@@ -108,6 +108,7 @@ Usage:
   node tools/board-slice.mjs --ready [--open]     one line per ready (or open) row: id, section, title
   node tools/board-slice.mjs --focus [--open]     the same, only for the ids in docs/FOCUS.md "## Now", in its order, plus the ready rows they wait on
   node tools/board-slice.mjs --find <text>        one line per row (done too) whose text holds <text>
+  node tools/board-slice.mjs --parked             ready rows whose dated note parks them on a person (operator:/owner:/blocked:) without the BLOCKED: marker the ready filter reads; exit 1 when any (the janitor sweep)
 
 The board is 598 KB: read it through one --next (list plus slice), never whole.
 
@@ -129,6 +130,9 @@ Options:
                  then the open ready rows a Now row waits on (needs: chain, transitively), each
                  marked "(ancestor of <ID>)": a Now chain never waits on a row nobody picks
   --find <text>  case-insensitive search of every row's text
+  --parked       list ready rows whose dated note says operator:/owner:/blocked: but
+                 that carry no BLOCKED:/LATER: marker (exit 1 when any): run this
+                 after parking a row, so the ready list does not keep offering it
   -h, --help     print this help and exit 0
 
 Exit codes: 0 ok - 1 unknown row or self-check FAIL - 2 usage.
@@ -397,6 +401,24 @@ export function rowReady(tasks, t) {
   return needsOf(t).every((d) => tasks.has(d) && tasks.get(d).done);
 }
 
+// A dated note that parks the row on a person, the reference GPU, the owner or
+// a second machine: `Progress <date>: operator: ...` (also owner:, blocked:).
+// The note's first word after the date is the marker; prose that mentions a
+// human later (a partial row's "left: ... needs a human lookcheck") never
+// matches, so a row with real agent work left stays ready.
+const PARK_NOTE = /Progress \d{4}-\d{2}-\d{2}:?\s*(?:operator|owner|blocked)\b/i;
+
+// The gap the ready filter cannot see: rows a loop would take next whose own
+// note says they wait on a person, because rowReady reads only BLOCKED:/LATER:
+// and the 2026-10-19 passes wrote park notes without that token. Print them,
+// add the marker (and the owner-queue line), or the loops spend sessions on
+// rows nobody can close.
+export function parkedUnmarked(tasks, order) {
+  return order
+    .map((id) => tasks.get(id))
+    .filter((t) => t && !t.done && rowReady(tasks, t) && PARK_NOTE.test(t.lines.join(" ")));
+}
+
 // The open READY rows that Now rows wait on, through the needs: chain (transitively), that the Now list does not name:
 // [{ id, of }], `of` = the first Now row (in Now order) whose chain reaches the row. A Now row that waits on a ready row
 // the focus rule never picks waits forever (2026-10-12: Q1 on RL26 and GX13). The chain runs through waiting rows and
@@ -474,6 +496,7 @@ function main(argv) {
   let listOpen = false;
   let listFocus = false;
   let listNext = false;
+  let listParked = false;
   let find = null;
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
@@ -482,6 +505,7 @@ function main(argv) {
     else if (a === "--focus") listFocus = true;
     else if (a === "--next") listNext = true;
     else if (a === "--open") listOpen = true;
+    else if (a === "--parked") listParked = true;
     else if (a === "--find") {
       find = args[i + 1];
       i += 1;
@@ -498,7 +522,7 @@ function main(argv) {
   }
   let nextText = null;
   if (listNext) {
-    if (listReady || listFocus || selfCheck) usageFail("--next runs alone: not with --ready, --focus or --self-check");
+    if (listReady || listFocus || selfCheck || listParked) usageFail("--next runs alone: not with --ready, --focus, --parked or --self-check");
     if (find && id) usageFail("use one filter: --next [<text>] or --next --find <text>, not both");
     nextText = find ?? id ?? null;
     find = null;
@@ -523,6 +547,16 @@ function main(argv) {
       process.stdout.write(built.slice);
     }
     process.exit(0);
+  }
+
+  if (listParked) {
+    const rows = parkedUnmarked(tasks, order);
+    for (const t of rows) {
+      const note = (t.lines.join(" ").match(/Progress \d{4}-\d{2}-\d{2}:?\s*(?:operator|owner|blocked)\b[^.]{0,90}/i) ?? [""])[0];
+      console.log(`${t.id.padEnd(ID_WIDTH)} ${note.trim()}`);
+    }
+    console.log(`${rows.length} ready row(s) parked without a BLOCKED: marker`);
+    process.exit(rows.length ? 1 : 0);
   }
 
   if (listReady || listFocus || find) {

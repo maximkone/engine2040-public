@@ -19,7 +19,9 @@
 //! - the tension level, on the ticks it changes (rises at once, falls after a
 //!   hold, see [`TensionTracker`]), and a kill stinger on a knockdown;
 //! - the crowd bed, started once and then ridden by `outcome.bed_gain` every
-//!   tick it moves.
+//!   tick it moves;
+//! - one break sound per break tick (RZ4, [`AudioSpace::feed_break`]), placed
+//!   where the blow struck.
 //!
 //! Errors: none propagate. A full ring is counted by the feed
 //! (`dropped_full`), a cue the bank lacks is counted by the feed
@@ -105,6 +107,8 @@ pub struct SpaceStats {
     pub tension_unheard: u64,
     /// Spear grapple cues played.
     pub spear: u64,
+    /// Break sounds played (one per break tick, RZ4).
+    pub breaks: u64,
 }
 
 /// Window-side audio presentation state: where the listener is, what the
@@ -271,6 +275,23 @@ impl AudioSpace {
             self.note(sent);
             self.stats.spear += 1;
         }
+    }
+
+    /// Plays one break (RZ4): the bank cue `name` at `gain`, placed where the blow landed
+    /// (`at_m`, meters `[x, y, z]`). One write per break tick; a refused write is counted here
+    /// and by the feed, never dropped silently.
+    pub fn feed_break(
+        &mut self,
+        tx: &mut FeedTx,
+        tick: u32,
+        name: &'static str,
+        gain: f32,
+        at_m: [f32; 3],
+    ) {
+        let at_cm = [to_cm(at_m[0]), to_cm(at_m[1]), to_cm(at_m[2])];
+        let sent = tx.play(tick, name, gain, Some(at_cm));
+        self.note(sent);
+        self.stats.breaks += 1;
     }
 
     fn feed_events(

@@ -60,7 +60,7 @@ they name another lane; none touches `crates/`.
   permission block. Accept: a drill agent's attempts are refused; one
   normal wave runs unaffected. needs: none.
   LATER: parked 2026-10-03 (circus verdict: loop-about-the-loop work, not a graphics/animation/ragdoll/AI-door bar (center runs the loop)); unpark by deleting this line.
-- [ ] AW9 tools: secret guard — `packet-gate` and the commit path scan Progress 2026-10-17: `tools/secret-gate.mjs` scans the staged diff (12 tests in secret-gate.test.mjs pass; `--self-test` detects a seeded key). No hook calls it (docs/book/ref-process.md:230); packet-gate and the plaintext-key-file handoff flag are gone. Left: wire it into the commit path and run the 50-commit false-positive check.
+- [x] AW9 tools: secret guard — `packet-gate` and the commit path scan Progress 2026-10-17: `tools/secret-gate.mjs` scans the staged diff (12 tests in secret-gate.test.mjs pass; `--self-test` detects a seeded key). No hook calls it (docs/book/ref-process.md:230); packet-gate and the plaintext-key-file handoff flag are gone. Left: wire it into the commit path and run the 50-commit false-positive check. Landed 0324e09c. node --test tools/secret-gate.test.mjs 12 of 12 pass; --self-test PASS; a seeded key in a scratch index is refused by the installed pre-commit hook (exit 1), a clean index passes (exit 0); the 50-commit check scanned 91 file diffs with 0 violations; the tool and its test are tracked now (were under .git/info/exclude), and tools/hooks/pre-commit carries the scan.
   staged diffs for key and token patterns and refuse; the handoff flags
   plaintext key files in the OpenCode config folder for the owner. Tier
   A. Size S. Owns the scanner and its test. Accept: a seeded key in a

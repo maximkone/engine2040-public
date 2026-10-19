@@ -2962,6 +2962,8 @@ mod skin_window_tests {
                     material: scene.material.clone(),
                     base_color: None,
                     normal_map: None,
+                    orm: None,
+                    emissive: None,
                 })
                 .collect(),
         }

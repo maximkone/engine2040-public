@@ -23,7 +23,7 @@ make those live, and every row built on them waits.
   ms posted; Q1 V1-V3 consume the same set. needs: GX1, GX3, GX12,
   RL6, PF2. (GX3 VERDICT wave 56.) (Owner 2026-10-10: Q1 dropped
   from needs, a cycle; GX13 feeds Q1.) Landed 4e51bd7a (docs/receipts/2026-10-18-gpu-pilot-gx13-gx14-rl30-pf19.md). Chart at 1600x900 down to 256x144 with no edge-256 exit, max diff 1.2e-7 vs 1e-5, 0 validation errors in a 300-frame window on the RTX 3050 6GB Laptop GPU, RA8 manifest generated (target/pilot-gx13/).
-- [ ] GX14 render: GTAO boosted-release proof — pilot-measurement only,
+- [ ] GX14 render: GTAO boosted-release proof — pilot-measurement only, Progress 2026-10-19: pilot measured, the bar posted as FAIL (receipt docs/receipts/2026-10-19-gx14-gtao-pilot.md, evidence target/evidence/gx5/). Pinned release window build 4082c7d1 (`target/release/arena.exe`, sha256 C5F98DF9…373596C; the only later game/render commit is 42f1c2a0 RZ7, CPU-only), adapter NVIDIA GeForce RTX 3050 6GB Laptop GPU driver 32.0.16.1062, clocks observed max 1732 of 2100 MHz, shared loaded box (observed-only). A real 1080p target without code: the arena's own window forced borderless to a 1937x1080 client (SWP_NOSENDCHANGING, GetClientRect verified; live-1080p-r3 prints resolution=1937x1080), with a 640x360 control proving the resize reaches the renderer (gtao 0.125 ms vs 0.33 ms at 720p). Table, 600 frames, 8 fighters, validation_errors=0: gtao device-clock mean 0.365-0.441 ms at 1080p (5 runs) vs 0.337-0.375 ms at 720p (3 runs). RA8 manifest target/evidence/gx5/ra8.json (15 frames, ticks 1..300, sequence_fnv e7cd5be5c38a77de, tool validator ok); the ignored exact-1920x1080 oracle probe ran clean (upload_ms=45.27 submit_ms=90.07, host-inclusive, 0 validation errors); llvmpipe note: no llvmpipe adapter here and the pass has no software path, the gtao CPU/oracle leg is green on the PC and on the Linux runner (gh run 39211727608). `node tools/proof.mjs --skip-build`: legacy golden d57b5c8ae3096614 plus all four seed double-runs and the tape replay PASS, RESULT FAIL only on reds from other agents' files (GP5 engine diff, engine-render dup_fns 8 -> 9, endpoint docs coverage). Left: the Accept's p95-at-1080p bar is unproven — the PF2 ring holds p50/p99 only and the window prints the gtao mean, so no p95 stamp exists, and WINDOW_SIZE is a const with no --size flag (both code in render/game, outside this row's owned paths; gtao.rs untouched), which is an owner call on which row lands them; the tick also waits for proof.mjs green on a clean tree.
   no pass code: pinned release window build, arena 1080p, PF2 per-pass
   GPU stamps (gtao probe via PF2), table + RA8 manifest + llvmpipe note;
   miss fails with numbers, bars never loosened. Tier A. Size S. Owns
@@ -33,6 +33,7 @@ make those live, and every row built on them waits.
   golden x2. needs: GX1, PF2, RL12. (GX5 VERDICT wave 56: GX5 is
   gtao.rs, not skinning; DROP 078-gx5-r2; wave-105 split: GX5 no
   longer blocks this row.) Progress 2026-10-18: 4e51bd7a not measured: the arena prints gtao only as a per-pass mean (0.19-0.31 ms at 720p) and the window cannot run at 1080p, so there is no p95 stamp.
+  BLOCKED: the Accept's p95-at-1080p bar is unproven: the PF2 ring holds p50/p99 only, the window prints the gtao mean, and WINDOW_SIZE is a const with no --size flag (all three outside this row's owned paths); needs the owner's call on which row lands them, and a clean tree for proof.mjs. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 
 - [ ] RL5 render: baked lightmaps with validity mask + SH probes for
   fighters reusing the `ibl.rs` SH path. Tier B. Size L. Owns
@@ -42,6 +43,7 @@ make those live, and every row built on them waits.
   Wave 44 progress (stays open): --scene/--fps flags, 120-frame ARENA
   capture @ 0.4 fps debug (not 60), bake x2 green; honest gap: 5-tick cap
    repeats checkpoints past frame 24 — needs fixed-step capture pacing. Progress 2026-10-19: operator/owner: every code leg in the row's own file is landed and green (`cargo test -p engine-render --lib baked_gi`: 25 passed, 2 ignored: bake_identical_bytes_twice, rl5_8fighter_capture_receipt_x2, rl5_ra1_receipt_consumes_the_bind, validity mask, sealed tunnel, forward-GI markers). Close still needs the reference-GPU 60 fps arena + 8 fighters receipt (RL29 boosted-release pilot) and the RL14 pacing log; the pacing fix itself sits in the game crate (`windowed.rs` WIN_MAX_STEPS_PER_FRAME, `bin/arena_frame`), which neither RL5 nor RL14 lists as an owned path, so the owner must say which row lands it.
+  BLOCKED: the close needs the reference-GPU 60 fps arena plus 8 fighters receipt (operator; see this row's note). Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [ ] RL14 render: fixed-step capture pacing + release receipt for RL5 —
   frame-accurate checkpoint pacing past frame 24 plus a release-build
   capture receipt (adapter/driver/power + fps). Tier B. Size S. Owns
@@ -87,12 +89,25 @@ make those live, and every row built on them waits.
    Consumer WIN1 match, Q1 captures. needs: GX4, GX7, PF2.
    (DO NOT DISPATCH 2026-10-05: CPU legs PASS in-lane; headless writers skip. Take RL18a pilot GPU-ms + Q1-capture closeout only, per 510 deep-dive.)
    Progress 2026-10-19: RL18a pilot GPU half run on the reference GPU (RTX 3050 6GB Laptop GPU, driver 32.0.16.1062). `cargo test -p engine-render --features window --lib auto_ -- --nocapture` through gh-check (local: the window feature never builds on the Linux runner) = 12 passed 0 failed 1 ignored, incl. `gpu_auto_chain_matches_cpu_chain` PASS parity 0.000000 (tol 0.005), adapted -4.986 stops; same filter without `window` = 11 passed 0 failed 1 ignored. Kill metrics in lane: day-sweep fixed clip 0.727 -> adapted 0.000 (improve 1.000, gate 0.15), torch grid 1.8698 -> 1.7365 stops (0.133 EV), blink and match-clip worst step 0.0500 stops (gate 0.5). No crate code touched, so the golden is untouched (presentation only). Left, not producible here: (1) per-pass ms with an adapter line - the live frame runs forward+blit only, post/exposure is probe-only, `arena per-pass` has no post column, and the device path splits bloom/exposure/tonemap into thirds, so no honest exposure ms exists (owner: RL21/RL26/RA14 or a PF2 presenter stamp); (2) llvmpipe parity - no llvmpipe adapter on this PC and the runner cannot build the window feature; (3) Q1 captures - Q1 is open on RL21, RL26, RA14. The live match also still rides fixed 1.0 (`FrameLight` in `crates/game/src/view_truth.rs`), so the WIN1 consumer is not on the adapted EV.
+  BLOCKED: the remaining legs are not producible without the live adapter (per-pass ms with an adapter line); operator run. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [ ] RP8b render: variance-clip re-spike, ONLY if the lead overturns
   the RP8a REJECT — re-run ghost + shimmer fixtures with the named
   delta beside `crates/render/src/post.rs` (resolve frozen).
   Tier B. Size S. Accept: ghost-trail px cut ≥30% with shimmer
   ≤0.06 and ms +≤5%, or second REJECT with numbers. needs: RP8a.
-  (A7, 2026-10-02.)
+  (A7, 2026-10-02.) Progress 2026-10-19: operator/owner: the row's own gate
+  is unmet — RP8b is boarded "ONLY if the lead overturns the RP8a REJECT",
+  and no overturn exists. docs/research/LADDER.md:84-85 hold the two standing
+  REJECTs (ghost cut 42.5%/41.1% PASS, shimmer PASS, ms +134.7%/+22.5% FAIL
+  the +5% bar, box-clamp stays canonical); the archived parent row says
+  "DO NOT DISPATCH ... RP8b only if the lead overturns with a fused bound
+  inside the ms bar plus release-perf plus digest x2"
+  (docs/archive/SPRINT-done-2026-10-10.md:453) and its deep-dive keeps RP8b
+  parked (docs/archive/2026-10-10/plans/render-look-cut.md:207-213).
+  No overturn and no such fused-bound patch exists (the lane patches are
+  gone), so a re-run would only repeat the known +22.5% FAIL. post.rs
+  untouched (resolve frozen); the row stays parked until the lead overturns.
+  BLOCKED: boarded ONLY if the lead overturns the RP8a REJECT, and no overturn exists (owner). Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [ ] RL21 render: twin arena-bundle bind — the WIN1 twin forward path
   draws the recooked arena bundle (CT8 recook 4996849) instead of the
   synthetic cube, as bind glue only in a new
@@ -106,6 +121,31 @@ make those live, and every row built on them waits.
   GX1, WIN1. (ART wave 86.)
   (Owner 2026-10-10: unfrozen; the D7 Bevy-frame gate died with D8/D9.
   FOCUS Now Look row; Q1 needs it.)
+  Progress 2026-10-19: operator/owner: the bind glue is landed and live in
+  both twin paths (`crates/render/src/twin_arena.rs`, 26434e12, deepened
+  since; the window `frame_list` and `push_kit_draws` swap the mesh-1 cube
+  when the CT8 kit is resident), and the after frame on the reference GPU is
+  clean, but the Accept's before frame
+  `target/pilot-owner-view/r2-20260929/arena/frame_000000.png` is not on
+  disk (`docs/plan/render-look.md:57`: zero reference PNGs on disk; Q1 owns
+  them), so the pair and this seat's silhouette + materials score cannot be
+  produced here. Evidence 2026-10-19 on the RTX 3050 6GB (driver
+  32.0.16.1062): `target/release/arena.exe --scene arena --fighters 4
+  --frames 60 --exit --no-break-look --capture-dir
+  target/rl21-20261019/after-nobreak --capture-every 60 --fps 30 --sha
+  2ca37f6 --rows RL21 --mute` printed `staged 11 kit draws (0 skipped)`,
+  `arena capture: frames=1
+  manifest="target/rl21-20261019/after-nobreak\manifest.json"
+  sha=73fd3ced036e8be7`, `validation_errors=0`; the opened frame_000000.png
+  shows the recooked kit walls, stands and sand with no synthetic cube (the
+  centre box of the earlier run is the RZ4w break crate: it leaves with
+  `--no-break-look`). Glue proof: `node tools/gh-check.mjs cargo test -p
+  engine-render --features v1 --lib twin_arena` 23 passed 0 failed (run
+  39176517660). This note changes no crate or content path, so the golden
+  stays d57b5c8ae3096614. Left: the owner supplies the Q1 before PNG, or
+  amends Accept to a before/after pair this seat renders itself (cube
+  fallback twin frame vs this kit frame); then one score closes the row.
+  BLOCKED: the Accept's before frame is not on disk; needs the owner's artefact or an operator capture (see this row's note). Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [ ] RL22 render: editor viewport day-rig bind — the editor viewport
   draws the CT8 arena establishing view under the RL4 sky bake plus
   RL15 day rig plus RL7 fog ramp instead of the brown starburst, as
@@ -194,6 +234,34 @@ make those live, and every row built on them waits.
   Not met: the skinned CT7 hero is not drawn (`FighterLook` needs
   `&mut Presenter`, which `frame_list` lacks), and the before/after capture
   pair with judge score on the reference GPU is still open (runner job).
+  Progress 2026-10-19: operator/owner: the bind is landed and its pixels are
+  now proven; the Accept's before frame is what is missing. `frame_list`
+  (`crates/game/src/bin/arena_capture.rs`) pushes one draw per resident body
+  staged by `twin_headless_capture`, and the new reference-GPU test
+  `twin_fighters_reach_the_frame_pixels` renders the twin offscreen twice at
+  128x96 (the `frame_list` frame with the eight staged bodies, and the same
+  frame with their draws removed): the PNG bytes differ with validation
+  clean, so an 8-fighter twin frame is no longer the old zero-pixel cube
+  frame (before the bind `frame_list` pushed no body, so the removal changed
+  nothing and this test failed). Proof 2026-10-19 on the RTX 3050 6GB
+  (driver 32.0.16.1062), Landed 743e3dcc: `node tools/gh-check.mjs --local
+  cargo test -p engine-game --features app --bin arena twin_fighters` 1
+  passed, the whole bin 83 passed, `cargo test -p engine-render --features
+  v1 --lib twin_fighters` 5 passed; the same `--fighters 8 --scene arena`
+  window run files 4 distinct frames
+  (`target/rl26-20261019/after8/manifest.json`, sequence_fnv
+  469900e5f9e6814c, validation_errors=0, `fighters=8 seen=8 empty=0`,
+  `fight_draws=32`, `fighter look bound 4 CT7 bodies`) and the opened
+  frame_000002.png shows the eight fighters, kit walls, stands and sand (the
+  twin's own slot 0 stays the CT7 hero graft bulk stand-in; the real skinned
+  hero is still drawn by the window look). Left: the before half
+  `target/pilot-owner-view/r5-20260929/arena/frame_000014.png` is not on
+  disk and never was in git (`docs/plan/render-look.md:57`: zero reference
+  PNGs on disk; Q1 owns them), so this seat cannot render the pair; the row
+  closes on the Q1 reference or on an owner amendment to a pair this seat
+  renders itself. Test-only hunk, no sim path touched, so the golden
+  d57b5c8ae3096614 stands.
+  BLOCKED: the Accept's before frame is not on disk; needs the owner's artefact or an operator capture (see this row's note). Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [ ] RP10 render: twin frame-advance proof — the WIN1 twin presents 30
   distinct frames with advancing HUD plus tick instead of 30
   byte-identical cubes, in a new

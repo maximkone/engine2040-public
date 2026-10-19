@@ -446,6 +446,66 @@ fn blend_axis(
     hermite_scalar(ends.0, ends.1, m0, m1, bracket.span, bracket.s)
 }
 
+/// Per-frame retention of a leftover rollback correction, in permille. 940 per
+/// 1000 leaves 2.4 percent of the jump after [`CORRECTION_FRAMES`] and moves
+/// the first frame by 6.0 percent (the MP25 bar).
+pub const CORRECTION_RETENTION_PERMILLE: u16 = 940;
+/// Frames over which a correction falls to the 2.5 percent line.
+pub const CORRECTION_FRAMES: u32 = 60;
+
+/// Presentation-only offset between the drawn local body and the authoritative
+/// pose after a rollback resimulation moved it.
+///
+/// The sim never reads this: it is added to the drawn pose only and decays one
+/// step per 60 Hz frame, so an 8-tick resim that jumped 0.67 m shows a 4 cm
+/// first-frame step instead of the whole jump. Units: metres, world axes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Correction {
+    err: [f32; 3],
+}
+
+impl Correction {
+    /// A zero correction: nothing to hide.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one resim jump into the offset (metres).
+    pub fn note(&mut self, jump: [f32; 3]) {
+        for (err, jump) in self.err.iter_mut().zip(jump) {
+            *err += jump;
+        }
+    }
+
+    /// The offset to add to the drawn pose this frame.
+    #[must_use]
+    pub fn offset(&self) -> [f32; 3] {
+        self.err
+    }
+
+    /// One 60 Hz frame of decay.
+    pub fn advance(&mut self) {
+        let keep = f32::from(CORRECTION_RETENTION_PERMILLE) / 1000.0;
+        for err in &mut self.err {
+            *err *= keep;
+        }
+    }
+
+    /// Fraction of `jump` still left to hide (1.0 right after [`Self::note`]).
+    #[must_use]
+    pub fn remaining(&self, jump: [f32; 3]) -> f32 {
+        let span = (jump[0] * jump[0] + jump[1] * jump[1] + jump[2] * jump[2]).sqrt();
+        if span <= 0.0 {
+            return 0.0;
+        }
+        let left =
+            (self.err[0] * self.err[0] + self.err[1] * self.err[1] + self.err[2] * self.err[2])
+                .sqrt();
+        left / span
+    }
+}
+
 /// Remote presentation on the session LAN path: every authoritative snapshot
 /// the client receives feeds the frozen [`Interpolator`] (tick-clock blend),
 /// the [`ConfirmedHistory`] (delta baselines plus the trailing cursor) and the
@@ -570,6 +630,8 @@ impl RemoteView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use engine_core::Fnv64;
 
     fn fighter(slot: u8, x_mm: i32, yaw_ddeg: i16) -> BodySnap {
         BodySnap {
@@ -1217,5 +1279,62 @@ mod tests {
         assert!(misses_at(5, 100) * 3 > samples, "100 ms is too short");
         assert!(misses_at(5, DEFAULT_INTERP_DELAY_MS) * 100 < samples);
         assert_eq!(bracket_misses(smallest, 2), 0, "same seed, same soak");
+    }
+
+    #[test]
+    fn rollback_correction_steps_six_percent_then_two_and_a_half_after_sixty() {
+        // An 8-tick resim that moved the local fighter 0.67 m in one frame
+        // (MP25). The drawn pose hides the jump over 60 frames.
+        let jump = [0.67, 0.0, -0.12];
+        let mut corr = Correction::new();
+        assert_eq!(corr.offset(), [0.0; 3]);
+        corr.note(jump);
+        let before = corr.remaining(jump);
+        corr.advance();
+        let first = before - corr.remaining(jump);
+        assert!(
+            first <= 0.06 + 1e-4,
+            "first frame moved {first} of the jump"
+        );
+        assert!(first > 0.0, "the first frame does move");
+        for _ in 1..CORRECTION_FRAMES {
+            corr.advance();
+        }
+        let left = corr.remaining(jump);
+        assert!(
+            left <= 0.025,
+            "{left} left after {CORRECTION_FRAMES} frames"
+        );
+        // A second jump folds into the leftover instead of snapping.
+        let folded = corr.offset();
+        corr.note([0.1, 0.0, 0.0]);
+        assert!((corr.offset()[0] - (folded[0] + 0.1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rollback_correction_never_moves_the_authoritative_frame_digest() {
+        // The correction is added to the drawn pose only: the interpolated
+        // frame bytes are the same whether a correction is stepped or not, so
+        // the sim and the replay hash never see it.
+        let digest_of = |with_correction: bool| {
+            let mut view = fixture_view(2040);
+            let mut corr = Correction::new();
+            let mut hash = Fnv64::new();
+            for step in 0..CORRECTION_FRAMES {
+                if with_correction {
+                    corr.note([0.67, 0.0, 0.0]);
+                    corr.advance();
+                }
+                let alpha = Fixed::from_int(i64::from(step % 5)) / Fixed::from_int(4);
+                let frame = view.present(alpha).expect("a frame to draw");
+                for body in &frame.state.fighters {
+                    hash.write_i32(body.x_mm);
+                }
+            }
+            hash.finish()
+        };
+        assert_eq!(digest_of(true), digest_of(false));
+        // The frozen presentation digest did not move either.
+        assert_eq!(digest_frames(&fixture_view(2040)), SNAPSHOT_FRAME_DIGEST);
     }
 }

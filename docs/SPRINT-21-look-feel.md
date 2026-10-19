@@ -372,7 +372,15 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `interp.rs`. Accept: `cargo test -p engine-net --lib interp` x2: first-frame
   step <= 6 percent of the jump, <= 2.5 percent left after 60 frames, hash equal
   with correction on and off. F2P: the first-frame step is 100 percent. P2P:
-  golden unchanged. needs: MP17.
+  golden unchanged. needs: MP17. Progress 2026-10-19: the net half landed —
+  `Correction` in `crates/net/src/interp.rs` (`CORRECTION_RETENTION_PERMILLE`
+  940, `CORRECTION_FRAMES` 60; note/offset/advance/remaining) with two tests:
+  rollback_correction_steps_six_percent_then_two_and_a_half_after_sixty and
+  rollback_correction_never_moves_the_authoritative_frame_digest; `cargo test
+  -p engine-net --lib interp` 19 passed x2, runs 39177678798 and 39177814134.
+  Left: the drawn half — `netgame.rs` does not yet note the resim jump and the
+  window does not add `Correction::offset` to the local fighter, so nothing is
+  drawn through it and the row stays open.
 - [ ] MP26 net: clock slew and a 30-frame advantage window — `delay.rs:56-65`
   steps the delay +-1 from one sample. Average frame advantage over 30 frames
   (ggrs `time_sync.rs`), slew the client clock up to 5 percent (lightyear

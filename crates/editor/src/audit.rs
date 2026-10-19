@@ -265,9 +265,6 @@ fn encode_ops(ops: &[Op]) -> Result<Vec<u8>, AuditError> {
     Ok(out)
 }
 
-/// Length-prefixed op text (`u64` length first) into the canonical encoding.
-/// One owner: the batch digest module writes the same prefix.
-
 /// Link digest: `digest(prev || entry_digest || seq)`.
 fn link(prev: &[u8; 32], entry_digest: &[u8; 32], seq: u64) -> [u8; 32] {
     digest_parts(&[prev, entry_digest, &seq.to_le_bytes()])

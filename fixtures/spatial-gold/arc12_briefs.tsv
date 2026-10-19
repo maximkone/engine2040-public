@@ -1,0 +1,12 @@
+# arc12-briefs v1 (ARC12 relation-diff edits)
+id	seed	brief
+arc12-01	2000	prop brazier brazier_01\nwant brazier_01 next_to wall:north [0,60]\nwant brazier_01 next_to wall:west [0,60]
+arc12-02	2001	prop crate crate_01\nwant crate_01 next_to point:200,-300 [0,50]\nprop crate crate_02\nwant crate_02 next_to object:crate_01 [50,150]
+arc12-03	2002	prop pillar pillar_01\nwant pillar_01 next_to wall:east [0,50]\nprop pillar pillar_02\nwant pillar_02 next_to object:pillar_01 [150,250]\nwant pillar_02 facing object:pillar_01
+arc12-04	2003	prop torch torch_01\nwant torch_01 next_to wall:south [0,50]\nprop torch torch_02\nwant torch_02 next_to wall:south [0,50]\nwant torch_02 next_to object:torch_01 [200,300]
+arc12-05	2004	prop altar altar_01\nwant altar_01 next_to point:0,0 [0,80]\nwant altar_01 facing wall:north
+arc12-06	2005	prop barrel barrel_01\nprop stand stand_01\nwant stand_01 next_to object:barrel_01 [30,120]\nprop banner banner_01\nwant banner_01 next_to wall:west [0,40]\nwant banner_01 facing object:stand_01
+arc12-07	2006	prop post post_01\nwant post_01 next_to wall:north [100,200]\nprop post post_02\nwant post_02 next_to wall:north [100,200]\nwant post_02 next_to object:post_01 [150,250]
+arc12-08	2007	prop bench bench_01\nwant bench_01 next_to wall:east [0,60]\nwant bench_01 facing wall:west
+arc12-09	2008	prop crate crate_01\nwant crate_01 next_to point:-200,200 [0,60]\nprop barrel barrel_01\nwant barrel_01 next_to object:crate_01 [40,140]\nprop torch torch_01\nwant torch_01 next_to wall:south [0,50]\nprop brazier brazier_01\nwant brazier_01 next_to wall:north [0,60]
+arc12-10	2009	prop stand stand_01\nwant stand_01 next_to point:100,100 [0,80]\nspawn stand_01\nprop brazier brazier_01\nwant brazier_01 facing object:stand_01\nwant brazier_01 next_to wall:north [0,80]

@@ -2,7 +2,8 @@
 //!
 //! Purpose: let two machines on different networks join one server match by a
 //! short invite code, trying a direct path first and falling back to a
-//! self-hosted forward-only relay that always works.
+//! self-hosted forward-only relay that always works. The same module holds the
+//! negative gate that keeps combat state authority-only.
 //! Owner: net lane. Units: ticks at 60 Hz, bytes on the wire, addresses.
 //! Determinism: invite mint, STUN/ICE shapes and the punch machine are seeded
 //! integer-only; sockets and wall clocks never enter sim hashes.
@@ -1446,6 +1447,145 @@ pub(crate) fn verify_answer(challenge: u64, token: u64, answer: u64) -> bool {
     token != 0 && answer == answer_challenge(challenge, token)
 }
 
+// ---------------------------------------------------------------------------
+// P2P combat-sync gate: combat state stays authority-only.
+// ---------------------------------------------------------------------------
+// A peer-to-peer CRDT sync for VR (arXiv 2503.17826v1) merges state with no
+// server and assumes non-Byzantine peers. Combat state cannot: the admission
+// screen (`crate::guard`) exists because a peer may lie, and a merged state
+// has no arbiter that can refuse a forged blow. This gate is the negative half
+// of that evaluation; it has no production caller by design, because nothing
+// in the tree may propose a peer-authored combat change.
+
+/// Who authored one proposed combat-state change. Only the match's dedicated
+/// server may author combat state; a peer-authored row is the P2P path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SyncAuthor {
+    /// The match's dedicated server, named by its id.
+    Authority(u64),
+    /// A player peer, named by its id.
+    Peer(u64),
+}
+
+/// One proposed combat-state change as a wire would carry it: the author, the
+/// authoritative tape row it was recorded on (none when the row names none),
+/// and the state digest it would set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CombatSync {
+    /// Author of the change.
+    pub author: SyncAuthor,
+    /// Authoritative tape row the change was recorded on.
+    pub tape: Option<u32>,
+    /// State digest the change would set.
+    pub state: u64,
+}
+
+/// Why the gate refused one proposed combat-state change.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum P2pRefusal {
+    /// A peer authored it: combat state is authority-only, so the P2P path has
+    /// no arbiter that can refuse a forged blow.
+    PeerAuthored,
+    /// No tape row is named, so no authoritative action recorded the change.
+    NoTape,
+    /// The change names an authority this match does not serve; a second
+    /// writer for one match is a merge.
+    ForeignAuthority,
+    /// The tape row is already held with different state; two writers for one
+    /// tick is a merge, and combat state never merges.
+    HeldRow,
+}
+
+/// The negative gate for combat state, one per match: a change applies only
+/// when the single authority authors it and it names the tape row that
+/// recorded it. Held rows prove no second writer merged a tick, and
+/// [`Self::peer_rows_refused`] counts the P2P combat path turned away.
+/// Integer-only and deterministic: the same changes give the same verdicts.
+pub struct CombatSyncGate {
+    authority: u64,
+    state: u64,
+    held: std::collections::BTreeMap<u32, u64>,
+    peer_rows_refused: u32,
+}
+
+impl CombatSyncGate {
+    /// Open a gate for `authority`.
+    ///
+    /// # Errors
+    ///
+    /// [`RelayError::Unauthorized`] when the authority id is zero: a match
+    /// without an authority can hold no combat state.
+    pub fn new(authority: u64) -> Result<Self, RelayError> {
+        if authority == 0 {
+            return Err(RelayError::Unauthorized);
+        }
+        Ok(Self {
+            authority,
+            state: 0,
+            held: std::collections::BTreeMap::new(),
+            peer_rows_refused: 0,
+        })
+    }
+
+    /// The authority this gate serves.
+    #[must_use]
+    pub fn authority(&self) -> u64 {
+        self.authority
+    }
+
+    /// Combat state digest the gate holds.
+    #[must_use]
+    pub fn state(&self) -> u64 {
+        self.state
+    }
+
+    /// Tape rows held, ascending.
+    #[must_use]
+    pub fn held_rows(&self) -> Vec<u32> {
+        self.held.keys().copied().collect()
+    }
+
+    /// Peer-authored changes refused so far.
+    #[must_use]
+    pub fn peer_rows_refused(&self) -> u32 {
+        self.peer_rows_refused
+    }
+
+    /// Apply one proposed change: applied only for the match's own authority
+    /// with a named tape row. A peer author, a missing tape row, a foreign
+    /// authority and a rewrite of a held row all refuse.
+    ///
+    /// # Errors
+    ///
+    /// [`P2pRefusal`] naming why nothing applied; the held state and rows are
+    /// untouched on every refusal.
+    pub fn apply(&mut self, change: CombatSync) -> Result<(), P2pRefusal> {
+        let author = match change.author {
+            SyncAuthor::Authority(authority) => authority,
+            SyncAuthor::Peer(_) => {
+                self.peer_rows_refused = self.peer_rows_refused.saturating_add(1);
+                return Err(P2pRefusal::PeerAuthored);
+            }
+        };
+        let Some(tape) = change.tape else {
+            return Err(P2pRefusal::NoTape);
+        };
+        if author != self.authority {
+            return Err(P2pRefusal::ForeignAuthority);
+        }
+        if self
+            .held
+            .get(&tape)
+            .is_some_and(|held| *held != change.state)
+        {
+            return Err(P2pRefusal::HeldRow);
+        }
+        self.held.insert(tape, change.state);
+        self.state = change.state;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2029,5 +2169,150 @@ mod tests {
             !verify_answer(challenge, 0, answer_challenge(challenge, 0)),
             "zero tokens refuse even with matching math"
         );
+    }
+
+    #[test]
+    fn combat_snapshots_never_merge_peer_to_peer() {
+        const AUTHORITY: u64 = 0xE204;
+        let mut gate = CombatSyncGate::new(AUTHORITY).expect("a match serves one authority");
+        assert_eq!(gate.authority(), AUTHORITY);
+        let row = |author, tape, state| CombatSync {
+            author,
+            tape: Some(tape),
+            state,
+        };
+        assert_eq!(
+            gate.apply(row(SyncAuthor::Authority(AUTHORITY), 10, 0xA1)),
+            Ok(())
+        );
+        let held = gate.state();
+        // A peer's row for the same tick would merge two writers.
+        assert_eq!(
+            gate.apply(row(SyncAuthor::Peer(2), 10, 0xB2)),
+            Err(P2pRefusal::PeerAuthored)
+        );
+        assert_eq!(gate.state(), held, "a peer row never moves combat state");
+        // A peer's row for a fresh tick merges just as little.
+        assert_eq!(
+            gate.apply(row(SyncAuthor::Peer(3), 11, 0xC3)),
+            Err(P2pRefusal::PeerAuthored)
+        );
+        assert_eq!(gate.state(), held);
+        assert_eq!(gate.held_rows(), vec![10], "no peer row is ever held");
+        assert_eq!(gate.peer_rows_refused(), 2);
+        // A second authority claiming a tick is the same merge, refused.
+        assert_eq!(
+            gate.apply(row(SyncAuthor::Authority(AUTHORITY + 1), 11, 0xD4)),
+            Err(P2pRefusal::ForeignAuthority)
+        );
+        assert_eq!(
+            gate.apply(row(SyncAuthor::Authority(AUTHORITY), 10, 0xE5)),
+            Err(P2pRefusal::HeldRow),
+            "one tick never takes two states"
+        );
+        assert_eq!(gate.state(), held);
+        // The authority's identical row is a resend, not a merge.
+        assert_eq!(
+            gate.apply(row(SyncAuthor::Authority(AUTHORITY), 10, 0xA1)),
+            Ok(())
+        );
+        assert_eq!(gate.held_rows(), vec![10]);
+    }
+
+    #[test]
+    fn every_combat_state_change_carries_authority_and_tape() {
+        const AUTHORITY: u64 = 0xE204;
+        let mut gate = CombatSyncGate::new(AUTHORITY).expect("a match serves one authority");
+        // A peer stamp is a proposal, not a state change.
+        assert_eq!(
+            gate.apply(CombatSync {
+                author: SyncAuthor::Peer(1),
+                tape: Some(0),
+                state: 1,
+            }),
+            Err(P2pRefusal::PeerAuthored)
+        );
+        // Authority but no tape row: nothing authoritative recorded it.
+        assert_eq!(
+            gate.apply(CombatSync {
+                author: SyncAuthor::Authority(AUTHORITY),
+                tape: None,
+                state: 1,
+            }),
+            Err(P2pRefusal::NoTape)
+        );
+        // Another server's row is not this match's authority.
+        assert_eq!(
+            gate.apply(CombatSync {
+                author: SyncAuthor::Authority(0xBEEF),
+                tape: Some(0),
+                state: 1,
+            }),
+            Err(P2pRefusal::ForeignAuthority)
+        );
+        assert_eq!(gate.state(), 0, "no half-stamped change moves state");
+        assert!(gate.held_rows().is_empty(), "and none is ever held");
+        // Authority plus tape is the only applied shape.
+        assert_eq!(
+            gate.apply(CombatSync {
+                author: SyncAuthor::Authority(AUTHORITY),
+                tape: Some(0),
+                state: 7,
+            }),
+            Ok(())
+        );
+        assert_eq!(gate.state(), 7);
+        assert_eq!(gate.held_rows(), vec![0]);
+        assert!(matches!(
+            CombatSyncGate::new(0),
+            Err(RelayError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn a_p2p_combat_path_fails_the_gate() {
+        const AUTHORITY: u64 = 0xE204;
+        let mut gate = CombatSyncGate::new(AUTHORITY).expect("a match serves one authority");
+        // Two peers exchange their own combat rows with no server in the path.
+        let rows = [
+            CombatSync {
+                author: SyncAuthor::Peer(2),
+                tape: Some(0),
+                state: 0x11,
+            },
+            CombatSync {
+                author: SyncAuthor::Peer(3),
+                tape: Some(1),
+                state: 0x22,
+            },
+            CombatSync {
+                author: SyncAuthor::Peer(2),
+                tape: Some(2),
+                state: 0x33,
+            },
+        ];
+        for change in rows {
+            assert_eq!(
+                gate.apply(change),
+                Err(P2pRefusal::PeerAuthored),
+                "{change:?} must fail the gate"
+            );
+        }
+        assert_eq!(gate.state(), 0, "a P2P match holds no combat state");
+        assert!(gate.held_rows().is_empty(), "and no tape row");
+        assert_eq!(gate.peer_rows_refused(), 3);
+        // The same rows under the authority's stamp and tape apply: the gate
+        // judges authorship, not the bytes.
+        let mut stamped = CombatSyncGate::new(AUTHORITY).expect("a match serves one authority");
+        for change in rows {
+            let authoritative = CombatSync {
+                author: SyncAuthor::Authority(AUTHORITY),
+                ..change
+            };
+            assert_eq!(stamped.apply(authoritative), Ok(()));
+        }
+        assert_eq!(stamped.state(), 0x33);
+        assert_eq!(stamped.held_rows(), vec![0, 1, 2]);
+        assert_eq!(stamped.peer_rows_refused(), 0);
     }
 }

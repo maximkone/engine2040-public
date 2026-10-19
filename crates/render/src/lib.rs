@@ -148,6 +148,11 @@ pub mod lod_fade;
 /// drains it next slice.
 pub mod wound_map;
 
+/// Severed-limb stump cap and limb cylinder meshes (RZ3): one closed stub per
+/// cut plus world placement, std-only. Consumer is the game limb look, which
+/// bakes a cap per cut and a cylinder per falling limb into resident keys.
+pub mod stump;
+
 /// CPU-side frame-graph executor (RA2): runs the compiled graph over
 /// recorded pass fns, plans transient aliasing, refuses GPU submit with
 /// a typed error until the bind groups land. Std-only.

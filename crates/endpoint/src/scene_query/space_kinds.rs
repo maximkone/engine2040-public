@@ -1,15 +1,18 @@
-//! Measure, room, glance and coverage questions for `scene.query`: `measure`,
-//! `room_of`, `in_room`, `exits_of`, `glance` and `coverage`. Each answers from one `engine-spatial`
-//! call and returns the figures an agent acts on (signed gap and shortfall in
-//! cm, room numbers with exits, permille coverage per object). Split out of the
-//! parent file to keep it under the size ratchet.
+//! Measure, room, glance, coverage and the sense text verbs of `scene.query`:
+//! `measure`, `room_of`, `in_room`, `exits_of`, `glance`, `coverage`, and the
+//! SP69 text verbs `view`, `lidar`, `map` and `pixel`. Each answers from one
+//! `engine-spatial` call and returns the figures an agent acts on (signed gap
+//! and shortfall in cm, room numbers with exits, permille coverage per object,
+//! and plain sense text rows). Split out of the parent file to keep it under
+//! the size ratchet.
 
 use super::pairs::{other_actor, row, Found};
 use super::*;
 use engine_spatial::measure::{measure_pair, MeasureArgs, What};
 use engine_spatial::rooms::{find_rooms, Rooms, CAPSULE_CM};
 use engine_spatial::sense_text::{
-    camera_yaw_deg, coverage, glance, glance_text, Camera, DEFAULT_GLANCE_GRID, HIDDEN_PERMILLE,
+    camera_yaw_deg, coverage, glance, glance_text, lidar, map, pixel, view, Camera, SenseError,
+    DEFAULT_GLANCE_GRID, HIDDEN_PERMILLE,
 };
 
 /// Extra fields of these questions, all optional on the wire.
@@ -182,18 +185,7 @@ fn room_rows(actors: &[Actor], args: &QueryArgs) -> Result<Found, QueryError> {
 
 fn glance_rows(actors: &[Actor], args: &QueryArgs) -> Result<Found, QueryError> {
     let eye = check_eye(args.eye_m)?;
-    let yaw = args.yaw.unwrap_or(0.0);
-    if !yaw.is_finite() {
-        return Err(QueryError::new(
-            "bad_point",
-            "yaw is not finite".to_owned(),
-            "pass radians",
-        ));
-    }
-    let cam = Camera {
-        eye_cm: eye.map(to_cm),
-        yaw_deg: camera_yaw_deg(yaw),
-    };
+    let cam = sense_camera(args)?;
     let fov = args
         .half_angle_deg
         .map_or(90, |half| half.saturating_mul(2));
@@ -239,19 +231,7 @@ fn glance_rows(actors: &[Actor], args: &QueryArgs) -> Result<Found, QueryError> 
 
 fn coverage_rows(actors: &[Actor], args: &QueryArgs) -> Result<Found, QueryError> {
     let subject = check_anchor(actors, args.anchor)?;
-    let eye = check_eye(args.eye_m)?;
-    let yaw = args.yaw.unwrap_or(0.0);
-    if !yaw.is_finite() {
-        return Err(QueryError::new(
-            "bad_point",
-            "yaw is not finite".to_owned(),
-            "pass radians",
-        ));
-    }
-    let cam = Camera {
-        eye_cm: eye.map(to_cm),
-        yaw_deg: camera_yaw_deg(yaw),
-    };
+    let cam = sense_camera(args)?;
     let seen = coverage(
         &SightWorld::build(actors),
         &cam,
@@ -285,7 +265,105 @@ fn coverage_rows(actors: &[Actor], args: &QueryArgs) -> Result<Found, QueryError
     ))
 }
 
-/// Answer one of the measure, room, glance or coverage kinds over the staged scene.
+/// The camera one door question names: `eye_m` in meters with `yaw` radians
+/// (0 faces +x), refused when the yaw is not finite.
+fn sense_camera(args: &QueryArgs) -> Result<Camera, QueryError> {
+    let eye = check_eye(args.eye_m)?;
+    let yaw = args.yaw.unwrap_or(0.0);
+    if !yaw.is_finite() {
+        return Err(QueryError::new(
+            "bad_point",
+            "yaw is not finite".to_owned(),
+            "pass radians",
+        ));
+    }
+    Ok(Camera {
+        eye_cm: eye.map(to_cm),
+        yaw_deg: camera_yaw_deg(yaw),
+    })
+}
+
+/// View or pixel box `[w, h, x, y]` in cells, with the per-kind default.
+fn sense_cells(args: &QueryArgs, kind: QueryKind) -> [i32; 4] {
+    args.cells.unwrap_or(match kind {
+        QueryKind::Pixel => [24, 16, 12, 8],
+        _ => [24, 16, 0, 0],
+    })
+}
+
+/// Door refusal for a sense verb: the typed code plus one recovery.
+fn sense_refusal(error: SenseError) -> QueryError {
+    match error {
+        SenseError::BadSize => QueryError::new(
+            "bad_view",
+            error.to_string(),
+            "view and pixel edges are 1..=128 cells",
+        ),
+        SenseError::OutOfImage => QueryError::new(
+            "bad_pixel",
+            error.to_string(),
+            "x runs 0..w and y runs 0..h inside the view",
+        ),
+        SenseError::BadRadius => QueryError::new(
+            "bad_radius",
+            error.to_string(),
+            "map radius is 50..=1500 cm",
+        ),
+        _ => QueryError::new(
+            "bad_view",
+            error.to_string(),
+            "glance and coverage refuse their own shapes",
+        ),
+    }
+}
+
+/// The SP69 text verbs at the door: `view`, `lidar`, `map` and `pixel` answer
+/// as rows of the same plain text `engine-spatial` prints, one row per line,
+/// plus the token cost of the whole text. Text only: no render, no vision
+/// model and no state. Every answer replays byte for byte.
+fn sense_rows(actors: &[Actor], args: &QueryArgs) -> Result<Found, QueryError> {
+    let cam = sense_camera(args)?;
+    let world = SightWorld::build(actors);
+    let text = match args.kind {
+        QueryKind::View => {
+            let [w, h, _, _] = sense_cells(args, args.kind);
+            view(&world, &cam, w, h)
+        }
+        QueryKind::Lidar => Ok(lidar(&world, cam.eye_cm, cam.yaw_deg)),
+        QueryKind::Map => map(&world, cam.eye_cm, args.radius_cm.unwrap_or(600)),
+        _ => {
+            let [w, h, x, y] = sense_cells(args, args.kind);
+            pixel(&world, &cam, w, h, x, y)
+        }
+    }
+    .map_err(sense_refusal)?;
+    let eye_m = args.eye_m.unwrap_or([0.0; 3]);
+    let mut hits: Vec<Hit> = text
+        .lines()
+        .enumerate()
+        .map(|(line, text)| Hit {
+            id: SAMPLE_ACTOR_BASE.saturating_add(u32::try_from(line).unwrap_or(u32::MAX)),
+            x: eye_m[0],
+            y: eye_m[1],
+            z: eye_m[2],
+            matched: true,
+            reason: text.to_owned(),
+        })
+        .collect();
+    let tokens = engine_spatial::estimate_tokens(&text);
+    hits.push(Hit {
+        id: SAMPLE_ACTOR_BASE.saturating_add(u32::try_from(hits.len()).unwrap_or(u32::MAX)),
+        x: eye_m[0],
+        y: eye_m[1],
+        z: eye_m[2],
+        matched: true,
+        reason: format!("tokens {tokens}"),
+    });
+    Ok((Vec::new(), hits, Vec::new()))
+}
+
+/// Answer one of the measure, room, glance, coverage or sense text kinds over
+/// the staged scene.
 pub(super) fn run_space_kind(
     actors: &[Actor],
     args: &QueryArgs,
@@ -295,6 +373,9 @@ pub(super) fn run_space_kind(
         QueryKind::Measure => measure_rows(actors, args)?,
         QueryKind::Glance => glance_rows(actors, args)?,
         QueryKind::Coverage => coverage_rows(actors, args)?,
+        QueryKind::View | QueryKind::Lidar | QueryKind::Map | QueryKind::Pixel => {
+            sense_rows(actors, args)?
+        }
         _ => room_rows(actors, args)?,
     };
     Ok(render(args.kind, &anchors, hits, conflicts, budget))

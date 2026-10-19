@@ -12,6 +12,7 @@
 //! Formulas: CIEDE2000 (Sharma, Wu and Dalal 2005, the published equations),
 //! sRGB primaries and D65 white (IEC 61966-2-1).
 
+use crate::compile::clamp_perceptual_roughness;
 use crate::record::MaterialRecord;
 
 /// The difference of record `b` against record `a`.
@@ -137,7 +138,7 @@ fn luminance(rgb: [f32; 3]) -> f64 {
 #[must_use]
 pub fn specular_peak(record: &MaterialRecord) -> f64 {
     let look = &record.look;
-    let alpha = |p: f32| f64::from(p).clamp(0.089, 1.0).powi(2);
+    let alpha = |p: f32| f64::from(clamp_perceptual_roughness(p)).powi(2);
     let ior = f64::from(look.specular_ior);
     let dielectric = ((ior - 1.0) / (ior + 1.0)).powi(2);
     let metal = f64::from(look.base_metalness);

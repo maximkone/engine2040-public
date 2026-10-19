@@ -1,0 +1,9 @@
+# arena_drive_hashes: seed tick hash of the scripted arena drive (NS32d).
+# Config: 600 ticks, 2 fighters, half 12 m, table v1, slot 0 runs
+# scripts/shield_bash_arena.rhai; the hash is the tick 599 checkpoint.
+# Written by: cargo test -p engine-rules --features arena --test arena_drive \
+#   bless_arena_hashes -- --ignored
+# A hash that differs on another machine is a finding for docs/BLOCKERS.md, never a
+# loosened test: floats enter the arena hash.
+2040 599 891ed62693a9c5dd
+7 599 9a442b4b06b34310

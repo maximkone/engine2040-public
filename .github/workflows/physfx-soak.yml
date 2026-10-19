@@ -1,0 +1,58 @@
+name: physfx-soak
+
+# RZ10: the RZ1 eight-ragdoll soak on two physics backends, one table. The harness
+# (tools/physfx-backends.mjs) builds the same scene (8 ragdolls, 200 debris, 6 limbs)
+# on Rapier wasm and Jolt wasm in Node and prints ms per tick and bodies for each.
+# It is a report, not a gate: nothing here is authority and the golden hash never
+# runs. The donors are vendored under tools/vendor (gitignored) and pinned by
+# tools/vendor/package-lock.json, so a runner installs exactly what the PC ran.
+#
+# Start it from the Actions tab (workflow_dispatch) or push a branch named
+# physfx-soak-* of the public mirror. The private dev repo never runs it.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["physfx-soak-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: physfx-soak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backends:
+    if: github.repository == 'maximkone/engine2040-public'
+    name: rapier-vs-jolt
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: install the vendored physics donors
+        run: |
+          set -euo pipefail
+          mkdir -p tools/vendor
+          # tools/vendor is gitignored on purpose (local donors); the runner installs the
+          # pinned wasm builds itself. Jolt is the single-thread wasm-compat build.
+          npm install --prefix tools/vendor --no-save --no-package-lock jolt-physics@1.1.0 @dimforge/rapier3d-compat@0.21.0
+      - name: tests of the harness
+        run: node --test tools/physfx-backends.test.mjs
+      - name: run the soak of both backends
+        run: |
+          set -euo pipefail
+          node tools/physfx-backends.mjs --ticks 180 | tee table.txt
+          node tools/physfx-backends.mjs --ticks 180 --json | tee -a table.txt
+      - name: print the table on the run page
+        if: always()
+        run: |
+          if [ -f table.txt ]; then { echo '```'; cat table.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: physfx-backends
+          path: table.txt
+          if-no-files-found: error

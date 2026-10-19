@@ -1,5 +1,5 @@
-//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, fifteen packs load on
-//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `web` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
+//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, sixteen packs load on
+//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `settings`, `web` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
 //!
 //! Consumer: the MCP door (`super::mcp::McpServer`) lists its core tools plus
 //! the packs a session loaded (`api.load`), dispatches any verb by exact
@@ -55,6 +55,8 @@ pub mod net;
 pub mod perf;
 /// Balance answers for one blow: the read-only `physics.read` verb.
 pub mod physics;
+/// Physics and render knobs an AI can set, with ranges, a replay tape and undo.
+pub mod physics_settings;
 pub mod play;
 pub mod replay;
 pub mod rules;
@@ -73,7 +75,7 @@ pub mod web;
 /// verifier verbs replace their replay-pack stand-ins in the same slot, so a
 /// build never serves one verb name twice.
 #[cfg(feature = "verify")]
-pub const PACK_NAMES: [&str; 15] = [
+pub const PACK_NAMES: [&str; 16] = [
     scene::PACK,
     break_::PACK,
     anim::PACK,
@@ -88,12 +90,13 @@ pub const PACK_NAMES: [&str; 15] = [
     play::PACK,
     verify::PACK,
     physics::PACK,
+    physics_settings::PACK,
     web::PACK,
 ];
 
 /// Every pack name, in contract order. Each name has one module below.
 #[cfg(not(feature = "verify"))]
-pub const PACK_NAMES: [&str; 15] = [
+pub const PACK_NAMES: [&str; 16] = [
     scene::PACK,
     break_::PACK,
     anim::PACK,
@@ -108,6 +111,7 @@ pub const PACK_NAMES: [&str; 15] = [
     play::PACK,
     replay::PACK,
     physics::PACK,
+    physics_settings::PACK,
     web::PACK,
 ];
 
@@ -563,6 +567,7 @@ impl PackRegistry {
             #[cfg(not(feature = "verify"))]
             packs.push(replay::pack());
             packs.push(physics::pack());
+            packs.push(physics_settings::pack());
             packs.push(web::pack());
             Self::build(packs)
         })

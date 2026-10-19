@@ -159,6 +159,7 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   BLOCKERS window-path entry closes. needs: OPT3, WIN1. (OPT3 VERDICT
   wave 84.) Progress 2026-10-19: operator: reference-GPU frame report x2;
   line in `docs/plan/2026-10-19-owner-queue.md`.
+  BLOCKED: needs the reference-GPU frame report x2 (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [ ] OPT32 ops: build-baseline promotion on the quiet box — rerun the
   OPT1 matrix back-to-back x2 (clean plus 4-crate touches x 3 profiles),
   single cargo, lanes halted, load <10%, root `target/`.
@@ -177,3 +178,4 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   harness. needs: OPT2. (OPT2 VERDICT wave 84.) Progress 2026-10-19:
   operator: reference-GPU DX12 vs Vulkan A/B; line in
   `docs/plan/2026-10-19-owner-queue.md`.
+  BLOCKED: needs the reference-GPU DX12 vs Vulkan A/B (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.

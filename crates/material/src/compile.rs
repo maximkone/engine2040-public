@@ -58,6 +58,33 @@ pub const NITS_TO_SCENE: f32 = 0.001;
 /// with margin; the cost is a brushed metal 3% darker.
 pub const ANISO_ENERGY_KEEP: f32 = 0.97;
 
+/// Filament perceptual-roughness floor (`0.089`, Apache-2.0): below it a
+/// half-precision build loses the specular peak, so [`clamp_perceptual_roughness`]
+/// and the generated fragment clamp to it. The one source of the number; the
+/// WGSL text declares it as `ROUGHNESS_FLOOR`.
+pub const PERCEPTUAL_ROUGHNESS_FLOOR: f32 = 0.089;
+
+/// Filament anisotropic alpha floor (`0.001`, Apache-2.0): the anisotropic
+/// roughness pair never reaches zero, so `D_GGX_Anisotropic` has no singular
+/// denominator. The WGSL text declares it as `ANISOTROPY_FLOOR`.
+pub const ANISOTROPY_FLOOR: f32 = 0.001;
+
+/// Filament smallest half normal (`2^-14`, about `6.1e-5`): the fp16-safe
+/// lower bound the Schlick power base is clamped to. `2^-14` is exact in f32,
+/// so the literal is the value. The WGSL text declares it as `MIN_HALF_NORMAL`.
+pub const MIN_HALF_NORMAL: f32 = 6.103_515_625e-5;
+
+/// The perceptual-roughness clamp the generated BRDF applies:
+/// [`PERCEPTUAL_ROUGHNESS_FLOOR`] below, one above. The CPU twin
+/// ([`crate::twin`]) reads this same function, so removing the clamp fails the
+/// white-furnace bar and the clamp test together.
+///
+/// Units: perceptual roughness. Determinism: pure math, no state. Errors: none.
+#[must_use]
+pub fn clamp_perceptual_roughness(p: f32) -> f32 {
+    p.clamp(PERCEPTUAL_ROUGHNESS_FLOOR, 1.0)
+}
+
 /// Lobe bits of [`Structure::lobes`].
 pub mod lobe {
     /// Clear coat (from the record's `coat`, or a wet or blood layer).
@@ -316,6 +343,62 @@ pub fn wgsl_digest(wgsl: &str) -> u64 {
     hasher.finish()
 }
 
+/// One row of the material table: one record and the compiled structure every
+/// draw of it bins under.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MaterialRow {
+    /// Wire id of the record ([`crate::set::MaterialSet::wire_id`]).
+    pub id: u8,
+    /// Record name.
+    pub name: String,
+    /// [`Structure::lobes`] of the row.
+    pub lobes: u8,
+    /// [`Structure::textures`] of the row.
+    pub textures: u8,
+    /// [`Structure::key`]: the pipeline-sharing key of the row.
+    pub key: u64,
+}
+
+/// The one material table: every shipped record in wire order, exactly one row
+/// per material id.
+///
+/// Why: the forward pass bins a draw by material id, and an id maps to one
+/// compiled structure. Generating the rows from
+/// [`crate::set::MaterialSet::shipped`] means a record added to a shipped set
+/// cannot miss a row, and the row's lobes come from [`Structure::of`], so the
+/// table can never disagree with [`compile`].
+///
+/// Units: wire id, lobe and texture bits, the FNV pipeline key. Determinism:
+/// set order plus [`Structure::key`], the same bytes on every host. Errors:
+/// none. Budget: [`crate::set::MAX_RECORDS`] rows.
+#[must_use]
+pub fn material_table() -> Vec<MaterialRow> {
+    crate::set::MaterialSet::shipped()
+        .records()
+        .iter()
+        .enumerate()
+        .flat_map(|(index, record)| {
+            let id = u8::try_from(index).ok()?;
+            let structure = Structure::of(record);
+            Some(MaterialRow {
+                id,
+                name: record.name.clone(),
+                lobes: structure.lobes,
+                textures: structure.textures,
+                key: structure.key(),
+            })
+        })
+        .collect()
+}
+
+/// The row of material id `id`, or `None` when no shipped record holds it.
+///
+/// Units: wire id. Determinism: [`material_table`] order. Errors: none.
+#[must_use]
+pub fn material_row(id: u8) -> Option<MaterialRow> {
+    material_table().into_iter().find(|row| row.id == id)
+}
+
 /// Compile one record. Total: a record that parsed always compiles; the
 /// naga check ([`validate`]) is a separate, optional step.
 #[must_use]
@@ -429,14 +512,31 @@ pub fn pack_uniform(record: &MaterialRecord, exposure: f32) -> Vec<f32> {
 /// this text, never written twice; a second copy would drift (the energy
 /// term in `fd_burley` is the drift that bit once). The window forward
 /// shader keeps its own staged copy until it routes through here; this
-/// accessor is the material-side end of that route. Units: none (WGSL
-/// text). Determinism: the same bytes on every host. Errors: none.
+/// accessor is the material-side end of that route.
+///
+/// The Filament clamps are WGSL `const`s generated from
+/// [`PERCEPTUAL_ROUGHNESS_FLOOR`], [`ANISOTROPY_FLOOR`] and
+/// [`MIN_HALF_NORMAL`], so each number lives once and the text names it.
+/// Units: none (WGSL text). Determinism: the same bytes on every host.
+/// Errors: none.
 ///
 /// Consumer: [`wgsl_for`] embeds it below; the door `material` pack and
 /// the render forward bind read it through [`compile`].
 #[must_use]
-pub fn brdf_wgsl() -> &'static str {
-    CHUNK_BRDF
+pub fn brdf_wgsl() -> String {
+    let mut out = String::with_capacity(BRDF_CHUNK_CAPACITY);
+    out.push_str("const PI: f32 = 3.141592653589793;\n");
+    out.push_str(&format!(
+        "const ROUGHNESS_FLOOR: f32 = {PERCEPTUAL_ROUGHNESS_FLOOR:?};\n"
+    ));
+    out.push_str(&format!(
+        "const ANISOTROPY_FLOOR: f32 = {ANISOTROPY_FLOOR:?};\n"
+    ));
+    out.push_str(&format!(
+        "const MIN_HALF_NORMAL: f32 = {MIN_HALF_NORMAL:?};\n"
+    ));
+    out.push_str(CHUNK_BRDF_BODY);
+    out
 }
 
 /// The generated source for a structure. Bytes depend only on `structure`.
@@ -447,7 +547,7 @@ pub fn wgsl_for(structure: &Structure) -> String {
     push_material_struct(&mut out, structure);
     push_bindings(&mut out, structure);
     out.push_str(CHUNK_IO);
-    out.push_str(brdf_wgsl());
+    out.push_str(&brdf_wgsl());
     out.push_str(&crate::dfg::wgsl());
     if structure.has_lobe(lobe::SHEEN) {
         out.push_str(CHUNK_SHEEN);
@@ -467,6 +567,18 @@ pub fn wgsl_for(structure: &Structure) -> String {
 }
 
 fn push_material_struct(out: &mut String, structure: &Structure) {
+    if !structure.layers.is_empty() {
+        // One layer is two vec4 in a row: `a` then `b`. The host packs the
+        // same interleaved stream ([`pack_uniform`], `Structure::uniform_bytes`),
+        // so the shader and the buffer agree on every layer, not only the
+        // first: two separate `array<vec4>` fields would read the wrong vec4.
+        out.push_str(
+            "struct LayerU {\n\
+             \x20   a: vec4<f32>,\n\
+             \x20   b: vec4<f32>,\n\
+             };\n",
+        );
+    }
     out.push_str(
         "struct MaterialU {\n\
          \x20   base: vec4<f32>,\n\
@@ -484,8 +596,7 @@ fn push_material_struct(out: &mut String, structure: &Structure) {
     );
     if !structure.layers.is_empty() {
         let n = structure.layers.len();
-        out.push_str(&format!("    layer_a: array<vec4<f32>, {n}>,\n"));
-        out.push_str(&format!("    layer_b: array<vec4<f32>, {n}>,\n"));
+        out.push_str(&format!("    layers: array<LayerU, {n}>,\n"));
     }
     out.push_str("};\n");
     out.push_str("struct ChannelU {\n    a: vec4<f32>,\n    b: vec4<f32>,\n};\n");
@@ -577,8 +688,8 @@ fn push_fragment(out: &mut String, structure: &Structure) {
         let c = channel_expr(*channel);
         out.push_str(&format!(
             "    {{\n\
-             \x20       let a = material.layer_a[{i}];\n\
-             \x20       let b = material.layer_b[{i}];\n\
+             \x20       let a = material.layers[{i}].a;\n\
+             \x20       let b = material.layers[{i}].b;\n\
              \x20       let cover = clamp({c}, 0.0, 1.0) * a.x;\n\
              \x20       base_color = base_color * (1.0 - a.y * cover);\n\
              \x20       base_color = mix(base_color, b.rgb, b.w * cover);\n\
@@ -629,7 +740,7 @@ fn push_fragment(out: &mut String, structure: &Structure) {
              \x20   let tan_t = tan0 * cos(tan_angle) + bit0 * sin(tan_angle);\n\
              \x20   let tan_b = cross(n, tan_t);\n\
              \x20   let a_t = min(roughness * (1.0 + material.sheen2.y), 1.0);\n\
-             \x20   let a_b = max(roughness * (1.0 - material.sheen2.y), 0.002);\n\
+             \x20   let a_b = max(roughness * (1.0 - material.sheen2.y), ANISOTROPY_FLOOR);\n\
              \x20   let rough_e = sqrt(sqrt(a_t * a_b));\n\
              \x20   let spec_d = d_ggx_anisotropic(a_t, a_b, dot(tan_t, h), dot(tan_b, h), ndot_h);\n",
         );
@@ -638,7 +749,7 @@ fn push_fragment(out: &mut String, structure: &Structure) {
         ));
     } else {
         out.push_str(
-            "    let rough_e = clamp(rough, 0.089, 1.0);\n\
+            "    let rough_e = clamp(rough, ROUGHNESS_FLOOR, 1.0);\n\
              \x20   let spec_d = d_ggx(roughness, ndot_h);\n\
              \x20   let vv = v_smith_ggx_correlated(roughness, ndot_v, ndot_l);\n",
         );
@@ -698,7 +809,7 @@ fn push_fragment(out: &mut String, structure: &Structure) {
              \x20       let cf0 = pow((coat_ior - 1.0) / (coat_ior + 1.0), 2.0);\n\
              \x20       let fc = f_schlick_vec(vec3<f32>(cf0), 1.0, ldot_h).x * coat_w;\n\
              \x20       let cr = perceptual_roughness_to_roughness(coat_r);\n\
-             \x20       let cab = dfg_lookup(ndot_v, clamp(coat_r, 0.089, 1.0));\n\
+             \x20       let cab = dfg_lookup(ndot_v, clamp(coat_r, ROUGHNESS_FLOOR, 1.0));\n\
              \x20       let coat_view = (cf0 * cab.x + cab.y) * coat_w;\n\
              \x20       let coat_spec = d_ggx(cr, ndot_h) * v_smith_ggx_correlated(cr, ndot_v, ndot_l) * fc * ndot_l;\n\
              \x20       lit = lit * (1.0 - coat_view) + vec3<f32>(coat_spec);\n\
@@ -754,11 +865,15 @@ fn vs(in: VIn) -> VOut {
 }
 "#;
 
-const CHUNK_BRDF: &str = r#"
-const PI: f32 = 3.141592653589793;
+/// Byte capacity reserved for one BRDF chunk: the three clamp declarations
+/// plus [`CHUNK_BRDF_BODY`], all ASCII.
+const BRDF_CHUNK_CAPACITY: usize = 2048;
 
+/// The BRDF body: every lit function, from the one shared text. The three
+/// Filament clamps are declared by [`brdf_wgsl`] and named here.
+const CHUNK_BRDF_BODY: &str = r#"
 fn perceptual_roughness_to_roughness(p: f32) -> f32 {
-    let c = clamp(p, 0.089, 1.0);
+    let c = clamp(p, ROUGHNESS_FLOOR, 1.0);
     return c * c;
 }
 
@@ -777,7 +892,9 @@ fn v_smith_ggx_correlated(roughness: f32, ndot_v: f32, ndot_l: f32) -> f32 {
 }
 
 fn f_schlick_vec(f0: vec3<f32>, f90: f32, vdot_h: f32) -> vec3<f32> {
-    return f0 + (f90 - f0) * pow(1.0 - vdot_h, 5.0);
+    // MIN_HALF_NORMAL keeps the power base positive: a half-vector cosine a
+    // hair above one would otherwise feed a negative base to pow.
+    return f0 + (f90 - f0) * pow(max(1.0 - vdot_h, MIN_HALF_NORMAL), 5.0);
 }
 
 fn fresnel_term(f0: vec3<f32>, ldot_h: f32) -> vec3<f32> {
@@ -987,6 +1104,45 @@ mod tests {
             let c = compile(record);
             assert_eq!(c.uniform.len() * 4, c.structure.uniform_bytes());
         }
+    }
+
+    /// Every layer is two vec4 in a row, in the struct and in the packed
+    /// stream. Two separate `array<vec4>` fields would make the shader read
+    /// the wrong vec4 from the second layer on; the swatch test proves the
+    /// pixels on a device, this pins the shape without one.
+    #[test]
+    fn layer_values_are_one_interleaved_pair_per_layer() {
+        let marble = MaterialSet::siege_kit()
+            .get("marble")
+            .cloned()
+            .expect("shipped marble");
+        let compiled = compile(&marble);
+        let n = compiled.structure.layers.len();
+        assert!(n >= 2, "marble carries {n} layers");
+        assert!(compiled.wgsl.contains("struct LayerU {"));
+        assert!(compiled
+            .wgsl
+            .contains(&format!("layers: array<LayerU, {n}>,")));
+        assert!(!compiled.wgsl.contains("layer_a"));
+        for i in 0..n {
+            assert!(
+                compiled.wgsl.contains(&format!("material.layers[{i}].a")),
+                "layer {i} reads its a"
+            );
+            assert!(
+                compiled.wgsl.contains(&format!("material.layers[{i}].b")),
+                "layer {i} reads its b"
+            );
+        }
+        // The stream is the head, then (a, b) per layer: the second layer's
+        // `a` is the second pair of the stream, not the head of a second array.
+        let head = UNIFORM_HEAD_FLOATS;
+        assert_eq!(compiled.uniform.len(), head + 8 * n);
+        assert_eq!(compiled.uniform[head + 8..head + 12], [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            compiled.uniform[head + 12..head + 16],
+            [0.35, 0.02, 0.02, 1.0]
+        );
     }
 
     #[test]
@@ -1204,10 +1360,64 @@ mod tests {
         );
     }
 
+    /// Every shipped record compiles to one non-empty module that keeps both
+    /// entry points, twice byte- and key-identical, and a coat edit on a bare
+    /// record moves the key and the text.
+    ///
+    /// The row counts the 21 siege-plus-reference record names; `shipped()`
+    /// holds the 19 names the siege kit does not already own, so the loop
+    /// runs over those.
+    #[test]
+    fn every_shipped_record_compiles_to_text_with_stable_keys() {
+        let shipped = MaterialSet::shipped();
+        assert!(shipped.len() >= 19, "{} shipped records", shipped.len());
+        for record in shipped.records() {
+            let a = compile(record);
+            let b = compile(record);
+            assert!(!a.wgsl.is_empty(), "{} compiles to text", record.name);
+            assert!(
+                a.wgsl.contains("fn vs(") && a.wgsl.contains("fn fs("),
+                "{} keeps the two entry points",
+                record.name
+            );
+            assert_eq!(a.wgsl, b.wgsl, "{} bytes x2", record.name);
+            assert_eq!(a.key, b.key, "{} key x2", record.name);
+        }
+        // A coat is a lobe, not a texture slot: the key and the text move,
+        // the group-1 bindings do not.
+        let bare = shipped
+            .records()
+            .iter()
+            .find(|r| !Structure::of(r).has_lobe(lobe::COAT))
+            .expect("a shipped record without a coat");
+        let mut coated = bare.clone();
+        coated.look.coat = Some(crate::record::Coat {
+            weight: 0.8,
+            roughness: 0.1,
+            ior: 1.5,
+        });
+        let a = compile(bare);
+        let b = compile(&coated);
+        assert!(
+            b.structure.has_lobe(lobe::COAT),
+            "{} gains the coat",
+            coated.name
+        );
+        assert_ne!(b.key, a.key, "a coat moves the key");
+        assert_ne!(b.wgsl, a.wgsl, "a coat moves the text");
+        assert_eq!(
+            b.structure.texture_bindings(),
+            a.structure.texture_bindings(),
+            "a coat adds no texture binding"
+        );
+    }
+
     /// The lit part is generated once: the shared BRDF chunk holds the
     /// seven canonical functions exactly once each, every compiled
     /// structure embeds that exact chunk once, and the module keeps one
-    /// `vs` plus one `fs` entry.
+    /// `vs` plus one `fs` entry. This is the "grep finds one BRDF text"
+    /// gate for everything this crate emits: WGSL here comes only from
+    /// [`brdf_wgsl`] and its siblings, and each function is defined once.
     #[test]
     fn brdf_chunk_is_the_single_lit_source() {
         let chunk = brdf_wgsl();
@@ -1230,7 +1440,7 @@ mod tests {
         for record in MaterialSet::shipped().records() {
             let text = compile(record).wgsl;
             assert_eq!(
-                text.match_indices(chunk).count(),
+                text.match_indices(chunk.as_str()).count(),
                 1,
                 "{} embeds the shared chunk once",
                 record.name
@@ -1245,6 +1455,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The Filament clamps are named consts with the Filament values, the
+    /// generated BRDF declares each once and reads it where the literal used
+    /// to be, and the CPU clamp the twin shares floors at the const. F2P: drop
+    /// a clamp call or change a value and this fails; the twin's furnace then
+    /// fails with it.
+    #[test]
+    fn the_filament_clamps_are_named_consts_the_text_reads() {
+        assert_eq!(PERCEPTUAL_ROUGHNESS_FLOOR, 0.089, "roughness floor");
+        assert_eq!(ANISOTROPY_FLOOR, 0.001, "anisotropy floor");
+        assert_eq!(MIN_HALF_NORMAL, 6.103_515_625e-5, "2^-14 half normal");
+        assert_eq!(
+            MIN_HALF_NORMAL,
+            2f32.powi(-14),
+            "the half normal is exactly 2^-14"
+        );
+        let chunk = brdf_wgsl();
+        for (name, value) in [
+            ("ROUGHNESS_FLOOR", PERCEPTUAL_ROUGHNESS_FLOOR),
+            ("ANISOTROPY_FLOOR", ANISOTROPY_FLOOR),
+            ("MIN_HALF_NORMAL", MIN_HALF_NORMAL),
+        ] {
+            let decl = format!("const {name}: f32 = {value:?};");
+            assert_eq!(
+                chunk.match_indices(decl.as_str()).count(),
+                1,
+                "{name} declared once with the const value"
+            );
+        }
+        // The clamp is read, not inlined: the fragment names the const where
+        // the literal 0.089 stood, and the Schlick base takes the half normal.
+        assert!(chunk.contains("clamp(p, ROUGHNESS_FLOOR, 1.0)"));
+        assert!(chunk.contains("pow(max(1.0 - vdot_h, MIN_HALF_NORMAL), 5.0)"));
+        let text = compile(&MaterialSet::siege_kit().records()[0]).wgsl;
+        assert!(text.contains("clamp(rough, ROUGHNESS_FLOOR, 1.0)"));
+        // The floor really clamps: a zero roughness lands on the const.
+        assert_eq!(clamp_perceptual_roughness(0.0), PERCEPTUAL_ROUGHNESS_FLOOR);
+        assert_eq!(clamp_perceptual_roughness(0.02), PERCEPTUAL_ROUGHNESS_FLOOR);
+        assert_eq!(clamp_perceptual_roughness(0.5), 0.5);
+        assert_eq!(clamp_perceptual_roughness(1.5), 1.0);
+    }
+
+    /// One table, one row per material id: every shipped record maps to
+    /// exactly one row, ids are the wire ids in order, the row's lobes and key
+    /// come from the same [`Structure::of`] [`compile`] reads, and a lookup by
+    /// id returns that row. A record added to a shipped set cannot miss a row.
+    #[test]
+    fn every_material_id_maps_to_one_table_row() {
+        let set = MaterialSet::shipped();
+        let table = material_table();
+        assert_eq!(table.len(), set.len(), "one row per shipped record");
+        let mut seen: Vec<u8> = Vec::with_capacity(table.len());
+        for (index, (row, record)) in table.iter().zip(set.records()).enumerate() {
+            let structure = Structure::of(record);
+            assert_eq!(row.id, u8::try_from(index).expect("shipped ids fit a byte"));
+            assert_eq!(row.name, record.name, "wire order");
+            assert_eq!(row.lobes, structure.lobes, "{} lobes", row.name);
+            assert_eq!(row.textures, structure.textures, "{} textures", row.name);
+            assert_eq!(row.key, structure.key(), "{} key", row.name);
+            assert!(!seen.contains(&row.id), "id {} appears once", row.id);
+            seen.push(row.id);
+            assert_eq!(
+                material_row(row.id).as_ref(),
+                Some(row),
+                "id {} maps back to its row",
+                row.id
+            );
+        }
+        // Every sim-side material id names a record in the table.
+        for id in engine_destruction::material::MaterialId::all() {
+            let row = table
+                .iter()
+                .find(|row| row.name == id.name())
+                .unwrap_or_else(|| panic!("{} has a table row", id.name()));
+            assert_eq!(row.id, id.as_u8(), "{} keeps its wire id", id.name());
+        }
+        assert!(material_row(u8::MAX).is_none(), "an unused id has no row");
     }
 
     #[cfg(feature = "validate")]

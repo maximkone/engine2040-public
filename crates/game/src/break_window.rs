@@ -21,7 +21,7 @@
 //! tier's debris cap in bodies, 16 draws for the eight-chunk crate, no work per frame after
 //! the pile sleeps.
 
-use crate::break_look::{BreakLook, BreakProp, LookError, BREAK_MESH_ID_BASE};
+use crate::break_look::{BreakCue, BreakLook, BreakProp, LookError, BREAK_MESH_ID_BASE};
 use crate::camera::to_mm;
 use crate::TickOutcome;
 use engine_arena::{crate_rest, ArenaConfig};
@@ -101,6 +101,8 @@ pub struct BreakScene {
     observed: u32,
     /// The tick of the first break event, once one came.
     broke_at: Option<u32>,
+    /// The break sound of the last accepted tick, until the audio feed takes it.
+    cue: Option<BreakCue>,
     /// Boxes already on the GPU: half-extents and model they were baked with (a merged proxy
     /// reuses its lead piece's key with a bigger box, so the half counts too).
     sent: Vec<(MeshKey, [f32; 3], [f32; 12])>,
@@ -131,6 +133,7 @@ impl BreakScene {
             breaks: 0,
             observed: 0,
             broke_at: None,
+            cue: None,
             sent: Vec::new(),
         })
     }
@@ -143,6 +146,7 @@ impl BreakScene {
             return Ok(());
         }
         self.look.observe(outcome.tick, &outcome.breaks)?;
+        self.cue = self.look.take_cue();
         self.observed += 1;
         if !outcome.breaks.is_empty() {
             self.breaks = self
@@ -229,6 +233,8 @@ impl BreakScene {
                 material: WOOD,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             });
         }
         Ok(draws.len())
@@ -256,6 +262,11 @@ impl BreakScene {
     #[must_use]
     pub const fn broke_at(&self) -> Option<u32> {
         self.broke_at
+    }
+
+    /// The break sound of the last accepted tick, once: the window's audio feed plays it.
+    pub fn take_cue(&mut self) -> Option<BreakCue> {
+        self.cue.take()
     }
 
     /// Counters of the physical layer.

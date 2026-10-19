@@ -223,11 +223,11 @@ Open owner decisions listed in `finish-line.md`: the tinted-share target, re-ope
 
 Hooks live in `.git/hooks/` (local, not versioned):
 
-- `pre-commit`: runs `node tools/rust-quality.mjs` on the staged tree. A commit that raises the ratchet is refused unless the same commit stages `tools/rust-quality.baseline.json` (`--accept` or `--tighten`).
+- `pre-commit`: runs `node tools/secret-gate.mjs` (a key or token in the staged diff refuses the commit) and `node tools/rust-quality.mjs` on the staged tree. A commit that raises the ratchet is refused unless the same commit stages `tools/rust-quality.baseline.json` (`--accept` or `--tighten`).
 - `pre-push`: `git lfs pre-push`, then `cargo deny check licenses`, then `node tools/license-gate.mjs`. Exit 1 on failure.
 - `post-checkout`, `post-commit`, `post-merge`: present, not described here.
 
-`tools/secret-gate.mjs` exists but no hook calls it. Run it by hand before a push if you need that scan.
+`tools/hooks/pre-commit` is the tracked copy of the hook; install it by copying the file to `.git/hooks/pre-commit`.
 
 `deny.toml` governs Cargo dependency licences only. Donor code from any source may be ported (`AGENTS.md` rule 4).
 

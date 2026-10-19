@@ -717,6 +717,33 @@ impl Presenter {
         }
     }
 
+    /// Every named texture slot of one draw must be resident: an unknown key
+    /// fails the frame with `InvalidDraw` naming the draw index, exactly like
+    /// `base_color`. `None` slots bind the fallbacks, so untextured draws
+    /// stay byte-identical. The normal slot is checked by `pick_map_sets`: a
+    /// normal key with no uploaded material set fails there.
+    pub(super) fn require_draw_textures(
+        &self,
+        item: &DrawItem,
+        index: usize,
+    ) -> Result<(), PresentError> {
+        for (reason, key) in [
+            ("unknown base color texture key", &item.base_color),
+            ("unknown orm texture key", &item.orm),
+            ("unknown emissive texture key", &item.emissive),
+        ] {
+            if let Some(key) = key {
+                if self.textures.get(key).is_none() {
+                    return Err(PresentError::InvalidDraw {
+                        index,
+                        reason: reason.into(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Stage one frame from the shared frame camera: validate the list and
     /// light, resolve every mesh key, and pack the uniform byte images from
     /// the frame's built view-projection. Returns stack camera (80 B) plus
@@ -766,16 +793,10 @@ impl Presenter {
                     reason: format!("unknown mesh key {:?}", item.mesh.id), // alloc-ok: cold missing-mesh refusal, never steady-state
                 });
             }
-            // Texture residency: unknown texture keys fail with their draw
-            // index, mirroring meshes, before any GPU work is encoded.
-            if let Some(key) = &item.base_color {
-                if self.textures.get(key).is_none() {
-                    return Err(PresentError::InvalidDraw {
-                        index,
-                        reason: "unknown texture key".into(),
-                    });
-                }
-            }
+            // Texture residency: unknown keys in any named slot fail with
+            // their draw index, mirroring meshes, before any GPU work is
+            // encoded.
+            self.require_draw_textures(item, index)?;
             self.material_scratch.extend_from_slice(&mat_u.to_array());
             self.material_scratch
                 .resize((index + 1) * MATERIAL_STRIDE, 0);
@@ -2216,6 +2237,8 @@ mod cq7_present_alloc_tests {
             },
             base_color: tex.map(|t| TextureKey::new(t, [0x77; 32])),
             normal_map: None,
+            orm: None,
+            emissive: None,
         }
     }
 
@@ -2285,6 +2308,8 @@ mod eg38_tests {
             },
             base_color: tex.map(|t| TextureKey::new(t, [0x77; 32])),
             normal_map: None,
+            orm: None,
+            emissive: None,
         }
     }
 
@@ -2343,6 +2368,8 @@ mod rl32_tests {
             },
             base_color: tex.map(|t| TextureKey::new(t, [0x77; 32])),
             normal_map: None,
+            orm: None,
+            emissive: None,
         }
     }
 
@@ -2581,6 +2608,8 @@ mod eg11_live_sun_tests {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         };
         let out = presenter
@@ -2770,6 +2799,8 @@ mod eg8_capture_sky_tests {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         };
         let mut off = crate::pass_truth::LookToggles::all_on();

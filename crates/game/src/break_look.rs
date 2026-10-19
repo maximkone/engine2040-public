@@ -5,11 +5,19 @@
 //! first event the intact mesh is hidden and the prop is drawn as its fracture chunks instead;
 //! every chunk the authority frees becomes a body of the float physical layer (`engine-physfx`)
 //! that tumbles, lands and sleeps. [`BreakLook::frame`] hands the renderer one list: a mesh key
-//! and a transform per piece, plus the keys of the intact meshes to skip.
+//! and a transform per piece, plus the keys of the intact meshes to skip. The draw hook is
+//! [`crate::break_window::BreakScene`].
+//!
+//! A tick whose blow snaps a bond also makes one sound: [`BreakLook::take_cue`] hands the window
+//! one [`BreakCue`] (the bank's impact sample, a gain that rises with the blow and the struck
+//! chunk's center) for the audio feed to play, and one dust cloud: [`BreakLook::take_dust`] hands
+//! the render's particle feed (NS11) one [`BreakDust`] (where the cloud sits, how many puffs and
+//! how wide) for every tick that frees pieces.
 //!
 //! Caller: the window loop calls [`BreakLook::observe`] once per accepted sim tick with that
 //! tick's `TickBreaks` events and [`BreakLook::frame`] once per drawn frame with the sub-tick
-//! alpha. The draw hook is not wired yet; the tests drive both calls the same way.
+//! alpha; the break scene does both, takes the cue for the audio feed and the dust for the
+//! particle feed.
 //! Data owner: the authority owns what broke; this module owns only the picture. Units: meters,
 //! seconds, Y up; rotations are unit quaternions `[x, y, z, w]`. Determinism: the same events on
 //! the same ticks give the same transforms on one machine; nothing here is hashed and the sim
@@ -17,6 +25,7 @@
 //! Budget: at most the tier's body cap of debris bodies (the oldest is recycled first), and no
 //! work at all before the first event.
 
+use engine_audio::cue_names;
 use engine_core::hash::hash_bytes;
 use engine_destruction::bonded::{Bond, BreakEvent, Chunk3, MAX_BONDED_CHUNKS};
 use engine_physfx::{Error as FxError, Key, Material, PhysFx, Shard, Stats, Tier, Transform};
@@ -253,6 +262,48 @@ impl PieceDraw {
     }
 }
 
+/// The sound one break makes: which bank cue to play, how loud and where the blow landed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BreakCue {
+    /// Bank cue name (`engine_audio::cue_names`). The bank ships one impact sample; a break
+    /// plays it.
+    pub name: &'static str,
+    /// Gain in `0.0..=1.0`, rising with the speed the blow gives the freed pieces.
+    pub gain: f32,
+    /// Center of the chunk the blow struck, meters.
+    pub at_m: [f32; 3],
+}
+
+/// Quietest a break sounds: rubble is always a crash, a nudge at the gate still lands.
+const MIN_BREAK_GAIN: f32 = 0.3;
+
+/// The dust one break kicks up: how many puffs, where the cloud sits and how wide it is. The
+/// render's particle feed (NS11) turns this into emitters; this module only says what the blow
+/// raised.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BreakDust {
+    /// Center of the cloud, meters: the struck chunk on a blow, the freed pieces' mean on a
+    /// collapse.
+    pub at_m: [f32; 3],
+    /// Puffs this break asks for, at least [`PUFFS_PER_PIECE`] per freed piece and rising with
+    /// the blow, never over [`MAX_PUFFS_PER_BREAK`].
+    pub puffs: u32,
+    /// Radius of the cloud, meters: how far the freed pieces fell from the blow, within
+    /// [`MIN_DUST_RADIUS_M`]`..=`[`MAX_DUST_RADIUS_M`].
+    pub radius_m: f32,
+}
+
+/// Puffs each freed piece raises, before the blow's share.
+const PUFFS_PER_PIECE: u32 = 2;
+/// Ceiling of one break's dust: the feed's per-event budget, whatever the cloud.
+const MAX_PUFFS_PER_BREAK: u32 = 96;
+/// Steps the blow's share of the puffs climbs; the top step doubles the base.
+const DUST_STEPS: u32 = 3;
+/// Smallest cloud radius, meters: a nudge still puffs around the struck chunk.
+const MIN_DUST_RADIUS_M: f32 = 0.2;
+/// Largest cloud radius, meters: a wall's fall never asks the feed for a fog bank.
+const MAX_DUST_RADIUS_M: f32 = 4.0;
+
 /// What to draw for the prop in one frame.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Frame {
@@ -292,6 +343,10 @@ pub struct BreakLook {
     /// `(batch, index)` of a debris body to the chunk it is.
     flying: BTreeMap<(u32, u32), usize>,
     broke: bool,
+    /// Sound of the last observed tick, until [`BreakLook::take_cue`] takes it.
+    cue: Option<BreakCue>,
+    /// Dust of the last observed tick, until [`BreakLook::take_dust`] takes it.
+    dust: Option<BreakDust>,
     last_tick: Option<u32>,
 }
 
@@ -324,6 +379,8 @@ impl BreakLook {
             pieces: vec![Piece::Standing; count],
             flying: BTreeMap::new(),
             broke: false,
+            cue: None,
+            dust: None,
             last_tick: None,
             prop,
         })
@@ -341,6 +398,13 @@ impl BreakLook {
         }
         let plan = self.plan(events)?;
         let take = plan.freed.len().min(self.body_cap);
+        let heard: &[usize] = if take == 0 {
+            &plan.freed
+        } else {
+            &plan.freed[..take]
+        };
+        let cue = self.break_cue(heard, plan.hit);
+        let dust = self.break_dust(heard, plan.hit);
         let admitted = if take == 0 {
             None
         } else {
@@ -371,6 +435,8 @@ impl BreakLook {
         if self.broke {
             self.fx.step();
         }
+        self.cue = cue;
+        self.dust = dust;
         self.last_tick = Some(tick);
         Ok(())
     }
@@ -415,6 +481,18 @@ impl BreakLook {
     #[must_use]
     pub fn meshes(&self) -> &[ChunkMeshes] {
         &self.prop.pieces
+    }
+
+    /// The sound the last observed tick's blow made, once: the window's audio feed plays it. A
+    /// quiet tick, a tick that only frees chunks, and a second read all give `None`.
+    pub fn take_cue(&mut self) -> Option<BreakCue> {
+        self.cue.take()
+    }
+
+    /// The dust the last observed tick raised, once: the render's particle feed (NS11) plays it.
+    /// A tick that frees nothing and a second read give `None`.
+    pub fn take_dust(&mut self) -> Option<BreakDust> {
+        self.dust.take()
     }
 
     /// Counters of the physical layer, for its receipt line.
@@ -490,11 +568,9 @@ impl BreakLook {
                 }
             })
             .collect();
-        let Some((struck, impulse)) = hit else {
+        let Some((struck, kick)) = self.kick(freed, hit) else {
             return (shards, [0.0; 3]);
         };
-        let authority_mass: f32 = freed.iter().map(|i| self.prop.chunks[*i].mass).sum();
-        let kick = (impulse / authority_mass).min(MAX_KICK_MS);
         let density = self.prop.material.props().density();
         let kilograms: f32 = shards
             .iter()
@@ -513,6 +589,98 @@ impl BreakLook {
         let push = (kick * kilograms).min(MAX_PUSH_NS);
         (shards, lean.map(|c| c * push))
     }
+
+    /// The chunk a blow struck and the speed it gives the freed pieces as one body, m/s: the
+    /// authority's impulse over their combined mass, capped. `None` on a tick with no snapped
+    /// bond, so a collapse that only frees chunks carries no blow of its own.
+    fn kick(&self, freed: &[usize], hit: Option<(usize, f32)>) -> Option<(usize, f32)> {
+        let (struck, impulse) = hit?;
+        let mass: f32 = freed.iter().map(|i| self.prop.chunks[*i].mass).sum();
+        Some((struck, (impulse / mass).min(MAX_KICK_MS)))
+    }
+
+    /// The sound this tick's blow makes: the bank's impact sample at the struck chunk, its gain
+    /// rising with [`Self::kick`]. `None` when no bond snapped or the speed is not finite.
+    fn break_cue(&self, freed: &[usize], hit: Option<(usize, f32)>) -> Option<BreakCue> {
+        let (struck, speed) = self.kick(freed, hit)?;
+        if !speed.is_finite() {
+            return None;
+        }
+        let c = self.prop.chunks[struck];
+        Some(BreakCue {
+            name: cue_names::IMPACT_STONE,
+            gain: break_gain(speed),
+            at_m: [c.x, c.y, c.z],
+        })
+    }
+
+    /// The dust this tick raised: a blow puffs at the struck chunk, a collapse (no snapped bond)
+    /// over the mean of the freed pieces. `None` on a tick that frees nothing. The cloud's radius
+    /// is how far the freed pieces fall from its center, so a whole wall's fall is a wider cloud
+    /// than one knocked corner.
+    fn break_dust(&self, freed: &[usize], hit: Option<(usize, f32)>) -> Option<BreakDust> {
+        if freed.is_empty() {
+            return None;
+        }
+        let count = f32::from(u16::try_from(freed.len()).unwrap_or(u16::MAX));
+        let centre = |axis: usize| {
+            freed
+                .iter()
+                .map(|i| {
+                    let c = self.prop.chunks[*i];
+                    [c.x, c.y, c.z][axis]
+                })
+                .sum::<f32>()
+                / count
+        };
+        let at_m = match hit {
+            Some((struck, _)) => {
+                let c = self.prop.chunks[struck];
+                [c.x, c.y, c.z]
+            }
+            None => [centre(0), centre(1), centre(2)],
+        };
+        let spread = freed
+            .iter()
+            .map(|i| {
+                let c = self.prop.chunks[*i];
+                let d = [c.x - at_m[0], c.y - at_m[1], c.z - at_m[2]];
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+            })
+            .sum::<f32>()
+            / count;
+        let speed = self.kick(freed, hit).map_or(0.0, |(_, speed)| speed);
+        Some(BreakDust {
+            at_m,
+            puffs: dust_puffs(freed.len(), speed),
+            radius_m: spread.clamp(MIN_DUST_RADIUS_M, MAX_DUST_RADIUS_M),
+        })
+    }
+}
+
+/// Gain of a break at `speed_m`: a crash at the cap, never silent and never over one.
+fn break_gain(speed_m: f32) -> f32 {
+    (speed_m / MAX_KICK_MS).clamp(MIN_BREAK_GAIN, 1.0)
+}
+
+/// Puffs a break of `freed` pieces raises at `kick_ms`: [`PUFFS_PER_PIECE`] each, plus up to that
+/// much again as the blow climbs [`MAX_KICK_MS`], capped at [`MAX_PUFFS_PER_BREAK`]. A collapse
+/// (speed zero, or not finite) still raises the base cloud.
+fn dust_puffs(freed: usize, kick_ms: f32) -> u32 {
+    let base = u32::try_from(freed)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(PUFFS_PER_PIECE);
+    let steps = if !kick_ms.is_finite() || kick_ms <= MAX_KICK_MS * 0.25 {
+        0
+    } else if kick_ms <= MAX_KICK_MS * 0.5 {
+        1
+    } else if kick_ms <= MAX_KICK_MS * 0.75 {
+        DUST_STEPS - 1
+    } else {
+        DUST_STEPS
+    };
+    base.saturating_add(base.saturating_mul(steps) / DUST_STEPS)
+        .min(MAX_PUFFS_PER_BREAK)
 }
 
 /// `value` as an index below `len`, when it is one.
@@ -800,6 +968,120 @@ mod tests {
         let slept = look.frame(0.3).expect("frame");
         assert_eq!(slept, end, "asleep means the same at every alpha");
         ticks
+    }
+
+    /// The break makes one sound: at a chunk, once, louder for a harder blow, and never before
+    /// the break tick or on a tick that only frees chunks (a collapse: the snapped bond already
+    /// sounded the tick before).
+    #[test]
+    fn the_break_makes_one_sound_at_the_struck_chunk() {
+        let wall = wall_break(6.0);
+        let mut look = wall_look(Tier::Comfort, &wall);
+        for tick in 0..BREAK_TICK {
+            look.observe(tick, &[]).expect("quiet tick");
+            assert_eq!(look.take_cue(), None, "tick {tick}: silent until the break");
+        }
+        look.observe(BREAK_TICK, &wall.events).expect("break tick");
+        let cue = look.take_cue().expect("the break sounds");
+        assert_eq!(cue.name, cue_names::IMPACT_STONE);
+        assert!(cue.gain > 0.0 && cue.gain <= 1.0, "{cue:?}");
+        assert!(
+            wall.desc.chunks.iter().any(|c| [c.x, c.y, c.z] == cue.at_m),
+            "the sound sits on a chunk: {cue:?}"
+        );
+        assert_eq!(look.take_cue(), None, "one sound per break tick");
+        look.observe(BREAK_TICK + 1, &[]).expect("tick");
+        assert_eq!(look.take_cue(), None, "a quiet tick is silent");
+
+        // A harder blow never sounds quieter, and the gain never passes a crash.
+        let harder = wall_break(12.0);
+        let mut loud = wall_look(Tier::Comfort, &harder);
+        play(&mut loud, &harder, BREAK_TICK);
+        let loud = loud.take_cue().expect("the harder break sounds").gain;
+        assert!(loud >= cue.gain, "{loud} vs {}", cue.gain);
+        assert!(break_gain(0.0) < break_gain(6.0));
+        assert!((break_gain(MAX_KICK_MS * 4.0) - 1.0).abs() < f32::EPSILON);
+
+        // Chunks freed with no snapped bond (a collapse) make no sound of their own.
+        let freed: Vec<BreakEvent> = wall
+            .events
+            .iter()
+            .filter(|e| matches!(e, BreakEvent::ChunkFreed { .. }))
+            .copied()
+            .collect();
+        assert!(!freed.is_empty(), "the wall frees chunks");
+        let mut collapse = wall_look(Tier::Comfort, &wall);
+        collapse.observe(BREAK_TICK, &freed).expect("collapse tick");
+        assert_eq!(collapse.take_cue(), None, "no bond, no blow");
+    }
+
+    /// The break kicks up dust: at a chunk, once, more puffs for a harder blow, and never on a
+    /// tick that frees nothing. A collapse with no snapped bond still puffs, at the base count.
+    #[test]
+    fn the_break_kicks_up_dust_at_the_struck_chunk() {
+        let wall = wall_break(6.0);
+        let mut look = wall_look(Tier::Comfort, &wall);
+        for tick in 0..BREAK_TICK {
+            look.observe(tick, &[]).expect("quiet tick");
+            assert_eq!(
+                look.take_dust(),
+                None,
+                "tick {tick}: no dust before the break"
+            );
+        }
+        look.observe(BREAK_TICK, &wall.events).expect("break tick");
+        let dust = look.take_dust().expect("the break raises dust");
+        assert!(
+            dust.puffs > 0 && dust.puffs <= MAX_PUFFS_PER_BREAK,
+            "{dust:?}"
+        );
+        assert!(
+            wall.desc
+                .chunks
+                .iter()
+                .any(|c| [c.x, c.y, c.z] == dust.at_m),
+            "the cloud sits on a chunk: {dust:?}"
+        );
+        assert!(
+            (MIN_DUST_RADIUS_M..=MAX_DUST_RADIUS_M).contains(&dust.radius_m),
+            "{dust:?}"
+        );
+        assert_eq!(look.take_dust(), None, "one cloud per break tick");
+        look.observe(BREAK_TICK + 1, &[]).expect("tick");
+        assert_eq!(look.take_dust(), None, "a quiet tick raises nothing");
+
+        // A harder blow never raises fewer puffs.
+        let harder = wall_break(12.0);
+        let mut loud = wall_look(Tier::Comfort, &harder);
+        play(&mut loud, &harder, BREAK_TICK);
+        assert!(loud.take_dust().expect("the harder break puffs").puffs >= dust.puffs);
+
+        // Chunks freed with no snapped bond (a collapse) still raise the base cloud.
+        let freed: Vec<BreakEvent> = wall
+            .events
+            .iter()
+            .filter(|e| matches!(e, BreakEvent::ChunkFreed { .. }))
+            .copied()
+            .collect();
+        let mut collapse = wall_look(Tier::Comfort, &wall);
+        collapse.observe(BREAK_TICK, &freed).expect("collapse tick");
+        let collapse = collapse.take_dust().expect("a collapse raises dust too");
+        assert!(
+            collapse.puffs > 0 && collapse.puffs <= dust.puffs,
+            "{collapse:?}"
+        );
+
+        // The puff count: two per piece, doubled at the cap, never over the budget.
+        assert_eq!(dust_puffs(0, 0.0), 0, "no pieces, no dust");
+        assert_eq!(dust_puffs(3, 0.0), 6, "a collapse is the base cloud");
+        assert_eq!(dust_puffs(3, MAX_KICK_MS), 12, "a full blow doubles it");
+        assert_eq!(dust_puffs(3, f32::NAN), 6, "a bad speed is no blow");
+        let many = usize::try_from(MAX_PUFFS_PER_BREAK).expect("the budget fits a usize");
+        assert_eq!(
+            dust_puffs(many, MAX_KICK_MS),
+            MAX_PUFFS_PER_BREAK,
+            "the per-event budget holds"
+        );
     }
 
     /// The same events on the same ticks give the same transforms; another blow does not.

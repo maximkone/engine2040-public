@@ -1014,6 +1014,8 @@ pub(crate) mod capture {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             });
         }
         let resident = presenter.mesh_keys();
@@ -1291,6 +1293,65 @@ pub(crate) mod capture {
             assert!(
                 text.contains("jump 1 line 0 hold 1 slew 0 stale 0"),
                 "names each flag: {text}"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod twin_fighter_tests {
+        use super::*;
+
+        /// RL26: the twin frame carries the staged fighter bodies into the
+        /// pixels. `frame_list` pushes one draw per resident body (the RL26
+        /// bind), and the same frame rendered with those draws removed differs,
+        /// so an 8-fighter twin capture can no longer be the old zero-pixel
+        /// cube frame. Before the bind `frame_list` pushed no body at all, so
+        /// the removal changed nothing and this test failed.
+        ///
+        /// Runs the offscreen twin on the reference GPU; a machine with no
+        /// adapter skips loudly, the same skip the twin smokes take.
+        #[test]
+        fn twin_fighters_reach_the_frame_pixels() {
+            let mut presenter = match Presenter::init_offscreen() {
+                Ok(presenter) => presenter,
+                Err(engine_render::present::PresentError::NoAdapter) => {
+                    eprintln!("SKIPPED twin_fighters_reach_the_frame_pixels: NoAdapter");
+                    return;
+                }
+                Err(err) => panic!("offscreen presenter: {err}"),
+            };
+            presenter
+                .resize(SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1)
+                .expect("twin resizes");
+            let key = MeshKey::new(1, [0xA1; 32]);
+            let _ = presenter.upload_mesh(key, &engine_render::v1::cube());
+            let _ = stage_dressing(&mut presenter);
+            let max = engine_render::twin_fighters::TWIN_FIGHTER_MAX;
+            let staged = engine_render::twin_fighters::stage_twin_fighters(&mut presenter, max)
+                .expect("fighter bodies stage");
+            assert_eq!(staged, 8, "one uploaded body per configured fighter slot");
+            let full = frame_list(&presenter, SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1, None, 0)
+                .expect("twin frame list builds");
+            let bodies: Vec<MeshKey> = (0..max)
+                .map(engine_render::twin_fighters::twin_fighter_key)
+                .collect();
+            let pushed = full
+                .items
+                .iter()
+                .filter(|item| bodies.contains(&item.mesh))
+                .count();
+            assert_eq!(pushed, 8, "`frame_list` pushes one draw per staged body");
+            let mut bare = full.clone();
+            bare.items.retain(|item| !bodies.contains(&item.mesh));
+            let with = presenter.render_offscreen(&full).expect("twin renders");
+            let without = presenter.render_offscreen(&bare).expect("twin renders");
+            assert!(with.manifest.is_clean(), "clean validation with fighters");
+            let (Some(with_png), Some(without_png)) = (with.png, without.png) else {
+                panic!("twin frame carried no bytes");
+            };
+            assert_ne!(
+                with_png, without_png,
+                "the staged fighter bodies change the twin pixels"
             );
         }
     }

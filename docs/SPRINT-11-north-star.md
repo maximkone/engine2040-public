@@ -26,10 +26,10 @@ Physics (extends PX1, BX4, BX12, DX5, BX13):
 
 Animation (extends AN1, AM2, TV1, PX4, LOC2, LMM1, PX1):
 
-- [ ] NS6 anim: full-body IK solve for carry and climb — spine plus limbs over Progress 2026-10-17: crates/anim/src/fbik.rs holds the reach, aim and grip full-body solve (reach_lands_inside_1cm_analytic_first, two_hand_grip_meets_at_the_weapon, steady_state_reuses_caller_buffers). Left: carry and climb fixtures over TV1 edges.
+- [x] NS6 anim: full-body IK solve for carry and climb — spine plus limbs over Progress 2026-10-17: crates/anim/src/fbik.rs holds the reach, aim and grip full-body solve (reach_lands_inside_1cm_analytic_first, two_hand_grip_meets_at_the_weapon, steady_state_reuses_caller_buffers). Left: carry and climb fixtures over TV1 edges.
   TV1 edges with balance (PX4) as the veto. Size M. Owns hunks beside
   `crates/anim/src/fbik.rs`. Accept: F2P carry fixture: hands on load, no
-  joint over its limit, x2; P2P golden unchanged. needs: TV1, PX4.
+  joint over its limit, x2; P2P golden unchanged. needs: TV1, PX4. Landed 8c8ba1f. carry_fixture_hands_on_load_and_within_limits green (cargo test -p engine-anim --lib carry_fixture, gh run 39183259521); full anim lib 446 passed (gh run 39183494005); golden d57b5c8ae3096614 unchanged (engine-proof golden_hash_untouched, gh run 39183496607).
 - [x] NS7 anim: motion-matching style and terrain dials — LM1 integer search
   over style-tagged and slope-tagged clips from the LOC2 bake. Size M. Owns
   hunks beside `crates/anim/src/motion_match.rs`. Accept: F2P style query
@@ -146,19 +146,39 @@ Rules (extends RC5, decision D2 in `FOCUS.md`):
   Accept: F2P `cargo test --release -p engine-rules --features arena --test arena_budget --
   --ignored` p99 at most 0.2 ms per tick on a quiet box (loops off or heavy queue idle); numbers
   in the row. needs: NS32a.
-- [ ] NS32d rules: second-PC replay of the scripted match — new test `arena_drive_hashes` in
+- [x] NS32d rules: second-PC replay of the scripted match - new test `arena_drive_hashes` in
   `crates/rules/tests/arena_drive.rs` plus `crates/rules/tests/data/arena_drive_hashes.txt`
   (seed 2040 and 7, 600 ticks, 2 fighters, half 12 m, slot 0 scripted: tick 599 hash per line;
   written once by an `#[ignore]` test `bless_arena_hashes`). Size S. Accept: F2P `cargo test -p
   engine-rules --features arena --test arena_drive arena_drive_hashes` equal on this PC and on a
   second PC; floats enter the arena hash, so a mismatch is a finding to write into
-  `docs/BLOCKERS.md`, not a test to loosen. needs: NS32a.
-- [ ] NS32e rules: scripted slot on a walled scene through the door — new test
+  `docs/BLOCKERS.md`, not a test to loosen. needs: NS32a. Landed 20789956.
+  `cargo test -p engine-rules --features arena --test arena_drive arena_drive_hashes -- --nocapture`
+  1 passed with both lines printed (run 39216183495): `2040 599 891ed62693a9c5dd` and
+  `7 599 9a442b4b06b34310`, blessed on this PC and matched byte for byte by a Linux x86_64 GitHub
+  runner, which is the row's second machine (a different OS, so the arena hash is machine-independent
+  across the two machines tested). `bless_arena_hashes` is the ignored writer and resolves the fixture
+  from `CARGO_MANIFEST_DIR`; every reported hash is computed twice before it is printed, so a drive
+  that does not repeat fails in the helper instead of printing a number, and the mismatch message
+  points at `docs/BLOCKERS.md` rather than inviting a looser bar. Whole target 8 passed, 1 ignored
+  (run 39216603655); rust-quality engine-rules PASS 99 (A); workspace-check PASS; no simulation code
+  changed, so the golden is untouched (test and fixture only).
+- [x] NS32e rules: scripted slot on a walled scene through the door — new test
   `rules_drive_on_a_walled_scene` in `crates/endpoint/tests/rules_door.rs` (copy `insert_wall`
   from `tests/scene_drives_match.rs`): `rules.set`, one 2 m wall, `play.run` with `scene_rev`.
   Size S. Accept: F2P `cargo test -p engine-endpoint --features rules --test rules_door
   rules_drive_on_a_walled_scene` the scripted walled run differs from the plain walled run, equal
-  x2, no fighter inside the wall in 18 of 20 seeds. needs: NS32b.
+  x2, no fighter inside the wall in 18 of 20 seeds. needs: NS32b. Landed 5115a24.
+  `rules_drive_on_a_walled_scene` in the endpoint `it` binary
+  (`crates/endpoint/tests/it/rules_door.rs` — the module already existed, so no new
+  test binary): a revision-2 document with the marker node and one 2 m x 0.4 m x 2 m
+  wall, `rules.set` of the shield bash on slot 0, `play.run` with `scene_rev`: the
+  scripted walled run differs from the plain walled run and its 600 checkpoints
+  repeat on the same seed. The wall leg drives the same controller hook the door
+  installs (`engine_rules::arena::RulesController` over `SpineMatch::with_controller`)
+  for 20 seeds: 18 of 20 fights never put a fighter inside the wall (the assert is the
+  bar). `cargo test -p engine-endpoint --features rules --test it rules_door::` 3 passed,
+  gh run 39179264813; rust-quality scoped to the file PASS; workspace-check PASS.
 
 Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask for.
 

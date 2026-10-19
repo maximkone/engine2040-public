@@ -77,6 +77,22 @@ export function pickNext(ready, done, opts = {}) {
   return pool.find((id) => !done.has(id) && (!re || re.test(id))) ?? null;
 }
 
+/**
+ * What one row's session did. A ticked row wins. A spawn failure or nonzero
+ * exit is `model-error` (the loop backs off after three in a row). A session
+ * the `--minutes` clock killed without touching its row is `timeout`: a slow
+ * row, not a broken model, so it never counts toward that backoff. A row whose
+ * text did change reads `progress`, even when the clock killed the session
+ * after the edit.
+ */
+export function classifyRun({ ticked = false, changed = false, timedOut = false, failed = false }) {
+  if (ticked) return "ticked";
+  if (failed) return "model-error";
+  if (timedOut && !changed) return "timeout";
+  if (changed) return "progress";
+  return "unchanged";
+}
+
 /** The one prompt a session gets: the row and the fixed rules, nothing else to decide. */
 export function buildPrompt(id, slice, today) {
   return [
@@ -161,14 +177,17 @@ function main() {
   }
   mkdirSync(OUT, { recursive: true });
   const attempts = loadLedger();
-  const done = new Set(o.retry ? [] : attempts.filter((a) => a.outcome !== "model-error").map((a) => a.id));
+  const done = new Set(o.retry ? [] : attempts.filter((a) => a.outcome !== "model-error" && a.outcome !== "timeout").map((a) => a.id));
+  // Rows this run burned the clock on: skipped for the rest of the run, so a
+  // slow row cannot be picked twice, but left for a later run to retry.
+  const burned = new Set();
   let tried = 0;
   let reds = 0;
   let modelErrors = 0;
   while (tried < o.max) {
     if (existsSync(STOP)) { console.log("nonstop: STOP file found, stopping"); break; }
     if (!o.dry) spawnSync("git", ["pull", "--no-rebase", "--no-edit", "origin", "master"], { cwd: ROOT, encoding: "utf8" });
-    const id = pickNext(readyIds(), done, o);
+    const id = pickNext(readyIds(), new Set([...done, ...burned]), o);
     if (!id) { console.log("nonstop: no candidate row left"); break; }
     const before = rowSlice(id);
     const prompt = buildPrompt(id, before, today());
@@ -182,8 +201,9 @@ function main() {
     writeFileSync(join(OUT, `${id}.log`), log);
     const after = rowSlice(id);
     const ticked = rowLine(after).startsWith("- [x]");
-    let outcome = ticked ? "ticked" : after !== before ? "progress" : "unchanged";
-    if (run.error || run.status !== 0) outcome = "model-error";
+    const timedOut = run.error?.code === "ETIMEDOUT";
+    const failed = !timedOut && (Boolean(run.error) || run.status !== 0);
+    const outcome = classifyRun({ ticked, changed: after !== before, timedOut, failed });
     modelErrors = outcome === "model-error" ? modelErrors + 1 : 0;
     const check = node([join(HERE, "workspace-check.mjs")]);
     const green = check.status === 0;
@@ -191,7 +211,8 @@ function main() {
     const last = log.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
     const entry = { id, outcome, treeGreen: green, minutes: Math.round((Date.now() - t0) / 6000) / 10, last: last.slice(0, 200), at: new Date().toISOString() };
     appendFileSync(LEDGER, `${JSON.stringify(entry)}\n`);
-    done.add(id);
+    if (outcome === "timeout") burned.add(id);
+    else done.add(id);
     tried += 1;
     console.log(`nonstop:     ${outcome}, tree ${green ? "green" : "RED"}, ${entry.minutes} min, ${entry.last}`);
     if (reds >= 2) { console.log("nonstop: tree red twice in a row, stopping. Fix it, then run again."); break; }
@@ -199,7 +220,8 @@ function main() {
   }
   const all = loadLedger();
   const count = (k) => all.filter((a) => a.outcome === k).length;
-  console.log(`nonstop: ledger ${all.length} rows: ${count("ticked")} ticked, ${count("progress")} progress, ${count("unchanged")} unchanged, ${count("model-error")} model errors`);
+  const timeouts = count("timeout") ? `, ${count("timeout")} timeout(s)` : "";
+  console.log(`nonstop: ledger ${all.length} rows: ${count("ticked")} ticked, ${count("progress")} progress, ${count("unchanged")} unchanged, ${count("model-error")} model errors${timeouts}`);
   return 0;
 }
 

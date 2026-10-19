@@ -1345,6 +1345,10 @@ pub fn push_kit_draws(
             // The draw's material set: the forward pass maps the normal and
             // scales roughness, metallic and ambient occlusion by its ORM.
             normal_map: draw.normal_map,
+            // NS31b2 slots: the kit imports no ORM or emissive map yet, so
+            // both bind the fallbacks.
+            orm: None,
+            emissive: None,
         });
         pushed += 1;
     }
@@ -2009,6 +2013,8 @@ mod tests {
                 material: draw.material.clone(),
                 base_color: if textured { draw.base_color } else { None },
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         };
         let out = presenter

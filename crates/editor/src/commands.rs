@@ -1218,7 +1218,7 @@ fn apply_one(
         Op::Insert { id, parent, local } => stage_insert(tree, op, *id, *parent, *local),
         Op::Remove { id } => stage_remove(tree, materials, components, op, *id),
         Op::SetComponent { id, component } => {
-            stage_set_component(tree, components, *id, component.clone())
+            stage_set_component(tree, components, *id, *component)
         }
         Op::RemoveComponent { id, kind } => stage_remove_component(tree, components, *id, *kind),
         Op::SetLocal { id, local } => stage_set_local(tree, op, *id, *local),
@@ -1443,7 +1443,7 @@ fn stage_remove_last_material(
 ) -> Result<(Vec<Op>, String), BatchError> {
     let removed = material_set
         .remove_last()
-        .ok_or(BatchError::BadMaterialRecord {
+        .ok_or_else(|| BatchError::BadMaterialRecord {
             path: "$".to_string(),
             detail: "material table is empty; nothing to remove".to_string(),
         })?;

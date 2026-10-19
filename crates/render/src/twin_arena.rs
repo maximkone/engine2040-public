@@ -190,6 +190,8 @@ pub fn push_twin_arena(
             material: material.clone(),
             base_color: None,
             normal_map: None,
+            orm: None,
+            emissive: None,
         });
         pushed += 1;
     }
@@ -257,6 +259,8 @@ pub fn push_twin_arena_textured(
             material: material.clone(),
             base_color: *base_color,
             normal_map: None,
+            orm: None,
+            emissive: None,
         });
         pushed += 1;
     }
@@ -349,6 +353,8 @@ mod tests {
             material: scene.material,
             base_color: None,
             normal_map: None,
+            orm: None,
+            emissive: None,
         });
         list
     }

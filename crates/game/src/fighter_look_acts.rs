@@ -230,6 +230,9 @@ impl FighterLook {
         // View-only trail feed (LF14): age once, push attacking slots and
         // clear the rest. Presentation only, never the sim hash.
         self.feed_trails();
+        // RZ7: lay and step each seen slot's cape on this tick's pose. Never
+        // hashed; the sim never reads a cape.
+        self.cape_tick();
     }
 
     /// Shift each seen slot's position (previous, current) for the frame lerp.
@@ -538,6 +541,8 @@ mod tests {
             uploaded_digest: crate::fighter_look::empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: crate::fighter_look::ragdoll_look::RagdollLook::empty(),
+            limbs: crate::fighter_look::limb_look::LimbLook::empty(),
+            capes: crate::fighter_look::Capes::empty(),
             hero: 0,
         }
     }

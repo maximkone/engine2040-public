@@ -114,7 +114,7 @@ action or line, so replays reproduce without a provider.
   Accept: 30 staged captures, +open-vocab tags with gold
   precision/recall posted, 0 auto-applies, bytes x2. needs: SP22.
   (Pillar reader wave 57 Card 4.)
-- [ ] SP67 spatial: tiny offline embedding model for scene queries, a spike (EB-2026-10-09-S113;
+- [x] SP67 spatial: tiny offline embedding model for scene queries, a spike (EB-2026-10-09-S113;
   donor candidates in inbox item S130: MiniLM-L6-v2 Apache Q8 about 40 MB, tokenizers Apache,
   instant-distance MIT, candle MIT or Apache). Under 50 MB, no key, weights kept out of git, vocab
   wired, ms per query printed; killed with numbers if over budget. Diff: hard. Tier C. Size M. Owns
@@ -122,16 +122,22 @@ action or line, so replays reproduce without a provider.
   --lib embed` green x2 with scene queries answered offline inside the ms budget, the vocab hash gate
   holding, and no weights file in `git ls-files`. F2P: no embed module exists today. P2P: golden
   `d57b5c8ae3096614` x2 (the tick never sees a vector); `cargo test -p engine-spatial --lib` green.
-  needs: none.
-- [ ] SP68 spatial: quantized spatial runtime for nav and place queries, a spike
+  needs: none. Landed 99d55be. `cargo test -p engine-spatial --lib embed` green x2 (gh runs
+  39180980802, 39181335425): 14/14 top-1 on the 11 real kit node names (1000 permille) against 714
+  permille for the exact-word baseline, 2 us/query inside the 1000 us budget, model 762 bytes inside
+  the 50 MB ceiling, vocab gate 0x5185acc6789857c0 holding, no weights file in `git ls-files`;
+  clippy --all-targets -D warnings green 39180977050; `cargo test -p engine-spatial --lib` green
+  39181330755 (391 passed, 21 ignored); golden d57b5c8ae3096614 x2 unchanged (39181121900,
+  39181122020).
+- [x] SP68 spatial: quantized spatial runtime for nav and place queries, a spike
   (EB-2026-10-09-S114; donor candidates in inbox item S130: recast Zlib shapes, tract convert-dep).
   Under 20 MB, advisory only, offline, the tick never sees a float. Diff: hard. Tier C. Size M. Owns
   `crates/spatial/src/place.rs`, `crates/nav/src/quant.rs`, `crates/nav/src/lib.rs`. Accept:
   `cargo test -p engine-nav --lib quant` and `cargo test -p engine-spatial --lib place` green x2;
   the quantized runtime size and the nav and place query results printed against the heuristic path.
   F2P: no quant module exists in crates/nav today. P2P: nav crowd tests green; golden
-  `d57b5c8ae3096614` x2. needs: none.
-- [ ] SP69 spatial: CPU sense verbs, text only so D7 is not touched (EB-2026-10-09-S118, Maxim yes).
+  `d57b5c8ae3096614` x2. needs: none. Landed 92e7992. `cargo test -p engine-nav --lib quant` and `cargo test -p engine-spatial --lib place` green x2 (gh 39183897118 and 39184212085; 39183630285 and 39183905868), `cargo test -p engine-nav --lib` 100 passed (39183905812), golden x2 (39184184188, 39184212222), clippy -D warnings (39183652041, 39183909747).
+- [x] SP69 spatial: CPU sense verbs, text only so D7 is not touched (EB-2026-10-09-S118, Maxim yes). Landed 44a45c59. cargo test -p engine-spatial --lib sense green x2 (gh 39185641886, 39186201601); cargo test -p engine-endpoint --lib scene_query 27 passed (gh 39186178688); --lib watch_ledger 8 passed (gh 39186201399); cargo test -p engine-endpoint --test it 57 passed 1 ignored; 50 seeded camera cases match an exact brute force 50 of 50 over 22,800 rays, 0.234 us per ray, 873 tokens; the four verbs are scene.query kinds view/lidar/map/pixel, same text twice; clippy -p engine-endpoint --all-targets -D warnings (gh 39188708713).
   From the index3 ray casts in sight.rs: sense.view(camera, w, h) is a run-length text picture, each
   cell an entity id plus a depth bucket; sense.lidar(origin, fan) is 72 distances plus ids;
   sense.map(center, radius) is a top-down text grid with legend, height and walkable cells;
@@ -442,14 +448,31 @@ action or line, so replays reproduce without a provider.
    needs: none. (ADV51.)
   Wave 52: TICK ae98ba8 (checker PASS; merged with ADV52a).
   LATER: parked 2026-10-03 (circus verdict 2: its own wave note says TICK with a commit that exists, but the box was never ticked, so builders re-verify finished work; the lead ticks it with its receipt); unpark by deleting this line.
-- [ ] ADV55c perf: seal parser migration onto engine-core, parser-only. Progress 2026-10-17: crates/core/src/seal_key.rs landed and playtest eval.rs plus seeded_bug.rs delegate to engine_core::parse_seal_key; left: proof a9.rs:427-457 still holds local decode_seal_hex, parse_seal_key and seal_key_error, and seal_key_reason was not added.
+- [x] ADV55c perf: seal parser migration onto engine-core, parser-only. Progress 2026-10-17: crates/core/src/seal_key.rs landed and playtest eval.rs plus seeded_bug.rs delegate to engine_core::parse_seal_key; left: proof a9.rs:427-457 still holds local decode_seal_hex, parse_seal_key and seal_key_error, and seal_key_reason was not added.
   Tier A. Size S. Owns `crates/core/src/seal_key.rs` (add `seal_key_reason`) +
   `crates/proof/src/a9.rs:410-457` + `crates/playtest/src/eval.rs:1324-1365`
   + `crates/playtest/src/seeded_bug.rs:160-205` hunks (delete local copies,
   delegate to the core owner; core stays std-only, zero new deps, off-tick
   parsing only; perf `seal_row` HMAC deferred). Accept: proof/playtest/perf
   forgery suites green + `node tools/rust-quality.mjs --crate engine-proof`
-  PASS (dup 0 on seal helpers) + golden x2 unchanged. needs: ADV55a.
+  PASS (dup 0 on seal helpers) + golden x2 unchanged. needs: ADV55a. Landed a89b11a.
+  `engine_core::seal_key::seal_key_reason(error, env)` is the one owner of the
+  remediation line ("key must be hex" / "key is too short" / "operator key is
+  missing", then `set <env> to 32 or more bytes as hex`). `crates/proof/src/a9.rs`
+  drops its local `decode_seal_hex` and `MIN_SEAL_KEY_BYTES` copy and delegates
+  `parse_seal_key`/`seal_key_from_env` to the core owner; `OPERATOR_KEY_ENV` stays
+  local and the HMAC-backend refusal keeps `seal_key_error`. Playtest already
+  delegated. Tests: `cargo test -p engine-proof --features seal --lib seal` 4 passed,
+  run 39180144120; `cargo test -p engine-playtest --lib seal` 9 passed, run
+  39180346107; `golden_hash_untouched` PASS x2, runs 39180715643 and 39180938654;
+  rust-quality engine-core + engine-proof PASS (no dup on the seal helpers);
+  `--list dup_fns --crate engine-proof` names only the bin `ragdoll_rows`/`arena_rows`
+  pair, which this row does not own. 2026-10-19 follow-up: `cargo clippy
+  --workspace --all-targets -- -D warnings` then found this landing left the
+  `decode_seal_hex` import and `seal_key_error` unused in a default build (both
+  are used only inside `#[cfg(feature = "seal")]` code); fixed in 6269235f with
+  the same gate as their callers, seal clippy PASS run 39188558290 and
+  `cargo test -p engine-proof --features seal --lib seal` 4 passed, run 39188949360.
 - [x] AQ2 arena-errors: derive `Eq` (+`Hash` where `Copy`) on Progress 2026-10-17: ForkError and DecodeError already derive Eq; ArenaError (integer variants only) still derives PartialEq without Eq and none of the three derive Hash.
   `ArenaError`/`ForkError`/`DecodeError` to match the combat error
   convention. Tier C. Size XS. Owns the three enum headers only.

@@ -24,12 +24,14 @@ use engine_anim::contract::{skinning_matrices, LocalPose, Skeleton};
 use engine_anim::hit_react::{envelope, DIP_M, PEAK_M};
 use engine_anim::inertial::Inertial;
 use engine_anim::pose::sample_pose_with_rots;
+use engine_arena::cloth::{Cloth, ClothCollider, ClothGrid, ClothParams, ClothTier};
 use engine_arena::GaitPhase;
 use engine_assets::body_import::{
     import_clip_source, import_skinned_body, ClipSource, SkinnedBody,
 };
 use engine_assets::retarget::{retarget_clip, BoneMap};
 use engine_assets::skin_import::ImportedClip;
+use engine_core::vec3::cross3;
 use engine_core::Fnv64;
 use engine_render::contact_feet::{ContactFoot, CONTACT_FEET_MAX};
 use engine_render::present::{DrawItem, DrawList, MeshKey, Presenter, TextureKey, TextureUpload};
@@ -96,6 +98,388 @@ pub use self::fighter_look_cam::CamFollow;
 mod ragdoll_look;
 
 use self::ragdoll_look::RagdollLook;
+
+/// Limb look (RZ3): an authority cut event hands the named joint's chain to the
+/// float physical layer and draws a stump cap where it left. Presentation only.
+#[path = "limb_look.rs"]
+mod limb_look;
+
+use self::limb_look::LimbLook;
+pub use self::limb_look::{limb_mesh_key, LimbCapture, LimbPose, StumpPose, LIMB_MESH_ID_BASE};
+
+/// The cape layer (RZ7): one CPU Verlet sheet per look slot, pinned at the
+/// shoulders of the shown pose and stepped once per accepted tick. The sheets
+/// come from `engine-physics`' cloth module through the `engine-arena` re-export
+/// above, so this lane cloths a fighter without a physics edge.
+///
+/// Consumer: [`FighterLook::observe_tick`] lays and steps a cape per seen slot
+/// each tick; [`FighterLook::present_into`] uploads the sheets and pushes one
+/// draw each. Data owner: this layer; the pose and the seen slots come from
+/// `fighter_look`. Units: meters, seconds, y up. Determinism: a cape is a pure
+/// fold of the tick's pose plus its own previous state, so the same ticks give
+/// the same sheet twice; the sim never reads one and nothing here is hashed, so
+/// the golden cannot move. Errors: a refused pose, tune or collider skips the
+/// slot's cape (no draw) instead of failing the frame.
+///
+/// Tune of every cape: the comfortable tier's sheet, light drag, no tearing.
+const CAPE_TIER: ClothTier = ClothTier::Comfort;
+/// Cape size in meters: width across the shoulder line, then the hang.
+const CAPE_SIZE_M: [f32; 2] = [0.5, 0.95];
+/// How far behind the shoulder line the cape's top row hangs, meters: the CT7
+/// shoulder joints sit slightly forward of the body's middle, so this clears
+/// the torso and hangs the sheet on the back.
+const CAPE_BACK_M: f32 = 0.28;
+/// Radius of the one-way body capsule a cape must keep clear, meters.
+const CAPE_BODY_RADIUS_M: f32 = 0.16;
+/// Fastest body speed, m/s, the cape's own airflow follows: a teleport or a
+/// respawn never blows a sheet across the arena.
+const CAPE_WIND_MAX_M_S: f32 = 12.0;
+/// Slowest body speed, m/s, that counts as running air: below it the cape's
+/// wind stays zero and a standing sheet stays asleep.
+const CAPE_WIND_MIN_M_S: f32 = 0.05;
+/// Deep red of the cape cloth.
+const CAPE_COLOR: [f32; 3] = [0.40, 0.06, 0.08];
+/// Roughness of the cape cloth.
+const CAPE_ROUGHNESS: f32 = 0.9;
+/// Mesh id base for cape draws (clear of the body-part, texture and limb keys).
+const CAPE_MESH_ID_BASE: u64 = 0xF16E_0000;
+
+/// Mesh key of one slot's cape.
+fn cape_mesh_key(slot: usize) -> MeshKey {
+    let id = CAPE_MESH_ID_BASE + u64::try_from(slot).unwrap_or(u64::MAX - CAPE_MESH_ID_BASE);
+    let mut digest = [0x5Du8; 32];
+    digest[0] = u8::try_from(slot).unwrap_or(u8::MAX);
+    MeshKey::new(id, digest)
+}
+
+/// A small particle index as a float, for a row fraction; cloth grids hold at
+/// most 32 particles per side, so nothing saturates.
+fn small_f32(n: usize) -> f32 {
+    f32::from(u16::try_from(n).unwrap_or(u16::MAX))
+}
+
+/// The CT7 joints one rig's cape pins and collides with.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct CapeJoints {
+    /// Left and right shoulder joints: the top row spans between them.
+    shoulders: [usize; 2],
+    /// Chest and pelvis joints: the one-way body capsule runs between them.
+    torso: [usize; 2],
+}
+
+impl CapeJoints {
+    /// The cape joints of a skeleton found by name; `None` when one is missing.
+    fn find(skeleton: &Skeleton) -> Option<Self> {
+        let at = |name: &str| skeleton.joints.iter().position(|joint| joint.name == name);
+        Some(Self {
+            shoulders: [at("arm_upper_l")?, at("arm_upper_r")?],
+            torso: [at("torso")?, at("pelvis")?],
+        })
+    }
+}
+
+/// The cape layer of a [`FighterLook`]: one Verlet sheet per look slot.
+struct Capes {
+    /// Per rig: the joints its capes pin to, `None` when the rig has none.
+    joints: Vec<Option<CapeJoints>>,
+    /// Per slot: the sheet, `None` before the slot is first seen.
+    sheets: Vec<Option<Cloth>>,
+    /// Per slot: the body's backward direction, the side a cape hangs on.
+    outward: [[f32; 3]; MAX_LOOK_FIGHTERS],
+    /// Top-row scratch, one pin point per column: no allocation per tick.
+    row: Vec<[f32; 3]>,
+    /// Slots the last tick laid a sheet on.
+    stepped: usize,
+    /// Cape keys uploaded for the last frame, one per drawn cape.
+    published: Vec<MeshKey>,
+}
+
+impl Capes {
+    /// The layer for `rigs`: the cape joints of every rig, cold.
+    fn for_rigs(rigs: &[Rig]) -> Self {
+        Self {
+            joints: rigs
+                .iter()
+                .map(|rig| CapeJoints::find(&rig.skeleton))
+                .collect(),
+            sheets: vec![None; MAX_LOOK_FIGHTERS],
+            outward: [[0.0, 0.0, -1.0]; MAX_LOOK_FIGHTERS],
+            row: Vec::new(),
+            stepped: 0,
+            published: Vec::new(),
+        }
+    }
+
+    /// A layer with no rigs: the tests' looks that draw no bodies.
+    #[cfg(test)]
+    fn empty() -> Self {
+        Self {
+            joints: Vec::new(),
+            sheets: vec![None; MAX_LOOK_FIGHTERS],
+            outward: [[0.0, 0.0, -1.0]; MAX_LOOK_FIGHTERS],
+            row: Vec::new(),
+            stepped: 0,
+            published: Vec::new(),
+        }
+    }
+}
+
+/// Model-space point `joint` in world meters under the slot's `root`.
+fn joint_world(world: &[[[f32; 4]; 4]], root: &[[f32; 4]; 4], joint: usize) -> [f32; 3] {
+    let m = mul(&world[joint], root);
+    [m[3][0], m[3][1], m[3][2]]
+}
+
+/// Write the cape's top row into `out`: `cols` points spanning `left` to
+/// `right`, every one moved by `back`. Pure; `out` is reused by the caller.
+fn cape_row_into(
+    out: &mut Vec<[f32; 3]>,
+    left: [f32; 3],
+    right: [f32; 3],
+    back: [f32; 3],
+    cols: usize,
+) {
+    out.clear();
+    let last = small_f32(cols.saturating_sub(1).max(1));
+    for c in 0..cols {
+        let t = small_f32(c) / last;
+        out.push([
+            left[0] + (right[0] - left[0]) * t + back[0],
+            left[1] + (right[1] - left[1]) * t + back[1],
+            left[2] + (right[2] - left[2]) * t + back[2],
+        ]);
+    }
+}
+
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// One unit normal of the cloth at vertex `(c, r)`, turned onto `outward`'s
+/// side so the cape's face points away from the body it hangs behind.
+fn cape_normal(
+    at: impl Fn(usize, usize) -> [f32; 3],
+    cols: usize,
+    rows: usize,
+    c: usize,
+    r: usize,
+    outward: [f32; 3],
+) -> [f32; 3] {
+    let right = sub3(at((c + 1).min(cols - 1), r), at(c.saturating_sub(1), r));
+    let down = sub3(at(c, (r + 1).min(rows - 1)), at(c, r.saturating_sub(1)));
+    let mut n = cross3(right, down);
+    let len2 = dot3(n, n);
+    if len2.is_finite() && len2 > 1e-12 {
+        let inv = 1.0 / len2.sqrt();
+        n = [n[0] * inv, n[1] * inv, n[2] * inv];
+    } else {
+        n = [0.0, 1.0, 0.0];
+    }
+    if dot3(n, outward) < 0.0 {
+        n = [-n[0], -n[1], -n[2]];
+    }
+    n
+}
+
+/// The cape's triangle mesh at its current positions: unit uvs over the grid,
+/// normals on `outward`'s side. Pure; the sheet is a `cols` by `rows` grid hung
+/// from its pinned top row.
+fn cape_mesh(cloth: &Cloth, grid: ClothGrid, outward: [f32; 3]) -> MeshData {
+    let (cols, rows) = (grid.cols, grid.rows);
+    let positions = cloth.positions().to_vec();
+    let at = |c: usize, r: usize| positions[r * cols + c];
+    let mut normals = Vec::with_capacity(positions.len());
+    let mut uvs = Vec::with_capacity(positions.len());
+    for r in 0..rows {
+        for c in 0..cols {
+            normals.push(cape_normal(at, cols, rows, c, r, outward));
+            uvs.push([
+                small_f32(c) / small_f32(cols - 1),
+                small_f32(r) / small_f32(rows - 1),
+            ]);
+        }
+    }
+    let mut indices = Vec::with_capacity((cols - 1) * (rows - 1) * 6);
+    for r in 0..rows - 1 {
+        for c in 0..cols - 1 {
+            let a = u32::try_from(r * cols + c).unwrap_or(u32::MAX);
+            let b = a + 1;
+            let d = a + u32::try_from(cols).unwrap_or(u32::MAX);
+            let e = d + 1;
+            indices.extend_from_slice(&[a, b, d, b, e, d]);
+        }
+    }
+    MeshData {
+        positions,
+        normals,
+        uvs,
+        indices,
+        tangents: Vec::new(),
+    }
+}
+
+impl FighterLook {
+    /// Lay and step every seen slot's cape on the pose of the tick just folded.
+    /// Call it once per accepted tick, after the act fold (`observe_tick`).
+    /// Presentation only; the sim never reads a cape.
+    fn cape_tick(&mut self) {
+        self.capes.stepped = 0;
+        for slot in 0..MAX_LOOK_FIGHTERS {
+            self.cape_slot(slot);
+        }
+    }
+
+    /// One slot's cape for this tick: build the sheet on first sight, pin its
+    /// top row to the shoulders and step it once. An unseen slot, a rig with no
+    /// cape joints, a refused pose or a refused collider leaves no cape.
+    fn cape_slot(&mut self, slot: usize) {
+        let anim = self.slots[slot];
+        if !anim.seen {
+            self.capes.sheets[slot] = None;
+            return;
+        }
+        let rig_index = self.rig_for_slot(slot);
+        let Some(joints) = self.capes.joints.get(rig_index).copied().flatten() else {
+            return;
+        };
+        let sample = {
+            let rig = &self.rigs[rig_index];
+            self.slot_sample(rig, slot, &anim, 1.0)
+        };
+        let Ok(sample) = sample else {
+            return;
+        };
+        let left = joint_world(&sample.world, &sample.root, joints.shoulders[0]);
+        let right = joint_world(&sample.world, &sample.root, joints.shoulders[1]);
+        let (s, c) = sample.yaw.sin_cos();
+        // The body faces `(sin yaw, 0, cos yaw)`; the cape hangs on the other side.
+        let back = [-s * CAPE_BACK_M, 0.0, -c * CAPE_BACK_M];
+        let grid = CAPE_TIER.knobs().cape;
+        cape_row_into(&mut self.capes.row, left, right, back, grid.cols);
+        let mid = self.capes.row[grid.cols / 2];
+        if self.capes.sheets[slot].is_none() {
+            let params = ClothParams::for_tier(CAPE_TIER);
+            match Cloth::new(grid, CAPE_SIZE_M, mid, params) {
+                Ok(sheet) => self.capes.sheets[slot] = Some(sheet),
+                Err(_) => return,
+            }
+        }
+        let body = ClothCollider::capsule(
+            joint_world(&sample.world, &sample.root, joints.torso[1]),
+            joint_world(&sample.world, &sample.root, joints.torso[0]),
+            CAPE_BODY_RADIUS_M,
+        );
+        let row = std::mem::take(&mut self.capes.row);
+        let Some(sheet) = self.capes.sheets[slot].as_mut() else {
+            self.capes.row = row;
+            return;
+        };
+        let pinned = sheet.pin_top_row(&row).is_ok();
+        self.capes.row = row;
+        if pinned {
+            // The air a running fighter moves through: the body's own wind,
+            // backward at its speed, so the cape streams behind it. Standing
+            // still gives zero wind and the sheet stays asleep. Presentation
+            // only; the speed is the tick's recorded travel, never the hash.
+            let (dx, dz) = (
+                anim.pos[0] - anim.prev_pos[0],
+                anim.pos[2] - anim.prev_pos[2],
+            );
+            let speed = (dx * dx + dz * dz).sqrt() * TICK_HZ;
+            let wind = if speed.is_finite() && speed > CAPE_WIND_MIN_M_S {
+                let speed = speed.min(CAPE_WIND_MAX_M_S);
+                [-s * speed, 0.0, -c * speed]
+            } else {
+                [0.0; 3]
+            };
+            if sheet.set_wind(wind).is_err() {
+                return;
+            }
+            // One 60 Hz Verlet step, the tick the pose belongs to. A refused
+            // body capsule steps the sheet with nothing to clear.
+            match body {
+                Ok(body) => {
+                    sheet.step(&[body]);
+                }
+                Err(_) => {
+                    sheet.step(&[]);
+                }
+            }
+            self.capes.outward[slot] = [-s, 0.0, -c];
+            self.capes.stepped += 1;
+        }
+    }
+
+    /// Upload the cape mesh of every seen slot that has a sheet, so
+    /// [`Self::push_cape_draws`] can draw it. Called from `stage_bodies`.
+    fn publish_capes(&mut self, presenter: &mut Presenter) {
+        self.capes.published.clear();
+        let grid = CAPE_TIER.knobs().cape;
+        for slot in 0..MAX_LOOK_FIGHTERS {
+            if !self.slots[slot].seen {
+                continue;
+            }
+            let Some(sheet) = self.capes.sheets[slot].as_ref() else {
+                continue;
+            };
+            let key = cape_mesh_key(slot);
+            let mesh = cape_mesh(sheet, grid, self.capes.outward[slot]);
+            if presenter.upload_mesh(key, &mesh).is_ok() {
+                self.capes.published.push(key);
+            }
+        }
+    }
+
+    /// Push one cloth draw per cape mesh this frame published. Returns draws. A
+    /// key the presenter does not hold draws nothing, so a failed publish never
+    /// fails the frame.
+    fn push_cape_draws(&self, list: &mut DrawList, resident: &[MeshKey]) -> usize {
+        let material = PbrMaterial {
+            base_color: CAPE_COLOR,
+            metallic: 0.0,
+            roughness: CAPE_ROUGHNESS,
+            exposure: 1.0,
+        };
+        let mut pushed = 0usize;
+        for key in &self.capes.published {
+            if !resident.contains(key) {
+                continue;
+            }
+            list.items.push(DrawItem {
+                mesh: *key,
+                material: material.clone(),
+                base_color: None,
+                normal_map: None,
+                orm: None,
+                emissive: None,
+            });
+            pushed += 1;
+        }
+        pushed
+    }
+
+    /// Seen fighters the last tick wore a cape for, and the capes the last
+    /// frame drew: the receipt pair a capture reports.
+    #[must_use]
+    pub fn capes(&self) -> (usize, usize) {
+        (self.capes.stepped, self.capes.published.len())
+    }
+
+    /// The cape sheet of `slot` at its current particle positions, or `None`
+    /// when that slot has none: the capture and the tests read it.
+    #[must_use]
+    pub fn cape_positions(&self, slot: usize) -> Option<&[[f32; 3]]> {
+        self.capes
+            .sheets
+            .get(slot)
+            .and_then(|sheet| sheet.as_ref())
+            .map(Cloth::positions)
+    }
+}
 
 /// Mesh id base for skinned body parts (clear of the cube, dressing, kit
 /// and staged-box keys): `base + slot * 16 + part`.
@@ -952,6 +1336,14 @@ pub struct FighterLook {
     /// The ragdoll layer (RZ2w): one float world, a body per floored slot. Presentation only;
     /// the sim never reads it and nothing in it is hashed.
     ragdoll: RagdollLook,
+    /// The limb layer (RZ3): one float world, a body per authority cut, plus the
+    /// stump caps and the blood the gore level allows. Presentation only; the sim
+    /// never reads it and nothing in it is hashed.
+    limbs: LimbLook,
+    /// The cape layer (RZ7): one CPU Verlet sheet per seen slot, pinned at the
+    /// shoulders. Presentation only; the sim never reads it and nothing in it is
+    /// hashed.
+    capes: Capes,
     /// The slot the fight camera rides behind: the window's human (0, or 1 for
     /// a network guest). View only.
     hero: usize,
@@ -1386,6 +1778,7 @@ impl FighterLook {
         }
         let inertia = fighter_look_inertia::slot_sets(&rigs)?;
         let ragdoll = Self::ragdoll_for_rigs(&rigs);
+        let capes = Capes::for_rigs(&rigs);
         Ok(Self {
             rigs,
             ring: None,
@@ -1400,6 +1793,8 @@ impl FighterLook {
             uploaded_digest: empty_upload_digest(),
             inertia,
             ragdoll,
+            limbs: LimbLook::new(),
+            capes,
             hero: 0,
         })
     }
@@ -1835,11 +2230,11 @@ impl FighterLook {
             body.foot_slide_m = sample.slides;
             body.ragdolled = self.ragdolled(slot_index);
             let mut frames = Vec::with_capacity(rig.parts.len());
+            let owner = self.limb_owner(slot_index, rig);
             for part in rig.parts.iter() {
-                let posed = rig
-                    .pipe
-                    .render_skinned(&part.mesh, Some(&part.skin), &uniform)
-                    .map_err(|err| LookError::Skin(format!("{err:?}")))?;
+                // RZ3: a part on a stumped slot draws with the leaving chain's
+                // vertices collapsed onto its stump, so the limb leaves the body.
+                let posed = self.skin_part(rig, part, owner.as_deref(), &uniform)?;
                 body.fold_vertices(&posed.positions);
                 if posed.used_error_material {
                     body.error_parts = body.error_parts.saturating_add(1);
@@ -2022,6 +2417,11 @@ impl FighterLook {
         // upload, so every existing caller poses and draws exactly as before.
         let pose_started = Instant::now();
         let posed = self.pose_frame(fighters, alpha)?;
+        // RZ3: bake this frame's fallen limbs and stump caps into resident keys
+        // before anything reads the resident list below.
+        self.publish_limbs(presenter, alpha);
+        // RZ7: upload each seen slot's cape sheet for this frame.
+        self.publish_capes(presenter);
         let mut split = SkinSplit {
             uploaded: 0,
             pose_us: micros(pose_started.elapsed()),
@@ -2053,7 +2453,26 @@ impl FighterLook {
             // above then only fed its bounds. Any other body re-uploads its
             // posed vertices.
             let parts = if slot_is_gpu_skinned(presenter, slot_index, rig) {
-                write_slot_skin(presenter, slot_index, rig.parts.len(), &body.matrices)?
+                // A stumped slot draws from the collapsed CPU vertices, not from
+                // the joint block: drop the skin block so the presenter draws the
+                // mesh the upload below writes.
+                if self.limbs.stumped(slot_index) {
+                    for (part_index, part) in rig.parts.iter().enumerate() {
+                        presenter
+                            .upload_mesh(look_mesh_key(slot_index, part_index), &part.mesh)
+                            .map_err(|err| LookError::Upload(err.to_string()))?;
+                    }
+                    upload_slot_parts(
+                        presenter,
+                        slot_index,
+                        rig,
+                        body.frames,
+                        body.lift,
+                        &mut self.uploaded_digest,
+                    )?
+                } else {
+                    write_slot_skin(presenter, slot_index, rig.parts.len(), &body.matrices)?
+                }
             } else {
                 upload_slot_parts(
                     presenter,
@@ -2111,6 +2530,8 @@ impl FighterLook {
                     material,
                     base_color: part.texture.as_ref().map(|(key, _)| *key),
                     normal_map: None,
+                    orm: None,
+                    emissive: None,
                 });
                 pushed += 1;
             }
@@ -2165,6 +2586,8 @@ impl FighterLook {
             ring.push_draws(list, &resident);
         }
         let draws = self.push_draws(list, &resident, frame.fighters);
+        let draws = draws + self.push_limb_draws(list, &resident);
+        let draws = draws + self.push_cape_draws(list, &resident);
         if draws > 0 {
             list.camera = self.fight_camera(&list.camera, frame.shot, frame.fighters, frame.frame);
         }
@@ -2499,6 +2922,8 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            limbs: LimbLook::empty(),
+            capes: Capes::empty(),
             hero: 0,
         }
     }
@@ -2566,6 +2991,8 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            limbs: LimbLook::empty(),
+            capes: Capes::empty(),
             hero: 0,
         };
         let base = Camera::new(
@@ -2835,6 +3262,8 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            limbs: LimbLook::empty(),
+            capes: Capes::empty(),
             hero: 0,
         };
         let base = Camera::new(
@@ -3083,6 +3512,8 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            limbs: LimbLook::empty(),
+            capes: Capes::empty(),
             hero: 0,
         }
     }
@@ -5286,6 +5717,8 @@ mod tests {
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
             ragdoll: RagdollLook::empty(),
+            limbs: LimbLook::empty(),
+            capes: Capes::empty(),
             hero: 0,
         };
         assert_eq!(
@@ -5371,5 +5804,143 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Two views: slot 0 at `z` with the rival straight ahead at +Z 40 m, so
+    /// the fighter faces the way it runs and slot 1 stands still.
+    fn cape_views(z: f32) -> [FighterView; 2] {
+        [view(0, 0.0, z), view(1, 0.0, 40.0)]
+    }
+
+    /// World point `p` in a slot's own frame (the yaw turn undone, the root at
+    /// the origin): the cape trails behind when this z goes negative.
+    fn cape_body_local(p: [f32; 3], pos: [f32; 3], yaw: f32) -> [f32; 3] {
+        let d = sub3(p, pos);
+        let (s, c) = yaw.sin_cos();
+        [d[0] * c - d[2] * s, d[1], d[0] * s + d[2] * c]
+    }
+
+    /// The body-frame hem of a slot's cape.
+    fn cape_hem_local(look: &FighterLook, slot: usize) -> [f32; 3] {
+        let sheet = look
+            .cape_positions(slot)
+            .unwrap_or_else(|| panic!("slot {slot} wears a cape"));
+        let at = look.slots[slot];
+        cape_body_local(sheet[sheet.len() - 1], at.pos, at.yaw)
+    }
+
+    #[test]
+    fn capes_pin_to_the_shoulders_and_trail_a_running_fighter() {
+        // RZ7 accept: a cape is pinned at each fighter's shoulders, hangs behind
+        // the body and swings while the fighter runs. Presentation only: nothing
+        // here reads or writes sim state.
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let grid = CAPE_TIER.knobs().cape;
+        let hp = [1000u16; 2];
+        // Stand still two seconds: the sheet settles at rest and sleeps.
+        for tick in 0..120u32 {
+            look.observe_tick(tick, &cape_views(0.0), &hp, &[]);
+        }
+        assert_eq!(look.capes().0, 2, "one cape per seen fighter");
+        let sheet = look.capes.sheets[0].as_ref().expect("slot 0 cape");
+        assert_eq!(sheet.pinned_count(), grid.cols, "the top row stays pinned");
+        assert!(
+            sheet.positions().iter().flatten().all(|v| v.is_finite()),
+            "the resting cape is finite"
+        );
+        let hem = sheet.positions()[sheet.particle_count() - 1];
+        let top_mid = sheet.positions()[grid.cols / 2];
+        assert!(
+            top_mid[1] - hem[1] > 0.5,
+            "the hem hangs under the shoulder row: {top_mid:?} to {hem:?}"
+        );
+        let rest = cape_hem_local(&look, 0);
+        assert!(rest[1] < 0.8, "the hem hangs low in the body: {rest:?}");
+        assert!(rest[2] < -0.1, "the cape hangs behind the body: {rest:?}");
+        // Run 3 m/s along +Z for 90 ticks (1.5 s, 4.5 m).
+        let mut z = 0.0f32;
+        for tick in 120..210u32 {
+            look.observe_tick(tick, &cape_views(z), &hp, &[]);
+            z += 3.0 / TICK_HZ;
+        }
+        let sheet = look.capes.sheets[0].as_ref().expect("slot 0 cape");
+        let hem = sheet.positions()[sheet.particle_count() - 1];
+        let top_mid = sheet.positions()[grid.cols / 2];
+        let running = cape_hem_local(&look, 0);
+        assert!(
+            running.iter().all(|v| v.is_finite()),
+            "the running cape is finite: {running:?}"
+        );
+        assert!(
+            top_mid[1] - hem[1] > 0.4,
+            "the hem keeps hanging while the fighter runs: {top_mid:?} to {hem:?}"
+        );
+        assert!(
+            running[2] < -0.3,
+            "the cape trails the running body: {running:?}"
+        );
+        let d = sub3(running, rest);
+        let moved = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        println!("cape: rest hem {rest:?}, running hem {running:?}, moved {moved:.3} m");
+        assert!(
+            moved > 0.15,
+            "the cape moves with the run: rest {rest:?}, running {running:?}"
+        );
+    }
+
+    #[test]
+    fn cape_mesh_covers_the_grid_with_unit_normals_and_unit_uvs() {
+        // The drawn sheet: one vertex per particle, two triangles per cell,
+        // outward unit normals and unit uvs. The renderer revalidates it.
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        look.observe_tick(0, &cape_views(0.0), &[1000, 1000], &[]);
+        let grid = CAPE_TIER.knobs().cape;
+        let sheet = look.capes.sheets[0].as_ref().expect("slot 0 cape");
+        let mesh = cape_mesh(sheet, grid, look.capes.outward[0]);
+        assert_eq!(mesh.positions.len(), grid.particles());
+        assert_eq!(mesh.normals.len(), grid.particles());
+        assert_eq!(mesh.indices.len(), (grid.cols - 1) * (grid.rows - 1) * 6);
+        assert_eq!(mesh.uvs.len(), grid.particles());
+        for n in &mesh.normals {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-4, "unit normal, got {n:?}");
+        }
+        assert!(mesh.uvs.iter().flatten().all(|u| (0.0..=1.0).contains(u)));
+        v1::upload_mesh(&mesh.positions, &mesh.normals, &mesh.uvs, &mesh.indices)
+            .expect("the cape mesh validates");
+    }
+
+    #[test]
+    fn capes_never_reach_the_authority_checkpoints() {
+        // P2P: the cape layer is presentation only. Two identical 8-fighter
+        // bouts, one with the capes stepped and one with the cape joints
+        // cleared, take the same checkpoint bytes: the cloth is never hashed.
+        let run = |capes: bool| {
+            let config = crate::GameConfig {
+                seed: 2040,
+                ticks: 180,
+                fighters: 8,
+                half_extent_m: 20.0,
+            };
+            let mut app =
+                crate::App::with_world(config, crate::arena_kit::kit_match_world_or_empty())
+                    .and_then(crate::App::into_duel)
+                    .expect("arena session builds");
+            let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+            if !capes {
+                look.capes.joints.clear();
+            }
+            for tick in 0..180u32 {
+                let out = app.tick_empty();
+                look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
+            }
+            (app.checkpoints().to_vec(), look.capes().0)
+        };
+        let (with_capes, stepped) = run(true);
+        let (without, none) = run(false);
+        assert!(!with_capes.is_empty(), "the bout took checkpoints");
+        assert_eq!(stepped, 8, "eight capes step in a full bout");
+        assert_eq!(none, 0, "no cape joints, no cape");
+        assert_eq!(with_capes, without, "the cape layer never moves the sim");
     }
 }

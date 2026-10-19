@@ -324,9 +324,12 @@ fn tool_list_headroom_holds_with_the_cone_op() {
     // 2026-10-18: SPR6 `blocked_by` and SPX3 `spatial_delta` raised the bound 45_500 -> 47_500.
     // 2026-10-18 (backlog wave 2): five query kinds, role triage and verdict rows: 47_500 -> 48_500.
     // 2026-10-18 (endpoint wave): `scene.pick` took the default list to 50.9k: bound 48_500 -> 51_500.
+    // 2026-10-19 (SP69): the four sense text kinds and the `cells` box (on top
+    // of the drift since the 50.9k reading) took the default list to 52_756:
+    // bound 51_500 -> 53_000.
     assert!(
-        ledger.total_chars < 51_500,
-        "default list {} stays under the 2026-10-18 spatial-lane bound",
+        ledger.total_chars < 53_000,
+        "default list {} stays under the 2026-10-19 spatial-lane bound",
         ledger.total_chars
     );
 }

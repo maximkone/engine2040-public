@@ -276,6 +276,27 @@ fn window_audio_space_walking_fighters_step_on_the_surface_cue() {
     assert_eq!(space.stats().footsteps as usize, seen.len());
 }
 
+#[test]
+fn window_audio_space_a_break_plays_where_the_blow_landed() {
+    let (mut tx, mut rx) = feed(64, bank());
+    let mut space = AudioSpace::with_parts(SpaceParts::EVENTS_ONLY);
+    space.feed_break(&mut tx, 7, cue_names::IMPACT_STONE, 0.8, [1.5, 0.5, -2.0]);
+    let mut plays = Vec::new();
+    while let Some(cmd) = rx.pop() {
+        if let Command::Play(play) = cmd {
+            plays.push(play);
+        }
+    }
+    assert_eq!(plays.len(), 1, "one write per break");
+    assert_eq!(plays[0].pos_cm, Some([150, 50, -200]), "meters become cm");
+    assert_eq!(space.stats().breaks, 1);
+    // A bank without the sample counts the refusal instead of dropping it.
+    let (mut bare_tx, _bare_rx) = feed(64, hit_only_bank());
+    space.feed_break(&mut bare_tx, 8, cue_names::IMPACT_STONE, 1.0, [0.0; 3]);
+    assert_eq!(space.stats().breaks, 2, "asked twice");
+    assert_eq!(space.stats().unknown_cue, 1, "the bank lacks the sample");
+}
+
 /// A bank with only the hit cue: everything else is a missing clip.
 fn hit_only_bank() -> Arc<CueBank> {
     let cue = Cue {

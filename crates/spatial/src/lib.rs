@@ -5,6 +5,8 @@ pub mod brief;
 mod checks;
 pub mod compose;
 pub mod diff;
+/// Tiny offline scene-query embedding: pinned vocab, integer vectors (spike).
+pub mod embed;
 /// Cover exposure per tile: threat-ray fans over sight geometry.
 pub mod exposure;
 /// Stray-robust scene extent (SPX8).

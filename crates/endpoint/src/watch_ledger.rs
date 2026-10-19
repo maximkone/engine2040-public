@@ -20,10 +20,10 @@ use engine_core::Fnv64;
 
 use super::scene_query::{QueryAnswer, QueryKind};
 
-/// Query verbs on the hardened surface: the twenty [`QueryKind`] words.
+/// Query verbs on the hardened surface: the twenty-four [`QueryKind`] words.
 /// Rows are indexed by the frozen discriminant through [`verb_index`], so an
 /// appended kind fails to compile here instead of aliasing a row.
-pub const QUERY_VERB_COUNT: usize = 20;
+pub const QUERY_VERB_COUNT: usize = 24;
 /// Estimated chars per model token on the door (Blender/Unity/Godot MCP
 /// comparison point: our ledger posts chars plus this estimate, never a
 /// vendor tokenizer).
@@ -57,6 +57,10 @@ fn verb_index(kind: QueryKind) -> usize {
         QueryKind::ExitsOf => 17,
         QueryKind::Glance => 18,
         QueryKind::Coverage => 19,
+        QueryKind::View => 20,
+        QueryKind::Lidar => 21,
+        QueryKind::Map => 22,
+        QueryKind::Pixel => 23,
     }
 }
 
@@ -215,6 +219,10 @@ impl WatchLedger {
                 VerbRow::new(QueryKind::ExitsOf),
                 VerbRow::new(QueryKind::Glance),
                 VerbRow::new(QueryKind::Coverage),
+                VerbRow::new(QueryKind::View),
+                VerbRow::new(QueryKind::Lidar),
+                VerbRow::new(QueryKind::Map),
+                VerbRow::new(QueryKind::Pixel),
             ],
             latest_revision: 0,
             latest_digest: 0,
@@ -459,8 +467,8 @@ mod tests {
 
     /// Session under churn in the tape test.
     const SESSION: u64 = 11;
-    /// Twenty steps: every verb at least twice, churn at 7 and 14.
-    const STEPS: usize = 20;
+    /// One step per verb, so every verb is asked at least once, churn at 7 and 14.
+    const STEPS: usize = QUERY_VERB_COUNT;
 
     fn actor(id: u32, x: f32, z: f32) -> Actor {
         Actor {
@@ -507,6 +515,10 @@ mod tests {
             5 => QueryArgs::largest_open(30),
             6 => QueryArgs::free_space(30, 100, 8, 7),
             7 => QueryArgs::cone_from(0, 90, 500),
+            20 => QueryArgs::view([0.0, 1.6, 0.0], 0.0, 8, 4),
+            21 => QueryArgs::lidar([0.0, 1.6, 0.0], 0.0),
+            22 => QueryArgs::map([0.0, 1.6, 0.0], 300),
+            23 => QueryArgs::pixel([0.0, 1.6, 0.0], 0.0, 8, 4, 4, 2),
             _ => QueryArgs::relation(0, Rel::Left, None),
         }
     }
@@ -635,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn token_table_posts_all_nine_verbs() {
+    fn token_table_posts_every_verb() {
         let (actors, reach) = fixture();
         let mut ledger = WatchLedger::new();
         for i in 0..QUERY_VERB_COUNT {
@@ -663,6 +675,10 @@ mod tests {
             "free_space",
             "cone",
             "relation",
+            "view",
+            "lidar",
+            "map",
+            "pixel",
         ] {
             assert!(text.contains(name), "table posts {name}");
         }
@@ -672,7 +688,7 @@ mod tests {
         );
         // Same calls give byte-identical text.
         assert_eq!(text, ledger.token_table_text(), "table text is stable");
-        // Empty ledger still posts all nine rows at zero.
+        // Empty ledger still posts every row at zero.
         let blank = WatchLedger::new().token_table_text();
         assert!(blank.contains("near 0 0 0"), "blank rows read zero");
     }

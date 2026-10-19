@@ -93,13 +93,16 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   lod_readable` green; arrow plus lean visible far-ring; nearest-8 match
   full-rate poses; sim bytes x2. needs: AM18, AM17.
   (PLN animation.md EXTEND r7, proposed 2026-09-29.)
-- [ ] TV4 anim: breach-rubble scramble variance — TV3 scramble holds across
+- [x] TV4 anim: breach-rubble scramble variance — TV3 scramble holds across
   seeded rubble height plus noise sweeps. Tier B. Size S. Owns fixture
   hunks beside `crates/anim/src/traversal.rs` (TV1 shape frozen; lands
   after TV3, disjoint rubble split). Accept: `cargo test -p engine-anim
   --lib rubble_var` green; picks expected; roots land within 1 cm; nav
   rebake exact x2. needs: TV3, TV2.
-  (PLN animation.md EXTEND r7, proposed 2026-09-29.)
+  (PLN animation.md EXTEND r7, proposed 2026-09-29.) Landed 4e08b07.
+  traversal_rubble_var_test.rs: rubble_var_scramble_holds_across_seeded_height_and_noise_sweeps,
+  rubble_var_bands_sit_exactly_on_the_chooser_gates, rubble_var_breach_rebake_is_exact_x2;
+  engine-anim --lib 449 passed + full --no-fail-fast, clippy clean (runs 39217218591, 39216661948, 39216657052).
 - [ ] LM4 anim: motion-search cost + schema lock — post the LM1
   per-character search cost plus AM8 exertion-warp cost into PF1
   workloads with kill bars; freeze the LM1 feature schema. Tier A.
@@ -143,7 +146,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Tier A. Size M. Owns `crates/physics/src/ragdoll.rs`,
   `crates/physics/src/joint_limits.rs`. Accept: no bone interpenetration over
   1 cm in 50 seeded falls; two ragdolls landing on each other separate; hash
-  x2; settles within the PX1 bound; zero per-tick allocations. needs: PX1, PX10. Progress 2026-10-17: b61738a5 physfx tests: two ragdolls landing on each other separate with no unjoined overlap over 1 cm and replay exactly (4 passed); the 50-seeded-falls bar fails (seed 44 overlaps lower_arm_r/shin_r by 8 cm at tick 40, run 39068262860), committed as an ignored repro; left: more solver iterations or bone CCD, spawn reading the joint tables.
+  x2; settles within the PX1 bound; zero per-tick allocations. needs: PX1, PX10. Progress 2026-10-17: b61738a5 physfx tests: two ragdolls landing on each other separate with no unjoined overlap over 1 cm and replay exactly (4 passed); the 50-seeded-falls bar fails (seed 44 overlaps lower_arm_r/shin_r by 8 cm at tick 40, run 39068262860), committed as an ignored repro; left: more solver iterations or bone CCD, spawn reading the joint tables. Progress 2026-10-19: `joint_limits.rs` lands (named degree rows spine 20/35, head 35/45, arm 85/70, hip 40/30, knee/elbow hinge 145; friction-spring motor numbers; collision groups that keep parent and child apart but let the same bone of two ragdolls meet) and `Ragdoll::spawn` reads it through `insert_table_joints`. Runner green: 256 lib + 18 it + 3 balance + 5 stagger tests, clippy -D warnings, golden d57b5c8ae3096614 x2, float world unchanged. Two-ragdoll separation still proves through `ragdoll_tape::clinch_fighters_part_under_a_centimeter_x2_shuffled`. The 1 cm bar is still open: the joint table moved the worst 50-fall overlap to 4.53 cm (fall 46, elbow_r/ankle_r) at Rapier's four solver iterations, 2.9 cm at six and 9.2 cm at twelve in engine-physfx, so the 50-fall test stays ignored with those numbers; left: a contact model the joints cannot overrun (AD17 bones plus a stiffer solver, or contacts between grandparents).
 - [ ] PX11 physics: PID servo — the joint motors of PX9 run a Fixed-point
   PID (P and D first, I clamped, D on the measurement, slew cap) instead of
   setting velocities, with one tuning per rig, not per animation. Tier B.
@@ -178,7 +181,8 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Bake only, runtime untouched. Tier C. Size S. Owns
   `crates/destruction/src/bake_rank.rs`. Accept: same bond count as uniform,
   better break look in a blind review, DX3 8-way equality holds; else killed.
-  needs: DX2. Progress 2026-10-17: 3f671e24 bake_rank.rs spaces lattice cuts by impact likelihood with the same bond count and anchors, 8-way spread equality; the keep-or-kill blind review needs a human; left: a caller.
+  needs: DX2. Progress 2026-10-17: 3f671e24 bake_rank.rs spaces lattice cuts by impact likelihood with the same bond count and anchors, 8-way spread equality; the keep-or-kill blind review needs a human; left: a caller. Progress 2026-10-19: operator: the keep-or-kill blind review needs a human (open the graded and the uniform bake side by side and say which break looks better); the `bake_rank.rs` caller stays agent work until the review says keep. See the owner queue.
+  BLOCKED: the keep-or-kill blind review needs a human; the caller stays agent work until that review says keep. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [ ] DX9 destruction: graded bonds — per-bond breaking strain from contact
   area, mass and anchor distance with seeded jitter (today every bond is
   1.0), Voronoi-density cut sites clipped by the existing split code, sliver
@@ -186,7 +190,8 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   NV3. Bake only. Tier B. Size M. Owns `crates/destruction/src/bond_grade.rs`.
   Accept: bake x2; DX3 8-way equality; anchors hold; a blind review prefers
   graded breaks, else density is killed but grading stays; 16/1024 caps hold
-  in the 8-fighter soak. needs: DX2, DX3, DX4. Progress 2026-10-17: 40da318b bond_grade.rs strain from contact area, pair mass, anchor distance, seeded jitter, sliver refusal, per-event break records with dirty nav tiles; 8-way insertion-order equality and 16-per-event / 1024-total caps in an 80-cut soak (run 39069886844); left: Voronoi-density cut sites, blind review, a caller.
+  in the 8-fighter soak. needs: DX2, DX3, DX4. Progress 2026-10-17: 40da318b bond_grade.rs strain from contact area, pair mass, anchor distance, seeded jitter, sliver refusal, per-event break records with dirty nav tiles; 8-way insertion-order equality and 16-per-event / 1024-total caps in an 80-cut soak (run 39069886844); left: Voronoi-density cut sites, blind review, a caller. Progress 2026-10-19: operator: the graded-vs-density blind review needs a human (same side-by-side as DX8); the Voronoi-density cut sites and the caller stay agent work. See the owner queue.
+  BLOCKED: the graded-vs-density blind review needs a human; the caller stays agent work until that review says keep. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [x] PX16 physics: 1,000-agent LOD + sleep scale proof — far soldiers as
   capsules, near ones full ragdoll, whole-island sleep hysteresis, plus
   a seeded shove-through-the-crowd tape proving no missed wake. Tier A.
@@ -463,14 +468,28 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   bytes identical plus cross-tile path byte-equal to whole-bake path
   plus digest x2; kill on any seam gap or per-event over 50 ms p95.
   needs: NV13, NV3. (PLN gameplay.md, proposed 2026-09-30.)
-- [ ] NV15 nav: salt-epoch handle detail (held on NV13, feeds NV7) —
+- [x] NV15 nav: salt-epoch handle detail (held on NV13, feeds NV7) —
   tile and obstacle handles so dangling refs fail closed (LADDER
   L512, spike first). Tier A. Size S. Owns
   `crates/nav/src/tiles.rs` TileRef plus StampedPath stamp-check
   hunks. Accept: `cargo test -p engine-nav tiles` green;
   dangling-stamp refusal 100% plus overflow keeps staleness plus
   digest x2; kill on any dangling resolve or digest drift. needs:
-  NV13, NV7. (PLN gameplay.md, proposed 2026-09-30.)
+  NV13, NV7. (PLN gameplay.md, proposed 2026-09-30.) Landed a1e2500.
+  `crates/nav/src/tiles.rs`: `TileRef { tile, epoch }` with `take` (reads the
+  tile's current version), `tile`, `epoch` and `resolve`, plus
+  `TileError::DanglingRef { tile, epoch, now }` and its Display arm. Resolve
+  returns the tile only while its version is unchanged, so a rebake under a
+  carried handle fails closed; versions never wrap (`rebake` refuses
+  `VersionOverflow` and keeps the old one), so a live handle cannot alias a
+  newer rebake. Tests: `tile_ref_refuses_every_dangling_resolve` (all four
+  tiles of a 2x2 registry refuse after their own rebake, 100%),
+  `tile_ref_digest_repeats_and_moves_with_the_version` (Fnv64 over handle
+  bytes repeats, and moving one epoch moves it), and
+  `version_overflow_keeps_a_live_handle_valid` (a version at u32::MAX refuses
+  the rebake and the handle still resolves). `cargo test -p engine-nav --lib
+  tiles` 34 passed, run 39182792426; rustfmt clean; rust-quality engine-nav
+  PASS; workspace-check PASS. No simulation crate touched.
 - [x] NV16 nav: rational-NURBS spline math + parallel-transport frames — de
   Casteljau / Cox-de Boor sampling, arc-length LUT, analytic tangents,
   twist-free sweep frames and ear-clip extrusion ported as integer-safe Rust

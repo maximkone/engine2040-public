@@ -32,6 +32,8 @@ mod gpu_tests {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         }
     }
@@ -130,6 +132,8 @@ mod gpu_tests {
             material: dielectric,
             base_color: None,
             normal_map: None,
+            orm: None,
+            emissive: None,
         });
         let out = presenter.render_offscreen(&list).expect("two draws render");
         assert!(out.manifest.is_clean(), "two draws stay validation-clean");
@@ -395,12 +399,16 @@ mod gpu_tests {
                     material: scene.material.clone(),
                     base_color: None,
                     normal_map: None,
+                    orm: None,
+                    emissive: None,
                 },
                 DrawItem {
                     mesh: far,
                     material: scene.material,
                     base_color: None,
                     normal_map: None,
+                    orm: None,
+                    emissive: None,
                 },
             ],
         };
@@ -484,6 +492,8 @@ mod gpu_tests {
                 },
                 base_color: Some(tex),
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         };
         let out = presenter
@@ -579,6 +589,66 @@ mod gpu_tests {
         match presenter.render_offscreen(&list) {
             Err(PresentError::InvalidDraw { index, .. }) => assert_eq!(index, 0),
             other => panic!("unknown texture must fail at draw 0, got {other:?}"),
+        }
+    }
+
+    /// NS31b2: a named ORM key with no resident upload fails the frame with
+    /// `InvalidDraw` exactly like an unknown `base_color` key.
+    #[test]
+    fn unknown_orm_key_is_invalid_draw() {
+        let Some(mut presenter) = init_or_skip("unknown_orm_key_is_invalid_draw") else {
+            return;
+        };
+        let mesh = MeshKey::new(47, [0xF5; 32]);
+        presenter
+            .upload_mesh(mesh, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let mut list = cube_list(mesh, 64, 64);
+        list.items[0].orm = Some(TextureKey::new(48, [0x00; 32]));
+        match presenter.render_offscreen(&list) {
+            Err(PresentError::InvalidDraw { index, .. }) => assert_eq!(index, 0),
+            other => panic!("unknown orm key must fail at draw 0, got {other:?}"),
+        }
+    }
+
+    /// NS31b2: a named normal key with no uploaded material set fails the
+    /// frame with `InvalidDraw`, never a silent flat normal.
+    #[test]
+    fn unknown_normal_key_is_invalid_draw() {
+        let Some(mut presenter) = init_or_skip("unknown_normal_key_is_invalid_draw") else {
+            return;
+        };
+        let mesh = MeshKey::new(49, [0x16; 32]);
+        presenter
+            .upload_mesh(mesh, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let mut list = cube_list(mesh, 64, 64);
+        list.items[0].normal_map = Some(TextureKey::new(50, [0x00; 32]));
+        match presenter.render_offscreen(&list) {
+            Err(PresentError::InvalidDraw { index, .. }) => assert_eq!(index, 0),
+            other => panic!("unknown normal key must fail at draw 0, got {other:?}"),
+        }
+    }
+
+    /// NS31b2: a named emissive key with no resident upload fails the frame
+    /// with `InvalidDraw` exactly like an unknown `base_color` key.
+    #[test]
+    fn unknown_emissive_key_is_invalid_draw() {
+        let Some(mut presenter) = init_or_skip("unknown_emissive_key_is_invalid_draw") else {
+            return;
+        };
+        let mesh = MeshKey::new(51, [0x27; 32]);
+        presenter
+            .upload_mesh(mesh, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(64, 64).expect("valid size applies");
+        let mut list = cube_list(mesh, 64, 64);
+        list.items[0].emissive = Some(TextureKey::new(52, [0x00; 32]));
+        match presenter.render_offscreen(&list) {
+            Err(PresentError::InvalidDraw { index, .. }) => assert_eq!(index, 0),
+            other => panic!("unknown emissive key must fail at draw 0, got {other:?}"),
         }
     }
 
@@ -729,6 +799,8 @@ mod rl9_gpu_tests {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         )
     }
@@ -1198,6 +1270,8 @@ mod live_frame_tests {
             material: scene.material,
             base_color: None,
             normal_map: None,
+            orm: None,
+            emissive: None,
         }
     }
 
@@ -1676,6 +1750,8 @@ mod live_frame_tests {
                     material: material([1.0, 1.0, 1.0]),
                     base_color: Some(tex),
                     normal_map: None,
+                    orm: None,
+                    emissive: None,
                 },
             ],
         };
@@ -1744,6 +1820,8 @@ mod live_frame_tests {
                 material: material(*rgb),
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             });
         }
         let list = DrawList {
@@ -1796,6 +1874,8 @@ mod live_frame_tests {
                 },
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         };
         let mut dim_light = scene.light.clone();
@@ -1813,6 +1893,8 @@ mod live_frame_tests {
                 },
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         };
         presenter.set_bloom_enabled(false);

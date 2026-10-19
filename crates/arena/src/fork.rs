@@ -40,6 +40,7 @@ use engine_combat::exchange::PhasedFighter;
 use engine_combat::fight::MAX_ATTACK_STARTED_PER_TICK;
 use engine_combat::FightEvent;
 use engine_combat::MAX_EVENTS_PER_TICK;
+use engine_core::Fnv64;
 use engine_destruction::bonded::BondedCollection;
 use engine_input::{FighterError, FighterId, FighterInput, FighterTape};
 #[cfg(feature = "sim")]
@@ -154,6 +155,101 @@ pub struct ForkMetrics {
     /// [`STUCK_SPEED_MPS`]), one `(slot, ticks)` entry per fighter.
     /// Knocked-out fighters hold pose, so they read as stuck.
     pub stuck_ticks: Vec<(u8, u32)>,
+}
+
+/// Which fold of a forked tick moved first. Checked in this order at one tick,
+/// so the earliest cause wins: a pose change is reported over the combat
+/// change it causes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ForkComponent {
+    /// Fighter ids, feet positions and yaw plus the tick's buttons.
+    Poses,
+    /// Combat state (hp, stamina, action clocks) plus the tick's events.
+    Combat,
+    /// The bonded destruction prop.
+    Destruction,
+    /// The whole-row checkpoint hash, when every fold above agrees.
+    Row,
+}
+
+/// One traced fork tick: the sim's checkpoint row hash plus the folds behind
+/// it, all in one `Copy` handle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TraceTick {
+    /// Absolute match tick (the checkpoint's own).
+    pub tick: u32,
+    /// [`ForkComponent::Poses`] fold.
+    pub poses: u64,
+    /// [`ForkComponent::Combat`] fold.
+    pub combat: u64,
+    /// [`ForkComponent::Destruction`] fold.
+    pub destruction: u64,
+    /// The row hash the sim's checkpoints carry for this tick.
+    pub row: u64,
+}
+
+/// Where two forked legs part.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ForkDivergence {
+    /// Absolute tick of the first differing shared tick.
+    pub tick: u32,
+    /// The component that moved first at that tick.
+    pub component: ForkComponent,
+}
+
+/// A forked leg's spine trace: one [`TraceTick`] per fork tick, in fork-tick
+/// order (the first entry is `base_tick + 1`). Two legs join when they agree
+/// on every shared tick, and [`ForkTrace::first_divergence`] names the first
+/// tick they part at plus the component that moved.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ForkTrace {
+    ticks: Vec<TraceTick>,
+}
+
+impl ForkTrace {
+    /// The traced ticks, oldest first.
+    pub fn ticks(&self) -> &[TraceTick] {
+        &self.ticks
+    }
+
+    /// Number of traced ticks.
+    pub fn len(&self) -> usize {
+        self.ticks.len()
+    }
+
+    /// True when the fork produced no traced tick (0-tick window or a step
+    /// failure that ended the window early).
+    pub fn is_empty(&self) -> bool {
+        self.ticks.is_empty()
+    }
+
+    /// First shared tick whose folds differ, naming the tick and the earliest
+    /// component that moved. `None` when every shared tick agrees. A shorter
+    /// trace joins on its shared prefix: no tick is invented for a leg that
+    /// ended early.
+    #[must_use]
+    pub fn first_divergence(&self, other: &ForkTrace) -> Option<ForkDivergence> {
+        for (left, right) in self.ticks.iter().zip(other.ticks.iter()) {
+            let component = if left.poses != right.poses {
+                Some(ForkComponent::Poses)
+            } else if left.combat != right.combat {
+                Some(ForkComponent::Combat)
+            } else if left.destruction != right.destruction {
+                Some(ForkComponent::Destruction)
+            } else if left.row != right.row {
+                Some(ForkComponent::Row)
+            } else {
+                None
+            };
+            if let Some(component) = component {
+                return Some(ForkDivergence {
+                    tick: left.tick,
+                    component,
+                });
+            }
+        }
+        None
+    }
 }
 
 /// A snapshot-clone of a match plus queued proposals, ready to run N ticks
@@ -340,6 +436,20 @@ impl Fork {
         }
     }
 
+    /// Runs the fork window on its own worker and keeps the per-tick spine
+    /// trace instead of metrics alone. Same isolation and step path as
+    /// [`run_n`](Fork::run_n): the same fork twice traces identical, and two
+    /// forks off identical prefixes agree tick for tick. A crashed worker
+    /// reads as an empty trace; callers that must see the crash use the
+    /// metrics path ([`try_run_n`](Fork::try_run_n)).
+    ///
+    /// Consumer: ARC3/ARC5 rejoin, which compares two legs with
+    /// [`ForkTrace::first_divergence`].
+    pub fn run_trace(&self, ticks: u32) -> ForkTrace {
+        self.run_worker(ticks, ForkJob::run_trace_inner)
+            .unwrap_or_default()
+    }
+
     /// Slot index or [`ForkError::UnknownFighter`].
     fn slot(&self, fighter: u8) -> Result<usize, ForkError> {
         let slot = usize::from(fighter);
@@ -469,6 +579,41 @@ impl ForkJob {
         )
     }
 
+    /// Trace worker body: the same step path and the same tape fill as
+    /// [`run_inner`](ForkJob::run_inner), recording one [`TraceTick`] per fork
+    /// tick (the sim's checkpoint row hash plus the three component folds). A
+    /// step failure ends the window with the ticks already traced, never a
+    /// fabricated one.
+    fn run_trace_inner(self) -> ForkTrace {
+        let steps = step_count(self.ticks);
+        let fighters = self.fighters;
+        let Some((mut sim, tape)) = self.build_sim(steps) else {
+            return ForkTrace::default();
+        };
+        let mut ticks = Vec::with_capacity(steps);
+        for _ in 0..steps {
+            if sim.step(&tape).is_none() {
+                break;
+            }
+            let Some(checkpoint) = sim.checkpoints.last() else {
+                break;
+            };
+            let events = sim
+                .events
+                .last()
+                .map_or(&[][..], |row| row.events.as_slice());
+            let live = sim.states.len().min(fighters);
+            ticks.push(TraceTick {
+                tick: checkpoint.tick,
+                poses: fold_poses(&sim.states[..live], &sim.buttons),
+                combat: fold_combat(&sim.fight, events),
+                destruction: sim.destruction.state_hash(),
+                row: checkpoint.hash,
+            });
+        }
+        ForkTrace { ticks }
+    }
+
     /// Build the worker sim plus its window tape: one owner for the fork
     /// restore (poses, combat, the intake flag plus phased cursors, brains,
     /// locomotion, the destruction prop, rebuilt controllers under `sim`).
@@ -552,7 +697,7 @@ impl ForkJob {
     /// pre-step observation sources each tick (plain forks pay nothing).
     fn run_inner(self, record: bool) -> (ForkMetrics, Option<Vec<Row>>) {
         let mut zero = self.zeros();
-        let steps = self.ticks as usize;
+        let steps = step_count(self.ticks);
         let fighters = self.fighters;
         let base_tick = self.base_tick;
         let Some((mut sim, tape)) = self.build_sim(steps) else {
@@ -718,6 +863,71 @@ impl ForkJob {
     }
 }
 
+/// Fork window length in steps. `u32` ticks fit `usize` on every target this
+/// engine builds for; the saturating fallback keeps a narrower target from
+/// wrapping instead of casting.
+fn step_count(ticks: u32) -> usize {
+    usize::try_from(ticks).unwrap_or(usize::MAX)
+}
+
+/// Poses fold: fighter ids, feet positions and yaw plus the tick's buttons.
+/// Positions go through the checkpoint path's canonical zeroing, so `-0.0`
+/// and `0.0` never trace as two different worlds.
+fn fold_poses(states: &[FighterState], buttons: &[u8]) -> u64 {
+    let mut fold = Fnv64::new();
+    for state in states {
+        fold.write_u32(u32::from(state.id.0));
+        for axis in state.pos {
+            fold.write_f32(super::canon_zero(axis));
+        }
+        fold.write_f32(super::canon_zero(state.yaw));
+    }
+    for button in buttons {
+        fold.write_u8(*button);
+    }
+    fold.finish()
+}
+
+/// Combat fold: the active fighters' hp, stamina and action clocks plus this
+/// tick's events. One numeric code per event kind, so the fold needs no
+/// `Hash` on the event.
+fn fold_combat(fight: &engine_combat::FightState, events: &[FightEvent]) -> u64 {
+    let mut fold = Fnv64::new();
+    fold.write_u8(fight.fighter_count);
+    fold.write_u32(fight.hitstop);
+    for state in fight.fighters.iter().take(usize::from(fight.fighter_count)) {
+        fold.write_u16(state.hp_permille);
+        fold.write_u16(state.stamina);
+        fold.write_u32(state.attack_age);
+        fold.write_bool(state.is_attacking);
+        fold.write_u32(state.block_age);
+        fold.write_bool(state.is_blocking);
+        fold.write_u32(state.dodge_age);
+        fold.write_bool(state.is_dodging);
+        fold.write_u32(state.react);
+        fold.write_u32(state.knockdown);
+    }
+    fold.write_len(events.len());
+    for event in events {
+        fold.write_u32(event_code(*event));
+    }
+    fold.finish()
+}
+
+/// One combat event as a number, damage carried, so two ticks with the same
+/// events in the same order fold equal and a different event never collides
+/// with a different count.
+fn event_code(event: FightEvent) -> u32 {
+    match event {
+        FightEvent::Hit { damage, .. } => 1_000_000 + u32::from(damage),
+        FightEvent::Blocked { chip, .. } => 2_000_000 + u32::from(chip),
+        FightEvent::Knockdown { .. } => 3_000_000,
+        FightEvent::Parried { .. } => 4_000_000,
+        FightEvent::Dodged { .. } => 5_000_000,
+        FightEvent::StaminaOut { .. } => 6_000_000,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,6 +1001,130 @@ mod tests {
         let _ = fork.run_n(120);
         let after = super::super::run(&config(), &tape);
         assert_eq!(control, after);
+    }
+
+    #[test]
+    fn forked_legs_resimulate_identical_twice() {
+        let fork = fork_at(60);
+        let first = fork.run_trace(120);
+        assert_eq!(first.len(), 120, "one traced tick per fork tick");
+        assert_eq!(
+            first.ticks()[0].tick,
+            60,
+            "the checkpoint tick is the base tick of the first step"
+        );
+        assert_eq!(first.ticks()[119].tick, 179, "the last tick of the window");
+        assert_eq!(first, fork.run_trace(120), "the same fork twice agrees");
+        assert_eq!(
+            fork_at(60).run_trace(120),
+            first,
+            "two forks off identical prefixes agree tick for tick"
+        );
+        assert!(
+            first.first_divergence(&first).is_none(),
+            "a leg joins itself"
+        );
+        // The trace rides the same window as the metrics path.
+        let metrics = fork.run_n(120);
+        assert_eq!(metrics.damage_dealt.len(), 2);
+    }
+
+    #[test]
+    fn a_seeded_input_names_its_tick_and_component() {
+        // The control leg and a leg whose fighter 0 attacks from tick 100.
+        let control = fork_at(60).run_trace(120);
+        let mut seeded = fork_at(60);
+        seeded
+            .apply_proposal(ForkProposal::SwapTape {
+                fighter: 0,
+                inputs: attack_spam(0, 100, 20),
+            })
+            .expect("tape swap validates");
+        let divergent = seeded.run_trace(120);
+        // Every tick before the seeded input agrees...
+        for (left, right) in control.ticks().iter().zip(divergent.ticks()).take(40) {
+            assert_eq!(left, right, "tick {} is before the seed", left.tick);
+        }
+        // ...and the first tick it lands on is the named one.
+        let found = control
+            .first_divergence(&divergent)
+            .expect("the seeded tick diverges");
+        assert_eq!(found.tick, 100, "the tick the seeded input lands on");
+        assert!(
+            matches!(
+                found.component,
+                ForkComponent::Poses | ForkComponent::Combat
+            ),
+            "an attack moves pose and combat, not the prop: {:?}",
+            found.component
+        );
+    }
+
+    #[test]
+    fn divergence_names_the_first_moving_component() {
+        let tick = |tick: u32, poses: u64, combat: u64, destruction: u64, row: u64| TraceTick {
+            tick,
+            poses,
+            combat,
+            destruction,
+            row,
+        };
+        let left = ForkTrace {
+            ticks: vec![
+                tick(1, 10, 20, 30, 40),
+                tick(2, 11, 21, 31, 41),
+                tick(3, 12, 22, 32, 42),
+            ],
+        };
+        let combat = ForkTrace {
+            ticks: vec![
+                tick(1, 10, 20, 30, 40),
+                tick(2, 11, 99, 31, 41),
+                tick(3, 12, 22, 32, 42),
+            ],
+        };
+        assert_eq!(
+            left.first_divergence(&combat),
+            Some(ForkDivergence {
+                tick: 2,
+                component: ForkComponent::Combat,
+            })
+        );
+        // A pose move at the same tick is named before the combat change.
+        let poses = ForkTrace {
+            ticks: vec![tick(1, 10, 20, 30, 40), tick(2, 77, 99, 31, 41)],
+        };
+        assert_eq!(
+            left.first_divergence(&poses),
+            Some(ForkDivergence {
+                tick: 2,
+                component: ForkComponent::Poses,
+            })
+        );
+        // The prop alone, then the row hash alone.
+        let prop = ForkTrace {
+            ticks: vec![tick(1, 10, 20, 30, 40), tick(2, 11, 21, 88, 41)],
+        };
+        assert_eq!(
+            left.first_divergence(&prop).map(|d| d.component),
+            Some(ForkComponent::Destruction)
+        );
+        let row = ForkTrace {
+            ticks: vec![tick(1, 10, 20, 30, 40), tick(2, 11, 21, 31, 99)],
+        };
+        assert_eq!(
+            left.first_divergence(&row),
+            Some(ForkDivergence {
+                tick: 2,
+                component: ForkComponent::Row,
+            })
+        );
+        // A leg that ended early joins on its shared prefix.
+        let short = ForkTrace {
+            ticks: vec![tick(1, 10, 20, 30, 40)],
+        };
+        assert_eq!(left.first_divergence(&short), None);
+        assert_eq!(short.first_divergence(&left), None);
     }
 
     #[test]

@@ -143,8 +143,8 @@ pub const SCENE_READ_MAX_ROWS: u32 = 128;
 /// stays at 43514 so the number is comparable to the old 21-tool door, and the
 /// ledger gate now measures whatever a session advertises. The frozen
 /// [`crate::tools::TOOLS`] registry now holds 26 tools.
-/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000.
-pub const TOOL_LIST_BUDGET_CHARS: usize = 59_000;
+/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000. On 2026-10-19 SP62's two view-truth verbs (`view.observe`, `view.laws`: camera, per-body act/clip/tint/root/bounds/rect/cover and the laws line) took the loaded list to 58703 (297 headroom): 59000 → 61500.
+pub const TOOL_LIST_BUDGET_CHARS: usize = 61_500;
 
 /// The thirteen core tools, in contract order. The router holds exactly these;
 /// every other verb is a pack verb.
@@ -712,6 +712,8 @@ pub struct ServerState {
     pub(crate) rules: super::packs::rules::RulesSlot,
     /// The web pack's scope, runner, builds and undo stack (refused until the host allows web).
     pub(crate) web: super::packs::web::WebSlot,
+    /// The settings pack's live knobs, replay tape and undo stack.
+    pub(crate) settings: super::packs::physics_settings::SettingsSlot,
     pub(crate) reads: super::guards::ReadClock,
     /// The baked nav mesh of the staged floor, when the host holds one. Without
     /// it `scene.query reachable` refuses `needs_nav_view` instead of guessing.
@@ -749,6 +751,7 @@ impl ServerState {
             #[cfg(feature = "rules")]
             rules: super::packs::rules::RulesSlot::default(),
             web: super::packs::web::WebSlot::default(),
+            settings: super::packs::physics_settings::SettingsSlot::default(),
             reads: super::guards::ReadClock::new(),
             nav: None,
         }

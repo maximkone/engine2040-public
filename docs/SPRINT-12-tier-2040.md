@@ -420,45 +420,54 @@ golden unchanged; kill bars are gates.
   Size M. Owns `crates/net/src/party.rs`. Accept: mismatched versions refuse
   loudly with the digest pair; party of 3 lands in one match; list refresh
   under budget on fixtures. needs: ON2, ON6.
-- [ ] ON14 net: datagram discipline — never fragment past 1,200 bytes
+- [x] ON14 net: datagram discipline — never fragment past 1,200 bytes
   (`OverBudget` drops and counts), far and idle poses shed first under
   congestion with 2-3 tick expiry, inputs and combat sent redundantly and
   never expired (RFC 9221 datagram rules). Tier C. Size M. Owns
   `crates/net/src/wan_discipline.rs`. Accept: 64 bots plus AI at 150 ms,
   30 ms jitter, 2% loss and reorder converge; no combat entity starved over
-  500 ms; at most 128 kbps per client; hash x2. needs: ON1, ON3, ON4, ON5.
-- [ ] ON15 net: per-connection scope gate — room membership + per-user scope Progress 2026-10-17: room membership scope (entity_room, room_in_scope, set_rooms) and interest_64_room_converges (64 viewers, kbps under 12,800 x100 cap, starve under 30 ticks, x2 deterministic) passed in `cargo test -p engine-net --lib` 258 passed, gh run 39056801523 (40def1e2); no assertion of the 3x saving versus broadcast, and no production caller (ON29).
+  500 ms; at most 128 kbps per client; hash x2. needs: ON1, ON3, ON4, ON5. Landed ad73685c. cargo test -p engine-net --no-fail-fast: 7 wan_discipline tests green (discipline_converges_the_siege_wan_matrix_x2, discipline_refuses_an_oversize_batch_and_counts_it, discipline_sheds_far_then_idle_before_combat, discipline_inputs_and_combat_repeat_once, discipline_replaces_stale_state_before_a_new_batch, discipline_report_bars_fail_loudly, discipline_refuses_bad_shapes_loudly) gh run 39190753182; clippy 39190753056. Measured: max_datagram=1200 (cap 1200), combat starve_max=6 ticks (bar 30), kbps_x100_max=9600 (cap 12800), submitted=7041182 written=3072000, superseded=3142446 shed=1442250 expired=768, x2 identical.
+- [x] ON15 net: per-connection scope gate — room membership + per-user scope Progress 2026-10-17: room membership scope (entity_room, room_in_scope, set_rooms) and interest_64_room_converges (64 viewers, kbps under 12,800 x100 cap, starve under 30 ticks, x2 deterministic) passed in `cargo test -p engine-net --lib` 258 passed, gh run 39056801523 (40def1e2); no assertion of the 3x saving versus broadcast, and no production caller (ON29).
   predicate over `aoi.rs` feeding the ON3 priority queue (naia rooms/scopes,
   MIT OR Apache-2.0, patterns only; naia has no rate-LOD of its own).
   Tier C. Size M. Owns `crates/net/src/interest.rs`. Accept: 64-bot soak
   shows 3x or better saving vs broadcast at 128 kbps/client or less, no
-  combat entity starved over 500 ms, zero desync. needs: ON3, MP2.
-- [ ] ON16 net: token handshake + soak harness — encrypted short-lived join
+  combat entity starved over 500 ms, zero desync. needs: ON3, MP2. Landed a695c4b9. interest_64_bot_soak_beats_broadcast_3x asserts saving >= 3x vs broadcast (saving_x100 >= 300), kbps_x100 <= 12800/client, combat word within the 30-tick (500 ms) bar and starve_max <= 30 for every viewer, x2 bit-identical and a delta-codec round-trip; cargo test -p engine-net --lib interest: 20 passed, gh run 39192165664; clippy 39192416037. Production call site stays ON29.
+- [x] ON16 net: token handshake + soak harness — encrypted short-lived join
   tokens and a replay window feeding `wan_soak.rs` per-fault reports
   (netcode.io STANDARD + soak.c, BSD-3-Clause, patterns reimplemented in
   Rust, no C vendored). Tier C. Size M. Owns `crates/net/src/wan_soak.rs`.
   Accept: ON4 matrix at 16-32 converges on every checkpoint with a
-  per-fault report; seeded rejoin converges in 5 s or less. needs: ON1, ON2.
-- [ ] ON17 net: per-class resend/memory discipline — unidirectional channel
+  per-fault report; seeded rejoin converges in 5 s or less. needs: ON1, ON2. Landed 1bb9ecfa. run_matrix_sized/run_fault_sized soak the 5-fault matrix over every session 16..=32 and every entry holds the clean tape checkpoint (wan_soak_matrix_sized_16_to_32_holds_every_checkpoint, wan_soak_matrix_sized_repeats_identically_x2); the seeded rejoin converges in 9 ticks (1 transit) because the 32-generation window covers the 2 s outage (wan_rejoin_seeded_converges_in_five_seconds, wan_rejoin_past_the_window_blows_the_bar_loudly); the short-lived join token (30 s TTL, relay challenge round, deny-by-default wan_join_token_is_short_lived_and_refuses_deny_by_default) and the replay window (wan_replay_window_refuses_duplicates_and_stale_sequences, posted as FaultReport.replays_refused per fault) are the handshake half; cargo test -p engine-net --no-fail-fast 357 lib + 44 it green, gh run 39195136954; clippy 39194989098; engine-proof --no-fail-fast green 39195384569; rust-quality --owned PASS. Token confidentiality rides the ON1 transport session; token-level AEAD remains the RC15 dependency decision (docs/plan/2026-10-19-owner-queue.md), so no cipher was hand-rolled here.
+- [x] ON17 net: per-class resend/memory discipline — unidirectional channel Landed ad73685c, folded into ON14 per this row's own clause (same owned file, same acceptance). Re-proven at HEAD 48f5a315: cargo test -p engine-net --lib wan_discipline 7 passed, gh run 39206953257, measured max_datagram=1200 (cap 1200), combat starve_max=6 ticks (bar 30), kbps_x100_max=9600 (cap 12800), x2 identical; cargo test -p engine-net --no-fail-fast 357 lib + 44 it green, gh run 39206679767, including the ON4 matrix cells (wan_fault_matrix_checkpoint_equality_per_cell) and the siege matrix half (discipline_converges_the_siege_wan_matrix_x2). Resend timers are Class::redundancy and shed caps are Class::expiry_ticks (near 6, far 2, idle 3) in `crates/net/src/wan_discipline.rs`; the queue is still a proof driver with no production caller, the same deferral ON14 recorded.
   configs with resend timers and shed caps behind the Transport trait
   (renet channel shapes, MIT OR Apache-2.0, reimplemented; may fold into
   ON14 acceptance instead of landing separately). Tier C. Size M. Owns
   `crates/net/src/wan_discipline.rs`. Accept: ON4 matrix converges with
   zero   combat starvation, 128 kbps/client or less, hash x2. needs: ON1,
   ON3, ON4.
-- [ ] ON18 net: version-stamped WAN resync — CC-OPI (arXiv 2609.19208v1)
+- [x] ON18 net: version-stamped WAN resync — CC-OPI (arXiv 2609.19208v1)
   version-based sync + emergency pool reimplemented std-only in wan_soak
   as an alternative to the AH4 path (spike only, no codec change).
   Tier B. Size S. Owns `crates/net/src/wan_soak.rs`. Accept: ON4 matrix
   at 16-32 converges on every checkpoint with per-fault converge-time +
   byte-overhead report; overhead over 10 percent or any miss kills it
-  with numbers. needs: ON1, ON3.
-- [ ] ON19 net: P2P-sync negative gate — CRDT P2P VR (arXiv 2503.17826v1)
+  with numbers. needs: ON1, ON3. Landed f563cb6c. wan_version_resync_matrix_16_to_32_posts_converge_and_overhead + wan_version_resync_matches_the_ah4_resync_ledger + wan_version_resync_kill_gate_names_numbers + wan_version_stamp_and_pool_are_bounded green: cargo test -p engine-net --no-fail-fast 361 lib + 44 it, gh run 39211468371; clippy 39211792217; rust-quality --owned PASS. ON4 matrix seed 7, 120 ticks, every size 16-32: every fault holds the clean tape checkpoint, misses 0, one generation 552 B. Overhead over the AH4 resync bytes: latency/jitter/loss 0% (no urgent resync; accepted), reorder 17.4-21.0%, disconnect 30.07% (reserve = one 1200 B datagram charged once per armed tape, plus a 12 B stamp and a 4 B pool ticket per resync); converge reorder 5 vs AH4 10 ticks, disconnect 0 vs 0. Verdict: KILLED by the spike's own 10% bar with numbers, so the version stamps and emergency pool stay spike code (no production path, no codec change).
+- [x] ON19 net: P2P-sync negative gate — CRDT P2P VR (arXiv 2503.17826v1)
   evaluated and rejected for combat state (non-Byzantine assumption vs
   the ON5 cheat model). Tier B. Size S. Owns a negative-test block in
   `crates/net/src/relay.rs` tests. Accept: test asserts combat snapshots
   never merge peer-to-peer and every state change carries authority +
-  tape; a P2P combat path fails the gate. needs: ON1, ON5.
+  tape; a P2P combat path fails the gate. needs: ON1, ON5. Landed f36bba7.
+  `CombatSyncGate` in crates/net/src/relay.rs applies a change only for the
+  match's own authority with a named tape row; a peer author, a missing tape
+  row, a foreign authority and a held-row rewrite refuse with a typed
+  `P2pRefusal`. combat_snapshots_never_merge_peer_to_peer +
+  every_combat_state_change_carries_authority_and_tape +
+  a_p2p_combat_path_fails_the_gate green: cargo test -p engine-net --lib relay
+  21 passed, gh run 39212991775; --no-fail-fast lib + 44 it green, gh run
+  39213607190; clippy 39213334777; rust-quality --owned PASS; no sim seam
+  changed so the frozen hashes are untouched.
 - [ ] ON20 net: delta-maintained scope views — DBSP section-4 Z-set idea
   (arXiv 2203.16684v1, mechanism only, reimplemented std-only, no Feldera
   dep) for ON15 room/scope predicates over aoi.rs. Tier B. Size S. Owns
@@ -534,6 +543,7 @@ golden unchanged; kill bars are gates.
   progress 2026-10-10 (split-claude): real-NAT runner built. `net_relay [--bind 0.0.0.0:7041]` on a host both networks reach (RelayHub: STUN echo, token register, forward from the registered address only). Machine A: `net_bout on30-serve --relay R:7041` prints an invite code; machine B: `net_bout on30-join --relay R:7041 --code CODE`. Both register, learn the public address, trade candidates, punch (bound 300 ticks), then play WAN bouts x2 over the relay and x2 direct when the punch won; each equals its one-process twin. Receipts in `target/on30-nat` (online-bout, checkpoints, drop-rejoin, distributions, punch, real-net). The real leg rides UDP, not QUIC. Three-process loopback smoke: ON30 NAT PASS. Open: one run across two real networks.
   decision 2026-10-10 (owner delegated to Claude): the real-NAT leg counts over the UDP courier; QUIC through the relay is QR1 (LATER, `docs/SPRINT-18-gaps.md`). ON30 ticks on one run across two real networks with the `target/on30-nat` receipts and the hash x2 with the MP1 tape (operator run: `net_relay` on a reachable host, `on30-serve` and `on30-join` on two networks).
   progress 2026-10-18: the arena window pair (`arena.exe --host` / `--join`) now passes the relay scenario too: `node tools/arena-net.mjs --exe target/release/arena.exe --relay-exe target/release/net_relay.exe` = 8 runs (plain/spear/fault/relay x2), host == guest each, relay run 1 and 2 end on the plain duel's 8bcc8890475af689, spear on 244f2e2c63a267d3, fault equal to plain; receipt `target/arena-net/receipt.json`. Still open for the tick: the operator run across two real networks (the `target/on30-nat` receipts) and the MP1-tape hash x2, plus the two-keyboard LAN play line on the row above. Progress 2026-10-19: operator: two real networks and two humans; exact lines in `docs/plan/2026-10-19-owner-queue.md`.
+  BLOCKED: needs two humans on two real networks (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [ ] ON31 net: voice-boundary proof with SN9 — typed tests proving Progress 2026-10-17: audio voice.rs live_synth_refused (synthesize_live returns VoiceError::LiveSynthRefused) passed in `cargo test -p engine-audio --lib voice`, gh run 39057032190; no net voice path and no voice on/off golden test yet (needs ON8).
   `voice.rs` bake-only refusal holds while ON8/ON12 net voice never
   touches the tick, checkpoints or golden. Tier B. Size S. Owns

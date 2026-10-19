@@ -17,7 +17,8 @@
 //! (`set.rs:28`), 8 KB schema (`schema.rs:98`), 64 KB JSON at depth 32
 //! (`json.rs:15-17`). Entry points: [`MaterialRecord`],
 //! [`MaterialSet::set_param`] and its inverse, [`MaterialSet::shipped`],
-//! sim/look digests, [`SCHEMA`], [`record`], [`set`], [`json`], [`fixed`].
+//! sim/look digests, [`SCHEMA`], [`record`], [`set`], [`json`], [`fixed`],
+//! [`twin`].
 //!
 //! ```rust
 //! use engine_material::{MaterialRecord, MaterialSet};
@@ -33,6 +34,7 @@
 pub mod channels;
 pub mod compare;
 pub mod compile;
+pub mod coverage;
 pub mod dfg;
 pub mod fixed;
 #[cfg(test)]
@@ -45,6 +47,7 @@ pub mod reload;
 pub mod schema;
 pub mod set;
 pub mod skin;
+pub mod twin;
 
 pub use record::{
     Anisotropy, Channel, Coat, Domain, Emission, Layer, LayerKind, Look, MaterialRecord,

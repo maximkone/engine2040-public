@@ -224,6 +224,8 @@ pub fn push_twin_fighters(
                 material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             });
             pushed += 1;
         }

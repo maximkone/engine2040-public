@@ -18,7 +18,7 @@ pub struct KindCard {
 }
 
 /// One card per kind, in discriminant order.
-pub const KIND_CARDS: [KindCard; 20] = [
+pub const KIND_CARDS: [KindCard; 24] = [
     KindCard {
         kind: QueryKind::Near,
         needs: "anchor",
@@ -118,6 +118,26 @@ pub const KIND_CARDS: [KindCard; 20] = [
         kind: QueryKind::Coverage,
         needs: "anchor, eye_m",
         example: r#"{"kind":"coverage","anchor":"crate_1 [<uuid>]","eye_m":[0.0,1.6,0.0],"yaw":0.0,"pitch":0.0,"half_angle_deg":30}"#,
+    },
+    KindCard {
+        kind: QueryKind::View,
+        needs: "eye_m",
+        example: r#"{"kind":"view","eye_m":[0.0,1.6,0.0],"yaw":0.0,"cells":[24,16,0,0]}"#,
+    },
+    KindCard {
+        kind: QueryKind::Lidar,
+        needs: "eye_m",
+        example: r#"{"kind":"lidar","eye_m":[0.0,1.6,0.0],"yaw":0.0}"#,
+    },
+    KindCard {
+        kind: QueryKind::Map,
+        needs: "eye_m",
+        example: r#"{"kind":"map","eye_m":[0.0,1.6,0.0],"radius_cm":600}"#,
+    },
+    KindCard {
+        kind: QueryKind::Pixel,
+        needs: "eye_m",
+        example: r#"{"kind":"pixel","eye_m":[0.0,1.6,0.0],"yaw":0.0,"cells":[24,16,12,8]}"#,
     },
 ];
 

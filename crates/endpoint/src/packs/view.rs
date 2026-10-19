@@ -1,8 +1,24 @@
 //! `view` pack: what the door sees about itself and the run.
 //!
-//! Holds the observe-log digest and pages, the self-describing manifest and
+//! Holds the observe-log digest and pages, the self-describing manifest,
+//! `view.observe` and `view.laws` (the live view as numbers) and
 //! `look.judge`, which scores a capture set by machine so a Look row accepts
 //! on a number instead of an opened PNG.
+//!
+//! `view.observe` and `view.laws` read the live bout of the session's play
+//! slot exactly as `sim.observe` reads it (seed, headcount and tick count):
+//! no bout answers `no_live_bout` first. The door owns no view and links no
+//! renderer: a host that links the SP61 view truth registers it once with
+//! [`register_view_source`], and the door passes back its camera, bodies and
+//! `arena view:` line unchanged. The door checks the host's answer against
+//! the contract (one body per live fighter, finite rect or null, ordered
+//! bounds, a camera inside its ranges) and refuses `bad_view` otherwise,
+//! never a partial success. Until a host registers, both verbs refuse
+//! `unsupported_view_source`, never a success shape. Units: meters, radians,
+//! seconds, degrees, picture share `0..=1`, fixed ticks. Determinism: the
+//! door adds nothing to the host's numbers; same seed plus tape twice gives
+//! the same bytes. Errors: [`McpToolError`] with `no_live_bout`,
+//! `unsupported_view_source`, `bad_view` or the host's own code.
 //!
 //! `look.judge` follows the capture pattern: the endpoint owns no judge. A
 //! host that links the judge registers it once with [`register_look_judge`];
@@ -29,13 +45,20 @@ use super::{PackDef, PackError, VerbSpec};
 use crate::discover::{DiscoverTool, TOOL_RPC_DISCOVER};
 use crate::log_tools::{LogDigestTool, LogQueryTool, TOOL_LOG_DIGEST, TOOL_LOG_QUERY};
 use crate::mcp::{McpServer, McpToolError};
-use crate::tool_capabilities::CapabilityCard;
+use crate::play::play_session::PlaySlot;
+use crate::tool_capabilities::{CapabilityCard, CheckKind};
 
 /// Pack name.
 pub const PACK: &str = "view";
 
 /// Verb: score a capture set by machine.
 pub const TOOL_LOOK_JUDGE: &str = "look.judge";
+
+/// Verb: read the live view's camera, drawn bodies and laws.
+pub const TOOL_VIEW_OBSERVE: &str = "view.observe";
+
+/// Verb: read the live view's `arena view:` laws line.
+pub const TOOL_VIEW_LAWS: &str = "view.laws";
 
 /// Rubric ids a judge answer must carry, in order.
 pub const LOOK_RUBRIC_IDS: [&str; 9] = ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"];
@@ -46,15 +69,24 @@ pub const LOOK_JUDGE_SCHEMA: u64 = 1;
 /// Longest directory argument in chars.
 const MAX_DIR_CHARS: usize = 512;
 
-/// The view pack: log digest, log pages, the manifest and the look judge,
-/// loaded on demand.
+/// The view pack: the live view as numbers, the log digest and pages, the
+/// manifest and the look judge, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
-        "what the door sees: observe-log digest and pages, the self-describing manifest, \
-         look.judge (machine scores for a capture set)",
+        "what the door sees: the live view as numbers, observe logs, the manifest, look.judge scores",
         false,
     );
+    pack.add(VerbSpec::of::<ViewObserveTool>(
+        TOOL_VIEW_OBSERVE,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<ViewLawsTool>(
+        TOOL_VIEW_LAWS,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
     pack.add(VerbSpec::of::<LogDigestTool>(
         TOOL_LOG_DIGEST,
         PACK,
@@ -293,6 +325,325 @@ impl SyncTool<McpServer> for LookJudgeTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// view.observe and view.laws: the live view as numbers, from a host that
+// links the SP61 view truth.
+// ---------------------------------------------------------------------------
+
+/// Camera the host drew with: eye and target in meters, vertical fov in
+/// degrees.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewCamera {
+    pub eye: [f32; 3],
+    pub target: [f32; 3],
+    pub fov_deg: f32,
+}
+
+/// One drawn body as the host posed it.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewBody {
+    pub slot: u8,
+    pub act: String,
+    pub clip: u8,
+    pub tint: bool,
+    pub root: [f32; 3],
+    pub min: Option<[f32; 3]>,
+    pub max: Option<[f32; 3]>,
+    pub screen: Option<[f32; 4]>,
+    pub cover: f32,
+}
+
+/// One live frame from the view host: the camera, every drawn body and the
+/// `arena view:` laws line so far. The door returns these bytes unchanged
+/// after the contract check.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewFrame {
+    /// Ticks simulated when the frame was drawn (the live bout's count).
+    pub tick: u32,
+    /// Camera that drew the frame.
+    pub camera: ViewCamera,
+    /// Every drawn body, one per live fighter.
+    pub bodies: Vec<ViewBody>,
+    /// The `arena view:` laws line, byte for byte; `""` at tick 0.
+    pub laws: String,
+}
+
+/// A registered view host: `(seed, ticks, fighters)` from the live bout in,
+/// one [`ViewFrame`] out, or the refusal to pass on. The host links the SP61
+/// view truth; the door never links a renderer.
+pub type ViewSourceFn = fn(seed: u64, ticks: u32, fighters: u8) -> Result<ViewFrame, McpToolError>;
+
+static VIEW_SOURCE: OnceLock<ViewSourceFn> = OnceLock::new();
+
+/// Register the view host for this process. The host that links the SP61 view
+/// truth calls this once at start; a second call refuses, so no later code
+/// swaps the view under a running door.
+///
+/// # Errors
+///
+/// `view_source_registered` when a host is already registered.
+pub fn register_view_source(source: ViewSourceFn) -> Result<(), McpToolError> {
+    VIEW_SOURCE.set(source).map_err(|_| {
+        McpToolError::new(
+            "view_source_registered",
+            "a view host is already registered for this process; \
+             restart the host to register another",
+        )
+    })
+}
+
+/// Args for `view.observe`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewObserveArgs {}
+
+/// `view.observe` result: the live view after the bout's last tick.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewObserveOutput {
+    pub tick: u32,
+    pub seed: String,
+    pub participants: u8,
+    pub camera: ViewCamera,
+    pub bodies: Vec<ViewBody>,
+    pub laws: String,
+    pub check: String,
+}
+
+/// Args for `view.laws`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewLawsArgs {}
+
+/// `view.laws` result: the live view's laws line.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewLawsOutput {
+    pub tick: u32,
+    pub laws: String,
+}
+
+/// No bout: the refusal `sim.observe` gives, same code and same recovery.
+fn no_live_bout() -> McpToolError {
+    McpToolError::new(
+        "no_live_bout",
+        "no live bout in this session; call sim.reset or sim.step first, then re-run view.observe \
+         or view.laws",
+    )
+}
+
+/// Unwired host: structured unsupported, never a success shape.
+fn unsupported_view_source() -> McpToolError {
+    McpToolError::new(
+        "unsupported_view_source",
+        "no view host is registered: the door owns no view, so a host that links the SP61 view \
+         truth must call register_view_source; absent host is unsupported, never success. Next: \
+         run the door in a host that links the view truth",
+    )
+}
+
+fn bad_view(why: impl std::fmt::Display) -> McpToolError {
+    McpToolError::new(
+        "bad_view",
+        format!(
+            "the view host answered outside its contract ({why}); re-run after fixing the host"
+        ),
+    )
+}
+
+/// A finite camera inside its ranges.
+fn check_camera(camera: &ViewCamera) -> Result<(), McpToolError> {
+    if !camera
+        .eye
+        .iter()
+        .chain(&camera.target)
+        .all(|v| v.is_finite())
+    {
+        return Err(bad_view("a camera vector is not finite"));
+    }
+    if !(camera.fov_deg.is_finite() && camera.fov_deg > 0.0 && camera.fov_deg < 180.0) {
+        return Err(bad_view(format!(
+            "fov_deg {} is not in (0, 180)",
+            camera.fov_deg
+        )));
+    }
+    Ok(())
+}
+
+/// One body inside the contract: an act, both bounds or neither, a finite
+/// ordered rect inside the picture, a finite cover in `0..=1`.
+fn check_body(body: &ViewBody) -> Result<(), McpToolError> {
+    if body.act.is_empty() {
+        return Err(bad_view(format!("body slot {} has no act", body.slot)));
+    }
+    match (body.min, body.max) {
+        (Some(lo), Some(hi)) => {
+            let finite = (0..3).all(|axis| lo[axis].is_finite() && hi[axis].is_finite());
+            let ordered = (0..3).all(|axis| lo[axis] <= hi[axis]);
+            if !finite || !ordered {
+                return Err(bad_view(format!(
+                    "body slot {} bounds are not finite and ordered",
+                    body.slot
+                )));
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(bad_view(format!(
+                "body slot {} carries one bound and not the other",
+                body.slot
+            )))
+        }
+    }
+    if let Some(rect) = body.screen {
+        let finite = rect.iter().all(|v| v.is_finite());
+        let ordered = rect[0] < rect[2] && rect[1] < rect[3];
+        let inside = rect.iter().all(|v| (-1.0..=1.0).contains(v));
+        if !finite || !ordered || !inside {
+            return Err(bad_view(format!(
+                "body slot {} screen rect {rect:?} is not a finite ordered rect inside -1..=1",
+                body.slot
+            )));
+        }
+    }
+    if !(body.cover.is_finite() && (0.0..=1.0).contains(&body.cover)) {
+        return Err(bad_view(format!(
+            "body slot {} cover {} is not in 0..=1",
+            body.slot, body.cover
+        )));
+    }
+    Ok(())
+}
+
+/// The host's frame against the live bout: same tick, one body per live
+/// fighter in `0..participants`, a laws line once a tick was folded.
+fn check_frame(frame: &ViewFrame, ticks: u32, participants: u8) -> Result<(), McpToolError> {
+    if frame.tick != ticks {
+        return Err(bad_view(format!(
+            "frame tick {} is not the live bout's {ticks}",
+            frame.tick
+        )));
+    }
+    check_camera(&frame.camera)?;
+    if ticks > 0 && frame.laws.is_empty() {
+        return Err(bad_view(format!(
+            "laws line is empty at tick {ticks}; the host must fold the run"
+        )));
+    }
+    let mut seen = vec![false; usize::from(participants)];
+    for body in &frame.bodies {
+        let Some(here) = seen.get_mut(usize::from(body.slot)) else {
+            return Err(bad_view(format!(
+                "body slot {} is outside 0..{participants}",
+                body.slot
+            )));
+        };
+        if *here {
+            return Err(bad_view(format!("body slot {} appears twice", body.slot)));
+        }
+        *here = true;
+        check_body(body)?;
+    }
+    if let Some(slot) = seen.iter().position(|seen| !seen) {
+        return Err(bad_view(format!(
+            "body slot {slot} is missing; the host must name every live fighter once"
+        )));
+    }
+    Ok(())
+}
+
+/// Read the live bout's view spec and the host's frame for it. Refusal order
+/// matches `sim.observe`: no bout first, then no host, then the host's own
+/// refusal, then the contract check.
+fn live_frame(
+    slot: &PlaySlot,
+    source: Option<ViewSourceFn>,
+) -> Result<(u64, u8, u32, ViewFrame), McpToolError> {
+    let bout = slot.current().ok_or_else(no_live_bout)?;
+    let spec = bout.spec();
+    let seed = spec.seed;
+    let participants = spec.participants;
+    let ticks = bout.observe(0).tick;
+    let source = source.ok_or_else(unsupported_view_source)?;
+    let frame = source(seed, ticks, participants)?;
+    check_frame(&frame, ticks, participants)?;
+    Ok((seed, participants, ticks, frame))
+}
+
+/// Pure observe core: the live bout's view. Steps nothing and writes nothing.
+fn observe_core(
+    slot: &PlaySlot,
+    source: Option<ViewSourceFn>,
+) -> Result<ViewObserveOutput, McpToolError> {
+    let (seed, participants, ticks, frame) = live_frame(slot, source)?;
+    Ok(ViewObserveOutput {
+        tick: ticks,
+        seed: seed.to_string(),
+        participants,
+        camera: frame.camera,
+        bodies: frame.bodies,
+        laws: frame.laws,
+        check: CheckKind::ReadOnly.name().to_owned(),
+    })
+}
+
+/// Pure laws core: the live bout's `arena view:` line, unchanged.
+fn laws_core(
+    slot: &PlaySlot,
+    source: Option<ViewSourceFn>,
+) -> Result<ViewLawsOutput, McpToolError> {
+    let (_, _, ticks, frame) = live_frame(slot, source)?;
+    Ok(ViewLawsOutput {
+        tick: ticks,
+        laws: frame.laws,
+    })
+}
+
+fn view_observe(
+    service: &McpServer,
+    _args: &ViewObserveArgs,
+) -> Result<ViewObserveOutput, McpToolError> {
+    service.dispatch(TOOL_VIEW_OBSERVE, |state| {
+        observe_core(&state.play, VIEW_SOURCE.get().copied())
+    })
+}
+
+fn view_laws(service: &McpServer, _args: &ViewLawsArgs) -> Result<ViewLawsOutput, McpToolError> {
+    service.dispatch(TOOL_VIEW_LAWS, |state| {
+        laws_core(&state.play, VIEW_SOURCE.get().copied())
+    })
+}
+
+crate::e2_tool!(
+    /// `view.observe` tool: the live view's camera, drawn bodies and laws. Read-only.
+    ViewObserveTool,
+    name = TOOL_VIEW_OBSERVE,
+    description = "Live view as numbers: camera, every drawn body (act, clip, tint, root, bounds, screen rect, cover) and the arena view laws line, from the view host. Run sim.reset or sim.step first. Writes nothing.",
+    readonly = true,
+    args = ViewObserveArgs,
+    output = ViewObserveOutput,
+    invoke = view_observe
+);
+
+crate::e2_tool!(
+    /// `view.laws` tool: the live view's `arena view:` laws line. Read-only.
+    ViewLawsTool,
+    name = TOOL_VIEW_LAWS,
+    description = "The arena view laws line for the live bout, byte for byte from the view host: frames, ticks, pops, sinking, foot slide, ragdolls. Run sim.reset or sim.step first. Writes nothing.",
+    readonly = true,
+    args = ViewLawsArgs,
+    output = ViewLawsOutput,
+    invoke = view_laws
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,5 +847,345 @@ mod tests {
             (passed.code, passed.message.as_str()),
             ("no_frames", "capture set holds no frame; re-run")
         );
+    }
+
+    // ---- view.observe and view.laws: the live view as numbers --------------
+
+    use crate::packs::gym::{SimResetArgs, SimResetTool, SimStepArgs, SimStepTool};
+    use crate::play::PlayInputDto;
+    use rmcp::handler::server::router::tool::SyncTool;
+
+    /// Match seed: the bout these door tests step.
+    const BOUT_SEED: u64 = 2;
+
+    /// The exact `arena view:` line SP61 prints for its breach fixture
+    /// (`view_truth.rs`, `breaches_count_and_the_receipt_line_is_exact`).
+    /// The door must pass it byte for byte.
+    const SP61_VIEW_LINE: &str = "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02 foot_slide_cm=0.0 planted_feet=0 ragdolls=0 spear=0 tether=0";
+
+    /// Fighter 0 closes and swings at tick 0, then swings again at tick 30.
+    fn script() -> Vec<PlayInputDto> {
+        vec![
+            PlayInputDto {
+                tick: 0,
+                fighter: 0,
+                mx: 100,
+                mz: 0,
+                facing: 0,
+                buttons: 0x01,
+            },
+            PlayInputDto {
+                tick: 30,
+                fighter: 0,
+                mx: 60,
+                mz: 0,
+                facing: 0,
+                buttons: 0x01,
+            },
+        ]
+    }
+
+    fn step_args(seed: u64, ticks: u32) -> SimStepArgs {
+        SimStepArgs {
+            seed: Some(seed),
+            participants: Some(2),
+            half_extent_m: Some(20.0),
+            ticks: Some(ticks),
+            inputs: Some(
+                script()
+                    .into_iter()
+                    .filter(|input| input.tick < ticks)
+                    .collect(),
+            ),
+            events: Some(64),
+        }
+    }
+
+    fn step(server: &McpServer, seed: u64, ticks: u32) {
+        SimStepTool::invoke(server, step_args(seed, ticks)).expect("step serves");
+    }
+
+    fn fixture_camera() -> ViewCamera {
+        ViewCamera {
+            eye: [0.0, 5.0, 12.0],
+            target: [0.0, 1.0, 0.0],
+            fov_deg: 50.0,
+        }
+    }
+
+    /// A contract-clean frame: slot 0 draws on screen with bounds, later
+    /// slots sit behind the camera with no rect and no bounds.
+    fn fixture(_seed: u64, ticks: u32, fighters: u8) -> Result<ViewFrame, McpToolError> {
+        let bodies = (0..fighters)
+            .map(|slot| ViewBody {
+                slot,
+                act: "idle".to_owned(),
+                clip: 0,
+                tint: slot % 2 == 1,
+                root: [f32::from(slot), 0.0, 0.0],
+                min: (slot == 0).then_some([-0.3, 0.0, -0.3]),
+                max: (slot == 0).then_some([0.3, 1.8, 0.3]),
+                screen: (slot == 0).then_some([-0.2, -0.4, 0.2, 0.4]),
+                cover: if slot == 0 { 0.08 } else { 0.0 },
+            })
+            .collect();
+        Ok(ViewFrame {
+            tick: ticks,
+            camera: fixture_camera(),
+            bodies,
+            laws: if ticks == 0 {
+                String::new()
+            } else {
+                SP61_VIEW_LINE.to_owned()
+            },
+        })
+    }
+
+    fn observe_with(server: &McpServer) -> ViewObserveOutput {
+        let state = server.lock().expect("test lock holds");
+        observe_core(&state.play, Some(fixture)).expect("view.observe serves")
+    }
+
+    fn laws_with(server: &McpServer) -> ViewLawsOutput {
+        let state = server.lock().expect("test lock holds");
+        laws_core(&state.play, Some(fixture)).expect("view.laws serves")
+    }
+
+    fn observe_json(server: &McpServer) -> String {
+        rmcp::serde_json::to_string(&observe_with(server)).expect("view.observe serializes")
+    }
+
+    #[test]
+    fn view_observe_names_every_live_fighter_after_120_ticks() {
+        let server = server();
+        step(&server, BOUT_SEED, 120);
+        let seen = observe_with(&server);
+        assert_eq!(seen.tick, 120, "the view is drawn at the bout's tick");
+        assert_eq!(seen.seed, "2");
+        assert_eq!(seen.participants, 2);
+        assert_eq!(seen.check, CheckKind::ReadOnly.name());
+        assert_eq!(seen.laws, SP61_VIEW_LINE, "the laws ride along unchanged");
+        let slots: Vec<u8> = seen.bodies.iter().map(|body| body.slot).collect();
+        assert_eq!(
+            slots,
+            [0, 1],
+            "every live fighter is named once, in slot order"
+        );
+        for body in &seen.bodies {
+            assert!(
+                body.cover.is_finite() && (0.0..=1.0).contains(&body.cover),
+                "slot {} cover {}",
+                body.slot,
+                body.cover
+            );
+            if let Some(rect) = body.screen {
+                assert!(
+                    rect.iter().all(|v| v.is_finite()),
+                    "slot {} rect {rect:?} is finite",
+                    body.slot
+                );
+            }
+        }
+        assert!(
+            seen.bodies[0].screen.is_some(),
+            "the body in front reads a rect"
+        );
+        assert!(
+            seen.bodies[1].screen.is_none(),
+            "a body behind the camera reads null"
+        );
+        assert!(seen.bodies[0].min.is_some() && seen.bodies[0].max.is_some());
+        assert!(seen.bodies[1].min.is_none() && seen.bodies[1].max.is_none());
+    }
+
+    #[test]
+    fn view_observe_one_tape_twice_is_byte_identical() {
+        let first = {
+            let session = server();
+            step(&session, BOUT_SEED, 120);
+            observe_json(&session)
+        };
+        let second = {
+            let session = server();
+            step(&session, BOUT_SEED, 120);
+            observe_json(&session)
+        };
+        assert_eq!(first, second, "two sessions, one tape, one byte stream");
+        // One session replaying the same tape through a reset says the same.
+        let replay = server();
+        step(&replay, BOUT_SEED, 120);
+        let live = observe_json(&replay);
+        SimResetTool::invoke(
+            &replay,
+            SimResetArgs {
+                seed: Some(BOUT_SEED),
+                participants: Some(2),
+                half_extent_m: Some(20.0),
+            },
+        )
+        .expect("reset serves");
+        step(&replay, BOUT_SEED, 120);
+        assert_eq!(
+            live,
+            observe_json(&replay),
+            "reset plus the tape replays the bytes"
+        );
+        assert_eq!(live, first);
+        // Another seed changes the bout identity, so the bytes differ.
+        let other = {
+            let session = server();
+            step(&session, BOUT_SEED + 1, 120);
+            observe_json(&session)
+        };
+        assert_ne!(first, other, "another seed is another view");
+    }
+
+    #[test]
+    fn view_laws_pops_the_sp61_line() {
+        let server = server();
+        step(&server, BOUT_SEED, 120);
+        let laws = laws_with(&server);
+        assert_eq!(laws.laws, SP61_VIEW_LINE, "byte for byte from SP61");
+        assert_eq!(laws.tick, 120);
+        assert_eq!(
+            laws.laws,
+            observe_with(&server).laws,
+            "view.observe and view.laws pop the same line"
+        );
+    }
+
+    #[test]
+    fn view_laws_at_tick_zero_pops_the_empty_line() {
+        let server = server();
+        SimResetTool::invoke(
+            &server,
+            SimResetArgs {
+                seed: Some(BOUT_SEED),
+                participants: Some(2),
+                half_extent_m: Some(20.0),
+            },
+        )
+        .expect("reset serves");
+        let laws = laws_with(&server);
+        assert_eq!(laws.tick, 0);
+        assert_eq!(laws.laws, "", "no frame folded yet, so no line");
+    }
+
+    #[test]
+    fn view_refuses_without_a_bout_then_without_a_source() {
+        let server = server();
+        {
+            let state = server.lock().expect("test lock holds");
+            for error in [
+                observe_core(&state.play, Some(fixture)).expect_err("nothing stepped yet"),
+                laws_core(&state.play, Some(fixture)).expect_err("nothing stepped yet"),
+            ] {
+                assert_eq!(error.code, "no_live_bout");
+                assert!(error.message.contains("sim.step"), "{}", error.message);
+            }
+        }
+        step(&server, BOUT_SEED, 8);
+        {
+            let state = server.lock().expect("test lock holds");
+            for error in [
+                observe_core(&state.play, None).expect_err("no host"),
+                laws_core(&state.play, None).expect_err("no host"),
+            ] {
+                assert_eq!(error.code, "unsupported_view_source");
+                assert!(
+                    error.message.contains("register_view_source"),
+                    "{}",
+                    error.message
+                );
+                assert!(error.message.contains("never success"), "{}", error.message);
+            }
+        }
+    }
+
+    #[test]
+    fn view_refuses_a_host_frame_outside_the_contract() {
+        let good = fixture(BOUT_SEED, 120, 2).expect("fixture builds");
+        let outside = |edit: &dyn Fn(&mut ViewFrame), why: &str| {
+            let mut frame = good.clone();
+            edit(&mut frame);
+            let error = check_frame(&frame, 120, 2).expect_err(why);
+            assert_eq!(error.code, "bad_view", "{why}");
+            assert!(error.message.contains(why), "{why}: {}", error.message);
+        };
+        outside(&|frame| frame.tick = 119, "frame tick");
+        outside(&|frame| frame.camera.eye = [f32::NAN; 3], "camera");
+        outside(&|frame| frame.camera.fov_deg = 0.0, "fov_deg");
+        outside(&|frame| frame.laws.clear(), "laws line is empty");
+        outside(
+            &|frame| {
+                frame.bodies.pop();
+            },
+            "slot 1 is missing",
+        );
+        outside(&|frame| frame.bodies[1].slot = 0, "slot 0 appears twice");
+        outside(&|frame| frame.bodies[1].slot = 2, "outside 0..2");
+        outside(&|frame| frame.bodies[0].act.clear(), "no act");
+        outside(&|frame| frame.bodies[0].max = None, "one bound");
+        outside(
+            &|frame| frame.bodies[0].min = Some([1.0, 0.0, 0.0]),
+            "not finite and ordered",
+        );
+        outside(
+            &|frame| frame.bodies[0].screen = Some([0.5, 0.0, -0.5, 1.0]),
+            "screen rect",
+        );
+        outside(
+            &|frame| frame.bodies[0].screen = Some([f32::NAN, -0.4, 0.2, 0.4]),
+            "screen rect",
+        );
+        outside(&|frame| frame.bodies[0].cover = 1.5, "cover");
+        // A host's own refusal passes through untouched.
+        fn refusing(_: u64, _: u32, _: u8) -> Result<ViewFrame, McpToolError> {
+            Err(McpToolError::new(
+                "view_host_busy",
+                "host is drawing; re-run",
+            ))
+        }
+        let server = server();
+        step(&server, BOUT_SEED, 8);
+        let state = server.lock().expect("test lock holds");
+        let passed = observe_core(&state.play, Some(refusing)).expect_err("host refuses");
+        assert_eq!(
+            (passed.code, passed.message.as_str()),
+            ("view_host_busy", "host is drawing; re-run")
+        );
+    }
+
+    #[test]
+    fn view_tools_register_in_the_pack_and_api_describe_reads_them() {
+        let registry = PackRegistry::shipped();
+        let pack = registry.pack(PACK).expect("view pack");
+        for (name, needle) in [
+            (TOOL_VIEW_OBSERVE, "screen rect"),
+            (TOOL_VIEW_LAWS, "arena view laws line"),
+        ] {
+            let verb = registry.verb(name).expect("the view verb registers");
+            assert_eq!(verb.pack(), PACK);
+            assert_eq!(verb.card(), CapabilityCard::Observe);
+            assert!(verb.readonly(), "{name} is read-only");
+            assert!(
+                pack.verb_names().contains(&name),
+                "{name} lists in the pack"
+            );
+            let described = ApiDescribeTool::invoke(
+                &server(),
+                ApiDescribeArgs {
+                    path: name.to_owned(),
+                },
+            )
+            .expect("api.describe reads the verb");
+            assert_eq!(described.path, name);
+            assert!(described.docs.contains(needle), "{}", described.docs);
+            assert!(
+                described.signature.contains("view"),
+                "{}",
+                described.signature
+            );
+        }
     }
 }

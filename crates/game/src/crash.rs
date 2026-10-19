@@ -27,6 +27,8 @@ pub const MAX_TAPE_TAIL_BYTES: usize = 64 * 1024;
 pub const MAX_CHECKPOINT_BYTES: usize = 64 * 1024;
 /// Max echoed bytes of an unknown mode token in [`CrashError::UnknownMode`].
 pub const MAX_MODE_ECHO_BYTES: usize = 32;
+/// Max display-mode echo bytes a report carries (`"borderless"` fits easily).
+pub const MAX_DISPLAY_BYTES: usize = 32;
 /// Max echoed bytes of an unknown field name in [`CrashError::UnknownField`].
 pub const MAX_FIELD_ECHO_BYTES: usize = 32;
 
@@ -86,6 +88,11 @@ pub enum CrashError {
     TapeTailTooLarge { len: usize, max: usize },
     /// Checkpoint exceeds [`MAX_CHECKPOINT_BYTES`]; lengths are bytes.
     CheckpointTooLarge { len: usize, max: usize },
+    /// Display-mode echo exceeds [`MAX_DISPLAY_BYTES`]; lengths are bytes.
+    DisplayTooLong { len: usize, max: usize },
+    /// The settings the caller holds are from another run; the report carries
+    /// the digest it was written under (`want`), the caller offered `got`.
+    SettingsDigestMismatch { want: u64, got: u64 },
     /// `mode` row is not `menu` | `fight` | `lobby`; echo clipped to
     /// [`MAX_MODE_ECHO_BYTES`] bytes at a char boundary.
     UnknownMode(String),
@@ -116,6 +123,13 @@ impl fmt::Display for CrashError {
             Self::CheckpointTooLarge { len, max } => {
                 write!(f, "crash checkpoint too large ({len} bytes, max {max})")
             }
+            Self::DisplayTooLong { len, max } => {
+                write!(f, "crash display echo too long ({len} bytes, max {max})")
+            }
+            Self::SettingsDigestMismatch { want, got } => write!(
+                f,
+                "crash settings digest mismatch (report has {want:016x}, caller has {got:016x})"
+            ),
             Self::UnknownMode(echo) => write!(f, "unknown crash mode ({echo})"),
             Self::UnknownField(field) => write!(f, "unknown crash field ({field})"),
             Self::MissingField(row) => write!(f, "crash report missing field ({row})"),
@@ -140,6 +154,13 @@ pub struct CrashReport {
     pub mode: CrashMode,
     /// Fixed-tick cursor at the crash.
     pub tick: u32,
+    /// Digest of the settings tape in force at the crash (`engine_ui`'s
+    /// `SettingsTape::digest`, recorded by [`note_settings`]); `0` when the
+    /// caller carried no settings.
+    pub settings_digest: u64,
+    /// Display-mode echo, e.g. `"borderless"`; bytes bounded by
+    /// [`MAX_DISPLAY_BYTES`], may be empty.
+    pub display: String,
     /// Last input-log bytes (a suffix window of the tape).
     pub tape_tail: Vec<u8>,
     /// Checkpoint snapshot bytes at [`CrashReport::tick`].
@@ -161,10 +182,59 @@ impl CrashReport {
             adapter,
             mode,
             tick,
+            settings_digest: 0,
+            display: String::new(),
             tape_tail,
             checkpoint,
         };
         report.validate().map(|()| report)
+    }
+
+    /// The same bundle with the settings state beside it: the settings tape's
+    /// digest and the display-mode echo. Validates after the change, so an
+    /// oversized echo fails loudly and nothing reaches the disk.
+    ///
+    /// Errors: [`CrashError::DisplayTooLong`] when the echo passes
+    /// [`MAX_DISPLAY_BYTES`].
+    pub fn with_settings(
+        mut self,
+        settings_digest: u64,
+        display: String,
+    ) -> Result<Self, CrashError> {
+        self.settings_digest = settings_digest;
+        self.display = display;
+        self.validate().map(|()| self)
+    }
+
+    /// The pre-crash tick this bundle regenerates, once `settings_digest` is
+    /// the digest the report was written under: the checkpoint's own
+    /// `(tick, hash)` record must agree with the report's `tick`.
+    ///
+    /// The caller holds the settings; a digest from another run is refused
+    /// loudly instead of being replayed against the wrong settings. Only a real
+    /// checkpoint record regenerates: a short record, the drill's synthetic
+    /// payload and a record whose tick disagrees all fail loudly.
+    ///
+    /// Errors: [`CrashError::SettingsDigestMismatch`] for a foreign digest,
+    /// [`CrashError::BadValue`]`("checkpoint")` for a checkpoint that cannot
+    /// regenerate the tick.
+    pub fn regenerate_tick(&self, settings_digest: u64) -> Result<u32, CrashError> {
+        if settings_digest != self.settings_digest {
+            return Err(CrashError::SettingsDigestMismatch {
+                want: self.settings_digest,
+                got: settings_digest,
+            });
+        }
+        if self.checkpoint.len() != CHECKPOINT_RECORD_BYTES {
+            return Err(CrashError::BadValue("checkpoint"));
+        }
+        let mut tick_bytes = [0u8; 4];
+        tick_bytes.copy_from_slice(&self.checkpoint[..4]);
+        let tick = u32::from_le_bytes(tick_bytes);
+        if tick != self.tick {
+            return Err(CrashError::BadValue("checkpoint"));
+        }
+        Ok(tick)
     }
 
     /// Check every bound; the writer runs this before touching the disk.
@@ -194,6 +264,12 @@ impl CrashReport {
             return Err(CrashError::CheckpointTooLarge {
                 len: self.checkpoint.len(),
                 max: MAX_CHECKPOINT_BYTES,
+            });
+        }
+        if self.display.len() > MAX_DISPLAY_BYTES {
+            return Err(CrashError::DisplayTooLong {
+                len: self.display.len(),
+                max: MAX_DISPLAY_BYTES,
             });
         }
         Ok(())
@@ -236,6 +312,8 @@ pub fn error_exit_code(err: &CrashError) -> i32 {
         CrashError::UnknownField(_) => EXIT_CODE_BASE + 16,
         CrashError::MissingField(_) => EXIT_CODE_BASE + 17,
         CrashError::BadValue(_) => EXIT_CODE_BASE + 18,
+        CrashError::DisplayTooLong { .. } => EXIT_CODE_BASE + 19,
+        CrashError::SettingsDigestMismatch { .. } => EXIT_CODE_BASE + 20,
         CrashError::Io(_) => EXIT_CODE_BASE + 15,
     }
 }
@@ -285,9 +363,13 @@ pub fn format_report(report: &CrashReport) -> Result<String, CrashError> {
     append_toml_string(&mut out, &report.adapter);
     out.push_str("\nmode = \"");
     out.push_str(report.mode.as_str());
-    out.push_str("\"\ntick = ");
+    out.push_str("\"\ndisplay = ");
+    append_toml_string(&mut out, &report.display);
+    out.push_str("\ntick = ");
     out.push_str(&report.tick.to_string());
-    out.push_str("\ncheckpoint = \"");
+    out.push_str("\nsettings_digest = \"");
+    out.push_str(&format!("{:016x}", report.settings_digest));
+    out.push_str("\"\ncheckpoint = \"");
     append_hex(&mut out, &report.checkpoint);
     out.push_str("\"\ntape_tail = \"");
     append_hex(&mut out, &report.tape_tail);
@@ -297,8 +379,9 @@ pub fn format_report(report: &CrashReport) -> Result<String, CrashError> {
 
 /// Parse a `[crash]` TOML document back into a [`CrashReport`].
 ///
-/// Strict schema: exactly `version`, `adapter`, `mode`, `tick`,
-/// `checkpoint` and `tape_tail` under one `[crash]` header, in any order.
+/// Strict schema: exactly `version`, `adapter`, `mode`, `display`, `tick`,
+/// `settings_digest`, `checkpoint` and `tape_tail` under one `[crash]` header,
+/// in any order.
 /// Unknown fields fail with [`CrashError::UnknownField`], missing rows with
 /// [`CrashError::MissingField`], malformed rows with [`CrashError::BadValue`]
 /// (bad `mode` keeps [`CrashError::UnknownMode`]) and oversized bundles keep
@@ -309,7 +392,9 @@ pub fn parse_report(text: &str) -> Result<CrashReport, CrashError> {
     let mut version: Option<String> = None;
     let mut adapter: Option<String> = None;
     let mut mode_text: Option<String> = None;
+    let mut display_text: Option<String> = None;
     let mut tick_text: Option<String> = None;
+    let mut settings_digest_text: Option<String> = None;
     let mut checkpoint_text: Option<String> = None;
     let mut tape_tail_text: Option<String> = None;
     let mut header_seen = false;
@@ -327,23 +412,12 @@ pub fn parse_report(text: &str) -> Result<CrashReport, CrashError> {
         }
         let (key, value) = split_row(line)?;
         match key {
-            "version" => {
-                if version.is_some() {
-                    return Err(CrashError::BadValue("version"));
-                }
-                version = Some(parse_toml_string(value, "version")?);
-            }
-            "adapter" => {
-                if adapter.is_some() {
-                    return Err(CrashError::BadValue("adapter"));
-                }
-                adapter = Some(parse_toml_string(value, "adapter")?);
-            }
-            "mode" => {
-                if mode_text.is_some() {
-                    return Err(CrashError::BadValue("mode"));
-                }
-                mode_text = Some(parse_toml_string(value, "mode")?);
+            "version" => take_string(&mut version, value, "version")?,
+            "adapter" => take_string(&mut adapter, value, "adapter")?,
+            "mode" => take_string(&mut mode_text, value, "mode")?,
+            "display" => take_string(&mut display_text, value, "display")?,
+            "settings_digest" => {
+                take_string(&mut settings_digest_text, value, "settings_digest")?;
             }
             "tick" => {
                 if tick_text.is_some() {
@@ -351,18 +425,8 @@ pub fn parse_report(text: &str) -> Result<CrashReport, CrashError> {
                 }
                 tick_text = Some(value.to_string());
             }
-            "checkpoint" => {
-                if checkpoint_text.is_some() {
-                    return Err(CrashError::BadValue("checkpoint"));
-                }
-                checkpoint_text = Some(parse_toml_string(value, "checkpoint")?);
-            }
-            "tape_tail" => {
-                if tape_tail_text.is_some() {
-                    return Err(CrashError::BadValue("tape_tail"));
-                }
-                tape_tail_text = Some(parse_toml_string(value, "tape_tail")?);
-            }
+            "checkpoint" => take_string(&mut checkpoint_text, value, "checkpoint")?,
+            "tape_tail" => take_string(&mut tape_tail_text, value, "tape_tail")?,
             _ => {
                 return Err(CrashError::UnknownField(clip_prefix(
                     key,
@@ -377,7 +441,9 @@ pub fn parse_report(text: &str) -> Result<CrashReport, CrashError> {
     let version = version.ok_or(CrashError::MissingField("version"))?;
     let adapter = adapter.ok_or(CrashError::MissingField("adapter"))?;
     let mode_text = mode_text.ok_or(CrashError::MissingField("mode"))?;
+    let display = display_text.ok_or(CrashError::MissingField("display"))?;
     let tick_text = tick_text.ok_or(CrashError::MissingField("tick"))?;
+    let settings_text = settings_digest_text.ok_or(CrashError::MissingField("settings_digest"))?;
     let checkpoint_text = checkpoint_text.ok_or(CrashError::MissingField("checkpoint"))?;
     let tape_tail_text = tape_tail_text.ok_or(CrashError::MissingField("tape_tail"))?;
     let mode = CrashMode::parse(&mode_text)?;
@@ -385,15 +451,32 @@ pub fn parse_report(text: &str) -> Result<CrashReport, CrashError> {
         .trim()
         .parse()
         .map_err(|_| CrashError::BadValue("tick"))?;
+    let settings_digest = u64::from_str_radix(&settings_text, 16)
+        .map_err(|_| CrashError::BadValue("settings_digest"))?;
     let checkpoint = decode_hex(&checkpoint_text, "checkpoint")?;
     let tape_tail = decode_hex(&tape_tail_text, "tape_tail")?;
-    CrashReport::new(version, adapter, mode, tick, tape_tail, checkpoint)
+    CrashReport::new(version, adapter, mode, tick, tape_tail, checkpoint)?
+        .with_settings(settings_digest, display)
 }
 
 /// Split one `key = value` row; surrounding whitespace is trimmed.
 fn split_row(line: &str) -> Result<(&str, &str), CrashError> {
     let (key, value) = line.split_once('=').ok_or(CrashError::BadValue("row"))?;
     Ok((key.trim(), value.trim()))
+}
+
+/// Record one string row into its slot: the first copy is parsed, a second is
+/// a [`CrashError::BadValue`] naming the row.
+fn take_string(
+    slot: &mut Option<String>,
+    value: &str,
+    row: &'static str,
+) -> Result<(), CrashError> {
+    if slot.is_some() {
+        return Err(CrashError::BadValue(row));
+    }
+    *slot = Some(parse_toml_string(value, row)?);
+    Ok(())
 }
 
 /// Unquote one TOML basic string, inverting [`append_toml_string`].
@@ -556,6 +639,8 @@ struct HookState {
     adapter: String,
     mode: CrashMode,
     tick: u32,
+    settings_digest: u64,
+    display: String,
     tape: VecDeque<u8>,
     checkpoint: Vec<u8>,
 }
@@ -564,6 +649,8 @@ static STATE: Mutex<HookState> = Mutex::new(HookState {
     adapter: String::new(),
     mode: CrashMode::Menu,
     tick: 0,
+    settings_digest: 0,
+    display: String::new(),
     tape: VecDeque::new(),
     checkpoint: Vec::new(),
 });
@@ -639,6 +726,38 @@ pub fn record_fight_tick(cursor: u32, input_bytes: &[u8], checkpoint: Option<(u3
 pub fn set_adapter(description: &str) {
     let mut state = STATE.lock().unwrap_or_else(PoisonError::into_inner);
     state.adapter = clip_prefix(description, MAX_ADAPTER_BYTES);
+}
+
+/// The settings state a crash report carries: the settings tape's digest and
+/// the display-mode echo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingsEcho {
+    /// Digest of the settings tape in force (`engine_ui`'s
+    /// `SettingsTape::digest`); `0` when nothing was recorded.
+    pub digest: u64,
+    /// Display-mode echo, bytes bounded by [`MAX_DISPLAY_BYTES`].
+    pub display: String,
+}
+
+/// Record the live settings state the next crash report carries: the settings
+/// tape's digest plus a display-mode echo, clipped to [`MAX_DISPLAY_BYTES`] at
+/// a char boundary. A caller that changes a setting calls this once; a run that
+/// never calls it reports digest `0` and an empty echo.
+pub fn note_settings(digest: u64, display: &str) {
+    let mut state = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+    state.settings_digest = digest;
+    state.display = clip_prefix(display, MAX_DISPLAY_BYTES);
+}
+
+/// What a report written now would carry as settings state. The report path
+/// reads the same snapshot; this is the read side for tests and the door.
+#[must_use]
+pub fn settings_echo() -> SettingsEcho {
+    let state = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+    SettingsEcho {
+        digest: state.settings_digest,
+        display: state.display.clone(),
+    }
 }
 
 /// Append one status line to the run log. The arena binary calls this for
@@ -759,6 +878,7 @@ fn write_crash_report() -> Result<PathBuf, CrashError> {
                 state.tape.iter().copied().collect(),
                 state.checkpoint.clone(),
             )?
+            .with_settings(state.settings_digest, state.display.clone())?
         }
         None => CrashReport::new(
             BUILD_VERSION.to_string(),
@@ -867,6 +987,8 @@ mod tests {
             adapter: ADAPTER.to_string(),
             mode: CrashMode::Fight,
             tick: 1,
+            settings_digest: 0,
+            display: String::new(),
             tape_tail: Vec::new(),
             checkpoint: vec![0u8; MAX_CHECKPOINT_BYTES + 1],
         };
@@ -962,6 +1084,8 @@ mod tests {
             adapter: ADAPTER.to_string(),
             mode: CrashMode::Lobby,
             tick: 7,
+            settings_digest: 0,
+            display: String::new(),
             tape_tail: Vec::new(),
             checkpoint: vec![0u8; MAX_CHECKPOINT_BYTES + 1],
         };
@@ -1001,8 +1125,8 @@ mod tests {
         assert!(text.contains("v\\\"1\\\\\\n2"), "not escaped:\n{text}");
         assert!(text.contains("a\\tb"), "tab not escaped:\n{text}");
         assert!(text.contains("ab00ff"), "tape hex wrong:\n{text}");
-        // Six rows plus the table header: an unescaped newline would add one.
-        assert_eq!(text.lines().count(), 7, "row leaked a newline:\n{text}");
+        // Eight rows plus the table header: an unescaped newline would add one.
+        assert_eq!(text.lines().count(), 9, "row leaked a newline:\n{text}");
     }
 
     #[test]
@@ -1148,6 +1272,225 @@ mod tests {
             .is_empty());
         assert!(!CrashError::MissingField("tick").to_string().is_empty());
         assert!(!CrashError::BadValue("tick").to_string().is_empty());
+    }
+
+    #[test]
+    fn settings_digest_and_display_roundtrip_through_schema() {
+        let report = sample(CrashMode::Fight)
+            .with_settings(0x0bad_c0de_1234_5678, "borderless".to_string())
+            .expect("settings fit the bounds");
+        let text = format_report(&report).expect("formats");
+        assert!(
+            text.contains("settings_digest = \"0badc0de12345678\""),
+            "{text}"
+        );
+        assert!(text.contains("display = \"borderless\""), "{text}");
+        let parsed = parse_report(&text).expect("parses");
+        assert_eq!(parsed, report, "roundtrip lost the settings state");
+        assert_eq!(format_report(&parsed).expect("reformats"), text);
+        // The two rows are part of the strict schema: dropping one is loud.
+        let missing = text
+            .lines()
+            .filter(|line| !line.starts_with("settings_digest ="))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            parse_report(&missing),
+            Err(CrashError::MissingField("settings_digest"))
+        );
+        let missing = text
+            .lines()
+            .filter(|line| !line.starts_with("display ="))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_eq!(
+            parse_report(&missing),
+            Err(CrashError::MissingField("display"))
+        );
+        // A bad digest string is a bad value, never a silent zero.
+        let bad = text.replacen("settings_digest = \"", "settings_digest = \"zz", 1);
+        assert_eq!(
+            parse_report(&bad),
+            Err(CrashError::BadValue("settings_digest"))
+        );
+        // A bundle with no settings writes the zero digest and an empty echo.
+        let plain = format_report(&sample(CrashMode::Menu)).expect("formats");
+        assert!(
+            plain.contains("settings_digest = \"0000000000000000\""),
+            "{plain}"
+        );
+        assert!(plain.contains("display = \"\""), "{plain}");
+    }
+
+    #[test]
+    fn custom_settings_regenerate_the_pre_crash_tick() {
+        // A real checkpoint record: tick (u32, little-endian) then hash (u64).
+        let tick = 12_345u32;
+        let mut checkpoint = tick.to_le_bytes().to_vec();
+        checkpoint.extend_from_slice(&0x5eed_5eed_5eed_5eedu64.to_le_bytes());
+        let digest = 0x00d1_6e57_1234_0001u64;
+        let report = CrashReport::new(
+            VERSION.to_string(),
+            ADAPTER.to_string(),
+            CrashMode::Fight,
+            tick,
+            Vec::new(),
+            checkpoint,
+        )
+        .expect("bundle valid")
+        .with_settings(digest, "fullscreen".to_string())
+        .expect("settings fit the bounds");
+        assert_eq!(
+            report.regenerate_tick(digest),
+            Ok(tick),
+            "report plus settings regenerate the pre-crash tick"
+        );
+        // The same inputs twice give the same bytes, and the tick still reads
+        // back after a schema roundtrip.
+        let text = format_report(&report).expect("formats");
+        let parsed = parse_report(&text).expect("parses");
+        assert_eq!(parsed.regenerate_tick(digest), Ok(tick));
+        assert_eq!(format_report(&parsed).expect("reformats"), text);
+    }
+
+    #[test]
+    fn settings_digest_mismatch_refuses_loudly() {
+        let tick = 400u32;
+        let mut checkpoint = tick.to_le_bytes().to_vec();
+        checkpoint.extend_from_slice(&7u64.to_le_bytes());
+        let report = CrashReport::new(
+            VERSION.to_string(),
+            ADAPTER.to_string(),
+            CrashMode::Fight,
+            tick,
+            Vec::new(),
+            checkpoint.clone(),
+        )
+        .expect("bundle valid")
+        .with_settings(0xabc, "windowed".to_string())
+        .expect("settings fit");
+        let err = report
+            .regenerate_tick(0xdef)
+            .expect_err("settings from another run are refused");
+        assert_eq!(
+            err,
+            CrashError::SettingsDigestMismatch {
+                want: 0xabc,
+                got: 0xdef
+            }
+        );
+        assert!(
+            err.to_string().contains("0abc"),
+            "the refusal names both: {err}"
+        );
+        assert_ne!(error_exit_code(&err), 0);
+        assert_ne!(
+            error_exit_code(&err),
+            error_exit_code(&CrashError::BadValue("checkpoint"))
+        );
+        // A matching digest with a checkpoint that cannot regenerate the tick
+        // is a bad value, never a silent tick: the drill payload is synthetic.
+        let drill = sample(CrashMode::Fight);
+        assert!(matches!(
+            drill.regenerate_tick(0),
+            Err(CrashError::BadValue("checkpoint"))
+        ));
+        // A short record and a record whose tick disagrees both fail too.
+        let short = CrashReport::new(
+            VERSION.to_string(),
+            ADAPTER.to_string(),
+            CrashMode::Fight,
+            tick,
+            Vec::new(),
+            tick.to_le_bytes().to_vec(),
+        )
+        .expect("bundle valid")
+        .with_settings(0, String::new())
+        .expect("no settings fit");
+        assert!(matches!(
+            short.regenerate_tick(0),
+            Err(CrashError::BadValue("checkpoint"))
+        ));
+        let disagreeing = CrashReport::new(
+            VERSION.to_string(),
+            ADAPTER.to_string(),
+            CrashMode::Fight,
+            tick + 1,
+            Vec::new(),
+            checkpoint,
+        )
+        .expect("bundle valid")
+        .with_settings(0, String::new())
+        .expect("no settings fit");
+        assert!(matches!(
+            disagreeing.regenerate_tick(0),
+            Err(CrashError::BadValue("checkpoint"))
+        ));
+    }
+
+    #[test]
+    fn oversized_display_fails_loudly_with_a_distinct_code() {
+        let err = sample(CrashMode::Fight)
+            .with_settings(1, "d".repeat(MAX_DISPLAY_BYTES + 1))
+            .expect_err("overlong display echo accepted");
+        assert_eq!(
+            err,
+            CrashError::DisplayTooLong {
+                len: MAX_DISPLAY_BYTES + 1,
+                max: MAX_DISPLAY_BYTES,
+            }
+        );
+        assert_ne!(error_exit_code(&err), 0);
+        assert_ne!(
+            error_exit_code(&err),
+            error_exit_code(&CrashError::UnknownMode("x".to_string()))
+        );
+        assert!(!err.to_string().is_empty());
+        // The bound itself is legal and writes.
+        let dir = drill_dir("display-bound");
+        let report = sample(CrashMode::Fight)
+            .with_settings(2, "d".repeat(MAX_DISPLAY_BYTES))
+            .expect("the bound is legal");
+        let path = dir.join("crash-display-bound.toml");
+        write_report(&path, &report).expect("bound-sized echo writes");
+        let text = std::fs::read_to_string(&path).expect("report readable");
+        assert_eq!(parse_report(&text).expect("parses"), report);
+        std::fs::remove_dir_all(&dir).expect("drill temp cleaned");
+    }
+
+    #[test]
+    fn note_settings_records_the_live_settings_echo() {
+        // A run that never records settings reports the defaults.
+        note_settings(0, "");
+        assert_eq!(
+            settings_echo(),
+            SettingsEcho {
+                digest: 0,
+                display: String::new()
+            }
+        );
+        note_settings(0xc0ff_ee00_1234_5678, "borderless");
+        assert_eq!(
+            settings_echo(),
+            SettingsEcho {
+                digest: 0xc0ff_ee00_1234_5678,
+                display: "borderless".to_string()
+            }
+        );
+        // A hostile echo is clipped at a char boundary, never stored raw.
+        note_settings(9, &"🪂".repeat(32));
+        let echo = settings_echo();
+        assert_eq!(echo.digest, 9);
+        assert!(
+            echo.display.len() <= MAX_DISPLAY_BYTES,
+            "{:?}",
+            echo.display
+        );
+        assert!(echo.display.is_char_boundary(echo.display.len()));
+        // Leave the shared snapshot as the other tests expect to find it.
+        note_settings(0, "");
     }
 
     #[test]

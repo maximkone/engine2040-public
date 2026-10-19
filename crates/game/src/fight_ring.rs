@@ -522,6 +522,8 @@ impl FightRing {
                 },
                 base_color: Some(texture),
                 normal_map: None,
+                orm: None,
+                emissive: None,
             });
             pushed += 1;
         }
@@ -539,6 +541,8 @@ impl FightRing {
                 },
                 base_color: Some(self.stone.0),
                 normal_map: None,
+                orm: None,
+                emissive: None,
             });
             pushed += 1;
         }

@@ -248,6 +248,8 @@ pub(crate) mod fixtures {
                 },
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             });
         }
         let mut camera = Camera::new(

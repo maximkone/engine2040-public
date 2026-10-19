@@ -107,6 +107,7 @@ export const OWN_TEST_BINARY = {
   "perf/profiler": "flips the process-wide ENABLED switch",
   "perf/w1_pf9a_paired": "flips the process-wide ENABLED switch",
   "editor/material_ops": "NS31a2 Accept names it as --test material_ops; it drives the document's material table through the public command API",
+  "render/material_swatch": "NS31d3 Accept names it as --test material_swatch; it opens its own device and reads a swatch frame back, state the shared tests/it harness does not carry",
 };
 export function testLayoutViolations(crates, own = OWN_TEST_BINARY) {
   const found = [];

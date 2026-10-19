@@ -139,6 +139,97 @@ fn explain_at_a_tick_logs_the_host_calls_without_changing_the_match() {
     assert!(!explanation.fighters[0].calls.is_empty());
 }
 
+/// The blessed arena hashes: the row's second-PC replay fixture, written once
+/// by `bless_arena_hashes` and read here.
+const HASHES: &str = include_str!("data/arena_drive_hashes.txt");
+/// Seeds the fixture holds, in file order.
+const HASH_SEEDS: [u64; 2] = [2040, 7];
+/// Tick whose checkpoint hash the fixture carries (the row names 599).
+const HASH_TICK: u32 = 599;
+
+/// The hash the row fixes: the scripted drive's checkpoint at [`HASH_TICK`],
+/// reproducible twice on this machine before it is reported.
+fn hashed_drive(seed: u64) -> u64 {
+    let first = last_hash(seed);
+    let second = last_hash(seed);
+    assert_eq!(
+        first, second,
+        "seed {seed}: the arena drive must be reproducible x2 on this machine"
+    );
+    first
+}
+
+/// One run's checkpoint hash at the row's tick.
+fn last_hash(seed: u64) -> u64 {
+    let (checkpoints, stats) = driven(seed, &[0]);
+    assert_eq!(stats.faults, 0, "the script ran clean: {stats:?}");
+    let last = checkpoints.last().expect("600 checkpoints");
+    assert_eq!(last.tick, HASH_TICK, "the row names tick {HASH_TICK}");
+    last.hash
+}
+
+/// One fixture line: `<seed> <tick> <hash>`, lower-case hex, fixed width.
+fn hash_line(seed: u64) -> String {
+    format!("{seed} {HASH_TICK} {:016x}", hashed_drive(seed))
+}
+
+/// Writes the hash fixture once on the blessing machine. Ignored by default:
+/// `cargo test -p engine-rules --features arena --test arena_drive
+/// bless_arena_hashes -- --ignored`.
+#[test]
+#[ignore = "writes the hash fixture; run once on the machine that blesses it"]
+fn bless_arena_hashes() {
+    let mut text = String::from(
+        "# arena_drive_hashes: seed tick hash of the scripted arena drive (NS32d).\n\
+         # Config: 600 ticks, 2 fighters, half 12 m, table v1, slot 0 runs\n\
+         # scripts/shield_bash_arena.rhai; the hash is the tick 599 checkpoint.\n\
+         # Written by: cargo test -p engine-rules --features arena --test arena_drive \\\n\
+         #   bless_arena_hashes -- --ignored\n\
+         # A hash that differs on another machine is a finding for docs/BLOCKERS.md, never a\n\
+         # loosened test: floats enter the arena hash.\n",
+    );
+    for seed in HASH_SEEDS {
+        text.push_str(&hash_line(seed));
+        text.push('\n');
+    }
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/arena_drive_hashes.txt");
+    std::fs::write(&path, text).expect("the fixture path is in the tree");
+    println!(
+        "blessed {} line(s) into {}",
+        HASH_SEEDS.len(),
+        path.display()
+    );
+}
+
+/// The second-PC replay check: the fixture's hashes must come back on this
+/// machine, and every run must repeat itself. A mismatch is the row's finding
+/// (floats enter the arena hash), written to `docs/BLOCKERS.md`, not a loosened
+/// bar.
+#[test]
+fn arena_drive_hashes() {
+    let wanted: Vec<&str> = HASHES
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    assert_eq!(
+        wanted.len(),
+        HASH_SEEDS.len(),
+        "the fixture carries one line per seed"
+    );
+    for (index, seed) in HASH_SEEDS.iter().enumerate() {
+        let got = hash_line(*seed);
+        assert_eq!(
+            got, wanted[index],
+            "seed {seed}: the arena hash differs from the blessed fixture; a mismatch across \
+             machines is a finding for docs/BLOCKERS.md, never a loosened test"
+        );
+        println!("{got}");
+    }
+    println!("arena_drive_hashes: {} line(s) equal", HASH_SEEDS.len());
+}
+
 /// Tape that walks slot 0 from its spawn straight at slot 1's spawn, holding
 /// attack plus block every tick, while slot 1 stands still. Movement is
 /// world-planar in wishes, so the aim comes from the spawn positions. The

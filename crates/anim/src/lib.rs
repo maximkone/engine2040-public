@@ -62,11 +62,11 @@ pub mod lod;
 mod lod_w1_test;
 pub mod motion_match;
 pub mod motion_net;
+#[cfg(test)]
+mod motion_schema_test;
 /// Style and terrain dials for the motion-matching search: style and grade tags
 /// from the LOC2 bake steer the integer scan. Integer-only (NS7).
 pub mod motion_style;
-#[cfg(test)]
-mod motion_schema_test;
 /// Per-fighter pose-hash rings naming the first divergent tick and fighter
 /// between two clients. Diagnostics only, never authoritative.
 pub mod net_diverge;
@@ -99,6 +99,8 @@ pub mod trails;
 pub mod traversal;
 #[cfg(test)]
 mod traversal_link_test;
+#[cfg(test)]
+mod traversal_rubble_var_test;
 #[cfg(test)]
 mod traversal_siege_test;
 pub mod viseme;

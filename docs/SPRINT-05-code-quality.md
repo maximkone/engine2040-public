@@ -122,10 +122,21 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   `crates/net/src/lib.rs`, `crates/net/src/anticheat.rs`. Accept: bare
   unitless names gone; tests green; golden x2. needs: none.
   (API-REVIEW wave 54.)
-- [ ] CQ-NET-API7 net: Debug plus docs pass — `#[derive(Debug)]` (plus Progress 2026-10-17: net string_errors 0, undoc_pub 50 -> 2 (interest.rs:535 `select`, tick_budget.rs:635 `capture`), score 98; the stale quic.rs wire-up comment is gone. Left: those 2 docs and the tick_budget Fnv64 fold (unchecked).
+- [x] CQ-NET-API7 net: Debug plus docs pass — `#[derive(Debug)]` (plus Progress 2026-10-17: net string_errors 0, undoc_pub 50 -> 2 (interest.rs:535 `select`, tick_budget.rs:635 `capture`), score 98; the stale quic.rs wire-up comment is gone. Left: those 2 docs and the tick_budget Fnv64 fold (unchecked).
   `Clone` where cheap) on the session/server/client/log types;
   document the 50 `undoc` public items; delete the stale
   `quic.rs:10-11` wire-up comment; `tick_budget` folds go through
   `engine_core::Fnv64`. Tier A. Size S. Owns `crates/net/src/`. Accept:
   net `undoc` 0; net `str_err` 0; score improves from 75; tests green.
-  needs: CQ-NET-API2. (API-REVIEW wave 54.)
+  needs: CQ-NET-API2. (API-REVIEW wave 54.) Landed b052e7e6. The two items the
+  2026-10-17 note named as left were already documented in the tree
+  (`interest.rs::select`, `tick_budget.rs::summary`); the last one, the
+  `tick_budget` fold, now goes through `engine_core::Fnv64` —
+  `TickBudget::fold_snapshot` spelled FNV-1a's offset and prime in decimal
+  (`1_464_717_047_381_303_168`, `1_099_511_628_211`), which the hex-reading
+  reimplementation gate never saw, and the value is fed to `black_box` and never
+  compared, so only the work it forces is the point. Accept met:
+  `rust-quality --crate engine-net --no-cache` undoc_pub 0, string_errors 0,
+  hash_reimpl 0, score 99 (A); `cargo test -p engine-net --lib` 357 passed, 2
+  ignored (run 39207576011); golden d57b5c8ae3096614 unchanged (run
+  39208182933).

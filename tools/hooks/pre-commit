@@ -1,7 +1,9 @@
 #!/bin/sh
-# engine2040 pre-commit: ratchet debt never lands silently.
+# engine2040 pre-commit: ratchet debt and secrets never land silently.
 # A commit whose tree raises the rust-quality ratchet is refused unless the
 # same landing stages tools/rust-quality.baseline.json (--accept/--tighten).
+# Every land path also scans its staged diff with tools/secret-gate.mjs; a key
+# or token refuses.
 # This covers every land path, including auto-backup commits that never pass
 # through a packet review. Install: copy to .git/hooks/pre-commit.
 # One shared tree, many writers: a commit answers only for the crates it
@@ -11,12 +13,18 @@
 # names a crate: a shader, a text baseline or a doc under crates/ changes no
 # rust-quality count (2026-10-12: a .wgsl and a heap_peak.txt in a backup made
 # the hook measure render and perf, whose HEAD debt then refused the backup).
+# AW9: staged added lines are scanned on every commit, crate files or not.
+repo=$(git rev-parse --show-toplevel)
+if ! gate_out=$(node "$repo/tools/secret-gate.mjs" 2>&1); then
+  echo "$gate_out" >&2
+  echo "refused: secret-gate flagged the staged diff (AW9, tools/secret-gate.mjs)." >&2
+  exit 1
+fi
 staged=$(git diff --cached --name-only)
 crates=$(printf '%s\n' "$staged" | sed -n 's#^crates/\([^/]*\)/.*\.rs$#\1#p; s#^crates/\([^/]*\)/Cargo\.toml$#\1#p' | sort -u)
 if [ -z "$crates" ]; then
   exit 0
 fi
-repo=$(git rev-parse --show-toplevel)
 snap=$(mktemp -d)
 trap 'rm -rf "$snap"' EXIT
 args=""

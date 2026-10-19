@@ -17,6 +17,25 @@ test("empty doc markers count undocumented, prose counts documented", () => {
   assert.equal(isDocumented(["/**", " * prose", " */", "pub fn a() {}"], 3), true);
   assert.equal(isDocumented(["/**", " *", " */", "pub fn a() {}"], 3), false);
 });
+test("a doc comment above a multi-line attribute group documents the item", () => {
+  const group = [
+    "/// Args for the verbs that take nothing.",
+    "#[derive(Debug, Default)]",
+    "#[expect(",
+    "    clippy::empty_structs_with_brackets,",
+    '    reason = "serde reads the wire shape `{}`; a unit struct reads null"',
+    ")]",
+    "pub struct NoArgs {}",
+  ];
+  assert.equal(isDocumented(group, group.length - 1), true, "the walk steps over the whole group");
+  // A balanced code line after an attribute is not a group continuation: the
+  // item below it stays undocumented.
+  const code = ["#[derive(Debug)]", "fn helper() { let v = [1, 2]; }", "pub struct Bare;"];
+  assert.equal(isDocumented(code, 2), false);
+  const a = analyzeText([...group, "", "/// Kept.", "pub struct Kept;"].join("\n"));
+  assert.equal(a.total, 2);
+  assert.equal(a.undocumented, 0);
+});
 test("analyzeText counts pub items, skips strings and test regions", () => {
   const text = ["/// Adds one.", "pub fn documented() {}", "pub fn missing() {}", 'let s = "pub fn fake() {}";', "#[cfg(test)]", "mod tests {", "/// Tested.", "pub fn in_test() {}", "}"].join("\n");
   const a = analyzeText(text);

@@ -163,6 +163,8 @@ mod device {
                 },
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         }
     }

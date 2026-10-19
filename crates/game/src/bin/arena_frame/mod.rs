@@ -421,11 +421,21 @@ impl ArenaApp {
             }
             // The crate's break picture takes the tick's authority break events (an empty
             // slice on quiet ticks) and steps its debris once; presentation only (RZ4w).
-            if let Some(scene) = self.break_scene.as_mut() {
-                if let Err(err) = scene.observe_outcome(&self.tick_scratch) {
-                    tell!("arena notice: break picture dropped: {err}");
-                    self.break_scene = None;
-                }
+            let break_cue = match self.break_scene.as_mut() {
+                Some(scene) => match scene.observe_outcome(&self.tick_scratch) {
+                    Ok(()) => scene.take_cue(),
+                    Err(err) => {
+                        tell!("arena notice: break picture dropped: {err}");
+                        self.break_scene = None;
+                        None
+                    }
+                },
+                None => None,
+            };
+            // The break sounds where the blow struck: presentation only (RZ4).
+            if let (Some(cue), Some(tx)) = (break_cue, self.feed_tx.as_mut()) {
+                self.audio_space
+                    .feed_break(tx, tick, cue.name, cue.gain, cue.at_m);
             }
             self.record_crash_tick(input);
             self.ticks_done += 1;
@@ -452,7 +462,7 @@ impl ArenaApp {
             stats.unknown_cue,
         );
         say!(
-            "arena audio space: placed={} flat={} footsteps={} tension_sends={} tension_unheard={} bed_writes={} refused={}",
+            "arena audio space: placed={} flat={} footsteps={} tension_sends={} tension_unheard={} bed_writes={} refused={} breaks={}",
             space.positioned,
             space.flat,
             space.footsteps,
@@ -460,6 +470,7 @@ impl ArenaApp {
             space.tension_unheard,
             space.bed_writes,
             space.refused,
+            space.breaks,
         );
     }
 

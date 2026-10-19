@@ -21,6 +21,10 @@ use std::sync::{
 use engine_core::hash_bytes;
 #[cfg(not(feature = "seal"))]
 use engine_core::hash_hex;
+#[cfg(feature = "seal")]
+use engine_core::seal_key::decode_seal_hex;
+use engine_core::seal_key::SealKeyError;
+pub use engine_core::seal_key::MIN_SEAL_KEY_BYTES;
 use engine_observe::EventCode;
 #[cfg(feature = "seal")]
 use hmac::{Hmac, Mac};
@@ -406,41 +410,27 @@ pub const SEAL_SCHEME: &str = "hmac-sha256";
 /// bytes). The key lives with the operator, never in the repo; sealing runs
 /// at evidence-write time, off the tick, so there is no per-tick budget.
 pub const OPERATOR_KEY_ENV: &str = "E2040_EVIDENCE_KEY";
-/// Minimum operator key length in bytes; short keys fail loudly at parse.
-pub const MIN_SEAL_KEY_BYTES: usize = 32;
-
-/// Even-length hex text decoded to bytes; `None` on odd length or digits
-/// outside hex. Shared by key parsing and seal-tag parsing.
-fn decode_seal_hex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(text.len() / 2);
-    for index in (0..text.len()).step_by(2) {
-        let byte = u8::from_str_radix(text.get(index..index + 2)?, 16).ok()?;
-        out.push(byte);
-    }
-    Some(out)
-}
-
-/// A refused operator key with the remediation attached.
+/// A refused operator key with the remediation attached (HMAC backend case).
+#[cfg(feature = "seal")]
 fn seal_key_error(detail: &str) -> A9Error {
     A9Error::SealKey(format!(
         "{detail}; set {OPERATOR_KEY_ENV} to {MIN_SEAL_KEY_BYTES} or more bytes as hex"
     ))
 }
 
+/// A refused operator key from the core parser, with the core's wording.
+fn seal_key_refused(error: SealKeyError) -> A9Error {
+    A9Error::SealKey(engine_core::seal_key::seal_key_reason(
+        error,
+        OPERATOR_KEY_ENV,
+    ))
+}
+
 /// Parse an operator seal key from hex text: even-length hex decoding to at
-/// least [`MIN_SEAL_KEY_BYTES`] bytes. Pure and deterministic; malformed or
-/// short keys fail typed [`A9Error::SealKey`], never truncate or pad.
+/// least [`MIN_SEAL_KEY_BYTES`] bytes. Delegates to the core owner; malformed
+/// or short keys fail typed [`A9Error::SealKey`], never truncate or pad.
 pub fn parse_seal_key(text: &str) -> Result<Vec<u8>, A9Error> {
-    let Some(key) = decode_seal_hex(text.trim()) else {
-        return Err(seal_key_error("key must be hex"));
-    };
-    if key.len() < MIN_SEAL_KEY_BYTES {
-        return Err(seal_key_error("key is too short"));
-    }
-    Ok(key)
+    engine_core::seal_key::parse_seal_key(text).map_err(seal_key_refused)
 }
 
 /// Read the operator seal key from [`OPERATOR_KEY_ENV`]. Missing or malformed
@@ -453,11 +443,7 @@ pub fn operator_seal_key() -> Result<Vec<u8>, A9Error> {
 /// from [`operator_seal_key`] keeps the missing-key branch hermetically
 /// testable without mutating the process environment.
 fn seal_key_from_env(var: &str) -> Result<Vec<u8>, A9Error> {
-    if let Ok(text) = std::env::var(var) {
-        parse_seal_key(&text)
-    } else {
-        Err(seal_key_error("operator key is missing"))
-    }
+    engine_core::seal_key::seal_key_from_env(var).map_err(seal_key_refused)
 }
 
 /// A seal failure naming the seal file with what was wanted and found.

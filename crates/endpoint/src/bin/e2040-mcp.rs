@@ -49,6 +49,16 @@ async fn run(args: &[String]) -> i32 {
         "e2040-mcp: serving `{dir}` over stdio",
         dir = config.project_dir.display()
     );
+    if let Some(grant) = &config.web {
+        eprintln!(
+            "e2040-mcp: web verbs allowed under `{root}`{chrome}",
+            root = grant.root.display(),
+            chrome = match &grant.chrome {
+                Some(chrome) => format!(" with Chrome `{chrome}`"),
+                None => String::new(),
+            }
+        );
+    }
     match server.run_stdio().await {
         Ok(_) => 0,
         Err(error) => {

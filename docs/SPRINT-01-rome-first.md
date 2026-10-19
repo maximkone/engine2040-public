@@ -163,7 +163,7 @@
   tests/material_ops.rs 7 passed (put_then_undo_restores_both_digests_and_the_table,
   set_material_param_look_edit_undoes_to_the_old_digests,
   set_material_param_body_edit_moves_the_sim_digest_only,
-  a_bad_value_is_refused_with_the_record_path_and_holds_the_revision, remove_last_*), lib suite green. The
+  a_bad_value_is_refused_with_the_record_path_and_holds_the_revision, remove_last_*), lib suite green. 2026-10-19 follow-up: that landing left `cargo clippy -p engine-editor --all-targets -- -D warnings` red (an empty line after a doc comment in `audit.rs`, a `clone` on the `Copy` type `Component`, a call inside `ok_or`); fixed in 9a8ad43, clippy PASS run 39187020105 and `cargo test -p engine-editor` PASS run 39187332978. The
   batch digest moved to `crates/editor/src/commands/digest.rs` and the WAL/audit copies were dropped, so
   rust-quality engine-editor PASS (big_files 0, dup 0, casts 141). Golden not on this path (editor/material
   only); `golden_hash_untouched` green at run 39175013886.
@@ -176,7 +176,7 @@
   linearized and Occlusion texels are not; a duplicate slot in one material is still refused); P2P `cargo test
   -p engine-assets` green and the cooked bundle digest of the existing assets is unchanged (the existing digest
   tests stay green), golden unchanged. needs: none. Landed 61dc1642 (cook) and 4ef89132 (archive offset fix). texture::tests::five_slots_round_trip (4x4 image per slot cooks bytes equal x2, Emissive linearized, Occlusion not, duplicate slot refused) and archive::tests::stage_refuses_an_archive_past_the_offset_limit green; cargo test -p engine-assets --features import --no-fail-fast PASS gh run 39108657201 (lib 307, it 96, bundle and collider digest tests unchanged), default features run 39101415354.
-- [ ] NS31b2 render: a draw can carry the four texture slots — in `crates/render/src/present.rs` extend `DrawItem` Progress 2026-10-17: DrawItem carries normal_map and texture_slots() reserves 4 slots (RL46a material_interface tests); left: no orm or emissive field, no unknown_orm/normal/emissive_key_is_invalid_draw tests.
+- [x] NS31b2 render: a draw can carry the four texture slots — in `crates/render/src/present.rs` extend `DrawItem` Progress 2026-10-17: DrawItem carries normal_map and texture_slots() reserves 4 slots (RL46a material_interface tests); left: no orm or emissive field, no unknown_orm/normal/emissive_key_is_invalid_draw tests.
   (line 360) with `orm: Option<TextureKey>`, `normal: Option<TextureKey>`, `emissive: Option<TextureKey>` next
   to `base_color`; an unknown key fails the frame with `InvalidDraw` exactly like `base_color` does; every
   struct literal of `DrawItem` in the workspace gets `None` (use Grep `DrawItem {`). No shader change here.
@@ -185,7 +185,14 @@
   tests `unknown_orm_key_is_invalid_draw`, `unknown_normal_key_is_invalid_draw`,
   `  unknown_emissive_key_is_invalid_draw`); P2P the existing `present` tests green and the frame bytes of an
   untextured draw are identical to before (the existing capture-hash tests stay green), golden unchanged.
-  needs: NS31b1.
+  needs: NS31b1. Landed 69e3829. `DrawItem` gains `orm` and `emissive`; the normal slot is the existing
+  `normal_map` field (no duplicate `normal` field), so `texture_slots()` reads all four. Both frame paths
+  refuse an unknown slot key through `Presenter::require_draw_textures` (`InvalidDraw` with the draw index);
+  the normal slot still refuses in `pick_map_sets`. present::tests_gpu::gpu_tests::unknown_orm_key_is_invalid_draw,
+  unknown_normal_key_is_invalid_draw and unknown_emissive_key_is_invalid_draw green in gh-check `cargo test -p
+  engine-render --lib --features window present` (255 passed, 0 failed; the window leg runs on this PC, adapter
+  NVIDIA GeForce RTX 3050 6GB, so no GitHub run id), which covers the existing capture-hash tests (P2P).
+  rust-quality PASS, workspace-check PASS.
 - [ ] NS31c1 material: compile records to WGSL — new file `crates/material/src/compile.rs` with `pub struct Compiled` Progress 2026-10-17: crates/material/src/compile.rs landed (Compiled, compile, CHANNEL_FLOATS, texture_bindings, key; same_record_gives_the_same_bytes_twice, a_structure_edit_changes_the_text_and_the_key, siege_kit plus reference records share at most 12 structures; material suite green run 39057556202); left: no test that a coated record has strictly more bindings than the same record uncoated, and texture_bindings returns (slot, binding) pairs not Vec<TextureSlot>.
   (`wgsl: String`, `key: u64`, structure accessors `uniform_bytes() -> usize` and `texture_bindings() -> Vec<TextureSlot>`)
   and `pub fn compile(record: &MaterialRecord) -> Compiled` that generates the WGSL for the record's channels
@@ -194,9 +201,15 @@
   it). Tier A. Size M. Owns `crates/material/src/compile.rs`. Accept: F2P `cargo test -p engine-material --lib
   compile` (all 21 records of `MaterialSet::shipped()` compile to non-empty WGSL, keys equal x2, a coated record
   has a different key and strictly more bindings than the same record uncoated); P2P `cargo test -p engine-material`
-  green, golden unchanged. needs: NS31b1. Progress 2026-10-19: owner: the
-  Accept line says a coated record has "strictly more bindings" but coat adds
-  no texture slot; keep the wording or change it to what the code does?
+  green, golden unchanged. needs: NS31b1. Progress 2026-10-19: c1b4b9b6 lands the test the Accept names for its
+  two decidable clauses (`every_shipped_record_compiles_to_text_with_stable_keys`: every record of
+  `MaterialSet::shipped()` compiles to non-empty WGSL that keeps `vs` and `fs`, bytes and keys x2, and a coat edit
+  on a bare shipped record moves the key and the text). F2P `cargo test -p engine-material --lib compile` 11 passed,
+  gh run 39177681648; P2P `cargo test -p engine-material` 114 passed plus 1 doctest, gh run 39177860750.
+  operator/owner: the third clause cannot pass as written — coat is a lobe, never a texture slot, so a coated record
+  keeps the same `texture_bindings()` as the same record uncoated (the new test pins that), and `shipped()` holds 19
+  records today, not the 21 the clause names (21 is the siege kit plus the reference set, whose two shared names
+  ship once). Keep the wording and give coat its own texture binding, or change the wording to what the code does?
   Question in `docs/plan/2026-10-19-owner-queue.md`.
 - [x] NS31c2 render: a pipeline from the generated WGSL — new file `crates/render/src/material_pipeline.rs` (window Progress 2026-10-17: crates/render/src/material_pipeline.rs landed as a std-only pipeline binning module (lobe plus slot key, MAX_MATERIAL_PIPELINES 12, bins_come_back_in_stable_order); left: no pipeline_for, no wgpu pipeline from generated WGSL, no 21-record GPU build test.
   feature) with `pub fn pipeline_for(device, compiled: &engine_material::compile::Compiled) ->
@@ -211,7 +224,7 @@
   --lib --features window material_pipeline` (all 21 records of `MaterialSet::shipped()` build a pipeline on the
   RTX 3050 with 0 validation errors; they share at most 12 pipelines; no adapter means the test prints SKIP and
   passes, as the other GPU tests do); golden unchanged. needs: none. Landed f3e4c63d. material_pipeline_all_shipped_records_build_with_zero_validation_errors on NVIDIA GeForce RTX 3050 6GB Laptop GPU: the 21 records (14 siege kit + 7 reference) build 7 pipelines, 0 validation errors; also material_pipeline_a_textured_structure_gets_its_group_one_layout, material_pipeline_a_broken_text_is_an_error_not_a_panic, material_pipeline_the_gate_refuses_the_structure_past_its_cap. cargo test -p engine-render --lib --features window material_pipeline: 16 passed, 0 skipped (local PC run, no GitHub run id: window lines run on the PC). Pipelines are cached by compiled key under the 32-variant gate (MaterialPipelines). Window-leg clippy not finished when this was ticked.
-- [ ] NS31c3 render: live swap and the 1 s bar — in `crates/render/src/material_pipeline.rs` add `pub struct
+- [x] NS31c3 render: live swap and the 1 s bar — in `crates/render/src/material_pipeline.rs` add `pub struct
   MaterialLive` holding an `engine_material::reload::Reloader`, the current pipeline and the uniform buffer:
   `apply_text(&mut self, text)` runs `Reloader::apply_text`; `Reload::Values` writes the buffer; `Reload::Structure`
   builds the new pipeline first and swaps only on success (the old one keeps drawing meanwhile, the HR2 pattern in
@@ -220,7 +233,7 @@
   engine-render --lib --features window material_live` (value edit reaches a presented frame in at most 100 ms;
   a structure edit, adding a coat, in at most 1000 ms at p95 over 20 runs on the RTX 3050, numbers written to
   `target/ns31c/reload.json`; 3 of 3 broken texts refused and the capture hash of the last good frame unchanged;
-  no adapter: SKIP); golden unchanged. needs: NS31c2.
+  no adapter: SKIP); golden unchanged. needs: NS31c2. Landed 03eabf91. material_live_value_and_structure_edits_reach_the_frame green on the RTX 3050 (local PC run, no GitHub run id: window lines run on the PC): a value edit reached the frame in 1.556 ms (bar 100), a structure edit (a coat) took 14.008 ms at p95 over 20 runs (bar 1000), 3 of 3 broken texts refused with the last good frame hash unchanged (1f2541e048052325), numbers in target/ns31c/reload.json; no adapter skips; golden unchanged (no simulation crate touched). MaterialLive holds the reloader, the drawing pipeline and its uniform buffer; a structure edit builds the new pipeline and buffer first and swaps only on success, so the old one keeps drawing.
 - [x] NS31d2 material: the furnace twin below roughness 0.3 — in `crates/material/src/furnace.rs` replace the
   l-space quadrature of the specular part by half-vector importance sampling (copy the method of
   `spec_integral` in `crates/material/src/dfg.rs` tests: GGX CDF inversion in `u`, `phi` grid, weight
@@ -229,7 +242,7 @@
   with `ROUGHNESS_GRID = [0.1, 0.3, 0.5, 0.75, 1.0]`: the same cases and bars as today (1.02, anisotropy 1.03);
   if a case fails, fix the shader in `compile.rs` and the twin together and say so in the row; golden unchanged.
   needs: none. Landed 8502207. furnace twin integrates each specular peak over half vectors, ROUGHNESS_GRID [0.1, 0.3, 0.5, 0.75, 1.0], same bars (1.02, anisotropy 1.03): white_furnace_holds_for_the_base_and_every_lobe, half_vector_sampling_agrees_with_light_space_quadrature_where_both_resolve, a_metal_keeps_its_light_at_low_roughness, anisotropy_stays_in_the_bar_for_every_strength_and_rotation green, engine-material --features validate 116 passed run 39106950779. Two shader fixes with the twin, both in compile.rs: d_ggx_anisotropic had a 1e-5 guard on the squared length that flattened the lobe below roughness 0.25 (albedo 0.0006 at 0.1, now 1.000); the isotropic tables over-report an anisotropic lobe by up to 4.2% at grazing views, so the lobe keeps 97% (ANISO_ENERGY_KEEP).
-- [ ] NS31d3 render: GPU swatches against the twin — new test file `crates/render/tests/material_swatch.rs` (window
+- [x] NS31d3 render: GPU swatches against the twin — new test file `crates/render/tests/material_swatch.rs` (window Landed 2b8b0b7. F2P `cargo test -p engine-render --test material_swatch --features window` 1 passed on this PC (RTX 3050, six swatches, worst 1 of 255 steps; no-adapter path prints one SKIPPED line and passes); P2P `cargo test -p engine-material --features validate --no-fail-fast` 118 passed plus 1 doctest, gh run 39184384371; golden d57b5c8ae3096614 unchanged (no sim code). `twin_lit_rgb` in `crates/material/src/twin.rs` runs the fragment chain on the CPU over one copy of the lobe math, `furnace.rs` integrates that copy and stays test-only. The swatch also found and fixed a real generated-WGSL layout bug: `MaterialU` declared `layer_a`/`layer_b` as two planar arrays while the host packs interleaved (a, b) pairs, so every layer after the first read the wrong vec4 (now `struct LayerU { a, b }`, `layers: array<LayerU, n>`), pinned by layer_values_are_one_interleaved_pair_per_layer.
   feature): render a lit sphere for steel, wet marble (`marble_wet`), cloth, skin, ceramic (clear coat) and glass
   from `MaterialSet::shipped()` through `pipeline_for` (NS31c2) at 128x128 and compare the center pixel region
   to the CPU twin `engine_material::channels::twin_layers` plus `furnace`-style lighting (add a `pub fn
@@ -247,7 +260,7 @@
   `crates/viewer/src/coverage.rs`. Accept: F2P `cargo test -p engine-viewer --no-default-features --lib coverage`
   (3 blood events and 1 water event from a seeded list give equal `Coverage` x2; a rolled-back list replays to
   the new timeline; `CoverageTracker::at` never reads a tick after the asked one); golden unchanged.
-  needs: BV4.
+  needs: BV4. Progress 2026-10-19: the tracker lands in `crates/material/src/coverage.rs` (c7082f3), not the row's own path: `crates/viewer` was dropped on purpose (1296f273, "render is the renderer") and `RecordLook::describe_with_coverage` went with it, so the row's named command `cargo test -p engine-viewer --no-default-features --lib coverage` cannot run and the row stays open. `CoverageTracker` holds one tick-ordered tape per object id with `push`, `rollback` (the rewind a resim needs) and `at` (replays from the tape alone, never past the asked tick); `engine-app`'s `ActorFrame::hit` is the hit half of the feed, and the feed itself cannot live in material (app sits above it, so it would close a cycle). Tests `cargo test -p engine-material --lib coverage` 4 passed, run 39207000455: a seeded 3-blood + 1-water list replays equal twice, a rolled-back tape replays to the new timeline, `at` never reads a tick after the asked one, an out-of-order feed lands in tick order. rust-quality engine-material PASS 99 (A); workspace-check PASS. owner: re-home the wiring onto material or render, or close the row (owner queue).
 - [x] NS31f2 material: MaterialX constants and images — new file `crates/material/src/mtlx_import.rs` with `pub fn
   import_mtlx(text: &str) -> Result<Import, MtlxError>` (reuse `Import`, `Warning`, `WarningKind` from
   `gltf_import.rs`): a small own XML reader (no new dependency; elements, attributes, self-closing, comments)

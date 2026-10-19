@@ -27,6 +27,10 @@ pub mod door;
 /// Canonical island topology plus snapshot bytes the Rapier world checkpoints
 /// through. Std-only; no sim step.
 pub mod islands;
+/// Per-bone ragdoll swing/twist limits, hinge kinds, friction motors and collision
+/// groups, read from the skeleton at spawn. Float, client-local, never hashed.
+#[cfg(feature = "rapier")]
+pub mod joint_limits;
 pub mod kcc;
 /// The collision layer table (fighter, prop, debris, sensor, world) as plain integers.
 pub mod layers;

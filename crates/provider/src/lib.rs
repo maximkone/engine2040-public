@@ -45,6 +45,7 @@ pub mod pins;
 pub mod policy;
 pub mod prompt;
 pub mod protocol;
+pub mod reader;
 pub mod remote;
 pub mod retry;
 pub mod router;
@@ -106,6 +107,10 @@ pub use protocol::{
     AdapterKind, AiError, AiEvent, AiRequest, AiResult, Budget, ContextRef, DataClass, EventKind,
     FinishReason, JobId, ModelSelector, PrivacyMode, Proposal, ProposalAction, ProtocolError,
     RequestId, TaskKind, Usage,
+};
+pub use reader::{
+    ReaderAdapter, ReaderAnswer, ReaderError, ReaderLabel, ReaderReceipt, ReaderRelation,
+    ScriptedRead,
 };
 pub use router::{
     replay, Ask, Choice, Decision, Router, RouterError, ScoreRow, Skip, TaskClass, Tier,

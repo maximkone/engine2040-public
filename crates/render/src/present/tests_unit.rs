@@ -474,6 +474,8 @@ mod draw_tests {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         }
     }
@@ -492,6 +494,8 @@ mod draw_tests {
             },
             base_color: None,
             normal_map: None,
+            orm: None,
+            emissive: None,
         });
         match list.validate() {
             Err(PresentError::InvalidDraw { index, reason }) => {

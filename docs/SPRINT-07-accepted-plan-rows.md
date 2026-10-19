@@ -192,6 +192,7 @@
   fails gate + reverts; sample matches hand-check. needs: ARC3.
   Progress 2026-10-19: owner: report-only receipt instead of auto-revert?
   Answer in `docs/plan/2026-10-19-owner-queue.md`.
+  BLOCKED: waiting on the owner's answer: report-only receipt instead of auto-revert. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [x] ARC14 ecs: spine float quarantine — the spine takes integer-ns
   dt (RC6 shape), never `schedule::Ctx.dt: f32`, and a quarantine test
   fails on any float inside the spine module. Tier A. Size S. Owns
@@ -199,12 +200,32 @@
   file; consumer ARC4). Accept: seeded float fails the gate; spine
   step dt integer-ns; golden unchanged. needs: ARC1, ARC2. (PLN
   architecture, reviewed 2026-09-26; waits ARC1/ARC2.) Landed 0968a4c1. register_ns/build_ns/SpineTick::run(dt_ns: u64); a source-scanning quarantine test allows floats only in the five documented parity items of spine.rs and none in spine_schedule.rs or views.rs (engine-ecs 131 passed, run 39068066992).
-- [ ] ARC15 arena: spine fork parity — FK1 forks carry spine state
+- [x] ARC15 arena: spine fork parity — FK1 forks carry spine state
   with rejoin + first-divergent-tick naming. Tier A. Size S. Owns
   fork glue + test hunks in `crates/arena/src/fork.rs` (fork API
   frozen; consumer ARC3/ARC5). Accept: forked spine legs resimulate
   identical x2; seeded divergence names tick + component. needs:
-  ARC4, FK1. (PLN architecture, reviewed 2026-09-26; waits ARC4.)
+  ARC4, FK1. (PLN architecture, reviewed 2026-09-26; waits ARC4.) Landed 23a3d2f.
+  `crates/arena/src/fork.rs`: `Fork::run_trace(ticks)` runs the same window on
+  the same worker thread as `run_n` and keeps one `TraceTick` per fork tick —
+  the sim's checkpoint row hash plus three folds behind it (poses: ids,
+  positions, yaw, buttons; combat: hp, stamina, action clocks plus the tick's
+  events; destruction: the bonded prop's `state_hash`). `ForkTrace::first_divergence`
+  rejoins two legs and returns the first shared tick that differs with the
+  component that moved first in cause order (Poses, Combat, Destruction, then
+  Row), or `None` when every shared tick agrees; a leg that ended early joins
+  on its shared prefix. Tests: `forked_legs_resimulate_identical_twice` (two
+  forks off identical prefixes trace tick for tick, a leg joins itself, the
+  trace rides the same 60..179 window the metrics path runs),
+  `a_seeded_input_names_its_tick_and_component` (a tape swapped in at tick 100
+  names exactly tick 100, poses/combat), and
+  `divergence_names_the_first_moving_component` (the cause order pinned on
+  hand-built traces). `cargo test -p engine-arena --lib fork::tests` 16 passed,
+  run 39185119414; `golden_hash_untouched` PASS, run 39184606291 (the change is
+  additive; `step_count` keeps the metrics path's ticks-to-steps conversion and
+  adds no cast); rust-quality engine-arena PASS 99 (A); workspace-check PASS.
+  `run_trace` lands without a production caller: ARC3/ARC5 (rejoin) are its
+  named consumers, and playtest still uses the metrics path.
 - [ ] ARC16 mcp: VP1 digest over spine — `play.step` digests read
   spine checkpoints with equal digests x2 on spine bytes. Tier A.
   Size S. Owns digest call-site hunks in `crates/endpoint/src/play*.rs`
@@ -407,7 +428,17 @@
   under 50ms; PQ2 40–60% win-rate with no move above 35% of kills;
   seeded float-math or magic-number regression fails the gate. needs:
   GP11, GP12, PQ1, PQ2. (PLN gameplay, reviewed 2026-09-26; waits
-  PQ1.)
+  PQ1.) Progress 2026-10-19: still the same owner call, now pinned to the code:
+  the bar is `PQ2_KILL_SHARE_MAX_PERMILLE` (`crates/game/src/bench.rs:69`),
+  enforced by `check_pq2_kill_share` on the per-move share, and all three
+  enforcing tests are green (`cargo test -p engine-game --lib pq2` and
+  `kill_share_bar_is_one_number_across_crates`); the pinned v1 survey's
+  whole-attack share reads 395 permille. So "no move above 35% of kills" holds
+  per move and fails for the whole attack mix. owner: which reading is the
+  Accept's, and if it is the whole mix, the survey baseline needs re-pinning
+  (owner queue). Left open on purpose: re-pinning a pinned baseline is the
+  owner's call, not a guess.
+  BLOCKED: waiting on the owner's answer: which reading of "no move above 35% of kills" is the Accept's. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [ ] GP21 game: trauma-curve shake stage. Tier B. Size S. Owns shake
   hunks beside `crates/game/src/camera.rs` + `camera_feed.rs`. Accept:
   jab <= 1/4 super displacement; restore holds every tick; sim bytes x2;
@@ -676,7 +707,7 @@
   task: 100-task gold pointing eval, engine side deterministic at 100%.
   Accept: 100/100 engine-side points resolve; duplicate names resolve
   by id only; bytes x2. needs: EV20. (PLAN eyes.md E2.) Progress 2026-10-18: pick core landed 41a32b6b (pick.rs pixel to entity id or floor point in integer cm, project/unproject pair, region manifest, 100-task gold from tools/pick-gold.mjs 100/100 in a standalone harness, node test green). Left: in-crate run (engine-endpoint --features mcp --lib pick::) and the registered scene.pick verb (scene_tools.rs is held by lane A). Landed eae4da14. scene.pick (pixel, object, cell): pick_door_gold_pointing_eval_resolves_100_of_100 (x2 equal bytes), pick_door_duplicate_names_resolve_by_id_only, pick_door_cell_manifest_tiles_the_frame_and_repeats_bytes, pick_door_finds_an_object_and_the_pixel_picks_it_back green beside the pick:: core tests (run 39109659487).
-- [ ] EV22 eyes: model-reader adapter behind the MCP door — mock is
+- [x] EV22 eyes: model-reader adapter behind the MCP door — mock is
   recorded PNG plus scripted read, local and remote match it; replay
   runs with no model. Tier A. Size S. Owns the reader adapter in
   `crates/provider/src/reader.rs` (new file, contract frozen, no
@@ -685,7 +716,24 @@
   the recorded set) plus offline replay. Accept: 3-path parity green;
   replay with no model byte-identical; AI-agnostic law holds (no
   weights in the tick). needs: EV20, EV21. (PLAN eyes.md E3.)
-- [ ] EV23 eyes: model-written fight report — tape plus captures plus
+  Landed 49b71cde. `crates/provider/src/reader.rs` is `ReaderAdapter`:
+  `record` holds the oracle answer for a capture plus brief, `read(capture,
+  brief, label)` answers it under `ReaderLabel::{Mock, Local, Remote}`, and
+  `replay` is the mock path with no model. One shape choice, recorded here: the
+  input is the capture's `ContextRef` (digest plus revision), not raw PNG bytes,
+  because the frozen protocol type carries "digest + revision, never raw bytes";
+  the PNG stays with the capture owner. The read is canonical by construction,
+  so the label never changes one byte of it; a relation's `kind` is the graph's
+  own name text, so this crate declares no second vocabulary. An unrecorded pair
+  answers `ReaderError::Unrecorded` under every label (the path stays open) and
+  `record` refuses a second, different read for a pair (no fixture drift). Tests
+  `cargo test -p engine-provider --lib reader` 5 passed: three labels agree byte
+  for byte, replay byte-identical, an unrecorded capture keeps every path open,
+  the oracle refuses a drift, the read is canonical and the module holds no
+  clock or socket (a source scan). Full `cargo test -p engine-provider --lib`
+  255 passed, 6 ignored (run 39210117488); clippy -D warnings PASS (run
+  39209758458); rust-quality engine-provider PASS 100 (A), undoc 0.
+- [x] EV23 eyes: model-written fight report — tape plus captures plus
   brief in, schema-pinned JSON out, digest-verified, replay-identical.
   Tier A. Size S. Owns the report writer in
   `crates/playtest/src/fight_report.rs` (new file, schema pinned).
@@ -693,6 +741,21 @@
   3 tapes replay to identical reports. Accept: 3/3 tapes identical
   bytes x2; digest line reads back; golden `d57b5c8ae3096614`
   unchanged. needs: EV20, EV21, EV22. (PLAN eyes.md E4.)
+  Landed adc110e4. `FightReport::of(tape, verdict, brief, captures)` takes one
+  tape's numbers (`TapeSummary`), combat's own `BoutWinner`, the brief by digest
+  and size, and the E1 manifest entries (name, sha256, size); `render` writes the
+  JSON body plus its `digest <016x>` line and `verify` reads that line back
+  (false on a tampered body, a rewritten digest, a truncated render or trailing
+  lines). One shape choice, recorded here: `TapeSummary` is defined in playtest
+  because playtest does not depend on engine-game, so the caller fills it from
+  its own tape; capture order is canonicalised away and one name with two
+  different captures is refused. Tests `cargo test -p engine-playtest --lib
+  fight_report` 5 passed (run 39211447526): three tapes render identical bytes
+  twice, the digest line reads back and rejects tampering, capture order does not
+  change a report, unbounded input (65 captures, empty or oversized name, an
+  oversized brief) is refused typed, and the JSON is canonical and escapes names.
+  clippy -D warnings PASS (run 39211447277); rust-quality engine-playtest PASS
+  100 (A); golden `d57b5c8ae3096614` unchanged (run 39211045932).
 - [x] MCP25 mcp: scope-policy file deepening the capability table. Landed ea34de95. policy file in tool_capabilities.rs.
   Tier A. Size S. Owns policy-file hunks beside
   `crates/endpoint/src/tool_capabilities.rs` (table frozen).
@@ -868,6 +931,7 @@
   VRAM posted on the reference GPU. Consumer: Q1 captures, RA14. needs:
   CT26, CT8. (EXTEND wave 86.) Progress 2026-10-19: operator: measured VRAM
   on the reference GPU; line in `docs/plan/2026-10-19-owner-queue.md`.
+  BLOCKED: needs the measured VRAM column on the reference GPU (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [x] CT46 content: provenance audit dry-run for the CT28 gate (50-asset Landed 124fcf36. tools/provenance-audit.mjs: 58 rows, 7 refusals named; run 39053389819.
   matrix). Tier A. Size S. Owns `content/PROVENANCE-AUDIT.md` (gate code
   stays CT28). Accept: matrix lists URL+SPDX+author+SHA or
@@ -1080,6 +1144,7 @@
   SP12 gold still green; kill on any override lost, any prefab edit not
   applied under deltas, or any digest drift. needs: RC4. (LADDER P1
   CANDIDATE 2026-09-30, spike 5/5 + x2.) Progress 2026-10-17: 2216f79d Instantiation::digest keyed by prefab key; museum run (2 overrides kept, 2 underneath edits shown, 1 new key) same digest x2 and fresh-edited-plus-overrides equals live reinstantiate (13574963997578328745); 19 prefab tests + clippy local only, no gh run id; the old 4aae94af came from a JS spike hash and cannot be reproduced, reword Accept when ticking. Progress 2026-10-19: owner: reword the Accept line (drop digest 4aae94af) or drop the row; question in `docs/plan/2026-10-19-owner-queue.md`. Progress 2026-10-19: owner: reword the Accept line (drop digest 4aae94af) or drop the row; question in `docs/plan/2026-10-19-owner-queue.md`.
+  BLOCKED: the override map is landed (2216f79d, 19 prefab tests, museum digest 13574963997578328745 x2) and every later note says the same thing: the Accept's `4aae94af` came from a JS spike and cannot be reproduced in Rust, so the row waits on the owner to reword or drop that digest. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [x] SP56 spatial (held on SP38): canonical digest + perm-stable audit Landed 049cdd8d. conflict_audit_baseline (60 seeds, 20 perms) + conflict_audit_baseline_failures + sp38_audit_hunks_cover_sixty_seeds_and_twenty_perms run 39056881036.
   gate as the SP38 proof leg (60/60 + 20/20 + digest `05b20def` x2).
   Tier B. Size S. Owns audit hunks beside
@@ -1152,7 +1217,7 @@
   Tier A. Size S. Owns drill hunks in `crates/game/src/modes.rs`.
   Accept: `cargo test -p engine-game --lib modes` green. needs:
    WIN2, MP3. (PLN shipping.md EXTEND, proposed 2026-09-29.) Landed 072e79ba. modes.rs restored from d89bd98e^; cargo test -p engine-game --lib modes green on this PC (20 passed, 0 failed: 9 modes incl. failed_device_swap_keeps_last_good_loudly and staged_swap_applies_only_at_its_frame, plus 11 modes_world); caller: bin/arena.rs resumed validates the windowed mode before window creation (refusal -> WinError::NoDisplay); cargo clippy -p engine-game --all-targets --features app -D warnings clean.
-- [ ] WIN12 game: crash-plus-settings repro bundle — the WIN4 report
+- [x] WIN12 game: crash-plus-settings repro bundle — the WIN4 report
   carries the settings digest plus display mode beside
   version/adapter/tape-tail/checkpoint. Tier B. Size S. Owns digest
   hunks in `crates/game/src/crash.rs` (WIN4 file frozen; fixed bytes,
@@ -1161,6 +1226,26 @@
   mismatch refuses loudly. Proof: `cargo test -p engine-game --lib
   crash` green. needs: WIN4, UIX6.
   (PLN shipping.md EXTEND, proposed 2026-09-29.)
+  Landed b5b76cce. The `[crash]` schema gains `settings_digest` (the settings
+  tape's digest) and `display` (the display-mode echo, `MAX_DISPLAY_BYTES`); both
+  are required rows, so `parse_report` refuses a missing one and a malformed
+  digest as `BadValue("settings_digest")`. `CrashReport::with_settings` sets the
+  pair and validates at once (`DisplayTooLong` before anything reaches the disk);
+  `CrashReport::regenerate_tick(settings_digest)` answers the Accept's first leg:
+  it returns the pre-crash tick from the report plus the settings the caller
+  holds, refusing a foreign digest loudly (`SettingsDigestMismatch`, both digests
+  named, its own exit code) and reading the tick from the checkpoint's own
+  `(tick, hash)` record, so a short record, the drill's synthetic payload and a
+  disagreeing record are `BadValue("checkpoint")`, never a silent tick. The run
+  hook carries the live state (`note_settings` clips at a char boundary,
+  `settings_echo` is the read side, `write_crash_report` copies the snapshot).
+  `cargo test -p engine-game --lib crash` 18 passed, 1 ignored, on this PC
+  (gh-check routes engine-game local: its bin holds window code, so no GitHub run
+  id); new tests cover the schema round trip and the required rows, the tick
+  regeneration across a round trip, the loud digest refusal, the display bound
+  and the live echo. clippy `--all-targets -- -D warnings` PASS (run
+  39214156767); rust-quality engine-game PASS 96 (A), long_fns back at 3 (the
+  string rows share `take_string`); golden unchanged (run 39214082788).
 - [ ] GP25 game: play-step follow camera — the endpoint top-down view
   keeps both fighters framed with the 20 m bounds drawn, fixing the t60
   edge-clip and t120 opposite-corner splits. Tier B. Size S. Owns

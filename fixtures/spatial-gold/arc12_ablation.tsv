@@ -1,0 +1,3 @@
+# arc12-ablation v1 (ARC12 relation-diff payload vs the raw coordinate table)
+# id	props	requests	changes	raw_lanes	raw_bytes	edit_bytes	solves	reachable	digest_equal
+arc12-01	0	0	0	0	0	0	0	0	0

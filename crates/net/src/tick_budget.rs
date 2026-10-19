@@ -17,7 +17,7 @@ use super::interest::{
 };
 use super::scale::TICK_HZ;
 use engine_core::digest::MerkleDigest;
-use engine_core::hash::FNV64_OFFSET;
+use engine_core::hash::{Fnv64, FNV64_OFFSET};
 use std::fmt::{self, Display, Formatter};
 use std::hint::black_box;
 #[expect(
@@ -393,16 +393,18 @@ impl SiegeTickWorld {
     }
 
     /// Encode system: fold the snapshot byte total into a checksum so the
-    /// optimizer cannot elide the interest walk in release. Integer fold.
+    /// optimizer cannot elide the interest walk in release. Integer fold
+    /// through the one owner, `engine_core::Fnv64`: the hand-rolled pair it
+    /// replaces was the same FNV-1a offset and prime spelled in decimal, which
+    /// the reimplementation gate reads as hex and so never saw. The value is
+    /// fed to `black_box` and never compared, so only the work is the point.
     #[must_use]
     pub fn fold_snapshot(&self, bytes: u64, tick: u32) -> u64 {
-        let mut hash: u64 = 1_464_717_047_381_303_168;
-        hash ^= bytes;
-        hash = hash.wrapping_mul(1_099_511_628_211);
-        hash ^= u64::from(tick);
-        hash = hash.wrapping_mul(1_099_511_628_211);
-        hash ^= self.seed;
-        hash.wrapping_mul(1_099_511_628_211)
+        let mut fold = Fnv64::new();
+        fold.write_u64(bytes);
+        fold.write_u32(tick);
+        fold.write_u64(self.seed);
+        fold.finish()
     }
 
     /// One full dedicated tick in server order: AI, simulate, then the due

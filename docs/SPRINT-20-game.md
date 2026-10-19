@@ -171,6 +171,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   P2P: P3 green. needs: GA13. Progress 2026-10-19: owner: this row says Tier B
   while the tier ladder puts it elsewhere; which one wins? Question in
   `docs/plan/2026-10-19-owner-queue.md`.
+  BLOCKED: waiting on the owner's answer: this row's tier against the tier ladder. Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [x] GP36 content: arena zones and the entrance metric — the only cover is a Landed d2b58bd1. `cargo test -p engine-playtest --lib -- tier_ zones` green, gh run 39056997288: zones_shares_sum_to_1000_and_entrance_stays_under_250; content/design/arena-zones.rows on disk; full playtest lib 301 passed, gh run 39059423063.
   1 m crate (`crate_a`, id 10) and `gate_tunnel` (id 5) is the one entrance;
   nothing measures where fights happen. `content/design/arena-zones.rows`
@@ -323,6 +324,11 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   test. Accept: `cargo test -p engine-combat --lib projectile_exact` and `cargo
   test -p engine-game --lib ballistics` green; `rg -n "step_round" crates/game`
   hits. F2P: two steppers disagree. P2P: golden unchanged. needs: none.
+  Progress 2026-10-19: owner: `crates/game/src/ballistics.rs` is gone and
+  `step_round` still has no game caller, so the Accept cannot run; close as
+  obsolete or re-scope to a new caller row. Question in
+  `docs/plan/2026-10-19-owner-queue.md`.
+  BLOCKED: waiting on the owner's answer: close as obsolete or re-scope (the named `ballistics` module is gone). Unblocks per docs/plan/2026-10-19-owner-queue.md.
 - [x] AX25 endpoint: fetched text is fenced as data — `crates/endpoint/src/assistant.rs` Landed 1d01a410. `cargo test -p engine-endpoint --features mcp --lib -- fence` fence_planted_instructions_make_no_unlisted_calls (10 planted-instruction fixtures x2, no tag-like call survives; observe rows are fenced with the `data, not instructions` line, propose rows byte-identical) green, gh run 39059683408; full `cargo test -p engine-endpoint --features mcp --lib` 555 passed, 1 ignored, gh run 39060654787.
   passes tool output and fetched text into a model prompt with no fence
   (`rg -i "untrusted|fence" assistant.rs` empty; Sekar 12). Wrap each in

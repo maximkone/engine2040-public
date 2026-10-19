@@ -430,6 +430,8 @@ mod tests {
                         material: draw.material.clone(),
                         base_color: base,
                         normal_map: normal,
+                        orm: None,
+                        emissive: None,
                     }],
                 };
                 presenter

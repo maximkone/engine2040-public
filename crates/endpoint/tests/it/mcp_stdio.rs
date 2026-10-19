@@ -46,8 +46,16 @@ const EXPECTED_TOOLS: [&str; 21] = [
     "sim.build_encounter",
     "test.run",
 ];
-/// Verbs of the `view` pack: listed only after `api.load`.
-const VIEW_PACK: [&str; 4] = ["log.digest", "log.query", "rpc.discover", "look.judge"];
+/// Verbs of the `view` pack: listed only after `api.load`. 2026-10-19: SP62's
+/// `view.observe` and `view.laws` joined the pack, so the list is six now.
+const VIEW_PACK: [&str; 6] = [
+    "log.digest",
+    "log.query",
+    "rpc.discover",
+    "look.judge",
+    "view.observe",
+    "view.laws",
+];
 /// Fixed node id for the scripted edit (a fresh server serves an empty doc).
 const NODE_ID: &str = "123e4567-e89b-42d3-a456-426614174000";
 /// Nil id: "no parent" on parent fields.

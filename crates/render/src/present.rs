@@ -369,7 +369,7 @@ pub fn walk_pipelines(
 // ---------------------------------------------------------------------------
 
 /// One draw: a cached mesh plus its PBR material, optionally modulated by
-/// a resident base-color texture (textured draws).
+/// resident texture slots (base color, ORM, normal, emissive).
 #[cfg(feature = "v1")]
 #[derive(Clone, PartialEq, Debug)]
 pub struct DrawItem {
@@ -389,6 +389,17 @@ pub struct DrawItem {
     /// `None` shades with the attribute normal exactly as before. Unknown
     /// keys fail the frame with `InvalidDraw`, mirroring meshes.
     pub normal_map: Option<TextureKey>,
+    /// Optional resident ORM map (linear bytes: occlusion, roughness,
+    /// metallic in R, G, B). Carried here for the RL46 material bind; this
+    /// frame never samples it, so `None` and `Some` render the same pixels.
+    /// Unknown keys fail the frame with `InvalidDraw`, exactly like
+    /// `base_color`.
+    pub orm: Option<TextureKey>,
+    /// Optional resident emissive map (sRGB bytes, sampled back to linear).
+    /// Carried here for the RL46 material bind; this frame never samples it,
+    /// so `None` and `Some` render the same pixels. Unknown keys fail the
+    /// frame with `InvalidDraw`, exactly like `base_color`.
+    pub emissive: Option<TextureKey>,
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +408,8 @@ pub struct DrawItem {
 //
 // - Draw side (here): each draw names one material plus four texture
 //   slots. Slot order is base color, ORM, normal, emissive. Only slot 0
-//   is bound today; the rest are `None`.
+//   is bound today; the other named keys must be resident and are carried
+//   for the RL46 material bind.
 // - Shader side: `shaders/forward.wgsl` exposes one lit entry,
 //   `direct_light`. RL46 routes it through the compiled material.
 // - Registry side: `crates/material/src/compile.rs` owns the six-lobe
@@ -438,11 +450,11 @@ impl DrawItem {
         h
     }
 
-    /// The four texture slots in fixed order. Slot 0 is `base_color`,
-    /// slot 2 is `normal_map`; slots 1 and 3 stay empty until RL46 binds
-    /// ORM and emissive.
+    /// The four texture slots in fixed order: `base_color`, `orm`,
+    /// `normal_map`, `emissive`. Slot 1 (ORM) and slot 3 (emissive) are
+    /// carried but unbound until RL46 binds them; slot 0 is bound today.
     pub fn texture_slots(&self) -> [Option<TextureKey>; 4] {
-        [self.base_color, None, self.normal_map, None]
+        [self.base_color, self.orm, self.normal_map, self.emissive]
     }
 }
 
@@ -703,6 +715,8 @@ mod material_interface_tests {
             material: scene.material,
             base_color: None,
             normal_map: None,
+            orm: None,
+            emissive: None,
         }
     }
 
@@ -730,8 +744,8 @@ mod material_interface_tests {
 
     #[test]
     fn normal_slot_follows_draw_normal_key() {
-        // EG12 slice c: slot 2 carries the draw's normal key; ORM (1) and
-        // emissive (3) stay empty for the next slice.
+        // EG12 slice c: slot 2 carries the draw's normal key; the ORM (1)
+        // and emissive (3) fields stay `None` in this sample.
         let mut item = sample_item();
         assert_eq!(item.texture_slots()[2], None);
         let key = TextureKey::new(9, [0x99; 32]);
@@ -741,6 +755,21 @@ mod material_interface_tests {
         assert_eq!(slots[1], None);
         assert_eq!(slots[3], None);
         assert_eq!(slots[0], item.base_color);
+    }
+
+    #[test]
+    fn orm_and_emissive_keys_land_in_slots_one_and_three() {
+        // NS31b2: all four slots carry a draw field in fixed order.
+        let mut item = sample_item();
+        let orm = TextureKey::new(11, [0xA1; 32]);
+        let emissive = TextureKey::new(12, [0xB2; 32]);
+        item.orm = Some(orm);
+        item.emissive = Some(emissive);
+        let slots = item.texture_slots();
+        assert_eq!(slots[1], Some(orm));
+        assert_eq!(slots[3], Some(emissive));
+        assert_eq!(slots[0], item.base_color);
+        assert_eq!(slots[2], item.normal_map);
     }
 
     #[test]

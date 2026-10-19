@@ -1330,4 +1330,117 @@ mod tests {
         assert_eq!(pose.positions.len(), 15);
         assert_eq!(fbik_hash(&pose), fbik_hash(&pose));
     }
+
+    /// Carry fixture (NS6): a two-handed load carried up a TV1 climb edge.
+    ///
+    /// The TV1 chooser commits the climb and its tick budget; the load lifts
+    /// with the move while both hands grip its sides and the spine/head aim at
+    /// it. Every tick runs the combat path (legs planted, then the upper-body
+    /// solve). Checks: both hands sit on the load every tick (residual inside
+    /// [`HAND_TOL_MM`], so nothing floats), no chain past its reach limit (no
+    /// clamp, and each bone keeps its rest length), and the whole move replays
+    /// byte-identically (x2). Balance (PX4) stays the physics owner: it reads
+    /// the wrist and spine lanes this solve writes.
+    #[test]
+    fn carry_fixture_hands_on_load_and_within_limits() {
+        use crate::traversal::{plan, Probe, TraverseAction};
+        // TV1: a high wall with a hold, the chooser's Climb.
+        let plan = plan(
+            &Probe {
+                height_m: 2.4,
+                depth_m: 0.3,
+                gap_m: 0.2,
+                speed_m_s: 0.5,
+                has_hold: true,
+            },
+            [14.0, 30.0],
+        )
+        .expect("climb edge plans");
+        assert_eq!(plan.action, TraverseAction::Climb);
+        let ticks = plan.duration_ticks as usize;
+        assert!(ticks > 0);
+        // The load: a crate half a meter wide, chest high, gripped both sides.
+        let half_span = 0.24;
+        let load_width = 0.48;
+        let base_y = 1.02;
+        let lift_m = 0.30;
+        let rest = rig();
+        let rest_l1 = dist_m(rest.positions[3], rest.positions[4]);
+        let rest_l2 = dist_m(rest.positions[4], rest.positions[5]);
+        let run = || {
+            let chains = chains();
+            let leg_maps = legs();
+            let mut pose = rig();
+            let mut locker = FootLocker::with_defaults();
+            let mut hashes = Vec::with_capacity(ticks);
+            for tick in 0..ticks {
+                let progress = tick as f32 / ticks as f32;
+                let y = base_y + lift_m * progress;
+                let z = 0.46 + 0.06 * progress;
+                let outcome = combat_reach_tick(
+                    &mut pose,
+                    &leg_maps,
+                    [tick % 2 == 0, tick % 2 == 1],
+                    &mut locker,
+                    &chains,
+                    &BodyTargets {
+                        hand_l: Some([half_span, y, z]),
+                        hand_r: Some([-half_span, y, z]),
+                        look: Some([0.0, y, z]),
+                        aim: Some([0.0, y, z]),
+                        grip: GripMode::Single,
+                        shield_l: None,
+                    },
+                )
+                .expect("carry tick");
+                let (l, r) = (
+                    outcome.body.hand_l.expect("left hand solves"),
+                    outcome.body.hand_r.expect("right hand solves"),
+                );
+                // Hands on the load: nothing floats.
+                assert!(
+                    l.error_mm <= HAND_TOL_MM,
+                    "tick {tick}: left hand off by {} mm",
+                    l.error_mm
+                );
+                assert!(
+                    r.error_mm <= HAND_TOL_MM,
+                    "tick {tick}: right hand off by {} mm",
+                    r.error_mm
+                );
+                // No joint past its limit: no chain clamped onto max reach...
+                assert!(!l.clamped && !r.clamped, "tick {tick}: past max reach");
+                // ...and every bone keeps its rest length (no stretch).
+                let l1 = dist_m(pose.positions[3], pose.positions[4]);
+                let l2 = dist_m(pose.positions[4], pose.positions[5]);
+                let r1 = dist_m(pose.positions[6], pose.positions[7]);
+                let r2 = dist_m(pose.positions[7], pose.positions[8]);
+                assert!((l1 - rest_l1).abs() < 0.001, "tick {tick}: left upper {l1}");
+                assert!((l2 - rest_l2).abs() < 0.001, "tick {tick}: left fore {l2}");
+                assert!(
+                    (r1 - rest_l1).abs() < 0.001,
+                    "tick {tick}: right upper {r1}"
+                );
+                assert!((r2 - rest_l2).abs() < 0.001, "tick {tick}: right fore {r2}");
+                // The hands span the half-meter load, so the grip holds it level.
+                let span = dist_m(pose.positions[5], pose.positions[8]);
+                assert!(
+                    (span - load_width).abs() < 0.025,
+                    "tick {tick}: span {span}"
+                );
+                assert!(outcome.body.cost_ops <= FULL_BODY_OPS_CAP);
+                hashes.push(fbik_hash(&pose));
+            }
+            hashes
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second, "carry solve must replay byte-identically");
+        assert_ne!(first[0], first[ticks - 1], "the load moved with the move");
+        println!(
+            "NS6 carry: climb edge ticks={ticks} loads={} hash=0x{:016x}",
+            first.len(),
+            first[ticks - 1]
+        );
+    }
 }

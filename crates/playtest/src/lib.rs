@@ -45,6 +45,7 @@ pub mod exploit;
 /// Feel keypoints: hit-stop, shake, cancel and readability claims as data,
 /// with seeded feel bugs (VK1 extended, GP7).
 pub mod feel_keypoints;
+pub mod fight_report;
 pub mod frame_check;
 pub mod highlights;
 pub mod keypoint;
@@ -82,6 +83,12 @@ pub mod winrates;
 /// registration. The move-intake and rating consumers read the gate
 /// outcome from here.
 pub use exploit::{exploit_gate, ExploitGateOutcome, EXPLOIT_GATE_NAME};
+/// Fight-report registration (playtest side): the evidence writers build a
+/// [`FightReport`] and read its digest line back with [`FightReport::verify`].
+pub use fight_report::{
+    BriefRef, CaptureRef, FightReport, ReportError, TapeSummary, MAX_BRIEF_BYTES, MAX_CAPTURES,
+    MAX_CAPTURE_NAME_BYTES, REPORT_SCHEMA, REPORT_VERSION,
+};
 /// Living-world eval gate (playtest side): the proof harness resolves
 /// the eval by [`LIVING_GATE_NAME`](living::LIVING_GATE_NAME) and calls
 /// [`living_gate`] through the crate root, mirroring the tournament gate

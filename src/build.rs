@@ -86,6 +86,20 @@ fn run_process(step: &Step) -> io::Result<Outcome> {
 
 /// `build --target <windows|web> [--manifest <path>]`.
 pub fn build_verb(args: impl Iterator<Item = OsString>, out: &mut dyn Write) -> Result<(), Error> {
+    let env = BuildEnv::host();
+    let mut run = run_process;
+    build_verb_with(args, &env, &mut run, out)
+}
+
+/// The `build` verb against a chosen checkout and runner: the manifest check and the target
+/// dispatch that [`build_verb`] runs on the host. Tests drive it with a script instead of a
+/// toolchain, so a generated project's manifest and both target command lines are checked.
+fn build_verb_with(
+    args: impl Iterator<Item = OsString>,
+    env: &BuildEnv,
+    run: &mut Runner<'_>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let flags = Flags::parse(args, &[], &["--target", "--manifest"])?;
     flags.no_positional("build")?;
     let target = parse_target(flags.text("--target")?)?;
@@ -99,7 +113,7 @@ pub fn build_verb(args: impl Iterator<Item = OsString>, out: &mut dyn Write) -> 
             joined(&project.manifest.targets, ", ")
         )));
     }
-    build(&BuildEnv::host(), target, &mut run_process, out)
+    build(env, target, run, out)
 }
 
 fn build(
@@ -438,6 +452,59 @@ mod tests {
             .map(OsString::from)
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    #[test]
+    fn new_template_generated_project_builds_both_targets_through_the_verb() {
+        // What `new` wrote is what `build` reads: the generated manifest passes the verb's
+        // checks and each target of it runs its one command and prints where the result is.
+        let temp = TempDir::new();
+        let dir = temp.0.join("duel-1");
+        execute(
+            Verb::New,
+            words(&["arena-duel", dir.to_str().unwrap()]),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let env = checkout(&temp, "windows");
+        let exe = env.target_dir.join("release").join("arena.exe");
+        let dist = env.root.join("dist").join("web");
+        let manifest = dir.join("game.toml");
+        let manifest = manifest.to_str().unwrap();
+        let mut seen: Vec<String> = Vec::new();
+        let mut out = Vec::new();
+        let mut run = |step: &Step| {
+            seen.push(format!("{} {}", step.program, step.args.join(" ")));
+            fs::create_dir_all(env.target_dir.join("release")).unwrap();
+            fs::write(&exe, "").unwrap();
+            fs::create_dir_all(&dist).unwrap();
+            fs::write(dist.join("index.html"), "<!doctype html>").unwrap();
+            reply(0, "")
+        };
+        for target in ["windows", "web"] {
+            build_verb_with(
+                words(&["--target", target, "--manifest", manifest]),
+                &env,
+                &mut run,
+                &mut out,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            seen,
+            [
+                "cargo build --locked --release -p engine-game --features app --bin arena",
+                "node tools/web-build.mjs"
+            ]
+        );
+        assert_eq!(
+            text(out),
+            format!(
+                "built windows: {}\nbuilt web: {}\n",
+                exe.display(),
+                dist.display()
+            )
+        );
     }
 
     #[test]

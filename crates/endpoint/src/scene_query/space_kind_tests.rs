@@ -1,5 +1,5 @@
-//! Door tests for the `measure`, `room_of`, `in_room`, `exits_of` and `glance`
-//! kinds, over staged scenes with fixed ids.
+//! Door tests for the `measure`, `room_of`, `in_room`, `exits_of`, `glance`,
+//! `coverage` and the SP69 sense text kinds, over staged scenes with fixed ids.
 
 use super::*;
 use crate::scene_tools::spatial_verdict_tests::{at, door, uuid, Node};
@@ -247,6 +247,154 @@ fn query_glance_lists_coverage_and_names_the_hidden_crate() {
         },
     );
     assert_eq!(bad.code, "bad_view");
+}
+
+#[test]
+fn query_sense_verbs_answer_plain_text_only_and_replay() {
+    // Node 1 (actor 0) is a 3 m column 1 m east of the eye, tall enough to
+    // block the walker band the map tests; node 2 is a crate further east.
+    let column = Node {
+        at: [1.0, 1.0, 0.0],
+        collider: Some([0.5, 1.5, 0.5]),
+        ..Node::default()
+    };
+    let block = Node {
+        at: [6.0, 0.0, 0.0],
+        collider: Some([0.5, 0.5, 0.5]),
+        ..Node::default()
+    };
+    let server = door(&[column, block]);
+    let eye = Some([0.0, 1.6, 0.0]);
+    // view: one row per picture line plus the token cost of the whole text.
+    let view = ask(
+        &server,
+        SceneQueryArgs {
+            eye_m: eye,
+            yaw: Some(0.0),
+            cells: Some([8, 4, 0, 0]),
+            ..call("view")
+        },
+    );
+    assert_eq!(view.kind, "view");
+    assert_eq!(view.hits.len(), 6, "header, 4 picture rows, token row");
+    assert_eq!(
+        view.hits[0].reason,
+        "view 8x4 eye=(0,160,0) yaw=90 range=2400 bucket=300cm"
+    );
+    for (y, row) in view.hits[1..5].iter().enumerate() {
+        assert!(row.reason.starts_with(&format!("{y}:")), "{row:?}");
+    }
+    assert!(
+        view.hits[5].reason.starts_with("tokens "),
+        "{:?}",
+        view.hits
+    );
+    // lidar: 72 rays from the facing, 5 degrees apart.
+    let lidar = ask(
+        &server,
+        SceneQueryArgs {
+            eye_m: eye,
+            yaw: Some(0.0),
+            ..call("lidar")
+        },
+    );
+    assert!(
+        lidar.hits[0]
+            .reason
+            .starts_with("lidar origin=(0,160,0) fan=90 step=5 range=2400"),
+        "{}",
+        lidar.hits[0].reason
+    );
+    assert!(
+        lidar.hits[1].reason.contains("45=") && lidar.hits[1].reason.contains("315="),
+        "72 rays named by degree: {}",
+        lidar.hits[1].reason
+    );
+    // map: the screen's own grid, centered on the eye, plus a legend row and
+    // the token cost. The column blocks the two cells that hold its footprint.
+    let map = ask(
+        &server,
+        SceneQueryArgs {
+            eye_m: eye,
+            radius_cm: Some(300),
+            ..call("map")
+        },
+    );
+    assert_eq!(
+        map.hits[0].reason,
+        "map center=(0,160,0) radius=300 cell=50cm rows=+z..-z cols=-x..+x"
+    );
+    assert!(
+        map.hits.iter().any(|h| h.reason == "A=0 top=250cm"),
+        "the column is the only blocker: {:?}",
+        map.hits
+    );
+    assert!(
+        map.hits[1..13]
+            .iter()
+            .filter(|h| h.reason.contains("AA"))
+            .count()
+            == 2,
+        "{:?}",
+        map.hits
+    );
+    // pixel: one ray through a named cell, id, point and distance in cm.
+    let pixel = ask(
+        &server,
+        SceneQueryArgs {
+            eye_m: eye,
+            yaw: Some(0.0),
+            cells: Some([8, 4, 4, 2]),
+            ..call("pixel")
+        },
+    );
+    assert!(
+        pixel.hits[0].reason.starts_with("pixel 4,2 id=0 point=(")
+            && pixel.hits[0].reason.contains("dist="),
+        "{}",
+        pixel.hits[0].reason
+    );
+    // The same call twice gives the same bytes and the same digest.
+    let again = ask(
+        &server,
+        SceneQueryArgs {
+            eye_m: eye,
+            yaw: Some(0.0),
+            cells: Some([8, 4, 0, 0]),
+            ..call("view")
+        },
+    );
+    assert_eq!(again.digest, view.digest, "same text twice, same digest");
+    assert_eq!(again.hits, view.hits, "same text twice, same rows");
+    // Off-shape requests refuse typed, never guessing.
+    for (args, code) in [
+        (
+            SceneQueryArgs {
+                eye_m: eye,
+                cells: Some([0, 4, 0, 0]),
+                ..call("view")
+            },
+            "bad_view",
+        ),
+        (
+            SceneQueryArgs {
+                eye_m: eye,
+                cells: Some([8, 4, 9, 2]),
+                ..call("pixel")
+            },
+            "bad_pixel",
+        ),
+        (
+            SceneQueryArgs {
+                eye_m: eye,
+                radius_cm: Some(10),
+                ..call("map")
+            },
+            "bad_radius",
+        ),
+    ] {
+        assert_eq!(refuse(&server, args).code, code);
+    }
 }
 
 /// SPF4 at the door: the gap and the push of the nearest neighbour, in cm and

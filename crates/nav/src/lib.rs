@@ -9,6 +9,8 @@ pub mod funnel;
 pub mod links;
 pub mod mesh;
 pub mod orca;
+/// Quantized nav runtime over one packed occupancy mask and direction field.
+pub mod quant;
 pub mod reach;
 pub mod rebake;
 pub mod spline;
@@ -30,7 +32,7 @@ mod wiring_tests {
     //! `engine_nav::x` caller takes. Determinism: integer and slice compares
     //! over pure bakes, no clock, no IO. Errors are panics via asserts.
 
-    use crate::{bake, flow, links, mesh, rebake, tiles};
+    use crate::{bake, flow, links, mesh, quant, rebake, tiles};
 
     /// `bake` + `flow`: one offline bake answers a runtime downhill step, and
     /// the same grid bakes the same distance field and hash twice.
@@ -58,6 +60,18 @@ mod wiring_tests {
         let walls = flow::seeded_blocked(2040, 8, 8, 250);
         assert_eq!(walls, flow::seeded_blocked(2040, 8, 8, 250));
         assert!(walls.iter().any(|cell| *cell), "density 250 walls cells");
+
+        // `quant`: the packed runtime answers the same step the baked flow
+        // does, through the root a caller names.
+        let goal = bake::Goal { x: 4, y: 4 };
+        let mut packed = quant::QuantNav::bake(&blocked, 5, 5);
+        packed.bake_goal(&goal);
+        assert!(packed.walkable(&bake::Cell { x: 0, y: 0 }));
+        assert_eq!(
+            packed.direction(&bake::Cell { x: 0, y: 0 }),
+            Some(bake::Cell { x: 0, y: 1 }),
+            "the quantized root steps downhill like the bake"
+        );
     }
 
     /// `mesh` + `tiles` + `rebake`: a baked floor survives its versioned

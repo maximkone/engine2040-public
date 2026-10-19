@@ -1137,6 +1137,211 @@ pub fn solve(intent: &Intent, actors: &[Actor]) -> Result<Vec<TransformOut>, Con
     })
 }
 
+/// Cell edge of the quantized occupancy runtime, in centimeters. It matches
+/// [`GRID_CM`], the solver's own placement pitch, so a runtime cell and a solver
+/// candidate name the same integer-cm square.
+pub const QUANT_CELL_CM: i32 = 10;
+/// Largest runtime the row allows, in bytes (20 MB).
+pub const QUANT_MAX_BYTES: usize = 20 * 1024 * 1024;
+/// Cell cap per axis: a scene wider than this keeps its first cells, so a
+/// degenerate giant cannot blow the runtime past the byte budget.
+const QUANT_MAX_AXIS_CELLS: usize = 4096;
+
+/// Quantized occupancy runtime for place queries (spike, 2026-10-19).
+///
+/// One bit per [`QUANT_CELL_CM`] square of the integer-cm XZ plane, rasterized
+/// from a scene's actor boxes: a cell any valid actor footprint touches reads
+/// blocked. A pose the runtime calls free is therefore always clear on the exact
+/// 3D index too, so a quantized answer never accepts a pose that puts an object
+/// inside geometry. It is sound but conservative the other way: a box whose XZ
+/// overlaps while its height does not still blocks its cells.
+///
+/// Consumer: an offline advisory query helper. Nothing here runs in a tick, so
+/// no float, clock or map reaches an answer; actor meters enter through the
+/// shared `to_cm` rounding only. [`QuantGrid::bytes`] bounds the runtime against
+/// [`QUANT_MAX_BYTES`]; the `place_` tests print the bytes beside the i32-cell
+/// heuristic size and the query counts beside the index's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuantGrid {
+    /// Cell edge in centimeters.
+    cell_cm: i32,
+    /// Origin of cell `(0, 0)`, in integer centimeters, snapped to a cell edge.
+    min_x: i32,
+    min_z: i32,
+    /// Cells per axis.
+    w: usize,
+    h: usize,
+    /// One bit per cell, row-major over `z` then `x`; set means blocked.
+    bits: Vec<u64>,
+}
+
+impl QuantGrid {
+    /// Rasterize every valid actor box at [`QUANT_CELL_CM`].
+    pub fn build(actors: &[Actor]) -> Self {
+        Self::from_boxes(actors, QUANT_CELL_CM)
+    }
+
+    /// Rasterize `actors` at `cell_cm` (clamped to at least one centimeter).
+    /// Only the boxes `boxes_of` keeps (known position and size) mark cells; a
+    /// scene with none of them yields an empty grid that blocks every pose.
+    pub fn from_boxes(actors: &[Actor], cell_cm: i32) -> Self {
+        let cell = cell_cm.max(1);
+        let boxes = boxes_of(actors);
+        if boxes.is_empty() {
+            return Self {
+                cell_cm: cell,
+                min_x: 0,
+                min_z: 0,
+                w: 0,
+                h: 0,
+                bits: Vec::new(),
+            };
+        }
+        let raw_min_x = boxes.iter().fold(i32::MAX, |acc, b| acc.min(b.min_x));
+        let raw_max_x = boxes.iter().fold(i32::MIN, |acc, b| acc.max(b.max_x));
+        let raw_min_z = boxes.iter().fold(i32::MAX, |acc, b| acc.min(b.min_z));
+        let raw_max_z = boxes.iter().fold(i32::MIN, |acc, b| acc.max(b.max_z));
+        let min_x = raw_min_x.div_euclid(cell) * cell;
+        let min_z = raw_min_z.div_euclid(cell) * cell;
+        let w = axis_cells(min_x, raw_max_x, cell);
+        let h = axis_cells(min_z, raw_max_z, cell);
+        let mut grid = Self {
+            cell_cm: cell,
+            min_x,
+            min_z,
+            w,
+            h,
+            bits: vec![0u64; w.saturating_mul(h).div_ceil(64)],
+        };
+        for b in &boxes {
+            let (Some((i0, i1)), Some((k0, k1))) = (
+                rect_cells(min_x, cell, b.min_x, b.max_x),
+                rect_cells(min_z, cell, b.min_z, b.max_z),
+            ) else {
+                continue;
+            };
+            let (i0, i1) = clamp_span(i0, i1, w);
+            let (k0, k1) = clamp_span(k0, k1, h);
+            if i0 > i1 || k0 > k1 {
+                continue;
+            }
+            for k in k0..=k1 {
+                for i in i0..=i1 {
+                    let idx = k * w + i;
+                    if let Some(word) = grid.bits.get_mut(idx / 64) {
+                        *word |= 1u64 << (idx % 64);
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    /// True when every cell the integer-cm rect `[min_x, max_x) x [min_z, max_z)`
+    /// touches is clear. A degenerate rect (no width or height), an empty grid,
+    /// or a rect that leaves the grid reads false: the runtime refuses instead
+    /// of guessing.
+    pub fn free_rect_cm(&self, min_x: i32, min_z: i32, max_x: i32, max_z: i32) -> bool {
+        if self.w == 0 || self.h == 0 {
+            return false;
+        }
+        let (Some((i0, i1)), Some((k0, k1))) = (
+            rect_cells(self.min_x, self.cell_cm, min_x, max_x),
+            rect_cells(self.min_z, self.cell_cm, min_z, max_z),
+        ) else {
+            return false;
+        };
+        if i0 < 0 || k0 < 0 {
+            return false;
+        }
+        let (Ok(i0), Ok(i1), Ok(k0), Ok(k1)) = (
+            usize::try_from(i0),
+            usize::try_from(i1),
+            usize::try_from(k0),
+            usize::try_from(k1),
+        ) else {
+            return false;
+        };
+        if i1 >= self.w || k1 >= self.h {
+            return false;
+        }
+        for k in k0..=k1 {
+            for i in i0..=i1 {
+                if self.cell_blocked(i, k) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// One cell read; an off-grid cell reads blocked.
+    pub fn cell_blocked(&self, x: usize, z: usize) -> bool {
+        if x >= self.w || z >= self.h {
+            return true;
+        }
+        let idx = z * self.w + x;
+        match self.bits.get(idx / 64) {
+            Some(word) => word & (1u64 << (idx % 64)) != 0,
+            None => true,
+        }
+    }
+
+    /// Cell counts over the whole grid: `(blocked, free)`.
+    pub fn counts(&self) -> (usize, usize) {
+        let blocked: usize = self
+            .bits
+            .iter()
+            .map(|word| usize::try_from(word.count_ones()).unwrap_or(0))
+            .sum();
+        (blocked, self.cells().saturating_sub(blocked))
+    }
+
+    /// Cells the runtime spans.
+    pub fn cells(&self) -> usize {
+        self.w.saturating_mul(self.h)
+    }
+
+    /// Bytes the runtime occupies: header plus the packed cells.
+    pub fn bytes(&self) -> usize {
+        3 * core::mem::size_of::<i32>()
+            + 2 * core::mem::size_of::<usize>()
+            + self.bits.len() * core::mem::size_of::<u64>()
+    }
+}
+
+/// Clamp an inclusive cell span to `0..len`; an inverted result is empty.
+fn clamp_span(lo: i64, hi: i64, len: usize) -> (usize, usize) {
+    let last = len.saturating_sub(1);
+    let lo = usize::try_from(lo).unwrap_or(0).min(last);
+    let hi = usize::try_from(hi).unwrap_or(usize::MAX).min(last);
+    (lo, hi)
+}
+
+/// Inclusive cell span of the integer-cm interval `[min, max)` over cells of
+/// `cell` cm starting at `origin`, or `None` for an empty interval. It is the
+/// strict rule the index overlap uses (`min < cell_max && cell_min < max`), so
+/// a clear span means no box overlaps the interval.
+fn rect_cells(origin: i32, cell: i32, min: i32, max: i32) -> Option<(i64, i64)> {
+    if max <= min {
+        return None;
+    }
+    let lo = (i64::from(min) - i64::from(origin)).div_euclid(i64::from(cell));
+    let hi = (i64::from(max) - 1 - i64::from(origin)).div_euclid(i64::from(cell));
+    Some((lo, hi))
+}
+
+/// Cells needed to cover `[origin, max)` at `cell` cm, capped per axis.
+fn axis_cells(origin: i32, max: i32, cell: i32) -> usize {
+    let span = i64::from(max) - i64::from(origin);
+    if span <= 0 {
+        return 0;
+    }
+    let span = usize::try_from(span).unwrap_or(QUANT_MAX_AXIS_CELLS);
+    let step = usize::try_from(cell.max(1)).unwrap_or(1);
+    span.div_ceil(step).min(QUANT_MAX_AXIS_CELLS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2218,5 +2423,172 @@ mod tests {
         assert_eq!(d0, super::canonical_audit_digest(&fwd_all), "digest x2");
         assert_ne!(d0, 0);
         assert_eq!(d0, super::canonical_audit_digest(&rev_all), "perm digest");
+    }
+
+    /// The quantized occupancy runtime answers the place query soundly beside
+    /// the exact index, and stays a fraction of the i32-cell heuristic size.
+    /// Every pose it calls free must read clear on the index (no false accept);
+    /// the first quantized-free pose and the solver's own placement must run
+    /// clean for the placed id; same scene any order gives the same runtime;
+    /// the bytes and both query counts print.
+    #[test]
+    fn place_quant_runtime_is_sound_small_and_stable() {
+        use super::super::index3::{probe_of, Index3};
+        let room_actors = room();
+        let mut dense = room();
+        for i in 0..120 {
+            let x = -4.0 + (i % 12) as f32 * 0.7;
+            let z = -3.0 + (i / 12) as f32 * 0.7;
+            dense.push(mk(
+                100 + i,
+                &format!("prop_{i:03}"),
+                x,
+                0.5,
+                z,
+                0.4,
+                1.0,
+                0.4,
+            ));
+        }
+        for (label, actors) in [("room", &room_actors), ("dense", &dense)] {
+            let grid = super::QuantGrid::build(actors);
+            let bounds = super::room_bounds(actors).expect("a valid room anchors bounds");
+            // The brazier footprint: half extents 30 cm, rest center y 50 cm.
+            let (hx, hy, hz) = (30, 50, 30);
+            let rest: Vec<Actor> = actors.iter().filter(|a| a.id != 5).cloned().collect();
+            let index = Index3::build(&rest);
+            let mut quant_free = 0usize;
+            let mut index_clear = 0usize;
+            let mut first_free = None;
+            let mut cz = bounds.min_z + hz;
+            while cz <= bounds.max_z - hz {
+                let mut cx = bounds.min_x + hx;
+                while cx <= bounds.max_x - hx {
+                    let pose = probe_of(cx, hy, cz, hx, hy, hz);
+                    let free = grid.free_rect_cm(cx - hx, cz - hz, cx + hx, cz + hz);
+                    let clear = !index.overlaps_any(&pose, 5);
+                    assert!(
+                        !free || clear,
+                        "{label}: pose ({cx},{cz}) reads free but the index hits"
+                    );
+                    if free {
+                        quant_free += 1;
+                        first_free.get_or_insert((cx, cz));
+                    }
+                    index_clear += usize::from(clear);
+                    cx += super::GRID_CM;
+                }
+                cz += super::GRID_CM;
+            }
+            assert!(quant_free > 0, "{label}: the room has free poses");
+            let (blocked, free_cells) = grid.counts();
+            assert_eq!(blocked + free_cells, grid.cells());
+            assert!(grid.bytes() < super::QUANT_MAX_BYTES, "{label}: size");
+            assert!(
+                grid.bytes() < grid.cells() * core::mem::size_of::<i32>(),
+                "{label}: smaller than one i32 per cell"
+            );
+            // The solver's own answer reads free on the runtime.
+            let solver = solve(
+                &Intent {
+                    object: ObjectRef::Id(5),
+                    wants: vec![],
+                },
+                actors,
+            )
+            .expect("the empty intent solves");
+            let out = &solver[0];
+            assert!(
+                grid.free_rect_cm(
+                    to_cm(out.x) - hx,
+                    to_cm(out.z) - hz,
+                    to_cm(out.x) + hx,
+                    to_cm(out.z) + hz
+                ),
+                "{label}: the solver placement must read free"
+            );
+            // The runtime answers the query on its own: its first free pose
+            // runs clean for the placed id.
+            let (fx, fz) = first_free.expect("a free pose exists");
+            let placed = placed_scene(
+                actors,
+                &TransformOut {
+                    id: 5,
+                    x: fx as f32 / 100.0,
+                    y: 0.5,
+                    z: fz as f32 / 100.0,
+                    yaw: 0.0,
+                },
+            );
+            let report = super::super::run(&placed);
+            assert!(
+                !report
+                    .findings
+                    .iter()
+                    .any(|f| (f.check == "overlap" && (f.a == 5 || f.b == 5))
+                        || (f.check == "floating" && f.a == 5)),
+                "{label}: quantized pose ({fx},{fz}) must run clean, got {:?}",
+                report.findings
+            );
+            // Same scene twice, and any input order, gives the same runtime.
+            assert_eq!(grid, super::QuantGrid::build(actors), "{label}: repeat");
+            let mut reversed = actors.clone();
+            reversed.reverse();
+            assert_eq!(
+                grid,
+                super::QuantGrid::build(&reversed),
+                "{label}: order-invariant"
+            );
+            println!(
+                "place quant runtime {label}: {} cells, {blocked} blocked {free_cells} free, \
+                 {} bytes vs {} bytes of i32 cells; quantized free poses {quant_free} vs \
+                 index-clear {index_clear}; first free ({fx},{fz}) cm, solver ({}, {}) cm",
+                grid.cells(),
+                grid.bytes(),
+                grid.cells() * core::mem::size_of::<i32>(),
+                to_cm(out.x),
+                to_cm(out.z)
+            );
+        }
+    }
+
+    /// The runtime refuses an empty scene, a degenerate footprint and a pose
+    /// that leaves the grid, so a caller never reads a wrong free.
+    #[test]
+    fn place_quant_runtime_refuses_what_it_cannot_answer() {
+        let empty = super::QuantGrid::build(&[]);
+        assert_eq!(empty.cells(), 0);
+        assert!(
+            !empty.free_rect_cm(0, 0, 10, 10),
+            "no anchors, no free pose"
+        );
+        let grid = super::QuantGrid::build(&room());
+        // The brazier footprint, brazier excluded from the room.
+        assert!(
+            grid.free_rect_cm(-490, -490, -430, -430),
+            "the open floor near the walls is free"
+        );
+        // A wall footprint is blocked, and a degenerate rect never reads free.
+        assert!(
+            !grid.free_rect_cm(-490, -505, -430, -495),
+            "the north wall blocks"
+        );
+        assert!(
+            !grid.free_rect_cm(-100, -100, -100, -100),
+            "a point refuses"
+        );
+        assert!(
+            !grid.free_rect_cm(-900, -900, -800, -800),
+            "off-grid refuses"
+        );
+        assert!(
+            grid.cell_blocked(0, 0) || grid.cell_blocked(0, 50),
+            "corner"
+        );
+        println!(
+            "place quant runtime edge cases: {} cells, {} bytes",
+            grid.cells(),
+            grid.bytes()
+        );
     }
 }

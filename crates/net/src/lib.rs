@@ -71,6 +71,10 @@ pub mod snapshot;
 /// the session drivers on both machines, the relay rendezvous.
 pub mod split;
 pub mod tick_budget;
+/// Datagram discipline for the WAN replication stream: one datagram per
+/// class-ordered snapshot, over-cap batches refused and counted, far and idle
+/// poses shed first, inputs and combat redundant and never expired.
+pub mod wan_discipline;
 pub mod wan_soak;
 /// The scripted duel a page plays against the native dedicated server: the
 /// host and client state machines over the `Transport` trait, the spec and the

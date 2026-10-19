@@ -1673,6 +1673,156 @@ mod tests {
     }
 
     #[test]
+    fn interest_64_bot_soak_beats_broadcast_3x() {
+        // ON15 Accept: a 64-bot soak saves 3x or better versus broadcast at
+        // 128 kbps/client or less, no combat entity starves past 500 ms and
+        // nothing the receiver needs desyncs. The broadcast arm runs the same
+        // 64-entity roster, the same delta baseline and the same 10 Hz cadence
+        // through the same `select()` path with every room in scope and rings
+        // wide enough that everything is Near: the only difference from the
+        // interest arm is the per-connection scope gate this row adds.
+        const TICKS: u32 = 600;
+        const COMBAT_TICK: u32 = 300;
+        let interest = InterestCfg::default_siege();
+        let broadcast = InterestCfg {
+            near_m: 1_000_000,
+            far_m: 1_000_000,
+            near_hz: 10,
+            far_hz: 10,
+            cap_bps: 1_000_000,
+        };
+        broadcast.validate().expect("broadcast tuning is legal");
+        // One entity per viewer, one metre apart, all drifting east together
+        // so the roster is a moving soak, not a frozen frame. Entity 7 starts
+        // fighting at COMBAT_TICK: a combat entity must never starve.
+        let roster = |tick: u32| -> Vec<InterestEntity> {
+            let drift = i32::try_from(tick).expect("tick fits") * 10;
+            (0..64u32)
+                .map(|id| InterestEntity {
+                    id,
+                    x_mm: i32::try_from(id).expect("id fits") * 1_000 + drift,
+                    z_mm: 0,
+                    combat: if id == 7 && tick >= COMBAT_TICK {
+                        900
+                    } else {
+                        1_000
+                    },
+                })
+                .collect()
+        };
+        // One arm: total wire bytes, worst starve, worst ticks-since-sent for
+        // the combat entity across every viewer.
+        let soak = |cfg: &InterestCfg, scoped: bool| -> (u64, u32, u32, (u32, usize)) {
+            let base = roster(0);
+            let mut conns: Vec<ConnectionInterest> = (0..64u32)
+                .map(|v| {
+                    let mut conn = ConnectionInterest::for_entities(v, 64).expect("conn");
+                    if scoped {
+                        conn.set_rooms(room_mask(v % 8));
+                    }
+                    conn.register_baseline(&base).expect("baseline");
+                    conn
+                })
+                .collect();
+            let mut out = vec![0u32; 64];
+            // Per viewer: the combat word its baseline holds for entity 7, and
+            // the first snapshot tick at which it fell behind (if any). A held
+            // word equal to the baseline is not owed; only a real change counts.
+            let mut held7 = vec![1_000u32; 64];
+            let mut stale7 = vec![None::<u32>; 64];
+            let (mut bytes, mut starve, mut combat_gap) = (0u64, 0u32, 0u32);
+            let mut combat_at = (0u32, 0usize);
+            for tick in (0..TICKS).step_by(SNAPSHOT_EVERY_TICKS as usize) {
+                let entities = roster(tick);
+                for (v, conn) in conns.iter_mut().enumerate() {
+                    let viewer = u32::try_from(v).expect("v fits");
+                    let report = conn
+                        .select(
+                            cfg,
+                            &entities,
+                            viewer,
+                            entities[v].x_mm,
+                            entities[v].z_mm,
+                            0,
+                            tick,
+                            SIEGE_BUDGET_BYTES,
+                            &mut out,
+                        )
+                        .expect("select");
+                    if out[..report.selected].contains(&7) {
+                        held7[v] = entities[7].combat;
+                        stale7[v] = None;
+                    } else if held7[v] != entities[7].combat {
+                        let since = *stale7[v].get_or_insert(tick);
+                        let gap = tick - since;
+                        if gap > combat_gap {
+                            combat_gap = gap;
+                            combat_at = (tick, v);
+                        }
+                    }
+                    starve = starve.max(report.starve_seen);
+                    bytes += u64::try_from(report.bytes).expect("bytes fit");
+                }
+            }
+            (bytes, starve, combat_gap, combat_at)
+        };
+        let broadcast_run = soak(&broadcast, false);
+        let interest_run = soak(&interest, true);
+        assert_eq!(
+            (broadcast_run, interest_run),
+            (soak(&broadcast, false), soak(&interest, true)),
+            "the 64-bot soak must replay bit-identically"
+        );
+        let (broadcast_bytes, _, _, _) = broadcast_run;
+        let (interest_bytes, starve, combat_gap, combat_at) = interest_run;
+        // No combat entity starves: every viewer ships the dirty body well
+        // inside the 500 ms bar, and no in-scope entity goes stale past it.
+        assert!(
+            combat_gap <= STARVE_TICKS,
+            "combat entity stale {combat_gap} ticks (tick {}, viewer {}) over the {STARVE_TICKS}-tick bar",
+            combat_at.0,
+            combat_at.1
+        );
+        assert!(
+            starve <= STARVE_TICKS,
+            "worst starve {starve} ticks over the 500 ms bar {STARVE_TICKS}"
+        );
+        // Per-client rate over the soak, integer kbps x100 (never float).
+        let kbps_x100 = interest_bytes * 8 * 100 * TICK_HZ / (64 * u64::from(TICKS) * 1_000);
+        assert!(
+            kbps_x100 <= ON9_CAP_KBPS_X100,
+            "client {kbps_x100} over the 12800 (128 kbps) cap"
+        );
+        // Integer saving x100: broadcast over interest, at least 3x.
+        let saving_x100 = broadcast_bytes * 100 / interest_bytes;
+        assert!(
+            saving_x100 >= 300,
+            "saving {saving_x100} under 300: broadcast {broadcast_bytes} vs interest {interest_bytes}"
+        );
+        // Zero desync on the shipped bytes: the combat change round-trips
+        // through the real delta codec against the acked baseline.
+        let base_bodies: Vec<BodySnap> = (0..16u8)
+            .map(|slot| BodySnap {
+                slot,
+                x_mm: i32::from(slot) * 1_000,
+                y_mm: 0,
+                z_mm: 0,
+                yaw_ddeg: 0,
+                hp: 1_000,
+                stamina: 100,
+            })
+            .collect();
+        let mut now_bodies = base_bodies.clone();
+        now_bodies[7].hp = 900;
+        now_bodies[7].x_mm += 60;
+        let baseline = FullSnap::new(COMBAT_TICK - 6, base_bodies).expect("baseline");
+        let full = FullSnap::new(COMBAT_TICK, now_bodies).expect("full");
+        let decoded = decode_delta(&encode_delta(&full, &baseline).expect("encode"), &baseline)
+            .expect("decode");
+        assert_eq!(decoded, full, "the shipped combat change must decode exact");
+    }
+
+    #[test]
     fn ioq3_per_client_view_matches_select() {
         let cfg = InterestCfg::default_siege();
         let entities: Vec<InterestEntity> = (0..8)

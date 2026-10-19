@@ -509,14 +509,9 @@ impl Presenter {
                     reason: format!("unknown mesh key {:?}", item.mesh.id),
                 });
             }
-            if let Some(key) = &item.base_color {
-                if self.textures.get(key).is_none() {
-                    return Err(PresentError::InvalidDraw {
-                        index: slot,
-                        reason: "unknown texture key".into(),
-                    });
-                }
-            }
+            // Texture residency: unknown keys in any named slot fail with
+            // their draw index, mirroring meshes, before any GPU work.
+            self.require_draw_textures(item, slot)?;
             // Stack image, not `to_bytes()`: the per-draw byte image would
             // build one `Vec` per draw, which the ALLOC ratchet cannot see.
             self.material_scratch.extend_from_slice(&mat_u.to_array());
@@ -1813,6 +1808,8 @@ mod live_bloom_glint_tests {
                 },
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         }
     }
@@ -2068,6 +2065,8 @@ mod live_wall_split_tests {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         };
         for frame in 0..3 {
@@ -2398,6 +2397,8 @@ mod live_bind_skip_tests {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         }
     }
@@ -2466,6 +2467,8 @@ mod live_present_skip_tests {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         }
     }
@@ -2818,6 +2821,8 @@ mod live_overlay_capture_tests {
                 material: scene.material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             }],
         }
     }
@@ -2981,6 +2986,8 @@ mod live_stage_alloc_tests {
             material: scene.material.clone(),
             base_color: None,
             normal_map: None,
+            orm: None,
+            emissive: None,
         };
         let list_with = |draws: usize| DrawList {
             camera: scene.camera.clone(),

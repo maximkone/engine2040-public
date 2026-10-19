@@ -319,6 +319,15 @@ pub enum TileError {
         /// Tile id refused.
         tile: u32,
     },
+    /// A [`TileRef`] handle outlived the version it was taken at.
+    DanglingRef {
+        /// Tile id the handle names.
+        tile: u32,
+        /// Version the handle was taken at.
+        epoch: u32,
+        /// Version the tile holds now.
+        now: u32,
+    },
     /// Grid dims are zero, over the cell bound, or overflow.
     BadDims {
         /// Grid width offered in cells.
@@ -396,6 +405,12 @@ impl fmt::Display for TileError {
             Self::BadTileCount { got } => write!(f, "tiles: tile count {got} refused"),
             Self::VersionOverflow { tile } => {
                 write!(f, "tiles: tile {tile} version overflow")
+            }
+            Self::DanglingRef { tile, epoch, now } => {
+                write!(
+                    f,
+                    "tiles: tile {tile} handle at version {epoch} dangles, now {now}"
+                )
             }
             Self::BadDims { w, h } => write!(f, "tiles: grid {w}x{h} refused"),
             Self::BadGridLen { got, want } => {
@@ -816,6 +831,59 @@ fn read_walk(
         }
     }
     Ok(cells)
+}
+
+/// Salt-epoch tile handle: a tile id plus the version it was taken at.
+///
+/// A walker or an off-tick job takes the handle once and carries it;
+/// resolving later returns the tile only while its version is unchanged, so a
+/// rebake under the handle fails closed with [`TileError::DanglingRef`]
+/// instead of handing back a tile whose polygons moved. Versions never wrap
+/// ([`TileRegistry::rebake`] refuses [`TileError::VersionOverflow`] and keeps
+/// the old version), so a live handle can never alias a newer rebake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileRef {
+    tile: TileId,
+    epoch: u32,
+}
+
+impl TileRef {
+    /// Takes a handle for `tile` at its current version.
+    ///
+    /// Errors: [`TileError::BadTile`] for an id past the registry.
+    pub fn take(nav: &TiledNav, tile: TileId) -> Result<Self, TileError> {
+        Ok(Self {
+            tile,
+            epoch: nav.version(tile)?,
+        })
+    }
+
+    /// The tile this handle names.
+    pub fn tile(&self) -> TileId {
+        self.tile
+    }
+
+    /// The version the handle was taken at.
+    pub fn epoch(&self) -> u32 {
+        self.epoch
+    }
+
+    /// Resolves against `nav`: the tile while its version is unchanged.
+    ///
+    /// Errors: [`TileError::DanglingRef`] when a rebake moved under the
+    /// handle, [`TileError::BadTile`] for an id past the registry.
+    pub fn resolve(&self, nav: &TiledNav) -> Result<TileId, TileError> {
+        let now = nav.version(self.tile)?;
+        if now == self.epoch {
+            Ok(self.tile)
+        } else {
+            Err(TileError::DanglingRef {
+                tile: self.tile.0,
+                epoch: self.epoch,
+                now,
+            })
+        }
+    }
 }
 
 /// Dynamic tiled nav: occupancy grid plus versioned tiles plus one flow
@@ -1529,6 +1597,82 @@ mod tests {
             }
         }
         blocked
+    }
+
+    #[test]
+    fn tile_ref_refuses_every_dangling_resolve() {
+        let mut nav = open(4, 4, 2);
+        let count = nav.tile_count();
+        let handles: Vec<TileRef> = (0..count)
+            .map(|index| TileRef::take(&nav, tile_id_at(index)).expect("take"))
+            .collect();
+        for handle in &handles {
+            assert_eq!(handle.resolve(&nav), Ok(handle.tile()), "fresh handle");
+        }
+        let mut dangling = 0;
+        for (index, handle) in handles.iter().enumerate() {
+            let tile = tile_id_at(index);
+            let set = BreakSet::new(1, &[tile], count).expect("set builds");
+            assert_eq!(nav.apply_breaks(&set), Ok(vec![tile]));
+            assert_eq!(nav.rebake_budget(1), 1, "tile {index} rebakes");
+            match handle.resolve(&nav) {
+                Err(TileError::DanglingRef {
+                    tile: t,
+                    epoch,
+                    now,
+                }) => {
+                    assert_eq!(t, tile.0);
+                    assert_eq!(epoch, 0, "taken at bake");
+                    assert_eq!(now, 1, "one rebake moved it");
+                    dangling += 1;
+                }
+                other => panic!("tile {index} resolved {other:?}"),
+            }
+        }
+        assert_eq!(dangling, count, "every stale handle refuses");
+    }
+
+    #[test]
+    fn tile_ref_digest_repeats_and_moves_with_the_version() {
+        let mut nav = open(8, 8, 2);
+        let fold = |nav: &TiledNav| {
+            let mut f = engine_core::Fnv64::new();
+            for index in 0..nav.tile_count() {
+                let handle = TileRef::take(nav, tile_id_at(index)).expect("take");
+                f.write_u32(handle.tile().0);
+                f.write_u32(handle.epoch());
+            }
+            f.finish()
+        };
+        let first = fold(&nav);
+        assert_eq!(first, fold(&nav), "identical takes stamp identical bytes");
+        let tile = tile_id_at(2);
+        let set = BreakSet::new(7, &[tile], nav.tile_count()).expect("set builds");
+        nav.apply_breaks(&set).expect("marks");
+        nav.rebake_budget(1);
+        let moved = fold(&nav);
+        assert_ne!(moved, first, "the rebaked tile moved its epoch");
+        assert_eq!(moved, fold(&nav), "still stable after the move");
+    }
+
+    #[test]
+    fn version_overflow_keeps_a_live_handle_valid() {
+        let mut nav = open(4, 4, 2);
+        let tile = tile_id_at(0);
+        nav.registry.versions[0] = u32::MAX;
+        let handle = TileRef::take(&nav, tile).expect("take at the ceiling");
+        nav.set_blocked(0, 0, true).expect("marks dirty");
+        assert_eq!(
+            nav.rebake_budget(1),
+            0,
+            "an overflowed tile keeps its version"
+        );
+        assert_eq!(
+            handle.resolve(&nav),
+            Ok(tile),
+            "the live handle still resolves"
+        );
+        assert_eq!(TileRef::take(&nav, tile).expect("take").epoch(), u32::MAX);
     }
 
     #[test]

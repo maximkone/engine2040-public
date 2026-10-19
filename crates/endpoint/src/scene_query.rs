@@ -107,6 +107,14 @@ pub enum QueryKind {
     Glance = 18,
     /// Share of the frame `anchor` fills from `eye_m` facing `yaw` and `pitch`.
     Coverage = 19,
+    /// Run-length text picture of what the eye sees (SP69).
+    View = 20,
+    /// 72 horizontal ray distances from the origin, 5 degrees apart (SP69).
+    Lidar = 21,
+    /// Top-down text grid of blocking and walkable cells (SP69).
+    Map = 22,
+    /// One ray through a view pixel: entity id, point in cm, distance (SP69).
+    Pixel = 23,
 }
 
 impl QueryKind {
@@ -133,6 +141,10 @@ impl QueryKind {
             Self::ExitsOf => "exits_of",
             Self::Glance => "glance",
             Self::Coverage => "coverage",
+            Self::View => "view",
+            Self::Lidar => "lidar",
+            Self::Map => "map",
+            Self::Pixel => "pixel",
         }
     }
 
@@ -159,12 +171,16 @@ impl QueryKind {
             "exits_of" => Ok(Self::ExitsOf),
             "glance" => Ok(Self::Glance),
             "coverage" => Ok(Self::Coverage),
+            "view" => Ok(Self::View),
+            "lidar" => Ok(Self::Lidar),
+            "map" => Ok(Self::Map),
+            "pixel" => Ok(Self::Pixel),
             _ => Err(QueryError::new(
                 "bad_kind",
                 format!("query kind `{text}` is unknown"),
                 "legal kinds: near, between, visible, reachable, cover_near, \
                  largest_open, free_space, cone, relation, sees, why_hidden, clearance, slide, ground, \
-                 measure, room_of, in_room, exits_of, glance, coverage \
+                 measure, room_of, in_room, exits_of, glance, coverage, view, lidar, map, pixel \
                  (re-read scene.brief for ids first)",
             )),
         }
@@ -244,6 +260,9 @@ pub struct QueryArgs {
     pub rel: Option<Rel>,
     /// Slide direction word for `slide` queries.
     pub dir: Option<String>,
+    /// View or pixel box in cells `[w, h, x, y]` (view, pixel); the eye yaw
+    /// gives the lidar fan start.
+    pub cells: Option<[i32; 4]>,
     /// Fields of the measure, room and glance kinds.
     pub space: SpaceArgs,
 }
@@ -268,6 +287,7 @@ impl QueryArgs {
             filter: None,
             rel: None,
             dir: None,
+            cells: None,
             space: SpaceArgs::default(),
         }
     }
@@ -361,6 +381,44 @@ impl QueryArgs {
         a.yaw = Some(yaw);
         a.half_angle_deg = Some(half_angle_deg);
         a.radius_cm = Some(radius_cm);
+        a
+    }
+
+    /// Run-length text picture a camera at `eye_m` facing `yaw` radians sees,
+    /// `w` by `h` cells (SP69).
+    pub fn view(eye_m: [f32; 3], yaw: f32, w: i32, h: i32) -> Self {
+        let mut a = Self::base(QueryKind::View);
+        a.eye_m = Some(eye_m);
+        a.yaw = Some(yaw);
+        a.cells = Some([w, h, 0, 0]);
+        a
+    }
+
+    /// 72 horizontal ray distances from `eye_m`, the first ray along the facing
+    /// `yaw` radians (0 faces +x), 5 degrees apart (SP69).
+    pub fn lidar(eye_m: [f32; 3], yaw: f32) -> Self {
+        let mut a = Self::base(QueryKind::Lidar);
+        a.eye_m = Some(eye_m);
+        a.yaw = Some(yaw);
+        a
+    }
+
+    /// Top-down text grid of the walkable cells around `eye_m` within
+    /// `radius_cm` (SP69).
+    pub fn map(eye_m: [f32; 3], radius_cm: i32) -> Self {
+        let mut a = Self::base(QueryKind::Map);
+        a.eye_m = Some(eye_m);
+        a.radius_cm = Some(radius_cm);
+        a
+    }
+
+    /// One ray through cell `(x, y)` of a `w` by `h` view from `eye_m` facing
+    /// `yaw` radians (SP69).
+    pub fn pixel(eye_m: [f32; 3], yaw: f32, w: i32, h: i32, x: i32, y: i32) -> Self {
+        let mut a = Self::base(QueryKind::Pixel);
+        a.eye_m = Some(eye_m);
+        a.yaw = Some(yaw);
+        a.cells = Some([w, h, x, y]);
         a
     }
 }
@@ -922,7 +980,11 @@ pub fn run_query(
         | QueryKind::InRoom
         | QueryKind::ExitsOf
         | QueryKind::Glance
-        | QueryKind::Coverage => space_kinds::run_space_kind(actors, args, budget),
+        | QueryKind::Coverage
+        | QueryKind::View
+        | QueryKind::Lidar
+        | QueryKind::Map
+        | QueryKind::Pixel => space_kinds::run_space_kind(actors, args, budget),
         QueryKind::Relation => {
             let anchor = check_anchor(actors, args.anchor)?;
             let rel = args.rel.ok_or_else(|| {
@@ -1136,7 +1198,7 @@ impl Hit {
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneQueryArgs {
-    /// Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m; measure anchor, other; room_of anchor; in_room room; exits_of anchor|room; glance eye_m; coverage anchor, eye_m. a|b means either.
+    /// Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m; measure anchor, other; room_of anchor; in_room room; exits_of anchor|room; glance eye_m; coverage anchor, eye_m; view eye_m; lidar eye_m; map eye_m; pixel eye_m. a|b means either.
     #[schemars(schema_with = "kind_schema")]
     pub kind: String,
     /// Object label from scene.brief (`lamp_2 [uuid]`) or bare UUID: the subject.
@@ -1181,6 +1243,10 @@ pub struct SceneQueryArgs {
     pub room: Option<u32>,
     /// Camera pitch in radians, up is positive (coverage).
     pub pitch: Option<f32>,
+    /// View or pixel box `[w, h, x, y]` in cells, edges 1..=128 (view, pixel;
+    /// default [24,16,0,0], x and y inside the view). The map uses the eye as
+    /// its center and `radius_cm` as its reach.
+    pub cells: Option<[i32; 4]>,
 }
 
 /// Schema of `kind`: a string enum of the kind words.
@@ -1237,6 +1303,7 @@ fn has_field(args: &SceneQueryArgs, field: &str) -> bool {
         "relation" => args.relation.is_some(),
         "dir" => args.dir.is_some(),
         "room" => args.room.is_some(),
+        "cells" => args.cells.is_some(),
         _ => true,
     })
 }
@@ -1437,6 +1504,7 @@ impl super::mcp::ServerState {
             filter: args.filter.clone(),
             rel,
             dir: args.dir.clone(),
+            cells: args.cells,
             space: SpaceArgs {
                 what: args.what.clone(),
                 room: args.room,
@@ -1466,8 +1534,8 @@ impl ToolBase for SceneQueryTool {
     fn description() -> Option<Cow<'static, str>> {
         Some(
             "Spatial questions with reasons: near, between, visible, reachable, \
-             cover_near, largest_open, free_space, cone, relation. Read-only; \
-             api.describe query:<kind> gives a working call."
+             cover_near, largest_open, free_space, cone, relation, view, lidar, \
+             map, pixel. Read-only; api.describe query:<kind> gives a working call."
                 .into(),
         )
     }

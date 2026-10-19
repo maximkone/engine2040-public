@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { archivedDoneRows, blockedBy, boardShardFiles, focusAncestors, focusNowIds, loadBoardText, needsOf, parseBoard, pickNext, rowReady, ticksOf } from "./board-slice.mjs";
+import { archivedDoneRows, blockedBy, boardShardFiles, focusAncestors, focusNowIds, loadBoardText, needsOf, parseBoard, parkedUnmarked, pickNext, rowReady, ticksOf } from "./board-slice.mjs";
 
 // Remove every temp folder this file makes when it exits (test temp folders piled up in %TEMP%).
 const madeDirs = [];
@@ -32,12 +32,12 @@ const BOARD = [
   "",
 ].join("\n");
 
-const run = (args, focus = null) => {
+const run = (args, focus = null, board = BOARD) => {
   const root = mkdtempSync(join(tmpdir(), "board-slice-"));
   mkdirSync(join(root, "tools"));
   mkdirSync(join(root, "docs", "plan"), { recursive: true });
   copyFileSync(TOOL, join(root, "tools", "board-slice.mjs"));
-  writeFileSync(join(root, "docs", "SPRINT.md"), BOARD);
+  writeFileSync(join(root, "docs", "SPRINT.md"), board);
   if (focus !== null) writeFileSync(join(root, "docs", "FOCUS.md"), focus);
   const r = spawnSync(process.execPath, [join(root, "tools", "board-slice.mjs"), ...args], { encoding: "utf8", cwd: root });
   return { code: r.status, out: r.stdout, err: r.stderr };
@@ -59,6 +59,41 @@ test("--ready --open adds every open row with what it waits on", () => {
   assert.match(out, /B5 .*\[waits: LATER\]/);
   assert.match(out, /O1 .*\[waits: operator\]/);
   assert.doesNotMatch(out, /^A1 /m, "a done row is not open");
+});
+
+
+test("--parked finds ready rows a dated note parked without the BLOCKED marker the ready filter reads", () => {
+  const board = [
+    "# SPRINT",
+    "## Board",
+    "### Finish line",
+    "- [ ] P1 render: ready row, needs: none.",
+    "  Progress 2026-10-19: operator/owner: the code half landed, the reference-GPU",
+    "  receipt is missing.",
+    "- [ ] P2 render: ready row, needs: none.",
+    "  Progress 2026-10-19: the sweep landed; left: the second rung and a human",
+    "  lookcheck.",
+    "- [ ] P3 render: parked with the marker, needs: none. BLOCKED: needs a human.",
+    "- [ ] P4 render: parked at the operator's door, needs: none.",
+    "  Progress 2026-10-19: blocked until the owner answers.",
+    "",
+  ].join("\n");
+  const { tasks, order } = parseBoard(board);
+  assert.deepEqual(
+    parkedUnmarked(tasks, order).map((t) => t.id),
+    ["P1", "P4"],
+    "a park note at the start of a dated note; a partial note that mentions a human later is still work",
+  );
+  const { code, out } = run(["--parked"], null, board);
+  assert.equal(code, 1, "the report exits 1 while a parked row lacks the marker");
+  assert.match(out, /^P1\s+Progress 2026-10-19: operator\/owner/m);
+  assert.match(out, /^P4\s+Progress 2026-10-19: blocked/m);
+  assert.doesNotMatch(out, /^P2 /m, "P2 has agent work left");
+  assert.doesNotMatch(out, /^P3 /m, "P3 carries the marker the ready filter reads");
+  assert.match(out, /^2 ready row\(s\) parked without a BLOCKED: marker$/m);
+  const clean = run(["--parked"], null, ["# SPRINT", "## Board", "### Finish line", "- [ ] P9 render: ready, needs: none.", ""].join("\n"));
+  assert.equal(clean.code, 0);
+  assert.match(clean.out, /^0 ready row\(s\) parked without a BLOCKED: marker$/m);
 });
 
 

@@ -15,20 +15,28 @@ use engine_editor::commands::{Document, Journal};
 use engine_editor::durable::{rehydrate, reopen_sealed};
 
 use super::mcp::McpServer;
+use super::packs::web::WebScope;
 
 /// Capability session the stdio door serves. One client, one session.
 pub const MCP_SESSION: u64 = 1;
 
 /// Help text for `--help`: usage plus the one-line MCP client config.
 pub const USAGE: &str = "\
-usage: e2040-mcp [--project-dir DIR] [DIR]\n\
+usage: e2040-mcp [--project-dir DIR] [--web-root DIR [--web-chrome PATH]] [DIR]\n\
 \n\
 Serve the MCP authoring door on a project folder over stdio.\n\
 The folder holds the durable `gen-*.edoc` generations; a fresh folder\n\
 starts empty. With no DIR, the current directory is the project.\n\
 \n\
+--web-root DIR allows the web verbs (`build.web`, `serve.web`,\n\
+`browser.capture`, `browser.input`) over the repo root holding\n\
+`tools/web-build.mjs` and `tools/web-browse.mjs`. Without it every web verb\n\
+is refused with the typed code `unscoped`. Sets are built under\n\
+`DIR/target/door-web`. --web-chrome names the Chrome `browser.capture`\n\
+drives (default: the host picks one).\n\
+\n\
 One-line MCP client config:\n\
-{\"command\": \"e2040-mcp\", \"args\": [\"--project-dir\", \"/path/to/project\"]}\n\
+{\"command\": \"e2040-mcp\", \"args\": [\"--project-dir\", \"/path/to/project\", \"--web-root\", \"/path/to/engine\"]}\n\
 ";
 
 /// Help text printed for `--help`.
@@ -79,22 +87,40 @@ impl fmt::Display for StartupError {
 
 impl std::error::Error for StartupError {}
 
-/// Parsed stdio startup: the project folder to open. The server speaks on
-/// stdin/stdout; there is no port and no extra tool past the 26-tool registry (`crate::tools::TOOLS`).
+/// What the project allows for the web verbs: the repo root holding the node
+/// tools, plus the Chrome `browser.capture` drives. The door grants this; no
+/// verb can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebGrant {
+    /// Repo root holding `tools/web-build.mjs` and `tools/web-browse.mjs`.
+    pub root: PathBuf,
+    /// Chrome program or path `browser.capture` drives; `None` lets the tool find one.
+    pub chrome: Option<String>,
+}
+
+/// Parsed stdio startup: the project folder to open, plus the optional web
+/// grant. The server speaks on stdin/stdout; there is no port and no extra tool
+/// past the 26-tool registry (`crate::tools::TOOLS`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupConfig {
     /// Project folder holding the durable `gen-*.edoc` generations.
     pub project_dir: PathBuf,
+    /// `--web-root`: allow the web verbs under that repo root; `None` (the
+    /// default) refuses every web verb with `unscoped`.
+    pub web: Option<WebGrant>,
 }
 
 /// Parse `argv` (including `argv[0]`): `--project-dir DIR`,
-/// `--project-dir=DIR` or one positional DIR. Anything else is [`Usage`](StartupError::Usage).
+/// `--project-dir=DIR`, `--web-root DIR`, `--web-chrome PATH` or one positional
+/// DIR. Anything else is [`Usage`](StartupError::Usage).
 pub fn parse_args(args: &[String]) -> Result<StartupConfig, StartupError> {
     let usage = |message: &str| StartupError::Usage {
         message: message.to_owned(),
     };
     let mut flag_dir: Option<PathBuf> = None;
     let mut positional: Option<PathBuf> = None;
+    let mut web_root: Option<PathBuf> = None;
+    let mut web_chrome: Option<String> = None;
     let mut rest = args.iter().skip(1);
     while let Some(arg) = rest.next() {
         if arg == "--project-dir" {
@@ -116,6 +142,36 @@ pub fn parse_args(args: &[String]) -> Result<StartupConfig, StartupError> {
                 return Err(usage("--project-dir given twice"));
             }
             flag_dir = Some(PathBuf::from(value));
+        } else if arg == "--web-root" || arg.starts_with("--web-root=") {
+            let value = if arg == "--web-root" {
+                rest.next()
+                    .ok_or_else(|| usage("--web-root needs a repo directory"))?
+                    .as_str()
+            } else {
+                arg.trim_start_matches("--web-root=")
+            };
+            if value.is_empty() {
+                return Err(usage("--web-root needs a non-empty repo directory"));
+            }
+            if web_root.is_some() {
+                return Err(usage("--web-root given twice"));
+            }
+            web_root = Some(PathBuf::from(value));
+        } else if arg == "--web-chrome" || arg.starts_with("--web-chrome=") {
+            let value = if arg == "--web-chrome" {
+                rest.next()
+                    .ok_or_else(|| usage("--web-chrome needs a program or path"))?
+                    .as_str()
+            } else {
+                arg.trim_start_matches("--web-chrome=")
+            };
+            if value.is_empty() {
+                return Err(usage("--web-chrome needs a non-empty program or path"));
+            }
+            if web_chrome.is_some() {
+                return Err(usage("--web-chrome given twice"));
+            }
+            web_chrome = Some(value.to_owned());
         } else if arg == "--help" || arg == "-h" {
             return Err(usage("help requested"));
         } else if arg.starts_with('-') {
@@ -129,10 +185,19 @@ pub fn parse_args(args: &[String]) -> Result<StartupConfig, StartupError> {
     if flag_dir.is_some() && positional.is_some() {
         return Err(usage("pass the project directory once, not twice"));
     }
+    if web_chrome.is_some() && web_root.is_none() {
+        return Err(usage(
+            "--web-chrome needs --web-root: the web verbs stay refused until the project allows them",
+        ));
+    }
     Ok(StartupConfig {
         project_dir: flag_dir
             .or(positional)
             .unwrap_or_else(|| PathBuf::from(".")),
+        web: web_root.map(|root| WebGrant {
+            root,
+            chrome: web_chrome,
+        }),
     })
 }
 
@@ -173,15 +238,36 @@ pub fn open_project(dir: &Path) -> Result<(Document, Journal), StartupError> {
 }
 
 /// Build the door server (core tools plus verb packs) over the opened
-/// project folder.
+/// project folder. A [`WebGrant`] is the one host call that allows the web
+/// verbs for this session; the verbs stay refused (`unscoped`) without it.
 pub fn build_server(config: &StartupConfig) -> Result<McpServer, StartupError> {
     let (doc, journal) = open_project(&config.project_dir)?;
-    Ok(McpServer::with_document(
+    let server = McpServer::with_document(
         doc,
         journal,
         MCP_SESSION,
         Capability::unrestricted(MCP_SESSION),
-    ))
+    );
+    if let Some(grant) = &config.web {
+        if !grant.root.is_dir() {
+            return Err(StartupError::BadDir {
+                path: grant.root.display().to_string(),
+                reason: "--web-root must be the repo root holding tools/web-build.mjs and \
+                         tools/web-browse.mjs; pass an existing directory"
+                    .to_owned(),
+            });
+        }
+        let scope = match &grant.chrome {
+            Some(chrome) => WebScope::new(grant.root.clone()).with_chrome(chrome.clone()),
+            None => WebScope::new(grant.root.clone()),
+        };
+        server
+            .allow_web(scope)
+            .map_err(|error| StartupError::Transport {
+                detail: format!("cannot grant the web scope: {error}"),
+            })?;
+    }
+    Ok(server)
 }
 
 #[cfg(test)]
@@ -243,6 +329,21 @@ mod tests {
             vec!["e2040-mcp", "a", "b"],
             vec!["e2040-mcp", "--project-dir", "a", "--project-dir", "b"],
             vec!["e2040-mcp", "--help"],
+            vec!["e2040-mcp", "--web-root"],
+            vec!["e2040-mcp", "--web-root="],
+            vec!["e2040-mcp", "--web-root", "a", "--web-root", "b"],
+            vec!["e2040-mcp", "--web-chrome"],
+            vec!["e2040-mcp", "--web-chrome="],
+            vec![
+                "e2040-mcp",
+                "--web-root",
+                "a",
+                "--web-chrome",
+                "c",
+                "--web-chrome",
+                "d",
+            ],
+            vec!["e2040-mcp", "--web-chrome", "chrome"],
         ] {
             let error = parse_args(&argv(&words)).expect_err("misuse must fail");
             assert!(
@@ -251,6 +352,112 @@ mod tests {
             );
             assert_ne!(error.exit_code(), 0, "usage errors exit nonzero");
         }
+        // `--web-chrome` alone names the fix: the verbs stay refused until the
+        // project allows them.
+        let error =
+            parse_args(&argv(&["e2040-mcp", "--web-chrome", "chrome"])).expect_err("no root");
+        assert!(
+            error.to_string().contains("--web-root"),
+            "the refusal names the missing flag: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_args_reads_the_web_grant_and_leaves_it_off_by_default() {
+        let bare = parse_args(&argv(&["e2040-mcp"])).expect("bare parses");
+        assert_eq!(bare.web, None, "no flag means the web verbs stay refused");
+        let explicit = parse_args(&argv(&[
+            "e2040-mcp",
+            "--web-root",
+            "engine",
+            "--web-chrome",
+            "chrome",
+        ]))
+        .expect("flag form parses");
+        assert_eq!(
+            explicit.web,
+            Some(WebGrant {
+                root: PathBuf::from("engine"),
+                chrome: Some("chrome".to_owned())
+            })
+        );
+        let equals = parse_args(&argv(&[
+            "e2040-mcp",
+            "--web-root=engine",
+            "--web-chrome=chrome",
+        ]))
+        .expect("equals form parses");
+        assert_eq!(equals.web, explicit.web);
+        let root_only =
+            parse_args(&argv(&["e2040-mcp", "--web-root", "engine"])).expect("root alone parses");
+        assert_eq!(
+            root_only.web,
+            Some(WebGrant {
+                root: PathBuf::from("engine"),
+                chrome: None
+            }),
+            "the grant works without Chrome: build and serve do not need it"
+        );
+    }
+
+    /// A scratch repo root with no `tools/` folder: a granted verb opens and
+    /// stops at the missing tool instead of refusing `unscoped`.
+    fn grant_rig(name: &str) -> (PathBuf, PathBuf) {
+        (
+            scratch(&format!("{name}-project")),
+            scratch(&format!("{name}-root")),
+        )
+    }
+
+    #[test]
+    fn the_web_grant_opens_the_verbs_and_a_bad_root_fails_at_start() {
+        use crate::packs::web::{TOOL_BUILD_WEB, UNSCOPED};
+        use crate::packs::{ApiCallArgs, ApiCallTool};
+        use rmcp::handler::server::router::tool::SyncTool;
+
+        let call = |server: &McpServer| {
+            ApiCallTool::invoke(
+                server,
+                ApiCallArgs {
+                    verb: TOOL_BUILD_WEB.to_owned(),
+                    args: None,
+                },
+            )
+        };
+        let (project, root) = grant_rig("web-grant");
+        // Refused by default: the door grant is the only way in.
+        let closed = build_server(&StartupConfig {
+            project_dir: project.clone(),
+            web: None,
+        })
+        .expect("server builds without a grant");
+        assert_eq!(call(&closed).expect_err("refused").code, UNSCOPED);
+        // Granted: the verb reaches its own gate and names the missing tool.
+        let open = build_server(&StartupConfig {
+            project_dir: project.clone(),
+            web: Some(WebGrant {
+                root: root.clone(),
+                chrome: Some("chrome-fixture".to_owned()),
+            }),
+        })
+        .expect("server builds with a grant");
+        let missing = call(&open).expect_err("no tools folder");
+        assert_eq!(missing.code, "tool_missing", "{missing}");
+        assert!(missing.message.contains("web-build.mjs"), "{missing}");
+        // A grant root that is not a directory is a typed start failure.
+        let error = build_server(&StartupConfig {
+            project_dir: project.clone(),
+            web: Some(WebGrant {
+                root: root.join("nope"),
+                chrome: None,
+            }),
+        })
+        .err()
+        .expect("bad grant root");
+        assert!(matches!(error, StartupError::BadDir { .. }), "{error:?}");
+        assert_ne!(error.exit_code(), 0);
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -351,6 +558,7 @@ mod tests {
         let dir = scratch("tools");
         let config = StartupConfig {
             project_dir: dir.clone(),
+            web: None,
         };
         let server = build_server(&config).expect("server builds");
         let mut names: Vec<String> = server

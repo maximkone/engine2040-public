@@ -124,6 +124,11 @@ use engine_physics::balance::BalanceParams;
 /// Integer balance verdicts the window reads (`Sim::balance`): re-exported so
 /// the presentation leg names the return without a physics edge.
 pub use engine_physics::balance::{BalanceState, GaitPhase};
+/// RZ7 capes: the CPU Verlet cloth sheet the window pins at each fighter's
+/// shoulders and hangs on the arena banners. Re-exported like the balance
+/// verdicts above so the presentation leg cloths a fighter without a physics
+/// edge; it is presentation only and the sim never reads it.
+pub use engine_physics::cloth;
 #[cfg(feature = "sim")]
 use engine_physics::controller::{Controller, ControllerSnapshot};
 use engine_physics::limb::{LimbPool, MAX_LIMBS};

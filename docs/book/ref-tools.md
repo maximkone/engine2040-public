@@ -75,6 +75,7 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 | `rerun-timeline.mjs` | Diffs two per-tick JSON timelines | `rerun-timeline.test.mjs` | 1 self-check FAIL, 2 usage |
 | `playtest-log.mjs` | Checks a playtest CSV | `playtest-log.test.mjs` | see code |
 | `pe-exports.mjs` | Lists PE export names | `pe-exports.test.mjs` | 2 usage or error |
+| `physfx-backends.mjs` | RZ1 soak on Rapier wasm and Jolt wasm, one table | `physfx-backends.test.mjs` | 0 both backends ran, 1 a backend failed to load or step, 2 usage |
 | `flaky-quarantine.mjs` | Quarantines tests that fail repeatedly | `flaky-quarantine.test.mjs` | 0 ok, 1 fail, 2 usage |
 | `duration-fmt.mjs` | Duration formatter CLI | `duration-fmt.test.mjs` | 0 pass, 1 fail, 2 usage |
 | `argv.mjs` | Library: shell-safe spawn and CLI failure helpers | `argv.test.mjs` | not a CLI |
@@ -160,7 +161,7 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 - Run: `node tools/secret-gate.mjs`; `--self-test` (seeds one temp secret and checks it is counted); `--help`.
 - Output: `PASS: <n> staged files scanned, 0 secrets`; `FAIL: <n> secrets in <n> staged files`; `PASS: self-test detected <n> seeded secret in 1 file`.
 - Exit: 0 pass, 1 secrets or self-test failed, 2 bad arguments.
-- No git hook calls it (section 14).
+- The pre-commit hook runs it on every commit (section 14); `node tools/secret-gate.mjs` scans on demand.
 
 ### license-gate.mjs
 
@@ -496,7 +497,7 @@ These `tools/*.test.mjs` files have no same-name module. Some import a module un
 ## 14. Suspicious items
 
 - `arch-fitness.mjs` exits 0 even on a cycle. It prints `FAIL cycle` and sets no exit code.
-- `secret-gate.mjs` is not called by any git hook. The local `pre-push` hook runs `git lfs pre-push`, `cargo deny check licenses`, and `node tools/license-gate.mjs`. The local `pre-commit` hook runs `tools/rust-quality.mjs`. Hooks live in `.git/hooks/`, not versioned.
+- `secret-gate.mjs` is called by the local `pre-commit` hook (installed from the tracked `tools/hooks/pre-commit`). The local `pre-push` hook runs `git lfs pre-push`, `cargo deny check licenses`, and `node tools/license-gate.mjs`; `pre-commit` also runs `tools/rust-quality.mjs`. Hooks live in `.git/hooks/`, not versioned.
 - `product-check.mjs` writes `bug-product-*.md` to `target/queue/ready/`. The keeper that consumed that queue was cut (`docs/plan/finish-line.md`). Nothing in this repo reads it.
 - Several tools name lane machinery that the standalone repo cut: `clean.mjs` (`lanes-worktrees.json`, `target/lanes`), `doctor.mjs` (`target/lanes/*.patch`), `mutants.mjs` (`target/lanes/<id>.patch`, `.lanes/<id>`). `books.mjs` and `ship.mjs` use paths outside the repo (`C:/empire/...`, `C:/e2040-clean/`).
 - `docs/WORKFLOW.md` names `tools/sprint-lock.mjs`, `tools/sprint-loop.mjs`, `builder` and `planner` agents. None exists in `tools/`.

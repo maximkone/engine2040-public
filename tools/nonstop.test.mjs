@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { buildPrompt, opencodeBin, parseReadyList, pickNext } from "./nonstop.mjs";
+import { buildPrompt, classifyRun, opencodeBin, parseReadyList, pickNext } from "./nonstop.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const READY = [
@@ -45,6 +45,17 @@ test("opencodeBin ignores OpenCode's own OPENCODE=1 marker and takes a real path
   assert.equal(opencodeBin({ OPENCODE: "/usr/local/bin/opencode" }), "/usr/local/bin/opencode");
   assert.equal(opencodeBin({ OPENCODE: "1", OPENCODE_BIN: "C:\\opencode\\opencode.exe" }), "C:\\opencode\\opencode.exe");
   assert.equal(opencodeBin({ OPENCODE_BIN: "custom-opencode", OPENCODE: "C:\\x.exe" }), "custom-opencode");
+});
+
+test("classifyRun reads a clock kill as a timeout, not a model error", () => {
+  assert.equal(classifyRun({ ticked: true }), "ticked");
+  assert.equal(classifyRun({ timedOut: true }), "timeout");
+  assert.equal(classifyRun({ failed: true }), "model-error");
+  assert.equal(classifyRun({ timedOut: true, failed: true }), "model-error", "a real failure wins");
+  assert.equal(classifyRun({ changed: true }), "progress");
+  assert.equal(classifyRun({ timedOut: true, changed: true }), "progress", "an edit before the kill counts");
+  assert.equal(classifyRun({}), "unchanged");
+  assert.equal(classifyRun({ ticked: true, timedOut: true, failed: true }), "ticked", "a ticked row is real");
 });
 
 test("--help exits 0 and --dry prints a prompt without running a model", () => {  const help = spawnSync(process.execPath, [join(HERE, "nonstop.mjs"), "--help"], { encoding: "utf8" });

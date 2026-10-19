@@ -355,6 +355,8 @@ pub fn push_fight_draws(
                 material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             });
             pushed += 1;
         }
@@ -387,6 +389,8 @@ pub fn staged_fight_frame_list(
             material: scene.material,
             base_color: None,
             normal_map: None,
+            orm: None,
+            emissive: None,
         });
     }
     let _ = push_dressing_draws(&mut list, resident)?;

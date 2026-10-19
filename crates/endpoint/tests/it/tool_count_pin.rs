@@ -31,7 +31,11 @@ use engine_endpoint::{
 /// `wound.table.get` (BX39, the break pack's fourth verb) moved every arm up by one.
 /// `scene.pick` (EV21, the scene pack's eighth verb) moved every arm up by one.
 /// `play.sweep` (GS33, the play pack's fourth verb) moved every arm up by one.
-const EXPECTED_ROUTER: usize = 65
+/// `view.observe` and `view.laws` (SP62, the view pack's two verbs, landed in
+/// 1c70578) moved every arm up by two.
+/// The settings pack adds `settings.get`, `settings.set` and `settings.undo`
+/// (on-demand, not advertised by default), so every arm moves up by three.
+const EXPECTED_ROUTER: usize = 70
     + if cfg!(feature = "rules") { 3 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

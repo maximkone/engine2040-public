@@ -7,10 +7,11 @@
 //! Errors: [`Error`] is typed; invalid caller input never panics.
 //!
 //! A [`Ragdoll`] spawns one dynamic body per skeleton joint, joined
-//! parent-to-child with spherical impulse joints whose swing limits derive
-//! deterministically from joint depth (the skeleton contract carries names
-//! plus parents only, so depth is the whole limit source: depth 1 swings widest, deeper joints get
-//! tighter by [`SWING_STEP`] down to [`SWING_MIN`]). The caller feeds the
+//! parent-to-child with joints whose swing and twist limits come from the
+//! skeleton's joint table ([`JointTable`]: a knee or an elbow hinges, a spine
+//! or a shoulder gets its named cone, an unknown name falls back to the joint
+//! depth), each carrying the row's friction torque motor. Collision groups keep
+//! a bone from touching its parent or children. The caller feeds the
 //! animated pose per tick via [`Ragdoll::set_animated`]; [`Ragdoll::bone_poses`]
 //! blends that animated input with the simulated bones under the
 //! [`Ragdoll::blend_to_ragdoll`] weight (`0` = fully animated, `1` = fully
@@ -37,6 +38,7 @@
 //! and the floor never feel a force back.
 #![forbid(unsafe_code)]
 
+use super::joint_limits::bone_groups;
 use super::rapier::{
     ordered_linvel, ordered_translation, position_in_bounds, quantize, sanitize3, BodyState,
     FIXED_DT, GRAVITY_Y, MAX_LEN,
@@ -44,11 +46,12 @@ use super::rapier::{
 use engine_anim::contract::{validate_pose, validate_skeleton, AnimError, LocalPose, Skeleton};
 use engine_core::{quat_mul, Fnv64};
 use rapier3d::dynamics::{
-    CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, JointAxis, MultibodyJointSet,
-    RigidBodyBuilder, RigidBodyHandle, RigidBodySet, SoftBodySet, SphericalJointBuilder,
+    CCDSolver, GenericJointBuilder, ImpulseJointSet, IntegrationParameters, IslandManager,
+    JointAxesMask, JointAxis, MultibodyJointSet, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
+    SoftBodySet, SphericalJointBuilder,
 };
 use rapier3d::geometry::{BroadPhaseBvh, ColliderBuilder, ColliderSet, NarrowPhase};
-use rapier3d::math::{Rotation, Vector};
+use rapier3d::math::{Pose, Rotation, Vector};
 use rapier3d::pipeline::PhysicsPipeline;
 use std::fmt::{Display, Formatter};
 
@@ -344,9 +347,94 @@ pub struct Ragdoll {
     contact_events: u64,
 }
 
+/// Check spawn inputs: one finite positive capsule per skeleton joint.
+fn validate_capsules(skeleton: &Skeleton, capsule_dims: &[BoneShape]) -> Result<(), Error> {
+    if capsule_dims.len() != skeleton.len() {
+        return Err(Error::Anim(AnimError::LengthMismatch {
+            expected: skeleton.len(),
+            got: capsule_dims.len(),
+        }));
+    }
+    for d in capsule_dims {
+        if !d.radius.is_finite() || d.radius == 0.0 || !(0.0..=MAX_LEN).contains(&d.radius) {
+            return Err(Error::InvalidRadius);
+        }
+        if !d.half_height.is_finite() || !(0.0..=MAX_LEN).contains(&d.half_height) {
+            return Err(Error::InvalidHeight);
+        }
+    }
+    Ok(())
+}
+
+/// One dynamic capsule body per joint at the posed world transform, then the
+/// joint table between them. Returns the body/collider/joint sets and the
+/// body handle of each joint in skeleton order.
+fn build_bones(
+    skeleton: &Skeleton,
+    capsule_dims: &[BoneShape],
+    world_pos: &[[f32; 3]],
+    world_rot: &[[f32; 4]],
+) -> (
+    RigidBodySet,
+    ColliderSet,
+    ImpulseJointSet,
+    Vec<RigidBodyHandle>,
+) {
+    let depths = joint_depths(skeleton);
+    let mut bodies = RigidBodySet::new();
+    let mut colliders = ColliderSet::new();
+    let mut impulse_joints = ImpulseJointSet::new();
+    let mut order = Vec::with_capacity(skeleton.len());
+    for (i, (p, r)) in world_pos.iter().zip(world_rot.iter()).enumerate() {
+        let body = RigidBodyBuilder::dynamic()
+            .translation(Vector::new(p[0], p[1], p[2]))
+            .linear_damping(LINEAR_DAMPING)
+            .angular_damping(ANGULAR_DAMPING)
+            // Sleeping is disabled so kinematic state (pos/rot/vel) is
+            // the complete future-affecting state and restore is exact.
+            .can_sleep(false)
+            // CCD is on: fast limbs stop at thin shields (see `set_ccd`).
+            .ccd_enabled(true)
+            .build();
+        let handle = bodies.insert(body);
+        // Orientation comes from the animated world rotation. The builder
+        // takes axis-angle (which needs `acos` to derive), so rotation is
+        // set directly as a quaternion instead: no trig in this glue.
+        if let Some(b) = bodies.get_mut(handle) {
+            b.set_rotation(normalized_rotation(r), false);
+        }
+        let mut bone_collider =
+            ColliderBuilder::capsule_y(capsule_dims[i].half_height, capsule_dims[i].radius)
+                .density(1.0)
+                .friction(FRICTION)
+                .restitution(0.0);
+        // Collision groups keep a bone from touching its parent or children
+        // while the same bone of another ragdoll still collides (see
+        // `joint_limits::bone_groups`). A skeleton wider than the bit budget
+        // keeps Rapier's default groups and the joint's own contact flag.
+        if let Some(groups) = bone_groups(skeleton, i) {
+            bone_collider = bone_collider.collision_groups(groups);
+        }
+        let collider = bone_collider.build();
+        colliders.insert_with_parent(collider, handle, &mut bodies);
+        order.push(handle);
+    }
+    // Parent-to-child joints read the per-joint table, anchored between the
+    // two rest positions so chained bodies start unstressed.
+    insert_table_joints(
+        skeleton,
+        world_pos,
+        world_rot,
+        &depths,
+        &order,
+        &mut impulse_joints,
+    );
+    (bodies, colliders, impulse_joints, order)
+}
+
 impl Ragdoll {
     /// Spawn one dynamic body per skeleton joint at the animated world
-    /// transform, joined parent-to-child with depth-limited spherical joints.
+    /// transform, joined parent-to-child with the per-joint limit table.
     /// `capsule_dims` carries one [`BoneShape`] per joint. Blend starts at
     /// `0`, so [`Ragdoll::bone_poses`] returns `pose` exactly until the caller
     /// raises the weight.
@@ -357,70 +445,14 @@ impl Ragdoll {
     ) -> Result<Self, Error> {
         validate_skeleton(skeleton).map_err(Error::Anim)?;
         validate_pose(skeleton, pose).map_err(Error::Anim)?;
-        if capsule_dims.len() != skeleton.len() {
-            return Err(Error::Anim(AnimError::LengthMismatch {
-                expected: skeleton.len(),
-                got: capsule_dims.len(),
-            }));
-        }
-        for d in capsule_dims {
-            if !d.radius.is_finite() || d.radius == 0.0 || !(0.0..=MAX_LEN).contains(&d.radius) {
-                return Err(Error::InvalidRadius);
-            }
-            if !d.half_height.is_finite() || !(0.0..=MAX_LEN).contains(&d.half_height) {
-                return Err(Error::InvalidHeight);
-            }
-        }
+        validate_capsules(skeleton, capsule_dims)?;
         let (world_pos, world_rot) = world_transforms(skeleton, pose);
-        let depths = joint_depths(skeleton);
-
+        let (bodies, colliders, impulse_joints, order) =
+            build_bones(skeleton, capsule_dims, &world_pos, &world_rot);
         let params = IntegrationParameters {
             dt: FIXED_DT,
             ..Default::default()
         };
-        let mut bodies = RigidBodySet::new();
-        let mut colliders = ColliderSet::new();
-        let mut impulse_joints = ImpulseJointSet::new();
-        let mut order = Vec::with_capacity(skeleton.len());
-        for (i, (p, r)) in world_pos.iter().zip(world_rot.iter()).enumerate() {
-            let body = RigidBodyBuilder::dynamic()
-                .translation(Vector::new(p[0], p[1], p[2]))
-                .linear_damping(LINEAR_DAMPING)
-                .angular_damping(ANGULAR_DAMPING)
-                // Sleeping is disabled so kinematic state (pos/rot/vel) is
-                // the complete future-affecting state and restore is exact.
-                .can_sleep(false)
-                // CCD is on: fast limbs stop at thin shields (see `set_ccd`).
-                .ccd_enabled(true)
-                .build();
-            let handle = bodies.insert(body);
-            // Orientation comes from the animated world rotation. The builder
-            // takes axis-angle (which needs `acos` to derive), so rotation is
-            // set directly as a quaternion instead: no trig in this glue.
-            if let Some(b) = bodies.get_mut(handle) {
-                b.set_rotation(normalized_rotation(r), false);
-            }
-            let collider =
-                ColliderBuilder::capsule_y(capsule_dims[i].half_height, capsule_dims[i].radius)
-                    .density(1.0)
-                    .friction(FRICTION)
-                    .restitution(0.0)
-                    .build();
-            colliders.insert_with_parent(collider, handle, &mut bodies);
-            order.push(handle);
-        }
-        // Parent-to-child spherical joints, anchored at the midpoint of the
-        // two rest positions so chained bodies start unstressed. Contacts
-        // between joined bodies stay off so overlapping bone capsules never
-        // self-collide; limits come from joint depth (the only hierarchy signal).
-        insert_joints(
-            skeleton,
-            &world_pos,
-            &world_rot,
-            &depths,
-            &order,
-            &mut impulse_joints,
-        );
         Ok(Self {
             pipeline: PhysicsPipeline::new(),
             gravity: Vector::new(0.0, GRAVITY_Y, 0.0),
@@ -1170,9 +1202,9 @@ fn resolve_spacing(
 
 /// Parent-to-child spherical joints anchored at the rest-pose midpoint of
 /// each pair, with depth-limited swing and contacts off between joined
-/// bodies. Split from `spawn` while it is open so the constructor stays
-/// short; the math is unchanged. Public so the float-only physical layer
-/// (`engine-physfx`) joins its ragdoll bones the same way this ragdoll does.
+/// bodies. This is the depth-only builder the float physical layer
+/// (`engine-physfx`) and the powered ragdoll keep; [`Ragdoll::spawn`] reads the
+/// per-joint table through [`insert_table_joints`] instead.
 pub fn insert_joints(
     skeleton: &Skeleton,
     world_pos: &[[f32; 3]],
@@ -1203,6 +1235,108 @@ pub fn insert_joints(
             .build();
         impulse_joints.insert(order[parent], order[i], data, true);
     }
+}
+
+/// Parent-to-child joints read from [`JointTable`]: a hinge for a knee or an
+/// elbow, a ball with its own swing cone and twist range for every other bone,
+/// each carrying the row's friction motor, anchored at the rest-pose midpoint of
+/// the pair, with contacts off between joined bodies. `_depths` is kept for
+/// callers that precompute it; the table derives its own.
+pub fn insert_table_joints(
+    skeleton: &Skeleton,
+    world_pos: &[[f32; 3]],
+    world_rot: &[[f32; 4]],
+    _depths: &[u32],
+    order: &[RigidBodyHandle],
+    impulse_joints: &mut ImpulseJointSet,
+) {
+    let table = JointTable::humanoid(skeleton);
+    // Hinges bend about the root body's side axis: one shared frame for the
+    // whole rig, so a knee and an elbow fold in their own planes and nowhere else.
+    let root = skeleton
+        .joints
+        .iter()
+        .position(|joint| joint.parent.is_none())
+        .unwrap_or(0);
+    let axis = rotate_vec(&[1.0, 0.0, 0.0], &normalize_quat(&world_rot[root]));
+    let world_frame = side_frame(axis);
+    for (i, joint) in skeleton.joints.iter().enumerate() {
+        let Some(parent) = joint.parent else {
+            continue;
+        };
+        let mid = [
+            (world_pos[parent][0] + world_pos[i][0]) * 0.5,
+            (world_pos[parent][1] + world_pos[i][1]) * 0.5,
+            (world_pos[parent][2] + world_pos[i][2]) * 0.5,
+        ];
+        let a1 = to_local(&world_pos[parent], &world_rot[parent], &mid);
+        let a2 = to_local(&world_pos[i], &world_rot[i], &mid);
+        let spec = table.spec(i).unwrap_or(JointSpec {
+            kind: JointKind::Spherical,
+            swing_limit: SWING_MIN,
+            twist_min: -JOINT_TWIST_SPHERICAL_RAD,
+            twist_max: JOINT_TWIST_SPHERICAL_RAD,
+            friction_torque: JOINT_FRICTION_SPHERICAL_NM,
+            spring_hz: JOINT_SPRING_SPHERICAL_HZ,
+        });
+        let data = match spec.kind {
+            JointKind::Hinge => {
+                // A knee folds backward (+X), an elbow forward (-X): the row's
+                // range is one-sided, so the joint cannot hyperextend.
+                let knee = joint.name.contains("knee") || joint.name.contains("shin");
+                let range = if knee {
+                    [0.0, spec.swing_limit]
+                } else {
+                    [-spec.swing_limit, 0.0]
+                };
+                let q1 = normalized_rotation(&world_rot[parent]);
+                let q2 = normalized_rotation(&world_rot[i]);
+                GenericJointBuilder::new(JointAxesMask::LOCKED_REVOLUTE_AXES)
+                    .local_frame1(Pose::from_parts(
+                        Vector::new(a1[0], a1[1], a1[2]),
+                        q1.inverse() * world_frame,
+                    ))
+                    .local_frame2(Pose::from_parts(
+                        Vector::new(a2[0], a2[1], a2[2]),
+                        q2.inverse() * world_frame,
+                    ))
+                    .limits(JointAxis::AngX, range)
+                    .motor_velocity(JointAxis::AngX, 0.0, spec.friction_torque)
+                    .contacts_enabled(false)
+                    .build()
+            }
+            JointKind::Spherical => SphericalJointBuilder::new()
+                .local_anchor1(Vector::new(a1[0], a1[1], a1[2]))
+                .local_anchor2(Vector::new(a2[0], a2[1], a2[2]))
+                .contacts_enabled(false)
+                .limits(JointAxis::AngX, [-spec.swing_limit, spec.swing_limit])
+                .limits(JointAxis::AngY, [spec.twist_min, spec.twist_max])
+                .limits(JointAxis::AngZ, [-spec.swing_limit, spec.swing_limit])
+                .motor_velocity(JointAxis::AngX, 0.0, spec.friction_torque)
+                .motor_velocity(JointAxis::AngY, 0.0, spec.friction_torque)
+                .motor_velocity(JointAxis::AngZ, 0.0, spec.friction_torque)
+                .build()
+                .into(),
+        };
+        impulse_joints.insert(order[parent], order[i], data, true);
+    }
+}
+
+/// Rotation that turns the hinge's +X axis onto the world `axis`, by the shortest
+/// arc: one `sqrt`, no platform trig. The opposite axis (a half turn) falls back to
+/// a half turn about Z, which maps X to -X.
+fn side_frame(axis: [f32; 3]) -> Rotation {
+    let d = axis[0];
+    if d < -0.999_999 {
+        return Rotation::from_xyzw(0.0, 0.0, 1.0, 0.0);
+    }
+    let cross = [0.0, -axis[2], axis[1]];
+    let w = 1.0 + d;
+    let n = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2] + w * w).sqrt();
+    if n <= 0.0 || !n.is_finite() {
+        return Rotation::IDENTITY;
+    }
+    Rotation::from_xyzw(cross[0] / n, cross[1] / n, cross[2] / n, w / n).normalize()
 }
 
 /// Depth of each joint (root is 0). Parents-first order from skeleton
@@ -1236,143 +1370,11 @@ pub(crate) fn swing_limit(depth: u32) -> f32 {
 pub const MASS_RATIO_LO: f32 = 0.8;
 /// Child-to-parent mass ratio ceiling, same units and determinism as [`MASS_RATIO_LO`].
 pub const MASS_RATIO_HI: f32 = 1.2;
-/// Friction motor torque for hinge joints (knees, elbows), newton-meters.
-pub const JOINT_FRICTION_HINGE_NM: f32 = 10.0;
-/// Friction motor torque for spherical joints, newton-meters.
-pub const JOINT_FRICTION_SPHERICAL_NM: f32 = 5.0;
-/// Spring rate for hinge joints, hertz.
-pub const JOINT_SPRING_HINGE_HZ: f32 = 2.0;
-/// Spring rate for spherical joints, hertz.
-pub const JOINT_SPRING_SPHERICAL_HZ: f32 = 0.5;
-/// Symmetric twist half-range for spherical joints, radians.
-pub const JOINT_TWIST_SPHERICAL_RAD: f32 = 0.8;
 
-/// Per-bone joint kind: hinge bends one way (knees, elbows), spherical cones plus twists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JointKind {
-    /// Single-axis hinge: flexion in `[0, swing_limit]`, no twist.
-    Hinge,
-    /// Ball joint: swing cone plus symmetric twist.
-    Spherical,
-}
-
-/// Per-bone joint spec: kind plus limits plus drive tuning. Units: radians, N.m, Hz.
-/// Determinism: plain values, never hashed (measurement beside spawn, not wired).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct JointSpec {
-    /// Hinge or spherical.
-    pub kind: JointKind,
-    /// Cone half-angle (spherical) or flexion cap (hinge), radians.
-    pub swing_limit: f32,
-    /// Twist range low, radians; hinge locks to `0`.
-    pub twist_min: f32,
-    /// Twist range high, radians; hinge locks to `0`.
-    pub twist_max: f32,
-    /// Friction motor torque, N.m, in `5..=10`.
-    pub friction_torque: f32,
-    /// Spring rate, Hz, in `0.5..=2`.
-    pub spring_hz: f32,
-}
-
-impl JointSpec {
-    /// Clamp a hinge flexion angle into `[0, swing_limit]`. Non-finite input maps
-    /// to `0`. Math is comparisons only, deterministic on every platform.
-    pub fn clamp_hinge(&self, angle: f32) -> f32 {
-        if !angle.is_finite() || !self.swing_limit.is_finite() {
-            return 0.0;
-        }
-        if angle < 0.0 {
-            0.0
-        } else if angle > self.swing_limit {
-            self.swing_limit
-        } else {
-            angle
-        }
-    }
-
-    /// Clamp a twist angle into `[twist_min, twist_max]`. Non-finite input maps
-    /// to `twist_min`. Comparisons only, deterministic on every platform.
-    pub fn clamp_twist(&self, angle: f32) -> f32 {
-        if !angle.is_finite() {
-            return self.twist_min;
-        }
-        if angle < self.twist_min {
-            self.twist_min
-        } else if angle > self.twist_max {
-            self.twist_max
-        } else {
-            angle
-        }
-    }
-}
-
-/// Per-bone joint table beside the depth-only swing limits: one [`JointSpec`]
-/// per bone in skeleton order (root row unused, parent is `None`). Measurement
-/// only: `spawn` does not read it yet (follow-up wiring packet), so it never
-/// reaches the hash.
-#[derive(Clone, Debug, PartialEq)]
-pub struct JointTable {
-    /// One entry per bone, skeleton order.
-    pub rows: Vec<JointSpec>,
-}
-
-impl JointTable {
-    /// Humanoid default: hinge knees and elbows (name contains `knee` or
-    /// `elbow`), cone plus twist elsewhere. Swing reuses [`swing_limit`] by
-    /// depth, friction `5..=10` N.m (hinge `10`, spherical `5`), spring
-    /// `0.5..=2` Hz (hinge `2`, spherical `0.5`), hinge twist locked,
-    /// spherical twist `+-0.8` rad. Allocates once for the table (never per
-    /// tick); math is comparisons plus the depth-limit multiply in `swing_limit`.
-    pub fn humanoid(skeleton: &Skeleton) -> Self {
-        let depths = joint_depths(skeleton);
-        let mut rows = Vec::with_capacity(skeleton.len());
-        for (i, joint) in skeleton.joints.iter().enumerate() {
-            let depth = depths.get(i).copied().unwrap_or(0);
-            let swing = swing_limit(depth);
-            if is_hinge_name(&joint.name) {
-                rows.push(JointSpec {
-                    kind: JointKind::Hinge,
-                    swing_limit: swing,
-                    twist_min: 0.0,
-                    twist_max: 0.0,
-                    friction_torque: JOINT_FRICTION_HINGE_NM,
-                    spring_hz: JOINT_SPRING_HINGE_HZ,
-                });
-            } else {
-                rows.push(JointSpec {
-                    kind: JointKind::Spherical,
-                    swing_limit: swing,
-                    twist_min: -JOINT_TWIST_SPHERICAL_RAD,
-                    twist_max: JOINT_TWIST_SPHERICAL_RAD,
-                    friction_torque: JOINT_FRICTION_SPHERICAL_NM,
-                    spring_hz: JOINT_SPRING_SPHERICAL_HZ,
-                });
-            }
-        }
-        Self { rows }
-    }
-
-    /// Row count (one per bone).
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    /// True when there are no rows.
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-    /// Spec for one bone, `None` past the end.
-    pub fn spec(&self, bone: usize) -> Option<JointSpec> {
-        self.rows.get(bone).copied()
-    }
-}
-
-/// True for hinge bones: name contains `knee` or `elbow` (contract names are
-/// lowercase `[a-z0-9_]`). Pure string match, no allocation.
-fn is_hinge_name(name: &str) -> bool {
-    name.contains("knee") || name.contains("elbow")
-}
+pub use super::joint_limits::{
+    JointKind, JointSpec, JointTable, JOINT_FRICTION_HINGE_NM, JOINT_FRICTION_SPHERICAL_NM,
+    JOINT_SPRING_HINGE_HZ, JOINT_SPRING_SPHERICAL_HZ, JOINT_TWIST_SPHERICAL_RAD,
+};
 
 /// Stabilize child-to-parent mass ratios into `[0.8, 1.2]` preserving total
 /// mass, skeleton order (parents first). Pure: slices in, slices out, no
@@ -2579,29 +2581,47 @@ mod tests {
         let table = JointTable::humanoid(&skeleton);
         assert_eq!(table.len(), 17);
         assert!(!table.is_empty());
-        // Hinge knees and elbows (4), cone plus twist elsewhere (13).
+        assert!(table.is_valid(), "every row inside 0..180 degrees");
+        // Hinge knees and elbows (4), cone plus twist elsewhere (13); the named
+        // rows carry their own numbers, so depth is only the fallback.
         let mut hinges = 0usize;
+        let depths = joint_depths(&skeleton);
         for (i, joint) in skeleton.joints.iter().enumerate() {
             let spec = table.spec(i).expect("row per bone");
-            let depth = joint_depths(&skeleton)[i];
-            assert!(
-                (spec.swing_limit - swing_limit(depth)).abs() < 1e-6,
-                "bone {i} swing must reuse depth limit"
-            );
             if joint.name.contains("knee") || joint.name.contains("elbow") {
                 assert_eq!(spec.kind, JointKind::Hinge, "bone {i} must hinge");
                 assert_eq!((spec.twist_min, spec.twist_max), (0.0, 0.0));
+                assert!((spec.swing_limit - 145.0 * 0.017_453_292).abs() < 1e-5);
                 assert_eq!(spec.friction_torque, JOINT_FRICTION_HINGE_NM);
                 assert_eq!(spec.spring_hz, JOINT_SPRING_HINGE_HZ);
                 hinges += 1;
             } else {
                 assert_eq!(spec.kind, JointKind::Spherical, "bone {i} spherical");
-                assert_eq!(
-                    (spec.twist_min, spec.twist_max),
-                    (-JOINT_TWIST_SPHERICAL_RAD, JOINT_TWIST_SPHERICAL_RAD)
+                assert!(
+                    spec.twist_min < 0.0 && spec.twist_max > 0.0,
+                    "bone {i} keeps a twist range"
                 );
                 assert_eq!(spec.friction_torque, JOINT_FRICTION_SPHERICAL_NM);
                 assert_eq!(spec.spring_hz, JOINT_SPRING_SPHERICAL_HZ);
+            }
+            // A known name departs from the depth fallback; the root and an
+            // unknown name (ankle, wrist) keep it.
+            let depth_limit = swing_limit(depths[i]);
+            if joint.parent.is_none()
+                || joint.name.contains("ankle")
+                || joint.name.contains("wrist")
+            {
+                assert!(
+                    (spec.swing_limit - depth_limit).abs() < 1e-6,
+                    "bone {i} ({}) keeps the depth fallback",
+                    joint.name
+                );
+            } else {
+                assert!(
+                    (spec.swing_limit - depth_limit).abs() > 1e-6,
+                    "bone {i} ({}) must read the table, not depth",
+                    joint.name
+                );
             }
             assert!(
                 (5.0..=10.0).contains(&spec.friction_torque),
@@ -2627,6 +2647,9 @@ mod tests {
         assert_eq!(table, JointTable::humanoid(&humanoid_skeleton()));
         println!("JOINT_TABLE hinges={hinges} rows=17 friction=5..10Nm spring=0.5..2Hz");
     }
+
+    /// True for a joint name the table has no row for (ankle, wrist): it keeps
+    /// the depth fallback.
 
     #[test]
     fn stabilize_clamps_ratio_preserving_total() {
@@ -2791,6 +2814,282 @@ mod tests {
         assert!(total_a < 1e-4, "total preserved: {total_a}");
         println!(
             "HUMAN_FALLS falls=50 digest={digest_a:016x} backward_before={before_a} backward_after={after_a} worst_ratio_outside={ratio_a:.6} worst_total_rel={total_a:.6}"
+        );
+    }
+
+    /// Deepest overlap of two *unjoined* bone capsules in one posed ragdoll, meters,
+    /// by the same segment-distance math the capsule pass corrects with (the oracle
+    /// `engine-physfx` measures its fall test with). Joined pairs (a bone and its
+    /// parent) are skipped: their contacts are off by design and the rest pose nests
+    /// them.
+    fn deepest_unjoined_overlap(r: &Ragdoll) -> (f32, usize, usize) {
+        let n = r.bone_count();
+        let mut worst = (0.0f32, 0, 0);
+        for b in 1..n {
+            for a in 0..b {
+                if r.skeleton.joints[a].parent == Some(b) || r.skeleton.joints[b].parent == Some(a)
+                {
+                    continue;
+                }
+                let gap = capsule_pair_gap(r, a, b);
+                let depth = -gap;
+                if depth > worst.0 {
+                    worst = (depth, a, b);
+                }
+            }
+        }
+        worst
+    }
+
+    /// One seeded fall on the joint table rig: seeded root placement, root speed and
+    /// a seeded shove, 300 ticks. Returns (end hash, peak overlap, settled overlap,
+    /// settled speed, peak bones at).
+    fn seeded_table_fall(seed: u64, fall: u64) -> (u64, f32, f32, f32, usize, usize) {
+        let mut rng = engine_core::Rng::new(seed).fork(fall);
+        let dx = unit01(rng.next_u64()) - 0.5;
+        let dz = unit01(rng.next_u64()) - 0.5;
+        let vx = unit01(rng.next_u64()) * 3.0 - 1.5;
+        let vz = unit01(rng.next_u64()) * 3.0 - 1.5;
+        let shove = [
+            unit01(rng.next_u64()) * 2.0 - 1.0,
+            0.0,
+            unit01(rng.next_u64()) * 2.0 - 1.0,
+        ];
+        let mut r = Ragdoll::spawn(
+            &humanoid_skeleton(),
+            &humanoid_pose([dx, 1.5, dz]),
+            &humanoid_shapes(),
+        )
+        .expect("humanoid spawns");
+        r.add_static_box([10.0, 0.5, 10.0], [0.0, -0.5, 0.0])
+            .expect("floor");
+        r.blend_to_ragdoll(1.0).expect("limp");
+        r.set_bone_linvel(0, [vx, 0.0, vz]).expect("root speed");
+        // The shove is a limb whip in meters per second, not an impulse: bone
+        // density is 1 kg/m3 at spawn (the mass table is AD17's row), so an
+        // impulse here would launch a 30 g bone at 60 m/s and test nothing real.
+        r.set_bone_linvel(1, shove).expect("shove");
+        let mut peak = (0.0f32, 0usize, 0usize);
+        for _ in 0..300u64 {
+            r.step(FIXED_DT).expect("step");
+            let d = deepest_unjoined_overlap(&r);
+            if d.0 > peak.0 {
+                peak = d;
+            }
+        }
+        let rest = deepest_unjoined_overlap(&r);
+        let mut total = 0.0f32;
+        for i in 0..r.bone_count() {
+            total += speed(r.bone_linvel(i).expect("vel"));
+        }
+        (r.state_hash(), peak.0, rest.0, total, peak.1, peak.2)
+    }
+
+    /// The closest-points routine agrees with a sampled grid on 100 seeded segment
+    /// pairs: it never reports a distance above the best sampled one, so it cannot
+    /// miss an overlap the pass then leaves uncorrected.
+    #[test]
+    fn closest_segments_matches_a_sampled_grid() {
+        let mut rng = engine_core::Rng::new(0x5A9D_1E67);
+        let mut worst = 0.0f32;
+        let mut deep = 0usize;
+        for _ in 0..100 {
+            let point = |rng: &mut engine_core::Rng| {
+                [
+                    unit01(rng.next_u64()) - 0.5,
+                    unit01(rng.next_u64()) - 0.5,
+                    unit01(rng.next_u64()) - 0.5,
+                ]
+            };
+            let (p1, q1) = (point(&mut rng), point(&mut rng));
+            let (p2, q2) = (point(&mut rng), point(&mut rng));
+            let (_, _, mine) = closest_segments(p1, q1, p2, q2);
+            if mine <= 0.0 {
+                deep += 1;
+            }
+            let mut sampled = f32::MAX;
+            for si in 0..=64u32 {
+                for ti in 0..=64u32 {
+                    let s = si as f32 / 64.0;
+                    let t = ti as f32 / 64.0;
+                    let on1 = [
+                        p1[0] + (q1[0] - p1[0]) * s,
+                        p1[1] + (q1[1] - p1[1]) * s,
+                        p1[2] + (q1[2] - p1[2]) * s,
+                    ];
+                    let on2 = [
+                        p2[0] + (q2[0] - p2[0]) * t,
+                        p2[1] + (q2[1] - p2[1]) * t,
+                        p2[2] + (q2[2] - p2[2]) * t,
+                    ];
+                    let d = [on1[0] - on2[0], on1[1] - on2[1], on1[2] - on2[2]];
+                    let d = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                    if d < sampled {
+                        sampled = d;
+                    }
+                }
+            }
+            worst = worst.max(mine - sampled);
+        }
+        assert!(
+            deep <= 2,
+            "the fixture must mostly miss: {deep} of 100 touch"
+        );
+        assert!(
+            worst <= 2e-3,
+            "closest points report {worst} m above the sampled minimum"
+        );
+        println!("SEGMENTS pairs=100 touching={deep} worst_over_sample={worst:.2e} m");
+    }
+
+    /// Surface gap of one bone pair by the pass's own math: negative means overlap,
+    /// meters. Diagnostic beside [`deepest_unjoined_overlap`].
+    fn capsule_pair_gap(r: &Ragdoll, a: usize, b: usize) -> f32 {
+        let (Some(ba), Some(bb)) = (r.bodies.get(r.order[a]), r.bodies.get(r.order[b])) else {
+            return f32::NAN;
+        };
+        let (Some(ra), Some(rb)) = (r.radii.get(a), r.radii.get(b)) else {
+            return f32::NAN;
+        };
+        let (Some(ha), Some(hb)) = (r.half_heights.get(a), r.half_heights.get(b)) else {
+            return f32::NAN;
+        };
+        let qa = [
+            ba.rotation().x,
+            ba.rotation().y,
+            ba.rotation().z,
+            ba.rotation().w,
+        ];
+        let qb = [
+            bb.rotation().x,
+            bb.rotation().y,
+            bb.rotation().z,
+            bb.rotation().w,
+        ];
+        let pa = [ba.translation().x, ba.translation().y, ba.translation().z];
+        let pb = [bb.translation().x, bb.translation().y, bb.translation().z];
+        let (a1, a2) = capsule_axis(pa, qa, *ha);
+        let (b1, b2) = capsule_axis(pb, qb, *hb);
+        closest_segments(a1, a2, b1, b2).2 - ra - rb
+    }
+
+    /// The two ends of a capsule's axis, from its center, unit rotation and cylinder
+    /// half-height: `center -+ R * (0, half_height, 0)`. Test-side copy of the shape
+    /// math the physics measure reads off a Rapier capsule.
+    fn capsule_axis(center: [f32; 3], rot: [f32; 4], half_height: f32) -> ([f32; 3], [f32; 3]) {
+        let up = rotate_vec(&[0.0, half_height, 0.0], &normalize_quat(&rot));
+        (
+            [center[0] - up[0], center[1] - up[1], center[2] - up[2]],
+            [center[0] + up[0], center[1] + up[1], center[2] + up[2]],
+        )
+    }
+
+    /// Closest points of two segments `p1..q1` and `p2..q2` and their distance
+    /// (Ericson, Real-Time Collision Detection 5.1.9). One `sqrt`; no allocation.
+    fn closest_segments(
+        p1: [f32; 3],
+        q1: [f32; 3],
+        p2: [f32; 3],
+        q2: [f32; 3],
+    ) -> ([f32; 3], [f32; 3], f32) {
+        let d1 = [q1[0] - p1[0], q1[1] - p1[1], q1[2] - p1[2]];
+        let d2 = [q2[0] - p2[0], q2[1] - p2[1], q2[2] - p2[2]];
+        let r = [p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2]];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let (a, e, f) = (dot(d1, d1), dot(d2, d2), dot(d2, r));
+        let c = dot(d1, r);
+        let b = dot(d1, d2);
+        let denom = a * e - b * b;
+        let mut s = if denom > 1e-9 {
+            ((b * f - c * e) / denom).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let mut t = if e > 1e-9 { (b * s + f) / e } else { 0.0 };
+        if t < 0.0 {
+            t = 0.0;
+            s = if a > 1e-9 {
+                (-c / a).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        } else if t > 1.0 {
+            t = 1.0;
+            s = if a > 1e-9 {
+                ((b - c) / a).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+        let on1 = [p1[0] + d1[0] * s, p1[1] + d1[1] * s, p1[2] + d1[2] * s];
+        let on2 = [p2[0] + d2[0] * t, p2[1] + d2[1] * t, p2[2] + d2[2] * t];
+        let gap = [on1[0] - on2[0], on1[1] - on2[1], on1[2] - on2[2]];
+        (on1, on2, dot(gap, gap).sqrt())
+    }
+
+    /// PX9 acceptance: fifty seeded falls of the joint-table humanoid keep every
+    /// unjoined bone pair under 1 cm of overlap at every tick, settle under 1 cm,
+    /// settle to rest inside the ragdoll speed bound, and repeat hash for hash.
+    ///
+    /// Ignored: it does not hold yet. At the Rapier default four solver iterations
+    /// the deepest unjoined pair reads 4.53 cm (fall 46, elbow_r/ankle_r); six
+    /// iterations read 2.9 cm in engine-physfx and twelve read 9.2 cm there, and
+    /// per-bone CCD reads 10.4 cm, so the contact budget is not the lever: the
+    /// joints drive the bones back through each other inside one tick. A capsule
+    /// depenetration seam was measured too (two to eight sweeps, alternating order,
+    /// deepest pair first, 32 fixes) and settled between 1.8 and 6.3 cm, never under
+    /// 1 cm, because every fix stretches a joint the next tick re-solves. Left: a
+    /// contact model the joints cannot overrun (AD17 mass/density plus a stiffer
+    /// solver, or contacts between grandparents), then run this test.
+    #[ignore = "PX9 open: a jointed ragdoll still drives unjoined bones 4.5 cm through each other at 4 solver iterations"]
+    #[test]
+    fn fifty_seeded_falls_keep_unjoined_bones_under_a_centimeter() {
+        let mut hashes = Vec::with_capacity(50);
+        let mut worst = (0.0f32, 0usize, 0usize, 0usize);
+        let mut worst_rest = (0.0f32, 0usize);
+        let mut worst_speed = 0.0f32;
+        for fall in 0..50u64 {
+            let (h, peak, rest, total, a, b) = seeded_table_fall(2040, fall);
+            hashes.push(h);
+            if peak > worst.0 {
+                worst = (peak, a, b, usize::try_from(fall).unwrap_or(0));
+            }
+            if rest > worst_rest.0 {
+                worst_rest = (rest, usize::try_from(fall).unwrap_or(0));
+            }
+            worst_speed = worst_speed.max(total);
+        }
+        let digest = engine_core::Rng::digest(&hashes);
+        let mut again = Vec::with_capacity(50);
+        for fall in 0..50u64 {
+            again.push(seeded_table_fall(2040, fall).0);
+        }
+        assert_eq!(
+            digest,
+            engine_core::Rng::digest(&again),
+            "fifty falls must repeat hash for hash"
+        );
+        assert!(
+            worst.0 <= 0.01,
+            "fall {}: {} and {} overlap by {:.4} m (limit 0.01)",
+            worst.3,
+            humanoid_skeleton().joints[worst.1].name,
+            humanoid_skeleton().joints[worst.2].name,
+            worst.0
+        );
+        assert!(
+            worst_rest.0 <= 0.01,
+            "fall {} settles {:.4} m deep (limit 0.01)",
+            worst_rest.1,
+            worst_rest.0
+        );
+        assert!(
+            worst_speed < 1.0,
+            "a fall must settle inside the ragdoll speed bound, worst {worst_speed}"
+        );
+        println!(
+            "PX9_FALLS falls=50 digest={digest:016x} peak={:.4} m settled={:.4} m worst_speed={worst_speed:.4}",
+            worst.0, worst_rest.0
         );
     }
 }

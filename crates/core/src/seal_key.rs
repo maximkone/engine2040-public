@@ -86,6 +86,19 @@ pub fn seal_key_from_env(var: &str) -> Result<Vec<u8>, SealKeyError> {
     parse_seal_key(&text)
 }
 
+/// One-line remediation for a refused operator key: what was wrong plus the
+/// variable to set and the minimum length. One owner for the wording, so every
+/// crate that parses a key prints the same sentence.
+#[must_use]
+pub fn seal_key_reason(error: SealKeyError, env: &str) -> String {
+    let detail = match error {
+        SealKeyError::NotHex => "key must be hex",
+        SealKeyError::TooShort => "key is too short",
+        SealKeyError::Missing => "operator key is missing",
+    };
+    format!("{detail}; set {env} to {MIN_SEAL_KEY_BYTES} or more bytes as hex")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +165,23 @@ mod tests {
         assert_eq!(parse_seal_key(""), Err(SealKeyError::TooShort));
         assert_eq!(parse_seal_key("   "), Err(SealKeyError::TooShort));
         assert_eq!(parse_seal_key("\t\n  "), Err(SealKeyError::TooShort));
+    }
+
+    #[test]
+    fn reasons_name_the_problem_and_the_variable() {
+        let env = "E2040_TEST_SEAL_KEY";
+        assert_eq!(
+            seal_key_reason(SealKeyError::NotHex, env),
+            "key must be hex; set E2040_TEST_SEAL_KEY to 32 or more bytes as hex"
+        );
+        assert_eq!(
+            seal_key_reason(SealKeyError::TooShort, env),
+            "key is too short; set E2040_TEST_SEAL_KEY to 32 or more bytes as hex"
+        );
+        assert_eq!(
+            seal_key_reason(SealKeyError::Missing, env),
+            "operator key is missing; set E2040_TEST_SEAL_KEY to 32 or more bytes as hex"
+        );
     }
 
     #[test]

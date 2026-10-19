@@ -6,9 +6,52 @@ import { fileURLToPath } from "node:url"; import { lex, testLines } from "./rust
 const HERE = dirname(fileURLToPath(import.meta.url)); const DEFAULT_ROOT = resolve(HERE, ".."); const BASELINE_NAME = "docs-coverage.baseline.json"; const EPS = 1e-9;
 const PUB_ITEM = /^\s*pub\s+(?:(?:const|async|unsafe|extern\s+"[^"]*")\s+)*(?:fn|struct|enum|trait|type|const|static|union|mod)\b/;
 const MOD_DECL = /^\s*pub\s+mod\s+(\w+)\s*;/; const DOC_EMPTY =/^\s*#\[\s*doc\s*=\s*"\s*"\s*\]\s*$/; const DOC_ATTR = /^\s*#\[\s*doc\b/; const ATTR_LINE = /^\s*#\[.*\]?\s*$/;
+// A line that closes a multi-line attribute group looks like `)]` or `]`, with
+// an optional trailing comma; only such a line can start the backward walk into
+// a group, so ordinary code that happens to follow an attribute (a balanced
+// `fn f() { let v = [1, 2]; }`) is never read as its continuation.
+const ATTRIBUTE_CLOSE = /\]\s*,?\s*$/;
+
+// The `#[` line that opens the multi-line attribute group ending at `b`, or -1.
+// rustdoc reads a doc comment above a group like
+//   #[expect(
+//       clippy::empty_structs_with_brackets,
+//       reason = "..."
+//   )]
+// as the item's docs, and so must this tool: the plain `#\[` scan stopped at
+// `reason = ...` and called four endpoint structs undocumented while
+// `cargo doc` was happy (2026-10-19). The group must balance ([ and ]) and sit
+// within ATTR_GROUP_LINES of `b`.
+const ATTR_GROUP_LINES = 40;
+function attributeGroupStart(raw, b) {
+  if (!ATTRIBUTE_CLOSE.test(raw[b] ?? "")) return -1;
+  for (let k = b; k >= 0 && b - k <= ATTR_GROUP_LINES; k--) {
+    if (/^\s*#\s*\[/.test(raw[k] ?? "")) {
+      let depth = 0;
+      for (let j = k; j <= b; j++) {
+        const line = raw[j] ?? "";
+        depth += (line.match(/\[/g) ?? []).length - (line.match(/\]/g) ?? []).length;
+      }
+      return depth === 0 ? k : -1;
+    }
+  }
+  return -1;
+}
+
 export function isDocumented(raw, l) {
   let b = l - 1;
-  while (b >= 0 && ATTR_LINE.test(raw[b] ?? "")) { const a = raw[b] ?? ""; if (DOC_EMPTY.test(a)) { b--; continue; } if (DOC_ATTR.test(a)) return true; b--; }
+  while (b >= 0) {
+    if (ATTR_LINE.test(raw[b] ?? "")) {
+      const a = raw[b] ?? "";
+      if (DOC_EMPTY.test(a)) { b--; continue; }
+      if (DOC_ATTR.test(a)) return true;
+      b--;
+      continue;
+    }
+    const group = attributeGroupStart(raw, b);
+    if (group < 0) break;
+    b = group - 1;
+  }
   if (b < 0) return false;
   const t = (raw[b] ?? "").trim();
   if (t.startsWith("///")) {

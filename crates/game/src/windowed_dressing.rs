@@ -441,6 +441,8 @@ pub fn push_dressing_draws(list: &mut DrawList, resident: &[MeshKey]) -> Result<
                 material,
                 base_color: None,
                 normal_map: None,
+                orm: None,
+                emissive: None,
             });
             pushed += 1;
         }

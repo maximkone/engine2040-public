@@ -71,6 +71,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/p4-netsim.mjs` (+ `tools/p4-netsim.test.mjs`): model 64 clients online.
 - `tools/part-score.mjs` (+ `tools/part-score.test.mjs`): score board parts.
 - `tools/pe-exports.mjs` (+ `tools/pe-exports.test.mjs`): read a Windows PE export table.
+- `tools/physfx-backends.mjs` (+ `tools/physfx-backends.test.mjs`): soak the RZ1 scene on Rapier wasm and Jolt wasm as one table.
 - `tools/plan-atlas.mjs` (+ `tools/plan-atlas.test.mjs`): read the plan atlas.
 - `tools/playtest-log.mjs` (+ `tools/playtest-log.test.mjs`): check a playtest CSV log.
 - `tools/potato-check.mjs` (+ `tools/potato-check.test.mjs`): run the potato gate.
@@ -85,6 +86,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/rerun-timeline.mjs` (+ `tools/rerun-timeline.test.mjs`): scrub a per-tick timeline.
 - `tools/rust-quality.mjs` (+ `tools/rust-quality.test.mjs`): score Rust quality.
 - `tools/seal-keys.mjs` (+ `tools/seal-keys.test.mjs`): run cargo legs with seal keys.
+- `tools/secret-gate.mjs` (+ `tools/secret-gate.test.mjs`): block secret leaks.
 - `tools/ship.mjs` (+ `tools/ship.test.mjs`): node script; see its header.
 - `tools/showcase.mjs` (+ `tools/showcase.test.mjs`): node script; see its header.
 - `tools/sim-source-scan.mjs` (+ `tools/sim-source-scan.test.mjs`): scan sim sources for banned calls.
