@@ -7,7 +7,7 @@
 //! Budget: stack bytes for packing; the builders run once per draw state.
 
 use super::{
-    DrawRecord, PARTICLE_DRAW_WGSL, POOL_CAP, SOFT_FADE_RANGE_M, STRETCH_GAIN, STRETCH_MAX,
+    DrawRecord, PARTICLE_DRAW_WGSL, POOL_CAP_HARD, SOFT_FADE_RANGE_M, STRETCH_GAIN, STRETCH_MAX,
 };
 
 // ---------------------------------------------------------------------------
@@ -29,9 +29,10 @@ pub const PARTICLE_DRAW_UNIFORM_BYTES: usize = 112;
 /// weight, then the tint on a 16-byte bound).
 pub const PARTICLE_DRAW_INSTANCE_BYTES: usize = 64;
 
-/// Instances one staged batch carries at most; the pool cap bounds it, so the
-/// instance buffer is sized once and never resizes on a frame.
-pub(super) const PARTICLE_DRAW_MAX_INSTANCES: usize = POOL_CAP;
+/// Instances one staged batch carries at most; the pool's hard bound sizes
+/// it, so the instance buffer is sized once and never resizes on a frame,
+/// and no tier (up to the hard cap) can outgrow it.
+pub(super) const PARTICLE_DRAW_MAX_INSTANCES: usize = POOL_CAP_HARD;
 
 /// Scene-depth seam bytes the draw binds at group 0 binding 4: the shader
 /// declares the array but reads a constant zero gap until the closing slice

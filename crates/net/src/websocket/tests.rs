@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{client_async, WebSocketStream};
 
 use super::wire::{self, Class, MAX_MESSAGE_BYTES};
-use super::{DepartReason, Departure, WsServer, MAX_SESSIONS, SESSION_PATH};
+use super::{DepartReason, Departure, LatestOnly, WsServer, MAX_SESSIONS, SESSION_PATH};
 use crate::delta::BodySnap;
 use crate::lobby::{BuildId, Msg};
 use crate::quic::{
@@ -809,4 +809,102 @@ fn ws_duel_plays_600_ticks_over_a_socket_and_ends_on_the_reference_hash() {
         !departures.is_empty()
     });
     assert_eq!(departures.len(), 1);
+}
+
+/// The datagram-class payloads a client holds, drained.
+fn datagrams(client: &mut WsTestClient) -> Vec<Vec<u8>> {
+    client
+        .recv()
+        .into_iter()
+        .filter_map(|inbound| match inbound.frame {
+            InboundFrame::Datagram(bytes) => Some(bytes),
+            InboundFrame::Stream { .. } => None,
+        })
+        .collect()
+}
+
+/// One stalled-writer round: hold the session writer for `stall`, queue one
+/// real state datagram per tick `1..=count`, release, and return what reached
+/// the client plus the latest-only receipt.
+fn stalled_round(count: u32, stall: Duration) -> (Vec<Vec<u8>>, LatestOnly) {
+    let mut server = WsServer::bind(loopback()).expect("bind the server");
+    let addr = server.local_addr();
+    let mut client = WsTestClient::connect(addr);
+    wait_for("the session is seated", || !server.peers().is_empty());
+    let peer = server.peers()[0];
+    server.hold_writer();
+    for tick in 1..=count {
+        server
+            .send_unreliable(peer, &state_datagram(tick))
+            .expect("a state datagram fits");
+    }
+    thread::sleep(stall);
+    assert_eq!(
+        server.latest_only().written,
+        0,
+        "the held writer put nothing on the socket"
+    );
+    assert!(
+        datagrams(&mut client).is_empty(),
+        "no datagram reached the client while the writer was held"
+    );
+    server.release_writer();
+    let mut got = Vec::new();
+    for _ in 0..POLL_ROUNDS {
+        got.extend(datagrams(&mut client));
+        if !got.is_empty() {
+            break;
+        }
+        thread::sleep(POLL_STEP);
+    }
+    // A backlog would arrive right behind the first frame.
+    thread::sleep(Duration::from_millis(50));
+    got.extend(datagrams(&mut client));
+    (got, server.latest_only())
+}
+
+/// QN8: one stalled writer, one slot. With the writer held 300 ms the leg keeps
+/// the newest snapshot only, prints the skipped count, and writes no backlog.
+#[test]
+fn ws_latest_only_keeps_the_newest_snapshot_when_the_writer_stalls_300_ms() {
+    let (got, receipt) = stalled_round(18, Duration::from_millis(300));
+    assert_eq!(
+        got.len(),
+        1,
+        "one slot: only the newest snapshot is written on resume"
+    );
+    assert_eq!(
+        got[0],
+        state_datagram(18),
+        "the newest tick left the slot, byte for byte"
+    );
+    assert_eq!(receipt.written, 1);
+    assert_eq!(receipt.skipped, 17, "17 older snapshots were superseded");
+    let line = receipt.line();
+    println!("{line}");
+    assert_eq!(line, "ws: latest-only written=1 skipped=17");
+}
+
+/// QN8: the resumed stream lands on the server's state hash, and two runs agree.
+#[test]
+fn ws_latest_only_resumes_on_the_same_hash_x2() {
+    let first = stalled_round(18, Duration::from_millis(300));
+    let second = stalled_round(18, Duration::from_millis(300));
+    let digest = |bytes: &[u8]| decode_state(bytes).expect("state codec").checkpoint.hash;
+    for (got, receipt) in [&first, &second] {
+        assert_eq!(got.len(), 1, "no backlog after the resume");
+        assert_eq!(receipt.skipped, 17, "the skip count is the same twice");
+    }
+    let resumed = digest(&first.0[0]);
+    assert_eq!(
+        resumed,
+        snap_digest(&snap_at(18)),
+        "the resumed state is the server's state for the newest tick"
+    );
+    assert_eq!(
+        resumed,
+        digest(&second.0[0]),
+        "the resumed state hash is equal x2"
+    );
+    println!("{}", first.1.line());
 }

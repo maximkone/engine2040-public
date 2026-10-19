@@ -818,8 +818,9 @@ fn sand_lift_m(lowest_y: f32) -> f32 {
 }
 
 /// True for a body that lies on the sand: the death clip (`Down`) or the sim's
-/// `Fallen` verdict. Only these rest by their lowest vertex; a standing body
-/// keeps the height its clip gives it (LF17, view only).
+/// `Fallen` verdict. Only these rest both ways; every other body is lifted
+/// only when its lowest vertex is under the sand, never pulled down (LF17,
+/// view only).
 #[must_use]
 fn lies_on_sand(slot: &SlotAnim) -> bool {
     slot.act == Act::Down || slot.balance == GaitPhase::Fallen
@@ -2241,11 +2242,10 @@ impl FighterLook {
                 }
                 frames.push(posed);
             }
-            // LF17 sand rest, view only: a dead body's lowest vertex sits on
-            // the sand on every frame, up from a sink and down from a hover.
-            // A standing body is never moved.
-            // A ragdoll rests by its physics: only a sunk one is lifted, a flying one is
-            // never pulled down to the sand.
+            // Sand rest, view only: no body is drawn under the sand.
+            // A dead body sits on it both ways (up from a sink, down from a
+            // hover, LF17); a ragdoll and a living body are lifted only, so a
+            // run's flight phase is never pulled down to the sand.
             let lift = if !body.has_bounds() {
                 0.0
             } else if self.ragdoll_rests(slot_index) {
@@ -2253,7 +2253,7 @@ impl FighterLook {
             } else if lies_on_sand(&slot) {
                 sand_rest_shift_m(body.min[1])
             } else {
-                0.0
+                sand_lift_m(body.min[1])
             };
             if lift != 0.0 {
                 body.root[1] += lift;

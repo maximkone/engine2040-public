@@ -3,10 +3,15 @@
 //! `[x, y, z, w]`. Validation is typed; sampling helpers build on `clip.rs`.
 //! This module never imports assets or arena.
 
-use engine_core::quat_mul;
+use engine_core::{quat_mul, Fnv64};
 
 /// Maximum joints per skeleton (skinning matrices stay bounded).
 pub const MAX_JOINTS: usize = 256;
+/// Name-key slots for the skeleton duplicate check, twice [`MAX_JOINTS`] so
+/// the open-addressed probe always reaches an empty slot without growing.
+const NAME_KEY_SLOTS: usize = 2 * MAX_JOINTS;
+/// Empty marker for a name-key slot; a joint index stays under [`MAX_JOINTS`].
+const NAME_KEY_EMPTY: u16 = u16::MAX;
 /// Maximum joint-name length; charset is `[a-z0-9_]` with no leading digit.
 pub const NAME_MAX_LEN: usize = 64;
 
@@ -135,6 +140,57 @@ fn valid_name(name: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// FNV-1a64 of one joint name; `engine_core` owns the constants.
+fn name_key(name: &str) -> u64 {
+    let mut hasher = Fnv64::new();
+    hasher.write(name.as_bytes());
+    hasher.finish()
+}
+
+/// Slot for a name key: low bits only, so the value always fits a `usize`.
+fn key_slot(key: u64) -> usize {
+    usize::try_from(key & u64::try_from(NAME_KEY_SLOTS - 1).unwrap_or(0)).unwrap_or(0)
+}
+
+/// Seen joint names as a stack-only open-addressed table: each slot holds a
+/// name's key plus the joint index that owns it, and a key hit is confirmed
+/// byte for byte, so the answer equals the earlier-name rescan it replaces
+/// (same first offending index) at O(1) probes instead of O(n) string
+/// compares. Never on the heap: the slot count is twice [`MAX_JOINTS`].
+struct NameSet {
+    keys: [u64; NAME_KEY_SLOTS],
+    owner: [u16; NAME_KEY_SLOTS],
+}
+
+impl NameSet {
+    fn new() -> Self {
+        Self {
+            keys: [0; NAME_KEY_SLOTS],
+            owner: [NAME_KEY_EMPTY; NAME_KEY_SLOTS],
+        }
+    }
+
+    /// Record `name` for joint `index` of `all`; `true` when an earlier joint
+    /// already owns that exact name.
+    fn note(&mut self, name: &str, index: usize, all: &[Joint]) -> bool {
+        let key = name_key(name);
+        let mask = NAME_KEY_SLOTS - 1;
+        let mut slot = key_slot(key);
+        loop {
+            let owner = self.owner[slot];
+            if owner == NAME_KEY_EMPTY {
+                self.keys[slot] = key;
+                self.owner[slot] = u16::try_from(index).unwrap_or(NAME_KEY_EMPTY);
+                return false;
+            }
+            if self.keys[slot] == key && all[usize::from(owner)].name == name {
+                return true;
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+}
+
 /// Validate a skeleton: bounds, names, parent-first acyclic links.
 pub fn validate_skeleton(skeleton: &Skeleton) -> Result<(), AnimError> {
     if skeleton.is_empty() {
@@ -143,12 +199,9 @@ pub fn validate_skeleton(skeleton: &Skeleton) -> Result<(), AnimError> {
     if skeleton.len() > MAX_JOINTS {
         return Err(AnimError::TooManyJoints(skeleton.len()));
     }
+    let mut seen = NameSet::new();
     for (index, joint) in skeleton.joints.iter().enumerate() {
-        if !valid_name(&joint.name)
-            || skeleton.joints[..index]
-                .iter()
-                .any(|other| other.name == joint.name)
-        {
+        if !valid_name(&joint.name) || seen.note(&joint.name, index, &skeleton.joints) {
             return Err(AnimError::BadName(index));
         }
         match joint.parent {
@@ -611,6 +664,172 @@ mod tests {
             }],
         };
         assert_eq!(validate_contacts(&bad), Err(AnimError::BadFoot(0)));
+    }
+
+    /// Chain of `joints` uniquely named joints, each parent the index below:
+    /// the joint count an imported humanoid rig reaches (a Mixamo skeleton is
+    /// 65 bones), which is where the duplicate scan bit.
+    fn wide_skeleton(joints: usize) -> Skeleton {
+        let mut out = Vec::with_capacity(joints);
+        for index in 0..joints {
+            out.push(Joint {
+                name: format!("joint_{index}"),
+                parent: if index == 0 { None } else { Some(index - 1) },
+            });
+        }
+        Skeleton { joints: out }
+    }
+
+    /// The duplicate check as it stood before the keyed table: every joint
+    /// rescans all earlier names. Kept here as the equality and timing oracle
+    /// for [`validate_skeleton`].
+    fn validate_skeleton_linear_scan(skeleton: &Skeleton) -> Result<(), AnimError> {
+        if skeleton.is_empty() {
+            return Err(AnimError::EmptySkeleton);
+        }
+        if skeleton.len() > MAX_JOINTS {
+            return Err(AnimError::TooManyJoints(skeleton.len()));
+        }
+        for (index, joint) in skeleton.joints.iter().enumerate() {
+            if !valid_name(&joint.name)
+                || skeleton.joints[..index]
+                    .iter()
+                    .any(|other| other.name == joint.name)
+            {
+                return Err(AnimError::BadName(index));
+            }
+            match joint.parent {
+                None => {}
+                Some(parent) if parent < index => {}
+                _ => return Err(AnimError::BadParent(index)),
+            }
+        }
+        Ok(())
+    }
+
+    /// One skeleton per way a rig can be valid or broken, each with the answer
+    /// the linear scan gives and the keyed table must reproduce.
+    fn validation_cases() -> Vec<(Skeleton, Result<(), AnimError>)> {
+        let mut cases = vec![
+            (Skeleton::default(), Err(AnimError::EmptySkeleton)),
+            (
+                wide_skeleton(MAX_JOINTS + 1),
+                Err(AnimError::TooManyJoints(MAX_JOINTS + 1)),
+            ),
+            (wide_skeleton(1), Ok(())),
+            (wide_skeleton(2), Ok(())),
+            (wide_skeleton(64), Ok(())),
+            (wide_skeleton(MAX_JOINTS), Ok(())),
+        ];
+        let mut duplicate_tail = wide_skeleton(64);
+        duplicate_tail.joints[63].name = "joint_0".into();
+        cases.push((duplicate_tail, Err(AnimError::BadName(63))));
+        let mut duplicate_mid = wide_skeleton(64);
+        duplicate_mid.joints[30].name = "joint_7".into();
+        cases.push((duplicate_mid, Err(AnimError::BadName(30))));
+        let mut duplicate_twice = wide_skeleton(MAX_JOINTS);
+        duplicate_twice.joints[10].name = "joint_0".into();
+        duplicate_twice.joints[255].name = "joint_9".into();
+        cases.push((duplicate_twice, Err(AnimError::BadName(10))));
+        let mut near_miss = wide_skeleton(16);
+        near_miss.joints[15].name = "joint_01".into();
+        cases.push((near_miss, Ok(())));
+        let mut underscore = wide_skeleton(8);
+        underscore.joints[2].name = "_joint_2".into();
+        cases.push((underscore, Ok(())));
+        let mut uppercase = wide_skeleton(8);
+        uppercase.joints[5].name = "Joint_5".into();
+        cases.push((uppercase, Err(AnimError::BadName(5))));
+        let mut long_name = wide_skeleton(8);
+        long_name.joints[3].name = "j".repeat(NAME_MAX_LEN + 1);
+        cases.push((long_name, Err(AnimError::BadName(3))));
+        let mut leading_digit = wide_skeleton(8);
+        leading_digit.joints[2].name = "9joint".into();
+        cases.push((leading_digit, Err(AnimError::BadName(2))));
+        let mut forward_parent = wide_skeleton(8);
+        forward_parent.joints[1].parent = Some(4);
+        cases.push((forward_parent, Err(AnimError::BadParent(1))));
+        let mut self_parent = wide_skeleton(8);
+        self_parent.joints[2].parent = Some(2);
+        cases.push((self_parent, Err(AnimError::BadParent(2))));
+        let mut parent_beats_duplicate = wide_skeleton(8);
+        parent_beats_duplicate.joints[1].parent = Some(5);
+        parent_beats_duplicate.joints[4].name = "joint_2".into();
+        cases.push((parent_beats_duplicate, Err(AnimError::BadParent(1))));
+        cases
+    }
+
+    /// The keyed name table answers exactly what the earlier-name rescan
+    /// answered: the same `Ok`, or the same error variant with the same joint
+    /// index, over valid rigs and every way a skeleton can break.
+    #[test]
+    fn keyed_name_table_matches_the_linear_scan_oracle() {
+        let cases = validation_cases();
+        assert!(cases.len() >= 15, "the case list shrank");
+        for (case, want) in cases {
+            assert_eq!(
+                validate_skeleton(&case),
+                want,
+                "keyed table moved: {} joints",
+                case.len()
+            );
+            assert_eq!(
+                validate_skeleton_linear_scan(&case),
+                want,
+                "oracle moved: {} joints",
+                case.len()
+            );
+            assert_eq!(
+                validate_skeleton(&case),
+                validate_skeleton_linear_scan(&case),
+                "the two paths disagree: {} joints",
+                case.len()
+            );
+        }
+    }
+
+    /// Timing receipt: p50 microseconds of one [`validate_skeleton`] pass over
+    /// a 64-joint fixture, keyed name table against the earlier-name rescan it
+    /// replaced, interleaved so the same load sits under both sides. The keyed
+    /// side stays only while the pair holds and it wins.
+    /// Run: cargo test -p engine-anim --release --lib skeleton_name_scan -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn skeleton_name_scan_paired_receipt() {
+        const JOINTS: usize = 64;
+        const ITERS: usize = 200;
+        let skeleton = wide_skeleton(JOINTS);
+        assert_eq!(
+            validate_skeleton(&skeleton),
+            validate_skeleton_linear_scan(&skeleton),
+            "the two timed paths disagree"
+        );
+        let mut rescan = Vec::with_capacity(ITERS);
+        let mut keyed = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let begin = std::time::Instant::now();
+            let _ = std::hint::black_box(validate_skeleton_linear_scan(&skeleton));
+            rescan.push(begin.elapsed().as_secs_f64() * 1.0e6);
+            let begin = std::time::Instant::now();
+            let _ = std::hint::black_box(validate_skeleton(&skeleton));
+            keyed.push(begin.elapsed().as_secs_f64() * 1.0e6);
+        }
+        rescan.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        keyed.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let (rescan, keyed) = (rescan[ITERS / 2], keyed[ITERS / 2]);
+        eprintln!(
+            "contract_skeleton_scan rescan_p50_us={rescan:.2} keyed_p50_us={keyed:.2} ratio_x={:.1} joints={JOINTS} iters={ITERS}",
+            rescan / keyed
+        );
+        assert!(
+            keyed < rescan,
+            "the keyed name table must not be the slower one: {keyed:.2} vs {rescan:.2}"
+        );
     }
 
     #[test]

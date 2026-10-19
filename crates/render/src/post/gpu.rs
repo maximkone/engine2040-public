@@ -2,8 +2,8 @@ use super::PostError;
 
 // One owner for these two helpers: `aa_scale::gpu` holds the bodies, and the
 // public path `post::gpu::max_abs_diff` stays here as a re-export.
-use crate::aa_scale::gpu::pack_pixels;
 pub use crate::aa_scale::gpu::max_abs_diff;
+use crate::aa_scale::gpu::pack_pixels;
 
 /// TAA resolve chunk (WGSL): bilinear history reproject, 3x3 box clamp
 /// around the current texel, velocity rejection, blend.
@@ -890,4 +890,3 @@ impl Rp1Submitter {
         })
     }
 }
-

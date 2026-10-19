@@ -481,8 +481,9 @@ impl<const N: usize> InputBuffer<N> {
 
 /// N-seat deterministic sim behind [`SeatSession`].
 ///
-/// Integer-only, like [`SimTick`]: `+ - * /`, wrapping integer math and a
-/// state hash; no float transcendental calls, no wall clock.
+/// The N-seat sibling of [`SimTick`] (which is the fixed two-player
+/// contract): `+ - * /`, wrapping integer math and a state hash; no float
+/// transcendental calls, no wall clock.
 pub trait SeatSim<const N: usize>: Clone {
     /// Advance one fixed tick with every seat's input.
     fn step(&mut self, inputs: [u32; N]);
@@ -755,10 +756,12 @@ impl std::fmt::Display for RollbackError {
 
 impl std::error::Error for RollbackError {}
 
-/// Deterministic 2-player sim tick behind the rollback tape.
+/// Deterministic 2-player sim tick behind both rollback sessions.
 ///
-/// Integer-only: implementations use `+ - * /`, wrapping integer math and
-/// `state_hash`; no float transcendental calls, no wall clock.
+/// One contract for [`P2pSession`] and [`crate::netcode::Session`] (which
+/// re-exports this trait as `netcode::Sim`). Integer-only: implementations
+/// use `+ - * /`, wrapping integer math and `state_hash`; no float
+/// transcendental calls, no wall clock.
 pub trait SimTick: Clone {
     /// Advance one fixed tick with both players' inputs.
     fn advance(&mut self, inputs: [u32; PLAYERS]);
@@ -2409,7 +2412,7 @@ mod tests {
 
     /// Lines naming the retired hash-only `lib.rs` ring: the whole word, in
     /// code (not a comment), inside `crates/net` or beside `engine_net`.
-    fn stub_callers(root: &std::path::Path, net_dir: &std::path::Path) -> Vec<String> {
+    fn retired_ring_callers(root: &std::path::Path, net_dir: &std::path::Path) -> Vec<String> {
         let name = ["Roll", "back"].concat();
         let edge = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
         let mut dirs = vec![root.to_path_buf()];
@@ -2442,29 +2445,29 @@ mod tests {
     }
 
     #[test]
-    fn stub_gate_flags_a_caller_in_net_or_through_engine_net() {
+    fn retired_ring_gate_flags_a_caller_in_net_or_through_engine_net() {
         let root = std::env::temp_dir().join(format!("engine_net_qn1_gate_{}", std::process::id()));
         let (net, other) = (root.join("net"), root.join("other"));
         std::fs::create_dir_all(&net).expect("net dir");
         std::fs::create_dir_all(&other).expect("other dir");
-        let stub = ["Roll", "back"].concat();
+        let retired = ["Roll", "back"].concat();
         let files = [
-            (net.join("a.rs"), format!("use crate::{stub};\n")),
+            (net.join("a.rs"), format!("use crate::{retired};\n")),
             (
                 other.join("b.rs"),
-                format!("let r = engine_net::{stub}::new(3);\n"),
+                format!("let r = engine_net::{retired}::new(3);\n"),
             ),
             (
                 other.join("c.rs"),
                 format!(
-                    "// {stub} in prose\nlet e = {stub}Error::TooFar;\nlet x = {stub}::new(1);\n"
+                    "// {retired} in prose\nlet e = {retired}Error::TooFar;\nlet x = {retired}::new(1);\n"
                 ),
             ),
         ];
         for (path, text) in &files {
             std::fs::write(path, text).expect("write fixture");
         }
-        let hits = stub_callers(&root, &net);
+        let hits = retired_ring_callers(&root, &net);
         std::fs::remove_dir_all(&root).expect("cleanup");
         let hits: Vec<String> = hits.iter().map(|h| h.replace('\\', "/")).collect();
         assert_eq!(hits.len(), 2, "{hits:?}");
@@ -2473,12 +2476,12 @@ mod tests {
     }
 
     #[test]
-    fn one_rollback_path_no_source_names_the_retired_stub() {
+    fn one_rollback_path_no_source_names_the_retired_ring() {
         // QN1: `P2pSession` and `netcode::Session` are the rollback paths;
         // the hash-only ring that sat in `lib.rs` is deleted and stays so.
         let net = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let crates = net.parent().expect("crates dir");
-        let hits = stub_callers(crates, net);
-        assert!(hits.is_empty(), "retired stub named again: {hits:?}");
+        let hits = retired_ring_callers(crates, net);
+        assert!(hits.is_empty(), "retired ring named again: {hits:?}");
     }
 }

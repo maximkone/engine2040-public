@@ -10,7 +10,8 @@
 // said so: "why i got to babysit this".
 //   node tools/product-check.mjs [--if-new] [--no-build] [--no-file] [--json]
 // Writes target/reports/product/latest.json, latest.md and history.jsonl;
-// captures go to target/reports/product/runs/<sha>-<utc>/ (newest 6 kept).
+// captures go to target/reports/product/runs/<sha>-<utc>/ (the six newest are
+// kept, plus the look score's reference run).
 // Exit 0 green or skipped, 1 a floor broke, 2 the check itself could not run.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -18,6 +19,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { binStatus, BINS } from "./bins.mjs";
+import { decodePng, flipX10000 } from "./iqa-gate.mjs";
 
 // Is a process alive? EPERM means it exists but is not ours.
 const pidAlive = (pid) => {
@@ -88,6 +90,40 @@ export const scoreCaptures = (files) => {
   return { captures: files.length, blank, frozen };
 };
 
+// The capture the look score reads: the middle PNG by sorted name (when both
+// runs hold it, the runs are compared at the same sim frame).
+export const middleCapture = (files) => (files.length ? files[Math.floor((files.length - 1) / 2)] : null);
+
+// The newest green run in history whose run directory still holds captures;
+// the reference the look score reads against (the FLIP row LF15).
+export const lastGreenRun = (history, dirs) => {
+  for (const h of [...history].reverse()) {
+    if (!h?.sha || (h.red && Object.keys(h.red).length)) continue;
+    const dir = dirs.find((d) => d.startsWith(`${h.sha}-`));
+    if (dir) return { sha: h.sha, dir };
+  }
+  return null;
+};
+
+// FLIP x10000 between this run's middle capture and the last green run's, or
+// null with a reason string when there is nothing (yet) to compare.
+export const lookScore = (priorDir, curDir) => {
+  const names = (dir) => { try { return readdirSync(dir).filter((n) => /^frame_\d+\.png$/.test(n)).sort(); } catch { return []; } };
+  const cur = middleCapture(names(curDir));
+  if (!priorDir) return { flip: null, vs: null, why: "no green run to compare against" };
+  if (!cur) return { flip: null, vs: null, why: "this run has no captures" };
+  const ref = middleCapture(names(priorDir));
+  if (!ref) return { flip: null, vs: null, why: "the last green run holds no captures" };
+  try {
+    const a = decodePng(readFileSync(join(priorDir, ref)), `${priorDir}/${ref}`), b = decodePng(readFileSync(join(curDir, cur)), `${curDir}/${cur}`);
+    if (a.w !== b.w || a.h !== b.h) return { flip: null, flip_max: null, vs: null, why: `capture sizes differ (${a.w}x${a.h} vs ${b.w}x${b.h})` };
+    const s = flipX10000(a.data, b.data, a.w, a.h);
+    return { flip: s.flip_x10000, flip_max: s.flip_max_x10000, vs: priorDir, why: null };
+  } catch (e) {
+    return { flip: null, flip_max: null, vs: null, why: `capture decode failed: ${e.message}` };
+  }
+};
+
 // Reference fps: the median p50 interval of the last unloaded timing runs.
 export const referenceInterval = (history) => {
   const xs = history.filter((h) => h.timing && !h.timing.loaded && h.timing.interval_p50_ms > 0).slice(-5).map((h) => h.timing.interval_p50_ms).sort((a, b) => a - b);
@@ -142,6 +178,7 @@ export const redFloors = ({ look, timing, caps, ref }, bar, passBar = null) => {
   if ((look.validation_errors ?? 0) > (f.validation_errors ?? 0)) red.validation = `${look.validation_errors} wgpu validation errors`;
   if (caps.blank > (f.blank_frames ?? 0)) red.blank = `${caps.blank} of ${caps.captures} captures are blank (PNG under 60 KB)`;
   if (caps.frozen > (f.frozen_pairs ?? 0)) red.freeze = `${caps.frozen} pairs of consecutive captures (60 frames apart) are byte-identical: the picture froze`;
+  if (look.flip !== null && look.flip !== undefined && look.flip > (f.look_flip_max ?? 1200)) red.look = `the machine look score read ${look.flip} x10000 against the last green run ${look.flip_vs ?? "?"} (floor ${f.look_flip_max ?? 1200})`;
   if (timing && !timing.loaded && timing.interval_p99_ms > (f.stall_p99_ms_max ?? 1500)) red.stall = `frame interval p99 ${timing.interval_p99_ms} ms (floor ${f.stall_p99_ms_max ?? 1500} ms)`;
   if (timing && !timing.loaded && ref && timing.interval_p50_ms > ref / (1 - (f.fps_drop_max ?? 0.3))) {
     red.slower = `frame interval p50 ${timing.interval_p50_ms} ms vs ${ref} ms reference (${Math.round(1000 / timing.interval_p50_ms)} vs ${Math.round(1000 / ref)} fps)`;
@@ -161,6 +198,7 @@ const SUSPECTS = {
   validation: ["crates/render/src/present/mod.rs"],
   blank: ["crates/render/src/present/mod.rs", "crates/game/src/bin/arena.rs"],
   freeze: ["crates/game/src/bin/arena.rs", "crates/game/src/fighter_look.rs"],
+  look: ["crates/game/src/fighter_look.rs", "crates/game/src/director.rs", "crates/render/src/present/mod.rs"],
   stall: ["crates/game/src/bin/arena.rs", "crates/render/src/present/mod.rs"],
   slower: ["crates/game/src/bin/arena.rs", "crates/render/src/present/mod.rs"],
   view_receipt: ["crates/game/src/view_truth.rs", "crates/game/src/fighter_look.rs"],
@@ -222,10 +260,18 @@ const build = async () => {
   return r.status === 0 ? { ok: true, why: `built (${st.state.toLowerCase()})` } : { ok: false, why: `build failed (the working tree, maybe a session mid-edit):\n${tail}` };
 };
 
-const pruneRuns = (runs) => {
+// Run dirs are `<sha>-<utc>`; order them by the UTC stamp, not by the sha.
+export const newestFirst = (dirs) => [...dirs].sort((a, b) => b.slice(-14).localeCompare(a.slice(-14)));
+
+// Keep the newest runs, plus the look score's reference run: a red streak must
+// not prune the last green captures out from under the score.
+export const pruneRuns = (runs, keep = null) => {
   if (!existsSync(runs)) return;
-  const dirs = readdirSync(runs).filter((d) => statSync(join(runs, d)).isDirectory()).sort();
-  for (const d of dirs.slice(0, Math.max(0, dirs.length - KEEP_RUNS))) rmSync(join(runs, d), { recursive: true, force: true });
+  const dirs = newestFirst(readdirSync(runs).filter((d) => statSync(join(runs, d)).isDirectory()));
+  for (const d of dirs.slice(KEEP_RUNS)) {
+    if (d === keep) continue;
+    rmSync(join(runs, d), { recursive: true, force: true });
+  }
 };
 
 const summary = (c) => {
@@ -236,6 +282,7 @@ const summary = (c) => {
     "",
     `Verdict: ${reds.length ? `RED (${reds.map(([k]) => k).join(", ")})` : "GREEN"}; build: ${c.build}`,
     `Look run: exit ${c.look.exit}, framing empty ${c.look.empty}/${c.look.frames}, fewest in view ${c.look.fewest_in_view}, steepest down ${c.look.steepest_down_deg} deg, tinted share ${c.look.tinted_share}, validation errors ${c.look.validation_errors}, captures ${c.caps.captures} (blank ${c.caps.blank}, frozen pairs ${c.caps.frozen}) in ${c.runDir}`,
+    `Look score (FLIP x10000 of the middle capture against the last green run): ${c.look.flip === null || c.look.flip === undefined ? `none (${c.look.flip_why ?? "no comparison"})` : `${c.look.flip} (max ${c.look.flip_max}) against ${c.look.flip_vs}`}`,
     `Timing run: ${fps(c.timing?.interval_p50_ms)}, p99 ${c.timing?.interval_p99_ms} ms, gpu p50 ${c.timing?.gpu_p50_ms} ms, cpu p50 ${c.timing?.cpu_p50_ms} ms, ${c.timing?.loaded ? `LOADED (${c.timing.loaded} cargo/rustc running: fps not gated)` : "quiet"}; reference ${c.ref ? fps(c.ref) : "none yet"}`,
     `View truth (no image; per frame in ${c.runDir}/view.jsonl): ${c.look.view ? Object.entries(c.look.view).map(([k, x]) => `${k} ${x}`).join(", ") : "none"}`,
     `Live GPU passes (ms > 0): ${Object.entries(c.look.passes ?? {}).filter(([, v]) => v > 0).map(([k]) => k).join(", ") || "none"}`,
@@ -283,7 +330,11 @@ const main = async () => {
     const historyFile = join(OUT, "history.jsonl");
     const history = existsSync(historyFile) ? readFileSync(historyFile, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : [];
     const ref = referenceInterval(history);
-    const red = redFloors({ look, timing, caps, ref }, bar, passBar);
+    const runDirs = existsSync(runs) ? readdirSync(runs).filter((d) => statSync(join(runs, d)).isDirectory()).sort() : [];
+    const prior = lastGreenRun(history, runDirs);
+    const score = lookScore(prior ? join(runs, prior.dir) : null, runDir);
+    const scored = { ...look, flip: score.flip, flip_max: score.flip_max, flip_vs: score.vs === null ? null : prior.sha, flip_why: score.why };
+    const red = redFloors({ look: scored, timing, caps, ref }, bar, passBar);
     const filed = [];
     const lastFiled = latest?.filedAt ?? {};
     const filedAt = { ...lastFiled };
@@ -299,14 +350,14 @@ const main = async () => {
       }
     }
     const strip = ({ text, ...rest }) => rest;
-    const check = { sha, tree, at: new Date().toISOString(), build: built.why.split("\n")[0], verdict: Object.keys(red).length ? "RED" : "GREEN", red, filed, filedAt, ref, caps, look: strip(look), timing: strip(timing), runDir: runDir.replace(/\\/g, "/"), bar, passBar };
+    const check = { sha, tree, at: new Date().toISOString(), build: built.why.split("\n")[0], verdict: Object.keys(red).length ? "RED" : "GREEN", red, filed, filedAt, ref, caps, look: strip(scored), timing: strip(timing), runDir: runDir.replace(/\\/g, "/"), bar, passBar };
     writeFileSync(latestFile, `${JSON.stringify(check, null, 2)}\n`);
-    appendFileSync(historyFile, `${JSON.stringify({ sha, tree, at: check.at, verdict: check.verdict, red, timing: { interval_p50_ms: timing.interval_p50_ms, interval_p99_ms: timing.interval_p99_ms, loaded }, look: { empty: look.empty, tinted_share: look.tinted_share, view: look.view } })}\n`);
+    appendFileSync(historyFile, `${JSON.stringify({ sha, tree, at: check.at, verdict: check.verdict, red, timing: { interval_p50_ms: timing.interval_p50_ms, interval_p99_ms: timing.interval_p99_ms, loaded }, look: { empty: look.empty, tinted_share: look.tinted_share, view: look.view, flip: scored.flip, flip_vs: scored.flip_vs } })}\n`);
     writeFileSync(join(OUT, "latest.md"), summary(check));
-    pruneRuns(runs);
+    pruneRuns(runs, prior?.dir ?? null);
     if (has("--json")) process.stdout.write(`${JSON.stringify(check, null, 2)}\n`);
     const fps = timing.interval_p50_ms ? (1000 / timing.interval_p50_ms).toFixed(1) : "-";
-    console.log(`product-check: ${check.verdict} ${sha} fps=${fps}${loaded ? "(loaded)" : ""} empty=${look.empty} tinted=${look.tinted_share} pops=${look.view?.pops ?? "-"} sunk=${look.view?.sunk_cm_max ?? "-"} ticks=${look.view ? `${look.view.sim_first}..${look.view.sim_last}` : "-"} blank=${caps.blank} frozen=${caps.frozen} val=${look.validation_errors}${Object.keys(red).length ? ` red=${Object.keys(red).join(",")}` : ""}${filed.length ? ` filed=${filed.map((m) => `bug-product-${m}`).join(",")}` : ""}`);
+    console.log(`product-check: ${check.verdict} ${sha} fps=${fps}${loaded ? "(loaded)" : ""} empty=${look.empty} tinted=${look.tinted_share} pops=${look.view?.pops ?? "-"} sunk=${look.view?.sunk_cm_max ?? "-"} ticks=${look.view ? `${look.view.sim_first}..${look.view.sim_last}` : "-"} flip=${scored.flip ?? "-"} blank=${caps.blank} frozen=${caps.frozen} val=${look.validation_errors}${Object.keys(red).length ? ` red=${Object.keys(red).join(",")}` : ""}${filed.length ? ` filed=${filed.map((m) => `bug-product-${m}`).join(",")}` : ""}`);
     process.exitCode = Object.keys(red).length ? 1 : 0;
   } finally {
     rmSync(lockFile, { force: true });

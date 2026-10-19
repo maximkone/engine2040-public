@@ -45,6 +45,10 @@ engine-clock = { version = "0.1.0", path = "../clock" }
 # WEB5: the render crate's presenter draws the arena frame. Browser build only, so the native
 # workspace still builds this crate as a library of pure modules with no GPU stack.
 engine-render = { workspace = true, features = ["window"] }
+# WEB15: the page plays the same match the native window does (`App`, the fixed tick and the
+# fight draw helpers). Browser build only, so the native workspace keeps this crate free of
+# the game stack.
+engine-game = { workspace = true, features = ["app"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

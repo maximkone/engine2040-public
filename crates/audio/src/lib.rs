@@ -264,6 +264,9 @@ struct Voice {
     data: Arc<[f32]>,
     channels: u16,
     cursor: usize,
+    /// Whole-frame count of `data`, fixed when the voice starts: cached so the
+    /// per-frame mix loop reads a field instead of dividing by `channels`.
+    frame_count: usize,
     gain_l: f32,
     gain_r: f32,
     fold_mono: bool,
@@ -283,8 +286,11 @@ struct Voice {
 }
 
 impl Voice {
+    /// Whole-frame count of `data` (cached at voice start; `data` and
+    /// `channels` never change after [`Mixer::push_voice`]).
+    #[must_use]
     fn frames(&self) -> usize {
-        self.data.len() / usize::from(self.channels.max(1))
+        self.frame_count
     }
 
     /// Fading out after a steal or a stop: already gone as far as limits
@@ -685,6 +691,7 @@ impl Mixer {
             data,
             channels,
             cursor: start.offset_frames.min(frames),
+            frame_count: frames,
             gain_l: gains.0,
             gain_r: gains.1,
             fold_mono,
@@ -1019,6 +1026,185 @@ mod tests {
 
     fn mono(rate: u32, samples: &[f32]) -> Pcm {
         Pcm::new(rate, 1, samples.to_vec())
+    }
+
+    // -----------------------------------------------------------------------
+    // PF5 mix receipt: the cached frame count against the same render with the
+    // count recomputed from `data.len() / channels` on every voice-frame. The
+    // recompute path is a test-only twin of the production loop, kept so both
+    // sides of the receipt run on one fixture in one process. Only the source
+    // of the frame count differs; the float work is bit-for-bit the same.
+    // -----------------------------------------------------------------------
+
+    /// Voices in the PF5 mix receipt: a busy combat frame.
+    const PF5_VOICES: usize = 32;
+    /// Frames per receipt block (10 ms at 48 kHz).
+    const PF5_FRAMES: usize = 480;
+    /// Timed rounds; the p50 of each side is the receipt.
+    const PF5_ITERS: usize = 200;
+    /// Frames in every fixture clip (long enough to outlast one block).
+    const PF5_CLIP_FRAMES: usize = 9_600;
+
+    impl Mixer {
+        /// The pre-change render: same frame walk as
+        /// [`Mixer::render_stereo_into`], frame count from `legacy_frames`.
+        fn render_stereo_into_legacy(&mut self, out: &mut [f32]) {
+            let frames = out.len() / 2;
+            for i in 0..frames {
+                let mix = self.accumulate(false);
+                self.advance_legacy();
+                let (l, r) = self.finish(&mix);
+                out[2 * i] = clip_sample(l);
+                out[2 * i + 1] = clip_sample(r);
+            }
+            if out.len() % 2 == 1 {
+                if let Some(last) = out.last_mut() {
+                    *last = 0.0;
+                }
+            }
+        }
+
+        /// [`Mixer::advance`] over the recomputed frame count.
+        fn advance_legacy(&mut self) {
+            let mut ended = false;
+            for v in &mut self.voices {
+                v.cursor += 1;
+                if v.cursor >= v.legacy_frames() && v.route.is_some_and(|route| route.looped) {
+                    v.cursor = 0;
+                }
+                v.gate.advance();
+                ended |= v.cursor >= v.legacy_frames() || (v.retiring() && v.gate.level() == 0);
+            }
+            if ended {
+                self.reap();
+            }
+        }
+    }
+
+    impl Voice {
+        /// The frame count the change used to recompute per voice-frame.
+        #[must_use]
+        fn legacy_frames(&self) -> usize {
+            self.data.len() / usize::from(self.channels.max(1))
+        }
+    }
+
+    /// The receipt's shared clip set: mono and stereo takes of equal length.
+    fn pf5_clips() -> Vec<Clip> {
+        (0..PF5_VOICES)
+            .map(|i| {
+                let channels = if i % 3 == 0 { 2u16 } else { 1 };
+                let samples = vec![0.05f32; PF5_CLIP_FRAMES * usize::from(channels)];
+                Clip {
+                    sample_rate: 48_000,
+                    channels,
+                    samples: Arc::from(samples),
+                }
+            })
+            .collect()
+    }
+
+    /// One armed mixer for the receipt: every clip routed, some looped, some
+    /// mono-folded, both buses plus dialogue (which ducks music), and two
+    /// plain master voices, so the per-frame voice walk is the real mix loop.
+    fn pf5_mixer(clips: &[Clip]) -> Mixer {
+        let mut m = Mixer::new(48_000);
+        m.set_group_limit(Group::Impact, u8::MAX);
+        for (i, clip) in clips.iter().enumerate() {
+            let bus = if i % 3 == 0 {
+                Bus::Dialogue
+            } else if i % 2 == 0 {
+                Bus::Sfx
+            } else {
+                Bus::Music
+            };
+            let route = VoiceRoute {
+                cue: CueId(u16::try_from(i).unwrap_or(0)),
+                bus,
+                group: Group::Impact,
+                priority: u8::try_from(i % 8).unwrap_or(0),
+                looped: i % 4 == 0,
+                ducks_music: bus == Bus::Dialogue,
+            };
+            m.play_clip(clip, route, (0.5, 0.25), i % 5 == 0)
+                .expect("the fixture leaves room for every voice");
+        }
+        let plain = Pcm::new(48_000, 1, vec![0.03f32; PF5_CLIP_FRAMES]);
+        for _ in 0..2 {
+            m.play(&plain, 0.25);
+        }
+        m
+    }
+
+    /// `ns` in microseconds for the receipt line (no cast).
+    fn pf5_micros(ns: u128) -> f64 {
+        engine_core::checked::f64_from_u64(u64::try_from(ns).unwrap_or(u64::MAX)) / 1000.0
+    }
+
+    /// How many times slower `slow` is than `fast`, as a receipt figure.
+    fn pf5_ratio(slow: u128, fast: u128) -> f64 {
+        if fast == 0 {
+            return 0.0;
+        }
+        engine_core::checked::f64_from_u64(u64::try_from(slow).unwrap_or(u64::MAX))
+            / engine_core::checked::f64_from_u64(u64::try_from(fast).unwrap_or(u64::MAX))
+    }
+
+    /// The cached frame count must not move a rounded sample: the production
+    /// render equals the recompute twin on one fixture, byte for byte.
+    #[test]
+    fn pf5_voice_frames_cache_renders_the_same_bytes() {
+        let clips = pf5_clips();
+        let mut cached = pf5_mixer(&clips);
+        let mut recomputed = pf5_mixer(&clips);
+        for v in &cached.voices {
+            assert_eq!(v.frames(), v.legacy_frames(), "cache drifted from data");
+        }
+        let mut a = vec![0.0f32; PF5_FRAMES * 2];
+        let mut b = vec![0.0f32; PF5_FRAMES * 2];
+        cached.render_stereo_into(&mut a);
+        recomputed.render_stereo_into_legacy(&mut b);
+        assert_eq!(a, b, "the cached render moved a sample");
+        assert_eq!(cached.voice_count(), recomputed.voice_count());
+        assert!(a.iter().any(|&s| s != 0.0), "the fixture is audible");
+    }
+
+    /// PF5 mix receipt: p50 microseconds for one 480-frame stereo block, the
+    /// cached frame count against the same render recomputing
+    /// `data.len() / channels` on every voice-frame, alternating rounds on one
+    /// fixture so one machine load sits under both sides.
+    /// Run: cargo test --release -p engine-audio --lib -- --ignored --nocapture
+    /// pf5_mix_voice_frames_bench_receipt
+    #[test]
+    #[ignore = "timing: run with --ignored --nocapture (release) for the receipt"]
+    fn pf5_mix_voice_frames_bench_receipt() {
+        let clips = pf5_clips();
+        let mut cached_runs = Vec::with_capacity(PF5_ITERS);
+        let mut recompute_runs = Vec::with_capacity(PF5_ITERS);
+        for _ in 0..PF5_ITERS {
+            let mut recomputed = pf5_mixer(&clips);
+            let mut cached = pf5_mixer(&clips);
+            let mut a = vec![0.0f32; PF5_FRAMES * 2];
+            let mut b = vec![0.0f32; PF5_FRAMES * 2];
+            let t = std::time::Instant::now();
+            recomputed.render_stereo_into_legacy(&mut a);
+            recompute_runs.push(t.elapsed().as_nanos());
+            let t = std::time::Instant::now();
+            cached.render_stereo_into(&mut b);
+            cached_runs.push(t.elapsed().as_nanos());
+            assert_eq!(a, b, "identical output on every receipt round");
+            std::hint::black_box(a.len() + b.len());
+        }
+        recompute_runs.sort_unstable();
+        cached_runs.sort_unstable();
+        let recompute = recompute_runs[PF5_ITERS / 2];
+        let cached = cached_runs[PF5_ITERS / 2];
+        eprintln!(
+            "pf5_mix_frames cached_p50_us={:.3} recompute_p50_us={:.3} speedup={:.3}x voices={PF5_VOICES} frames={PF5_FRAMES}",
+            pf5_micros(cached),
+            pf5_micros(recompute),
+            pf5_ratio(recompute, cached)
+        );
     }
 
     #[test]

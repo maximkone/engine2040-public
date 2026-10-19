@@ -10,6 +10,7 @@
 
 use crate::feel::{balance_over_200, BalanceReport, FeelError, FeelPreset};
 use crate::fight::{step_with_tables_into, FightEvent, FightState, Tables};
+use engine_core::checked::saturating_u32_to_u16;
 use engine_input::fighter::{ATTACK, BLOCK, DODGE};
 use engine_input::{Buttons, ParticipantId, ParticipantInput};
 
@@ -457,7 +458,7 @@ pub const fn camera_kick_for(damage: u16, parries: u32, trauma_peak: u16, camera
         } else {
             damage as u32
         };
-        return (trauma_peak as u32 * capped / 1000) as u16;
+        return saturating_u32_to_u16(trauma_peak as u32 * capped / 1000);
     }
     if parries > 0 {
         return trauma_peak / 2;
@@ -627,7 +628,7 @@ pub fn measure_one(
     let damage_total = if damage_sum > u32::from(u16::MAX) {
         u16::MAX
     } else {
-        damage_sum as u16
+        u16::try_from(damage_sum).unwrap_or(u16::MAX)
     };
     let hitstop_ticks = if scenario.rig.hitstop && (hits > 0 || parries > 0) {
         tables.hitstop_ticks
@@ -653,7 +654,7 @@ pub fn measure_one(
         event_count: if event_count > u32::from(u16::MAX) {
             u16::MAX
         } else {
-            event_count as u16
+            u16::try_from(event_count).unwrap_or(u16::MAX)
         },
         damage_total,
         hitstop_ticks,
@@ -687,7 +688,7 @@ pub fn run_suite_into(
     }
     let mut id = 0u8;
     while id < SCENARIO_COUNT_U8 {
-        out[id as usize] = measure_one(id, preset, base)?;
+        out[usize::from(id)] = measure_one(id, preset, base)?;
         id += 1;
     }
     Ok(())
@@ -803,7 +804,7 @@ mod tests {
         assert_eq!(ImpactFeature::from_index(19), None);
         let mut core = 0u32;
         let mut i = 0u8;
-        while i < FEATURE_COUNT as u8 {
+        while i < u8::try_from(FEATURE_COUNT).unwrap_or(u8::MAX) {
             let feature = ImpactFeature::from_index(i).expect("inventory index resolves");
             assert_eq!(feature.index(), i);
             assert_eq!(ImpactFeature::from_index(feature.index()), Some(feature));

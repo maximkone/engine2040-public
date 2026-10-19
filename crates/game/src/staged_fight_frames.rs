@@ -16,6 +16,7 @@
 //! four 128x96 CPU frames; all IO-free, never on the fixed tick.
 
 use engine_arena::{recorder::Dataset, run_dataset, run_events, ArenaConfig, TickEvents};
+use engine_audio::FightCue;
 use engine_combat::FightEvent;
 use engine_core::hash_bytes;
 use engine_input::{fighter::ATTACK, Buttons, FighterId, FighterInput, FighterTape};
@@ -362,6 +363,42 @@ pub fn push_fight_draws(
         }
     }
     Ok(pushed)
+}
+
+/// Live fight bodies: one dot per simulated fighter from the match's own fighter views (feet
+/// position on the floor, live hp, this tick's flash).
+///
+/// Caller: the native window (`bin/arena.rs`) and the browser shell
+/// (`crates/web/src/fight.rs`) each draw the match they step, so the mapping
+/// from a running `App` to drawable dots lives here once.
+#[must_use]
+pub fn live_fight_dots(app: &crate::App, cues: &[FightCue]) -> Vec<StagedFighterDot> {
+    let views = app.fighter_views();
+    let mut dots = Vec::with_capacity(views.len());
+    for view in views {
+        let Some(id) = FighterId::new(view.slot) else {
+            continue;
+        };
+        if !view.pos_m.iter().all(|v| v.is_finite()) {
+            continue;
+        }
+        let hit = cues.iter().any(|cue| match cue {
+            FightCue::Hit { victim, .. } => *victim == id.get(),
+            FightCue::Knockdown { victim, .. } => *victim == id.get(),
+            _ => false,
+        });
+        dots.push(StagedFighterDot {
+            slot: id.get(),
+            pos_m: [view.pos_m[0], 0.0, view.pos_m[2]],
+            hp: app
+                .hp()
+                .get(usize::from(view.slot))
+                .copied()
+                .unwrap_or(1000),
+            hit,
+        });
+    }
+    dots
 }
 
 /// One staged-fight draw list: the HUD clear plus the lit cube plus dressing
@@ -1145,6 +1182,83 @@ mod tests {
                 .expect("clear list builds");
         assert!(clear.items.is_empty());
         assert!(staged_fight_frame_list(0, SMOKE_FRAME_SIZE.1, None, 0, &resident, dots).is_err());
+    }
+
+    #[test]
+    fn live_dots_come_from_the_running_match() {
+        let config = crate::GameConfig {
+            seed: 2040,
+            ticks: 600,
+            fighters: 2,
+            half_extent_m: 12.0,
+        };
+        let app = crate::App::with_world(config, crate::arena_kit::kit_match_world_or_empty())
+            .expect("session builds");
+        let mut app = app;
+        assert!(
+            live_fight_dots(&app, &[]).is_empty(),
+            "no pose before the first tick"
+        );
+        app.tick(FighterInput {
+            tick: 0,
+            fighter: FighterId(0),
+            mx: 0,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        });
+        let dots = live_fight_dots(&app, &[]);
+        assert_eq!(dots.len(), 2, "one dot per fighter");
+        assert!(
+            dots.iter().all(|dot| dot.pos_m[1] == 0.0),
+            "dots sit on the floor"
+        );
+        assert!(
+            dots.iter().all(|dot| dot.hp == 1000),
+            "full hp before the first tick"
+        );
+        assert!(dots
+            .iter()
+            .all(|dot| { dot.pos_m[0].is_finite() && dot.pos_m[2].is_finite() && !dot.hit }));
+    }
+
+    #[test]
+    fn a_walking_seat_moves_its_dot() {
+        // A roomy arena: the pair spawns at the ring edge, so a small ring would put the walk
+        // into the wall clamp and measure the clamp instead of the walk.
+        let config = crate::GameConfig {
+            seed: 2040,
+            ticks: 600,
+            fighters: 2,
+            half_extent_m: 40.0,
+        };
+        let mut app = crate::App::with_world(config, crate::arena_kit::kit_match_world_or_empty())
+            .expect("session builds")
+            .into_duel()
+            .expect("duel rules build");
+        let walk = |tick: u32| FighterInput {
+            tick,
+            fighter: FighterId(0),
+            mx: 100,
+            mz: 0,
+            facing: 0,
+            buttons: Buttons::NONE,
+        };
+        app.tick(walk(0));
+        let start = live_fight_dots(&app, &[]);
+        let from = start.first().expect("a dot after one tick").pos_m;
+        // The duel rules hold a short startup and a commit lock, so the first steps barely move;
+        // 90 ticks is long enough for the held wish to show on the feet (measured ~1 m).
+        for tick in 1..90 {
+            app.tick(walk(tick));
+        }
+        let dots = live_fight_dots(&app, &[]);
+        let to = dots.first().expect("a dot after ninety ticks").pos_m;
+        let moved = ((to[0] - from[0]).powi(2) + (to[2] - from[2]).powi(2)).sqrt();
+        assert!(
+            moved > 0.5,
+            "a held forward wish walks the seat: moved {moved:.3} m from {from:?} to {to:?}"
+        );
     }
 
     #[test]

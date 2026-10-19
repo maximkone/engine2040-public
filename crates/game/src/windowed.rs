@@ -54,7 +54,7 @@ pub use windowed_smoke::{
 #[path = "staged_fight_frames.rs"]
 mod staged_fight_frames;
 pub use staged_fight_frames::{
-    fight_body_material, fight_body_mesh, fight_mesh_key, push_fight_draws,
+    fight_body_material, fight_body_mesh, fight_mesh_key, live_fight_dots, push_fight_draws,
     run_staged_fight_frames, split_staged_flag, stage_fight_bodies, staged_ct7_body_shas,
     staged_ct7_bundle_shas, staged_fight_frame_list, staged_fight_frame_png,
     staged_fight_frame_rgba, staged_fight_input, staged_frame_manifest, staged_session_config,

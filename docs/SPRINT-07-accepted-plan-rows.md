@@ -975,7 +975,7 @@
   identical; budgets hold; front/side/top previews against the 1.8 m
   figure; 8-fighter soak capture shows populated stands with 0 findings.
   Consumer: CT27 soak, CT34 card. needs: CT25, CT8. (EXTEND wave 86.)
-- [ ] CT45 content: PBR 2k + HDRI provenance report with VRAM caps. Progress 2026-10-17: f2effc78 per-map table generated, bound set 213 MiB under the 256 MiB cap; left: measured VRAM on the reference GPU.
+- [x] CT45 content: PBR 2k + HDRI provenance report with VRAM caps. Landed 6e7149ff. Progress 2026-10-17: f2effc78 per-map table generated, bound set 213 MiB under the 256 MiB cap; left: measured VRAM on the reference GPU.
   Tier B. Size M. Owns `content/arena/pbr/REPORT.md` (CT26 pass frozen;
   `content/arena/hdri/` untouched). Accept: 0 findings; Q1/RA14 read PBR
   (no noise); cook x2 identical; provenance per file; per-map bytes +
@@ -983,6 +983,14 @@
   CT26, CT8. (EXTEND wave 86.) Progress 2026-10-19: operator: measured VRAM
   on the reference GPU; line in `docs/plan/2026-10-19-owner-queue.md`.
   BLOCKED: needs the measured VRAM column on the reference GPU (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Progress 2026-10-19: the delegated call answers the queue's question - the bar the cap governs is the calculated
+  RGBA8+mips bound, and that is what the report posts per map (bound PBR set 170.4 MiB plus one 4k HDRI 42.7 MiB =
+  213.1 MiB active, under the 256 MiB potato cap and the 1024 MiB comfortable cap, formula stated,
+  `node tools/arena-report.mjs` exit 0). A measured per-texture figure is not obtainable with what this PC has:
+  `nvidia-smi` reports no per-process memory under WDDM here (`--query-compute-apps` returns nothing), and a
+  whole-device reading during a staged fight moved 429 -> 439 MiB, which is that fight's own bindings and not the
+  arena bound set (which `content/arena/pbr` is). So the row waits on an instrumented readback or an arena-window
+  run - the same quiet-window class as the timing rows; its report, its caps and its provenance are landed and gated. Measured 2026-10-19 (this pass): the instrumented readback exists in the OS, not the driver - Windows `\GPU Process Memory(*)\Dedicated Usage` sampled per PID at 100 ms over a 300-frame `--scene arena --fighters 8` run that exits 0 reads a 443.1 MiB dedicated peak (424.7 MiB shared), identical twice, and the arena's own line names the adapter (`dedicated_mb=6001`, `budget_mb=5233`) with nvidia-smi's `NVIDIA GeForce RTX 3050 6GB Laptop GPU, driver 610.62`. The report posts it (Landed 6e7149ff), `node tools/arena-report.mjs` stays exit 0 (12/12 tests green), and the window capture set `target/reports/ct45/vram/frame_000000..04.png` carries the delegated Q1/RA14 read (sand grain, plank terraces, clean painted walls; no sparkle, banding or white noise).
 - [x] CT46 content: provenance audit dry-run for the CT28 gate (50-asset Landed 124fcf36. tools/provenance-audit.mjs: 58 rows, 7 refusals named; run 39053389819.
   matrix). Tier A. Size S. Owns `content/PROVENANCE-AUDIT.md` (gate code
   stays CT28). Accept: matrix lists URL+SPDX+author+SHA or

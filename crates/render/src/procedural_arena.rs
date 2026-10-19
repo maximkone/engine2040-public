@@ -370,6 +370,56 @@ impl ProceduralArena {
         Ok(camera)
     }
 
+    /// A camera that frames two fighter feet positions: on the perpendicular bisector of the
+    /// pair, high and far enough that both fit the frame. Falls back to the ring camera when a
+    /// position is not finite or the pair has no direction, so a frame always has a camera.
+    pub fn framing_camera(
+        &self,
+        width: u32,
+        height: u32,
+        a: [f32; 3],
+        b: [f32; 3],
+    ) -> Result<Camera, ArenaError> {
+        let ring = self.camera(width, height, 0.0)?;
+        if !a.iter().chain(b.iter()).all(|v| v.is_finite()) {
+            return Ok(ring);
+        }
+        let (a, b) = (Vec3::from_array(a), Vec3::from_array(b));
+        let mid = (a + b) * 0.5;
+        let Some(along) = (b - a).try_normalize() else {
+            return Ok(ring);
+        };
+        let Some(side) = along.cross(Vec3::Y).try_normalize() else {
+            return Ok(ring);
+        };
+        let dist = ((b - a).length() * 1.8).clamp(6.0, 20.0);
+        // The eye looks outward from near the ring centre at the pair, so the fighters are
+        // framed against the wall instead of silhouetted on it; when the pair is at the centre
+        // there is no inward direction, so the perpendicular side is used.
+        let inward = (-mid).try_normalize().unwrap_or(side);
+        let mut eye = mid + inward * dist + Vec3::Y * (dist * 0.45);
+        // Keep the eye inside the wall, whatever the pair does: clamp the horizontal radius.
+        let flat = Vec3::new(eye.x, 0.0, eye.z);
+        let radius = flat.length();
+        let limit = WALL_RADIUS_M - 1.5;
+        if radius > limit {
+            let k = limit / radius;
+            eye = Vec3::new(flat.x * k, eye.y, flat.z * k);
+        }
+        let mut camera = Camera::new(
+            eye.to_array(),
+            (mid + Vec3::Y * 0.9).to_array(),
+            [0.0, 1.0, 0.0],
+            58.0_f32.to_radians(),
+        );
+        camera.aspect = unit16(width) / unit16(height);
+        camera.far = 200.0;
+        if camera.validate().is_err() {
+            return Ok(ring);
+        }
+        Ok(camera)
+    }
+
     /// The warm key light the twin scenes use.
     #[must_use]
     pub fn light() -> DirectionalLight {
@@ -382,12 +432,30 @@ impl ProceduralArena {
 
     /// The draw list for a `width` x `height` frame at time `t_s`, one draw per part.
     pub fn list_at(&self, width: u32, height: u32, t_s: f32) -> Result<DrawList, ArenaError> {
+        self.list_of(width, height, t_s, |_| true)
+    }
+
+    /// The same list without the fighter parts: the ring, floor and props a played match keeps
+    /// while the match's own bodies are staged over it (WEB15). The camera stays the stand-in's.
+    pub fn list_scenery(&self, width: u32, height: u32, t_s: f32) -> Result<DrawList, ArenaError> {
+        self.list_of(width, height, t_s, |part| part.skin.is_none())
+    }
+
+    /// One draw per part `keep` accepts, under the stand-in camera.
+    fn list_of(
+        &self,
+        width: u32,
+        height: u32,
+        t_s: f32,
+        keep: impl Fn(&Part) -> bool,
+    ) -> Result<DrawList, ArenaError> {
         Ok(DrawList {
             camera: self.camera(width, height, t_s)?,
             light: Self::light(),
             items: self
                 .parts
                 .iter()
+                .filter(|part| keep(part))
                 .map(|part| DrawItem {
                     mesh: part.key,
                     material: part.material.clone(),
@@ -602,6 +670,66 @@ mod tests {
         assert!(
             widest >= WALL_RADIUS_M + 2.9,
             "the floor runs under the wall: {widest}"
+        );
+    }
+
+    #[test]
+    fn scenery_is_every_static_part_and_never_a_fighter() {
+        let arena = arena();
+        let all = arena.list_at(1280, 720, 2.5).expect("list builds");
+        let scenery = arena.list_scenery(1280, 720, 2.5).expect("scenery builds");
+        let fighters = arena
+            .parts()
+            .iter()
+            .filter(|part| part.skin.is_some())
+            .count();
+        assert_eq!(
+            scenery.items.len() + fighters,
+            all.items.len(),
+            "the scenery list drops exactly the skinned fighter parts"
+        );
+        assert!(
+            scenery.items.len() >= 5,
+            "the ring, floor and props stay in the scenery list"
+        );
+        scenery.validate().expect("the scenery list is valid");
+    }
+
+    #[test]
+    fn the_framing_camera_keeps_both_fighters_in_view_and_falls_back() {
+        let arena = arena();
+        let camera = arena
+            .framing_camera(1280, 720, [-3.0, 0.0, 0.0], [3.0, 0.0, 1.0])
+            .expect("camera builds");
+        camera.validate().expect("the framing camera is valid");
+        let vp = camera.view_proj().expect("its matrix builds");
+        for point in [[-3.0f32, 0.0, 0.0], [3.0, 0.0, 1.0]] {
+            let clip = vp * glam::Vec4::new(point[0], 1.0, point[2], 1.0);
+            let ndc = clip.truncate() / clip.w;
+            assert!(
+                ndc.x.abs() < 1.0 && ndc.y.abs() < 1.0,
+                "a fighter left the frame: {ndc:?}"
+            );
+        }
+        let ring = arena
+            .camera(1280, 720, 0.0)
+            .expect("the ring camera builds");
+        let same = arena
+            .framing_camera(1280, 720, [1.0, 0.0, 1.0], [1.0, 0.0, 1.0])
+            .expect("a degenerate pair still gives a camera");
+        assert_eq!(same.eye, ring.eye, "it falls back to the ring camera");
+        let bad = arena
+            .framing_camera(1280, 720, [f32::NAN, 0.0, 0.0], [0.0, 0.0, 0.0])
+            .expect("a non-finite position still gives a camera");
+        assert_eq!(bad.eye, ring.eye);
+        // A pair fighting at the wall keeps the eye inside it, not behind the stone.
+        let near = arena
+            .framing_camera(1280, 720, [10.6, 0.0, 2.0], [10.0, 0.0, 2.4])
+            .expect("a pair at the wall still gives a camera");
+        let radius = (near.eye.x * near.eye.x + near.eye.z * near.eye.z).sqrt();
+        assert!(
+            radius <= WALL_RADIUS_M - 1.5 + 1e-3,
+            "the eye stays inside the wall: radius {radius:.3} m"
         );
     }
 

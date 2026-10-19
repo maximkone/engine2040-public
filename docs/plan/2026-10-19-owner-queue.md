@@ -5,12 +5,20 @@ the exact question. Everything else on the board is agent work.
 
 ## Human / machine runs
 
-Note 2026-10-19 (owner delegated the decisions; the runs below are still runs):
-the timing legs (OPT31, OPT33, RL5, RL18, OB4, RC20) need a **quiesced**
-machine. Four nonstop loops and five code agents were compiling on this PC, so a
-number taken during this pass would be meaningless; the rows stay parked until a
-quiet window. CT45 needs a VRAM measurement, not a timing run, so it can go in a
-busy window. ON30 and SG3 need people.
+Note 2026-10-19 (second pass, after the owner delegation): the box measured
+98% CPU with 7 cargo and 11 rustc processes from other sessions over three
+10-second samples, so no timing number was taken and none is invented. CT45 is
+done: the per-process VRAM readback exists in the OS (`\GPU Process
+Memory(*)\Dedicated Usage`), the arena run reads 443.1 MiB dedicated peak
+(424.7 shared) identical twice, and the report carries the adapter line
+(`content/arena/pbr/REPORT.md`, ticked at 6e7149ff). The timing rows (OPT31,
+OPT33, RL5, RL18, OB4, RC20) and GM3 are armed on the scheduled quiet-window
+keeper: it waits for CPU under 15% with no cargo/rustc/arena, then runs one
+parked row per beat with its receipts (OpenChamber task
+`17b51ead-acc9-4869-ba7d-681824879b6b`, every 2 hours at :30, gated on CPU under
+15% with no cargo/rustc/arena). RL21 and RL26 are not runs: they are
+render bind-glue rows inside the sweep session's `crates/render` and stay parked
+as agent work until that crate frees. ON30 and SG3 still need people.
 
 - ON30 (docs/SPRINT-11-north-star.md): two humans + 6 AI over two real
   networks. Host: `target\release\net_relay.exe` on a reachable host, then
@@ -198,8 +206,10 @@ Kept and implemented by the delegated call (agent work dispatched, not parked):
   upstream wyrand vectors, a statistical test we own, cross-platform equality,
   one real caller wired, p95 kept. TestU01 is out (no C suite in the repo).
 
-Still only a person can do it (a run, not a decision), so it stays in this
-queue: ON30 (two humans, two real networks), SG3 (a hand-played tow), OPT31,
-OPT33, CT45, RL5, RL18, RL21, RL26, OB4, RC20 — and the DX8/DX9 look, which the
-delegated call answers as "kept" rather than waiting for the review.
+Still only a person can do it (a run with hands or two networks, not a
+decision): ON30 (two humans, two real networks) and SG3 (a hand-played tow).
+Everything else is answered: CT45 is measured and ticked, the timing rows and
+GM3 are armed on the quiet-window keeper, RL21/RL26 are render work in the sweep
+session's crate, and the DX8/DX9 look is answered "kept" rather than waiting for
+the review.
 

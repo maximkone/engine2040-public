@@ -227,11 +227,11 @@ fn run_bout(kind: Kind, press: u32, tables: &Tables, delay: u32) -> Sample {
 
 /// Run the seeded suite: `INPUTS` bouts, kind and press tick from `splitmix64`.
 fn run_suite(tables: &Tables, delay: u32) -> Vec<Sample> {
-    let mut samples = Vec::with_capacity(INPUTS as usize);
+    let mut samples = Vec::with_capacity(usize::try_from(INPUTS).unwrap_or(usize::MAX));
     for i in 0..INPUTS {
         let r = splitmix64(SEED.wrapping_add(i));
         let kind = KINDS[(r % 4) as usize];
-        let press = LEAD_IN + ((r >> 8) % PRESS_SPREAD) as u32;
+        let press = LEAD_IN + u32::try_from((r >> 8) % PRESS_SPREAD).unwrap_or(u32::MAX);
         samples.push(run_bout(kind, press, tables, delay));
     }
     samples

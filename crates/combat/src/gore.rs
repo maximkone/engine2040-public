@@ -15,6 +15,7 @@
 //! Integer centimetres only, so there are no NaN positions by construction.
 
 use crate::fight::{FightEvent, Tables, MAX_HP_PERMILLE, TABLES_V1};
+use engine_core::checked::saturating_u32_to_i32;
 use engine_core::Fnv64;
 
 /// Presentation gore policy: render richness only, never simulation.
@@ -459,9 +460,9 @@ const fn jitter_cm(tick: u32, victim: u8) -> (i32, i32) {
     let hash = tick
         .wrapping_mul(0x9E37_79B1)
         .wrapping_add((victim as u32).wrapping_mul(0x85EB_CA6B));
-    let span = (JITTER_CM as u32) * 2 + 1;
-    let jx = (hash % span) as i32 - JITTER_CM;
-    let jz = ((hash >> 16) % span) as i32 - JITTER_CM;
+    let span = JITTER_CM.unsigned_abs() * 2 + 1;
+    let jx = saturating_u32_to_i32(hash % span) - JITTER_CM;
+    let jz = saturating_u32_to_i32((hash >> 16) % span) - JITTER_CM;
     (jx, jz)
 }
 
@@ -660,7 +661,10 @@ mod tests {
             let (bout, _) = run_bout();
             let mut stream = Vec::new();
             for (tick, events) in bout.iter().enumerate() {
-                stream.extend(gore_for_events(tick as u32, events));
+                stream.extend(gore_for_events(
+                    u32::try_from(tick).unwrap_or(u32::MAX),
+                    events,
+                ));
             }
             stream
         };
@@ -700,7 +704,7 @@ mod tests {
             let before = with_gore;
             let events = step(tick_inputs, &mut with_gore);
             // Gore reads events by shared reference and never touches state.
-            let gore = gore_for_events(tick as u32, &events);
+            let gore = gore_for_events(u32::try_from(tick).unwrap_or(u32::MAX), &events);
             assert_eq!(with_gore, {
                 let mut untouched = before;
                 let replayed = step(tick_inputs, &mut untouched);
@@ -752,7 +756,7 @@ mod tests {
             for (tick, tick_inputs) in script.iter().enumerate() {
                 let events = step(tick_inputs, &mut state);
                 stream.extend(super::gore_for_events_with_setting(
-                    tick as u32,
+                    u32::try_from(tick).unwrap_or(u32::MAX),
                     &events,
                     &crate::fight::TABLES_V1,
                     setting,
@@ -922,7 +926,7 @@ mod tests {
 
         // Cap: oldest drops first, newest survives.
         let mut full = super::WoundBoard::new();
-        for tick in 0..(super::MAX_WOUNDS as u32 + 1) {
+        for tick in 0..(u32::try_from(super::MAX_WOUNDS).unwrap_or(u32::MAX) + 1) {
             full.open_for_events(tick, &[hit]);
         }
         assert_eq!(full.len(), super::MAX_WOUNDS);
@@ -930,7 +934,7 @@ mod tests {
         assert!(full.intensity_at(0, 1).unwrap() > 0);
         // All sixteen survive at the newest tick (ages 15..0, none tapered).
         assert_eq!(
-            full.live_count_at(super::MAX_WOUNDS as u32),
+            full.live_count_at(u32::try_from(super::MAX_WOUNDS).unwrap_or(u32::MAX)),
             super::MAX_WOUNDS
         );
     }

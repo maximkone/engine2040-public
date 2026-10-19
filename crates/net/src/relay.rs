@@ -14,7 +14,7 @@
 
 use engine_core::{hash::GOLDEN_GAMMA, mix64, splitmix64};
 use std::collections::VecDeque;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 
 /// Wire magic `b"RL"`, first two bytes of every relay and signal datagram.
 pub const RELAY_WIRE_MAGIC: u16 = 0x4C52;
@@ -40,14 +40,9 @@ pub const RELAY_PROTOCOL_ID: u64 = 0xE204_0A11_CE00_0001;
 /// Domain salt for the relay challenge round: keeps challenge answers off
 /// the invite-code and relay-id streams.
 const CHALLENGE_SALT: u64 = 0x51A7_C4A1_1E69_0A30;
-/// STUN magic cookie (RFC 5389 fixed word, checked on decode).
-pub const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
-/// STUN binding request type word.
-pub const STUN_BINDING_REQUEST: u16 = 0x0001;
-/// STUN binding success response type word.
-pub const STUN_BINDING_RESPONSE: u16 = 0x0101;
-/// STUN XOR-MAPPED-ADDRESS attribute type word.
-pub const STUN_ATTR_XOR_MAPPED: u16 = 0x0020;
+/// STUN integrity, ICE candidates, pair nomination and consent freshness:
+/// the conformance half of this module, re-exported unchanged.
+pub use crate::relay_ice::*;
 
 /// Relay and join failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -256,306 +251,6 @@ impl InviteTicket {
             0
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// STUN binding shape: request/response plus XOR-MAPPED-ADDRESS, IPv4/IPv6.
-// ---------------------------------------------------------------------------
-
-/// Encode a 20-byte binding request for transaction `tx`.
-pub fn encode_binding_request(tx: [u8; 12]) -> [u8; 20] {
-    let mut out = [0u8; 20];
-    out[0..2].copy_from_slice(&STUN_BINDING_REQUEST.to_be_bytes());
-    out[2..4].copy_from_slice(&0u16.to_be_bytes());
-    out[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
-    out[8..20].copy_from_slice(&tx);
-    out
-}
-
-/// Decode a binding request, returning its transaction id.
-pub fn decode_binding_request(bytes: &[u8]) -> Result<[u8; 12], RelayError> {
-    if bytes.len() != 20 {
-        return Err(RelayError::Truncated);
-    }
-    if u16::from_be_bytes([bytes[0], bytes[1]]) != STUN_BINDING_REQUEST {
-        return Err(RelayError::BadKind(bytes[0]));
-    }
-    if u16::from_be_bytes([bytes[2], bytes[3]]) != 0 {
-        return Err(RelayError::BadInput);
-    }
-    if u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) != STUN_MAGIC_COOKIE {
-        return Err(RelayError::BadMagic);
-    }
-    let mut tx = [0u8; 12];
-    tx.copy_from_slice(&bytes[8..20]);
-    Ok(tx)
-}
-
-/// Encode a binding success response echoing `tx` with the observed address
-/// XOR-mapped per RFC 5389 (obfuscation by fixed xor, not crypto).
-pub fn encode_binding_response(tx: [u8; 12], mapped: SocketAddr) -> Vec<u8> {
-    let attr: Vec<u8> = match mapped.ip() {
-        IpAddr::V4(v4) => {
-            let mut attr = vec![0u8; 8];
-            attr[0] = 0;
-            attr[1] = 1;
-            let xport = mapped.port() ^ (STUN_MAGIC_COOKIE >> 16) as u16;
-            attr[2..4].copy_from_slice(&xport.to_be_bytes());
-            let octets = v4.octets();
-            let cookie = STUN_MAGIC_COOKIE.to_be_bytes();
-            for (i, octet) in octets.iter().enumerate() {
-                attr[4 + i] = octet ^ cookie[i];
-            }
-            attr
-        }
-        IpAddr::V6(v6) => {
-            let mut attr = vec![0u8; 20];
-            attr[0] = 0;
-            attr[1] = 2;
-            let xport = mapped.port() ^ (STUN_MAGIC_COOKIE >> 16) as u16;
-            attr[2..4].copy_from_slice(&xport.to_be_bytes());
-            let cookie = STUN_MAGIC_COOKIE.to_be_bytes();
-            for (i, octet) in v6.octets().iter().enumerate() {
-                let mask = if i < 4 { cookie[i] } else { tx[i - 4] };
-                attr[4 + i] = octet ^ mask;
-            }
-            attr
-        }
-    };
-    let mut out = vec![0u8; 20 + 4 + attr.len()];
-    out[0..2].copy_from_slice(&STUN_BINDING_RESPONSE.to_be_bytes());
-    out[2..4].copy_from_slice(&(attr.len() as u16).to_be_bytes());
-    out[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
-    out[8..20].copy_from_slice(&tx);
-    out[20..22].copy_from_slice(&STUN_ATTR_XOR_MAPPED.to_be_bytes());
-    out[22..24].copy_from_slice(&(attr.len() as u16).to_be_bytes());
-    out[24..].copy_from_slice(&attr);
-    out
-}
-
-/// Decode a binding response, checking the `tx` echo and returning the
-/// mapped address.
-pub fn decode_binding_response(bytes: &[u8], tx: [u8; 12]) -> Result<SocketAddr, RelayError> {
-    if bytes.len() < 28 {
-        return Err(RelayError::Truncated);
-    }
-    if u16::from_be_bytes([bytes[0], bytes[1]]) != STUN_BINDING_RESPONSE {
-        return Err(RelayError::BadKind(bytes[0]));
-    }
-    if u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) != STUN_MAGIC_COOKIE {
-        return Err(RelayError::BadMagic);
-    }
-    if bytes[8..20] != tx {
-        return Err(RelayError::BadInput);
-    }
-    if u16::from_be_bytes([bytes[20], bytes[21]]) != STUN_ATTR_XOR_MAPPED {
-        return Err(RelayError::BadInput);
-    }
-    let attr_len = usize::from(u16::from_be_bytes([bytes[22], bytes[23]]));
-    if bytes.len() != 24 + attr_len {
-        return Err(RelayError::Truncated);
-    }
-    let attr = &bytes[24..];
-    if attr.len() < 8 || attr[0] != 0 {
-        return Err(RelayError::BadInput);
-    }
-    let xport = u16::from_be_bytes([attr[2], attr[3]]);
-    let port = xport ^ (STUN_MAGIC_COOKIE >> 16) as u16;
-    let cookie = STUN_MAGIC_COOKIE.to_be_bytes();
-    match attr[1] {
-        1 => {
-            if attr.len() != 8 {
-                return Err(RelayError::Truncated);
-            }
-            let mut octets = [0u8; 4];
-            for (i, octet) in octets.iter_mut().enumerate() {
-                *octet = attr[4 + i] ^ cookie[i];
-            }
-            Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(octets)), port))
-        }
-        2 => {
-            if attr.len() != 20 {
-                return Err(RelayError::Truncated);
-            }
-            let mut octets = [0u8; 16];
-            for (i, octet) in octets.iter_mut().enumerate() {
-                let mask = if i < 4 { cookie[i] } else { tx[i - 4] };
-                *octet = attr[4 + i] ^ mask;
-            }
-            Ok(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(octets)), port))
-        }
-        family => Err(RelayError::BadKind(family)),
-    }
-}
-
-/// Deterministic STUN stand-in: answers binding requests with the configured
-/// public address. The deployment runs a real server; the shape is identical.
-pub struct StunServer {
-    public: SocketAddr,
-}
-
-impl StunServer {
-    /// Serve mapped-address lookups as `public`.
-    pub fn new(public: SocketAddr) -> Self {
-        Self { public }
-    }
-
-    /// Advertised public address.
-    pub fn public_addr(&self) -> SocketAddr {
-        self.public
-    }
-
-    /// Answer one request with a success response, or refuse junk loudly.
-    pub fn serve(&self, request: &[u8]) -> Result<Vec<u8>, RelayError> {
-        let tx = decode_binding_request(request)?;
-        Ok(encode_binding_response(tx, self.public))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ICE-lite candidates: host / server-reflexive / relay with fixed priority.
-// ---------------------------------------------------------------------------
-
-/// Candidate source, ordered host > srflx > relay by construction.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum CandidateKind {
-    /// Local interface address.
-    Host,
-    /// STUN-learned server-reflexive address.
-    Srflx,
-    /// Relay-allocated address, always works.
-    Relay,
-}
-
-impl CandidateKind {
-    /// Type preference per the ICE shape: host 126, srflx 100, relay 0.
-    pub const fn preference(self) -> u32 {
-        match self {
-            Self::Host => 126,
-            Self::Srflx => 100,
-            Self::Relay => 0,
-        }
-    }
-
-    /// Wire code for this kind.
-    pub const fn as_u8(self) -> u8 {
-        match self {
-            Self::Host => 0,
-            Self::Srflx => 1,
-            Self::Relay => 2,
-        }
-    }
-
-    /// Decode a wire code; unknown codes fail.
-    pub const fn from_u8(code: u8) -> Option<Self> {
-        match code {
-            0 => Some(Self::Host),
-            1 => Some(Self::Srflx),
-            2 => Some(Self::Relay),
-            _ => None,
-        }
-    }
-}
-
-/// One connectivity candidate: source plus address plus fixed priority.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Candidate {
-    /// Source of this address.
-    pub kind: CandidateKind,
-    /// Address to try.
-    pub addr: SocketAddr,
-}
-
-impl Candidate {
-    /// Priority from type preference only (component and local parts fixed),
-    /// so ordering is stable and needs no floats.
-    pub fn priority(&self) -> u64 {
-        u64::from(self.kind.preference()) << 24
-    }
-
-    /// Encode: kind 1, family 1, port 2, address 4 or 16.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = vec![0u8; 4];
-        out[0] = self.kind.as_u8();
-        match self.addr.ip() {
-            IpAddr::V4(v4) => {
-                out[1] = 4;
-                out[2..4].copy_from_slice(&self.addr.port().to_le_bytes());
-                out.extend_from_slice(&v4.octets());
-            }
-            IpAddr::V6(v6) => {
-                out[1] = 6;
-                out[2..4].copy_from_slice(&self.addr.port().to_le_bytes());
-                out.extend_from_slice(&v6.octets());
-            }
-        }
-        out
-    }
-
-    /// Decode and validate one candidate; junk refuses loudly.
-    pub fn decode(bytes: &[u8]) -> Result<Self, RelayError> {
-        if bytes.len() != 8 && bytes.len() != 20 {
-            return Err(RelayError::Truncated);
-        }
-        let kind = CandidateKind::from_u8(bytes[0]).ok_or(RelayError::BadKind(bytes[0]))?;
-        let port = u16::from_le_bytes([bytes[2], bytes[3]]);
-        if port == 0 {
-            return Err(RelayError::BadInput); // port zero never gathers, so wire bytes carrying it are junk too
-        }
-        let ip = match (bytes[1], bytes.len()) {
-            (4, 8) => {
-                let mut octets = [0u8; 4];
-                octets.copy_from_slice(&bytes[4..8]);
-                IpAddr::V4(Ipv4Addr::from(octets))
-            }
-            (6, 20) => {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(&bytes[4..20]);
-                IpAddr::V6(Ipv6Addr::from(octets))
-            }
-            _ => return Err(RelayError::BadInput),
-        };
-        Ok(Self {
-            kind,
-            addr: SocketAddr::new(ip, port),
-        })
-    }
-}
-
-/// Gather the ICE-lite set: host always, srflx and relay when known, sorted
-/// by priority highest first. Port zero never gathers.
-pub fn gather_candidates(
-    host: SocketAddr,
-    srflx: Option<SocketAddr>,
-    relay: Option<SocketAddr>,
-) -> Result<Vec<Candidate>, RelayError> {
-    if host.port() == 0 {
-        return Err(RelayError::BadInput);
-    }
-    let mut out = vec![Candidate {
-        kind: CandidateKind::Host,
-        addr: host,
-    }];
-    if let Some(addr) = srflx {
-        if addr.port() == 0 {
-            return Err(RelayError::BadInput);
-        }
-        out.push(Candidate {
-            kind: CandidateKind::Srflx,
-            addr,
-        });
-    }
-    if let Some(addr) = relay {
-        if addr.port() == 0 {
-            return Err(RelayError::BadInput);
-        }
-        out.push(Candidate {
-            kind: CandidateKind::Relay,
-            addr,
-        });
-    }
-    out.sort_by_key(|cand| std::cmp::Reverse(cand.priority()));
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -953,6 +648,7 @@ pub struct HubStats {
 pub struct RelayHub {
     server: RelayServer,
     addrs: std::collections::BTreeMap<u64, SocketAddr>,
+    creds: Option<StunCreds>,
     stats: HubStats,
 }
 
@@ -962,8 +658,17 @@ impl RelayHub {
         Self {
             server: RelayServer::new(config),
             addrs: std::collections::BTreeMap::new(),
+            creds: None,
             stats: HubStats::default(),
         }
+    }
+
+    /// Require MESSAGE-INTEGRITY-SHA256 on every STUN binding, keyed by the
+    /// invite ticket: unsigned or forged bindings get no answer.
+    #[must_use]
+    pub fn with_creds(mut self, creds: StunCreds) -> Self {
+        self.creds = Some(creds);
+        self
     }
 
     /// The forward-only relay inside.
@@ -979,9 +684,14 @@ impl RelayHub {
     /// Handle one datagram from `src`; returns every datagram to send, with
     /// its destination, in order.
     pub fn handle(&mut self, src: SocketAddr, bytes: &[u8]) -> Vec<(SocketAddr, Vec<u8>)> {
-        if let Ok(tx) = decode_binding_request(bytes) {
-            self.stats.stun += 1;
-            return vec![(src, encode_binding_response(tx, src))];
+        if self.creds.is_some() && is_stun(bytes) {
+            return self.handle_signed_binding(src, bytes);
+        }
+        if self.creds.is_none() {
+            if let Ok(tx) = decode_binding_request(bytes) {
+                self.stats.stun += 1;
+                return vec![(src, encode_binding_response(tx, src))];
+            }
         }
         let Ok(msg) = RelayMsg::decode(bytes) else {
             self.stats.junk += 1;
@@ -1025,6 +735,28 @@ impl RelayHub {
             .encode()
             .map(|bytes| vec![(src, bytes)])
             .unwrap_or_default()
+    }
+
+    /// Answer a binding only when the ticket key verifies its tag. Every
+    /// other STUN byte is refused and counted, never answered.
+    fn handle_signed_binding(
+        &mut self,
+        src: SocketAddr,
+        bytes: &[u8],
+    ) -> Vec<(SocketAddr, Vec<u8>)> {
+        let Some(creds) = self.creds else {
+            return Vec::new();
+        };
+        match decode_binding_request_signed(bytes, &creds) {
+            Ok(check) => {
+                self.stats.stun += 1;
+                vec![(src, encode_binding_response_signed(check.tx, src, &creds))]
+            }
+            Err(_) => {
+                self.stats.refused += 1;
+                Vec::new()
+            }
+        }
     }
 
     fn forward(
@@ -1589,6 +1321,7 @@ impl CombatSyncGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn socket(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)

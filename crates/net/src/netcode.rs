@@ -94,11 +94,13 @@ impl std::fmt::Display for NetcodeError {
 
 impl std::error::Error for NetcodeError {}
 
-/// Deterministic sim contract: snapshots via Clone, fixed inputs yield fixed state.
-pub trait Sim: Clone {
-    fn step(&mut self, inputs: [u32; 2]);
-    fn hash(&self) -> u64;
-}
+/// The two-player sim contract, shared with [`crate::rollback`].
+///
+/// [`crate::rollback::SimTick`] owns the methods (`advance` plus
+/// `state_hash`); this re-export keeps the netcode spelling working. An
+/// implementation that works for [`Session`] also works for
+/// [`crate::rollback::P2pSession`].
+pub use crate::rollback::SimTick as Sim;
 
 /// Channel hint only. Caller maps to transport; net never sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,8 +319,8 @@ impl<S: Sim> Session<S> {
             self.predicted += 1;
         }
         let before = self.sim.clone();
-        self.sim.step([local, r]);
-        let h = self.sim.hash();
+        self.sim.advance([local, r]);
+        let h = self.sim.state_hash();
         self.frames.push_back(Rec {
             frame: f,
             before,
@@ -391,8 +393,8 @@ impl<S: Sim> Session<S> {
         let len = self.frames.len();
         for i in idx..len {
             let (l, r) = (self.frames[i].local, self.frames[i].remote);
-            self.sim.step([l, r]);
-            let h = self.sim.hash();
+            self.sim.advance([l, r]);
+            let h = self.sim.state_hash();
             self.frames[i].hash = h;
             let f = self.frames[i].frame;
             if let Some(slot) = f
@@ -423,11 +425,11 @@ mod tests {
         b: i32,
     }
     impl Sim for Toy {
-        fn step(&mut self, inputs: [u32; 2]) {
+        fn advance(&mut self, inputs: [u32; 2]) {
             self.a = self.a.wrapping_add(inputs[0] as i32 - 1);
             self.b = self.b.wrapping_add(inputs[1] as i32 - 1);
         }
-        fn hash(&self) -> u64 {
+        fn state_hash(&self) -> u64 {
             let mut fold = Fnv64::new();
             fold.write_i32(self.a);
             fold.write_i32(self.b);
@@ -444,7 +446,7 @@ mod tests {
         let (local, remote) = (seq(n, 1), seq(n, 3));
         let mut refs = Toy::default();
         for f in 0..n {
-            refs.step([local[f], remote[f]]);
+            refs.advance([local[f], remote[f]]);
         }
         let mut s = Session::new(Toy::default());
         for f in 0..n {
@@ -467,7 +469,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(s.sim.hash(), refs.hash(), "10% loss must converge");
+        assert_eq!(
+            s.sim.state_hash(),
+            refs.state_hash(),
+            "10% loss must converge"
+        );
         assert_eq!(s.frames_played() as usize, n);
         // ON40: bounded history, not full-length.
         assert!(
@@ -479,7 +485,7 @@ mod tests {
         assert_eq!(s.stream().len(), s.history_len());
         assert_eq!(
             *s.stream().last().unwrap(),
-            refs.hash(),
+            refs.state_hash(),
             "tip must converge"
         );
         assert!(
@@ -556,9 +562,9 @@ mod tests {
         s.advance(2, Some(3));
         s.advance(2, None);
         let mut t = Toy::default();
-        t.step([2, 3]);
-        t.step([2, 3]);
-        assert_eq!(s.sim.hash(), t.hash());
+        t.advance([2, 3]);
+        t.advance([2, 3]);
+        assert_eq!(s.sim.state_hash(), t.state_hash());
         assert_eq!(s.predicted_count(), 1);
         assert_eq!(s.was_predicted(1), Some(true));
         assert_eq!(s.confirm(1, 3), Ok(0));
@@ -677,9 +683,9 @@ mod tests {
         let (local, remote) = (seq(n, 1), seq(n, 3));
         let mut refs = Toy::default();
         for f in 0..n {
-            refs.step([local[f], remote[f]]);
+            refs.advance([local[f], remote[f]]);
         }
-        assert_eq!(tip1, refs.hash(), "tip equals true sim");
+        assert_eq!(tip1, refs.state_hash(), "tip equals true sim");
     }
 
     #[test]
@@ -749,11 +755,11 @@ mod tests {
     fn save_load_roundtrip() {
         let mut s = Session::new(Toy::default());
         s.advance(2, Some(2));
-        let (snap, h0) = (s.save(), s.sim.hash());
+        let (snap, h0) = (s.save(), s.sim.state_hash());
         s.advance(3, Some(0));
-        assert_ne!(s.sim.hash(), h0);
+        assert_ne!(s.sim.state_hash(), h0);
         s.load(snap);
-        assert_eq!(s.sim.hash(), h0);
+        assert_eq!(s.sim.state_hash(), h0);
         assert!(s.snapshot(0).is_some());
         let p = Session::<Toy>::packet(7, 2, Channel::Reliable);
         assert_eq!((p.frame, p.input, p.ch), (7, 2, Channel::Reliable));
@@ -795,7 +801,7 @@ mod tests {
         }
         // Snapshot at T: the sim state plus its checksum.
         let snap = s.save();
-        let hash_at_t = s.sim.hash();
+        let hash_at_t = s.sim.state_hash();
         // Advance N past the snapshot, keeping the first-pass checksums.
         let mut first = Vec::with_capacity(N);
         for f in T..T + N {
@@ -804,13 +810,21 @@ mod tests {
         let first_tip = *first.last().expect("N checksums");
         // Restore the snapshot and re-advance the same N inputs.
         s.load(snap);
-        assert_eq!(s.sim.hash(), hash_at_t, "restore must return the T state");
+        assert_eq!(
+            s.sim.state_hash(),
+            hash_at_t,
+            "restore must return the T state"
+        );
         let mut second = Vec::with_capacity(N);
         for f in T..T + N {
             second.push(s.advance(local[f], Some(remote[f])));
         }
         assert_eq!(second, first, "re-advance must reproduce every checksum");
-        assert_eq!(s.sim.hash(), first_tip, "tip must match the first pass");
+        assert_eq!(
+            s.sim.state_hash(),
+            first_tip,
+            "tip must match the first pass"
+        );
     }
 
     #[test]

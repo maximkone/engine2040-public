@@ -24,6 +24,28 @@ pub fn saturating_usize_to_u32(v: usize) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
 }
 
+/// Saturating `u32` to `u16`: clamps at `u16::MAX`, never truncates. The bytes
+/// read keeps the conversion const and honest about the bound.
+#[must_use]
+pub const fn saturating_u32_to_u16(v: u32) -> u16 {
+    if v > 65_535 {
+        u16::MAX
+    } else {
+        let [lo, hi, ..] = v.to_le_bytes();
+        u16::from_le_bytes([lo, hi])
+    }
+}
+
+/// Saturating `u32` to `i32`: clamps at `i32::MAX`, never wraps.
+#[must_use]
+pub const fn saturating_u32_to_i32(v: u32) -> i32 {
+    if v > 2_147_483_647 {
+        i32::MAX
+    } else {
+        i32::from_le_bytes(v.to_le_bytes())
+    }
+}
+
 /// Low 64 bits of an `i128` (two's complement wrap). The one named truncation
 /// for fixed-point products that wrap by contract; the checked forms use
 /// `i64::try_from` and refuse instead.
@@ -148,6 +170,19 @@ mod tests {
             }
         });
         assert_eq!(heap.calls, 0, "checked conversions must not allocate");
+    }
+
+    #[test]
+    fn saturating_u32_narrowing_holds_the_bounds() {
+        assert_eq!(saturating_u32_to_u16(0), 0);
+        assert_eq!(saturating_u32_to_u16(1_000), 1_000);
+        assert_eq!(saturating_u32_to_u16(65_535), u16::MAX);
+        assert_eq!(saturating_u32_to_u16(65_536), u16::MAX);
+        assert_eq!(saturating_u32_to_u16(u32::MAX), u16::MAX);
+        assert_eq!(saturating_u32_to_i32(0), 0);
+        assert_eq!(saturating_u32_to_i32(2_147_483_647), i32::MAX);
+        assert_eq!(saturating_u32_to_i32(2_147_483_648), i32::MAX);
+        assert_eq!(saturating_u32_to_i32(u32::MAX), i32::MAX);
     }
 
     #[test]

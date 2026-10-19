@@ -339,9 +339,10 @@ pub fn validate_sweep(s: &WeaponSweep, count: u8, tables: &SweepTables) -> Resul
     let dz = i64::from(s.p1_mm[2]) - i64::from(s.p0_mm[2]);
     let max = i64::from(tables.max_sweep_len_mm);
     if dx * dx + dy * dy + dz * dz > max * max {
+        let len_sq = u64::try_from(dx * dx + dy * dy + dz * dz).unwrap_or(u64::MAX);
         return Err(SweepError::BadValue {
             field: "sweep_len_mm",
-            value: ((dx * dx + dy * dy + dz * dz) as u64).isqrt() as u32,
+            value: u32::try_from(len_sq.isqrt()).unwrap_or(u32::MAX),
         });
     }
     Ok(())
@@ -389,7 +390,7 @@ pub fn sweep_one(
         return SweepOutcome::Miss(SweepMiss::OutOfReach);
     }
     // Hurt spine: vertical capsule through the defender position.
-    let half = defender.hurt_half_height_mm as i32;
+    let half = i32::try_from(defender.hurt_half_height_mm).unwrap_or(i32::MAX);
     let q0 = [
         defender.pos_mm[0],
         defender.pos_mm[1] - half,
@@ -406,7 +407,7 @@ pub fn sweep_one(
     let radius_mm = if radius > u64::from(u32::MAX) {
         u32::MAX
     } else {
-        radius as u32
+        u32::try_from(radius).unwrap_or(u32::MAX)
     };
     if !seg_seg_touches(sweep.p0_mm, sweep.p1_mm, q0, q1, radius_mm) {
         return SweepOutcome::Miss(SweepMiss::OutOfReach);
@@ -817,13 +818,13 @@ fn shield_blocks(def: &SweepParticipant, atk_pos: [i32; 3]) -> bool {
     }
     let fx2 = i64::from(def.facing_x) * i64::from(def.facing_x);
     let fz2 = i64::from(def.facing_z) * i64::from(def.facing_z);
-    let len_f = ((fx2 + fz2) as u64).isqrt();
+    let len_f = u64::try_from(fx2 + fz2).unwrap_or(0).isqrt();
     if len_f == 0 {
         return false;
     }
-    let len_d = ((dx * dx + dz * dz) as u64).isqrt();
+    let len_d = u64::try_from(dx * dx + dz * dz).unwrap_or(0).isqrt();
     let cos = u64::from(cos_half_q16(def.shield_half_deg));
-    (dot as u64) * COS_Q16 >= cos * len_f * len_d
+    u64::try_from(dot).unwrap_or(0) * COS_Q16 >= cos * len_f * len_d
 }
 
 /// Cosine of a shield half-angle in Q16 via a fixed-point polynomial.
@@ -842,7 +843,7 @@ fn cos_half_q16(half_deg: u8) -> u32 {
     if cos < 0 {
         0
     } else {
-        cos as u32
+        u32::try_from(cos).unwrap_or(0)
     }
 }
 
@@ -879,7 +880,7 @@ fn clamp_param_q(num: i128, den: i128) -> i64 {
     if q > i128::from(SWEEP_Q) {
         SWEEP_Q
     } else {
-        q as i64
+        i64::try_from(q).unwrap_or(i64::MAX)
     }
 }
 

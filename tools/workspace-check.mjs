@@ -58,8 +58,10 @@ export const allowedEdges = new Map([
   // WEB4 browser shell: the golden tape and corpus run in the page through engine-proof; the shell hands the
   // page's clock to engine-clock. WEB5: on wasm32 it also drives the render crate's presenter for the arena frame
   // (a target-gated dependency, so the native build of this crate stays a library of pure modules). WEB7 maps browser input
-  // and a WebAudio gate onto engine-input and the std-only engine-audio. Nothing depends on it.
-  ["engine-web", ["engine-proof", "engine-clock", "engine-render", "engine-input", "engine-audio", "engine-net"]],
+  // and a WebAudio gate onto engine-input and the std-only engine-audio. WEB15: on wasm32 it holds the session the
+  // native window holds (`engine_game::App`, the fixed tick and the fight draw helpers), so the page plays the match
+  // it draws; that edge is target-gated too. Nothing depends on it.
+  ["engine-web", ["engine-proof", "engine-clock", "engine-render", "engine-input", "engine-audio", "engine-net", "engine-game"]],
   ["engine-viewer", ["engine-game", "engine-arena", "engine-app", "engine-material"]],
   ["engine-geo", ["engine-assets"]],
   ["engine-perf", ["engine-core", "engine-ecs", "engine-physics", "engine-render", "engine-arena", "engine-ai", "engine-destruction", "engine-net"]],

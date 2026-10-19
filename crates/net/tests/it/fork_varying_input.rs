@@ -26,14 +26,14 @@ struct Toy {
 }
 
 impl Sim for Toy {
-    fn step(&mut self, inputs: [u32; 2]) {
+    fn advance(&mut self, inputs: [u32; 2]) {
         let la = i32::try_from(inputs[0] % 4).unwrap_or(3);
         let ra = i32::try_from(inputs[1] % 4).unwrap_or(3);
         self.a = self.a.wrapping_add(la - 1);
         self.b = self.b.wrapping_add(ra - 1);
     }
 
-    fn hash(&self) -> u64 {
+    fn state_hash(&self) -> u64 {
         let mut fold = Fnv64::new();
         fold.write_i32(self.a);
         fold.write_i32(self.b);

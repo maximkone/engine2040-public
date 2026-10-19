@@ -437,6 +437,9 @@ fn run(args: &[String]) -> Result<(), String> {
             reference.map_or_else(|| "n/a".to_owned(), |want| (want == hash).to_string()),
         );
         say(&line);
+        // The latest-only WebSocket queue: frames the writer actually sent and
+        // frames a newer snapshot superseded while the writer was stalled.
+        say(&listeners.ws.latest_only().line());
         if let Some(path) = &options.out {
             std::fs::write(path, format!("net-serve: {line}\n"))
                 .map_err(|error| format!("write {path}: {error}"))?;

@@ -1,4 +1,5 @@
-//! particles_gpu: fixed seeded pool for dust, torch flame and sparks (RP2).
+//! particles_gpu: fixed seeded pool for the fight look kinds dust, sparks and
+//! blood spray plus the torch flame ambience (RP2, QL12).
 //!
 //! Owner: render lane; consumers WIN1/ED1 frames and Q1 captures through the
 //! RA2 graph (transient buffers owned there, never here). Units: meters for
@@ -6,14 +7,13 @@
 //! Determinism: fixed emitter order, SplitMix64 stream, stable compaction,
 //! math uses only `+ - * /` and one `sqrt`; same seed gives identical bytes.
 //! Errors are typed [`ParticleError`]; the headless twin names the missing
-//! window device while the window build binds the pool for real with 0
-//! validation errors. Posted budget: [`PARTICLE_BUDGET_MS`] ms.
+//! window device while the window build stages the flipbook draw into the
+//! frame's HDR pass with 0 validation errors. Per-tier caps
+//! ([`KindCaps`]) bound every kind, so a tier can refuse a spawn over its cap.
+//! Posted budget: [`PARTICLE_BUDGET_MS`] ms.
 
 use std::fmt;
 use std::time::Instant;
-
-#[cfg(feature = "window")]
-use crate::decals::{compute_storage_entry, compute_uniform_entry};
 
 #[path = "fluids_gpu.rs"]
 /// Seeded presentation fluid pool beside the three emitters; see [`fluids_gpu`].
@@ -47,8 +47,8 @@ pub const MAX_DT_CLAMP: f32 = 0.1;
 pub const POOL_CAP: usize = 4096;
 /// Hard cap for custom pools; bigger asks are refused loudly.
 pub const POOL_CAP_HARD: usize = 8192;
-/// Fixed emitter count: dust, torch flame, sparks, always in that order.
-pub const EMITTER_COUNT: usize = 3;
+/// Fixed emitter count: dust, flame, sparks, blood spray, always in that order.
+pub const EMITTER_COUNT: usize = 4;
 /// Posted GPU budget at 1080p on the reference GPU (PF2 enforces).
 pub const PARTICLE_BUDGET_MS: f64 = 1.0;
 /// Largest accepted viewport edge in pixels (mirrors the RA1 frame bound).
@@ -118,15 +118,26 @@ pub enum EmitterKind {
     Flame,
     /// Fast hot strike sparks with gravity drop.
     Sparks,
+    /// Short dark blood spray thrown off a cut.
+    Blood,
 }
 
 impl EmitterKind {
+    /// Every kind in the fixed integration order.
+    pub const ALL: [EmitterKind; EMITTER_COUNT] = [
+        EmitterKind::Dust,
+        EmitterKind::Flame,
+        EmitterKind::Sparks,
+        EmitterKind::Blood,
+    ];
+
     /// Stable slot index; also the `kind` tag stored per particle.
     pub fn index(self) -> usize {
         match self {
             Self::Dust => 0,
             Self::Flame => 1,
             Self::Sparks => 2,
+            Self::Blood => 3,
         }
     }
 
@@ -135,6 +146,7 @@ impl EmitterKind {
         match tag {
             1 => Self::Flame,
             2 => Self::Sparks,
+            3 => Self::Blood,
             _ => Self::Dust,
         }
     }
@@ -145,29 +157,98 @@ impl EmitterKind {
             Self::Dust => (4, 4),
             Self::Flame => (4, 2),
             Self::Sparks => (8, 2),
+            Self::Blood => (8, 2),
         }
     }
 
-    /// Only sparks loop their flipbook; dust and flame clamp on the end.
+    /// Only sparks loop their flipbook; the rest clamp on the end.
     pub fn looping(self) -> bool {
         matches!(self, Self::Sparks)
     }
 
-    /// Size multiplier over life: dust grows, flame shrinks, sparks hold.
+    /// Size multiplier over life: dust grows, flame shrinks, sparks and
+    /// blood hold.
     fn size_mul(self, age01: f32) -> f32 {
         match self {
             Self::Dust => 0.4 + 1.2 * age01,
             Self::Flame => 1.2 - 0.6 * age01,
-            Self::Sparks => 1.0,
+            Self::Sparks | Self::Blood => 1.0,
         }
     }
 
-    /// Alpha multiplier over life: dust fades late, flame and sparks linear.
+    /// Alpha multiplier over life: dust fades late, the rest linear.
     fn alpha_mul(self, age01: f32) -> f32 {
         match self {
             Self::Dust => 1.0 - age01 * age01,
-            Self::Flame | Self::Sparks => 1.0 - age01,
+            Self::Flame | Self::Sparks | Self::Blood => 1.0 - age01,
         }
+    }
+}
+
+/// Per-tier live caps: how many live particles of one kind a tier allows.
+/// Units are counts. Pure integer data, no clock, no float: the same total
+/// pool budget always splits the same way, so a tier's caps are reproducible.
+/// The split keeps the three fight kinds (dust, sparks, blood) ahead of the
+/// torch ambience, and every tier's four counts sum to its pool budget.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct KindCaps {
+    /// Live dust particles allowed.
+    pub dust: u32,
+    /// Live torch flame particles allowed.
+    pub flame: u32,
+    /// Live strike sparks allowed.
+    pub sparks: u32,
+    /// Live blood spray particles allowed.
+    pub blood: u32,
+}
+
+impl KindCaps {
+    /// Split a tier's total pool budget over the four kinds. Dust 30%,
+    /// sparks 30%, blood 25% and the torch flame the remaining 15%. Every
+    /// kind keeps a slot while the budget allows one, so a tiny budget still
+    /// lets the fight kinds spawn and the four caps never sum past the
+    /// budget. Integer math only, so every tier splits deterministically.
+    #[must_use]
+    pub fn for_total(total: usize) -> Self {
+        let total = u32::try_from(total).unwrap_or(u32::MAX);
+        let dust = total.saturating_mul(30) / 100;
+        let sparks = total.saturating_mul(30) / 100;
+        let blood = total.saturating_mul(25) / 100;
+        let named = dust.saturating_add(sparks).saturating_add(blood);
+        Self {
+            dust: dust.max(u32::from(total > 0)),
+            flame: if total > 3 {
+                total.saturating_sub(named).max(1)
+            } else {
+                0
+            },
+            sparks: sparks.max(u32::from(total > 1)),
+            blood: blood.max(u32::from(total > 2)),
+        }
+    }
+
+    /// Cap for one fixed kind.
+    #[must_use]
+    pub fn of(&self, kind: EmitterKind) -> u32 {
+        self.of_index(kind.index())
+    }
+
+    /// Cap for one fixed slot index; an out-of-range slot reads the dust cap.
+    #[must_use]
+    pub fn of_index(&self, slot: usize) -> u32 {
+        [self.dust, self.flame, self.sparks, self.blood]
+            .get(slot)
+            .copied()
+            .unwrap_or(self.dust)
+    }
+
+    /// Sum of the four kind caps; never above the pool budget.
+    #[must_use]
+    pub fn total(&self) -> u32 {
+        self.dust
+            .saturating_add(self.flame)
+            .saturating_add(self.sparks)
+            .saturating_add(self.blood)
     }
 }
 
@@ -264,6 +345,26 @@ impl PoolEmitter {
             size_m: [0.02, 0.05],
             tint_a: [1.0, 0.95, 0.7, 1.0],
             tint_b: [1.0, 0.4, 0.1, 0.0],
+        }
+    }
+
+    /// Short dark blood spray off a cut: fast, gravity-led, brief.
+    pub fn blood() -> Self {
+        Self {
+            kind: EmitterKind::Blood,
+            origin_m: [0.0, 0.9, 0.0],
+            extent_m: [0.2, 0.2, 0.2],
+            dir: [0.0, 1.0, 0.0],
+            spread: 0.9,
+            rate_per_s: 45.0,
+            burst: 6,
+            life_s: [0.3, 0.7],
+            speed_m_s: [2.0, 5.0],
+            gravity_m_s2: 8.0,
+            drag_per_s: 0.3,
+            size_m: [0.03, 0.07],
+            tint_a: [0.45, 0.03, 0.03, 0.9],
+            tint_b: [0.25, 0.01, 0.01, 0.0],
         }
     }
 
@@ -438,15 +539,19 @@ pub struct ParticlePool {
     dropped_total: u64,
     capped: bool,
     cap: usize,
+    kind_caps: KindCaps,
+    live_kind: [usize; EMITTER_COUNT],
 }
 
 impl ParticlePool {
-    /// Fixed pool (dust, flame, sparks) with [`POOL_CAP`] slots.
+    /// Fixed pool (dust, flame, sparks, blood) with [`POOL_CAP`] slots and
+    /// the per-tier caps that budget splits into.
     pub fn new(seed: u64) -> Self {
         let emitters = [
             PoolEmitter::dust(),
             PoolEmitter::flame(),
             PoolEmitter::sparks(),
+            PoolEmitter::blood(),
         ];
         let mut live = Vec::new();
         live.reserve_exact(POOL_CAP);
@@ -461,10 +566,13 @@ impl ParticlePool {
             dropped_total: 0,
             capped: false,
             cap: POOL_CAP,
+            kind_caps: KindCaps::for_total(POOL_CAP),
+            live_kind: [0; EMITTER_COUNT],
         }
     }
 
-    /// Fixed emitters with a custom cap in `1..=POOL_CAP_HARD`.
+    /// Fixed emitters with a custom cap in `1..=POOL_CAP_HARD`; the kind caps
+    /// split that budget the same way every tier does.
     pub fn with_capacity(seed: u64, cap: usize) -> Result<Self, ParticleError> {
         if cap == 0 {
             return Err(ParticleError::Invalid(
@@ -473,12 +581,13 @@ impl ParticlePool {
         }
         if cap > POOL_CAP_HARD {
             return Err(ParticleError::BudgetExceeded {
-                requested: cap as u32,
-                allowed: POOL_CAP_HARD as u32,
+                requested: u32::try_from(cap).unwrap_or(u32::MAX),
+                allowed: u32::try_from(POOL_CAP_HARD).unwrap_or(u32::MAX),
             });
         }
         let mut pool = Self::new(seed);
         pool.cap = cap;
+        pool.kind_caps = KindCaps::for_total(cap);
         let mut live = Vec::new();
         live.reserve_exact(cap);
         pool.live = live;
@@ -488,6 +597,16 @@ impl ParticlePool {
     /// Slots the pool holds at most.
     pub fn cap(&self) -> usize {
         self.cap
+    }
+
+    /// Per-kind live caps this pool enforces (row QL12).
+    pub fn kind_caps(&self) -> KindCaps {
+        self.kind_caps
+    }
+
+    /// Live particles per kind, in the fixed emitter order.
+    pub fn alive_by_kind(&self) -> [usize; EMITTER_COUNT] {
+        self.live_kind
     }
 
     /// Check the pool before a submit trusts it.
@@ -571,7 +690,16 @@ impl ParticlePool {
             }
             p.frame = cell as u16;
         }
-        self.live.retain(|p| p.age_s < p.life_s);
+        let mut live_kind = [0usize; EMITTER_COUNT];
+        self.live.retain(|p| {
+            let keep = p.age_s < p.life_s;
+            if keep {
+                let slot = usize::from(p.kind).min(EMITTER_COUNT - 1);
+                live_kind[slot] += 1;
+            }
+            keep
+        });
+        self.live_kind = live_kind;
         self.time_s += dt;
         self.ticks += 1;
     }
@@ -631,12 +759,13 @@ impl ParticlePool {
         &self.emitters
     }
 
-    /// One batched draw over dust, flame, sparks in fixed order.
+    /// One batched draw over dust, flame, sparks and blood in fixed order.
     /// Caller: the next present bind reads [`vfx_hanabi::HanabiBatch`] here.
     pub fn hanabi_dispatch(&self, batch: &vfx_hanabi::HanabiBatch) -> u32 {
         debug_assert!(self.emitters[0].kind == EmitterKind::Dust);
         debug_assert!(self.emitters[1].kind == EmitterKind::Flame);
         debug_assert!(self.emitters[2].kind == EmitterKind::Sparks);
+        debug_assert!(self.emitters[3].kind == EmitterKind::Blood);
         batch.dispatch_count()
     }
     /// Backing capacity probe for the no-steady-state-allocation test.
@@ -703,7 +832,7 @@ impl ParticlePool {
     /// GPU submit seam for the RA2 billboard bind. Validates the pool, then
     /// names the missing window device bind on the headless twin (never
     /// silent success). The CPU sim above is the authority here; the
-    /// `window` build below records the live pass instead.
+    /// `window` build below stages the live draw instead.
     #[cfg(not(feature = "window"))]
     pub fn submit_gpu(&self, viewport_px: [u32; 2]) -> Result<ParticleReceipt, ParticleError> {
         self.validate()?;
@@ -723,12 +852,49 @@ impl ParticlePool {
     }
 
     fn spawn(&mut self, ei: usize) {
-        if self.live.len() >= self.cap {
+        // The tick path never fails a frame: a refused spawn is counted and
+        // the sim runs degraded. `try_spawn` hands the same refusal to a
+        // caller that must see it.
+        let _ = self.spawn_at(ei);
+    }
+
+    /// Spawn one particle of `kind` unless its tier cap (or the pool cap)
+    /// refuses it. Refusal is typed and leaves the pool unchanged, so a
+    /// caller can act on a tier cap that a spawn would cross.
+    pub fn try_spawn(&mut self, kind: EmitterKind) -> Result<(), ParticleError> {
+        self.spawn_at(kind.index())
+    }
+
+    /// Spawn one particle for emitter slot `ei`. Refuses over the per-kind
+    /// cap with a typed budget error, then over the pool cap; a refusal
+    /// counts one drop and marks the pool capped.
+    fn spawn_at(&mut self, ei: usize) -> Result<(), ParticleError> {
+        let slot = ei.min(EMITTER_COUNT - 1);
+        let kind_live = self.live_kind[slot];
+        let kind_allowed = self.kind_caps.of_index(slot);
+        let refused = if self.live.len() >= self.cap {
+            Some((
+                u32::try_from(self.live.len())
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(1),
+                u32::try_from(self.cap).unwrap_or(u32::MAX),
+            ))
+        } else if u32::try_from(kind_live).unwrap_or(u32::MAX) >= kind_allowed {
+            Some((
+                u32::try_from(kind_live)
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(1),
+                kind_allowed,
+            ))
+        } else {
+            None
+        };
+        if let Some((requested, allowed)) = refused {
             self.capped = true;
             self.dropped_total += 1;
-            return;
+            return Err(ParticleError::BudgetExceeded { requested, allowed });
         }
-        let e = self.emitters[ei];
+        let e = self.emitters[slot];
         let jx = self.stream.next_unit() * 2.0 - 1.0;
         let jy = self.stream.next_unit() * 2.0 - 1.0;
         let jz = self.stream.next_unit() * 2.0 - 1.0;
@@ -771,12 +937,15 @@ impl ParticlePool {
             kind: e.kind.index() as u8,
         });
         self.spawned += 1;
+        self.live_kind[slot] += 1;
+        Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Staged draw helpers (CPU) plus staged draw WGSL (not bound yet).
-// The bind probe below still owns the submit; this slice stages math only.
+// Staged draw helpers (CPU) plus the staged draw WGSL. The window build
+// stages the live pool into flipbook instances and the frame records the
+// draw into its HDR pass.
 // ---------------------------------------------------------------------------
 
 /// Soft depth fade range in meters; gaps at or past this read fully faded.
@@ -978,10 +1147,11 @@ pub struct DrawRecord {
 
 impl ParticlePool {
     /// Stage one [`DrawRecord`] per live particle for the fixed emitters in
-    /// fixed order (dust, flame, sparks; live slot order inside each kind).
-    /// Feed staged for the window ParticleSubmitter submit: the live bind
-    /// plus scene-depth gaps land with the submit.rs depth resolve, which
-    /// sits outside this packet's paths. The CPU sim stays the authority.
+    /// fixed order (dust, flame, sparks, blood; live slot order inside each
+    /// kind). Feed staged for the window ParticleSubmitter submit: the live
+    /// draw plus scene-depth gaps land with the submit.rs depth resolve,
+    /// which sits outside this packet's paths. The CPU sim stays the
+    /// authority.
     /// `gap_of` names each particle's scene-depth gap in meters; with `soft_on` the fade is
     /// [`soft_fade`] of that gap, otherwise 1. Records append to `out`
     /// (caller-owned, reused across frames); the return is the appended
@@ -994,7 +1164,7 @@ impl ParticlePool {
         out: &mut Vec<DrawRecord>,
     ) -> usize {
         let base = out.len();
-        for kind in [EmitterKind::Dust, EmitterKind::Flame, EmitterKind::Sparks] {
+        for kind in EmitterKind::ALL {
             let (cols, rows) = kind.grid();
             let cells = u32::from(cols.max(1)) * u32::from(rows.max(1));
             let cells_f = u32_to_f32(cells);
@@ -1022,55 +1192,37 @@ impl ParticlePool {
     }
 }
 
-/// Kenney flipbook draw shader over the fixed dust, flame, sparks emitters
-/// in fixed order; pool bounds and the seeded stream are untouched.
-/// Draw path is the `shaders/particle.wgsl` file; `ParticleSubmitter`
-/// still binds `PARTICLE_BIND_WGSL` on the window build.
+/// Kenney flipbook draw shader over the fixed dust, flame, sparks and blood
+/// emitters in fixed order; pool bounds and the seeded stream are untouched.
+/// The draw path is the `shaders/particle.wgsl` file; `ParticleSubmitter`
+/// stages the live batch and the frame records it ([`ParticleSubmitter::stage_pool`]
+/// plus [`ParticleSubmitter::encode_draw`]).
 /// Engine-owned WGSL, fixed math only, no wall clock.
 pub const PARTICLE_DRAW_WGSL: &str = include_str!("shaders/particle.wgsl");
 
 // ---------------------------------------------------------------------------
-// Window device submit (behind `window`): the live pool byte image bound
-// under the shared LookFrame bind shape. Engine-owned WGSL, no donor code.
+// Window device submit (behind `window`): the live pool staged as flipbook
+// instances and drawn into the frame's HDR pass. Engine-owned WGSL.
 // ---------------------------------------------------------------------------
 
-/// Bind probe over the pool byte image: copies the bound words to prove
-/// the billboard bind-group path validates. Look uniform bound and live.
-#[cfg(feature = "window")]
-const PARTICLE_BIND_WGSL: &str = r#"
-struct LookU {
-    frame_idx: u32,
-    width_px: u32,
-    height_px: u32,
-    exposure: f32,
-    sun_dir: vec3<f32>,
-    _pad: f32,
-};
-@group(0) @binding(0) var<uniform> look: LookU;
-@group(0) @binding(1) var<storage, read> src: array<u32>;
-@group(0) @binding(2) var<storage, read_write> dst: array<u32>;
-@compute @workgroup_size(64)
-fn bind_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i >= arrayLength(&src)) { return; }
-    dst[i] = src[i] + u32(look.exposure * 0.0);
-}
-"#;
-
 /// One window submit over the live pool: tick cursor, live count, the
-/// validation outcome and the wall-clock encode + submit + readback ms.
+/// per-kind counts, the staged instance count and the wall-clock stage ms.
 #[cfg(feature = "window")]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ParticleGpuReceipt {
     /// Ticks simulated when the receipt was taken.
     pub ticks: u64,
-    /// Live particles bound.
+    /// Live particles staged.
     pub alive: usize,
     /// Total spawns at the cursor.
     pub spawned: u64,
-    /// wgpu validation errors observed; green means 0.
-    pub validation_errors: u32,
-    /// Wall time for encode + submit + readback in ms (evidence only).
+    /// Live particles per kind, in the fixed emitter order.
+    pub alive_by_kind: [usize; EMITTER_COUNT],
+    /// Per-tier caps the staged batch ran under.
+    pub caps: KindCaps,
+    /// Instances handed to the draw; 0 draws nothing.
+    pub staged: u32,
+    /// Wall time for the stage in ms; evidence only, never hashed.
     pub submit_ms: f64,
 }
 
@@ -1081,40 +1233,26 @@ impl ParticleGpuReceipt {
         PARTICLE_BUDGET_MS
     }
 
-    /// True while the submit stayed inside the posted budget.
+    /// True while the stage stayed inside the posted budget.
     pub fn within_budget(&self) -> bool {
         self.submit_ms <= PARTICLE_BUDGET_MS
     }
-
-    /// True when the submit observed zero validation errors.
-    pub fn is_clean(&self) -> bool {
-        self.validation_errors == 0
-    }
 }
 
-/// Reusable window submit state: the bind-probe pipeline plus the look bind
-/// layout over one uniform buffer, with shape-keyed word buffers and one
-/// bind group. Built once per frame loop (WIN1 and ED1 each own one);
-/// steady-state submits on a matching shape create no buffers or bind
-/// groups (the reuse test proves the count stays flat).
-///
-/// Beside the probe sits the staged draw side ([`Self::draw_staged`] plus
-/// [`Self::encode_draw`]): the flipbook pipeline over [`PARTICLE_DRAW_WGSL`]
-/// with the view uniform, the max-size instance buffer and one bind group,
-/// built on the first non-empty batch and reused after.
+/// Reusable window submit state: the flipbook draw pipeline over
+/// [`PARTICLE_DRAW_WGSL`] with the view uniform, the max-size instance
+/// buffer and one bind group, built on the first non-empty batch and reused
+/// after, plus the caller-owned record scratch a frame stages into. Built
+/// once per frame loop (WIN1 and ED1 each own one); steady-state stages on
+/// a matching shape create no buffers or bind groups (the reuse test proves
+/// the count stays flat) and never map or wait on the device.
 #[cfg(feature = "window")]
 pub struct ParticleSubmitter {
-    pipeline: wgpu::ComputePipeline,
-    layout: wgpu::BindGroupLayout,
-    look_buf: wgpu::Buffer,
-    cached_words: Option<u64>,
-    src_buf: Option<wgpu::Buffer>,
-    dst_buf: Option<wgpu::Buffer>,
-    readback: Option<wgpu::Buffer>,
-    bind: Option<wgpu::BindGroup>,
     created_buffers: u64,
     draw_view: [u8; PARTICLE_DRAW_UNIFORM_BYTES],
     draw: Option<ParticleDrawState>,
+    /// Staged records, reused across frames (cleared, never reallocated).
+    records: Vec<DrawRecord>,
 }
 
 /// Device state for the staged draw: the flipbook pipeline built from
@@ -1139,51 +1277,11 @@ struct ParticleDrawState {
 
 #[cfg(feature = "window")]
 impl ParticleSubmitter {
-    /// Compile the bind-probe pipeline and the look bind layout; allocate
-    /// the 32-byte look uniform buffer. No pool-size state yet: word
-    /// buffers size on the first submit and resize only on shape change.
-    pub fn new(device: &wgpu::Device) -> Self {
-        use crate::pipeline_warmup::CountedPipelines as _;
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("rp2-particle-bind"),
-            source: wgpu::ShaderSource::Wgsl(PARTICLE_BIND_WGSL.into()),
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("rp2-particle-bind-layout"),
-            entries: &[
-                compute_uniform_entry(0),
-                compute_storage_entry(1, true),
-                compute_storage_entry(2, false),
-            ],
-        });
-        let pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("rp2-particle-pipe-layout"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_compute_pipeline_counted(&wgpu::ComputePipelineDescriptor {
-            label: Some("rp2-particle-pipeline"),
-            layout: Some(&pipe_layout),
-            module: &shader,
-            entry_point: Some("bind_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let look_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rp2-particle-look-uniform"),
-            size: crate::graph::LOOK_UNIFORM_BYTES,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+    /// Build the submitter: the draw camera starts at identity (right +X,
+    /// up +Y) until a frame binds one, and no device state exists until the
+    /// first non-empty batch.
+    pub fn new(_device: &wgpu::Device) -> Self {
         Self {
-            pipeline,
-            layout,
-            look_buf,
-            cached_words: None,
-            src_buf: None,
-            dst_buf: None,
-            readback: None,
-            bind: None,
             created_buffers: 0,
             // Identity draw camera (right +X, up +Y) until a frame binds one.
             draw_view: particle_pack_uniform(
@@ -1197,6 +1295,7 @@ impl ParticleSubmitter {
                 [0.0, 1.0, 0.0],
             ),
             draw: None,
+            records: Vec::new(),
         }
     }
 
@@ -1204,6 +1303,11 @@ impl ParticleSubmitter {
     /// reuse test: flat across matching-shape submits).
     pub fn created_buffers(&self) -> u64 {
         self.created_buffers
+    }
+
+    /// Instances in the batch currently staged on the device.
+    pub fn staged_count(&self) -> u32 {
+        self.draw.as_ref().map_or(0, |draw| draw.staged)
     }
 
     /// Bind the frame camera the staged draw uses: the view-projection the
@@ -1236,6 +1340,45 @@ impl ParticleSubmitter {
             queue.write_buffer(&draw.uniform, 0, &packed);
         }
         Ok(())
+    }
+
+    /// Stage one live pool into the draw: bind the frame camera, build one
+    /// [`DrawRecord`] per live particle into the reused scratch and upload
+    /// the batch. Returns the receipt the look row charges the pass against
+    /// (tick cursor, live and per-kind counts, the tier caps, the staged
+    /// instance count and the wall-clock stage ms). Over-cap batches and
+    /// non-finite cameras are refused before any device work; a calm pool
+    /// stages nothing. This path never maps and never waits on the device:
+    /// the frame records [`Self::encode_draw`] into its HDR pass.
+    pub fn stage_pool(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pool: &ParticlePool,
+        view_proj: [[f32; 4]; 4],
+        cam_right: [f32; 3],
+        cam_up: [f32; 3],
+    ) -> Result<ParticleGpuReceipt, ParticleError> {
+        let started = Instant::now();
+        pool.validate()?;
+        self.set_draw_view(queue, view_proj, cam_right, cam_up)?;
+        let mut records = std::mem::take(&mut self.records);
+        records.clear();
+        // The scene-depth feed lands with the closing slice; until then the
+        // staged fade rides the record's alpha with the gap fade off.
+        pool.draw_records(false, |_| 0.0, &mut records);
+        let staged = self.draw_staged(device, queue, &records);
+        self.records = records;
+        let staged = staged?;
+        Ok(ParticleGpuReceipt {
+            ticks: pool.tick_count(),
+            alive: pool.alive(),
+            spawned: pool.spawned_total(),
+            alive_by_kind: pool.alive_by_kind(),
+            caps: pool.kind_caps(),
+            staged,
+            submit_ms: started.elapsed().as_secs_f64() * 1000.0,
+        })
     }
 
     /// Upload one staged batch (one instance per [`DrawRecord`], in the
@@ -1402,173 +1545,6 @@ impl ParticleDrawState {
     }
 }
 
-/// Map a readback buffer and wait for it. One poll covers every pending map.
-/// Shared [`crate::accel`] core with the `particle` error prefix kept.
-#[cfg(feature = "window")]
-fn particle_map_and_wait(
-    device: &wgpu::Device,
-    buffer: &wgpu::Buffer,
-) -> Result<(), crate::accel::ReadbackError> {
-    crate::accel::map_readback(device, buffer, "particle")
-}
-
-/// Read `count` little-endian u32 words from a mapped readback buffer.
-/// Shared [`crate::accel`] core with the `particle` text kept.
-#[cfg(feature = "window")]
-fn particle_readback_u32(
-    buffer: &wgpu::Buffer,
-    count: usize,
-) -> Result<Vec<u32>, crate::accel::ReadbackError> {
-    crate::accel::readback_u32(buffer, count, "particle", "words")
-}
-
-#[cfg(feature = "window")]
-impl From<crate::accel::ReadbackError> for ParticleError {
-    fn from(error: crate::accel::ReadbackError) -> Self {
-        Self::Device(error.to_string())
-    }
-}
-
-#[cfg(feature = "window")]
-impl ParticlePool {
-    /// Window submit over the live pool (RP2 live): bind the deterministic
-    /// byte image (zero-padded to whole words) under the shared
-    /// [`crate::gtao::LookFrame`] bind, run one bind-group probe pass over
-    /// it and read it back exactly, proving the billboard bind validates
-    /// with 0 errors and the device image matches the CPU sim word for
-    /// word. Fails loudly (never silent, never the twin refusal) on bad
-    /// frames or any device fault.
-    pub fn submit_gpu(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        frame: &crate::gtao::LookFrame,
-        submitter: &mut ParticleSubmitter,
-    ) -> Result<ParticleGpuReceipt, ParticleError> {
-        use std::time::Instant;
-        self.validate()?;
-        frame
-            .validate()
-            .map_err(|e| ParticleError::Invalid(format!("particle look frame: {e}")))?; // alloc-ok: cold refusal, never a steady frame
-        let bytes = self.particle_bytes();
-        let words = bytes.len().div_ceil(4) as u64;
-        let count = u32::try_from(words)
-            .map_err(|_| ParticleError::Invalid(format!("particle words {words} exceed u32")))?; // alloc-ok: cold refusal, never a steady frame
-        if words == 0 {
-            return Err(ParticleError::Invalid(
-                "particle byte image is empty".into(),
-            ));
-        }
-        let byte_len = words * 4;
-        let started = Instant::now();
-
-        if submitter.cached_words != Some(words) {
-            let src_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("rp2-particle-src"),
-                size: byte_len,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let dst_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("rp2-particle-dst"),
-                size: byte_len,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-            let readback = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("rp2-particle-readback"),
-                size: byte_len,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("rp2-particle-bind"),
-                layout: &submitter.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: submitter.look_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: src_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: dst_buf.as_entire_binding(),
-                    },
-                ],
-            });
-            submitter.src_buf = Some(src_buf);
-            submitter.dst_buf = Some(dst_buf);
-            submitter.readback = Some(readback);
-            submitter.bind = Some(bind);
-            submitter.cached_words = Some(words);
-            submitter.created_buffers = submitter.created_buffers.saturating_add(3);
-        }
-        let (src_buf, dst_buf, readback, bind) = match (
-            &submitter.src_buf,
-            &submitter.dst_buf,
-            &submitter.readback,
-            &submitter.bind,
-        ) {
-            (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
-            _ => {
-                return Err(ParticleError::Device(
-                    "particle submitter lost its sized buffers".into(),
-                ));
-            }
-        };
-
-        queue.write_buffer(
-            &submitter.look_buf,
-            0,
-            &crate::graph::look_frame_uniform_bytes(frame),
-        );
-        let mut padded = vec![0u8; byte_len as usize]; // alloc-ok: submit_gpu probe staging with readback, not the window steady frame
-        padded[..bytes.len()].copy_from_slice(&bytes);
-        queue.write_buffer(src_buf, 0, &padded);
-
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rp2-particle-frame"),
-        });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("rp2-particle-bind-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&submitter.pipeline);
-            pass.set_bind_group(0, bind, &[]);
-            pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(dst_buf, 0, readback, 0, byte_len);
-        queue.submit(Some(encoder.finish()));
-        particle_map_and_wait(device, readback)?;
-        let back = particle_readback_u32(readback, words as usize)?;
-        readback.unmap();
-        if let Some(err) = pollster::block_on(scope.pop()) {
-            let reason = format!("particle bind validation: {err:?}"); // alloc-ok: cold validation failure, never a steady frame
-            return Err(ParticleError::Validation(reason));
-        }
-        for (i, chunk) in padded.chunks_exact(4).enumerate() {
-            let want = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            if back[i] != want {
-                let got = back[i];
-                let reason = format!("particle bind roundtrip word {i} differs: {got} vs {want}"); // alloc-ok: cold device-loss path, never a steady frame
-                return Err(ParticleError::Device(reason));
-            }
-        }
-        Ok(ParticleGpuReceipt {
-            ticks: self.ticks,
-            alive: self.live.len(),
-            spawned: self.spawned,
-            validation_errors: 0,
-            submit_ms: started.elapsed().as_secs_f64() * 1000.0,
-        })
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Receipts: what ran, how many, how long, charged against the 1.0 ms budget.
 // ---------------------------------------------------------------------------
@@ -1612,6 +1588,77 @@ mod tests {
             pool.tick();
         }
         pool
+    }
+
+    #[test]
+    fn tier_caps_split_the_budget_and_refuse_over_the_cap() {
+        // F2P (QL12): a tier cap refuses a spawn over the cap. The dust cap
+        // of a 64-slot pool is what the split gives it; the first spawn over
+        // that cap is a typed budget refusal and the pool is unchanged.
+        let mut pool = ParticlePool::with_capacity(9, 64).expect("bounded pool builds");
+        let caps = pool.kind_caps();
+        assert_eq!(
+            caps.total() as usize,
+            64,
+            "the tier split sums to the pool budget"
+        );
+        assert!(
+            caps.dust >= caps.flame && caps.sparks >= caps.flame && caps.blood >= caps.flame,
+            "the fight kinds lead the torch ambience, got {caps:?}"
+        );
+        for _ in 0..caps.dust {
+            pool.try_spawn(EmitterKind::Dust)
+                .expect("spawns under the dust cap are allowed");
+        }
+        assert_eq!(pool.alive_by_kind()[0], caps.dust as usize);
+        match pool.try_spawn(EmitterKind::Dust) {
+            Err(ParticleError::BudgetExceeded { requested, allowed }) => {
+                assert_eq!(allowed, caps.dust, "the refused cap is the dust cap");
+                assert_eq!(requested, caps.dust + 1, "the refused ask is one over");
+            }
+            other => panic!("a spawn over the tier cap must refuse, got {other:?}"),
+        }
+        assert_eq!(
+            pool.alive_by_kind()[0],
+            caps.dust as usize,
+            "a refusal leaves the pool unchanged"
+        );
+        assert_eq!(pool.dropped_total(), 1, "the refusal is counted once");
+        assert!(pool.capped(), "a cap hit marks the pool degraded");
+        // Another kind still under its own cap keeps spawning.
+        pool.try_spawn(EmitterKind::Sparks)
+            .expect("sparks are under their own cap");
+        assert_eq!(pool.alive_by_kind()[2], 1, "per-kind caps are independent");
+    }
+
+    #[test]
+    fn tier_caps_follow_the_tier_budget_and_never_exceed_it() {
+        // Every tier's four counts sum to its own pool budget, and the split
+        // stays monotone with the ladder, so a stronger tier never caps a
+        // kind below a weaker one.
+        let mut previous = KindCaps::for_total(0);
+        for tier in crate::quality::Quality::ALL {
+            let knobs = crate::quality::knobs(tier);
+            let total = crate::quality::particle_pool_slots(&knobs);
+            let caps = KindCaps::for_total(total);
+            assert_eq!(caps.total() as usize, total, "{tier:?} sums to its budget");
+            assert!(caps.dust >= previous.dust, "{tier:?} dust is monotone");
+            assert!(
+                caps.sparks >= previous.sparks,
+                "{tier:?} sparks are monotone"
+            );
+            assert!(caps.blood >= previous.blood, "{tier:?} blood is monotone");
+            assert!(caps.flame >= previous.flame, "{tier:?} flame is monotone");
+            previous = caps;
+        }
+        // Tiny budgets still hand out what they have and never overdraw.
+        for total in [1usize, 2, 3, 4, 7, 12] {
+            let caps = KindCaps::for_total(total);
+            assert!(
+                caps.total() as usize <= total,
+                "a {total}-slot budget never overdraws, got {caps:?}"
+            );
+        }
     }
 
     #[test]
@@ -1703,7 +1750,7 @@ mod tests {
         assert_eq!(a.alive(), b.alive(), "alive x2 identical");
         assert!(a.alive() > 0, "the sim must actually run");
         assert_eq!(POOL_CAP, 4096, "pool bound stays exact");
-        assert_eq!(EMITTER_COUNT, 3, "emitter count stays exact");
+        assert_eq!(EMITTER_COUNT, 4, "emitter count stays exact");
         assert_eq!(PARTICLE_BUDGET_MS, 1.0, "particle bar stays 1.0 ms");
         for age01 in [
             0.0, 0.0625, 0.125, 0.1875, 0.25, 0.3125, 0.375, 0.4375, 0.5, 0.5625, 0.625, 0.6875,
@@ -1751,7 +1798,7 @@ mod tests {
         // faded, so the staged picture changes with the pass.
         let mut a = ParticlePool::new(2040);
         let mut b = ParticlePool::new(2040);
-        for kind in [EmitterKind::Dust, EmitterKind::Flame, EmitterKind::Sparks] {
+        for kind in EmitterKind::ALL {
             a.set_rate(kind, MAX_RATE_PER_S)
                 .expect("MAX_RATE_PER_S passes set_rate validation");
             b.set_rate(kind, MAX_RATE_PER_S)
@@ -1767,7 +1814,19 @@ mod tests {
         assert!(a.dropped_total() > 0, "saturation must refuse spawns");
         assert_eq!(a.alive(), b.alive(), "alive x2 identical");
         let live = a.alive();
-        assert!(live >= 4000, "the frame must stage ~4096 live, got {live}");
+        // The saturated frame stages the whole budget less this tick's
+        // expiries: spawns run before the cull, so `alive` reads the cap
+        // minus one tick of deaths. Per-kind caps keep every kind full.
+        assert!(
+            live >= POOL_CAP * 92 / 100,
+            "the frame must stage nearly the whole cap, got {live}"
+        );
+        for (kind, count) in EmitterKind::ALL.iter().zip(a.alive_by_kind()) {
+            assert!(
+                count > 0,
+                "every kind stages under its own cap, {kind:?} is empty"
+            );
+        }
         assert_eq!(a.state_hash(), b.state_hash(), "hash x2 identical, diff 0");
         let mut off = Vec::new();
         let mut on = Vec::new();
@@ -1822,7 +1881,7 @@ mod tests {
     fn gpu_draw_stage_within_budget() {
         // Row accept: the 4096-live stage stays inside PARTICLE_BUDGET_MS.
         let mut pool = ParticlePool::new(2040);
-        for kind in [EmitterKind::Dust, EmitterKind::Flame, EmitterKind::Sparks] {
+        for kind in EmitterKind::ALL {
             pool.set_rate(kind, MAX_RATE_PER_S)
                 .expect("MAX_RATE_PER_S passes set_rate validation");
         }
@@ -1832,7 +1891,10 @@ mod tests {
         assert!(pool.capped(), "the saturated frame must hit the cap");
         assert!(pool.dropped_total() > 0, "saturation must refuse spawns");
         let live = pool.alive();
-        assert!(live >= 4000, "the frame must stage ~4096 live, got {live}");
+        assert!(
+            live >= POOL_CAP * 92 / 100,
+            "the frame must stage nearly the whole cap, got {live}"
+        );
         let mut scratch = Vec::with_capacity(live);
         // Warmup plus best-of-7: wall clock on the shared box jitters under
         // parallel load, so the budget verdict reads the fastest clean
@@ -2123,12 +2185,17 @@ mod tests {
     }
 
     #[test]
-    fn emitter_order_dust_flame_sparks() {
+    fn emitter_order_dust_flame_sparks_blood() {
         let pool = settled(15, 60);
         let kinds: Vec<EmitterKind> = pool.emitters().iter().map(|e| e.kind).collect();
         assert_eq!(
             kinds,
-            vec![EmitterKind::Dust, EmitterKind::Flame, EmitterKind::Sparks]
+            vec![
+                EmitterKind::Dust,
+                EmitterKind::Flame,
+                EmitterKind::Sparks,
+                EmitterKind::Blood
+            ]
         );
         for want in kinds {
             assert!(
@@ -2202,21 +2269,11 @@ mod tests {
         crate::graph::gx1_test_device()
     }
 
-    #[cfg(feature = "window")]
-    fn particle_frame() -> crate::gtao::LookFrame {
-        crate::gtao::LookFrame {
-            frame_index: 11,
-            viewport_px: [64, 64],
-            exposure_ev100: 10.0,
-            sun_dir: [0.3, 0.8, 0.5],
-        }
-    }
-
     #[test]
     #[cfg(feature = "window")]
-    fn gpu_pool_binds_exact_with_look_frame() {
+    fn gpu_pool_stages_the_live_batch_and_binds_the_frame() {
         let Some((device, queue, info)) = particle_device() else {
-            eprintln!("SKIPPED particle bind: no wgpu adapter on this machine");
+            eprintln!("SKIPPED particle stage: no wgpu adapter on this machine");
             return;
         };
         let mut pool = ParticlePool::new(2040);
@@ -2224,75 +2281,108 @@ mod tests {
             pool.tick();
         }
         assert!(pool.alive() > 0, "the sim must actually run");
-        let frame = particle_frame();
         let mut submitter = ParticleSubmitter::new(device);
         assert_eq!(submitter.created_buffers(), 0);
-        let receipt = pool
-            .submit_gpu(device, queue, &frame, &mut submitter)
-            .expect("live pool binds clean");
-        assert!(receipt.is_clean(), "0 validation errors");
+        let receipt = submitter
+            .stage_pool(
+                device,
+                queue,
+                &pool,
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            )
+            .expect("the live pool stages clean");
         assert_eq!(
             (receipt.ticks, receipt.alive, receipt.spawned),
             (pool.tick_count(), pool.alive(), pool.spawned_total())
         );
+        assert_eq!(receipt.staged, pool.alive() as u32, "one instance per live");
+        assert_eq!(receipt.alive_by_kind, pool.alive_by_kind());
+        assert_eq!(receipt.caps, pool.kind_caps());
         assert_eq!(receipt.budget_ms(), PARTICLE_BUDGET_MS);
-        // The pool sims on between submits, so the word shape moves: a
-        // same-tick resubmit reuses the sized buffers exactly.
+        // A same-shape restage reuses the built buffers exactly.
         let before = submitter.created_buffers();
-        let again = pool
-            .submit_gpu(device, queue, &frame, &mut submitter)
-            .expect("same-tick bind reuses");
-        assert!(again.is_clean());
+        let again = submitter
+            .stage_pool(
+                device,
+                queue,
+                &pool,
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            )
+            .expect("a same-shape restage reuses");
+        assert_eq!(again.staged, receipt.staged);
         assert_eq!(
             submitter.created_buffers(),
             before,
-            "matching-shape submits size nothing"
+            "matching-shape stages size nothing"
         );
         eprintln!(
-            "RP2 particle bind on {}: alive={} words={} submit_ms={:.3} resubmit_ms={:.3} (budget {PARTICLE_BUDGET_MS} ms)",
-            info.name,
-            receipt.alive,
-            pool.particle_bytes().len().div_ceil(4),
-            receipt.submit_ms,
-            again.submit_ms
+            "QL12 particle stage on {}: alive={} staged={} caps={:?} stage_ms={:.3} (budget {PARTICLE_BUDGET_MS} ms)",
+            info.name, receipt.alive, receipt.staged, receipt.caps, receipt.submit_ms
         );
     }
 
     #[test]
     #[cfg(feature = "window")]
-    fn gpu_empty_pool_still_binds() {
+    fn gpu_calm_pool_stages_nothing() {
         let Some((device, queue, _)) = particle_device() else {
-            eprintln!("SKIPPED particle empty bind: no wgpu adapter on this machine");
+            eprintln!("SKIPPED particle calm stage: no wgpu adapter on this machine");
             return;
         };
-        // Zero ticks: the 12-byte header image still records a real pass.
+        // Zero ticks: a calm pool stages no instance and sizes no buffer.
         let pool = ParticlePool::new(7);
         assert_eq!(pool.alive(), 0);
         let mut submitter = ParticleSubmitter::new(device);
-        let receipt = pool
-            .submit_gpu(device, queue, &particle_frame(), &mut submitter)
-            .expect("empty pool binds clean");
-        assert!(receipt.is_clean());
-        assert_eq!((receipt.ticks, receipt.alive), (0, 0));
+        let receipt = submitter
+            .stage_pool(
+                device,
+                queue,
+                &pool,
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            )
+            .expect("a calm pool stages clean");
+        assert_eq!((receipt.ticks, receipt.alive, receipt.staged), (0, 0, 0));
+        assert_eq!(submitter.created_buffers(), 0, "a calm stage sizes nothing");
     }
 
     #[test]
     #[cfg(feature = "window")]
-    fn gpu_refuses_bad_frame_before_sizing() {
+    fn gpu_refuses_a_nonfinite_view_before_sizing() {
         let Some((device, queue, _)) = particle_device() else {
-            eprintln!("SKIPPED particle refusals: no wgpu adapter on this machine");
+            eprintln!("SKIPPED particle view refusals: no wgpu adapter on this machine");
             return;
         };
         let pool = settled(21, 10);
-        let frame = particle_frame();
         let mut submitter = ParticleSubmitter::new(device);
-        assert_eq!(submitter.created_buffers(), 0);
-        let bad = crate::gtao::LookFrame {
-            exposure_ev100: f32::NAN,
-            ..frame
-        };
+        let mut view = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        view[3][3] = f32::NAN;
         assert!(matches!(
-            pool.submit_gpu(device, queue, &bad, &mut submitter),
+            submitter.stage_pool(device, queue, &pool, view, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
             Err(ParticleError::Invalid(_))
         ));
         assert_eq!(submitter.created_buffers(), 0, "refusals size no buffers");
@@ -2305,7 +2395,7 @@ mod tests {
     #[cfg(feature = "window")]
     fn saturated_pool() -> ParticlePool {
         let mut pool = ParticlePool::new(2040);
-        for kind in [EmitterKind::Dust, EmitterKind::Flame, EmitterKind::Sparks] {
+        for kind in EmitterKind::ALL {
             pool.set_rate(kind, MAX_RATE_PER_S)
                 .expect("MAX_RATE_PER_S passes set_rate validation");
         }
@@ -2328,7 +2418,10 @@ mod tests {
         };
         let pool = saturated_pool();
         let live = pool.alive();
-        assert!(live >= 4000, "the frame must stage ~4096 live, got {live}");
+        assert!(
+            live >= POOL_CAP * 92 / 100,
+            "the frame must stage nearly the whole cap, got {live}"
+        );
         let mut records = Vec::new();
         let staged = pool.draw_records(false, |_| 0.0, &mut records);
         assert_eq!(staged, live, "one record per live particle");
@@ -2402,9 +2495,9 @@ mod tests {
             .find("pub struct ParticleSubmitter")
             .expect("the submitter exists");
         let end = src[submitter_at..]
-            .find("fn particle_map_and_wait")
+            .find("// Receipts: what ran")
             .map(|at| submitter_at + at)
-            .expect("the draw side ends before the bind map helper");
+            .expect("the draw side ends before the receipt section");
         let draw_side = format!("{}{}", &builders[builders_at..], &src[submitter_at..end]);
         assert!(
             draw_side.contains("PARTICLE_DRAW_WGSL"),

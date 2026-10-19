@@ -1230,6 +1230,9 @@ impl Presenter {
                 debug_assert_eq!(sky_exposure, self.sky_exposure);
             }
             let forward_ibl_started = engine_clock::now();
+            // The particle batch is the probe tranche's own draw (QL12): a
+            // live frame stages nothing, so it draws nothing and its pixels
+            // stay a pure function of the frame's list.
             let sky_timed = self.encode_forward(
                 &mut enc,
                 targets,
@@ -1336,6 +1339,7 @@ impl Presenter {
                 let timed = PassesTimed {
                     sky: sky_timed,
                     gtao: gtao_timed,
+                    particle: false,
                 };
                 timer.encode_resolve(&mut enc, slot, timed);
             }
@@ -1402,8 +1406,17 @@ impl Presenter {
         let probe = self
             .frames_presented
             .is_multiple_of(self.probe_every.max(1));
+        // QL12: the probe frame times its particle pass; a held frame runs no
+        // probe pass and takes no timer slot.
+        let timer_slot = if probe {
+            self.gpu_timer
+                .as_mut()
+                .and_then(|timer| timer.begin_frame(&self.device))
+        } else {
+            None
+        };
         let look = if probe {
-            self.encode_look_passes()?
+            self.encode_look_passes(&frame)?
         } else {
             LookPassReceipt::skipped()
         };
@@ -1440,10 +1453,30 @@ impl Presenter {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ra1-frame"),
             });
+        // QL12: only a probe frame stages a live particle batch, so only a
+        // probe frame records the particle pass and writes its timestamps.
+        let particle_timed = probe && self.particle_sub.staged_count() > 0;
         {
             let targets = self.targets.as_ref().expect("ensured above");
             let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
-            self.encode_forward(&mut enc, targets, list, ForwardLook::blocking());
+            let timer = self.gpu_timer.as_ref().zip(timer_slot);
+            self.encode_forward(
+                &mut enc,
+                targets,
+                list,
+                ForwardLook::probed(particle_timed, timer.map(|(timer, _)| timer)),
+            );
+            if let (Some((timer, slot)), true) = (timer, probe) {
+                timer.encode_resolve(
+                    &mut enc,
+                    slot,
+                    PassesTimed {
+                        sky: false,
+                        gtao: false,
+                        particle: particle_timed,
+                    },
+                );
+            }
             if fog_now {
                 enc.copy_texture_to_buffer(
                     wgpu::TexelCopyTextureInfo {
@@ -1469,6 +1502,11 @@ impl Presenter {
             }
         }
         self.queue.submit(Some(enc.finish()));
+        // QL12: arm the late read of this frame's particle timestamps; the
+        // read never waits, so the frame keeps its non-blocking shape.
+        if let (Some((timer, slot)), true) = (self.gpu_timer.as_ref().zip(timer_slot), probe) {
+            timer.arm(slot);
+        }
         let mut raw_depth = std::mem::take(&mut self.depth_decode);
         // The depth copy above was recorded only when the fog tranche is due,
         // so map only then: a held frame runs no copy and must not map, or a

@@ -4,9 +4,10 @@
 //! connections and pumps their messages; the tick loop never awaits. Per
 //! session:
 //!
-//! - unreliable-class frames are queued from the caller's thread into a small
-//!   bounded queue; a full queue sheds the frame like loss (the redundancy
-//!   window recovers it) and counts it;
+//! - unreliable-class frames wait in one latest-only slot; a newer frame
+//!   supersedes a frame the writer has not taken yet, which is counted, so a
+//!   stalled writer never leaves a backlog (the input redundancy window
+//!   recovers the skipped ticks exactly like loss);
 //! - reliable frames go to their own bounded queue that is always written
 //!   first; a full queue means the client stopped reading and the send is
 //!   refused loudly;
@@ -53,8 +54,6 @@ pub const MAX_SESSIONS: usize = 16;
 const INBOX_FRAMES: usize = 1024;
 /// Reliable frames queued per session: the channel memory cap in full frames.
 pub const RELIABLE_FRAMES: usize = CHANNEL_MEMORY_BYTES / MAX_PACKET_BYTES;
-/// Unreliable frames queued per session before the sender sheds.
-const DATAGRAM_FRAMES: usize = 64;
 /// Messages one write batch holds before it flushes.
 const WRITE_BATCH: usize = 32;
 /// Departures kept for the caller; the oldest drops first.
@@ -91,20 +90,83 @@ pub struct Departure {
     pub reason: DepartReason,
 }
 
+/// What the latest-only datagram slot did: frames written and frames a newer
+/// one superseded before the writer took them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct LatestOnly {
+    /// Datagram-class frames the writer put on the socket.
+    pub written: u64,
+    /// Datagram-class frames superseded before the writer took them.
+    pub skipped: u64,
+}
+
+impl LatestOnly {
+    /// The receipt as the one line the server prints.
+    #[must_use]
+    pub fn line(self) -> String {
+        format!(
+            "ws: latest-only written={} skipped={}",
+            self.written, self.skipped
+        )
+    }
+}
+
 /// State shared between the tick loop and the I/O thread.
 struct Shared {
     peers: Mutex<BTreeMap<SocketAddr, PeerLink>>,
     departures: Mutex<VecDeque<Departure>>,
     dropped_datagrams: AtomicU64,
+    written_datagrams: AtomicU64,
+    skipped_datagrams: AtomicU64,
     next_session: AtomicU64,
+    /// A test can hold every session's writer here (`WsServer::hold_writer`).
+    #[cfg(test)]
+    stall: watch::Sender<bool>,
 }
 
-/// What the tick loop needs to reach one session. Dropping the link closes
-/// both queues, which ends the session's writer.
+/// The newest datagram-class frame waiting for the writer.
+///
+/// One slot, not a queue: a stalled writer keeps the newest frame and a newer
+/// one supersedes it, so the leg never grows a backlog. A superseded frame is
+/// counted in [`LatestOnly::skipped`]; the input redundancy window recovers the
+/// tick, exactly like a lost datagram.
+struct Latest {
+    pending: Mutex<Option<Vec<u8>>>,
+    arrived: tokio::sync::Notify,
+}
+
+impl Latest {
+    fn new() -> Self {
+        Self {
+            pending: Mutex::new(None),
+            arrived: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Keep `frame` for the writer; true when it superseded one still waiting.
+    fn put(&self, frame: Vec<u8>) -> bool {
+        let superseded = lock(&self.pending).replace(frame).is_some();
+        self.arrived.notify_one();
+        superseded
+    }
+
+    /// Take the frame to write, or nothing when the slot is empty.
+    fn take(&self) -> Option<Vec<u8>> {
+        lock(&self.pending).take()
+    }
+
+    /// Wait until a frame was put since the last call.
+    async fn wait(&self) {
+        self.arrived.notified().await;
+    }
+}
+
+/// What the tick loop needs to reach one session. Dropping the link closes the
+/// reliable queue, which ends the session's writer.
 struct PeerLink {
     session: u64,
     reliable: mpsc::Sender<Vec<u8>>,
-    datagrams: mpsc::Sender<Vec<u8>>,
+    datagrams: Arc<Latest>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -112,8 +174,33 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
+    fn new() -> Self {
+        Self {
+            peers: Mutex::new(BTreeMap::new()),
+            departures: Mutex::new(VecDeque::new()),
+            dropped_datagrams: AtomicU64::new(0),
+            written_datagrams: AtomicU64::new(0),
+            skipped_datagrams: AtomicU64::new(0),
+            next_session: AtomicU64::new(0),
+            #[cfg(test)]
+            stall: watch::channel(false).0,
+        }
+    }
+
+    /// The test stall gate, when the crate is built for tests.
+    #[cfg(test)]
+    fn stall(&self) -> Option<watch::Receiver<bool>> {
+        Some(self.stall.subscribe())
+    }
+
+    /// Production has no writer gate.
+    #[cfg(not(test))]
+    fn stall(&self) -> Option<watch::Receiver<bool>> {
+        None
+    }
+
     /// Seat a session. A full table refuses; a session already seated at the
-    /// address is replaced (its queues close, which ends it).
+    /// address is replaced (its link leaves the table, which ends it).
     fn admit(&self, peer: SocketAddr, link: PeerLink) -> bool {
         let mut peers = lock(&self.peers);
         if !peers.contains_key(&peer) && peers.len() >= MAX_SESSIONS {
@@ -163,12 +250,7 @@ impl WsServer {
         // The listener registers its socket with the runtime it is made in.
         let listener = runtime.block_on(TcpListener::bind(addr))?;
         let local_addr = listener.local_addr()?;
-        let shared = Arc::new(Shared {
-            peers: Mutex::new(BTreeMap::new()),
-            departures: Mutex::new(VecDeque::new()),
-            dropped_datagrams: AtomicU64::new(0),
-            next_session: AtomicU64::new(0),
-        });
+        let shared = Arc::new(Shared::new());
         let (inbox_tx, inbox) = mpsc::channel(INBOX_FRAMES);
         let (stop, stop_rx) = oneshot::channel();
         let worker = thread::Builder::new().name("ws-server".into()).spawn({
@@ -205,11 +287,32 @@ impl WsServer {
         lock(&self.shared.departures).drain(..).collect()
     }
 
-    /// Datagram-class frames dropped in either direction: over the budget, or
-    /// a queue was full.
+    /// Datagram-class frames shed on the receive side so far: a full inbox.
     #[must_use]
     pub fn dropped_datagrams(&self) -> u64 {
         self.shared.dropped_datagrams.load(Ordering::Relaxed)
+    }
+
+    /// What the latest-only send slot did so far: frames written, and frames a
+    /// newer one superseded before the writer took them.
+    #[must_use]
+    pub fn latest_only(&self) -> LatestOnly {
+        LatestOnly {
+            written: self.shared.written_datagrams.load(Ordering::Relaxed),
+            skipped: self.shared.skipped_datagrams.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Test only: hold every session writer before its next datagram write.
+    #[cfg(test)]
+    pub(crate) fn hold_writer(&self) {
+        self.shared.stall.send_replace(true);
+    }
+
+    /// Test only: let a held writer run again.
+    #[cfg(test)]
+    pub(crate) fn release_writer(&self) {
+        self.shared.stall.send_replace(false);
     }
 }
 
@@ -218,17 +321,14 @@ impl Transport for WsServer {
         let message = wire::encode(Class::Datagram, bytes)?;
         let peers = lock(&self.shared.peers);
         let link = peers.get(&to.0).ok_or(NetError::BadInput)?;
-        match link.datagrams.try_send(message) {
-            Ok(()) => Ok(()),
-            // A slow client sheds like loss; the redundancy window recovers.
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.shared
-                    .dropped_datagrams
-                    .fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(NetError::BadInput),
+        // One slot: a newer frame replaces a waiting one and counts the skip,
+        // so a slow client sheds like loss and never leaves a backlog.
+        if link.datagrams.put(message) {
+            self.shared
+                .skipped_datagrams
+                .fetch_add(1, Ordering::Relaxed);
         }
+        Ok(())
     }
 
     fn send_reliable(
@@ -347,11 +447,11 @@ async fn serve(
     };
     let session = shared.next_session.fetch_add(1, Ordering::Relaxed);
     let (reliable, reliable_rx) = mpsc::channel(RELIABLE_FRAMES);
-    let (datagrams, datagrams_rx) = mpsc::channel(DATAGRAM_FRAMES);
+    let datagrams = Arc::new(Latest::new());
     let link = PeerLink {
         session,
         reliable,
-        datagrams,
+        datagrams: Arc::clone(&datagrams),
     };
     let (mut sink, mut source) = socket.split();
     if !shared.admit(peer, link) {
@@ -360,7 +460,7 @@ async fn serve(
     }
     let reason = tokio::select! {
         reason = read_messages(&shared, &inbox, &mut source, PeerId(peer)) => reason,
-        reason = write_messages(&mut sink, reliable_rx, datagrams_rx) => reason,
+        reason = write_messages(&shared, &mut sink, reliable_rx, datagrams, shared.stall()) => reason,
         _ = goodbye.changed() => DepartReason::ServerClosed,
     };
     match reason {
@@ -474,19 +574,42 @@ async fn read_messages(
     }
 }
 
+/// Where one write batch came from.
+enum Outgoing {
+    Reliable(Vec<u8>),
+    Datagram(Vec<u8>),
+}
+
 /// Write queued messages, reliable first, plus a keepalive ping. Returns only
-/// when the session is over.
+/// when the session is over. The datagram slot holds one frame, so a stalled
+/// write resumes on the newest state and never drains a backlog.
 async fn write_messages(
+    shared: &Shared,
     sink: &mut Sink,
     mut reliable: mpsc::Receiver<Vec<u8>>,
-    mut datagrams: mpsc::Receiver<Vec<u8>>,
+    datagrams: Arc<Latest>,
+    mut stall: Option<watch::Receiver<bool>>,
 ) -> DepartReason {
     let mut keepalive = tokio::time::interval(QUIC_KEEPALIVE);
     loop {
         let first = tokio::select! {
             biased;
-            queued = reliable.recv() => queued,
-            queued = datagrams.recv() => queued,
+            queued = reliable.recv() => {
+                let Some(message) = queued else {
+                    return DepartReason::ServerClosed;
+                };
+                Outgoing::Reliable(message)
+            }
+            () = datagrams.wait() => {
+                if let Some(gate) = stall.as_mut() {
+                    // A test holds the writer here; production has no gate.
+                    let _ = gate.wait_for(|held| !*held).await;
+                }
+                match datagrams.take() {
+                    Some(message) => Outgoing::Datagram(message),
+                    None => continue,
+                }
+            }
             _ = keepalive.tick() => {
                 if let Err(error) = sink.send(Message::Ping(Vec::new().into())).await {
                     return reason_of(&error);
@@ -494,20 +617,27 @@ async fn write_messages(
                 continue;
             }
         };
-        // A closed queue means the link left the table: replaced or shut down.
-        let Some(first) = first else {
-            return DepartReason::ServerClosed;
-        };
         let mut batch = vec![first];
         while batch.len() < WRITE_BATCH {
-            match reliable.try_recv().or_else(|_| datagrams.try_recv()) {
-                Ok(next) => batch.push(next),
-                Err(_) => break,
+            if let Ok(next) = reliable.try_recv() {
+                batch.push(Outgoing::Reliable(next));
+                continue;
+            }
+            match datagrams.take() {
+                Some(next) => batch.push(Outgoing::Datagram(next)),
+                None => break,
             }
         }
         for message in batch {
-            if let Err(error) = sink.feed(Message::Binary(message.into())).await {
+            let (is_datagram, bytes) = match message {
+                Outgoing::Reliable(bytes) => (false, bytes),
+                Outgoing::Datagram(bytes) => (true, bytes),
+            };
+            if let Err(error) = sink.feed(Message::Binary(bytes.into())).await {
                 return reason_of(&error);
+            }
+            if is_datagram {
+                shared.written_datagrams.fetch_add(1, Ordering::Relaxed);
             }
         }
         if let Err(error) = sink.flush().await {

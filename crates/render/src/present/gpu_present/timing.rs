@@ -17,11 +17,11 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Timestamps per frame: forward begin and end, blit begin and end, then the
-/// own-pass sky and the GTAO compute pass begin and end (each written only
-/// on frames that run that pass).
-const QUERY_COUNT: u32 = 8;
-/// Bytes one frame resolves (eight u64 ticks).
-const RESOLVE_BYTES: u64 = 64;
+/// own-pass sky, the GTAO compute pass and the particle draw pass begin and
+/// end (each written only on frames that run that pass).
+const QUERY_COUNT: u32 = 10;
+/// Bytes one frame resolves (ten u64 ticks).
+const RESOLVE_BYTES: u64 = 80;
 /// Staging buffers in flight: a result is read once its map completed.
 const SLOT_COUNT: usize = 4;
 /// Most samples kept per pass; older samples are overwritten.
@@ -40,6 +40,8 @@ struct TimerSlot {
     sky_written: AtomicBool,
     /// The same for the GTAO pass (queries 6 and 7).
     gtao_written: AtomicBool,
+    /// The same for the particle draw pass (queries 8 and 9).
+    particle_written: AtomicBool,
 }
 
 /// Which optional passes wrote their timestamps in one frame.
@@ -49,6 +51,8 @@ pub(crate) struct PassesTimed {
     pub(crate) sky: bool,
     /// The GTAO compute pass wrote queries 6 and 7.
     pub(crate) gtao: bool,
+    /// The particle draw pass wrote queries 8 and 9.
+    pub(crate) particle: bool,
 }
 
 #[derive(Default)]
@@ -78,12 +82,15 @@ pub(crate) struct GpuTimer {
     sky: Ring,
     blit: Ring,
     gtao: Ring,
-    /// Forward plus sky plus GTAO plus blit per resolved frame.
+    particle: Ring,
+    /// Forward plus sky plus GTAO plus blit plus particle per resolved frame.
     total: Ring,
     /// Device ms of the newest resolved sky pass; 0 until one lands.
     latest_sky_ms: f32,
     /// Device ms of the newest resolved GTAO pass; 0 until one lands.
     latest_gtao_ms: f32,
+    /// Device ms of the newest resolved particle pass; 0 until one lands.
+    latest_particle_ms: f32,
 }
 
 impl GpuTimer {
@@ -119,6 +126,7 @@ impl GpuTimer {
                 state: Arc::new(AtomicU8::new(FREE)),
                 sky_written: AtomicBool::new(false),
                 gtao_written: AtomicBool::new(false),
+                particle_written: AtomicBool::new(false),
             })
             .collect();
         Some(Self {
@@ -130,9 +138,11 @@ impl GpuTimer {
             sky: Ring::default(),
             gtao: Ring::default(),
             blit: Ring::default(),
+            particle: Ring::default(),
             total: Ring::default(),
             latest_sky_ms: 0.0,
             latest_gtao_ms: 0.0,
+            latest_particle_ms: 0.0,
         })
     }
 
@@ -159,6 +169,7 @@ impl GpuTimer {
                     let timed = PassesTimed {
                         sky: slot.sky_written.load(Ordering::Acquire),
                         gtao: slot.gtao_written.load(Ordering::Acquire),
+                        particle: slot.particle_written.load(Ordering::Acquire),
                     };
                     slot.buffer.unmap();
                     slot.state.store(FREE, Ordering::Release);
@@ -172,7 +183,7 @@ impl GpuTimer {
         }
     }
 
-    fn record(&mut self, ticks: [u64; 8], timed: PassesTimed) {
+    fn record(&mut self, ticks: [u64; 10], timed: PassesTimed) {
         let forward = self.span_ms(ticks[0], ticks[1]);
         let blit = self.span_ms(ticks[2], ticks[3]);
         self.forward.push(forward);
@@ -190,6 +201,12 @@ impl GpuTimer {
             self.latest_gtao_ms = gtao;
             total += gtao;
         }
+        if timed.particle {
+            let particle = self.span_ms(ticks[8], ticks[9]);
+            self.particle.push(particle);
+            self.latest_particle_ms = particle;
+            total += particle;
+        }
         self.total.push(total);
     }
 
@@ -199,10 +216,12 @@ impl GpuTimer {
         self.forward = Ring::default();
         self.sky = Ring::default();
         self.gtao = Ring::default();
+        self.particle = Ring::default();
         self.blit = Ring::default();
         self.total = Ring::default();
         self.latest_sky_ms = 0.0;
         self.latest_gtao_ms = 0.0;
+        self.latest_particle_ms = 0.0;
     }
 
     /// Device milliseconds of the newest resolved own-pass sky; 0.0 until one
@@ -210,6 +229,14 @@ impl GpuTimer {
     /// A few frames late by construction: the read never waits.
     pub(crate) fn latest_sky_ms(&self) -> f32 {
         self.latest_sky_ms
+    }
+
+    /// Device milliseconds of the newest resolved particle draw pass; 0.0
+    /// until one lands (no timestamps, no batch staged, or the first frames
+    /// still in flight). A few frames late by construction: the read never
+    /// waits.
+    pub(crate) fn latest_particle_ms(&self) -> f32 {
+        self.latest_particle_ms
     }
 
     /// Device milliseconds of the newest resolved GTAO pass; 0.0 until one
@@ -263,6 +290,15 @@ impl GpuTimer {
         }
     }
 
+    /// Timestamp writes for the particle draw pass.
+    pub(crate) fn particle_writes(&self) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.queries,
+            beginning_of_pass_write_index: Some(8),
+            end_of_pass_write_index: Some(9),
+        }
+    }
+
     /// Resolve this frame's timestamps and copy them to staging slot
     /// `index`. Call after every pass, before the encoder finishes.
     /// `timed` says which optional passes wrote their queries; the late read
@@ -278,6 +314,8 @@ impl GpuTimer {
         };
         slot.sky_written.store(timed.sky, Ordering::Release);
         slot.gtao_written.store(timed.gtao, Ordering::Release);
+        slot.particle_written
+            .store(timed.particle, Ordering::Release);
         enc.resolve_query_set(&self.queries, 0..QUERY_COUNT, &self.resolve, 0);
         enc.copy_buffer_to_buffer(&self.resolve, 0, &slot.buffer, 0, RESOLVE_BYTES);
     }
@@ -308,6 +346,7 @@ impl GpuTimer {
         // no sky pass at all reports a zero sky, not a missing report.
         let mut sky = self.sky.samples.clone();
         let mut gtao = self.gtao.samples.clone();
+        let mut particle = self.particle.samples.clone();
         Some(GpuTimingReport {
             frames: u64::try_from(forward.len()).unwrap_or(u64::MAX),
             total: percentiles(&mut total)?,
@@ -315,14 +354,16 @@ impl GpuTimer {
             blit: percentiles(&mut blit)?,
             sky: percentiles(&mut sky).unwrap_or_default(),
             gtao: percentiles(&mut gtao).unwrap_or_default(),
+            particle: percentiles(&mut particle).unwrap_or_default(),
+            particle_frames: u64::try_from(self.particle.samples.len()).unwrap_or(u64::MAX),
         })
     }
 }
 
-/// Eight little-endian u64 ticks from a mapped staging buffer.
-fn read_ticks(buffer: &wgpu::Buffer) -> Option<[u64; 8]> {
+/// Ten little-endian u64 ticks from a mapped staging buffer.
+fn read_ticks(buffer: &wgpu::Buffer) -> Option<[u64; 10]> {
     let view = buffer.slice(..).get_mapped_range().ok()?;
-    let mut ticks = [0u64; 8];
+    let mut ticks = [0u64; 10];
     for (tick, chunk) in ticks.iter_mut().zip(view.chunks_exact(8)) {
         let mut word = [0u8; 8];
         word.copy_from_slice(chunk);

@@ -128,6 +128,12 @@ jobs:
           tool: cargo-nextest
       - name: test ${{ matrix.group }}
         run: cargo nextest run --locked --all-targets ${{ matrix.args }}
+      # The shipped-WGSL gate (CQ23): the render lib validates every
+      # crates/render/src/shaders file in its shipped composition, so a
+      # type-broken shader fails here, not at cook time on a seat. CPU only.
+      - name: shader gate (--features shader-validate)
+        if: ${{ !cancelled() && matrix.group == 'render' }}
+        run: cargo test --locked -p engine-render --lib --features shader-validate shader_validate
 
   clippy:
     if: github.repository == 'maximkone/engine2040-public'

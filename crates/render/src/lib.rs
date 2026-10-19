@@ -215,8 +215,9 @@ pub mod material_layer;
 /// material structure. Consumer is the forward-pass bind (RL46), which
 /// looks pipelines up by structure key.
 pub mod material_pipeline;
-/// Seeded GPU particle pool (RP2): dust/flame/sparks, CPU-sim parity
-/// bytes. Std-only; consumer is the arena match through WIN1.
+/// Seeded GPU particle pool (RP2, QL12): dust/flame/sparks/blood, per-tier
+/// kind caps, CPU-sim parity bytes. Std-only; consumer is the arena match
+/// through WIN1.
 pub mod particles_gpu;
 /// Cascade-split selection plus per-cascade map sizes for the arena-day
 /// sun (RL27): pinned splits over the camera range, std-only; consumer

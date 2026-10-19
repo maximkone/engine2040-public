@@ -385,7 +385,7 @@ impl ComboChain {
             .take(usize::from(self.pattern_count))
         {
             if pattern.id == id {
-                pattern.len = seq.len() as u8;
+                pattern.len = u8::try_from(seq.len()).unwrap_or(u8::MAX);
                 pattern.seq = [0; MAX_PATTERN_LEN];
                 for (i, kind) in seq.iter().enumerate() {
                     pattern.seq[i] = *kind;
@@ -398,7 +398,7 @@ impl ComboChain {
         }
         let slot = &mut self.patterns[usize::from(self.pattern_count)];
         slot.id = id;
-        slot.len = seq.len() as u8;
+        slot.len = u8::try_from(seq.len()).unwrap_or(u8::MAX);
         slot.seq = [0; MAX_PATTERN_LEN];
         for (i, kind) in seq.iter().enumerate() {
             slot.seq[i] = *kind;
@@ -893,7 +893,7 @@ mod tests {
         );
         assert_eq!(chain.register_pattern(1, &[9]), Err(DepthError::BadKind(9)));
         assert_eq!(chain.input(9), Err(DepthError::BadKind(9)));
-        for id in 0..MAX_PATTERNS as u8 {
+        for id in 0..u8::try_from(MAX_PATTERNS).unwrap_or(u8::MAX) {
             assert_eq!(chain.register_pattern(id, &[INPUT_LIGHT]), Ok(true));
         }
         assert_eq!(

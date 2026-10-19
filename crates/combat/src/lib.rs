@@ -1,5 +1,11 @@
 //! combat: frame-data combat. Timing as data (hitstop, cancel/parry windows, trauma). Never tick-coupled.
 
+#![warn(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+
 /// Anatomy graph plus tissue and armor tables for deterministic cuts:
 /// joint parents, per-segment Q16 toughness, per-joint armor coverage and
 /// the Rome gladiator row. Std-only, no heap, integer math only.
@@ -171,9 +177,11 @@ pub fn trauma_shake(seed: u64, trauma: Trauma, tick: u64) -> (f32, f32) {
     // Seeded noise from the shared SplitMix64 step (no rand crate); the two
     // halves of one mixed word give the two axes, so one tick is one sample.
     let z = engine_core::splitmix64(seed.wrapping_add(tick)) | 1;
+    let max = engine_core::checked::f32_from_u64(u64::from(u32::MAX));
+    let low = u64::from(u32::try_from(z & u64::from(u32::MAX)).unwrap_or(u32::MAX));
     let (a, b) = (
-        (z >> 32) as f32 / u32::MAX as f32 * 2.0 - 1.0,
-        (z as u32 as f32) / u32::MAX as f32 * 2.0 - 1.0,
+        engine_core::checked::f32_from_u64(z >> 32) / max * 2.0 - 1.0,
+        engine_core::checked::f32_from_u64(low) / max * 2.0 - 1.0,
     );
     let amp = t * t; // trauma^2 response
     (a * amp, b * amp)

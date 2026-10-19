@@ -919,6 +919,40 @@ pub const QUIC_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(5
 #[cfg(feature = "quic")]
 pub const QUIC_MAX_STREAMS: u32 = 16;
 
+/// Datagram buffer per direction; a non-zero send buffer turns QUIC datagrams
+/// on, so `Connection::max_datagram_size()` reports the live path limit.
+#[cfg(feature = "quic")]
+pub const QUIC_DATAGRAM_BUFFER: usize = 64 * 1024;
+
+/// Datagram sends refused because the live QUIC path could not carry them.
+#[cfg(feature = "quic")]
+static DATAGRAM_REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+/// Datagrams refused so far for exceeding the live path limit. Metrics only.
+#[cfg(feature = "quic")]
+pub fn datagram_refusals() -> u64 {
+    DATAGRAM_REFUSALS.load(Ordering::Relaxed)
+}
+
+/// One refusal: counted here and in the process gate receipt, never sent.
+#[cfg(feature = "quic")]
+fn refuse_datagram(limit: usize) -> NetError {
+    DATAGRAM_REFUSALS.fetch_add(1, Ordering::Relaxed);
+    crate::browser::note_oversize();
+    NetError::OverBudget { limit }
+}
+
+/// Gate one datagram against the limit the caller just read live from
+/// `Connection::max_datagram_size()`. `None` means no datagrams fit (limit 0).
+/// A refusal is counted and nothing reaches the socket.
+#[cfg(feature = "quic")]
+pub fn datagram_gate(limit: Option<usize>, bytes: &[u8]) -> Result<(), NetError> {
+    match limit {
+        Some(limit) if bytes.len() <= limit => Ok(()),
+        _ => Err(refuse_datagram(limit.unwrap_or(0))),
+    }
+}
+
 #[cfg(feature = "quic")]
 use quinn::rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -968,7 +1002,8 @@ pub fn quinn_transport() -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport
         .keep_alive_interval(Some(QUIC_KEEPALIVE))
-        .datagram_receive_buffer_size(Some(64 * 1024))
+        .datagram_receive_buffer_size(Some(QUIC_DATAGRAM_BUFFER))
+        .datagram_send_buffer_size(QUIC_DATAGRAM_BUFFER)
         .max_concurrent_bidi_streams(varint(QUIC_MAX_STREAMS))
         .max_concurrent_uni_streams(varint(QUIC_MAX_STREAMS))
         .send_window(512 * 1024)
@@ -1576,6 +1611,25 @@ impl QuinnEndpoint {
     }
 }
 
+/// Send one unreliable game datagram on an open QUIC connection. Reads the
+/// live path limit first, so a payload the path cannot carry is refused as
+/// [`NetError::OverBudget`] and counted, never fragmented or dropped silently.
+#[cfg(feature = "quic")]
+pub fn send_datagram(conn: &quinn::Connection, bytes: &[u8]) -> Result<(), NetError> {
+    check_budget(bytes)?;
+    datagram_gate(conn.max_datagram_size(), bytes)?;
+    match conn.send_datagram(bytes.to_vec().into()) {
+        Ok(()) => Ok(()),
+        // The path shrank between the read and the send: same refusal.
+        Err(quinn::SendDatagramError::TooLarge) => {
+            Err(refuse_datagram(conn.max_datagram_size().unwrap_or(0)))
+        }
+        // Lost connection, blocked queue, peer without datagrams: a dropped
+        // datagram, exactly like UDP loss.
+        Err(_) => Err(NetError::BadInput),
+    }
+}
+
 #[cfg(all(test, feature = "quic"))]
 mod tests {
     use super::*;
@@ -1601,6 +1655,34 @@ mod tests {
         );
         assert!(client.recv().is_empty());
         assert_eq!(fabric.bytes_sent(PeerId(addr(1))), (0, 0));
+    }
+
+    #[test]
+    fn quic_datagram_gate_refuses_1200_bytes_over_1100_limit() {
+        // Live path limit below the fixed 1200-byte game budget: the payload
+        // is refused as OverBudget before any send, and counted.
+        let before = datagram_refusals();
+        let receipt = crate::browser::GateReceipt::read().oversize_refused;
+        let payload = vec![0u8; 1200];
+        assert_eq!(
+            datagram_gate(Some(1100), &payload),
+            Err(NetError::OverBudget { limit: 1100 })
+        );
+        assert_eq!(datagram_refusals() - before, 1, "refusal is counted");
+        assert!(
+            crate::browser::GateReceipt::read().oversize_refused > receipt,
+            "the process gate receipt shows the refusal"
+        );
+        // The gate reads the limit it is given: at 1200 the same payload
+        // passes, and a payload at the limit passes too.
+        assert!(datagram_gate(Some(1200), &payload).is_ok());
+        assert!(datagram_gate(Some(1100), &payload[..1100]).is_ok());
+        // No datagram support means no payload fits; still counted.
+        assert_eq!(
+            datagram_gate(None, &[]),
+            Err(NetError::OverBudget { limit: 0 })
+        );
+        assert_eq!(datagram_refusals() - before, 2, "the off path counts too");
     }
 
     #[test]

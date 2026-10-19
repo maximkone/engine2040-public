@@ -290,8 +290,8 @@ mod tests {
         );
         assert_eq!(
             (a.len(), super::super::EMITTER_COUNT + 1),
-            (4, 4),
-            "four effects"
+            (4, 5),
+            "the batch holds its four effects beside the four pool kinds"
         );
         assert_eq!(a.alive(), b.alive(), "alive x2");
         assert!(a.alive() > 0, "batch runs");
@@ -301,7 +301,7 @@ mod tests {
                 super::super::EMITTER_COUNT,
                 super::super::PARTICLE_BUDGET_MS
             ),
-            (4096, 3, 1.0),
+            (4096, 4, 1.0),
             "bounds exact"
         );
         for t in [0.0, 0.5, 1.0] {

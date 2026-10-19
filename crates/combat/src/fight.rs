@@ -13,6 +13,7 @@
 //! slot count (`fighter_count` in `1..=MAX_PARTICIPANTS`, the canonical cap),
 //! and versioned swaps live in the [`tables`](crate::tables) module.
 
+use engine_core::checked::saturating_u32_to_u16;
 use engine_input::fighter::{ATTACK, BLOCK, DODGE};
 use engine_input::{Buttons, FighterError, FighterInput, MAX_PARTICIPANTS};
 
@@ -82,7 +83,7 @@ pub const MAX_EVENTS_PER_TICK: usize = 512;
 /// Chip damage dealt through a held block under the frozen V1 row above.
 /// New rows use [`Tables::chip`]; the step core never calls this.
 pub const fn block_chip(damage: u16) -> u16 {
-    ((damage as u32 * BLOCK_CHIP_NUM) / BLOCK_CHIP_DEN) as u16
+    saturating_u32_to_u16((damage as u32 * BLOCK_CHIP_NUM) / BLOCK_CHIP_DEN)
 }
 
 /// Tunable fight-rules row: every number the step core reads, in one place.
@@ -166,7 +167,7 @@ impl Tables {
                     if chip > u16::MAX as u32 {
                         u16::MAX
                     } else {
-                        chip as u16
+                        saturating_u32_to_u16(chip)
                     }
                 }
             },
@@ -1073,8 +1074,8 @@ fn start_actions(
                         }
                     }
                 }
-            } else {
-                events.push(FightEvent::StaminaOut { fighter: id as u8 });
+            } else if let Some(fighter) = slot_id_u8(id) {
+                events.push(FightEvent::StaminaOut { fighter });
             }
         }
     }
@@ -1107,8 +1108,8 @@ fn dodge_step(
         // A dodge cancels its own in-flight attack.
         f.is_attacking = false;
         f.attack_age = 0;
-    } else {
-        events.push(FightEvent::StaminaOut { fighter: id as u8 });
+    } else if let Some(fighter) = slot_id_u8(id) {
+        events.push(FightEvent::StaminaOut { fighter });
     }
     true
 }
@@ -1296,8 +1297,8 @@ fn resolve_strike(
         guard,
         symmetric,
     } = strike;
-    let a = attacker as u8;
-    let v = victim as u8;
+    let a = u8::try_from(attacker).unwrap_or(u8::MAX);
+    let v = u8::try_from(victim).unwrap_or(u8::MAX);
     let stun = |current: u32, ticks: u32| if symmetric { current.max(ticks) } else { ticks };
     if guard.invulnerable_with(tables) {
         events.push(FightEvent::Dodged {
@@ -2811,7 +2812,7 @@ mod tests {
                 *e,
                 FightEvent::Hit {
                     attacker: 4,
-                    victim: i as u8,
+                    victim: u8::try_from(i).unwrap_or(u8::MAX),
                     damage: TABLES_V1.attack_damage,
                 }
             );

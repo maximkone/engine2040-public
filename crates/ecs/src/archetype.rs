@@ -790,12 +790,19 @@ impl World {
     /// Apply all staged kills; stale handles are skipped, never fatal.
     /// Drains in canonical `(id, gen)` order so the staged call order never
     /// reaches `free` reuse or table rows: index-ordered Vec, no HashMap order.
+    /// The staged-kill buffer is sorted in place and cleared, never taken, so
+    /// a caller that stages and flushes every tick reuses its capacity instead
+    /// of allocating a fresh vector each time. Staged handles are unique
+    /// (`kill` refuses a repeat), so the unstable sort and the stable sort it
+    /// replaced order the same list identically.
     pub fn flush(&mut self) {
-        let mut q = std::mem::take(&mut self.pending);
-        q.sort_by_key(|e| (e.id, e.gen));
-        for e in q {
+        self.pending.sort_unstable_by_key(|e| (e.id, e.gen));
+        let staged = self.pending.len();
+        for i in 0..staged {
+            let e = self.pending[i];
             let _ = self.despawn(e);
         }
+        self.pending.clear();
     }
     /// Apply all staged kills through `arena` scratch with no allocation:
     /// same canonical `(id, gen)` order and same despawn sequence as
@@ -2175,5 +2182,238 @@ mod tests {
             assert_ne!(seeded, region, "seed {to:?} must land");
             assert_eq!(float_sites(&seeded).len(), 1, "seed {to:?}");
         }
+    }
+
+    /// Rows in the flush receipt world.
+    const FLUSH_ROWS: usize = 2_000;
+    /// Staged kills per flush: a plausible per-tick churn on the direct path.
+    const FLUSH_KILLS: usize = 8;
+    /// Flush cycles timed per run; the p50 of these is the receipt.
+    const FLUSH_ITERS: usize = 400;
+    /// Digest of the fixture world after `flush`, frozen before the in-place
+    /// flush change; the despawn sequence must still write these bytes.
+    const FLUSH_ORACLE: u64 = 9_361_122_219_599_841_781;
+
+    /// `i` as an `f32` through the checked helper, so this fixture adds no cast.
+    fn coord(i: usize) -> f32 {
+        engine_core::checked::f32_from_u64(u64::try_from(i).unwrap_or(0))
+    }
+
+    /// 16 P+V rows, one immediate despawn (free list, 15 rows left) and six
+    /// staged kills.
+    fn flush_fixture() -> (World, Vec<Entity>) {
+        let mut w = World::new();
+        w.reserve(32);
+        let mut ids = Vec::with_capacity(16);
+        for i in 0..16 {
+            let f = coord(i);
+            ids.push(w.spawn(
+                Some(Position { x: f, y: -f }),
+                Some(Velocity { x: 0.5, y: -0.25 }),
+            ));
+        }
+        assert!(w.despawn(ids[1]), "one dead row fills the free list");
+        for i in (0..16).step_by(3) {
+            assert!(w.kill(ids[i]), "row {i} stages");
+        }
+        (w, ids)
+    }
+
+    /// The in-place flush despawns the same set in the same canonical order as
+    /// the untouched arena flush, so both worlds snapshot byte for byte, and
+    /// the bytes frozen before the change still hold.
+    #[test]
+    fn flush_matches_the_arena_path_and_the_frozen_bytes() {
+        let (mut direct, _) = flush_fixture();
+        assert_eq!(direct.pending(), 6, "the fixture stages six kills");
+        direct.flush();
+        assert_eq!(direct.pending(), 0, "flush drains the stagings");
+        let (mut via_arena, _) = flush_fixture();
+        let mut arena = PhaseArena::with_capacity(32, 0);
+        via_arena.flush_with(&mut arena).expect("the kill set fits");
+        assert_eq!(
+            direct.snapshot(),
+            via_arena.snapshot(),
+            "flush order moved table rows or the free list"
+        );
+        assert_eq!(direct.state_hash(), via_arena.state_hash());
+        assert_eq!(
+            hash_bytes(&direct.snapshot()),
+            FLUSH_ORACLE,
+            "the flushed world moved"
+        );
+        // Not vacuous: a bigger kill set moves the bytes.
+        let (mut other, _) = flush_fixture();
+        let e = other.spawn(Some(Position { x: 9.0, y: 9.0 }), Some(Velocity::default()));
+        assert!(other.kill(e));
+        other.flush();
+        assert_ne!(
+            hash_bytes(&other.snapshot()),
+            FLUSH_ORACLE,
+            "a bigger kill set must move the bytes"
+        );
+    }
+
+    /// The pre-change flush body, kept as the A side of the receipt: taking
+    /// the staged-kill buffer leaves a zero-capacity vector behind, so the
+    /// next staging cycle allocates again. Test-only; `flush` now sorts and
+    /// clears in place.
+    fn flush_taking(w: &mut World) {
+        let mut q = std::mem::take(&mut w.pending);
+        q.sort_by_key(|e| (e.id, e.gen));
+        for e in q {
+            let _ = w.despawn(e);
+        }
+    }
+
+    /// The in-place flush as the B side of the receipt harness.
+    fn flush_in_place(w: &mut World) {
+        w.flush();
+    }
+
+    /// `FLUSH_ROWS` P+V rows on a fixed grid, sized for the receipt cycles.
+    fn flush_bench_world() -> World {
+        let mut w = World::new();
+        w.reserve(FLUSH_ROWS + FLUSH_KILLS + 8);
+        for i in 0..FLUSH_ROWS {
+            let f = coord(i);
+            w.spawn(
+                Some(Position { x: f * 0.25, y: -f }),
+                Some(Velocity { x: 0.5, y: -0.25 }),
+            );
+        }
+        w
+    }
+
+    /// Re-spawn `count` rows, recycling the ids the last cycle freed.
+    fn respawn_count(w: &mut World, count: usize) {
+        for i in 0..count {
+            let f = coord(i);
+            w.spawn(
+                Some(Position { x: f, y: -f }),
+                Some(Velocity { x: 0.5, y: 0.25 }),
+            );
+        }
+    }
+
+    /// `ns` in microseconds for the receipt line (no cast, no float method).
+    fn micros(ns: u128) -> f64 {
+        engine_core::checked::f64_from_u64(u64::try_from(ns).unwrap_or(0)) / 1000.0
+    }
+
+    /// How many times slower `slow` is than `fast`, as a receipt figure.
+    fn ratio(slow: u128, fast: u128) -> f64 {
+        if fast == 0 {
+            return 0.0;
+        }
+        engine_core::checked::f64_from_u64(u64::try_from(slow).unwrap_or(0))
+            / engine_core::checked::f64_from_u64(u64::try_from(fast).unwrap_or(0))
+    }
+
+    /// Flush receipt: the in-place flush against the pre-change taking flush,
+    /// over the same op sequence on two worlds, on interleaved rounds so the
+    /// same machine load sits under both sides. Run: cargo test -p engine-ecs
+    /// --lib --release flush_bench_receipt -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn flush_bench_receipt() {
+        let (mut taking, mut in_place) = (flush_bench_world(), flush_bench_world());
+        let mut census_a = PhaseArena::with_capacity(FLUSH_ROWS + 8, 0);
+        let mut census_b = PhaseArena::with_capacity(FLUSH_ROWS + 8, 0);
+        let cycle = |w: &mut World, census: &mut PhaseArena, flush: &dyn Fn(&mut World)| {
+            w.collect_live_into(census)
+                .expect("census fits the pre-size");
+            let victims: Vec<Entity> = census
+                .entities()
+                .iter()
+                .copied()
+                .take(FLUSH_KILLS)
+                .collect();
+            let t = std::time::Instant::now();
+            for v in &victims {
+                assert!(w.kill(*v), "a census victim stages");
+            }
+            flush(w);
+            let ns = t.elapsed().as_nanos();
+            respawn_count(w, FLUSH_KILLS);
+            ns
+        };
+        // Warmup cycles size every buffer on both sides before the timing.
+        for _ in 0..2 {
+            cycle(&mut taking, &mut census_a, &flush_taking);
+            cycle(&mut in_place, &mut census_b, &flush_in_place);
+        }
+        let mut take_runs = Vec::with_capacity(FLUSH_ITERS);
+        let mut place_runs = Vec::with_capacity(FLUSH_ITERS);
+        for _ in 0..FLUSH_ITERS {
+            take_runs.push(cycle(&mut taking, &mut census_a, &flush_taking));
+            place_runs.push(cycle(&mut in_place, &mut census_b, &flush_in_place));
+        }
+        assert_eq!(
+            taking.snapshot(),
+            in_place.snapshot(),
+            "the two sides ran the same sequence to the same bytes"
+        );
+        assert_eq!(taking.count(), FLUSH_ROWS, "the population is steady");
+        take_runs.sort_unstable();
+        place_runs.sort_unstable();
+        let (old, new) = (take_runs[FLUSH_ITERS / 2], place_runs[FLUSH_ITERS / 2]);
+        eprintln!(
+            "world_flush_p50_us={:.3} taking_p50_us={:.3} speedup={:.2}x rows={FLUSH_ROWS} kills={FLUSH_KILLS}",
+            micros(new),
+            micros(old),
+            ratio(old, new)
+        );
+        assert!(new < old, "the in-place flush must not be the slower one");
+    }
+
+    /// The staged-kill path must stay allocation-free once its buffer is warm,
+    /// because the buffer is reused rather than taken and dropped per call.
+    #[test]
+    fn flush_reuses_its_staged_kill_buffer() {
+        use engine_core::alloc_probe::measure;
+        let (_, seen) = measure(|| std::hint::black_box(vec![0u8; 64]));
+        assert!(seen.calls >= 1, "alloc probe is blind");
+        let mut w = World::new();
+        w.reserve(64);
+        let mut census = PhaseArena::with_capacity(64, 0);
+        for i in 0..32 {
+            let f = coord(i);
+            w.spawn(
+                Some(Position { x: f, y: -f }),
+                Some(Velocity { x: 0.5, y: 0.25 }),
+            );
+        }
+        // Two warmup cycles size the staged-kill buffer and the free list.
+        for _ in 0..2 {
+            w.collect_live_into(&mut census).expect("census fits");
+            let warm: Vec<Entity> = census.entities().iter().copied().take(4).collect();
+            for e in &warm {
+                assert!(w.kill(*e));
+            }
+            w.flush();
+            for i in 0..4 {
+                let f = coord(i);
+                w.spawn(
+                    Some(Position { x: f, y: -f }),
+                    Some(Velocity { x: 0.5, y: 0.25 }),
+                );
+            }
+        }
+        // A fresh census picks the victims outside the measured window.
+        w.collect_live_into(&mut census).expect("census fits");
+        let victims: Vec<Entity> = census.entities().iter().copied().take(4).collect();
+        let ((), heap) = measure(|| {
+            for e in &victims {
+                assert!(w.kill(*e), "a census victim stages");
+            }
+            w.flush();
+        });
+        assert_eq!(heap.calls, 0, "a warm flush must not allocate");
     }
 }

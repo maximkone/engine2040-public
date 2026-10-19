@@ -48,6 +48,8 @@ mod arena;
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(target_arch = "wasm32")]
+mod fight;
+#[cfg(target_arch = "wasm32")]
 mod netplay;
 #[cfg(target_arch = "wasm32")]
 mod shell;

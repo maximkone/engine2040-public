@@ -14,8 +14,11 @@
 //!
 //! Delivery: WebSocket is one ordered reliable byte stream. Datagram-class
 //! frames therefore ride it with head-of-line blocking (the documented
-//! downgrade of the UDP path); the sender sheds a datagram when its queue is
-//! full and the input redundancy window recovers it, as with loss.
+//! downgrade of the UDP path). The send side keeps one datagram slot: while
+//! the writer is stalled a newer frame replaces the waiting one and the skip
+//! is counted ([`LatestOnly`]), so a resume writes the newest state, never a
+//! backlog, and the input redundancy window recovers the skipped ticks as
+//! with loss.
 //!
 //! TLS: the server speaks plain `ws`. `wss` on 443 is terminated in front of
 //! it (a reverse proxy), the same place a TLS-inspecting proxy sits.
@@ -33,5 +36,6 @@ mod tests;
 
 #[cfg(all(feature = "websocket", not(target_arch = "wasm32")))]
 pub use server::{
-    DepartReason, Departure, WsServer, IDLE_TIMEOUT, MAX_SESSIONS, RELIABLE_FRAMES, SESSION_PATH,
+    DepartReason, Departure, LatestOnly, WsServer, IDLE_TIMEOUT, MAX_SESSIONS, RELIABLE_FRAMES,
+    SESSION_PATH,
 };

@@ -516,8 +516,12 @@ impl ArenaApp {
         if self.pass_frames == 0 {
             self.pass_adapter.clone_from(&receipt.adapter);
             self.pass_driver.clone_from(&receipt.driver);
-            self.pass_size = (receipt.width, receipt.height);
         }
+        // The means above are taken over every folded frame, so the size they
+        // were taken at is the newest frame's: the shell resizes the window to
+        // the capture size a few frames into the run, and a run that names its
+        // boot size would report the 1080p means under a 720p label.
+        self.pass_size = (receipt.width, receipt.height);
         self.pass_frames = self.pass_frames.saturating_add(1);
         if receipt.look_passes > 0 {
             self.pass_probes = self.pass_probes.saturating_add(1);

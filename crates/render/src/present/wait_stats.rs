@@ -263,6 +263,11 @@ pub struct GpuTimingReport {
     pub sky: Percentiles,
     /// GTAO compute pass alone over the frames that ran it; zero when none did.
     pub gtao: Percentiles,
+    /// QL12 particle draw pass alone over the frames that ran it; zero when
+    /// none did.
+    pub particle: Percentiles,
+    /// Frames that ran the particle draw pass (its query pair was written).
+    pub particle_frames: u64,
 }
 
 #[cfg(test)]

@@ -3356,6 +3356,7 @@ version = "0.1.0"
 dependencies = [
  "engine-audio",
  "engine-clock",
+ "engine-game",
  "engine-input",
  "engine-net",
  "engine-proof",

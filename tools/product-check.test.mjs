@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { packetText, parseReceipt, parseView, passFloors, redFloors, referenceInterval, scoreCaptures } from "./product-check.mjs";
+import { crc32, deflateSync } from "node:zlib";
+import { sandFrames } from "./iqa-gate.mjs";
+import { lastGreenRun, lookScore, middleCapture, newestFirst, packetText, parseReceipt, parseView, passFloors, pruneRuns, redFloors, referenceInterval, scoreCaptures } from "./product-check.mjs";
 
 const RECEIPT = `arena smoke: ticks=300 frames=300
 arena frame-split: sim=0.085ms present=117.519ms fighters=2.932ms per frame (mean over 300 frames) cpu_ms p50=7.501 p99=407.215 interval_ms p50=59.597 p99=407.881 gpu_ms p50=0.244 p99=4.156 (forward p50=0.135 blit p50=0.109; 299 frames) acquire=0.068ms present_mode=Fifo
@@ -105,4 +107,73 @@ test("GS3 pass floors: every required pass above 0 ms is green; pending never tu
   const green = redFloors({ look: { ...look, passes: { ...look.passes, bloom: 1.2 } }, timing: null, caps: quietCaps, ref: null }, BAR, greenBar);
   assert.deepEqual(green, {}, "ibl and bloom above 0 ms are green");
   assert.deepEqual(passFloors({}, { passes: { sky: "pending" } }), {}, "a missing pending pass is ignored");
+});
+
+// LF15's consumer: the machine look score reads this run's middle capture
+// against the last green run's, with the FLIP metric iqa-gate.mjs mirrors.
+const pngOf = (w, h, data) => {
+  const raw = Buffer.alloc(h * (w * 4 + 1));
+  for (let y = 0; y < h; y++) data.copy(raw, y * (w * 4 + 1) + 1, y * w * 4, (y + 1) * w * 4);
+  const chunk = (t, d) => { const l = Buffer.alloc(4); l.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc32(td) >>> 0); return Buffer.concat([l, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 6;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+};
+
+test("the look score reads the middle capture against the last green run's", () => {
+  assert.equal(middleCapture(["frame_000000.png", "frame_000060.png", "frame_000120.png"]), "frame_000060.png");
+  assert.equal(middleCapture(["a.png", "b.png"]), "a.png");
+  assert.equal(middleCapture([]), null);
+  const history = [{ sha: "aaa1111", red: { strobe: "x" } }, { sha: "bbb2222", red: {} }, { sha: "ccc3333", red: {} }];
+  assert.deepEqual(lastGreenRun(history, ["aaa1111-2026", "bbb2222-2026"]), { sha: "bbb2222", dir: "bbb2222-2026" }, "the newest green run whose captures are on disk wins");
+  assert.equal(lastGreenRun(history, ["aaa1111-2026"]), null, "a red run is never the reference");
+  assert.equal(lastGreenRun([{ sha: "ddd4444", red: {} }], []), null, "a green run whose captures were pruned is skipped");
+  const { ref, cap, w, h } = sandFrames();
+  const prior = mkdtempSync(join(tmpdir(), "product-")), cur = mkdtempSync(join(tmpdir(), "product-"));
+  writeFileSync(join(prior, "frame_000000.png"), pngOf(w, h, ref));
+  writeFileSync(join(cur, "frame_000000.png"), pngOf(w, h, cap));
+  const s = lookScore(prior, cur);
+  assert.equal(s.flip, 1268, "the same PNG pair the Rust and iqa-gate tests pin (LF15)");
+  assert.equal(s.vs, prior);
+  assert.equal(lookScore(prior, mkdtempSync(join(tmpdir(), "product-"))).why, "this run has no captures");
+  assert.equal(lookScore(null, cur).flip, null);
+  assert.match(lookScore(null, cur).why, /no green run/);
+  assert.equal(lookScore(prior, prior).flip, 0, "a run compared with itself reads 0");
+});
+
+test("the look score never throws: broken captures read as none with the reason", () => {
+  const prior = mkdtempSync(join(tmpdir(), "product-")), cur = mkdtempSync(join(tmpdir(), "product-"));
+  assert.match(lookScore(prior, cur).why, /this run has no captures/);
+  writeFileSync(join(cur, "frame_000000.png"), Buffer.from("not a png"));
+  assert.match(lookScore(prior, cur).why, /the last green run holds no captures/);
+  writeFileSync(join(prior, "frame_000000.png"), Buffer.from("not a png"));
+  assert.match(lookScore(prior, cur).why, /capture decode failed/);
+  assert.equal(lookScore(prior, cur).flip, null);
+  assert.match(lookScore(join(prior, "gone"), cur).why, /the last green run holds no captures/, "a reference dir that vanished reads as none");
+  assert.equal(lookScore(prior, join(cur, "gone")).why, "this run has no captures");
+});
+
+test("the kept runs are the six newest by their UTC stamp, not by sha", () => {
+  assert.deepEqual(newestFirst(["ffffffff-20261015T1242Z", "00000000-20261012T2223Z", "aaaaaaaa-20261013T0335Z"]), ["ffffffff-20261015T1242Z", "aaaaaaaa-20261013T0335Z", "00000000-20261012T2223Z"]);
+});
+
+test("the look score's reference run survives pruning", () => {
+  const root = mkdtempSync(join(tmpdir(), "product-"));
+  const dirs = ["aaaa1111-20261001T0000Z", "bbbb2222-20261002T0000Z", "cccc3333-20261003T0000Z", "dddd4444-20261004T0000Z", "eeee5555-20261005T0000Z", "ffff6666-20261006T0000Z", "gggg7777-20261007T0000Z", "hhhh8888-20261008T0000Z"];
+  for (const d of dirs) mkdirSync(join(root, d));
+  pruneRuns(root, "aaaa1111-20261001T0000Z");
+  assert.deepEqual(readdirSync(root).sort(), ["aaaa1111-20261001T0000Z", "cccc3333-20261003T0000Z", "dddd4444-20261004T0000Z", "eeee5555-20261005T0000Z", "ffff6666-20261006T0000Z", "gggg7777-20261007T0000Z", "hhhh8888-20261008T0000Z"].sort(), "the six newest plus the pinned reference");
+});
+
+test("a look score above the floor is red and files bug:product-look", () => {
+  const look = { ...parseReceipt(RECEIPT), tinted_share: 0, exit: 0, timedOut: false, flip: 1500, flip_max: 8000, flip_vs: "abc1234" };
+  const red = redFloors({ look, timing: null, caps: quietCaps, ref: null }, BAR);
+  assert.deepEqual(Object.keys(red), ["look"]);
+  assert.match(red.look, /1500 x10000 against the last green run abc1234 \(floor 1200\)/);
+  const text = packetText({ metric: "look", why: red.look, sha: "abc1234", runDir: "target/reports/product/runs/x", history: [{ sha: "0ld0000", red: {} }] });
+  assert.match(text, /^row: bug:product-look$/m);
+  assert.ok(text.includes("\nGoal:"), "the packet keeps the builder boilerplate");
+  const worstGreen = redFloors({ look: { ...look, flip: 609 }, timing: null, caps: quietCaps, ref: null }, BAR);
+  assert.deepEqual(worstGreen, {}, "the worst green-vs-green drift observed (609 between two trees) stays green");
+  const none = redFloors({ look: { ...look, flip: null, flip_vs: null, flip_why: "no green run to compare against" }, timing: null, caps: quietCaps, ref: null }, BAR);
+  assert.deepEqual(none, {}, "no comparable run is not a red");
 });

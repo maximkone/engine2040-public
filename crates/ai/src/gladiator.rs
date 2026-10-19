@@ -203,8 +203,35 @@ fn bias_to_delta(bias: i32) -> f32 {
     }
 }
 
+/// Nerve-weighted lane scores in the `0..=1` utility band from integer signals:
+/// the base table shaped by `weights`, then the depth bias as a small `f32`
+/// delta. Pure and total; no allocation.
+fn thinker_scores(
+    dist_mm: i32,
+    foe_attacking: bool,
+    stamina: i32,
+    weights: &crate::personality::Weights,
+    bias: [i32; 5],
+) -> [f32; 5] {
+    let weighted = weights.apply(thinker_base(dist_mm, foe_attacking, stamina));
+    [
+        crate::utility::clamp01(weighted[0] + bias_to_delta(bias[0])),
+        crate::utility::clamp01(weighted[1] + bias_to_delta(bias[1])),
+        crate::utility::clamp01(weighted[2] + bias_to_delta(bias[2])),
+        crate::utility::clamp01(weighted[3] + bias_to_delta(bias[3])),
+        crate::utility::clamp01(weighted[4] + bias_to_delta(bias[4])),
+    ]
+}
+
 /// Thinker-table intent from integer signals plus nerve weights and depth bias. Scores never enter any digest. Units: intent. Errors: none. Deterministic.
 /// Caller: Brain::score_intent tick path.
+///
+/// The gated choice table ([`crate::utility::Thinker`]) is a cold-build item:
+/// its two `Vec`s are built once, not per decision. The tick reads the same
+/// five scored rows straight through [`crate::utility::pick_gated`], so a
+/// decide allocates nothing. `Highest` with a zero threshold picks the argmax
+/// with strict `>` (the earlier lane keeps a tie), exactly what the table
+/// returned; the `_` arm is the table's otherwise intent.
 pub fn thinker_intent(
     dist_mm: i32,
     foe_attacking: bool,
@@ -212,15 +239,7 @@ pub fn thinker_intent(
     weights: &crate::personality::Weights,
     bias: [i32; 5],
 ) -> Intent {
-    let base = thinker_base(dist_mm, foe_attacking, stamina);
-    let weighted = weights.apply(base);
-    let scored = [
-        crate::utility::clamp01(weighted[0] + bias_to_delta(bias[0])),
-        crate::utility::clamp01(weighted[1] + bias_to_delta(bias[1])),
-        crate::utility::clamp01(weighted[2] + bias_to_delta(bias[2])),
-        crate::utility::clamp01(weighted[3] + bias_to_delta(bias[3])),
-        crate::utility::clamp01(weighted[4] + bias_to_delta(bias[4])),
-    ];
+    let scored = thinker_scores(dist_mm, foe_attacking, stamina, weights, bias);
     struct Fixed(f32);
     impl crate::utility::Scorer for Fixed {
         fn score(&self, _: &crate::Brief) -> f32 {
@@ -234,24 +253,19 @@ pub fn thinker_intent(
         Fixed(scored[3]),
         Fixed(scored[4]),
     );
-    let table = crate::utility::Thinker::new(3)
-        .when(&a, 0)
-        .when(&b, 1)
-        .when(&c, 2)
-        .when(&d, 3)
-        .when(&e, 4);
+    let rows: [&dyn crate::utility::Scorer; INTENT_OUT_DIM] = [&a, &b, &c, &d, &e];
     let brief = crate::Brief {
         tick: 0,
         entities: 0,
         bodies: 0,
         hash: 0,
     };
-    match table.decide(&brief, 0.0, crate::utility::Gate::Highest) {
-        0 => Intent::Attack,
-        1 => Intent::Block,
-        2 => Intent::Dodge,
-        3 => Intent::Advance,
-        4 => Intent::Retreat,
+    match crate::utility::pick_gated(&rows, &brief, 0.0, crate::utility::Gate::Highest) {
+        crate::utility::Gated::Pick(0) => Intent::Attack,
+        crate::utility::Gated::Pick(1) => Intent::Block,
+        crate::utility::Gated::Pick(2) => Intent::Dodge,
+        crate::utility::Gated::Pick(3) => Intent::Advance,
+        crate::utility::Gated::Pick(4) => Intent::Retreat,
         _ => Intent::Advance,
     }
 }
@@ -1499,6 +1513,7 @@ fn yaw_to_cdeg(yaw_rad: f32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::personality::Weights;
     use std::time::Duration;
 
     fn fighter() -> FighterId {
@@ -1580,6 +1595,172 @@ mod tests {
                 || coward_out.buttons == Buttons(DODGE)
                 || coward_out.mx < 0,
             "coward defends or retreats: {coward_out:?}"
+        );
+    }
+
+    /// The pre-change thinker path: the same five scored rows fed through the
+    /// two-`Vec` [`crate::utility::Thinker`] table per call, kept as the oracle
+    /// the flat read must equal on every fixture.
+    fn thinker_intent_table(
+        dist_mm: i32,
+        foe_attacking: bool,
+        stamina: i32,
+        weights: &Weights,
+        bias: [i32; 5],
+    ) -> Intent {
+        let scored = thinker_scores(dist_mm, foe_attacking, stamina, weights, bias);
+        struct Fixed(f32);
+        impl crate::utility::Scorer for Fixed {
+            fn score(&self, _: &crate::Brief) -> f32 {
+                self.0
+            }
+        }
+        let (a, b, c, d, e) = (
+            Fixed(scored[0]),
+            Fixed(scored[1]),
+            Fixed(scored[2]),
+            Fixed(scored[3]),
+            Fixed(scored[4]),
+        );
+        let table = crate::utility::Thinker::new(3)
+            .when(&a, 0)
+            .when(&b, 1)
+            .when(&c, 2)
+            .when(&d, 3)
+            .when(&e, 4);
+        let brief = crate::Brief {
+            tick: 0,
+            entities: 0,
+            bodies: 0,
+            hash: 0,
+        };
+        match table.decide(&brief, 0.0, crate::utility::Gate::Highest) {
+            0 => Intent::Attack,
+            1 => Intent::Block,
+            2 => Intent::Dodge,
+            3 => Intent::Advance,
+            4 => Intent::Retreat,
+            _ => Intent::Advance,
+        }
+    }
+
+    /// Lane index for the sweep tally (`0..=5`); no cast.
+    fn intent_tag(intent: Intent) -> usize {
+        match intent {
+            Intent::Attack => 0,
+            Intent::Block => 1,
+            Intent::Dodge => 2,
+            Intent::Advance => 3,
+            Intent::Retreat => 4,
+            Intent::Reposition => 5,
+        }
+    }
+
+    /// The distance, attack, stamina, nerve and bias sweep: the flat read
+    /// answers exactly what the per-call table build answered on every fixture,
+    /// and the sweep really does reach more than one lane.
+    #[test]
+    fn thinker_intent_matches_the_table_oracle_on_a_sweep() {
+        let mut lanes = [0u32; 6];
+        for dist_mm in [0, 1_000, 2_500, 4_000, 8_000, 9_000, 40_000] {
+            for foe_attacking in [false, true] {
+                for stamina in [0, 100, 400, 1_000] {
+                    for weights in [Weights::bold(), Weights::neutral(), Weights::shy()] {
+                        for bias in [[0; 5], [900, -900, 0, 0, 0], [-900, 0, 0, 600, 200]] {
+                            let want = thinker_intent_table(
+                                dist_mm,
+                                foe_attacking,
+                                stamina,
+                                &weights,
+                                bias,
+                            );
+                            let got =
+                                thinker_intent(dist_mm, foe_attacking, stamina, &weights, bias);
+                            assert_eq!(
+                                got, want,
+                                "flat read moved at dist {dist_mm}, attack {foe_attacking}"
+                            );
+                            lanes[intent_tag(got)] = lanes[intent_tag(got)].saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+        let reached = lanes.iter().filter(|n| **n > 0).count();
+        assert!(reached >= 2, "the sweep must reach real choices: {lanes:?}");
+    }
+
+    /// Timing receipt: p50 microseconds of one [`thinker_intent`] against the
+    /// per-call table build it replaced, interleaved so the same machine load
+    /// sits under both sides. Integer nanos only: no cast, no unwrap.
+    /// Run: cargo test -p engine-ai --release --lib thinker_intent_paired_receipt -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn thinker_intent_paired_receipt() {
+        const ITERS: usize = 400;
+        let weights = Weights::bold();
+        let bias = [0, -200, 0, 300, 0];
+        let (dist_mm, foe_attacking, stamina) = (2_500, true, 800);
+        assert_eq!(
+            thinker_intent(dist_mm, foe_attacking, stamina, &weights, bias),
+            thinker_intent_table(dist_mm, foe_attacking, stamina, &weights, bias),
+            "the two timed paths disagree"
+        );
+        std::hint::black_box(thinker_intent_table(
+            dist_mm,
+            foe_attacking,
+            stamina,
+            &weights,
+            bias,
+        ));
+        std::hint::black_box(thinker_intent(
+            dist_mm,
+            foe_attacking,
+            stamina,
+            &weights,
+            bias,
+        ));
+        let mut table = Vec::with_capacity(ITERS);
+        let mut flat = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let begin = std::time::Instant::now();
+            let _ = std::hint::black_box(thinker_intent_table(
+                dist_mm,
+                foe_attacking,
+                stamina,
+                &weights,
+                bias,
+            ));
+            table.push(begin.elapsed().as_nanos());
+            let begin = std::time::Instant::now();
+            let _ = std::hint::black_box(thinker_intent(
+                dist_mm,
+                foe_attacking,
+                stamina,
+                &weights,
+                bias,
+            ));
+            flat.push(begin.elapsed().as_nanos());
+        }
+        table.sort_unstable();
+        flat.sort_unstable();
+        let (table_ns, flat_ns) = (table[ITERS / 2], flat[ITERS / 2]);
+        eprintln!(
+            "gladiator_thinker_intent table_p50_us={}.{:03} flat_p50_us={}.{:03} speedup_x100={} iters={ITERS}",
+            table_ns / 1_000,
+            table_ns % 1_000,
+            flat_ns / 1_000,
+            flat_ns % 1_000,
+            table_ns.saturating_mul(100).checked_div(flat_ns).unwrap_or(0),
+        );
+        assert!(
+            flat_ns < table_ns,
+            "the flat read must not be the slower one: {flat_ns} ns vs {table_ns} ns"
         );
     }
 

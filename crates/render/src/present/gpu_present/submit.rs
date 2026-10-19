@@ -126,17 +126,23 @@ pub(super) struct ForwardLook<'a> {
     pub(super) sky: SkyPlan,
     /// Something reads depth after the pass (fog feed copy, AO).
     pub(super) keep_depth: bool,
+    /// Record the staged particle draw into the HDR target (QL12): set on
+    /// frames that staged a live batch this frame, so a live frame never
+    /// repeats a stale batch.
+    pub(super) particles: bool,
     /// Device timestamps around the forward pass.
     pub(super) timestamps: Option<wgpu::RenderPassTimestampWrites<'a>>,
     /// Device timestamps around the own-pass sky.
     pub(super) sky_timestamps: Option<wgpu::RenderPassTimestampWrites<'a>>,
+    /// Device timestamps around the particle draw pass.
+    pub(super) particle_timestamps: Option<wgpu::RenderPassTimestampWrites<'a>>,
 }
 
 impl<'a> ForwardLook<'a> {
     /// The live window frame: the draw, sun and sky switches the frame's
     /// `LiveLook` carries (the sky in its own pass when on), depth kept for the
-    /// sky pass and for GTAO (`gtao`), and the device timestamps of the
-    /// frame's timer slot.
+    /// sky pass and for GTAO (`gtao`), no particle batch (a live frame never
+    /// steps the pool), and the device timestamps of the frame's timer slot.
     #[must_use]
     pub(super) fn live(
         look: &LiveLook,
@@ -149,8 +155,28 @@ impl<'a> ForwardLook<'a> {
             sun_depth: look.sun_depth,
             sky: if sky { SkyPlan::OwnPass } else { SkyPlan::Skip },
             keep_depth: gtao,
+            particles: false,
             timestamps: timer.map(GpuTimer::forward_writes),
             sky_timestamps: timer.map(GpuTimer::sky_writes),
+            particle_timestamps: None,
+        }
+    }
+
+    /// The window probe frame: every pass on with no sky of its own, depth
+    /// kept for the fog feed and the AO, the staged particle batch drawn when
+    /// `particles` is set (a held frame stages nothing), and the particle
+    /// pass bracketed by the frame timer's particle queries.
+    #[must_use]
+    pub(super) fn probed(particles: bool, timer: Option<&'a GpuTimer>) -> Self {
+        Self {
+            draws: true,
+            sun_depth: true,
+            sky: SkyPlan::Skip,
+            keep_depth: true,
+            particles,
+            timestamps: None,
+            sky_timestamps: None,
+            particle_timestamps: timer.map(GpuTimer::particle_writes),
         }
     }
 }
@@ -158,7 +184,9 @@ impl<'a> ForwardLook<'a> {
 impl ForwardLook<'_> {
     /// A blocking frame (capture twin, probe composite): every pass on, no
     /// sky of its own (a capture decision may add it), depth kept for the fog
-    /// feed, no device timestamps.
+    /// feed and no device timestamps. The live particle batch is left out: a
+    /// capture of one list must repeat byte-exact, and the pool steps one
+    /// tick per look frame, so drawing it would move pixels between twins.
     #[must_use]
     pub(super) fn blocking() -> Self {
         Self {
@@ -166,8 +194,10 @@ impl ForwardLook<'_> {
             sun_depth: true,
             sky: SkyPlan::Skip,
             keep_depth: true,
+            particles: false,
             timestamps: None,
             sky_timestamps: None,
+            particle_timestamps: None,
         }
     }
 }
@@ -274,14 +304,17 @@ impl Presenter {
     /// chart is not part of this tranche: it samples the init-time bake
     /// with no forward input, so it submits after the forward draws
     /// (see `submit_ibl_chart`) and the receipt counts it separately.
-    pub(super) fn encode_look_passes(&mut self) -> Result<LookPassReceipt, PresentError> {
-        let frame = self.look_frame();
+    pub(super) fn encode_look_passes(
+        &mut self,
+        frame: &FrameCamera,
+    ) -> Result<LookPassReceipt, PresentError> {
+        let frame_uniform = self.look_frame();
         let cam = self.look_cam();
         // RL8: the RA1 skybox plus the RL2 ambient read the same bound
         // bake every frame the RL4 submit binds below (RL7 fog follows in
         // the fog tranche off the same bake). A corrupt bake fails the
         // frame loudly here instead of tinting it.
-        let sky_sample = self.skybox_sample(frame.sun_dir)?;
+        let sky_sample = self.skybox_sample(frame_uniform.sun_dir)?;
         let ambient = self.ibl_ambient();
         if !sky_sample.iter().all(|c| c.is_finite()) || !ambient.iter().all(|c| c.is_finite()) {
             return Err(PresentError::Validation(
@@ -291,7 +324,7 @@ impl Presenter {
         let sky = sky::submit_gpu_sky(
             &self.device,
             &self.queue,
-            &frame,
+            &frame_uniform,
             &self.sky_capture,
             &mut self.sky_sub,
         )
@@ -299,32 +332,59 @@ impl Presenter {
         let layers = material_layer::submit_chart_gpu(
             &self.device,
             &self.queue,
-            &frame,
+            &frame_uniform,
             &mut self.layer_sub,
         )
         .map_err(layer_err)?;
         self.particles.step(particles_gpu::TICK_DT);
-        let particles = self
-            .particles
-            .submit_gpu(&self.device, &self.queue, &frame, &mut self.particle_sub)
+        // QL12: the pool's live set is staged as flipbook instances under the
+        // frame camera; the frame records the draw into its HDR pass
+        // (`encode_forward`), so the particle row is a device pass instead of
+        // a bind probe.
+        let particle = self
+            .particle_sub
+            .stage_pool(
+                &self.device,
+                &self.queue,
+                &self.particles,
+                frame.built_view_proj.to_cols_array_2d(),
+                frame.camera_right(),
+                frame.camera_up(),
+            )
             .map_err(particle_err)?;
         let decal_pool = &self.decal_pool;
         let decal_receipt = decal_pool
-            .submit_gpu(&self.device, &self.queue, &frame, &cam, &mut self.decal_sub)
+            .submit_gpu(
+                &self.device,
+                &self.queue,
+                &frame_uniform,
+                &cam,
+                &mut self.decal_sub,
+            )
             .map_err(decal_err)?;
-        // Each submitter above is one submit, one map and one poll wait.
-        self.frame_waits.map_and_wait_n(4);
+        // Each submitter above is one submit, one map and one poll wait; the
+        // particle stage is CPU-only (the frame's own error scope owns its
+        // validation) and reports its device ms through the frame timer.
+        self.frame_waits.map_and_wait_n(3);
         Ok(LookPassReceipt {
             passes: 4,
             validation_errors: sky.validation_errors
                 + layers.validation_errors
-                + particles.validation_errors
                 + decal_receipt.validation_errors,
             sky_ms: sky.submit_ms,
             layer_ms: layers.submit_ms,
-            particle_ms: particles.submit_ms,
+            particle_ms: self.particle_device_ms(particle.submit_ms),
             decal_ms: decal_receipt.submit_ms,
         })
+    }
+
+    /// The particle row's ms: the device timestamp of the newest resolved
+    /// particle pass when the frame has a timer, the CPU stage ms otherwise
+    /// (a capture twin with no timer). Evidence only, never a hash input.
+    fn particle_device_ms(&self, stage_ms: f64) -> f64 {
+        self.gpu_timer
+            .as_ref()
+            .map_or(stage_ms, |timer| f64::from(timer.latest_particle_ms()))
     }
 
     /// Submit the IBL material chart after the forward draws: the
@@ -1016,11 +1076,49 @@ impl Presenter {
             rp.draw(0..3, 0..1);
         }
         drop(rp);
-        if sky_plan == SkyPlan::OwnPass {
+        let sky_timed = if sky_plan == SkyPlan::OwnPass {
             self.encode_sky_pass(enc, targets, look.sky_timestamps)
         } else {
             false
+        };
+        // QL12: the staged particle batch composites over the lit frame
+        // inside the same encoder, one HDR load pass after the sky, so the
+        // quads land in the picture the blit and the capture read. A frame
+        // that staged no batch records nothing.
+        if look.particles && self.particle_sub.staged_count() > 0 {
+            self.encode_particle_pass(enc, targets, look.particle_timestamps);
         }
+        sky_timed
+    }
+
+    /// The staged particle batch as its own render pass after forward: loads
+    /// the HDR target, draws the flipbook quads with no depth attachment (the
+    /// pipeline's declared shape) and brackets the pass with its own device
+    /// timestamps when the frame has a timer, so the particle cost is a
+    /// device number of its own. Caller: `encode_forward` above.
+    fn encode_particle_pass(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ra1-particles"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &targets.hdr_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: timestamps,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.particle_sub.encode_draw(&mut rp);
     }
 
     /// The sky as its own render pass after forward: loads the HDR and id
@@ -1234,7 +1332,7 @@ impl Presenter {
         let frame = effective_camera(list, width, height)?;
         let (cam_bytes, light_bytes) = self.stage_frame(list, &frame)?;
         self.frame_waits = FrameWaits::default();
-        let look = self.encode_look_passes()?;
+        let look = self.encode_look_passes(&frame)?;
         self.ensure_targets(width, height);
         self.write_frame_uniforms(&cam_bytes, &light_bytes, true);
         // The window twin forward path samples the landed cascaded
@@ -1756,6 +1854,24 @@ impl FrameCamera {
     /// so this never fails and never rebuilds.
     pub(super) fn view_proj(&self) -> Result<glam::Mat4, v1::CameraError> {
         Ok(self.built_view_proj)
+    }
+
+    /// World-space camera right axis (unit length), the axis the particle
+    /// billboards expand along. Derived from the frame camera's own eye,
+    /// target and up: `right = normalize(forward x up)`.
+    pub(super) fn camera_right(&self) -> [f32; 3] {
+        let forward = (self.camera.target - self.camera.eye).normalize_or_zero();
+        let right = forward.cross(self.camera.up).normalize_or_zero();
+        right.to_array()
+    }
+
+    /// World-space camera up axis (unit length), the billboards' vertical
+    /// axis: `up = normalize(right x forward)`, re-orthogonalized against
+    /// the frame camera's forward so a tilted up never skews a quad.
+    pub(super) fn camera_up(&self) -> [f32; 3] {
+        let forward = (self.camera.target - self.camera.eye).normalize_or_zero();
+        let right = forward.cross(self.camera.up).normalize_or_zero();
+        right.cross(forward).normalize_or_zero().to_array()
     }
 }
 

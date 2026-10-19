@@ -13,6 +13,7 @@
 //! never reach the sim. Same integer and no-heap budget as the tick.
 
 use crate::fight::{step_with_tables_into, FightEvent, FightState, Tables, MAX_STAMINA, TABLES_V1};
+use engine_core::checked::saturating_u32_to_u16;
 use engine_core::{Fnv64, Rng};
 use engine_input::fighter::{ATTACK, BLOCK, DODGE, KNOWN_BUTTONS};
 use engine_input::{Buttons, ParticipantId, ParticipantInput};
@@ -482,7 +483,7 @@ pub const fn juice_for_damage(
     } else {
         damage_permille as u32
     };
-    let trauma = (juicing.trauma_permille as u32 * damage / 1000) as u16;
+    let trauma = saturating_u32_to_u16(juicing.trauma_permille as u32 * damage / 1000);
     let hitstop = sim_hitstop_ticks.saturating_add(juicing.hitstop_boost_ticks);
     JuiceOutput {
         hitstop_ticks: if hitstop > 60 { 60 } else { hitstop },
@@ -719,7 +720,7 @@ impl MoveKillShare {
         if kills_total == 0 || self.kills == 0 {
             return 0;
         }
-        (u32::from(self.kills) * 1000 / u32::from(kills_total)) as u16
+        saturating_u32_to_u16(u32::from(self.kills) * 1000 / u32::from(kills_total))
     }
 }
 
@@ -735,7 +736,7 @@ impl BalanceReport {
         if decisive == 0 {
             return 500;
         }
-        (self.wins_a as u32 * 1000 / decisive) as u16
+        saturating_u32_to_u16(self.wins_a as u32 * 1000 / decisive)
     }
 
     /// True while both fighters sit inside the 40–60% balance band over
@@ -785,7 +786,7 @@ fn next_rand(stream: &mut u64) -> u64 {
 /// dodge mixes, drawn from its own seeded stream. Both fighters run the same
 /// policy, so any persistent edge is the tables' doing, not the driver's.
 fn policy_buttons(stream: &mut u64) -> u8 {
-    match (next_rand(stream) % 100) as u8 {
+    match u8::try_from(next_rand(stream) % 100).unwrap_or(u8::MAX) {
         0..=37 => ATTACK,
         38..=52 => BLOCK,
         53..=62 => DODGE,
@@ -2098,7 +2099,7 @@ mod tests {
         );
         assert!(buffer.is_empty());
         // A full buffer drops the newcomer and keeps its contents.
-        for tick in 0..STREAM_BUFFER_CAP as u32 {
+        for tick in 0..u32::try_from(STREAM_BUFFER_CAP).unwrap_or(u32::MAX) {
             buffer.push(tick, ATTACK).unwrap();
         }
         assert!(buffer.is_full());

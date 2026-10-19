@@ -247,6 +247,25 @@ fn canvas_locked(canvas: &HtmlCanvasElement) -> bool {
         .is_some_and(|el| same(el, canvas))
 }
 
+/// The human seat's input for `tick` at `facing` centidegrees: the keys, mouse and pad the page
+/// holds right now, through the same bindings table the native window uses. Caller: the played
+/// match (`crate::fight`), one call per fixed tick. The type names stay neutral here on purpose.
+#[must_use]
+pub fn seat_input(tick: u32, facing: i16) -> Option<BodyInput> {
+    INPUT.with(|input| input.borrow().fighter_input(tick, BodyId(0), facing).ok())
+}
+
+/// The seat's turn for this frame: the pending mouse look in millidegrees plus whether Q and E
+/// are held, for the caller's [`Facing`](crate::input::Facing).
+#[must_use]
+pub fn seat_look() -> (i32, bool, bool) {
+    INPUT.with(|input| {
+        let mut input = input.borrow_mut();
+        let (yaw, _pitch) = input.take_look(MILLI_DEG_PER_PX);
+        (yaw, input.held(Key::Q), input.held(Key::E))
+    })
+}
+
 /// Start listening and printing. Safe to call once per page (a second call does nothing); works
 /// with or without WebGPU, because it needs only the DOM.
 pub fn install(canvas_id: &str) {

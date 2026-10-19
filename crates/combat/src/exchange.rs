@@ -528,8 +528,8 @@ fn resolve_parries(
                         state.fighters[v].last_parry_tick = state.tick;
                         if n < out.len() {
                             out[n] = ExchangeEvent::Parried {
-                                attacker: a as u8,
-                                victim: v as u8,
+                                attacker: u8::try_from(a).unwrap_or(u8::MAX),
+                                victim: u8::try_from(v).unwrap_or(u8::MAX),
                             };
                             n += 1;
                         }
@@ -561,6 +561,8 @@ fn resolve_clashes(
         while j < attacker_n {
             let a = attackers[i];
             let b = attackers[j];
+            let a_id = u8::try_from(a).unwrap_or(u8::MAX);
+            let b_id = u8::try_from(b).unwrap_or(u8::MAX);
             let (ta, tb) = match (intents[a], intents[b]) {
                 (ExchangeIntent::Attack { timing: ta }, ExchangeIntent::Attack { timing: tb }) => {
                     (ta, tb)
@@ -568,8 +570,8 @@ fn resolve_clashes(
                 _ => (0, 0),
             };
             let decided = resolve_clash(
-                a as u8,
-                b as u8,
+                a_id,
+                b_id,
                 ta,
                 tb,
                 state.fighters[a].poise,
@@ -584,8 +586,8 @@ fn resolve_clashes(
                 .saturating_sub(tables.clash_poise_damage);
             if n < out.len() {
                 out[n] = ExchangeEvent::Clash {
-                    a: (a as u8).min(b as u8),
-                    b: (a as u8).max(b as u8),
+                    a: a_id.min(b_id),
+                    b: a_id.max(b_id),
                     winner: decided.winner,
                 };
                 n += 1;
@@ -885,7 +887,7 @@ pub fn validate_phased(set: &PhasedTableSet) -> Result<(), PhaseError> {
     let mut i: usize = 0;
     while i < usize::from(set.count) {
         let row = &set.moves[i];
-        if row.move_id != i as u8 {
+        if row.move_id != u8::try_from(i).unwrap_or(u8::MAX) {
             return Err(PhaseError::BadValue {
                 field: "move_id",
                 value: u32::from(row.move_id),
@@ -1230,10 +1232,15 @@ mod phased_tests {
             })
         );
         assert_eq!(
-            PhasedTableSet::new(2, MAX_PHASED_MOVES as u8 + 1, PHASED_V1.moves).validate(),
+            PhasedTableSet::new(
+                2,
+                u8::try_from(MAX_PHASED_MOVES).unwrap_or(u8::MAX) + 1,
+                PHASED_V1.moves
+            )
+            .validate(),
             Err(PhaseError::BadValue {
                 field: "count",
-                value: MAX_PHASED_MOVES as u32 + 1
+                value: u32::try_from(MAX_PHASED_MOVES).unwrap_or(u32::MAX) + 1
             })
         );
         // Non-dense ids refuse.

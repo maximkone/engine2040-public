@@ -7,6 +7,8 @@
 //! ([`Panel::Activity`](crate::shell::Panel::Activity)) renders
 //! [`ActivityRing::text_rows`] and [`SceneDiff::text_rows`]; the same pure
 //! functions feed the future door verbs `session.activity` and `scene.diff`.
+//! [`SceneDiff::text_rows_into`] writes the same rows into a buffer the panel
+//! keeps, so a redraw allocates no row text.
 //! Units: `tick` is a fixed-tick index, `subject` a scene object id, `revision`
 //! a scene revision.
 //! Determinism: the ring keeps oldest-first order and [`ActivityRing::digest`]
@@ -16,13 +18,15 @@
 //! Errors: none. The ring never fails (it evicts the oldest past
 //! [`ACTIVITY_CAP`]) and the diff is total.
 //! Budget: O(cap) per digest and O(n log n) per diff, both far under a panel
-//! frame at siege scale.
+//! frame at siege scale; at 2,500 diff rows the kept-buffer form measures
+//! about 1.4x to 1.6x faster than allocating one `String` per row per call.
 //!
 //! Sources (ideas only): web: godot-mcp-bridge `scene_diff` +
 //! `get_editor_activity` (MIT), and `docs/plan/finish-line.md` item 17,
 //! read 2026-10-19.
 
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 
 use engine_core::Fnv64;
 
@@ -208,7 +212,7 @@ impl SceneDiff {
     }
 
     /// One panel row per change: `+ id=7 rev=1`, `- id=3 rev=2`,
-    /// `~ id=5 rev=3` (the revision the row moved to).
+    /// `~ id=5 rev=3` (the revision the row moved to). Allocates every row.
     #[must_use]
     pub fn text_rows(&self) -> Vec<String> {
         let mut out = Vec::with_capacity(self.len());
@@ -229,6 +233,43 @@ impl SceneDiff {
         );
         out
     }
+
+    /// The same rows written into `out`, reusing the `String`s already there.
+    ///
+    /// `out` keeps every slot between calls, so a panel that holds one scratch
+    /// buffer (and reads `out[..count]`) allocates no row text on a redraw at
+    /// siege scale. Returns the row count; the rows are `out[..count]`.
+    #[must_use]
+    pub fn text_rows_into(&self, out: &mut Vec<String>) -> usize {
+        let mut count = 0usize;
+        for (tag, rows) in [
+            ("+", &self.added),
+            ("-", &self.removed),
+            ("~", &self.changed),
+        ] {
+            for row in rows {
+                write_change(out, count, tag, *row);
+                count = count.saturating_add(1);
+            }
+        }
+        count
+    }
+}
+
+/// Write `tag id=N rev=R` into slot `count` of `out`, minting the slot only
+/// when the reused buffer has no `String` there yet.
+///
+/// A minted slot is built by `format!`, whose pre-sized buffer beats growing
+/// an empty one; a slot the caller already owns is rewritten in place, which
+/// is what makes a redraw allocate nothing for row text.
+fn write_change(out: &mut Vec<String>, count: usize, tag: &str, row: Row) {
+    if count == out.len() {
+        out.push(format!("{tag} id={} rev={}", row.id, row.revision));
+        return;
+    }
+    let slot = &mut out[count];
+    slot.clear();
+    let _ = write!(slot, "{tag} id={} rev={}", row.id, row.revision);
 }
 
 /// Diff two snapshots by id: `added` is in `after` only, `removed` is in
@@ -269,6 +310,8 @@ pub fn diff_rows(before: &[Row], after: &[Row]) -> SceneDiff {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     fn act(author: Author, verb: &'static str, subject: Option<u64>, tick: u64) -> Activity {
@@ -418,6 +461,189 @@ mod tests {
         let ids: Vec<u64> = forward.added.iter().map(|row| row.id).collect();
         assert_eq!(ids, vec![6, 7]);
         assert_eq!(diff_rows(&before, &after), forward);
+    }
+
+    /// Median wall time of `runs` timed runs of `work`.
+    fn median_of(runs: usize, mut work: impl FnMut()) -> Duration {
+        let mut times: Vec<Duration> = (0..runs)
+            .map(|_| {
+                let start = Instant::now();
+                work();
+                start.elapsed()
+            })
+            .collect();
+        times.sort();
+        times[runs / 2]
+    }
+
+    fn us(duration: Duration) -> f64 {
+        duration.as_secs_f64() * 1e6
+    }
+
+    /// Interleaved p50 of `slow` and `fast` over `runs` pairs, so both see the
+    /// same machine load and cache warmth; an old and a new build time that
+    /// differ by tens of percent cannot be compared across runs, only inside
+    /// one process.
+    fn median_pair(runs: usize, mut slow: impl FnMut(), mut fast: impl FnMut()) -> (f64, f64) {
+        let mut slow_us = Vec::with_capacity(runs);
+        let mut fast_us = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let start = Instant::now();
+            slow();
+            slow_us.push(us(start.elapsed()));
+            let start = Instant::now();
+            fast();
+            fast_us.push(us(start.elapsed()));
+        }
+        slow_us.sort_by(f64::total_cmp);
+        fast_us.sort_by(f64::total_cmp);
+        (slow_us[runs / 2], fast_us[runs / 2])
+    }
+
+    /// The pre-change body of [`SceneDiff::text_rows`]: one `format!` per row.
+    fn legacy_diff_text_rows(diff: &SceneDiff) -> Vec<String> {
+        let mut out = Vec::with_capacity(diff.len());
+        out.extend(
+            diff.added
+                .iter()
+                .map(|row| format!("+ id={} rev={}", row.id, row.revision)),
+        );
+        out.extend(
+            diff.removed
+                .iter()
+                .map(|row| format!("- id={} rev={}", row.id, row.revision)),
+        );
+        out.extend(
+            diff.changed
+                .iter()
+                .map(|row| format!("~ id={} rev={}", row.id, row.revision)),
+        );
+        out
+    }
+
+    /// The pre-change body of [`Activity::text`]: a `head` `format!` that a
+    /// second `format!` appends the subject to.
+    fn legacy_activity_text(activity: Activity) -> String {
+        let head = format!(
+            "t{:04} {} {}",
+            activity.tick,
+            activity.author.name(),
+            activity.verb
+        );
+        match activity.subject {
+            Some(id) => format!("{head} id={id}"),
+            None => head,
+        }
+    }
+
+    /// Timed probe: p50 of the panel row builders at a siege-sized diff
+    /// (2,500 changed rows) and at the ring cap, against the reference body
+    /// `text_rows` keeps, in one process.
+    #[test]
+    fn perf_probe_text_rows_p50_us() {
+        let mut ring = ActivityRing::new();
+        for tick in 0..u64::try_from(ACTIVITY_CAP).unwrap() {
+            ring.push(act(Author::Agent, "scene.place", Some(tick), tick));
+        }
+        let before: Vec<Row> = (0..2_000u64).map(|id| row(id, 1)).collect();
+        let after: Vec<Row> = (500..2_500u64).map(|id| row(id, 2)).collect();
+        let diff = diff_rows(&before, &after);
+        assert_eq!(diff.len(), 2_500);
+        let activities = ring.rows();
+
+        let (legacy_fresh, fresh) = median_pair(
+            200,
+            || {
+                std::hint::black_box(legacy_diff_text_rows(&diff));
+            },
+            || {
+                std::hint::black_box(diff.text_rows());
+            },
+        );
+        // The panel path: one scratch buffer kept across frames, never cleared.
+        let mut scratch: Vec<String> = Vec::new();
+        let (legacy_buffer, buffered) = median_pair(
+            200,
+            || {
+                std::hint::black_box(legacy_diff_text_rows(&diff));
+            },
+            || {
+                let count = diff.text_rows_into(&mut scratch);
+                std::hint::black_box(&scratch[..count]);
+            },
+        );
+        assert_eq!(scratch.len(), diff.len());
+        let (legacy_text, new_text) = median_pair(
+            200,
+            || {
+                std::hint::black_box(
+                    activities
+                        .iter()
+                        .map(|activity| legacy_activity_text(*activity))
+                        .collect::<Vec<String>>(),
+                );
+            },
+            || {
+                std::hint::black_box(
+                    activities
+                        .iter()
+                        .map(Activity::text)
+                        .collect::<Vec<String>>(),
+                );
+            },
+        );
+        let diff_rows_p50 = median_of(200, || {
+            std::hint::black_box(diff_rows(&before, &after));
+        });
+        eprintln!(
+            "ED20 probe: diff rows(2500) reference {legacy_fresh:.1} us -> text_rows {fresh:.1} us ({:.2}x) | reference {legacy_buffer:.1} us -> text_rows_into kept buffer {buffered:.1} us ({:.2}x) | activity text rows({ACTIVITY_CAP}) legacy {legacy_text:.1} us -> new {new_text:.1} us ({:.2}x) | diff_rows(2000,2000) {:.1} us",
+            legacy_fresh / fresh,
+            legacy_buffer / buffered,
+            legacy_text / new_text,
+            us(diff_rows_p50),
+        );
+    }
+
+    #[test]
+    fn text_rows_into_a_kept_buffer_matches_the_reference_format() {
+        // 2 added, 2 removed, 1 changed: five rows in three groups, and one
+        // unchanged id (13) in no group.
+        let before = [row(3, 2), row(5, 1), row(9, 4), row(11, 0), row(13, 7)];
+        let after = [row(3, 3), row(7, 1), row(9, 4), row(12, 9), row(13, 7)];
+        let diff = diff_rows(&before, &after);
+        let reference = legacy_diff_text_rows(&diff);
+        assert_eq!(diff.len(), 5);
+        assert_eq!(diff.text_rows(), reference);
+
+        // A buffer already holding seven rows keeps every slot; only the first
+        // `count` slots are the current diff, in the same order and text.
+        let seed: Vec<Row> = (1..=7u64).map(|id| row(id, id)).collect();
+        let mut scratch = legacy_diff_text_rows(&diff_rows(&[], &seed));
+        assert_eq!(scratch.len(), 7);
+        let count = diff.text_rows_into(&mut scratch);
+        assert_eq!(count, reference.len());
+        assert_eq!(&scratch[..count], reference.as_slice());
+        assert_eq!(&scratch[..count], diff.text_rows().as_slice());
+        // The slots past `count` stay owned by the caller's buffer, and a
+        // second call rewrites the first `count` of them the same way.
+        assert_eq!(scratch.len(), 7);
+        assert_eq!(diff.text_rows_into(&mut scratch), count);
+        assert_eq!(&scratch[..count], reference.as_slice());
+
+        // A fresh empty buffer mints every slot and matches the same rows.
+        let mut minted: Vec<String> = Vec::new();
+        assert_eq!(diff.text_rows_into(&mut minted), reference.len());
+        assert_eq!(minted, reference);
+
+        // Two 20-digit numbers grow a slot and still match the reference.
+        let wide = diff_rows(&[row(u64::MAX, 0)], &[row(u64::MAX, u64::MAX)]);
+        assert_eq!(wide.text_rows(), legacy_diff_text_rows(&wide));
+        assert_eq!(wide.text_rows_into(&mut scratch), 1);
+        assert_eq!(scratch[0], legacy_diff_text_rows(&wide)[0]);
+        // An empty diff writes no rows over a kept buffer.
+        let empty = diff_rows(&[], &[]);
+        assert_eq!(empty.text_rows_into(&mut Vec::new()), 0);
+        assert!(empty.text_rows().is_empty());
     }
 
     #[test]

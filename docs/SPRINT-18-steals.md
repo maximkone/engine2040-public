@@ -36,7 +36,25 @@ Every row is one crate, small, with a named donor and a test that fails before.
   prints the install line and exits 2 (NOOP); a canned llvm-cov JSON fixture gives
   the same grouped zero-hit list x2 and groups by crate; the real run writes
   `target/reports/wiring-cov.json`. F2P: no such report. P2P: `node --test
-  tools/wiring-cov.test.mjs` green.
+  tools/wiring-cov.test.mjs` green. Progress 2026-10-19: `cargo-llvm-cov` 0.9.1
+  and `llvm-tools-preview` are installed; the real run still yields no usable data on
+  this PC. `cargo llvm-cov run --no-report -p engine-game --features app --bin arena --
+  --scene arena --fighters 8 --frames 300 --exit` (isolated
+  `CARGO_LLVM_COV_TARGET_DIR=target/llvm-cov-target`) writes a 2.16 MB
+  `engine2040-<pid>-.profraw` whose `llvm-profdata show --counts` reads 13,697
+  functions with total count 0, and `cargo llvm-cov report --json` exports `files: 0`
+  (the tool then groups 6,474 zero-hit fns, all zero). Two causes: normal-mode
+  profraws stay 0 bytes because `crates/game/src/bin/arena.rs:690` leaves via
+  `std::process::exit` (ExitProcess on Windows skips the LLVM writer, continuous mode
+  `LLVM_PROFILE_FILE_NAME=engine2040-%p-%c.profraw` only makes an all-zero file), and
+  the counter layout itself is unreadable on 1.97.1 MSVC: the raw route
+  (`RUSTFLAGS=-Cinstrument-coverage`, `CARGO_INCREMENTAL=0`, isolated dir) on a small
+  `engine-core` test binary gives a clean exit and a profraw whose
+  `llvm-profdata show` reports max count 209,510,251 over 529 functions, the signature
+  of 64-bit reads over 32-bit counters. The tool, its 15 tests and the `--from-json`
+  route stay green; the all-zero export was discarded, not kept as the report. Left:
+  run the three `cargoPlan` calls on Linux (the same line is the standard path there)
+  or fix the arena exit path, then write `target/reports/wiring-cov.json`.
 - [x] GS3 tools: pass floors — the product check already reads `name=Xms` per pass Landed d74e785f.
   (`tools/product-check.mjs` `passes`). Add `tools/pass-bar.json` listing each look
   pass (sky, ibl, shadow, gtao, bloom, taa, particles, decals) as `required` or

@@ -1392,10 +1392,12 @@ mod live_frame_tests {
         assert!(out.receipt.presented && out.manifest.is_clean());
         let stats = presenter.wait_stats();
         assert_eq!(stats.capture_frames, 1);
-        // Depth readback, color readback, four look submits, chart, fog and
-        // gtao submits: every one is a counted map plus wait.
-        assert_eq!(stats.capture_maps, 9, "the counter sees every readback");
-        assert_eq!(stats.capture_waits, 9);
+        // Depth readback, color readback, three look submits (sky, chart,
+        // decals), the ibl chart, fog and gtao submits: every one is a counted
+        // map plus wait. The QL12 particle stage is CPU-only, so it maps
+        // nothing and adds no wait.
+        assert_eq!(stats.capture_maps, 8, "the counter sees every readback");
+        assert_eq!(stats.capture_waits, 8);
         assert_eq!(stats.live_blocking(), 0);
     }
 
@@ -1435,6 +1437,67 @@ mod live_frame_tests {
         presenter.set_look_probes(false);
         let live = presenter.render_live_offscreen(&list).expect("live frame");
         assert_eq!(live.look_passes, 0);
+        assert_eq!(presenter.wait_stats().live_blocking(), 0);
+    }
+
+    /// QL12: a probe frame stages the live particle batch and records it as
+    /// its own timed HDR pass, so the live particle row is a device number
+    /// and not a bind probe. Offscreen twin of the windowed probe path.
+    #[test]
+    fn probe_frame_measures_the_particle_pass_on_the_device() {
+        let Some(mut presenter) =
+            init_or_skip("probe_frame_measures_the_particle_pass_on_the_device")
+        else {
+            return;
+        };
+        if !presenter.gpu_timing_supported() {
+            crate::test_gpu::note_skip(
+                "probe_frame_measures_the_particle_pass_on_the_device",
+                "adapter lacks TIMESTAMP_QUERY",
+            );
+            return;
+        }
+        presenter
+            .upload_mesh(cube_key(), &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(320, 180).expect("valid size applies");
+        presenter.set_look_probes(true);
+        // The arena's own cadence: one probe round every 120 frames, so the
+        // particle row is a device number over the frames that probed. The
+        // fog tranche is a blocking stall this row does not measure.
+        presenter.set_probe_every(120);
+        presenter.set_fog_every(1000);
+        let list = list_with(camera_at(6.0), vec![cube_item()]);
+        let mut rows = Vec::new();
+        for _ in 0..300 {
+            let receipt = presenter
+                .render_live_offscreen(&list)
+                .expect("frame renders");
+            if receipt.look_passes > 0 {
+                rows.push(receipt.particle_submit_us);
+            }
+        }
+        assert!(rows.len() >= 3, "the probe rounds ran, got {rows:?}");
+        // Test only: let the device finish so the late maps land.
+        presenter
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("test poll");
+        for _ in 0..4 {
+            presenter
+                .render_live_offscreen(&list)
+                .expect("frame renders");
+        }
+        let report = presenter.gpu_timing_report().expect("timestamps resolved");
+        eprintln!("QL12 particle rounds us: {rows:?} report: {report:?}");
+        assert!(
+            report.particle_frames >= 1,
+            "the particle pass writes its own timestamp pair: {report:?}"
+        );
+        assert!(
+            report.particle.p99 <= 1.0,
+            "the particle pass stays inside its 1.0 ms budget: {report:?}"
+        );
         assert_eq!(presenter.wait_stats().live_blocking(), 0);
     }
 

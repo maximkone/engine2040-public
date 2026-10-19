@@ -188,6 +188,38 @@ fn dot_permille(ax: i32, az: i32, bx: i32, bz: i32) -> i32 {
         .clamp(-1000, 1000)
 }
 
+/// Score points by the best cover-alignment dot (the [`Test::CoverAlign`]
+/// body): the spot->threat vector and its `isqrt` length are one per point,
+/// so they never rerun inside the cover loop. A point whose threat length is
+/// zero keeps the floor score, exactly like the per-cover `continue`.
+fn score_cover_align(points: &mut [EqPoint], ctx: &EqContext, covers: &[Vec3Mm], power: u32) {
+    let power = clamp_power(power);
+    for p in points.iter_mut() {
+        let tx = i64::from(ctx.target.x) - i64::from(p.pos.x);
+        let tz = i64::from(ctx.target.z) - i64::from(p.pos.z);
+        let tl = Vec3Mm::len_xz(tx, tz);
+        let mut best: i32 = 0;
+        if tl > 0 {
+            for c in covers {
+                let cx = i64::from(c.x) - i64::from(p.pos.x);
+                let cz = i64::from(c.z) - i64::from(p.pos.z);
+                let cl = Vec3Mm::len_xz(cx, cz);
+                if cl <= 0 {
+                    continue;
+                }
+                // Dot in permille via i128: arena-scale squares fit.
+                let num =
+                    (i128::from(cx) * i128::from(tx) + i128::from(cz) * i128::from(tz)) * 1000;
+                let dot = (num / (i128::from(cl) * i128::from(tl))).clamp(-1000, 1000) as i32;
+                if dot > best {
+                    best = dot;
+                }
+            }
+        }
+        p.score = mul_score(p.score, pow_permille(best.clamp(0, SCORE_MAX), power));
+    }
+}
+
 /// Baked ring directions in permille (16 evenly spaced headings, so the
 /// ring generator needs no runtime trig; values fixed, never computed).
 const RING_DIRS: [(i32, i32); RING_MAX_POINTS] = [
@@ -627,31 +659,7 @@ impl<'a> Test<'a> {
                 }
             }
             Test::CoverAlign { covers, power } => {
-                let power = clamp_power(*power);
-                for p in points.iter_mut() {
-                    let mut best: i32 = 0;
-                    for c in *covers {
-                        let cx = i64::from(c.x) - i64::from(p.pos.x);
-                        let cz = i64::from(c.z) - i64::from(p.pos.z);
-                        let tx = i64::from(ctx.target.x) - i64::from(p.pos.x);
-                        let tz = i64::from(ctx.target.z) - i64::from(p.pos.z);
-                        let cl = Vec3Mm::len_xz(cx, cz);
-                        let tl = Vec3Mm::len_xz(tx, tz);
-                        if cl <= 0 || tl <= 0 {
-                            continue;
-                        }
-                        // Dot in permille via i128: arena-scale squares fit.
-                        let num = (i128::from(cx) * i128::from(tx)
-                            + i128::from(cz) * i128::from(tz))
-                            * 1000;
-                        let dot =
-                            (num / (i128::from(cl) * i128::from(tl))).clamp(-1000, 1000) as i32;
-                        if dot > best {
-                            best = dot;
-                        }
-                    }
-                    p.score = mul_score(p.score, pow_permille(best.clamp(0, SCORE_MAX), power));
-                }
+                score_cover_align(points, ctx, covers, *power);
             }
             Test::Sightline { vis } => {
                 for p in points.iter_mut() {
@@ -1596,5 +1604,134 @@ mod tests {
             "next id applies"
         );
         assert_eq!(boundary.last_applied(), Some(42));
+    }
+
+    /// Cover ring for the cover-align receipt: the baked 16 headings at
+    /// 6 m, the arena's own generator table.
+    fn bench_covers() -> Vec<Vec3Mm> {
+        RING_DIRS
+            .iter()
+            .map(|(dx, dz)| Vec3Mm::new(dx * 6, 0, dz * 6))
+            .collect()
+    }
+
+    /// Scored candidates for the receipt: the 8x8 grid around the querier.
+    fn bench_points() -> Vec<EqPoint> {
+        let mut out = Vec::new();
+        let gen = GridGenerator::new(7_000, 2_000).expect("grid is legal");
+        gen.generate_into(&ctx(), &mut out).expect("grid fits");
+        out
+    }
+
+    /// Shipped cover-align body, copied verbatim as the oracle for the
+    /// hoisted production path: `tx`/`tz`/`tl` are recomputed inside the
+    /// cover loop (the shape before the isqrt was hoisted).
+    fn cover_align_shipped(points: &mut [EqPoint], ctx: &EqContext, covers: &[Vec3Mm], power: u32) {
+        let power = clamp_power(power);
+        for p in points.iter_mut() {
+            let mut best: i32 = 0;
+            for c in covers {
+                let cx = i64::from(c.x) - i64::from(p.pos.x);
+                let cz = i64::from(c.z) - i64::from(p.pos.z);
+                let tx = i64::from(ctx.target.x) - i64::from(p.pos.x);
+                let tz = i64::from(ctx.target.z) - i64::from(p.pos.z);
+                let cl = Vec3Mm::len_xz(cx, cz);
+                let tl = Vec3Mm::len_xz(tx, tz);
+                if cl <= 0 || tl <= 0 {
+                    continue;
+                }
+                let num =
+                    (i128::from(cx) * i128::from(tx) + i128::from(cz) * i128::from(tz)) * 1000;
+                let dot = (num / (i128::from(cl) * i128::from(tl))).clamp(-1000, 1000) as i32;
+                if dot > best {
+                    best = dot;
+                }
+            }
+            p.score = mul_score(p.score, pow_permille(best.clamp(0, SCORE_MAX), power));
+        }
+    }
+
+    /// The hoist must not move one score: the shipped per-cover loop and the
+    /// hoisted production path agree on the fixture, at every power, and on
+    /// the degenerate case where the target sits exactly on a candidate
+    /// (`tl == 0`, the guard that skips the cover loop).
+    #[test]
+    fn cover_align_hoist_matches_the_shipped_loop() {
+        let covers = bench_covers();
+        let base = bench_points();
+        let on_point = Vec3Mm::new(-1_000, 0, -1_000);
+        assert!(
+            base.iter().any(|p| p.pos == on_point),
+            "the guard case needs a candidate on the target"
+        );
+        for (self_pos, target) in [
+            (SELF, THREAT),
+            (SELF, on_point),
+            (Vec3Mm::new(0, 0, 0), Vec3Mm::new(3, 0, 4)),
+        ] {
+            let ctx = EqContext::new(self_pos, target);
+            for power in 1..=MAX_POWER {
+                let mut shipped = base.clone();
+                let mut hoisted = base.clone();
+                cover_align_shipped(&mut shipped, &ctx, &covers, power);
+                score_cover_align(&mut hoisted, &ctx, &covers, power);
+                assert_eq!(shipped, hoisted, "power {power}, self {self_pos:?}");
+            }
+        }
+    }
+
+    /// Paired receipt for the cover-align inner loop: the shipped per-cover
+    /// `tl` recompute against the hoisted production path, one fixture,
+    /// interleaved so the same machine load sits under both sides.
+    /// Integer nanos only: no cast, no unwrap.
+    /// Run: cargo test -p engine-ai --release --lib cover_align_paired_receipt -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn cover_align_paired_receipt() {
+        const ITERS: usize = 300;
+        let covers = bench_covers();
+        let base = bench_points();
+        let ctx = ctx();
+        let mut old_out = base.clone();
+        let mut new_out = base.clone();
+        cover_align_shipped(&mut old_out, &ctx, &covers, 2);
+        score_cover_align(&mut new_out, &ctx, &covers, 2);
+        assert_eq!(old_out, new_out, "the hoist moved a score");
+        let mut shipped = Vec::with_capacity(ITERS);
+        let mut hoisted = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let mut buf = base.clone();
+            let t = std::time::Instant::now();
+            cover_align_shipped(&mut buf, &ctx, &covers, 2);
+            shipped.push(t.elapsed().as_nanos());
+            std::hint::black_box(&buf);
+            let mut buf = base.clone();
+            let t = std::time::Instant::now();
+            score_cover_align(&mut buf, &ctx, &covers, 2);
+            hoisted.push(t.elapsed().as_nanos());
+            std::hint::black_box(&buf);
+        }
+        shipped.sort_unstable();
+        hoisted.sort_unstable();
+        let (shipped_ns, hoisted_ns) = (shipped[ITERS / 2], hoisted[ITERS / 2]);
+        eprintln!(
+            "eqs_cover_align shipped_p50_us={}.{:03} hoisted_p50_us={}.{:03} speedup_x100={} points={} covers={} iters={ITERS}",
+            shipped_ns / 1_000,
+            shipped_ns % 1_000,
+            hoisted_ns / 1_000,
+            hoisted_ns % 1_000,
+            shipped_ns.saturating_mul(100).checked_div(hoisted_ns).unwrap_or(0),
+            base.len(),
+            covers.len(),
+        );
+        assert!(
+            hoisted_ns < shipped_ns,
+            "the hoisted path must not be the slower one: {hoisted_ns} ns vs {shipped_ns} ns"
+        );
     }
 }

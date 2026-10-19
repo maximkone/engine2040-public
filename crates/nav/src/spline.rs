@@ -189,12 +189,12 @@ impl Nurbs {
     }
 
     /// Analytic derivative `dC/du` at `u`: `(A' - w' C) / w` over the
-    /// homogeneous derivative curve.
+    /// homogeneous derivative curve. Never allocates: the derivative curve is
+    /// evaluated in place, so one tangent costs `O(degree^2)` on the stack.
     pub fn tangent(&self, u: f64) -> V3 {
         let u = self.clamp(u);
         let h = de_boor(self.degree, &self.knots, &self.ctrl, u);
-        let (ctrl, knots) = derivative(self.degree, &self.knots, &self.ctrl);
-        let d = de_boor(self.degree - 1, knots, &ctrl, u);
+        let d = derivative_de_boor(self.degree, &self.knots, &self.ctrl, u);
         let c = [h[0] / h[3], h[1] / h[3], h[2] / h[3]];
         [
             (d[0] - d[3] * c[0]) / h[3],
@@ -328,24 +328,44 @@ fn de_boor(degree: usize, knots: &[f64], ctrl: &[[f64; 4]], u: f64) -> [f64; 4] 
     d[degree]
 }
 
-/// Control points and knots of the derivative curve (degree - 1).
-fn derivative<'k>(
-    degree: usize,
-    knots: &'k [f64],
-    ctrl: &[[f64; 4]],
-) -> (Vec<[f64; 4]>, &'k [f64]) {
-    let q = (0..ctrl.len() - 1)
-        .map(|i| {
-            let span = knots[i + degree + 1] - knots[i + 1];
-            let f = if span > 0.0 {
-                degree as f64 / span
+/// De Boor evaluation of the derivative curve (degree - 1) at `u`, without
+/// materialising its control points: only the `degree` points around the span
+/// are built, so a tangent never allocates. The derivative knot vector is the
+/// open window `knots[1..len - 1]`, a slice and never a copy.
+fn derivative_de_boor(degree: usize, knots: &[f64], ctrl: &[[f64; 4]], u: f64) -> [f64; 4] {
+    let d_degree = degree - 1;
+    let d_knots = &knots[1..knots.len() - 1];
+    let last = ctrl.len() - 1;
+    let k = find_span(d_degree, d_knots, last, u);
+    let mut d = [[0.0; 4]; MAX_DEGREE + 1];
+    for (j, slot) in d.iter_mut().enumerate().take(d_degree + 1) {
+        *slot = derivative_ctrl(degree, knots, ctrl, k - d_degree + j);
+    }
+    for r in 1..=d_degree {
+        for j in (r..=d_degree).rev() {
+            let i = j + k - d_degree;
+            let span = d_knots[i + d_degree + 1 - r] - d_knots[i];
+            let alpha = if span > 0.0 {
+                (u - d_knots[i]) / span
             } else {
                 0.0
             };
-            [0, 1, 2, 3].map(|c| f * (ctrl[i + 1][c] - ctrl[i][c]))
-        })
-        .collect();
-    (q, &knots[1..knots.len() - 1])
+            d[j] = [0, 1, 2, 3].map(|c| (1.0 - alpha) * d[j - 1][c] + alpha * d[j][c]);
+        }
+    }
+    d[d_degree]
+}
+
+/// One control point of the derivative curve at index `i`: the value the
+/// previous `derivative` builder wrote for that slot.
+fn derivative_ctrl(degree: usize, knots: &[f64], ctrl: &[[f64; 4]], i: usize) -> [f64; 4] {
+    let span = knots[i + degree + 1] - knots[i + 1];
+    let f = if span > 0.0 {
+        degree as f64 / span
+    } else {
+        0.0
+    };
+    [0, 1, 2, 3].map(|c| f * (ctrl[i + 1][c] - ctrl[i][c]))
 }
 
 /// Cumulative arc-length table of a curve.
@@ -519,6 +539,98 @@ mod tests {
 
     fn near(a: f64, b: f64, tol: f64) {
         assert!((a - b).abs() <= tol, "{a} vs {b}");
+    }
+
+    /// The pre-change tangent: it built the whole derivative control array in
+    /// a heap vector on every call. Kept as the equality oracle and the A/B
+    /// reference for the stack-only [`Nurbs::tangent`].
+    fn tangent_allocating(curve: &Nurbs, u: f64) -> V3 {
+        let u = curve.clamp(u);
+        let h = de_boor(curve.degree, &curve.knots, &curve.ctrl, u);
+        let q: Vec<[f64; 4]> = (0..curve.ctrl.len() - 1)
+            .map(|i| derivative_ctrl(curve.degree, &curve.knots, &curve.ctrl, i))
+            .collect();
+        let d_knots = &curve.knots[1..curve.knots.len() - 1];
+        let d = de_boor(curve.degree - 1, d_knots, &q, u);
+        let c = [h[0] / h[3], h[1] / h[3], h[2] / h[3]];
+        [
+            (d[0] - d[3] * c[0]) / h[3],
+            (d[1] - d[3] * c[1]) / h[3],
+            (d[2] - d[3] * c[2]) / h[3],
+        ]
+    }
+
+    /// Shared fixture: a 64-control-point clamped cubic, the rail a content
+    /// tool bakes. Big enough that the old path's `Vec` dwarfs the evaluation.
+    fn rib() -> Nurbs {
+        let mut points: Vec<V3> = Vec::with_capacity(64);
+        let mut t = 0.0;
+        while points.len() < 64 {
+            points.push([t, (t * 0.25).sqrt() - 1.0, t * t * 0.01]);
+            t += 0.5;
+        }
+        Nurbs::clamped(3, &points, &[1.0; 64]).expect("rib curve")
+    }
+
+    /// The stack tangent equals the allocating oracle bit for bit on one
+    /// 64-point fixture, across the domain and past both clamped ends.
+    #[test]
+    fn stack_tangent_equals_the_allocating_oracle_bit_for_bit() {
+        let curve = rib();
+        for step in 0u32..=64 {
+            let u = f64::from(step) / 32.0 - 0.5;
+            assert_eq!(
+                curve.tangent(u),
+                tangent_allocating(&curve, u),
+                "u {u}: the stack tangent moved a bit"
+            );
+        }
+    }
+
+    /// Tangent receipt: p50 microseconds of one 64-sample tangent scan on the
+    /// 64-point [`rib`], stack-only [`Nurbs::tangent`] against the allocating
+    /// oracle, interleaved so the same load sits under both sides. The stack
+    /// path stays only while the pair holds and the stack side wins.
+    /// Run: cargo test -p engine-nav --lib --release spline -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "timing test reads the wall clock; it never enters the tick"
+    )]
+    fn spline_tangent_bench_receipt() {
+        const SAMPLES: u32 = 64;
+        const ITERS: usize = 200;
+        let curve = rib();
+        let us: Vec<f64> = (0..SAMPLES)
+            .map(|step| f64::from(step) / f64::from(SAMPLES - 1))
+            .collect();
+        let want: Vec<V3> = us.iter().map(|u| tangent_allocating(&curve, *u)).collect();
+        let got: Vec<V3> = us.iter().map(|u| curve.tangent(*u)).collect();
+        assert_eq!(got, want, "the two timed paths disagree");
+        let mut old_runs = Vec::with_capacity(ITERS);
+        let mut new_runs = Vec::with_capacity(ITERS);
+        for _ in 0..ITERS {
+            let begin = std::time::Instant::now();
+            for u in &us {
+                std::hint::black_box(tangent_allocating(&curve, *u));
+            }
+            old_runs.push(begin.elapsed().as_micros());
+            let begin = std::time::Instant::now();
+            for u in &us {
+                std::hint::black_box(curve.tangent(*u));
+            }
+            new_runs.push(begin.elapsed().as_micros());
+        }
+        old_runs.sort_unstable();
+        new_runs.sort_unstable();
+        let (old, new) = (old_runs[ITERS / 2], new_runs[ITERS / 2]);
+        eprintln!(
+            "spline_tangent stack_p50_us={new} allocating_p50_us={old} speedup_x100={} points=64 samples={SAMPLES}",
+            old.saturating_mul(100).checked_div(new).unwrap_or(0)
+        );
+        assert!(new < old, "the stack tangent must not be the slower one");
     }
 
     /// Reference point and unit tangent of the quarter circle by angle.

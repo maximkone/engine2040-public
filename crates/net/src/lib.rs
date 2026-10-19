@@ -1,4 +1,23 @@
 //! net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta over UDP/QUIC/relay transports (UdpTransport/RelayTransport/SimQuicNet/QuinnEndpoint).
+//!
+//! # One session per use-case
+//!
+//! One trait covers a two-player sim: [`rollback::SimTick`] (`advance` plus
+//! `state_hash`; re-exported under its old name as `netcode::Sim`). Pick the
+//! session by the job:
+//!
+//! - Shipped online matches with server authority and native or browser
+//!   clients: [`session::Server`] and [`session::Client`] over the snapshot
+//!   delta wire. This is the production path.
+//! - Two-player peer-to-peer tape with a 128-frame storage window and two
+//!   input queues: [`rollback::P2pSession`] over [`rollback::SimTick`].
+//! - Compact reference session with the 9-frame WAN authority window and a
+//!   bounded hash log: [`netcode::Session`] over the same
+//!   [`rollback::SimTick`]; the ggrs and sync-vector tests drive it.
+//! - N-seat predicting client (the four-seat proof): [`rollback::SeatSession`]
+//!   over [`rollback::SeatSim`].
+//! - Per-frame hash ring only, no session: [`rollback::FrameLog`].
+//! - Prediction and desync probes without a session: [`prediction`].
 
 /// Packet delivery tracking: a 32-bit ack bitfield, a fixed ring of sent
 /// records and a loss rate in permille. Std-only; feeds receipts, never the sim.
@@ -67,6 +86,10 @@ pub mod receipt;
 /// Internet-join relay: self-hostable relay binary core, STUN/ICE-lite
 /// hole punch with relay fallback, invite codes. Std-only; certs test-only.
 pub mod relay;
+/// STUN binding integrity, ICE candidates, pair nomination and consent
+/// freshness: the conformance half of [`relay`], split to keep one owner file
+/// bounded. Re-exported from `relay` unchanged.
+pub mod relay_ice;
 /// Replays with keyframes plus theater playback and divergence reports:
 /// record any input tape, frame-step it, attribute seeded bugs.
 pub mod replay;
@@ -80,6 +103,9 @@ pub mod snapshot;
 /// the session drivers on both machines, the relay rendezvous.
 pub mod split;
 pub mod tick_budget;
+/// Authenticated-transport audit: netcode-style token auth against TLS,
+/// measured side by side with real handshake bytes and CPU, no dependency.
+pub mod transport_audit;
 /// Datagram discipline for the WAN replication stream: one datagram per
 /// class-ordered snapshot, over-cap batches refused and counted, far and idle
 /// poses shed first, inputs and combat redundant and never expired.

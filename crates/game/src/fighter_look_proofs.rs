@@ -150,10 +150,11 @@ fn sand_rest_scripted_deaths_lie_on_the_sand_through_the_whole_fall() {
 }
 
 #[test]
-fn sand_rest_real_fight_dead_lie_on_the_sand_and_the_living_are_not_lifted() {
+fn sand_rest_real_fight_dead_lie_on_the_sand_and_the_living_never_sink() {
     // The window's own session: 8 fighters, the duel's tables, 900 ticks of
     // brains fighting. Every body the sim has floored or killed rests on the
-    // sand; a standing body is never moved by the dead-body rest.
+    // sand, and no living body is drawn under it: a dip is lifted to the sand
+    // and a flight phase is never pulled down.
     let config = crate::GameConfig {
         seed: 2040,
         ticks: 900,
@@ -167,7 +168,7 @@ fn sand_rest_real_fight_dead_lie_on_the_sand_and_the_living_are_not_lifted() {
     // This proof is the flat-pose rest: a ragdoll rests by its physics instead (RZ2w, proved in
     // `ragdoll_look`), so the layer is off here.
     look.set_ragdoll(false);
-    let (mut dead_frames, mut worst_cm) = (0u32, 0.0f32);
+    let (mut dead_frames, mut worst_cm, mut living_lifted) = (0u32, 0.0f32, 0u32);
     for tick in 0..900u32 {
         let out = app.tick_empty();
         look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
@@ -183,16 +184,29 @@ fn sand_rest_real_fight_dead_lie_on_the_sand_and_the_living_are_not_lifted() {
                     body.truth.slot
                 );
             } else {
-                assert_eq!(
-                    body.lift, 0.0,
-                    "tick {tick} slot {}: a living body is never lifted",
+                assert!(
+                    body.truth.min[1] >= GROUND_Y - 0.01,
+                    "tick {tick} slot {}: a living body is {:.1} cm under the sand",
+                    body.truth.slot,
+                    (GROUND_Y - body.truth.min[1]) * 100.0
+                );
+                assert!(
+                    body.lift >= 0.0,
+                    "tick {tick} slot {}: the sand lift never pushes a body down",
                     body.truth.slot
                 );
+                if body.lift > 0.0 {
+                    living_lifted += 1;
+                }
             }
         }
     }
     assert!(dead_frames > 100, "the fight floored bodies: {dead_frames}");
     assert!(worst_cm < 1.0, "worst rest error {worst_cm:.2} cm");
+    assert!(
+        living_lifted > 0,
+        "the fight dipped a living body in some frame (the law must bite): 0 lifts"
+    );
 }
 
 /// The three integer clocks that drive a slot's pose: clip phase in ticks,

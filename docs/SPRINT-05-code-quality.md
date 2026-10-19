@@ -63,18 +63,18 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   transient bytes, `build_rp1_graph`, `compile_rp1_for_present`, `aa_scale` seam
   move verbatim to new `post/graph.rs`; compiled order stays six RP1 names.
   Accept: render lib post tests green; golden unchanged. needs: CQ27. Landed 34fae3ba. `crates/render/src/post/graph.rs` (274 lines, byte-identical to the old `post/rp1.rs`: `git show --stat --find-renames 061667e3` reports `post/{rp1.rs => graph.rs} | 0`) holds all six `RP1_PASS_*` names, `rp1_pass_names`, `RP1_HISTORY_BYTES_PER_TEXEL`/`RP1_POST_BYTES_PER_TEXEL`, `rp1_transient_bytes`, `build_rp1_graph`, `compile_rp1_for_present` and the RP5 `aa_scale` seam (`From<AaScaleError>`, `taa_off_render_size_for_scale`, `compile_taa_off_for_scale`, `tick_scale_for_present`, `run_taa_off_frame_for_scale`). Note: the rename was swept into another session's commit 061667e3 while this row was in flight; 34fae3ba adds the `mod graph; pub use graph::*;` facade that un-reds the tree (`mod rp1;` with no `rp1.rs` did not compile) and every `post::` caller path is unchanged. F2P: `grep -c "pub fn build_rp1_graph" crates/render/src/post/graph.rs` = 1 (0 before; the old name was in `post/rp1.rs`). P2P: `cargo test -p engine-render --lib post` = 49 passed / 0 failed / 2 ignored (PC run, GPU/window crate, 2026-10-19), incl. `rp1_graph_declares_six_passes_in_order`, `rp1_graph_rejects_bad_sizes_and_counts_bytes`, `rp5_scale_seam_drives_presented_size`, `rp5_scale_seam_fails_loudly`. Golden d57b5c8ae3096614 unchanged (gh run 39236977636, `cargo test -p engine-proof --lib golden_hash_untouched` PASS).
-- [ ] CQ30 quality: split post GPU submitter out, facade under the bar —
+- [x] CQ30 quality: split post GPU submitter out, facade under the bar —
   window-only `mod gpu` (`Rp1Submitter`, resolve, frame) moves verbatim to new
   `post/gpu.rs`; `post.rs` under 1500 prod lines, `big_files` clears it; LF4
   unblocked. Accept: render lib post tests green; golden unchanged. needs:
-  CQ27, CQ28, CQ29.
+  CQ27, CQ28, CQ29. Landed 781ecd67 (the CQ9 post split; this row proves the gpu hunk, same commit as CQ25-CQ29). `crates/render/src/post/gpu.rs` holds `Rp1Submitter`, `GpuResolve`, `GpuFrame`, `resolve` and `run_frame`; `crates/render/src/post.rs:202` is the only facade (`#[cfg(feature = "window")] pub mod gpu;`). The body is the old `mod gpu` dedented: compare `git show 781ecd67^:crates/render/src/post.rs` (module at lines 2780-3660) with `git show 781ecd67:crates/render/src/post/gpu.rs`, the only textual deltas are the `shaders/` -> `../shaders/` include paths plus rustfmt reflow; later behavior commits (CQ7, 83385c43) changed lines on purpose. F2P: `grep -c "pub struct Rp1Submitter" crates/render/src/post/gpu.rs` = 1, same grep on `post.rs` = 0. Prod lines: `post.rs` = 189 (rust-quality `lines` metric; 2,277 raw with tests), and `node tools/rust-quality.mjs --list big_files --crate render` no longer lists it (6 hits: fog, gtao, ibl, live, presenter, submit). P2P: `cargo test -p engine-render --lib post` = 49 passed / 0 failed / 2 ignored (PC run 2026-10-19, GPU/window crate), incl. `single_uniform_owner`, `rp1_graph_declares_six_passes_in_order`, `full_frame_names_every_pass_in_ms`; `rustfmt --edition 2021 --check` clean on both owned files. Golden d57b5c8ae3096614 unchanged (gh run 39238279514, `cargo test -p engine-proof --lib golden_hash_untouched` PASS). LF4 is unblocked (ticked 99e624b).
 - [ ] CQ10 core: checked numerics — 4,236 numeric `as` casts; simulation Progress 2026-10-17: Numeric casts 4,236 -> 2,965 workspace-wide; the named crates now nav 168, combat 65, anim 118, destruction 116. Left: at most 5 per 1,000 lines per crate and the clippy cast lints at zero.
   crates first (nav 192, combat 190, anim 176, destruction 174): `From`,
   `TryFrom` or named, tested saturating conversions in `engine_core`, then
   `clippy::cast_possible_truncation`, `cast_sign_loss` and
   `cast_possible_wrap` join the crate at zero. Tier A. Size M per crate.
   Owns one crate per packet. Accept: crate casts at most 5 per 1,000 lines;
-  golden x2 unchanged. needs: none. Progress 2026-10-17: f6c055fb numeric casts engine-core 19 -> 1 and engine-geo 2 -> 0 (the one left is the audited f64->f32 narrowing in checked.rs); arena lib run 39065884031, geo run 39065811433.
+  golden x2 unchanged. needs: none. Progress 2026-10-17: f6c055fb numeric casts engine-core 19 -> 1 and engine-geo 2 -> 0 (the one left is the audited f64->f32 narrowing in checked.rs); arena lib run 39065884031, geo run 39065811433. Progress 2026-10-19: 013124a combat 64 -> 22 casts (1.8 per 1,000 production lines); the crate carries `#![warn(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]` and is clean under `-D warnings`; new const owners `saturating_u32_to_u16` and `saturating_u32_to_i32` in `engine_core::checked` with `saturating_u32_narrowing_holds_the_bounds`. `cargo test -p engine-combat --no-fail-fast` 306 lib + 19 it + 1 doc green (gh 39240553933), `cargo test -p engine-core --lib checked` 11 green (gh 39240741291), golden d57b5c8ae3096614 x2. Left: nav 226, anim 109, destruction 109 and the remaining named crates, one packet each.
 - [x] CQ14 ops: typed errors — 93 `Result<_, String>` in library code Progress 2026-10-17: string_errors 93 -> 19 (render 13, endpoint 3, game 2, scene 1; playtest and assets at 0). Left: those 19.
   (playtest 50, render 18, assets 17) become typed enums with `Display` and
   a source. Tier B. Size S per crate. Owns one crate's error module.
@@ -109,14 +109,14 @@ every crate, its clippy lint joins `[workspace.lints]` (the lint ladder).
   `crates/net/src/lib.rs`. Accept: no two public `Server` types under
   different modules without qualified-doc guidance; tests green; golden
   x2. needs: CQ-NET-API1. (API-REVIEW wave 54.) Tick audit 2026-10-19: the named `server.rs` left in the net slim 3151bd46; the public names are `session::Server`, `websocket::WsServer`, `webtransport::WtServer`.
-- [ ] CQ-NET-API5 net: collapse the rollback families — delete or
+- [x] CQ-NET-API5 net: collapse the rollback families — delete or
   delegate lib-root `Rollback` stub to `rollback::FrameLog`, document
   the canonical pick per use-case in `lib.rs` docs; unify
   `Sim`/`SimTick`. Tier A. Size M. Owns `crates/net/src/lib.rs`,
   `crates/net/src/netcode.rs`, `crates/net/src/rollback.rs`. Accept:
   one documented session choice per use-case in `lib.rs`; zero "stub"
   comments in public API; tests green; golden x2. needs: CQ-NET-API2.
-  (API-REVIEW wave 54.)
+  (API-REVIEW wave 54.) Landed a0d9e63a. `netcode::Sim` is now a re-export of `rollback::SimTick`; `lib.rs` names the session per use-case; the retired-ring gate (`one_rollback_path_no_source_names_the_retired_ring`) is green and no "stub" mention remains in `crates/net/src`. netcode 14 passed (gh run 39242923961), rollback 30 passed (39242923762), it binary 44 passed (39242499563); golden x2 d57b5c8ae3096614 / state 2aca9338670aa0cb.
 - [x] CQ-NET-API6 net: units in names — `SnapEnt::{x,y}` gain cm units, Landed 3151bd46. Moot after the net slim: `SnapEnt`, `Config{budget,cell,view,world}`, `DelayBuffer` and anticheat.rs no longer exist in crates/net/src. `cargo test -p engine-net --lib` 258 passed, gh run 39061111700.
   `Config::{budget,cell,view,world}` gain byte/cm units,
   `DelayBuffer.delay` gains ticks, anticheat limits gain unit suffixes.

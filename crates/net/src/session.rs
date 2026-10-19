@@ -270,6 +270,13 @@ pub enum NetError {
     Truncated,
     /// Datagram exceeds [`MAX_PACKET_BYTES`].
     TooLarge,
+    /// Payload exceeds the live QUIC path limit read just before the send
+    /// (`Connection::max_datagram_size()`), carried in bytes. Refused and
+    /// counted, never sent; `limit` 0 means the path carries no datagrams.
+    OverBudget {
+        /// Live path limit in bytes at the refused send.
+        limit: usize,
+    },
     /// Input count outside the per-kind bound, count carried.
     TooManyInputs(usize),
     /// Arena rejected a prefix run the net layer believed valid.
@@ -293,6 +300,9 @@ impl std::fmt::Display for NetError {
             Self::BadKind(k) => write!(f, "unknown packet kind {k}"),
             Self::Truncated => write!(f, "truncated packet"),
             Self::TooLarge => write!(f, "packet exceeds size bound"),
+            Self::OverBudget { limit } => {
+                write!(f, "packet exceeds live datagram limit {limit}")
+            }
             Self::TooManyInputs(n) => write!(f, "too many inputs: {n}"),
             Self::SimRejected => write!(f, "arena rejected the prefix run"),
             Self::BadState => write!(f, "checkpoint and delta disagree"),

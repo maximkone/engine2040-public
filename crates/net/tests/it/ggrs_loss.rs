@@ -15,11 +15,11 @@ struct Toy {
 }
 
 impl Sim for Toy {
-    fn step(&mut self, inputs: [u32; 2]) {
+    fn advance(&mut self, inputs: [u32; 2]) {
         self.a = self.a.wrapping_add(inputs[0] as i32 - 1);
         self.b = self.b.wrapping_add(inputs[1] as i32 - 1);
     }
-    fn hash(&self) -> u64 {
+    fn state_hash(&self) -> u64 {
         let mut fold = Fnv64::new();
         fold.write_i32(self.a);
         fold.write_i32(self.b);
@@ -85,9 +85,9 @@ fn run_once() -> (Vec<u64>, u64, u64, u64, usize, usize) {
     let digest = digest_state.finish();
     let mut refs = Toy::default();
     for f in 0..n {
-        refs.step([local[f], remote[f]]);
+        refs.advance([local[f], remote[f]]);
     }
-    assert_eq!(tip, refs.hash(), "tip equals true sim");
+    assert_eq!(tip, refs.state_hash(), "tip equals true sim");
     (stream, fold, tip, digest, s.max_rollback(), s.history_len())
 }
 

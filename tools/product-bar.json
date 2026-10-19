@@ -1,11 +1,12 @@
 {
-  "note": "Product floors and finish targets read by tools/product-check.mjs (owner 2026-10-11). A broken floor files a bug: packet by itself; a target is the finish line the board climbs toward (docs/FOCUS.md Now). Raise targets when they are met; never lower a floor to make a check green. view_* floors read the `arena view:` line: every drawn body as numbers from the CPU skin, no image (crates/game/src/view_truth.rs).",
+  "note": "Product floors and finish targets read by tools/product-check.mjs (owner 2026-10-11). A broken floor files a bug: packet by itself; a target is the finish line the board climbs toward (docs/FOCUS.md Now). Raise targets when they are met; never lower a floor to make a check green. view_* floors read the `arena view:` line: every drawn body as numbers from the CPU skin, no image (crates/game/src/view_truth.rs). look_flip_max reads the FLIP x10000 between this run's middle capture and the last green run's (LF15; crates/playtest/src/look/metric.rs is the authority, tools/iqa-gate.mjs mirrors it): the stored runs read 0-609 between green runs of different trees, 1493-1798 when the camera sat inside the props, 2185 for a black frame.",
   "floors": {
     "framing_empty": 0,
     "tinted_share_max": 0.25,
     "validation_errors": 0,
     "blank_frames": 0,
     "frozen_pairs": 0,
+    "look_flip_max": 1200,
     "stall_p99_ms_max": 1500,
     "fps_drop_max": 0.3,
     "view_nonfinite": 0,
@@ -22,6 +23,6 @@
     "look_score": "machine look score vs references (LJ1, EG30) at or above the bar Q1 sets",
     "strobe": "tinted_share under 0.10 in an 8-fighter brawl",
     "pops": "0 joint pops per 300 frames (view line `pops`; LF9 took the attack and idle clip switches to 0; 20-37 remain in a 4-fighter duel, all in the run act, from the run clip speed scale jumping the clip phase)",
-    "sunk_cm": "under 2 cm (dead bodies rest on the sand at 0 cm since LF17; living bodies still dip 5-14 cm into it at clip crossfades and the run stride: LF9, LF12)"
+    "sunk_cm": "under 2 cm (every body rests on the sand since 01572b00: dead bodies sit both ways at 0 cm, and a living body's dip is lifted out of the sand and never pushed down, so a run's flight phase stays up; the product check read 0 cm on run 82402dd2)"
   }
 }

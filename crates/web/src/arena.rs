@@ -15,7 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use engine_render::pipeline_warmup;
-use engine_render::present::{last_live_wall_split, PresentError, Presenter, MAX_FRAME_DIM};
+use engine_render::present::{
+    last_live_wall_split, DrawList, PresentError, Presenter, MAX_FRAME_DIM,
+};
 use engine_render::procedural_arena::ProceduralArena;
 use engine_render::quality::{self, Quality, WEB_CUT_ORDER};
 use wasm_bindgen::prelude::*;
@@ -25,6 +27,7 @@ use crate::anim::{FrameStats, StepClock, MAX_STEPS_PER_FRAME};
 use crate::arena_view::{
     has_flag, scaled_frame_size, CaptureFacts, Counters, CAPTURE_AFTER_FRAMES,
 };
+use crate::fight::MatchError;
 use crate::limits::{adapter_hint, feature_names, limit_rows};
 use crate::recovery::{reason_word, Cause, LostBox};
 use crate::report::{AdapterFacts, ArenaFacts, Failure, Ready};
@@ -70,6 +73,8 @@ struct Uncaptured {
 struct ArenaLoop {
     presenter: Presenter,
     arena: ProceduralArena,
+    /// The played match (`?fight`, WEB15); `None` draws the stand-in.
+    fight: Option<crate::fight::Match>,
     canvas: HtmlCanvasElement,
     lost: Arc<LostBox>,
     uncaptured: Arc<Uncaptured>,
@@ -171,10 +176,20 @@ impl ArenaLoop {
         let t_s = self.frozen_s.unwrap_or_else(|| self.clock.time_s() as f32);
         let cpu_started = now_ms();
         let (w, h) = self.presenter.size();
-        if let Err(e) = self.arena.pose(&mut self.presenter, t_s) {
-            self.note_error(&format!("pose: {e}"));
+        if self.fight.is_none() {
+            if let Err(e) = self.arena.pose(&mut self.presenter, t_s) {
+                self.note_error(&format!("pose: {e}"));
+            }
         }
-        let listed = self.arena.list_at(w, h, t_s);
+        let listed = if let Some(mut fight) = self.fight.take() {
+            let listed = self.step_fight(&mut fight, t_s);
+            self.fight = Some(fight);
+            listed
+        } else {
+            self.arena
+                .list_at(w, h, t_s)
+                .map_err(|e| MatchError::Scenery(e.to_string()))
+        };
         self.sim_ms = now_ms() - cpu_started;
         match listed {
             Ok(list) => match self.presenter.render_surface(&list) {
@@ -216,6 +231,31 @@ impl ArenaLoop {
             self.publish_receipt();
         }
         self.tick_split(frame_ms, resumed);
+    }
+
+    /// WEB15: the page plays the match it draws. One step per fixed tick the clock took, the
+    /// human seat's input for each, then the match's own bodies over the scenery.
+    fn step_fight(
+        &mut self,
+        fight: &mut crate::fight::Match,
+        t_s: f32,
+    ) -> Result<DrawList, MatchError> {
+        let (w, h) = self.presenter.size();
+        let steps = self.clock.steps();
+        let frames = self.counters.frames;
+        let (yaw, left, right) = crate::browser::seat_look();
+        for _ in 0..steps {
+            let tick = fight.next_tick();
+            let facing = fight.facing_for(yaw, left, right);
+            match crate::browser::seat_input(tick, facing) {
+                Some(input) => fight.step(input),
+                None => break,
+            }
+        }
+        if frames % 15 == 1 {
+            set_text("fight", &fight.line());
+        }
+        fight.list(&mut self.presenter, w, h, t_s)
     }
 
     /// Feed the frame to the one-second window (unless it spans a hidden gap); once a second print
@@ -539,9 +579,12 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
             .map_err(|e| present_failure(&e))?;
     presenter.apply_quality(&quality::knobs(tier));
     let arena = ProceduralArena::build().map_err(|e| (Failure::NoDevice, e.to_string()))?;
+    // WEB15: `?fight` plays a real match over the same scenery; nothing else changes.
+    let fight = open_fight(&search)?;
     let mut frame = ArenaLoop {
         presenter,
         arena,
+        fight,
         canvas,
         lost,
         uncaptured,
@@ -593,6 +636,16 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
     web_sys::console::log_1(&JsValue::from_str(&line));
     run_loop(frame, canvas_id.to_string(), generation);
     Ok(line)
+}
+
+/// Build the played match when the query asks for it (`?fight`); `None` keeps the stand-in.
+fn open_fight(search: &str) -> Result<Option<crate::fight::Match>, (Failure, String)> {
+    if !has_flag(search, "fight") {
+        return Ok(None);
+    }
+    crate::fight::Match::new()
+        .map(Some)
+        .map_err(|e| (Failure::NoDevice, e.to_string()))
 }
 
 /// The ladder of cuts, unless `?ladder=off` or a software adapter that no cut would help.

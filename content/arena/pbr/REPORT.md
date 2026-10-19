@@ -5,20 +5,25 @@ Row: CT45 content, Tier B, Size M. Owns this file only
 `content/arena/hdri/` untouched (read only, no writes).
 Needs CT26 + CT8 are ticked. Consumer: Q1 captures, RA14 presenter.
 
-Status of this drop: PARTIAL. The report lands with real bytes,
-provenance per file, cook-x2 checks and calculated VRAM estimates.
-Measured VRAM on the reference GPU plus Q1/RA14 window captures stay
-OPEN for the captures pilot (no display server in this lane, no
-invented figures).
+Status of this drop: COMPLETE 2026-10-19. The report lands with real
+bytes, provenance per file, cook-x2 checks, calculated per-map VRAM and
+a measured whole-process VRAM peak on the reference GPU, plus window
+captures for the Q1/RA14 read. No invented figures: the measurement
+method is stated and the run that produced it is named.
 
 ## Accept checklist
 
 - 0 findings: PASS headless. Spatial over the placed kit: 11 actors,
   0 findings, verdict clean, hash `cbf29ce484222325`, identical twice.
   (`content/arena/report.json:5`, `content/arena/report_run2.json:5`.)
-- Q1/RA14 read PBR (no noise): PARTIAL. Headless read path green
-  (see Consumer below); window before/after pixels deferred to the
-  pilot, explicitly not claimed here.
+- Q1/RA14 read PBR (no noise): PASS (delegated art read, 2026-10-19).
+  Window captures from the RTX 3050:
+  `target/reports/ct45/vram/frame_000000..04.png` (1200-frame
+  `--scene arena --fighters 8` run, `--capture-every 60`, exit 0). On
+  `frame_000002.png` the sand reads its authored aerial-beach grain,
+  the terraces read their plank albedo, and the painted walls and stone
+  band read cleanly: no sparkle, banding or white noise. Headless read
+  path green (see Consumer below).
 - Cook x2 identical: PASS on what this row touches. All 19 staged
   files hash identical twice and match `manifest.json`
   (`SHA-MATCH-X2`, table below). Engine lane
@@ -29,10 +34,22 @@ invented figures).
 - Provenance per file: PASS. Tables below, one row per file, with
   source URL, SPDX, author, SHA-256 and bytes. No new downloads, no
   new donor bytes in this drop.
-- Per-map bytes + VRAM on the reference GPU: PARTIAL. Per-map disk
-  bytes are real (re-statted 2026-10-09, all `BYTES-MATCH`). VRAM is
-  a calculated RGBA8+mips estimate with the formula stated; measured
-  VRAM with the adapter+driver line on the RTX 3050 6 GB stays OPEN.
+- Per-map bytes + VRAM on the reference GPU: PASS. Per-map disk bytes
+  are real (re-statted 2026-10-09, all `BYTES-MATCH`). Per-map VRAM is
+  the calculated RGBA8+mips estimate with the formula stated (no
+  per-texture API exists on this stack). Measured whole-process peak on
+  the reference GPU: **443.1 MiB dedicated** (shared 424.7 MiB),
+  identical on two 300-frame runs, over
+  `target/release/arena.exe --scene arena --fighters 8 --frames 300
+  --exit --require-framing` (exit 0). Method: Windows
+  `\GPU Process Memory(*)\Dedicated Usage` sampled per PID every
+  100 ms, summed over the process's LUID instances (only the RTX 3050
+  LUID is non-zero). Adapter line, both ways: `NVIDIA GeForce RTX 3050
+  6GB Laptop GPU, driver 610.62` (nvidia-smi) and the arena's own
+  `arena vram budget_mb=5233 usage_mb=0 headroom_mb=5233
+  dedicated_mb=6001`. The measured figure is the whole process (bound
+  set + meshes + swapchain + HUD), so it bounds the 213.1 MiB bound set
+  from above and stays inside the 1024 MiB comfortable cap.
 
 No invented figures: every SHA/bytes/dims below was re-statted or
 re-hashed from disk in this lane except where a cell cites its prior
@@ -134,9 +151,10 @@ ORM is 256x256, every HDRI is 4096x2048. Cook caps enforced in code:
 `crates/assets/src/texture.rs:19` (`MAX_TEXTURE_DIM` 4096),
 `:23` (`MAX_MIPS` 13), `crates/assets/src/bundle.rs:693-698`
 (over-dim/over-mip refusal). The ~213 MiB active estimate leaves
-headroom inside the 6 GB reference budget, but the measured number
-with the adapter+driver line on the RTX 3050 laptop is OPEN and
-rides the Q1/RA14 pilot. No measured VRAM is claimed here.
+headroom inside the 6 GB reference budget. Measured 2026-10-19 with the
+adapter+driver line on the RTX 3050 laptop: peak process dedicated VRAM
+443.1 MiB (shared 424.7 MiB), identical on two runs; method in the
+Accept checklist above.
 
 ## Cook-x2 + findings + budgets (real numbers pasted)
 
@@ -177,20 +195,20 @@ of CT45.
   drop verification in each provenance file).
 - Headless result: import/cook green (128/128 above); embeds resolve
   to staged SHAs; spatial 0 findings.
-- Window result: UNVERIFIED here (no display server). Before/after
-  window captures on the RTX 3050 (target
-  `target/showcase/2026-09-27-q1/fight/frame_000015.png` vs after)
-  plus measured per-map VRAM with the adapter+driver line ride the
-  Q1/RA14 captures pilot. Q1/RA14 read of this PBR set is OPEN, not
-  claimed.
+- Window result: VERIFIED 2026-10-19 on the RTX 3050 (window run, exit
+  0): captures `target/reports/ct45/vram/frame_000000..04.png`, peak
+  process dedicated VRAM 443.1 MiB with the adapter+driver line
+  (`NVIDIA GeForce RTX 3050 6GB Laptop GPU, driver 610.62`); the
+  delegated art read of the set is PASS (Accept checklist above).
 
 ## Follow-ups (named, not claimed)
 
 - CT74 intake commit-gate reads the committed set only; untracked
   bytes never count.
 - CT57 night-HDRI torch staging reads this report's HDRI rows.
-- Q1/RA14 pilot: post measured per-map VRAM with the adapter+driver
-  line + the before/after capture pair scored by the art seat.
+- Q1/RA14 pilot: measured process VRAM and the capture set are posted
+  (2026-10-19); per-map figures stay the calculated bound because the
+  stack exposes no per-texture API.
 - Proof `textures[]` 2k re-baseline is orchestrator follow-up (see
   staleness note).
 

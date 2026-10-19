@@ -240,13 +240,30 @@ pub(crate) fn contains(b: &Box3, p: [i32; 3]) -> bool {
 /// The segment test is integer slab math on exact rationals: touching a
 /// face or edge is a zero-length touch and never blocks, matching the
 /// strict `hit` semantics of the 3D index.
+///
+/// The segment's integer AABB is hoisted out of the loop: a box strictly
+/// outside it on any axis has a strict integer gap to the whole segment, so
+/// neither `contains` nor the slab test can hold. The gap test is strict, so
+/// boxes that merely touch the AABB still reach the exact slab test and keep
+/// the documented touching semantics.
 fn blocked(world: &SightWorld, e: [i32; 3], t: [i32; 3]) -> bool {
     let d = [
         i64::from(t[0]) - i64::from(e[0]),
         i64::from(t[1]) - i64::from(e[1]),
         i64::from(t[2]) - i64::from(e[2]),
     ];
+    let lo = [e[0].min(t[0]), e[1].min(t[1]), e[2].min(t[2])];
+    let hi = [e[0].max(t[0]), e[1].max(t[1]), e[2].max(t[2])];
     for b in &world.solids {
+        if b.max_x < lo[0] || b.min_x > hi[0] {
+            continue;
+        }
+        if b.max_y < lo[1] || b.min_y > hi[1] {
+            continue;
+        }
+        if b.max_z < lo[2] || b.min_z > hi[2] {
+            continue;
+        }
         if contains(b, e) || contains(b, t) {
             continue;
         }
@@ -616,6 +633,7 @@ pub fn visible_area_cm2(world: &SightWorld, eye_m: [f32; 3]) -> Result<i64, Sigh
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::checked::f64_from_u64;
 
     #[expect(
         clippy::too_many_arguments,
@@ -1315,5 +1333,231 @@ mod tests {
             per_us <= 200.0,
             "ray budget 0.2 ms, measured {per_us:.3} us"
         );
+    }
+
+    /// The pre-AABB scan, kept as the reference side of the A/B pair: every
+    /// solid is containment-checked then slab-tested, with no AABB pre-filter.
+    fn old_blocked(world: &SightWorld, e: [i32; 3], t: [i32; 3]) -> bool {
+        let d = [
+            i64::from(t[0]) - i64::from(e[0]),
+            i64::from(t[1]) - i64::from(e[1]),
+            i64::from(t[2]) - i64::from(e[2]),
+        ];
+        for b in &world.solids {
+            if contains(b, e) || contains(b, t) {
+                continue;
+            }
+            if seg_hits(*b, e, d) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Room shell plus a 5x5 pillar field and five crates: axis-aligned,
+    /// diagonal and grazing segments all resolve here.
+    fn blocked_corpus_world() -> SightWorld {
+        let mut actors = vec![
+            prop(1, 0.0, 1.5, -12.0, 24.0, 3.0, 0.5),
+            prop(2, 0.0, 1.5, 12.0, 24.0, 3.0, 0.5),
+            prop(3, -12.0, 1.5, 0.0, 0.5, 3.0, 24.0),
+            prop(4, 12.0, 1.5, 0.0, 0.5, 3.0, 24.0),
+        ];
+        for gx in 0..5u8 {
+            for gz in 0..5u8 {
+                let id = 10 + u32::from(gx) * 5 + u32::from(gz);
+                actors.push(prop(
+                    id,
+                    -8.0 + 4.0 * f32::from(gx),
+                    0.75,
+                    -8.0 + 4.0 * f32::from(gz),
+                    1.0,
+                    1.5,
+                    1.0,
+                ));
+            }
+        }
+        for (n, (x, z)) in [(-3.0, 6.0), (6.0, -2.5), (0.5, 0.25), (-6.5, -6.5)]
+            .iter()
+            .enumerate()
+        {
+            actors.push(prop(
+                100 + u32::try_from(n).unwrap_or(0),
+                *x,
+                0.5,
+                *z,
+                1.4,
+                1.0,
+                1.4,
+            ));
+        }
+        SightWorld::build(&actors)
+    }
+
+    /// Integer-cm lattice points used as both eyes and targets.
+    fn blocked_corpus_points() -> Vec<[i32; 3]> {
+        let mut pts = Vec::with_capacity(162);
+        for h in [50, 170] {
+            for ix in 0..9u8 {
+                for iz in 0..9u8 {
+                    pts.push([-1050 + 300 * i32::from(ix), h, -1050 + 300 * i32::from(iz)]);
+                }
+            }
+        }
+        pts
+    }
+
+    /// Equivalence proof for the AABB pre-filter: on one room corpus the
+    /// filtered scan and the full scan agree on every ordered lattice pair,
+    /// and both outcomes occur, so the corpus is not vacuous.
+    #[test]
+    fn blocked_aabb_filter_equals_full_scan_on_corpus() {
+        let world = blocked_corpus_world();
+        let pts = blocked_corpus_points();
+        let mut pairs = 0u32;
+        let mut hits = 0u32;
+        for &e in &pts {
+            for &t in &pts {
+                let old = old_blocked(&world, e, t);
+                let new = blocked(&world, e, t);
+                assert_eq!(old, new, "blocked diverged at e={e:?} t={t:?}");
+                pairs += 1;
+                hits += u32::from(new);
+            }
+        }
+        assert_eq!(pairs, 26_244, "every ordered lattice pair is compared");
+        assert!(
+            hits > 0 && hits < pairs,
+            "corpus must exercise both outcomes"
+        );
+    }
+
+    /// Room of 404 solids for the timing pair: eighty percent of the rays run
+    /// through the prop field at head height, so the AABB filter has to earn
+    /// its win on the x/z tests, not on a trivial height reject.
+    fn blocked_bench_world() -> SightWorld {
+        let mut actors = vec![
+            prop(1, 0.0, 1.5, -14.0, 28.0, 3.0, 0.5),
+            prop(2, 0.0, 1.5, 14.0, 28.0, 3.0, 0.5),
+            prop(3, -14.0, 1.5, 0.0, 0.5, 3.0, 28.0),
+            prop(4, 14.0, 1.5, 0.0, 0.5, 3.0, 28.0),
+        ];
+        for gx in 0..20u8 {
+            for gz in 0..20u8 {
+                let id = 10 + u32::from(gx) * 20 + u32::from(gz);
+                actors.push(prop(
+                    id,
+                    -12.5 + 1.25 * f32::from(gx),
+                    1.0,
+                    -12.5 + 1.25 * f32::from(gz),
+                    0.8,
+                    2.0,
+                    0.8,
+                ));
+            }
+        }
+        SightWorld::build(&actors)
+    }
+
+    /// 600 head-height rays with both endpoints drawn from the same 100 cm
+    /// lattice across the room, so ray length and direction vary the way an
+    /// arbitrary eye/target pair does: short rays read clear (full scans),
+    /// crossing rays meet a prop (early exits). One corpus, both outcomes.
+    fn blocked_bench_rays() -> Vec<([i32; 3], [i32; 3])> {
+        let span = |v: u32| 100 * i32::try_from(v % 27).unwrap_or(0) - 1300;
+        (0..600u32)
+            .map(|i| {
+                (
+                    [span(i), 160, span(i * 5)],
+                    [span(i * 7), 160, span(i * 13)],
+                )
+            })
+            .collect()
+    }
+
+    /// One interleaved pass over `rays`: even rounds time the old scan first,
+    /// odd rounds the new one, so ordering and cache effects sit under both.
+    #[expect(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        reason = "test-only timing, never the tick"
+    )]
+    fn paired_blocked_samples(
+        world: &SightWorld,
+        rays: &[([i32; 3], [i32; 3])],
+    ) -> (Vec<u128>, Vec<u128>) {
+        let iters = 3 * rays.len();
+        let mut old_ns: Vec<u128> = Vec::with_capacity(iters);
+        let mut new_ns: Vec<u128> = Vec::with_capacity(iters);
+        for round in 0..3 {
+            for (e, t) in rays {
+                if round % 2 == 0 {
+                    let start = std::time::Instant::now();
+                    let old = old_blocked(world, *e, *t);
+                    old_ns.push(start.elapsed().as_nanos());
+                    let start = std::time::Instant::now();
+                    let new = blocked(world, *e, *t);
+                    new_ns.push(start.elapsed().as_nanos());
+                    std::hint::black_box((old, new));
+                } else {
+                    let start = std::time::Instant::now();
+                    let new = blocked(world, *e, *t);
+                    new_ns.push(start.elapsed().as_nanos());
+                    let start = std::time::Instant::now();
+                    let old = old_blocked(world, *e, *t);
+                    old_ns.push(start.elapsed().as_nanos());
+                    std::hint::black_box((old, new));
+                }
+            }
+        }
+        (old_ns, new_ns)
+    }
+
+    /// Paired receipt: the filtered scan against the pre-change scan on one
+    /// fixture in one process.
+    /// Run: cargo test -p engine-spatial --release blocked_aabb_bench_receipt
+    /// -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
+    fn blocked_aabb_bench_receipt() {
+        let world = blocked_bench_world();
+        let rays = blocked_bench_rays();
+        assert_eq!(world.solids().len(), 404, "bench fixture size");
+        let mut hits = 0usize;
+        for (e, t) in &rays {
+            let old = old_blocked(&world, *e, *t);
+            assert_eq!(old, blocked(&world, *e, *t), "ray {e:?} -> {t:?} diverged");
+            hits += usize::from(old);
+        }
+        assert!(hits > 0 && hits < rays.len(), "both outcomes occur");
+        let (mut old_ns, mut new_ns) = paired_blocked_samples(&world, &rays);
+        old_ns.sort_unstable();
+        new_ns.sort_unstable();
+        let mid = old_ns.len() / 2;
+        let (old, new) = (old_ns[mid], new_ns[mid]);
+        eprintln!(
+            "blocked p50 old_us={:.3} new_us={:.3} speedup={:.2}x rays={} hits={} solids={}",
+            micros(old),
+            micros(new),
+            ratio(old, new),
+            rays.len(),
+            hits,
+            world.solids().len()
+        );
+        assert!(new < old, "the AABB pre-filter must not be the slower scan");
+    }
+
+    /// Nanoseconds as microseconds, without a cast.
+    fn micros(ns: u128) -> f64 {
+        f64_from_u64(u64::try_from(ns).unwrap_or(0)) / 1000.0
+    }
+
+    /// How many times slower `slow` is than `fast`.
+    fn ratio(slow: u128, fast: u128) -> f64 {
+        if fast == 0 {
+            return 0.0;
+        }
+        f64_from_u64(u64::try_from(slow).unwrap_or(0))
+            / f64_from_u64(u64::try_from(fast).unwrap_or(0))
     }
 }

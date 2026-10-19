@@ -55,11 +55,11 @@ use engine_game::window_audio_space::AudioSpace;
 use engine_game::windowed::{
     apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit, dressing_camera,
     feed_tick_audio, fighter_input_from_pressed, format_timed_smoke, frame_times_csv_row,
-    hud_cells_quads, hud_draw_list, msaa_setting, push_fight_draws, smoke_muted, split_staged_flag,
-    stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
-    staged_session_config, surface_frame_action, StagedFighterDot, StagedTally, SurfaceFrameAction,
-    TickAccumulator, WinArgs, WinError, WindowPad, FRAME_TIMES_CSV_HEADER, MSAA_ENV,
-    WINDOWED_SAMPLE_RATE, WINDOW_SIZE, WIN_FIXED_DT_S,
+    hud_cells_quads, hud_draw_list, live_fight_dots, msaa_setting, push_fight_draws, smoke_muted,
+    split_staged_flag, stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
+    staged_session_config, surface_frame_action, StagedTally, SurfaceFrameAction, TickAccumulator,
+    WinArgs, WinError, WindowPad, FRAME_TIMES_CSV_HEADER, MSAA_ENV, WINDOWED_SAMPLE_RATE,
+    WINDOW_SIZE, WIN_FIXED_DT_S,
 };
 use engine_game::{App, GameConfig, TickOutcome};
 use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
@@ -121,6 +121,30 @@ use arena_capture::capture::{
 /// A fresh fight camera follower, snapping to the next shot (a new window or a new bout).
 fn new_cam_follow() -> Result<CamFollow, WinError> {
     CamFollow::new().map_err(|err| WinError::Render(format!("fight camera: {err}")))
+}
+
+/// QL12: one line of per-tier particle counts: each quality tier's pool
+/// budget and how it splits over dust, flame, sparks and blood. Pure data
+/// from the shipped tables, so a capture names the caps its particle pass
+/// ran under. Cold path only.
+fn particle_tier_line() -> String {
+    use engine_render::particles_gpu::KindCaps;
+    use engine_render::quality::{knobs, particle_pool_slots, Quality};
+    let mut line = String::from("arena particles: per-tier");
+    for tier in Quality::ALL {
+        let total = particle_pool_slots(&knobs(tier));
+        let caps = KindCaps::for_total(total);
+        line.push_str(&format!(
+            " {}={} dust={} flame={} sparks={} blood={}",
+            tier.name(),
+            total,
+            caps.dust,
+            caps.flame,
+            caps.sparks,
+            caps.blood
+        ));
+    }
+    line
 }
 
 /// Default session seed for windowed play.
@@ -832,6 +856,10 @@ fn run(raw: &[String]) -> i32 {
         }
     }
     say!("arena controls: {CONTROLS_LINE}");
+    // QL12: the per-tier particle counts ride at the head of the run, so a
+    // fight capture names the caps its particle pass ran under beside the
+    // pass ms on the per-pass line.
+    say!("{}", particle_tier_line());
     if no_break_look {
         app.break_scene = None;
     }
@@ -919,34 +947,6 @@ fn duration_us(elapsed: std::time::Duration) -> u64 {
 
 /// Live fight bodies: one dot per simulated fighter from the rolling pose
 /// cursor (planar position, feet on the floor), live hp, this tick's flash.
-fn live_fight_dots(app: &App, cues: &[FightCue]) -> Vec<StagedFighterDot> {
-    let fighters = usize::from(app.config().fighters);
-    let poses = app.window_frame_poses();
-    let mut dots = Vec::with_capacity(fighters);
-    for slot in 0..fighters {
-        let Some(id) = u8::try_from(slot).ok().and_then(FighterId::new) else {
-            continue;
-        };
-        let Some(root) = poses.get(slot).and_then(|pose| pose.positions.first()) else {
-            continue;
-        };
-        if !root.iter().all(|v| v.is_finite()) {
-            continue;
-        }
-        let hit = cues.iter().any(|cue| match cue {
-            FightCue::Hit { victim, .. } => *victim == id.get(),
-            FightCue::Knockdown { victim, .. } => *victim == id.get(),
-            _ => false,
-        });
-        dots.push(StagedFighterDot {
-            slot: id.get(),
-            pos_m: [root[0], 0.0, root[2]],
-            hp: app.hp().get(slot).copied().unwrap_or(1000),
-            hit,
-        });
-    }
-    dots
-}
 
 /// Live window session: winit events feed the bindings table, the accumulator
 /// steps the [`App`] match at 60 Hz, voices play into the shared mixer, and
@@ -3803,6 +3803,67 @@ mod tests {
         );
     }
 
+    /// One folded receipt carrying the fields the per-pass line reads, at the
+    /// frame size named. Shared by the per-pass line tests.
+    fn folded_receipt(
+        width: u32,
+        height: u32,
+        sky_us: u64,
+        gtao_us: u64,
+        shadow_us: u64,
+        validation: u32,
+    ) -> engine_render::present::FrameReceipt {
+        engine_render::present::FrameReceipt {
+            width,
+            height,
+            draws: 1,
+            validation_errors: 0,
+            generation: 1,
+            presented: true,
+            adapter: "NVIDIA GeForce RTX 3050 6GB Laptop GPU".to_string(),
+            driver: "610.62".to_string(),
+            mesh_count: 1,
+            texture_count: 0,
+            mesh_high_water: 1,
+            texture_high_water: 0,
+            mesh_evicted: 0,
+            texture_evicted: 0,
+            evicted_mesh_id: None,
+            evicted_texture_id: None,
+            look_passes: 4,
+            look_validation_errors: validation,
+            ibl_passes: 1,
+            ibl_validation_errors: 0,
+            fog_passes: 2,
+            fog_validation_errors: 0,
+            fog_submit_us: 200,
+            gtao_passes: 2,
+            gtao_validation_errors: 0,
+            gtao_submit_us: gtao_us,
+            sky_submit_us: sky_us,
+            layer_submit_us: 100,
+            particle_submit_us: 100,
+            decal_submit_us: 100,
+            ibl_submit_us: 300,
+            shadow_submit_us: shadow_us,
+        }
+    }
+
+    #[test]
+    fn per_pass_line_names_the_newest_folded_frame_size() {
+        // QL12: the capture runner forces the window to its capture size a few
+        // frames into a run, and the means are taken over the frames that
+        // followed, so the line names the newest folded size and not the boot
+        // size (which pinned every 1080p run under a 720p label).
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "2", "--exit"]))
+            .expect("valid smoke fixture parses");
+        let mut app = ArenaApp::new(bin_config(), args, None).expect("test session builds");
+        app.note_receipt(&folded_receipt(1280, 720, 1000, 800, 1500, 0));
+        app.note_receipt(&folded_receipt(1937, 1080, 3000, 1200, 2500, 0));
+        let line = app.per_pass_line().expect("two receipts post a line");
+        assert!(line.contains("resolution=1937x1080"), "{line}");
+    }
+
     #[test]
     fn per_pass_line_posts_means_with_adapter_and_validation() {
         // No frames yet: no adapter pinned, so no line (never a fake table).
@@ -3811,45 +3872,8 @@ mod tests {
         let mut app = ArenaApp::new(bin_config(), args, None).expect("test session builds");
         assert!(app.per_pass_line().is_none());
         // Two folded receipts average to the posted means; validation sums.
-        let receipt = |sky_us: u64,
-                       gtao_us: u64,
-                       shadow_us: u64,
-                       validation: u32|
-         -> engine_render::present::FrameReceipt {
-            engine_render::present::FrameReceipt {
-                width: 1280,
-                height: 720,
-                draws: 1,
-                validation_errors: 0,
-                generation: 1,
-                presented: true,
-                adapter: "NVIDIA GeForce RTX 3050 6GB Laptop GPU".to_string(),
-                driver: "610.62".to_string(),
-                mesh_count: 1,
-                texture_count: 0,
-                mesh_high_water: 1,
-                texture_high_water: 0,
-                mesh_evicted: 0,
-                texture_evicted: 0,
-                evicted_mesh_id: None,
-                evicted_texture_id: None,
-                look_passes: 4,
-                look_validation_errors: validation,
-                ibl_passes: 1,
-                ibl_validation_errors: 0,
-                fog_passes: 2,
-                fog_validation_errors: 0,
-                fog_submit_us: 200,
-                gtao_passes: 2,
-                gtao_validation_errors: 0,
-                gtao_submit_us: gtao_us,
-                sky_submit_us: sky_us,
-                layer_submit_us: 100,
-                particle_submit_us: 100,
-                decal_submit_us: 100,
-                ibl_submit_us: 300,
-                shadow_submit_us: shadow_us,
-            }
+        let receipt = |sky_us: u64, gtao_us: u64, shadow_us: u64, validation: u32| {
+            folded_receipt(1280, 720, sky_us, gtao_us, shadow_us, validation)
         };
         app.note_receipt(&receipt(1000, 800, 1500, 0));
         app.note_receipt(&receipt(3000, 1200, 2500, 1));

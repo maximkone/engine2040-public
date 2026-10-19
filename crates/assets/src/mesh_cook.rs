@@ -458,6 +458,9 @@ struct TipsifyState {
     adjacency: Vec<Vec<u32>>,
     /// Modeled cache members.
     cache: Vec<u32>,
+    /// Scratch for the cache sorted most-recent first; reused every step so
+    /// one walk does not allocate per triangle.
+    members: Vec<u32>,
     /// Membership flags shadowing `cache`.
     in_cache: Vec<bool>,
     /// Last-touch tick per vertex.
@@ -499,6 +502,7 @@ impl TipsifyState {
             valence,
             adjacency,
             cache: Vec::new(),
+            members: Vec::new(),
             in_cache: vec![false; vert_count],
             stamp: vec![0u32; vert_count],
             tick: 0,
@@ -512,14 +516,16 @@ impl TipsifyState {
     /// Next triangle to emit: most-recent cache vertex first, then the
     /// dead-end stack, then input order. Ties break on the lowest index.
     fn next(&mut self) -> Option<u32> {
-        let mut members = self.cache.clone();
-        members.sort_unstable_by(|a, b| {
-            let old = self.stamp.get(index_usize(*a)).copied().unwrap_or(0);
-            let young = self.stamp.get(index_usize(*b)).copied().unwrap_or(0);
+        self.members.clear();
+        self.members.extend_from_slice(&self.cache);
+        let stamp = &self.stamp;
+        self.members.sort_unstable_by(|a, b| {
+            let old = stamp.get(index_usize(*a)).copied().unwrap_or(0);
+            let young = stamp.get(index_usize(*b)).copied().unwrap_or(0);
             young.cmp(&old).then_with(|| a.cmp(b))
         });
-        for member in members {
-            let vertex = index_usize(member);
+        for member in &self.members {
+            let vertex = index_usize(*member);
             if self.valence.get(vertex).copied().unwrap_or(0) == 0 {
                 continue;
             }
@@ -571,19 +577,27 @@ impl TipsifyState {
                     vertex,
                     self.cache_size,
                 );
-                if let Some(ring) = self.adjacency.get(vertex).cloned() {
-                    for other in ring {
-                        let id = index_usize(other);
-                        if self.live.get(id) != Some(&true) {
-                            continue;
-                        }
-                        if let Some(shared) = self.corners.get(id) {
-                            for peer in *shared {
-                                let valence =
-                                    self.valence.get(index_usize(peer)).copied().unwrap_or(0);
-                                if valence > 0 {
-                                    self.dead.push(peer);
-                                }
+                // The ring never changes during the walk, so read it in place;
+                // a per-corner clone allocated once per corner of every triangle.
+                let ring_len = self.adjacency.get(vertex).map_or(0, Vec::len);
+                for at in 0..ring_len {
+                    let Some(other) = self
+                        .adjacency
+                        .get(vertex)
+                        .and_then(|ring| ring.get(at))
+                        .copied()
+                    else {
+                        break;
+                    };
+                    let id = index_usize(other);
+                    if self.live.get(id) != Some(&true) {
+                        continue;
+                    }
+                    if let Some(shared) = self.corners.get(id) {
+                        for peer in *shared {
+                            let valence = self.valence.get(index_usize(peer)).copied().unwrap_or(0);
+                            if valence > 0 {
+                                self.dead.push(peer);
                             }
                         }
                     }
@@ -1960,6 +1974,180 @@ mod tests {
             "ORDER-PROOF prop cook: unordered_chain_ms={raw_ms} ordered_cook_ms={cook_ms} digest={}",
             cooked.digest,
         );
+    }
+
+    /// Digest of the prop-class grid cook, recorded from the committed
+    /// index-order walk: an index-order change must leave it untouched.
+    const PROP_GRID_DIGEST: u64 = 0x2e46_4739_8a5e_5648;
+
+    /// Byte-parity gate for the cook-time walk: the 50x50 grid (one whole prop
+    /// class) cooks the same bytes twice and keeps the pinned digest.
+    #[test]
+    fn index_order_walk_keeps_prop_grid_digest() {
+        let mesh = grid_mesh(50);
+        assert_eq!(tri_count(&mesh), PROP_MAX_TRIS);
+        let cooked = cook_mesh(&mesh, MeshClass::Prop).expect("prop grid cooks");
+        assert_eq!(
+            cooked,
+            cook_mesh(&mesh, MeshClass::Prop).expect("recook"),
+            "cook bytes x2"
+        );
+        eprintln!("ASSET-perf prop grid digest {:#018x}", cooked.digest);
+        assert_eq!(
+            cooked.digest, PROP_GRID_DIGEST,
+            "cooked bytes must not move"
+        );
+    }
+
+    /// Cook-time walk timing on a 100x100 grid (20_000 tris, hero scale), p50
+    /// over 100 rounds in microseconds. `miss` and `overdraw` are untouched
+    /// sibling cook passes, printed so two runs on different machines compare
+    /// by ratio. Wall time is printed, never asserted.
+    #[test]
+    fn index_order_walk_p50_us() {
+        let mesh = grid_mesh(100);
+        let tris = tri_count(&mesh);
+        assert_eq!(tris, 20_000);
+        let mut miss_us: Vec<u64> = Vec::with_capacity(100);
+        let mut draw_us: Vec<u64> = Vec::with_capacity(100);
+        let mut cache_us: Vec<u64> = Vec::with_capacity(100);
+        let mut order_us: Vec<u64> = Vec::with_capacity(100);
+        let mut checksum = 0usize;
+        let mut miss_sum = 0.0f32;
+        for _ in 0..100 {
+            miss_sum += time_one(&mut miss_us, || {
+                vertex_cache_miss_ratio(&mesh.indices, VERTEX_CACHE_SIZE)
+            });
+            checksum += time_one(&mut draw_us, || optimize_overdraw(&mesh).indices.len());
+            checksum += time_one(&mut cache_us, || optimize_vertex_cache(&mesh).indices.len());
+            checksum += time_one(&mut order_us, || optimize_index_order(&mesh).indices.len());
+        }
+        assert_eq!(checksum, mesh.indices.len() * 300, "every pass ordered");
+        assert!(miss_sum > 0.0, "miss ratio is a real number");
+        let (miss, draw, cache, order) = (
+            median_us(&mut miss_us),
+            median_us(&mut draw_us),
+            median_us(&mut cache_us),
+            median_us(&mut order_us),
+        );
+        eprintln!(
+            "ASSET-perf index_order 100x100 ({tris} tris): miss p50 {miss} us, overdraw p50 {draw} us, vertex_cache p50 {cache} us (/miss {:.2}), index_order p50 {order} us (/miss {:.2})",
+            cache as f64 / miss.max(1) as f64,
+            order as f64 / miss.max(1) as f64,
+        );
+    }
+
+    /// Paired buffer-strategy A/B with both arms in this one process, so the
+    /// ratios are machine-independent: the walk's per-triangle cache snapshot
+    /// (`fresh` allocates a buffer, `reuse` keeps one) and its per-corner ring
+    /// read (`clone` copies the list, `index` walks it). p50 us over 100 rounds
+    /// of 200 steps, printed, never asserted.
+    #[test]
+    fn index_order_walk_buffer_strategies_p50_us() {
+        let mesh = grid_mesh(40);
+        let corners: Vec<[u32; 3]> = mesh
+            .indices
+            .chunks_exact(3)
+            .map(|tri| [tri[0], tri[1], tri[2]])
+            .collect();
+        let mut state = TipsifyState::new(corners, mesh.positions.len(), VERTEX_CACHE_SIZE);
+        let order = tipsify_order(&mesh.indices, mesh.positions.len(), VERTEX_CACHE_SIZE);
+        for tri in order.iter().take(4 * VERTEX_CACHE_SIZE) {
+            state.emit(*tri);
+        }
+        assert_eq!(state.cache.len(), VERTEX_CACHE_SIZE, "a full snapshot");
+        let rings = state.adjacency.len();
+        assert!(rings > VERTEX_CACHE_SIZE);
+        let mut scratch: Vec<u32> = Vec::new();
+        let (mut fresh_us, mut reuse_us) = (Vec::new(), Vec::new());
+        let (mut clone_us, mut index_us) = (Vec::new(), Vec::new());
+        for _ in 0..100 {
+            time_one(&mut fresh_us, || {
+                for _ in 0..200 {
+                    std::hint::black_box(cache_snapshot(&state.cache, &state.stamp));
+                }
+            });
+            time_one(&mut reuse_us, || {
+                for _ in 0..200 {
+                    cache_snapshot_into(&mut scratch, &state.cache, &state.stamp);
+                    std::hint::black_box(&scratch);
+                }
+            });
+            time_one(&mut clone_us, || {
+                for at in 0..200 {
+                    let vertex = std::hint::black_box((at + 1) % rings);
+                    std::hint::black_box(ring_clone(&state.adjacency, vertex));
+                }
+            });
+            time_one(&mut index_us, || {
+                for at in 0..200 {
+                    let vertex = std::hint::black_box((at + 1) % rings);
+                    std::hint::black_box(ring_read(&state.adjacency, vertex));
+                }
+            });
+        }
+        let (fresh, reuse) = (median_us(&mut fresh_us), median_us(&mut reuse_us));
+        let (clone, index) = (median_us(&mut clone_us), median_us(&mut index_us));
+        eprintln!(
+            "ASSET-perf tipsify buffers: snapshot fresh p50 {fresh} us vs reuse {reuse} us (/fresh {:.2}), ring clone p50 {clone} us vs index {index} us (/clone {:.2})",
+            reuse as f64 / fresh.max(1) as f64,
+            index as f64 / clone.max(1) as f64,
+        );
+    }
+
+    /// Pre-change step: snapshot the modeled cache into a fresh buffer.
+    fn cache_snapshot(cache: &[u32], stamp: &[u32]) -> Vec<u32> {
+        let mut members = Vec::new();
+        cache_snapshot_into(&mut members, cache, stamp);
+        members
+    }
+
+    /// Changed step: clear and refill one buffer, then sort most-recent first.
+    fn cache_snapshot_into(scratch: &mut Vec<u32>, cache: &[u32], stamp: &[u32]) {
+        scratch.clear();
+        scratch.extend_from_slice(cache);
+        scratch.sort_unstable_by(|a, b| {
+            let old = stamp.get(index_usize(*a)).copied().unwrap_or(0);
+            let young = stamp.get(index_usize(*b)).copied().unwrap_or(0);
+            young.cmp(&old).then_with(|| a.cmp(b))
+        });
+    }
+
+    /// Pre-change step: clone the vertex's live-triangle ring.
+    fn ring_clone(adjacency: &[Vec<u32>], vertex: usize) -> Vec<u32> {
+        adjacency.get(vertex).cloned().unwrap_or_default()
+    }
+
+    /// Changed step: walk the same ring in place and sum it.
+    fn ring_read(adjacency: &[Vec<u32>], vertex: usize) -> usize {
+        let len = adjacency.get(vertex).map_or(0, Vec::len);
+        let mut sum = 0usize;
+        for at in 0..len {
+            let Some(tri) = adjacency.get(vertex).and_then(|ring| ring.get(at)) else {
+                break;
+            };
+            sum = sum.wrapping_add(index_usize(*tri));
+        }
+        sum
+    }
+
+    /// Time one pass, keep the sample, and hand back what the pass returned.
+    fn time_one<R>(samples: &mut Vec<u64>, pass: impl FnOnce() -> R) -> R {
+        let start = std::time::Instant::now();
+        let out = pass();
+        samples.push(elapsed_us(start));
+        out
+    }
+
+    /// Microseconds elapsed since `start`, saturating on absurd runs.
+    fn elapsed_us(start: std::time::Instant) -> u64 {
+        u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX) / 1000
+    }
+
+    /// Median of the samples, sorting them in place.
+    fn median_us(samples: &mut [u64]) -> u64 {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
     }
 
     #[test]
