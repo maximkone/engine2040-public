@@ -166,7 +166,7 @@ pub(crate) mod fixtures {
     }
 
     /// An axis-aligned box from the unit cube: same winding, scaled and moved.
-    fn box_mesh(min: [f32; 3], max: [f32; 3]) -> MeshData {
+    pub(crate) fn box_mesh(min: [f32; 3], max: [f32; 3]) -> MeshData {
         let cube = v1::cube();
         let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
         let mid = [
@@ -190,7 +190,7 @@ pub(crate) mod fixtures {
     }
 
     /// A square floor at y = 0, up-facing.
-    fn floor_mesh(half: f32) -> MeshData {
+    pub(crate) fn floor_mesh(half: f32) -> MeshData {
         let positions = [
             [-half, 0.0, -half],
             [-half, 0.0, half],

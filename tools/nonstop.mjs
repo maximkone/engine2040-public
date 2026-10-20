@@ -106,7 +106,7 @@ export function buildPrompt(id, slice, today) {
     "Do this, in order:",
     "1. Do the row's work. The smallest change that meets its Accept line. Reuse existing code. Do not invent files the row does not name.",
     "2. Prove it with the test the row names. Heavy cargo runs only through `node tools/gh-check.mjs cargo ...`. Frozen hashes must not move.",
-    "3. `cargo fmt` on your files, then `node tools/rust-quality.mjs --owned`, then `node tools/workspace-check.mjs`. No FAIL from your files.",
+    "3. `rustfmt --edition 2021` on your own files only (never `cargo fmt`), then `node tools/rust-quality.mjs --owned`, then `node tools/workspace-check.mjs`. No FAIL from your files.",
     "4. Commit only your own paths: `git commit -F <msgfile> -- <paths>` (run `git add -N <file>` for new files first; `mod x;` and x.rs go in one commit).",
     "   Never `git add -A`, rebase, amend or force-push. Then `git pull --no-rebase --no-edit origin master` and `git push origin master`.",
     `5. Tick the row only if a named test ran green: change \`- [ ] ${id}\` to \`- [x] ${id}\` and append \` Landed <sha7>. <test names and gh run id>.\``,

@@ -638,6 +638,8 @@ mod tests {
     use super::*;
     use crate::pass_truth::harness::fixtures::{arena_like_scene, init_or_skip, H, W};
     use crate::pass_truth::LookToggles;
+    use crate::present::{DrawItem, DrawList};
+    use crate::v1::{Camera, DirectionalLight, PbrMaterial};
 
     /// Read one whole `f32` texture (a depth texture through its depth
     /// aspect, or `ao_texture`) back to the host, row-major.
@@ -733,6 +735,9 @@ mod tests {
             return;
         };
         presenter.resize(W, H).expect("valid size applies");
+        // This row's contract is GTAO alone: the contact pass (GS43) is its
+        // own kernel and would add a shade the CPU oracle does not model.
+        presenter.set_contact_shadow_strength(0.0);
         let list = arena_like_scene(&mut presenter, W, H);
         presenter.render_live_offscreen(&list).expect("live frame");
         let targets = presenter.targets.as_ref().expect("targets exist");
@@ -829,6 +834,126 @@ mod tests {
             wgpu::TextureAspect::All,
         );
         assert_eq!(on, again, "the same frame twice is byte-equal");
+    }
+
+    #[test]
+    fn contact_shadows_drop_under_both_feet_on_a_live_frame() {
+        // GS43 accept: two feet on the sand, a low sun. On a live frame the
+        // floor inside a 0.3 m box under each foot loses at least 8% of its
+        // mean luma with the pass on, and strength 0 leaves it untouched.
+        use crate::pass_truth::harness::fixtures::{box_mesh, floor_mesh};
+        let Some(mut presenter) = init_or_skip("contact_shadows_both_feet") else {
+            return;
+        };
+        let (w, h) = (640u32, 360u32);
+        presenter.resize(w, h).expect("valid size applies");
+        let mut items: Vec<DrawItem> = Vec::new();
+        let mut upload =
+            |presenter: &mut Presenter, id: u64, mesh: &crate::v1::MeshData, color: [f32; 3]| {
+                let key = MeshKey::new(id, [id as u8; 32]);
+                presenter
+                    .upload_mesh(key, mesh)
+                    .expect("fixture mesh uploads");
+                items.push(DrawItem {
+                    mesh: key,
+                    material: PbrMaterial {
+                        base_color: color,
+                        metallic: 0.0,
+                        roughness: 0.9,
+                        exposure: 1.0,
+                    },
+                    base_color: None,
+                    normal_map: None,
+                    orm: None,
+                    emissive: None,
+                });
+            };
+        upload(
+            &mut presenter,
+            0xE901,
+            &floor_mesh(12.0),
+            [0.42, 0.32, 0.20],
+        );
+        upload(
+            &mut presenter,
+            0xE902,
+            &box_mesh([-0.21, 0.0, -0.13], [-0.09, 0.10, 0.13]),
+            [0.30, 0.28, 0.26],
+        );
+        upload(
+            &mut presenter,
+            0xE903,
+            &box_mesh([0.09, 0.0, -0.13], [0.21, 0.10, 0.13]),
+            [0.30, 0.28, 0.26],
+        );
+        let mut camera = Camera::new(
+            [0.0, 1.25, 2.6],
+            [0.0, 0.10, 0.0],
+            [0.0, 1.0, 0.0],
+            50.0f32.to_radians(),
+        );
+        camera.aspect = w as f32 / h as f32;
+        let list = DrawList {
+            camera,
+            light: DirectionalLight {
+                direction: glam::Vec3::new(-0.48, 0.32, -0.82).normalize(),
+                color: glam::Vec3::new(1.0, 0.96, 0.90),
+                intensity: 3.0,
+            },
+            items,
+        };
+        presenter.set_contact_shadow_strength(1.0);
+        let on = presenter
+            .capture_live_pixels(&list, &LookToggles::all_on())
+            .expect("contact on");
+        presenter.set_contact_shadow_strength(0.0);
+        let off = presenter
+            .capture_live_pixels(&list, &LookToggles::all_on())
+            .expect("contact off");
+        assert_eq!(on.rgba.len(), off.rgba.len());
+        let vp = list.camera.view_proj().expect("camera builds");
+        let project = |p: [f32; 3]| {
+            let c = vp * glam::Vec4::new(p[0], p[1], p[2], 1.0);
+            let ndc = c.truncate() / c.w;
+            (
+                (ndc.x * 0.5 + 0.5) * w as f32,
+                (1.0 - (ndc.y * 0.5 + 0.5)) * h as f32,
+            )
+        };
+        let luma = |rgba: &[u8], i: usize| {
+            0.2126 * f32::from(rgba[i * 4])
+                + 0.7152 * f32::from(rgba[i * 4 + 1])
+                + 0.0722 * f32::from(rgba[i * 4 + 2])
+        };
+        for (foot, x) in [("left", -0.15f32), ("right", 0.15)] {
+            let a = project([x - 0.15, 0.01, -0.09]);
+            let b = project([x + 0.15, 0.01, 0.21]);
+            let x0 = a.0.min(b.0).max(0.0) as u32;
+            let x1 = a.0.max(b.0).min(w as f32 - 1.0) as u32;
+            let y0 = a.1.min(b.1).max(0.0) as u32;
+            let y1 = a.1.max(b.1).min(h as f32 - 1.0) as u32;
+            let (mut sum_on, mut sum_off, mut n) = (0.0f64, 0.0f64, 0u32);
+            for y in y0..=y1 {
+                for px in x0..=x1 {
+                    let i = (y * w + px) as usize;
+                    if off.ids[i] != 0 {
+                        continue;
+                    }
+                    sum_on += f64::from(luma(&on.rgba, i));
+                    sum_off += f64::from(luma(&off.rgba, i));
+                    n += 1;
+                }
+            }
+            assert!(n > 500, "{foot}: the box holds floor pixels: {n}");
+            let drop = 1.0 - sum_on / sum_off;
+            eprintln!(
+                "contact shadows {foot}: floor px={n} mean luma {:.1} -> {:.1} ({:.1}% drop)",
+                sum_off / f64::from(n),
+                sum_on / f64::from(n),
+                drop * 100.0
+            );
+            assert!(drop >= 0.08, "{foot} floor drops 8%: {drop:.3}");
+        }
     }
 
     #[test]

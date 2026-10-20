@@ -35,7 +35,7 @@ const STEPS: u32 = 16u;
 const LENGTH_M: f32 = 0.3;
 const THICKNESS_M: f32 = 0.1;
 const BIAS_M: f32 = 0.02;
-const MAX_SHADE: f32 = 0.55;
+const MAX_SHADE: f32 = 0.25;
 
 fn clamp_px(p: vec2<i32>) -> vec2<i32> {
     return clamp(p, vec2<i32>(0), vec2<i32>(u.full_wh) - vec2<i32>(1));

@@ -71,6 +71,7 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `SP63-deepdive.md` — NOW — Look — stuck-gate deep dive for SP63 draw-id target: land the two foreign fixes first, then slice 1
 - `lf10-pose-hold-rethink.md` — NOW — Bodies — stuck-gate rethink for LF10 pose-hold hitstop: slice A land plus slice B defer
 - `fps-view.md` — NEXT — Look — a first-person eye on a fighter body: eye pose, look channel beside the tape, camera feed, no-clip rule (rows FV1-FV6)
+- `2026-10-20-parallel-campaign.md` — NOW — all four — how three agent lanes land the 309 startable rows (not the 695 open): lane split, waves, proof fleet, stop rules, and the owner decisions it waits on
 
 ## How a plan is written
 

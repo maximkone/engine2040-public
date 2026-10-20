@@ -33,9 +33,10 @@ test("pickNext skips done rows and honors --ids and --match", () => {
 
 test("buildPrompt names the row, the date, the one-line ending and the hard rules", () => {
   const p = buildPrompt("QR2", "## Row\n- [ ] QR2 body", "2026-10-19");
-  for (const needle of ["Row: QR2", "2026-10-19", "- [x] QR2", "DONE QR2", "git add -A", "gh-check.mjs", "Never ask a question"]) {
+  for (const needle of ["Row: QR2", "2026-10-19", "- [x] QR2", "DONE QR2", "git add -A", "gh-check.mjs", "Never ask a question", "rustfmt --edition 2021"]) {
     assert.ok(p.includes(needle), needle);
   }
+  assert.ok(!p.includes("`cargo fmt` on"), "AGENTS.md forbids cargo fmt; the prompt must not ask for it");
 });
 
 test("opencodeBin ignores OpenCode's own OPENCODE=1 marker and takes a real path", () => {

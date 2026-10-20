@@ -121,6 +121,21 @@ pub fn msaa_setting(value: Option<&str>) -> bool {
     value.is_some_and(|value| value == "1")
 }
 
+/// Contact-shadow strength (GS43): `0` turns the pass off (the kernel copies
+/// the GTAO field through, so the frame is byte-equal), a number in `0..=1`
+/// scales it, and unset keeps the shipped 1.0. Same shape as `E2040_MSAA`.
+pub const CONTACT_SHADOW_ENV: &str = "E2040_CONTACT_SHADOW";
+
+/// Parse the contact-shadow strength: 1.0 when unset or not a finite number,
+/// else the number clamped to `0..=1`. Pure string parse, no clock; the
+/// returned strength is the setting's only effect.
+pub fn contact_shadow_strength(value: Option<&str>) -> f32 {
+    value
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .map_or(1.0, |value| value.clamp(0.0, 1.0))
+}
+
 /// Windowed failures: bounded diagnostics, never panics. Audio loss is not an
 /// error: opening the device returns a notice string and the headless mixer
 /// keeps rendering voices offline.
@@ -1567,6 +1582,11 @@ fn smoke_presenter() -> Result<Option<(Presenter, MeshKey, super::arena_kit::Kit
             // EG13: the offscreen twin honors the same setting as the
             // window, so one capture pair can show 4x MSAA on and off.
             presenter.set_msaa_enabled(msaa_setting(std::env::var(MSAA_ENV).ok().as_deref()));
+            // GS43: the same setting the window reads, so the smoke twin and
+            // a capture pair agree on contact shadows too.
+            presenter.set_contact_shadow_strength(contact_shadow_strength(
+                std::env::var(CONTACT_SHADOW_ENV).ok().as_deref(),
+            ));
             // One lit cube proves the forward pass; a failed upload falls
             // back to clear-only frames rather than failing the smoke.
             let key = MeshKey::new(1, [0xA1; 32]);
@@ -1915,6 +1935,22 @@ mod tests {
         assert!(!msaa_setting(Some("0")), "0 keeps the 1x path");
         assert!(!msaa_setting(Some("true")), "a word is not the setting");
         assert_eq!(MSAA_ENV, "E2040_MSAA", "the setting name is pinned");
+    }
+
+    /// GS43: contact shadows ship at 1.0; `0` turns them off, a number scales,
+    /// a word keeps the shipped default, and out-of-range clamps.
+    #[test]
+    fn contact_shadow_strength_defaults_to_one_and_clamps() {
+        assert_eq!(contact_shadow_strength(None), 1.0, "unset ships on");
+        assert_eq!(contact_shadow_strength(Some("0")), 0.0, "0 is off");
+        assert_eq!(contact_shadow_strength(Some("0.5")), 0.5, "a number scales");
+        assert_eq!(contact_shadow_strength(Some("2")), 1.0, "above 1 clamps");
+        assert_eq!(contact_shadow_strength(Some("-1")), 0.0, "below 0 clamps");
+        assert_eq!(contact_shadow_strength(Some("on")), 1.0, "a word is unset");
+        assert_eq!(
+            CONTACT_SHADOW_ENV, "E2040_CONTACT_SHADOW",
+            "the setting name is pinned"
+        );
     }
 
     #[test]
