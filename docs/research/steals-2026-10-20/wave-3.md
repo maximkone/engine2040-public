@@ -10,6 +10,19 @@ in the tree. Boarding them again would spend sessions on duplicate work. So the
 first half of this dive is an audit; the second half is the six rows in
 `docs/SPRINT-26-steals-wave3.md`.
 
+## State, end of 2026-10-20
+
+| Row | State | Evidence |
+|---|---|---|
+| GS43 contact shadows | **landed** (`baf9c07`, board `838665d`) | `--lib gtao` 49 passed; live-frame feet test 8.4% / 8.8% mean luma drop; arena capture pair 519 darker / 0 lighter; a fresh HEAD build reproduces both capture shas |
+| GS44 auto exposure | **core + seams landed, GPU dispatch in flight** | meter 6 tests; `tick_hist` matches `tick` bit for bit (`e812c85`); histogram kernel naga-validated (`73baa12`); the presenter dispatch is a parallel lane's uncommitted `auto_exposure_gpu.rs` |
+| GS45 pass report | **landed** (`a8be8c9`, board `1e372c6`) | `--lib pass_report` 6 passed; a missing writer names pass and texture; JSON byte-equal x2 |
+| GS46 world.query verb | landed earlier (`008c197`) | 146 packs/door tests |
+| GS48 AI decision log | landed earlier (`4f00b39`) | 5 ai + 4 door + 21 play-pack tests |
+
+Branches: `git branch -a` shows `master` only (plus the `origin-tags/lucid-hopper-mcam05`
+tag ref); there is no unmerged feature branch to pick up. The engine is one tree.
+
 ## Method
 
 Five checks, all against the tree on 2026-10-20, no engine built or benchmarked:

@@ -10,7 +10,7 @@ import { SIM_CRATES } from "./rust-quality.mjs";
 import { archivedDoneRows, needsOf } from "./board-slice.mjs";
 import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
 import { OWN_MATH_FILES, deriveFixedApi, genreFindings, platformMathHits } from "./sim-source-scan.mjs";
-import { runWithVerdictCache } from "./wiring-scan.mjs";
+import { runWithVerdictCache, scanIslandsFrom } from "./wiring-scan.mjs";
 
 // engine-core is the bottom layer (ARCHITECTURE.md): any crate may use it.
 // Without this, packets re-derived its hash, rng and alloc probe instead.
@@ -54,7 +54,9 @@ export const allowedEdges = new Map([
   // AD20: scene.query reachable reads polygons from a baked engine-nav mesh (feature `mcp`).
   // AD8: the door hosts the real look judge from engine-playtest and answers
   // `look.judge` with it (feature `mcp` only).
-  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-nav", "engine-input", "engine-playtest", "engine-proof"]],
+  // UI5: play.step paints HP bars, names, echo, tick and the you arrow from
+  // engine-ui snapshots (feature `mcp` only); ui never imports endpoint.
+  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-nav", "engine-input", "engine-ui", "engine-playtest", "engine-proof"]],
   ["engine-input", ["engine-core"]],
   ["engine-net", ["engine-arena", "engine-input", "engine-observe", "engine-ecs", "engine-save"]], // ARC5: rejoin resim keeps spine checkpoints in `Spine::snapshot` bytes and rides the save rollback/persist envelopes
   ["engine-nav", ["engine-spatial"]], // SP40 KdTree crowd feed reads spatial KdTree
@@ -153,6 +155,55 @@ export function parseModmapPaths(text) {
   return [...text.matchAll(/^-\s+`([^`]+)`/gm)]
     .map((m) => m[1].split("·")[0].trim())
     .filter(Boolean);
+}
+
+// Module reachability, one pass per file (E51, 2026-10-20). The old code
+// tested one regex per (file, name) pair, so every parent file was rescanned
+// once per child file: 747 files cost 2.1 s of regex work. These two helpers
+// read a file once and answer every lookup from that one read.
+// `mod` declarations: `mod x;`, `pub mod x;`, `pub(crate) mod x;`.
+export function parseDeclaredModules(text) {
+  const names = new Set();
+  const re = /^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/gm;
+  let m;
+  while ((m = re.exec(text)) !== null) names.add(m[1]);
+  return names;
+}
+
+// `include!("path/name.rs")` targets: the base name without the .rs suffix.
+export function parseIncludedFiles(text) {
+  const names = new Set();
+  const re = /include!\s*\(\s*"([^"]+)"\s*\)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const path = m[1].split(/[\\/]/).pop() ?? "";
+    names.add(path.replace(/\.rs$/, ""));
+  }
+  return names;
+}
+
+// Every Rust source file under a root, skipping `tests` directories: the same
+// file set the wiring scan walks (E51: one shared list, one read per file).
+export function sourceFilesUnder(root) {
+  const out = [];
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "tests") continue;
+        stack.push(full);
+      } else if (entry.isFile() && entry.name.endsWith(".rs")) {
+        out.push(full);
+      }
+    }
+  }
+  out.sort();
+  return out;
 }
 export function structuralMapViolations({ headings, paths, workspaceCrates, repomapHasCrates, missing }) {
   const found = [];
@@ -347,45 +398,32 @@ function wiringContentHash(path) {
     return createHash("sha256").update(readFileSync(path)).digest("hex");
   } catch { return "unreadable"; }
 }
-function wiringFingerprint(repoDir) {
+function wiringFingerprint(repoDir, sources) {
   const fps = [];
   try {
+    const scannerPath = join(repoDir, "tools", "wiring-scan.mjs");
+    const st = statSync(scannerPath);
+    fps.push(`tools/wiring-scan.mjs:${st.mtimeMs}:${st.size}:${wiringContentHash(scannerPath)}`);
+  } catch { fps.push("tools/wiring-scan.mjs:missing"); }
+  // E51: the bytes come from the shared read, so the fingerprint costs no
+  // extra disk pass over crates/. Without a shared map the tree is walked.
+  if (sources) {
+    for (const [file, entry] of [...sources.entries()].sort()) {
+      fps.push(`${relative(repoDir, file)}:${entry.mtimeMs}:${entry.size}:${createHash("sha256").update(entry.text).digest("hex")}`);
+    }
+    return fps.join("\n");
+  }
+  for (const file of sourceFilesUnder(join(repoDir, "crates"))) {
     try {
-      const scannerPath = join(repoDir, "tools", "wiring-scan.mjs");
-      const st = statSync(scannerPath);
-      fps.push(`tools/wiring-scan.mjs:${st.mtimeMs}:${st.size}:${wiringContentHash(scannerPath)}`);
-    } catch { fps.push("tools/wiring-scan.mjs:missing"); }
-    const root = join(repoDir, "crates");
-    const stack = [root];
-    const files = [];
-    while (stack.length) {
-      const dir = stack.pop();
-      let entries = [];
-      try { entries = readdirSync(dir, { withFileTypes: true }); }
-      catch { continue; }
-      for (const e of entries) {
-        const full = join(dir, e.name);
-        if (e.isDirectory()) {
-          if (e.name === "tests") continue;
-          stack.push(full);
-        } else if (e.isFile() && e.name.endsWith(".rs")) {
-          if (full.split(/[\\/]/).includes("tests")) continue;
-          files.push(full);
-        }
-      }
-    }
-    files.sort();
-    for (const f of files) {
-      try {
-        const st = statSync(f);
-        fps.push(`${relative(repoDir, f)}:${st.mtimeMs}:${st.size}:${wiringContentHash(f)}`);
-      } catch { fps.push(`${relative(repoDir, f)}:missing`); }
-    }
-  } catch { /* fingerprint is best-effort: a miss below re-runs the scan */ }
+      const st = statSync(file);
+      fps.push(`${relative(repoDir, file)}:${st.mtimeMs}:${st.size}:${wiringContentHash(file)}`);
+    } catch { fps.push(`${relative(repoDir, file)}:missing`); }
+  }
   return fps.join("\n");
 }
 function loadWiringCache(repoDir, fp) {
   if (!fp) return null;
+  if (process.env.WORKSPACE_CHECK_NO_CACHE) return null;
   try {
     const cached = JSON.parse(readFileSync(join(repoDir, "target", WIRING_CACHE), "utf8"));
     if (cached?.fp === fp && typeof cached.line === "string" && cached.line) return cached.line;
@@ -432,6 +470,9 @@ function main() {
   runWithVerdictCache({
     repoDir,
     name: "workspace-check",
+    // WORKSPACE_CHECK_NO_CACHE=1 runs the full audit every time (no replayed
+    // verdict): the switch every other cache in this tool already honors.
+    enabled: !process.env.WORKSPACE_CHECK_NO_CACHE,
     run: () => {
       try {
         audit(repoDir);
@@ -489,34 +530,47 @@ function audit(repoDir) {
   // A file no `mod` declares is never compiled, so its tests never run either.
   // Speed: one walk per crate plus a content cache shared by the module,
   // determinism and genre scans below (was: three walks and ~1500 reads).
+  // E51 (2026-10-20): the whole crates/ tree is read once up front and the
+  // wiring scan below reuses those bytes, so the workspace is scanned once
+  // instead of twice (once here, once again inside the wiring child).
   let sourceFiles = 0;
   const contentCache = new Map();
+  const cratesDir = join(dirname(root.manifest_path), "crates");
+  const sharedSources = new Map();
+  for (const file of sourceFilesUnder(cratesDir)) {
+    try {
+      const st = statSync(file);
+      sharedSources.set(file, { text: readFileSync(file, "utf8"), size: st.size, mtimeMs: st.mtimeMs });
+    } catch { /* unreadable file: the checks below report it */ }
+  }
   const cachedRead = (file) => {
     let text = contentCache.get(file);
     if (text === undefined) {
-      text = readFileSync(file, "utf8");
+      const shared = sharedSources.get(file);
+      text = shared ? shared.text : readFileSync(file, "utf8");
       contentCache.set(file, text);
     }
     return text;
   };
-  const declaresReCache = new Map();
-  const declares = (file, name) => {
-    if (!existsSync(file)) return false;
-    let re = declaresReCache.get(name);
-    if (!re) {
-      re = new RegExp(`^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?mod\\s+${name}\\s*;`, "m");
-      declaresReCache.set(name, re);
+  // One parse per file, then a set lookup (E51: was one regex test per
+  // (file, name) pair, which rescanned every parent file once per child).
+  const declaredCache = new Map();
+  const declaredNames = (file) => {
+    let names = declaredCache.get(file);
+    if (names === undefined) {
+      names = existsSync(file) ? parseDeclaredModules(cachedRead(file)) : new Set();
+      declaredCache.set(file, names);
     }
-    return re.test(cachedRead(file));
+    return names;
   };
-  const includeReCache = new Map();
-  const includeDeclares = (file, name) => {
-    let re = includeReCache.get(name);
-    if (!re) {
-      re = new RegExp(`include!\\s*\\(\\s*"[^"]*${name}(\\.rs)?"\\s*\\)`);
-      includeReCache.set(name, re);
+  const includedCache = new Map();
+  const includedNames = (file) => {
+    let names = includedCache.get(file);
+    if (names === undefined) {
+      names = existsSync(file) ? parseIncludedFiles(cachedRead(file)) : new Set();
+      includedCache.set(file, names);
     }
-    return re.test(cachedRead(file));
+    return names;
   };
   const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory() ? walk(join(dir, entry.name)) : entry.name.endsWith(".rs") ? [join(dir, entry.name)] : []);
@@ -540,11 +594,11 @@ function audit(repoDir) {
       const parents = parentDir === src
         ? [join(src, "lib.rs"), join(src, "main.rs")]
         : [`${parentDir}.rs`, join(parentDir, "mod.rs")];
-      if (!parents.some((parent) => declares(parent, name))) {
+      if (!parents.some((parent) => declaredNames(parent).has(name))) {
         // `#[path]`-nested modules (e.g. playtest trace_export.rs declared in
         // eval.rs) have no conventional parent file; accept any same-crate
         // file declaring `mod <name>;`. A truly undeclared file still fails.
-        const declaredElsewhere = crateFiles.some((other) => other !== file && declares(other, name));
+        const declaredElsewhere = crateFiles.some((other) => other !== file && declaredNames(other).has(name));
         // `include!()`-inlined files (e.g. editor commands_coalesce.rs folded
         // into commands.rs so the journal types stay in one module) are
         // compiled as part of their includer, which owns them; accept the
@@ -552,7 +606,7 @@ function audit(repoDir) {
         // still fails.
         const includedElsewhere = crateFiles.some((other) => {
           if (other === file || !existsSync(other)) return false;
-          return includeDeclares(other, name);
+          return includedNames(other).has(name);
         });
         if (!declaredElsewhere && !includedElsewhere) {
           errors.push(`${pkg.name}: ${relative(src, file)} is not declared by any module, so it is never compiled`);
@@ -808,10 +862,17 @@ function audit(repoDir) {
 
   try { const archOut = execFileSync(process.execPath, [join(repoDir, "tools", "arch-fitness.mjs")], { encoding: "utf8" }).trim(); if (archOut === "PASS dependency cycle") console.log(archOut); else errors.push(archOut || "dependency cycle found"); } catch (error) { errors.push(`dependency cycle check failed: ${error.message}`); }
   try {
-    const wireFp = wiringFingerprint(repoDir);
+    const wireFp = wiringFingerprint(repoDir, sharedSources);
     let wireOut = loadWiringCache(repoDir, wireFp);
     if (!wireOut) {
-      wireOut = execFileSync(process.execPath, [join(repoDir, "tools", "wiring-scan.mjs"), join(repoDir, "crates")], { encoding: "utf8" }).split("\n")[0].trim();
+      // E51: the wiring scan runs in process on the bytes this audit already
+      // read. The child process re-read the whole tree and paid a node
+      // startup for the same answer.
+      const islands = scanIslandsFrom(
+        [...sharedSources.entries()].map(([file, entry]) => ({ file, text: entry.text })),
+        cratesDir,
+      );
+      wireOut = `islands: ${islands.length}`;
       saveWiringCache(repoDir, wireFp, wireOut);
     }
     console.log(`WARN wiring (report-only): ${wireOut}`);

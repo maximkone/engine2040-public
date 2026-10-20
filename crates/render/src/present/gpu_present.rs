@@ -40,6 +40,7 @@ pub(super) const BLIT_WGSL: &str = concat!(
     include_str!("../shaders/blit.wgsl")
 );
 
+mod auto_exposure_gpu;
 mod bind_memo;
 mod capture;
 mod contact_live;

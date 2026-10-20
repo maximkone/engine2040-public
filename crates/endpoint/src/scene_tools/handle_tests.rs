@@ -144,10 +144,24 @@ fn brief_handles_200_objects_read_back_within_budget() {
     );
     assert_eq!(
         poses[0].split(' ').count(),
-        9,
-        "name [i] x y z sx sy sz dir"
+        10,
+        "name [i] x y z sx sy sz dir #digest"
     );
-    assert!(poses[0].contains(" 100 100 100 +x"), "{}", poses[0]);
+    assert!(poses[0].contains(" 100 100 100 +x #"), "{}", poses[0]);
+    // The brief TEXT names the same object with the same cm pose and digest,
+    // so an agent reads coordinates without a second call.
+    assert!(first.text.len() <= SCENE_BRIEF_DEFAULT_BUDGET as usize);
+    let text_place = first
+        .text
+        .lines()
+        .find(|line| line.starts_with(&format!("{name0} [0] ")))
+        .unwrap_or_else(|| panic!("no place row for {name0} in:\n{}", first.text));
+    assert!(text_place.contains(" 100 100 100 +x #"), "{text_place}");
+    assert_eq!(
+        text_place.rsplit(' ').next(),
+        poses[0].rsplit(' ').next(),
+        "text and table carry one digest"
+    );
     eprintln!(
         "brief_handles: default call {} bytes, {pages} pages at max",
         wire.len()
@@ -161,7 +175,9 @@ fn sorted(ids: &[ObjectId]) -> Vec<&ObjectId> {
 }
 
 /// Inserting a node of another mesh relabels no existing node, and every
-/// other node's pose row is unchanged apart from its table index.
+/// other node's pose row, cm numbers and own `#digest` are unchanged. The
+/// scene digest does move (it counts nodes and edges), so the per-object
+/// digest is the stable proof.
 #[test]
 fn brief_handles_survive_an_unrelated_insert() {
     let mut doc = Document::new();
@@ -175,10 +191,12 @@ fn brief_handles_survive_an_unrelated_insert() {
             .zip(poses)
             .map(|(label, pose)| {
                 let tail = pose.split_once("] ").expect("pose tail").1.to_owned();
-                (label, tail)
+                let digest = pose.rsplit(' ').next().expect("digest tail").to_owned();
+                (label, (tail, digest))
             })
             .collect::<std::collections::BTreeMap<_, _>>()
     };
+    let scene_before = brief_page(&server, SCENE_BRIEF_DEFAULT_BUDGET, None).digest;
     let before = by_id(&server);
     {
         let mut state = server.lock().expect("test lock holds");
@@ -190,10 +208,17 @@ fn brief_handles_survive_an_unrelated_insert() {
             &[("rock", [-9.0, 0.0, 9.0], None)],
         );
     }
+    let scene_after = brief_page(&server, SCENE_BRIEF_DEFAULT_BUDGET, None).digest;
     let after = by_id(&server);
     assert_eq!(after.len(), before.len() + 1);
-    for (label, tail) in &before {
-        assert_eq!(after.get(label), Some(tail), "{label} moved");
+    assert_ne!(
+        scene_after, scene_before,
+        "the scene digest counts nodes, so it moves by construction"
+    );
+    for (label, (tail, digest)) in &before {
+        let (new_tail, new_digest) = after.get(label).expect("label survives");
+        assert_eq!(new_tail, tail, "{label} moved");
+        assert_eq!(new_digest, digest, "{label} digest moved");
     }
 }
 

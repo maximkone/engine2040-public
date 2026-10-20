@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-export const CELLS = ["cold", "prime", "warm", "warm2"];
+export const CELLS = ["cold", "prime", "rebuild", "warm", "warm2"];
 export const DEFAULT_CRATES = ["engine-physics"];
 export const DEFAULT_JOBS = 4;
 export const SPEED_BAR = 0.30; // the row's bar: the warm lane must be 30% faster
@@ -44,10 +44,17 @@ export const serverEnv = (dirs) => ({
   ...(dirs.port ? { SCCACHE_SERVER_PORT: String(dirs.port) } : {}),
 });
 
+// The rebuild cell is the CI shape: the same target dir path (so the cache
+// key still matches) with the artifacts removed. Every other cell owns a
+// fresh dir of its own.
+export function cellDir(cell, dirs) {
+  return join(dirs.run, cell === "rebuild" ? "prime" : cell);
+}
+
 // Env overrides of one cell on top of the caller's env. The cold cell drops any
 // inherited wrapper so it measures this machine as it builds today.
 export function cellEnv(cell, dirs, base = {}) {
-  const env = { ...base, CARGO_TARGET_DIR: join(dirs.run, cell) };
+  const env = { ...base, CARGO_TARGET_DIR: cellDir(cell, dirs) };
   if (cell === "cold") {
     delete env.RUSTC_WRAPPER;
     delete env.CARGO_INCREMENTAL;
@@ -81,7 +88,7 @@ export function hitRate({ hits = 0, misses = 0 } = {}) {
 const pct = (x) => `${Math.round(x * 100)}%`;
 
 // Keep or drop from the four wall times and the warm hit rate.
-export function verdict({ coldSeconds, primeSeconds, warmSeconds, warm2Seconds, rate }) {
+export function verdict({ coldSeconds, primeSeconds, warmSeconds, warm2Seconds, rate, rebuildSeconds = null }) {
   const reasons = [];
   const ratio = coldSeconds > 0 && warmSeconds > 0 ? warmSeconds / coldSeconds : null;
   if (ratio === null) reasons.push("no cold/warm pair measured");
@@ -92,8 +99,15 @@ export function verdict({ coldSeconds, primeSeconds, warmSeconds, warm2Seconds, 
     const drift = Math.abs(warm2Seconds - warmSeconds) / warmSeconds;
     if (drift > STABLE_BAR) reasons.push(`two warm runs differ by ${(drift * 100).toFixed(1)}%, over 10%`);
   }
+  // The CI shape: the same target dir path with the artifacts removed.
+  let rebuildRatio = null;
+  if (rebuildSeconds !== null) {
+    rebuildRatio = coldSeconds > 0 ? rebuildSeconds / coldSeconds : null;
+    if (rebuildRatio === null) reasons.push("no cold/rebuild pair measured");
+    else if (rebuildRatio > 1 - SPEED_BAR) reasons.push(`the CI-shape rebuild is ${pct(rebuildRatio)} of the cold lane, under the 30% faster bar`);
+  }
   const spikeRatio = primeSeconds > 0 && warmSeconds > 0 ? warmSeconds / primeSeconds : null;
-  return { keep: reasons.length === 0, ratio, spikeRatio, reasons };
+  return { keep: reasons.length === 0, ratio, rebuildRatio, spikeRatio, reasons };
 }
 
 export function parseArgs(argv) {
@@ -131,7 +145,11 @@ export function helpText() {
 const cellLine = (cell, args, dirs) => {
   const env = cellEnv(cell, dirs);
   const shown = Object.entries(env).map(([k, v]) => `${k}=${v}`).join(" ");
-  const note = cell === "cold" ? "baseline: no RUSTC_WRAPPER, incremental as configured" : "opt-in wrapper for this run only";
+  const note = cell === "cold"
+    ? "baseline: no RUSTC_WRAPPER, incremental as configured"
+    : cell === "rebuild"
+      ? "CI shape: same target dir path as prime, artifacts removed, cache primed"
+      : "opt-in wrapper for this run only";
   return `[${cell}] cargo ${args.join(" ")}  (${note}; ${shown})`;
 };
 
@@ -180,6 +198,16 @@ const main = (argv) => {
   const cells = {};
   for (const cell of CELLS) {
     console.log(cellLine(cell, args, dirs));
+    if (cell === "rebuild") {
+      // The CI shape: the same target dir path, the artifacts gone. Only this
+      // spike's own directory is cleaned (target/spike-opt9/<utc>/prime).
+      const clean = spawnSync("cargo", ["clean", "--target-dir", cellDir(cell, dirs)], { cwd: ROOT, encoding: "utf8", maxBuffer: 1 << 24 });
+      if (clean.status !== 0) {
+        console.log(`[${cell}] could not clear the spike's own target dir (exit ${clean.status}): no measurement`);
+        return 2;
+      }
+      console.log(`[${cell}] cleared ${cellDir(cell, dirs)} (the spike's own dir)`);
+    }
     const before = cell === "cold" ? null : readStats(dirs);
     if (before?.error) { console.log(`[${cell}] ${before.error}`); return 2; }
     const t0 = performance.now();
@@ -202,6 +230,7 @@ const main = (argv) => {
   const v = verdict({
     coldSeconds: cells.cold.seconds,
     primeSeconds: cells.prime.seconds,
+    rebuildSeconds: cells.rebuild.seconds,
     warmSeconds: cells.warm.seconds,
     warm2Seconds: cells.warm2.seconds,
     rate: cells.warm.rate,
@@ -217,7 +246,7 @@ const main = (argv) => {
     const c = cells[cell];
     console.log(`| ${cell} | ${c.seconds} | ${c.hits} | ${c.misses} | ${c.rate === null ? "-" : pct(c.rate)} |`);
   }
-  const line = `RESULT ${v.keep ? "KEEP" : "DROP"}: warm ${cells.warm.seconds} s vs cold ${cells.cold.seconds} s (${v.ratio === null ? "no ratio" : `${pct(1 - v.ratio)} faster`}), warm hit rate ${cells.warm.rate === null ? "unknown" : pct(cells.warm.rate)}${v.spikeRatio === null ? "" : `, warm vs prime ${pct(1 - v.spikeRatio)} faster`}${v.reasons.length ? `: ${v.reasons.join("; ")}` : ""}`;
+  const line = `RESULT ${v.keep ? "KEEP" : "DROP"}: warm ${cells.warm.seconds} s vs cold ${cells.cold.seconds} s (${v.ratio === null ? "no ratio" : `${pct(1 - v.ratio)} faster`}), warm hit rate ${cells.warm.rate === null ? "unknown" : pct(cells.warm.rate)}${v.spikeRatio === null ? "" : `, warm vs prime ${pct(1 - v.spikeRatio)} faster`}${v.rebuildRatio === null ? "" : `, CI-shape rebuild ${cells.rebuild.seconds} s vs cold ${cells.cold.seconds} s (${pct(1 - v.rebuildRatio)} faster, ${cells.rebuild.hits} hits)`}${v.reasons.length ? `: ${v.reasons.join("; ")}` : ""}`;
 
   mkdirSync(dirs.cache, { recursive: true });
   writeFileSync(join(runDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);

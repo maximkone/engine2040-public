@@ -1,0 +1,1 @@
+{"name":"wardens_heavy","height_m":1.82,"heads":7.5,"shoulder_span":0.5,"torso_depth":0.27,"chest_w":0.42,"waist_w":0.33,"hip_w":0.38,"leg_len":0.88,"arm_len":0.78,"hand":0.19,"head_size":0.22,"bulk":1.15,"stance_deg":4,"attachments":[{"kind":"shield","side":"l","length":1.0,"radius":0.3,"angle_deg":10},{"kind":"blade","side":"r","length":0.95,"radius":0.05,"angle_deg":25}]}

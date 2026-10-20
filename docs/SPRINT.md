@@ -79,6 +79,8 @@ Rows live in one shard per section (byte-identical; each shard header is the can
 - [`SPRINT-24-editor.md`](SPRINT-24-editor.md) — Editor for indie developers
 - [`SPRINT-25-ai-native.md`](SPRINT-25-ai-native.md) — AI native
 - [`SPRINT-26-steals-wave3.md`](SPRINT-26-steals-wave3.md) — Steals wave 3, verified against the tree
+- [`SPRINT-27-final-picture.md`](SPRINT-27-final-picture.md) — Final picture: auto-fix, compact code, touch and POV
+- [`SPRINT-28-rome.md`](SPRINT-28-rome.md) — Rome: one legionary's war
 
 ### Ready (live, never a snapshot)
 

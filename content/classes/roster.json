@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "note": "Clean-room roster. Names are new. Mechanics are re-derived from public descriptions, never from client files. Stats are per-level growth.",
+  "factions": ["wardens", "ashkin"],
+  "classes": [
+    {"id": "warden_fighter", "faction": "wardens", "tier": 0, "role": "line breaker", "growth": {"str": 1, "con": 1}, "signature": "net + power attack"},
+    {"id": "warden_defender", "faction": "wardens", "tier": 1, "branch": "warden_fighter", "role": "shield tank", "growth": {"str": 1.5, "con": 1.5}, "signature": "damage redirection, slowing strikes", "fix": "visible share meter so the redirect reads as value"},
+    {"id": "warden_warrior", "faction": "wardens", "tier": 1, "branch": "warden_fighter", "role": "dual-wield burst", "growth": {"str": 2, "con": 1}, "signature": "war song then a running combo", "fix": "combo timing as intended skill, not a cancel bug"},
+    {"id": "warden_rogue", "faction": "wardens", "tier": 0, "role": "skirmisher", "growth": {"dex": 1, "str": 1}, "signature": "dig (reveals hidden), dark sword"},
+    {"id": "warden_assassin", "faction": "wardens", "tier": 1, "branch": "warden_rogue", "role": "stealth burster", "growth": {"dex": 2, "str": 1}, "signature": "short-sword opener, 4x from stealth, slow", "fix": "cap opener at 60% vs players and force de-stealth"},
+    {"id": "warden_archer", "faction": "wardens", "tier": 1, "branch": "warden_rogue", "role": "ranged debuffer", "growth": {"dex": 1.5, "str": 1.5}, "signature": "multi-shot from stealth, camouflage line", "fix": "scale the multi-shot on DEX and give arrows a real slow"},
+    {"id": "warden_mage", "faction": "wardens", "tier": 0, "role": "caster", "growth": {"int": 1, "dex": 1}, "signature": "charge casts, magic cell"},
+    {"id": "warden_sorcerer", "faction": "wardens", "tier": 1, "branch": "warden_mage", "role": "elemental nuker", "growth": {"int": 2, "dex": 1}, "signature": "fire, electric, ice lines; charge to release", "fix": "ground-targeted casts with a decal matched to the charge bar"},
+    {"id": "warden_enchanter", "faction": "wardens", "tier": 1, "branch": "warden_mage", "role": "seals and buffs", "growth": {"int": 1.5, "dex": 1.5}, "signature": "seal, weaken, weapon potentiation", "fix": "the seal becomes the dedicated interrupt"},
+    {"id": "warden_acolyte", "faction": "wardens", "tier": 0, "role": "medic", "growth": {"wis": 1, "con": 1}, "signature": "first aid, courage"},
+    {"id": "warden_cleric", "faction": "wardens", "tier": 1, "branch": "warden_acolyte", "role": "healer", "growth": {"wis": 2, "con": 1}, "signature": "heal with a debuff strip, resurrect", "fix": "healing becomes a ticking chant aura"},
+    {"id": "warden_priest", "faction": "wardens", "tier": 1, "branch": "warden_acolyte", "role": "buffer and mana donor", "growth": {"wis": 1.5, "con": 1.5}, "signature": "psalms, flash armor, spirit sharing", "fix": "psalms carry the potion regen, replacing the flask"},
+    {"id": "ashkin_combatant", "faction": "ashkin", "tier": 0, "role": "bruiser", "growth": {"str": 1}, "signature": "weapon intensify, brave power"},
+    {"id": "ashkin_templar", "faction": "ashkin", "tier": 1, "branch": "ashkin_combatant", "role": "peel tank", "growth": {"str": 1.5, "con": 1.5}, "signature": "net, protecting skill, status relief", "fix": "net gains forced melee; protecting becomes a frontal party arc"},
+    {"id": "ashkin_attacker", "faction": "ashkin", "tier": 1, "branch": "ashkin_combatant", "role": "drain bruiser", "growth": {"str": 2, "con": 1}, "signature": "energy absorbing, fire spring, war song", "fix": "drain heals only on hit, with a visible link"},
+    {"id": "ashkin_gunner", "faction": "ashkin", "tier": 1, "branch": "ashkin_combatant", "role": "arm-cannon artillery", "growth": {"dex": 1.5, "con": 1.5}, "signature": "cannon volley, bombing, camouflage, digging", "fix": "root-and-charge cannon with recoil; cloak breaks on firing"},
+    {"id": "ashkin_officiator", "faction": "ashkin", "tier": 0, "role": "caster", "growth": {"dex": 1}, "signature": "halt, dark power"},
+    {"id": "ashkin_rune", "faction": "ashkin", "tier": 1, "branch": "ashkin_officiator", "role": "AoE nuker", "growth": {"int": 2, "dex": 1}, "signature": "electric, poison, root lines; group damage", "fix": "elemental lines castable on the move, INT-scaled AoE cap"},
+    {"id": "ashkin_life", "faction": "ashkin", "tier": 1, "branch": "ashkin_officiator", "role": "healer and injury broker", "growth": {"wis": 2, "dex": 1}, "signature": "injury shifting, life alternation, resurrect", "fix": "injury transfer HUD and a hard cap"},
+    {"id": "ashkin_shadow", "faction": "ashkin", "tier": 1, "branch": "ashkin_officiator", "role": "stealth assassin", "growth": {"dex": 2, "str": 1}, "signature": "harmful wind, dark sword, dodge line", "fix": "one second of reveal after the opener"}
+  ]
+}

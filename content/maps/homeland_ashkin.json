@@ -1,0 +1,50 @@
+{
+  "id": "homeland_ashkin",
+  "label": "Ashkin Homeland - Emberstrand Coast",
+  "faction": "ashkin",
+  "size_m": { "x": 180, "z": 180 },
+  "level_band": [1, 20],
+  "biome": {
+    "terrain": "volcanic coast: a black sand beach along the east shore, basalt shelves stepping up to a low caldera ridge inland to the north-west, the road cut between shore and ridge, the gate at the south end where the road leaves the coast",
+    "climate": "hot and ash-choked, high sun flattened by smoke",
+    "ground": ["black volcanic sand", "dark basalt", "red scoria on the ridge"],
+    "rock": "dark basalt split by glowing ember seams, left in squared blocks",
+    "vegetation": "none, ash-burned trunks and dry scrub only around the market",
+    "water": "a shallow hot sea along the shore, ember-lit from below",
+    "light": "low ember sun behind the smoke, warm bounce off the sand, seam glow from the cracks",
+    "architecture": "oversized black iron and basalt blocks, chunky, at most three materials per landmark (basalt, one metal, one trim)",
+    "fog": "blood red ash haze, distance read dies past 70 m, landmarks resolve as dark triangles",
+    "materials": ["black_iron", "blood_red", "bronze", "ember"]
+  },
+  "palette": { "ground": "#2B2724", "sky": "#C8562A", "fog": "#7A1F1C", "accent": "#9C6B3A" },
+  "landmarks": [
+    { "id": "ember_keep", "kind": "keep", "x": -4, "z": 70, "radius": 24, "purpose": "home claim, respawn hearth, quartermaster and the war-window board" },
+    { "id": "black_smithy", "kind": "smithy", "x": 46, "z": 34, "radius": 16, "purpose": "forge: reforge, re-edge and re-plate starter weapons and armour" },
+    { "id": "ash_shrine", "kind": "shrine", "x": -46, "z": 26, "radius": 18, "purpose": "ember shrine: class blessings, hot-spring heal and the tier-1 respec" },
+    { "id": "ember_market", "kind": "market", "x": 40, "z": -26, "radius": 20, "purpose": "market: buy tonics and plate, sell loot, read the bounty board" },
+    { "id": "choke_ward", "kind": "barricade", "x": 0, "z": -34, "radius": 14, "purpose": "the last line: a lava-stone barricade narrowing the road to the gate" },
+    { "id": "ember_gate", "kind": "gate", "x": 0, "z": -64, "radius": 26, "purpose": "the war gate: the only exit to the contested middle, shut outside war windows" }
+  ],
+  "spawns": [
+    { "id": "spawn_keep_west", "x": 12, "z": 78, "count": 6 },
+    { "id": "spawn_keep_east", "x": -12, "z": 78, "count": 6 },
+    { "id": "spawn_keep_road", "x": 0, "z": 86, "count": 4 }
+  ],
+  "pve_spots": [
+    { "id": "camp_01_black_shallows", "x": 30, "z": 58, "level": 1, "mobs": [{ "id": "ember_hound", "count": 3 }, { "id": "cinder_crab", "count": 4 }], "respawn_s": 30 },
+    { "id": "camp_02_ember_slopes", "x": -34, "z": 52, "level": 3, "mobs": [{ "id": "ember_hound", "count": 4 }, { "id": "ash_vulture", "count": 5 }], "respawn_s": 30 },
+    { "id": "camp_03_broken_harbour", "x": 62, "z": 14, "level": 5, "mobs": [{ "id": "slag_brute", "count": 3 }, { "id": "ash_vulture", "count": 6 }], "respawn_s": 40 },
+    { "id": "camp_04_tide_hollow", "x": -48, "z": -2, "level": 8, "mobs": [{ "id": "magma_stalker", "count": 5 }, { "id": "slag_brute", "count": 3 }], "respawn_s": 45 },
+    { "id": "camp_05_market_road", "x": 22, "z": -12, "level": 11, "mobs": [{ "id": "magma_stalker", "count": 6 }, { "id": "slag_brute", "count": 4 }], "respawn_s": 60 },
+    { "id": "camp_06_ward_rocks", "x": -26, "z": -44, "level": 14, "mobs": [{ "id": "slag_brute", "count": 5 }, { "id": "magma_stalker", "count": 4 }], "respawn_s": 60 },
+    { "id": "camp_07_scoria_slope", "x": 52, "z": -52, "level": 17, "mobs": [{ "id": "magma_stalker", "count": 6 }, { "id": "slag_brute", "count": 5 }], "respawn_s": 75 },
+    { "id": "camp_08_gate_ravine", "x": -44, "z": -66, "level": 19, "mobs": [{ "id": "slag_brute", "count": 6 }, { "id": "magma_bull", "count": 1 }], "respawn_s": 90 },
+    { "id": "camp_09_crown_rock", "x": 30, "z": -82, "level": 20, "mobs": [{ "id": "magma_bull", "count": 1 }, { "id": "magma_stalker", "count": 6 }], "respawn_s": 90 }
+  ],
+  "travel": {
+    "portals": [
+      { "to": "contested_middle", "x": 0, "z": -80 }
+    ]
+  },
+  "notes": "MIRROR: this map is the mirror of homeland_wardens. Every position maps by x -> -x and z -> -z (a half turn about the map centre), so both starters learn one shape and meet in the middle on equal footing. The home basin is the +Z end; the gate and the only portal are the -Z end. On the Wardens map the home is -Z and the gate is +Z. LAYOUT GRAMMAR (shared by both maps): keep at the closed end, road up the spine, a smithy spur on one shoulder, a shrine spur on the other, a market spur further up, a barricade choke, then the gate. LANDMARKS: six oversized masses, at most three materials each (basalt, one metal, one trim), read as dark triangles in the red haze. Bronze trim is the only colour that matches the Wardens gold, and it marks the gate, the shrine and the market, so the two homelands still look like one world. LEVELS: nine open world camps, level 1 at the black shallows beside the keep up to level 20 at the crown rock; each camp is a spawn cluster in the open world, never an instance, and it respawns on its own timer (30 s at the low end, 90 s at the boss end). SIGHT LINES: the road is the only long view; from the keep the gate is 134 m away and around two bends, so it is never in frame; from the barricade the gate is 30 m away and fills the frame; the dark ash haze eats anything past 70 m, so this side reads closer and tighter than the cold one. TRAVEL: 150 m straight line and 162 m of road from the keep forecourt to the portal, about 27 s at a 6 m/s run, 41 s on foot. THE PORTAL: the single exit at the south end of the road opens onto contested_middle, and the Ashkin enter that map from its north side; the homeland sits north of the middle and the Wardens homeland south of it, so the two coasts point at each other. This is the farm half of the war loop: level on the coast, then walk to the gate and take the middle."
+}

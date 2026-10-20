@@ -34,7 +34,23 @@
   ],
   "atlas": "house.woodcutter.atlas.png",
   "mask_atlas": null,
-  "cameo": null,
+  "cameo": {
+    "id": "house.woodcutter.cameo",
+    "atlas": "house.woodcutter.cameo.png",
+    "cell": [
+      96,
+      72
+    ],
+    "size": [
+      98,
+      74
+    ],
+    "padding": 1,
+    "pivot": [
+      48,
+      51
+    ]
+  },
   "atlas_size": [
     226,
     452

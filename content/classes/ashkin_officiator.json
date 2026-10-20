@@ -1,0 +1,158 @@
+{
+  "id": "ashkin_officiator",
+  "faction": "ashkin",
+  "tier": 0,
+  "branch": null,
+  "role": "caster",
+  "growth": {
+    "str": 0,
+    "dex": 1,
+    "con": 0,
+    "int": 0,
+    "wis": 0
+  },
+  "primary": [
+    "dex"
+  ],
+  "playstyle": "You are a knife in the dark wearing a robe. The Ashkin casters are not scholars; they are killers with a different delivery.",
+  "abilities": [
+    {
+      "id": "holdfast",
+      "name": "Holdfast",
+      "tier": 0,
+      "kind": "control",
+      "shape": "single",
+      "range": 20,
+      "radius": 0,
+      "cast": 0.3,
+      "cooldown": 18,
+      "mana": 16,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "root",
+        "damage"
+      ],
+      "notes": "A short binding bolt that stops a caster mid-cast. The most valuable thing an Officiator can do."
+    },
+    {
+      "id": "hex_bolt",
+      "name": "Hex Bolt",
+      "tier": 0,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 24,
+      "radius": 0,
+      "cast": 0.5,
+      "cooldown": 2,
+      "mana": 12,
+      "telegraph": "none",
+      "damage": {
+        "base": 30,
+        "scale": "dex"
+      },
+      "effects": [
+        "damage"
+      ],
+      "notes": "A fast, cheap bolt. You will cast it more than anything else."
+    },
+    {
+      "id": "shadow_veil",
+      "name": "Shadow Veil",
+      "tier": 1,
+      "kind": "stealth",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 24,
+      "mana": 18,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "stealth"
+      ],
+      "notes": "A short veil that dims you. It breaks when you act."
+    },
+    {
+      "id": "split_arrow",
+      "name": "Split Arrow",
+      "tier": 2,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 22,
+      "radius": 0,
+      "cast": 0.7,
+      "cooldown": 5,
+      "mana": 20,
+      "telegraph": "none",
+      "damage": {
+        "base": 44,
+        "scale": "dex"
+      },
+      "effects": [
+        "damage"
+      ],
+      "notes": "One arrow that arrives as two. The pair comes apart around the target."
+    },
+    {
+      "id": "night_tide",
+      "name": "Night Tide",
+      "tier": 3,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 20,
+      "radius": 7,
+      "cast": 1.1,
+      "cooldown": 16,
+      "mana": 40,
+      "telegraph": "circle",
+      "damage": {
+        "base": 62,
+        "scale": "dex"
+      },
+      "effects": [
+        "damage",
+        "slow"
+      ],
+      "notes": "A wave of darkness that spreads out and slows what it touches."
+    },
+    {
+      "id": "last_rite",
+      "name": "Last Rite",
+      "tier": 4,
+      "kind": "utility",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 120,
+      "mana": 50,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "execute",
+        "stealth"
+      ],
+      "notes": "A rite that lets you finish a wounded enemy and leaves you untouchable for a moment afterwards."
+    }
+  ],
+  "loadout": {
+    "weapon": "rite_rod",
+    "offhand": "charm"
+  },
+  "counters": [
+    "warden_acolyte",
+    "warden_priest"
+  ],
+  "weakness": "No armour, and the Ashkin do not heal each other the way the Wardens do."
+}

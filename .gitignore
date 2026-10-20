@@ -46,3 +46,6 @@ tools/bin/
 tools/vendor/
 # Local env secrets: never track.
 .env
+# LLVM coverage droppings (instrumented test runs write them to the cwd): never track.
+*.profraw
+*.profdata

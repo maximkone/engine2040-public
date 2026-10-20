@@ -108,7 +108,7 @@
     "rows": 2,
     "columns": 1,
     "rows_note": "row 0 finished, row 1 half_built; one facing each, buildings do not rotate",
-    "pack_command": "node tools/kam2/pack_atlas.mjs --in <frames> --out content/kam2/buildings/warehouse --id house.warehouse --kind building --facings 1 --anim finished:1:8:true --anim half_built:1:8:true --footprint 3x3"
+    "pack_command": "node tools/kam2/pack_atlas.mjs --in <frames> --out content/kam2/buildings/warehouse --id house.warehouse --kind building --facings 1 --anim finished:1:8:true --anim half_built:1:8:true --footprint 3x3 --cameo <frames>/cameo/frame_00.png --cameo-cell 96x72"
   },
   "source_frames": [
     "render/warehouse/finished/frame_00.png -> pack/state_00.png (row 0)",
@@ -126,8 +126,34 @@
     "The kit has no crate, bale, field or crop piece. The warehouse uses a loaded cart as the goods stand-in; the farm uses low hedge pieces as crop rows on a dirt-coloured plank plot.",
     "Roof pieces carry one flat #A33B2E material; every other kit material is as authored. The farm plot planks carry one flat #8A6A43 material.",
     "States are atlas rows of one id, finished then half_built. The sim has no damaged house state, so no damaged row is shipped: a broken model per kind is a different assembly, not a tint.",
-    "No team-colour mask and no cameo pass yet; both manifest fields stay null.",
     "Half-built and finished share one cell, span and pivot, so the two rows stack without a jump.",
-    "fps 8 and loop true on each state row are placeholders the packer needs; both states are stills."
-  ]
+    "fps 8 and loop true on each state row are placeholders the packer needs; both states are stills.",
+    "The cameo is the same finished model at the style-lock cameo angles (yaw 45 deg off S, pitch 35, ortho, 96x72, transparent) and packs beside the atlas as a 96x72 cell with the same 1 px gutter. The manifest records it as a cameo object with its own id, atlas, cell and pivot.",
+    "One scale for all six kinds: 50.6 px per kit cell = 50.6 px per tile, read back from cell px / world span in the receipt. The cottage is drawn at the same cell convention (224 px cell, span 4.4269, ground row 168).",
+    "No team-colour mask pass yet: the manifest's mask_atlas stays null."
+  ],
+  "cameo": {
+    "file": "house.warehouse.cameo.png",
+    "id": "house.warehouse.cameo",
+    "cell": [
+      96,
+      72
+    ],
+    "size": [
+      98,
+      74
+    ],
+    "padding": 1,
+    "pivot": [
+      48,
+      53
+    ],
+    "bytes": 7535,
+    "sha256": "d6802a24dae05f04c4b3c0dff8073cdf4af46a9e4821f1b2b7688336cc4f90b4",
+    "pitch_deg": 35,
+    "yaw_deg": 135,
+    "yaw_used": "135 deg = one yaw 45 deg off the S axis, the style-lock cameo yaw",
+    "transparent": true,
+    "command": "blender --background --factory-startup --python tools/kam2/render_frames.py -- --scene <kind>/finished.glb --out <dir> --yaw 135 --pitch 35 --size 96x72 --samples 48"
+  }
 }

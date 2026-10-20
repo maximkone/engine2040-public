@@ -92,6 +92,9 @@ export function archivedDoneRows(root = ROOT) {
   for (const file of [...archiveDoneFiles(root), ...historyDoneFiles(root)]) {
     if (!existsSync(file)) continue;
     for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+      // Cheap prefilter before the id regex (E51): only a ticked row can
+      // match, and the archive files hold mostly prose.
+      if (!line.startsWith("- [x] ")) continue;
       const m = ARCHIVE_HEAD.exec(line);
       if (m && !done.has(m[1])) done.set(m[1], line);
     }

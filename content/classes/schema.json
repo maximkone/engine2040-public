@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "engine2040/classes/v1",
+  "title": "engine2040 class file v1",
+  "description": "One playable class file: identity, growth, abilities and loadout. Draft 2020-12. Draft 2020-12 has no unique-by keyword, so the rule that ability ids and ability names are unique inside one file is declared as the x-unique-by extension on the abilities array and enforced by tools/class-validate.mjs (as is every rule that spans files: branch targets, faction counts, global ability-id uniqueness).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "faction",
+    "tier",
+    "branch",
+    "role",
+    "growth",
+    "primary",
+    "playstyle",
+    "abilities",
+    "loadout",
+    "counters",
+    "weakness"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Class id, unique in the class set. snake_case."
+    },
+    "faction": {
+      "enum": ["wardens", "ashkin"],
+      "description": "Faction the class belongs to."
+    },
+    "tier": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "description": "0 = starter, 1 = branch, 2+ = advanced."
+    },
+    "branch": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Id of the tier 0 class this class branches from. Null for a starter. The target must exist in the class set and be tier 0."
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Short role label, e.g. line breaker."
+    },
+    "growth": {
+      "$ref": "#/$defs/growth",
+      "description": "Per-level growth of the five stats."
+    },
+    "primary": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/stat"},
+      "description": "Stats this class builds on. Every listed stat must have growth above zero."
+    },
+    "playstyle": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "description": "How the class is played, in prose."
+    },
+    "abilities": {
+      "type": "array",
+      "minItems": 6,
+      "items": {"$ref": "#/$defs/ability"},
+      "x-unique-by": ["id", "name"],
+      "description": "At least 6 abilities. Ability ids and ability names are unique inside this file."
+    },
+    "loadout": {
+      "$ref": "#/$defs/loadout",
+      "description": "Weapon and offhand the class fights with."
+    },
+    "counters": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 2048},
+      "description": "What this class answers well: other class ids, or \"<class id>: why\"."
+    },
+    "weakness": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "description": "What beats this class, in prose."
+    },
+    "signature": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Optional short identity line, as in roster.json."
+    },
+    "fix": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Optional note on the change this class brings over its base."
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 2048,
+      "description": "Optional free notes."
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2048,
+      "description": "Optional prose about the class."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional file version."
+    }
+  },
+  "$defs": {
+    "stat": {
+      "enum": ["str", "dex", "con", "int", "wis"],
+      "description": "One of the five stats."
+    },
+    "growth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["str", "dex", "con", "int", "wis"],
+      "description": "Per-level growth per stat. Zero means the stat does not grow.",
+      "properties": {
+        "str": {"type": "number", "minimum": 0},
+        "dex": {"type": "number", "minimum": 0},
+        "con": {"type": "number", "minimum": 0},
+        "int": {"type": "number", "minimum": 0},
+        "wis": {"type": "number", "minimum": 0}
+      }
+    },
+    "damage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "scale"],
+      "description": "Flat part and the stat that scales the rest.",
+      "properties": {
+        "base": {"type": "number", "minimum": 0, "maximum": 500},
+        "scale": {
+          "enum": ["str", "dex", "con", "int", "wis", "none"],
+          "description": "none = flat damage only."
+        }
+      }
+    },
+    "loadout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["weapon", "offhand"],
+      "properties": {
+        "weapon": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "offhand": {"type": ["string", "null"], "minLength": 1, "maxLength": 2048}
+      }
+    },
+    "effect": {
+      "type": ["string", "object"],
+      "minLength": 1,
+      "maxLength": 2048,
+      "required": ["type"],
+      "properties": {
+        "type": {"type": "string", "minLength": 1, "maxLength": 64}
+      },
+      "additionalProperties": {"type": ["string", "number", "boolean"]},
+      "description": "A status effect: a keyword tag (\"channel\", \"aura\"), a sentence, or an object with a type and its numbers."
+    },
+    "ability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "tier",
+        "kind",
+        "shape",
+        "range",
+        "radius",
+        "cast",
+        "cooldown",
+        "mana",
+        "telegraph",
+        "damage",
+        "effects",
+        "notes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z0-9_-]+)*$",
+          "description": "Ability id, unique in the class set. Plain snake_case, or class_id.ability."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Display name, unique in the class file."
+        },
+        "tier": {"type": "integer", "minimum": 0, "maximum": 4},
+        "kind": {
+          "enum": [
+            "melee",
+            "projectile",
+            "aoe",
+            "buff",
+            "debuff",
+            "heal",
+            "control",
+            "stealth",
+            "utility"
+          ]
+        },
+        "shape": {
+          "enum": ["single", "cone", "circle", "line", "self", "target"],
+          "description": "Hit area of the ability."
+        },
+        "range": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60,
+          "description": "Reach in metres."
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 30,
+          "description": "Area radius in metres. 0 for a point hit."
+        },
+        "cast": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Cast time in seconds."
+        },
+        "cooldown": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600,
+          "description": "Cooldown in seconds. Long cooldowns are for revivals and window-scale ultimates."
+        },
+        "mana": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 200,
+          "description": "Mana cost."
+        },
+        "telegraph": {
+          "enum": ["none", "circle", "cone", "line", "charge"],
+          "description": "Ground tell the player reads. An aoe ability must have one."
+        },
+        "damage": {"$ref": "#/$defs/damage"},
+        "effects": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/effect"},
+          "description": "Status effects the ability applies."
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "Design note for the ability. May be empty."
+        },
+        "tags": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 32},
+          "description": "Optional search tags."
+        }
+      }
+    }
+  }
+}

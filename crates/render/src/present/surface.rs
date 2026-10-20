@@ -157,6 +157,15 @@ impl fmt::Display for PresentError {
 
 impl std::error::Error for PresentError {}
 
+impl From<crate::post::PostError> for PresentError {
+    /// A post-chain refusal at a presentation seam. The message is carried
+    /// as-is so the caller sees the row that refused; the conversion lives
+    /// here, not in the frame step, to keep the hot path allocation-free.
+    fn from(error: crate::post::PostError) -> Self {
+        PresentError::Validation(format!("post: {error}"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Frame sizes: zero area suspends (minimize path), over-bound rejects.
 // The state itself stays in `v1::SwapState`; this is the input predicate.

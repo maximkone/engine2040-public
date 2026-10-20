@@ -136,6 +136,18 @@ pub fn contact_shadow_strength(value: Option<&str>) -> f32 {
         .map_or(1.0, |value| value.clamp(0.0, 1.0))
 }
 
+/// Auto exposure (GS44): `1` lets the GPU histogram drive the camera
+/// exposure toward the key, any other value (unset included) holds 0 EV and
+/// leaves every existing capture byte-equal. Off by default: the arena's
+/// own day exposure stays the shipped look until the night preset lands.
+pub const AUTO_EXPOSURE_ENV: &str = "E2040_AUTO_EXPOSURE";
+
+/// Parse the auto-exposure switch: true only for `1` after trimming. Pure
+/// string parse; the returned flag is the setting's only effect.
+pub fn auto_exposure_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "1")
+}
+
 /// Windowed failures: bounded diagnostics, never panics. Audio loss is not an
 /// error: opening the device returns a notice string and the headless mixer
 /// keeps rendering voices offline.
@@ -1587,6 +1599,11 @@ fn smoke_presenter() -> Result<Option<(Presenter, MeshKey, super::arena_kit::Kit
             presenter.set_contact_shadow_strength(contact_shadow_strength(
                 std::env::var(CONTACT_SHADOW_ENV).ok().as_deref(),
             ));
+            // GS44: the same off-by-default switch in the smoke twin, so a
+            // capture pair can show the meter on and off.
+            presenter.set_auto_exposure_enabled(auto_exposure_enabled(
+                std::env::var(AUTO_EXPOSURE_ENV).ok().as_deref(),
+            ));
             // One lit cube proves the forward pass; a failed upload falls
             // back to clear-only frames rather than failing the smoke.
             let key = MeshKey::new(1, [0xA1; 32]);
@@ -1951,6 +1968,19 @@ mod tests {
             CONTACT_SHADOW_ENV, "E2040_CONTACT_SHADOW",
             "the setting name is pinned"
         );
+    }
+
+    #[test]
+    fn auto_exposure_defaults_off_and_only_one_turns_it_on() {
+        assert!(
+            !auto_exposure_enabled(None),
+            "unset keeps the shipped frame"
+        );
+        assert!(!auto_exposure_enabled(Some("0")), "0 is off");
+        assert!(auto_exposure_enabled(Some("1")), "1 is on");
+        assert!(auto_exposure_enabled(Some(" 1 ")), "trimmed 1 is on");
+        assert!(!auto_exposure_enabled(Some("on")), "a word stays off");
+        assert_eq!(AUTO_EXPOSURE_ENV, "E2040_AUTO_EXPOSURE", "name is pinned");
     }
 
     #[test]

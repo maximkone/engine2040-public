@@ -5,6 +5,8 @@
 //!
 //! The receipt hash moved with the side split (SIM1): `a7d73ecdbeba76e5` before,
 //! `6d282b76f7a45609` now, because side 1's own starting stock is in the digest.
+//! SIM2 left it unchanged: `6d282b76f7a45609` -> `6d282b76f7a45609`, because the town
+//! walks no unit and the tile rule only changes the movement phase.
 
 use kam2_sim::{Command, HouseKind, Sim, Ware};
 

@@ -5,8 +5,18 @@
 //! the same islands. The snapshot writes a body field in island order, so
 //! the same states and the same pairs give the same bytes on every PC. The
 //! Rapier world reads these bytes for checkpoint and rollback
-//! (`rapier::World::island_snapshot`). Std-only; no sim step lives here.
+//! (`rapier::World::island_snapshot`).
+//!
+//! [`step_islands`] steps one unit per island, one island at a time, in up to
+//! [`MAX_THREADS`] lanes on a caller-owned [`JobPool`]. Islands are cut into
+//! chunks by island count and `chunk` alone, lanes take chunks round-robin,
+//! and the chunk results merge by chunk index, so the lane count reaches
+//! neither state nor result order: 1, 2, 4 and 8 threads give the same
+//! answer. The step itself is the caller's frozen function; this module only
+//! cuts, schedules and merges. Std-only.
 #![forbid(unsafe_code)]
+
+use engine_ecs::JobPool;
 
 /// Union-find root per body. Skips self and out-of-range pairs, then unions
 /// by smaller root: no rank noise, fully deterministic.
@@ -57,6 +67,204 @@ fn union_roots(p: &mut Vec<usize>, n: usize, pairs: &[(usize, usize)]) {
         }
         p[i] = x;
     }
+}
+
+/// Most lanes one [`step_islands`] call may fan out to.
+pub const MAX_THREADS: usize = 64;
+
+/// How [`step_islands`] cuts and schedules its work.
+///
+/// Chunk edges depend on the island count and `chunk` only, never on
+/// `threads`, so every lane count visits the same chunks and merges them in
+/// the same order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParConfig {
+    /// Lanes, `1..=MAX_THREADS`: lane 0 runs on the caller and every other
+    /// lane is one pool job, so `1` steps everything on the caller. The
+    /// pool's worker count bounds how many lanes really run at once.
+    pub threads: usize,
+    /// Islands per chunk, at least `1`.
+    pub chunk: usize,
+}
+
+impl ParConfig {
+    /// Range-checks the config; nothing is stepped on an error.
+    pub fn validate(&self) -> Result<(), ParError> {
+        if self.threads == 0 || self.threads > MAX_THREADS {
+            return Err(ParError::BadThreads(self.threads));
+        }
+        if self.chunk == 0 {
+            return Err(ParError::BadChunk);
+        }
+        Ok(())
+    }
+}
+
+/// Why a parallel island step was refused. Nothing was stepped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParError {
+    /// Thread count zero or past [`MAX_THREADS`]; the culprit is carried.
+    BadThreads(usize),
+    /// Chunk size zero.
+    BadChunk,
+    /// The island builder returned a unit twice or not at all: a bug in the
+    /// builder, reported instead of stepping a unit twice.
+    Partition,
+}
+
+impl core::fmt::Display for ParError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::BadThreads(n) => write!(f, "island threads {n} is outside 1..={MAX_THREADS}"),
+            Self::BadChunk => write!(f, "island chunk size must be at least 1"),
+            Self::Partition => write!(f, "island partition did not cover each unit once"),
+        }
+    }
+}
+
+impl std::error::Error for ParError {}
+
+/// Chunked split beside [`step_islands`]: the island ranges a step visits,
+/// `chunk` islands each. Entry `i` covers islands `start..end` in island
+/// order. Units: island indices. Determinism: the island count and `chunk`
+/// alone decide the edges, so 1/2/4/8 threads get the same ranges. Errors:
+/// none. Budget: one `usize` pair per chunk.
+#[must_use]
+pub fn island_chunks(count: usize, chunk: usize) -> Vec<(usize, usize)> {
+    let width = chunk.max(1);
+    (0..count)
+        .step_by(width)
+        .map(|start| (start, (start + width).min(count)))
+        .collect()
+}
+
+/// Sorted merge beside [`step_islands`]: chunk results by chunk index, island
+/// order inside, so 1/2/4/8 threads give the same sequence. Units: chunk
+/// indices plus results. Determinism: `sort_unstable` by index, no clock.
+/// Errors: none. Caller: [`step_islands`].
+#[must_use]
+pub fn merge_sorted<R>(mut done: Vec<(usize, Vec<R>)>) -> Vec<R> {
+    done.sort_unstable_by_key(|(index, _)| *index);
+    done.into_iter().flat_map(|(_, results)| results).collect()
+}
+
+/// One island's members in ascending unit order, as exclusive borrows.
+type Members<'a, T> = Vec<&'a mut T>;
+/// A chunk index and the islands in it.
+type Chunk<'a, T> = (usize, Vec<Members<'a, T>>);
+
+/// Step every island of one chunk, in island order.
+fn run_chunks<T, R, F>(chunks: Vec<Chunk<'_, T>>, step: &F) -> Vec<(usize, Vec<R>)>
+where
+    F: Fn(&mut [&mut T]) -> R,
+{
+    chunks
+        .into_iter()
+        .map(|(index, mut islands)| {
+            let results = islands
+                .iter_mut()
+                .map(|members| step(members.as_mut_slice()))
+                .collect();
+            (index, results)
+        })
+        .collect()
+}
+
+/// Step all `units` once, island by island, in up to `cfg.threads` lanes run
+/// on `pool`, a pool the caller starts once and reuses.
+///
+/// `coupled` lists unit pairs that interact during the step (any order,
+/// repeats and out-of-range ends are ignored, as in [`build_islands`]).
+/// `step` receives one island at a time: its members in ascending unit order.
+/// It must touch only those members and read no shared mutable state.
+/// Returns one result per island, in island order (ascending first member),
+/// whatever the lane count, the pool size or which job finished first.
+///
+/// Determinism: islands come from [`build_islands`]; chunks of `cfg.chunk`
+/// islands are fixed by the island count alone; lane `w` takes chunks
+/// `w, w + lanes, ...`; results merge sorted by chunk index. A panic in
+/// `step` unwinds on the caller, as the serial call would.
+///
+/// Errors: [`ParError`] for a bad config; units are untouched then.
+pub fn step_islands<T, R, F>(
+    pool: &JobPool,
+    units: &mut [T],
+    coupled: &[(usize, usize)],
+    cfg: ParConfig,
+    step: F,
+) -> Result<Vec<R>, ParError>
+where
+    T: Send,
+    R: Send,
+    F: Fn(&mut [&mut T]) -> R + Sync,
+{
+    cfg.validate()?;
+    let lanes = partition(units, coupled, cfg)?;
+    Ok(merge_sorted(run_lanes(pool, lanes, &step)))
+}
+
+/// Cut `units` into islands, islands into chunks of `cfg.chunk`, and chunks
+/// into one lane per worker (chunk `i` goes to lane `i % workers`). This is
+/// the per-call setup: a handful of vectors sized by the unit count.
+fn partition<'a, T>(
+    units: &'a mut [T],
+    coupled: &[(usize, usize)],
+    cfg: ParConfig,
+) -> Result<Vec<Vec<Chunk<'a, T>>>, ParError> {
+    let islands = build_islands(units.len(), coupled);
+    let ranges = island_chunks(islands.len(), cfg.chunk);
+    let mut free: Vec<Option<&mut T>> = units.iter_mut().map(Some).collect();
+    let mut chunks: Vec<Chunk<'a, T>> = Vec::with_capacity(ranges.len());
+    for (index, (begin, end)) in ranges.into_iter().enumerate() {
+        let group = islands.get(begin..end).ok_or(ParError::Partition)?;
+        let mut taken: Vec<Members<'a, T>> = Vec::with_capacity(group.len());
+        for members in group {
+            let mut borrowed = Vec::with_capacity(members.len());
+            for &unit in members {
+                let slot = free.get_mut(unit).and_then(Option::take);
+                borrowed.push(slot.ok_or(ParError::Partition)?);
+            }
+            taken.push(borrowed);
+        }
+        chunks.push((index, taken));
+    }
+    let workers = cfg.threads.min(chunks.len()).max(1);
+    let mut lanes: Vec<Vec<Chunk<'a, T>>> = (0..workers).map(|_| Vec::new()).collect();
+    for chunk in chunks {
+        if let Some(lane) = lanes.get_mut(chunk.0 % workers) {
+            lane.push(chunk);
+        }
+    }
+    Ok(lanes)
+}
+
+/// Queue every lane but the first as a job on `pool`, run lane 0 on the
+/// caller, and wait for the scope. Each lane writes its own slot, so the
+/// chunk results come back in lane order; [`merge_sorted`] sorts them by
+/// chunk index. A panicking lane re-raises here after every job is done.
+fn run_lanes<T, R, F>(
+    pool: &JobPool,
+    lanes: Vec<Vec<Chunk<'_, T>>>,
+    step: &F,
+) -> Vec<(usize, Vec<R>)>
+where
+    T: Send,
+    R: Send,
+    F: Fn(&mut [&mut T]) -> R + Sync,
+{
+    let mut slots: Vec<Vec<(usize, Vec<R>)>> = Vec::new();
+    slots.resize_with(lanes.len(), Vec::new);
+    pool.scope(|scope| {
+        let mut pairs = lanes.into_iter().zip(slots.iter_mut());
+        let mine = pairs.next();
+        for (lane, slot) in pairs {
+            scope.spawn(move || *slot = run_chunks(lane, step));
+        }
+        if let Some((lane, slot)) = mine {
+            *slot = run_chunks(lane, step);
+        }
+    });
+    slots.into_iter().flatten().collect()
 }
 
 /// Canonical islands: every body appears in exactly one island; isolated
@@ -386,6 +594,7 @@ pub fn update_sleep(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     #[test]
     fn build_slice_topology_stable_under_pair_order() {
@@ -724,5 +933,441 @@ mod tests {
             Ok(Vec::new())
         );
         assert!(SnapshotError::Order.to_string().contains("canonical"));
+    }
+
+    /// A unit with order-sensitive state: every step depends on the member
+    /// before it, so a wrong member order or a wrong island split shows.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Cell {
+        id: usize,
+        state: u64,
+        steps: u32,
+    }
+
+    fn cells(n: usize) -> Vec<Cell> {
+        (0..n)
+            .map(|id| Cell {
+                id,
+                state: engine_core::splitmix64(u64::try_from(id).unwrap_or(0)),
+                steps: 0,
+            })
+            .collect()
+    }
+
+    /// Uneven busy work per member, so chunks finish in a different order
+    /// from the one they merge in.
+    fn step_cell_island(members: &mut [&mut Cell]) -> u64 {
+        let mut carry = u64::try_from(members.len()).unwrap_or(0);
+        for member in members.iter_mut() {
+            for _ in 0..(member.id % 7 + 1) * 40 {
+                member.state = engine_core::splitmix64(member.state ^ carry.rotate_left(17));
+                carry = carry.wrapping_add(member.state);
+            }
+            member.steps += 1;
+            carry = engine_core::splitmix64(carry ^ member.state);
+        }
+        carry
+    }
+
+    /// The same step with no executor: islands one after another, each on
+    /// copies of its members written back.
+    fn serial_cell_step(cells: &mut [Cell], coupled: &[(usize, usize)]) -> Vec<u64> {
+        build_islands(cells.len(), coupled)
+            .iter()
+            .map(|members| {
+                let mut group: Vec<Cell> = members.iter().map(|&i| cells[i].clone()).collect();
+                let result = {
+                    let mut refs: Vec<&mut Cell> = group.iter_mut().collect();
+                    step_cell_island(&mut refs)
+                };
+                for (&i, cell) in members.iter().zip(group) {
+                    cells[i] = cell;
+                }
+                result
+            })
+            .collect()
+    }
+
+    /// Chains, a pair, a triple whose ends are written backwards, and many
+    /// singletons.
+    fn coupling() -> Vec<(usize, usize)> {
+        vec![
+            (1, 0),
+            (2, 1),
+            (3, 2),
+            (10, 11),
+            (21, 20),
+            (22, 21),
+            (40, 70),
+            (70, 41),
+            (99, 5),
+            (5, 99),
+        ]
+    }
+
+    /// A pool whose workers plus the caller make `threads` threads, started
+    /// once and reused, as a match would.
+    fn lane_pool(threads: usize) -> JobPool {
+        JobPool::new(threads.saturating_sub(1)).expect("pool starts")
+    }
+
+    /// Chunk edges are a function of the island count and `chunk` only, and
+    /// they cover every island once in ascending order.
+    #[test]
+    fn par_split_edges_depend_on_count_and_chunk_only() {
+        assert_eq!(island_chunks(64, 5).len(), 13);
+        assert_eq!(island_chunks(64, 5).first().copied(), Some((0, 5)));
+        assert_eq!(island_chunks(64, 5).last().copied(), Some((60, 64)));
+        assert!(island_chunks(0, 4).is_empty(), "no island, no chunk");
+        assert_eq!(
+            island_chunks(64, 0),
+            island_chunks(64, 1),
+            "chunk 0 reads as 1"
+        );
+        for chunk in [1, 2, 3, 7, 64, 1000] {
+            let edges = island_chunks(64, chunk);
+            let covered: Vec<usize> = edges.iter().flat_map(|&(a, b)| a..b).collect();
+            assert_eq!(covered, (0..64).collect::<Vec<_>>(), "chunk {chunk}");
+            // The split never sees a lane count: the same call, twice.
+            assert_eq!(edges, island_chunks(64, chunk), "chunk {chunk}");
+        }
+        assert_eq!(
+            merge_sorted(vec![(1, vec![3]), (0, vec![1, 2])]),
+            vec![1, 2, 3]
+        );
+        assert!(merge_sorted(Vec::<(usize, Vec<u8>)>::new()).is_empty());
+    }
+
+    /// The parallel step is the serial step under any threads and chunking.
+    #[test]
+    fn par_step_matches_the_serial_step_under_1_2_4_8_threads() {
+        let pairs = coupling();
+        let mut reference = cells(120);
+        let mut want = Vec::new();
+        for _ in 0..12 {
+            want.push(serial_cell_step(&mut reference, &pairs));
+        }
+        for threads in [1, 2, 4, 8] {
+            let pool = lane_pool(threads);
+            for chunk in [1, 2, 3, 7, 64, 1000] {
+                let cfg = ParConfig { threads, chunk };
+                let mut live = cells(120);
+                for (tick, expected) in want.iter().enumerate() {
+                    let got = step_islands(&pool, &mut live, &pairs, cfg, step_cell_island)
+                        .expect("steps");
+                    assert_eq!(
+                        &got, expected,
+                        "threads {threads} chunk {chunk} tick {tick}"
+                    );
+                }
+                assert_eq!(live, reference, "threads {threads} chunk {chunk}");
+                assert!(
+                    live.iter().all(|c| c.steps == 12),
+                    "every unit stepped once per tick"
+                );
+            }
+        }
+    }
+
+    fn member_ids(members: &mut [&mut Cell]) -> Vec<usize> {
+        members.iter().map(|c| c.id).collect()
+    }
+
+    #[test]
+    fn par_step_results_come_back_in_island_order_with_ascending_members() {
+        let pairs = [(5, 2), (0, 9), (9, 4), (7, 7), (30, 1)];
+        let mut live = cells(10);
+        let islands = build_islands(10, &pairs);
+        let firsts: Vec<usize> = islands.iter().map(|m| m[0]).collect();
+        assert_eq!(firsts, vec![0, 1, 2, 3, 6, 7, 8], "{islands:?}");
+        assert_eq!(islands[0], vec![0, 4, 9]);
+        for (threads, chunk) in [(1, 1), (3, 2), (8, 1), (8, 100)] {
+            let cfg = ParConfig { threads, chunk };
+            let got = step_islands(&lane_pool(threads), &mut live, &pairs, cfg, member_ids)
+                .expect("steps");
+            assert_eq!(got, islands, "threads {threads} chunk {chunk}");
+        }
+    }
+
+    /// Yields on odd islands so workers finish out of merge order.
+    fn jittered(members: &mut [&mut Cell]) -> u64 {
+        if members[0].id % 2 == 1 {
+            thread::yield_now();
+        }
+        step_cell_island(members)
+    }
+
+    #[test]
+    fn par_step_completion_order_cannot_change_the_answer() {
+        let pairs = coupling();
+        let pool = lane_pool(8);
+        let mut first: Option<(Vec<Cell>, Vec<u64>)> = None;
+        for round in 0..30 {
+            let mut live = cells(120);
+            let mut last = Vec::new();
+            let cfg = ParConfig {
+                threads: 8,
+                chunk: 3,
+            };
+            for _ in 0..4 {
+                last = step_islands(&pool, &mut live, &pairs, cfg, jittered).expect("steps");
+            }
+            match &first {
+                None => first = Some((live, last)),
+                Some((state, result)) => {
+                    assert_eq!(&live, state, "round {round}");
+                    assert_eq!(&last, result, "round {round}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn par_step_refuses_a_bad_config_and_steps_nothing() {
+        let pool = lane_pool(4);
+        let mut live = cells(8);
+        let untouched = live.clone();
+        for (cfg, want) in [
+            (
+                ParConfig {
+                    threads: 0,
+                    chunk: 1,
+                },
+                ParError::BadThreads(0),
+            ),
+            (
+                ParConfig {
+                    threads: MAX_THREADS + 1,
+                    chunk: 1,
+                },
+                ParError::BadThreads(MAX_THREADS + 1),
+            ),
+            (
+                ParConfig {
+                    threads: 2,
+                    chunk: 0,
+                },
+                ParError::BadChunk,
+            ),
+        ] {
+            assert_eq!(
+                step_islands(&pool, &mut live, &[], cfg, step_cell_island),
+                Err(want)
+            );
+            assert_eq!(live, untouched);
+            assert!(!want.to_string().is_empty());
+        }
+        let top = ParConfig {
+            threads: MAX_THREADS,
+            chunk: 1,
+        };
+        assert_eq!(
+            step_islands(&pool, &mut live, &[], top, step_cell_island).map(|r| r.len()),
+            Ok(8)
+        );
+        let mut none: Vec<Cell> = Vec::new();
+        let ok = ParConfig {
+            threads: 4,
+            chunk: 4,
+        };
+        assert_eq!(
+            step_islands(&pool, &mut none, &[], ok, step_cell_island),
+            Ok(Vec::new())
+        );
+    }
+
+    fn boom(members: &mut [&mut Cell]) -> u8 {
+        let id = members[0].id;
+        assert!(id != 11, "island {id} blew up");
+        0
+    }
+
+    #[test]
+    fn par_step_a_panicking_island_unwinds_on_the_caller() {
+        let mut live = cells(16);
+        for threads in [1, 4] {
+            let pool = lane_pool(threads);
+            let cfg = ParConfig { threads, chunk: 2 };
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                step_islands(&pool, &mut live, &[], cfg, boom)
+            }));
+            let payload = run.expect_err("the panic reaches the caller");
+            let text = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                text.contains("island 11 blew up"),
+                "threads {threads}: {text:?}"
+            );
+            // The pool survives and the next step runs.
+            assert_eq!(
+                step_islands(&pool, &mut live, &[], cfg, member_ids).map(|r| r.len()),
+                Ok(16)
+            );
+        }
+    }
+
+    #[test]
+    fn par_step_spawns_no_thread_per_step() {
+        // Thread ids are never reused in a process, so a thread spawned per
+        // step would show up as a new id on every tick.
+        let pairs = coupling();
+        let pool = lane_pool(4);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let mut live = cells(120);
+        let cfg = ParConfig {
+            threads: 4,
+            chunk: 2,
+        };
+        for _ in 0..60 {
+            step_islands(&pool, &mut live, &pairs, cfg, |members| {
+                let id = thread::current().id();
+                if let Ok(mut ids) = seen.lock() {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+                step_cell_island(members)
+            })
+            .expect("steps");
+        }
+        let seen = seen.into_inner().unwrap_or_default();
+        assert!(
+            seen.len() <= 4,
+            "60 steps ran on {} threads; the pool has 3 workers plus the caller",
+            seen.len()
+        );
+        assert!(
+            seen.contains(&thread::current().id()),
+            "lane 0 is the caller"
+        );
+    }
+
+    /// The 64-fighter scene: one Rapier world per fighter, each a floor with a
+    /// three-capsule rig (legs, torso, head) that settles on itself, so a step
+    /// carries real contacts and the solver has real work.
+    #[cfg(feature = "rapier")]
+    fn fighter_worlds() -> Vec<crate::rapier::World> {
+        (0..64u8)
+            .map(|k| {
+                let mut world = crate::rapier::World::new();
+                world
+                    .add_static_box([30.0, 0.5, 30.0], [0.0, -0.5, 0.0])
+                    .expect("floor");
+                let x = f32::from(k % 8) * 2.0 - 7.0;
+                let z = f32::from(k / 8) * 2.0 - 7.0;
+                let lift = 0.1 * f32::from(k % 3);
+                world
+                    .spawn_capsule([x, 0.9 + lift, z], 0.4, 0.9)
+                    .expect("legs");
+                world
+                    .spawn_capsule([x, 1.8 + lift, z], 0.4, 0.6)
+                    .expect("torso");
+                world
+                    .spawn_capsule([x, 2.6 + lift, z], 0.35, 0.3)
+                    .expect("head");
+                world
+            })
+            .collect()
+    }
+
+    /// One island of the scene: every fighter world steps its own fixed tick.
+    #[cfg(feature = "rapier")]
+    fn step_fighter(worlds: &mut [&mut crate::rapier::World]) {
+        for world in worlds.iter_mut() {
+            world
+                .step(crate::rigid::FIXED_DT)
+                .expect("a fixed step runs");
+        }
+    }
+
+    /// One digest over the scene, in fighter index order.
+    #[cfg(feature = "rapier")]
+    fn scene_hash(worlds: &[crate::rapier::World]) -> u64 {
+        let mut hash = engine_core::Fnv64::new();
+        hash.write_len(worlds.len());
+        for world in worlds {
+            hash.write_u64(world.state_hash());
+        }
+        hash.finish()
+    }
+
+    /// The row's hash leg: the 64-fighter scene steps to the same digest at
+    /// 1, 2, 4 and 8 threads, for every chunking.
+    #[cfg(feature = "rapier")]
+    #[test]
+    fn par_64_fighter_scene_hash_is_identical_under_1_2_4_8_threads() {
+        const TICKS: u32 = 120;
+        let run = |threads: usize, chunk: usize| {
+            let mut worlds = fighter_worlds();
+            let pool = lane_pool(threads);
+            let cfg = ParConfig { threads, chunk };
+            for _ in 0..TICKS {
+                step_islands(&pool, &mut worlds, &[], cfg, step_fighter).expect("steps");
+            }
+            scene_hash(&worlds)
+        };
+        let fresh = scene_hash(&fighter_worlds());
+        let want = run(1, 8);
+        assert_ne!(want, fresh, "the scene stepped");
+        for threads in [2, 4, 8] {
+            for chunk in [1, 2, 4, 8, 16] {
+                assert_eq!(run(threads, chunk), want, "threads {threads} chunk {chunk}");
+            }
+        }
+    }
+
+    /// The row's wall leg: `cargo test -p engine-physics --features rapier
+    /// --release --lib par_speedup_64_fighters -- --ignored --nocapture`.
+    /// Best of nine runs per config; the world build sits outside the clock,
+    /// so the bar measures the island step alone, and the digest keeps the
+    /// work alive.
+    #[cfg(feature = "rapier")]
+    #[test]
+    #[ignore = "timing report, run in release on the reference CPU"]
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "wall clock in a test-only timing report, never in the tick"
+    )]
+    fn par_speedup_64_fighters() {
+        use std::time::Instant;
+        const TICKS: u32 = 60;
+        println!(
+            "islands: available_parallelism {:?}",
+            thread::available_parallelism()
+        );
+        let timed = |threads: usize, chunk: usize| {
+            let mut best = u64::MAX;
+            let mut hash = 0;
+            for _ in 0..9 {
+                let mut worlds = fighter_worlds();
+                let pool = lane_pool(threads);
+                let cfg = ParConfig { threads, chunk };
+                let start = Instant::now();
+                for _ in 0..TICKS {
+                    step_islands(&pool, &mut worlds, &[], cfg, step_fighter).expect("steps");
+                }
+                let ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                best = best.min(ns);
+                hash = scene_hash(&worlds);
+            }
+            (best, hash)
+        };
+        let (serial, want) = timed(1, 8);
+        println!("islands: 1 thread {serial} ns for 64 fighters x {TICKS} ticks");
+        let mut bar = 0.0f64;
+        for chunk in [1, 2, 4, 8, 16] {
+            let (par, hash) = timed(4, chunk);
+            assert_eq!(hash, want, "the 4-lane run must agree with 1 thread");
+            let ratio = serial as f64 / par.max(1) as f64;
+            bar = bar.max(ratio);
+            println!("islands: 4 threads chunk {chunk}: {par} ns, {ratio:.2}x of 1 thread");
+        }
+        assert!(
+            bar >= 2.0,
+            "the row bar: 64 fighters on 4 threads must be at least 2x 1 thread, got {bar:.2}x"
+        );
     }
 }

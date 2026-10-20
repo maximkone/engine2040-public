@@ -1,0 +1,256 @@
+{
+  "id": "warden_warrior",
+  "faction": "wardens",
+  "tier": 1,
+  "branch": "warden_fighter",
+  "role": "dual-wield burst",
+  "growth": { "str": 2, "dex": 0, "con": 1, "int": 0, "wis": 0 },
+  "primary": ["str", "con"],
+  "playstyle": "Run the combo: keep every strike inside the chain window, let the fourth link open the finale window, then spend the song on one Crescendo that deletes the target before it can answer.",
+  "abilities": [
+    {
+      "id": "war_paired_strike",
+      "name": "Paired Strike",
+      "tier": 0,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.4,
+      "radius": 0,
+      "cast": 0.15,
+      "cooldown": 0.5,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 26, "scale": "str" },
+      "effects": [
+        "chain link: a strike landed inside the chain window adds one link",
+        "+12% damage per chain link, maximum 4 links (+48% at 4)",
+        "chain window 0.8 s after the previous link (1.2 s to 1.5 s while a song is up)",
+        "a missed chain window resets the chain to 1 link, it never cancels the ability"
+      ],
+      "notes": "This is the combo itself. The 2026 fix: the timing is the skill, not a cancel bug - the bonus is a reward for striking on time and the button always fires. The chain window is the slack you have to fit Wide Sweep or Hammer Rhythm into the rotation without dropping the chain; the finale window is the tight one."
+    },
+    {
+      "id": "war_marching_song",
+      "name": "Marching Song",
+      "tier": 0,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 6,
+      "radius": 6,
+      "cast": 0.3,
+      "cooldown": 30,
+      "mana": 18,
+      "telegraph": "circle",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "aura on the caster, radius 6 m, 12 s",
+        "you gain +20% damage dealt",
+        "chain window 0.8 s -> 1.2 s",
+        "the 4th chain link opens a finale window of 2.0 s",
+        "the song ends when the finale window closes",
+        "only one song can be up at a time; casting one song replaces the other"
+      ],
+      "notes": "The song is the fuel for the combo: without it the chain window is 0.8 s and there is no finale at all. Tier 0 of the song line - it is the shortest song, with the smallest aura and the shortest finale window."
+    },
+    {
+      "id": "war_stride_cut",
+      "name": "Stride Cut",
+      "tier": 0,
+      "kind": "melee",
+      "shape": "single",
+      "range": 3.0,
+      "radius": 0,
+      "cast": 0.2,
+      "cooldown": 8,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 32, "scale": "str" },
+      "effects": [
+        "dash up to 4 m",
+        "slow 25% for 2 s",
+        "counts as a chain link when it lands inside the chain window"
+      ],
+      "notes": "The gap close that keeps the chain running: land it on time and the link count goes up instead of resetting."
+    },
+    {
+      "id": "war_song_of_two",
+      "name": "Song of Two",
+      "tier": 1,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 8,
+      "radius": 8,
+      "cast": 0.4,
+      "cooldown": 40,
+      "mana": 24,
+      "telegraph": "circle",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "aura on the caster, radius 8 m, 12 s",
+        "you gain +20% damage dealt",
+        "allies in the aura gain +12% damage dealt",
+        "chain window 1.2 s for everyone in the aura",
+        "the 4th chain link opens a finale window of 2.0 s",
+        "only one song can be up at a time; casting one song replaces the other"
+      ],
+      "notes": "The party version of the song. It carries the same chain window and the same finale window, so the whole group can run the combo."
+    },
+    {
+      "id": "war_wide_sweep",
+      "name": "Wide Sweep",
+      "tier": 1,
+      "kind": "melee",
+      "shape": "cone",
+      "range": 3.2,
+      "radius": 3.2,
+      "cast": 0.4,
+      "cooldown": 12,
+      "mana": 6,
+      "telegraph": "cone",
+      "damage": { "base": 44, "scale": "str" },
+      "effects": [
+        "120 degree cone",
+        "slow 35% for 2 s",
+        "each target hit adds 1 chain link"
+      ],
+      "notes": "Two blades, one arc. It feeds the chain instead of breaking it, which is why it sits at tier 1."
+    },
+    {
+      "id": "war_deep_song",
+      "name": "Deep Song",
+      "tier": 2,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 10,
+      "radius": 10,
+      "cast": 0.4,
+      "cooldown": 50,
+      "mana": 32,
+      "telegraph": "circle",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "aura on the caster, radius 10 m, 14 s",
+        "you gain +30% damage dealt",
+        "allies in the aura gain +20% damage dealt",
+        "chain window 1.4 s",
+        "the 4th chain link opens a finale window of 3.0 s",
+        "each chain link refunds 4 mana",
+        "only one song can be up at a time; casting one song replaces the other"
+      ],
+      "notes": "The song grows with the tier: +30% damage, a longer chain window and a finale window of 3.0 s instead of 2.0 s."
+    },
+    {
+      "id": "war_crescendo",
+      "name": "Crescendo",
+      "tier": 2,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 3.5,
+      "radius": 3.5,
+      "cast": 0.4,
+      "cooldown": 16,
+      "mana": 30,
+      "telegraph": "circle",
+      "damage": { "base": 70, "scale": "str" },
+      "effects": [
+        "inside the finale window: damage x2.2 and the song is consumed",
+        "outside the finale window: base damage only, the song keeps running",
+        "knockback 2 m"
+      ],
+      "notes": "The payoff of the combo. Used early it is a wasted cooldown, not a cancelled cast: the button always fires and the song survives."
+    },
+    {
+      "id": "war_hammer_rhythm",
+      "name": "Hammer Rhythm",
+      "tier": 2,
+      "kind": "aoe",
+      "shape": "line",
+      "range": 10,
+      "radius": 10,
+      "cast": 0.6,
+      "cooldown": 20,
+      "mana": 20,
+      "telegraph": "line",
+      "damage": { "base": 66, "scale": "str" },
+      "effects": [
+        "3 m wide line, 10 m long, cast in the facing direction",
+        "knockback 2.5 m",
+        "stagger 1.0 s",
+        "each target hit adds 1 chain link"
+      ],
+      "notes": "The running part of the running combo: a line that hits everything in the lane and hands the chain back a link per target."
+    },
+    {
+      "id": "war_bloodbeat",
+      "name": "Bloodbeat",
+      "tier": 3,
+      "kind": "debuff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 24,
+      "mana": 12,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "the next 3 chain links deal +20% damage",
+        "each of those links applies bleed: 10 damage per second for 4 s",
+        "chain window +0.2 s while active"
+      ],
+      "notes": "Tier 3 is one deep pick because the Warrior's power curve runs through the song tiers. Bleed ticks use the same formula as the damage blocks: 10 x (1 + 0.04 x (STR - 10)) per second."
+    },
+    {
+      "id": "war_last_verse",
+      "name": "Last Verse",
+      "tier": 4,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 12,
+      "radius": 12,
+      "cast": 0.5,
+      "cooldown": 120,
+      "mana": 60,
+      "telegraph": "circle",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "aura on the caster, radius 12 m, 16 s",
+        "you gain +45% damage dealt",
+        "allies in the aura gain +30% damage dealt",
+        "chain window 1.5 s",
+        "the 4th chain link opens a finale window of 4.0 s",
+        "a chain link landed inside the finale window extends it by 1 s, up to 6 s",
+        "each chain link refunds 6 mana",
+        "only one song can be up at a time; casting one song replaces the other"
+      ],
+      "notes": "Top of the song line: +45% damage, the longest chain window and a finale window of 4.0 s that the combo itself can push to 6 s."
+    },
+    {
+      "id": "war_final_crescendo",
+      "name": "Final Crescendo",
+      "tier": 4,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 5.0,
+      "radius": 5.0,
+      "cast": 0.5,
+      "cooldown": 30,
+      "mana": 50,
+      "telegraph": "circle",
+      "damage": { "base": 150, "scale": "str" },
+      "effects": [
+        "inside the finale window: damage x2.5 and the song is consumed",
+        "outside the finale window: base damage only, the song keeps running",
+        "knockback 3 m",
+        "inside the finale window: allies within 6 m gain +25% damage dealt for 8 s"
+      ],
+      "notes": "Top of the finale line: 150 base over 5 m and a bigger multiplier than Crescendo, and the whole party gets the damage buff when it lands in time."
+    }
+  ],
+  "loadout": {
+    "weapon": "arming sword",
+    "offhand": "arming sword"
+  },
+  "counters": ["warden_rogue", "warden_assassin", "ashkin_combatant", "ashkin_shadow", "warden_fighter", "ashkin_attacker"],
+  "weakness": "warden_defender holds you outside 2.4 m and punishes the standing still with Bulwark Charge, warden_cleric and ashkin_life out-heal a burst that has already been spent, and ashkin_gunner kills from outside the chain window."
+}

@@ -78,7 +78,11 @@ def parse_args(argv):
     parser.add_argument("--self-test", action="store_true", help="build a cube+cone scene and render it")
     parser.add_argument("--out", help="output folder (default: %%TEMP%%/kam2-art/<name>)")
     parser.add_argument("--frames", type=int, default=8, help="frames around the ring (default 8)")
-    parser.add_argument("--size", type=int, default=64, help="square cell size in px (default 64)")
+    parser.add_argument(
+        "--size",
+        default="64",
+        help="cell in px: one number for a square cell, WxH for a cameo (default 64)",
+    )
     parser.add_argument("--pitch", type=float, default=PITCH_DEG, help="camera pitch in degrees")
     parser.add_argument("--margin", type=float, default=0.06, help="framing margin, fraction of the span")
     parser.add_argument("--prefix", default="frame", help="frame file prefix (default frame)")
@@ -101,13 +105,25 @@ def parse_args(argv):
         parser.error("--scene or --self-test is required")
     if args.frames < 1:
         parser.error("--frames must be >= 1")
-    if args.size < 8:
-        parser.error("--size must be >= 8")
-    if args.height_px is not None and args.height_px >= args.size:
-        parser.error("--height-px must be smaller than --size (the cell needs room for the shadow)")
+    size_parts = [part.strip() for part in str(args.size).lower().split("x")]
+    try:
+        sizes = [int(part) for part in size_parts]
+    except ValueError:
+        parser.error("--size wants one number or WxH: %s" % args.size)
+    if len(sizes) == 1:
+        sizes = sizes * 2
+    if len(sizes) != 2:
+        parser.error("--size wants one number or WxH: %s" % args.size)
+    args.size, args.size_y = sizes
+    if args.size < 8 or args.size_y < 8:
+        parser.error("--size must be >= 8 in both sides")
+    if args.size_y > args.size:
+        parser.error("--size WxH wants W >= H: ortho_scale covers the larger side")
+    if args.height_px is not None and args.height_px >= args.size_y:
+        parser.error("--height-px must be smaller than the cell height (the cell needs room for the shadow)")
     if args.span is not None and args.span <= 0:
         parser.error("--span must be > 0")
-    if args.ground_px is not None and not 0 <= args.ground_px < args.size:
+    if args.ground_px is not None and not 0 <= args.ground_px < args.size_y:
         parser.error("--ground-px must be inside the cell")
     if (args.pivot_x is None) != (args.pivot_y is None):
         parser.error("--pivot-x and --pivot-y go together")
@@ -265,12 +281,16 @@ def camera_basis(yaw_deg, pitch_deg):
     return to_cam, forward, right, up
 
 
-def frame_plan(lo, hi, frames, pitch, size, margin, height_px=None, span=None, ground_px=None, floor_z=None, pivot_x=None, pivot_y=None, yaw=None):
+def frame_plan(lo, hi, frames, pitch, size, margin, height_px=None, span=None, ground_px=None, floor_z=None, pivot_x=None, pivot_y=None, yaw=None, size_y=None):
     """One span and one pivot pixel shared by every facing, so frames stack exactly.
 
     Heading 0 is south (toward the camera). The model never turns; the camera walks
     the ring, which gives the same picture as a fixed camera and a turning unit.
+    `size` is the cell width (the larger side, which ortho_scale covers); `size_y`
+    is the cell height and defaults to a square cell.
     """
+    if size_y is None:
+        size_y = size
     floor = lo.z if floor_z is None else floor_z
     pivot = Vector(
         (
@@ -309,13 +329,14 @@ def frame_plan(lo, hi, frames, pitch, size, margin, height_px=None, span=None, g
         body = (hi.z - floor) * math.cos(math.radians(pitch))
         span_used = max(body, 1.0e-4) * size / height_px
     else:
-        span_used = max(u_span, v_span) * (1.0 + margin)
+        # Both sides of the cell must hold the model: the wider one sets ortho_scale.
+        span_used = max(u_span, v_span * size / size_y) * (1.0 + margin)
     # Pixel of the ground pivot; constant for every facing by construction.
-    pixel = [size * 0.5 - u_mid / span_used * size, size * 0.5 + v_mid / span_used * size]
+    pixel = [size * 0.5 - u_mid / span_used * size, size_y * 0.5 + v_mid / span_used * size]
     v_aim = v_mid
     if ground_px is not None:
         # Put the ground pivot on ground_px, whatever the pose does above it.
-        v_aim = (ground_px - size * 0.5) * span_used / size
+        v_aim = (ground_px - size_y * 0.5) * span_used / size
         pixel[1] = float(ground_px)
     return {
         "pivot": pivot,
@@ -439,7 +460,7 @@ def setup_render(scene, args):
         scene.render.engine = "BLENDER_WORKBENCH"
 
     scene.render.resolution_x = args.size
-    scene.render.resolution_y = args.size
+    scene.render.resolution_y = args.size_y
     scene.render.resolution_percentage = 100
     scene.render.film_transparent = True
     scene.render.dither_intensity = 0.0
@@ -561,6 +582,7 @@ def main():
         pivot_x=args.pivot_x,
         pivot_y=args.pivot_y,
         yaw=args.yaw,
+        size_y=args.size_y,
     )
     shadow = None if args.no_shadow else add_contact_shadow(scene, plan)
 
@@ -585,7 +607,7 @@ def main():
         "count": len(names),
         "mask_frames": mask_names,
         "width": args.size,
-        "height": args.size,
+        "height": args.size_y,
         "pitch_deg": round(args.pitch, 4),
         "yaw_deg": None if args.yaw is None else round(args.yaw, 4),
         "yaw_step_deg": None if args.yaw is not None else round(360.0 / args.frames, 4),

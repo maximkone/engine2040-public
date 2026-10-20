@@ -133,11 +133,11 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   stays the default. Tier C. Size M. Owns `crates/nn/src/ort_backend.rs`.
   Accept: same outputs as tract within tolerance on the NN2 corpus; the
   default build gains no dependency. needs: NN2.
-- [ ] PX15 physics: deterministic parallel islands via chunked split plus
+- [x] PX15 physics: deterministic parallel islands via chunked split plus
   sorted merge with step frozen (READER-SPEED53 card 3, PX6 deepening).
   Tier B. Size S. Owns the chunked split+merge hunks beside
   `crates/physics/src/islands.rs:57`. Accept: identical hash at 1/2/4/8
-  threads + ≥2x wall on 64-fighter scene. needs: PX6. (SPEED53.)
+  threads + ≥2x wall on 64-fighter scene. needs: PX6. (SPEED53.) Landed e8d2fb8. par_64_fighter_scene_hash_is_identical_under_1_2_4_8_threads and par_step_matches_the_serial_step_under_1_2_4_8_threads 8 passed (gh run 39489741989); par_speedup_64_fighters 2.30x wall on 4 threads, runner available_parallelism 4 (gh run 39488071406); whole crate 282 passed (run 39489768592), clippy green (run 39489293024), golden d57b5c8ae3096614 unchanged (run 39490319645).
 - [ ] PX9 physics: ragdoll contacts and joint tables — self-collision between
   non-adjacent bones (collision groups filter parent and child), ragdoll
   against ragdoll for clinches and falls, per-joint swing/twist limit tables
@@ -316,12 +316,12 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   decode_stays_within_cm_and_degrees, decode_allocates_nothing,
   cook_twice_is_identical, truncated_payload_is_refused_not_panicking) 5 pass,
   gh run 39484516174; clippy gh run 39485335830.
-- [ ] CT13 assets: ray-tracing proxies — the cook emits a simplified proxy
+- [x] CT13 assets: ray-tracing proxies — the cook emits a simplified proxy
   mesh per asset (quadric chain from CT2) for the RT acceleration
   structures, with a stored deviation bound, beside the full raster mesh
   (Solari proxy rule). Tier A. Size S. Owns `crates/assets/src/proxy.rs`.
   Accept: proxies stay inside their bound on every museum asset; a light leak
-  through a proxy fails the tunnel fixture; cook x2 identical. needs: CT2, RT1.
+  through a proxy fails the tunnel fixture; cook x2 identical. needs: CT2, RT1. Landed c36c060e. proxy::tests 5 passed (proxies_stay_inside_their_bound_on_every_museum_asset, the_same_mesh_cooks_the_same_proxy_twice, a_light_leak_through_a_proxy_fails_the_tunnel_fixture, a_tiny_mesh_keeps_its_own_surface_as_the_proxy, a_degenerate_mesh_is_refused_not_panicking), gh run 39505030084; proxy.rs clippy clean (the crate-wide run stays red on another agent's asset_source/fetch.rs type_complexity).
 - [ ] CT14 content: AI motion source — a provider-style `MotionSource` (mock
   clip library; forge's combat-motion sidecar over loopback at
   127.0.0.1:7863, the owner's own trained model; any remote text-to-motion

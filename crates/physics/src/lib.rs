@@ -25,7 +25,8 @@ pub mod controller2;
 /// events, and the collision layer a broken door drops to. Integer, std-only.
 pub mod door;
 /// Canonical island topology plus snapshot bytes the Rapier world checkpoints
-/// through. Std-only; no sim step.
+/// through, and the chunked split plus sorted merge that steps one unit per
+/// island on lanes of a caller pool. Std-only.
 pub mod islands;
 /// Per-bone ragdoll swing/twist limits, hinge kinds, friction motors and collision
 /// groups, read from the skeleton at spawn. Float, client-local, never hashed.

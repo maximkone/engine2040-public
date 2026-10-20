@@ -178,7 +178,7 @@ Too big for 6 GB (skip): HY-Motion 1.0 (26 GB), Hunyuan3D-2.1 (10 to 29 GB), Ski
 |---|---|---|---|
 | meshoptimizer + gltfpack | Meshlets, LOD (`-si`), `-c` compression, `-tc` KTX2. Crate `meshopt` 0.6.2. | https://github.com/zeux/meshoptimizer/tree/master/gltf | S / 5 |
 | glTF-Transform | optimize, meshopt, uastc, etc1s, resize, prune, dedup. Adds Node to the cook. | https://github.com/donmccurdy/glTF-Transform | S / 4 |
-| basisu 0.1.0 | Pure-Rust KTX2 transcoder for runtime. | https://docs.rs/basisu/0.1.0/basisu/ | S / 4 |
+| basisu 0.1.0 | Pure-Rust KTX2 transcoder for runtime: reads a `.ktx2` or `.basis` and transcodes it to BC7, the other BCn, ASTC, ETC, PVRTC, ATC, FXT1 or RGBA at load. Decode side only (the encoder is the C++ `basisu` tool). Repo `marcogomez/basisu`, files `basisu/src/ktx2.rs`, `basisu/src/transcoder.rs`, `basisu/src/dispatch.rs`; Apache-2.0; read live 2026-10-20. | https://github.com/marcogomez/basisu | S / 4 |
 | intel_tex_2, block_compression | BC7 on CPU at cook; GPU port in WGSL. U | https://docs.rs/block_compression | S / 4 |
 | Symphonia | Pure-Rust decode of Ogg, FLAC, WAV, MP3. | https://github.com/pdeljanov/Symphonia | S / 4 |
 | AssetCooker | USN-journal incremental cook driver for Windows. | https://github.com/jlaumon/AssetCooker | S / 4 |

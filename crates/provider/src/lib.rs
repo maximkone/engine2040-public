@@ -23,7 +23,9 @@
 //!
 //! [`arbiter`] decides where local inference runs while the game shares the
 //! GPU (GPU, CPU, deferred or a configured remote), and [`LocalAdapter`]
-//! applies that decision on its request path.
+//! applies that decision on its request path. [`pressure`] is the live feed
+//! that hands the arbiter a running window's frame-time p95 and VRAM
+//! reading.
 
 #![warn(missing_docs)]
 
@@ -43,6 +45,7 @@ pub mod ollama;
 pub mod openai;
 pub mod pins;
 pub mod policy;
+pub mod pressure;
 pub mod prompt;
 pub mod protocol;
 pub mod quota;
@@ -100,6 +103,9 @@ pub use fallback::{
     fallback_for, FallbackCause, FallbackErr, FallbackNotice, ScriptedFallback, MAX_NOTICE_LEN,
 };
 pub use policy::{AiSessionPolicy, CancelReason, Fallback, JobState, ProviderCapabilities};
+pub use pressure::{
+    FrameWindow, PressureError, PressureFeed, FRAME_WINDOW, MAX_FRAME_WINDOW,
+};
 pub use prompt::{
     gate_edit, score_permille, text_digest, EditReport, EvalModel, PromptAsset, PromptError,
     PromptEval, BUILTIN_KINDS, MAX_EVALS,

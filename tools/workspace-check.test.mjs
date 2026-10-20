@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges } from "./workspace-check.mjs";
+import { spawnSync } from "node:child_process";
+import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, sourceFilesUnder } from "./workspace-check.mjs";
 import { parseBoard, needsOf } from "./board-slice.mjs";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { deriveFixedApi, genreHits, maskRust, platformMathHits, productionCode } from "./sim-source-scan.mjs";
+import { scanIslandsFrom } from "./wiring-scan.mjs";
 
 const board = (lines) => lines.join("\n");
 
@@ -366,4 +370,54 @@ test("wiring cache: changed .rs or scanner inputs bust the cache (no stale numbe
   } finally {
     rmTmp(shimUrl, { force: true });
   }
+});
+
+test("module reachability: one parse per file answers every lookup (E51)", () => {
+  const names = parseDeclaredModules([
+    "mod plain;",
+    "  pub mod published;",
+    "pub(crate) mod scoped;",
+    "pub(in crate::x) mod nested;",
+    "let s = \"mod quoted;\";",
+  ].join("\n"));
+  assert.deepEqual([...names].sort(), ["nested", "plain", "published", "scoped"]);
+  assert.equal(names.has("quoted"), false, "a string is not a module declaration");
+});
+
+test("module reachability: an include!() names the file it pulls in (E51)", () => {
+  const names = parseIncludedFiles([
+    'include!("editor/commands_coalesce.rs");',
+    'include!("plain.rs");',
+  ].join("\n"));
+  assert.deepEqual([...names].sort(), ["commands_coalesce", "plain"]);
+});
+
+test("the shared source list is the wiring file set: tests directories stay out (E51)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ws-sources-"));
+  try {
+    mkdirSync(join(dir, "demo", "src"), { recursive: true });
+    mkdirSync(join(dir, "demo", "tests"), { recursive: true });
+    writeFileSync(join(dir, "demo", "src", "lib.rs"), "pub fn a() {}\n");
+    writeFileSync(join(dir, "demo", "src", "mod.rs"), "pub fn b() {}\n");
+    writeFileSync(join(dir, "demo", "tests", "it.rs"), "fn t() {}\n");
+    const files = sourceFilesUnder(dir).map((f) => f.replace(/\\/g, "/"));
+    assert.equal(files.length, 2, "the tests directory is not scanned");
+    assert.ok(files.some((f) => f.endsWith("demo/src/lib.rs")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the in-process wiring scan answers like the tool it replaces (E51)", () => {
+  const cratesDir = new URL("../crates/", import.meta.url);
+  if (!existsSync(cratesDir)) return;
+  const root = cratesDir.pathname.replace(/^\//, "");
+  const files = sourceFilesUnder(root);
+  assert.ok(files.length > 100, `expected the crate sources, found ${files.length}`);
+  const entries = files.map((file) => ({ file, text: readFileSync(file, "utf8") }));
+  const islands = scanIslandsFrom(entries, root);
+  assert.equal(typeof islands.length, "number");
+  const tool = spawnSync(process.execPath, [new URL("./wiring-scan.mjs", import.meta.url).pathname.replace(/^\//, ""), root], { encoding: "utf8", maxBuffer: 1 << 26 });
+  const line = (tool.stdout ?? "").split("\n")[0].trim();
+  assert.equal(line, `islands: ${islands.length}`, "the in-process scan must count what the tool counts");
 });

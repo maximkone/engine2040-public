@@ -298,6 +298,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   -p engine-anim --lib ang_limit` x2 (a 180 deg step at 1080 deg/s takes 10 ticks
   +-1) and `arena view:` pops=0 in product-check. F2P: pops 35-55. P2P: golden
   unchanged. needs: none.
+  Progress 2026-10-21: the real 8-fighter 300-frame window is now `pops=0 pop_acts=none pop_cm_max=10.0 sunk_cm_max=0.0 foot_slide_cm=0.0` on the RTX 3050 (`target/reports/product/manual-6eafae93/look.txt`, same flags as product-check). The 258/109.3 gap is gone; the official checker is still blocked by another arena holding the GPU/lock, so the row stays open until its own `latest.md` prints 0.
 - [ ] AM25 anim: look-at with soft limit, target-switch ease and a behind-the-back
   guard — replaces the hard clamp LF13 asks for; `crates/anim/src/fbik.rs:392`
   solve_look has no ease (Godot `look_at_modifier_3d.cpp`). Diff: regular. Tier

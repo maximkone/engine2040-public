@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "model": "graduated",
+  "note": "One detection model for every class that hides. The server owns it. The client only draws the meter.",
+  "meter": {
+    "range_pts_at_closest": 100,
+    "range_pts_far": 0,
+    "fill_to_detected": 100,
+    "drain_per_s": 25,
+    "grace_s": 2,
+    "alert_duration_s": 4,
+    "alert_radius_m": 20,
+    "alert_allies": 3
+  },
+  "distance_term": {
+    "formula": "linear from range_pts_at_closest at 2 m to range_pts_far at the effective range",
+    "effective_range_m": { "base": 30, "assassin_hidden": 24, "assassin_hidden_moving": 16, "archer_hidden": 26, "archer_hidden_moving": 21 }
+  },
+  "facing_term": {
+    "formula": "100 inside the front arc, 50 on the flanks, 0 behind",
+    "front_arc_deg": 90
+  },
+  "concealment_term": {
+    "formula": "1 - concealment, 0.55 for a cloak, 1.0 for nothing",
+    "cloak_fill_rate": 0.55
+  },
+  "motion_term": { "still": 1.0, "walking": 1.4, "running": 2.0 },
+  "fill_formula": "(D + F) * (1 - C) * M",
+  "rules": [
+    "Never a binary aura. No class sees every hidden enemy on the field.",
+    "Reveal effects beat the meter instantly but only inside their own shape.",
+    "A detection pulse breaks enemy stealth only; allies are exempt.",
+    "Firing a weapon breaks the cloak. Moving fast doubles the rate you are seen.",
+    "The meter, not the model, decides. A player never dies without having been given a chance to know they were seen."
+  ]
+}

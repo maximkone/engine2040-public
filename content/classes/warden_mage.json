@@ -1,0 +1,159 @@
+{
+  "id": "warden_mage",
+  "faction": "wardens",
+  "tier": 0,
+  "branch": null,
+  "role": "caster",
+  "growth": {
+    "str": 0,
+    "dex": 1,
+    "con": 0,
+    "int": 1,
+    "wis": 0
+  },
+  "primary": [
+    "int",
+    "dex"
+  ],
+  "playstyle": "You win by making the other side stop moving. A mage who is casting is a mage who is being hit, so every second of charge is a decision.",
+  "abilities": [
+    {
+      "id": "mana_ward",
+      "name": "Mana Ward",
+      "tier": 0,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 20,
+      "mana": 10,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "spell_shield"
+      ],
+      "notes": "A short shield that blocks one spell. The most important button on a low level mage."
+    },
+    {
+      "id": "ember_bolt",
+      "name": "Ember Bolt",
+      "tier": 0,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 24,
+      "radius": 0,
+      "cast": 0.6,
+      "cooldown": 2,
+      "mana": 14,
+      "telegraph": "none",
+      "damage": {
+        "base": 34,
+        "scale": "int"
+      },
+      "effects": [
+        "damage"
+      ],
+      "notes": "A single target bolt. The slowest thing you own and the one you cast most."
+    },
+    {
+      "id": "static_burst",
+      "name": "Static Burst",
+      "tier": 1,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 18,
+      "radius": 5,
+      "cast": 0.9,
+      "cooldown": 8,
+      "mana": 26,
+      "telegraph": "circle",
+      "damage": {
+        "base": 30,
+        "scale": "int"
+      },
+      "effects": [
+        "damage",
+        "shock"
+      ],
+      "notes": "A burst around the target that shocks everyone close to it. The ground decal is the whole point."
+    },
+    {
+      "id": "frost_line",
+      "name": "Frost Line",
+      "tier": 1,
+      "kind": "aoe",
+      "shape": "line",
+      "range": 20,
+      "radius": 3,
+      "cast": 1,
+      "cooldown": 10,
+      "mana": 24,
+      "telegraph": "line",
+      "damage": {
+        "base": 26,
+        "scale": "int"
+      },
+      "effects": [
+        "damage",
+        "slow"
+      ],
+      "notes": "A line of ice along the ground. Slows what it crosses so the line holds for two seconds."
+    },
+    {
+      "id": "drain_life",
+      "name": "Drain Life",
+      "tier": 2,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 22,
+      "radius": 0,
+      "cast": 0.8,
+      "cooldown": 6,
+      "mana": 22,
+      "telegraph": "none",
+      "damage": {
+        "base": 40,
+        "scale": "int"
+      },
+      "effects": [
+        "damage",
+        "heal"
+      ],
+      "notes": "Steals a little of what it takes. The mage's answer to running dry."
+    },
+    {
+      "id": "elemental_burst",
+      "name": "Elemental Burst",
+      "tier": 4,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 22,
+      "radius": 8,
+      "cast": 1.6,
+      "cooldown": 24,
+      "mana": 60,
+      "telegraph": "charge",
+      "damage": {
+        "base": 120,
+        "scale": "int"
+      },
+      "effects": [
+        "damage"
+      ],
+      "notes": "A large detonation that builds through a visible charge. Three seconds of standing still for a screen full of hurt."
+    }
+  ],
+  "loadout": {
+    "weapon": "staff",
+    "offhand": null
+  },
+  "counters": [
+    "ashkin_attacker",
+    "ashkin_combatant"
+  ],
+  "weakness": "Paper. Every enemy in the game is looking for you."
+}

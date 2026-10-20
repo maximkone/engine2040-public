@@ -153,9 +153,9 @@ root motion, `net` state):
   `arena=d29b3b17bbd3b244` on linux-x86_64, windows-x86_64, linux-aarch64,
   wasm32-wasip1 and wasm32-wasip1-simd128, all MATCH. RZ3w (2026-10-20) put a
   landed v2 hit through `resolve_swing` and `spawn_limbs`, so the same fixture
-  now prints `arena=2fbd56040fd091a7` on linux-x86_64; the five-target matrix
-  rerun is the open gate. It is a new fixture (own digest); the legacy golden
-  is unchanged, and V1 has no cut path.
+  now prints `arena=2fbd56040fd091a7`; golden-matrix run 39493719322 MATCHed it
+  on the same five targets (`ARENA RESULT PASS`). It is a new fixture (own
+  digest); the legacy golden is unchanged, and V1 has no cut path.
 
 ## AI and asynchronous services
 

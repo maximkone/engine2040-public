@@ -284,37 +284,6 @@ pub(crate) struct TablePage {
     pub(crate) next_cursor: Option<u32>,
 }
 
-/// Compact pose row of one staged actor: `name [index] x y z sx sy sz dir`,
-/// whole cm (`?` where the pose is unknown) and the yaw as one of eight
-/// compass words (`+x`, `+x+z`, `+z`, ...: the facing's octant).
-fn pose_row(index: usize, actor: &engine_spatial::Actor) -> String {
-    let cm = |v: f32| {
-        if v.is_finite() {
-            engine_spatial::to_cm(v).to_string()
-        } else {
-            "?".to_owned()
-        }
-    };
-    let (dx, dz) = engine_spatial::navcheck::octant(actor.yaw);
-    let axis = |d: i32, plus: &'static str, minus: &'static str| match d {
-        1 => plus,
-        -1 => minus,
-        _ => "",
-    };
-    format!(
-        "{} [{index}] {} {} {} {} {} {} {}{}",
-        actor.name,
-        cm(actor.x),
-        cm(actor.y),
-        cm(actor.z),
-        cm(actor.sx),
-        cm(actor.sy),
-        cm(actor.sz),
-        axis(dx, "+x", "-x"),
-        axis(dz, "+z", "-z"),
-    )
-}
-
 /// Page of the wire tables for a staged scene: objects from `cursor` while
 /// the page's bytes (ids + labels + pose rows) stay within `allowance`, at
 /// least one object so a page always moves forward. `only` keeps just those
@@ -340,7 +309,7 @@ pub(crate) fn table_page(
         }
         let uuid = id.to_string();
         let label = object_label(&actor.name, id);
-        let pose = pose_row(index, actor);
+        let pose = engine_spatial::brief::place_row(actor);
         let cost = uuid.len() + label.len() + pose.len();
         if !page.ids.is_empty() && used + cost > allowance {
             page.next_cursor = u32::try_from(index).ok();

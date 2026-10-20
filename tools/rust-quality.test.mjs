@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveFixedApi } from "./sim-source-scan.mjs";
-import { HELP, analyzeFile, cfgTestModPaths, cfgTestMods, cloneKey, compare, functions, hitIsOwned, isPassthrough, lex, measure, onlyBase, packages, scopeRatchetToOwned, score, testLines, testOnlyFile, testPath } from "./rust-quality.mjs";
+import { HELP, analyzeFile, cfgTestModPaths, cfgTestMods, cloneKey, compare, compareCloneMembers, functions, hitIsOwned, isPassthrough, lex, measure, onlyBase, packages, scopeRatchetToOwned, score, testLines, testOnlyFile, testPath } from "./rust-quality.mjs";
 
 const lib = { crate: "engine-x", lib: true, bin: false, sim: false, hot: false, core: false, testFile: false };
 const sim = { ...lib, crate: "engine-physics", sim: true, hot: true };
@@ -269,4 +269,41 @@ test("onlyBase names baseline rows with no crate, and the real baseline has none
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const real = JSON.parse(readFileSync(join(root, "tools", "rust-quality.baseline.json"), "utf8"));
   assert.deepEqual(onlyBase(real, new Set(packages(root).map((p) => p.name))), [], "a baseline row names a crate that is gone");
+});
+
+test("the board-id prefilter keeps every real row id (E51)", () => {
+  const ids = new Set(["OPT9", "E51", "GA7"]);
+  const src = [
+    "// OPT9 ops: compile cache spike",
+    "pub fn a() {} // E51 speed: measured hotspot bundle",
+    "// a plain comment with no row id",
+    "// ga7 lower case is not a row id",
+    "pub fn b() {} // GA7 is a row id",
+  ].join("\n");
+  const hits = analyzeFile(src, lib, ids).hits.board_ids;
+  assert.equal(hits.length, 3, "OPT9, E51 and GA7 are named");
+});
+
+test("the clone group owner order does not depend on the machine locale (E51)", () => {
+  const paths = [
+    "crates/core/src/a.rs:1",
+    "crates/ai/src/b.rs:2",
+    "crates/ai/src/a.rs:3",
+    "crates/zz/src/c.rs:4",
+    "crates/core/src/z.rs:5",
+  ];
+  for (const a of paths) {
+    for (const b of paths) {
+      const mine = compareCloneMembers({ core: 0, at: a }, { core: 0, at: b });
+      const locale = a.localeCompare(b);
+      assert.equal(Math.sign(mine), Math.sign(locale), `${a} vs ${b}`);
+    }
+  }
+  assert.ok(compareCloneMembers({ core: 1, at: "z" }, { core: 0, at: "a" }) < 0, "engine-core owns the group first");
+});
+
+test("the package list is read once per root (E51)", () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  assert.equal(packages(root), packages(root), "the second call reuses the list");
+  assert.ok(packages(root).some((p) => p.name === "engine-core"));
 });

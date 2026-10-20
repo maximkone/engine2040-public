@@ -1,0 +1,205 @@
+{
+  "id": "warden_assassin",
+  "faction": "wardens",
+  "tier": 1,
+  "branch": "warden_rogue",
+  "role": "stealth burster",
+  "growth": {"str": 1, "dex": 2, "con": 0, "int": 0, "wis": 0},
+  "primary": ["dex", "str"],
+  "playstyle": "Open on one target from stealth, burst it, and walk away before the answer arrives. The class lives on space and timing. Only the opener scales hard; every other button either sets the opener up or buys the walk back. It has no heal and no crowd tool, so a second enemy in the fight is a loss it must refuse to start.",
+  "abilities": [
+    {
+      "id": "veil_breath",
+      "name": "Veil Breath",
+      "tier": 0,
+      "kind": "stealth",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.6,
+      "cooldown": 14,
+      "mana": 8,
+      "telegraph": "none",
+      "damage": {"base": 0, "scale": "none"},
+      "effects": [
+        {"type": "stealth", "duration_s": 8, "concealment": 0.55, "detect_range_m": 16, "speed_mult": 0.6}
+      ],
+      "notes": "Enter stealth for 8 s. Inside it the observer fill rate is x0.45, the effective detection range is 16 m, the facing term is halved, and the move speed is 3.0 of 5.0 m/s. It ends on any damage dealt, on Fang Burst, on Shadowstep, on Blind Powder, or when the 8 s run out."
+    },
+    {
+      "id": "soft_step",
+      "name": "Soft Step",
+      "tier": 0,
+      "kind": "utility",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.3,
+      "cooldown": 16,
+      "mana": 5,
+      "telegraph": "none",
+      "damage": {"base": 0, "scale": "none"},
+      "effects": [
+        {"type": "noise", "duration_s": 10, "detect_range_m": 24, "motion_mult": 0.7}
+      ],
+      "notes": "Quiet for 10 s. The effective detection range against observers drops to 24 m and the motion term counts at 0.7 while walking, 0.5 while still. It grants no stealth. It only slows the meter down, and it is the cheap way to cross open ground between two picks."
+    },
+    {
+      "id": "short_fang",
+      "name": "Short Fang",
+      "tier": 0,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.0,
+      "radius": 0,
+      "cast": 0.25,
+      "cooldown": 1.2,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {"base": 26, "scale": "dex"},
+      "effects": [
+        {"type": "poise_damage", "amount": 200}
+      ],
+      "notes": "The plain stab, 26 + 1.0 per DEX, 2.0 m reach. It is the fallback when the stealth is gone and the chip that opens a mark. Stabbing out of stealth drops the stealth, because damage always does."
+    },
+    {
+      "id": "fang_burst",
+      "name": "Fang Burst",
+      "tier": 1,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.2,
+      "radius": 0,
+      "cast": 0.3,
+      "cooldown": 10,
+      "mana": 12,
+      "telegraph": "none",
+      "damage": {"base": 45, "scale": "dex"},
+      "effects": [
+        {"type": "slow", "amount_pct": 30, "duration_s": 3},
+        {"type": "break_stealth", "force": true}
+      ],
+      "notes": "The opener. It needs stealth and it drops the stealth on use. From stealth the hit is x2.4 against players, which is 60 percent of the old x4.0, and x3.6 against NPCs. 45 + 1.1 per DEX, then the slow of 30 percent for 3 s. Worked example at DEX 40: 89 raw, 214 from stealth against a player."
+    },
+    {
+      "id": "hamstring",
+      "name": "Hamstring",
+      "tier": 1,
+      "kind": "debuff",
+      "shape": "target",
+      "range": 2.5,
+      "radius": 0,
+      "cast": 0.4,
+      "cooldown": 8,
+      "mana": 10,
+      "telegraph": "none",
+      "damage": {"base": 16, "scale": "dex"},
+      "effects": [
+        {"type": "slow", "amount_pct": 45, "duration_s": 5}
+      ],
+      "notes": "Cripple. The target moves 45 percent slower for 5 s and takes 16 + 0.6 per DEX. The slow is the real weapon: it turns a missed opener into a kill and it stops the target from reaching the healer."
+    },
+    {
+      "id": "shadowstep",
+      "name": "Shadowstep",
+      "tier": 2,
+      "kind": "utility",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.2,
+      "cooldown": 9,
+      "mana": 12,
+      "telegraph": "none",
+      "damage": {"base": 0, "scale": "none"},
+      "effects": [
+        {"type": "dash", "distance_m": 6, "iframes": 2},
+        {"type": "break_stealth", "force": true}
+      ],
+      "notes": "Dash 6 m in 0.2 s with 2 iframes, and the stealth ends on use. The escape and the gap closer are the same button, so the assassin never carries two mobility tools."
+    },
+    {
+      "id": "flaw_mark",
+      "name": "Flaw Mark",
+      "tier": 2,
+      "kind": "debuff",
+      "shape": "target",
+      "range": 2.5,
+      "radius": 0,
+      "cast": 0.5,
+      "cooldown": 14,
+      "mana": 14,
+      "telegraph": "none",
+      "damage": {"base": 0, "scale": "none"},
+      "effects": [
+        {"type": "damage_taken", "amount_pct": 20, "duration_s": 6}
+      ],
+      "notes": "The target takes 20 percent more damage from every source for 6 s. The mark deals no damage of its own, so it can be laid on a target the warband is already hitting instead of one the assassin has to solo."
+    },
+    {
+      "id": "rend",
+      "name": "Rend",
+      "tier": 3,
+      "kind": "melee",
+      "shape": "cone",
+      "range": 2.6,
+      "radius": 2.6,
+      "cast": 0.45,
+      "cooldown": 12,
+      "mana": 16,
+      "telegraph": "cone",
+      "damage": {"base": 38, "scale": "dex"},
+      "effects": [
+        {"type": "slow", "amount_pct": 25, "duration_s": 3}
+      ],
+      "notes": "A sweeping cut through a 60 degree cone 2.6 m deep: 38 + 0.9 per DEX to every target standing in it, then 25 percent slower for 3 s. The cone is drawn 0.35 s before the blade lands, so a careful opponent can back out of it. This is the only answer the assassin has to two enemies, and it is weak."
+    },
+    {
+      "id": "blind_powder",
+      "name": "Blind Powder",
+      "tier": 3,
+      "kind": "control",
+      "shape": "cone",
+      "range": 4.0,
+      "radius": 4.0,
+      "cast": 0.5,
+      "cooldown": 20,
+      "mana": 18,
+      "telegraph": "cone",
+      "damage": {"base": 8, "scale": "none"},
+      "effects": [
+        {"type": "blind", "duration_s": 3, "miss_chance_pct": 40}
+      ],
+      "notes": "Powder thrown into a 60 degree cone 4 m deep: every enemy inside misses 40 percent of its attacks for 3 s and its detection of the assassin is halved for the same 3 s. The throw drops the stealth, so it is used to leave, not to arrive."
+    },
+    {
+      "id": "last_breath",
+      "name": "Last Breath",
+      "tier": 4,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.2,
+      "radius": 0,
+      "cast": 0.6,
+      "cooldown": 45,
+      "mana": 25,
+      "telegraph": "none",
+      "damage": {"base": 70, "scale": "dex"},
+      "effects": [
+        {"type": "execute", "threshold_pct": 30, "bonus_pct": 60, "bonus_pct_vs_players": 30}
+      ],
+      "notes": "The capstone. 70 + 1.4 per DEX, and 60 percent more when the target is under 30 percent health. Against players the bonus is 30 percent instead, so a full health target is never deleted by it. It needs 2.2 m of reach and 0.6 s of standing still, the one moment in the kit where the assassin is punished for the pause."
+    }
+  ],
+  "loadout": {
+    "weapon": "short sword, one handed",
+    "offhand": "free, a throwable or a charm, never a second blade"
+  },
+  "counters": [
+    "warden_sorcerer: the charge cast is a standing charge, the assassin closes inside it and the ground decal is useless at 2 m",
+    "warden_mage: the magic cell has to be held and the assassin is faster than the hold",
+    "ashkin_gunner: the cannon recoil is the tell, and 3 s of slow on a gunner is a dead gunner",
+    "warden_cleric: the chant does not move, so the opener lands on a stationary target"
+  ],
+  "weakness": "warden_defender redirects damage and holds the assassin in place long enough for the warband to arrive. warden_warrior punishes the 0.6 s of Last Breath with a stagger. ashkin_templar walks the arc and puts the shield between the assassin and its target. Any archer with a clear line reads the approach and the opener lands on a target that is already ready for it. The class has no heal and no crowd answer, so a second enemy in the fight is a loss."
+}

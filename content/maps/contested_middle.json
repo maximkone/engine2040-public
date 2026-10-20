@@ -1,0 +1,123 @@
+{
+  "id": "contested_middle",
+  "label": "The Contested Middle",
+  "size_m": { "x": 300, "z": 300 },
+  "level_band": [21, 60],
+  "biome": {
+    "id": "dust_plain",
+    "name": "Dust plain",
+    "ground": "cracked dry earth, ochre sand, salt crust",
+    "surface": "no grass, no lush growth, a few dry scrub clumps",
+    "relief": "a shallow bowl, 12 m of height across the whole map",
+    "elevation": "the ruined keep sits on the only rise; the south-west and north-east quarters dip into salt flats where the teal pools sit",
+    "water_rule": "shallow teal pools: a hazard band, not a swim area (40% speed, no cover, you are seen from the rim)",
+    "fog_start_m": 60,
+    "fog_end_m": 240,
+    "fog_note": "heavy distance fog on a low sun; beyond 240 m you only know a lane is busy",
+    "features": [
+      "cracked earth",
+      "dry scrub",
+      "ruined stone",
+      "salt crust",
+      "shallow teal pools"
+    ]
+  },
+  "palette": {
+    "sand": "#C9A46A",
+    "sky": "#D8C9A8",
+    "water": "#3E7F7A",
+    "fog": "#B9B29C",
+    "stone": "#B9B29C",
+    "accent": "#C9A227"
+  },
+  "landmarks": [
+    { "id": "keep_ruin", "kind": "keep", "x": 0, "z": 0, "r": 34, "h": 5.5, "note": "the ruined central keep: a ring of 5.5 m walls with a 12 m gate on each side, the courtyard floor is open" },
+    { "id": "keep_gate_n", "kind": "gate_arch", "x": 0, "z": 33, "r": 6, "h": 8, "note": "north gate, the main road enters the courtyard here" },
+    { "id": "keep_gate_s", "kind": "gate_arch", "x": 0, "z": -33, "r": 6, "h": 8, "note": "south gate, the main road leaves the courtyard here" },
+    { "id": "keep_gate_w", "kind": "gate_arch", "x": -33, "z": 0, "r": 6, "h": 8, "note": "west gate, the east-west road enters the courtyard here" },
+    { "id": "keep_gate_e", "kind": "gate_arch", "x": 33, "z": 0, "r": 6, "h": 8, "note": "east gate, the east-west road leaves the courtyard here" },
+    { "id": "keep_tower_nw", "kind": "tower", "x": -42, "z": 34, "r": 6, "h": 14, "note": "north-west corner tower, still standing: the high ground of the whole map" },
+    { "id": "keep_tower_se", "kind": "tower", "x": 42, "z": -34, "r": 6, "h": 14, "note": "south-east corner tower, the mirror of the north-west one" },
+    { "id": "road_post_w", "kind": "road_post", "x": -140, "z": 0, "r": 4, "h": 5, "note": "caravan post where the west road ends" },
+    { "id": "road_post_e", "kind": "road_post", "x": 140, "z": 0, "r": 4, "h": 5, "note": "caravan post where the east road ends" },
+    { "id": "watchtower_w", "kind": "watchtower", "x": -104, "z": 46, "r": 5, "h": 12, "note": "broken watchtower on the west rise, overlooks the west statue and the west road" },
+    { "id": "watchtower_e", "kind": "watchtower", "x": 104, "z": -46, "r": 5, "h": 12, "note": "broken watchtower on the east rise, the mirror of the west one" }
+  ],
+  "nodes": [
+    { "id": "statue_west", "kind": "statue", "x": -92, "z": 0, "radius": 12, "capture_progress_s": 45, "contested_by": 2 },
+    { "id": "statue_east", "kind": "statue", "x": 92, "z": 0, "radius": 12, "capture_progress_s": 45, "contested_by": 2 },
+    { "id": "statue_mid", "kind": "statue", "x": 0, "z": 0, "radius": 9, "capture_progress_s": 90, "contested_by": 2 },
+    { "id": "fort_nw", "kind": "fort", "x": -58, "z": 78, "radius": 16, "capture_progress_s": 0, "contested_by": 2 },
+    { "id": "fort_se", "kind": "fort", "x": 58, "z": -78, "radius": 16, "capture_progress_s": 0, "contested_by": 2 },
+    { "id": "gate_n", "kind": "gate", "x": 0, "z": 33, "radius": 8, "capture_progress_s": 0, "contested_by": 2 },
+    { "id": "gate_s", "kind": "gate", "x": 0, "z": -33, "radius": 8, "capture_progress_s": 0, "contested_by": 2 },
+    { "id": "gate_w", "kind": "gate", "x": -33, "z": 0, "radius": 8, "capture_progress_s": 0, "contested_by": 2 },
+    { "id": "gate_e", "kind": "gate", "x": 33, "z": 0, "radius": 8, "capture_progress_s": 0, "contested_by": 2 }
+  ],
+  "spawns": [
+    { "id": "spawn_warden_s", "faction": "wardens", "x": 0, "z": -130, "count": 16 },
+    { "id": "spawn_warden_w", "faction": "wardens", "x": -132, "z": -44, "count": 16 },
+    { "id": "spawn_ashkin_n", "faction": "ashkin", "x": 0, "z": 130, "count": 16 },
+    { "id": "spawn_ashkin_e", "faction": "ashkin", "x": 132, "z": 44, "count": 16 }
+  ],
+  "pve_spots": [
+    { "id": "pve_west_flats", "x": -62, "z": 16, "r": 12, "kind": "beast", "level": 33, "count": 3, "respawn_s": 90 },
+    { "id": "pve_east_flats", "x": 62, "z": -16, "r": 12, "kind": "beast", "level": 33, "count": 3, "respawn_s": 90 },
+    { "id": "pve_north_road", "x": 12, "z": 66, "r": 10, "kind": "bandit", "level": 40, "count": 2, "respawn_s": 120 },
+    { "id": "pve_south_road", "x": -12, "z": -66, "r": 10, "kind": "bandit", "level": 40, "count": 2, "respawn_s": 120 },
+    { "id": "pve_west_buttes", "x": -92, "z": 66, "r": 12, "kind": "beast", "level": 47, "count": 4, "respawn_s": 150 },
+    { "id": "pve_east_buttes", "x": 92, "z": -66, "r": 12, "kind": "beast", "level": 47, "count": 4, "respawn_s": 150 }
+  ],
+  "sight_lines": [
+    { "from": "spawn_ashkin_n", "to": "keep_gate_n", "width_m": 10 },
+    { "from": "spawn_warden_s", "to": "keep_gate_s", "width_m": 10 },
+    { "from": "road_post_w", "to": "keep_gate_w", "width_m": 12 },
+    { "from": "road_post_e", "to": "keep_gate_e", "width_m": 12 },
+    { "from": "keep_gate_n", "to": "statue_mid", "width_m": 12 },
+    { "from": "keep_gate_s", "to": "statue_mid", "width_m": 12 },
+    { "from": "keep_gate_w", "to": "statue_mid", "width_m": 12 },
+    { "from": "keep_gate_e", "to": "statue_mid", "width_m": 12 },
+    { "from": "keep_tower_nw", "to": "statue_west", "width_m": 8 },
+    { "from": "keep_tower_se", "to": "statue_east", "width_m": 8 },
+    { "from": "keep_tower_nw", "to": "statue_mid", "width_m": 6 },
+    { "from": "keep_tower_se", "to": "statue_mid", "width_m": 6 },
+    { "from": "watchtower_w", "to": "statue_west", "width_m": 6 },
+    { "from": "watchtower_e", "to": "statue_east", "width_m": 6 }
+  ],
+  "cover": [
+    { "id": "cov_keep_n_w", "x": -18, "z": 33, "w": 24, "h": 3, "kind": "keep_wall" },
+    { "id": "cov_keep_n_e", "x": 18, "z": 33, "w": 24, "h": 3, "kind": "keep_wall" },
+    { "id": "cov_keep_s_w", "x": -18, "z": -33, "w": 24, "h": 3, "kind": "keep_wall" },
+    { "id": "cov_keep_s_e", "x": 18, "z": -33, "w": 24, "h": 3, "kind": "keep_wall" },
+    { "id": "cov_keep_w", "x": -33, "z": 0, "w": 4, "h": 66, "kind": "rubble" },
+    { "id": "cov_keep_e", "x": 33, "z": 0, "w": 4, "h": 66, "kind": "rubble" },
+    { "id": "cov_wall_nw", "x": -40, "z": 46, "w": 16, "h": 3, "kind": "wall_low" },
+    { "id": "cov_wall_se", "x": 40, "z": -46, "w": 16, "h": 3, "kind": "wall_low" },
+    { "id": "cov_rock_sw", "x": -26, "z": -52, "w": 12, "h": 9, "kind": "rock" },
+    { "id": "cov_rock_ne", "x": 26, "z": 52, "w": 12, "h": 9, "kind": "rock" },
+    { "id": "cov_rock_fort_nw", "x": -34, "z": 58, "w": 10, "h": 8, "kind": "rock" },
+    { "id": "cov_rock_fort_se", "x": 34, "z": -58, "w": 10, "h": 8, "kind": "rock" },
+    { "id": "cov_wreck_n", "x": -36, "z": 76, "w": 7, "h": 4, "kind": "wreck" },
+    { "id": "cov_wreck_s", "x": 36, "z": -76, "w": 7, "h": 4, "kind": "wreck" },
+    { "id": "cov_wreck_w", "x": -74, "z": 30, "w": 7, "h": 4, "kind": "wreck" },
+    { "id": "cov_wreck_e", "x": 74, "z": -30, "w": 7, "h": 4, "kind": "wreck" }
+  ],
+  "terrain": {
+    "height_amplitude_m": 12,
+    "roads": [
+      { "from": "spawn_ashkin_n", "to": "keep_gate_n", "width_m": 8 },
+      { "from": "keep_gate_s", "to": "spawn_warden_s", "width_m": 8 },
+      { "from": "road_post_w", "to": "keep_gate_w", "width_m": 8 },
+      { "from": "keep_gate_e", "to": "road_post_e", "width_m": 8 },
+      { "from": "spawn_warden_w", "to": "road_post_w", "width_m": 6 },
+      { "from": "spawn_ashkin_e", "to": "road_post_e", "width_m": 6 }
+    ],
+    "water": [
+      { "id": "pool_w", "shape": "circle", "x": -110, "z": -28, "r": 18 },
+      { "id": "pool_e", "shape": "circle", "x": 110, "z": 28, "r": 18 },
+      { "id": "pool_nw", "shape": "circle", "x": -18, "z": 76, "r": 12 },
+      { "id": "pool_se", "shape": "circle", "x": 18, "z": -76, "r": 12 }
+    ]
+  },
+  "notes": "The contested middle: a 300 m bowl of dust with 12 m of relief, the ruined keep on the only rise at the centre. 64 players in four halls of 16: wardens from the south and the south-west, ashkin from the north and the north-east. Three capture points, the three statues: capture_progress_s is the capture time in seconds, radius is the capture ring in metres, contested_by is how many factions can contest one ring at once. The two forts are build plots for guilds, not capture points (capture_progress_s 0) and they persist between wars while the statues reset. The four gates are lane markers, not score points (capture_progress_s 0). Units are metres, +x is east, +z is north, the origin is the middle statue. from and to in sight_lines and terrain.roads are ids of landmarks, nodes, spawns or pve_spots in this file. cover w is the size along x and cover h is the size along z, a footprint box; the standing height of each kind is in contested_middle.md. Water is a hazard band, not a swim area: 40% speed, no cover, visible from the rim. Fog runs from 60 m to 240 m."
+}

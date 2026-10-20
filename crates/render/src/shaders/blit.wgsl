@@ -20,8 +20,11 @@ struct FogU {
     color: vec3<f32>,
     width_f: f32,
     height_f: f32,
+    // Bloom switch (LF4), 0 off.
     _pad0: f32,
-    _pad1: f32,
+    // Camera exposure as a linear multiplier (GS44): the meter's stops,
+    // written per frame. 1.0 is neutral.
+    exposure: f32,
     _pad2: f32,
 };
 @group(0) @binding(4) var<uniform> fog: FogU;
@@ -50,7 +53,10 @@ fn composite(in: BOut) -> vec4<f32> {
     // already scales the baked diffuse by the ORM occlusion and contact, so
     // multiplying here darkened direct sun too (open sand lost its sun).
     // The live GTAO field stays declared for a later ambient-only composite.
-    return vec4<f32>(mix(hdr.rgb, fog.color, f), hdr.a);
+    // One camera exposure for the whole frame, applied to linear radiance
+    // before the one tone map (GS44). 1.0 leaves the frame exactly as it was.
+    let lit = mix(hdr.rgb, fog.color, f) * fog.exposure;
+    return vec4<f32>(lit, hdr.a);
 }
 // Single-pass bloom before the one tone map (LF4 slice 2). Every tap is
 // soft-knee extracted first, then the extracts are blurred: a glint a pixel

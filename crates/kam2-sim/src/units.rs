@@ -3,6 +3,14 @@
 //! Invariants: `Sim::tick` is the only clock; a path is a plain tile list from a
 //! breadth-first search; every unit field is in the hash, so the same commands and the
 //! same ticks repeat the same state.
+//!
+//! A tile holds one body. The movement phase samples the tile every living unit holds,
+//! then walks the units in spawn order: a unit may enter its next tile only when that
+//! tile was free in the sample and no earlier unit has entered it this tick. A blocked
+//! unit stays on its tile and tries again next tick, so a tile vacated this tick is free
+//! only next tick: two units never share a tile, never swap in one tick and never pass
+//! through each other. A dead unit releases its tile in the same tick it falls, and a
+//! spawn on a held tile is refused with `Refusal::Occupied`.
 
 use std::collections::VecDeque;
 
@@ -251,10 +259,14 @@ pub(crate) fn find_path(
 }
 
 /// One tick of the army: arrows land, units walk, units strike.
-pub(crate) fn step(tick: u32, map: &Map, units: &mut Vec<Unit>, shots: &mut Vec<Shot>) {
+///
+/// Returns how many tile entries had to wait for a body; the match adds it to its
+/// blocked-move counter.
+pub(crate) fn step(tick: u32, map: &Map, units: &mut Vec<Unit>, shots: &mut Vec<Shot>) -> u32 {
     land_shots(tick, units, shots);
-    advance_movement(map, units);
+    let blocked = advance_movement(map, units);
     strike(tick, units, shots);
+    blocked
 }
 
 fn land_shots(tick: u32, units: &mut Vec<Unit>, shots: &mut Vec<Shot>) {
@@ -271,8 +283,15 @@ fn land_shots(tick: u32, units: &mut Vec<Unit>, shots: &mut Vec<Shot>) {
     units.retain(|u| u.hp > 0);
 }
 
-fn advance_movement(map: &Map, units: &mut [Unit]) {
+/// One movement phase: every unit at its arrival tick reserves the next tile, or waits.
+///
+/// `before` is the tile sample of this tick; `claimed` holds what earlier units entered.
+/// A unit that cannot enter keeps itself one tick short of arrival, so it retries on the
+/// next tick instead of spending another full walk.
+fn advance_movement(map: &Map, units: &mut [Unit]) -> u32 {
     let before: Vec<(i32, i32)> = units.iter().map(|u| (u.x, u.y)).collect();
+    let mut claimed: Vec<(i32, i32)> = Vec::new();
+    let mut blocked = 0u32;
     for (i, unit) in units.iter_mut().enumerate() {
         if unit.path.is_empty() {
             unit.progress = 0;
@@ -282,18 +301,25 @@ fn advance_movement(map: &Map, units: &mut [Unit]) {
         if unit.progress < unit.kind.move_ticks() {
             continue;
         }
-        unit.progress = 0;
         let Some(&next) = unit.path.front() else {
             continue;
         };
-        let taken = before.iter().enumerate().any(|(j, p)| j != i && *p == next);
-        if taken || !map.walkable(next.0, next.1) {
+        let held = before
+            .iter()
+            .enumerate()
+            .any(|(j, tile)| j != i && *tile == next);
+        if held || claimed.contains(&next) || !map.walkable(next.0, next.1) {
+            unit.progress = unit.kind.move_ticks().saturating_sub(1);
+            blocked = blocked.saturating_add(1);
             continue;
         }
+        unit.progress = 0;
         unit.path.pop_front();
         unit.x = next.0;
         unit.y = next.1;
+        claimed.push(next);
     }
+    blocked
 }
 
 fn strike(tick: u32, units: &mut Vec<Unit>, shots: &mut Vec<Shot>) {
@@ -458,6 +484,191 @@ mod tests {
         assert!(unit.path.is_empty());
         sim.tick();
         assert_eq!(sim.unit(id).map(|u| (u.x, u.y)), Some((4, 5)));
+    }
+
+    #[test]
+    fn two_units_ordered_to_one_tile_end_on_different_tiles() {
+        let mut sim = Sim::new(7, 1);
+        let first = spawn(&mut sim, UnitKind::Swordsman, 0, 1, 0);
+        let second = spawn(&mut sim, UnitKind::Swordsman, 1, 5, 0);
+        sim.apply(Command::MoveUnit {
+            id: first,
+            x: 3,
+            y: 0,
+        })
+        .expect("the first walk");
+        sim.apply_for(
+            1,
+            Command::MoveUnit {
+                id: second,
+                x: 3,
+                y: 0,
+            },
+        )
+        .expect("the second walk");
+        for _ in 0..12 {
+            sim.tick();
+        }
+        let first = sim.unit(first).expect("the first unit");
+        let second = sim.unit(second).expect("the second unit");
+        assert_eq!((first.x, first.y), (3, 0), "the lower id took the tile");
+        assert_eq!((second.x, second.y), (4, 0), "the other waits beside it");
+        assert_ne!(
+            (first.x, first.y),
+            (second.x, second.y),
+            "two bodies never share a tile"
+        );
+        assert!(
+            sim.blocked_moves() >= 1,
+            "the second entry kept waiting: {}",
+            sim.blocked_moves()
+        );
+    }
+
+    #[test]
+    fn a_tile_vacated_this_tick_is_free_next_tick_twice() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct Snapshot {
+            waited: [(i32, i32); 2],
+            entered: [(i32, i32); 2],
+            hash: u64,
+        }
+
+        fn play() -> Snapshot {
+            let mut sim = Sim::new(6, 1);
+            let walker = spawn(&mut sim, UnitKind::Swordsman, 0, 1, 0);
+            sim.apply(Command::MoveUnit {
+                id: walker,
+                x: 3,
+                y: 0,
+            })
+            .expect("the path is planned before the other body stands on it");
+            let other = spawn(&mut sim, UnitKind::Swordsman, 1, 2, 0);
+            sim.apply_for(
+                1,
+                Command::MoveUnit {
+                    id: other,
+                    x: 5,
+                    y: 0,
+                },
+            )
+            .expect("the other walks off");
+            for _ in 0..4 {
+                sim.tick();
+            }
+            let walked = sim.unit(walker).expect("the walker");
+            let moved = sim.unit(other).expect("the other");
+            let waited = [(walked.x, walked.y), (moved.x, moved.y)];
+            sim.tick();
+            let walked = sim.unit(walker).expect("the walker");
+            let moved = sim.unit(other).expect("the other");
+            let entered = [(walked.x, walked.y), (moved.x, moved.y)];
+            Snapshot {
+                waited,
+                entered,
+                hash: sim.hash(),
+            }
+        }
+        let first = play();
+        let second = play();
+        assert_eq!(first, second, "the swap resolves the same way twice");
+        assert_eq!(first.waited, [(1, 0), (3, 0)], "the vacated tile waits");
+        assert_eq!(
+            first.entered,
+            [(2, 0), (3, 0)],
+            "the walker enters behind it"
+        );
+    }
+
+    #[test]
+    fn a_unit_blocked_by_a_body_arrives_later_and_arrives() {
+        let mut sim = Sim::new(8, 1);
+        let walker = spawn(&mut sim, UnitKind::Swordsman, 0, 0, 0);
+        sim.apply(Command::MoveUnit {
+            id: walker,
+            x: 5,
+            y: 0,
+        })
+        .expect("the walk is planned on an empty row");
+        let ahead = spawn(&mut sim, UnitKind::Swordsman, 1, 2, 0);
+        for _ in 0..4 {
+            sim.tick();
+        }
+        sim.apply_for(
+            1,
+            Command::MoveUnit {
+                id: ahead,
+                x: 7,
+                y: 0,
+            },
+        )
+        .expect("the other walks the same way");
+        let mut arrived = 0;
+        for tick in 5..=40 {
+            sim.tick();
+            if sim
+                .unit(walker)
+                .is_some_and(|unit| (unit.x, unit.y) == (5, 0))
+            {
+                arrived = tick;
+                break;
+            }
+        }
+        assert_eq!(arrived, 21, "five tiles at four ticks, one tick lost");
+        assert!(
+            sim.unit(walker).is_some_and(|unit| unit.path.is_empty()),
+            "the walker arrived"
+        );
+        assert_eq!(sim.blocked_moves(), 1, "one entry had to wait");
+    }
+
+    #[test]
+    fn the_tile_fight_receipt_holds_twice() {
+        fn play() -> (u64, usize, u32) {
+            let mut sim = Sim::new(12, 6);
+            let first = spawn(&mut sim, UnitKind::Swordsman, 0, 1, 3);
+            let second = spawn(&mut sim, UnitKind::Swordsman, 1, 9, 3);
+            sim.apply(Command::MoveUnit {
+                id: first,
+                x: 5,
+                y: 3,
+            })
+            .expect("the first walk");
+            sim.apply_for(
+                1,
+                Command::MoveUnit {
+                    id: second,
+                    x: 5,
+                    y: 3,
+                },
+            )
+            .expect("the second walk");
+            for _ in 0..16 {
+                sim.tick();
+            }
+            sim.apply(Command::Attack {
+                id: first,
+                target: second,
+            })
+            .expect("the first strike");
+            sim.apply_for(
+                1,
+                Command::Attack {
+                    id: second,
+                    target: first,
+                },
+            )
+            .expect("the second strike");
+            for _ in 0..80 {
+                sim.tick();
+            }
+            (sim.hash(), sim.units().len(), sim.blocked_moves())
+        }
+        let first = play();
+        let second = play();
+        assert_eq!(first, second, "the same fight twice, same receipt");
+        assert_eq!(first.1, 1, "one swordsman stands");
+        assert_eq!(first.2, 1, "the shared middle tile blocked one entry");
     }
 
     #[test]

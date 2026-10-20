@@ -310,6 +310,9 @@ pub fn fog_blit_uniform_bytes(color: [f32; 3], width_px: u32, height_px: u32) ->
     out[8..12].copy_from_slice(&color[2].to_le_bytes());
     out[12..16].copy_from_slice(&(width_px as f32).to_le_bytes());
     out[16..20].copy_from_slice(&(height_px as f32).to_le_bytes());
+    // Offset 24 is the camera exposure (GS44): neutral 1.0. The live frame
+    // rewrites it per frame; every other writer keeps the frame as it was.
+    out[24..28].copy_from_slice(&1.0f32.to_le_bytes());
     out
 }
 
@@ -372,7 +375,12 @@ mod tests {
         let h = f32::from_le_bytes(bytes[16..20].try_into().expect("h bytes"));
         assert_eq!((r, g, b), (color[0], color[1], color[2]));
         assert_eq!((w, h), (1280.0, 720.0));
-        assert!(bytes[20..32].iter().all(|x| *x == 0));
+        // The bloom flag stays 0 (the live frame writes it), the camera
+        // exposure ships neutral 1.0, and the last word stays free.
+        assert!(bytes[20..24].iter().all(|x| *x == 0));
+        let exposure = f32::from_le_bytes(bytes[24..28].try_into().expect("exposure bytes"));
+        assert_eq!(exposure, 1.0, "neutral exposure is 1.0");
+        assert!(bytes[28..32].iter().all(|x| *x == 0));
     }
 
     #[test]

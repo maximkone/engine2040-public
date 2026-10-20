@@ -60,6 +60,15 @@ test("verdict keeps the cache only at 30% faster, 80% hits and stable warm runs"
   assert.equal(unmeasured.ratio, null);
 });
 
+test("the CI-shape rebuild is judged by the same 30% bar", () => {
+  const fast = verdict({ coldSeconds: 400, primeSeconds: 400, rebuildSeconds: 100, warmSeconds: 100, warm2Seconds: 100, rate: 0.95 });
+  assert.equal(fast.keep, true, fast.reasons.join("; "));
+  assert.equal(fast.rebuildRatio, 0.25);
+  const slow = verdict({ coldSeconds: 400, primeSeconds: 400, rebuildSeconds: 300, warmSeconds: 100, warm2Seconds: 100, rate: 0.95 });
+  assert.equal(slow.keep, false);
+  assert.match(slow.reasons.join("; "), /CI-shape rebuild/);
+});
+
 test("laneArgs is the lane's compile step with --no-run and no --release", () => {
   assert.deepEqual(laneArgs({ crates: ["engine-physics"], jobs: 4 }), [
     "test", "-j", "4", "--locked", "-p", "engine-physics", "--all-targets", "--no-run",
@@ -71,7 +80,7 @@ test("laneArgs is the lane's compile step with --no-run and no --release", () =>
 
 test("each cell owns a fresh target dir; only the cache cells wrap rustc", () => {
   const dirs = { run: "run", cache: "run/sccache", base: "C:/repo", port: 4399 };
-  assert.deepEqual(CELLS, ["cold", "prime", "warm", "warm2"]);
+  assert.deepEqual(CELLS, ["cold", "prime", "rebuild", "warm", "warm2"]);
   const cold = cellEnv("cold", dirs);
   assert.equal(cold.RUSTC_WRAPPER, undefined, "the baseline runs rustc directly");
   assert.equal(cold.SCCACHE_SERVER_PORT, undefined, "the baseline talks to no cache server");
@@ -87,7 +96,10 @@ test("each cell owns a fresh target dir; only the cache cells wrap rustc", () =>
     assert.equal(env.SCCACHE_SERVER_PORT, "4399", `${cell} uses the spike's own server, never the box's`);
     assert.equal(env.SCCACHE_BASEDIRS, dirs.base);
   }
-  assert.equal(targets.size, CELLS.length, "no cell reuses another's build dir");
+  // Every cell but the rebuild one owns a dir of its own; the rebuild cell is
+  // the CI shape: the same path as prime, so the cache key still matches.
+  assert.equal(targets.size, CELLS.length - 1);
+  assert.equal(cellEnv("rebuild", dirs).CARGO_TARGET_DIR, cellEnv("prime", dirs).CARGO_TARGET_DIR);
 });
 
 test("parseArgs takes repeatable --lane and refuses unknown flags", () => {

@@ -129,7 +129,7 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   `crates/provider/src/router.rs`. Accept: a seeded outage of the top
   model reroutes within the deadline; decisions replay from the record;
   a cost cap refuses loudly. needs: OPT24, EV1.
-- [ ] OPT27 provider: inference arbiter — local models and the game Progress 2026-10-17: provider side done (arbiter, serving adapter); left: feed live frame p95 and read_vram, window-build budget check on a GPU.
+- [ ] OPT27 provider: inference arbiter — local models and the game Progress 2026-10-17: provider side done (arbiter, serving adapter); left: feed live frame p95 and read_vram, window-build budget check on a GPU. Progress 2026-10-21: the provider half landed 50361c3d — `crates/provider/src/pressure.rs` (`PressureFeed`: frame-time p95 window and the VRAM reading reach the arbiter sample, typed notices, `route()` on the same reader) and `VramHeadroom::from_bytes` (the read_vram seam); 273 lib tests and 2 matrix tests green on the runner, clippy clean. Left: the window/game loop must own `PressureFeed` and the window build must hold the P6 frame budget with a local model loaded, which is the render and game lane's half — so the row is NOT ticked.
   share one 6 GB GPU: under frame pressure local inference moves to CPU,
   defers or routes remote; VRAM use reported; the tick never waits.
   Tier B. Size M. Owns `crates/provider/src/arbiter.rs`. Accept: with a
@@ -160,6 +160,8 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   wave 84.) Progress 2026-10-19: operator: reference-GPU frame report x2;
   line in `docs/plan/2026-10-19-owner-queue.md`.
   BLOCKED: needs the reference-GPU frame report x2 (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Progress 2026-10-20T21:47Z: no receipt in four keeper runs (300, 300, 30, 30 frames) at 100 % CPU with 27-45 foreign `cargo` and 10-25 `rustc`: the window stops after `arena particles: per-tier ...`, never presents a frame (`Responding: False`, 3 % GPU, 1-2 s CPU per 240 s), so there is no fps, no spread and no tick. Evidence `target/evidence/build/opt31-attempt-20261020T2147Z.md`; one BLOCKERS row added.
+  Progress 2026-10-20T22:02Z: the stall is the window/GPU path only — `arena.exe --view-line 2040 600 8` printed its 600-tick view line and exited on the same box, while `--backend vulkan --frames 30` stalled exactly like dx12 (no receipt in 120 s, 100 % CPU, 45 cargo / 20 rustc). So OPT33 has no leg either. Same evidence file, addendum.
 - [ ] OPT32 ops: build-baseline promotion on the quiet box — rerun the
   OPT1 matrix back-to-back x2 (clean plus 4-crate touches x 3 profiles),
   single cargo, lanes halted, load <10%, root `target/`.

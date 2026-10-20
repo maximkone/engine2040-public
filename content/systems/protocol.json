@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "transport": "quic",
+  "tick_hz": 30,
+  "snapshot": {
+    "bytes_per_player_per_s": 900,
+    "max_players": 64,
+    "interest": "cell",
+    "delta": "field"
+  },
+  "messages": [
+    {
+      "id": 1,
+      "name": "join",
+      "dir": "c2s",
+      "rate_hz": 0,
+      "payload_bytes": 48,
+      "fields": ["token", "wire_version", "build_digest", "name_hash", "client_tick"],
+      "notes": "One-shot (rate 0) on the reliable QUIC stream. The server answers with roster. A build-digest or wire-version mismatch refuses loudly (lobby::BuildId, session::WIRE_VERSION = 1). Carries no position and no claim."
+    },
+    {
+      "id": 2,
+      "name": "roster",
+      "dir": "s2c",
+      "rate_hz": 0.2,
+      "payload_bytes": 40,
+      "fields": ["roster_seq", "player_count", "present_mask", "team_mask", "alive_mask", "join_leave_count"],
+      "notes": "Participant summary for the join: three 64-bit masks plus a sequence. Sent at join and at most once every 5 s as an idempotent refresh. The static per-slot detail (class, team) rides the roster update delta."
+    },
+    {
+      "id": 3,
+      "name": "move",
+      "dir": "c2s",
+      "rate_hz": 60,
+      "payload_bytes": 10,
+      "fields": ["tick", "seq", "move_x_q8", "move_z_q8", "buttons"],
+      "notes": "The input frame: intent only, never a position. 10 bytes is session::INPUT_BYTES; one packet carries a redundancy window of 3 frames (session::REDUNDANCY = 3). The server derives position, the client predicts only (client_predict)."
+    },
+    {
+      "id": 4,
+      "name": "cast",
+      "dir": "c2s",
+      "rate_hz": 10,
+      "payload_bytes": 6,
+      "fields": ["tick", "ability_id", "aim_q8"],
+      "notes": "Ability press intent (strike, engine shot, ordered build). The server adjudicates it against cooldown and range and owns the outcome; the client never asserts damage, cooldown or a hit."
+    },
+    {
+      "id": 5,
+      "name": "hit",
+      "dir": "s2c",
+      "rate_hz": 5,
+      "payload_bytes": 18,
+      "fields": ["tick", "attacker_slot", "target_slot", "damage", "cooldown_left", "flags"],
+      "notes": "Authoritative hit resolution for entities in the client interest cells. Damage and cooldown are server numbers; a client hit claim is never admitted, and a press outside the lag window is refused and counted (lagcomp::HitReceipt)."
+    },
+    {
+      "id": 6,
+      "name": "death",
+      "dir": "s2c",
+      "rate_hz": 0.5,
+      "payload_bytes": 24,
+      "fields": ["tick", "slot", "killer_slot", "cause", "respawn_tick", "match_hash"],
+      "notes": "Authoritative death event plus the checkpoint hash the client must match. A hash disagreement is counted and healed by resimulation from the last keyframe, never ignored (HASH-LAW)."
+    },
+    {
+      "id": 7,
+      "name": "capture tick",
+      "dir": "s2c",
+      "rate_hz": 2,
+      "payload_bytes": 12,
+      "fields": ["tick", "point_id", "holder_team", "progress_q8", "next_tick"],
+      "notes": "Capture point state. Only the server moves the progress and names the holder; the client renders it. Spec only: the shipped arena duel has no capture point yet."
+    },
+    {
+      "id": 8,
+      "name": "chat",
+      "dir": "c2s",
+      "rate_hz": 0.5,
+      "payload_bytes": 64,
+      "fields": ["channel", "sender_slot", "seq", "text"],
+      "notes": "Posted by the client on a reliable stream; the server fans the same 64-byte frame out to the room. Presentation only: chat, jitter and latency never enter a hash (HASH-LAW OUT). Spec only: no chat path ships yet."
+    },
+    {
+      "id": 9,
+      "name": "roster update",
+      "dir": "s2c",
+      "rate_hz": 10,
+      "payload_bytes": 48,
+      "fields": ["base_tick", "tick", "entity_count", "dx_mm", "dy_mm", "dz_mm", "yaw_ddeg", "hp_permille", "flags"],
+      "notes": "Field-delta batch for the entities in the client interest cell: up to 4 entities at 12 bytes (dx, dy, dz 16-bit mm deltas, yaw 16-bit decidegrees, hp 16-bit permille, flags). 10 Hz is one snapshot every 3 wire ticks, matching interest::SNAPSHOT_EVERY_TICKS = 6 sim ticks at 60 Hz. This is the authoritative position stream."
+    },
+    {
+      "id": 10,
+      "name": "fort build",
+      "dir": "c2s",
+      "rate_hz": 1,
+      "payload_bytes": 20,
+      "fields": ["tick", "structure_type", "cell_id", "rot_q8", "client_nonce"],
+      "notes": "Build order for a fort piece. The server checks cost, cooldown and placement, authors the structure and publishes the accepted id in the next window state frame; a refused order changes nothing. Spec only: no fort builder ships yet."
+    },
+    {
+      "id": 11,
+      "name": "window state",
+      "dir": "s2c",
+      "rate_hz": 2,
+      "payload_bytes": 16,
+      "fields": ["tick", "structure_id", "structure_type", "hp", "build_state", "open_q8"],
+      "notes": "Authoritative state of the fort and window structures in the client cell, one frame per structure and up to two per message. The accepted build result and any structure hp change ride here. Spec only: the shipped duel has no structures yet."
+    }
+  ],
+  "inputs": {"buffer_ms": 100, "rate_hz": 60, "client_predict": true},
+  "authority": {"server": "position,damage,cooldown,capture", "client": "prediction,animation"},
+  "anti_cheat": {"server_checks": ["speed", "cooldown", "rate"], "evidence": "replay"},
+  "reconnect": {"window_s": 30}
+}

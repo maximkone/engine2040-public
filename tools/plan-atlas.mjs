@@ -134,9 +134,13 @@ function usageFail(message) {
 // Single-flight plan file read: one read per filename, shared by the
 // text/words/crates/missing7 getters below. Cache key is the plan
 // filename; dir is the docs/plan dir for this index.
-export function planText(dir, f, cache = new Map()) {
-  if (!cache.has(f)) cache.set(f, readFileSync(join(dir, f), "utf8"));
-  return cache.get(f);
+// E51 (2026-10-20): the cache is module wide, so a caller that forgets to
+// pass one cannot make the tool read a plan file twice.
+export const planTextCache = new Map();
+export function planText(dir, f, cache = planTextCache) {
+  const key = `${dir}\u0000${f}`;
+  if (!cache.has(key)) cache.set(key, readFileSync(join(dir, f), "utf8"));
+  return cache.get(key);
 }
 
 // Shared index: one entry per docs/plan/*.md file on disk.

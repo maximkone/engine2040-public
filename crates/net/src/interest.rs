@@ -269,6 +269,297 @@ impl ScopeView {
     }
 }
 
+/// Range clause of one connection's subscription: the two rings in metres.
+/// A row inside `near_m` joins the result set at any bearing; a row inside
+/// `far_m` joins it when the view clause holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RangePredicate {
+    /// Near-ring radius in metres.
+    pub near_m: u32,
+    /// Far-ring radius in metres.
+    pub far_m: u32,
+}
+
+/// View clause of one connection's subscription: whether the far ring holds
+/// only rows ahead of the viewer (the near ring and combat rows are exempt).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ViewPredicate {
+    /// True when the far ring tests the facing hemisphere.
+    pub front_only: bool,
+}
+
+/// LOD clause of one connection's subscription: snapshot rates per ring.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LodPredicate {
+    /// Near-ring rate in Hz.
+    pub near_hz: u8,
+    /// Far-ring rate in Hz.
+    pub far_hz: u8,
+}
+
+/// One connection's typed subscription: range, view and LOD clauses plus the
+/// room scope and the per-client byte cap. [`Subscription::tuning`] hands the
+/// same clauses back to [`ConnectionInterest::select`] as one
+/// [`InterestCfg`], so tuning has a single owner and a per-connection
+/// subscription cannot drift from the bytes it authorizes. Integer fields
+/// only, no map, no clock: equal subscriptions push equal bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Subscription {
+    /// Distance clause.
+    pub range: RangePredicate,
+    /// Facing clause.
+    pub view: ViewPredicate,
+    /// Rate clause.
+    pub lod: LodPredicate,
+    /// Per-client cap in bytes/s.
+    pub cap_bps: u32,
+    /// Room scope mask (send-only, never sim).
+    pub rooms: u64,
+}
+
+impl Subscription {
+    /// Subscription whose clauses match `cfg` for a connection scoped to
+    /// `rooms`. The far ring starts view-gated, the siege rule.
+    #[must_use]
+    pub const fn from_cfg(cfg: &InterestCfg, rooms: u64) -> Self {
+        Self {
+            range: RangePredicate {
+                near_m: cfg.near_m,
+                far_m: cfg.far_m,
+            },
+            view: ViewPredicate { front_only: true },
+            lod: LodPredicate {
+                near_hz: cfg.near_hz,
+                far_hz: cfg.far_hz,
+            },
+            cap_bps: cfg.cap_bps,
+            rooms,
+        }
+    }
+
+    /// The flat tuning [`ConnectionInterest::select`] takes.
+    #[must_use]
+    pub const fn tuning(&self) -> InterestCfg {
+        InterestCfg {
+            near_m: self.range.near_m,
+            far_m: self.range.far_m,
+            near_hz: self.lod.near_hz,
+            far_hz: self.lod.far_hz,
+            cap_bps: self.cap_bps,
+        }
+    }
+
+    /// Replace the room scope mask (room gate on the result set).
+    pub const fn set_rooms(&mut self, rooms: u64) {
+        self.rooms = rooms;
+    }
+
+    /// Reject degenerate clauses loudly; the rules are [`InterestCfg`]'s.
+    pub const fn validate(&self) -> Result<(), InterestError> {
+        self.tuning().validate()
+    }
+
+    /// True when clean row `e` is in this connection's result set: in room
+    /// scope and near, or far and ahead when the view clause is on. A combat
+    /// row is never culled, but that rule belongs to `select`, not to the
+    /// clean result set this predicate names.
+    #[must_use]
+    pub fn matches(
+        &self,
+        e: &InterestEntity,
+        viewer_x_mm: i32,
+        viewer_z_mm: i32,
+        viewer_yaw_ddeg: i16,
+    ) -> bool {
+        if !room_in_scope(entity_room(e.id), self.rooms) {
+            return false;
+        }
+        let ring = ring_edges(&self.tuning());
+        let rel_x = i64::from(e.x_mm) - i64::from(viewer_x_mm);
+        let rel_z = i64::from(e.z_mm) - i64::from(viewer_z_mm);
+        let (dir_x, dir_z) = octant_dir(viewer_yaw_ddeg);
+        let front = !self.view.front_only || in_front(rel_x, rel_z, dir_x, dir_z);
+        relevancy(
+            dist2_mm(e.x_mm, e.z_mm, viewer_x_mm, viewer_z_mm),
+            ring.near2,
+            ring.far2,
+            front,
+            false,
+        ) != Relevancy::Culled
+    }
+}
+
+/// Wire bytes of one id tombstone: a left row is named, not carried.
+const ID_TOMBSTONE_BYTES: usize = 2;
+
+/// The row events one [`PredicateView::update`] found: ids that entered and
+/// left the result set. Empty on an unchanged tick, which is the common tick,
+/// so a still scene pushes nothing at all. Fixed size, no allocation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PredicateDelta {
+    /// Ids whose weight went 0 to 1.
+    pub entered: u32,
+    /// Ids whose weight went 1 to 0.
+    pub left: u32,
+    /// True when the span changed (roster swap): the whole set was replaced,
+    /// so `entered` and `left` carry the new and old counts.
+    pub resync: bool,
+}
+
+impl PredicateDelta {
+    /// True when the delta pushes nothing: no datagram is owed.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        !self.resync && self.entered == 0 && self.left == 0
+    }
+
+    /// Wire bytes the change-driven push costs: zero when empty, else one
+    /// header, a full row per entered id and an id tombstone per left id. A
+    /// full row on entry makes re-entry safe after a tombstone.
+    #[must_use]
+    pub fn push_bytes(&self) -> usize {
+        if self.is_empty() {
+            return 0;
+        }
+        let entered = usize::try_from(self.entered).unwrap_or(usize::MAX);
+        let left = usize::try_from(self.left).unwrap_or(usize::MAX);
+        DELTA_HEADER_LEN + entered * entity_cost_bytes(true, true, true) + left * ID_TOMBSTONE_BYTES
+    }
+}
+
+/// Change-driven result set of one connection's [`Subscription`]: bit `id`
+/// holds 1 while the predicate matches `id`, so `weight` is the client's clean
+/// row count. [`PredicateView::update`] returns only the row events since the
+/// last call, so the transport pushes a delta instead of the whole set.
+/// Fixed size, integer ops in ascending id order, so every machine builds the
+/// same set: the row-set digest is stable and hashable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PredicateView {
+    sub: Subscription,
+    len: usize,
+    weight: u32,
+    words: [u64; SCOPE_WORDS],
+}
+
+impl PredicateView {
+    /// Build the result set over `entities` for `sub` at one viewer pose.
+    /// One predicate call per entity, the same shape `select` pays.
+    pub fn rebuild(
+        sub: Subscription,
+        entities: &[InterestEntity],
+        viewer_x_mm: i32,
+        viewer_z_mm: i32,
+        viewer_yaw_ddeg: i16,
+    ) -> Result<Self, InterestError> {
+        let len = entities.len();
+        check_scope_len(len)?;
+        let mut words = [0u64; SCOPE_WORDS];
+        let mut weight = 0u32;
+        for (at, e) in entities.iter().enumerate() {
+            if sub.matches(e, viewer_x_mm, viewer_z_mm, viewer_yaw_ddeg) {
+                words[at / SCOPE_WORD_BITS] |= 1u64 << (at % SCOPE_WORD_BITS);
+                weight += 1;
+            }
+        }
+        Ok(Self {
+            sub,
+            len,
+            weight,
+            words,
+        })
+    }
+
+    /// Diff the roster against the held set: only row events come back, and an
+    /// unchanged roster returns an empty delta that pushes no bytes. A changed
+    /// span resyncs the whole set and says so; a bad span refuses.
+    pub fn update(
+        &mut self,
+        entities: &[InterestEntity],
+        viewer_x_mm: i32,
+        viewer_z_mm: i32,
+        viewer_yaw_ddeg: i16,
+    ) -> Result<PredicateDelta, InterestError> {
+        let fresh = Self::rebuild(
+            self.sub,
+            entities,
+            viewer_x_mm,
+            viewer_z_mm,
+            viewer_yaw_ddeg,
+        )?;
+        if fresh.len != self.len {
+            let delta = PredicateDelta {
+                entered: fresh.weight,
+                left: self.weight,
+                resync: true,
+            };
+            *self = fresh;
+            return Ok(delta);
+        }
+        let mut delta = PredicateDelta::default();
+        for (old, new) in self.words.iter().zip(fresh.words.iter()) {
+            let gain = new & !old;
+            let loss = old & !new;
+            delta.entered += gain.count_ones();
+            delta.left += loss.count_ones();
+        }
+        *self = fresh;
+        Ok(delta)
+    }
+
+    /// Subscription the set is held under.
+    #[must_use]
+    pub const fn subscription(&self) -> Subscription {
+        self.sub
+    }
+
+    /// Ids the set spans.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True when no id is in the set.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.weight == 0
+    }
+
+    /// Rows in the set.
+    #[must_use]
+    pub const fn weight(&self) -> u32 {
+        self.weight
+    }
+
+    /// True when `id` is in the set; ids outside the span are not.
+    #[must_use]
+    pub fn contains(&self, id: u32) -> bool {
+        let Ok(at) = usize::try_from(id) else {
+            return false;
+        };
+        at < self.len && self.words[at / SCOPE_WORD_BITS] & (1u64 << (at % SCOPE_WORD_BITS)) != 0
+    }
+
+    /// Canonical digest of set plus subscription: the clauses, the span, the
+    /// row count and every word, folded through `engine_core::hash::Fnv64` in
+    /// integer order. Equal views always digest equal.
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        let mut fold = Fnv64::new();
+        fold.write_u64(self.sub.rooms);
+        fold.write_u64(u64::from(self.sub.range.near_m));
+        fold.write_u64(u64::from(self.sub.range.far_m));
+        fold.write_u64(u64::from(self.sub.lod.near_hz));
+        fold.write_u64(u64::from(self.sub.lod.far_hz));
+        fold.write_u64(u64::from(self.sub.cap_bps));
+        fold.write_len(self.len);
+        fold.write_u64(u64::from(self.weight));
+        for word in &self.words {
+            fold.write_u64(*word);
+        }
+        fold.finish()
+    }
+}
+
 /// Relevancy of one entity to one viewer: distance ring plus view hemisphere.
 /// Combat-dirty entities are never culled; that is the no-desync rule.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1157,8 +1448,11 @@ pub fn ioq3_client_view(params: Ioq3ViewParams<'_>) -> Result<Ioq3ClientView, Ne
     if params.selected.is_empty() {
         return Err(NetError::BadState);
     }
-    if params.selected.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(NetError::BadState);
+    let mut order = SortedUnique::new();
+    for id in params.selected {
+        if !order.push(*id) {
+            return Err(NetError::BadState);
+        }
     }
     let mut slots = Vec::with_capacity(params.selected.len());
     for id in params.selected {
@@ -2036,6 +2330,335 @@ mod tests {
         let decoded = decode_delta(&encode_delta(&full, &baseline).expect("encode"), &baseline)
             .expect("decode");
         assert_eq!(decoded, full, "the shipped combat change must decode exact");
+    }
+
+    /// Rows in the ON26 soak: 64 viewers plus the ring-crossing walker.
+    const SOAK_ROWS: u32 = 65;
+    /// The walker row id (room 0, so the room-0 viewers can see it).
+    const SOAK_WALKER: u32 = 64;
+    /// Soak length in ticks (10 s at 60 Hz) and the tick combat starts on.
+    const SOAK_TICKS: u32 = 600;
+    /// Tick the combat row starts fighting on.
+    const SOAK_COMBAT_TICK: u32 = 300;
+
+    /// Walker z off the roster line: one leg runs 20 m to 140 m and back, so
+    /// every leg crosses the 32 m near ring (the membership event the push
+    /// proof needs) at 0.8 m per tick.
+    fn soak_walker_z(tick: u32) -> i32 {
+        let phase = i32::try_from(tick % 300).expect("phase fits");
+        let leg = if phase <= 150 { phase } else { 300 - phase };
+        -20_000 - leg * 800
+    }
+
+    /// The soak roster at `tick`: 64 bots one metre apart drifting east
+    /// together (relative poses hold, so only the walker and the combat row
+    /// change), entity 7 starts fighting at [`SOAK_COMBAT_TICK`].
+    fn soak_roster(tick: u32) -> Vec<InterestEntity> {
+        let drift = i32::try_from(tick).expect("tick fits") * 10;
+        (0..SOAK_ROWS)
+            .map(|id| InterestEntity {
+                id,
+                x_mm: i32::try_from(id).expect("id fits") * 1_000 + drift,
+                z_mm: if id == SOAK_WALKER {
+                    soak_walker_z(tick)
+                } else {
+                    0
+                },
+                combat: if id == 7 && tick >= SOAK_COMBAT_TICK {
+                    900
+                } else {
+                    1_000
+                },
+            })
+            .collect()
+    }
+
+    /// One ON26 soak arm: 64 viewers over the synthetic roster at 10 Hz.
+    /// Returns (pushed bytes, worst starve, worst combat gap in ticks, digest
+    /// fold). A subscribed arm holds a typed room-scoped [`Subscription`] per
+    /// viewer and adds its change-driven row events; the broadcast arm has
+    /// every room in scope and no subscription.
+    fn soak_subscription(cfg: &InterestCfg, subscribed: bool) -> (u64, u32, u32, u64) {
+        let base = soak_roster(0);
+        let mut conns = Vec::new();
+        let mut views = Vec::new();
+        for v in 0..64u32 {
+            let rooms = if subscribed {
+                room_mask(v % 8)
+            } else {
+                u64::MAX
+            };
+            let sub = Subscription::from_cfg(cfg, rooms);
+            let mut conn = ConnectionInterest::for_entities(v, SOAK_ROWS as usize).expect("conn");
+            conn.set_rooms(rooms);
+            conn.register_baseline(&base).expect("baseline");
+            let at = usize::try_from(v).expect("v fits usize");
+            views.push(PredicateView::rebuild(sub, &base, base[at].x_mm, 0, 0).expect("view"));
+            conns.push(conn);
+        }
+        let mut out = vec![0u32; SOAK_ROWS as usize];
+        let mut held7 = vec![1_000u32; 64];
+        let mut stale7 = vec![None::<u32>; 64];
+        let (mut bytes, mut starve, mut gap) = (0u64, 0u32, 0u32);
+        let mut fold = Fnv64::new();
+        for tick in (0..SOAK_TICKS).step_by(SNAPSHOT_EVERY_TICKS as usize) {
+            let entities = soak_roster(tick);
+            for (v, conn) in conns.iter_mut().enumerate() {
+                let viewer = u32::try_from(v).expect("v fits");
+                let report = conn
+                    .select(
+                        cfg,
+                        &entities,
+                        viewer,
+                        entities[v].x_mm,
+                        entities[v].z_mm,
+                        0,
+                        tick,
+                        SIEGE_BUDGET_BYTES,
+                        &mut out,
+                    )
+                    .expect("select");
+                let delta = views[v]
+                    .update(&entities, entities[v].x_mm, entities[v].z_mm, 0)
+                    .expect("delta");
+                bytes += u64::try_from(report.bytes + delta.push_bytes()).expect("bytes fit");
+                starve = starve.max(report.starve_seen);
+                if out[..report.selected].contains(&7) {
+                    held7[v] = entities[7].combat;
+                    stale7[v] = None;
+                } else if held7[v] != entities[7].combat {
+                    let since = *stale7[v].get_or_insert(tick);
+                    gap = gap.max(tick - since);
+                }
+                fold.write_u64(views[v].digest());
+                fold.write_u64(u64::try_from(report.selected).expect("selected fits"));
+            }
+        }
+        (bytes, starve, gap, fold.finish())
+    }
+
+    #[test]
+    fn subscription_typed_predicates_split_range_view_and_lod() {
+        let cfg = InterestCfg::default_siege();
+        let sub = Subscription::from_cfg(&cfg, room_mask(0));
+        assert_eq!(sub.tuning(), cfg, "clauses round-trip to the select tuning");
+        assert_eq!(sub.validate(), Ok(()));
+        assert_eq!(
+            sub.range,
+            RangePredicate {
+                near_m: 32,
+                far_m: 100
+            }
+        );
+        assert_eq!(
+            sub.lod,
+            LodPredicate {
+                near_hz: 10,
+                far_hz: 2
+            }
+        );
+        assert!(sub.view.front_only, "the siege far ring is view-gated");
+        let row = |id: u32, x: i32, z: i32| InterestEntity {
+            id,
+            x_mm: x,
+            z_mm: z,
+            combat: 1_000,
+        };
+        // Near ring: joins at any bearing (yaw 0 faces -x).
+        assert!(sub.matches(&row(8, 0, -20_000), 0, 0, 0));
+        assert!(sub.matches(&row(8, 20_000, 0), 0, 0, 0));
+        // Far ring: ahead joins, behind does not while the view clause is on.
+        assert!(sub.matches(&row(8, -60_000, 0), 0, 0, 0));
+        assert!(!sub.matches(&row(8, 60_000, 0), 0, 0, 0));
+        // Turning the view clause off takes the far row behind too.
+        let open = Subscription {
+            view: ViewPredicate { front_only: false },
+            ..sub
+        };
+        assert!(open.matches(&row(8, 60_000, 0), 0, 0, 0));
+        // Beyond the far ring nothing clean joins, whatever the bearing.
+        assert!(!sub.matches(&row(8, 200_000, 0), 0, 0, 0));
+        assert!(!open.matches(&row(8, 200_000, 0), 0, 0, 0));
+        // A row whose room is out of scope never joins.
+        assert!(!sub.matches(&row(1, 5_000, 0), 0, 0, 0));
+        // A re-pointed scope mask moves the gate with it.
+        let scoped = Subscription {
+            rooms: room_mask(1),
+            ..sub
+        };
+        assert!(scoped.matches(&row(1, 5_000, 0), 0, 0, 0));
+        // Bad clauses refuse with the flat tuning's error.
+        let bad = Subscription {
+            lod: LodPredicate {
+                near_hz: 10,
+                far_hz: 11,
+            },
+            ..sub
+        };
+        assert_eq!(bad.validate(), Err(InterestError::BadConfig));
+    }
+
+    #[test]
+    fn predicate_view_pushes_only_row_changes() {
+        let cfg = InterestCfg::default_siege();
+        let sub = Subscription::from_cfg(&cfg, room_mask(0) | room_mask(3));
+        let entities: Vec<InterestEntity> = (0..8)
+            .map(|id| InterestEntity {
+                id,
+                x_mm: i32::try_from(id).expect("id fits") * 1_000,
+                z_mm: 0,
+                combat: 1_000,
+            })
+            .collect();
+        let mut view = PredicateView::rebuild(sub, &entities, 0, 0, 0).expect("view");
+        assert_same_view(
+            PredicateView::rebuild(sub, &entities, 0, 0, 0).expect("again"),
+            view,
+        );
+        // Rooms 0 and 3 are in scope: ids 0 and 3, nothing else.
+        assert_eq!(view.weight(), 2);
+        assert!(view.contains(0) && view.contains(3) && !view.contains(1));
+        assert_eq!((view.len(), view.is_empty()), (8, false));
+        assert_eq!(view.subscription(), sub);
+        // Unchanged roster: empty delta, no bytes owed, set untouched.
+        let delta = view.update(&entities, 0, 0, 0).expect("no-op");
+        assert!(delta.is_empty());
+        assert_eq!(delta.push_bytes(), 0);
+        assert_eq!(
+            view.digest(),
+            PredicateView::rebuild(sub, &entities, 0, 0, 0)
+                .expect("rebuild")
+                .digest()
+        );
+        // Id 3 moves behind and beyond the far ring: it leaves the set, and
+        // the push is one header plus one id tombstone.
+        let mut moved = entities.clone();
+        moved[3] = InterestEntity {
+            x_mm: 300_000,
+            ..moved[3]
+        };
+        let digest_before = view.digest();
+        let delta = view.update(&moved, 0, 0, 0).expect("leave");
+        assert_eq!((delta.entered, delta.left), (0, 1));
+        assert!(!delta.resync);
+        assert_eq!(delta.push_bytes(), DELTA_HEADER_LEN + ID_TOMBSTONE_BYTES);
+        assert!(!view.contains(3));
+        assert!((view.weight(), view.digest()) != (2, digest_before));
+        assert_eq!(
+            view,
+            PredicateView::rebuild(sub, &moved, 0, 0, 0).expect("rebuild")
+        );
+        // It walks back inside the near ring: a full row is pushed again.
+        moved[3] = InterestEntity {
+            x_mm: 5_000,
+            ..moved[3]
+        };
+        let delta = view.update(&moved, 0, 0, 0).expect("enter");
+        assert_eq!((delta.entered, delta.left), (1, 0));
+        assert_eq!(
+            delta.push_bytes(),
+            DELTA_HEADER_LEN + entity_cost_bytes(true, true, true)
+        );
+        assert!(view.contains(3));
+        assert_eq!(view.weight(), 2);
+        // A roster swap resyncs the whole set and says so.
+        let smaller = moved[..7].to_vec();
+        let delta = view.update(&smaller, 0, 0, 0).expect("resync");
+        assert!(delta.resync);
+        assert_eq!((delta.entered, delta.left), (2, 2));
+        assert_eq!(view.len(), 7);
+        assert_eq!(
+            view,
+            PredicateView::rebuild(sub, &smaller, 0, 0, 0).expect("rebuild")
+        );
+        // Bad spans refuse loudly and leave the held set unchanged.
+        let held = view;
+        assert_eq!(
+            PredicateView::rebuild(sub, &[], 0, 0, 0).map(|_| ()),
+            Err(InterestError::EmptyEntities)
+        );
+        assert_eq!(view.update(&[], 0, 0, 0), Err(InterestError::EmptyEntities));
+        assert_eq!(view, held);
+        assert_eq!(
+            PredicateView::rebuild(sub, &vec![entities[0]; MAX_INTEREST_ENTITIES + 1], 0, 0, 0)
+                .map(|_| ()),
+            Err(InterestError::TooManyEntities {
+                got: MAX_INTEREST_ENTITIES + 1
+            })
+        );
+    }
+
+    #[test]
+    fn subscription_predicate_64_soak_beats_broadcast_3x() {
+        let interest = InterestCfg::default_siege();
+        let broadcast = InterestCfg {
+            near_m: 1_000_000,
+            far_m: 1_000_000,
+            near_hz: 10,
+            far_hz: 10,
+            cap_bps: 1_000_000,
+        };
+        broadcast.validate().expect("broadcast tuning is legal");
+        let interest_run = soak_subscription(&interest, true);
+        let broadcast_run = soak_subscription(&broadcast, false);
+        assert_eq!(
+            interest_run,
+            soak_subscription(&interest, true),
+            "the subscription arm must replay bit-identically"
+        );
+        assert_eq!(
+            broadcast_run,
+            soak_subscription(&broadcast, false),
+            "the broadcast arm must replay bit-identically"
+        );
+        let (interest_bytes, starve, gap, _) = interest_run;
+        let (broadcast_bytes, _, _, _) = broadcast_run;
+        assert!(interest_bytes > 0 && broadcast_bytes > 0);
+        // No combat row starves and no in-scope row goes stale past 500 ms.
+        assert!(
+            gap <= STARVE_TICKS,
+            "combat row stale {gap} ticks over the {STARVE_TICKS}-tick bar"
+        );
+        assert!(
+            starve <= STARVE_TICKS,
+            "worst starve {starve} ticks over the 500 ms bar {STARVE_TICKS}"
+        );
+        // Per-client rate over the soak, integer kbps x100 (never float).
+        let kbps_x100 = interest_bytes * 8 * 100 * TICK_HZ / (64 * u64::from(SOAK_TICKS) * 1_000);
+        assert!(
+            kbps_x100 <= ON9_CAP_KBPS_X100,
+            "client {kbps_x100} over the 12800 (128 kbps) cap"
+        );
+        let saving_x100 = broadcast_bytes * 100 / interest_bytes;
+        assert!(
+            saving_x100 >= 300,
+            "saving {saving_x100} under 300: broadcast {broadcast_bytes} vs interest {interest_bytes}"
+        );
+        // The walker crosses the near ring, so the push is a real delta and
+        // not a constant full set: viewer 56 shares the walker's room 0.
+        let sub = Subscription::from_cfg(&interest, room_mask(0));
+        let mut view = PredicateView::rebuild(sub, &soak_roster(0), 56_000, 0, 0).expect("view");
+        let (mut events, mut push_bytes) = (0u32, 0usize);
+        for tick in (0..SOAK_TICKS).step_by(SNAPSHOT_EVERY_TICKS as usize) {
+            let entities = soak_roster(tick);
+            let viewer_x = 56_000 + i32::try_from(tick).expect("tick fits") * 10;
+            let delta = view
+                .update(&entities, viewer_x, 0, 0)
+                .expect("walker delta");
+            events += delta.entered + delta.left;
+            push_bytes += delta.push_bytes();
+        }
+        assert!(
+            events >= 4,
+            "the soak must cross the near ring: {events} row events"
+        );
+        assert!(push_bytes >= 4 * (DELTA_HEADER_LEN + ID_TOMBSTONE_BYTES));
+    }
+
+    /// Bit-identical view check without `assert_eq!` printing 128 bytes.
+    fn assert_same_view(a: PredicateView, b: PredicateView) {
+        assert_eq!(a.digest(), b.digest(), "equal views digest equal");
+        assert_eq!(a.weight(), b.weight(), "equal views hold equal rows");
     }
 
     #[test]

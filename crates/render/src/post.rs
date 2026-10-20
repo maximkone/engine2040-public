@@ -180,7 +180,7 @@ mod upscale;
 pub use upscale::*;
 mod chain;
 pub use chain::*;
-mod auto_exposure;
+pub(crate) mod auto_exposure;
 pub use auto_exposure::*;
 mod graph;
 pub use graph::*;

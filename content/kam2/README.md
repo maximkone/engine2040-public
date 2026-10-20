@@ -3,10 +3,11 @@
 `buildings/` holds the five economy kinds as rendered atlases, each on its sim footprint:
 `house.warehouse` (3x3) and `house.farm`, `house.mill`, `house.bakery`, `house.woodcutter`
 (2x2). One yaw 45 deg off S, two rows (`finished`, `half_built`), native scale 50.6 px per
-kit cell. Receipt and rebuild proof: `buildings/README.md`.
+kit cell, and one 96x72 cameo per kind. Receipt and rebuild proof: `buildings/README.md`.
 
 `house/` is the first building: `house.cottage`, a Kenney Fantasy Town Kit cottage on a 2x2
-footprint, three states (finished, half-built, damaged) in one 130x390 atlas. Receipt and
+footprint, three states (finished, half-built, damaged) in one 226x678 atlas at 224 px cells,
+re-rendered at the set's native scale in ART3b and shipped with a 96x72 cameo. Receipt and
 numbers: `house/README.md`; source and licence: `house/source.json`.
 
 `unit.soldier.atlas.png` is the first real sprite sheet of the game: a Kenney Blocky

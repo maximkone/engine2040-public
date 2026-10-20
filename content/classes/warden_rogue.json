@@ -1,0 +1,159 @@
+{
+  "id": "warden_rogue",
+  "faction": "wardens",
+  "tier": 0,
+  "branch": null,
+  "role": "skirmisher",
+  "growth": {
+    "str": 1,
+    "dex": 1,
+    "con": 0,
+    "int": 0,
+    "wis": 0
+  },
+  "primary": [
+    "dex",
+    "str"
+  ],
+  "playstyle": "You are not the wall. You are the thing that appears behind the wall after it has already been broken.",
+  "abilities": [
+    {
+      "id": "scout_pulse",
+      "name": "Scout Pulse",
+      "tier": 0,
+      "kind": "utility",
+      "shape": "circle",
+      "range": 20,
+      "radius": 20,
+      "cast": 0,
+      "cooldown": 20,
+      "mana": 8,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "reveal"
+      ],
+      "notes": "A short pulse that reveals hidden enemies inside it. A third of a team has one; nobody else does."
+    },
+    {
+      "id": "quick_strike",
+      "name": "Quick Strike",
+      "tier": 0,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.2,
+      "radius": 0,
+      "cast": 0.3,
+      "cooldown": 2,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 24,
+        "scale": "dex"
+      },
+      "effects": [
+        "damage"
+      ],
+      "notes": "Fast, cheap, and the second half of every kill you make."
+    },
+    {
+      "id": "shade_step",
+      "name": "Shade Step",
+      "tier": 0,
+      "kind": "utility",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 18,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "move_speed",
+        "evade"
+      ],
+      "notes": "A short burst of speed with a dodge window. Gets you off a plate and onto a healer."
+    },
+    {
+      "id": "thrown_dust",
+      "name": "Thrown Dust",
+      "tier": 1,
+      "kind": "control",
+      "shape": "circle",
+      "range": 14,
+      "radius": 4,
+      "cast": 0.3,
+      "cooldown": 16,
+      "mana": 14,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "blind"
+      ],
+      "notes": "A cone of grit that makes a target miss for three seconds."
+    },
+    {
+      "id": "bleeding_edge",
+      "name": "Bleeding Edge",
+      "tier": 2,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.4,
+      "radius": 0,
+      "cast": 0.4,
+      "cooldown": 6,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 40,
+        "scale": "dex"
+      },
+      "effects": [
+        "damage",
+        "dot"
+      ],
+      "notes": "A wound that keeps working after you have moved on. The class does not have burst, it has patience."
+    },
+    {
+      "id": "shadow_lunge",
+      "name": "Shadow Lunge",
+      "tier": 4,
+      "kind": "melee",
+      "shape": "line",
+      "range": 8,
+      "radius": 0,
+      "cast": 0.5,
+      "cooldown": 12,
+      "mana": 20,
+      "telegraph": "line",
+      "damage": {
+        "base": 66,
+        "scale": "dex"
+      },
+      "effects": [
+        "damage",
+        "dash"
+      ],
+      "notes": "A long lunge that crosses a gap and hits everything on the way. Expensive, and you will be seen doing it."
+    }
+  ],
+  "loadout": {
+    "weapon": "short_sword",
+    "offhand": null
+  },
+  "counters": [
+    "warden_cleric",
+    "warden_priest"
+  ],
+  "weakness": "Dies to anything that can reach you. No armour, no shield."
+}

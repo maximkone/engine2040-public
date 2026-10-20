@@ -1,0 +1,1 @@
+{"name":"wardens_light","height_m":1.86,"heads":7.5,"shoulder_span":0.4,"torso_depth":0.22,"chest_w":0.33,"waist_w":0.26,"hip_w":0.31,"leg_len":0.9,"arm_len":0.8,"hand":0.17,"head_size":0.21,"bulk":0.85,"stance_deg":6,"attachments":[{"kind":"quiver","side":"b","length":0.55,"radius":0.09,"angle_deg":0},{"kind":"bow","side":"l","length":1.35,"radius":0.03,"angle_deg":0}]}

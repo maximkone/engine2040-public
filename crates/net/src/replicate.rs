@@ -36,6 +36,7 @@ use crate::session::{
     NetError, KIND_SNAPSHOT, MAX_PACKET_BYTES, SNAPSHOT_HEADER_LEN, SNAPSHOT_REPLICATE_BIT,
     WIRE_MAGIC, WIRE_VERSION,
 };
+use crate::validate::SortedUnique;
 use engine_core::Fnv64;
 
 /// Wire version accepted by [`decode_message`]; anything else refuses.
@@ -781,19 +782,17 @@ fn validate_message(message: &ReplicationMessage) -> Result<(), ReplicateError> 
             return Err(ReplicateError::TooManyEntities(section));
         }
     }
-    let mut prev: Option<u32> = None;
+    let mut spawns = SortedUnique::new();
     for spawn in &message.spawns {
-        if prev.is_some_and(|id| spawn.entity.0 <= id) {
+        if !spawns.push(spawn.entity.0) {
             return Err(ReplicateError::DuplicateEntity(spawn.entity.0));
         }
-        prev = Some(spawn.entity.0);
     }
-    prev = None;
+    let mut updates = SortedUnique::new();
     for update in &message.updates {
-        if prev.is_some_and(|id| update.entity.0 <= id) {
+        if !updates.push(update.entity.0) {
             return Err(ReplicateError::DuplicateEntity(update.entity.0));
         }
-        prev = Some(update.entity.0);
         if update.mask == 0 || update.mask & !MASK_ALL != 0 {
             return Err(ReplicateError::BadMask(update.mask));
         }
@@ -803,12 +802,11 @@ fn validate_message(message: &ReplicationMessage) -> Result<(), ReplicateError> 
             return Err(ReplicateError::BadMask(update.mask));
         }
     }
-    prev = None;
+    let mut despawns = SortedUnique::new();
     for entity in &message.despawns {
-        if prev.is_some_and(|id| entity.0 <= id) {
+        if !despawns.push(entity.0) {
             return Err(ReplicateError::DuplicateEntity(entity.0));
         }
-        prev = Some(entity.0);
     }
     Ok(())
 }

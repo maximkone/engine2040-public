@@ -19,6 +19,11 @@ use super::timing::PassesTimed;
 /// fog submit us, gtao passes, gtao validation errors, gtao submit us.
 pub(super) type FogRows = (u32, u32, u64, u32, u32, u64);
 
+/// The frame time the live meter assumes: the nominal 60 frames a second.
+/// The meter never reads a wall clock, so a replay and a capture adapt
+/// the same way. Units seconds.
+pub(crate) const AUTO_LIVE_DT_S: f32 = 1.0 / 60.0;
+
 /// Where a window-path frame blit lands.
 #[derive(Clone, Copy)]
 pub(super) enum LiveSink<'a> {
@@ -139,6 +144,13 @@ pub(super) const LIVE_BLOOM_KNEE: f32 = 0.5;
 /// Units bytes. The neutral uniform the targets carry is zero there,
 /// so writing `0.0` keeps today's frame bit-identical.
 const LIVE_BLOOM_FLAG_OFFSET: u64 = 20;
+
+/// Byte offset of the camera exposure inside the blit fog uniform
+/// (`FogU::exposure`). Owner live, consumer `present_frame_live` below.
+/// Units bytes. The neutral uniform the targets carry holds 1.0 there, so a
+/// meter that is off (or has not landed its first histogram) leaves the
+/// frame exactly as it was.
+const LIVE_EXPOSURE_OFFSET: u64 = 24;
 
 /// Live bloom max-luma feed for one frame: CPU mirror of the forward HDR
 /// peak from the draw list (brightest base-color channel times exposure
@@ -519,6 +531,33 @@ impl Presenter {
                 .resize((slot + 1) * MATERIAL_STRIDE, 0);
         }
         Ok((cam_u.to_array(), light_u.to_array()))
+    }
+
+    /// The auto-exposure meter step of one frame: the histogram of the
+    /// frame before this one lands here (the readback is one frame late),
+    /// the state adapts toward the key, and the stops ride the next
+    /// frame's draws. A frame whose map has not landed keeps the stops it
+    /// had; the meter never guesses.
+    pub(super) fn auto_exposure_meter_step(&mut self) -> Result<(), PresentError> {
+        if !self.auto_exp_enabled {
+            return Ok(());
+        }
+        let Some(hist) = self.auto_exp_gpu.take_ready()? else {
+            return Ok(());
+        };
+        self.auto_exp_hist = Some(hist);
+        self.auto_exp_state.tick_hist(&hist, AUTO_LIVE_DT_S)?;
+        Ok(())
+    }
+
+    /// The linear multiplier of the adapted stops: 1.0 while the meter is
+    /// off, so a frame without a meter is exactly the frame the caller
+    /// staged.
+    pub(crate) fn auto_exposure_mult(&self) -> f32 {
+        if !self.auto_exp_enabled {
+            return 1.0;
+        }
+        self.auto_exp_state.mult()
     }
 
     /// After-blit overlay draw for staged HP bars: one textured-quad draw
@@ -1158,6 +1197,11 @@ impl Presenter {
         let frame = effective_camera(list, render_w, render_h)?;
         let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
         let order = Self::frame_draw_order(list, &mut order_buf);
+        // The meter step runs before the frame is staged: the histogram
+        // of the frame before this one lands here (the readback is one
+        // frame late), and the stops it holds ride the blit exposure of
+        // this frame.
+        self.auto_exposure_meter_step()?;
         let (cam_bytes, light_bytes) =
             self.stage_frame_with_camera(list, &frame, frame.built_view_proj, order)?;
         self.frame_waits = FrameWaits::default();
@@ -1213,6 +1257,9 @@ impl Presenter {
         // one pass and closes on it, so the AO upload, blit and overlay never
         // bill to the `ibl` column.
         let forward_ibl_ms: f64;
+        // True when the meter dispatch of this frame went into the
+        // encoder; the map of its bins starts after the submit.
+        let histogram_dispatched: bool;
         {
             let targets = self
                 .targets
@@ -1300,6 +1347,14 @@ impl Presenter {
                 LIVE_BLOOM_FLAG_OFFSET,
                 &bloom_flag.to_le_bytes(),
             );
+            // GS44: the one camera exposure of the frame, applied by the
+            // blit before the tone map. The meter is one frame late and
+            // fail-closed, so this writes 1.0 until a histogram lands.
+            self.queue.write_buffer(
+                &targets.fog_col_buf,
+                LIVE_EXPOSURE_OFFSET,
+                &self.auto_exposure_mult().to_le_bytes(),
+            );
             self.encode_blit(
                 &mut enc,
                 &targets.blit_bind,
@@ -1354,7 +1409,27 @@ impl Presenter {
         // so the live frame is bound; the bake verdict comes from the live bake.
         let bake_lit = crate::ibl::bake_has_light(&self.ibl_bake);
         let ibl = live_ibl_for_frame(true, bake_lit, forward_ibl_ms, render_w, render_h);
+        // The meter: one compute dispatch over the HDR target the forward
+        // wrote, into the 64 log-luma bins. The blit applies the
+        // exposure, so the target still holds pre-exposure radiance:
+        // the meter reads the scene, not the exposed frame.
+        if self.auto_exp_enabled {
+            let hdr_view = self
+                .targets
+                .as_ref()
+                .map(|targets| targets.hdr_view.clone());
+            if let Some(hdr_view) = hdr_view {
+                histogram_dispatched = self
+                    .auto_exp_gpu
+                    .encode(&mut enc, &hdr_view, render_w, render_h);
+            }
+        }
         self.queue.submit(Some(enc.finish()));
+        if histogram_dispatched {
+            // The map of the bins is picked up by the frame after this
+            // one: the live frame never waits on the GPU.
+            self.auto_exp_gpu.begin_map();
+        }
         // The present call is patched in by `present_frame` on the surface
         // path; the twin never makes one.
         super::frame::record_live_wall_split(super::frame::LiveWallSplit {
@@ -2007,6 +2082,54 @@ mod live_bloom_glint_tests {
             }
         }
         presenter.set_bloom_enabled(false);
+    }
+
+    #[test]
+    fn the_meter_adapts_the_exposure_and_the_blit_carries_it() {
+        // GS44 end to end: the GPU histogram of the HDR target lands one
+        // frame late, the meter adapts the stops, and the next frame's blit
+        // carries the multiplier. Fail-closed: before the first histogram
+        // the multiplier is exactly 1.0, so no frame moves by accident.
+        let Some(mut presenter) = init_or_skip("meter_adapts_exposure") else {
+            return;
+        };
+        let _held = super::HALF_RES_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        presenter
+            .upload_mesh(glint_key(), &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(SIDE, SIDE).expect("valid size applies");
+        presenter.set_bloom_enabled(false);
+        presenter.set_auto_exposure_enabled(true);
+        assert_eq!(
+            presenter.auto_exposure_mult(),
+            1.0,
+            "no histogram yet: the meter never guesses"
+        );
+        let list = glint_list(GLINT_EXPOSURE);
+        let mut stops = Vec::new();
+        for _ in 0..6 {
+            let _ = render(&mut presenter, &list);
+            stops.push(presenter.auto_exposure_ev());
+        }
+        eprintln!("auto exposure stops: {stops:?}");
+        assert!(
+            presenter.auto_exposure_histogram().is_some(),
+            "the GPU histogram of the HDR target landed"
+        );
+        assert!(
+            stops.iter().all(|ev| ev.is_finite()),
+            "the stops stay finite: {stops:?}"
+        );
+        let mult = presenter.auto_exposure_mult();
+        assert!(
+            (mult - 1.0).abs() > 1e-4,
+            "the meter moved the exposure off neutral: {mult}"
+        );
+        // Off is exactly neutral again: the switch is the only effect.
+        presenter.set_auto_exposure_enabled(false);
+        assert_eq!(presenter.auto_exposure_mult(), 1.0, "off is 0 EV");
     }
 }
 

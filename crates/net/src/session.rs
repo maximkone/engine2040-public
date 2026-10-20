@@ -2445,12 +2445,12 @@ mod tests {
         );
         // Empty and oversize inputs never encode.
         assert_eq!(encode_input_compressed(7, &[]), Err(NetError::BadInput));
-        let many: Vec<FighterInput> = (0..17)
-            .map(|tick| slot_input(tick, 0, 0, 0, 0, 0))
+        let many: Vec<FighterInput> = (0..=MAX_INPUTS_PER_PACKET)
+            .map(|tick| slot_input(u32::try_from(tick).expect("tick fits"), 0, 0, 0, 0, 0))
             .collect();
         assert_eq!(
             encode_input_compressed(16, &many),
-            Err(NetError::TooManyInputs(17))
+            Err(NetError::TooManyInputs(MAX_INPUTS_PER_PACKET + 1))
         );
     }
 

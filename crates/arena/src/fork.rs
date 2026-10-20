@@ -676,9 +676,6 @@ impl ForkJob {
                 // stays empty; it still needs its reservation to build.
                 last_cues: Vec::with_capacity(MAX_ATTACK_STARTED_PER_TICK),
                 breaks: Vec::with_capacity(steps),
-                // Unrelated to the cap: the arena Sim grew a cuts log; a
-                // fork starts with an empty one, like breaks.
-                cuts: Vec::with_capacity(steps),
                 match_log: Vec::with_capacity(steps),
                 // Forks keep the observed match track live, matching the
                 // observer entry points (`run_match_events`).

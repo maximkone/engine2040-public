@@ -103,6 +103,7 @@ pub struct Sim {
     seq: u64,
     units: Vec<Unit>,
     shots: Vec<Shot>,
+    blocked: u32,
     next_unit: u32,
 }
 
@@ -119,6 +120,7 @@ impl Sim {
             seq: 0,
             units: Vec::new(),
             shots: Vec::new(),
+            blocked: 0,
             next_unit: 0,
         }
     }
@@ -156,6 +158,15 @@ impl Sim {
     #[must_use]
     pub fn shots(&self) -> &[Shot] {
         &self.shots
+    }
+
+    /// Tile entries that had to wait for a body over this match; a proof hook.
+    ///
+    /// The counter is not in the hash: it only records how often the tile rule made a
+    /// walker pause, and the paused walker's progress is already in the digest.
+    #[must_use]
+    pub const fn blocked_moves(&self) -> u32 {
+        self.blocked
     }
 
     /// Ticks played.
@@ -433,7 +444,8 @@ impl Sim {
                 }
             }
         }
-        step(self.tick, &self.map, &mut self.units, &mut self.shots);
+        let blocked = step(self.tick, &self.map, &mut self.units, &mut self.shots);
+        self.blocked = self.blocked.saturating_add(blocked);
     }
 
     fn land(&mut self) {
@@ -981,5 +993,101 @@ mod tests {
             .expect("the owner moves it");
         assert_eq!(sim.stock_of(1, Ware::Wood), 40, "side 1 paid nothing");
         assert_eq!(sim.stock_of(0, Ware::Wood), 39, "side 0 paid one wood");
+    }
+
+    #[test]
+    fn a_spawn_on_a_held_tile_is_refused() {
+        let mut sim = Sim::new(8, 8);
+        sim.apply(Command::SpawnUnit {
+            kind: crate::units::UnitKind::Worker,
+            side: 0,
+            x: 4,
+            y: 4,
+        })
+        .expect("the first body");
+        assert_eq!(
+            sim.apply(Command::SpawnUnit {
+                kind: crate::units::UnitKind::Worker,
+                side: 0,
+                x: 4,
+                y: 4,
+            }),
+            Err(Refusal::Occupied),
+            "the same side cannot stack either"
+        );
+        assert_eq!(
+            sim.apply_for(
+                1,
+                Command::SpawnUnit {
+                    kind: crate::units::UnitKind::Swordsman,
+                    side: 1,
+                    x: 4,
+                    y: 4,
+                }
+            ),
+            Err(Refusal::Occupied),
+            "no side stacks"
+        );
+        assert_eq!(sim.units().len(), 1, "the refusals changed nothing");
+        assert_eq!(sim.stock(Ware::Wood), 39, "only the first unit was paid");
+        assert_eq!(sim.stock_of(1, Ware::Wood), 40, "the other purse is whole");
+    }
+
+    #[test]
+    fn a_dead_unit_frees_its_tile_in_the_same_tick() {
+        let mut sim = Sim::new(10, 10);
+        sim.apply(Command::SpawnUnit {
+            kind: crate::units::UnitKind::Swordsman,
+            side: 0,
+            x: 2,
+            y: 2,
+        })
+        .expect("the swordsman");
+        sim.apply_for(
+            1,
+            Command::SpawnUnit {
+                kind: crate::units::UnitKind::Archer,
+                side: 1,
+                x: 3,
+                y: 2,
+            },
+        )
+        .expect("the archer");
+        sim.apply(Command::Attack { id: 0, target: 1 })
+            .expect("strike");
+        sim.apply_for(1, Command::Attack { id: 1, target: 0 })
+            .expect("strike back");
+        for _ in 0..20 {
+            sim.tick();
+        }
+        assert!(sim.unit(1).is_some(), "the archer stands after two hits");
+        assert_eq!(
+            sim.apply_for(
+                1,
+                Command::SpawnUnit {
+                    kind: crate::units::UnitKind::Worker,
+                    side: 1,
+                    x: 3,
+                    y: 2,
+                }
+            ),
+            Err(Refusal::Occupied),
+            "the living archer holds its tile"
+        );
+        sim.tick();
+        assert!(sim.unit(1).is_none(), "the third sword hit ends it");
+        assert_eq!(
+            sim.apply_for(
+                1,
+                Command::SpawnUnit {
+                    kind: crate::units::UnitKind::Worker,
+                    side: 1,
+                    x: 3,
+                    y: 2,
+                }
+            ),
+            Ok(()),
+            "the fallen archer frees its tile in the death tick"
+        );
     }
 }

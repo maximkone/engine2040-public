@@ -1,0 +1,201 @@
+{
+  "id": "warden_archer",
+  "faction": "wardens",
+  "tier": 1,
+  "branch": "warden_rogue",
+  "role": "ranged debuffer",
+  "growth": {"str": 1.5, "dex": 1.5, "con": 0, "int": 0, "wis": 0},
+  "primary": ["dex", "str"],
+  "playstyle": "Stay out of the melee ring, mark the front line, and keep the slow running until the warband arrives. The archer wins before it shoots: the fan shot is the payoff, the marks, the lines and the coat are the setup. Every arrow it lands takes something away, so the fight it wins is a fight it never had.",
+  "abilities": [
+    {
+      "id": "loose_arrow",
+      "name": "Loose Arrow",
+      "tier": 0,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 22,
+      "radius": 0,
+      "cast": 0.5,
+      "cooldown": 1.2,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {"base": 24, "scale": "dex"},
+      "effects": [],
+      "notes": "The basic shot, 22 m, 24 + 0.8 per DEX. It is the cheapest way to put a mark on a target and it costs no mana, so it is what the archer does while it waits for the line to open."
+    },
+    {
+      "id": "veil_coat",
+      "name": "Veil Coat",
+      "tier": 0,
+      "kind": "stealth",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 1.0,
+      "cooldown": 20,
+      "mana": 10,
+      "telegraph": "none",
+      "damage": {"base": 0, "scale": "none"},
+      "effects": [
+        {"type": "stealth", "duration_s": 12, "concealment": 0.45, "detect_range_m": 21, "speed_mult": 0.8}
+      ],
+      "notes": "Wear the coat for 12 s. Inside it the observer fill rate is x0.55, the effective detection range is 21 m, and the move speed is 4.0 of 5.0 m/s. The coat ends the moment the archer deals damage with any shot, so it is a way in and a way out, never a way to fight from."
+    },
+    {
+      "id": "quarry_marks",
+      "name": "Quarry Marks",
+      "tier": 0,
+      "kind": "utility",
+      "shape": "self",
+      "range": 0,
+      "radius": 20,
+      "cast": 0.8,
+      "cooldown": 18,
+      "mana": 8,
+      "telegraph": "none",
+      "damage": {"base": 0, "scale": "none"},
+      "effects": [
+        {"type": "reveal", "radius_m": 20, "duration_s": 4}
+      ],
+      "notes": "Paints a 20 m ring around the archer for 4 s. Any cloaked or hidden target inside is revealed for that time, with its distance and direction on the HUD. A reveal is not a detection aura: it fills no observer meter, it only takes the cloak off."
+    },
+    {
+      "id": "fan_shot",
+      "name": "Fan Shot",
+      "tier": 1,
+      "kind": "projectile",
+      "shape": "cone",
+      "range": 20,
+      "radius": 20,
+      "cast": 0.6,
+      "cooldown": 9,
+      "mana": 18,
+      "telegraph": "cone",
+      "damage": {"base": 18, "scale": "dex"},
+      "effects": [
+        {"type": "slow", "amount_pct": 30, "duration_s": 2.5},
+        {"type": "weaken", "amount_pct": 8, "duration_s": 4}
+      ],
+      "notes": "Three arrows in a 40 degree cone at 20 m. The number on the ability is per arrow: 18 + 0.55 per DEX each, so the fan is three times that, 120 at DEX 40. Every arrow slows 30 percent for 2.5 s and weakens 8 percent for 4 s, and the slow and the weaken refresh instead of stacking. Fired out of Veil Coat it is 4 arrows and the coat ends on the shot."
+    },
+    {
+      "id": "binding_arrows",
+      "name": "Binding Arrows",
+      "tier": 1,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 18,
+      "radius": 0,
+      "cast": 0.8,
+      "cooldown": 12,
+      "mana": 16,
+      "telegraph": "none",
+      "damage": {"base": 20, "scale": "dex"},
+      "effects": [
+        {"type": "slow", "amount_pct": 55, "duration_s": 4},
+        {"type": "weaken", "amount_pct": 12, "duration_s": 6}
+      ],
+      "notes": "The heavy shot on one target: 20 + 0.7 per DEX, and the target moves 55 percent slower for 4 s and strikes 12 percent weaker for 6 s. This is the arrow that holds a warband out of the ring long enough for the rest of the warband to come."
+    },
+    {
+      "id": "veil_line",
+      "name": "Veil Line",
+      "tier": 2,
+      "kind": "utility",
+      "shape": "line",
+      "range": 18,
+      "radius": 2,
+      "cast": 1.0,
+      "cooldown": 25,
+      "mana": 20,
+      "telegraph": "line",
+      "damage": {"base": 0, "scale": "none"},
+      "effects": [
+        {"type": "conceal_zone", "duration_s": 12, "concealment": 0.6, "width_m": 4}
+      ],
+      "notes": "Lays an 18 m long dust line with a 2 m radius, so it is 4 m wide, and it lives 12 s. Anyone standing in it loses 60 percent of the fill rate against observers on the far side, and observers standing in it lose 60 percent against anyone outside. A screen for one side and a blindfold for the other. The 4 m width means a single body can break the line, which is the whole point of the shape."
+    },
+    {
+      "id": "volley",
+      "name": "Volley",
+      "tier": 2,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 24,
+      "radius": 4,
+      "cast": 1.2,
+      "cooldown": 16,
+      "mana": 22,
+      "telegraph": "circle",
+      "damage": {"base": 20, "scale": "dex"},
+      "effects": [
+        {"type": "slow", "amount_pct": 25, "duration_s": 2}
+      ],
+      "notes": "Four arrows fall on a 4 m circle chosen up to 24 m away, 20 + 0.45 per DEX each, so 38 an arrow and 152 in total at DEX 40. The circle is drawn on the ground for 1.2 s before the arrows land, and everything caught inside is 25 percent slower for 2 s. The slow, not the damage, is what the volley is for."
+    },
+    {
+      "id": "hunter_mark",
+      "name": "Hunter Mark",
+      "tier": 3,
+      "kind": "debuff",
+      "shape": "target",
+      "range": 20,
+      "radius": 0,
+      "cast": 0.7,
+      "cooldown": 14,
+      "mana": 18,
+      "telegraph": "none",
+      "damage": {"base": 0, "scale": "none"},
+      "effects": [
+        {"type": "mark", "duration_s": 10, "damage_taken_pct": 25, "slow_pct": 20, "slow_duration_s": 3}
+      ],
+      "notes": "Paints one target at 20 m for 10 s. It takes 25 percent more damage from the archer shots and every arrow that lands on it also slows it 20 percent for 3 s. The mark is shown on the HUD for everyone in the warband, so the whole group can aim at it."
+    },
+    {
+      "id": "longshot",
+      "name": "Longshot",
+      "tier": 3,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 30,
+      "radius": 0,
+      "cast": 1.0,
+      "cooldown": 10,
+      "mana": 20,
+      "telegraph": "line",
+      "damage": {"base": 70, "scale": "dex"},
+      "effects": [],
+      "notes": "One heavy arrow to 30 m, 70 + 1.2 per DEX. The archer stands still for 1.0 s and the shot draws a thin line, so anyone standing on that line can see it coming and step off it. It pierces nobody. The line is the tell and the tell is the price."
+    },
+    {
+      "id": "storm_of_arrows",
+      "name": "Storm of Arrows",
+      "tier": 4,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 28,
+      "radius": 6,
+      "cast": 1.5,
+      "cooldown": 45,
+      "mana": 30,
+      "telegraph": "circle",
+      "damage": {"base": 12, "scale": "dex"},
+      "effects": [
+        {"type": "slow", "amount_pct": 40, "duration_s": 3}
+      ],
+      "notes": "Twelve arrows over 3 s onto a 6 m circle up to 28 m away, 12 + 0.3 per DEX each, so 24 an arrow and 288 in total at DEX 40. Everything caught is 40 percent slower for 3 s. The ground telegraph runs 1.5 s. The capstone is a slow and a statement, not a nuke."
+    }
+  ],
+  "loadout": {
+    "weapon": "short bow, one handed",
+    "offhand": "free, a quiver of marked arrows or a charm, never a shield"
+  },
+  "counters": [
+    "warden_warrior: the dual-wield runner has to cross 10 m to reach the archer, and every step of it is a slowed step",
+    "ashkin_templar: the frontal guard answers melee, not a marked target standing at 20 m",
+    "warden_sorcerer: the ground targeted cast is a stationary circle, and the volley lands on a circle",
+    "warden_mage: the magic cell has to be held, and the binding arrows make the holder stop moving"
+  ],
+  "weakness": "warden_fighter and ashkin_combatant close 6 m before the first arrow lands, and the archer has no answer under 8 m. A net from warden_fighter or a charge from ashkin_attacker ends the fight outright. warden_defender and ashkin_templar eat the arrows behind a shield arc, so the archer needs a different mark for them. The class has no escape tool and only 12 m of cloak, so a sustained chase beats it every time."
+}

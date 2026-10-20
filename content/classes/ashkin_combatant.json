@@ -1,0 +1,158 @@
+{
+  "id": "ashkin_combatant",
+  "faction": "ashkin",
+  "tier": 0,
+  "branch": null,
+  "role": "bruiser",
+  "growth": {
+    "str": 1,
+    "dex": 0,
+    "con": 0,
+    "int": 0,
+    "wis": 0
+  },
+  "primary": [
+    "str"
+  ],
+  "playstyle": "You walk into the room and the room gets smaller. Everything else is detail.",
+  "abilities": [
+    {
+      "id": "safeguard",
+      "name": "Safeguard",
+      "tier": 0,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 20,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "damage_reduction"
+      ],
+      "notes": "A bracing stance that blunts what lands on you."
+    },
+    {
+      "id": "heavy_blow",
+      "name": "Heavy Blow",
+      "tier": 0,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.8,
+      "radius": 0,
+      "cast": 0.6,
+      "cooldown": 3,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 32,
+        "scale": "str"
+      },
+      "effects": [
+        "damage"
+      ],
+      "notes": "A slow swing with a lot behind it."
+    },
+    {
+      "id": "brawling_roar",
+      "name": "Brawling Roar",
+      "tier": 1,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 30,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "damage"
+      ],
+      "notes": "A roar that makes your next three hits land harder."
+    },
+    {
+      "id": "iron_tether",
+      "name": "Iron Tether",
+      "tier": 2,
+      "kind": "control",
+      "shape": "single",
+      "range": 9,
+      "radius": 0,
+      "cast": 0.4,
+      "cooldown": 16,
+      "mana": 14,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "root",
+        "drag"
+      ],
+      "notes": "A hook that drags an enemy to you and holds them there."
+    },
+    {
+      "id": "spike_burst",
+      "name": "Spike Burst",
+      "tier": 3,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 4,
+      "radius": 4,
+      "cast": 0.5,
+      "cooldown": 12,
+      "mana": 0,
+      "telegraph": "circle",
+      "damage": {
+        "base": 58,
+        "scale": "str"
+      },
+      "effects": [
+        "damage",
+        "knockback"
+      ],
+      "notes": "An eruption around your feet that throws people off you."
+    },
+    {
+      "id": "fury_cycle",
+      "name": "Fury Cycle",
+      "tier": 4,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 90,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "damage",
+        "move_speed"
+      ],
+      "notes": "A cycle of rage that trades your safety for a great deal of damage."
+    }
+  ],
+  "loadout": {
+    "weapon": "great_axe",
+    "offhand": null
+  },
+  "counters": [
+    "warden_rogue",
+    "warden_archer"
+  ],
+  "weakness": "You are big and slow and everything clever walks around you."
+}

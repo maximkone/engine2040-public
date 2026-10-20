@@ -1,0 +1,157 @@
+{
+  "id": "warden_acolyte",
+  "faction": "wardens",
+  "tier": 0,
+  "branch": null,
+  "role": "medic",
+  "growth": {
+    "str": 0,
+    "dex": 0,
+    "con": 1,
+    "int": 0,
+    "wis": 1
+  },
+  "primary": [
+    "wis",
+    "con"
+  ],
+  "playstyle": "You do not win fights. You keep the people who win them standing, and you are the reason the other side kills you first.",
+  "abilities": [
+    {
+      "id": "field_dressing",
+      "name": "Field Dressing",
+      "tier": 0,
+      "kind": "heal",
+      "shape": "single",
+      "range": 8,
+      "radius": 0,
+      "cast": 1,
+      "cooldown": 5,
+      "mana": 8,
+      "telegraph": "none",
+      "damage": {
+        "base": 70,
+        "scale": "wis"
+      },
+      "effects": [
+        "heal"
+      ],
+      "notes": "A single heal that stops at missing health. The first thing you learn and the last thing you stop doing."
+    },
+    {
+      "id": "courage_verse",
+      "name": "Courage Verse",
+      "tier": 0,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 10,
+      "radius": 10,
+      "cast": 0,
+      "cooldown": 24,
+      "mana": 16,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "attack_speed"
+      ],
+      "notes": "A short rally that raises how fast your party swings."
+    },
+    {
+      "id": "cleanse",
+      "name": "Cleanse",
+      "tier": 1,
+      "kind": "utility",
+      "shape": "single",
+      "range": 8,
+      "radius": 0,
+      "cast": 0.5,
+      "cooldown": 16,
+      "mana": 18,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "cleanse"
+      ],
+      "notes": "Removes one debuff from one ally. The most valuable button in a war window."
+    },
+    {
+      "id": "group_chant",
+      "name": "Group Chant",
+      "tier": 2,
+      "kind": "heal",
+      "shape": "circle",
+      "range": 8,
+      "radius": 8,
+      "cast": 1,
+      "cooldown": 14,
+      "mana": 30,
+      "telegraph": "none",
+      "damage": {
+        "base": 18,
+        "scale": "wis"
+      },
+      "effects": [
+        "heal"
+      ],
+      "notes": "A steady chant that ticks healing to everyone standing in it."
+    },
+    {
+      "id": "sanctuary",
+      "name": "Sanctuary",
+      "tier": 3,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 6,
+      "radius": 6,
+      "cast": 0,
+      "cooldown": 40,
+      "mana": 40,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "damage_reduction"
+      ],
+      "notes": "A bubble of safety for eight seconds. It is a wall you can carry."
+    },
+    {
+      "id": "last_chant",
+      "name": "Last Chant",
+      "tier": 4,
+      "kind": "heal",
+      "shape": "circle",
+      "range": 10,
+      "radius": 10,
+      "cast": 1.5,
+      "cooldown": 60,
+      "mana": 70,
+      "telegraph": "charge",
+      "damage": {
+        "base": 40,
+        "scale": "wis"
+      },
+      "effects": [
+        "heal",
+        "cleanse"
+      ],
+      "notes": "A long, loud, charged chant that heals a group and strips what is on them."
+    }
+  ],
+  "loadout": {
+    "weapon": "mace",
+    "offhand": "tome"
+  },
+  "counters": [
+    "warden_sorcerer",
+    "ashkin_rune"
+  ],
+  "weakness": "You cannot fight back. If the fight reaches you, the fight wins."
+}

@@ -6,6 +6,8 @@
 //!
 //! The receipt hash moved with the side split (SIM1): `82295fecdeefed91` before,
 //! `9da53332e624d075` now, because side 1's own starting stock is in the digest.
+//! SIM2 left it unchanged: `9da53332e624d075` -> `9da53332e624d075`, because the mayor
+//! fields swordsmen but never walks one.
 
 use kam2_sim::{HouseKind, Mayor, Sim, Ware};
 

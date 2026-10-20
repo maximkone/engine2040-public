@@ -26,6 +26,10 @@ struct HistU {
 
 const LOG_MIN_EV: f32 = -12.0;
 const LOG_MAX_EV: f32 = 8.0;
+// Bin width in stops: 20 stops over 64 bins, exactly 0.3125. The CPU
+// oracle divides by the same constant, so one sample lands in the same
+// bin on both sides.
+const BIN_WIDTH_EV: f32 = 0.3125;
 const BIN_COUNT: f32 = 64.0;
 
 @compute @workgroup_size(8, 8, 1)
@@ -41,7 +45,7 @@ fn hist_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (luma > 0.0) {
         ev = clamp(log2(luma), LOG_MIN_EV, LOG_MAX_EV);
     }
-    let scaled = (ev - LOG_MIN_EV) / (LOG_MAX_EV - LOG_MIN_EV) * BIN_COUNT;
+    let scaled = (ev - LOG_MIN_EV) / BIN_WIDTH_EV;
     let bin = u32(clamp(scaled, 0.0, BIN_COUNT - 1.0));
     atomicAdd(&bins[bin], 1u);
 }

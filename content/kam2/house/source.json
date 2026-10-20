@@ -57,53 +57,80 @@
     "engine": "cycles",
     "device": "CPU",
     "samples": 48,
-    "size": 128,
+    "size": 224,
     "pitch_deg": 26.5651,
-    "yaw_used": "45 deg off the S axis (ring frame 01 of 8, camera at the building's south-east corner, south and east faces visible); buildings do not rotate",
-    "ortho_scale_world_units": 3.2,
-    "px_per_kit_cell": 40.0,
-    "ground_px": 95,
+    "yaw_used": "135 deg = one yaw 45 deg off the S axis (camera at the building's south-east corner, south and east faces visible); buildings do not rotate",
+    "yaw_flag": 135,
+    "single_yaw": true,
+    "ortho_scale_world_units": 4.4269,
+    "px_per_kit_cell": 50.6,
+    "ground_px": 168,
     "transparent": true,
     "contact_shadow": true,
     "lights": "style-lock key #FFE8C4 3.2, fill #6E86A8 0.55, ambient #3A4250 0.5, screen-locked",
     "material_override": "roof pieces use one flat #A33B2E material (style-lock roof red); every other kit material is as authored",
-    "command": "blender --background --factory-startup --python tools/kam2/render_frames.py -- --scene <state>.glb --out <dir> --frames 8 --size 128 --span 3.2 --ground-px 95 --samples 48"
+    "command": "blender --background --factory-startup --python tools/kam2/render_frames.py -- --scene <state>.glb --out <dir> --yaw 135 --size 224 --span 4.4269 --ground-px 168 --pivot-x 1 --pivot-y 1 --samples 48"
   },
   "scale": {
     "style_lock_tile_px": [64, 32],
-    "native_scale_px_per_cell": 50.6,
-    "used_px_per_cell": 40.0,
-    "factor_vs_native": 0.79,
-    "footprint_diamond_px": [101.2, 50.6],
-    "why": "the 2x2 footprint diamond is 128 px wide at native scale and the kit's roof eaves add 0.14 unit per side (2.14 units across), which needs 136 px: it cannot fit a 128 px cell, so the whole set is drawn at 0.79 of native and the factor is recorded here"
+    "native_px_per_kit_cell": 50.6,
+    "used_px_per_kit_cell": 50.6,
+    "factor_vs_native": 1,
+    "why": "one scale for the whole building set: 224 px cell at span 4.4269 world units = 50.6 px per kit cell = 50.6 px per tile, the same number the five kinds in content/kam2/buildings use. The kit's eaves add 0.14 unit per side (2.14 units = 108 px), so the house fits a 224 px cell with room for the contact shadow. The first pass drew it at 40 px per cell (0.79 of native) in a 128 px cell; that factor is gone."
   },
   "pivot": {
-    "px": [64, 95],
-    "meaning": "footprint centre on the ground plane (z 0); the front footprint edge lands on row 120, the sprite alpha reaches rows 25..122 and columns 3..124 of the 128 px cell",
-    "why": "a building anchors on its footprint centre; the front edge and the eaves are recorded above so a renderer can also y-sort on row 120"
+    "px": [112, 168],
+    "world": [1, 1, 0],
+    "meaning": "footprint centre on the ground plane (z 0); the sprite alpha reaches rows 81..201 and columns 36..187 of the 224 px cell, and the baked shadow ends on row 201"
   },
   "atlas": {
     "file": "house.cottage.atlas.png",
-    "size": [130, 390],
-    "bytes": 53718,
-    "cell": [128, 128],
+    "size": [226, 678],
+    "bytes": 75907,
+    "sha256": "b072c60322d579055f1fbe6425ddf86ecae04e2a638f191f1f25ff2667bd8f51",
+    "cell": [224, 224],
     "padding": 1,
     "rows": 3,
     "columns": 1,
     "rows_note": "row 0 finished, row 1 half_built, row 2 damaged; one facing each, buildings do not rotate",
-    "pack_command": "node tools/kam2/pack_atlas.mjs --in <frames> --out content/kam2/house --id house.cottage --kind building --facings 1 --anim finished:1:8:true --anim half_built:1:8:true --anim damaged:1:8:true --footprint 2x2 --pivot 64,95"
+    "pack_command": "node tools/kam2/pack_atlas.mjs --in <frames> --out content/kam2/house --id house.cottage --kind building --facings 1 --anim finished:1:8:true --anim half_built:1:8:true --anim damaged:1:8:true --footprint 2x2 --pivot 112,168 --cameo <frames>/cameo/frame_00.png --cameo-cell 96x72"
+  },
+  "cameo": {
+    "file": "house.cottage.cameo.png",
+    "id": "house.cottage.cameo",
+    "cell": [96, 72],
+    "size": [98, 74],
+    "padding": 1,
+    "pivot": [48, 52],
+    "bytes": 6400,
+    "sha256": "d172283a3bd066334a914cc2616c63002ad21e098a8f376c2d33f44354cce3f4",
+    "pitch_deg": 35,
+    "yaw_deg": 135,
+    "yaw_used": "135 deg = one yaw 45 deg off the S axis, the style-lock cameo yaw",
+    "transparent": true,
+    "command": "blender --background --factory-startup --python tools/kam2/render_frames.py -- --scene <kind>/finished.glb --out <dir> --yaw 135 --pitch 35 --size 96x72 --samples 48"
   },
   "source_frames": [
-    "final-finished/frame_01.png -> pack/state_00.png (row 0)",
-    "final-half_built/frame_01.png -> pack/state_01.png (row 1)",
-    "final-damaged/frame_01.png -> pack/state_02.png (row 2)"
+    "render/finished/frame_00.png -> pack/state_00.png (row 0)",
+    "render/half_built/frame_00.png -> pack/state_01.png (row 1)",
+    "render/damaged/frame_00.png -> pack/state_02.png (row 2)"
   ],
+  "states": {
+    "rows": [
+      "finished",
+      "half_built",
+      "damaged"
+    ],
+    "damaged": "rendered from its own assembled model (lower walls, caved roof, fallen chimney); the sim has no public damage field yet, so nothing selects row 2 at runtime"
+  },
   "notes": [
     "Kit palette kept except the roof. The kit ships a teal roof; the lock fixes roof red #A33B2E, so the four roof pieces carry one flat material in that colour. Walls, wood and stone keep the kit's own pastel colours, which sit lighter and less saturated than the lock ramps: an open item, not a silent change.",
-    "States are atlas rows of one id, not the separate ids the lock names for build stages (house.farm.stage2). One manifest had to carry the set for this first building; the runtime picks row 0, 1 or 2 from build progress.",
-    "The contact shadow is the renderer's baked ellipse (35% #1B1F24, 2 px along the sun). A footprint-filling building hides most of it, so it reads as a soft fringe at the base (alpha reaches row 122).",
+    "States are atlas rows of one id, not the separate ids the lock names for build stages (house.farm.stage2). One manifest carries the set; the runtime picks row 0, 1 or 2 from build progress.",
+    "The contact shadow is the renderer's baked ellipse (35% #1B1F24, 2 px along the sun). A footprint-filling building hides most of it, so it reads as a soft fringe at the base (alpha reaches row 201).",
     "fps 8 and loop true on each state row are placeholders the packer needs; the three states are single stills.",
-    "No team-colour mask pass for buildings yet, and no cameo (96x72, pitch 35) yet: both manifest fields stay null.",
+    "The cameo is the same finished model at the style-lock cameo angles (yaw 45 deg off S, pitch 35, ortho, 96x72, transparent) and packs beside the atlas as a 96x72 cell with the same 1 px gutter. The manifest records it as a cameo object with its own id, atlas, cell and pivot.",
+    "One scale for all six kinds: 50.6 px per kit cell = 50.6 px per tile, read back from cell px / world span in the receipt. The cell grew from 128 to 224 px for this reason; the atlas, manifest and README carry the new geometry.",
+    "No team-colour mask pass yet: the manifest's mask_atlas stays null.",
     "The kit's roof corner piece is a quarter hip, so the 2x2 roof is a pyramid hip, not the gable the sample renders show."
   ]
 }

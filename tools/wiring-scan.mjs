@@ -165,7 +165,7 @@ export function scanIslands(rootDir) {
     return [];
   }
   const files = listRsFiles(rootDir);
-  const prods = new Map();
+  const entries = [];
   for (const f of files) {
     let text = '';
     try {
@@ -173,7 +173,21 @@ export function scanIslands(rootDir) {
     } catch {
       text = '';
     }
-    prods.set(f, prodOf(text));
+    entries.push({ file: f, text: text });
+  }
+  return scanIslandsFrom(entries, rootDir);
+}
+
+// Islands from source bytes the caller already read (E51, 2026-10-20): the
+// workspace audit reads every file once and hands the text over, so the
+// wiring pass never walks the tree a second time.
+// `entries`: [{ file, text }] with absolute paths, `rootDir`: the scan root
+// the crate and file names are taken from.
+export function scanIslandsFrom(entries, rootDir) {
+  const files = entries.map((e) => e.file);
+  const prods = new Map();
+  for (const e of entries) {
+    prods.set(e.file, prodOf(e.text));
   }
   const defs = [];
   for (const f of files) {
@@ -460,7 +474,8 @@ if (isMain) {
   const toolDir = dirname(fileURLToPath(import.meta.url));
   const mode = wantDiff ? 'diff' : wantCheck ? 'check' : wantBaseline ? 'baseline' : wantJson ? 'json' : 'report';
   runWithVerdictCache({ repoDir: dirname(toolDir), name: 'wiring-scan', extra: mode + '|' + root,
-    enabled: mode !== 'baseline' && mode !== 'diff', // --baseline writes files and --diff reads git: never replay them
+    // WORKSPACE_CHECK_NO_CACHE=1 runs the scan instead of replaying a verdict.
+    enabled: mode !== 'baseline' && mode !== 'diff' && !process.env.WORKSPACE_CHECK_NO_CACHE, // --baseline writes files and --diff reads git: never replay them
     run: function () {
   const islands = scanIslands(root);
   if (wantDiff) {

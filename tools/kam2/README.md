@@ -51,7 +51,7 @@ too unless `--keep-lights`. Output is `<out>\frame_NN.png`, `<out>\mask_NN.png` 
 | `--scene <path>` | - | model to render (or use `--self-test`) |
 | `--out <dir>` | `%TEMP%\kam2-art\<name>` | output folder |
 | `--frames <n>` | 8 | frames around the ring, 45 deg per step |
-| `--size <px>` | 64 | square cell |
+| `--size <px\|WxH>` | 64 | cell in px: one number for a square cell, `96x72` for a cameo |
 | `--pitch <deg>` | 26.565 (`atan 0.5`) | camera pitch |
 | `--margin <f>` | 0.06 | framing margin as a fraction of the span |
 | `--samples <n>` | 48 | Cycles samples, CPU |
@@ -89,14 +89,15 @@ assembles the worked example from the modular Kenney Fantasy Town Kit (CC0), whi
 
 ```powershell
 blender --background --factory-startup --python tools\kam2\build_house.py -- --kit "<pack>\Models\GLB format" --out $env:TEMP\kam2\house --state finished
-blender --background --factory-startup --python tools\kam2\render_frames.py -- --scene $env:TEMP\kam2\house\finished.glb --out $env:TEMP\kam2\house\finished --frames 8 --size 128 --span 3.2 --ground-px 95 --samples 48
+blender --background --factory-startup --python tools\kam2\render_frames.py -- --scene $env:TEMP\kam2\house\finished.glb --out $env:TEMP\kam2\house\finished --yaw 135 --size 224 --span 4.4269 --ground-px 168 --pivot-x 1 --pivot-y 1 --samples 48
+blender --background --factory-startup --python tools\kam2\render_frames.py -- --scene $env:TEMP\kam2\house\finished.glb --out $env:TEMP\kam2\house\cameo --yaw 135 --pitch 35 --size 96x72 --samples 48
 ```
 
-Keep `frame_01.png` (camera at the building's south-east corner) and pack it with
-`--facings 1`. A 2x2 footprint plus the kit's eaves is 2.14 units across, which no 128 px cell
-holds at the lock's native 64x32 px tile, so the example uses `--span 3.2` = 40 px per kit
-cell (0.79 of native) and says so in its `source.json`. The contact shadow lands under the
-building and reads as a fringe at the base.
+`--yaw 135` is the camera at the building's south-east corner, the ring's 45 deg frame; keep
+its `frame_00.png` and pack it with `--facings 1`. A 2x2 footprint plus the kit's eaves is 2.14
+units across, so the cottage uses a 224 px cell at `--span 4.4269` = 50.6 px per kit cell, the
+same scale as the five kinds below. The cameo is the same finished model at pitch 35 in a
+96x72 cell. The contact shadow lands under the building and reads as a fringe at the base.
 
 ## Build the building kinds
 
@@ -141,6 +142,7 @@ anims in `--anim` order. `mask_NN.png` files are skipped here and read by `--mas
 | `--turret-anchor x,y` | none | turret pivot in cell px |
 | `--mask-dir <dir>` | none | pack `mask_NN.png` into `<id>.mask.png` |
 | `--cameo <file>` | none | copy beside the atlas and record the name |
+| `--cameo-cell <WxH>` | none | pack the cameo as `<id>.cameo.png` with the gutter and record `{id, atlas, cell, size, padding, pivot}` |
 
 Layout: column = facing, row = animation frame. The manifest carries the style-lock fields
 `id, kind, tile_w, tile_h, pivot, footprint, turret_anchor, facings, anims (name, frames, fps,

@@ -1,0 +1,229 @@
+{
+  "id": "warden_sorcerer",
+  "faction": "wardens",
+  "tier": 1,
+  "branch": "warden_mage",
+  "role": "elemental nuker",
+  "growth": { "str": 0, "dex": 1, "con": 0, "int": 2, "wis": 0 },
+  "primary": ["int"],
+  "playstyle": "Stand 18 to 24 m out and drop circles under them: every group spell is ground targeted, and any hit cancels the charge.",
+  "abilities": [
+    {
+      "id": "sor_ember_lance",
+      "name": "Ember Lance",
+      "tier": 0,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 24,
+      "radius": 0,
+      "cast": 0.5,
+      "cooldown": 2.5,
+      "mana": 8,
+      "telegraph": "none",
+      "damage": { "base": 22, "scale": "int" },
+      "effects": [
+        "burn 20% of the hit per second for 4 s, stacks to 3",
+        "no charge: it fires while moving and while hit"
+      ],
+      "notes": "Fire line opener. Damage 22 x (1 + 0.04 x (INT - 10)): 38 at L10, 55 at L20. No charge and no decal, so it still fires when the caster is hit. The only fire spell that can be cast while moving."
+    },
+    {
+      "id": "sor_ember_pike",
+      "name": "Ember Pike",
+      "tier": 2,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 26,
+      "radius": 0,
+      "cast": 1.6,
+      "cooldown": 9,
+      "mana": 22,
+      "telegraph": "line",
+      "damage": { "base": 46, "scale": "int" },
+      "effects": [
+        "burn 30% of the hit per second for 5 s",
+        "knockback 1.5 m",
+        "line telegraph: the target sees the path"
+      ],
+      "notes": "Fire line spike. Damage 46 x (1 + 0.04 x (INT - 10)): 79 at L10, 116 at L20. The 1.6 s charge draws a thin flame line on the ground, so the target sees it coming. A hit on the caster during the charge loses the shot, spends no mana and pushes the caster back 2 m."
+    },
+    {
+      "id": "sor_ember_verdict",
+      "name": "Ember Verdict",
+      "tier": 4,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 26,
+      "radius": 0,
+      "cast": 2.2,
+      "cooldown": 20,
+      "mana": 40,
+      "telegraph": "line",
+      "damage": { "base": 78, "scale": "int" },
+      "effects": [
+        "burn 40% of the hit per second for 6 s",
+        "the target takes 20% more fire damage for 4 s"
+      ],
+      "notes": "Fire line finisher. Damage 78 x (1 + 0.04 x (INT - 10)): 134 at L10, 197 at L20. 2.2 s of standing still buys the biggest single hit in the class, and the target burns for 6 s afterwards. The line telegraph shows the path, not the target."
+    },
+    {
+      "id": "sor_arc_snap",
+      "name": "Arc Snap",
+      "tier": 0,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 16,
+      "radius": 4.0,
+      "cast": 1.2,
+      "cooldown": 8,
+      "mana": 14,
+      "telegraph": "circle",
+      "damage": { "base": 16, "scale": "int" },
+      "effects": [
+        "slow 25% for 2 s",
+        "chain to 1 extra enemy within 5 m for half damage"
+      ],
+      "notes": "Electric line opener. Damage 16 x (1 + 0.04 x (INT - 10)): 28 at L10, 40 at L20 to everyone inside the 4 m decal, then one chain. The decal radius is the spell radius, always: the circle on the ground is the truth."
+    },
+    {
+      "id": "sor_storm_ring",
+      "name": "Storm Ring",
+      "tier": 2,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 18,
+      "radius": 5.5,
+      "cast": 1.6,
+      "cooldown": 14,
+      "mana": 24,
+      "telegraph": "circle",
+      "damage": { "base": 30, "scale": "int" },
+      "effects": [
+        "slow 35% for 3 s",
+        "chain to 3 extra enemies within 7 m for half damage"
+      ],
+      "notes": "Electric line middle. Damage 30 x (1 + 0.04 x (INT - 10)): 52 at L10, 76 at L20 in a 5.5 m decal, then the arc jumps out to 3 more enemies. Chain targets take half damage but the same slow."
+    },
+    {
+      "id": "sor_thunderclap",
+      "name": "Thunderclap",
+      "tier": 4,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 20,
+      "radius": 7.0,
+      "cast": 2.2,
+      "cooldown": 30,
+      "mana": 48,
+      "telegraph": "circle",
+      "damage": { "base": 55, "scale": "int" },
+      "effects": [
+        "stun 0.8 s: cannot act or cast",
+        "slow 50% for 4 s"
+      ],
+      "notes": "Electric line cap. Damage 55 x (1 + 0.04 x (INT - 10)): 95 at L10, 139 at L20 in a 7 m decal, plus a 0.8 s stun on everyone inside. The longest charge in the class: a hit during the 2.2 s throws the release away."
+    },
+    {
+      "id": "sor_rime_field",
+      "name": "Rime Field",
+      "tier": 0,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 16,
+      "radius": 4.5,
+      "cast": 1.4,
+      "cooldown": 10,
+      "mana": 16,
+      "telegraph": "circle",
+      "damage": { "base": 12, "scale": "int" },
+      "effects": [
+        "slow 30% for 3 s"
+      ],
+      "notes": "Ice line opener. Damage 12 x (1 + 0.04 x (INT - 10)): 21 at L10, 30 at L20. Low damage on purpose: the ice line buys time, it does not kill. 4.5 m decal, 1.4 s charge."
+    },
+    {
+      "id": "sor_rime_crush",
+      "name": "Rime Crush",
+      "tier": 2,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 18,
+      "radius": 6.0,
+      "cast": 1.9,
+      "cooldown": 18,
+      "mana": 28,
+      "telegraph": "circle",
+      "damage": { "base": 26, "scale": "int" },
+      "effects": [
+        "slow 45% for 4 s",
+        "root 1 s: cannot move"
+      ],
+      "notes": "Ice line middle. Damage 26 x (1 + 0.04 x (INT - 10)): 45 at L10, 66 at L20 in a 6 m decal, then the ground freezes under everyone inside. The root is short on purpose: it buys one melee swing, not a kill."
+    },
+    {
+      "id": "sor_winter_lock",
+      "name": "Winter Lock",
+      "tier": 4,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 20,
+      "radius": 7.5,
+      "cast": 2.4,
+      "cooldown": 36,
+      "mana": 55,
+      "telegraph": "circle",
+      "damage": { "base": 44, "scale": "int" },
+      "effects": [
+        "freeze: rooted in place for 2.5 s",
+        "slow 60% for 5 s after the freeze ends",
+        "frozen targets take 25% more damage for 6 s"
+      ],
+      "notes": "Ice line cap. Damage 44 x (1 + 0.04 x (INT - 10)): 76 at L10, 111 at L20 in a 7.5 m decal, then everything inside is frozen for 2.5 s and stays slow for 5 s. The freeze is the class payoff: nobody moves while the party hits."
+    },
+    {
+      "id": "sor_spark_step",
+      "name": "Spark Step",
+      "tier": 1,
+      "kind": "utility",
+      "shape": "self",
+      "range": 7,
+      "radius": 0,
+      "cast": 0.2,
+      "cooldown": 9,
+      "mana": 12,
+      "telegraph": "none",
+      "damage": { "base": 8, "scale": "int" },
+      "effects": [
+        "blink 7 m forward, not through a wall",
+        "burst 2.5 m at the start point",
+        "a hit inside the 0.2 s cast cancels the blink"
+      ],
+      "notes": "The escape and the only utility spell. Damage 8 x (1 + 0.04 x (INT - 10)): 14 at L10 in a 2.5 m burst at the start point. Blink first, land second: a hit inside the 0.2 s cast cancels the blink."
+    },
+    {
+      "id": "sor_rime_ward",
+      "name": "Rime Ward",
+      "tier": 3,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.4,
+      "cooldown": 24,
+      "mana": 30,
+      "telegraph": "none",
+      "damage": { "base": 130, "scale": "int" },
+      "effects": [
+        "shield absorbs damage before health for 8 s",
+        "ice slows on the caster are 30% weaker for 8 s"
+      ],
+      "notes": "The only self buff. It deals no damage: the block carries the shield, on the INT scale, 130 x (1 + 0.04 x (INT - 10)): 200 at L10. Cast it before a charge, not after, because the shield does not stop a charge from being cancelled."
+    }
+  ],
+  "loadout": {
+    "weapon": "long silver focus staff, gold ferrules, bone white grip",
+    "offhand": "none, both hands stay on the staff"
+  },
+  "counters": ["warden_fighter", "warden_warrior", "warden_assassin", "ashkin_shadow"],
+  "weakness": "Fast melee that reaches it: one hit cancels the charge. Also the rival caster, who casts on the move, and ranged poke."
+}

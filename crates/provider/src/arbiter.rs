@@ -89,12 +89,29 @@ pub enum VramHeadroom {
 }
 
 impl VramHeadroom {
+    /// One MiB in bytes: the MB unit these thresholds use.
+    pub const MB: u64 = 1024 * 1024;
+
     /// Free MB under the budget, or `None` when unknown.
     #[must_use]
     pub fn free_mb(self) -> Option<u32> {
         match self {
             Self::Known { budget_mb, used_mb } => Some(budget_mb.saturating_sub(used_mb)),
             Self::Unknown => None,
+        }
+    }
+
+    /// Headroom from a host reading in bytes, the shape the OS `read_vram`
+    /// gives (budget and use). A missing half reads as unknown, never as a
+    /// guess. Consumer: [`crate::pressure::PressureFeed::push_frame`].
+    #[must_use]
+    pub fn from_bytes(budget_bytes: Option<u64>, used_bytes: Option<u64>) -> Self {
+        match (budget_bytes, used_bytes) {
+            (Some(budget), Some(used)) => Self::Known {
+                budget_mb: u32::try_from(budget / Self::MB).unwrap_or(u32::MAX),
+                used_mb: u32::try_from(used / Self::MB).unwrap_or(u32::MAX),
+            },
+            _ => Self::Unknown,
         }
     }
 }

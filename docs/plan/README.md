@@ -77,6 +77,12 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `2026-10-20-progress.md` — NOW — all four — the 2026-10-20 pass record: tree green, rows ticked, live page re-verified, board reality
 - `EDITOR-INDIE-2026-10-19.md` — NOW — Look — the owner's editor-for-indies brief: audits, landed UI fixes, and the next editor slices
 - `kam2-hosting.md` — NOW — Look — KAM9: serve the browser build on this PC through a free Cloudflare tunnel, no setup on the work PC
+- `final-picture.md` — NOW — all four — the engine's end state on one screen and the five layers that make it fix itself and stay small: runtime heal with proof, dev-loop auto-fix, content rules with fixes, one-call recipes, compaction (rows AF1-AF4, CX1-CX2; the CMP rows stay the powerups lead's)
+- `touch-and-pov.md` — NOW — Bodies, Look — collision on by default, capes that meet every body, pushes that make bodies stumble, crowds that touch and lean, and a helmet-cam first-person view with lens, mount, weapon weight and tactical second cameras (rows TC1-TC7, POV1-POV7)
+- `rome.md` — NOW — all four — the Roman game in one plan (owner 2026-10-21): one legionary of Legio I Minervia, AD 83-107, first person through the helmet, six chapters, march, camp, shield line, engineering and making loops with sourced numbers; rare and contested kit with its evidence on the card; merges the duel, ladder, district, siege field and ludus (rows ROM, LEG, MK, KIT)
+- `rome-codex.md` — NOW — all four — the Roman era as game data: twelve sources (Perseus, Gutenberg, Wikipedia, Wikidata, Pleiades, Itiner-e, Met, AIC, Commons, Poly Haven, Smith's Dictionary, Latin audio), the fetch, index and extract tools, the rule that every Rome number cites a source, and the door verbs (rows CDX)
+- `build-cpu.md` — NOW — tooling — one machine-wide pool of compile slots shared by every cargo on the PC (named-semaphore jobserver), the local golden off fat LTO, dependencies without debug info, builds below the desktop, spikes that wait for a free slot; sccache stays dropped (rows OPT37-OPT42)
+- `kam2-ui.md` — NOW — Look — the KAM2 screen contract: right sidebar, top strip, pointer and the receipt the wasm must expose to draw them (no row yet)
 
 ## How a plan is written
 
@@ -177,6 +183,11 @@ FAILs on a plan missing there); a new plan adds its row there in the same commit
 | — | `rome-spec.md` | none (Rome arena spec; `rome-spec.json` is its machine copy) |
 | — | `steals.md` | none (scout list, not a plan) |
 | — | `EDITOR-INDIE-2026-10-19.md` | EI (SPRINT-24) |
+| — | `final-picture.md` | AF, CX |
+| — | `touch-and-pov.md` | TC, POV |
+| — | `rome.md` | ROM, LEG, MK, KIT |
+| — | `rome-codex.md` | CDX |
+| — | `build-cpu.md` | OPT (OPT37-OPT42; the rest are `quality.md`'s) |
 
 ## Facts to start from
 

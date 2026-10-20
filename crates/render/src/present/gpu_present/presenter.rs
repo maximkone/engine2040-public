@@ -210,6 +210,18 @@ pub struct Presenter {
     /// GS43: contact-shadow strength (1 on, 0 off). Strength 0 copies the
     /// GTAO field through, so an off capture is byte-equal to no pass.
     pub(crate) contact_strength: f32,
+    /// The device meter: the 64-bin histogram kernel over the HDR target
+    /// and its one-frame-late readback. Built once with the device; the
+    /// steady frame only dispatches and reads.
+    pub(crate) auto_exp_gpu: super::auto_exposure_gpu::AutoExposureGpu,
+    /// The adapted stops: the meter state the frame ticks. One state per
+    /// presenter, carried across frames.
+    pub(crate) auto_exp_state: crate::post::AutoExposure,
+    /// The last histogram the meter read, for the frame report.
+    pub(crate) auto_exp_hist: Option<crate::post::ExposureHistogram>,
+    /// The meter switch (off by default): off leaves every frame exactly
+    /// as it was, on meters the HDR target and adapts the exposure.
+    pub(crate) auto_exp_enabled: bool,
     /// IBL chart bind state (steady-state submits size nothing;
     /// the reuse test in `ibl.rs` proves it).
     pub(crate) ibl_sub: ibl::gpu::IblSubmitter,
@@ -1201,6 +1213,10 @@ impl Presenter {
             gtao_sub: gtao::GtaoSubmitter::new(&device),
             gtao_gpu: super::gtao_live::GtaoGpu::new(&device),
             contact_strength: 1.0,
+            auto_exp_gpu: super::auto_exposure_gpu::AutoExposureGpu::new(&device, &queue),
+            auto_exp_state: crate::post::AutoExposure::default(),
+            auto_exp_hist: None,
+            auto_exp_enabled: false,
             ibl_sub: ibl::gpu::IblSubmitter::new(&device),
             ibl_bake,
             ibl_prefilter,
@@ -2586,6 +2602,30 @@ impl Presenter {
     /// LF4 bloom switch state.
     pub fn bloom_enabled(&self) -> bool {
         self.bloom.enabled
+    }
+
+    /// The auto-exposure meter switch. On, the live frame histograms the
+    /// HDR target and adapts the camera exposure toward the key; off,
+    /// every frame is exactly what it was. Presentation only, never
+    /// hashed.
+    pub fn set_auto_exposure_enabled(&mut self, on: bool) {
+        self.auto_exp_enabled = on;
+    }
+
+    /// True when the meter runs.
+    pub fn auto_exposure_enabled(&self) -> bool {
+        self.auto_exp_enabled
+    }
+
+    /// The adapted stops the meter holds.
+    pub fn auto_exposure_ev(&self) -> f32 {
+        self.auto_exp_state.ev()
+    }
+
+    /// The histogram the meter read last, `None` until the first
+    /// readback lands.
+    pub fn auto_exposure_histogram(&self) -> Option<&crate::post::ExposureHistogram> {
+        self.auto_exp_hist.as_ref()
     }
 
     /// RL9 cached fog -> forward wiring (`None` until the first live fog

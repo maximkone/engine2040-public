@@ -368,10 +368,7 @@ impl MasterList {
     /// Drop listings no beacon refreshed for `stale_ticks`; answers how many
     /// went. [`STALE_LISTING_TICKS`] is the two-second LAN expiry.
     pub fn prune(&mut self, now_tick: u32, stale_ticks: u32) -> usize {
-        let before = self.entries.len();
-        self.entries
-            .retain(|entry| now_tick.saturating_sub(entry.seen_tick) <= stale_ticks);
-        before - self.entries.len()
+        prune_expired(&mut self.entries, now_tick, stale_ticks)
     }
 
     /// Encode the reply datagram: magic, version, count, then every listing in
@@ -434,6 +431,14 @@ impl Default for MasterList {
     }
 }
 
+/// Drop listings no beacon refreshed for `stale_ticks`; answers how many went.
+/// One body for both holders ([`MasterList`] and [`ServerBrowser`]).
+fn prune_expired(entries: &mut Vec<Listing>, now_tick: u32, stale_ticks: u32) -> usize {
+    let before = entries.len();
+    entries.retain(|entry| now_tick.saturating_sub(entry.seen_tick) <= stale_ticks);
+    before - entries.len()
+}
+
 /// Server browser over a master reply: what a client holds after it asks a
 /// master for its list. Distinct from [`crate::lobby::Browser`], which watches
 /// LAN beacons itself at ms pace, and from [`crate::browser`], the page client.
@@ -479,10 +484,7 @@ impl ServerBrowser {
     /// Drop listings the master has not refreshed for `stale_ticks`; answers
     /// how many went.
     pub fn prune(&mut self, now_tick: u32, stale_ticks: u32) -> usize {
-        let before = self.entries.len();
-        self.entries
-            .retain(|entry| now_tick.saturating_sub(entry.seen_tick) <= stale_ticks);
-        before - self.entries.len()
+        prune_expired(&mut self.entries, now_tick, stale_ticks)
     }
 
     /// Freshest listed server: highest beacon tick, then last seen, last slot
@@ -1360,14 +1362,14 @@ mod tests {
             // TABLES_VERSION_V1 keeps the golden frozen on v1 rules.
             table_version: 1,
         };
-        let mut server = HeadlessServer::new(cfg).expect("16-slot server");
+        let mut server = HeadlessServer::new(cfg).expect("cap-slot server");
         for (index, token) in TOKENS.iter().enumerate() {
             assert_eq!(server.connect(*token), Ok(index as u8));
         }
         assert_eq!(server.connected_count(), TOKENS.len());
         let mut witness = Client::new(cfg, FighterId::new(2).expect("slot 2")).expect("client");
 
-        // Phase 1: three humans plus thirteen AI slots author together.
+        // Phase 1: three humans plus the rest of the cap AI-fill.
         for step in 0..DROP_AT {
             for (slot, token) in TOKENS.iter().enumerate() {
                 server
@@ -1375,7 +1377,10 @@ mod tests {
                     .expect("submit");
             }
             server.tick().expect("server tick");
-            assert_eq!(server.ai_filled_last_tick(), 16 - TOKENS.len());
+            assert_eq!(
+                server.ai_filled_last_tick(),
+                usize::from(MAX_PARTICIPANTS) - TOKENS.len()
+            );
             let snapshot = server.snapshot().expect("snapshot");
             let tip = server.checkpoints().last().copied().expect("tip");
             witness
@@ -1394,7 +1399,10 @@ mod tests {
                     .expect("submit");
             }
             server.tick().expect("ai tick");
-            assert_eq!(server.ai_filled_last_tick(), 16 - 2);
+            assert_eq!(
+                server.ai_filled_last_tick(),
+                usize::from(MAX_PARTICIPANTS) - 2
+            );
         }
 
         // Phase 3: the same token reclaims the same slot and resyncs.
@@ -1412,7 +1420,7 @@ mod tests {
         assert_eq!(
             witness.checkpoints(),
             server.checkpoints(),
-            "rejoined slot must converge to 16-slot server truth"
+            "rejoined slot must converge to full-cap server truth"
         );
 
         // Phase 4: all three humans play to the final tick and stay converged.
@@ -1434,7 +1442,7 @@ mod tests {
         assert_eq!(
             witness.checkpoints(),
             server.checkpoints(),
-            "16-slot drop plus rejoin must converge end to end"
+            "full-cap drop plus rejoin must converge end to end"
         );
     }
 

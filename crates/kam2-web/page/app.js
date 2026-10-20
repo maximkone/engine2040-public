@@ -1,11 +1,14 @@
-// KAM8 page: the wasm module owns the match and the fixed 10 Hz tick; this file
-// draws its flat 2.5D frame with Canvas2D and forwards the two keys.
+// KAM11 page: the wasm module owns the match and the fixed 10 Hz tick; this file
+// draws its flat 2.5D frame with Canvas2D, fills the build sidebar from the
+// module's own cell list, and paints the footprint the cursor would place.
 //
 // The page reads one Float32Array per frame (layout in crates/kam2-web/src/scene_flat.rs):
 // ground diamonds, then depth-ordered billboards (soldier cells, cottage cells).
 // It converts the scene's linear colours to sRGB once per frame and draws the
-// packed atlases the same way the native window does. Nothing here feeds a value
-// back into the sim.
+// packed atlases the same way the native window does. The build cells, the wares
+// and every refusal come from the wasm module (`houseKinds`, `stockOf`,
+// `placement`, `build`): the page paints and clicks, the sim decides. Nothing
+// here feeds a value back into the sim.
 
 import init, { Kam2Web } from "./kam2web.js";
 
@@ -14,7 +17,9 @@ const ctx = stage.getContext("2d", { alpha: false });
 const report = document.getElementById("report");
 const hudLine = document.getElementById("hud-line");
 const hudState = document.getElementById("hud-state");
-const hudStock = document.getElementById("hud-stock");
+const wares = document.getElementById("wares");
+const grid = document.getElementById("build-grid");
+const orderLine = document.getElementById("order-line");
 const fatal = document.getElementById("fatal");
 
 // Presentation scale: the scene is built for 1280x720 at 100% zoom (the same
@@ -28,9 +33,25 @@ const GROUND_STRIDE = 11;
 const BILLBOARD_STRIDE = 12;
 const KIND_UNIT = 1;
 const KIND_HOUSE = 2;
+// Tiles per ground row: scene_flat writes one diamond per tile in row order.
+const MAP_W = 16;
+const WARE_NAMES = ["wood", "stone", "grain", "flour", "bread"];
 
 const keys = new Set();
-const state = { frames: 0, tick: 0, hash: "", webgpu: "unknown", error: null, limit: 0 };
+const state = {
+  frames: 0,
+  tick: 0,
+  hash: "",
+  webgpu: "unknown",
+  error: null,
+  limit: 0,
+  frame: null,
+  cells: [],
+  armed: null,
+  hover: null,
+  hoverOk: false,
+  order: "",
+};
 const params = new URLSearchParams(location.search);
 const frameLimit = Number(params.get("frames") ?? 0);
 state.limit = Number.isFinite(frameLimit) && frameLimit > 0 ? frameLimit : 0;
@@ -50,7 +71,7 @@ const rgb = (r, g, b) => `rgb(${r} ${g} ${b})`;
 function fail(reason) {
   state.error = String(reason);
   document.body.dataset.state = "fatal";
-  fatal.textContent = `KAM8 did not start: ${state.error}`;
+  fatal.textContent = `KAM2 did not start: ${state.error}`;
   fatal.style.display = "block";
   console.error(state.error);
 }
@@ -149,6 +170,53 @@ function drawBillboard(frame, o) {
   ctx.drawImage(image, sx, sy, sw, sh, tx, ty, w, h);
 }
 
+// One ground diamond of the frame as [x0, y0, x1, y1, x2, y2, x3, y3], top,
+// right, bottom and left corner in framebuffer pixels.
+function groundDiamond(frame, x, z) {
+  if (!frame || x < 0 || z < 0 || x >= MAP_W) return null;
+  const rows = (frame[0] | 0) / MAP_W;
+  if (z >= rows) return null;
+  const o = 4 + (z * MAP_W + x) * GROUND_STRIDE;
+  return frame.subarray(o, o + 8);
+}
+
+// The four screen corners of a `w` by `h` footprint with its top-left at (x, z),
+// taken from the diamonds the renderer already drew.
+function footprintCorners(frame, x, z, w, h) {
+  const top = groundDiamond(frame, x, z);
+  const right = groundDiamond(frame, x + w - 1, z);
+  const bottom = groundDiamond(frame, x + w - 1, z + h - 1);
+  const left = groundDiamond(frame, x, z + h - 1);
+  if (!top || !right || !bottom || !left) return null;
+  return [
+    [top[0], top[1]],
+    [right[2], right[3]],
+    [bottom[4], bottom[5]],
+    [left[6], left[7]],
+  ];
+}
+
+function drawFootprint() {
+  if (!state.armed || !state.hover) return;
+  const corners = footprintCorners(
+    state.frame,
+    state.hover.x,
+    state.hover.z,
+    state.armed.w,
+    state.armed.h,
+  );
+  if (!corners) return;
+  ctx.beginPath();
+  ctx.moveTo(corners[0][0], corners[0][1]);
+  for (const corner of corners.slice(1)) ctx.lineTo(corner[0], corner[1]);
+  ctx.closePath();
+  ctx.fillStyle = state.hoverOk ? "rgba(72, 158, 74, 0.42)" : "rgba(186, 46, 38, 0.42)";
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = state.hoverOk ? "rgba(128, 240, 134, 0.95)" : "rgba(255, 126, 116, 0.95)";
+  ctx.stroke();
+}
+
 function drawFrame(frame) {
   backdrop();
   sceneTransform();
@@ -159,6 +227,7 @@ function drawFrame(frame) {
   for (let i = 0; i < billboards; i += 1) {
     drawBillboard(frame, base + i * BILLBOARD_STRIDE);
   }
+  drawFootprint();
 }
 
 function applyPan() {
@@ -171,14 +240,183 @@ function applyPan() {
   if (dx !== 0 || dz !== 0) game.pan(dx, dz);
 }
 
+// Pointer to framebuffer pixels: the canvas is stretched to the window with
+// object-fit contain, so the drawn bitmap keeps its 1280x720 shape and is
+// centred inside the element.
+function framebufferPoint(event) {
+  const rect = stage.getBoundingClientRect();
+  const scale = Math.min(rect.width / stage.width, rect.height / stage.height);
+  if (!(scale > 0)) return null;
+  const offsetX = (rect.width - stage.width * scale) / 2;
+  const offsetY = (rect.height - stage.height * scale) / 2;
+  return [
+    (event.clientX - rect.left - offsetX) / scale,
+    (event.clientY - rect.top - offsetY) / scale,
+  ];
+}
+
+// Framebuffer pixels to the scene space the frame was built in: the draw
+// transform scales by VIEW_SCALE about the canvas centre.
+function scenePoint(event) {
+  const fb = framebufferPoint(event);
+  if (!fb) return null;
+  const s = VIEW_SCALE;
+  return [
+    (fb[0] - (1 - s) * stage.width * 0.5) / s,
+    (fb[1] - (1 - s) * stage.height * 0.5) / s,
+  ];
+}
+
+function clientPoint(sceneX, sceneY) {
+  const rect = stage.getBoundingClientRect();
+  const scale = Math.min(rect.width / stage.width, rect.height / stage.height);
+  const offsetX = (rect.width - stage.width * scale) / 2;
+  const offsetY = (rect.height - stage.height * scale) / 2;
+  const s = VIEW_SCALE;
+  const fbX = s * sceneX + (1 - s) * stage.width * 0.5;
+  const fbY = s * sceneY + (1 - s) * stage.height * 0.5;
+  return {
+    x: Math.round(rect.left + offsetX + fbX * scale),
+    y: Math.round(rect.top + offsetY + fbY * scale),
+  };
+}
+
+function insideDiamond(px, py, diamond) {
+  let sign = 0;
+  for (let corner = 0; corner < 4; corner += 1) {
+    const a = (corner % 4) * 2;
+    const b = ((corner + 1) % 4) * 2;
+    const cross =
+      (diamond[b] - diamond[a]) * (py - diamond[a + 1]) -
+      (diamond[b + 1] - diamond[a + 1]) * (px - diamond[a]);
+    if (cross === 0) continue;
+    const side = cross > 0 ? 1 : -1;
+    if (sign === 0) sign = side;
+    else if (side !== sign) return false;
+  }
+  return true;
+}
+
+// The tile under a point of the frame's own scene space; the diamonds are the
+// ones the player sees, so a panned or scaled view still lands on its tile.
+function tileUnder(px, py) {
+  const frame = state.frame;
+  if (!frame) return null;
+  const grounds = frame[0] | 0;
+  for (let i = 0; i < grounds; i += 1) {
+    const diamond = frame.subarray(4 + i * GROUND_STRIDE, 4 + i * GROUND_STRIDE + 8);
+    if (insideDiamond(px, py, diamond)) {
+      return { x: i % MAP_W, z: (i / MAP_W) | 0 };
+    }
+  }
+  return null;
+}
+
+function applyCursor() {
+  if (!state.armed) {
+    stage.style.cursor = "default";
+    return;
+  }
+  stage.style.cursor = state.hoverOk ? "crosshair" : "not-allowed";
+}
+
+function setOrder(text) {
+  state.order = text;
+  orderLine.textContent = text;
+}
+
+function refreshHover(event) {
+  if (!state.armed || !game) {
+    state.hover = null;
+    state.hoverOk = false;
+    applyCursor();
+    return;
+  }
+  const point = scenePoint(event);
+  const tile = point ? tileUnder(point[0], point[1]) : null;
+  state.hover = tile;
+  state.hoverOk = tile ? game.placement(state.armed.id, tile.x, tile.z) === "" : false;
+  applyCursor();
+}
+
+function arm(cell) {
+  state.armed = cell;
+  state.hover = null;
+  state.hoverOk = false;
+  for (const other of state.cells) {
+    other.button.setAttribute("aria-pressed", String(other === cell));
+  }
+  applyCursor();
+  publish();
+}
+
+function disarm() {
+  if (!state.armed) return;
+  state.armed = null;
+  state.hover = null;
+  state.hoverOk = false;
+  for (const cell of state.cells) cell.button.setAttribute("aria-pressed", "false");
+  applyCursor();
+  publish();
+}
+
+function placeAtPointer(event) {
+  if (!state.armed || !game) return;
+  const point = scenePoint(event);
+  const tile = point ? tileUnder(point[0], point[1]) : null;
+  if (!tile) return;
+  setOrder(game.build(state.armed.id, tile.x, tile.z));
+  state.hover = tile;
+  state.hoverOk = state.order === "";
+  applyCursor();
+  publish();
+}
+
+function buildGrid() {
+  for (const [slot, kind] of JSON.parse(Kam2Web.houseKinds()).entries()) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "cell";
+    button.title = `${kind.label} (${kind.w} x ${kind.h}) - ${kind.cost}`;
+    button.dataset.kind = kind.id;
+    button.setAttribute("aria-pressed", "false");
+    const image = document.createElement("img");
+    image.src = `cameos/${kind.id}.png`;
+    image.alt = kind.label;
+    image.width = 64;
+    image.height = 48;
+    const key = document.createElement("span");
+    key.className = "key";
+    key.textContent = String(slot + 1);
+    button.append(image, key);
+    const cell = { id: kind.id, label: kind.label, w: kind.w, h: kind.h, button };
+    button.addEventListener("click", () => arm(cell));
+    state.cells.push(cell);
+    grid.append(button);
+  }
+}
+
+function wareStrip() {
+  const counts = Array.from(game.stockOf(0));
+  const parts = WARE_NAMES.map((name, slot) => {
+    const span = document.createElement("span");
+    const label = document.createElement("b");
+    label.textContent = name;
+    span.append(label, document.createTextNode(` ${counts[slot] ?? 0}`));
+    return span;
+  });
+  wares.replaceChildren(...parts);
+}
+
 function publish() {
   state.tick = game.ticks;
   state.hash = game.hash;
   const paused = game.paused;
   hudState.textContent = paused ? "PAUSED" : "RUN";
   hudState.className = paused ? "tag paused" : "tag";
-  hudLine.textContent = `tick ${state.tick} · hash ${state.hash} · houses ${game.houses} · units ${game.units} · frames ${state.frames}`;
-  hudStock.textContent = game.stock;
+  hudLine.textContent = `tick ${state.tick} · hash ${state.hash} · houses ${game.houses} · units ${game.units}`;
+  wareStrip();
+  orderLine.textContent = state.order;
   report.textContent = JSON.stringify({
     ok: state.error === null,
     frames: state.frames,
@@ -188,6 +426,8 @@ function publish() {
     units: game.units,
     paused,
     stock: game.stock,
+    armed: state.armed ? state.armed.id : null,
+    order: state.order,
     webgpu: state.webgpu,
     canvas: "canvas2d",
   });
@@ -198,7 +438,9 @@ function tickFrame(now) {
   last = now;
   game.advance(dt);
   applyPan();
-  drawFrame(game.frame());
+  const frame = game.frame();
+  state.frame = frame;
+  drawFrame(frame);
   state.frames += 1;
   window.kam2Frames = state.frames;
   if (state.frames === 1) {
@@ -217,6 +459,19 @@ function onKeyDown(event) {
     event.preventDefault();
     game.togglePause();
     publish();
+    return;
+  }
+  if (event.code === "Escape") {
+    event.preventDefault();
+    disarm();
+    return;
+  }
+  if (event.key >= "1" && event.key <= "5") {
+    const cell = state.cells[Number(event.key) - 1];
+    if (cell) {
+      event.preventDefault();
+      arm(cell);
+    }
     return;
   }
   if (event.code.startsWith("Arrow")) {
@@ -238,6 +493,7 @@ async function start() {
     ]);
     await init();
     game = new Kam2Web();
+    buildGrid();
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     window.kam2 = {
@@ -245,12 +501,43 @@ async function start() {
       tick: () => game.ticks,
       hash: () => game.hash,
       paused: () => game.paused,
+      houses: () => game.houses,
+      units: () => game.units,
       pan: () => Array.from(game.panOffset),
       webgpu: () => state.webgpu,
+      armed: () => (state.armed ? state.armed.id : null),
+      order: () => orderLine.textContent,
+      placement: (kind, x, z) => game.placement(kind, x, z),
+      stock: (side) => Array.from(game.stockOf(side ?? 0)),
+      // Client pixel of a tile centre, for the headless pointer drill.
+      pixelOf: (x, z) => {
+        const diamond = groundDiamond(state.frame, x, z);
+        if (!diamond) return null;
+        const cx = (diamond[0] + diamond[2] + diamond[4] + diamond[6]) / 4;
+        const cy = (diamond[1] + diamond[3] + diamond[5] + diamond[7]) / 4;
+        return clientPoint(cx, cy);
+      },
     };
     addEventListener("keydown", onKeyDown);
     addEventListener("keyup", onKeyUp);
     addEventListener("blur", () => keys.clear());
+    stage.addEventListener("mousemove", refreshHover);
+    stage.addEventListener("mouseleave", () => {
+      state.hover = null;
+      state.hoverOk = false;
+      applyCursor();
+    });
+    stage.addEventListener("mousedown", (event) => {
+      if (event.button !== 0 || !state.armed) return;
+      event.preventDefault();
+      refreshHover(event);
+      placeAtPointer(event);
+    });
+    stage.addEventListener("contextmenu", (event) => {
+      if (!state.armed) return;
+      event.preventDefault();
+      disarm();
+    });
     document.addEventListener("visibilitychange", () => {
       last = 0;
     });

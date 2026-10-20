@@ -369,9 +369,14 @@ pub struct SceneBriefArgs {
 pub struct SceneBriefOutput {
     /// Document revision the brief was read at.
     pub revision: u64,
-    /// Spatial graph digest over the snapshot (budget-independent).
+    /// Spatial graph digest over the snapshot (budget-independent). It counts
+    /// nodes and edges, so any insert moves it; a per-object `#digest` in the
+    /// place rows (and `poses`) is the stable one.
     pub digest: u64,
-    /// Brief text rows within the budget, always starting with the digest line.
+    /// Brief text rows within the budget, always starting with the digest line:
+    /// extent and problem rows, folded look-alike rows, then one place row per
+    /// object (`lamp_2 [index] x y z sx sy sz dir #digest`, whole cm) while it
+    /// fits, then groups, relations and findings.
     pub text: String,
     /// True when groups, relations or findings were cut to fit the budget.
     pub truncated: bool,
@@ -381,7 +386,8 @@ pub struct SceneBriefOutput {
     /// `ids`: the bracketed id resolves, the name never does.
     pub objects: Vec<String>,
     /// One pose row per object, aligned with `ids`:
-    /// `name [index] x y z sx sy sz dir`, whole cm and a compass facing.
+    /// `name [index] x y z sx sy sz dir #digest`, whole cm, a compass facing
+    /// and the object's own place digest (stable when another object moves).
     pub poses: Vec<String>,
     /// First object index of the next page; absent on the last page.
     #[serde(default, skip_serializing_if = "Option::is_none")]

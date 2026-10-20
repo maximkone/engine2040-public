@@ -53,6 +53,5 @@ five-kind loop and the byte-identical rebuild proof are in [`../README.md`](../R
 The kit has no crate or bale, so `cart-high` is the goods stand-in. The 3x3 hip has
 a flat cap because the kit has no 3-wide gable span; that is the kit's intended 3x3 roof.
 
-One shared item: the cottage is still drawn at 0.79 of native, so this 3x3 kind is
-about 27% larger in the same scene until the cottage is re-rendered or a ground-scale field
-lands in the manifest.
+One shared item: every kind in this set and the cottage draw at the same 50.6 px per tile
+(ART3b), and `tools/kam2/buildings_receipt.mjs` re-checks that number per kind.

@@ -1,0 +1,160 @@
+{
+  "id": "warden_fighter",
+  "faction": "wardens",
+  "tier": 0,
+  "branch": null,
+  "role": "line breaker",
+  "growth": {
+    "str": 1,
+    "dex": 0,
+    "con": 1,
+    "int": 0,
+    "wis": 0
+  },
+  "primary": [
+    "str",
+    "con"
+  ],
+  "playstyle": "Stand in front. Every point of your HP is a wall the other side has to break before it reaches anyone you protect.",
+  "abilities": [
+    {
+      "id": "iron_snare",
+      "name": "Iron Snare",
+      "tier": 0,
+      "kind": "control",
+      "shape": "single",
+      "range": 9,
+      "radius": 0,
+      "cast": 0.4,
+      "cooldown": 14,
+      "mana": 12,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "root",
+        "damage"
+      ],
+      "notes": "Paralyse one enemy for 1.6 s. Breaks on any knockback. The answer to a caster, and the thing a caster hates."
+    },
+    {
+      "id": "heavy_arc",
+      "name": "Heavy Arc",
+      "tier": 0,
+      "kind": "melee",
+      "shape": "cone",
+      "range": 2.6,
+      "radius": 3,
+      "cast": 0.5,
+      "cooldown": 3,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 28,
+        "scale": "str"
+      },
+      "effects": [
+        "damage"
+      ],
+      "notes": "A wide swing for everything in front of you. Low damage per hit, hits five people at once."
+    },
+    {
+      "id": "fencing_step",
+      "name": "Fencing Step",
+      "tier": 0,
+      "kind": "utility",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 12,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "move_speed",
+        "evade"
+      ],
+      "notes": "Half a second of faster footwork and a small dodge window. The skill you press when a spear comes down."
+    },
+    {
+      "id": "breaker_blow",
+      "name": "Breaker Blow",
+      "tier": 1,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.4,
+      "radius": 0,
+      "cast": 0.6,
+      "cooldown": 5,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": {
+        "base": 52,
+        "scale": "str"
+      },
+      "effects": [
+        "damage",
+        "stagger"
+      ],
+      "notes": "A committed overhead that staggers. Slow enough that a good duelist will read it."
+    },
+    {
+      "id": "shield_wall",
+      "name": "Shield Wall",
+      "tier": 2,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 6,
+      "radius": 6,
+      "cast": 0,
+      "cooldown": 22,
+      "mana": 18,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "damage_reduction"
+      ],
+      "notes": "A short-lived guard stance. Halves incoming damage for everyone inside it, including the enemies you are standing next to."
+    },
+    {
+      "id": "last_stand",
+      "name": "Last Stand",
+      "tier": 4,
+      "kind": "utility",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 90,
+      "mana": 30,
+      "telegraph": "none",
+      "damage": {
+        "base": 0,
+        "scale": "none"
+      },
+      "effects": [
+        "damage_reduction",
+        "heal"
+      ],
+      "notes": "For ten seconds you cannot be knocked down and you regenerate. The panic button of the frontline."
+    }
+  ],
+  "loadout": {
+    "weapon": "sword",
+    "offhand": "buckler"
+  },
+  "counters": [
+    "warden_sorcerer",
+    "warden_enchanter"
+  ],
+  "weakness": "Low damage. If the line holds you forever, you never win it."
+}

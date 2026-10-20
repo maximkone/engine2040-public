@@ -9,9 +9,12 @@
 
 use std::path::PathBuf;
 
+use engine_anim::contract::skinning_matrices;
+use engine_anim::ik::{limb_positions, solve_limb, Limb};
 use engine_arena::GaitPhase;
 use engine_audio::FightCue;
 use engine_combat::fight::HITSTOP_TICKS;
+use engine_core::vec3::dist2;
 use engine_render::v1::Camera;
 
 use super::fighter_look_feet::{Legs, Plant};
@@ -1196,4 +1199,135 @@ fn bodies_that_lie_are_never_planted_and_a_still_guard_barely_changes() {
     eprintln!("lf12 still bodies: {dead_frames} dead frames, {living_frames} guard frames, worst {worst_cm:.2} cm");
     assert!(dead_frames > 100, "{dead_frames} dead frames");
     assert!(living_frames > 100, "{living_frames} guard frames");
+}
+
+/// Euclidean distance in meters between two `[x, y, z]` points.
+fn span(a: [f32; 3], b: [f32; 3]) -> f32 {
+    dist2(a, b).sqrt()
+}
+
+/// Unit vector in the direction of `v`; the zero vector reads as zero.
+fn unit3(v: [f32; 3]) -> [f32; 3] {
+    let n = span(v, [0.0; 3]);
+    if n > 0.0 {
+        [v[0] / n, v[1] / n, v[2] / n]
+    } else {
+        [0.0; 3]
+    }
+}
+
+/// `a . b`.
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[test]
+fn the_weapon_hand_holds_the_grip_socket_through_a_swing() {
+    // LF12's hand half on the real CT7 hero. The sword is skinned to the
+    // weapon socket `wep_pos_r`, a child of the right palm, so the grip sits
+    // in the hand and keeps one offset from the palm while a swing clip runs
+    // (the sword never slides in the grip). The same right arm then reaches a
+    // grip target at 0.9 of its chain length within 1e-3 m, with the elbow
+    // kept on the pole's side: the hand solve the weapon socket needs.
+    let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+    let (palm, socket, arm) = {
+        let joints = &look.rigs[0].skeleton.joints;
+        let at = |name: &str| {
+            joints
+                .iter()
+                .position(|joint| joint.name == name)
+                .unwrap_or_else(|| panic!("the hero rig names {name}"))
+        };
+        let shoulder = at("arm_upper_r");
+        let elbow = at("arm_lower_r");
+        let palm = at("palm_r");
+        let socket = at("wep_pos_r");
+        let arm =
+            Limb::new(&look.rigs[0].skeleton, shoulder, elbow, palm).expect("right arm chain");
+        (palm, socket, arm)
+    };
+    assert_eq!(
+        look.rigs[0].skeleton.joints[socket].parent,
+        Some(palm),
+        "the sword's grip socket rides on the right palm"
+    );
+    let views = [view(0, 0.0, 0.0), view(1, 0.0, 1.2)];
+    let hit = FightCue::Hit {
+        attacker: 0,
+        victim: 1,
+        damage: 100,
+    };
+    let mut spans = Vec::new();
+    for tick in 0..30u32 {
+        let cues = if tick == 0 { vec![hit] } else { Vec::new() };
+        look.observe_tick(tick, &views, &[1000, 900], &cues);
+        let rig = &look.rigs[look.rig_for_slot(0)];
+        let slot = look.slots[0];
+        for frame in 0..3u16 {
+            let alpha = (f32::from(frame) + 0.5) / 3.0;
+            let pose = look.slot_pose(rig, &slot, alpha).expect("pose samples");
+            let world = skinning_matrices(&rig.skeleton, &pose).expect("FK");
+            let place = |joint: usize| [world[joint][3][0], world[joint][3][1], world[joint][3][2]];
+            spans.push(span(place(palm), place(socket)));
+        }
+    }
+    let grip = spans[0];
+    assert!(
+        (0.03..0.15).contains(&grip),
+        "the grip socket sits in the hand: {grip} m from the palm"
+    );
+    let drift = spans
+        .iter()
+        .map(|d| (d - grip).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        drift < 1.0e-3,
+        "the sword slid {drift} m in the hand across the swing"
+    );
+    // The right arm reaches a grip target 0.9 of its chain away.
+    let rig = &look.rigs[0];
+    let slot = look.slots[0];
+    let mut pose = look.slot_pose(rig, &slot, 1.0).expect("pose samples");
+    let before = limb_positions(&rig.skeleton, &pose, arm).expect("FK");
+    let chain = span(before[0], before[1]) + span(before[1], before[2]);
+    let reach = 0.9 * chain;
+    let aim = unit3([0.25, -0.9, 0.35]);
+    let target = [
+        before[0][0] + aim[0] * reach,
+        before[0][1] + aim[1] * reach,
+        before[0][2] + aim[2] * reach,
+    ];
+    let pole = [0.0, 0.0, 1.0];
+    solve_limb(&rig.skeleton, &mut pose, arm, target, pole).expect("the grip target solves");
+    let after = limb_positions(&rig.skeleton, &pose, arm).expect("FK");
+    let miss = span(after[2], target);
+    assert!(miss < 1.0e-3, "the weapon hand misses the grip by {miss} m");
+    let axis = unit3([
+        target[0] - after[0][0],
+        target[1] - after[0][1],
+        target[2] - after[0][2],
+    ]);
+    let rel = [
+        after[1][0] - after[0][0],
+        after[1][1] - after[0][1],
+        after[1][2] - after[0][2],
+    ];
+    let along = dot3(rel, axis);
+    let off = [
+        rel[0] - axis[0] * along,
+        rel[1] - axis[1] * along,
+        rel[2] - axis[2] * along,
+    ];
+    let want = [
+        pole[0] - axis[0] * dot3(pole, axis),
+        pole[1] - axis[1] * dot3(pole, axis),
+        pole[2] - axis[2] * dot3(pole, axis),
+    ];
+    assert!(
+        dot3(off, want) > 0.0,
+        "the elbow left the axis on the wrong side"
+    );
+    eprintln!(
+        "lf12 weapon hand: grip {grip} m from the palm, drift {drift} m, reach miss {miss} m"
+    );
 }

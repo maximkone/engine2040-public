@@ -26,7 +26,11 @@ build burst at 11:30), so the numbers were taken but are not usable: OPT31 sprea
 13.7% and OPT33 spreads 27.2% (dx12) / 22.5% (vulkan) against the 5% bar, while
 the absolute fps floor passed with margin (286-480 fps). Receipts are labeled
 contended under `target/evidence/build/` and `target/evidence/backend/`; no row
-was ticked. The quiet-window keeper stays the route to a real measurement.
+was ticked. The quiet-window keeper stays the route to a real measurement. A
+second pair after the storm grew to 17-23 cargo/rustc at 99.9% CPU read 51.9 and
+58.5 fps (spread 11.3%, floor passed), and a further 9-minute watch found no lull
+(23 cargo/rustc at 99.1%); under that load the arena prints its receipt but hangs
+on teardown, so the keeper reads the receipt and stops the process.
 
 - ON30 (docs/SPRINT-11-north-star.md): two humans + 6 AI over two real
   networks. Host: `target\release\net_relay.exe` on a reachable host, then

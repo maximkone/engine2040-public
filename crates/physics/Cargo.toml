@@ -17,6 +17,8 @@ rapier = ["dep:rapier3d", "dep:engine-anim"]
 
 [dependencies]
 engine-core = { workspace = true }
+# PX15: the persistent lane pool the parallel island step queues on.
+engine-ecs = { workspace = true }
 rapier3d = { workspace = true, optional = true }
 engine-anim = { workspace = true, optional = true }
 

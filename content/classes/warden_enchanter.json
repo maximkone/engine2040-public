@@ -1,0 +1,230 @@
+{
+  "id": "warden_enchanter",
+  "faction": "wardens",
+  "tier": 1,
+  "branch": "warden_mage",
+  "role": "control and buffs",
+  "growth": { "str": 0, "dex": 1.5, "con": 0, "int": 1.5, "wis": 0 },
+  "primary": ["int", "dex"],
+  "playstyle": "Keep 14 to 18 m behind the line. The interrupt cancels the enemy charge, the weapon buff makes your own line hit harder.",
+  "abilities": [
+    {
+      "id": "enc_bind_mark",
+      "name": "Bind Mark",
+      "tier": 0,
+      "kind": "control",
+      "shape": "target",
+      "range": 18,
+      "radius": 0,
+      "cast": 0.3,
+      "cooldown": 14,
+      "mana": 10,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "interrupt: cancels a cast or charge in progress",
+        "blocks the next cast for 1.5 s",
+        "root 1 s",
+        "misses a caster in the last 0.3 s of a charge"
+      ],
+      "notes": "The dedicated interrupt. It deals no damage and never needs any. A 0.3 s cast beats every charge in the game, including a 2.4 s ice charge: the decal stays on the ground and nothing fires. It cannot catch a caster in the last 0.3 s before the release."
+    },
+    {
+      "id": "enc_keen_edge",
+      "name": "Keen Edge",
+      "tier": 0,
+      "kind": "buff",
+      "shape": "target",
+      "range": 12,
+      "radius": 0,
+      "cast": 0.4,
+      "cooldown": 20,
+      "mana": 12,
+      "telegraph": "none",
+      "damage": { "base": 12, "scale": "int" },
+      "effects": [
+        "weapon damage raised for 20 s on one ally",
+        "stacks three times on the same ally"
+      ],
+      "notes": "The weapon buff. It deals no damage: the block carries the weapon damage bonus, on the INT scale, 12 x (1 + 0.04 x (INT - 10)): 18% at L10, 40% at L40. Cast it on the front line right before the charge lands."
+    },
+    {
+      "id": "enc_spark_jab",
+      "name": "Spark Jab",
+      "tier": 0,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 16,
+      "radius": 0,
+      "cast": 0.2,
+      "cooldown": 3,
+      "mana": 6,
+      "telegraph": "none",
+      "damage": { "base": 12, "scale": "int" },
+      "effects": [
+        "slow 15% for 1.5 s"
+      ],
+      "notes": "The only damage this class has. Damage 12 x (1 + 0.04 x (INT - 10)): 18 at L10. 3 s cooldown, 6 mana: it exists so the Enchanter can weave between controls without going silent. Never trade on it."
+    },
+    {
+      "id": "enc_snare_field",
+      "name": "Snare Field",
+      "tier": 1,
+      "kind": "debuff",
+      "shape": "circle",
+      "range": 14,
+      "radius": 5.0,
+      "cast": 0.8,
+      "cooldown": 22,
+      "mana": 18,
+      "telegraph": "circle",
+      "damage": { "base": 6, "scale": "int" },
+      "effects": [
+        "slow 50% for 5 s on entering the field",
+        "the field keeps slowing for 8 s"
+      ],
+      "notes": "Ground control. Damage 6 x (1 + 0.04 x (INT - 10)): 9 at L10 on anyone inside the 5 m decal, and the field keeps slowing for 8 s. The decal radius is the spell radius, same rule as the caster lines."
+    },
+    {
+      "id": "enc_haste_ward",
+      "name": "Haste Ward",
+      "tier": 1,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 0,
+      "radius": 12,
+      "cast": 0.6,
+      "cooldown": 30,
+      "mana": 20,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "move speed +30% for 12 s on up to 4 allies",
+        "the caster is inside the radius too"
+      ],
+      "notes": "The party haste. It deals no damage: the 30% is flat, it does not scale. Range 0 means the caster's own position and the 12 m radius covers the allies it reaches."
+    },
+    {
+      "id": "enc_ward_link",
+      "name": "Ward Link",
+      "tier": 2,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 0,
+      "radius": 14,
+      "cast": 1.0,
+      "cooldown": 45,
+      "mana": 35,
+      "telegraph": "none",
+      "damage": { "base": 12, "scale": "int" },
+      "effects": [
+        "damage taken reduced for 15 s on up to 5 allies",
+        "the caster is inside the radius too"
+      ],
+      "notes": "The party shield. It deals no damage: the block carries the damage reduction, on the INT scale, 12 x (1 + 0.04 x (INT - 10)): 18% at L10, 40% at L40. It does not stop a charge from being cancelled, it only stops the party from dying while it is cast."
+    },
+    {
+      "id": "enc_hoarfrost_skin",
+      "name": "Hoarfrost Skin",
+      "tier": 2,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.3,
+      "cooldown": 30,
+      "mana": 25,
+      "telegraph": "none",
+      "damage": { "base": 130, "scale": "int" },
+      "effects": [
+        "shield absorbs damage before health for 8 s",
+        "the shield breaks at 0 and gives no more"
+      ],
+      "notes": "The personal shield, because this class has the lowest health in the game and no self healing. It deals no damage: the block carries the shield, on the INT scale, 130 x (1 + 0.04 x (INT - 10)): 200 at L10. It buys one assassin opener, not two."
+    },
+    {
+      "id": "enc_mana_well",
+      "name": "Mana Well",
+      "tier": 3,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 0,
+      "radius": 14,
+      "cast": 0.8,
+      "cooldown": 50,
+      "mana": 40,
+      "telegraph": "none",
+      "damage": { "base": 2, "scale": "int" },
+      "effects": [
+        "mana regen raised for 20 s on up to 4 allies",
+        "the caster is inside the radius too"
+      ],
+      "notes": "The mana buff. It deals no damage: the block carries the mana regen per second, on the INT scale, 2 x (1 + 0.04 x (INT - 10)): 3 per second at L10. A caster in the party holds four charges instead of one."
+    },
+    {
+      "id": "enc_hush_field",
+      "name": "Hush Field",
+      "tier": 3,
+      "kind": "debuff",
+      "shape": "circle",
+      "range": 16,
+      "radius": 8.0,
+      "cast": 1.2,
+      "cooldown": 40,
+      "mana": 30,
+      "telegraph": "circle",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "slow 60% for 8 s on anyone inside the decal",
+        "the caster is never slowed by its own field"
+      ],
+      "notes": "The wide slow. It deals no damage by design: it is the biggest control in the game and it buys the party 8 s. The decal radius is the spell radius. The caster is never slowed by its own field."
+    },
+    {
+      "id": "enc_deep_bind",
+      "name": "Deep Bind",
+      "tier": 4,
+      "kind": "control",
+      "shape": "target",
+      "range": 20,
+      "radius": 0,
+      "cast": 0.5,
+      "cooldown": 45,
+      "mana": 40,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "root 3 s: cannot move or cast",
+        "interrupt: cancels a charge in progress",
+        "removes one buff from the target"
+      ],
+      "notes": "The capstone hold and the reliable interrupt: it cancels the charge and pins the caster for 3 s while the party hits it. It cannot catch a caster in the last 0.3 s of a charge."
+    },
+    {
+      "id": "enc_war_edge",
+      "name": "War Edge",
+      "tier": 4,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 0,
+      "radius": 16,
+      "cast": 1.0,
+      "cooldown": 60,
+      "mana": 45,
+      "telegraph": "none",
+      "damage": { "base": 22, "scale": "int" },
+      "effects": [
+        "weapon damage raised for 25 s on up to 5 allies",
+        "attack speed +10% for 25 s",
+        "the caster is inside the radius too"
+      ],
+      "notes": "The party weapon buff cap. It deals no damage: the block carries the weapon damage bonus, on the INT scale, 22 x (1 + 0.04 x (INT - 10)): 34% at L10, 73% at L40. Cast it on the clash, not on the walk in: 25 s is long enough for one good trade."
+    }
+  ],
+  "loadout": {
+    "weapon": "short silver focus rod with a gold ring at the tip",
+    "offhand": "bone white grimoire bound in gold on a chain"
+  },
+  "counters": ["warden_sorcerer", "ashkin_rune", "warden_assassin", "ashkin_shadow"],
+  "weakness": "Lowest health in the game and no self healing: one assassin opener ends the class, and it deals no damage to the timer."
+}

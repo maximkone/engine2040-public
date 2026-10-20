@@ -34,7 +34,23 @@
   ],
   "atlas": "house.mill.atlas.png",
   "mask_atlas": null,
-  "cameo": null,
+  "cameo": {
+    "id": "house.mill.cameo",
+    "atlas": "house.mill.cameo.png",
+    "cell": [
+      96,
+      72
+    ],
+    "size": [
+      98,
+      74
+    ],
+    "padding": 1,
+    "pivot": [
+      48,
+      56
+    ]
+  },
   "atlas_size": [
     290,
     580

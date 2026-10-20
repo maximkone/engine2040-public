@@ -15,7 +15,7 @@
 //
 // Exit codes: 0 ok - 1 pack failed - 2 usage.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { inflateSync, deflateSync } from "node:zlib";
@@ -45,7 +45,9 @@ Options:
   --footprint <WxH>   tiles covered in the world (default 1x1)
   --turret-anchor <x,y>  turret pivot in cell px (default: none)
   --mask-dir <dir>    mask_NN.png set from render_frames.py --mask
-  --cameo <file>      cameo PNG, copied beside the atlas
+  --cameo <file>      cameo PNG; copied beside the atlas, or packed when --cameo-cell
+  --cameo-cell <WxH>  cameo cell in px (e.g. 96x72): write <id>.cameo.png with the gutter
+                      and record {id, atlas, cell, size, padding, pivot} in the manifest
   --help              this text
 
 Layout: column = facing (S, SW, W, NW, N, NE, E, SE), row = animation frame.
@@ -302,6 +304,7 @@ function main() {
         "turret-anchor": { type: "string" },
         "mask-dir": { type: "string" },
         cameo: { type: "string" },
+        "cameo-cell": { type: "string" },
         help: { type: "boolean" },
       },
       allowPositionals: false,
@@ -444,12 +447,54 @@ function main() {
           : Array.from({ length: facings }, (_, i) => `f${i}`);
 
     let cameoName = null;
+    let cameo = null;
+    if (values["cameo-cell"] && !values.cameo) throw new PackError("--cameo-cell needs --cameo");
     if (values.cameo) {
       const cameoPath = isAbsolute(values.cameo) ? values.cameo : resolve(values.cameo);
       if (!existsSync(cameoPath)) throw new PackError(`cameo not found: ${cameoPath}`);
       cameoName = basename(cameoPath);
-      const target = join(outDir, cameoName);
-      if (resolve(target) !== resolve(cameoPath)) copyFileSync(cameoPath, target);
+      if (values["cameo-cell"]) {
+        const match = /^(\d+)x(\d+)$/i.exec(values["cameo-cell"].trim());
+        if (!match) throw new PackError(`--cameo-cell must be WxH: ${values["cameo-cell"]}`);
+        const cellW = Number(match[1]);
+        const cellH = Number(match[2]);
+        if (cellW < 1 || cellH < 1 || cellW > MAX_ATLAS || cellH > MAX_ATLAS) {
+          throw new PackError(`--cameo-cell out of range: ${values["cameo-cell"]}`);
+        }
+        const image = decodePng(readFileSync(cameoPath), cameoPath);
+        if (image.width !== cellW || image.height !== cellH) {
+          throw new PackError(`cameo is ${image.width}x${image.height}, --cameo-cell says ${cellW}x${cellH}`);
+        }
+        const cameoW = cellW + pad * 2;
+        const cameoH = cellH + pad * 2;
+        const cameoPixels = Buffer.alloc(cameoW * cameoH * 4);
+        blit(cameoPixels, cameoW, image.pixels, image.width, image.height, pad, pad);
+        cameoName = `${stem}.cameo.png`;
+        writeFileSync(join(outDir, cameoName), encodePng(cameoW, cameoH, cameoPixels));
+        let cameoPivot = [Math.round(cellW / 2), Math.round(cellH / 2)];
+        const cameoMeta = join(dirname(cameoPath), "frames.json");
+        if (existsSync(cameoMeta)) {
+          try {
+            const meta = JSON.parse(readFileSync(cameoMeta, "utf8"));
+            if (Array.isArray(meta.pivot) && meta.pivot.length === 2) {
+              cameoPivot = [Number(meta.pivot[0]), Number(meta.pivot[1])];
+            }
+          } catch (err) {
+            process.stderr.write(`W_PACK cameo frames.json ignored: ${err.message}\n`);
+          }
+        }
+        cameo = {
+          id: `${values.id}.cameo`,
+          atlas: cameoName,
+          cell: [cellW, cellH],
+          size: [cameoW, cameoH],
+          padding: pad,
+          pivot: cameoPivot,
+        };
+      } else {
+        const target = join(outDir, cameoName);
+        if (resolve(target) !== resolve(cameoPath)) copyFileSync(cameoPath, target);
+      }
     }
 
     const atlasName = `${stem}.atlas.png`;
@@ -476,7 +521,7 @@ function main() {
       })),
       atlas: atlasName,
       mask_atlas: maskName,
-      cameo: cameoName,
+      cameo: cameo ?? cameoName,
       atlas_size: [atlasW, atlasH],
       padding: pad,
       source_frames: images.length,
@@ -487,7 +532,8 @@ function main() {
 
     process.stdout.write(
       `KAM2 PACK OK frames=${images.length} atlas=${atlasW}x${atlasH} bytes=${atlasBuffer.length}` +
-        `${maskName ? ` mask=${maskBytes}` : ""} manifest=${manifestPath}\n`,
+        `${maskName ? ` mask=${maskBytes}` : ""}` +
+        `${cameo ? ` cameo=${statSync(join(outDir, cameo.atlas)).size}` : ""} manifest=${manifestPath}\n`,
     );
     return 0;
   } catch (err) {

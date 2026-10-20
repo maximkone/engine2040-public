@@ -313,6 +313,11 @@ several plans serve one part, the order in the last column is the reading order.
 | `docs/plan/gameplay.md` | AI in gameplay; The three games | GP, GA, NV, CB (brains and navigation merged in); read 1st for the games (Rome first, MODERN NATIONAL second, Primordial third) |
 | `docs/plan/ai-door.md` | AI builds the game; AI in gameplay | AL, DP, RB, LF16, HS20, AID1 (the five FOCUS Now AI-door slices plus the describe ledger); read after `ai-native.md` |
 | `docs/plan/fps-view.md` | Look on the RTX 3050; The three games | FV (a first-person eye on a fighter body: eye pose, look channel beside the hashed tape, camera feed, no-clip rule; consumer UW11) |
+| `docs/plan/final-picture.md` | AI builds the game; Headless proofs and tests; Shipping a clean build; Editor and tools | AF, CX (the end state: runtime heal, dev-loop auto-fix, content rules, recipes, compaction) |
+| `docs/plan/touch-and-pov.md` | Physics and destruction; Look on the RTX 3050; The three games | TC, POV (collision on by default, capes and crowds that touch, helmet-cam view); read after `fps-view.md` |
+| `docs/plan/rome.md` | The three games; AI in gameplay; Physics and destruction; Determinism and exact replay | ROM, LEG, MK, KIT (one legionary's war, owner 2026-10-21: chapters, line fighting, engineering, making, kit certainty); read 1st for Rome |
+| `docs/plan/rome-codex.md` | The three games; AI builds the game | CDX (Roman sources as game data, every Rome number cites a ref); read after `rome.md` |
+| `docs/plan/build-cpu.md` | Shipping a clean build; Headless proofs and tests | OPT37-OPT42 (one compile-slot pool for every cargo on the PC; read after `quality.md` and `docs/SMOOTH-BUILD.md`) |
 | `docs/plan/parked.md` | Editor and tools; The three games; Spatial understanding for AI | WD, SN, ED, PLF, UIX (world, audio and editor parked; each names the proof that un-parks it) |
 | `docs/plan/urban-war.md` | The three games | UW, UC (urban-city merged in); frozen by FOCUS D7 |
 | `docs/plan/silicon-city.md` | none: a future game (LATER), no Core proof | SIL (CPU-as-city builder with a hashed truth sim, skyline, bot ladder and reference-sim gate); rows not on the board yet |

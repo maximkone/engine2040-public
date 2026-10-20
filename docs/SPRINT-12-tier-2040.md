@@ -506,12 +506,25 @@ golden unchanged; kill bars are gates.
   `cargo test -p engine-net --lib relay` 30 passed; ON30 QUIC relay leg 1
   passed; clippy -D warnings PASS; release binary hash `d57b5c8ae3096614` x2.
   Gate is opt-in via `with_turn`; ON27 wires the allocation path.
-- [ ] ON26 net: subscription-predicate interest — typed per-connection
+- [x] ON26 net: subscription-predicate interest — typed per-connection
   range/view/LOD predicates over aoi.rs with change-driven delta push
   (SpacetimeDB subscription idea, BSL-1.1, reimplemented, no donor code).
   Tier C. Size M. Owns `crates/net/src/interest.rs` scope-predicate
   block. Accept: 64-bot soak ≥3x vs broadcast at ≤128 kbps/client, no
-  combat entity starved over 500 ms, hash x2. needs: ON3, ON15.
+  combat entity starved over 500 ms, hash x2. needs: ON3, ON15. Landed
+  8595ac0. aoi.rs is gone (NETSLIM-R2 folded it into interest.rs, the owned
+  path): `Subscription` carries typed range/view/LOD clauses and hands the
+  same clauses to `select` as one `InterestCfg`; `PredicateView` holds the
+  clean result set as a fixed bitset and `update()` returns only the
+  entered/left row events, so an unchanged tick pushes 0 bytes and a left row
+  costs one id tombstone. subscription_predicate_64_soak_beats_broadcast_3x:
+  64 viewers x 65 rows x 600 ticks at 10 Hz, saving >= 3x vs broadcast,
+  kbps <= 12800/client, combat row and worst starve <= 30 ticks, both arms x2
+  bit-identical, ring-crossing walker proves a real delta; plus
+  subscription_typed_predicates_split_range_view_and_lod and
+  predicate_view_pushes_only_row_changes. cargo test -p engine-net --lib
+  interest 27 passed, gh run 39494552479; full lib 430 passed, 39495016461;
+  clippy 39495016264. Production call site stays ON29.
 - [ ] ON27 net: interest-aware relay spike — subscription-scoped
   forwarding on the ON25 allocation path (ideas only, no new donor).
   Tier C. Size S. Owns relay forward-filter test block. Accept: ≥2x

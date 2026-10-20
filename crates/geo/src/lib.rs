@@ -16,8 +16,8 @@
 //!
 //! Budgets: 64 recipe ops, 200_000 triangles, 32 name chars
 //! (`crates/geo/src/recipe.rs:18-22`). Entry points: [`GeoMesh`], [`GeoError`], [`EdgeReport`],
-//! [`mesh`], [`ops`], [`primitives`], [`recipe`], [`weights`], and one module per feature
-//! (`boolean`, `uv`, `lod`, `collision`, `bake`, `fbx`).
+//! [`mesh`], [`ops`], [`parts`], [`primitives`], [`recipe`], [`weights`], and one module per
+//! feature (`boolean`, `uv`, `lod`, `collision`, `bake`, `fbx`).
 //!
 //! Donors (licenses read from each crate's own file on 2026-10-04, all on the `deny.toml` list):
 //! `manifold-rust` (Apache-2.0, port of Manifold), `xatlas` (MIT, vendored source behind the
@@ -29,6 +29,8 @@ pub mod bonemap;
 pub mod mesh;
 /// Native mesh ops (weld, mirror, array, flip, normals): std only, no feature.
 pub mod ops;
+/// Part sets: the union box, one shared pose and one triangle budget per part: std only.
+pub mod parts;
 pub mod primitives;
 pub mod recipe;
 /// Automatic skin weights from bone segments: the four nearest bones, inverse-square, std only.
@@ -97,6 +99,10 @@ mod wiring_tests {
             crate::mesh::GeoMesh::validate;
         // The bone auto-map resolves at the root too: `auto_map` never moves silently.
         let _: fn(&[&str]) -> Vec<(crate::bonemap::HumanoidBone, usize)> = crate::bonemap::auto_map;
+        // The part-set plan resolves at the root: one pose and one budget per part.
+        let _: fn(&[&crate::GeoMesh], u32) -> Result<crate::parts::PartPlan, crate::parts::PartError> =
+            crate::parts::plan;
+        assert_eq!(crate::parts::MAX_PARTS, 16);
         let _ = mesh::GeoError::NonFinite;
         let _ = primitives::cuboid_faces([1.0, 1.0, 1.0]);
         let _ = recipe::RecipeError::TooManyOps;

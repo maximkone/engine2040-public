@@ -1,0 +1,1 @@
+{"name":"ashkin_heavy","height_m":2.05,"heads":6.0,"shoulder_span":0.98,"torso_depth":0.4,"chest_w":0.72,"waist_w":0.46,"hip_w":0.56,"leg_len":0.86,"arm_len":0.88,"hand":0.24,"head_size":0.31,"bulk":1.25,"stance_deg":7,"attachments":[{"kind":"shield","side":"l","length":1.25,"radius":0.36,"angle_deg":8},{"kind":"blade","side":"r","length":1.1,"radius":0.07,"angle_deg":30}]}

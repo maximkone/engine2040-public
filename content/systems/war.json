@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "windows": [
+    {"id": "statue_war", "label": "Statue War", "duration_min": 60, "count_per_day": 4, "local_hours": [10, 14, 18, 22]}
+  ],
+  "scoring": {"points_per_node_tick": 1, "node_tick_seconds": 10, "win_nodes": 2, "respawn_seconds": 30},
+  "nodes": [
+    {"id": "statue_crossroads", "faction": "neutral", "capture_progress": 30, "decay_per_second": 0.5, "buff": {"xp_percent": 10, "drop_percent": 10, "duration_min": 2}},
+    {"id": "statue_mill", "faction": "neutral", "capture_progress": 30, "decay_per_second": 0.5, "buff": {"xp_percent": 10, "drop_percent": 10, "duration_min": 2}},
+    {"id": "statue_watchtower", "faction": "neutral", "capture_progress": 30, "decay_per_second": 0.5, "buff": {"xp_percent": 10, "drop_percent": 10, "duration_min": 2}}
+  ],
+  "forts": {
+    "build_cost": 30,
+    "levels": [
+      {"level": 1, "materials": 30, "hp": 20000, "upkeep": 3},
+      {"level": 2, "materials": 60, "hp": 50000, "upkeep": 6},
+      {"level": 3, "materials": 100, "hp": 100000, "upkeep": 10}
+    ],
+    "persist_between_windows": true,
+    "weekly_harvest": true,
+    "flags": [
+      {"id": "war_banner", "effect": "respawn point: the owning guild respawns at the fort instead of the faction spawn hall"},
+      {"id": "market_stall", "effect": "taxed stall: the owning guild trades materials there and takes 5 percent of every sale"},
+      {"id": "mine_works", "effect": "weekly mine: the fort yields materials at the weekly harvest tick, scaled by fort level"}
+    ]
+  },
+  "honour": {"per_minute": 1, "stars": 5, "lucky_per_star": 0.05},
+  "fame": {"from": ["war_kill", "node_capture"], "from_other_sources": false},
+  "limits": {"guild_cap": 50, "max_players_per_window": 64},
+  "no_friendly_fire": true
+}

@@ -53,6 +53,5 @@ The kit has no field, crop, grain or bale piece. The hedge rows are the closest 
 row the kit ships, and the dirt plot is a recoloured plank floor. Replace both when a better
 CC0 farm prop is found; the footprint and pivot do not change.
 
-One shared item: the cottage is still drawn at 0.79 of native, so this 2x2 kind is
-about 27% larger in the same scene until the cottage is re-rendered or a ground-scale field
-lands in the manifest.
+One shared item: every kind in this set and the cottage draw at the same 50.6 px per tile
+(ART3b), and `tools/kam2/buildings_receipt.mjs` re-checks that number per kind.

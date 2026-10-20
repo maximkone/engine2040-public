@@ -1,11 +1,11 @@
 {
   "id": "house.cottage",
   "kind": "building",
-  "tile_w": 128,
-  "tile_h": 128,
+  "tile_w": 224,
+  "tile_h": 224,
   "pivot": [
-    64,
-    95
+    112,
+    168
   ],
   "footprint": [
     2,
@@ -41,10 +41,26 @@
   ],
   "atlas": "house.cottage.atlas.png",
   "mask_atlas": null,
-  "cameo": null,
+  "cameo": {
+    "id": "house.cottage.cameo",
+    "atlas": "house.cottage.cameo.png",
+    "cell": [
+      96,
+      72
+    ],
+    "size": [
+      98,
+      74
+    ],
+    "padding": 1,
+    "pivot": [
+      48,
+      52
+    ]
+  },
   "atlas_size": [
-    130,
-    390
+    226,
+    678
   ],
   "padding": 1,
   "source_frames": 3,

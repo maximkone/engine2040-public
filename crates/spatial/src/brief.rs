@@ -19,9 +19,17 @@
 //! Collapsed room rows group parent-linked actors per forest root, and
 //! per-room `expand_room_text` reuses the [`brief`] budget path.
 //!
+//! The door brief ([`brief_folded`]) also prints one [`place_row`] per object:
+//! its handle, whole-cm position and size, yaw octant and a digest of that
+//! object's own fields. The digest never moves when another object is
+//! inserted, moved or removed; the scene digest in the first line does, by
+//! construction, because it counts nodes and edges.
+//!
 //! Std-only. Never imports scene or editor types.
 
 use super::fold::{extent_text, fold_lookalikes, fold_text, problems_in_words};
+use super::index::to_cm;
+use super::navcheck::octant;
 use super::relation::{Graph, Layer, Relation};
 use super::triage::Role;
 use super::{Actor, Report};
@@ -133,23 +141,109 @@ fn object_line(entry: &ObjectEntry) -> String {
     format!("object {} [{}]\n", entry.name, entry.id)
 }
 
+/// Place-row digest tag, distinct from the scene graph and parity domains.
+const PLACE_TAG: &[u8] = b"e2brief-place:1";
+
+/// Whole-cm token for a place row; `?` when the number is unknown.
+fn cm_text(v: f32) -> String {
+    if v.is_finite() {
+        to_cm(v).to_string()
+    } else {
+        "?".to_owned()
+    }
+}
+
+/// Mix one number into a place digest: cm when finite, raw bits when not, so
+/// two unknown poses still differ.
+fn mix_cm(h: &mut Fnv64, v: f32) {
+    if v.is_finite() {
+        h.write_u8(1);
+        h.write(&to_cm(v).to_le_bytes());
+    } else {
+        h.write_u8(0);
+        h.write(&v.to_bits().to_le_bytes());
+    }
+}
+
+/// Digest of one actor's own place row: sanitized name, cm position and size,
+/// and the yaw octant.
+///
+/// Consumer: the `#digest` tail of [`place_row`], so a caller can prove an
+/// object did not move. The caller owns the data: nothing outside this actor
+/// enters the hash, so inserting, moving or removing an unrelated actor never
+/// moves it, and neither does the actor's table index. Units: none (cm and
+/// octant integers inside). Determinism scope: pure function of the actor;
+/// same fields give the same digest on every platform.
+#[must_use]
+pub fn place_digest(actor: &Actor) -> u64 {
+    let mut h = Fnv64::new();
+    h.write(PLACE_TAG);
+    h.write_str(&sanitize_name(&actor.name));
+    for v in [actor.x, actor.y, actor.z, actor.sx, actor.sy, actor.sz] {
+        mix_cm(&mut h, v);
+    }
+    let (dx, dz) = octant(actor.yaw);
+    h.write(&dx.to_le_bytes());
+    h.write(&dz.to_le_bytes());
+    h.finish()
+}
+
+/// One compact place row: `name [id] x y z sx sy sz dir #digest`.
+///
+/// Consumer: the door brief text and the `scene.brief` pose table, so the two
+/// read back identically. Position and size are whole centimeters (`?` when
+/// unknown), `dir` is the yaw octant (`+x`, `+x+z`, `+z`, ...) and the
+/// `#digest` tail is [`place_digest`] of this actor alone. The bracketed `id`
+/// is the caller's actor id: the aligned id table maps it to a UUID. Hostile
+/// names stay single-line through [`sanitize_name`], so a row never splits.
+#[must_use]
+pub fn place_row(actor: &Actor) -> String {
+    let (dx, dz) = octant(actor.yaw);
+    let axis = |d: i32, plus: &'static str, minus: &'static str| match d {
+        1 => plus,
+        -1 => minus,
+        _ => "",
+    };
+    format!(
+        "{} [{}] {} {} {} {} {} {} {}{} #{:016x}",
+        sanitize_name(&actor.name),
+        actor.id,
+        cm_text(actor.x),
+        cm_text(actor.y),
+        cm_text(actor.z),
+        cm_text(actor.sx),
+        cm_text(actor.sy),
+        cm_text(actor.sz),
+        axis(dx, "+x", "-x"),
+        axis(dz, "+z", "-z"),
+        place_digest(actor),
+    )
+}
+
+/// Actors in id order, first-wins on duplicate ids (ties broken by name), so
+/// any input order gives the same rows.
+fn id_sorted(actors: &[Actor]) -> Vec<&Actor> {
+    let mut by_id: BTreeMap<u32, &Actor> = BTreeMap::new();
+    let mut sorted: Vec<&Actor> = actors.iter().collect();
+    sorted.sort_by(|a, b| (a.id, &a.name).cmp(&(b.id, &b.name)));
+    for actor in sorted {
+        by_id.entry(actor.id).or_insert(actor);
+    }
+    by_id.into_values().collect()
+}
+
 /// Id-sorted object labels over the input actors.
 ///
 /// First-wins on duplicate ids (ties broken by name, so any input order
 /// gives the same labels); names are sanitized display-only tokens, so two
 /// actors sharing a name still render distinct rows by id.
 fn object_labels(actors: &[Actor]) -> Vec<ObjectEntry> {
-    let mut by_id: BTreeMap<u32, String> = BTreeMap::new();
-    let mut sorted: Vec<&Actor> = actors.iter().collect();
-    sorted.sort_by(|a, b| (a.id, &a.name).cmp(&(b.id, &b.name)));
-    for actor in sorted {
-        by_id
-            .entry(actor.id)
-            .or_insert_with(|| sanitize_name(&actor.name));
-    }
-    by_id
+    id_sorted(actors)
         .into_iter()
-        .map(|(id, name)| ObjectEntry { id, name })
+        .map(|actor| ObjectEntry {
+            id: actor.id,
+            name: sanitize_name(&actor.name),
+        })
         .collect()
 }
 
@@ -415,12 +509,13 @@ pub struct FoldedBrief {
 }
 
 /// [`brief_text`] for the door: `object <stem> x<count> <w>x<h>x<d> cm [ids]`
-/// rows replace one row per object, `extent` and `problem` rows follow the
-/// digest. `roles` maps the caller's component kinds, so a collider that wraps
-/// its mesh folds into the mesh row. Rows join in priority order (extent,
-/// problems, findings, objects, relations, groups) while the whole text fits
-/// `budget_bytes`; the digest row is always emitted. Same actors in any order
-/// give the same bytes.
+/// rows replace one row per object, then one [`place_row`] per object names
+/// each handle with its cm pose and own digest, and `extent` and `problem`
+/// rows follow the digest. `roles` maps the caller's component kinds, so a
+/// collider that wraps its mesh folds into the mesh row. Rows join in priority
+/// order (extent, problems, folded objects, place rows, relations, findings,
+/// groups) while the whole text fits `budget_bytes`; the digest row is always
+/// emitted. Same actors in any order give the same bytes.
 pub fn brief_folded(
     actors: &[Actor],
     graph: &Graph,
@@ -442,10 +537,15 @@ pub fn brief_folded(
         head.push_str(&line);
         head.push('\n');
     }
-    let rows: Vec<String> = fold_text(&fold_lookalikes(actors, roles))
+    let mut rows: Vec<String> = fold_text(&fold_lookalikes(actors, roles))
         .lines()
         .map(|row| format!("object {row}\n"))
         .collect();
+    rows.extend(
+        id_sorted(actors)
+            .into_iter()
+            .map(|actor| format!("{}\n", place_row(actor))),
+    );
     let tiers = fit_tiers(actors, graph, report, budget_bytes, head.len(), &rows, true);
     let tail = Brief {
         groups: tiers.groups,
@@ -1381,6 +1481,81 @@ mod tests {
         let (dup_brief, _) = brief_of(&dupes, usize::MAX);
         assert_eq!(dup_brief.objects.len(), 1);
         assert_eq!(dup_brief.objects[0].id, 9);
+    }
+
+    #[test]
+    fn place_rows_carry_cm_pose_size_octant_and_own_digest() {
+        let actor = mk(
+            2,
+            "lamp_2",
+            1.0,
+            0.5,
+            -2.0,
+            1.0,
+            2.0,
+            0.5,
+            std::f32::consts::FRAC_PI_2,
+        );
+        let row = super::place_row(&actor);
+        assert!(
+            row.starts_with("lamp_2 [2] 100 50 -200 100 200 50 +z #"),
+            "{row}"
+        );
+        assert!(
+            row.ends_with(&format!("#{:016x}", super::place_digest(&actor))),
+            "{row}"
+        );
+        // An unrelated insert moves nothing, and the table index is not hashed,
+        // so a renumbered actor keeps its own digest.
+        let mut renumbered = actor.clone();
+        renumbered.id = 7;
+        assert_eq!(
+            super::place_digest(&renumbered),
+            super::place_digest(&actor)
+        );
+        let mut scene = vec![actor.clone()];
+        scene.push(prop(9, "crate_1", 9.0, 0.5, 9.0));
+        assert_eq!(super::place_digest(&scene[0]), super::place_digest(&actor));
+        // A moved object does move its own digest.
+        let mut nudged = actor.clone();
+        nudged.x = 1.1;
+        assert_ne!(super::place_digest(&nudged), super::place_digest(&actor));
+        // Unknown numbers stay `?` and still hash without panicking.
+        let mut lost = actor;
+        lost.x = f32::NAN;
+        let lost_row = super::place_row(&lost);
+        assert!(lost_row.contains(" [2] ? "), "{lost_row}");
+        assert_ne!(super::place_digest(&lost), super::place_digest(&nudged));
+    }
+
+    #[test]
+    fn folded_brief_prints_a_place_row_per_object() {
+        let actors = arena_fixture();
+        let graph = super::super::relation::build(&actors);
+        let report = super::super::run(&actors);
+        let folded = super::brief_folded(&actors, &graph, &report, &BTreeMap::new(), usize::MAX);
+        let places: Vec<&str> = folded
+            .text
+            .lines()
+            .filter(|line| line.starts_with("arena [0] ") || line.starts_with("torch_01 [4] "))
+            .collect();
+        assert_eq!(places.len(), 2, "{}", folded.text);
+        assert!(
+            places[0].starts_with("arena [0] 0 200 0 2000 400 2000 +x #"),
+            "{}",
+            places[0]
+        );
+        assert!(
+            places[1].starts_with("torch_01 [4] 500 500 500 100 100 100 +x #"),
+            "{}",
+            places[1]
+        );
+        // The place rows fit the budget before relations do; the digest is
+        // never cut.
+        let tight = super::brief_folded(&actors, &graph, &report, &BTreeMap::new(), 1024);
+        assert!(tight.text.len() <= 1024, "{} bytes", tight.text.len());
+        assert!(tight.text.starts_with("digest "));
+        assert!(tight.text.contains("arena [0] 0 200 0 2000 400 2000 +x #"));
     }
 
     #[test]

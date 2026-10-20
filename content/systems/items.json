@@ -1,0 +1,272 @@
+{
+  "version": 1,
+  "note": "Clean-room item system for Bannerfall. Rules re-derived from docs/research/ryl1-2026-10-20/dossier.md sections 4 and 10. No RYL names, no client data. items.md explains the arithmetic.",
+  "slots": ["weapon", "offhand", "head", "chest", "gloves", "boots", "ring", "neck"],
+  "stats": ["str", "dex", "con", "int", "wis"],
+
+  "grade_bands": [
+    {"grade": "F", "min": 0, "max": 0},
+    {"grade": "D", "min": 1, "max": 24},
+    {"grade": "C", "min": 25, "max": 49},
+    {"grade": "B", "min": 50, "max": 79},
+    {"grade": "A", "min": 80, "max": 119},
+    {"grade": "AA", "min": 120, "max": 169},
+    {"grade": "AAA", "min": 170, "max": 999}
+  ],
+
+  "grade_rules": {
+    "unit": "percent above the F base of the same stat on the same item",
+    "formula": "pct = ceil(100 * (value / base_adj - 1))",
+    "base_adj": "base_adj = base * (1 + upgrade_stat_mult_per_level * upgrade_level)",
+    "base": "base = round(round(slot_base[slot][stat] * template.base_mult * level_band.base_mult) * metal_multiplier) + template.base_bonus[stat]",
+    "metal_multiplier": "metal_multiplier = 1 + 0.08 * (metal_quality - 1); the metal is set when the item is forged, the template metal is the default",
+    "rounding": "ceil, so any value above the base counts as at least +1 percent",
+    "band_lookup": "first band with min <= pct <= max wins; bands tile 0..999 with no gap",
+    "stat_grade": "every stat on the item gets its own grade from the same band table",
+    "item_grade": "the grade of the template primary stat; templates may override the slot primary stat",
+    "tie_rule": "a value exactly on a band edge takes the higher band",
+    "below_base": "a value at or below the base is F",
+    "edge_drift": "stat values are whole numbers; a value recomputed from a rounded number can sit one band off when it lands exactly on an edge, so an item keeps its stored roll_pct as the authority"
+  },
+
+  "level_bands": [
+    {"id": "L1", "min_level": 1, "max_level": 15, "base_mult": 1.0, "socket_capacity": 1, "upgrade_cost_mult": 1.0, "endurance_mult": 1.0},
+    {"id": "L2", "min_level": 16, "max_level": 35, "base_mult": 2.0, "socket_capacity": 2, "upgrade_cost_mult": 1.5, "endurance_mult": 1.3},
+    {"id": "L3", "min_level": 36, "max_level": 60, "base_mult": 3.5, "socket_capacity": 3, "upgrade_cost_mult": 2.2, "endurance_mult": 1.7},
+    {"id": "L4", "min_level": 61, "max_level": 100, "base_mult": 5.0, "socket_capacity": 4, "upgrade_cost_mult": 3.0, "endurance_mult": 2.2}
+  ],
+
+  "f_base": {
+    "rule": "slot_base[slot][stat] * template.base_mult * level_band.base_mult, then scaled by the metal multiplier and rounded; template.base_bonus adds a flat amount on top",
+    "primary_stat_by_slot": {
+      "weapon": "str",
+      "offhand": "con",
+      "head": "con",
+      "chest": "con",
+      "gloves": "dex",
+      "boots": "dex",
+      "ring": "int",
+      "neck": "wis"
+    },
+    "slot_base": {
+      "weapon": {"str": 10, "dex": 4, "con": 2},
+      "offhand": {"str": 2, "dex": 2, "con": 8},
+      "head": {"con": 6, "wis": 2},
+      "chest": {"con": 10, "str": 2},
+      "gloves": {"dex": 6, "str": 2},
+      "boots": {"dex": 6, "con": 4},
+      "ring": {"int": 6, "wis": 2},
+      "neck": {"wis": 6, "int": 2}
+    }
+  },
+
+  "upgrade_stat_mult_per_level": 0.12,
+  "metal_stat_mult_per_quality": 0.08,
+
+  "item_templates": [
+    {"id": "short_sword", "name": "Short Sword", "slot": "weapon", "primary_stat": "str", "base_mult": 1.0, "metal": "iron", "set_id": "valley_oath"},
+    {"id": "scout_blade", "name": "Scout Blade", "slot": "weapon", "primary_stat": "str", "base_mult": 0.85, "metal": "iron", "set_id": null},
+    {"id": "hatchet", "name": "Hatchet", "slot": "weapon", "primary_stat": "str", "base_mult": 0.9, "metal": "iron", "set_id": null},
+    {"id": "longsword", "name": "Long Sword", "slot": "weapon", "primary_stat": "str", "base_mult": 1.2, "metal": "bronze", "set_id": null},
+    {"id": "war_axe", "name": "War Axe", "slot": "weapon", "primary_stat": "str", "base_mult": 1.25, "metal": "steel", "set_id": null},
+    {"id": "greatsword", "name": "Great Sword", "slot": "weapon", "primary_stat": "str", "base_mult": 1.45, "metal": "silver", "set_id": null},
+    {"id": "scout_bow", "name": "Scout Bow", "slot": "weapon", "primary_stat": "dex", "base": {"str": 2, "dex": 10, "con": 2}, "base_mult": 1.0, "metal": "iron", "set_id": "ranger_trail"},
+    {"id": "rune_bow", "name": "Rune Bow", "slot": "weapon", "primary_stat": "dex", "base": {"str": 3, "dex": 14, "con": 3}, "base_mult": 1.0, "metal": "gold", "set_id": "sorcerer_relic"},
+    {"id": "apprentice_stave", "name": "Apprentice Stave", "slot": "weapon", "primary_stat": "int", "base": {"str": 2, "dex": 4, "con": 2, "int": 8}, "base_mult": 1.0, "metal": "iron", "set_id": null},
+    {"id": "buckler", "name": "Buckler", "slot": "offhand", "primary_stat": "con", "base_mult": 1.0, "metal": "iron", "set_id": "valley_oath"},
+    {"id": "tower_shield", "name": "Tower Shield", "slot": "offhand", "primary_stat": "con", "base_mult": 1.25, "metal": "bronze", "set_id": "iron_ward"},
+    {"id": "bulwark", "name": "Bulwark", "slot": "offhand", "primary_stat": "con", "base_mult": 1.45, "metal": "steel", "set_id": null},
+    {"id": "leather_cap", "name": "Leather Cap", "slot": "head", "primary_stat": "con", "base_mult": 1.0, "metal": "iron", "set_id": "valley_oath"},
+    {"id": "banded_helm", "name": "Banded Helm", "slot": "head", "primary_stat": "con", "base_mult": 1.2, "metal": "bronze", "set_id": "iron_ward"},
+    {"id": "crown_helm", "name": "Crown Helm", "slot": "head", "primary_stat": "con", "base_mult": 1.4, "metal": "silver", "set_id": "sorcerer_relic"},
+    {"id": "mail_shirt", "name": "Mail Shirt", "slot": "chest", "primary_stat": "con", "base_mult": 1.0, "metal": "bronze", "set_id": "iron_ward"},
+    {"id": "chainmail", "name": "Chainmail", "slot": "chest", "primary_stat": "con", "base_mult": 1.2, "metal": "steel", "set_id": "iron_ward"},
+    {"id": "plate_breastplate", "name": "Plate Breastplate", "slot": "chest", "primary_stat": "con", "base_mult": 1.45, "metal": "gold", "set_id": null},
+    {"id": "padded_gloves", "name": "Padded Gloves", "slot": "gloves", "primary_stat": "dex", "base_mult": 1.0, "metal": "iron", "set_id": null},
+    {"id": "padded_boots", "name": "Padded Boots", "slot": "boots", "primary_stat": "dex", "base_mult": 1.0, "metal": "iron", "set_id": "valley_oath"},
+    {"id": "travel_charm", "name": "Travel Charm", "slot": "neck", "primary_stat": "wis", "base_mult": 1.0, "metal": "iron", "set_id": "ranger_trail"},
+    {"id": "warded_charm", "name": "Warded Charm", "slot": "neck", "primary_stat": "wis", "base_mult": 1.25, "metal": "silver", "set_id": "sorcerer_relic"},
+    {"id": "signet_ring", "name": "Signet Ring", "slot": "ring", "primary_stat": "int", "base_mult": 1.0, "metal": "bronze", "set_id": "ranger_trail"},
+    {"id": "gem_ring", "name": "Gem Ring", "slot": "ring", "primary_stat": "int", "base_mult": 1.25, "metal": "gold", "set_id": "sorcerer_relic"}
+  ],
+
+  "upgrades": {
+    "max_level": 5,
+    "cost_base": 100,
+    "cost_per_level": 40,
+    "cost_formula": "cost = round((cost_base + cost_per_level * (target_level - 1)) * level_band.upgrade_cost_mult)",
+    "level_table": [
+      {"level": 1, "cost": 100, "success_chance": 0.95, "downgrade_chance": 0.35, "endurance_loss_min": 1, "endurance_loss_max": 3, "note": "first pull is safe, a failure only burns condition"},
+      {"level": 2, "cost": 140, "success_chance": 0.90, "downgrade_chance": 0.35, "endurance_loss_min": 1, "endurance_loss_max": 4, "note": "failure can still wipe the item back to +0"},
+      {"level": 3, "cost": 180, "success_chance": 0.82, "downgrade_chance": 0.32, "endurance_loss_min": 2, "endurance_loss_max": 5, "note": "past this point the tax bites"},
+      {"level": 4, "cost": 220, "success_chance": 0.70, "downgrade_chance": 0.28, "endurance_loss_min": 3, "endurance_loss_max": 7, "note": "one failure in three sends the item back a level"},
+      {"level": 5, "cost": 260, "success_chance": 0.55, "downgrade_chance": 0.20, "endurance_loss_min": 5, "endurance_loss_max": 10, "note": "the last pull, and the one that opens the sockets"}
+    ],
+    "failure": {
+      "downgrade_chance": 0.35,
+      "max_endurance_loss": 10,
+      "min_endurance_loss": 1,
+      "rule": "a failed attempt always burns max endurance by a whole number rolled uniformly in [min_endurance_loss, max_endurance_loss]; the per level row above gives the tighter range and the chance of also losing a level",
+      "cap_rule": "effective downgrade chance = min(level row, failure.downgrade_chance); effective loss range = level row range clamped to [failure.min_endurance_loss, failure.max_endurance_loss]",
+      "downgrade_effect": "the item loses one upgrade level; a downgrade from +1 leaves it at +0",
+      "endurance_effect": "the loss is permanent: max_endurance drops by the rolled amount and endurance is clamped to the new max",
+      "on_success": "the level goes up by one and the item keeps every stat; upgrades multiply the stats, they never re-roll them",
+      "on_failure_cost": "the coin and the material are spent even when the attempt fails"
+    },
+    "sockets_open_at_level": 5,
+    "metal_consumed_per_attempt": 1,
+    "metal_rule": "an upgrade attempt consumes one unit of the item's own metal; the metal is chosen when the item is forged and never changes, so refining iron burns iron and refining cobalt burns cobalt"
+  },
+
+  "metals": [
+    {"id": "iron", "cost": 10, "quality": 1},
+    {"id": "bronze", "cost": 30, "quality": 2},
+    {"id": "steel", "cost": 60, "quality": 3},
+    {"id": "silver", "cost": 110, "quality": 4},
+    {"id": "gold", "cost": 190, "quality": 5},
+    {"id": "cobalt", "cost": 320, "quality": 6}
+  ],
+  "metal_rule": {
+    "quality_order": "iron < bronze < steel < silver < gold < cobalt, by the quality field",
+    "stat_multiplier": "stat_multiplier = 1 + 0.08 * (quality - 1); it scales the base, so it moves the numbers and not the grade",
+    "endurance_bonus": "+10 max endurance per quality step above iron",
+    "upgrade_cost": "an upgrade attempt costs the metal's own cost on top of the level table coin cost"
+  },
+
+  "sockets": {
+    "per_item_max": 3,
+    "gem_sizes": [1, 2, 3, 4],
+    "open_at_upgrade_level": 5,
+    "count_by_grade": {"F": 0, "D": 0, "C": 1, "B": 1, "A": 2, "AA": 2, "AAA": 3},
+    "gem_types": [
+      {"id": "ruby", "name": "Ruby", "stat": "str", "mode": "flat", "values": [2, 5, 10, 20]},
+      {"id": "sunstone", "name": "Sunstone", "stat": "str", "mode": "pct", "values": [3, 6, 12, 22]},
+      {"id": "sapphire", "name": "Sapphire", "stat": "dex", "mode": "flat", "values": [2, 5, 10, 20]},
+      {"id": "aquamarine", "name": "Aquamarine", "stat": "dex", "mode": "pct", "values": [3, 6, 12, 22]},
+      {"id": "emerald", "name": "Emerald", "stat": "con", "mode": "flat", "values": [3, 6, 12, 24]},
+      {"id": "jade", "name": "Jade", "stat": "con", "mode": "pct", "values": [3, 7, 13, 24]},
+      {"id": "amethyst", "name": "Amethyst", "stat": "int", "mode": "flat", "values": [2, 5, 10, 20]},
+      {"id": "quartz", "name": "Quartz", "stat": "int", "mode": "pct", "values": [3, 6, 12, 22]},
+      {"id": "pearl", "name": "Pearl", "stat": "wis", "mode": "flat", "values": [2, 5, 10, 20]},
+      {"id": "moonstone", "name": "Moonstone", "stat": "wis", "mode": "pct", "values": [3, 6, 12, 22]},
+      {"id": "obsidian", "name": "Obsidian Shard", "stat": "atk_pct", "mode": "flat", "values": [2, 4, 8, 15]},
+      {"id": "crystal", "name": "Crystal", "stat": "hp", "mode": "flat", "values": [20, 60, 140, 300]},
+      {"id": "amber", "name": "Amber", "stat": "crit_pct", "mode": "flat", "values": [1, 2, 4, 7]},
+      {"id": "opal", "name": "Opal", "stat": "drop_pct", "mode": "flat", "values": [1, 2, 4, 8]}
+    ],
+    "rules": {
+      "one_gem_per_socket": "a socket holds exactly one gem; a gem cannot be shared between sockets",
+      "open_at": "sockets open only when the item reaches upgrade level 5",
+      "count_by_grade": "F and D items get none, C and B get one, A and AA get two, AAA gets three",
+      "capacity": "a socket accepts a gem of size 1..level_band.socket_capacity; a big gem needs a high level item",
+      "mode": "flat gems add a whole number to the stat, pct gems add a percentage of the wearer's stat",
+      "removal": "a gem can be taken out for free but the socket stays empty; sockets never close"
+    }
+  },
+
+  "sets": [
+    {"id": "valley_oath", "name": "Oath of the Valley", "items": ["short_sword", "buckler", "leather_cap", "padded_boots"]},
+    {"id": "iron_ward", "name": "Iron Ward", "items": ["mail_shirt", "banded_helm", "tower_shield", "padded_gloves"]},
+    {"id": "ranger_trail", "name": "Ranger Trail", "items": ["scout_bow", "padded_boots", "travel_charm", "signet_ring"]},
+    {"id": "sorcerer_relic", "name": "Sorcerer Relic", "items": ["rune_bow", "crown_helm", "warded_charm", "gem_ring"]}
+  ],
+
+  "set_bonuses": [
+    {"id": "valley_oath_2", "set_id": "valley_oath", "pieces": 2, "bonus": {"str": 2}},
+    {"id": "valley_oath_3", "set_id": "valley_oath", "pieces": 3, "bonus": {"str": 2, "con": 2}},
+    {"id": "valley_oath_4", "set_id": "valley_oath", "pieces": 4, "bonus": {"str": 4, "con": 4}},
+    {"id": "iron_ward_2", "set_id": "iron_ward", "pieces": 2, "bonus": {"con": 3}},
+    {"id": "iron_ward_3", "set_id": "iron_ward", "pieces": 3, "bonus": {"con": 3, "hp": 30}},
+    {"id": "iron_ward_4", "set_id": "iron_ward", "pieces": 4, "bonus": {"con": 6, "hp": 60}},
+    {"id": "ranger_trail_2", "set_id": "ranger_trail", "pieces": 2, "bonus": {"dex": 3}},
+    {"id": "ranger_trail_3", "set_id": "ranger_trail", "pieces": 3, "bonus": {"dex": 3, "wis": 2, "move_pct": 5}},
+    {"id": "sorcerer_relic_2", "set_id": "sorcerer_relic", "pieces": 2, "bonus": {"int": 3}},
+    {"id": "sorcerer_relic_3", "set_id": "sorcerer_relic", "pieces": 3, "bonus": {"int": 3, "wis": 3}},
+    {"id": "sorcerer_relic_4", "set_id": "sorcerer_relic", "pieces": 4, "bonus": {"int": 5, "wis": 5, "mp": 40}}
+  ],
+  "set_rule": "the row with the highest pieces count that the wearer satisfies wins; the bonus stacks on top of the item stats and is not a grade",
+
+  "condition": {
+    "max_endurance_by_slot": {"weapon": 100, "offhand": 90, "head": 70, "chest": 110, "gloves": 60, "boots": 70, "ring": 40, "neck": 45},
+    "max_endurance_formula": "max_endurance = round(slot value * level_band.endurance_mult) + 10 * (metal quality - 1)",
+    "death_cost": "on death every equipped item loses 10 percent of its max endurance, at least 1; no xp is lost",
+    "break_rule": "when endurance hits 0 the item is broken: max_endurance drops by 1 for good and endurance is set to max_endurance - 1",
+    "repair_rule": "a broken item is repaired at a smith for a coin cost of 30 percent of its max endurance; the permanent loss never comes back"
+  },
+
+  "drops": [
+    {"id": "short_sword", "grade": "C", "weight": 28, "source": "south_valley", "level_band": "L1", "qty": 1},
+    {"id": "scout_blade", "grade": "D", "weight": 22, "source": "south_valley", "level_band": "L1", "qty": 1},
+    {"id": "buckler", "grade": "D", "weight": 16, "source": "south_valley", "level_band": "L1", "qty": 1},
+    {"id": "leather_cap", "grade": "D", "weight": 14, "source": "south_valley", "level_band": "L1", "qty": 1},
+    {"id": "padded_boots", "grade": "D", "weight": 10, "source": "south_valley", "level_band": "L1", "qty": 1},
+    {"id": "travel_charm", "grade": "F", "weight": 10, "source": "south_valley", "level_band": "L1", "qty": 1},
+
+    {"id": "hatchet", "grade": "C", "weight": 26, "source": "north_valley", "level_band": "L1", "qty": 1},
+    {"id": "apprentice_stave", "grade": "D", "weight": 20, "source": "north_valley", "level_band": "L1", "qty": 1},
+    {"id": "leather_cap", "grade": "D", "weight": 18, "source": "north_valley", "level_band": "L1", "qty": 1},
+    {"id": "padded_gloves", "grade": "D", "weight": 14, "source": "north_valley", "level_band": "L1", "qty": 1},
+    {"id": "scout_bow", "grade": "C", "weight": 12, "source": "north_valley", "level_band": "L1", "qty": 1},
+    {"id": "signet_ring", "grade": "F", "weight": 10, "source": "north_valley", "level_band": "L1", "qty": 1},
+
+    {"id": "short_sword", "grade": "B", "weight": 30, "source": "south_valley", "level_band": "L2", "qty": 1},
+    {"id": "buckler", "grade": "C", "weight": 25, "source": "south_valley", "level_band": "L2", "qty": 1},
+    {"id": "mail_shirt", "grade": "C", "weight": 20, "source": "south_valley", "level_band": "L2", "qty": 1},
+    {"id": "padded_boots", "grade": "C", "weight": 15, "source": "south_valley", "level_band": "L2", "qty": 1},
+    {"id": "travel_charm", "grade": "D", "weight": 10, "source": "south_valley", "level_band": "L2", "qty": 1},
+
+    {"id": "hatchet", "grade": "B", "weight": 30, "source": "north_valley", "level_band": "L2", "qty": 1},
+    {"id": "apprentice_stave", "grade": "C", "weight": 22, "source": "north_valley", "level_band": "L2", "qty": 1},
+    {"id": "mail_shirt", "grade": "C", "weight": 20, "source": "north_valley", "level_band": "L2", "qty": 1},
+    {"id": "padded_gloves", "grade": "C", "weight": 16, "source": "north_valley", "level_band": "L2", "qty": 1},
+    {"id": "scout_bow", "grade": "B", "weight": 12, "source": "north_valley", "level_band": "L2", "qty": 1},
+
+    {"id": "longsword", "grade": "B", "weight": 24, "source": "central_basin", "level_band": "L2", "qty": 1},
+    {"id": "tower_shield", "grade": "B", "weight": 18, "source": "central_basin", "level_band": "L2", "qty": 1},
+    {"id": "chainmail", "grade": "B", "weight": 20, "source": "central_basin", "level_band": "L2", "qty": 1},
+    {"id": "scout_bow", "grade": "B", "weight": 12, "source": "central_basin", "level_band": "L2", "qty": 1},
+    {"id": "banded_helm", "grade": "C", "weight": 14, "source": "central_basin", "level_band": "L2", "qty": 1},
+    {"id": "signet_ring", "grade": "C", "weight": 12, "source": "central_basin", "level_band": "L2", "qty": 1},
+
+    {"id": "longsword", "grade": "A", "weight": 22, "source": "central_basin", "level_band": "L3", "qty": 1},
+    {"id": "tower_shield", "grade": "A", "weight": 16, "source": "central_basin", "level_band": "L3", "qty": 1},
+    {"id": "chainmail", "grade": "A", "weight": 20, "source": "central_basin", "level_band": "L3", "qty": 1},
+    {"id": "war_axe", "grade": "A", "weight": 14, "source": "central_basin", "level_band": "L3", "qty": 1},
+    {"id": "warded_charm", "grade": "B", "weight": 14, "source": "central_basin", "level_band": "L3", "qty": 1},
+    {"id": "gem_ring", "grade": "B", "weight": 14, "source": "central_basin", "level_band": "L3", "qty": 1},
+
+    {"id": "greatsword", "grade": "AA", "weight": 20, "source": "central_basin", "level_band": "L4", "qty": 1},
+    {"id": "bulwark", "grade": "A", "weight": 16, "source": "central_basin", "level_band": "L4", "qty": 1},
+    {"id": "plate_breastplate", "grade": "AA", "weight": 22, "source": "central_basin", "level_band": "L4", "qty": 1},
+    {"id": "rune_bow", "grade": "AA", "weight": 12, "source": "central_basin", "level_band": "L4", "qty": 1},
+    {"id": "crown_helm", "grade": "A", "weight": 14, "source": "central_basin", "level_band": "L4", "qty": 1},
+    {"id": "gem_ring", "grade": "A", "weight": 16, "source": "central_basin", "level_band": "L4", "qty": 1},
+
+    {"id": "chainmail", "grade": "A", "weight": 22, "source": "open_boss", "level_band": "L3", "qty": 1},
+    {"id": "longsword", "grade": "A", "weight": 20, "source": "open_boss", "level_band": "L3", "qty": 1},
+    {"id": "tower_shield", "grade": "A", "weight": 16, "source": "open_boss", "level_band": "L3", "qty": 1},
+    {"id": "war_axe", "grade": "AA", "weight": 14, "source": "open_boss", "level_band": "L3", "qty": 1},
+    {"id": "warded_charm", "grade": "A", "weight": 14, "source": "open_boss", "level_band": "L3", "qty": 1},
+    {"id": "gem_ring", "grade": "B", "weight": 14, "source": "open_boss", "level_band": "L3", "qty": 1},
+
+    {"id": "greatsword", "grade": "AAA", "weight": 18, "source": "open_boss", "level_band": "L4", "qty": 1},
+    {"id": "bulwark", "grade": "AA", "weight": 16, "source": "open_boss", "level_band": "L4", "qty": 1},
+    {"id": "plate_breastplate", "grade": "AAA", "weight": 18, "source": "open_boss", "level_band": "L4", "qty": 1},
+    {"id": "rune_bow", "grade": "AAA", "weight": 14, "source": "open_boss", "level_band": "L4", "qty": 1},
+    {"id": "crown_helm", "grade": "AA", "weight": 16, "source": "open_boss", "level_band": "L4", "qty": 1},
+    {"id": "gem_ring", "grade": "AA", "weight": 18, "source": "open_boss", "level_band": "L4", "qty": 1}
+  ],
+
+  "drop_rules": {
+    "grouping": "rows are grouped by (source, level_band); the weights of one group add up to 100, so a weight is a percent",
+    "pick": "pick one row by weight, then roll that row's grade into a whole number percent for every stat of the item, inside the band of the row's grade",
+    "roll_rule": "the primary stat rolls in the top third of the band, the other stats roll anywhere in the band",
+    "grade_to_value": "value = round(base_adj * (1 + pct / 100)), base_adj = base * (1 + 0.12 * upgrade_level)",
+    "sources": {
+      "south_valley": "first starter valley, low levels",
+      "north_valley": "second starter valley, low levels",
+      "central_basin": "the contested middle, mid and high levels",
+      "open_boss": "open world bosses, the best gear in the open map"
+    }
+  }
+}

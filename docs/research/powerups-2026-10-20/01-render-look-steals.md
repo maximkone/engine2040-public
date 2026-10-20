@@ -1,0 +1,63 @@
+# 01 - Render look steals: the GPU lit frame and the 2040 look (2026-10-20)
+
+**Answer.** The lit frame needs four donors, not twenty. The tree has no GPU motion-vector target
+(`crates/render/src/post/gpu.rs` takes a CPU `MotionField`, OBSERVED 2026-10-20), no normal buffer
+(`crates/render/src/gtao.rs:680 live_facing_normal` derives facing normals from depth differences),
+no indirect draw in the live path (`git grep draw_indexed_indirect crates/render/src` hits only the
+comment in `gpu_cull.rs:10`), no shadow atlas (`git grep -i atlas crates/render/src` finds only the
+crowd, glyph and decal atlases) and no debug-draw caller (`git grep DebugDraw crates/` hits
+`debug_draw.rs` and `lib.rs` only). The three donors that close the most are **Falcor** (BSD-3-Clause:
+velocity buffer, TAA v2, G-buffer prepass), **schell/renderling** (MIT OR Apache-2.0: Rust + wgpu
+GPU-driven cull and indirect args, debug overlay) and **TheRealMJP/Shadows + sirhco/verve**
+(MIT + Apache-2.0: shadow atlas, cascades, PCF kernels). Clouds (**AmanSachan1/Meteoros**, MIT) and
+dynamic GI without a bake (**AMD FSR SDK radiance cache**, MIT) are the two new Tier C gifts.
+Everything else in the hunt area was already mined (see Rejections).
+
+## Ranked steals
+
+| # | What it is | Donor + URL + date read | License | Fills (engine2040 row id) | What exactly to port (donor file path) | Cost S/M/L | Kill line | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| 1 | GPU motion-vector (velocity) target, written in the forward pass | NVIDIAGameWorks/Falcor, https://github.com/NVIDIAGameWorks/Falcor, read 2026-10-20 | BSD-3-Clause (LICENSE.md read live; NVIDIA copyright, 3 clauses) | LF5 (Tier A, TAA slice 1) and RL37 (fighter motion vectors) | `Source/RenderPasses/GBuffer/VBuffer/VBufferRaster.slang` (raster path) and `Source/RenderPasses/GBuffer/VBuffer/VBufferRT.slang` (RT path): one velocity target next to the depth target, written from current and previous clip position | M | LF5 GPU test: the camera pan misses the analytic shift by more than 0.1 px, or the forward pass grows by more than 0.3 ms at 1080p on the RTX 3050 -> the velocity target dies and TAA stays off | PORT |
+| 2 | TAA v2 resolve: velocity reprojection, neighbourhood clamp, Catmull-Rom history | NVIDIAGameWorks/Falcor, same repo, read 2026-10-20 | BSD-3-Clause (read live) | RL38 (TAA v2 with upsample), helps LF5 | `Source/RenderPasses/TAA/TAA.ps.slang` (5.8 KB, read): reads `gTexMotionVec`, Catmull-Rom history sample, colour box sigma `gColorBoxSigma`, anti-flicker `gAntiFlicker`. Port the shape into `crates/render/src/post/taa.rs` and `crates/render/src/shaders/post/taa_compute.wgsl`; our three TAA copies collapse to one | M | RL38 `gpu_taa_sword_sweep` ghost trail still above 0.10 on the 120 px blade sweep after two tuning rounds -> keep the 3x3 box clamp and drop the Catmull-Rom and the anti-flicker | PORT |
+| 3 | Depth plus normal prepass (the normal buffer the frame lacks) | NVIDIAGameWorks/Falcor, same repo, read 2026-10-20 | BSD-3-Clause (read live) | RL41 (depth prepass, GTAO on it, AO into ambient only) and gap B7 "a depth and normal prepass" | `Source/RenderPasses/GBuffer/GBuffer/GBufferRT.slang` (target layout) and `Source/RenderPasses/GBuffer/GBuffer/DepthPass.3d.slang`: one depth-only vertex stage plus one normal target, read by the GTAO kernel instead of the depth-difference normal | M | Forward plus prepass is not at least 10 percent below the old forward p50 at 1080p -> keep the depth-only prepass that LF3 landing 2 already has and drop the normal target | PORT |
+| 4 | GPU-driven cull, indirect draw args and a Rust wgpu debug overlay | schell/renderling, https://github.com/schell/renderling, read 2026-10-20 | MIT OR Apache-2.0 (LICENSE read live: "dual-licensed under either") | GS18b (draws go indirect) plus RL60 and RL32 (binned draws, DrawItem transform); gap B7 "cull, sort and instancing in the live draw loop" | `crates/renderling/src/draw.rs` (`DrawIndirectArgs {vertex_count, instance_count, first_vertex, first_instance}`) and `crates/renderling/src/cull/shader.rs` (cull writes `instance_count = 0` on the indirect arg). The compute is rust-gpu, so port the shape to WGSL only | M | DX12 drops `first_instance` on count draws (wgpu-hal 30.0.1 dx12/command.rs, already in our docs) -> the indirect path stays off and the CPU bins win; or the GPU cull answer misses the CPU oracle on 10,000 spheres -> row dies | PORT |
+| 5 | Sun shadows the frame samples: static arena map, dynamic fighter map, PCF kernels, cascades in one atlas | TheRealMJP/Shadows, https://github.com/TheRealMJP/Shadows, read 2026-10-20, plus sirhco/verve, https://github.com/sirhco/verve, read 2026-10-20 | MIT (TheRealMJP/Shadows LICENSE read live) and Apache-2.0 (verve LICENSE read live, Apache 2.0 text) | RL35 (static arena map + dynamic fighter map, texel-snapped, PCF) and QA4 (arena sun with 2 cascades) | `Shadows/PCFKernels.hlsl` (3.9 KB), `Shadows/DrawCascades.hlsl`, `Shadows/DepthReduction.hlsl` from MJP; `src/client/islands/GlSceneWebgpu.zig` from verve for the atlas layout in a WebGPU backend | M | RL35 accept fails: shadow passes above 1.0 ms in `arena per-pass`, or the static map re-renders more than once per 600 frames, or the edge moves more than one texel for a 10 degree pan -> row dies | PORT |
+| 6 | Volumetric clouds and cloud reprojection (Nubis shape) | AmanSachan1/Meteoros, https://github.com/AmanSachan1/Meteoros, read 2026-10-20 | MIT (LICENSE read live: "MIT License, Copyright (c) 2017 Aman Sachan") | VX2 (volumetric clouds and weather sky) | `src/CloudScapes/shaders/cloudRayMarch.comp` and `src/CloudScapes/shaders/reprojection.comp` (GLSL compute; read the file list live) | L | The cloud pass costs more than 1.5 ms at 1080p on the RTX 3050, or the sky costs more than the whole rest of the frame -> VX2 stays Tier C and unbuilt | PORT |
+| 7 | Radiance cache for direct and indirect light with no bake | AMD FSR SDK 2.3.0 "Redstone", https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, read 2026-10-20 | MIT (header read live in `ffx_frameinterpolation.h`: "Copyright (C) 2026 Advanced Micro Devices, Inc." plus the MIT grant) | RT4 (dynamic GI with no bake) and RT8 (probe-grid GI for Base) | `Kits/FidelityFX/radiancecache/include/ffx_radiancecache.h` (7.3 KB) and `ffx_radiancecache.hpp`: one radiance cache that feeds the day-to-night sweep | M | The sweep misses its 2.5 ms budget on the reference GPU, or the tunnel leak test fails with the cache on -> RT4 keeps its bake fallback and this donor waits | PORT |
+| 8 | Per-pass report from the frame graph (one named scope per pass) | NVIDIAGameWorks/Falcor, same repo, read 2026-10-20 | BSD-3-Clause (read live) | PF25 (GPU time on every production pass) and the "pass report" idea for the frame graph | `Source/Falcor/RenderGraph/RenderGraphExe.cpp`: every pass in the execution list runs inside `FALCOR_PROFILE(ctx.pRenderContext, pass.name)`, so the frame prints one line per pass in declaration order | S | The dump changes the sim hash or a digest, or the CSV still has fewer than 12 production pass rows after the change -> row dies | PORT |
+| 9 | Spatiotemporal denoiser for the ray-traced passes | NVIDIAGameWorks/Falcor, same repo, read 2026-10-20 | BSD-3-Clause (read live) | RT6 (engine denoiser, SVGF and ReBLUR shape) | `Source/RenderPasses/SVGFPass/SVGFReproject.ps.slang` (8.6 KB), `SVGFAtrous.ps.slang`, `SVGFFilterMoments.ps.slang` | M | RT6 needs RT7 fixtures that do not exist yet, and the RT tier is parked (RT4 and RT8 carry a LATER line) -> read it, port it later | RESEARCH-ONLY |
+| 10 | Frame generation (interpolation) | AMD FSR SDK 2.3.0, same repo, read 2026-10-20 | MIT (header read live) | no row, propose a new row "FG1 frame generation" | `Kits/FidelityFX/framegeneration/fsr3/include/ffx_frameinterpolation.h` (24.9 KB, version 3.1.6) plus `ffx_opticalflow.h`: the interface, not the flow | L | No optical-flow provider in the tree: AMD's flow is host supplied and the NVIDIA Optical Flow SDK is proprietary -> the row dies on arrival, keep the interface idea only | RESEARCH-ONLY |
+| 11 | Debug overlay and debug views in Rust on wgpu | schell/renderling, same repo, read 2026-10-20 | MIT OR Apache-2.0 (read live) | RL59 (renderer debug views through the door capture) and part of RL58 (debug draw) | `crates/renderling/src/debug.rs` (the shader module) and `crates/renderling/src/debug/cpu.rs` (the wgpu pipeline, a full-screen overlay that reads the slab and the draw args) | S | A debug view must be byte-equal with it off; if the overlay changes the capture bytes when off, the row dies | PORT |
+| 12 | Hair and strand shading with linearly transformed cosines | selfshadow/ltc_code, https://github.com/selfshadow/ltc_code, read 2026-10-20 | BSD-3-Clause (LICENSE read live, with the paper reference as a condition) | VX3 (skin subsurface scattering, eye shading, hair cards with anisotropic shading) | `webgl/` and `fit/` folders hold the LTC tables and the fit code; port the anisotropic lobe into the material path | S | VX3 is Tier C and the proof game has no hair cards -> read it now, port it when VX3 unpark | RESEARCH-ONLY |
+
+## Rejections
+
+Checked and dropped, so nobody re-mines them:
+
+- GTAO and SSAO: Bevy GTAO plus XeGTAO are already named (lighting.md, post.md) and `crates/render/src/gtao.rs` is engine-owned with its own oracle. No new donor needed.
+- TAA upscale, RCAS and EASU: pmndrs/upscaler and FidelityFX FSR3 are already named (post.md row 5). No second copy.
+- Bloom, exposure, grade, lens, dither, auto exposure, motion blur, DoF, SMAA: Bevy post crates plus FidelityFX-SDK lens are already named (post.md rows 1, 3, 6, 7, 8, 11, 13).
+- Froxel volumetric fog and shafts: godot `volumetric_fog_process.glsl` is already named (atmos.md row 5). VX1 stays as it is.
+- Decals drawn in the scene: Bevy forward decals are already named (atmos.md header) and `crates/render/src/decals.rs` owns the pool.
+- Screen-space reflections: Bevy SSR raymarch is already on board row RT19 (steals-2026-10-18 Known). verve `src/client/islands/GlSsr.zig` is a second copy of the same row, so it is listed but not ranked.
+- Shadow cascades: Bevy `cascade.rs` and the fit math are already named (post.md row 2). Only the atlas layout (verve) and the PCF kernels (MJP) are new, so they share one row.
+- Meshlets and virtual geometry: VG rows are frozen and the plan cuts meshlets without a profile. Falcor meshlet support was not read.
+- Frame pacing and latency: wgpu present mode plus Fifo is already named (gpu.md steal 1) and OPT35 needs no other donor. No new donor found today.
+- Pass report data model: `crates/render/src/pass_report.rs` already exists, donor uinosoft/zenfg plus Themaister/Granite. Only the per-pass timing scope was missing and that is row 8.
+- NVIDIA RTX SDK family (RTXDI, NRD, RTXGI, Reflex): the LICENSE read live is the NVIDIA RTX SDKs license, not open source. PROPRIETARY, research only.
+- EmbarkStudios/kajiya: archived 2026-06-01 and already cited for temporal and irradiance cache (RESEARCH-VERDICT, VISION-TABLES).
+- veloren/veloren: GPL-3.0, copyleft risk. Already known, not re-ranked.
+- Skin subsurface scattering and eye shading: no MIT or Apache donor found today. Unity HDRP is proprietary, Blender is GPL, Godot and Filament are already mined. VX3 hair only.
+- Unreal, Unity, Godot, Filament, Flax, Stride, O3DE, Bevy, meshoptimizer: named in RULES.md, skipped.
+
+## Top 3
+
+1. **NVIDIAGameWorks/Falcor** - https://github.com/NVIDIAGameWorks/Falcor - BSD-3-Clause, read live 2026-10-20.
+   Closes LF5 (GPU motion-vector target) and RL38 (TAA v2) and RL41 (normal prepass for gap B7).
+   Cost M. Port the shapes: `Source/RenderPasses/GBuffer/VBuffer/VBufferRT.slang`, `Source/RenderPasses/TAA/TAA.ps.slang`, `Source/RenderPasses/GBuffer/GBuffer/DepthPass.3d.slang`.
+2. **schell/renderling** - https://github.com/schell/renderling - MIT OR Apache-2.0, read live 2026-10-20.
+   Closes GS18b plus RL60 and RL32, the cull, sort and instancing half of gap B7, and gives RL59 a debug overlay in Rust on wgpu.
+   Cost M. Port the shapes: `crates/renderling/src/draw.rs`, `crates/renderling/src/cull/shader.rs`, `crates/renderling/src/debug/cpu.rs`.
+3. **TheRealMJP/Shadows** - https://github.com/TheRealMJP/Shadows (with sirhco/verve, https://github.com/sirhco/verve) - MIT and Apache-2.0, read live 2026-10-20.
+   Closes RL35 (static arena map plus dynamic fighter map with PCF) and QA4 (arena sun with 2 cascades).
+   Cost M. Port the shapes: `Shadows/PCFKernels.hlsl`, `Shadows/DrawCascades.hlsl`, and the atlas layout in `src/client/islands/GlSceneWebgpu.zig`.

@@ -381,6 +381,17 @@ export const HASH_CONST = /0x0*(?:cbf29ce484222325|100000001b3|811c9dc5|1000193|
 export const CAST = /\bas\s+(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64)\b/g;
 const PUB_ITEM = /^\s*pub\s+(?:(?:const|async|unsafe|extern\s+"[^"]*")\s+)*(?:fn|struct|enum|trait|type|const|static|union)\b/;
 const WAIVER = /\b(?:det-ok|alloc-ok):/;
+// Cheap necessary condition for a board row id in a comment: an upper-case
+// letter followed by digits. The full id pattern needs the same shape, so the
+// hint never drops a real id (E51: it skips the id scan on most comments).
+const BOARD_ID_HINT = /[A-Z][A-Z0-9]*\d/;
+
+// Owner order inside a clone group: engine-core first, then path order. The
+// comparison is plain, not localeCompare, so the owner does not depend on the
+// machine's locale (E51: the first sort call paid ~25 ms for ICU data).
+export function compareCloneMembers(a, b) {
+  return (b.core - a.core) || (a.at < b.at ? -1 : a.at > b.at ? 1 : 0);
+}
 
 export function boardIds(root = ".") {
   const path = join(root, "docs", "SPRINT.md");
@@ -408,7 +419,7 @@ export function analyzeFile(text, kind, ids = new Set()) {
     const c = lines[l];
     const note = comments[l] ?? "";
     if (/#\[test\]|#\[(?:tokio::)?test\b/.test(c)) m.tests++;
-    if (ids.size && note) {
+    if (ids.size && note && BOARD_ID_HINT.test(note)) {
       const named = note.match(/\b[A-Z][A-Z0-9]*\d+[a-z]?\b/g) ?? [];
       if (named.some((t) => ids.has(t))) hit("board_ids", l);
     }
@@ -490,6 +501,8 @@ function walk(dir) {
 }
 
 export function packages(root = ".") {
+  const cached = packageCache.get(root);
+  if (cached) return cached;
   const pkgs = [];
   const crates = join(root, "crates");
   for (const dir of existsSync(crates) ? readdirSync(crates).sort() : []) {
@@ -499,8 +512,13 @@ export function packages(root = ".") {
     pkgs.push({ name, dir: join(crates, dir), roots: [""] });
   }
   pkgs.push({ name: "engine2040", dir: root, roots: ["src", "tests", "examples", "benches"] });
+  packageCache.set(root, pkgs);
   return pkgs;
 }
+
+// The package list is read once per root per process (E51: the crate-filtered
+// run read every manifest twice - once to measure, once for the orphan check).
+const packageCache = new Map();
 
 // A file whose first item, after comments, is `#![cfg(test)]` compiles only
 // into test builds: a test helper module counts as test code like tests.rs.
@@ -619,7 +637,10 @@ export function measure(root = ".", filter = null, useCache = true) {
   // every other member counts against its crate.
   const groups = [...cloneIndex.values()].filter((g) => g.length > 1);
   for (const g of groups) {
-    g.sort((a, b) => (b.core - a.core) || a.at.localeCompare(b.at));
+    // Plain comparison, not localeCompare: the order must not depend on the
+    // machine's locale, and the first sort call paid ~25 ms for ICU data
+    // (E51). Same order on the current tree (28 groups, checked).
+    g.sort(compareCloneMembers);
     for (const member of g.slice(1)) {
       const c = crates.get(member.crate);
       c.metrics.dup_fns++;

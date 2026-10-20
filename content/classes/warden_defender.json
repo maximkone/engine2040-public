@@ -1,0 +1,248 @@
+{
+  "id": "warden_defender",
+  "faction": "wardens",
+  "tier": 1,
+  "branch": "warden_fighter",
+  "role": "shield tank",
+  "growth": { "str": 1.5, "dex": 0, "con": 1.5, "int": 0, "wis": 0 },
+  "primary": ["str", "con"],
+  "playstyle": "Plant the shield between the party and the hit, let the share meter climb while the ally's bar stays flat, then spend 100 meter points on Bulwark Charge and a slam.",
+  "abilities": [
+    {
+      "id": "def_bulwark_stance",
+      "name": "Bulwark Stance",
+      "tier": 0,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0,
+      "cooldown": 12,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "damage taken -25% for 6 s",
+        "share meter fills x1.5 while active",
+        "move speed 60% while active"
+      ],
+      "notes": "The cheap anchor. It buys the redirect time and tells the ally the tank is taking the hits now."
+    },
+    {
+      "id": "def_shield_ram",
+      "name": "Shield Ram",
+      "tier": 0,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.2,
+      "radius": 0,
+      "cast": 0.2,
+      "cooldown": 8,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 24, "scale": "str" },
+      "effects": [
+        "slow 30% for 2 s",
+        "stagger 0.3 s"
+      ],
+      "notes": "Bottom of the strike line. Low damage, low cooldown, and the slow is the real value."
+    },
+    {
+      "id": "def_weight_of_the_line",
+      "name": "Weight of the Line",
+      "tier": 0,
+      "kind": "control",
+      "shape": "circle",
+      "range": 8,
+      "radius": 8,
+      "cast": 0.4,
+      "cooldown": 30,
+      "mana": 12,
+      "telegraph": "circle",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "aura on the caster, radius 8 m, 8 s",
+        "allies in the aura take 40% less damage for 8 s",
+        "60% of the damage they avoid is redirected to the caster",
+        "share meter +1 per 3 damage redirected",
+        "share meter decay pauses while the aura is up"
+      ],
+      "notes": "The 2026 fix in one ability: the share meter is visible under the health bar and climbs while the ally's bar stays flat, so the redirect reads as value. Global share rules: 0 to 100 points, decays 3 points per second while no share aura is up, and every 25 points gives the caster -2% damage taken (max -8%)."
+    },
+    {
+      "id": "def_cradle_sweep",
+      "name": "Cradle Sweep",
+      "tier": 1,
+      "kind": "melee",
+      "shape": "cone",
+      "range": 3.0,
+      "radius": 3.0,
+      "cast": 0.3,
+      "cooldown": 10,
+      "mana": 0,
+      "telegraph": "cone",
+      "damage": { "base": 34, "scale": "str" },
+      "effects": [
+        "120 degree cone",
+        "slow 40% for 3 s",
+        "hits every target in the cone"
+      ],
+      "notes": "First cone of the strike line. Two shields wide, so it catches a front pair, and the slow outlasts the swing."
+    },
+    {
+      "id": "def_oath_of_the_line",
+      "name": "Oath of the Line",
+      "tier": 1,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 10,
+      "radius": 10,
+      "cast": 0.4,
+      "cooldown": 45,
+      "mana": 20,
+      "telegraph": "circle",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "aura on the caster, radius 10 m, 10 s",
+        "allies in the aura take 50% less damage for 10 s",
+        "70% of the damage they avoid is redirected to the caster",
+        "share meter +1 per 2 damage redirected",
+        "share meter decay pauses while the aura is up",
+        "only one share aura can be up at a time; this replaces Weight of the Line"
+      ],
+      "notes": "The bigger share. Wider, deeper and faster filling than tier 0: 50% reduction and one point per two damage redirected."
+    },
+    {
+      "id": "def_shield_slam",
+      "name": "Shield Slam",
+      "tier": 2,
+      "kind": "melee",
+      "shape": "circle",
+      "range": 3.5,
+      "radius": 3.5,
+      "cast": 0.6,
+      "cooldown": 18,
+      "mana": 10,
+      "telegraph": "circle",
+      "damage": { "base": 58, "scale": "str" },
+      "effects": [
+        "slow 50% for 4 s",
+        "stagger 1.0 s",
+        "knockback 1.5 m"
+      ],
+      "notes": "The strike line goes area. The circle decal is on the floor for 0.8 s, so the enemy chooses to stand in it."
+    },
+    {
+      "id": "def_bulwark_charge",
+      "name": "Bulwark Charge",
+      "tier": 2,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 4.0,
+      "radius": 4.0,
+      "cast": 0.5,
+      "cooldown": 20,
+      "mana": 25,
+      "telegraph": "circle",
+      "damage": { "base": 84, "scale": "str" },
+      "effects": [
+        "not castable while the share meter is below 100 points; the button shows the meter as its cost",
+        "consumes 100 share meter points on cast",
+        "allies within 6 m gain +20% damage dealt for 6 s",
+        "knockback 1.5 m"
+      ],
+      "notes": "The meter payoff. This is why the redirect is worth taking hits for: 100 points buy a hit that hands the party 20% more damage."
+    },
+    {
+      "id": "def_iron_tide",
+      "name": "Iron Tide",
+      "tier": 3,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 5.0,
+      "radius": 5.0,
+      "cast": 0.8,
+      "cooldown": 26,
+      "mana": 18,
+      "telegraph": "circle",
+      "damage": { "base": 96, "scale": "str" },
+      "effects": [
+        "slow 60% for 4 s",
+        "stagger 1.2 s",
+        "knockback 3 m"
+      ],
+      "notes": "The room-clearing tier 3. Five metres of floor, and the knockback is what stops the second wave."
+    },
+    {
+      "id": "def_second_stand",
+      "name": "Second Stand",
+      "tier": 3,
+      "kind": "heal",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 1.0,
+      "cooldown": 45,
+      "mana": 30,
+      "telegraph": "none",
+      "damage": { "base": 130, "scale": "con" },
+      "effects": [
+        "heals the caster",
+        "restores 60 share meter points",
+        "damage taken -60% for 3 s",
+        "clears 1 debuff from the caster"
+      ],
+      "notes": "The damage block carries the heal amount, on the CON scale: 130 x (1 + 0.04 x (CON - 10)). It also puts 60 meter points back, so a bad redirect is a delayed Bulwark Charge, not a lost one."
+    },
+    {
+      "id": "def_hold_fast",
+      "name": "Hold Fast",
+      "tier": 4,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 6.0,
+      "radius": 6.0,
+      "cast": 1.0,
+      "cooldown": 60,
+      "mana": 35,
+      "telegraph": "circle",
+      "damage": { "base": 132, "scale": "str" },
+      "effects": [
+        "slow 70% for 5 s",
+        "stagger 1.5 s",
+        "knockback 4 m",
+        "damage taken -35% for 4 s"
+      ],
+      "notes": "Top of the strike line: 132 base, six metres of floor, and the tank is safer while it lands. One minute of cooldown, so it is a fight changer, not a rotation."
+    },
+    {
+      "id": "def_aegis_rite",
+      "name": "Aegis Rite",
+      "tier": 4,
+      "kind": "buff",
+      "shape": "circle",
+      "range": 12,
+      "radius": 12,
+      "cast": 0.6,
+      "cooldown": 90,
+      "mana": 45,
+      "telegraph": "circle",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        "aura on the caster, radius 12 m, 12 s",
+        "allies in the aura take 65% less damage for 12 s",
+        "80% of the damage they avoid is redirected to the caster",
+        "share meter +1 per 1 damage redirected",
+        "share meter cap rises from 100 to 150 points",
+        "allies in the aura gain +15% damage dealt for 12 s"
+      ],
+      "notes": "Top of the share line: 65% reduction, 12 m, one point per damage redirected and a 150 point cap. With this up a Bulwark Charge can be paid for twice."
+    }
+  ],
+  "loadout": {
+    "weapon": "arming sword",
+    "offhand": "heater shield"
+  },
+  "counters": ["warden_assassin", "warden_rogue", "ashkin_shadow", "warden_warrior", "ashkin_combatant", "ashkin_attacker", "ashkin_templar"],
+  "weakness": "Ranged and long-range casters ignore the aura: ashkin_gunner, ashkin_rune and warden_sorcerer all kill from outside the share aura, 12 m at its best, and warden_cleric plus ashkin_life out-heal anything the tank takes for itself."
+}

@@ -16,9 +16,11 @@
   #golden { position: fixed; left: 8px; top: 40px; z-index: 20; margin: 0; padding: 4px 8px; background: rgba(0, 0, 0, 0.75); border-left: 4px solid #888; border-radius: 3px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
   body[data-golden="ok"] #golden { border-left-color: #2fbf4a; }
   body[data-golden="mismatch"] #golden, body[data-golden="error"] #golden { border-left-color: #ff3b30; background: #b00020; color: #fff; font-size: 16px; font-weight: 700; }
-  #input, #audio { position: fixed; right: 8px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
+  #input, #audio, #audioworklet { position: fixed; right: 8px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
   #input { top: 8px; }
   #audio { top: 34px; }
+  /* A5: which sink plays the sound (worklet, the deprecated node, or none) and what it did. */
+  #audioworklet { top: 60px; }
   /* QW3/QW12: how the module arrived (bundle, bytes fetched, download, compile, first frame). */
   #load, #memory { position: fixed; right: 8px; top: 86px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; max-width: 60vw; white-space: pre-wrap; word-break: break-all; }
   #memory { top: 112px; }
@@ -43,7 +45,7 @@
   body[data-play] #keys { display: block; }
   body[data-play] #fight { position: fixed; left: 8px; top: 40px; z-index: 20; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
   body[data-play] #golden, body[data-play] #report, body[data-play] #arena-info,
-  body[data-play] #input, body[data-play] #audio, body[data-play] #load,
+  body[data-play] #input, body[data-play] #audio, body[data-play] #audioworklet, body[data-play] #load,
   body[data-play] #memory, body[data-play] #coi { display: none; }
   /* WEB15: the played match's HUD. Two health bars fed from the sim, best-of-five pips, the
      round number and the K.O./WINNER flash. It never takes the pointer: the canvas keeps it. */
@@ -82,6 +84,7 @@
 <div id="hud">frame 0 | -- ms</div>
 <pre id="input">input: kb=0 mouse=0 pad=0</pre>
 <pre id="audio">audio: state=suspended</pre>
+<pre id="audioworklet">audio: path=none</pre>
 <pre id="net">net: idle</pre>
 <pre id="netstat"></pre>
 <pre id="fight">fight: idle</pre>
