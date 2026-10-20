@@ -461,7 +461,7 @@
   starvation; kbps charted vs MP2 caps;
   `cargo test -p engine-net --lib scale` green. needs: MP2.
   (A7, 2026-10-02.)
-- [ ] MP16b net: 32-fighter LAN soak revival after the GE12
+- [x] MP16b net: 32-fighter LAN soak revival after the GE12 Landed 1fc9ac23. soak_32_bot_x600_converges_with_matching_hashes x2 (hash 054b08ed9179a1d2, bots=32 ticks=600 snap_bytes=617 hz=15 Bps=9255 kbps=74.04, under the MP2 96 kbps row), combat_inputs_never_starve_under_snapshot_flood at the 800-byte chart cap (combat delta 147 B, all-fields worst 661 B, 139 B headroom), kbps_chart_rows_stay_under_target, thirty_two_slot_gates_follow_the_canonical_cap (=15 Hz, 12000 B/s, 800 B), select_priority_orders_thirty_two_slots; `cargo test -p engine-net --lib scale -- --nocapture` 24 passed run 39517334554 (that run carried the `arena-fork-cuts-x2` one-line fork.rs `cuts` fix in the working tree only: master is red there, not this row); `cargo check -p engine-net --lib` green.
   canonical-cap decision — same accept as MP16 parent (32-bot
   x600 hashes x2, zero combat starvation, kbps vs MP2 caps,
   scale tests green). Tier B. Size S. Owns soak hunks in

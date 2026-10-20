@@ -324,7 +324,7 @@ impl Drop for JobPool {
 /// Started on first use and never dropped: its idle workers sleep on the
 /// queue condvar until the process exits. It holds no session or match
 /// state, only threads; sim code takes an explicit [`JobPool`] instead.
-pub(crate) fn shared() -> &'static JobPool {
+pub fn shared() -> &'static JobPool {
     static SHARED: OnceLock<JobPool> = OnceLock::new();
     SHARED.get_or_init(|| {
         let cores = thread::available_parallelism().map_or(1, NonZeroUsize::get);

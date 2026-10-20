@@ -166,6 +166,7 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   BLOCKED: needs the reference-GPU frame report x2 (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.
   Progress 2026-10-20T21:47Z: no receipt in four keeper runs (300, 300, 30, 30 frames) at 100 % CPU with 27-45 foreign `cargo` and 10-25 `rustc`: the window stops after `arena particles: per-tier ...`, never presents a frame (`Responding: False`, 3 % GPU, 1-2 s CPU per 240 s), so there is no fps, no spread and no tick. Evidence `target/evidence/build/opt31-attempt-20261020T2147Z.md`; one BLOCKERS row added.
   Progress 2026-10-20T22:02Z: the stall is the window/GPU path only — `arena.exe --view-line 2040 600 8` printed its 600-tick view line and exited on the same box, while `--backend vulkan --frames 30` stalled exactly like dx12 (no receipt in 120 s, 100 % CPU, 45 cargo / 20 rustc). So OPT33 has no leg either. Same evidence file, addendum.
+  Progress 2026-10-21T23:50Z: two more keeper runs, 300 frames each, at CPU 100 / 100 / 99.9 % with 36 `cargo` and 25 `rustc`: both stopped after `arena: staged 6 dressing boxes` (before presenter creation), no `interval_ms p50=` line, `nvidia-smi` 8 % GPU. No fps, no spread — contended and unmeasured, not a floor pass, so no tick. Evidence `target/evidence/build/opt31-opt33-keeper-20261021T2350Z.md` (BLOCKERS fingerprint now x8).
 - [ ] OPT32 ops: build-baseline promotion on the quiet box — rerun the
   OPT1 matrix back-to-back x2 (clean plus 4-crate touches x 3 profiles),
   single cargo, lanes halted, load <10%, root `target/`.
@@ -185,3 +186,4 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   operator: reference-GPU DX12 vs Vulkan A/B; line in
   `docs/plan/2026-10-19-owner-queue.md`.
   BLOCKED: needs the reference-GPU DX12 vs Vulkan A/B (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Progress 2026-10-21T23:50Z: both legs ran 600 fixed-camera frames on the reference adapter (`NVIDIA GeForce RTX 3050 6GB Laptop GPU`, driver `610.62`) and neither presented a frame — no `interval_ms p50=` receipt, stop after `arena: staged 6 dressing boxes`; dx12 CPU 99.7 % avg with 50 `cargo` / 43 `rustc`, vulkan 99.6 % with 51 / 40. Both contended, so no 5 % A/B, no per-pass column and no default named; the startup line still logs the compiled-in default (`fallback=dx12`). Evidence `target/evidence/backend/opt33-ab-keeper-20261021T2350Z.md`. No tick.

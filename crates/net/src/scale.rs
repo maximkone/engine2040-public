@@ -1375,6 +1375,51 @@ mod tests {
         assert_eq!(a, 32, "zero combat starvation");
         let all: Vec<u8> = (0..32u8).collect();
         assert_eq!(&first[..a], all.as_slice());
+        // The same flood at the chart budget (the MP2 800-byte snapshot cap),
+        // not only the 1200-byte datagram: every combat slot still ships.
+        let chart_budget = cap_bytes_per_snapshot(32).expect("32 chart budget");
+        assert_eq!(chart_budget, 800);
+        let mut capped = [0u8; 32];
+        let c = select_priority(&now, &base, 0, 9, 8, chart_budget, &mut capped)
+            .expect("select 32 at the chart budget");
+        assert_eq!(c, 32, "zero combat starvation at the 800-byte cap");
+        // Worst case: all 32 slots change every field, so this is the largest
+        // 32-slot delta the shed can ever offer; it must still fit the cap.
+        let mut worst = base.clone();
+        for view in worst.iter_mut() {
+            view.x_mm += 1;
+            view.y_mm += 1;
+            view.z_mm += 1;
+            view.yaw_ddeg += 1;
+            view.hp = view.hp.saturating_add(1);
+            view.stamina = view.stamina.saturating_add(1);
+        }
+        let mut worst_out = [0u8; 32];
+        let w = select_priority(&worst, &base, 0, 9, 8, chart_budget, &mut worst_out)
+            .expect("select worst-case 32");
+        assert_eq!(w, 32, "worst-case 32-slot delta must fit the 800-byte cap");
+        let worst_bytes = DELTA_HEADER_LEN
+            + worst
+                .iter()
+                .zip(base.iter())
+                .map(|(now, base)| delta_cost_bytes(*now, *base))
+                .sum::<usize>();
+        assert!(
+            worst_bytes <= chart_budget,
+            "worst-case delta {worst_bytes} B over the {chart_budget} B cap"
+        );
+        println!(
+            "SCALE flood32 combat_delta={} B worst_delta={} B chart_budget={} B headroom={} B",
+            DELTA_HEADER_LEN
+                + now
+                    .iter()
+                    .zip(base.iter())
+                    .map(|(now, base)| delta_cost_bytes(*now, *base))
+                    .sum::<usize>(),
+            worst_bytes,
+            chart_budget,
+            chart_budget - worst_bytes,
+        );
         // Table order: combat inputs outrank state outranks snapshot bulk.
         let (_, ip) = crate::netcode::kind_channel(crate::session::KIND_INPUT).expect("input");
         let (_, sp) = crate::netcode::kind_channel(crate::session::KIND_STATE).expect("state");

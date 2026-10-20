@@ -735,5 +735,92 @@ lane right now, so this is a patch-ready spec, not code.
 - `rerun-io/rerun` (MIT) — already in `docs/research/LADDER.md`; the engine's
   own `rerun_sink.rs` covers it (SMX-10 is a wiring row, not a steal).
 - `promptfoo`, `ollama`, `conceptgraphs` — already mined per RULES.md.
-- NVIDIA RTX SDKs, Unreal, Unity, Isaac Gym, Isaac Sim — proprietary.
+- NVIDIA RTX SDKs, Unreal, Unity, Isaac Gym, Isaac Sim - proprietary.
   Research-only, never vendored.
+
+---
+
+# Addendum 2026-10-21 — ratchet tightening on SMX-01
+
+The pre-commit gate refused the landing with two regressions in engine-ai:
+`casts 103 -> 105` and `long_fns 4 -> 5`. Both are fixed in the code, not
+accepted: no `--accept` was used.
+
+Note on the tree: between the first proof run and this tightening, the working
+tree was reset by a pull/restore and every file of this lane came back at HEAD
+(`plan_trace.rs` gone, the `lib.rs`, `depth.rs`, `blackboard.rs`,
+`audio/src/heal.rs` and `audio/src/engine.rs` edits reverted). The engine-ai
+code was rewritten in the tightened form below. The audio wiring (SMX-03) is
+**not restored here**: this pass is told not to touch crates/audio, so SMX-03
+needs its owner to re-land `crates/audio/src/heal.rs` + `crates/audio/src/engine.rs`.
+
+## The two casts (both were in `crates/ai/src/plan_trace.rs`)
+
+1. `Some((percept.dist_m * 1000.0) as i32)` in `facts_from_percept`.
+   **Removed.** The percept branch reads whole millimetres as a float:
+   `mm_from_m(dist_m) = (dist_m * 1000.0).trunc()`, compared against
+   `ATTACK_MM: f32 = 2_500.0` and `FAR_MM: f32 = 8_000.0`. That is the same
+   classification as before: `trunc` is what the `as i32` did for a positive
+   finite reading, and 2 500 and 8 000 are exact in `f32`, so
+   `mm <= 2_500.0` equals the old `mm_i32 <= 2_500` for every distance the
+   arena can produce. The melee-view branch keeps its integer compare
+   (`melee.target().dist_mm() <= Brain::ATTACK_MM`), because that distance is
+   already whole centimetres. The new test
+   `plan_trace_metre_thresholds_match_the_brain_thresholds` pins the float
+   thresholds to `Brain::ATTACK_MM` / `Brain::FAR_MM` through `u16::try_from`
+   + `f32::from` (no cast in the test either) and pins both boundaries
+   (2 500 mm in range, 2 501 mm out; 8 000 mm far, 7 999 mm near), so a moved
+   brain threshold fails the test instead of drifting.
+
+2. `blackboard.set("steps", steps.len() as u64)`.
+   **Removed.** It is now
+   `blackboard.set("steps", u64::try_from(steps).unwrap_or(u64::MAX))` inside
+   `trace_blackboard` — the same total conversion idiom the audio heal uses
+   (`u64::try_from(frames).unwrap_or(u64::MAX)`).
+
+No cast is left in the file; `Select-String plan_trace.rs -Pattern "\bas\b"`
+returns prose only (the `as i32` phrase in a doc comment).
+
+## The long function
+
+`plan_and_trace` was 108 lines. It is split into six named functions plus one
+private struct, and `plan_and_trace` is now about 30 lines that read as the
+sequence of decisions:
+
+- `goals()` — the four goal rows in tried order (was an inline array).
+- `struct Best` — the winning goal, its plan and its total cost (replaces the
+  `(PlanGoalId, goap::Plan, u32)` tuple).
+- `plan_every_goal(actions, start, budget)` — the per-goal A* loop and the
+  cheapest-total choice; returns every outcome plus the winner.
+- `runner_up(outcomes, winner)` — the next cheapest reachable goal.
+- `trace_steps(actions, start, plan)` — the step walk, returning the steps and
+  the final facts.
+- `trace_blackboard(best, reason, start, final_facts, steps, next)` — the
+  blackboard writes, in the same key order as before.
+- `unreachable_trace(outcomes, start)` — the trace when no goal is reachable.
+
+Behaviour is unchanged: the same goal wins (same tie-break), the same steps
+come out, and the blackboard is written with the same keys in the same order,
+so `state_hash` is identical.
+
+`crates/ai/src/blackboard.rs` also carries `#[derive(Clone, Debug, PartialEq,
+Eq)]` on `Blackboard`, which `PlanTrace` needs to derive the same traits.
+
+`crates/ai/src/depth.rs` needed one more repair to compile at all: the lib test
+annotated `let full: SquadN<16>` while `Squad` is `SquadN<MAX_PARTICIPANTS>` and
+the arena cap is 32, so `cargo test -p engine-ai --lib` did not build at HEAD.
+The annotation is now `Squad`, and three stale 16-slot expectations follow the
+cap (first refused id is 32, the token loop runs `0..32`). Test-only lines.
+
+## Proof
+
+| command | result |
+|---|---|
+| `node tools/gh-check.mjs cargo test -p engine-ai --lib plan_trace` | PASS — `test result: ok. 9 passed; 0 failed; 0 ignored; 312 filtered out` (run 39515853505) |
+| `node tools/gh-check.mjs cargo test -p engine-ai --lib` | PASS — `test result: ok. 316 passed; 0 failed; 5 ignored` (run 39516199060) |
+| `node tools/rust-quality.mjs --crate ai --crate audio --owned crates/ai/src/blackboard.rs --owned crates/ai/src/depth.rs --owned crates/ai/src/lib.rs --owned crates/ai/src/plan_trace.rs --owned crates/audio/src/block.rs --owned crates/audio/src/engine.rs --owned crates/audio/src/heal.rs --owned crates/audio/src/lib.rs` | `RESULT PASS: score 98 (A), 0 ratchet regressions over 2 crate(s)` |
+
+Golden `d57b5c8ae3096614` untouched: the tightening is arithmetic- and
+structure-only inside a module the simulation does not call, plus test-only
+lines in `depth.rs`.
+

@@ -81,6 +81,7 @@ Rows live in one shard per section (byte-identical; each shard header is the can
 - [`SPRINT-26-steals-wave3.md`](SPRINT-26-steals-wave3.md) — Steals wave 3, verified against the tree
 - [`SPRINT-27-final-picture.md`](SPRINT-27-final-picture.md) — Final picture: auto-fix, compact code, touch and POV
 - [`SPRINT-28-rome.md`](SPRINT-28-rome.md) — Rome: one legionary's war
+- [`SPRINT-29-hunt.md`](SPRINT-29-hunt.md) — Hunt 2026-10-21: steals from outside the engine set
 
 ### Ready (live, never a snapshot)
 

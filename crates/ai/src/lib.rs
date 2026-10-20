@@ -45,6 +45,13 @@ pub mod gladiator;
 pub mod goalstack;
 /// GOAP planner: A* over a 64-fact integer world state.
 pub mod goap;
+/// Plan and show the trace: the GOAP plan, the goal it chased, the reason
+/// that goal won and the blackboard the plan wrote, behind one call.
+pub mod plan_trace;
+pub use plan_trace::{
+    facts_from_percept, plan_and_trace, plan_for_percept, Facts, PlanAction, PlanGoalId,
+    PlanGoalOutcome, PlanReason, PlanStep, PlanTrace,
+};
 /// One shared scanner for designer `key=value` rows: comment strip plus field
 /// walk, so depth tier rows and ai curves rows refuse the same shapes.
 pub mod rows;

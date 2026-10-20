@@ -1833,8 +1833,8 @@ mod tests {
             Err(DepthError::DuplicateFighter { id: 0 })
         );
         assert_eq!(
-            Squad::new(&[FighterId(16)]),
-            Err(DepthError::UnknownFighter { id: 16 })
+            Squad::new(&[FighterId(32)]),
+            Err(DepthError::UnknownFighter { id: 32 })
         );
         assert_eq!(Role::Holder.score_bias()[1], 75, "block lane");
         assert_eq!(Role::Flanker.score_bias()[3], 75, "advance lane");
@@ -2242,8 +2242,9 @@ mod tests {
             Err(DepthError::UnknownFighter { id: 2 })
         );
         assert_eq!(SquadN::<2>::new(&[]), Err(DepthError::EmptySquad));
-        // Full arena squads still seat sixteen with the same arbitration.
-        let full: SquadN<16> =
+        // Full arena squads still seat the arena capacity with the same
+        // arbitration (`Squad` is `SquadN<MAX_PARTICIPANTS>`).
+        let full: Squad =
             Squad::new(&[fighter(7), fighter(0), fighter(15), fighter(2), fighter(9)])
                 .expect("arena seats");
         assert_eq!(full.holder(), fighter(0));
@@ -2252,14 +2253,15 @@ mod tests {
         wide.on_knockdown(&[fighter(0)], &[(fighter(2), 700), (fighter(15), 100)])
             .expect("holder down promotes");
         assert_eq!(wide.holder(), fighter(2));
-        // The default squad is the arena width: `Squad` is `SquadN<16>`.
+        // The default squad is the arena width: `Squad` is
+        // `SquadN<MAX_PARTICIPANTS>`.
         let classic = Squad::new(&[fighter(2), fighter(0), fighter(3)]).expect("seats");
         assert_eq!(classic.members().len(), 3);
         assert_eq!(classic.holder(), fighter(0));
         // Slot validity still follows the canonical cap at any width.
         assert_eq!(
-            SquadN::<2>::new(&[FighterId(16)]),
-            Err(DepthError::UnknownFighter { id: 16 })
+            SquadN::<2>::new(&[FighterId(32)]),
+            Err(DepthError::UnknownFighter { id: 32 })
         );
         assert_eq!(
             SquadN::<4>::new(&[fighter(0), fighter(0)]),
@@ -2354,8 +2356,8 @@ mod tests {
             "non-member attacker"
         );
         assert_eq!(
-            squad.claim_token(fighter(0), FighterId(16)),
-            Err(DepthError::UnknownFighter { id: 16 }),
+            squad.claim_token(fighter(0), FighterId(32)),
+            Err(DepthError::UnknownFighter { id: 32 }),
             "target beyond the arena"
         );
         assert_eq!(
@@ -2363,7 +2365,7 @@ mod tests {
             Err(DepthError::SelfTarget { id: 0 })
         );
         assert_eq!(squad.tokens_on(FighterId(200)), 0);
-        for id in 0..16 {
+        for id in 0..32 {
             assert_eq!(squad.tokens_on(fighter(id)), 0, "refusals grant nothing");
         }
     }

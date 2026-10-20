@@ -133,7 +133,7 @@ export const realDeps = () => ({
 // Run a command; a non-zero exit throws a BuildError that quotes the end of its output.
 const stepOf = (run) => (label, cmd, args, o) => {
   const r = run(cmd, args, o);
-  if (r.status !== 0) throw new BuildError(`${label} failed (exit ${r.status}): ${cmd} ${args.join(" ")}\n${tail(r.out)}`);
+  if (r.status !== 0) throw new BuildError(`${label} failed (exit ${r.status}): ${cmd} ${args.join(" ")}\n${tail(r.out, 120)}`);
   return r.out;
 };
 

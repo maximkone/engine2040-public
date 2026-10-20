@@ -15,6 +15,7 @@ pub enum TaskStatus {
 
 /// Sorted key-value store (string keys, u64 values). Iteration is insertion
 /// order for determinism; lookups are linear (NPC counts are tiny).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Blackboard {
     keys: Vec<String>,
     vals: Vec<u64>,
