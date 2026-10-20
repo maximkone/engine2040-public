@@ -112,6 +112,15 @@ pub mod morph_import;
 pub mod meshlet;
 /// Conservative meshlet cull: frustum plus cone, no false negatives.
 pub mod meshlet_cull;
+/// RT proxies: a simplified proxy mesh beside the raster mesh, with its
+/// measured deviation bound and a light-leak check.
+#[cfg(feature = "import")]
+pub mod proxy;
+#[cfg(feature = "import")]
+pub use proxy::{
+    cook_proxy, light_leaks, LeakReport, ProxyError, ProxyMesh, Ray, PROXY_BOUND_RATIO,
+    PROXY_DIVISORS, PROXY_LAST_FRACTION, PROXY_MAX_TRIS, PROXY_MIN_BOUND_M, PROXY_MIN_TRIS,
+};
 pub mod recook;
 #[cfg(feature = "import")]
 pub mod retarget;
