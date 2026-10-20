@@ -9,7 +9,7 @@ slice 2 (per-slot compiled state machine, needs EG18), EG18c slice 3
 
 ## Symptom
 
-Second identical oversize failure, zero landings. `docs/BLOCKERS.md:27`:
+Second identical oversize failure, zero landings. `docs/BLOCKERS.md:27` (2026-10-21 note: `docs/BLOCKERS.md` was rewritten on 2026-10-21, 122 pre-standalone rows moved to `docs/archive/BLOCKERS-to-2026-10-17.md`; this row now reads `docs/archive/BLOCKERS-archive.md:213`):
 EG18 anim-crossfade abandoned at 233 changed lines over max_diff 200
 twice; repro `target/abandoned/eg18-anim-crossfade-2026-10-11.patch`.
 That patch's fade (`Fade { act, act_start, switched_at }`,

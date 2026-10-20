@@ -1,6 +1,14 @@
 # Fast-iteration config. Stock Windows safe: plain `cargo build` works here.
 # No new tools required. Opt-ins are commented below.
 
+# Many AI sessions build on one 12-core PC at once (owner 2026-10-21: 100% CPU, 27 cargo, 20 rustc).
+# Builds outside the machine slot pool (`tools/jobserver.ps1`; a shell started before it or a
+# stopped holder) run at most 4 jobs each, so three of them fill the cores instead of asking for
+# 36 jobs. On a full box more jobs bought nothing: 10 rustc 588 s vs 2 rustc 591 s
+# (`docs/plan/build-cpu.md`). An explicit `-j` still wins. GitHub runners have 4 cores anyway.
+[build]
+jobs = 4
+
 [profile.dev]
 codegen-units = 256
 debug = "line-tables-only"

@@ -23,7 +23,7 @@ Three conjuncts, none of them a code defect in the fixtures:
    budget binds the substitution at arena wall counts. The row
    cannot tick on fixtures alone while the substitution is
    unproven.
-2. Verify environment. `docs/BLOCKERS.md:34` records engine-spatial
+2. Verify environment. `docs/BLOCKERS.md:34` (2026-10-21 note: `docs/BLOCKERS.md` was rewritten on 2026-10-21, 122 pre-standalone rows moved to `docs/archive/BLOCKERS-to-2026-10-17.md`; this row now reads `docs/archive/BLOCKERS-archive.md:220`) records engine-spatial
    lib tests link-red x2 (rust-lld undefined llvm symbols, same
    fingerprint as GS27). Any crate-wide P2P gate fails the slice
    for the toolchain, not the code. Re-sending GS30 whole repeats
@@ -31,7 +31,7 @@ Three conjuncts, none of them a code defect in the fixtures:
 3. Island risk plus overlap. `isovist` and `visible_area_cm2`
    (`crates/spatial/src/sight.rs:488`) have zero production
    callers outside tests. That is the shape that abandoned GS31
-   (`docs/BLOCKERS.md:43`). And `docs/plan/forge-adoption.md:698`
+   (`docs/BLOCKERS.md:43`; 2026-10-21 note: now `docs/archive/BLOCKERS-archive.md:229`). And `docs/plan/forge-adoption.md:698`
    puts GS30 near SP65 `view_sees`: one home per job. Meanwhile
    `sight.rs` is modified inside a ~150-file dirty tree, so a
    whole-row resend also risks a foreign-file gate.

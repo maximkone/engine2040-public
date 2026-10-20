@@ -740,6 +740,14 @@ the hack". Those are **build-artifact counts from 2026-10-17**, not
 > "16 / 12 / 14" figures counted files in `target/debug/deps`, which drift
 > with every build.
 
+Status 2026-10-21: this correction is now in the tree. `docs/SMOOTH-BUILD.md`
+"Build speed facts" carries the Cargo.lock numbers (measured by parsing
+`Cargo.lock` at HEAD `c36c060e`: 1,032 packages, 80 multi-version names, 101
+extra copies, `serde_json` 1.0.151, `num-traits` 0.2.19 and not a direct
+dependency, `syn` 1.0.109 / 2.0.119 / 3.0.6), and the `docs/SPRINT-13-engine-edge.md:34`
+OPT8 progress note carries a dated correction beside the old figures. The old
+"16 / 12 / 14" text is gone from both places.
+
 ---
 
 ## For the OPT8 lane

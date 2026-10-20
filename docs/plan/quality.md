@@ -9,6 +9,7 @@ Acceptance:
 Order (free-first; tree dirty on all code lanes, so cold slices before hot-lane code): CQ36 CQ14 CQ10 CQ7 CQ15 CQ5 CQ24 CQ25 CQ26 CQ27 CQ28 CQ29 CQ30 CQ31 CQ32 CQ33 CQ34 CQ9 PF19 PF18 PF5 PF9 PF9a SL3 SL5 SL21 SL35 SL44 PF16, then table order, LATER last.
 Owner crates: perf, observe, proof, tools/.
 Open board IDs: CQ5 CQ6 CQ7 CQ8 CQ9 CQ10 CQ14 CQ15 CQ16 FB1 FB2 FB3 FB4 FB5 FB6 FB7 OPT4 OPT5 OPT6 OPT7 OPT8 OPT9 OPT11 OPT13 OPT14 OPT15 OPT16 OPT17 OPT18 OPT19 OPT20 OPT21 OPT22 OPT23 OPT24 OPT25 OPT26 OPT27 OPT28 OPT29 OPT30 OPT31 OPT32 OPT33 PF5 PF9 PF9a PF16 PF18 PF19 SL3 SL5 SL16 SL21 SL23 SL24 SL28 SL29 SL30 SL31 SL32 SL33 SL34 SL35 SL36 SL37 SL38 SL42 SL43 SL44 SL45. AH: none open.
+Status 2026-10-21: the CQ ids in the two lines above are stale - CQ24, CQ25, CQ26, CQ27, CQ28, CQ29 and CQ30 are LANDED and ticked on the board (`docs/SPRINT-05-code-quality.md:41-70`; `node tools/board-slice.mjs CQ27` and `CQ30` both print `- [x]`). The line-9 order and the CQ24-CQ30 ids in the line-11 list should come off that list; the CQ30 row below carries the detail.
 Pre-merge text: git show d96091cd:docs/plan/quality.md
 Pre-merge text: git show d96091cd:docs/plan/engine-edge.md
 Pre-merge text: git show d96091cd:docs/plan/finish-b.md
@@ -40,6 +41,7 @@ Code as-is 2026-10-15: CQ9 open — 12 files over the 1500 bar (`tools/rust-qual
 11. **Doc truth.** FOCUS Now drops ticked BX28 BX37 BX38 PX6 (owner edit); plan rows are regenerated from the board, not hand-copied.
 
 - Status 2026-10-17: disk shows the "sprint-loop refuses to commit when workspace-check exits non-zero; test in sprint-loop.test.mjs" half of item 10 above is false. `tools/sprint-loop.mjs` (Length 10378) has 0 `workspace-check` hits (`rg -c "workspace-check" tools/sprint-loop.mjs` exits 1) and calls no git commit at all — each wave only spawns `opencode run --agent orchestrator` (`:183-187`) — and `tools/sprint-loop.test.mjs` (Length 6264) has 0 `workspace` hits over its 8 tests (dry-run oracle, ready-id list, the two usage errors, three prune-queue cases, the QUEUE-PRUNE rename counter). The audit gate that does refuse now lives in `tools/land.mjs`: the audit comment at `:128-133`, `workspaceVerdict` at `:156-171`, and it is the tool that commits (`git add -- <paths>` `:444`, `git commit -F <msg> -- <paths>` `:448`, the close-row pair `:373-374`, push `:458`). The other half of item 10 still holds: board commit `f336c06b` exists ("Board: UI3/UI4 replan plus MP10 lightyear reword plus LADDER P3 lines (workspace-check PASS)"). So the `:38` cite in `docs/plan/BOOK-GAPS-2026-10-12.md` row S14 has drifted to `:39` and the loop/test half of that row needs a fix.
+- Status 2026-10-21: the loop half of item 10 is gone from the tree, not just false - `tools/sprint-loop.mjs`, `tools/sprint-loop.test.mjs` and `tools/land.mjs` were all removed on 2026-10-17 (commit `6bdf32bf`, "cut the center link, the keeper, the queue tools and 13 of 14 agents"; none of the three files exists now). The refusal shape they carried is now the by-path land rule in the root `AGENTS.md` "Proof" section plus `node tools/workspace-check.mjs`. The second half of item 10 (board commit `f336c06b`) still holds.
 
 ### build and runtime speed (OPT)
 
@@ -230,6 +232,22 @@ lands after CQ27 (chain isolated) and CQ30 (facade under the bar).
   Rp1Submitter" crates/render/src/post/gpu.rs` fails before, passes after.
   P2P: `cargo test -p engine-render --lib post` exit 0. needs: CQ27, CQ28,
   CQ29.
+  Status 2026-10-21: this row and CQ24-CQ29 are LANDED on the board
+  (`docs/SPRINT-05-code-quality.md:41-70`, all ticked; CQ27/CQ28/CQ30 landed
+  781ecd67, CQ29 landed 34fae3ba) and the files are on disk
+  (`crates/render/src/post/{taa,upscale,chain,auto_exposure,graph,gpu}.rs`,
+  plus `crates/render/src/post_jitter_motion.rs` for CQ24). The `post.rs`
+  line cites above are stale - `post.rs` is 2,376 lines, so `:2650`, `:2806`
+  and `:3133` no longer exist; the moved symbols now read
+  `crates/render/src/post/gpu.rs:163` (`pub struct Rp1Submitter`) and `:363`
+  (`pub fn resolve`), `crates/render/src/post/chain.rs:923` (`pub fn
+  run_frame`). CQ24's own path is also wrong: the leaf is the flat file
+  `crates/render/src/post_jitter_motion.rs` (`pub fn halton`), not
+  `crates/render/src/post/jitter_motion.rs`; the other new leaves read
+  `post/taa.rs` (`pub fn taa_resolve`), `post/upscale.rs` (`pub fn
+  fsr_upscale`) and `post/chain.rs` (`pub fn apply_bloom`). The plan's own
+  open list (line 9 order, line 11 open ids) and the CQ24-CQ30 rows above
+  still show them as open.
 
 Next chain (plan-only, refines CQ9; orchestrator boards after
 `node tools/workspace-check.mjs` PASS). `crates/render/src/present.rs` keeps

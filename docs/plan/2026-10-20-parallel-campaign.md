@@ -17,6 +17,13 @@ Before counting the 309, close or rewrite the rows that name work in the retired
 center: GN4, GN5, GN7, GN8 all own or run `kaggle.mjs`, which the standalone-repo
 decision removed on 2026-10-17. `docs/plan/2026-10-17-obsolete-rows.md` already
 holds the same verdict for E4.
+Status 2026-10-21: the generator chain has a new home, so these four rows are
+re-pointable, not dead. `C:\empire\center\make.mjs` (center repo, commit
+`9fda6705`) is the file: `node make.mjs models --verify` is the licence gate,
+`node make.mjs run <kind> --spec <file>` starts a job and prints
+`started run <id>`, `node make.mjs job <id>` polls it, `node make.mjs selftest`
+is the no-network check. Each of the four board rows now carries this
+correction (GN4, GN5, GN7, GN8 in `docs/SPRINT-11-north-star.md`).
 
 ## Speed: GitHub yes, Kaggle no
 
@@ -51,7 +58,8 @@ the 309 ready rows on 2026-10-20.
 1. **W0 now, clean tree:** E, A, N (48 rows whose owned crates have no dirty
    files from the other session). Start three lanes, five rows each, then judge.
    Leave GN7 out: it runs the retired `kaggle.mjs` and waits on the obsolete-row
-   decision.
+   decision. (2026-10-21: the new home is `C:\empire\center\make.mjs`, so GN7 is
+   re-pointable - see the status note under "Before counting the 309".)
 2. **W1 focus, once `crates/render` and `crates/game` are clean:** R takes FC1 LF2
    EG12 GS43 GS44 GS45; G takes LF14 AM24 RZ4; E/A take OPT27 WEB6. Twelve rows,
    the current FOCUS path.

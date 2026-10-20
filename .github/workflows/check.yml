@@ -9,6 +9,13 @@ on:
       cmd:
         description: "one cargo check|test|clippy command"
         required: true
+      os:
+        # tools/gh-check.mjs sends lines that need Windows or a window|app|ui|device feature to Windows; the rest to Linux.
+        description: "runner"
+        required: false
+        default: ubuntu-latest
+        type: choice
+        options: [ubuntu-latest, windows-latest]
 
 permissions:
   contents: read
@@ -23,18 +30,20 @@ env:
 jobs:
   run:
     if: github.repository == 'maximkone/engine2040-public'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.os || 'ubuntu-latest' }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
       - name: free disk
+        if: runner.os == 'Linux'
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
       - uses: mozilla-actions/sccache-action@v0.0.11
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
+      # Restore only: main's ci.yml saves these (test-debug on Linux, win-check from its window-compile job on Windows).
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-debug
+          shared-key: ${{ runner.os == 'Windows' && 'win-check' || 'test-debug' }}
           save-if: "false"
       - name: run the command
         env:

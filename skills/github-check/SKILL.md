@@ -21,13 +21,16 @@ Which form for which job, and what each odd message means (exit 2 or 3, 0 tests,
 - Exit codes: 0 = passed, 1 = failed (the output tail is printed: read it and fix), 2 = could not run, 3 = still running.
 - On auto the tool decides where a line runs, so you never count retries:
   - a run that could not start is tried once more, then the same line runs on the PC (never `--workspace`);
-  - GPU, window and Windows-only lines run on the PC at once (features `window`, `app`, `ui`, `device`, `--all-features`, a gpu or window test filter, a test in a file that probes for an adapter or is `cfg(windows)`);
+  - lines that need Windows or a `window`, `app`, `ui` or `device` feature (or `--all-features`) only to build go to a Windows runner: every check and clippy, `--no-run`, a test in a `cfg(windows)` file, and tests that open no GPU or window;
+  - only GPU, window and sound-device tests run on the PC (a gpu or window test filter or target, a test in a file that probes for an adapter, a `device`-feature test);
+  - reuse: the same line on unchanged inputs (its crates with their dependencies, the manifests, the lock, `content/`, `fixtures/`, any path its code names outside them) prints `REUSED PASS` or `REUSED FAIL` at once (a pass is kept 24 h, a fail 30 min; `--fresh` runs it again), and a line another AI is already running is joined, not run twice;
+  - `--only <path,path>` builds HEAD plus just those files: use it when another AI's unfinished file breaks the build (never kept for reuse);
   - a cargo test that passed with 0 tests reruns on the PC.
 - `--remote-only` never falls back (exit 2). `--local` skips GitHub.
 
 ## What the runner cannot do
 
-- It is Linux with no GPU and no window. Tests that need an adapter print SKIPPED and pass. Windows-only code is not compiled. The tool sends the lines it can recognise to the PC itself. A skipping test it cannot recognise still shows as a pass, so for a render, window or crash proof read the passed count (skill `test-and-proof`).
+- The default runner is Linux; lines with a window, app, ui or device feature run on a Windows runner. Neither has a GPU or a desktop. Tests that need an adapter print SKIPPED and pass. On Linux, Windows-only code is not compiled. The tool sends the lines it can recognise to the PC itself. A skipping test it cannot recognise still shows as a pass, so for a render, window or crash proof read the passed count (skill `test-and-proof`).
 - It builds everyone's uncommitted files too. A red in a file you do not own is its owner's: say so, do not edit it.
 - The tree goes to the PUBLIC mirror branch for the run (denylist and secret scan apply). Never leave a key, token or private note in the tree.
 - Workspace-wide proofs (`--workspace`) are fine here and forbidden local.

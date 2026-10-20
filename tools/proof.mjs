@@ -12,6 +12,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { lowerPriority, poolEnv } from "./jobserver.mjs";
+
+// Every cargo this file starts: joins the shared slot pool when it is up, and runs below the desktop's priority (tools/jobserver.mjs).
+const cargoEnv = () => { lowerPriority(); return { ...process.env, ...poolEnv() }; };
+// Timed runs keep normal priority (below-normal would skew their clocks); they still join the pool.
+const timedEnv = () => ({ ...process.env, ...poolEnv() });
 
 // Pure CLI arg validation (exported for tests): throws the usage line on
 // anything but [] or one of the flags, mirroring the old exit(2).
@@ -488,7 +494,7 @@ if (args.includes("--mutants")) {
 
 if (args.includes("--perf")) {
   // Release build, one test thread: numbers are only meaningful without contention.
-  const result = spawnSync("cargo", ["test", "--locked", "--workspace", "--release", "--all-features", "--", "--ignored", "--test-threads=1"], { encoding: "utf8", timeout: 1_200_000, maxBuffer: 16 * 1024 * 1024 });
+  const result = spawnSync("cargo", ["test", "--locked", "--workspace", "--release", "--all-features", "--", "--ignored", "--test-threads=1"], { encoding: "utf8", timeout: 1_200_000, maxBuffer: 16 * 1024 * 1024, env: timedEnv() });
   const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   for (const line of out.split("\n").filter((l) => /^test .* \.\.\. |panicked/.test(l))) console.log(line);
   // PQ1 input-latency leg (wave-44 judge FAIL-to-tick: headless_report
@@ -497,7 +503,7 @@ if (args.includes("--perf")) {
   // the proof log. Leg passes iff the latency tests pass; a latency
   // failure exits non-zero here so the --perf gate cannot pass without it.
   // Collected wave 45: root-relative cargo (lane prefixes rewritten).
-  const latency = spawnSync("cargo", ["test", "--locked", "-p", "engine-perf", "latency", "--", "--nocapture"], { encoding: "utf8", timeout: 1_200_000, maxBuffer: 16 * 1024 * 1024 });
+  const latency = spawnSync("cargo", ["test", "--locked", "-p", "engine-perf", "latency", "--", "--nocapture"], { encoding: "utf8", timeout: 1_200_000, maxBuffer: 16 * 1024 * 1024, env: timedEnv() });
   const latencyOut = `${latency.stdout ?? ""}${latency.stderr ?? ""}`;
   for (const line of latencyOut.split("\n").filter((l) => /input_latency|reference_gpu|sim_p50|sim_p95|present_p50|present_p95|GPU-PENDING|PENDING/.test(l))) console.log(line);
   const latencyOk = !latency.error && latency.status === 0;
@@ -519,7 +525,7 @@ if (args.includes("--perf")) {
   if (process.platform === "linux") {
     // Callgrind counts repeat exactly, so the 2% Ir budget set in
     // crates/perf/benches/instructions.rs gates where wall clock cannot.
-    const ir = spawnSync("cargo", ["bench", "--locked", "-p", "engine-perf", "--bench", "instructions", "--", "--baseline=perf_gate"], { encoding: "utf8", timeout: 1_200_000, maxBuffer: 16 * 1024 * 1024 });
+    const ir = spawnSync("cargo", ["bench", "--locked", "-p", "engine-perf", "--bench", "instructions", "--", "--baseline=perf_gate"], { encoding: "utf8", timeout: 1_200_000, maxBuffer: 16 * 1024 * 1024, env: timedEnv() });
     const verdict = irGateVerdict(ir);
     console.log(verdict.line);
     if (!verdict.ok) {
@@ -547,7 +553,7 @@ function cargo(args, timeoutMs = 1_800_000) {
   // keeps its own 30 min budget; the split below gives the same coverage two
   // budgets instead of one. Timeout details keep the output tail so the next
   // hang names its package instead of printing ETIMEDOUT alone.
-  const result = spawnSync("cargo", args, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 });
+  const result = spawnSync("cargo", args, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, env: cargoEnv() });
   if (result.error) {
     const tail = `${result.stdout ?? ""}${result.stderr ?? ""}`.split("\n").filter(Boolean).slice(-8).join(" | ");
     const detail = `${result.error.message}${tail ? ` | tail: ${tail.slice(0, 2000)}` : ""}`;
@@ -570,7 +576,7 @@ let nextestProbe = null;
 function useNextest() {
   if (nextestProbe !== null) return nextestProbe;
   try {
-    const probe = spawnSync("cargo", ["nextest", "--version"], { encoding: "utf8", timeout: 30_000 });
+    const probe = spawnSync("cargo", ["nextest", "--version"], { encoding: "utf8", timeout: 30_000, env: cargoEnv() });
     const bin = !probe.error && probe.status === 0;
     const text = existsSync(NEXTEST_CONFIG) ? readFileSync(NEXTEST_CONFIG, "utf8") : "";
     nextestProbe = bin && hasNextestProfile(text);
@@ -733,7 +739,7 @@ try {
   // ARC10 spine scorecard: the parity column per build (legacy step against
   // spine step, 20 seeded 600-tick tapes). A mismatch fails the gate; the
   // canary run must fail too, or the column proves nothing.
-  const parityRun = (extra) => spawnSync("cargo", ["run", "-p", "engine-proof", "--locked", "--release", "--quiet", "--features", "spine", "--bin", "spine_parity_line", "--", ...extra], { encoding: "utf8", timeout: 1_800_000, maxBuffer: 16 * 1024 * 1024 });
+  const parityRun = (extra) => spawnSync("cargo", ["run", "-p", "engine-proof", "--locked", "--release", "--quiet", "--features", "spine", "--bin", "spine_parity_line", "--", ...extra], { encoding: "utf8", timeout: 1_800_000, maxBuffer: 16 * 1024 * 1024, env: cargoEnv() });
   const parity = parityVerdict(parityRun([]));
   check("spine parity column", parity.ok, parity.line);
   const canary = parityVerdict(parityRun(["--seeded-wall"]), { canary: true });

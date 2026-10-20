@@ -30,7 +30,7 @@
 
 - **Damage:** `D = base x (1 + 0.04 x (S - 10))`, `S = 10 + growth x (level - 1)`.
   STR: L1 = 10 (x1.00) · L10 = 28 (x1.72) · L20 = 48 (x2.62) · L40 = 88 (x4.22).
-- **Health:** `80 + 10 x CON`. **Mitigation:** 1% per CON point, capped at 35%.
+- **Health:** `200 + 25 x CON`. **Mitigation:** 1% per CON point, capped at 35%.
   At L10: 270 health, 19% mitigation — the softest of the human line.
 - **Fields:** `range` = reach from the Warrior, `radius` = size of the area,
   `cast` = wind-up seconds, `cooldown` = seconds, `mana` = points,

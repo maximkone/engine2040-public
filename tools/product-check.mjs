@@ -302,7 +302,6 @@ const main = async () => {
   const latest = readJson(latestFile, null);
   const tree = git("rev-parse", "HEAD:crates");
   const sha = git("rev-parse", "--short", "HEAD");
-  if (existsSync(join(ROOT, "target", "sprint.halt")) && has("--if-new")) return console.log("product-check: SKIP sprint.halt");
   if (has("--if-new") && latest?.tree === tree) return console.log(`product-check: SAME tree as ${latest.sha} (${latest.verdict})`);
   const lockFile = join(OUT, "lock.json");
   const lock = readJson(lockFile, null);

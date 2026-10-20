@@ -29,16 +29,20 @@ on the same tree.
   do): before (cold, no wrapper) **21.6 s**, after (warm, primed cache) **13.6 s**
   = 37 % on the clock but **0 of 2 cacheable units hit** - the gap is the box,
   not the cache (`docs/receipts/2026-10-20-opt9-compile-cache-spike.md`).
-  The new `rebuild` cell measures the CI shape on this box: see the numbers
-  below.
-- CI shape (same target dir path, artifacts removed, cache primed): the
-  `rebuild` cell against the `cold` cell, one line each, from the run quoted
-  under "Proof".
+- CI shape (same target dir path, artifacts removed, cache primed): the new
+  `rebuild` cell against the `cold` cell. The cell is landed and pinned, but
+  its run did not finish inside this packet's time budget on this box (the
+  cold cell alone ran 17 min while 24 cargo builds of other agents ran), so
+  the CI-shape number is still open: run
+  `node tools/compile-cache-spike.mjs --lane engine-provider --jobs 4` on a
+  quiet box and read the `rebuild` row of the table (the report lands in
+  `target/spike-opt9/<utc>/report.json`).
 
 **Proof**
 
 ```
-node tools/compile-cache-spike.mjs --lane engine-physics --jobs 4
+node --test tools/compile-cache-spike.test.mjs   ->  10/10 green
+node tools/compile-cache-spike.mjs --lane engine-provider --jobs 4   ->  the cold cell did not finish on this loaded box
 ```
 
 **What is still open**
@@ -80,16 +84,35 @@ builds drops by a third)**
 - The five lanes: `engine-provider`, `engine-scene`, `engine-nav`,
   `engine-spatial`, `engine-observe` (light lanes that carry the shared
   externals: serde, serde_json, uuid).
-- Before (the tree as it is: no crate depends on the hack): **TBD**
-- After (the same five lanes with `engine-workspace-hack = { workspace = true }`):
-  **TBD**
-- Verdict: **TBD**
+- Measured quantity: the dependency units each lane's build graph holds
+  (`cargo tree -p <crate> -e normal,build --prefix none --format "{p}"`, no
+  compilation), summed over the five lanes. This is the cheap proxy for the
+  rebuild count; the rebuild count itself (the `Compiling` lines of five lane
+  builds in one shared target dir) is what `tools/dep-rebuild-count.mjs`
+  counts, and the cold build of that side did not finish inside this
+  packet's time budget on this box (see "What is still open").
+- **Before** (the tree as it is: no crate depends on the hack):
+  provider 7, scene 19, nav 3, spatial 2, observe 2 = **33 dependency units**
+  across the five lane graphs.
+- **After** (the same five lanes with `engine-workspace-hack = { workspace =
+  true }`, measured in a scratch copy of the workspace so the shared tree was
+  not touched): provider 35, scene 42, nav 36, spatial 35, observe 35 =
+  **183 dependency units**.
+- Verdict: the count **rises 5.5x**, so the bar (a third less) is **not
+  met** - with the union as it stands the spike is a **DROP**. The reason is
+  the union list in `crates/workspace-hack/Cargo.toml` (serde with derive,
+  serde_json, uuid with serde+v4, image with png+hdr+jpeg): every lane that
+  takes the hack builds all four externals, even the lanes that use none of
+  them (nav, spatial, observe: 2-3 units -> 35-36). The union has to be
+  split per feature group and given only to the crates that use it.
 
 **Proof**
 
 ```
 node tools/dep-rebuild-count.mjs --target-dir target/spike-opt8/before2 --lane engine-provider --lane engine-scene --lane engine-nav --lane engine-spatial --lane engine-observe
-node tools/dep-rebuild-count.mjs --target-dir <scratch>/target/spike-opt8/after --lane engine-provider --lane engine-scene --lane engine-nav --lane engine-spatial --lane engine-observe
+(the cold build of the five lanes did not finish in 40 min on this box: 24 concurrent cargo builds from other agents)
+cargo tree --manifest-path <tree>/Cargo.toml -p <crate> -e normal,build --prefix none --format "{p}"   ->  33 units before, 183 units after
+node --test tools/dep-rebuild-count.test.mjs   ->  6/6 green
 ```
 
 **What the other agents must add (exact change, one line per crate)**
@@ -108,13 +131,19 @@ word and I add the rows).
 
 **What is still open**
 
-- The measurement below is the spike's answer for the lanes that carry the
-  shared externals. The union list in `crates/workspace-hack/Cargo.toml` is
-  what decides the outcome: a union that names externals a lane does not use
-  adds units to that lane.
-- Not measured: the five heavy lanes (render, editor, ui, material, game)
-  that the CI matrix uses - a cold build of `engine-render` on this box is
-  longer than the whole packet.
+- The rebuild count itself (the `Compiling` lines of five lane builds in one
+  shared target dir, before and after) is not measured: the cold build of
+  the "before" side ran past 40 minutes on this box (24 concurrent cargo
+  builds from the other agents) and was cut. The tool is ready and the
+  direction is not in doubt (the union adds ~30 units to every lane that
+  takes it), but the row's own number is still open; the next run should be
+  on a quiet box, with `node tools/dep-rebuild-count.mjs --target-dir
+  <fresh dir> --lane ...` on both sides.
+- The five heavy lanes (render, editor, ui, material, game) that the CI
+  matrix uses were not measured: a cold build of `engine-render` on this box
+  is longer than the whole packet.
+- The copies (the same crate built twice for two feature sets) are not in
+  the graph count; they need the rebuild count to see them.
 
 ---
 
@@ -203,10 +232,9 @@ node --test tools/nextest-spike.test.mjs   ->  7/7 green
 **Proof**
 
 ```
-node --test tools/workspace-check.test.mjs      -> 36/36 green
-node --test tools/rust-quality.test.mjs         -> 21/21 green
-node --test tools/plan-atlas-cache.test.mjs     -> 7/7 green
-node --test tools/plan-atlas.test.mjs           -> 9/9 green
+node --test tools/workspace-check.test.mjs tools/rust-quality.test.mjs tools/plan-atlas-cache.test.mjs tools/plan-atlas.test.mjs tools/compile-cache-spike.test.mjs tools/dep-rebuild-count.test.mjs tools/nextest-spike.test.mjs tools/wiring-scan.test.mjs tools/board-slice.test.mjs
+  ->  148/148 green
+node tools/workspace-check.mjs   ->  FAIL on crates/assets/src/proxy.rs (another agent's uncommitted file, outside my paths) and on the genre ledger; every other check passes
 ```
 
 **What is still open**
@@ -228,3 +256,20 @@ node --test tools/plan-atlas.test.mjs           -> 9/9 green
   the unfiltered resolve of the workspace pulls ~400 externals into the
   root's closure (feature unification across members), so the host-accurate
   `cargo tree` stays.
+
+---
+
+## Housekeeping for the lead
+
+- The lead's auto-backup sweep (commit `dbbe6435`) picked up four throwaway
+  measurement copies of mine: `tools/tmp-board-slice-before.mjs`,
+  `tools/tmp-plan-atlas-before.mjs`, `tools/tmp-rust-quality-before.mjs`,
+  `tools/tmp-ws-before.mjs`. They are deleted in the working tree; please
+  commit the deletion by path (they are copies of the pre-change tools, kept
+  only for the A/B measurement).
+- My files (all under my ownership): `tools/workspace-check.mjs` +
+  test, `tools/wiring-scan.mjs`, `tools/rust-quality.mjs` + test,
+  `tools/plan-atlas.mjs`, `tools/plan-atlas-cache.test.mjs`,
+  `tools/board-slice.mjs`, `tools/compile-cache-spike.mjs` + test,
+  `tools/dep-rebuild-count.mjs` + test, `tools/nextest-spike.mjs` + test,
+  and this receipt. I committed nothing and staged nothing.

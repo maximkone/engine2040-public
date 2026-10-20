@@ -9,9 +9,18 @@
 
 use std::collections::BTreeMap;
 
-use engine_input::MAX_PARTICIPANTS;
+use engine_arena::Checkpoint;
+use engine_core::Fnv64;
+use engine_input::fighter::{Buttons, ATTACK, BLOCK};
+use engine_input::{FighterId, FighterInput, MAX_PARTICIPANTS};
 
-use crate::session::{SNAPSHOT_HEADER_LEN, SNAPSHOT_SLOT_LEN, STATE_DELTA_HEADER_LEN};
+use crate::delta::{encode_delta, FighterSnap, FullSnap};
+use crate::netcode::{Channel, KIND_CHANNEL};
+use crate::session::{
+    encode_input, encode_input_compressed, encode_snapshot, encode_state_delta, NetError,
+    KIND_INPUT, KIND_SNAPSHOT, KIND_STATE, SNAPSHOT_HEADER_LEN, SNAPSHOT_SLOT_LEN,
+    STATE_DELTA_HEADER_LEN,
+};
 use crate::validate::SortedUnique;
 
 /// The canonical slot cap as an array length (the one widening of it).
@@ -663,6 +672,347 @@ pub fn bandwidth_chart() -> [ChartRow; 4] {
     rows
 }
 
+/// Slots in the flood chart: the 16-fighter shape the MP18 bar names.
+const FLOOD_SLOTS: u8 = 16;
+/// The same count as an array length; the chart tests hold the pair equal.
+const FLOOD_VIEWS: usize = 16;
+/// Slots that fight on the flood (wounded, so combat outranks pose).
+const FLOOD_COMBAT_SLOTS: u8 = 8;
+/// Slots that moved on the flood (combat plus pose); the rest hold still.
+const FLOOD_MOVING_SLOTS: u8 = 12;
+/// Flood tick and the baseline tick it diffs against.
+const FLOOD_TICK: u32 = 9;
+/// Baseline tick of the flood chart's delta.
+const FLOOD_BASE_TICK: u32 = 8;
+/// Checkpoint hash stamped on the charted state packets. A fixture stamp, not
+/// a sim hash: nothing charted here feeds the tick.
+const FLOOD_CHECKPOINT_HASH: u64 = 0x2040_0000_0000_0009;
+
+/// One row of the flood chart: a wire kind, the channel and priority the MP8
+/// table gives it, and the bytes the MP9 codec puts on the wire. Units: bytes
+/// per packet, bytes/s at the row rate through the helpers. Determinism: whole
+/// integers read from the table and the codecs, no clock, no allocation here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FloodRow {
+    /// Wire kind byte, read from [`KIND_CHANNEL`], never restated here.
+    pub kind: u8,
+    /// Transport channel the table maps the kind to.
+    pub channel: Channel,
+    /// Priority class the table gives the kind, lower first.
+    pub priority: u8,
+    /// Rate the row's packet is sent at, Hz (inputs ride every tick).
+    pub hz: u64,
+    /// Bytes per packet without the MP9 codec.
+    pub raw_bytes: usize,
+    /// Bytes per packet with the MP9 codec. Equal to raw where a kind has no
+    /// codec yet, so its saving reads zero instead of guessing.
+    pub packed_bytes: usize,
+}
+
+impl FloodRow {
+    /// Bytes/s carried by the raw shape at the row rate.
+    #[must_use]
+    pub const fn raw_bytes_per_sec(self) -> u64 {
+        bytes_per_sec(self.raw_bytes, self.hz)
+    }
+
+    /// Bytes/s carried by the packed shape at the row rate.
+    #[must_use]
+    pub const fn packed_bytes_per_sec(self) -> u64 {
+        bytes_per_sec(self.packed_bytes, self.hz)
+    }
+
+    /// Whole permille of raw bytes the codec removes; zero when the row has
+    /// no codec or the packed shape is not smaller.
+    #[must_use]
+    pub fn saving_permille(self) -> u64 {
+        if self.raw_bytes == 0 || self.packed_bytes > self.raw_bytes {
+            return 0;
+        }
+        u64::try_from((self.raw_bytes - self.packed_bytes) * 1_000 / self.raw_bytes)
+            .unwrap_or(u64::MAX)
+    }
+}
+
+/// The MP18 flood chart: the MP8 channel table and the MP9 input codec drawn
+/// on one 16-fighter flood, with the MP16 shed and the quiet tape beside them,
+/// so one chart decides both rows. Twelve slots move (eight fight), four hold
+/// still as idle crowd; the quiet tape moves only the viewer by one
+/// millimetre. Chart helper, not a wire path: no sockets, no clock, and the
+/// same flood draws the same chart on every run.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FloodChart {
+    /// One row per [`KIND_CHANNEL`] entry, table order.
+    pub rows: [FloodRow; KIND_CHANNEL.len()],
+    /// Slots the MP16 shed keeps under the chart budget.
+    pub kept_slots: usize,
+    /// Slots the shed drops on this flood.
+    pub dropped_slots: usize,
+    /// Dropped slots whose class is combat (must stay zero).
+    pub dropped_combat: usize,
+    /// Dropped slots whose class is pose.
+    pub dropped_pose: usize,
+    /// Dropped slots whose class is idle (the crowd shed first).
+    pub dropped_idle: usize,
+    /// State-delta packet bytes on the flood tape.
+    pub flood_delta_bytes: usize,
+    /// State-delta packet bytes on the quiet tape.
+    pub quiet_delta_bytes: usize,
+    /// FNV-1a over every charted wire packet, so two draws compare a hash.
+    pub digest: u64,
+}
+
+impl std::fmt::Display for FloodChart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for row in self.rows {
+            writeln!(
+                f,
+                "FLOOD kind={} channel={:?} prio={} hz={} raw={}B packed={}B save={}permille {}B/s -> {}B/s",
+                row.kind,
+                row.channel,
+                row.priority,
+                row.hz,
+                row.raw_bytes,
+                row.packed_bytes,
+                row.saving_permille(),
+                row.raw_bytes_per_sec(),
+                row.packed_bytes_per_sec(),
+            )?;
+        }
+        writeln!(
+            f,
+            "FLOOD shed kept={} dropped={} combat={} pose={} idle={}",
+            self.kept_slots,
+            self.dropped_slots,
+            self.dropped_combat,
+            self.dropped_pose,
+            self.dropped_idle,
+        )?;
+        write!(
+            f,
+            "FLOOD delta flood={}B quiet={}B digest={:016x}",
+            self.flood_delta_bytes, self.quiet_delta_bytes, self.digest,
+        )
+    }
+}
+
+/// Baseline of the flood: 16 fighters at rest, spread by slot.
+fn flood_baseline() -> [FighterView; FLOOD_VIEWS] {
+    let mut base = [FighterView {
+        slot: 0,
+        x_mm: 0,
+        y_mm: 0,
+        z_mm: 0,
+        yaw_ddeg: 0,
+        hp: 0,
+        stamina: 0,
+    }; FLOOD_VIEWS];
+    for (slot, view) in (0u8..).zip(base.iter_mut()) {
+        *view = FighterView {
+            slot,
+            x_mm: 1_000 + i32::from(slot) * 500,
+            y_mm: 0,
+            z_mm: -2_000,
+            yaw_ddeg: 100,
+            hp: 1_000,
+            stamina: 100,
+        };
+    }
+    base
+}
+
+/// The flood tape beside its quiet twin: eight slots fight, four move, four
+/// hold still; the quiet tape moves only the viewer, by one millimetre.
+fn flood_tape(
+    base: &[FighterView; FLOOD_VIEWS],
+) -> ([FighterView; FLOOD_VIEWS], [FighterView; FLOOD_VIEWS]) {
+    let mut flood = *base;
+    let mut quiet = *base;
+    for (slot, view) in (0u8..).zip(flood.iter_mut()) {
+        if slot < FLOOD_COMBAT_SLOTS {
+            view.x_mm += 500;
+            view.z_mm -= 250;
+            view.yaw_ddeg += 90;
+            view.hp = view.hp.saturating_sub(120);
+            view.stamina = view.stamina.saturating_sub(2);
+        } else if slot < FLOOD_MOVING_SLOTS {
+            view.x_mm += 250;
+            view.z_mm -= 125;
+        }
+    }
+    quiet[0].x_mm += 1;
+    (flood, quiet)
+}
+
+/// The flood's held input tape: 16 fighters on one tick, a held human wish in
+/// slot 0, a second human wish in slot 1 and fourteen held bot wishes, every
+/// slot holding a combat button.
+fn flood_inputs() -> [FighterInput; FLOOD_VIEWS] {
+    let mut inputs = [FighterInput {
+        tick: FLOOD_TICK,
+        fighter: FighterId(0),
+        mx: 0,
+        mz: 0,
+        facing: 0,
+        buttons: Buttons::NONE,
+    }; FLOOD_VIEWS];
+    for (slot, input) in (0u8..).zip(inputs.iter_mut()) {
+        *input = match slot {
+            0 => FighterInput {
+                tick: FLOOD_TICK,
+                fighter: FighterId(0),
+                mx: 100,
+                mz: 0,
+                facing: 0,
+                buttons: Buttons(ATTACK),
+            },
+            1 => FighterInput {
+                tick: FLOOD_TICK,
+                fighter: FighterId(1),
+                mx: -60,
+                mz: 40,
+                facing: -900,
+                buttons: Buttons(BLOCK),
+            },
+            _ => FighterInput {
+                tick: FLOOD_TICK,
+                fighter: FighterId(slot),
+                mx: 100,
+                mz: 0,
+                facing: 0,
+                buttons: Buttons(ATTACK),
+            },
+        };
+    }
+    inputs
+}
+
+/// Quantized full snapshot of one charted tape.
+fn flood_snap_of(tick: u32, views: &[FighterView; FLOOD_VIEWS]) -> FullSnap {
+    FullSnap {
+        tick,
+        fighters: views
+            .iter()
+            .map(|view| FighterSnap {
+                slot: view.slot,
+                x_mm: view.x_mm,
+                y_mm: view.y_mm,
+                z_mm: view.z_mm,
+                yaw_ddeg: view.yaw_ddeg,
+                hp: view.hp,
+                stamina: view.stamina,
+            })
+            .collect(),
+    }
+}
+
+/// State-delta packet bytes for `now` against `base` through the session
+/// codec, read here and never reimplemented.
+fn state_delta_bytes(base: &FullSnap, now: &FullSnap) -> Result<Vec<u8>, NetError> {
+    let delta = encode_delta(now, base)?;
+    encode_state_delta(
+        Checkpoint {
+            tick: now.tick,
+            hash: FLOOD_CHECKPOINT_HASH,
+        },
+        &delta,
+    )
+}
+
+/// The MP16 shed on the chart flood under the chart's own budget: the viewer
+/// plus every changed non-idle slot, so idle crowd is exactly what drops.
+/// Returns `[kept, dropped, combat, pose, idle]`.
+fn flood_shed(
+    base: &[FighterView; FLOOD_VIEWS],
+    now: &[FighterView; FLOOD_VIEWS],
+) -> Result<[usize; 5], ScaleError> {
+    let mut budget = DELTA_HEADER_LEN;
+    for (index, view) in now.iter().enumerate() {
+        if priority_of(*view, base[index], 0) != PRIORITY_IDLE {
+            budget = budget.saturating_add(delta_cost_bytes(*view, base[index]));
+        }
+    }
+    let mut out = [0u8; FLOOD_VIEWS];
+    let kept = select_priority(now, base, 0, FLOOD_TICK, FLOOD_BASE_TICK, budget, &mut out)?;
+    let mut tally = [kept, 0, 0, 0, 0];
+    for (index, view) in now.iter().enumerate() {
+        if out[..kept].contains(&view.slot) {
+            continue;
+        }
+        tally[1] += 1;
+        match priority_of(*view, base[index], 0) {
+            PRIORITY_COMBAT => tally[2] += 1,
+            PRIORITY_IDLE => tally[4] += 1,
+            _ => tally[3] += 1,
+        }
+    }
+    Ok(tally)
+}
+
+/// Draw the MP18 flood chart: the MP8 table plus the MP9 codec under one
+/// 16-fighter flood, one chart deciding both rows.
+///
+/// # Errors
+///
+/// [`NetError`] only if the fixed fixture stops validating (a code change, not
+/// an input): the chart never draws a partial row.
+pub fn flood_chart() -> Result<FloodChart, NetError> {
+    let base = flood_baseline();
+    let (flood, quiet) = flood_tape(&base);
+    let inputs = flood_inputs();
+    let raw = encode_input(FLOOD_TICK, &inputs)?;
+    let packed = encode_input_compressed(FLOOD_TICK, &inputs)?;
+    let base_snap = flood_snap_of(FLOOD_BASE_TICK, &base);
+    let now_snap = flood_snap_of(FLOOD_TICK, &flood);
+    let quiet_snap = flood_snap_of(FLOOD_TICK, &quiet);
+    let flood_delta = state_delta_bytes(&base_snap, &now_snap)?;
+    let quiet_delta = state_delta_bytes(&base_snap, &quiet_snap)?;
+    let full = encode_snapshot(&now_snap)?;
+    let hz = snapshot_hz(FLOOD_SLOTS).map_err(|_| NetError::BadState)?;
+    let shed = flood_shed(&base, &flood).map_err(|_| NetError::BadState)?;
+    let mut rows = [FloodRow {
+        kind: 0,
+        channel: Channel::Unreliable,
+        priority: u8::MAX,
+        hz: 0,
+        raw_bytes: 0,
+        packed_bytes: 0,
+    }; KIND_CHANNEL.len()];
+    for (row, (kind, channel, priority)) in rows.iter_mut().zip(KIND_CHANNEL) {
+        // Kinds this chart does not encode draw zeroes; the chart test
+        // asserts every table row carries bytes, so table growth fails there.
+        let (rate, raw_bytes, packed_bytes) = match kind {
+            KIND_INPUT => (TICK_HZ, raw.len(), packed.len()),
+            KIND_STATE => (hz, flood_delta.len(), flood_delta.len()),
+            KIND_SNAPSHOT => (hz, full.len(), full.len()),
+            _ => (0, 0, 0),
+        };
+        *row = FloodRow {
+            kind,
+            channel,
+            priority,
+            hz: rate,
+            raw_bytes,
+            packed_bytes,
+        };
+    }
+    let mut digest = Fnv64::new();
+    for bytes in [&raw, &packed, &flood_delta, &quiet_delta, &full] {
+        digest.write(bytes);
+    }
+    Ok(FloodChart {
+        rows,
+        kept_slots: shed[0],
+        dropped_slots: shed[1],
+        dropped_combat: shed[2],
+        dropped_pose: shed[3],
+        dropped_idle: shed[4],
+        flood_delta_bytes: flood_delta.len(),
+        quiet_delta_bytes: quiet_delta.len(),
+        digest: digest.finish(),
+    })
+}
+
 /// Allocation-free proof hook: the hot selection path funnels through
 /// [`select_priority`], which takes slices plus a caller buffer and owns no
 /// `Vec`, `String`, `Box` or `BTreeMap`. This map fingerprints one scripted
@@ -720,11 +1070,13 @@ pub(crate) fn human_dwell(seed: u64, slot: u8, epoch: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta::MASK_HP;
+    use crate::netcode::kind_channel;
     use crate::replicate::{
         decode_snapshot_packet, encode_snapshot_packet, EntityId, ReplicationClient,
         ReplicationServer, Transform, Vitals, MASK_VITALS, REPLICATE_VERSION_OFFSET,
     };
-    use crate::session::NetError;
+    use crate::session::{decode_input, NetError};
 
     fn view(slot: u8) -> FighterView {
         FighterView {
@@ -800,6 +1152,151 @@ mod tests {
     }
 
     #[test]
+    fn flood_chart_rows_follow_the_mp8_table_and_keep_combat_first() {
+        let chart = flood_chart().expect("the fixed flood charts");
+        println!("{chart}");
+        assert_eq!(
+            chart.rows.len(),
+            KIND_CHANNEL.len(),
+            "one row per table kind"
+        );
+        for (row, (kind, channel, priority)) in chart.rows.iter().zip(KIND_CHANNEL) {
+            assert_eq!(row.kind, kind, "rows follow the table order");
+            assert_eq!(row.channel, channel);
+            assert_eq!(row.priority, priority);
+            assert_eq!(
+                kind_channel(kind),
+                Some((channel, priority)),
+                "kind {kind} must read the same table"
+            );
+            assert!(
+                row.raw_bytes > 0 && row.packed_bytes > 0,
+                "kind {kind} draws no bytes: {chart}"
+            );
+        }
+        let priorities: Vec<u8> = chart.rows.iter().map(|row| row.priority).collect();
+        assert!(
+            priorities.windows(2).all(|pair| pair[0] < pair[1]),
+            "combat inputs must outrank state and snapshot bulk: {priorities:?}"
+        );
+        assert_eq!(chart.dropped_combat, 0, "combat never starves: {chart}");
+        // Combat state really carries: every wounded slot names hp in the
+        // flood's state delta, and every slot's combat button survives both
+        // input shapes byte-exact.
+        let base = flood_baseline();
+        let (flood, _) = flood_tape(&base);
+        let delta = encode_delta(
+            &flood_snap_of(FLOOD_TICK, &flood),
+            &flood_snap_of(FLOOD_BASE_TICK, &base),
+        )
+        .expect("the flood deltas");
+        for slot in 0..FLOOD_COMBAT_SLOTS {
+            let change = delta
+                .changed_slots
+                .iter()
+                .find(|(at, _)| *at == slot)
+                .expect("wounded slot is named");
+            assert_ne!(change.1.mask & MASK_HP, 0, "hp starved for slot {slot}");
+        }
+        let inputs = flood_inputs();
+        let raw = encode_input(FLOOD_TICK, &inputs).expect("raw input packet");
+        let packed = encode_input_compressed(FLOOD_TICK, &inputs).expect("packed input packet");
+        assert_eq!(decode_input(&raw).expect("raw decodes").inputs, inputs);
+        assert_eq!(
+            decode_input(&packed).expect("packed decodes").inputs,
+            inputs
+        );
+        for input in inputs {
+            assert_ne!(
+                input.buttons.0 & engine_input::fighter::KNOWN_BUTTONS,
+                0,
+                "slot {} holds no combat button",
+                input.fighter.get()
+            );
+        }
+    }
+
+    #[test]
+    fn flood_chart_sheds_idle_crowd_before_any_combat_slot() {
+        let chart = flood_chart().expect("the fixed flood charts");
+        let crowd = usize::from(FLOOD_SLOTS - FLOOD_MOVING_SLOTS);
+        assert_eq!(chart.dropped_slots, crowd, "the idle crowd sheds: {chart}");
+        assert_eq!(chart.dropped_idle, crowd);
+        assert_eq!((chart.dropped_combat, chart.dropped_pose), (0, 0));
+        assert_eq!(
+            chart.kept_slots,
+            usize::from(FLOOD_MOVING_SLOTS),
+            "every changed slot ships: {chart}"
+        );
+    }
+
+    #[test]
+    fn flood_chart_deltas_are_smaller_on_quiet_tapes() {
+        let chart = flood_chart().expect("the fixed flood charts");
+        println!("{chart}");
+        assert!(
+            chart.quiet_delta_bytes < chart.flood_delta_bytes,
+            "quiet tape must delta smaller: quiet {} vs flood {}",
+            chart.quiet_delta_bytes,
+            chart.flood_delta_bytes
+        );
+        assert!(
+            chart.quiet_delta_bytes * 4 < chart.flood_delta_bytes,
+            "quiet delta {} must stay under a quarter of the flood {}",
+            chart.quiet_delta_bytes,
+            chart.flood_delta_bytes
+        );
+        let full = chart
+            .rows
+            .iter()
+            .find(|row| row.kind == KIND_SNAPSHOT)
+            .expect("snapshot row")
+            .raw_bytes;
+        assert!(
+            chart.flood_delta_bytes < full,
+            "the flood delta {} must beat the full snapshot {full}",
+            chart.flood_delta_bytes
+        );
+    }
+
+    #[test]
+    fn flood_chart_codec_saves_twenty_percent_at_sixteen_fighters() {
+        let chart = flood_chart().expect("the fixed flood charts");
+        let input = chart
+            .rows
+            .iter()
+            .find(|row| row.kind == KIND_INPUT)
+            .expect("input row");
+        println!("{chart}");
+        // The kill bar: >=20% saving at 16 fighters, or the row dies here
+        // with the numbers on the failure line.
+        assert!(
+            input.packed_bytes * 5 <= input.raw_bytes * 4,
+            "MP18 kill bar: need >=20% saving, raw={} packed={} ({} permille)",
+            input.raw_bytes,
+            input.packed_bytes,
+            input.saving_permille()
+        );
+        assert!(input.saving_permille() >= 200);
+        assert!(input.packed_bytes_per_sec() < input.raw_bytes_per_sec());
+    }
+
+    #[test]
+    fn flood_chart_replays_identically_x2() {
+        assert_eq!(
+            FLOOD_VIEWS,
+            usize::from(FLOOD_SLOTS),
+            "the fixture count and its array length must agree"
+        );
+        let first = flood_chart().expect("the fixed flood charts");
+        let second = flood_chart().expect("the fixed flood charts");
+        assert_eq!(first.digest, second.digest, "same flood, same bytes");
+        assert_ne!(first.digest, 0, "the chart must hash real bytes");
+        assert_eq!(first, second, "same flood draws the same chart");
+        println!("{first}");
+    }
+
+    #[test]
     fn full_snapshots_fit_both_budgets() {
         assert_eq!(full_wire_len(16), 313);
         assert_eq!(full_wire_len(32), 617);
@@ -850,7 +1347,8 @@ mod tests {
             .expect("select 32");
         assert_eq!((a, &first[..a]), (b, &second[..b]), "twice equal");
         assert_eq!(a, 32, "every slot ships");
-        assert_eq!(&first[..a], &(0..32u8).collect::<Vec<u8>>()[..]);
+        let all: Vec<u8> = (0..32u8).collect();
+        assert_eq!(&first[..a], all.as_slice());
     }
 
     #[test]
@@ -875,7 +1373,8 @@ mod tests {
             select_priority(&now, &base, 0, 9, 8, MAX_DATAGRAM_BYTES, &mut second).expect("select");
         assert_eq!((a, &first[..a]), (b, &second[..b]), "twice equal");
         assert_eq!(a, 32, "zero combat starvation");
-        assert_eq!(&first[..a], &(0..32u8).collect::<Vec<u8>>()[..]);
+        let all: Vec<u8> = (0..32u8).collect();
+        assert_eq!(&first[..a], all.as_slice());
         // Table order: combat inputs outrank state outranks snapshot bulk.
         let (_, ip) = crate::netcode::kind_channel(crate::session::KIND_INPUT).expect("input");
         let (_, sp) = crate::netcode::kind_channel(crate::session::KIND_STATE).expect("state");

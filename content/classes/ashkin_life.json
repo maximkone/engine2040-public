@@ -1,0 +1,210 @@
+{
+  "id": "ashkin_life",
+  "faction": "ashkin",
+  "tier": 1,
+  "branch": "ashkin_officiator",
+  "role": "healer and injury broker",
+  "growth": { "str": 0, "dex": 1, "con": 0, "int": 0, "wis": 2 },
+  "primary": ["wis", "dex"],
+  "playstyle": "The Life does not mend the wound, it moves it. Injury is tracked in points (1 point = 1 damage) and the sheet reads the fight as a ledger: what she takes, what she pushes onto somebody else, what she mends. Every cap on this sheet exists so she cannot cheat the ledger. Burden Shift moves up to 30% of the target injury into her, hard cap 25% of her own max health (125 points at 500 health). Burden Relay moves damage to a marked ally, 200 damage in total, and the ally really takes it: the redirect moves damage, it never erases it. Return From Ash brings a downed ally back at 40% health for a 300 s cooldown and 12% of a level of XP. She has no damage of her own, 500 health and 0% mitigation, so she cannot finish anything and a duel she cannot end is a duel she loses.",
+  "abilities": [
+    {
+      "id": "ashkin_life.mend_song",
+      "name": "Mending Song",
+      "tier": 0,
+      "kind": "heal",
+      "shape": "target",
+      "range": 18,
+      "radius": 4,
+      "cast": 1.2,
+      "cooldown": 3.0,
+      "mana": 12,
+      "telegraph": "none",
+      "damage": { "base": 40, "scale": "wis" },
+      "effects": [
+        { "type": "heal_per_second", "value": 40, "duration": 5 }
+      ],
+      "notes": "Heals the target and up to 3 allies within 4 m of it. Base 40 on WIS per second: 69 at L10, 344 over the 5 s. You can walk while the song runs."
+    },
+    {
+      "id": "ashkin_life.mend_ward",
+      "name": "Mending Ward",
+      "tier": 0,
+      "kind": "buff",
+      "shape": "target",
+      "range": 16,
+      "radius": 0,
+      "cast": 0.3,
+      "cooldown": 20.0,
+      "mana": 8,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "damage_reduction", "value": 25, "duration": 6 }
+      ],
+      "notes": "25% less damage taken for 6 s on one ally. Does not stack with itself; a recast resets the 6 s. On a standard 120 damage hit that is 30 points off every time."
+    },
+    {
+      "id": "ashkin_life.injury_shift",
+      "name": "Burden Shift",
+      "tier": 0,
+      "kind": "utility",
+      "shape": "target",
+      "range": 20,
+      "radius": 0,
+      "cast": 0.8,
+      "cooldown": 14.0,
+      "mana": 16,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "injury_transfer", "value": 30, "duration": 0 },
+        { "type": "injury_transfer_cap", "value": 25, "duration": 0 }
+      ],
+      "notes": "Move injury out of one fighter and into yourself: up to 30% of the target current injury, hard cap 25% of your max health, 125 damage points at 500 health. The moved injury lands on you as real damage, so it can down you. Nothing is deleted: the target HURT bar drops by exactly what your HURT bar rises. HUD: your own frame shows the split (MOVED IN / MOVED OUT) after every cast."
+    },
+    {
+      "id": "ashkin_life.wound_lantern",
+      "name": "Wound Lantern",
+      "tier": 1,
+      "kind": "debuff",
+      "shape": "circle",
+      "range": 20,
+      "radius": 5,
+      "cast": 0.0,
+      "cooldown": 16.0,
+      "mana": 20,
+      "telegraph": "circle",
+      "damage": { "base": 40, "scale": "wis" },
+      "effects": [
+        { "type": "injury_amplify", "value": 25, "duration": 6 }
+      ],
+      "notes": "A 5 m circle at up to 20 m: base 40 on WIS to every enemy inside, 69 at L10, and +25% injury from every hit for 6 s. It multiplies injury, not damage, so it hurts the armoured more than the fragile."
+    },
+    {
+      "id": "ashkin_life.burden_relay",
+      "name": "Burden Relay",
+      "tier": 1,
+      "kind": "buff",
+      "shape": "target",
+      "range": 20,
+      "radius": 0,
+      "cast": 0.0,
+      "cooldown": 25.0,
+      "mana": 20,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "damage_redirect", "value": 200, "duration": 8 },
+        { "type": "damage_redirect_mana", "value": 1, "duration": 8 }
+      ],
+      "notes": "Mark one ally. For 8 s, damage that hits you is moved to that ally, up to 200 damage in total (flat cap, under two standard hits of 120). Damage past the cap still lands on you. The ally takes it as real damage: the redirect moves damage, it never erases it. Cost: 1 mana per 10 damage moved, 20 mana at most."
+    },
+    {
+      "id": "ashkin_life.cleanse_rite",
+      "name": "Cleanse Rite",
+      "tier": 1,
+      "kind": "heal",
+      "shape": "target",
+      "range": 16,
+      "radius": 0,
+      "cast": 0.6,
+      "cooldown": 18.0,
+      "mana": 14,
+      "telegraph": "none",
+      "damage": { "base": 60, "scale": "wis" },
+      "effects": [
+        { "type": "heal_burst", "value": 60, "duration": 0 },
+        { "type": "debuff_cleanse", "value": 2, "duration": 0 }
+      ],
+      "notes": "Heals one ally or yourself and removes 2 debuffs. Base 60 on WIS: 103 at L10. 0.6 s cast: it can be interrupted, and the Life has no magic shield for herself."
+    },
+    {
+      "id": "ashkin_life.life_exchange",
+      "name": "Life Exchange",
+      "tier": 2,
+      "kind": "utility",
+      "shape": "target",
+      "range": 18,
+      "radius": 0,
+      "cast": 1.0,
+      "cooldown": 30.0,
+      "mana": 24,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "injury_swap", "value": 30, "duration": 0 },
+        { "type": "move_speed", "value": -40, "duration": 2 }
+      ],
+      "notes": "You and the target swap injury: what you carry goes to them, what they carry comes to you, each side capped at 30% of its own max health, so 150 points for you and 300 for a 1000 health fighter. The overflow stays where it was. The target loses 1 debuff. Casting leaves you at 40% move speed for 2 s: you are exposed while the trade lands. The answer to a tank is not more healing, it is a trade."
+    },
+    {
+      "id": "ashkin_life.mend_choir",
+      "name": "Mending Choir",
+      "tier": 2,
+      "kind": "heal",
+      "shape": "self",
+      "range": 0,
+      "radius": 8,
+      "cast": 0.0,
+      "cooldown": 30.0,
+      "mana": 26,
+      "telegraph": "none",
+      "damage": { "base": 20, "scale": "wis" },
+      "effects": [
+        { "type": "heal_per_second", "value": 20, "duration": 12 },
+        { "type": "aura", "value": 8, "duration": 12 }
+      ],
+      "notes": "A 12 s aura around you: heals every ally within 8 m. Base 20 on WIS per second: 34 at L10. One aura per ally; a second Life does not stack and does not double the heal."
+    },
+    {
+      "id": "ashkin_life.vital_surge",
+      "name": "Vital Surge",
+      "tier": 3,
+      "kind": "heal",
+      "shape": "target",
+      "range": 20,
+      "radius": 0,
+      "cast": 0.8,
+      "cooldown": 60.0,
+      "mana": 30,
+      "telegraph": "none",
+      "damage": { "base": 250, "scale": "wis" },
+      "effects": [
+        { "type": "heal_burst", "value": 250, "duration": 0 },
+        { "type": "debuff_cleanse", "value": 2, "duration": 0 },
+        { "type": "damage_boost", "value": 25, "duration": 6 }
+      ],
+      "notes": "Heals one ally and clears 2 debuffs. Base 250 on WIS: 430 at L10, most of a 500 health ally. The healed ally deals +25% damage for 6 s. It does not work on a downed ally: for that, use Return From Ash."
+    },
+    {
+      "id": "ashkin_life.return_from_ash",
+      "name": "Return From Ash",
+      "tier": 4,
+      "kind": "heal",
+      "shape": "target",
+      "range": 24,
+      "radius": 0,
+      "cast": 4.0,
+      "cooldown": 300.0,
+      "mana": 40,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "resurrect", "value": 40, "duration": 0 },
+        { "type": "xp_cost", "value": 12, "duration": 0 }
+      ],
+      "notes": "A 4 s channel on a downed ally within 24 m: they come back with 40% health and half their injury cleared. Cost: 300 s cooldown and 12% of the XP needed for your next level (rounded down, never below 0). If the ally was downed more than 25 s ago the channel fails, the cooldown is refunded and no XP is paid. A failed channel costs 4 s and nothing else."
+    }
+  ],
+  "loadout": {
+    "weapon": "Ledger stave: 18 m reach, WIS is the scaling stat on every number on this sheet.",
+    "offhand": "Oath tablet: holds the ledger, the split HUD and the mana pool (110 mana at level 1, +7 per level, regen 5 per second out of combat and 1.5 per second in combat)."
+  },
+  "counters": [
+    "warden_fighter",
+    "warden_warrior",
+    "ashkin_attacker"
+  ],
+  "weakness": "The Life has no damage of her own, so she cannot finish anything: a warden_rogue or a warden_assassin kills her in 4-5 standard hits (120 damage each, 500 health, 0% mitigation) because WIS does not block a knife. Her own tools can also lose her party: one Burden Shift of 125 points onto a low ally can down that ally, and a redirect sends the boss damage into the back line she was hired to keep alive. Wardens with 25% damage reduction cut her heals by a quarter and give her nothing to move."
+}

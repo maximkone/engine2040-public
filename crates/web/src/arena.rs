@@ -736,7 +736,8 @@ impl<'a> StartupFacts<'a> {
 /// the real arena. The kit is opt-in until the body draw reads near the ring centre and the
 /// kit's own spawn pair frames it (see `docs/BLOCKERS.md`, `2026-10-20T00:35Z`).
 async fn fetch_kit(search: &str) -> Option<engine_assets::asset_source::BundleSource> {
-    if !has_flag(search, "fight") || !has_flag(search, "kit") {
+    // WEB17: the cooked kit is the arena by default; `?nokit` keeps the procedural stand-in.
+    if !has_flag(search, "fight") || has_flag(search, "nokit") {
         return None;
     }
     set_text("hud", "loading the arena kit...");

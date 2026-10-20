@@ -35,10 +35,11 @@ pub const MATCH_TICKS: u32 = 36_000;
 /// Seed of the page's match; the native arena's default seed.
 pub const MATCH_SEED: u64 = 2040;
 /// Half-extent of the arena the page plays in, meters. The duel spawns at random points in a box
-/// whose limit is this extent minus a fighter radius; 12 is the native arena's own default and
-/// what the shipped page draws. The kit's corridor is narrower (z ±9.5, gate from x=7), so the
-/// kit stays a preview: see the `2026-10-20T00:35Z` row in `docs/BLOCKERS.md`.
-pub const HALF_EXTENT_M: f32 = 12.0;
+/// whose limit is this extent minus a fighter radius. Three and a half keeps both seats inside
+/// the kit's corridor (walls at z ±10 between x -6 and 2, stand backs at x -14, gate from x 7),
+/// so the shoulder camera stays behind its seat and inside the stone instead of clamping past
+/// a wall.
+pub const HALF_EXTENT_M: f32 = 3.5;
 
 /// The kit corridor's free ground, meters, with the eye kept a margin off its walls: the walls'
 /// inner faces at z ±9.5, the gate's at x 7, the stands' at x -14.

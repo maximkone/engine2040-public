@@ -9,8 +9,10 @@ Order of work: `FOCUS.md` "## Now". Rules for AIs: root `../AGENTS.md` (wins) an
 | Plans (one subsystem each) | `plan/README.md` indexes them; `node tools/plan-atlas.mjs --row <ID>` finds a row's plan; `plan/status-2026-10-17.md` is the truth check |
 | Where the engine is going | `VISION.md`, `ROADMAP.md`, `PLAN-REVIEW.md`, `AI-NATIVE.md` (tables: `VISION-TABLES.md`) |
 | Code layout | `ARCHITECTURE.md` (layers), `CRATE-MAP.md` (generated), `../.opencode/modmap.md` (files per crate, Grep only) |
+| Tree and context size | `compaction-baseline.md` (measured crates, src lines, lock names, dead flags) |
 | Code rules and gates | `CODELAW.md` (guides), `RUST-QUALITY.md` (enforces), `HASH-LAW.md` (golden hash), `WORKFLOW.md` (how a change flows) |
 | Blockers, evidence, deps | `BLOCKERS.md` (never read whole), `EVIDENCE.md`, `DEPENDENCIES.md`, `DECISIONS-M1.md`, `adr/` |
+| Dated proof receipts | `receipts/` (capture frames and run receipts, one folder per date), `evidence/` (hashed frame digests) |
 | How-to for users and AIs | `book/` (mdBook: quick start, AI door, recipes); `library/` (reusable patterns) |
 | Game design notes | `design/` (index `design/README.md`) |
 | Specs left from the old systems set | `systems/` (`ai-door.md`, `observability-heal.md`) |

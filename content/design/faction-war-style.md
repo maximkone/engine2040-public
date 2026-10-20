@@ -6,13 +6,13 @@ them enters the repo.
 
 ## The one idea
 
-Two factions, two palettes, one shared accent. Humans are light, upright and
-cool. Ak'Kan are dark, top-heavy and warm. Both carry gold. That single shared
+Two factions, two palettes, one shared accent. Wardens are light, upright and
+cool. Ashkin are dark, top-heavy and warm. Both carry gold. That single shared
 metal is what makes them look like one world instead of two games.
 
 ## Palettes
 
-Humans (light, cool, gold):
+Wardens (light, cool, gold):
 
 | role | hex | use |
 |---|---|---|
@@ -22,7 +22,7 @@ Humans (light, cool, gold):
 | steel blue | `#3E5A78` | cloth under-layer, small areas only |
 | leather | `#6B4B33` | straps, boots, belts |
 
-Ak'Kan (dark, warm, bronze):
+Ashkin (dark, warm, bronze):
 
 | role | hex | use |
 |---|---|---|
@@ -37,7 +37,7 @@ fog `#B9B29C`. Warm ground, cool water, low sun, heavy distance fog.
 
 ## Proportions
 
-| | human | Ak'Kan |
+| | wardens | Ashkin |
 |---|---|---|
 | height in heads | 7.5 | 6.0 |
 | shoulder width in head widths | 2.2 | 3.0 |
@@ -45,10 +45,10 @@ fog `#B9B29C`. Warm ground, cool water, low sun, heavy distance fog.
 | stance | upright, narrow | hunched, wide |
 | read at 30 m | slim vertical | dark triangle |
 
-The Ak'Kan silhouette is a triangle standing on two legs. If the triangle is
+The Ashkin silhouette is a triangle standing on two legs. If the triangle is
 not obvious at 30 m, the model is wrong, whatever the texture says.
 
-## Class silhouettes (Ak'Kan)
+## Class silhouettes (Ashkin)
 
 Class art is where the design lives; the in-game NPCs are drab on purpose.
 Read from the Warfare Online class cards (RYL-lineage art).
@@ -66,10 +66,10 @@ Stat identity matches the picture: +1.5 DEX +1.5 CON, mobile and tough.
 
 ## Colour is per set, red is constant
 
-The high-tier Ak'Kan sets are blue-silver plate with red accents, not the
+The high-tier Ashkin sets are blue-silver plate with red accents, not the
 black-and-bronze of the low-level NPCs. So the faction colour is not a fixed
 palette — it is **red as the always-present accent** on a heavy plate base.
-Do not lock the Ak'Kan to black. Lock them to: heavy plate, enclosed head,
+Do not lock the Ashkin to black. Lock them to: heavy plate, enclosed head,
 oversized weapon, red accent.
 
 ## Materials
@@ -89,7 +89,7 @@ oversized weapon, red accent.
 ## Environment
 
 Chunky, oversized architecture. Hard edges, few materials, fog for depth.
-Beach + palms + tower for the Ak'Kan start; dust, cracked earth and stone for
+Beach + palms + tower for the Ashkin start; dust, cracked earth and stone for
 the contested middle. No lush fantasy forest.
 
 ## UI language

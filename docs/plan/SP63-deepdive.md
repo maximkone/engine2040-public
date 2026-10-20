@@ -9,7 +9,8 @@ FOCUS Now Look row (`docs/FOCUS.md:7`).
 
 Three second-identical failures in 48 h to 2026-10-14, zero rows ticked, work done but
 unlanded. 2026-10-16 note: the `docs/BLOCKERS.md:35` / `:46` / `:53` cites below are stale — `:35` today is EG11 window build (`v1_skin.rs:769` E0308), `:46` is `provider-json-vs-audit`, `:53` is EG29 slice-1 foreign red (see `docs/BLOCKERS.md:35`, `:46`, `:53`).
-Current SP63 rows are `docs/BLOCKERS.md:28` (`loop-sp63-a2-repair` land REFUSED x10), `:51` (SP63 box-id closeout, `v1.rs:1844` no field tangents), and `:54` (SP63 id-saturates, foreign gate plus link-env). Original 2026-10-14 symptom was: SP63-a1 verify BLOCKED x2 on a foreign
+2026-10-21 note: `docs/BLOCKERS.md` was rewritten on 2026-10-21 and 122 pre-standalone rows moved to `docs/archive/BLOCKERS-to-2026-10-17.md`, so every `docs/BLOCKERS.md:NN` line number below now points at a different row: the three named rows read `docs/archive/BLOCKERS-to-2026-10-17.md:32` (EG11 window build), `:43` (provider-json-vs-audit) and `:50` (EG29 slice-1 foreign red).
+Current SP63 rows are `docs/BLOCKERS.md:28` (`loop-sp63-a2-repair` land REFUSED x10; now `docs/archive/BLOCKERS-to-2026-10-17.md:25`), `:51` (SP63 box-id closeout, `v1.rs:1844` no field tangents; now `:48`), and `:54` (SP63 id-saturates, foreign gate plus link-env; now `:51`). Original 2026-10-14 symptom was: SP63-a1 verify BLOCKED x2 on a foreign
 compile error (`quality.rs:197`, owned by the running GS10 slice; SP63
 code on disk unverified); SP63 id slice BLOCKED
 x2 on pre-existing `frame.rs:461` targets-none after resize (id_target 4
@@ -43,7 +44,7 @@ Three conjuncts, none inside the row Accepts:
    dirt. Same shape as the LF4 and EG11 rows.
 2. Pre-existing target lifecycle. Resize drops targets (lazy rebuild),
    so the cold readback ran targets-none at old `frame.rs:461` (the
-   `docs/BLOCKERS.md:46` failure line). The fix
+   `docs/BLOCKERS.md:46` failure line; 2026-10-21 note: that line number moved with the 2026-10-21 BLOCKERS rewrite, the row is now `docs/archive/BLOCKERS-to-2026-10-17.md:43`). The fix
    (`ensure_targets`, on disk staged at `frame.rs:467`, defined at
    `submit.rs:343`) lives in a foreign long-fn file, so the packet
    gate FAILs the slice for out-of-scope lines even with slice hunks

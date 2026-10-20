@@ -15,7 +15,7 @@
 
 - **Damage:** `D = base x (1 + 0.04 x (S - 10))`, `S = 10 + growth x (level - 1)`.
   STR: L1 = 10 (x1.00) · L10 = 23.5 (x1.54) · L20 = 38.5 (x2.14) · L40 = 68.5 (x3.34).
-- **Health:** `80 + 10 x CON`. **Mitigation:** 1% per CON point, capped at 35%.
+- **Health:** `200 + 25 x CON`. **Mitigation:** 1% per CON point, capped at 35%.
   At L10: 315 health, 23% mitigation.
 - **Share meter:** 0 to 100 points, shown under the health bar. It fills from
   redirected ally damage, decays 3 points/s while no share aura is up, and every

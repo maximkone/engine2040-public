@@ -2,15 +2,15 @@
 # One row per actor plus the centre duel circle. Whole numbers only, cm units.
 # class: 1 magnet, 2 curtain, 3 generator, 4 bumper, 0 none.
 table arena-zones version 1
-sand_floor class=0 cx_cm=-6000 cz_cm=0 radius_cm=1500 height_cm=20 advantage=0 dominance=0 risk=0
+sand_floor class=0 cx_cm=-200 cz_cm=0 radius_cm=1500 height_cm=20 advantage=0 dominance=0 risk=0
 stands class=1 cx_cm=-2000 cz_cm=0 radius_cm=600 height_cm=300 advantage=0 dominance=0 risk=0
 wall_north class=0 cx_cm=-200 cz_cm=-1000 radius_cm=400 height_cm=300 advantage=0 dominance=0 risk=0
 wall_south class=0 cx_cm=-200 cz_cm=1000 radius_cm=400 height_cm=300 advantage=0 dominance=0 risk=0
 gate_tunnel class=2 cx_cm=1000 cz_cm=0 radius_cm=200 height_cm=500 advantage=0 dominance=0 risk=1
-torch_west class=3 cx_cm=2000 cz_cm=-300 radius_cm=50 height_cm=200 advantage=0 dominance=0 risk=0
-torch_east class=3 cx_cm=2000 cz_cm=300 radius_cm=50 height_cm=200 advantage=0 dominance=0 risk=0
-banner_west class=0 cx_cm=2400 cz_cm=-300 radius_cm=80 height_cm=300 advantage=0 dominance=0 risk=0
-banner_east class=0 cx_cm=2400 cz_cm=300 radius_cm=80 height_cm=300 advantage=0 dominance=0 risk=0
+torch_west class=3 cx_cm=-400 cz_cm=-900 radius_cm=50 height_cm=200 advantage=0 dominance=0 risk=0
+torch_east class=3 cx_cm=-400 cz_cm=900 radius_cm=50 height_cm=200 advantage=0 dominance=0 risk=0
+banner_west class=0 cx_cm=-800 cz_cm=-930 radius_cm=80 height_cm=300 advantage=0 dominance=0 risk=0
+banner_east class=0 cx_cm=-800 cz_cm=930 radius_cm=80 height_cm=300 advantage=0 dominance=0 risk=0
 crate_a class=4 cx_cm=-500 cz_cm=-500 radius_cm=100 height_cm=100 advantage=1 dominance=0 risk=0
 debris_field class=4 cx_cm=500 cz_cm=500 radius_cm=125 height_cm=100 advantage=1 dominance=0 risk=1
 centre class=1 cx_cm=0 cz_cm=0 radius_cm=250 height_cm=0 advantage=1 dominance=1 risk=0

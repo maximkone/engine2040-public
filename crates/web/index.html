@@ -43,6 +43,10 @@
   /* WEB15: a played page keeps the picture, the frame line, the match line and the controls; the proof chrome steps aside. */
   #keys { display: none; position: fixed; right: 8px; bottom: 8px; z-index: 20; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
   body[data-play] #keys { display: block; }
+  /* Play keeps the picture: the frame and match dev lines are for ?debug, not for a player. */
+  body[data-play]:not([data-debug]) #hud, body[data-play]:not([data-debug]) #fight { display: none; }
+  /* Play keeps the picture: the frame and match dev lines are for ?debug, not for a player. */
+  body[data-play]:not([data-debug]) #hud, body[data-play]:not([data-debug]) #fight { display: none; }
   body[data-play] #fight { position: fixed; left: 8px; top: 40px; z-index: 20; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
   body[data-play] #golden, body[data-play] #report, body[data-play] #arena-info,
   body[data-play] #input, body[data-play] #audio, body[data-play] #audioworklet, body[data-play] #load,
@@ -192,6 +196,10 @@ const square = query.has("square");
 // WEB15: a played page (?fight, or a joined duel with &play) keeps the arena, the frame line, the
 // match line and the controls; the proof chrome steps aside so the picture is not buried.
 if (query.has("fight") || (query.has("server") && query.has("play"))) document.body.dataset.play = "1";
+// ?debug keeps the frame and match dev lines on screen during play; a plain ?fight hides them.
+if (query.has("debug")) document.body.dataset.debug = "1";
+// ?debug keeps the frame and match dev lines on screen during play; a plain ?fight hides them.
+if (query.has("debug")) document.body.dataset.debug = "1";
 
 try {
   // QW3/QW12: loader.js fetches and compiles the module (streaming, cached by hash) and times it; a wrong MIME type or a

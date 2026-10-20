@@ -299,7 +299,7 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 - Scores against `tools/product-bar.json` and `tools/pass-bar.json`.
 - Writes `target/reports/product/latest.json`, `latest.md`, `history.jsonl`; captures in `target/reports/product/runs/<sha>-<utc>/` (newest 6 kept).
 - For each broken floor writes `bug-product-<metric>.md` to `target/queue/ready/` (section 14).
-- `--if-new`: returns at once when the tree is the last checked (`SAME tree as <sha> (<verdict>)`) or when `target/sprint.halt` exists (`SKIP sprint.halt`). `--no-build`, `--no-file`, `--json`.
+- `--if-new`: returns at once when the tree is the last checked (`SAME tree as <sha> (<verdict>)`). `--no-build`, `--no-file`, `--json`.
 - Output line: `product-check: <GREEN|RED> <sha> fps=... empty=... tinted=... pops=... sunk=... blank=... frozen=... val=...`, with `red=` and `filed=` when present.
 - Exit: 0 green, 1 floor broke, 2 not run (`NOT RUN at <sha>: <why>`).
 

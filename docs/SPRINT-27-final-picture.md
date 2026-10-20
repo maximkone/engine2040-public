@@ -122,13 +122,13 @@ self-heal rows already on the board (AD14, E75) and the compaction rows the powe
 
 Plan: `docs/plan/build-cpu.md`. One pool of compile slots for every cargo on the PC, then the cheap levers. sccache stays dropped (OPT9 receipt).
 
-- [ ] OPT37 tools: every cargo our tools start joins the slot pool. New `tools/jobserver.mjs` exports `poolEnv()`, which returns `{ CARGO_MAKEFLAGS: "-j --jobserver-auth=engine2040-jobserver" }` when `pwsh -NoProfile -File tools/jobserver.ps1 status` exits 0, and `{}` otherwise (and on non-Windows). `tools/gh-check.mjs` (`runLocal`) and `tools/proof.mjs` (`cargo`) merge it into the child env. Tier A. Size S. Owns `tools/jobserver.mjs`, `tools/jobserver.test.mjs`, `tools/jobserver.ps1`, `tools/gh-check.mjs`, `tools/proof.mjs`.
+- [x] OPT37 tools: every cargo our tools start joins the slot pool. New `tools/jobserver.mjs` exports `poolEnv()`, which returns `{ CARGO_MAKEFLAGS: "-j --jobserver-auth=engine2040-jobserver" }` when `pwsh -NoProfile -File tools/jobserver.ps1 status` exits 0, and `{}` otherwise (and on non-Windows). `tools/gh-check.mjs` (`runLocal`) and `tools/proof.mjs` (`cargo`) merge it into the child env. Tier A. Size S. Owns `tools/jobserver.mjs`, `tools/jobserver.test.mjs`, `tools/jobserver.ps1`, `tools/gh-check.mjs`, `tools/proof.mjs`. Landed 6bfb92ed.
   Accept: `node --test tools/jobserver.test.mjs` passes: with a 1-slot holder under a test name the env names it, with none the env is empty, and a cargo check of a 7-dependency scratch crate under the 1-slot pool never shows more than 2 of its rustc at once (polled every 300 ms); `node tools/workspace-check.mjs` PASS.
   F2P: each cargo starts its own 12-job pool; four live builds ask for 48 jobs on 12 cores.
   P2P: with no holder running every tool behaves as before; golden d57b5c8ae3096614 x2.
   needs: none.
-- [ ] OPT38 proof: the local golden verify builds on `product`, not fat-LTO `release`. `tools/proof.mjs` runs `cargo run -p engine2040 --locked --profile product` for `--verify`, `--replay` and the backend check; CI's release-proof leg keeps `--release`. Tier A. Size S. Owns `tools/proof.mjs`.
-  Accept: `node tools/gh-check.mjs cargo test -p engine2040 --locked --profile product --test proof_cli default_and_max_seed` and the same line with `--release` pass twice each (1 test each; it asserts `final_hash` `d57b5c8ae3096614` from the binary built in that profile); `node --test tools/proof.test.mjs` passes; the receipt line gives the two build times.
+- [ ] OPT38 proof: the local golden verify builds on `perf-test` (thin LTO, 16 units), not fat-LTO `release`. `tools/proof.mjs` runs `cargo run -p engine2040 --locked --profile perf-test` for `--verify`, `--replay` and the backend check; CI's release-proof leg keeps `--release`. If the keeper's thin-LTO `product` profile (`docs/research/build-cpu-2026-10-21/CARD.md`) lands first, use it instead so the golden shares that target dir. Tier A. Size S. Owns `tools/proof.mjs`.
+  Accept: `node tools/gh-check.mjs cargo test -p engine2040 --locked --profile perf-test --test proof_cli default_and_max_seed` and the same line with `--release` pass twice each (1 test each; it asserts `final_hash` `d57b5c8ae3096614` from the binary built in that profile); `node --test tools/proof.test.mjs` passes; the receipt line gives the two build times.
   F2P: every local golden check pays the fat-LTO, one-unit relink in `target/release`.
   P2P: golden d57b5c8ae3096614 x2 on both profiles.
   needs: none.
@@ -137,7 +137,7 @@ Plan: `docs/plan/build-cpu.md`. One pool of compile slots for every cargo on the
   F2P: dependencies carry line tables nobody reads.
   P2P: workspace-crate backtraces keep file:line; golden x2.
   needs: none.
-- [ ] OPT40 tools: builds run below the desktop. `tools/gh-check.mjs` and `tools/proof.mjs` call `os.setPriority(os.constants.priority.PRIORITY_BELOW_NORMAL)` on their own process before they spawn cargo, so cargo and every rustc under it inherit below-normal on Windows. Tier B. Size S. Owns `tools/jobserver.mjs`, `tools/jobserver.test.mjs`, `tools/gh-check.mjs`, `tools/proof.mjs`.
+- [x] OPT40 tools: builds run below the desktop. `tools/gh-check.mjs` and `tools/proof.mjs` call `os.setPriority(os.constants.priority.PRIORITY_BELOW_NORMAL)` on their own process before they spawn cargo, so cargo and every rustc under it inherit below-normal on Windows. Tier B. Size S. Owns `tools/jobserver.mjs`, `tools/jobserver.test.mjs`, `tools/gh-check.mjs`, `tools/proof.mjs`. Landed 6bfb92ed.
   Accept: `node --test tools/jobserver.test.mjs` passes with a test where a process that called `lowerPriority()` spawns a child and the child reads its own `os.getPriority()` as below normal (10).
   F2P: a build at 100% CPU takes the same priority as the game window and the editor.
   P2P: build results unchanged.
@@ -147,6 +147,16 @@ Plan: `docs/plan/build-cpu.md`. One pool of compile slots for every cargo on the
   F2P: an old spike dir compiles `syn` at opt-level 3 next to live work.
   P2P: with no pool or free slots, spikes run as before.
   needs: OPT37.
+- [x] OPT43 tools: gh-check reuses every result by what the line builds. A result is keyed by the line, the runner and its inputs (the `-p` crates with their dependency closure, root manifests, lock, `.cargo/config.toml`, toolchain, `content/`, `fixtures/`, paths the crates' code names outside them); the same line on unchanged inputs answers from `target/gh-check/results/` (pass 24 h, fail 30 min, `--fresh` reruns), a line another call is running is joined, and the same local line already building is waited for. Tier A. Size M. Owns `tools/gh-check.mjs`, `tools/gh-check.test.mjs`. Landed 137b6c2d.
+  Accept: `node --test tools/gh-check.test.mjs` passes (the key ignores edits outside the closure and changes on edits inside it, a kept pass answers without a build, a fail expires at 30 min, a vacuous pass is never kept); a live third identical call answers from the kept result.
+  F2P: every call builds again, and two AIs asking the same line build it twice.
+  P2P: gh-check's route tests pass.
+  needs: none.
+- [x] OPT44 tools: feature builds go to a Windows runner, not the PC. Lines that need Windows or a window|app|ui|device feature only to build (check, clippy, `--no-run`, tests that open no GPU or window, `cfg(windows)` tests) run on `windows-latest` through check.yml's `os` input; only GPU, window and sound-device tests stay on the PC. ci.yml's window-compile job saves the `win-check` cache and builds the engine-game app tests for those runs to restore. Tier A. Size S. Owns `tools/gh-check.mjs`, `.github/workflows/check.yml`, `.github/workflows/ci.yml`, `skills/github-check/SKILL.md`, `AGENTS.md`. Landed 137b6c2d.
+  Accept: `node --test tools/gh-check.test.mjs` passes (route sends an app clippy line to windows-latest and a gpu filter to the PC); a live `cargo check -p engine-audio --features device` runs on the Windows runner.
+  F2P: every app, window, ui and device line compiled on the PC.
+  P2P: Linux lines dispatch without the `os` input.
+  needs: none.
 - [ ] OPT42 build: nightly front-end threads and Cranelift for dev, spike only. LATER: owner go (needs a nightly toolchain on the PC). In `target/spike-nightly`, time a cold and a touch rebuild of `engine-game` with `-Zthreads=8`, and with `codegen-backend = "cranelift"`, against stable dev. Tier C. Size S. Owns `docs/receipts/`.
   Accept: a receipt with six wall times (3 setups x 2 runs) and the run spread.
   F2P: no nightly numbers.

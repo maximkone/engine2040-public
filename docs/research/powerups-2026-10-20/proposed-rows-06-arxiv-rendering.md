@@ -97,6 +97,24 @@ path and `crates/render/src/baked_gi.rs` is a *bake-time* lightmap; there is no 
 count on the torch-grid fixture, or if the probe storage is not byte-equal twice.
 **Cost.** L. **Verdict: IDEAS-ONLY** (paper shape, no bytes).
 
+**Spec (patch-ready).**
+- New file `crates/render/src/probe_grid.rs`: `pub struct ProbeGrid` holding the sparse probe table,
+  `pub fn insert_probe(&mut self, cell: [i32; 3], probe: Probe)`, `pub fn lookup(&self, p: [f32; 3]) -> Probe`,
+  and `pub fn split_interval(interval: RadianceInterval, j: u32, beta: f32) -> Vec<RadianceInterval>`
+  (the ray-splitting arithmetic, written from the paper text - the unlicensed donor is not copied).
+- The interval type: `pub struct RadianceInterval { pub dir: [f32; 3], pub c: [f32; 3], pub beta: f32,
+  pub t_min: f32, pub t_max: f32 }` with `pub fn merge(a: &RadianceInterval, b: &RadianceInterval) ->
+  RadianceInterval` (the cascade merge).
+- The probe grid is fed by the existing `crates/render/src/gi_probe.rs` order (fixed probe order,
+  `+ - * /` and `sqrt` only) so the byte-equal-twice rule holds: no HashMap, no clock.
+- New WGSL `crates/render/src/shaders/probe_grid.wgsl`: `@compute @workgroup_size(8, 8, 1) fn
+  main(...)` writing the probe splat into the irradiance texture, reading the sparse table from a
+  storage buffer.
+- Test file `crates/render/tests/it/probe_grid.rs` (a new `mod` line in `crates/render/tests/it/main.rs`):
+  `probe_grid_splits_one_interval_into_j_sub_intervals` and `probe_grid_bytes_are_equal_twice`.
+- Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib probe_grid`.
+- Golden: `d57b5c8ae3096614` must not move (presentation only; the probe grid never enters the tick).
+
 ### RTX-02 - RT7: a WebGPU path tracer with OpenPBR shading
 
 **What it is.** A browser path tracer built on WebGPU compute with an OpenPBR surface model, a BVH and
@@ -125,6 +143,32 @@ file does not exist today), **RT13** (path-reference convergence lock) and the r
 **Kill line.** Kill if a 64-spp still of the material chart does not come within the RT13 FLIP gate of
 the analytic path, or if the BVH build is not byte-equal twice.
 **Cost.** L. **Verdict: PORT-CANDIDATE** (MIT, port from source, zero bytes vendored).
+
+**Spec (patch-ready).**
+- New file `crates/render/src/pathtrace.rs`: `pub struct OpenPbrMaterial` carrying the 19 fields the
+  donor's WGSL `Material` struct carries (`base_weight`, `base_color`, `base_metalness`,
+  `diffuse_roughness`, `specular_weight`, `specular_color`, `specular_roughness`,
+  `specular_anisotropy`, `specular_rotation`, `specular_ior`, `coat_weight`, `coat_color`,
+  `coat_roughness`, `coat_roughness_anisotropy`, `coat_ior`, `coat_darkening`, `emission_luminance`,
+  `emission_color`, `thin_film_thickness`, `thin_film_ior`) - our own Rust struct, our own field
+  names, no donor bytes. Plus `pub fn trace_path(...) -> Vec<Hit>` and `pub fn shade(hit: &Hit, mat:
+  &OpenPbrMaterial) -> [f32; 3]`.
+- The BVH comes from the existing `crates/render/src/accel.rs`: `pub struct Blas` (line 350) and
+  `pub fn build_input_bytes(blas: &Blas) -> Vec<u8>` (line 552) are already ours - the path tracer
+  consumes them, it does not build a second acceleration structure.
+- New WGSL `crates/render/src/shaders/pathtrace.wgsl`: `@compute @workgroup_size(64, 1, 1) fn
+  main(@builtin(global_invocation_id) gid: vec3<u32>)` with the entry points `pathtrace_raygen`,
+  `pathtrace_intersect` and `pathtrace_shade` (the wavefront split, see RTX-07), reading the scene
+  from the same storage buffers `accel.rs` writes.
+- The denoise pass is a second dispatch in the same file: `pathtrace_denoise` (the donor's
+  `denoise-pass-shader.ts` split).
+- Test file `crates/render/tests/it/pathtrace.rs`: `pathtrace_openpbr_material_covers_the_standard_fields`
+  (19 fields present), `pathtrace_bvh_build_is_byte_equal_twice` (the `build_input_bytes` output
+  twice), `pathtrace_material_chart_is_under_the_flop_gate` (the RT13 convergence bar).
+- Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib pathtrace`.
+- Golden: `d57b5c8ae3096614` must not move (the path tracer is a reference image, never the tick).
+- RT7's own Accept from the board: "converged when 1,024 vs 4,096 spp FLIP is at most 0.02; an
+  ablation with NEE off must score clearly worse on night and tunnel, else the reference is rejected."
 
 ### RTX-03 - RP1 + RL38: filter-adapted sampling noise instead of Halton
 
@@ -157,6 +201,35 @@ crates/` -> 0 hits).
 baseline at equal sample count, or if it costs more than 0.05 ms per frame.
 **Cost.** M. **Verdict: PORT-CANDIDATE** (BSD-3-Clause, port from source).
 
+**Spec (patch-ready).**
+- New file `crates/render/src/noise_table.rs`: `pub fn build_filter_adapted_table(spatial: Filter,
+  temporal: Filter, depth: u32) -> Vec<f64>` - the generator, written in Rust from the donor's
+  `FastNoiseDesign.md` recipe (which spatial filter, which temporal filter, product vs separate
+  combine, the per-pixel data type). The donor's Windows C++ tool is **not** vendored and **not**
+  called; we reimplement the recipe.
+- New file `crates/render/src/shaders/noise_table.wgsl` is not needed: the table is a `r32float` 3D
+  texture uploaded once at presenter start, next to the `sky.rs` bake upload.
+- Changed file `crates/render/src/post_jitter_motion.rs`: `pub fn jitter_offset(frame: u64) -> [f32; 2]`
+  (line 38) and `pub fn jitter_ndc(frame: u64, width: u32, height: u32) -> [f32; 2]` (line 46) today
+  return the Halton-2/3 pair. The new path adds `pub fn jitter_offset_from_table(frame: u64, table:
+  &NoiseTable) -> [f32; 2]`, reading the table at the Halton index (the sequence stays, the *value*
+  becomes filter-adapted). `pub fn halton(mut index: u32, base: u32) -> f32` (line 22) stays as the
+  index source.
+- Changed file `crates/render/src/post/taa.rs`: `pub fn taa_resolve` (line 145) and `pub fn
+  taa_resolve_jittered` (line 201) take the jitter from the caller; `pub(super) fn
+  neighborhood_minmax` (line 109) and `pub(super) fn clamp_history` (line 134) are the clamp the
+  noise is measured against. RL38's YCoCg variance clip and the closest-depth dilation land **after**
+  this row (that is RL38's own work) - this row only changes where the sample goes.
+- Changed file `crates/render/src/shaders/post/taa_compute.wgsl`: the `main` compute entry reads
+  `u.jitter` today; the new table lookup feeds the same uniform, so the GPU resolve is untouched.
+- Test file `crates/render/tests/it/post_noise.rs`: `filter_adapted_noise_cuts_the_rp1_shimmer` (the
+  settled variance against `SHIMMER_MAX_VAR` = 0.01 in `crates/render/src/post.rs:66`),
+  `filter_adapted_noise_table_is_byte_equal_twice` (the table bytes twice).
+- Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib post`.
+- Golden: `d57b5c8ae3096614` must not move (presentation only).
+- The noise is a build-time artifact, not a runtime dependency: the table ships as bytes in the
+  presenter, so the tick never reads it.
+
 ### RTX-04 - RT2 + RT6: occlusion-point reuse for ray-traced AO and area-light shadow
 
 **What it is.** Instead of reusing the *shaded value* or the *light sample*, reuse the **first-hit
@@ -184,6 +257,26 @@ RT path and no reuse.
 the arena sand fixture, or if the MIS weight cannot be expressed in integers (the tick is integer-only).
 **Cost.** M. **Verdict: IDEAS-ONLY** (paper shape, no bytes).
 
+**Spec (patch-ready).**
+- New file `crates/render/src/rt_shadow.rs`: `pub struct OccluderSample { pub point: [f32; 3], pub
+  normal: [f32; 3], pub weight: f32 }` and `pub fn occluder_domain_ao(samples: &[OccluderSample],
+  neighbours: usize) -> f32` - the estimator that turns AO into an occluder-domain integral. The
+  paper text is the only source; there is no donor file to copy.
+- The MIS weight: `pub fn mis_weight(pdf_a: f32, pdf_b: f32) -> f32` returning
+  `pdf_a / (pdf_a + pdf_b)`, clamped to 0..=1 so the integer path is safe.
+- The rays come from the existing `crates/render/src/accel.rs` (`pub struct Blas` line 350,
+  `pub struct Tlas` line 645) - RT2 reuses the tier's acceleration structures, it does not build a
+  second one. `pub fn require_rt(tier: Tier) -> Result<(), AccelError>` (line 164) is the gate.
+- The CPU sand-map ray tracer in `crates/render/src/rt_shadows.rs` (the `RT_FRAME_W = 32` frame) is
+  the **oracle** the GPU path is compared against, not the shipping path.
+- New WGSL `crates/render/src/shaders/rt_shadow.wgsl`: `@compute @workgroup_size(8, 8, 1) fn main(...)`
+  tracing the rays, writing the occluder samples into a storage buffer, then a second dispatch
+  combining the neighbours with the MIS weight.
+- Test file `crates/render/tests/it/rt_shadow.rs`: `occlusion_reuse_beats_no_reuse_at_equal_rays`,
+  `occlusion_reuse_mis_weight_is_in_range`.
+- Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib rt_shadow`.
+- Golden: `d57b5c8ae3096614` must not move.
+
 ### RTX-05 - RT3 + RT11 + RT14: constraint-aware spatio-temporal reservoir reuse
 
 **What it is.** Reservoir resampling reused *across frames* for time-resolved transport, with the reuse
@@ -208,6 +301,25 @@ per-frame reservoir in `crates/render/src/restir_di.rs`, or if the reservoir sta
 deterministically (the oracle uses `CounterRng`).
 **Cost.** M. **Verdict: IDEAS-ONLY** (paper shape, no bytes).
 
+**Spec (patch-ready).**
+- Changed file `crates/render/src/restir_di.rs`: the file is today a **CPU oracle** (`pub struct
+  RestirDi` line 31, `pub const DI_TORCHES: usize = 250` line 9, `pub const DI_FRAME_LEN: usize = 800
+  * 600 * 4` line 11). The GPU path adds `pub struct GpuReservoir { pub w: f32, pub light_idx: u32,
+  pub pdf: f32, pub path_len_m: f32 }` and `pub fn reuse_if_path_len_allows(prev: &GpuReservoir,
+  path_len_m: f32, max_len_m: f32) -> bool` - the constraint-aware reuse: a reservoir from the
+  previous frame is only reused when its path still satisfies the optical path-length bound.
+- The seed stays deterministic: the oracle already uses `engine_core::CounterRng`; the GPU path takes
+  the frame seed from the same source so the reservoir state is byte-equal twice.
+- New file `crates/render/src/restir_check.rs`: `pub fn reservoir_convergence(reservoirs: &[GpuReservoir],
+  reference: &[f32; 3], spp: u32) -> f64` - the RT11 bar (the reservoir against the RT7 reference on
+  the torch and tunnel fixtures).
+- New WGSL `crates/render/src/shaders/restir_di.wgsl`: `@compute @workgroup_size(64, 1, 1) fn main(...)`
+  doing the reservoir update and the temporal reuse.
+- Test file `crates/render/tests/it/restir.rs`: `spatio_temporal_reuse_cuts_di_variance_at_250_torches`,
+  `reservoir_state_is_seeded_deterministically`.
+- Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib restir`.
+- Golden: `d57b5c8ae3096614` must not move.
+
 ### RTX-06 - RT6 + RT11 + RT13: per-pixel difficulty as a transport-mechanism class
 
 **What it is.** The paper argues a per-pixel difficulty should be a *discrete description of how each
@@ -229,6 +341,22 @@ paper replaces.
 scalar itself at 64 spp, or if the label cannot be computed on the CPU oracle without a GPU path.
 **Cost.** M. **Verdict: IDEAS-ONLY** (paper shape, no bytes).
 
+**Spec (patch-ready).**
+- New file `crates/render/src/denoise.rs`: `pub enum TransportClass { Direct, FirstBounce, DeepBounce,
+  SpecularGlossy, Caustic, IndirectDiffuse, Emissive }` (seven classes, an integer index) plus
+  `pub fn classify(contribution: &Contribution) -> TransportClass` and `pub fn sample_budget(class:
+  TransportClass, base_spp: u32) -> u32` - the per-pixel sample allocation the paper argues for.
+- The class is an integer enum, so the whole thing is integer-only by construction: no float in the
+  tick path, and the denoiser is presentation-only anyway.
+- The noise it consumes is RTX-12's field; this row owns only the **classification and the budget**.
+- The denoiser's history and the variance guide live here too, but the SVGF/ReBLUR shape is already
+  carded in the LADDER (`docs/research/LADDER.md`, the "SVGF-shape spatiotemporal core for the RT6
+  engine denoiser" card) - this row is the **sample allocation** half, not a second denoiser.
+- Test file `crates/render/tests/it/denoise.rs`: `transport_class_predicts_variance_better_than_variance`,
+  `transport_class_is_an_integer_index`.
+- Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib denoise`.
+- Golden: `d57b5c8ae3096614` must not move.
+
 ### RTX-07 - RT7: wavefront versus megakernel path tracing (the shape decision)
 
 **What it is.** The same forward path tracer written two ways: wavefront keeps state in buffers between
@@ -248,6 +376,23 @@ traces from NVIDIA Nsight Graphics, we attributed this speedup to WPT's improved
 or if the state buffer makes the spp counter non-deterministic (RT13 wants seeds 7 and 17 at 64..4096
 spp, converged when 1024 vs 4096 spp FLIP <= 0.02).
 **Cost.** S. **Verdict: IDEAS-ONLY** (paper shape, no bytes).
+
+**Spec (patch-ready).**
+- The spec rides on RTX-02's file: `crates/render/src/pathtrace.rs` gets
+  `pub enum PathStage { RayGen, Intersect, Shade }` and `pub fn path_stages() -> [PathStage; 3]` - the
+  wavefront split, decided **before** the first line of the tracer is written, because the pass
+  structure is what the paper is about.
+- WGSL `crates/render/src/shaders/pathtrace.wgsl`: three `@compute` entry points
+  (`pathtrace_raygen`, `pathtrace_intersect`, `pathtrace_shade`) sharing one state buffer
+  (`PathState { ray: vec3<f32>, t: f32, throughput: vec3<f32>, depth: u32, path_len_m: f32, alive: u32 }`),
+  dispatched one stage at a time. The megakernel variant is the single dispatch alternative, kept
+  behind a flag so the paper's comparison is measurable on our own hardware.
+- The spp counter lives in the state buffer, so the RT13 seeds (7 and 17 at 64..4096 spp) are
+  reproducible: `pub fn spp_count(state: &PathState) -> u32`.
+- Test file `crates/render/tests/it/pathtrace.rs`: `wavefront_split_beats_the_megakernel_on_the_fixture`,
+  `wavefront_spp_counter_is_deterministic`.
+- Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib pathtrace`.
+- Golden: `d57b5c8ae3096614` must not move.
 
 ### RTX-08 - RP1 + RL38 + LF5: a local-and-parallel blue-noise generator
 
@@ -272,6 +417,22 @@ re-propose STBN**, it proposes the *local-and-parallel generator*.
 **Kill line.** Kill if the generated table does not beat Halton-2/3 on RP1 shimmer variance at equal
 sample count, or if generation is not deterministic byte-equal twice.
 **Cost.** M. **Verdict: IDEAS-ONLY** (paper shape, no bytes).
+
+**Spec (patch-ready).**
+- New file `crates/render/src/blue_noise.rs`: `pub struct GibbsPenalty { pub repulsion: f32, pub scale:
+  f32, pub hardness: f32 }` and `pub fn generate_lattice_blue_noise(depth: u32, penalty: GibbsPenalty,
+  seed: u64) -> Vec<f64>` - the generator, written from the paper text: a Gibbs distribution over a
+  lattice with a pairwise penalty, sampled with a bounded backward dependency trace so tiles are
+  independent. **The paper has no code; there is nothing to port.** The STBN paper (arXiv:2112.09629)
+  is already carded in the LADDER for GX12 and is **not** re-proposed here.
+- The output table is the same 3D texture RTX-03 uploads, so the two rows share the upload path: the
+  blue-noise table replaces the Halton-valued one and the consumer code does not change.
+- Determinism: the sampler takes an explicit `seed: u64` and uses `engine_core::CounterRng`, so the
+  table is byte-equal twice. The engine's tick never reads it (it is a build-time artifact).
+- Test file `crates/render/tests/it/post_noise.rs`: `lattice_blue_noise_beats_halton_on_the_rp1_shimmer`,
+  `lattice_blue_noise_table_is_byte_equal_twice`.
+- Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib post`.
+- Golden: `d57b5c8ae3096614` must not move.
 
 ### RTX-09 - E81: a WebGPU cloth solver (mass-spring, BVH broad phase, tri-tri narrow phase)
 
@@ -299,6 +460,20 @@ arXiv-simulation lane, so this row's spec is for that lane, not for us.
 fixed step, or if the tick hash moves at all (cloth is presentation-only, never hashed).
 **Cost.** M. **Verdict: IDEAS-ONLY** (unlicensed repo, shape only).
 
+**Spec (patch-ready).** NOTE: `crates/physfx` is HELD by the arXiv-simulation lane, so this spec is
+for **that** lane, not for us. It is listed here because the paper came from our lane.
+- New file `crates/physfx/src/cloth_gpu.rs`: `pub struct GpuCloth { pub nodes: usize, pub rest: Vec<f32>
+  }` with `pub fn step(&mut self, dt: f32) -> Result<(), ClothError>`; the solver is a mass-spring
+  integrate pass, a BVH broad phase and a tri-tri narrow phase, each a `@compute @workgroup_size(64)`
+  dispatch in a new `crates/physfx/src/shaders/cloth.wgsl`.
+- The **CPU verlet** in `crates/physics/src/cloth.rs` is the oracle the GPU pass is compared against at
+  the same fixed step; the two must agree bit for bit.
+- Test file `crates/physfx/tests/it/cloth.rs`: `gpu_cloth_matches_the_cpu_verlet_at_the_same_step`,
+  `gpu_cloth_never_moves_the_tick_hash`.
+- Proof: `node tools/gh-check.mjs cargo test -p engine-physfx --lib cloth`.
+- Golden: `d57b5c8ae3096614` must not move - cloth is presentation-only and never hashed, so a hash
+  move is a hard fail.
+
 ### RTX-10 - RL34 + QL1 + LF15 + B8: Oklch+ as the colour-difference metric
 
 **What it is.** A three-parameter extension of Oklab (power transform on the L axis, Naka-Rushton
@@ -321,6 +496,30 @@ is `crates/material/src/compare.rs:74 ciede2000`, used at `compare.rs:168` for `
 **Kill line.** Kill if the Oklch+ distance does not separate the material pairs that `ciede2000`
 separates on the published COMBVD pairs, or if the gate introduces a non-monotonic grade.
 **Cost.** S. **Verdict: PORT-CANDIDATE** (paper shape, no bytes; pure closed-form maths, one day).
+
+**Spec (patch-ready).**
+- Changed file `crates/material/src/compare.rs`: `pub fn ciede2000(l1: [f64; 3], l2: [f64; 3]) -> f64`
+  (line 74) is the metric the row points at. This row adds `pub fn oklch_plus(l1: [f64; 3], l2:
+  [f64; 3]) -> f64` beside it - the three-parameter transform (a power curve on L, a Naka-Rushton
+  compression on C, Euclidean distance in the transformed space) - and `pub fn chroma_gate(c: f64, n:
+  f32, sigma: f32) -> f32` returning `c^n / (c^n + sigma^n)`. `pub fn lab_of(rgb: [f32; 3]) -> [f64;
+  3]` (line 56) already gives the Lab input.
+- `pub struct Delta` (line 20) keeps `pub delta_e: f64` as **CIEDE2000**; the Oklch+ number is a new
+  field `pub delta_e_oklch: f64` so the two sit side by side and no consumer silently changes meaning.
+  `pub fn compare` (line 162) fills both.
+- The chroma gate goes into the grade: changed file `crates/render/src/shaders/blit.wgsl`, `fn
+  blit_grade` (line 118) - the gate blends the OKLCH interpolation path toward the Oklab path as
+  chroma falls, so a near-neutral grade does not swing hue.
+- The tonemap hue test RL34 wants lives beside `crates/render/src/shaders/tonemap.wgsl`: `fn
+  display_tonemap` (line 118) and `fn hue_keep_display` are the two branches; the test measures the
+  torch hue shift with the Oklch+ difference, not a raw hue angle.
+- Test file `crates/material/tests/it/compare.rs` (or the existing `mod tests` in
+  `crates/material/src/compare.rs`): `oklch_plus_separates_the_pairs_ciede2000_merges`,
+  `the_chroma_gate_is_monotonic_in_chroma`.
+- Proof: `node tools/gh-check.mjs cargo test -p engine-material --lib compare` and
+  `node tools/gh-check.mjs cargo test -p engine-render --lib tonemap`.
+- Golden: `d57b5c8ae3096614` must not move (the material comparator is a look-side number; the sim
+  half of the record is untouched).
 
 ### RTX-11 - VR2 + QA2 + QA15: JPEG as a variable-rate texture format with random access
 
@@ -348,6 +547,23 @@ KTX2 files, 9.79 MB, 4.5x smaller than RGBA8 (VR2 progress 2026-10-17).
 **Kill line.** Kill if the JPEG path cannot beat the KTX2 bundle size at equal perceptual quality in the
 QA2 receipt table, or if the CC BY-SA island turns out to be needed (then drop the donor entirely).
 **Cost.** L. **Verdict: RESEARCH-ONLY** (read it, port later).
+
+**Spec (patch-ready).**
+- Changed file `crates/assets/src/ktx2_cook.rs`: the VR2 bake today writes 15 KTX2 files (5 CC0
+  ambientCG sets, 9.79 MB, 4.5x smaller than RGBA8). This row adds the **alternative** path
+  `pub fn cook_jpeg_texture_set(...) -> Result<JpegSet, CookError>` next to the KTX2 cook, and the
+  QA2 receipt table gains a JPEG column.
+- The **GPU** decode (the donor's per-frame block decode) is the hard half: the donor is CUDA, so we
+  would write our own WGSL decode, and the copyleft island (`src/kernels/utils.cuh`, CC BY-SA 4.0)
+  is excluded. The cheap first slice is a **CPU** decode at cook time into BC, which changes no
+  runtime path at all.
+- The browser path is the real prize: JPEG is what a browser decodes for free, so the web bundle
+  (`crates/web`) could ship JPEG textures with no WASM decoder.
+- Test file `crates/assets/tests/it/jpeg.rs`: `jpeg_bundle_is_smaller_than_ktx2_at_equal_flop`,
+  `the_cc_by_sa_island_is_not_vendored` (the donor's `libs/` and `src/kernels/utils.cuh` never enter
+  the tree - the licence gate in `deny.toml` refuses them).
+- Proof: `node tools/gh-check.mjs cargo test -p engine-assets --lib jpeg`.
+- Golden: `d57b5c8ae3096614` must not move (asset bytes, not the tick).
 
 ### RTX-12 - RT2 + RT6: a unit-variance noise field with controlled spatio-temporal correlation
 
@@ -379,6 +595,22 @@ Halton-2/3 jitter (`crates/render/src/post_jitter_motion.rs`) and a plain 3x3 mi
 **Kill line.** Kill if the variance-corrected field does not cut the RT6 trail noise by >=30% at matched
 sample count, or if the estimator cannot be made integer-only and deterministic.
 **Cost.** M. **Verdict: IDEAS-ONLY** (CC-BY-NC, paper shape, no bytes).
+
+**Spec (patch-ready).**
+- New file `crates/render/src/noise_field.rs`: `pub struct NoiseField { pub mean: f64, pub variance:
+  f64 }` and `pub fn estimate_unit_variance_field(samples: &[f64], footprint_px: u32) -> NoiseField` -
+  the count-unique estimator, the prefilter to the pixel footprint and the variance correction after
+  it, written from the paper text. **The donor is CC-BY-NC: zero bytes are vendored and the estimator
+  is reimplemented.**
+- The field is the **input** to the denoiser: `crates/render/src/denoise.rs` (RTX-06's file) reads it
+  to weight samples by a *known* quantity instead of estimating moments per pixel. That is the whole
+  point: our variance-clip TAA spike was REJECTED because a second 9-tap stats pass cost +135%, and
+  a known-variance field costs nothing at sample time.
+- The CPU oracle: the same estimator in Rust over a seeded fixture, so the test does not need a GPU.
+- Test file `crates/render/tests/it/denoise.rs`: `variance_corrected_noise_cuts_the_rt6_trail`,
+  `the_noise_field_is_unit_variance`.
+- Proof: `node tools/gh-check.mjs cargo test -p engine-render --lib denoise`.
+- Golden: `d57b5c8ae3096614` must not move.
 
 ---
 

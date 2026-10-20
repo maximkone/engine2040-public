@@ -1,0 +1,341 @@
+{
+  "version": 1,
+  "currencies": [
+    {
+      "id": "coin",
+      "name": "Coin",
+      "sources": [
+        {"kind": "mob_drop", "amount": 3},
+        {"kind": "elite_drop", "amount": 25},
+        {"kind": "boss_drop", "amount": 180},
+        {"kind": "quest_turn_in", "amount": 60},
+        {"kind": "loot_sale", "amount": 15},
+        {"kind": "statue_war_reward", "amount": 90}
+      ],
+      "sinks": [
+        {"kind": "gear_repair", "amount": 30},
+        {"kind": "gear_upgrade_l1", "amount": 180},
+        {"kind": "gear_upgrade_l2", "amount": 270},
+        {"kind": "gear_upgrade_l3", "amount": 396},
+        {"kind": "socket_drill", "amount": 300},
+        {"kind": "endurance_restoration", "amount": 600},
+        {"kind": "material_iron", "amount": 10},
+        {"kind": "material_bronze", "amount": 30},
+        {"kind": "material_steel", "amount": 60},
+        {"kind": "material_silver", "amount": 110},
+        {"kind": "material_gold", "amount": 190},
+        {"kind": "material_cobalt", "amount": 320},
+        {"kind": "material_gem_1", "amount": 60},
+        {"kind": "material_gem_2", "amount": 120},
+        {"kind": "material_gem_3", "amount": 200},
+        {"kind": "respawn_item", "amount": 120},
+        {"kind": "travel_scroll", "amount": 25},
+        {"kind": "flask_charge", "amount": 40},
+        {"kind": "ration", "amount": 15}
+      ]
+    },
+    {
+      "id": "honour",
+      "name": "Honour Medals",
+      "sources": [
+        {"kind": "war_presence", "amount": 60},
+        {"kind": "war_kill", "amount": 25},
+        {"kind": "war_objective", "amount": 150},
+        {"kind": "guild_war_participation", "amount": 120}
+      ],
+      "sinks": [
+        {"kind": "war_respawn_pass", "amount": 30},
+        {"kind": "war_camp_supply", "amount": 80},
+        {"kind": "war_gear_upgrade", "amount": 250},
+        {"kind": "banner_placement", "amount": 600},
+        {"kind": "fort_flag_slot", "amount": 400}
+      ]
+    },
+    {
+      "id": "fame",
+      "name": "Fame",
+      "sources": [
+        {"kind": "war_kill", "amount": 30},
+        {"kind": "node_capture", "amount": 40}
+      ],
+      "sinks": [
+        {"kind": "inscribed_title", "amount": 400},
+        {"kind": "guild_hall_slot", "amount": 600},
+        {"kind": "banner_wrapping", "amount": 250},
+        {"kind": "dye_set", "amount": 120}
+      ]
+    },
+    {
+      "id": "ember_marks",
+      "name": "Ember Marks",
+      "sources": [
+        {"kind": "season_goal_tier", "amount": 50},
+        {"kind": "war_attendance", "amount": 10},
+        {"kind": "faction_war_win", "amount": 150}
+      ],
+      "sinks": [
+        {"kind": "season_title", "amount": 250},
+        {"kind": "season_set", "amount": 400},
+        {"kind": "season_craft_kit", "amount": 300},
+        {"kind": "ember_cache", "amount": 600},
+        {"kind": "season_pass_free_track", "amount": 500}
+      ]
+    }
+  ],
+  "shops": [
+    {
+      "id": "warden_market",
+      "faction": "wardens",
+      "location": "high_market",
+      "currency": "coin",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "flask_charge", "price": 40, "stock": 99},
+        {"item": "ration", "price": 15, "stock": 99},
+        {"item": "travel_scroll", "price": 25, "stock": 99},
+        {"item": "return_token", "price": 120, "stock": 25}
+      ]
+    },
+    {
+      "id": "warden_smithy",
+      "faction": "wardens",
+      "location": "stone_smithy",
+      "currency": "coin",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "iron", "price": 10, "stock": 200},
+        {"item": "bronze", "price": 30, "stock": 150},
+        {"item": "steel", "price": 60, "stock": 100},
+        {"item": "gem_1", "price": 60, "stock": 60},
+        {"item": "gem_2", "price": 120, "stock": 40},
+        {"item": "gear_repair", "price": 30, "stock": 99},
+        {"item": "restoration", "price": 600, "stock": 5},
+        {"item": "upgrade_attempt_l1", "price": 180, "stock": 99},
+        {"item": "upgrade_attempt_l2", "price": 270, "stock": 99},
+        {"item": "upgrade_attempt_l3", "price": 396, "stock": 99},
+        {"item": "socket_drill", "price": 300, "stock": 20}
+      ]
+    },
+    {
+      "id": "warden_quartermaster",
+      "faction": "wardens",
+      "location": "warden_keep",
+      "currency": "honour",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "war_respawn_pass", "price": 30, "stock": 99},
+        {"item": "war_camp_supply", "price": 80, "stock": 40},
+        {"item": "war_gear_upgrade", "price": 250, "stock": 20},
+        {"item": "banner_placement", "price": 600, "stock": 5},
+        {"item": "fort_flag_slot", "price": 400, "stock": 10}
+      ]
+    },
+    {
+      "id": "ashkin_market",
+      "faction": "ashkin",
+      "location": "ember_market",
+      "currency": "coin",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "flask_charge", "price": 40, "stock": 99},
+        {"item": "ration", "price": 15, "stock": 99},
+        {"item": "travel_scroll", "price": 25, "stock": 99},
+        {"item": "return_token", "price": 120, "stock": 25}
+      ]
+    },
+    {
+      "id": "ashkin_smithy",
+      "faction": "ashkin",
+      "location": "black_smithy",
+      "currency": "coin",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "iron", "price": 10, "stock": 200},
+        {"item": "bronze", "price": 30, "stock": 150},
+        {"item": "steel", "price": 60, "stock": 100},
+        {"item": "gem_1", "price": 60, "stock": 60},
+        {"item": "gem_2", "price": 120, "stock": 40},
+        {"item": "gear_repair", "price": 30, "stock": 99},
+        {"item": "restoration", "price": 600, "stock": 5},
+        {"item": "upgrade_attempt_l1", "price": 180, "stock": 99},
+        {"item": "upgrade_attempt_l2", "price": 270, "stock": 99},
+        {"item": "upgrade_attempt_l3", "price": 396, "stock": 99},
+        {"item": "socket_drill", "price": 300, "stock": 20}
+      ]
+    },
+    {
+      "id": "ashkin_quartermaster",
+      "faction": "ashkin",
+      "location": "ember_keep",
+      "currency": "honour",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "war_respawn_pass", "price": 30, "stock": 99},
+        {"item": "war_camp_supply", "price": 80, "stock": 40},
+        {"item": "war_gear_upgrade", "price": 250, "stock": 20},
+        {"item": "banner_placement", "price": 600, "stock": 5},
+        {"item": "fort_flag_slot", "price": 400, "stock": 10}
+      ]
+    },
+    {
+      "id": "frontier_market",
+      "faction": "neutral",
+      "location": "road_post_w",
+      "currency": "coin",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "silver", "price": 110, "stock": 40},
+        {"item": "gold", "price": 190, "stock": 20},
+        {"item": "cobalt", "price": 320, "stock": 12},
+        {"item": "gem_3", "price": 200, "stock": 15},
+        {"item": "gear_repair", "price": 30, "stock": 99},
+        {"item": "flask_charge", "price": 40, "stock": 99},
+        {"item": "ration", "price": 15, "stock": 99},
+        {"item": "travel_scroll", "price": 25, "stock": 99},
+        {"item": "return_token", "price": 120, "stock": 25}
+      ]
+    },
+    {
+      "id": "war_quartermaster",
+      "faction": "neutral",
+      "location": "keep_ruin",
+      "currency": "honour",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "war_respawn_pass", "price": 30, "stock": 99},
+        {"item": "war_camp_supply", "price": 80, "stock": 40},
+        {"item": "war_gear_upgrade", "price": 250, "stock": 20},
+        {"item": "banner_placement", "price": 600, "stock": 5},
+        {"item": "fort_flag_slot", "price": 400, "stock": 10}
+      ]
+    },
+    {
+      "id": "memorial_hall",
+      "faction": "neutral",
+      "location": "keep_ruin",
+      "currency": "fame",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "inscribed_title", "price": 400, "stock": 20},
+        {"item": "guild_hall_slot", "price": 600, "stock": 10},
+        {"item": "banner_wrapping", "price": 250, "stock": 30},
+        {"item": "dye_set", "price": 120, "stock": 50}
+      ]
+    },
+    {
+      "id": "ember_bazaar",
+      "faction": "neutral",
+      "location": "road_post_e",
+      "currency": "ember_marks",
+      "buy_rate": 0.5,
+      "sell_rate": 0.25,
+      "stock": [
+        {"item": "season_title", "price": 250, "stock": 10},
+        {"item": "season_set", "price": 400, "stock": 20},
+        {"item": "season_craft_kit", "price": 300, "stock": 15},
+        {"item": "ember_cache", "price": 600, "stock": 8}
+      ]
+    }
+  ],
+  "materials": [
+    {"id": "iron", "name": "Iron", "source": "mine", "tier": 1},
+    {"id": "bronze", "name": "Bronze", "source": "mine", "tier": 2},
+    {"id": "steel", "name": "Steel", "source": "war_cache", "tier": 2},
+    {"id": "silver", "name": "Silver", "source": "war_cache", "tier": 3},
+    {"id": "gold", "name": "Gold", "source": "boss_drop", "tier": 3},
+    {"id": "cobalt", "name": "Cobalt", "source": "boss_drop", "tier": 4},
+    {"id": "gem_1", "name": "Chipped Gem", "source": "war_cache", "tier": 1},
+    {"id": "gem_2", "name": "Cut Gem", "source": "war_cache", "tier": 2},
+    {"id": "gem_3", "name": "Faceted Gem", "source": "boss_drop", "tier": 3}
+  ],
+  "endurance": {
+    "max": 100,
+    "on_death_loss": 10,
+    "repair_cost": 30,
+    "low_warn": 20,
+    "low_max_loss": 1,
+    "repair_amount": 100,
+    "broken_at": 0,
+    "restoration_cost": 600,
+    "restoration_amount": 10
+  },
+  "potions": [
+    {"id": "healing_draught", "charge": 3, "heal": 150, "cooldown_s": 2, "shared_resource": "flask", "refill_s": 45},
+    {"id": "mana_draught", "charge": 3, "heal": 0, "mana": 90, "cooldown_s": 2, "shared_resource": "flask", "refill_s": 45}
+  ],
+  "progression": {
+    "xp_per_level": [
+      {"level": 1, "xp": 0},
+      {"level": 2, "xp": 100},
+      {"level": 3, "xp": 210},
+      {"level": 4, "xp": 335},
+      {"level": 5, "xp": 480},
+      {"level": 6, "xp": 650},
+      {"level": 7, "xp": 850},
+      {"level": 8, "xp": 1090},
+      {"level": 9, "xp": 1380},
+      {"level": 10, "xp": 1730},
+      {"level": 11, "xp": 2150},
+      {"level": 12, "xp": 2650},
+      {"level": 13, "xp": 3240},
+      {"level": 14, "xp": 3930},
+      {"level": 15, "xp": 4730},
+      {"level": 16, "xp": 5650},
+      {"level": 17, "xp": 6700},
+      {"level": 18, "xp": 7890},
+      {"level": 19, "xp": 9230},
+      {"level": 20, "xp": 10730},
+      {"level": 21, "xp": 12400},
+      {"level": 22, "xp": 14250},
+      {"level": 23, "xp": 16290},
+      {"level": 24, "xp": 18530},
+      {"level": 25, "xp": 20980},
+      {"level": 26, "xp": 23650},
+      {"level": 27, "xp": 26550},
+      {"level": 28, "xp": 29690},
+      {"level": 29, "xp": 33080},
+      {"level": 30, "xp": 36730},
+      {"level": 31, "xp": 40650},
+      {"level": 32, "xp": 44850},
+      {"level": 33, "xp": 49340},
+      {"level": 34, "xp": 54130},
+      {"level": 35, "xp": 59230},
+      {"level": 36, "xp": 64650},
+      {"level": 37, "xp": 70400},
+      {"level": 38, "xp": 76490},
+      {"level": 39, "xp": 82930},
+      {"level": 40, "xp": 89730},
+      {"level": 41, "xp": 96900},
+      {"level": 42, "xp": 104450},
+      {"level": 43, "xp": 112390},
+      {"level": 44, "xp": 120730},
+      {"level": 45, "xp": 129480},
+      {"level": 46, "xp": 138650},
+      {"level": 47, "xp": 148250},
+      {"level": 48, "xp": 158290},
+      {"level": 49, "xp": 168780},
+      {"level": 50, "xp": 179730},
+      {"level": 51, "xp": 191150},
+      {"level": 52, "xp": 203050},
+      {"level": 53, "xp": 215440},
+      {"level": 54, "xp": 228330},
+      {"level": 55, "xp": 241730},
+      {"level": 56, "xp": 255650},
+      {"level": 57, "xp": 270100},
+      {"level": 58, "xp": 285090},
+      {"level": 59, "xp": 300630},
+      {"level": 60, "xp": 316730}
+    ],
+    "level_cap": 60,
+    "penalties": {"death_xp_percent": 0, "death_coin_percent": 0}
+  }
+}

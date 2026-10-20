@@ -1,6 +1,6 @@
 # INDEX — active contracts
 
-Map first: `README.md` (one screen). Quick start: `ROADMAP.md` → `ARCHITECTURE.md` (17.4KB); the work list is the board in `SPRINT.md` (slice it, never read whole).
+Map first: `README.md` (one screen). Quick start: `ROADMAP.md` → `ARCHITECTURE.md` (21.0KB, checked 2026-10-21); the work list is the board in `SPRINT.md` (slice it, never read whole).
 Then read `PLAN-REVIEW.md` → `VISION.md` → `AI-NATIVE.md`, plus
 `VISUAL-TARGET.md`, `EDITOR_AI_CONTROL.md`, `HASH-LAW.md` or the
 subsystem plan in `plan/` for the task.
@@ -30,6 +30,7 @@ and they carry no authority.
 | ROADMAP.md | Integrated milestones M0–M6 |
 | ARCHITECTURE.md | Acyclic layers, crate integration status, schema contracts |
 | CRATE-MAP.md | One row per crate: package, dir, job, engine deps and users (generated: `node tools/crate-map.mjs`) |
+| compaction-baseline.md | Measured size of the tree and of an agent's context: crates, src lines, lock names, dead flags (2026-10-20 snapshot) |
 | FINISH-RICH.md | Developer alpha and v1 acceptance with gate status |
 | FOCUS.md | Rome at war: Now order + keep/cut lists |
 | VISUAL-TARGET.md | Reference project and render milestones |
@@ -51,11 +52,13 @@ and they carry no authority.
 | EVIDENCE.md | Provenance ledger for code ports and content |
 | ROYALTY.md | Draft business terms (not an engine contract) |
 | plan/frontier.md | Research topics for the focus areas (render, animation, physics, hard systems, AI door) |
-| research/LADDER.md | Cards, spikes and verdicts, one ladder rung each; read the rung, not the file (199 KB) |
+| research/LADDER.md | Cards, spikes and verdicts, one ladder rung each; read the rung, not the file (226 KB, checked 2026-10-21) |
 | archive/ | No authority, git history made browsable: `archive/INDEX.md` lists what moved on 2026-10-17, older dated folders are listed by their date |
 | CAPTURE.md | Capture output: built-in dump first, OBS only for live play |
+| receipts/ | Dated proof receipts: capture frames and run receipts, one folder per date |
+| evidence/ | Hashed frame evidence (one JSON per proof); the provenance ledger is `EVIDENCE.md` |
 | DEMO.md | How to launch and play the arena demo (exe and browser), controls, what to look for |
-| fixtures/ | Fixture dir: pinned test data, start at `../fixtures/README.md` |
+| ../fixtures/ | Fixture dir: pinned test data, start at `../fixtures/README.md` |
 | README.md | The one-screen map of docs/: plans, rows, book, research, archive |
 | INDEX.md | This list |
 

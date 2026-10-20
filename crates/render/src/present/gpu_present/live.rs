@@ -1258,8 +1258,9 @@ impl Presenter {
         // bill to the `ibl` column.
         let forward_ibl_ms: f64;
         // True when the meter dispatch of this frame went into the
-        // encoder; the map of its bins starts after the submit.
-        let histogram_dispatched: bool;
+        // encoder; the map of its bins starts after the submit. False
+        // while the meter is off or a map is still open.
+        let mut histogram_dispatched = false;
         {
             let targets = self
                 .targets

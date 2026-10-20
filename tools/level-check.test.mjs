@@ -102,7 +102,10 @@ test("live layout passes: cover, entrance, use, physical, dominance", () => {
   assert.equal(r.noUse, 0);
   assert.equal(r.physicalUnread, 0);
   assert.ok(r.dominance >= 1, "one holdable dominance point");
-  assert.equal(r.possibleDeath, 234, "possible_death pinned 234, got " + r.possibleDeath);
+  // 396, was 234 before 2026-10-21: the sand floor moved under the duel lane
+  // (cx -6000 -> -200 cm), so more of the 20x20 m floor now sits within
+  // 2000 mm of a zone centre. The rule itself only asks for a nonzero count.
+  assert.equal(r.possibleDeath, 396, "possible_death pinned 396, got " + r.possibleDeath);
   // The live risk rows are `gate_tunnel` (its mouth stands on the 10 m floor
   // edge, |cx| 1000) and `debris_field`; no other row carries the flag. Both
   // stand on the floor, so the risk rule is quiet on the shipped layout.

@@ -16,12 +16,13 @@
 //! snapshot). Error policy: invalid proposals fail as [`ForkError`], a tick
 //! mismatch in [`Fork::from_snapshot`] is `None`; the worker never panics.
 //!
-//! Threading contract: [`Fork::run_n`] clones the fork state into one
-//! `std::thread` worker and joins it before returning. The live match is
+//! Threading contract: [`Fork::run_n`] clones the fork state into one job on
+//! the shared job pool (`engine_ecs::pool::shared()`, E21) and waits for it
+//! before returning. The live match is
 //! never touched (snapshot-clone isolation: no shared locks, no shared
 //! mutable state), so the fixed tick never waits on a fork; only the calling
-//! thread blocks on its own join. Concurrent forks are independent. A 0-tick
-//! fork joins immediately with zeroed metrics.
+//! thread blocks on its own wait. Concurrent forks are independent. A 0-tick
+//! fork returns immediately with zeroed metrics.
 //!
 //! Ship configuration: NET1/LOC2-style consumers enable `engine-arena/sim`
 //! (physics settling plus wall collision inside the fork worker). Fork tests
@@ -406,17 +407,32 @@ impl Fork {
         self.run_worker(ticks, |job| job.run())
     }
 
-    /// The one worker-thread path: spawn, join, and turn a panic into
-    /// [`ForkCrashed`]. The job is built on the caller's thread first.
+    /// The one worker-thread path: queue the job on the shared job pool, wait
+    /// for it, and turn a panic into [`ForkCrashed`]. The job is built on the
+    /// caller's thread first.
+    ///
+    /// E21: the fork rides the shared pool (one worker set, started once)
+    /// instead of spawning a thread per fork. The pool re-raises a job panic
+    /// on the caller, so the crash still reads as [`ForkCrashed`] and never
+    /// as zeroed metrics.
     fn run_worker<T, F>(&self, ticks: u32, work: F) -> Result<T, ForkCrashed>
     where
         T: Send + 'static,
         F: FnOnce(ForkJob) -> T + Send + 'static,
     {
         let job = self.job(ticks);
-        std::thread::spawn(move || work(job))
-            .join()
-            .map_err(|_| ForkCrashed)
+        let (sender, receiver) = std::sync::mpsc::channel::<T>();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine_ecs::pool::shared().scope(|scope| {
+                scope.spawn(move || {
+                    let _ = sender.send(work(job));
+                });
+            });
+        }));
+        if outcome.is_err() {
+            return Err(ForkCrashed);
+        }
+        receiver.recv().map_err(|_| ForkCrashed)
     }
 
     /// Recorded fork run: same worker isolation as [`run_n`](Fork::run_n),
@@ -428,9 +444,8 @@ impl Fork {
     /// Consumer: DT2 student trainer; the sibling live-match entrypoint is
     /// [`run_dataset`](super::run_dataset).
     pub fn run_recorded(&self, ticks: u32) -> (ForkMetrics, Dataset) {
-        let job = self.job(ticks);
         let fighters = fighter_slot_count(self.fighters);
-        match std::thread::spawn(move || job.run_recorded_inner()).join() {
+        match self.run_worker(ticks, ForkJob::run_recorded_inner) {
             Ok(pair) => pair,
             Err(_) => (
                 ForkMetrics {
@@ -676,6 +691,9 @@ impl ForkJob {
                 // stays empty; it still needs its reservation to build.
                 last_cues: Vec::with_capacity(MAX_ATTACK_STARTED_PER_TICK),
                 breaks: Vec::with_capacity(steps),
+                // Cut rows fill as the fork replays, one row per tick like
+                // `breaks`; a v1 prefix snapshot carries none.
+                cuts: Vec::with_capacity(steps),
                 match_log: Vec::with_capacity(steps),
                 // Forks keep the observed match track live, matching the
                 // observer entry points (`run_match_events`).
@@ -794,26 +812,46 @@ impl ForkJob {
             }
             // One row per fighter: the tick's shared pre-step observation,
             // that slot's decided input, and its damage before/after.
+            //
+            // E21/RC36: the rows are built per fighter on the shared job
+            // pool and merged in fighter order, so the bytes are the ones
+            // the serial loop wrote, whatever the worker count.
             if let (Some(out), Some((pre_fight, before_damage))) = (rows.as_mut(), record_before) {
                 let inputs = sim.last_inputs();
                 let tick = base_tick + index as u32;
-                for slot in 0..fighters {
+                let observed = &pre_states[..fighters];
+                let row_of = |slot: usize| -> Option<Row> {
                     let Some(input) = inputs[slot] else {
-                        continue;
+                        return None;
                     };
                     let step = StepRecord {
                         tick,
-                        states: &pre_states[..fighters],
+                        states: observed,
                         fight: &pre_fight,
                         input,
                         damage_before: before_damage[slot],
                         damage_after: damage[slot],
                         killed,
                     };
-                    if let Some(recorded) = on_fork_step(&step) {
-                        out.push(recorded);
-                    }
-                }
+                    on_fork_step(&step)
+                };
+                let partials = engine_ecs::parallel::fork_join_on(
+                    engine_ecs::pool::shared(),
+                    0..fighters,
+                    engine_ecs::jobs::ChunkSize::new(1),
+                    |range| range.filter_map(row_of).collect::<Vec<Row>>(),
+                    Vec::new(),
+                    |mut acc, part| {
+                        acc.extend(part);
+                        acc
+                    },
+                )
+                .unwrap_or_else(|_| {
+                    // The range is non-empty, so the fork cannot refuse; the
+                    // serial loop gives the same rows if it ever does.
+                    (0..fighters).filter_map(row_of).collect::<Vec<Row>>()
+                });
+                out.extend(partials);
             }
         }
         for (slot, total) in damage.iter().enumerate().take(fighters) {

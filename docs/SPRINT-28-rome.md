@@ -183,7 +183,7 @@ until the slice (LEG10) lands.
   P2P: workspace-check PASS.
   needs: CDX4, CDX5.
 - [ ] KIT1 rome: kit says how sure we are. `content/rome/kit.toml` lists the period kit from `rome.md` section 3 (Corbridge lorica, Weisenau helmet, Pompeii gladius, pilum, scutum, pugio, dolabra, caligae) and the section 4.9 table, each with `certainty` (attested, reconstructed, contested, invented), refs, and `found` (site, year found, object date) when an object exists; `crates/rome/src/certainty.rs` loads it and refuses an item without a certainty or a ref. Tier B. Size S. Owns `crates/rome/src/certainty.rs`, `crates/rome/src/lib.rs`, `content/rome/kit.toml`.
-  Accept: `cargo test -p engine-rome --lib certainty` passes: the table loads, the Xanten-Wardt bow reads `contested` with `found` 1999, an item with no certainty is refused with its key named, and two loads hash the same.
+  Accept: `cargo test -p engine-rome --lib certainty` passes: the table loads, the Xanten-Wardt manuballista reads `attested` with `found` 1999 and its hand-held reading marked debated, an item with no certainty is refused with its key named, and two loads hash the same.
   F2P: kit has no certainty and no finds.
   P2P: golden d57b5c8ae3096614 x2.
   needs: ROM2.
@@ -192,11 +192,11 @@ until the slice (LEG10) lands.
   F2P: no falx and no arm guard.
   P2P: rules v1 and golden d57b5c8ae3096614 x2.
   needs: KIT1, LEG10.
-- [ ] KIT3 rome: the hand torsion bow, labelled contested. LATER: until the codex holds Schalles (Xantener Berichte 18, 2010) and Baatz (1991). The Xanten-Wardt frame as Immunis ballistarius kit, sized only from those papers, with its card saying scholars split on hand-held against stand-mounted. Tier C. Size S. Owns `content/rome/kit.toml`, `crates/rome/src/certainty.rs`.
-  Accept: `cargo test -p engine-rome --lib certainty` passes with the bow's sizes cited to page numbers; the codex card shows `contested` and both readings.
-  F2P: no hand torsion bow.
-  P2P: golden x2.
-  needs: KIT1, CDX2.
+- [ ] KIT3 arena: the manuballista (cheiroballistra). The ballistarius's one-man torsion bolt-shooter: wind the two springs (ticks per turn from the table), load an 18 cm iron bolt, shoot flat and fast (start value 31 m/s, the reconstruction figure), reload; a bolt pierces a shield or sticks in it by the table, and a hit on an unshielded man wounds through the body path. Direct fire from the rampart and over a work party; ammo is counted. Start numbers carry refs (the owner's reconstruction sources) in `content/rome/kit.toml` and are rechecked when the codex holds Schalles 2010. Tier B. Size S. Owns `crates/arena/src/bolt.rs`, `crates/arena/src/lib.rs`, `content/rome/kit.toml`.
+  Accept: `cargo test -p engine-arena --lib manuballista` passes: wind, load and shoot take the table's ticks; a bolt's flight and hit replay byte-equal twice; at 30 m a bolt drops less than a thrown pilum at the same range; a bolt into a scutum sticks or pierces as the table says; rules v2 only.
+  F2P: no manuballista.
+  P2P: rules v1 and golden d57b5c8ae3096614 x2.
+  needs: KIT1, LEG5.
 - [ ] KIT4 rome: name your kit. Punch letters into the shield boss or helmet with a punch, one letter per stroke, as on the Tyne boss of Junius Dubitatus (legio VIII Augusta); the text lives in the save and shows on the drawn shield. Tier C. Size S. Owns `crates/rome/src/scutum.rs`, `content/rome/tech/scutum.toml`.
   Accept: `cargo test -p engine-rome --lib punch` passes: 12 strokes punch "IVL DVBITATI" style text of up to 24 letters, the save round-trips byte-equal, and a letter outside the Latin capitals is refused.
   F2P: kit has no owner marks.

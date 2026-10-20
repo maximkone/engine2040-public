@@ -23,7 +23,7 @@ skinning, AM11 springs. Their evidence paths are in git (`pack.rs`, `dq.rs`, `sp
 
 | Capability | Status | Evidence (file or commit) |
 |---|---|---|
-| GASP-class ground feel (LM2) | missing (rowed) | `crates/anim/src/warp_ground.rs` does not exist yet; needs LM1, AM6 (ticked) |
+| GASP-class ground feel (LM2) | on disk, live consumer present (rowed) | `crates/anim/src/warp_ground.rs` and `crates/anim/src/warp_ground_feel_test.rs` both exist (Test-Path True) and the live consumer is `use engine_anim::warp_ground::GroundWarp;` at `crates/arena/src/lib.rs:109`; the old "does not exist yet" cell was false (corrected 2026-10-21; see the Status lines at `:33`/`:34`) |
 | Networked motion (LM3) | missing (rowed) | `crates/anim/src/net_pose.rs` present on disk; needs LM1, NET2 |
 | Animation LOD (AM13) | missing (rowed) | `crates/anim/src/lod.rs` present on disk; needs AM1, LM1 |
 | Parallel SIMD eval (AM14) | present, 0 live callers (rowed) | `crates/anim/src/par.rs` on disk; equality 0/1/2/4/8 workers bit-identical; 2.0x on 64 fighters, the 3x bar is open and no game caller; needs AM1, RC3 |

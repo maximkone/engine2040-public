@@ -1,0 +1,215 @@
+{
+  "id": "ashkin_shadow",
+  "faction": "ashkin",
+  "tier": 1,
+  "branch": "ashkin_officiator",
+  "role": "stealth assassin",
+  "growth": { "str": 1, "dex": 2, "con": 0, "int": 0, "wis": 0 },
+  "primary": ["dex", "str"],
+  "playstyle": "The Shadow fights on a detection meter, not on a health bar. Every watcher who can see the Shadow climbs a 4 step ladder (curious at 25, suspicious at 50, searching at 75, spotted at 100), and the whole kit pushes those ladders down. The opener is the only big hit: base 80 on DEX multiplied by 3.5 from unseen, which is 481 at L10, then a forced 1.0 s reveal during which the target takes 50% less damage and its next melee hit stuns the Shadow for 0.6 s. Against a player the opener is capped at 60% of the target max health (600 damage at 1000 health), and the cap bites from L20 on, where the raw opener is 705. So the opener starts a fight instead of ending one. The Shadow has no ranged tool: if it cannot reach a target, it waits. It has 500 health and 0% mitigation at every level, so 4.2 standard weapon hits (120 damage each) kill it.",
+  "abilities": [
+    {
+      "id": "ashkin_shadow.veil_step",
+      "name": "Veil Step",
+      "tier": 0,
+      "kind": "stealth",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.0,
+      "cooldown": 12.0,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "stealth", "value": 3, "duration": 3 }
+      ],
+      "notes": "3 s unseen. While unseen, watchers gain no detection on the Shadow at all. It breaks the moment the Shadow attacks or sprints. 12 s cooldown."
+    },
+    {
+      "id": "ashkin_shadow.quick_blade",
+      "name": "Quickblade",
+      "tier": 0,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.2,
+      "radius": 0,
+      "cast": 0.2,
+      "cooldown": 1.0,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 50, "scale": "dex" },
+      "effects": [],
+      "notes": "The basic blade. Base 50 on DEX: 86 at L10, to one target in front of you, 2.2 m reach. Attacking breaks any stealth the Shadow had."
+    },
+    {
+      "id": "ashkin_shadow.windstep",
+      "name": "Windstep",
+      "tier": 0,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.0,
+      "cooldown": 25.0,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "move_speed", "value": 35, "duration": 6 },
+        { "type": "attack_speed", "value": 20, "duration": 6 },
+        { "type": "detection_gain", "value": -25, "duration": 6 }
+      ],
+      "notes": "6 s of +35% move speed and +20% attack speed, and watchers gain 25% less detection on the Shadow while it runs. Sprinting cancels it."
+    },
+    {
+      "id": "ashkin_shadow.cull",
+      "name": "Cull",
+      "tier": 1,
+      "kind": "melee",
+      "shape": "single",
+      "range": 2.4,
+      "radius": 0,
+      "cast": 0.0,
+      "cooldown": 14.0,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 80, "scale": "dex" },
+      "effects": [
+        { "type": "stealth_multiplier", "value": 3.5, "duration": 0 },
+        { "type": "armor_ignore", "value": 50, "duration": 0 },
+        { "type": "damage_cap_vs_player", "value": 60, "duration": 0 },
+        { "type": "reveal", "value": 1, "duration": 1 },
+        { "type": "counter_window", "value": 50, "duration": 1 }
+      ],
+      "notes": "The opener. From unseen: base 80 on DEX (138 at L10) multiplied by 3.5, so 481 at L10, and half of the target armour is ignored. After it lands the Shadow is revealed for 1.0 s to every watcher and their detection jumps to spotted. During that second the target takes 50% less damage and its next melee hit stuns the Shadow for 0.6 s: that second is the counterplay window. Against a player target the whole hit is capped at 60% of the target max health, 600 damage at 1000 health; the cap bites from L20 on, where the raw opener is 705. Against an NPC the cap is 120% of its max health, so an opener can still delete an NPC."
+    },
+    {
+      "id": "ashkin_shadow.fan_of_blades",
+      "name": "Fan of Blades",
+      "tier": 1,
+      "kind": "aoe",
+      "shape": "cone",
+      "range": 3.2,
+      "radius": 0,
+      "cast": 0.2,
+      "cooldown": 16.0,
+      "mana": 0,
+      "telegraph": "cone",
+      "damage": { "base": 45, "scale": "dex" },
+      "effects": [
+        { "type": "stealth_multiplier", "value": 1.5, "duration": 0 },
+        { "type": "damage_cap_vs_player", "value": 60, "duration": 0 }
+      ],
+      "notes": "A 90 degree cone at 3.2 m. Base 45 on DEX per enemy: 77 at L10, 116 from unseen. 0.4 s cone telegraph: an enemy that steps back loses the hit. Each enemy hit is capped at 60% of their max health when they are a player."
+    },
+    {
+      "id": "ashkin_shadow.shroud_pulse",
+      "name": "Shroud Pulse",
+      "tier": 1,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 12,
+      "radius": 5,
+      "cast": 0.0,
+      "cooldown": 18.0,
+      "mana": 0,
+      "telegraph": "circle",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "detection_step", "value": 1, "duration": 6 },
+        { "type": "detection_gain", "value": -50, "duration": 6 }
+      ],
+      "notes": "A 5 m cloud at up to 12 m. Every watcher inside drops one step of the ladder, 25 detection points, and gains half the usual detection on the Shadow for 6 s. It does no damage. It is the answer to a search party."
+    },
+    {
+      "id": "ashkin_shadow.night_brand",
+      "name": "Night Brand",
+      "tier": 2,
+      "kind": "debuff",
+      "shape": "target",
+      "range": 14,
+      "radius": 0,
+      "cast": 0.3,
+      "cooldown": 18.0,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "mark", "value": 10, "duration": 10 },
+        { "type": "damage_boost", "value": 20, "duration": 10 },
+        { "type": "detection_gain", "value": 100, "duration": 10 }
+      ],
+      "notes": "Mark one enemy for 10 s: the Shadow deals +20% damage to it and it gains twice the usual detection on the Shadow, so it turns on fast. Marking is how the Shadow picks its first target, and how a hunter marks the Shadow."
+    },
+    {
+      "id": "ashkin_shadow.black_escape",
+      "name": "Black Escape",
+      "tier": 2,
+      "kind": "stealth",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.0,
+      "cooldown": 20.0,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "stealth", "value": 2.5, "duration": 2.5 },
+        { "type": "detection_point", "value": -25, "duration": 2.5 },
+        { "type": "reopener", "value": 4, "duration": 4 }
+      ],
+      "notes": "Vanish for 2.5 s: drop 25 detection points from every watcher and be unseen. The next melee hit within 4 s counts as an opener again, with the 3.5x multiplier, but the 1.0 s reveal after it still applies. 20 s cooldown, so it is one reset, not a loop."
+    },
+    {
+      "id": "ashkin_shadow.nightfall_arc",
+      "name": "Nightfall Arc",
+      "tier": 3,
+      "kind": "aoe",
+      "shape": "cone",
+      "range": 4.0,
+      "radius": 0,
+      "cast": 0.3,
+      "cooldown": 24.0,
+      "mana": 0,
+      "telegraph": "cone",
+      "damage": { "base": 90, "scale": "dex" },
+      "effects": [
+        { "type": "silence", "value": 1.5, "duration": 1.5 },
+        { "type": "damage_cap_vs_player", "value": 60, "duration": 0 }
+      ],
+      "notes": "A 120 degree cone at 4 m. Base 90 on DEX per enemy: 155 at L10, and a 1.5 s silence, so casters inside cannot cast. 0.5 s cone telegraph. Player targets are capped at 60% of their max health per hit."
+    },
+    {
+      "id": "ashkin_shadow.waning_dark",
+      "name": "Waning Dark",
+      "tier": 4,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 10,
+      "radius": 8,
+      "cast": 0.0,
+      "cooldown": 45.0,
+      "mana": 0,
+      "telegraph": "circle",
+      "damage": { "base": 100, "scale": "dex" },
+      "effects": [
+        { "type": "detection_step", "value": 1, "duration": 3 },
+        { "type": "damage_cap_vs_player", "value": 60, "duration": 0 },
+        { "type": "reopener", "value": 6, "duration": 6 }
+      ],
+      "notes": "An 8 m circle at up to 10 m. Base 100 on DEX per enemy: 172 at L10. Every enemy hit drops one step of the ladder, and the next melee hit within 6 s is an opener. Player targets are capped at 60% of their max health. 45 s cooldown: it is a once-per-fight answer, not a rotation."
+    }
+  ],
+  "loadout": {
+    "weapon": "Twin ash knives: 2.2 m reach, DEX is the scaling stat on every hit on this sheet.",
+    "offhand": "Ash cord: holds the stealth state, the detection ladder and the mana pool (60 mana at level 1, +4 per level, but no Shadow skill costs mana)."
+  },
+  "counters": [
+    "warden_cleric",
+    "warden_priest",
+    "warden_mage"
+  ],
+  "weakness": "The whole plan dies when the Shadow is seen: warden_rogue pulses a 20 m reveal every 20 s that finds every hidden enemy inside it, and the ashkin_gunner dig pulse reveals hidden enemies to the whole Ashkin faction for 12 s and cancels stealth effects on the ground inside it, so Veil Step inside the pulse does nothing. A Shadow picked early is a slow swordsman with 500 health, 0% mitigation and 4.2 standard weapon hits (120 damage each) to survive. warden_defender blocks the opener from the front, which is the side the Shadow has to attack, and any class that marks or buffs detection turns the ladder against the Shadow. Once revealed for 1 s there is no second opening, only the counter that lands inside that second."
+}

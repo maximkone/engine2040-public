@@ -16,6 +16,9 @@ CDX). Decision D10 in `docs/FOCUS.md`.
    the second (Historia Augusta, Hadrian 3). Not in the sources: the legion's own part in the
    Chatti war of 83 and in the revolt of 89. So chapter II follows a work party of the legion
    on the new frontier, and chapter III is told as an invented loyalty story and says so in game.
+1b. **Period names, real features (owner 2026-10-21).** Every historical weapon, tool or work uses its period name (Latin,
+   with the Greek beside it: manuballista / cheiroballistra) and is built as a playable thing. Its evidence and any
+   scholarly debate go on its codex card, never in place of the feature.
 2. **View.** First person through the helmet is the game. Third person stays for replays, the
    spectator and the arena duel proof.
 3. **The arena stays and gets a reason.** Legionary fortresses had amphitheatres for weapons drill.
@@ -201,16 +204,26 @@ one. The in-game codex card shows all of it. A contested item can be played, and
 the card. That label is the history-nerd feature: the game shows its evidence instead of
 pretending.
 
-**The one-man crossbow.** No Roman one-man crossbow with small bolts turned up as a find from
-2010-2026. The closest real object is the Xanten-Wardt frame, a small torsion weapon found in 1999
-in a Rhine side arm and published in 2010 (Schalles, Xantener Berichte 18). It is dated to the mid
-1st century AD, so it is a little older than our years. Its authors read it as a hand-held
-"manuballista", but other writers (the Vindolanda museum blog among them) call it stand-mounted.
-One blog says bolt heads fit its bore. That matches the "small bolts" memory, but it is one claim.
-The crossbow-shaped brooches from Whitton (found 2017) and Hadrianopolis (4th-5th c.) are probably
-where "discovered lately" comes from. Hero's *Cheiroballistra* describes a hand torsion weapon,
-but its author is doubtful. So the game has it as `contested` kit for an Immunis ballistarius
-(KIT3), and it gets no numbers until the codex holds Schalles 2010 and Baatz 1991.
+**The manuballista (Greek: cheiroballistra).** The Roman one-man bolt-shooter: "hand ballista".
+It is a small torsion engine. Two twisted springs of sinew or hair sit in an iron frame, and it shoots
+short iron bolts in a flat line. It is the ancestor of the crossbow, but its power comes from torsion,
+not a bent bow.
+
+- **Text:** Hero's *Cheiroballistra* gives the build, though its author is doubtful.
+- **Find:** frame parts from Xanten-Wardt. They were found in 1999 in a Rhine side arm, published
+  in 2010 (Schalles, Xantener Berichte 18), and are dated to the mid 1st century AD. That is just
+  before our years, so the legion's armouries plausibly had it.
+- **Reported in reconstructions:** bolts of about 7 in (18 cm), shot at over 70 mph (31 m/s) with
+  sniper precision. Its use in Britain and Scotland is linked to the Burnswark siege (c. AD 140).
+  Owner's sources: Smithsonian Channel; YouTube reconstructions; Wiktionary *manuballista*.
+
+In game it is a real weapon: the ballistarius (an Immunis) carries it. Its jobs are direct fire
+from the rampart, picking off chiefs and standard-bearers, and covering a work party (KIT3). Its
+big brother is the carroballista on its cart. The codex card shows the Xanten frame, Hero's text,
+and the one open debate, hand-held or on a stand. Start numbers come from the reconstructions and
+are rechecked against Schalles 2010 and Baatz 1991 when the codex holds them; the weapon does not
+wait for that. The crossbow-shaped brooches (Whitton, found 2017; Hadrianopolis, 4th-5th c.) are
+codex cards beside it.
 
 In our years (AD 83-107) and usable:
 
@@ -222,7 +235,7 @@ In our years (AD 83-107) and usable:
 | Named shield boss | boss punched "Junius Dubitatus", legio VIII Augusta (River Tyne, early 2nd c.) | attested (no published reference found yet) | punch your own name on your kit (KIT4) |
 | Inscribed sling bullets | lead glandes with taunts and unit names, about 1,000 casts catalogued (Berlin, 2021); no fixed date | contested for our years | auxiliary slingers; a found bullet is a codex card (KIT5) |
 | Caltrops (tribuli) | iron caltrops from Tyras (2nd to early 3rd c.) and Caerleon (3rd c.) | contested for our years | camp field traps beside Caesar's lilia (KIT5) |
-| Hand torsion bow | Xanten-Wardt, see above | contested | Immunis kit (KIT3) |
+| Manuballista (cheiroballistra) | Xanten-Wardt frame (found 1999, mid 1st c.); Hero's *Cheiroballistra* | attested (hand-held or on a stand: debated) | the ballistarius's one-man bolt-shooter (KIT3) |
 
 Outside our years. These are codex cards only, never kit:
 
@@ -238,7 +251,7 @@ Outside our years. These are codex cards only, never kit:
 
 Leads to check before use. These come from memory and were not fetched:
 
-- cheiroballistra arch pieces from Danube forts (Orșova, Gornea), which would sit in chapter IV's
+- cheiroballistra (manuballista) arch pieces from Danube forts (Orșova, Gornea), which would sit in chapter IV's
   ground if their date fits;
 - the original Xanten-Wardt and Baatz papers (the Germania review blocked the hunter).
 

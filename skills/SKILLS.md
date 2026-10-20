@@ -14,7 +14,7 @@ Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing tr
 | tick-a-row | finish a board row: `[x]` plus `Landed <sha7>` and evidence, or a Progress note; the sed traps |
 | github-check | any cargo test, clippy or check proof, a red gate or CI check, a link failure, a blocked local cargo lock |
 | gh-check-playbook | which gh-check or web-run form for which job; exit 2 or 3, 0 tests, push or dispatch errors, GPU lines hang |
-| rust-quality-ratchet | the pre-commit hook refused, `rust-quality.mjs` FAIL, casts, long fns, big files; tighten or accept |
+| rust-quality-ratchet | the pre-commit hook refused, `tools/rust-quality.mjs` FAIL, casts, long fns, big files; tighten or accept |
 | wiring-a-feature | code exists but nothing calls it, a wire row (`RZ4w`), or before you write something that may exist |
 | recover-deleted-code | a file a row or plan names is gone (rot cleanup 2026-10-16): find it in git, restore or rewrite |
 | repo-orientation | entering an unfamiliar crate, ranking risk before a plan, narrow search when a wide grep fails |

@@ -220,9 +220,14 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
+      # shared-key win-check: check.yml's Windows runs (tools/gh-check.mjs app/window lines) restore this cache.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: win-check
       - name: compile actual window feature (not GPU execution)
         run: cargo check --locked --workspace --all-targets --features window
+      - name: build the app test binaries gh-check sends here (warms the cache)
+        run: cargo test --locked -p engine-game --features app --no-run
 
   arm-golden:
     if: github.repository == 'maximkone/engine2040-public'

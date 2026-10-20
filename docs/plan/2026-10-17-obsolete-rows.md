@@ -11,6 +11,7 @@ with `Landed obsolete.` and its own reason; nothing is deleted, so this file sta
 the record.
 
 - E4: target `kaggle.mjs` (center mesh step) is gone; the center pipeline was retired by the standalone-repo decision 2026-10-17. Replaced by: nothing in this repo.
+  Correction 2026-10-21: the "nothing in this repo" half is out of date. The generator chain's new home is `C:\empire\center\make.mjs` (center repo, commit `9fda6705`): `node make.mjs models --verify` is the licence gate, `node make.mjs run <kind> --spec <file>` starts a job and prints `started run <id>`, `node make.mjs job <id>` polls it, `node make.mjs selftest` is the no-network check. The engine half is still open - see board row PW56 in `docs/SPRINT-28-powerups.md`.
 - E6: target `tools/lanes.mjs` (land/prune of lanes) is gone; lanes retired 2026-10-17. Replaced by: one worktree on master and commit-by-path (CLAUDE.md, one-worktree-main).
 - E12: target `tools/ab-bench.mjs` is gone. Replaced by: the brief chain proofs in `crates/playtest` brief_eval (EV2) and `crates/endpoint` build_game tests.
 - E17: target `tools/lanes.mjs` is gone and the forge undo journal it ported from is retired. Replaced by: one worktree on master and commit-by-path (CLAUDE.md).

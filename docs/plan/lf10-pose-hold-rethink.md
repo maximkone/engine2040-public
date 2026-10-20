@@ -10,7 +10,7 @@ Status: code landed-but-unproven (`crates/game/src/pose_hold.rs`,
 `crates/game/src/hitstop.rs`, hold hunks in
 `crates/game/src/fighter_look_acts.rs:239-252,366-367`); board row still
 open; link wall `arena-link-anon319-destruction-x2`
-(`docs/BLOCKERS.md:139`) still stands.
+(`docs/BLOCKERS.md:139`; 2026-10-21 note: `docs/BLOCKERS.md` was rewritten on 2026-10-21 and 122 pre-standalone rows moved to `docs/archive/BLOCKERS-to-2026-10-17.md`, so the old line numbers no longer point at the rows) still stands.
 
 ## 1. Root cause
 
@@ -19,7 +19,7 @@ The code is done and the proof path is broken. LF10's Accept runs
 link in the tree (game lib plus the app feature pulls render, net, arena
 and destruction rlibs). Every run dies inside `rust-lld.exe` with undefined
 `anon.*.llvm` symbols, the same wall that holds LF11, LF14, GA8 and EG21
-(`docs/BLOCKERS.md:138-139,141`). Meanwhile `cargo check` stays green,
+(`docs/BLOCKERS.md:138-139,141`; 2026-10-21 note: those line numbers moved with the 2026-10-21 BLOCKERS rewrite, 122 pre-standalone rows are now in `docs/archive/BLOCKERS-to-2026-10-17.md`). Meanwhile `cargo check` stays green,
 queue-cap PASSes, and zero-diff verifies confirm the files are untouched.
 So each retry re-proves the toolchain is red, not the code. Six identical
 verifies burned 72 h on an environment fault. AGENTS says the second
@@ -33,7 +33,7 @@ deferred re-verify, on a seam the linker can cross today.
 Slice A (land today, link-free): prove the two LF10 laws where linking
 works. The sim authority (per-kind hitstop counts) lives in
 `crates/combat`, which links fine (257 passed proven,
-`docs/BLOCKERS.md:108`). The presentation wiring (hold mask, slot pick,
+`docs/BLOCKERS.md:108`; 2026-10-21 note: that line number moved with the 2026-10-21 BLOCKERS rewrite). The presentation wiring (hold mask, slot pick,
 bridge freeze) compiles without any link step under `cargo check -p
 engine-game --features app` (check-green proven on every BLOCKERS row).
 Land the wiring gated on check, not on link.

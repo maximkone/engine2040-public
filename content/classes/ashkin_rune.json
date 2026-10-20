@@ -1,0 +1,198 @@
+{
+  "id": "ashkin_rune",
+  "faction": "ashkin",
+  "tier": 1,
+  "branch": "ashkin_officiator",
+  "role": "AoE nuker",
+  "growth": { "str": 0, "dex": 1, "con": 0, "int": 2, "wis": 0 },
+  "primary": ["int", "dex"],
+  "playstyle": "Every elemental is a 0 s cast, so the Rune never stops to channel: it walks into the group and paints it. The class rule is the per-cast budget: one cast may spend 440 x (1 + 0.04 x (INT - 10)) damage across every enemy it touches, field damage included, and damage over the budget is discarded. A big group is therefore not a bigger kill, it is the same kill spread thin. The Rune wins by choosing when to spend the budget and when to hold it. It has no self-sustain beyond one armor skin, no escape tool and 0 CON growth, so it has 500 health and 0% mitigation at every level: 4.2 standard weapon hits (120 damage each) kill it. Any mistake is a corpse.",
+  "abilities": [
+    {
+      "id": "ashkin_rune.rune_bolt",
+      "name": "Runebolt",
+      "tier": 0,
+      "kind": "projectile",
+      "shape": "single",
+      "range": 24,
+      "radius": 0,
+      "cast": 0.15,
+      "cooldown": 1.2,
+      "mana": 6,
+      "telegraph": "none",
+      "damage": { "base": 60, "scale": "int" },
+      "effects": [],
+      "notes": "Basic bolt. Base 60 on INT: D = 60 x (1 + 0.04 x (INT - 10)), 103 at L10. 0.15 s cast, no channel: you keep walking and you keep casting. One target only, so the per-cast budget never applies to it."
+    },
+    {
+      "id": "ashkin_rune.ember_streak",
+      "name": "Cinder Trail",
+      "tier": 0,
+      "kind": "projectile",
+      "shape": "line",
+      "range": 16,
+      "radius": 2.2,
+      "cast": 0.0,
+      "cooldown": 3.0,
+      "mana": 10,
+      "telegraph": "none",
+      "damage": { "base": 40, "scale": "int" },
+      "effects": [
+        { "type": "burn", "value": 8, "duration": 6 }
+      ],
+      "notes": "A 16 m line, 2.2 m wide, hits every enemy standing in it. Base 40 on INT per target: 69 at L10. Burn is flat: 8 damage per second for 6 s. Casting it does not stop your movement."
+    },
+    {
+      "id": "ashkin_rune.stone_ward",
+      "name": "Basalt Skin",
+      "tier": 0,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.0,
+      "cooldown": 18,
+      "mana": 12,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "damage_reduction", "value": 30, "duration": 8 }
+      ],
+      "notes": "Basalt skin: 30% less damage taken for 8 s. It does not stack with itself; a recast resets the 8 s. This is the only defensive tool the Rune has, and 30% of 120 is not much against a group."
+    },
+    {
+      "id": "ashkin_rune.shard_storm",
+      "name": "Shatterstone",
+      "tier": 1,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 20,
+      "radius": 6,
+      "cast": 0.0,
+      "cooldown": 8.0,
+      "mana": 24,
+      "telegraph": "circle",
+      "damage": { "base": 110, "scale": "int" },
+      "effects": [],
+      "notes": "Drop a 6 m circle of stone on a point up to 20 m away. Base 110 on INT to every enemy inside: 189 at L10. Cast time is 0: you can throw it while running. A 0.5 s warning circle gives melee targets just enough time to step out. All of the damage counts against the per-cast budget."
+    },
+    {
+      "id": "ashkin_rune.storm_lances",
+      "name": "Stormlance",
+      "tier": 1,
+      "kind": "aoe",
+      "shape": "line",
+      "range": 24,
+      "radius": 3,
+      "cast": 0.0,
+      "cooldown": 9.0,
+      "mana": 26,
+      "telegraph": "line",
+      "damage": { "base": 100, "scale": "int" },
+      "effects": [
+        { "type": "stagger", "value": 0.5, "duration": 0 }
+      ],
+      "notes": "A 24 m line, 3 m wide, at most 6 targets. Base 100 on INT per target: 172 at L10, and a 0.5 s stagger. 0.6 s line telegraph. Counts against the per-cast budget."
+    },
+    {
+      "id": "ashkin_rune.rune_pools",
+      "name": "Slag Pool",
+      "tier": 1,
+      "kind": "debuff",
+      "shape": "circle",
+      "range": 18,
+      "radius": 5,
+      "cast": 0.0,
+      "cooldown": 14.0,
+      "mana": 18,
+      "telegraph": "circle",
+      "damage": { "base": 10, "scale": "none" },
+      "effects": [
+        { "type": "ground_field", "value": 12, "duration": 8 },
+        { "type": "slow", "value": 25, "duration": 8 }
+      ],
+      "notes": "Leaves a 5 m slag field for 8 s: 12 damage per second to everyone standing in it and a 25% slow. The field is flat, it does not scale on INT. The opening tick is base 10: 17 at L10. One cast is capped at 80 damage per target from the field, and field damage counts against the same per-cast budget as the rest of the cast."
+    },
+    {
+      "id": "ashkin_rune.frost_bloom",
+      "name": "Frostbloom",
+      "tier": 2,
+      "kind": "aoe",
+      "shape": "cone",
+      "range": 16,
+      "radius": 0,
+      "cast": 0.0,
+      "cooldown": 12.0,
+      "mana": 30,
+      "telegraph": "cone",
+      "damage": { "base": 120, "scale": "int" },
+      "effects": [
+        { "type": "slow", "value": 40, "duration": 3 }
+      ],
+      "notes": "A 60 degree cone, 16 m long, cast from where you stand. Base 120 on INT per target: 206 at L10, and a 40% slow for 3 s. 0.5 s cone telegraph. Counts against the per-cast budget."
+    },
+    {
+      "id": "ashkin_rune.rune_conduit",
+      "name": "Rune Conduit",
+      "tier": 2,
+      "kind": "utility",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.0,
+      "cooldown": 0.0,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "group_damage_cap", "value": 440, "duration": 0 }
+      ],
+      "notes": "Passive rule of the class. Every cast has a damage budget: 440 x (1 + 0.04 x (INT - 10)) total damage across every enemy the cast touches, field damage included. That is 757 at L10 and 1109 at L20. Damage over the budget is discarded and is never carried into the next cast. A cast that hits 4 or more enemies refunds 4 mana. The budget covers about four Shatterstones at L10: a fifth enemy in the same circle takes nothing."
+    },
+    {
+      "id": "ashkin_rune.overload",
+      "name": "Overload",
+      "tier": 3,
+      "kind": "buff",
+      "shape": "self",
+      "range": 0,
+      "radius": 0,
+      "cast": 0.0,
+      "cooldown": 45.0,
+      "mana": 0,
+      "telegraph": "none",
+      "damage": { "base": 0, "scale": "none" },
+      "effects": [
+        { "type": "cap_multiplier", "value": 1.5, "duration": 10 },
+        { "type": "move_speed", "value": 15, "duration": 10 }
+      ],
+      "notes": "For 10 s the per-cast budget is multiplied by 1.5: 1135 at L10, enough for six Shatterstones in one cast. You also move 15% faster. The multiplier drops back the moment the buff ends. Cannot be used while it is already running."
+    },
+    {
+      "id": "ashkin_rune.rune_severance",
+      "name": "Severance",
+      "tier": 4,
+      "kind": "aoe",
+      "shape": "circle",
+      "range": 24,
+      "radius": 8,
+      "cast": 0.0,
+      "cooldown": 30.0,
+      "mana": 40,
+      "telegraph": "circle",
+      "damage": { "base": 180, "scale": "int" },
+      "effects": [],
+      "notes": "An 8 m circle on a point up to 24 m away. Base 180 on INT to every enemy inside: 310 at L10. It ignores the normal budget and has its own hard cap: 600 x (1 + 0.04 x (INT - 10)), 1032 at L10, however many enemies stand there. 1.2 s warning circle. 30 s cooldown: it is a once-per-fight answer, not a rotation."
+    }
+  ],
+  "loadout": {
+    "weapon": "Runewrought stave: 24 m reach, INT is the scaling stat on every hit on this sheet.",
+    "offhand": "Bound rune tablet: holds the conduit, the budget and the mana pool (120 mana at level 1, +8 per level, regen 6 per second out of combat and 2.5 per second in combat)."
+  },
+  "counters": [
+    "warden_defender",
+    "warden_priest",
+    "ashkin_templar"
+  ],
+  "weakness": "0 CON growth: 500 health and 0% mitigation at every level, so 4.2 standard weapon hits (120 damage each) kill the Rune, and it has no escape tool beyond a 15% speed buff. warden_fighter, warden_warrior and warden_rogue close the 20 m faster than the Rune can walk away. Every skill it owns is aimed at a group, so a lone melee attacker picks it apart. The budget is the other half of the weakness: standing 3 m off the circle wastes the whole cast, and a group that reads the warning circle and steps aside pays nothing."
+}

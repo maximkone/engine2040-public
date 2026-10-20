@@ -184,7 +184,7 @@ Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask f
 
 - [ ] GN4 make: texture spike, license first (MV-Adapter, `huanngzh/MV-Adapter`, Apache-2.0, commit
   `4277e0018232bac82bb2c103caf0893cedb711be`, `python -m scripts.texture_i2tex ... --variant sd21`
-  writes `<save_dir>/<save_name>_shaded.glb`). TRAP read 2026-10-05: its texture path imports
+  writes `<save_dir>/<save_name>_shaded.glb`). Correction 2026-10-21: the center file this row owns is gone - `center/kaggle.mjs` and `center/kaggle.test.mjs` do not exist and have no git history. The generator chain's new home is `C:\empire\center\make.mjs` (center repo, commit `9fda6705`): `node make.mjs models --verify` is the licence gate, `node make.mjs run <kind> --spec <file>` starts a job and prints `started run <id>`, `node make.mjs job <id>` polls it, `node make.mjs selftest` is the no-network check. Kinds: `mesh`, `parts`, `texture`, `motion`, `sound`. Re-point the steps and the accept to those commands. TRAP read 2026-10-05: its texture path imports
   `nvdiffrast.torch` (NVIDIA licence, not commercial for us) in `mvadapter/utils/mesh_utils/{mesh,render,utils,warp}.py`
   with 7 calls (`RasterizeCudaContext`, `RasterizeGLContext`, `rasterize` x3, `interpolate`, `antialias`,
   `texture`), plus `pymeshlab` (GPL-3.0) and `open3d` in `mesh_process.py`, `cvcuda` in `cv_ops.py`, and an
@@ -204,6 +204,7 @@ Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask f
   share is 200 GPU min a week; GN3 used about 8).
   needs: GN3.
 - [ ] GN5 make: `parts` job kind for pre-broken props (PartCrafter, `wgsxm/PartCrafter`, MIT on the card
+  Correction 2026-10-21: the center file this row owns is gone - `center/kaggle.mjs` and `center/kaggle.test.mjs` do not exist and have no git history. The generator chain's new home is `C:\empire\center\make.mjs` (center repo, commit `9fda6705`): `node make.mjs models --verify` is the licence gate, `node make.mjs run <kind> --spec <file>` starts a job and prints `started run <id>`, `node make.mjs job <id>` polls it, `node make.mjs selftest` is the no-network check. `parts` is one of the accepted kinds (`mesh`, `parts`, `texture`, `motion`, `sound`). Re-point the steps and the accept to those commands.
   and LICENSE, commit `3d773bf02fad51c7ab31a5615573fec93b287b30`; `src/pipelines/pipeline_partcrafter.py`
   uses scikit-image marching cubes, no `diso`). Same Tencent condition string as TripoSG because its
   transformer file `src/models/transformers/partcrafter_transformer.py` is adapted from TripoSG/HunyuanDiT.
@@ -235,6 +236,7 @@ Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask f
   one cache hit returns the same bundle hash, a refused model writes nothing; P2P golden
   `d57b5c8ae3096614` unchanged. needs: GN1.
 - [ ] GN7 endpoint: `asset.generate` becomes a runner that starts the center job without blocking —
+  Correction 2026-10-21: the command this row names is gone - `center/kaggle.mjs` does not exist and has no git history. The new home is `C:\empire\center\make.mjs` (center repo, commit `9fda6705`): `node make.mjs run <kind> --spec <file>` starts a job and prints `started run <id>`, `node make.mjs job <id>` polls it and prints the state and the files, `node make.mjs models --verify` is the licence gate, `node make.mjs selftest` is the no-network check. The run id is the hash of the job spec, so the same spec always names the same run. Re-point the two commands and the accept to those.
   new file `crates/endpoint/src/packs/asset/generate_run.rs` (feature `intake`), `GenerateTool` in
   `packs/asset.rs` keeps its name. Args `{image_path, name, n?, faces?}` start
   `node <center>/kaggle.mjs run mesh --repo engine2040 --in <image_path> --out <out_dir>/<name> --detach`
@@ -250,6 +252,7 @@ Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask f
   again; unset `E2040_CENTER_DIR` is refused with `no_center`; the default build (no `intake`) still
   lists `asset.generate` as the explainer. needs: GN2.
 - [ ] GN8 make: licence recheck for the generator chain — new center command `node kaggle.mjs models
+  Correction 2026-10-21: the command this row names is gone - `center/kaggle.mjs` does not exist and has no git history. The new home is `C:\empire\center\make.mjs` (center repo, commit `9fda6705`): the licence gate is `node make.mjs models --verify` (one line per model, exits 1 on a mismatch or a refusal), the job runner is `node make.mjs run <kind> --spec <file>` (prints `started run <id>`) and `node make.mjs job <id>` (polls the state and the files), and `node make.mjs selftest` is the no-network check. The gate already fails closed on a missing, gated or non-commercial card. Re-point the row and its accept to those commands.
   --verify` in `kaggle.mjs` (function `verifyModels`, dependency-free `fetch` of
   `https://huggingface.co/api/models/<hf>` for every `MODELS` entry with an `hf` field) that compares
   the card's `cardData.license` to the table and prints one line per model; a mismatch or a gated or

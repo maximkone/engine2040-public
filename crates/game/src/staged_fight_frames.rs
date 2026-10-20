@@ -47,8 +47,9 @@ pub const STAGED_FIGHT_FRAMES: usize = 4;
 /// Mesh id base for staged fighter bodies (never collides with the central
 /// cube key or the dressing base).
 pub const FIGHT_MESH_ID_BASE: u64 = 0xF167_7400;
-/// Fighter body size in meters `[sx, sy, sz]` (a standing box volume).
-pub const FIGHT_BODY_SIZE_M: [f32; 3] = [0.6, 1.8, 0.6];
+/// Fighter body size in meters `[sx, sy, sz]`: the box the stance in
+/// [`BODY_BOXES`] fits inside, fists and feet included.
+pub const FIGHT_BODY_SIZE_M: [f32; 3] = [0.9, 1.8, 0.9];
 
 /// One fighter's frame state: sim position plus health plus hit flash.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -145,16 +146,40 @@ pub fn fight_mesh_key(slot: u8) -> MeshKey {
     MeshKey::new(FIGHT_MESH_ID_BASE + u64::from(slot), [0xF1 ^ slot; 32])
 }
 
-/// Subdivisions per box edge for the staged fighter proxy: 16 gives
-/// 3072 triangles per box, 6144 for the two-part body (over the 5000-tri
-/// CT7 scale the frame gate pins).
-const BODY_SUBDIV: u16 = 16;
-/// Total vertices for the two-part proxy (2 boxes times 6 faces times
-/// `(BODY_SUBDIV + 1)` squared).
-const BODY_VERTS: usize = 3_468;
-/// Total indices for the two-part proxy (2 boxes times 12 times
-/// `BODY_SUBDIV` squared triangles times 3).
-const BODY_INDICES: usize = 18_432;
+/// The fighter proxy's parts: `[min_x, min_y, min_z, max_x, max_y, max_z]` in
+/// meters from the feet, plus that box's face subdivision. A standing guard:
+/// legs apart, hips, torso and head up, both arms forward with fists high. The
+/// silhouette reads as a person from any side at fight distance; one stretched
+/// box never did.
+const BODY_BOXES: [([f32; 6], u16); 13] = [
+    // hips
+    ([-0.17, 0.86, -0.12, 0.17, 1.08, 0.12], 6),
+    // torso
+    ([-0.23, 1.08, -0.14, 0.23, 1.50, 0.16], 8),
+    // head
+    ([-0.12, 1.53, -0.10, 0.12, 1.77, 0.14], 8),
+    // left leg forward, right leg back
+    ([-0.26, 0.00, 0.02, -0.08, 0.88, 0.22], 6),
+    ([0.08, 0.00, -0.20, 0.26, 0.88, 0.00], 6),
+    // upper arms hanging from the shoulders
+    ([-0.34, 1.18, -0.10, -0.20, 1.46, 0.10], 6),
+    ([0.20, 1.18, -0.10, 0.34, 1.46, 0.10], 6),
+    // forearms held forward
+    ([-0.36, 1.16, 0.06, -0.22, 1.30, 0.34], 6),
+    ([0.22, 1.16, 0.06, 0.36, 1.30, 0.34], 6),
+    // fists
+    ([-0.38, 1.14, 0.30, -0.20, 1.32, 0.44], 6),
+    ([0.20, 1.14, 0.30, 0.38, 1.32, 0.44], 6),
+    // feet
+    ([-0.28, 0.00, 0.06, -0.06, 0.10, 0.34], 6),
+    ([0.06, 0.00, -0.30, 0.28, 0.10, -0.02], 6),
+];
+/// Total vertices over [`BODY_BOXES`]: 2 boxes at 8 subdivisions and 11 at 6
+/// (6 faces times `(seg + 1)` squared each).
+const BODY_VERTS: usize = 4_206;
+/// Total indices over [`BODY_BOXES`]: 12 times `seg` squared triangles per box
+/// times 3.
+const BODY_INDICES: usize = 18_864;
 
 /// Push one axis-aligned subdivided box with outward face normals and
 /// `0..=1` UVs. Faces are emitted in `+X -X +Y -Y +Z -Z` order with a
@@ -237,54 +262,41 @@ fn push_subdivided_box(
     Ok(())
 }
 
-/// Two-part CT7-scale fighter proxy for one body: a torso box plus a head
-/// box inside the [`FIGHT_BODY_SIZE_M`] volume, feet at `feet_m`, 1.8 m
-/// tall, 6144 triangles. Deterministic subdivided grids (no wall clock, no
-/// RNG); headless std-only like the old placeholder. Validation failures
-/// are typed, never panics.
+/// A staged fighter body: the [`BODY_BOXES`] stance welded into one mesh with
+/// feet at `feet_m`, inside the [`FIGHT_BODY_SIZE_M`] volume, 6,288 triangles.
+/// Deterministic subdivided grids (no wall clock, no RNG); headless std-only.
+/// Validation failures are typed, never panics.
 pub fn fight_body_mesh(feet_m: [f32; 3]) -> Result<MeshData, WinError> {
     if !feet_m.iter().all(|v| v.is_finite()) {
         return Err(WinError::Render(
             "fight body position is not finite".to_string(),
         ));
     }
-    let half_x = 0.5 * FIGHT_BODY_SIZE_M[0];
-    let half_z = 0.5 * FIGHT_BODY_SIZE_M[2];
-    let torso_min = [feet_m[0] - half_x, feet_m[1], feet_m[2] - half_z];
-    let torso_max = [feet_m[0] + half_x, feet_m[1] + 1.5, feet_m[2] + half_z];
-    let head_half = 0.15;
-    let head_min = [
-        feet_m[0] - head_half,
-        feet_m[1] + 1.5,
-        feet_m[2] - head_half,
-    ];
-    let head_max = [
-        feet_m[0] + head_half,
-        feet_m[1] + FIGHT_BODY_SIZE_M[1],
-        feet_m[2] + head_half,
-    ];
     let mut positions = Vec::with_capacity(BODY_VERTS);
     let mut normals = Vec::with_capacity(BODY_VERTS);
     let mut uvs = Vec::with_capacity(BODY_VERTS);
     let mut indices = Vec::with_capacity(BODY_INDICES);
-    push_subdivided_box(
-        torso_min,
-        torso_max,
-        BODY_SUBDIV,
-        &mut positions,
-        &mut normals,
-        &mut uvs,
-        &mut indices,
-    )?;
-    push_subdivided_box(
-        head_min,
-        head_max,
-        BODY_SUBDIV,
-        &mut positions,
-        &mut normals,
-        &mut uvs,
-        &mut indices,
-    )?;
+    for (part, seg) in BODY_BOXES {
+        let min = [
+            feet_m[0] + part[0],
+            feet_m[1] + part[1],
+            feet_m[2] + part[2],
+        ];
+        let max = [
+            feet_m[0] + part[3],
+            feet_m[1] + part[4],
+            feet_m[2] + part[5],
+        ];
+        push_subdivided_box(
+            min,
+            max,
+            seg,
+            &mut positions,
+            &mut normals,
+            &mut uvs,
+            &mut indices,
+        )?;
+    }
     v1::upload_mesh(&positions, &normals, &uvs, &indices)
         .map_err(|err| WinError::Render(format!("fight body mesh: {err}")))
 }
@@ -1182,6 +1194,37 @@ mod tests {
                 .expect("clear list builds");
         assert!(clear.items.is_empty());
         assert!(staged_fight_frame_list(0, SMOKE_FRAME_SIZE.1, None, 0, &resident, dots).is_err());
+    }
+
+    #[test]
+    fn body_stance_fits_its_declared_box_with_feet_on_the_floor() {
+        let feet = [3.0, 0.0, -2.0];
+        let mesh = fight_body_mesh(feet).expect("body mesh builds");
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for p in &mesh.positions {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(p[axis]);
+                max[axis] = max[axis].max(p[axis]);
+            }
+        }
+        // Feet sit exactly on the seam the sim gives; a body that floats or sinks reads wrong.
+        assert!((min[1] - feet[1]).abs() < 1e-4, "feet at the seam: {min:?}");
+        for axis in 0..3 {
+            let half = 0.5 * FIGHT_BODY_SIZE_M[axis];
+            assert!(
+                min[axis] >= feet[axis] - half - 1e-4 && max[axis] <= feet[axis] + half + 1e-4,
+                "axis {axis}: [{}, {}] outside +/-{half}",
+                min[axis] - feet[axis],
+                max[axis] - feet[axis]
+            );
+        }
+        // The head reaches the stated height, so a person reads at fight distance.
+        assert!(
+            (max[1] - feet[1] - FIGHT_BODY_SIZE_M[1]).abs() < 0.05,
+            "top at {} m",
+            max[1] - feet[1]
+        );
     }
 
     #[test]

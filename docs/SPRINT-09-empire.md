@@ -293,6 +293,11 @@ action or line, so replays reproduce without a provider.
   audit hunks beside `crates/render/src/present.rs:3084`. Accept:
   0 heap allocs/frame steady-state or explicit N/A with numbers +
   suites green + golden x2. needs: none. (SPEED53.)
+  Correction 2026-10-21: the `crates/render/src/present.rs:3084` cite is out of
+  range - that file is 828 lines. The submit path the row names now lives in
+  `crates/render/src/present/gpu_present/submit.rs` (3,221 lines), and the
+  `steady_120_frames_read_zero_allocs` test the row's own Progress note names is
+  at `crates/render/src/present/gpu_present/submit.rs:2562`.
 - [x] SL45 net: engine-core owner for the leftover folds — `relay.rs:110` Landed 3ba9bfd. Tick audit 2026-10-17: rust-quality hash_reimpl 0 hits in engine-net, net lib green in gh-check run 39057462548.
   splitmix mix, `tick_budget.rs:439,619`, `wan_soak.rs:192,338`
   (NETSLIM-R2 judge: out of that packet's scope, all production).

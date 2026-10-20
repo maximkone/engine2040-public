@@ -33,7 +33,7 @@ is unchanged: one interrupt that cancels any charge.
 
 - **Damage:** `D = base x (1 + 0.04 x (S - 10))`, `S = 10 + growth x (level - 1)`.
   INT: L1 = 10 (x1.00) · L10 = 23.5 (x1.54) · L20 = 38.5 (x2.14) · L40 = 68.5 (x3.34).
-- **Health:** `80 + 10 x CON` = **80 at every level**. **Mitigation:** 1% per CON
+- **Health:** `200 + 25 x CON` = **200 at every level**. **Mitigation:** 1% per CON
   point, capped at 35%. The Enchanter has 0% of both.
 - **Cast:** a spell with a listed cast of 1.0 s or less gets 2% shorter per DEX point
   above 10, floor 70%. At DEX 40 the interrupt is a 0.21 s cast. Any cast over 1.0 s

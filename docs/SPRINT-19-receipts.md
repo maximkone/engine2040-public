@@ -2,8 +2,19 @@
 
 Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 
-<!-- template: new blocks append via `node tools/land.mjs <packet> --dry` + `node tools/proof.mjs --skip-build`; do not hand-type golden/proof lines -->
+<!-- template: new blocks append via `node tools/proof.mjs --skip-build`; do not hand-type golden/proof lines -->
+<!-- 2026-10-21: the `node tools/land.mjs <packet> --dry` half of this template was removed with the loop tools on 2026-10-17 (commit 6bdf32bf; `tools/land.mjs` does not exist). Land by path and paste the proof output. -->
 > Golden `d57b5c8ae3096614` holds for every landing below unless the block names a move; new blocks paste the land+proof output, not hand-typed hashes.
+
+### 2026-10-21, OPT43 and OPT44 reuse every check, feature builds on the Windows runner
+
+- 137b6c2d OPT43: gh-check keys each result by line, runner and inputs (crate closure, manifests, lock, content/, fixtures/, outside paths the code names) and answers an unchanged line from `target/gh-check/results/`. Proof: `node --test tools/gh-check.test.mjs` 18/18; live, the third `cargo check -p engine-audio --features device` printed `REUSED FAIL from 0 min ago (windows-latest, run .../39509451917)` in 0.4 s. Other sessions' calls kept results within minutes (engine-physics, engine-destruction).
+- 137b6c2d OPT44: `cargo check -p engine-audio --features device` ran on windows-latest (run 39508991396, PASS, 50 s of compile) instead of the PC; the second run FAILED on another session's unfinished `crates/observe/src/supervisor_proof.rs`, as it should.
+
+### 2026-10-21, OPT37 and OPT40 one slot pool for every cargo
+
+- 6bfb92ed OPT37: `tools/jobserver.ps1` holds one named-semaphore jobserver pool (8 slots); `install` made it permanent (user env `CARGO_MAKEFLAGS`, hidden holder in the Startup folder); `tools/jobserver.mjs` `poolEnv()` joins `tools/gh-check.mjs` local runs and every `tools/proof.mjs` cargo to it. Proof: `node --test tools/jobserver.test.mjs` 3 pass (holder env, empty env, priority); the cap was measured by the A/B on a 7-dependency scratch crate, 1-slot pool 2 rustc max in 591 s against own `-j` 10 rustc in 588 s (the test's live leg hit the package-cache lock and stays gated). gh-check 15/15, proof 34/34.
+- 6bfb92ed OPT40: gh-check and proof call `lowerPriority()` before cargo, so cargo and its rustc run below normal; timed runs keep normal priority. Proof: a grandchild of a `lowerPriority()` process reads `os.getPriority()` 10.
 
 ### 2026-10-20, NS31e2 closed on the re-home rule
 
