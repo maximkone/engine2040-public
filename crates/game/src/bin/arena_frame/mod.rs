@@ -7,6 +7,7 @@ use engine_audio::CueBank;
 
 use super::*;
 
+pub(super) mod latency;
 pub(super) mod pace;
 pub(super) mod trace;
 pub(crate) use pace::FixedDtPacer;
@@ -392,6 +393,10 @@ impl ArenaApp {
                 break;
             }
             let tick = self.app.cursor();
+            // PQ18 stage one: the tick starts consuming this input now. It is
+            // one stamp for keyboard, pad, tape and seat alike, because the
+            // sim consumes held state per tick, not discrete OS events.
+            let accepted_at = Instant::now();
             let input = if self.net.is_some() {
                 match self.net_tick(tick, human) {
                     Ok(Some(input)) => input,
@@ -404,6 +409,9 @@ impl ArenaApp {
                 self.app.tick_into(input, &mut self.tick_scratch);
                 input
             };
+            // PQ18 stage two: the tick carrying that input reached the sim.
+            self.latency.note_input_accepted(accepted_at);
+            self.latency.note_sim_submitted(Instant::now());
             debug_assert!(self.tick_scratch.input_accepted);
             self.publish_seat(tick);
             // Lock-free feed first (tick-stamped, bounded, `dropped_full`

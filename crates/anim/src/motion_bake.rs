@@ -1,0 +1,312 @@
+//! motion_bake: the offline teacher bake's pure half (endpoint rule + pack).
+//!
+//! Owner: `engine-anim`. Consumer: the bake tool `tools/motion_bake`, which
+//! reads a Kimodo NPZ teacher clip, retargets it with `soma_pairs()` through
+//! `BoneMap`/`retarget_cook` and packs the result to AM5P. This module owns
+//! the two rules every bake must obey and no I/O at all: the PartiGen
+//! endpoint rule ([`bake_len`]) and the pack half ([`bake_pack`] /
+//! [`bake_unpack`]) over the one AM5P home in [`super::pack`]. The tick never
+//! calls it.
+//!
+//! Endpoint rule: a teacher clip ends where its last constrained frame ends,
+//! never at a fixed duration and never at the teacher's own tail. A
+//! constrained frame is one the teacher pinned (a foot plant, a key pose);
+//! [`last_constrained`] reads the last one from a per-frame flag lane and
+//! [`bake_len`] turns it into the clip length, so a trailing unconstrained
+//! tail is cut. Zero-length, negative and over-cap lengths are refused
+//! instead of clipped.
+//!
+//! Pack half: [`bake_pack`] writes the bytes and proves they decode back to
+//! the same clip bits ([`qclip_hash`]), [`bake_unpack`] reads bytes the bake
+//! wrote and proves a re-pack is byte-identical. One format, no twin.
+//!
+//! Determinism: comparisons and `+ - * /` only, no clock, no map iteration.
+
+use super::clip::{qclip_hash, QClip};
+use super::pack::{pack_qclip, unpack_qclip, PackError, PackedClip};
+
+/// Fastest bake rate accepted, frames per second.
+pub const MIN_BAKE_FPS: f32 = 1.0;
+/// Slowest bake rate accepted, frames per second.
+pub const MAX_BAKE_FPS: f32 = 1_000.0;
+/// Longest bake accepted, in ticks: the shared 3600-frame cook cap
+/// (`MAX_COOK_TICKS`, `MAX_KEYS_PER_TRACK`).
+pub const MAX_BAKE_TICKS: u32 = 3_600;
+/// Shortest bake accepted, in ticks: a one-frame bake carries no motion.
+pub const MIN_BAKE_TICKS: u32 = 2;
+
+/// One bake length: tick count plus the time of the last constrained tick.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BakeLen {
+    /// Ticks the baked clip holds, the last constrained tick included.
+    pub ticks: u32,
+    /// Time of the last constrained tick, seconds: the clip's last key.
+    pub dur: f32,
+}
+
+/// Why a bake length or pack step was refused; every variant names the fault.
+#[derive(Clone, PartialEq, Debug)]
+pub enum BakeError {
+    /// No constrained frame at all: a negative last index means the teacher
+    /// pinned nothing, so there is no length to take.
+    NoConstraint,
+    /// A single constrained frame (a still): refused, it carries no motion.
+    TooShort {
+        /// Tick count seen.
+        ticks: u32,
+    },
+    /// The bake passes [`MAX_BAKE_TICKS`]; refused, never truncated.
+    TooLong {
+        /// Tick count wanted.
+        ticks: u32,
+    },
+    /// The bake rate is not a finite rate inside
+    /// [`MIN_BAKE_FPS`]..=[`MAX_BAKE_FPS`].
+    BadFps(f32),
+    /// The AM5P wire refused the clip; the cause is carried.
+    Pack(PackError),
+    /// The bytes did not decode back to the same clip bits; a bake never
+    /// ships a lossy pack.
+    NotRoundTrip,
+}
+
+impl core::fmt::Display for BakeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoConstraint => write!(f, "bake: no constrained frame, no length"),
+            Self::TooShort { ticks } => {
+                write!(f, "bake: {ticks} tick(s) carries no motion")
+            }
+            Self::TooLong { ticks } => write!(f, "bake: {ticks} ticks passes the bake cap"),
+            Self::BadFps(fps) => write!(f, "bake: {fps} is not a bake rate"),
+            Self::Pack(cause) => write!(f, "bake: {cause}"),
+            Self::NotRoundTrip => write!(f, "bake: the AM5P pack did not round-trip"),
+        }
+    }
+}
+
+impl std::error::Error for BakeError {}
+
+impl From<PackError> for BakeError {
+    fn from(cause: PackError) -> Self {
+        Self::Pack(cause)
+    }
+}
+
+/// Last frame the teacher constrained, or `None` when it constrained none.
+/// `constrained[i]` is the flag of frame `i` at the bake rate; the last true
+/// flag is the frame the clip ends on (PartiGen's end-of-sequence rule, done
+/// as a scan instead of a net).
+pub fn last_constrained(constrained: &[bool]) -> Option<u32> {
+    constrained
+        .iter()
+        .rposition(|flag| *flag)
+        .and_then(|index| u32::try_from(index).ok())
+}
+
+/// Length of a baked clip from the last constrained tick: the rule that
+/// replaces a fixed duration. The last constrained tick is the clip's last
+/// key, so the bake holds it and drops the teacher's tail.
+///
+/// Refused instead of clipped: a negative index ([`BakeError::NoConstraint`]),
+/// a single tick ([`BakeError::TooShort`]), more than [`MAX_BAKE_TICKS`]
+/// ([`BakeError::TooLong`]) and an unusable rate ([`BakeError::BadFps`]).
+pub fn bake_len(last_constrained_tick: i64, fps: f32) -> Result<BakeLen, BakeError> {
+    if !fps.is_finite() || !(MIN_BAKE_FPS..=MAX_BAKE_FPS).contains(&fps) {
+        return Err(BakeError::BadFps(fps));
+    }
+    if last_constrained_tick < 0 {
+        return Err(BakeError::NoConstraint);
+    }
+    let last = u32::try_from(last_constrained_tick).map_err(|_| BakeError::TooLong {
+        ticks: MAX_BAKE_TICKS + 1,
+    })?;
+    let ticks = last + 1;
+    if ticks < MIN_BAKE_TICKS {
+        return Err(BakeError::TooShort { ticks });
+    }
+    if ticks > MAX_BAKE_TICKS {
+        return Err(BakeError::TooLong { ticks });
+    }
+    // MAX_BAKE_TICKS fits u16, so the last key index converts exactly and
+    // without a float cast (f32: From<u32> does not exist; u32 -> f32 is lossy).
+    let last_key = u16::try_from(last).map_err(|_| BakeError::TooLong { ticks })?;
+    Ok(BakeLen {
+        ticks,
+        dur: f32::from(last_key) / fps,
+    })
+}
+
+/// Bake one clip to AM5P bytes through the single pack home and prove the
+/// round trip: the bytes decode back to the same `qclip_hash`.
+///
+/// The wire stores `dur` but [`unpack_qclip`] reads the clip's duration from
+/// its last knot, so a clip whose `dur` is not its last knot is refused
+/// ([`BakeError::NotRoundTrip`]) rather than baked lossy; build bakes with
+/// [`super::clip::bake_clip`], which sets exactly that duration.
+pub fn bake_pack(clip: &QClip) -> Result<Vec<u8>, BakeError> {
+    let bytes = pack_qclip(clip)?.to_bytes();
+    let back = bake_unpack(&bytes)?;
+    if qclip_hash(&back) != qclip_hash(clip) {
+        return Err(BakeError::NotRoundTrip);
+    }
+    Ok(bytes)
+}
+
+/// Read AM5P bytes a bake wrote back to a clip, refusing a blob that does not
+/// re-pack to the same bytes (the fixed point the wire guarantees).
+pub fn bake_unpack(bytes: &[u8]) -> Result<QClip, BakeError> {
+    let packed = PackedClip::from_bytes(bytes)?;
+    if packed.to_bytes() != bytes {
+        return Err(BakeError::NotRoundTrip);
+    }
+    Ok(unpack_qclip(&packed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::clip::{avg_slip, bake_clip, bake_track, TICK_DT};
+    use super::*;
+
+    /// One 60 Hz two-track clip: the fixture shape the tool writes.
+    fn tick_clip(ticks: u32) -> QClip {
+        let times: Vec<f32> = (0..ticks).map(|k| k as f32 * TICK_DT).collect();
+        let left: Vec<[f32; 3]> = times
+            .iter()
+            .map(|t| [0.0, -0.42 + 0.10 * (t * 6.0).min(1.0), 0.0])
+            .collect();
+        let right: Vec<[f32; 3]> = times
+            .iter()
+            .map(|t| [0.20 - 0.20 * (t * 3.0).min(1.0), -0.42, 0.0])
+            .collect();
+        bake_clip(vec![
+            bake_track(times.clone(), left),
+            bake_track(times, right),
+        ])
+    }
+
+    #[test]
+    fn bake_len_follows_the_last_constrained_frame() {
+        // The last constrained tick is the clip's last key, never a fixed
+        // duration: 41 becomes 42 ticks (0.7 s at 60 Hz).
+        let len = bake_len(41, 60.0).expect("42 ticks");
+        assert_eq!(len.ticks, 42);
+        assert!((len.dur - 41.0 / 60.0).abs() < 1e-7, "dur {}", len.dur);
+
+        // A long trailing unconstrained tail is cut, not baked: 101 pinned
+        // frames then 499 free ones bake to 101 ticks.
+        let mut flags = vec![false; 600];
+        for flag in flags.iter_mut().take(101) {
+            *flag = true;
+        }
+        let last = last_constrained(&flags).expect("frame 100 is pinned");
+        assert_eq!(last, 100);
+        let len = bake_len(i64::from(last), 60.0).expect("101 ticks");
+        assert_eq!(len.ticks, 101);
+        assert!(len.ticks < flags.len() as u32, "the tail is cut");
+
+        // A pinned frame zero is a still, not a clip; a negative index means
+        // the teacher pinned nothing.
+        assert_eq!(last_constrained(&[]), None);
+        assert_eq!(last_constrained(&[false, false]), None);
+        assert_eq!(last_constrained(&[true]), Some(0));
+    }
+
+    #[test]
+    fn bake_len_refuses_zero_negative_and_absurd() {
+        assert_eq!(
+            bake_len(0, 60.0),
+            Err(BakeError::TooShort { ticks: 1 }),
+            "a one-frame bake carries no motion"
+        );
+        assert_eq!(bake_len(-1, 60.0), Err(BakeError::NoConstraint));
+        assert_eq!(bake_len(i64::MIN, 60.0), Err(BakeError::NoConstraint));
+        assert_eq!(
+            bake_len(3_600, 60.0),
+            Err(BakeError::TooLong { ticks: 3_601 })
+        );
+        assert_eq!(
+            bake_len(4_000_000, 60.0),
+            Err(BakeError::TooLong { ticks: 4_000_001 })
+        );
+        for fps in [0.0, -60.0, f32::NAN, f32::INFINITY, 0.5, 1_001.0] {
+            match bake_len(41, fps) {
+                // NaN never equals itself, so compare the carried bits.
+                Err(BakeError::BadFps(got)) => {
+                    assert_eq!(got.to_bits(), fps.to_bits(), "fps {fps} is carried");
+                }
+                other => panic!("fps {fps} must be refused, got {other:?}"),
+            }
+        }
+        assert!(bake_len(3_599, 60.0).is_ok(), "the cap itself is legal");
+    }
+
+    #[test]
+    fn pack_round_trips_bit_exact_through_the_one_home() {
+        let clip = tick_clip(61);
+        let bytes = bake_pack(&clip).expect("bakes");
+        let back = bake_unpack(&bytes).expect("decodes");
+        assert_eq!(back.tracks.len(), clip.tracks.len(), "track count");
+        for (got, want) in back.tracks.iter().zip(clip.tracks.iter()) {
+            assert_eq!(got.keys, want.keys, "keys differ");
+            assert_eq!(got.times.len(), want.times.len(), "time counts differ");
+            for (a, b) in got.times.iter().zip(want.times.iter()) {
+                assert_eq!(a.to_bits(), b.to_bits(), "knot bits differ");
+            }
+            for lane in 0..3 {
+                assert_eq!(got.min[lane].to_bits(), want.min[lane].to_bits());
+                assert_eq!(got.max[lane].to_bits(), want.max[lane].to_bits());
+            }
+        }
+        assert_eq!(back.dur.to_bits(), clip.dur.to_bits(), "dur bits");
+        assert_eq!(qclip_hash(&back), qclip_hash(&clip), "qclip_hash");
+        // Same clip, same bytes, every run; and the wire re-packs to itself.
+        assert_eq!(bytes, bake_pack(&clip).expect("bakes again"));
+        assert_eq!(
+            PackedClip::from_bytes(&bytes).expect("wire").to_bytes(),
+            bytes
+        );
+        // The AM5P magic is on the wire, so the fixture is a real pack.
+        assert_eq!(&bytes[..4], b"AM5P");
+    }
+
+    #[test]
+    fn pack_refuses_a_duration_its_last_knot_does_not_hold() {
+        let mut clip = tick_clip(61);
+        clip.dur += 0.5;
+        assert_eq!(bake_pack(&clip), Err(BakeError::NotRoundTrip));
+        // Truncated and foreign bytes name their fault through the wire.
+        let bytes = bake_pack(&tick_clip(61)).expect("bakes");
+        assert!(matches!(
+            bake_unpack(&bytes[..bytes.len() - 1]),
+            Err(BakeError::Pack(PackError::Truncated { .. }))
+        ));
+        let mut bad = bytes.clone();
+        bad[0] = b'X';
+        assert!(matches!(
+            bake_unpack(&bad),
+            Err(BakeError::Pack(PackError::BadMagic { .. }))
+        ));
+    }
+
+    #[test]
+    fn the_committed_stagger_fixture_loads_and_matches_its_receipt() {
+        // The seed-7 run of `tools/motion_bake bake` wrote these bytes; the
+        // receipt it printed names the same hash. Read at compile time, so
+        // this gate needs no file I/O and no tool build.
+        let bytes: &[u8] = include_bytes!("../../../fixtures/clips/stagger.am5p");
+        assert_eq!(&bytes[..4], b"AM5P", "the committed pack is AM5P");
+        let clip = bake_unpack(bytes).expect("the committed pack loads");
+        assert_eq!(clip.tracks.len(), 2, "left foot then right foot");
+        assert_eq!(clip.tracks[0].times.len(), 61, "one second at 60 Hz");
+        assert_eq!(
+            qclip_hash(&clip),
+            0x34f7_2e4f_8b72_217a,
+            "the seed-7 receipt's qclip_hash"
+        );
+        let slip = avg_slip(&clip, 0, 61);
+        assert!(slip < 0.08, "the planted foot slips {slip}");
+        assert_eq!(bake_pack(&clip).expect("repacks"), bytes, "fixed point");
+        println!("AM27_FIXTURE ticks=61 slip={slip:.6}");
+    }
+}

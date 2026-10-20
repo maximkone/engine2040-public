@@ -32,9 +32,9 @@ export const allowedEdges = new Map([
   ["engine-ai", ["engine-ecs", "engine-physics", "engine-input", "engine-nn"]],
   ["engine-app", ["engine-core", "engine-ecs", "engine-scene", "engine-arena", "engine-clock"]],
   ["engine-audio", ["engine-observe"]],
-  ["engine-save", ["engine-observe"]],
+  ["engine-save", ["engine-observe", "engine-ecs"]], // ARC5: dev-only edge; the spine payload test consumes real `Spine::snapshot`/`restore`, the crate itself stays ecs-free
   ["engine-anim", ["engine-nn", "engine-combat", "engine-ecs", "engine-nav"]],
-  ["engine-playtest", ["engine-ai", "engine-arena", "engine-combat", "engine-render", "engine-provider", "engine-spatial"]],
+  ["engine-playtest", ["engine-ai", "engine-arena", "engine-combat", "engine-material", "engine-render", "engine-provider", "engine-spatial"]], // NS31h2: the material gallery reads compiled records (std-only; outside the headless default graph)
   ["engine-arena", ["engine-input", "engine-physics", "engine-combat", "engine-ai", "engine-anim", "engine-destruction", "engine-ecs", "engine-provider"]], // AL1 dev-only: mock provider drives the stamped-reply test; provider takes core only, no cycle
   ["engine-assets", ["engine-scene", "engine-anim", "engine-clock"]],
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
@@ -45,7 +45,7 @@ export const allowedEdges = new Map([
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.
   ["engine-material", ["engine-destruction"]],
-  ["engine-editor", ["engine-ecs", "engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app", "engine-material"]], // NS31a2: the document holds the material table and edits it with undo; engine-material takes destruction + core only, so no cycle
+  ["engine-editor", ["engine-ecs", "engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app", "engine-arena", "engine-material"]], // NS31a2: the document holds the material table and edits it with undo; engine-material takes destruction + core only, so no cycle. ARC6: the ui play-in loop steps one arena spine match for the inspector (arena never imports editor).
   // The duel teacher and strength gate run arena bouts through the public controller seam.
   ["engine-distill", ["engine-nn", "engine-ai", "engine-arena", "engine-input"]],
   // The squad pack reads legion formations from engine-ai (feature `mcp` only).
@@ -56,7 +56,7 @@ export const allowedEdges = new Map([
   // `look.judge` with it (feature `mcp` only).
   ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-nav", "engine-input", "engine-playtest", "engine-proof"]],
   ["engine-input", ["engine-core"]],
-  ["engine-net", ["engine-arena", "engine-input", "engine-observe"]],
+  ["engine-net", ["engine-arena", "engine-input", "engine-observe", "engine-ecs", "engine-save"]], // ARC5: rejoin resim keeps spine checkpoints in `Spine::snapshot` bytes and rides the save rollback/persist envelopes
   ["engine-nav", ["engine-spatial"]], // SP40 KdTree crowd feed reads spatial KdTree
   // step_islands runs its lanes on the ecs JobPool (persistent workers, index-ordered merge).
   ["engine-physics", ["engine-anim", "engine-ecs"]],
@@ -81,7 +81,8 @@ export const allowedEdges = new Map([
   ["engine-geo", ["engine-assets"]],
   ["engine-perf", ["engine-core", "engine-ecs", "engine-physics", "engine-render", "engine-arena", "engine-ai", "engine-destruction", "engine-net"]],
   // The ragdoll tape (feature `ragdoll`) builds the skeleton and pose types of the fixture from engine-anim.
-  ["engine-proof", ["engine-core", "engine-ecs", "engine-physics", "engine-scene", "engine-arena", "engine-observe", "engine-assets", "engine-editor", "engine-render", "engine-net", "engine-combat", "engine-anim"]],
+  // The pillars receipt loads the shipped net through engine-ai and digests its fighter inputs (engine-input).
+  ["engine-proof", ["engine-core", "engine-ecs", "engine-physics", "engine-scene", "engine-arena", "engine-observe", "engine-assets", "engine-editor", "engine-render", "engine-net", "engine-combat", "engine-anim", "engine-ai", "engine-input"]],
   ["engine-core", []],
   ["engine-ecs", []],
   ["engine-nn", []],
@@ -116,6 +117,7 @@ export function largeBlobViolations(entries, limit = LFS_SIZE_LIMIT) {
 // and link (the merge cut about 100 of them). A file that needs its own process is listed here
 // with the reason; a file that sets #[global_allocator] needs no entry. Keys are <crate dir>/<stem>.
 export const OWN_TEST_BINARY = {
+  "assets/gltf_conformance": "CT10 Accept names it as --test gltf_conformance; it drives the selected glTF models through import, place, save, reopen and play",
   "assets/vfetch_vectors": "its import leg does not compile at HEAD; merge it into tests/it once it builds",
   "endpoint/door_parity": "AD8 Accept names it as --test door_parity; it spawns e2040-mcp and runs the 20-task mirror proof",
   "endpoint/look_judge_hook": "registers a process-wide one-shot hook",

@@ -53,6 +53,7 @@ pub mod living;
 pub mod look;
 pub mod look_score;
 pub mod machine_eyes;
+pub mod material_gallery;
 pub mod mirror;
 pub mod mirror_craft;
 pub mod mirror_gdb;

@@ -2,6 +2,9 @@
 //!
 //! Run: `cargo run -p kam2-sim --example town`
 //! Prints the stock every 200 ticks and one final line with the state hash.
+//!
+//! The receipt hash moved with the side split (SIM1): `a7d73ecdbeba76e5` before,
+//! `6d282b76f7a45609` now, because side 1's own starting stock is in the digest.
 
 use kam2_sim::{Command, HouseKind, Sim, Ware};
 

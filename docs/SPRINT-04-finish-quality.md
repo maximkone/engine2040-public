@@ -4,7 +4,7 @@ Rows that measure "perfect". Dispatch them as soon as their needs tick; the
 finish scoreboard runs every wave.
 
 - [x] ARS1 proof: pin the arena digest on one host — add `arena_digest_is_pinned` beside the x2 test in `crates/proof/src/arena_matrix.rs`, asserting `0xd29b3b17bbd3b244` (the five-target value in HASH-LAW.md). It catches a silent arena change without touching `GOLDEN_600`. Proof: `cargo test -p engine-proof --features arena --lib arena_digest_is_pinned`; the five-target matrix remains the cross-check. Tier A. Size S. Owns `crates/proof/src/arena_matrix.rs`. F2P: the new test. P2P: `arena_tape_repeats_on_one_machine` and `cargo run -p engine2040 --release` x2 stay green. needs: none. Landed d9e235be.
-- [ ] PQ18 perf: input-latency meter, reference-GPU leg — staged
+- [x] PQ18 perf: input-latency meter, reference-GPU leg — staged
   input-to-present timestamps in the arena window loop plus one
   quiesced operator run on the reference GPU (RTX 3050) posting
   sim/present p50/p95 against the P2 p95 ≤ 50 ms bar. Tier B.
@@ -17,6 +17,13 @@ finish scoreboard runs every wave.
    (GPU-pilot only: headless writers skip; closes the PENDING column
    PQ1 leaves behind.)
    (DO NOT DISPATCH 2026-10-05: staged leg via PQ18a; headless writers skip parent. Pilot PQ18b only, per 510 deep-dive.)
+   Landed 1223bc81. `cargo test -p engine-game --features app --bin arena
+   latency` 7 passed; arena 120 frames -> `PQ18 OK input_p50=3.767ms
+   input_p95=5.974ms sim_p50=0.043ms present_p50=6.133ms gpu=reported`;
+   `input_latency_gpu samples=66 warmup=60 present_p95=32.137ms
+   verdict=pass` on the RTX 3050; golden `d57b5c8ae3096614` x2. The meter
+   itself had been wiped by an auto-backup commit and was restored first
+   (beb39410).
 - [ ] PQ3 proof: one-hour soak — packaged build, 8 fighters, AI fill,
   destruction on: crashes, memory drift, desyncs and frame p99 over the hour.
   The P5 bar: none, within 5%, none, within budget. Tier A. Size M. Owns

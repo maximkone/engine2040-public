@@ -1,11 +1,11 @@
 ### Accepted plan rows (Tier A/B future; dispatch like Finish line rows)
 
-- [ ] RC8 core: deterministic math spike — correctly rounded sin, cos, exp Progress 2026-10-17: crates/core/src/det_math.rs has det_sin/det_cos/det_exp/det_atan2za on Fixed (det_golden_spots, det_bit_identical_100k, det_zero_alloc); left: corpus is 100k not 1M, no two-toolchain run, CODELAW sin/cos ban not lifted.
+- [x] RC8 core: deterministic math spike — correctly rounded sin, cos, exp Progress 2026-10-17: crates/core/src/det_math.rs has det_sin/det_cos/det_exp/det_atan2za on Fixed (det_golden_spots, det_bit_identical_100k, det_zero_alloc); left: corpus is 100k not 1M, no two-toolchain run, CODELAW sin/cos ban not lifted.
   and atan2 (CORE-MATH and RLIBM methods, papers only, no code copied)
   behind a gate; `Fixed` stays the default sim math. Tier C. Size M. Owns
   `crates/core/src/det_math.rs`. Accept: a 1M-input corpus is bit-identical
   on two toolchains and twice per build; zero allocations; the sin/cos ban
-  in CODELAW lifts only on green. needs: none. Progress 2026-10-17: 4f556c75 correctly rounded sin/cos/exp, 0 wrong over every raw input of two sin/cos periods and the unsaturated exp range vs a test-only f64 oracle; 1M corpus digest 967702734373494140 identical on rustc 1.97.1 and 1.88.0 (Windows) and 1.97.1 (Linux), run 39066980501; left: atan2 stays CORDIC, and the HASH-LAW sin/cos ban stays until a cross-machine matrix row.
+  in CODELAW lifts only on green. needs: none. Progress 2026-10-17: 4f556c75 correctly rounded sin/cos/exp, 0 wrong over every raw input of two sin/cos periods and the unsaturated exp range vs a test-only f64 oracle; 1M corpus digest 967702734373494140 identical on rustc 1.97.1 and 1.88.0 (Windows) and 1.97.1 (Linux), run 39066980501; left: atan2 stays CORDIC, and the HASH-LAW sin/cos ban stays until a cross-machine matrix row. Landed 2878fb2. cargo test -p engine-core --lib det_math: 8 passed (gh run 39480476958) - atan2_correctly_rounded_on_a_grid_and_a_seeded_million (0 wrong over every pair of raws -256..=256 and 1M seeded pairs across the raw range, against an f64 atan2 oracle), corpus_1m_bit_identical_twice_and_pinned (digest 16629546346452603426, equal twice per build and the same on rustc 1.88.0, gh run 39480067720), det_zero_alloc (0 calls, 0 bytes), det_golden_spots; clippy -p engine-core --all-targets -D warnings green (gh run 39480747019). `Fixed::atan2` (CORDIC) stays the default sim math; the HASH-LAW sin/cos ban text is unchanged on purpose, because det_math is behind a gate with no sim caller, so the lift waits for a consumer and a matrix row. Golden d57b5c8ae3096614 unaffected (nothing in the tick calls det_math).
 - [x] RC9 core: incremental digest experiment — per-component hashes folded
   into archetype roots and a tick root (Merkle style), O(changed) per tick,
   reporting the first divergent archetype and component; runs beside the
@@ -42,13 +42,13 @@
   stays reserved for RC12 splits). Tier B. Size M. Owns spine call sites
   in `crates/ecs` (no new storage). Accept: 20 prefab spawns bytes x2;
   0 tick-path allocs; golden unchanged. needs: ARC1, RC4. Landed 7d13d5f1 (views.rs; verified 2026-10-17): optional views + dynamic spawn, 20 prefab spawns byte-identical x2 and zero tick-path allocations (runs 39066475838, 39068066992); callers so far only inside ecs.
-- [ ] RC20 ecs: ordered slot-write collect for bake/verify/anim-eval lanes Progress 2026-10-17: fork_join_on gathers chunk partials in slots, bit-identical across 0/1/2/4/8 workers (parallel.rs, run 39056114783) and a synthetic scaled bake clears 2x (run 39056618000); left: the ordered slot-write collect with exact-len pre-size and full-coverage assert is not built, 2x not measured on the CT2 workload.
+- [x] RC20 ecs: ordered slot-write collect for bake/verify/anim-eval lanes Progress 2026-10-17: fork_join_on gathers chunk partials in slots, bit-identical across 0/1/2/4/8 workers (parallel.rs, run 39056114783) and a synthetic scaled bake clears 2x (run 39056618000); left: the ordered slot-write collect with exact-len pre-size and full-coverage assert is not built, 2x not measured on the CT2 workload.
   — exact-len pre-size, disjoint index-slot writes, full-coverage assert
   (rayon `iter/collect`, MIT, pattern reimplemented, no dependency; sim
   tick untouched). Tier B. Size S. Owns `crates/ecs/src/parallel.rs`
   (with RC11). Accept: bit-identical across 1, 2, 4 and 8 threads; at
   least 2x on the CT2 bake workload or killed with numbers; golden
-  unchanged. needs: RC3, RC11. Progress 2026-10-17: 25b351de collect_indexed_on in parallel.rs: slots allocated up front, each job writes its own slice, JobsError::Uncovered refuses a gap, bit-identical for 0/1/2/4/8 workers, 2.86x on a synthetic 200k bake (run 39066665851); left: the CT2 workload measurement.
+  unchanged. needs: RC3, RC11. Progress 2026-10-17: 25b351de collect_indexed_on in parallel.rs: slots allocated up front, each job writes its own slice, JobsError::Uncovered refuses a gap, bit-identical for 0/1/2/4/8 workers, 2.86x on a synthetic 200k bake (run 39066665851); left: the CT2 workload measurement. Landed bc80214e. CT2 workload measured: the 8 committed `content/arena/src/*.gltf` meshes cooked through `engine_assets::cook_gltf_bytes` (the workload of the assets test `arena_kit_meshes_cook_identical_twice_within_the_prop_budget`) take 414.1 ms serial and 180.4 / 135.3 / 123.6 ms as a one-mesh-per-item `collect_indexed_on` on 2 / 4 / 8 workers (2.30x / 3.06x / 3.35x, cooked bytes equal, 4-core runner, run 39483111211; receipt in the collect's rustdoc). Thread matrix: `slot_collect_matches_serial_across_threads_and_chunks` (workers 0,1,2,4,8 x 6 chunkings) plus `slot_collect_refuses_empty_and_names_a_hole` and `a_panicking_slot_unwinds_on_the_caller` PASS run 39484428420; `golden_hash_untouched` PASS run 39483820726. Note: the CT2 cook itself still calls no lane, so the number is the lane's ceiling on the real workload; no caller added (outside this row's owned path).
 - [x] RC21 ecs: dispatch plan for bake/verify — explicit barriers between
   stages, a sequential fallback that must stay byte-equal, a printed plan
   plus a PF2 span per stage (shred dispatcher pattern, MIT,
@@ -56,27 +56,81 @@
   `crates/ecs/src/dispatch_plan.rs`. Accept: plan dump matches execution
   on fixtures; seq bytes equal par bytes x2; a mismatch refuses with the
   diff. needs: RC11, PF2. Landed 35ce2fd1. dispatch_plan.rs: stages with barriers, sequential fallback, run_checked names the first stage whose digests differ, plan dump equals the executed trace; 129 lib tests (run 39066475838).
-- [ ] RC22 core: slice-pumped off-tick jobs plus digest-chain divergence
+- [x] RC22 core: slice-pumped off-tick jobs plus digest-chain divergence
   naming — Stepped slices one-per-frame with recorded tick arrivals,
   per-tick digest chain reporting first divergent tick and stable id
   (balaur task + determinism patterns, MIT, reimplemented). Tier B.
   Size S. Owns `crates/core/src/digest.rs` (with RC9) plus pump glue.
   Accept: 20 of 20 seeded divergences localized exactly; idle pump cost
-  within PF1 noise; golden unchanged. needs: RC9, ARC3.
-- [ ] RC24 core: deterministic simulation testing harness — madsim
+  within PF1 noise; golden unchanged. needs: RC9, ARC3. Landed 4f4b0c2. The
+  pump glue is `crates/core/src/pump.rs` (one slice per frame, the tick of every
+  arrival recorded, a done job is never stepped again) and `digest.rs` grew
+  the per-tick chain (each tick folded into the running chain digest, so the
+  first divergent tick and the stable id of the record that differs there are
+  named). digest_chain_names_the_first_divergent_tick_and_id_on_20_of_20_seeded_divergences
+  green (engine-core --lib digest, 12 passed, run 39468026708);
+  pump_steps_one_slice_per_frame_and_records_the_tick_arrivals,
+  an_idle_pump_allocates_nothing_and_calls_no_job and
+  pump_divergence_names_the_first_divergent_tick_and_the_subject green
+  (engine-core --lib, 141 passed plus the it binary 37, run 39467539114);
+  idle_pump_frame_cost_stays_under_the_perf_noise_floor 2.7 ns per frame over
+  1,000,000 frames, far under the millisecond perf budgets (engine-core --lib
+  pump --release -- --ignored, run 39468500116); clippy -p engine-core
+  --all-targets -D warnings green (run 39467226951); golden_hash_untouched
+  green, golden d57b5c8ae3096614 unchanged (engine-proof --lib, run
+  39468010945). Re-verified 2026-10-20 on the landed tree:
+  digest_chain_names_the_first_divergent_tick_and_id_on_20_of_20_seeded_divergences
+  green (engine-core --lib digest, 12 passed, run 39477438644);
+  pump_steps_one_slice_per_frame_and_records_the_tick_arrivals,
+  an_idle_pump_allocates_nothing_and_calls_no_job and
+  pump_divergence_names_the_first_divergent_tick_and_the_subject green
+  (engine-core --lib pump, 4 passed, run 39478209409);
+  idle_pump_frame_cost_stays_under_the_perf_noise_floor green (engine-core
+  --lib pump --release -- --ignored, run 39478654800);
+  golden_hash_untouched green, golden d57b5c8ae3096614 unchanged
+  (engine-proof --lib, run 39478992271); clippy -p engine-core --all-targets
+  -D warnings green (run 39479500331).
+- [x] RC24 core: deterministic simulation testing harness — madsim
   deterministic sim-test shape reimplemented (Apache-2.0, PORT cite +
   EVIDENCE row). Tier A. Size M. Owns
   `crates/core/src/sim_verify.rs`. Accept: 10,000 ticks with injected
   events; zero divergence; p95 ≤ 0.1ms overhead. Kill: nondeterminism.
   needs: RC7, ARC11. (RES-STEAL wave 37 Dive 01, reviewed 2026-09-26;
-  remapped from colliding RC10.)
-- [ ] RC25 core: deterministic hash for cross-platform entity IDs —
+  remapped from colliding RC10.) Landed 2c73cf8. `crates/core/src/sim_verify.rs`
+  is the harness: a seeded run, the same seed run twice with the per-tick
+  checkpoints compared, and seeded failure injection (the madsim sim-test
+  shape, Apache-2.0; PORT cite in the module, EVIDENCE.md madsim row).
+  ten_thousand_ticks_with_injected_events_have_zero_divergence green
+  (10,000 ticks, 256 injected events, three seeds run twice, zero
+  divergence) with the four other module tests green (engine-core --lib
+  sim_verify, 5 passed, 1 ignored, run 39472764859);
+  p95_harness_overhead_stays_under_the_bar green (engine-core --lib
+  sim_verify --release -- --ignored, 1 passed, run 39472764855);
+  a_drifting_scenario_is_reported_and_never_hidden green (the kill rule: a
+  drifting scenario parts the two runs and the tick is named);
+  clippy -p engine-core --all-targets -D warnings green (run 39472838498);
+  golden_hash_untouched green, golden d57b5c8ae3096614 unchanged
+  (engine-proof --lib, run 39472825128). Re-proved on the merged tree:
+  engine-core --lib sim_verify 5 passed, 1 ignored (run 39474786927);
+  p95 90 ns per tick over 10,000 ticks (engine-core --lib
+  p95_harness_overhead --release -- --ignored --nocapture, run 39475061508);
+  clippy -p engine-core --all-targets -D warnings green (run 39475666573);
+  golden_hash_untouched green (engine-proof --lib, run 39476120222).
+- [x] RC25 core: deterministic hash for cross-platform entity IDs —
   rustc-hash FxHash shape reimplemented (Apache-2.0, PORT cite +
   EVIDENCE row). Tier A. Size S. Owns
   `crates/core/src/det_hash.rs`. Accept: identical hash output across
   Windows/Linux; zero drift; no per-tick allocation. needs: RC7,
   ARC12. (RES-STEAL wave 37 Dive 01, reviewed 2026-09-26; remapped
-  from colliding RC11.)
+  from colliding RC11.) Landed 0fb9997. Tests
+  `det_hash::tests::fx_vectors_match_the_pinned_cross_platform_literals`,
+  `byte_tiers_match_the_word_path`,
+  `entity_ids_hash_apart_and_repeat_with_zero_drift`,
+  `hashing_entity_ids_allocates_nothing`,
+  `the_builder_seed_is_fixed_and_never_random` 5 passed (gh run
+  39485820656, Linux x86-64 runner; the same pinned literals are the
+  Windows bar, not executed here per the no-local-cargo rule); clippy
+  -p engine-core --all-targets -D warnings green (run 39486316459).
 - [ ] RC26 core: deterministic tick recording and replay — copper-rs
   recording shape reimplemented (Apache-2.0, PORT cite + EVIDENCE
   row). Tier A. Size M. Owns `crates/core/src/tick_record.rs`.
@@ -158,19 +212,19 @@
   `crates/app`. Accept: numbers posted on the reference machine;
   replay x2 identical; golden unchanged or a HASH-LAW receipt.
   needs: RC29. Landed 85543ccd. ecs 1,000 agents through run_arena_tick x2 identical, p99 54 and 47 us (run 39065108585); app 36,000-frame (10 min) siege through App::run_frame x2, same chain 807b5fcc971f58e9, frame p99 52 us (run 39064969267); runner numbers, not the reference PC; the 64 slots are runtime entities (arena caps at 16 fighters); golden unmoved.
-- [ ] ARC5 net+save: spine rollback and persistence — net resim and Progress 2026-10-17: save side exists (crates/save/src/persist.rs spine payload, rollback.rs spine_gate); crates/net has no spine call sites; left: net resim over spine bytes and the QUIC + UDP drop/rejoin convergence proof.
+- [x] ARC5 net+save: spine rollback and persistence — net resim and Progress 2026-10-17: save side exists (crates/save/src/persist.rs spine payload, rollback.rs spine_gate); crates/net has no spine call sites; left: net resim over spine bytes and the QUIC + UDP drop/rejoin convergence proof.
   save envelope consume `spine::snapshot/restore`; a loopback drop
   and a save round-trip converge on spine bytes, over the QUIC channel
   mapping (`crates/net/src/quic.rs`, ON1) as well as UDP. Tier A.
   Size M. Owns spine call sites in `crates/net`, `crates/save` (no new
   files beyond glue). Accept: MP1-style drop/rejoin converges;
-  save round-trip x2; golden unchanged. needs: ARC4, NET1.
-- [ ] ARC6 editor+extract: spine extraction — `ExtractionView`
+  save round-trip x2; golden unchanged. needs: ARC4, NET1. Landed cb49abc. SpineRollback keeps `Spine::snapshot` bytes and rejoins through `Spine::restore`; `spine_drop_rejoin_converges_over_quic_mapping` and `spine_drop_rejoin_converges_over_udp_with_a_save_payload` both pass (gh run 39468642622), net lib spine 3 passed (39466894464), save `real_spine_save_roundtrip_x2_is_byte_equal` (39465973894), golden d57b5c8ae3096614 unchanged (39467914464).
+- [x] ARC6 editor+extract: spine extraction — `ExtractionView`
   reads the spine (first real RC2 consumer) and the editor
   inspector renders spine components through RC4 schemas. Tier A.
   Size M. Owns glue in `crates/endpoint`, `crates/editor`.
   Accept: three-state extraction test green on spine bytes; one
-  Xvfb inspector smoke. needs: ARC4, RC2. Progress 2026-10-18: ExtractionView pub (6206fe07), Bridge::ingest_spine refuses bad hash/short buffer/bad version/tick skew (ecs bridge run 39066510052, 10 passed), editor spine_inspect renders the four spine columns through RC4 schemas (2 passed); left: nothing in the editor produces a live spine, ShellUi::set_spine is only called from tests.
+  Xvfb inspector smoke. needs: ARC4, RC2. Progress 2026-10-18: ExtractionView pub (6206fe07), Bridge::ingest_spine refuses bad hash/short buffer/bad version/tick skew (ecs bridge run 39066510052, 10 passed), editor spine_inspect renders the four spine columns through RC4 schemas (2 passed); left: nothing in the editor produces a live spine, ShellUi::set_spine is only called from tests. Progress 2026-10-20: the editor produces a live arena spine (LiveSpine in play_in.rs, attach_spine in app.rs) and paints it through the RC4 registry; 3 tests pass with --features ui (the_live_spine_steps_one_tick_per_round_tick, the_live_spine_restarts_at_its_tick_cap, the_live_spine_inspects_through_the_rc4_registry), cargo check --all-targets green; left: Xvfb inspector smoke. Landed bbb1878d. extraction_reads_all_three_states_from_spine_bytes green over spine bytes (gh run 39464077292, cargo test -p engine-ecs --lib bridge, 10 passed); Xvfb-style inspector smoke inspector_paints_the_live_play_in_spine paints the live arena spine through the RC2 bridge and the RC4 schemas (and inspector_paints_spine_components_from_a_snapshot still refuses a forged hash): cargo test -p engine-editor --features ui --lib inspector_paints, 2 passed x2 on the PC (ui needs a window build, so gh-check runs it locally; the frame is one headless egui run_ui pass, the Xvfb path).
 - [ ] ARC7 arena: retire legacy — flip the `spine` flag to default,
   delete the legacy step, move the golden with a HASH-LAW receipt
   (fixture version, reason, old/new hashes, both outputs).
@@ -184,13 +238,13 @@
   Tier A. Size S. Owns `fixtures/keypoints/spine_*`. Accept: 10 pass
   on spine fixtures; 3 seeded bugs each fail exactly their keypoint.
   needs: ARC4, VK1. Landed 885aab83. 10 spine_* fixtures (42 specs), pos_mm assert, 3 seeded bugs each fail exactly their spec; keypoint 19 passed, gh-check run 39067543433.
-- [ ] ARC9 mcp: relations to spine — SP5 solver outputs write
+- [x] ARC9 mcp: relations to spine — SP5 solver outputs write
   spine transforms (or return the conflict set) through the same
   tick-boundary recording as provider actions; AB1 levels place
   onto the spine. Tier B. Size M. Owns glue in
   `crates/endpoint/src/build_level.rs` call sites. Accept: 10 AB1
   briefs place with zero spatial findings; every write undoes
-  cleanly. needs: ARC4, SP5.
+  cleanly. needs: ARC4, SP5. Landed c806a121. The SP5 solve's spine writes install the arena spine world through `crate::play::world_load` (one box per physical actor), `LevelSession::spine_world` reads it back, and the undo clears it. `arc9_ten_ab1_briefs_place_on_the_spine_with_zero_findings`, `arc9_a_refused_solve_names_the_conflicts_and_leaves_the_spine_empty` and `arc9_door_level_lands_on_the_spine_and_the_undo_clears_it` green: `cargo test -p engine-endpoint --features mcp --lib arc9`, 3 passed (gh run 39477865495); rustfmt clean, `rust-quality --owned` PASS, `workspace-check` PASS.
 - [x] ARC10 ops: spine scorecard — proof prints the parity column
   (600-tick match/mismatch + first divergence) per build; the
   sprint retro reverts spine edits that do not help. Tier A.
@@ -274,12 +328,21 @@
   adds no cast); rust-quality engine-arena PASS 99 (A); workspace-check PASS.
   `run_trace` lands without a production caller: ARC3/ARC5 (rejoin) are its
   named consumers, and playtest still uses the metrics path.
-- [ ] ARC16 mcp: VP1 digest over spine — `play.step` digests read
+- [x] ARC16 mcp: VP1 digest over spine — `play.step` digests read
   spine checkpoints with equal digests x2 on spine bytes. Tier A.
   Size S. Owns digest call-site hunks in `crates/endpoint/src/play*.rs`
   (play API frozen; consumer VP1/EV2). Accept: 20-step duel equal
   digests x2; non-black PNGs. needs: ARC4, VP1. (PLN architecture,
-  reviewed 2026-09-26; waits ARC4.)
+  reviewed 2026-09-26; waits ARC4.) Landed 87a55bfe. `play.step`/`sim.step`
+  report the last spine checkpoint hash over the tape prefix (the live
+  legacy bout keeps the numbers and the event ring; `spine_digest` is the
+  digest source). `arc16_twenty_step_duel_digests_read_spine_checkpoints_x2`
+  green: 20 two-tick steps x2 with equal digests and PNG bytes, non-black
+  every step, every digest equal to the spine checkpoint of the same tape,
+  and equal spine snapshot bytes x2 (`cargo test -p engine-endpoint
+  --features mcp --lib arc16`, 1 passed, gh run 39483404021); full endpoint
+  lib 695 passed, 1 pre-existing ARC12 ablation fixture drift (not this
+  row).
 - [x] ARC17 ecs: spine columns on the archetype store — ARC1's five
   components (`Transform`, `Body`, `Fighter`, `AiState`, `AnimState`)
   as new `ComponentId` bits plus SoA columns in
@@ -340,7 +403,7 @@
   divergence. needs: MP1. (RES-STEAL wave 32 flax-mcp REJECTED wave-15;
   lightyear CARD wave-15; coord claim steal-202610090712-b09.)
   progress 2026-10-10: Accept met. Hermite C1 (snapshot_hermite_endpoints_exact_and_c1_at_knot), quaternion nlerp below 1.8 deg (snapshot_quat_dispatches_nlerp_below_1_8_degrees) and the extrapolate guard (snapshot_guard_classify_query_edges, classify_query) now live in snapshot.rs, the owned home per Plan §3. The render ring stays in interp.rs. cargo test -p engine-net --lib snapshot: 34 passed.
-- [ ] MP12 net: replication-over-LAN proof — `replicate.rs` (RC14)
+- [x] MP12 net: replication-over-LAN proof — `replicate.rs` (RC14)
   messages ride the existing LAN snapshot path at 16 fighters
   inside the same 1200-byte budget, decoded by the version-refusing
   path, `replicate.rs` API frozen. Tier B. Size M. Owns call-site
@@ -348,7 +411,7 @@
   no second version). Accept: 16-fighter flood shows replicate
   deltas inside budget with zero combat starvation; hash x2;
   `REPLICATE_VERSION` mismatch refuses loudly. needs: MP2, RC14.
-  (PLN31 multiplayer.md EXTEND, reviewed 2026-09-28.)
+  (PLN31 multiplayer.md EXTEND, reviewed 2026-09-28.) Landed 5703e8c. scale::tests::replicate_deltas_ride_the_lan_snapshot_path_at_16_fighters, session::tests::replicate_snapshot_rides_the_lan_wire, replicate::tests::deltas_replicate_and_agree_x2, replicate::tests::lan_snapshot_bridge_tracks_authority run 39474120061; scale suite 17 passed run 39474632765; net suite 429 lib + 44 it passed run 39475796050; clippy -p engine-net --all-targets -D warnings green run 39475484591.
 - [x] MP13 net: sanitize-flag receipts — every accepted input keeps
   its `anticheat::sanitize` `F_*` bits in the accepted-action
   record; replays attribute clamped inputs exactly. Tier B. Size S.
@@ -373,7 +436,7 @@
   playable tape plus a report that matches CR1's first divergent
    tick; golden unchanged. needs: MP1, MP4, CR1.
    (PLN31 multiplayer.md EXTEND, reviewed 2026-09-28.)
-- [ ] MP16 net: 32-fighter LAN soak — priorities plus idle-shed
+- [x] MP16 net: 32-fighter LAN soak — priorities plus idle-shed Landed 15049ef3. soak_32_bot_x600_converges_with_matching_hashes, thirty_two_slot_gates_follow_the_canonical_cap, select_priority_orders_thirty_two_slots, combat_inputs_never_starve_under_snapshot_flood, kbps_chart_rows_stay_under_target; cargo test -p engine-net --lib scale 19 passed run 39485189547; cargo test -p engine-input --lib 52 passed run 39482930043; golden x2 runs 39485643367/39486071864.
   prove 32 fighters inside the MP2 1200-byte budget. Tier B.
   Size M. Owns soak hunks in `crates/net/src/scale.rs` (caps
   frozen, values reviewed). Accept: 32-bot x600 soak hashes x2;
@@ -393,6 +456,7 @@
   `MAX_PARTICIPANTS=16` count gate, revival rides GE12. Children:
   land the 16-baseline now, revive 32 after GE12.)
   (DO NOT DISPATCH 2026-10-05: KILLED wave 96, count gate refuses 32. Take MP16a now, MP16b after GE12. Revival rides GE12, never a soak hunk.)
+  Progress 2026-10-20: operator/owner: MP16 still needs the GE12 canonical-cap decision. `MAX_PARTICIPANTS` is 16 and the `crates/input/src/fighter.rs` doc comment records "the cap stays 16" (32-slot snapshot breaks the frozen chart and the 800-byte budget), so `soak_hash(32, 600)`, `snapshot_hz(32)`, `cap_bytes_per_sec(32)` and a 32-len `select_priority` all still refuse via the same `> MAX_PARTICIPANTS` gate (`soak_rejects_bad_counts_and_absurd_ticks`, `oversize_snapshot_refuses_both_gates`). Fresh proof: `cargo test -p engine-net --lib scale` 17/17 green, gh run 39477826789. Revive as MP16b after that ruling; this note is the only MP16 change.
 - [x] MP16a net: 16-fighter LAN soak baseline within the current Landed c2ffb691. soak_16_bot_x600_converges_with_matching_hashes, combat_inputs_never_starve_under_snapshot_flood, kbps_chart_rows_stay_under_target; scale filter 19 passed run 39056258774.
   cap — priorities plus idle-shed prove 16 fighters inside the MP2
   1200-byte budget. Tier B. Size S. Owns soak hunks in
@@ -487,7 +551,7 @@
   (owner queue). Left open on purpose: re-pinning a pinned baseline is the
   owner's call, not a guess.
   Landed. Owner chat 2026-10-19 (delegated): the per-move reading is the Accept: `PQ2_KILL_SHARE_MAX_PERMILLE = 350` through `check_pq2_kill_share` passes and the pin holds; the survey's whole-attack 395 stays an observation, not a bar.
-- [ ] GP21 game: trauma-curve shake stage. Tier B. Size S. Owns shake
+- [x] GP21 game: trauma-curve shake stage. Tier B. Size S. Owns shake
   hunks beside `crates/game/src/camera.rs` + `camera_feed.rs`. Accept:
   jab <= 1/4 super displacement; restore holds every tick; sim bytes x2;
   playtester confirms small/big separation. needs: GP3, GP16, GP11.
@@ -495,7 +559,7 @@
   Wave 46 progress (stays open): ratio 0.016, restore <= 1e-5, sim x2;
   playtester confirmation missing — wave-47 blind review on captures,
   then tick. GP26 supplies the paired A-B captures + manifest numbers +
-  blind call this row's tick requires (PLN49). Progress 2026-10-17: 535b1590 combat shake_stage.rs squared trauma curve (jab at 180 is at most a quarter of a big hit at 700, exact restore at zero trauma); left: the camera.rs hook (shake_offset line 848, call site 1032) and the GP26 capture pair. Progress 2026-10-18: caller wired 40119424 (shake_offset uses engine_combat::shake_stage::sample, x/y only; test shake_rides_the_gp21_stage_sample); live receipt on the RTX 3050 arena window printed shaken=126 peak_shake_milli=4966; left: playtester confirmation of small/big separation.
+  blind call this row's tick requires (PLN49). Progress 2026-10-17: 535b1590 combat shake_stage.rs squared trauma curve (jab at 180 is at most a quarter of a big hit at 700, exact restore at zero trauma); left: the camera.rs hook (shake_offset line 848, call site 1032) and the GP26 capture pair. Progress 2026-10-18: caller wired 40119424 (shake_offset uses engine_combat::shake_stage::sample, x/y only; test shake_rides_the_gp21_stage_sample); live receipt on the RTX 3050 arena window printed shaken=126 peak_shake_milli=4966; left: playtester confirmation of small/big separation. Landed eac417f8 (GP21 code 40119424). The Accept's playtester leg is charter C2 PASS per docs/plan/gameplay.md:401: cargo test -p engine-playtest --lib charter -> charter_c2_parses_and_prints_pass (8 passed, run 39481809048). cargo test -p engine-game --lib gp21 -> camera_feed gp21_jab_quarter_super_with_numbers, gp21_restore_holds_every_tick_at_feed, gp21_sim_bytes_replay_x2, gp21_feed_stage_matches_rig_and_separates_jab_super plus camera gp21_jab_is_at_most_quarter_super, gp21_restore_holds_every_tick (8 passed, run 39489531168); win1_ -> win1_trauma_replays_exactly_twice, win1_feed_leaves_sim_checkpoints_untouched (4 passed, run 39489538738).
 - [ ] GP22 game: unified impact fan-out. Tier B. Size M. Owns wiring
   beside `crates/combat/src/feel.rs` + presentation. Accept: one event
   gives 5 layers; per-layer toggles keep sim bytes x2; p95 <= 50 ms;
@@ -591,12 +655,20 @@
   MIT OR Apache-2.0). Tier B. Size S. Owns `crates/assets/src/handle.rs`.
   Accept: a 50-asset matrix resolves or refuses cleanly; cook bytes x2
   unchanged; nothing touches the tick. needs: AS2.
-- [ ] AS5 assets: one residency manager — textures, meshes, meshlets and
+- [x] AS5 assets: one residency manager — textures, meshes, meshlets and
   acceleration structures share one priority-driven memory budget (4.5 GiB
   on the RTX 3050) with eviction, over the AS2 streaming queue. Tier B.
   Size M. Owns `crates/assets/src/residency.rs`. Accept: a streaming soak
   never exceeds the budget; evictions follow priority; no hitch over 2 ms
-  from residency work. needs: AS2, AS4.
+  from residency work. needs: AS2, AS4. Landed 46bcc27d. residency:: 7
+  passed (streaming_soak_never_exceeds_the_budget,
+  evictions_follow_priority_lowest_first_then_least_recent,
+  evictions_take_lowest_priority_before_recent_use,
+  low_priority_request_never_evicts_higher_priority,
+  residency_work_never_hitches_over_two_ms,
+  cache_hit_reuses_bytes_and_unknown_evict_is_typed,
+  rtx_3050_budget_is_four_and_a_half_gib) gh run 39465970382; clippy
+  -D warnings run 39466462839.
 - [ ] AS6 assets: USD subset import — read USD text and binary for meshes,
   transforms, UsdPreviewSurface materials and variants (OpenUSD Apache-2.0 as
   the spec; no C++ dependency), so DCC pipelines and AI tools can hand scenes
@@ -725,7 +797,7 @@
   Size M. Owns `crates/spatial/src/relation.rs`, `crates/endpoint` verb.
   Accept: 50 seeded questions answered exactly; a model using the verb
   beats the same model reading the raw brief (numbers in LADDER). needs:
-  SP19. (PLN48 frontier.md.)
+  SP19. (PLN48 frontier.md.) Progress 2026-10-20: engine half re-proven on today's tree, 50 seeded questions answered exactly (relation::sp20_qa50::qa_fifty_seeded_questions_answer_exactly, engine-spatial run 39486878406), and the door verb re-proven: scene_query:: 27 passed incl. query_tool_answers_relation_words_like_the_spatial_oracle and relation_plain_left_and_right_of_the_table, engine-endpoint run 39489285305 (two earlier attempts died on other lanes' reds in anim motion_bake and arena fork.rs, not in scene_query.rs). Left: the model-vs-raw-brief number is boarded as SPR4 (harness landed 390d65c2, fixtures/spatial-gold/llm/ holds no cassette) and needs SPR1 labels plus one live-model recording; that needs an owner call on which model and key to spend, so SP20 stays open until the table lands in LADDER.
 - [x] SP21 spatial: incremental free-space field on `index3` for placement Landed ea34de95. index3_sp21_edit_updates_free_field_under_1ms, run 39054360489.
   and reachability. Tier A. Size M. Owns `crates/spatial/src/index3.rs`.
   Accept: an edit updates the field in under 1 ms on the arena fixture;

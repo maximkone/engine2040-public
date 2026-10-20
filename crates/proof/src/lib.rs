@@ -23,6 +23,8 @@ pub mod chaos;
 /// 20,000-agent crowd determinism harness: one hash per machine.
 pub mod crowd;
 pub mod dataset;
+/// Pillars receipt: the sample's distilled net, AI write chain and museum.
+pub mod fb_pillars;
 pub mod fb_ship;
 pub mod fb_versions;
 #[cfg(feature = "fuzz")]

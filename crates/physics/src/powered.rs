@@ -20,7 +20,7 @@ use super::ragdoll::{
 };
 use super::rapier::{
     ordered_linvel, ordered_translation, position_in_bounds, quantize, sanitize3, BodyState,
-    FIXED_DT, GRAVITY_Y, MAX_LEN,
+    ParamsError, RagdollParams, FIXED_DT, GRAVITY_Y, MAX_LEN,
 };
 use engine_anim::contract::{validate_pose, validate_skeleton, AnimError, LocalPose, Skeleton};
 use engine_core::{quat_mul, Fnv64};
@@ -140,6 +140,8 @@ pub enum RagdollError {
     InvalidHalfExtents,
     /// Snapshot does not match this ragdoll (counts, mask, mode or pose).
     SnapshotMismatch,
+    /// The ragdoll params builder refused the table.
+    Params(ParamsError),
 }
 
 impl Display for RagdollError {
@@ -169,6 +171,7 @@ impl Display for RagdollError {
                 f.write_str("invalid half-extents: need finite values in (0, 1000]")
             }
             RagdollError::SnapshotMismatch => f.write_str("snapshot does not match this ragdoll"),
+            RagdollError::Params(e) => write!(f, "ragdoll params refused: {e}"),
         }
     }
 }
@@ -178,6 +181,12 @@ impl std::error::Error for RagdollError {}
 impl From<AnimError> for RagdollError {
     fn from(e: AnimError) -> Self {
         RagdollError::Anim(e)
+    }
+}
+
+impl From<ParamsError> for RagdollError {
+    fn from(e: ParamsError) -> Self {
+        RagdollError::Params(e)
     }
 }
 
@@ -295,16 +304,17 @@ impl PoweredRagdoll {
         drives: &[DriveParams],
     ) -> Result<Self, RagdollError> {
         validate_spawn_args(skeleton, pose, capsule_dims, drives)?;
+        let radii: Vec<f32> = capsule_dims.iter().map(|d| d.radius).collect();
+        let half_heights: Vec<f32> = capsule_dims.iter().map(|d| d.half_height).collect();
+        let params = RagdollParams::for_rig(skeleton, &radii, &half_heights)?;
         let (world_pos, world_rot) = world_transforms(skeleton, pose);
         let depths = joint_depths(skeleton);
-        let params = IntegrationParameters {
-            dt: FIXED_DT,
-            ..Default::default()
-        };
+        let integration = params.integration(FIXED_DT);
         let mut bodies = RigidBodySet::new();
         let mut colliders = ColliderSet::new();
         let mut impulse_joints = ImpulseJointSet::new();
         let mut order = Vec::with_capacity(skeleton.len());
+        let ccd_flags = params.ccd_flags();
         for (i, (p, r)) in world_pos.iter().zip(world_rot.iter()).enumerate() {
             let body = RigidBodyBuilder::dynamic()
                 .translation(Vector::new(p[0], p[1], p[2]))
@@ -313,8 +323,9 @@ impl PoweredRagdoll {
                 // Sleeping is disabled so kinematic state (pos/rot/vel) is
                 // the complete future-affecting state and restore is exact.
                 .can_sleep(false)
-                // CCD is on: fast limbs stop at thin shields (see `set_ccd`).
-                .ccd_enabled(true)
+                // The one CCD policy: a dynamic bone rides the solver so fast
+                // limbs stop at thin shields (see `set_ccd`).
+                .ccd_enabled(ccd_flags.get(i).copied().unwrap_or(false))
                 .build();
             let handle = bodies.insert(body);
             // Orientation is set directly as a quaternion: the builder takes
@@ -322,9 +333,13 @@ impl PoweredRagdoll {
             if let Some(b) = bodies.get_mut(handle) {
                 b.set_rotation(normalized_rotation(r), false);
             }
+            // The density carries the bone's share of the body mass.
+            let density = params
+                .density_for(i, capsule_dims[i].radius, capsule_dims[i].half_height)
+                .unwrap_or(1.0);
             let collider =
                 ColliderBuilder::capsule_y(capsule_dims[i].half_height, capsule_dims[i].radius)
-                    .density(1.0)
+                    .density(density)
                     .friction(FRICTION)
                     .restitution(0.0)
                     .build();
@@ -343,7 +358,7 @@ impl PoweredRagdoll {
         Ok(Self {
             pipeline: PhysicsPipeline::new(),
             gravity: Vector::new(0.0, GRAVITY_Y, 0.0),
-            params,
+            params: integration,
             islands: IslandManager::new(),
             broad: BroadPhaseBvh::new(),
             narrow: NarrowPhase::new(),
@@ -364,7 +379,7 @@ impl PoweredRagdoll {
             hits: 0,
             target_pos: vec![[0.0; 3]; n],
             target_rot: vec![[0.0, 0.0, 0.0, 1.0]; n],
-            ccd_flags: vec![true; n],
+            ccd_flags,
             pending: Vec::with_capacity(32),
             contact_events: 0,
         })

@@ -140,6 +140,15 @@ where
 ///
 /// Determinism: slot `i` is written only with `f(start + i)`; the pool decides
 /// where a job runs, never which slot it fills.
+///
+/// Measured on the CT2 workload (RC20, 2026-10-20, release, 4-core runner):
+/// the 8 committed `content/arena/src/*.gltf` meshes cooked through
+/// `engine_assets::cook_gltf_bytes` (the workload of the assets test
+/// `arena_kit_meshes_cook_identical_twice_within_the_prop_budget`) take
+/// 414.1 ms serial and 180.4 / 135.3 / 123.6 ms as a one-mesh-per-item
+/// collect on 2 / 4 / 8 workers, so 2.30x / 3.06x / 3.35x with the cooked
+/// bytes equal (run 39483111211). The cook itself still calls no lane:
+/// this is the ceiling on the real workload, not a wired caller.
 pub fn collect_indexed_on<T, F>(
     pool: &JobPool,
     range: Range<usize>,

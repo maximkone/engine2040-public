@@ -29,7 +29,7 @@ checkpoint hash. Default build is std-only. Feature `sim` adds Rapier controller
 
 | Type | Definition and range | Determinism | Errors |
 |---|---|---|---|
-| `ArenaConfig` | `{ seed: u64, ticks: u32, fighters: u8, half_extent_m: f32, table_version: u32 }`, Copy, PartialEq. `ticks` 1..=`MAX_TICKS` (100 000); `fighters` 2..=16; `half_extent_m` 5.0..=100.0; `table_version` 1 (startup 4) or 2 (startup 15, parry 7). | Validated before any step. | `ArenaError::{BadTicks(u32), BadFighters(u8), BadExtent, BadTableVersion(u32)}` from `validate(self)`, in that order. |
+| `ArenaConfig` | `{ seed: u64, ticks: u32, fighters: u8, half_extent_m: f32, table_version: u32 }`, Copy, PartialEq. `ticks` 1..=`MAX_TICKS` (100 000); `fighters` 2..=32; `half_extent_m` 5.0..=100.0; `table_version` 1 (startup 4) or 2 (startup 15, parry 7). | Validated before any step. | `ArenaError::{BadTicks(u32), BadFighters(u8), BadExtent, BadTableVersion(u32)}` from `validate(self)`, in that order. |
 | `ArenaConfig::try_new(seed, ticks, fighters, half_extent_m)` | Sets `table_version` 1. | | `ArenaError` |
 | `Checkpoint` | `{ tick: u32, hash: u64 }`, Copy, Hash. One per tick. | the hash | none |
 | `TickEvents` / `TickBreaks` / `TickMatchEvents` | `{ tick, events: Vec<FightEvent> }` / `{ tick, events: Vec<BreakEvent> }` / `{ tick, exchange, sweep }`. Fighter-ID order; breaks are bond snaps then freed chunks. | events feed the hash; match events are observed only | none |
@@ -38,7 +38,7 @@ checkpoint hash. Default build is std-only. Feature `sim` adds Rapier controller
 | `ArenaRules` | `{ version, teams: [u8;16], collision: bool, pillars: [Option<Pillar>;8], balance: bool }` | v2 digest adds tags (1.3) | `is_known()` |
 | `FighterInput`, `FighterTape`, `FighterId`, `Buttons` | Re-exported from `engine-input` (section 4). | canonical bytes | `FighterError` |
 
-Re-exports: `BodyId`, `BodyInput`, `BodyTape` (genre-neutral aliases), `MAX_PARTICIPANTS` (16),
+Re-exports: `BodyId`, `BodyInput`, `BodyTape` (genre-neutral aliases), `MAX_PARTICIPANTS` (32),
 `TICK_HZ`, `TOP_SPEED_MPS` (5.0), `FIGHTER_RADIUS_M` (0.4), `FIGHTER_HEIGHT_M` (1.8),
 `AI_PERIOD_TICKS` (6), `MAX_TICKS`. Under `sim`: `SIM_TRACK` (true), `CAPSULE_CYL_H_M` (1.0),
 `CAPSULE_REST_Y_M` (0.9).
@@ -325,7 +325,7 @@ Deterministic action map for the fixed tick. `FighterInput` is one validated com
 |---|---|
 | `FighterInput { tick: u32, fighter: FighterId, mx: i8, mz: i8, facing: i16, buttons: Buttons }` | Copy, Hash. |
 | `WISH_RANGE` 100 (`mx`, `mz` in ±100 percent of top speed); `FACING_RANGE` 18 000 (centidegrees) | |
-| `MAX_PARTICIPANTS` 16; `FighterId::new(u8) -> Option<Self>`; `Buttons(pub u8)`: `ATTACK` 0x01, `BLOCK` 0x02, `DODGE` 0x04, `KNOWN_BUTTONS` 0x07 | Slots 0..=15. |
+| `MAX_PARTICIPANTS` 32; `FighterId::new(u8) -> Option<Self>`; `Buttons(pub u8)`: `ATTACK` 0x01, `BLOCK` 0x02, `DODGE` 0x04, `KNOWN_BUTTONS` 0x07 | Slots 0..=31. |
 | `FighterInput::validate(self) -> Result<(), FighterError>`; `append_bytes(self, &mut Vec<u8>)` | Canonical little-endian bytes for tick hashing. |
 | `FighterTape(pub Vec<FighterInput>)`; `validate(&self)` | Sorted by tick then fighter; no duplicates. |
 | `FighterError`: `UnknownFighter(u8)`, `WishOutOfRange(i8)`, `FacingOutOfRange(i16)`, `UnknownButtons(u8)`, `UnsortedTape(usize)`, `DuplicateInput(usize)`; `range_detail()` | Neutral aliases: `BoutTape`, `ParticipantInput`, `ParticipantId`, `ParticipantError`. |

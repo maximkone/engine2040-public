@@ -38,8 +38,8 @@ use engine_spatial::to_cm;
 
 use crate::{FighterView, TickOutcome};
 
-/// Slots tracked for footsteps (the roster cap).
-pub const MAX_SLOTS: usize = 16;
+/// Slots tracked for footsteps (the canonical roster cap).
+pub const MAX_SLOTS: usize = 32;
 /// Meters a fighter travels between footsteps.
 pub const STRIDE_M: f32 = 0.8;
 /// A move longer than this in one tick is a teleport (respawn, rematch), not

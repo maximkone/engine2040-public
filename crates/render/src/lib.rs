@@ -361,6 +361,12 @@ pub mod contact_feet;
 /// recovers the last centimetres where a body meets the ground. The CPU
 /// oracle here pins the constants the live GTAO upsample runs.
 pub mod contact_shadow;
+
+/// Per-pass report: each pass declares reads and writes; the plan fails when
+/// a read has no live writer, and the JSON names ran, culled and failed
+/// passes with their reasons. Std-only, no clock.
+pub mod pass_report;
+
 /// Shadowed spot lights (flashlights and lamps) on the clustered path.
 pub mod spot;
 

@@ -11,3 +11,8 @@ workspace = true
 [dependencies]
 # Corrupt-save fallback surfaces as an observe notice (both std-only).
 engine-observe.workspace = true
+
+[dev-dependencies]
+# ARC5: the spine payload round-trip test consumes a real
+# `Spine::snapshot`/`Spine::restore`; the crate itself stays ecs-free.
+engine-ecs.workspace = true

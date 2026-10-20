@@ -51,6 +51,10 @@ pub mod bc;
 /// Skinned body plus clip-source import for render skinning (fighter look).
 #[cfg(feature = "import")]
 pub mod body_import;
+/// Animation key compression: segment, quantize and error-loop over cooked
+/// clips; decode fills caller buffers with no allocation.
+#[cfg(feature = "import")]
+pub mod anim_compress;
 /// Combat batch intake: retarget plus digest dedupe over canonical clips.
 #[cfg(feature = "import")]
 pub mod clip_intake;
@@ -111,12 +115,21 @@ pub mod meshlet_cull;
 pub mod recook;
 #[cfg(feature = "import")]
 pub mod retarget;
+/// SOMA-77 joint table and its map onto the fighter-65 rig (bake-time names).
+pub mod soma;
 #[cfg(feature = "import")]
 pub mod skin_import;
 /// Asset streaming jobs with priorities and budgets: deterministic
 /// completion order over bundles. Std-only; planned, no caller yet (verified
 /// 2026-10-16): the asset browser will consume.
 pub mod stream;
+/// One residency manager over the stream queue: textures, meshes, meshlets
+/// and acceleration structures share one priority-driven byte budget.
+pub mod residency;
+pub use residency::{
+    Admitted, Eviction, ResClass, Residency, ResidencyError, BUDGET_BYTES_RTX_3050,
+    JOBS_RTX_3050, MAX_EVICTIONS_PER_CALL,
+};
 #[cfg(feature = "import")]
 pub mod texture;
 /// Traversal and finisher intake: edge markers plus sidecar audit over retarget cooks.

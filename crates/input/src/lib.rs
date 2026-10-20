@@ -77,14 +77,14 @@ mod root_alias_tests {
 
     #[test]
     fn participant_slot_gate_matches_cap() {
-        assert_eq!(MAX_PARTICIPANTS, 16);
+        assert_eq!(MAX_PARTICIPANTS, 32);
         assert!(ParticipantId::new(0).is_some());
-        assert!(ParticipantId::new(15).is_some());
-        assert_eq!(ParticipantId::new(16), None);
+        assert!(ParticipantId::new(31).is_some());
+        assert_eq!(ParticipantId::new(32), None);
         assert_eq!(ParticipantId::new(u8::MAX), None);
         let mut bad = participant(0, 0);
-        bad.fighter = FighterId(16);
-        assert_eq!(bad.validate(), Err(ParticipantError::UnknownFighter(16)));
+        bad.fighter = FighterId(32);
+        assert_eq!(bad.validate(), Err(ParticipantError::UnknownFighter(32)));
     }
 
     #[test]

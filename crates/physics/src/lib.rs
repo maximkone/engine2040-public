@@ -39,7 +39,8 @@ pub mod layers;
 /// Integer, std-only.
 pub mod limb;
 /// Physics LOD for armies: far soldiers as capsules, near ones full detail,
-/// CCD only for fast weapons and projectiles, island sleep for rest.
+/// the one CCD policy (a dynamic body may ride the solver, a driven one never
+/// does), island sleep for rest.
 pub mod lod;
 /// One table of density, friction, bounce and damping per material (wood, stone,
 /// flesh, metal, sand, cloth). Integer rows, std-only.

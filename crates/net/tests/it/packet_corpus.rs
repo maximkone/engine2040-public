@@ -47,8 +47,8 @@ mod corpus {
         0x4E, 0x31, 0x01, 0x7F, 0x07, 0x00, 0x00, 0x00, 0x01, 0x07, 0x00, 0x00, 0x00, 0x00, 0x64,
         0x00, 0x28, 0x23, 0x00,
     ];
-    /// Input header claiming 17 inputs (over the 16-input bound).
-    pub const TOO_MANY: &[u8] = &[0x4E, 0x31, 0x01, 0x00, 0x07, 0x00, 0x00, 0x00, 0x11];
+    /// Input header claiming 33 inputs (over the 32-input bound).
+    pub const TOO_MANY: &[u8] = &[0x4E, 0x31, 0x01, 0x00, 0x07, 0x00, 0x00, 0x00, 0x21];
 
     /// Every seed in this corpus.
     pub const SEEDS: &[&[u8]] = &[
@@ -120,7 +120,7 @@ fn garbage_seeds_reject_with_named_errors() {
     assert_eq!(decode_input(corpus::BAD_KIND), Err(NetError::BadKind(0x7F)));
     assert_eq!(
         decode_input(corpus::TOO_MANY),
-        Err(NetError::TooManyInputs(17))
+        Err(NetError::TooManyInputs(33))
     );
     assert_eq!(decode_state(corpus::VALID_INPUT), Err(NetError::BadKind(0)));
     assert_eq!(decode_input(corpus::VALID_STATE), Err(NetError::BadKind(1)));

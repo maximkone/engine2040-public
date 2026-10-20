@@ -173,20 +173,10 @@ impl std::error::Error for SaveError {}
 
 /// Bitwise IEEE CRC32 (table-free, deterministic, std-only). Same polynomial
 /// as the `engine-save` envelope so checksums agree across the two formats;
-/// the algorithm is reimplemented here so this module needs no new crate edge.
+/// the algorithm is owned by `engine-core` (one checksum in the workspace).
 /// Crate-visible: the durable journal, the WAL and round snapshots seal their
 /// frames with the same checksum.
-pub(crate) fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
+pub(crate) use engine_core::crc32::crc32;
 
 /// Save a document to versioned bytes: hierarchy plus revision plus v2
 /// material bindings.

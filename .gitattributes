@@ -3,5 +3,7 @@
 # (no further rewrite; pre-slim regular blobs already in history stay as-is).
 # Test fixtures included byte-for-byte by tests (lengths pinned in EVIDENCE.md): never convert line endings.
 fixtures/khronos/*.gltf -text
+# CT10 glTF conformance fixtures: included byte-for-byte by the conformance test.
+fixtures/gltf/*.gltf -text
 # engine-geo vendored xatlas: byte-exact, never converted.
 crates/geo/vendor/** -text

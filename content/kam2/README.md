@@ -1,4 +1,9 @@
-# KAM2 art: first rendered unit and first rendered building
+# KAM2 art: first rendered unit and first rendered building kinds
+
+`buildings/` holds the five economy kinds as rendered atlases, each on its sim footprint:
+`house.warehouse` (3x3) and `house.farm`, `house.mill`, `house.bakery`, `house.woodcutter`
+(2x2). One yaw 45 deg off S, two rows (`finished`, `half_built`), native scale 50.6 px per
+kit cell. Receipt and rebuild proof: `buildings/README.md`.
 
 `house/` is the first building: `house.cottage`, a Kenney Fantasy Town Kit cottage on a 2x2
 footprint, three states (finished, half-built, damaged) in one 130x390 atlas. Receipt and

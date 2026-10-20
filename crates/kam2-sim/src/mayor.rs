@@ -5,7 +5,9 @@
 //! the list never asks for something the real sim refuses. Roads come first, then houses
 //! (warehouse, then the chain the stock asks for), then one swordsman; house and unit ids
 //! are handed out in exactly that order. The seat defaults to side 0; [`Mayor::with_side`]
-//! moves it to the other team, and its army counts only that side's swordsmen.
+//! moves it to the other team. It reads and spends only its own side's stock and house
+//! list, and its army counts only that side's swordsmen. Apply its commands with
+//! [`Sim::apply_for`] and [`Mayor::side`].
 
 use crate::economy::{HouseKind, Ware};
 use crate::sim::{Command, Sim};
@@ -46,11 +48,18 @@ impl Mayor {
         }
     }
 
-    /// Field the army for `side` (0 or 1); the town and the stock stay shared.
+    /// Field the army and spend the stock of `side` (0 or 1); the town it builds is
+    /// that side's own house list.
     #[must_use]
     pub const fn with_side(mut self, side: u8) -> Self {
         self.side = side;
         self
+    }
+
+    /// The side this seat works for.
+    #[must_use]
+    pub const fn side(&self) -> u8 {
+        self.side
     }
 
     /// Never spend wood below this count.
@@ -81,7 +90,8 @@ impl Mayor {
         self
     }
 
-    /// One round of commands, safe to apply in the order returned.
+    /// One round of commands, safe to apply in the order returned with
+    /// [`Sim::apply_for`] and [`Mayor::side`].
     ///
     /// Apply the whole list, then tick; the next list starts from the state the list leaves.
     #[must_use]
@@ -100,7 +110,7 @@ impl Mayor {
                 break;
             };
             let cmd = Command::PlaceHouse { kind, x, y };
-            if scratch.apply(cmd).is_err() {
+            if scratch.apply_for(self.side, cmd).is_err() {
                 break;
             }
             plan.push(cmd);
@@ -109,7 +119,7 @@ impl Mayor {
         plan
     }
 
-    /// Extend the road one tile at a time toward the target site.
+    /// Extend the road one tile at a time toward the target site. Roads are shared.
     fn lay_roads(&self, scratch: &mut Sim, plan: &mut Vec<Command>) {
         let mut laid = 0;
         for x in 0..=self.target.0 {
@@ -121,7 +131,7 @@ impl Mayor {
                 continue;
             }
             let cmd = Command::PlaceRoad { x, y };
-            if scratch.apply(cmd).is_err() {
+            if scratch.apply_for(self.side, cmd).is_err() {
                 break;
             }
             plan.push(cmd);
@@ -129,39 +139,40 @@ impl Mayor {
         }
     }
 
-    /// The house the town wants next, driven by what the stock holds.
+    /// The house the town wants next, driven by what its own stock holds.
     fn next_house(&self, sim: &Sim) -> Option<HouseKind> {
-        if count(sim, HouseKind::Warehouse) == 0 {
+        if count(sim, self.side, HouseKind::Warehouse) == 0 {
             return Some(HouseKind::Warehouse);
         }
-        if count(sim, HouseKind::Woodcutter) == 0 {
+        if count(sim, self.side, HouseKind::Woodcutter) == 0 {
             return Some(HouseKind::Woodcutter);
         }
-        if count(sim, HouseKind::Farm) == 0 {
+        if count(sim, self.side, HouseKind::Farm) == 0 {
             return Some(HouseKind::Farm);
         }
         // A mill waits for the first grain, a bakery for the first flour.
-        if count(sim, HouseKind::Mill) == 0 && sim.stock(Ware::Grain) > 0 {
+        if count(sim, self.side, HouseKind::Mill) == 0 && sim.stock_of(self.side, Ware::Grain) > 0 {
             return Some(HouseKind::Mill);
         }
-        if count(sim, HouseKind::Bakery) == 0 && sim.stock(Ware::Flour) > 0 {
+        if count(sim, self.side, HouseKind::Bakery) == 0 && sim.stock_of(self.side, Ware::Flour) > 0
+        {
             return Some(HouseKind::Bakery);
         }
-        let wood = sim.stock(Ware::Wood);
+        let wood = sim.stock_of(self.side, Ware::Wood);
         let wants = [
             (
                 HouseKind::Farm,
-                8u32.saturating_sub(sim.stock(Ware::Grain)),
+                8u32.saturating_sub(sim.stock_of(self.side, Ware::Grain)),
                 HOUSES_PER_KIND,
             ),
             (
                 HouseKind::Mill,
-                6u32.saturating_sub(sim.stock(Ware::Flour)),
+                6u32.saturating_sub(sim.stock_of(self.side, Ware::Flour)),
                 HOUSES_PER_KIND,
             ),
             (
                 HouseKind::Bakery,
-                4u32.saturating_sub(sim.stock(Ware::Bread)),
+                4u32.saturating_sub(sim.stock_of(self.side, Ware::Bread)),
                 HOUSES_PER_KIND,
             ),
             (
@@ -172,7 +183,7 @@ impl Mayor {
         ];
         let mut best: Option<(u32, HouseKind)> = None;
         for (kind, deficit, cap) in wants {
-            if deficit == 0 || count(sim, kind) >= cap {
+            if deficit == 0 || count(sim, self.side, kind) >= cap {
                 continue;
             }
             if best.is_none_or(|(top, _)| deficit > top) {
@@ -182,11 +193,11 @@ impl Mayor {
         best.map(|(_, kind)| kind)
     }
 
-    /// True when the house can be paid without eating into a reserve.
+    /// True when the house can be paid from the seat's own stock without eating a reserve.
     fn pays(&self, sim: &Sim, kind: HouseKind) -> bool {
-        kind.cost()
-            .iter()
-            .all(|(ware, n)| sim.stock(*ware) >= n.saturating_add(self.reserve(*ware)))
+        kind.cost().iter().all(|(ware, n)| {
+            sim.stock_of(self.side, *ware) >= n.saturating_add(self.reserve(*ware))
+        })
     }
 
     /// The count of one ware the mayor refuses to spend.
@@ -212,21 +223,25 @@ impl Mayor {
             x,
             y,
         };
-        if scratch.apply(cmd).is_ok() {
+        if scratch.apply_for(self.side, cmd).is_ok() {
             plan.push(cmd);
         }
     }
 
-    /// True while the army has room and the stock can pay without breaking the reserve.
+    /// True while the army has room and the own stock can pay without breaking the reserve.
     fn wants_swordsman(&self, sim: &Sim) -> bool {
         count_units(sim, UnitKind::Swordsman, self.side) < self.army_cap
-            && sim.stock(Ware::Wood) >= self.army_wood.saturating_add(self.wood_reserve)
+            && sim.stock_of(self.side, Ware::Wood)
+                >= self.army_wood.saturating_add(self.wood_reserve)
     }
 }
 
-/// Houses of one kind standing in the town.
-fn count(sim: &Sim, kind: HouseKind) -> u32 {
-    let n = sim.houses().iter().filter(|h| h.kind == kind).count();
+/// Houses of one kind and side standing in the town.
+fn count(sim: &Sim, side: u8, kind: HouseKind) -> u32 {
+    let n = sim
+        .houses_of(side)
+        .filter(|house| house.kind == kind)
+        .count();
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
@@ -286,7 +301,7 @@ mod tests {
     fn play(sim: &mut Sim, mayor: &Mayor, ticks: u32) {
         while sim.ticks() < ticks {
             for cmd in mayor.decide(sim) {
-                sim.apply(cmd)
+                sim.apply_for(mayor.side(), cmd)
                     .expect("the mayor only issues commands the sim takes");
             }
             for _ in 0..ROUND {
@@ -331,6 +346,16 @@ mod tests {
             a.houses().len()
         );
         assert!(a.stock(Ware::Bread) > 0, "bread {}", a.stock(Ware::Bread));
+        assert_eq!(
+            a.houses_of(1).count(),
+            0,
+            "the side-0 seat builds only side 0"
+        );
+        assert_eq!(
+            a.stock_of(1, Ware::Wood),
+            40,
+            "the other purse is untouched"
+        );
     }
 
     #[test]
@@ -343,7 +368,7 @@ mod tests {
             let plan = mayor.decide(&sim);
             assert_eq!(plan, mayor.decide(&sim), "a pure decision");
             for cmd in plan {
-                let applied = sim.apply(cmd);
+                let applied = sim.apply_for(mayor.side(), cmd);
                 assert!(applied.is_ok(), "{cmd:?} refused: {:?}", applied.err());
                 assert!(
                     sim.stock(Ware::Wood) >= 20,
@@ -382,5 +407,30 @@ mod tests {
             sim.units().iter().all(|u| u.side == 1),
             "the side-1 seat fields nothing for side 0"
         );
+        assert!(sim.houses_of(1).count() > 0, "side 1 builds its own houses");
+        assert_eq!(
+            sim.houses_of(0).count(),
+            0,
+            "side 1 builds nothing for side 0"
+        );
+    }
+
+    #[test]
+    fn the_mayor_grows_past_five_houses_on_its_own_stock() {
+        let mayor = Mayor::new((20, 12)).with_side(1);
+        let mut sim = town();
+        play(&mut sim, &mayor, 3000);
+        assert!(
+            sim.houses_of(1).count() > 5,
+            "side 1 placed {} houses",
+            sim.houses_of(1).count()
+        );
+        assert!(
+            sim.stock_of(1, Ware::Bread) > 0,
+            "side 1 bakes its own bread"
+        );
+        assert_eq!(sim.houses_of(0).count(), 0, "side 0 built nothing");
+        assert_eq!(sim.stock_of(0, Ware::Wood), 40, "side 0 purse untouched");
+        assert_eq!(sim.stock_of(0, Ware::Bread), 0, "side 0 ate nothing");
     }
 }

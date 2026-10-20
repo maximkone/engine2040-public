@@ -261,7 +261,7 @@ pub struct RulesExplainArgs {
     pub tick: u32,
     /// Match seed (default 0), as in play.run.
     pub seed: Option<u64>,
-    /// Players, `2..=16` (default 2).
+    /// Players, `2..=MAX_PARTICIPANTS` (default 2).
     pub fighters: Option<u8>,
     /// Arena half extent in meters, `5.0..=100.0` (default 12).
     pub half_extent_m: Option<f32>,

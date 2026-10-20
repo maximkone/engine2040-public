@@ -160,6 +160,8 @@ impl HouseKind {
 pub struct House {
     /// Stable id, handed out in placement order.
     pub id: u32,
+    /// Team that owns it: its stock paid and its warehouse receives.
+    pub side: u8,
     /// What it does.
     pub kind: HouseKind,
     /// Top-left tile.

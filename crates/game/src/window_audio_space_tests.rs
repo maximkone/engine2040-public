@@ -24,6 +24,16 @@ fn bank() -> Arc<CueBank> {
     )
 }
 
+#[test]
+fn slot_cap_tracks_the_canonical_participant_cap() {
+    // The stride array is sized to one slot per fighter; drift is a bug.
+    assert_eq!(
+        MAX_SLOTS,
+        usize::from(engine_input::MAX_PARTICIPANTS),
+        "footstep slots must match MAX_PARTICIPANTS"
+    );
+}
+
 fn view(slot: u8, x: f32, z: f32) -> FighterView {
     FighterView {
         slot,

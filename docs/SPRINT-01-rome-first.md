@@ -289,13 +289,15 @@
   engine-assets --lib bc7` (1024x1024 base color PSNR at least 38 dB, bytes equal x2 with 1 and 8 threads of the
   existing cook pool; 4x smaller than RGBA8 with mips); P2P existing assets' bundle digest unchanged, golden
   unchanged. needs: NS31g1. Landed 93a57a82. Real BC7 mode 6 encode_bc7_block and decode_bc7_block (the old one was BC3 with swapped halves); texture_cook routes BaseColor and MetallicRoughness to BC7. bc::tests::bc7_* (5): spec bit layout pinned, only mode 6 read, solid and two-color blocks exact (one p-bit per endpoint, mixed parity within 1 code), bc7_albedo_1024_reaches_40_db_is_4x_smaller_and_threads_agree = 42.51 dB on a 1024 stone fixture (bar 38; the old stand-in scores 38.98), 1/4 of RGBA8 bytes, bytes equal x2 and at 1 and 8 scoped threads (no cook pool exists in engine-assets, every block encodes alone); run 39108657201, clippy 39107698018 and 39108371577.
-- [ ] NS31h2 playtest: the material gallery — new file `crates/playtest/src/material_gallery.rs` with `pub fn
+- [x] NS31h2 playtest: the material gallery — new file `crates/playtest/src/material_gallery.rs` with `pub fn
   gallery(records: &MaterialSet, lights: [LightPreset; 3]) -> Vec<Capture>` rendering a sphere and a slab per
   record under three lights (day, torch, overcast) through `pipeline_for` (NS31c2) and `material.compare` math
   from `engine_material::compare` for the pair report. Tier B. Size S. Owns that file. Accept: F2P `cargo test -p
   engine-playtest --lib material_gallery` (19 records x 3 lights = 57 captures in at most 120 s on the RTX 3050;
   the compare report of dry versus wet marble is identical x2, luminance ratio below 0.95, highlight peak ratio
-  at least 2; no adapter: SKIP); golden unchanged. needs: NS31c2.
+  at least 2; no adapter: SKIP); golden unchanged. needs: NS31c2. Landed 5a009518. 57 captures in 2.85 s on the
+  RTX 3050; marble to marble_wet dE 6.34, luminance x0.751, highlight 239.17, equal x2; 3 tests with the window
+  feature and 2 headless; clippy exit 0.
 - [x] VS1 game: arena kit from glTF in the window and headless twin — parse
   `content/arena/placement.json`, import each `content/arena/src/<asset>.gltf`
   through `engine_assets::mesh_import::import_gltf_path`, fit to the placement

@@ -1914,15 +1914,15 @@ mod tests {
     }
 
     #[test]
-    fn sixteen_slots_validate_and_sixteen_refuses() {
-        // Sixteen slots validate through the canonical cap.
-        assert_eq!(MAX_PARTICIPANTS, 16);
+    fn thirty_two_slots_validate_and_32_refuses() {
+        // Thirty-two slots validate through the canonical cap.
+        assert_eq!(MAX_PARTICIPANTS, 32);
         let mut hud = Hud::new(0, 100, 100, 0, 0);
         for slot in 0..MAX_PARTICIPANTS {
             hud.upsert_fighter(FighterHud::new(fighter_id(slot), 1_000, 1_000))
                 .expect("slot inside the cap tracks");
         }
-        assert_eq!(hud.fighter(fighter_id(15)).unwrap().hp_permille, 1_000);
+        assert_eq!(hud.fighter(fighter_id(31)).unwrap().hp_permille, 1_000);
         assert_eq!(
             hud.upsert_fighter(FighterHud {
                 id: FighterId(MAX_PARTICIPANTS),

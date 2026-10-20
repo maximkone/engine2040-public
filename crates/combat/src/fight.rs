@@ -78,11 +78,11 @@ pub const MAX_INPUTS_PER_TICK: usize = 32;
 /// Hard bound on events emitted for one tick: at most one `StaminaOut` per
 /// fighter plus, per attacker whose startup completes, one outcome per other
 /// live victim with a possible `Knockdown` beside it. That is
-/// `16 + 16 * 15 * 2 = 496` at the `MAX_PARTICIPANTS` cap. A buffer reserved
+/// `32 + 32 * 31 * 2 = 2016` at the `MAX_PARTICIPANTS` cap. A buffer reserved
 /// once to this capacity never reallocates on the tick path, so the
 /// `*_into` entries below prove zero steady-state allocation under a
 /// counting allocator. Units: events, exact.
-pub const MAX_EVENTS_PER_TICK: usize = 512;
+pub const MAX_EVENTS_PER_TICK: usize = 2_048;
 
 /// Chip damage dealt through a held block under the frozen V1 row above.
 /// New rows use [`Tables::chip`]; the step core never calls this.
@@ -3185,7 +3185,7 @@ mod tests {
             tape_hash(&all_owned, &owned_state)
         );
         // The bound holds with room: the whole 4-fighter bout peaks far
-        // below the 16-fighter worst case the const covers.
+        // below the 32-fighter worst case the const covers.
         let event_total: usize = all_into.iter().map(Vec::len).sum();
         assert!(
             event_total > 0,

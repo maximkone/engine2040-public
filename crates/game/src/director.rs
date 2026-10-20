@@ -268,8 +268,8 @@ fn select_peak(cues: &[FightCue], tick: u32, hp_permille: &[u16], bed_gain: f32)
     // Scratch bound for one entry per fighter slot: a literal (never a
     // numeric cast) pinned to the participant cap at compile time, so a
     // cap change fails loudly here instead of mis-sizing the fold.
-    const SLOTS: usize = 16;
-    const _: () = assert!(MAX_PARTICIPANTS == 16);
+    const SLOTS: usize = 32;
+    const _: () = assert!(MAX_PARTICIPANTS == 32);
     let mut slot_total = [0u32; SLOTS];
     let mut slot_kind: [Option<BeatKind>; SLOTS] = [None; SLOTS];
     for cue in cues {

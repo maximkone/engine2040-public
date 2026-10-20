@@ -1,6 +1,7 @@
 //! lod: physics LOD for armies. Far soldiers step as one capsule, near ones
-//! step capsule plus bones, CCD fires only for fast weapons and projectiles,
-//! and resting capsule islands sleep through the shared island sleeper.
+//! step capsule plus bones, the one CCD policy decides who rides the
+//! continuous-collision solver, and resting capsule islands sleep through the
+//! shared island sleeper.
 //!
 //! Integer millimetre thresholds keep tier assignment exact; iteration stays
 //! in slot order, so the same distances plus the same bodies give the same
@@ -49,13 +50,27 @@ pub enum Ccd {
     Off,
 }
 
-/// What a mover is. Only fast weapons and projectiles earn CCD.
+/// How a body moves. The CCD policy reads it: a dynamic body integrates under
+/// forces and can tunnel through a thin shield, a kinematic body is driven by
+/// the caller and never moves on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Motion {
+    /// Integrated under gravity, contacts and impulses.
+    Dynamic,
+    /// Driven by the caller: the pose is set, never integrated.
+    Kinematic,
+}
+
+/// What a mover is. A weapon, a projectile or a bone may tunnel; a soldier or
+/// a duelist capsule is fat and never does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentKind {
     Soldier,
     Duelist,
     Weapon,
     Projectile,
+    /// A bone of a ragdoll: thin, and it takes the hit.
+    Bone,
 }
 
 /// LOD policy. Distances are millimetres (integer, exact); speeds m/s.
@@ -142,14 +157,32 @@ pub fn classify(current: Tier, dist_mm: u32, cfg: &LodConfig) -> Tier {
     }
 }
 
-/// CCD policy: fast weapons and projectiles only. Fast bodies of any other
-/// kind stay [`Ccd::Off`]; slow weapons never tunnel far enough to matter.
-pub fn ccd_for(kind: AgentKind, speed_mps: f32, cfg: &LodConfig) -> Ccd {
-    let armed = matches!(kind, AgentKind::Weapon | AgentKind::Projectile);
-    if armed && speed_mps.is_finite() && speed_mps >= cfg.ccd_speed_mps {
-        Ccd::On
-    } else {
-        Ccd::Off
+/// The one CCD policy: the single place that says whether a body rides the
+/// continuous-collision solver.
+///
+/// A kinematic body is driven by the caller, so it never tunnels and never
+/// pays for the solver. A dynamic body tunnels when it is thin and fast: a
+/// weapon or a projectile past [`LodConfig::ccd_speed_mps`], and a bone of a
+/// ragdoll, which is thin from the start and takes every hit. A soldier or a
+/// duelist capsule is fat, so it never earns CCD however fast it goes.
+///
+/// Consumer: `rapier::RagdollParams::ccd_flags` reads it at spawn for the
+/// ragdoll and the powered ragdoll, so one function answers for every body.
+/// Determinism: comparisons only.
+pub fn ccd_for(kind: AgentKind, motion: Motion, speed_mps: f32, cfg: &LodConfig) -> Ccd {
+    if motion == Motion::Kinematic {
+        return Ccd::Off;
+    }
+    match kind {
+        AgentKind::Bone => Ccd::On,
+        AgentKind::Weapon | AgentKind::Projectile => {
+            if speed_mps.is_finite() && speed_mps >= cfg.ccd_speed_mps {
+                Ccd::On
+            } else {
+                Ccd::Off
+            }
+        }
+        AgentKind::Soldier | AgentKind::Duelist => Ccd::Off,
     }
 }
 
@@ -455,12 +488,27 @@ mod tests {
         let cfg = LodConfig::default();
         let fast = cfg.ccd_speed_mps + 5.0;
         let slow = (cfg.ccd_speed_mps - 1.0).max(0.0);
-        assert_eq!(ccd_for(AgentKind::Weapon, fast, &cfg), Ccd::On);
-        assert_eq!(ccd_for(AgentKind::Projectile, fast, &cfg), Ccd::On);
-        assert_eq!(ccd_for(AgentKind::Weapon, slow, &cfg), Ccd::Off);
-        assert_eq!(ccd_for(AgentKind::Soldier, fast, &cfg), Ccd::Off);
-        assert_eq!(ccd_for(AgentKind::Duelist, fast, &cfg), Ccd::Off);
-        assert_eq!(ccd_for(AgentKind::Projectile, f32::NAN, &cfg), Ccd::Off);
+        let dyn_motion = Motion::Dynamic;
+        assert_eq!(ccd_for(AgentKind::Weapon, dyn_motion, fast, &cfg), Ccd::On);
+        assert_eq!(
+            ccd_for(AgentKind::Projectile, dyn_motion, fast, &cfg),
+            Ccd::On
+        );
+        assert_eq!(ccd_for(AgentKind::Weapon, dyn_motion, slow, &cfg), Ccd::Off);
+        assert_eq!(
+            ccd_for(AgentKind::Soldier, dyn_motion, fast, &cfg),
+            Ccd::Off
+        );
+        assert_eq!(
+            ccd_for(AgentKind::Duelist, dyn_motion, fast, &cfg),
+            Ccd::Off
+        );
+        assert_eq!(
+            ccd_for(AgentKind::Projectile, dyn_motion, f32::NAN, &cfg),
+            Ccd::Off
+        );
+        // A bone is thin from the start, so it rides the solver even at rest.
+        assert_eq!(ccd_for(AgentKind::Bone, dyn_motion, 0.0, &cfg), Ccd::On);
     }
 
     #[test]

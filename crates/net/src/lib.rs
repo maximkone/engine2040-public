@@ -93,12 +93,19 @@ pub mod relay_ice;
 /// Replays with keyframes plus theater playback and divergence reports:
 /// record any input tape, frame-step it, attribute seeded bugs.
 pub mod replay;
+/// Server-authoritative component replication: the authoritative world, the
+/// masked deltas against an acked baseline, and the version-refusing wire
+/// codec the LAN snapshot path carries.
+pub mod replicate;
 pub mod rollback;
-/// 8-16 fighter hardening: bandwidth caps, priority deltas, soak
+/// 8-32 fighter hardening: bandwidth caps, priority deltas, soak
 /// proof. Std-only; loopback only.
 pub mod scale;
 pub mod session;
 pub mod snapshot;
+/// Rejoin resim over `Spine::snapshot` bytes: bounded checkpoints, the wire
+/// frame codec and the save payload codec (ARC5).
+pub mod spine;
 /// One played bout split across two machines over real UDP: the split wire,
 /// the session drivers on both machines, the relay rendezvous.
 pub mod split;

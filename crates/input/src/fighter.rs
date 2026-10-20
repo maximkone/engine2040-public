@@ -9,26 +9,24 @@
 //! `Copy` and hash through [`FighterInput::append_bytes`] (little-endian).
 
 /// Canonical match slots in one headless match: `2..=MAX_PARTICIPANTS`
-/// (2–16; siege scales via split-match-32, never by widening this).
-/// Single source: arena, combat, net, ui and game read this const and
-/// declare no private cap. Server connection capacity (`engine-net`
+/// (2–32). Single source: arena, combat, net, ui and game read this const
+/// and declare no private cap. Server connection capacity (`engine-net`
 /// `server::MAX_PLAYERS = 64`) is a separate transport bound, not match
 /// slots; the provider observation window
 /// (`MAX_FIGHTERS_PER_OBSERVATION = 8`) is a separate view bound.
 ///
-/// Decision: the cap stays 16. The per-fighter record stays 10 bytes,
-/// little-endian and cap-independent, and the golden fixture never runs
-/// arena, so the golden stays byte-identical. Net consequences (frozen
-/// chart, 1200-byte datagram): 2 fighters map to 47 bytes at 20 Hz, 8 to
-/// 161 bytes at 20 Hz, 16 to 313 bytes at 15 Hz, each under its kbps cap.
-/// A 32-slot snapshot would need 617 bytes at 15 Hz: inside 1200 bytes on
-/// paper, but it breaks the frozen chart, the 800-byte per-snapshot
-/// budget and every fixed `[T; MAX_PARTICIPANTS]` array, so it rides a
-/// later row, never this const. Split-match-32 harness: two 16-slot
-/// tapes (`FighterTape`), halves `0..16` each with their own tick hash;
-/// theater joins the halves, net sends two 16-slot snapshots, never one
-/// 32-slot snapshot.
-pub const MAX_PARTICIPANTS: u8 = 16;
+/// Decision (owner 2026-10-20, GE12): the cap is 32. Every gate follows
+/// this one value, so no consumer keeps a 16-only branch. The per-fighter
+/// record stays 10 bytes, little-endian and cap-independent, and the
+/// golden fixture never runs arena, so the golden stays byte-identical.
+/// Net consequences (chart, 1200-byte datagram, 800-byte per-snapshot
+/// budget at 15 Hz): 2 fighters map to 47 bytes at 20 Hz, 8 to 161 bytes
+/// at 20 Hz, 16 to 313 bytes at 15 Hz, 32 to 617 bytes at 15 Hz
+/// (74.04 kbps under the 96 kbps cap), each under its kbps cap. A 32-slot
+/// snapshot fits the 800-byte per-snapshot budget and the 1200-byte
+/// datagram. Siege still composes shards; the split-match-32 harness is
+/// superseded by this cap.
+pub const MAX_PARTICIPANTS: u8 = 32;
 /// Wish axis range: `-100..=100` (percent of top speed).
 pub const WISH_RANGE: i8 = 100;
 /// Facing range in centidegrees: `-18000..=18000`.
@@ -238,31 +236,31 @@ mod tests {
 
     #[test]
     fn bad_fighter_rejected() {
-        assert_eq!(FighterId::new(15).map(|id| id.get()), Some(15));
-        assert_eq!(FighterId::new(16), None);
+        assert_eq!(FighterId::new(31).map(|id| id.get()), Some(31));
+        assert_eq!(FighterId::new(32), None);
         assert_eq!(FighterId::new(u8::MAX), None);
         let mut input = valid();
-        input.fighter = FighterId(16);
-        assert_eq!(input.validate(), Err(FighterError::UnknownFighter(16)));
+        input.fighter = FighterId(32);
+        assert_eq!(input.validate(), Err(FighterError::UnknownFighter(32)));
         let mut wide = valid();
-        wide.fighter = FighterId(15);
-        wide.validate().expect("slot 15 is inside the 16-slot cap");
+        wide.fighter = FighterId(31);
+        wide.validate().expect("slot 31 is inside the 32-slot cap");
     }
 
     #[test]
     fn canonical_cap_single_sourced() {
         // One match-slot cap, no legacy alias.
-        assert_eq!(MAX_PARTICIPANTS, 16);
+        assert_eq!(MAX_PARTICIPANTS, 32);
     }
 
     #[test]
-    fn sixteen_slot_boundary_validates() {
-        for slot in [0u8, 1, 4, 15] {
+    fn thirty_two_slot_boundary_validates() {
+        for slot in [0u8, 1, 15, 31] {
             let mut input = valid();
             input.fighter = FighterId(slot);
             assert!(input.validate().is_ok(), "slot {slot} must validate");
         }
-        for slot in [16u8, 17, u8::MAX] {
+        for slot in [32u8, 33, u8::MAX] {
             let mut input = valid();
             input.fighter = FighterId(slot);
             assert_eq!(
@@ -377,14 +375,14 @@ mod tests {
     }
 
     #[test]
-    fn cap_stays_16_and_split_match_32_needs_two_tapes() {
-        assert_eq!(MAX_PARTICIPANTS, 16);
-        let half = |tick: u32| -> FighterTape {
+    fn full_thirty_two_slot_tape_validates_and_33_refuses() {
+        assert_eq!(MAX_PARTICIPANTS, 32);
+        let full = |tick: u32| -> FighterTape {
             FighterTape(
                 (0..MAX_PARTICIPANTS)
                     .map(|slot| FighterInput {
                         tick,
-                        fighter: FighterId::new(slot).expect("half slot inside cap"),
+                        fighter: FighterId::new(slot).expect("slot inside cap"),
                         mx: 0,
                         mz: 0,
                         facing: 0,
@@ -393,8 +391,8 @@ mod tests {
                     .collect(),
             )
         };
-        half(0).validate().expect("first half validates");
-        half(1).validate().expect("second half validates");
+        full(0).validate().expect("first tick validates");
+        full(1).validate().expect("second tick validates");
         let mut wide = FighterInput {
             tick: 0,
             fighter: FighterId(0),
@@ -403,13 +401,16 @@ mod tests {
             facing: 0,
             buttons: Buttons::NONE,
         };
-        wide.fighter = FighterId(16);
-        assert_eq!(wide.validate(), Err(FighterError::UnknownFighter(16)));
+        wide.fighter = FighterId(MAX_PARTICIPANTS);
+        assert_eq!(
+            wide.validate(),
+            Err(FighterError::UnknownFighter(MAX_PARTICIPANTS))
+        );
         let mut bytes = Vec::new();
-        for input in half(0).0 {
+        for input in full(0).0 {
             input.append_bytes(&mut bytes);
         }
-        assert_eq!(bytes.len(), 16 * 10);
+        assert_eq!(bytes.len(), usize::from(MAX_PARTICIPANTS) * 10);
     }
 
     #[test]

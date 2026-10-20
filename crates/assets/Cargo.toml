@@ -37,3 +37,8 @@ required-features = ["import"]
 [[bin]]
 name = "arena_bundle"
 required-features = ["import", "registry"]
+
+[dev-dependencies]
+# The zero-allocation allocator the decode proof installs (feature `test-util`).
+engine-core = { workspace = true, features = ["test-util"] }
+

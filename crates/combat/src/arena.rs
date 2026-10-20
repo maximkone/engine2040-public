@@ -4,7 +4,7 @@
 //! Units: ticks at 60 Hz, sweep lengths in mm, poise/damage in permille.
 //! Determinism: integer math, fighter-ID order; same tables+inputs => same bytes.
 //! Errors: MatchError for bad versions/counts; the step never panics, never allocs.
-//! Budget: O(fighters^2 + sweeps*fighters) over <=16 slots and <=8 sweeps,
+//! Budget: O(fighters^2 + sweeps*fighters) over <=32 slots and <=8 sweeps,
 //!   no heap per tick (every event buffer is caller-owned).
 
 use crate::exchange::{

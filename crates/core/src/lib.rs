@@ -13,6 +13,9 @@ pub mod config;
 pub mod counter_rng;
 /// Bitwise IEEE CRC-32 shared by the PNG writers.
 pub mod crc32;
+/// The Fx-shape hasher for entity-id table keys: fixed seed, explicit
+/// little-endian bytes, no per-process randomness.
+pub mod det_hash;
 pub mod det_math;
 pub mod digest;
 pub mod diverge;
@@ -20,12 +23,18 @@ pub mod fixed;
 pub mod hash;
 /// JSON string escaping for the hand-rolled writers.
 pub mod json;
+/// The off-tick job pump: one slice per frame, with the tick of every
+/// arrival recorded.
+pub mod pump;
 pub mod quat;
 pub mod rng;
 /// The wyrand-shape counter stream (wyhash family): a keyed `sample(counter)`
 /// word function for new bake work beside the frozen legacy stream.
 pub mod rng_wyhash;
 pub mod seal_key;
+/// The deterministic simulation testing harness: a seeded run, the same seed
+/// run twice with the checkpoints compared, and seeded failure injection.
+pub mod sim_verify;
 pub mod tick;
 pub mod time;
 pub mod vec3;
@@ -33,6 +42,8 @@ pub mod vec3;
 pub use counter_rng::{CounterCursor, CounterRng};
 // One hash owner: every crate imports these instead of re-deriving FNV or SplitMix.
 pub use hash::{hash_bytes, hash_hex, hash_u64s, mix64, splitmix64, Fnv64};
+// Id-key tables get the fixed-seed Fx shape, never std's per-process seed.
+pub use det_hash::{hash_entity_id, hash_id, DetHashBuilder, DetHasher};
 // One quaternion product: every crate composes rotations to the same bits.
 pub use quat::{quat_mul, quat_mul_fixed};
 pub use rng::Rng;

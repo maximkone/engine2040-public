@@ -19,7 +19,7 @@ action or line, so replays reproduce without a provider.
   unlisted genre names; a seeded new assumption fails the gate; proof
    generality gates green. needs: GE2. (PLN18 runtime.md, reviewed
    2026-09-26.) Landed b69c228. node --test tools/sim-source-scan.test.mjs tools/workspace-check.test.mjs 43 pass (genreHits UPPER_SNAKE caps, genreFindings seeded new file and cap refused, stale entry reported); workspace-check: PASS genre ledger 85 files, none unlisted, none stale.
-- [ ] GE12 input: canonical participant-cap decision — rule whether
+- [x] GE12 input: canonical participant-cap decision — rule whether Landed 15049ef3. Owner decision 2026-10-20: 32. soak_32_bot_x600_converges_with_matching_hashes x2, thirty_two_slot_gates_follow_the_canonical_cap (snapshot_hz(32)=15, cap_bytes_per_sec(32)=12000, 617 B under the 800-byte snapshot budget), select_priority_orders_thirty_two_slots; cargo test -p engine-net --lib scale 19 passed run 39485189547, engine-input --lib 52 passed run 39482930043; golden d57b5c8ae3096614 unchanged x2 runs 39485643367/39486071864; GE2 genre ledger PASS (85 files).
   `MAX_PARTICIPANTS` stays 16 or moves to 32 across
   `crates/input/src/fighter.rs`, arena slots, net scale/select/soak
   and the `workspace-check` edge, with the HASH-LAW/golden review
@@ -514,7 +514,7 @@ action or line, so replays reproduce without a provider.
   reproducing x2; 4 fault cells x2 runs, zero undiagnosed;
   golden unchanged. Consumer: the dedicated-server operator.
   needs: MP1, MP2, MP3, ON2. (planner-rows-r8.)
-- [ ] FB4 proof: AI-pillars-in-sample receipt — the distilled
+- [x] FB4 proof: AI-pillars-in-sample receipt — the distilled
   integer `.e2nn` gladiator policy replays bit-exactly, every
   AI-made object carries a provenance chain, the museum loads,
   migrates and replays alpha tapes + scenes. Tier B. Size M.
@@ -523,7 +523,11 @@ action or line, so replays reproduce without a provider.
   -p engine-proof --lib fb_pillars` green with the report
   reproducing x2; digest identical x2, chain complete, museum
   green; golden unchanged. Consumer: the shipped sample.
-  needs: LW6, CT6. (planner-rows-r8.)
+  needs: LW6, CT6. (planner-rows-r8.) Landed e4b4736.
+  fb_pillars 6 passed (gh run 39485085722); 7 passed with
+  --features scene-museum on the PC. Report x2 identical, net
+  6aceb82b2a856f5c, policy df218622c7255b5b, tape 1a69b20f0be6d0eb,
+  chain complete, golden d57b5c8ae3096614 unchanged.
 - [ ] FB5 proof: cycle + hour soak receipt — repeat
   load/unload/play cycles with resource accounting plus the PQ3
   hour read into one report: memory within 5%, no desync, no

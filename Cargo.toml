@@ -215,6 +215,9 @@ mimalloc = "0.1.52"
 # root [dependencies]/default-members, so the headless resolve stays std-only.
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+# AM14: SoA sampling in crates/anim (SIMD lerps over four joints).
+# wide is Zlib OR Apache-2.0 OR MIT; deny.toml allows all three.
+wide = "1.7"
 engine-workspace-hack = { version = "0.1.0", path = "crates/workspace-hack" }
 
 [dependencies]

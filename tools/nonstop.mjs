@@ -37,6 +37,7 @@ Usage:
   --match RE     only rows whose id matches the regex (example: '^(NV|WEB)')
   --ids A,B      only these ids, in this order
   --model P/M    opencode model (default ${DEFAULT_MODEL})
+  --remote-only  tell the session to send every cargo command to gh-check
   --minutes M    kill one row's session after M minutes (default ${DEFAULT_MINUTES})
   --retry        try rows again that the ledger already holds
   --dry          print the next prompt and exit; runs nothing, writes nothing
@@ -94,7 +95,7 @@ export function classifyRun({ ticked = false, changed = false, timedOut = false,
 }
 
 /** The one prompt a session gets: the row and the fixed rules, nothing else to decide. */
-export function buildPrompt(id, slice, today) {
+export function buildPrompt(id, slice, today, remoteOnly = false) {
   return [
     `You are finishing ONE board row of engine2040, then you stop. Row: ${id}. Today is ${today}.`,
     "Read first: AGENTS.md (\"Work from plans\"), docs/plan/2026-10-18-handoff.md (section \"Hard rules\"),",
@@ -105,7 +106,9 @@ export function buildPrompt(id, slice, today) {
     "",
     "Do this, in order:",
     "1. Do the row's work. The smallest change that meets its Accept line. Reuse existing code. Do not invent files the row does not name.",
-    "2. Prove it with the test the row names. Heavy cargo runs only through `node tools/gh-check.mjs cargo ...`. Frozen hashes must not move.",
+    remoteOnly
+      ? "2. Prove it with the test the row names. Do NOT run any cargo command on this PC: every `cargo check`, `cargo test` and `cargo clippy` goes through `node tools/gh-check.mjs cargo ...` (up to 20 run at once)."
+      : "2. Prove it with the test the row names. Heavy cargo runs only through `node tools/gh-check.mjs cargo ...`. Frozen hashes must not move.",
     "3. `rustfmt --edition 2021` on your own files only (never `cargo fmt`), then `node tools/rust-quality.mjs --owned`, then `node tools/workspace-check.mjs`. No FAIL from your files.",
     "4. Commit only your own paths: `git commit -F <msgfile> -- <paths>` (run `git add -N <file>` for new files first; `mod x;` and x.rs go in one commit).",
     "   Never `git add -A`, rebase, amend or force-push. Then `git pull --no-rebase --no-edit origin master` and `git push origin master`.",
@@ -121,12 +124,13 @@ export function buildPrompt(id, slice, today) {
 }
 
 function parseArgs(argv) {
-  const o = { max: Infinity, minutes: DEFAULT_MINUTES, model: DEFAULT_MODEL, match: "", ids: [], retry: false, dry: false, help: false };
+  const o = { max: Infinity, minutes: DEFAULT_MINUTES, model: DEFAULT_MODEL, match: "", ids: [], retry: false, dry: false, remoteOnly: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") o.help = true;
     else if (a === "--retry") o.retry = true;
     else if (a === "--dry") o.dry = true;
+    else if (a === "--remote-only") o.remoteOnly = true;
     else if (a === "--max") o.max = Number(argv[++i]);
     else if (a === "--minutes") o.minutes = Number(argv[++i]);
     else if (a === "--model") o.model = argv[++i];
@@ -190,7 +194,7 @@ function main() {
     const id = pickNext(readyIds(), new Set([...done, ...burned]), o);
     if (!id) { console.log("nonstop: no candidate row left"); break; }
     const before = rowSlice(id);
-    const prompt = buildPrompt(id, before, today());
+    const prompt = buildPrompt(id, before, today(), o.remoteOnly);
     if (o.dry) { process.stdout.write(`${prompt}\n`); return 0; }
     console.log(`nonstop: [${tried + 1}] ${id}`);
     const t0 = Date.now();

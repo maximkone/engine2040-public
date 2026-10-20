@@ -22,7 +22,6 @@ Exit: 0 wrote the .glb - 1 build failed - 2 bad flags.
 """
 
 import argparse
-import json
 import math
 import os
 import sys
@@ -223,7 +222,7 @@ def warehouse(kit, state):
         ring(
             kit, w, h, 0, 0, WALL_Z,
             {
-                "south": ["wall-wood-window-small", "wall-wood", "wall-wood-window-small"],
+                "south": ["wall-wood-window-small", "wall-wood-window-small", "wall-wood-window-small"],
                 "east": ["wall-wood", "wall-wood-window-small", "wall-wood"],
                 "north": ["wall-wood", "wall-wood-window-small", "wall-wood"],
                 "west": ["wall-wood-window-small", "wall-wood", "wall-wood"],
@@ -401,10 +400,10 @@ def woodcutter(kit, state):
         # Logs at the open front, where the light reaches them: a stack of three cut
         # posts plus two loose logs, and a chopping block.
         for i, z in enumerate((0.09, 0.27, 0.45)):
-            kit.place("pillar-wood", 0.68, 0.55, z, 0.0, ry=90.0, scale=(1.0, 1.0, 1.15))
-        kit.place("pillar-wood", 0.42, 0.42, 0.09, 18.0, ry=90.0, scale=(1.0, 1.0, 0.95))
-        kit.place("pillar-wood", 0.35, 0.72, 0.09, 8.0, ry=90.0, scale=(1.0, 1.0, 0.85))
-        kit.place("pillar-wood", 1.45, 1.35, 0.11, 0.0, scale=(0.4, 0.4, 0.3))
+            kit.place("pillar-wood", 0.68, 0.25, z, 0.0, ry=90.0, scale=(1.0, 1.0, 1.15))
+        kit.place("pillar-wood", 0.42, 0.06, 0.09, 18.0, ry=90.0, scale=(1.0, 1.0, 0.95))
+        kit.place("pillar-wood", 0.35, 0.36, 0.09, 8.0, ry=90.0, scale=(1.0, 1.0, 0.85))
+        kit.place("pillar-wood", 1.55, 0.55, 0.11, 0.0, scale=(0.4, 0.4, 0.3))
     else:
         ring(
             kit, w, h, 0, 0, 0.0,
@@ -458,11 +457,7 @@ def main():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     kit = Kit(os.path.abspath(args.kit))
     BUILDERS[args.kind](kit, args.state)
-    if kit.roofs and os.environ.get("KAM2_DEBUG_ROOF"):
-        palette = ["#E04040", "#40C040", "#4060E0", "#E0D040", "#E060C0", "#40D0D0", "#E08020", "#8040E0", "#FFFFFF"]
-        for i, ob in enumerate(kit.roofs):
-            kit.paint([ob], palette[i % len(palette)] if i < len(palette) else "#808080", 0.7)
-    elif kit.roofs:
+    if kit.roofs:
         kit.paint(kit.roofs, ROOF_RED, 0.62)
     if kit.soil:
         kit.paint(kit.soil, DIRT_DARK, 0.9)

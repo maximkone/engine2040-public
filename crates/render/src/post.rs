@@ -1946,6 +1946,31 @@ mod tests {
         assert!((a.mult() - 2f32.powf(a.ev())).abs() < 1e-6);
     }
 
+    /// The GPU path hands over a prebuilt histogram: ticking it must land on
+    /// exactly the same stops as ticking the pixels it came from, bit for bit.
+    #[test]
+    fn a_prebuilt_histogram_ticks_bit_identically_to_the_pixels() {
+        let scene = ExposureScene::day_sweep_torch().expect("scene builds");
+        let mut pixels = AutoExposure::default();
+        let mut binned = AutoExposure::default();
+        for k in 0..6 {
+            let frame = &scene.sweep[k % scene.sweep.len()];
+            let hist = histogram_log_luma(frame, scene.width, scene.height).expect("histograms");
+            let ev_pixels = pixels
+                .tick(frame, scene.width, scene.height, 1.0 / 60.0)
+                .expect("ticks pixels");
+            let ev_hist = binned.tick_hist(&hist, 1.0 / 60.0).expect("ticks hist");
+            assert_eq!(
+                ev_pixels.to_bits(),
+                ev_hist.to_bits(),
+                "frame {k}: the histogram path is the same meter"
+            );
+        }
+        // A bad dt still fails loudly on the histogram path.
+        let hist = histogram_log_luma(&scene.sweep[0], scene.width, scene.height).expect("hist");
+        assert!(binned.tick_hist(&hist, f32::NAN).is_err(), "NaN dt fails");
+    }
+
     #[test]
     fn auto_exposure_beats_fixed_on_day_sweep() {
         // The accept metric: fixed stops clip the bright sweep end, the

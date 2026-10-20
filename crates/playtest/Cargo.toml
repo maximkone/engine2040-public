@@ -12,6 +12,9 @@ workspace = true
 # headless default stays std-only (render `v1` is glam/image PNG-only).
 [features]
 capture = ["dep:engine-render"]
+# NS31h2: the material gallery draws compiled records on a real device
+# through render's `pipeline_for`; the default build stays GPU-free.
+window = ["dep:engine-render", "engine-render/window", "dep:wgpu", "dep:pollster"]
 # Opt-in HTTPS for cloud LLMs: forwards to engine-provider `tls`
 # (rustls/ring plus platform roots). Default stays plain HTTP.
 tls = ["engine-provider/tls"]
@@ -29,12 +32,19 @@ engine-combat.workspace = true
 # graph, so the workspace check stays green. Per-file digests reuse the
 # engine-core FNV owner instead of local copies.
 engine-core.workspace = true
+# NS31h2: the gallery compiles shipped records and reads the pair report
+# (`engine_material::compare`). Std-only, outside the headless default graph.
+engine-material.workspace = true
 hmac = "0.12"
 sha2 = "0.10"
 # EV1 eval harness drives mock/local/remote providers (std + serde_json).
 engine-provider.workspace = true
 engine-spatial.workspace = true
 engine-render = { workspace = true, optional = true, features = ["v1"] }
+# NS31h2 window leg: the gallery holds a device and builds one pipeline per
+# record through render's `pipeline_for`. Off unless `window` is on.
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
 # Look judge PNG decode (MIT/Apache-2.0): the same `image` 0.25 the render and
 # assets crates already resolve, PNG codec only, so the lock gains no package.
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -139,8 +139,8 @@ impl Camera {
             return None;
         }
         let forward = normalize(sub(self.target, self.position))?;
-        let right = normalize(cross(forward, self.up))?;
-        let cam_up = cross(right, forward);
+        let right = normalize(engine_core::vec3::cross3(forward, self.up))?;
+        let cam_up = engine_core::vec3::cross3(right, forward);
         Some((right, cam_up, forward))
     }
 
@@ -461,14 +461,6 @@ fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
 }
 
 /// Unit vector, or None for zero/non-finite input.

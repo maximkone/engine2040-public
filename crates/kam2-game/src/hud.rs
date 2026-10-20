@@ -249,8 +249,8 @@ mod tests {
         let mut sim = start();
         assert_eq!(
             stock_line(&sim),
-            "WOOD 12 STONE 15 GRAIN 0 FLOUR 0 BREAD 0",
-            "three houses cost 16 wood and 5 stone, the army 12 wood"
+            "WOOD 18 STONE 15 GRAIN 0 FLOUR 0 BREAD 0",
+            "three houses cost side 0 16 wood and 5 stone; its two swordsmen 6 wood"
         );
         sim.apply(Command::SpawnUnit {
             kind: UnitKind::Swordsman,
@@ -261,7 +261,7 @@ mod tests {
         .expect("open ground");
         assert_eq!(
             stock_line(&sim),
-            "WOOD 9 STONE 15 GRAIN 0 FLOUR 0 BREAD 0",
+            "WOOD 15 STONE 15 GRAIN 0 FLOUR 0 BREAD 0",
             "one swordsman costs three wood"
         );
     }
@@ -308,8 +308,8 @@ mod tests {
         assert!(has_minimap, "the minimap frame is in the frame");
         assert_eq!(
             bars,
-            vec![(38, WARE_FILL[0]), (71, WARE_FILL[1])],
-            "12 of 60 wood fills 38 px, 15 of 40 stone fills 71 px, no grain yet"
+            vec![(57, WARE_FILL[0]), (71, WARE_FILL[1])],
+            "18 of 60 wood fills 57 px, 15 of 40 stone fills 71 px, no grain yet"
         );
         assert_eq!(pips, sim.houses().len() + sim.units().len(), "one pip each");
     }

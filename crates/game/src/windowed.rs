@@ -685,7 +685,7 @@ impl WinArgs {
     /// present). Unknown flags, a missing `--frames`/`--seed`/`--ticks`/
     /// `--fighters`/`--scene`/`--backend`/`--camera-path`/`--fixed-dt` value,
     /// unparsable numbers or backend/camera-path labels, a zero `--frames`
-    /// and a fighter count outside `2..=16` fail loudly.
+    /// and a fighter count outside `2..=MAX_PARTICIPANTS` fail loudly.
     /// `--deadline-ms` takes the same missing/zero/unparsable path, as does
     /// `--present-every` (needs `1..=MAX_TICKS`) and `--fixed-dt` (needs
     /// `1..=FIXED_DT_MAX_MS`).

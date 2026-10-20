@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(app.rounds_played(), 1);
         assert_eq!(app.match_winner(), None);
         app.reset_for_next_round();
-        assert_eq!(app.hp(), &[1000; 16]);
+        assert_eq!(app.hp(), &[1000; engine_input::MAX_PARTICIPANTS as usize]);
         assert_eq!(app.rounds_played(), 1);
     }
 }

@@ -26,8 +26,9 @@ const FIGHT_PAIR: [(u8, i32, i32); 2] = [(0, 7, 9), (1, 8, 9)];
 pub const FIGHT_TICKS: u32 = 60;
 
 /// The start village: one road, a warehouse, a farm, a woodcutter and four
-/// swordsmen. Costs 16 wood and 5 stone for the houses and 12 wood for the army,
-/// so the player still holds 12 wood and 15 stone to build with.
+/// swordsmen. The houses cost side 0 16 wood and 5 stone, and each side pays 6
+/// wood for its own two swordsmen, so side 0 still holds 18 wood and 15 stone to
+/// build with while side 1 starts with 34 wood and 20 stone.
 ///
 /// # Errors
 ///
@@ -41,12 +42,15 @@ pub fn match_start() -> Result<Sim, Refusal> {
         sim.apply(Command::PlaceHouse { kind, x, y })?;
     }
     for (side, x, y) in START_UNITS {
-        sim.apply(Command::SpawnUnit {
-            kind: UnitKind::Swordsman,
+        sim.apply_for(
             side,
-            x,
-            y,
-        })?;
+            Command::SpawnUnit {
+                kind: UnitKind::Swordsman,
+                side,
+                x,
+                y,
+            },
+        )?;
     }
     Ok(sim)
 }
@@ -60,24 +64,26 @@ pub fn match_start() -> Result<Sim, Refusal> {
 pub fn scripted_fight() -> Result<Sim, Refusal> {
     let mut sim = match_start()?;
     for (side, x, y) in FIGHT_PAIR {
-        sim.apply(Command::SpawnUnit {
-            kind: UnitKind::Swordsman,
+        sim.apply_for(
             side,
-            x,
-            y,
-        })?;
+            Command::SpawnUnit {
+                kind: UnitKind::Swordsman,
+                side,
+                x,
+                y,
+            },
+        )?;
     }
-    if let Some((attacker, target)) = nearest_enemy(&sim, 0) {
-        sim.apply(Command::Attack {
-            id: attacker,
-            target,
-        })?;
-    }
-    if let Some((attacker, target)) = nearest_enemy(&sim, 1) {
-        sim.apply(Command::Attack {
-            id: attacker,
-            target,
-        })?;
+    for side in [0u8, 1] {
+        if let Some((attacker, target)) = nearest_enemy(&sim, side) {
+            sim.apply_for(
+                side,
+                Command::Attack {
+                    id: attacker,
+                    target,
+                },
+            )?;
+        }
     }
     for _ in 0..FIGHT_TICKS {
         sim.tick();
@@ -134,7 +140,7 @@ mod tests {
         let sim = match_start().expect("start village");
         assert_eq!(sim.houses().len(), 3);
         assert_eq!(sim.units().len(), 4);
-        assert_eq!(sim.stock(Ware::Wood), 12);
+        assert_eq!(sim.stock(Ware::Wood), 18);
         assert_eq!(sim.stock(Ware::Stone), 15);
         for house in sim.houses() {
             assert!(
@@ -164,27 +170,36 @@ mod tests {
     fn the_nearest_enemy_is_the_face_to_face_pair() {
         let mut sim = match_start().expect("start village");
         for (side, x, y) in FIGHT_PAIR {
-            sim.apply(Command::SpawnUnit {
-                kind: UnitKind::Swordsman,
+            sim.apply_for(
                 side,
-                x,
-                y,
-            })
+                Command::SpawnUnit {
+                    kind: UnitKind::Swordsman,
+                    side,
+                    x,
+                    y,
+                },
+            )
             .expect("the fight pair finds open ground");
         }
         assert_eq!(nearest_enemy(&sim, 0), Some((4, 5)));
         assert_eq!(nearest_enemy(&sim, 1), Some((5, 4)));
         let (attacker, target) = nearest_enemy(&sim, 0).expect("both sides field units");
-        sim.apply(Command::Attack {
-            id: attacker,
-            target,
-        })
+        sim.apply_for(
+            0,
+            Command::Attack {
+                id: attacker,
+                target,
+            },
+        )
         .expect("attack order");
         let (attacker, target) = nearest_enemy(&sim, 1).expect("both sides field units");
-        sim.apply(Command::Attack {
-            id: attacker,
-            target,
-        })
+        sim.apply_for(
+            1,
+            Command::Attack {
+                id: attacker,
+                target,
+            },
+        )
         .expect("attack order");
         for _ in 0..FIGHT_TICKS {
             sim.tick();
@@ -203,8 +218,8 @@ mod tests {
         assert!(fight.unit(5).is_none(), "the side-1 swordsman fell");
         assert_eq!(
             fight.hash(),
-            0x91c3_22e3_2246_3749,
-            "pin the state digest of the scripted fight"
+            0xe065_56a1_4caf_0f7b,
+            "pin the state digest of the scripted fight; before the side split it was 0x91c3_22e3_2246_3749"
         );
         let twice = scripted_fight().expect("scripted fight again");
         assert_eq!(fight.hash(), twice.hash(), "same commands, same hash");

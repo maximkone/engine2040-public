@@ -1,4 +1,4 @@
-//! scale: 8-16 fighter hardening (bandwidth caps, priority deltas, soak).
+//! scale: 8-32 fighter hardening (bandwidth caps, priority deltas, soak).
 //! Owner: net lane. Units: bytes/s and bits/s for bandwidth, whole ticks
 //! for time. Determinism: integer math and stable slot order only, so same
 //! inputs give same bytes, same selection and same soak hash. Errors:
@@ -81,7 +81,7 @@ const fn measured_resim_window(lan_max: u32, wan_max: u32) -> u32 {
         wan_max
     }
 }
-/// Headless 16-bot soak length in ticks (the proof bar).
+/// Headless 32-bot soak length in ticks (the proof bar).
 pub const SOAK_TICKS: u32 = 600;
 /// Upper bound on soak length so a stray caller cannot hang a gate.
 pub const SOAK_TICKS_MAX: u32 = 3600;
@@ -99,7 +99,7 @@ pub const PRIORITY_IDLE: u8 = 3;
 /// Scale failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ScaleError {
-    /// Fighter count outside `2..=16`.
+    /// Fighter count outside `2..=MAX_PARTICIPANTS`.
     BadFighterCount {
         /// Count the caller offered.
         got: usize,
@@ -142,7 +142,7 @@ impl std::fmt::Display for ScaleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             Self::BadFighterCount { got } => {
-                write!(f, "fighter count {got} outside 2..=16")
+                write!(f, "fighter count {got} outside 2..={MAX_PARTICIPANTS}")
             }
             Self::EmptySnapshot => write!(f, "snapshot has no fighters"),
             Self::UnsortedSlots => write!(f, "slots must be sorted and unique"),
@@ -267,7 +267,7 @@ pub const fn snapshot_hz(fighters: u8) -> Result<u64, ScaleError> {
 }
 
 /// Per-client bandwidth cap in bytes/s: 2 fighters map to 16 kbps, up to 8 to
-/// 64 kbps, up to 16 to 96 kbps (kbps * 1000 / 8).
+/// 64 kbps, up to 32 to 96 kbps (kbps * 1000 / 8).
 pub const fn cap_bytes_per_sec(fighters: u8) -> Result<u64, ScaleError> {
     // Explicit bounds: `RangeInclusive::contains` is not const.
     if fighters < SCALE_MIN_FIGHTERS || fighters > MAX_PARTICIPANTS {
@@ -367,7 +367,7 @@ fn check_order(slots: &[FighterView]) -> Result<(), ScaleError> {
 /// `budget_bytes`. Prefix (not skip-fit) keeps classes absolute: an idle slot
 /// never ships while a pose delta is dropped. Taken slots are written sorted
 /// ascending into `out`; the return is how many were written. Budget: O(n)
-/// time over at most 16 slots, zero heap use (all working state is stack
+/// time over at most 32 slots, zero heap use (all working state is stack
 /// arrays plus the caller buffer), so this is safe to call on the snapshot
 /// path without steady-state allocation.
 pub fn select_priority(
@@ -537,7 +537,7 @@ const fn fold_bot(hash: u64, bot: &SoakBot) -> u64 {
 }
 
 /// Deterministic soak hash: `fighters` bots stepped `ticks` ticks from `seed`.
-/// Same seed plus same counts give the same hash on every run (the 16-bot
+/// Same seed plus same counts give the same hash on every run (the 32-bot
 /// x600 proof asserts two runs agree); different seeds diverge.
 pub fn soak_hash(seed: u64, fighters: u8, ticks: u32) -> Result<u64, ScaleError> {
     if !(SCALE_MIN_FIGHTERS..=MAX_PARTICIPANTS).contains(&fighters) {
@@ -636,16 +636,16 @@ pub struct ChartRow {
 }
 
 /// Posted per-client bandwidth chart: 2 fighters at 20 Hz under 16 kbps,
-/// 8 at 20 Hz under 64 kbps, 16 at 15 Hz under 96 kbps.
-pub fn bandwidth_chart() -> [ChartRow; 3] {
+/// 8 at 20 Hz under 64 kbps, 16 and 32 at 15 Hz under 96 kbps.
+pub fn bandwidth_chart() -> [ChartRow; 4] {
     let mut rows = [ChartRow {
         fighters: 0,
         hz: 0,
         snapshot_bytes: 0,
         bytes_per_sec: 0,
         kbps_target: 0,
-    }; 3];
-    let targets = [(2u8, 16u64), (8u8, 64u64), (16u8, 96u64)];
+    }; 4];
+    let targets = [(2u8, 16u64), (8u8, 64u64), (16u8, 96u64), (32u8, 96u64)];
     let mut at = 0usize;
     while at < targets.len() {
         let (fighters, target) = targets[at];
@@ -720,6 +720,11 @@ pub(crate) fn human_dwell(seed: u64, slot: u8, epoch: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::replicate::{
+        decode_snapshot_packet, encode_snapshot_packet, EntityId, ReplicationClient,
+        ReplicationServer, Transform, Vitals, MASK_VITALS, REPLICATE_VERSION_OFFSET,
+    };
+    use crate::session::NetError;
 
     fn view(slot: u8) -> FighterView {
         FighterView {
@@ -772,6 +777,16 @@ mod tests {
                 kbps_target: 96,
             }
         );
+        assert_eq!(
+            chart[3],
+            ChartRow {
+                fighters: 32,
+                hz: 15,
+                snapshot_bytes: 617,
+                bytes_per_sec: 9_255,
+                kbps_target: 96,
+            }
+        );
         for row in chart {
             within_cap(row.fighters, row.snapshot_bytes).expect("chart row must fit");
             assert!(
@@ -785,39 +800,82 @@ mod tests {
     }
 
     #[test]
-    fn full_16_snapshot_fits_a_datagram() {
+    fn full_snapshots_fit_both_budgets() {
         assert_eq!(full_wire_len(16), 313);
-        assert!(full_wire_len(16) <= MAX_DATAGRAM_BYTES);
+        assert_eq!(full_wire_len(32), 617);
+        assert!(full_wire_len(32) <= MAX_DATAGRAM_BYTES);
         assert_eq!(cap_bytes_per_snapshot(16).expect("cap"), 800);
+        assert_eq!(cap_bytes_per_snapshot(32).expect("cap"), 800);
         assert!(full_wire_len(16) <= cap_bytes_per_snapshot(16).expect("cap"));
+        assert!(full_wire_len(32) <= cap_bytes_per_snapshot(32).expect("cap"));
     }
 
     #[test]
-    fn combat_inputs_never_starve_under_snapshot_flood() {
-        // 16-fighter shape stays within 1200 bytes, never fragments.
-        let full = full_wire_len(16);
-        assert_eq!(full, 313);
-        assert!(full <= MAX_DATAGRAM_BYTES);
-        within_cap(16, full).expect("16 must fit");
-        assert!(full <= crate::session::IOQ3_FRAGMENT_SIZE);
-        // Flood: every non-viewer slot combat-changed; budget is the cap.
-        let base = lineup(16);
+    fn thirty_two_slot_gates_follow_the_canonical_cap() {
+        // One value, every gate: the chart rates and caps accept 32 slots.
+        assert_eq!(snapshot_hz(32), Ok(15));
+        assert_eq!(cap_bytes_per_sec(32), Ok(12_000));
+        assert_eq!(cap_bytes_per_snapshot(32), Ok(800));
+        within_cap(32, full_wire_len(32)).expect("32 slots fit the 1200-byte datagram");
+        assert_eq!(
+            within_cap(32, 801),
+            Err(ScaleError::OverBudget {
+                need: 801,
+                budget: 800,
+            })
+        );
+        assert_eq!(
+            snapshot_hz(33),
+            Err(ScaleError::BadFighterCount { got: 33 })
+        );
+        assert_eq!(
+            cap_bytes_per_sec(33),
+            Err(ScaleError::BadFighterCount { got: 33 })
+        );
+    }
+
+    #[test]
+    fn select_priority_orders_thirty_two_slots() {
+        // A 32-length output is legal and every combat delta ships.
+        let base = lineup(32);
         let mut now = base.clone();
         for view in now.iter_mut().skip(1) {
             view.hp = view.hp.saturating_sub(120);
         }
-        let mut first = [0u8; 16];
-        let mut second = [0u8; 16];
+        let mut first = [0u8; 32];
+        let mut second = [0u8; 32];
+        let a = select_priority(&now, &base, 0, 9, 8, MAX_DATAGRAM_BYTES, &mut first)
+            .expect("select 32");
+        let b = select_priority(&now, &base, 0, 9, 8, MAX_DATAGRAM_BYTES, &mut second)
+            .expect("select 32");
+        assert_eq!((a, &first[..a]), (b, &second[..b]), "twice equal");
+        assert_eq!(a, 32, "every slot ships");
+        assert_eq!(&first[..a], &(0..32u8).collect::<Vec<u8>>()[..]);
+    }
+
+    #[test]
+    fn combat_inputs_never_starve_under_snapshot_flood() {
+        // 32-fighter shape stays within 1200 bytes, never fragments.
+        let full = full_wire_len(32);
+        assert_eq!(full, 617);
+        assert!(full <= MAX_DATAGRAM_BYTES);
+        within_cap(32, full).expect("32 must fit");
+        assert!(full <= crate::session::IOQ3_FRAGMENT_SIZE);
+        // Flood: every non-viewer slot combat-changed; budget is the cap.
+        let base = lineup(32);
+        let mut now = base.clone();
+        for view in now.iter_mut().skip(1) {
+            view.hp = view.hp.saturating_sub(120);
+        }
+        let mut first = [0u8; 32];
+        let mut second = [0u8; 32];
         let a =
             select_priority(&now, &base, 0, 9, 8, MAX_DATAGRAM_BYTES, &mut first).expect("select");
         let b =
             select_priority(&now, &base, 0, 9, 8, MAX_DATAGRAM_BYTES, &mut second).expect("select");
         assert_eq!((a, &first[..a]), (b, &second[..b]), "twice equal");
-        assert_eq!(a, 16, "zero combat starvation");
-        assert_eq!(
-            &first[..a],
-            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-        );
+        assert_eq!(a, 32, "zero combat starvation");
+        assert_eq!(&first[..a], &(0..32u8).collect::<Vec<u8>>()[..]);
         // Table order: combat inputs outrank state outranks snapshot bulk.
         let (_, ip) = crate::netcode::kind_channel(crate::session::KIND_INPUT).expect("input");
         let (_, sp) = crate::netcode::kind_channel(crate::session::KIND_STATE).expect("state");
@@ -841,8 +899,8 @@ mod tests {
             Err(ScaleError::BadFighterCount { got: 1 })
         );
         assert_eq!(
-            within_cap(17, 47),
-            Err(ScaleError::BadFighterCount { got: 17 })
+            within_cap(33, 47),
+            Err(ScaleError::BadFighterCount { got: 33 })
         );
     }
 
@@ -972,15 +1030,15 @@ mod tests {
     }
 
     #[test]
-    fn soak_16_bot_x600_converges_with_matching_hashes() {
-        let a = run_soak(2040, 16, SOAK_TICKS).expect("soak");
-        let b = run_soak(2040, 16, SOAK_TICKS).expect("soak");
+    fn soak_32_bot_x600_converges_with_matching_hashes() {
+        let a = run_soak(2040, 32, SOAK_TICKS).expect("soak");
+        let b = run_soak(2040, 32, SOAK_TICKS).expect("soak");
         assert_eq!(a, b, "same seed must converge to the same report");
         assert_ne!(a.hash, 0, "soak must actually simulate");
-        assert_eq!((a.fighters, a.ticks), (16, SOAK_TICKS));
-        assert_eq!(a.snapshot_bytes, 313);
+        assert_eq!((a.fighters, a.ticks), (32, SOAK_TICKS));
+        assert_eq!(a.snapshot_bytes, 617);
         assert_eq!(a.snapshot_hz, 15);
-        assert_eq!(a.bytes_per_sec, 4_695);
+        assert_eq!(a.bytes_per_sec, 9_255);
         within_cap(a.fighters, a.snapshot_bytes).expect("soak must fit the cap");
         println!("{a}");
     }
@@ -993,8 +1051,8 @@ mod tests {
             assert_eq!(a, b, "fighters={fighters} must converge");
             assert_ne!(a, 0);
         }
-        let a = soak_hash(1, 16, 600).expect("soak");
-        let b = soak_hash(2, 16, 600).expect("soak");
+        let a = soak_hash(1, 32, 600).expect("soak");
+        let b = soak_hash(2, 32, 600).expect("soak");
         assert_ne!(a, b, "different seeds must diverge");
     }
 
@@ -1005,10 +1063,10 @@ mod tests {
             Err(ScaleError::BadFighterCount { got: 1 })
         );
         assert_eq!(
-            soak_hash(1, 17, 10),
-            Err(ScaleError::BadFighterCount { got: 17 })
+            soak_hash(1, 33, 10),
+            Err(ScaleError::BadFighterCount { got: 33 })
         );
-        assert!(soak_hash(1, 16, SOAK_TICKS_MAX + 1).is_err());
+        assert!(soak_hash(1, 32, SOAK_TICKS_MAX + 1).is_err());
     }
 
     #[test]
@@ -1100,5 +1158,131 @@ mod tests {
                 "window minus one would not cover the posted WAN max"
             );
         };
+    }
+
+    /// The replicated entity id of one fighter slot.
+    fn entity_of(view: &FighterView) -> EntityId {
+        EntityId(u32::from(view.slot))
+    }
+
+    /// The replicated transform of one fighter: the ground plane, x and z.
+    fn transform_of(view: &FighterView) -> Transform {
+        Transform {
+            x_mm: view.x_mm,
+            y_mm: view.z_mm,
+            yaw_ddeg: view.yaw_ddeg,
+        }
+    }
+
+    /// The replicated vitals of one fighter.
+    fn vitals_of(view: &FighterView) -> Vitals {
+        Vitals {
+            hp: view.hp,
+            stamina: view.stamina,
+        }
+    }
+
+    /// One 16-fighter flood run: the join message, the flood message and
+    /// the world hash. Same fixture twice gives the same bytes and hash.
+    fn replicate_flood_run() -> (Vec<u8>, Vec<u8>, u64) {
+        let base = lineup(16);
+        let mut now = base.clone();
+        for (index, fighter) in now.iter_mut().enumerate() {
+            // Everybody moves and everybody but the viewer fights.
+            fighter.x_mm += 500 + i32::try_from(index).unwrap_or(0);
+            fighter.z_mm -= 250;
+            if index != 0 {
+                fighter.hp = fighter.hp.saturating_sub(120);
+            }
+        }
+        let mut world = ReplicationServer::new();
+        for fighter in &base {
+            world
+                .spawn(
+                    entity_of(fighter),
+                    transform_of(fighter),
+                    vitals_of(fighter),
+                )
+                .expect("spawn");
+        }
+        world.advance();
+        // A late client joins with the whole world.
+        let join = world.message_for(1).expect("join message");
+        let join_bytes = encode_snapshot_packet(&join).expect("encode join");
+        assert!(world.on_ack(1, join.tick).expect("ack"));
+        // The flood lands on the authoritative world.
+        for fighter in &now {
+            world
+                .set_transform(entity_of(fighter), transform_of(fighter))
+                .expect("move");
+            world
+                .set_vitals(entity_of(fighter), vitals_of(fighter))
+                .expect("vitals");
+        }
+        world.advance();
+        let flood = world.message_for(1).expect("flood message");
+        let flood_bytes = encode_snapshot_packet(&flood).expect("encode flood");
+        (join_bytes, flood_bytes, world.world_hash())
+    }
+
+    #[test]
+    fn replicate_deltas_ride_the_lan_snapshot_path_at_16_fighters() {
+        let (join_bytes, flood_bytes, hash) = replicate_flood_run();
+        // Hash x2: the same flood gives the same bytes and the same hash.
+        let (join_again, flood_again, hash_again) = replicate_flood_run();
+        assert_eq!(
+            (join_bytes.clone(), flood_bytes.clone(), hash),
+            (join_again, flood_again, hash_again),
+            "the flood must replay exactly"
+        );
+        // The flood rides the LAN snapshot path inside the same budget.
+        assert!(
+            flood_bytes.len() <= MAX_DATAGRAM_BYTES,
+            "replicate flood {} must fit the {} byte LAN budget",
+            flood_bytes.len(),
+            MAX_DATAGRAM_BYTES
+        );
+        assert!(
+            join_bytes.len() <= MAX_DATAGRAM_BYTES,
+            "replicate join {} must fit the {} byte LAN budget",
+            join_bytes.len(),
+            MAX_DATAGRAM_BYTES
+        );
+        // The version-refusing path decodes the flood back.
+        let flood = decode_snapshot_packet(&flood_bytes).expect("decode flood");
+        assert!(!flood.resync, "the flood rides the delta path");
+        assert_eq!(flood.updates.len(), 16, "every fighter is named");
+        // Zero combat starvation: every wounded fighter carries its vitals.
+        for slot in 1..16u8 {
+            let update = flood
+                .updates
+                .iter()
+                .find(|update| update.entity == EntityId(u32::from(slot)))
+                .expect("wounded fighter named");
+            assert_ne!(
+                update.mask & MASK_VITALS,
+                0,
+                "combat state starved for slot {slot}"
+            );
+        }
+        // The mirror agrees with the authority after the flood.
+        let mut client = ReplicationClient::new();
+        let join = decode_snapshot_packet(&join_bytes).expect("decode join");
+        client.apply(&join).expect("apply join");
+        client.apply(&flood).expect("apply flood");
+        assert_eq!(
+            client.world_hash(),
+            hash,
+            "mirror agrees with the authority"
+        );
+        // A foreign replicate version refuses loudly and applies nothing.
+        let mut foreign = flood_bytes.clone();
+        foreign[REPLICATE_VERSION_OFFSET] = crate::replicate::REPLICATE_VERSION + 1;
+        assert_eq!(
+            decode_snapshot_packet(&foreign),
+            Err(NetError::VersionMismatch {
+                got: crate::replicate::REPLICATE_VERSION + 1
+            })
+        );
     }
 }

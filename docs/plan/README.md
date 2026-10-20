@@ -55,6 +55,7 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `silicon-city.md` — LATER — none — a future game: build a CPU like a city and a factory, ride one instruction in first person, compete on a performance/power/area skyline with humans and bots, and check the best designs in real open simulators (rows SIL1..SIL45, not on the board yet)
 - `silicon-world.md` — LATER — none — the look and world half of Silicon City: the chip as a walkable, drivable GTA-style city (RAM harbor, ghost town, subway), zoom with no load screen, time dial, radio stations as workloads, missions, every visual tied to a sim counter (rows SIL46..SIL59, not on the board yet)
 - `ryl1.md` — LATER — none — the RYL1 soul as a faction-war game: two asymmetric races, aimed combat, three capture points, 6v6 with AI seats (rows RY1-RY10, not on the board yet; owner door 2026-10-20)
+- `road-war.md` — LATER — none — the Auto Assault soul as a vehicle territory war: one chassis, mounted guns, capture nodes on a highway (rows RW1-RW8, not on the board yet; owner 2026-10-20; shares RY3 and RY4)
 - `os-game.md` — LATER — none — the headless "You're the OS" game (`crates/ossim`: 4 CPUs, RAM and swap, one I/O queue, starvation, 12 stages), the window and web shells still to build, and the GPL idea-only note (rows OS1..OS5, not on the board yet)
 - `parked.md` — LATER — none — parked areas (world, audio, editor, shipping UI) stay small; each names the Core proof that un-parks it
 - `forge-adoption.md` — NEXT — AI door, Bodies, Look — what the engine takes from Forge and the old Flax plugin: 34 board rows (AD1..AD29, PX40, AX23, EA6, PF24, SP66), 30 next items, 26 engine defects, 14 owner decisions, a 90-line ranked second-pass catalog
@@ -72,6 +73,10 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `lf10-pose-hold-rethink.md` — NOW — Bodies — stuck-gate rethink for LF10 pose-hold hitstop: slice A land plus slice B defer
 - `fps-view.md` — NEXT — Look — a first-person eye on a fighter body: eye pose, look channel beside the tape, camera feed, no-clip rule (rows FV1-FV6)
 - `2026-10-20-parallel-campaign.md` — NOW — all four — how three agent lanes land the 309 startable rows (not the 695 open): lane split, waves, proof fleet, stop rules, and the owner decisions it waits on
+- `2026-10-20-owner-queue.md` — NOW — all four — the decisions only the owner can make: board shape, obsolete rows, wording and API calls that block lanes
+- `2026-10-20-progress.md` — NOW — all four — the 2026-10-20 pass record: tree green, rows ticked, live page re-verified, board reality
+- `EDITOR-INDIE-2026-10-19.md` — NOW — Look — the owner's editor-for-indies brief: audits, landed UI fixes, and the next editor slices
+- `kam2-hosting.md` — NOW — Look — KAM9: serve the browser build on this PC through a free Cloudflare tunnel, no setup on the work PC
 
 ## How a plan is written
 

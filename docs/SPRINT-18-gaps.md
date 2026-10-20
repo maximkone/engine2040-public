@@ -1068,7 +1068,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   --lib` green; golden unchanged. Amends PX9 (same file, joint_limits.rs): the
   builder who takes PX9 reads this row first. PX1 and PX10 are done. Plan:
   `docs/plan/forge-adoption.md` AD-16. needs: AD17.
-- [ ] AD17 physics: ragdoll params builder — one builder shared by
+- [x] AD17 physics: ragdoll params builder — one builder shared by
   `ragdoll.rs`, `powered.rs`, `rapier.rs` sets solver passes (chosen by test,
   Rapier 0.36 default is 4) and bone density from a mass fraction times a
   total (80 kg; sum within 1% or refuse); one `ccd_for` policy used at spawn;
@@ -1083,7 +1083,16 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   F2P: `ragdoll.rs:361-364` builds `IntegrationParameters` with dt only and
   `ragdoll.rs:387-389` uses density 1.0. P2P: `cargo test -p engine-physics
   --features rapier --lib` green; golden unchanged. Plan:
-  `docs/plan/forge-adoption.md` AD-17. needs: none.
+  `docs/plan/forge-adoption.md` AD-17. needs: none. Landed d37711b6.
+  `ragdoll_params` x2 on the final tree, 4 passed (`ragdoll_mass_sums_to_80kg`,
+  `ragdoll_params_twelve_bone_chain_keeps_joint_gaps_under_five_cm`,
+  `ragdoll_params_ccd_policy_matrix`, `ragdoll_params_mass_rows_name_the_segments`;
+  gh runs 39482754577 and 39483986934); lib 274 passed, 5 ignored (39482754565);
+  clippy -D warnings (39482711150); `balance_hash` 3 passed (39483380764);
+  golden d57b5c8ae3096614 unchanged (39481139268). Open gate: the Rapier
+  ragdoll tape digest is stale — PX9 moved the fall on 2026-10-19 and AD17
+  moves it again, so `engine-proof --features ragdoll` is red on its pinned
+  const until a four-machine golden-matrix run re-pins it with a receipt.
 - [ ] AD18 spatial: 3D, yaw-aware overlap in the report, the solver and the
   gate (prerequisite of SP16) — one box test: 3D interval first, then the XZ
   footprint rotated by the yaw (exact at 90 degrees; integer bound

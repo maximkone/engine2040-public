@@ -2957,6 +2957,7 @@ dependencies = [
  "engine-nav",
  "engine-nn",
  "serde_json",
+ "wide",
 ]
 
 [[package]]
@@ -3070,6 +3071,7 @@ dependencies = [
  "egui_dock",
  "engine-ai",
  "engine-app",
+ "engine-arena",
  "engine-assets",
  "engine-combat",
  "engine-core",
@@ -3129,6 +3131,7 @@ dependencies = [
  "engine-destruction",
  "engine-input",
  "engine-net",
+ "engine-perf",
  "engine-physfx",
  "engine-render",
  "engine-save",
@@ -3184,8 +3187,10 @@ version = "0.1.0"
 dependencies = [
  "engine-arena",
  "engine-core",
+ "engine-ecs",
  "engine-input",
  "engine-observe",
+ "engine-save",
  "futures-util",
  "hmac",
  "js-sys",
@@ -3263,18 +3268,22 @@ dependencies = [
  "engine-arena",
  "engine-combat",
  "engine-core",
+ "engine-material",
  "engine-provider",
  "engine-render",
  "engine-spatial",
  "hmac",
  "image",
+ "pollster",
  "sha2 0.10.9",
+ "wgpu 30.0.1",
 ]
 
 [[package]]
 name = "engine-proof"
 version = "0.1.0"
 dependencies = [
+ "engine-ai",
  "engine-anim",
  "engine-arena",
  "engine-assets",
@@ -3282,6 +3291,7 @@ dependencies = [
  "engine-core",
  "engine-ecs",
  "engine-editor",
+ "engine-input",
  "engine-net",
  "engine-observe",
  "engine-physics",
@@ -3333,6 +3343,7 @@ dependencies = [
 name = "engine-save"
 version = "0.1.0"
 dependencies = [
+ "engine-ecs",
  "engine-observe",
 ]
 

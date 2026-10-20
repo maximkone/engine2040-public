@@ -10,7 +10,9 @@
 //! Units: tiles for the sim, framebuffer pixels for the view and the HUD.
 //! Determinism: [`script`] and [`view`] are pure, and [`ai_match::AiMatch`]
 //! reads no clock, so the tests pin the mapping, one scripted fight and the
-//! 3000-tick AI match hash without a window.
+//! 3000-tick AI match hash without a window. [`orders`] is the CMB1 layer that
+//! closes distance before it strikes: it issues sim commands only, for either
+//! side, and counts every refusal so the receipts can demand zero.
 //!
 //! The window leg (bin) keeps GPU types out of this library: every quad is
 //! computed here or in [`scene`], and the binary only uploads the triangles.
@@ -18,6 +20,7 @@
 pub mod ai_match;
 pub mod house;
 pub mod hud;
+pub mod orders;
 pub mod scene;
 pub mod script;
 pub mod soldier;
@@ -26,6 +29,7 @@ pub mod view;
 pub use ai_match::{AiMatch, AI_PERIOD, AI_SIDE, DEFENCE_RANGE, RECEIPT_TICKS};
 pub use house::{HouseManifest, HouseState};
 pub use hud::{hud_frame, stock_line, title_line};
+pub use orders::{skirmish, Order, OrderKind, Orders, SKIRMISH_GAP, SKIRMISH_TICKS};
 pub use scene::{build_with, Part, Scene, ShapeQuad, SpriteQuad, Units};
 pub use script::{match_start, nearest_enemy, scripted_fight, spawn_tile};
 pub use soldier::{

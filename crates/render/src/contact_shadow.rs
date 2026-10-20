@@ -24,7 +24,7 @@ pub const LENGTH_M: f32 = 0.3;
 pub const THICKNESS_M: f32 = 0.1;
 /// Nearest distance that still counts: skips the pixel's own surface.
 pub const BIAS_M: f32 = 0.02;
-/// How much of ambient the darkest contact keeps (0.55 means 45% darker).
+/// How much of ambient the darkest contact keeps (0.25 means 75% darker).
 pub const MAX_SHADE: f32 = 0.25;
 
 /// World point as three floats; small local helpers keep this module std-only.

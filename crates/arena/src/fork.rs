@@ -56,7 +56,7 @@ pub use engine_ai::tier::{TierRow, SHIPPED_TIERS, TIER_DUELS, WIN_BAR_PERMILLE};
 pub const STUCK_SPEED_MPS: f32 = 0.2;
 
 /// Fighter count as a slot byte for zeroed metrics.
-/// Valid counts are `2..=MAX_PARTICIPANTS` (16), so every live value fits
+/// Valid counts are `2..=MAX_PARTICIPANTS` (32), so every live value fits
 /// `u8` exactly; out-of-range counts saturate at `u8::MAX` instead of
 /// truncating low bits, keeping zeroed-metric length bounded.
 fn fighter_slot_count(fighters: usize) -> u8 {
@@ -676,6 +676,9 @@ impl ForkJob {
                 // stays empty; it still needs its reservation to build.
                 last_cues: Vec::with_capacity(MAX_ATTACK_STARTED_PER_TICK),
                 breaks: Vec::with_capacity(steps),
+                // Unrelated to the cap: the arena Sim grew a cuts log; a
+                // fork starts with an empty one, like breaks.
+                cuts: Vec::with_capacity(steps),
                 match_log: Vec::with_capacity(steps),
                 // Forks keep the observed match track live, matching the
                 // observer entry points (`run_match_events`).

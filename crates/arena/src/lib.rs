@@ -116,7 +116,11 @@ use engine_combat::fight::{
 use engine_combat::sweep::WeaponSweep;
 use engine_combat::sweep::MAX_SWEEPS_PER_TICK;
 use engine_combat::tables::{TABLES_VERSION_V1, TABLES_VERSION_V2};
-use engine_combat::{try_step_into, FightEvent, FightState, MAX_EVENTS_PER_TICK, TABLES_V1};
+use engine_combat::{
+    resolve_swing, try_step_into, AnatomyTable, BladeSwing, Cut, FightEvent, FightState, JointId,
+    JointTarget, CUT_V1, MAX_CUTS_PER_SWING, MAX_ENERGY_Q16, MAX_EVENTS_PER_TICK,
+    MAX_SHARPNESS_Q16, SEVERABLE_JOINT_COUNT, TABLES_V1,
+};
 use engine_core::fixed::Fixed;
 use engine_destruction::bonded::{event_bytes as break_bytes, BondedCollection, BreakEvent};
 use engine_input::fighter::{ATTACK, DODGE, JUMP, THROW_SPEAR};
@@ -568,6 +572,15 @@ pub struct TickBreaks {
     pub events: Vec<BreakEvent>,
 }
 
+/// Severed-joint cuts emitted on one fixed tick, in resolver order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TickCuts {
+    /// Zero-based fixed tick these cuts belong to.
+    pub tick: u32,
+    /// Cuts for the tick, possibly empty.
+    pub cuts: Vec<Cut>,
+}
+
 /// Opaque mid-match state for rollback/resimulation. Captures every
 /// future-affecting byte: tick cursor, kinematic poses, latched wishes and
 /// buttons, combat state, the observer intake flag plus phased cursors,
@@ -695,6 +708,14 @@ pub fn run_events(config: &ArenaConfig, tape: &FighterTape) -> Vec<TickEvents> {
 pub fn run_breaks(config: &ArenaConfig, tape: &FighterTape) -> Vec<TickBreaks> {
     run_sim(config, tape, false, false)
         .map(|sim| sim.breaks)
+        .unwrap_or_default()
+}
+
+/// Per-tick severed-joint cuts for a valid run; empty on invalid input. V1
+/// rules never cut, so only a v2 match fills the rows.
+pub fn run_cuts(config: &ArenaConfig, tape: &FighterTape) -> Vec<TickCuts> {
+    run_sim(config, tape, false, false)
+        .map(|sim| sim.cuts)
         .unwrap_or_default()
 }
 
@@ -913,6 +934,8 @@ pub struct Sim {
     /// [`Sim::cues`]; presentation only, never hashed, never logged.
     last_cues: Vec<AttackStarted>,
     breaks: Vec<TickBreaks>,
+    /// Severed-joint cuts per tick, one row per tick like [`Self::breaks`].
+    cuts: Vec<TickCuts>,
     match_log: Vec<TickMatchEvents>,
     /// Whether this sim resolves the GP1/GP2 match track each tick. The
     /// hashed/measured authority path (`run`, combat/destruction logs, the
@@ -1096,6 +1119,7 @@ impl Sim {
             combat_scratch: Vec::with_capacity(MAX_EVENTS_PER_TICK),
             last_cues: Vec::with_capacity(cue_cap),
             breaks: Vec::with_capacity(ticks),
+            cuts: Vec::with_capacity(ticks),
             // Cold authority sims keep no match rows at all: even the outer
             // reservation would bill 600 rows of `Vec` pairs into the
             // allocation budget, so only live observers reserve it.
@@ -1597,6 +1621,13 @@ impl Sim {
         if self.rules.collides() {
             self.collide();
         }
+        // RZ3w: v2 landed hits resolve to cuts before the limb pool steps, so
+        // a limb loses its first tick immediately. V1 never enters this path.
+        let tick_cuts = if self.rules.version == FIGHT_RULES_V2 {
+            self.resolve_cuts(&tick_events)
+        } else {
+            Vec::new()
+        };
         // EG34: observe each body's post-move centre, then advance balance.
         // EG46: stagger memory steps beside balance under the same gate.
         // EG46b: the limb pool steps after stagger under the same gate.
@@ -1693,6 +1724,10 @@ impl Sim {
         self.breaks.push(TickBreaks {
             tick: self.tick,
             events: tick_breaks,
+        });
+        self.cuts.push(TickCuts {
+            tick: self.tick,
+            cuts: tick_cuts,
         });
         if let Some(history) = self.history.as_mut() {
             history.push(self.states.clone());
@@ -1807,6 +1842,63 @@ impl Sim {
             }
         }
         Some(())
+    }
+
+    /// Resolve one tick's landed hits into severed joints. V2 only: the cut
+    /// event names the joint and the limb pool carries it into the hash; the
+    /// blade is the attacker's mapped sweep at torso height, and the victim's
+    /// capsules use the standing rest layout at its feet. Presentation owns
+    /// the pose and blood; this path owns the integer cut.
+    fn resolve_cuts(&mut self, events: &[FightEvent]) -> Vec<Cut> {
+        let anatomy = AnatomyTable::rome_kit();
+        let mut cuts = Vec::new();
+        for event in events {
+            let FightEvent::Hit {
+                attacker, victim, ..
+            } = *event
+            else {
+                continue;
+            };
+            let (a, v) = (usize::from(attacker), usize::from(victim));
+            if a >= self.fighters || v >= self.fighters {
+                continue;
+            }
+            let from = match_wire::pos_mm(self.states[a].pos);
+            let to = match_wire::pos_mm(self.states[v].pos);
+            let facing = ((to[0] - from[0]).signum(), (to[2] - from[2]).signum());
+            let sweep = match_wire::sweep_for_attacker(attacker, from, facing);
+            let blade = BladeSwing {
+                attacker,
+                victim,
+                swing: self.tick.wrapping_mul(8).wrapping_add(u32::from(attacker)),
+                p0_mm: [sweep.p0_mm[0], 1_000, sweep.p0_mm[2]],
+                p1_mm: [sweep.p1_mm[0], 1_000, sweep.p1_mm[2]],
+                blade_half_mm: sweep.blade_half_mm,
+                // A landed blade is a full-force cut for the first authority
+                // slice; damage scaling and edge wear land with the feel pass.
+                energy_q16: MAX_ENERGY_Q16,
+                sharpness_q16: MAX_SHARPNESS_Q16,
+                wear_q16: 0,
+            };
+            let targets = rest_targets(to);
+            let mut out = [Cut {
+                swing: 0,
+                attacker: 0,
+                victim: 0,
+                joint: 1,
+                flags: 0,
+                energy_q16: 0,
+                protection_q16: 0,
+            }; MAX_CUTS_PER_SWING];
+            let count = resolve_swing(&blade, &targets, &anatomy, 0, &CUT_V1, &mut out);
+            if count > 0 {
+                cuts.push(out[0]);
+            }
+        }
+        if !cuts.is_empty() && crate::limbs::spawn_limbs(&mut self.limbs, &cuts, 0).is_err() {
+            cuts.clear();
+        }
+        cuts
     }
 
     /// EG20 collision pass over this sim's fighters; see [`collide_states`].
@@ -2055,6 +2147,7 @@ impl Sim {
             combat_scratch: Vec::with_capacity(MAX_EVENTS_PER_TICK),
             last_cues: Vec::with_capacity(MAX_ATTACK_STARTED_PER_TICK),
             breaks: Vec::with_capacity(ticks),
+            cuts: Vec::with_capacity(ticks),
             match_log: Vec::with_capacity(ticks),
             // Resumes continue the observed match track so suffix match rows
             // match the uninterrupted observer run tick for tick.
@@ -2297,6 +2390,41 @@ fn unit_f32(word: u64) -> f32 {
 }
 
 /// Absolute facing in centidegrees (`-18000..=18000`) to yaw radians.
+/// Standing 1.8 m rest capsules, in `JointId` order from the waist. Every
+/// capsule spans the segment below its joint, so a torso-high blade reaches
+/// the trunk, arms, legs and head. Axis-aligned by design: the cut names a
+/// joint; presentation owns the posed limb.
+const REST_BONES: [([i32; 3], [i32; 3], u32); SEVERABLE_JOINT_COUNT] = [
+    ([0, 950, 0], [0, 1100, 0], 140),       // Waist
+    ([0, 1100, 0], [0, 1350, 0], 170),      // Chest
+    ([0, 1450, 0], [0, 1700, 0], 90),       // Neck and head
+    ([-200, 1400, 0], [-260, 1130, 0], 70), // ShoulderL
+    ([200, 1400, 0], [260, 1130, 0], 70),   // ShoulderR
+    ([-260, 1130, 0], [-300, 880, 0], 55),  // ElbowL
+    ([260, 1130, 0], [300, 880, 0], 55),    // ElbowR
+    ([-300, 880, 0], [-310, 780, 0], 40),   // WristL
+    ([300, 880, 0], [310, 780, 0], 40),     // WristR
+    ([-100, 950, 0], [-110, 500, 0], 95),   // HipL
+    ([100, 950, 0], [110, 500, 0], 95),     // HipR
+    ([-110, 500, 0], [-110, 80, 0], 70),    // KneeL
+    ([110, 500, 0], [110, 80, 0], 70),      // KneeR
+    ([-110, 80, 0], [-110, 0, 140], 50),    // AnkleL
+    ([110, 80, 0], [110, 0, 140], 50),      // AnkleR
+];
+
+fn rest_targets(origin: [i32; 3]) -> [JointTarget; SEVERABLE_JOINT_COUNT] {
+    let joints = JointId::all();
+    std::array::from_fn(|index| {
+        let (q0, q1, radius_mm) = REST_BONES[index];
+        JointTarget {
+            joint: joints[index + 1],
+            q0_mm: [origin[0] + q0[0], origin[1] + q0[1], origin[2] + q0[2]],
+            q1_mm: [origin[0] + q1[0], origin[1] + q1[1], origin[2] + q1[2]],
+            radius_mm,
+        }
+    })
+}
+
 fn yaw_from_centideg(facing: i16) -> f32 {
     canon_zero(facing as f32 * PI / 18_000.0)
 }
@@ -4835,6 +4963,56 @@ mod tests {
         let uncut = limb_hash_digest(false);
         let cut = limb_hash_digest(true);
         assert_ne!(cut, uncut, "a severed limb must move the digest");
+    }
+
+    #[test]
+    fn live_cut_spawns_a_limb_and_repeats() {
+        use engine_combat::Cut;
+        let base = short_config();
+        let config = ArenaConfig {
+            ticks: 20,
+            table_version: TABLES_VERSION_V2,
+            ..base
+        };
+        let tape = close_attack_tape(&config);
+        let run = || {
+            let mut sim = Sim::build(&config, &tape, false, false).expect("valid sim");
+            sim.states[0].pos = [0.0, 0.0, 0.0];
+            sim.states[1].pos = [0.0, 0.0, 1.0];
+            while sim.tick < config.ticks {
+                sim.step(&tape).expect("v2 tick steps");
+            }
+            let hits: Vec<FightEvent> = sim
+                .events
+                .iter()
+                .flat_map(|row| row.events.iter().copied())
+                .filter(|event| matches!(event, FightEvent::Hit { .. }))
+                .collect();
+            (sim.cuts, hits, sim.limbs.limbs().len())
+        };
+        let (first, hits, limbs) = run();
+        let (second, _, _) = run();
+        let cuts: Vec<Cut> = first
+            .iter()
+            .flat_map(|row| row.cuts.iter().copied())
+            .collect();
+        assert_eq!(first, second, "the same v2 tape cuts twice");
+        assert!(!hits.is_empty(), "the v2 tape lands a hit");
+        assert!(!cuts.is_empty(), "a landed v2 hit must sever a joint");
+        assert_eq!(limbs, cuts.len(), "one pool limb per cut");
+        let v1 = ArenaConfig {
+            table_version: TABLES_VERSION_V1,
+            ..config
+        };
+        let v1_tape = close_attack_tape(&v1);
+        let mut v1_sim = Sim::build(&v1, &v1_tape, false, false).expect("valid sim");
+        v1_sim.states[0].pos = [0.0, 0.0, 0.0];
+        v1_sim.states[1].pos = [0.0, 0.0, 1.0];
+        while v1_sim.tick < v1.ticks {
+            v1_sim.step(&v1_tape).expect("v1 tick steps");
+        }
+        assert!(v1_sim.cuts.iter().all(|row| row.cuts.is_empty()));
+        assert_eq!(v1_sim.limbs.limbs().len(), 0);
     }
 
     /// v2 bout fixture for the timing receipts: 8 fighters, 600 ticks, v2

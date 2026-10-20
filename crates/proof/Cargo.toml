@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+engine-ai.workspace = true
 engine-anim = { workspace = true, optional = true }
 engine-arena = { workspace = true, optional = true }
 engine-assets = { workspace = true, features = ["import", "registry"], optional = true }
@@ -16,6 +17,7 @@ engine-combat.workspace = true
 engine-core.workspace = true
 engine-ecs.workspace = true
 engine-editor = { workspace = true, optional = true }
+engine-input.workspace = true
 engine-net.workspace = true
 engine-observe.workspace = true
 engine-physics.workspace = true

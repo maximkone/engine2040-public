@@ -1288,7 +1288,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire; Match seed (a decimal string or a number); same seed plus same tape replays the same digest. |
-| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters`; Participant count, 2..=`MAX_PARTICIPANTS`. |
+| `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters`; Participant count, 2..=`MAX_PARTICIPANTS`. |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half-extent in meters, 5.0..=100.0, explicit (never defaulted across tools when comparing receipts). |
 | `upto_tick` | `Option<u32>` | no |  | `0..N`, `1..=3600`; Ticks to simulate as the 1-indexed count N of the 0-indexed prefix `0..N` (1..=`MAX_PLAY_TICKS`); the digest is the checkpoint `N - 1` hash. See the module legend. |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`; Tape inputs with 0-indexed tick ids inside `0..upto_tick`. |
@@ -1296,13 +1296,14 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | `height` | `Option<u32>` | no |  | `1..=2048`, `up to 2048`; Receipt height in pixels, 1..=512 software. |
 | `timing` | `Option<bool>` | no |  |  |
 
-<details><summary>12 typed refusals</summary>
+<details><summary>13 typed refusals</summary>
 
 | Code | Message |
 |---|---|
 | `invalid_tape` | arena refused the inputs of tick {tick}; they passed MCP range checks, so report the tape verbatim |
+| `invalid_tape` | the spine step refused the tape through tick {ticks}; the legacy step accepted it, so report the tape verbatim |
 | `bad_ticks` | play.step needs upto_tick; submit 1..=3600 |
-| `bad_participants` | participants {participants} is outside 2..=16 |
+| `bad_participants` | participants {participants} is outside 2..=32 |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0 meters |
 | `bad_ticks` | upto_tick {upto} is outside 1..=3600 (MCP play.step bound) |
 | `too_many_inputs` | inputs holds {} entries; at most 2048 per match |
@@ -1336,7 +1337,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | Code | Message |
 |---|---|
 | `rules_worker_down` | the OS refused to start a rules worker |
-| `bad_slots` | slot {bad} is outside 0..16; submit slots in that range |
+| `bad_slots` | slot {bad} is outside 0..32; submit slots in that range |
 | `rules_refused` | {error}; {kept_text} |
 
 ### `rules.test`
@@ -1375,7 +1376,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 |---|---|---|---|---|
 | `tick` | `u32` | yes |  | `0..3600`; Tick to explain, `0..3600`. |
 | `seed` | `Option<u64>` | no |  | Match seed (default 0), as in play.run. |
-| `fighters` | `Option<u8>` | no |  | `2..=16`; Players, `2..=16` (default 2). |
+| `fighters` | `Option<u8>` | no |  | `2..=32`; Players, `2..=MAX_PARTICIPANTS` (default 2). |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half extent in meters, `5.0..=100.0` (default 12). |
 | `scene_rev` | `Option<u64>` | no |  | Scene revision to play on, as in play.run. |
 
@@ -1385,7 +1386,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 |---|---|
 | `rules_worker_down` | the OS refused to start a rules worker |
 | `bad_ticks` | tick {} is outside 0..3600 |
-| `bad_fighters` | fighters {fighters} is outside 2..=16 |
+| `bad_fighters` | fighters {fighters} is outside 2..=32 |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0 meters |
 | `no_script` | no rule script drives any slot; call rules.set first |
 | `invalid_config` | arena refused this seed, fighters and extent |
@@ -1513,16 +1514,16 @@ Listed in a fresh session: no, call `api.load` with `gym`. Source: `crates/endpo
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire; Match seed (a decimal string or a number); the same seed plus config replays the same digest. |
-| `participants` | `Option<u8>` | no |  | `2..=16`, `5.0..=100.0m`; alias `fighters`; Participant count, 2..=16. |
+| `participants` | `Option<u8>` | no |  | `2..=32`, `5.0..=100.0m`; alias `fighters`; Participant count, `2..=MAX_PARTICIPANTS`. |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half-extent in meters, 5.0..=100.0. |
 
 **Typed refusals:**
 
 | Code | Message |
 |---|---|
-| `bad_fighters` | participants {participants} is outside 2..=16; re-run with a headcount in that range |
+| `bad_fighters` | participants {participants} is outside 2..=32; re-run with a headcount in that range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0 meters; re-run in range |
-| `bad_config` | spawn for seed {seed} with {participants} fighters at {half}m holds nothing; ranges already check 2..=16 and 5.0..=100.0m, so re-run in range and report the seed |
+| `bad_config` | spawn for seed {seed} with {participants} fighters at {half}m holds nothing; ranges already check 2..=32 and 5.0..=100.0m, so re-run in range and report the seed |
 
 ### `sim.step`
 
@@ -1538,9 +1539,9 @@ Listed in a fresh session: no, call `api.load` with `gym`. Source: `crates/endpo
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire; Match seed (a decimal string or a number); the same seed plus tape replays the same digest. |
-| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters`; Participant count, 2..=16. |
+| `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters`; Participant count, `2..=MAX_PARTICIPANTS`. |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half-extent in meters, 5.0..=100.0. |
-| `ticks` | `Option<u32>` | no |  | `1..=3600`, `2..=16`, `5.0..=100.0m`; Ticks to simulate as the 1-indexed count N (1..=3600). |
+| `ticks` | `Option<u32>` | no |  | `1..=3600`, `2..=32`, `5.0..=100.0m`; Ticks to simulate as the 1-indexed count N (1..=3600). |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`; Tape inputs with 0-indexed tick ids inside `0..ticks`. |
 | `events` | `Option<u32>` | no |  | `0..=64`; How many of the newest combat events to return, 0..=64 (default 16). |
 
@@ -1550,11 +1551,11 @@ Listed in a fresh session: no, call `api.load` with `gym`. Source: `crates/endpo
 |---|---|
 | `bad_events` | events {count} is outside 0..=64 (default 16); re-run with a count in that range |
 | `bad_ticks` | ticks is missing; submit 1..=3600 (MCP sim.step bound); re-run with a tick count |
-| `bad_fighters` | participants {participants} is outside 2..=16; re-run with a headcount in that range |
+| `bad_fighters` | participants {participants} is outside 2..=32; re-run with a headcount in that range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0 meters; re-run in range |
 | `bad_ticks` | ticks {ticks} is outside 1..=3600 (MCP sim.step bound); re-run in range |
 | `too_many_inputs` | inputs holds {} entries; at most 2048 per step; re-run with a shorter tape |
-| `bad_config` | step for seed {seed} with {participants} fighters at {half}m for {ticks} ticks holds nothing; ranges already check 2..=16, 5.0..=100.0m and 1..=3600, so re-run in range and report the seed |
+| `bad_config` | step for seed {seed} with {participants} fighters at {half}m for {ticks} ticks holds nothing; ranges already check 2..=32, 5.0..=100.0m and 1..=3600, so re-run in range and report the seed |
 
 ### `sim.observe`
 
@@ -1844,7 +1845,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
-| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters` |
+| `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048` |
 | `tick_cap` | `Option<u32>` | no |  | `1..=3600` |
@@ -1855,7 +1856,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 
 | Code | Message |
 |---|---|
-| `bad_fighters` | participants {participants} is outside 2..=16; re-run in range |
+| `bad_fighters` | participants {participants} is outside 2..=32; re-run in range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
 | `bad_ticks` | tick_cap missing; submit 1..=3600; re-run with a cap |
 | `bad_ticks` | tick_cap {cap} is outside 1..=3600; re-run in range |
@@ -1880,7 +1881,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
-| `fighters` | `Option<u8>` | no |  | `2..=16` |
+| `fighters` | `Option<u8>` | no |  | `2..=32` |
 | `frames` | `Option<u32>` | no |  | `1..=100000` |
 
 **Typed refusals:**
@@ -1893,7 +1894,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `seat_start_failed` | the seat booted on port {port} but the door could not connect ({err}); re-run, and check that nothing else holds the port |
 | `seat_start_failed` | the arena exited {status} before its seat listened: {}; re-run with a working window (the seat needs a display) |
 | `seat_start_failed` | the arena printed no seat line within {} s: {}; re-run with a built arena.exe |
-| `bad_args` | fighters {fighters} is outside 2..=16; re-run in range |
+| `bad_args` | fighters {fighters} is outside 2..=32; re-run in range |
 | `bad_args` | frames {frames} is outside 1..=100000; re-run in range |
 
 ### `seat.step`
@@ -1988,7 +1989,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
-| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters` |
+| `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
 | `fighter` | `Option<u8>` | no |  |  |
 | `action` | `Option<String>` | no |  |  |
@@ -1999,7 +2000,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 
 | Code | Message |
 |---|---|
-| `bad_fighters` | participants {participants} is outside 2..=16; re-run in range |
+| `bad_fighters` | participants {participants} is outside 2..=32; re-run in range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
 | `bad_args` | action `{action}` is unknown; submit attack, block or dodge; re-run |
 | `bad_fighters` | fighter {fighter} is outside 0..{participants}; re-run with a live slot |
@@ -2026,7 +2027,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
-| `participants` | `Option<u8>` | no |  | `2..=16`; alias `fighters` |
+| `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
 | `ticks` | `Option<u32>` | no |  | `1..=3600` |
 | `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048` |
@@ -2035,7 +2036,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 
 | Code | Message |
 |---|---|
-| `bad_fighters` | participants {participants} is outside 2..=16; re-run in range |
+| `bad_fighters` | participants {participants} is outside 2..=32; re-run in range |
 | `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
 | `bad_ticks` | ticks missing; submit 1..=3600; re-run with a count |
 | `bad_ticks` | ticks {ticks} is outside 1..=3600; re-run in range |
@@ -2057,7 +2058,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
 | `bouts` | `Option<u32>` | no |  | `1..=20` |
 | `ticks` | `Option<u32>` | no |  | `60..=3600` |
-| `fighters` | `Option<u8>` | no |  | `2..=16`; alias `participants` |
+| `fighters` | `Option<u8>` | no |  | `2..=32`; alias `participants` |
 
 **Typed refusals:**
 
@@ -2065,7 +2066,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 |---|---|
 | `bad_args` | bouts {bouts} is outside 1..=20; re-run with a bout count in range |
 | `bad_args` | ticks {ticks} is outside 60..=3600; re-run with a bout length in range |
-| `bad_args` | fighters {fighters} is outside 2..=16; re-run with a headcount in range |
+| `bad_args` | fighters {fighters} is outside 2..=32; re-run with a headcount in range |
 | `evidence_unwritten` | could not write {rel} ({why}); re-run after freeing target/reports |
 
 ## Pack `verify`
@@ -2510,7 +2511,7 @@ Listed in a fresh session: no, call `api.load` with `web`. Source: `crates/endpo
 
 ## Coverage
 
-83 tools parsed, 402 refusal rows printed, 0 declarations the parser could not read.
+83 tools parsed, 403 refusal rows printed, 0 declarations the parser could not read.
 A verb whose handler converts a typed error defined in another file (the log tools, the level builder) shows fewer refusals than it can return; the tests next to its source are the full list.
 
 Tools with no refusal site found: `capture`, `scene.next`, `wound.table.get`, `material.list`, `asset.generate`, `sim.plan_goals`, `log.digest`, `log.query`, `rpc.discover`, `settings.get`.

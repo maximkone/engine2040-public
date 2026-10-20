@@ -346,7 +346,23 @@ impl AutoExposure {
             ));
         }
         let hist = histogram_log_luma(hdr, width, height)?;
-        let mean = trimmed_log_mean(&hist, self.config.trim_lo, self.config.trim_hi)?;
+        self.tick_hist(&hist, dt_s)
+    }
+
+    /// Tick from a histogram already built (the GPU histogram path): the
+    /// same trim, aim and slew as [`Self::tick`], with no pixel walk. A
+    /// `dt_s` of 0 holds; negative or non-finite dts fail loudly.
+    pub fn tick_hist(
+        &mut self,
+        hist: &ExposureHistogram,
+        dt_s: f32,
+    ) -> Result<f32, PostError> {
+        if !dt_s.is_finite() || dt_s < 0.0 {
+            return Err(PostError::Invalid(
+                "auto-exposure dt_s is not finite non-negative".into(),
+            ));
+        }
+        let mean = trimmed_log_mean(hist, self.config.trim_lo, self.config.trim_hi)?;
         let target = target_ev_for_mean(mean, self.config.key_luma)?
             .clamp(self.config.min_ev, self.config.max_ev);
         let step = self.config.adapt_ev_per_s * dt_s;

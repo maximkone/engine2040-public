@@ -38,6 +38,7 @@ needs it. Every dependency stays behind a feature, off the headless default.
 | schemars 1.2 | MIT (LICENSE read live 2026-10-20, GREsau/schemars) | game (`layered_extract_strict`) | `GameConfig` JSON Schema is the one key list for the strict layered extract; unknown rows refuse as `BadConfig("unknown")` (E63) |
 | rustls 0.23 (default-features=false: std, tls12, ring) | Apache-2.0 OR ISC OR MIT (crates.io API, rustls/rustls) | provider `tls` | opt-in HTTPS handshake for cloud LLMs; ring already in the graph via quinn |
 | rustls-native-certs 0.8 | Apache-2.0 OR ISC OR MIT (crates.io API, rustls/rustls-native-certs) | provider `tls` | platform-native roots for the rustls handshake (webpki-roots skipped: CDLA-Permissive-2.0 is outside deny.toml) |
+| wide 1.7.1 | Zlib OR Apache-2.0 OR MIT (crates.io API 2026-10-20, Lokathor/wide) | anim `simd` (off the headless default) | AM14: the parallel SIMD crowd eval samples the clip bank with `wide` (one joint's three channels per `wide` lerp); the same crate is already in Cargo.lock through parry3d/simba |
 | ggrs 0.13 | MIT OR Apache-2.0 | none (NOT WIRED 2026-10-16: 0 hits in any Cargo.toml/Cargo.lock, candidate only) | rollback candidate for the arena sync (E40c); hand-rolled resim still in use until wired |
 
 ## 2. Banned (`deny.toml` enforces)

@@ -296,7 +296,7 @@ Rows from the books (2026-10-12, board shard `../SPRINT-20-game.md`; `BOOK-GAPS-
 
 - [ ] GE6 scoreboard moves from `ui` to `game`: killer and victim fighter rows. Accept: HUD tests green; ui builds with no `engine-input` fighter import.
 - [ ] GE11 ledger refresh for post-GE2 files: re-audit crates for genre names. Accept: zero unlisted genre names; a seeded new assumption fails the gate; proof generality gates green.
-- [ ] GE12 canonical participant-cap decision: rule whether the cap stays 16 or the split-match-32 harness is defined. Accept: 32-bot x600 soak hashes x2 or 16 stays with the split-match-32 harness defined; golden `d57b5c8ae3096614` unchanged x2; GE2 ledger green.
+- [x] GE12 canonical participant-cap decision: rule whether the cap stays 16 or the split-match-32 harness is defined. Accept: 32-bot x600 soak hashes x2 or 16 stays with the split-match-32 harness defined; golden `d57b5c8ae3096614` unchanged x2; GE2 ledger green. Landed 15049ef3. Owner decision 2026-10-20: 32; scale filter 19 passed run 39485189547, input 52 passed run 39482930043, golden x2 runs 39485643367/39486071864.
 
 ## 8. Quality gates
 

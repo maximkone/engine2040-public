@@ -16,12 +16,23 @@
 use std::fmt;
 
 use engine_app::{App, AppBuilder, AppConfig, AppError};
+use engine_arena::spine_step::SpineMatch;
+use engine_arena::world::MatchWorld;
+use engine_arena::{ArenaConfig, BodyTape};
+use engine_ecs::spine::SpineSnapshot;
 
 use crate::commands::Document;
 use crate::instant::{InstantPlay, Restored, RoundInput, RoundSnapshot, SnapshotError};
 use crate::play::PlayEntrypoint;
 use crate::shell::Shell;
 use crate::viewport_image::{ViewportImage, ViewportImageError};
+
+/// Ticks one inspector spine match runs before it restarts (one minute at 60 Hz).
+const SPINE_MATCH_TICKS: u32 = 3_600;
+/// Bodies the inspector's spine match fields (the arena's default duel).
+const SPINE_BODIES: u8 = 2;
+/// Arena half-extent for the inspector's spine match, in meters.
+const SPINE_HALF_M: f32 = 20.0;
 
 /// What rejected a play-in-editor action. Refusals move no round state: a
 /// bad frame dt steps nothing, a bad snapshot restores nothing, and a
@@ -32,6 +43,8 @@ pub enum PlayInError {
     App(AppError),
     /// A play snapshot refused (bad magic, truncated, corrupt, tampered).
     Snapshot(SnapshotError),
+    /// The inspector's spine match refused to start (arena config or spawn).
+    Spine,
     /// Frame, step, snapshot or restart on a stopped session.
     Closed {
         /// The refused operation.
@@ -44,6 +57,7 @@ impl fmt::Display for PlayInError {
         match self {
             Self::App(error) => write!(f, "play-in-editor app refused: {error}"),
             Self::Snapshot(error) => write!(f, "play-in-editor snapshot refused: {error}"),
+            Self::Spine => write!(f, "play-in-editor spine match refused to start"),
             Self::Closed { what } => write!(f, "play-in-editor {what} on a stopped session"),
         }
     }
@@ -54,7 +68,7 @@ impl std::error::Error for PlayInError {
         match self {
             Self::App(error) => Some(error),
             Self::Snapshot(error) => Some(error),
-            Self::Closed { .. } => None,
+            Self::Spine | Self::Closed { .. } => None,
         }
     }
 }
@@ -123,18 +137,68 @@ impl fmt::Display for PlayFrame {
     }
 }
 
+/// The arena match the inspector shows: one real spine stepped beside the
+/// round.
+///
+/// The play-in round carries no spine columns (it is the editor's placeholder
+/// sim), so this is the arena's own seeded duel on an empty world: brains
+/// decide every slot and one round tick is one spine tick. The inspector is a
+/// read-only view of these columns; nothing writes back to the match. A
+/// finished match (the tick cap) or a refused step starts over at tick 0, so a
+/// long play-in run never freezes the panel. Same seed gives the same match,
+/// no wall clock.
+pub struct LiveSpine {
+    config: ArenaConfig,
+    sim: SpineMatch,
+}
+
+impl LiveSpine {
+    /// An arena spine at tick 0 on `seed`; `None` when the arena refuses the
+    /// compile-time match (config bounds or a blocked spawn).
+    pub fn start(seed: u64) -> Option<Self> {
+        let config =
+            ArenaConfig::try_new(seed, SPINE_MATCH_TICKS, SPINE_BODIES, SPINE_HALF_M).ok()?;
+        let sim = SpineMatch::build(&config, &BodyTape(Vec::new()), MatchWorld::empty())?;
+        Some(Self { config, sim })
+    }
+
+    /// Step one fixed tick; a finished or refused match starts over at tick 0.
+    pub fn step(&mut self) {
+        if self.sim.step().is_some() {
+            return;
+        }
+        if let Some(sim) =
+            SpineMatch::build(&self.config, &BodyTape(Vec::new()), MatchWorld::empty())
+        {
+            self.sim = sim;
+        }
+    }
+
+    /// Ticks stepped since the match started (a restart counts from zero).
+    pub fn tick(&self) -> u32 {
+        self.sim.tick()
+    }
+
+    /// The spine columns after the last step, as the inspector reads them.
+    pub fn snapshot(&self) -> SpineSnapshot {
+        self.sim.spine().snapshot()
+    }
+}
+
 /// Play-in-editor session: the game-window-equivalent loop hosted in the viewport.
 ///
 /// Owns the [`App`](engine_app::App) pacer (fixed-tick accumulator,
-/// phase order, extraction) and the [`InstantPlay`] round (the sim the
-/// child binary runs, driven here in-process). `frame` is the only tick
-/// advancer besides the single-tick `step_once`; tuning batches are never
-/// touched here, so staged tuning values can only land between frames at the
-/// host's `tick` cursor. The session never spawns the arena child itself:
-/// child-process play stays the fallback owned by the host.
+/// phase order, extraction), the [`InstantPlay`] round (the sim the
+/// child binary runs, driven here in-process) and the [`LiveSpine`] the
+/// inspector paints. `frame` is the only tick advancer besides the single-tick
+/// `step_once`; tuning batches are never touched here, so staged tuning values
+/// can only land between frames at the host's `tick` cursor. The session never
+/// spawns the arena child itself: child-process play stays the fallback owned
+/// by the host.
 pub struct PlayInSession {
     app: App,
     play: InstantPlay,
+    spine: LiveSpine,
     paused: bool,
     frames: u64,
     closed: bool,
@@ -144,15 +208,18 @@ impl PlayInSession {
     /// Start a session on a round copy of `doc`: run the app startup
     /// sequence (registries, phase order, scene load, the verified headless
     /// frame) and seed the round from the document bytes (the instant-play rule).
-    /// `seed` paces the app only; round seeding stays document-derived.
+    /// `seed` paces the app and seeds the inspector's spine match; round
+    /// seeding stays document-derived.
     pub fn start(doc: Document, entry: PlayEntrypoint, seed: u64) -> Result<Self, PlayInError> {
         let app = AppBuilder::new()
             .with_config(AppConfig::new(seed))
             .startup()?;
+        let spine = LiveSpine::start(seed).ok_or(PlayInError::Spine)?;
         let play = InstantPlay::new(doc, entry);
         Ok(Self {
             app,
             play,
+            spine,
             paused: false,
             frames: 0,
             closed: false,
@@ -182,6 +249,16 @@ impl PlayInSession {
     /// Live round tick (the cursor tuning batches stage against at boundaries).
     pub fn tick(&self) -> u64 {
         self.play.tick()
+    }
+
+    /// Tick of the inspector's spine match (a match restart counts from zero).
+    pub fn spine_tick(&self) -> u32 {
+        self.spine.tick()
+    }
+
+    /// The inspector's spine columns after the last step.
+    pub fn spine_snapshot(&self) -> SpineSnapshot {
+        self.spine.snapshot()
     }
 
     /// Presentation frames driven, paused ones included.
@@ -233,6 +310,9 @@ impl PlayInSession {
                 .unwrap_or_else(RoundInput::neutral);
             self.play.push_input(input);
         }
+        for _ in 0..receipt.steps {
+            self.spine.step();
+        }
         self.frames = self.frames.saturating_add(1);
         Ok(PlayFrame {
             steps: receipt.steps,
@@ -249,6 +329,7 @@ impl PlayInSession {
             return Err(PlayInError::Closed { what: "step" });
         }
         self.play.push_input(input);
+        self.spine.step();
         Ok(self.play.tick())
     }
 
@@ -406,6 +487,66 @@ mod tests {
             PlayCheckpoint::from(&straight_end),
             "pause/step/restart framing never forks the truth"
         );
+    }
+
+    #[test]
+    fn the_live_spine_steps_one_tick_per_round_tick() {
+        let mut session = PlayInSession::start(fixture_doc(), stub_entry(), 2040).unwrap();
+        assert_eq!(session.spine_tick(), 0);
+        let dt = AppConfig::new(2040).dt();
+        let receipt = session.frame(3.0 * dt, &input_tape(3)).unwrap();
+        assert_eq!(receipt.steps, 3);
+        assert_eq!(session.spine_tick(), 3, "one spine tick per round tick");
+        session.pause();
+        session.frame(dt, &[]).unwrap();
+        assert_eq!(session.spine_tick(), 3, "paused frames freeze the spine");
+        session.resume();
+        session.step_once(RoundInput::neutral()).unwrap();
+        assert_eq!(session.spine_tick(), 4);
+        // The snapshot is the spine's own bytes: it restores to itself.
+        let snap = session.spine_snapshot();
+        let back = engine_ecs::spine::Spine::restore(&snap.bytes).expect("spine restores");
+        assert_eq!(back.snapshot(), snap);
+        assert_eq!(back.live(), usize::from(SPINE_BODIES));
+    }
+
+    #[test]
+    fn the_live_spine_restarts_at_its_tick_cap() {
+        let mut spine = LiveSpine::start(2040).expect("spine match builds");
+        for _ in 0..SPINE_MATCH_TICKS {
+            spine.step();
+        }
+        assert_eq!(spine.tick(), SPINE_MATCH_TICKS);
+        spine.step();
+        assert_eq!(
+            spine.tick(),
+            0,
+            "a finished match starts over, never freezes"
+        );
+    }
+
+    #[test]
+    fn the_live_spine_inspects_through_the_rc4_registry() {
+        let mut session = PlayInSession::start(fixture_doc(), stub_entry(), 9).unwrap();
+        let dt = AppConfig::new(9).dt();
+        for _ in 0..30 {
+            session.frame(dt, &[]).unwrap();
+        }
+        let snapshot = session.spine_snapshot();
+        let registry = crate::spine_inspect::spine_registry().expect("spine components register");
+        let (view, nodes) =
+            crate::spine_inspect::inspect_spine(session.spine_tick(), &snapshot, &registry)
+                .expect("live spine inspects");
+        assert_eq!(view.tick, 30);
+        assert_eq!(view.arena_hash, Some(snapshot.hash));
+        assert_eq!(nodes.len(), usize::from(SPINE_BODIES));
+        for node in &nodes {
+            assert_eq!(
+                node.components.len(),
+                crate::spine_inspect::COMPONENTS.len()
+            );
+            assert!(node.schema.iter().all(|step| step.is_current));
+        }
     }
 
     #[test]

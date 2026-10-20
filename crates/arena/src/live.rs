@@ -39,7 +39,7 @@ use crate::world::MatchWorld;
 use crate::MatchSnapshot;
 use crate::{
     ArenaConfig, ArenaRules, BalanceState, Checkpoint, FighterState, MatchSpec, Sim, TickBreaks,
-    TickEvents, MAX_SLOTS,
+    TickCuts, TickEvents, MAX_SLOTS,
 };
 
 /// Dataset recorder leg: pre-step poses, fight state and damage counters
@@ -107,6 +107,9 @@ pub struct LiveTick<'a> {
     /// Destruction breaks of the tick: the last row of
     /// [`run_breaks`](crate::run_breaks) over `0..=tick`.
     pub breaks: &'a TickBreaks,
+    /// Severed-joint cuts of the tick: the last row of
+    /// [`run_cuts`](crate::run_cuts) over `0..=tick`.
+    pub cuts: &'a TickCuts,
     /// The tick's dataset rows, one per fighter in slot order: the last
     /// `fighters` rows of [`run_dataset`](crate::run_dataset) over `0..=tick`.
     pub rows: &'a [Row],
@@ -150,6 +153,7 @@ pub struct LiveMatch {
     checkpoint: Checkpoint,
     events: TickEvents,
     breaks: TickBreaks,
+    cuts: TickCuts,
     steps: u64,
     poisoned: bool,
     /// Past-deadline replies refused in arrival order, one row per late
@@ -210,6 +214,10 @@ impl LiveMatch {
             breaks: TickBreaks {
                 tick: 0,
                 events: Vec::new(),
+            },
+            cuts: TickCuts {
+                tick: 0,
+                cuts: Vec::new(),
             },
             steps: 0,
             poisoned: false,
@@ -368,6 +376,7 @@ impl LiveMatch {
             checkpoint: self.checkpoint,
             events: &self.events,
             breaks: &self.breaks,
+            cuts: &self.cuts,
             rows: &self.rows,
         })
     }
@@ -500,6 +509,10 @@ impl LiveMatch {
                 tick: 0,
                 events: Vec::new(),
             },
+            cuts: TickCuts {
+                tick: 0,
+                cuts: Vec::new(),
+            },
             steps: 0,
             poisoned: false,
             fallbacks: Vec::new(),
@@ -512,6 +525,7 @@ impl LiveMatch {
         self.checkpoint = self.sim.checkpoints.pop()?;
         self.events = self.sim.events.pop()?;
         self.breaks = self.sim.breaks.pop()?;
+        self.cuts = self.sim.cuts.pop()?;
         Some(())
     }
 }

@@ -50,6 +50,7 @@ use crate::play_in::PlayInSession;
 use crate::save::{load_from_bytes, save_to_bytes, MAX_SAVE_BYTES};
 use crate::shell::Shell;
 use crate::shell_ui::ShellUi;
+use crate::spine_inspect::spine_registry;
 use crate::viewport_image::{ViewportImage, MAX_VIEWPORT_TEX};
 
 /// Ctrl+S saves the open project (W8 keyboard flow).
@@ -786,6 +787,11 @@ pub struct EditorApp {
     play: Option<ChildPlay>,
     /// In-editor fixed-tick session (W6): no child process, stopped by drop.
     play_in: Option<PlayInSession>,
+    /// RC4 registry the spine inspector reads (built once; `None` only when a
+    /// builtin name clashes, and then the panel stays empty instead of lying).
+    spine_registry: Option<engine_scene::schema::SchemaRegistry>,
+    /// Spine tick already painted in the inspector (skip idle frames).
+    spine_shown: Option<u32>,
     status: String,
     frames: u64,
 }
@@ -825,6 +831,8 @@ impl EditorApp {
             snapshot: ViewportSnapshot::new(),
             play: None,
             play_in: None,
+            spine_registry: spine_registry().ok(),
+            spine_shown: None,
             status,
             frames: 0,
         })
@@ -883,8 +891,31 @@ impl EditorApp {
         self.status = "play stopped".to_string();
     }
 
+    /// Show the play-in spine's latest columns at the top of the Inspector
+    /// tab, read-only. The snapshot comes from the live arena match the
+    /// session steps, never from the document; a refused frame keeps the last
+    /// one and names the reason in the status line.
+    fn attach_spine(&mut self) {
+        let Some(registry) = self.spine_registry.as_ref() else {
+            return;
+        };
+        let Some(session) = self.play_in.as_ref() else {
+            return;
+        };
+        let tick = session.spine_tick();
+        if self.spine_shown == Some(tick) {
+            return;
+        }
+        let snapshot = session.spine_snapshot();
+        match self.dock.set_spine(tick, &snapshot, registry) {
+            Ok(_) => self.spine_shown = Some(tick),
+            Err(error) => self.status = format!("spine inspector refused: {error}"),
+        }
+    }
+
     /// Start the in-editor session on a round copy of the document: no child
-    /// process is spawned and the scene file is not written (W6).
+    /// process is spawned and the scene file is not written (W6). The session
+    /// also steps a live arena spine, shown in the Inspector tab.
     pub fn play_in_start(&mut self) -> Result<(), EditorAppError> {
         self.play_in_stop();
         let session =
@@ -898,6 +929,8 @@ impl EditorApp {
             session.revision()
         );
         self.play_in = Some(session);
+        self.spine_shown = None;
+        self.attach_spine();
         Ok(())
     }
 
@@ -920,6 +953,7 @@ impl EditorApp {
                     reason: error.to_string(),
                 })?;
         self.status = format!("play-in tick {tick} (frames {})", session.frames());
+        self.attach_spine();
         Ok(tick)
     }
 
@@ -930,6 +964,8 @@ impl EditorApp {
             let _ = session.stop();
             self.status = format!("play-in stopped at tick {tick}");
         }
+        self.spine_shown = None;
+        self.dock.clear_spine();
     }
 
     /// Save the document to the project path. Returns bytes written.
@@ -1114,6 +1150,7 @@ impl EditorApp {
                 self.status = format!("play-in tick {} frame {}", frame.tick, frame.frame);
             }
         }
+        self.attach_spine();
         self.refresh_viewport_texture();
         let raw = self
             .egui_winit

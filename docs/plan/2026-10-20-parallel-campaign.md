@@ -57,19 +57,41 @@ the 309 ready rows on 2026-10-20.
    the current FOCUS path.
 3. **W2:** R 31, G 24, M 18, P 13. T runs beside them and removes rows instead of
    landing them: close obsolete, add missing `Owns`, park what needs a person.
-4. **W3:** the rest, still three lanes.
+4. **W3:** the rest, still three local lanes.
 
-Never run all lanes at once. One tree, no worktrees, one `target/` lock and one
+Local builds stay at three lanes: one tree, one `target/` lock and one
 `Cargo.lock`. The 2026-10-19 session ran three loops and about ten cargo
-processes; timing rows had to wait for a quiet window. Three lanes plus the
-GitHub proof fleet is the useful ceiling here.
+processes; timing rows wait for a quiet window. The scale-out below adds
+remote-only lanes that do not compile on this PC.
+
+## Scale-out 2026-10-20
+
+The owner allowed isolated clones and asked for maximum speed. What landed:
+
+- **Disk:** deleted `C:\_quarantine\2026-10-20\target-debug`, the 82 GB stale
+  E86 debug cache (275,857 files, reproducible; `MOVES.tsv` kept). C: free went
+  from 15.7 GB to 90.8 GB.
+- **Four clone lanes** from GitHub: `C:\e2040-lanes\{anim,physics,core,proof}`.
+  Each runs `node tools/nonstop.mjs --remote-only` on MiniMax M3.1 Flash max:
+  - anim: AM14, LF12
+  - physics: AD17, PX15
+  - core: RC22, RC24
+  - proof: NS4, FB4
+- `--remote-only` bans local cargo: every `cargo check`, test and clippy goes to
+  `node tools/gh-check.mjs`, so the clones add no `target/` dirs and no CPU load.
+- The three local loops stay on endpoint, assets and net.
+
+Seven lanes is the ceiling this box can hold: 12 threads, 16.9 GB RAM and
+GitHub's 20 concurrent checks. More sessions would swap, not land rows.
+
 
 ## Per-row protocol
 
 - Read `AGENTS.md` and the matching skill first; take one row's slice with
   `node tools/board-slice.mjs <ID>`.
-- Edit only the paths in the row's `Owns`; never touch another session's dirty
-  file, never `git add -A`, never a worktree.
+- Edit only the paths in the row's `Owns` and your lane's crate; never touch
+  another session's dirty file, never `git add -A`. Clones are isolated; the
+  main tree stays the merge target.
 - Prove locally with `cargo check -p <crate>`; send tests, clippy and multi-crate
   proofs to `node tools/gh-check.mjs`. A red in a file you do not own is its
   owner's; re-run when the tree clears, do not fix it.
@@ -87,7 +109,9 @@ would add weeks and need an owner decision, so "all 695" is not a scheduling
 target. The board also grows while it is worked; treat it as a backlog, not a
 burn-down.
 
-## Launch, after the owner says go
+## Launch (running since 2026-10-20)
+
+Local lanes, three at once:
 
 ```
 node tools/nonstop.mjs --ids ARC6,ARC9,ARC16,SP20,API6,SPR1,CT16,AB15,PB51,PB60,PB64,E16,E44,NS13,FU3,EG35,AD2,AD9,AD10,AD20,SP62,AX28 --max 5 --minutes 40
@@ -95,8 +119,18 @@ node tools/nonstop.mjs --ids AS5,CT10,CT11,CT13,E70,E73,NS17,NS20,GN6,FU6,AD15,G
 node tools/nonstop.mjs --ids ARC5,MP12,MP16,E15,E40,E50,ON26,ON28,ON29,BX9,MP26,QN9 --max 5 --minutes 40
 ```
 
-No `--retry`: the shared ledger already holds attempted ids. The three loops
-write one ledger and one log per row under `target/nonstop/`.
+Remote-only clone lanes, each in its own checkout:
+
+```
+cd C:\e2040-lanes\anim    && node tools/nonstop.mjs --remote-only --model "zen-proxy-minimax/minimax-m3.1-flash-free#max" --ids AM14,LF12 --max 2 --minutes 40
+cd C:\e2040-lanes\physics && node tools/nonstop.mjs --remote-only --model "zen-proxy-minimax/minimax-m3.1-flash-free#max" --ids AD17,PX15 --max 2 --minutes 40
+cd C:\e2040-lanes\core    && node tools/nonstop.mjs --remote-only --model "zen-proxy-minimax/minimax-m3.1-flash-free#max" --ids RC22,RC24 --max 2 --minutes 40
+cd C:\e2040-lanes\proof   && node tools/nonstop.mjs --remote-only --model "zen-proxy-minimax/minimax-m3.1-flash-free#max" --ids NS4,FB4 --max 2 --minutes 40
+```
+
+No `--retry`: each ledger already holds attempted ids. The local loops write
+`target/nonstop/`; each clone writes its own.
+
 
 ## Owner decisions this plan waits on
 

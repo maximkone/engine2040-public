@@ -2972,7 +2972,7 @@ mod tests {
         use engine_ui::{FighterHud, Hud};
         let mut src = Hud::new(0, 1000, 1000, 0, 0);
         let mut dst = Hud::new(0, 1000, 1000, 0, 0);
-        for slot in 0..16u8 {
+        for slot in 0..MAX_PARTICIPANTS {
             let id = FighterId::new(slot).expect("slot in cap");
             src.upsert_fighter(FighterHud::new(id, 1000, 1000)).unwrap();
             if slot < 8 {

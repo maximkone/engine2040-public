@@ -19,12 +19,21 @@
 //! coordinate table the report carries stays as the ablation arm
 //! (`ablation_numbers`) and is never the edit. A solve that cannot place
 //! refuses with the SP5 conflict set (`LevelRefusal::conflict_set`).
+//!
+//! ARC9 spine landing: the SP5 solve's outputs are spine transform writes.
+//! One write per placed prop (position, yaw, authored box), and the writes
+//! install the arena spine's world: the boxes the spine step plays around,
+//! read back through the one scene loader the door and `play.run` share.
+//! A solve that cannot place refuses with the conflict set and installs
+//! nothing, so the spine's world only moves when a write lands, and the
+//! undo takes the level back off the spine.
 
 #[cfg(feature = "mcp")]
 mod imp {
     use std::borrow::Cow;
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+    use engine_arena::world::MatchWorld;
     use engine_core::{hash::FNV64_OFFSET, hash_bytes, Fnv64};
     use engine_editor::capability::{self, approve};
     use engine_editor::commands::{self, Batch, Op, ProvenanceStamp};
@@ -156,6 +165,8 @@ mod imp {
         NothingToUndo,
         /// Token names another batch than the newest one.
         UndoMismatch { expected: u64, got: u64 },
+        /// The level does not fit the arena spine's world; nothing landed.
+        SpineWorld { reason: String },
     }
 
     impl LevelError {
@@ -175,6 +186,7 @@ mod imp {
                 Self::UndoneKey { .. } => "undone_key",
                 Self::NothingToUndo => "nothing_to_undo",
                 Self::UndoMismatch { .. } => "undo_mismatch",
+                Self::SpineWorld { .. } => "spine_world",
             }
         }
     }
@@ -237,6 +249,10 @@ mod imp {
                     f,
                     "undo_mismatch: newest undoable batch is key {expected}, not token {got}; \
                      omit undo_token to undo the newest batch"
+                ),
+                Self::SpineWorld { reason } => write!(
+                    f,
+                    "spine_world: the level does not fit the arena spine's world: {reason}"
                 ),
             }
         }
@@ -853,6 +869,44 @@ mod imp {
             .collect();
         out.sort_by_key(|write| write.id);
         out
+    }
+
+    /// The arena spine world a level's actors install: one oriented box per
+    /// physical actor (the props; the room shell is not physical), read back
+    /// through the one scene loader the door and `play.run` share
+    /// ([`crate::play::world_load`]). The loader owns "what blocks a
+    /// fighter", so the level and the document agree box for box.
+    ///
+    /// Consumer: the arena spine step, which resolves every fighter against
+    /// these boxes once per tick; the world's digest rides every checkpoint,
+    /// so a level on the spine is a different match. Units: meters, radians.
+    /// Determinism: the same actors give the same world digest (the loader
+    /// sorts the boxes canonically). Errors: [`LevelError::SpineWorld`] when
+    /// the level holds a box the arena cannot play.
+    pub fn spine_world(actors: &[Actor]) -> Result<MatchWorld, LevelError> {
+        let mut doc = commands::Document::new();
+        for actor in actors.iter().filter(|actor| actor.physical) {
+            let id = ObjectId::new();
+            doc.hierarchy
+                .insert(
+                    id,
+                    ObjectId::NIL,
+                    Transform::new(
+                        [actor.x, actor.y, actor.z],
+                        quat_of_yaw(actor.yaw),
+                        [actor.sx, actor.sy, actor.sz],
+                    ),
+                )
+                .map_err(|error| LevelError::SpineWorld {
+                    reason: format!("the level holds a node the scene refuses: {error}"),
+                })?;
+        }
+        crate::play::world_load::match_world(&doc).map_err(|error| LevelError::SpineWorld {
+            reason: format!(
+                "the level does not fit the spine's world: {}",
+                error.message
+            ),
+        })
     }
 
     /// Relation-diff edit path: plan the brief into relation requests, solve
@@ -2131,6 +2185,167 @@ mod imp {
                 );
                 assert!(n.changes > 0, "brief {id} the solve changed relations");
             }
+        }
+
+        /// The arena spine step over one world: the match the spine plays
+        /// around that world (the world digest rides every checkpoint).
+        fn spine_match(world: &engine_arena::world::MatchWorld) -> Vec<engine_arena::Checkpoint> {
+            let config =
+                engine_arena::ArenaConfig::try_new(2040, 60, 2, 12.0).expect("valid config");
+            let tape = engine_arena::FighterTape::default();
+            engine_arena::spine_step::run_spine(&config, &tape, world)
+        }
+
+        #[test]
+        fn arc9_ten_ab1_briefs_place_on_the_spine_with_zero_findings() {
+            let empty = engine_arena::world::MatchWorld::empty();
+            let plain = spine_match(&empty);
+            assert_eq!(plain.len(), 60, "the empty world plays");
+            for (id, seed, brief) in arc12_brief_rows() {
+                let mut digests = Vec::new();
+                for round in 0..2u64 {
+                    let mut session = fresh_session();
+                    let revision = session.revision();
+                    let preview = session.preview(&brief, seed).expect("brief previews");
+                    assert_eq!(preview.verdict, "pass", "brief {id} round {round}");
+                    assert!(
+                        preview.findings.is_empty(),
+                        "brief {id} round {round} zero spatial findings"
+                    );
+                    assert!(
+                        preview.conflict_set.is_empty(),
+                        "brief {id} round {round} places"
+                    );
+                    let key = 6000 + seed + round;
+                    let outcome = session
+                        .apply(&brief, seed, revision, key)
+                        .expect("brief applies");
+                    let applied = match outcome {
+                        ApplyOutcome::Placed(applied) => applied,
+                        ApplyOutcome::Refused { refusal, .. } => {
+                            panic!("brief {id} refused: {}", refusal.reason)
+                        }
+                    };
+                    assert_eq!(applied.revision, revision + 1, "brief {id}");
+                    assert!(
+                        applied.report.routes.iter().all(|route| route.reachable),
+                        "brief {id} every route reachable"
+                    );
+                    // The level sits on the spine: one box per placed prop.
+                    let world = session.spine_world().expect("the level fits the spine");
+                    let props: Vec<&Actor> = session
+                        .current()
+                        .iter()
+                        .filter(|actor| actor.physical)
+                        .collect();
+                    assert_eq!(
+                        world.obstacles().len(),
+                        props.len(),
+                        "brief {id}: one box per placed prop"
+                    );
+                    for prop in &props {
+                        assert!(
+                            world.obstacles().iter().any(|block| {
+                                (block.center[0] - prop.x).abs() < 1.0e-4
+                                    && (block.center[1] - prop.z).abs() < 1.0e-4
+                                    && (block.half[0] - prop.sx * 0.5).abs() < 1.0e-4
+                                    && (block.half[1] - prop.sz * 0.5).abs() < 1.0e-4
+                            }),
+                            "brief {id}: the prop {} is a box on the spine",
+                            prop.name
+                        );
+                    }
+                    // The spine played that world, so it is not the bare match.
+                    let played = spine_match(&world);
+                    assert!(!played.is_empty(), "brief {id}: the spine played the level");
+                    assert_ne!(
+                        played, plain,
+                        "brief {id} round {round}: the level moved the match"
+                    );
+                    digests.push(world.digest());
+                    // The undo takes the level back off the spine.
+                    let undone = session.undo(Some(key)).expect("level undoes");
+                    assert_eq!(undone.undone_key, key, "brief {id}");
+                    let cleared = session.spine_world().expect("the undone level fits");
+                    assert!(cleared.is_empty(), "brief {id}: undo clears the spine");
+                    assert_eq!(
+                        spine_match(&cleared),
+                        plain,
+                        "brief {id} round {round}: undo returns the bare match"
+                    );
+                }
+                assert_eq!(digests[0], digests[1], "brief {id}: the same level twice");
+            }
+        }
+
+        #[test]
+        fn arc9_a_refused_solve_names_the_conflicts_and_leaves_the_spine_empty() {
+            // Four walls cannot be met at once on one grounded prop.
+            let text = "prop crate doomed\n\
+                 want doomed next_to wall:north [0,10]\n\
+                 want doomed next_to wall:south [0,10]\n\
+                 want doomed next_to wall:east [0,10]\n\
+                 want doomed next_to wall:west [0,10]";
+            let env = envelope(text, 23).expect("stuck brief envelopes");
+            let refusal = match relation_edit(&env).expect("stuck brief plans") {
+                EditOutcome::Refused(refusal) => refusal,
+                EditOutcome::Edited(edit) => panic!("impossible brief placed: {:?}", edit.writes),
+            };
+            assert!(!refusal.findings.is_empty(), "the refusal carries findings");
+            assert!(
+                !refusal.conflict_set.is_empty(),
+                "the SP5 conflict set is named"
+            );
+            // The session refuses the same brief and the spine stays bare.
+            let mut session = fresh_session();
+            let revision = session.revision();
+            let outcome = session
+                .apply(text, 23, revision, 77)
+                .expect("the session answers");
+            assert!(
+                matches!(outcome, ApplyOutcome::Refused { .. }),
+                "a refused solve never lands"
+            );
+            let world = session
+                .spine_world()
+                .expect("the bare level fits the spine");
+            assert!(world.is_empty(), "a refusal installs nothing on the spine");
+        }
+
+        #[test]
+        fn arc9_door_level_lands_on_the_spine_and_the_undo_clears_it() {
+            let mut state = ServerState::new(11, Capability::unrestricted(11));
+            let empty = engine_arena::world::MatchWorld::empty();
+            let plain = spine_match(&empty);
+            let out = build_level_on_state(
+                &mut state,
+                &BuildLevelArgs {
+                    brief: BRIEF_BRAZIER.to_owned(),
+                    seed: 3000,
+                    expected_revision: 0,
+                    idempotency_key: 700,
+                },
+            )
+            .expect("the door places the level");
+            assert!(out.solved, "{}", out.reason);
+            assert_eq!(out.placements.len(), 1, "the door placed the brazier");
+            // The document the door wrote is the spine's world.
+            let world =
+                crate::play::world_load::match_world(&state.doc).expect("the level fits the spine");
+            assert_eq!(world.obstacles().len(), 1, "one box per placed prop");
+            let played = spine_match(&world);
+            assert!(!played.is_empty(), "the spine played the level");
+            assert_ne!(played, plain, "the level moved the match");
+            // The undo takes the level back off the spine.
+            commands::undo(&mut state.doc, &mut state.journal).expect("the undo lands");
+            let cleared = crate::play::world_load::match_world(&state.doc)
+                .expect("the bare document fits the spine");
+            assert!(cleared.is_empty(), "the undo cleared the spine");
+            assert_eq!(
+                spine_match(&cleared),
+                plain,
+                "the undo returned the bare match"
+            );
         }
 
         #[test]

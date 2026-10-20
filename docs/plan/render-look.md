@@ -109,9 +109,9 @@ Owner lanes: `game` (`crates/game`), with `ui` and `input` only where a row name
 | Packaged tree vs clean install | REAL dist exists, 5-min clean install NEVER run | `crates/game/src/package.rs`: `target/as7-dist` REAL/REAL; the 18000-frame run was never attempted (binary 5-min wall bound blocks it, see WIN13) - code cut 2026-10-16, recover via git log --follow -- crates/game/src/package.rs |
 
 Module note: GM3 stays OPEN and BLOCKED until the 18000-frame clean-machine
-run (A8). Scale cap, read in code: `MAX_PARTICIPANTS: u8 = 16`
-(`crates/input/src/fighter.rs:17`); every WIN row proves at 16 and names
-what 64 needs.
+run (A8). Scale cap, read in code: `MAX_PARTICIPANTS: u8 = 32`
+(`crates/input/src/fighter.rs`, owner decision GE12 2026-10-20); every
+WIN row proves at 16 and names what 64 needs.
 
 Status 2026-10-17 (window and packaged run): the game dead-code cut (`d89bd98e`, an `auto: backup` commit; rot packet `0-rot-game-dead-r1`) removed `package.rs` and its test (the GM3 packaging check, row SL39), `modes.rs` (display-mode manager: WIN2 and GP17 are ticked, WIN8 is open and owns it) and `window_bind.rs` (CT29a). Section 2 text that says `package.rs` checks framing and records digests describes removed code. GM3 is still BLOCKED and open; no packaged run exists.
 

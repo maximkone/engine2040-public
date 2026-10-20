@@ -9,6 +9,8 @@ Two scripts, no add-ons, no downloads, no paid tools.
 | `render_frames.py` | Blender 5.2 headless: orthographic ring, transparent film, `frame_NN.png` set + `frames.json`. |
 | `pack_atlas.mjs` | Node 24, builtins only: PNG decode/encode through `node:zlib`, atlas PNG + `manifest.json`. |
 | `build_house.py` | Blender 5.2 headless: assembles one 2x2 house from Kenney Fantasy Town Kit pieces, one `.glb` per state. |
+| `build_buildings.py` | Blender 5.2 headless: assembles the five KAM2 house kinds on their real footprints (3x3 warehouse, 2x2 farm/mill/bakery/woodcutter), one `.glb` per state. |
+| `buildings_receipt.mjs` | Node 24, builtins only: verifies the ART3 building atlases against their `source.json` and prints the receipt. |
 
 Needs Blender 5.2 at `C:\Program Files\Blender Foundation\Blender 5.2\blender.exe` and Node 24.
 Run everything from the repo root. The `--` after the script path separates our flags from Blender's.
@@ -64,6 +66,9 @@ too unless `--keep-lights`. Output is `<out>\frame_NN.png`, `<out>\mask_NN.png` 
 | `--span <units>` | - | fixed ortho span, to reuse one scale across runs |
 | `--ground-px <px>` | centred | cell row where the ground pivot lands |
 | `--floor-z <z>` | pose low point | ground plane of the model |
+| `--yaw <deg>` | - | render one fixed yaw instead of the ring (sets frames 1) |
+| `--pivot-x <x>` | bounds centre | world x of the ground pivot; the camera aims at it |
+| `--pivot-y <y>` | bounds centre | world y of the ground pivot |
 
 Frame `NN` is the compass heading `NN` of the style-lock order `S, SW, W, NW, N, NE, E, SE`.
 The model stands still and the camera walks the ring, which is the same picture as a fixed
@@ -92,6 +97,27 @@ Keep `frame_01.png` (camera at the building's south-east corner) and pack it wit
 holds at the lock's native 64x32 px tile, so the example uses `--span 3.2` = 40 px per kit
 cell (0.79 of native) and says so in its `source.json`. The contact shadow lands under the
 building and reads as a fringe at the base.
+
+## Build the building kinds
+
+`build_buildings.py` holds one assembly per kind, on the footprint the sim already uses
+(`crates/kam2-sim/src/economy.rs`): warehouse 3x3, farm/mill/bakery/woodcutter 2x2. It
+writes one `.glb` per state; the kit is never committed.
+
+```powershell
+blender --background --factory-startup --python tools\kam2\build_buildings.py -- --list
+blender --background --factory-startup --python tools\kam2\build_buildings.py -- --kit "<pack>\Models\GLB format" --out $env:TEMP\kam2 --kind mill --state finished
+blender --background --factory-startup --python tools\kam2\render_frames.py -- --scene $env:TEMP\kam2\mill\finished.glb --out $env:TEMP\kam2\mill\finished --yaw 135 --size 288 --span 5.6917 --ground-px 216 --pivot-x 1 --pivot-y 1 --samples 48
+```
+
+`--yaw 135` renders one frame at 45 deg off the S axis instead of walking the ring; it is the
+same camera as ring frame 01 and is what the building atlases use. `--pivot-x/--pivot-y` fix a
+world pivot: the camera aims at that point, so every state of one building lands on the same
+pivot pixel even when the alpha box differs. Both flags are optional and leave the old ring
+behaviour unchanged.
+
+Receipts, exact spans, pivots and the byte-identical rebuild proof:
+`content/kam2/buildings/README.md`.
 
 ## Pack an atlas
 

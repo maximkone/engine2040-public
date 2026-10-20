@@ -3,7 +3,7 @@
 //! Units: ticks at 60 Hz, damage/poise in permille points, ids are slots.
 //! Determinism: integer math, fighter-ID order; same tables+inputs => same events.
 //! Errors: ExchangeError for bad versions/rows/slots; resolvers never panic.
-//! Budget: resolution O(n^2) over <=16 slots, no heap per tick (caller buffer).
+//! Budget: resolution O(n^2) over <=32 slots, no heap per tick (caller buffer).
 //! Slots: match slots come from `engine_input::MAX_PARTICIPANTS` (the one
 //! canonical cap); resolvers take the slot count (`ExchangeState.count`) plus table sets
 //! (`ExchangeTables`/`ExchangeTableSet`), never a private cap. Crate edge

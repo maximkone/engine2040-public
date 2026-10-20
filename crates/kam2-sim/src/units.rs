@@ -346,7 +346,7 @@ mod tests {
     use crate::sim::{Command, Refusal, Sim};
 
     fn spawn(sim: &mut Sim, kind: UnitKind, side: u8, x: i32, y: i32) -> u32 {
-        sim.apply(Command::SpawnUnit { kind, side, x, y })
+        sim.apply_for(side, Command::SpawnUnit { kind, side, x, y })
             .expect("spawn");
         sim.units().last().expect("a unit").id
     }
@@ -389,22 +389,28 @@ mod tests {
         );
         spawn(&mut sim, UnitKind::Worker, 0, 5, 5);
         assert_eq!(
-            sim.apply(Command::SpawnUnit {
-                kind: UnitKind::Swordsman,
-                side: 1,
-                x: 5,
-                y: 5
-            }),
+            sim.apply_for(
+                1,
+                Command::SpawnUnit {
+                    kind: UnitKind::Swordsman,
+                    side: 1,
+                    x: 5,
+                    y: 5
+                }
+            ),
             Err(Refusal::Occupied),
             "another unit stands there"
         );
         assert_eq!(
-            sim.apply(Command::SpawnUnit {
-                kind: UnitKind::Worker,
-                side: 2,
-                x: 6,
-                y: 5
-            }),
+            sim.apply_for(
+                2,
+                Command::SpawnUnit {
+                    kind: UnitKind::Worker,
+                    side: 2,
+                    x: 6,
+                    y: 5
+                }
+            ),
             Err(Refusal::BadSide),
             "only sides 0 and 1 exist"
         );
@@ -418,12 +424,15 @@ mod tests {
         })
         .expect("warehouse");
         assert_eq!(
-            sim.apply(Command::SpawnUnit {
-                kind: UnitKind::Worker,
-                side: 1,
-                x: 1,
-                y: 8
-            }),
+            sim.apply_for(
+                1,
+                Command::SpawnUnit {
+                    kind: UnitKind::Worker,
+                    side: 1,
+                    x: 1,
+                    y: 8
+                }
+            ),
             Err(Refusal::Occupied),
             "a house stands there"
         );
@@ -461,10 +470,13 @@ mod tests {
             target: archer,
         })
         .expect("order");
-        sim.apply(Command::Attack {
-            id: archer,
-            target: swordsman,
-        })
+        sim.apply_for(
+            1,
+            Command::Attack {
+                id: archer,
+                target: swordsman,
+            },
+        )
         .expect("order");
         for _ in 0..20 {
             sim.tick();
@@ -569,10 +581,13 @@ mod tests {
             y: 1,
         })
         .expect("move");
-        sim.apply(Command::Attack {
-            id: archer,
-            target: swordsman,
-        })
+        sim.apply_for(
+            1,
+            Command::Attack {
+                id: archer,
+                target: swordsman,
+            },
+        )
         .expect("order");
         sim
     }

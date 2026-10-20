@@ -14,12 +14,12 @@
 //! clock, no float in hashed state. Errors: [`SiegeError`] at every
 //! boundary; invalid input is rejected loudly, never skipped.
 //!
-//! Shape: 64 slots are four 16-fighter shards (the `MAX_PARTICIPANTS`
-//! contract caps one match at 16, so the siege scales by composition,
-//! never by reopening that cap). Shards 0–1 are the attackers, shards
-//! 2–3 the defenders; global slot `g` is shard `g / 16`, local slot
-//! `g % 16`. Every shard runs all-AI through the arena brain fill, so a
-//! bot-filled siege needs no human inputs; connected humans stage
+//! Shape: 64 slots are four 16-fighter shards. The canonical
+//! `MAX_PARTICIPANTS` cap is 32, and siege still composes four fixed
+//! 16-fighter shards (a shard size, never a reopened cap). Shards 0–1 are the
+//! attackers, shards 2–3 the defenders; global slot `g` is shard `g / 16`,
+//! local slot `g % 16`. Every shard runs all-AI through the arena brain fill,
+//! so a bot-filled siege needs no human inputs; connected humans stage
 //! through [`SiegeServer::submit`] onto their shard's server. Walls are
 //! eight integer-hp sections bombarded by four deterministic engines on
 //! a fixed schedule with sorted `(tick, engine)` impacts; the arena's
@@ -56,7 +56,7 @@ use engine_net::interest::{
 
 /// Arena shards composing one siege (4 x 16 = 64 slots).
 pub const SIEGE_SHARDS: usize = 4;
-/// Fighters per shard (the single-match cap, composed not reopened).
+/// Fighters per shard (a composition size, not the canonical match cap).
 pub const SHARD_FIGHTERS: u8 = 16;
 /// Global slots in one siege.
 pub const SIEGE_SLOTS: usize = 64;

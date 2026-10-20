@@ -16,6 +16,10 @@ engine-arena.workspace = true
 engine-core.workspace = true
 engine-input.workspace = true
 engine-observe.workspace = true
+# ARC5: rejoin resim keeps spine checkpoints in canonical `Spine::snapshot`
+# bytes and reads/writes them through the save rollback/persist envelopes.
+engine-ecs.workspace = true
+engine-save.workspace = true
 # QUIC transport (optional; the headless default stays std-only).
 quinn = { version = "0.11", optional = true }
 # WebTransport server (optional): browsers join the dedicated server through

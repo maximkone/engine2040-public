@@ -159,6 +159,65 @@ mod tests {
     }
 
     #[test]
+    fn real_spine_save_roundtrip_x2_is_byte_equal() {
+        use engine_ecs::spine::{Body, Spine, Transform, Vitals};
+
+        let mut spine = Spine::with_capacity(2);
+        for slot in 0..2 {
+            let at = f32::from(i16::try_from(slot).expect("slot fits i16"));
+            spine
+                .spawn(
+                    Transform {
+                        pos: [at + 1.5, 0.0, at - 2.5],
+                        yaw: at * 0.5,
+                    },
+                    Body::default(),
+                    Vitals {
+                        hp_permille: 1000 - u16::try_from(slot).expect("slot fits u16"),
+                        stamina: 80,
+                        poise: 4,
+                        state: Vitals::ATTACKING,
+                    },
+                )
+                .expect("fixture has room");
+        }
+        let snapshot = spine.snapshot();
+
+        // Two independent seals of the real spine are byte-identical.
+        let (first, second) = (
+            seal_spine(2040, 600, &snapshot.bytes).expect("real spine seals"),
+            seal_spine(2040, 600, &snapshot.bytes).expect("real spine seals"),
+        );
+        assert_eq!(first, second, "same spine seals the same payload x2");
+
+        // The payload restores through the spine codec, twice.
+        for payload in [&first, &second] {
+            let opened = open_spine(payload).expect("payload opens");
+            assert_eq!((opened.seed, opened.tick), (2040, 600));
+            let restored = Spine::restore(&opened.spine).expect("spine restores");
+            assert_eq!(
+                restored.snapshot().bytes,
+                snapshot.bytes,
+                "restore then snapshot is byte-equal"
+            );
+        }
+
+        // The envelope round-trip keeps the payload and the spine identity.
+        let sealed = super::super::seal(PERSIST_SCHEMA_VERSION, 2040, 600, &first)
+            .expect("payload fits the envelope");
+        let env = super::super::open(&sealed).expect("envelope opens");
+        let again = open_spine(&env.payload).expect("payload opens again");
+        assert_eq!(again.spine, snapshot.bytes);
+        assert_eq!(
+            Spine::restore(&again.spine)
+                .expect("spine restores from the envelope")
+                .snapshot()
+                .bytes,
+            snapshot.bytes
+        );
+    }
+
+    #[test]
     fn version_length_and_spine_gates_are_loud() {
         let spine = spine_bytes(2);
         let mut bad = seal_spine(1, 2, &spine).expect("valid spine seals");

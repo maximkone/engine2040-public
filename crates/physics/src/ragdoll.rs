@@ -40,8 +40,8 @@
 
 use super::joint_limits::bone_groups;
 use super::rapier::{
-    ordered_linvel, ordered_translation, position_in_bounds, quantize, sanitize3, BodyState,
-    FIXED_DT, GRAVITY_Y, MAX_LEN,
+    ordered_linvel, ordered_translation, position_in_bounds, quantize, resolve_coupling, sanitize3,
+    BodyState, ParamsError, RagdollParams, FIXED_DT, GRAVITY_Y, MAX_LEN,
 };
 use engine_anim::contract::{validate_pose, validate_skeleton, AnimError, LocalPose, Skeleton};
 use engine_core::{quat_mul, Fnv64};
@@ -111,6 +111,8 @@ pub enum Error {
     BadCouplingBound,
     /// Snapshot body count (or animated pose length) does not match.
     SnapshotMismatch,
+    /// The ragdoll params builder refused the table.
+    Params(ParamsError),
 }
 
 impl Display for Error {
@@ -136,6 +138,7 @@ impl Display for Error {
                 f.write_str("invalid coupling bound: need finite step, floor and spacing")
             }
             Error::SnapshotMismatch => f.write_str("snapshot does not match this ragdoll"),
+            Error::Params(e) => write!(f, "ragdoll params refused: {e}"),
         }
     }
 }
@@ -145,6 +148,12 @@ impl std::error::Error for Error {}
 impl From<AnimError> for Error {
     fn from(e: AnimError) -> Self {
         Error::Anim(e)
+    }
+}
+
+impl From<ParamsError> for Error {
+    fn from(e: ParamsError) -> Self {
+        Error::Params(e)
     }
 }
 
@@ -369,11 +378,16 @@ fn validate_capsules(skeleton: &Skeleton, capsule_dims: &[BoneShape]) -> Result<
 /// One dynamic capsule body per joint at the posed world transform, then the
 /// joint table between them. Returns the body/collider/joint sets and the
 /// body handle of each joint in skeleton order.
+///
+/// The masses come from the one params builder: a bone weighs its share of
+/// the total and the collider density carries it. The CCD switch per bone
+/// comes from the one CCD policy.
 fn build_bones(
     skeleton: &Skeleton,
     capsule_dims: &[BoneShape],
     world_pos: &[[f32; 3]],
     world_rot: &[[f32; 4]],
+    params: &RagdollParams,
 ) -> (
     RigidBodySet,
     ColliderSet,
@@ -385,6 +399,7 @@ fn build_bones(
     let mut colliders = ColliderSet::new();
     let mut impulse_joints = ImpulseJointSet::new();
     let mut order = Vec::with_capacity(skeleton.len());
+    let ccd_flags = params.ccd_flags();
     for (i, (p, r)) in world_pos.iter().zip(world_rot.iter()).enumerate() {
         let body = RigidBodyBuilder::dynamic()
             .translation(Vector::new(p[0], p[1], p[2]))
@@ -393,8 +408,9 @@ fn build_bones(
             // Sleeping is disabled so kinematic state (pos/rot/vel) is
             // the complete future-affecting state and restore is exact.
             .can_sleep(false)
-            // CCD is on: fast limbs stop at thin shields (see `set_ccd`).
-            .ccd_enabled(true)
+            // The one CCD policy: a dynamic bone rides the solver so fast
+            // limbs stop at thin shields (see `set_ccd`).
+            .ccd_enabled(ccd_flags.get(i).copied().unwrap_or(false))
             .build();
         let handle = bodies.insert(body);
         // Orientation comes from the animated world rotation. The builder
@@ -403,9 +419,14 @@ fn build_bones(
         if let Some(b) = bodies.get_mut(handle) {
             b.set_rotation(normalized_rotation(r), false);
         }
+        // The density carries the bone's share of the body mass: the builder
+        // divides that mass by the capsule volume.
+        let density = params
+            .density_for(i, capsule_dims[i].radius, capsule_dims[i].half_height)
+            .unwrap_or(1.0);
         let mut bone_collider =
             ColliderBuilder::capsule_y(capsule_dims[i].half_height, capsule_dims[i].radius)
-                .density(1.0)
+                .density(density)
                 .friction(FRICTION)
                 .restitution(0.0);
         // Collision groups keep a bone from touching its parent or children
@@ -438,25 +459,49 @@ impl Ragdoll {
     /// `capsule_dims` carries one [`BoneShape`] per joint. Blend starts at
     /// `0`, so [`Ragdoll::bone_poses`] returns `pose` exactly until the caller
     /// raises the weight.
+    ///
+    /// The solver passes, the bone masses and the CCD switches come from the
+    /// one params builder ([`RagdollParams`]): the rig weighs
+    /// [`super::rapier::RAGDOLL_TOTAL_MASS_KG`] and every bone rides the
+    /// continuous-collision solver.
     pub fn spawn(
         skeleton: &Skeleton,
         pose: &LocalPose,
         capsule_dims: &[BoneShape],
     ) -> Result<Self, Error> {
+        let radii: Vec<f32> = capsule_dims.iter().map(|d| d.radius).collect();
+        let half_heights: Vec<f32> = capsule_dims.iter().map(|d| d.half_height).collect();
+        let params =
+            RagdollParams::for_rig(skeleton, &radii, &half_heights).map_err(Error::Params)?;
+        Self::spawn_with_params(skeleton, pose, capsule_dims, &params)
+    }
+
+    /// Spawn with a caller table of masses and solver passes. The table must
+    /// have one row per bone; a table that misses is refused by the builder
+    /// and nothing is built.
+    pub fn spawn_with_params(
+        skeleton: &Skeleton,
+        pose: &LocalPose,
+        capsule_dims: &[BoneShape],
+        params: &RagdollParams,
+    ) -> Result<Self, Error> {
         validate_skeleton(skeleton).map_err(Error::Anim)?;
         validate_pose(skeleton, pose).map_err(Error::Anim)?;
         validate_capsules(skeleton, capsule_dims)?;
+        if params.bones() != skeleton.len() {
+            return Err(Error::Params(ParamsError::BoneCount {
+                want: skeleton.len(),
+                got: params.bones(),
+            }));
+        }
         let (world_pos, world_rot) = world_transforms(skeleton, pose);
         let (bodies, colliders, impulse_joints, order) =
-            build_bones(skeleton, capsule_dims, &world_pos, &world_rot);
-        let params = IntegrationParameters {
-            dt: FIXED_DT,
-            ..Default::default()
-        };
+            build_bones(skeleton, capsule_dims, &world_pos, &world_rot, params);
+        let integration = params.integration(FIXED_DT);
         Ok(Self {
             pipeline: PhysicsPipeline::new(),
             gravity: Vector::new(0.0, GRAVITY_Y, 0.0),
-            params,
+            params: integration,
             islands: IslandManager::new(),
             broad: BroadPhaseBvh::new(),
             narrow: NarrowPhase::new(),
@@ -476,7 +521,7 @@ impl Ragdoll {
             coupling_stats: CouplingStats::default(),
             radii: capsule_dims.iter().map(|d| d.radius).collect(),
             half_heights: capsule_dims.iter().map(|d| d.half_height).collect(),
-            ccd_flags: vec![true; skeleton.len()],
+            ccd_flags: params.ccd_flags(),
             pending: Vec::with_capacity(32),
             contact_events: 0,
         })
@@ -1037,169 +1082,6 @@ pub(crate) fn drain_narrow_contacts<C>(
     *counter = counter.wrapping_add(u64::try_from(pending.len()).unwrap_or(u64::MAX));
 }
 
-/// Divide-and-Truncate pass: floor lift plus neighbor separation, each
-/// correction divided into `substeps` equal parts with every part truncated
-/// to `max_step_m`. Index loops over caller-owned slices only, so the pass
-/// performs no steady-state allocation; math is `+ - * /` plus one `sqrt`
-/// per bone pair, all deterministic in skeleton order.
-fn resolve_coupling(
-    bodies: &mut RigidBodySet,
-    order: &[RigidBodyHandle],
-    radii: &[f32],
-    params: &CouplingParams,
-    stats: &mut CouplingStats,
-) {
-    if !params.enabled {
-        return;
-    }
-    resolve_floor(bodies, order, radii, params, stats);
-    resolve_spacing(bodies, order, params, stats);
-}
-
-/// Floor lift: a bone center below `floor_top_y + radius` rises back to the
-/// plane in divided, truncated parts, and downward velocity dies there so
-/// the next step does not re-tunnel. A correction the per-tick authority
-/// cannot cover stays counted as a residual penetration event.
-fn resolve_floor(
-    bodies: &mut RigidBodySet,
-    order: &[RigidBodyHandle],
-    radii: &[f32],
-    params: &CouplingParams,
-    stats: &mut CouplingStats,
-) {
-    let parts = f32::from(params.substeps);
-    for (i, handle) in order.iter().enumerate() {
-        let Some(radius) = radii.get(i).copied() else {
-            continue;
-        };
-        let Some(body) = bodies.get_mut(*handle) else {
-            continue;
-        };
-        let y = body.translation().y;
-        if !y.is_finite() {
-            continue;
-        }
-        let need = params.floor_top_y + radius - y;
-        if need <= 0.0 {
-            continue;
-        }
-        let each = need / parts;
-        let clamped = if each > params.max_step_m {
-            params.max_step_m
-        } else {
-            each
-        };
-        // One condition guards both counters: `clamped < each` means the
-        // per-tick authority (`max_step_m * substeps`) cannot cover `need`,
-        // so the cap shortened the move and a residual stays behind. When
-        // the parts cover the need, `(need / parts) * parts` lands on the
-        // plane up to float rounding and no event is counted.
-        if clamped < each {
-            stats.truncations = stats.truncations.wrapping_add(1);
-            stats.penetration_events = stats.penetration_events.wrapping_add(1);
-        }
-        let applied = clamped * parts;
-        let t = body.translation();
-        // Sleeping is disabled on every bone, so no wake is needed: `false`
-        // keeps the pass out of Rapier's user-change lists and the tick
-        // inside its allocation budget (see the audit test below).
-        body.set_translation(Vector::new(t.x, t.y + applied, t.z), false);
-        let lv = body.linvel();
-        if lv.y < 0.0 {
-            body.set_linvel(Vector::new(lv.x, 0.0, lv.z), false);
-        }
-        if applied > stats.max_correction_m {
-            stats.max_correction_m = applied;
-        }
-    }
-}
-
-/// Neighbor separation: bone centers closer than `min_spacing_m` part along
-/// the pair axis in divided, truncated halves, so clinched bones never sit
-/// inside each other. A degenerate zero-distance pair parts along +X.
-/// Same single-condition counters as the floor pass: a shortened move
-/// leaves a counted residual.
-fn resolve_spacing(
-    bodies: &mut RigidBodySet,
-    order: &[RigidBodyHandle],
-    params: &CouplingParams,
-    stats: &mut CouplingStats,
-) {
-    let parts = f32::from(params.substeps);
-    let n = order.len();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let (pi, pj) = match (bodies.get(order[i]), bodies.get(order[j])) {
-                (Some(a), Some(b)) => {
-                    let ta = a.translation();
-                    let tb = b.translation();
-                    ([ta.x, ta.y, ta.z], [tb.x, tb.y, tb.z])
-                }
-                _ => continue,
-            };
-            if pi.iter().chain(pj.iter()).any(|c| !c.is_finite()) {
-                continue;
-            }
-            let d = [pj[0] - pi[0], pj[1] - pi[1], pj[2] - pi[2]];
-            let d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-            if !d2.is_finite() {
-                continue;
-            }
-            // One `sqrt` per pair, allowed sim math.
-            let dist = d2.sqrt();
-            let need = params.min_spacing_m - dist;
-            if need <= 0.0 {
-                continue;
-            }
-            // Unit axis from `i` to `j`; a zero-distance pair parts along +X
-            // so the direction is always defined and deterministic.
-            let axis = if dist > 0.0 {
-                [d[0] / dist, d[1] / dist, d[2] / dist]
-            } else {
-                [1.0, 0.0, 0.0]
-            };
-            let each = need * 0.5 / parts;
-            let clamped = if each > params.max_step_m {
-                params.max_step_m
-            } else {
-                each
-            };
-            if clamped < each {
-                stats.truncations = stats.truncations.wrapping_add(1);
-                stats.penetration_events = stats.penetration_events.wrapping_add(1);
-            }
-            let half = clamped * parts;
-            // No wake: bones never sleep, and `false` keeps the pass out of
-            // Rapier's user-change lists (see the floor pass and the audit).
-            if let Some(a) = bodies.get_mut(order[i]) {
-                let t = a.translation();
-                a.set_translation(
-                    Vector::new(
-                        t.x - axis[0] * half,
-                        t.y - axis[1] * half,
-                        t.z - axis[2] * half,
-                    ),
-                    false,
-                );
-            }
-            if let Some(b) = bodies.get_mut(order[j]) {
-                let t = b.translation();
-                b.set_translation(
-                    Vector::new(
-                        t.x + axis[0] * half,
-                        t.y + axis[1] * half,
-                        t.z + axis[2] * half,
-                    ),
-                    false,
-                );
-            }
-            if half > stats.max_correction_m {
-                stats.max_correction_m = half;
-            }
-        }
-    }
-}
-
 /// Parent-to-child spherical joints anchored at the rest-pose midpoint of
 /// each pair, with depth-limited swing and contacts off between joined
 /// bodies. This is the depth-only builder the float physical layer
@@ -1607,6 +1489,15 @@ mod tests {
         }
     }
 
+    /// The impulse that gives one bone a target speed in m/s. The mass table
+    /// (AD17) sets the bone's mass, so a hit is a speed and not a fixed
+    /// number of newton-seconds: the same speed moves the rig the same way
+    /// whatever the rig weighs.
+    fn hit_for_speed(r: &Ragdoll, bone: usize, speed: f32) -> [f32; 3] {
+        let mass = r.bodies.get(r.order[bone]).expect("bone").mass();
+        [mass * speed, 0.0, 0.0]
+    }
+
     #[test]
     fn balance_hash_equal_with_ragdoll_on_and_off() {
         // EG34 split: the Rapier ragdoll is client-local, seeded from each
@@ -1790,7 +1681,8 @@ mod tests {
         }
         step_n(&mut a, 150);
         step_n(&mut b, 150);
-        a.apply_hit(1, [0.05, 0.0, 0.0], 150).expect("hit bone 1");
+        a.apply_hit(1, hit_for_speed(&a, 1, 1.18), 150)
+            .expect("hit bone 1");
         step_n(&mut a, 20);
         step_n(&mut b, 20);
         // The struck bone travels with the impulse; descendants are displaced
@@ -1807,7 +1699,10 @@ mod tests {
             let pa = a.bone_position(i).expect("bone a");
             let pb = b.bone_position(i).expect("bone b");
             let dist = (pa[0] - pb[0]).abs() + (pa[1] - pb[1]).abs() + (pa[2] - pb[2]).abs();
-            assert!(dist > 0.1, "bone {i} must displace down-chain: {dist}");
+            // The chain weighs 80 kg after AD17, so the drag fades with
+            // distance from the strike: the tail reads 2.9 cm here. The bar is
+            // 1 cm, so a hit that stops at the struck bone still fails.
+            assert!(dist > 0.01, "bone {i} must displace down-chain: {dist}");
         }
         // The hit ran one way only: the untouched twin barely moved in X.
         let root_b = b.bone_position(0).expect("root b");
@@ -1891,8 +1786,10 @@ mod tests {
         }
         step_n(&mut a, 150);
         step_n(&mut b, 150);
-        a.apply_hit(1, [0.05, 0.0, 0.0], 150).expect("hit A");
-        b.apply_hit(1, [-0.05, 0.0, 0.0], 150).expect("hit B");
+        a.apply_hit(1, hit_for_speed(&a, 1, 1.18), 150)
+            .expect("hit A");
+        b.apply_hit(1, hit_for_speed(&b, 1, -1.18), 150)
+            .expect("hit B");
         step_n(&mut a, 20);
         step_n(&mut b, 20);
         // The hits actually split the struck bones in X, so the mirror
@@ -1956,10 +1853,20 @@ mod tests {
         let mut r = ragdoll_on_floor();
         r.blend_to_ragdoll(1.0).expect("full ragdoll");
         step_n(&mut r, 30);
-        r.apply_hit(1, [0.02, 0.0, 0.0], 30).expect("hit");
-        let (hash_before, tick_allocs) = engine_core::alloc_probe::measure(|| {
-            step_n(&mut r, 60);
-            r.state_hash()
+        r.apply_hit(1, hit_for_speed(&r, 1, 0.47), 30).expect("hit");
+        let top = [3.0, 3.5, 4.0, 4.5];
+        let ((hash_before, lowest), tick_allocs) = engine_core::alloc_probe::measure(|| {
+            // The lowest point of the window: an 80 kg chain bounces off the
+            // floor, so the end of the window is not where the fall is read.
+            let mut lowest = [f32::MAX; 4];
+            for _ in 0..60 {
+                step_n(&mut r, 1);
+                for (i, low) in lowest.iter_mut().enumerate() {
+                    let p = r.bone_position(i).expect("bone");
+                    *low = low.min(p[1]);
+                }
+            }
+            (r.state_hash(), lowest)
         });
         assert!(
             tick_allocs.calls <= 600 && tick_allocs.bytes <= 52_000,
@@ -1970,14 +1877,13 @@ mod tests {
             hash_allocs.calls, 0,
             "our hash must not allocate, got {hash_allocs:?}"
         );
-        // The probed run is real work: the body fell and the hash advanced
-        // with the tick, so the budget above guards a live tick, not a no-op.
+        // The probed run is real work: the body fell during the probed steps
+        // and the hash advanced with the tick, so the budget above guards a
+        // live tick, not a no-op.
         assert_eq!(r.state_hash(), hash_before);
-        let top = [3.0, 3.5, 4.0, 4.5];
         let mut fell = false;
         for (i, t) in top.iter().enumerate() {
-            let p = r.bone_position(i).expect("bone");
-            fell |= p[1] < t - 0.1;
+            fell |= lowest[i] < t - 0.1;
         }
         assert!(fell, "chain must fall during the probed steps");
     }
@@ -2218,7 +2124,7 @@ mod tests {
             })
             .expect("tiny seam");
             r.blend_to_ragdoll(1.0).expect("full ragdoll");
-            r.apply_hit(1, [0.06, 0.0, 0.0], 0).expect("knock");
+            r.apply_hit(1, hit_for_speed(&r, 1, 1.4), 0).expect("knock");
             step_n(&mut r, 300);
             r.coupling_stats()
         }
@@ -2865,9 +2771,9 @@ mod tests {
             .expect("floor");
         r.blend_to_ragdoll(1.0).expect("limp");
         r.set_bone_linvel(0, [vx, 0.0, vz]).expect("root speed");
-        // The shove is a limb whip in meters per second, not an impulse: bone
-        // density is 1 kg/m3 at spawn (the mass table is AD17's row), so an
-        // impulse here would launch a 30 g bone at 60 m/s and test nothing real.
+        // The shove is a limb whip in meters per second, not an impulse: a
+        // bone weighs its share of the 80 kg (AD17), so a hand impulse here
+        // would be a different speed for every bone and test nothing real.
         r.set_bone_linvel(1, shove).expect("shove");
         let mut peak = (0.0f32, 0usize, 0usize);
         for _ in 0..300u64 {
@@ -3032,15 +2938,17 @@ mod tests {
     /// settle to rest inside the ragdoll speed bound, and repeat hash for hash.
     ///
     /// Ignored: it does not hold yet. At the Rapier default four solver iterations
-    /// the deepest unjoined pair reads 4.53 cm (fall 46, elbow_r/ankle_r); six
+    /// the deepest unjoined pair read 4.53 cm (fall 46, elbow_r/ankle_r); six
     /// iterations read 2.9 cm in engine-physfx and twelve read 9.2 cm there, and
     /// per-bone CCD reads 10.4 cm, so the contact budget is not the lever: the
     /// joints drive the bones back through each other inside one tick. A capsule
     /// depenetration seam was measured too (two to eight sweeps, alternating order,
     /// deepest pair first, 32 fixes) and settled between 1.8 and 6.3 cm, never under
-    /// 1 cm, because every fix stretches a joint the next tick re-solves. Left: a
-    /// contact model the joints cannot overrun (AD17 mass/density plus a stiffer
-    /// solver, or contacts between grandparents), then run this test.
+    /// 1 cm, because every fix stretches a joint the next tick re-solves. Those
+    /// numbers were measured before AD17 shipped the 80 kg bone masses and twelve
+    /// solver passes, and this test has not been re-measured since. Left: a contact
+    /// model the joints cannot overrun (contacts between grandparents), then run
+    /// this test and replace the numbers.
     #[ignore = "PX9 open: a jointed ragdoll still drives unjoined bones 4.5 cm through each other at 4 solver iterations"]
     #[test]
     fn fifty_seeded_falls_keep_unjoined_bones_under_a_centimeter() {
@@ -3091,5 +2999,378 @@ mod tests {
             "PX9_FALLS falls=50 digest={digest:016x} peak={:.4} m settled={:.4} m worst_speed={worst_speed:.4}",
             worst.0, worst_rest.0
         );
+    }
+
+    /// The AD17 params proofs: the bone mass table, the one CCD policy and
+    /// the twelve-bone chain under a spear-like impulse.
+    mod ragdoll_params {
+        use super::*;
+        use crate::lod::{ccd_for, AgentKind, Ccd, LodConfig, Motion};
+        use crate::rapier::{
+            mass_fractions, ParamsError, RagdollParams, RAGDOLL_MASS_TOLERANCE,
+            RAGDOLL_SOLVER_PASSES, RAGDOLL_TOTAL_MASS_KG,
+        };
+        use engine_anim::contract::Joint;
+
+        /// Bones of the twelve-bone chain.
+        const CHAIN_BONES: usize = 12;
+        /// The joint gap limit, meters.
+        const JOINT_GAP_LIMIT_M: f32 = 0.05;
+        /// The band Rapier's default misses, meters: the twelve-bone chain
+        /// opens its joints by 2.6 cm at the default four passes.
+        const MEASURED_CHAIN_GAP_M: f32 = 0.02;
+        /// The margin the shipped table holds, meters: 0.8 cm at twelve
+        /// passes, against 1.2 cm at eight.
+        const SHIPPED_CHAIN_GAP_M: f32 = 0.01;
+        /// Rapier's own solver passes (Rapier 0.36 `num_solver_iterations`):
+        /// the count the shipped table must beat to hold the chain.
+        const RAPIER_DEFAULT_SOLVER_PASSES: usize = 4;
+        /// The spear-like impulse per kilogram of the struck bone, in N.s per
+        /// kg: the hit gives the bone 0.7 m/s, the speed the arena's 40 N.s
+        /// spear thrust gives an 80 kg fighter.
+        const SPEAR_IMPULSE_PER_KG: f32 = 0.7;
+
+        /// A twelve-bone chain: every bone the child of the one before it.
+        fn chain12_skeleton() -> Skeleton {
+            Skeleton {
+                joints: (0..CHAIN_BONES)
+                    .map(|i| Joint {
+                        name: format!("chain_{i}"),
+                        parent: i.checked_sub(1),
+                    })
+                    .collect(),
+            }
+        }
+
+        /// The chain pose: the root a metre up, every child 30 cm higher, so
+        /// the chain stands as a tower that topples on the floor.
+        fn chain12_pose() -> LocalPose {
+            let mut positions = Vec::with_capacity(CHAIN_BONES);
+            for i in 0..CHAIN_BONES {
+                let d = 0.3 * f32::from(u16::try_from(i).unwrap_or(u16::MAX));
+                positions.push([0.0, d, 0.0]);
+            }
+            positions[0] = [0.0, 1.0, 0.0];
+            LocalPose {
+                positions,
+                rotations: vec![[0.0, 0.0, 0.0, 1.0]; CHAIN_BONES],
+            }
+        }
+
+        /// The chain capsules: a slim bone, twice the radius wide.
+        fn chain12_shapes() -> Vec<BoneShape> {
+            vec![
+                BoneShape {
+                    radius: 0.06,
+                    half_height: 0.06,
+                };
+                CHAIN_BONES
+            ]
+        }
+
+        /// The gap of one joint: the distance between the two anchor points
+        /// the joint holds together, in meters. Zero is a joint that holds.
+        fn joint_gap(
+            r: &Ragdoll,
+            world_pos: &[[f32; 3]],
+            world_rot: &[[f32; 4]],
+            bone: usize,
+        ) -> f32 {
+            let Some(parent) = r.skeleton.joints[bone].parent else {
+                return 0.0;
+            };
+            // The anchor is the rest-pose midpoint of the pair, the same
+            // point the joint builder anchors the two bodies on.
+            let mid = [
+                (world_pos[parent][0] + world_pos[bone][0]) * 0.5,
+                (world_pos[parent][1] + world_pos[bone][1]) * 0.5,
+                (world_pos[parent][2] + world_pos[bone][2]) * 0.5,
+            ];
+            let a1 = to_local(&world_pos[parent], &world_rot[parent], &mid);
+            let a2 = to_local(&world_pos[bone], &world_rot[bone], &mid);
+            let (Some(pa), Some(pb)) = (r.bodies.get(r.order[parent]), r.bodies.get(r.order[bone]))
+            else {
+                return f32::NAN;
+            };
+            let ta = pa.translation();
+            let tb = pb.translation();
+            let ra = [
+                pa.rotation().x,
+                pa.rotation().y,
+                pa.rotation().z,
+                pa.rotation().w,
+            ];
+            let rb = [
+                pb.rotation().x,
+                pb.rotation().y,
+                pb.rotation().z,
+                pb.rotation().w,
+            ];
+            let wa = rotate_vec(&a1, &ra);
+            let wb = rotate_vec(&a2, &rb);
+            let on_a = [ta.x + wa[0], ta.y + wa[1], ta.z + wa[2]];
+            let on_b = [tb.x + wb[0], tb.y + wb[1], tb.z + wb[2]];
+            let d = [on_a[0] - on_b[0], on_a[1] - on_b[1], on_a[2] - on_b[2]];
+            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+        }
+
+        /// The worst joint gap of the chain under the spear impulse, for a
+        /// given number of solver passes, in meters.
+        ///
+        /// `floor` puts a static box under the chain, so Rapier resolves the
+        /// landing; `seam` runs the coupling seam, the engine's own
+        /// depenetration pass. With both off the chain falls in free air and
+        /// the joint solver alone has to hold it. `hit` is the bone the spear
+        /// strikes: the root drags the whole chain, the middle bends it.
+        fn worst_gap(solver_passes: usize, floor: bool, seam: bool, hit: usize) -> f32 {
+            let skeleton = chain12_skeleton();
+            let pose = chain12_pose();
+            let (world_pos, world_rot) = world_transforms(&skeleton, &pose);
+            let shapes = chain12_shapes();
+            let radii: Vec<f32> = shapes.iter().map(|s| s.radius).collect();
+            let half_heights: Vec<f32> = shapes.iter().map(|s| s.half_height).collect();
+            let params = RagdollParams::new(
+                mass_fractions(&skeleton, &radii, &half_heights),
+                RAGDOLL_TOTAL_MASS_KG,
+                solver_passes,
+            )
+            .expect("the chain table");
+            let mut r =
+                Ragdoll::spawn_with_params(&skeleton, &pose, &shapes, &params).expect("spawn");
+            if floor {
+                r.add_static_box([10.0, 0.5, 10.0], [0.0, -0.5, 0.0])
+                    .expect("floor");
+            }
+            if !seam {
+                r.set_coupling(CouplingParams::disabled())
+                    .expect("seam off");
+            }
+            r.blend_to_ragdoll(1.0).expect("limp");
+            // The spear thrust: the impulse is scaled by the bone's mass, so
+            // the bone takes the same speed whatever the rig weighs.
+            let mass = r.bodies.get(r.order[hit]).expect("bone").mass();
+            r.apply_hit(hit, [mass * SPEAR_IMPULSE_PER_KG, 0.0, 0.0], 0)
+                .expect("spear");
+            let mut worst = 0.0f32;
+            for _ in 0..300 {
+                r.step(FIXED_DT).expect("step");
+                for bone in 1..CHAIN_BONES {
+                    worst = worst.max(joint_gap(&r, &world_pos, &world_rot, bone));
+                }
+            }
+            worst
+        }
+
+        /// AD17: a bone weighs its share of the total, and the rig weighs
+        /// exactly the total.
+        #[test]
+        fn ragdoll_mass_sums_to_80kg() {
+            let skeleton = humanoid_skeleton();
+            let shapes = humanoid_shapes();
+            let radii: Vec<f32> = shapes.iter().map(|s| s.radius).collect();
+            let half_heights: Vec<f32> = shapes.iter().map(|s| s.half_height).collect();
+            let params = RagdollParams::for_rig(&skeleton, &radii, &half_heights)
+                .expect("the shipped table");
+            assert_eq!(params.total_mass_kg(), RAGDOLL_TOTAL_MASS_KG);
+            assert_eq!(params.bones(), skeleton.len());
+            // Every bone has a positive share and the shares sum to one.
+            let mut sum = 0.0f32;
+            for (i, fraction) in params.fractions().iter().enumerate() {
+                assert!(*fraction > 0.0, "bone {i} has no share of the mass");
+                sum += *fraction;
+            }
+            assert!(
+                (sum - 1.0).abs() <= RAGDOLL_MASS_TOLERANCE,
+                "the shares sum to {sum}"
+            );
+            // The rig Rapier builds weighs the total: read the masses back.
+            let r = Ragdoll::spawn(
+                &skeleton,
+                &humanoid_pose([0.0, 1.0, 0.0]),
+                &humanoid_shapes(),
+            )
+            .expect("spawn");
+            let mut total = 0.0f32;
+            for handle in &r.order {
+                let body = r.bodies.get(*handle).expect("body");
+                total += body.mass();
+            }
+            assert!(
+                (total - RAGDOLL_TOTAL_MASS_KG).abs()
+                    <= RAGDOLL_TOTAL_MASS_KG * RAGDOLL_MASS_TOLERANCE,
+                "the rig weighs {total} kg, want {RAGDOLL_TOTAL_MASS_KG}"
+            );
+            // A table that misses the total by more than 1% is refused.
+            let bad = RagdollParams::new(vec![0.5, 0.2], RAGDOLL_TOTAL_MASS_KG, 4);
+            assert!(
+                matches!(bad, Err(ParamsError::MassSum { .. })),
+                "a table that misses the total must be refused"
+            );
+            // ... and a table with a row missing is refused at spawn.
+            let short = RagdollParams::new(vec![1.0], RAGDOLL_TOTAL_MASS_KG, 4).expect("one row");
+            assert!(matches!(
+                Ragdoll::spawn_with_params(
+                    &skeleton,
+                    &humanoid_pose([0.0, 1.0, 0.0]),
+                    &humanoid_shapes(),
+                    &short
+                ),
+                Err(Error::Params(ParamsError::BoneCount { .. }))
+            ));
+        }
+
+        /// AD17: a bone name picks its own mass row. The table matches by
+        /// substring, so a short name that is a prefix of a long one must not
+        /// swallow it: a forearm weighs less than an upper arm.
+        #[test]
+        fn ragdoll_params_mass_rows_name_the_segments() {
+            let names = [
+                "upper_arm_l",
+                "forearm_l",
+                "elbow_l",
+                "hand_l",
+                "upper_leg_l",
+            ];
+            let skeleton = Skeleton {
+                joints: names
+                    .iter()
+                    .map(|name| Joint {
+                        name: (*name).into(),
+                        parent: None,
+                    })
+                    .collect(),
+            };
+            let shapes = vec![
+                BoneShape {
+                    radius: 0.05,
+                    half_height: 0.1,
+                };
+                names.len()
+            ];
+            let radii: Vec<f32> = shapes.iter().map(|s| s.radius).collect();
+            let half_heights: Vec<f32> = shapes.iter().map(|s| s.half_height).collect();
+            let fractions = mass_fractions(&skeleton, &radii, &half_heights);
+            assert!(
+                fractions[1] < fractions[0],
+                "a forearm ({}) must weigh less than an upper arm ({})",
+                fractions[1],
+                fractions[0]
+            );
+            // The elbow shares the forearm row, and the upper leg is a thigh
+            // (0.105) and not a shank (`leg` is the shank alias, 0.0433).
+            assert_eq!(fractions[2], fractions[1]);
+            assert!(
+                (fractions[4] - 0.105).abs() < 1e-6,
+                "upper leg {}",
+                fractions[4]
+            );
+            // The unnamed hand takes what the table leaves.
+            assert!(fractions.iter().all(|f| *f > 0.0));
+        }
+
+        /// AD17: the twelve-bone chain under a spear-like impulse keeps every
+        /// joint gap at or under 5 cm for 300 ticks, and the solver passes of
+        /// the shipped table are the ones that hold it.
+        #[test]
+        fn ragdoll_params_twelve_bone_chain_keeps_joint_gaps_under_five_cm() {
+            // The spear strikes the middle of the chain: the impulse has to
+            // travel through six joints, so the solver passes decide whether
+            // the chain holds together. The chain falls in free air with the
+            // coupling seam off, so the joint solver alone is measured.
+            let shipped = worst_gap(RAGDOLL_SOLVER_PASSES, false, false, CHAIN_BONES / 2);
+            assert!(
+                shipped <= JOINT_GAP_LIMIT_M,
+                "the chain opens {shipped:.4} m at {RAGDOLL_SOLVER_PASSES} solver passes, over the {JOINT_GAP_LIMIT_M} m limit"
+            );
+            // The shipped table keeps the chain inside the 1 cm margin; that
+            // margin is what picks it over Rapier's default and over eight
+            // passes (see the printed rows).
+            assert!(
+                shipped <= SHIPPED_CHAIN_GAP_M,
+                "the chain opens {shipped:.4} m at {RAGDOLL_SOLVER_PASSES} solver passes, over the shipped {SHIPPED_CHAIN_GAP_M} m"
+            );
+            // The root strike drags the whole chain through all twelve joints.
+            let root = worst_gap(RAGDOLL_SOLVER_PASSES, false, false, 0);
+            assert!(
+                root <= JOINT_GAP_LIMIT_M,
+                "a root strike opens the chain {root:.4} m at {RAGDOLL_SOLVER_PASSES} solver passes"
+            );
+            // Rapier's own default misses the shipped margin: the count is
+            // chosen by this test, not left at the default.
+            let rapier_default =
+                worst_gap(RAPIER_DEFAULT_SOLVER_PASSES, false, false, CHAIN_BONES / 2);
+            assert!(
+                rapier_default > MEASURED_CHAIN_GAP_M,
+                "the Rapier default ({RAPIER_DEFAULT_SOLVER_PASSES} passes) leaves the chain at {rapier_default:.4} m, inside the measured band"
+            );
+            // The floor rows are printed but not asserted: with the coupling
+            // seam on, a landing stretches the joints far past 5 cm at every
+            // pass count (18-20 cm at twelve), because the seam lifts bones
+            // the joints hold. That landing is its own row, not a params bar.
+            for passes in [4usize, 6, 8, 12, 16] {
+                println!(
+                    "CHAIN passes={passes} middle={:.4} root={:.4} floor_noseam={:.4} floor_seam={:.4}",
+                    worst_gap(passes, false, false, CHAIN_BONES / 2),
+                    worst_gap(passes, false, false, 0),
+                    worst_gap(passes, true, false, CHAIN_BONES / 2),
+                    worst_gap(passes, true, true, CHAIN_BONES / 2)
+                );
+            }
+        }
+
+        /// AD17: one CCD policy for every body. A dynamic body may tunnel, so
+        /// a bone always rides the solver and a fast weapon or projectile does
+        /// too; a kinematic body is driven and never pays for it.
+        #[test]
+        fn ragdoll_params_ccd_policy_matrix() {
+            let cfg = LodConfig::default();
+            let fast = cfg.ccd_speed_mps + 5.0;
+            // Dynamic: a bone always, a weapon or a projectile when fast.
+            assert_eq!(
+                ccd_for(AgentKind::Bone, Motion::Dynamic, 0.0, &cfg),
+                Ccd::On
+            );
+            assert_eq!(
+                ccd_for(AgentKind::Weapon, Motion::Dynamic, fast, &cfg),
+                Ccd::On
+            );
+            assert_eq!(
+                ccd_for(AgentKind::Projectile, Motion::Dynamic, fast, &cfg),
+                Ccd::On
+            );
+            assert_eq!(
+                ccd_for(AgentKind::Weapon, Motion::Dynamic, 0.0, &cfg),
+                Ccd::Off
+            );
+            // A fat capsule never earns CCD.
+            assert_eq!(
+                ccd_for(AgentKind::Soldier, Motion::Dynamic, fast, &cfg),
+                Ccd::Off
+            );
+            assert_eq!(
+                ccd_for(AgentKind::Duelist, Motion::Dynamic, fast, &cfg),
+                Ccd::Off
+            );
+            // Kinematic: never, whatever the body is.
+            for kind in [
+                AgentKind::Bone,
+                AgentKind::Weapon,
+                AgentKind::Projectile,
+                AgentKind::Soldier,
+                AgentKind::Duelist,
+            ] {
+                assert_eq!(
+                    ccd_for(kind, Motion::Kinematic, fast, &cfg),
+                    Ccd::Off,
+                    "{kind:?} must not ride the solver when it is driven"
+                );
+            }
+            // The spawn reads the same policy: every bone of a spawned ragdoll
+            // rides the solver.
+            let r = ragdoll_on_floor();
+            for bone in 0..r.bone_count() {
+                assert_eq!(r.ccd_enabled(bone), Some(true), "bone {bone}");
+            }
+        }
     }
 }

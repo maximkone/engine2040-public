@@ -1444,6 +1444,29 @@ pub(crate) fn remove_closing_drag(shell: &mut Shell, id: ObjectId) -> Result<App
 mod tests {
     use super::*;
 
+    /// Every text run egui painted this frame (textures cleared: headless).
+    fn painted(mut output: egui::FullOutput) -> String {
+        output.textures_delta.clear();
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            if let egui::epaint::Shape::Text(run) = &clipped.shape {
+                text.push_str(run.galley.text());
+                text.push(' ');
+            }
+        }
+        text
+    }
+
+    /// Headless inspector frame at 1280x720 with the Tab focused by the caller.
+    fn inspector_frame(ctx: &egui::Context, ui_state: &mut ShellUi, shell: &mut Shell) -> String {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..egui::RawInput::default()
+        };
+        painted(ctx.run_ui(input, |ui| ui_state.show(shell, ui)))
+    }
+
     /// Headless dock frame: no window, no GPU, just one egui pass over all
     /// four panels (hierarchy, inspector, viewport with its gizmo session,
     /// log). The windowed present loop stays with the window host; this only proves the
@@ -1586,35 +1609,15 @@ mod tests {
     fn inspector_paints_spine_components_from_a_snapshot() {
         use crate::spine_inspect::{fixture::fight, spine_registry};
 
-        // Every text run egui painted this frame.
-        fn painted(mut output: egui::FullOutput) -> String {
-            output.textures_delta.clear();
-            let mut text = String::new();
-            for clipped in &output.shapes {
-                if let egui::epaint::Shape::Text(run) = &clipped.shape {
-                    text.push_str(run.galley.text());
-                    text.push(' ');
-                }
-            }
-            text
-        }
         let mut shell = Shell::new();
         let mut ui_state = ShellUi::new(&shell);
         assert!(ui_state.focus_panel(Panel::Inspector));
         let ctx = egui::Context::default();
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
-        let frame = |ui_state: &mut ShellUi, shell: &mut Shell| {
-            let input = egui::RawInput {
-                screen_rect: Some(screen),
-                ..egui::RawInput::default()
-            };
-            painted(ctx.run_ui(input, |ui| ui_state.show(shell, ui)))
-        };
         let registry = spine_registry().expect("spine components register");
 
-        assert!(!frame(&mut ui_state, &mut shell).contains("fighter 0"));
+        assert!(!inspector_frame(&ctx, &mut ui_state, &mut shell).contains("fighter 0"));
         assert_eq!(ui_state.set_spine(41, &fight(), &registry), Ok(2));
-        let shown = frame(&mut ui_state, &mut shell);
+        let shown = inspector_frame(&ctx, &mut ui_state, &mut shell);
         assert!(shown.contains("Spine t41 (2 actors"), "{shown}");
         assert!(shown.contains("fighter 0"), "{shown}");
         assert!(shown.contains("vitals v1: hp=800"), "{shown}");
@@ -1623,9 +1626,48 @@ mod tests {
         let mut forged = fight();
         forged.hash ^= 1;
         assert!(ui_state.set_spine(42, &forged, &registry).is_err());
-        assert!(frame(&mut ui_state, &mut shell).contains("Spine t41"));
+        assert!(inspector_frame(&ctx, &mut ui_state, &mut shell).contains("Spine t41"));
         ui_state.clear_spine();
-        assert!(!frame(&mut ui_state, &mut shell).contains("Spine t41"));
+        assert!(!inspector_frame(&ctx, &mut ui_state, &mut shell).contains("Spine t41"));
+    }
+
+    /// ARC6 live smoke: the Inspector tab paints the spine the play-in loop
+    /// stepped (real arena bytes through the RC2 bridge and the RC4 schemas,
+    /// no fixture), and stops showing it once the frame is cleared.
+    #[test]
+    fn inspector_paints_the_live_play_in_spine() {
+        use crate::instant::RoundInput;
+        use crate::play::PlayEntrypoint;
+        use crate::play_in::PlayInSession;
+        use crate::spine_inspect::spine_registry;
+
+        let mut shell = Shell::new();
+        let entry = PlayEntrypoint::new("e2040-no-such-program-xyz", Vec::<String>::new());
+        let mut session = PlayInSession::start(shell.document().clone(), entry, 2040)
+            .expect("play-in session starts");
+        for _ in 0..30 {
+            session
+                .step_once(RoundInput::neutral())
+                .expect("round steps");
+        }
+        let mut ui_state = ShellUi::new(&shell);
+        assert!(ui_state.focus_panel(Panel::Inspector));
+        let registry = spine_registry().expect("spine components register");
+        assert_eq!(
+            ui_state.set_spine(session.spine_tick(), &session.spine_snapshot(), &registry),
+            Ok(2)
+        );
+        let ctx = egui::Context::default();
+        let shown = inspector_frame(&ctx, &mut ui_state, &mut shell);
+        assert!(shown.contains("Spine t30 (2 actors"), "{shown}");
+        assert!(shown.contains("fighter 0"), "{shown}");
+        assert!(shown.contains("vitals v1: hp="), "{shown}");
+        assert!(shown.contains("body v1: vel_x_mm="), "{shown}");
+        assert!(shown.contains("ai v1: mx="), "{shown}");
+        assert!(shown.contains("anim v1: loco="), "{shown}");
+        session.stop().expect("session stops");
+        ui_state.clear_spine();
+        assert!(!inspector_frame(&ctx, &mut ui_state, &mut shell).contains("Spine t30"));
     }
 
     /// Viewport, outliner and inspector agree on the identical live selection.

@@ -151,7 +151,8 @@ pub struct LobbyBoot {
     pub seed: u64,
     /// Fixed steps, `1..=100_000` (the arena/siege replay bound).
     pub ticks: u32,
-    /// Fighters requested: `2..=16` for arena/district, exactly 64 for siege.
+    /// Fighters requested: `2..=MAX_PARTICIPANTS` for arena/district, exactly
+    /// 64 for siege.
     pub fighters: u8,
     /// Arena half-extent in meters, `5.0..=100.0`.
     pub half_extent_m: f32,
@@ -492,7 +493,8 @@ pub enum ModeSession {
 
 impl ModeSession {
     /// Boot one mode from the lobby: validates ticks/extent for every mode,
-    /// fighters `2..=16` for arena/district/ludus and exactly 64 for siege.
+    /// fighters `2..=MAX_PARTICIPANTS` for arena/district/ludus and exactly 64
+    /// for siege.
     /// The district center derives deterministically from the seed. Modes only
     /// construct validated configs and call public entry points — they never
     /// mutate engine state outside their own session.

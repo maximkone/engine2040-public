@@ -14,7 +14,7 @@ pub const ROLLBACK_SCHEMA_VERSION: u8 = 1;
 pub const SUPPORTED_ROLLBACK_VERSIONS: &[u8] = &[1];
 /// Most checkpoints one ring holds (mirrors net `MAX_ROLLBACK`).
 pub const MAX_ROLLBACK_FRAMES: usize = 128;
-/// Most spine bytes one frame carries (16 slots encode ~1.4 KiB).
+/// Most spine bytes one frame carries (32 slots encode ~2.8 KiB).
 pub const MAX_SPINE_BYTES: usize = 65_536;
 /// Spine snapshot version word `save` accepts (`engine-ecs` `SPINE_VERSION`).
 pub const SPINE_VERSION_EXPECTED: u16 = 1;

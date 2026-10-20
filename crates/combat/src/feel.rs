@@ -2227,7 +2227,7 @@ mod tests {
         // MAX_PARTICIPANTS is the canonical cap: survey ids above slot 1
         // never construct, and the winner enum covers every bout.
         assert!(ParticipantId::new(MAX_PARTICIPANTS).is_none());
-        assert_eq!(MAX_PARTICIPANTS, 16);
+        assert_eq!(MAX_PARTICIPANTS, 32);
         let tables = FeelPreset::v1().tables(TABLES_V1);
         let report = balance_over_200(&tables);
         assert_eq!(report.decisive(), report.wins_a + report.wins_b);

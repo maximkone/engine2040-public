@@ -92,8 +92,8 @@ Facts on disc, not a promise:
 - M1 (look lock) in part: real soldier atlas (Kenney CC0), cottage in three states, both drawn in
   the window (`e6b3d87a`, `8ead56c6`); remaining kinds, team mask, cameo and turret art are open.
   The owner's look verdict is still the gate before volume.
-- M2 (economy) is the sim core (`70d92dba`, `01dd23ec`, `1f3e458d`); it was one shared purse for
-  both sides until SIM1 splits it.
+- M2 (economy) is the sim core (`70d92dba`, `01dd23ec`, `1f3e458d`); since SIM1 each side has
+  its own purse, house list and deliveries, while roads and terrain stay shared.
 - M3 (war) has two units, pathing, melee, archers, `Attack` with no approach (KAM6 uses Move then
   Attack); formations and garrison are open.
 - M4 (minds) has the mayor on side 1 (`e6b3d87a`), `KAM2 AI OK ... hash=ff4ce6d9be42e1a4`.

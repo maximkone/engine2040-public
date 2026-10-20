@@ -549,7 +549,7 @@ fn loco_disc(state: LocoState) -> u8 {
     u8::try_from(state_code(state)).unwrap_or(u8::MAX)
 }
 
-/// Fighter slot as the `u8` id the contracts carry (slots stay below 16).
+/// Fighter slot as the `u8` id the contracts carry (slots stay below 32).
 fn slot_id(slot: usize) -> u8 {
     u8::try_from(slot).unwrap_or(u8::MAX)
 }

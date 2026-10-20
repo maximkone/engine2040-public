@@ -21,7 +21,7 @@ workspace = true
 # RZ4: `app` also turns on the float physical layer (`engine-physfx/rapier`) that
 # paints breaks as debris. It only paints: the sim never reads it, and
 # `engine-arena`, `engine-combat` and `engine-proof` never name it.
-app = ["engine-render/window", "engine-audio/device", "dep:winit", "dep:engine-assets", "dep:gilrs", "dep:engine-physfx", "engine-physfx/rapier", "shader-validate"]
+app = ["engine-render/window", "engine-audio/device", "dep:winit", "dep:engine-assets", "dep:gilrs", "dep:engine-physfx", "engine-physfx/rapier", "shader-validate", "dep:engine-perf"]
 
 # CQ23: the hot-reload cook checks every edited `.wgsl` with naga (CPU, no
 # GPU) instead of brace balance alone; a type-broken edit is refused with its
@@ -79,6 +79,11 @@ engine-net.workspace = true
 # budget walls from destruction (consumed, never mirrored).
 engine-core.workspace = true
 engine-destruction.workspace = true
+# PQ18: the arena window loop stages its input-to-present stamps through the
+# perf crate's public latency API (`WindowLatencyLog`, `GpuConditions`). The
+# perf crate is a leaf harness (nothing it composes depends on game), so the
+# edge stays acyclic; `app` only, so the headless default graph is unchanged.
+engine-perf = { path = "../perf", version = "0.1.0", optional = true }
 # WD6 mode framework: district cell window over the WD1 CellCoord range
 # (consumed, never mirrored).
 engine-world.workspace = true

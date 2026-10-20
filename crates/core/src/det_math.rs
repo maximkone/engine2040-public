@@ -2,11 +2,11 @@
 //! Owner: engine-core (std-only; no float, no alloc).
 //! Units: Fixed Q47.16 raw i64; angles radians, exp unitless.
 //! Determinism: i128 integer math only; identical bits on every machine.
-//! Accuracy: `det_sin`, `det_cos` and `det_exp` are correctly rounded (nearest
-//! raw unit) apart from inputs whose true value sits within about 1e-11 of a
-//! rounding tie; the exhaustive tests below compare every raw input of a
-//! period (and of the whole exp range) with an `f64` reference. `det_atan2za`
-//! is the CORDIC path of `Fixed::atan2`, not correctly rounded.
+//! Accuracy: `det_sin`, `det_cos`, `det_exp` and `det_atan2za` are correctly
+//! rounded (nearest raw unit) apart from inputs whose true value sits within
+//! about 1e-11 of a rounding tie; the tests below compare every raw input of a
+//! sin/cos period and of the whole exp range, and a 1M seeded atan2 sample,
+//! with an `f64` reference.
 //! Domain: angles clamp to +-2^40 raw (about 1.7e7 rad) so the reduction fits
 //! i128. Errors: saturates outward; no panics. Budget: zero heap; no tables.
 use crate::fixed::Fixed;
@@ -21,9 +21,11 @@ const LN2_Q96: i128 = 54_916_777_467_707_473_351_141_471_128;
 /// Fractional bits of the series arithmetic (products stay below 2^127).
 const SERIES_BITS: u32 = 56;
 const ONE: i128 = 1 << SERIES_BITS;
-/// Q96 to series Q56, and series Q56 to Fixed Q16.
+/// Q96 to series Q56, series Q56 to Q96, and Q96 to Fixed Q16.
 const TO_SERIES: i128 = 1 << (96 - SERIES_BITS);
 const FROM_SERIES: i128 = 1 << (SERIES_BITS - 16);
+const SERIES_TO_Q96: i128 = 1 << (96 - SERIES_BITS);
+const Q96_TO_FIXED: i128 = 1 << (96 - 16);
 /// Raw angle clamp: keeps `k * TAU_Q96` inside i128.
 const LIMIT_RAW: i64 = 1 << 40;
 
@@ -67,6 +69,40 @@ fn exp_series(r: i128) -> i128 {
         sum = sum.wrapping_add(term);
     }
     sum
+}
+
+/// Square root of a positive Q56 value, rounded to the nearest raw unit.
+fn sqrt_series(v: i128) -> i128 {
+    // Callers pass 1 + r^2, so `v` is positive and below 2; the shift fits u128.
+    let scaled = u128::try_from(v).unwrap_or(0) << SERIES_BITS;
+    let floor = scaled.isqrt();
+    let mid = 2 * floor + 1;
+    let rounded = if 4 * scaled > mid * mid {
+        floor + 1
+    } else {
+        floor
+    };
+    i128::try_from(rounded).unwrap_or(i128::MAX)
+}
+
+/// One atan half-angle step: `atan(r) = 2 atan(r / (1 + sqrt(1 + r^2)))`.
+fn half_angle(r: i128) -> i128 {
+    let d = ONE.wrapping_add(mul_series(r, r));
+    div_round(r.wrapping_mul(ONE), ONE.wrapping_add(sqrt_series(d)))
+}
+
+/// atan(r) in Q56 for `0 <= r <= 1`: two half-angle steps leave `|u| <=
+/// tan(pi/16)`, where the series through `u^27` cuts below 2^-70.
+fn atan_series(r: i128) -> i128 {
+    let u = half_angle(half_angle(r));
+    let u2 = mul_series(u, u);
+    let mut power = u;
+    let mut sum = u;
+    for k in 1_i128..14 {
+        power = div_round(power.wrapping_mul(u2), ONE).wrapping_neg();
+        sum = sum.wrapping_add(div_round(power, 2 * k + 1));
+    }
+    sum * 4
 }
 
 /// Sine of a Q96 angle: exact reduction by whole turns, fold to +-pi/2, series.
@@ -123,13 +159,31 @@ pub fn det_exp(x: Fixed) -> Fixed {
     Fixed::from_bits(sat_i128(raw))
 }
 
-/// Atan2 coverage through the Fixed CORDIC path; zero gives zero.
+/// Deterministic atan2 in radians, correctly rounded; a zero `(y, x)` pair
+/// gives zero. The result for `(0, -1)` is the correctly rounded pi (205_887
+/// raw), one raw unit below the LUT `Fixed::PI`.
 pub fn det_atan2za(y: Fixed, x: Fixed) -> Fixed {
-    if y == Fixed::ZERO && x == Fixed::ZERO {
-        Fixed::ZERO
-    } else {
-        Fixed::atan2(y, x)
+    if y.0 == 0 && x.0 == 0 {
+        return Fixed::ZERO;
     }
+    let ay = i128::from(y.0).abs();
+    let ax = i128::from(x.0).abs();
+    // Fold into the first octant; `steep` means the angle is measured from
+    // the y axis, so the quarter turn joins the result instead of the ratio.
+    let (ratio, steep) = if ay <= ax {
+        (div_round(ay << SERIES_BITS, ax), false)
+    } else {
+        (div_round(ax << SERIES_BITS, ay), true)
+    };
+    let a = atan_series(ratio).wrapping_mul(SERIES_TO_Q96);
+    let angle = match (steep, x.0 > 0) {
+        (false, true) => a,
+        (false, false) => PI_Q96.wrapping_sub(a),
+        (true, true) => HALF_PI_Q96.wrapping_sub(a),
+        (true, false) => HALF_PI_Q96.wrapping_add(a),
+    };
+    let signed = if y.0 < 0 { angle.wrapping_neg() } else { angle };
+    Fixed::from_bits(sat_i128(div_round(signed, Q96_TO_FIXED)))
 }
 
 #[cfg(test)]
@@ -158,9 +212,19 @@ mod tests {
         assert_eq!(s, det_sin(Fixed::from_bits(34_315)));
         assert_eq!(c, det_cos(Fixed::from_bits(34_315)));
         assert_eq!(det_atan2za(Fixed::ZERO, Fixed::ZERO), Fixed::ZERO);
+        // Correctly rounded: pi/4, pi/2 and pi land on their nearest raw unit
+        // (the LUT `Fixed::PI` sits one raw unit above the rounded pi).
+        assert_eq!(det_atan2za(Fixed::ONE, Fixed::ONE), Fixed::FRAC_PI_4);
+        assert_eq!(det_atan2za(Fixed::ONE, Fixed::ZERO), Fixed::FRAC_PI_2);
+        assert_eq!(det_atan2za(Fixed::NEG_ONE, Fixed::ZERO), Fixed(-102_944));
+        assert_eq!(det_atan2za(Fixed::ZERO, Fixed::ONE), Fixed::ZERO);
         assert_eq!(
-            det_atan2za(Fixed::ONE, Fixed::ONE),
-            Fixed::atan2(Fixed::ONE, Fixed::ONE)
+            det_atan2za(Fixed::ZERO, Fixed::NEG_ONE),
+            Fixed::from_bits(205_887)
+        );
+        assert_eq!(
+            det_atan2za(Fixed::NEG_ONE, Fixed::NEG_ONE),
+            Fixed(-154_416)
         );
     }
 
@@ -264,6 +328,50 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "libm is the independent test oracle here, never part of the sim"
+    )]
+    fn atan2_correctly_rounded_on_a_grid_and_a_seeded_million() {
+        assert_eq!(
+            det_atan2za(Fixed::ZERO, Fixed::ZERO),
+            Fixed::ZERO,
+            "the zero pair is the one undefined input"
+        );
+        let mut wrong = 0;
+        let mut ties = 0;
+        let oracle = |y: i64, x: i64| f64::atan2(y as f64 / 65_536.0, x as f64 / 65_536.0);
+        // Every pair of small raws: both zeros, both axes, equal magnitudes
+        // (the pi/4 fold) and all four quadrants.
+        for y in -256..=256_i64 {
+            for x in -256..=256_i64 {
+                count_atan2(y, x, oracle(y, x), &mut wrong, &mut ties);
+            }
+        }
+        // One million seeded pairs over the whole raw range: huge ratios,
+        // near-diagonals and both i64 extremes.
+        let rng = crate::CounterRng::new(2040);
+        for i in 0..1_000_000u64 {
+            let (y, x) = (
+                rng.sample(i) as i64,
+                rng.sample(i.wrapping_add(500_003)) as i64,
+            );
+            count_atan2(y, x, oracle(y, x), &mut wrong, &mut ties);
+        }
+        assert_eq!((wrong, ties < 1_000), (0, true), "atan2 ties {ties}");
+    }
+
+    /// Compare one pair with the `f64` oracle; undecidable ties are counted.
+    fn count_atan2(y: i64, x: i64, want: f64, wrong: &mut u32, ties: &mut u32) {
+        let got = det_atan2za(Fixed::from_bits(y), Fixed::from_bits(x)).to_bits();
+        match nearest_raw(want) {
+            Some(w) if w != got => *wrong += 1,
+            Some(_) => {}
+            None => *ties += 1,
+        }
+    }
+
+    #[test]
     fn huge_angles_clamp_without_panic() {
         for raw in [i64::MIN, i64::MAX, LIMIT_RAW, -LIMIT_RAW, LIMIT_RAW + 1] {
             let x = Fixed::from_bits(raw);
@@ -287,13 +395,20 @@ mod tests {
             h.write_i64(det_cos(Fixed::from_bits(a)).to_bits());
             h.write_i64(det_exp(Fixed::from_bits(e)).to_bits());
             h.write_i64(det_atan2za(Fixed::from_bits(a), Fixed::from_bits(e)).to_bits());
+            // atan2 over the whole raw range, so the fold, the sqrt and the
+            // series see extreme ratios as well as near-diagonals.
+            let y = rng.sample(i.wrapping_add(2_000_003));
+            let x = rng.sample(i.wrapping_add(3_000_001));
+            h.write_i64(
+                det_atan2za(Fixed::from_bits(y as i64), Fixed::from_bits(x as i64)).to_bits(),
+            );
         }
         h.finish()
     }
 
-    /// The 1M-input corpus digest, recorded on Windows x86-64 (MSVC) and
-    /// Linux x86-64 (GitHub runner); it must read the same on every machine.
-    const CORPUS_1M_DIGEST: u64 = 967_702_734_373_494_140;
+    /// The 1M-input corpus digest, recorded on Linux x86-64 (GitHub runner)
+    /// with rustc 1.97.1 and 1.88.0; it must read the same on every machine.
+    const CORPUS_1M_DIGEST: u64 = 16_629_546_346_452_603_426;
 
     #[test]
     fn corpus_1m_bit_identical_twice_and_pinned() {
@@ -312,6 +427,8 @@ mod tests {
                 acc = acc.wrapping_add(det_sin(Fixed::from_bits(w)).to_bits());
                 acc = acc.wrapping_add(det_cos(Fixed::from_bits(w)).to_bits());
                 acc = acc.wrapping_add(det_exp(Fixed::from_bits(w)).to_bits());
+                acc = acc
+                    .wrapping_add(det_atan2za(Fixed::from_bits(w), Fixed::from_bits(!w)).to_bits());
             }
             std::hint::black_box(acc);
         });

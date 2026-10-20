@@ -506,21 +506,27 @@ impl RelayTransport {
         self.srflx
     }
 
-    /// Offer registration plus a STUN binding request to the relay. A
-    /// failed send is loss; the caller repeats this until [`Self::registered`]
-    /// flips or [`Self::denied`] names the refusal.
-    pub fn send_register(&mut self) {
-        let register = RelayMsg::Register {
+    /// Offer registration plus a STUN binding request; a failed send goes
+    /// back to the caller, which repeats until registered or denied.
+    pub fn send_register(&mut self) -> Result<(), NetError> {
+        let reg = RelayMsg::Register {
             client_id: self.leg.me,
             token: self.leg.token,
         };
-        if let Ok(bytes) = register.encode() {
-            let _ = self.sock.send_to(&bytes, self.leg.addr);
-        }
+        let bytes = reg.encode().map_err(relay_err)?;
+        self.send_to_relay(&bytes)?;
         if self.srflx.is_none() {
-            let probe = encode_binding_request(self.stun_tx);
-            let _ = self.sock.send_to(&probe, self.leg.addr);
+            self.send_to_relay(&encode_binding_request(self.stun_tx))?;
         }
+        Ok(())
+    }
+
+    /// One relay datagram; a socket fault maps like every other send.
+    fn send_to_relay(&mut self, bytes: &[u8]) -> Result<(), NetError> {
+        self.sock
+            .send_to(bytes, self.leg.addr)
+            .map(|_| ())
+            .map_err(|_| NetError::BadInput)
     }
 
     /// Wrap game bytes as one relay forward from this machine to its peer.
@@ -555,10 +561,7 @@ impl RelayTransport {
             return Err(NetError::BadInput);
         }
         let body = Self::wrap(&self.leg, bytes)?;
-        self.sock
-            .send_to(&body, self.leg.addr)
-            .map(|_| ())
-            .map_err(|_| NetError::BadInput)
+        self.send_to_relay(&body)
     }
 }
 
@@ -2180,7 +2183,9 @@ mod relay_transport_tests {
         assert!(!transport.registered(), "nothing acked yet");
         assert_eq!(transport.denied(), None);
         assert_eq!(transport.srflx(), None);
-        transport.send_register();
+        transport
+            .send_register()
+            .expect("loopback send reaches the relay");
         assert!(transport.recv().is_empty(), "no relay answers on loopback");
         assert!(!transport.registered());
         let payload = vec![3u8; 16];

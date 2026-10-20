@@ -26,6 +26,7 @@ mod quantize_grid_vectors;
 mod quantize_parity;
 mod registry_singleton_vectors;
 mod retarget_batch_a;
+mod retarget_soma;
 mod sidecar_conformance;
 mod sparse_order_vectors;
 mod spatial_sort_vectors;

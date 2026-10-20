@@ -201,8 +201,31 @@ Board IDs in `engine-proposed-rows.md` are AD1..AD20 (same number).
 ### AD-17  Ragdoll params builder: mass from a total, solver passes, one CCD policy   [score 15.6 on S-size, shown after AD-16 for sequencing]
 - WHY: bones at density 1.0 weigh ~0.04 kg while limbs weigh 3.75 kg; long chains drift on hits; docs and code disagree on CCD.
 - Evidence [V]: ragdoll.rs:361-364 `IntegrationParameters{dt, ..Default}`, :374-378 CCD on for every bone, :387-389 density 1.0; lod.rs:144-152 policy "weapons/projectiles only"; physics lib.rs:27-29 repeats it; Rapier 0.36 defaults `num_solver_iterations 4`, pgs 1 (integration_parameters.rs:289-293, :414-416). Forge `RagdollWizard.cs:60-70` Plagenhoef fractions, 80 kg [F]; old `RagdollBodyPlan.cs` "8/4 too low; use 12/8" [F]. Plan row PX10 text says "ccd_enabled 0 hits" (A, stale).
-- Status: PARTIAL.
-- ADAPT: one params builder shared by `ragdoll.rs`, `powered.rs`, `rapier.rs`; solver passes set and tested on a 12-bone chain (PhysX 12/8 does not map 1:1 to Rapier fields: pick by test); bone density from fraction x total mass, refuse if the sum misses by >1%; one `ccd_for` policy used by spawn; fix doc text. Hash-free (E02 said "re-pin the golden": CORRECTED, ragdoll is not in it). The limb mass table (`limb.rs`) is on the hashed path later (EG46), so share the fraction table only after that.
+- Status: PARTIAL. Landed 2026-10-20 (AD17): the one builder is
+  `engine_physics::rapier::RagdollParams` (`crates/physics/src/rapier.rs`) —
+  solver passes, the 80 kg total and the bone fractions from the bone names
+  (the Plagenhoef rows of the Forge wizard; a bone the table does not name
+  shares what is left in proportion to its size); the table must sum to 1
+  within 1% or the builder refuses it. `ragdoll.rs` and `powered.rs` read it
+  at spawn, the CCD switch comes from the one `lod::ccd_for` policy (a
+  dynamic body may ride the solver, a driven one never does), and the stale
+  CCD text in `physics/src/lib.rs` and in the PX10 row is fixed. The twelve
+  passes are picked by the chain test: the twelve-bone chain opens its joints
+  by 2.6 cm at Rapier's four, 1.2 cm at eight and 0.8 cm at twelve (accept
+  bar 5 cm, shipped margin 1 cm). The legacy golden `d57b5c8ae3096614` does
+  not move (the ragdoll is not in it). The Rapier ragdoll tape digest
+  `8097ccafb6740acb` is stale and NOT re-pinned here: PX9 moved the fall on
+  2026-10-19 and AD17 changes the masses and the pass count again, so
+  `cargo test -p engine-proof --features ragdoll --lib ragdoll_matrix` is red
+  on its pinned constant until a four-machine golden-matrix run on the public
+  mirror re-pins it with a receipt (open gate; never re-pin to pass).
+  Findings for the next row: a landed rig does not stay landed — a four-bone
+  tower peaks at 7.5 m after a 3 m fall at twelve passes (3.0 m, its spawn
+  height, at Rapier's four), and the twelve-bone chain on the floor tears its
+  joints to 18-20 cm at twelve passes (9.6 cm at sixteen), because the
+  coupling seam lifts bones the joints hold. Landing energy and the seam want
+  their own row.
+- ADAPT: one params builder shared by `ragdoll.rs`, `powered.rs`, `rapier.rs`; solver passes set and tested on a 12-bone chain (PhysX 12/8 does not map 1:1 to Rapier fields: pick by test); bone density from fraction x total mass, refuse if the sum misses by >1%; one `ccd_for` policy used by spawn; fix doc text. The legacy golden is hash-free (E02 said "re-pin the golden": CORRECTED, ragdoll is not in it), but the Rapier ragdoll tape digest moves with the masses and needs its own four-machine re-pin receipt. The limb mass table (`limb.rs`) is on the hashed path later (EG46), so share the fraction table only after that.
 - Home: `crates/physics/src/{ragdoll,powered,rapier,lod}.rs`.
 - Proof: `ragdoll_mass_sums_to_80kg`; spear-like impulse leaves every joint gap <= 5 cm for 300 ticks; ccd policy matrix; `cargo test -p engine-physics --features rapier --lib balance_hash` unchanged.
 - Size S-M. Depends: none. Unblocks PX9/AD-16. Audits: E02 #1, #3, #5.

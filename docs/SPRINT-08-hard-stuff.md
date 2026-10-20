@@ -31,10 +31,10 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   size, IK and springs off far away, crowd handed to VG4. Tier A. Size M.
   Owns `crates/anim/src/lod.rs`. Accept: 64 fighters under 2 ms total on
   the reference CPU; the 8 nearest match full-rate poses. needs: AM1, LM1.
-- [ ] AM14 anim: parallel SIMD eval — per-character jobs on RC3 fork-join,
+- [x] AM14 anim: parallel SIMD eval — per-character jobs on RC3 fork-join,
   SoA sampling on `wide` (license read first). Tier A. Size M. Owns
   `crates/anim/src/par.rs`. Accept: at least 3x on 4 cores for 64 fighters;
-  identical poses under every chunking. needs: AM1, RC3. Progress 2026-10-17: 6ab36492 anim par.rs per-character eval on the RC3 pool, poses bit-identical for 0,1,2,4,8 workers; speedup 2.0x on 64 fighters (run 39067637155), the 3x bar is not met and the wide SIMD half is skipped (external dependency). Dunsky 2026-10-19: par.rs has 0 game callers (`nb-gaps-anim-dunsky.txt`).
+  identical poses under every chunking. needs: AM1, RC3. Progress 2026-10-17: 6ab36492 anim par.rs per-character eval on the RC3 pool, poses bit-identical for 0,1,2,4,8 workers; speedup 2.0x on 64 fighters (run 39067637155), the 3x bar is not met and the wide SIMD half is skipped (external dependency). Dunsky 2026-10-19: par.rs has 0 game callers (`nb-gaps-anim-dunsky.txt`). Landed 4122026. par 21/21 green (gh 39477737556), par_speedup 7.67x on 4 vCPU (gh 39479055766: shared-clock key-major bank, SoA serial 3.68x, 4-worker pool 2.08x); identical poses for 0,1,2,4,8 workers and chunk 1..100; no non-test caller yet.
 - [ ] AM15 anim: additive layers — locomotion base, combat upper body and
   flinch additives through one inertializer, with analytic two-bone IK in
   contact windows (Bollo GDC 2018, Clavet and Paragon GDC 2016; ozz and ACL
@@ -293,7 +293,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   F2P: the impact_table test fails before (no module on master). P2P:
   impact_table green x2 plus golden held. needs: DX5. (RES-STEAL
   2026-10-05 DeepFracture r5-r17 deduped; HS33/BX42 variants folded.) Progress 2026-10-17: 3c161bdd impact_table.rs 486 entries x 3 shapes, integer lookup, replay x2, 1000 random impacts no NaN; the learned-vs-seeded win is a score proxy, the blind pick is open; left: a caller at spawn.
-- [ ] CT10 assets: glTF conformance — the cook passes the Khronos glTF sample
+- [x] CT10 assets: glTF conformance — the cook passes the Khronos glTF sample
   models (license per model read first) and Blender glTF exporter variants
   (animation sampling, per-action vs broadcast, PBR mapping from
   KhronosGroup/glTF-Blender-IO, Apache-2.0, as acceptance only). Blender
@@ -301,12 +301,21 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   `crates/assets/tests/gltf_conformance.rs`, `fixtures/gltf/`. Accept: every
   selected model imports, places, saves, reopens and plays; failures are
   typed refusals, never panics. needs: CT1, CT2.
-  PX6.
-- [ ] CT11 assets: animation compression — segment, quantize and error-loop
+  PX6. Landed e61952b0. cargo test -p engine-assets --features import,registry
+  --test gltf_conformance: 8 passed (the_corpus_covers_the_khronos_samples_and_the_blender_variants,
+  every_selected_model_passes_the_whole_path, the_saved_bundle_is_identical_twice,
+  every_model_carries_a_documented_licence, per_action_and_broadcast_carry_the_same_motion,
+  the_pbr_mapping_survives_the_cook, a_mesh_without_indices_cooks_to_the_same_mesh,
+  the_saved_bundle_holds_the_model_and_not_a_stub), gh run 39475283117.
+- [x] CT11 assets: animation compression — segment, quantize and error-loop
   ideas from ACL (nfrechette/acl, MIT). Tier B. Size M. Owns
   `crates/assets/src/anim_compress.rs`. Accept: 5-20x smaller clips with
   error bounded in cm and degrees; decode allocates nothing; cook x2
-  identical. needs: CT1.
+  identical. needs: CT1. Landed c840c1c7. anim_compress::tests
+  (compress_shrinks_a_smooth_clip_five_to_twenty_times,
+  decode_stays_within_cm_and_degrees, decode_allocates_nothing,
+  cook_twice_is_identical, truncated_payload_is_refused_not_panicking) 5 pass,
+  gh run 39484516174; clippy gh run 39485335830.
 - [ ] CT13 assets: ray-tracing proxies — the cook emits a simplified proxy
   mesh per asset (quadric chain from CT2) for the RT acceleration
   structures, with a stored deviation bound, beside the full raster mesh

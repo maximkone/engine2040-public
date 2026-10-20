@@ -18,11 +18,17 @@ engine-combat.workspace = true
 engine-core.workspace = true
 # AM14: per-character eval fans out on the RC3 job pool (anim -> ecs edge; ecs depends on core only).
 engine-ecs.workspace = true
+# AM14: the SIMD crowd eval samples the clip bank with `wide` (Zlib OR
+# Apache-2.0 OR MIT). It rides the `simd` feature, so the headless default
+# stays std-only (workspace-check.mjs owns that rule).
+wide = { workspace = true, optional = true }
 # State machine JSON and door entry points: opt-in, never in the tick.
 serde_json = { workspace = true, optional = true }
 
 [features]
 json = ["dep:serde_json"]
+# AM14: the parallel SIMD crowd eval. Off by default: the crate rides `wide`.
+simd = ["dep:wide"]
 
 [dev-dependencies]
 # TV2: the contract test ties the anim chooser to the nav link registry (test-only edge; nav does not import anim).

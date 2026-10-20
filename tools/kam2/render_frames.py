@@ -295,6 +295,11 @@ def frame_plan(lo, hi, frames, pitch, size, margin, height_px=None, span=None, g
             vs.append(rel.dot(up))
     u_mid = (min(us) + max(us)) * 0.5
     v_mid = (min(vs) + max(vs)) * 0.5
+    if pivot_x is not None:
+        # An explicit pivot is a contract: the camera aims at it, not at the alpha box,
+        # so every state of one asset lands on the same pivot pixel.
+        u_mid = 0.0
+        v_mid = 0.0
     u_span = max(max(us) - min(us), 1.0e-4)
     v_span = max(max(vs) - min(vs), 1.0e-4)
     if span is not None:

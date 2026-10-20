@@ -31,6 +31,11 @@ required-features = ["window"]
 name = "kam2match"
 path = "src/bin/kam2match/main.rs"
 
+# CMB1: the headless order skirmish, two swordsmen, two hashes. No window feature.
+[[bin]]
+name = "kam2orders"
+path = "src/bin/kam2orders/main.rs"
+
 [dependencies]
 kam2-sim = { version = "0.1.0", path = "../kam2-sim" }
 engine-render.workspace = true

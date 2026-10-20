@@ -1,0 +1,134 @@
+{
+  "id": "house.mill",
+  "kind": "building",
+  "model": "Kenney Fantasy Town Kit (2.0), assembled into one 2x2 mill by tools/kam2/build_buildings.py",
+  "author": "Kenney (www.kenney.nl)",
+  "licence": "CC0 1.0 Universal (public domain dedication)",
+  "licence_line": "Fantasy Town Kit (2.0). Created/distributed by Kenney (www.kenney.nl). License: Creative Commons Zero, CC0. http://creativecommons.org/publicdomain/zero/1.0/",
+  "licence_file": "License.txt inside the pack; the line above is its licence text",
+  "download": {
+    "page": "https://kenney.nl/assets/fantasy-town-kit",
+    "url": "https://kenney.nl/media/pages/assets/fantasy-town-kit/efe948d309-1754222374/kenney_fantasy-town-kit_2.0.zip",
+    "zip_bytes": 3854691,
+    "zip_sha256": "1a7530c09f4d2fa2cdee259876f089334f8b1f27fa86a0c4f54ef86cdd8676ef",
+    "file_in_zip": "Models/GLB format/<piece>.glb",
+    "account_required": false
+  },
+  "assembly": {
+    "tool": "tools/kam2/build_buildings.py",
+    "footprint_tiles": [
+      2,
+      2
+    ],
+    "grid": "1 kit cell = 1 world unit; footprint x and y in [0, 2] and [0, 2], floor at z 0, wall panel 1 unit high",
+    "orientation": "door on the south face, camera at the south-east corner; the building itself does not rotate",
+    "pieces_finished": [
+      "wall x4, wall-door x1, wall-window-small x2 (lower tower floor)",
+      "wall-wood x4, wall-wood-window-small x4 (upper tower floor)",
+      "pillar-wood x8 (corner posts, two floors)",
+      "roof-corner x4 (2x2 hip cap)",
+      "windmill x1 (four sails and hub, scaled 0.72; the kit piece has no tower body)",
+      "pillar-wood x1 (sail axle)"
+    ],
+    "pieces_half_built": [
+      "planks x4 (floor)",
+      "wall x3, wall-door x1 (south and west lower walls)",
+      "pillar-wood x4",
+      "poles x3 (scaffold on the open east and north sides)"
+    ],
+    "build_commands": [
+      "blender --background --factory-startup --python tools/kam2/build_buildings.py -- --kit \"<pack>/Models/GLB format\" --out <dir> --kind mill --state finished",
+      "blender --background --factory-startup --python tools/kam2/build_buildings.py -- --kit \"<pack>/Models/GLB format\" --out <dir> --kind mill --state half_built"
+    ],
+    "built_glb_not_committed": {
+      "finished": {
+        "bytes": 222176,
+        "sha256": "d1f3e92f5f5f92f07462d34aa04e6fa0d4bf98639469e9339de2f4dca359107c"
+      },
+      "half_built": {
+        "bytes": 90388,
+        "sha256": "74d4197f628cd7b2f18ce443ecf73453b4cc7526ce02602422888dc76cc4ee08"
+      }
+    }
+  },
+  "render": {
+    "tool": "tools/kam2/render_frames.py",
+    "blender": "5.2.0 LTS",
+    "engine": "cycles",
+    "device": "CPU",
+    "samples": 48,
+    "size": 288,
+    "pitch_deg": 26.5651,
+    "yaw_used": "135 deg = one yaw 45 deg off the S axis (camera at the building's south-east corner, south and east faces visible); buildings do not rotate",
+    "yaw_flag": 135,
+    "single_yaw": true,
+    "ortho_scale_world_units": 5.6917,
+    "px_per_kit_cell": 50.6,
+    "ground_px": 216,
+    "transparent": true,
+    "contact_shadow": true,
+    "lights": "style-lock key #FFE8C4 3.2, fill #6E86A8 0.55, ambient #3A4250 0.5, screen-locked",
+    "material_override": "roof pieces use one flat #A33B2E material; the farm plot uses one flat #8A6A43 material; every other kit material is as authored",
+    "command": "blender --background --factory-startup --python tools/kam2/render_frames.py -- --scene <state>.glb --out <dir> --yaw 135 --size 288 --span 5.6917 --ground-px 216 --pivot-x 1 --pivot-y 1 --samples 48"
+  },
+  "scale": {
+    "style_lock_tile_px": [
+      64,
+      32
+    ],
+    "native_px_per_kit_cell": 50.6,
+    "used_px_per_kit_cell": 50.6,
+    "factor_vs_native": 1,
+    "why": "2x2 tower at native scale; the sails reach z 3.67, so the cell is 288 px to hold the full sail circle with a ground shadow. The factor is 1.00 against the 50.6 px per kit cell that content/kam2/house/source.json records as native, so every kind shares one honest scale."
+  },
+  "pivot": {
+    "px": [
+      144,
+      216
+    ],
+    "world": [
+      1,
+      1,
+      0
+    ],
+    "meaning": "footprint centre on the ground plane; the cell x differs from 144 only because the model's alpha box is asymmetric (props on one side), the pivot itself is the footprint centre"
+  },
+  "atlas": {
+    "file": "house.mill.atlas.png",
+    "size": [
+      290,
+      580
+    ],
+    "bytes": 67995,
+    "sha256": "1b041d0befee16ff8a1874755e3b267e2abbc1c0fc5eceae06c6abe58cef4d9b",
+    "cell": [
+      288,
+      288
+    ],
+    "padding": 1,
+    "rows": 2,
+    "columns": 1,
+    "rows_note": "row 0 finished, row 1 half_built; one facing each, buildings do not rotate",
+    "pack_command": "node tools/kam2/pack_atlas.mjs --in <frames> --out content/kam2/buildings/mill --id house.mill --kind building --facings 1 --anim finished:1:8:true --anim half_built:1:8:true --footprint 2x2"
+  },
+  "source_frames": [
+    "render/mill/finished/frame_00.png -> pack/state_00.png (row 0)",
+    "render/mill/half_built/frame_00.png -> pack/state_01.png (row 1)"
+  ],
+  "states": {
+    "rows": [
+      "finished",
+      "half_built"
+    ],
+    "damaged": "not rendered: the sim has no damaged house state (House has no hit points); a broken variant would need its own assembly per kind"
+  },
+  "notes": [
+    "The kit is CC0 and is never committed; only this rendered atlas and its settings are.",
+    "The kit has no crate, bale, field or crop piece. The warehouse uses a loaded cart as the goods stand-in; the farm uses low hedge pieces as crop rows on a dirt-coloured plank plot.",
+    "Roof pieces carry one flat #A33B2E material; every other kit material is as authored. The farm plot planks carry one flat #8A6A43 material.",
+    "States are atlas rows of one id, finished then half_built. The sim has no damaged house state, so no damaged row is shipped: a broken model per kind is a different assembly, not a tint.",
+    "No team-colour mask and no cameo pass yet; both manifest fields stay null.",
+    "Half-built and finished share one cell, span and pivot, so the two rows stack without a jump.",
+    "fps 8 and loop true on each state row are placeholders the packer needs; both states are stills."
+  ]
+}

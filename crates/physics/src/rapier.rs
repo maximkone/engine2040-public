@@ -16,7 +16,10 @@
 //! they own any further determinism claims.
 #![forbid(unsafe_code)]
 
+use super::ragdoll::{CouplingParams, CouplingStats};
 use crate::islands::{self, SnapshotError, STATE_FLOATS};
+use crate::lod::{ccd_for, AgentKind, Ccd, LodConfig, Motion};
+use engine_anim::contract::Skeleton;
 use engine_core::Fnv64;
 use rapier3d::dynamics::{
     CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
@@ -36,6 +39,19 @@ pub const GRAVITY_Y: f32 = -9.81;
 pub const HASH_SCALE: f64 = 1_000_000.0;
 /// Upper bound for accepted lengths (radii, heights, half-extents, positions).
 pub(crate) const MAX_LEN: f32 = 1_000.0;
+/// Total body mass the ragdoll builder assumes, kilograms. The Forge ragdoll
+/// wizard uses the same 80 kg default for its mass table.
+pub const RAGDOLL_TOTAL_MASS_KG: f32 = 80.0;
+/// Solver passes a ragdoll runs with (Rapier's `num_solver_iterations`).
+/// Rapier 0.36 defaults to 4; the twelve-bone chain test picks this number:
+/// at four passes the chain opens its joints by 2.6 cm under the spear
+/// thrust, at eight by 1.2 cm and at twelve by 0.8 cm (the accept bar is
+/// 5 cm, the shipped margin 1 cm).
+pub const RAGDOLL_SOLVER_PASSES: usize = 12;
+/// Ceiling on the solver passes a caller may ask for.
+pub const RAGDOLL_MAX_SOLVER_PASSES: usize = 64;
+/// How far the bone masses may miss the total, as a fraction of it.
+pub const RAGDOLL_MASS_TOLERANCE: f32 = 0.01;
 
 /// Typed errors for the Rapier adapter. User input never panics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +88,480 @@ impl Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Typed errors of the ragdoll params builder. Bad caller input never panics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ParamsError {
+    /// A mass fraction is not a finite number in `[0, 1]`.
+    BadFraction(usize),
+    /// The fractions miss 1 by more than [`RAGDOLL_MASS_TOLERANCE`].
+    MassSum {
+        /// The sum the table gave.
+        got: f32,
+    },
+    /// The total mass is not a finite positive number of kilograms.
+    BadTotalMass,
+    /// The solver pass count is zero or above [`RAGDOLL_MAX_SOLVER_PASSES`].
+    BadSolverPasses,
+    /// The fraction table has no row for every bone of the skeleton.
+    BoneCount {
+        /// Bone count of the skeleton.
+        want: usize,
+        /// Row count of the table.
+        got: usize,
+    },
+}
+
+impl Display for ParamsError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParamsError::BadFraction(i) => {
+                write!(
+                    f,
+                    "invalid mass fraction: row {i} is not a number in [0, 1]"
+                )
+            }
+            ParamsError::MassSum { got } => write!(
+                f,
+                "mass fractions sum to {got}: need 1 within {RAGDOLL_MASS_TOLERANCE}"
+            ),
+            ParamsError::BadTotalMass => {
+                f.write_str("invalid total mass: need a finite positive number of kilograms")
+            }
+            ParamsError::BadSolverPasses => write!(
+                f,
+                "invalid solver passes: need 1..={RAGDOLL_MAX_SOLVER_PASSES}"
+            ),
+            ParamsError::BoneCount { want, got } => {
+                write!(
+                    f,
+                    "mass table has {got} rows, the skeleton has {want} bones"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ParamsError {}
+
+/// One named mass row: the bone names that pick it and the fraction of the
+/// body mass that segment carries.
+struct MassRow {
+    /// Lower-case names; a bone takes the row whose name it contains.
+    names: &'static [&'static str],
+    /// Fraction of the total body mass.
+    fraction: f32,
+}
+
+/// The segment masses of a human body as fractions of the total: the
+/// Plagenhoef table the Forge ragdoll wizard ships (Plagenhoef 1983, retyped
+/// there as the twelve rows of its twelve-bone plan). The rows name a pelvis,
+/// two spine bones, a head, two upper arms, two forearms, two thighs and two
+/// shanks; the table has no row for a hand, a foot or a neck.
+///
+/// A row with a short name must come before the row it is a prefix of:
+/// `forearm` and `lower_arm` both contain `arm`, so the forearm row is first
+/// or a forearm would weigh an upper arm.
+const MASS_ROWS: &[MassRow] = &[
+    MassRow {
+        names: &["pelvis", "hips"],
+        fraction: 0.135,
+    },
+    MassRow {
+        names: &["spine1"],
+        fraction: 0.131,
+    },
+    MassRow {
+        names: &["spine2", "chest"],
+        fraction: 0.155,
+    },
+    MassRow {
+        names: &["head"],
+        fraction: 0.0694,
+    },
+    MassRow {
+        names: &["forearm", "lower_arm", "elbow"],
+        fraction: 0.015,
+    },
+    MassRow {
+        names: &["upper_arm", "shoulder", "arm"],
+        fraction: 0.0263,
+    },
+    MassRow {
+        names: &["upper_leg", "up_leg", "upleg", "thigh", "hip"],
+        fraction: 0.105,
+    },
+    MassRow {
+        names: &["shank", "shin", "knee", "leg"],
+        fraction: 0.0433,
+    },
+];
+
+/// The mass fraction of one bone, from its name. `None` when the table does
+/// not name it.
+fn named_fraction(name: &str) -> Option<f32> {
+    let lower = name.to_ascii_lowercase();
+    MASS_ROWS
+        .iter()
+        .find(|row| row.names.iter().any(|n| lower.contains(n)))
+        .map(|row| row.fraction)
+}
+
+/// The mass fractions of one rig: one per bone, in skeleton order.
+///
+/// A bone the table names takes its published fraction. The mass the named
+/// rows leave (the table names no hand, foot or neck) is shared by the bones
+/// it does not name in proportion to their size, so a rig of unnamed bones
+/// keeps the mass ratio of its shapes and no bone weighs nothing.
+pub fn mass_fractions(skeleton: &Skeleton, radius: &[f32], half_height: &[f32]) -> Vec<f32> {
+    let n = skeleton.len();
+    let mut fractions = vec![0.0f32; n];
+    let mut sum = 0.0f32;
+    let mut rest_volume = 0.0f32;
+    for (i, joint) in skeleton.joints.iter().enumerate() {
+        match named_fraction(&joint.name) {
+            Some(fraction) => {
+                fractions[i] = fraction;
+                sum += fraction;
+            }
+            None => {
+                let r = radius.get(i).copied().unwrap_or(0.0);
+                let h = half_height.get(i).copied().unwrap_or(0.0);
+                rest_volume += capsule_volume(r, h);
+            }
+        }
+    }
+    if n == 0 {
+        return fractions;
+    }
+    let left = 1.0 - sum;
+    if rest_volume > 0.0 {
+        for (i, fraction) in fractions.iter_mut().enumerate() {
+            if *fraction != 0.0 {
+                continue;
+            }
+            let r = radius.get(i).copied().unwrap_or(0.0);
+            let h = half_height.get(i).copied().unwrap_or(0.0);
+            *fraction = left * capsule_volume(r, h) / rest_volume;
+        }
+    } else {
+        // Every bone is named: the leftover rides the root, the hips carry
+        // the trunk.
+        fractions[0] += left;
+    }
+    fractions
+}
+
+/// Volume of one capsule, cubic meters: the cylinder `PI r^2 * 2h` plus the
+/// ball `4/3 PI r^3`. The same volume Rapier derives from the shape, so a
+/// density over it gives the mass back.
+fn capsule_volume(radius: f32, half_height: f32) -> f32 {
+    let pi = core::f32::consts::PI;
+    pi * radius * radius * 2.0 * half_height + 4.0 / 3.0 * pi * radius * radius * radius
+}
+
+/// The coupling seam passes: the floor lift and the neighbor separation
+/// that keep a ragdoll's bones from sinking into the floor or into each
+/// other. They move Rapier bodies only, so the adapter owns them; the
+/// policy (the params and the counters) stays with the ragdoll.
+///
+/// Divide-and-Truncate pass: floor lift plus neighbor separation, each
+/// correction divided into `substeps` equal parts with every part truncated
+/// to `max_step_m`. Index loops over caller-owned slices only, so the pass
+/// performs no steady-state allocation; math is `+ - * /` plus one `sqrt`
+/// per bone pair, all deterministic in skeleton order.
+pub(crate) fn resolve_coupling(
+    bodies: &mut RigidBodySet,
+    order: &[RigidBodyHandle],
+    radii: &[f32],
+    params: &CouplingParams,
+    stats: &mut CouplingStats,
+) {
+    if !params.enabled {
+        return;
+    }
+    resolve_floor(bodies, order, radii, params, stats);
+    resolve_spacing(bodies, order, params, stats);
+}
+
+/// Floor lift: a bone center below `floor_top_y + radius` rises back to the
+/// plane in divided, truncated parts, and downward velocity dies there so
+/// the next step does not re-tunnel. A correction the per-tick authority
+/// cannot cover stays counted as a residual penetration event.
+fn resolve_floor(
+    bodies: &mut RigidBodySet,
+    order: &[RigidBodyHandle],
+    radii: &[f32],
+    params: &CouplingParams,
+    stats: &mut CouplingStats,
+) {
+    let parts = f32::from(params.substeps);
+    for (i, handle) in order.iter().enumerate() {
+        let Some(radius) = radii.get(i).copied() else {
+            continue;
+        };
+        let Some(body) = bodies.get_mut(*handle) else {
+            continue;
+        };
+        let y = body.translation().y;
+        if !y.is_finite() {
+            continue;
+        }
+        let need = params.floor_top_y + radius - y;
+        if need <= 0.0 {
+            continue;
+        }
+        let each = need / parts;
+        let clamped = if each > params.max_step_m {
+            params.max_step_m
+        } else {
+            each
+        };
+        // One condition guards both counters: `clamped < each` means the
+        // per-tick authority (`max_step_m * substeps`) cannot cover `need`,
+        // so the cap shortened the move and a residual stays behind. When
+        // the parts cover the need, `(need / parts) * parts` lands on the
+        // plane up to float rounding and no event is counted.
+        if clamped < each {
+            stats.truncations = stats.truncations.wrapping_add(1);
+            stats.penetration_events = stats.penetration_events.wrapping_add(1);
+        }
+        let applied = clamped * parts;
+        let t = body.translation();
+        // Sleeping is disabled on every bone, so no wake is needed: `false`
+        // keeps the pass out of Rapier's user-change lists and the tick
+        // inside its allocation budget (see the ragdoll allocation audit).
+        body.set_translation(Vector::new(t.x, t.y + applied, t.z), false);
+        let lv = body.linvel();
+        if lv.y < 0.0 {
+            body.set_linvel(Vector::new(lv.x, 0.0, lv.z), false);
+        }
+        if applied > stats.max_correction_m {
+            stats.max_correction_m = applied;
+        }
+    }
+}
+
+/// Neighbor separation: bone centers closer than `min_spacing_m` part along
+/// the pair axis in divided, truncated halves, so clinched bones never sit
+/// inside each other. A degenerate zero-distance pair parts along +X.
+/// Same single-condition counters as the floor pass: a shortened move
+/// leaves a counted residual.
+fn resolve_spacing(
+    bodies: &mut RigidBodySet,
+    order: &[RigidBodyHandle],
+    params: &CouplingParams,
+    stats: &mut CouplingStats,
+) {
+    let parts = f32::from(params.substeps);
+    let n = order.len();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (pi, pj) = match (bodies.get(order[i]), bodies.get(order[j])) {
+                (Some(a), Some(b)) => {
+                    let ta = a.translation();
+                    let tb = b.translation();
+                    ([ta.x, ta.y, ta.z], [tb.x, tb.y, tb.z])
+                }
+                _ => continue,
+            };
+            if pi.iter().chain(pj.iter()).any(|c| !c.is_finite()) {
+                continue;
+            }
+            let d = [pj[0] - pi[0], pj[1] - pi[1], pj[2] - pi[2]];
+            let d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if !d2.is_finite() {
+                continue;
+            }
+            // One `sqrt` per pair, allowed sim math.
+            let dist = d2.sqrt();
+            let need = params.min_spacing_m - dist;
+            if need <= 0.0 {
+                continue;
+            }
+            // Unit axis from `i` to `j`; a zero-distance pair parts along +X
+            // so the direction is always defined and deterministic.
+            let axis = if dist > 0.0 {
+                [d[0] / dist, d[1] / dist, d[2] / dist]
+            } else {
+                [1.0, 0.0, 0.0]
+            };
+            let each = need * 0.5 / parts;
+            let clamped = if each > params.max_step_m {
+                params.max_step_m
+            } else {
+                each
+            };
+            if clamped < each {
+                stats.truncations = stats.truncations.wrapping_add(1);
+                stats.penetration_events = stats.penetration_events.wrapping_add(1);
+            }
+            let half = clamped * parts;
+            // No wake: bones never sleep, and `false` keeps the pass out of
+            // Rapier's user-change lists (see the floor pass and the ragdoll
+            // allocation audit).
+            if let Some(a) = bodies.get_mut(order[i]) {
+                let t = a.translation();
+                a.set_translation(
+                    Vector::new(
+                        t.x - axis[0] * half,
+                        t.y - axis[1] * half,
+                        t.z - axis[2] * half,
+                    ),
+                    false,
+                );
+            }
+            if let Some(b) = bodies.get_mut(order[j]) {
+                let t = b.translation();
+                b.set_translation(
+                    Vector::new(
+                        t.x + axis[0] * half,
+                        t.y + axis[1] * half,
+                        t.z + axis[2] * half,
+                    ),
+                    false,
+                );
+            }
+            if half > stats.max_correction_m {
+                stats.max_correction_m = half;
+            }
+        }
+    }
+}
+
+/// One builder for every Rapier world: the solver passes, the bone mass table
+/// and the CCD switches. The ragdoll, the powered ragdoll and this adapter
+/// read it, so a rig cannot be built with one set of numbers and simulated
+/// with another.
+///
+/// Masses: a bone weighs its fraction of the total, and the fraction table
+/// comes from the bone names (the segment masses above). The table must sum
+/// to 1 within [`RAGDOLL_MASS_TOLERANCE`]; a table that misses is refused,
+/// never silently scaled.
+///
+/// Determinism: plain values read at spawn, never hashed (the Rapier ragdoll
+/// is client-local, HASH-LAW "Ragdoll split").
+#[derive(Clone, Debug, PartialEq)]
+pub struct RagdollParams {
+    /// Solver passes per step.
+    solver_passes: usize,
+    /// Total body mass, kilograms.
+    total_mass_kg: f32,
+    /// Mass fraction per bone, skeleton order.
+    fractions: Vec<f32>,
+}
+
+impl RagdollParams {
+    /// The shipped table for one rig: the chosen solver passes, the
+    /// [`RAGDOLL_TOTAL_MASS_KG`] total and the mass fractions of its bones.
+    /// `radius` and `half_height` are the bone capsules in meters, skeleton
+    /// order.
+    pub fn for_rig(
+        skeleton: &Skeleton,
+        radius: &[f32],
+        half_height: &[f32],
+    ) -> Result<Self, ParamsError> {
+        Self::new(
+            mass_fractions(skeleton, radius, half_height),
+            RAGDOLL_TOTAL_MASS_KG,
+            RAGDOLL_SOLVER_PASSES,
+        )
+    }
+
+    /// The params of a world without bones: the same solver passes and no
+    /// mass table. The generic capsules of [`World`] carry no bone names, so
+    /// they take no share of the body mass.
+    pub fn world() -> Self {
+        Self {
+            solver_passes: RAGDOLL_SOLVER_PASSES,
+            total_mass_kg: RAGDOLL_TOTAL_MASS_KG,
+            fractions: Vec::new(),
+        }
+    }
+
+    /// The builder from a caller table: one fraction per bone, the total mass
+    /// and the solver passes. The fractions must sum to 1 within
+    /// [`RAGDOLL_MASS_TOLERANCE`]; a table that misses is refused.
+    pub fn new(
+        fractions: Vec<f32>,
+        total_mass_kg: f32,
+        solver_passes: usize,
+    ) -> Result<Self, ParamsError> {
+        if solver_passes == 0 || solver_passes > RAGDOLL_MAX_SOLVER_PASSES {
+            return Err(ParamsError::BadSolverPasses);
+        }
+        if !total_mass_kg.is_finite() || total_mass_kg <= 0.0 {
+            return Err(ParamsError::BadTotalMass);
+        }
+        let mut sum = 0.0f32;
+        for (i, fraction) in fractions.iter().enumerate() {
+            if !fraction.is_finite() || !(0.0..=1.0).contains(fraction) {
+                return Err(ParamsError::BadFraction(i));
+            }
+            sum += *fraction;
+        }
+        if (sum - 1.0).abs() > RAGDOLL_MASS_TOLERANCE {
+            return Err(ParamsError::MassSum { got: sum });
+        }
+        Ok(Self {
+            solver_passes,
+            total_mass_kg,
+            fractions,
+        })
+    }
+
+    /// Solver passes per step.
+    pub fn solver_passes(&self) -> usize {
+        self.solver_passes
+    }
+
+    /// Total body mass, kilograms.
+    pub fn total_mass_kg(&self) -> f32 {
+        self.total_mass_kg
+    }
+
+    /// The mass fractions, one per bone, skeleton order.
+    pub fn fractions(&self) -> &[f32] {
+        &self.fractions
+    }
+
+    /// Bone count the table covers.
+    pub fn bones(&self) -> usize {
+        self.fractions.len()
+    }
+
+    /// The mass of one bone, kilograms. `None` past the end of the table.
+    pub fn mass_kg(&self, bone: usize) -> Option<f32> {
+        self.fractions.get(bone).map(|f| f * self.total_mass_kg)
+    }
+
+    /// The density of one bone, kg/m^3: its mass over the capsule volume.
+    /// `None` past the end of the table or for a capsule without volume.
+    pub fn density_for(&self, bone: usize, radius: f32, half_height: f32) -> Option<f32> {
+        let mass = self.mass_kg(bone)?;
+        let volume = capsule_volume(radius, half_height);
+        (volume > 0.0).then(|| mass / volume)
+    }
+
+    /// The integration parameters at `dt`: the fixed step plus the solver
+    /// passes of this table.
+    pub fn integration(&self, dt: f32) -> IntegrationParameters {
+        IntegrationParameters {
+            dt,
+            num_solver_iterations: self.solver_passes,
+            ..Default::default()
+        }
+    }
+
+    /// The CCD switch per bone, from the one policy: a dynamic bone rides the
+    /// continuous-collision solver from spawn.
+    pub fn ccd_flags(&self) -> Vec<bool> {
+        let cfg = LodConfig::default();
+        (0..self.fractions.len())
+            .map(|_| ccd_for(AgentKind::Bone, Motion::Dynamic, 0.0, &cfg) == Ccd::On)
+            .collect()
+    }
+}
 
 /// Kinematic state of one dynamic body. Plain owned data.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -149,12 +639,10 @@ pub struct World {
 }
 
 impl World {
-    /// New empty world with Earth gravity and default integration parameters.
+    /// New empty world with Earth gravity and the shared integration
+    /// parameters (the fixed step plus the solver passes of the one builder).
     pub fn new() -> Self {
-        let params = IntegrationParameters {
-            dt: FIXED_DT,
-            ..Default::default()
-        };
+        let params = RagdollParams::world().integration(FIXED_DT);
         Self {
             pipeline: PhysicsPipeline::new(),
             gravity: Vector::new(0.0, GRAVITY_Y, 0.0),

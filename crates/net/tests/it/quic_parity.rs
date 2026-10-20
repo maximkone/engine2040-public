@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use engine_arena::{ArenaConfig, Checkpoint};
+use engine_ecs::spine::{Body, Spine, Transform, Vitals};
 use engine_input::fighter::{Buttons, ATTACK};
 use engine_input::{FighterId, FighterInput};
 use engine_net::lobby::{BuildId, Msg, RefuseReason};
@@ -18,6 +19,8 @@ use engine_net::session::{
     self, Client, FighterSnap, FullSnap, Interpolator, NetError, Server, SnapshotDelta, REDUNDANCY,
     WIRE_VERSION,
 };
+use engine_net::spine::{send_spine_frame, SpineRollback};
+use engine_save::rollback::decode_frame;
 
 const TICKS: u32 = 90;
 const LATENCY: u32 = 3;
@@ -579,4 +582,189 @@ fn quic_garbage_and_version_rejected_through_transport() {
         client_t.recv().is_empty(),
         "no cross-talk back to the sender"
     );
+}
+
+// ---------------------------------------------------------------------------
+// ARC5: spine drop/rejoin resim over the QUIC mapping and UDP.
+// ---------------------------------------------------------------------------
+
+/// Ticks the spine fixture plays (fits one rollback ring).
+const SPINE_TICKS: u64 = 12;
+/// Tick the rejoin client misses (the scripted drop).
+const SPINE_DROP: u64 = 4;
+/// Tick the link is back; the catch-up starts here.
+const SPINE_BACK: u64 = 7;
+
+/// Deterministic two-slot spine whose pose and vitals move every tick.
+fn spine_at(tick: u64) -> Spine {
+    let mut spine = Spine::with_capacity(2);
+    for slot in 0..2u64 {
+        let ord = tick.saturating_mul(2).saturating_add(slot);
+        let at = f32::from(i16::try_from(ord).expect("fixture ticks fit i16"));
+        spine
+            .spawn(
+                Transform {
+                    pos: [at * 0.25, 0.0, at * -0.5],
+                    yaw: at,
+                },
+                Body::default(),
+                Vitals {
+                    hp_permille: 1000 - u16::try_from(tick).expect("fixture ticks fit u16"),
+                    stamina: 90,
+                    poise: 3,
+                    state: 0,
+                },
+            )
+            .expect("fixture has room");
+    }
+    spine
+}
+
+/// Keep the spine frames a receive drain carried (streams or datagrams).
+fn spine_frames(inbound: Vec<Inbound>) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for frame in inbound {
+        match frame.frame {
+            InboundFrame::Stream {
+                kind: ControlKind::Snapshot,
+                bytes,
+            } => out.push(bytes),
+            InboundFrame::Datagram(bytes) => out.push(bytes),
+            InboundFrame::Stream { .. } => {}
+        }
+    }
+    out
+}
+
+/// Apply the pre-drop frames to `client`, sort the rejoin suffix by tick and
+/// answer it. The drop tick itself is the gap the rejoin must fill.
+fn pre_drop_and_suffix(client: &mut SpineRollback, wire: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut suffix = Vec::new();
+    for frame in wire {
+        let tick = decode_frame(frame).expect("wire frame decodes").tick;
+        if tick < SPINE_DROP {
+            client.apply_frame(frame).expect("pre-drop tick stores");
+        } else {
+            suffix.push(frame.clone());
+        }
+    }
+    suffix.sort_by_key(|frame| decode_frame(frame).expect("decodes").tick);
+    suffix
+}
+
+/// The client ring equals the server truth at every tick.
+fn assert_spine_converged(client: &SpineRollback, server: &SpineRollback) {
+    for tick in 0..SPINE_TICKS {
+        let truth = server.restore(tick).expect("server restores");
+        assert!(
+            client
+                .converges_with(tick, &truth)
+                .expect("client stored the tick"),
+            "tick {tick} converges on spine bytes"
+        );
+    }
+}
+
+#[test]
+fn spine_drop_rejoin_converges_over_quic_mapping() {
+    let fabric = SimQuicFabric::new(2, 0x5A11_0000_D0ED);
+    let server_id = PeerId(addr(11001));
+    let client_id = PeerId(addr(11002));
+    let mut server_t = fabric.endpoint(server_id.0);
+    let mut client_t = fabric.endpoint(client_id.0);
+    let mut server = SpineRollback::new(64);
+    let mut client = SpineRollback::new(64);
+    let mut wire: Vec<Vec<u8>> = Vec::new();
+    for tick in 0..SPINE_TICKS {
+        let spine = spine_at(tick);
+        server.capture(tick, &spine).expect("server captures");
+        if tick == SPINE_BACK {
+            // Catch-up: every missed checkpoint rides the reliable stream
+            // first, then the live suffix.
+            for missed in SPINE_DROP..SPINE_BACK {
+                let frame = server.frame(missed).expect("missed frame");
+                send_spine_frame(&mut server_t, client_id, &frame).expect("catch-up fits");
+            }
+        }
+        if !(SPINE_DROP..SPINE_BACK).contains(&tick) {
+            let frame = server.frame(tick).expect("frame");
+            send_spine_frame(&mut server_t, client_id, &frame).expect("frame fits");
+        }
+        fabric.tick();
+        wire.extend(spine_frames(client_t.recv()));
+        fabric.tick();
+    }
+    // The last live frame is due one latency after the final tick above.
+    wire.extend(spine_frames(client_t.recv()));
+    let suffix = pre_drop_and_suffix(&mut client, &wire);
+    assert!(
+        client.bytes(SPINE_DROP).is_err(),
+        "the drop is a real gap before the rejoin"
+    );
+    let tip = client.rejoin(SPINE_DROP, &suffix).expect("rejoin replays");
+    assert_eq!(
+        tip.snapshot().bytes,
+        spine_at(SPINE_TICKS - 1).snapshot().bytes,
+        "the resim tip is the server tip"
+    );
+    assert_spine_converged(&client, &server);
+    let (unreliable, reliable) = fabric.bytes_sent(server_id);
+    assert!(reliable > 0, "spine frames ride the reliable stream");
+    assert_eq!(unreliable, 0, "the spine catch-up sends no datagrams");
+}
+
+#[test]
+fn spine_drop_rejoin_converges_over_udp_with_a_save_payload() {
+    let mut server_t = UdpTransport::bind_loopback().expect("bind server");
+    let mut client_t = UdpTransport::bind_loopback().expect("bind client");
+    let client_id = PeerId(client_t.local_addr().expect("client addr"));
+    let mut server = SpineRollback::new(64);
+    let mut client = SpineRollback::new(64);
+    let mut wire: Vec<Vec<u8>> = Vec::new();
+    for tick in 0..SPINE_TICKS {
+        let spine = spine_at(tick);
+        server.capture(tick, &spine).expect("server captures");
+        if tick == SPINE_BACK {
+            // The drop checkpoint comes from the save payload below; the rest
+            // of the missed suffix rides the link as the catch-up.
+            for missed in SPINE_DROP + 1..SPINE_BACK {
+                let frame = server.frame(missed).expect("missed frame");
+                send_spine_frame(&mut server_t, client_id, &frame).expect("catch-up fits");
+                let inbound = recv_frame_udp(&mut client_t);
+                wire.extend(spine_frames(vec![inbound]));
+            }
+        }
+        if !(SPINE_DROP..SPINE_BACK).contains(&tick) {
+            let frame = server.frame(tick).expect("frame");
+            send_spine_frame(&mut server_t, client_id, &frame).expect("frame fits");
+            let inbound = recv_frame_udp(&mut client_t);
+            wire.extend(spine_frames(vec![inbound]));
+        }
+    }
+    let suffix = pre_drop_and_suffix(&mut client, &wire);
+    assert!(
+        client.bytes(SPINE_DROP).is_err(),
+        "the drop is a real gap before the rejoin"
+    );
+    // The missing checkpoint comes back from the save envelope, twice.
+    let (first, second) = (
+        server
+            .save_payload(2040, SPINE_DROP)
+            .expect("drop checkpoint seals"),
+        server
+            .save_payload(2040, SPINE_DROP)
+            .expect("drop checkpoint seals"),
+    );
+    assert_eq!(first, second, "save payload round-trip x2 is byte-equal");
+    assert_eq!(
+        client.load_payload(&first).expect("save payload opens"),
+        SPINE_DROP
+    );
+    let tip = client.rejoin(SPINE_DROP, &suffix).expect("rejoin replays");
+    assert_eq!(
+        tip.snapshot().bytes,
+        spine_at(SPINE_TICKS - 1).snapshot().bytes,
+        "the resim tip is the server tip"
+    );
+    assert_spine_converged(&client, &server);
 }

@@ -56,7 +56,7 @@ pub struct SimResetArgs {
     #[serde(default, with = "dec_u64::opt")]
     #[schemars(with = "Option<String>")]
     pub seed: Option<u64>,
-    /// Participant count, 2..=16.
+    /// Participant count, `2..=MAX_PARTICIPANTS`.
     #[serde(default, alias = "fighters")]
     pub participants: Option<u8>,
     /// Arena half-extent in meters, 5.0..=100.0.
@@ -140,7 +140,7 @@ fn reset_core(args: &SimResetArgs) -> Result<SimResetOutput, McpToolError> {
                 "bad_config",
                 format!(
                     "spawn for seed {seed} with {participants} fighters at {half}m holds \
-                     nothing; ranges already check 2..=16 and 5.0..=100.0m, so re-run \
+                     nothing; ranges already check 2..={MAX_PARTICIPANTS} and 5.0..=100.0m, so re-run \
                      in range and report the seed"
                 ),
             ));
@@ -215,7 +215,7 @@ pub struct SimStepArgs {
     #[serde(default, with = "dec_u64::opt")]
     #[schemars(with = "Option<String>")]
     pub seed: Option<u64>,
-    /// Participant count, 2..=16.
+    /// Participant count, `2..=MAX_PARTICIPANTS`.
     #[serde(default, alias = "fighters")]
     pub participants: Option<u8>,
     /// Arena half-extent in meters, 5.0..=100.0.
@@ -335,7 +335,7 @@ fn step_core(slot: &mut PlaySlot, args: &SimStepArgs) -> Result<SimStepOutput, M
             "bad_config",
             format!(
                 "step for seed {seed} with {participants} fighters at {half}m for {ticks} ticks holds \
-                 nothing; ranges already check 2..=16, 5.0..=100.0m and 1..={MAX_PLAY_TICKS}, so re-run \
+                 nothing; ranges already check 2..={MAX_PARTICIPANTS}, 5.0..=100.0m and 1..={MAX_PLAY_TICKS}, so re-run \
                  in range and report the seed"
             ),
         ));
@@ -471,9 +471,13 @@ mod tests {
                     ..reset_args()
                 },
             )
-            .expect_err("headcount outside 2..=16 refuses");
+            .expect_err("headcount outside 2..=MAX_PARTICIPANTS refuses");
             assert_eq!(refused.code, "bad_fighters");
-            assert!(refused.message.contains("2..=16"), "{}", refused.message);
+            assert!(
+                refused.message.contains(&format!("2..={MAX_PARTICIPANTS}")),
+                "{}",
+                refused.message
+            );
         }
         for half in [4.0, 101.0, f32::NAN, f32::INFINITY] {
             let refused = SimResetTool::invoke(
@@ -630,9 +634,13 @@ mod tests {
                     ..step_args()
                 },
             )
-            .expect_err("headcount outside 2..=16 refuses");
+            .expect_err("headcount outside 2..=MAX_PARTICIPANTS refuses");
             assert_eq!(refused.code, "bad_fighters");
-            assert!(refused.message.contains("2..=16"), "{}", refused.message);
+            assert!(
+                refused.message.contains(&format!("2..={MAX_PARTICIPANTS}")),
+                "{}",
+                refused.message
+            );
         }
         for half in [4.0, 101.0, f32::NAN, f32::INFINITY] {
             let refused = SimStepTool::invoke(

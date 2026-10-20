@@ -3,7 +3,7 @@
 //! Units: arena meters in, sweep millimetres out, ticks at 60 Hz.
 //! Determinism: integer math, fighter-ID order; same inputs => same bytes.
 //! Errors: none returned; bad counts refuse construction, resolvers never panic.
-//! Budget: O(fighters^2) over <=16 slots; no heap per tick (caller buffers).
+//! Budget: O(fighters^2) over <=32 slots; no heap per tick (caller buffers).
 
 use engine_combat::arena::{
     canonical_bytes, match_riposte, match_step, MatchState, MatchTables, MATCH_V1,

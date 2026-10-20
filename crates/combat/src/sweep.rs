@@ -1136,7 +1136,7 @@ mod tests {
         assert_eq!(t.max_sweep_len_mm, 6000);
         assert_eq!(SweepTableSet::v1().version, 1);
         assert_eq!(SweepTableSet::v1().validate(), Ok(()));
-        assert_eq!(MAX_PARTICIPANTS, 16);
+        assert_eq!(MAX_PARTICIPANTS, 32);
         assert_eq!(MAX_SWEEPS_PER_TICK, 8);
     }
 
@@ -1744,21 +1744,21 @@ mod tests {
                 },
             ]
         );
-        // Six fighters pass the strict path; sixteen validate, seventeen refuse.
+        // Six fighters pass the strict path; thirty-two validate, 33 refuse.
         let mut out = [SweepEvent::Hit {
             attacker: 0,
             victim: 0,
         }; MAX_SWEEP_EVENTS_PER_TICK];
         assert!(try_resolve_tick(&fighters, &[s0], &t, &mut out).is_ok());
-        let sixteen: Vec<SweepParticipant> = (0..16u8)
+        let full: Vec<SweepParticipant> = (0..MAX_PARTICIPANTS)
             .map(|id| pose(id, 0, 0, 1, 0, 800, 60, false))
             .collect();
-        assert!(try_resolve_tick(&sixteen, &[], &t, &mut out).is_ok());
-        let seventeen: Vec<SweepParticipant> = (0..17u8)
+        assert!(try_resolve_tick(&full, &[], &t, &mut out).is_ok());
+        let over: Vec<SweepParticipant> = (0..=MAX_PARTICIPANTS)
             .map(|id| pose(id, 0, 0, 1, 0, 800, 60, false))
             .collect();
         assert_eq!(
-            try_resolve_tick(&seventeen, &[], &t, &mut out),
+            try_resolve_tick(&over, &[], &t, &mut out),
             Err(SweepError::TooManyFighters(17))
         );
     }

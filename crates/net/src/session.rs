@@ -47,6 +47,10 @@
 //! rejected as [`NetError::VersionMismatch`] and change nothing. Duplicate
 //! or out-of-order packets are acknowledged but change nothing.
 //!
+//! Replicate payloads ride this same wire: the replicate module frames one
+//! under the snapshot kind with [`SNAPSHOT_REPLICATE_BIT`] set, and the
+//! full-snapshot decoder refuses it loudly.
+//!
 //! Physics track: the session uses the arena default kinematic track. The
 //! arena `sim` feature (Rapier settling) stays off: rollback needs the
 //! same-machine reproducibility the default track already gives, without the
@@ -104,12 +108,16 @@ pub const SNAPSHOT_HEADER_LEN: usize = 9;
 pub const SNAPSHOT_SLOT_LEN: usize = 19;
 /// State-delta header length: the 17-byte state header plus baseline tick 4.
 pub const STATE_DELTA_HEADER_LEN: usize = 21;
+/// Snapshot count-byte flag: the payload is a replicate message, not the
+/// fighter slot list.
+pub const SNAPSHOT_REPLICATE_BIT: u8 = 0x80;
 /// Last-N inputs repeated in every packet (loss redundancy).
 pub const REDUNDANCY: usize = 3;
 /// Ticks a sent input is held before the server is expected to need it.
 pub const INPUT_DELAY_TICKS: u32 = 2;
-/// Upper bound on inputs carried by one datagram (flood guard).
-pub const MAX_INPUTS_PER_PACKET: usize = 16;
+/// Upper bound on inputs carried by one datagram (flood guard): one whole
+/// tick of `MAX_PARTICIPANTS` fighter inputs, never split across packets.
+pub const MAX_INPUTS_PER_PACKET: usize = 32;
 /// Upper bound on an accepted datagram in bytes (flood guard).
 pub const MAX_PACKET_BYTES: usize = 1200;
 /// Encoded [`FighterInput`] size: tick u32 + fighter u8 + mx i8 + mz i8 +
@@ -285,6 +293,9 @@ pub enum NetError {
     SimRejected,
     /// Checkpoint and delta disagree (tick or hash mismatch).
     BadState,
+    /// The payload is not the shape this decoder reads: fighter slots where
+    /// a replicate payload was expected, or the other way round.
+    BadPayload,
 }
 
 impl std::fmt::Display for NetError {
@@ -307,6 +318,7 @@ impl std::fmt::Display for NetError {
             Self::TooManyInputs(n) => write!(f, "too many inputs: {n}"),
             Self::SimRejected => write!(f, "arena rejected the prefix run"),
             Self::BadState => write!(f, "checkpoint and delta disagree"),
+            Self::BadPayload => write!(f, "payload is not the expected shape"),
         }
     }
 }
@@ -1514,6 +1526,10 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<FullSnap, NetError> {
     if bytes[3] != KIND_SNAPSHOT {
         return Err(NetError::BadKind(bytes[3]));
     }
+    if bytes[8] & SNAPSHOT_REPLICATE_BIT != 0 {
+        // A replicate payload rides this wire; only its own decoder reads it.
+        return Err(NetError::BadPayload);
+    }
     let tick = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let count = usize::from(bytes[8]);
     if count == 0 || count > usize::from(engine_input::MAX_PARTICIPANTS) {
@@ -2160,6 +2176,57 @@ mod tests {
             Err(NetError::BadKind(KIND_SNAPSHOT))
         );
         assert_eq!(decode_snapshot(&bytes[..8]), Err(NetError::Truncated));
+    }
+
+    #[test]
+    fn replicate_snapshot_rides_the_lan_wire() {
+        use crate::replicate::{
+            decode_snapshot_packet, encode_snapshot_packet, REPLICATE_VERSION_OFFSET,
+        };
+        let mut world = crate::replicate::ReplicationServer::new();
+        world
+            .spawn(
+                crate::replicate::EntityId(0),
+                crate::replicate::Transform {
+                    x_mm: 100,
+                    y_mm: 200,
+                    yaw_ddeg: 30,
+                },
+                crate::replicate::Vitals::FULL,
+            )
+            .expect("spawn");
+        world.advance();
+        let message = world.message_for(1).expect("message");
+        let bytes = encode_snapshot_packet(&message).expect("encode");
+        // One wire, one session version byte, the replicate flag on the
+        // count byte.
+        assert_eq!(bytes[2], WIRE_VERSION);
+        assert_eq!(bytes[3], KIND_SNAPSHOT);
+        assert_ne!(bytes[8] & SNAPSHOT_REPLICATE_BIT, 0);
+        assert_eq!(decode_snapshot_packet(&bytes).expect("decode"), message);
+        // The full-snapshot decoder refuses the replicate payload loudly.
+        assert_eq!(decode_snapshot(&bytes), Err(NetError::BadPayload));
+        // A foreign replicate version refuses loudly.
+        let mut foreign = bytes.clone();
+        foreign[REPLICATE_VERSION_OFFSET] = crate::replicate::REPLICATE_VERSION + 1;
+        assert_eq!(
+            decode_snapshot_packet(&foreign),
+            Err(NetError::VersionMismatch {
+                got: crate::replicate::REPLICATE_VERSION + 1
+            })
+        );
+        // A foreign session version refuses before the payload is read.
+        let mut old = bytes.clone();
+        old[2] = WIRE_VERSION + 1;
+        assert_eq!(
+            decode_snapshot_packet(&old),
+            Err(NetError::VersionMismatch {
+                got: WIRE_VERSION + 1
+            })
+        );
+        // A plain fighter snapshot is not a replicate payload.
+        let full = encode_snapshot(&snap_fighters(70)).expect("encode snapshot");
+        assert_eq!(decode_snapshot_packet(&full), Err(NetError::BadPayload));
     }
 
     #[test]

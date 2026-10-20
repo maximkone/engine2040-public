@@ -293,12 +293,15 @@ impl Play {
             "NO ROOM".clone_into(&mut self.notice);
             return;
         };
-        match self.march.order(Command::SpawnUnit {
-            kind: UnitKind::Swordsman,
+        match self.march.order_for(
             side,
-            x,
-            y,
-        }) {
+            Command::SpawnUnit {
+                kind: UnitKind::Swordsman,
+                side,
+                x,
+                y,
+            },
+        ) {
             Ok(()) => self.notice = format!("SPAWN S{side}"),
             Err(refusal) => {
                 self.notice = format!("REFUSED {refusal:?}").to_ascii_uppercase();

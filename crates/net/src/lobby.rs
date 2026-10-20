@@ -4,8 +4,8 @@
 //! Determinism: slot order plus ready transitions are pure input order;
 //! ms timing never enters match seed or state. Errors: [`LobbyError`].
 //! Budget: at most `MAX_PARTICIPANTS` slots, 16 beacons, wire messages at
-//! most 33 bytes; browser and lobby ops are O(16) with no per-tick sim
-//! allocation.
+//! most 33 bytes; browser and lobby ops are O(MAX_PARTICIPANTS) with no
+//! per-tick sim allocation.
 //! Caps: match slots come from `engine_input::MAX_PARTICIPANTS` (the
 //! canonical cap) and beacon wire constants come from `dedicated` (the one
 //! owner); this module declares no private cap and no mirror constants.
@@ -35,9 +35,10 @@ pub const STALE_BEACON_MS: u64 = 2000;
 /// Lobby wire magic `b"LB"` little-endian, first two bytes of control msgs.
 pub const LOBBY_MAGIC: u16 = 0x424C;
 /// Lobby wire version; anything else is refused. Version 2 widened the
-/// `Start` AI mask from 8 to 16 bits so every `MAX_PARTICIPANTS` slot has
-/// a bit; version 1 `Start` datagrams refuse as `BadVersion`, loudly.
-pub const LOBBY_VERSION: u8 = 2;
+/// `Start` AI mask from 8 to 16 bits; version 3 widened it to 32 bits so
+/// every `MAX_PARTICIPANTS` slot has a bit. Older `Start` datagrams refuse
+/// as `BadVersion`, loudly.
+pub const LOBBY_VERSION: u8 = 3;
 
 /// Party board point in the ludus hub (`map.json` party_board interact
 /// board x -13 z 1.2) in whole millimetres: integer-only so the gate never
@@ -70,8 +71,8 @@ pub const JOIN_REFUSE_LEN: usize = 33;
 /// Total wire lengths: header 4 plus fixed payload, no trailing bytes.
 pub const READY_LEN: usize = 13;
 /// Total wire lengths: header 4 plus fixed payload, no trailing bytes.
-/// `Start` carries the mask as two little-endian bytes (16-bit AI mask).
-pub const START_LEN: usize = 25;
+/// `Start` carries the mask as four little-endian bytes (32-bit AI mask).
+pub const START_LEN: usize = 27;
 
 /// Lobby failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -275,9 +276,9 @@ pub enum Msg {
         /// Agreed build identity.
         build: BuildId,
         /// Bitmask of AI-filled slots (bit `i` set means slot `i` is AI).
-        /// Sixteen bits cover every `MAX_PARTICIPANTS` slot; bits at or
+        /// Thirty-two bits cover every `MAX_PARTICIPANTS` slot; bits at or
         /// above `fighters` refuse.
-        ai_mask: u16,
+        ai_mask: u32,
     },
 }
 
@@ -372,9 +373,9 @@ impl Msg {
                 if !(MIN_LOBBY_SLOTS..=MAX_PARTICIPANTS).contains(&fighters) {
                     return Err(LobbyError::BadInput);
                 }
-                // Bits at or above the fighter count refuse; the 16-bit mask
-                // covers every canonical slot including slots 8..15.
-                if u32::from(ai_mask) >> fighters != 0 {
+                // Bits at or above the fighter count refuse. `checked_shr`
+                // treats a 32-fighter count as "no bits above the roster".
+                if ai_mask.checked_shr(u32::from(fighters)).unwrap_or(0) != 0 {
                     return Err(LobbyError::BadInput);
                 }
                 build.validate()?;
@@ -492,11 +493,11 @@ impl Msg {
                     version: u16::from_le_bytes([bytes[13], bytes[14]]),
                     rules: u64::from_le_bytes(bytes_range_8(bytes, 15)?),
                 };
-                let ai_mask = u16::from_le_bytes([bytes[23], bytes[24]]);
+                let ai_mask = u32::from_le_bytes([bytes[23], bytes[24], bytes[25], bytes[26]]);
                 if !(MIN_LOBBY_SLOTS..=MAX_PARTICIPANTS).contains(&fighters) {
                     return Err(LobbyError::BadInput);
                 }
-                if u32::from(ai_mask) >> fighters != 0 {
+                if ai_mask.checked_shr(u32::from(fighters)).unwrap_or(0) != 0 {
                     return Err(LobbyError::BadInput);
                 }
                 build.validate()?;
@@ -564,7 +565,7 @@ pub struct StartParams {
     /// Agreed build identity.
     pub build: BuildId,
     /// Bitmask of AI-filled slots: bit `i` set means slot `i` is AI.
-    pub ai_mask: u16,
+    pub ai_mask: u32,
 }
 
 impl StartParams {
@@ -801,14 +802,14 @@ impl Lobby {
         filled
     }
 
-    /// Bitmask of AI slots: bit `i` set means slot `i` is AI. Sixteen bits
-    /// so every `MAX_PARTICIPANTS` slot has a bit; `u16` shifts never trap
-    /// on slots 8..15.
-    pub fn ai_mask(&self) -> u16 {
-        let mut mask = 0u16;
+    /// Bitmask of AI slots: bit `i` set means slot `i` is AI. Thirty-two bits
+    /// so every `MAX_PARTICIPANTS` slot has a bit; `u32` shifts never trap
+    /// on slots 16..31.
+    pub fn ai_mask(&self) -> u32 {
+        let mut mask = 0u32;
         for (index, slot) in self.slots[..usize::from(self.fighters)].iter().enumerate() {
             if *slot == Slot::Ai {
-                mask |= 1u16 << index;
+                mask |= 1u32 << index;
             }
         }
         mask
@@ -1062,9 +1063,9 @@ mod tests {
     }
 
     #[test]
-    fn sixteen_slot_lobby_forms_and_seventeen_refuses() {
-        // 16-slot validation: the canonical cap forms, cap + 1 refuses.
-        let full = Lobby::new(BUILD, MAX_PARTICIPANTS, 7).expect("16-slot lobby");
+    fn thirty_two_slot_lobby_forms_and_33_refuses() {
+        // 32-slot validation: the canonical cap forms, cap + 1 refuses.
+        let full = Lobby::new(BUILD, MAX_PARTICIPANTS, 7).expect("32-slot lobby");
         assert_eq!(full.fighters(), MAX_PARTICIPANTS);
         assert_eq!(full.slots().len(), MAX_PARTICIPANTS as usize);
         assert_eq!(
@@ -1098,18 +1099,18 @@ mod tests {
     }
 
     #[test]
-    fn sixteen_slot_ai_mask_covers_every_slot() {
-        // The widened 16-bit mask names AI slots 8..15 that a `u8`
-        // mask could never carry (debug builds trapped on `1 << 8`).
-        let mut lobby = Lobby::new(BUILD, MAX_PARTICIPANTS, 7).expect("16-slot lobby");
+    fn thirty_two_slot_ai_mask_covers_every_slot() {
+        // The 32-bit mask names AI slots 16..31 that a `u16` mask could
+        // never carry (debug builds trapped on `1 << 16`).
+        let mut lobby = Lobby::new(BUILD, MAX_PARTICIPANTS, 7).expect("32-slot lobby");
         lobby.join(1, BUILD).expect("join slot 0");
         lobby.join(2, BUILD).expect("join slot 1");
         lobby.set_ready(1, true).expect("ready");
         lobby.set_ready(2, true).expect("ready");
         assert_eq!(lobby.ai_fill(), MAX_PARTICIPANTS - 2);
         let mask = lobby.ai_mask();
-        assert_eq!(mask, 0xFFFFu16 ^ 0b11);
-        assert_ne!(mask & 0xFF00, 0, "slots 8..15 need the upper byte");
+        assert_eq!(mask, u32::MAX ^ 0b11);
+        assert_ne!(mask & 0xFFFF_0000, 0, "slots 16..31 need the upper half");
         let start = lobby.try_start().expect("start");
         assert_eq!(start.ai_mask, mask);
         let bytes = start.as_msg().encode().expect("encode");
@@ -1120,20 +1121,20 @@ mod tests {
             fighters: 15,
             seed: 1,
             build: BUILD,
-            ai_mask: 1u16 << 15,
+            ai_mask: 1u32 << 15,
         };
         assert_eq!(bad.encode(), Err(LobbyError::BadInput));
-        // A version-1 Start (pre-widening wire) refuses loudly as a version
-        // mismatch, never as silent truncation.
-        let mut v1 = bytes.clone();
-        v1[2] = LOBBY_VERSION - 1;
+        // An older-version Start (16-bit mask wire) refuses loudly as a
+        // version mismatch, never as silent truncation.
+        let mut old = bytes.clone();
+        old[2] = LOBBY_VERSION - 1;
         assert_eq!(
-            Msg::decode(&v1),
+            Msg::decode(&old),
             Err(LobbyError::BadVersion {
                 got: LOBBY_VERSION - 1
             })
         );
-        // The 16-slot beacon crosses real loopback UDP and decodes.
+        // The 32-slot beacon crosses real loopback UDP and decodes.
         let tx = UdpSocket::bind("127.0.0.1:0").expect("tx");
         let rx = UdpSocket::bind("127.0.0.1:0").expect("rx");
         rx.set_nonblocking(true).expect("nonblocking");

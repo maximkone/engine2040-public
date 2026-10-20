@@ -31,7 +31,7 @@ the open capability rows of both plans.
 | Physics-driven locomotion student (PX5) | missing (rowed) | no `learned_ctrl.rs`; needs PX4, DT2, NN1 |
 | Deterministic parallel islands (PX6, ticked in FOCUS) | missing (split PX37-PX39 + PX15 salvage) | `islands.rs` builds only (canonical union-find + sorted output); `rapier.rs` spawn-order |
 | Ragdoll contacts + joint tables (PX9) | shaped-but-unproven | depth-based swing/twist limits and parent-child `contacts_enabled(false)`; no `joint_limits.rs`, no `InteractionGroups`; needs PX1, PX10 |
-| Continuous collision CCD (PX10) | shaped-but-unproven | `CCDSolver` plumbed but `ccd_enabled` 0 hits; bodies mutate during step |
+| Continuous collision CCD (PX10) | shaped-but-unproven | `CCDSolver` plumbed; the one `lod::ccd_for` policy turns it on for a dynamic bone at spawn (AD17) and off for a driven body; the weapon/projectile arm has no caller yet |
 | PID servo (PX11), servo corpus (PX22) | missing (rowed) | no `crates/physics/src/servo.rs`; velocity-set only |
 | Swept shape-cast API (PX20) | missing (rowed) | segment-cast exists (`QueryBvh::cast_into`, BoxMm only); needs PH1, GP2 |
 | Runtime Voronoi fracture (DX5) | shaped-but-unproven | runtime Voronoi in `crates/destruction/src/fracture.rs` + offline `Mode::Voronoi` in `bake.rs`; needs DX4 |
@@ -41,6 +41,7 @@ the open capability rows of both plans.
 
 - Status 2026-10-12: BX4 row above says no `limb.rs`, but `crates/physics/src/limb.rs:1` and `crates/arena/src/limbs.rs:1` exist on disk, so that cell is false.
 - Status 2026-10-17: disk shows `crates/physics/src/ragdoll.rs:378` and `crates/physics/src/powered.rs:317` call `.ccd_enabled(true)` (rg hits), so the `:32` "`ccd_enabled` 0 hits" cell and the `:45` "CCD is off by grep" line are false at those two sites.
+- Status 2026-10-20 (AD17): the one CCD policy `lod::ccd_for(kind, motion, speed, cfg)` now has callers: `rapier::RagdollParams::ccd_flags` reads it at spawn for `ragdoll.rs` and `powered.rs`, so a dynamic bone rides the solver from spawn and a kinematic body never does. The PX10 cell above is corrected in place.
 - Status 2026-10-17: disk shows the false BX4 cell still at `:25` ("no `limb.rs`, `limbloss.rs`, `injured.rs`; glob 2026-09-30") with `:40` already marking it false, while the code names now exist: `crates/physics/src/limb.rs:1`, `crates/arena/src/limbs.rs:1` and `crates/combat/src/limbloss.rs:1` (Test-Path True, `limb`/`limbs`/`limbloss` under `crates/`), and only `crates/physics/src/injured.rs` is still absent (Test-Path False), so the "no `limb.rs`" half stays stale and the `:25` cell stays false.
 - Status 2026-10-17 (physics and destruction cut, on purpose): rot packet `0-rot-physics-dead-r1` removed about 17,000 lines that had no production caller. The bytes sit in `auto: backup` commits `3d6ee4a1` (physics, 14,466 lines) and `3387a96e` (destruction, 2,681 lines). The landing record is `9fdee9a4` ("cut: physics dead-module wave", review PASS, 95 physics tests green at the time). Removed: `cloth.rs` (PX2, PX27-PX29), `grapple.rs` (PX3), `lod.rs` (PX7), `vehicle.rs` (the D1 vehicles line), `query.rs` (UW1, and the `QueryBvh` cast that the PX20 cell cites), `solver.rs` and `verify.rs` (EG5), `substep.rs` (PX31), `broadphase.rs`, `cast.rs`, `checked_fix.rs`, `islands_build.rs`, `simd_math.rs`, and in destruction `bond_grade.rs` (DX9), `nav_dirty.rs` with `tests/contract.rs` (DX10), `debris.rs`, `wall_slice.rs`. The ticked rows stay ticked, so read PX2, PX3, PX7, D1 and DX10 as "built, then removed". Every line in this file that counts cloth, grapple, vehicles or army LOD as landed (the "Landed and ticked" list, the ownership line, the `step_cloth` sketch, the 2.5 ms and 4 ms budgets) describes code that is gone. Recover with `git log --follow -- <path>`.
 - Status 2026-10-17 (PX6, parallel islands): PX6 is ticked, but no parallel island code is in the tree. `step_islands`, `ParConfig` and `JobPool` left with `islands.rs` in `3d6ee4a1`. A slim `islands.rs` came back today (`bc72d03d`): `roots`, `build_islands` and the snapshot half that the Rapier snapshot needs, nothing parallel. PX15 is the open row for real parallel islands.
@@ -51,7 +52,8 @@ the open capability rows of both plans.
 Step contract (kept green forever): fixed 60 Hz, fixed iterations, sorted
 insertion, hash x2 plus snapshot/restore equality; cloth stays
 presentation-only and never enters the hash. Scale rows PX15-PX18 and
-DX11-DX12 are boarded open; CCD is off by grep.
+DX11-DX12 are boarded open; CCD is on for a dynamic bone through
+`lod::ccd_for` (AD17).
 
 Status 2026-10-17: disk shows that "CCD is off by grep" text two lines lower than the `:45` cite in the bullet above, at `docs/plan/body-and-break.md:52` (`rg -n "CCD is off by grep" docs/plan/body-and-break.md` returns only `47:`), and the code side still holds, so that line and the `:32` "`ccd_enabled` 0 hits" cell stay false: `crates/physics/src/ragdoll.rs:378` and `crates/physics/src/powered.rs:317` call `.ccd_enabled(true)` (rg hits), `crates/physics/src/lod.rs` is gone (Test-Path False) and `rg -n ccd_for crates` exits 1 with 0 hits, while bomb CCD still runs inside the solver as `CCDSolver` at `crates/physics/src/ragdoll.rs:299`, `crates/physics/src/powered.rs:248` and `crates/physics/src/rapier.rs:144`.
 

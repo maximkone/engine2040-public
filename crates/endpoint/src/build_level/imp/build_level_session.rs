@@ -7,6 +7,7 @@
 //! plus seed gives the same preview, receipt and digests.
 use std::collections::{BTreeMap, BTreeSet};
 
+use engine_arena::world::MatchWorld;
 use engine_spatial::Actor;
 
 use super::{
@@ -161,6 +162,15 @@ impl LevelSession {
     /// Digest of the current actor list.
     pub fn current_digest(&self) -> u64 {
         actors_digest(&self.current)
+    }
+
+    /// The arena spine world this level installs: the boxes the spine step
+    /// plays around. Empty until a write lands, and empty again after the
+    /// undo, so the level sits on the spine exactly as long as it is applied.
+    /// Errors: [`LevelError::SpineWorld`] when the level holds a box the
+    /// arena cannot play.
+    pub fn spine_world(&self) -> Result<MatchWorld, LevelError> {
+        super::spine_world(&self.current)
     }
 
     /// Dry run: validate, solve the relation-diff edit, gate and report with

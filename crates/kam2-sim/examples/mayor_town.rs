@@ -3,6 +3,9 @@
 //!
 //! Run: `cargo run -p kam2-sim --example mayor_town`
 //! Prints the town every 500 ticks and one final receipt line.
+//!
+//! The receipt hash moved with the side split (SIM1): `82295fecdeefed91` before,
+//! `9da53332e624d075` now, because side 1's own starting stock is in the digest.
 
 use kam2_sim::{HouseKind, Mayor, Sim, Ware};
 

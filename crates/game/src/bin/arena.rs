@@ -1244,6 +1244,9 @@ struct ArenaApp {
     /// rematch so the next finished bout announces once.
     result_announced: bool,
     last: Instant,
+    /// PQ18: input-to-present stage stamps for the run's latency receipt.
+    /// Presentation only; never read by the sim or a hash.
+    latency: arena_frame::latency::LatencyMeter,
     /// Wall start of the session for the `--timed-smoke` fps line.
     started: Instant,
     ticks_done: u32,
@@ -1450,6 +1453,7 @@ impl ArenaApp {
             free_cam: DirectorParams::arena(),
             result_announced: false,
             last: Instant::now(),
+            latency: arena_frame::latency::LatencyMeter::new(),
             started: Instant::now(),
             ticks_done: 0,
             frames_presented: 0,
@@ -1906,6 +1910,8 @@ impl ArenaApp {
         if let Some(code) = self.report_waits() {
             self.failure = Some(code);
         }
+        // PQ18: the measured input-latency block plus the one-line receipt.
+        self.report_latency();
         if let Some(report) = self.finalize_capture() {
             say!(
                 "arena capture: frames={} manifest=\"{}\" sha={}",
@@ -2091,6 +2097,12 @@ impl ArenaApp {
             // One health bar per fighter (the capture path already stages them).
             let overlay = engine_game::windowed::duel_overlay_for_app(&self.app);
             engine_game::windowed::stage_hp_bars(presenter, &overlay);
+            // PQ18 stage three: the frame submits its present call now. Only a
+            // frame with an accepted tick stamps, so an idle frame never reads
+            // as a stray event.
+            if self.latency.is_waiting() {
+                self.latency.note_present_submitted(Instant::now());
+            }
             match presenter.render_surface(&list) {
                 Ok(receipt) => {
                     if receipt.total_validation_errors() > 0 {
@@ -2145,6 +2157,12 @@ impl ArenaApp {
             &engine_render::present::last_live_wall_split(),
         );
         self.frames_presented += 1;
+        // PQ18 stage four: the presented frame ends the chain here, before
+        // the twin capture can add its own offscreen wall. A full window
+        // prints its summary line on this frame.
+        if let Some(summary) = self.latency.note_frame_end(Instant::now()) {
+            say!("{}", summary.line(self.latency.dropped()));
+        }
         self.poll_hot_reload();
         self.note_receipt(&receipt);
         self.capture_offscreen(event_loop, &list);

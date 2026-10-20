@@ -39,6 +39,13 @@ test("buildPrompt names the row, the date, the one-line ending and the hard rule
   assert.ok(!p.includes("`cargo fmt` on"), "AGENTS.md forbids cargo fmt; the prompt must not ask for it");
 });
 
+test("buildPrompt --remote-only forbids local cargo", () => {
+  const p = buildPrompt("QR2", "## Row\n- [ ] QR2 body", "2026-10-20", true);
+  assert.ok(p.includes("Do NOT run any cargo command on this PC"), "remote-only names the ban");
+  assert.ok(p.includes("`node tools/gh-check.mjs cargo ...`"), "remote-only names the proof path");
+  assert.ok(!buildPrompt("QR2", "row", "2026-10-20", false).includes("Do NOT run any cargo command"), "default keeps local check");
+});
+
 test("opencodeBin ignores OpenCode's own OPENCODE=1 marker and takes a real path", () => {
   assert.equal(opencodeBin({ OPENCODE: "1" }), "opencode");
   assert.equal(opencodeBin({}), "opencode");

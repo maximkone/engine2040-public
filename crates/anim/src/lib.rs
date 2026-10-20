@@ -60,6 +60,9 @@ pub mod locomotion;
 pub mod lod;
 #[cfg(test)]
 mod lod_w1_test;
+/// Offline motion bake: the PartiGen endpoint rule plus the one AM5P pack half
+/// a teacher bake must use. Std-only, no I/O, never called by the tick.
+pub mod motion_bake;
 pub mod motion_match;
 pub mod motion_net;
 #[cfg(test)]

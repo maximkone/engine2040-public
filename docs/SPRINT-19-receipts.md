@@ -5,6 +5,11 @@ Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 <!-- template: new blocks append via `node tools/land.mjs <packet> --dry` + `node tools/proof.mjs --skip-build`; do not hand-type golden/proof lines -->
 > Golden `d57b5c8ae3096614` holds for every landing below unless the block names a move; new blocks paste the land+proof output, not hand-typed hashes.
 
+### 2026-10-20, NS31h2 material gallery and PQ18 arena latency
+
+- 5a009518 NS31h2: `crates/playtest/src/material_gallery.rs` renders a sphere and a slab per record under day, torch and overcast through `pipeline_for`, then pairs the captures. 57 captures in 2.85 s on the RTX 3050 against a 120 s bar; marble to marble_wet dE 6.34, luminance x0.751, highlight 239.17, equal x2. Proof: 3 tests with `--features window`, 2 headless; clippy exit 0; workspace-check edge documented (99fa50d0).
+- 1223bc81 PQ18: the arena window loop stamps input accepted, sim tick, present submit and frame end into `WindowLatencyLog`, behind the `app` feature. Proof: 7 loop tests; `PQ18 OK window=1 input_p50=3.767ms input_p95=5.974ms sim_p50=0.043ms present_p50=6.133ms gpu=reported`; `input_latency_gpu samples=66 warmup=60 present_p95=32.137ms verdict=pass` on the RTX 3050; golden x2. Note: the meter had been removed by an auto-backup commit (`f7b7c8ae`) and was restored first in beb39410.
+
 ### 2026-10-20, VS9 the daily arena shot
 
 - fc2c97cf: `tools/arena-shot.mjs` runs the pinned capture at HEAD, writes three frames, three mask PNGs, manifest, per-pass timings, `masks.json` and `shot.json` under `target/vs9/`, and refuses a cube digest, 64x48 noise, an empty fighter box and magenta above 0.5%. Proof: `node tools/arena-shot.mjs` PASS at build beb39410, `frames=3 masks=3 magenta_max=0.000%`; `--self-check` 17/17; golden `d57b5c8ae3096614` PASS. Left: the pre-VS1 cube build is gone, so the cube-SHA refusal replays only as the pinned-digest rule.

@@ -41,8 +41,9 @@
 //! `upto_tick: N` simulates the `0..N` prefix: N ticks with 0-indexed tick
 //! ids `0..=N-1`. The receipt reports the 1-indexed count `tick: N`, which
 //! equals the `play.run` poll field `tick_count: N` and sits exactly one past
-//! the last checkpoint tick id (`N - 1`). The digest is the last checkpoint
-//! hash, so `play.step(upto_tick = N).digest` equals
+//! the last checkpoint tick id (`N - 1`). The digest is the last spine
+//! checkpoint hash ([`spine_digest`]), so `play.step(upto_tick = N).digest`
+//! equals
 //! `play.run(ticks = N).final_hash` on the same seed, extent, participants and
 //! tape. Inputs always carry 0-indexed tick ids inside the covered prefix;
 //! [`PlaySession::cursor`] is the next uncovered tick id (0 before the first
@@ -54,6 +55,8 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use engine_arena::gym::{GymEvent, GymLive};
+use engine_arena::spine_step::SpineMatch;
+use engine_arena::world::MatchWorld;
 use engine_arena::{ArenaConfig, BoutTape, MAX_PARTICIPANTS};
 use engine_core::{adler::adler32, crc32::crc32, hash::GOLDEN_GAMMA, splitmix64};
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
@@ -187,9 +190,9 @@ pub struct PlayStepOutput {
     /// field `tick_count` and sits one past the last checkpoint tick id
     /// (`N - 1`); see the module legend.
     pub tick: u32,
-    /// State digest: the checkpoint `tick - 1` hash, equal to the `play.run`
-    /// `final_hash` on the same seed, extent, participants and tape. A
-    /// decimal string on the wire.
+    /// State digest: the spine checkpoint `tick - 1` hash, equal to the
+    /// `play.run` `final_hash` on the same seed, extent, participants and
+    /// tape. A decimal string on the wire.
     #[serde(with = "dec_u64")]
     #[schemars(with = "String")]
     pub digest: u64,
@@ -371,6 +374,9 @@ pub(crate) struct LiveBout {
     /// Every input the env consumed, in tape order.
     consumed: BoutTape,
     log: VecDeque<GymEvent>,
+    /// State digest of the reached tick: the last spine checkpoint hash
+    /// (see [`spine_digest`]), `0` before the first tick.
+    digest: u64,
 }
 
 impl LiveBout {
@@ -390,6 +396,7 @@ impl LiveBout {
             env: GymLive::new(&config)?,
             consumed: BoutTape::default(),
             log: VecDeque::with_capacity(EVENT_LOG_CAP),
+            digest: 0,
         })
     }
 
@@ -443,7 +450,7 @@ impl LiveBout {
         let skip = self.log.len().saturating_sub(events);
         BoutView {
             tick: snapshot.tick,
-            digest: snapshot.digest,
+            digest: self.digest,
             fighters: snapshot
                 .fighters
                 .iter()
@@ -464,6 +471,32 @@ impl LiveBout {
     }
 }
 
+/// Read the spine checkpoint `ticks - 1` over `tape`: the state digest the
+/// door reports. The spine step is the authority `play.step` reads; the
+/// legacy bout beside it supplies the numbers and the event ring, and its
+/// checkpoints equal these bytes (ARC4 parity). `None` when the spine refuses
+/// a tape the legacy step accepted; `0` before the first tick.
+fn spine_digest(spec: BoutSpec, tape: &BoutTape, ticks: u32) -> Option<u64> {
+    if ticks == 0 {
+        return Some(0);
+    }
+    let config = ArenaConfig {
+        seed: spec.seed,
+        // The cap only bounds the walk; it never enters the hash, and the
+        // request tape stops below `ticks` (the `build_tape` contract).
+        ticks,
+        fighters: spec.participants,
+        half_extent_m: spec.half_extent_m(),
+        table_version: 1,
+    };
+    let mut sim = SpineMatch::build(&config, tape, MatchWorld::empty())?;
+    let mut digest = 0;
+    while sim.tick() < ticks {
+        digest = sim.step()?.hash;
+    }
+    Some(digest)
+}
+
 /// Everything `play.step`, `sim.step` and `sim.observe` hold for one
 /// session: the live bout (at most one, replaced when a request cannot extend
 /// it), the GPU capture hook fixed at construction and the re-query cache.
@@ -478,9 +511,14 @@ pub(crate) struct PlaySlot {
     requery: RequeryCache,
     /// Bounded ring of step wall times (read only by the `timing` receipt).
     timing: TimingRing,
-    /// Sim steps performed through this slot: the cost proof tests read.
+    /// Sim steps performed through this slot's live bout: the cost proof
+    /// tests read.
     #[cfg(test)]
     pub(crate) steps: u64,
+    /// Spine steps spent reading the digest (always the full prefix, from
+    /// tick 0): the ARC16 receipt reads it.
+    #[cfg(test)]
+    pub(crate) spine_steps: u64,
 }
 
 impl fmt::Debug for PlaySlot {
@@ -501,8 +539,9 @@ impl PlaySlot {
 
     /// Bring the bout to `ticks` over `tape` and hand it back. Extends the
     /// held bout when it can, else opens a fresh one and steps from tick 0;
-    /// both give the bytes a from-zero run would. A failure leaves the slot
-    /// empty, so the next call rebuilds.
+    /// both give the bytes a from-zero run would. The reported digest is the
+    /// spine checkpoint `ticks - 1` read from `tape` (see [`spine_digest`]).
+    /// A failure leaves the slot empty, so the next call rebuilds.
     pub(crate) fn advance_to(
         &mut self,
         spec: BoutSpec,
@@ -516,9 +555,19 @@ impl PlaySlot {
         #[cfg(test)]
         let from = bout.env.tick();
         bout.run_to(tape, ticks)?;
+        bout.digest = spine_digest(spec, tape, ticks).ok_or_else(|| {
+            McpToolError::new(
+                "invalid_tape",
+                format!(
+                    "the spine step refused the tape through tick {ticks}; the legacy step \
+                     accepted it, so report the tape verbatim"
+                ),
+            )
+        })?;
         #[cfg(test)]
         {
             self.steps += u64::from(ticks - from);
+            self.spine_steps += u64::from(ticks);
         }
         Ok(self.bout.insert(bout))
     }
@@ -557,7 +606,7 @@ pub type StepCaptureHook =
     fn(&CaptureArgs, digest: u64, tick: u32) -> Result<CaptureOutput, McpToolError>;
 
 /// Stateless step over a full tape prefix: validate, simulate the
-/// `0..upto_tick` prefix, digest the last checkpoint, capture. Same seed
+/// `0..upto_tick` prefix, read its spine checkpoint, capture. Same seed
 /// plus same tape twice gives the same digest, numbers and PNG bytes
 /// (software re-queries replay the call's own re-query cache). Holds nothing
 /// between calls: the MCP tool path keeps a bout, a hook and a cache per
@@ -1434,6 +1483,70 @@ mod tests {
         let (repeat_digests, repeat_frames) = play_twenty(&mut second);
         assert_eq!(digests, repeat_digests, "digests repeat across runs");
         assert_eq!(frames, repeat_frames, "receipt bytes repeat across runs");
+    }
+
+    /// Run one spine match over `tape` to `ticks`: its last checkpoint hash
+    /// and its spine snapshot bytes.
+    fn spine_run(tape: &BoutTape, ticks: u32) -> (u64, Vec<u8>) {
+        let config = ArenaConfig {
+            seed: SEED,
+            ticks,
+            fighters: 2,
+            half_extent_m: 20.0,
+            table_version: 1,
+        };
+        let mut sim = SpineMatch::build(&config, tape, MatchWorld::empty()).expect("spine builds");
+        let mut hash = 0;
+        while sim.tick() < ticks {
+            hash = sim.step().expect("spine steps").hash;
+        }
+        (hash, sim.spine().snapshot().bytes)
+    }
+
+    /// ARC16: `play.step` reads its digest from the spine checkpoint, not the
+    /// legacy fold. Twenty two-tick duel steps repeat equal digests and PNG
+    /// bytes x2 (every PNG non-black, checked by [`play_twenty`]), every step
+    /// digest equals the checkpoint a spine run over the same tape folds, and
+    /// two spine runs seal equal snapshot bytes.
+    #[test]
+    fn arc16_twenty_step_duel_digests_read_spine_checkpoints_x2() {
+        let mut first = PlaySession::new(SEED, 2, 20.0).expect("duel opens");
+        let (digests, frames) = play_twenty(&mut first);
+        assert_eq!(digests.len(), 20);
+        assert_eq!(first.slot.steps, 40, "the live bout stays incremental");
+        assert_eq!(
+            first.slot.spine_steps, 420,
+            "the digest reads the spine prefix: 2+4+...+40 ticks"
+        );
+
+        let mut second = PlaySession::new(SEED, 2, 20.0).expect("duel reopens");
+        let (repeat_digests, repeat_frames) = play_twenty(&mut second);
+        assert_eq!(digests, repeat_digests, "digests repeat across runs x2");
+        assert_eq!(frames, repeat_frames, "receipt bytes repeat across runs x2");
+
+        // The same tape on the spine step, two ticks at a time: the step
+        // digest is the checkpoint that run folded at that tick.
+        let mut tape: Vec<PlayInputDto> = Vec::new();
+        for step in 0..20u32 {
+            tape.extend_from_slice(&step_inputs(step * 2, step));
+            let ticks = (step + 1) * 2;
+            let arena_tape = build_tape(&tape, ticks, 2).expect("tape validates");
+            let (hash, _) = spine_run(&arena_tape, ticks);
+            assert_eq!(
+                digests[usize::try_from(step).expect("step fits")],
+                hash,
+                "step {step}: the digest is spine checkpoint {}",
+                ticks - 1
+            );
+        }
+
+        // Same spine bytes twice: the digest and the snapshot agree x2.
+        let arena_tape = build_tape(&tape, 40, 2).expect("tape validates");
+        let once = spine_run(&arena_tape, 40);
+        let twice = spine_run(&arena_tape, 40);
+        assert_eq!(once.0, digests[19], "the last digest is checkpoint 39");
+        assert_eq!(once.0, twice.0, "spine digests repeat x2");
+        assert_eq!(once.1, twice.1, "spine snapshot bytes repeat x2");
     }
 
     #[test]

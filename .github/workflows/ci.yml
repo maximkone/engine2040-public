@@ -134,6 +134,12 @@ jobs:
       - name: shader gate (--features shader-validate)
         if: ${{ !cancelled() && matrix.group == 'render' }}
         run: cargo test --locked -p engine-render --lib --features shader-validate shader_validate
+      # The anim SIMD gate (AM14): the parallel crowd eval rides the `simd`
+      # feature, so the headless default stays std-only. The feature carries
+      # the bit-identical pose proof, so it must run here, not only locally.
+      - name: anim SIMD gate (--features simd)
+        if: ${{ !cancelled() && matrix.group == 'rest' }}
+        run: cargo test --locked -p engine-anim --lib --features simd par
 
   clippy:
     if: github.repository == 'maximkone/engine2040-public'

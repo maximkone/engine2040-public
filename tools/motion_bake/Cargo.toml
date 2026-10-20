@@ -1,0 +1,29 @@
+[package]
+name = "motion-bake"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.97.1"
+publish = false
+description = "Offline teacher-clip bake to AM5P (AM27): NPZ in, retarget, endpoint rule, pack out."
+
+# The bake tool is not a tick crate and not a member of the engine workspace
+# (`members = ["crates/*"]`): it runs offline on a desk, writes a committed
+# fixture and is never built by `cargo test -p engine-anim`. Its own empty
+# workspace table keeps `cargo` in this folder from joining the engine graph.
+[workspace]
+
+[[bin]]
+name = "motion_bake"
+path = "src/main.rs"
+
+[dependencies]
+# The engine side of the bake: the pack half and the tick rate (anim), the
+# retarget cook and the SOMA table (assets, import lane only for retarget).
+engine-anim = { path = "../../crates/anim" }
+engine-assets = { path = "../../crates/assets", features = ["import"] }
+# A real Kimodo `.npz` is `numpy.savez_compressed`; this inflates it. Free
+# crate, already in the engine lock graph through flate2.
+miniz_oxide = "0.8"
+# The receipt's source and pack identity. Free crate; never in the tick.
+sha2 = "0.10"
