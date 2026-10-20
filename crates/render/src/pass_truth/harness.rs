@@ -275,10 +275,10 @@ pub(crate) mod fixtures {
 mod tests {
     use super::*;
     use crate::pass_truth::harness::fixtures::{
-        arena_like_scene, init_or_skip, ARMOR_DRAW, FLOOR_DRAW, H, W,
+        arena_like_scene, init_or_skip, ARMOR_DRAW, FLOOR_DRAW, H, W, WALL_DRAW,
     };
     use crate::pass_truth::live_gate::{diff_in_draws, NO_DRAW_ID};
-    use crate::pass_truth::{PassRegion, PASS_EPSILON};
+    use crate::pass_truth::{LookToggles, PassRegion, PASS_EPSILON};
 
     /// The row of one look pass by name.
     fn row<'a>(gate: &'a LiveGate, name: &str) -> &'a LiveRow {
@@ -329,15 +329,12 @@ mod tests {
         let second = gate_live_scene(&mut presenter, &list).expect("scene gates again");
         assert_eq!(first.rows, second.rows, "the gate run twice, same table");
         assert_eq!(first.noise_px, 0, "the all-on frame repeats exactly");
-        for name in ["graph", "ibl", "sky"] {
+        for name in ["graph", "ibl", "sky", "gtao"] {
             let r = row(&first, name);
             assert!(r.verdict.live, "{name} moves pixels in its region: {r:?}");
             assert!(r.verdict.diff_pixels > 0 && r.counted_px > 0);
         }
         for name in [
-            // LF3: the GTAO field is bound but not composited until the
-            // ambient-only landing, so its toggle changes no pixel.
-            "gtao",
             "shadow_cluster",
             "post",
             "material_layer",
@@ -368,9 +365,9 @@ mod tests {
         );
         assert!(report.contains("| graph | LIVE |"));
         assert!(report.contains("| sky | LIVE |"));
-        assert!(report.contains("| gtao | PROBE | 0 |"));
+        assert!(report.contains("| gtao | LIVE |"));
         assert!(report.contains("| decals | PROBE | 0 |"));
-        assert!(report.contains("9 rows, 3 LIVE, 6 PROBE"));
+        assert!(report.contains("9 rows, 4 LIVE, 5 PROBE"));
         // The artifact: dated by the caller (`PASS_TRUTH_DATE`), repo-rooted.
         let date = std::env::var("PASS_TRUTH_DATE").unwrap_or_else(|_| "arena-like".into());
         let path = super::super::live_gate::write_live_gate_report(&repo_root(), &date, &report)
@@ -452,21 +449,74 @@ mod tests {
     }
 
     #[test]
-    fn gtao_toggle_leaves_the_frame_byte_equal() {
-        // LF3: AO no longer multiplies the whole HDR frame at the blit (it
-        // darkened direct sun too). The GTAO field stays bound for a later
-        // ambient-only composite, so toggling the pass must not change a
-        // pixel; ambient contact darkening lives in forward and is covered
-        // by `contact_feet`.
-        let Some(mut presenter) = init_or_skip("gtao_toggle_leaves_the_frame_byte_equal") else {
+    fn the_gtao_field_darkens_the_wall_base_and_leaves_the_open_sand() {
+        // LF3 landing 2: the field scales the ambient at the contact, so
+        // the wall base darkens while the open sand stays put: a contact
+        // effect, never a global darkening.
+        let Some(mut presenter) = init_or_skip("the_gtao_field_darkens_the_wall_base") else {
             return;
         };
         presenter.resize(W, H).expect("valid size applies");
         let list = arena_like_scene(&mut presenter, W, H);
         let on = capture(&mut presenter, &list, None);
         let off = capture(&mut presenter, &list, Some("gtao"));
-        eprintln!("gtao on/off: {} px byte-equal", on.rgba.len() / 4);
-        assert_eq!(on.rgba, off.rgba, "AO on/off frames are byte-equal");
+        let wall = surface_diff(&on, &off, &[WALL_DRAW]);
+        let floor = surface_diff(&on, &off, &[FLOOR_DRAW]);
+        let wall_px = on.ids.iter().filter(|id| **id == WALL_DRAW).count();
+        let floor_px = on.ids.iter().filter(|id| **id == FLOOR_DRAW).count();
+        eprintln!("gtao on/off: wall {wall}/{wall_px} px, floor {floor}/{floor_px} px");
+        assert!(wall_px > 100 && floor_px > 100, "both surfaces are in view");
+        assert!(wall > 0, "the wall base darkens: {wall}/{wall_px}");
+        assert!(
+            (wall + floor) * 10 < wall_px + floor_px,
+            "the open sand stays put: {} of {} px differ",
+            wall + floor,
+            wall_px + floor_px
+        );
+    }
+
+    #[test]
+    fn gtao_toggle_moves_the_ambient_pixels_only() {
+        // LF3 landing 2: the GTAO field scales the ambient diffuse, so the
+        // toggle moves the covered pixels. The control: with the baked
+        // ambient cut the field has nothing to scale, so the direct sun
+        // pixels stay byte-equal and the sun never darkens.
+        let Some(mut presenter) = init_or_skip("gtao_toggle_moves_the_ambient_pixels_only") else {
+            return;
+        };
+        presenter.resize(W, H).expect("valid size applies");
+        let list = arena_like_scene(&mut presenter, W, H);
+        let on = capture(&mut presenter, &list, None);
+        let off = capture(&mut presenter, &list, Some("gtao"));
+        let w = on.width as usize;
+        let h = on.height as usize;
+        let surface_mask = super::super::live_gate::region_mask(PassRegion::Geometry, &on.ids);
+        let surfaces = frame_diff_count(
+            &on.rgba,
+            &off.rgba,
+            w,
+            h,
+            surface_mask.as_deref(),
+            PASS_EPSILON,
+        )
+        .expect("frames line up");
+        eprintln!("gtao on/off: {surfaces} covered px differ");
+        assert!(surfaces > 0, "the field darkens the ambient where it bites");
+        // The control frame: no baked ambient, so the field scales nothing
+        // and the direct sun pixels are byte-equal with the pass on or off.
+        let mut sun_only = LookToggles::all_on();
+        sun_only.disable("ibl");
+        let sun_on = presenter
+            .capture_live_pixels(&list, &sun_only)
+            .expect("live frame captures");
+        sun_only.disable("gtao");
+        let sun_off = presenter
+            .capture_live_pixels(&list, &sun_only)
+            .expect("live frame captures");
+        assert_eq!(
+            sun_on.rgba, sun_off.rgba,
+            "the direct sun never moves when the field comes on"
+        );
     }
 
     #[test]

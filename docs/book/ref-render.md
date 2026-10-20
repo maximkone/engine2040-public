@@ -57,7 +57,7 @@ Crate root `crates/render/src/lib.rs`. "Row" is the board row that owns the modu
 | `present/gpu_present/sun_shadow.rs` | | Sun shadow depth and bind on the live frame. |
 | `twin_shadow.rs` | | Sun-shadow bind for the window twin (`arena_capture`). |
 | `gtao.rs` | RL3 | Half-resolution GTAO plus the shared `LookFrame` bind shape. `GTAO_BUDGET_MS = 0.8`. |
-| `gtao` device path | LF3 | `present/gpu_present/gtao_live.rs`: GTAO on the device writes `ao_tex`; no readback. |
+| `gtao` device path | LF3 | `present/gpu_present/gtao_live.rs`: GTAO on the device writes `ao_tex`; no readback. Landing 2: a depth prepass (`present/gpu_present/submit.rs`) writes the frame's depth first, and `fs` scales the ambient diffuse by the field (group 1, binding 0). |
 | `v1_lighting.rs` | R4 | Cascaded shadows, probe GI, bloom factors, Halton TAA jitter (`v1`). |
 | `gi.rs` | | Baked GI: hemisphere lightmap and SH probes; runtime is lookup only. |
 | `baked_gi.rs`, `baked_bake.rs` | RL5 | Arena lightmaps with validity mask and fighter SH probes; bake is identical bytes twice. |
@@ -94,7 +94,7 @@ Crate root `crates/render/src/lib.rs`. "Row" is the board row that owns the modu
 | Module | Feature | Role |
 |---|---|---|
 | `v1.rs`, `v1_gpu.rs` | `v1`, `window` | Forward PBR receipt (R1). `v1_gpu.rs` renders the shared shader `shaders/forward.wgsl` offscreen. |
-| `v1_skin.rs` | `v1` | GPU skinning joint matrices and weight validation (R3). |
+| `v1_skin.rs` | `v1` | GPU skinning joint matrices and weight validation (R3). EG12: the skinned vertex layout carries the mesh tangent (80-byte stride) and the CPU mirror is `SkinnedFrame::tangents`. |
 | `v1_ibl_shadow.rs` | `v1` | IBL and single shadow map (R2). |
 | `v1_temporal.rs` | test only | Temporal upscale parity oracle. |
 | `twin_fighters.rs`, `twin_arena.rs` | `v1` | Binds for the window twin frame list in `crates/game/src/bin/arena_capture.rs`. |

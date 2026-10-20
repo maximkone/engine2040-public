@@ -9,7 +9,8 @@ Multiplayer. Format: file — tag — proof it feeds — scope. A new plan file 
 one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 
 - `finish-line.md` — NOW — all four — the finish line as numbers the loop prints itself (gates G1-G8, product check), the order of the LF steal rows, research in `docs/research/steals-2026-10-11/`
-- `status-2026-10-17.md` — NOW — all four — one-screen truth check: what is verified green this week, what code was cut, which rows are unbuilt, and the owner's open decisions; read it before trusting a status cell in any plan
+- `ai-native-steals.md` - NOW - AI door - the owner's 2026-10-20 seat/warn report: what landed (the live `--agent-seat` socket and self-warn floors) and the five ranked steals with sources and rows AIN1-AIN6
+- `status-2026-10-17.md` - NOW - all four - one-screen truth check: what is verified green this week, what code was cut, which rows are unbuilt, and the owner's open decisions; read it before trusting a status cell in any plan
 - `web-and-realism.md` — NOW — Look, Bodies, Multiplayer — heavy realistic games on Windows and in the browser: the wasm build, the physical layer (ragdoll, severed limbs, debris), the lit and textured arena, browser multiplayer, and an AI-driven project setup (rows WEB, RZ, VR, AIS)
 - `web-plays-the-match.md` — NOW — Look, Multiplayer — the browser page runs the same match the native window runs (`App` + fixed tick + the fight draw helpers) and draws it with the procedural ring until the cooked kit assets land (row WEB15)
 - `parry-and-limb.md` — NOW — Look, Bodies — the v2 exchange (parry, riposte, clash) made readable in the page, and a lost guard costing a limb that falls into the debris layer (row WEB16 with QR12)

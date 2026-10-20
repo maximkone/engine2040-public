@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CACHE_NAME, LoadError, browserEnv, loadEngine, loadLine, watchFirstFrame } from "../crates/web/loader.js";
+import { CACHE_NAME, LoadError, AssetError, browserEnv, fetchAsset, pageFetcher, loadEngine, loadLine, watchFirstFrame } from "../crates/web/loader.js";
 
 const WASM = Buffer.from("fake wasm bytes".repeat(100));
 const SHA = createHash("sha256").update(WASM).digest("hex");
@@ -124,6 +124,95 @@ test("loadLine prints the three numbers and what is not known yet is left out", 
 test("the file is plain ASCII", () => {
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "crates", "web", "loader.js"), "utf8");
   assert.ok(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(src));
+});
+
+// WEB6: the runtime fetches a gameplay asset at runtime, through the page's own network.
+test("WEB6: the loader requests the gameplay asset and returns its bytes", async () => {
+  const body = Buffer.from("packed bundle bytes");
+  const asked = [];
+  const env = {
+    fetch: async (url) => { asked.push(String(url)); return new Response(body, { status: 200 }); },
+    now: () => 0,
+  };
+  const { bytes, stats } = await fetchAsset("http://127.0.0.1:9/assets/arena.e2bundle", env);
+  assert.deepEqual(asked, ["http://127.0.0.1:9/assets/arena.e2bundle"], "the asset is requested by URL");
+  assert.deepEqual([...bytes], [...body], "the bytes come back whole");
+  assert.equal(stats.bytesFetched, body.length);
+});
+
+test("WEB6: a missing asset is a typed refusal that names it", async () => {
+  const env = { fetch: async () => new Response("not found", { status: 404 }), now: () => 0 };
+  await assert.rejects(fetchAsset("http://127.0.0.1:9/assets/arena.e2bundle", env), (e) => {
+    assert.ok(e instanceof AssetError, "the failure is typed");
+    assert.match(e.message, /assets\/arena\.e2bundle could not be fetched: HTTP 404/);
+    assert.equal(e.status, 404, "the status travels with the refusal");
+    return true;
+  });
+});
+
+test("WEB6: an empty body and a failed request are typed refusals, not empty assets", async () => {
+  const empty = { fetch: async () => new Response(new Uint8Array(0), { status: 200 }), now: () => 0 };
+  await assert.rejects(fetchAsset("http://127.0.0.1:9/assets/arena.e2bundle", empty), /assets\/arena\.e2bundle is empty/);
+  const offline = { fetch: async () => { throw new Error("offline"); }, now: () => 0 };
+  await assert.rejects(fetchAsset("http://127.0.0.1:9/assets/arena.e2bundle", offline), /could not be fetched: offline/);
+});
+
+test("WEB6: the fetcher the engine asks for is the one the page installs", () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const rust = readFileSync(join(root, "crates", "web", "src", "content.rs"), "utf8");
+  assert.match(rust, /pub const PAGE_FETCHER: &str = "engine2040FetchAsset"/, "the engine asks for the page's fetcher by this name");
+  const html = readFileSync(join(root, "crates", "web", "index.html"), "utf8");
+  assert.match(html, /window\.engine2040FetchAsset = /, "the page installs it under that name");
+});
+
+test("WEB6: the fetcher the page installs answers with the asset's bytes", async () => {
+  const { serve } = await import("./web-browse.mjs");
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "web-fetcher-"));
+  const body = Buffer.from("e2bundle bytes", "utf8");
+  mkdirSync(join(dir, "assets"));
+  writeFileSync(join(dir, "assets", "arena.e2bundle"), body);
+  try {
+    const server = await serve(dir);
+    try {
+      // The page's own fetcher, the one it installs for the engine: a relative asset
+      // name against the page's URL, answered with the asset's bytes.
+      const fetcher = pageFetcher(`http://127.0.0.1:${server.port}/index.html`);
+      const bytes = await fetcher("assets/arena.e2bundle");
+      assert.ok(bytes instanceof Uint8Array, "the engine is handed a Uint8Array");
+      assert.deepEqual([...bytes], [...body]);
+      assert.equal(server.log.at(-1).path, "/assets/arena.e2bundle", "the server saw the asset request");
+      await assert.rejects(fetcher("assets/missing.e2bundle"), /assets\/missing\.e2bundle could not be fetched: HTTP 404/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WEB6 end to end: the real server serves the asset and the loader brings its bytes back", async () => {
+  const { serve } = await import("./web-browse.mjs");
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "web-asset-"));
+  const body = Buffer.from("e2bundle bytes", "utf8");
+  mkdirSync(join(dir, "assets"));
+  writeFileSync(join(dir, "assets", "arena.e2bundle"), body);
+  try {
+    const server = await serve(dir);
+    try {
+      const { bytes } = await fetchAsset(`http://127.0.0.1:${server.port}/assets/arena.e2bundle`, { ...browserEnv(), caches: null });
+      assert.deepEqual([...bytes], [...body]);
+      assert.equal(server.log.at(-1).path, "/assets/arena.e2bundle", "the server saw the asset request");
+      await assert.rejects(fetchAsset(`http://127.0.0.1:${server.port}/assets/missing.e2bundle`, { ...browserEnv(), caches: null }), /assets\/missing\.e2bundle could not be fetched: HTTP 404/);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // The real fetch and the real WebAssembly.compileStreaming against the harness's own static server.

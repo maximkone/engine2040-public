@@ -107,6 +107,7 @@ fn play(
         ttl_polls: None,
         job_id: None,
         scene_rev,
+        timing: None,
     };
     let started = PlayRunTool::invoke(server, start)
         .map_err(|error| format!("{}: {}", error.code, error.message))?;

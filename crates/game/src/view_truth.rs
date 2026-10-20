@@ -279,6 +279,36 @@ pub struct ViewLaws {
     tracks: Vec<Option<Track>>,
 }
 
+/// Floors the `arena view:` receipt must stay inside. Mirrors the `view_*`
+/// entries of `tools/product-bar.json` (owner 2026-10-11); a test keeps the
+/// two in step, so a floor is never remembered here and changed there.
+/// View only, never hashed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewFloors {
+    /// Deepest body bottom under the sand, in centimeters.
+    pub sunk_cm_max: f32,
+    /// Posed vertices or joints with a non-finite component.
+    pub nonfinite: u32,
+    /// Body parts drawn with the skin error material.
+    pub error_parts: u32,
+    /// Frames with the camera inside a drawn body.
+    pub eye_in_body: u32,
+    /// Frames with the camera under the sand.
+    pub eye_below_ground: u32,
+}
+
+impl Default for ViewFloors {
+    fn default() -> Self {
+        Self {
+            sunk_cm_max: 3.0,
+            nonfinite: 0,
+            error_parts: 0,
+            eye_in_body: 0,
+            eye_below_ground: 0,
+        }
+    }
+}
+
 impl ViewLaws {
     /// Fold one presented frame: the camera that drew it, sim time `t` in
     /// ticks (tick plus interpolation alpha) and every drawn body.
@@ -510,6 +540,54 @@ impl ViewLaws {
             self.spears_max,
             self.tethers_max,
         ))
+    }
+
+    /// Every floor this run breaks, one `arena WARN:` line each, in receipt
+    /// order: counters first, then the sand. A run inside every floor warns
+    /// nothing. The warning is not a refusal: the caller keeps its exit code,
+    /// and `tools/product-check.mjs` still owns the gate.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings_with(&ViewFloors::default())
+    }
+
+    /// [`Self::warnings`] against explicit floors; the bar-pin test reads the
+    /// product bar this way.
+    #[must_use]
+    pub fn warnings_with(&self, floors: &ViewFloors) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.nonfinite > floors.nonfinite {
+            out.push(format!(
+                "arena WARN: view_nonfinite value={} floor={}",
+                self.nonfinite, floors.nonfinite
+            ));
+        }
+        if self.error_parts > floors.error_parts {
+            out.push(format!(
+                "arena WARN: view_error_parts value={} floor={}",
+                self.error_parts, floors.error_parts
+            ));
+        }
+        if self.eye_in_body > floors.eye_in_body {
+            out.push(format!(
+                "arena WARN: view_eye_in_body value={} floor={}",
+                self.eye_in_body, floors.eye_in_body
+            ));
+        }
+        if self.eye_below_ground > floors.eye_below_ground {
+            out.push(format!(
+                "arena WARN: view_eye_below_ground value={} floor={}",
+                self.eye_below_ground, floors.eye_below_ground
+            ));
+        }
+        let sunk_cm = self.sunk_m * 100.0;
+        if sunk_cm > floors.sunk_cm_max {
+            out.push(format!(
+                "arena WARN: view_sunk_cm_max value={sunk_cm:.1} floor={:.1}",
+                floors.sunk_cm_max
+            ));
+        }
+        out
     }
 }
 
@@ -837,6 +915,63 @@ mod tests {
                 "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02 foot_slide_cm=0.0 planted_feet=0 ragdolls=0 spear=0 tether=0"
             )
         );
+        // The run warns by itself, one line per broken floor, receipt order.
+        assert_eq!(
+            laws.warnings(),
+            vec![
+                "arena WARN: view_nonfinite value=1 floor=0".to_string(),
+                "arena WARN: view_error_parts value=1 floor=0".to_string(),
+                "arena WARN: view_eye_below_ground value=1 floor=0".to_string(),
+                "arena WARN: view_sunk_cm_max value=12.0 floor=3.0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clean_run_warns_about_nothing() {
+        let mut laws = ViewLaws::default();
+        laws.note(
+            &camera(),
+            1.0,
+            &[body(0, "idle", [0.0, 0.0, 0.0], vec![[0.0, 1.0, 0.0]])],
+        );
+        assert!(laws.line().is_some(), "the run still prints its receipt");
+        assert!(laws.warnings().is_empty(), "a clean run is silent");
+    }
+
+    #[test]
+    fn the_warning_floors_are_the_product_bar_floors() {
+        // One owner of the floors: the bar file the gate reads. A change on
+        // either side that forgets the other fails here.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/product-bar.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        let floors = ViewFloors::default();
+        for (key, want) in [
+            ("view_sunk_cm_max", f64::from(floors.sunk_cm_max)),
+            ("view_nonfinite", f64::from(floors.nonfinite)),
+            ("view_error_parts", f64::from(floors.error_parts)),
+            ("view_eye_in_body", f64::from(floors.eye_in_body)),
+            ("view_eye_below_ground", f64::from(floors.eye_below_ground)),
+        ] {
+            assert_eq!(json_floor(&text, key), want, "{key} matches the bar");
+        }
+    }
+
+    /// The number `key` carries in the product bar's flat JSON. This crate
+    /// keeps no serde dependency for one small file.
+    fn json_floor(text: &str, key: &str) -> f64 {
+        let at = text
+            .find(&format!("\"{key}\""))
+            .unwrap_or_else(|| panic!("the product bar names {key}"));
+        let rest = &text[at + key.len() + 2..];
+        let colon = rest.find(':').expect("a key has a value");
+        let value = rest[colon + 1..].trim_start();
+        let end = value
+            .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+            .unwrap_or(value.len());
+        value[..end].parse().expect("the floor is a number")
     }
 
     #[test]

@@ -31,16 +31,28 @@ impl Presenter {
         // QL5: the look guard preset is a pipeline constant, so only a tier
         // that moves it rebuilds the four forward pipelines (the potato edge).
         if quality::look_potato_guard(knobs) != quality::look_potato_guard(&self.quality) {
+            let constants = quality::look_guard_constants(knobs);
             let [hdr, hdr_msaa, skinned, skinned_msaa] = super::presenter::forward_pipelines(
                 &self.device,
                 &self.forward_shader,
                 &self.forward_layout,
-                &quality::look_guard_constants(knobs),
+                &self.ao_layout,
+                &constants,
             );
             self.forward_hdr = hdr;
             self.forward_hdr_msaa = hdr_msaa;
             self.forward_skinned = skinned;
             self.forward_skinned_msaa = skinned_msaa;
+            // LF3 landing 2: the depth prepass pipelines carry the same
+            // preset, so they move with the forward twins.
+            let [depth, depth_skinned] = super::submit::forward_depth_pipelines(
+                &self.device,
+                &self.forward_shader,
+                &self.forward_layout,
+                &constants,
+            );
+            self.depth_pipeline = depth;
+            self.depth_skinned_pipeline = depth_skinned;
         }
         self.quality = *knobs;
     }

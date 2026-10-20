@@ -6,7 +6,9 @@ Rows from the 2026-10-19 editor audits. Spec:
 start band. EI1 landed d0ff9f0c (camera orbit/pan/zoom/frame), EI4 landed
 aff52663 (scale, snapping, W/E/R/T), EI5 landed 09ba69e0 (prefabs), EI2
 landed 72b11973 (live GPU frame at panel size) and EI3 landed 28ef641a
-(drag-drop glTF import); EI6 waits on PLF8.
+(drag-drop glTF import); EI6 waits on PLF8. W8 landed bd11f9eb
+(keyboard flow, named undo/redo). W6 landed 9b6a5265 (Play here, no child).
+W5 landed bf67a52c (Browser tab).
 
 - [x] EI1 editor: the viewport camera orbits, pans, zooms and frames — Landed d0ff9f0c.
   `viewport.rs:110-117` fixes the eye at `[0,1.5,5]` and fov 60; the viewport
@@ -56,6 +58,29 @@ landed 72b11973 (live GPU frame at panel size) and EI3 landed 28ef641a
   `commands.rs` and one test. Accept: save a 3-node selection, instantiate it
   twice, edit one instance; the other and the source stay byte-equal. F2P:
   no reuse. P2P: template reservations unchanged. needs: none.
+- [x] W8 editor: keyboard flow and named undo — Landed bd11f9eb.
+  The menu was mouse-only and Undo/Redo never named the batch. Add
+  Ctrl+S/O/Z/Y, Space play/stop (guarded while a text field has focus) and
+  Delete for the selection, and label the buttons `Undo <batch>` /
+  `Redo <batch>` through `shell.undo_label`/`redo_label`. Accept: headless
+  key events undo and redo an insert, Delete removes it, and the painted
+  menu carries the batch name. Proof: 361 editor tests; rust-quality editor
+  99 A.
+- [x] W6 editor: Play here runs in-editor, no child process — Landed 9b6a5265.
+  Play spawned `e2040-arena` with nulled stdio while `PlayInSession` had no
+  dock caller. Hold `Option<PlayInSession>`; Play here starts it on a round
+  copy, Step here advances one fixed tick, Stop here closes it, and the
+  windowed frame loop drives `frame(stable_dt)`. Accept: headless start,
+  three steps at +1 tick each, stop, and no child spawned. Proof: 362
+  editor tests.
+- [x] W5 editor: Browser tab scans a folder and imports glTF — Landed bf67a52c.
+  `Panel::Browser` joins the dock; `browser_tab.rs` owns the folder text, the
+  scan (glb/gltf + images, sorted, capped at 200) and the Import button, which
+  sends a glTF through the EI3 `Shell::import_glb` path (one journal entry,
+  one undo step). Typed `BrowserError`; a failed scan keeps the last rows.
+  Accept: one row imports as one batch and undo restores; a missing folder is
+  a typed error; the tab paints `Triangle.gltf` and Import. Proof: 365 editor
+  tests.
 - [ ] EI6 editor: mission authoring has a home — PLF8 is parked; KaM Remake
   ships 209 `.script` missions over 248 maps with per-map text sidecars and a
   goal HUD. Add a mission tab that edits goals and a text sidecar, previews

@@ -2410,4 +2410,68 @@ mod tests {
             "ragged depth is refused"
         );
     }
+
+    /// PF25 coverage (row `pass_timing`): every pass in the compiled order of
+    /// a production graph gets its own `query_pair(pos)`, and the pairs tile
+    /// `0..2 * passes` with no hole and no collision. A pass that never enters
+    /// a compiled order is not recorded by `submit_gpu`, so it cannot carry a
+    /// pair here; the crate census of those direct descriptor sites is in the
+    /// PF25 report. Pure: runs with no device.
+    #[test]
+    fn pass_timing_covers_every_compiled_pass() {
+        use crate::executor::{query_pair, timestamp_query_count};
+        let graphs: Vec<(&str, CompiledGraph)> = vec![
+            (
+                "arena",
+                arena_frame_graph()
+                    .compile()
+                    .expect("arena graph is acyclic"),
+            ),
+            (
+                "baked_gi",
+                crate::baked_gi::compile_baked_gi_for_forward().expect("baked gi graph compiles"),
+            ),
+        ];
+        let mut descriptors = 0usize;
+        let mut compiled = 0usize;
+        for (graph, plan) in &graphs {
+            let passes = plan.order().len();
+            descriptors += plan.pass_count();
+            compiled += passes;
+            assert_eq!(
+                plan.pass_count(),
+                passes,
+                "{graph}: every declared pass compiles into the order"
+            );
+            let slots = usize::try_from(timestamp_query_count(passes)).unwrap_or(0);
+            assert_eq!(slots, passes * 2, "{graph}: two timestamp slots per pass");
+            let mut used = vec![false; slots];
+            for (pos, id) in plan.order().iter().enumerate() {
+                let name = &plan.pass(*id).expect("ordered id is declared").name;
+                let (begin, end) = query_pair(pos);
+                let bi = usize::try_from(begin).unwrap_or(usize::MAX);
+                let ei = usize::try_from(end).unwrap_or(usize::MAX);
+                assert_eq!(ei, bi + 1, "{graph}:{name}: a pair is adjacent");
+                assert!(
+                    !used[bi] && !used[ei],
+                    "{graph}:{name}: pairs never collide"
+                );
+                used[bi] = true;
+                used[ei] = true;
+                eprintln!("pass_timing cover {graph}[{pos}] {name} ticks {begin}..{end}");
+            }
+            assert!(
+                used.iter().all(|&slot| slot),
+                "{graph}: the pairs tile every timestamp slot"
+            );
+        }
+        eprintln!(
+            "pass_timing cover: descriptors={descriptors} compiled_passes={compiled} graphs={}",
+            graphs.len()
+        );
+        assert!(
+            compiled >= 9,
+            "production compiled passes covered: {compiled}"
+        );
+    }
 }

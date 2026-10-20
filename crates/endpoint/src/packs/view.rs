@@ -20,6 +20,16 @@
 //! the same bytes. Errors: [`McpToolError`] with `no_live_bout`,
 //! `unsupported_view_source`, `bad_view` or the host's own code.
 //!
+//! `view.laws` has a narrower host too: a host that can fold the bout's
+//! `arena view:` line but cannot draw a frame registers [`ViewLawsFn`] with
+//! [`register_view_laws_source`]. The shipped door registers
+//! [`arena_view_line`], which spawns `arena.exe --view-line <seed> <ticks>
+//! <fighters>` (no window, no GPU) and reads its one prefixed line, so
+//! `view.laws` answers in every build. `view.observe` stays
+//! `unsupported_view_source` until a host that links the renderer registers
+//! a camera and every drawn body: the CPU pose alone cannot supply the
+//! picture share, and the door never fakes one.
+//!
 //! `look.judge` follows the capture pattern: the endpoint owns no judge. A
 //! host that links the judge registers it once with [`register_look_judge`];
 //! until then the verb refuses as `unsupported_look_judge`, never a success
@@ -32,7 +42,8 @@
 //! `bad_args`, `unsupported_look_judge`, `bad_receipt` or the judge's own code.
 
 use std::borrow::Cow;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::OnceLock;
 
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
@@ -396,10 +407,65 @@ pub fn register_view_source(source: ViewSourceFn) -> Result<(), McpToolError> {
     })
 }
 
+/// A registered laws host: `(seed, ticks, fighters)` from the live bout in,
+/// the `arena view:` line out, or the refusal to pass on. A host that can fold
+/// the line but not draw a frame registers this one, so `view.laws` answers
+/// without claiming a camera or a body it cannot supply.
+pub type ViewLawsFn = fn(seed: u64, ticks: u32, fighters: u8) -> Result<String, McpToolError>;
+
+static VIEW_LAWS: OnceLock<ViewLawsFn> = OnceLock::new();
+
+/// Register the laws host for this process. One-shot like
+/// [`register_view_source`]: a second call refuses, so no later code swaps the
+/// line under a running door.
+///
+/// # Errors
+///
+/// `view_laws_registered` when a laws host is already registered.
+pub fn register_view_laws_source(source: ViewLawsFn) -> Result<(), McpToolError> {
+    VIEW_LAWS.set(source).map_err(|_| {
+        McpToolError::new(
+            "view_laws_registered",
+            "a view laws host is already registered for this process; \
+             restart the host to register another",
+        )
+    })
+}
+
+/// Environment override for the arena binary the view and seat hosts spawn.
+pub const ARENA_EXE_ENV: &str = "E2040_ARENA_EXE";
+
+/// Shipped arena binary path, relative to the door's working directory.
+pub const DEFAULT_ARENA_EXE: &str = "target/release/arena.exe";
+
+/// Prefix `arena.exe --view-line` prints before the laws line, so a boot or
+/// warning line can never be mistaken for the answer.
+pub const VIEW_LINE_PREFIX: &str = "arena view-line: ";
+
+/// Longest laws line a host may return, in chars.
+const MAX_VIEW_LAWS_CHARS: usize = 4096;
+
+/// The arena binary the hosts spawn: [`ARENA_EXE_ENV`] when set, else
+/// [`DEFAULT_ARENA_EXE`]. Pure over the given value; the caller checks that the
+/// path is a file so a missing build fails loudly with the path it tried.
+fn arena_exe_from(value: Option<std::ffi::OsString>) -> PathBuf {
+    value.map_or_else(|| PathBuf::from(DEFAULT_ARENA_EXE), PathBuf::from)
+}
+
+/// [`arena_exe_from`] over the process environment.
+#[must_use]
+pub fn arena_exe_path() -> PathBuf {
+    arena_exe_from(std::env::var_os(ARENA_EXE_ENV))
+}
+
 /// Args for `view.observe`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "serde reads the wire shape `{}`; a unit struct reads null"
+)]
 pub struct ViewObserveArgs {}
 
 /// `view.observe` result: the live view after the bout's last tick.
@@ -420,6 +486,10 @@ pub struct ViewObserveOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "serde reads the wire shape `{}`; a unit struct reads null"
+)]
 pub struct ViewLawsArgs {}
 
 /// `view.laws` result: the live view's laws line.
@@ -595,15 +665,161 @@ fn observe_core(
     })
 }
 
-/// Pure laws core: the live bout's `arena view:` line, unchanged.
+/// Pure laws core: the live bout's `arena view:` line, unchanged. A laws host
+/// answers with the line alone; without one the older view source's frame line
+/// serves, and with neither the verb refuses `unsupported_view_source`.
 fn laws_core(
     slot: &PlaySlot,
     source: Option<ViewSourceFn>,
+    laws: Option<ViewLawsFn>,
 ) -> Result<ViewLawsOutput, McpToolError> {
+    if let Some(laws) = laws {
+        let bout = slot.current().ok_or_else(no_live_bout)?;
+        let spec = bout.spec();
+        let ticks = bout.observe(0).tick;
+        let line = laws(spec.seed, ticks, spec.participants)?;
+        check_laws_line(&line, ticks)?;
+        return Ok(ViewLawsOutput {
+            tick: ticks,
+            laws: line,
+        });
+    }
     let (_, _, ticks, frame) = live_frame(slot, source)?;
     Ok(ViewLawsOutput {
         tick: ticks,
         laws: frame.laws,
+    })
+}
+
+/// The host's laws line against the contract: at most
+/// [`MAX_VIEW_LAWS_CHARS`], one line, the `arena view:` head once a tick was
+/// folded, and empty at tick 0.
+fn check_laws_line(line: &str, ticks: u32) -> Result<(), McpToolError> {
+    if line.chars().count() > MAX_VIEW_LAWS_CHARS {
+        return Err(bad_view(format!(
+            "laws line is longer than {MAX_VIEW_LAWS_CHARS} chars"
+        )));
+    }
+    if line.contains(['\n', '\r']) {
+        return Err(bad_view("laws line carries a line break"));
+    }
+    if ticks == 0 {
+        if !line.is_empty() {
+            return Err(bad_view("laws line is not empty at tick 0"));
+        }
+        return Ok(());
+    }
+    if !line.starts_with("arena view: ") {
+        return Err(bad_view(format!(
+            "laws line `{}` is not an `arena view:` line",
+            line.chars().take(40).collect::<String>()
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The arena subprocess host: `arena.exe --view-line` folds the same headless
+// bout `FighterLook::view_run` draws, prints one prefixed line and exits, so
+// `view.laws` answers in a build that links no renderer.
+// ---------------------------------------------------------------------------
+
+/// The laws line in `stdout`, when the arena printed the prefixed line.
+fn view_line_from_stdout(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        line.strip_prefix(VIEW_LINE_PREFIX)
+            .map(|laws| laws.trim_end_matches('\r').to_owned())
+    })
+}
+
+/// The last line of a child's stderr, for a loud refusal.
+fn error_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let tail = text.lines().rev().find(|line| !line.trim().is_empty());
+    tail.map_or_else(|| "no stderr".to_owned(), |line| line.trim().to_owned())
+}
+
+/// `view.laws` served by a windowless `arena.exe`: spawn the shipped binary
+/// with `--view-line <seed> <ticks> <fighters>`, read its one prefixed line and
+/// pass it on unchanged. The path is [`ARENA_EXE_ENV`] or
+/// [`DEFAULT_ARENA_EXE`], relative to the door's working directory.
+///
+/// The line folds the bout with no scripted input, exactly as
+/// `FighterLook::view_run` does, so it is the live bout's own line when that
+/// bout ran the empty tape.
+///
+/// # Errors
+///
+/// `arena_exe_missing` names the path tried when no binary is there,
+/// `arena_view_failed` carries the exit status plus the child's stderr tail,
+/// and `bad_view` when the child printed no `arena view-line:` line.
+pub fn arena_view_line(seed: u64, ticks: u32, fighters: u8) -> Result<String, McpToolError> {
+    arena_view_line_from(&arena_exe_path(), seed, ticks, fighters)
+}
+
+/// [`arena_view_line`] over an explicit binary path: the test seam, and the
+/// one owner of the spawn, the exit check and the line parse.
+fn arena_view_line_from(
+    exe: &Path,
+    seed: u64,
+    ticks: u32,
+    fighters: u8,
+) -> Result<String, McpToolError> {
+    if !exe.is_file() {
+        return Err(McpToolError::new(
+            "arena_exe_missing",
+            format!(
+                "no arena binary at `{}`; build one with \
+                 `cargo build -p engine-game --release --features app --bin arena` or set \
+                 {ARENA_EXE_ENV} to a built arena.exe, then re-run",
+                exe.display()
+            ),
+        ));
+    }
+    let output = Command::new(exe)
+        .arg("--view-line")
+        .arg(seed.to_string())
+        .arg(ticks.to_string())
+        .arg(fighters.to_string())
+        .output()
+        .map_err(|err| {
+            McpToolError::new(
+                "arena_view_failed",
+                format!(
+                    "`{}` did not run ({err}); re-run with a built arena.exe",
+                    exe.display()
+                ),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(McpToolError::new(
+            "arena_view_failed",
+            format!(
+                "`{}` exited {}: {}; re-run with a built arena.exe",
+                exe.display(),
+                output.status,
+                error_tail(&output.stderr)
+            ),
+        ));
+    }
+    view_line_from_stdout(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        McpToolError::new(
+            "bad_view",
+            format!(
+                "`{}` printed no `{VIEW_LINE_PREFIX}` line; re-run with a built arena.exe",
+                exe.display()
+            ),
+        )
+    })
+}
+
+fn view_laws(service: &McpServer, _args: &ViewLawsArgs) -> Result<ViewLawsOutput, McpToolError> {
+    service.dispatch(TOOL_VIEW_LAWS, |state| {
+        laws_core(
+            &state.play,
+            VIEW_SOURCE.get().copied(),
+            VIEW_LAWS.get().copied(),
+        )
     })
 }
 
@@ -613,12 +829,6 @@ fn view_observe(
 ) -> Result<ViewObserveOutput, McpToolError> {
     service.dispatch(TOOL_VIEW_OBSERVE, |state| {
         observe_core(&state.play, VIEW_SOURCE.get().copied())
-    })
-}
-
-fn view_laws(service: &McpServer, _args: &ViewLawsArgs) -> Result<ViewLawsOutput, McpToolError> {
-    service.dispatch(TOOL_VIEW_LAWS, |state| {
-        laws_core(&state.play, VIEW_SOURCE.get().copied())
     })
 }
 
@@ -637,7 +847,7 @@ crate::e2_tool!(
     /// `view.laws` tool: the live view's `arena view:` laws line. Read-only.
     ViewLawsTool,
     name = TOOL_VIEW_LAWS,
-    description = "The arena view laws line for the live bout, byte for byte from the view host: frames, ticks, pops, sinking, foot slide, ragdolls. Run sim.reset or sim.step first. Writes nothing.",
+    description = "The arena view laws line for the live bout, byte for byte from the view host: frames, ticks, pops, sinking, foot slide, ragdolls. Run sim.reset or sim.step first. The shipped door folds the bout's seed, ticks and fighters over the shipped 20 m arena with no scripted input through arena.exe; the host's line is passed on unchanged. Writes nothing.",
     readonly = true,
     args = ViewLawsArgs,
     output = ViewLawsOutput,
@@ -948,7 +1158,7 @@ mod tests {
 
     fn laws_with(server: &McpServer) -> ViewLawsOutput {
         let state = server.lock().expect("test lock holds");
-        laws_core(&state.play, Some(fixture)).expect("view.laws serves")
+        laws_core(&state.play, Some(fixture), None).expect("view.laws serves")
     }
 
     fn observe_json(server: &McpServer) -> String {
@@ -1078,7 +1288,7 @@ mod tests {
             let state = server.lock().expect("test lock holds");
             for error in [
                 observe_core(&state.play, Some(fixture)).expect_err("nothing stepped yet"),
-                laws_core(&state.play, Some(fixture)).expect_err("nothing stepped yet"),
+                laws_core(&state.play, Some(fixture), None).expect_err("nothing stepped yet"),
             ] {
                 assert_eq!(error.code, "no_live_bout");
                 assert!(error.message.contains("sim.step"), "{}", error.message);
@@ -1089,7 +1299,7 @@ mod tests {
             let state = server.lock().expect("test lock holds");
             for error in [
                 observe_core(&state.play, None).expect_err("no host"),
-                laws_core(&state.play, None).expect_err("no host"),
+                laws_core(&state.play, None, None).expect_err("no host"),
             ] {
                 assert_eq!(error.code, "unsupported_view_source");
                 assert!(
@@ -1187,5 +1397,107 @@ mod tests {
                 described.signature
             );
         }
+    }
+
+    // ---- the laws host: line only, no camera and no bodies ----------------
+
+    /// A laws host built from the live bout: names the seed, ticks and fighters
+    /// it was handed, so a test proves the door forwards the bout's spec.
+    fn fixture_laws(seed: u64, ticks: u32, fighters: u8) -> Result<String, McpToolError> {
+        Ok(format!(
+            "arena view: frames={fighters} sim_ticks=0.5..{ticks}.5 seed={seed} bodies={fighters}"
+        ))
+    }
+
+    #[test]
+    fn view_laws_host_answers_the_bout_line_without_a_frame() {
+        let server = server();
+        step(&server, BOUT_SEED, 120);
+        let state = server.lock().expect("test lock holds");
+        let laws = laws_core(&state.play, None, Some(fixture_laws)).expect("laws host serves");
+        assert_eq!(laws.tick, 120);
+        assert!(laws.laws.starts_with("arena view: "), "{}", laws.laws);
+        assert!(laws.laws.contains("seed=2"), "{}", laws.laws);
+        assert!(laws.laws.contains("bodies=2"), "{}", laws.laws);
+        assert_eq!(
+            laws,
+            laws_core(&state.play, None, Some(fixture_laws)).expect("same answer twice"),
+            "one bout, one line"
+        );
+    }
+
+    #[test]
+    fn view_laws_host_refuses_a_line_outside_the_contract() {
+        let long = "x".repeat(MAX_VIEW_LAWS_CHARS + 1);
+        for (line, why, ticks) in [
+            (
+                "not a view line".to_owned(),
+                "is not an `arena view:` line",
+                8u32,
+            ),
+            (
+                "arena view: a\narena view: b".to_owned(),
+                "carries a line break",
+                8,
+            ),
+            (
+                "arena view: at tick zero".to_owned(),
+                "not empty at tick 0",
+                0,
+            ),
+            (long, "longer than", 8),
+        ] {
+            let error = check_laws_line(&line, ticks).expect_err(why);
+            assert_eq!(error.code, "bad_view", "{why}");
+            assert!(error.message.contains(why), "{why}: {}", error.message);
+        }
+        assert!(
+            check_laws_line("", 0).is_ok(),
+            "tick 0 serves the empty line"
+        );
+        assert!(check_laws_line("arena view: frames=1", 1).is_ok());
+        assert_eq!(
+            check_laws_line("", 1).expect_err("no line").code,
+            "bad_view",
+            "a folded tick must carry its line"
+        );
+    }
+
+    #[test]
+    fn view_laws_parse_the_arena_windowless_line() {
+        let stdout =
+            "arena log: target/arena.log\narena view-line: arena view: frames=3 bodies=2\n";
+        assert_eq!(
+            view_line_from_stdout(stdout).as_deref(),
+            Some("arena view: frames=3 bodies=2")
+        );
+        assert_eq!(view_line_from_stdout("arena smoke: ticks=0\n"), None);
+        assert_eq!(
+            view_line_from_stdout("arena view-line: \r\n").as_deref(),
+            Some(""),
+            "the empty tick-0 line still crosses"
+        );
+        assert_eq!(
+            arena_exe_from(Some("D:/x/arena.exe".into())),
+            PathBuf::from("D:/x/arena.exe"),
+            "the env override wins"
+        );
+        assert_eq!(arena_exe_from(None), PathBuf::from(DEFAULT_ARENA_EXE));
+    }
+
+    #[test]
+    fn view_laws_host_refuses_a_missing_arena_binary_loudly() {
+        // A path no build can be at: the refusal names the path it tried and
+        // the env var that overrides it, and never falls back to a fake line.
+        let exe = PathBuf::from("target/no-such-build/arena.exe");
+        let error = arena_view_line_from(&exe, 2040, 600, 2).expect_err("no binary there");
+        assert_eq!(error.code, "arena_exe_missing");
+        assert!(
+            error.message.contains(&exe.display().to_string()),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains(ARENA_EXE_ENV), "{}", error.message);
+        assert!(error.message.contains("re-run"), "{}", error.message);
     }
 }

@@ -1060,6 +1060,7 @@ mod tests {
                 ttl_polls: None,
                 job_id: None,
                 scene_rev: Some(scene_rev),
+                timing: None,
             },
         )
         .expect("play.run starts around an EXPLAIN check");
@@ -1077,6 +1078,7 @@ mod tests {
                     ttl_polls: None,
                     job_id: Some(id),
                     scene_rev: None,
+                    timing: None,
                 },
             )
             .expect("play.run polls around an EXPLAIN check")

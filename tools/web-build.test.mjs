@@ -407,6 +407,10 @@ test("the page contract: canvas, hud, report, fatal message with the browser ver
   assert.match(html, /<pre id="load">/);
   assert.match(html, /"The engine did not start: " \+ e/);
   assert.match(html, /run\("canvas"\)/);
+  // WEB6: the page installs the asset fetcher the engine asks for, so a gameplay asset can be
+  // fetched at runtime instead of only the wasm and build.json.
+  assert.match(html, /import \{[^}]*pageFetcher[^}]*\} from "\.\/loader\.js"/);
+  assert.match(html, /window\.engine2040FetchAsset = pageFetcher\(import\.meta\.url\)/);
   for (const v of ["Chrome 113", "Edge 113", "Safari 26", "Firefox 141"]) assert.ok(html.includes(v), `fatal message lost ${v}`);
   assert.match(html, /body\[data-state="fatal"\] #fatal \{ display: block/);
   assert.match(html, /<body data-state="starting"/);

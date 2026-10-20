@@ -166,10 +166,10 @@ fn push_node(
         ];
     }
     ops.push(Op::Insert { id, parent, local });
-    for (_, component) in &node.components {
+    for component in node.components.values() {
         ops.push(Op::SetComponent {
             id,
-            component: component.clone(),
+            component: *component,
         });
     }
     if let Some(material) = node.material {

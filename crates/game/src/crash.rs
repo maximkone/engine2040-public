@@ -31,6 +31,8 @@ pub const MAX_MODE_ECHO_BYTES: usize = 32;
 pub const MAX_DISPLAY_BYTES: usize = 32;
 /// Max echoed bytes of an unknown field name in [`CrashError::UnknownField`].
 pub const MAX_FIELD_ECHO_BYTES: usize = 32;
+/// Max metric token bytes in a warning bundle directory name.
+pub const MAX_METRIC_BYTES: usize = 64;
 
 /// Base of the loud exit-code range; 0 (silent success) is never emitted.
 const EXIT_CODE_BASE: i32 = 101;
@@ -553,6 +555,175 @@ pub fn write_report(path: &Path, report: &CrashReport) -> Result<(), CrashError>
     let text = format_report(report)?;
     std::fs::write(path, text.as_bytes()).map_err(|err| CrashError::Io(err.kind()))?;
     Ok(())
+}
+
+/// Facts one warning bundle carries; formatted by the two private writers.
+struct BundleFacts<'a> {
+    metric: &'a str,
+    stamp: &'a str,
+    seed: u64,
+    ticks: u32,
+    ticks_done: u32,
+    fighters: u8,
+    view_line: &'a str,
+    warnings: &'a [String],
+    adapter: &'a str,
+    display: &'a str,
+    checkpoint: Option<(u32, u64)>,
+    tape_bytes: usize,
+}
+
+/// One token that is safe as a directory name: lowercase ASCII, digits and
+/// `_`, non-empty and bounded by [`MAX_METRIC_BYTES`].
+fn safe_metric(metric: &str) -> bool {
+    !metric.is_empty()
+        && metric.len() <= MAX_METRIC_BYTES
+        && metric
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// The bundle's `report.toml`: a `[repro]` table with the exact view receipt,
+/// every warning line, the run's seed and ticks, adapter, display and the
+/// checkpoint record, plus the tape's name and size.
+fn format_bundle_report(facts: &BundleFacts<'_>) -> String {
+    let mut out = String::from("[repro]\nmetric = ");
+    append_toml_string(&mut out, facts.metric);
+    out.push_str("\nutc = ");
+    append_toml_string(&mut out, facts.stamp);
+    out.push_str(&format!(
+        "\nseed = {}\nticks = {}\nticks_done = {}\nfighters = {}\n",
+        facts.seed, facts.ticks, facts.ticks_done, facts.fighters
+    ));
+    out.push_str("view = ");
+    append_toml_string(&mut out, facts.view_line);
+    out.push_str("\nwarnings = [");
+    for (index, warning) in facts.warnings.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        append_toml_string(&mut out, warning);
+    }
+    out.push_str("]\nadapter = ");
+    append_toml_string(&mut out, facts.adapter);
+    out.push_str("\ndisplay = ");
+    append_toml_string(&mut out, facts.display);
+    out.push_str("\ncheckpoint = ");
+    match facts.checkpoint {
+        Some((tick, hash)) => out.push_str(&format!("\"{tick}:{hash:016x}\"")),
+        None => out.push_str("\"none\""),
+    }
+    out.push_str(&format!(
+        "\ntape = \"tape.bin\"\ntape_bytes = {}\n",
+        facts.tape_bytes
+    ));
+    out
+}
+
+/// The bundle's `README.txt`: what each file holds and the rerun line.
+fn format_bundle_readme(facts: &BundleFacts<'_>) -> String {
+    let checkpoint = match facts.checkpoint {
+        Some((tick, hash)) => format!("tick {tick}, hash {hash:016x}"),
+        None => "none (no checkpoint recorded)".to_string(),
+    };
+    let mut out = format!(
+        "engine2040 view-warning repro bundle\nmetric: {}\nutc: {}\nseed: {}\nticks: {} (ran {})\nfighters: {}\n\nview: {}\n\nwarnings:\n",
+        facts.metric, facts.stamp, facts.seed, facts.ticks, facts.ticks_done, facts.fighters,
+        facts.view_line,
+    );
+    for warning in facts.warnings {
+        out.push_str("  ");
+        out.push_str(warning);
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "\ncheckpoint: {checkpoint}\ntape: tape.bin ({} bytes; the crash tape tail, raw canonical 10-byte FighterInput records, oldest first)\n\nrerun the same bout:\n  arena.exe --seed {} --ticks {} --fighters {} --frames {} --exit\n\nThe crash-report equivalent: report.toml carries these facts; tape.bin is the\nsame bytes a crash-<UTC>.toml carries as tape_tail hex.\n",
+        facts.tape_bytes, facts.seed, facts.ticks, facts.fighters, facts.ticks,
+    ));
+    out
+}
+
+/// Write one self-contained repro bundle for the first broken view floor:
+/// `<dir>/<metric>-<utc-stamp>/` holding `report.toml` (seed, planned and run
+/// ticks, the exact `arena view:` line, every `arena WARN:` line, adapter,
+/// display echo, checkpoint tick and hash), `tape.bin` (the crash tape tail,
+/// raw canonical 10-byte `FighterInput` records, oldest first) and
+/// `README.txt` (what each file holds plus the rerun line).
+///
+/// View only: nothing here reaches the simulation or its hash. The caller
+/// writes once, when the first warning is known, so a run leaves one bundle.
+/// Errors: [`CrashError::BadValue`]`("metric")` for an unsafe directory token,
+/// [`CrashError::Io`] for a failed directory or file; the caller keeps its own
+/// exit code and only logs the refusal.
+pub fn write_warning_bundle(
+    dir: &Path,
+    metric: &str,
+    seed: u64,
+    ticks: u32,
+    ticks_done: u32,
+    fighters: u8,
+    view_line: &str,
+    warnings: &[String],
+) -> Result<PathBuf, CrashError> {
+    if !safe_metric(metric) {
+        return Err(CrashError::BadValue("metric"));
+    }
+    let stamp = utc_stamp(SystemTime::now());
+    let (adapter, display, checkpoint, tape) = match try_lock_or_recover(&STATE) {
+        Some(state) => {
+            let adapter = if state.adapter.is_empty() {
+                "no GPU adapter (window not presented)".to_string()
+            } else {
+                state.adapter.clone()
+            };
+            let checkpoint = if state.checkpoint.len() == CHECKPOINT_RECORD_BYTES {
+                let mut tick_bytes = [0u8; 4];
+                tick_bytes.copy_from_slice(&state.checkpoint[..4]);
+                let mut hash_bytes = [0u8; 8];
+                hash_bytes.copy_from_slice(&state.checkpoint[4..12]);
+                Some((
+                    u32::from_le_bytes(tick_bytes),
+                    u64::from_le_bytes(hash_bytes),
+                ))
+            } else {
+                None
+            };
+            (
+                adapter,
+                state.display.clone(),
+                checkpoint,
+                state.tape.iter().copied().collect::<Vec<u8>>(),
+            )
+        }
+        None => (
+            "unknown (snapshot busy at warning)".to_string(),
+            String::new(),
+            None,
+            Vec::new(),
+        ),
+    };
+    let facts = BundleFacts {
+        metric,
+        stamp: &stamp,
+        seed,
+        ticks,
+        ticks_done,
+        fighters,
+        view_line,
+        warnings,
+        adapter: &adapter,
+        display: &display,
+        checkpoint,
+        tape_bytes: tape.len(),
+    };
+    let bundle = dir.join(format!("{metric}-{stamp}"));
+    std::fs::create_dir_all(&bundle).map_err(|err| CrashError::Io(err.kind()))?;
+    std::fs::write(bundle.join("report.toml"), format_bundle_report(&facts))
+        .map_err(|err| CrashError::Io(err.kind()))?;
+    std::fs::write(bundle.join("tape.bin"), &tape).map_err(|err| CrashError::Io(err.kind()))?;
+    std::fs::write(bundle.join("README.txt"), format_bundle_readme(&facts))
+        .map_err(|err| CrashError::Io(err.kind()))?;
+    Ok(bundle)
 }
 
 // PORT(EmbarkStudios/crash-handling@e7d5067:crash-handler, minidumper): fault
@@ -1543,6 +1714,74 @@ mod tests {
             assert_eq!(env.tick, 70);
             std::fs::remove_dir_all(&dir).expect("drill temp cleaned");
         }
+    }
+
+    #[test]
+    fn warning_bundle_writes_report_tape_and_readme() {
+        let root = drill_dir("repro-bundle");
+        set_adapter(ADAPTER);
+        record_fight_tick(7, &[0xAA, 0xBB, 0xCC], Some((6, 0x5eed_5eed_5eed_5eedu64)));
+        let warnings = vec![
+            "arena WARN: view_sunk_cm_max value=12.0 floor=3.0".to_string(),
+            "arena WARN: view_nonfinite value=1 floor=0".to_string(),
+        ];
+        let view = "arena view: frames=7 sim_ticks=0.0..6.0 bodies=14 sunk_cm_max=12.0";
+        let bundle =
+            write_warning_bundle(&root, "view_sunk_cm_max", 2040, 600, 7, 2, view, &warnings)
+                .expect("bundle writes");
+        assert!(bundle.is_dir(), "bundle dir: {}", bundle.display());
+        let name = bundle
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        assert!(
+            name.starts_with("view_sunk_cm_max-") && name.ends_with('Z'),
+            "metric-stamped dir: {name}"
+        );
+        let report = std::fs::read_to_string(bundle.join("report.toml")).expect("report readable");
+        for needle in [
+            "[repro]",
+            "metric = \"view_sunk_cm_max\"",
+            "seed = 2040",
+            "ticks = 600",
+            "ticks_done = 7",
+            "fighters = 2",
+            view,
+            warnings[0].as_str(),
+            warnings[1].as_str(),
+            ADAPTER,
+            "checkpoint = \"6:5eed5eed5eed5eed\"",
+            "tape = \"tape.bin\"",
+            "tape_bytes = 3",
+        ] {
+            assert!(
+                report.contains(needle),
+                "report misses {needle:?}:\n{report}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(bundle.join("tape.bin")).expect("tape readable"),
+            vec![0xAA, 0xBB, 0xCC],
+            "tape.bin is the crash tape tail"
+        );
+        let readme = std::fs::read_to_string(bundle.join("README.txt")).expect("readme readable");
+        assert!(readme.contains("view_sunk_cm_max"), "{readme}");
+        assert!(
+            readme.contains("arena.exe --seed 2040 --ticks 600 --fighters 2 --frames 600 --exit"),
+            "rerun line:\n{readme}"
+        );
+        assert!(
+            readme.contains("checkpoint: tick 6, hash 5eed5eed5eed5eed"),
+            "{readme}"
+        );
+        // A hostile metric never escapes the bundle root.
+        let bad = write_warning_bundle(&root, "..\\escape", 2040, 1, 1, 2, view, &warnings);
+        assert_eq!(bad, Err(CrashError::BadValue("metric")));
+        assert!(
+            !root.join("escape").exists(),
+            "hostile metric wrote outside the root"
+        );
+        std::fs::remove_dir_all(&root).expect("repro temp cleaned");
     }
 
     #[test]

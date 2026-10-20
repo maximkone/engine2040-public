@@ -577,7 +577,7 @@ mod imp {
             let parsed: Vec<ParsedWant> = prop
                 .wants
                 .iter()
-                .cloned()
+                .copied()
                 .zip(prop.sources.iter().cloned())
                 .map(|(want, source)| ParsedWant { want, source })
                 .collect();
@@ -1901,8 +1901,7 @@ mod imp {
             for (id, seed, brief) in arc12_brief_rows() {
                 let mut session = fresh_session();
                 let shell = session.current_digest();
-                let mut key = 4000 + seed;
-                for round in 0..2u64 {
+                for (round, key) in (0..2u64).zip(4000 + seed..) {
                     let revision = session.revision();
                     let preview = session.preview(&brief, seed).expect("brief previews");
                     assert_eq!(preview.verdict, "pass", "brief {id} round {round}");
@@ -1944,7 +1943,6 @@ mod imp {
                         shell,
                         "brief {id} round {round} undoes clean"
                     );
-                    key += 1;
                 }
             }
         }
@@ -1957,10 +1955,9 @@ mod imp {
             // lands. The door accept here rides a 1 m brazier; prop sizes
             // are the level build's business, gated by its own checks.
             let server = McpServer::new(11, Capability::unrestricted(11));
-            let mut key = 700u64;
             // A build lands one revision, its undo publishes the next.
             let mut revision = 0u64;
-            for round in 0..2u64 {
+            for (round, key) in (0..2u64).zip(700u64..) {
                 let out = BuildLevelTool::invoke(
                     &server,
                     BuildLevelArgs {
@@ -1991,7 +1988,6 @@ mod imp {
                     revision + 1,
                     "round {round} lands one revision"
                 );
-                key += 1;
                 let undone = TxUndoTool::invoke(&server, TxUndoArgs { undo_token: None })
                     .unwrap_or_else(|error| panic!("round {round} undo: {}", error.message));
                 assert_eq!(undone.undone_key, out.key, "round {round} undo key");

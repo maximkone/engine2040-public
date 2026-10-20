@@ -383,6 +383,7 @@ fn play_run_completes_beside_place_storm() {
                         ttl_polls: None,
                         job_id: None,
                         scene_rev: Some(revision_of(shared)),
+                        timing: None,
                     },
                 )
             };
@@ -410,6 +411,7 @@ fn play_run_completes_beside_place_storm() {
                         ttl_polls: None,
                         job_id: Some(job_id),
                         scene_rev: None,
+                        timing: None,
                     },
                 )
             };

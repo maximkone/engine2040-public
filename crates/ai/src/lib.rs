@@ -53,6 +53,8 @@ pub use gladiator::{
 };
 pub mod melee;
 pub use melee::{FoeView, MeleeView, StrikePhase, NEAR_FOES, WAIT_RING_MM};
+/// Four-bucket foe model and the opt-in action lease it feeds.
+pub mod opponent;
 pub mod personality;
 pub mod reaction_delay;
 pub use personality::Personality;

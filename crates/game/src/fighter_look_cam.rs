@@ -22,7 +22,7 @@ use super::{FighterLook, LookFrame, SHAKE_MAX_M};
 use crate::camera::camera_rig::{
     damper_step, halflife_to_damping, smooth_trauma_offset, trauma_gain, FightCamSpring,
 };
-use crate::camera::{CameraError, Vec3};
+use crate::camera::{CameraError, LookAhead, Vec3};
 
 /// Halflife of yaw, distance, look point and eye height, seconds: a cut or a
 /// moving pair settles over about half a second, a steady drift lags a few
@@ -80,6 +80,10 @@ pub struct CamFollow {
     bob_damping: f32,
     /// The hero's floor position last frame, for the step the bob follows.
     bob_last: Option<[f32; 2]>,
+    /// Velocity look-ahead for the hero's walk; at rest unless armed.
+    look_ahead: LookAhead,
+    /// True when the look-ahead moves the shot (default off: today's camera).
+    lead_armed: bool,
 }
 
 impl CamFollow {
@@ -96,7 +100,25 @@ impl CamFollow {
             bob_gain: 0.0,
             bob_damping: halflife_to_damping(1.0 / BOB_MGT_SPEED)?,
             bob_last: None,
+            look_ahead: LookAhead::new(),
+            lead_armed: false,
         })
+    }
+
+    /// Arm the 0.5 s velocity look-ahead ([`LookAhead`]): the presented eye
+    /// and look point lead the hero's walk, ease in while it speeds up and
+    /// decay when it stops. Off by default, so an existing follower shows
+    /// today's camera; presentation only, never sim input or a hash.
+    #[must_use]
+    pub fn with_look_ahead(mut self) -> Self {
+        self.lead_armed = true;
+        self
+    }
+
+    /// Current look-ahead offset, meters (zero while unarmed or at rest).
+    #[must_use]
+    pub fn lead_m(&self) -> Vec3 {
+        self.look_ahead.offset_m()
     }
 
     /// Fold `shot` into the smoothed state over `dt_s` seconds and return the
@@ -139,9 +161,50 @@ impl CamFollow {
             look.z + yaw.cos() * dist,
         ]
         .into();
-        self.walk_bob(&mut camera, hero, dt_s)?;
+        // The hero's floor step drives both graders: the walk bob (distance)
+        // and the look-ahead (velocity). A teleport is not motion.
+        let delta = self.hero_step(hero);
+        let step = delta[0].hypot(delta[1]);
+        if self.lead_armed {
+            let velocity = if step > BOB_MAX_STEP_M {
+                Vec3::ZERO
+            } else {
+                Vec3::new(delta[0] / dt_s, 0.0, delta[1] / dt_s)
+            };
+            let lead = self.look_ahead.step(velocity, dt_s).unwrap_or(Vec3::ZERO);
+            camera.target = [
+                camera.target.x + lead.x,
+                camera.target.y + lead.y,
+                camera.target.z + lead.z,
+            ]
+            .into();
+            camera.eye = [
+                camera.eye.x + lead.x,
+                camera.eye.y + lead.y,
+                camera.eye.z + lead.z,
+            ]
+            .into();
+        }
+        self.walk_bob(&mut camera, step, hero[1] <= BOB_AIRBORNE_M, dt_s)?;
         camera.fov_y = self.fov_y;
         Ok(camera)
+    }
+
+    /// The hero's planar step since the last frame, meters: `[0, 0]` on the
+    /// first frame, after a teleport or for a non-finite draw. Also stores the
+    /// position the next frame reads.
+    fn hero_step(&mut self, hero: [f32; 3]) -> [f32; 2] {
+        let at = [hero[0], hero[2]];
+        let delta = self.bob_last.map_or([0.0, 0.0], |last| {
+            let (dx, dz) = (at[0] - last[0], at[1] - last[1]);
+            if dx.is_finite() && dz.is_finite() {
+                [dx, dz]
+            } else {
+                [0.0, 0.0]
+            }
+        });
+        self.bob_last = Some(at);
+        delta
     }
 
     /// Walk bob (source game's `CameraBob`): the floor step the hero took this
@@ -154,20 +217,11 @@ impl CamFollow {
     fn walk_bob(
         &mut self,
         camera: &mut Camera,
-        hero: [f32; 3],
+        step: f32,
+        on_floor: bool,
         dt_s: f32,
     ) -> Result<(), CameraError> {
-        let at = [hero[0], hero[2]];
-        let step = self.bob_last.map_or(0.0, |last| {
-            let (dx, dz) = (at[0] - last[0], at[1] - last[1]);
-            if dx.is_finite() && dz.is_finite() {
-                dx.hypot(dz)
-            } else {
-                0.0
-            }
-        });
-        self.bob_last = Some(at);
-        let walking = hero[1] <= BOB_AIRBORNE_M && step <= BOB_MAX_STEP_M;
+        let walking = on_floor && step <= BOB_MAX_STEP_M;
         let want = if walking && dt_s > 0.0 {
             (step / dt_s / BOB_FULL_SPEED_MS).clamp(0.0, 1.0)
         } else {
@@ -596,6 +650,75 @@ mod tests {
         // A zero or negative time steps as the shortest legal one, never panics.
         let zero = look.aim_camera(&mut follow, &base(), &frame(), 0.0);
         assert!(zero.validate().is_ok());
+    }
+
+    /// One look with an unarmed and an armed follower, both fed the same
+    /// shots: any gap between them is the look-ahead alone.
+    fn aim_pair(
+        look: &mut FighterLook,
+        plain: &mut CamFollow,
+        lead: &mut CamFollow,
+    ) -> (Camera, Camera) {
+        (
+            look.aim_camera(plain, &base(), &frame(), FRAME_60_S),
+            look.aim_camera(lead, &base(), &frame(), FRAME_60_S),
+        )
+    }
+
+    /// Walk the hero `walk_frames` frames at the full walk speed, then hold it
+    /// still `rest_frames` frames; return both cameras per presented frame.
+    fn run_lead_tape(walk_frames: usize, rest_frames: usize) -> Vec<(Camera, Camera)> {
+        let mut look = super::super::tests::balance_look_two();
+        let mut plain = follower();
+        let mut lead = follower().with_look_ahead();
+        let step_m = BOB_FULL_SPEED_MS * FRAME_60_S;
+        place(&mut look, [0.0, 0.0], [1.0, 0.5]);
+        let mut out = Vec::with_capacity(walk_frames + rest_frames + 1);
+        for n in 0..walk_frames {
+            walk_hero(&mut look, n as f32 * step_m, step_m);
+            out.push(aim_pair(&mut look, &mut plain, &mut lead));
+        }
+        place(&mut look, [walk_frames as f32 * step_m, 0.0], [1.0, 0.5]);
+        // One settle frame carries the half step to rest before the rest tape.
+        let _ = aim_pair(&mut look, &mut plain, &mut lead);
+        for _ in 0..rest_frames {
+            out.push(aim_pair(&mut look, &mut plain, &mut lead));
+        }
+        out
+    }
+
+    #[test]
+    fn look_ahead_leads_a_walking_hero_and_decays_when_stopped() {
+        let walk_frames = 120;
+        let tape = run_lead_tape(walk_frames, 90);
+        let gap = |pair: &(Camera, Camera)| (pair.1.target - pair.0.target).length();
+        assert!(
+            gap(&tape[0]) < 1e-4,
+            "the first frame snaps, no lead yet: {}",
+            gap(&tape[0])
+        );
+        let peak = tape.iter().fold(0.0f32, |p, pair| p.max(gap(pair)));
+        assert!(peak > 0.1, "a walking hero gets a lead, peak {peak} m");
+        assert!(
+            peak <= crate::camera::LEAD_MAX_M + 1e-3,
+            "the lead is capped, peak {peak} m"
+        );
+        let last = gap(tape.last().expect("frames"));
+        assert!(last < 1e-3, "a stopped hero drops the lead, {last} m");
+        // The stop decays, never snaps: each rest frame is no larger.
+        for pair in tape.windows(2).skip(walk_frames - 1) {
+            assert!(
+                gap(&pair[1]) <= gap(&pair[0]) + 1e-6,
+                "the lead decays after the stop: {} then {}",
+                gap(&pair[0]),
+                gap(&pair[1])
+            );
+        }
+        assert_eq!(
+            tape,
+            run_lead_tape(walk_frames, 90),
+            "the same tape twice gives the same pose"
+        );
     }
 
     #[test]

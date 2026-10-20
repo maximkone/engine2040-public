@@ -44,11 +44,29 @@ use engine_scene::transform::{quat_normalized, quat_rotate, Transform};
 use crate::a2_session::encode_png_rgba8;
 use crate::commands::Document;
 use crate::durable::write_atomic;
+use crate::instant::RoundInput;
 use crate::play::{ChildPlay, PlayEntrypoint};
+use crate::play_in::PlayInSession;
 use crate::save::{load_from_bytes, save_to_bytes, MAX_SAVE_BYTES};
 use crate::shell::Shell;
 use crate::shell_ui::ShellUi;
 use crate::viewport_image::{ViewportImage, MAX_VIEWPORT_TEX};
+
+/// Ctrl+S saves the open project (W8 keyboard flow).
+const SHORTCUT_SAVE: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+/// Ctrl+O reopens the project from disk.
+const SHORTCUT_OPEN: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
+/// Ctrl+Z undoes the newest batch.
+const SHORTCUT_UNDO: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
+/// Ctrl+Y redoes the newest undone batch.
+const SHORTCUT_REDO: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Y);
+/// Space starts or stops the play child while no text field has focus.
+const SHORTCUT_PLAY: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Space);
 
 /// Default project file next to the working directory.
 pub const DEFAULT_PROJECT: &str = "scene.edoc";
@@ -144,6 +162,11 @@ pub enum EditorAppError {
         /// OS report.
         reason: String,
     },
+    /// The in-editor play session refused a start, frame or step (W6).
+    PlayIn {
+        /// The session's typed reason.
+        reason: String,
+    },
 }
 
 impl EditorAppError {
@@ -156,7 +179,8 @@ impl EditorAppError {
             | Self::BadSize { .. }
             | Self::ViewportFailed(_)
             | Self::WindowFailed(_)
-            | Self::ChildFailed { .. } => Recovery::FixCallerInput,
+            | Self::ChildFailed { .. }
+            | Self::PlayIn { .. } => Recovery::FixCallerInput,
             Self::ViewportSuspended | Self::NoAdapter => Recovery::KeepLastGood,
             Self::SnapshotFailed { recovery, .. } => *recovery,
         }
@@ -210,6 +234,7 @@ impl fmt::Display for EditorAppError {
             Self::ChildFailed { command, reason } => {
                 write!(f, "arena child `{command}` failed: {reason}")
             }
+            Self::PlayIn { reason } => write!(f, "play-in refused: {reason}"),
         }
     }
 }
@@ -759,6 +784,8 @@ pub struct EditorApp {
     pending: egui::TexturesDelta,
     snapshot: ViewportSnapshot,
     play: Option<ChildPlay>,
+    /// In-editor fixed-tick session (W6): no child process, stopped by drop.
+    play_in: Option<PlayInSession>,
     status: String,
     frames: u64,
 }
@@ -797,6 +824,7 @@ impl EditorApp {
             pending: egui::TexturesDelta::default(),
             snapshot: ViewportSnapshot::new(),
             play: None,
+            play_in: None,
             status,
             frames: 0,
         })
@@ -853,6 +881,55 @@ impl EditorApp {
         }
         self.play = None;
         self.status = "play stopped".to_string();
+    }
+
+    /// Start the in-editor session on a round copy of the document: no child
+    /// process is spawned and the scene file is not written (W6).
+    pub fn play_in_start(&mut self) -> Result<(), EditorAppError> {
+        self.play_in_stop();
+        let session =
+            PlayInSession::start(self.shell.document().clone(), self.config.arena.clone(), 1)
+                .map_err(|error| EditorAppError::PlayIn {
+                    reason: error.to_string(),
+                })?;
+        self.status = format!(
+            "play-in started (tick {}, r{})",
+            session.tick(),
+            session.revision()
+        );
+        self.play_in = Some(session);
+        Ok(())
+    }
+
+    /// True while the in-editor session is held (no child process).
+    pub fn play_in_alive(&self) -> bool {
+        self.play_in.is_some()
+    }
+
+    /// Advance exactly one fixed tick in the in-editor session.
+    pub fn play_in_step(&mut self) -> Result<u64, EditorAppError> {
+        let Some(session) = self.play_in.as_mut() else {
+            return Err(EditorAppError::PlayIn {
+                reason: "no in-editor session".to_owned(),
+            });
+        };
+        let tick =
+            session
+                .step_once(RoundInput::neutral())
+                .map_err(|error| EditorAppError::PlayIn {
+                    reason: error.to_string(),
+                })?;
+        self.status = format!("play-in tick {tick} (frames {})", session.frames());
+        Ok(tick)
+    }
+
+    /// Stop and drop the in-editor session. Idempotent.
+    pub fn play_in_stop(&mut self) {
+        if let Some(mut session) = self.play_in.take() {
+            let tick = session.tick();
+            let _ = session.stop();
+            self.status = format!("play-in stopped at tick {tick}");
+        }
     }
 
     /// Save the document to the project path. Returns bytes written.
@@ -1031,6 +1108,12 @@ impl EditorApp {
         if self.gpu.is_none() || self.egui_winit.is_none() {
             return;
         }
+        if let Some(session) = self.play_in.as_mut() {
+            let frame_dt = self.ctx.input(|input| input.stable_dt).min(0.1);
+            if let Ok(frame) = session.frame(frame_dt, &[]) {
+                self.status = format!("play-in tick {} frame {}", frame.tick, frame.frame);
+            }
+        }
         self.refresh_viewport_texture();
         let raw = self
             .egui_winit
@@ -1188,26 +1271,63 @@ impl EditorApp {
     /// Failures surface as status notices (and the log panel); the document
     /// is never at risk from a button.
     fn menu(&mut self, ui: &mut egui::Ui) {
+        // W8: shortcuts are consumed once, before the buttons draw. Unmodified
+        // keys wait for a focused text field so typing never edits the scene.
+        let wants_keys = ui.ctx().egui_wants_keyboard_input();
+        let (save, open, undo, redo) = ui.input_mut(|input| {
+            (
+                input.consume_shortcut(&SHORTCUT_SAVE),
+                input.consume_shortcut(&SHORTCUT_OPEN),
+                input.consume_shortcut(&SHORTCUT_UNDO),
+                input.consume_shortcut(&SHORTCUT_REDO),
+            )
+        });
+        let play_key = !wants_keys && ui.input_mut(|input| input.consume_shortcut(&SHORTCUT_PLAY));
+        let delete_key = !wants_keys
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
+        let undo_label = match self.shell.undo_label() {
+            Some(name) => format!("Undo {name}"),
+            None => "Undo".to_owned(),
+        };
+        let redo_label = match self.shell.redo_label() {
+            Some(name) => format!("Redo {name}"),
+            None => "Redo".to_owned(),
+        };
         ui.horizontal(|ui| {
             ui.label("e2040");
             ui.separator();
-            if ui.button("Save").clicked() {
+            if ui.button("Save").clicked() || save {
                 if let Err(error) = self.save_now() {
                     self.note(error);
                 }
             }
-            if ui.button("Open").clicked() {
+            if ui.button("Open").clicked() || open {
                 if let Err(error) = self.open_now() {
                     self.note(error);
                 }
             }
             ui.separator();
             if self.play.as_mut().is_some_and(|play| play.is_alive()) {
-                if ui.button("Stop").clicked() {
+                if ui.button("Stop").clicked() || play_key {
                     self.play_stop();
                 }
-            } else if ui.button("Play").clicked() {
+            } else if ui.button("Play").clicked() || play_key {
                 if let Err(error) = self.play_start() {
+                    self.note(error);
+                }
+            }
+            ui.separator();
+            if self.play_in.is_some() {
+                if ui.button("Step here").clicked() {
+                    if let Err(error) = self.play_in_step() {
+                        self.note(error);
+                    }
+                }
+                if ui.button("Stop here").clicked() {
+                    self.play_in_stop();
+                }
+            } else if ui.button("Play here").clicked() {
+                if let Err(error) = self.play_in_start() {
                     self.note(error);
                 }
             }
@@ -1216,15 +1336,20 @@ impl EditorApp {
                     self.note(error);
                 }
             }
-            if ui.button("Undo").clicked() {
+            if ui.button(undo_label).clicked() || undo {
                 self.shell.undo();
             }
-            if ui.button("Redo").clicked() {
+            if ui.button(redo_label).clicked() || redo {
                 self.shell.redo();
             }
             ui.separator();
             ui.label(self.status.clone());
         });
+        if delete_key {
+            if let Some(id) = self.shell.selection {
+                let _ = self.shell.remove_node(id);
+            }
+        }
     }
 
     /// Surface a typed failure as a status notice plus a log line. The app
@@ -2137,6 +2262,25 @@ mod tests {
     }
 
     #[test]
+    fn play_in_steps_three_ticks_without_a_child_process() {
+        let mut app = EditorApp::new(EditorConfig::new()).unwrap();
+        assert!(!app.play_in_alive());
+        app.play_in_start().expect("headless session starts");
+        assert!(app.play_in_alive());
+        assert!(app.play.is_none(), "no child process is spawned");
+        let first = app.play_in_step().expect("step 1");
+        let second = app.play_in_step().expect("step 2");
+        let third = app.play_in_step().expect("step 3");
+        assert_eq!(second, first + 1);
+        assert_eq!(third, first + 2);
+        assert!(app.status().contains("play-in tick"), "{}", app.status());
+        app.play_in_stop();
+        assert!(!app.play_in_alive());
+        assert!(app.status().contains("play-in stopped at tick"));
+        assert!(app.play.is_none());
+    }
+
+    #[test]
     fn play_spawn_failure_is_typed_and_stop_is_idempotent() {
         let config = EditorConfig {
             arena: PlayEntrypoint::new("e2040-no-such-arena-xyz", Vec::<String>::new()),
@@ -2243,6 +2387,78 @@ mod tests {
         assert_eq!(app.shell.selection, Some(id));
         assert!(app.shell.staged_preview().is_none());
         assert!(!app.play_alive());
+    }
+
+    /// W8: menu shortcuts undo, redo and delete the selection, and the menu
+    /// names the batch the next undo would reverse.
+    #[test]
+    fn menu_shortcuts_undo_redo_delete_and_name_the_batch() {
+        let mut app = EditorApp::new(EditorConfig::new()).unwrap();
+        let id = ObjectId::new();
+        app.shell
+            .insert_node(id, ObjectId::NIL, Transform::identity())
+            .unwrap();
+        assert_eq!(app.shell.document().hierarchy.len(), 1);
+        assert_eq!(app.shell.undo_label(), Some("edit"));
+
+        let ctx = app.ctx.clone();
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let mut input = egui::RawInput::default();
+        input
+            .events
+            .push(key(egui::Key::Z, egui::Modifiers::COMMAND));
+        let mut output = ctx.run_ui(input, |ui| app.menu(ui));
+        output.textures_delta.clear();
+        assert!(
+            app.shell.document().hierarchy.is_empty(),
+            "Ctrl+Z undid the insert"
+        );
+        assert_eq!(app.shell.redo_label(), Some("edit"));
+
+        let mut input = egui::RawInput::default();
+        input
+            .events
+            .push(key(egui::Key::Y, egui::Modifiers::COMMAND));
+        let mut output = ctx.run_ui(input, |ui| app.menu(ui));
+        output.textures_delta.clear();
+        assert_eq!(
+            app.shell.document().hierarchy.len(),
+            1,
+            "Ctrl+Y redid the insert"
+        );
+        assert_eq!(app.shell.undo_label(), Some("edit"));
+
+        // The next frame paints the button with the batch name, not a bare
+        // "Undo": labels are read before the click, so they name what is next.
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.menu(ui));
+        output.textures_delta.clear();
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            if let egui::epaint::Shape::Text(run) = &clipped.shape {
+                text.push_str(run.galley.text());
+                text.push(' ');
+            }
+        }
+        assert!(text.contains("Undo edit"), "menu names the batch: {text}");
+
+        assert!(app.shell.select(id));
+        let mut input = egui::RawInput::default();
+        input
+            .events
+            .push(key(egui::Key::Delete, egui::Modifiers::NONE));
+        let mut output = ctx.run_ui(input, |ui| app.menu(ui));
+        output.textures_delta.clear();
+        assert!(
+            app.shell.document().hierarchy.is_empty(),
+            "Delete removed the selection"
+        );
+        assert_eq!(app.shell.selection, None);
     }
 
     /// EI2: a two-node scene renders through the GPU presenter at panel size,

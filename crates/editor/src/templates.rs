@@ -50,6 +50,13 @@ impl TemplateKind {
         [Self::Arena, Self::Prop, Self::Weapon, Self::Fighter]
     }
 
+    /// The onboarding starters in creation order: the ring, one body, a blade.
+    /// Lives here (ledger-listed, like [`Self::is_roster`]) so the UI file
+    /// never names a genre-word variant.
+    pub const fn onboarding_starters() -> [Self; 3] {
+        [Self::Arena, Self::Fighter, Self::Weapon]
+    }
+
     /// Short id, tab title and one-line summary of this kind, in one table.
     const fn text(self) -> (&'static str, &'static str, &'static str) {
         match self {

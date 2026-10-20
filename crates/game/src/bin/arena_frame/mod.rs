@@ -313,7 +313,14 @@ impl ArenaApp {
         let staged = self
             .capture
             .as_mut()
-            .and_then(|slot| slot.tape.input_for_tick(tick));
+            .and_then(|slot| slot.tape.input_for_tick(tick))
+            // An armed agent seat authors the same slot as a tape; the flags
+            // refuse both together, so at most one of them answers.
+            .or_else(|| {
+                self.seat
+                    .as_ref()
+                    .and_then(|seat| seat.input_for_tick(tick, human))
+            });
         let input = match staged {
             // Tape-bound capture: the tape owns the human slot this tick.
             Some(input) => input,
@@ -337,6 +344,22 @@ impl ArenaApp {
             }
         };
         self.with_spear_key(input)
+    }
+
+    /// The agent seat reads back this tick's match hash, and the view
+    /// receipt so far every VIEW_EVERY_TICKS. One short write per tick; a
+    /// dead client is counted, never waited for.
+    pub(super) fn publish_seat(&self, tick: u32) {
+        let Some(seat) = self.seat.as_ref() else {
+            return;
+        };
+        let hash = self.app.hud().state_hash();
+        seat.publish(&format!("tick {tick} {hash:016x}\n"));
+        if tick % engine_game::agent_seat::VIEW_EVERY_TICKS == 0 {
+            if let Some(line) = self.view.line() {
+                seat.publish(&format!("view {line}\n"));
+            }
+        }
     }
 
     /// Run `steps` fixed ticks for the human slot: input, feed and mixer
@@ -368,6 +391,7 @@ impl ArenaApp {
                 input
             };
             debug_assert!(self.tick_scratch.input_accepted);
+            self.publish_seat(tick);
             // Lock-free feed first (tick-stamped, bounded, `dropped_full`
             // counted): a busy mixer never loses commands because the feed
             // already queued them with the camera listener.

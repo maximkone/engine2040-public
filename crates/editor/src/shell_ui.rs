@@ -10,6 +10,7 @@
 //! the selection; every gizmo result stages a batch (preview) before Apply
 //! commits it. Windowed runs and captures stay with the window host.
 
+use crate::browser_tab::BrowserTab;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use egui_dock::widgets::tab_viewer::OnCloseResponse;
@@ -82,6 +83,8 @@ pub struct ShellUi {
     /// Spine actors shown read-only above the document grid, when a host
     /// attached a spine snapshot.
     spine: Option<SpineShown>,
+    /// Browser tab state (W5): folder, rows and last notice.
+    browser: BrowserTab,
 }
 
 /// One attached spine frame: the extraction tick and digest plus a node per
@@ -118,6 +121,7 @@ impl ShellUi {
             inspector_panel: InspectorPanel::new(),
             inspector_key: 1,
             spine: None,
+            browser: BrowserTab::new(),
         }
     }
 
@@ -229,6 +233,7 @@ impl ShellUi {
         );
         let (inspector_panel, inspector_key) = (&mut self.inspector_panel, &mut self.inspector_key);
         let spine = &self.spine;
+        let browser = &mut self.browser;
         let mut viewer = Viewer {
             shell,
             gizmo,
@@ -248,6 +253,7 @@ impl ShellUi {
             inspector_panel,
             inspector_key,
             spine,
+            browser,
         };
         DockArea::new(dock).show_inside(ui, &mut viewer);
     }
@@ -273,6 +279,7 @@ struct Viewer<'a> {
     inspector_panel: &'a mut InspectorPanel,
     inspector_key: &'a mut u64,
     spine: &'a Option<SpineShown>,
+    browser: &'a mut BrowserTab,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -294,6 +301,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Findings => self.findings_panel(ui),
             Panel::Tuning => self.tuning_panel(ui),
             Panel::Templates => self.templates_panel(ui),
+            Panel::Browser => self.browser.show(ui, self.shell),
             Panel::Activity => self.activity(ui),
             Panel::Log => self.log(ui),
         }
@@ -643,11 +651,7 @@ impl Viewer<'_> {
             }
             if ui.button("Create arena scene").clicked() {
                 let mut made = 0usize;
-                for kind in [
-                    TemplateKind::Arena,
-                    TemplateKind::Fighter,
-                    TemplateKind::Weapon,
-                ] {
+                for kind in TemplateKind::onboarding_starters() {
                     let name = self.shell.template_suggest(kind);
                     match self.shell.template_apply(kind, &name) {
                         Ok(_) => made += 1,
@@ -2036,5 +2040,47 @@ mod tests {
         shell.undo().unwrap();
         let local = shell.document().hierarchy.local(id).unwrap();
         assert!((local.position[0] - 1.0).abs() <= 1e-5);
+    }
+
+    /// W5: the Browser tab paints the scanned file name and its Import button.
+    #[test]
+    fn browser_panel_paints_scanned_rows() {
+        let dir = std::env::temp_dir().join(format!("e2040-browser-paint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Triangle.gltf"),
+            include_bytes!("../../../fixtures/khronos/Triangle.gltf"),
+        )
+        .unwrap();
+
+        let mut shell = Shell::new();
+        let mut ui_state = ShellUi::new(&shell);
+        ui_state.browser.set_dir(dir.display().to_string());
+        ui_state.browser.scan();
+        assert!(ui_state.focus_panel(Panel::Browser));
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 720.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| ui_state.show(&mut shell, ui));
+        output.textures_delta.clear();
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            if let egui::epaint::Shape::Text(run) = &clipped.shape {
+                text.push_str(run.galley.text());
+                text.push(' ');
+            }
+        }
+        assert!(
+            text.contains("Triangle.gltf"),
+            "browser paints the file: {text}"
+        );
+        assert!(text.contains("Import"), "glTF rows offer Import: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

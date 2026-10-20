@@ -25,17 +25,21 @@ use engine_input::{Buttons, FighterId, FighterInput, MAX_PARTICIPANTS};
 #[path = "depth/steer.rs"]
 mod steer;
 pub use steer::{steer_wish, DEFAULT_HALF_EXTENT_MM, SEEK_MM, WALL_PROX_MM};
+/// Commitment lease: hold the chosen intent for `N` ticks, `N = 0` is off.
+/// The step logic lives with the foe table in `opponent.rs`; this is the
+/// stable `ai::depth::ActionLease` door the row names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ActionLease {
+    pub(crate) len: u32,
+    pub(crate) intent: Intent,
+    pub(crate) ticks_left: u32,
+    pub(crate) held: Option<FighterInput>,
+    pub(crate) last: Option<Intent>,
+}
+pub use crate::opponent::{LeaseThreats, OpponentTable};
 
 /// Score-lane order shared with the scripted utility table.
 const IDX_ATTACK: usize = 0;
-/// Score-lane order shared with the scripted utility table.
-const IDX_BLOCK: usize = 1;
-/// Score-lane order shared with the scripted utility table.
-const IDX_DODGE: usize = 2;
-/// Score-lane order shared with the scripted utility table.
-const IDX_ADVANCE: usize = 3;
-/// Score-lane order shared with the scripted utility table.
-const IDX_RETREAT: usize = 4;
 
 /// Close range in millimetres (mirrors the scripted strike bands).
 const CLOSE_MM: i32 = 4_000;
@@ -432,28 +436,11 @@ impl TierRow {
 }
 
 /// Shipped duel tiers matching the designer rows file.
+#[rustfmt::skip]
 pub const SHIPPED_TIERS: [TierRow; 3] = [
-    TierRow {
-        tier: 1,
-        hp_permille: 950,
-        tell_ticks: 15,
-        stagger_permille: 400,
-        counter: 1,
-    },
-    TierRow {
-        tier: 2,
-        hp_permille: 1_000,
-        tell_ticks: 15,
-        stagger_permille: 500,
-        counter: 2,
-    },
-    TierRow {
-        tier: 3,
-        hp_permille: 1_050,
-        tell_ticks: 15,
-        stagger_permille: 600,
-        counter: 1,
-    },
+    TierRow { tier: 1, hp_permille: 950, tell_ticks: 15, stagger_permille: 400, counter: 1 },
+    TierRow { tier: 2, hp_permille: 1_000, tell_ticks: 15, stagger_permille: 500, counter: 2 },
+    TierRow { tier: 3, hp_permille: 1_050, tell_ticks: 15, stagger_permille: 600, counter: 1 },
 ];
 
 /// Final-foe primus row: skill, not stats. Health sits inside the narrow
@@ -462,12 +449,9 @@ pub const SHIPPED_TIERS: [TierRow; 3] = [
 /// elite. Notice is faster (reaction 1) and nerve is bolder (700, 750 in
 /// phase 2). The designer file carries this row as `tier_4`; a file
 /// without one still parses, defaulting the fourth slot to this const.
+#[rustfmt::skip]
 pub const PRIMUS_TIER: TierRow = TierRow {
-    tier: 4,
-    hp_permille: 1100,
-    tell_ticks: 15,
-    stagger_permille: 700,
-    counter: 1,
+    tier: 4, hp_permille: 1100, tell_ticks: 15, stagger_permille: 700, counter: 1,
 };
 
 /// Primus phase from remaining health in permille: phase 2 at or below
@@ -790,32 +774,17 @@ impl ArenaPolicy {
     /// Combined bias in scripted table order: phase plus feint plus stamina
     /// gate plus role, saturating. Bounded to `+/-445`.
     pub fn bias(self) -> [i32; 5] {
-        let phase = self.phase.score_bias();
-        let feint = self.feint.score_bias();
-        let gate = stamina_gate_bias(self.stamina);
-        let role = self.role.score_bias();
-        [
-            phase[IDX_ATTACK]
-                .saturating_add(feint[IDX_ATTACK])
-                .saturating_add(gate[IDX_ATTACK])
-                .saturating_add(role[IDX_ATTACK]),
-            phase[IDX_BLOCK]
-                .saturating_add(feint[IDX_BLOCK])
-                .saturating_add(gate[IDX_BLOCK])
-                .saturating_add(role[IDX_BLOCK]),
-            phase[IDX_DODGE]
-                .saturating_add(feint[IDX_DODGE])
-                .saturating_add(gate[IDX_DODGE])
-                .saturating_add(role[IDX_DODGE]),
-            phase[IDX_ADVANCE]
-                .saturating_add(feint[IDX_ADVANCE])
-                .saturating_add(gate[IDX_ADVANCE])
-                .saturating_add(role[IDX_ADVANCE]),
-            phase[IDX_RETREAT]
-                .saturating_add(feint[IDX_RETREAT])
-                .saturating_add(gate[IDX_RETREAT])
-                .saturating_add(role[IDX_RETREAT]),
-        ]
+        let rows = [
+            self.phase.score_bias(),
+            self.feint.score_bias(),
+            stamina_gate_bias(self.stamina),
+            self.role.score_bias(),
+        ];
+        let mut bias = [0i32; 5];
+        for row in rows {
+            add_bias(&mut bias, row);
+        }
+        bias
     }
 }
 
@@ -842,6 +811,10 @@ pub struct DepthBrain {
     threat_history: u8,
     tier: Option<TierRow>,
     play: TierPlay,
+    lease: ActionLease,
+    opponent: OpponentTable,
+    read_opponent: bool,
+    prediction: Option<Intent>,
 }
 
 impl DepthBrain {
@@ -858,6 +831,10 @@ impl DepthBrain {
             threat_history: 0,
             tier: None,
             play: TierPlay::default(),
+            lease: ActionLease::new(0),
+            opponent: OpponentTable::new(),
+            read_opponent: false,
+            prediction: None,
         }
     }
 
@@ -875,6 +852,10 @@ impl DepthBrain {
             threat_history: 0,
             tier: None,
             play: TierPlay::default(),
+            lease: ActionLease::new(0),
+            opponent: OpponentTable::new(),
+            read_opponent: false,
+            prediction: None,
         }
     }
 
@@ -993,16 +974,60 @@ impl DepthBrain {
             .set_morale(self.inner.morale().saturating_add(delta))
     }
 
-    /// Last decided intent (initially [`Intent::Advance`]).
+    /// The installed action lease (`N = 0`, off, by default).
+    pub const fn lease(&self) -> ActionLease {
+        self.lease
+    }
+
+    /// Hold the chosen lane for `ticks`; `0` turns the lease off. Returns
+    /// the stored length.
+    pub fn set_lease_ticks(&mut self, ticks: u32) -> u32 {
+        self.lease.set_len(ticks);
+        self.lease.hold_ticks()
+    }
+
+    /// True while the foe table is read into the bias (off by default).
+    pub const fn reads_opponent(&self) -> bool {
+        self.read_opponent
+    }
+
+    /// Arm or disarm the foe read. Disarming drops the last prediction but
+    /// keeps the learned counts.
+    pub fn set_read_opponent(&mut self, on: bool) {
+        self.read_opponent = on;
+        if !on {
+            self.prediction = None;
+        }
+    }
+
+    /// Last predicted foe action while the read is armed.
+    pub const fn prediction(&self) -> Option<Intent> {
+        self.prediction
+    }
+
+    /// The learned four-bucket foe table (cold counts, no allocation).
+    pub const fn opponent(&self) -> &OpponentTable {
+        &self.opponent
+    }
+
+    /// Last decided intent (the leased lane while one is held, else the
+    /// scripted core's choice).
     pub const fn intent(&self) -> Intent {
-        self.inner.intent()
+        match self.lease.lane() {
+            Some(lane) => lane,
+            None => self.inner.intent(),
+        }
     }
 
     /// Round boundary: install the next phase and clear the feint window.
-    /// Stamina and morale carry over; the squad reassigns separately.
+    /// Stamina and morale carry over; the squad reassigns separately. The
+    /// lease and the foe trend drop; the learned foe counts carry.
     pub fn end_round(&mut self, phase: Phase) {
         self.policy.end_round(phase);
         self.foe_was_attacking = false;
+        self.lease.abort();
+        self.prediction = None;
+        self.opponent.clear_read();
     }
 
     /// Combined depth bias in scripted table order: the installed
@@ -1013,10 +1038,13 @@ impl DepthBrain {
     }
 
     /// Decide one [`FighterInput`] for `percept`: track the feint release,
-    /// score with the depth bias, map a tier brain's facing-relative wish into
-    /// the world axes a legacy arena reads, steer it off blocked axes and
-    /// toward a far foe, and charge stamina. Deterministic, always passes
+    /// score with the depth bias, hold or take the fresh lane (the opt-in
+    /// action lease), map a tier brain's facing-relative wish into the world
+    /// axes a legacy arena reads, steer it off blocked axes and toward a far
+    /// foe, and charge stamina. Deterministic, always passes
     /// [`FighterInput::validate`], a few dozen integer ops with no allocation.
+    /// With the lease off (`N = 0`, default) and the foe read off (default)
+    /// the output is byte-identical to the brain before those fields existed.
     ///
     /// [`FighterInput::validate`]: engine_input::FighterInput::validate
     pub fn decide(&mut self, percept: &Percept) -> FighterInput {
@@ -1034,14 +1062,20 @@ impl DepthBrain {
         self.policy
             .update_feint(percept.foe_attacking, self.foe_was_attacking, dist_mm);
         self.foe_was_attacking = percept.foe_attacking;
-        let bias = self.edge_bias(percept, dist_mm);
+        let mut bias = self.edge_bias(percept, dist_mm);
+        if self.read_opponent {
+            let predicted = self.opponent.observe_foe(percept.foe_attacking, dist_mm);
+            add_bias(&mut bias, crate::opponent::counter_bias(predicted));
+            self.prediction = Some(predicted);
+        }
         let scored = self.inner.decide_with_bias(percept, bias);
+        let (leased, scored) = self.lease.decide(scored, self.inner.intent(), percept);
         // A tier brain on the legacy arena (no melee view: it reads the wish
         // as world axes) maps its own wish into the foe frame and backs away,
         // buttons up, when held still. A rules-v2 arena maps it itself.
         let tiered = self.tier.is_some() && !percept.melee.is_live();
         let away = tiered && self.play.backing_away(me);
-        let intent = [self.inner.intent(), Intent::Retreat][usize::from(away)];
+        let intent = [leased, Intent::Retreat][usize::from(away)];
         let wish = if tiered {
             tier_wish_to_world(scored, intent, percept, dist_mm)
         } else {
@@ -1065,7 +1099,7 @@ impl DepthBrain {
         let drained = self
             .policy
             .stamina()
-            .saturating_sub(stamina_cost(self.inner.intent()))
+            .saturating_sub(stamina_cost(leased))
             .saturating_add(STAMINA_RECOVERY);
         self.policy.set_stamina(drained);
         input
@@ -1482,47 +1516,16 @@ pub const DRIFT_MAX: i32 = 200;
 
 /// Shipped tension ladder, rung `0` (quiet) to rung `7` (cauldron).
 /// Volume climbs monotonically; every row sits inside its fences.
+#[rustfmt::skip]
 pub const TENSION_LADDER: [TensionRow; LADDER_RUNGS as usize] = [
-    TensionRow {
-        crowd_volume_permille: 200,
-        spawn_ticks: 480,
-        morale_drift: -100,
-    },
-    TensionRow {
-        crowd_volume_permille: 300,
-        spawn_ticks: 420,
-        morale_drift: -50,
-    },
-    TensionRow {
-        crowd_volume_permille: 400,
-        spawn_ticks: 360,
-        morale_drift: 0,
-    },
-    TensionRow {
-        crowd_volume_permille: 500,
-        spawn_ticks: 300,
-        morale_drift: 0,
-    },
-    TensionRow {
-        crowd_volume_permille: 600,
-        spawn_ticks: 240,
-        morale_drift: 50,
-    },
-    TensionRow {
-        crowd_volume_permille: 700,
-        spawn_ticks: 180,
-        morale_drift: 75,
-    },
-    TensionRow {
-        crowd_volume_permille: 850,
-        spawn_ticks: 120,
-        morale_drift: 100,
-    },
-    TensionRow {
-        crowd_volume_permille: 1_000,
-        spawn_ticks: 60,
-        morale_drift: 150,
-    },
+    TensionRow { crowd_volume_permille: 200, spawn_ticks: 480, morale_drift: -100 },
+    TensionRow { crowd_volume_permille: 300, spawn_ticks: 420, morale_drift: -50 },
+    TensionRow { crowd_volume_permille: 400, spawn_ticks: 360, morale_drift: 0 },
+    TensionRow { crowd_volume_permille: 500, spawn_ticks: 300, morale_drift: 0 },
+    TensionRow { crowd_volume_permille: 600, spawn_ticks: 240, morale_drift: 50 },
+    TensionRow { crowd_volume_permille: 700, spawn_ticks: 180, morale_drift: 75 },
+    TensionRow { crowd_volume_permille: 850, spawn_ticks: 120, morale_drift: 100 },
+    TensionRow { crowd_volume_permille: 1_000, spawn_ticks: 60, morale_drift: 150 },
 ];
 
 /// Validate one tension row against its fences. Returns the first failure.
@@ -1720,7 +1723,7 @@ mod tests {
         }
         assert!(finish[IDX_ATTACK] > pressure[IDX_ATTACK]);
         assert!(pressure[IDX_ATTACK] > open[IDX_ATTACK]);
-        assert!(open[IDX_ADVANCE] > finish[IDX_ADVANCE]);
+        assert!(open[3] > finish[3], "advance lane");
     }
 
     #[test]
@@ -1833,8 +1836,8 @@ mod tests {
             Squad::new(&[FighterId(16)]),
             Err(DepthError::UnknownFighter { id: 16 })
         );
-        assert_eq!(Role::Holder.score_bias()[IDX_BLOCK], 75);
-        assert_eq!(Role::Flanker.score_bias()[IDX_ADVANCE], 75);
+        assert_eq!(Role::Holder.score_bias()[1], 75, "block lane");
+        assert_eq!(Role::Flanker.score_bias()[3], 75, "advance lane");
     }
 
     #[test]
@@ -2842,5 +2845,299 @@ mod tests {
         let shipped = parse_tiers(text).expect("shipped file parses to four rows");
         assert_eq!(shipped[..3], SHIPPED_TIERS);
         assert_eq!(shipped[3], PRIMUS_TIER);
+    }
+
+    #[test]
+    fn leased_brain_holds_the_lane_across_perception_ticks() {
+        // Same script twice: a close look at tick 0, a far look from tick 6.
+        // The open brain re-scores Advance at tick 6; the leased brain keeps
+        // the Attack it committed at tick 0 across that perception tick.
+        let script = |tick: u32| {
+            let dist = if tick < 6 { 1.0 } else { 10.0 };
+            percept(tick, dist, false)
+        };
+        let mut leased = DepthBrain::new(fighter(0), 6);
+        assert_eq!(leased.set_lease_ticks(24), 24);
+        assert_eq!(leased.lease().hold_ticks(), 24);
+        let mut plain = DepthBrain::new(fighter(0), 6);
+        assert!(!plain.lease().is_on());
+        for tick in 0..12 {
+            let a = leased.decide(&script(tick));
+            let b = plain.decide(&script(tick));
+            if tick < 6 {
+                assert_eq!(leased.intent(), Intent::Attack, "tick {tick}");
+                assert_eq!(b.tick, tick);
+            } else if tick == 6 {
+                assert_eq!(leased.intent(), Intent::Attack, "the lease holds");
+                assert_eq!(plain.intent(), Intent::Advance, "the open brain re-scores");
+                assert_eq!(a.tick, tick);
+                a.validate().expect("held output validates");
+            }
+            assert_eq!(b.tick, tick, "plain output follows the tick");
+        }
+        // The same script on a plain brain never attacks at tick 6.
+        let mut fresh = DepthBrain::new(fighter(0), 6);
+        for tick in 0..=6 {
+            let out = fresh.decide(&script(tick));
+            if tick == 6 {
+                assert_ne!(out.buttons.0 & ATTACK, ATTACK);
+            }
+        }
+        // A lease of zero is the old brain, byte for byte.
+        let mut again = DepthBrain::new(fighter(0), 6);
+        again.set_lease_ticks(0);
+        let mut old = DepthBrain::new(fighter(0), 6);
+        for tick in 0..120 {
+            assert_eq!(again.decide(&script(tick)), old.decide(&script(tick)));
+        }
+    }
+
+    #[test]
+    fn leased_brain_aborts_the_hold_on_an_incoming_blow() {
+        // Tick 0 is calm and commits; tick 6 is the perception tick where the
+        // foe swings, so the fresh guard replaces the held lane that tick.
+        let script = |tick: u32| percept(tick, 1.0, tick >= 6);
+        let mut leased = DepthBrain::new(fighter(0), 6);
+        leased.set_lease_ticks(60);
+        let mut plain = DepthBrain::new(fighter(0), 6);
+        for tick in 0..12 {
+            let a = leased.decide(&script(tick));
+            let b = plain.decide(&script(tick));
+            assert!(a.tick == tick && b.tick == tick);
+            if tick == 6 {
+                assert_ne!(
+                    plain.intent(),
+                    Intent::Attack,
+                    "the open brain guards the blow"
+                );
+                assert_eq!(
+                    leased.intent(),
+                    plain.intent(),
+                    "the threat aborts the hold"
+                );
+                assert_eq!(a.buttons, b.buttons, "both brains guard on the same tick");
+                assert_eq!(leased.lease().lane(), None);
+                assert_eq!(leased.lease().ticks_left(), 0);
+            }
+        }
+        assert!(plain.intent() != Intent::Attack);
+        // Low hp is the second bit: a wounded leased brain stops committing.
+        let mut wounded = DepthBrain::new(fighter(0), 6);
+        wounded.set_lease_ticks(60);
+        let view = MeleeView::nearest(200, 1_000, &[foe_view(1, 100, StrikePhase::Idle)]);
+        let low = percept(6, 1.0, false).with_melee(view);
+        for tick in 0..6 {
+            let _ = wounded.decide(&percept(tick, 1.0, false));
+        }
+        let _ = wounded.decide(&low);
+        assert_eq!(wounded.lease().lane(), None, "low hp aborts");
+    }
+
+    #[test]
+    fn armed_opponent_read_learns_the_foe_and_predicts() {
+        let mut brain = DepthBrain::new(fighter(0), 1);
+        assert!(!brain.reads_opponent());
+        assert_eq!(brain.prediction(), None);
+        brain.set_read_opponent(true);
+        assert!(brain.reads_opponent());
+        // Six-tick script: close stand, 0.8 m retreat, close attack, repeat.
+        for tick in 0..24u32 {
+            let dist = if (tick / 6).is_multiple_of(2) {
+                1.0
+            } else {
+                1.8
+            };
+            let _ = brain.decide(&percept(tick, dist, tick.is_multiple_of(6)));
+        }
+        assert!(brain.prediction().is_some(), "the read predicts every tick");
+        // Sum every bucket without moving the brain into a closure.
+        let counted = |brain: &DepthBrain| {
+            let bands = [
+                crate::opponent::RangeBand::Close,
+                crate::opponent::RangeBand::Far,
+            ];
+            let intents = [
+                Intent::Attack,
+                Intent::Block,
+                Intent::Dodge,
+                Intent::Advance,
+                Intent::Retreat,
+                Intent::Reposition,
+            ];
+            let mut sum = 0u32;
+            for band in bands {
+                for last in intents {
+                    sum = sum.saturating_add(brain.opponent().observed(band, last));
+                }
+            }
+            sum
+        };
+        let observed = counted(&brain);
+        assert!(observed > 0, "observations land in the buckets");
+        // Disarming drops the read but keeps the learned counts.
+        brain.set_read_opponent(false);
+        assert_eq!(brain.prediction(), None);
+        assert_eq!(counted(&brain), observed);
+    }
+
+    // ---- lease-on vs lease-off bench over seeds 2040..=2049 ----
+
+    const BENCH_FIRST_SEED: u64 = 2040;
+    const BENCH_SEEDS: u64 = 10;
+    const BENCH_TICKS: u32 = 600;
+    const BENCH_LEASE_TICKS: u32 = 12;
+    const BENCH_START_MM: i32 = 2_400;
+    const BENCH_REACH_MM: i32 = 1_800;
+    const BENCH_STEP_MM: i32 = 500;
+    const BENCH_DAMAGE: i32 = 60;
+    const BENCH_WINDUP: u32 = 6;
+    const BENCH_WARNING: u32 = 2;
+    const BENCH_FOE_HP: i32 = 1_000;
+
+    /// Scripted foe action for one seed and 12-tick window. Deterministic:
+    /// the same seed and tick always give the same intent.
+    fn bench_foe_intent(seed: u64, tick: u32) -> Intent {
+        let slot = u64::from(tick / 12);
+        // Every third window gives ground, so the pair crosses the strike
+        // band and a committed lane has something to hold through.
+        if slot % 3 == 2 {
+            return Intent::Retreat;
+        }
+        let roll =
+            engine_core::splitmix64(seed.wrapping_add(slot.wrapping_mul(0x9E37_79B9_7F4A_7C15)))
+                % 100;
+        match roll {
+            0..=54 => Intent::Attack,
+            55..=69 => Intent::Advance,
+            70..=79 => Intent::Block,
+            80..=89 => Intent::Dodge,
+            _ => Intent::Retreat,
+        }
+    }
+
+    /// Ground distance after both fighters move for one tick. Attack closes
+    /// only a little (the core wish is 30 of 100), advance closes fully.
+    fn bench_move(dist_mm: i32, mine: Intent, foe: Intent) -> i32 {
+        let step = |intent: Intent| match intent {
+            Intent::Attack => 100,
+            Intent::Advance => BENCH_STEP_MM,
+            Intent::Retreat => -BENCH_STEP_MM,
+            _ => 0,
+        };
+        (dist_mm - step(mine) - step(foe)).clamp(0, 8_000)
+    }
+
+    /// Advance a swing clock for `intent`: a fresh Attack winds up, an
+    /// interrupted Attack (any other lane) cancels, and the tick the clock
+    /// reaches zero is the impact tick.
+    fn bench_swing(clock: u32, intent: Intent) -> (u32, bool) {
+        if intent != Intent::Attack {
+            return (0, false);
+        }
+        if clock == 0 {
+            return (BENCH_WINDUP - 1, false);
+        }
+        let left = clock - 1;
+        (left, left == 0)
+    }
+
+    /// One scripted round: damage traded and the margin (`1` win, `0` draw,
+    /// `-1` loss). No RNG, no clock; the same arguments replay exactly.
+    /// Swings land only on their impact tick, so a lane that re-decides away
+    /// from Attack before impact cancels: the lease is the only difference.
+    fn bench_round(seed: u64, lease_ticks: u32) -> (i32, i32, i32) {
+        let mut brain = DepthBrain::new(fighter(0), 6);
+        brain.set_lease_ticks(lease_ticks);
+        let (mut my_clock, mut foe_clock) = (0u32, 0u32);
+        let (mut my_hp, mut foe_hp, mut dist) = (1_000i32, BENCH_FOE_HP, BENCH_START_MM);
+        for tick in 0..BENCH_TICKS {
+            let foe_intent = bench_foe_intent(seed, tick);
+            let readable = foe_clock > 0 && foe_clock <= BENCH_WARNING;
+            let phase = if readable {
+                StrikePhase::Windup
+            } else {
+                StrikePhase::Idle
+            };
+            let view = MeleeView::nearest(
+                u16::try_from(my_hp).unwrap_or(0),
+                1_000,
+                &[FoeView::quantize(
+                    1,
+                    dist,
+                    u16::try_from(foe_hp).unwrap_or(0),
+                    phase,
+                    0,
+                )],
+            );
+            let seen = Percept::new(
+                [0.0, 0.0, 0.0],
+                0.0,
+                [dist as f32 / 1_000.0, 0.0, 0.0],
+                readable,
+                dist as f32 / 1_000.0,
+                tick,
+            )
+            .with_melee(view);
+            let _ = brain.decide(&seen);
+            let intent = brain.intent();
+            let in_reach = dist <= BENCH_REACH_MM;
+            let (next_my, my_impact) = bench_swing(my_clock, intent);
+            let (next_foe, foe_impact) = bench_swing(foe_clock, foe_intent);
+            my_clock = next_my;
+            foe_clock = next_foe;
+            if my_impact && in_reach && !matches!(foe_intent, Intent::Block | Intent::Dodge) {
+                foe_hp = (foe_hp - BENCH_DAMAGE).max(0);
+            }
+            if foe_impact && in_reach && !matches!(intent, Intent::Block | Intent::Dodge) {
+                my_hp = (my_hp - BENCH_DAMAGE).max(0);
+            }
+            dist = bench_move(dist, intent, foe_intent);
+            if my_hp == 0 || foe_hp == 0 {
+                break;
+            }
+        }
+        let margin = (my_hp - foe_hp).signum();
+        (BENCH_FOE_HP - foe_hp, 1_000 - my_hp, margin)
+    }
+
+    /// One bench table: a line per seed with both arms plus the totals. The
+    /// caller runs it twice and compares the strings byte for byte.
+    fn bench_lines() -> Vec<String> {
+        let mut lines = vec![format!(
+            "lease bench seeds {BENCH_FIRST_SEED}..={} ticks={BENCH_TICKS} on={BENCH_LEASE_TICKS} off=0",
+            BENCH_FIRST_SEED + BENCH_SEEDS - 1
+        )];
+        let (mut on_wins, mut off_wins) = (0i32, 0i32);
+        let (mut on_dealt, mut on_taken) = (0i32, 0i32);
+        let (mut off_dealt, mut off_taken) = (0i32, 0i32);
+        for seed in BENCH_FIRST_SEED..BENCH_FIRST_SEED + BENCH_SEEDS {
+            let (off_dealt_one, off_taken_one, off_margin) = bench_round(seed, 0);
+            let (on_dealt_one, on_taken_one, on_margin) = bench_round(seed, BENCH_LEASE_TICKS);
+            on_wins += i32::from(on_margin > 0);
+            off_wins += i32::from(off_margin > 0);
+            on_dealt += on_dealt_one;
+            on_taken += on_taken_one;
+            off_dealt += off_dealt_one;
+            off_taken += off_taken_one;
+            lines.push(format!(
+                "seed {seed} off damage={off_dealt_one}/{off_taken_one} margin={off_margin} on damage={on_dealt_one}/{on_taken_one} margin={on_margin}"
+            ));
+        }
+        lines.push(format!(
+            "totals off wins={off_wins}/{BENCH_SEEDS} damage={off_dealt}/{off_taken} on wins={on_wins}/{BENCH_SEEDS} damage={on_dealt}/{on_taken}"
+        ));
+        lines
+    }
+
+    #[test]
+    fn bench_lease_on_vs_off_over_seeds_2040_2049() {
+        let first = bench_lines();
+        let second = bench_lines();
+        assert_eq!(first, second, "the bench must repeat byte-identical");
+        assert_eq!(first.len(), 1 + BENCH_SEEDS as usize + 1);
+        for line in &first {
+            println!("{line}");
+        }
+        println!("repeat: identical");
     }
 }

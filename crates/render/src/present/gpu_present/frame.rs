@@ -350,6 +350,9 @@ pub(crate) struct Targets {
     pub(crate) fog_texture: wgpu::Texture,
     /// RL9 contact-AO texture the blit multiplies (R32 float).
     pub(crate) ao_texture: wgpu::Texture,
+    /// LF3 landing 2: group-1 bind over `ao_texture`, the occlusion field
+    /// the forward pass scales its ambient by. Rebuilt with the targets.
+    pub(crate) ao_bind: wgpu::BindGroup,
     /// Live GTAO resources over this frame size (`None` when the kernel
     /// cannot size the frame): the half-res buffer, the uniform and the two
     /// bind groups over this target's depth and `ao_texture`.

@@ -77,6 +77,8 @@ pub enum Panel {
     Tuning,
     /// New-item templates: arena, prop, weapon and fighter starters.
     Templates,
+    /// Asset files in a folder, with import through the EI3 glTF path (W5).
+    Browser,
     /// Activity feed tagged human or agent, plus the scene diff, so a person
     /// and an AI on the same scene see each other's edits.
     Activity,
@@ -93,6 +95,7 @@ impl Panel {
             Self::Findings => "Findings",
             Self::Tuning => "Tuning",
             Self::Templates => "Templates",
+            Self::Browser => "Browser",
             Self::Activity => "activity",
         }
     }
@@ -1517,6 +1520,17 @@ impl Shell {
         Some(receipt)
     }
 
+    /// Name of the batch the next undo would reverse, or `None`. The menu
+    /// labels its button with this so the action is never anonymous (W8).
+    pub fn undo_label(&self) -> Option<&str> {
+        self.journal.past.last().map(|entry| entry.name.as_str())
+    }
+
+    /// Name of the batch the next redo would replay, or `None`.
+    pub fn redo_label(&self) -> Option<&str> {
+        self.journal.future.last().map(|entry| entry.name.as_str())
+    }
+
     /// Fresh idempotency key for the next batch (never zero).
     fn take_key(&mut self) -> u64 {
         let key = self.next_key.max(1);
@@ -1542,10 +1556,7 @@ impl Default for Shell {
 /// `.glb`/`.gltf` extension, bytes outside the asset-name alphabet replaced
 /// by `-`, capped so a per-mesh suffix still fits the name bound.
 fn import_stem(path: &str) -> String {
-    let file = path
-        .rsplit(|ch| ch == '/' || ch == '\\')
-        .next()
-        .unwrap_or(path);
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let stem = match file.rsplit_once('.') {
         Some((stem, extension))
             if extension.eq_ignore_ascii_case("glb") || extension.eq_ignore_ascii_case("gltf") =>

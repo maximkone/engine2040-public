@@ -18,6 +18,20 @@
 //! comparisons, `+ - * /`, `sqrt` (wish clamp), `round` (millisecond timers
 //! and hash) and integer math. No `sin`/`cos`/`angle_between`, no `Duration`
 //! or wall clock. Grade is rise-over-run compared against [`MAX_SLOPE_GRADE`].
+//!
+//! Air channel table (AIN6 steal 5): off unless [`Controller::with_air`] arms
+//! it, so the default step and the golden hash do not move. Every number is
+//! named once here and read only through [`AirTuning`].
+//!
+//! | number | value | unit | meaning |
+//! |---|---|---|---|
+//! | `AIR_CONTROL_SCALE` | 0.30 | share | airborne wish scale (today, both paths) |
+//! | `AIR_TURN_BRAKE` | 0.20 | share | ramp gain at `dot(wish, facing) == -1` |
+//! | `AIR_APEX_SPEED_MPS` | 2.00 | m/s | vertical speed under which gravity halves |
+//! | `AIR_APEX_GRAVITY` | 0.50 | share | gravity scale near the apex |
+//! | `AIR_COYOTE_MS` | 120 | ms | coyote window (7-8 ticks at 60 Hz) |
+//! | `AIR_JUMP_HOLD_TICKS` | 6 | ticks | jump-hold deadline after take-off |
+//! | `AIR_HOLD_CUT` | 0.50 | share | upward speed kept by a release inside the deadline |
 #![forbid(unsafe_code)]
 
 use super::rapier::{quantize, Error, Snapshot, World, GRAVITY_Y};
@@ -44,8 +58,103 @@ pub const COYOTE_MS: u32 = 150;
 pub const BUFFER_MS: u32 = 150;
 /// Downhill slide speed on over-steep ground, m/s.
 pub const SLIP_SPEED_M_S: f32 = 4.0;
+/// Air ramp gain at a full reversal, share of the air-control scale.
+pub const AIR_TURN_BRAKE: f32 = 0.2;
+/// Vertical speed under which gravity halves, m/s.
+pub const AIR_APEX_SPEED_MPS: f32 = 2.0;
+/// Gravity scale near the apex, share.
+pub const AIR_APEX_GRAVITY: f32 = 0.5;
+/// Coyote grace while the air channel is armed, milliseconds (0.12 s).
+pub const AIR_COYOTE_MS: u32 = 120;
+/// Jump-hold deadline after take-off, ticks.
+pub const AIR_JUMP_HOLD_TICKS: u32 = 6;
+/// Upward speed kept by a release inside the hold deadline, share.
+pub const AIR_HOLD_CUT: f32 = 0.5;
 /// Comparison epsilon, meters.
 const EPS: f32 = 1e-6;
+
+/// Air shaping table (AIN6 steal 5): the opt-in numbers behind
+/// [`Controller::with_air`]. [`AirTuning::default`] is today's flat tuning, so
+/// arming the channel with it reproduces the current step; [`AirTuning::shaped`]
+/// is the AIN6 table (ramp, apex gravity, 0.12 s coyote, jump-hold deadline).
+/// Values outside their range are not clamped: the caller arms a table.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AirTuning {
+    /// Airborne wish scale when the wish holds the facing, share.
+    pub control_scale: f32,
+    /// Ramp gain at a full reversal (`dot == -1`), share of `control_scale`.
+    pub turn_brake: f32,
+    /// Vertical speed under which gravity halves, m/s; `0` never halves.
+    pub apex_speed_mps: f32,
+    /// Gravity scale under `apex_speed_mps`, share.
+    pub apex_gravity: f32,
+    /// Coyote grace after leaving walkable ground, milliseconds.
+    pub coyote_ms: u32,
+    /// Jump-hold deadline after take-off, ticks; `0` has no deadline.
+    pub jump_hold_ticks: u32,
+    /// Upward speed kept by a release inside the deadline, share.
+    pub hold_cut: f32,
+}
+
+impl Default for AirTuning {
+    /// Today's flat tuning: no ramp, no apex gravity, 150 ms coyote, no hold
+    /// deadline. Arming with it leaves the step unchanged.
+    fn default() -> Self {
+        Self {
+            control_scale: AIR_CONTROL_SCALE,
+            turn_brake: 1.0,
+            apex_speed_mps: 0.0,
+            apex_gravity: 1.0,
+            coyote_ms: COYOTE_MS,
+            jump_hold_ticks: 0,
+            hold_cut: 1.0,
+        }
+    }
+}
+
+impl AirTuning {
+    /// The AIN6 shaping table: turning brakes, holding the line keeps speed,
+    /// gravity halves near the apex, the coyote window is 0.12 s and a jump
+    /// release inside six ticks keeps half the rise.
+    #[must_use]
+    pub fn shaped() -> Self {
+        Self {
+            control_scale: AIR_CONTROL_SCALE,
+            turn_brake: AIR_TURN_BRAKE,
+            apex_speed_mps: AIR_APEX_SPEED_MPS,
+            apex_gravity: AIR_APEX_GRAVITY,
+            coyote_ms: AIR_COYOTE_MS,
+            jump_hold_ticks: AIR_JUMP_HOLD_TICKS,
+            hold_cut: AIR_HOLD_CUT,
+        }
+    }
+
+    /// Air-control gain along `dot(wish, facing)`: `1` on the line, `turn_brake`
+    /// on a full reversal, linear between. A zero wish or facing gains `1`.
+    fn ramp(self, wish: [f32; 2], facing: [f32; 2]) -> f32 {
+        let (wl, fl) = (planar_len(wish), planar_len(facing));
+        if !wl.is_finite() || wl <= 0.0 || !fl.is_finite() || fl <= 0.0 {
+            return 1.0;
+        }
+        let dot = ((wish[0] * facing[0] + wish[1] * facing[1]) / (wl * fl)).clamp(-1.0, 1.0);
+        self.turn_brake + (1.0 - self.turn_brake) * (dot + 1.0) * 0.5
+    }
+
+    /// Gravity scale for a vertical speed: `apex_gravity` under the threshold,
+    /// `1` otherwise and always when the threshold is `0`.
+    fn gravity_scale(self, vel_y: f32) -> f32 {
+        if vel_y.abs() < self.apex_speed_mps {
+            self.apex_gravity
+        } else {
+            1.0
+        }
+    }
+}
+
+/// Length of a planar pair.
+fn planar_len(v: [f32; 2]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1]).sqrt()
+}
 
 /// Autostep lane: max rise plus minimum tread width after the step.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -161,6 +270,8 @@ pub struct ControllerSnapshot {
     coyote_ms: u32,
     buffer_ms: u32,
     buffered_vel: f32,
+    air_facing: [f32; 2],
+    air_hold_ticks: u32,
 }
 
 /// Axis-aligned static box, min/max corners in meters.
@@ -197,7 +308,9 @@ enum Hit {
 /// downhill slip on over-steep ground, 150 ms coyote plus 150 ms jump
 /// buffer in integer milliseconds, gravity on the fixed tick. Units: meters,
 /// seconds, Y-up. Per-tick cost is the existing axis/vertical passes plus one
-/// ramp scan when grounded (no allocation).
+/// ramp scan when grounded (no allocation). The air channel
+/// ([`Controller::with_air`]) optionally shapes the same step (ramp, apex
+/// gravity, 0.12 s coyote, jump-hold deadline); unarmed it is never read.
 pub struct Controller {
     world: World,
     body: usize,
@@ -212,6 +325,12 @@ pub struct Controller {
     buffer_ms: u32,
     /// Take-off velocity stored with the buffer, m/s.
     buffered_vel: f32,
+    /// Last grounded wish direction (unit on XZ), the air ramp's facing.
+    air_facing: [f32; 2],
+    /// Remaining jump-hold deadline, ticks (air channel only).
+    air_hold_ticks: u32,
+    /// Air shaping table; `None` keeps today's flat step.
+    air: Option<AirTuning>,
     boxes: Vec<StaticBox>,
     ramps: Vec<Ramp>,
 }
@@ -236,9 +355,49 @@ impl Controller {
             coyote_ms: COYOTE_MS,
             buffer_ms: 0,
             buffered_vel: 0.0,
+            air_facing: [1.0, 0.0],
+            air_hold_ticks: 0,
+            air: None,
             boxes: Vec::new(),
             ramps: Vec::new(),
         })
+    }
+
+    /// Arm the air channel with `tuning`, or keep today's flat step when
+    /// `None`. [`AirTuning::default`] armed is today's step; the AIN6 table is
+    /// [`AirTuning::shaped`]. The channel is explicit, like the arena's
+    /// `with_height`, so an unarmed controller never reads the table.
+    #[must_use]
+    pub fn with_air(mut self, tuning: AirTuning) -> Self {
+        self.air = Some(tuning);
+        self
+    }
+
+    /// Armed air table, if any.
+    #[must_use]
+    pub fn air(&self) -> Option<AirTuning> {
+        self.air
+    }
+
+    /// Last grounded wish direction the air ramp reads, unit on XZ.
+    #[must_use]
+    pub fn air_facing(&self) -> [f32; 2] {
+        self.air_facing
+    }
+
+    /// Release the jump button: inside the armed hold deadline and still
+    /// rising, the upward speed is cut to [`AirTuning::hold_cut`]; otherwise
+    /// nothing moves. Unarmed controllers ignore it, so the default step and
+    /// hash never change.
+    pub fn jump_release(&mut self) {
+        let Some(air) = self.air else {
+            return;
+        };
+        if self.air_hold_ticks == 0 || self.grounded || self.vel_y <= 0.0 {
+            return;
+        }
+        self.vel_y *= air.hold_cut;
+        self.air_hold_ticks = 0;
     }
 
     /// Add a static box from half-extents plus center. Mirrored into the
@@ -307,6 +466,7 @@ impl Controller {
             self.coyote_ms = 0;
             self.buffer_ms = 0;
             self.buffered_vel = 0.0;
+            self.air_hold_ticks = self.air.map_or(0, |air| air.jump_hold_ticks);
         } else {
             self.buffered_vel = vel;
             self.buffer_ms = BUFFER_MS;
@@ -382,13 +542,33 @@ impl Controller {
         }
         let dt_ms = dt_to_ms(dt);
         let fired = self.tick_timers(was_grounded, dt_ms);
+        // The facing the air ramp reads is the last grounded wish direction, so
+        // a take-off keeps the line it ran on and an airborne turn brakes.
+        if was_grounded && (clamped[0] != 0.0 || clamped[1] != 0.0) {
+            let len = planar_len(clamped);
+            if len > 0.0 {
+                self.air_facing = [clamped[0] / len, clamped[1] / len];
+            }
+        }
         let mut wish = clamped;
-        if !was_grounded {
-            wish[0] *= AIR_CONTROL_SCALE;
-            wish[1] *= AIR_CONTROL_SCALE;
+        match self.air {
+            None => {
+                if !was_grounded {
+                    wish[0] *= AIR_CONTROL_SCALE;
+                    wish[1] *= AIR_CONTROL_SCALE;
+                }
+            }
+            Some(air) => {
+                if !was_grounded {
+                    let scale = air.control_scale * air.ramp(clamped, self.air_facing);
+                    wish[0] *= scale;
+                    wish[1] *= scale;
+                }
+            }
         }
         if !fired {
-            self.vel_y += GRAVITY_Y * dt;
+            let gravity = self.air.map_or(1.0, |air| air.gravity_scale(self.vel_y));
+            self.vel_y += GRAVITY_Y * gravity * dt;
             if self.vel_y < MAX_FALL_SPEED {
                 self.vel_y = MAX_FALL_SPEED;
             }
@@ -625,6 +805,8 @@ impl Controller {
             coyote_ms: self.coyote_ms,
             buffer_ms: self.buffer_ms,
             buffered_vel: self.buffered_vel,
+            air_facing: self.air_facing,
+            air_hold_ticks: self.air_hold_ticks,
         }
     }
 
@@ -638,6 +820,8 @@ impl Controller {
         self.coyote_ms = snapshot.coyote_ms;
         self.buffer_ms = snapshot.buffer_ms;
         self.buffered_vel = snapshot.buffered_vel;
+        self.air_facing = snapshot.air_facing;
+        self.air_hold_ticks = snapshot.air_hold_ticks;
         self.world.set_body_translation(self.body, self.pos);
         Ok(())
     }
@@ -646,6 +830,8 @@ impl Controller {
     /// the grounded flag and the integer-millisecond jump timers (all affect
     /// future ticks). The tail folds whole words plus one prime step each,
     /// exactly like before, with the prime owned by the shared hash module.
+    /// The air facing and hold deadline fold only when the channel is armed,
+    /// so the unarmed tail (the golden path) keeps today's bytes.
     pub fn state_hash(&self) -> u64 {
         let mut h = self.world.state_hash();
         for v in [
@@ -658,16 +844,28 @@ impl Controller {
             h ^= v;
             h = h.wrapping_mul(FNV64_PRIME);
         }
+        if self.air.is_some() {
+            for v in [
+                u64::from_le_bytes(quantize(self.air_facing[0]).to_le_bytes()),
+                u64::from_le_bytes(quantize(self.air_facing[1]).to_le_bytes()),
+                u64::from(self.air_hold_ticks),
+            ] {
+                h ^= v;
+                h = h.wrapping_mul(FNV64_PRIME);
+            }
+        }
         h
     }
 
     /// Tick the integer-millisecond timers. Returns true when a buffered
     /// take-off fires on this tick (velocity set, gravity skipped by caller).
     fn tick_timers(&mut self, was_grounded: bool, dt_ms: u32) -> bool {
+        let coyote = self.air.map_or(COYOTE_MS, |air| air.coyote_ms);
         if was_grounded {
-            self.coyote_ms = COYOTE_MS;
+            self.coyote_ms = coyote;
         } else {
             self.coyote_ms = self.coyote_ms.saturating_sub(dt_ms);
+            self.air_hold_ticks = self.air_hold_ticks.saturating_sub(1);
         }
         if self.buffer_ms == 0 {
             return false;
@@ -678,6 +876,7 @@ impl Controller {
             self.coyote_ms = 0;
             self.buffer_ms = 0;
             self.buffered_vel = 0.0;
+            self.air_hold_ticks = self.air.map_or(0, |air| air.jump_hold_ticks);
             return true;
         }
         self.buffer_ms = self.buffer_ms.saturating_sub(dt_ms);
@@ -963,6 +1162,306 @@ mod tests {
         const { assert!(AIR_CONTROL_SCALE > 0.0 && AIR_CONTROL_SCALE < 1.0) };
         const { assert!(COYOTE_MS == 150) };
         const { assert!(BUFFER_MS == 150) };
+        // AIN6 air channel table (off unless armed).
+        const { assert!(AIR_TURN_BRAKE > 0.0 && AIR_TURN_BRAKE < 1.0) };
+        const { assert!(AIR_APEX_SPEED_MPS == 2.0) };
+        const { assert!(AIR_APEX_GRAVITY == 0.5) };
+        const { assert!(AIR_COYOTE_MS == 120) };
+        const { assert!(AIR_JUMP_HOLD_TICKS == 6) };
+        const { assert!(AIR_HOLD_CUT == 0.5) };
+    }
+
+    /// Floor box plus a settled capsule on it, optionally air-armed.
+    fn flat(air: Option<AirTuning>) -> Controller {
+        let mut c = Controller::spawn([0.0, HALF, 0.0], RADIUS, HEIGHT).expect("spawn");
+        c.add_static_box([10.0, 0.5, 10.0], [0.0, -0.5, 0.0])
+            .expect("floor");
+        if let Some(tuning) = air {
+            c = c.with_air(tuning);
+        }
+        c.move_and_slide([0.0, 0.0], FIXED_DT);
+        assert!(c.grounded(), "flat start must settle grounded");
+        c
+    }
+
+    /// Ten grounded ticks along +x (facing +x), a 5 m/s take-off, then two
+    /// quiet air ticks: the shared prefix of the air tapes.
+    fn warm_air(air: Option<AirTuning>) -> Controller {
+        let mut c = flat(air);
+        for _ in 0..10 {
+            c.move_and_slide([0.05, 0.0], FIXED_DT);
+        }
+        assert!(c.grounded(), "prefix keeps the feet down");
+        c.jump(5.0);
+        c.move_and_slide([0.0, 0.0], FIXED_DT);
+        c.move_and_slide([0.0, 0.0], FIXED_DT);
+        assert!(!c.grounded(), "prefix is airborne");
+        c
+    }
+
+    #[test]
+    fn air_ramp_brakes_a_turn_and_holds_the_line() {
+        let held = 0.05 * AIR_CONTROL_SCALE;
+        let braked = held * AIR_TURN_BRAKE;
+        let mut hold = warm_air(Some(AirTuning::shaped()));
+        let mut turn = warm_air(Some(AirTuning::shaped()));
+        let mut today = warm_air(None);
+        let h = hold.move_and_slide([0.05, 0.0], FIXED_DT);
+        let t = turn.move_and_slide([-0.05, 0.0], FIXED_DT);
+        let k = today.move_and_slide([0.05, 0.0], FIXED_DT);
+        assert!(
+            (h.displacement[0] - held).abs() < 1e-6,
+            "holding the line keeps the air scale: {h:?} vs {held}"
+        );
+        assert!(
+            (t.displacement[0] + braked).abs() < 1e-6,
+            "turning brakes to {braked}: {t:?}"
+        );
+        assert!(
+            t.displacement[0].abs() < h.displacement[0].abs(),
+            "a turn must lose speed, hold {h:?} turn {t:?}"
+        );
+        assert!(
+            (k.displacement[0] - held).abs() < 1e-6,
+            "unarmed keeps today's flat scale: {k:?}"
+        );
+        // Facing is written on the ground, so a held turn keeps braking.
+        let t2 = turn.move_and_slide([-0.05, 0.0], FIXED_DT);
+        assert!(
+            (t2.displacement[0] + braked).abs() < 1e-6,
+            "second turn tick still brakes: {t2:?}"
+        );
+    }
+
+    #[test]
+    fn apex_gravity_lengthens_the_rise() {
+        let rise = |air: Option<AirTuning>| -> (u32, u32, u32, u32) {
+            let mut c = flat(air);
+            c.jump(5.0);
+            let (mut half, mut full, mut below) = (0u32, 0u32, 0u32);
+            let full_step = GRAVITY_Y * FIXED_DT;
+            let half_step = GRAVITY_Y * AIR_APEX_GRAVITY * FIXED_DT;
+            let mut prev = c.velocity_y();
+            for tick in 1..=200u32 {
+                c.move_and_slide([0.0, 0.0], FIXED_DT);
+                let now = c.velocity_y();
+                let delta = now - prev;
+                if (delta - half_step).abs() < 1e-6 {
+                    half += 1;
+                } else if (delta - full_step).abs() < 1e-6 {
+                    full += 1;
+                }
+                if prev.abs() < AIR_APEX_SPEED_MPS {
+                    below += 1;
+                }
+                if now <= 0.0 {
+                    return (tick, half, full, below);
+                }
+                prev = now;
+            }
+            panic!("rise never reached its apex");
+        };
+        let (shaped, half, full, below) = rise(Some(AirTuning::shaped()));
+        let (today, today_half, today_full, _) = rise(None);
+        let (armed_today, _, _, _) = rise(Some(AirTuning::default()));
+        assert_eq!(today, armed_today, "armed today's table keeps the rise");
+        assert!(
+            shaped > today + 5,
+            "shaped rise {shaped} ticks vs today {today}"
+        );
+        assert_eq!(half, below, "every step under the apex speed halves");
+        assert!(half > 5, "only {half} half-gravity steps");
+        assert!(full > 5, "only {full} full-gravity steps");
+        assert_eq!(today_half, 0, "unarmed never halves gravity");
+        assert!(today_full > 0, "unarmed keeps full gravity");
+    }
+
+    #[test]
+    fn air_coyote_window_is_seven_ticks_and_a_jump_three_ticks_out_fires() {
+        let dt_ms = dt_to_ms(FIXED_DT);
+        let live = (1..=12u32).filter(|n| n * dt_ms < AIR_COYOTE_MS).count();
+        assert!(
+            (7..=8).contains(&live),
+            "0.12 s is {live} ticks at {dt_ms} ms"
+        );
+
+        // Walk off the deck top (y = 1.0) and jump three ticks later.
+        let edge = |air: Option<AirTuning>| -> Controller {
+            let mut c = Controller::spawn([-4.0, 1.0 + HALF, 0.0], RADIUS, HEIGHT).expect("spawn");
+            c.add_static_box([3.0, 0.5, 3.0], [-2.0, 0.5, 0.0])
+                .expect("deck");
+            if let Some(tuning) = air {
+                c = c.with_air(tuning);
+            }
+            c.move_and_slide([0.0, 0.0], FIXED_DT);
+            assert!(c.grounded());
+            let mut left = false;
+            for _ in 0..30 {
+                c.move_and_slide([0.2, 0.0], FIXED_DT);
+                if !c.grounded() {
+                    left = true;
+                    break;
+                }
+            }
+            assert!(left, "must walk off the deck");
+            c
+        };
+        let mut early = edge(Some(AirTuning::shaped()));
+        assert_eq!(
+            early.coyote_ms(),
+            AIR_COYOTE_MS,
+            "the leaving tick grants the armed window"
+        );
+        for _ in 0..3 {
+            early.move_and_slide([0.0, 0.0], FIXED_DT);
+        }
+        assert_eq!(early.coyote_ms(), AIR_COYOTE_MS - 3 * dt_ms);
+        early.jump(5.0);
+        assert!(
+            early.velocity_y() > 4.9,
+            "a coyote jump 3 ticks out takes off, v={}",
+            early.velocity_y()
+        );
+
+        // Eight ticks out the armed window is gone: the press buffers.
+        let mut late = edge(Some(AirTuning::shaped()));
+        for _ in 0..8 {
+            late.move_and_slide([0.0, 0.0], FIXED_DT);
+        }
+        assert_eq!(late.coyote_ms(), 0, "the armed window shut");
+        late.jump(5.0);
+        assert!(late.buffer_ms() > 0, "the press buffers instead");
+        let before = late.velocity_y();
+        late.move_and_slide([0.0, 0.0], FIXED_DT);
+        assert!(late.velocity_y() < before, "no take-off outside the window");
+
+        // Today's 150 ms window still fires at the same tick (oracle).
+        let mut legacy = edge(None);
+        for _ in 0..8 {
+            legacy.move_and_slide([0.0, 0.0], FIXED_DT);
+        }
+        assert!(legacy.coyote_ms() > 0, "150 ms is still live at 8 ticks");
+        legacy.jump(5.0);
+        assert!(legacy.velocity_y() > 4.9, "today's window fires");
+    }
+
+    #[test]
+    fn jump_hold_deadline_cuts_only_when_armed() {
+        let mut armed = flat(Some(AirTuning::shaped()));
+        armed.jump(5.0);
+        armed.move_and_slide([0.0, 0.0], FIXED_DT);
+        let rising = armed.velocity_y();
+        armed.jump_release();
+        assert!(
+            (armed.velocity_y() - rising * AIR_HOLD_CUT).abs() < 1e-6,
+            "a release inside the deadline keeps half the rise: {}",
+            armed.velocity_y()
+        );
+        let mut late = flat(Some(AirTuning::shaped()));
+        late.jump(5.0);
+        for _ in 0..AIR_JUMP_HOLD_TICKS {
+            late.move_and_slide([0.0, 0.0], FIXED_DT);
+        }
+        let past = late.velocity_y();
+        late.jump_release();
+        assert_eq!(late.velocity_y(), past, "past the deadline nothing cuts");
+        let mut off = flat(None);
+        off.jump(5.0);
+        off.move_and_slide([0.0, 0.0], FIXED_DT);
+        let plain = off.velocity_y();
+        off.jump_release();
+        assert_eq!(off.velocity_y(), plain, "unarmed ignores the release");
+    }
+
+    #[test]
+    fn air_channel_off_keeps_todays_step() {
+        // Pinned before the air channel landed: the same course tape
+        // (12 grounded ticks, a jump, 60 air ticks alternating the wish up
+        // and against it, 60 deck ticks) read these bytes today.
+        let tape = |air: Option<AirTuning>| -> Vec<(u64, [f32; 3], f32)> {
+            let mut c = course();
+            if let Some(tuning) = air {
+                c = c.with_air(tuning);
+            }
+            c.move_and_slide([0.0, 0.0], FIXED_DT);
+            for _ in 0..12 {
+                c.move_and_slide([0.15, 0.0], FIXED_DT);
+            }
+            let mut out = vec![(c.state_hash(), c.position(), c.velocity_y())];
+            c.jump(5.0);
+            for n in 0..60 {
+                let wish = if n % 10 < 5 {
+                    [0.15, 0.0]
+                } else {
+                    [-0.15, 0.0]
+                };
+                c.move_and_slide(wish, FIXED_DT);
+            }
+            out.push((c.state_hash(), c.position(), c.velocity_y()));
+            for _ in 0..60 {
+                c.move_and_slide([0.15, 0.0], FIXED_DT);
+            }
+            out.push((c.state_hash(), c.position(), c.velocity_y()));
+            out
+        };
+        let off = tape(None);
+        assert_eq!(off[0].0, 17_379_790_754_153_763_782);
+        assert_eq!(off[0].1, [-0.200_000_23, 0.700_000_05, 0.0]);
+        assert_eq!(off[1].0, 12_097_500_969_543_187_946);
+        assert_eq!(off[1].1, [-0.200_000_23, 0.713_249_56, 0.0]);
+        assert_eq!(off[1].2, -4.810_001);
+        assert_eq!(off[2].0, 5_579_706_705_276_364_177);
+        assert_eq!(off[2].1, [8.630_001, 2.0, 0.0]);
+        assert_eq!(off[2].2, 0.0);
+        assert_eq!(tape(None), off, "the same tape replays byte for byte");
+        // Arming today's flat table moves the same capsule: same positions,
+        // same speeds (its hash tail adds the armed facing and deadline).
+        let armed = tape(Some(AirTuning::default()));
+        for (a, b) in off.iter().zip(armed.iter()) {
+            assert_eq!(a.1, b.1, "armed today's table must not move the body");
+            assert_eq!(a.2, b.2, "armed today's table must not change speed");
+        }
+    }
+
+    #[test]
+    fn air_channel_shaped_tape_names_its_first_diff_tick() {
+        // The AIN6 receipt's fixed tape: 12 grounded ticks holding +x, a jump,
+        // then 120 air ticks alternating the wish with and against the line.
+        // Compare positions and vertical speeds only; the hash tail is armed
+        // from tick 0, so a hash compare would name tick 0.
+        let run = |air: Option<AirTuning>| -> Vec<([f32; 3], f32)> {
+            let mut c = course();
+            if let Some(tuning) = air {
+                c = c.with_air(tuning);
+            }
+            c.move_and_slide([0.0, 0.0], FIXED_DT);
+            for _ in 0..12 {
+                c.move_and_slide([0.15, 0.0], FIXED_DT);
+            }
+            c.jump(5.0);
+            let mut out = Vec::with_capacity(120);
+            for n in 0..120 {
+                let wish = if n % 10 < 5 {
+                    [0.15, 0.0]
+                } else {
+                    [-0.15, 0.0]
+                };
+                c.move_and_slide(wish, FIXED_DT);
+                out.push((c.position(), c.velocity_y()));
+            }
+            out
+        };
+        let off = run(None);
+        let armed = run(Some(AirTuning::shaped()));
+        let first = off
+            .iter()
+            .zip(&armed)
+            .position(|(a, b)| a.0 != b.0 || a.1 != b.1)
+            .expect("the shaped table must move the tape");
+        assert_eq!(
+            first, 5,
+            "the sixth air tick (first reversed wish) is the ramp's first difference"
+        );
     }
 
     #[test]

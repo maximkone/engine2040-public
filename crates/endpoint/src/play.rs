@@ -5,8 +5,11 @@
 //! this module owns only the job handles: poll/cancel/expiry, progress
 //! events and bounded logs. Units follow arena (meters, fixed ticks).
 //! Determinism scope: same start args give the same checkpoints; the registry
-//! is a `BTreeMap` under a monotonic id counter, with no wall clock, no
-//! threads and no hash-order iteration.
+//! is a `BTreeMap` under a monotonic id counter, with no threads and no
+//! hash-order iteration. Wall time is opt-in (`timing`): a receipt-only
+//! measurement labelled `software` (a CPU run, never a reference-GPU claim)
+//! that never enters a digest, a hash or the job state. Without the flag no
+//! clock is read and the output is byte-identical to a run without timing.
 //!
 //! Sync core: the match simulates eagerly at `start` (ticks are MCP-bounded
 //! so it stays fast) while the handle still walks the full
@@ -79,6 +82,12 @@ pub const FRAME_CAPTION_MAX_CHARS: usize = 2048;
 /// for the play module plus the receipt tests (`play_session`,
 /// `requery`, `tests/it/step20x2`).
 pub const PNG_MAGIC: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+/// Wall-time samples a session keeps for the opt-in `timing` receipt. The
+/// ring is bounded so a long-lived session never grows without limit.
+pub const TIMING_RING_CAP: usize = 256;
+/// Label on every `timing` receipt: the numbers come from a CPU run, so they
+/// are a `software` figure, never a reference-GPU claim.
+pub const TIMING_LABEL_SOFTWARE: &str = "software";
 /// Fewest fighters a match runs (the arena config check owns the same bound).
 const MIN_FIGHTERS: u8 = 2;
 
@@ -163,6 +172,9 @@ pub struct PlayRunArgs {
     pub ttl_polls: Option<u64>,
     pub job_id: Option<u64>,
     pub scene_rev: Option<u64>,
+    // Opt-in wall-time receipt (PF24): `true` carries a `timing` object on
+    // every status, absent or `false` reads no clock at all.
+    pub timing: Option<bool>,
 }
 
 /// One match checkpoint: tick id plus the state hash there.
@@ -204,6 +216,67 @@ pub struct PlayRunOutput {
     // Pin digest of the scene bytes `scene_rev` named (lowercase hex), echoed
     // on every status so a run always names the exact scene it played.
     pub scene_digest: Option<String>,
+    // Opt-in wall-time receipt: present only when the caller asked (`timing`),
+    // so a run without the flag serializes byte-identically to one before
+    // timing existed. Wall time never enters a digest or a hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<PlayTimingDto>,
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in wall time (PF24): a receipt-only measurement. Numbers come from the
+// CPU path, so the label is `software`; a missing sample answers `unknown`,
+// never a zero. Nothing here is read by the simulation, a digest or a hash.
+// Field docs are omitted on purpose: every doc line inflates the advertised
+// schemas, and the tool-list discovery budget is a gate.
+// ---------------------------------------------------------------------------
+
+/// Wall-time receipt: step milliseconds at p50 and p99 over the session's
+/// bounded ring, labelled `software`. Units are milliseconds and samples.
+/// No errors: an empty ring answers `"unknown"`. Budget is
+/// [`TIMING_RING_CAP`] samples.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct PlayTimingDto {
+    pub label: String,
+    // Step wall p50/p99 in milliseconds, or the word `unknown` with no sample.
+    pub p50_ms: StepMillis,
+    pub p99_ms: StepMillis,
+    // Samples behind the numbers, `0..=TIMING_RING_CAP`.
+    pub samples: usize,
+}
+
+impl PlayTimingDto {
+    /// Zero-sample report: both figures answer `unknown`, never zero. A timed
+    /// poll of a job whose start did not measure answers this.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self {
+            label: TIMING_LABEL_SOFTWARE.to_owned(),
+            p50_ms: StepMillis::Missing(NoSample::Unknown),
+            p99_ms: StepMillis::Missing(NoSample::Unknown),
+            samples: 0,
+        }
+    }
+}
+
+/// One wall-time figure: milliseconds, or `"unknown"` when the ring held no
+/// sample (a run of zero steps). Never a zero for a missing sample.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde", untagged)]
+#[schemars(crate = "rmcp::schemars")]
+pub enum StepMillis {
+    Measured(f64),
+    Missing(NoSample),
+}
+
+/// The one word a missing sample answers with.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde", rename_all = "lowercase")]
+#[schemars(crate = "rmcp::schemars")]
+pub enum NoSample {
+    Unknown,
 }
 
 /// Capture request: optional receipt width and height in pixels, plus the
@@ -282,6 +355,9 @@ struct PlayJob {
     truncated_logs: bool,
     polls_used: u64,
     ttl_polls: u64,
+    // Measured at `start` only when the caller asked for `timing`; a job that
+    // measured nothing answers `unknown` on a later timed poll.
+    timing: Option<PlayTimingDto>,
 }
 
 /// The scene a started match plays: its world plus the pin digest of the scene
@@ -308,10 +384,12 @@ pub type RunMatch<'a> = dyn Fn(&ArenaConfig, &FighterTape, Option<&MatchWorld>) 
     + 'a;
 
 /// Session job table: monotonic ids over a `BTreeMap` (stable order, no
-/// wall clock). Bounded at [`MAX_JOBS`] live entries.
+/// wall clock in the ids). Bounded at [`MAX_JOBS`] live entries.
 pub struct PlayJobs {
     next_id: u64,
     jobs: BTreeMap<u64, PlayJob>,
+    /// Bounded ring of start wall times: read only when `timing` is asked.
+    timing: play_session::TimingRing,
 }
 
 impl PlayJobs {
@@ -320,6 +398,7 @@ impl PlayJobs {
         Self {
             next_id: 1,
             jobs: BTreeMap::new(),
+            timing: play_session::TimingRing::default(),
         }
     }
 
@@ -363,10 +442,11 @@ impl PlayJobs {
         runner: Option<&MatchRunner<'_>>,
     ) -> Result<PlayRunOutput, McpToolError> {
         let action = PlayAction::parse(&args.action)?;
+        let wants_timing = args.timing.unwrap_or(false);
         match action {
             PlayAction::Start => self.start(args, world, runner),
-            PlayAction::Poll => self.poll(action.job_id(args)?),
-            PlayAction::Cancel => self.cancel(action.job_id(args)?),
+            PlayAction::Poll => self.poll(action.job_id(args)?, wants_timing),
+            PlayAction::Cancel => self.cancel(action.job_id(args)?, wants_timing),
         }
     }
 
@@ -474,10 +554,15 @@ impl PlayJobs {
             }
             (None, _) => (None, None),
         };
-        let checkpoints = match (runner, &world) {
-            (Some(runner), world) => (runner.run)(&config, &tape, world.as_ref())?,
-            (None, Some(world)) => run_spine(&config, &tape, world),
-            (None, None) => run(&config, &tape),
+        let wants_timing = args.timing.unwrap_or(false);
+        let (checkpoints, timing) = if wants_timing {
+            let clock = std::time::Instant::now();
+            let points = simulate(&config, &tape, runner, world.as_ref())?;
+            self.timing
+                .record_ms(clock.elapsed().as_secs_f64() * 1000.0);
+            (points, Some(self.timing.report()))
+        } else {
+            (simulate(&config, &tape, runner, world.as_ref())?, None)
         };
         if checkpoints.is_empty() {
             return Err(McpToolError::new(
@@ -501,6 +586,7 @@ impl PlayJobs {
             truncated_logs: false,
             polls_used: 0,
             ttl_polls: ttl,
+            timing,
         };
         push_log(
             &mut job,
@@ -526,21 +612,27 @@ impl PlayJobs {
         }
         self.jobs.insert(id, job);
         let job = self.jobs.get(&id).expect("inserted job reads back");
-        Ok(render_output(id, job, vec![format!("job {id} staged")]))
+        Ok(render_output(
+            id,
+            job,
+            vec![format!("job {id} staged")],
+            requested_timing(job, wants_timing),
+        ))
     }
 
     /// Advance one running handle: first poll reports progress, second
     /// completes; terminal handles replay their status idempotently.
-    fn poll(&mut self, id: u64) -> Result<PlayRunOutput, McpToolError> {
+    fn poll(&mut self, id: u64, wants_timing: bool) -> Result<PlayRunOutput, McpToolError> {
         let job = self.jobs.get_mut(&id).ok_or_else(|| {
             McpToolError::new(
                 "unknown_job",
                 format!("job {id} is unknown; start a job with action=`start`"),
             )
         })?;
+        let timing = requested_timing(job, wants_timing);
         match job.status {
             JobStatus::Completed | JobStatus::Cancelled | JobStatus::Expired => {
-                Ok(render_output(id, job, Vec::new()))
+                Ok(render_output(id, job, Vec::new(), timing))
             }
             JobStatus::Running => {
                 if job.polls_used >= job.ttl_polls {
@@ -549,7 +641,7 @@ impl PlayJobs {
                     let ttl = job.ttl_polls;
                     push_log(job, format!("job {id} expired after {ttl} polls"));
                     let job = self.jobs.get(&id).expect("expired job reads back");
-                    return Ok(render_output(id, job, Vec::new()));
+                    return Ok(render_output(id, job, Vec::new(), timing));
                 }
                 job.polls_used += 1;
                 if job.polls_used == 1 {
@@ -570,6 +662,7 @@ impl PlayJobs {
                             format!("simulating ticks 0..{ticks}"),
                             format!("halfway checkpoint tick {mid} hash {mid_hash:016x}"),
                         ],
+                        timing,
                     ));
                 }
                 let done = job.checkpoints.len();
@@ -585,27 +678,28 @@ impl PlayJobs {
                     },
                 );
                 let job = self.jobs.get(&id).expect("completed job reads back");
-                Ok(render_output(id, job, Vec::new()))
+                Ok(render_output(id, job, Vec::new(), timing))
             }
         }
     }
 
     /// Stop a running handle and drop its result; terminal handles refuse
     /// with the legal next step attached.
-    fn cancel(&mut self, id: u64) -> Result<PlayRunOutput, McpToolError> {
+    fn cancel(&mut self, id: u64, wants_timing: bool) -> Result<PlayRunOutput, McpToolError> {
         let job = self.jobs.get_mut(&id).ok_or_else(|| {
             McpToolError::new(
                 "unknown_job",
                 format!("job {id} is unknown; start a job with action=`start`"),
             )
         })?;
+        let timing = requested_timing(job, wants_timing);
         match job.status {
             JobStatus::Running => {
                 job.status = JobStatus::Cancelled;
                 job.checkpoints = Vec::new();
                 push_log(job, format!("job {id} cancelled; result dropped"));
                 let job = self.jobs.get(&id).expect("cancelled job reads back");
-                Ok(render_output(id, job, Vec::new()))
+                Ok(render_output(id, job, Vec::new(), timing))
             }
             JobStatus::Completed => Err(McpToolError::new(
                 "job_already_done",
@@ -625,6 +719,21 @@ impl PlayJobs {
 impl Default for PlayJobs {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Simulate one validated match: the host runner, the spine step around a
+/// scene world, or the plain arena run.
+fn simulate(
+    config: &ArenaConfig,
+    tape: &FighterTape,
+    runner: Option<&MatchRunner<'_>>,
+    world: Option<&MatchWorld>,
+) -> Result<Vec<Checkpoint>, McpToolError> {
+    match (runner, world) {
+        (Some(runner), world) => (runner.run)(config, tape, world),
+        (None, Some(world)) => Ok(run_spine(config, tape, world)),
+        (None, None) => Ok(run(config, tape)),
     }
 }
 
@@ -765,8 +874,14 @@ fn push_log(job: &mut PlayJob, line: String) {
 }
 
 /// Render one tool output for a stored job; progress events ride on running
-/// polls, the terminal line on finished ones.
-fn render_output(id: u64, job: &PlayJob, events: Vec<String>) -> PlayRunOutput {
+/// polls, the terminal line on finished ones. `timing` is the opt-in wall-time
+/// receipt this call asked for, `None` keeps the bytes as before PF24.
+fn render_output(
+    id: u64,
+    job: &PlayJob,
+    events: Vec<String>,
+    timing: Option<PlayTimingDto>,
+) -> PlayRunOutput {
     let (progress, events, checkpoints, final_hash) = match job.status {
         JobStatus::Running => {
             let progress = if job.polls_used == 0 { 0.0 } else { 0.5 };
@@ -819,7 +934,14 @@ fn render_output(id: u64, job: &PlayJob, events: Vec<String>) -> PlayRunOutput {
         half_extent_m: job.half_extent_m,
         scene_rev: job.scene_rev,
         scene_digest: job.scene_digest.clone(),
+        timing,
     }
+}
+
+/// The timing receipt this call asked for: the job's own measurement when its
+/// start made one, else an `unknown` object (a run of zero measured steps).
+fn requested_timing(job: &PlayJob, wants: bool) -> Option<PlayTimingDto> {
+    wants.then(|| job.timing.clone().unwrap_or_else(PlayTimingDto::unknown))
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,6 +1388,7 @@ mod tests {
             ttl_polls: None,
             job_id: None,
             scene_rev: Some(1),
+            timing: None,
         }
     }
 
@@ -1327,6 +1450,7 @@ mod tests {
             ttl_polls: None,
             job_id,
             scene_rev: None,
+            timing: None,
         }
     }
 
@@ -1896,6 +2020,7 @@ mod tests {
             inputs: Some(Vec::new()),
             width: None,
             height: None,
+            timing: None,
         }
     }
 
@@ -2123,6 +2248,7 @@ mod tests {
             inputs: Some(inputs),
             width: None,
             height: None,
+            timing: None,
         };
         let first = play_session::play_step_with(&args, None).expect("seed95 serves");
         let second = play_session::play_step_with(&args, None).expect("seed95 replays");
@@ -2143,11 +2269,316 @@ mod tests {
             inputs: None,
             width: None,
             height: None,
+            timing: None,
         };
         let no_jab = play_session::play_step_with(&plain, None).expect("no-jab serves");
         assert_ne!(
             first.png_bytes, no_jab.png_bytes,
             "kp01 jab must move the capture (flash/legend/dots)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PF24: opt-in wall time. The pre-change output shapes below are the
+    // byte-equality oracle: with `timing` off the new output must serialize to
+    // exactly these bytes. Wall time never enters a digest or a hash.
+    // -----------------------------------------------------------------------
+
+    /// `play.run` output before PF24 (same field order and types).
+    #[derive(Serialize)]
+    #[serde(crate = "rmcp::serde")]
+    struct LegacyRunOutput {
+        job_id: u64,
+        status: String,
+        progress: f32,
+        events: Vec<String>,
+        logs: Vec<String>,
+        truncated_logs: bool,
+        tick_count: u32,
+        final_hash: Option<u64>,
+        checkpoints: Vec<CheckpointDto>,
+        seed: u64,
+        half_extent_m: f32,
+        scene_rev: Option<u64>,
+        scene_digest: Option<String>,
+    }
+
+    impl LegacyRunOutput {
+        fn of(out: &PlayRunOutput) -> Self {
+            Self {
+                job_id: out.job_id,
+                status: out.status.clone(),
+                progress: out.progress,
+                events: out.events.clone(),
+                logs: out.logs.clone(),
+                truncated_logs: out.truncated_logs,
+                tick_count: out.tick_count,
+                final_hash: out.final_hash,
+                checkpoints: out.checkpoints.clone(),
+                seed: out.seed,
+                half_extent_m: out.half_extent_m,
+                scene_rev: out.scene_rev,
+                scene_digest: out.scene_digest.clone(),
+            }
+        }
+    }
+
+    /// `play.step` output before PF24 (same field order, same `dec_u64` wire).
+    #[derive(Serialize)]
+    #[serde(crate = "rmcp::serde")]
+    struct LegacyStepOutput {
+        tick: u32,
+        #[serde(with = "play_session::dec_u64")]
+        digest: u64,
+        participants: u8,
+        inputs_applied: usize,
+        summary: String,
+        manifest: CaptureManifestDto,
+        png_bytes: Vec<u8>,
+        fighters: Vec<play_session::ActorNumbers>,
+        events: Vec<play_session::BoutEvent>,
+    }
+
+    impl LegacyStepOutput {
+        fn of(out: &play_session::PlayStepOutput) -> Self {
+            Self {
+                tick: out.tick,
+                digest: out.digest,
+                participants: out.participants,
+                inputs_applied: out.inputs_applied,
+                summary: out.summary.clone(),
+                manifest: out.manifest.clone(),
+                png_bytes: out.png_bytes.clone(),
+                fighters: out.fighters.clone(),
+                events: out.events.clone(),
+            }
+        }
+    }
+
+    /// One untimed `play.run` job from the job table alone (no scene pin).
+    fn untimed_run(jobs: &mut PlayJobs, ticks: u32) -> Vec<PlayRunOutput> {
+        let mut start = start_args(ticks);
+        start.scene_rev = None;
+        let poll = run_action(
+            "poll",
+            Some(jobs.play_run(&start).expect("start runs").job_id),
+        );
+        vec![
+            jobs.play_run(&poll).expect("progress poll"),
+            jobs.play_run(&poll).expect("completing poll"),
+        ]
+    }
+
+    #[test]
+    fn play_timing_off_serializes_the_old_bytes() {
+        // `play.run`: no flag, explicit `false`, and the poll path all match
+        // the pre-change shape byte-for-byte.
+        let mut jobs = PlayJobs::new();
+        let started = {
+            let mut args = start_args(32);
+            args.scene_rev = None;
+            jobs.play_run(&args).expect("start runs")
+        };
+        assert_eq!(
+            rmcp::serde_json::to_string(&started).expect("start serializes"),
+            rmcp::serde_json::to_string(&LegacyRunOutput::of(&started)).expect("oracle serializes")
+        );
+        assert!(!rmcp::serde_json::to_string(&started)
+            .expect("json")
+            .contains("timing"));
+        let id = started.job_id;
+        let mut off = run_action("poll", Some(id));
+        off.timing = Some(false);
+        let done = jobs.play_run(&off).expect("poll runs");
+        assert_eq!(
+            rmcp::serde_json::to_string(&done).expect("poll serializes"),
+            rmcp::serde_json::to_string(&LegacyRunOutput::of(&done)).expect("oracle serializes")
+        );
+        assert!(!rmcp::serde_json::to_string(&done)
+            .expect("json")
+            .contains("timing"));
+
+        // `play.step`: the same comparison against the step oracle.
+        let step = play_session::play_step_with(&step_args(95, 20.0, Some(120)), None)
+            .expect("step serves");
+        assert_eq!(
+            rmcp::serde_json::to_string(&step).expect("step serializes"),
+            rmcp::serde_json::to_string(&LegacyStepOutput::of(&step)).expect("oracle serializes")
+        );
+        assert!(!rmcp::serde_json::to_string(&step)
+            .expect("json")
+            .contains("timing"));
+    }
+
+    #[test]
+    fn play_timing_on_carries_p50_p99_and_software_label() {
+        let mut jobs = PlayJobs::new();
+        let mut args = start_args(64);
+        args.scene_rev = None;
+        args.timing = Some(true);
+        let started = jobs.play_run(&args).expect("timed start runs");
+        let timing = started.timing.clone().expect("timed start carries timing");
+        assert_eq!(timing.label, TIMING_LABEL_SOFTWARE);
+        assert_eq!(timing.samples, 1, "one measured start");
+        match (timing.p50_ms, timing.p99_ms) {
+            (StepMillis::Measured(p50), StepMillis::Measured(p99)) => {
+                assert!(p50 >= 0.0, "p50 {p50} is a wall figure");
+                assert!(p99 >= p50, "p99 {p99} sits above p50 {p50}");
+            }
+            other => panic!("a measured ring answers numbers, got {other:?}"),
+        }
+        let json = rmcp::serde_json::to_value(&started).expect("start serializes");
+        assert_eq!(json["timing"]["label"], "software");
+        assert!(
+            json["timing"]["p50_ms"].is_number(),
+            "measured p50 is a number"
+        );
+        assert!(
+            json["timing"]["p99_ms"].is_number(),
+            "measured p99 is a number"
+        );
+        assert_eq!(json["timing"]["samples"], 1);
+
+        // `play.step` over a live session: two timed calls give two samples.
+        let server = server();
+        let mut step = step_args(95, 20.0, Some(120));
+        step.timing = Some(true);
+        let first =
+            play_session::PlayStepTool::invoke(&server, step.clone()).expect("timed step serves");
+        let second =
+            play_session::PlayStepTool::invoke(&server, step).expect("timed replay serves");
+        let first_timing = first.timing.clone().expect("step carries timing");
+        let second_timing = second.timing.clone().expect("replay carries timing");
+        assert_eq!(first_timing.label, "software");
+        assert_eq!(first_timing.samples, 1);
+        assert_eq!(second_timing.samples, 2, "the ring keeps both step times");
+        assert!(
+            matches!(second_timing.p50_ms, StepMillis::Measured(_)),
+            "two samples answer numbers"
+        );
+        // The advertised schema renders (the untagged millisecond form).
+        let schema = rmcp::serde_json::to_value(rmcp::schemars::schema_for!(PlayTimingDto))
+            .expect("timing schema serializes");
+        assert!(schema["properties"]["label"].is_object());
+    }
+
+    #[test]
+    fn play_timing_zero_steps_answers_unknown() {
+        // A ring with no sample answers `unknown`, never zero.
+        let empty = play_session::TimingRing::default().report();
+        assert_eq!(empty.samples, 0);
+        assert_eq!(empty.label, TIMING_LABEL_SOFTWARE);
+        assert_eq!(empty.p50_ms, StepMillis::Missing(NoSample::Unknown));
+        assert_eq!(empty.p99_ms, StepMillis::Missing(NoSample::Unknown));
+
+        // A timed poll of a job whose start measured nothing: the same answer
+        // on the wire, as the word `unknown`.
+        let mut jobs = PlayJobs::new();
+        let timed = untimed_run(&mut jobs, 32);
+        let id = {
+            let mut args = start_args(32);
+            args.scene_rev = None;
+            jobs.play_run(&args).expect("start runs").job_id
+        };
+        assert!(timed[1].timing.is_none(), "an untimed job stores nothing");
+        let mut poll = run_action("poll", Some(id));
+        poll.timing = Some(true);
+        let polled = jobs.play_run(&poll).expect("timed poll runs");
+        let timing = polled
+            .timing
+            .clone()
+            .expect("timed poll answers a timing object");
+        assert_eq!(timing.samples, 0);
+        assert_eq!(timing.p50_ms, StepMillis::Missing(NoSample::Unknown));
+        let json = rmcp::serde_json::to_value(&polled).expect("poll serializes");
+        assert_eq!(json["timing"]["p50_ms"], "unknown");
+        assert_eq!(json["timing"]["p99_ms"], "unknown");
+        assert_eq!(json["timing"]["samples"], 0);
+    }
+
+    #[test]
+    fn play_timing_ring_is_bounded_and_nearest_rank() {
+        let mut ring = play_session::TimingRing::default();
+        for ms in 1..=100 {
+            ring.record_ms(f64::from(ms));
+        }
+        let report = ring.report();
+        assert_eq!(report.samples, 100);
+        assert_eq!(report.p50_ms, StepMillis::Measured(50.0));
+        assert_eq!(report.p99_ms, StepMillis::Measured(99.0));
+
+        // The ring drops the oldest sample once full: 300 recorded values keep
+        // the last 256 (45..=300), so the ranks shift with them.
+        let mut bounded = play_session::TimingRing::default();
+        for ms in 1..=300 {
+            bounded.record_ms(f64::from(ms));
+        }
+        let report = bounded.report();
+        assert_eq!(report.samples, TIMING_RING_CAP);
+        assert_eq!(report.p50_ms, StepMillis::Measured(172.0));
+        assert_eq!(report.p99_ms, StepMillis::Measured(298.0));
+
+        // The same ring always answers the same figure.
+        assert_eq!(bounded.report(), report);
+    }
+
+    #[test]
+    fn play_timing_receipt_digest_is_equal_on_and_off() {
+        // `play.run`: the same composition with and without the flag hashes
+        // and logs identically; only the timing object differs.
+        let mut off = PlayJobs::new();
+        let mut on = PlayJobs::new();
+        let mut args = start_args(32);
+        args.scene_rev = None;
+        let plain = untimed_run(&mut off, 32);
+        let mut args_on = args.clone();
+        args_on.timing = Some(true);
+        let started = on.play_run(&args_on).expect("timed start runs");
+        let id = started.job_id;
+        let mut poll = run_action("poll", Some(id));
+        poll.timing = Some(true);
+        let progress = on.play_run(&poll).expect("timed progress poll runs");
+        let done = on.play_run(&poll).expect("timed completing poll runs");
+        assert_eq!(plain[1].final_hash, done.final_hash, "final hash is equal");
+        assert_eq!(
+            plain[1].checkpoints, done.checkpoints,
+            "checkpoints are equal"
+        );
+        assert_eq!(plain[1].logs, done.logs, "logs carry no wall time");
+        assert_eq!(plain[0].logs, progress.logs);
+        assert_eq!(
+            done.final_hash,
+            done.checkpoints.last().map(|point| point.hash)
+        );
+        assert!(done.timing.is_some(), "the flag adds the object");
+
+        // `play.step`: digest, pixels, fighters and summary are equal.
+        let plain_step = play_session::play_step_with(&step_args(95, 20.0, Some(120)), None)
+            .expect("step serves");
+        let timed_step = play_session::play_step_with(
+            &{
+                let mut args = step_args(95, 20.0, Some(120));
+                args.timing = Some(true);
+                args
+            },
+            None,
+        )
+        .expect("timed step serves");
+        assert_eq!(plain_step.digest, timed_step.digest, "step digest is equal");
+        assert_ne!(plain_step.digest, 0);
+        assert_eq!(plain_step.png_bytes, timed_step.png_bytes);
+        assert_eq!(plain_step.fighters, timed_step.fighters);
+        assert_eq!(plain_step.summary, timed_step.summary);
+        let mut timed_json = rmcp::serde_json::to_value(&timed_step).expect("json");
+        assert!(
+            timed_json.get("timing").is_some(),
+            "the flag adds the object"
+        );
+        timed_json.as_object_mut().expect("object").remove("timing");
+        assert_eq!(
+            rmcp::serde_json::to_value(&plain_step).expect("json"),
+            timed_json,
+            "the timed bytes minus `timing` equal the plain bytes"
         );
     }
 }

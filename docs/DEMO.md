@@ -45,6 +45,11 @@ Not exposed: a quality tier flag (tiers exist on the web build only; native has 
 - Ragdoll: a knocked-out fighter falls as a loose body, then gets up when the sim says so.
 - HUD: one red hp bar per fighter, bottom left, top bar is you (slot 0). A bar empties as hp drops. There is no text on screen; the console prints `arena TITLE` / `arena RESULT P0|P1|draw ticks=a/b` lines.
 - Receipt lines (only printed when you run with `--frames N --exit`): `arena view:` (`ragdolls=` more than 0 after a knockdown, `sunk_cm_max`, `pops`), `arena break:` (`breaks=`, `debris=`), `arena sim:` (the frozen sim hash). Meanings: `skills/arena-capture-and-view-line/SKILL.md`.
+- A bad run warns itself: when a run breaks a product floor (non-finite vertices, a skin error part, the camera inside a body or under the sand, a body sunk past 3 cm), the arena prints one `arena WARN: <metric> value=<v> floor=<f>` line right after `arena view:`. A clean run stays silent; the floors are pinned to `tools/product-bar.json`.
+
+**An agent plays the live window.** `--agent-seat PORT` hands slot 0 to one loopback client: the client sends one validated fighter input per fixed tick and reads the match hash back, so an agent plays the same build a person does. The seat owns slot 0 (the boot line says so) and starts the bout like `--play` (a seat has no Enter key), and `--staged-fight`, `--spear-demo`, `--tape` and `--host/--join` refuse to mix with it. Run:
+`target\release\arena.exe --scene arena --fighters 2 --frames 150 --exit --agent-seat 7117`
+One line each way, `\n` terminated: the client sends `input <tick> <mx> <mz> <facing> <buttons>` (`buttons` is the legal bit set, `0..=23`; `ping` is ignored); the window sends `tick <tick> <hash:016x>` after every fixed tick and `view <arena view: ...>` every 60 ticks. The run ends with `arena seat: port=... clients=1 inputs=... late=0 held=0 invalid=0 dropped=0`. Two runs with the same inputs read the same hash at the same tick (2026-10-20: tick 20 `dcc10f28eaabb591` twice; the runs presented 25 and 45 ticks, so the final `arena sim:` hashes differ by design). The door's `seat.*` verbs are next (row AN2).
 
 Scripted run with screenshots (no hands needed):
 `target\release\arena.exe --scene arena --fighters 4 --staged-fight --frames 700 --exit --capture-dir target/clips/demo --capture-every 70 --fps 30 --sha abcdef1`

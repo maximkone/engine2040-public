@@ -37,6 +37,9 @@ pub type ParticipantInput = FighterInput;
 /// genre-neutral code never names a fighter type; identical layout, zero-cost.
 pub type ParticipantId = FighterId;
 
+/// Slot zero as a neutral id: the live agent seat authors slot 0 (AIN2).
+pub const PARTICIPANT_ZERO: ParticipantId = FighterId(0);
+
 /// Neutral alias for [`FighterError`]: participant contract failures.
 /// Cross-genre consumers use this name; identical layout, zero-cost.
 pub type ParticipantError = FighterError;

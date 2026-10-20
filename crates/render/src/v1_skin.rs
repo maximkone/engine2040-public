@@ -45,6 +45,10 @@ pub const WEIGHT_SUM_EPS: f32 = 1e-3;
 pub const NORMAL_LEN_EPS: f32 = 1e-3;
 /// Visible error material: unlit magenta, never a silent wrong pose.
 pub const ERROR_MAGENTA: [f32; 3] = [1.0, 0.0, 1.0];
+/// The tangent the skinned stage used before the tangent attribute landed:
+/// `+X` with positive handedness. It is the fallback for a mesh with no
+/// tangent row and the reference frame of the EG12 pixel proof.
+pub const DUMMY_TANGENT: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
 /// Fixed 8-color joint palette for [`joint_heatmap`]; joint `j` maps to
 /// `PALETTE[j % 8]` by dominant influence.
@@ -274,6 +278,10 @@ pub struct SkinnedFrame {
     pub positions: Vec<[f32; 3]>,
     /// Posed unit normals.
     pub normals: Vec<[f32; 3]>,
+    /// Posed tangents with handedness in `w`: the CPU mirror of the
+    /// skinned vertex stage, so a normal map maps through the same frame
+    /// the GPU builds.
+    pub tangents: Vec<[f32; 4]>,
     /// True when the magenta error material must shade this frame.
     pub used_error_material: bool,
     /// Diagnostic entries (missing skin, degenerate normals).
@@ -459,6 +467,7 @@ impl SkinPipeline {
             return Ok(SkinnedFrame {
                 positions: mesh.positions.clone(),
                 normals: mesh.normals.clone(),
+                tangents: mesh.tangents.clone(),
                 used_error_material: true,
                 diagnostics: vec![missing_skin], // alloc-ok: offscreen capture staging
             });
@@ -487,6 +496,7 @@ impl SkinPipeline {
         let mut scene = base.clone();
         scene.mesh.positions.clone_from(&frame.positions);
         scene.mesh.normals.clone_from(&frame.normals);
+        scene.mesh.tangents.clone_from(&frame.tangents);
         if frame.used_error_material {
             scene.material = PbrMaterial {
                 base_color: ERROR_MAGENTA,
@@ -575,12 +585,38 @@ fn blend_normal(
     Some([out[0] / l, out[1] / l, out[2] / l])
 }
 
+/// Blend one tangent by the rotational part only, then normalize. The
+/// handedness in `w` is carried through unchanged. Returns `None` when the
+/// blend is degenerate (the caller falls back to the dummy tangent).
+fn blend_tangent(
+    t: [f32; 4],
+    row_j: &[u16; 4],
+    row_w: &[f32; 4],
+    mats: &[[[f32; 4]; 4]],
+) -> Option<[f32; 4]> {
+    let mut out = [0.0f32; 3];
+    for k in 0..MAX_INFLUENCES {
+        let m = &mats[row_j[k] as usize];
+        let w = row_w[k];
+        out[0] += w * (t[0] * m[0][0] + t[1] * m[1][0] + t[2] * m[2][0]);
+        out[1] += w * (t[0] * m[0][1] + t[1] * m[1][1] + t[2] * m[2][1]);
+        out[2] += w * (t[0] * m[0][2] + t[1] * m[1][2] + t[2] * m[2][2]);
+    }
+    let l2 = out[0] * out[0] + out[1] * out[1] + out[2] * out[2];
+    if l2 < 1e-12 {
+        return None;
+    }
+    let l = l2.sqrt();
+    Some([out[0] / l, out[1] / l, out[2] / l, t[3]])
+}
+
 /// Pose every vertex of `mesh` with validated inputs: fixed order, float
 /// math only, bit-identical per input. Degenerate blended normals fall back
 /// to `+Y` with a diagnostic entry (flagged, never silent).
 fn skin_mesh(mesh: &MeshData, skin: &SkinWeights, uniform: &SkinningUniform) -> SkinnedFrame {
     let mut positions = Vec::with_capacity(mesh.positions.len());
     let mut normals = Vec::with_capacity(mesh.normals.len());
+    let mut tangents = Vec::with_capacity(mesh.positions.len());
     let mut diagnostics = Vec::new();
     for (vertex, ((p, n), (row_j, row_w))) in mesh
         .positions
@@ -600,10 +636,17 @@ fn skin_mesh(mesh: &MeshData, skin: &SkinWeights, uniform: &SkinningUniform) -> 
                 });
             }
         }
+        // The tangent rides the same joints as the normal, so the frame
+        // stays orthogonal under the pose.
+        let bind_tangent = mesh.tangents.get(vertex).copied().unwrap_or(DUMMY_TANGENT);
+        tangents.push(
+            blend_tangent(bind_tangent, row_j, row_w, &uniform.matrices).unwrap_or(DUMMY_TANGENT),
+        );
     }
     SkinnedFrame {
         positions,
         normals,
+        tangents,
         used_error_material: false,
         diagnostics,
     }
@@ -685,6 +728,11 @@ pub enum GpuSkinError {
     Skin(SkinError),
     /// Scene/capture-side failure.
     Capture(CaptureError),
+    /// The normal-map seam got a texel count the map cannot hold.
+    BadNormalMap {
+        /// Texel count the caller passed.
+        got: usize,
+    },
 }
 
 #[cfg(feature = "window")]
@@ -697,6 +745,9 @@ impl fmt::Display for GpuSkinError {
             Self::Readback(e) => write!(f, "gpu skin readback: {e}"),
             Self::Skin(e) => write!(f, "gpu skin input: {e}"),
             Self::Capture(e) => write!(f, "gpu skin capture: {e}"),
+            Self::BadNormalMap { got } => {
+                write!(f, "gpu skin normal map holds {got} texels, expected 16")
+            }
         }
     }
 }
@@ -704,10 +755,18 @@ impl fmt::Display for GpuSkinError {
 #[cfg(feature = "window")]
 impl std::error::Error for GpuSkinError {}
 
-/// Interleaved skinned vertex stride: pos(3) + normal(3) + uv(2) f32 plus
-/// joints (4xu32) plus weights (4xf32): 32 + 16 + 16 = 64 bytes.
+/// Interleaved skinned vertex stride: pos(3) + normal(3) + uv(2) f32, the
+/// tangent (4 f32, handedness in w) plus joints (4xu32) plus weights
+/// (4xf32): 32 + 16 + 16 + 16 = 80 bytes.
 #[cfg(feature = "window")]
-const SKINNED_VERTEX_STRIDE: u64 = 64;
+const SKINNED_VERTEX_STRIDE: u64 = 80;
+/// Byte offset of the tangent inside one skinned vertex.
+#[cfg(feature = "window")]
+const SKINNED_TANGENT_OFFSET: u64 = 32;
+/// Edge of the normal map the skinned capture binds at 17: a 4x4 canvas
+/// whose texels are the tangram of the EG12 pixel proof.
+#[cfg(feature = "window")]
+const NORMAL_MAP_DIM: u32 = 4;
 /// Storage buffer holds exactly [`MAX_GPU_JOINTS`] column-major matrices.
 #[cfg(feature = "window")]
 const SKIN_STORAGE_BYTES: u64 = MAX_GPU_JOINTS as u64 * 64;
@@ -729,7 +788,8 @@ pub struct GpuSkinned {
     ibl_brdf: wgpu::Texture,
     ibl_sh_buf: wgpu::Buffer,
     ibl_sampler: wgpu::Sampler,
-    /// Neutral 1x1 normal map bound at 17; keeps geometric normals.
+    /// 4x4 normal map bound at 17; every texel starts neutral, so the
+    /// capture keeps the geometric normal until a tangram is written in.
     normal_map: wgpu::Texture,
     /// White fallback ORM (occlusion 1, roughness 1, metallic 1) for the
     /// skinned capture layout; a real ORM map binds here later (EG12).
@@ -785,8 +845,8 @@ impl GpuSkinned {
         let normal_map = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("r3-normal-fallback"),
             size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
+                width: NORMAL_MAP_DIM,
+                height: NORMAL_MAP_DIM,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -796,6 +856,13 @@ impl GpuSkinned {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        // Every texel starts neutral (128,128,255,255 decodes to the
+        // tangent-space +Z), so the capture keeps the geometric normal until
+        // a tangram is written in.
+        let mut neutral = Vec::with_capacity(NORMAL_MAP_DIM as usize * NORMAL_MAP_DIM as usize * 4);
+        for _ in 0..NORMAL_MAP_DIM * NORMAL_MAP_DIM {
+            neutral.extend_from_slice(&[128u8, 128, 255, 255]);
+        }
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &normal_map,
@@ -803,15 +870,15 @@ impl GpuSkinned {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &[128u8, 128, 255, 255],
+            &neutral,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: Some(1),
+                bytes_per_row: Some(NORMAL_MAP_DIM * 4),
+                rows_per_image: Some(NORMAL_MAP_DIM),
             },
             wgpu::Extent3d {
-                width: 1,
-                height: 1,
+                width: NORMAL_MAP_DIM,
+                height: NORMAL_MAP_DIM,
                 depth_or_array_layers: 1,
             },
         );
@@ -972,13 +1039,19 @@ impl GpuSkinned {
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Uint32x4,
-                            offset: 32,
+                            offset: 48,
                             shader_location: 3,
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Float32x4,
-                            offset: 48,
+                            offset: 64,
                             shader_location: 4,
+                        },
+                        // EG12 slice c: the tangent with handedness in w.
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: SKINNED_TANGENT_OFFSET,
+                            shader_location: 5,
                         },
                     ],
                 })],
@@ -1033,6 +1106,65 @@ impl GpuSkinned {
         &self.adapter_driver
     }
 
+    /// Replace the neutral fallback ORM texel: `[occlusion, roughness,
+    /// metallic]` in `0..=255`. Debug/test seam for the EG12 pixel proof.
+    pub fn set_orm_texel(&self, orm: [u8; 3]) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.orm_map,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[orm[0], orm[1], orm[2], 255],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Write the normal map the capture samples at binding 17: a 4x4
+    /// tangram of tangent-space normals, row-major, one RGBA texel each.
+    /// The texel count must match the map (16), so a typo never leaves a
+    /// half-written map behind. Debug/test seam for the EG12 pixel proof.
+    pub fn set_normal_texels(&self, texels: &[[u8; 4]]) -> Result<(), GpuSkinError> {
+        let want = (NORMAL_MAP_DIM * NORMAL_MAP_DIM) as usize;
+        if texels.len() != want {
+            return Err(GpuSkinError::BadNormalMap { got: texels.len() });
+        }
+        let mut bytes = Vec::with_capacity(want * 4);
+        for texel in texels {
+            bytes.extend_from_slice(texel);
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.normal_map,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(NORMAL_MAP_DIM * 4),
+                rows_per_image: Some(NORMAL_MAP_DIM),
+            },
+            wgpu::Extent3d {
+                width: NORMAL_MAP_DIM,
+                height: NORMAL_MAP_DIM,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
+    }
+
     /// Render `scene` offscreen at `width` x `height` with on-device
     /// skinning: `skin = None` shades the mesh unlit magenta (the visible
     /// missing-skin path) and still reports zero validation errors. A
@@ -1043,6 +1175,24 @@ impl GpuSkinned {
         scene: &Scene,
         skin: Option<&SkinWeights>,
         uniform: &SkinningUniform,
+        width: u32,
+        height: u32,
+    ) -> Result<(Vec<u8>, Manifest), GpuSkinError> {
+        self.render_capture_tangents(scene, skin, uniform, None, width, height)
+    }
+
+    /// The same capture with an explicit tangent set. `None` uses the mesh
+    /// tangents (the real frame); `Some(rows)` writes those rows into the
+    /// vertex buffer instead, one row per vertex, and a short set falls back
+    /// to [`DUMMY_TANGENT`]. The EG12 pixel proof renders the same mesh
+    /// twice, once with the mesh tangents and once with the old dummy
+    /// frame, and compares the two frames on the device.
+    pub fn render_capture_tangents(
+        &self,
+        scene: &Scene,
+        skin: Option<&SkinWeights>,
+        uniform: &SkinningUniform,
+        tangents: Option<&[[f32; 4]]>,
         width: u32,
         height: u32,
     ) -> Result<(Vec<u8>, Manifest), GpuSkinError> {
@@ -1130,6 +1280,16 @@ impl GpuSkinned {
                 verts.extend_from_slice(&c.to_le_bytes());
             }
             for c in scene.mesh.uvs[i] {
+                verts.extend_from_slice(&c.to_le_bytes());
+            }
+            // EG12 slice c: the tangent rides the vertex, so the fragment
+            // stage maps a normal map through the real frame instead of the
+            // old fixed +X dummy.
+            let tangent = match tangents {
+                Some(rows) => rows.get(i).copied().unwrap_or(DUMMY_TANGENT),
+                None => scene.mesh.tangents.get(i).copied().unwrap_or(DUMMY_TANGENT),
+            };
+            for c in tangent {
                 verts.extend_from_slice(&c.to_le_bytes());
             }
             match skin {
@@ -1584,6 +1744,67 @@ mod tests {
     }
 
     #[test]
+    fn skinned_capture_darkens_when_orm_occlusion_drops() {
+        // EG12: fs_skinned samples orm.x. With a neutral white ORM vs an
+        // occlusion of 0.25, the same geometry and pose must darken; before
+        // the fix the map was never sampled and the frames were identical.
+        use super::{GpuSkinError, GpuSkinned};
+        let gpu = match GpuSkinned::init() {
+            Ok(gpu) => gpu,
+            Err(GpuSkinError::NoAdapter) => {
+                eprintln!("SKIPPED skinned ORM capture: no wgpu adapter on this machine");
+                return;
+            }
+            Err(error) => panic!("gpu skin init failed (must fail loudly): {error}"),
+        };
+        let mesh = cube();
+        let mut pipe = SkinPipeline::new();
+        pipe.upload_skeleton(1).expect("1 joint uploads");
+        let uniform = pipe
+            .skinning_uniform(&[IDENTITY])
+            .expect("identity pose uploads");
+        let joints = vec![[0u16, 0, 0, 0]; mesh.positions.len()];
+        let weights = vec![[1.0f32, 0.0, 0.0, 0.0]; mesh.positions.len()];
+        let skin = pipe
+            .upload_weights(&joints, &weights)
+            .expect("cube skin uploads");
+        let mut scene = default_scene(160, 120).expect("default scene is valid");
+        scene.mesh = mesh;
+        let (bright_png, _) = gpu
+            .render_capture(&scene, Some(&skin), &uniform, 160, 120)
+            .expect("neutral ORM capture renders");
+        gpu.set_orm_texel([64, 255, 255]);
+        let (dark_png, _) = gpu
+            .render_capture(&scene, Some(&skin), &uniform, 160, 120)
+            .expect("dark ORM capture renders");
+        let luma = |png: &[u8]| {
+            let image = image::load_from_memory(png)
+                .expect("skinned png decodes")
+                .to_rgba8();
+            let mut sum = 0u64;
+            let mut n = 0u64;
+            for pixel in image.pixels() {
+                // The clear color is about (7, 8, 15); only count the cube.
+                if pixel[0] > 20 || pixel[1] > 20 || pixel[2] > 20 {
+                    sum += u64::from(pixel[0]) + u64::from(pixel[1]) + u64::from(pixel[2]);
+                    n += 1;
+                }
+            }
+            (sum, n)
+        };
+        let (bright_sum, bright_n) = luma(&bright_png);
+        let (dark_sum, dark_n) = luma(&dark_png);
+        assert!(
+            bright_n > 100 && bright_n == dark_n,
+            "the same cube covers both frames: {bright_n} vs {dark_n}"
+        );
+        assert!(
+            dark_sum < bright_sum,
+            "orm.x 0.25 darkens the skinned capture: {bright_sum} -> {dark_sum}"
+        );
+    }
+
+    #[test]
     fn missing_skin_renders_the_error_path() {
         let pipe = two_joint_pipeline();
         let uniform = pipe
@@ -1793,6 +2014,180 @@ mod tests {
             "R3 receipt: {} + manifest {}",
             dir.join("r3-skinned.png").display(),
             bent_manifest.to_json()
+        );
+    }
+
+    /// AN1 row-vector turn about +Z by `angle`.
+    fn turn_z(angle: f32) -> [[f32; 4]; 4] {
+        let (s, c) = angle.sin_cos();
+        [
+            [c, s, 0.0, 0.0],
+            [-s, c, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    }
+
+    #[test]
+    fn skinned_tangents_follow_the_pose() {
+        // EG12 slice c: the CPU mirror of the skinned vertex stage. The
+        // identity pose keeps the mesh tangent, a turn about Z rotates the
+        // tangent with the pose, and the handedness rides along untouched.
+        let mesh = cube();
+        let mut pipe = SkinPipeline::new();
+        pipe.upload_skeleton(1).expect("1 joint uploads");
+        let joints = vec![[0u16, 0, 0, 0]; mesh.positions.len()];
+        let weights = vec![[1.0f32, 0.0, 0.0, 0.0]; mesh.positions.len()];
+        let skin = pipe
+            .upload_weights(&joints, &weights)
+            .expect("cube skin uploads");
+        let flat = pipe
+            .skinning_uniform(&[IDENTITY])
+            .expect("identity pose uploads");
+        let frame = pipe
+            .render_skinned(&mesh, Some(&skin), &flat)
+            .expect("identity pose skins");
+        assert_eq!(frame.tangents.len(), mesh.positions.len());
+        for (posed, bind) in frame.tangents.iter().zip(mesh.tangents.iter()) {
+            for k in 0..3 {
+                assert!(
+                    (posed[k] - bind[k]).abs() < 1e-5,
+                    "the identity pose keeps the tangent: {posed:?} vs {bind:?}"
+                );
+            }
+            assert_eq!(posed[3], bind[3], "the handedness rides along");
+        }
+        let turned = pipe
+            .skinning_uniform(&[turn_z(std::f32::consts::FRAC_PI_2)])
+            .expect("turn pose uploads");
+        let frame = pipe
+            .render_skinned(&mesh, Some(&skin), &turned)
+            .expect("turned pose skins");
+        for (posed, bind) in frame.tangents.iter().zip(mesh.tangents.iter()) {
+            // The AN1 row convention: `t' = t.x*r0 + t.y*r1 + t.z*r2`.
+            let want = [-bind[1], bind[0], bind[2]];
+            for k in 0..3 {
+                assert!(
+                    (posed[k] - want[k]).abs() < 1e-5,
+                    "the tangent turns with the pose: {posed:?} vs {want:?}"
+                );
+            }
+            assert_eq!(posed[3], bind[3], "the handedness rides along");
+        }
+    }
+
+    /// The 4x4 tangram: two tangent-space directions in a checker, so a
+    /// face maps through the tangent frame instead of the geometric one.
+    fn tangram() -> [[u8; 4]; 16] {
+        let mut out = [[0u8; 4]; 16];
+        for (i, texel) in out.iter_mut().enumerate() {
+            *texel = if i % 2 == 0 {
+                [255, 128, 128, 255] // tangent-space +X
+            } else {
+                [128, 255, 128, 255] // tangent-space +Y
+            };
+        }
+        out
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn a_tangram_skinned_frame_differs_from_the_dummy_tangent_frame() {
+        // EG12 slice c: the skinned vertex stage carries the mesh tangent,
+        // so a normal map on a skinned body maps through the real frame.
+        // The old dummy tangent (+X) gives another frame: the two device
+        // captures must differ, with zero validation errors.
+        use super::{GpuSkinError, GpuSkinned, DUMMY_TANGENT};
+        let gpu = match GpuSkinned::init() {
+            Ok(gpu) => gpu,
+            Err(GpuSkinError::NoAdapter) => {
+                eprintln!("SKIPPED skinned tangram capture: no wgpu adapter on this machine");
+                return;
+            }
+            Err(error) => panic!("gpu skin init failed (must fail loudly): {error}"),
+        };
+        let mesh = cube();
+        let rows = mesh.positions.len();
+        let mut pipe = SkinPipeline::new();
+        pipe.upload_skeleton(1).expect("1 joint uploads");
+        let uniform = pipe
+            .skinning_uniform(&[IDENTITY])
+            .expect("identity pose uploads");
+        let joints = vec![[0u16, 0, 0, 0]; rows];
+        let weights = vec![[1.0f32, 0.0, 0.0, 0.0]; rows];
+        let skin = pipe
+            .upload_weights(&joints, &weights)
+            .expect("cube skin uploads");
+        let mut scene = default_scene(160, 120).expect("default scene is valid");
+        scene.mesh = mesh;
+        gpu.set_normal_texels(&tangram())
+            .expect("the tangram writes");
+        let (real_png, real_manifest) = gpu
+            .render_capture_tangents(&scene, Some(&skin), &uniform, None, 160, 120)
+            .expect("the real-tangent capture renders");
+        let dummy = vec![DUMMY_TANGENT; rows];
+        let (dummy_png, dummy_manifest) = gpu
+            .render_capture_tangents(&scene, Some(&skin), &uniform, Some(&dummy), 160, 120)
+            .expect("the dummy-tangent capture renders");
+        assert!(
+            real_manifest.is_clean() && dummy_manifest.is_clean(),
+            "both captures report 0 validation errors"
+        );
+        let real = image::load_from_memory(&real_png)
+            .expect("real png decodes")
+            .to_rgba8();
+        let dummy_img = image::load_from_memory(&dummy_png)
+            .expect("dummy png decodes")
+            .to_rgba8();
+        let mut differing = 0usize;
+        let mut energy = 0u64;
+        for (a, b) in real.pixels().zip(dummy_img.pixels()) {
+            let d = a[0]
+                .abs_diff(b[0])
+                .max(a[1].abs_diff(b[1]))
+                .max(a[2].abs_diff(b[2]));
+            energy += u64::from(d);
+            if d > 2 {
+                differing += 1;
+            }
+        }
+        eprintln!("skinned tangram vs dummy tangent: {differing} pixels differ, energy {energy}");
+        assert!(
+            differing > 20,
+            "the tangram maps through the real tangent frame: {differing} pixels differ"
+        );
+        assert!(
+            energy > 500,
+            "the two frames are not the same picture: energy {energy}"
+        );
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn the_skinned_vertex_stage_carries_the_mesh_tangent() {
+        // The stage blends the mesh tangent with the joints and keeps the
+        // handedness; the old fixed +X dummy is gone.
+        let source = crate::v1_gpu::FORWARD_PBR_WGSL;
+        let head = "fn vs_skinned(";
+        let start = source.find(head).expect("vs_skinned exists in the source");
+        let rest = &source[start..];
+        let end = rest.find("\n}").expect("vs_skinned closes");
+        let body = &rest[..end];
+        assert!(
+            body.contains("in.tangent.xyz"),
+            "the stage blends the mesh tangent"
+        );
+        assert!(
+            body.contains("in.tangent.w"),
+            "the stage keeps the handedness"
+        );
+        assert!(
+            !body.contains("out.tangent = vec4<f32>(1.0, 0.0, 0.0, 1.0)"),
+            "the fixed dummy tangent is gone"
+        );
+        assert!(
+            source.contains("@location(5) tangent: vec4<f32>"),
+            "the skinned vertex carries the tangent attribute"
         );
     }
 }

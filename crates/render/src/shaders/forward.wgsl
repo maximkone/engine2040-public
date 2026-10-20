@@ -4,6 +4,7 @@
 //
 //   vertex    vs            static mesh: world-space positions
 //             vs_skinned    joint palette (storage) + 4 weights per vertex
+//                           + the mesh tangent, skinned with the joints
 //             vs_depth      position only, for depth-only passes
 //             vs_sky        fullscreen triangle at the far plane
 //   fragment  fs            window frame: textured, cascade shade, ambient
@@ -141,6 +142,11 @@ struct SkinParams {
 // `orm_scale` carries it into the BRDF helpers below; `fs` writes it once,
 // every other entry keeps the identity default.
 @group(0) @binding(19) var orm_map: texture_2d<f32>;
+// LF3 landing 2: the screen-space occlusion field the forward pass reads
+// for its ambient. It sits in group 1 because it belongs to the frame, not
+// to a draw: the live frame binds it after a depth prepass feeds the GTAO
+// kernel, and the field is the same for every draw of the frame.
+@group(1) @binding(0) var ao_tex: texture_2d<f32>;
 var<private> orm_scale: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 fn sky_view_uv(d: vec3<f32>) -> vec2<f32> {
     let elev = asin(clamp(d.y, -1.0, 1.0));
@@ -333,6 +339,10 @@ struct SIn {
     @location(2) uv: vec2<f32>,
     @location(3) joints: vec4<u32>,
     @location(4) weights: vec4<f32>,
+    // EG12 slice c: the mesh tangent with handedness in w. It rides the
+    // same joint matrices as the normal, so the tangent frame stays
+    // orthogonal under skinning.
+    @location(5) tangent: vec4<f32>,
 };
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -380,9 +390,11 @@ fn vs_skinned(in: SIn, @builtin(instance_index) ii: u32) -> VOut {
     var out: VOut;
     var sp = vec3<f32>(0.0);
     var sn = vec3<f32>(0.0);
+    var st = vec3<f32>(0.0);
     if (skin_params.has_skin == 0u) {
         sp = in.pos;
         sn = in.normal;
+        st = in.tangent.xyz;
     } else {
         for (var k = 0u; k < 4u; k = k + 1u) {
             let idx = min(in.joints[k], 63u);
@@ -390,13 +402,21 @@ fn vs_skinned(in: SIn, @builtin(instance_index) ii: u32) -> VOut {
             let w = in.weights[k];
             sp += w * (m * vec4<f32>(in.pos, 1.0)).xyz;
             sn += w * (m * vec4<f32>(in.normal, 0.0)).xyz;
+            st += w * (m * vec4<f32>(in.tangent.xyz, 0.0)).xyz;
         }
     }
     out.world_pos = sp;
     let l = length(sn);
     out.world_n = select(vec3<f32>(0.0, 1.0, 0.0), sn / max(l, 1e-12), l > 1e-6);
     out.uv = in.uv;
-    out.tangent = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    // EG12 slice c: the tangent rides the same joint matrices as the
+    // normal, so `eg12_world_normal` maps a normal map through the real
+    // tangent frame instead of the old fixed +X dummy. A degenerate blend
+    // falls back to that +X dummy, never to a NaN.
+    let tl = length(st);
+    out.tangent = vec4<f32>(
+        select(vec3<f32>(1.0, 0.0, 0.0), st / max(tl, 1e-12), tl > 1e-6),
+        in.tangent.w);
     out.clip = cam.view_proj * vec4<f32>(sp, 1.0);
     out.draw_id = ii;
     return out;
@@ -624,6 +644,19 @@ fn eg12_world_normal(geom_n: vec3<f32>, tangent: vec4<f32>, map_n: vec3<f32>) ->
     return out / sqrt(ol2);
 }
 
+// The occlusion field at one fragment: an exact texel load (the field is
+// full resolution and unfilterable). A fragment outside the field reads
+// 1.0 (open) rather than a zero texel, so a frame that never runs the
+// GTAO keeps its ambient.
+fn ao_at(frag_xy: vec2<f32>) -> f32 {
+    let dim = vec2<i32>(textureDimensions(ao_tex));
+    let at = vec2<i32>(frag_xy);
+    if (at.x < 0 || at.y < 0 || at.x >= dim.x || at.y >= dim.y) {
+        return 1.0;
+    }
+    return textureLoad(ao_tex, at, 0).r;
+}
+
 // ---------------------------------------------------------------------------
 // Height fog: the unified linear-density closed form (Game Engine Gems 3
 // ch 3.2, Lengyel Foundations 2 8.5.2). `fc`/`fp` are the signed plane
@@ -702,7 +735,11 @@ fn fs(in: VOut) -> FsOut {
     // Contact darkens the baked ambient so feet ground in IBL wash; direct
     // sun keeps its own contact shade inside direct_light.
     let occlusion: f32 = sun_contact_factor(in.world_pos);
-    let lit = direct_light(in.world_pos, mapped_n, albedo) * shade + ibl_diffuse_term * occlusion * orm.x + ibl_spec_term + torch_frame_sum(in.world_pos, mapped_n, albedo);
+    // LF3 landing 2: the GTAO field scales the ambient diffuse only. The
+    // direct sun and the torches keep their own light, so a sunlit open
+    // texel does not move when the field comes on.
+    let ao = ao_at(in.clip.xy);
+    let lit = direct_light(in.world_pos, mapped_n, albedo) * shade + ibl_diffuse_term * ao * occlusion * orm.x + ibl_spec_term + torch_frame_sum(in.world_pos, mapped_n, albedo);
     let radiance = max(lit * mat.exposure, vec3<f32>(0.0));
     let fog_f = fog_factor_finite(fog_fwd, cam.camera_pos, in.world_pos);
     var out: FsOut;

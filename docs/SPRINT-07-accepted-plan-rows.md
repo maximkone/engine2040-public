@@ -1367,7 +1367,9 @@
   Tier B. Size S. Owns timeline hunks beside
   `crates/observe/src/rerun_sink.rs` (PF9 file frozen; lands after PF9).
   Accept: seeded desync first tick named 10/10, engine hash unperturbed
-  x2. needs: PF2, PF9. (PLN50 wave-49 REPO card 3 reshaped; rerun
+  x2. needs: PF2. (PF9 dropped from needs: the timeline landed beside the
+  frozen file with no dependency, as the note below records; PF9's own GPU
+  legs do not gate this row.) (PLN50 wave-49 REPO card 3 reshaped; rerun
   time_point shape reimplemented, no dependency.) Receipt: `cargo test -p engine-observe --lib timeline` 9 passed twice (gh 39312199977, 39312225066); ten seeds name the exact perturbed tick 10/10 (109, 10, 56, 92, 12, 52, 4, 40, 63, 17) with the matching field, including two non-hash perturbations; `golden_hash_untouched` passed twice (gh 39312221483, 39312220999); engine-observe 75 passed 0 failed (gh 39312818568); clippy PASS (39311926071). `rerun_sink.rs` was not modified.
 - [ ] PF18 perf: mimalloc as the bench-harness allocator on PF1 release
   workloads, hashes and alloc counts pinned (mimalloc_rust MIT,

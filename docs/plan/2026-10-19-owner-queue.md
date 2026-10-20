@@ -20,6 +20,14 @@ parked row per beat with its receipts (OpenChamber task
 render bind-glue rows inside the sweep session's `crates/render` and stay parked
 as agent work until that crate frees. ON30 and SG3 still need people.
 
+Attempt 2026-10-20 (after the owner asked "is quiet now"): the box read 55-92%
+CPU *during* the runs (three python jobs plus a foreign 40-minute arena, then a
+build burst at 11:30), so the numbers were taken but are not usable: OPT31 spread
+13.7% and OPT33 spreads 27.2% (dx12) / 22.5% (vulkan) against the 5% bar, while
+the absolute fps floor passed with margin (286-480 fps). Receipts are labeled
+contended under `target/evidence/build/` and `target/evidence/backend/`; no row
+was ticked. The quiet-window keeper stays the route to a real measurement.
+
 - ON30 (docs/SPRINT-11-north-star.md): two humans + 6 AI over two real
   networks. Host: `target\release\net_relay.exe` on a reachable host, then
   `target\release\arena.exe --scene arena --fighters 8 --spear --host`; guest:

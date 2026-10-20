@@ -74,6 +74,11 @@ Rows live in one shard per section (byte-identical; each shard header is the can
 - [`SPRINT-18-steals.md`](SPRINT-18-steals.md) — Steals and potato tier
 - [`SPRINT-20-game.md`](SPRINT-20-game.md) — Game
 - [`SPRINT-21-look-feel.md`](SPRINT-21-look-feel.md) — Look and feel steals
+- [`SPRINT-22-web-realism.md`](SPRINT-22-web-realism.md) — Web and realism
+- [`SPRINT-23-books.md`](SPRINT-23-books.md) — Books
+- [`SPRINT-24-editor.md`](SPRINT-24-editor.md) — Editor for indie developers
+- [`SPRINT-25-ai-native.md`](SPRINT-25-ai-native.md) — AI native
+- [`SPRINT-26-steals-wave3.md`](SPRINT-26-steals-wave3.md) — Steals wave 3, verified against the tree
 
 ### Ready (live, never a snapshot)
 

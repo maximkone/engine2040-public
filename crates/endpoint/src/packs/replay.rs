@@ -1,20 +1,29 @@
-//! `replay` pack: verify a tape against its recorded hash chain.
+//! `replay` pack: verify a tape against its recorded hash chain, and bisect the
+//! first tick a monotone view-receipt floor crosses.
 //!
-//! Two read-only verbs, `replay.verify` and `replay.bisect`, resimulate one
-//! tape with [`engine_arena::run`] and name the first tick whose hash leaves
-//! the recorded chain, so an agent reads the verdict through `api.call`
-//! instead of driving the sim.
+//! Two read-only verbs, `replay.verify` and `replay.bisect`. Verify mode
+//! resimulates one tape with [`engine_arena::run`] and names the first tick
+//! whose hash leaves the recorded chain. Metric mode bisects the first tick
+//! whose prefix run crosses a view-receipt floor: a prefix maximum of
+//! `sunk_cm_max`, `nonfinite`, `error_parts`, `eye_in_body` or
+//! `eye_below_ground` never decreases, so "crossed" is monotone and a binary
+//! search over tick prefixes is sound. A clean prefix run reports `clean`.
+//! An agent reads the verdict through `api.call` instead of driving the sim.
 //!
 //! Consumer: the MCP door (`super::mcp::McpServer`) lists the verbs after
 //! `api.load` and dispatches them by exact name. Data owner for the bout is
 //! `engine-arena`; this module owns only the verb DTOs, validation and the
 //! typed report. Units: whole ticks for `ticks` and `tick`, whole fighters
 //! for `participants`, meters for `half_extent_m`, `u64` hashes (decimal
-//! strings on the wire). Determinism: the same seed plus tape plus chain
-//! twice seals the same report; integer compares only, no clock, no float.
-//! Errors: [`McpToolError`] with `bad_ticks`, `bad_fighters`, `bad_extent`,
-//! `too_many_inputs`, `bad_chain`, `no_chain`, `invalid_tape` and
-//! `corrupt_tape`, each naming the legal values plus one recovery.
+//! strings on the wire), receipt samples in the metric's own unit
+//! (centimeters for `sunk_cm_max`, counts for the others). Determinism: the
+//! same seed plus tape plus chain (or the same receipts) twice seals the same
+//! report; integer compares for hashes, total-order float compares for prefix
+//! maxima, no clock. Errors: [`McpToolError`] with
+//! `bad_ticks`, `bad_fighters`, `bad_extent`, `too_many_inputs`, `bad_chain`,
+//! `no_chain`, `invalid_tape`, `corrupt_tape`, `bad_metric`, `bad_floor`,
+//! `no_receipts` and `bad_receipts`, each naming the legal values plus one
+//! recovery.
 //!
 //! Slice note: this file calls `engine-arena` directly. When the endpoint
 //! manifest may grow again, the core compare should delegate to the playtest
@@ -37,8 +46,19 @@ use rmcp::serde::{self, Deserialize, Serialize};
 pub const PACK: &str = "replay";
 /// Verb: resimulate a tape and report the first divergent tick.
 pub const TOOL_REPLAY_VERIFY: &str = "replay.verify";
-/// Verb: binary-search a tape for its first divergent tick.
+/// Verb: binary-search a tape for its first divergent tick, or a monotone
+/// receipt metric for the first tick its prefix crosses a floor.
 pub const TOOL_REPLAY_BISECT: &str = "replay.bisect";
+
+/// Monotone view-receipt metrics `replay.bisect` accepts: each is a prefix
+/// maximum in the `arena view:` line, so it never decreases over a run.
+pub const BISECT_METRICS: [&str; 5] = [
+    "sunk_cm_max",
+    "nonfinite",
+    "error_parts",
+    "eye_in_body",
+    "eye_below_ground",
+];
 
 /// The replay pack: verify plus bisect, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
@@ -152,6 +172,38 @@ struct Divergence {
 
 fn bad_ticks(message: String) -> McpToolError {
     McpToolError::new("bad_ticks", message)
+}
+
+/// Refusal for a metric token outside [`BISECT_METRICS`].
+fn bad_metric(metric: &str) -> McpToolError {
+    McpToolError::new(
+        "bad_metric",
+        format!(
+            "metric {metric:?} is not one of {}; re-run with one of those monotone receipt metrics",
+            BISECT_METRICS.join(", ")
+        ),
+    )
+}
+
+/// Refusal for a floor that is missing, non-finite or negative.
+fn bad_floor(why: &str) -> McpToolError {
+    McpToolError::new(
+        "bad_floor",
+        format!("floor {why}; submit a finite floor of 0 or more, then re-run"),
+    )
+}
+
+/// Refusal for metric mode without the per-tick receipt samples.
+fn no_receipts() -> McpToolError {
+    McpToolError::new(
+        "no_receipts",
+        "receipts holds 0 samples; submit one finite value per tick in tick order, then re-run",
+    )
+}
+
+/// Refusal for receipt samples that are missing, mis-sized or not finite.
+fn bad_receipts(message: String) -> McpToolError {
+    McpToolError::new("bad_receipts", message)
 }
 
 /// Refusal for a missing recorded chain; the verify pack reuses it so both
@@ -326,6 +378,71 @@ fn bisect_first(resim: &[u64], chain: &[u64]) -> Option<Divergence> {
     })
 }
 
+/// One crossing of a monotone receipt floor: the 0-based tick and the prefix
+/// value that crossed there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BisectHit {
+    tick: u32,
+    value: f64,
+}
+
+/// First tick whose prefix maximum of `value_at(0..=tick)` is above `floor`,
+/// or `None` when the whole run stays at or under it.
+///
+/// Pure: no sim, no clock, no file. `value_at` yields one sample per tick in
+/// tick order. A prefix maximum never decreases, so "crossed" is monotone
+/// (false up to one point, true after it) and the binary search is sound. A
+/// non-finite sample refuses with `bad_receipts`, because NaN would break the
+/// ordering the search relies on.
+fn bisect_floor<F>(
+    ticks: u32,
+    floor: f64,
+    mut value_at: F,
+) -> Result<Option<BisectHit>, McpToolError>
+where
+    F: FnMut(u32) -> Result<f64, McpToolError>,
+{
+    if ticks == 0 {
+        return Err(bad_ticks(format!(
+            "ticks 0 is outside 1..={MAX_PLAY_TICKS}; re-run with a tick count"
+        )));
+    }
+    let mut prefix = Vec::with_capacity(usize::try_from(ticks).unwrap_or(usize::MAX));
+    let mut running = f64::NEG_INFINITY;
+    for tick in 0..ticks {
+        let value = value_at(tick)?;
+        if !value.is_finite() {
+            return Err(bad_receipts(format!(
+                "receipt at tick {tick} is not finite; submit finite values, then re-run"
+            )));
+        }
+        running = running.max(value);
+        prefix.push(running);
+    }
+    let crossed = |tick: u32| {
+        prefix
+            .get(usize::try_from(tick).unwrap_or(usize::MAX))
+            .is_some_and(|value| *value > floor)
+    };
+    let last = ticks - 1;
+    if !crossed(last) {
+        return Ok(None);
+    }
+    let (mut lo, mut hi) = (0u32, last);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if crossed(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Ok(Some(BisectHit {
+        tick: lo,
+        value: prefix[usize::try_from(lo).unwrap_or(0)],
+    }))
+}
+
 fn report_of(first: Option<Divergence>, ticks: u32) -> ReplayReport {
     match first {
         None => ReplayReport {
@@ -361,6 +478,64 @@ pub fn bisect_report(args: &ReplayArgs) -> Result<ReplayReport, McpToolError> {
     Ok(report_of(bisect_first(&resim, &chain), ticks))
 }
 
+/// Run one `replay.bisect` in metric mode: validate the monotone metric, its
+/// floor and one finite sample per tick, then bisect the prefix maxima.
+///
+/// The samples are the per-tick readings of `metric` (for example a
+/// `--view-brief` row's `sunk_cm_max`), in the metric's own unit. The prefix
+/// maximum makes the crossing monotone, so the answer is the first bad tick.
+/// The real view host is not wired here yet: a caller submits the samples.
+/// `seed`, `participants` and `half_extent_m` stay metadata for that run; they
+/// are not resimulated here, so a bad chain is not needed either.
+pub(crate) fn bisect_metric_report(
+    args: &ReplayBisectArgs,
+    metric: &str,
+) -> Result<ReplayBisectReport, McpToolError> {
+    if !BISECT_METRICS.contains(&metric) {
+        return Err(bad_metric(metric));
+    }
+    let ticks = args.ticks.ok_or_else(|| {
+        bad_ticks(format!(
+            "ticks missing; submit 1..={MAX_PLAY_TICKS}; re-run with a tick count"
+        ))
+    })?;
+    if ticks == 0 || ticks > MAX_PLAY_TICKS {
+        return Err(bad_ticks(format!(
+            "ticks {ticks} is outside 1..={MAX_PLAY_TICKS}; re-run in range"
+        )));
+    }
+    let floor = args.floor.ok_or_else(|| bad_floor("missing"))?;
+    if !floor.is_finite() || floor < 0.0 {
+        return Err(bad_floor(&format!("{floor} is not finite or is below 0")));
+    }
+    let receipts = args.receipts.as_deref().ok_or_else(no_receipts)?;
+    if receipts.is_empty() {
+        return Err(no_receipts());
+    }
+    if receipts.len() != usize::try_from(ticks).unwrap_or(usize::MAX) {
+        return Err(bad_receipts(format!(
+            "receipts holds {} samples for {ticks} ticks; submit one value per tick, then re-run",
+            receipts.len()
+        )));
+    }
+    let crossing = bisect_floor(ticks, floor, |tick| {
+        receipts
+            .get(usize::try_from(tick).unwrap_or(usize::MAX))
+            .copied()
+            .ok_or_else(|| bad_receipts(format!("receipt for tick {tick} missing")))
+    })?;
+    Ok(ReplayBisectReport {
+        clean: crossing.is_none(),
+        tick: crossing.map(|hit| hit.tick),
+        expected: None,
+        observed: None,
+        ticks,
+        metric: Some(metric.to_string()),
+        floor: Some(floor),
+        value: crossing.map(|hit| hit.value),
+    })
+}
+
 /// `replay.verify` handler: the pure report under the audited dispatch seam.
 fn replay_verify(service: &McpServer, args: &ReplayArgs) -> Result<ReplayReport, McpToolError> {
     service.dispatch(TOOL_REPLAY_VERIFY, |_| verify_report(args))
@@ -378,10 +553,10 @@ crate::e2_tool!(
 );
 
 crate::e2_tool!(
-    /// `replay.bisect` tool: binary-search a tape for its first divergent tick. Read-only.
+    /// `replay.bisect` tool: binary-search a tape or a monotone receipt metric. Read-only.
     ReplayBisectTool,
     name = TOOL_REPLAY_BISECT,
-    description = "Binary-search a resimulated tape for the first tick whose hash leaves the recorded chain. Read-only.",
+    description = "Binary-search a resimulated tape for the first tick whose hash leaves the recorded chain, or (with metric, floor and receipts) the first tick whose monotone view-receipt prefix crosses the floor. Read-only.",
     readonly = true,
     args = ReplayBisectArgs,
     output = ReplayBisectReport,
@@ -408,10 +583,17 @@ pub struct ReplayBisectArgs {
     #[serde(default, with = "dec_u64_vec")]
     #[schemars(with = "Vec<String>")]
     pub chain: Vec<u64>,
+    #[serde(default)]
+    pub metric: Option<String>,
+    #[serde(default)]
+    pub floor: Option<f64>,
+    #[serde(default)]
+    pub receipts: Option<Vec<f64>>,
 }
 
-/// `replay.bisect` answer: same shape as verify.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+/// `replay.bisect` answer: same shape as verify in chain mode; metric mode
+/// names the metric, floor and crossing value instead of two hashes.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ReplayBisectReport {
@@ -425,6 +607,12 @@ pub struct ReplayBisectReport {
     #[schemars(with = "Option<String>")]
     pub observed: Option<u64>,
     pub ticks: u32,
+    #[serde(default)]
+    pub metric: Option<String>,
+    #[serde(default)]
+    pub floor: Option<f64>,
+    #[serde(default)]
+    pub value: Option<f64>,
 }
 
 impl ReplayBisectArgs {
@@ -451,6 +639,9 @@ impl From<ReplayReport> for ReplayBisectReport {
             expected: report.expected,
             observed: report.observed,
             ticks: report.ticks,
+            metric: None,
+            floor: None,
+            value: None,
         }
     }
 }
@@ -460,6 +651,9 @@ fn replay_bisect_verb(
     args: &ReplayBisectArgs,
 ) -> Result<ReplayBisectReport, McpToolError> {
     service.dispatch(TOOL_REPLAY_BISECT, |_| {
+        if let Some(metric) = args.metric.as_deref() {
+            return bisect_metric_report(args, metric);
+        }
         bisect_report(&args.as_replay()).map(ReplayBisectReport::from)
     })
 }
@@ -533,10 +727,126 @@ mod tests {
                 half_extent_m: args.half_extent_m,
                 inputs: args.inputs.clone(),
                 chain: args.chain.clone(),
+                metric: None,
+                floor: None,
+                receipts: None,
             },
         )
         .expect("bisect verb serves");
         assert_eq!(verb.tick, Some(8));
+    }
+
+    #[test]
+    fn bisect_floor_names_a_known_crossing_twice() {
+        // A pure predicate: the prefix crosses at tick 41, once and forever.
+        let sample = |tick: u32| Ok(if tick < 41 { 1.0 } else { 12.0 });
+        let first = bisect_floor(120, 3.0, sample).expect("searches");
+        assert_eq!(
+            first,
+            Some(BisectHit {
+                tick: 41,
+                value: 12.0
+            })
+        );
+        let second = bisect_floor(120, 3.0, sample).expect("repeats");
+        assert_eq!(first, second, "same predicate, same crossing twice");
+        assert_eq!(
+            bisect_floor(120, 3.0, |_| Ok(1.0)).expect("calm searches"),
+            None,
+            "a prefix under the floor never crosses"
+        );
+        // A value equal to the floor is not a crossing; the next tick is.
+        let edge = bisect_floor(8, 0.0, |tick| Ok(if tick == 0 { 0.0 } else { 1.0 }))
+            .expect("edge searches");
+        assert_eq!(edge.map(|hit| hit.tick), Some(1));
+        // A NaN sample breaks the ordering, so it refuses typed.
+        let error = bisect_floor(8, 1.0, |tick| Ok(if tick == 3 { f64::NAN } else { 0.0 }))
+            .expect_err("NaN refuses");
+        assert_eq!(error.code, "bad_receipts");
+        assert_eq!(
+            bisect_floor(0, 1.0, |_| Ok(0.0))
+                .expect_err("zero ticks refuses")
+                .code,
+            "bad_ticks"
+        );
+    }
+
+    #[test]
+    fn replay_bisect_metric_names_the_seeded_tick_twice() {
+        let receipts = |ticks: usize| {
+            let mut values = vec![1.0f64; ticks];
+            for value in values.iter_mut().skip(41) {
+                *value = 12.0;
+            }
+            values
+        };
+        let args = ReplayBisectArgs {
+            seed: Some(2040),
+            ticks: Some(120),
+            participants: Some(2),
+            half_extent_m: Some(20.0),
+            inputs: Some(Vec::new()),
+            chain: Vec::new(),
+            metric: Some("sunk_cm_max".to_string()),
+            floor: Some(3.0),
+            receipts: Some(receipts(120)),
+        };
+        let first = replay_bisect_verb(&server(), &args).expect("metric bisects");
+        assert_eq!(first.tick, Some(41), "seeded crossing: {first:?}");
+        assert!(!first.clean);
+        assert_eq!(first.metric.as_deref(), Some("sunk_cm_max"));
+        assert_eq!(first.value, Some(12.0));
+        assert_eq!(first.expected, None, "no hash chain in metric mode");
+        let second = replay_bisect_verb(&server(), &args).expect("repeats");
+        assert_eq!(first, second, "same receipts name the same tick twice");
+        // A run that never crosses reads clean and names no tick.
+        let calm = ReplayBisectArgs {
+            receipts: Some(vec![1.0; 120]),
+            ..args.clone()
+        };
+        let clean = replay_bisect_verb(&server(), &calm).expect("calm bisects");
+        assert!(clean.clean && clean.tick.is_none(), "{clean:?}");
+        // Refusals stay typed and name one recovery.
+        let bad = ReplayBisectArgs {
+            metric: Some("pops".to_string()),
+            ..calm
+        };
+        assert_eq!(
+            replay_bisect_verb(&server(), &bad)
+                .expect_err("bad metric refuses")
+                .code,
+            "bad_metric"
+        );
+        let bad = ReplayBisectArgs {
+            floor: None,
+            ..args.clone()
+        };
+        assert_eq!(
+            replay_bisect_verb(&server(), &bad)
+                .expect_err("missing floor refuses")
+                .code,
+            "bad_floor"
+        );
+        let bad = ReplayBisectArgs {
+            receipts: None,
+            ..args.clone()
+        };
+        assert_eq!(
+            replay_bisect_verb(&server(), &bad)
+                .expect_err("missing receipts refuses")
+                .code,
+            "no_receipts"
+        );
+        let bad = ReplayBisectArgs {
+            receipts: Some(vec![1.0; 60]),
+            ..args.clone()
+        };
+        assert_eq!(
+            replay_bisect_verb(&server(), &bad)
+                .expect_err("short receipts refuse")
+                .code,
+            "bad_receipts"
+        );
     }
 
     #[test]

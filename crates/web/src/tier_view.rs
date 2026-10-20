@@ -840,12 +840,12 @@ mod tests {
             render_ms: 2.1,
             present_ms: 0.4,
             hidden_skips: 2,
-            drift_pct: Some(3.14),
+            drift_pct: Some(2.75),
         };
         let line = s.line("web", 85, 2.0);
         assert_eq!(
             line,
-            "tier=web fps=59.9 frame=16.7ms sim=0.30 physfx=0.00 render=2.10 present=0.40 scale=85 dpr=2.00 drift=3.1 hidden_skips=2"
+            "tier=web fps=59.9 frame=16.7ms sim=0.30 physfx=0.00 render=2.10 present=0.40 scale=85 dpr=2.00 drift=2.8 hidden_skips=2"
         );
         for field in ["sim=", "physfx=", "render=", "present="] {
             assert!(line.contains(field), "{field} missing from {line}");

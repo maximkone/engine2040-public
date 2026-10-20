@@ -4,7 +4,7 @@ Boarded 2026-10-10 from the plans review (`target/reports/plans-review-2026-10-1
 part E): the Look proof had no frame-cost rows and no machine score. GM3 needs
 FC3 (at 3.29 fps the 18,000-frame run takes 91 min against a 45 min slot).
 
-- [ ] FC1 perf: frame cost table for the windowed arena — the perf seat runs Progress 2026-10-17: table exists, `target/reports/perf-20261014-fc1.md` (QUIET x3, top 3 costs named with files: present, sun shadow, fighters). Not met: spread 50% against the 10% bar, report not named perf-<date>.md, no re-run after EG1 and EG2; arena.exe is STALE (100 code commits) so a fresh quiet run is needed.
+- [ ] FC1 perf: frame cost table for the windowed arena — the perf seat runs Progress 2026-10-17: table exists, `target/reports/perf-20261014-fc1.md` (QUIET x3, top 3 costs named with files: present, sun shadow, fighters). Not met: spread 50% against the 10% bar, report not named perf-<date>.md, no re-run after EG1 and EG2; arena.exe is STALE (100 code commits) so a fresh quiet run is needed. Progress 2026-10-20 (perf seat, HEAD 5099d6f9): fresh x3 hand quiet gate (`tools/quiet.mjs` was deleted in e5457d6e), report `target/reports/perf-2026-10-20.md`. Top 3: present 5.5/10.0/9.4 ms (`arena.rs:1918` present_frame -> render `live.rs`, acquire 3.2-4.8 ms), fighters 0.55/1.16/1.59 ms (`arena.rs:2054` push_fighters + `fighter_look.rs`), sim 0.14/0.33/0.60 ms (`arena.rs:1646` run_sim_ticks). FAIL: cpu p50 spread 59.1% vs <=10% (present mean 83%, fighters 187%, sim 319%). `bins.mjs` still says STALE after the rebuild line (commit-time vs mtime artifact; cargo recompiled nothing). p50 2.0-3.2 ms; p99 78.8-87.2 ms from ~80 ms CPU present hitches, 63-72 slow frames of 300.
   the real window game three times in a quiet window and names the top 3
   costs (render pass or system) with the file that owns each. `perf.exe` has
   no presenter, so it is not the target (render review 2026-10-10). Tier A.
@@ -26,7 +26,7 @@ FC3 (at 3.29 fps the 18,000-frame run takes 91 min against a 45 min slot).
   the switch (pass skipped or run at half resolution) fails before. P2P:
   `cargo test -p engine-render --lib` green; golden unchanged. EG2 measured
   its own before and after (present 39.2 to 8.0 ms), so FC2 closed ahead of FC1.
-- [ ] FC3 render: arena with 8 fighters at 30 fps (1080p, RTX 3050) — repeat Progress 2026-10-17: the quiet FC1 run of 2026-10-14 already reads interval p50 2.66-4.13 ms and p99 8.1-11.1 ms for 8 fighters (bar 33.3 and 50 ms), but only one run set, on a binary now STALE; the bar needs a fresh quiet x2 on the current HEAD with frame_check unchanged.
+- [ ] FC3 render: arena with 8 fighters at 30 fps (1080p, RTX 3050) — repeat Progress 2026-10-17: the quiet FC1 run of 2026-10-14 already reads interval p50 2.66-4.13 ms and p99 8.1-11.1 ms for 8 fighters (bar 33.3 and 50 ms), but only one run set, on a binary now STALE; the bar needs a fresh quiet x2 on the current HEAD with frame_check unchanged. Progress 2026-10-20 (same runs): p50 PASS (2.013/2.422/3.203 ms <= 33.3), p99 FAIL (78.755/87.195/85.904 ms > 50) in all three runs; the 2026-10-19 set read p99 78.7-82.1 ms, so the ~80 ms present hitches are not new. frame_check has no CLI (`tools/frame-check.mjs` deleted): `cargo test -p engine-playtest --lib frame_check` -> 27 passed; arena lines framing seen=8 empty=0, view nonfinite=0 error_parts=0 eye_in_body=0, validation_errors=0. Resolution 1280x720 (arena window fixed), so the 1080p bar stays unproven.
   FC2 on the next top cost until the quiet perf run shows the windowed arena
   p50 frame at most 33.3 ms. Tier A. Size L. Owns one render file per landing
   (FC2 shape). Accept: quiet perf run x2: windowed arena p50 at most 33.3 ms,
@@ -281,7 +281,7 @@ seat guard refuses their edits, so take the next row. Search the books first:
   shadowed pixels; a fixture foot on the plane casts contact shadow within 2
   px. F2P: the snapping test fails before. P2P: render lib green. Review:
   render.md G5 (RL27 keeps its split-distance unit). needs: EG11b.
-- [ ] EG12 render: ambient, torches, normal and ORM maps — the forward shader Progress 2026-10-17: landing (a) has its pixel test (`ambient_sh9_on_off_differs_in_masked_region`, ibl.rs) and the forward shader holds an 8-slot `TorchU` block (b). Left: a torch on-vs-off pixel test, the tangent attribute and normal and ORM sampling (c).
+- [ ] EG12 render: ambient, torches, normal and ORM maps - the forward shader Progress 2026-10-17: landing (a) has its pixel test (`ambient_sh9_on_off_differs_in_masked_region`, ibl.rs) and the forward shader holds an 8-slot `TorchU` block (b). Left: a torch on-vs-off pixel test, the tangent attribute and normal and ORM sampling (c). Progress 2026-10-20: landing (c) ORM sampling landed 69df8617 with a device pixel proof e526bb2c; `fs_skinned` samples binding 19 and the standalone capture binds a white fallback until a real map rides in. Progress 2026-10-20 (skinned tangent): the skinned vertex layout carries the mesh tangent (80-byte stride, location 5, handedness in w) and `vs_skinned` skins it with the joints, so `eg12_world_normal` maps a normal map through the real frame; the CPU mirror is `SkinnedFrame::tangents`. Device proof `a_tangram_skinned_frame_differs_from_the_dummy_tangent_frame`: a tangram-mapped skinned frame differs from the dummy-tangent frame in 1565 px (energy 147142) with validation errors 0.
   has a constant ambient, unlit torches, no tangents. Three landings, one per
   batch: (a) SH9 ambient uniform from the `ibl.rs` bake, AO scales ambient
   only; (b) up to 8 point lights in a uniform array for the torch actors in
@@ -1384,7 +1384,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   engine-endpoint --lib` green; golden hash unchanged. Plan:
   `docs/plan/forge-adoption.md` section J (D-EA6). Owner Decision 1: yes
   (tier 1 default). needs: AD10.
-- [ ] PF24 perf: wall time on play receipts — `play.step` and `play.run` take
+- [x] PF24 perf: wall time on play receipts — `play.step` and `play.run` take Landed c44ca6fe.
   an opt-in `timing` flag and then carry a `timing` object: step wall ms (p50
   and p99) labelled `software` (a CPU run, never a reference-GPU claim). A
   missing sample answers `unknown`, never zero. Wall time stays out of the
@@ -1403,6 +1403,23 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   clock"). P2P: `cargo test -p engine-endpoint --lib` green; golden hash
   unchanged. Ordered behind AD3: one builder per crate. Plan:
   `docs/plan/forge-adoption.md` section J (D-PF21). needs: AD3.
+  Landed c44ca6fe: `cargo test -p engine-endpoint --features mcp --lib
+  play_timing` x2 (5 passed each: with `timing` off the bytes equal the
+  pre-change shape oracle and the JSON carries no `timing` key; with it on the
+  object holds p50, p99, the sample count and the `software` label; an empty
+  ring answers `unknown` as the word `unknown`, never zero; the ring is bounded
+  at `TIMING_RING_CAP` 256 with nearest-rank math checked on exact figures; the
+  step digest, PNG bytes, final hash, checkpoints and logs are equal on and
+  off). `cargo test -p engine-endpoint --features mcp --test it step20x2` (1
+  passed; the row's `--test step20x2` names the module inside the `it`
+  integration binary, so the runnable line is `--test it step20x2`). P2P:
+  `cargo test -p engine-endpoint --lib` (162 passed),
+  `cargo test -p engine-proof --lib golden_hash_untouched` (1 passed).
+  rustfmt clean, rust-quality PASS 97 (A), 0 regressions. Clippy on the two
+  owned files: no diagnostic. The five clippy errors `-p engine-endpoint
+  --features mcp` reports are pre-existing and in files this change does not
+  touch (`build_level.rs` x3, `packs/view.rs` x2). The consumer side in
+  `crates/playtest/src/eval.rs` is not part of the Accept and is untouched.
 - [ ] SP66 spatial: light reach — a point is lit when any light's reach covers
   it. A directional light covers every point; a point or spot light covers the
   points inside its range; a light whose range cannot be read (not finite, or
@@ -1449,7 +1466,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   x2 equal; `arena per-pass` sky above 0 ms on live frames. F2P: a live-sky
   test fails before (`fs_sky` reads no texture). P2P: `cargo test -p
   engine-render --lib` green; golden unchanged. needs: EG9.
-- [ ] LF2 render: the window lights with `ibl.rs` — `fs` adds a constant Landed so far (2026-10-17): 1bb6097 (ibl LIVE: armor 1074/1074 and sand 36511/36511 pixels change, capture equal twice). Remaining: a separate ibl ms in arena per-pass (it runs inside forward).
+- [ ] LF2 render: the window lights with `ibl.rs` - `fs` adds a constant Landed so far (2026-10-17): 1bb6097 (ibl LIVE: armor 1074/1074 and sand 36511/36511 pixels change, capture equal twice). Remaining: a separate ibl ms in arena per-pass (it runs inside forward). Progress 2026-10-20: the prefilter is a 256-tap GGX lobe (dc01adcb), within 5% per channel of a 4096-sample reference at roughness 0.6.
   `AMBIENT_FLOOR`; `ibl.rs` bakes a prefiltered cubemap and BRDF LUT on the
   CPU at presenter start from the embedded
   `content/incoming/studio_small_09_1k.hdr` (`gpu_present.rs:15`,
@@ -1463,7 +1480,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   regions differ on vs off; capture x2 equal; ibl above 0 ms live. F2P: on vs
   off frames are identical today. P2P: render lib green; golden unchanged.
   needs: EG9.
-- [ ] LF3 render: GTAO in the live frame — the blit multiplies `ao_tex` Landed so far (2026-10-17): 1bb6097 (landing 1: GTAO on the device writes ao_tex, 0.165 ms at 720p, feet 0.9907 and wall base 0.9877 vs open sand 1.0000). Remaining: landing 2, the depth-only prepass so AO scales ambient only; GTAO under MSAA.
+- [ ] LF3 render: GTAO in the live frame - the blit multiplies `ao_tex` Landed so far (2026-10-17): 1bb6097 (landing 1: GTAO on the device writes ao_tex, 0.165 ms at 720p, feet 0.9907 and wall base 0.9877 vs open sand 1.0000). Remaining: landing 2, the depth-only prepass so AO scales ambient only; GTAO under MSAA. Progress 2026-10-20: landing 3 dropped the whole-frame AO multiply (b6bc6367); gtao on/off is 76800 px byte-equal and the pass-truth row reads PROBE until landing 2 composites the field into ambient. Progress 2026-10-20 (landing 2): a depth prepass (`vs_depth` for the static meshes, `vs_skinned` for the skinned ones, no fragment stage) writes the frame's depth before the forward pass, the GTAO kernel builds the field from it, and `fs` scales the ambient diffuse by that field (group 1, binding 0); the forward pass then clears the depth and writes it again, so the frame's final depth is unchanged. The pass-truth row reads LIVE (9 rows, 4 LIVE, 5 PROBE), the field moves 975 covered px, and the direct-sun control (the baked ambient cut) stays byte-equal: the sun never darkens.
   (`shaders/blit.wgsl:49`), which stays 1.0; `gtao.rs` computes half-res GTAO
   on the GPU only under `--look-probes`. There is no depth prepass: the
   forward pass clears and stores depth once (`submit.rs:410-419`). First

@@ -460,8 +460,9 @@ pub(crate) fn timestamp_supported(device: &wgpu::Device) -> bool {
     device.features().contains(wgpu::Features::TIMESTAMP_QUERY)
 }
 
-/// Tick delta to ms via the queue period (ns per tick). Pure.
-#[cfg(feature = "window")]
+/// Tick delta to ms via the queue period (ns per tick). Pure, no wgpu
+/// types, so it also compiles on the headless twin for its math tests.
+#[cfg(any(feature = "window", test))]
 pub(crate) fn ticks_to_ms(delta_ticks: u64, period: f32) -> f64 {
     let hi = u32::try_from(delta_ticks >> 32).unwrap_or(u32::MAX);
     let lo = u32::try_from(delta_ticks & 0xffff_ffff).unwrap_or(u32::MAX);
@@ -469,26 +470,26 @@ pub(crate) fn ticks_to_ms(delta_ticks: u64, period: f32) -> f64 {
 }
 
 /// One pass ms from a begin/end tick pair; inverted pairs read zero. Pure.
-#[cfg(feature = "window")]
+#[cfg(any(feature = "window", test))]
 pub(crate) fn pass_ms_from_ticks(begin_ticks: u64, end_ticks: u64, period: f32) -> f64 {
     ticks_to_ms(end_ticks.saturating_sub(begin_ticks), period)
 }
 
 /// Query pair for one compiled-order position. Pure.
-#[cfg(feature = "window")]
+#[cfg(any(feature = "window", test))]
 pub(crate) fn query_pair(pos: usize) -> (u32, u32) {
     let begin = u32::try_from(pos.saturating_mul(2)).unwrap_or(u32::MAX);
     (begin, begin.saturating_add(1))
 }
 
 /// Query count for a submit: two timestamps per pass. Pure.
-#[cfg(feature = "window")]
+#[cfg(any(feature = "window", test))]
 pub(crate) fn timestamp_query_count(passes: usize) -> u32 {
     u32::try_from(passes.saturating_mul(2)).unwrap_or(u32::MAX)
 }
 
 /// All-`None` timings for a submit that skipped or lost its queries. Pure.
-#[cfg(feature = "window")]
+#[cfg(any(feature = "window", test))]
 pub(crate) fn none_gpu_timings(passes: usize) -> Vec<Option<f64>> {
     let mut rows = Vec::with_capacity(passes);
     for _ in 0..passes {
@@ -499,7 +500,7 @@ pub(crate) fn none_gpu_timings(passes: usize) -> Vec<Option<f64>> {
 
 /// Decode a resolved buffer (`2 * passes` little-endian u64) to per-pass
 /// ms; short tails and bad samples degrade to `None`. Pure.
-#[cfg(feature = "window")]
+#[cfg(any(feature = "window", test))]
 pub(crate) fn decode_pass_bytes(bytes: &[u8], passes: usize, period: f32) -> Vec<Option<f64>> {
     let mut rows = Vec::with_capacity(passes);
     for pos in 0..passes {
@@ -1156,6 +1157,179 @@ mod tests {
                     .all(|timing| timing.gpu_ms.is_none()),
                 "fallback wires None per pass: {wired:?}"
             );
+        }
+    }
+
+    // ----- PF25 pass timings (row `pass_timing`): resolution math + receipt -----
+    // One timestamp pair per compiled pass. The resolution helpers are pure,
+    // so the math test below runs on the headless twin; only the device
+    // receipt needs `window` (and a real adapter).
+
+    /// Resolution math: ticks to ms through the queue period, an inverted
+    /// pair reading zero, and a missing timing staying `None` (never a fake
+    /// zero). Runs headless: the helpers use no wgpu type.
+    #[test]
+    fn pass_timing_math_reads_ticks_and_keeps_missing_none() {
+        // 1e6 ns is one ms; the queue period is ns per tick.
+        assert_eq!(ticks_to_ms(0, 1.0), 0.0);
+        assert!((ticks_to_ms(1_000_000, 1.0) - 1.0).abs() < 1e-9);
+        assert!((ticks_to_ms(2_500, 2.0) - 0.005).abs() < 1e-9);
+        // The hi/lo split keeps a wide delta finite instead of saturating.
+        let wide = u64::MAX >> 1;
+        let ms = ticks_to_ms(wide, 1.0);
+        assert!(ms.is_finite() && ms > 0.0, "wide delta stays finite: {ms}");
+        // A pass reads end-minus-begin; an inverted or empty pair reads zero.
+        assert!((pass_ms_from_ticks(10, 11_010, 1.0) - 0.011).abs() < 1e-9);
+        assert_eq!(
+            pass_ms_from_ticks(50, 20, 1.0),
+            0.0,
+            "inverted pair is zero"
+        );
+        assert_eq!(pass_ms_from_ticks(7, 7, 1.0), 0.0, "empty pair is zero");
+        // A missing timing stays None: the all-None submit and a short tail.
+        assert_eq!(none_gpu_timings(3), vec![None, None, None]);
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&100u64.to_le_bytes());
+        bytes.extend_from_slice(&1_100u64.to_le_bytes());
+        let rows = decode_pass_bytes(&bytes, 2, 1.0);
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[0].is_some_and(|sample| (sample - 0.001).abs() < 1e-9),
+            "a full pair resolves"
+        );
+        assert_eq!(rows[1], None, "a missing pair stays None, never zero");
+        // resolve_gpu_ms ignores extras and leaves a None sample unresolved.
+        let mut receipt = ExecReceipt {
+            frame_index: 0,
+            draws: 0,
+            triangles: 0,
+            per_pass_cpu_ms: vec![ExecPassTiming::new("a", 1), ExecPassTiming::new("b", 1)],
+            total_cpu_ms: 2,
+        };
+        receipt
+            .resolve_gpu_ms(&[Some(0.25), None])
+            .expect("finite sample resolves");
+        assert_eq!(receipt.per_pass_cpu_ms[0].gpu_ms, Some(0.25));
+        assert_eq!(
+            receipt.per_pass_cpu_ms[1].gpu_ms, None,
+            "missing stays None"
+        );
+    }
+
+    /// Nearest-rank percentile of already-sorted samples; 0.0 when empty.
+    #[cfg(feature = "window")]
+    fn percentile(sorted: &[f64], rank: usize) -> f64 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        let n = sorted.len();
+        let idx = (n * rank).div_ceil(100).max(1) - 1;
+        sorted[idx.min(n - 1)]
+    }
+
+    /// Device receipt: submit the arena graph many frames on the real adapter,
+    /// read the QuerySet back and print per-pass p50/p99 GPU ms plus the frame
+    /// total, naming the slowest pass. Without `TIMESTAMP_QUERY` the samples
+    /// stay `None` and the test says so instead of printing a fake number.
+    #[cfg(feature = "window")]
+    #[test]
+    fn pass_timing_gpu_per_pass_p50_over_120_frames() {
+        const FRAMES: u64 = 120;
+        let Some((device, queue, info)) = crate::graph::gx1_test_device() else {
+            eprintln!("SKIPPED pass_timing gpu: no wgpu adapter on this machine");
+            return;
+        };
+        let supported = timestamp_supported(device);
+        eprintln!(
+            "pass_timing gpu: adapter='{}' backend={:?} driver='{} {}' TIMESTAMP_QUERY={supported} period_ns={}",
+            info.name,
+            info.backend,
+            info.driver,
+            info.driver_info,
+            queue.get_timestamp_period()
+        );
+        let plan = crate::graph::arena_frame_graph()
+            .compile()
+            .expect("arena graph is acyclic");
+        let names: Vec<String> = plan
+            .order()
+            .iter()
+            .filter_map(|id| plan.pass(*id).map(|desc| desc.name.clone()))
+            .collect();
+        assert_eq!(
+            names.len(),
+            plan.order().len(),
+            "every ordered pass has a name"
+        );
+        let mut submitter = crate::graph::GpuSubmitter::new(device);
+        let mut samples: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
+        let mut totals: Vec<f64> = Vec::with_capacity(usize::try_from(FRAMES).unwrap_or(0));
+        for index in 0..FRAMES {
+            let receipt = plan
+                .submit_gpu(
+                    device,
+                    queue,
+                    &crate::graph::gx1_test_frame(index),
+                    &mut submitter,
+                )
+                .expect("timestamp submit runs");
+            assert!(receipt.is_clean(), "no validation error with timestamps");
+            assert_eq!(
+                receipt.per_pass_gpu_ms.len(),
+                names.len(),
+                "one sample per compiled pass"
+            );
+            let mut total = 0.0;
+            for (pos, sample) in receipt.per_pass_gpu_ms.iter().enumerate() {
+                if let (Some(ms), Some(rows)) = (sample, samples.get_mut(pos)) {
+                    assert!(ms.is_finite() && *ms >= 0.0, "device ms is finite");
+                    rows.push(*ms);
+                    total += *ms;
+                }
+            }
+            totals.push(total);
+        }
+        if supported {
+            for (pos, rows) in samples.iter().enumerate() {
+                assert_eq!(
+                    rows.len(),
+                    usize::try_from(FRAMES).unwrap_or(0),
+                    "pass {pos} resolved every frame"
+                );
+            }
+        } else {
+            assert!(
+                samples.iter().all(Vec::is_empty),
+                "no TIMESTAMP_QUERY: every per-pass sample stays None"
+            );
+            eprintln!(
+                "pass_timing gpu: adapter lacks TIMESTAMP_QUERY; per-pass ms stays None (no fake numbers)"
+            );
+        }
+        let mut ranked: Vec<(String, f64, f64)> = Vec::with_capacity(names.len());
+        for (pos, rows) in samples.iter().enumerate() {
+            let mut sorted = rows.clone();
+            sorted.sort_by(f64::total_cmp);
+            let name = names.get(pos).cloned().unwrap_or_default();
+            ranked.push((name, percentile(&sorted, 50), percentile(&sorted, 99)));
+        }
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        eprintln!("pass_timing gpu: per-pass GPU ms over {FRAMES} frames, slowest first");
+        for (name, p50, p99) in &ranked {
+            eprintln!("pass_timing gpu:   {name:<12} p50={p50:.4} p99={p99:.4}");
+        }
+        totals.sort_by(f64::total_cmp);
+        eprintln!(
+            "pass_timing gpu: frame total p50={:.4} p99={:.4} ms",
+            percentile(&totals, 50),
+            percentile(&totals, 99)
+        );
+        match ranked.first() {
+            Some((slowest, p50, _)) => {
+                eprintln!("pass_timing gpu: slowest pass = {slowest} (p50={p50:.4} ms)");
+                assert!(!slowest.is_empty(), "the slowest pass is named");
+            }
+            None => panic!("the arena graph has passes, so one is slowest"),
         }
     }
 }

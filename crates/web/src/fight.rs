@@ -35,8 +35,20 @@ pub const MATCH_TICKS: u32 = 36_000;
 /// Seed of the page's match; the native arena's default seed.
 pub const MATCH_SEED: u64 = 2040;
 /// Half-extent of the arena the page plays in, meters. The duel spawns at random points in a box
-/// whose limit is this extent minus a fighter radius; 12 is the native arena's own default.
+/// whose limit is this extent minus a fighter radius; 12 is the native arena's own default and
+/// what the shipped page draws. The kit's corridor is narrower (z ±9.5, gate from x=7), so the
+/// kit stays a preview: see the `2026-10-20T00:35Z` row in `docs/BLOCKERS.md`.
 pub const HALF_EXTENT_M: f32 = 12.0;
+
+/// The kit corridor's free ground, meters, with the eye kept a margin off its walls: the walls'
+/// inner faces at z ±9.5, the gate's at x 7, the stands' at x -14.
+const KIT_EYE_BOUNDS: engine_render::procedural_arena::EyeBounds =
+    engine_render::procedural_arena::EyeBounds {
+        min_x: -12.5,
+        max_x: 6.0,
+        min_z: -8.8,
+        max_z: 8.8,
+    };
 /// Ticks a round-ending K.O. banner stays up, at the fixed 60 Hz rate: one and a quarter
 /// seconds. The match pauses for it, so the last pose and the empty bar stay on screen.
 pub const KO_HOLD_TICKS: u32 = 75;
@@ -439,10 +451,14 @@ impl Match {
                 shake: self.shake(),
                 t_s,
             };
-            list.camera = self
-                .arena
-                .shoulder_camera(width, height, view)
-                .map_err(|e| MatchError::Camera(e.to_string()))?;
+            // The kit's corridor is a rectangle, not a ring: keep the eye inside its walls too.
+            let camera = if self.kit.is_some() {
+                self.arena
+                    .shoulder_camera_in(width, height, view, KIT_EYE_BOUNDS)
+            } else {
+                self.arena.shoulder_camera(width, height, view)
+            };
+            list.camera = camera.map_err(|e| MatchError::Camera(e.to_string()))?;
         }
         self.cam = [
             list.camera.eye.x,

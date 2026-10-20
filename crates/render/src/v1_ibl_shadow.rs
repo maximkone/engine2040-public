@@ -206,28 +206,64 @@ pub fn sample(env: &EnvMap, dir: [f32; 3]) -> Result<[f32; 3], SampleError> {
     Ok(mix(mix(a, b, fx), mix(c, e, fx), fy))
 }
 
-/// Fixed 8-neighbor ring for the prefilter kernel (compass offsets, unit-ish
-/// radius); with the center tap the kernel is 9 taps, equal-weighted.
-pub const PREFILTER_RING: [[f32; 2]; 8] = [
-    [1.0, 0.0],
-    [1.0, 1.0],
-    [0.0, 1.0],
-    [-1.0, 1.0],
-    [-1.0, 0.0],
-    [-1.0, -1.0],
-    [0.0, -1.0],
-    [1.0, -1.0],
-];
-/// Tangent-plane spread of the ring at roughness 1 (~0.35 rad of blur).
-pub const PREFILTER_SPREAD: f32 = 0.35;
+/// Importance samples per prefilter probe: fixed and deterministic.
+pub const PREFILTER_SAMPLES: u32 = 256;
 
-/// Roughness-blurred radiance stub over the HDRI: roughness 0 returns the
-/// direct [`sample`]; above 0 the 9-tap ring spreads on the tangent plane
-/// proportionally to roughness and averages. Equal weights keep the
-/// brightest-spot monotonic property the tests pin: blurring a global-max
-/// neighborhood can only dilute it. R4 replaces the kernel with mip levels;
-/// the (`dir`, `roughness`) signature stays.
+/// Radical inverse of `bits` in base 2 (van der Corput), `0..1`.
+fn radical_inverse_vdc(mut bits: u32) -> f32 {
+    bits = (bits << 16) | (bits >> 16);
+    bits = ((bits & 0x5555_5555) << 1) | ((bits & 0xAAAA_AAAA) >> 1);
+    bits = ((bits & 0x3333_3333) << 2) | ((bits & 0xCCCC_CCCC) >> 2);
+    bits = ((bits & 0x0F0F_0F0F) << 4) | ((bits & 0xF0F0_F0F0) >> 4);
+    bits = ((bits & 0x00FF_00FF) << 8) | ((bits & 0xFF00_FF00) >> 8);
+    f32::from_bits(0x3F80_0000 | (bits >> 9)) - 1.0
+}
+
+/// One Hammersley point `(i/n, radical inverse base 2)`, fixed order.
+fn hammersley(i: u32, n: u32) -> [f32; 2] {
+    let i_f = f32::from(u16::try_from(i).unwrap_or(0));
+    let n_f = f32::from(u16::try_from(n.max(1)).unwrap_or(1));
+    [i_f / n_f, radical_inverse_vdc(i)]
+}
+
+/// A GGX half-vector in the `(t, b, n)` tangent frame: Epic's
+/// importance sample, the same lobe shape `ibl.rs` uses for the BRDF LUT.
+fn importance_sample_ggx(
+    xi: [f32; 2],
+    roughness: f32,
+    t: [f32; 3],
+    b: [f32; 3],
+    n: [f32; 3],
+) -> [f32; 3] {
+    let alpha = roughness * roughness;
+    let phi = std::f32::consts::TAU * xi[0];
+    let denominator = (1.0 + (alpha * alpha - 1.0) * xi[1]).max(1e-9);
+    let cos_theta = ((1.0 - xi[1]) / denominator).sqrt().min(1.0);
+    let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+    let (sin_phi, cos_phi) = phi.sin_cos();
+    [
+        t[0] * (cos_phi * sin_theta) + b[0] * (sin_phi * sin_theta) + n[0] * cos_theta,
+        t[1] * (cos_phi * sin_theta) + b[1] * (sin_phi * sin_theta) + n[1] * cos_theta,
+        t[2] * (cos_phi * sin_theta) + b[2] * (sin_phi * sin_theta) + n[2] * cos_theta,
+    ]
+}
+
+/// Roughness-blurred radiance over the HDRI: roughness 0 returns the direct
+/// [`sample`]; above 0 the GGX lobe is importance-sampled with a Hammersley
+/// sequence and weighted by `N·L` (the split-sum prefilter). Fixed sample
+/// count and fixed order keep the result bit-identical per input.
 pub fn prefilter(env: &EnvMap, dir: [f32; 3], roughness: f32) -> Result<[f32; 3], SampleError> {
+    prefilter_with(env, dir, roughness, PREFILTER_SAMPLES)
+}
+
+/// [`prefilter`] with an explicit sample count; tests compare the shipped
+/// count against a dense 4096-sample reference.
+fn prefilter_with(
+    env: &EnvMap,
+    dir: [f32; 3],
+    roughness: f32,
+    samples: u32,
+) -> Result<[f32; 3], SampleError> {
     if !roughness.is_finite() || !(0.0..=1.0).contains(&roughness) {
         return Err(SampleError::RoughnessOutOfRange(roughness));
     }
@@ -248,26 +284,41 @@ pub fn prefilter(env: &EnvMap, dir: [f32; 3], roughness: f32) -> Result<[f32; 3]
             a[0] * b[1] - a[1] * b[0],
         ]
     };
-    let mut t = cross(helper, d);
-    let tl = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt().max(1e-12);
-    t = [t[0] / tl, t[1] / tl, t[2] / tl];
-    let b = cross(d, t);
     let norm = |v: [f32; 3]| {
         let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
         [v[0] / l, v[1] / l, v[2] / l]
     };
-    let s = roughness * PREFILTER_SPREAD;
-    let mut acc = sample(env, d)?;
-    for [ox, oy] in PREFILTER_RING {
-        let off = norm([
-            d[0] + (t[0] * ox + b[0] * oy) * s,
-            d[1] + (t[1] * ox + b[1] * oy) * s,
-            d[2] + (t[2] * ox + b[2] * oy) * s,
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let t = norm(cross(helper, d));
+    let b = cross(d, t);
+    let count = samples.max(1);
+    let mut acc = [0.0f32; 3];
+    let mut weight = 0.0f32;
+    for i in 0..count {
+        let h = importance_sample_ggx(hammersley(i, count), roughness, t, b, d);
+        // N = V = d: reflect the view about H.
+        let vdh = dot(d, h);
+        let l = norm([
+            2.0 * vdh * h[0] - d[0],
+            2.0 * vdh * h[1] - d[1],
+            2.0 * vdh * h[2] - d[2],
         ]);
-        let tap = sample(env, off)?;
-        acc = [acc[0] + tap[0], acc[1] + tap[1], acc[2] + tap[2]];
+        let ndotl = dot(d, l).max(0.0);
+        if ndotl <= 0.0 {
+            continue;
+        }
+        let tap = sample(env, l)?;
+        acc = [
+            acc[0] + tap[0] * ndotl,
+            acc[1] + tap[1] * ndotl,
+            acc[2] + tap[2] * ndotl,
+        ];
+        weight += ndotl;
     }
-    Ok([acc[0] / 9.0, acc[1] / 9.0, acc[2] / 9.0])
+    if weight <= 1e-9 {
+        return sample(env, d);
+    }
+    Ok([acc[0] / weight, acc[1] / weight, acc[2] / weight])
 }
 
 /// Mean texel radiance (f64 accumulation, fixed order): exposure calibration
@@ -631,6 +682,25 @@ mod tests {
         // Roughness 0 is the direct sample, exactly.
         let r0 = prefilter(&env, dir, 0.0).expect("roughness 0 prefilters");
         assert_eq!(r0, sample(&env, dir).expect("direct sample"));
+    }
+
+    #[test]
+    fn prefilter_matches_a_dense_ggx_reference() {
+        // LF2 accept: the shipped 256-sample GGX lobe stays within 5% per
+        // channel of a 4096-sample reference at roughness 0.6, so the kernel
+        // is the GGX lobe, not the old 9-tap box ring.
+        let env = load_fixture();
+        let dir = [0.4, 0.35, 0.8];
+        let fast = prefilter(&env, dir, 0.6).expect("shipped kernel");
+        let slow = prefilter_with(&env, dir, 0.6, 4096).expect("dense reference");
+        for channel in 0..3 {
+            let scale = slow[channel].abs().max(1e-3);
+            let error = (fast[channel] - slow[channel]).abs() / scale;
+            assert!(
+                error <= 0.05,
+                "channel {channel} at r0.6: fast {fast:?}, slow {slow:?}"
+            );
+        }
     }
 
     #[test]

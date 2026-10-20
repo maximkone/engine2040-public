@@ -216,9 +216,17 @@ fn replay_bisect(
     service: &McpServer,
     args: &ReplayBisectArgs,
 ) -> Result<ReplayBisectReport, McpToolError> {
-    service.dispatch(TOOL_REPLAY_BISECT, |_| {
-        replay_report(&args.as_replay(), true).map(ReplayBisectReport::from)
-    })
+    service.dispatch(TOOL_REPLAY_BISECT, |_| replay_bisect_core(args))
+}
+
+/// The body behind [`replay_bisect`]: metric mode delegates to the replay
+/// pack's receipt bisect, chain mode keeps the RB1 binary search. Split out so
+/// the verify-feature route is testable without a server.
+fn replay_bisect_core(args: &ReplayBisectArgs) -> Result<ReplayBisectReport, McpToolError> {
+    if let Some(metric) = args.metric.as_deref() {
+        return crate::packs::replay::bisect_metric_report(args, metric);
+    }
+    replay_report(&args.as_replay(), true).map(ReplayBisectReport::from)
 }
 
 crate::e2_tool!(
@@ -709,6 +717,30 @@ mod tests {
         let hit = replay_report(&dirty, false).expect("dirty verifies");
         assert_eq!(hit.tick, Some(8), "{hit:?}");
         assert_eq!(replay_report(&dirty, true).expect("dirty bisects"), hit);
+    }
+
+    /// The verify feature's `replay.bisect` must route a metric request to the
+    /// receipt bisect, not the tape body: same seeded crossing, same answer.
+    #[test]
+    fn replay_bisect_routes_metric_mode_under_the_verify_pack() {
+        let mut receipts = vec![1.0f64; 120];
+        for value in receipts.iter_mut().skip(41) {
+            *value = 12.0;
+        }
+        let args = ReplayBisectArgs {
+            ticks: Some(120),
+            metric: Some("sunk_cm_max".to_string()),
+            floor: Some(3.0),
+            receipts: Some(receipts),
+            ..ReplayBisectArgs::default()
+        };
+        let first = replay_bisect_core(&args).expect("metric mode routes");
+        assert_eq!(first.tick, Some(41), "seeded crossing: {first:?}");
+        assert!(!first.clean);
+        assert_eq!(first.metric.as_deref(), Some("sunk_cm_max"));
+        assert_eq!(first.value, Some(12.0));
+        let second = replay_bisect_core(&args).expect("repeats");
+        assert_eq!(first, second, "same receipts name the same tick twice");
     }
 
     #[test]

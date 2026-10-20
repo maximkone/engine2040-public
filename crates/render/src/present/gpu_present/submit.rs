@@ -551,6 +551,17 @@ impl Presenter {
         let hdr_view = hdr.create_view(&wgpu::TextureViewDescriptor::default());
         let fog_view = fog_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let ao_view = ao_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // LF3 landing 2: the forward pass reads the frame's occlusion field
+        // from group 1. The field is a target texture, so the bind is
+        // rebuilt with the targets; steady frames create no bind groups.
+        let ao_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ra1-ao-field-bind"),
+            layout: &self.ao_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&ao_view),
+            }],
+        });
         // The blit bind group is rebuilt with the targets (not per frame),
         // so steady-state frames allocate no bind groups or pipelines.
         let blit_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -699,6 +710,7 @@ impl Presenter {
             depth_texture,
             fog_texture,
             ao_texture,
+            ao_bind,
             gtao,
             id_texture,
             id_view,
@@ -904,6 +916,55 @@ impl Presenter {
         (list.camera.eye - list.camera.target).length()
     }
 
+    /// LF3 landing 2: the depth prepass. It draws the list's depth with the
+    /// depth-only pipelines so the GTAO kernel can read the frame's depth
+    /// before the forward pass shades it. The forward pass then clears the
+    /// depth and writes it again, so the frame's final depth is the one the
+    /// forward pass wrote, exactly as before this landing.
+    pub(super) fn encode_depth_prepass(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        list: &DrawList,
+    ) {
+        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ra1-depth-prepass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &targets.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
+        let order = rl32_submit_order(list, &mut order_buf);
+        for &draw in order {
+            let item = &list.items[draw];
+            let (Some(mesh), Some(bind)) = (self.meshes.get(&item.mesh), self.draw_bind(draw))
+            else {
+                continue;
+            };
+            let skin_block = self.skin_blocks.get(&item.mesh).copied();
+            rp.set_pipeline(if skin_block.is_some() {
+                &self.depth_skinned_pipeline
+            } else {
+                &self.depth_pipeline
+            });
+            let offset = u32::try_from(draw * MATERIAL_STRIDE).unwrap_or(0);
+            let joints = skin_block.map_or(0, skin_block_offset);
+            rp.set_bind_group(0, bind, &[offset, joints]);
+            rp.set_vertex_buffer(0, mesh.vertex.slice(..));
+            rp.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..mesh.count, 0, 0..1);
+        }
+    }
+
     /// Forward pass: clear, draw the list, then the sky at the far plane so
     /// the depth test rejects every covered pixel, inside the pass or in its
     /// own pass per the [`SkyPlan`]. `look` carries the frame's pass switches
@@ -1004,8 +1065,12 @@ impl Presenter {
             multiview_mask: None,
         });
         rp.set_pipeline(pipeline);
+        // LF3 landing 2: the frame's occlusion field (group 1). The forward
+        // pass scales its ambient diffuse by it; the field belongs to the
+        // frame, so one bind serves every draw.
+        rp.set_bind_group(1, &targets.ao_bind, &[]);
         // The skinned pipeline binds only while a skinned group draws: a
-        // mesh uploaded with a skin block carries 64-byte vertices and reads
+        // mesh uploaded with a skin block carries 80-byte vertices and reads
         // its joint block through the dynamic offset at binding 7.
         let mut skinned_bound = false;
         // RL32: sorted groups over the borrowed index list; one bind plus
@@ -1362,9 +1427,13 @@ impl Presenter {
         // Sun depth is owned by the EG11 lane; record zero time so the
         // forward pass runs while that map type lands.
         self.encode_sun_depth(&mut enc, list)?;
+        // LF3 landing 2: the capture twin runs the same occlusion field as
+        // the live frame, so the capture and the window agree.
+        let gtao_run = self.gtao_live_plan(true, width, height);
         {
             let targets = self.targets.as_ref().expect("ensured above");
             let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
+            self.encode_ao_field(&mut enc, targets, list, &frame, gtao_run, None)?;
             self.encode_forward(&mut enc, targets, list, ForwardLook::blocking());
             // RL9 depth-readback seam: this frame's depth feeds the fog
             // tranche below (same queue order, so the copy sees the
@@ -1663,8 +1732,12 @@ pub(crate) const SKIN_BLOCKS: usize = 16;
 /// Bytes of the `skin_params` uniform (`SkinParams` in the shader).
 pub(super) const SKIN_PARAMS_BYTES: u64 = 16;
 /// Skinned vertex stride in bytes: pos(12) + normal(12) + uv(8) +
-/// joints(4 x u32, 16) + weights(4 x f32, 16). Matches `SIn` in the shader.
-pub(super) const SKINNED_VERTEX_STRIDE: u64 = 64;
+/// tangent(16) + joints(4 x u32, 16) + weights(4 x f32, 16). Matches `SIn`
+/// in the shader; the tangent carries the mesh frame with handedness in w
+/// (EG12 slice c), so a normal map on a skinned body is not distorted.
+pub(super) const SKINNED_VERTEX_STRIDE: u64 = 80;
+/// Byte offset of the tangent inside one skinned vertex.
+pub(super) const SKINNED_TANGENT_OFFSET: u64 = 32;
 const _: () = assert!(SKIN_BLOCK_JOINTS * 64 == 4096);
 const _: () = assert!(SKIN_BLOCK_STRIDE.is_multiple_of(256));
 const _: () = assert!(SKIN_BLOCKS >= 8, "eight fighters each get a block");
@@ -2088,8 +2161,9 @@ const STATIC_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
 ];
 
 /// Vertex attributes of the skinned entry `vs_skinned` (`SIn`): pos, normal,
-/// uv, four joint indices and four weights, with no tangent.
-const SKINNED_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
+/// uv, the tangent with handedness, four joint indices and four weights.
+/// Offsets follow the 80-byte skinned vertex.
+const SKINNED_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -2107,13 +2181,19 @@ const SKINNED_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
     },
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Uint32x4,
-        offset: 32,
+        offset: 48,
         shader_location: 3,
     },
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
-        offset: 48,
+        offset: 64,
         shader_location: 4,
+    },
+    // Location 5 carries the tangent with handedness in w (EG12 slice c).
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: SKINNED_TANGENT_OFFSET,
+        shader_location: 5,
     },
 ];
 
@@ -2131,6 +2211,7 @@ pub(super) fn forward_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
+    ao_layout: &wgpu::BindGroupLayout,
     formats: &[wgpu::TextureFormat],
     multisample: wgpu::MultisampleState,
     constants: &[(&str, f64)],
@@ -2139,6 +2220,7 @@ pub(super) fn forward_pipeline(
         device,
         shader,
         layout,
+        ao_layout,
         formats,
         multisample,
         constants,
@@ -2148,12 +2230,13 @@ pub(super) fn forward_pipeline(
 
 /// The skinned twin of [`forward_pipeline`]: same shader, layout, fragment
 /// entry, targets and depth state, with the `vs_skinned` vertex entry over
-/// the 64-byte skinned vertex. A draw reads its joint block through the
+/// the 80-byte skinned vertex. A draw reads its joint block through the
 /// dynamic offset at binding 7.
 pub(super) fn forward_skinned_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
+    ao_layout: &wgpu::BindGroupLayout,
     formats: &[wgpu::TextureFormat],
     multisample: wgpu::MultisampleState,
     constants: &[(&str, f64)],
@@ -2162,6 +2245,7 @@ pub(super) fn forward_skinned_pipeline(
         device,
         shader,
         layout,
+        ao_layout,
         formats,
         multisample,
         constants,
@@ -2175,6 +2259,7 @@ fn forward_pipeline_for(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
+    ao_layout: &wgpu::BindGroupLayout,
     formats: &[wgpu::TextureFormat],
     multisample: wgpu::MultisampleState,
     constants: &[(&str, f64)],
@@ -2183,7 +2268,9 @@ fn forward_pipeline_for(
     use crate::pipeline_warmup::CountedPipelines as _;
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ra1-forward-layout"),
-        bind_group_layouts: &[Some(layout)],
+        // Group 1 carries the LF3 occlusion field (the frame's GTAO
+        // output); group 0 stays the per-draw forward group.
+        bind_group_layouts: &[Some(layout), Some(ao_layout)],
         immediate_size: 0,
     });
     let targets = color_target_states(formats);
@@ -2237,6 +2324,86 @@ fn forward_pipeline_for(
     })
 }
 
+/// The depth-only twins of the forward pipelines: the same vertex entries
+/// (`vs_depth` for the static meshes, `vs_skinned` for the skinned ones) and
+/// no fragment stage. LF3 landing 2: the depth prepass writes the frame's
+/// depth before the forward pass, so the GTAO kernel can build the
+/// occlusion field the forward pass needs for its ambient. The depth state
+/// matches the forward pass (same compare, same cull), so the prepass
+/// leaves the same depth the forward pass would have written.
+pub(super) fn forward_depth_pipelines(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&str, f64)],
+) -> [wgpu::RenderPipeline; 2] {
+    [
+        depth_pipeline(device, shader, layout, constants, false),
+        depth_pipeline(device, shader, layout, constants, true),
+    ]
+}
+
+/// One depth-only pipeline: the vertex entry, the vertex layout and the
+/// depth state of the forward twin, with no fragment stage.
+fn depth_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&str, f64)],
+    skinned: bool,
+) -> wgpu::RenderPipeline {
+    use crate::pipeline_warmup::CountedPipelines as _;
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("ra1-depth-layout"),
+        // The depth pass shades nothing, so it carries the forward group
+        // alone: the occlusion field belongs to the forward pass.
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    let (entry, stride, attributes): (&str, u64, &[wgpu::VertexAttribute]) = if skinned {
+        (
+            "vs_skinned",
+            SKINNED_VERTEX_STRIDE,
+            &SKINNED_VERTEX_ATTRIBUTES,
+        )
+    } else {
+        ("vs_depth", FORWARD_VERTEX_STRIDE, &STATIC_VERTEX_ATTRIBUTES)
+    };
+    device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
+        label: Some(if skinned {
+            "ra1-depth-skinned-pipeline"
+        } else {
+            "ra1-depth-pipeline"
+        }),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(entry),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: stride,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes,
+            })],
+            compilation_options: guard_options(constants),
+        },
+        fragment: None,
+        primitive: wgpu::PrimitiveState {
+            cull_mode: Some(wgpu::Face::Back),
+            ..wgpu::PrimitiveState::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// Sky pipeline: one fullscreen triangle at the far plane. Depth test
 /// `LessEqual` against the cleared 1.0 passes only where no geometry drew,
 /// and nothing is written, so it costs the uncovered pixels alone.
@@ -2250,6 +2417,8 @@ pub(super) fn sky_pipeline(
     use crate::pipeline_warmup::CountedPipelines as _;
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ra1-sky-layout"),
+        // The sky reads the forward group alone: the occlusion field belongs
+        // to the forward pass, which binds it before the sky triangle.
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });

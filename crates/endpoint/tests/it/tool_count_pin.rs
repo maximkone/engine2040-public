@@ -13,10 +13,11 @@ use engine_endpoint::{
     tools::TOOLS,
 };
 
-/// Reachable tools under `--features mcp`: 13 core + 49 pack verbs (the web pack adds
+/// Reachable tools under `--features mcp`: 13 core + 52 pack verbs (the web pack adds
 /// `build.web`, `serve.web`, `browser.capture` and `browser.input`; the physics
 /// pack adds `physics.read`, `physics.raycast` and `physics.shapecast`; the play
-/// pack adds `play.step_until`, `input.inject` and `state.digest`). The `rules` feature adds 3 (`rules.set`,
+/// pack adds `play.step_until`, `input.inject`, `state.digest`, `seat.open`,
+/// `seat.step` and `seat.close`). The `rules` feature adds 3 (`rules.set`,
 /// `rules.test`, `rules.explain`), the `intake` feature adds 1 (`asset.intake`),
 /// and the `verify` feature adds 3 (`bug.replay`, `trace.summary`,
 /// `verify.proof`; it also moves `replay.verify`/`replay.bisect` into the
@@ -35,7 +36,9 @@ use engine_endpoint::{
 /// 1c70578) moved every arm up by two.
 /// The settings pack adds `settings.get`, `settings.set` and `settings.undo`
 /// (on-demand, not advertised by default), so every arm moves up by three.
-const EXPECTED_ROUTER: usize = 70
+/// The live seat's `seat.open`, `seat.step` and `seat.close` (AIN2) moved every
+/// arm up by three.
+const EXPECTED_ROUTER: usize = 73
     + if cfg!(feature = "rules") { 3 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

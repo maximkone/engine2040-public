@@ -203,7 +203,7 @@ impl Camera {
         }
         let offset = sub(self.position, self.target);
         let distance = dot(offset, offset).sqrt();
-        if !(distance > 1e-4) {
+        if distance.is_nan() || distance <= 1e-4 {
             return self;
         }
         let yaw = offset[0].atan2(offset[2]) + dyaw;
@@ -259,7 +259,7 @@ impl Camera {
         }
         let offset = sub(self.position, self.target);
         let distance = dot(offset, offset).sqrt();
-        if !(distance > 1e-4) {
+        if distance.is_nan() || distance <= 1e-4 {
             return self;
         }
         let new = (distance * factor).clamp(MIN_CAMERA_DISTANCE_M, MAX_CAMERA_DISTANCE_M);

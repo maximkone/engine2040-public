@@ -130,7 +130,7 @@ pub use engine_physics::balance::{BalanceState, GaitPhase};
 /// edge; it is presentation only and the sim never reads it.
 pub use engine_physics::cloth;
 #[cfg(feature = "sim")]
-use engine_physics::controller::{Controller, ControllerSnapshot};
+use engine_physics::controller::{AirTuning, Controller, ControllerSnapshot};
 use engine_physics::limb::{LimbPool, MAX_LIMBS};
 #[cfg(feature = "sim")]
 use engine_physics::rapier::FIXED_DT;
@@ -1958,7 +1958,8 @@ impl Sim {
             return None;
         }
         #[cfg(feature = "sim")]
-        let controllers = {            let mut live = snapshot.controllers;
+        let controllers = {
+            let mut live = snapshot.controllers;
             for (controller, snap) in live.iter_mut().zip(snapshot.controller_snaps.iter()) {
                 controller.restore(snap.clone()).ok()?;
             }
@@ -2051,12 +2052,17 @@ fn resume_inner(snapshot: MatchSnapshot, config: &ArenaConfig, tape: &FighterTap
 fn build_controllers(config: &ArenaConfig, states: &[FighterState]) -> Option<Vec<Controller>> {
     let mut controllers = Vec::with_capacity(states.len());
     for state in states {
+        // AIN6 (owner 2026-10-20 "ARM GOO ALL"): the sim controller runs the
+        // shaped air table (ramp, apex gravity, 0.12 s coyote, jump hold).
+        // The presentation leg owns its own locomotion; this arms every sim
+        // match and its snapshots. Presentation never reads the table.
         let mut controller = Controller::spawn(
             [state.pos[0], CAPSULE_REST_Y_M, state.pos[2]],
             FIGHTER_RADIUS_M,
             CAPSULE_CYL_H_M,
         )
-        .ok()?;
+        .ok()?
+        .with_air(AirTuning::shaped());
         let half = config.half_extent_m;
         controller
             .add_static_box([half, 0.5, half], [0.0, -0.5, 0.0])

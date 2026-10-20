@@ -1229,6 +1229,21 @@ impl Presenter {
                 debug_assert_eq!(sky_horizon, self.fog_fwd.color);
                 debug_assert_eq!(sky_exposure, self.sky_exposure);
             }
+            // LF3 landing 2: the depth prepass writes the frame's depth, the
+            // GTAO kernel turns it into the occlusion field, and the forward
+            // pass that follows scales its ambient diffuse by that field.
+            // The forward pass then clears the depth and writes it again,
+            // so the frame's final depth is the one it wrote before.
+            gtao_timed = self.encode_ao_field(
+                &mut enc,
+                targets,
+                list,
+                &frame,
+                // The field needs the geometry: a frame with no draws has
+                // nothing to occlude, so the field stays open.
+                gtao_run && look.forward,
+                timer.map(|(timer, _)| timer.gtao_writes()),
+            )?;
             let forward_ibl_started = engine_clock::now();
             // The particle batch is the probe tranche's own draw (QL12): a
             // live frame stages nothing, so it draws nothing and its pixels
@@ -1240,24 +1255,15 @@ impl Presenter {
                 ForwardLook::live(&look, sky_draw, gtao_run, timer.map(|(timer, _)| timer)),
             );
             forward_ibl_ms = engine_clock::since(forward_ibl_started).as_secs_f64() * 1000.0;
-            // LF3: GTAO on the stored forward depth, on the device, writing
-            // `ao_tex` for the blit below (no readback, no wait).
-            gtao_timed = gtao_run
-                && self.encode_gtao(
-                    &mut enc,
-                    targets,
-                    &frame,
-                    timer.map(|(timer, _)| timer.gtao_writes()),
-                )?;
-            // LF3 first landing: fresh GTAO after forward, before the blit,
-            // wired through the live helper (`live_ao_upload_for_frame`:
-            // bake via `gtao_live_full_for_forward`, guard via
-            // `check_ao_full_for_blit`, upload via `write_ao_full`). The
-            // forward-stored depth plus normals feed is absent until the
-            // slice-2 prepass, so the empty feed stays skip (ao_tex keeps
-            // 1.0) with the stale reuse below as fallback. A guard failure
-            // records skip, never fails the frame; ms is evidence only
-            // against `GTAO_BUDGET_MS`.
+            // LF3 first landing: the CPU GTAO helper
+            // (`live_ao_upload_for_frame`: bake via
+            // `gtao_live_full_for_forward`, guard via `check_ao_full_for_blit`,
+            // upload via `write_ao_full`). The forward-stored depth plus
+            // normals feed is absent (the device pass above owns the field
+            // now), so the empty feed stays skip (ao_tex keeps 1.0) with the
+            // stale reuse below as fallback. A guard failure records skip,
+            // never fails the frame; ms is evidence only against
+            // `GTAO_BUDGET_MS`.
             let depth: &[f32] = &[];
             let normals: &[[f32; 3]] = &[];
             let fresh_us = if live_ao_should_bind(render_w, render_h, depth.len(), normals.len()) {
@@ -1447,6 +1453,9 @@ impl Presenter {
         // Per-frame draw binds (base-color resolve after staging).
         self.resolve_draw_binds(list)?;
 
+        // LF3 landing 2: the probe frame runs the same occlusion field as
+        // the live frame, so the window and the capture agree.
+        let gtao_run = self.gtao_live_plan(true, width, height);
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut enc = self
             .device
@@ -1460,6 +1469,7 @@ impl Presenter {
             let targets = self.targets.as_ref().expect("ensured above");
             let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
             let timer = self.gpu_timer.as_ref().zip(timer_slot);
+            self.encode_ao_field(&mut enc, targets, list, &frame, gtao_run, None)?;
             self.encode_forward(
                 &mut enc,
                 targets,

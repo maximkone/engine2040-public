@@ -23,6 +23,7 @@ use std::time::Instant;
 use engine_anim::contract::{skinning_matrices, LocalPose, Skeleton};
 use engine_anim::hit_react::{envelope, DIP_M, PEAK_M};
 use engine_anim::inertial::Inertial;
+use engine_anim::inertialize::{AngularLimiter, DEFAULT_ANG_LIMIT_DEG_PER_SEC};
 use engine_anim::pose::sample_pose_with_rots;
 use engine_arena::cloth::{Cloth, ClothCollider, ClothGrid, ClothParams, ClothTier};
 use engine_arena::GaitPhase;
@@ -516,6 +517,14 @@ const RUN_SPEED_M_PER_TICK: f32 = 0.012;
 const RUN_REF_M_PER_TICK: f32 = 0.05;
 /// Largest facing turn per tick in radians (about 14 degrees).
 const MAX_TURN_PER_TICK: f32 = 0.25;
+/// Seconds of angular budget a limiter lane takes when it is first seeded:
+/// at the look's cap this accepts any pose whole, so a first frame never
+/// ramps in from identity. Presentation only.
+const SEED_S: f32 = 1.0;
+/// Ticks short of a tick's end the limiter reads its wanted pose: the same
+/// hair the inertial switch fold uses, so a swing clip that runs out on this
+/// tick is not sampled a tick before the offsets smooth that cut.
+const LAG_TICKS: f32 = 0.001;
 /// Most parts per body (atlas quadrants); keys reserve 16 per slot.
 const MAX_PARTS: usize = 16;
 /// Pelvis height for a fallen slot: lies flat, below 0.4 m (EG45).
@@ -1335,6 +1344,12 @@ pub struct FighterLook {
     /// and built once at load: a clip switch writes it, every frame reads it.
     /// Empty for a look with no rigs. Presentation only; never hashed.
     inertia: Vec<Inertial>,
+    /// One last-stage rotation limiter per look slot, sized to that slot's rig
+    /// and built once at load: `observe_tick` advances it on the tick's final
+    /// pose, `slot_sample` reads this tick's start and end rotations on every
+    /// frame, so no bone turns faster than 1080 deg/s (18 deg a 60 Hz tick).
+    /// Empty for a look with no rigs. Presentation only; never hashed.
+    limit: Vec<LimitLane>,
     /// The ragdoll layer (RZ2w): one float world, a body per floored slot. Presentation only;
     /// the sim never reads it and nothing in it is hashed.
     ragdoll: RagdollLook,
@@ -1746,6 +1761,79 @@ struct SlotSample {
     slides: [Option<f32>; 2],
 }
 
+/// One slot's angular-speed limiter lanes: the `engine-anim` limiter owns the
+/// cap and the last accepted rotation per bone; this struct keeps this tick's
+/// start and end rotations so a frame at any sub-tick `alpha` reads a pose
+/// between them. Built once per look slot at load; `observe_tick` advances it.
+/// Presentation only; never hashed.
+struct LimitLane {
+    /// Caps each bone's rotation change per tick at
+    /// [`DEFAULT_ANG_LIMIT_DEG_PER_SEC`].
+    limiter: AngularLimiter,
+    /// Rotations the previous tick's output held (this tick's start).
+    from: Vec<[f32; 4]>,
+    /// Rotations this tick's output holds (its end).
+    to: Vec<[f32; 4]>,
+    /// False until the slot's first pose: a first sight takes the pose whole
+    /// instead of ramping in from identity.
+    seeded: bool,
+}
+
+impl LimitLane {
+    /// A lane for `joints` bones at the look's fixed cap, unseeded.
+    fn new(joints: usize) -> Self {
+        Self {
+            limiter: AngularLimiter::new(joints, DEFAULT_ANG_LIMIT_DEG_PER_SEC),
+            from: vec![[0.0, 0.0, 0.0, 1.0]; joints],
+            to: vec![[0.0, 0.0, 0.0, 1.0]; joints],
+            seeded: false,
+        }
+    }
+}
+
+/// One lane per look slot, sized to that slot's rig, like the inertial sets.
+/// Cold path; a rig past the limiter's shape fails the load.
+fn limit_lanes(rigs: &[Rig]) -> Result<Vec<LimitLane>, LookError> {
+    (0..MAX_LOOK_FIGHTERS)
+        .map(|slot| {
+            let rig = rigs
+                .get(rig_index(rigs.len(), slot))
+                .ok_or_else(|| LookError::Skin("limit lanes: no rig".to_string()))?;
+            Ok(LimitLane::new(rig.skeleton.len()))
+        })
+        .collect()
+}
+
+/// Shortest-arc normalized lerp between two unit quats by `t` in `0..=1`;
+/// `t >= 1` reads `b` whole. A degenerate sum reads `a`. Pure.
+fn rot_lerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let w = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if w >= 1.0 {
+        return b;
+    }
+    let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+    let mut q = [
+        a[0] + (b[0] * sign - a[0]) * w,
+        a[1] + (b[1] * sign - a[1]) * w,
+        a[2] + (b[2] * sign - a[2]) * w,
+        a[3] + (b[3] * sign - a[3]) * w,
+    ];
+    let norm = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if norm.is_finite() && norm > 0.0 {
+        for lane in &mut q {
+            *lane /= norm;
+        }
+        q
+    } else {
+        a
+    }
+}
+
 impl FighterLook {
     /// Bind the CT7 bundles under `content_dir`, re-hash every body against
     /// its pin, import bodies plus clips, retarget the clips per rig and
@@ -1779,6 +1867,7 @@ impl FighterLook {
             swing_ticks += 1;
         }
         let inertia = fighter_look_inertia::slot_sets(&rigs)?;
+        let limit = limit_lanes(&rigs)?;
         let ragdoll = Self::ragdoll_for_rigs(&rigs);
         let capes = Capes::for_rigs(&rigs);
         Ok(Self {
@@ -1794,6 +1883,7 @@ impl FighterLook {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia,
+            limit,
             ragdoll,
             limbs: LimbLook::new(),
             capes,
@@ -2087,6 +2177,88 @@ impl FighterLook {
         Ok(pose)
     }
 
+    /// Advance every seen slot's angular limiter to this tick's end pose. The
+    /// wanted pose is the clip plus inertia pose at the tick's end (the very
+    /// pose [`slot_sample`](Self::slot_sample) samples before the feet plant
+    /// and the throw layer, which keep their own bounded motion); the limiter
+    /// caps each bone's change at [`DEFAULT_ANG_LIMIT_DEG_PER_SEC`] over
+    /// `elapsed` ticks. A slot first seen, unseen, ragdolled (physics owns its
+    /// bones), under a forced balance pose (a fall or a kneel lands whole) or
+    /// refused drops to unseeded, so its next pose lands whole instead of
+    /// ramping in from stale or identity rotations. Presentation only; the sim
+    /// hash never reads it. Caller: [`observe_tick`](Self::observe_tick) last.
+    pub(super) fn limit_tick(&mut self, elapsed: u32) {
+        let dt = f32::from(u16::try_from(elapsed).unwrap_or(u16::MAX)) / TICK_HZ;
+        for index in 0..MAX_LOOK_FIGHTERS {
+            let slot = self.slots[index];
+            // Read the tick a hair before its end, as the switch fold does: at
+            // exactly 1.0 a swing clip that runs out would sample the *next*
+            // clip a tick before the inertial offsets take over that cut.
+            let wanted = match (slot.seen, self.ragdolled(index)) {
+                (true, false) => self
+                    .rigs
+                    .get(self.rig_for_slot(index))
+                    .and_then(|rig| self.inertial_pose(rig, index, &slot, 1.0 - LAG_TICKS).ok()),
+                _ => None,
+            };
+            // A balance verdict (a fall or a kneel) is a forced pose the look
+            // lands at once, so it takes the whole cap budget instead of
+            // ramping: the limiter guards clip motion, never a floor verdict.
+            // A slot with nothing to pose drops to unseeded too.
+            let ramp = slot.seen
+                && !self.ragdolled(index)
+                && matches!(slot.balance, GaitPhase::Steady | GaitPhase::Stumbling);
+            if !ramp || wanted.is_none() {
+                if let Some(lane) = self.limit.get_mut(index) {
+                    lane.seeded = false;
+                }
+            }
+            if let Some(pose) = &wanted {
+                self.advance_limit(index, &pose.rotations, dt);
+            }
+        }
+    }
+
+    /// Step one slot's limiter toward `wanted` and keep this tick's start and
+    /// end rotations. An unseeded lane takes `wanted` whole: a full second of
+    /// the cap accepts any angle, so the first frame shows the clip rather
+    /// than ramping in from identity. Steady state allocates nothing.
+    fn advance_limit(&mut self, index: usize, wanted: &[[f32; 4]], dt: f32) {
+        let Some(lane) = self.limit.get_mut(index) else {
+            return;
+        };
+        if lane.to.len() != wanted.len() {
+            return;
+        }
+        if !lane.seeded {
+            lane.from.copy_from_slice(wanted);
+            lane.limiter.step(wanted, SEED_S, &mut lane.to);
+            lane.seeded = true;
+            return;
+        }
+        lane.from.copy_from_slice(&lane.to);
+        lane.limiter.step(wanted, dt, &mut lane.to);
+    }
+
+    /// Read the limiter on a frame at sub-tick `alpha`: each bone takes the
+    /// shortest-arc blend from this tick's start rotation to its capped end
+    /// rotation, so the drawn pose never moves faster than the cap and needs
+    /// no state of its own. A slot with no seeded lane, a ragdolled one, or
+    /// one under a forced balance pose (`ramp` false) keeps `rots` as the pose
+    /// gave it: a floor verdict lands whole, never masked by a stale lane.
+    /// Pure.
+    fn limit_pose(&self, index: usize, rots: &mut [[f32; 4]], alpha: f32, ramp: bool) {
+        let Some(lane) = self.limit.get(index) else {
+            return;
+        };
+        if !ramp || !lane.seeded || self.ragdolled(index) {
+            return;
+        }
+        for ((rot, from), to) in rots.iter_mut().zip(&lane.from).zip(&lane.to) {
+            *rot = rot_lerp(*from, *to, alpha);
+        }
+    }
+
     /// Create every slot's body-part vertex buffers once, from the bind
     /// pose, so no fighter ever creates a GPU buffer inside a frame: a
     /// slot that appears late already has its buffers and just rewrites
@@ -2151,7 +2323,9 @@ impl FighterLook {
     /// matrices and interpolated root. Pure fold of the tick plus `alpha`;
     /// the balance lean (EG45) rides along, presentation only. A `Fallen`
     /// gait forces the flat `Down` last frame (like [`slot_pose`](Self::slot_pose)),
-    /// so the floored slot draws flat within one frame.
+    /// so the floored slot draws flat within one frame. The last-stage
+    /// angular-speed cap ([`limit_pose`](Self::limit_pose)) guards the bone
+    /// rotations here, so both the full and the joints-only pose carry it.
     fn slot_sample(
         &self,
         rig: &Rig,
@@ -2161,6 +2335,15 @@ impl FighterLook {
     ) -> Result<SlotSample, LookError> {
         let (clip, time) = self.clip_pick(rig, slot, alpha);
         let mut pose = self.inertial_pose(rig, index, slot, alpha)?;
+        // Last-stage angular-speed cap: each bone turns no faster than
+        // `DEFAULT_ANG_LIMIT_DEG_PER_SEC`, its state advanced once in
+        // `observe_tick`. Before the feet plant and the throw layer, so the
+        // IK still lands the ankles on their held spots and the throw arm
+        // keeps its cue timeline; both have their own bounded per-tick motion.
+        // A held slot reads the end of its tick, like its clip clock.
+        let at = clip_alpha(slot, alpha);
+        let ramp = matches!(slot.balance, GaitPhase::Steady | GaitPhase::Stumbling);
+        self.limit_pose(index, &mut pose.rotations, at, ramp);
         let (pos, yaw) = slot_root(slot, alpha);
         // LF12: plant the feet last, on top of the inertial offsets, so a clip
         // switch stays continuous and the feet hold their spot on the sand.
@@ -2357,9 +2540,10 @@ impl FighterLook {
 
     /// Headless bout folded into one `arena view:` receipt line, with no
     /// `Presenter` and no window: steps a bout, observes each tick and poses
-    /// joints-only. Zero ticks fold no frame and read as `""`; otherwise the
-    /// view laws line. The same seed gives the same line twice; the sim hash
-    /// never reads it.
+    /// the full CPU skin, so the bounds are the exact posed vertices and the
+    /// sand-rest rule matches the window's line. Zero ticks fold no frame and
+    /// read as `""`; otherwise the view laws line. The same seed gives the
+    /// same line twice; the sim hash never reads it.
     /// Caller: `crates/endpoint/src/packs/view.rs` (SP62 `view.laws` pops this
     /// line); public so that door can reach it without a `Presenter`.
     pub fn view_run(seed: u64, ticks: u32, fighters: u8) -> Result<String, LookError> {
@@ -2399,8 +2583,12 @@ impl FighterLook {
                 "app mirror and look freeze agree at tick {tick}"
             );
             look.observe_live_balances(app.live_match(), usize::from(fighters));
-            let joints = look.pose_frame_joints(usize::from(fighters), 0.5)?;
-            laws.note(&camera, f64::from(tick) + 0.5, &joints);
+            let bodies: Vec<crate::view_truth::BodyTruth> = look
+                .pose_frame(usize::from(fighters), 0.5)?
+                .into_iter()
+                .map(|posed| posed.truth)
+                .collect();
+            laws.note(&camera, f64::from(tick) + 0.5, &bodies);
         }
         Ok(laws.line().unwrap_or_default())
     }
@@ -2922,6 +3110,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            limit: Vec::new(),
             ragdoll: RagdollLook::empty(),
             limbs: LimbLook::empty(),
             capes: Capes::empty(),
@@ -2991,6 +3180,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            limit: Vec::new(),
             ragdoll: RagdollLook::empty(),
             limbs: LimbLook::empty(),
             capes: Capes::empty(),
@@ -3262,6 +3452,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            limit: Vec::new(),
             ragdoll: RagdollLook::empty(),
             limbs: LimbLook::empty(),
             capes: Capes::empty(),
@@ -3512,6 +3703,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            limit: Vec::new(),
             ragdoll: RagdollLook::empty(),
             limbs: LimbLook::empty(),
             capes: Capes::empty(),
@@ -4108,6 +4300,30 @@ mod tests {
         Some((look, presenter))
     }
 
+    /// One GPU-skinned frame creates no bind group and, the first time a seen
+    /// slot's cape pins, only that cape's two cloth buffers (RZ7, cold). Every
+    /// other frame and every body part rewrites resident buffers. `cloth`
+    /// carries the published count between frames.
+    fn assert_frame_creates(
+        until: u32,
+        before: (u64, u64),
+        after: (u64, u64),
+        published: u64,
+        cloth: &mut u64,
+    ) {
+        let fresh = published.saturating_sub(*cloth);
+        *cloth = published;
+        assert_eq!(
+            after.1, before.1,
+            "a GPU-skinned frame creates no bind group (tick {until})"
+        );
+        assert_eq!(
+            after.0 - before.0,
+            2 * fresh,
+            "a frame creates only the cloth of a newly pinned cape (tick {until})"
+        );
+    }
+
     /// One scripted tick of a four-fighter ring: a hit on slot 1 at tick 20
     /// (flash), slot 2 knocked down at tick 21 and held down after. Call it
     /// for every tick from 0, in order.
@@ -4173,6 +4389,7 @@ mod tests {
             .sum();
         // Ticks that show a flash (24), the deepest sand lift (26) and a body
         // at rest on the sand (75), each compared frame for frame.
+        let mut cloth = 0u64;
         for until in 0..=75u32 {
             brawl_step(&mut cpu_look, until);
             brawl_step(&mut gpu_look, until);
@@ -4183,15 +4400,13 @@ mod tests {
             let cpu_report = cpu_look
                 .present_into(&mut cpu, &mut cpu_list, &frame)
                 .expect("cpu frame stages");
-            let created = gpu.gpu_create_totals();
+            let before = gpu.gpu_create_totals();
             let gpu_report = gpu_look
                 .present_into(&mut gpu, &mut gpu_list, &frame)
                 .expect("gpu frame stages");
-            assert_eq!(
-                gpu.gpu_create_totals(),
-                created,
-                "a GPU-skinned frame creates no buffer or bind group (tick {until})"
-            );
+            let now = gpu.gpu_create_totals();
+            let published = u64::try_from(gpu_look.capes().1).unwrap_or(u64::MAX);
+            assert_frame_creates(until, before, now, published, &mut cloth);
             assert_eq!(cpu_report.draws, gpu_report.draws, "same draws");
             assert_eq!(gpu_report.skin.uploaded, parts, "every part is resident");
             assert!(gpu_report.skin.pose_us > 0, "the bounds still pose on CPU");
@@ -4337,7 +4552,25 @@ mod tests {
             .iter()
             .find(|body| body.truth.slot == 0)
             .expect("slot 0 is posed");
-        assert_eq!(upright.lift, 0.0, "an upright body is not lifted");
+        // Since 01572b00 the sand rest covers every body, lift-only: a
+        // standing pose whose foot dips is nudged up to the sand by its own
+        // dip and never rides the downed body's lift or gets pushed down.
+        assert!(
+            upright.lift >= 0.0,
+            "an upright lift never pushes down, got {} m",
+            upright.lift
+        );
+        assert!(
+            upright.lift <= 0.05,
+            "an upright body is nudged by its own dip only, got {} m",
+            upright.lift
+        );
+        assert!(
+            upright.lift == 0.0 || upright.truth.min[1].abs() < 1e-6,
+            "a lifted upright body rests on the sand: lift {} m, lowest {} m",
+            upright.lift,
+            upright.truth.min[1]
+        );
         let rig = &look.rigs[look.rig_for_slot(2)];
         let slot = look.slots[2];
         let sample = look.slot_sample(rig, 2, &slot, 0.5).expect("sample");
@@ -4806,6 +5039,11 @@ mod tests {
         assert!(staged >= MAX_LOOK_FIGHTERS, "every slot owns its parts");
         let views = [view(0, -1.0, 0.0), view(1, 1.0, 0.0)];
         look.observe_tick(0, &views, &[1000, 1000], &[]);
+        // RZ7 capes: the first stage publishes each seen fighter's cloth
+        // mesh (a vertex and an index buffer), cold. That is the only
+        // creation a stage may make; every later one rewrites in place.
+        look.stage_bodies(&mut presenter, 2, 0.5)
+            .expect("warm frame stages");
         let created = presenter.gpu_create_totals();
         // A moved pose is what re-sends a part (an upload digest skips only
         // the parts whose bytes are already resident), so every step here
@@ -4846,17 +5084,30 @@ mod tests {
                 "fighter bounds stay compact, got [{dx:.2}, {dy:.2}, {dz:.2}]"
             );
         }
-        // A fighter that shows up later already owns its buffers.
+        // A fighter that shows up later already owns its body buffers; only
+        // its cloth is published now, cold.
         let three = [view(0, -1.0, 0.0), view(1, 1.0, 0.0), view(2, 0.0, 3.0)];
         look.observe_tick(6, &three, &[1000, 1000, 1000], &[]);
+        let cloth_before = look.capes().1;
         let (split, _) = look
             .stage_bodies(&mut presenter, 3, 0.5)
             .expect("late fighter stages");
         assert!(split.upload_us > 0, "the late fighter writes its parts");
+        let cloth = u64::try_from(look.capes().1.saturating_sub(cloth_before)).unwrap_or(u64::MAX);
+        let late = presenter.gpu_create_totals();
+        assert_eq!(
+            late,
+            (created.0 + 2 * cloth, created.1),
+            "the late slot's body rewrites resident buffers; only its cloth is new"
+        );
+        // The frame after that rewrites the new cloth in place too.
+        look.observe_tick(7, &three, &[1000; 3], &[]);
+        look.stage_bodies(&mut presenter, 3, 0.5)
+            .expect("steady frame stages");
         assert_eq!(
             presenter.gpu_create_totals(),
-            created,
-            "late slots rewrite their staged buffers too"
+            late,
+            "steady frames after a late slot never create"
         );
     }
 
@@ -5365,6 +5616,7 @@ mod tests {
         engine_render::v1_skin::SkinnedFrame {
             positions: positions.to_vec(),
             normals: vec![[0.0, 1.0, 0.0]; positions.len()],
+            tangents: vec![engine_render::v1_skin::DUMMY_TANGENT; positions.len()],
             used_error_material: false,
             diagnostics: Vec::new(),
         }
@@ -5474,6 +5726,94 @@ mod tests {
                 rig.radius_m
             );
         }
+    }
+
+    /// Rotate `v` by the unit quaternion `q`; the test's own arm vector.
+    fn rotate_by(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+        let p = engine_core::quat_mul(
+            engine_core::quat_mul(q, [v[0], v[1], v[2], 0.0]),
+            [-q[0], -q[1], -q[2], q[3]],
+        );
+        [p[0], p[1], p[2]]
+    }
+
+    fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn ang_limit_look_output_takes_ten_ticks_for_180_deg() {
+        // AM24: a 180 deg step on one bone, driven through the look's own
+        // limiter tail. `advance_limit` is what `observe_tick` calls;
+        // `limit_pose` is what `slot_sample` reads on every frame. A half
+        // metre arm turns the cap into metres: 18 deg a tick is a 0.156 m
+        // chord, so the arm covers the arc in ten chords, nine leave it short.
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let joints = look.rigs[0].skeleton.len();
+        let identity = vec![[0.0f32, 0.0, 0.0, 1.0]; joints];
+        let mut wanted = identity.clone();
+        wanted[0] = [0.0, 1.0, 0.0, 0.0];
+        let arm = [0.0, 0.0, 0.5];
+        assert_eq!(
+            look.limit[0].limiter.limit_deg_per_sec(),
+            1080.0,
+            "the look runs the 180 deg in 10 ticks cap by default"
+        );
+        // First sight lands whole: the seed spends a full second of budget.
+        look.advance_limit(0, &identity, 1.0 / TICK_HZ);
+        let mut rots = identity.clone();
+        look.limit_pose(0, &mut rots, 1.0, true);
+        assert_eq!(rots, identity, "a first pose is shown whole, no ramp");
+        let mut tip = rotate_by(rots[0], arm);
+        for tick in 1..=9u32 {
+            look.advance_limit(0, &wanted, 1.0 / TICK_HZ);
+            let mut rots = identity.clone();
+            look.limit_pose(0, &mut rots, 1.0, true);
+            let next = rotate_by(rots[0], arm);
+            let chord = distance(tip, next);
+            assert!(
+                (0.150..=0.161).contains(&chord),
+                "tick {tick} turned {chord} m at 0.5 m, want 18 deg (0.156 m)"
+            );
+            tip = next;
+        }
+        assert!(
+            distance(tip, [0.0, 0.0, -0.5]) > 0.15,
+            "nine ticks are not a 180 deg step"
+        );
+        look.advance_limit(0, &wanted, 1.0 / TICK_HZ);
+        let mut rots = identity.clone();
+        look.limit_pose(0, &mut rots, 1.0, true);
+        let miss = distance(rotate_by(rots[0], arm), [0.0, 0.0, -0.5]);
+        assert!(
+            miss <= 0.005,
+            "ten ticks land the 180 deg step, {miss} m off"
+        );
+        // Halfway through a tick the frame reads the blend, not the end: turn
+        // the lane back toward identity and read the half tick.
+        look.advance_limit(0, &identity, 1.0 / TICK_HZ);
+        let to = look.limit[0].to[0];
+        let mut half = identity.clone();
+        look.limit_pose(0, &mut half, 0.5, true);
+        assert_ne!(half[0], to, "the sub-tick frame stays inside the tick");
+        assert_ne!(
+            half[0],
+            [0.0, 1.0, 0.0, 0.0],
+            "the sub-tick frame has left the tick start"
+        );
+    }
+
+    #[test]
+    fn view_run_2040_600_has_no_joint_pops() {
+        // AM24 accept: the last-stage cap takes the seeded 600-tick line from
+        // 31 joint pops (worst 12.1 cm, all in the run clip) to none, with the
+        // sand and skin counters unchanged.
+        let line = FighterLook::view_run(2040, 600, 2).expect("headless view runs");
+        assert!(
+            line.contains(" nonfinite=0 error_parts=0 sunk_cm_max=0.0 "),
+            "{line}"
+        );
+        assert!(line.contains(" pops=0 pop_acts=none "), "{line}");
     }
 
     #[test]
@@ -5717,6 +6057,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: empty_upload_digest(),
             inertia: Vec::new(),
+            limit: Vec::new(),
             ragdoll: RagdollLook::empty(),
             limbs: LimbLook::empty(),
             capes: Capes::empty(),

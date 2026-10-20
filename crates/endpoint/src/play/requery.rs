@@ -262,6 +262,7 @@ mod tests {
             },
             fighters: Vec::new(),
             events: Vec::new(),
+            timing: None,
         }
     }
 

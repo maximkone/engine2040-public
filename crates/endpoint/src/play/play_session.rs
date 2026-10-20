@@ -12,7 +12,9 @@
 //! never share a hook, a bout or a cache. Units follow arena
 //! (meters, radians, permille, fixed ticks); receipts are sRGB PNG.
 //! Determinism: same seed plus same tape twice gives the same digest, the
-//! same numbers and the same PNG bytes; no wall clock, no threads. Errors
+//! same numbers and the same PNG bytes; no threads. Wall time is opt-in
+//! (`timing`) and receipt-only: it never enters a digest, a hash or the tick,
+//! and a missing sample answers `unknown`, never zero. Errors
 //! are typed `McpToolError` codes naming the legal values; a wired GPU hook
 //! is validated like `capture_with`, and the software rasterizer never
 //! answers `unsupported_capture`. Budget: one step simulates at most
@@ -63,9 +65,10 @@ use rmcp::serde::{self, Deserialize, Serialize};
 
 use super::requery::{requery_key, RequeryCache, RequeryParams};
 use super::{
-    build_tape, capture_with, CaptureArgs, CaptureManifestDto, CaptureOutput, PlayInputDto,
-    CAPTURE_DEFAULT_HEIGHT, CAPTURE_DEFAULT_WIDTH, CAPTURE_MAX_DIM, MAX_CAPTURE_BYTES,
-    MAX_PLAY_INPUTS, MAX_PLAY_TICKS, PNG_MAGIC,
+    build_tape, capture_with, CaptureArgs, CaptureManifestDto, CaptureOutput, NoSample,
+    PlayInputDto, PlayTimingDto, StepMillis, CAPTURE_DEFAULT_HEIGHT, CAPTURE_DEFAULT_WIDTH,
+    CAPTURE_MAX_DIM, MAX_CAPTURE_BYTES, MAX_PLAY_INPUTS, MAX_PLAY_TICKS, PNG_MAGIC,
+    TIMING_LABEL_SOFTWARE, TIMING_RING_CAP,
 };
 use crate::mcp::{McpServer, McpToolError};
 
@@ -166,6 +169,10 @@ pub struct PlayStepArgs {
     pub width: Option<u32>,
     /// Receipt height in pixels, 1..=512 software.
     pub height: Option<u32>,
+    // Opt-in wall-time receipt: `true` adds a `timing` object (p50/p99 step
+    // wall ms labelled `software`); absent or `false` reads no clock and
+    // keeps the output byte-identical.
+    pub timing: Option<bool>,
 }
 
 /// Step answer: tick count, state digest, the numbers and the PNG receipt.
@@ -199,6 +206,11 @@ pub struct PlayStepOutput {
     /// tick it resolved on (always below `tick`).
     #[serde(default)]
     pub events: Vec<BoutEvent>,
+    /// Opt-in wall-time receipt: present only when the caller asked, so a
+    /// step without the flag stays byte-identical. Wall time never enters a
+    /// digest or a hash; a zero-sample ring answers `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<PlayTimingDto>,
 }
 
 /// One fighter's numbers after the last simulated tick: what a model reads
@@ -257,6 +269,52 @@ pub struct BoutEvent {
 pub(crate) const EVENT_LOG_CAP: usize = 64;
 /// Events a step or an observation returns when the caller names no count.
 pub(crate) const EVENT_DEFAULT: usize = 16;
+
+/// Bounded ring of step wall times for the opt-in `timing` receipt. Samples
+/// are milliseconds from the CPU path; they never enter a digest, a hash or
+/// the fixed tick, and a missing sample answers `unknown`, never zero. One
+/// ring per [`PlaySlot`] (play.step) and one per `PlayJobs` (play.run starts),
+/// so a session's samples never mix with another's.
+#[derive(Debug, Default)]
+pub(crate) struct TimingRing {
+    samples_ms: VecDeque<f64>,
+}
+
+impl TimingRing {
+    /// Record one step's wall time in milliseconds, dropping the oldest
+    /// sample once the ring is full.
+    pub(crate) fn record_ms(&mut self, ms: f64) {
+        if self.samples_ms.len() == TIMING_RING_CAP {
+            self.samples_ms.pop_front();
+        }
+        self.samples_ms.push_back(ms);
+    }
+
+    /// The receipt over a sorted copy of the ring: nearest-rank p50 and p99,
+    /// labelled `software`. An empty ring reports every figure `unknown`.
+    #[must_use]
+    pub(crate) fn report(&self) -> PlayTimingDto {
+        PlayTimingDto {
+            label: TIMING_LABEL_SOFTWARE.to_owned(),
+            p50_ms: self.percentile(50),
+            p99_ms: self.percentile(99),
+            samples: self.samples_ms.len(),
+        }
+    }
+
+    /// Nearest-rank percentile: rank `ceil(n * percent / 100)`, 1-based, on
+    /// the ascending sorted copy. Integer rank math only, so the same ring
+    /// always answers the same figure.
+    fn percentile(&self, percent: usize) -> StepMillis {
+        let mut sorted: Vec<f64> = self.samples_ms.iter().copied().collect();
+        sorted.sort_unstable_by(f64::total_cmp);
+        let Some(last) = sorted.len().checked_sub(1) else {
+            return StepMillis::Missing(NoSample::Unknown);
+        };
+        let rank = sorted.len().saturating_mul(percent).div_ceil(100).max(1);
+        StepMillis::Measured(sorted[rank.saturating_sub(1).min(last)])
+    }
+}
 
 /// What identifies one bout besides its tape: the match seed, the headcount
 /// and the arena half-extent bits. Two requests with equal specs and a
@@ -418,6 +476,8 @@ pub(crate) struct PlaySlot {
     hook: Option<StepCaptureHook>,
     /// This session's bounded receipt cache.
     requery: RequeryCache,
+    /// Bounded ring of step wall times (read only by the `timing` receipt).
+    timing: TimingRing,
     /// Sim steps performed through this slot: the cost proof tests read.
     #[cfg(test)]
     pub(crate) steps: u64,
@@ -511,7 +571,8 @@ pub fn play_step_with(
 
 /// Step over a full tape prefix inside `slot`: extends the slot's live bout
 /// when the request continues it, else rebuilds from tick 0; the slot's hook
-/// and cache decide the receipt.
+/// and cache decide the receipt. With `timing` on, the call's own wall time is
+/// recorded in the slot's ring and returned; nothing else changes.
 fn play_step_in(slot: &mut PlaySlot, args: &PlayStepArgs) -> Result<PlayStepOutput, McpToolError> {
     let seed = args.seed.unwrap_or(0);
     let participants = args.participants.unwrap_or(2);
@@ -523,7 +584,11 @@ fn play_step_in(slot: &mut PlaySlot, args: &PlayStepArgs) -> Result<PlayStepOutp
             format!("play.step needs upto_tick; submit 1..={MAX_PLAY_TICKS}"),
         )
     })?;
-    step_core(
+    let wants_timing = args.timing.unwrap_or(false);
+    // Receipt-only clock: read only when the caller opted in, and the value
+    // never enters the tick, a digest or a hash.
+    let clock = wants_timing.then(std::time::Instant::now);
+    let mut out = step_core(
         slot,
         &StepRequest {
             seed,
@@ -534,7 +599,13 @@ fn play_step_in(slot: &mut PlaySlot, args: &PlayStepArgs) -> Result<PlayStepOutp
             height: args.height,
         },
         &inputs,
-    )
+    )?;
+    if let Some(clock) = clock {
+        slot.timing
+            .record_ms(clock.elapsed().as_secs_f64() * 1000.0);
+        out.timing = Some(slot.timing.report());
+    }
+    Ok(out)
 }
 
 /// One validated step: match config, tape prefix, digest and receipt.
@@ -651,6 +722,7 @@ fn step_compute(
         png_bytes: capture.png_bytes,
         fighters: view.fighters,
         events: view.events,
+        timing: None,
     })
 }
 
@@ -1391,6 +1463,7 @@ mod tests {
                 inputs: Some(inputs.clone()),
                 width: Some(W),
                 height: Some(H),
+                timing: None,
             },
         )
         .expect("play.step serves");
@@ -1452,6 +1525,7 @@ mod tests {
             inputs: Some(tape),
             width: Some(W),
             height: Some(H),
+            timing: None,
         };
         let via_tool = PlayStepTool::invoke(&server(), args.clone()).expect("tool serves one step");
         let via_fn = play_step_with(&args, None).expect("stateless step serves");
@@ -1519,6 +1593,7 @@ mod tests {
             inputs: Some(inputs.clone()),
             width: None,
             height: None,
+            timing: None,
         };
         let mut slot = PlaySlot::default();
         let first = play_step_in(&mut slot, &args).expect("seed95 upto120 serves");
@@ -1745,6 +1820,7 @@ mod tests {
                 inputs: Some(step_inputs(0, 0)),
                 width: Some(W),
                 height: Some(H),
+                timing: None,
             },
             Some(|_, _, _| {
                 Ok(CaptureOutput {
@@ -1773,6 +1849,7 @@ mod tests {
                 inputs: Some(step_inputs(0, 0)),
                 width: Some(W),
                 height: Some(H),
+                timing: None,
             },
             Some(|_, _, _| {
                 Ok(CaptureOutput {
@@ -1809,6 +1886,7 @@ mod tests {
             inputs: Some(step_inputs(0, 0)),
             width: Some(W),
             height: Some(H),
+            timing: None,
         }
     }
 
@@ -1993,6 +2071,7 @@ mod tests {
                 ttl_polls: None,
                 job_id: None,
                 scene_rev: Some(1),
+                timing: None,
             }
         }
         fn poll_args(job_id: u64) -> PlayRunArgs {
@@ -2006,6 +2085,7 @@ mod tests {
                 ttl_polls: None,
                 job_id: Some(job_id),
                 scene_rev: None,
+                timing: None,
             }
         }
 
@@ -2020,6 +2100,7 @@ mod tests {
                 inputs: None,
                 width: None,
                 height: None,
+                timing: None,
             };
             let step = play_step_with(&step_args, None).expect("step serves");
             assert_eq!(step.tick, TICKS, "seed {seed}: receipt carries the count");

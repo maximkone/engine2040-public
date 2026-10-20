@@ -233,6 +233,10 @@ impl FighterLook {
         // RZ7: lay and step each seen slot's cape on this tick's pose. Never
         // hashed; the sim never reads a cape.
         self.cape_tick();
+        // Last stage: advance each seen slot's angular-speed cap onto this
+        // tick's final pose, so no bone turns faster than 1080 deg/s on the
+        // frames that read it. Presentation only, never hashed.
+        self.limit_tick(elapsed);
     }
 
     /// Shift each seen slot's position (previous, current) for the frame lerp.
@@ -540,6 +544,7 @@ mod tests {
             shake_trauma_permille: 0,
             uploaded_digest: crate::fighter_look::empty_upload_digest(),
             inertia: Vec::new(),
+            limit: Vec::new(),
             ragdoll: crate::fighter_look::ragdoll_look::RagdollLook::empty(),
             limbs: crate::fighter_look::limb_look::LimbLook::empty(),
             capes: crate::fighter_look::Capes::empty(),

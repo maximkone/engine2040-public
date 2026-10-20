@@ -407,6 +407,30 @@ impl Presenter {
         runs
     }
 
+    /// LF3 landing 2: the frame's occlusion field. The depth prepass writes
+    /// the frame's depth, the GTAO kernel turns it into the field, and the
+    /// forward pass that follows scales its ambient diffuse by it. The
+    /// forward pass then clears the depth and writes it again, so the
+    /// frame's final depth is the one the forward pass wrote.
+    /// `run` is false when the field must stay open: the row is off, or the
+    /// 4x path where the depth is not resolved.
+    /// Caller: the live, probe and capture frames, before `encode_forward`.
+    pub(super) fn encode_ao_field(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        list: &DrawList,
+        frame: &FrameCamera,
+        run: bool,
+        timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) -> Result<bool, PresentError> {
+        if !run {
+            return Ok(false);
+        }
+        self.encode_depth_prepass(enc, targets, list);
+        self.encode_gtao(enc, targets, frame, timestamps)
+    }
+
     /// Record the GTAO compute pass over the stored forward depth into
     /// `ao_tex`: the camera uniform first (a queue write ordered before the
     /// submit), then the half-res kernel and the upsample in one pass bracketed

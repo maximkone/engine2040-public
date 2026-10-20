@@ -2660,6 +2660,7 @@ mod tests {
                     ttl_polls: None,
                     job_id,
                     scene_rev: Some(pinned),
+                    timing: None,
                 },
             )
         };

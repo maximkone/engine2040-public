@@ -19,6 +19,11 @@
 //! hook ([`PoseSource::ImportedFighter`]): presentation poses come from the
 //! arena movement path ([`App::presentation`]); authored content is the visual gate.
 
+/// Agent seat: one loopback client plays the human slot of the live window
+/// and reads each fixed tick's hash back. Tool surface only, never hashed.
+/// App leg only (the window owns the socket).
+#[cfg(feature = "app")]
+pub mod agent_seat;
 /// Sim state to clip cues with a per-slot crossfade: the act pick plus the
 /// fade driver the fighter look samples. Std-only, presentation only.
 pub mod anim_bridge;

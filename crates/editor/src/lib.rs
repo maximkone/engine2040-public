@@ -21,6 +21,8 @@ pub mod audit;
 /// place-rule refusal. Std-only; consumed by the shell and the recorded
 /// sessions (`shell.rs`, `a2_session.rs`, `a3_session.rs`).
 pub mod browser;
+#[cfg(feature = "ui")]
+pub mod browser_tab;
 pub mod capability;
 pub mod commands;
 pub mod durable;

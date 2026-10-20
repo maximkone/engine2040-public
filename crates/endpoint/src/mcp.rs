@@ -143,8 +143,8 @@ pub const SCENE_READ_MAX_ROWS: u32 = 128;
 /// stays at 43514 so the number is comparable to the old 21-tool door, and the
 /// ledger gate now measures whatever a session advertises. The frozen
 /// [`crate::tools::TOOLS`] registry now holds 26 tools.
-/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000. On 2026-10-19 SP62's two view-truth verbs (`view.observe`, `view.laws`: camera, per-body act/clip/tint/root/bounds/rect/cover and the laws line) took the loaded list to 58703 (297 headroom): 59000 → 61500.
-pub const TOOL_LIST_BUDGET_CHARS: usize = 61_500;
+/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000. On 2026-10-19 SP62's two view-truth verbs (`view.observe`, `view.laws`: camera, per-body act/clip/tint/root/bounds/rect/cover and the laws line) took the loaded list to 58703 (297 headroom): 59000 → 61500. On 2026-10-19 PF24's opt-in `timing` receipt (a flag on both play args, plus label/p50/p99/samples on both play outputs: 931 chars) took the default list to 53873 and the loaded one to 60228: 61500 → 62500.
+pub const TOOL_LIST_BUDGET_CHARS: usize = 62_500;
 
 /// The thirteen core tools, in contract order. The router holds exactly these;
 /// every other verb is a pack verb.
@@ -2256,9 +2256,12 @@ mod tests {
         // 2026-10-18 (endpoint wave): `scene.pick` took the default list to 50.9k: bound 48_500 -> 51_500.
         // 2026-10-18 (AX24): the `tx.apply` change list (AX24 `ChangeListDto`, revisions,
         // counts and rows) took the default list to 52.3k: bound 51_500 -> 53_000.
+        // 2026-10-19 (PF24): the opt-in `timing` receipt (a flag on both play args plus
+        // the label/p50/p99/samples object on both play outputs) took the default list to
+        // 53.9k: bound 53_000 -> 54_500.
         assert!(
-            budget < 53_000,
-            "default list {budget} stays near the measured 2026-10-18 spatial-lane door"
+            budget < 54_500,
+            "default list {budget} stays near the measured 2026-10-19 play-timing door"
         );
         assert!(budget < everything, "the default list hides something");
         assert!(core_only < budget, "the scene pack adds to the core");

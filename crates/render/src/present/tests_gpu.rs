@@ -1597,9 +1597,38 @@ mod live_frame_tests {
         presenter.render_live_offscreen(&list).expect("moved frame");
         let (after, _, _) = read_twin(&presenter);
         let centre_after = pixel(&after, w, 64, 64);
-        let right_after = pixel(&after, w, 64 + 43, 64);
-        let right_before = pixel(&before, w, 64 + 43, 64);
         let swing = |a: [f32; 3], b: [f32; 3]| (0..3).map(|c| (a[c] - b[c]).abs()).sum::<f32>();
+        // A 9x9 patch around the arrival point: the cube face sits close to
+        // the sky behind it, so one pixel is a weak witness; the patch sums
+        // every texel the move rewrites.
+        let patch_swing = |a: &[u8], b: &[u8], x: usize, y: usize| {
+            let mut total = 0.0f32;
+            for oy in 0..9usize {
+                for ox in 0..9usize {
+                    let Some(px) = x.checked_add(ox).and_then(|v| v.checked_sub(4)) else {
+                        continue;
+                    };
+                    let Some(py) = y.checked_add(oy).and_then(|v| v.checked_sub(4)) else {
+                        continue;
+                    };
+                    total += swing(
+                        pixel(
+                            a,
+                            w,
+                            u32::try_from(px).unwrap_or(0),
+                            u32::try_from(py).unwrap_or(0),
+                        ),
+                        pixel(
+                            b,
+                            w,
+                            u32::try_from(px).unwrap_or(0),
+                            u32::try_from(py).unwrap_or(0),
+                        ),
+                    );
+                }
+            }
+            total
+        };
         // The live IBL is the arena day sky now (not the photo studio), so the
         // lit cube face sits closer to the sky behind it: 30 summed levels still
         // say "the cube moved" (a static frame differs by 0 to 2).
@@ -1608,8 +1637,8 @@ mod live_frame_tests {
             "the cube left the centre: {centre_before:?} -> {centre_after:?}"
         );
         assert!(
-            swing(right_before, right_after) > 30.0,
-            "the cube arrived on the right: {right_before:?} -> {right_after:?}"
+            patch_swing(&before, &after, 64 + 43, 64) > 500.0,
+            "the cube arrived on the right: a 9x9 patch must move"
         );
 
         // Refusals write nothing and say why.

@@ -733,16 +733,27 @@ impl<'a> StartupFacts<'a> {
 /// Fetch the cooked arena kit for `?fight&kit`: `Some` when the bundle downloaded and opened,
 /// `None` for every other query or a refused fetch (the HUD says why and the procedural
 /// stand-in stays). The fetch is awaited once, before the first frame, so the first picture is
-/// the real arena. Until the kit's own spawn pair and framing drive the page, this is opt-in.
+/// the real arena. The kit is opt-in until the body draw reads near the ring centre and the
+/// kit's own spawn pair frames it (see `docs/BLOCKERS.md`, `2026-10-20T00:35Z`).
 async fn fetch_kit(search: &str) -> Option<engine_assets::asset_source::BundleSource> {
     if !has_flag(search, "fight") || !has_flag(search, "kit") {
         return None;
     }
     set_text("hud", "loading the arena kit...");
     match crate::content::fetch_bundle(crate::content::ARENA_BUNDLE_URL).await {
-        Ok(source) => Some(source),
+        Ok(source) => {
+            // WEB6: the receipt says the asset really arrived and how big it was.
+            let entries = source.entries_in_file_order().count();
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "content: arena kit bytes={} entries={entries}",
+                source.byte_len()
+            )));
+            Some(source)
+        }
         Err(err) => {
             set_text("hud", &format!("arena kit: {err} (stand-in ring)"));
+            // The refusal is loud and durable: the frame line overwrites the HUD.
+            web_sys::console::log_1(&JsValue::from_str(&format!("content: refused: {err}")));
             None
         }
     }

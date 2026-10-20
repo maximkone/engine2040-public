@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use engine_assets::watcher::{WatchSettings, Watcher};
 use engine_audio::{AudioEngine, Bank, FeedTx, FightCue, FrameSource, Mixer};
+use engine_game::agent_seat::Seat;
 use engine_game::arena_kit::{
     kit_match_world_or_empty, kit_prop_rows, live_kit_notice, push_kit_draws, stage_kit_or_default,
     KitReport,
@@ -119,8 +120,11 @@ use arena_capture::capture::{
 };
 
 /// A fresh fight camera follower, snapping to the next shot (a new window or a new bout).
+/// AIN6 (owner 2026-10-20 "ARM GOO ALL"): the 0.5 s velocity lead is armed.
 fn new_cam_follow() -> Result<CamFollow, WinError> {
-    CamFollow::new().map_err(|err| WinError::Render(format!("fight camera: {err}")))
+    CamFollow::new()
+        .map(CamFollow::with_look_ahead)
+        .map_err(|err| WinError::Render(format!("fight camera: {err}")))
 }
 
 /// QL12: one line of per-tier particle counts: each quality tier's pool
@@ -167,6 +171,18 @@ const SPEAR_DEMO_FLAG: &str = "--spear-demo";
 /// `--height`: the fighter height channel on (rows SG5 and SG4): fighters fall
 /// and land under gravity and the wall tether swings instead of zipping.
 const HEIGHT_FLAG: &str = "--height";
+/// `--agent-seat <PORT>`: a loopback client plays the human slot of this
+/// window and reads each fixed tick's hash back (see the `agent_seat`
+/// module). Port 0 asks the OS and the bound port is printed. The seat owns
+/// slot 0: the keyboard is ignored, and the boot line says so.
+const AGENT_SEAT_FLAG: &str = "--agent-seat";
+/// `--view-line <SEED> <TICKS> <FIGHTERS>`: fold the headless bout into one
+/// `arena view-line: <arena view: ...>` line, print it and exit. No window, no
+/// GPU; the MCP door's `view.laws` spawns this (see `FighterLook::view_run`).
+const VIEW_LINE_FLAG: &str = "--view-line";
+/// Prefix of the one line [`VIEW_LINE_FLAG`] prints, mirrored by
+/// `engine_endpoint`'s view host.
+const VIEW_LINE_PREFIX: &str = "arena view-line: ";
 /// `--hold <KEYS>`: keys held down from the first tick, as if pressed by hand (`W`, `W,F`; the
 /// names are W A S D F Q SPACE SHIFT). A dev flag for receipts and smoke runs: the keys take the
 /// keyboard's own road (bindings, camera-relative wish, spear key), so a capture can show W
@@ -303,6 +319,80 @@ fn split_pause_flags(raw: &[String]) -> Result<(Option<u64>, bool, Vec<String>),
         index += 1;
     }
     Ok((pause_at, step_on, rest))
+}
+
+/// Split the value flag `--agent-seat <PORT>` off the argument list before
+/// the strict parser (it would refuse an unknown flag). Port 0 asks the OS
+/// for a free port; the bound one is printed at boot. A missing or
+/// unparsable port fails loudly, never silently falls back to the keyboard.
+fn split_agent_seat(raw: &[String]) -> Result<(Option<u16>, Vec<String>), String> {
+    let mut port = None;
+    let mut rest = Vec::with_capacity(raw.len());
+    let mut index = 0usize;
+    while index < raw.len() {
+        let arg = &raw[index];
+        if arg == AGENT_SEAT_FLAG {
+            let value = raw
+                .get(index + 1)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| format!("{AGENT_SEAT_FLAG} needs a port"))?;
+            let parsed: u16 = value
+                .parse()
+                .map_err(|_| format!("{AGENT_SEAT_FLAG} {value}"))?;
+            port = Some(parsed);
+            index += 2;
+            continue;
+        }
+        rest.push(arg.clone());
+        index += 1;
+    }
+    Ok((port, rest))
+}
+
+/// Split `--view-line <SEED> <TICKS> <FIGHTERS>` off before the strict parser
+/// (it would refuse an unknown flag) and check the three numbers against the
+/// session config's own ranges, so a bad request fails loudly at boot instead
+/// of building a bout the sim would refuse. Zero ticks is the empty line.
+fn split_view_line(raw: &[String]) -> Result<(Option<(u64, u32, u8)>, Vec<String>), String> {
+    let mut request = None;
+    let mut rest = Vec::with_capacity(raw.len());
+    let mut index = 0usize;
+    while index < raw.len() {
+        let arg = &raw[index];
+        if arg != VIEW_LINE_FLAG {
+            rest.push(arg.clone());
+            index += 1;
+            continue;
+        }
+        let three = raw
+            .get(index + 1..index + 4)
+            .filter(|values| values.iter().all(|value| !value.starts_with("--")))
+            .ok_or_else(|| format!("{VIEW_LINE_FLAG} needs SEED TICKS FIGHTERS"))?;
+        let seed: u64 = three[0]
+            .parse()
+            .map_err(|_| format!("{VIEW_LINE_FLAG} seed {}", three[0]))?;
+        let ticks: u32 = three[1]
+            .parse()
+            .map_err(|_| format!("{VIEW_LINE_FLAG} ticks {}", three[1]))?;
+        let fighters: u8 = three[2]
+            .parse()
+            .map_err(|_| format!("{VIEW_LINE_FLAG} fighters {}", three[2]))?;
+        if ticks > engine_game::MAX_TICKS {
+            return Err(format!(
+                "{VIEW_LINE_FLAG} ticks {ticks} is outside 0..={}",
+                engine_game::MAX_TICKS
+            ));
+        }
+        if fighters < 2 || fighters > engine_arena::MAX_PARTICIPANTS {
+            return Err(format!(
+                "{VIEW_LINE_FLAG} fighters {fighters} is outside 2..={}",
+                engine_arena::MAX_PARTICIPANTS
+            ));
+        }
+        request = Some((seed, ticks, fighters));
+        index += 4;
+    }
+    Ok((request, rest))
 }
 
 /// What the fight camera showed over a run: frames tallied, frames with no
@@ -626,6 +716,23 @@ fn live_wait_failure(stats: &WaitStats) -> Option<String> {
     })
 }
 
+/// The metric token of an `arena WARN:` line (the first word after the
+/// prefix); `None` for any other line. Names the repro bundle directory.
+fn warning_metric(warning: &str) -> Option<&str> {
+    let rest = warning.strip_prefix("arena WARN: ")?;
+    let metric = rest.split_whitespace().next()?;
+    (!metric.is_empty()).then_some(metric)
+}
+
+/// The metric that must write this run's one warning bundle now: `None` when
+/// the run is clean, a bundle already landed, or the first line is malformed.
+fn warning_bundle_metric<'a>(warnings: &'a [String], written: bool) -> Option<&'a str> {
+    if written {
+        return None;
+    }
+    warning_metric(warnings.first()?)
+}
+
 /// Whole microseconds as milliseconds with three decimals, integer math.
 fn fmt_us_as_ms(us: u64) -> String {
     format!("{}.{:03}", us / 1000, us % 1000)
@@ -712,6 +819,40 @@ fn run(raw: &[String]) -> i32 {
     let (spear, raw) = split_flag(&raw, SPEAR_FLAG);
     let (spear_demo, raw) = split_flag(&raw, SPEAR_DEMO_FLAG);
     let (height, raw) = split_flag(&raw, HEIGHT_FLAG);
+    let (agent_seat, raw) = match split_agent_seat(&raw) {
+        Ok(split) => split,
+        Err(err) => {
+            tell!("arena: {err}");
+            return 2;
+        }
+    };
+    // Windowless `view.laws` host: split and run before any GPU or window work,
+    // so the MCP door can fold a bout on a build with no display.
+    let (view_line, raw) = match split_view_line(&raw) {
+        Ok(split) => split,
+        Err(err) => {
+            tell!("arena: {err}");
+            return 2;
+        }
+    };
+    if let Some((seed, ticks, fighters)) = view_line {
+        if agent_seat.is_some() {
+            tell!("arena: {VIEW_LINE_FLAG} folds a bout; {AGENT_SEAT_FLAG} plays a window; they do not mix");
+            return 2;
+        }
+        return match engine_game::fighter_look::FighterLook::view_run(seed, ticks, fighters) {
+            Ok(line) => {
+                say!("{VIEW_LINE_PREFIX}{line}");
+                0
+            }
+            Err(err) => {
+                tell!("arena: {VIEW_LINE_FLAG}: {err}");
+                2
+            }
+        };
+    }
+    // A seat has no Enter key: arming one starts the bout, like `--play`.
+    let play = play || agent_seat.is_some();
     let (net, raw) = match arena_net::split_net_args(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -754,6 +895,21 @@ fn run(raw: &[String]) -> i32 {
             return 2;
         }
     };
+    // One owner of slot 0. A seat beside a tape or a script would make two
+    // authors for one tick and neither receipt could say which one played.
+    if agent_seat.is_some()
+        && (staged
+            || spear_demo
+            || net.is_some()
+            || capture_flags
+                .as_ref()
+                .is_some_and(|flags| flags.tape.is_some()))
+    {
+        tell!(
+            "arena: {AGENT_SEAT_FLAG} owns slot 0; --staged-fight, --spear-demo, --tape and --host/--join do not mix"
+        );
+        return 2;
+    }
     let args = match WinArgs::parse(&rest) {
         Ok(args) => args,
         Err(err) => {
@@ -814,6 +970,12 @@ fn run(raw: &[String]) -> i32 {
         Err(err) => {
             let err = WinError::NoDisplay(capped(&err.to_string()));
             if args.frames.is_some() {
+                if agent_seat.is_some() {
+                    tell!(
+                        "arena: {AGENT_SEAT_FLAG} needs a window; the headless fallback has no seat"
+                    );
+                    return 3;
+                }
                 return headless_fallback(config, &args, &err, &capture_flags);
             }
             tell!("arena: {err}");
@@ -862,6 +1024,21 @@ fn run(raw: &[String]) -> i32 {
     };
     if let Some(script) = app.scripted {
         say!("arena: {script}; the keyboard is ignored in this run");
+    }
+    if let Some(port) = agent_seat {
+        match Seat::bind(port) {
+            Ok(seat) => {
+                say!(
+                    "arena seat: listening on 127.0.0.1:{}; the client owns slot 0 and the keyboard is ignored",
+                    seat.port()
+                );
+                app.seat = Some(seat);
+            }
+            Err(err) => {
+                tell!("arena: {AGENT_SEAT_FLAG}: {err}");
+                return 2;
+            }
+        }
     }
     if let Some(net) = net.as_ref() {
         if let Err(err) = arena_net::attach(&mut app, net) {
@@ -1098,6 +1275,8 @@ struct ArenaApp {
     view: ViewLaws,
     /// `--view-brief`: one JSON line of view truth per presented frame.
     view_brief: Option<BufWriter<File>>,
+    /// The one warning bundle this run wrote, when a view floor broke.
+    warn_bundle: Option<PathBuf>,
     /// Wall us of each frame body: fixed ticks plus the present call,
     /// which includes the swapchain acquire.
     work_us: Vec<u64>,
@@ -1137,6 +1316,9 @@ struct ArenaApp {
     title_hint: Option<String>,
     /// The network seat of `--host`/`--join`; `None` plays alone against AI.
     net: Option<arena_net::NetPlay>,
+    /// The agent seat of `--agent-seat <PORT>`: a loopback client authors the
+    /// human slot and reads each fixed tick's hash. `None` keeps the keyboard.
+    seat: Option<Seat>,
 }
 
 /// Build the live session's match over the arena kit's physical placement:
@@ -1248,6 +1430,7 @@ impl ArenaApp {
             framing: Framing::default(),
             view: ViewLaws::default(),
             view_brief: None,
+            warn_bundle: None,
             work_us: Vec::new(),
             interval_us: Vec::new(),
             frame_rows: Vec::new(),
@@ -1264,6 +1447,7 @@ impl ArenaApp {
             view_forward: None,
             title_hint: None,
             net: None,
+            seat: None,
         };
         // Title boot: the stranger sees the start key before the bout, and
         // the accumulator holds at zero ticks until `FlowEvent::Start`.
@@ -1528,6 +1712,41 @@ impl ArenaApp {
         }
     }
 
+    /// The view receipt, then one `arena WARN:` line per broken product
+    /// floor: a bad run says so by itself, and a clean run stays silent. The
+    /// first warning of the run also writes its one repro bundle (view only,
+    /// never the sim or the hash), so the failing frame leaves a tape.
+    fn report_view(&mut self) {
+        if let Some(line) = self.view.line() {
+            say!("{line}");
+            let warnings = self.view.warnings();
+            if let Some(metric) = warning_bundle_metric(&warnings, self.warn_bundle.is_some()) {
+                match crash::write_warning_bundle(
+                    std::path::Path::new("target/repro"),
+                    metric,
+                    self.config.seed,
+                    self.config.ticks,
+                    self.ticks_done,
+                    self.config.fighters,
+                    &line,
+                    &warnings,
+                ) {
+                    Ok(path) => {
+                        say!("arena repro: bundle=\"{}\"", path.display());
+                        self.warn_bundle = Some(path);
+                    }
+                    Err(err) => tell!("arena WARN: repro bundle not written ({err})"),
+                }
+            }
+            for warning in warnings {
+                say!("{warning}");
+            }
+        }
+        if let Some(seat) = self.seat.as_ref() {
+            say!("{}", seat.receipt());
+        }
+    }
+
     /// Exit-run receipts: smoke line, timed lines, capture manifest plus
     /// per-pass sidecar, staged-fight receipt, then leave the loop.
     fn finish_exit(&mut self, event_loop: &ActiveEventLoop) {
@@ -1577,9 +1796,7 @@ impl ArenaApp {
         if let Some(line) = self.framing.line() {
             say!("{line}");
         }
-        if let Some(line) = self.view.line() {
-            say!("{line}");
-        }
+        self.report_view();
         if let Some(scene) = self.spear.scene.as_ref() {
             say!("{}", scene.look().receipt_line());
         }
@@ -2467,6 +2684,46 @@ mod tests {
         assert_eq!(same, strings(&["arena", "--exit"]));
         // The strict parser still refuses the flag if it were not split.
         assert!(WinArgs::parse(&strings(&["arena", "--look-probes"])).is_err());
+    }
+
+    #[test]
+    fn view_line_flag_splits_off_and_refuses_bad_numbers() {
+        let (request, rest) = split_view_line(&strings(&[
+            "arena",
+            "--view-line",
+            "2040",
+            "600",
+            "2",
+            "--frames",
+            "3",
+        ]))
+        .expect("a clean request parses");
+        assert_eq!(request, Some((2040, 600, 2)));
+        assert_eq!(rest, strings(&["arena", "--frames", "3"]));
+        assert_eq!(
+            split_view_line(&strings(&["arena", "--frames", "3"]))
+                .expect("absent is fine")
+                .0,
+            None
+        );
+        for bad in [
+            vec!["arena", "--view-line"],
+            vec!["arena", "--view-line", "2040", "600"],
+            vec!["arena", "--view-line", "x", "600", "2"],
+            vec!["arena", "--view-line", "2040", "x", "2"],
+            vec!["arena", "--view-line", "2040", "600", "x"],
+            vec!["arena", "--view-line", "2040", "600", "1"],
+            vec!["arena", "--view-line", "2040", "600", "17"],
+            vec!["arena", "--view-line", "2040", "100001", "2"],
+            vec!["arena", "--view-line", "2040", "--frames", "2"],
+        ] {
+            assert!(
+                split_view_line(&strings(&bad)).is_err(),
+                "bad request {bad:?} refuses"
+            );
+        }
+        // The strict parser still refuses the flag if it were not split.
+        assert!(WinArgs::parse(&strings(&["arena", "--view-line"])).is_err());
     }
 
     #[test]
@@ -3415,7 +3672,8 @@ mod tests {
         };
         let mut app = ArenaApp::new(config, args, None).expect("session builds");
         app.pad = WindowPad::absent();
-        app.enable_spear(true, false).expect("the grapple turns on");
+        app.enable_spear(true, false, false)
+            .expect("the grapple turns on");
         if free_cam {
             app.cam_mode = CameraMode::Free;
         }
@@ -4268,6 +4526,58 @@ mod tests {
         assert!(
             centre.contains("advantage=1") && centre.contains("dominance=1"),
             "{centre}"
+        );
+    }
+
+    #[test]
+    fn the_agent_seat_flag_takes_a_port_and_refuses_a_bad_one() {
+        let raw = |args: &[&str]| {
+            args.iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>()
+        };
+        let (port, rest) =
+            split_agent_seat(&raw(&["--agent-seat", "0", "--exit"])).expect("a port splits");
+        assert_eq!(port, Some(0), "0 asks the OS for a free port");
+        assert_eq!(rest, vec!["--exit".to_string()]);
+        for bad in [
+            vec!["--agent-seat"],
+            vec!["--agent-seat", "--exit"],
+            vec!["--agent-seat", "nope"],
+            vec!["--agent-seat", "70000"],
+        ] {
+            assert!(
+                split_agent_seat(&raw(&bad)).is_err(),
+                "{bad:?} must fail loudly"
+            );
+        }
+    }
+
+    #[test]
+    fn warning_bundle_lands_once_and_only_for_a_warned_run() {
+        let warning = "arena WARN: view_sunk_cm_max value=12.0 floor=3.0".to_string();
+        assert_eq!(
+            warning_bundle_metric(&[], false),
+            None,
+            "a clean run writes nothing"
+        );
+        assert_eq!(
+            warning_bundle_metric(&[warning.clone()], true),
+            None,
+            "a written bundle never writes again"
+        );
+        assert_eq!(
+            warning_bundle_metric(&[warning.clone()], false),
+            Some("view_sunk_cm_max")
+        );
+        assert_eq!(
+            warning_bundle_metric(&["arena: not a warning".to_string()], false),
+            None,
+            "only WARN lines name a bundle"
+        );
+        assert_eq!(
+            warning_metric("arena WARN: view_eye_in_body value=1 floor=0"),
+            Some("view_eye_in_body")
         );
     }
 }

@@ -930,6 +930,92 @@ pub fn shake_offset(trauma_permille: u32, tick: u32, max_m: f32) -> Vec3 {
     )
 }
 
+/// Look-ahead table (AIN6 steal 5): a 0.5 s velocity lead with accel/decel
+/// damping. Presentation only: the lead moves the presented eye and look
+/// point, never the simulation, a tick call or a hash. The fixture follow
+/// camera keeps its constant [`FixtureCamera::lead_m`]; this table is the
+/// damped velocity form the window camera arms through
+/// [`CamFollow::with_look_ahead`](crate::fighter_look_cam::CamFollow::with_look_ahead).
+///
+/// | number | value | unit | meaning |
+/// |---|---|---|---|
+/// | `LEAD_HORIZON_S` | 0.50 | s | velocity times horizon is the wanted lead |
+/// | `LEAD_MAX_M` | 1.20 | m | cap on the lead at any speed |
+/// | `LEAD_ACCEL_HALFLIFE_S` | 0.20 | s | ease-in while the wanted lead grows |
+/// | `LEAD_DECEL_HALFLIFE_S` | 0.10 | s | ease-out while it shrinks or the hero stops |
+pub const LEAD_HORIZON_S: f32 = 0.5;
+/// Largest lead at any speed, meters.
+pub const LEAD_MAX_M: f32 = 1.2;
+/// Lead ease-in halflife, seconds.
+pub const LEAD_ACCEL_HALFLIFE_S: f32 = 0.2;
+/// Lead ease-out halflife, seconds.
+pub const LEAD_DECEL_HALFLIFE_S: f32 = 0.1;
+
+/// Wanted look-ahead for a planar velocity (m/s): `velocity * LEAD_HORIZON_S`
+/// capped at `LEAD_MAX_M`, on the floor plane only. A zero or non-finite
+/// velocity gives exactly [`Vec3::ZERO`]. Pure presentation math.
+#[must_use]
+pub fn look_ahead_m(velocity_mps: Vec3) -> Vec3 {
+    let planar = Vec3::new(velocity_mps.x, 0.0, velocity_mps.z);
+    let speed = planar.len();
+    if !speed.is_finite() || speed <= 0.0 {
+        return Vec3::ZERO;
+    }
+    let wanted = speed * LEAD_HORIZON_S;
+    let scale = if wanted > LEAD_MAX_M {
+        LEAD_MAX_M / speed
+    } else {
+        LEAD_HORIZON_S
+    };
+    planar * scale
+}
+
+/// Damped velocity look-ahead: eases the wanted lead in over
+/// [`LEAD_ACCEL_HALFLIFE_S`] and out over [`LEAD_DECEL_HALFLIFE_S`], so a stop
+/// decays toward zero instead of snapping. Pure state: the same velocity tape
+/// and frame times give the same offset twice, and a cut resets it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LookAhead {
+    offset_m: Vec3,
+}
+
+impl LookAhead {
+    /// A tracker at rest.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current lead offset, meters.
+    #[must_use]
+    pub fn offset_m(&self) -> Vec3 {
+        self.offset_m
+    }
+
+    /// Drop the lead (a cut, a respawn, a new shot).
+    pub fn reset(&mut self) {
+        self.offset_m = Vec3::ZERO;
+    }
+
+    /// Fold one frame of planar `velocity_mps` over `dt_s` seconds and return
+    /// the lead: ease-in while the wanted lead grows along the current one,
+    /// ease-out while it shrinks or turns back. Presentation only.
+    /// Errors: [`CameraError::BadParam`] for a bad frame time or velocity.
+    pub fn step(&mut self, velocity_mps: Vec3, dt_s: f32) -> Result<Vec3, CameraError> {
+        let wanted = look_ahead_m(velocity_mps);
+        let current = self.offset_m;
+        let easing_in = wanted.len_sq() >= current.len_sq() && wanted.dot(current) >= 0.0;
+        let halflife = if easing_in {
+            LEAD_ACCEL_HALFLIFE_S
+        } else {
+            LEAD_DECEL_HALFLIFE_S
+        };
+        let damping = halflife_to_damping(halflife)?;
+        self.offset_m = damper_step_vec3(current, wanted, damping, dt_s)?;
+        Ok(self.offset_m)
+    }
+}
+
 /// Arena camera director: per-tick lock-on, integer trauma decay and framed
 /// poses with pure shake. State is presentation only: the simulation records
 /// hits elsewhere and the windowed leg feeds them here through
@@ -1348,6 +1434,71 @@ mod tests {
         assert_eq!(frame.trauma_permille, 0, "decay saturates at zero");
         director.add_trauma(u32::MAX);
         assert_eq!(director.trauma_permille(), 1000, "giant hits clamp");
+    }
+
+    #[test]
+    fn look_ahead_peaks_while_moving_and_decays_to_zero_when_stopped() {
+        // Wanted lead: velocity times the 0.5 s horizon, capped, floor plane.
+        assert_eq!(look_ahead_m(Vec3::ZERO), Vec3::ZERO);
+        assert_eq!(look_ahead_m(Vec3::new(f32::NAN, 0.0, 0.0)), Vec3::ZERO);
+        let walk = look_ahead_m(Vec3::new(1.0, 5.0, 0.0));
+        assert_eq!(walk.y, 0.0, "the lead stays on the floor plane");
+        assert!((walk.x - LEAD_HORIZON_S).abs() < 1e-6, "{walk:?}");
+        let run = look_ahead_m(Vec3::new(9.0, 0.0, 0.0));
+        assert!((run.x - LEAD_MAX_M).abs() < 1e-6, "a run hits the cap");
+        assert_eq!(
+            look_ahead_m(Vec3::new(-1.0, 0.0, 0.0)).x,
+            -1.0 * LEAD_HORIZON_S
+        );
+
+        // A held 5 m/s walk: the lead grows and settles on the cap. It is
+        // still short on the first frame (ease-in), never over the cap.
+        let dt_s = 1.0 / 60.0;
+        let mut lead = LookAhead::new();
+        let mut first = 0.0f32;
+        let mut peak = 0.0f32;
+        for frame in 0..120 {
+            let offset = lead
+                .step(Vec3::new(5.0, 0.0, 0.0), dt_s)
+                .expect("a good step");
+            if frame == 0 {
+                first = offset.len();
+            }
+            peak = peak.max(offset.len());
+        }
+        assert!(first > 0.0 && first < 0.2, "ease-in, first {first} m");
+        assert!(
+            (peak - LEAD_MAX_M).abs() < 0.02,
+            "a walk peaks at the cap: {peak} m"
+        );
+        // Stopped: every frame decays and a second of it leaves almost none.
+        let mut prev = lead.offset_m().len();
+        for _ in 0..90 {
+            let now = lead.step(Vec3::ZERO, dt_s).expect("a good step").len();
+            assert!(now <= prev, "a stop must decay: {now} vs {prev}");
+            prev = now;
+        }
+        assert!(prev < 1e-4, "a stop decays the lead to zero: {prev} m");
+        assert_eq!(lead.step(Vec3::ZERO, dt_s).expect("step").y, 0.0);
+        // The same velocity tape twice gives the same offsets.
+        let tape = |dt: f32| {
+            let mut tracker = LookAhead::new();
+            let mut out = Vec::new();
+            for frame in 0..90 {
+                let v = if frame < 45 { 4.0 } else { 0.0 };
+                out.push(
+                    tracker
+                        .step(Vec3::new(v, 0.0, 0.0), dt)
+                        .expect("a good step"),
+                );
+            }
+            out
+        };
+        assert_eq!(tape(dt_s), tape(dt_s), "the same tape replays exactly");
+        let mut reset = LookAhead::new();
+        reset.step(Vec3::new(4.0, 0.0, 0.0), dt_s).expect("step");
+        reset.reset();
+        assert_eq!(reset.offset_m(), Vec3::ZERO, "a cut drops the lead");
     }
 
     #[test]

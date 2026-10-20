@@ -73,11 +73,22 @@ pub struct Presenter {
     /// 4x MSAA forward pipeline for the on path: same shader plus layout
     /// as `forward_hdr` with count 4; bound when `targets.msaa` is `Some`.
     pub(crate) forward_hdr_msaa: wgpu::RenderPipeline,
-    /// `forward_hdr` with the `vs_skinned` vertex entry over the 64-byte
+    /// `forward_hdr` with the `vs_skinned` vertex entry over the 80-byte
     /// skinned vertex: bound for a group whose mesh has a skin block.
     pub(crate) forward_skinned: wgpu::RenderPipeline,
     /// 4x MSAA twin of `forward_skinned` (one HDR target, like the static one).
     pub(crate) forward_skinned_msaa: wgpu::RenderPipeline,
+    /// LF3 landing 2: the depth-only twin of the forward pipeline. The
+    /// depth prepass writes the frame's depth before the forward pass, so
+    /// the GTAO kernel can build the occlusion field the forward pass
+    /// scales its ambient by.
+    pub(crate) depth_pipeline: wgpu::RenderPipeline,
+    /// The skinned twin of `depth_pipeline` (`vs_skinned` over the 80-byte
+    /// skinned vertex).
+    pub(crate) depth_skinned_pipeline: wgpu::RenderPipeline,
+    /// Layout of the occlusion field group (group 1): the frame's GTAO
+    /// output, bound once per forward pass.
+    pub(crate) ao_layout: wgpu::BindGroupLayout,
     /// Joint palette: `SKIN_BLOCKS` blocks of 64 matrices, read by
     /// `vs_skinned` at forward binding 7 through a per-draw dynamic offset.
     /// One `write_skin_block` per skinned body per tick fills a block.
@@ -86,7 +97,7 @@ pub struct Presenter {
     /// once at build, so `vs_skinned` always blends.
     pub(crate) skin_params_buf: wgpu::Buffer,
     /// Skin block of every resident mesh uploaded through
-    /// `upload_skinned_mesh`. A mesh key listed here holds 64-byte skinned
+    /// `upload_skinned_mesh`. A mesh key listed here holds 80-byte skinned
     /// vertices and draws through `forward_skinned`; every other key holds
     /// the 48-byte static vertex.
     pub(crate) skin_blocks: BTreeMap<MeshKey, u8>,
@@ -390,6 +401,26 @@ fn forward_normal_layout_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
     ]
 }
 
+/// Layout of the LF3 occlusion field group (group 1, binding 0): the
+/// full-resolution R32Float field the forward pass samples for its
+/// ambient. The field is unfilterable, so the shader reads it with an
+/// exact texel load.
+pub(super) fn forward_ao_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("ra1-ao-field"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }],
+    })
+}
+
 /// Every shared resource a forward bind group points at, besides the
 /// per-texture base-color view. Borrowed, built where the bind is created.
 #[cfg(feature = "window")]
@@ -531,18 +562,20 @@ pub(super) fn forward_pipelines(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
+    ao_layout: &wgpu::BindGroupLayout,
     constants: &[(&str, f64)],
 ) -> [wgpu::RenderPipeline; 4] {
     // EG13 on path: 4x multisample with one shading run per pixel (cost is
     // bandwidth, not shading); off stays the 1x path. SP63: the MSAA pass
     // keeps a single HDR attachment, so its pipeline carries one target.
-    // The skinned twins use `vs_skinned` over the 64-byte vertex, so a body
+    // The skinned twins use `vs_skinned` over the 80-byte vertex, so a body
     // draws from bind-pose vertices plus one joint block.
     [
         forward_pipeline(
             device,
             shader,
             layout,
+            ao_layout,
             &super::submit::forward_color_target_formats(),
             pipeline_multisample(&MsaaConfig::default()),
             constants,
@@ -551,6 +584,7 @@ pub(super) fn forward_pipelines(
             device,
             shader,
             layout,
+            ao_layout,
             &[HDR_FORMAT],
             pipeline_multisample(&MsaaConfig { enabled: true }),
             constants,
@@ -559,6 +593,7 @@ pub(super) fn forward_pipelines(
             device,
             shader,
             layout,
+            ao_layout,
             &super::submit::forward_color_target_formats(),
             pipeline_multisample(&MsaaConfig::default()),
             constants,
@@ -567,6 +602,7 @@ pub(super) fn forward_pipelines(
             device,
             shader,
             layout,
+            ao_layout,
             &[HDR_FORMAT],
             pipeline_multisample(&MsaaConfig { enabled: true }),
             constants,
@@ -786,15 +822,26 @@ impl Presenter {
             label: Some("ra1-uniforms"),
             entries: &forward_entries,
         });
+        // LF3 landing 2: the occlusion field lives in group 1, so the
+        // forward group keeps its per-draw shape.
+        let ao_layout = forward_ao_layout(&device);
+        let look_constants = crate::quality::look_guard_constants(&crate::quality::knobs(
+            crate::quality::Quality::High,
+        ));
         let [forward_hdr, forward_hdr_msaa, forward_skinned, forward_skinned_msaa] =
             forward_pipelines(
                 &device,
                 &forward_shader,
                 &forward_layout,
-                &crate::quality::look_guard_constants(&crate::quality::knobs(
-                    crate::quality::Quality::High,
-                )),
+                &ao_layout,
+                &look_constants,
             );
+        let [depth_pipeline, depth_skinned_pipeline] = super::submit::forward_depth_pipelines(
+            &device,
+            &forward_shader,
+            &forward_layout,
+            &look_constants,
+        );
         let skin_joint_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fc2b-skin-joints"),
             size: SKIN_BLOCK_BYTES * u64::try_from(SKIN_BLOCKS).unwrap_or(1),
@@ -1185,6 +1232,9 @@ impl Presenter {
             forward_hdr_msaa,
             forward_skinned,
             forward_skinned_msaa,
+            depth_pipeline,
+            depth_skinned_pipeline,
+            ao_layout,
             skin_joint_buf,
             skin_params_buf,
             skin_blocks: BTreeMap::new(),
@@ -1561,14 +1611,15 @@ impl Presenter {
     }
 
     /// Upload a skinned body part under `key`: the bind-pose `mesh` plus its
-    /// `skin` rows packed as 64-byte vertices (pos, normal, uv, four joint
-    /// indices, four weights). A draw of `key` blends the joint matrices that
-    /// [`Self::write_skin_block`] last wrote to `block`, so a posed body costs
-    /// one 45-matrix write per tick and no vertex upload. Revalidated like
-    /// [`Self::upload_mesh`]; a skin row count that differs from the vertex
-    /// count, a joint index past [`Self::SKIN_BLOCK_JOINTS`] or a block past
-    /// [`Self::SKIN_BLOCKS`] is refused and changes nothing. A re-upload
-    /// replaces the buffers. Cold path: call it once per part, not per frame.
+    /// `skin` rows packed as 80-byte vertices (pos, normal, uv, tangent,
+    /// four joint indices, four weights). A draw of `key` blends the joint
+    /// matrices that [`Self::write_skin_block`] last wrote to `block`, so a
+    /// posed body costs one 45-matrix write per tick and no vertex upload.
+    /// Revalidated like [`Self::upload_mesh`]; a skin row count that differs
+    /// from the vertex count, a joint index past [`Self::SKIN_BLOCK_JOINTS`]
+    /// or a block past [`Self::SKIN_BLOCKS`] is refused and changes nothing.
+    /// A re-upload replaces the buffers. Cold path: call it once per part,
+    /// not per frame.
     pub fn upload_skinned_mesh(
         &mut self,
         key: MeshKey,
@@ -1597,7 +1648,7 @@ impl Presenter {
                 skin.weights.len()
             )));
         }
-        let stride = usize::try_from(super::submit::SKINNED_VERTEX_STRIDE).unwrap_or(64);
+        let stride = usize::try_from(super::submit::SKINNED_VERTEX_STRIDE).unwrap_or(80);
         let mut bytes = Vec::with_capacity(mesh.positions.len() * stride);
         for (index, row) in skin.joints.iter().enumerate() {
             if row
@@ -1614,6 +1665,11 @@ impl Presenter {
                 .chain(&mesh.normals[index])
                 .chain(&mesh.uvs[index]);
             for value in floats {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            // EG12 slice c: the mesh tangent rides the same draw, so a
+            // normal map on a skinned body maps through the real frame.
+            for value in mesh.tangents[index] {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
             for joint in row {
@@ -3120,7 +3176,8 @@ mod skin_window_tests {
         assert_eq!(SKIN_BLOCK_JOINTS, 64);
         assert_eq!(SKIN_BLOCK_BYTES, 64 * 64, "one mat4 is 64 bytes");
         assert_eq!(u64::from(SKIN_BLOCK_STRIDE), SKIN_BLOCK_BYTES);
-        assert_eq!(SKINNED_VERTEX_STRIDE, 12 + 12 + 8 + 16 + 16);
+        assert_eq!(SKINNED_VERTEX_STRIDE, 12 + 12 + 8 + 16 + 16 + 16);
+        assert!(wgsl.contains("@location(5) tangent: vec4<f32>"));
         for block in 0..SKIN_BLOCKS {
             let offset = skin_block_offset(u8::try_from(block).expect("block fits u8"));
             assert_eq!(offset % 256, 0, "block {block} is a legal storage offset");
@@ -3294,7 +3351,7 @@ mod skin_window_tests {
             .upload_skinned_mesh(key, &mesh, &skin, 1)
             .expect("skinned");
         assert_eq!(presenter.skin_block_of(&key), Some(1));
-        // The same key as a 48-byte static mesh: the 64-byte buffer is
+        // The same key as a 48-byte static mesh: the 80-byte buffer is
         // replaced, never rewritten in place, and the draw uses `vs`.
         presenter.upload_mesh(key, &v1::cube()).expect("static");
         assert_eq!(presenter.skin_block_of(&key), None);

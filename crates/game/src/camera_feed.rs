@@ -20,11 +20,12 @@ use engine_render::present::MAX_FRAME_DIM;
 use sha2::{Digest, Sha256};
 
 use super::camera::{
-    count_unframed, off_screen_arrows, shake_displacement_m, trauma_gain, unshaken_eye,
-    CameraError, CameraFrame, DampedSync, DirectorParams, FighterView, LookIntent, OffScreenArrow,
-    StagedRig, Vec3, BYPASS_LOCK, BYPASS_SHAKE,
+    count_unframed, off_screen_arrows, shake_displacement_m, smooth_trauma_offset, trauma_gain,
+    unshaken_eye, CameraError, CameraFrame, DampedSync, DirectorParams, FighterView, LookIntent,
+    OffScreenArrow, StagedRig, Vec3, BYPASS_LOCK, BYPASS_SHAKE,
 };
 use super::TickOutcome;
+use crate::fps_view::EYE_ROLL_MAX_RAD;
 
 /// Rolling window length in receipts, in the unit the receipt buffers are
 /// sized and compared in (`usize`). The window is owned once per unit: this
@@ -248,7 +249,14 @@ impl PresentationFeed {
     ) -> Result<CameraFrame, CameraError> {
         self.rig.set_bypass(bypass & (BYPASS_LOCK | BYPASS_SHAKE));
         self.rig.add_trauma(trauma_for_cues(cues));
-        let frame = self.rig.update(views, tick)?;
+        let mut frame = self.rig.update(views, tick)?;
+        // QL8 rotation-only feel: the translation shake never reaches the
+        // presented pose, so the trauma rides [`Self::rotation_shake`]
+        // instead and `shake_m` stays exactly zero (the F2P bar).
+        if bypass & BYPASS_TRANSLATION != 0 {
+            frame.eye_m = frame.eye_m - frame.shake_m;
+            frame.shake_m = Vec3::ZERO;
+        }
         debug_assert_eq!(
             feed_trauma_gain(frame.trauma_permille),
             trauma_gain(frame.trauma_permille),
@@ -319,6 +327,23 @@ impl PresentationFeed {
         out: &mut [OffScreenArrow],
     ) -> Result<usize, CameraError> {
         off_screen_arrows(frame, views, &self.rig.params(), out)
+    }
+
+    /// Rotation-only feel shake for the last presented frame, in radians:
+    /// zeros while the whole shake stage is bypassed ([`BYPASS_SHAKE`], the
+    /// shake-off proof capture), else the capped rotation for the frame's
+    /// decaying trauma ([`shake_rotation_offset`]). Rotation only, so a
+    /// caller can turn the view without moving the presented pose; with
+    /// [`BYPASS_TRANSLATION`] the frame's `shake_m` is already exactly zero.
+    #[must_use]
+    pub fn rotation_shake(&self) -> RotationShake {
+        if self.rig.bypass() & BYPASS_SHAKE != 0 {
+            return RotationShake::NONE;
+        }
+        match self.frames.last() {
+            Some(frame) => shake_rotation_offset(frame.trauma_permille, frame.tick),
+            None => RotationShake::NONE,
+        }
     }
 }
 
@@ -503,6 +528,111 @@ pub fn feed_shake_displacement_m(frame: &CameraFrame) -> f32 {
 pub fn feed_restored_eye(frame: &CameraFrame) -> Vec3 {
     frame.eye_m - frame.shake_m
 }
+
+// ---------------------------------------------------------------------------
+// QL8 feel camera: trauma shake, rotation only, hard cap.
+// ---------------------------------------------------------------------------
+
+/// Bypass bit that drops the director's translation shake while the rotation
+/// offset still reports: the rotation-only feel camera. The staged rig keeps
+/// only its own bits ([`BYPASS_LOCK`], [`BYPASS_SHAKE`]), so this one is
+/// applied by the feed after the update: the presented pose holds still and
+/// the trauma rides [`PresentationFeed::rotation_shake`] instead. Setting it
+/// together with [`BYPASS_SHAKE`] drops the whole shake stage.
+pub const BYPASS_TRANSLATION: u8 = 0x04;
+
+/// Hard cap for the feel-camera rotation shake, in degrees: the camera's one
+/// owned rotation rail, a tenth of a radian
+/// ([`EYE_ROLL_MAX_RAD`]), printed in degrees as the row's receipt asks.
+/// Every channel of [`RotationShake`] stays at or under it, so a burst can
+/// never turn the view further than this.
+pub const SHAKE_ROTATION_CAP_DEG: f32 = EYE_ROLL_MAX_RAD * (180.0 / PI);
+
+/// Rotation-only feel shake for one presented tick: yaw and pitch about the
+/// eye plus roll about the view axis, in radians, each channel hard-capped.
+/// The struct carries no translation at all, so applying it can never move
+/// the presented eye the way the director's meter shake
+/// ([`shake_offset`](super::camera::shake_offset)) does. Same inputs give the
+/// same rotation twice. Pure data, no heap.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct RotationShake {
+    /// Yaw about the eye, radians.
+    pub yaw_rad: f32,
+    /// Pitch about the eye, radians.
+    pub pitch_rad: f32,
+    /// Roll about the view axis, radians.
+    pub roll_rad: f32,
+}
+
+impl RotationShake {
+    /// Shake off: every channel exactly zero (calm, or the stage bypassed),
+    /// so a caller never special-cases it.
+    pub const NONE: Self = Self {
+        yaw_rad: 0.0,
+        pitch_rad: 0.0,
+        roll_rad: 0.0,
+    };
+
+    /// Largest channel magnitude in radians.
+    #[must_use]
+    pub fn peak_rad(&self) -> f32 {
+        self.yaw_rad
+            .abs()
+            .max(self.pitch_rad.abs())
+            .max(self.roll_rad.abs())
+    }
+
+    /// Largest channel magnitude in degrees, the unit the receipt prints.
+    #[must_use]
+    pub fn peak_deg(&self) -> f32 {
+        self.peak_rad() * 180.0 / PI
+    }
+}
+
+/// Rotation offset for one presented tick from the tick's decaying trauma:
+/// the trauma curve ([`feed_trauma_gain`], squared so a jab turns far less
+/// than a super) drives a direction from the rig's value-noise phase
+/// ([`smooth_trauma_offset`], no fork of the shake stage). The offset is
+/// rotation only ([`RotationShake`] holds no translation), and every channel
+/// is hard-capped at [`SHAKE_ROTATION_CAP_DEG`], so even a saturated burst
+/// stays inside the row's degree cap. Zero-trauma ticks are exactly
+/// [`RotationShake::NONE`]. Same inputs give the same rotation twice. Pure,
+/// no heap.
+#[must_use]
+pub fn shake_rotation_offset(trauma_permille: u32, tick: u32) -> RotationShake {
+    let gain = feed_trauma_gain(trauma_permille);
+    if gain <= 0.0 {
+        return RotationShake::NONE;
+    }
+    let Ok(shake) = smooth_trauma_offset(trauma_permille, tick, 0.0, 1.0) else {
+        // Constant arguments, always in range: unreachable; calm keeps the
+        // cap honest.
+        return RotationShake::NONE;
+    };
+    let cap_rad = SHAKE_ROTATION_CAP_DEG.to_radians();
+    let mag = gain * cap_rad;
+    // Screen-plane pair: the sideways channel steers yaw, the vertical one
+    // pitch, so the view swings with the same noise the meter shake used.
+    let dir = Vec3::new(shake.offset_m.x, shake.offset_m.y, 0.0);
+    let len = dir.len();
+    let (uy, up) = if len > 0.0 {
+        (dir.x / len, dir.y / len)
+    } else {
+        (0.0, 0.0)
+    };
+    // Roll rides the rig's own roll noise into the same cap.
+    let roll_unit = shake.roll_rad / ROTATION_ROLL_RAIL_RAD;
+    RotationShake {
+        yaw_rad: uy * mag,
+        pitch_rad: up * mag,
+        roll_rad: (roll_unit * mag).clamp(-mag, mag),
+    }
+}
+
+/// Roll rail the staged rig scales its roll noise by, in radians (the
+/// `camera_rig` roll share). Dividing the rig's roll by it recovers the
+/// `[-gain, gain]` unit this stage scales into [`SHAKE_ROTATION_CAP_DEG`].
+const ROTATION_ROLL_RAIL_RAD: f32 = 0.1;
 
 // ---------------------------------------------------------------------------
 // Wired game capture: the single pixel supplier for `capture_with` receipts.

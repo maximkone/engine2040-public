@@ -19,6 +19,9 @@ mod stages;
 #[cfg(test)]
 mod tests;
 
+/// VGA text-mode cell buffer over a [`State`] snapshot (OS6).
+pub mod screen;
+
 pub use model::{
     grid_cell, Action, Config, Event, EventKind, IoEntry, LossReason, Outcome, Pending, ProcState,
     Process, Refusal, ScoreParts, Stage, CPU_SLOTS, GRID_COLS, GRID_ROWS, HAPPY_RUNNING_TICKS,
@@ -27,5 +30,6 @@ pub use model::{
     STARVATION_MAX, STARVATION_TICKS, STARVATION_TICKS_PRIORITY, SWAP_SLOTS, SWAP_TICKS_MAX,
     SWAP_TICKS_MIN, TICKS_PER_MINUTE, TICK_HZ,
 };
+pub use screen::{Cell, Screen, SCREEN_CELLS, SCREEN_COLS, SCREEN_ROWS};
 pub use sim::{Sim, State};
 pub use stages::STAGES;

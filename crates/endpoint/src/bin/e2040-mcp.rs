@@ -45,6 +45,21 @@ async fn run(args: &[String]) -> i32 {
         eprintln!("e2040-mcp: {error}");
         return 1;
     }
+    // AIN3: the door hosts `view.laws` by spawning the windowless arena. One
+    // registration, at start; a refused slot is a start failure. `view.observe`
+    // stays unsupported: the CPU pose supplies no camera and no picture share,
+    // and the door never fakes them.
+    if let Err(error) = engine_endpoint::packs::view::register_view_laws_source(
+        engine_endpoint::packs::view::arena_view_line,
+    ) {
+        eprintln!("e2040-mcp: {error}");
+        return 1;
+    }
+    eprintln!(
+        "e2040-mcp: view.laws folds the live bout through `{}` ({})",
+        engine_endpoint::packs::view::arena_exe_path().display(),
+        engine_endpoint::packs::view::ARENA_EXE_ENV
+    );
     eprintln!(
         "e2040-mcp: serving `{dir}` over stdio",
         dir = config.project_dir.display()

@@ -75,6 +75,31 @@ pub const SHOULDER_LOOK_UP_M: f32 = 1.15;
 /// The eye never goes closer to the wall than this radius, meters.
 pub const CAMERA_RADIUS_M: f32 = WALL_RADIUS_M - 1.4;
 
+/// The ground rectangle the shoulder camera keeps its eye inside, meters: a play area with a
+/// wall on every side. [`EyeBounds::OPEN`] clamps nothing, which is what the circular stand-in
+/// ring passes (it keeps its own radial bound).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EyeBounds {
+    /// West inner face, meters.
+    pub min_x: f32,
+    /// East inner face, meters.
+    pub max_x: f32,
+    /// North inner face, meters.
+    pub min_z: f32,
+    /// South inner face, meters.
+    pub max_z: f32,
+}
+
+impl EyeBounds {
+    /// No clamp at all: the caller's own bound (the ring's radius) is the only one.
+    pub const OPEN: Self = Self {
+        min_x: f32::NEG_INFINITY,
+        max_x: f32::INFINITY,
+        min_z: f32::NEG_INFINITY,
+        max_z: f32::INFINITY,
+    };
+}
+
 /// What the shoulder camera frames: both seats' feet, the human's heading, the hit shake weight
 /// and the clock the shake reads. Plain data, so the same view gives the same camera.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -519,6 +544,18 @@ impl ProceduralArena {
         height: u32,
         view: ShoulderView,
     ) -> Result<Camera, ArenaError> {
+        self.shoulder_camera_in(width, height, view, EyeBounds::OPEN)
+    }
+
+    /// [`Self::shoulder_camera`] with the eye also kept inside `bounds`, for a play area whose
+    /// walls are a rectangle (the arena kit's corridor) rather than a circle.
+    pub fn shoulder_camera_in(
+        &self,
+        width: u32,
+        height: u32,
+        view: ShoulderView,
+        bounds: EyeBounds,
+    ) -> Result<Camera, ArenaError> {
         let ShoulderView {
             human_m: human,
             rival_m: rival,
@@ -562,6 +599,9 @@ impl ProceduralArena {
             let k = CAMERA_RADIUS_M / radius;
             eye = Vec3::new(flat.x * k, eye.y, flat.z * k);
         }
+        // A rectangular play area keeps the eye inside its own walls as well.
+        eye.x = eye.x.clamp(bounds.min_x, bounds.max_x);
+        eye.z = eye.z.clamp(bounds.min_z, bounds.max_z);
         let fov = (58.0 + far * 0.45).clamp(58.0, 74.0);
         let mut camera = Camera::new(
             eye.to_array(),
@@ -1015,6 +1055,49 @@ mod tests {
             "the shake is small and real: {offset:.4} m"
         );
         assert_eq!(shaken.target, still.target, "the look point holds");
+    }
+
+    #[test]
+    fn the_shoulder_camera_keeps_a_rectangular_eye_inside_its_walls() {
+        let arena = arena();
+        let bounds = EyeBounds {
+            min_x: -12.5,
+            max_x: 6.0,
+            min_z: -8.8,
+            max_z: 8.8,
+        };
+        // The human stands at the east end facing east: the eye would back through the gate.
+        let human = [5.0, 0.0, 4.0];
+        let rival = [4.0, 0.0, 5.0];
+        let east = ShoulderView {
+            human_m: human,
+            rival_m: rival,
+            facing_cdeg: 9_000,
+            shake: 0.0,
+            t_s: 0.0,
+        };
+        let camera = arena
+            .shoulder_camera_in(1280, 720, east, bounds)
+            .expect("a pair at the gate still gives a camera");
+        assert!(
+            camera.eye.x <= bounds.max_x + 1e-3 && camera.eye.x >= bounds.min_x - 1e-3,
+            "the eye stays west of the gate: x {:.3} m",
+            camera.eye.x
+        );
+        assert!(
+            camera.eye.z <= bounds.max_z + 1e-3 && camera.eye.z >= bounds.min_z - 1e-3,
+            "the eye stays between the walls: z {:.3} m",
+            camera.eye.z
+        );
+        // The open bound clamps nothing beyond the ring's own radius.
+        let open = arena
+            .shoulder_camera_in(1280, 720, east, EyeBounds::OPEN)
+            .expect("the open bound still gives a camera");
+        let radius = (open.eye.x * open.eye.x + open.eye.z * open.eye.z).sqrt();
+        assert!(
+            radius <= CAMERA_RADIUS_M + 1e-3,
+            "the ring's radius still holds: {radius:.3} m"
+        );
     }
 
     #[test]

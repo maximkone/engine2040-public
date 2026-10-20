@@ -23,15 +23,16 @@ pub struct PanelDescriptor {
     pub panel: Panel,
 }
 
-/// The eight dock panels in default order: the single source of truth behind
+/// The nine dock panels in default order: the single source of truth behind
 /// [`builtin_registry`] and [`ensure_builtin_panels`].
-pub const BUILTIN: [(&str, Panel); 8] = [
+pub const BUILTIN: [(&str, Panel); 9] = [
     ("hierarchy", Panel::Hierarchy),
     ("inspector", Panel::Inspector),
     ("viewport", Panel::Viewport),
     ("findings", Panel::Findings),
     ("tuning", Panel::Tuning),
     ("templates", Panel::Templates),
+    ("browser", Panel::Browser),
     ("activity", Panel::Activity),
     ("log", Panel::Log),
 ];
@@ -101,7 +102,7 @@ mod tests {
         }
         assert!(shell.is_open(Panel::Log));
         assert_eq!(builtin_registry().panels(), Panel::all());
-        assert_eq!(builtin_registry().panels().len(), 8);
+        assert_eq!(builtin_registry().panels().len(), 9);
     }
 
     #[test]
@@ -118,7 +119,7 @@ mod tests {
         assert_eq!(Panel::Activity.title(), "activity");
         assert!(Panel::all().contains(&Panel::Activity));
         assert_eq!(builtin_registry().panels(), Panel::all());
-        assert_eq!(builtin_registry().panels().len(), 8);
+        assert_eq!(builtin_registry().panels().len(), 9);
     }
 
     #[test]
