@@ -835,6 +835,10 @@ impl ForkJob {
                     };
                     on_fork_step(&step)
                 };
+                // The rows are built on the shared job pool when the `spine` feature brings
+                // `engine-ecs` in; the default graph keeps the serial loop, which writes the
+                // same rows in fighter order.
+                #[cfg(feature = "spine")]
                 let partials = engine_ecs::parallel::fork_join_on(
                     engine_ecs::pool::shared(),
                     0..fighters,
@@ -851,6 +855,8 @@ impl ForkJob {
                     // serial loop gives the same rows if it ever does.
                     (0..fighters).filter_map(row_of).collect::<Vec<Row>>()
                 });
+                #[cfg(not(feature = "spine"))]
+                let partials = (0..fighters).filter_map(row_of).collect::<Vec<Row>>();
                 out.extend(partials);
             }
         }

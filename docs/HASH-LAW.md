@@ -178,3 +178,15 @@ not establish model reproducibility. Job completion order cannot decide outcomes
 - PX30 com_mm: state_hash folds integer mm; golden d57b5c8ae3096614 verified unchanged x2
   via cargo test -p engine-proof --lib golden_hash_untouched; no re-pin needed
   because arena/game never calls BalanceState.
+- ARC7 (2026-10-21): `engine-arena`'s `spine` feature is a default feature now,
+  so every consumer compiles the spine step. This is the build graph only:
+  `run`, `run_controlled` and `LiveMatch` still step the legacy `Sim`, and the
+  spine step still covers the kinematic default track only (no `ArenaRules`
+  v2, cuts/limbs, balance/stagger, spear, match track or `sim` controllers), so
+  the legacy step is not retired and no fixture moved. Receipt: fixture
+  `GOLDEN_600` v1 (seed 2040, 600 ticks, scope above), reason "feature flag is
+  default, no step changed", old == new `d57b5c8ae3096614`, both outputs
+  `cargo test -p engine2040 --release --test proof_cli default_and_max_seed`
+  (json `--verify` final_hash plus the text receipt), run 39509470629. A real
+  retirement would move the arena digest `arena=2fbd56040fd091a7`, never
+  `GOLDEN_600`, which runs only the `engine-proof` 2D fixture.

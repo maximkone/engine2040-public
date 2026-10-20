@@ -19,10 +19,15 @@ engine-destruction.workspace = true
 # The Rapier settling track lives behind `sim` (AR2-fix): `sim` turns on
 # `engine-physics/rapier` for gravity settling plus wall collision.
 engine-physics.workspace = true
-# ARC3/ARC4: the spine step and parity harness (`spine` flag, off by default).
+# ARC3/ARC4: the spine step and parity harness (`spine` flag, a default feature
+# since ARC7 so every consumer compiles the migration path).
 engine-ecs = { workspace = true, optional = true }
 
 [features]
+# ARC7: the spine is the default build of the crate; the flag stays named so
+# `--no-default-features` still builds the bare crate. Off only removes the
+# modules: `run` and `LiveMatch` step the legacy `Sim` either way.
+default = ["spine"]
 sim = ["engine-physics/rapier"]
 spine = ["dep:engine-ecs"]
 

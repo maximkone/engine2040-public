@@ -2776,11 +2776,20 @@ mod tests {
         );
         assert_eq!(
             ArenaConfig {
-                fighters: 17,
+                fighters: MAX_PARTICIPANTS,
                 ..config()
             }
             .validate(),
-            Err(ArenaError::BadFighters(17))
+            Ok(()),
+            "GE12: the raised cap itself is a valid match"
+        );
+        assert_eq!(
+            ArenaConfig {
+                fighters: MAX_PARTICIPANTS + 1,
+                ..config()
+            }
+            .validate(),
+            Err(ArenaError::BadFighters(MAX_PARTICIPANTS + 1))
         );
         assert_eq!(
             ArenaConfig {

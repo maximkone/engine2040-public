@@ -225,13 +225,9 @@
   Size M. Owns glue in `crates/endpoint`, `crates/editor`.
   Accept: three-state extraction test green on spine bytes; one
   Xvfb inspector smoke. needs: ARC4, RC2. Progress 2026-10-18: ExtractionView pub (6206fe07), Bridge::ingest_spine refuses bad hash/short buffer/bad version/tick skew (ecs bridge run 39066510052, 10 passed), editor spine_inspect renders the four spine columns through RC4 schemas (2 passed); left: nothing in the editor produces a live spine, ShellUi::set_spine is only called from tests. Progress 2026-10-20: the editor produces a live arena spine (LiveSpine in play_in.rs, attach_spine in app.rs) and paints it through the RC4 registry; 3 tests pass with --features ui (the_live_spine_steps_one_tick_per_round_tick, the_live_spine_restarts_at_its_tick_cap, the_live_spine_inspects_through_the_rc4_registry), cargo check --all-targets green; left: Xvfb inspector smoke. Landed bbb1878d. extraction_reads_all_three_states_from_spine_bytes green over spine bytes (gh run 39464077292, cargo test -p engine-ecs --lib bridge, 10 passed); Xvfb-style inspector smoke inspector_paints_the_live_play_in_spine paints the live arena spine through the RC2 bridge and the RC4 schemas (and inspector_paints_spine_components_from_a_snapshot still refuses a forged hash): cargo test -p engine-editor --features ui --lib inspector_paints, 2 passed x2 on the PC (ui needs a window build, so gh-check runs it locally; the frame is one headless egui run_ui pass, the Xvfb path).
-- [ ] ARC7 arena: retire legacy — flip the `spine` flag to default,
-  delete the legacy step, move the golden with a HASH-LAW receipt
-  (fixture version, reason, old/new hashes, both outputs).
-  Tier A. Size S. Owns legacy step deletion + `docs/HASH-LAW.md`
-  note (orchestrator lands the doc edit). Accept: `git grep` for
-  legacy step finds nothing; proof golden x2 on the new hash;
-  receipt committed with the row. needs: ARC4, ARC5.
+- [x] ARC7a arena: the spine flag is a default feature — `spine` ships on by default so every consumer compiles the spine step; the build graph is the only change (`run`, `run_controlled` and `LiveMatch` still step legacy `Sim`). Tier A. Size S. Owns `crates/arena/Cargo.toml`. Accept: `spine` is in the default features; golden d57b5c8ae3096614 x2 unchanged; arena lib green. F2P: `spine` was opt-in. P2P: golden d57b5c8ae3096614 and arena lib. needs: ARC4, ARC5. Landed 1ae3eb42. golden old == new d57b5c8ae3096614 x2 (gh run 39509470629); arena lib 241 passed (gh run 39509189839); `config_ranges_rejected` now checks the 32-slot boundary. Split 2026-10-21: legacy removal is ARC7b/ARC7c.
+- [ ] ARC7b arena: v2 rules and logs on the spine — the spine step learns the v2 `ArenaRules` track (cuts/limbs, balance/stagger, spear, match track and `sim` controllers) so it can stand in for the legacy `Sim`; no deletion yet. Tier A. Size L (landings: v2 rules; cuts/limbs; balance/stagger; spear; match track and controllers). Owns `crates/arena/src/spine_step.rs`, `crates/arena/src/lib.rs`, `crates/arena/src/world.rs`. Accept: `cargo test -p engine-arena --lib spine_` green; the same tape on spine and legacy prints identical cuts/balance/spear/match events; arena digest `2fbd56040fd091a7` x2 after the switch; golden d57b5c8ae3096614 unchanged. F2P: the spine step covers only the kinematic default track. P2P: arena lib green; legacy `Sim` untouched. needs: ARC7a.
+- [ ] ARC7c arena: delete the legacy `Sim` — remove `Sim` and route every runner through `spine_step`; move the arena digest with a HASH-LAW receipt (fixture version, reason, old/new digests, both outputs). Tier A. Size L (landings: runners and live; fork and snapshots; digest receipt). Owns `crates/arena/src/lib.rs`, `crates/arena/src/fork.rs`, `docs/HASH-LAW.md`. Accept: `git grep` finds no legacy `Sim` step; proof `arena=2fbd56040fd091a7` -> new digest x2; receipt committed with the row; golden d57b5c8ae3096614 unchanged. F2P: `run`/`run_controlled`/`LiveMatch` still build `Sim`. P2P: golden unchanged; arena lib green. needs: ARC7b.
 - [x] ARC8 playtest: spine keypoint fixtures — 10 gameplay claims
   as VK1 specs over spine state (parry window, hit-stop, get-up,
   bounds), run by the ticked VK1 30-spec harness (no isolated specs).
@@ -482,14 +478,14 @@
   green. needs: MP10.
   (PLN multiplayer.md EXTEND, proposed 2026-09-29.)
   progress 2026-10-10: Accept met on the tree before split-claude WIP landed in crates/net. cargo test -p engine-net --lib snapshot: 34 passed, incl. snapshot_wire_jitter_16_bodies_interpolates_c1 (C1 with guard), snapshot_remote_view_keeps_frozen_interpolator_bytes (delta bytes unchanged), snapshot_wire_bytes_and_presentation_are_pinned_x2 (hash x2).
-- [ ] MP18 net: channel + compression flood chart — the MP8 table
+- [x] MP18 net: channel + compression flood chart — the MP8 table
   plus the MP9 codec under one 16-fighter flood, one chart
   deciding both rows. Tier B. Size S. Owns chart hunks in
   `crates/net/src/scale.rs` (table and codec read, never
   redefined; after MP16). Accept: combat first, idle shed
   first, deltas smaller on quiet tapes, ≥20% saving or killed
   with numbers; hash x2. needs: MP8, MP9, MP16.
-  (PLN multiplayer.md EXTEND, proposed 2026-09-29.)
+  (PLN multiplayer.md EXTEND, proposed 2026-09-29.) Landed 9d0296b. flood_chart_rows_follow_the_mp8_table_and_keep_combat_first, flood_chart_sheds_idle_crowd_before_any_combat_slot, flood_chart_deltas_are_smaller_on_quiet_tapes, flood_chart_codec_saves_twenty_percent_at_sixteen_fighters, flood_chart_replays_identically_x2; chart: input 169 B -> 73 B (56.8 %) at 60 Hz, state delta 189 B and snapshot 313 B at 15 Hz, shed kept 12 / dropped 4 idle / 0 combat / 0 pose, quiet delta 27 B vs flood 189 B, digest 8770ad15c773d8cc x2; cargo test -p engine-net --lib scale 24 passed run 39511062228, full --lib 435 passed run 39511343673, clippy run 39510757406 (only the pre-existing arena large_types_passed_by_value waived), golden d57b5c8ae3096614 run 39509390917.
 - [x] MP19 net: every-match theater receipt — the MP7 three-tape Landed 1d01a410 (with MP15). dedicated_auto_theater_ends_playable_with_cr1_parity (playable tape + report equal to CR1 attribute) and ..._refuses_before_finish_and_bad_probe (corrupt probe refused BadInput) run 39056258774.
   attribution plus the MP15 match-end auto-write as one receipt:
   every dedicated match ends playable and attributed with zero
