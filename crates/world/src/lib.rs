@@ -3,6 +3,9 @@
 
 pub mod cells;
 pub mod ground;
+/// Map assembly manifests: versioned cell bytes with per-cell asset lists and
+/// the EVIDENCE provenance gate.
+pub mod manifest;
 /// Seeded spawn rosters over tagged spawn points: min/max per group, matching-based so a
 /// greedy pick never strands a later group.
 pub mod roster;

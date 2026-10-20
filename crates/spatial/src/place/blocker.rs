@@ -443,7 +443,7 @@ fn nearest(scan: &Scan<'_, '_>, wants: &[Want], i: usize, strict: bool) -> Optio
                 }
                 if strict {
                     let out = transform_of(&kept, cx, cz, yaw_idx);
-                    if !verifies(scan.index, &kept, &out, rest_cm) {
+                    if !verifies(scan.ctx, scan.index, &kept, &out, rest_cm) {
                         continue;
                     }
                 }

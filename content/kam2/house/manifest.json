@@ -1,0 +1,52 @@
+{
+  "id": "house.cottage",
+  "kind": "building",
+  "tile_w": 128,
+  "tile_h": 128,
+  "pivot": [
+    64,
+    95
+  ],
+  "footprint": [
+    2,
+    2
+  ],
+  "turret_anchor": null,
+  "facings": [
+    "S"
+  ],
+  "facing_count": 1,
+  "anims": [
+    {
+      "name": "finished",
+      "frames": 1,
+      "fps": 8,
+      "loop": true,
+      "row": 0
+    },
+    {
+      "name": "half_built",
+      "frames": 1,
+      "fps": 8,
+      "loop": true,
+      "row": 1
+    },
+    {
+      "name": "damaged",
+      "frames": 1,
+      "fps": 8,
+      "loop": true,
+      "row": 2
+    }
+  ],
+  "atlas": "house.cottage.atlas.png",
+  "mask_atlas": null,
+  "cameo": null,
+  "atlas_size": [
+    130,
+    390
+  ],
+  "padding": 1,
+  "source_frames": 3,
+  "generator": "tools/kam2/pack_atlas.mjs"
+}

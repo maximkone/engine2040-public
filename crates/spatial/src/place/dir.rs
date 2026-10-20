@@ -105,7 +105,8 @@ pub fn place_dir(
                     .all(|&i| fast_ok(&wants[i], cx, cz, hx, hz, &ctx, &by_id))
                 {
                     let out = transform_of(&obj, cx, cz, 0);
-                    if verifies(&index, &obj, &out, None) && confirmed(subset, wants, &out, actors)
+                    if verifies(&ctx, &index, &obj, &out, None)
+                        && confirmed(subset, wants, &out, actors)
                     {
                         return Some(out);
                     }

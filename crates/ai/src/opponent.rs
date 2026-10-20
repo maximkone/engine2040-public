@@ -66,8 +66,9 @@ const fn class_of(intent: Intent) -> usize {
     }
 }
 
-/// Lane index in [`Intent`] table order.
-const fn lane_of(intent: Intent) -> usize {
+/// Lane index in [`Intent`] table order, 0..=5. The one table the decision
+/// ring (`crate::gladiator`) and this counter both read.
+pub(crate) const fn lane_index(intent: Intent) -> u8 {
     match intent {
         Intent::Attack => 0,
         Intent::Block => 1,
@@ -129,7 +130,7 @@ impl OpponentTable {
 
     /// Count one observation: in `band`, after `last`, the foe did `next`.
     pub fn observe(&mut self, band: RangeBand, last: Intent, next: Intent) {
-        let cell = &mut self.counts[bucket(band, last)][lane_of(next)];
+        let cell = &mut self.counts[bucket(band, last)][usize::from(lane_index(next))];
         *cell = cell.saturating_add(1);
     }
 
@@ -148,7 +149,7 @@ impl OpponentTable {
 
     /// Count held on one observation cell.
     pub fn count(&self, band: RangeBand, last: Intent, next: Intent) -> u32 {
-        self.counts[bucket(band, last)][lane_of(next)]
+        self.counts[bucket(band, last)][usize::from(lane_index(next))]
     }
 
     /// Observations counted in one bucket.

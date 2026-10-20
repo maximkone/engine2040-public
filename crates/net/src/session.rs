@@ -80,6 +80,7 @@ use crate::delta::{
 /// Remote presentation of the LAN path: the frozen [`Interpolator`] plus the
 /// Hermite/quaternion/guard modules, fed together from one snapshot stream.
 pub use crate::interp::{FrameHead, InterpFrame, QueryKind, RemoteView, SnapshotInterpolator};
+use crate::validate::SortedUnique;
 
 /// Wire version accepted by [`decode_input`] and [`decode_state`].
 /// Anything else — older or future — is rejected outright.
@@ -412,7 +413,7 @@ impl Server {
         let fighters = self.spec.config.fighters;
         let mut sorted: Vec<FighterInput> = inputs.to_vec();
         sorted.sort_by_key(|input| (input.tick, input.fighter.0));
-        let mut prev: Option<(u32, u8)> = None;
+        let mut order = SortedUnique::new();
         for input in &sorted {
             if input.validate().is_err() || input.fighter.0 >= fighters {
                 return Err(NetError::BadInput);
@@ -420,11 +421,9 @@ impl Server {
             if input.tick != self.next_tick {
                 return Err(NetError::LateInput(input.tick));
             }
-            let key = (input.tick, input.fighter.0);
-            if prev == Some(key) {
+            if !order.push((input.tick, input.fighter.0)) {
                 return Err(NetError::BadInput);
             }
-            prev = Some(key);
         }
         let checkpoint = match self.stepper.step(&sorted) {
             Some(stepped) => stepped.checkpoint,
@@ -807,7 +806,7 @@ fn validate_tape(
     fighters: u8,
     max_tick: Option<u32>,
 ) -> Result<(), NetError> {
-    let mut prev: Option<(u32, u8)> = None;
+    let mut order = SortedUnique::new();
     for input in tape {
         if input.validate().is_err() || input.fighter.0 >= fighters {
             return Err(NetError::BadInput);
@@ -815,11 +814,9 @@ fn validate_tape(
         if max_tick.is_some_and(|max| input.tick > max) {
             return Err(NetError::BadState);
         }
-        let key = (input.tick, input.fighter.0);
-        if prev.is_some_and(|p| key <= p) {
+        if !order.push((input.tick, input.fighter.0)) {
             return Err(NetError::BadInput);
         }
-        prev = Some(key);
     }
     Ok(())
 }
@@ -1327,7 +1324,7 @@ fn decode_state_delta_body(
     let base_tick = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
     let mut changed_slots = Vec::with_capacity(nslots);
     let mut cursor = 4usize;
-    let mut prev: Option<u8> = None;
+    let mut order = SortedUnique::new();
     for _ in 0..nslots {
         if body.len() < cursor + 2 {
             return Err(NetError::Truncated);
@@ -1335,10 +1332,9 @@ fn decode_state_delta_body(
         let slot = body[cursor];
         let mask = body[cursor + 1];
         cursor += 2;
-        if slot >= engine_input::MAX_PARTICIPANTS || prev.is_some_and(|p| slot <= p) {
+        if slot >= engine_input::MAX_PARTICIPANTS || !order.push(slot) {
             return Err(NetError::BadInput);
         }
-        prev = Some(slot);
         if mask == 0 || mask & !MASK_ALL != 0 {
             return Err(NetError::BadInput);
         }
@@ -1527,13 +1523,12 @@ pub fn decode_snapshot(bytes: &[u8]) -> Result<FullSnap, NetError> {
         return Err(NetError::Truncated);
     }
     let mut fighters = Vec::with_capacity(count);
-    let mut prev: Option<u8> = None;
+    let mut order = SortedUnique::new();
     for chunk in bytes[SNAPSHOT_HEADER_LEN..].chunks_exact(SNAPSHOT_SLOT_LEN) {
         let slot = chunk[0];
-        if slot >= engine_input::MAX_PARTICIPANTS || prev.is_some_and(|p| slot <= p) {
+        if slot >= engine_input::MAX_PARTICIPANTS || !order.push(slot) {
             return Err(NetError::BadInput);
         }
-        prev = Some(slot);
         fighters.push(FighterSnap {
             slot,
             x_mm: i32::from_le_bytes([chunk[1], chunk[2], chunk[3], chunk[4]]),

@@ -1,0 +1,75 @@
+{
+  "id": "unit.soldier",
+  "kind": "unit",
+  "model": "Kenney Blocky Characters 2.0 - character-j.glb",
+  "author": "Kenney (www.kenney.nl)",
+  "licence": "CC0 1.0 Universal (public domain dedication)",
+  "licence_line": "Blocky Characters (2.0). Created/distributed by Kenney (www.kenney.nl). License: Creative Commons Zero, CC0. http://creativecommons.org/publicdomain/zero/1.0/",
+  "licence_file": "License.txt inside the pack, copied below as licence_line",
+  "download": {
+    "page": "https://kenney.nl/assets/blocky-characters",
+    "url": "https://kenney.nl/media/pages/assets/blocky-characters/8369c0cf30-1749547469/kenney_blocky-characters_20.zip",
+    "zip_bytes": 2148510,
+    "zip_sha256": "5e123859aa0c1598342b600c6db197024a1d63eb9ec531398b310725f589887e",
+    "file_in_zip": "Models/GLB format/character-j.glb",
+    "glb_bytes": 113584,
+    "glb_sha256": "5bae1cabb44a719fba8e18a8c519f45c92531bc02a2a1324cd316ffa5903e311",
+    "account_required": false
+  },
+  "rig": {
+    "type": "node hierarchy, no skin weights",
+    "nodes": ["root", "leg-left", "leg-right", "torso", "arm-left", "arm-right", "head"],
+    "clips": 27,
+    "clip_used": "walk",
+    "clip_seconds": 0.667,
+    "clip_source_fps": 24,
+    "clip_frames": 16
+  },
+  "render": {
+    "tool": "tools/kam2/render_frames.py",
+    "blender": "5.2.0 LTS",
+    "engine": "cycles",
+    "device": "CPU",
+    "samples": 48,
+    "size": 64,
+    "pitch_deg": 26.5651,
+    "yaw_order": ["S", "SW", "W", "NW", "N", "NE", "E", "SE"],
+    "ortho_scale": 4.629976,
+    "height_px": 34,
+    "ground_px": 56,
+    "floor_z": 0.0,
+    "pose_frame": 6,
+    "transparent": true,
+    "contact_shadow": true,
+    "lights": "style-lock key #FFE8C4 3.2, fill #6E86A8 0.55, ambient #3A4250 0.5, screen-locked",
+    "command": "blender --background --factory-startup --python tools/kam2/render_frames.py -- --scene \"<pack>/Models/GLB format/character-j.glb\" --out <dir> --frames 8 --size 64 --action walk --frame 6 --span 4.629976 --ground-px 56 --floor-z 0 --samples 48"
+  },
+  "atlas": {
+    "file": "unit.soldier.atlas.png",
+    "size": [528, 594],
+    "cell": [64, 64],
+    "padding": 1,
+    "rows": 9,
+    "columns": 8,
+    "row_0": "walk_pose: one walking pose (source clip frame 6) at 8 yaws, S..SE",
+    "rows_1_8": "walk: 8 frames (source clip frames 0,2,4,6,8,10,12,14) x 8 yaws",
+    "pivot_px": [32, 56],
+    "pack_command": "node tools/kam2/pack_atlas.mjs --in <frames> --out target/kam2-art/soldier --id unit.soldier --kind unit --facings 8 --anim walk_pose:1:10:true --anim walk:8:10:true --footprint 1x1 --pivot auto"
+  },
+  "yaw_frames": [
+    "yaws/frame_00.png S",
+    "yaws/frame_01.png SW",
+    "yaws/frame_02.png W",
+    "yaws/frame_03.png NW",
+    "yaws/frame_04.png N",
+    "yaws/frame_05.png NE",
+    "yaws/frame_06.png E",
+    "yaws/frame_07.png SE"
+  ],
+  "notes": [
+    "Sprite body is 34 px from ground to crown; the drawn silhouette is 37-38 px because the head's near top corner and the 26.565 deg tilt add depth. The alpha bbox is 42-43 px tall, which includes the baked contact shadow.",
+    "Widest facing (SW or SE) is 33 px, over the style-lock 24 px infantry box; the blocky character's arms are wide. The cell is 64 px so nothing clips.",
+    "The walk clip swings legs from the hip with no foot planting: frames 4 and 12 lift both feet 0.43 world units (about 6 px). The render is the clip as authored, no ground clamp was added.",
+    "No team mask pass: this look test renders the base sprite only."
+  ]
+}

@@ -630,27 +630,24 @@ fn capture_arg() -> Option<u32> {
 /// Caller: `main --alloc-compare`.
 fn alloc_compare_text() -> String {
     use engine_perf::allocator::{
-        box_conditions, candidate_rows, csv_row, system_rows, AllocatorKind, CSV_HEADER,
+        active_kind, box_conditions, candidate_rows, csv_row, CSV_HEADER,
     };
-    let system = system_rows();
-    let candidate = candidate_rows();
+    // One process carries one global allocator, so a candidate row is a second
+    // build of this same harness (the `mimalloc` feature). Rows name the
+    // allocator that produced them; the comparison is two runs of this flag.
+    let kind = active_kind();
     let mut out = String::new();
     out.push_str(CSV_HEADER);
     out.push('\n');
     out.push_str(&box_conditions());
     out.push('\n');
-    for (left, right) in system.iter().zip(candidate.iter()) {
-        match (
-            csv_row(left, AllocatorKind::System, None),
-            csv_row(right, AllocatorKind::Mimalloc, None),
-        ) {
-            (Ok(left_row), Ok(right_row)) => {
-                out.push_str(&left_row);
-                out.push('\n');
-                out.push_str(&right_row);
+    for report in candidate_rows() {
+        match csv_row(&report, kind, None) {
+            Ok(row) => {
+                out.push_str(&row);
                 out.push('\n');
             }
-            (Err(error), _) | (_, Err(error)) => {
+            Err(error) => {
                 out.push_str(&format!("# row refused: {error}\n"));
             }
         }

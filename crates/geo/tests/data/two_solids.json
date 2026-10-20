@@ -1,0 +1,20 @@
+{
+  "script": "tools/dcc/blender/make_fbx_fixture.py",
+  "blender": "5.2.0 LTS",
+  "fbx": "two_solids.fbx",
+  "axes": {
+    "forward": "-Z",
+    "up": "Y"
+  },
+  "unit_meters": 1.0,
+  "meshes": [
+    {
+      "name": "Cube",
+      "triangles": 12
+    },
+    {
+      "name": "Sphere",
+      "triangles": 960
+    }
+  ]
+}

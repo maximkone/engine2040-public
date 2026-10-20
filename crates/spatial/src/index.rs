@@ -1,5 +1,7 @@
 //! Integer-cm XZ index. Sweep-and-prune broadphase, frozen pair order.
 //! All math on i32 cm so builds are bit-identical across targets.
+//! The shared `overlap` box test lives here too: 3D Y interval first, then
+//! the XZ footprint after yaw (exact on quarter turns, a bound between).
 
 use super::Actor;
 
@@ -181,6 +183,139 @@ pub(crate) fn xyz_hit(a: &Box3, b: &Box3) -> bool {
         && b.min_x < a.max_x
         && a.min_y < b.max_y
         && b.min_y < a.max_y
+        && a.min_z < b.max_z
+        && b.min_z < a.max_z
+}
+
+/// Yaw tolerance in radians: a yaw this close to a 45-degree step reads as
+/// that step. Far above f32 yaw arithmetic error, far below a real tilt.
+const YAW_STEP_EPS: f32 = 1e-4;
+
+/// One row's 3D bounds after yaw, in integer cm. `exact` is true on quarter
+/// turns, where the footprint keeps its own edges; `circular` is true off the
+/// 45-degree lattice, where the bounding circle stands in and the report
+/// labels the hit yellow. `area` is the footprint area, the same integer
+/// `build_rects` reports for the unrotated row.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct YawBox {
+    pub(crate) id: u32,
+    pub(crate) min_x: i32,
+    pub(crate) max_x: i32,
+    pub(crate) min_y: i32,
+    pub(crate) max_y: i32,
+    pub(crate) min_z: i32,
+    pub(crate) max_z: i32,
+    pub(crate) area: i64,
+    pub(crate) exact: bool,
+    pub(crate) circular: bool,
+}
+
+impl YawBox {
+    /// The same bounds as a plain 3D box, for sweeps and index probes.
+    pub(crate) fn as_box3(&self) -> Box3 {
+        Box3 {
+            id: self.id,
+            min_x: self.min_x,
+            max_x: self.max_x,
+            min_y: self.min_y,
+            max_y: self.max_y,
+            min_z: self.min_z,
+            max_z: self.max_z,
+        }
+    }
+}
+
+/// Yaw-aware bounds of one actor, or `None` when its position or size is not
+/// finite. Sizes read by magnitude, so a degenerate row keeps the flat
+/// footprint `build_rects` gives it.
+pub(crate) fn yaw_box_of(a: &Actor) -> Option<YawBox> {
+    if !pos_known(a) || !size_known(a) {
+        return None;
+    }
+    yaw_box_at(
+        a.id,
+        to_cm(a.x),
+        to_cm(a.y),
+        to_cm(a.z),
+        to_cm(a.sx).abs() / 2,
+        to_cm(a.sy).abs() / 2,
+        to_cm(a.sz).abs() / 2,
+        a.yaw,
+    )
+}
+
+/// Yaw-aware bounds from a center and its integer-cm half extents.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one box from its id, center, half extents and yaw; no struct churn"
+)]
+pub(crate) fn yaw_box_at(
+    id: u32,
+    x_cm: i32,
+    y_cm: i32,
+    z_cm: i32,
+    hx: i32,
+    hy: i32,
+    hz: i32,
+    yaw: f32,
+) -> Option<YawBox> {
+    if hx < 0 || hy < 0 || hz < 0 {
+        return None;
+    }
+    let (fx, fz, exact, circular) = yaw_half(hx, hz, yaw);
+    Some(YawBox {
+        id,
+        min_x: clamp_to_i32(i64::from(x_cm) - i64::from(fx)),
+        max_x: clamp_to_i32(i64::from(x_cm) + i64::from(fx)),
+        min_y: clamp_to_i32(i64::from(y_cm) - i64::from(hy)),
+        max_y: clamp_to_i32(i64::from(y_cm) + i64::from(hy)),
+        min_z: clamp_to_i32(i64::from(z_cm) - i64::from(fz)),
+        max_z: clamp_to_i32(i64::from(z_cm) + i64::from(fz)),
+        area: 4 * i64::from(hx) * i64::from(hz),
+        exact,
+        circular,
+    })
+}
+
+/// Footprint half-extents on X and Z for one yaw, in integer cm:
+/// `(hx, hz, exact, circular)`. Quarter turns swap the extents exactly.
+/// 45-degree steps take the integer bound `(hx+hz)*1415/2000`, rounded up so
+/// the bound never sits inside the rotated footprint. Any other yaw takes the
+/// bounding circle, which the report labels yellow.
+fn yaw_half(hx: i32, hz: i32, yaw: f32) -> (i32, i32, bool, bool) {
+    let (hx, hz) = (hx.abs(), hz.abs());
+    if !yaw.is_finite() {
+        return (hx, hz, true, false);
+    }
+    let quarters = (yaw * core::f32::consts::FRAC_2_PI).round();
+    if (yaw - quarters * core::f32::consts::FRAC_PI_2).abs() <= YAW_STEP_EPS {
+        let swap = quarters.rem_euclid(2.0) > 0.5;
+        return if swap {
+            (hz, hx, true, false)
+        } else {
+            (hx, hz, true, false)
+        };
+    }
+    let eighths = (yaw * 1.273_239_5).round();
+    if (yaw - eighths * core::f32::consts::FRAC_PI_4).abs() <= YAW_STEP_EPS {
+        let sum = i64::from(hx) + i64::from(hz);
+        let bound = i32::try_from((sum * 1415 + 1999) / 2000).unwrap_or(i32::MAX);
+        return (bound, bound, false, false);
+    }
+    let square = i64::from(hx) * i64::from(hx) + i64::from(hz) * i64::from(hz);
+    let root = super::intmath::isqrt(square);
+    let radius = if root * root < square { root + 1 } else { root };
+    let radius = i32::try_from(radius).unwrap_or(i32::MAX);
+    (radius, radius, false, true)
+}
+
+/// Strict 3D hit between two yaw-aware boxes: the Y interval first (a lamp on
+/// a table and a crate under it never hit), then the XZ footprint.
+pub(crate) fn yaw_hit(a: &YawBox, b: &YawBox) -> bool {
+    a.min_y < b.max_y
+        && b.min_y < a.max_y
+        && a.min_x < b.max_x
+        && b.min_x < a.max_x
         && a.min_z < b.max_z
         && b.min_z < a.max_z
 }
@@ -396,5 +531,63 @@ mod index_tests {
             rects[0].max_x
         );
         assert_eq!(rects[0].max_x, i32::MAX);
+    }
+
+    #[test]
+    fn overlap_3d_footprint_is_exact_on_quarter_turns() {
+        use core::f32::consts::{FRAC_PI_2, PI};
+        assert_eq!(super::yaw_half(200, 20, 0.0), (200, 20, true, false));
+        assert_eq!(super::yaw_half(200, 20, FRAC_PI_2), (20, 200, true, false));
+        assert_eq!(super::yaw_half(200, 20, PI), (200, 20, true, false));
+        assert_eq!(super::yaw_half(200, 20, -FRAC_PI_2), (20, 200, true, false));
+        // A NaN yaw reads as the unrotated footprint, never as a panic.
+        assert_eq!(super::yaw_half(200, 20, f32::NAN), (200, 20, true, false));
+    }
+
+    #[test]
+    fn overlap_3d_footprint_at_45_takes_the_integer_bound() {
+        let (hx, hz, exact, circular) = super::yaw_half(200, 20, core::f32::consts::FRAC_PI_4);
+        // ceil(220 * 1415 / 2000) = 156; the true 155.56 stays inside it.
+        assert_eq!((hx, hz), (156, 156));
+        assert!(!exact && !circular);
+    }
+
+    #[test]
+    fn overlap_3d_footprint_off_the_lattice_takes_the_circle() {
+        let (hx, hz, exact, circular) = super::yaw_half(200, 20, core::f32::consts::FRAC_PI_6);
+        assert_eq!((hx, hz), (201, 201), "ceil(sqrt(200^2 + 20^2))");
+        assert!(!exact && circular);
+    }
+
+    #[test]
+    fn overlap_3d_box_test_runs_the_y_interval_first() {
+        let a = super::yaw_box_at(1, 0, 150, 0, 50, 50, 50, 0.0).expect("box");
+        let below = super::yaw_box_at(2, 0, 0, 0, 50, 50, 50, 0.0).expect("box");
+        assert!(!super::yaw_hit(&a, &below), "separated in Y never hits");
+        let same = super::yaw_box_at(2, 0, 100, 0, 50, 50, 50, 0.0).expect("box");
+        assert!(super::yaw_hit(&a, &same), "overlapping Y hits");
+    }
+
+    #[test]
+    fn overlap_3d_box_test_matches_build_rects_at_yaw_zero() {
+        let actors = vec![actor(1, 0.0), actor(2, 0.5), actor(3, 1.5)];
+        let rects = build_rects(&actors);
+        let rect_of = |id: u32| rects.iter().find(|r| r.id == id).expect("rect");
+        for (i, a) in actors.iter().enumerate() {
+            let ba = super::yaw_box_of(a).expect("box");
+            let r = rect_of(a.id);
+            assert_eq!(
+                (ba.min_x, ba.max_x, ba.min_z, ba.max_z),
+                (r.min_x, r.max_x, r.min_z, r.max_z),
+                "actor {i}"
+            );
+            assert_eq!(ba.area, r.area, "actor {i} area");
+        }
+        let a = super::yaw_box_of(&actors[0]).expect("box");
+        let b = super::yaw_box_of(&actors[1]).expect("box");
+        let c = super::yaw_box_of(&actors[2]).expect("box");
+        assert!(super::yaw_hit(&a, &b));
+        assert!(!super::yaw_hit(&a, &c));
+        assert!(!super::yaw_hit(&b, &c));
     }
 }

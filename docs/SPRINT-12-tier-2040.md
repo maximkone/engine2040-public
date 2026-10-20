@@ -497,12 +497,15 @@ golden unchanged; kill bars are gates.
   reimplemented, no dep). Tier C. Size M. Owns `crates/net/src/relay.rs`
   ICE block. Accept: RFC vector fixtures pass; spoofed bindings refused
   100%; punch-or-fallback still within 300 ticks; hash x2. needs: ON2. Landed 950dcd83. `cargo test -p engine-net --lib relay --features crypto` 27 passed (gh run 39247784105) and the default build 26 passed (39247366025): stun_message_integrity_matches_rfc8489_b1 verifies the RFC 8489 B.1 vector as corrected by verified erratum 6290 (HMAC-SHA256 over the adjusted length, key = SHA-256(username:realm:password)); signed_stun_bindings_refuse_every_spoof refuses 7/7 spoof classes (wrong ticket key, flipped tag, flipped tx, flipped USERNAME, flipped type, unsigned, truncated) and relay_hub_requires_ticket_integrity_on_stun answers only ticket-signed bindings (unsigned and foreign-ticket bindings get no answer, counters refused); nomination_settles_on_the_best_pair pins RFC 8445 pair priority and the final USE-CANDIDATE; consent_keepalives_stay_fresh_and_the_punch_still_falls_back_at_300 keeps the relay fallback at exactly 300 ticks. The ICE block moved to `crates/net/src/relay_ice.rs` and is re-exported from `relay` (owner file 1241 lines, under the 1500 ratchet). clippy -p engine-net --all-targets -D warnings PASS (39248476320) and with --features crypto (39248177776); golden `d57b5c8ae3096614` unchanged, binary run x2 identical; rust-quality --owned PASS; workspace-check PASS. No new dependency.
-- [ ] ON25 net: TURN allocation discipline — Allocate/Refresh lifetimes,
+- [x] ON25 net: TURN allocation discipline — Allocate/Refresh lifetimes,
   CreatePermission-before-forward, ChannelBind multiplexing on the relay
   path (webrtc-rs/turn shapes + coturn oracle, reimplemented, no dep).
   Tier C. Size M. Owns `crates/net/src/relay.rs` allocation block.
   Accept: zero unpermitted or stale-allocation forwards in fixtures; ON4
-  fallback drill converges; hash x2. needs: ON2.
+  fallback drill converges; hash x2. needs: ON2. Landed 577b9122.
+  `cargo test -p engine-net --lib relay` 30 passed; ON30 QUIC relay leg 1
+  passed; clippy -D warnings PASS; release binary hash `d57b5c8ae3096614` x2.
+  Gate is opt-in via `with_turn`; ON27 wires the allocation path.
 - [ ] ON26 net: subscription-predicate interest — typed per-connection
   range/view/LOD predicates over aoi.rs with change-driven delta push
   (SpacetimeDB subscription idea, BSL-1.1, reimplemented, no donor code).

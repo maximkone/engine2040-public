@@ -69,6 +69,10 @@ pub const HIT_REACT_TICKS: u32 = 6;
 pub const HITSTOP_TICKS: u32 = 4;
 /// Ticks a knocked-down fighter stays down.
 pub const KNOCKDOWN_TICKS: u32 = 30;
+/// Consecutive clean hits a stunned victim can take before the next one
+/// knocks it down (AIN6 juggle budget, Ikemen GO's 15). The first hit sets
+/// the counter to one; hit 16 converts to a knockdown and resets it.
+pub const JUGGLE_BUDGET: u8 = 15;
 /// Hard bound on inputs accepted for one tick.
 pub const MAX_INPUTS_PER_TICK: usize = 32;
 /// Hard bound on events emitted for one tick: at most one `StaminaOut` per
@@ -304,6 +308,10 @@ pub struct FighterState {
     pub react: u32,
     /// Ticks remaining knocked down; zero means up.
     pub knockdown: u32,
+    /// Consecutive clean hits taken while already in hitstun (the AIN6
+    /// juggle budget). Reset when hitstun ends, a block lands, or the
+    /// sixteenth hit converts to a knockdown.
+    pub juggle: u8,
 }
 
 impl Default for FighterState {
@@ -321,6 +329,7 @@ impl Default for FighterState {
             is_dodging: false,
             react: 0,
             knockdown: 0,
+            juggle: 0,
         }
     }
 }
@@ -1367,6 +1376,7 @@ fn resolve_strike(
     let v = u8::try_from(victim).unwrap_or(u8::MAX);
     let stun = |current: u32, ticks: u32| if symmetric { current.max(ticks) } else { ticks };
     if guard.invulnerable_with(tables) {
+        state.fighters[victim].juggle = 0;
         events.push(FightEvent::Dodged {
             attacker: a,
             victim: v,
@@ -1374,6 +1384,7 @@ fn resolve_strike(
         return false;
     }
     if covered && guard.parry_open_with(tables) {
+        state.fighters[victim].juggle = 0;
         events.push(FightEvent::Parried {
             attacker: a,
             victim: v,
@@ -1416,26 +1427,72 @@ fn resolve_strike(
             damage,
         }
     });
-    let target = &mut state.fighters[victim];
-    if target.hp_permille == 0 {
-        if was_up {
-            target.knockdown = tables.knockdown_ticks;
-            target.is_attacking = false;
-            target.is_dodging = false;
-            events.push(FightEvent::Knockdown {
-                attacker: a,
-                victim: v,
-            });
+    let clean = {
+        let target = &mut state.fighters[victim];
+        if target.hp_permille == 0 {
+            target.juggle = 0;
+            if was_up {
+                target.knockdown = tables.knockdown_ticks;
+                target.is_attacking = false;
+                target.is_dodging = false;
+                events.push(FightEvent::Knockdown {
+                    attacker: a,
+                    victim: v,
+                });
+            }
+            false
+        } else if blocked {
+            target.juggle = 0;
+            target.react = target.react.max(1);
+            false
+        } else {
+            true
         }
-    } else if blocked {
-        target.react = target.react.max(1);
-    } else {
-        target.react = stun(target.react, tables.hit_react_ticks);
+    };
+    if clean {
+        apply_juggle_hit(state, tables, events, a, victim, v, symmetric);
     }
     if !blocked {
         state.hitstop = hitstop_for_impact(tables, kind, false);
     }
     false
+}
+
+/// The AIN6 juggle budget on one clean hit: the first hit starts the count,
+/// each further hit while the victim is still in hitstun adds one, and the
+/// first hit past [`JUGGLE_BUDGET`] turns into a knockdown instead of more
+/// stun. A block or an expired stun resets the count (the caller owns those
+/// two resets). Split from [`resolve_strike`] to keep that resolver under the
+/// long-function ratchet.
+fn apply_juggle_hit(
+    state: &mut FightState,
+    tables: &Tables,
+    events: &mut Vec<FightEvent>,
+    attacker: u8,
+    victim: usize,
+    victim_id: u8,
+    symmetric: bool,
+) {
+    let target = &mut state.fighters[victim];
+    if target.react > 0 {
+        target.juggle = target.juggle.saturating_add(1);
+    } else {
+        target.juggle = 1;
+    }
+    if target.juggle > JUGGLE_BUDGET {
+        target.juggle = 0;
+        target.knockdown = tables.knockdown_ticks;
+        target.is_attacking = false;
+        target.is_dodging = false;
+        events.push(FightEvent::Knockdown {
+            attacker,
+            victim: victim_id,
+        });
+    } else if symmetric {
+        target.react = target.react.max(tables.hit_react_ticks);
+    } else {
+        target.react = tables.hit_react_ticks;
+    }
 }
 
 /// Step 4: advance attack, dodge, react and knockdown clocks and regen
@@ -1462,6 +1519,9 @@ fn advance_clocks(state: &mut FightState, tables: &Tables, count: usize) {
         }
         if f.react > 0 {
             f.react -= 1;
+            if f.react == 0 {
+                f.juggle = 0;
+            }
         }
         if f.knockdown > 0 && f.hp_permille > 0 {
             // Knockdown counts down only after a revive; the out fighter
@@ -2728,6 +2788,95 @@ mod tests {
     }
 
     #[test]
+    fn juggle_budget_knocks_down_on_the_sixteenth_stun_hit() {
+        let mut tables = TABLES_V1;
+        tables.attack_damage = 0;
+        let mut state = FightState::new(2).expect("two fighters");
+        let mut events = Vec::new();
+        for hit in 1..=15u8 {
+            let guard = PreState::of(&state.fighters[1]);
+            let parried = resolve_strike(
+                &mut state,
+                &tables,
+                &mut events,
+                Strike {
+                    attacker: 0,
+                    victim: 1,
+                    kind: crate::depth::INPUT_LIGHT,
+                    covered: false,
+                    guard,
+                    symmetric: false,
+                },
+            );
+            assert!(!parried);
+            assert_eq!(state.fighters[1].juggle, hit, "hit {hit} stays in stun");
+            assert_eq!(state.fighters[1].knockdown, 0, "hit {hit} is not a fall");
+        }
+        let guard = PreState::of(&state.fighters[1]);
+        resolve_strike(
+            &mut state,
+            &tables,
+            &mut events,
+            Strike {
+                attacker: 0,
+                victim: 1,
+                kind: crate::depth::INPUT_LIGHT,
+                covered: false,
+                guard,
+                symmetric: false,
+            },
+        );
+        assert_eq!(state.fighters[1].juggle, 0, "the fall resets the budget");
+        assert_eq!(state.fighters[1].knockdown, tables.knockdown_ticks);
+        assert!(matches!(
+            events.last(),
+            Some(FightEvent::Knockdown {
+                attacker: 0,
+                victim: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn juggle_budget_resets_when_hitstun_expires() {
+        let mut state = FightState::new(2).expect("two fighters");
+        state.fighters[1].react = 1;
+        state.fighters[1].juggle = 4;
+        step(&[none(0), none(1)], &mut state);
+        assert_eq!(state.fighters[1].react, 0);
+        assert_eq!(state.fighters[1].juggle, 0, "a clean stun break resets it");
+    }
+
+    #[test]
+    fn juggle_budget_fires_before_retiarius_kills() {
+        // Retiarius damage is half: 60 permille a hit, so the victim is at
+        // 100 hp after hit 15 and the 16th hit knocks down instead of killing.
+        let tables = crate::classes::tables(crate::classes::Class::Retiarius, TABLES_V2);
+        assert_eq!(tables.attack_damage, 60, "the cap needs a surviving victim");
+        let mut state = FightState::new(2).expect("two fighters");
+        let mut events = Vec::new();
+        for _ in 0..16 {
+            let guard = PreState::of(&state.fighters[1]);
+            resolve_strike(
+                &mut state,
+                &tables,
+                &mut events,
+                Strike {
+                    attacker: 0,
+                    victim: 1,
+                    kind: crate::depth::INPUT_LIGHT,
+                    covered: false,
+                    guard,
+                    symmetric: false,
+                },
+            );
+        }
+        assert_eq!(state.fighters[1].hp_permille, 40);
+        assert_eq!(state.fighters[1].knockdown, tables.knockdown_ticks);
+        assert_eq!(state.fighters[1].juggle, 0);
+    }
+
+    #[test]
     fn input_order_does_not_change_events() {
         let run = |order: &[FighterInput]| {
             let mut state = FightState::new(2).unwrap();
@@ -2764,6 +2913,7 @@ mod tests {
             mix(u64::from(f.is_dodging));
             mix(u64::from(f.react));
             mix(u64::from(f.knockdown));
+            mix(u64::from(f.juggle));
         }
         for tick_events in all {
             for e in tick_events {

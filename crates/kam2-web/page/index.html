@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KAM8 - the KAM2 village in a tab</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0b0f14; overflow: hidden; }
+  body { font: 13px/1.45 "Segoe UI", system-ui, sans-serif; color: #e9edf2; }
+  #stage { display: block; width: 100vw; height: 100vh; object-fit: contain; background: #0b0f14; }
+  .hud { position: fixed; left: 18px; pointer-events: none; }
+  #hud-top { top: 14px; }
+  #hud-stock { bottom: 14px; letter-spacing: 0.04em; color: #d9be86; }
+  #hud-hint { bottom: 38px; color: #8fa84e; }
+  .title { font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
+  .line { color: #b9c3cf; font-variant-numeric: tabular-nums; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 3px; background: #2b6fd6; color: #fff; font-size: 11px; vertical-align: 2px; }
+  .tag.paused { background: #a33b2e; }
+  #fatal { display: none; position: fixed; inset: 0; padding: 40px; background: #160d0d; color: #ffd9d4; font-size: 16px; white-space: pre-wrap; }
+  #report { position: fixed; right: 10px; bottom: 8px; margin: 0; font: 10px/1.3 Consolas, monospace; color: #6f7b8a; max-width: 70vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.55; }
+</style>
+</head>
+<body data-state="starting">
+<canvas id="stage" width="1280" height="720"></canvas>
+<div class="hud" id="hud-top">
+  <div class="title">KAM8 &middot; KAM2 village <span class="tag" id="hud-state">RUN</span></div>
+  <div class="line" id="hud-line">loading the wasm module...</div>
+</div>
+<div class="hud" id="hud-hint">SPACE pause &middot; ARROWS pan</div>
+<div class="hud" id="hud-stock"></div>
+<pre id="report">{}</pre>
+<div id="fatal"></div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

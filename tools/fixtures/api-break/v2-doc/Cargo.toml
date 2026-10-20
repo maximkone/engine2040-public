@@ -1,0 +1,8 @@
+[package]
+name = "api-break-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Own workspace: the gate renders this fixture without the engine tree.
+[workspace]

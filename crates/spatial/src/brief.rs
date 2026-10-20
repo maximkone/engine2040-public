@@ -1055,6 +1055,9 @@ mod tests {
     fn golden_brief_text_arena_fixture() {
         let actors = arena_fixture();
         let (_brief, text) = brief_of(&actors, usize::MAX);
+        // AD18 receipt: the torch floats above the arena (its Y 4.5..5.5 does
+        // not meet the arena's 0..4), so `overlap 0 4` is gone. The other rows
+        // and the brief digest are byte-identical.
         let expected = concat!(
             "digest 13654318318115460896\n",
             "object arena [0]\n",
@@ -1083,7 +1086,6 @@ mod tests {
             "finding overlap 0 1 red 100\n",
             "finding overlap 0 2 red 100\n",
             "finding overlap 0 3 red 100\n",
-            "finding overlap 0 4 red 100\n",
             "finding overlap 1 2 red 100\n",
             "finding overlap 1 3 red 100\n",
             "finding floating 4 - yellow 0\n",

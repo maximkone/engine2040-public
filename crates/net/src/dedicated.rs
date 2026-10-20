@@ -3,15 +3,18 @@
 //! [`HeadlessServer`] authors one arena match: connected clients submit inputs,
 //! empty or dropped slots AI-fill through the arena brain fill, and a desync
 //! resyncs from the latest [`SnapshotDelta`]. LAN peers find the match
-//! through [`Beacon`] datagrams on a well-known UDP port. Consumer: the
-//! packaged game and the dedicated-server operator. Units: fixed ticks
-//! at the arena tick rate, latency in whole milliseconds. Determinism scope:
-//! same config plus same submitted tape gives identical checkpoints (the
-//! arena guarantee); latency reports and beacon transit never enter the hash.
+//! through [`Beacon`] datagrams on a well-known UDP port; a master list
+//! ([`MasterList`]) registers those beacons and answers a browser's query
+//! with every server it holds ([`ServerBrowser`]). Consumer: the packaged
+//! game and the dedicated-server operator. Units: fixed ticks at the arena
+//! tick rate, latency in whole milliseconds. Determinism scope: same config
+//! plus same submitted tape gives identical checkpoints (the arena
+//! guarantee); latency reports, beacon transit and master-list traffic never
+//! enter the hash and never run inside [`HeadlessServer::tick`].
 //! Errors: [`ServerError`]; bad input rejects loudly and changes nothing.
 
 use std::io;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 
 use engine_arena::{ArenaConfig, Checkpoint, MatchSpec};
 use engine_input::{FighterInput, MAX_PARTICIPANTS};
@@ -33,6 +36,30 @@ pub const BEACON_VERSION: u8 = 1;
 pub const BEACON_LEN: usize = 18;
 /// Upper bound on a reported per-client latency in milliseconds.
 pub const MAX_LATENCY_MS: u64 = 10_000;
+/// Master-list query magic `b"MQ"` little-endian: a browser asks for the list.
+pub const MASTER_QUERY_MAGIC: u16 = 0x514D;
+/// Master-list reply magic `b"ML"` little-endian: the master answers with servers.
+pub const MASTER_LIST_MAGIC: u16 = 0x4C4D;
+/// Master-list wire version; anything else is rejected.
+pub const MASTER_VERSION: u8 = 1;
+/// Servers one master list holds; its widest reply carries all of them.
+pub const MAX_MASTER_SERVERS: usize = 32;
+/// One listing on the wire: host 4 + port 2 + fighters 1 + tick 4 + hash 8 +
+/// seen tick 4. Fixed size, no padding, no trailing bytes.
+pub const LISTING_LEN: usize = 23;
+/// Query datagram length: magic 2 + version 1, nothing else (a browser asks
+/// for the whole list; the master never pages).
+pub const MASTER_QUERY_LEN: usize = 3;
+/// Reply header: magic 2 + version 1 + server count 1, then that many listings.
+pub const MASTER_REPLY_HEADER: usize = 4;
+/// Widest reply: header plus every bounded listing.
+pub const MASTER_REPLY_MAX: usize = MASTER_REPLY_HEADER + MAX_MASTER_SERVERS * LISTING_LEN;
+/// A listing expires after two seconds without a refresh (the 4 Hz beacon
+/// period of [`crate::lobby::Browser`], eight periods).
+pub const STALE_LISTING_TICKS: u32 = ms_to_ticks(2_000) as u32;
+
+/// The widest master reply is one datagram: no fragmentation on the wire.
+const _: () = assert!(MASTER_REPLY_MAX <= crate::session::MAX_PACKET_BYTES);
 
 /// Dedicated-server failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,6 +68,8 @@ pub enum ServerError {
     BadConfig,
     /// A fighter input, token or beacon field failed validation.
     BadInput,
+    /// A listing host is not IPv4; the master wire carries IPv4 only.
+    BadHost,
     /// No free slot: every slot is connected.
     SlotFull,
     /// Unknown, disconnected or zero token, or an input stamped for a tick
@@ -73,6 +102,7 @@ impl std::fmt::Display for ServerError {
         match *self {
             Self::BadConfig => write!(f, "invalid arena config"),
             Self::BadInput => write!(f, "invalid input, token or beacon field"),
+            Self::BadHost => write!(f, "listing host is not IPv4"),
             Self::SlotFull => write!(f, "no free slot"),
             Self::StaleClient { token } => write!(f, "stale client token {token}"),
             Self::Desync { tick, want, got } => write!(
@@ -196,6 +226,275 @@ impl Beacon {
     }
 }
 
+/// One server a master lists: its beacon, the host the master heard it from
+/// and when. The join address is [`Listing::join_addr`]: the beacon port on
+/// that host, so no operator types an address.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Listing {
+    /// IPv4 host the beacon arrived from (read from the datagram, never typed).
+    pub host: Ipv4Addr,
+    /// Last beacon the server registered.
+    pub beacon: Beacon,
+    /// Master tick at the last registration; pacing only, never in the hash.
+    pub seen_tick: u32,
+}
+
+impl Listing {
+    /// Address a joining client sends its inputs to.
+    pub fn join_addr(self) -> SocketAddr {
+        SocketAddr::from((self.host, self.beacon.port))
+    }
+
+    /// Encode one listing: host, port, fighters, tick, hash, seen tick.
+    fn encode(self) -> [u8; LISTING_LEN] {
+        let mut out = [0u8; LISTING_LEN];
+        out[0..4].copy_from_slice(&self.host.octets());
+        out[4..6].copy_from_slice(&self.beacon.port.to_le_bytes());
+        out[6] = self.beacon.fighters;
+        out[7..11].copy_from_slice(&self.beacon.tick.to_le_bytes());
+        out[11..19].copy_from_slice(&self.beacon.hash.to_le_bytes());
+        out[19..23].copy_from_slice(&self.seen_tick.to_le_bytes());
+        out
+    }
+
+    /// Decode and validate one listing record off the wire.
+    fn decode(bytes: &[u8]) -> Result<Self, ServerError> {
+        if bytes.len() != LISTING_LEN {
+            return Err(ServerError::BadInput);
+        }
+        let beacon = Beacon {
+            port: u16::from_le_bytes([bytes[4], bytes[5]]),
+            fighters: bytes[6],
+            tick: u32::from_le_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]),
+            hash: u64::from_le_bytes([
+                bytes[11], bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17],
+                bytes[18],
+            ]),
+        };
+        beacon.validate()?;
+        Ok(Self {
+            host: Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]),
+            beacon,
+            seen_tick: u32::from_le_bytes([bytes[19], bytes[20], bytes[21], bytes[22]]),
+        })
+    }
+}
+
+/// Master list: the bounded directory a browser asks for servers. A server
+/// lists itself by its [`Beacon`] ([`Self::register`]); a client sends
+/// [`MASTER_QUERY_LEN`] bytes and reads [`Self::encode_reply`]. Everything is
+/// integer and pure: no socket lives here, so master traffic can never run
+/// inside [`HeadlessServer::tick`]. The wire carries IPv4 hosts only (a
+/// 32-entry reply stays inside one 1200-byte datagram); an IPv6 host refuses
+/// as [`ServerError::BadHost`] until a widening row. Units: fixed ticks, and
+/// `now_tick` is pacing only, never part of a checkpoint.
+pub struct MasterList {
+    /// Registered servers in registration order; a refresh keeps its slot.
+    entries: Vec<Listing>,
+}
+
+impl MasterList {
+    /// Empty list; first registration takes the first slot.
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Servers held.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True when no server is registered.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Listings in registration order.
+    pub fn listings(&self) -> &[Listing] {
+        &self.entries
+    }
+
+    /// List one server from its beacon, heard from `from` at master tick
+    /// `now_tick`. A known host and port refreshes in place: the newer beacon
+    /// wins, an older one never rewinds the payload. A full list evicts its
+    /// stalest entry (lowest [`Listing::seen_tick`], first slot on a tie), so
+    /// the list stays at [`MAX_MASTER_SERVERS`]. Bad or non-IPv4 input
+    /// rejects loudly and changes nothing.
+    pub fn register(
+        &mut self,
+        from: SocketAddr,
+        beacon: Beacon,
+        now_tick: u32,
+    ) -> Result<(), ServerError> {
+        let SocketAddr::V4(from) = from else {
+            return Err(ServerError::BadHost);
+        };
+        beacon.validate()?;
+        let host = *from.ip();
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.host == host && entry.beacon.port == beacon.port)
+        {
+            if beacon.tick >= entry.beacon.tick {
+                entry.beacon = beacon;
+            }
+            entry.seen_tick = now_tick;
+            return Ok(());
+        }
+        let listing = Listing {
+            host,
+            beacon,
+            seen_tick: now_tick,
+        };
+        if self.entries.len() < MAX_MASTER_SERVERS {
+            self.entries.push(listing);
+            return Ok(());
+        }
+        let oldest = self
+            .entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.seen_tick)
+            .map(|(index, _)| index);
+        if let Some(index) = oldest {
+            self.entries[index] = listing;
+        }
+        Ok(())
+    }
+
+    /// Drop listings no beacon refreshed for `stale_ticks`; answers how many
+    /// went. [`STALE_LISTING_TICKS`] is the two-second LAN expiry.
+    pub fn prune(&mut self, now_tick: u32, stale_ticks: u32) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| now_tick.saturating_sub(entry.seen_tick) <= stale_ticks);
+        before - self.entries.len()
+    }
+
+    /// Encode the reply datagram: magic, version, count, then every listing in
+    /// registration order. Never wider than [`MASTER_REPLY_MAX`], one datagram.
+    pub fn encode_reply(&self) -> Result<Vec<u8>, ServerError> {
+        let count = u8::try_from(self.entries.len()).map_err(|_| ServerError::BadInput)?;
+        let mut out = Vec::with_capacity(MASTER_REPLY_HEADER + self.entries.len() * LISTING_LEN);
+        out.extend_from_slice(&MASTER_LIST_MAGIC.to_le_bytes());
+        out.push(MASTER_VERSION);
+        out.push(count);
+        for entry in &self.entries {
+            out.extend_from_slice(&entry.encode());
+        }
+        Ok(out)
+    }
+
+    /// Decode a whole reply: wrong magic, any version but [`MASTER_VERSION`],
+    /// a count above [`MAX_MASTER_SERVERS`], any length but header plus count
+    /// listings, or one bad field rejects loudly and yields nothing.
+    pub fn decode_reply(bytes: &[u8]) -> Result<Vec<Listing>, ServerError> {
+        if bytes.len() < MASTER_REPLY_HEADER {
+            return Err(ServerError::BadInput);
+        }
+        if u16::from_le_bytes([bytes[0], bytes[1]]) != MASTER_LIST_MAGIC {
+            return Err(ServerError::BadInput);
+        }
+        if bytes[2] != MASTER_VERSION {
+            return Err(ServerError::BadInput);
+        }
+        let count = usize::from(bytes[3]);
+        if count > MAX_MASTER_SERVERS || bytes.len() != MASTER_REPLY_HEADER + count * LISTING_LEN {
+            return Err(ServerError::BadInput);
+        }
+        let mut out = Vec::with_capacity(count);
+        for chunk in bytes[MASTER_REPLY_HEADER..].chunks_exact(LISTING_LEN) {
+            out.push(Listing::decode(chunk)?);
+        }
+        Ok(out)
+    }
+
+    /// The one datagram a browser sends: magic, version, nothing else.
+    pub fn query() -> [u8; MASTER_QUERY_LEN] {
+        let mut out = [0u8; MASTER_QUERY_LEN];
+        out[0..2].copy_from_slice(&MASTER_QUERY_MAGIC.to_le_bytes());
+        out[2] = MASTER_VERSION;
+        out
+    }
+
+    /// True when `bytes` is exactly a master query.
+    pub fn is_query(bytes: &[u8]) -> bool {
+        bytes.len() == MASTER_QUERY_LEN
+            && u16::from_le_bytes([bytes[0], bytes[1]]) == MASTER_QUERY_MAGIC
+            && bytes[2] == MASTER_VERSION
+    }
+}
+
+impl Default for MasterList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Server browser over a master reply: what a client holds after it asks a
+/// master for its list. Distinct from [`crate::lobby::Browser`], which watches
+/// LAN beacons itself at ms pace, and from [`crate::browser`], the page client.
+/// The browser keeps the reply's integer ticks, so it never needs a clock.
+#[derive(Clone, Debug, Default)]
+pub struct ServerBrowser {
+    /// Every server the last reply carried, in reply order.
+    entries: Vec<Listing>,
+}
+
+impl ServerBrowser {
+    /// Empty browser; no server known until one reply is applied.
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Servers held.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True when no reply has listed a server.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Held listings in reply order.
+    pub fn sightings(&self) -> &[Listing] {
+        &self.entries
+    }
+
+    /// Replace the held list with one decoded reply; answers how many servers
+    /// it carried. A bad reply rejects loudly and keeps the held list.
+    pub fn apply(&mut self, reply: &[u8]) -> Result<usize, ServerError> {
+        let entries = MasterList::decode_reply(reply)?;
+        let count = entries.len();
+        self.entries = entries;
+        Ok(count)
+    }
+
+    /// Drop listings the master has not refreshed for `stale_ticks`; answers
+    /// how many went.
+    pub fn prune(&mut self, now_tick: u32, stale_ticks: u32) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| now_tick.saturating_sub(entry.seen_tick) <= stale_ticks);
+        before - self.entries.len()
+    }
+
+    /// Freshest listed server: highest beacon tick, then last seen, last slot
+    /// on a full tie. The join address is [`Listing::join_addr`].
+    pub fn best(&self) -> Option<Listing> {
+        self.entries
+            .iter()
+            .copied()
+            .max_by_key(|entry| (entry.beacon.tick, entry.seen_tick))
+    }
+}
+
 /// Dedicated headless server: authoritative arena match plus slot presence.
 ///
 /// Slots are sticky: [`Self::connect`] with a known token reclaims its slot
@@ -286,6 +585,22 @@ impl HeadlessServer {
     /// Authoritative checkpoints so far, one per authored tick.
     pub fn checkpoints(&self) -> &[Checkpoint] {
         &self.checkpoints
+    }
+
+    /// The beacon that lists this server: its input `port`, the configured
+    /// fighter slots, the next tick to author and the latest hash (`0` before
+    /// the first tick). A master list ([`MasterList::register`]) and a LAN
+    /// browser see exactly these fields; a zero port or a bad slot count
+    /// refuses as [`ServerError::BadInput`].
+    pub fn beacon(&self, port: u16) -> Result<Beacon, ServerError> {
+        let beacon = Beacon {
+            port,
+            fighters: self.config.fighters,
+            tick: self.tick_now(),
+            hash: self.checkpoints.last().map_or(0, |point| point.hash),
+        };
+        beacon.validate()?;
+        Ok(beacon)
     }
 
     /// Slots with a connected client.
@@ -1450,6 +1765,288 @@ mod tests {
         assert_eq!(
             ServerError::NotFinished.to_string(),
             "match not yet finished"
+        );
+    }
+
+    #[test]
+    fn master_list_wire_roundtrip_and_refusals() {
+        // The beacon of a running server is what lists it; the wire is integer.
+        let cfg = config(2);
+        let mut server = HeadlessServer::new(cfg).expect("server");
+        let sock = crate::session::bind_loopback().expect("socket");
+        let port = sock.local_addr().expect("addr").port();
+        for _ in 0..4 {
+            server.tick().expect("tick");
+        }
+        let beacon = server.beacon(port).expect("beacon");
+        assert_eq!(beacon.port, port);
+        assert_eq!(beacon.fighters, 2);
+        assert_eq!(beacon.tick, 4);
+        assert_eq!(beacon.hash, server.checkpoints()[3].hash);
+
+        let from = SocketAddr::from(([127, 0, 0, 1], 51_234));
+        let mut master = MasterList::new();
+        assert!(master.is_empty());
+        master.register(from, beacon, 90).expect("register");
+        assert_eq!(master.len(), 1);
+        let reply = master.encode_reply().expect("reply");
+        assert_eq!(reply.len(), MASTER_REPLY_HEADER + LISTING_LEN);
+        assert!(reply.len() <= MAX_PACKET_BYTES);
+        // Header then one entry, every field little-endian and byte-identical.
+        assert_eq!(u16::from_le_bytes([reply[0], reply[1]]), MASTER_LIST_MAGIC);
+        assert_eq!(reply[2], MASTER_VERSION);
+        assert_eq!(reply[3], 1);
+        let entry = &reply[MASTER_REPLY_HEADER..];
+        assert_eq!(&entry[0..4], &[127, 0, 0, 1]);
+        assert_eq!(u16::from_le_bytes([entry[4], entry[5]]), port);
+        assert_eq!(entry[6], 2);
+        assert_eq!(
+            u32::from_le_bytes([entry[7], entry[8], entry[9], entry[10]]),
+            4
+        );
+        assert_eq!(
+            u64::from_le_bytes([
+                entry[11], entry[12], entry[13], entry[14], entry[15], entry[16], entry[17],
+                entry[18],
+            ]),
+            beacon.hash
+        );
+        assert_eq!(
+            u32::from_le_bytes([entry[19], entry[20], entry[21], entry[22]]),
+            90
+        );
+        // A browser that holds only the reply knows where to join.
+        let mut browser = ServerBrowser::new();
+        assert_eq!(browser.apply(&reply).expect("apply"), 1);
+        let listed = browser.best().expect("listed");
+        assert_eq!(listed.beacon, beacon);
+        assert_eq!(listed.host, from.ip());
+        assert_eq!(listed.join_addr(), SocketAddr::from(([127, 0, 0, 1], port)));
+        assert_eq!(
+            MasterList::decode_reply(&reply).expect("decode"),
+            master.listings()
+        );
+        // The query is the one datagram a browser sends, header only.
+        let query = MasterList::query();
+        assert_eq!(query.len(), MASTER_QUERY_LEN);
+        assert!(MasterList::is_query(&query));
+        assert!(!MasterList::is_query(&reply));
+        // Every wire refusal changes nothing: length, magic, version, count, field.
+        assert_eq!(
+            MasterList::decode_reply(&reply[..reply.len() - 1]),
+            Err(ServerError::BadInput)
+        );
+        let mut trailing = reply.clone();
+        trailing.push(0);
+        assert_eq!(
+            MasterList::decode_reply(&trailing),
+            Err(ServerError::BadInput)
+        );
+        let mut bad_magic = reply.clone();
+        bad_magic[0] ^= 0xFF;
+        assert_eq!(
+            MasterList::decode_reply(&bad_magic),
+            Err(ServerError::BadInput)
+        );
+        let mut bad_version = reply.clone();
+        bad_version[2] = MASTER_VERSION + 1;
+        assert_eq!(
+            MasterList::decode_reply(&bad_version),
+            Err(ServerError::BadInput)
+        );
+        let mut bad_count = reply.clone();
+        bad_count[3] = 2;
+        assert_eq!(
+            MasterList::decode_reply(&bad_count),
+            Err(ServerError::BadInput)
+        );
+        let mut bad_port = reply.clone();
+        bad_port[MASTER_REPLY_HEADER + 4] = 0;
+        bad_port[MASTER_REPLY_HEADER + 5] = 0;
+        assert_eq!(
+            MasterList::decode_reply(&bad_port),
+            Err(ServerError::BadInput)
+        );
+        // Registration refuses IPv6 hosts and invalid beacons, and keeps its list.
+        let v6 = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 7));
+        assert_eq!(master.register(v6, beacon, 90), Err(ServerError::BadHost));
+        assert_eq!(
+            master.register(from, Beacon { port: 0, ..beacon }, 90),
+            Err(ServerError::BadInput)
+        );
+        assert_eq!(master.len(), 1);
+        assert_eq!(server.beacon(0), Err(ServerError::BadInput));
+    }
+
+    #[test]
+    fn master_list_refreshes_prunes_and_bounds() {
+        let from = SocketAddr::from(([10, 0, 0, 7], 9_000));
+        let beacon = |port: u16| Beacon {
+            port,
+            fighters: 2,
+            tick: 3,
+            hash: 0xABCD,
+        };
+        let mut master = MasterList::new();
+        master.register(from, beacon(7001), 10).expect("first");
+        master.register(from, beacon(7002), 20).expect("second");
+        assert_eq!(master.len(), 2);
+        // A refresh of the same host and port stays in its slot, newest beacon wins.
+        let mut newer = beacon(7001);
+        newer.tick = 9;
+        master.register(from, newer, 30).expect("refresh");
+        assert_eq!(master.len(), 2);
+        assert_eq!(master.listings()[0].beacon.tick, 9);
+        assert_eq!(master.listings()[0].seen_tick, 30);
+        // An older beacon never rewinds the payload, but proves the server is alive.
+        master
+            .register(from, beacon(7001), 40)
+            .expect("stale refresh");
+        assert_eq!(master.listings()[0].beacon.tick, 9);
+        assert_eq!(master.listings()[0].seen_tick, 40);
+        // Prune drops what no beacon refreshed for two seconds (120 ticks).
+        assert_eq!(STALE_LISTING_TICKS, 120);
+        assert_eq!(master.prune(151, STALE_LISTING_TICKS), 1);
+        assert_eq!(master.len(), 1);
+        assert_eq!(master.listings()[0].beacon.port, 7001);
+        // The browser prunes by the same integer clock.
+        let reply = master.encode_reply().expect("reply");
+        let mut browser = ServerBrowser::new();
+        browser.apply(&reply).expect("apply");
+        assert_eq!(browser.prune(500, STALE_LISTING_TICKS), 1);
+        assert!(browser.best().is_none());
+        assert!(browser.is_empty());
+        // A full list evicts its stalest entry and stays bounded.
+        let mut full = MasterList::new();
+        for index in 0..MAX_MASTER_SERVERS {
+            let port = u16::try_from(7_000 + index).expect("port");
+            full.register(from, beacon(port), u32::try_from(index).expect("tick"))
+                .expect("register");
+        }
+        assert_eq!(full.len(), MAX_MASTER_SERVERS);
+        full.register(from, beacon(8_000), 1_000).expect("evict");
+        assert_eq!(full.len(), MAX_MASTER_SERVERS);
+        assert!(full
+            .listings()
+            .iter()
+            .any(|entry| entry.beacon.port == 8_000));
+        assert!(!full
+            .listings()
+            .iter()
+            .any(|entry| entry.beacon.port == 7_000));
+        // The widest reply is one datagram: the cap holds by construction.
+        let widest = full.encode_reply().expect("widest");
+        assert_eq!(widest.len(), MASTER_REPLY_MAX);
+        assert!(widest.len() <= MAX_PACKET_BYTES);
+        assert_eq!(
+            MasterList::decode_reply(&widest).expect("decode").len(),
+            MAX_MASTER_SERVERS
+        );
+    }
+
+    #[test]
+    fn dedicated_master_list_headless_run_prints_listing_line() {
+        // One headless server, one master, two clients that find the server
+        // through the list and join it over the listed UDP address.
+        let cfg = config(2);
+        let port_sock = crate::session::bind_loopback().expect("server socket");
+        port_sock.set_nonblocking(true).expect("nonblocking");
+        let port = port_sock.local_addr().expect("addr").port();
+        let host = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut server = HeadlessServer::new(cfg).expect("server");
+        let mut master = MasterList::new();
+        let registrar = SocketAddr::from(([127, 0, 0, 1], 51_000));
+        master
+            .register(registrar, server.beacon(port).expect("beacon"), 0)
+            .expect("register");
+        // A browser asks with the query and reads the answer.
+        let mut browser = ServerBrowser::new();
+        assert_eq!(
+            browser
+                .apply(&master.encode_reply().expect("reply"))
+                .expect("apply"),
+            1
+        );
+        let listed = browser.best().expect("listed");
+        assert_eq!(listed.join_addr(), host);
+        assert_eq!(listed.beacon.fighters, 2);
+
+        // Two clients join the listed address; the control server sees the same inputs.
+        let tokens = [0xA11CEu64, 0xB0B];
+        let clients = [
+            crate::session::bind_loopback().expect("client a"),
+            crate::session::bind_loopback().expect("client b"),
+        ];
+        let slots = [
+            server.connect(tokens[0]).expect("client a slot"),
+            server.connect(tokens[1]).expect("client b slot"),
+        ];
+        assert_eq!(slots, [0, 1]);
+        let mut control = HeadlessServer::new(cfg).expect("control");
+        assert_eq!(control.connect(tokens[0]), Ok(0));
+        assert_eq!(control.connect(tokens[1]), Ok(1));
+
+        let ticks = cfg.ticks;
+        for step in 0..ticks {
+            for (order, slot) in slots.iter().enumerate() {
+                let input = wish(step, *slot);
+                control
+                    .submit(tokens[order], input)
+                    .expect("control submit");
+                let bytes = encode_input(step, std::slice::from_ref(&input)).expect("encode input");
+                crate::session::send_packet(&clients[order], host, &bytes).expect("send");
+            }
+            for bytes in drain(&port_sock) {
+                if let Ok(packet) = decode_input(&bytes) {
+                    for input in packet.inputs {
+                        let order = usize::from(input.fighter.0);
+                        if let Some(token) = tokens.get(order) {
+                            let _ = server.submit(*token, input);
+                        }
+                    }
+                }
+            }
+            server.tick().expect("server tick");
+            control.tick().expect("control tick");
+            // The beacon refresh lists the new tick; master traffic stays off the tick.
+            master
+                .register(registrar, server.beacon(port).expect("beacon"), step + 1)
+                .expect("refresh");
+        }
+        assert_eq!(server.connected_count(), 2);
+        assert_eq!(
+            server.checkpoints(),
+            control.checkpoints(),
+            "master traffic must never feed the tick"
+        );
+        assert_eq!(
+            server.tick_now(),
+            ticks,
+            "both clients played every tick to the end"
+        );
+
+        // The listing line the headless run prints: what a browser would see.
+        let reply = master.encode_reply().expect("reply");
+        assert_eq!(
+            browser.apply(&reply).expect("apply"),
+            1,
+            "one server stays listed"
+        );
+        let listed = browser.best().expect("listed after the run");
+        assert_eq!(listed.beacon.tick, ticks);
+        assert_eq!(
+            listed.beacon.hash,
+            server.checkpoints().last().copied().expect("tip").hash
+        );
+        assert_eq!(listed.join_addr(), host);
+        println!(
+            "MASTER list servers={} port={port} fighters={} tick={} hash={:016x} joined={} \
+             ticks={ticks} query={MASTER_QUERY_LEN}B entry={LISTING_LEN}B",
+            browser.len(),
+            listed.beacon.fighters,
+            listed.beacon.tick,
+            listed.beacon.hash,
+            server.connected_count(),
         );
     }
 }

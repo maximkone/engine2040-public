@@ -1,7 +1,8 @@
 //! Table-driven checks. Frozen order; thresholds in integer cm.
 
 use super::index::{
-    build_rects, density_grid, overlap_pct, pos_known, size_known, sweep_pairs, to_cm, CmRect,
+    build_rects, density_grid, overlap_pct, pos_known, size_known, sweep_pairs, to_cm, yaw_box_of,
+    yaw_hit, YawBox,
 };
 use super::triage::z_fights_all;
 use super::{navcheck, Actor, Finding, Report};
@@ -172,64 +173,6 @@ pub fn run_spatial_eps(
         .filter(|a| !bad.contains(&a.id))
         .cloned()
         .collect();
-
-    // overlap via the index3 sweep broadphase (sweep-then-exact): candidates
-    // come from `sweep_xz` over `live_boxes` in one pass, exact intersection and percent from
-    // the rect map. Rows the index drops (zero/negative size) ride a small
-    // exact fallback, so the union is identical to the legacy pair set.
-    if wanted.contains("overlap") {
-        let rects = build_rects(&good);
-        let area_of: BTreeMap<u32, i64> = rects.iter().map(|r| (r.id, r.area)).collect();
-        let rect_of: BTreeMap<u32, &CmRect> = rects.iter().map(|r| (r.id, r)).collect();
-        for (lo, hi) in super::index3::sweep_xz(&super::index3::live_boxes(&good)) {
-            let (a, b) = (rect_of[&lo], rect_of[&hi]);
-            let ix = i64::from(a.max_x.min(b.max_x)) - i64::from(a.min_x.max(b.min_x));
-            let iz = i64::from(a.max_z.min(b.max_z)) - i64::from(a.min_z.max(b.min_z));
-            if ix <= 0 || iz <= 0 {
-                continue;
-            }
-            let pct = overlap_pct(ix * iz, area_of[&lo], area_of[&hi]);
-            push("overlap", lo, hi, pct);
-        }
-        // Exact fallback for index-degenerate rects only: live-live pairs
-        // are fully covered above, so test each degenerate rect against the
-        // higher-id rects directly (degenerate counts stay tiny; findings
-        // sort into frozen order below like every other check).
-        let live_of: BTreeMap<u32, bool> = good
-            .iter()
-            .map(|a| (a.id, a.sx > 0.0 && a.sy > 0.0 && a.sz > 0.0))
-            .collect();
-        let mut degen: Vec<&CmRect> = rects
-            .iter()
-            .filter(|r| !live_of.get(&r.id).copied().unwrap_or(false))
-            .collect();
-        degen.sort_by_key(|r| r.id);
-        for d in &degen {
-            for o in rects.iter().filter(|o| o.id != d.id) {
-                // Degenerate-degenerate pairs emit once from the lower id;
-                // the live side of a degenerate-live pair never emits, so
-                // every other combination emits here.
-                if o.id < d.id && !live_of.get(&o.id).copied().unwrap_or(false) {
-                    continue;
-                }
-                let ix = i64::from(d.max_x.min(o.max_x)) - i64::from(d.min_x.max(o.min_x));
-                if ix <= 0 {
-                    continue;
-                }
-                let iz = i64::from(d.max_z.min(o.max_z)) - i64::from(d.min_z.max(o.min_z));
-                if iz <= 0 {
-                    continue;
-                }
-                let (lo, hi) = if d.id < o.id {
-                    (d.id, o.id)
-                } else {
-                    (o.id, d.id)
-                };
-                let pct = overlap_pct(ix * iz, area_of[&lo], area_of[&hi]);
-                push("overlap", lo, hi, pct);
-            }
-        }
-    }
 
     let giants = if wanted.contains("giantObject") {
         giant_ids(&good)
@@ -425,6 +368,42 @@ pub fn run_spatial_eps(
     // Phase-2 nav checks (bake view only).
     if let Some(nv) = nav {
         findings.extend(navcheck::run_nav(actors, nv, &wanted));
+    }
+
+    // overlap: one yaw-aware box test for the report, the solver and the gate.
+    // It runs last only because it writes its severity straight into
+    // `findings`; the frozen sort below places it like every other check. The
+    // broadphase sweeps the yaw-expanded footprints, then `yaw_hit` runs the Y
+    // interval first (a lamp on a table is clear, a crate under a table is
+    // clear) and the XZ footprint after. Quarter turns are exact, 45-degree
+    // steps take the integer bound, and the bounding circle labels the hit
+    // yellow. Rows the old index dropped (zero/negative size) keep the flat
+    // footprint `build_rects` gives them, so the flat pair set is unchanged.
+    if wanted.contains("overlap") {
+        let fp: Vec<YawBox> = good.iter().filter_map(yaw_box_of).collect();
+        let boxes3: Vec<_> = fp.iter().map(YawBox::as_box3).collect();
+        let box_of: BTreeMap<u32, YawBox> = fp.iter().map(|b| (b.id, *b)).collect();
+        for (lo, hi) in super::index3::sweep_xz(&boxes3) {
+            let (a, b) = (&box_of[&lo], &box_of[&hi]);
+            if !yaw_hit(a, b) {
+                continue;
+            }
+            let ix = i64::from(a.max_x.min(b.max_x)) - i64::from(a.min_x.max(b.min_x));
+            let iz = i64::from(a.max_z.min(b.max_z)) - i64::from(a.min_z.max(b.min_z));
+            let pct = overlap_pct(ix * iz, a.area, b.area).min(100.0);
+            let severity = if a.circular || b.circular {
+                "yellow"
+            } else {
+                "red"
+            };
+            findings.push(Finding {
+                check: "overlap",
+                a: lo,
+                b: hi,
+                pct,
+                severity,
+            });
+        }
     }
 
     findings.sort_by_key(|f| (check_index(f.check), f.a, f.b));
@@ -1084,5 +1063,229 @@ mod zfight_tests {
         assert!(f.pct >= 20.0, "ratio {}", f.pct);
         scene.reverse();
         assert_eq!(run_checks(&scene, &["stray"]).unwrap().hash, report.hash);
+    }
+}
+
+/// AD18: 3D, yaw-aware overlap. One box test serves the report and the
+/// solver: the Y interval runs first, then the XZ footprint after yaw.
+#[cfg(test)]
+mod overlap_3d_tests {
+    use super::super::index::{yaw_box_of, yaw_hit};
+    use super::super::{run, to_cm, Actor};
+    use crate::place::{solve, Intent, ObjectRef, Target, Want};
+    use crate::relation::Relation;
+    use core::f32::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_6};
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "AD18 fixture builder takes each field positionally"
+    )]
+    fn mk(
+        id: u32,
+        name: &str,
+        x: f32,
+        y: f32,
+        z: f32,
+        sx: f32,
+        sy: f32,
+        sz: f32,
+        yaw: f32,
+    ) -> Actor {
+        Actor {
+            id,
+            name: name.into(),
+            x,
+            y,
+            z,
+            sx,
+            sy,
+            sz,
+            parent: None,
+            physical: true,
+            vx: 0.0,
+            vz: 0.0,
+            yaw,
+        }
+    }
+
+    fn point_intent(x_cm: i32, z_cm: i32) -> Intent {
+        Intent {
+            object: ObjectRef::Id(2),
+            wants: vec![Want {
+                relation: Relation::NextTo,
+                target: Target::Point { x_cm, z_cm },
+                distance_cm: Some((0, 0)),
+            }],
+        }
+    }
+
+    #[test]
+    fn overlap_3d_lamp_on_a_table_is_clear() {
+        // A solid table with the lamp resting on its top face: touching, not
+        // inside. The old XZ-only arm reported RED and the repair slid it off.
+        let scene = vec![
+            mk(1, "table", 0.0, 0.4, 0.0, 1.2, 0.8, 1.2, 0.0),
+            mk(2, "lamp", 0.0, 0.9, 0.0, 0.2, 0.2, 0.2, 0.0),
+        ];
+        let report = run(&scene);
+        assert_eq!(
+            report.count("overlap"),
+            0,
+            "lamp on a table must be clear: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn overlap_3d_crate_under_a_table_is_clear() {
+        // Crate under a raised desktop: same XZ footprint, separated in Y.
+        let scene = vec![
+            mk(1, "desk_top", 0.0, 1.0, 0.0, 1.6, 0.2, 1.6, 0.0),
+            mk(2, "crate", 0.0, 0.25, 0.0, 0.5, 0.5, 0.5, 0.0),
+        ];
+        let report = run(&scene);
+        assert_eq!(
+            report.count("overlap"),
+            0,
+            "crate under a table must be clear: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn overlap_3d_plank_at_45_is_never_intersected_by_the_solver() {
+        // A 4 m plank turned 45 degrees: its true bar runs diagonally, which
+        // the old unrotated XZ box cannot see. (120,120) sits on that bar.
+        let scene = vec![
+            mk(0, "floor", 0.0, -0.1, 0.0, 12.0, 0.2, 12.0, 0.0),
+            mk(1, "plank", 0.0, 0.15, 0.0, 4.0, 0.3, 0.4, FRAC_PI_4),
+            mk(2, "prop", 0.0, 0.2, 0.0, 0.4, 0.4, 0.4, 0.0),
+        ];
+        let plank_box = yaw_box_of(&scene[1]).expect("plank has a box");
+        assert!(
+            solve(&point_intent(120, 120), &scene).is_err(),
+            "a pose inside the 45-degree plank must refuse"
+        );
+        let out = solve(&point_intent(500, 0), &scene).expect("clear pose must solve");
+        assert_eq!(out.len(), 1);
+        let placed = Actor {
+            x: out[0].x,
+            y: out[0].y,
+            z: out[0].z,
+            yaw: out[0].yaw,
+            ..scene[2].clone()
+        };
+        let prop_box = yaw_box_of(&placed).expect("placed prop has a box");
+        assert!(
+            !yaw_hit(&prop_box, &plank_box),
+            "solver result intersects the plank: {:?}",
+            (prop_box, plank_box)
+        );
+        // The report agrees with the shared test on the placed scene.
+        let mut placed_scene = scene.clone();
+        placed_scene[2] = placed;
+        let report = run(&placed_scene);
+        assert_eq!(
+            report.count("overlap"),
+            0,
+            "placed scene must read clear: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn overlap_3d_plank_at_90_is_solved_by_its_turned_box() {
+        // A 4 m plank turned a quarter turn lies along Z. Its unrotated XZ
+        // box still lies along X, so only a yaw-aware verify lets the solver
+        // take a pose beside it (150,0).
+        let scene = vec![
+            mk(0, "floor", 0.0, -0.1, 0.0, 12.0, 0.2, 12.0, 0.0),
+            mk(1, "plank", 0.0, 0.15, 0.0, 4.0, 0.3, 0.4, FRAC_PI_2),
+            mk(2, "prop", 0.0, 0.2, 0.0, 0.4, 0.4, 0.4, 0.0),
+        ];
+        let out = solve(&point_intent(150, 0), &scene).expect("turned plank leaves (150,0) clear");
+        assert_eq!(out.len(), 1);
+        assert_eq!((to_cm(out[0].x), to_cm(out[0].z)), (150, 0));
+    }
+
+    #[test]
+    fn overlap_3d_20_permutations_give_equal_digests() {
+        let scene = vec![
+            mk(5, "floor", 0.0, -0.1, 0.0, 12.0, 0.2, 12.0, 0.0),
+            mk(0, "table", 3.0, 0.4, 0.0, 1.2, 0.8, 1.2, 0.0),
+            mk(1, "lamp", 3.0, 0.9, 0.0, 0.2, 0.2, 0.2, 0.0),
+            mk(6, "plank", 0.0, 0.15, 0.0, 4.0, 0.3, 0.4, FRAC_PI_4),
+            mk(3, "crate", 3.0, 0.25, 2.0, 0.5, 0.5, 0.5, 0.0),
+            mk(4, "tilted", -3.0, 0.5, 2.0, 1.0, 1.0, 0.6, FRAC_PI_6),
+            mk(2, "prop", 0.0, 0.2, 0.0, 0.4, 0.4, 0.4, 0.0),
+        ];
+        let base = run(&scene);
+        let base_solve = solve(&point_intent(500, 0), &scene).expect("clear pose must solve");
+        for k in 1..20 {
+            let mut rot = scene.clone();
+            let n = rot.len();
+            rot.rotate_left(k % n);
+            assert_eq!(run(&rot).hash, base.hash, "permutation {k}: report digest");
+            assert_eq!(
+                solve(&point_intent(500, 0), &rot).expect("clear pose must solve"),
+                base_solve,
+                "permutation {k}: solve"
+            );
+        }
+    }
+
+    #[test]
+    fn overlap_3d_flat_room_golden_is_byte_identical() {
+        // Pre-AD18 digest of this flat room, byte-identical after the change.
+        let scene = vec![
+            mk(0, "a", 0.0, 0.5, 0.0, 1.0, 1.0, 1.0, 0.0),
+            mk(1, "b", 0.5, 0.5, 0.0, 1.0, 1.0, 1.0, 0.0),
+            mk(2, "c", 5.0, 0.5, 5.0, 1.0, 1.0, 1.0, 0.0),
+            mk(3, "d", 5.4, 0.5, 5.0, 1.0, 1.0, 1.0, 0.0),
+            mk(4, "e", 40.0, 0.5, 40.0, 1.0, 1.0, 1.0, 0.0),
+        ];
+        let report = run(&scene);
+        println!("AD18 flat hash {:#018x}", report.hash);
+        assert_eq!(report.count("overlap"), 2);
+        assert_eq!(report.hash, 0xab89_b218_6529_da05);
+    }
+
+    #[test]
+    fn overlap_3d_stacked_scene_digest_is_re_pinned() {
+        // Receipt: AD18 moves the stacked digest (the lamp on the table stops
+        // being a RED overlap); it is re-pinned here on purpose.
+        let scene = vec![
+            mk(0, "table", 3.0, 0.4, 0.0, 1.2, 0.8, 1.2, 0.0),
+            mk(1, "lamp", 3.0, 0.9, 0.0, 0.2, 0.2, 0.2, 0.0),
+            mk(2, "plank", 0.0, 0.15, 0.0, 4.0, 0.3, 0.4, FRAC_PI_4),
+            mk(3, "crate", 3.0, 0.25, 2.0, 0.5, 0.5, 0.5, 0.0),
+        ];
+        let report = run(&scene);
+        println!("AD18 stacked hash {:#018x}", report.hash);
+        assert_eq!(
+            report.count("overlap"),
+            0,
+            "stacked scene must be clear: {:?}",
+            report.findings
+        );
+        assert_eq!(report.hash, 0x2b03_0af4_c9e7_73f6);
+    }
+
+    #[test]
+    fn overlap_3d_off_lattice_hit_is_yellow() {
+        // A 30-degree tilt takes the bounding circle: the corner actor sits
+        // outside the true bar but inside the circle, so the hit is yellow.
+        let scene = vec![
+            mk(1, "tilted", 0.0, 0.5, 0.0, 4.0, 1.0, 0.4, FRAC_PI_6),
+            mk(2, "corner", 1.6, 0.5, 1.6, 0.2, 1.0, 0.2, 0.0),
+        ];
+        let report = run(&scene);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.check == "overlap")
+            .expect("circle bound overlaps the corner");
+        assert_eq!(finding.severity, "yellow");
+        assert_eq!((finding.a, finding.b), (1, 2));
     }
 }

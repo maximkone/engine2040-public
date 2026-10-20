@@ -33,6 +33,10 @@ pub const GROUND_Y: f32 = 0.0;
 /// in one presented frame popped: a clip snap, not motion (a swinging hand
 /// misses by well under a centimeter at 60 frames a second).
 pub const POP_M: f64 = 0.10;
+/// Ticks a live jump may stay off the floor before the idle-float law counts
+/// it again: a real jump or swing is shorter; a body that keeps hovering
+/// becomes a warned idle float. One second at the 60 Hz fixed tick.
+const AIR_GRACE_TICKS: f64 = 60.0;
 /// Bins of the foot-slide histogram, one per millimeter: the last bin holds a
 /// slide of a meter or more.
 const SLIDE_BINS: usize = 1001;
@@ -244,6 +248,13 @@ struct Track {
     /// Meters per tick from the frame before; `None` right after a pop or
     /// on the first frame, so one snap counts once.
     vel: Option<Vec<[f64; 3]>>,
+    /// World root height at this frame, meters.
+    root_y: f32,
+    /// True while the body is off the floor with vertical motion (a jump or
+    /// a fall), so the idle-float law does not count a live jump.
+    airborne: bool,
+    /// When this air time began, seconds; zero while on the floor.
+    air_since: f64,
 }
 
 /// A run's view laws: folded frame by frame, printed as one receipt line.
@@ -311,8 +322,19 @@ impl Default for ViewFloors {
 
 impl ViewLaws {
     /// Fold one presented frame: the camera that drew it, sim time `t` in
-    /// ticks (tick plus interpolation alpha) and every drawn body.
+    /// ticks (tick plus interpolation alpha) and every drawn body. This is the
+    /// door and test entry point; the window splits it into [`Self::note_frame`]
+    /// per drawn frame and [`Self::note_tick`] per sim tick so a cached pose or
+    /// a two-tick frame cannot fake a pop.
     pub fn note(&mut self, camera: &Camera, t: f64, bodies: &[BodyTruth]) {
+        self.note_frame(camera, t, bodies);
+        self.note_tick(t, bodies);
+    }
+
+    /// Fold one presented frame's camera, bounds, cover, sand rest and foot
+    /// slides. Joint motion is deliberately absent: [`Self::note_tick`] owns
+    /// it, once per sim tick.
+    pub fn note_frame(&mut self, camera: &Camera, t: f64, bodies: &[BodyTruth]) {
         self.frames = self.frames.saturating_add(1);
         self.first_t.get_or_insert(t);
         self.last_t = t;
@@ -339,16 +361,23 @@ impl ViewLaws {
                 Some(rect) => self.cover_max = self.cover_max.max(cover(rect)),
                 None => self.offscreen = self.offscreen.saturating_add(1),
             }
+            let index = usize::from(body.slot);
+            let prev = self.tracks.get(index).and_then(|track| track.as_ref());
+            let was_air = prev.is_some_and(|track| track.airborne);
+            let rising = prev.is_some_and(|track| body.root[1] - track.root_y > 0.002);
+            let air_grace =
+                prev.is_some_and(|track| track.airborne && t - track.air_since < AIR_GRACE_TICKS);
+            let airborne = body.min[1] - GROUND_Y > 0.01 && (was_air || rising);
+            let live_air = airborne && (rising || air_grace);
             if body.has_bounds() {
                 self.sunk_m = self.sunk_m.max(GROUND_Y - body.min[1]);
-                if body.act == "idle" {
+                if body.act == "idle" && !live_air {
                     self.idle_float_m = self.idle_float_m.max(body.min[1] - GROUND_Y);
                 }
             }
             for slide in body.foot_slide_m.into_iter().flatten() {
                 self.note_slide(slide);
             }
-            self.track(t, body);
             let index = usize::from(body.slot);
             if drawn.len() <= index {
                 drawn.resize(index + 1, false);
@@ -367,6 +396,20 @@ impl ViewLaws {
                     self.closest_m = Some(self.closest_m.map_or(d, |c| c.min(d)));
                 }
             }
+        }
+    }
+
+    /// Fold one sim tick's joint motion: the pop law runs once per tick, not
+    /// once per presented frame, so a frame that covers two ticks or repeats a
+    /// cached pose cannot invent a pop. Call after posing the tick's bodies.
+    pub fn note_tick(&mut self, t: f64, bodies: &[BodyTruth]) {
+        for body in bodies {
+            let index = usize::from(body.slot);
+            let prev = self.tracks.get(index).and_then(|track| track.as_ref());
+            let was_air = prev.is_some_and(|track| track.airborne);
+            let rising = prev.is_some_and(|track| body.root[1] - track.root_y > 0.002);
+            let airborne = body.min[1] - GROUND_Y > 0.01 && (was_air || rising);
+            self.track(t, body, airborne);
         }
     }
 
@@ -411,7 +454,7 @@ impl ViewLaws {
 
     /// Predict each joint from the slot's last velocity; the worst miss
     /// above [`POP_M`] is one pop.
-    fn track(&mut self, t: f64, body: &BodyTruth) {
+    fn track(&mut self, t: f64, body: &BodyTruth, airborne: bool) {
         let index = usize::from(body.slot);
         if self.tracks.len() <= index {
             self.tracks.resize_with(index + 1, || None);
@@ -423,11 +466,17 @@ impl ViewLaws {
                     t,
                     joints: body.joints.clone(),
                     vel: None,
+                    root_y: body.root[1],
+                    airborne,
+                    air_since: if airborne { t } else { 0.0 },
                 });
                 return;
             }
         };
         let dt = t - prev.t;
+        // A repeated sample time is not a standstill. The window avoids this
+        // path for a cached pose by calling note_tick only on sim ticks; this
+        // guard covers a caller that repeats the same time.
         if dt <= 1e-6 {
             self.tracks[index] = Some(prev);
             return;
@@ -438,27 +487,37 @@ impl ViewLaws {
                 t,
                 joints: body.joints.clone(),
                 vel: None,
+                root_y: body.root[1],
+                airborne,
+                air_since: if airborne { t } else { 0.0 },
             });
             return;
         }
         let mut popped = false;
-        if let Some(vel) = &prev.vel {
-            let mut worst = 0.0f64;
-            for ((now, then), v) in body.joints.iter().zip(&prev.joints).zip(vel) {
-                let miss = (0..3)
-                    .map(|k| (f64::from(now[k]) - (f64::from(then[k]) + v[k] * dt)).powi(2))
-                    .sum::<f64>()
-                    .sqrt();
-                worst = worst.max(miss);
-            }
-            self.pop_m = self.pop_m.max(worst);
-            if worst > POP_M {
-                self.pops = self.pops.saturating_add(1);
-                *self.pop_acts.entry(body.act).or_insert(0) += 1;
-                popped = true;
+        // A takeoff or a landing between frames is a real floor crossing, not
+        // a pose snap: the root moves with the height channel, so the next
+        // frame restarts prediction from the crossing pose instead of counting
+        // one pop.
+        let crossing = airborne != prev.airborne;
+        if !crossing {
+            if let Some(vel) = &prev.vel {
+                let mut worst = 0.0f64;
+                for ((now, then), v) in body.joints.iter().zip(&prev.joints).zip(vel) {
+                    let miss = (0..3)
+                        .map(|k| (f64::from(now[k]) - (f64::from(then[k]) + v[k] * dt)).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    worst = worst.max(miss);
+                }
+                self.pop_m = self.pop_m.max(worst);
+                if worst > POP_M {
+                    self.pops = self.pops.saturating_add(1);
+                    *self.pop_acts.entry(body.act).or_insert(0) += 1;
+                    popped = true;
+                }
             }
         }
-        let vel = (!popped).then(|| {
+        let vel = (!popped && !crossing).then(|| {
             body.joints
                 .iter()
                 .zip(&prev.joints)
@@ -471,6 +530,17 @@ impl ViewLaws {
             t,
             joints: body.joints.clone(),
             vel,
+            root_y: body.root[1],
+            airborne,
+            air_since: if airborne {
+                if prev.airborne {
+                    prev.air_since
+                } else {
+                    t
+                }
+            } else {
+                0.0
+            },
         });
     }
 
@@ -813,6 +883,24 @@ mod tests {
     }
 
     #[test]
+    fn a_live_jump_is_not_idle_float_but_a_hover_is() {
+        let cam = camera();
+        let mut laws = ViewLaws::default();
+        let at = |y: f32| body(0, "idle", [0.0, y, 0.0], vec![[0.0, y + 1.0, 0.0]]);
+        laws.note(&cam, 0.0, &[at(0.0)]);
+        laws.note(&cam, 1.0, &[at(0.08)]);
+        laws.note(&cam, 2.0, &[at(0.30)]);
+        assert_eq!(laws.idle_float_m * 100.0, 0.0, "a jump is not idle float");
+        // The same height with no vertical motion after the grace is a hover.
+        laws.note(&cam, 180.0, &[at(0.30)]);
+        assert!(
+            laws.idle_float_m * 100.0 > 20.0,
+            "a hover flags after the grace: {}",
+            laws.idle_float_m * 100.0
+        );
+    }
+
+    #[test]
     fn bounds_reuse_the_camera_arm_owner() {
         // `has_bounds` and `screen_rect` read through the shared `Aabb`
         // owner: finite ordered bounds pass, anything else refuses.
@@ -893,6 +981,75 @@ mod tests {
             "worst miss {}",
             laws.pop_m
         );
+    }
+
+    #[test]
+    fn a_repeated_pose_keeps_its_velocity_and_the_next_fresh_pose_does_not_pop() {
+        let cam = camera();
+        let mut laws = ViewLaws::default();
+        for (i, t) in [0.0, 0.5, 1.0, 1.5].into_iter().enumerate() {
+            let x = i as f32 * 0.3;
+            laws.note(
+                &cam,
+                t,
+                &[body(0, "run", [0.0; 3], vec![[x, 1.0, 0.0], [x, 1.5, 0.1]])],
+            );
+        }
+        assert_eq!(laws.pops, 0, "steady motion is predicted");
+        // Same pose at a later frame time: a cache, not a standstill. Use the
+        // exact value the loop produced (3 * 0.3 in f32 is not the literal 0.9).
+        let repeated = 3.0f32 * 0.3;
+        laws.note_frame(
+            &cam,
+            2.0,
+            &[body(
+                0,
+                "run",
+                [0.0; 3],
+                vec![[repeated, 1.0, 0.0], [repeated, 1.5, 0.1]],
+            )],
+        );
+        // The next sim tick continues the old velocity; a zeroed velocity
+        // would predict 0.9 and count a 0.6 m pop. The window poses per tick,
+        // not per cached frame, so the cached frame above adds no track.
+        laws.note_frame(
+            &cam,
+            2.5,
+            &[body(
+                0,
+                "run",
+                [0.0; 3],
+                vec![[1.5, 1.0, 0.0], [1.5, 1.5, 0.1]],
+            )],
+        );
+        laws.note_tick(
+            2.5,
+            &[body(
+                0,
+                "run",
+                [0.0; 3],
+                vec![[1.5, 1.0, 0.0], [1.5, 1.5, 0.1]],
+            )],
+        );
+        assert_eq!(
+            laws.pops, 0,
+            "a cached frame must not zero the tick velocity"
+        );
+    }
+
+    #[test]
+    fn a_tick_note_counts_joint_motion_without_a_presented_frame() {
+        let mut laws = ViewLaws::default();
+        for tick in 0..4u8 {
+            let t = f64::from(tick) + 0.5;
+            let x = f32::from(tick) * 0.02;
+            laws.note_tick(
+                t,
+                &[body(0, "run", [0.0; 3], vec![[x, 1.0, 0.0], [x, 1.5, 0.1]])],
+            );
+        }
+        assert_eq!(laws.frames, 0, "a tick note draws no frame");
+        assert_eq!(laws.pops, 0, "steady joint motion is predicted");
     }
 
     #[test]

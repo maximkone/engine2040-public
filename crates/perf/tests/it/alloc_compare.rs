@@ -1,14 +1,18 @@
-//! PF18 alloc-compare pin: `perf --alloc-compare` header plus 8 rows x2 identical.
+//! PF18 alloc-compare pin: `perf --alloc-compare` header plus one row per
+//! canonical workload, x2 identical.
 //!
 //! Consumer: `perf --alloc-compare` (`crates/perf/src/main.rs`
-//! `alloc_compare_text` via `poll_present_flags`: header, box line, 8
-//! interleaved rows, no wall delta). Units: ticks, hash, bytes, count; the ms
-//! column stays `-` in the default suite. Determinism: hash/alloc rows repeat
-//! exactly; wall ms never enters here (timed rows live under `--perf`, see
-//! `allocator_baseline.rs`). Errors: test asserts only, no production path.
+//! `alloc_compare_text` via `poll_present_flags`: header, box line, four rows
+//! for the allocator this build installs, no wall delta). Units: ticks, hash,
+//! bytes, count; the ms column stays `-` in the default suite. Determinism:
+//! hash/alloc rows repeat exactly; wall ms never enters here (timed rows live
+//! under `--perf`, see `allocator_baseline.rs`). One process has one global
+//! allocator, so the candidate row is a second build (`--features mimalloc`)
+//! of the same harness and the comparison is two runs. Errors: test asserts
+//! only, no production path.
 
 use engine_perf::allocator::{
-    compare_ms, csv_row, AllocatorError, AllocatorKind, CSV_HEADER, SPEEDUP_PCT,
+    active_kind, compare_ms, csv_row, AllocatorError, AllocatorKind, CSV_HEADER, SPEEDUP_PCT,
 };
 use std::process::Command;
 
@@ -27,10 +31,10 @@ fn alloc_compare_stdout() -> String {
 }
 
 #[test]
-fn header_plus_8_rows_repeat_x2() {
+fn header_plus_four_active_rows_repeat_x2() {
     let first = alloc_compare_stdout();
     let second = alloc_compare_stdout();
-    assert_eq!(first, second, "same backend gives the same body twice");
+    assert_eq!(first, second, "same build gives the same body twice");
     let mut lines = first.lines();
     assert_eq!(
         lines.next().expect("body holds the header"),
@@ -39,40 +43,29 @@ fn header_plus_8_rows_repeat_x2() {
     );
     let box_line = lines.next().expect("body holds the box line");
     assert!(box_line.starts_with("# box:"), "{box_line}");
-    for token in ["scheme=", "cpu=", "threads=1", "profile="] {
+    for token in ["allocator=", "scheme=", "cpu=", "threads=1", "profile="] {
         assert!(box_line.contains(token), "{box_line} names {token}");
     }
-    let rows: Vec<&str> = lines.collect();
-    assert_eq!(
-        rows.len(),
-        8,
-        "four workloads times two allocators: {rows:?}"
+    let kind = active_kind();
+    assert!(
+        box_line.contains(&format!("allocator={kind}")),
+        "the box line names the backend this build installs: {box_line}"
     );
+    let rows: Vec<&str> = lines.collect();
+    assert_eq!(rows.len(), 4, "one row per canonical workload: {rows:?}");
     let mut workloads = Vec::with_capacity(4);
-    for (index, row) in rows.iter().enumerate() {
+    for row in &rows {
         assert_eq!(row.split(',').count(), 7, "columns never drift: {row}");
         assert!(
             row.ends_with(",-"),
             "default rows carry no wall sample: {row}"
         );
-        let expected = if index.is_multiple_of(2) {
-            "system,"
-        } else {
-            "mimalloc,"
-        };
-        assert!(row.starts_with(expected), "{row}");
+        assert!(
+            row.starts_with(&format!("{kind},")),
+            "the row names the backend that produced it: {row}"
+        );
         let fields: Vec<&str> = row.split(',').collect();
-        if index.is_multiple_of(2) {
-            workloads.push(fields[1].to_owned());
-        } else {
-            let system = &rows[index - 1];
-            let left: Vec<&str> = system.split(',').collect();
-            assert_eq!(left[1], fields[1], "candidate keeps the workload name");
-            assert_eq!(left[2], fields[2], "candidate keeps the tick count");
-            assert_eq!(left[3], fields[3], "candidate keeps the system hash");
-            assert_eq!(left[4], fields[4], "candidate keeps the system bytes");
-            assert_eq!(left[5], fields[5], "candidate keeps the system count");
-        }
+        workloads.push(fields[1].to_owned());
     }
     workloads.sort_unstable();
     workloads.dedup();

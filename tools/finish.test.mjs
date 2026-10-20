@@ -13,8 +13,14 @@ import {
   DROPPED_ROWS,
   FALLBACK_ROWS,
   GATES,
+  checkVerdict,
   expandIds,
+  loadSuspects,
+  parseProbes,
   parseProvenBy,
+  readArchive,
+  runProbe,
+  scoreGate,
   ticksFromArchive,
 } from "./finish.mjs";
 
@@ -69,6 +75,22 @@ function run(finishPath, sprintPath, extra = []) {
   assert.equal(r.status, 0, `finish.mjs failed: ${r.stderr}${r.stdout}`);
   return JSON.parse(r.stdout);
 }
+
+test("a suspect row blocks met and names the reason", () => {
+  const ticks = new Map([["A1", true]]);
+  const suspects = new Map([["A1", "path-missing"]]);
+  const gate = scoreGate("A1", ["A1"], ticks, "Met: pinned toolchain", suspects);
+  assert.equal(gate.status, "partial", "a suspect row is never met");
+  assert.deepEqual(gate.suspectRows, [{ id: "A1", reason: "path-missing", evidence: "" }]);
+});
+
+test("loadSuspects reads the in-process audit for the gate rows", () => {
+  const texts = new Map([["ZZ1", "owns `crates/zz-fixture/src/gone.rs`"]]);
+  const report = loadSuspects(process.cwd(), texts, ["ZZ1"]);
+  assert.equal(report.ok, true);
+  assert.ok(report.suspects.has("ZZ1"), "a missing path is a suspect");
+  assert.match(report.suspects.get("ZZ1").reasons.join(","), /path-missing/);
+});
 
 test("hand-checked sample: 5/5 gates correct", () => {
   const dir = join(tmpdir(), `finish-sample-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
@@ -433,6 +455,119 @@ test("archive-only ticked row in the set counts as ticked (P10/FS1)", () => {
     const byOpen = new Map(open.map((r) => [r.gate, r]));
     assert.equal(byOpen.get("P10").status, "open", "P10 open without archive tick");
     assert.deepEqual(byOpen.get("P10").openRows, ["FS1"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runProbe enforces marker, exit and minPassed", () => {
+  const ok = runProbe({
+    cmd: process.execPath,
+    args: ["-e", "console.log('PROBE OK')"],
+    marker: "PROBE OK",
+    timeoutMs: 5000,
+  });
+  assert.equal(ok.state, "pass");
+  const badExit = runProbe({
+    cmd: process.execPath,
+    args: ["-e", "console.log('PROBE OK'); process.exit(3)"],
+    marker: "PROBE OK",
+    timeoutMs: 5000,
+  });
+  assert.equal(badExit.state, "fail");
+  const noMarker = runProbe({
+    cmd: process.execPath,
+    args: ["-e", "console.log('nope')"],
+    marker: "PROBE OK",
+    timeoutMs: 5000,
+  });
+  assert.equal(noMarker.state, "fail");
+  const zeroTests = runProbe({
+    cmd: process.execPath,
+    args: ["-e", "console.log('test result: ok. 0 passed')"],
+    marker: "test result: ok\\.",
+    minPassed: 1,
+    timeoutMs: 5000,
+  });
+  assert.equal(zeroTests.state, "fail", "a hollow green is not a pass");
+  assert.equal(runProbe({ missing: "needs a GPU" }).state, "missing");
+  const timed = runProbe({
+    cmd: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 5000)"],
+    marker: "never",
+    timeoutMs: 150,
+  });
+  assert.equal(timed.state, "timeout");
+});
+
+test("parseProbes rejects an unknown gate and keeps a missing reason", () => {
+  assert.throws(
+    () => parseProbes('{"ZZ9":{"cmd":"node","args":[],"marker":"x"}}'),
+    /unknown gate/,
+  );
+  assert.deepEqual(parseProbes('{"A1":{"missing":"needs a GPU"}}').A1, {
+    missing: "needs a GPU",
+  });
+});
+
+test("checkVerdict fails a met gate that still names a suspect row", () => {
+  const check = checkVerdict(
+    [{ gate: "P10", status: "met", suspectRows: [{ id: "PF8" }] }],
+    new Set(),
+    { ok: true, audited: 1, unchecked: 0 },
+  );
+  assert.equal(check.pass, false);
+  assert.match(check.reasons.join(" "), /PF8/);
+});
+
+test("--check passes on the live tree", () => {
+  const pass = spawnSync(process.execPath, [FINISH, "--check", "--json"], {
+    encoding: "utf8",
+  });
+  assert.equal(pass.status, 0, pass.stderr);
+  const parsed = JSON.parse(pass.stdout);
+  assert.equal(parsed.check.pass, true);
+  assert.ok(Array.isArray(parsed.gates));
+  assert.match(pass.stderr, /^$/);
+});
+
+test("archive row text finds a stale path even when the tick sits in SPRINT-ARCHIVE.md", () => {
+  const dir = join(tmpdir(), `finish-archive-text-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    const f = join(dir, "FINISH-RICH.md");
+    const s = join(dir, "SPRINT.md");
+    const a = join(dir, "archive");
+    mkdirSync(a, { recursive: true });
+    writeFileSync(
+      f,
+      `# FINISH-RICH — archive text fixture
+## Finish-line status
+| Gate | Status 2026-10-05 |
+|---|---|
+| P10 | Met: evidence-line audit |
+## Finish P - the polish bar
+| Gate | The bar | Proven by |
+|---|---|---|
+| P10: evidence | Every met gate has an evidence line | FS1 |
+`,
+    );
+    writeFileSync(s, `# SPRINT — FS1 pruned
+- [x] PQ14 proof: evidence-line audit.
+`);
+    writeFileSync(join(a, "SPRINT-2026-10-05.md"), "# old archive\n");
+    writeFileSync(
+      join(dir, "SPRINT-ARCHIVE.md"),
+      "- [x] FS1 tools: owns `crates/zz-fixture/src/gone.rs`.\n",
+    );
+    const rows = run(f, s, ["--archive", a]);
+    const p10 = rows.find((r) => r.gate === "P10");
+    assert.equal(p10.status, "partial", "a suspect row cannot be met");
+    assert.equal(p10.suspectRows[0].id, "FS1");
+    assert.match(p10.suspectRows[0].reason, /path-missing/);
+    const archive = readArchive(a);
+    assert.equal(archive.ticks.get("FS1"), true, "SPRINT-ARCHIVE.md is read for ticks");
+    assert.match(archive.texts.get("FS1"), /crates\/zz-fixture/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

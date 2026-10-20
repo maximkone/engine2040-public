@@ -119,7 +119,7 @@ use engine_combat::tables::{TABLES_VERSION_V1, TABLES_VERSION_V2};
 use engine_combat::{try_step_into, FightEvent, FightState, MAX_EVENTS_PER_TICK, TABLES_V1};
 use engine_core::fixed::Fixed;
 use engine_destruction::bonded::{event_bytes as break_bytes, BondedCollection, BreakEvent};
-use engine_input::fighter::{ATTACK, DODGE, THROW_SPEAR};
+use engine_input::fighter::{ATTACK, DODGE, JUMP, THROW_SPEAR};
 use engine_physics::balance::BalanceParams;
 /// Integer balance verdicts the window reads (`Sim::balance`): re-exported so
 /// the presentation leg names the return without a physics edge.
@@ -164,6 +164,12 @@ pub const FIGHTER_HEIGHT_M: f32 = 1.8;
 /// Height-channel gravity, mm per tick squared (row SG5): the source game's
 /// -40 m/s^2 at the 60 Hz fixed tick, rounded to whole mm.
 pub const FIGHTER_GRAVITY: i32 = 11;
+/// Live jump take-off rise, mm per tick: 5 m/s at the 60 Hz fixed tick
+/// (AIN6/AIN7; the same take-off the sim controller tests use).
+pub const JUMP_RISE_MM_TICK: i32 = 5_000 / 60;
+/// Apex speed under which the live height channel halves gravity, mm per
+/// tick: the AIN6 table's 2.0 m/s at 60 Hz.
+pub const AIR_APEX_MM_TICK: i32 = 2_000 / 60;
 
 /// Perception period for AI-filled slots, in fixed ticks. The arena maps a
 /// fresh [`Percept`] every tick; each [`DepthBrain`]
@@ -1167,14 +1173,25 @@ impl Sim {
 
     /// One tick of the height channel: gravity on every slot that is off the
     /// floor, a landing at floor height with the vertical speed cleared.
-    /// Integer mm, so a replay lands on the same height twice.
+    /// Integer mm, so a replay lands on the same height twice. Near the apex
+    /// (`AIR_APEX_MM_TICK`) a held jump halves gravity, the AIN6 table's
+    /// float-free copy; the spear swing keeps the plain arc.
     fn fall(&mut self) {
         for (slot, state) in self.states.iter_mut().enumerate().take(self.fighters) {
             let at_mm = match_wire::pos_mm(state.pos)[1];
             if self.rise[slot] == 0 && at_mm <= 0 {
                 continue;
             }
-            let rise = self.rise[slot].saturating_sub(FIGHTER_GRAVITY);
+            // The apex hang belongs to the live jump only: a held jump button
+            // near the top halves gravity. Other height users (the spear rope
+            // swing) keep the plain arc, so their receipts stay exact.
+            let held_jump = self.last_inputs[slot].is_some_and(|input| input.buttons.0 & JUMP != 0);
+            let gravity = if held_jump && self.rise[slot].abs() < AIR_APEX_MM_TICK {
+                FIGHTER_GRAVITY / 2
+            } else {
+                FIGHTER_GRAVITY
+            };
+            let rise = self.rise[slot].saturating_sub(gravity);
             let next = at_mm.saturating_add(rise);
             if next <= 0 {
                 self.rise[slot] = 0;
@@ -1184,6 +1201,20 @@ impl Sim {
                 state.pos[1] = match_wire::metres(next);
             }
         }
+    }
+
+    /// AIN7 live jump: arm the height channel from any tick (the `--height`
+    /// flag arms it before tick 0). Refuses on the Rapier `sim` leg, whose
+    /// controller owns the pose; the sim air table is armed separately.
+    fn arm_jump(&mut self) -> bool {
+        if cfg!(feature = "sim") {
+            return false;
+        }
+        if !self.height {
+            self.rise = vec![0; self.fighters];
+            self.height = true;
+        }
+        true
     }
 
     /// Validated constructor behind the intake version flag: V0 keeps the
@@ -1314,8 +1345,15 @@ impl Sim {
         }
         let inputs = &row[..self.fighters];
         // Latch the merged inputs for the DT1 recorder (tape plus brain
-        // decisions); authority reads `inputs` below, never this copy.
+        // decisions); authority reads `inputs` below, never this copy. The
+        // jump edge is read against the previous latch before it moves.
+        let mut jump_edges = [false; MAX_SLOTS];
+        let mut jump_releases = [false; MAX_SLOTS];
         for (slot, input) in inputs.iter().enumerate() {
+            let before = self.last_inputs[slot].is_some_and(|prev| prev.buttons.0 & JUMP != 0);
+            let now = input.buttons.0 & JUMP != 0;
+            jump_edges[slot] = now && !before;
+            jump_releases[slot] = !now && before;
             self.last_inputs[slot] = Some(*input);
         }
         // Strict combat: entry validation makes failure unreachable, but a
@@ -1435,6 +1473,19 @@ impl Sim {
                     matches!(state.gait(), GaitPhase::Fallen | GaitPhase::Catching)
                 });
             let speed = if down { 0.0 } else { speed };
+            // AIN7 live jump: a fresh press on the floor takes off through the
+            // height channel; releasing early cuts the rise (the AIN6 hold
+            // cut). The first press arms the channel, so a default match and
+            // its hashes before the press stay floor-plane.
+            if jump_edges[slot] && !down && self.arm_jump() {
+                let grounded = self.rise[slot] == 0 && self.states[slot].pos[1] <= 0.0;
+                if grounded {
+                    self.rise[slot] = JUMP_RISE_MM_TICK;
+                }
+            }
+            if jump_releases[slot] && self.height && self.rise[slot] > 0 {
+                self.rise[slot] /= 2;
+            }
             let interrupt = interrupt_for_slot(&tick_events, slot as u8);
             // Authority ticks that record nothing take the root-only
             // advance (0 heap allocs); presentation runs keep `update` so
@@ -4954,6 +5005,98 @@ mod tests {
     }
 
     /// SG5: a fighter off the floor falls under gravity and lands at rest.
+    #[test]
+    fn live_jump_lifts_the_body_and_lands_on_the_floor() {
+        let config = ArenaConfig {
+            ticks: 120,
+            ..config()
+        };
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            let mut human = tape_input(tick, 0, 0, 0);
+            if tick == 3 {
+                human.buttons = Buttons(JUMP);
+            }
+            inputs.push(human);
+            inputs.push(tape_input(tick, 1, 0, 0));
+        }
+        let tape = FighterTape(inputs);
+        let mut sim = Sim::build(&config, &tape, false, false).expect("jump match");
+        let mut peak = 0.0f32;
+        while sim.tick < config.ticks {
+            sim.step(&tape).expect("jump tick");
+            peak = peak.max(sim.states[0].pos[1]);
+        }
+        assert!(sim.height, "the first press arms the height channel");
+        assert!(peak > 0.1, "the jump leaves the floor, peak {peak}");
+        assert_eq!(sim.states[0].pos[1], 0.0, "and lands");
+        assert!(sim.rise.iter().all(|rise| *rise == 0), "no residual rise");
+    }
+
+    #[test]
+    fn live_jump_same_tape_repeats_its_peak() {
+        let peak = |hold: u32| {
+            let config = ArenaConfig {
+                ticks: 120,
+                ..config()
+            };
+            let mut inputs = Vec::new();
+            for tick in 0..config.ticks {
+                let mut human = tape_input(tick, 0, 0, 0);
+                if (3..3 + hold).contains(&tick) {
+                    human.buttons = Buttons(JUMP);
+                }
+                inputs.push(human);
+                inputs.push(tape_input(tick, 1, 0, 0));
+            }
+            let tape = FighterTape(inputs);
+            let mut sim = Sim::build(&config, &tape, false, false).expect("jump match");
+            let mut peak = 0.0f32;
+            while sim.tick < config.ticks {
+                sim.step(&tape).expect("jump tick");
+                peak = peak.max(sim.states[0].pos[1]);
+            }
+            peak
+        };
+        let tap = peak(1);
+        let held = peak(2);
+        assert_eq!(peak(1), tap, "the same tape repeats its peak");
+        assert!(
+            held > tap,
+            "holding the jump keeps more rise: {held} > {tap}"
+        );
+    }
+
+    #[test]
+    fn live_jump_first_hash_diff_is_the_press_tick() {
+        let tape = |jump: bool| {
+            let config = ArenaConfig {
+                ticks: 60,
+                ..config()
+            };
+            let mut inputs = Vec::new();
+            for tick in 0..config.ticks {
+                let mut human = tape_input(tick, 0, 0, 0);
+                if jump && (10..18).contains(&tick) {
+                    human.buttons = Buttons(JUMP);
+                }
+                inputs.push(human);
+                inputs.push(tape_input(tick, 1, 0, 0));
+            }
+            (config, FighterTape(inputs))
+        };
+        let (config, with) = tape(true);
+        let (_, without) = tape(false);
+        let jumped = run(&config, &with);
+        let floor = run(&config, &without);
+        let first = jumped
+            .iter()
+            .zip(&floor)
+            .position(|(a, b)| a != b)
+            .map(|index| jumped[index].tick);
+        assert_eq!(first, Some(10), "the press tick is the first difference");
+    }
+
     #[test]
     fn fighter_height_falls_to_the_floor_and_rests() {
         let (mut sim, tape) = height_sim(true, 3.0);

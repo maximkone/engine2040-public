@@ -106,6 +106,8 @@ pub mod mesh_import;
 #[cfg(feature = "import")]
 pub mod morph_import;
 pub mod meshlet;
+/// Conservative meshlet cull: frustum plus cone, no false negatives.
+pub mod meshlet_cull;
 pub mod recook;
 #[cfg(feature = "import")]
 pub mod retarget;

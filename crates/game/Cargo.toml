@@ -90,6 +90,10 @@ engine-spatial.workspace = true
 # SHOW1: per-frame SHA-256 for capture manifests (tamper binding the stitch
 # validator cross-checks; no hand-rolled crypto).
 sha2 = { version = "0.10" }
+# E63: the `GameConfig` JSON Schema contract behind the strict layered extract.
+# MIT (LICENSE read live 2026-10-20, GREsau/schemars); derive + std are its
+# defaults, and both are already in the lock through rmcp.
+schemars = { version = "1.2" }
 winit = { workspace = true, optional = true }
 # Pad device poll on the windowed leg only (optional, so the headless default
 # graph stays std-only); Apache-2.0/MIT passes the deny allow-list.

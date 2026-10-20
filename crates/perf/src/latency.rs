@@ -4,7 +4,9 @@
 //! Units: ticks/frames on the shared 60 Hz clock, milliseconds in reports.
 //! Determinism: `measure` is integer tick math only, no wall clock, sorted by
 //! id so input order never matters; wall time lives in `summarize_live`
-//! inputs only, and never enters a tick hash.
+//! inputs (`WindowLatencyLog` stages them) and never enters a tick hash.
+//! Reference-GPU rows print through `GpuConditions::report`, or stay
+//! `pending` with the blocker named until the window run lands.
 //! Errors: typed `LatencyError`.
 //! Budget: the bar is event-to-present p95 <= 50 ms (3 frames at 60 Hz).
 
@@ -132,6 +134,8 @@ pub enum LatencyError {
         /// Rejected sample count.
         count: usize,
     },
+    /// A pending reference-GPU row arrived without naming its blocker.
+    EmptyBlocker,
 }
 
 impl Display for LatencyError {
@@ -188,6 +192,7 @@ impl Display for LatencyError {
             Self::TooManySamples { count } => {
                 write!(f, "latency: {count} samples overflow the u32 event counter")
             }
+            Self::EmptyBlocker => write!(f, "latency: pending marker needs its blocker named"),
         }
     }
 }
@@ -464,6 +469,224 @@ pub fn summarize_live(sim_ms: &[f64], present_ms: &[f64]) -> Result<LatencyRepor
     })
 }
 
+/// Ceiling for staged window events: bounds the window loop's scratch so one
+/// runaway session cannot grow the report without limit.
+pub const MAX_STAGED_EVENTS: usize = 4_096;
+
+/// Staged window-loop collector: holds per-event event-to-sim-effect and
+/// event-to-present milliseconds until the frame batch summarizes. The arena
+/// window loop stages the input, sim-effect and present legs per event, then
+/// `summarize` feeds [`summarize_live`] into [`GpuConditions::report`] for the
+/// measured `input_latency_gpu` block. Presentation only: never hashed, never
+/// ticked. Empty legs summarize exactly like [`summarize_live`] over empty
+/// slices, so an unstaged run fails loudly instead of printing zeros.
+///
+/// # Errors
+///
+/// [`LatencyError::TooManySamples`] when already holding [`MAX_STAGED_EVENTS`]
+/// pairs, [`LatencyError::BadSample`] on a NaN, infinite or negative leg,
+/// [`LatencyError::PresentBeforeSim`] when a present predates its effect.
+#[derive(Clone, Debug, Default)]
+pub struct WindowLatencyLog {
+    /// Staged event-to-sim-effect milliseconds, in stage order.
+    sim_ms: Vec<f64>,
+    /// Staged event-to-present milliseconds, in stage order.
+    present_ms: Vec<f64>,
+}
+
+impl WindowLatencyLog {
+    /// Empty collector; legs grow to [`MAX_STAGED_EVENTS`] pairs at most.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sim_ms: Vec::new(),
+            present_ms: Vec::new(),
+        }
+    }
+
+    /// Staged pairs so far.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.sim_ms.len()
+    }
+
+    /// True while no pair is staged.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sim_ms.is_empty()
+    }
+
+    /// Stage one input-to-present sample pair in caller order. Rejects a bad
+    /// pair at stage time with the same error [`summarize_live`] would raise,
+    /// so the window loop learns the leg and index on the spot.
+    ///
+    /// # Errors
+    ///
+    /// [`LatencyError::TooManySamples`] past [`MAX_STAGED_EVENTS`] pairs,
+    /// [`LatencyError::BadSample`] on a NaN, infinite or negative leg,
+    /// [`LatencyError::PresentBeforeSim`] when the present predates its sim.
+    pub fn stage(&mut self, sim_ms: f64, present_ms: f64) -> Result<(), LatencyError> {
+        if self.sim_ms.len() >= MAX_STAGED_EVENTS {
+            return Err(LatencyError::TooManySamples {
+                count: self.sim_ms.len() + 1,
+            });
+        }
+        let index = self.sim_ms.len();
+        for (leg, value) in [
+            (SampleLeg::SimEffect, sim_ms),
+            (SampleLeg::Present, present_ms),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(LatencyError::BadSample {
+                    leg,
+                    index,
+                    value_ms: value,
+                });
+            }
+        }
+        if present_ms < sim_ms {
+            return Err(LatencyError::PresentBeforeSim {
+                index,
+                sim_ms,
+                present_ms,
+            });
+        }
+        self.sim_ms.push(sim_ms);
+        self.present_ms.push(present_ms);
+        Ok(())
+    }
+
+    /// Summarize the staged legs with the shared nearest-rank p50/p95, so the
+    /// staged report ranks exactly like [`summarize_live`] over the same pairs.
+    /// Run [`check_p2_bar`] on the result for the P2 verdict.
+    ///
+    /// # Errors
+    ///
+    /// [`LatencyError::EmptyInput`] while no pair is staged.
+    pub fn summarize(&self) -> Result<LatencyReport, LatencyError> {
+        summarize_live(&self.sim_ms, &self.present_ms)
+    }
+
+    /// Print the staged legs as the measured GPU block. One call for the
+    /// pilot run: summarize the staged pairs, then print with conditions.
+    /// Empty logs fail with [`LatencyError::EmptyInput`], never zeros.
+    /// Caller: the reference-GPU run hands its conditions here.
+    ///
+    /// # Errors
+    ///
+    /// [`LatencyError::EmptyInput`] while no pair is staged, so a run that
+    /// staged nothing refuses to print measured rows.
+    pub fn staged_report(&self, conditions: &GpuConditions) -> Result<String, LatencyError> {
+        self.summarize().map(|report| conditions.report(&report))
+    }
+
+    /// Drop every staged pair; the log reads as fresh for the next batch.
+    pub fn clear(&mut self) {
+        self.sim_ms.clear();
+        self.present_ms.clear();
+    }
+}
+
+/// Conditions a reference-GPU latency run was measured under. Every field
+/// prints into the report beside the numbers, so a later reader knows the
+/// adapter, driver, power and clock state, build, scene and machine load
+/// behind each p50/p95. Offline report data only: never hashed, never ticked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuConditions {
+    /// Graphics adapter name as reported by the OS or driver.
+    pub adapter: String,
+    /// Graphics driver version behind the run.
+    pub driver: String,
+    /// Graphics backend used for the run.
+    pub backend: String,
+    /// Processor the window run executed on.
+    pub cpu: String,
+    /// OS power scheme during the run.
+    pub power_mode: String,
+    /// Graphics clock policy observed during the run.
+    pub clock_mode: String,
+    /// Internal render resolution (output may upscale from it).
+    pub resolution: String,
+    /// Presentation sync state during the run.
+    pub vsync: String,
+    /// Build profile: debug or release; numbers never compare across profiles.
+    pub profile: String,
+    /// Scene and content version behind the run.
+    pub scene: String,
+    /// Window build identity (binary plus content hash).
+    pub build: String,
+    /// Machine load during the run: concurrent builds or captures beside it.
+    pub load: String,
+    /// Warmup frames before sampling.
+    pub warmup: u32,
+    /// Events sampled.
+    pub samples: u32,
+}
+
+impl GpuConditions {
+    /// Measured reference-GPU block: conditions beside the numbers, then the
+    /// shared summary with its P2 verdict. Same report shape as the headless
+    /// leg, so one perf report reads both.
+    #[must_use]
+    pub fn report(&self, report: &LatencyReport) -> String {
+        format!(
+            "input_latency_gpu samples={} warmup={} profile={} scene=\"{}\" build=\"{}\" \
+             adapter=\"{}\" driver=\"{}\" backend=\"{}\" resolution=\"{}\" vsync=\"{}\" \
+             power=\"{}\" clocks=\"{}\" cpu=\"{}\" load=\"{}\"\n{}",
+            self.samples,
+            self.warmup,
+            self.profile,
+            self.scene,
+            self.build,
+            self.adapter,
+            self.driver,
+            self.backend,
+            self.resolution,
+            self.vsync,
+            self.power_mode,
+            self.clock_mode,
+            self.cpu,
+            self.load,
+            report.summary(),
+        )
+    }
+
+    /// Pending reference-GPU block: every leg stays PENDING with the exact
+    /// blocker named, beside the known conditions. A run posts this instead
+    /// of numbers until the window measurement lands.
+    ///
+    /// # Errors
+    ///
+    /// [`LatencyError::EmptyBlocker`] when the blocker is empty or blank:
+    /// a pending row must say what is still missing.
+    pub fn pending(&self, blocker: &str) -> Result<String, LatencyError> {
+        if blocker.trim().is_empty() {
+            return Err(LatencyError::EmptyBlocker);
+        }
+        Ok(format!(
+            "reference_gpu sim_p50=PENDING sim_p95=PENDING \
+             present_p50=PENDING present_p95=PENDING samples={} warmup={} profile={} \
+             scene=\"{}\" build=\"{}\" adapter=\"{}\" driver=\"{}\" backend=\"{}\" \
+             resolution=\"{}\" vsync=\"{}\" power=\"{}\" clocks=\"{}\" cpu=\"{}\" \
+             load=\"{}\" blocker=\"{blocker}\"\n",
+            self.samples,
+            self.warmup,
+            self.profile,
+            self.scene,
+            self.build,
+            self.adapter,
+            self.driver,
+            self.backend,
+            self.resolution,
+            self.vsync,
+            self.power_mode,
+            self.clock_mode,
+            self.cpu,
+            self.load,
+        ))
+    }
+}
+
 /// Frame-times CSV writing and the proof-gate verdict live in the game crate
 /// (`frame_times_csv_row` plus the window timed-smoke writer): the windowed
 /// smoke path owns its own CSV shape, so this module keeps no copy.
@@ -675,6 +898,196 @@ mod tests {
         );
     }
 
+    fn gpu_conditions() -> GpuConditions {
+        GpuConditions {
+            adapter: "NVIDIA GeForce RTX 3050 6GB Laptop GPU".to_owned(),
+            driver: "610.62".to_owned(),
+            backend: "vulkan".to_owned(),
+            cpu: "i5-13420H".to_owned(),
+            power_mode: "Balanced".to_owned(),
+            clock_mode: "dynamic".to_owned(),
+            resolution: "1920x1080".to_owned(),
+            vsync: "on".to_owned(),
+            profile: "release".to_owned(),
+            scene: "arena".to_owned(),
+            build: "local window build".to_owned(),
+            load: "idle, single run".to_owned(),
+            warmup: 120,
+            samples: 31,
+        }
+    }
+
+    #[test]
+    fn gpu_report_carries_conditions_and_verdict() {
+        let conditions = gpu_conditions();
+        let report = summarize_live(&[1.0 * 1000.0 / TICK_HZ; 31], &[50.0; 31])
+            .expect("clean samples summarize");
+        let text = conditions.report(&report);
+        for token in [
+            "input_latency_gpu",
+            "adapter=",
+            "610.62",
+            "power=",
+            "clocks=",
+            "load=",
+            "present_p95=50.000ms",
+            "verdict=pass",
+        ] {
+            assert!(text.contains(token), "{text}");
+        }
+        // A 4-frame present fails the feel bar in the same report shape.
+        let slow = summarize_live(&[1.0 * 1000.0 / TICK_HZ; 25], &[4.0 * 1000.0 / TICK_HZ; 25])
+            .expect("slow samples summarize");
+        let slow_text = conditions.report(&slow);
+        assert!(slow_text.contains("verdict=FAIL"), "{slow_text}");
+        assert!(check_p2_bar(&slow).is_err(), "4 frames blow the bar");
+        // Measured rows land in the test log for the perf report (`-- --nocapture`).
+        println!("{text}");
+    }
+
+    #[test]
+    fn gpu_pending_names_its_blocker() {
+        let conditions = gpu_conditions();
+        let text = conditions
+            .pending(
+                "staged input-to-present timestamps missing in the arena window loop; \
+                 no idle release run on the reference graphics card this wave",
+            )
+            .expect("named blocker prints");
+        assert!(text.contains("reference_gpu"), "{text}");
+        assert!(text.contains("PENDING"), "{text}");
+        assert!(
+            text.contains("staged input-to-present timestamps"),
+            "{text}"
+        );
+        assert!(text.contains("adapter="), "{text}");
+        assert!(text.contains("load="), "{text}");
+        assert_eq!(conditions.pending(""), Err(LatencyError::EmptyBlocker));
+        assert_eq!(conditions.pending("   "), Err(LatencyError::EmptyBlocker));
+        // The pending row lands in the test log beside the measured rows.
+        println!("{text}");
+    }
+
+    #[test]
+    fn window_log_stages_measured_legs_for_the_gpu_report() {
+        let mut log = WindowLatencyLog::new();
+        assert!(log.is_empty());
+        assert_eq!(log.len(), 0);
+        let sim_ms = vec![1.0 * 1000.0 / TICK_HZ; 31];
+        let present_ms = vec![50.0; 31];
+        for (&sim, &present) in sim_ms.iter().zip(present_ms.iter()) {
+            log.stage(sim, present).expect("clean pair stages");
+        }
+        assert_eq!(log.len(), 31);
+        // Oracle: staged legs rank exactly like the direct live summary.
+        let direct = summarize_live(&sim_ms, &present_ms).expect("same pairs summarize");
+        let staged = log.summarize().expect("staged legs summarize");
+        assert_eq!(staged, direct);
+        assert_eq!(staged.present_p95_ms, 50.0);
+        // The staged report prints the measured GPU block, PENDING-free.
+        let text = gpu_conditions().report(&staged);
+        assert!(text.contains("input_latency_gpu"), "{text}");
+        assert!(text.contains("adapter="), "{text}");
+        assert!(text.contains("present_p95=50.000ms"), "{text}");
+        assert!(text.contains("verdict=pass"), "{text}");
+        assert!(!text.contains("PENDING"), "{text}");
+        println!("{text}");
+        // Clear returns the log to fresh: stage again and re-summarize.
+        log.clear();
+        assert!(log.is_empty());
+        log.stage(1.0 * 1000.0 / TICK_HZ, 50.0)
+            .expect("cleared log stages again");
+        assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn window_log_staged_report_prints_measured_gpu_block() {
+        let mut log = WindowLatencyLog::new();
+        // Same legs as the staged summary test: one frame to sim, 50 ms to present.
+        for _ in 0..31 {
+            log.stage(1.0 * 1000.0 / TICK_HZ, 50.0)
+                .expect("clean pair stages");
+        }
+        let text = log
+            .staged_report(&gpu_conditions())
+            .expect("staged legs print");
+        assert!(text.contains("input_latency_gpu"), "{text}");
+        assert!(text.contains("adapter="), "{text}");
+        assert!(text.contains("present_p95=50.000ms"), "{text}");
+        assert!(text.contains("verdict=pass"), "{text}");
+        assert!(!text.contains("PENDING"), "{text}");
+        println!("{text}");
+        // Empty never prints zeros: the pilot sees the missing batch loudly.
+        assert_eq!(
+            WindowLatencyLog::new().staged_report(&gpu_conditions()),
+            Err(LatencyError::EmptyInput)
+        );
+    }
+
+    #[test]
+    fn window_log_rejects_bad_stage_time() {
+        let mut log = WindowLatencyLog::new();
+        log.stage(5.0, 20.0).expect("clean pair stages");
+        assert!(
+            matches!(
+                log.stage(f64::NAN, 20.0),
+                Err(LatencyError::BadSample {
+                    leg: SampleLeg::SimEffect,
+                    index: 1,
+                    ..
+                })
+            ),
+            "NaN sim names its leg and index at stage time"
+        );
+        assert_eq!(
+            log.stage(5.0, -1.0),
+            Err(LatencyError::BadSample {
+                leg: SampleLeg::Present,
+                index: 1,
+                value_ms: -1.0
+            })
+        );
+        assert_eq!(
+            log.stage(5.0, 2.0),
+            Err(LatencyError::PresentBeforeSim {
+                index: 1,
+                sim_ms: 5.0,
+                present_ms: 2.0
+            })
+        );
+        // Rejections stage nothing: the one clean pair still summarizes alone.
+        assert_eq!(log.len(), 1);
+        let staged = log.summarize().expect("clean pair survives rejections");
+        assert_eq!(staged.events, 1);
+        assert_eq!(
+            WindowLatencyLog::new().summarize(),
+            Err(LatencyError::EmptyInput)
+        );
+    }
+
+    #[test]
+    fn window_log_holds_its_ceiling() {
+        let mut log = WindowLatencyLog::new();
+        for _ in 0..MAX_STAGED_EVENTS {
+            log.stage(1.0 * 1000.0 / TICK_HZ, 50.0)
+                .expect("pairs stage to the ceiling");
+        }
+        assert_eq!(log.len(), MAX_STAGED_EVENTS);
+        assert!(
+            matches!(
+                log.stage(1.0 * 1000.0 / TICK_HZ, 50.0),
+                Err(LatencyError::TooManySamples { .. })
+            ),
+            "one past the ceiling fails loudly"
+        );
+        let staged = log.summarize().expect("full log still summarizes");
+        assert_eq!(staged.present_p95_ms, 50.0);
+        log.clear();
+        assert!(log.is_empty());
+        log.stage(1.0 * 1000.0 / TICK_HZ, 50.0)
+            .expect("cleared ceiling stages again");
+    }
+
     #[test]
     fn bad_rows_fail_loudly() {
         let (events, effects, presents) = fixture_3f(3, 5);
@@ -765,6 +1178,7 @@ mod tests {
                 present_ms: 2.0,
             },
             LatencyError::TooManySamples { count: usize::MAX },
+            LatencyError::EmptyBlocker,
         ];
         for error in cases {
             assert!(!error.to_string().is_empty(), "{error:?} explains itself");

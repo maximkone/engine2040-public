@@ -262,6 +262,15 @@ mod tests {
     }
 
     #[test]
+    fn arena_digest_is_pinned() {
+        // The five-target matrix established this value (HASH-LAW.md, arena
+        // line). Pinning it in-tree catches a silent arena change on one host;
+        // it does not touch GOLDEN_600.
+        let match_run = run(&Fixture::STANDARD).expect("standard match");
+        assert_eq!(match_run.digest, 0xd29b_3b17_bbd3_b244);
+    }
+
+    #[test]
     fn arena_tape_follows_one_flipped_input() {
         let base = run(&Fixture::STANDARD).expect("base");
         let flipped = run(&Fixture {

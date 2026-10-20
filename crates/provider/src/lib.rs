@@ -45,6 +45,7 @@ pub mod pins;
 pub mod policy;
 pub mod prompt;
 pub mod protocol;
+pub mod quota;
 pub mod reader;
 pub mod remote;
 pub mod retry;
@@ -107,6 +108,13 @@ pub use protocol::{
     AdapterKind, AiError, AiEvent, AiRequest, AiResult, Budget, ContextRef, DataClass, EventKind,
     FinishReason, JobId, ModelSelector, PrivacyMode, Proposal, ProposalAction, ProtocolError,
     RequestId, TaskKind, Usage,
+};
+pub use quota::{
+    resolve_key, scan_package, KeyFinding, KeyKind, KeyRoute, KeySafetyError, KeyScanReport,
+    KeyStoreError, KeyUse, MemoryKeyStore, OsKeyStore, PlayerId, QuotaBook, QuotaCharge,
+    QuotaConfigError, QuotaLimit, QuotaLimits, QuotaPlan, QuotaReceipt, QuotaRefusal, QuotaScope,
+    QuotaUsage, RateLimit, ScanError, ScanLimits, SecretToken, SessionId, MAX_ACCOUNT_LEN,
+    MAX_TOKEN_BYTES, MAX_TRACKED_PLAYERS, MAX_TRACKED_SESSIONS, MIN_TOKEN_BYTES,
 };
 pub use reader::{
     ReaderAdapter, ReaderAnswer, ReaderError, ReaderLabel, ReaderReceipt, ReaderRelation,

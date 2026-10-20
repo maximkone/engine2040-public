@@ -96,6 +96,10 @@ impl Bank {
             Synth::Friction => Self::bake_friction(sr, variant),
             Synth::Crowd => Self::bake_crowd(sr),
             Synth::Swing => Self::bake_swing(sr, variant),
+            Synth::Bone => Self::bake_bone(sr, variant),
+            Synth::Armor => Self::bake_armor(sr, variant),
+            Synth::Stump => Self::bake_stump(sr, variant),
+            Synth::Groan => Self::bake_groan(sr, variant),
             Synth::Kill => Self::bake_kill(sr),
             Synth::Roar => Self::bake_roar(sr),
         }
@@ -195,6 +199,98 @@ impl Bank {
         Pcm::new(sr, 1, out)
     }
 
+    /// Bone: a hard high knock (620 Hz + 40 per variant, sharp decay) through
+    /// a bright resonant body plus a short crack click.
+    fn bake_bone(sr: u32, variant: u8) -> Pcm {
+        let n = frames_for(sr, BONE_SECS);
+        let mut rng: u64 = seeded(0x62_6f_6e_65_5f_32_30_34, variant);
+        let mut out = Vec::with_capacity(n);
+        let click_len = usize::try_from((sr / 250).max(1)).unwrap_or(1);
+        let freq = 620.0 + 40.0 * f32::from(variant);
+        let mut body = crate::dsp::ResonantBody::new(sr, 2400 + 250 * u32::from(variant), 1100);
+        for i in 0..n {
+            let t = ratio(i, sr);
+            let d = 1.0 - ratio(i, n);
+            let knock = (2.0 * std::f32::consts::PI * freq * t).sin() * d * d * 0.75;
+            let crack = if i < click_len {
+                noise(&mut rng) * (1.0 - ratio(i, click_len)) * 0.5
+            } else {
+                0.0
+            };
+            out.push(body.step(knock + crack).clamp(-1.0, 1.0));
+        }
+        Pcm::new(sr, 1, out)
+    }
+
+    /// Armor: a metal ring (1240 Hz and 1860 Hz, the upper partial fading
+    /// first) over a low 140 Hz body thud; the ring detunes with the variant.
+    fn bake_armor(sr: u32, variant: u8) -> Pcm {
+        let n = frames_for(sr, ARMOR_SECS);
+        let mut rng: u64 = seeded(0x61_72_6d_6f_72_5f_32_30, variant);
+        let mut out = Vec::with_capacity(n);
+        let tau = std::f32::consts::TAU;
+        let detune = 1.0 + 0.015 * f32::from(variant);
+        let low = 1240.0 * detune;
+        let high = 1860.0 * detune;
+        for i in 0..n {
+            let t = ratio(i, sr);
+            let d = 1.0 - ratio(i, n);
+            let ring = (tau * low * t).sin() * (-7.0 * t).exp() * 0.45
+                + (tau * high * t).sin() * (-11.0 * t).exp() * 0.3;
+            let thud = (tau * 140.0 * t).sin() * (-18.0 * t).exp() * 0.45;
+            let noise_bed = noise(&mut rng) * (-40.0 * t).exp() * 0.1;
+            out.push(((ring + thud + noise_bed) * d.sqrt()).clamp(-1.0, 1.0));
+        }
+        Pcm::new(sr, 1, out)
+    }
+
+    /// Stump: a wet spurt, lowpassed noise swelling fast then falling over a
+    /// 120 Hz thump; the variant shifts the spurt's brightness.
+    fn bake_stump(sr: u32, variant: u8) -> Pcm {
+        let n = frames_for(sr, STUMP_SECS);
+        let mut rng: u64 = seeded(0x73_74_75_6d_70_5f_32_30, variant);
+        let mut out = Vec::with_capacity(n);
+        let peak = 0.18 + 0.03 * f32::from(variant);
+        let mut wet = 0.0f32;
+        for i in 0..n {
+            let t = ratio(i, n);
+            let warp = if t < peak {
+                t / peak * 0.5
+            } else {
+                0.5 + (t - peak) / (1.0 - peak) * 0.5
+            };
+            let env = (std::f32::consts::PI * warp).sin().powi(2);
+            wet += (0.08 + 0.5 * env) * (noise(&mut rng) - wet);
+            let thump = (2.0 * std::f32::consts::PI * 120.0 * ratio(i, sr)).sin()
+                * (1.0 - ratio(i, n)).powi(2)
+                * 0.35;
+            out.push(((wet * env * 1.6) + thump).clamp(-1.0, 1.0));
+        }
+        Pcm::new(sr, 1, out)
+    }
+
+    /// Groan: a loaded beam creaking, low-passed noise under a 3 Hz wobble
+    /// that rises then falls away; the variant sets the wobble rate.
+    fn bake_groan(sr: u32, variant: u8) -> Pcm {
+        let n = frames_for(sr, GROAN_SECS);
+        let mut rng: u64 = seeded(0x67_72_6f_61_6e_5f_32_30, variant);
+        let mut out = Vec::with_capacity(n);
+        let wobble = 2.6 + 0.4 * f32::from(variant);
+        let mut dark = 0.0f32;
+        let mut low = 0.0f32;
+        for i in 0..n {
+            let t = ratio(i, n);
+            let swell = (std::f32::consts::PI * t).sin();
+            let grain = 0.55 + 0.45 * (2.0 * std::f32::consts::PI * wobble * ratio(i, sr)).sin();
+            let raw = noise(&mut rng);
+            low += 0.01 * (raw - low);
+            dark += (0.03 + 0.12 * swell) * ((raw - low) - dark);
+            let env = swell * swell * (1.0 - t);
+            out.push((dark * grain * env * 3.0).clamp(-1.0, 1.0));
+        }
+        Pcm::new(sr, 1, out)
+    }
+
     /// Kill stinger: a body whose pitch falls from 110 Hz toward 40 Hz, an
     /// A minor triad stab and a short noise click.
     fn bake_kill(sr: u32) -> Pcm {
@@ -273,6 +369,14 @@ pub enum Synth {
     Crowd,
     /// Weapon whoosh.
     Swing,
+    /// Blade on bone: hard knock with a crack.
+    Bone,
+    /// Blade on armor: metal ring over a body thud.
+    Armor,
+    /// Severed stump: wet spurt over a low thump.
+    Stump,
+    /// Structure creak under load.
+    Groan,
     /// Kill stinger.
     Kill,
     /// Crowd roar stinger.
@@ -285,6 +389,7 @@ impl Synth {
         match self {
             Self::Crowd | Self::Kill | Self::Roar => 1,
             Self::Hit | Self::Footstep | Self::Swing | Self::Friction => 3,
+            Self::Bone | Self::Armor | Self::Stump | Self::Groan => 3,
         }
     }
 }
@@ -293,6 +398,14 @@ impl Synth {
 pub const SWING_SECS: f32 = 0.3;
 /// Friction scrape length in seconds.
 pub const FRICTION_SECS: f32 = 0.35;
+/// Blade-on-bone knock length in seconds.
+pub const BONE_SECS: f32 = 0.3;
+/// Blade-on-armor ring length in seconds.
+pub const ARMOR_SECS: f32 = 0.45;
+/// Severed-stump spurt length in seconds.
+pub const STUMP_SECS: f32 = 0.4;
+/// Structure groan length in seconds.
+pub const GROAN_SECS: f32 = 1.2;
 /// Kill stinger length in seconds.
 pub const KILL_SECS: f32 = 1.0;
 /// Roar stinger length in seconds.

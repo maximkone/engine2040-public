@@ -38,6 +38,7 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 | `bins.mjs` | Release binaries built after the last code commit | `bins.test.mjs` | 0 all fresh, 1 stale or missing |
 | `cargo-guard.mjs` | One cargo command with time and message caps | `cargo-guard.test.mjs` | child code; 2 usage, 124 time cap, 127 spawn failed |
 | `compile-cache.mjs` | Warm compiler-cache plan | `compile-cache.test.mjs` | see code |
+| `compile-cache-spike.mjs` | Cold lane build vs a warm sccache in fresh dirs (KEEP/DROP) | `compile-cache-spike.test.mjs` | 0 measured or help, 2 usage or a failed build |
 | `clean.mjs` | Removes trash under `target/` | `clean.test.mjs` | 2 bad arguments |
 | `doctor.mjs` | Health report and consented repair | `doctor.test.mjs` | 0 healthy or healed, 1 needs a person, 2 bad consent |
 | `seal-keys.mjs` | Makes seal keys, runs a command with them | `seal-keys.test.mjs` | child code via `--`; 2 bad arguments |

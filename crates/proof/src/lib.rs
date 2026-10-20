@@ -5,7 +5,7 @@
 //! [`Schedule::run_arena_tick`](engine_ecs::schedule::Schedule::run_arena_tick).
 
 use engine_core::hash::FNV64_PRIME;
-use engine_core::{hash_bytes, Fnv64, Rng, TickState, DT};
+use engine_core::{hash_bytes, CounterRng, Fnv64, Rng, TickState, DT};
 use engine_ecs::archetype::{Entity, Position, Velocity, World};
 use engine_ecs::schedule::{Phase, Schedule};
 use engine_ecs::snapshot::SNAPSHOT_VERSION;
@@ -58,6 +58,9 @@ pub mod trace;
 pub const GOLDEN_600: u64 = 0xd57b5c8ae3096614;
 /// Change when the fixture's initialization, rules or full-state encoding changes.
 pub const FIXTURE_VERSION: u16 = 1;
+/// A new in-memory fixture version whose seed expansion has no low-bit alias.
+/// It is not a tape or a recordable format; the legacy v1 golden stays frozen.
+pub const FIXTURE_VERSION_V2: u16 = 2;
 /// Paired ECS entities and physics bodies created by this fixture.
 pub const BODY_COUNT: u32 = 100;
 /// Bound replay CPU work and checkpoint allocation.
@@ -271,13 +274,40 @@ struct Simulation {
 
 impl Simulation {
     fn new(config: Config, inputs: &[Input]) -> Self {
+        Self::build(config, inputs, FIXTURE_VERSION, None)
+    }
+
+    /// V2 fixture for tests only: the same scene, with a keyed counter stream
+    /// so seeds `2k` and `2k + 1` take different trajectories. The context
+    /// folds `FIXTURE_VERSION_V2`, so it cannot share a digest with v1.
+    #[cfg(test)]
+    fn new_v2(config: Config, inputs: &[Input]) -> Self {
+        Self::build(
+            config,
+            inputs,
+            FIXTURE_VERSION_V2,
+            Some(CounterRng::new(config.seed)),
+        )
+    }
+
+    fn build(config: Config, inputs: &[Input], version: u16, counter: Option<CounterRng>) -> Self {
         let mut world = World::new();
         let mut space = Space::new();
         let mut rng = Rng::new(config.seed);
+        let mut word = 0u64;
         let mut entities = Vec::new();
         for _ in 0..BODY_COUNT {
-            let x = (rng.next_u64() % 100) as f32;
-            let y = (rng.next_u64() % 100) as f32;
+            let (x, y) = if let Some(stream) = counter.as_ref() {
+                let x = f32::from(u8::try_from(stream.sample(word) % 100).unwrap_or(0));
+                word += 1;
+                let y = f32::from(u8::try_from(stream.sample(word) % 100).unwrap_or(0));
+                word += 1;
+                (x, y)
+            } else {
+                let x = (rng.next_u64() % 100) as f32;
+                let y = (rng.next_u64() % 100) as f32;
+                (x, y)
+            };
             entities.push(world.spawn(Some(Position { x, y }), Some(Velocity { x: 1.0, y: 0.5 })));
             space.add(Body {
                 x,
@@ -298,7 +328,7 @@ impl Simulation {
         let mut arena = PhaseArena::with_capacity(slots, ARENA_BYTE_LEN);
         arena.reserve(slots, ARENA_BYTE_LEN);
         let mut context = Vec::new();
-        context.extend_from_slice(&FIXTURE_VERSION.to_le_bytes());
+        context.extend_from_slice(&version.to_le_bytes());
         context.extend_from_slice(&config.seed.to_le_bytes());
         context.extend_from_slice(&config.ticks.to_le_bytes());
         for input in inputs {
@@ -856,6 +886,15 @@ mod tests {
         (sim.legacy_world_hash(), sim.space.state_hash())
     }
 
+    fn trajectory_v2(seed: u64, ticks: u32) -> (u64, u64) {
+        let mut sim = Simulation::new_v2(Config { seed, ticks }, &[]);
+        for _ in 0..ticks {
+            sim.step(&[])
+                .expect("presized fixture tick fits its scratch");
+        }
+        (sim.legacy_world_hash(), sim.space.state_hash())
+    }
+
     #[test]
     fn sim_ticks_through_run_arena_tick() {
         // The fixture tick advances the arena schedule (not a direct
@@ -897,6 +936,20 @@ mod tests {
         let even = record(Config { seed: 2, ticks: 40 }, &[]).unwrap();
         let odd = record(Config { seed: 3, ticks: 40 }, &[]).unwrap();
         assert_ne!(even.checkpoints, odd.checkpoints);
+    }
+
+    #[test]
+    fn v2_seeds_differing_only_in_low_bit_take_different_trajectories() {
+        // V2 is a new in-memory fixture, not a tape: it uses CounterRng and a
+        // new version byte, so adjacent seeds stop alias while v1 stays frozen.
+        assert_eq!(trajectory_v2(2, 40), trajectory_v2(2, 40));
+        assert_ne!(trajectory_v2(2, 40), trajectory_v2(3, 40));
+        assert_ne!(trajectory_v2(0, 40), trajectory_v2(1, 40));
+        assert_ne!(
+            trajectory_v2(2, 40),
+            trajectory(2, 40),
+            "the version byte and seed stream both change"
+        );
     }
 
     #[test]

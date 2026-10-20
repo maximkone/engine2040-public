@@ -63,7 +63,7 @@
   @keyframes duel-pop { from { transform: translate(-50%, -50%) scale(1.45); opacity: 0; } to { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
 </style>
 </head>
-<body data-state="starting" data-commit="b6bc636756a6">
+<body data-state="starting" data-commit="f7f3b5347b95">
 <canvas id="canvas"></canvas>
 <div id="duel" aria-hidden="true">
   <div class="duel-side">
@@ -88,7 +88,7 @@
 <pre id="keys">WASD move · mouse look · Q/E turn · F attack · Shift block · Space dodge</pre>
 <pre id="load">load: fetching the engine</pre>
 <pre id="memory">memory: no reading yet</pre>
-<pre id="build">build: commit b6bc636756a6</pre>
+<pre id="build">build: commit f7f3b5347b95</pre>
 <pre id="coi">coi: isolated=false reloads=0</pre>
 <pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
 <pre id="report">starting</pre>
@@ -118,7 +118,12 @@
 </noscript>
 <script type="module">
 import init, { run, run_arena, lose_device, destroy_device, input_sample, request_arena_capture, run_net } from "./engine.js";
-import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory } from "./loader.js";
+import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory, pageFetcher } from "./loader.js";
+
+// WEB6: the page owns the network. The engine asks for a gameplay asset by URL and this
+// function fetches it; the bytes come back through the asset seam (engine-assets). A failure
+// here is a typed refusal the engine names, never an empty arena.
+window.engine2040FetchAsset = pageFetcher(import.meta.url);
 
 // WEB14: cross-origin isolation. GitHub Pages cannot send COOP/COEP, so a small service worker
 // adds them. The page registers it only when it is not isolated, waits until the worker controls

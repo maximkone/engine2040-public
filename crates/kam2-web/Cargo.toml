@@ -1,0 +1,28 @@
+[package]
+name = "kam2-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "KAM8: the KAM2 village match in a browser tab - a wasm module that owns the 10 Hz tick and the flat 2.5D frame the page draws"
+
+# cdylib is what wasm-bindgen turns into kam2web.js and kam2web_bg.wasm
+# (tools/kam2-web.mjs); rlib keeps the native unit tests of the pure modules.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The match, the AI seat and the 2.5D camera: one owner each, no copy here.
+kam2-sim = { version = "0.1.0", path = "../kam2-sim" }
+kam2-game = { version = "0.1.0", path = "../kam2-game" }
+engine-render.workspace = true
+
+# Browser glue, wasm32 only, so the native workspace and its tests stay free of
+# wasm-bindgen. Version tracks the locked library (Cargo.lock): the CLI that
+# tools/kam2-web.mjs runs must equal it byte for byte.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"

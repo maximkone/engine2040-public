@@ -123,7 +123,19 @@ excluded from git (reproducible via `content/arena/tools/gen.mjs` + proof).
 |---|---|
 | `content/arena/` kit, textures, HDRIs, placement | CC0-1.0 (originals, engine2040) |
 
-## Content track A — CT4 AI modeling loop
+## Content track D - map kits (CT9)
+
+All kit files original (`content/maps/tools/gen.mjs`, author engine2040 CT9 lane),
+cooked via CT2/A2/AS1; per-file SHA-256 in `content/maps/manifest.json`.
+Licenses read live 2026-09-25: Poly Haven CC0-1.0, ambientCG CC0-1.0, Kenney CC0
+public domain. Quaternius REFUSED for git (QAL v1.0, see track B). Bundle
+excluded from git (reproducible via the CT9 proof).
+
+| Asset | License |
+|---|---|
+| `content/maps/` | kit, textures, HDRI, placements, provenance; CC0-1.0 (originals, engine2040 CT9 lane) |
+
+## Content track A - CT4 AI modeling loop
 
 Blender 5.2 via mcp-for-blender. Tool is GPL; model output is artist bytes, never tool code.
 

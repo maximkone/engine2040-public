@@ -306,6 +306,9 @@ pub struct SupervisedDecision {
     pub applies_at: u64,
     /// True when the budget is spent: quarantine loudly.
     pub quarantined: bool,
+    /// True when a late attempt spent hedge budget: run this retry now as
+    /// the backup, alongside the still-running primary.
+    pub hedged: bool,
 }
 
 impl SupervisedDecision {
@@ -517,6 +520,75 @@ impl Default for RollingBreaker {
     }
 }
 
+/// Per-code hedge budget: a retry that faults past `hedge_after_ms` may run
+/// one backup at once, while backups stay within `max_extra_percent` of the
+/// reported primaries. Units: ms (`u64`), counts (`u64`), percent (`u32`).
+/// Determinism: integer counts only, no clock, same latencies give the same
+/// decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HedgeBudget {
+    /// Latency past which a late retry owes a backup, in milliseconds.
+    hedge_after_ms: u64,
+    /// Extra-load cap as integer percent of reported primaries.
+    max_extra_percent: u32,
+    /// Reported primary attempts counted against the cap.
+    primaries: u64,
+    /// Backups spent so far, never above the cap.
+    backups: u64,
+}
+
+impl HedgeBudget {
+    /// Empty budget: no backups spent, cap applies to future reports.
+    #[must_use]
+    pub fn new(hedge_after_ms: u64, max_extra_percent: u32) -> Self {
+        Self {
+            hedge_after_ms,
+            max_extra_percent,
+            primaries: 0,
+            backups: 0,
+        }
+    }
+
+    /// Latency past which a late retry owes a backup, in milliseconds.
+    #[must_use]
+    pub fn hedge_after_ms(&self) -> u64 {
+        self.hedge_after_ms
+    }
+
+    /// Extra-load cap as integer percent of reported primaries.
+    #[must_use]
+    pub fn max_extra_percent(&self) -> u32 {
+        self.max_extra_percent
+    }
+
+    /// Reported primaries counted against the cap.
+    #[must_use]
+    pub fn primaries(&self) -> u64 {
+        self.primaries
+    }
+
+    /// Backups spent so far.
+    #[must_use]
+    pub fn backups(&self) -> u64 {
+        self.backups
+    }
+
+    /// Count one reported primary at `latency_ms`; `true` spends one backup
+    /// when the sample is past the threshold and the cap still allows it.
+    pub fn observe(&mut self, latency_ms: u64) -> bool {
+        self.primaries = self.primaries.saturating_add(1);
+        let allowed = self
+            .primaries
+            .saturating_mul(u64::from(self.max_extra_percent))
+            / 100;
+        let hedge = latency_ms > self.hedge_after_ms && self.backups < allowed;
+        if hedge {
+            self.backups = self.backups.saturating_add(1);
+        }
+        hedge
+    }
+}
+
 /// MAPE-K supervisor: catalog policies with attempt budgets, escalation
 /// with backoff, a tick-boundary queue for sim heals and a heal tape.
 ///
@@ -536,6 +608,9 @@ pub struct Supervisor {
     /// Opt-in rolling breakers per code. Empty by default, so codes without
     /// one keep the plain attempt-budget path.
     breakers: BTreeMap<u32, RollingBreaker>,
+    /// Opt-in hedge budgets per code. Empty by default, so codes without one
+    /// keep the plain backoff path.
+    hedges: BTreeMap<u32, HedgeBudget>,
 }
 
 impl Supervisor {
@@ -550,6 +625,7 @@ impl Supervisor {
             escalation: BTreeMap::new(),
             quarantine: BTreeMap::new(),
             breakers: BTreeMap::new(),
+            hedges: BTreeMap::new(),
         };
         for policy in catalog() {
             supervisor.register_policy(policy);
@@ -677,7 +753,8 @@ impl Supervisor {
 
     /// Clear the attempt budget and escalation for `code` after a verified
     /// recovery. Deferred heals and tape history are kept: history is
-    /// evidence, not budget.
+    /// evidence, not budget. The breaker and hedge budget are kept too:
+    /// they bound load and retries, not health.
     pub fn reset(&mut self, code: EventCode) {
         self.registry.reset(code);
         self.escalation.remove(&code.raw());
@@ -741,6 +818,45 @@ impl Supervisor {
             .is_none_or(|breaker| breaker.half_open_probe().is_ok())
     }
 
+    /// Turn on the hedge budget for `code`. Opt-in: codes without one keep
+    /// the plain backoff path. Re-enabling replaces the row and its counts:
+    /// new knowledge, fresh budget. `reset` leaves it alone; the cap bounds
+    /// load, not health.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HealError::NotRegistered`] when `code` has no policy row.
+    pub fn enable_hedge(
+        &mut self,
+        code: EventCode,
+        hedge_after_ms: u64,
+        max_extra_percent: u32,
+    ) -> Result<(), HealError> {
+        if !self.policies.contains_key(&code.raw()) {
+            return Err(HealError::NotRegistered(code));
+        }
+        self.hedges.insert(
+            code.raw(),
+            HedgeBudget::new(hedge_after_ms, max_extra_percent),
+        );
+        Ok(())
+    }
+
+    /// Copy of the code's hedge budget, if enabled.
+    #[must_use]
+    pub fn hedge_budget(&self, code: EventCode) -> Option<HedgeBudget> {
+        self.hedges.get(&code.raw()).copied()
+    }
+
+    /// Count one reported primary at `latency_ms`; `true` spends one backup
+    /// when the sample is past the threshold and the cap allows it. Codes
+    /// without a hedge budget return `false`.
+    fn hedge_admits(&mut self, code: EventCode, latency_ms: u64) -> bool {
+        self.hedges
+            .get_mut(&code.raw())
+            .is_some_and(|budget| budget.observe(latency_ms))
+    }
+
     /// True when the code's breaker is open, so the retry stops here.
     fn breaker_rejects(&self, code: EventCode) -> bool {
         self.breakers
@@ -758,6 +874,7 @@ impl Supervisor {
             deferred: false,
             applies_at: fault_tick,
             quarantined: true,
+            hedged: false,
         }
     }
 
@@ -788,6 +905,7 @@ impl Supervisor {
             deferred: false,
             applies_at: fault_tick,
             quarantined: true,
+            hedged: false,
         }
     }
 
@@ -838,6 +956,7 @@ impl Supervisor {
             deferred: false,
             applies_at: fault_tick,
             quarantined: true,
+            hedged: false,
         }
     }
 
@@ -903,6 +1022,7 @@ impl Supervisor {
             deferred: false,
             applies_at: fault_tick,
             quarantined: true,
+            hedged: false,
         }
     }
 
@@ -950,6 +1070,7 @@ impl Supervisor {
                 deferred: true,
                 applies_at,
                 quarantined: false,
+                hedged: false,
             }
         } else {
             self.tape.push(HealTapeRecord {
@@ -968,6 +1089,7 @@ impl Supervisor {
                 deferred: false,
                 applies_at: fault_tick,
                 quarantined: false,
+                hedged: false,
             }
         }
     }
@@ -981,6 +1103,33 @@ impl Supervisor {
         &mut self,
         code: EventCode,
         fault_tick: u64,
+        ring: &mut RingBuffer,
+    ) -> Result<SupervisedDecision, HealError> {
+        self.plan_fault(code, fault_tick, None, ring)
+    }
+
+    /// Report one fault whose attempt took `latency_ms`. With a hedge budget
+    /// on the code, a late attempt spends one backup and the retry runs at
+    /// once (`hedged`) instead of after its backoff. Units: ms (`u64`).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::report_fault`].
+    pub fn report_fault_with_latency(
+        &mut self,
+        code: EventCode,
+        fault_tick: u64,
+        latency_ms: u64,
+        ring: &mut RingBuffer,
+    ) -> Result<SupervisedDecision, HealError> {
+        self.plan_fault(code, fault_tick, Some(latency_ms), ring)
+    }
+
+    fn plan_fault(
+        &mut self,
+        code: EventCode,
+        fault_tick: u64,
+        latency_ms: Option<u64>,
         ring: &mut RingBuffer,
     ) -> Result<SupervisedDecision, HealError> {
         let policy = self
@@ -1024,15 +1173,19 @@ impl Supervisor {
         if quarantined {
             return Ok(self.record_quarantine(code, fault_tick, attempt, backoff));
         }
-        Ok(self.record_heal(
+        let hedged =
+            !boundary && latency_ms.is_some_and(|latency| self.hedge_admits(code, latency));
+        let mut decision = self.record_heal(
             code,
             fault_tick,
             attempt,
-            backoff,
+            if hedged { 0 } else { backoff },
             decision.kind,
             boundary,
             policy.retry_after_ticks,
-        ))
+        );
+        decision.hedged = hedged;
+        Ok(decision)
     }
 
     /// Report one fault from a raw code, rejecting unregistered values
@@ -1436,6 +1589,7 @@ mod tests {
             escalation: BTreeMap::new(),
             quarantine: BTreeMap::new(),
             breakers: BTreeMap::new(),
+            hedges: BTreeMap::new(),
         };
         assert_eq!(
             bare.report_fault(EventCode::PROVIDER_TIMEOUT, 0, &mut events),
@@ -1661,5 +1815,61 @@ mod tests {
         assert_eq!(healed.attempt, 1);
         assert!(!healed.is_quarantine());
         assert_eq!(healed.kind, HealKind::LastGood);
+    }
+
+    #[test]
+    fn late_fault_hedges_retry_within_budget() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::PROVIDER_TIMEOUT;
+        supervisor.enable_hedge(code, 15, 100).unwrap();
+        // 20 ms is past the 15 ms hedge threshold: the retry is the backup
+        // and runs at once, not after its backoff.
+        let hedged = supervisor
+            .report_fault_with_latency(code, 100, 20, &mut events)
+            .unwrap();
+        assert!(hedged.hedged);
+        assert_eq!(hedged.backoff_ms, 0);
+        assert_eq!(hedged.kind, HealKind::Degrade);
+        assert_eq!(hedged.attempt, 1);
+        assert!(!hedged.is_quarantine());
+        assert_eq!(supervisor.hedge_budget(code).unwrap().backups(), 1);
+        // 10 ms is the fast path: the retry keeps its normal backoff.
+        let plain = supervisor
+            .report_fault_with_latency(code, 101, 10, &mut events)
+            .unwrap();
+        assert!(!plain.hedged);
+        assert!(plain.backoff_ms > 0);
+        assert_eq!(supervisor.hedge_budget(code).unwrap().backups(), 1);
+        // The tape keeps the instant retry at zero backoff.
+        assert_eq!(supervisor.tape()[0].backoff_ms, 0);
+    }
+
+    #[test]
+    fn hedge_is_opt_in_per_code() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::PROVIDER_TIMEOUT;
+        let plain = supervisor
+            .report_fault_with_latency(code, 100, 500, &mut events)
+            .unwrap();
+        assert!(!plain.hedged, "no hedge row: latency changes nothing");
+        assert_eq!(supervisor.hedge_budget(code), None);
+    }
+
+    #[test]
+    fn hedge_budget_caps_extra_load_at_percent() {
+        let mut budget = HedgeBudget::new(15, 10);
+        for _ in 0..9 {
+            assert!(!budget.observe(40), "9 of 10 reports allow no backup");
+        }
+        assert!(budget.observe(40), "the tenth report allows one backup");
+        assert_eq!(budget.primaries(), 10);
+        assert_eq!(budget.backups(), 1);
+        for _ in 0..9 {
+            assert!(!budget.observe(40), "cap already spent");
+        }
+        assert!(budget.observe(40), "the twentieth allows the second");
+        assert_eq!(budget.backups(), 2);
     }
 }

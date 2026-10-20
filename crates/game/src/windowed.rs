@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 
 use engine_arena::GaitPhase;
 use engine_audio::{device::DeviceOutput, Bank, CueBank, FeedTx, HoldLastMixer, Mixer};
-use engine_input::{Bindings, FighterError, FighterId, FighterInput, PhysicalButton};
+use engine_input::fighter::JUMP;
+use engine_input::{Bindings, FighterError, FighterId, FighterInput, Key, PhysicalButton};
 use engine_render::{
     backend::{BackendChoice, BackendError},
     present::{DrawList, MeshKey, PresentError, Presenter, SizeClass},
@@ -102,6 +103,9 @@ pub const SMOKE_FRAME_SIZE: (u32, u32) = (128, 96);
 /// a hung smoke fails itself loudly within minutes instead of burning a core
 /// for hours. Overridable per run with `--deadline-ms`.
 pub const SMOKE_WALL_LIMIT_MS: u32 = 300_000;
+/// Longest `--fixed-dt` frame period in milliseconds (1 s): a longer period
+/// is a stalled window, not a harness, and fails loudly at the CLI.
+pub const FIXED_DT_MAX_MS: u32 = 1_000;
 
 /// Window-leg 4x MSAA setting (EG13): `1` turns the 4x HDR/depth pair plus
 /// its resolve on; unset, `0` or any other word keeps the default 1x path
@@ -340,6 +344,36 @@ fn parse_backend_flag(raw: &str) -> Result<BackendChoice, WinError> {
     BackendChoice::from_name(raw).map_err(|err| backend_arg("--backend", err))
 }
 
+/// Smallest window side `--size` accepts (pixels). Matches the display
+/// layer's own floor (`modes::MIN_WINDOWED_PX`), so a named size always
+/// survives the display-mode gate.
+const WINDOW_MIN_SIDE_PX: u32 = 320;
+/// Largest window side `--size` accepts (pixels). Matches the render
+/// crate's frame cap (`engine_render::present::MAX_FRAME_DIM`), so every
+/// size the flag accepts is one the presenter can present; a wider request
+/// would be refused at presenter init instead of here.
+const WINDOW_MAX_SIDE_PX: u32 = 2048;
+
+/// Parse one `--size <width>x<height>` value into pixel counts. Both sides
+/// must be whole numbers inside `WINDOW_MIN_SIDE_PX..=WINDOW_MAX_SIDE_PX`;
+/// a missing `x`, a non-numeric side, zero and an out-of-range side fail
+/// loudly naming the flag. Split out of [`WinArgs::parse`] (fn-length bar).
+fn parse_window_size(raw: &str) -> Result<(u32, u32), WinError> {
+    let bad = || WinError::BadArgs(format!("--size {raw}"));
+    let (width_raw, height_raw) = raw
+        .split_once('x')
+        .or_else(|| raw.split_once('X'))
+        .ok_or_else(bad)?;
+    let width: u32 = width_raw.parse().map_err(|_| bad())?;
+    let height: u32 = height_raw.parse().map_err(|_| bad())?;
+    if !(WINDOW_MIN_SIDE_PX..=WINDOW_MAX_SIDE_PX).contains(&width)
+        || !(WINDOW_MIN_SIDE_PX..=WINDOW_MAX_SIDE_PX).contains(&height)
+    {
+        return Err(bad());
+    }
+    Ok((width, height))
+}
+
 /// Parsed `arena` CLI: `--frames N` caps presented frames (and fixed ticks),
 /// `--exit` exits after the cap instead of idling with the window open.
 /// `--seed S` and `--ticks T` override the session coordinates.
@@ -353,6 +387,12 @@ fn parse_backend_flag(raw: &str) -> Result<BackendChoice, WinError> {
 /// `--deadline-ms N` overrides the `--exit` wall-clock bound; `--present-every
 /// N` presents every Nth headless tick and `--present-skip` presents none
 /// (ticks still play every tick, hashes unchanged; 1 is today's behavior).
+/// `--fixed-dt N` is the perf harness: the window presents one frame every N
+/// milliseconds and runs exactly one fixed tick per presented frame, so two
+/// runs of the same fixture pay the same ticks. Pure.
+/// `--size <width>x<height>` names the window inner size in pixels (both
+/// sides whole numbers in `320..=2048`); without it the window opens at
+/// [`WINDOW_SIZE`], so a default run is byte-identical to today.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct WinArgs {
     /// Fixed ticks (and frames) to run when `Some`; unbounded window play
@@ -384,6 +424,16 @@ pub struct WinArgs {
     pub present_every: u32,
     /// Present no frame at all; ticks still play every tick.
     pub present_skip: bool,
+    /// Fixed-dt harness: the frame period in milliseconds (`None` keeps the
+    /// default pace, one frame per fixed tick). With it the window presents
+    /// one frame every period and runs exactly one fixed tick per presented
+    /// frame, so two runs of the same fixture pay the same ticks.
+    pub fixed_dt_ms: Option<u32>,
+    /// Window inner size in pixels (`None` keeps [`WINDOW_SIZE`]). `--size
+    /// <width>x<height>` names it; both sides must be whole pixels inside
+    /// `320..=2048`. The window opens at this size and the camera aspect
+    /// follows the real window, so a 1080p run measures 1080p.
+    pub window_size: Option<(u32, u32)>,
 }
 
 impl WinArgs {
@@ -393,6 +443,14 @@ impl WinArgs {
     #[must_use]
     pub fn wall_limit_ms(self) -> u32 {
         self.deadline_ms.unwrap_or(SMOKE_WALL_LIMIT_MS)
+    }
+
+    /// Effective window inner size in pixels: the `--size` override when
+    /// present, else [`WINDOW_SIZE`]. Pure, so the window opener and the
+    /// tests share it exactly.
+    #[must_use]
+    pub fn window_size(self) -> (u32, u32) {
+        self.window_size.unwrap_or(WINDOW_SIZE)
     }
 }
 
@@ -592,6 +650,16 @@ fn apply_win_flag(
                 .map_err(|_| WinError::BadArgs(format!("--present-every {raw}")))?;
         }
         "--present-skip" => out.present_skip = true,
+        "--fixed-dt" => {
+            *index += 1;
+            let raw = flag_value(rest, *index, "--fixed-dt")?;
+            out.fixed_dt_ms = Some(windowed_smoke::parse_fixed_dt_value(raw)?);
+        }
+        "--size" => {
+            *index += 1;
+            let raw = flag_value(rest, *index, "--size")?;
+            out.window_size = Some(parse_window_size(raw)?);
+        }
         other => return Err(WinError::BadArgs(other.to_string())),
     }
     Ok(())
@@ -600,11 +668,15 @@ fn apply_win_flag(
 impl WinArgs {
     /// Parse the `arena` CLI (program name at index 0 is skipped when
     /// present). Unknown flags, a missing `--frames`/`--seed`/`--ticks`/
-    /// `--fighters`/`--scene`/`--backend`/`--camera-path` value, unparsable
-    /// numbers or backend/camera-path labels, a zero `--frames`
+    /// `--fighters`/`--scene`/`--backend`/`--camera-path`/`--fixed-dt` value,
+    /// unparsable numbers or backend/camera-path labels, a zero `--frames`
     /// and a fighter count outside `2..=16` fail loudly.
     /// `--deadline-ms` takes the same missing/zero/unparsable path, as does
-    /// `--present-every` (needs `1..=MAX_TICKS`).
+    /// `--present-every` (needs `1..=MAX_TICKS`) and `--fixed-dt` (needs
+    /// `1..=FIXED_DT_MAX_MS`).
+    /// `--size <width>x<height>` takes the same missing/unparsable path and
+    /// needs both sides inside `320..=2048`; without the flag the window
+    /// keeps [`WINDOW_SIZE`].
     pub fn parse(args: &[String]) -> Result<Self, WinError> {
         let mut out = Self {
             frames: None,
@@ -620,6 +692,8 @@ impl WinArgs {
             deadline_ms: None,
             present_every: super::DEFAULT_PRESENT_EVERY,
             present_skip: false,
+            fixed_dt_ms: None,
+            window_size: None,
         };
         // Skip argv[0] when it does not look like a flag (the program name).
         let rest: &[String] = match args.first() {
@@ -698,13 +772,20 @@ pub fn fighter_input_from_pressed(
     bindings: &Bindings,
 ) -> FighterInput {
     let (mx, mz) = bindings.wish_from_pressed(pressed);
+    let mut buttons = bindings.button_bits(pressed);
+    // AIN7 live jump: E is the jump key and rides beside the rebindable
+    // action table, so an old bindings file cannot swallow it. The pad path
+    // has no jump row yet; the keyboard is the live jump.
+    if pressed.contains(&PhysicalButton::Key(Key::E.0)) {
+        buttons.0 |= JUMP;
+    }
     FighterInput {
         tick,
         fighter,
         mx,
         mz,
         facing: 0,
-        buttons: bindings.button_bits(pressed),
+        buttons,
     }
 }
 
@@ -1970,6 +2051,8 @@ mod tests {
                 deadline_ms: None,
                 present_every: 1,
                 present_skip: false,
+                fixed_dt_ms: None,
+                window_size: None,
             }
         );
         // Flags without the program name parse too.
@@ -2043,6 +2126,51 @@ mod tests {
         ] {
             assert!(WinArgs::parse(&bad).is_err(), "args accepted: {bad:?}");
         }
+    }
+
+    #[test]
+    fn win_args_parse_fixed_dt_period() {
+        // The fixed-dt harness: the period in milliseconds. Unset keeps the
+        // default pace, so the default run is untouched.
+        let plain = WinArgs::parse(&["arena".to_string()]).unwrap();
+        assert_eq!(plain.fixed_dt_ms, None, "the default pace stands");
+        let parsed = WinArgs::parse(&[
+            "arena".to_string(),
+            "--fixed-dt".to_string(),
+            "17".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.fixed_dt_ms, Some(17));
+        // A missing, unparsable, zero or over-long period fails loudly: a bad
+        // period never silently becomes a free-running window.
+        for bad in [
+            vec!["arena".to_string(), "--fixed-dt".to_string()],
+            vec![
+                "arena".to_string(),
+                "--fixed-dt".to_string(),
+                "abc".to_string(),
+            ],
+            vec![
+                "arena".to_string(),
+                "--fixed-dt".to_string(),
+                "0".to_string(),
+            ],
+            vec![
+                "arena".to_string(),
+                "--fixed-dt".to_string(),
+                "1001".to_string(),
+            ],
+        ] {
+            assert!(WinArgs::parse(&bad).is_err(), "args accepted: {bad:?}");
+        }
+        // The cap itself is accepted.
+        let parsed = WinArgs::parse(&[
+            "arena".to_string(),
+            "--fixed-dt".to_string(),
+            "1000".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.fixed_dt_ms, Some(FIXED_DT_MAX_MS));
     }
 
     #[test]
@@ -2213,6 +2341,53 @@ mod tests {
         // Defaults stay free-play with no backend override.
         let plain = WinArgs::parse(&["arena".to_string()]).unwrap();
         assert_eq!((plain.backend, plain.camera_path), (None, None));
+    }
+
+    #[test]
+    fn win_args_size_flag_names_a_window_size() {
+        // The size flag names the window inner size in pixels; both sides
+        // are whole numbers inside 320..=2048.
+        let parsed = WinArgs::parse(
+            &["arena", "--size", "1920x1080"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        )
+        .expect("a 1080p size parses");
+        assert_eq!(parsed.window_size, Some((1920, 1080)));
+        assert_eq!(parsed.window_size(), (1920, 1080));
+        // An upper-case separator names the same size.
+        let parsed = WinArgs::parse(&["--size".to_string(), "1280X720".to_string()]).unwrap();
+        assert_eq!(parsed.window_size, Some((1280, 720)));
+        // A missing value, a missing separator, a non-numeric side, zero and
+        // an out-of-range side all fail loudly.
+        for bad in [
+            vec!["arena".to_string(), "--size".to_string()],
+            vec!["--size".to_string(), "1920".to_string()],
+            vec!["--size".to_string(), "1920x".to_string()],
+            vec!["--size".to_string(), "axb".to_string()],
+            vec!["--size".to_string(), "0x1080".to_string()],
+            vec!["--size".to_string(), "1920x0".to_string()],
+            vec!["--size".to_string(), "319x720".to_string()],
+            vec!["--size".to_string(), "1280x319".to_string()],
+            vec!["--size".to_string(), "2049x720".to_string()],
+            vec!["--size".to_string(), "1280x2049".to_string()],
+        ] {
+            assert!(
+                WinArgs::parse(&bad).is_err(),
+                "the size flag accepted {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn win_args_default_window_size_is_the_hud_size() {
+        // Without the flag the window opens at the shipped size, so an
+        // existing run is byte-identical to today.
+        let plain = WinArgs::parse(&["arena".to_string()]).unwrap();
+        assert_eq!(plain.window_size, None);
+        assert_eq!(plain.window_size(), WINDOW_SIZE);
+        assert_eq!(plain.window_size(), (1280, 720));
     }
 
     #[test]
@@ -2646,6 +2821,7 @@ mod tests {
             outcome.audio.push(super::super::AudioCommand {
                 tick: 0,
                 sound: BankSound::Hit,
+                cue: engine_audio::cue_names::HIT,
                 gain: 1.0,
             });
         }

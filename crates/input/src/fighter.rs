@@ -46,8 +46,12 @@ pub const KNOWN_BUTTONS: u8 = ATTACK | BLOCK | DODGE;
 /// `MatchSpec::spear`; any other match ignores it. Not part of
 /// [`KNOWN_BUTTONS`], so consumers that mask with that const are unchanged.
 pub const THROW_SPEAR: u8 = 0x10;
-/// Every button bit the wire accepts: [`KNOWN_BUTTONS`] plus [`THROW_SPEAR`].
-pub const ALL_BUTTONS: u8 = KNOWN_BUTTONS | THROW_SPEAR;
+/// Jump bit in [`Buttons`]: world-arming, read by the arena's live height
+/// channel (AIN7). Combat and feel masks ignore it; it is not a strike.
+pub const JUMP: u8 = 0x20;
+/// Every button bit the wire accepts: [`KNOWN_BUTTONS`] plus [`THROW_SPEAR`]
+/// and [`JUMP`]. Consumers that mask with [`KNOWN_BUTTONS`] keep three bits.
+pub const ALL_BUTTONS: u8 = KNOWN_BUTTONS | THROW_SPEAR | JUMP;
 
 /// Stable fighter slot in `0..MAX_PARTICIPANTS`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -316,6 +320,10 @@ mod tests {
         assert_eq!(input.validate(), Err(FighterError::UnknownButtons(0x08)));
         assert!(!Buttons(0x08).is_legal());
         assert!(Buttons(ATTACK | BLOCK | DODGE).is_legal());
+        assert!(
+            Buttons(JUMP).is_legal(),
+            "the live jump bit is a legal button"
+        );
     }
 
     #[test]
@@ -328,8 +336,13 @@ mod tests {
         input.append_bytes(&mut bytes);
         assert_eq!(bytes.len(), 10, "the record layout is frozen");
         assert_eq!(bytes[9], ATTACK | THROW_SPEAR);
-        input.buttons = Buttons(0x20);
-        assert_eq!(input.validate(), Err(FighterError::UnknownButtons(0x20)));
+        input.buttons = Buttons(JUMP);
+        input
+            .validate()
+            .expect("the live jump bit is a legal button");
+        assert_eq!(KNOWN_BUTTONS & JUMP, 0, "combat keeps 3 bits");
+        input.buttons = Buttons(0x40);
+        assert_eq!(input.validate(), Err(FighterError::UnknownButtons(0x40)));
     }
 
     #[test]

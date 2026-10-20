@@ -22,6 +22,22 @@ export const WASM_FILE = "engine_bg.wasm";
 /** The wasm could not be fetched or is served wrongly; the message is the reason the page shows. */
 export class LoadError extends Error {}
 
+// WEB6: gameplay content is fetched at runtime, not read from a file system (the browser has
+// none). The page owns the network: the engine asks for an asset by URL through the page's own
+// fetcher (window.engine2040FetchAsset, installed by index.html) and the bytes come back through
+// the asset seam in engine-assets. A failure here is a typed AssetError that names the asset, so
+// the page can say what is missing instead of drawing an empty arena.
+
+/** A gameplay asset could not be fetched. The message names the asset. */
+export class AssetError extends Error {
+  constructor(message, status = null) {
+    super(message);
+    this.name = "AssetError";
+    /** The HTTP status the server answered with, or null when it never answered. */
+    this.status = status;
+  }
+}
+
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 /** The browser's own fetch, caches, storage, WebAssembly, clock and SHA-256; tests pass fakes instead. */
@@ -107,6 +123,57 @@ export async function loadEngine(base, env = browserEnv()) {
     : Promise.resolve(stats);
   return { module, stats, settled };
 }
+
+// The path part of an asset URL, so an error names the asset and not a whole URL.
+const assetName = (url) => {
+  try {
+    return new URL(url, "http://localhost/").pathname.replace(/^\/+/, "");
+  } catch {
+    return String(url);
+  }
+};
+
+// The message of a thrown value, bounded to one line.
+const reason = (err) => String(err?.message ?? err ?? "unknown").slice(0, 120);
+
+/**
+ * Fetch one gameplay asset at runtime (WEB6).
+ *
+ * Resolves { bytes, stats }: `bytes` is a Uint8Array of the whole body and `stats` is
+ * { bytesFetched, downloadMs }. Rejects with an `AssetError` when the request itself fails, when
+ * the server answers with a status other than 200, or when the body is empty. The caller never
+ * gets an empty asset and never a silent failure.
+ */
+export async function fetchAsset(url, env = browserEnv()) {
+  const name = assetName(url);
+  const t0 = env.now();
+  let res;
+  try {
+    res = await env.fetch(url);
+  } catch (e) {
+    throw new AssetError(`${name} could not be fetched: ${reason(e)}`);
+  }
+  if (!res.ok) throw new AssetError(`${name} could not be fetched: HTTP ${res.status}`, res.status);
+  let body;
+  try {
+    body = await res.arrayBuffer();
+  } catch (e) {
+    throw new AssetError(`${name} could not be read: ${reason(e)}`);
+  }
+  if (!body || body.byteLength === 0) throw new AssetError(`${name} is empty`);
+  return {
+    bytes: new Uint8Array(body),
+    stats: { bytesFetched: body.byteLength, downloadMs: Math.round(env.now() - t0) },
+  };
+}
+
+/**
+ * The fetcher the page hands the engine (WEB6): the engine asks for an asset by
+ * URL and gets the asset's bytes as a Uint8Array, or a rejection it turns into a
+ * typed refusal. `base` is the page's own URL, so a relative asset name lands in
+ * the same folder as the page.
+ */
+export const pageFetcher = (base) => (url) => fetchAsset(new URL(url, base)).then((r) => r.bytes);
 
 /** Resolves with env.now() when `body` (the page's <body>) first carries data-state running or fatal: the first frame, or the reason there is none. */
 export function watchFirstFrame(body, now = () => performance.now()) {

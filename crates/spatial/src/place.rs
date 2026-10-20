@@ -28,16 +28,18 @@
 //! object want rests on the supporter top instead.
 //! Self-verify probes one [`Index3`](super::index3::Index3) built over the
 //! scene-minus-object rows: a candidate wins when its integer-cm probe reads
-//! clear via `overlaps_any` and rests at `min_y` 0. For grounded rooms this
-//! coincides with the `overlap` + `floating` verdict on the placed id,
-//! at microseconds per candidate instead of a full [`run`](super::run) per
-//! candidate. Model rooms as thin wall actors, not solid
-//! plates: the overlap check is XZ-based, so any placement inside a solid plate
+//! clear on the shared yaw-aware box test and rests at `min_y` 0. That is the
+//! same 3D test the `overlap` check runs: the Y interval first, then the XZ
+//! footprint after yaw, so an object on a table is clear and a 45-degree plank
+//! blocks its true diagonal. For grounded rooms this coincides with the
+//! `overlap` + `floating` verdict on the placed id, at microseconds per
+//! candidate instead of a full [`run`](super::run) per candidate. Model rooms
+//! as thin wall actors, not solid plates: any placement inside a solid plate
 //! trips verification by construction.
 //!
 //! Std-only. Never imports scene or editor types.
 
-use super::index::{boxes_of, pos_known, size_known, to_cm, Box3};
+use super::index::{boxes_of, pos_known, size_known, to_cm, yaw_box_at, yaw_hit, Box3, YawBox};
 use super::index3::{probe_of, Index3};
 use super::navcheck::octant;
 use super::relation::{Relation, FACING_RANGE_CM, NEXT_TO_CM, SUPPORT_GAP_CM};
@@ -315,16 +317,32 @@ struct Ctx<'a> {
     bounds: Bounds,
     boxes: BTreeMap<u32, Box3>,
     by_id: BTreeMap<u32, &'a Actor>,
+    /// Yaw-aware bounds of every valid row, id-sorted. The solver's exact
+    /// pair test reads this list.
+    yawed: Vec<YawBox>,
+    /// True when every row's yaw box is its plain unrotated box (yaw 0 or
+    /// 180): the 3D index is then an exact stand-in and the fast path stays
+    /// available.
+    axis: bool,
 }
 
 fn context<'a>(actors: &'a [Actor], bounds: Bounds) -> Ctx<'a> {
     let good: Vec<Actor> = actors.iter().filter(|a| valid_box(a)).cloned().collect();
     let boxes: BTreeMap<u32, Box3> = boxes_of(&good).into_iter().map(|b| (b.id, b)).collect();
     let by_id: BTreeMap<u32, &'a Actor> = actors.iter().map(|a| (a.id, a)).collect();
+    let mut yawed: Vec<YawBox> = good.iter().filter_map(super::index::yaw_box_of).collect();
+    yawed.sort_by_key(|b| b.id);
+    let axis = yawed.iter().all(|b| {
+        boxes.get(&b.id).is_some_and(|u| {
+            b.min_x == u.min_x && b.max_x == u.max_x && b.min_z == u.min_z && b.max_z == u.max_z
+        })
+    });
     Ctx {
         bounds,
         boxes,
         by_id,
+        yawed,
+        axis,
     }
 }
 
@@ -728,22 +746,46 @@ fn rest_for(wants: &[Want], obj: &Placed, ctx: &Ctx<'_>) -> Option<i32> {
     None
 }
 
-/// Self-verify behind the 3D index: the candidate probe must clear
-/// every indexed volume (strict 3D, the solver clearance contract) and rest on
-/// the ground plane, or on the stacked support top when `rest_cm` holds the
-/// integer-cm center from `rest_for`. Unknown or degenerate room rows index
-/// nothing, like the relation isolates, so they never block a placement.
-fn verifies(index: &Index3, obj: &Placed, out: &TransformOut, rest_cm: Option<i32>) -> bool {
+/// Self-verify behind the shared box test: the candidate probe must clear
+/// every valid room row on its yaw-aware bounds (the Y interval first, then
+/// the XZ footprint after yaw) and rest on the ground plane, or on the
+/// stacked support top when `rest_cm` holds the integer-cm center from
+/// `rest_for`. Unknown or degenerate room rows never block a placement.
+/// A room whose rows all keep their unrotated footprint, probed by a
+/// candidate whose own yaw keeps it, reads the plain 3D index: same answer,
+/// no per-row scan. Quarter turns that swap the footprint go the long way.
+fn verifies(
+    ctx: &Ctx<'_>,
+    index: &Index3,
+    obj: &Placed,
+    out: &TransformOut,
+    rest_cm: Option<i32>,
+) -> bool {
     let hx = to_cm(obj.sx).abs() / 2;
     let hy = to_cm(obj.sy).abs() / 2;
     let hz = to_cm(obj.sz).abs() / 2;
-    let probe = probe_of(to_cm(out.x), to_cm(out.y), to_cm(out.z), hx, hy, hz);
-    if index.overlaps_any(&probe, obj.id) {
+    let (cx, cy, cz) = (to_cm(out.x), to_cm(out.y), to_cm(out.z));
+    let Some(probe) = yaw_box_at(obj.id, cx, cy, cz, hx, hy, hz, out.yaw) else {
+        return false;
+    };
+    let plain = probe_of(cx, cy, cz, hx, hy, hz);
+    let aligned = probe.min_x == plain.min_x
+        && probe.max_x == plain.max_x
+        && probe.min_z == plain.min_z
+        && probe.max_z == plain.max_z;
+    let clear = if ctx.axis && probe.exact && aligned {
+        !index.overlaps_any(&plain, obj.id)
+    } else {
+        !ctx.yawed
+            .iter()
+            .any(|b| b.id != obj.id && yaw_hit(&probe, b))
+    };
+    if !clear {
         return false;
     }
     match rest_cm {
-        None => to_cm(out.y) - hy <= FLOAT_EPS_CM,
-        Some(rest) => (to_cm(out.y) - rest).abs() <= FLOAT_EPS_CM,
+        None => cy - hy <= FLOAT_EPS_CM,
+        Some(rest) => (cy - rest).abs() <= FLOAT_EPS_CM,
     }
 }
 
@@ -798,7 +840,7 @@ fn search(
                     continue;
                 }
                 let out = transform_of(&stacked, cx, cz, yaw_idx);
-                if verifies(index, &stacked, &out, rest_cm) {
+                if verifies(ctx, index, &stacked, &out, rest_cm) {
                     return Some(out);
                 }
             }

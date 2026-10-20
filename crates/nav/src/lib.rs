@@ -6,6 +6,7 @@ pub mod bake;
 mod cursor;
 pub mod flow;
 pub mod funnel;
+pub mod layers;
 pub mod links;
 pub mod mesh;
 pub mod orca;
@@ -82,7 +83,7 @@ mod wiring_tests {
             [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0]],
             [[0.0, 0.0, 0.0], [1.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
         ];
-        assert_eq!(mesh::MESH_VERSION, 1, "mesh byte version pinned");
+        assert_eq!(mesh::MESH_VERSION, 2, "mesh byte version pinned");
         assert_eq!(mesh::MAX_TRIS, 65_536, "triangle bound pinned");
         let baked = mesh::NavMesh::bake(&floor, &mesh::BakeConfig::default()).expect("floor bakes");
         assert!(baked.polygon_count() > 0, "a walkable floor bakes polygons");

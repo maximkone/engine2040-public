@@ -43,6 +43,10 @@ pub const CELLS_PER_METER: f32 = 16.0;
 pub const MAP_HALF_METERS: f32 = 64.0;
 /// Minimum accepted contrast ratio for palette pairs (large-text/UI bound).
 pub const MIN_CONTRAST: f32 = 3.0;
+/// Minimum text contrast for HUD labels (WCAG AA normal text, 4.5:1).
+pub const HUD_TEXT_CONTRAST: f32 = 4.5;
+/// Poise ring segments around a fighter portrait.
+pub const MAX_POISE_SEGMENTS: u8 = 8;
 
 /// HUD failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -658,6 +662,8 @@ pub enum OverlayError {
     BadName,
     /// Health outside `0..=PERMILLE_MAX`, culprit carried.
     HpOutOfRange(u16),
+    /// Stamina or poise outside `0..=PERMILLE_MAX`, culprit carried.
+    StatOutOfRange(u16),
     /// Palette id outside `0..=3`, culprit carried.
     BadPalette(u8),
     /// Row count outside `0..=MAX_OVERLAY_ROWS`, culprit carried.
@@ -680,6 +686,7 @@ impl core::fmt::Display for OverlayError {
             Self::NameTooLong(len) => write!(f, "fighter name too long ({len} bytes)"),
             Self::BadName => write!(f, "invalid fighter name"),
             Self::HpOutOfRange(hp) => write!(f, "health out of range ({hp})"),
+            Self::StatOutOfRange(value) => write!(f, "stat out of range ({value})"),
             Self::BadPalette(id) => write!(f, "unknown palette ({id})"),
             Self::TooManyRows(n) => write!(f, "too many overlay rows ({n})"),
             Self::DuplicateFighter(id) => write!(f, "duplicate fighter ({id})"),
@@ -723,6 +730,14 @@ fn check_overlay_hp(hp_permille: u16) -> Result<(), OverlayError> {
     Ok(())
 }
 
+/// Reject stamina or poise outside permille; row defaults are full. Pure.
+fn check_overlay_stat(value: u16) -> Result<(), OverlayError> {
+    if value > PERMILLE_MAX {
+        return Err(OverlayError::StatOutOfRange(value));
+    }
+    Ok(())
+}
+
 /// Health in permille to lit pips, `0..=MAX_HP_PIPS`, halves round up.
 /// Counts by thresholds (pip `k` lights at `100 * k - 50`) so the conversion
 /// stays total with plain integer math: no casts, no panics. Pure.
@@ -741,7 +756,20 @@ pub fn hp_pips(hp_permille: u16) -> u8 {
     pips
 }
 
-/// One named fighter row: display name plus permille health. Pure data.
+/// Poise in permille to lit ring segments, `0..=MAX_POISE_SEGMENTS`.
+/// Partial poise lights the next segment (a sliver is visible), so a broken
+/// guard reads before it empties. Pure integer math, never panics.
+#[must_use]
+pub fn poise_segments(poise_permille: u16) -> u8 {
+    let clamped = u32::from(clamp_permille(poise_permille));
+    let scaled = clamped.saturating_mul(u32::from(MAX_POISE_SEGMENTS));
+    let lit = scaled.saturating_add(u32::from(PERMILLE_MAX) - 1) / u32::from(PERMILLE_MAX);
+    u8::try_from(lit).unwrap_or(MAX_POISE_SEGMENTS)
+}
+
+/// One named fighter row: display name plus permille health, stamina and
+/// poise. Health rides the wire; stamina and poise are presentation-side and
+/// default full on decode, so wire bytes stay frozen. Pure data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverlayRow {
     /// Which fighter this row names.
@@ -750,6 +778,10 @@ pub struct OverlayRow {
     name: String,
     /// Health in permille, `0..=1000`.
     hp_permille: u16,
+    /// Stamina in permille, `0..=1000`; starts full.
+    stamina_permille: u16,
+    /// Poise in permille, `0..=1000`; starts full.
+    poise_permille: u16,
 }
 
 impl OverlayRow {
@@ -771,10 +803,28 @@ impl OverlayRow {
         self.hp_permille
     }
 
+    /// Stamina in permille, `0..=1000`.
+    #[must_use]
+    pub fn stamina_permille(&self) -> u16 {
+        self.stamina_permille
+    }
+
+    /// Poise in permille, `0..=1000`.
+    #[must_use]
+    pub fn poise_permille(&self) -> u16 {
+        self.poise_permille
+    }
+
     /// Lit HP pips for this row; see [`hp_pips`]. Pure.
     #[must_use]
     pub fn pips(&self) -> u8 {
         hp_pips(self.hp_permille)
+    }
+
+    /// Lit poise ring segments for this row; see [`poise_segments`]. Pure.
+    #[must_use]
+    pub fn poise_segments(&self) -> u8 {
+        poise_segments(self.poise_permille)
     }
 }
 
@@ -928,11 +978,15 @@ impl DuelOverlay {
                     id: FighterId(0),
                     name: NAMES[first].to_owned(),
                     hp_permille: hp(8),
+                    stamina_permille: hp(28),
+                    poise_permille: hp(36),
                 },
                 OverlayRow {
                     id: FighterId(1),
                     name: NAMES[second].to_owned(),
                     hp_permille: hp(20),
+                    stamina_permille: hp(44),
+                    poise_permille: hp(52),
                 },
             ],
             attacker: None,
@@ -1093,6 +1147,8 @@ impl DuelOverlay {
                 id,
                 name: name.to_owned(),
                 hp_permille,
+                stamina_permille: PERMILLE_MAX,
+                poise_permille: PERMILLE_MAX,
             });
         }
         Ok(())
@@ -1122,6 +1178,42 @@ impl DuelOverlay {
         check_overlay_hp(hp_permille)?;
         if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
             row.hp_permille = hp_permille;
+            Ok(())
+        } else {
+            Err(OverlayError::UnknownFighter(id.get()))
+        }
+    }
+
+    /// Replace a tracked fighter's stamina; unknown ids fail. Presentation
+    /// only: stamina never enters the overlay wire. Pure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OverlayError`] for bad stamina or untracked slots.
+    pub fn set_stamina(
+        &mut self,
+        id: FighterId,
+        stamina_permille: u16,
+    ) -> Result<(), OverlayError> {
+        check_overlay_stat(stamina_permille)?;
+        if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
+            row.stamina_permille = stamina_permille;
+            Ok(())
+        } else {
+            Err(OverlayError::UnknownFighter(id.get()))
+        }
+    }
+
+    /// Replace a tracked fighter's poise; unknown ids fail. Presentation
+    /// only: poise never enters the overlay wire. Pure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OverlayError`] for bad poise or untracked slots.
+    pub fn set_poise(&mut self, id: FighterId, poise_permille: u16) -> Result<(), OverlayError> {
+        check_overlay_stat(poise_permille)?;
+        if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
+            row.poise_permille = poise_permille;
             Ok(())
         } else {
             Err(OverlayError::UnknownFighter(id.get()))
@@ -1279,6 +1371,10 @@ impl DuelOverlay {
                 id,
                 name: name.to_owned(),
                 hp_permille,
+                // Stamina and poise are presentation-side; the frozen wire
+                // has no bytes for them, so a decoded row starts full.
+                stamina_permille: PERMILLE_MAX,
+                poise_permille: PERMILLE_MAX,
             });
         }
         if cursor != bytes.len() {
@@ -1347,6 +1443,405 @@ impl DuelOverlay {
         hit_tick: Option<u64>,
     ) -> Result<play_hud::PlayHud, play_hud::PlayHudError> {
         play_hud::PlayHud::from_parts(self.tick, you, echo, ammo, max_ammo, crosshair, hit_tick)
+    }
+}
+
+/// What a HUD rectangle means. The renderer paints every rect the same way;
+/// the tag keeps tests and accessibility tools able to name each element.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum HudRole {
+    /// Row background panel.
+    Panel,
+    /// Empty part of a bar or pip.
+    BarBack,
+    /// One health pip.
+    HpPip,
+    /// Filled part of the stamina bar.
+    StaminaFill,
+    /// Lit poise ring segment.
+    PoiseSegment,
+    /// Unlit poise ring segment.
+    PoiseEmpty,
+}
+
+/// One HUD command kind; each kind is one draw batch.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum HudCommandKind {
+    /// Filled rectangle.
+    Rect,
+    /// Rectangle outline.
+    Border,
+    /// Text run.
+    Text,
+    /// Clip rectangle for the commands that follow.
+    Scissor,
+}
+
+/// One flat HUD command in the Clay shape: rect, border, text, scissor.
+/// Integer pixels, top-left origin, sRGB RGBA color. Pure data; the render
+/// HUD pass uploads rects as one instanced draw and text through its text
+/// path. Scissor changes state, it is not a draw.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum HudCommand {
+    /// Filled rectangle at `(x, y)` with size `(w, h)`.
+    Rect {
+        /// What this rectangle draws.
+        role: HudRole,
+        /// Left edge in pixels.
+        x: i32,
+        /// Top edge in pixels.
+        y: i32,
+        /// Width in pixels.
+        w: i32,
+        /// Height in pixels.
+        h: i32,
+        /// sRGB color plus alpha.
+        color: [u8; 4],
+    },
+    /// Outline `thickness` pixels wide inside `(x, y, w, h)`.
+    Border {
+        /// Left edge in pixels.
+        x: i32,
+        /// Top edge in pixels.
+        y: i32,
+        /// Width in pixels.
+        w: i32,
+        /// Height in pixels.
+        h: i32,
+        /// Stroke width in pixels.
+        thickness: i32,
+        /// sRGB color plus alpha.
+        color: [u8; 4],
+    },
+    /// One text run with its top-left corner, font size and color.
+    Text {
+        /// Left edge in pixels.
+        x: i32,
+        /// Top edge in pixels.
+        y: i32,
+        /// Font size in pixels.
+        px: u16,
+        /// sRGB color plus alpha.
+        color: [u8; 4],
+        /// ASCII text (the font covers `0x20..=0x7E`).
+        text: String,
+    },
+    /// Clip every following command to `(x, y, w, h)`.
+    Scissor {
+        /// Left edge in pixels.
+        x: i32,
+        /// Top edge in pixels.
+        y: i32,
+        /// Width in pixels.
+        w: i32,
+        /// Height in pixels.
+        h: i32,
+    },
+}
+
+impl HudCommand {
+    /// Command kind, one draw batch each.
+    #[must_use]
+    pub fn kind(&self) -> HudCommandKind {
+        match self {
+            Self::Rect { .. } => HudCommandKind::Rect,
+            Self::Border { .. } => HudCommandKind::Border,
+            Self::Text { .. } => HudCommandKind::Text,
+            Self::Scissor { .. } => HudCommandKind::Scissor,
+        }
+    }
+
+    /// Text payload for a text command. Pure.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text, .. } => Some(text),
+            Self::Rect { .. } | Self::Border { .. } | Self::Scissor { .. } => None,
+        }
+    }
+}
+
+/// One HUD frame as a flat command list plus the numbers the render pass
+/// needs: viewport, text size and batch counts. Pure data.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct HudFrame {
+    width: u32,
+    height: u32,
+    text_px: u16,
+    commands: Vec<HudCommand>,
+}
+
+impl HudFrame {
+    /// Viewport width in pixels.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Viewport height in pixels.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Text font size in pixels.
+    #[must_use]
+    pub fn text_px(&self) -> u16 {
+        self.text_px
+    }
+
+    /// Commands in draw order.
+    #[must_use]
+    pub fn commands(&self) -> &[HudCommand] {
+        &self.commands
+    }
+
+    /// `(rect, border, text)` command counts; one draw per non-empty count.
+    #[must_use]
+    pub fn batch_counts(&self) -> (usize, usize, usize) {
+        let mut counts = (0usize, 0usize, 0usize);
+        for command in &self.commands {
+            match command.kind() {
+                HudCommandKind::Rect => counts.0 += 1,
+                HudCommandKind::Border => counts.1 += 1,
+                HudCommandKind::Text => counts.2 += 1,
+                HudCommandKind::Scissor => {}
+            }
+        }
+        counts
+    }
+
+    /// Draw calls this frame needs: one per non-empty batch, at most 3.
+    #[must_use]
+    pub fn draws(&self) -> usize {
+        let (rects, borders, texts) = self.batch_counts();
+        usize::from(rects > 0) + usize::from(borders > 0) + usize::from(texts > 0)
+    }
+
+    /// Build a frame from a prepared command list. [`DuelOverlay::hud_frame`]
+    /// builds the duel HUD; the windowed proof feeds a stock bar, a minimap
+    /// placeholder and text lines through this door. Commands keep draw order;
+    /// the render pass clips them to its surface. Pure.
+    #[must_use]
+    pub fn from_commands(width: u32, height: u32, text_px: u16, commands: Vec<HudCommand>) -> Self {
+        Self {
+            width,
+            height,
+            text_px,
+            commands,
+        }
+    }
+}
+
+/// Poise ring offsets in 1080p pixels, clockwise from the top. Scaled by the
+/// viewport; the segment count is [`MAX_POISE_SEGMENTS`].
+const POISE_RING: [(i32, i32); 8] = [
+    (0, -40),
+    (28, -28),
+    (40, 0),
+    (28, 28),
+    (0, 40),
+    (-28, 28),
+    (-40, 0),
+    (-28, -28),
+];
+
+/// sRGB triad to an opaque-or-not RGBA command color. Pure.
+fn rgba(color: [u8; 3], alpha: u8) -> [u8; 4] {
+    [color[0], color[1], color[2], alpha]
+}
+
+/// Mix `share` percent of `b` into `a`; integer sRGB, deterministic. Pure.
+fn mix_srgb(a: [u8; 3], b: [u8; 3], share: u32) -> [u8; 3] {
+    let keep = 100u32.saturating_sub(share);
+    let channel = |left: u8, right: u8| -> u8 {
+        let mixed = u32::from(left)
+            .saturating_mul(keep)
+            .saturating_add(u32::from(right).saturating_mul(share))
+            / 100;
+        u8::try_from(mixed).unwrap_or(0)
+    };
+    [
+        channel(a[0], b[0]),
+        channel(a[1], b[1]),
+        channel(a[2], b[2]),
+    ]
+}
+
+impl DuelOverlay {
+    /// Flat HUD command list for `width` x `height`: one panel per named
+    /// fighter with the name, HP pips, stamina bar under the HP pips, poise
+    /// ring segments around the portrait and numeric labels for every bar.
+    /// Text is at least [`text::HUD_TEXT_PX_1080`] at 1080p and every label
+    /// uses the palette foreground on its palette background. Pure; bounded
+    /// by [`MAX_OVERLAY_ROWS`], no IO, no clock.
+    #[must_use]
+    pub fn hud_frame(&self, width: u32, height: u32) -> HudFrame {
+        let palette = self.palette();
+        let text_px = text::hud_text_px(height);
+        let width_px = i32::try_from(width.min(8192)).unwrap_or(1920);
+        let height_px = i32::try_from(height.min(8192)).unwrap_or(1080);
+        let scale = |base: i32| -> i32 { (base.saturating_mul(height_px) / 1080).max(1) };
+        let margin = scale(24);
+        let panel_w = scale(360);
+        let row_h = scale(128);
+        let gap = scale(24);
+        let usable = height_px
+            .saturating_sub(margin.saturating_mul(2))
+            .max(row_h);
+        let per_column = usize::try_from(usable / row_h).unwrap_or(1).max(1);
+        let panel_bg = rgba(palette.bg, 255);
+        let text_color = rgba(palette.fg, 255);
+        let bar_back = rgba(mix_srgb(palette.bg, palette.fg, 30), 255);
+        let stamina_color = rgba(palette.accent, 255);
+        let poise_empty = rgba(mix_srgb(palette.bg, palette.fg, 20), 255);
+        let mut commands = vec![HudCommand::Scissor {
+            x: 0,
+            y: 0,
+            w: width_px,
+            h: height_px,
+        }];
+        for (index, row) in self.rows.iter().enumerate() {
+            let column = i32::try_from(index / per_column).unwrap_or(i32::MAX / 4096);
+            let line = i32::try_from(index % per_column).unwrap_or(i32::MAX / 4096);
+            let x = margin.saturating_add(column.saturating_mul(panel_w.saturating_add(gap)));
+            let y = margin.saturating_add(line.saturating_mul(row_h));
+            commands.push(HudCommand::Scissor {
+                x: x.saturating_sub(scale(12)),
+                y: y.saturating_sub(scale(8)),
+                w: panel_w,
+                h: row_h,
+            });
+            commands.push(HudCommand::Rect {
+                role: HudRole::Panel,
+                x: x.saturating_sub(scale(12)),
+                y: y.saturating_sub(scale(8)),
+                w: panel_w,
+                h: row_h.saturating_sub(scale(8)),
+                color: panel_bg,
+            });
+            let portrait = scale(56);
+            let center_x = x.saturating_add(portrait / 2);
+            let center_y = y.saturating_add(portrait / 2);
+            if self.is_flashing(row.id()) {
+                commands.push(HudCommand::Border {
+                    x,
+                    y,
+                    w: portrait,
+                    h: portrait,
+                    thickness: scale(3),
+                    color: rgba(palette.accent, 255),
+                });
+            }
+            let lit = row.poise_segments();
+            for (segment, (dx, dy)) in POISE_RING.iter().enumerate() {
+                let role = if segment < usize::from(lit) {
+                    HudRole::PoiseSegment
+                } else {
+                    HudRole::PoiseEmpty
+                };
+                let seg_w = scale(6);
+                let seg_h = scale(12);
+                commands.push(HudCommand::Rect {
+                    role,
+                    x: center_x
+                        .saturating_add(scale(*dx))
+                        .saturating_sub(seg_w / 2),
+                    y: center_y
+                        .saturating_add(scale(*dy))
+                        .saturating_sub(seg_h / 2),
+                    w: seg_w,
+                    h: seg_h,
+                    color: if segment < usize::from(lit) {
+                        stamina_color
+                    } else {
+                        poise_empty
+                    },
+                });
+            }
+            let text_x = x.saturating_add(portrait).saturating_add(scale(40));
+            commands.push(HudCommand::Text {
+                x: text_x,
+                y,
+                px: text_px,
+                color: text_color,
+                text: row.name().to_owned(),
+            });
+            commands.push(HudCommand::Text {
+                x: text_x,
+                y: y.saturating_add(scale(28)),
+                px: text_px,
+                color: text_color,
+                text: format!("HP {}", row.hp_permille()),
+            });
+            commands.push(HudCommand::Text {
+                x: text_x.saturating_add(scale(120)),
+                y: y.saturating_add(scale(28)),
+                px: text_px,
+                color: text_color,
+                text: format!("STA {}", row.stamina_permille()),
+            });
+            let pip_w = scale(18);
+            let pip_h = scale(8);
+            let pip_gap = scale(2);
+            let bar_w = pip_w
+                .saturating_add(pip_gap)
+                .saturating_mul(i32::from(MAX_HP_PIPS))
+                .saturating_sub(pip_gap);
+            let pips_y = y.saturating_add(scale(64));
+            commands.push(HudCommand::Border {
+                x: text_x.saturating_sub(scale(2)),
+                y: pips_y.saturating_sub(scale(2)),
+                w: bar_w.saturating_add(scale(4)),
+                h: pip_h.saturating_add(scale(4)),
+                thickness: scale(1),
+                color: text_color,
+            });
+            for pip in 0..MAX_HP_PIPS {
+                let lit_pip = pip < row.pips();
+                commands.push(HudCommand::Rect {
+                    role: HudRole::HpPip,
+                    x: text_x.saturating_add(i32::from(pip).saturating_mul(pip_w + pip_gap)),
+                    y: pips_y,
+                    w: pip_w,
+                    h: pip_h,
+                    color: if lit_pip { text_color } else { bar_back },
+                });
+            }
+            let stamina_y = y.saturating_add(scale(80));
+            commands.push(HudCommand::Rect {
+                role: HudRole::BarBack,
+                x: text_x,
+                y: stamina_y,
+                w: bar_w,
+                h: pip_h,
+                color: bar_back,
+            });
+            let fill = bar_w.saturating_mul(i32::from(row.stamina_permille())) / 1000;
+            if fill > 0 {
+                commands.push(HudCommand::Rect {
+                    role: HudRole::StaminaFill,
+                    x: text_x,
+                    y: stamina_y,
+                    w: fill,
+                    h: pip_h,
+                    color: stamina_color,
+                });
+            }
+            commands.push(HudCommand::Text {
+                x: text_x,
+                y: y.saturating_add(scale(96)),
+                px: text_px,
+                color: text_color,
+                text: format!("POISE {}/{}", lit, MAX_POISE_SEGMENTS),
+            });
+        }
+        HudFrame {
+            width,
+            height,
+            text_px,
+            commands,
+        }
     }
 }
 
@@ -2155,5 +2650,283 @@ mod tests {
             Err(OverlayError::UnknownFighter(2)),
             "untracked victim hp never moves without its row"
         );
+    }
+
+    fn raster_pixels(frame: &HudFrame) -> [usize; 6] {
+        let width = usize::try_from(frame.width()).expect("frame width fits usize");
+        let height = usize::try_from(frame.height()).expect("frame height fits usize");
+        let mut grid: Vec<Option<HudRole>> = vec![None; width.saturating_mul(height)];
+        for command in frame.commands() {
+            if let HudCommand::Rect {
+                role, x, y, w, h, ..
+            } = *command
+            {
+                let x0 = i64::from(x).max(0);
+                let y0 = i64::from(y).max(0);
+                let x1 = i64::from(x).saturating_add(i64::from(w)).min(width as i64);
+                let y1 = i64::from(y).saturating_add(i64::from(h)).min(height as i64);
+                let mut py = y0;
+                while py < y1 {
+                    let mut px = x0;
+                    while px < x1 {
+                        let index = py as usize * width + px as usize;
+                        grid[index] = Some(role);
+                        px += 1;
+                    }
+                    py += 1;
+                }
+            }
+        }
+        let mut counts = [0usize; 6];
+        for role in grid.into_iter().flatten() {
+            counts[role_index(role)] += 1;
+        }
+        counts
+    }
+
+    fn role_index(role: HudRole) -> usize {
+        match role {
+            HudRole::Panel => 0,
+            HudRole::BarBack => 1,
+            HudRole::HpPip => 2,
+            HudRole::StaminaFill => 3,
+            HudRole::PoiseSegment => 4,
+            HudRole::PoiseEmpty => 5,
+        }
+    }
+
+    #[test]
+    fn hud_frame_is_three_batches_of_28px_text() {
+        let overlay = sample_overlay();
+        let frame = overlay.hud_frame(1920, 1080);
+        assert_eq!((frame.width(), frame.height()), (1920, 1080));
+        assert_eq!(frame.text_px(), 28);
+        assert!(matches!(
+            frame.commands().first(),
+            Some(HudCommand::Scissor { .. })
+        ));
+        let (rects, borders, texts) = frame.batch_counts();
+        assert!(rects > 0, "rect batch");
+        assert!(borders > 0, "border batch");
+        assert!(texts > 0, "text batch");
+        assert!(
+            frame.draws() <= 3,
+            "one batch per kind, {} draw(s)",
+            frame.draws()
+        );
+        for command in frame.commands() {
+            if let HudCommand::Text { px, .. } = command {
+                assert!(*px >= 28, "text at 1080p is {px} px");
+            }
+        }
+    }
+
+    #[test]
+    fn hud_frame_puts_stamina_under_hp_with_poise_ring_text() {
+        let mut overlay = sample_overlay();
+        overlay
+            .set_stamina(fighter_id(0), 400)
+            .expect("stamina tracks");
+        overlay.set_poise(fighter_id(1), 500).expect("poise tracks");
+        let frame = overlay.hud_frame(1920, 1080);
+        let mut rows: Vec<Vec<&HudCommand>> = Vec::new();
+        for command in frame.commands() {
+            if matches!(
+                command,
+                HudCommand::Rect {
+                    role: HudRole::Panel,
+                    ..
+                }
+            ) {
+                rows.push(Vec::new());
+            }
+            if let Some(current) = rows.last_mut() {
+                current.push(command);
+            }
+        }
+        assert_eq!(rows.len(), overlay.len(), "one panel per row");
+        for row in &rows {
+            let hp = row
+                .iter()
+                .find_map(|command| match *command {
+                    HudCommand::Rect {
+                        role: HudRole::HpPip,
+                        x,
+                        y,
+                        w,
+                        h,
+                        ..
+                    } => Some((x, y, w, h)),
+                    _ => None,
+                })
+                .expect("hp pips draw");
+            let stamina = row
+                .iter()
+                .find_map(|command| match *command {
+                    HudCommand::Rect {
+                        role: HudRole::StaminaFill,
+                        x,
+                        y,
+                        w,
+                        h,
+                        ..
+                    } => Some((x, y, w, h)),
+                    _ => None,
+                })
+                .expect("stamina fill draws");
+            let bar = row
+                .iter()
+                .find_map(|command| match *command {
+                    HudCommand::Rect {
+                        role: HudRole::BarBack,
+                        x,
+                        y,
+                        w,
+                        h,
+                        ..
+                    } => Some((x, y, w, h)),
+                    _ => None,
+                })
+                .expect("stamina back draws");
+            let hp_span = row
+                .iter()
+                .filter_map(|command| match *command {
+                    HudCommand::Rect {
+                        role: HudRole::HpPip,
+                        x,
+                        w,
+                        ..
+                    } => Some(x.saturating_add(*w)),
+                    _ => None,
+                })
+                .max()
+                .expect("hp pips draw")
+                .saturating_sub(*hp.0);
+            assert_eq!(*stamina.0, *hp.0, "stamina starts at the hp edge");
+            assert_eq!(*stamina.0, *bar.0, "stamina fill starts at its back");
+            assert_eq!(*bar.2, hp_span, "stamina spans the hp width");
+            assert!(*stamina.2 <= *bar.2, "the fill stays inside its back");
+            assert!(*stamina.1 > *hp.1, "stamina sits under hp");
+            let labels: Vec<&str> = row.iter().filter_map(|command| command.text()).collect();
+            assert!(labels.iter().any(|text| text.starts_with("HP ")));
+            assert!(labels.iter().any(|text| text.starts_with("STA ")));
+            assert!(labels.iter().any(|text| text.starts_with("POISE ")));
+        }
+        let lit = |row: &[&HudCommand]| {
+            row.iter()
+                .filter(|command| {
+                    matches!(
+                        command,
+                        HudCommand::Rect {
+                            role: HudRole::PoiseSegment,
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+        assert_eq!(lit(&rows[0]), 8, "full poise lights every segment");
+        assert_eq!(lit(&rows[1]), 4, "half poise lights half the ring");
+        assert!(
+            rows[1].iter().any(|command| matches!(
+                command,
+                HudCommand::Rect {
+                    role: HudRole::PoiseEmpty,
+                    ..
+                }
+            )),
+            "the unlit ring stays visible"
+        );
+    }
+
+    #[test]
+    fn hud_frame_text_passes_45_contrast_on_every_palette() {
+        for palette_id in 0..4u8 {
+            let mut overlay = sample_overlay();
+            overlay.set_palette(palette_id).expect("palette selects");
+            let palette = overlay.palette();
+            assert!(
+                contrast_ratio(palette.fg, palette.bg) >= HUD_TEXT_CONTRAST,
+                "palette {palette_id} text contrast"
+            );
+            let frame = overlay.hud_frame(1920, 1080);
+            let mut measured = 0usize;
+            for command in frame.commands() {
+                if let HudCommand::Text { color, .. } = command {
+                    assert_eq!(
+                        *color,
+                        [palette.fg[0], palette.fg[1], palette.fg[2], 255],
+                        "text uses the palette foreground"
+                    );
+                    let ratio = contrast_ratio([color[0], color[1], color[2]], palette.bg);
+                    assert!(
+                        ratio >= HUD_TEXT_CONTRAST,
+                        "palette {palette_id} text measures {ratio}"
+                    );
+                    measured += 1;
+                }
+            }
+            assert!(measured > 0, "palette {palette_id} draws text");
+        }
+    }
+
+    #[test]
+    fn hud_frame_pixels_reach_stamina_poise_and_pips() {
+        let mut overlay = sample_overlay();
+        overlay
+            .set_stamina(fighter_id(0), 400)
+            .expect("stamina tracks");
+        overlay.set_poise(fighter_id(0), 500).expect("poise tracks");
+        let frame = overlay.hud_frame(1920, 1080);
+        let counts = raster_pixels(&frame);
+        assert!(counts[role_index(HudRole::Panel)] > 0, "panel pixels");
+        assert!(counts[role_index(HudRole::HpPip)] > 0, "pip pixels");
+        assert!(
+            counts[role_index(HudRole::StaminaFill)] > 0,
+            "stamina pixels"
+        );
+        assert!(
+            counts[role_index(HudRole::PoiseSegment)] > 0,
+            "poise pixels"
+        );
+        assert!(
+            counts[role_index(HudRole::PoiseEmpty)] > 0,
+            "unlit poise pixels"
+        );
+    }
+
+    #[test]
+    fn overlay_stamina_and_poise_do_not_move_the_wire() {
+        let mut overlay = sample_overlay();
+        let before = overlay.to_bytes();
+        overlay
+            .set_stamina(fighter_id(0), 123)
+            .expect("stamina tracks");
+        overlay.set_poise(fighter_id(0), 456).expect("poise tracks");
+        assert_eq!(overlay.to_bytes(), before, "stats stay presentation-side");
+        let decoded = DuelOverlay::from_bytes(&before).expect("wire bytes decode");
+        let row = decoded.row(fighter_id(0)).expect("row decodes");
+        assert_eq!(row.stamina_permille(), PERMILLE_MAX);
+        assert_eq!(row.poise_permille(), PERMILLE_MAX);
+        assert_eq!(
+            overlay.set_stamina(fighter_id(0), 1001),
+            Err(OverlayError::StatOutOfRange(1001))
+        );
+        assert_eq!(
+            overlay.set_poise(fighter_id(0), 1001),
+            Err(OverlayError::StatOutOfRange(1001))
+        );
+        assert_eq!(poise_segments(0), 0);
+        assert_eq!(poise_segments(1), 1);
+        assert_eq!(poise_segments(500), 4);
+        assert_eq!(poise_segments(PERMILLE_MAX), MAX_POISE_SEGMENTS);
+    }
+
+    #[test]
+    fn hud_text_size_holds_28_at_1080p() {
+        assert_eq!(text::hud_text_px(1080), 28);
+        assert_eq!(text::hud_text_px(2160), 56);
+        assert!(text::hud_text_px(720) < 28, "small screens scale down");
+        assert_eq!(text::hud_text_px(0), 12, "zero viewport stays readable");
     }
 }

@@ -10,7 +10,8 @@ render, audio, HUD) reads only what is listed under "What presentation reads".
 
 - New input bit `THROW_SPEAR = 0x10` in the fighter `buttons` byte (the 10-byte
   wire/tape record is unchanged; `Buttons::is_legal` now accepts
-  `KNOWN_BUTTONS | THROW_SPEAR`; `KNOWN_BUTTONS` stays `0x07`).
+  `KNOWN_BUTTONS | THROW_SPEAR`; `KNOWN_BUTTONS` stays `0x07`). AIN7 later adds
+  `JUMP = 0x20` to `ALL_BUTTONS`; the mask consumers here are unchanged.
 - New `MatchSpec::spear: bool` (default false; `MatchSpec::with_spear()` turns
   it on). Off: nothing runs, nothing is hashed, the input bit is masked out of
   the latched buttons, and every old digest is byte-identical. On: the match

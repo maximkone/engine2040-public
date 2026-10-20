@@ -7,15 +7,15 @@
 //   node tools/ship.mjs pack [--dist <path>] [--target <path>] [--replace]
 //                            [--bin <arena-exe>] [--editor-bin <editor-exe>]
 //                            [--bundle <bundle-bin>]
-//                            [--frames N | --minutes N] [--log <path>]
+//                            [--frames N | --minutes N] [--chunks N] [--log <path>]
 //                            [--build-log <path>] [--allow-stub] [--skip-build]
 //   node tools/ship.mjs stage [same flags as pack]  (= pack --stage-only)
 //   node tools/ship.mjs run [--dist <path>] [--target <path>] [--replace]
-//                           [--frames N | --minutes N] [--log <path>]
+//                           [--frames N | --minutes N] [--chunks N] [--log <path>]
 //                           [--allow-stub] [--bin <arena-exe>]
 //                           [--bundle <bundle-bin>] [--receipt <path>]
 //   node tools/ship.mjs run --dry-run [--fixture <path>] [--work <path>]
-//                           [--frames N] [--log <path>]
+//                           [--frames N] [--chunks N] [--log <path>]
 //
 // pack  = full (build + stage + run). stage = pack --stage-only.
 // run   = full; run --dry-run is the fixtures/clean-run sim and
@@ -188,6 +188,80 @@ export function parseSmokeCounts(out) {
   };
 }
 
+// GM3 chunked plan (docs/plan/quality.md gap 3): an 18,000-frame play
+// outlives one 30 min slot, so the proof runs as legs and the joined log
+// names the full frame count. Legs cover contiguous frame ranges whose
+// counts sum to the proof, so a dropped or doubled leg reads as a mismatch,
+// never as a pass. The exe carries no resume token, so each leg boots a
+// fresh bout: the joined proof is the frame sum, not a continued soak.
+export const CHUNK_SLOT_MS = 30 * 60 * 1000;
+
+export function chunkPlan(totalFrames, legs = 1) {
+  const total = Number(totalFrames);
+  const count = Number(legs);
+  if (!Number.isInteger(total) || total <= 0) throw new Error("--frames needs a positive integer");
+  if (!Number.isInteger(count) || count <= 0) throw new Error("--chunks needs a positive integer");
+  if (count > total) throw new Error(`--chunks ${count} exceeds --frames ${total}`);
+  const base = Math.floor(total / count);
+  const extra = total % count; // the first `extra` legs carry the spare frame
+  const out = [];
+  let first = 1;
+  for (let i = 0; i < count; i++) {
+    const frames = base + (i < extra ? 1 : 0);
+    out.push({ index: i + 1, frames, firstFrame: first, lastFrame: first + frames - 1 });
+    first += frames;
+  }
+  return { totalFrames: total, legs: out };
+}
+
+// One leg's row: plan facts plus the leg's own reported counts. Wall time
+// never enters, so the same plan prints the same hashes on every run.
+export function chunkLegRow(plan, leg, { ticks = null, framesPresented = null } = {}) {
+  const hash = fnv1a64Hex(Buffer.from([
+    "gm3-chunk",
+    `total=${plan.totalFrames}`,
+    `legs=${plan.legs.length}`,
+    `leg=${leg.index}`,
+    `frames=${leg.frames}`,
+    `first=${leg.firstFrame}`,
+    `last=${leg.lastFrame}`,
+    `ticks=${ticks ?? ""}`,
+    `presented=${framesPresented ?? ""}`,
+  ].join("|"), "utf8"));
+  return { index: leg.index, frames: leg.frames, first: leg.firstFrame, last: leg.lastFrame, ticks, frames_presented: framesPresented, hash };
+}
+
+export function joinedChunkProof(plan, rows = []) {
+  const frames = rows.reduce((n, row) => n + Number(row.frames ?? 0), 0);
+  const digest = fnv1a64Hex(Buffer.from(rows.map((row) => String(row.hash ?? "")).join("\n"), "utf8"));
+  return { frames, expected: plan.totalFrames, matches: frames === plan.totalFrames, digest };
+}
+
+// Per-leg wall projection from one probe rate, against the 30 min slot.
+export function chunkSlotReport(plan, perFrameMs, slotMs = CHUNK_SLOT_MS) {
+  const rate = Number(perFrameMs);
+  if (!(rate > 0)) return { projected: [], over: [] };
+  const projected = plan.legs.map((leg) => Math.round(rate * leg.frames));
+  return { projected, over: plan.legs.filter((leg, i) => projected[i] > slotMs).map((leg) => leg.index) };
+}
+
+export function resolveChunks(args, frames) {
+  const legs = args.chunks === null || args.chunks === undefined ? 1 : Number(args.chunks);
+  chunkPlan(frames, legs); // validates: positive integer, at most one leg per frame
+  return legs;
+}
+
+// Total of one count field across legs; null when any leg did not report it.
+function chunkCountSum(rows, key) {
+  if (rows.length === 0) return null;
+  let sum = 0;
+  for (const row of rows) {
+    if (typeof row[key] !== "number") return null;
+    sum += row[key];
+  }
+  return sum;
+}
+
 // A8 staged-receipt steal (tauri-apps/tauri@ece2c876, Apache-2.0,
 // copy_binaries staged Vec<PathBuf> receipt pattern): staging returns the
 // file list it wrote, and --replace archives the prior tree instead of
@@ -343,11 +417,14 @@ function usage() {
     "  node tools/ship.mjs pack --help",
     "  node tools/ship.mjs pack [--dist <path>] [--target <path>] [--replace]",
     "                            [--bin <arena-exe>] [--editor-bin <editor-exe>] [--bundle <bundle-bin>]",
-    "                            [--frames N | --minutes N] [--log <path>]",
+    "                            [--frames N | --minutes N] [--chunks N] [--log <path>]",
     "                            [--build-log <path>] [--allow-stub] [--skip-build] [--stage-only]",
     "",
     "Defaults: --dist ./dist, --target C:/e2040-clean/, 18000 frames (5 min),",
     "--log ./pack-clean.log, --build-log ./pack-build.log.",
+    "Chunks: --chunks N plays the proof as N legs whose frame counts sum to",
+    "--frames (3 x 6000 for the 18000-frame proof), each leg inside its own",
+    "wall bound; the clean-run log names the leg hashes and the joined hash.",
   "Bundle: --bundle flag wins, else $E2040_PACKAGE_BUNDLE, else the script",
   "cooks a REAL bundle from content/ via bundle_cook (never a silent stub).",
     "Binary: --bin flag wins, else the fresh release build output.",
@@ -374,6 +451,7 @@ function parseArgs(argv) {
     stageOnly: false,
     frames: null,
     minutes: null,
+    chunks: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -398,6 +476,7 @@ function parseArgs(argv) {
       case "--build-log": out.buildLog = value(arg); break;
       case "--frames": out.frames = value(arg); break;
       case "--minutes": out.minutes = value(arg); break;
+      case "--chunks": out.chunks = value(arg); break;
       default: throw new Error(`unknown arg ${arg}`);
     }
   }
@@ -622,8 +701,10 @@ function main() {
     process.exit(0);
   }
   let frames;
+  let legs;
   try {
     frames = resolveFrames(args);
+    legs = resolveChunks(args, frames);
   } catch (error) {
     console.error(`Usage: ${error.message}\n${usage()}`);
     process.exit(2);
@@ -638,6 +719,7 @@ function main() {
     `dist: ${dist}`,
     `target: ${target}`,
     `frames: ${frames}`,
+    `chunks: ${legs}`,
     `log: ${logPath}`,
     `build-log: ${buildLogPath}`,
   ];
@@ -925,10 +1007,11 @@ function main() {
   ];
   if (args.replace) cleanArgs.push("--replace");
   if (args.allowStub) cleanArgs.push("--allow-stub");
+  if (legs > 1) cleanArgs.push("--chunks", String(legs));
   log.push(`$ clean-run: node ${cleanArgs.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ")}`);
-  // Same play budget as `run` (500 ms per frame plus slack): at the measured
-  // frame rate a 5 min clean run is far longer than 5 min of wall time.
-  const timeoutMs = frames * 1000 + 180000 + 120000;
+  // Same play budget as `run` (1000 ms per frame plus slack per leg): at the
+  // measured frame rate a 5 min clean run is far longer than 5 min of wall time.
+  const timeoutMs = frames * 1000 + 180000 * Math.max(1, legs) + 120000;
   let result;
   try {
     result = spawnSync(process.execPath, cleanArgs, { encoding: "utf8", timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 });
@@ -1145,9 +1228,9 @@ function usage() {
     "",
     "Usage:",
     "  node tools/ship.mjs run --help",
-    "  node tools/ship.mjs run --dry-run [--fixture <path>] [--work <path>] [--frames N] [--log <path>]",
+    "  node tools/ship.mjs run --dry-run [--fixture <path>] [--work <path>] [--frames N] [--chunks N] [--log <path>]",
     "  node tools/ship.mjs run [--dist <path>] [--target <path>] [--replace]",
-    "                            [--frames N | --minutes N] [--log <path>] [--allow-stub]",
+    "                            [--frames N | --minutes N] [--chunks N] [--log <path>] [--allow-stub]",
     "                            [--bin <arena-exe>] [--bundle <arena-bundle.bin>] [--receipt <path>]",
     "                            [--present-every N] [--present-skip]",
     "",
@@ -1162,6 +1245,10 @@ function usage() {
     "presents none (ticks still run); the flag is forwarded verbatim to the",
     "game binary, so a non-default mode needs the game-side flag (piece 1).",
     "Unset (or N=1) passes no extra arg: today's behavior.",
+    "Chunks: --chunks N plays the proof as N legs (3 x 6000 for the 18000-frame",
+    "proof) whose frame counts sum to --frames; each leg is its own --exit play",
+    "with its own wall bound, its hash is stable across runs, and the joined",
+    "hash covers the legs in order. --chunks 1 (default) is one play, as before.",
     "Dry-run mode: same harness against fixtures/clean-run/ in a temp dir; the",
     "smoke launcher runs under the current Node while a probe proves the",
     "sanitized env hides Node. Never touches C:/e2040-clean/.",
@@ -1189,6 +1276,7 @@ function parseArgs(argv) {
     allowStub: false,
     frames: null,
     minutes: null,
+    chunks: null,
     presentEvery: null,
     presentSkip: false,
   };
@@ -1215,6 +1303,7 @@ function parseArgs(argv) {
       case "--bundle": out.bundle = value(arg); break;
       case "--frames": out.frames = value(arg); break;
       case "--minutes": out.minutes = value(arg); break;
+      case "--chunks": out.chunks = value(arg); break;
       case "--present-every": out.presentEvery = value(arg); break;
       case "--present-skip": out.presentSkip = true; break;
       default: throw new Error(`unknown arg ${arg}`);
@@ -1685,14 +1774,17 @@ function main() {
   }
   let frames;
   let presentPlayArgs = [];
+  let plan;
   try {
     frames = resolveFrames(args);
-    presentPlayArgs = resolvePresentFlags(args);
     if (args.dryRun && args.frames === null && args.minutes === null) frames = 5;
+    plan = chunkPlan(frames, resolveChunks(args, frames));
+    presentPlayArgs = resolvePresentFlags(args);
   } catch (error) {
     console.error(`Usage: ${error.message}\n${usage()}`);
     process.exit(2);
   }
+  const planLine = `$ chunk plan: ${plan.legs.length} legs (${plan.legs.map((l) => l.frames).join("+")}) = ${plan.totalFrames} frames`;
 
   if (args.dryRun) {
     const fixture = resolve(args.fixture ?? join(REPO_ROOT, "fixtures", "clean-run"));
@@ -1703,7 +1795,9 @@ function main() {
       `fixture: ${fixture}`,
       `work: ${work}`,
       `frames: ${frames}`,
+      planLine,
     ];
+    if (plan.legs.length > 1) log.push("$ chunk note: each leg boots a fresh bout (the exe carries no resume token); the joined proof is the frame sum");
     const done = (failed, reason, detail) => writeLogAndExit(logPath, log, failed, reason, detail, frames);
     if (!existsSync(fixture)) {
       done(true, "MISSING_FIXTURE", `fixture missing: ${fixture}`);
@@ -1748,8 +1842,9 @@ function main() {
       done(true, "MISSING_FIXTURE", `dry-run launcher missing: bin/arena-smoke.mjs`);
       return;
     }
-    let dryOut = "";
     let dryWallMs = 0;
+    let dryRows = [];
+    let dryJoined = null;
     try {
       // Wall-projection probe (indicatif Estimator pattern): time the first
       // WALL_PROBE_FRAMES played frames, project the full wall, and abort
@@ -1806,31 +1901,45 @@ function main() {
           done(true, "WALL_OVERRUN", `projected full wall ${Math.round(projectedMs)}ms exceeds ${budget}ms budget (${WALL_PROBE_FRAMES}-frame probe took ${probeMs}ms)`);
           return;
         }
+        const slots = chunkSlotReport(plan, probeMs / WALL_PROBE_FRAMES);
+        log.push(`$ chunk slots: legs project ${slots.projected.join("+")} ms against the ${CHUNK_SLOT_MS} ms slot (${slots.over.length === 0 ? "fits" : `over on ${slots.over.join(",")}`})`);
       }
       // The launcher needs the current Node; node-hiding is proved by the
       // probe lines above, not by running the launcher blind.
-      const smokeStart = Date.now();
-      const result = spawnSync(process.execPath, [launcher, "--frames", String(frames), "--exit", ...presentPlayArgs], {
-        cwd: work,
-        encoding: "utf8",
-        timeout: 60000,
-        maxBuffer: 4 * 1024 * 1024,
-      });
-      const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-      dryOut = out;
-      dryWallMs = Date.now() - smokeStart;
-      log.push("--- child output begin ---");
-      log.push(out.trimEnd() || "(no output)");
-      log.push("--- child output end ---");
-      if (result.error || result.status !== 0) {
-        done(true, "PLAY_FAILED", `dry-run smoke failed (${result.error ? result.error.message : `exit ${result.status}`})`);
+      for (const leg of plan.legs) {
+        const smokeStart = Date.now();
+        const result = spawnSync(process.execPath, [launcher, "--frames", String(leg.frames), "--exit", ...presentPlayArgs], {
+          cwd: work,
+          encoding: "utf8",
+          timeout: 60000,
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+        const wallMs = Date.now() - smokeStart;
+        log.push("--- child output begin ---");
+        log.push(out.trimEnd() || "(no output)");
+        log.push("--- child output end ---");
+        if (result.error || result.status !== 0) {
+          done(true, "PLAY_FAILED", `dry-run leg ${leg.index}/${plan.legs.length} (${leg.frames} frames) failed (${result.error ? result.error.message : `exit ${result.status}`})`);
+          return;
+        }
+        if (!/arena (headless )?smoke:/.test(out)) {
+          done(true, "PLAY_FAILED", `dry-run leg ${leg.index}/${plan.legs.length} (${leg.frames} frames) exited 0 without the arena smoke marker`);
+          return;
+        }
+        const counts = parseSmokeCounts(out);
+        const row = chunkLegRow(plan, leg, counts);
+        dryRows.push(row);
+        dryWallMs += wallMs;
+        log.push(`$ chunk ${leg.index}/${plan.legs.length}: frames ${leg.firstFrame}-${leg.lastFrame} (${leg.frames}) ticks=${row.ticks} presented=${row.frames_presented} wall_ms=${wallMs} hash=${row.hash}`);
+      }
+      dryJoined = joinedChunkProof(plan, dryRows);
+      log.push(`$ chunks: ${dryRows.length} legs, ${dryJoined.frames} of ${dryJoined.expected} frames played, sum ${dryJoined.matches ? "matches" : "MISMATCH"}, joined hash=${dryJoined.digest}`);
+      if (!dryJoined.matches) {
+        done(true, "CHUNK_SUM", `legs played ${dryJoined.frames} of ${dryJoined.expected} frames`);
         return;
       }
-      if (!/arena (headless )?smoke:/.test(out)) {
-        done(true, "PLAY_FAILED", "dry-run smoke exited 0 without the arena smoke marker");
-        return;
-      }
-      log.push(`$ dry-run smoke ok: exit 0 with marker (frames=${frames})`);
+      log.push(`$ dry-run smoke ok: exit 0 with marker (frames=${dryJoined.frames})`);
     } catch (error) {
       done(true, "PLAY_FAILED", `dry-run smoke threw (${error.message})`);
       return;
@@ -1839,7 +1948,7 @@ function main() {
       // Dry-run receipt: the same ticks/frames/wall/present shape as the
       // full-run receipt, so the flag parsing plus receipt fields stay
       // testable without a real exe.
-      const counts = parseSmokeCounts(dryOut);
+      const counts = { ticks: chunkCountSum(dryRows, "ticks"), framesPresented: chunkCountSum(dryRows, "frames_presented") };
       const present = describePresentMode(args);
       const dryReceiptPath = args.receipt ? resolve(args.receipt) : join(work, "clean-run-receipt.json");
       try {
@@ -1854,6 +1963,10 @@ function main() {
           frames_presented: counts.framesPresented,
           wall_ms: dryWallMs,
           present,
+          chunks: dryRows,
+          chunk_plan: { legs: plan.legs.length, total_frames: plan.totalFrames },
+          chunk_sum: dryJoined?.matches ?? false,
+          joined_hash: dryJoined?.digest ?? null,
           exit: 0,
           log: logPath,
         });
@@ -1883,7 +1996,9 @@ function main() {
     `frames: ${frames} (timeout ${timeoutMs}ms)`,
     `receipt: ${receiptPath}`,
     `present: ${describePresentMode(args).mode}`,
+    planLine,
   ];
+  if (plan.legs.length > 1) log.push("$ chunk note: each leg boots a fresh bout (the exe carries no resume token); the joined proof is the frame sum");
   const done = (failed, reason, detail) => writeLogAndExit(logPath, log, failed, reason, detail, frames);
   // Stage 1: resolve the real binary + real AS1 bundle (flags win, else the
   // packager env vars). Cook the bundle first with the bundle_cook bin when
@@ -2020,6 +2135,8 @@ function main() {
   }
   let playOut = "";
   let playWallMs = 0;
+  const playRows = [];
+  let playJoined = null;
   if (frames > WALL_PROBE_FRAMES) {
     // Wall-projection probe: the first WALL_PROBE_FRAMES played frames pace
     // the full wall. An overrun aborts here with a fingerprinted FAIL plus
@@ -2064,22 +2181,46 @@ function main() {
         done(true, "WALL_OVERRUN", `projected full wall ${Math.round(projectedMs)}ms exceeds ${budget}ms budget (${WALL_PROBE_FRAMES}-frame probe took ${probeMs}ms)`);
         return;
       }
+      const slots = chunkSlotReport(plan, probeMs / WALL_PROBE_FRAMES);
+      log.push(`$ chunk slots: legs project ${slots.projected.join("+")} ms against the ${CHUNK_SLOT_MS} ms slot (${slots.over.length === 0 ? "fits" : `over on ${slots.over.join(",")}`})`);
     } catch (error) {
       done(true, error.reason ?? "PLAY_FAILED", error.detail ?? String(error));
       return;
     }
   }
-  try {
-    // The exe bounds its own `--exit` run (default 300 s); a 5 min clean run at
-    // the measured frame rate is longer, so hand it the same budget minus a
-    // minute: a wedged run then ends itself loudly before this harness kills it.
-    const deadlineMs = Math.max(300000, timeoutMs - 60000);
-    const playStart = Date.now();
-    playOut = runPlay(exePath, ["--frames", String(frames), "--exit", "--deadline-ms", String(deadlineMs), ...presentPlayArgs], { cwd: target, env: cleanEnv, timeoutMs, log });
-    playWallMs = Date.now() - playStart;
-  } catch (error) {
-    done(true, error.reason ?? "PLAY_FAILED", error.detail ?? String(error));
-    return;
+  {
+    // Each leg is its own `--exit` play with its own wall bound, so one
+    // 6000-frame leg never leans on the whole proof's budget. Legs run in
+    // order and their hashes chain into the joined proof below.
+    const outputs = [];
+    for (const leg of plan.legs) {
+      const legTimeoutMs = leg.frames * PER_FRAME_BUDGET_MS + SMOKE_TIMEOUT_SLACK_MS;
+      // The exe bounds its own `--exit` run (default 300 s); a 5 min clean run at
+      // the measured frame rate is longer, so hand it the same budget minus a
+      // minute: a wedged leg then ends itself loudly before this harness kills it.
+      const legDeadlineMs = Math.max(300000, legTimeoutMs - 60000);
+      const playStart = Date.now();
+      let legOut;
+      try {
+        legOut = runPlay(exePath, ["--frames", String(leg.frames), "--exit", "--deadline-ms", String(legDeadlineMs), ...presentPlayArgs], { cwd: target, env: cleanEnv, timeoutMs: legTimeoutMs, log });
+      } catch (error) {
+        done(true, error.reason ?? "PLAY_FAILED", `leg ${leg.index}/${plan.legs.length} (${leg.frames} frames): ${error.detail ?? error}`);
+        return;
+      }
+      const wallMs = Date.now() - playStart;
+      outputs.push(legOut);
+      playWallMs += wallMs;
+      const row = chunkLegRow(plan, leg, parseSmokeCounts(legOut));
+      playRows.push(row);
+      log.push(`$ chunk ${leg.index}/${plan.legs.length}: frames ${leg.firstFrame}-${leg.lastFrame} (${leg.frames}) ticks=${row.ticks} presented=${row.frames_presented} wall_ms=${wallMs} hash=${row.hash}`);
+    }
+    playOut = outputs.join("\n");
+    playJoined = joinedChunkProof(plan, playRows);
+    log.push(`$ chunks: ${playRows.length} legs, ${playJoined.frames} of ${playJoined.expected} frames played, sum ${playJoined.matches ? "matches" : "MISMATCH"}, joined hash=${playJoined.digest}`);
+    if (!playJoined.matches) {
+      done(true, "CHUNK_SUM", `legs played ${playJoined.frames} of ${playJoined.expected} frames`);
+      return;
+    }
   }
   // Quote the run output the acceptance receipt needs: the arena smoke line
   // plus adapter/driver/scene evidence from the same output.
@@ -2097,7 +2238,7 @@ function main() {
   log.push(`$ adapter/driver line: ${adapterLine || "(missing)"}`);
   log.push(`$ audio line: ${audioLine || "(missing)"}`);
   log.push(`$ scene line: ${sceneLine || "(missing)"}`);
-  const counts = parseSmokeCounts(playOut);
+  const counts = { ticks: chunkCountSum(playRows, "ticks"), framesPresented: chunkCountSum(playRows, "frames_presented") };
   const present = describePresentMode(args);
   log.push(`$ counts: ticks=${counts.ticks} frames_presented=${counts.framesPresented} wall_ms=${playWallMs} present=${present.mode}`);
   try {
@@ -2112,6 +2253,10 @@ function main() {
       frames_presented: counts.framesPresented,
       wall_ms: playWallMs,
       present,
+      chunks: playRows,
+      chunk_plan: { legs: plan.legs.length, total_frames: plan.totalFrames },
+      chunk_sum: playJoined?.matches ?? false,
+      joined_hash: playJoined?.digest ?? null,
       exit: 0,
       manifest: {
         profile: manifest.profile,
@@ -2157,8 +2302,8 @@ function shipUsage() {
     "  node tools/ship.mjs run [run flags] [--dry-run]",
     "",
     "Pack flags: --dist/--target/--replace/--bin/--editor-bin/--bundle/",
-    "--frames/--minutes/--log/--build-log/--allow-stub/--skip-build.",
-    "Run flags: --dist/--target/--replace/--bin/--bundle/--frames/--minutes/",
+    "--frames/--minutes/--chunks/--log/--build-log/--allow-stub/--skip-build.",
+    "Run flags: --dist/--target/--replace/--bin/--bundle/--frames/--minutes/--chunks/",
     "--log/--allow-stub/--present-every/--present-skip plus --dry-run/--fixture/--work/--receipt.",
     "Run 'pack --help', 'stage --help' or 'run --help' for the full text.",
   ].join("\n");

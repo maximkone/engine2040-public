@@ -54,13 +54,14 @@ use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, View
 use engine_game::virt::{speed_label, step_speed, VirtualClock, KEY_RAMP_MS};
 use engine_game::window_audio_space::AudioSpace;
 use engine_game::windowed::{
-    apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit, dressing_camera,
-    feed_tick_audio, fighter_input_from_pressed, format_timed_smoke, frame_times_csv_row,
-    hud_cells_quads, hud_draw_list, live_fight_dots, msaa_setting, push_fight_draws, smoke_muted,
-    split_staged_flag, stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
-    staged_session_config, surface_frame_action, StagedTally, SurfaceFrameAction, TickAccumulator,
-    WinArgs, WinError, WindowPad, FRAME_TIMES_CSV_HEADER, MSAA_ENV, WINDOWED_SAMPLE_RATE,
-    WINDOW_SIZE, WIN_FIXED_DT_S,
+    apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit,
+    contact_shadow_strength, dressing_camera, feed_tick_audio, fighter_input_from_pressed,
+    format_timed_smoke, frame_times_csv_row, hud_cells_quads, hud_draw_list, live_fight_dots,
+    msaa_setting, push_fight_draws, smoke_muted, split_staged_flag, stage_arena_bank,
+    stage_dressing, stage_fight_bodies, staged_fight_input, staged_session_config,
+    surface_frame_action, StagedTally, SurfaceFrameAction, TickAccumulator, WinArgs, WinError,
+    WindowPad, CONTACT_SHADOW_ENV, FRAME_TIMES_CSV_HEADER, MSAA_ENV, WINDOWED_SAMPLE_RATE,
+    WIN_FIXED_DT_S,
 };
 use engine_game::{App, GameConfig, TickOutcome};
 use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
@@ -1136,6 +1137,30 @@ fn duration_us(elapsed: std::time::Duration) -> u64 {
     u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
 }
 
+/// Where the per-frame present-path trace is written, from
+/// `E2040_FRAME_TRACE` (a path). `None` when the variable is unset or
+/// empty, so the default run pays nothing and writes nothing.
+fn frame_trace_path() -> Option<PathBuf> {
+    let raw = std::env::var("E2040_FRAME_TRACE").ok()?;
+    let path = raw.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+/// The presentation pacer: one frame every `--fixed-dt <ms>` when the flag
+/// names a period, else one frame per fixed tick (the game's own rate).
+/// The window parks between slots instead of free-running: a free-running
+/// window outruns the display, and the compositor answers with ~80 ms
+/// swapchain acquire stalls (the 2026-10-20 perf lane).
+fn frame_pacer(period_ms: Option<u32>) -> arena_frame::FixedDtPacer {
+    let period = match period_ms {
+        Some(ms) => Duration::from_millis(u64::from(ms)),
+        None => Duration::from_secs_f64(WIN_FIXED_DT_S),
+    };
+    arena_frame::FixedDtPacer::new(period, Instant::now())
+}
 /// Live fight bodies: one dot per simulated fighter from the rolling pose
 /// cursor (planar position, feet on the floor), live hp, this tick's flash.
 
@@ -1285,6 +1310,19 @@ struct ArenaApp {
     /// Per-frame wall split behind `work_us`, so the receipt names the slow
     /// frames (`--exit` runs only, like `work_us`).
     frame_rows: Vec<arena_frame::FrameRow>,
+    /// Per-frame trace of the present path split, written to
+    /// `E2040_FRAME_TRACE` (a path) at the end of the run. Empty when the
+    /// variable is unset, so the default run pays nothing.
+    frame_trace: Vec<arena_frame::FrameTrace>,
+    /// Where the per-frame trace is written at the end of the run.
+    frame_trace_path: Option<PathBuf>,
+    /// Whether the window held the keyboard focus at the last frame.
+    window_focused: bool,
+    /// Whether the window was occluded at the last frame.
+    window_occluded: bool,
+    /// The present path's split for the frame just presented: the
+    /// swapchain acquire plus the render crate's live wall split.
+    last_frame_split: arena_frame::FrameSplit,
     /// Tick index that panics on purpose (`TEST_PANIC_ENV`); `None` otherwise.
     test_panic_at: Option<u32>,
     /// Reused scratch for one tick's canonical input bytes (crash tape).
@@ -1319,6 +1357,13 @@ struct ArenaApp {
     /// The agent seat of `--agent-seat <PORT>`: a loopback client authors the
     /// human slot and reads each fixed tick's hash. `None` keeps the keyboard.
     seat: Option<Seat>,
+    /// The presentation pacer: the window presents one frame per slot, so
+    /// it never outruns the display.
+    pacer: arena_frame::FixedDtPacer,
+    /// Whether the sim runs exactly one fixed tick per presented frame
+    /// (`--fixed-dt`): the deterministic harness. Off by default, so the
+    /// default run keeps the wall-clock accumulator.
+    fixed_dt_ticks: bool,
 }
 
 /// Build the live session's match over the arena kit's physical placement:
@@ -1434,6 +1479,11 @@ impl ArenaApp {
             work_us: Vec::new(),
             interval_us: Vec::new(),
             frame_rows: Vec::new(),
+            frame_trace: Vec::new(),
+            frame_trace_path: frame_trace_path(),
+            window_focused: true,
+            window_occluded: false,
+            last_frame_split: arena_frame::FrameSplit::default(),
             test_panic_at,
             crash_bytes: Vec::with_capacity(16),
             watcher,
@@ -1448,11 +1498,24 @@ impl ArenaApp {
             title_hint: None,
             net: None,
             seat: None,
+            pacer: frame_pacer(args.fixed_dt_ms),
+            fixed_dt_ticks: args.fixed_dt_ms.is_some(),
         };
         // Title boot: the stranger sees the start key before the bout, and
         // the accumulator holds at zero ticks until `FlowEvent::Start`.
         // Automated smoke skips the shell and runs the bout at once.
         arena_frame::announce_title_boot(boot);
+        // The pacing receipt: the period the window presents at and the
+        // tick rule the sim runs under. A perf run reads both from here.
+        say!(
+            "arena pacing: period_ms={:.3} tick_rule={}",
+            shell.pacer.period().as_secs_f64() * 1000.0,
+            if shell.fixed_dt_ticks {
+                "one-per-frame"
+            } else {
+                "wall-clock"
+            },
+        );
         Ok(shell)
     }
 
@@ -1614,9 +1677,22 @@ impl ArenaApp {
                     let room = at.saturating_sub(u64::from(self.ticks_done));
                     owed.min(u32::try_from(room).unwrap_or(u32::MAX))
                 }
+                // The fixed-dt harness: one fixed tick per presented frame, so
+                // the tick count is the frame count and two runs of the same
+                // fixture pay the same ticks and hash the same.
+                None if self.fixed_dt_ticks => self.fixed_dt_steps(),
                 None => self.ticks_owed(elapsed_ms),
             },
         }
+    }
+
+    /// Fixed ticks owed this frame under `--fixed-dt`: exactly one per
+    /// presented frame, clamped to the session's remaining ticks. A window
+    /// that cannot show a frame holds the match, like the wall-clock path.
+    fn fixed_dt_steps(&self) -> u32 {
+        let shown =
+            self.flow.ticks_run() && self.presenter.as_ref().is_some_and(|p| !p.suspended());
+        arena_frame::pace::fixed_dt_steps(shown, self.ticks_done, self.config.ticks)
     }
 
     /// Step fixed ticks for the elapsed wall time, then present one HUD frame.
@@ -1665,9 +1741,8 @@ impl ArenaApp {
         }
         self.last_alpha = self.acc.alpha();
         let present_started = Instant::now();
-        self.sim_us = self
-            .sim_us
-            .saturating_add(duration_us(present_started - sim_started));
+        let sim_wall_us = duration_us(present_started - sim_started);
+        self.sim_us = self.sim_us.saturating_add(sim_wall_us);
         // A throttled step ran its ticks above and draws nothing: no present
         // wall, no frame sample, no presented-frame count.
         if !self.take_present_skip() {
@@ -1675,8 +1750,8 @@ impl ArenaApp {
             self.present_frame(event_loop);
             let present_wall_us = duration_us(present_started.elapsed());
             self.present_us = self.present_us.saturating_add(present_wall_us);
+            let work_wall_us = duration_us(sim_started.elapsed());
             if self.args.exit && self.frames_presented > 0 {
-                let work_wall_us = duration_us(sim_started.elapsed());
                 self.work_us.push(work_wall_us);
                 self.interval_us.push(duration_us(interval));
                 self.frame_rows.push(arena_frame::FrameRow {
@@ -1686,6 +1761,16 @@ impl ArenaApp {
                     fighters_us: self.fighters_us.saturating_sub(fighters_before),
                 });
             }
+            // The per-frame trace (only when `E2040_FRAME_TRACE` names a
+            // path): one row per presented frame, so a perf run can say
+            // which section of the present path ate a slow frame.
+            self.note_frame_trace(
+                work_wall_us,
+                duration_us(interval),
+                sim_wall_us,
+                present_wall_us,
+                self.fighters_us.saturating_sub(fighters_before),
+            );
         }
         // Every `--exit` run carries its own wall-clock bound: a hung window
         // loop fails itself loudly instead of burning a core for hours.
@@ -1810,6 +1895,7 @@ impl ArenaApp {
                 self.failure = Some(2);
             }
         }
+        self.write_frame_trace();
         if let Some(why) = self.framing.failure().filter(|_| self.require_framing) {
             tell!("arena: {why}");
             self.failure = Some(1);
@@ -2046,6 +2132,18 @@ impl ArenaApp {
                 }
             }
         };
+        // The present path's split of this frame: the acquire the
+        // presenter measured plus the live wall split the render crate
+        // recorded (stage, submit, present call). Read before the twin
+        // path can overwrite the render crate's last live split.
+        let acquire_us = self
+            .presenter
+            .as_ref()
+            .map_or(0, |presenter| presenter.last_acquire_us());
+        self.last_frame_split = arena_frame::FrameSplit::of_live_frame(
+            acquire_us,
+            &engine_render::present::last_live_wall_split(),
+        );
         self.frames_presented += 1;
         self.poll_hot_reload();
         self.note_receipt(&receipt);
@@ -2121,7 +2219,10 @@ impl ArenaApp {
                 self.framing.note_tint(look.tinted(frame.fighters));
             }
             let t = look.sim_time(frame.alpha);
-            self.view.note(&list.camera, t, look.view_truth());
+            // Frame fields (camera, bounds, sand, cover) are per present; joint
+            // pops are folded per sim tick in arena_frame so a cached pose or a
+            // two-tick present cannot fake one. Door/test callers use note().
+            self.view.note_frame(&list.camera, t, look.view_truth());
             if let Some(scene) = self.spear.scene.as_ref() {
                 let (spears, ropes) = scene.counts();
                 self.view.note_spear(spears, ropes);
@@ -2451,7 +2552,16 @@ impl ArenaApp {
                 // EG13: 4x MSAA stays off unless this run asks for it
                 // (`E2040_MSAA=1`), so the default window frame keeps the
                 // 1x path the look captures were taken with.
-                presenter.set_msaa_enabled(msaa_setting(std::env::var(MSAA_ENV).ok().as_deref()));
+                let msaa_on = msaa_setting(std::env::var(MSAA_ENV).ok().as_deref());
+                presenter.set_msaa_enabled(msaa_on);
+                // EG13: the perf run says which sample count it measured, so a
+                // p50 pair cannot be mistaken for the same path twice.
+                tell!("arena msaa: {}", if msaa_on { "4x" } else { "1x" });
+                // GS43: contact shadows ship on; `E2040_CONTACT_SHADOW=0`
+                // keeps the identical frame without them for the capture pair.
+                presenter.set_contact_shadow_strength(contact_shadow_strength(
+                    std::env::var(CONTACT_SHADOW_ENV).ok().as_deref(),
+                ));
                 let key = MeshKey::new(1, [0xA1; 32]);
                 // A refused cube falls back to clear-only frames, never a panic.
                 let _ = presenter.upload_mesh(key, &engine_render::v1::cube());
@@ -2520,15 +2630,16 @@ impl ApplicationHandler for ArenaApp {
         // instead of opening a window no adapter can fill. Adapter
         // enumeration stays operator-side, so the ranked list is seeded with
         // the requested mode and the check is a range check.
+        // `--size` names the inner size in physical pixels, so a 1080p run
+        // opens a 1920x1080 window on any display scale; without the flag
+        // the window opens at `WINDOW_SIZE`, byte-identical to today.
+        let (w_px, h_px) = self.args.window_size();
         let startup = SwapRequest {
-            mode: DisplayMode::Windowed {
-                w_px: WINDOW_SIZE.0,
-                h_px: WINDOW_SIZE.1,
-            },
+            mode: DisplayMode::Windowed { w_px, h_px },
         };
         let ranked = rank_modes(&[AdapterMode {
-            w_px: WINDOW_SIZE.0,
-            h_px: WINDOW_SIZE.1,
+            w_px,
+            h_px,
             refresh_hz: engine_core::TICK_HZ_U32,
         }]);
         if let Err(err) = validate_request(&startup, &ranked) {
@@ -2536,10 +2647,7 @@ impl ApplicationHandler for ArenaApp {
         }
         let attrs = Window::default_attributes()
             .with_title(arena_frame::window_title(None))
-            .with_inner_size(winit::dpi::LogicalSize::new(
-                f64::from(WINDOW_SIZE.0),
-                f64::from(WINDOW_SIZE.1),
-            ));
+            .with_inner_size(winit::dpi::PhysicalSize::new(w_px, h_px));
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -2554,6 +2662,10 @@ impl ApplicationHandler for ArenaApp {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Focused(focused) => self.note_window_state(focused, self.window_occluded),
+            WindowEvent::Occluded(occluded) => {
+                self.note_window_state(self.window_focused, occluded)
+            }
             WindowEvent::Resized(size) => {
                 if let Some(presenter) = self.presenter.as_mut() {
                     match presenter.resize(size.width, size.height) {
@@ -2648,7 +2760,18 @@ impl ApplicationHandler for ArenaApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::Poll);
+        // The window presents one frame per slot and parks until the next
+        // slot is due. A free-running window presents far above the display
+        // rate, and the compositor throttles it with ~80 ms swapchain
+        // acquire stalls (the 2026-10-20 perf lane).
+        let now = Instant::now();
+        let due = self.pacer.deadline();
+        if now < due {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+            return;
+        }
+        self.pacer.advance(now);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.pacer.deadline()));
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
@@ -3001,6 +3124,53 @@ mod tests {
     }
 
     #[test]
+    fn the_window_presents_one_frame_per_slot_and_the_harness_is_opt_in() {
+        // The default window paces itself at the fixed tick period: it
+        // presents one frame per slot instead of free-running.
+        let args = WinArgs::parse(&strings(&["arena", "--frames", "3", "--exit"]))
+            .expect("smoke args parse");
+        let app = ArenaApp::new(bin_config(), args, None).expect("session builds");
+        assert!(
+            !app.fixed_dt_ticks,
+            "the default run keeps the wall-clock accumulator"
+        );
+        assert_eq!(
+            app.pacer.period(),
+            Duration::from_secs_f64(engine_game::windowed::WIN_FIXED_DT_S),
+            "the default pace is the game's own tick rate"
+        );
+        // With the flag the pacer carries the period the CLI named and the
+        // sim runs one fixed tick per presented frame.
+        let args = WinArgs::parse(&strings(&[
+            "arena",
+            "--frames",
+            "3",
+            "--fixed-dt",
+            "17",
+            "--exit",
+        ]))
+        .expect("smoke args parse");
+        let app = ArenaApp::new(bin_config(), args, None).expect("session builds");
+        assert!(app.fixed_dt_ticks, "the harness runs one tick per frame");
+        assert_eq!(
+            app.pacer.period(),
+            Duration::from_millis(17),
+            "the pacer carries the named period"
+        );
+    }
+
+    #[test]
+    fn the_size_flag_names_the_window_the_arena_opens() {
+        // The flag names the window inner size; the default keeps the
+        // shipped 1280x720, so an existing run is byte-identical to today.
+        let args = WinArgs::parse(&strings(&["arena", "--size", "1920x1080"]))
+            .expect("a 1080p size parses");
+        assert_eq!(args.window_size(), (1920, 1080));
+        let plain = WinArgs::parse(&strings(&["arena"])).expect("plain args parse");
+        assert_eq!(plain.window_size(), (1280, 720));
+    }
+
+    #[test]
     fn frame_percentiles_use_nearest_rank_over_microseconds() {
         assert_eq!(percentile_us(&[], 50), 0, "no frames reads zero");
         assert_eq!(percentile_us(&[7_000], 99), 7_000);
@@ -3146,6 +3316,8 @@ mod tests {
             deadline_ms: None,
             present_every: 1,
             present_skip: false,
+            fixed_dt_ms: None,
+            window_size: None,
         };
         let display = WinError::NoDisplay("test headless".to_string());
         assert_eq!(
@@ -3202,6 +3374,8 @@ mod tests {
             deadline_ms: None,
             present_every: 1,
             present_skip: false,
+            fixed_dt_ms: None,
+            window_size: None,
         };
         let display = WinError::NoDisplay("test headless".to_string());
         assert_eq!(

@@ -342,13 +342,16 @@
   Accept: F2P the frame light list holds every torch actor; at night the mean
   luminance within 2 m of a torch is at least 2 times the far sand; P2P
   golden unchanged, 0 validation errors. needs: VS1, GX2.
-- [ ] VS9 proof: daily arena shot — one command runs the arena capture
+- [x] VS9 proof: daily arena shot — one command runs the arena capture
   (`--scene arena --fighters 2 --camera-path arena600 --frames 120 --exit`),
   writes 3 PNGs, their manifests and silhouette masks under `target/vs9/`, and
   refuses the cube SHA, the 64x48 noise SHA, empty fighter boxes and magenta
   over 0.5%. Tier A. Size S. Owns `tools/arena-shot.mjs`. Accept: F2P the
   command FAILs on today's build (cube SHA) and PASSes after VS1+VS4; P2P
-  `node tools/proof.mjs` golden unchanged. needs: VS1.
+  `node tools/proof.mjs` golden unchanged. needs: VS1. Landed fc2c97cf.
+  `node tools/arena-shot.mjs` -> PASS build=beb39410 frames=3 masks=3
+  magenta_max=0.000% dir=target/vs9; `--self-check` 17/17; golden
+  `d57b5c8ae3096614` PASS via proof.mjs --skip-build.
 - [ ] RA14 render: arena content through the presenter — CT7 fighters +
   CT8 kit (sand, stands, walls, gate, torches) in the window build and
   the llvmpipe twin instead of the cube placeholder. Tier A. Size M.

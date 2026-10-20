@@ -11,6 +11,10 @@ pub mod bake_rank;
 /// records with dirty nav tiles. Bake only. Std-only.
 pub mod bond_grade;
 pub mod bonded;
+/// Door panels and thin walls as bonded collections, with ram, shotgun and
+/// charge break sets that name their dirty nav tiles and debris seeds.
+/// Std-only.
+pub mod breach;
 /// Debris budgets at 8-fighter scale: per-event caps, sleep islands,
 /// distance LOD. Std-only.
 pub mod budget;

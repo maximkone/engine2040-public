@@ -46,6 +46,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use engine_playtest::look::metric::{self, Frame, Region};
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
@@ -70,6 +71,9 @@ pub const TOOL_VIEW_OBSERVE: &str = "view.observe";
 
 /// Verb: read the live view's `arena view:` laws line.
 pub const TOOL_VIEW_LAWS: &str = "view.laws";
+
+/// Verb: compare two PNG captures with the machine metrics.
+pub const TOOL_VIEW_COMPARE: &str = "view.compare";
 
 /// Rubric ids a judge answer must carry, in order.
 pub const LOOK_RUBRIC_IDS: [&str; 9] = ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"];
@@ -115,6 +119,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<LookJudgeTool>(
         TOOL_LOOK_JUDGE,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<ViewCompareTool>(
+        TOOL_VIEW_COMPARE,
         PACK,
         CapabilityCard::Observe,
     )?);
@@ -333,6 +342,124 @@ impl SyncTool<McpServer> for LookJudgeTool {
         service.dispatch(TOOL_LOOK_JUDGE, |_state| {
             run_look_judge(&param, LOOK_JUDGE.get().copied())
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// view.compare: two PNGs, one machine score
+// ---------------------------------------------------------------------------
+
+/// Two relative PNG paths. Units are path chars; errors are typed `bad_args`
+/// for an absolute path, `..`, a non-PNG name or an unreadable file.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewCompareArgs {
+    pub left: String,
+    pub right: String,
+}
+
+/// Whole-frame machine score. All scores are fixed point; 10000 is identical
+/// for SSIM and 0 is identical for FLIP and deltaE. `ssimulacra2_x10000` is
+/// the reserved slice-2 slot until the pure-Rust crate lands.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewCompareOutput {
+    pub width: u32,
+    pub height: u32,
+    pub ssim_x10000: i32,
+    pub flip_x10000: u32,
+    pub mean_de_x100: u32,
+    pub hist_tv_x10000: u32,
+    pub hist_emd_x10000: u32,
+    pub ssimulacra2_x10000: Option<u32>,
+}
+
+/// A PNG path must be a non-empty relative path of plain names ending in
+/// `.png`. It is read, never written.
+fn check_png(field: &str, raw: &str) -> Result<(), McpToolError> {
+    check_dir(field, raw)?;
+    if raw.to_ascii_lowercase().ends_with(".png") {
+        return Ok(());
+    }
+    Err(bad_args(format!(
+        "{field} `{}` is not a .png file; re-run with a path such as \
+         target/reports/staged-fight/captures/frame.png",
+        raw.chars().take(80).collect::<String>()
+    )))
+}
+
+/// Decode one bounded PNG; the error names the side and the path.
+fn read_frame(field: &str, path: &str) -> Result<Frame, McpToolError> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        McpToolError::new(
+            "bad_args",
+            format!("{field} `{path}` could not be read: {error}"),
+        )
+    })?;
+    Frame::decode_png(&bytes).map_err(|error| {
+        McpToolError::new(
+            "bad_image",
+            format!("{field} `{path}` is not a decodable PNG: {error}"),
+        )
+    })
+}
+
+/// Score two decoded frames over the whole frame.
+fn compare_frames(left: &Frame, right: &Frame) -> Result<ViewCompareOutput, McpToolError> {
+    let compared = metric::compare(left, right, Region::Full).map_err(|error| {
+        McpToolError::new("bad_image", format!("frames do not compare: {error}"))
+    })?;
+    Ok(ViewCompareOutput {
+        width: left.width(),
+        height: left.height(),
+        ssim_x10000: compared.ssim_x10000,
+        flip_x10000: compared.flip_x10000,
+        mean_de_x100: compared.mean_de_x100,
+        hist_tv_x10000: compared.hist_tv_x10000,
+        hist_emd_x10000: compared.hist_emd_x10000,
+        ssimulacra2_x10000: None,
+    })
+}
+
+fn run_view_compare(args: &ViewCompareArgs) -> Result<ViewCompareOutput, McpToolError> {
+    check_png("left", &args.left)?;
+    check_png("right", &args.right)?;
+    let left = read_frame("left", &args.left)?;
+    let right = read_frame("right", &args.right)?;
+    compare_frames(&left, &right)
+}
+
+/// `view.compare` tool: two PNG captures scored by machine, read-only.
+pub struct ViewCompareTool;
+
+impl ToolBase for ViewCompareTool {
+    type Parameter = ViewCompareArgs;
+    type Output = ViewCompareOutput;
+    type Error = McpToolError;
+
+    fn name() -> Cow<'static, str> {
+        TOOL_VIEW_COMPARE.into()
+    }
+
+    fn description() -> Option<Cow<'static, str>> {
+        Some(
+            "Compare two relative PNG captures over the whole frame: SSIM, FLIP, \
+             deltaE and histogram distances as fixed-point integers. Read-only; \
+             SSIMULACRA2 is a null slot until the pure-Rust crate lands."
+                .into(),
+        )
+    }
+
+    fn annotations() -> Option<rmcp::model::ToolAnnotations> {
+        crate::mcp::read_only_annotations()
+    }
+}
+
+impl SyncTool<McpServer> for ViewCompareTool {
+    fn invoke(_service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
+        run_view_compare(&param)
     }
 }
 
@@ -871,6 +998,15 @@ mod tests {
             preview_dir: None,
             q1_dir: None,
         }
+    }
+
+    /// A 16x16 textured frame: SSIM needs at least one whole 8x8 window.
+    fn frame_of(paint: impl Fn(usize) -> [u8; 4]) -> Frame {
+        let mut rgba = Vec::with_capacity(16 * 16 * 4);
+        for i in 0..16 * 16 {
+            rgba.extend_from_slice(&paint(i));
+        }
+        Frame::from_rgba(16, 16, rgba).expect("16x16 frame")
     }
 
     /// A contract-clean answer: nine items, one frame, integers only.
@@ -1499,5 +1635,88 @@ mod tests {
         );
         assert!(error.message.contains(ARENA_EXE_ENV), "{}", error.message);
         assert!(error.message.contains("re-run"), "{}", error.message);
+    }
+
+    #[test]
+    fn view_compare_scores_identical_frames_one_and_zero_flip() {
+        let left = frame_of(|i| {
+            [
+                u8::try_from((i * 7) % 230).expect("byte"),
+                u8::try_from((i * 13) % 200).expect("byte"),
+                u8::try_from((i * 3) % 180).expect("byte"),
+                255,
+            ]
+        });
+        let right = left.clone();
+        let compared = compare_frames(&left, &right).expect("identical frames compare");
+        assert_eq!(compared.width, 16);
+        assert_eq!(compared.height, 16);
+        assert_eq!(compared.ssim_x10000, 10000);
+        assert_eq!(compared.flip_x10000, 0);
+        assert_eq!(compared.mean_de_x100, 0);
+        assert_eq!(compared.hist_tv_x10000, 0);
+        assert_eq!(compared.hist_emd_x10000, 0);
+        assert_eq!(compared.ssimulacra2_x10000, None);
+    }
+
+    #[test]
+    fn view_compare_scores_a_changed_frame_below_one() {
+        let dark = frame_of(|i| {
+            [
+                u8::try_from((i * 5) % 120).expect("byte"),
+                u8::try_from((i * 11) % 100).expect("byte"),
+                u8::try_from((i * 3) % 80).expect("byte"),
+                255,
+            ]
+        });
+        let bright = frame_of(|i| {
+            [
+                u8::try_from(120 + (i * 5) % 120).expect("byte"),
+                u8::try_from(100 + (i * 11) % 100).expect("byte"),
+                u8::try_from(80 + (i * 3) % 80).expect("byte"),
+                255,
+            ]
+        });
+        let compared = compare_frames(&dark, &bright).expect("different frames compare");
+        assert!(compared.ssim_x10000 < 10000, "{}", compared.ssim_x10000);
+        assert!(compared.flip_x10000 > 0, "{}", compared.flip_x10000);
+    }
+
+    #[test]
+    fn view_compare_refuses_escapes_and_non_png_names() {
+        for bad in [
+            "../up.png",
+            "/abs.png",
+            "C:\\x.png",
+            "a\\b.png",
+            "a/../../b.png",
+            "target/captures/frame.jpg",
+            "",
+        ] {
+            assert_eq!(check_png("left", bad).expect_err(bad).code, "bad_args");
+        }
+        for ok in [
+            "target/captures/frame.png",
+            "content/reference/native/key.png",
+            "./target/x.PNG",
+        ] {
+            assert!(check_png("left", ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn view_compare_registers_read_only_in_the_view_pack() {
+        let registry = PackRegistry::shipped();
+        let verb = registry
+            .verb(TOOL_VIEW_COMPARE)
+            .expect("view.compare registers");
+        assert_eq!(verb.pack(), PACK);
+        assert_eq!(verb.card(), CapabilityCard::Observe);
+        assert!(verb.readonly());
+        assert!(registry
+            .pack(PACK)
+            .expect("view pack")
+            .verb_names()
+            .contains(&TOOL_VIEW_COMPARE));
     }
 }

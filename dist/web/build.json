@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "commit": "b6bc636756a6",
+  "commit": "f7f3b5347b95",
   "target": "wasm32-unknown-unknown",
   "profile": "web",
   "files": {
@@ -15,30 +15,30 @@
       "sha256": "dabf39855d892809e852eeda7712bec2bb55d8fdff19a8bebdea316355549d48"
     },
     "engine.js": {
-      "bytes": 103408,
-      "gzipBytes": 17391,
-      "sha256": "859283ca96af2f45c4ba757db06390a593279fdb591be084a5d48280ea101912"
+      "bytes": 102806,
+      "gzipBytes": 17301,
+      "sha256": "8fe2e0dd4da780031acc4d71b03dc8f0c76e8b77018d242eb2364eb8f59a72be"
     },
     "engine_bg.wasm": {
-      "bytes": 2946668,
-      "gzipBytes": 1140840,
-      "sha256": "4a30923422ef633f8dc119968f2f7630bdedb75349b71cbedc39d9d49d9b02ea"
+      "bytes": 2954980,
+      "gzipBytes": 1144913,
+      "sha256": "b006b3275502b22e6e3cee3fd04f1df6f047f10842b3395e7ec583a6fd19815f"
     },
     "index.html": {
-      "bytes": 16172,
-      "gzipBytes": 5529,
-      "sha256": "54c6fb297bd8e462865f70bfa94edf147eecde25f9d48997e19b502d01409acb"
+      "bytes": 16501,
+      "gzipBytes": 5658,
+      "sha256": "f97a2a308feecacc25e3a522c373ee513cf9a16b21c450a363056bccda5530b0"
     },
     "loader.js": {
-      "bytes": 7951,
-      "gzipBytes": 3284,
-      "sha256": "6b2733dfef8dd9b699c10509ab661c0b39600600a44ec4114b0962029741beba"
+      "bytes": 10604,
+      "gzipBytes": 4153,
+      "sha256": "e421db056cbfef5b63df1485a887502ff3bef96ffaeccc1e2b8778f23e5e9ccd"
     }
   },
-  "totalBytes": 4436673,
+  "totalBytes": 4447365,
   "limitBytes": 8388608,
   "underLimit": true,
-  "rawWasmBytes": 4003831,
+  "rawWasmBytes": 4011805,
   "tools": {
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
     "wasmBindgen": "0.2.128",

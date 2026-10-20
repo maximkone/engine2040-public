@@ -15,6 +15,7 @@ Keep scripts small and portable; docs stay in `docs/`. The full per-tool referen
 Short lines; the script header is the full doc. Keep one line here per live `tools/*.mjs`.
 
 - `tools/affected.mjs` (+ `tools/affected.test.mjs`): node script; see its header.
+- `tools/api-break.mjs` (+ `tools/api-break.test.mjs`): gate the public API of every engine crate against a committed baseline (rustdoc JSON); `--write` blesses a break.
 - `tools/arch-fitness.mjs` (+ `tools/arch-fitness.test.mjs`): check the crate graph stays acyclic.
 - `tools/arena-report.mjs` (+ `tools/arena-report.test.mjs`): gate the arena manifest, PBR/HDRI VRAM caps, crate+torch receipt and soak baseline.
 - `tools/arena-sources.mjs` (+ `tools/arena-sources.test.mjs`): check the raw CC0 PBR sets in `content/arena/sources` and their PROVENANCE rows.
@@ -31,6 +32,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/city-osm.mjs` (+ `tools/city-osm.test.mjs`): convert an offline OSM slice to glTF.
 - `tools/clean.mjs` (+ `tools/clean.test.mjs`): node script; see its header.
 - `tools/compile-cache.mjs` (+ `tools/compile-cache.test.mjs`): node script; see its header.
+- `tools/compile-cache-spike.mjs` (+ `tools/compile-cache-spike.test.mjs`): time one lane build cold, then with a warm sccache in fresh target dirs; prints KEEP/DROP, never edits a tracked file.
 - `tools/content-lib.mjs`: shared digest, image-size and generated-block helpers for the content report tools.
 - `tools/cook-char.mjs` (+ `tools/cook-char.test.mjs`): check the character intake manifest.
 - `tools/crate-map.mjs` (+ `tools/crate-map.test.mjs`): map each crate to its package, dir and job.

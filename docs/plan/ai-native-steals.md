@@ -120,7 +120,9 @@ runs the gates and lands each row by path.
    `AirTuning::shaped`, the window camera uses `with_look_ahead`, and the
    receipt is `docs/receipts/2026-10-20-ain6-armed/README.md` (air tick 6 is
    the first differing tape tick; root golden unchanged x2). The juggle budget
-   stays open: combat has no vertical launch to budget.
+   is built in combat: 15 consecutive clean hits, the 16th knocks down; the
+   number, the first differing hit and the Retiarius reachability proof are in
+   `docs/receipts/2026-10-20-ain6-juggle/README.md`.
 
 ### AIN6 numbers table (one owner: `AirTuning::shaped` and `LookAhead`)
 
@@ -137,7 +139,7 @@ runs the gates and lands each row by path.
 | camera lead cap | 1.2 | m | 0.0 |
 | accel halflife | 0.2 | s | 0.0 |
 | decel halflife | 0.1 | s | 0.0 |
-| juggle budget | 15 | hits | none (no air-combo consumer yet) |
+| juggle budget | 15 | consecutive clean hits | none (always on; hit 16 knocks down) |
 
 Armed, `Controller::state_hash` folds `air_facing` and the hold deadline; the
 unarmed controller reads none of the table, so `d57b5c8ae3096614` stays. The
@@ -145,5 +147,7 @@ arena arms the table in the sim leg (`build_controllers`) and the camera lead in
 the window (`new_cam_follow`) under the owner's 2026-10-20 "ARM GOO ALL"; the
 receipt is `docs/receipts/2026-10-20-ain6-armed/README.md`. On the fixed course
 tape the armed step first differs on air tick 6 (the first reversed wish). The
-juggle budget is the one open number: combat has no vertical launch to budget.
+juggle budget is built in combat (15 consecutive clean hits; hit 16 is a
+knockdown) and its receipt is
+`docs/receipts/2026-10-20-ain6-juggle/README.md`.
 

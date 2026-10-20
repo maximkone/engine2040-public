@@ -24,6 +24,7 @@ Open board IDs: MP6 MP8 MP10 MP12 MP14 MP15 MP16 MP16a MP16b MP17 MP18 MP19 MP21
 | Dedicated server + discovery + reconnect (MP1) | unit-tested, integrated, ticked |
 | 8–16 hardening + priority deltas (MP2) | unit-tested, integrated, ticked |
 | Lobby browser + ready-up + AI-fill (MP3) | unit-tested, integrated, ticked |
+| Master list + server browser (E79) | unit-tested 2026-10-20: `MasterList` registers beacons and answers a query on an integer wire; `ServerBrowser` holds the reply; both pure (no socket, so never in the tick), IPv4 hosts, 32 servers in one 1200 B datagram; run steps in §9 |
 | Replays + theater + keyframes (MP4) | unit-tested, integrated, ticked |
 | Lag window on the dedicated server (MP5, QN12) | `lagcomp.rs` restored 2026-10-18 as the input-arrival window (per-slot, sized from measured lag or reported round trip, capped at 16 ticks); `HeadlessServer::hold_ticks` holds ticks open, a `HitReceipt` per attack press; caller `played.rs`. View rewind for snapshot clients is not built. Status 2026-10-18 below |
 | Disconnect/desync heal (AH4) | unit-tested, integrated, ticked |
@@ -569,4 +570,34 @@ Ticked rows are dropped. Rows never boarded are not listed (git keeps them). Now
   fails proof; no `Unsupported`/`todo!`/stub in shipped ON paths.
 - Two-machine proof for ON2/ON6/ON13/ON30: invite join and party form-up run on
   real hardware with zero pasted addresses; versions matched by digest.
+
+## 9. Run: master list and server browser (E79)
+
+The master directory is one pure struct in `dedicated.rs`: no socket and no
+clock, so master traffic can never run inside `HeadlessServer::tick`. Both wire
+messages are integer, fixed length, one datagram each way.
+
+1. List a server. After the server authors a tick, build its beacon from server
+   truth and register it where the master heard it:
+   `let beacon = server.beacon(port)?; master.register(from, beacon, now_tick)?;`
+   `from` is the datagram source the master read (host learned, never typed);
+   `now_tick` is the master's tick, pacing only, never a checkpoint.
+2. Ask and browse. A client sends `MasterList::query()` (3 bytes) and applies
+   the answer: `browser.apply(&reply)?`, then `browser.best()`. The join address
+   is `Listing::join_addr()`: listed host plus beacon port. A host that is not
+   IPv4 refuses as `ServerError::BadHost`.
+3. Join. Two clients connect with their tokens and send inputs to that listed
+   address; the list stays out of their input path and out of the tick.
+4. Keep it live. Refresh at the 4 Hz beacon period (`lobby::Browser` pacing);
+   `prune(now_tick, STALE_LISTING_TICKS)` (120 ticks, two seconds) drops silent
+   servers, and a full list evicts its stalest entry.
+5. Check it. `cargo test -p engine-net --lib dedicated` must be green; for the
+   listing line run the same line with `-- --nocapture` and expect
+   `MASTER list servers=1 port=PORT fighters=2 tick=64 hash=HASH joined=2 ticks=64 query=3B entry=23B`.
+
+Bounds: 32 servers, 23-byte listing, 740-byte widest reply, inside
+`MAX_PACKET_BYTES` (1200) by a const assert. The wire carries IPv4 hosts only;
+IPv6 registration refuses loudly until a widening row. `lobby::Browser` stays
+the LAN path that watches beacons itself at ms pace; `ServerBrowser` is the
+master-reply consumer and uses integer ticks only.
 

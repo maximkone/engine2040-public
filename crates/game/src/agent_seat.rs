@@ -12,8 +12,8 @@
 //!
 //! Protocol, one line each way, UTF-8, `\n` terminated:
 //! - client: `input <tick> <mx> <mz> <facing> <buttons>` (the fields of
-//!   [`FighterInput`]; `buttons` is the raw legal bit set, `0..=23`, the
-//!   bits of `engine_input::ALL_BUTTONS`);
+//!   [`FighterInput`]; `buttons` is the raw legal bit set, `0..=55`, the
+//!   bits of `engine_input::ALL_BUTTONS` (`JUMP` is `0x20`);
 //! - client: `ping` (ignored) or `quit` (closes the seat);
 //! - window: `tick <tick> <hash:016x>` after every fixed tick, and
 //!   `view <arena view: ...>` every [`VIEW_EVERY_TICKS`] ticks.

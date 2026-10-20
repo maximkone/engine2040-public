@@ -118,7 +118,7 @@ pub fn place_outside(
                 z: a.z,
                 yaw: a.yaw,
             };
-            if ok(cx, cz, yaw_idx_of(a.yaw)) && verifies(&index, &stacked, &here, rest_cm) {
+            if ok(cx, cz, yaw_idx_of(a.yaw)) && verifies(&ctx, &index, &stacked, &here, rest_cm) {
                 return Some(here);
             }
         }
@@ -130,7 +130,7 @@ pub fn place_outside(
                 for yaw_idx in 0..YAW_STEPS {
                     if ok(cx, cz, yaw_idx) {
                         let out = transform_of(&stacked, cx, cz, yaw_idx);
-                        if verifies(&index, &stacked, &out, rest_cm) {
+                        if verifies(&ctx, &index, &stacked, &out, rest_cm) {
                             return Some(out);
                         }
                     }

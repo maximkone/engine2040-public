@@ -8,9 +8,11 @@
 // Usage from the repo/lane root:
 //   node tools/finish.mjs [--finish <path>] [--sprint <path>] [--archive <dir>] [--json]
 //   node --test tools/finish.test.mjs
+import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadBoardText, parseBoard, ticksOf } from "./board-slice.mjs";
+import { auditRows, buildContext } from "./ticked-rows-audit.mjs";
 
 export const GATES = [
   "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10",
@@ -103,36 +105,72 @@ export const DROPPED_ROWS = new Set(["GX5"]);
 // ticksFromArchive reads. finish.test.mjs fails a member with no archive tick.
 export const ARCHIVE_TICKED_ROWS = new Set(["OB3", "DOC1", "FX3", "LW3", "DM1", "PF4", "PF6", "PF7", "PF8", "A1", "A2", "A3", "AS1", "AS2", "CT7", "CT8", "E1", "E2", "E3", "ED1", "ED2", "ED3", "SU1", "ED4", "ED5", "AM2", "AM3", "AM5", "AM9", "LW1", "LW2", "GP2", "GP3", "PX4", "HR3", "HR4", "SL2", "UIX2", "FS1", "AM4", "AM6", "AH1", "AH2", "EA1a", "EA1b", "EA1c", "EA1d", "EA1e", "FK1", "BR2", "PV3", "QA1", "CR1", "GP1", "GP4", "SL1"]);
 
-function ticksFromArchiveDir(dir) {
-  const out = new Map();
-  let files = [];
+const ARCHIVE_DONE = /^SPRINT-done-.*\.md$/;
+
+// Done files first, then the older snapshots, then the board-diet file beside
+// the archive dir: the same first-wins order ticked-rows-audit.tickedRows uses.
+function archiveFiles(dir) {
+  let names;
   try {
-    files = readdirSync(dir).filter((f) => f.endsWith(".md")).sort();
+    names = readdirSync(dir).filter((f) => f.endsWith(".md"));
   } catch {
-    return out;
+    return [];
   }
-  for (const f of files) {
+  names.sort((a, b) => (ARCHIVE_DONE.test(b) - ARCHIVE_DONE.test(a)) || a.localeCompare(b));
+  const files = names.map((n) => join(dir, n));
+  const sibling = join(dir, "..", "SPRINT-ARCHIVE.md");
+  if (existsSync(sibling)) files.push(sibling);
+  return files;
+}
+
+// Ticks and row texts from the same read. PF8's text only lives in
+// docs/SPRINT-ARCHIVE.md, so a tick read that drops that file hides the row.
+export function readArchive(archiveDir) {
+  const ticks = new Map();
+  const texts = new Map();
+  for (const file of archiveFiles(archiveDir)) {
     let md;
     try {
-      md = readFileSync(join(dir, f), "utf8").replace(/\r\n/g, "\n");
+      md = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
     } catch {
       continue;
     }
-    for (const [k, v] of ticksFromBoard(md)) if (v) out.set(k, true);
+    for (const [id, row] of parseBoard(md).tasks) {
+      if (row.done) ticks.set(id, true);
+      if (!texts.has(id)) texts.set(id, row.lines.join(" "));
+    }
   }
-  return out;
+  return { ticks, texts };
 }
 
-// Every archived done row: docs/archive/*.md plus docs/SPRINT-ARCHIVE.md, the
-// file the board diet (F06) moved done rows into. It sits beside the archive dir.
+// Kept for finish.test.mjs and any other existing caller.
 export function ticksFromArchive(archiveDir) {
-  const out = ticksFromArchiveDir(archiveDir);
-  const sprintArchive = join(archiveDir, "..", "SPRINT-ARCHIVE.md");
-  if (existsSync(sprintArchive)) {
-    const md = readFileSync(sprintArchive, "utf8").replace(/\r\n/g, "\n");
-    for (const [k, v] of ticksFromBoard(md)) if (v) out.set(k, true);
-  }
-  return out;
+  return readArchive(archiveDir).ticks;
+}
+
+// Suspects among the gate rows this tree can read: id -> { reasons, evidence }.
+// The full ticked-rows-audit CLI reads every ticked row and walks git history
+// (about 12 s); the scoreboard needs only the ~125 gate rows (about 0.3 s), so
+// it imports the same auditRows instead of spawning that CLI. ok=false means
+// the repo context could not be built (no git); the caller decides whether
+// that is a warning (default) or a failure (--check).
+export function loadSuspects(root, texts, ids) {
+  const ctx = buildContext(root);
+  if (!ctx) return { ok: false, suspects: new Map(), audited: 0, unchecked: 0 };
+  const rows = [...new Set(ids)]
+    .filter((id) => texts.has(id))
+    .map((id) => ({ id, source: "gate", text: texts.get(id) }));
+  const report = auditRows(rows, ctx);
+  const suspects = new Map(
+    report.suspects.map((s) => [
+      s.id,
+      {
+        reasons: [...new Set(s.findings.map((f) => f.reason))],
+        evidence: s.findings.map((f) => f.evidence).join(" | "),
+      },
+    ]),
+  );
+  return { ok: true, suspects, audited: rows.length, unchecked: report.unchecked };
 }
 
 function argPath(flag, fallback) {
@@ -271,20 +309,169 @@ function oneLine(s, max = 220) {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
-function scoreGate(gate, rows, ticks, statusText) {
+export function scoreGate(gate, rows, ticks, statusText, suspects = new Map()) {
   const openRows = rows.filter((r) => !ticks.get(r));
+  const suspectRows = rows
+    .filter((r) => suspects.has(r))
+    .map((id) => {
+      const found = suspects.get(id);
+      return typeof found === "string"
+        ? { id, reason: found, evidence: "" }
+        : { id, reason: found.reasons.join(", "), evidence: oneLine(found.evidence, 160) };
+    });
   const evidence = hasEvidence(statusText);
   let status;
   if (rows.length === 0) status = evidence ? "met" : "open";
-  else if (openRows.length === 0) status = evidence ? "met" : "partial";
+  else if (openRows.length === 0) status = evidence && suspectRows.length === 0 ? "met" : "partial";
   else if (openRows.length === rows.length) status = "open";
   else status = "partial";
-  return { gate, status, rows, openRows, evidence: statusText ? oneLine(statusText) : "none" };
+  return {
+    gate,
+    status,
+    rows,
+    openRows,
+    suspectRows,
+    evidence: statusText ? oneLine(statusText) : "none",
+  };
+}
+
+// One command per met gate. A gate with no headless command is `missing`, not
+// green: the probe mode can never upgrade a gate and never fakes a pass.
+export const PROBES = {
+  A1: { cmd: "node", args: ["tools/proof.mjs", "--skip-build"], marker: "RESULT PASS \\(proof fixtures only\\)", timeoutMs: 1_800_000 },
+  A2: { missing: "needs the editor window and a GPU: recorded --record-a2 (FINISH-RICH A2)" },
+  A3: { missing: "needs the editor window, a GPU and the child crash drill: recorded --record-a3 (FINISH-RICH A3)" },
+  A4: { missing: "needs reference-GPU stills and the motion review (FINISH-RICH A4)" },
+  A5: { missing: "needs a packaged 5-10 minute LAN session (FINISH-RICH A5)" },
+  A6: { cmd: "cargo", args: ["test", "-p", "engine-playtest", "--lib", "eval"], marker: "test result: ok\\.", minPassed: 1, timeoutMs: 900_000 },
+  A7: { cmd: "cargo", args: ["test", "-p", "engine-playtest", "seeded_bug"], marker: "test result: ok\\.", minPassed: 1, timeoutMs: 900_000 },
+  A8: { missing: "needs a clean Windows machine without the source checkout (FINISH-RICH A8)" },
+  A9: { cmd: "cargo", args: ["test", "-p", "engine-proof", "--all-features", "--lib", "a9"], marker: "test result: ok\\.", minPassed: 1, timeoutMs: 1_800_000 },
+  A10: { cmd: "cargo", args: ["test", "-p", "engine-editor", "--all-features", "tuning"], marker: "test result: ok\\.", minPassed: 1, timeoutMs: 1_800_000 },
+  B: { missing: "needs a second game, dedicated-server loss/jitter runs and a one-hour soak (FINISH-RICH B)" },
+  C1: { missing: "needs a real-device submit per ticked render row (FINISH-RICH C1)" },
+  C2: { missing: "needs the RT tier on the reference GPU (FINISH-RICH C2)" },
+  C3: { missing: "needs virtual geometry and the 20k crowd on the GPU (FINISH-RICH C3)" },
+  C4: { missing: "needs internet clients through the relay (FINISH-RICH C4)" },
+  C5: { missing: "needs streamed maps and a 10-minute 64-slot siege (FINISH-RICH C5)" },
+  P1: { missing: "needs GPU stills, ghost/shimmer tests and the review panel (FINISH-RICH P1)" },
+  P2: { missing: "needs the release-clock latency leg and the feel fixtures in one run (FINISH-RICH P2)" },
+  P3: { cmd: "cargo", args: ["test", "-p", "engine-playtest", "--all-features", "tournament", "--", "--test-threads=1"], marker: "test result: ok\\.", minPassed: 1, timeoutMs: 1_800_000 },
+  P4: { missing: "needs 64 clients under RTT and loss (FINISH-RICH P4)" },
+  P5: { missing: "needs a one-hour soak and the 10k fuzz corpus (FINISH-RICH P5)" },
+  P6: { missing: "needs CPU/GPU frame p95 on the reference GPU (FINISH-RICH P6)" },
+  P7: { missing: "needs six suite commands plus the 15-minute newcomer run (FINISH-RICH P7)" },
+  P8: { missing: "needs janitor sweeps, clippy -D warnings and a stub scan; no one command prints that verdict (FINISH-RICH P8)" },
+  P9: { missing: "needs a packaged exe on a clean Windows machine (FINISH-RICH P9)" },
+  P10: { cmd: "node", args: ["--test", "--test-reporter=tap", "tools/finish.test.mjs"], marker: "# fail 0\\b", minPassed: 1, timeoutMs: 180_000 },
+};
+
+export function parseProbes(text) {
+  const raw = JSON.parse(text);
+  const out = {};
+  for (const [gate, entry] of Object.entries(raw)) {
+    if (!GATES.includes(gate)) throw new Error(`unknown gate ${gate}`);
+    if (entry.missing) {
+      out[gate] = { missing: String(entry.missing) };
+      continue;
+    }
+    if (typeof entry.cmd !== "string" || !Array.isArray(entry.args) || typeof entry.marker !== "string") {
+      throw new Error(`${gate}: needs cmd, args and marker`);
+    }
+    out[gate] = {
+      cmd: entry.cmd,
+      args: entry.args.map(String),
+      marker: entry.marker,
+      timeoutMs: entry.timeoutMs ?? 120_000,
+      minPassed: entry.minPassed,
+    };
+  }
+  return out;
+}
+
+export function runProbe(entry, { cwd = process.cwd(), env = process.env } = {}) {
+  if (!entry || entry.missing) {
+    return { state: "missing", why: entry?.missing ?? "no probe for this gate" };
+  }
+  const bin = entry.cmd === "node" ? process.execPath : entry.cmd;
+  const cmd = [entry.cmd, ...(entry.args ?? [])].join(" ");
+  const started = Date.now();
+  const result = spawnSync(bin, entry.args ?? [], {
+    cwd,
+    env,
+    encoding: "utf8",
+    timeout: entry.timeoutMs ?? 120_000,
+    maxBuffer: 32 * 1024 * 1024,
+    shell: false,
+  });
+  const ms = Date.now() - started;
+  const out = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const base = { cmd, ms, exit: result.status };
+  if (result.error) {
+    return {
+      ...base,
+      state: result.error.code === "ETIMEDOUT" ? "timeout" : "fail",
+      why: result.error.message,
+    };
+  }
+  if (!new RegExp(entry.marker).test(out)) {
+    return { ...base, state: "fail", why: `marker /${entry.marker}/ not found` };
+  }
+  const passed =
+    [...out.matchAll(/(\d+) passed/g)].reduce((n, m) => n + Number(m[1]), 0) +
+    [...out.matchAll(/^# pass (\d+)$/gm)].reduce((n, m) => n + Number(m[1]), 0);
+  if (entry.minPassed !== undefined && passed < entry.minPassed) {
+    return { ...base, state: "fail", why: `${passed} test(s) passed (min ${entry.minPassed})` };
+  }
+  if (result.status !== 0) {
+    return { ...base, state: "fail", why: `exit ${result.status}`, tail: oneLine(out.slice(-300)) };
+  }
+  return { ...base, state: "pass", passed };
+}
+
+// `--check` is the scoreboard's own integrity test: every gate row resolves to
+// the board or the archive, and no met gate carries a suspect ticked row. It
+// does not require every gate met; the gates are the later stages' work.
+export function checkVerdict(results, unresolved, audit) {
+  const reasons = [];
+  if (!audit.ok) reasons.push("row audit unavailable (git ls-files failed)");
+  if (unresolved.size) {
+    reasons.push(
+      `${unresolved.size} gate row(s) on neither the board nor the archive: ${[...unresolved].join(", ")}`,
+    );
+  }
+  for (const r of results) {
+    if (r.status === "met" && r.suspectRows.length) {
+      reasons.push(`${r.gate} met with suspect row(s): ${r.suspectRows.map((s) => s.id).join(", ")}`);
+    }
+  }
+  return { pass: reasons.length === 0, reasons, audited: audit.audited, unchecked: audit.unchecked };
+}
+
+function probesFor(argv) {
+  if (argv.includes("--probes") && !argv.includes("--probe")) {
+    console.error("finish: --probes needs --probe");
+    process.exit(2);
+  }
+  if (!argv.includes("--probe")) return {};
+  const i = argv.indexOf("--probes");
+  if (i === -1) return PROBES;
+  const path = argv[i + 1];
+  if (!path || !existsSync(path)) {
+    console.error(`finish: probe fixture not found: ${path ?? "(missing path)"}`);
+    process.exit(2);
+  }
+  try {
+    return parseProbes(readFileSync(path, "utf8"));
+  } catch (error) {
+    console.error(`finish: bad probe fixture ${path}: ${error.message}`);
+    process.exit(2);
+  }
 }
 
 function main() {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    console.log("Usage: node tools/finish.mjs [--finish <path>] [--sprint <path>] [--archive <dir>] [--json]");
+    console.log("Usage: node tools/finish.mjs [--finish <path>] [--sprint <path>] [--archive <dir>] [--json] [--no-suspects] [--probe] [--probes <path>] [--check]");
     process.exit(0);
   }
   const cwd = process.cwd();
@@ -304,21 +491,30 @@ function main() {
   const sprintMd = (sprintPath === defaultSprint)
     ? loadBoardText().replace(/\r\n/g, "\n")
     : readFileSync(sprintPath, "utf8");
+  const checkMode = process.argv.includes("--check");
+  const probeMode = process.argv.includes("--probe");
+  if (checkMode && process.argv.includes("--no-suspects")) {
+    console.error("finish: --check needs the row audit; drop --no-suspects");
+    process.exit(2);
+  }
+  const probes = probeMode ? probesFor(process.argv) : {};
+
   const statusByGate = parseStatusTable(finishMd);
   const provenBy = parseProvenBy(finishMd);
-  // liveTicks is the board as it stands. ticks adds the archived done rows that
-  // ARCHIVE_TICKED_ROWS vouches for (landed code checked by hand).
-  const liveTicks = ticksFromBoard(sprintMd);
+  const board = parseBoard(sprintMd);
+  const liveTicks = ticksOf(board.tasks);
   const ticks = new Map(liveTicks);
   const archiveDir = argPath("--archive", join(cwd, "docs", "archive"));
-  const archiveTicks = ticksFromArchive(archiveDir);
-  for (const id of ARCHIVE_TICKED_ROWS) if (archiveTicks.get(id)) ticks.set(id, true);
+  const archive = readArchive(archiveDir);
+  for (const id of ARCHIVE_TICKED_ROWS) if (archive.ticks.get(id)) ticks.set(id, true);
   // A dropped row leaves the gates only while the live board does not reopen it.
   const liveOpen = (id) => liveTicks.get(id) === false;
+  const texts = new Map([...board.tasks].map(([id, row]) => [id, row.lines.join(" ")]));
+  for (const [id, text] of archive.texts) if (!texts.has(id)) texts.set(id, text);
 
   const unresolved = new Set();
   const droppedOpen = [];
-  const results = GATES.map((gate) => {
+  const resolved = GATES.map((gate) => {
     const statusText = statusByGate.get(gate) ?? "";
     let rows;
     if (gate.startsWith("P")) {
@@ -336,9 +532,17 @@ function main() {
     for (const r of rows) if (DROPPED_ROWS.has(r) && liveOpen(r)) droppedOpen.push(`${gate}:${r}`);
     rows = rows.filter((r) => !DROPPED_ROWS.has(r) || liveOpen(r));
     // A row on neither the board nor the archive is counted open, and named.
-    for (const r of rows) if (!liveTicks.has(r) && !archiveTicks.get(r)) unresolved.add(r);
-    return scoreGate(gate, rows, ticks, statusText);
+    for (const r of rows) if (!liveTicks.has(r) && !archive.ticks.get(r)) unresolved.add(r);
+    return { gate, statusText, rows };
   });
+
+  const audit = process.argv.includes("--no-suspects")
+    ? { ok: true, suspects: new Map(), audited: 0, unchecked: 0, skipped: true }
+    : loadSuspects(cwd, texts, resolved.flatMap((r) => r.rows));
+  if (!audit.ok) {
+    console.error("finish: warning: row audit unavailable (git ls-files failed); gates score ticks only");
+  }
+  const results = resolved.map((r) => scoreGate(r.gate, r.rows, ticks, r.statusText, audit.suspects));
 
   if (unresolved.size) {
     console.error(`finish: warning: rows on neither the live board nor the archive, counted open: ${[...unresolved].join(", ")} — restore their tick or update FALLBACK_ROWS in tools/finish.mjs`);
@@ -347,18 +551,54 @@ function main() {
     console.error(`finish: warning: dropped rows the live board reopened, counted again: ${droppedOpen.join(", ")} — update DROPPED_ROWS in tools/finish.mjs`);
   }
 
+  if (probeMode) {
+    for (const r of results) {
+      if (r.status !== "met") {
+        r.probe = { state: "skipped", why: "gate is not met on the board" };
+        continue;
+      }
+      r.probe = runProbe(probes[r.gate]);
+      r.status = r.probe.state === "pass"
+        ? "met"
+        : r.probe.state === "missing"
+          ? "probe-missing"
+          : "probe-failed";
+    }
+  }
+
+  const check = checkMode ? checkVerdict(results, unresolved, audit) : null;
+  if (checkMode) process.exitCode = check.pass ? 0 : audit.ok ? 1 : 2;
+
   if (asJson) {
-    console.log(JSON.stringify(results, null, 2));
+    console.log(JSON.stringify(checkMode ? { check, gates: results } : results, null, 2));
     return;
+  }
+  if (checkMode) {
+    const metWithSuspect = results.filter((r) => r.status === "met" && r.suspectRows.length).length;
+    console.log(
+      `Check: ${check.pass ? "PASS" : "FAIL"} — ${results.length} gates, ${audit.audited} row(s) audited ` +
+        `(${audit.unchecked} name no crate path or test), ${unresolved.size} unresolved, ` +
+        `${metWithSuspect} met gates with a suspect row`,
+    );
+    for (const reason of check.reasons) console.log(`  - ${reason}`);
   }
   for (const r of results) {
     const open = r.openRows.length ? r.openRows.join(", ") : "none";
-    console.log(`${r.gate}: ${r.status} — open rows: ${open} (${r.openRows.length}/${r.rows.length}) — evidence: ${r.evidence}`);
+    const sus = r.suspectRows.length
+      ? ` — suspect: ${r.suspectRows.map((s) => `${s.id} (${s.reason})`).join(", ")}`
+      : "";
+    const probe = r.probe && r.probe.state !== "skipped" ? ` — probe: ${r.probe.state}` : "";
+    console.log(`${r.gate}: ${r.status} — open rows: ${open} (${r.openRows.length}/${r.rows.length}) — evidence: ${r.evidence}${sus}${probe}`);
   }
-  const met = results.filter((r) => r.status === "met").length;
-  const partial = results.filter((r) => r.status === "partial").length;
-  const open = results.filter((r) => r.status === "open").length;
-  console.log(`Summary: ${met} met, ${partial} partial, ${open} open (FS1 scoreboard)`);
+  if (!checkMode) {
+    const met = results.filter((r) => r.status === "met").length;
+    const partial = results.filter((r) => r.status === "partial").length;
+    const open = results.filter((r) => r.status === "open").length;
+    const missing = results.filter((r) => r.status === "probe-missing").length;
+    const failed = results.filter((r) => r.status === "probe-failed").length;
+    const extra = probeMode ? `, ${missing} probe-missing, ${failed} probe-failed` : "";
+    console.log(`Summary: ${met} met, ${partial} partial, ${open} open${extra} (FS1 scoreboard)`);
+  }
 }
 
 if (import.meta.main) main();

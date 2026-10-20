@@ -29,9 +29,33 @@ thread_local! {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CountingAlloc;
 
+/// Count one successful allocation of `layout` on this thread while armed.
+fn note_alloc(layout: Layout) {
+    if !ARMED.get() {
+        return;
+    }
+    CALLS.set(CALLS.get().saturating_add(1));
+    let size = u64::try_from(layout.size()).unwrap_or(u64::MAX);
+    BYTES.set(BYTES.get().saturating_add(size));
+    let live = LIVE
+        .get()
+        .saturating_add(i64::try_from(size).unwrap_or(i64::MAX));
+    LIVE.set(live);
+    PEAK.set(PEAK.get().max(live));
+}
+
+/// Count one free of `layout` on this thread while armed.
+fn note_dealloc(layout: Layout) {
+    if !ARMED.get() {
+        return;
+    }
+    let size = i64::try_from(layout.size()).unwrap_or(i64::MAX);
+    LIVE.set(LIVE.get().saturating_sub(size));
+}
+
 #[expect(
     unsafe_code,
-    reason = "the workspace's one unsafe site: a counting allocator is only expressible as an unsafe GlobalAlloc impl"
+    reason = "the counting allocators are only expressible as unsafe GlobalAlloc impls: both forward every call unchanged to their inner allocator"
 )]
 // SAFETY: every call forwards the caller's layout and pointer unchanged to
 // `System`, so `System`'s guarantees hold. The counters are const-initialized
@@ -40,15 +64,8 @@ unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: the caller upholds `GlobalAlloc::alloc`'s layout contract.
         let ptr = unsafe { System.alloc(layout) };
-        if !ptr.is_null() && ARMED.get() {
-            CALLS.set(CALLS.get().saturating_add(1));
-            let size = u64::try_from(layout.size()).unwrap_or(u64::MAX);
-            BYTES.set(BYTES.get().saturating_add(size));
-            let live = LIVE
-                .get()
-                .saturating_add(i64::try_from(size).unwrap_or(i64::MAX));
-            LIVE.set(live);
-            PEAK.set(PEAK.get().max(live));
+        if !ptr.is_null() {
+            note_alloc(layout);
         }
         ptr
     }
@@ -56,10 +73,40 @@ unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // SAFETY: `ptr` came from `alloc` above with this same `layout`.
         unsafe { System.dealloc(ptr, layout) };
-        if ARMED.get() {
-            let size = i64::try_from(layout.size()).unwrap_or(i64::MAX);
-            LIVE.set(LIVE.get().saturating_sub(size));
+        note_dealloc(layout);
+    }
+}
+
+/// Any `A` allocator that counts this thread's allocations while armed, with
+/// the same counters as [`CountingAlloc`] (which is this over `System`).
+///
+/// A harness that measures a candidate backend (a different allocator row)
+/// installs this as its global allocator, so hash and allocation rows stay
+/// comparable with the system row at the same workload.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CountingAllocator<A: GlobalAlloc = System>(pub A);
+
+#[expect(
+    unsafe_code,
+    reason = "same shape as the unit counting allocator: forward unchanged to the inner backend and count on this thread"
+)]
+// SAFETY: every call forwards the caller's layout and pointer unchanged to the
+// inner allocator, so that allocator's guarantees hold. Only the same
+// const-initialized thread-local counters are touched.
+unsafe impl<A: GlobalAlloc> GlobalAlloc for CountingAllocator<A> {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller upholds `GlobalAlloc::alloc`'s layout contract.
+        let ptr = unsafe { self.0.alloc(layout) };
+        if !ptr.is_null() {
+            note_alloc(layout);
         }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `ptr` came from `self.0.alloc` with this same `layout`.
+        unsafe { self.0.dealloc(ptr, layout) };
+        note_dealloc(layout);
     }
 }
 

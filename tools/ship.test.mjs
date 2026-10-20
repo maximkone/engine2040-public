@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { archiveExistingDir, cleanFingerprint, cleanLedgerRow, cleanNormalize, createWallEstimator, describePresentMode, nextestArchiveArgs, nextestRunArgs, parseSmokeCounts, projectProbeWall, resolvePresentFlags, stagedFileReceipt, wallBudgetMs, writeArchiveAndJunit, writeArchiveReceipt, writeJunitReceipt, writeStagedReceipt } from "./ship.mjs";
+import { CHUNK_SLOT_MS, archiveExistingDir, chunkLegRow, chunkPlan, chunkSlotReport, cleanFingerprint, cleanLedgerRow, cleanNormalize, createWallEstimator, describePresentMode, joinedChunkProof, nextestArchiveArgs, nextestRunArgs, parseSmokeCounts, projectProbeWall, resolvePresentFlags, stagedFileReceipt, wallBudgetMs, writeArchiveAndJunit, writeArchiveReceipt, writeJunitReceipt, writeStagedReceipt } from "./ship.mjs";
 import { fnv1a64Hex } from "./fnv1a64.mjs";
 
 // Remove every temp folder this file makes when it exits (test temp folders piled up in %TEMP%).
@@ -367,4 +367,97 @@ test("a passing dry-run leaves its archive plus junit receipt beside the receipt
   const log = readFileSync(join(work, "clean-run.log"), "utf8");
   assert.match(log, /\$ archive: .*clean-run-archive\.json/);
   assert.match(log, /\$ junit: .*clean-run-junit\.xml/);
+});
+
+test("the GM3 chunk plan splits 18000 frames into legs that sum to the full proof", () => {
+  const plan = chunkPlan(18000, 3);
+  assert.equal(plan.totalFrames, 18000);
+  assert.deepEqual(plan.legs.map((l) => l.frames), [6000, 6000, 6000], "the plan's 3 legs are the 6000-frame slots");
+  assert.equal(plan.legs.reduce((n, l) => n + l.frames, 0), 18000, "chunks sum to the full proof");
+  assert.deepEqual(plan.legs.map((l) => [l.firstFrame, l.lastFrame]), [[1, 6000], [6001, 12000], [12001, 18000]], "legs cover contiguous frames");
+  assert.equal(plan.legs.reduce((n, l) => n + (l.lastFrame - l.firstFrame + 1), 0), 18000);
+  const uneven = chunkPlan(18000, 7);
+  const sizes = uneven.legs.map((l) => l.frames);
+  assert.equal(sizes.reduce((n, f) => n + f, 0), 18000, "an uneven split still sums to the full proof");
+  assert.ok(Math.max(...sizes) - Math.min(...sizes) <= 1, "leg sizes stay 1 apart at most");
+  assert.deepEqual(chunkPlan(18000, 1).legs.map((l) => l.frames), [18000], "one leg is today's single run");
+  assert.throws(() => chunkPlan(18000, 0), /--chunks/);
+  assert.throws(() => chunkPlan(5, 6), /--chunks 6 exceeds --frames 5/);
+});
+
+test("each chunk hash is stable across runs and blind to wall time", () => {
+  const counts = { ticks: 6000, framesPresented: 6000 };
+  const rowsOf = (plan) => plan.legs.map((leg) => chunkLegRow(plan, leg, counts));
+  const first = rowsOf(chunkPlan(18000, 3));
+  const again = rowsOf(chunkPlan(18000, 3));
+  assert.deepEqual(first.map((r) => r.hash), again.map((r) => r.hash), "same plan twice: same leg hashes");
+  assert.equal(new Set(first.map((r) => r.hash)).size, 3, "one hash per leg");
+  assert.match(first[0].hash, /^[0-9a-f]{16}$/);
+  assert.deepEqual(first[0], { index: 1, frames: 6000, first: 1, last: 6000, ticks: 6000, frames_presented: 6000, hash: first[0].hash });
+  const shifted = chunkLegRow(chunkPlan(18000, 3), chunkPlan(18000, 3).legs[0], { ticks: 5999, framesPresented: 5999 });
+  assert.notEqual(shifted.hash, first[0].hash, "a different tick count changes the hash");
+  const otherPlan = chunkLegRow(chunkPlan(12000, 2), chunkPlan(12000, 2).legs[0], counts);
+  assert.notEqual(otherPlan.hash, first[0].hash, "a different plan changes the hash");
+});
+
+test("the joined proof sums the legs and reports a missing leg as a mismatch", () => {
+  const plan = chunkPlan(18000, 3);
+  const rows = plan.legs.map((leg) => chunkLegRow(plan, leg, { ticks: leg.frames, framesPresented: leg.frames }));
+  const joined = joinedChunkProof(plan, rows);
+  assert.equal(joined.frames, 18000, "chunks sum to the full proof");
+  assert.equal(joined.expected, 18000);
+  assert.equal(joined.matches, true);
+  assert.match(joined.digest, /^[0-9a-f]{16}$/);
+  assert.equal(joinedChunkProof(plan, rows).digest, joined.digest, "the joined hash is stable");
+  const short = joinedChunkProof(plan, rows.slice(0, 2));
+  assert.equal(short.frames, 12000);
+  assert.equal(short.matches, false, "2 of 3 legs never counts as the full proof");
+});
+
+test("chunk slots project each leg against the 30 min slot from one probe", () => {
+  assert.equal(CHUNK_SLOT_MS, 1_800_000, "the slot is 30 min");
+  const plan = chunkPlan(18000, 3);
+  const fits = chunkSlotReport(plan, 138); // the RTX 3050 twin's 83 s per 600 frames
+  assert.deepEqual(fits.projected, [828_000, 828_000, 828_000]);
+  assert.deepEqual(fits.over, [], "a 6000-frame leg at 138 ms/frame fits the slot");
+  const slow = chunkSlotReport(plan, 520); // the contended reading, 62 s per 120 frames
+  assert.deepEqual(slow.over, [1, 2, 3], "a slow box puts every leg over the slot");
+  assert.deepEqual(chunkSlotReport(plan, 0), { projected: [], over: [] }, "no rate: no claim");
+});
+
+test("an 18000-frame dry-run in 3 legs prints a joined proof whose hashes repeat", () => {
+  const fixture = stageFixture(mkdtempSync(join(tmpdir(), "e2040-ship-test-")));
+  const oneRun = () => {
+    const work = mkdtempSync(join(tmpdir(), "e2040-ship-test-"));
+    const logPath = join(work, "clean-run.log");
+    const receiptPath = join(work, "clean-run-receipt.json");
+    const r = runShip(["run", "--dry-run", "--fixture", fixture, "--work", work, "--log", logPath, "--receipt", receiptPath, "--frames", "18000", "--chunks", "3"]);
+    return { r, log: readFileSync(logPath, "utf8"), receipt: JSON.parse(readFileSync(receiptPath, "utf8")) };
+  };
+  const first = oneRun();
+  const second = oneRun();
+  assert.equal(first.r.status, 0, `chunked dry-run passes: ${first.r.out.slice(0, 300)}`);
+  assert.match(first.log, /\$ chunk plan: 3 legs \(6000\+6000\+6000\) = 18000 frames/);
+  assert.match(first.log, /\$ chunk note: each leg boots a fresh bout/);
+  for (const i of [1, 2, 3]) {
+    assert.match(first.log, new RegExp(`\\$ chunk ${i}/3: frames ${(i - 1) * 6000 + 1}-${i * 6000} \\(6000\\) ticks=6000 presented=6000 wall_ms=\\d+ hash=[0-9a-f]{16}`));
+  }
+  assert.match(first.log, /\$ chunks: 3 legs, 18000 of 18000 frames played, sum matches, joined hash=[0-9a-f]{16}/);
+  assert.match(first.log, /\$ chunk slots: legs project \d+\+\d+\+\d+ ms against the 1800000 ms slot \(fits\)/);
+  assert.equal(first.receipt.chunks.length, 3, "one row per leg");
+  assert.deepEqual(first.receipt.chunks.map((c) => c.frames), [6000, 6000, 6000]);
+  assert.equal(first.receipt.frames, 18000);
+  assert.equal(first.receipt.ticks, 18000, "leg ticks sum to the full proof");
+  assert.equal(first.receipt.frames_presented, 18000);
+  assert.equal(first.receipt.chunk_sum, true);
+  assert.deepEqual(first.receipt.chunk_plan, { legs: 3, total_frames: 18000 });
+  assert.deepEqual(first.receipt.chunks.map((c) => c.hash), second.receipt.chunks.map((c) => c.hash), "each leg hash is stable across runs");
+  assert.equal(second.receipt.joined_hash, first.receipt.joined_hash, "the joined hash is stable across runs");
+  assert.equal(second.log.match(/CLEAN-RUN PASS/g).length, 1, "a chunked pass closes with 1 PASS line");
+});
+
+test("--chunks past the frame count is a usage error", () => {
+  const r = runShip(["run", "--dry-run", "--frames", "2", "--chunks", "3"]);
+  assert.equal(r.status, 2, "usage errors exit 2");
+  assert.match(r.out, /--chunks 3 exceeds --frames 2/);
 });

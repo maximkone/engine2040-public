@@ -27,6 +27,7 @@
 use crate::apply::{apply_due, apply_due_into, AppliedBatch};
 use crate::curves::{AiConfig, AiCurves};
 use crate::curves_text::AiRowsError;
+use crate::decision_log::{Decision, DecisionLog};
 use crate::melee::MeleeView;
 use crate::mind::{ActionLog, MindRequest};
 use engine_input::fighter::{ATTACK, BLOCK, DODGE, FACING_RANGE};
@@ -310,6 +311,7 @@ pub struct Brain {
     last_intent: Intent,
     far_streak: u32,
     config: AiConfig,
+    decisions: Option<DecisionLog>,
 }
 
 impl Brain {
@@ -356,6 +358,7 @@ impl Brain {
             last_intent: Intent::Advance,
             far_streak: 0,
             config: valid,
+            decisions: None,
         }
     }
 
@@ -404,6 +407,56 @@ impl Brain {
         self.last_intent
     }
 
+    /// Turn the decision ring on with `cap` rows (clamped by
+    /// [`DecisionLog::new`]). Off by default: while off, deciding does no extra
+    /// scoring and allocates nothing. While on, each evaluation appends one row
+    /// and the oldest row drops when the ring is full.
+    pub fn record_decisions(&mut self, cap: usize) {
+        self.decisions = Some(DecisionLog::new(cap));
+    }
+
+    /// Turn the ring off and drop the recorded rows.
+    pub fn stop_recording(&mut self) {
+        self.decisions = None;
+    }
+
+    /// Recorded decisions, or `None` while the ring is off.
+    pub fn decisions(&self) -> Option<&DecisionLog> {
+        self.decisions.as_ref()
+    }
+
+    /// Lane scores for the decision ring, mirroring [`Brain::score_intent`].
+    /// Called only while recording, so the default path pays nothing.
+    fn report_scores(&self, percept: &Percept, dist_mm: i32, bias: [i32; 5]) -> [f32; 5] {
+        if self.far_streak >= Self::FAR_STREAK_TICKS {
+            return [0.0; 5];
+        }
+        if self.morale == Self::MORALE_NEUTRAL {
+            let base = utility_scores_cfg(
+                dist_mm,
+                percept.foe_attacking,
+                self.morale,
+                &self.config.curves,
+            );
+            let mut scores = [0.0; 5];
+            for lane in 0..5 {
+                let value = base[lane].saturating_add(bias[lane]);
+                scores[lane] = f32::from(i16::try_from(value).unwrap_or(i16::MAX));
+            }
+            return scores;
+        }
+        let clamped = self.morale.clamp(Self::MORALE_MIN, Self::MORALE_MAX);
+        let seen = u16::try_from(clamped).unwrap_or(500);
+        let nerve = crate::personality::Personality::new(0, 1_200, seen);
+        thinker_scores(
+            dist_mm,
+            percept.foe_attacking,
+            self.morale,
+            &nerve.weights(),
+            bias,
+        )
+    }
+
     /// Decide one [`FighterInput`] for `percept`.
     ///
     /// Re-scores on perception ticks only; between them the last intent is
@@ -445,6 +498,17 @@ impl Brain {
             // No history yet (unreachable after first eval); fall through.
         }
         let intent = self.score_intent(percept, dist_mm, bias);
+        if self.decisions.is_some() {
+            let scores = self.report_scores(percept, dist_mm, bias);
+            if let Some(log) = self.decisions.as_mut() {
+                log.push(Decision {
+                    tick: percept.tick,
+                    fighter: self.fighter.0,
+                    scores,
+                    chosen: crate::opponent::lane_index(intent),
+                });
+            }
+        }
         let facing = self.face_percept(percept);
         let input = emit(self.fighter, percept.tick, intent, facing);
         self.last_eval_tick = Some(percept.tick);

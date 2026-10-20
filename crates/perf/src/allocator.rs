@@ -54,6 +54,19 @@ impl Display for AllocatorKind {
     }
 }
 
+/// The allocator this build installs as the process global: `System` in the
+/// default build, `Mimalloc` under the `mimalloc` feature. A row names the
+/// allocator that produced it, so the harness reads this instead of assuming;
+/// the A/B is two builds of the same harness, one per backend.
+#[must_use]
+pub const fn active_kind() -> AllocatorKind {
+    if cfg!(feature = "mimalloc") {
+        AllocatorKind::Mimalloc
+    } else {
+        AllocatorKind::System
+    }
+}
+
 /// Allocator comparison failure: which side refused, with the value carried.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AllocatorError {
@@ -179,12 +192,26 @@ pub fn system_rows() -> [WorkloadReport; 4] {
     ]
 }
 
+/// Nearest-rank percentile `percent` (0..=100) over an ascending sorted slice;
+/// 0.0 when the slice holds no sample. Integer rank math only, so the system
+/// row and a candidate row (`--features mimalloc`) report p50, p95 and p99 by
+/// the same rule: rank is `round(end * percent / 100)`, half up.
+#[must_use]
+pub fn percentile(sorted: &[f64], percent: u32) -> f64 {
+    let Some(end) = sorted.len().checked_sub(1) else {
+        return 0.0;
+    };
+    let scale = usize::try_from(percent).unwrap_or(usize::MAX);
+    let rank = end.saturating_mul(scale).saturating_add(50) / 100;
+    sorted.get(rank.min(end)).copied().unwrap_or(0.0)
+}
+
 /// Candidate-allocator rows beside [`system_rows`]: same workloads, same
-/// shape, so hash/alloc columns match field for field. The backend is still
-/// `System` (the mimalloc global plugs in here when its manifest/deny/lock
-/// lane lands), hence identical by construction and the swap stays dropped
-/// per [`SPEEDUP_PCT`]. Caller: `perf --alloc-compare` plus the
-/// candidate-vs-system test.
+/// shape, so hash/alloc columns match field for field. The backend is the
+/// process's global allocator: `System` in the default build, and `mimalloc`
+/// in the `mimalloc`-feature test binary that installs it, so a candidate row
+/// names the allocator that actually produced it. Caller:
+/// `perf --alloc-compare` plus the candidate-vs-system test.
 #[must_use]
 pub fn candidate_rows() -> [WorkloadReport; 4] {
     system_rows()
@@ -267,7 +294,10 @@ pub fn box_conditions() -> String {
     } else {
         "release"
     };
-    format!("# box: scheme={scheme} cpu={cpu} mhz={mhz} load={load}% threads=1 profile={profile}")
+    format!(
+        "# box: allocator={} scheme={scheme} cpu={cpu} mhz={mhz} load={load}% threads=1 profile={profile}",
+        active_kind()
+    )
 }
 
 #[cfg(test)]
@@ -284,9 +314,45 @@ mod tests {
     fn box_line_names_its_fields() {
         let line = box_conditions();
         assert!(line.starts_with("# box:"), "{line}");
-        for token in ["scheme=", "cpu=", "mhz=", "load=", "threads=1", "profile="] {
+        for token in [
+            "allocator=",
+            "scheme=",
+            "cpu=",
+            "mhz=",
+            "load=",
+            "threads=1",
+            "profile=",
+        ] {
             assert!(line.contains(token), "{line} names {token}");
         }
+        assert!(
+            line.contains(&format!("allocator={}", active_kind())),
+            "{line} names the backend this build installs"
+        );
+    }
+
+    #[test]
+    fn percentile_reads_nearest_rank_on_a_sorted_slice() {
+        let sorted: Vec<f64> = (1..=100u32).map(f64::from).collect();
+        // Index ranks over 0..=99: 50, 94 and 98, i.e. the 51st, 95th, 99th
+        // values. Same figures the float formula gave before the integer rank.
+        assert_eq!(percentile(&sorted, 50), 51.0);
+        assert_eq!(percentile(&sorted, 95), 95.0);
+        assert_eq!(percentile(&sorted, 99), 99.0);
+        assert_eq!(percentile(&sorted, 0), 1.0, "rank 0 keeps the smallest");
+        assert_eq!(
+            percentile(&sorted, 100),
+            100.0,
+            "rank 100 keeps the largest"
+        );
+        assert_eq!(
+            percentile(&[], 50),
+            0.0,
+            "no sample reads zero, never a panic"
+        );
+        assert_eq!(percentile(&[7.5], 99), 7.5);
+        // The same slice answers the same figure twice.
+        assert_eq!(percentile(&sorted, 95), percentile(&sorted, 95));
     }
 
     #[test]

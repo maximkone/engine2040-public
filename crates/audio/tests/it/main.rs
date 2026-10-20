@@ -11,3 +11,4 @@ mod feed_contention;
 mod music_tension;
 mod occlusion_xover;
 mod presence;
+mod strike_sound;

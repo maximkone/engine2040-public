@@ -15,6 +15,7 @@
 use super::delta::{ioq3_encode_fields, ioq3_fields_wire_len, BodySnap, FullSnap, Ioq3SnapFields};
 use super::scale::{DELTA_HEADER_LEN, MAX_DATAGRAM_BYTES, TICK_HZ};
 use super::session::{ioq3_fragment_message, NetError};
+use crate::validate::SortedUnique;
 use engine_core::hash::Fnv64;
 
 /// Largest entity population one selection handles (64 fighters plus 500
@@ -582,12 +583,11 @@ fn check_order(entities: &[InterestEntity]) -> Result<(), InterestError> {
             got: entities.len(),
         });
     }
-    let mut prev: Option<u32> = None;
+    let mut order = SortedUnique::new();
     for e in entities {
-        if prev.is_some_and(|p| e.id <= p) {
+        if !order.push(e.id) {
             return Err(InterestError::UnsortedEntities);
         }
-        prev = Some(e.id);
     }
     Ok(())
 }

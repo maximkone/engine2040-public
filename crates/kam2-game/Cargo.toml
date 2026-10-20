@@ -1,0 +1,48 @@
+[package]
+name = "kam2-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "KAM6: the first playable kam2 match (AI mayor on side 1, 2.5D window, HUD, PNG receipt)"
+# Only `kam2play` and `kam2match` are binaries: the files beside them are their
+# modules (gpu.rs), and autodiscovery would otherwise try to build every file
+# under src/bin as a bin.
+autobins = false
+
+[lints]
+workspace = true
+
+[features]
+# The window leg is opt-in like engine-render's: the default build is the pure
+# match, view, scene and HUD library, so `cargo test -p kam2-game --lib` needs
+# no GPU. `kam2play` is the window binary and asks for this feature; the
+# headless `kam2match` binary runs the same match loop without it.
+window = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:image", "engine-render/window"]
+
+# Only `kam2play` draws: the files beside it are its modules (gpu.rs).
+[[bin]]
+name = "kam2play"
+path = "src/bin/kam2play/main.rs"
+required-features = ["window"]
+
+# The headless receipt: the AI match, 3000 ticks, one line. No window feature.
+[[bin]]
+name = "kam2match"
+path = "src/bin/kam2match/main.rs"
+
+[dependencies]
+kam2-sim = { version = "0.1.0", path = "../kam2-sim" }
+engine-render.workspace = true
+engine-ui.workspace = true
+# sRGB palette conversion for the flat shape pass (std-only default features).
+engine-assets.workspace = true
+# The one monotonic time source for the 10 Hz shell tick; never a sim input.
+engine-clock.workspace = true
+# The packed soldier manifest is JSON; the workspace already owns the reader.
+serde_json.workspace = true
+# PNG-only image, like engine-render: the avif chain fails the license gate.
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+pollster = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+winit = { workspace = true, optional = true }

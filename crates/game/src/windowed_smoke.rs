@@ -88,6 +88,20 @@ pub(crate) fn parse_fighter_count(raw: &str) -> Result<u8, WinError> {
     u8::try_from(value).map_err(|_| WinError::BadArgs(format!("--fighters {raw}")))
 }
 
+/// Parse one `--fixed-dt` value: the frame period in milliseconds.
+/// Unparsable, zero or over [`FIXED_DT_MAX_MS`] fails loudly naming the
+/// flag; a bad period never silently becomes the default pace.
+/// Split out of the CLI parse (fn-length bar).
+pub(crate) fn parse_fixed_dt_value(raw: &str) -> Result<u32, WinError> {
+    let value: u32 = raw
+        .parse()
+        .map_err(|_| WinError::BadArgs(format!("--fixed-dt {raw}")))?;
+    if value == 0 || value > super::FIXED_DT_MAX_MS {
+        return Err(WinError::BadArgs(format!("--fixed-dt {raw}")));
+    }
+    Ok(value)
+}
+
 /// Format one timed-smoke line: presented frames plus wall elapsed plus
 /// measured fps. Non-finite or non-positive elapsed fails loudly.
 pub fn format_timed_smoke(frames: u32, ticks: u32, elapsed_ms: f64) -> Result<String, WinError> {

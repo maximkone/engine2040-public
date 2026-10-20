@@ -207,6 +207,9 @@ pub struct Presenter {
     /// Live GTAO on the forward-stored depth (LF3): both compute kernels
     /// plus the neutral-reset flag; the frame-size resources ride the targets.
     pub(crate) gtao_gpu: super::gtao_live::GtaoGpu,
+    /// GS43: contact-shadow strength (1 on, 0 off). Strength 0 copies the
+    /// GTAO field through, so an off capture is byte-equal to no pass.
+    pub(crate) contact_strength: f32,
     /// IBL chart bind state (steady-state submits size nothing;
     /// the reuse test in `ibl.rs` proves it).
     pub(crate) ibl_sub: ibl::gpu::IblSubmitter,
@@ -316,6 +319,9 @@ pub struct Presenter {
     pub(crate) acquire_us: u64,
     /// Surface frames acquired.
     pub(crate) acquire_frames: u64,
+    /// Wall time of the most recent surface acquire (us). The swapchain
+    /// wait of one frame, so a perf run can name the frame that blocked.
+    pub(crate) last_acquire_us: u64,
     /// The fog pair holds stale probe output and must be reset to neutral
     /// before the next live frame blits it.
     pub(crate) neutral_fog_pending: bool,
@@ -1178,6 +1184,7 @@ impl Presenter {
             gpu_timer,
             acquire_us: 0,
             acquire_frames: 0,
+            last_acquire_us: 0,
             neutral_fog_pending: false,
             overlay: overlay::OverlayRing::new(),
             bloom: BloomState::on(),
@@ -1193,6 +1200,7 @@ impl Presenter {
             fog_sub: fog::FogSubmitter::new(&device),
             gtao_sub: gtao::GtaoSubmitter::new(&device),
             gtao_gpu: super::gtao_live::GtaoGpu::new(&device),
+            contact_strength: 1.0,
             ibl_sub: ibl::gpu::IblSubmitter::new(&device),
             ibl_bake,
             ibl_prefilter,
@@ -2394,6 +2402,12 @@ impl Presenter {
     /// present modes park here).
     pub fn acquire_mean_us(&self) -> u64 {
         self.acquire_us / self.acquire_frames.max(1)
+    }
+
+    /// Wall time of the last swapchain acquire in us: the wait of the most
+    /// recent frame alone, so a perf run can name the frame that blocked.
+    pub fn last_acquire_us(&self) -> u64 {
+        self.last_acquire_us
     }
 
     /// Present mode the surface was configured with (`None` without a

@@ -129,12 +129,17 @@ impl StageRecord {
     /// Converged digest of the canonical bytes. Equality across runs is the
     /// replay proof; the absolute value is never compared across shapes.
     pub fn digest(&self) -> u64 {
-        let mut stage_hasher = Fnv64::with_state(FNV64_OFFSET ^ REPLAY_DOMAIN);
-        stage_hasher.write(&self.encode());
-        stage_hasher.finish()
+        record_digest(&self.encode())
     }
 }
 
+/// Converged digest of one canonical record's bytes: the replay domain and the
+/// FNV-64 order every record in the chain shares.
+fn record_digest(bytes: &[u8]) -> u64 {
+    let mut hasher = Fnv64::with_state(FNV64_OFFSET ^ REPLAY_DOMAIN);
+    hasher.write(bytes);
+    hasher.finish()
+}
 /// Full-chain record: one `StageRecord` per AB stage in canonical order plus
 /// the play proof. The offline replay rebuilds from the brief inputs and
 /// requires these bytes back byte-identically, providers off.
@@ -280,9 +285,7 @@ impl ChainRecord {
 
     /// Converged digest of the canonical bytes.
     pub fn digest(&self) -> u64 {
-        let mut chain_hasher = Fnv64::with_state(FNV64_OFFSET ^ REPLAY_DOMAIN);
-        chain_hasher.write(&self.encode());
-        chain_hasher.finish()
+        record_digest(&self.encode())
     }
 
     /// One-line replay receipt: brief, seed, stages, play and package digests.

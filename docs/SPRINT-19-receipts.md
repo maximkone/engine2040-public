@@ -5,6 +5,17 @@ Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 <!-- template: new blocks append via `node tools/land.mjs <packet> --dry` + `node tools/proof.mjs --skip-build`; do not hand-type golden/proof lines -->
 > Golden `d57b5c8ae3096614` holds for every landing below unless the block names a move; new blocks paste the land+proof output, not hand-typed hashes.
 
+### 2026-10-20, VS9 the daily arena shot
+
+- fc2c97cf: `tools/arena-shot.mjs` runs the pinned capture at HEAD, writes three frames, three mask PNGs, manifest, per-pass timings, `masks.json` and `shot.json` under `target/vs9/`, and refuses a cube digest, 64x48 noise, an empty fighter box and magenta above 0.5%. Proof: `node tools/arena-shot.mjs` PASS at build beb39410, `frames=3 masks=3 magenta_max=0.000%`; `--self-check` 17/17; golden `d57b5c8ae3096614` PASS. Left: the pre-VS1 cube build is gone, so the cube-SHA refusal replays only as the pinned-digest rule.
+
+### 2026-10-20, E79 dedicated server, E63 strict config, UW18 squad orders, ON25 TURN
+
+- 701f9b34 E79: MasterList register/list, ServerBrowser and `HeadlessServer::beacon` on an IPv4 integer wire (3 B query, 23 B entry, 740 B reply under 1200 B), pure and never inside `tick`. Proof: `cargo test -p engine-net --lib dedicated` 10 passed x2; `cargo test -p engine-net --lib` 404 passed; listing `servers=1 fighters=2 tick=64 hash=0e2d1288d6e8d002 joined=2 ticks=64`; golden x2; clippy clean. Left: IPv6 registration refuses as `BadHost` until a widening row.
+- 1a0cc6e0 E63: `layered_extract_strict` reads env then file then defaults and refuses any bad or unknown row as `BadConfig`; `GameConfig` derives `JsonSchema` with `deny_unknown_fields`. Proof: `cargo test -p engine-game --lib layered_extract` 9 passed (6 pre-existing + 3 new); config_vectors 8 passed; golden x2; `cargo deny check` ok.
+- 1751ea1a UW18: `crates/ai/src/orders.rs` squad orders (move, hold, fall in, stack, mirror, wedge, breach family then bang/stinger/gas/none, restrain, collect, split), versioned tape encode/decode, typed `OrderError`, replay book. Proof: `cargo test -p engine-ai --lib orders` 9 passed; legion 14 passed 1 ignored; clippy clean.
+- 577b9122 ON25: TURN allocation discipline (Allocate/Refresh lifetimes, CreatePermission before forward, ChannelBind multiplexing) opt-in on `RelayHub` via `with_turn`, default relay untouched. Proof: `cargo test -p engine-net --lib relay` 30 passed; ON30 QUIC relay leg 1 passed; release hash `d57b5c8ae3096614` x2; clippy clean. Left: ON27 wires the live allocation path.
+
 ### 2026-10-10, EG9 linear HDR frame and one forward shader file
 
 - 58d22d62 (shaders reached HEAD in auto-backup 99b54cb7): forward writes linear radiance with exposure only into Rgba16Float; blit.wgsl does the one ACES plus sRGB tone map (tonemap.wgsl). All forward WGSL lives in crates/render/src/shaders/forward.wgsl via include_str! (static, skinned, depth-only, sky entries); no replacen on WGSL left (a test scans the sources); v1_skin.rs lost its second BRDF copy. attach_surface picked an sRGB swapchain while the blit also encoded sRGB (double gamma): fixed, device test within 2 bytes.

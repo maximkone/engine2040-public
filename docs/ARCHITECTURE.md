@@ -66,6 +66,7 @@ runs the state machine door state (`anim.graph.set`, `anim.graph.undo`, `anim.pr
 `engine-endpoint` depends on `engine-input` behind its `mcp` feature: `play.run` validates tape inputs against the fighter contract ranges (`WISH_RANGE`, `FACING_RANGE`, `KNOWN_BUTTONS`) that `engine_input::fighter` owns, instead of mirroring them; input never imports endpoint.
 `engine-endpoint` depends on `engine-playtest` behind its `mcp` feature (the real `look.judge` host) and on `engine-proof` behind its off-by-default `verify` feature: the `verify` pack serves `replay.verify`, `replay.bisect`, `bug.replay`, `trace.summary` and `verify.proof` from the playtest replay and proof bug/trace bodies, so the door and the library measure the same rows; playtest and proof never import endpoint.
 `engine-proof` depends on `engine-combat` (default features): `break_corpus.rs` feeds 10,000 seeded swings to the cut resolver and pins one digest; combat never imports proof.
+`kam2-game` is the KAM3 window shell (first playable window): it composes `kam2-sim` (std-only, IO-free, no engine crate), the `engine-render` window leg (the fixed 2.5D projection, the procedural sprite atlas and the HUD pass), `engine-ui` HUD data, `engine-assets` palette conversion and `engine-clock` for the 10 Hz shell tick. Render never imports the game crate, and no frame, camera or clock reading enters the sim; the crate map and `tools/workspace-check.mjs` carry the same edge.
 
 ### Crate integration status (2026-10-01)
 

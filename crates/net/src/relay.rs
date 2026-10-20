@@ -44,6 +44,12 @@ const CHALLENGE_SALT: u64 = 0x51A7_C4A1_1E69_0A30;
 /// the conformance half of this module, re-exported unchanged.
 pub use crate::relay_ice::*;
 
+/// TURN allocation discipline: lifetimes, permissions and channel binds,
+/// split to keep one owner file bounded. Re-exported unchanged.
+#[path = "relay_turn.rs"]
+mod relay_turn;
+pub use relay_turn::*;
+
 /// Relay and join failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RelayError {
@@ -649,6 +655,7 @@ pub struct RelayHub {
     server: RelayServer,
     addrs: std::collections::BTreeMap<u64, SocketAddr>,
     creds: Option<StunCreds>,
+    turn: Option<TurnAllocator>,
     stats: HubStats,
 }
 
@@ -659,6 +666,7 @@ impl RelayHub {
             server: RelayServer::new(config),
             addrs: std::collections::BTreeMap::new(),
             creds: None,
+            turn: None,
             stats: HubStats::default(),
         }
     }
@@ -669,6 +677,90 @@ impl RelayHub {
     pub fn with_creds(mut self, creds: StunCreds) -> Self {
         self.creds = Some(creds);
         self
+    }
+
+    /// Enable TURN allocation discipline: forwards then need a live
+    /// allocation plus a channel or permission for the destination.
+    pub fn with_turn(mut self, base_port: u16) -> Result<Self, RelayError> {
+        self.turn = Some(TurnAllocator::new(base_port)?);
+        Ok(self)
+    }
+
+    /// Move the TURN clock; lifetimes are tick counts.
+    pub fn advance(&mut self, now: u32) {
+        if let Some(turn) = &mut self.turn {
+            turn.advance(now);
+        }
+    }
+
+    /// TURN counters, `None` when the discipline is off.
+    pub fn turn_stats(&self) -> Option<TurnStats> {
+        self.turn.as_ref().map(TurnAllocator::stats)
+    }
+
+    /// Allocate a relayed port for a registered client.
+    pub fn allocate(
+        &mut self,
+        client_id: u64,
+        requested_ttl: u32,
+    ) -> Result<TurnAllocation, RelayError> {
+        if !self.addrs.contains_key(&client_id) {
+            return Err(RelayError::UnknownPeer(client_id));
+        }
+        self.turn
+            .as_mut()
+            .ok_or(RelayError::Unauthorized)?
+            .allocate(client_id, requested_ttl)
+    }
+
+    /// Refresh (a zero ttl releases) a registered client's allocation.
+    pub fn refresh(
+        &mut self,
+        client_id: u64,
+        requested_ttl: u32,
+    ) -> Result<Option<TurnAllocation>, RelayError> {
+        if !self.addrs.contains_key(&client_id) {
+            return Err(RelayError::UnknownPeer(client_id));
+        }
+        self.turn
+            .as_mut()
+            .ok_or(RelayError::Unauthorized)?
+            .refresh(client_id, requested_ttl)
+    }
+
+    /// CreatePermission for a registered peer.
+    pub fn create_permission(
+        &mut self,
+        client_id: u64,
+        peer_client: u64,
+    ) -> Result<(), RelayError> {
+        let peer = self
+            .addrs
+            .get(&peer_client)
+            .copied()
+            .ok_or(RelayError::UnknownPeer(peer_client))?;
+        self.turn
+            .as_mut()
+            .ok_or(RelayError::Unauthorized)?
+            .create_permission(client_id, peer)
+    }
+
+    /// ChannelBind `channel` to a registered peer.
+    pub fn bind_channel(
+        &mut self,
+        client_id: u64,
+        channel: u16,
+        peer_client: u64,
+    ) -> Result<(), RelayError> {
+        let peer = self
+            .addrs
+            .get(&peer_client)
+            .copied()
+            .ok_or(RelayError::UnknownPeer(peer_client))?;
+        self.turn
+            .as_mut()
+            .ok_or(RelayError::Unauthorized)?
+            .bind_channel(client_id, channel, peer)
     }
 
     /// The forward-only relay inside.
@@ -771,6 +863,12 @@ impl RelayHub {
             self.stats.refused += 1;
             return Vec::new();
         };
+        if let Some(turn) = &mut self.turn {
+            if turn.permit(from, dest).is_err() {
+                self.stats.refused += 1;
+                return Vec::new();
+            }
+        }
         if self.server.forward(from, to, payload).is_err() {
             self.stats.refused += 1;
             return Vec::new();
@@ -2047,5 +2145,243 @@ mod tests {
         assert_eq!(stamped.state(), 0x33);
         assert_eq!(stamped.held_rows(), vec![0, 1, 2]);
         assert_eq!(stamped.peer_rows_refused(), 0);
+    }
+
+    fn turn_ip(last: u8, port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, last)), port)
+    }
+
+    #[test]
+    fn turn_allocation_grants_clamps_refreshes_and_expires() {
+        let mut turn = TurnAllocator::new(49_152).expect("base port");
+        assert!(matches!(TurnAllocator::new(0), Err(RelayError::BadInput)));
+        turn.advance(100);
+        let first = turn.allocate(1, 0).expect("allocate");
+        assert_eq!(
+            (first.relayed_port, first.ttl_ticks),
+            (49_152, TURN_ALLOC_TTL_TICKS)
+        );
+        assert!(
+            first.is_live(100 + TURN_ALLOC_TTL_TICKS),
+            "the lifetime bar is inclusive"
+        );
+        assert!(!first.is_live(101 + TURN_ALLOC_TTL_TICKS));
+        let second = turn
+            .allocate(2, TURN_ALLOC_MAX_TICKS + 10)
+            .expect("allocate");
+        assert_eq!(second.ttl_ticks, TURN_ALLOC_MAX_TICKS, "a long ask clamps");
+        assert_eq!(second.relayed_port, 49_153);
+        assert!(
+            matches!(turn.allocate(1, 0), Err(RelayError::SlotFull)),
+            "a live allocation is never replaced"
+        );
+        turn.advance(100 + TURN_ALLOC_TTL_TICKS);
+        assert!(turn.live(1).is_some(), "live exactly at the bar");
+        assert!(
+            turn.refresh(1, 0).expect("refresh").is_none(),
+            "zero deletes"
+        );
+        assert!(turn.live(1).is_none());
+        assert!(
+            matches!(turn.refresh(1, 60), Err(RelayError::Expired)),
+            "a refresh never revives"
+        );
+        assert_eq!(turn.stats().released, 1);
+        turn.advance(100 + TURN_ALLOC_TTL_TICKS + TURN_ALLOC_MAX_TICKS + 1);
+        assert!(turn.live(2).is_none(), "the long allocation lapsed");
+        let fresh = turn.allocate(2, 60).expect("re-allocate");
+        assert_eq!(fresh.relayed_port, 49_152, "a lapsed port is reusable");
+    }
+
+    #[test]
+    fn turn_hub_forwards_only_after_create_permission_and_refuses_stale() {
+        let config = RelayConfig::default();
+        let mut hub = RelayHub::new(config).with_turn(49_160).expect("turn port");
+        let (a, b, c) = (turn_ip(1, 5001), turn_ip(2, 5002), turn_ip(3, 5003));
+        for (id, addr) in [(1, a), (2, b), (3, c)] {
+            let register = RelayMsg::Register {
+                client_id: id,
+                token: config.token,
+            }
+            .encode()
+            .expect("register");
+            assert_eq!(hub.handle(addr, &register).len(), 1);
+        }
+        let forward = |from, to| {
+            RelayMsg::Forward {
+                from,
+                to,
+                payload: b"turn".to_vec(),
+            }
+            .encode()
+            .expect("forward")
+        };
+        assert!(
+            matches!(hub.allocate(9, 0), Err(RelayError::UnknownPeer(9))),
+            "only registered clients allocate"
+        );
+        assert!(hub.handle(a, &forward(1, 2)).is_empty());
+        assert_eq!(hub.turn_stats().expect("turn on").refused_stale, 1);
+        assert_eq!(hub.server().stats().forwarded, 0);
+        for id in [1, 2] {
+            hub.allocate(id, 0).expect("allocate");
+        }
+        assert!(hub.handle(a, &forward(1, 2)).is_empty());
+        assert_eq!(hub.turn_stats().expect("turn on").refused_unpermitted, 1);
+        hub.create_permission(1, 2).expect("permission");
+        assert_eq!(hub.handle(a, &forward(1, 2)), vec![(b, forward(1, 2))]);
+        assert!(
+            hub.handle(a, &forward(1, 3)).is_empty(),
+            "a permission names one peer IP"
+        );
+        hub.advance(TURN_PERMISSION_TTL_TICKS);
+        assert_eq!(hub.handle(a, &forward(1, 2)).len(), 1, "inclusive bar");
+        hub.advance(TURN_PERMISSION_TTL_TICKS + 1);
+        assert!(hub.handle(a, &forward(1, 2)).is_empty());
+        hub.refresh(1, 0).expect("release");
+        assert!(hub.handle(a, &forward(1, 2)).is_empty());
+        let stats = hub.turn_stats().expect("turn on");
+        assert_eq!(stats.permitted, 2, "two permitted forwards");
+        assert_eq!(stats.refused_unpermitted, 3);
+        assert_eq!(stats.refused_stale, 2, "before allocate and after release");
+        assert_eq!(hub.server().stats().forwarded, 2);
+    }
+
+    #[test]
+    fn turn_channel_binds_multiplex_peers_and_imply_permission() {
+        let config = RelayConfig::default();
+        let mut hub = RelayHub::new(config).with_turn(49_200).expect("turn port");
+        let addrs = [
+            turn_ip(1, 5001),
+            turn_ip(2, 5002),
+            turn_ip(3, 5003),
+            turn_ip(4, 5004),
+        ];
+        for (index, addr) in addrs.iter().enumerate() {
+            let id = u64::try_from(index + 1).expect("id");
+            let register = RelayMsg::Register {
+                client_id: id,
+                token: config.token,
+            }
+            .encode()
+            .expect("register");
+            hub.handle(*addr, &register);
+        }
+        hub.allocate(1, TURN_ALLOC_MAX_TICKS).expect("allocate");
+        let forward = |to| {
+            RelayMsg::Forward {
+                from: 1,
+                to,
+                payload: b"chan".to_vec(),
+            }
+            .encode()
+            .expect("forward")
+        };
+        hub.bind_channel(1, TURN_CHANNEL_FIRST, 2).expect("bind 2");
+        hub.bind_channel(1, TURN_CHANNEL_FIRST + 1, 3)
+            .expect("bind 3");
+        assert!(hub.handle(addrs[0], &forward(4)).is_empty(), "4 is unbound");
+        assert_eq!(
+            hub.handle(addrs[0], &forward(2)),
+            vec![(addrs[1], forward(2))]
+        );
+        assert_eq!(
+            hub.handle(addrs[0], &forward(3)),
+            vec![(addrs[2], forward(3))]
+        );
+        assert!(matches!(
+            hub.bind_channel(1, TURN_CHANNEL_FIRST - 1, 2),
+            Err(RelayError::BadInput)
+        ));
+        assert!(
+            matches!(
+                hub.bind_channel(1, TURN_CHANNEL_FIRST, 3),
+                Err(RelayError::BadInput)
+            ),
+            "a channel never moves peer"
+        );
+        assert!(
+            matches!(
+                hub.bind_channel(1, TURN_CHANNEL_FIRST + 2, 2),
+                Err(RelayError::BadInput)
+            ),
+            "a peer holds one channel"
+        );
+        hub.advance(TURN_CHANNEL_TTL_TICKS);
+        assert_eq!(hub.handle(addrs[0], &forward(2)).len(), 1, "inclusive bar");
+        hub.bind_channel(1, TURN_CHANNEL_FIRST, 2).expect("refresh");
+        hub.advance(TURN_CHANNEL_TTL_TICKS + 1);
+        assert_eq!(
+            hub.handle(addrs[0], &forward(2)),
+            vec![(addrs[1], forward(2))]
+        );
+        hub.advance(TURN_CHANNEL_TTL_TICKS * 2 + 1);
+        assert!(
+            hub.handle(addrs[0], &forward(2)).is_empty(),
+            "channels lapse"
+        );
+        assert_eq!(hub.turn_stats().expect("turn on").refused_unpermitted, 2);
+    }
+
+    #[test]
+    fn turn_forward_fixture_has_zero_unpermitted_or_stale_forwards() {
+        let config = RelayConfig::default();
+        let mut hub = RelayHub::new(config).with_turn(49_240).expect("turn port");
+        let addrs = [turn_ip(1, 6001), turn_ip(2, 6002), turn_ip(3, 6003)];
+        for (index, addr) in addrs.iter().enumerate() {
+            let id = u64::try_from(index + 1).expect("id");
+            let register = RelayMsg::Register {
+                client_id: id,
+                token: config.token,
+            }
+            .encode()
+            .expect("register");
+            hub.handle(*addr, &register);
+        }
+        hub.allocate(1, TURN_ALLOC_MAX_TICKS).expect("allocate");
+        for id in [2, 3] {
+            hub.allocate(id, 0).expect("allocate");
+        }
+        hub.create_permission(1, 2).expect("permission");
+        hub.bind_channel(1, TURN_CHANNEL_FIRST, 3).expect("bind");
+        // (tick, from, to, delivered): the expected column follows from the
+        // lifetimes alone, so a forward that slips a lapsed gate is a failure.
+        let tape = [
+            (0, 1, 2, true),
+            (0, 1, 3, true),
+            (0, 2, 1, false),
+            (18_000, 1, 2, true),
+            (18_001, 1, 2, false),
+            (36_000, 1, 3, true),
+            (36_001, 1, 3, false),
+            (54_000, 1, 3, false),
+        ];
+        let forward = |from, to| {
+            RelayMsg::Forward {
+                from,
+                to,
+                payload: b"fixture".to_vec(),
+            }
+            .encode()
+            .expect("forward")
+        };
+        let mut delivered = 0;
+        for (at, from, to, expect) in tape {
+            hub.advance(at);
+            let src = addrs[usize::try_from(from).expect("from") - 1];
+            let got = !hub.handle(src, &forward(from, to)).is_empty();
+            assert_eq!(got, expect, "tick {at}: {from} -> {to}");
+            delivered += usize::from(got);
+        }
+        // A released allocation is stale, never a permitted forward.
+        hub.refresh(1, 0).expect("release");
+        hub.advance(54_001);
+        assert!(hub.handle(addrs[0], &forward(1, 2)).is_empty());
+        let stats = hub.turn_stats().expect("turn on");
+        assert_eq!(delivered, 4, "only the permitted forwards landed");
+        assert_eq!(stats.permitted, 4);
+        assert_eq!(stats.refused_unpermitted, 4);
+        assert_eq!(stats.refused_stale, 1, "after release the path is stale");
+        assert_eq!(hub.server().stats().forwarded, 4);
     }
 }

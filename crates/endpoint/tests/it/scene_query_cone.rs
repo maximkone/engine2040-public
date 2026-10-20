@@ -327,9 +327,12 @@ fn tool_list_headroom_holds_with_the_cone_op() {
     // 2026-10-19 (SP69): the four sense text kinds and the `cells` box (on top
     // of the drift since the 50.9k reading) took the default list to 52_756:
     // bound 51_500 -> 53_000.
+    // 2026-10-20: PF24's opt-in `timing` receipt (a flag on both play args plus
+    // label/p50/p99/samples on both play outputs) took the default list to
+    // 53_873: bound 53_000 -> 54_500.
     assert!(
-        ledger.total_chars < 53_000,
-        "default list {} stays under the 2026-10-19 spatial-lane bound",
+        ledger.total_chars < 54_500,
+        "default list {} stays under the 2026-10-20 timing-receipt bound",
         ledger.total_chars
     );
 }

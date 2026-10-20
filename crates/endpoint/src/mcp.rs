@@ -71,9 +71,10 @@ use engine_scene::transform::Transform;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResponse, InitializeResult, JsonObject,
-    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities,
-    ServerConfig, ToolAnnotations, ToolsCapability,
+    CacheScope, CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResponse,
+    GetPromptResult, InitializeResult, JsonObject, ListPromptsResult, ListToolsResult,
+    PaginatedRequestParams, Prompt, PromptMessage, PromptsCapability, ProtocolVersion, ResultType,
+    Role, ServerCapabilities, ServerConfig, ToolAnnotations, ToolsCapability,
 };
 use rmcp::serde_json::Value;
 use rmcp::service::RequestContext;
@@ -143,8 +144,8 @@ pub const SCENE_READ_MAX_ROWS: u32 = 128;
 /// stays at 43514 so the number is comparable to the old 21-tool door, and the
 /// ledger gate now measures whatever a session advertises. The frozen
 /// [`crate::tools::TOOLS`] registry now holds 26 tools.
-/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000. On 2026-10-19 SP62's two view-truth verbs (`view.observe`, `view.laws`: camera, per-body act/clip/tint/root/bounds/rect/cover and the laws line) took the loaded list to 58703 (297 headroom): 59000 → 61500. On 2026-10-19 PF24's opt-in `timing` receipt (a flag on both play args, plus label/p50/p99/samples on both play outputs: 931 chars) took the default list to 53873 and the loaded one to 60228: 61500 → 62500.
-pub const TOOL_LIST_BUDGET_CHARS: usize = 62_500;
+/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000. On 2026-10-19 SP62's two view-truth verbs (`view.observe`, `view.laws`: camera, per-body act/clip/tint/root/bounds/rect/cover and the laws line) took the loaded list to 58703 (297 headroom): 59000 → 61500. On 2026-10-19 PF24's opt-in `timing` receipt (a flag on both play args, plus label/p50/p99/samples on both play outputs: 931 chars) took the default list to 53873 and the loaded one to 60228: 61500 → 62500. On 2026-10-20 GS46's `world.query` (nested data/filter, strict, limit) plus the day's other verbs took the default list to 56345 and the loaded one to 62869: 62500 → 65000. Same day GS48's `ai.decisions` (show/diff over hex tapes) took the loaded one to 63830 (1170 headroom): 65000 → 66500.
+pub const TOOL_LIST_BUDGET_CHARS: usize = 66_500;
 
 /// The thirteen core tools, in contract order. The router holds exactly these;
 /// every other verb is a pack verb.
@@ -1054,6 +1055,20 @@ impl McpServer {
         Self::with_state(ServerState::with_document(doc, journal, session, cap))
     }
 
+    /// Published skill prompts, sorted by name. These cost no tool budget.
+    #[must_use]
+    pub fn prompt_list(&self) -> Vec<Prompt> {
+        crate::skills::SkillRegistry::shipped().prompts()
+    }
+
+    /// One skill body for `prompts/get`; `None` for an unknown name.
+    #[must_use]
+    pub fn prompt_text(&self, name: &str) -> Option<String> {
+        crate::skills::SkillRegistry::shipped()
+            .body(name)
+            .map(str::to_owned)
+    }
+
     /// Session over a fully built state.
     pub fn with_state(mut state: ServerState) -> Self {
         let tool_router = Self::router();
@@ -1245,6 +1260,9 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         let mut capabilities = ServerCapabilities::default();
         capabilities.tools = Some(ToolsCapability::default());
+        if !crate::skills::SkillRegistry::shipped().is_empty() {
+            capabilities.prompts = Some(PromptsCapability::default());
+        }
         let mut info = InitializeResult::new(capabilities);
         info.protocol_version = ProtocolVersion::V_2026_07_28;
         "engine-endpoint".clone_into(&mut info.server_info.name);
@@ -1297,6 +1315,30 @@ impl ServerHandler for McpServer {
             ttl_ms: supports_cache_hints.then_some(0),
             cache_scope: supports_cache_hints.then_some(CacheScope::Public),
         })
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        Ok(ListPromptsResult {
+            prompts: self.prompt_list(),
+            ..Default::default()
+        })
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, ErrorData> {
+        let Some(body) = self.prompt_text(&request.name) else {
+            return Err(ErrorData::invalid_params("prompt not found", None));
+        };
+        Ok(GetPromptResponse::Complete(GetPromptResult::new(vec![
+            PromptMessage::new_text(Role::User, body),
+        ])))
     }
 
     fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
@@ -1445,6 +1487,29 @@ mod tests {
 
     fn read(server: &McpServer, limit: Option<u32>, cursor: Option<u32>) -> SceneReadOutput {
         SceneReadTool::invoke(server, SceneReadArgs { limit, cursor }).expect("valid page reads")
+    }
+
+    #[test]
+    fn prompts_publish_the_shipped_skills() {
+        let server = test_server();
+        let info = server.get_info();
+        assert!(
+            info.capabilities.prompts.is_some(),
+            "the handshake advertises prompts when skills ship"
+        );
+        let prompts = server.prompt_list();
+        assert!(prompts.len() >= 30, "got {} prompts", prompts.len());
+        let door = prompts
+            .iter()
+            .find(|prompt| prompt.name == "ai-door")
+            .expect("ai-door is published");
+        assert!(door
+            .description
+            .as_deref()
+            .is_some_and(|text| !text.is_empty()));
+        let body = server.prompt_text("ai-door").expect("ai-door body");
+        assert!(body.contains("# AI door"), "the body is the skill text");
+        assert!(server.prompt_text("not-a-skill").is_none());
     }
 
     #[test]
@@ -2259,9 +2324,11 @@ mod tests {
         // 2026-10-19 (PF24): the opt-in `timing` receipt (a flag on both play args plus
         // the label/p50/p99/samples object on both play outputs) took the default list to
         // 53.9k: bound 53_000 -> 54_500.
+        // 2026-10-20 (GS46): `world.query` (nested data/filter plus the flat aliases) took
+        // the default list to 55.8k: bound 54_500 -> 56_500.
         assert!(
-            budget < 54_500,
-            "default list {budget} stays near the measured 2026-10-19 play-timing door"
+            budget < 56_500,
+            "default list {budget} stays near the measured 2026-10-20 world-query door"
         );
         assert!(budget < everything, "the default list hides something");
         assert!(core_only < budget, "the scene pack adds to the core");

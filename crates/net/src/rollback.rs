@@ -16,7 +16,9 @@
 //! frame order; interest relevancy (`super::interest::Relevancy`) scopes what
 //! the session layer replicates, never the tape order. Budget: snapshot
 //! window holds at most `MAX_P2P_ROLLBACK + 1` states; per-player queues hold at
-//! most `INPUT_QUEUE_LEN` inputs; hash log costs 8 B per frame (documented).
+//! most `INPUT_QUEUE_LEN` inputs; the replay tape keeps at most [`TAPE_CAP`]
+//! frames (hash plus input row) and drops the oldest past it, so its bytes
+//! stay flat however long the session runs.
 //! Input delay and first-incorrect resim (MP22, `HouraiTeahouse/backroll-rs`
 //! ISC, ideas only): `P2pSession::with_frame_delay` applies each local input
 //! `frame_delay` frames late so the peer's copy of it travels for free, and
@@ -65,6 +67,11 @@ pub const PLAYERS: usize = 2;
 pub const DEFAULT_FRAME_DELAY: u32 = crate::session::INPUT_DELAY_TICKS;
 /// Narrow Lunaris-v2 resim window (8 frames, GGRS default, pattern only).
 pub const LUNARIS_WINDOW: usize = 8;
+/// Frames kept by the replay tape (one hash plus one input row each). The
+/// tape is a ring: the newest `TAPE_CAP` frames stay readable and older ones
+/// drop off, so a long session's tape bytes stay flat. 512 covers the
+/// 500-tick reference replay with headroom and is a power of two.
+pub const TAPE_CAP: usize = MAX_P2P_ROLLBACK * 4;
 
 /// A frame count as a window index.
 fn index(frames: u32) -> usize {
@@ -789,7 +796,8 @@ pub struct P2pSession<S: SimTick> {
     sim: S,
     frame: u32,
     window: VecDeque<FrameRecord<S>>,
-    history: Vec<u64>,
+    history: VecDeque<u64>,
+    tape_base: u32,
     pending: BTreeMap<u32, u32>,
     queues: [InputQueue; PLAYERS],
     last_remote: u32,
@@ -800,7 +808,7 @@ pub struct P2pSession<S: SimTick> {
     last_mismatch: Cell<Option<u32>>,
     frontier: u32,
     settled: u32,
-    log: Vec<[u32; PLAYERS]>,
+    log: VecDeque<[u32; PLAYERS]>,
     seat: u64,
     sparse: bool,
     confirmed: u32,
@@ -818,7 +826,8 @@ impl<S: SimTick> P2pSession<S> {
             sim: initial,
             frame: 0,
             window: VecDeque::new(),
-            history: Vec::new(),
+            history: VecDeque::new(),
+            tape_base: 0,
             pending: BTreeMap::new(),
             queues: [InputQueue::new(), InputQueue::new()],
             last_remote: 0,
@@ -829,7 +838,7 @@ impl<S: SimTick> P2pSession<S> {
             last_mismatch: Cell::new(None),
             frontier: 0,
             settled: 0,
-            log: Vec::new(),
+            log: VecDeque::new(),
             seat: 0,
             sparse: false,
             confirmed: 0,
@@ -935,14 +944,33 @@ impl<S: SimTick> P2pSession<S> {
         self.window.is_empty()
     }
 
-    /// Full per-frame hash tape, frame `i` at index `i`.
+    /// Hash tape over the held frames, oldest first (at most [`TAPE_CAP`]).
     pub fn stream(&self) -> Vec<u64> {
-        self.history.clone()
+        self.history.iter().copied().collect()
     }
 
-    /// Tape hash at `frame`, or `None` before/after the authored range.
+    /// Tape index of `frame` while the ring still holds it.
+    fn tape_index(&self, frame: u32) -> Option<usize> {
+        let at = frame.checked_sub(self.tape_base)?;
+        usize::try_from(at).ok().filter(|&i| i < self.history.len())
+    }
+
+    /// Append one authored frame to the ring tape, dropping the oldest frame
+    /// past [`TAPE_CAP`] so the tape never grows without bound.
+    fn push_tape(&mut self, hash: u64, inputs: [u32; PLAYERS]) {
+        if self.history.len() >= TAPE_CAP {
+            self.history.pop_front();
+            self.log.pop_front();
+            self.tape_base = self.tape_base.wrapping_add(1);
+        }
+        self.history.push_back(hash);
+        self.log.push_back(inputs);
+    }
+
+    /// Tape hash at `frame`, or `None` once the frame dropped off the tape.
     pub fn hash_at(&self, frame: u32) -> Option<u64> {
-        self.history.get(frame as usize).copied()
+        self.tape_index(frame)
+            .and_then(|i| self.history.get(i).copied())
     }
 
     /// GGRS-style per-tick checksum: state hash saved at `frame`.
@@ -950,12 +978,12 @@ impl<S: SimTick> P2pSession<S> {
         self.hash_at(frame)
     }
 
-    /// GGRS-style checksum log: one `(frame, state hash)` per authored tick.
+    /// GGRS-style checksum log: one `(frame, state hash)` per held tape frame.
     pub fn checksum_log(&self) -> Vec<(u32, u64)> {
         self.history
             .iter()
             .enumerate()
-            .map(|(i, &hash)| (i as u32, hash))
+            .map(|(i, &hash)| (self.tape_base.wrapping_add(i as u32), hash))
             .collect()
     }
 
@@ -1005,18 +1033,15 @@ impl<S: SimTick> P2pSession<S> {
         self.settled
     }
 
-    /// Append-only input log at `frame`, or `None` when absent.
+    /// Recorded input row at `frame`, or `None` once it dropped off the tape.
     pub fn input_at(&self, frame: u32) -> Option<[u32; PLAYERS]> {
-        usize::try_from(frame)
-            .ok()
+        self.tape_index(frame)
             .and_then(|i| self.log.get(i).copied())
     }
 
     /// Spectator read path: tape hash at `frame` without mutating.
     pub fn spectator_hash_at(&self, frame: u32) -> Option<&u64> {
-        usize::try_from(frame)
-            .ok()
-            .and_then(|i| self.history.get(i))
+        self.tape_index(frame).and_then(|i| self.history.get(i))
     }
     /// Narrow to the Lunaris-v2 8-frame window and bind `seat`.
     pub fn enable_lunaris_v2(&mut self, seat: u64) {
@@ -1104,10 +1129,9 @@ impl<S: SimTick> P2pSession<S> {
             predicted,
             hash,
         });
-        self.history.push(hash);
+        self.push_tape(hash, [local, r]);
         self.queues[0].push_input(f, local, true);
         self.queues[1].push_input(f, r, !predicted);
-        self.log.push([local, r]);
         if self.window.len() > MAX_P2P_ROLLBACK + 1 {
             self.window.pop_front();
         }
@@ -1129,8 +1153,8 @@ impl<S: SimTick> P2pSession<S> {
     /// into the window (`save_game_state` shape), so a mispredict restores
     /// the `before` checkpoint for `frame` and replays the window in frame
     /// order instead of rebuilding from tick zero. Handles stay small
-    /// (frame plus the 8 B per frame hash log); full state lives only in
-    /// the window owner.
+    /// (frame plus the capped hash tape); full state lives only in the
+    /// window owner.
     pub fn confirm_frame(&mut self, frame: u32, remote: u32) -> Result<usize, RollbackError> {
         self.confirm_input(frame, remote)?;
         self.resolve_incorrect()
@@ -1164,7 +1188,7 @@ impl<S: SimTick> P2pSession<S> {
         self.queues[1].confirm(frame, remote);
         if wrong {
             self.mispredicted += 1;
-            if let Some(entry) = self.log.get_mut(index(frame)) {
+            if let Some(entry) = self.tape_index(frame).and_then(|i| self.log.get_mut(i)) {
                 entry[1] = remote;
             }
             self.first_incorrect = Some(self.first_incorrect.map_or(frame, |f| f.min(frame)));
@@ -1218,8 +1242,9 @@ impl<S: SimTick> P2pSession<S> {
             let Some(slot) = self.window.get_mut(i) else {
                 break;
             };
+            let frame = slot.frame;
             slot.hash = hash;
-            if let Some(entry) = self.history.get_mut(index(slot.frame)) {
+            if let Some(entry) = self.tape_index(frame).and_then(|i| self.history.get_mut(i)) {
                 *entry = hash;
             }
             if i + 1 < len {
@@ -2408,6 +2433,47 @@ mod tests {
             "delay 0 must resim every late tick: {bare:?}"
         );
         println!("quad on {on:?}\nquad bare {bare:?}");
+    }
+
+    #[test]
+    fn e15_tape_flat_over_10k_frames() {
+        // E15 accept: a 10k-frame run keeps the rollback tape flat (bytes
+        // printed at 1k and 10k), the tape stops at `TAPE_CAP`, and the
+        // replay digest is identical x2.
+        fn run(frames: u32) -> (u64, usize, usize) {
+            let remote = |f: u32| f.wrapping_mul(11).wrapping_add(2) % 5;
+            let mut session = P2pSession::new(ToyDuel::default());
+            for f in 0..frames {
+                let avail = (f % 5 != 4).then(|| remote(f));
+                session.advance_frame(f.wrapping_mul(7).wrapping_add(1) % 5, avail);
+                if f >= 2 && (f - 2) % 5 == 4 {
+                    session
+                        .confirm_frame(f - 2, remote(f - 2))
+                        .expect("late input inside window");
+                }
+            }
+            let bytes = session.history.capacity() * std::mem::size_of::<u64>()
+                + session.log.capacity() * std::mem::size_of::<[u32; PLAYERS]>()
+                + session.window.capacity() * std::mem::size_of::<FrameRecord<ToyDuel>>();
+            let mut fold = Fnv64::new();
+            for hash in session.stream() {
+                fold.write_u64(hash);
+            }
+            fold.write_u64(session.sim().state_hash());
+            fold.write_u64(session.rollback_count());
+            (fold.finish(), bytes, session.stream().len())
+        }
+        let (_, bytes_1k, len_1k) = run(1_000);
+        let (digest, bytes_10k, len_10k) = run(10_000);
+        let (digest_again, _, _) = run(10_000);
+        eprintln!("e15 tape buffers: 1k frames {bytes_1k} B, 10k frames {bytes_10k} B");
+        assert_eq!(
+            bytes_10k, bytes_1k,
+            "tape buffers flat from 1k to 10k frames"
+        );
+        assert!(len_10k <= TAPE_CAP, "tape {len_10k} over its cap");
+        assert_eq!(len_1k, len_10k, "both runs hold the saturated tape");
+        assert_eq!(digest, digest_again, "replay digest x2");
     }
 
     /// Lines naming the retired hash-only `lib.rs` ring: the whole word, in

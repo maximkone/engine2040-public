@@ -24,6 +24,13 @@ use crate::gtao::{gtao_weight_sum_f32, GTAO_LIVE_SIN_BIAS};
 /// Bytes of the kernel uniform (`LiveAoU` in both shaders).
 const LIVE_AO_UNIFORM_BYTES: u64 = 112;
 
+/// Bytes of the contact-shadow uniform (`ContactU` in `shaders/contact.wgsl`).
+const CONTACT_UNIFORM_BYTES: u64 = 176;
+
+/// The contact-shadow compute kernel, validated by the CPU naga gate with
+/// every other shipped shader.
+const CONTACT_WGSL: &str = include_str!("../../shaders/contact.wgsl");
+
 /// Workgroup edge of both dispatches, in pixels.
 const GROUP_EDGE: u32 = 8;
 
@@ -186,8 +193,10 @@ fn up_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 pub(crate) struct GtaoGpu {
     half: wgpu::ComputePipeline,
     up: wgpu::ComputePipeline,
+    contact: wgpu::ComputePipeline,
     half_layout: wgpu::BindGroupLayout,
     up_layout: wgpu::BindGroupLayout,
+    contact_layout: wgpu::BindGroupLayout,
     /// The `ao_tex` holds live GTAO output, not the neutral 1.0: it must be
     /// reset once before a frame without the pass can trust it.
     pub(crate) wrote_ao: bool,
@@ -199,6 +208,10 @@ pub(crate) struct GtaoSized {
     uniform: wgpu::Buffer,
     half_bind: wgpu::BindGroup,
     up_bind: wgpu::BindGroup,
+    /// GS43: the contact-shadow uniform plus its bind group (depth, `ao_tex`
+    /// in place) over this frame size.
+    contact_uniform: wgpu::Buffer,
+    contact_bind: wgpu::BindGroup,
     /// Uniform image with every field but the camera filled in.
     template: [u8; 112],
     full: (u32, u32),
@@ -261,6 +274,41 @@ fn live_ao_uniform_bytes(
     out
 }
 
+/// Pack the contact-shadow uniform: inverse view-projection, view-projection,
+/// eye, the direction toward the sun, the strength and the frame size. Pure
+/// bytes; the camera and sun part is rewritten every frame.
+fn contact_uniform_bytes(
+    inv_cols: [[f32; 4]; 4],
+    vp_cols: [[f32; 4]; 4],
+    eye: [f32; 3],
+    sun: [f32; 3],
+    strength: f32,
+    full: (u32, u32),
+) -> [u8; 176] {
+    let mut out = [0u8; 176];
+    let mut put = |at: usize, word: [u8; 4]| out[at..at + 4].copy_from_slice(&word);
+    for (c, col) in inv_cols.iter().enumerate() {
+        for (r, v) in col.iter().enumerate() {
+            put((c * 4 + r) * 4, v.to_le_bytes());
+        }
+    }
+    for (c, col) in vp_cols.iter().enumerate() {
+        for (r, v) in col.iter().enumerate() {
+            put(64 + (c * 4 + r) * 4, v.to_le_bytes());
+        }
+    }
+    for (i, v) in eye.iter().enumerate() {
+        put(128 + i * 4, v.to_le_bytes());
+    }
+    put(140, strength.to_le_bytes());
+    for (i, v) in sun.iter().enumerate() {
+        put(144 + i * 4, v.to_le_bytes());
+    }
+    put(160, full.0.to_le_bytes());
+    put(164, full.1.to_le_bytes());
+    out
+}
+
 impl GtaoGpu {
     /// Compile both kernels and their layouts. Cold path, once per presenter.
     pub(crate) fn new(device: &wgpu::Device) -> Self {
@@ -317,11 +365,39 @@ impl GtaoGpu {
         };
         let half_module = module("gtao-live-half", GTAO_LIVE_HALF_WGSL);
         let up_module = module("gtao-live-up", GTAO_LIVE_UP_WGSL);
+        let contact_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("contact-shadow-layout"),
+            entries: &[
+                compute_uniform_entry(0),
+                depth_entry(),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadWrite,
+                        format: wgpu::TextureFormat::R32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let contact_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("contact-shadow"),
+            source: wgpu::ShaderSource::Wgsl(CONTACT_WGSL.into()),
+        });
         Self {
             half: pipeline("gtao-live-half", &half_layout, &half_module, "half_main"),
             up: pipeline("gtao-live-up", &up_layout, &up_module, "up_main"),
+            contact: pipeline(
+                "contact-shadow",
+                &contact_layout,
+                &contact_module,
+                "contact_main",
+            ),
             half_layout,
             up_layout,
+            contact_layout,
             wrote_ao: false,
         }
     }
@@ -372,12 +448,29 @@ impl GtaoGpu {
                 bind_entry(3, wgpu::BindingResource::TextureView(ao_view)),
             ],
         });
+        let contact_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("contact-shadow-uniform"),
+            size: CONTACT_UNIFORM_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let contact_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("contact-shadow-bind"),
+            layout: &self.contact_layout,
+            entries: &[
+                bind_entry(0, contact_uniform.as_entire_binding()),
+                bind_entry(1, wgpu::BindingResource::TextureView(depth_view)),
+                bind_entry(2, wgpu::BindingResource::TextureView(ao_view)),
+            ],
+        });
         let template =
             live_ao_uniform_bytes([[0.0; 4]; 4], [0.0; 3], (width, height), half, &config);
         Some(GtaoSized {
             uniform,
             half_bind,
             up_bind,
+            contact_uniform,
+            contact_bind,
             template,
             full: (width, height),
             half,
@@ -428,7 +521,8 @@ impl Presenter {
             return Ok(false);
         }
         self.encode_depth_prepass(enc, targets, list);
-        self.encode_gtao(enc, targets, frame, timestamps)
+        let sun = list.light.direction.to_array();
+        self.encode_gtao(enc, targets, frame, sun, self.contact_strength, timestamps)
     }
 
     /// Record the GTAO compute pass over the stored forward depth into
@@ -441,6 +535,8 @@ impl Presenter {
         enc: &mut wgpu::CommandEncoder,
         targets: &Targets,
         camera: &FrameCamera,
+        sun: [f32; 3],
+        strength: f32,
         timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) -> Result<bool, PresentError> {
         let Some(sized) = targets.gtao.as_ref() else {
@@ -476,7 +572,45 @@ impl Presenter {
             sized.full.1.div_ceil(GROUP_EDGE),
             1,
         );
+        drop(pass);
+        self.encode_contact(enc, sized, camera, &inv, sun, strength);
         Ok(true)
+    }
+
+    /// GS43: the contact-shadow kernel over the finished field, in its own
+    /// compute pass so the upsample's writes are ordered before its reads.
+    /// Writes `ao_tex` in place; strength 0 copies the field through, so an
+    /// off frame is byte-equal to a frame without the pass.
+    fn encode_contact(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        sized: &GtaoSized,
+        camera: &FrameCamera,
+        inv: &[[f32; 4]; 4],
+        sun: [f32; 3],
+        strength: f32,
+    ) {
+        let vp = camera.built_view_proj.to_cols_array_2d();
+        let bytes = contact_uniform_bytes(
+            *inv,
+            vp,
+            camera.eye.to_array(),
+            sun,
+            strength.clamp(0.0, 1.0),
+            sized.full,
+        );
+        self.queue.write_buffer(&sized.contact_uniform, 0, &bytes);
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ra1-contact-shadow"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.gtao_gpu.contact);
+        pass.set_bind_group(0, &sized.contact_bind, &[]);
+        pass.dispatch_workgroups(
+            sized.full.0.div_ceil(GROUP_EDGE),
+            sized.full.1.div_ceil(GROUP_EDGE),
+            1,
+        );
     }
 
     /// The `gtao` cell of a live frame's per-pass row: the device time of the
@@ -488,6 +622,13 @@ impl Presenter {
             .as_ref()
             .map_or(0.0, |timer| f64::from(timer.latest_gtao_ms()));
         Self::ms_to_us(ms)
+    }
+
+    /// GS43: set the contact-shadow strength, clamped to `0..=1`. 0 copies the
+    /// GTAO field through untouched, so an off frame is byte-equal to a frame
+    /// that never ran the kernel.
+    pub fn set_contact_shadow_strength(&mut self, strength: f32) {
+        self.contact_strength = strength.clamp(0.0, 1.0);
     }
 }
 
@@ -635,6 +776,59 @@ mod tests {
             "{off_count} texels differ by more than 0.02"
         );
         assert!(worst < 0.25, "worst gap {worst}");
+    }
+
+    #[test]
+    fn contact_shadows_darken_the_base_and_strength_zero_is_byte_equal() {
+        // Caller: the GS43 accept. Behavior: with strength 1 the field darkens
+        // where geometry meets the ground, and with strength 0 the kernel
+        // copies the field through so nothing moves.
+        let Some(mut presenter) = init_or_skip("contact_shadows_darken_the_base") else {
+            return;
+        };
+        presenter.resize(W, H).expect("valid size applies");
+        let list = arena_like_scene(&mut presenter, W, H);
+        presenter.set_contact_shadow_strength(1.0);
+        presenter.render_live_offscreen(&list).expect("contact on");
+        let on = read_f32(
+            &presenter,
+            &presenter.targets.as_ref().expect("targets").ao_texture,
+            wgpu::TextureAspect::All,
+        );
+        presenter.set_contact_shadow_strength(0.0);
+        presenter.render_live_offscreen(&list).expect("contact off");
+        let off = read_f32(
+            &presenter,
+            &presenter.targets.as_ref().expect("targets").ao_texture,
+            wgpu::TextureAspect::All,
+        );
+        assert_eq!(on.len(), off.len());
+        let darker = on
+            .iter()
+            .zip(off.iter())
+            .filter(|(a, b)| **a < **b - 0.01)
+            .count();
+        let lighter = on
+            .iter()
+            .zip(off.iter())
+            .filter(|(a, b)| **a > **b + 0.001)
+            .count();
+        eprintln!(
+            "contact shadows: {darker} texels darker, {lighter} lighter of {}",
+            on.len()
+        );
+        assert!(darker > 0, "the base darkens on the device: {darker}");
+        assert_eq!(lighter, 0, "contact shading only darkens");
+        presenter.set_contact_shadow_strength(1.0);
+        presenter
+            .render_live_offscreen(&list)
+            .expect("contact back on");
+        let again = read_f32(
+            &presenter,
+            &presenter.targets.as_ref().expect("targets").ao_texture,
+            wgpu::TextureAspect::All,
+        );
+        assert_eq!(on, again, "the same frame twice is byte-equal");
     }
 
     #[test]

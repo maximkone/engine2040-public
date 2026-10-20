@@ -35,6 +35,7 @@ needs it. Every dependency stays behind a feature, off the headless default.
 | wasm-bindgen 0.2, wasm-bindgen-futures 0.4, js-sys 0.3, web-sys 0.3 (WebSocket, MessageEvent, CloseEvent) | MIT OR Apache-2.0 | net (wasm32 only) | browser WebSocket and WebTransport clients behind the Transport trait; the versions engine-web already links |
 | puffin 0.20 | MIT/Apache-2.0 (crates.io API 2026-09-24) | perf `profile` | profiler on observe spans for PF2 |
 | sha2 0.10 | MIT (LICENSE-MIT read live 2026-09-25, RustCrypto/hashes) | game (capture manifests) | per-frame SHA-256 for SHOW1 manifests, cross-checked by tools/showcase.mjs |
+| schemars 1.2 | MIT (LICENSE read live 2026-10-20, GREsau/schemars) | game (`layered_extract_strict`) | `GameConfig` JSON Schema is the one key list for the strict layered extract; unknown rows refuse as `BadConfig("unknown")` (E63) |
 | rustls 0.23 (default-features=false: std, tls12, ring) | Apache-2.0 OR ISC OR MIT (crates.io API, rustls/rustls) | provider `tls` | opt-in HTTPS handshake for cloud LLMs; ring already in the graph via quinn |
 | rustls-native-certs 0.8 | Apache-2.0 OR ISC OR MIT (crates.io API, rustls/rustls-native-certs) | provider `tls` | platform-native roots for the rustls handshake (webpki-roots skipped: CDLA-Permissive-2.0 is outside deny.toml) |
 | ggrs 0.13 | MIT OR Apache-2.0 | none (NOT WIRED 2026-10-16: 0 hits in any Cargo.toml/Cargo.lock, candidate only) | rollback candidate for the arena sync (E40c); hand-rolled resim still in use until wired |

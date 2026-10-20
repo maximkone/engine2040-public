@@ -1,13 +1,17 @@
-//! System-allocator baseline rows: identical hash/alloc gates as the
-//! recorded baselines, plus the wall-ms harness a candidate row reuses.
+//! Baseline rows for the allocator this build installs: identical hash/alloc
+//! gates as the recorded baselines, plus the wall-ms harness a candidate row
+//! reuses.
 //! Default suite pins hash/alloc exactly; wall samples print only under the
 //! ignored `--perf` proof (release, single-threaded):
 //! `cargo test --release -p engine-perf --test it allocator_baseline:: -- --ignored --test-threads=1`.
+//! PF18: the same harness under `--features mimalloc` is the candidate run
+//! (one global allocator per process), and the box line plus every row name
+//! the backend that produced it (`active_kind`).
 //! Wall ms joins the baseline file only from a quiesced box (load under 10%,
 //! High-Performance power plan, three consecutive runs within ±10%);
 //! every other timed row stays observed-only.
 
-use engine_perf::allocator::{box_conditions, csv_row, system_rows, AllocatorKind, CSV_HEADER};
+use engine_perf::allocator::{active_kind, box_conditions, csv_row, system_rows, CSV_HEADER};
 use engine_perf::baselines::baseline;
 use engine_perf::budget::{check_report, BudgetError};
 use engine_perf::workloads::ArenaTick;
@@ -16,11 +20,12 @@ use std::time::Instant;
 #[test]
 fn system_rows_match_baselines_exactly() {
     println!("{CSV_HEADER}");
+    let kind = active_kind();
     for report in system_rows() {
         let recorded = baseline(report.workload).expect("system row names its baseline");
         check_report(&report, &recorded).expect("system row matches its baseline");
-        let row = csv_row(&report, AllocatorKind::System, None).expect("row prints");
-        assert!(row.starts_with("system,"), "{row}");
+        let row = csv_row(&report, kind, None).expect("row prints");
+        assert!(row.starts_with(&format!("{kind},")), "{row}");
         println!("{row}");
     }
 }
@@ -41,11 +46,9 @@ fn seeded_row_trips_the_gate_through_the_harness() {
     );
 }
 
-fn percentile(sorted: &mut [f64], p: f64) -> f64 {
+fn percentile(sorted: &mut [f64], p: u32) -> f64 {
     sorted.sort_by(|a, b| a.total_cmp(b));
-    let end = sorted.len().saturating_sub(1);
-    let index = ((p / 100.0) * end as f64).round() as usize;
-    sorted[index.min(end)]
+    engine_perf::allocator::percentile(sorted, p)
 }
 
 #[test]
@@ -85,9 +88,9 @@ fn system_wall_ms_rows() {
                 report.workload
             );
         }
-        let p50 = percentile(&mut samples, 50.0);
-        let p95 = percentile(&mut samples, 95.0);
-        let p99 = percentile(&mut samples, 99.0);
+        let p50 = percentile(&mut samples, 50);
+        let p95 = percentile(&mut samples, 95);
+        let p99 = percentile(&mut samples, 99);
         let min = samples.first().copied().unwrap_or(f64::NAN);
         let max = samples.last().copied().unwrap_or(f64::NAN);
         for (name, value) in [("p50", p50), ("p95", p95), ("p99", p99)] {
@@ -101,7 +104,7 @@ fn system_wall_ms_rows() {
             "# stats: workload={} n={SAMPLES} p50={p50:.3}ms p95={p95:.3}ms p99={p99:.3}ms min={min:.3}ms max={max:.3}ms",
             report.workload
         );
-        let row = csv_row(&report, AllocatorKind::System, Some(p50)).expect("timed row prints");
+        let row = csv_row(&report, active_kind(), Some(p50)).expect("timed row prints");
         println!("{row}");
     }
 }

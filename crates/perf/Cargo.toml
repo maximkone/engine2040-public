@@ -10,8 +10,12 @@ workspace = true
 
 # PF2 profiler leg, opt-in so the headless default stays dependency-light
 # (puffin 0.20 MIT/Apache-2.0, verified via crates.io API 2026-09-24).
+# PF18 candidate leg: `mimalloc` (MIT) is the harness's alternative global
+# allocator. Only `tests/alloc_mimalloc.rs` installs it, and only under this
+# feature, so neither the default headless graph nor the perf binary changes.
 [features]
 profile = ["dep:puffin"]
+mimalloc = ["dep:mimalloc"]
 
 [[bin]]
 name = "perf"
@@ -29,6 +33,7 @@ engine-ai.workspace = true
 engine-destruction.workspace = true
 engine-net.workspace = true
 puffin = { workspace = true, optional = true }
+mimalloc = { workspace = true, optional = true }
 
 # Instruction-count benches: Gungraun (Apache-2.0 OR MIT) drives Callgrind from
 # `cargo bench`. Callgrind is Linux-only, so the dependency exists only for

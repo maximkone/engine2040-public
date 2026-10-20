@@ -37,8 +37,11 @@ use engine_endpoint::{
 /// The settings pack adds `settings.get`, `settings.set` and `settings.undo`
 /// (on-demand, not advertised by default), so every arm moves up by three.
 /// The live seat's `seat.open`, `seat.step` and `seat.close` (AIN2) moved every
-/// arm up by three.
-const EXPECTED_ROUTER: usize = 73
+/// arm up by three. `view.compare` (the two-PNG machine score) moved every arm
+/// up by one. `world.query` (GS46, the scene pack's ninth verb) moved every arm
+/// up by one. `ai.decisions` (GS48, the play pack's eighth verb) moved every arm
+/// up by one.
+const EXPECTED_ROUTER: usize = 76
     + if cfg!(feature = "rules") { 3 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

@@ -30,6 +30,9 @@ pub mod director;
 pub mod dsp;
 pub mod engine;
 pub mod feed;
+/// Gunshot, crack and shout acoustics: distance filter, delay, zone tail,
+/// wall and door occlusion. Std-only, presentation data.
+pub mod gunfire;
 pub mod heal;
 /// Headphone 3D ears over mono sources: HRIR-sphere FIR pair plus
 /// ITD/ILD per octant, speakers passthrough unchanged. Std-only.
@@ -45,6 +48,8 @@ pub mod playlist;
 /// zero audio-thread allocs. Std-only.
 pub mod reverb;
 pub mod spatial;
+/// Cut, break and collapse events to material and tissue cue plays.
+pub mod strike_sound;
 pub mod trace;
 pub mod voice;
 

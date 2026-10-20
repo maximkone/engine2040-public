@@ -3,6 +3,7 @@
 Rows that measure "perfect". Dispatch them as soon as their needs tick; the
 finish scoreboard runs every wave.
 
+- [x] ARS1 proof: pin the arena digest on one host — add `arena_digest_is_pinned` beside the x2 test in `crates/proof/src/arena_matrix.rs`, asserting `0xd29b3b17bbd3b244` (the five-target value in HASH-LAW.md). It catches a silent arena change without touching `GOLDEN_600`. Proof: `cargo test -p engine-proof --features arena --lib arena_digest_is_pinned`; the five-target matrix remains the cross-check. Tier A. Size S. Owns `crates/proof/src/arena_matrix.rs`. F2P: the new test. P2P: `arena_tape_repeats_on_one_machine` and `cargo run -p engine2040 --release` x2 stay green. needs: none. Landed d9e235be.
 - [ ] PQ18 perf: input-latency meter, reference-GPU leg — staged
   input-to-present timestamps in the arena window loop plus one
   quiesced operator run on the reference GPU (RTX 3050) posting

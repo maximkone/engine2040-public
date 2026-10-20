@@ -444,6 +444,40 @@ fn physics_read_answers_equal_bytes_twice_over_stdio() {
 }
 
 #[test]
+fn prompts_list_and_get_are_published_over_stdio() {
+    let dir = scratch("prompts");
+    let mut client = StdioClient::spawn(&dir);
+
+    let list = client.send("prompts/list", &format!("{{{META}}}"));
+    let prompts = list["prompts"]
+        .as_array()
+        .expect("prompt list carries prompts");
+    assert!(
+        prompts.len() >= 30,
+        "expected the shipped skill set, got {}",
+        prompts.len()
+    );
+    assert!(
+        prompts
+            .iter()
+            .any(|prompt| prompt["name"].as_str() == Some("ai-door")),
+        "ai-door is published"
+    );
+
+    let get = client.send("prompts/get", &format!(r#"{{"name":"ai-door",{META}}}"#));
+    let text = get["messages"][0]["content"]["text"]
+        .as_str()
+        .expect("the prompt carries text");
+    assert!(
+        text.contains("# AI door"),
+        "the prompt body is the skill text, got: {text}"
+    );
+
+    assert!(client.close_and_wait(), "server exits cleanly on stdin EOF");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn startup_rejects_bad_dirs_and_flags_with_nonzero_exits() {
     let missing = std::env::temp_dir().join(format!("e2040-mcp5-nope-{n}", n = std::process::id()));
     let _ = std::fs::remove_dir_all(&missing);

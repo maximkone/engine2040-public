@@ -17,12 +17,27 @@ touches other crates after that
 fixture; most workspace crates are not included in `GOLDEN_600`. Tests in those
 crates are useful, but cannot extend the golden's coverage by name.
 
+Scope in plain words. `GOLDEN_600` covers one fixture: the archetype ECS world,
+`engine_physics::Space` (the legacy 2D rigid path), the tick clock and the input
+tape (`crates/proof/src/lib.rs`). It does not run `arena`, `combat`,
+`physics::islands`, the Rapier world, `destruction`, `game`, `physfx`, `net` or
+any GPU path. Those have their own fixtures and digests: the arena match
+`arena=d29b3b17bbd3b244` (1200 ticks, rules v2, kit walls, five targets), the
+Rapier ragdoll `GOLDEN_RAGDOLL=8097ccafb6740acb` (300 steps, four targets), the
+20k crowd digest `0x9627a1119822c2e0`, and the per-crate tests named beside
+each row. A green `golden_hash_untouched` says only that the legacy 2D fixture
+is unchanged; it says nothing about arena, combat, physics or render.
+
 Legacy seeding forces the low bit (`Rng::new(seed | 1)`), so seeds `2k` and
 `2k + 1` simulate the same trajectory; receipts still differ because the raw
 seed is folded into both hashes. Receipt inequality therefore cannot show that
 two seeds simulated differently; `engine-proof` tests assert trajectories
 directly. New fixtures must expand seeds without aliasing (for example
-SplitMix64) under a new fixture version; v1 stays frozen.
+SplitMix64) under a new fixture version; v1 stays frozen. `engine-proof` now
+has such an in-memory fixture: `FIXTURE_VERSION_V2` seeds from `CounterRng`,
+and `v2_seeds_differing_only_in_low_bit_take_different_trajectories` proves
+that seeds `2k` and `2k + 1` diverge. It is a test fixture, not a tape, and it
+does not move `GOLDEN_600`.
 
 ## Hash scope
 
@@ -56,6 +71,8 @@ FNV is a regression checksum, not a cryptographic integrity/authenticity proof.
 
 The multiplayer arena needs **tier 3 for the arena simulation**: one release
 binary, x86-64 Windows on every player's PC, with Linux CI as the cross-check.
+(`tier 3` here is evidence tier 3 above, platform reproducibility; it is not a
+hash coverage class.)
 Replays and bug tapes must reproduce on any of those machines. Rules for the
 authoritative simulation (`arena`, `physics`, `combat`, `ai` gameplay, `anim`
 root motion, `net` state):

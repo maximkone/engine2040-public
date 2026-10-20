@@ -17,6 +17,17 @@ import { runWithVerdictCache } from "./wiring-scan.mjs";
 const UNIVERSAL_EDGES = new Set(["engine-core"]);
 
 export const allowedEdges = new Map([
+  // KAM3 first playable window: the shell draws the match through engine-render's
+  // window leg (fixed 2.5D projection, sprite atlas, HUD pass), composes engine-ui
+  // HUD data, reads the shell clock and converts palette bytes with engine-assets.
+  // kam2-sim stays std-only and IO-free: it takes no engine crate at all.
+  ["kam2-game", ["kam2-sim", "engine-render", "engine-ui", "engine-assets", "engine-clock"]],
+  ["kam2-sim", []],
+  // KAM8 browser tab: the wasm shell owns the KAM6 match and its fixed 10 Hz tick
+  // (kam2-game's AI seat and 2.5D scene), and projects the flat frame through the
+  // same fixed camera the window uses. No clock, IO or GPU edge: the page hands in
+  // its own time deltas and draws the flat frame with Canvas2D.
+  ["kam2-web", ["kam2-sim", "kam2-game", "engine-render"]],
   ["engine2040", ["engine-core", "engine-ecs", "engine-render", "engine-physics", "engine-nav", "engine-audio", "engine-script", "engine-net", "engine-assets", "engine-destruction", "engine-ai", "engine-ponytail", "engine-proof"]],
   ["engine-ai", ["engine-ecs", "engine-physics", "engine-input", "engine-nn"]],
   ["engine-app", ["engine-core", "engine-ecs", "engine-scene", "engine-arena", "engine-clock"]],
@@ -29,7 +40,7 @@ export const allowedEdges = new Map([
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
   ["engine-chaos", ["engine-observe", "engine-proof"]],
   ["engine-combat", ["engine-input"]],
-  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock"]],
+  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf"]],
   ["engine-destruction", ["engine-core", "engine-nav"]],
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.
@@ -52,8 +63,10 @@ export const allowedEdges = new Map([
   // RZ1 physical layer: float Rapier world, presentation only. It takes the ragdoll joint builder from
   // physics and the skeleton/pose types from anim. No sim crate (arena, combat, proof) may list it;
   // engine-game lists it as an optional dependency of its `app` leg (RZ4 break look).
+  // engine-game takes engine-perf on the same pp leg: the window's input-latency meter
+  // (PQ18) reads the perf crate's sampler, never the tick.
   ["engine-physfx", ["engine-physics", "engine-anim"]],
-  ["engine-render", ["engine-observe", "engine-assets", "engine-clock", "engine-material"]], // v1-only tangents (ARCHITECTURE C3); default stays std-only; the clock seam for frame timers (a browser has no std clock); engine-material only on the window leg (NS31c2: pipeline from the compiled WGSL)
+  ["engine-render", ["engine-ui", "engine-observe", "engine-assets", "engine-clock", "engine-material"]], // UIX13: the hud pass draws engine-ui frames (std-only); v1-only tangents (ARCHITECTURE C3); default stays std-only; the clock seam for frame timers (a browser has no std clock); engine-material only on the window leg (NS31c2: pipeline from the compiled WGSL)
   ["engine-ui", ["engine-input"]],
   // WEB4 browser shell: the golden tape and corpus run in the page through engine-proof; the shell hands the
   // page's clock to engine-clock. WEB5: on wasm32 it also drives the render crate's presenter for the arena frame

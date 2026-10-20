@@ -24,7 +24,24 @@ window = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:windows", "dep:engine-ma
 # edit is refused with line:col and the live generation keeps last-good.
 shader-validate = ["dep:engine-material", "engine-material/validate"]
 
+[[bin]]
+name = "kam1a"
+path = "src/bin/kam1a.rs"
+required-features = ["window"]
+
+[[bin]]
+name = "kam1b"
+path = "src/bin/kam1b.rs"
+required-features = ["window"]
+
+[[bin]]
+name = "kam1c"
+path = "src/bin/kam1c.rs"
+required-features = ["window"]
+
 [dependencies]
+# HUD command lane owner (UIX13): the hud pass draws `engine-ui` frames. Std-only.
+engine-ui.workspace = true
 # AH2 device-loss heal runs through the observe supervisor (both std-only
 # on the default graph; wgpu stays behind `window`).
 engine-observe.workspace = true

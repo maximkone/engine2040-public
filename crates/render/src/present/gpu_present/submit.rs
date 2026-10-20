@@ -1622,9 +1622,9 @@ impl Presenter {
             .as_ref()
             .expect("checked above")
             .get_current_texture();
-        self.acquire_us = self.acquire_us.saturating_add(
-            u64::try_from(engine_clock::since(acquire_started).as_micros()).unwrap_or(u64::MAX),
-        );
+        self.last_acquire_us =
+            u64::try_from(engine_clock::since(acquire_started).as_micros()).unwrap_or(u64::MAX);
+        self.acquire_us = self.acquire_us.saturating_add(self.last_acquire_us);
         self.acquire_frames = self.acquire_frames.saturating_add(1);
         let (width, height) = self.swap.size();
         match current {

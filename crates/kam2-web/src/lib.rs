@@ -1,0 +1,23 @@
+//! kam2-web: KAM8 - the KAM2 village match in one browser tab.
+//!
+//! Consumer: `tools/kam2-web.mjs` builds this crate for wasm32-unknown-unknown,
+//! wasm-bindgen turns it into `kam2web.js` plus `kam2web_bg.wasm`, and the page
+//! under `crates/kam2-web/page/` draws the frame with Canvas2D. The module owns
+//! the match ([`kam2_game::AiMatch`]) and a fixed 10 Hz tick the page drives with
+//! the deltas of its own `performance.now()`; it reads no clock, no file and no
+//! DOM, so the tick is tested with pinned deltas and never with real time.
+//! Data owner: `kam2-sim` owns the match state, `kam2-game` owns the AI seat, the
+//! 2.5D scene and the projection. This crate owns the browser clock, the pan and
+//! the flat frame ([`scene_flat`]) the page reads in one typed array.
+//! Units: milliseconds in, ticks and framebuffer pixels out.
+//! Determinism: the same start and the same tick count give the same hash, so a
+//! page that only changes how often it draws never moves the sim.
+
+pub mod scene_flat;
+pub mod shell;
+
+#[cfg(target_arch = "wasm32")]
+mod web;
+
+pub use scene_flat::{flatten, BILLBOARD_STRIDE, GROUND_STRIDE, HEADER, KIND_HOUSE, KIND_UNIT};
+pub use shell::{Shell, MAX_CATCHUP, PAN_LIMIT, TICK_MS, VIEW_H, VIEW_W};

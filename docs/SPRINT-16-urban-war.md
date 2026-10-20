@@ -105,12 +105,14 @@ content rows wait for UW0 (Finish A met). Combat never imports physics
   Tier B. Size L. Owns `crates/ai/src/clear.rs`. Accept: 1,000 seeded
   clears, 0 stuck, 0 unseen cells at clear, 0 friendly hits, x2. needs:
   UW13, UW16.
-- [ ] UW18 brain: squad orders — move, hold, fall in, stack, mirror,
+- [x] UW18 brain: squad orders — move, hold, fall in, stack, mirror,
   wedge, breach (open, kick, ram, shotgun, charge; then bang, stinger,
   gas or none), restrain, collect, split red/blue, as validated
   recorded actions. Tier B. Size S. Owns `crates/ai/src/orders.rs`.
   Accept: order tapes replay x2; bad orders refuse typed; legion
-  goldens unchanged. needs: GA2.
+  goldens unchanged. needs: GA2. Landed 1751ea1a.
+  `cargo test -p engine-ai --lib orders` 9 passed; `cargo test -p engine-ai
+  --lib legion` 14 passed, 1 ignored; clippy -D warnings clean.
 - [x] UW19 world: spawn rosters — seeded rosters over tagged spawn
   points (min/max per group, archetype, weapon, trap, evidence,
   objective); same seed, same placement. Tier B. Size S. Owns

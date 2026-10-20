@@ -22,6 +22,7 @@ use crate::mcp::{McpServer, McpToolError};
 use crate::play::play_session::{dec_u64, BoutSpec, PlaySlot};
 use crate::play::{build_tape, PlayInputDto, MAX_PLAY_INPUTS, MAX_PLAY_TICKS};
 use crate::tool_capabilities::CapabilityCard;
+use engine_ai::decision_log::{Decision, DecisionLog};
 use engine_arena::MAX_PARTICIPANTS;
 use engine_input::{Buttons, ParticipantError, ParticipantInput, PARTICIPANT_ZERO};
 use rmcp::schemars::JsonSchema;
@@ -37,6 +38,8 @@ pub const TOOL_SEAT_OPEN: &str = "seat.open";
 pub const TOOL_SEAT_STEP: &str = "seat.step";
 /// Verb: close the live seat and kill its window.
 pub const TOOL_SEAT_CLOSE: &str = "seat.close";
+/// Verb: show one AI decision tape, or diff two and name the first divergent tick.
+pub const TOOL_AI_DECISIONS: &str = "ai.decisions";
 
 #[path = "play_ext.rs"]
 mod play_ext;
@@ -81,6 +84,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     play_ext::add_verbs(&mut pack)?;
     sweep::add_verb(&mut pack)?;
+    pack.add(VerbSpec::of::<AiDecisionsTool>(
+        TOOL_AI_DECISIONS,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
     Ok(pack)
 }
 /// Request: seed, bout, tape, cap and watched hp threshold.
@@ -851,6 +859,191 @@ crate::e2_tool!(
     invoke = seat_close
 );
 
+/// Longest hex a tape can carry: the header plus [`MAX_ROWS`](engine_ai::decision_log::MAX_ROWS) rows.
+const MAX_TAPE_HEX: usize = 2 * (4 + engine_ai::decision_log::MAX_ROWS * 26);
+
+/// Request: one decision tape as hex, optionally a second tape and a mode.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AiDecisionsArgs {
+    /// Left tape: canonical decision-log bytes as hex.
+    pub left: String,
+    /// Right tape for `diff`; omit for `show`.
+    #[serde(default)]
+    pub right: Option<String>,
+    /// `show` (default without a right tape) or `diff` (needs a right tape).
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// One decision row on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AiDecisionsRow {
+    /// Evaluation tick.
+    pub tick: u32,
+    /// Fighter slot.
+    pub fighter: u8,
+    /// Chosen lane name (`attack`, `block`, `dodge`, `advance`, `retreat`, `reposition`).
+    pub chosen: String,
+    /// Utility score per lane, in action order.
+    pub scores: [f32; 5],
+}
+
+/// First divergent row of two tapes.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AiDecisionsDiff {
+    /// First tick the tapes disagree.
+    pub tick: u32,
+    /// Fighter of the differing row.
+    pub fighter: u8,
+    /// Left row, when the left tape has one at this tick.
+    pub left: Option<AiDecisionsRow>,
+    /// Right row, when the right tape has one at this tick.
+    pub right: Option<AiDecisionsRow>,
+    /// Absolute chosen-score gap; 0 when one side has no row.
+    pub gap: f32,
+    /// One printable line naming the tick, both rows and the gap.
+    pub line: String,
+}
+
+/// Answer: the mode served, row count and either the show text or the diff.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct AiDecisionsOutput {
+    /// Mode served: `show` or `diff`.
+    pub mode: String,
+    /// Rows in the left tape.
+    pub rows: u32,
+    /// Show text, one line per row (`show` only).
+    pub show: Option<String>,
+    /// First divergence (`diff` only).
+    pub diff: Option<AiDecisionsDiff>,
+    /// True when `diff` found a divergence.
+    pub divergent: bool,
+}
+
+fn tape_hex(side: &str, text: &str) -> Result<Vec<u8>, McpToolError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(bad_args(format!("{side} tape is empty")));
+    }
+    if text.len() > MAX_TAPE_HEX {
+        return Err(bad_args(format!(
+            "{side} tape is {} hex chars, cap is {MAX_TAPE_HEX}",
+            text.len()
+        )));
+    }
+    if text.len() % 2 != 0 {
+        return Err(bad_args(format!(
+            "{side} tape has an odd hex length {}",
+            text.len()
+        )));
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let mut at = 0;
+    while at < bytes.len() {
+        let hi = hex_nibble(side, bytes[at], at)?;
+        let lo = hex_nibble(side, bytes[at + 1], at + 1)?;
+        out.push((hi << 4) | lo);
+        at += 2;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(side: &str, byte: u8, at: usize) -> Result<u8, McpToolError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(bad_args(format!(
+            "{side} tape has a non-hex byte at char {at}"
+        ))),
+    }
+}
+
+fn tape(side: &str, text: &str) -> Result<DecisionLog, McpToolError> {
+    let bytes = tape_hex(side, text)?;
+    DecisionLog::from_bytes(&bytes).map_err(|error| {
+        McpToolError::new("bad_tape", format!("{side} tape refused: {error}"))
+            .with_data(rmcp::serde_json::json!({ "side": side, "cause": error.to_string() }))
+    })
+}
+
+fn decision_row(decision: &Decision) -> AiDecisionsRow {
+    AiDecisionsRow {
+        tick: decision.tick,
+        fighter: decision.fighter,
+        chosen: decision.chosen_name().to_owned(),
+        scores: decision.scores,
+    }
+}
+
+fn ai_decisions_core(args: &AiDecisionsArgs) -> Result<AiDecisionsOutput, McpToolError> {
+    let left = tape("left", &args.left)?;
+    let rows = u32::try_from(left.len()).unwrap_or(u32::MAX);
+    let mode = args
+        .mode
+        .as_deref()
+        .unwrap_or(if args.right.is_some() { "diff" } else { "show" });
+    match mode {
+        "show" => Ok(AiDecisionsOutput {
+            mode: "show".to_owned(),
+            rows,
+            show: Some(left.show_text()),
+            diff: None,
+            divergent: false,
+        }),
+        "diff" => {
+            let right_text = args
+                .right
+                .as_deref()
+                .ok_or_else(|| bad_args("mode `diff` needs a right tape".to_owned()))?;
+            let right = tape("right", right_text)?;
+            let found = engine_ai::decision_log::diff(&left, &right);
+            Ok(AiDecisionsOutput {
+                mode: "diff".to_owned(),
+                rows,
+                show: None,
+                diff: found.map(|found| AiDecisionsDiff {
+                    tick: found.tick,
+                    fighter: found.fighter,
+                    left: found.left.as_ref().map(decision_row),
+                    right: found.right.as_ref().map(decision_row),
+                    gap: found.gap,
+                    line: found.line(),
+                }),
+                divergent: found.is_some(),
+            })
+        }
+        other => Err(bad_args(format!("mode `{other}` is not `show` or `diff`"))),
+    }
+}
+
+fn ai_decisions(
+    _service: &McpServer,
+    args: &AiDecisionsArgs,
+) -> Result<AiDecisionsOutput, McpToolError> {
+    ai_decisions_core(args)
+}
+
+crate::e2_tool!(
+    /// `ai.decisions` tool: show one decision tape or diff two. Read-only.
+    AiDecisionsTool,
+    name = TOOL_AI_DECISIONS,
+    description = "Show one AI decision tape or diff two: feed canonical decision-log bytes as hex (row count, then tick, fighter, chosen lane and five utility scores per row). show prints one line per row; diff returns the first divergent tick, both score vectors and the chosen-score gap. Off by default in the brain; enable with Brain::record_decisions.",
+    readonly = true,
+    args = AiDecisionsArgs,
+    output = AiDecisionsOutput,
+    invoke = ai_decisions
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,5 +1396,120 @@ mod tests {
             };
             assert_eq!(refused.code, "bad_args");
         }
+    }
+
+    fn decision_hex(rows: &[(u32, u8, [f32; 5])]) -> String {
+        let mut log = DecisionLog::new(8);
+        for (tick, chosen, scores) in rows {
+            log.push(Decision {
+                tick: *tick,
+                fighter: 1,
+                scores: *scores,
+                chosen: *chosen,
+            });
+        }
+        let mut out = String::with_capacity(log.to_bytes().len() * 2);
+        for byte in log.to_bytes() {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
+    }
+
+    #[test]
+    fn ai_decisions_show_lists_every_row() {
+        let left = decision_hex(&[
+            (10, 0, [9.0, 1.0, 0.0, 0.0, 0.0]),
+            (20, 3, [0.0, 0.0, 0.0, 8.0, 1.0]),
+        ]);
+        let served = ai_decisions_core(&AiDecisionsArgs {
+            left,
+            right: None,
+            mode: None,
+        })
+        .expect("show serves");
+        assert_eq!(served.mode, "show");
+        assert_eq!(served.rows, 2);
+        assert!(!served.divergent);
+        let text = served.show.expect("show text");
+        assert!(text.contains("tick=10"), "{text}");
+        assert!(text.contains("chose=advance"), "{text}");
+        assert!(text.contains("tick=20"), "{text}");
+    }
+
+    #[test]
+    fn ai_decisions_diff_names_the_first_divergent_tick() {
+        let left = decision_hex(&[
+            (10, 0, [9.0, 1.0, 0.0, 0.0, 0.0]),
+            (30, 1, [0.0, 7.0, 0.0, 0.0, 0.0]),
+        ]);
+        let right = decision_hex(&[
+            (10, 0, [9.0, 1.0, 0.0, 0.0, 0.0]),
+            (30, 1, [0.0, 4.0, 0.0, 0.0, 0.0]),
+        ]);
+        let served = ai_decisions_core(&AiDecisionsArgs {
+            left,
+            right: Some(right),
+            mode: Some("diff".to_owned()),
+        })
+        .expect("diff serves");
+        assert!(served.divergent);
+        let found = served.diff.expect("a divergence");
+        assert_eq!(found.tick, 30);
+        assert_eq!(found.fighter, 1);
+        assert_eq!(found.left.expect("left row").scores[1], 7.0);
+        assert_eq!(found.right.expect("right row").scores[1], 4.0);
+        assert_eq!(found.gap, 3.0);
+        assert!(found.line.contains("tick=30"), "{}", found.line);
+    }
+
+    #[test]
+    fn ai_decisions_refuses_bad_hex_bad_tape_and_unknown_mode() {
+        let odd = ai_decisions_core(&AiDecisionsArgs {
+            left: "abc".to_owned(),
+            right: None,
+            mode: None,
+        })
+        .expect_err("odd hex refuses");
+        assert_eq!(odd.code(), "bad_args");
+        assert!(odd.to_string().contains("odd"), "{odd}");
+        let non_hex = ai_decisions_core(&AiDecisionsArgs {
+            left: "zz".to_owned(),
+            right: None,
+            mode: None,
+        })
+        .expect_err("non-hex refuses");
+        assert_eq!(non_hex.code(), "bad_args");
+        assert!(non_hex.to_string().contains("non-hex"), "{non_hex}");
+        let short = ai_decisions_core(&AiDecisionsArgs {
+            left: "0100".to_owned(),
+            right: None,
+            mode: None,
+        })
+        .expect_err("short tape refuses");
+        assert_eq!(short.code(), "bad_tape");
+        let unknown = ai_decisions_core(&AiDecisionsArgs {
+            left: decision_hex(&[(1, 0, [1.0, 0.0, 0.0, 0.0, 0.0])]),
+            right: None,
+            mode: Some("replay".to_owned()),
+        })
+        .expect_err("unknown mode refuses");
+        assert_eq!(unknown.code(), "bad_args");
+        let missing = ai_decisions_core(&AiDecisionsArgs {
+            left: decision_hex(&[(1, 0, [1.0, 0.0, 0.0, 0.0, 0.0])]),
+            right: None,
+            mode: Some("diff".to_owned()),
+        })
+        .expect_err("diff needs a right tape");
+        assert_eq!(missing.code(), "bad_args");
+    }
+
+    #[test]
+    fn ai_decisions_verb_is_listed_read_only() {
+        let verb = PackRegistry::shipped()
+            .verb(TOOL_AI_DECISIONS)
+            .expect("registers");
+        assert_eq!(verb.pack(), PACK);
+        assert_eq!(verb.card(), CapabilityCard::Observe);
+        assert!(verb.readonly());
     }
 }

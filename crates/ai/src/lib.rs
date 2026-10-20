@@ -25,6 +25,9 @@ pub use behavior::{tick, Behavior, Status};
 pub mod bout;
 /// Versioned integer trees for bout bots; the bout harness ticks these.
 pub mod bt;
+/// Off-by-default ring of AI decisions: canonical bytes, show text and the
+/// first divergent tick between two tapes.
+pub mod decision_log;
 pub mod director;
 /// Duel enemy tiers T1-T3: shipped rows, the win bar and the skill score.
 pub mod tier;
@@ -55,6 +58,9 @@ pub mod melee;
 pub use melee::{FoeView, MeleeView, StrikePhase, NEAR_FOES, WAIT_RING_MM};
 /// Four-bucket foe model and the opt-in action lease it feeds.
 pub mod opponent;
+/// Squad orders as validated recorded actions: the typed vocabulary, its
+/// versioned tape bytes and the per-squad replay book.
+pub mod orders;
 pub mod personality;
 pub mod reaction_delay;
 pub use personality::Personality;
@@ -87,6 +93,10 @@ pub use depth::{
 
 pub mod alert;
 pub mod apply;
+/// Capability after a cut: the typed observation plus the reaction rule for
+/// hands, legs, blood and morale; every plan carries a debug reason.
+pub mod capability;
+pub use capability::{react, witness_cut, CapabilityTable, CapabilityView, Choice, Plan, Reason};
 pub mod dialogue;
 pub mod eqs;
 mod eqs_slice;

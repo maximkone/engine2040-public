@@ -1,0 +1,109 @@
+{
+  "id": "house.cottage",
+  "kind": "building",
+  "model": "Kenney Fantasy Town Kit (2.0), assembled into one 2x2 cottage by tools/kam2/build_house.py",
+  "author": "Kenney (www.kenney.nl)",
+  "licence": "CC0 1.0 Universal (public domain dedication)",
+  "licence_line": "Fantasy Town Kit (2.0). Created/distributed by Kenney (www.kenney.nl). License: Creative Commons Zero, CC0. http://creativecommons.org/publicdomain/zero/1.0/",
+  "licence_file": "License.txt inside the pack; the line above is its licence text",
+  "download": {
+    "page": "https://kenney.nl/assets/fantasy-town-kit",
+    "url": "https://kenney.nl/media/pages/assets/fantasy-town-kit/efe948d309-1754222374/kenney_fantasy-town-kit_2.0.zip",
+    "zip_bytes": 3854691,
+    "zip_sha256": "1a7530c09f4d2fa2cdee259876f089334f8b1f27fa86a0c4f54ef86cdd8676ef",
+    "file_in_zip": "Models/GLB format/<piece>.glb",
+    "account_required": false,
+    "also_checked": {
+      "page": "https://kenney.nl/assets/castle-kit",
+      "url": "https://kenney.nl/media/pages/assets/castle-kit/a395102d20-1711543616/kenney_castle-kit.zip",
+      "zip_bytes": 2232589,
+      "zip_sha256": "921f3f73927bb23106cae34bc21d5ab4b033a9fc120475e96f714a406e3169df",
+      "why_not": "same author and licence, but the castle kit holds walls, towers, gates and siege engines only, no house walls or roofs"
+    }
+  },
+  "assembly": {
+    "tool": "tools/kam2/build_house.py",
+    "grid": "1 kit cell = 1 world unit; house footprint x and y in [0, 2], floor at z 0, walls 1 unit high, roof to z 1.63, chimney to z 1.95",
+    "orientation": "walls sit on the footprint edges, door on the south face, scaffolding on the east and north faces of the half-built state",
+    "pieces_finished": [
+      "wall-wood-window-small (south-west panel)",
+      "wall-door (south-east panel, carries the door object)",
+      "wall-window-small (east, front)",
+      "wall (east, back)",
+      "wall (west, front)",
+      "wall-wood (west, back)",
+      "wall (north, west)",
+      "wall-wood (north, east)",
+      "roof-corner x4 (hip roof, apex at the house centre)",
+      "chimney (1.28, 1.34, z 0.95)",
+      "pillar-wood x4 (corner posts)",
+      "planks x4 (interior floor)"
+    ],
+    "download_command": "Invoke-WebRequest -Uri <url> -OutFile kenney_fantasy-town-kit_20.zip; Expand-Archive kenney_fantasy-town-kit_20.zip",
+    "build_commands": [
+      "blender --background --factory-startup --python tools/kam2/build_house.py -- --kit \"<pack>/Models/GLB format\" --out <dir> --state finished",
+      "blender --background --factory-startup --python tools/kam2/build_house.py -- --kit \"<pack>/Models/GLB format\" --out <dir> --state half_built",
+      "blender --background --factory-startup --python tools/kam2/build_house.py -- --kit \"<pack>/Models/GLB format\" --out <dir> --state damaged"
+    ],
+    "built_glb_not_committed": {
+      "finished": { "bytes": 118124, "sha256": "77fbf7a9d68d3c26e98c372d7a9304a38004e1c16ffcd25808f62ecf06f1cc9a" },
+      "half_built": { "bytes": 77128, "sha256": "31d50b91e22541770882400dc2da36aa8b15f12dbfdcfd1d0861c5ea9a93ba6d" },
+      "damaged": { "bytes": 109284, "sha256": "dc16822ea5505dbd2293ff19aa0e4ff4fb44a2ba44aa3ab37ef57b1a13df5ee1" }
+    }
+  },
+  "render": {
+    "tool": "tools/kam2/render_frames.py",
+    "blender": "5.2.0 LTS",
+    "engine": "cycles",
+    "device": "CPU",
+    "samples": 48,
+    "size": 128,
+    "pitch_deg": 26.5651,
+    "yaw_used": "45 deg off the S axis (ring frame 01 of 8, camera at the building's south-east corner, south and east faces visible); buildings do not rotate",
+    "ortho_scale_world_units": 3.2,
+    "px_per_kit_cell": 40.0,
+    "ground_px": 95,
+    "transparent": true,
+    "contact_shadow": true,
+    "lights": "style-lock key #FFE8C4 3.2, fill #6E86A8 0.55, ambient #3A4250 0.5, screen-locked",
+    "material_override": "roof pieces use one flat #A33B2E material (style-lock roof red); every other kit material is as authored",
+    "command": "blender --background --factory-startup --python tools/kam2/render_frames.py -- --scene <state>.glb --out <dir> --frames 8 --size 128 --span 3.2 --ground-px 95 --samples 48"
+  },
+  "scale": {
+    "style_lock_tile_px": [64, 32],
+    "native_scale_px_per_cell": 50.6,
+    "used_px_per_cell": 40.0,
+    "factor_vs_native": 0.79,
+    "footprint_diamond_px": [101.2, 50.6],
+    "why": "the 2x2 footprint diamond is 128 px wide at native scale and the kit's roof eaves add 0.14 unit per side (2.14 units across), which needs 136 px: it cannot fit a 128 px cell, so the whole set is drawn at 0.79 of native and the factor is recorded here"
+  },
+  "pivot": {
+    "px": [64, 95],
+    "meaning": "footprint centre on the ground plane (z 0); the front footprint edge lands on row 120, the sprite alpha reaches rows 25..122 and columns 3..124 of the 128 px cell",
+    "why": "a building anchors on its footprint centre; the front edge and the eaves are recorded above so a renderer can also y-sort on row 120"
+  },
+  "atlas": {
+    "file": "house.cottage.atlas.png",
+    "size": [130, 390],
+    "bytes": 53718,
+    "cell": [128, 128],
+    "padding": 1,
+    "rows": 3,
+    "columns": 1,
+    "rows_note": "row 0 finished, row 1 half_built, row 2 damaged; one facing each, buildings do not rotate",
+    "pack_command": "node tools/kam2/pack_atlas.mjs --in <frames> --out content/kam2/house --id house.cottage --kind building --facings 1 --anim finished:1:8:true --anim half_built:1:8:true --anim damaged:1:8:true --footprint 2x2 --pivot 64,95"
+  },
+  "source_frames": [
+    "final-finished/frame_01.png -> pack/state_00.png (row 0)",
+    "final-half_built/frame_01.png -> pack/state_01.png (row 1)",
+    "final-damaged/frame_01.png -> pack/state_02.png (row 2)"
+  ],
+  "notes": [
+    "Kit palette kept except the roof. The kit ships a teal roof; the lock fixes roof red #A33B2E, so the four roof pieces carry one flat material in that colour. Walls, wood and stone keep the kit's own pastel colours, which sit lighter and less saturated than the lock ramps: an open item, not a silent change.",
+    "States are atlas rows of one id, not the separate ids the lock names for build stages (house.farm.stage2). One manifest had to carry the set for this first building; the runtime picks row 0, 1 or 2 from build progress.",
+    "The contact shadow is the renderer's baked ellipse (35% #1B1F24, 2 px along the sun). A footprint-filling building hides most of it, so it reads as a soft fringe at the base (alpha reaches row 122).",
+    "fps 8 and loop true on each state row are placeholders the packer needs; the three states are single stills.",
+    "No team-colour mask pass for buildings yet, and no cameo (96x72, pitch 35) yet: both manifest fields stay null.",
+    "The kit's roof corner piece is a quarter hip, so the 2x2 roof is a pyramid hip, not the gable the sample renders show."
+  ]
+}

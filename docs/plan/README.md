@@ -9,8 +9,10 @@ Multiplayer. Format: file — tag — proof it feeds — scope. A new plan file 
 one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 
 - `finish-line.md` — NOW — all four — the finish line as numbers the loop prints itself (gates G1-G8, product check), the order of the LF steal rows, research in `docs/research/steals-2026-10-11/`
-- `ai-native-steals.md` - NOW - AI door - the owner's 2026-10-20 seat/warn report: what landed (the live `--agent-seat` socket and self-warn floors) and the five ranked steals with sources and rows AIN1-AIN6
-- `status-2026-10-17.md` - NOW - all four - one-screen truth check: what is verified green this week, what code was cut, which rows are unbuilt, and the owner's open decisions; read it before trusting a status cell in any plan
+- `kam2-rust.md` — NOW — Look — the owner's 2026-10-20 order: a KaM-economy RTS in Rust with a RA2-look 2.5D renderer, its crates KAM2-SIM/DATA/RENDER/UI/AI/GAME, milestones KAM0-KAM5 and the free-art legal line
+- `kam2-style-lock.md` — NOW — Look — the measured art lock for KAM2: 2:1 diamond at 64x32, 8 facings, turret layer, palette, light rig, team mask, cameo and manifest rules
+- `ai-native-steals.md` — NOW — AI door — the owner's 2026-10-20 seat/warn report: what landed (the live `--agent-seat` socket and self-warn floors) and the five ranked steals with sources and rows AIN1-AIN6
+- `status-2026-10-17.md` — NOW — all four — one-screen truth check: what is verified green this week, what code was cut, which rows are unbuilt, and the owner's open decisions; read it before trusting a status cell in any plan
 - `web-and-realism.md` — NOW — Look, Bodies, Multiplayer — heavy realistic games on Windows and in the browser: the wasm build, the physical layer (ragdoll, severed limbs, debris), the lit and textured arena, browser multiplayer, and an AI-driven project setup (rows WEB, RZ, VR, AIS)
 - `web-plays-the-match.md` — NOW — Look, Multiplayer — the browser page runs the same match the native window runs (`App` + fixed tick + the fight draw helpers) and draws it with the procedural ring until the cooked kit assets land (row WEB15)
 - `parry-and-limb.md` — NOW — Look, Bodies — the v2 exchange (parry, riposte, clash) made readable in the page, and a lost guard costing a limb that falls into the debris layer (row WEB16 with QR12)
@@ -24,8 +26,8 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `2026-10-18-docs-audit.md` — LATER — none — docs/plan pointer sweep: the one missing index line and one gone `systems/` path fixed, with the pinned stale refs, EMPIRE refs and future paths left and listed with reasons
 - `2026-10-19-owner-queue.md` — NOW — all four — the rows only a person can close (a run or a decision) with the exact command or question, and the record of the owner's delegated calls of 2026-10-19 (every A item decided, the 32 obsolete and the gone-code ticks resolved)
 - `2026-10-19-progress.md` — NOW — all four — the dated progress log (pass one to five): rows landed and judged with run ids, the janitor sweeps, and the two tool fixes (`nonstop` timeout classification, `docs-coverage` multi-line attributes)
-- `design-review-2026-10-17.md` - NEXT - all four - 13 ranked design findings (DSN1-DSN13) with a board row each
-- `shady-knight-port.md` - NEXT - Look - the owner's own game as donor: what is ported (walk bob, SG6), the numbers each row uses, and why the rope swing (SG4) waits on a fighter height channel (SG5)
+- `design-review-2026-10-17.md` — NEXT — all four — 13 ranked design findings (DSN1-DSN13) with a board row each
+- `shady-knight-port.md` — NEXT — Look — the owner's own game as donor: what is ported (walk bob, SG6), the numbers each row uses, and why the rope swing (SG4) waits on a fighter height channel (SG5)
 - `render-look.md` — NOW — Look — moving fighter captures on the RTX 3050 stand beside the references: arena kit, window build, Q1 reference captures
 - `body-and-break.md` — NOW — Bodies — cuts, limbs, ragdoll, collapse and fire give one hash on every PC and in replay (physics base inside)
 - `hard-systems.md` — NOW — AI door — published, reproducible AI-door scores beside rivals, and the proofs behind them
@@ -52,14 +54,15 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `urban-war.md` — LATER — none — a second, different game proves the engine is general (frozen by FOCUS D7)
 - `silicon-city.md` — LATER — none — a future game: build a CPU like a city and a factory, ride one instruction in first person, compete on a performance/power/area skyline with humans and bots, and check the best designs in real open simulators (rows SIL1..SIL45, not on the board yet)
 - `silicon-world.md` — LATER — none — the look and world half of Silicon City: the chip as a walkable, drivable GTA-style city (RAM harbor, ghost town, subway), zoom with no load screen, time dial, radio stations as workloads, missions, every visual tied to a sim counter (rows SIL46..SIL59, not on the board yet)
+- `ryl1.md` — LATER — none — the RYL1 soul as a faction-war game: two asymmetric races, aimed combat, three capture points, 6v6 with AI seats (rows RY1-RY10, not on the board yet; owner door 2026-10-20)
 - `os-game.md` — LATER — none — the headless "You're the OS" game (`crates/ossim`: 4 CPUs, RAM and swap, one I/O queue, starvation, 12 stages), the window and web shells still to build, and the GPL idea-only note (rows OS1..OS5, not on the board yet)
 - `parked.md` — LATER — none — parked areas (world, audio, editor, shipping UI) stay small; each names the Core proof that un-parks it
 - `forge-adoption.md` — NEXT — AI door, Bodies, Look — what the engine takes from Forge and the old Flax plugin: 34 board rows (AD1..AD29, PX40, AX23, EA6, PF24, SP66), 30 next items, 26 engine defects, 14 owner decisions, a 90-line ranked second-pass catalog
 - `steals.md` — LATER — none — open donor steals per bar, at most 3 per bar (data, not a plan)
 - `rome-spec.md` — LATER — none — shared Rome arena spec for two engines, with the open parity gaps digest
 - `BOOK-GAPS-2026-10-12.md` — NEXT — all four — book review 1 (Gregory GEA, Lengyel, Modern Game Testing) vs code: wired-but-unused W1-W18, render order, decisions D1-D6 (a review, not rows)
-- `BOOK-GAPS-2-2026-10-12.md` - NOW - all four - book review 2 (30 books: engine, math, Rust, architecture, MCP, game design) rows N1-N40; boarded as GP27-GP42, GA13-GA15 and the engine rows in `../SPRINT-20-game.md`
-- `BOOK-GAPS-3-2026-10-19.md` - NOW - all four - book review 3 (Dunsky, Beuken, GPG8, Rust official docs, shelf) rows D1-D2 on AM14/AM15, G1-G4 as NB3-NB5/AM13, R1-R2 as NB1-NB2 in `../SPRINT-23-books.md`
+- `BOOK-GAPS-2-2026-10-12.md` — NOW — all four — book review 2 (30 books: engine, math, Rust, architecture, MCP, game design) rows N1-N40; boarded as GP27-GP42, GA13-GA15 and the engine rows in `../SPRINT-20-game.md`
+- `BOOK-GAPS-3-2026-10-19.md` — NOW — all four — book review 3 (Dunsky, Beuken, GPG8, Rust official docs, shelf) rows D1-D2 on AM14/AM15, G1-G4 as NB3-NB5/AM13, R1-R2 as NB1-NB2 in `../SPRINT-23-books.md`
 - `ATLAS.md` — LATER — none — generated plan map (`node tools/plan-atlas.mjs --write`); never hand-edited
 - `DP1-deepdive.md` — NOW — AI door — stuck-gate deep dive for DP1 endpoint door net plus perf packs
 - `EG8-deepdive.md` — NOW — Look — stuck-gate deep dive for EG8 live pass-truth leg

@@ -16,6 +16,28 @@ static TEST_ALLOC: engine_core::alloc_probe::CountingAlloc =
 
 pub mod window;
 
+/// Fixed 2.5D ground projection: locked 45 degree yaw, `atan(0.5)` pitch and
+/// 64 x 32 pixel diamonds. Std-only; consumers are the windowed proof and the
+/// 2.5D game's ground pass.
+pub mod kam2_iso;
+
+/// Sprite layer over the fixed 2.5D view: eight facings, painter depth
+/// order, independent turret aim and the team-mask tint. Std-only.
+pub mod kam2_sprites;
+
+/// Procedural stand-in sprite atlas for the KAM1b proof: four rows of eight
+/// facing cells plus the team mask. Std-only.
+pub mod kam2_sprite_atlas;
+
+/// Windowed proof of the 2.5D ground field: real window, PNG receipt.
+#[cfg(feature = "window")]
+pub mod kam2_iso_proof;
+
+/// Windowed proof of the sprite layer: field, walking sprites, tracking
+/// turret and team tint, with a PNG receipt.
+#[cfg(feature = "window")]
+pub mod kam2_sprite_proof;
+
 pub mod graph;
 
 /// Named history textures across frames with a validity flag (RL62): take,
@@ -80,6 +102,11 @@ pub mod present;
 /// quads drained to one triangle list. Std-only; consumer is the slice-2
 /// present-path feed.
 pub mod overlay;
+
+/// Flat HUD command pass (UIX13): rects, borders, text quads and scissors
+/// from an `engine-ui` frame, rasterized over an RGBA8 scene. Std-only;
+/// consumer is the KAM1c windowed proof and the `hud` graph pass next.
+pub mod hud_pass;
 
 /// EG8 pass-truth gate (GX6 successor): a look pass counts live only when
 /// its on/off frames differ above epsilon. Std-only; consumer is the EG8
@@ -329,6 +356,13 @@ pub mod twin_shadow;
 /// shader reads (`shadow.feet`), its pack and the CPU oracle of
 /// `sun_contact_factor`. Std-only; fed by `Presenter::set_contact_feet`.
 pub mod contact_feet;
+
+/// Screen-space contact shadows: the 16-step, 0.3 m, 0.1 m-thick march that
+/// recovers the last centimetres where a body meets the ground. The CPU
+/// oracle here pins the constants the live GTAO upsample runs.
+pub mod contact_shadow;
+/// Shadowed spot lights (flashlights and lamps) on the clustered path.
+pub mod spot;
 
 /// Twin fighter draw bind (RL26): one box body per fighter slot (the hero
 /// stand-in plus staged opponents) for the window twin's

@@ -16,6 +16,7 @@ use crate::scene_tools::{
     TOOL_SCENE_SPATIAL,
 };
 use crate::tool_capabilities::CapabilityCard;
+use crate::world_query::{WorldQueryTool, TOOL_WORLD_QUERY};
 use engine_scene::component::ComponentKind;
 
 /// Pack name.
@@ -61,12 +62,13 @@ pub fn component_doc(kind: ComponentKind) -> (&'static str, &'static str) {
     }
 }
 
-/// The scene pack: eight verbs, loaded by default.
+/// The scene pack: nine verbs, loaded by default.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
         "layout authoring: brief, spatial findings, intent placement, brief-to-level build, \
-         spatial questions, the digest watch, the next-call planner and pointing at a capture",
+         spatial questions, the digest watch, the next-call planner, pointing at a capture \
+         and the BRP component filter",
         true,
     );
     pack.add(VerbSpec::of::<SceneBriefTool>(
@@ -106,6 +108,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<ScenePickTool>(
         TOOL_SCENE_PICK,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<WorldQueryTool>(
+        TOOL_WORLD_QUERY,
         PACK,
         CapabilityCard::Observe,
     )?);

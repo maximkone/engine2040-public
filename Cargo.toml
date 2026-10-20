@@ -40,10 +40,12 @@ rust-version = "1.97.1"
 # `node tools/rust-quality.mjs` and join this list when their count hits zero.
 # Exceptions use `#[expect(lint, reason = "...")]`, never a bare `allow`.
 [workspace.lints.rust]
-# Five scoped, reasoned `#[expect(unsafe_code)]` sites exist: engine-core's
-# counting allocator, engine-provider's test-only environment writer,
-# engine-ecs's `Scope::spawn` (lifetime erase for scoped jobs on the persistent pool),
-# engine-geo's xatlas FFI wrapper, and engine-render's Windows DXGI VRAM read (`backend.rs`).
+# Six scoped, reasoned `#[expect(unsafe_code)]` sites exist: engine-core's
+# counting allocators (the unit `CountingAlloc` over `System` and the generic
+# `CountingAllocator<A>` a candidate-backend harness installs), engine-provider's
+# test-only environment writer, engine-ecs's `Scope::spawn` (lifetime erase for
+# scoped jobs on the persistent pool), engine-geo's xatlas FFI wrapper, and
+# engine-render's Windows DXGI VRAM read (`backend.rs`).
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 # `loom` is set by `RUSTFLAGS="--cfg loom"` for the job-pool model in engine-ecs.
@@ -204,6 +206,10 @@ wgpu = "30.0.1"
 pollster = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 puffin = "0.20"
+# PF18 candidate allocator (MIT, harness-only): the perf test binary that sets
+# it as its global allocator is the only consumer. Never a dependency of a tick
+# crate or of the default headless graph.
+mimalloc = "0.1.52"
 # OPT36 feature union (cargo-hakari pattern): one set every -p test builds.
 # Scoped out of the headless default: the hack stays externals-only and out of
 # root [dependencies]/default-members, so the headless resolve stays std-only.

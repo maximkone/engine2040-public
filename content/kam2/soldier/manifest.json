@@ -1,0 +1,52 @@
+{
+  "id": "unit.soldier",
+  "kind": "unit",
+  "tile_w": 64,
+  "tile_h": 64,
+  "pivot": [
+    32,
+    56
+  ],
+  "footprint": [
+    1,
+    1
+  ],
+  "turret_anchor": null,
+  "facings": [
+    "S",
+    "SW",
+    "W",
+    "NW",
+    "N",
+    "NE",
+    "E",
+    "SE"
+  ],
+  "facing_count": 8,
+  "anims": [
+    {
+      "name": "walk_pose",
+      "frames": 1,
+      "fps": 10,
+      "loop": true,
+      "row": 0
+    },
+    {
+      "name": "walk",
+      "frames": 8,
+      "fps": 10,
+      "loop": true,
+      "row": 1
+    }
+  ],
+  "atlas": "unit.soldier.atlas.png",
+  "mask_atlas": null,
+  "cameo": null,
+  "atlas_size": [
+    528,
+    594
+  ],
+  "padding": 1,
+  "source_frames": 72,
+  "generator": "tools/kam2/pack_atlas.mjs"
+}

@@ -31,7 +31,7 @@ the sim controller and in its snapshots.
 | camera lead cap | 1.2 | m | `LookAhead` |
 | accel halflife | 0.2 | s | `LookAhead` |
 | decel halflife | 0.1 | s | `LookAhead` |
-| juggle budget | 15 | hits | **not built** (see open item) |
+| juggle budget | 15 | consecutive clean hits | `JUGGLE_BUDGET` (combat, always on) |
 
 The default `AirTuning` remains today's flat table, so tests and callers that do
 not arm the channel keep the old step. `Controller::state_hash` folds
@@ -58,13 +58,13 @@ and `fighter_look_cam::tests::look_ahead_leads_a_walking_hero_and_decays_when_st
 - `cargo test -p engine-physics --lib --features rapier apex_gravity` -> 1 passed.
 - `cargo test -p engine-physics --lib --features rapier jump_hold_deadline` -> 1 passed.
 - `cargo test -p engine-game --lib --features app look_ahead` -> 2 passed.
-- `cargo test -p engine-arena --lib` -> 227 passed, 0 failed, 5 ignored.
+- `cargo test -p engine-arena --lib` -> 229 passed, 0 failed, 5 ignored.
 - Root `target/release/engine2040.exe` x2 -> `final_hash=d57b5c8ae3096614`
   both times, `state_hash=2aca9338670aa0cb`; the root does not link arena/game.
 
-## Open item
+## Juggle
 
-The juggle budget has no consumer: combat has no vertical launch or air-combo
-meter, so a 15-hit budget would be a constant with nothing to count. It stays
-open on AIN6; the air ramp, apex, coyote, hold and camera lead are armed and
-proven above.
+The juggle budget is now built in combat: 15 consecutive clean hits, the 16th
+knocks down. The number, the first differing tick (the 16th hit) and the
+Retiarius reachability proof are in
+`docs/receipts/2026-10-20-ain6-juggle/README.md`. The root golden is unchanged.

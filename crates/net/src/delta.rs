@@ -27,6 +27,7 @@
 //! deltas reject loudly and change nothing, never panic.
 
 use super::session::NetError;
+use crate::validate::SortedUnique;
 
 /// Field mask bit: `x_mm` present in a [`FighterDelta`].
 pub const MASK_X: u8 = 0x01;
@@ -203,15 +204,11 @@ impl FullSnap {
         {
             return Err(NetError::BadState);
         }
-        let mut prev: Option<u8> = None;
+        let mut order = SortedUnique::new();
         for fighter in &self.fighters {
-            if fighter.slot >= engine_input::MAX_PARTICIPANTS {
+            if fighter.slot >= engine_input::MAX_PARTICIPANTS || !order.push(fighter.slot) {
                 return Err(NetError::BadState);
             }
-            if prev.is_some_and(|p| fighter.slot <= p) {
-                return Err(NetError::BadState);
-            }
-            prev = Some(fighter.slot);
         }
         Ok(())
     }
@@ -230,15 +227,11 @@ pub(crate) fn validate_delta_shape(delta: &Delta) -> Result<(), NetError> {
     if delta.changed_slots.len() > usize::from(engine_input::MAX_PARTICIPANTS) {
         return Err(NetError::TooManyInputs(delta.changed_slots.len()));
     }
-    let mut prev: Option<u8> = None;
+    let mut order = SortedUnique::new();
     for (slot, change) in &delta.changed_slots {
-        if *slot >= engine_input::MAX_PARTICIPANTS {
+        if *slot >= engine_input::MAX_PARTICIPANTS || !order.push(*slot) {
             return Err(NetError::BadState);
         }
-        if prev.is_some_and(|p| *slot <= p) {
-            return Err(NetError::BadState);
-        }
-        prev = Some(*slot);
         if change.mask == 0 || change.mask & !MASK_ALL != 0 {
             return Err(NetError::BadState);
         }

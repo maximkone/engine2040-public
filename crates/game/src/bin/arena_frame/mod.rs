@@ -7,6 +7,11 @@ use engine_audio::CueBank;
 
 use super::*;
 
+pub(super) mod pace;
+pub(super) mod trace;
+pub(crate) use pace::FixedDtPacer;
+pub(crate) use trace::{FrameSplit, FrameTrace};
+
 /// Watch content files plus shaders by file; missing roots watch nothing,
 /// notes still stage. The designer combat rows file rides explicitly via
 /// the practice path const: the `content` scan only sees top-level files
@@ -362,6 +367,15 @@ impl ArenaApp {
         }
     }
 
+    /// Fold this tick's joint motion into the pop law; presentation only.
+    fn note_pop_tick(&mut self, tick: u32) {
+        if let Some(look) = self.look.as_mut() {
+            if let Ok(bodies) = look.pose_frame_joints(usize::from(self.config.fighters), 0.5) {
+                self.view.note_tick(f64::from(tick) + 0.5, &bodies);
+            }
+        }
+    }
+
     /// Run `steps` fixed ticks for the human slot: input, feed and mixer
     /// pumps, staged and look tallies, then the crash ring. A network seat
     /// (`--host`/`--join`) pumps first and flushes last; its ticks come from
@@ -417,10 +431,8 @@ impl ArenaApp {
                     }
                     mixer.render_into(&mut self.audio_scratch);
                 }
-            }
-            // Offline pump when no device stream is live so sent == applied
-            // even headless; a live stream pumps itself on the callback.
-            if self._device.is_none() {
+                // Offline pump when no device stream is live so sent == applied
+                // even headless; a live stream pumps itself on the callback.
                 if let Some(engine) = self.feed_engine.as_mut() {
                     engine.render_stereo_into(&mut self.feed_scratch);
                 }
@@ -443,6 +455,7 @@ impl ArenaApp {
                     usize::from(self.config.fighters),
                 );
             }
+            self.note_pop_tick(tick);
             // The crate's break picture takes the tick's authority break events (an empty
             // slice on quiet ticks) and steps its debris once; presentation only (RZ4w).
             let break_cue = match self.break_scene.as_mut() {
@@ -749,6 +762,68 @@ impl ArenaApp {
         let message = live_wait_failure(&stats)?;
         tell!("arena: {message}");
         Some(1)
+    }
+
+    /// Write the per-frame present-path trace to the path
+    /// `E2040_FRAME_TRACE` named, and print the slow frames with the
+    /// section that ate each one. A run without the variable writes
+    /// nothing and prints nothing.
+    pub(super) fn write_frame_trace(&mut self) {
+        let Some(path) = self.frame_trace_path.clone() else {
+            return;
+        };
+        let trace = std::mem::take(&mut self.frame_trace);
+        if let Err(err) = trace::write_trace_csv(&path, &trace) {
+            tell!("arena: frame trace {path:?}: {err}");
+            self.failure = Some(2);
+            return;
+        }
+        say!(
+            "arena frame-trace: file=\"{}\" frames={} slow={}",
+            path.display(),
+            trace.len(),
+            trace::slow_frames_line(&trace),
+        );
+        for row in trace::slow_frames(&trace).iter().take(10) {
+            say!("arena frame-trace-slow: {}", trace::slow_frame_line(row));
+        }
+    }
+
+    /// One row of the per-frame trace: the frame's wall split and the
+    /// present path's own split. Nothing is written unless
+    /// `E2040_FRAME_TRACE` named a path, so the default run pays nothing.
+    pub(super) fn note_frame_trace(
+        &mut self,
+        work_us: u64,
+        interval_us: u64,
+        sim_us: u64,
+        present_us: u64,
+        fighters_us: u64,
+    ) {
+        if self.frame_trace_path.is_none() {
+            return;
+        }
+        self.frame_trace.push(arena_frame::FrameTrace {
+            index: self.frames_presented.saturating_sub(1),
+            wall_us: duration_us(self.started.elapsed()),
+            work_us,
+            interval_us,
+            sim_us,
+            present_us,
+            fighters_us,
+            split: self.last_frame_split,
+            ticks: self.ticks_done,
+            focused: self.window_focused,
+            occluded: self.window_occluded,
+        });
+    }
+
+    /// The window's focus and occlusion state, for the frame trace: a
+    /// present path that parks on an unfocused window is a different stall
+    /// from one that parks on the compositor.
+    pub(super) fn note_window_state(&mut self, focused: bool, occluded: bool) {
+        self.window_focused = focused;
+        self.window_occluded = occluded;
     }
 }
 

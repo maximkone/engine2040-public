@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use engine_input::MAX_PARTICIPANTS;
 
 use crate::session::{SNAPSHOT_HEADER_LEN, SNAPSHOT_SLOT_LEN, STATE_DELTA_HEADER_LEN};
+use crate::validate::SortedUnique;
 
 /// The canonical slot cap as an array length (the one widening of it).
 const SLOT_CAP: usize = MAX_PARTICIPANTS as usize;
@@ -344,17 +345,16 @@ fn check_order(slots: &[FighterView]) -> Result<(), ScaleError> {
     if slots.len() > SLOT_CAP {
         return Err(ScaleError::BadFighterCount { got: slots.len() });
     }
-    let mut prev: Option<u8> = None;
+    let mut order = SortedUnique::new();
     for view in slots {
         if view.slot >= MAX_PARTICIPANTS {
             return Err(ScaleError::BadFighterCount {
                 got: usize::from(view.slot),
             });
         }
-        if prev.is_some_and(|p| view.slot <= p) {
+        if !order.push(view.slot) {
             return Err(ScaleError::UnsortedSlots);
         }
-        prev = Some(view.slot);
     }
     Ok(())
 }

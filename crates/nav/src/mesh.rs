@@ -13,9 +13,11 @@ use crate::cursor::{Cursor, Truncated};
 pub const MAX_COORD_M: f32 = 4096.0;
 
 /// Bake wire magic (`E2NAV1`) at the head of every blob.
-const MESH_MAGIC: [u8; 6] = *b"E2NAV1";
-/// Bake wire version; bump on any layout change, refuse anything else.
-pub const MESH_VERSION: u16 = 1;
+pub(crate) const MESH_MAGIC: [u8; 6] = *b"E2NAV1";
+/// Wire version written today: 2 adds the layered span table (`layers.rs`)
+/// beside the unchanged plain-mesh body. Version 1 blobs still decode, so a
+/// bake from before the span table keeps loading; later versions refuse.
+pub const MESH_VERSION: u16 = 2;
 /// Millimeters per meter; the only float-to-int scale in the bake.
 const MM_PER_M: f32 = 1000.0;
 /// Largest triangle soup one bake accepts; larger inputs refuse loudly.
@@ -337,6 +339,24 @@ impl NavMesh {
     pub fn grid_dims(&self) -> (u32, u32) {
         (self.width, self.height)
     }
+    /// Cell size in whole millimeters, the value the bytes carry.
+    pub fn cell_size_mm(&self) -> u32 {
+        self.cell_mm
+    }
+    /// Grid origin in whole millimeters, world `[x, z]`.
+    pub fn origin_mm(&self) -> [i32; 2] {
+        self.origin_mm
+    }
+    /// Baked surface height of grid cell `cell` in millimeters; `None` when
+    /// the cell is off-grid or on no walkable polygon. The layered read path
+    /// rebuilds its span table from these heights.
+    pub fn cell_height_mm(&self, cell: [u32; 2]) -> Option<i32> {
+        if cell[0] >= self.width || cell[1] >= self.height {
+            return None;
+        }
+        let index = grid_usize(cell[1]) * grid_usize(self.width) + grid_usize(cell[0]);
+        (self.cell_poly[index] != NO_POLY).then(|| self.cell_h_mm[index])
+    }
     /// Walkable cell count.
     pub fn walkable_cells(&self) -> usize {
         self.cell_poly.iter().filter(|p| **p != NO_POLY).count()
@@ -452,7 +472,7 @@ impl NavMesh {
             return Err(NavError::BadMagic);
         }
         let version = read.u16()?;
-        if version != MESH_VERSION {
+        if version == 0 || version > MESH_VERSION {
             return Err(NavError::VersionMismatch { got: version });
         }
         let cell_mm = read.u32()?;
@@ -834,7 +854,7 @@ impl MeshTiles {
             return Err(NavError::BadMagic);
         }
         let ver = read.u16()?;
-        if ver != MESH_VERSION {
+        if ver == 0 || ver > MESH_VERSION {
             return Err(NavError::VersionMismatch { got: ver });
         }
         let (edge, cols, rows) = (read.u32()?, read.u32()?, read.u32()?);
@@ -907,7 +927,7 @@ fn check_config(config: &BakeConfig) -> Result<(), NavError> {
 
 /// Rounds a millimeter value to `i32`, or `None` when it is NaN, infinite or
 /// outside `i32`. `as` would turn NaN into 0 and clamp the rest silently.
-fn round_mm(value: f64) -> Option<i32> {
+pub(crate) fn round_mm(value: f64) -> Option<i32> {
     let rounded = value.round();
     // Every comparison with NaN is false, so NaN never passes the range test.
     (f64::from(i32::MIN)..=f64::from(i32::MAX))
@@ -915,8 +935,20 @@ fn round_mm(value: f64) -> Option<i32> {
         .then_some(rounded as i32)
 }
 
+/// A grid bound or cell coordinate as `usize`; every nav grid bound is at most
+/// `MAX_SIDE` wide and `MAX_CELLS` cells, far inside `usize` on every target.
+pub(crate) fn grid_usize(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+/// A bounded table count back to `u32` for the wire; the same bound keeps it
+/// inside `u32` on every target.
+pub(crate) fn grid_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 /// Quantize one triangle to integer millimeters, refusing bad input.
-fn quantize_tri(tri: &[[f32; 3]; 3], index: usize) -> Result<[i32; 9], NavError> {
+pub(crate) fn quantize_tri(tri: &[[f32; 3]; 3], index: usize) -> Result<[i32; 9], NavError> {
     for vertex in tri {
         if !vertex.iter().all(|v| v.is_finite()) {
             return Err(NavError::NonFiniteTri { tri: index });
@@ -961,7 +993,7 @@ fn shoelace_twice(edges: &[([f64; 2], [f64; 2])]) -> f64 {
 }
 
 /// Walkable slope of a quantized triangle as its normal Y in `[-1, 1]`.
-fn tri_normal_y(quant: &[i32; 9]) -> f32 {
+pub(crate) fn tri_normal_y(quant: &[i32; 9]) -> f32 {
     let (ax, ay, az) = (
         f64::from(quant[3] - quant[0]),
         f64::from(quant[4] - quant[1]),
@@ -981,7 +1013,10 @@ fn tri_normal_y(quant: &[i32; 9]) -> f32 {
 }
 
 /// Grid origin and dims covering the walkable triangles, in integer mm.
-fn grid_span(walkable: &[[i32; 9]], cell_mm: u32) -> Result<([i32; 2], u32, u32), NavError> {
+pub(crate) fn grid_span(
+    walkable: &[[i32; 9]],
+    cell_mm: u32,
+) -> Result<([i32; 2], u32, u32), NavError> {
     let mut min_x = i32::MAX;
     let mut max_x = i32::MIN;
     let mut min_z = i32::MAX;
@@ -1077,7 +1112,12 @@ fn rasterize(
 }
 
 /// Cell span overlapped by one triangle axis, clamped to the grid.
-fn tri_cell_span(values_mm: [f64; 3], origin_mm: i32, cell_mm: u32, dims: u32) -> (u32, u32) {
+pub(crate) fn tri_cell_span(
+    values_mm: [f64; 3],
+    origin_mm: i32,
+    cell_mm: u32,
+    dims: u32,
+) -> (u32, u32) {
     let lo = values_mm[0].min(values_mm[1]).min(values_mm[2]);
     let hi = values_mm[0].max(values_mm[1]).max(values_mm[2]);
     let to_cell = |v: f64| ((v - f64::from(origin_mm)) / f64::from(cell_mm)).floor() as i64;
@@ -1087,7 +1127,7 @@ fn tri_cell_span(values_mm: [f64; 3], origin_mm: i32, cell_mm: u32, dims: u32) -
 }
 
 /// Quantized triangle back to float millimeters for raster tests.
-fn quant_to_tri_f(quant: &[i32; 9]) -> [[f64; 3]; 3] {
+pub(crate) fn quant_to_tri_f(quant: &[i32; 9]) -> [[f64; 3]; 3] {
     [
         [
             f64::from(quant[0]),
@@ -1109,7 +1149,7 @@ fn quant_to_tri_f(quant: &[i32; 9]) -> [[f64; 3]; 3] {
 
 /// Height sample when the XZ center falls inside the triangle, else none.
 /// A non-finite height gives none too, so the cell stays unwalkable.
-fn sample_height(tri: &[[f64; 3]; 3], center_mm: [f64; 2]) -> Option<i32> {
+pub(crate) fn sample_height(tri: &[[f64; 3]; 3], center_mm: [f64; 2]) -> Option<i32> {
     let (ax, az) = (tri[0][0], tri[0][2]);
     let (bx, bz) = (tri[1][0], tri[1][2]);
     let (cx, cz) = (tri[2][0], tri[2][2]);
@@ -1704,5 +1744,27 @@ mod tests {
             stacked.query_stacked(0, [0.5, 0.0, 0.5], 9, [0.5, 0.0, 0.5], [0.5, 0.0, 0.5]),
             Err(NavError::OutOfBounds)
         );
+    }
+
+    #[test]
+    fn tile_bytes_accept_v1_and_refuse_a_future_version() {
+        let floor = bake(&slab(0.0, 4.0, 0.0, 4.0, 0.0), &config()).expect("floor bakes");
+        let tiles = MeshTiles::from_mesh(&floor, MESH_TILE_EDGE).expect("tiles build");
+        let bytes = tiles.to_bytes();
+        assert_eq!(bytes[6..8], MESH_VERSION.to_le_bytes(), "tiles write v2");
+        assert_eq!(MeshTiles::from_bytes(&bytes), Ok(tiles.clone()));
+        let mut v1 = bytes.clone();
+        v1[6..8].copy_from_slice(&1u16.to_le_bytes());
+        assert_eq!(
+            MeshTiles::from_bytes(&v1),
+            Ok(tiles),
+            "a v1 table still decodes"
+        );
+        let mut future = bytes;
+        future[6..8].copy_from_slice(&(MESH_VERSION + 1).to_le_bytes());
+        assert!(matches!(
+            MeshTiles::from_bytes(&future),
+            Err(NavError::VersionMismatch { .. })
+        ));
     }
 }

@@ -42,11 +42,19 @@ Recomputed r406 from the 59 open FOCUS rows; the live list
 splits exactly as r385-r405 did: 0 + 11 + 16 + 17 + 0 + 15 = 59 (re-read row
 by row this run, same row ids, same stage split, so every number in the table
 below is re-derived and unchanged). Buffer = ceil(15% or 25% of the stage's open
-rows). A stage never passes without its exit test. Bars never lower.
+rows). A stage never passes without its exit test. Bars never lower. Status
+2026-10-20 at 78cd6b03: the table and the sections below are the 2026-10-17 r406
+snapshot. The live slice now prints 18 open FOCUS rows (AM24 moved into Feel for
+the pops proof), not 59, so recompute the stage split before quoting a buffer.
+Preproduction's exit test is the scoreboard's own integrity:
+`node tools/finish.mjs --check` exits 0 when every gate row resolves to the
+board or the archive and no met gate carries a suspect ticked row (missing
+crate, path or test filter, per `tools/ticked-rows-audit.mjs`). It does not
+require every gate met; the gates are the work of the later stages.
 
-| Stage | Exit test (one command) | Open FOCUS rows | Buffer | passed |
+| Stage | Exit test (one command) | Open FOCUS rows (2026-10-17 r406) | Buffer | passed |
 |---|---|---|---|---|
-| Preproduction | `node tools/finish.mjs` | 0 | n/a (no rows) | no |
+| Preproduction | `node tools/finish.mjs --check` | 0 | n/a (no rows) | yes (2026-10-20) |
 | First Playable (G1) | `node tools/product-check.mjs` | 11 | 3 (25% of 11) | no |
 | Vertical Slice | `node tools/product-check.mjs` | 16 | 4 (25% of 16) | no |
 | Alpha | `node tools/proof.mjs` | 17 | 5 (25% of 17) | no |
@@ -121,21 +129,16 @@ same 0 + 11 + 16 + 17 + 0 + 15 = 59 split.
 - r406 05:23Z: FIRED (ready 13 -> 19, +46.2%); table, buffers and the six stage
   sections below repasted from the receipts read at 05:13Z-05:36Z.
 
-## 1. Preproduction - passed: no
+## 1. Preproduction - passed: yes (2026-10-20)
 
-Scope and plans exist (FOCUS "## Now", finish-line G1-G9, FINISH-RICH A/B/C/P).
-Exit test: `node tools/finish.mjs`, which must print every gate with no fallback
-warning.
-Open FOCUS rows that belong here: 0. Buffer: none.
-Still closed: r406 re-ran the exit test (`node tools/finish.mjs`, 05:34Z):
-`A1: met`, `A2: met`, `A3: met`, `A4: partial 10/12`, `A5: partial
-8/10`, `A6: open 8/8`, `A7: open 4/4`, `A8: open 1/1`, `A9: partial 7/8`, `A10:
-partial 4/8`, the B/C/P tables and `Summary: 4 met, 10 partial, 12 open`, plus
-the same two warnings: `finish: warning: fallback rows used for A2, A3, A4, A5,
-A6, A7, A9, A10, C1, C2, C3, C4, C5` and `finish: warning: dropped rows filtered
-(A4:GX5, C1:GX5, P1:GX5)`, so the open set is still stale and the exit test is
-not clean. The tool names its own fix: `update FALLBACK_ROWS in tools/finish.mjs`
-and `update DROPPED_ROWS in tools/finish.mjs if the board changed`.
+Scope and plans exist (FOCUS "## Now", finish-line G1-G11, FINISH-RICH A/B/C/P).
+Exit test: `node tools/finish.mjs --check`, which exits 0 only when every gate
+row resolves to the board or the archive and no met gate carries a suspect
+ticked row. It does not require every gate met: Preproduction owns the contract
+and the scoreboard; the gates are later-stage work.
+Receipt 2026-10-20: `Check: PASS — 26 gates, 154 row(s) audited (65 name no
+crate path or test), 0 unresolved, 0 met gates with a suspect row`.
+The scoreboard still prints open gates by design; they are the later stages.
 
 ## 2. First Playable (the duel plays start to end, product check green: G1) - passed: no
 

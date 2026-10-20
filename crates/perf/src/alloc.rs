@@ -3,13 +3,27 @@
 //! Counting is per thread and armed only inside [`measure`], so parallel
 //! tests never pollute each other's budgets and unmeasured code behaves
 //! exactly like `System`.
+//!
+//! PF18: the `mimalloc` feature swaps the counted backend to `mimalloc` for the
+//! whole crate (one global allocator per process), so a candidate run is a
+//! separate build of the same harness and every row names the allocator that
+//! produced it ([`crate::allocator::active_kind`]).
 
-use engine_core::alloc_probe::{self, CountingAlloc};
+use engine_core::alloc_probe;
+#[cfg(not(feature = "mimalloc"))]
+use engine_core::alloc_probe::CountingAlloc;
+#[cfg(feature = "mimalloc")]
+use engine_core::alloc_probe::CountingAllocator;
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
 
+#[cfg(not(feature = "mimalloc"))]
 #[global_allocator]
 static GLOBAL_ALLOC: CountingAlloc = CountingAlloc;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL_ALLOC: CountingAllocator<mimalloc::MiMalloc> = CountingAllocator(mimalloc::MiMalloc);
 
 /// Allocation totals observed on the calling thread.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -106,6 +106,9 @@ pub mod tick_budget;
 /// Authenticated-transport audit: netcode-style token auth against TLS,
 /// measured side by side with real handshake bytes and CPU, no dependency.
 pub mod transport_audit;
+/// The shared sorted-and-unique gate for key runs (input tapes, interest
+/// rosters, snapshot slots, delta rows): one definition, caller-owned errors.
+pub mod validate;
 /// Datagram discipline for the WAN replication stream: one datagram per
 /// class-ordered snapshot, over-cap batches refused and counted, far and idle
 /// poses shed first, inputs and combat redundant and never expired.

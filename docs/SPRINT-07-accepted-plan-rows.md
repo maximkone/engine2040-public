@@ -1371,7 +1371,7 @@
   frozen file with no dependency, as the note below records; PF9's own GPU
   legs do not gate this row.) (PLN50 wave-49 REPO card 3 reshaped; rerun
   time_point shape reimplemented, no dependency.) Receipt: `cargo test -p engine-observe --lib timeline` 9 passed twice (gh 39312199977, 39312225066); ten seeds name the exact perturbed tick 10/10 (109, 10, 56, 92, 12, 52, 4, 40, 63, 17) with the matching field, including two non-hash perturbations; `golden_hash_untouched` passed twice (gh 39312221483, 39312220999); engine-observe 75 passed 0 failed (gh 39312818568); clippy PASS (39311926071). `rerun_sink.rs` was not modified.
-- [ ] PF18 perf: mimalloc as the bench-harness allocator on PF1 release
+- [x] PF18 perf: mimalloc as the bench-harness allocator on PF1 release Landed aa2ca746.
   workloads, hashes and alloc counts pinned (mimalloc_rust MIT,
   harness-only). Tier B/C. Size S. Owns the `GlobalAlloc` override in
   the harness. Accept: wall ms delta at identical hash/alloc rows;
@@ -1384,6 +1384,27 @@
   per docs/plan/quality.md:416: harden slice in-tree + suite-green =
   observed-only, no ms joins a baseline; mimalloc ≥10% delta HELD for a
   quiesced-box rerun or pilot numbers. No more full-row writers.)
+  Landed aa2ca746, verdict DROPPED. The candidate is real now: `perf`'s
+  `mimalloc` feature swaps the crate's counted global allocator, so the A/B is
+  two builds of one harness, and `allocator::active_kind()` names the backend
+  in the box line and in every row (`--alloc-compare` used to print eight rows
+  all produced by one allocator; it now prints the active backend's four).
+  Hash and alloc rows are identical either way (arena `b26ea883b1b772c0`,
+  65715 B, 151 calls; physics `ffcdcfcbfa0320ab`, 12192, 7; ai
+  `509b8f3eaa2bb76d`, 1344, 1; destruction `e063c0b4ab0c7aef`, 3764, 37).
+  Three interleaved pairs, release, 21 samples: p50 paired ratio system over
+  mimalloc median 0.914 arena (9% slower), 0.992 physics, 1.052 ai, 1.022
+  destruction; no workload reaches `SPEEDUP_PCT` 10%, so the swap is dropped
+  and the system allocator stays. The box was not quiesced (three-run spread
+  to 2.2x), so ms stay observed-only and no ms joins a baseline. Proof:
+  engine-core 132 passed, perf allocator 9 passed, `--test it alloc_compare`
+  2 passed in both feature states, clippy clean on both crates, rustfmt clean,
+  golden `d57b5c8ae3096614` x2. `engine-core` unsafe 5 to 10 is accepted with
+  a logged reason (the same forwarding pattern; a candidate cannot be counted
+  without it). Found, not fixed: `allocator_baseline::system_rows_match_
+  baselines_exactly` fails on `arena_tick_16` AllocBytes 63539 vs 65715,
+  before this change and after the arena tick moved in d743d05a; a budget
+  constant is never edited to pass.
 - [ ] SPR1 spatial: handle and place for every object - brief, spatial and query label objects
   `<mesh asset name>_<n> [uuid]` instead of `prop_NNNN` (ordinal stable per name), the brief gains one
   compact row per object (cm position, cm size, yaw octant), and `ids`/`objects` obey the byte budget with a

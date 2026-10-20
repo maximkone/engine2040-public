@@ -17,11 +17,12 @@
 //! Budgets: 64 recipe ops, 200_000 triangles, 32 name chars
 //! (`crates/geo/src/recipe.rs:18-22`). Entry points: [`GeoMesh`], [`GeoError`], [`EdgeReport`],
 //! [`mesh`], [`ops`], [`primitives`], [`recipe`], [`weights`], and one module per feature
-//! (`boolean`, `uv`, `lod`, `collision`, `bake`).
+//! (`boolean`, `uv`, `lod`, `collision`, `bake`, `fbx`).
 //!
 //! Donors (licenses read from each crate's own file on 2026-10-04, all on the `deny.toml` list):
 //! `manifold-rust` (Apache-2.0, port of Manifold), `xatlas` (MIT, vendored source behind the
-//! `uv` feature), `meshopt` (MIT OR Apache-2.0, meshoptimizer), `parry3d` (Apache-2.0, V-HACD).
+//! `uv` feature), `meshopt` (MIT OR Apache-2.0, meshoptimizer), `parry3d` (Apache-2.0, V-HACD),
+//! `ufbx` (MIT OR Unlicense, FBX loader behind the `fbx` feature).
 
 /// Humanoid bone auto-map: the 22 humanoid bones named from a rig's joint names, std only.
 pub mod bonemap;
@@ -39,6 +40,9 @@ pub mod bake;
 pub mod boolean;
 #[cfg(feature = "collision")]
 pub mod collision;
+/// FBX import with ufbx: one mesh per node, meters, +Y up.
+#[cfg(feature = "fbx")]
+pub mod fbx;
 #[cfg(feature = "lod")]
 pub mod lod;
 #[cfg(feature = "uv")]

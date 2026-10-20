@@ -78,6 +78,151 @@ pub mod names {
     pub const STINGER_ROAR: &str = "stinger_roar";
     /// Weapon or body against the stone wall.
     pub const IMPACT_STONE: &str = "impact_stone";
+    /// Blade on bone: a hard knock with a crack.
+    pub const IMPACT_BONE: &str = "impact_bone";
+    /// Blade on armor: a metal ring over a body thud.
+    pub const IMPACT_ARMOR: &str = "impact_armor";
+    /// A severed joint opens: wet spurt and bone crack.
+    pub const STUMP: &str = "stump";
+    /// Loaded structure creaks before it fails.
+    pub const STRUCTURE_GROAN: &str = "structure_groan";
+}
+
+/// What happened on a blow, for the impact table below. The sim events carry
+/// no surface or kind field; the presentation side names the cue from what it
+/// already knows (the event, the move, the victim's kit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImpactKind {
+    /// Blade or fist lands on a body.
+    Hit,
+    /// A held block soaks the blow.
+    Block,
+    /// A block inside the parry window: blade on blade.
+    Parry,
+    /// A fighter drops to the floor.
+    Knockdown,
+    /// Two attackers bind on the same tick.
+    Clash,
+    /// A counter blow off a parry.
+    Riposte,
+    /// A blow severs a joint.
+    Sever,
+    /// Blood and tissue leave the body.
+    Gore,
+}
+
+impl ImpactKind {
+    /// Number of kinds.
+    pub const COUNT: usize = 8;
+    /// Every kind, in [`Self::index`] order.
+    pub const ALL: [ImpactKind; ImpactKind::COUNT] = [
+        Self::Hit,
+        Self::Block,
+        Self::Parry,
+        Self::Knockdown,
+        Self::Clash,
+        Self::Riposte,
+        Self::Sever,
+        Self::Gore,
+    ];
+
+    /// Dense index `0..COUNT` for per-kind tables.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Hit => 0,
+            Self::Block => 1,
+            Self::Parry => 2,
+            Self::Knockdown => 3,
+            Self::Clash => 4,
+            Self::Riposte => 5,
+            Self::Sever => 6,
+            Self::Gore => 7,
+        }
+    }
+}
+
+/// What the blow landed on: picks the material family of the take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImpactSurface {
+    /// Bare or cloth-covered body.
+    Flesh,
+    /// Leather or mail: a body thud with a soft ring.
+    Mail,
+    /// Plate: a metal ring over the body.
+    Plate,
+    /// Wooden shield.
+    ShieldWood,
+    /// Iron shield or helmet.
+    ShieldIron,
+    /// Stone wall or floor.
+    Stone,
+}
+
+impl ImpactSurface {
+    /// Number of surfaces.
+    pub const COUNT: usize = 6;
+    /// Every surface, in [`Self::index`] order.
+    pub const ALL: [ImpactSurface; ImpactSurface::COUNT] = [
+        Self::Flesh,
+        Self::Mail,
+        Self::Plate,
+        Self::ShieldWood,
+        Self::ShieldIron,
+        Self::Stone,
+    ];
+
+    /// Dense index `0..COUNT` for per-surface tables.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Flesh => 0,
+            Self::Mail => 1,
+            Self::Plate => 2,
+            Self::ShieldWood => 3,
+            Self::ShieldIron => 4,
+            Self::Stone => 5,
+        }
+    }
+
+    /// True for the metal families (plate, iron shield): a blow on them rings
+    /// like the blade-on-metal cue. Mail keeps the body family.
+    fn is_metal(self) -> bool {
+        matches!(self, Self::Plate | Self::ShieldIron)
+    }
+}
+
+/// The arena cue for one impact: the kind of blow and the material it hit.
+///
+/// One table for every impact the arena can report, so the `FightEvent`
+/// contract stays field-for-field (the Godot `AudioStreamRandomizer` shape:
+/// variant choice and kind/surface live on the presentation side). All four
+/// material families of [`ARENA_CUES`] are reachable: flesh/mail take the
+/// body takes, wood the shield takes, plate/iron the metal takes, stone the
+/// stone takes. Sever uses the heavy knockdown takes; a recorded sever take
+/// would add a fifth family. Never panics.
+pub fn impact_cue(kind: ImpactKind, surface: ImpactSurface) -> &'static str {
+    let metal = surface.is_metal();
+    match kind {
+        ImpactKind::Knockdown | ImpactKind::Sever => names::KNOCKDOWN,
+        ImpactKind::Parry | ImpactKind::Clash | ImpactKind::Riposte => names::PARRY,
+        ImpactKind::Block => {
+            if metal {
+                names::PARRY
+            } else {
+                names::BLOCK
+            }
+        }
+        ImpactKind::Hit | ImpactKind::Gore => {
+            if metal {
+                names::PARRY
+            } else if surface == ImpactSurface::ShieldWood {
+                names::BLOCK
+            } else if surface == ImpactSurface::Stone {
+                names::IMPACT_STONE
+            } else {
+                names::HIT
+            }
+        }
+    }
 }
 
 /// Index of a cue inside its [`CueBank`]; stable because the bank sorts by
@@ -458,10 +603,28 @@ const fn impact(
     }
 }
 
+/// Shorthand for one synthesized combat cue: no recordings yet, so the
+/// procedural voice stands in.
+const fn synthesized(name: &'static str, synth: Synth, priority: u8, gain: f32) -> CueSpec {
+    CueSpec {
+        name,
+        files: &[],
+        synth,
+        spatial: COMBAT,
+        group: Group::Impact,
+        looped: false,
+        priority,
+        bus: Bus::Sfx,
+        gain,
+        ducks_music: false,
+    }
+}
+
 /// Every cue the arena plays, mapped onto the CC0 clips in `content/audio`.
-/// `swing`, `crowd` and the two stingers have no recording yet: they are
-/// synthesized.
-pub const ARENA_CUES: [CueSpec; 15] = [
+/// `swing`, `crowd`, the two stingers and the BX11 material/tissue takes
+/// (`impact_bone`, `impact_armor`, `stump`, `structure_groan`) have no
+/// recording yet: they are synthesized.
+pub const ARENA_CUES: [CueSpec; 19] = [
     impact(
         names::HIT,
         &[
@@ -513,6 +676,10 @@ pub const ARENA_CUES: [CueSpec; 15] = [
         120,
         0.9,
     ),
+    synthesized(names::IMPACT_BONE, Synth::Bone, 175, 1.0),
+    synthesized(names::IMPACT_ARMOR, Synth::Armor, 165, 0.9),
+    synthesized(names::STUMP, Synth::Stump, 185, 0.9),
+    synthesized(names::STRUCTURE_GROAN, Synth::Groan, 110, 0.8),
     CueSpec {
         name: names::SWING,
         files: &[],
@@ -1074,5 +1241,74 @@ mod tests {
             "streamed bed keeps source rate, no resample growth"
         );
         assert_eq!(report.loaded_files, 1);
+    }
+
+    #[test]
+    fn impact_matrix_covers_every_kind_on_the_shipped_bank() {
+        let bank = CueBank::placeholder(48_000).expect("shipped table is valid");
+        assert_eq!(ImpactKind::ALL.len(), ImpactKind::COUNT);
+        assert_eq!(ImpactSurface::ALL.len(), ImpactSurface::COUNT);
+        for (index, kind) in ImpactKind::ALL.into_iter().enumerate() {
+            assert_eq!(kind.index(), index);
+            for (at, surface) in ImpactSurface::ALL.into_iter().enumerate() {
+                assert_eq!(surface.index(), at);
+                let name = impact_cue(kind, surface);
+                assert!(
+                    bank.id(name).is_some(),
+                    "{kind:?} on {surface:?} names {name} outside the bank"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn impact_matrix_reads_both_kind_and_surface() {
+        let flesh = impact_cue(ImpactKind::Hit, ImpactSurface::Flesh);
+        let wood = impact_cue(ImpactKind::Hit, ImpactSurface::ShieldWood);
+        let iron = impact_cue(ImpactKind::Hit, ImpactSurface::ShieldIron);
+        assert_eq!(
+            (flesh, wood, iron),
+            (names::HIT, names::BLOCK, names::PARRY),
+            "the surface picks the material family"
+        );
+        assert_eq!(
+            impact_cue(ImpactKind::Block, ImpactSurface::ShieldIron),
+            names::PARRY,
+            "a block on iron rings like metal"
+        );
+        assert_eq!(
+            impact_cue(ImpactKind::Block, ImpactSurface::ShieldWood),
+            names::BLOCK
+        );
+        assert_eq!(
+            impact_cue(ImpactKind::Clash, ImpactSurface::Flesh),
+            names::PARRY,
+            "a clash is blade on blade whatever the kit"
+        );
+        assert_eq!(
+            impact_cue(ImpactKind::Knockdown, ImpactSurface::Stone),
+            names::KNOCKDOWN
+        );
+        assert_eq!(
+            impact_cue(ImpactKind::Sever, ImpactSurface::Flesh),
+            names::KNOCKDOWN,
+            "sever uses the heavy takes"
+        );
+        assert_eq!(
+            impact_cue(ImpactKind::Parry, ImpactSurface::Plate),
+            impact_cue(ImpactKind::Parry, ImpactSurface::Plate),
+            "same inputs, same play"
+        );
+        let mut families = std::collections::BTreeSet::new();
+        for kind in ImpactKind::ALL {
+            for surface in ImpactSurface::ALL {
+                families.insert(impact_cue(kind, surface));
+            }
+        }
+        assert_eq!(
+            families.len(),
+            5,
+            "every material family plus the knockdown takes: {families:?}"
+        );
     }
 }

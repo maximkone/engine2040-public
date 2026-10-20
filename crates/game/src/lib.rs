@@ -185,6 +185,7 @@ use engine_arena::world::MatchWorld;
 use engine_arena::{
     run_loco_poses, ArenaConfig, ArenaRules, Checkpoint, LiveMatch, LivePresentation, MatchSpec,
 };
+use engine_audio::cue::{impact_cue, ImpactKind, ImpactSurface};
 use engine_audio::{BankSound, Crowd, FightCue, Reaction};
 use engine_combat::{fight::MAX_HP_PERMILLE, FightEvent};
 use engine_destruction::bonded::BreakEvent;
@@ -202,7 +203,10 @@ pub use progress::{GameProgress, ProgressError};
 pub const HUMAN_SLOT: u8 = 0;
 
 /// Session configuration: one human vs `fighters - 1` AI brains.
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// The schemars derive is the one key list: `deny_unknown_fields` names the
+/// four rows and refuses any other in the generated JSON Schema.
+#[derive(Clone, Copy, PartialEq, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct GameConfig {
     /// Arena initialization seed; also stored as the save envelope seed.
     pub seed: u64,
@@ -440,6 +444,94 @@ pub fn layered_extract(
     layered_extract_report(defaults, file_rows, env_rows).0
 }
 
+/// Property names of the generated [`GameConfig`] JSON Schema, in schema
+/// order. The schemars derive owns this list, so strict extract keeps no
+/// second copy of the keys. Empty when the schema shape is unexpected, which
+/// makes every row refuse as unknown instead of passing silently. Pure.
+fn strict_schema_keys() -> Vec<String> {
+    schemars::schema_for!(GameConfig)
+        .as_object()
+        .and_then(|root| root.get("properties"))
+        .and_then(|properties| properties.as_object())
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Refuse the first row whose key the [`GameConfig`] schema does not declare,
+/// with `BadConfig("unknown")`. Pure.
+fn refuse_unknown_layer_rows(rows: &[(&str, &str)]) -> Result<(), GameError> {
+    let known = strict_schema_keys();
+    for (key, _) in rows {
+        if !known.iter().any(|known| known == key) {
+            return Err(GameError::BadConfig("unknown"));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve one strict row: a present value in either layer must parse inside
+/// its field range, then env wins over file over the default. A bad present
+/// row refuses with its key instead of falling back a layer. Pure.
+fn strict_layer_row<T: Copy>(
+    default: T,
+    file_rows: &[(&str, &str)],
+    env_rows: &[(&str, &str)],
+    key: &'static str,
+    parse: fn(&str) -> Option<T>,
+) -> Result<T, GameError> {
+    let file = extract_inner(file_rows, key)
+        .map(|raw| parse(&raw).ok_or(GameError::BadConfig(key)))
+        .transpose()?;
+    let env = extract_inner(env_rows, key)
+        .map(|raw| parse(&raw).ok_or(GameError::BadConfig(key)))
+        .transpose()?;
+    Ok(env.or(file).unwrap_or(default))
+}
+
+/// Strict sibling of [`layered_extract`]: every present row must be a
+/// [`GameConfig`] schema property and parse inside its field range; the first
+/// bad row refuses with [`GameError::BadConfig`] (keys `seed`, `ticks`,
+/// `fighters`, `half_extent_m`, then `unknown`) instead of falling back.
+/// Precedence stays env over file over `defaults`; no IO, no clock.
+pub fn layered_extract_strict(
+    defaults: GameConfig,
+    file_rows: &[(&str, &str)],
+    env_rows: &[(&str, &str)],
+) -> Result<GameConfig, GameError> {
+    let seed = strict_layer_row(defaults.seed, file_rows, env_rows, "seed", parse_layer_seed)?;
+    let ticks = strict_layer_row(
+        defaults.ticks,
+        file_rows,
+        env_rows,
+        "ticks",
+        parse_layer_ticks,
+    )?;
+    let fighters = strict_layer_row(
+        defaults.fighters,
+        file_rows,
+        env_rows,
+        "fighters",
+        parse_layer_fighters,
+    )?;
+    let half_extent_m = strict_layer_row(
+        defaults.half_extent_m,
+        file_rows,
+        env_rows,
+        "half_extent_m",
+        parse_layer_extent,
+    )?;
+    refuse_unknown_layer_rows(file_rows)?;
+    refuse_unknown_layer_rows(env_rows)?;
+    let merged = GameConfig {
+        seed,
+        ticks,
+        fighters,
+        half_extent_m,
+    };
+    merged.validate()?;
+    Ok(merged)
+}
+
 /// Game failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GameError {
@@ -511,8 +603,13 @@ impl From<ProgressError> for GameError {
 pub struct AudioCommand {
     /// Fixed tick the command was emitted on.
     pub tick: u32,
-    /// Which bank voice to play.
+    /// Placeholder mix voice (the headless [`Bank`](engine_audio::Bank) leg).
     pub sound: BankSound,
+    /// Arena-bank cue the kind-by-surface table names for this blow
+    /// (`engine_audio::cue::impact_cue`): the name a cue player resolves
+    /// against the live [`CueBank`](engine_audio::CueBank). Presentation
+    /// only: the sim event carries no surface field.
+    pub cue: &'static str,
     /// Per-voice gain, `0.0..=1.0`.
     pub gain: f32,
 }
@@ -1366,6 +1463,7 @@ impl App {
                 out.audio.push(AudioCommand {
                     tick,
                     sound: BankSound::Hit,
+                    cue: impact_cue(ImpactKind::Hit, ImpactSurface::Flesh),
                     gain: 1.0,
                 });
             }
@@ -1377,6 +1475,7 @@ impl App {
                 out.audio.push(AudioCommand {
                     tick,
                     sound: BankSound::Hit,
+                    cue: impact_cue(ImpactKind::Block, ImpactSurface::ShieldWood),
                     gain: 0.4,
                 });
             }
@@ -1384,6 +1483,7 @@ impl App {
                 out.audio.push(AudioCommand {
                     tick,
                     sound: BankSound::Hit,
+                    cue: impact_cue(ImpactKind::Parry, ImpactSurface::Plate),
                     gain: 0.7,
                 });
             }
@@ -1396,6 +1496,7 @@ impl App {
                 out.audio.push(AudioCommand {
                     tick,
                     sound: BankSound::Hit,
+                    cue: impact_cue(ImpactKind::Knockdown, ImpactSurface::Flesh),
                     gain: 1.0,
                 });
                 // Arena slots are always valid fighter IDs by
@@ -2107,6 +2208,142 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
         assert!(distinct.len() > 1, "match never moved");
+    }
+
+    /// Route the whole impact matrix through the shipped bank with the
+    /// picker shape the live mixer holds (one seeded stream per cue), and
+    /// return distinct clips, immediate repeats, kinds with a cue and the
+    /// heap count of the routing loop.
+    fn route_impact_matrix(
+        bank: &engine_audio::CueBank,
+        seed: u64,
+        picks: &mut [(u16, usize)],
+    ) -> (usize, usize, usize, alloc_probe::AllocCount) {
+        let mut pickers: Vec<engine_audio::VariantPicker> = (0..bank.len())
+            .map(|idx| {
+                engine_audio::VariantPicker::new(
+                    seed,
+                    engine_audio::CueId(u16::try_from(idx).expect("bank fits a cue id")),
+                )
+            })
+            .collect();
+        let mut pointers = [0usize; 16 * engine_audio::MAX_VARIANTS];
+        let mut kinds = [false; ImpactKind::COUNT];
+        let mut distinct = 0usize;
+        let mut repeats = 0usize;
+        let ((), probe) = alloc_probe::measure(|| {
+            let mut last = usize::MAX;
+            for round in 0usize..2 {
+                for kind in ImpactKind::ALL {
+                    for surface in ImpactSurface::ALL {
+                        let id = bank
+                            .id(impact_cue(kind, surface))
+                            .expect("the table only names shipped cues");
+                        let cue = bank.cue(id).expect("id resolves");
+                        let variant = pickers[usize::from(id.0)].pick(cue.variants.len());
+                        let clip = cue.variants[variant].samples.as_ptr() as usize;
+                        kinds[kind.index()] = true;
+                        if !pointers[..distinct].contains(&clip) {
+                            pointers[distinct] = clip;
+                            distinct += 1;
+                        }
+                        if clip == last {
+                            repeats += 1;
+                        }
+                        last = clip;
+                        let slot = round * ImpactKind::COUNT * ImpactSurface::COUNT
+                            + kind.index() * ImpactSurface::COUNT
+                            + surface.index();
+                        picks[slot] = (id.0, variant);
+                    }
+                }
+            }
+        });
+        (
+            distinct,
+            repeats,
+            kinds.iter().filter(|seen| **seen).count(),
+            probe,
+        )
+    }
+
+    /// SN12 gate (`engine-game --lib hit_matrix`): the kind-by-surface table
+    /// names 8 of 8 event kinds on the shipped bank, the seeded pickers reach
+    /// 12 or more distinct clips and never play one twice in a row, and the
+    /// routing loop allocates nothing. Same seed, same takes.
+    #[test]
+    fn hit_matrix_eight_kinds_twelve_clips_no_repeat_no_alloc() {
+        let plays = 2 * ImpactKind::COUNT * ImpactSurface::COUNT;
+        let bank = engine_audio::CueBank::placeholder(48_000).expect("shipped table is valid");
+        assert!(bank.len() <= 16, "the clip ledger sizes 16 cues");
+        let mut first = vec![(0u16, 0usize); plays];
+        let (distinct, repeats, kinds, probe) = route_impact_matrix(&bank, 2040, &mut first);
+        assert!(distinct >= 12, "distinct clips {distinct} < 12");
+        assert_eq!(repeats, 0, "the same clip played twice in a row");
+        assert_eq!(kinds, ImpactKind::COUNT, "kinds with a cue {kinds}/8");
+        assert_eq!(
+            probe.calls, 0,
+            "impact routing allocated {} calls",
+            probe.calls
+        );
+        println!(
+            "hit_matrix distinct_clips={distinct} repeat_run={repeats} kinds_with_cue={kinds}/8 allocations={}",
+            probe.calls
+        );
+        let mut again = vec![(0u16, 0usize); plays];
+        let (_, _, _, _) = route_impact_matrix(&bank, 2040, &mut again);
+        assert_eq!(first, again, "same seed routes the same takes");
+    }
+
+    /// The live fold reads the same table: each impact event names the cue
+    /// its kind and the surface the arena knows (a held block is wood, a
+    /// parry is steel on steel) resolve to.
+    #[test]
+    fn hit_matrix_live_fold_names_the_impact_cue() {
+        let mut app = App::new(small_config()).expect("config");
+        let mut out = TickOutcome::default();
+        let cases = [
+            (
+                FightCue::Hit {
+                    attacker: 0,
+                    victim: 1,
+                    damage: 120,
+                },
+                ImpactKind::Hit,
+                ImpactSurface::Flesh,
+            ),
+            (
+                FightCue::Blocked {
+                    attacker: 0,
+                    victim: 1,
+                    chip: 24,
+                },
+                ImpactKind::Block,
+                ImpactSurface::ShieldWood,
+            ),
+            (
+                FightCue::Parried {
+                    attacker: 0,
+                    victim: 1,
+                },
+                ImpactKind::Parry,
+                ImpactSurface::Plate,
+            ),
+            (
+                FightCue::Knockdown {
+                    attacker: 0,
+                    victim: 1,
+                },
+                ImpactKind::Knockdown,
+                ImpactSurface::Flesh,
+            ),
+        ];
+        for (event, kind, surface) in cases {
+            out.audio.clear();
+            app.fold_cue_into(7, event, &mut out);
+            let command = out.audio.first().expect("an impact emits a voice");
+            assert_eq!(command.cue, impact_cue(kind, surface), "{event:?}");
+        }
     }
 
     #[test]
@@ -3011,6 +3248,90 @@ mod tests {
         assert!(refused.is_empty());
         assert!(merged.validate().is_ok());
         assert!(App::new(merged).is_ok());
+    }
+
+    #[test]
+    fn layered_extract_strict_schema_owns_every_row() {
+        let schema = schemars::schema_for!(GameConfig);
+        let root = schema.as_object().expect("GameConfig schema is an object");
+        let properties = root
+            .get("properties")
+            .and_then(|properties| properties.as_object())
+            .expect("GameConfig schema has properties");
+        let mut keys: Vec<&str> = properties.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["fighters", "half_extent_m", "seed", "ticks"]);
+        assert_eq!(
+            root.get("additionalProperties")
+                .and_then(|extra| extra.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn layered_extract_strict_takes_env_over_file_and_defaults() {
+        let defaults = GameConfig::default();
+        let file_rows = [
+            ("seed", "7"),
+            ("ticks", "64"),
+            ("fighters", "4"),
+            ("half_extent_m", "12.0"),
+        ];
+        let env_rows = [
+            ("seed", "99"),
+            ("ticks", "120"),
+            ("fighters", "5"),
+            ("half_extent_m", "30.0"),
+        ];
+        let merged = layered_extract_strict(defaults, &file_rows, &env_rows).unwrap();
+        assert_eq!(
+            merged,
+            GameConfig {
+                seed: 99,
+                ticks: 120,
+                fighters: 5,
+                half_extent_m: 30.0,
+            }
+        );
+        // Absent rows keep the defaults.
+        let sparse = [("seed", "8")];
+        let empty: [(&str, &str); 0] = [];
+        let kept = layered_extract_strict(defaults, &sparse, &empty).unwrap();
+        assert_eq!(
+            kept,
+            GameConfig {
+                seed: 8,
+                ..defaults
+            }
+        );
+        // Strict refuses a bad file row even when env would hide it.
+        assert_eq!(
+            layered_extract_strict(defaults, &[("ticks", "0")], &[("ticks", "120")]),
+            Err(GameError::BadConfig("ticks"))
+        );
+    }
+
+    #[test]
+    fn layered_extract_strict_refuses_all_five_keys() {
+        let defaults = GameConfig::default();
+        let cases: [(&'static str, [(&str, &str); 1]); 5] = [
+            ("seed", [("seed", "not-a-number")]),
+            ("ticks", [("ticks", "600.0")]),
+            ("fighters", [("fighters", "99")]),
+            ("half_extent_m", [("half_extent_m", "NaN")]),
+            ("unknown", [("mode", "arena")]),
+        ];
+        let empty: [(&str, &str); 0] = [];
+        let mut refused = Vec::new();
+        for (key, rows) in cases {
+            let err = layered_extract_strict(defaults, &rows, &empty).expect_err(key);
+            assert_eq!(err, GameError::BadConfig(key));
+            refused.push(key);
+        }
+        assert_eq!(
+            refused,
+            ["seed", "ticks", "fighters", "half_extent_m", "unknown"]
+        );
     }
 
     #[test]

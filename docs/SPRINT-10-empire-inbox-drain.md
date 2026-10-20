@@ -394,14 +394,17 @@
   .github/workflows/ci.yml` prints nothing; a throwaway tag push lists 1 plan manifest (lead run).
   F2P: no release workflow exists today. P2P: ci.yml unchanged; golden `d57b5c8ae3096614` x2.
   needs: none.
-- [ ] E63 game: strict GameConfig extract with schemars in `layered_extract` — bad rows refuse as
+- [x] E63 game: strict GameConfig extract with schemars in `layered_extract` — bad rows refuse as
   BadConfig with 5 refusal keys (EB-2026-10-09-S26; GREsau/schemars, MIT). The orchestrator adds
   the dependency first (licence read live, `docs/DEPENDENCIES.md` row, `cargo deny check`). Diff:
   good. Tier B. Size S. Owns the layered_extract hunk of `crates/game/src/lib.rs`,
   `crates/game/Cargo.toml`. Accept: `cargo test -p engine-game --lib layered_extract` shows 6
   passed with 5 refusal keys. F2P: 3 layered_extract tests and no schemars in crates/game today.
   P2P: `cargo test -p engine-game --test it config_vectors::` 8 of 8; golden
-  `d57b5c8ae3096614` x2. needs: none.
+  `d57b5c8ae3096614` x2. needs: none. Landed 1a0cc6e0. `cargo test -p engine-game
+  --lib layered_extract` 9 passed (6 pre-existing + 3 new: schema keys,
+  env>file>defaults precedence, all five refusal keys); config_vectors 8 passed;
+  cargo deny clean.
 - [ ] E64 ops: five scouted Rust cuts, each pinned by a test (EB-2026-10-09-S40): gore Hit-arm
   extract, parity-test ignore quarantine, fixed lut single div, blockout fold, component to_json
   error path. The sixth cut, the LodWorld archive move, is already true (LodWorld appears only in
@@ -534,7 +537,7 @@
   `docs/research/COMPARE.md`. Accept: `rg -n "D-RAGDOLL-1|D-DESTRUCT-1|D-CLOTH-1"
   docs/research/COMPARE.md` shows no UNKNOWN cell and `node tools/workspace-check.mjs` adds no FAIL.
   F2P: the three ids read UNKNOWN today. P2P: workspace-check PASS count unchanged. needs: none.
-- [ ] E79 net: headless dedicated server with a master list and a server browser
+- [x] E79 net: headless dedicated server with a master list and a server browser
   (EB-2026-10-09-S99; Agones and DDNet pattern). dedicated.rs has the LAN beacon only (line 105) and
   the word master appears nowhere in it. Add master-list register and list calls on an integer wire,
   no IO inside the tick; the beacon lists the server, 2 clients join, run steps go in
@@ -542,6 +545,9 @@
   `docs/plan/multiplayer.md`. Accept: `cargo test -p engine-net --lib dedicated` green x2 and the
   headless run prints its listing line. F2P: `rg -ci master crates/net/src/dedicated.rs` prints 0
   today. P2P: golden `d57b5c8ae3096614` x2; `cargo test -p engine-net --lib` green. needs: none.
+  Landed 701f9b34. `cargo test -p engine-net --lib dedicated` 10 passed x2;
+  `cargo test -p engine-net --lib` 404 passed; listing line `servers=1
+  fighters=2 tick=64 hash=0e2d1288d6e8d002 query=3B entry=23B`.
 - [x] E80 destruction: debris snapshot resim (EB-2026-10-09-S110; snapshot bytes, digest and restore Landed c466633e. `cargo test -p engine-destruction --lib snapshot` 8 passed (rollback_across_a_collapse_is_byte_equal_to_the_straight_run, an_eight_tick_rollback_resims_equal_at_every_tick_of_the_collapse, debris_snapshot_break_then_rollback_resims_byte_equal, canonical (island, id) restore order, max_shards cap checked on restore), gh run 39056263269.
   landed in c466633e, DX6 debris LOD stays its own row). Restore in island order and replay a
   rollback twice with the 16 and 1024 caps held. Diff: good. Tier B. Size M. Owns

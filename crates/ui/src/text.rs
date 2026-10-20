@@ -29,6 +29,24 @@ pub const MAX_CELLS: usize = 4096;
 pub const TAB_WIDTH: u32 = 4;
 /// Largest accepted quad scale; larger values clamp. Keeps positions finite.
 pub const MAX_SCALE: f32 = 64.0;
+/// HUD text size at 1080p, in pixels (Game Accessibility Guidelines minimum).
+pub const HUD_TEXT_PX_1080: u16 = 28;
+/// Smallest HUD text size honored on a short viewport, in pixels.
+pub const HUD_TEXT_PX_MIN: u16 = 12;
+
+/// HUD text size for a viewport height: 28 px at 1080p, scaled by height,
+/// clamped to `HUD_TEXT_PX_MIN..=224`. Consumers are the HUD text commands;
+/// the render pass takes this number as the font size. Pure; no floats.
+#[must_use]
+pub fn hud_text_px(viewport_height: u32) -> u16 {
+    let height = viewport_height.min(16_384);
+    let scaled = u32::from(HUD_TEXT_PX_1080)
+        .saturating_mul(height)
+        .checked_div(1080)
+        .unwrap_or(0)
+        .clamp(u32::from(HUD_TEXT_PX_MIN), 224);
+    u16::try_from(scaled).unwrap_or(HUD_TEXT_PX_1080)
+}
 
 /// Editor text-entry IME wiring (Windows commit path).
 ///

@@ -61,6 +61,9 @@ pub mod scene_query;
 #[cfg(feature = "mcp")]
 pub mod scene_tools;
 pub mod secret_launch;
+/// Published skills: `skills/*/SKILL.md` served as MCP prompts.
+#[cfg(feature = "mcp")]
+pub mod skills;
 #[cfg(feature = "mcp")]
 mod spatial_glue;
 #[cfg(feature = "mcp")]
@@ -75,3 +78,6 @@ pub mod transport;
 pub mod watch_ledger;
 /// Witnessed-plan gate plus evidence receipts (std-only, no `mcp` needed).
 pub mod witness;
+#[cfg(feature = "mcp")]
+/// BRP `world.query` over the staged document: filters, strict and a hit cap.
+pub mod world_query;
