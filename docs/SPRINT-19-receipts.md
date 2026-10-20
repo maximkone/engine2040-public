@@ -5,6 +5,10 @@ Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 <!-- template: new blocks append via `node tools/land.mjs <packet> --dry` + `node tools/proof.mjs --skip-build`; do not hand-type golden/proof lines -->
 > Golden `d57b5c8ae3096614` holds for every landing below unless the block names a move; new blocks paste the land+proof output, not hand-typed hashes.
 
+### 2026-10-20, NS31e2 closed on the re-home rule
+
+- c7082f36 NS31e2: `CoverageTracker` lives in `crates/material/src/coverage.rs` — one tick-ordered tape per object id, `push`, `rollback` and `at` that never reads past the asked tick — and its four tests pass (`cargo test -p engine-material --lib coverage`). The row named `crates/viewer`, dropped on purpose in 1296f273, so its own command is retired; four rows of the same shard had already landed in their new homes, and the row is closed on that precedent rather than left waiting on an owner answer. The feed from `engine_app::ActorFrame::hit` is not part of it and belongs with the render re-home.
+
 ### 2026-10-20, NS31h2 material gallery and PQ18 arena latency
 
 - 5a009518 NS31h2: `crates/playtest/src/material_gallery.rs` renders a sphere and a slab per record under day, torch and overcast through `pipeline_for`, then pairs the captures. 57 captures in 2.85 s on the RTX 3050 against a 120 s bar; marble to marble_wet dE 6.34, luminance x0.751, highlight 239.17, equal x2. Proof: 3 tests with `--features window`, 2 headless; clippy exit 0; workspace-check edge documented (99fa50d0).

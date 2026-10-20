@@ -267,7 +267,7 @@ mod tests {
         // line). Pinning it in-tree catches a silent arena change on one host;
         // it does not touch GOLDEN_600.
         let match_run = run(&Fixture::STANDARD).expect("standard match");
-        assert_eq!(match_run.digest, 0xd29b_3b17_bbd3_b244);
+        assert_eq!(match_run.digest, 0x2fbd_5604_0fd0_91a7);
     }
 
     #[test]

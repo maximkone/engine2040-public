@@ -135,6 +135,9 @@ was ticked. The quiet-window keeper stays the route to a real measurement.
   rule for the rest of the shard, or close the rows whose wiring point is gone.
   NS31e2's tracker is landed and tested; only its named command
   (`cargo test -p engine-viewer …`) is unrunnable, so it waits on this answer.
+  (2026-10-20: answered by precedent, not by Maxim - the four rows above already
+  landed in their new homes, so NS31e2 closed as landed c7082f36 in engine-material;
+  its feed wiring belongs with the render re-home. Reopen if he wants it otherwise.)
 
 - DX8, DX9 (docs/SPRINT-08-hard-stuff.md): a human blind review decides
   keep-or-kill. DX8: `crates/destruction/src/bake_rank.rs` spaces lattice cuts

@@ -22,7 +22,7 @@ Scope in plain words. `GOLDEN_600` covers one fixture: the archetype ECS world,
 tape (`crates/proof/src/lib.rs`). It does not run `arena`, `combat`,
 `physics::islands`, the Rapier world, `destruction`, `game`, `physfx`, `net` or
 any GPU path. Those have their own fixtures and digests: the arena match
-`arena=d29b3b17bbd3b244` (1200 ticks, rules v2, kit walls, five targets), the
+`arena=2fbd56040fd091a7` (1200 ticks, rules v2, kit walls, five targets), the
 Rapier ragdoll `GOLDEN_RAGDOLL=8097ccafb6740acb` (300 steps, four targets), the
 20k crowd digest `0x9627a1119822c2e0`, and the per-crate tests named beside
 each row. A green `golden_hash_untouched` says only that the legacy 2D fixture
@@ -149,11 +149,13 @@ root motion, `net` state):
   byte for byte. The arena match is pinned across machines: `arena_line`
   (`cargo run -p engine-proof --features arena --bin arena_line`) plays 1200
   ticks of 8 fighters under rules v2 on the kit walls and prints a digest and
-  every tick hash. Golden-matrix run 39054403838: `arena=d29b3b17bbd3b244` on
-  linux-x86_64, windows-x86_64, linux-aarch64, wasm32-wasip1 and
-  wasm32-wasip1-simd128, all MATCH. It is a new fixture (own digest); the
-  legacy golden is unchanged. A limb cut is not in the tape yet: the sim step
-  has no caller of `spawn_limbs`.
+  every tick hash. Golden-matrix run 39054403838 pinned the old
+  `arena=d29b3b17bbd3b244` on linux-x86_64, windows-x86_64, linux-aarch64,
+  wasm32-wasip1 and wasm32-wasip1-simd128, all MATCH. RZ3w (2026-10-20) put a
+  landed v2 hit through `resolve_swing` and `spawn_limbs`, so the same fixture
+  now prints `arena=2fbd56040fd091a7` on linux-x86_64; the five-target matrix
+  rerun is the open gate. It is a new fixture (own digest); the legacy golden
+  is unchanged, and V1 has no cut path.
 
 ## AI and asynchronous services
 
