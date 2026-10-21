@@ -830,6 +830,82 @@ mod tests {
         write_log(tier, &steps)
     }
 
+    /// The scenario list the ship differential plays, as it is committed.
+    ///
+    /// The bytes ride in the test binary, so a moved or unreadable file fails
+    /// the build of this crate and not the CI job that plays the list.
+    const COMMITTED_LIST: &str = include_str!("../../../fixtures/differential/scenarios.txt");
+
+    /// The crate root: the manifest directory of the proof crate.
+    fn crate_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// The bins the manifest declares, with the features each one needs.
+    ///
+    /// The manifest is read as text: the crate carries no TOML parser and
+    /// the manifest keeps one shape. A `[[bin]]` block holds a `name` and
+    /// `required-features`; the scanner reads those two keys and nothing else.
+    fn declared_bins() -> Vec<(String, Vec<String>)> {
+        let text = fs::read_to_string(crate_root().join("Cargo.toml")).expect("the manifest");
+        let mut bins: Vec<(String, Vec<String>)> = Vec::new();
+        let mut block: Option<(String, Vec<String>)> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                if let Some(bin) = block.take() {
+                    bins.push(bin);
+                }
+                if line == "[[bin]]" {
+                    block = Some((String::new(), Vec::new()));
+                }
+                continue;
+            }
+            let Some((name, features)) = block.as_mut() else {
+                continue;
+            };
+            if let Some(rest) = line.strip_prefix("name = \"") {
+                *name = rest.trim_end_matches('"').to_string();
+            } else if let Some(rest) = line.strip_prefix("required-features = [") {
+                for item in rest.trim_end_matches(']').split(',') {
+                    let item = item.trim().trim_matches('"');
+                    if !item.is_empty() {
+                        features.push(item.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(bin) = block.take() {
+            bins.push(bin);
+        }
+        bins
+    }
+
+    /// The feature names the manifest declares.
+    fn declared_features() -> Vec<String> {
+        let text = fs::read_to_string(crate_root().join("Cargo.toml")).expect("the manifest");
+        let mut features = Vec::new();
+        let mut in_features = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_features = line == "[features]";
+                continue;
+            }
+            if !in_features || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, _)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            if !key.is_empty() {
+                features.push(key.to_string());
+            }
+        }
+        features
+    }
+
     /// The directory the test writes its files into.
     fn scratch_dir() -> PathBuf {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1079,5 +1155,65 @@ mod tests {
             matches!(error, DiffError::Format(_)),
             "the error is {error}"
         );
+    }
+
+    /// The curated scenario list the repo ships, parsed. A typo in the file
+    /// fails here, not in CI.
+    fn committed_scenario_list() -> ScenarioList {
+        ScenarioList::parse(COMMITTED_LIST).expect("the committed scenario list parses")
+    }
+
+    #[test]
+    fn the_committed_scenario_list_parses_and_names_its_tiers() {
+        let list = committed_scenario_list();
+        assert_eq!(list.tier_names(), vec!["fast", "deep"]);
+        let fast = list.tier("fast").expect("the fast tier");
+        assert_eq!(fast.len(), 2);
+        assert_eq!(fast[0].name, "matrix");
+        assert_eq!(fast[0].bin, "matrix_line");
+        assert_eq!(fast[1].name, "arena");
+        assert_eq!(fast[1].bin, "arena_line");
+        let deep = list.tier("deep").expect("the deep tier");
+        assert_eq!(deep.len(), 2);
+        assert_eq!(deep[0].name, "spine");
+        assert_eq!(deep[0].bin, "spine_parity_line");
+        assert_eq!(deep[1].name, "ragdoll");
+        assert_eq!(deep[1].bin, "ragdoll_line");
+    }
+
+    #[test]
+    fn every_committed_scenario_names_a_binary_the_crate_builds() {
+        let list = committed_scenario_list();
+        let bins = declared_bins();
+        let features = declared_features();
+        for tier in list.tier_names() {
+            let scenarios = list.tier(tier).expect("the tier");
+            for scenario in scenarios {
+                // The bin has a source file: a name the crate never builds
+                // fails here, not in the CI job that plays the list.
+                let source = crate_root()
+                    .join("src/bin")
+                    .join(format!("{}.rs", scenario.bin));
+                assert!(
+                    source.is_file(),
+                    "the scenario {tier}/{} names the binary {}, but {} is missing",
+                    scenario.name,
+                    scenario.bin,
+                    source.display()
+                );
+                // The features that bin needs are features the crate declares,
+                // so the CI build can turn them on.
+                if let Some((_, needed)) = bins.iter().find(|(name, _)| name == &scenario.bin) {
+                    for feature in needed {
+                        assert!(
+                            features.contains(feature),
+                            "the binary {} needs the feature {}, which the crate does not declare",
+                            scenario.bin,
+                            feature
+                        );
+                    }
+                }
+            }
+        }
     }
 }

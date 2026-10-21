@@ -859,9 +859,27 @@ fn run(raw: &[String]) -> i32 {
             tell!("arena: {VIEW_LINE_FLAG} folds a bout; {AGENT_SEAT_FLAG} plays a window; they do not mix");
             return 2;
         }
-        return match engine_game::fighter_look::FighterLook::view_run(seed, ticks, fighters) {
-            Ok(line) => {
+        let fold = engine_game::fighter_look::FighterLook::view_run_detail(seed, ticks, fighters);
+        return match fold {
+            Ok((line, pop)) => {
                 say!("{VIEW_LINE_PREFIX}{line}");
+                // The worst pop of the fold, named (AM24): which slot and joint,
+                // when, and how far that joint missed its prediction.
+                if let Some(pop) = pop {
+                    say!(
+                        "arena pop: slot={} joint={} tick={:.1} miss_cm={:.1} from={:.2},{:.2},{:.2} at={:.2},{:.2},{:.2}",
+                        pop.slot,
+                        pop.joint,
+                        pop.tick,
+                        pop.miss_m * 100.0,
+                        pop.from[0],
+                        pop.from[1],
+                        pop.from[2],
+                        pop.at[0],
+                        pop.at[1],
+                        pop.at[2],
+                    );
+                }
                 0
             }
             Err(err) => {
@@ -1858,6 +1876,23 @@ impl ArenaApp {
     fn report_view(&mut self) {
         if let Some(line) = self.view.line() {
             say!("{line}");
+            // The worst pop of the run, named: which slot, which joint, when,
+            // and how far the joint missed its prediction (AM24).
+            if let Some(pop) = self.view.pop_detail() {
+                say!(
+                    "arena pop: slot={} joint={} tick={:.1} miss_cm={:.1} from={:.2},{:.2},{:.2} at={:.2},{:.2},{:.2}",
+                    pop.slot,
+                    pop.joint,
+                    pop.tick,
+                    pop.miss_m * 100.0,
+                    pop.from[0],
+                    pop.from[1],
+                    pop.from[2],
+                    pop.at[0],
+                    pop.at[1],
+                    pop.at[2],
+                );
+            }
             let warnings = self.view.warnings();
             if let Some(metric) = warning_bundle_metric(&warnings, self.warn_bundle.is_some()) {
                 match crash::write_warning_bundle(

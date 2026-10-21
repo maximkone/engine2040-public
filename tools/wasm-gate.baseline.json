@@ -32,13 +32,9 @@
   "crates/game/src/dev_hotpatch.rs": {
    "fs": 1
   },
-  "crates/game/src/fighter_bind.rs": {
-   "fs": 2
-  },
   "crates/game/src/fighter_look.rs": {
    "clock": 4,
-   "exe": 1,
-   "fs": 2
+   "exe": 1
   },
   "crates/game/src/lib.rs": {
    "fs": 1

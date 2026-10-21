@@ -2417,16 +2417,15 @@ fn push_legionary_text(
     });
 }
 
-/// Width of a text run in pixels at `text_px`: the monospace cell of the HUD
-/// font. Pure.
+/// Width of a text run in pixels at `text_px`.
+///
+/// The HUD pass gives every character one square cell of `text_px` pixels
+/// and steps `text_px` pixels per character (`crates/render/src/hud_pass.rs`),
+/// so a run of N characters is N * `text_px` wide. The right aligned runs
+/// need that number, or they overhang the margin they sit on. Pure.
 fn legionary_text_width(text: &str, text_px: u16) -> i32 {
     let chars = i32::try_from(text.chars().count()).unwrap_or(i32::MAX);
-    let cell_w = i32::try_from(text::Atlas::CELL_W).unwrap_or(6);
-    let cell_h = i32::try_from(text::Atlas::CELL_H).unwrap_or(8);
-    chars
-        .saturating_mul(cell_w)
-        .saturating_mul(i32::from(text_px))
-        / cell_h
+    chars.saturating_mul(i32::from(text_px))
 }
 
 #[cfg(test)]
@@ -3663,6 +3662,29 @@ mod tests {
         assert!(
             layout.objective.at.y > layout.objective_label.at.y,
             "the label sits above the line"
+        );
+    }
+
+    #[test]
+    fn legionary_hud_text_runs_end_on_the_margin() {
+        // The HUD pass draws one square cell of `px` pixels per character and
+        // steps `px` pixels per character (crates/render/src/hud_pass.rs), so
+        // a right aligned run must reserve that width, or it overhangs the
+        // margin it sits on.
+        assert_eq!(legionary_text_width("OBJECTIVE:", 28), 10 * 28);
+        assert_eq!(legionary_text_width("MARCH TO THE CAMP.", 28), 18 * 28);
+        assert_eq!(legionary_text_width("", 28), 0);
+        let layout = legionary_hud().layout();
+        let text_px = i32::from(text::hud_text_px(1080));
+        assert_eq!(
+            layout.objective.at.right() - layout.objective.at.x,
+            18 * text_px,
+            "the line is as wide as the HUD pass draws it"
+        );
+        assert_eq!(
+            layout.objective_label.at.right() - layout.objective_label.at.x,
+            10 * text_px,
+            "the label is as wide as the HUD pass draws it"
         );
     }
 
