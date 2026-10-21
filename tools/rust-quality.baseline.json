@@ -276,7 +276,7 @@
    "string_errors": 0,
    "board_ids": 0,
    "hash_reimpl": 0,
-   "dup_fns": 3,
+   "dup_fns": 1,
    "passthrough": 1,
    "long_fns": 10,
    "big_files": 0,

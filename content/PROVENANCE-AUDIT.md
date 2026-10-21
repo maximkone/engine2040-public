@@ -34,7 +34,7 @@ the fighters are the OpenGameArt System G6 CC0 pack. Floor of the CT46 row is 50
 | 15 | content/arena/hdri/arena_day.hdr | https://polyhaven.com/a/goegap | CC0-1.0 | Greg Zaal | c3ddb9860a308449718f1187bf988638f09eb155ad1eed45ac7ab6607eda47c0 | match |
 | 16 | content/arena/hdri/arena_sunset.hdr | https://polyhaven.com/a/venice_sunset | CC0-1.0 | Greg Zaal | f243a060f84df1437705d2e50bbdbcce66aa55ddb2d913c18eb3f87873213b10 | off-tree |
 | 17 | content/arena/hdri/arena_night.hdr | https://polyhaven.com/a/moonlit_golf | CC0-1.0 | Greg Zaal | 66452c13b77cd8dbdd44b8ff9837d304c64d5d095ef3c93b31465024a2fb0d07 | off-tree |
-| 18 | content/arena/placement.json | https://github.com/maximkone/engine2040-public/blob/master/content/arena/tools/gen.mjs | CC0-1.0 | engine2040 CT8 lane | 16913e041b2438b6accaf4a8e3de912e83748bbfcb266c0000d060d31dae14f6 | match |
+| 18 | content/arena/placement.json | https://github.com/maximkone/engine2040-public/blob/master/content/arena/tools/gen.mjs | CC0-1.0 | engine2040 CT8 lane | e2fe86589f5d78a3d73a9bcef844a28aab76ba2b60b8d7486c3fff158411bc60 | match |
 | 19 | content/arena/textures/sand_albedo_2k.jpg | https://polyhaven.com/a/aerial_beach_01 | CC0-1.0 | Rob Tuytel | 1803d7e2861b304bea6d2e124dcd4c657fcb93843b84c17bb2db98ce48a87e4e | match |
 | 20 | content/arena/textures/sand_normal_2k.jpg | https://polyhaven.com/a/aerial_beach_01 | CC0-1.0 | Rob Tuytel | 0f35185b7225fe2027897bb7e4586c7deb048817524f1ed104fdae7ce80bdc06 | match |
 | 21 | content/arena/textures/sand_roughness_2k.jpg | https://polyhaven.com/a/aerial_beach_01 | CC0-1.0 | Rob Tuytel | 318b440c109de7411f9e7443f38ae3cf873f34e90afd762c931bae3b23426da2 | match |

@@ -23,11 +23,17 @@
 //! authors [`FighterInput`] values; the same inputs from a tape, a client or
 //! the keyboard fold the same hash.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::VecDeque;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::{TcpListener, TcpStream};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex, PoisonError};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use engine_input::{Buttons, FighterId, FighterInput};
@@ -37,6 +43,7 @@ pub const MAX_PENDING: usize = 32;
 /// Ticks between `view` lines on the seat wire.
 pub const VIEW_EVERY_TICKS: u32 = 60;
 /// Longest a publish may block on a client that stopped reading, in ms.
+#[cfg(not(target_arch = "wasm32"))]
 const WRITE_TIMEOUT_MS: u64 = 20;
 
 /// Why a seat line was refused. The line is named so the client can fix it.
@@ -116,12 +123,14 @@ impl SeatStats {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Shared {
     pending: VecDeque<SeatCommand>,
     stats: SeatStats,
     writer: Option<TcpStream>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for Shared {
     fn default() -> Self {
         Self {
@@ -134,12 +143,14 @@ impl Default for Shared {
 
 /// The listening seat. Drop closes the listener; a client already attached
 /// keeps its reader until it closes or the process exits.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Seat {
     port: u16,
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Seat {
     /// Bind `127.0.0.1:port` (0 asks the OS for one) and serve it in a
     /// reader thread. A bind failure is loud: a requested seat never falls
@@ -242,6 +253,7 @@ impl Seat {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Seat {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -250,8 +262,55 @@ impl Drop for Seat {
     }
 }
 
+/// The seat on the wasm target. A tab cannot listen on a loopback port, so
+/// [`Seat::bind`] refuses at once and no value of this type ever exists.
+#[cfg(target_arch = "wasm32")]
+pub struct Seat(std::convert::Infallible);
+
+#[cfg(target_arch = "wasm32")]
+impl Seat {
+    /// Always refused on wasm.
+    ///
+    /// # Errors
+    ///
+    /// [`SeatError::Io`] (unsupported) on the wasm target.
+    pub fn bind(_port: u16) -> Result<Self, SeatError> {
+        Err(SeatError::Io(std::io::ErrorKind::Unsupported.into()))
+    }
+
+    /// Unreachable on wasm: there is no seat to ask (see [`Seat::bind`]).
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        match self.0 {}
+    }
+
+    /// Unreachable on wasm: there is no seat to ask (see [`Seat::bind`]).
+    #[must_use]
+    pub fn input_for_tick(&self, _tick: u32, _fighter: FighterId) -> Option<FighterInput> {
+        match self.0 {}
+    }
+
+    /// Unreachable on wasm: there is no seat to write to (see [`Seat::bind`]).
+    pub fn publish(&self, _line: &str) {
+        match self.0 {}
+    }
+
+    /// Unreachable on wasm: there is no seat to count (see [`Seat::bind`]).
+    #[must_use]
+    pub fn stats(&self) -> SeatStats {
+        match self.0 {}
+    }
+
+    /// Unreachable on wasm: there is no seat to report (see [`Seat::bind`]).
+    #[must_use]
+    pub fn receipt(&self) -> String {
+        match self.0 {}
+    }
+}
+
 /// The reader thread: one client at a time, lines into the queue. A second
 /// client waits in the listener backlog until the first closes.
+#[cfg(not(target_arch = "wasm32"))]
 fn serve(listener: TcpListener, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Relaxed) {
         let Ok((stream, _)) = listener.accept() else {
@@ -283,6 +342,7 @@ fn serve(listener: TcpListener, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn handle_line(shared: &Mutex<Shared>, line: &str) {
     match parse_input(line) {
         Ok(Some(command)) => {
@@ -363,6 +423,7 @@ fn bounded(part: Option<&str>, name: &str, low: i32, high: i32) -> Result<i32, S
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

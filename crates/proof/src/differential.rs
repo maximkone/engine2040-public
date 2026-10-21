@@ -78,7 +78,9 @@ pub struct Normalizer {
 impl Normalizer {
     /// A rule set with the given volatile keys.
     pub fn new(keys: &[&'static str]) -> Self {
-        Self { keys: keys.to_vec() }
+        Self {
+            keys: keys.to_vec(),
+        }
     }
 
     /// The default rule set: [`VOLATILE_KEYS`].
@@ -116,7 +118,7 @@ impl Normalizer {
 
     /// True when the key carries a measured or environment value.
     fn is_volatile(&self, key: &str) -> bool {
-        self.keys.iter().any(|known| *known == key)
+        self.keys.contains(&key)
     }
 }
 
@@ -237,7 +239,7 @@ impl Report {
 
     /// The exit code the tool returns: 0 clean, 1 one divergence or more.
     pub fn exit_code(&self) -> i32 {
-        if self.is_clean() { 0 } else { 1 }
+        i32::from(!self.is_clean())
     }
 
     /// The report as text: one headline and one block per divergence.
@@ -310,10 +312,7 @@ pub fn parse_log(text: &str) -> Result<Log, DiffError> {
 /// Reads the header line of a receipt log.
 fn parse_log_header(line: &str, number: usize) -> Result<String, DiffError> {
     let rest = line.strip_prefix(LOG_FORMAT).ok_or_else(|| {
-        DiffError::Format(format!(
-            "line {} must start with {LOG_FORMAT}",
-            number + 1
-        ))
+        DiffError::Format(format!("line {} must start with {LOG_FORMAT}", number + 1))
     })?;
     for field in rest.split_whitespace() {
         if let Some(tier) = field.strip_prefix("tier=") {
@@ -527,8 +526,26 @@ impl ScenarioList {
             }
             let (word, rest) = split_word(line);
             match word {
-                "tier" => parse_tier(rest, number, &mut tiers)?,
-                "scenario" => parse_scenario(rest, number, &mut tiers)?,
+                "tier" => {
+                    let name = parse_tier(rest, number)?;
+                    if tiers.iter().any(|(tier, _)| tier == &name) {
+                        return Err(DiffError::Format(format!(
+                            "line {} repeats the tier {name}",
+                            number + 1
+                        )));
+                    }
+                    tiers.push((name, Vec::new()));
+                }
+                "scenario" => {
+                    let scenario = parse_scenario(rest, number)?;
+                    let Some((_, scenarios)) = tiers.last_mut() else {
+                        return Err(DiffError::Format(format!(
+                            "line {} holds a scenario before any tier",
+                            number + 1
+                        )));
+                    };
+                    scenarios.push(scenario);
+                }
                 other => {
                     return Err(DiffError::Format(format!(
                         "line {} holds the unknown word {other}",
@@ -554,12 +571,8 @@ fn split_word(line: &str) -> (&str, &str) {
     }
 }
 
-/// Reads one tier line of a scenario list.
-fn parse_tier(
-    rest: &str,
-    number: usize,
-    tiers: &mut Vec<(String, Vec<Scenario>)>,
-) -> Result<(), DiffError> {
+/// Reads one tier line of a scenario list and returns the tier name.
+fn parse_tier(rest: &str, number: usize) -> Result<String, DiffError> {
     let name = rest.trim();
     if name.is_empty() {
         return Err(DiffError::Format(format!(
@@ -567,22 +580,11 @@ fn parse_tier(
             number + 1
         )));
     }
-    if tiers.iter().any(|(tier, _)| tier == name) {
-        return Err(DiffError::Format(format!(
-            "line {} repeats the tier {name}",
-            number + 1
-        )));
-    }
-    tiers.push((name.to_string(), Vec::new()));
-    Ok(())
+    Ok(name.to_string())
 }
 
-/// Reads one scenario line of a scenario list.
-fn parse_scenario(
-    rest: &str,
-    number: usize,
-    tiers: &mut Vec<(String, Vec<Scenario>)>,
-) -> Result<(), DiffError> {
+/// Reads one scenario line of a scenario list and returns the scenario.
+fn parse_scenario(rest: &str, number: usize) -> Result<Scenario, DiffError> {
     let (name, fields) = split_word(rest);
     if name.is_empty() {
         return Err(DiffError::Format(format!(
@@ -590,12 +592,6 @@ fn parse_scenario(
             number + 1
         )));
     }
-    let Some((_, scenarios)) = tiers.last_mut() else {
-        return Err(DiffError::Format(format!(
-            "line {} holds a scenario before any tier",
-            number + 1
-        )));
-    };
     let mut bin: Option<String> = None;
     let mut args: Vec<String> = Vec::new();
     for field in fields.split_whitespace() {
@@ -622,12 +618,11 @@ fn parse_scenario(
             number + 1
         )));
     };
-    scenarios.push(Scenario {
+    Ok(Scenario {
         name: name.to_string(),
         bin,
         args,
-    });
-    Ok(())
+    })
 }
 
 /// Runs one tier of a scenario list against a build and returns its log.
@@ -739,18 +734,18 @@ fn run(args: &[String], out: &mut dyn Write) -> Result<i32, DiffError> {
             "--tier" => tier = Some(value),
             "--build" => build = Some(value),
             "--out" => out_path = Some(value),
-            other => {
-                return Err(DiffError::Format(format!(
-                    "the flag {other} is not known"
-                )))
-            }
+            other => return Err(DiffError::Format(format!("the flag {other} is not known"))),
         }
         index += 2;
     }
     match (scenarios, reference, candidate) {
-        (Some(list), None, None) => {
-            collect(&list, tier.as_deref(), build.as_deref(), out_path.as_deref(), out)
-        }
+        (Some(list), None, None) => collect(
+            &list,
+            tier.as_deref(),
+            build.as_deref(),
+            out_path.as_deref(),
+            out,
+        ),
         (None, Some(reference), Some(candidate)) => {
             let reference_text = read_text(&reference)?;
             let candidate_text = read_text(&candidate)?;
@@ -789,7 +784,9 @@ fn collect(
     let log = run_tier(&list, tier, Path::new(build), &root)?;
     let text = write_log(&log.tier, &log.steps);
     match out_path {
-        Some(path) => fs::write(path, text).map_err(|why| DiffError::Io(format!("{path}: {why}")))?,
+        Some(path) => {
+            fs::write(path, text).map_err(|why| DiffError::Io(format!("{path}: {why}")))?;
+        }
         None => {
             let _ = write!(out, "{text}");
         }
@@ -976,7 +973,7 @@ mod tests {
     fn the_tool_exits_one_on_one_in_scope_divergence() {
         let reference = scratch_file("reference.log", &sample_log("fast", "d57b5c8ae3096614"));
         let candidate = scratch_file("candidate.log", &sample_log("fast", "0000000000000001"));
-        let args = vec![
+        let args = [
             "differential".to_string(),
             "--reference".to_string(),
             reference.to_string_lossy().into_owned(),
@@ -988,14 +985,23 @@ mod tests {
         let code = cli(&args, &mut out, &mut err);
         assert_eq!(code, 1, "the tool must exit 1 on a divergence");
         let text = String::from_utf8_lossy(&out).into_owned();
-        assert!(text.contains("DIVERGENCE step=golden"), "the text is {text}");
+        assert!(
+            text.contains("DIVERGENCE step=golden"),
+            "the text is {text}"
+        );
     }
 
     #[test]
     fn the_tool_exits_zero_when_the_logs_match() {
-        let reference = scratch_file("match-reference.log", &sample_log("fast", "d57b5c8ae3096614"));
-        let candidate = scratch_file("match-candidate.log", &sample_log("fast", "d57b5c8ae3096614"));
-        let args = vec![
+        let reference = scratch_file(
+            "match-reference.log",
+            &sample_log("fast", "d57b5c8ae3096614"),
+        );
+        let candidate = scratch_file(
+            "match-candidate.log",
+            &sample_log("fast", "d57b5c8ae3096614"),
+        );
+        let args = [
             "differential".to_string(),
             "--reference".to_string(),
             reference.to_string_lossy().into_owned(),
@@ -1009,7 +1015,7 @@ mod tests {
 
     #[test]
     fn the_tool_exits_two_when_it_cannot_run() {
-        let args = vec!["differential".to_string(), "--reference".to_string()];
+        let args = ["differential".to_string(), "--reference".to_string()];
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
         assert_eq!(cli(&args, &mut out, &mut err), 2);
@@ -1037,7 +1043,10 @@ mod tests {
     #[test]
     fn a_log_without_a_header_is_refused() {
         let error = parse_log("STEP golden\nhash=1\n").expect_err("the header is missing");
-        assert!(matches!(error, DiffError::Format(_)), "the error is {error}");
+        assert!(
+            matches!(error, DiffError::Format(_)),
+            "the error is {error}"
+        );
     }
 
     #[test]
@@ -1066,6 +1075,9 @@ mod tests {
             "differential scenario list v1\ntier fast\nscenario golden bin=x colour=red\n",
         )
         .expect_err("the field is unknown");
-        assert!(matches!(error, DiffError::Format(_)), "the error is {error}");
+        assert!(
+            matches!(error, DiffError::Format(_)),
+            "the error is {error}"
+        );
     }
 }

@@ -1,12 +1,12 @@
-//! The window's GPU leg: two instanced pipelines, two sprite atlases, readback.
+//! The window's GPU leg: two instanced pipelines, sprite atlases, readback.
 //!
 //! Consumer: the `kam2play` shell, which owns the match and the camera and asks
 //! this module to draw one [`Scene`] and one [`HudFrame`]. The shape pass draws
 //! the ground quads; the sprite pass draws atlas cells with the team tint
-//! through the mask texture, one bind group for the soldier sheet and one for
-//! the cottage sheet. The frame is a plain sRGB surface; a capture frame is
-//! copied into a readback buffer, the HUD is composited on the CPU and the
-//! result becomes a PNG.
+//! through the mask texture, one bind group for the soldier sheet and one per
+//! house atlas slot: the cottage in slot zero and one slot per house kind. The
+//! frame is a plain sRGB surface; a capture frame is copied into a readback
+//! buffer, the HUD is composited on the CPU and the result becomes a PNG.
 //!
 //! Determinism: no clock and no sim here; the pixels are a pure function of the
 //! scene and the HUD. Failure modes are typed in [`crate::PlayError`].
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use engine_render::hud_pass::{self, HudSurface};
 use engine_ui::HudFrame;
-use kam2_game::{Part, Scene, ShapeQuad, SpriteQuad};
+use kam2_game::{Part, Scene, ShapeQuad, SpriteQuad, HOUSE_SLOTS};
 use winit::window::Window;
 
 use crate::art::Sheet;
@@ -204,7 +204,8 @@ pub struct Gpu {
     view_buffer: wgpu::Buffer,
     view_bind: wgpu::BindGroup,
     atlas_bind: wgpu::BindGroup,
-    house_bind: wgpu::BindGroup,
+    atlas_layout: wgpu::BindGroupLayout,
+    house_binds: Vec<Option<wgpu::BindGroup>>,
     shapes: wgpu::Buffer,
     sprites: wgpu::Buffer,
     houses: wgpu::Buffer,
@@ -521,11 +522,14 @@ fn instance_buffer(device: &wgpu::Device, label: &str, capacity: usize) -> wgpu:
 impl Gpu {
     /// Bring up the surface, the device and both pipelines for `window`.
     ///
+    /// The soldier atlas goes in with the sheet; the house atlases come later,
+    /// one per slot, through [`Gpu::set_house_sheet`].
+    ///
     /// # Errors
     ///
     /// Returns [`PlayError`] for a refused surface, adapter or device and for a
     /// surface without an 8-bit sRGB format.
-    pub fn new(window: Arc<Window>, sheet: &Sheet, house_sheet: &Sheet) -> Result<Self, PlayError> {
+    pub fn new(window: Arc<Window>, sheet: &Sheet) -> Result<Self, PlayError> {
         let OpenedSurface {
             surface,
             device,
@@ -537,7 +541,6 @@ impl Gpu {
         let view = view_binding(&device);
         let atlas_layout = make_atlas_layout(&device);
         let atlas_bind = atlas_binding(&device, &queue, sheet, &atlas_layout);
-        let house_bind = atlas_binding(&device, &queue, house_sheet, &atlas_layout);
         let shader = shader_module(&device);
         let shapes_pipeline = shape_pipeline(&device, format, &view.layout, &shader);
         let sprites_pipeline =
@@ -555,12 +558,22 @@ impl Gpu {
             view_buffer: view.buffer,
             view_bind: view.bind,
             atlas_bind,
-            house_bind,
+            atlas_layout,
+            house_binds: vec![None; HOUSE_SLOTS],
             shapes,
             sprites,
             houses,
             bgra,
         })
+    }
+
+    /// Upload one house atlas into its slot: the cottage in slot zero and one
+    /// slot per house kind. A slot outside the registry is ignored.
+    pub fn set_house_sheet(&mut self, slot: usize, sheet: &Sheet) {
+        let bind = atlas_binding(&self.device, &self.queue, sheet, &self.atlas_layout);
+        if let Some(cell) = self.house_binds.get_mut(slot) {
+            *cell = Some(bind);
+        }
     }
 
     /// Surface width in pixels.
@@ -589,7 +602,8 @@ impl Gpu {
     /// # Errors
     ///
     /// Returns [`PlayError`] for a lost frame buffer, a readback failure, a HUD
-    /// surface that does not fit, or a PNG write failure.
+    /// surface that does not fit, a PNG write failure, or a house whose atlas
+    /// slot has no sheet.
     pub fn draw(
         &mut self,
         scene: &Scene,
@@ -626,7 +640,7 @@ impl Gpu {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("kam2play-frame"),
             });
-        self.encode_scene(&mut encoder, &view, scene);
+        self.encode_scene(&mut encoder, &view, scene)?;
 
         let padded = (width * 4).div_ceil(ROW_ALIGN) * ROW_ALIGN;
         let readback = capture.map(|_| {
@@ -673,12 +687,17 @@ impl Gpu {
     }
 
     /// One render pass: clear to ambient, then the field and the billboards.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlayError::Art`] when a house names an atlas slot that has no
+    /// sheet, so a house is never dropped from the frame.
     fn encode_scene(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         scene: &Scene,
-    ) {
+    ) -> Result<(), PlayError> {
         let clear = engine_assets::bc::srgb_byte_to_linear(AMBIENT[0]);
         let green = engine_assets::bc::srgb_byte_to_linear(AMBIENT[1]);
         let blue = engine_assets::bc::srgb_byte_to_linear(AMBIENT[2]);
@@ -703,7 +722,7 @@ impl Gpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.record(&mut pass, scene);
+        self.record(&mut pass, scene)
     }
 
     /// Read the captured frame back, composite the HUD and write the PNG.
@@ -769,8 +788,15 @@ impl Gpu {
     }
 
     /// Record the ground, then the billboard order: house cells and unit cells
-    /// alternate as the depth keys say, one draw and one atlas bind per run.
-    fn record(&self, pass: &mut wgpu::RenderPass<'_>, scene: &Scene) {
+    /// alternate as the depth keys say, one draw and one atlas bind per run. A
+    /// house run is split where the atlas slot changes, so every house draws
+    /// from the atlas of its own kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlayError::Art`] when a house names an atlas slot that has no
+    /// sheet: the frame never drops a house to keep going.
+    fn record(&self, pass: &mut wgpu::RenderPass<'_>, scene: &Scene) -> Result<(), PlayError> {
         let ground = u32::try_from(scene.ground.len()).unwrap_or(0);
         pass.set_pipeline(&self.shapes_pipeline);
         pass.set_bind_group(0, &self.view_bind, &[]);
@@ -783,13 +809,35 @@ impl Gpu {
             match scene.order[index] {
                 Part::House(first) => {
                     let run = contiguous(&scene.order, index, first);
-                    let start = u32::try_from(first).unwrap_or(0);
-                    let end = start + u32::try_from(run).unwrap_or(0);
-                    pass.set_pipeline(&self.sprites_pipeline);
-                    pass.set_bind_group(0, &self.view_bind, &[]);
-                    pass.set_bind_group(1, &self.house_bind, &[]);
-                    pass.set_vertex_buffer(0, self.houses.slice(..));
-                    pass.draw(0..4, start..end);
+                    let mut offset = 0usize;
+                    while offset < run {
+                        let slot = scene
+                            .house_atlases
+                            .get(first + offset)
+                            .copied()
+                            .ok_or_else(|| {
+                                PlayError::Art(format!(
+                                    "house {} has no atlas slot in the scene",
+                                    first + offset
+                                ))
+                            })?;
+                        let length = same_slot(scene, first + offset, run - offset);
+                        let bind = self
+                            .house_binds
+                            .get(slot)
+                            .and_then(Option::as_ref)
+                            .ok_or_else(|| {
+                                PlayError::Art(format!("house atlas slot {slot} has no sheet"))
+                            })?;
+                        let start = u32::try_from(first + offset).unwrap_or(0);
+                        let end = start + u32::try_from(length).unwrap_or(0);
+                        pass.set_pipeline(&self.sprites_pipeline);
+                        pass.set_bind_group(0, &self.view_bind, &[]);
+                        pass.set_bind_group(1, bind, &[]);
+                        pass.set_vertex_buffer(0, self.houses.slice(..));
+                        pass.draw(0..4, start..end);
+                        offset += length;
+                    }
                     index += run;
                 }
                 Part::Unit(first) => {
@@ -805,7 +853,24 @@ impl Gpu {
                 }
             }
         }
+        Ok(())
     }
+}
+
+/// How many houses from `start` share the atlas slot of the first one, up to
+/// `remaining` houses.
+fn same_slot(scene: &Scene, start: usize, remaining: usize) -> usize {
+    let Some(slot) = scene.house_atlases.get(start).copied() else {
+        return 1;
+    };
+    let mut length = 1usize;
+    while length < remaining {
+        match scene.house_atlases.get(start + length).copied() {
+            Some(next) if next == slot => length += 1,
+            _ => break,
+        }
+    }
+    length
 }
 
 /// How many consecutive parts of one kind follow `index`, with run indices:
@@ -988,6 +1053,16 @@ mod tests {
         }
     }
 
+    fn sprite() -> SpriteQuad {
+        SpriteQuad {
+            top_left: [0.0, 0.0],
+            size: [64.0, 64.0],
+            uv_min: [0.0, 0.0],
+            uv_size: [0.25, 0.25],
+            team: [255, 255, 255],
+        }
+    }
+
     #[test]
     fn a_shape_instance_is_twelve_floats() {
         let mut bytes = Vec::new();
@@ -1029,6 +1104,25 @@ mod tests {
         assert_eq!(contiguous(&order, 3, 2), 1);
         assert_eq!(contiguous(&order, 2, 0), 1);
         assert_eq!(contiguous(&order, 4, 1), 1);
+    }
+
+    #[test]
+    fn a_house_run_splits_where_the_atlas_slot_changes() {
+        let scene = Scene {
+            ground: Vec::new(),
+            houses: vec![sprite(); 4],
+            house_atlases: vec![0, 2, 2, 3],
+            units: Vec::new(),
+            order: vec![
+                Part::House(0),
+                Part::House(1),
+                Part::House(2),
+                Part::House(3),
+            ],
+        };
+        assert_eq!(same_slot(&scene, 0, 4), 1, "the cottage stands alone");
+        assert_eq!(same_slot(&scene, 1, 3), 2, "the two farms share one atlas");
+        assert_eq!(same_slot(&scene, 3, 1), 1, "the last house stands alone");
     }
 
     #[test]

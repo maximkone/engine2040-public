@@ -19,6 +19,9 @@ export function fileDigest(path, { text = false } = {}) {
   return { sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
 }
 
+/** A pinned file git stores as text (no LFS, line endings normalised): pin its LF bytes, or Windows and Linux disagree. */
+export const isTextPin = (path) => /\.(json|md|txt|toml|ron|csv)$/i.test(path);
+
 /** Parse a JSON file from disk. */
 export function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));

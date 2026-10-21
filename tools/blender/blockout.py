@@ -882,6 +882,27 @@ def shoulder_pixels(scene, cam, parts, resolution):
     return (right - left) * resolution[0]
 
 
+def export_glb(parts, path):
+    """One joined mesh as a GLB, so the style cook has something to take."""
+    bpy.ops.object.select_all(action="DESELECT")
+    for ob in parts:
+        ob.select_set(True)
+    bpy.context.view_layer.objects.active = parts[0]
+    if len(parts) > 1:
+        bpy.ops.object.join()
+    ob = bpy.context.view_layer.objects.active
+    ob.name = "blockout"
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    try:
+        bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", export_apply=True,
+                                  export_texcoords=True, export_normals=True)
+    except TypeError:
+        bpy.ops.export_scene.gltf(filepath=path, export_format="GLB")
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        raise BlockoutError(f"glb export wrote nothing: {path}")
+    return path
+
+
 def main(argv):
     args = argv[argv.index("--") + 1:] if "--" in argv else []
     if len(args) < 2:
@@ -919,6 +940,10 @@ def main(argv):
         render_studio(scene, cam, studio_path, RES_BIG, built["ortho_scale"])
 
         shoulder_px = shoulder_pixels(scene, cam, built["parts"], RES_BIG)
+        if "--export-glb" in args:
+            glb_path = os.path.join(outdir, "blockout.glb")
+            export_glb(built["parts"], glb_path)
+            print(f"GLB {glb_path}")
         metrics = {
             "name": P.name,
             "height_px": round(big["height_px"], 2),

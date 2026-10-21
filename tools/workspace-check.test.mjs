@@ -6,6 +6,7 @@ import { parseBoard, needsOf } from "./board-slice.mjs";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { deriveFixedApi, genreHits, maskRust, platformMathHits, productionCode } from "./sim-source-scan.mjs";
 import { scanIslandsFrom } from "./wiring-scan.mjs";
 
@@ -409,15 +410,15 @@ test("the shared source list is the wiring file set: tests directories stay out 
 });
 
 test("the in-process wiring scan answers like the tool it replaces (E51)", () => {
-  const cratesDir = new URL("../crates/", import.meta.url);
-  if (!existsSync(cratesDir)) return;
-  const root = cratesDir.pathname.replace(/^\//, "");
+  // fileURLToPath, not pathname: on Linux a pathname keeps no leading slash (home/...), a relative path that is not there.
+  const root = fileURLToPath(new URL("../crates/", import.meta.url));
+  if (!existsSync(root)) return;
   const files = sourceFilesUnder(root);
   assert.ok(files.length > 100, `expected the crate sources, found ${files.length}`);
   const entries = files.map((file) => ({ file, text: readFileSync(file, "utf8") }));
   const islands = scanIslandsFrom(entries, root);
   assert.equal(typeof islands.length, "number");
-  const tool = spawnSync(process.execPath, [new URL("./wiring-scan.mjs", import.meta.url).pathname.replace(/^\//, ""), root], { encoding: "utf8", maxBuffer: 1 << 26 });
+  const tool = spawnSync(process.execPath, [fileURLToPath(new URL("./wiring-scan.mjs", import.meta.url)), root], { encoding: "utf8", maxBuffer: 1 << 26 });
   const line = (tool.stdout ?? "").split("\n")[0].trim();
   assert.equal(line, `islands: ${islands.length}`, "the in-process scan must count what the tool counts");
 });

@@ -22,16 +22,9 @@ Large means more than 3 files or more than 200 added lines, or more than one cra
 
 Reply `CHECK: PASS` or `CHECK: FAIL - <reason>`, then at most five findings with path and line. Do not rule on design or taste in a CHECK.
 
-### The caller rule (one rule, used here and in `engine-code`)
+### The caller rule
 
-A new `pub` fn, helper or module without a production caller is FAIL, not a repair.
-- Name the caller: its path and line, or the board row that will consume it (a follow-up row already on the board). Neither means FAIL.
-- Run `git grep` on the new name. There must be a hit outside `tests/` and outside `#[cfg(test)]`. A tests-only item says so in the report.
-- A test that only asserts the helper's output proves nothing about wiring.
-- No `let _ =` on a value the row promised to use.
-- Flipping `pub` back to private is not a caller.
-- Oversize and unwired: split it and wire the pieces. A repair never resends the whole island.
-- A second identical unwired FAIL ends the patch. The next try starts from the caller, not the helper.
+Run `node tools/wiring-scan.mjs crates --diff`; the rule lives in `skills/wiring-a-feature`.
 
 ## 2. Review (depth)
 
@@ -42,7 +35,7 @@ Name both lists: F2P (fails before the change, passes after) and P2P (passes bef
 
 - Depth score 0 to 5. 0 is a slice. 3 is finished and wired. 5 is best in class with edges, scale and docs. Check the row's best-in-class statement. Depth under 3 is `FAIL - <reason>`, whatever the tests say.
 - Render and GPU rows: open the owned module and read its submit path. If it can still return `Unsupported`, `GpuUnsupported` or any typed refusal on a real device, the verdict is `FAIL - <reason>`. Tests, llvmpipe parity and a CPU reference do not change that. Name the file.
-- Eyes: for any visual, render or content row, open the capture PNGs with the Read tool. Write one line on what is really on screen before the verdict. Black, empty, magenta, NaN-speckled or T-posed frames are `FAIL - <reason>`. A visual result with no capture you opened is unverified.
+- Eyes: for any visual, render or content row, follow the Eyes rule in skill `test-and-proof`.
 
 Return: `VERDICT: ...`, findings ordered by severity with path, line and repro, the missing gates, and the smallest fix.
 
@@ -56,7 +49,7 @@ Return: `VERDICT: ...`, findings ordered by severity with path, line and repro, 
   - data layout fit for the hot path (SoA, slices, reused buffers);
   - typed, specific errors; explicit conversions; the smallest `pub` surface; names with units;
   - short single-purpose functions;
-  - no re-derived helper that an owner already exports: `engine_core::Fnv64`, `hash_bytes`, `Rng`, `splitmix64` (in `crates/core/src/hash.rs`), `engine_core::alloc_probe`;
+  - no re-derived helper an owner already exports: see skill `engine-code` section 3;
   - comments that state invariants, not history (no board ids or "was X");
   - tests that would fail on a plausible bug (oracle, negative case, property over seeds).
 - Name the file for each deduction. A Rust score under 3 is FAIL.

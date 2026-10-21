@@ -1,10 +1,31 @@
 # Build CPU: fewer cores burned per iteration
 
 Owner ask 2026-10-21: "optimize our cpu usage af and all rust and cargo too".
-Status: **CARD**, spike not run. The box sat at 99-100% CPU with 17-23 foreign
-`cargo`/`rustc` processes through every window, and the one probe (a new thin-LTO
-profile's cold `cargo check`) did not finish in 30 minutes, so it was reverted.
-No speedup is claimed here; the numbers below are measured baselines, not wins.
+Status: **SPIKE ran, idea 1 LANDED** (row OPT45). `[profile.release]` is now
+thin LTO + 16 codegen units; the fat-LTO one-unit shape moved to `[profile.ship]`
+(the packaged artifact and the CI release-proof leg). Measured on the GitHub
+runner, same tree overlay, same 22 crates compiled in both runs:
+
+| Shape | Profile | Build wall (runner) | Golden hash |
+|---|---|---|---|
+| fat LTO, 1 unit | `--profile ship` | **58.84 s** (run 39576660515) | `d57b5c8ae3096614` PASS |
+| thin LTO, 16 units | `--release` | **38.08 s** (run 39576029326) | `d57b5c8ae3096614` PASS |
+
+-35% wall for the same work, and the hash does not move: the sim is a
+deterministic fixed point and no fast-math came with the profile change.
+The pre-change fat baseline on the same line was 1 m 05 s (run 39575327069).
+Local numbers (this PC) stay as the noisy reference only: the fat arena release
+build took **11 m 41 s** with ~9.7 min of it in the one-unit relink, on a box
+that was 100% busy with other sessions' cargo.
+
+Still open: the 300-frame arena run on the **thin** build must keep the 60 fps
+floor (`tools/product-bar.json`). The local thin arena build was still queued
+behind other sessions' cargo when this card was written, so no fps number is
+claimed here yet. The floor was never lowered; it is the same bar the fat build
+had to pass.
+
+Ideas 2-8 below are untouched. Idea 4 (dependency debug info off) is the next
+cheap lever and stays its own commit.
 
 ## Baseline (all measured in this repo)
 
@@ -18,9 +39,10 @@ No speedup is claimed here; the numbers below are measured baselines, not wins.
 - sccache across lane pools: **DROP** 2026-10-20. A fresh target dir served 0 of
   2 cacheable units; only rlib units are cacheable (24 of 30 requests refused).
   It pays in one target dir (clean rebuild, branch switch) and on CI only.
-- Local product loop: `tools/bins.mjs` builds arena with `--release` = **fat LTO,
-  1 codegen unit**, every time the keeper finds it stale (every 4 h), and
-  `product-check` pays that relink on every arena source change.
+- Local product loop (before the change): `tools/bins.mjs` built arena with
+  `--release` = **fat LTO, 1 codegen unit**, every time the keeper found it
+  stale (every 4 h), and `product-check` paid that relink on every arena source
+  change. It is now thin LTO, 16 units.
 - Artifacts: **1.19 GB** of PDBs in `target/debug`; largest 46.8 MB
   (`kam2play`), 41.1 MB (`kam1c`), 27.1 MB (`wasm_bindgen_macro`).
 - Toolchain: stable 1.97.1 only (no nightly installed); sccache 0.18.0 present;
@@ -28,13 +50,12 @@ No speedup is claimed here; the numbers below are measured baselines, not wins.
 
 ## Ideas, ranked by measured cost x fit
 
-1. **Thin-LTO local product profile** (`[profile.product]`, inherits release,
-   `lto = "thin"`, `codegen-units = 16`) for the arena the keeper and frame tools
-   run. Removes the fat-LTO single-unit relink from the recurring loop while
-   `ship` keeps fat LTO for the packaged artifact. The fps floor (60) has 5-8x
-   measured headroom (300-480 fps on the RTX 3050). One-time cost: the whole
-   dependency tree is rebuilt for the new profile - the exact reason the probe
-   could not finish on a loaded box. Source: Cargo profiles book.
+1. **Thin-LTO local product profile** - **LANDED (OPT45)**. `[profile.release]`
+   is now `lto = "thin"`, `codegen-units = 16`; `[profile.ship]` keeps
+   `lto = "fat"`, `codegen-units = 1` for the packaged artifact and the CI
+   release-proof leg. The arena the keeper and frame tools run no longer pays
+   the one-unit relink. The fps floor (60) has 5-8x measured headroom (300-480
+   fps on the RTX 3050) and is not lowered. Source: Cargo profiles book.
 2. **Parallel front-end** `-Z threads=n` (nightly): type checking, borrow
    checking and MIR optimization run in parallel; parsing, HIR lowering and macro
    expansion stay serial. Our engine-render frontend is 99.7 s of a 294 s crate,
@@ -61,21 +82,24 @@ No speedup is claimed here; the numbers below are measured baselines, not wins.
    per target dir), so the fix is a stable checkout path or a shared cache, not a
    wrapper.
 
-## Spike (quiet window; one experiment)
+## Spike: ran 2026-10-21 on the GitHub runner
 
-- Fixture: `cargo build -p engine-game --features app --bin arena` under
-  `--release` (fat LTO, 1 unit) vs `--profile product` (thin, 16 units), each
-  after `cargo clean -p engine-game`.
-- Metric: wall and rustc user CPU of the relink; accept if the product relink is
-  >= 30% cheaper, and a 300-frame arena run on the same box keeps every fps
-  floor (60) and the golden hash unchanged.
-- Kill: cold product build costs more than it saves over 10 rebuilds, or the run
-  drops under 120 fps on the RTX 3050.
-- Patch to apply when it runs (reverted 2026-10-21, box too loaded):
-  `[profile.product]` in Cargo.toml; `dir: "product"` + `--profile product` on
-  the arena row of `tools/bins.mjs`; `target/product/arena.exe` in
-  `tools/product-check.mjs`, `tools/arena-shot.mjs` (use the bin row's build
-  line) and `tools/arena-net.mjs` (default exe + message + test pin).
+- Fixture: the same line in both runs, `cargo test -p engine2040 --release
+  --test proof_cli default_and_max_seed` (22 crates compiled from scratch in
+  each run), the only difference being the profile shape.
+- Metric: the runner's own "Finished `release` profile [optimized] target(s) in
+  Xs" line, plus the golden hash the test asserts.
+- Result: fat LTO + 1 unit = **58.84 s** (`--profile ship`, run 39576660515),
+  thin LTO + 16 units = **38.08 s** (`--release`, run 39576029326). Both PASS
+  with `"final_hash":"d57b5c8ae3096614"` (`tests/proof_cli.rs:55`).
+- The pre-change fat baseline on the same line was 1 m 05 s (run 39575327069).
+- Patch landed instead of the reverted `[profile.product]`: `[profile.release]`
+  is thin LTO + 16 units, `[profile.ship]` keeps fat LTO + 1 unit,
+  `tools/ship.mjs` builds the packaged artifact with `--profile ship`,
+  `tools/proof.mjs` builds the CI golden leg in the same shipped shape, and
+  the CI release-proof leg builds `--profile ship`.
+- Still open: the 300-frame arena run on the thin binary and the 60 fps floor
+  (`tools/product-bar.json`). The floor is unchanged and not lowered.
 
 ## Sources (read live 2026-10-21)
 

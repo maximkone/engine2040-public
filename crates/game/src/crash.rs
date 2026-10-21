@@ -10,8 +10,10 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
 use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
@@ -553,7 +555,7 @@ fn hex_byte(byte: u8) -> Option<u8> {
 /// [`CrashError::Io`]. No panic paths.
 pub fn write_report(path: &Path, report: &CrashReport) -> Result<(), CrashError> {
     let text = format_report(report)?;
-    std::fs::write(path, text.as_bytes()).map_err(|err| CrashError::Io(err.kind()))?;
+    write_file(path, text.as_bytes())?;
     Ok(())
 }
 
@@ -672,7 +674,7 @@ pub fn write_warning_bundle(
     if !safe_metric(metric) {
         return Err(CrashError::BadValue("metric"));
     }
-    let stamp = utc_stamp(SystemTime::now());
+    let stamp = utc_stamp(wall_now());
     let (adapter, display, checkpoint, tape) = match try_lock_or_recover(&STATE) {
         Some(state) => {
             let adapter = if state.adapter.is_empty() {
@@ -721,12 +723,10 @@ pub fn write_warning_bundle(
         tape_bytes: tape.len(),
     };
     let bundle = dir.join(format!("{metric}-{stamp}"));
-    std::fs::create_dir_all(&bundle).map_err(|err| CrashError::Io(err.kind()))?;
-    std::fs::write(bundle.join("report.toml"), format_bundle_report(&facts))
-        .map_err(|err| CrashError::Io(err.kind()))?;
-    std::fs::write(bundle.join("tape.bin"), &tape).map_err(|err| CrashError::Io(err.kind()))?;
-    std::fs::write(bundle.join("README.txt"), format_bundle_readme(&facts))
-        .map_err(|err| CrashError::Io(err.kind()))?;
+    make_dir(&bundle)?;
+    write_file(bundle.join("report.toml"), format_bundle_report(&facts))?;
+    write_file(bundle.join("tape.bin"), &tape)?;
+    write_file(bundle.join("README.txt"), format_bundle_readme(&facts))?;
     Ok(bundle)
 }
 
@@ -748,7 +748,7 @@ fn write_minidump_stub(path: &Path, report: &CrashReport) -> Result<PathBuf, Cra
     header.extend_from_slice(&report.tick.to_le_bytes());
     let version_len = u32::try_from(report.version.len()).unwrap_or(u32::MAX);
     header.extend_from_slice(&version_len.to_le_bytes());
-    std::fs::write(&dump, &header).map_err(|err| CrashError::Io(err.kind()))?;
+    write_file(&dump, &header)?;
     Ok(dump)
 }
 
@@ -793,6 +793,7 @@ fn append_hex(out: &mut String, bytes: &[u8]) {
 /// Crate version stamped into every crash report.
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Name of the process main thread; only its panics are fatal.
+#[cfg(not(target_arch = "wasm32"))]
 const MAIN_THREAD: &str = "main";
 /// Bytes of one checkpoint record: tick (u32, little-endian) then hash (u64).
 const CHECKPOINT_RECORD_BYTES: usize = 12;
@@ -829,6 +830,7 @@ static STATE: Mutex<HookState> = Mutex::new(HookState {
     tape: VecDeque::new(),
     checkpoint: Vec::new(),
 });
+#[cfg(not(target_arch = "wasm32"))]
 static LOG: Mutex<Option<File>> = Mutex::new(None);
 static RUN: OnceLock<RunPaths> = OnceLock::new();
 
@@ -837,6 +839,7 @@ static RUN: OnceLock<RunPaths> = OnceLock::new();
 /// opened still leaves panics loud (the report then goes to the temp dir).
 /// Errors: [`CrashError::Io`] for the directory or log, `BadValue("install")`
 /// on a second call. Never panics.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn install_run_hook(dir: &Path) -> Result<RunPaths, CrashError> {
     if RUN.get().is_some() {
         return Err(CrashError::BadValue("install"));
@@ -856,6 +859,13 @@ pub fn install_run_hook(dir: &Path) -> Result<RunPaths, CrashError> {
     *LOG.lock().unwrap_or_else(PoisonError::into_inner) = Some(file);
     let _ = RUN.set(paths.clone());
     Ok(paths)
+}
+
+/// The wasm build has no file system, so there is no run log to open. The hook
+/// stays uninstalled and the error names why.
+#[cfg(target_arch = "wasm32")]
+pub fn install_run_hook(_dir: &Path) -> Result<RunPaths, CrashError> {
+    Err(CrashError::Io(std::io::ErrorKind::Unsupported))
 }
 
 /// Where logs and crash reports go: `E2040_LOG_DIR` when set, else
@@ -939,19 +949,29 @@ pub fn settings_echo() -> SettingsEcho {
 /// every line it prints, so the log holds what the console showed. The file
 /// is unbuffered and each line is one write call, so a crash keeps every
 /// line already written. No-op before install; lock poisoning is recovered.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn mirror_line(line: &str) {
     let mut log = LOG.lock().unwrap_or_else(PoisonError::into_inner);
     write_log_line(log.as_mut(), line);
 }
 
+/// The wasm build keeps no run log: the line reaches the console only.
+#[cfg(target_arch = "wasm32")]
+pub fn mirror_line(_line: &str) {}
+
 /// Panic-path flavour of [`mirror_line`]: never blocks. A lock held at the
 /// moment of the panic skips the log line; the stderr copy still lands.
+#[cfg(not(target_arch = "wasm32"))]
 fn mirror_line_from_hook(line: &str) {
     if let Some(mut log) = try_lock_or_recover(&LOG) {
         write_log_line(log.as_mut(), line);
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn mirror_line_from_hook(_line: &str) {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn write_log_line(log: Option<&mut File>, line: &str) {
     let Some(file) = log else {
         return;
@@ -981,6 +1001,7 @@ fn try_lock_or_recover<T>(lock: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 /// thread it writes the report and exits with the crash code. On any other
 /// thread it only logs and returns, so the panic unwinds to its owner, which
 /// may recover it (a joined worker, a reader's `catch_unwind`, an ecs job).
+#[cfg(not(target_arch = "wasm32"))]
 fn on_panic(info: &PanicHookInfo<'_>) {
     let message = panic_text(info.payload());
     let place = match info.location() {
@@ -1036,7 +1057,7 @@ pub fn fatal_unwind(payload: Box<dyn std::any::Any + Send>) -> ! {
 fn write_crash_report() -> Result<PathBuf, CrashError> {
     let path = match RUN.get() {
         Some(run) => run.report.clone(),
-        None => std::env::temp_dir().join(format!("crash-{}.toml", utc_stamp(SystemTime::now()))),
+        None => std::env::temp_dir().join(format!("crash-{}.toml", utc_stamp(wall_now()))),
     };
     let report = match try_lock_or_recover(&STATE) {
         Some(state) => {
@@ -1078,6 +1099,41 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
         return text.clone();
     }
     "non-string panic payload".to_string()
+}
+
+/// The wall time a stamp reads. `SystemTime::now` panics on the wasm target,
+/// and a tab writes no stamped file, so the wasm build reads the epoch.
+#[cfg(not(target_arch = "wasm32"))]
+fn wall_now() -> SystemTime {
+    SystemTime::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wall_now() -> SystemTime {
+    UNIX_EPOCH
+}
+
+/// Create `dir` and its parents. The wasm build has no file system and refuses.
+#[cfg(not(target_arch = "wasm32"))]
+fn make_dir<P: AsRef<Path>>(dir: P) -> Result<(), CrashError> {
+    std::fs::create_dir_all(dir).map_err(|err| CrashError::Io(err.kind()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn make_dir<P: AsRef<Path>>(_dir: P) -> Result<(), CrashError> {
+    Err(CrashError::Io(std::io::ErrorKind::Unsupported))
+}
+
+/// Write `contents` to `path`, creating or truncating it. The wasm build has
+/// no file system and refuses.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_file<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Result<(), CrashError> {
+    std::fs::write(path, contents).map_err(|err| CrashError::Io(err.kind()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_file<P: AsRef<Path>, C: AsRef<[u8]>>(_path: P, _contents: C) -> Result<(), CrashError> {
+    Err(CrashError::Io(std::io::ErrorKind::Unsupported))
 }
 
 /// UTC `YYYYMMDDTHHMMSSZ` for a wall time. Integer math (civil-from-days),

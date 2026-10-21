@@ -30,12 +30,13 @@ pub mod kam2_sprites;
 pub mod kam2_sprite_atlas;
 
 /// Windowed proof of the 2.5D ground field: real window, PNG receipt.
-#[cfg(feature = "window")]
+/// Native only: it writes the PNG to disk and blocks on the GPU adapter.
+#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
 pub mod kam2_iso_proof;
 
 /// Windowed proof of the sprite layer: field, walking sprites, tracking
-/// turret and team tint, with a PNG receipt.
-#[cfg(feature = "window")]
+/// turret and team tint, with a PNG receipt. Native only, as above.
+#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
 pub mod kam2_sprite_proof;
 
 pub mod graph;
@@ -333,6 +334,12 @@ pub mod post;
 /// jitter plus current-minus-history motion vectors, re-exported through
 /// the `post` facade so `post::` callers keep their path.
 pub mod post_jitter_motion;
+
+/// The bodycam lens: barrel distortion, chromatic aberration, vignette and
+/// film grain in one post pass, with the eye, helmet and chest presets.
+/// The eye is the identity and the default. Std-only oracle plus the WGSL;
+/// the GPU pass and the capture helper ride the `window` feature.
+pub mod lens;
 
 /// SMAA fallback plus dynamic resolution around RP1 (RP4): edge-detect
 /// area blend for the TAA-off path plus a hysteresis scale controller on

@@ -5,33 +5,46 @@
 //! hud pass composites it on the readback frame, so the saved PNG carries
 //! both the scene and the HUD.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_arch = "wasm32"))]
 use engine_render::kam2_sprite_proof::{run_proof_with_hud, SpriteProofError, WINDOW_H, WINDOW_W};
+#[cfg(not(target_arch = "wasm32"))]
 use engine_ui::text::hud_text_px;
+#[cfg(not(target_arch = "wasm32"))]
 use engine_ui::{HudCommand, HudFrame, HudRole};
 
 /// Stock panel color: near-black HUD background, mostly opaque over the field.
+#[cfg(not(target_arch = "wasm32"))]
 const PANEL: [u8; 4] = [16, 18, 24, 220];
 /// Text color: palette foreground.
+#[cfg(not(target_arch = "wasm32"))]
 const TEXT: [u8; 4] = [245, 245, 245, 255];
 /// Ware fill: wood.
+#[cfg(not(target_arch = "wasm32"))]
 const WOOD: [u8; 4] = [166, 124, 82, 255];
 /// Ware fill: stone.
+#[cfg(not(target_arch = "wasm32"))]
 const STONE: [u8; 4] = [150, 158, 170, 255];
 /// Ware fill: iron.
+#[cfg(not(target_arch = "wasm32"))]
 const IRON: [u8; 4] = [205, 214, 226, 255];
 /// Minimap placeholder background, translucent so the field reads through.
+#[cfg(not(target_arch = "wasm32"))]
 const MAP_BACK: [u8; 4] = [8, 10, 14, 180];
 /// Stock slots: left edge, label, units held and fill color.
+#[cfg(not(target_arch = "wasm32"))]
 const SLOTS: [(i32, &str, u32, [u8; 4]); 3] = [
     (36, "WOOD", 120, WOOD),
     (206, "STONE", 80, STONE),
     (376, "IRON", 45, IRON),
 ];
 /// Units a full slot holds; every fill scales against it.
+#[cfg(not(target_arch = "wasm32"))]
 const SLOT_FULL: u32 = 120;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), SpriteProofError> {
     let frame = stock_hud(WINDOW_W, WINDOW_H);
     let proof = run_proof_with_hud(target_png(), Some(frame))?;
@@ -43,6 +56,7 @@ fn main() -> Result<(), SpriteProofError> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn target_png() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = manifest
@@ -55,6 +69,7 @@ fn target_png() -> PathBuf {
 /// One HUD frame for the proof: viewport scissor, stock panel with three
 /// wares, minimap placeholder frame and two text lines. ASCII only so the
 /// 5x7 atlas covers every glyph.
+#[cfg(not(target_arch = "wasm32"))]
 fn stock_hud(width: u32, height: u32) -> HudFrame {
     let width_px = i32::try_from(width).unwrap_or(8192);
     let height_px = i32::try_from(height).unwrap_or(8192);
@@ -146,3 +161,7 @@ fn stock_hud(width: u32, height: u32) -> HudFrame {
     });
     HudFrame::from_commands(width, height, px, commands)
 }
+
+/// The proof writes a PNG and blocks on the GPU adapter: native only.
+#[cfg(target_arch = "wasm32")]
+fn main() {}

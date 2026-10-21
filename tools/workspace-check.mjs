@@ -40,7 +40,7 @@ export const allowedEdges = new Map([
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
   ["engine-chaos", ["engine-observe", "engine-proof"]],
   ["engine-combat", ["engine-input"]],
-  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf"]],
+  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf", "engine-material"]],
   ["engine-destruction", ["engine-core", "engine-nav"]],
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.
@@ -318,7 +318,9 @@ function headlessPackages(repoDir, fp) {
       if (cached?.fp === fp && Array.isArray(cached.lines)) return cached.lines;
     } catch { /* missing or corrupt: run cargo below */ }
   }
-  const out = execFileSync("cargo", ["tree", "--locked", "-p", "engine2040", "-e", "normal,build", "--prefix", "none", "--format", "{p}"], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  // --color never: CI sets CARGO_TERM_COLOR=always, which wraps the repeat marker "(*)" in escape codes, so a path
+  // crate seen twice no longer ends in ")" and reads as external.
+  const out = execFileSync("cargo", ["tree", "--locked", "-p", "engine2040", "-e", "normal,build", "--prefix", "none", "--format", "{p}", "--color", "never"], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
   const lines = [...new Set(out.split("\n").map((l) => l.replace(/ \(\*\)$/, "").trim()).filter(Boolean))];
   try {
     mkdirSync(join(repoDir, "target"), { recursive: true });

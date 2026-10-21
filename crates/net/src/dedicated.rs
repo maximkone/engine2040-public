@@ -25,6 +25,7 @@ use crate::heal::{DesyncPlan, NetHeal, NetHealError, QuarantineNotice, Reconnect
 use crate::lagcomp::{LagTape, LagWindow, MAX_WINDOW_TICKS};
 use crate::replay::{record_tape, DivergenceReport, ReplayError, ReplayTape, Theater};
 use crate::session::{SnapshotDelta, WIRE_VERSION};
+use engine_observe::recovery::HealValidation;
 use engine_observe::supervisor::AppliedHeal;
 
 /// Beacon wire magic `b"MP"` little-endian, first two bytes of every beacon.
@@ -1128,12 +1129,35 @@ impl HeadlessServer {
         })
     }
 
+    /// Prove a resync with the authoritative digest and the digest the client
+    /// holds after applying it. Equal digests clear the shared heal budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetHealError::NotRegistered`] when no tape row holds `attempt`.
+    pub fn heal_verify_recovery(
+        &mut self,
+        attempt: u32,
+        last_good: u64,
+        healed: u64,
+    ) -> Result<HealValidation, NetHealError> {
+        self.heal.verify_recovery(attempt, last_good, healed)
+    }
+
     /// Clear the shared heal budget and the slot quarantine after a verified
-    /// recovery (reclaim plus snapshot convergence). History stays: tape and
-    /// notices are evidence, not budget. Returns true when the slot was
-    /// quarantined.
+    /// recovery (see [`Self::heal_verify_recovery`]). Refused without a proof:
+    /// the slot stays quarantined. History stays: tape and notices are
+    /// evidence, not budget. Returns true when the slot was quarantined and
+    /// is released.
     pub fn heal_reset_slot(&mut self, slot: u8) -> bool {
         self.heal.reset_slot(slot)
+    }
+
+    /// Operator escape hatch: release the slot and clear the budget with no
+    /// proof on file. Loud in the supervisor events. Returns true when the
+    /// slot was quarantined.
+    pub fn heal_reset_slot_unverified(&mut self, slot: u8) -> bool {
+        self.heal.reset_slot_unverified(slot)
     }
 
     /// Apply every deferred net heal due at or before `boundary_tick`,

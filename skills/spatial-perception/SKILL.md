@@ -13,27 +13,18 @@ Four areas: sight and FOV, isovist polygon, AI hearing, stacked support. They sh
 - Output is id-sorted. No `HashMap` order, no clock, no float in a hash.
 - Same input twice gives the same bytes twice. Prove it with an x2 test.
 - PASS needs a test or a measured cost per touched item. A picture alone is not proof.
-- Proof lines (through GitHub, skill `github-check`): `cargo test -p engine-spatial --lib`, `cargo test -p engine-ai --lib`.
+- Proof lines (through GitHub, skill `github-check`): `node tools/gh-check.mjs cargo test -p engine-spatial --lib`, `node tools/gh-check.mjs cargo test -p engine-ai --lib`.
 
 What is in the tree today (verify before you build on it):
 - `crates/spatial/src/sight.rs` (`SightWorld::build`, `los_point`, `digest_answers`): 3D line of sight over boxes.
 - `crates/spatial/src/fps_visibility.rs`: per-viewer sight sets (FOV cone plus occlusion), id-sorted, capped by `FPS_MAX_CANDIDATES`. AI brains gate chase on membership. Net interest intersects with the set.
 - `crates/spatial/src/isovist.rs`: integer-cm visibility polygon and `area_cm2`.
 - `crates/spatial/src/place.rs`, `index3.rs`, `relation.rs`, `afford.rs`: placement with support.
-- No tile-grid FOV or explored-map module was found in `crates/` by grep on 2026-10-17. Sections 1 items 1-3 and 7 apply to any new tile-visibility module.
+- No tile-grid FOV or explored-map module was found in `crates/` by grep on 2026-10-17 (see section 1).
 
 ## 1. Sight and FOV (viewer-based)
 
-1. **Opacity apart from blocking.** Vision blocking has its own flag, apart from movement blocking. Flag: one flag drives both, so a slit or window behaves wrong. (spatial for tiles, physics for motion)
-2. **Visible set per viewer.** Each viewer keeps its own deduped point set and a radius tuned per kind. Flag: one shared list or one radius for all kinds.
-3. **Dirty-gated recompute.** Rebuild the set only when its owner moves. Start dirty, clear after the run. Flag: full rebuild every tick for every viewer.
-4. **Order after movement.** The sight pass runs after movement settles and before draw and chase, in each schedule that moves. Flag: draw or chase reads last turn's spots.
-5. **Draw gated on sight.** Tiles, bodies and hover tips show only when the viewer set holds the point. Flag: hidden foes drawn or named by hover. (render, ui)
-6. **Chase gated on sight.** Pursuit starts only when the target is inside the chaser set and stops when sight breaks. Flag: foes path through walls at any range. (ai)
-7. **Memory kept apart.** Explored state is a separate bool array. It is set from the viewer set on move and never cleared. Seen draws bright, recalled draws dim. Flag: recall stored inside the live set, or wiped each move.
-8. **Same input same set, plus cost.** Same origin, radius and map give the same set. Measure build cost at real viewer counts. Flag: shifting order leaks into sim state, or full-map scans with no number.
-
-Do: recompute on move, gate chase and draw on set membership, keep recall apart from sight. Don't: scan each tick, chase through walls, fold recall into the live set.
+Tile FOV and explored-map memory are a design target, no module yet: `docs/plan/spatial.md` has no row for them. Live viewer sight is `crates/spatial/src/fps_visibility.rs` (listed above).
 
 ## 2. Isovist polygon (`crates/spatial/src/sight.rs`, `isovist.rs`)
 
@@ -47,13 +38,13 @@ Entry points: `isovist::isovist(origin, walls)`, `split_crossings`, `area_cm2`, 
 6. **Sweep order.** Boxes are id-sorted at `SightWorld::build`. Walls, endpoints and angles are sorted before the sweep. Flag: unsorted angles giving a bow-tie polygon.
 7. **Closed area.** `area_cm2` is the shoelace over `i128`, sign-independent, 0 under 3 points. `digest_answers` hashes integer cm bytes in sorted order. Flag: an open ring, or a float area that differs x2.
 8. **Sight reuse.** Occlusion agrees with `los_point` / `SightWorld`. No second ray test. Flag: isovist says visible where sight says blocked. The `parity_*` tests compare the ring with a brute-force segment test.
-9. **Determinism proof.** Outputs id-sorted, module exported in `lib.rs`, `cargo test -p engine-spatial --lib` green x2. Flag: HashMap order, or an unexported module.
+9. **Determinism proof.** Outputs id-sorted, module exported in `lib.rs`, `node tools/gh-check.mjs cargo test -p engine-spatial --lib` green x2. Flag: HashMap order, or an unexported module.
 
 Do: one integer-cm sweep with sorted angles and id tie-breaks. Don't: add a float fast path that skips the split or the sort.
 
 ## 3. AI hearing (`crates/ai`)
 
-`heard_by` does not exist yet (grep of `crates/ai/src` found nothing). This section is a design target. Model it on `crates/ai/src/eqs.rs` (`EqQuery`, `MAX_POINTS` 256, `SCORE_MAX` 1000, `EqError`). Record hears with `crates/ai/src/mind.rs::MemoryKind::Heard`. PASS needs table tests plus x2 equal with `cargo test -p engine-ai --lib`.
+`heard_by` is in `crates/ai/src/hearing.rs` (`pub fn heard_by(dist_cm, noise, tick) -> Option<u16>`). Items 1-8 are its spec: check the file before you say one is live. Model new hearing code on `crates/ai/src/eqs.rs` (`EqQuery`, `MAX_POINTS` 256, `SCORE_MAX` 1000, `EqError`). Record hears with `crates/ai/src/mind.rs::MemoryKind::Heard`. PASS needs table tests plus x2 equal with `node tools/gh-check.mjs cargo test -p engine-ai --lib`.
 
 1. **Kinds as data.** Kind, range and life come from a table: gunfire 4000 cm for 120 ticks, footstep 2400 cm for 90, quiet 1000 cm for 30. Caller-owned buffers like `EqQuery`. Flag: per-kind branches or hidden globals.
 2. **Range before loudness.** Test distance first, strength only inside range. A far footstep at 2500 cm never hears. A near gunshot at 3900 cm does. Flag: loud-far beats near-quiet.
@@ -62,7 +53,7 @@ Do: one integer-cm sweep with sorted angles and id tie-breaks. Don't: add a floa
 5. **Keep the last list.** The brain keeps the prior audible set, marks all for drop, then unmarks the still-audible (`crates/ai/src/memory.rs::MemoryStore`). Flag: a fresh list each tick that flaps.
 6. **Loudest first, stop when full.** Read candidates loudest-first, scale `0..=1000`, copy only until the channels fill, then stop. Flag: a low-priority scan after full.
 7. **Louder replaces.** A louder live noise replaces the current one by one integer compare (`crates/ai/src/depth.rs::DepthBrain` style). Flag: two noises mixed, or first-wins.
-8. **Integers twice equal.** `heard_by(listener_cm, noise, tick)` returns `Option<u16>` integers, refuses bad ids like `EqError`, and gives identical bytes twice. Flag: float strength or run-to-run drift.
+8. **Integers twice equal.** `heard_by(dist_cm, noise, tick)` returns `Option<u16>` integers, refuses bad ids like `EqError`, and gives identical bytes twice. Flag: float strength or run-to-run drift.
 
 Do: table kinds with range plus life, distance first, old set with drop flags, loudest-first until full. Don't: branch per kind, hear far-quiet over near-loud, mix noises, return floats.
 

@@ -2,9 +2,6 @@
  "version": 1,
  "note": "Ratchet for tools/wasm-gate.mjs: per file and hazard, the count of calls that break in a browser. Counts only go down (--tighten); a file that is not listed must have none.",
  "files": {
-  "crates/arena/src/fork.rs": {
-   "thread": 2
-  },
   "crates/arena/src/gym.rs": {
    "thread": 1
   },
@@ -27,15 +24,10 @@
    "thread": 1
   },
   "crates/game/src/arena_kit.rs": {
-   "exe": 1,
-   "fs": 1
+   "exe": 1
   },
   "crates/game/src/capture.rs": {
    "fs": 6
-  },
-  "crates/game/src/crash.rs": {
-   "clock": 2,
-   "fs": 4
   },
   "crates/game/src/dev_hotpatch.rs": {
    "fs": 1
@@ -159,7 +151,6 @@
    "clock": 1
   },
   "crates/render/src/particles_gpu.rs": {
-   "block": 1,
    "clock": 2
   },
   "crates/render/src/pass_truth.rs": {

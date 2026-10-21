@@ -73,6 +73,7 @@ const VIEW_SNAP_TICKS: u32 = 30;
 /// Relay registration is retried every this many frames until confirmed.
 const REGISTER_EVERY_FRAMES: u32 = 30;
 /// Fixed tick length of the headless loop.
+#[cfg(not(target_arch = "wasm32"))]
 const TICK: Duration = Duration::from_micros(16_667);
 
 /// Input lead in ticks for a round trip of `rtt_ms`: the round trip in ticks

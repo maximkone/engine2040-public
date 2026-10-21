@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { ARENA, arenaPath, LOCAL_HDRI, LOCAL_ONLY } from "./arena-report.mjs";
 import { provenanceRows } from "./arena-sources.mjs";
 import { clipRows, FIGHTERS } from "./fighter-report.mjs";
-import { fileDigest, mdTable, readJson, REPO, syncBlocks } from "./content-lib.mjs";
+import { fileDigest, isTextPin, mdTable, readJson, REPO, syncBlocks } from "./content-lib.mjs";
 
 /** Licences a release may carry; a test pins this to `ALLOWED_SPDX` in provenance.rs. */
 export const ALLOWED_SPDX = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "Zlib", "ISC", "CC0-1.0", "Unlicense", "0BSD", "MIT-0", "Unicode-3.0", "Unicode-DFS-2016"];
@@ -89,7 +89,7 @@ export function auditRecords(repo = REPO) {
   const ignored = gitIgnored(repo, rows.map((r) => r.name));
   return rows.map(({ name, src, sha, path, local }) => ({
     rec: { name, url: src.url, spdx: src.spdx ?? "CC0-1.0", author: src.author, sha },
-    disk: diskState(path && fileDigest(path), sha, local || ignored.has(name)),
+    disk: diskState(path && fileDigest(path, { text: isTextPin(name) }), sha, local || ignored.has(name)),
   }));
 }
 

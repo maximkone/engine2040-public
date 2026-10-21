@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.5804,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 2.0351,
+  "fill_30m": 0.5632,
+  "height_30m_px": 89,
+  "height_px": 621,
+  "ortho_scale_m": 3.2771,
+  "px_per_m": 305.15,
+  "resolution_30m": [
+    1326,
+    746
+  ],
+  "scale_applied": 2.339014,
+  "source": "C:\\engine2040\\content\\generated\\gunner_base_02\\0\\mesh.glb",
+  "source_height_m": 0.8551,
+  "triangles": 27136,
+  "width_px": 553
+}

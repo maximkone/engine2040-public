@@ -1,19 +1,17 @@
-# Skills - 33 skills in skills/ (none in .opencode/skills/)
+# Skills - 29 skills in skills/ (none in .opencode/skills/)
 
-New here? Read `skills/START-HERE.md` first (the 10 skills to read once, then a task-to-skill table).
+New here? Read `skills/START-HERE.md` first (the 8 skills to read once, then a task-to-skill table).
 
 Any AI (Claude Code, OpenCode, anything) loads a skill by its trigger. `AGENTS.md` wins over every skill. One skill per job you are about to do; read the trigger, open the one that matches, and follow links between skills instead of loading many.
 
-Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing true was dropped; the old folders are in git history (`git log --all -- skills/<old-name>`). Old name to new home: see the table at the end.
+Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing true was dropped; the old folders are in git history (`git log --all -- skills/<old-name>`). Merged again 2026-10-21: four pairs became one skill each (tick-a-row into commit-and-board, gh-check-playbook into github-check, arena-capture-and-view-line into door-and-headless-runbook, browser-test-on-this-pc into web-wasm). Old name to new home: the table at the end.
 
 ## Work flow
 
 | skill | when |
 |---|---|
-| commit-and-board | commit or push on the shared tree, write a new board row, plan rows, add a doc that needs an index line |
-| tick-a-row | finish a board row: `[x]` plus `Landed <sha7>` and evidence, or a Progress note; the sed traps |
-| github-check | any cargo test, clippy or check proof, a red gate or CI check, a link failure, a blocked local cargo lock |
-| gh-check-playbook | which gh-check or web-run form for which job; exit 2 or 3, 0 tests, push or dispatch errors, GPU lines hang |
+| commit-and-board | commit or push on the shared tree, write a board row, close a row (`Landed <sha7>`, evidence) or log progress, plan rows, add a doc that needs an index line |
+| github-check | any cargo test, clippy or check proof, a red gate or CI check, a link failure, a blocked local cargo lock; the odd gh-check messages (exit 2 or 3, 0 tests, push or dispatch errors) |
 | rust-quality-ratchet | the pre-commit hook refused, `tools/rust-quality.mjs` FAIL, casts, long fns, big files; tighten or accept |
 | wiring-a-feature | code exists but nothing calls it, a wire row (`RZ4w`), or before you write something that may exist |
 | recover-deleted-code | a file a row or plan names is gone (rot cleanup 2026-10-16): find it in git, restore or rewrite |
@@ -43,8 +41,7 @@ Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing tr
 | spatial-perception | FOV, isovist, sight-gated chase, explored maps, AI hearing, stacked placement |
 | game-shell-audio-ui | title/pause/result shell, HUD and overlays, menus, how sound plays |
 | ai-door | MCP verbs and packs in crates/endpoint, provider adapters, evals and win rates, offline search, int8 nets |
-| door-and-headless-runbook | running without a window or a person: staged fight, golden proof, capture, perf CSV, the e2040 MCP door |
-| arena-capture-and-view-line | run `arena.exe --exit`, read the `arena view:`, `arena break:` and `physfx:` lines (pops, foot slide, debris), take captures |
+| door-and-headless-runbook | running without a window or a person: staged fight, golden proof, perf CSV, the e2040 MCP door; the arena window run and its receipt lines (`arena view:`, `arena break:`, `physfx:`), captures |
 | design-and-playtest | game design data, feel and fun reviews, playing through the MCP play tools, look reviews |
 
 ## Render, web, content
@@ -55,16 +52,15 @@ Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing tr
 | render-pipeline-math | render passes, readback, fog, cascades, draw order, MSAA/TAA, WGSL, matrix/normal/depth/color math |
 | render-lighting | shadows, point/spot/sun lights, torches, IBL, normal and gloss maps, GTAO, sky bake, wound maps |
 | render-cull-vram | frustum, light, shadow, portal and occlusion culling; VRAM math, staging, streaming pools, eviction |
-| web-wasm | wasm32 builds, the browser shell, dist/web, headless Chrome proof, web workflows |
-| browser-test-on-this-pc | check the published Pages build in the Claude app's browser pane: golden line, frames, errors, commit match |
+| web-wasm | wasm32 builds, the browser shell, dist/web, headless Chrome proof, web workflows; the check of the published Pages build in the Claude app's browser pane (real GPU) |
 | assets-content | finding, licensing, cooking and budgeting content in content/ or crates/assets |
 
-## Old name to new home (2026-10-17 merge)
+## Old name to new home (2026-10-17 and 2026-10-21 merges)
 
 | new skill | old skills folded in |
 |---|---|
-| commit-and-board | commit-by-path, board-row-writing, planning-rows |
-| github-check | github-check, gate-red-fix, link-env-triage |
+| commit-and-board | commit-by-path, board-row-writing, planning-rows, tick-a-row (2026-10-21) |
+| github-check | github-check, gate-red-fix, link-env-triage, gh-check-playbook (2026-10-21) |
 | repo-orientation | acquire-codebase, hotspot-recon, grep-overflow-guard |
 | debug-triage | systematic-debug, crash-stack-triage, causal-triage-plan, bug-report-writing |
 | determinism-debug | desync-debug, golden-matrix, replay-capture-perf-triage |
@@ -85,7 +81,7 @@ Merged 2026-10-17 from 86 skills (82 here, 4 in `.opencode/skills/`). Nothing tr
 | game-shell-audio-ui | flow-shell-checks, hud-overlay-checks, audio-cue-rules |
 | net-rollback | gaffer-netcode, ggrs-rollback-rules |
 | ai-door | ai-door-rules, eval-regression-checks, engine-provider, mcp-verb-authoring |
-| door-and-headless-runbook | door-and-headless-runbook |
-| web-wasm | wasm-compat, web-build-and-test |
+| door-and-headless-runbook | door-and-headless-runbook, arena-capture-and-view-line (2026-10-21) |
+| web-wasm | wasm-compat, web-build-and-test, browser-test-on-this-pc (2026-10-21) |
 | assets-content | engine-assets, pbr-texture-sources, asset-budget-checks, tri-mesh-checks |
 | research | engine-research, engine-experiment, book-search, bevy-rust-ecs |

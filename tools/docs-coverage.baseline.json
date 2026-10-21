@@ -241,6 +241,24 @@
    "documented": 26,
    "undocumented": 3,
    "coverage": 89.65517241379311
+  },
+  "kam2-game": {
+   "total": 147,
+   "documented": 147,
+   "undocumented": 0,
+   "coverage": 100
+  },
+  "kam2-sim": {
+   "total": 86,
+   "documented": 86,
+   "undocumented": 0,
+   "coverage": 100
+  },
+  "kam2-web": {
+   "total": 77,
+   "documented": 77,
+   "undocumented": 0,
+   "coverage": 100
   }
  }
 }

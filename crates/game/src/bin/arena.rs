@@ -2790,12 +2790,19 @@ impl ApplicationHandler for ArenaApp {
         // acquire stalls (the 2026-10-20 perf lane).
         let now = Instant::now();
         let due = self.pacer.deadline();
+        // `wait_duration` takes a std Duration: winit's WaitUntil wants its own
+        // Instant type, which is web_time's on wasm and not std's.
         if now < due {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+            event_loop.set_control_flow(ControlFlow::wait_duration(
+                due.saturating_duration_since(now),
+            ));
             return;
         }
         self.pacer.advance(now);
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.pacer.deadline()));
+        let next = self.pacer.deadline();
+        event_loop.set_control_flow(ControlFlow::wait_duration(
+            next.saturating_duration_since(now),
+        ));
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }

@@ -63,11 +63,15 @@
       "url": "https://query.wikidata.org/sparql?query={id}&format=json",
       "items": [
         {
-          "id": "SELECT ?legion ?legionLabel ?place ?placeLabel ?coord WHERE { ?legion wdt:P31 wd:Q11303 . OPTIONAL { ?legion wdt:P276 ?place . } OPTIONAL { ?legion wdt:P625 ?coord . } SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\". } }",
+          "id": "SELECT ?item ?itemLabel ?kind ?place ?placeLabel ?placeCoord WHERE { ?item wdt:P31 wd:Q163323 . BIND(wd:Q163323 AS ?kind) ?item wdt:P276 ?place . ?place wdt:P625 ?placeCoord . SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\". } }",
           "name": "legions-and-places.json"
+        },
+        {
+          "id": "SELECT ?item ?itemLabel ?kind ?coord ?date WHERE { ?item wdt:P31 wd:Q178561 . BIND(wd:Q178561 AS ?kind) ?item wdt:P625 ?coord . OPTIONAL { ?item wdt:P585 ?date . } SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\". } }",
+          "name": "battles.json"
         }
       ],
-      "note": "One query every 60 s, as the plan states. The query text is url encoded into the sparql url."
+      "note": "One query every 60 s, as the plan states. The query text is url encoded into the sparql url. wd:Q163323 is the Roman legion and wd:Q178561 is the battle; the earlier text asked for wd:Q11303, which is the skyscraper, so the pull answered with towers."
     },
     {
       "id": "pleiades",

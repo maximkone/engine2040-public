@@ -141,3 +141,47 @@ Two habits follow: commit by path as soon as a file is written, and keep the
 proof of what a file is in its commit body, because the object database is
 the only copy that survives a stray clean.
 
+## The chain, as one command
+
+    node tools/asset-gen/character.mjs --concept <concept.png> \
+      --name ashkin_gunner --faction ashkin --out content/generated/characters/ashkin_gunner
+
+That runs the four tools in order and writes `character.json`: the base mesh
+from the one local 3D lane, the style cook, the 30 m gate, the 22-bone rig.
+The gate has teeth: a silhouette that does not read stops the chain with the
+numbers and the picture, before anything is painted.
+
+The gate band is calibrated on the six blockouts. The two heavies that read
+as rectangles scored `bbox_fill` 0.7443 and 0.7519; the four that read
+scored 0.5283 to 0.6604. So the band is 0.40 to 0.70, and a base outside it
+dies as a grey shape in a minute instead of costing a day of paint.
+
+## What each tool owns
+
+- `tools/asset-gen/sf3d.mjs` — the one local 3D lane. SF3D, local weights,
+  device detected, no hub call at run time.
+- `tools/blender/style_cook.py` — our palette pushed into one 512 atlas, the
+  triangle budget, four LODs, painted AO as vertex colours, everything at the
+  2 m canonical height. The hue chooses the palette entry and the luminance
+  scales it, so the generator's baked light survives and its colours do not.
+- `tools/blender/mesh_silhouette.py` — the 30 m read test, the same picture
+  and the same measurements as `blockout.py`, so a generated base and a hand
+  blockout compare number for number.
+- `tools/blender/rig22.py` — our own 22-bone rig, the engine's
+  `HumanoidBone` names and the engine's chain. The proportions are ours
+  (hips at half the height, the shoulder line at 0.82); the mesh supplies
+  the scale and the reach. No UniRig, no weights, no GPU, no network.
+
+## The image estimator is optional
+
+SF3D's image estimator refines the decoder's roughness and metallic with a
+CLIP pass. It wants `open_clip_pytorch_model.bin`, 577 MB, and this machine
+cannot be trusted with that download: the hub fetch froze at 190 MB and the
+eight-way range fetch still only managed 210 kB/s.
+
+The decoder already estimates roughness and metallic on its own, so
+`sf3d/system.py` now treats the image estimator as optional and loads a
+checkpoint that carries its weights without it. A run with
+`image_estimator_cls: ""` makes the same mesh, one CLIP refinement poorer,
+and our cook repaints the material anyway.
+

@@ -1,8 +1,8 @@
 ### Done
 
-- [ ] CB3 combat: delta-battle design patterns — hit-stop timing, cancel
+- [x] CB3 combat: delta-battle design patterns — hit-stop timing, cancel
   windows and reaction timing reimplemented (MIT, PORT cite + EVIDENCE
-  row; Deltarune IP never touched, patterns only). Tier B. Size L.
+  row; Deltarune IP never touched, patterns only). Landed f4fc190b. Tier B. Size L.
   Owns `crates/combat/src/design.rs`. Accept: PQ2 tournament balance
   within tolerance; input latency ≤ 50ms. Kill: float math in the tick;
   divergence. needs: CB1, PQ2. (RES-STEAL wave 35 Dive 11, reviewed

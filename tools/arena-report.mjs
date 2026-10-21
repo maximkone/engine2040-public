@@ -11,7 +11,7 @@ import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { lodTotals } from "./fighter-report.mjs";
-import { fileDigest, hdrSize, imageSize, mdTable, mib, readJson, REPO, rgba8MipBytes, syncBlocks } from "./content-lib.mjs";
+import { fileDigest, hdrSize, imageSize, isTextPin, mdTable, mib, readJson, REPO, rgba8MipBytes, syncBlocks } from "./content-lib.mjs";
 
 export const ARENA = join(REPO, "content", "arena");
 export const LOCAL_HDRI = join(REPO, "content", "local", "hdri");
@@ -47,7 +47,7 @@ export function checkManifest(root = ARENA, local = LOCAL_HDRI) {
   if (existsSync(join(root, "manifest_before.json"))) problems.push("manifest_before.json: stale pre-kit manifest still present");
   const { files } = readJson(join(root, "manifest.json"));
   for (const [rel, want] of Object.entries(files)) {
-    const got = fileDigest(arenaPath(rel, root, local));
+    const got = fileDigest(arenaPath(rel, root, local), { text: isTextPin(rel) });
     if (!got && rel in LOCAL_ONLY) continue;
     if (!got) problems.push(`${rel}: missing on disk`);
     else if (got.bytes !== want.bytes) problems.push(`${rel}: ${got.bytes} bytes on disk, manifest says ${want.bytes}`);
@@ -69,7 +69,7 @@ export function refreshManifest(root = ARENA, local = LOCAL_HDRI) {
   const manifest = readJson(path);
   const changed = [];
   for (const [rel, want] of Object.entries(manifest.files)) {
-    const got = fileDigest(arenaPath(rel, root, local));
+    const got = fileDigest(arenaPath(rel, root, local), { text: isTextPin(rel) });
     if (!got || (got.bytes === want.bytes && got.sha256 === want.sha256)) continue;
     manifest.files[rel] = { ...want, ...got };
     changed.push(rel);

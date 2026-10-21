@@ -458,7 +458,7 @@
   while the release build fails tree-wide on the absent HDRI; Q2 takes
   the headless numeric half now, Q1 keeps the visual half pilot-only
   HELD; proof: HDRI gate build green, then release pilot V1-V3.)
-- [ ] Q2 proof: Q1 numeric receipt headless - refresh the Q1 evidence-only
+- [x] Q2 proof: Q1 numeric receipt headless - refresh the Q1 evidence-only
   receipt with zero reference-GPU pixels. Tier A. Size S. Owns evidence
   only under `target/q1/` (no `crates/` hunks, no `content/` writes).
   Accept: `node tools/proof.mjs --skip-build` PASS golden
@@ -466,7 +466,12 @@
   lines quoted; placeholder refusal re-verified (V1 64x48 noise sha
   refused, V2/V3 single-cube sha refused, zero reference-GPU captures
   claimed); headless `perf-report.txt` refreshed, GPU lines PENDING.
-  needs: WIN1, PF2. (Q1 deep-dive 2026-10-03.)
+  needs: WIN1, PF2. (Q1 deep-dive 2026-10-03.) (Ticked 2026-10-21:
+  golden `d57b5c8ae3096614` re-proven x2 by two independent
+  `node tools/proof.mjs --skip-build` runs; the command's overall RESULT
+  FAIL names only other seats' in-flight gates, quoted in
+  `docs/SPRINT-19-receipts.md` and `target/q1/receipt.md`. GPU lines
+  PENDING, zero reference-GPU pixels claimed.)
 - [ ] CT12 assets: bake manifest — every cook and bake writes a seeded manifest
   of inputs, tool versions and outputs, so only what changed rebuilds and
   every output has a receipt for DT5 and PR1 (Snakemake discipline, MIT, no

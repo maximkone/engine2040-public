@@ -1,20 +1,27 @@
 //! One frame of geometry: ground diamonds and house/unit sprite quads.
 //!
 //! Everything here is CPU data in framebuffer pixels, built from the sim and the
-//! camera only; the window uploads it and draws. Houses are cells of the packed
-//! cottage atlas, anchored with their manifest pivot so the sprite's front edge
+//! camera only; the window uploads it and draws. Houses are cells of a packed
+//! building atlas, anchored with their manifest pivot so the sprite's front edge
 //! sits on the footprint; units are atlas cells cut from the packed soldier
 //! atlas or, when that file is missing, from engine-render's procedural
 //! stand-in, turned to the eighth facing they walk or fight toward. Depth is the
 //! fixed view's `x + z` key: ground first, then [`Part`] order.
+//!
+//! Two builders share one frame: [`build_with`] draws every house from one
+//! cottage atlas, and [`build_with_arts`] asks the [`HouseArts`] registry which
+//! atlas a house kind draws from, so a kind with its own building folder draws
+//! its own cells and a kind without one falls back to the cottage. Every house
+//! quad names its atlas slot in [`Scene::house_atlases`], so the window can
+//! upload one sheet per slot and bind the right one per run of houses.
 
 use engine_assets::bc::srgb_byte_to_linear;
 use engine_render::kam2_iso::IsoCamera;
 use engine_render::kam2_sprite_atlas::{CELL_H, CELL_W, ROWS, ROW_INFANTRY};
 use engine_render::kam2_sprites::{facing_from_direction, Facing, SpriteAtlas};
-use kam2_sim::{House, HouseKind, Sim, Terrain, Unit};
+use kam2_sim::{House, Sim, Terrain, Unit};
 
-use crate::house::{HouseManifest, HouseState};
+use crate::house::{HouseArts, HouseManifest, HouseState};
 use crate::soldier::{frame_index, SoldierManifest, UnitClip};
 use crate::view::{footprint_center_world, tile_center_world, tile_diamond, MAP_H, MAP_W};
 
@@ -73,8 +80,10 @@ pub enum Part {
 pub struct Scene {
     /// Ground diamonds, in row order, including the tiles under a house.
     pub ground: Vec<ShapeQuad>,
-    /// One cottage cell per house, on the footprint centre.
+    /// One building cell per house, on the footprint centre.
     pub houses: Vec<SpriteQuad>,
+    /// The atlas slot each house cell is cut from, parallel to `houses`.
+    pub house_atlases: Vec<usize>,
     /// One sprite cell per unit.
     pub units: Vec<SpriteQuad>,
     /// Billboard order, farthest first.
@@ -137,7 +146,7 @@ impl Units {
 
 /// Build the frame for `sim` through `camera`: `units` picks the unit atlas,
 /// `houses` the cottage atlas, `tick` picks the build state and the animation
-/// frame.
+/// frame. Every house draws from that one atlas, in slot zero.
 #[must_use]
 pub fn build_with(
     sim: &Sim,
@@ -146,6 +155,47 @@ pub fn build_with(
     houses: &HouseManifest,
     tick: u32,
 ) -> Scene {
+    build_frame(sim, camera, units, tick, |house| {
+        Some((0usize, houses, house.kind.footprint()))
+    })
+}
+
+/// Build the frame with one atlas per house kind: `arts` says which manifest
+/// and which atlas slot a house draws from. A kind with its own building
+/// folder draws its own cells and its own footprint; a kind without one falls
+/// back to the cottage and keeps the footprint the sim reserves.
+#[must_use]
+pub fn build_with_arts(
+    sim: &Sim,
+    camera: &IsoCamera,
+    units: &Units,
+    arts: &HouseArts,
+    tick: u32,
+) -> Scene {
+    build_frame(sim, camera, units, tick, |house| {
+        let art = arts.resolve(house.kind)?;
+        let footprint = if art.own {
+            let [w, h] = art.manifest.footprint();
+            (i32::try_from(w).unwrap_or(0), i32::try_from(h).unwrap_or(0))
+        } else {
+            house.kind.footprint()
+        };
+        Some((art.slot, art.manifest, footprint))
+    })
+}
+
+/// The shared frame builder: `resolve` names the atlas slot, the manifest and
+/// the drawn footprint of one house.
+fn build_frame<'a, F>(
+    sim: &Sim,
+    camera: &IsoCamera,
+    units: &Units,
+    tick: u32,
+    resolve: F,
+) -> Scene
+where
+    F: Fn(&House) -> Option<(usize, &'a HouseManifest, (i32, i32))>,
+{
     let mut ground = Vec::with_capacity(usize::try_from(MAP_W * MAP_H).unwrap_or(0));
     for y in 0..MAP_H {
         for x in 0..MAP_W {
@@ -157,14 +207,20 @@ pub fn build_with(
     }
     let mut entries = Vec::with_capacity(sim.houses().len() + sim.units().len());
     let mut drawn_houses = Vec::with_capacity(sim.houses().len());
+    let mut house_atlases = Vec::with_capacity(sim.houses().len());
     for house in sim.houses() {
-        if let Some(quad) = house_quad(camera, house, houses, tick) {
-            entries.push((
-                house_depth(house.x, house.y, house.kind),
-                Part::House(drawn_houses.len()),
-            ));
-            drawn_houses.push(quad);
-        }
+        let Some((slot, art, footprint)) = resolve(house) else {
+            continue;
+        };
+        let Some(quad) = house_quad(camera, house, art, footprint, tick) else {
+            continue;
+        };
+        entries.push((
+            house_depth(house.x, house.y, footprint),
+            Part::House(drawn_houses.len()),
+        ));
+        drawn_houses.push(quad);
+        house_atlases.push(slot);
     }
     let mut drawn_units = Vec::with_capacity(sim.units().len());
     for unit in sim.units() {
@@ -180,6 +236,7 @@ pub fn build_with(
     Scene {
         ground,
         houses: drawn_houses,
+        house_atlases,
         units: drawn_units,
         order: entries.into_iter().map(|(_, part)| part).collect(),
     }
@@ -187,8 +244,8 @@ pub fn build_with(
 
 /// Depth key of a house: its footprint base row at its west edge, which is the
 /// centre of its bottom-left tile. A unit on the next row south sorts after it.
-fn house_depth(x: i32, y: i32, kind: HouseKind) -> f32 {
-    let (_, h) = kind.footprint();
+fn house_depth(x: i32, y: i32, footprint: (i32, i32)) -> f32 {
+    let (_, h) = footprint;
     (x + y + h) as f32
 }
 
@@ -219,16 +276,19 @@ fn tile_color(sim: &Sim, x: i32, y: i32) -> [u8; 3] {
 }
 
 /// One house billboard: the state cell the sim tick picks, on the footprint
-/// centre, with the manifest pivot and cell size.
+/// centre, with the manifest pivot and cell size. `footprint` is the drawn
+/// footprint: the manifest's own when the kind has its own art, the sim's when
+/// the kind falls back to the cottage.
 fn house_quad(
     camera: &IsoCamera,
     house: &House,
     art: &HouseManifest,
+    footprint: (i32, i32),
     tick: u32,
 ) -> Option<SpriteQuad> {
     let row = art.row(HouseState::for_tick(tick, house.built_at))?;
     let [uv_min, uv_size] = art.cell_uv(row)?;
-    let (w, h) = house.kind.footprint();
+    let (w, h) = footprint;
     let [wx, wz] = footprint_center_world(house.x, house.y, w, h);
     Some(SpriteQuad {
         top_left: art.top_left(camera.project([wx, 0.0, wz])),
@@ -288,7 +348,7 @@ fn linear(rgb: [u8; 3]) -> [f32; 3] {
 mod tests {
     use super::*;
     use crate::view::footprint_screen;
-    use kam2_sim::{Command, UnitKind};
+    use kam2_sim::{Command, HouseKind, UnitKind};
 
     const EPS: f32 = 0.01;
 
@@ -341,7 +401,7 @@ mod tests {
         for (index, house) in sim.houses().iter().enumerate() {
             let (w, h) = house.kind.footprint();
             let quad = scene.houses[index];
-            assert_eq!(quad.size, [128.0, 128.0], "one 128 px cell");
+            assert_eq!(quad.size, art.size(), "one manifest cell");
             // The pivot is the footprint centre: top and bottom corners meet there.
             let corners = footprint_screen(&camera, house.x, house.y, w, h);
             let anchor = [
@@ -362,8 +422,8 @@ mod tests {
         let corners = footprint_screen(&camera, farm.x, farm.y, 2, 2);
         let quad = scene.houses[1];
         assert!(
-            (quad.top_left[1] + 128.0 - (corners[2][1] + 1.0)).abs() < EPS,
-            "the cell reaches the baked shadow row just past the front edge"
+            quad.top_left[1] + art.size()[1] > corners[2][1],
+            "the cell reaches the baked shadow row past the front edge"
         );
     }
 
@@ -374,8 +434,12 @@ mod tests {
         let farm = &sim.houses()[1];
         assert_eq!(farm.kind, HouseKind::Farm);
         assert_eq!(farm.built_at, 30, "a farm takes 30 ticks");
-        let half_built = (1.0 * 130.0 + 1.0) / 390.0;
-        let finished = 1.0 / 390.0;
+        let art = cottage();
+        let atlas_h = f64::from(art.atlas_size()[1]);
+        let padding = f64::from(art.padding());
+        let pitch = f64::from(art.pitch()[1]);
+        let half_built = (pitch + padding) / atlas_h;
+        let finished = padding / atlas_h;
         for (tick, row_y) in [
             (0u32, half_built),
             (29, half_built),
@@ -385,13 +449,13 @@ mod tests {
             let scene = frame(&sim, &camera, &Units::StandIn, tick);
             let quad = scene.houses[1];
             assert!(
-                (quad.uv_min[1] - row_y).abs() < EPS,
+                (f64::from(quad.uv_min[1]) - row_y).abs() < f64::from(EPS),
                 "tick {tick} draws row {}",
-                quad.uv_min[1] * 390.0
+                f64::from(quad.uv_min[1]) * atlas_h
             );
         }
         assert_eq!(
-            cottage().row(HouseState::Damaged),
+            art.row(HouseState::Damaged),
             Some(2),
             "the damaged row loads, no public damage field selects it yet"
         );
@@ -500,7 +564,7 @@ mod tests {
             Part::House(index) => {
                 // The drawn house list keeps the sim's house order.
                 let house = &sim.houses()[index];
-                house_depth(house.x, house.y, house.kind)
+                house_depth(house.x, house.y, house.kind.footprint())
             }
             Part::Unit(index) => {
                 let unit = &sim.units()[index];
@@ -558,5 +622,104 @@ mod tests {
             .iter()
             .any(|quad| quad.color == linear(GRASS_LIGHT));
         assert!(grass, "the light grass tile is in the palette");
+    }
+
+    /// The registry of the committed content: the cottage plus one slot per
+    /// house kind, every manifest read from the files in the repo.
+    fn registry() -> HouseArts {
+        let mut arts = HouseArts::new();
+        arts.set_cottage(cottage());
+        for (kind, text) in crate::house::BUILDING_MANIFESTS {
+            let manifest = HouseManifest::parse(text).expect("the committed manifest parses");
+            arts.set_kind(kind, manifest);
+        }
+        arts
+    }
+
+    /// A road row at `y = 6` with one house of every kind above it.
+    fn every_kind() -> Sim {
+        let mut sim = Sim::new(MAP_W, MAP_H);
+        for x in 0..MAP_W {
+            sim.apply(Command::PlaceRoad { x, y: 6 })
+                .expect("the road row fits");
+        }
+        for (kind, x, y) in [
+            (HouseKind::Warehouse, 0, 3),
+            (HouseKind::Farm, 4, 4),
+            (HouseKind::Mill, 7, 4),
+            (HouseKind::Bakery, 10, 4),
+            (HouseKind::Woodcutter, 13, 4),
+        ] {
+            sim.apply(Command::PlaceHouse { kind, x, y })
+                .expect("the house fits beside the road");
+        }
+        sim
+    }
+
+    #[test]
+    fn every_kind_draws_its_own_atlas_slot() {
+        let camera = IsoCamera::new(1280, 720);
+        let sim = every_kind();
+        let arts = registry();
+        let scene = build_with_arts(&sim, &camera, &Units::StandIn, &arts, 0);
+        assert_eq!(scene.houses.len(), 5);
+        assert_eq!(scene.house_atlases.len(), scene.houses.len());
+        for (index, house) in sim.houses().iter().enumerate() {
+            assert_eq!(
+                scene.house_atlases[index],
+                usize::from(house.kind.index()) + 1,
+                "{} draws its own atlas",
+                house.kind.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_kind_without_its_own_art_falls_back_to_the_cottage() {
+        let camera = IsoCamera::new(1280, 720);
+        let mut sim = Sim::new(MAP_W, MAP_H);
+        for x in 0..MAP_W {
+            sim.apply(Command::PlaceRoad { x, y: 6 })
+                .expect("the road row fits");
+        }
+        sim.apply(Command::PlaceHouse {
+            kind: HouseKind::Warehouse,
+            x: 0,
+            y: 3,
+        })
+        .expect("the warehouse fits beside the road");
+        let mut arts = HouseArts::new();
+        arts.set_cottage(cottage());
+        let scene = build_with_arts(&sim, &camera, &Units::StandIn, &arts, 0);
+        assert_eq!(scene.house_atlases, vec![0], "the cottage answers");
+        // The fallback keeps the footprint the sim reserves: three tiles wide.
+        let art = cottage();
+        let house = &sim.houses()[0];
+        let corners = footprint_screen(&camera, house.x, house.y, 3, 3);
+        let anchor = [
+            (corners[0][0] + corners[2][0]) * 0.5,
+            (corners[0][1] + corners[2][1]) * 0.5,
+        ];
+        let quad = scene.houses[0];
+        let pivot = [
+            quad.top_left[0] + art.pivot()[0] as f32,
+            quad.top_left[1] + art.pivot()[1] as f32,
+        ];
+        assert!(
+            (pivot[0] - anchor[0]).abs() < EPS && (pivot[1] - anchor[1]).abs() < EPS,
+            "the fallback pivot {pivot:?} sits on the 3x3 anchor {anchor:?}"
+        );
+    }
+
+    #[test]
+    fn the_cottage_builder_names_slot_zero_for_every_house() {
+        let camera = IsoCamera::new(1280, 720);
+        let sim = every_kind();
+        let scene = frame(&sim, &camera, &Units::StandIn, 0);
+        assert_eq!(scene.house_atlases.len(), scene.houses.len());
+        assert!(
+            scene.house_atlases.iter().all(|slot| *slot == 0),
+            "the plain builder draws every house from the cottage atlas"
+        );
     }
 }

@@ -15,10 +15,20 @@
 //! never chosen at runtime: a house that is no longer half built draws the
 //! finished cell. The damaged row exists in the atlas and in [`HouseManifest`]
 //! so a future public damage value can select it without a new asset.
+//!
+//! [`HouseArts`] is the registry on top of that: slot 0 holds the cottage and
+//! slot `kind.index() + 1` the art of one house kind, so a kind with its own
+//! building folder draws its own atlas and a kind without one falls back to
+//! the cottage. The registry holds manifests only; the atlas bytes live in the
+//! window binary, which uploads one sheet per slot.
 
+use kam2_sim::HouseKind;
 use serde_json::Value;
 
 use crate::soldier::{pair_at, ManifestError, SoldierManifest};
+
+/// House art slots: the cottage and one per house kind.
+pub const HOUSE_SLOTS: usize = 6;
 
 /// Which cell row of the cottage atlas a house draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +126,18 @@ impl HouseManifest {
         self.sprite.tile
     }
 
+    /// Transparent gutter around one cell, in pixels.
+    #[must_use]
+    pub const fn padding(&self) -> u32 {
+        self.sprite.padding
+    }
+
+    /// Cell pitch in atlas pixels: the cell plus its gutter on both sides.
+    #[must_use]
+    pub fn pitch(&self) -> [u32; 2] {
+        self.sprite.pitch()
+    }
+
     /// Ground anchor inside one cell, from its top-left.
     #[must_use]
     pub const fn pivot(&self) -> [u32; 2] {
@@ -172,9 +194,118 @@ impl HouseManifest {
     }
 }
 
+/// The house art registry: slot 0 holds the cottage, slot `kind.index() + 1`
+/// the manifest of one house kind.
+///
+/// The scene asks the registry which atlas a house draws from, so a kind with
+/// its own building folder draws its own art and a kind without one falls back
+/// to the cottage. Only manifests live here; the atlas bytes belong to the
+/// window binary, which uploads one sheet per slot.
+#[derive(Clone, Debug, Default)]
+pub struct HouseArts {
+    slots: Vec<Option<HouseManifest>>,
+}
+
+impl HouseArts {
+    /// An empty registry: no slot holds art yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            slots: vec![None; HOUSE_SLOTS],
+        }
+    }
+
+    /// Put the cottage manifest in slot 0, the fallback of every kind.
+    pub fn set_cottage(&mut self, manifest: HouseManifest) {
+        self.set_slot(0, manifest);
+    }
+
+    /// Put one kind's own manifest in the slot of that kind.
+    pub fn set_kind(&mut self, kind: HouseKind, manifest: HouseManifest) {
+        self.set_slot(usize::from(kind.index()) + 1, manifest);
+    }
+
+    /// The manifest of one slot, when that slot holds art.
+    #[must_use]
+    pub fn manifest(&self, slot: usize) -> Option<&HouseManifest> {
+        self.slots.get(slot).and_then(Option::as_ref)
+    }
+
+    /// The slot a kind draws from: its own when it has one, else the cottage.
+    /// `None` when neither the kind nor the cottage is loaded.
+    #[must_use]
+    pub fn slot_for(&self, kind: HouseKind) -> Option<usize> {
+        let own = usize::from(kind.index()) + 1;
+        if self.slots.get(own).and_then(Option::as_ref).is_some() {
+            Some(own)
+        } else if self.slots.first().and_then(Option::as_ref).is_some() {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    /// The art one kind draws: the slot, the manifest of that slot and whether
+    /// the manifest is the kind's own rather than the cottage fallback.
+    #[must_use]
+    pub fn resolve(&self, kind: HouseKind) -> Option<HouseArt<'_>> {
+        let slot = self.slot_for(kind)?;
+        let manifest = self.slots.get(slot).and_then(Option::as_ref)?;
+        Some(HouseArt {
+            slot,
+            manifest,
+            own: slot != 0,
+        })
+    }
+
+    /// Fill one slot; a slot outside the registry is ignored.
+    fn set_slot(&mut self, slot: usize, manifest: HouseManifest) {
+        if let Some(cell) = self.slots.get_mut(slot) {
+            *cell = Some(manifest);
+        }
+    }
+}
+
+/// The art one house kind draws: a slot, its manifest and where the manifest
+/// came from.
+#[derive(Clone, Copy, Debug)]
+pub struct HouseArt<'a> {
+    /// The atlas slot the kind draws from.
+    pub slot: usize,
+    /// The manifest of that slot.
+    pub manifest: &'a HouseManifest,
+    /// `true` when the manifest is the kind's own, `false` for the cottage.
+    pub own: bool,
+}
+
 /// The committed manifest, for tests that must catch content drift.
 #[cfg(test)]
 pub const MANIFEST_JSON: &str = include_str!("../../../content/kam2/house/manifest.json");
+
+/// The committed manifest of every house kind, beside the cottage.
+#[cfg(test)]
+pub const BUILDING_MANIFESTS: [(HouseKind, &str); 5] = [
+    (
+        HouseKind::Warehouse,
+        include_str!("../../../content/kam2/buildings/warehouse/manifest.json"),
+    ),
+    (
+        HouseKind::Farm,
+        include_str!("../../../content/kam2/buildings/farm/manifest.json"),
+    ),
+    (
+        HouseKind::Mill,
+        include_str!("../../../content/kam2/buildings/mill/manifest.json"),
+    ),
+    (
+        HouseKind::Bakery,
+        include_str!("../../../content/kam2/buildings/bakery/manifest.json"),
+    ),
+    (
+        HouseKind::Woodcutter,
+        include_str!("../../../content/kam2/buildings/woodcutter/manifest.json"),
+    ),
+];
 
 #[cfg(test)]
 mod tests {
@@ -186,30 +317,99 @@ mod tests {
         HouseManifest::parse(MANIFEST_JSON).expect("the committed manifest parses")
     }
 
+    /// The committed manifest as raw JSON: the authority every number below
+    /// is derived from, so the test never repeats a hand-typed constant.
+    fn manifest_json() -> Value {
+        serde_json::from_str(MANIFEST_JSON).expect("the committed manifest is JSON")
+    }
+
+    /// One unsigned number of the committed JSON.
+    fn number(json: &Value, name: &str) -> u32 {
+        json.get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0)
+    }
+
+    /// One `[x, y]` pair of the committed JSON.
+    fn pair(json: &Value, name: &str) -> [u32; 2] {
+        let values = json
+            .get(name)
+            .and_then(Value::as_array)
+            .expect("the manifest holds the pair");
+        [
+            u32::try_from(values[0].as_u64().unwrap_or(0)).unwrap_or(0),
+            u32::try_from(values[1].as_u64().unwrap_or(0)).unwrap_or(0),
+        ]
+    }
+
+    /// The state rows the committed JSON lists.
+    fn state_rows(json: &Value) -> u32 {
+        u32::try_from(
+            json.get("anims")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+        )
+        .unwrap_or(0)
+    }
+
     #[test]
     fn the_committed_manifest_parses_into_the_cottage_grid() {
         let manifest = manifest();
+        let json = manifest_json();
+        let tile = [number(&json, "tile_w"), number(&json, "tile_h")];
+        let padding = number(&json, "padding");
+        let rows = state_rows(&json);
+        let atlas = [
+            tile[0] + padding * 2,
+            rows * (tile[1] + padding * 2),
+        ];
+
         assert_eq!(manifest.id(), "house.cottage");
         assert_eq!(manifest.atlas(), "house.cottage.atlas.png");
         assert_eq!(manifest.mask_atlas(), None, "this look pass ships no mask");
-        assert_eq!(manifest.atlas_size(), [130, 390]);
-        assert_eq!(manifest.tile(), [128, 128]);
-        assert_eq!(manifest.pivot(), [64, 95]);
-        assert_eq!(manifest.footprint(), [2, 2]);
+        assert_eq!(manifest.tile(), tile);
+        assert_eq!(manifest.padding(), padding);
+        assert_eq!(manifest.pitch(), [tile[0] + padding * 2, tile[1] + padding * 2]);
+        assert_eq!(manifest.atlas_size(), atlas);
+        assert_eq!(manifest.pivot(), pair(&json, "pivot"));
+        assert_eq!(manifest.footprint(), pair(&json, "footprint"));
         assert_eq!(manifest.columns(), 1, "buildings do not rotate");
-        assert_eq!(manifest.rows(), 3, "one row per build state");
+        assert_eq!(manifest.rows(), rows, "one row per build state");
         assert_eq!(manifest.row(HouseState::Finished), Some(0));
         assert_eq!(manifest.row(HouseState::HalfBuilt), Some(1));
         assert_eq!(manifest.row(HouseState::Damaged), Some(2));
+    }
 
-        let [origin, size] = manifest
-            .cell_uv(1)
-            .expect("the half-built row is inside the grid");
-        assert!((origin[0] - 1.0 / 130.0).abs() < EPS, "{origin:?}");
-        assert!((origin[1] - 131.0 / 390.0).abs() < EPS, "{origin:?}");
-        assert!((size[0] - 128.0 / 130.0).abs() < EPS);
-        assert!((size[1] - 128.0 / 390.0).abs() < EPS);
-        assert_eq!(manifest.cell_uv(3), None, "the atlas holds three rows");
+    #[test]
+    fn the_cell_uv_follows_the_committed_grid() {
+        let manifest = manifest();
+        let json = manifest_json();
+        let tile = [number(&json, "tile_w"), number(&json, "tile_h")];
+        let padding = number(&json, "padding");
+        let rows = state_rows(&json);
+        let atlas = [
+            f64::from(tile[0] + padding * 2),
+            f64::from(rows * (tile[1] + padding * 2)),
+        ];
+        for row in 0..rows {
+            let [origin, size] = manifest.cell_uv(row).expect("the row is inside the grid");
+            let expected_x = f64::from(padding) / atlas[0];
+            let expected_y =
+                f64::from(row * (tile[1] + padding * 2) + padding) / atlas[1];
+            assert!(
+                (f64::from(origin[0]) - expected_x).abs() < f64::from(EPS),
+                "row {row} origin {origin:?}"
+            );
+            assert!(
+                (f64::from(origin[1]) - expected_y).abs() < f64::from(EPS),
+                "row {row} origin {origin:?}"
+            );
+            assert!((f64::from(size[0]) - f64::from(tile[0]) / atlas[0]).abs() < f64::from(EPS));
+            assert!((f64::from(size[1]) - f64::from(tile[1]) / atlas[1]).abs() < f64::from(EPS));
+        }
+        assert_eq!(manifest.cell_uv(rows), None, "the atlas holds no row past the last");
     }
 
     #[test]
@@ -268,14 +468,66 @@ mod tests {
     #[test]
     fn the_pivot_puts_the_footprint_centre_on_the_ground_pixel() {
         let manifest = manifest();
+        let pivot = manifest.pivot();
         let anchor = [640.0, 360.0];
         let top_left = manifest.top_left(anchor);
-        assert_eq!(top_left, [576.0, 265.0], "the pivot is 64 x 95 inside");
-        assert_eq!(manifest.size(), [128.0, 128.0]);
-        let pivot = [
-            top_left[0] + manifest.pivot()[0] as f32,
-            top_left[1] + manifest.pivot()[1] as f32,
+        assert_eq!(
+            top_left,
+            [
+                anchor[0] - pivot[0] as f32,
+                anchor[1] - pivot[1] as f32,
+            ],
+            "the cell starts that far above the anchor"
+        );
+        assert_eq!(
+            manifest.size(),
+            [manifest.tile()[0] as f32, manifest.tile()[1] as f32]
+        );
+        let ground = [
+            top_left[0] + pivot[0] as f32,
+            top_left[1] + pivot[1] as f32,
         ];
-        assert_eq!(pivot, anchor, "the footprint centre sits on the anchor");
+        assert_eq!(ground, anchor, "the footprint centre sits on the anchor");
+    }
+
+    #[test]
+    fn every_committed_building_manifest_matches_the_sim_footprint() {
+        for (kind, text) in BUILDING_MANIFESTS {
+            let manifest = HouseManifest::parse(text).expect("the committed manifest parses");
+            let (w, h) = kind.footprint();
+            assert_eq!(
+                manifest.footprint(),
+                [
+                    u32::try_from(w).unwrap_or(0),
+                    u32::try_from(h).unwrap_or(0),
+                ],
+                "the {} manifest must draw the footprint the sim reserves",
+                kind.name()
+            );
+            assert_eq!(manifest.columns(), 1, "{} does not rotate", kind.name());
+        }
+    }
+
+    #[test]
+    fn the_registry_serves_a_kind_its_own_slot_or_the_cottage() {
+        let mut arts = HouseArts::new();
+        assert_eq!(arts.slot_for(HouseKind::Farm), None, "no art is loaded yet");
+        assert!(arts.resolve(HouseKind::Farm).is_none());
+
+        arts.set_cottage(manifest());
+        let cottage = arts.resolve(HouseKind::Farm).expect("the cottage answers");
+        assert_eq!(cottage.slot, 0);
+        assert!(!cottage.own, "a kind without its own art draws the cottage");
+
+        let farm = HouseManifest::parse(BUILDING_MANIFESTS[1].1)
+            .expect("the committed farm manifest parses");
+        arts.set_kind(HouseKind::Farm, farm);
+        let own = arts.resolve(HouseKind::Farm).expect("the farm answers");
+        assert_eq!(own.slot, usize::from(HouseKind::Farm.index()) + 1);
+        assert!(own.own, "the farm draws its own atlas");
+        let mill = arts.resolve(HouseKind::Mill).expect("the mill falls back");
+        assert_eq!(mill.slot, 0, "the mill has no art of its own");
+        assert!(!mill.own);
+        assert!(arts.manifest(0).is_some(), "the cottage stays in slot zero");
     }
 }

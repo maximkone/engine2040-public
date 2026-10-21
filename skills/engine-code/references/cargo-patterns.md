@@ -42,7 +42,7 @@ Confirm: the build starts with a `Compiling` line.
 
 Symptom: a unit test asserts the wrong value.
 Fix: correct the expected value only if the code is right. Otherwise fix the code.
-Confirm: `cargo test` prints a passing result, exit 0.
+Confirm: `node tools/gh-check.mjs cargo test -p <crate> --lib <filter>` prints a passing result, exit 0.
 
 ## TOML parse failure from `--config`
 

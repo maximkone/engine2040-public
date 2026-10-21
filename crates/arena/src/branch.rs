@@ -285,6 +285,9 @@ impl BranchSet {
             .map_or(1, std::num::NonZeroUsize::get)
             .clamp(1, count);
         let chunk = count.div_ceil(workers);
+        // A browser tab has no threads: the wasm build runs the same batches
+        // in order on this thread, and each receipt still lands in its slot.
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::scope(|scope| {
             for (batch, slots) in self.branches.chunks(chunk).zip(outcomes.chunks_mut(chunk)) {
                 scope.spawn(move || {
@@ -294,6 +297,12 @@ impl BranchSet {
                 });
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        for (batch, slots) in self.branches.chunks(chunk).zip(outcomes.chunks_mut(chunk)) {
+            for (branch, slot) in batch.iter().zip(slots.iter_mut()) {
+                *slot = Some(run_branch(fork, ticks, branch));
+            }
+        }
         // Merge: one refusal drops the whole set, so a caller never reads a
         // short vector as a full sweep.
         let mut receipts = Vec::with_capacity(count);

@@ -2,7 +2,9 @@
 // Skills index parity and skill-file hygiene: header N matches skills/*/SKILL.md,
 // rows cover folders and name no missing folder, frontmatter is loadable and
 // trigger-shaped, files stay short, and cites cannot rot (no path:line, every
-// cited repo path exists unless the line says "cut").
+// cited repo path exists unless the line says "cut", and a "cut" line names no
+// path that exists). No SKILL.md tells the reader to run plain cargo test or
+// clippy: those go through node tools/gh-check.mjs.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -82,6 +84,31 @@ export function citedPaths(line) {
   return out;
 }
 
+// The line without backticked spans, so a path such as crates/combat/src/cut.rs is not the word "cut".
+export function prose(line) {
+  return line.replace(/`[^`]*`/g, " ");
+}
+
+// Cite errors for one line (no file prefix). A "cut" line must name no path that exists;
+// any other line must name no path that is missing. A git-ignored output dir is exempt.
+export function citeErrors(line, exists = (p) => existsSync(join(ROOT, p))) {
+  if (/git-ignored/i.test(line)) return [];
+  const cut = /\bcut\b/i.test(prose(line));
+  const errs = [];
+  for (const p of citedPaths(line)) {
+    const there = exists(p);
+    if (cut && there) errs.push(`says cut but ${p} exists`);
+    if (!cut && !there) errs.push(`missing ${p}`);
+  }
+  return errs;
+}
+
+// A line that tells the reader to run a plain cargo test or clippy (not through gh-check).
+export function plainCargoLine(line) {
+  if (line.includes("node tools/gh-check.mjs")) return false;
+  return /^\s*(?:[-*+]\s+|\d+\.\s+)?`?cargo (?:test|clippy)\b/.test(line);
+}
+
 function markdownFiles(dir) {
   const out = [];
   for (const n of readdirSync(dir)) {
@@ -137,18 +164,45 @@ test("every SKILL.md: loadable frontmatter, name = folder, trigger-shaped descri
   assert.deepEqual(errs, [], errs.join("\n"));
 });
 
-test("skill files never cite path:line and every cited repo path exists (or the line says cut or git-ignored)", () => {
+test("skill files never cite path:line; every cited repo path exists, and a cut line names none that exists", () => {
   const errs = [];
   for (const n of listSkills()) {
     for (const file of markdownFiles(join(DIR, n))) {
       const rel = file.slice(ROOT.length + 1);
       readFileSync(file, "utf8").split(/\r?\n/).forEach((line, i) => {
         for (const c of lineCites(line)) errs.push(`${rel}:${i + 1} line cite ${c}`);
-        // "cut" marks a removed file kept for history; "git-ignored" marks an output dir.
-        if (/\bcut\b|git-ignored/i.test(line)) return;
-        for (const p of citedPaths(line)) if (!existsSync(join(ROOT, p))) errs.push(`${rel}:${i + 1} missing ${p}`);
+        for (const e of citeErrors(line)) errs.push(`${rel}:${i + 1} ${e}`);
       });
     }
+  }
+  assert.deepEqual(errs, [], errs.join("\n"));
+});
+
+test("fixture: a cut line that names an existing path fails; a missing path on a cut line passes", () => {
+  const exists = (p) => p === "crates/combat/src/cut.rs";
+  assert.deepEqual(citeErrors("Limb loss: the cut tables `crates/combat/src/cut.rs`", exists), ["says cut but crates/combat/src/cut.rs exists"]);
+  assert.deepEqual(citeErrors("The old file was cut; `crates/gone/x.rs` is gone.", exists), []);
+  assert.deepEqual(citeErrors("Owns `crates/combat/src/cut.rs`", exists), []);
+  assert.deepEqual(citeErrors("Owns `crates/gone/x.rs`", exists), ["missing crates/gone/x.rs"]);
+});
+
+test("fixture: a line that runs plain cargo test or clippy fails; a gh-check line and cargo check pass", () => {
+  assert.equal(plainCargoLine("- `cargo test -p engine-net --lib x`"), true);
+  assert.equal(plainCargoLine("cargo clippy -p engine-net --all-targets"), true);
+  assert.equal(plainCargoLine("  1. `cargo test --locked -p x`"), true);
+  assert.equal(plainCargoLine("- `node tools/gh-check.mjs cargo test -p engine-net --lib x`"), false);
+  assert.equal(plainCargoLine("- `cargo check -p engine-net` to iterate"), false);
+  assert.equal(plainCargoLine("A plain `cargo test` is denied in OpenCode."), false);
+});
+
+test("no SKILL.md line tells the reader to run plain cargo test or clippy (use node tools/gh-check.mjs)", () => {
+  const errs = [];
+  for (const n of listSkills()) {
+    const file = join(DIR, n, "SKILL.md");
+    const rel = file.slice(ROOT.length + 1);
+    readFileSync(file, "utf8").split(/\r?\n/).forEach((line, i) => {
+      if (plainCargoLine(line)) errs.push(`${rel}:${i + 1} plain cargo test/clippy: run it as node tools/gh-check.mjs cargo ...`);
+    });
   }
   assert.deepEqual(errs, [], errs.join("\n"));
 });

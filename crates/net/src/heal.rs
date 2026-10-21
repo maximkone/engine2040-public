@@ -20,12 +20,14 @@
 //! resimulates from the authoritative snapshot
 //! ([`Client::resync_from_authority`](crate::session::Client::resync_from_authority)).
 //! Past the shared catalog budget (4 attempts) the slot quarantines: reclaim
-//! and resync refuse with [`NetHealError::Quarantined`] until the operator
-//! verifies recovery and calls [`NetHeal::reset_slot`].
+//! and resync refuse with [`NetHealError::Quarantined`] until a verified
+//! recovery is on file ([`NetHeal::verify_recovery`]) and
+//! [`NetHeal::reset_slot`] releases the slot.
 
 use std::collections::BTreeMap;
 
 use engine_observe::heal::{HealError, HealKind};
+use engine_observe::recovery::{HealObservation, HealValidation, ResetOutcome};
 use engine_observe::supervisor::{AppliedHeal, HealTapeRecord, SupervisedDecision, Supervisor};
 use engine_observe::{EventCode, RingBuffer};
 
@@ -323,12 +325,51 @@ impl NetHeal {
         self.supervisor.apply_tick_boundary(boundary_tick)
     }
 
+    /// Prove a resync: `last_good` is the authoritative state digest, `healed`
+    /// the digest the client holds after applying it. Equal digests are a
+    /// verified recovery and clear the shared budget; different digests are a
+    /// failed attempt and spend it. `attempt` is the one-based attempt the
+    /// plan carried.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetHealError::NotRegistered`] when no tape row holds `attempt`.
+    pub fn verify_recovery(
+        &mut self,
+        attempt: u32,
+        last_good: u64,
+        healed: u64,
+    ) -> Result<HealValidation, NetHealError> {
+        self.supervisor
+            .verify_heal(
+                NET_FAULT,
+                attempt,
+                &HealObservation::State {
+                    before_digest: last_good,
+                    after_digest: healed,
+                },
+                &mut self.ring,
+            )
+            .map_err(map_heal_error)
+    }
+
     /// Clear the shared budget and the slot quarantine after a verified
-    /// recovery (reclaim plus snapshot convergence). History stays: tape and
-    /// notices are evidence, not budget. Returns true when the slot was
-    /// quarantined.
+    /// recovery (see [`Self::verify_recovery`]). The supervisor refuses the
+    /// budget reset without a green proof on the tape: a refused reset leaves
+    /// the slot quarantined. History stays: tape and notices are evidence,
+    /// not budget. Returns true when the slot was quarantined and is released.
     pub fn reset_slot(&mut self, slot: u8) -> bool {
-        self.supervisor.reset(NET_FAULT);
+        if self.supervisor.reset(NET_FAULT) != ResetOutcome::Cleared {
+            return false;
+        }
+        self.quarantined.remove(&slot).is_some()
+    }
+
+    /// Operator escape hatch: clear the shared budget and the slot quarantine
+    /// with no proof on file. Loud: the supervisor logs the reset without
+    /// proof in its events. Returns true when the slot was quarantined.
+    pub fn reset_slot_unverified(&mut self, slot: u8) -> bool {
+        self.supervisor.reset_unverified(NET_FAULT);
         self.quarantined.remove(&slot).is_some()
     }
 
@@ -620,6 +661,12 @@ mod tests {
             "rejoined client must converge to server truth"
         );
         // Verified recovery clears the budget; history stays as evidence.
+        let healed = client.checkpoints().last().expect("tick").hash;
+        let last_good = server.checkpoints().last().expect("tick").hash;
+        assert_eq!(
+            server.heal_verify_recovery(plan.attempt, last_good, healed),
+            Ok(HealValidation::Recovered)
+        );
         let tape_before = server.heal().tape_len();
         server.heal_reset_slot(home);
         assert_eq!(server.heal().attempts(), 0);
@@ -741,6 +788,11 @@ mod tests {
             server.checkpoints(),
             "desynced client must converge to server truth"
         );
+        let healed = client.checkpoints().last().expect("tick").hash;
+        assert_eq!(
+            server.heal_verify_recovery(plan.attempt, snapshot.hash, healed),
+            Ok(HealValidation::Recovered)
+        );
         server.heal_reset_slot(0);
         assert_eq!(server.heal().attempts(), 0);
         println!(
@@ -823,8 +875,12 @@ mod tests {
             .expect("slot 1 submits");
         server.tick().expect("match continues");
         assert_eq!(server.reclaim_slot(TOKEN_B), Ok(1));
-        // Verified recovery resets the slot; history stays as evidence.
-        assert!(server.heal_reset_slot(0));
+        // Nothing converged for slot 0, so no proof is on file: the gated
+        // reset refuses and the slot stays held with its budget spent.
+        assert!(!server.heal_reset_slot(0));
+        assert!(server.is_slot_quarantined(0));
+        // The operator escape hatch releases it, loudly; history stays as evidence.
+        assert!(server.heal_reset_slot_unverified(0));
         assert!(!server.is_slot_quarantined(0));
         assert_eq!(server.heal().attempts(), 0);
         assert_eq!(server.heal_notices().len(), 1);

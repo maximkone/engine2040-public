@@ -1,0 +1,17 @@
+{
+  "provider": "ovh-ai-endpoints",
+  "model": "stable-diffusion-xl-base-v10",
+  "endpoint": "https://stable-diffusion-xl.endpoints.kepler.ai.cloud.ovh.net/api/text2image",
+  "cost": "0 per request, anonymous, 2 requests per minute per IP",
+  "licence": "OpenRAIL++-M (Stability AI Community Licence)",
+  "commercial_use": true,
+  "served_from": "FR/EU",
+  "prompt": "front view full body character sheet of a lean armored orc slinger standing straight facing the viewer, arms out from the sides, black iron and bronze armor with crimson sash, plain mid grey background, even flat lighting, full body head to feet, stylized video game concept art, separate readable limbs",
+  "negative_prompt": "text, watermark, extra limbs, extra fingers, blurry, lowres, jpeg artifacts, photorealistic",
+  "size": "1024x1024",
+  "output": "content/generated/concepts/ashkin_gunner_04.jpg",
+  "bytes": 899366,
+  "purpose": "reference for the base mesh only: never a shipped asset, and the shipped mesh is rebuilt by us",
+  "verdict": "the first input with every limb separate: both arms away from the body, legs apart, a shield clear of the silhouette, a plain background and a standing pose. Attempt 2 asked for a hulking orc and got a mass, because hulking is a shape the generator cannot separate. This one asks for the opposite and gets it. This is the input the lane wants.",
+  "compared_to": "content/generated/concepts/ashkin_gunner_02.jpg"
+}

@@ -172,3 +172,9 @@ Plan: `docs/plan/build-cpu.md`. One pool of compile slots for every cargo on the
   F2P: no nightly numbers.
   P2P: the default toolchain and profiles unchanged.
   needs: none.
+- [ ] OPT45 build: the local release build is thin LTO, the shipped artifact keeps fat LTO. `[profile.release]` is now `lto = "thin"`, `codegen-units = 16`; `[profile.ship]` keeps `lto = "fat"`, `codegen-units = 1` and is what `tools/ship.mjs` and the CI release-proof leg build, so the packaged shape does not change. Tier A. Size S. Owns `Cargo.toml`, `tools/ship.mjs`, `tools/proof.mjs`, `tools/proof.test.mjs`, `tools/ci.test.mjs`, `.github/workflows/ci.yml`.
+  Accept: on the GitHub runner, the same line (`cargo test -p engine2040 --release --test proof_cli default_and_max_seed`) compiles the same 22 crates from scratch in both shapes and passes the golden hash in both - thin 38.08 s (run 39576029326) vs fat 58.84 s (run 39576660515); `node --test tools/ci.test.mjs tools/proof.test.mjs` passes; a 300-frame arena run on the thin binary keeps the 60 fps floor (`tools/product-bar.json`, never lowered).
+  F2P: every local `--release` build pays the fat-LTO one-unit relink (the arena release build took 11 m 41 s on this PC, ~9.7 min of it in the relink).
+  P2P: the golden hash `d57b5c8ae3096614` is the same under both shapes; the packaged artifact still builds fat LTO with one codegen unit.
+  needs: none.
+  Progress 2026-10-21: the profile change and both runner proofs are in and the golden hash holds in both shapes; the 300-frame arena fps check on the thin binary is still open (the local thin arena build was queued behind other sessions' cargo).

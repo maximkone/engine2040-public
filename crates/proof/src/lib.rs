@@ -24,6 +24,8 @@ pub mod chaos;
 pub mod crowd;
 pub mod dataset;
 /// Differential receipt comparison: two builds, one curated scenario list.
+/// Native only: it reads and writes receipt files and runs the builds.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod differential;
 /// Pillars receipt: the sample's distilled net, AI write chain and museum.
 pub mod fb_pillars;

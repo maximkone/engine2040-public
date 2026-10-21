@@ -1,11 +1,12 @@
-//! KAM6: the first playable kam2 match, against the AI mayor.
+//! KAM10: the play window draws every house kind from its own atlas.
 //!
-//! Opens one 1280x720 window, plays the 16x12 start village at a fixed 10 Hz
-//! with the AI mayor in the side-1 seat ([`AiMatch::village`]), draws the field,
-//! the houses from the packed cottage atlas and both armies from the packed
-//! soldier atlas, and saves a PNG receipt on F12 and again at frame 120, then
-//! exits by itself. The procedural stand-in is drawn only when the soldier atlas
-//! file is missing; the receipt names the house source it used.
+//! Opens one 1280x720 window, plays the demo village at a fixed 10 Hz, draws
+//! the field, the houses from the building atlas of their own kind and both
+//! armies from the packed soldier atlas, and saves a PNG receipt on F12 and
+//! again at frame 120, then exits by itself. The demo village is fixed: one
+//! road, eleven houses and four swordsmen, so one receipt shows all five
+//! house kinds. The procedural stand-in is drawn only when the soldier atlas
+//! file is missing; the receipt names the atlas every house kind drew from.
 //!
 //! Controls: W/S/D and the arrow keys pan; A pans left and, on the press, orders
 //! the nearest side-0 swordsman onto its nearest enemy (the same key carries
@@ -23,8 +24,8 @@ use std::time::Duration;
 
 use engine_render::kam2_iso::IsoCamera;
 use engine_ui::HudFrame;
-use kam2_game::{hud_frame, scene, screen_to_tile, script, AiMatch, MAP_H, MAP_W};
-use kam2_sim::{Command, HouseKind, Refusal, UnitKind};
+use kam2_game::{hud_frame, scene, screen_to_tile, script, MAP_H, MAP_W};
+use kam2_sim::{Command, HouseKind, Refusal, Sim, UnitKind};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -32,7 +33,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use art::{Art, HouseArt};
+use art::{slot_of, Art, BuildingArts, HOUSE_KINDS};
 use gpu::{Gpu, Outcome};
 
 /// Window width in logical pixels.
@@ -49,6 +50,29 @@ const MAX_CATCH_UP: u32 = 4;
 const MAX_EMPTY_FRAMES: u32 = 240;
 /// Camera pan speed in world units per second.
 const PAN_SPEED: f32 = 6.0;
+/// Row of the one east-west road of the demo village.
+const ROAD_ROW: i32 = 6;
+/// The demo village: side, kind and top-left tile of every house. Five kinds on
+/// each side, so one receipt shows all five kinds; every footprint touches the
+/// road, so every house is linked to its own warehouse from tick zero.
+const DEMO_HOUSES: [(u8, HouseKind, i32, i32); 11] = [
+    (0, HouseKind::Warehouse, 0, 3),
+    (0, HouseKind::Farm, 3, 4),
+    (0, HouseKind::Mill, 5, 4),
+    (0, HouseKind::Bakery, 7, 4),
+    (0, HouseKind::Woodcutter, 9, 4),
+    (1, HouseKind::Warehouse, 0, 7),
+    (1, HouseKind::Farm, 4, 7),
+    (1, HouseKind::Mill, 6, 7),
+    (1, HouseKind::Bakery, 8, 7),
+    (1, HouseKind::Woodcutter, 10, 7),
+    (1, HouseKind::Farm, 12, 7),
+];
+/// The demo armies: side and tile of every swordsman.
+const DEMO_UNITS: [(u8, i32, i32); 4] = [(0, 12, 5), (0, 14, 5), (1, 12, 9), (1, 14, 9)];
+/// Ticks the demo village plays before the first frame, so every house is past
+/// its build time and draws its finished cell.
+const STARTUP_TICKS: u32 = 60;
 
 /// Why the play window failed.
 #[derive(Debug)]
@@ -77,7 +101,7 @@ enum PlayError {
     Art(String),
     /// An atlas PNG did not decode.
     Image(String),
-    /// The start village no longer fits its fixed layout.
+    /// The demo village no longer fits its fixed layout.
     Match(Refusal),
     /// The PNG could not be written.
     Io(std::io::Error),
@@ -100,7 +124,7 @@ impl std::fmt::Display for PlayError {
             Self::Hud(error) => write!(f, "hud pass: {error}"),
             Self::Art(error) => write!(f, "sprite art: {error}"),
             Self::Image(error) => write!(f, "atlas png: {error}"),
-            Self::Match(refusal) => write!(f, "start village refused: {refusal:?}"),
+            Self::Match(refusal) => write!(f, "demo village refused: {refusal:?}"),
             Self::Io(error) => write!(f, "io: {error}"),
             Self::NoFrame => write!(f, "no surface frame was presented"),
         }
@@ -115,7 +139,6 @@ impl std::error::Error for PlayError {
             Self::Surface(error) => Some(error),
             Self::Adapter(error) => Some(error),
             Self::Device(error) => Some(error),
-            Self::Hud(error) => Some(error),
             Self::Io(error) => Some(error),
             Self::NoSrgbFormat
             | Self::Readback(_)
@@ -132,11 +155,16 @@ impl std::error::Error for PlayError {
 /// One automatic receipt: what the captured frame drew and where it went.
 #[derive(Clone, Debug)]
 struct Receipt {
-    /// House cells the frame drew from the cottage atlas.
+    /// House kinds the frame drew.
+    kinds: usize,
+    /// House cells the frame drew.
     houses: usize,
-    /// `atlas`, the house art path this run took.
-    source: &'static str,
+    /// The PNG the frame was written to.
     png: PathBuf,
+    /// Size of that PNG in bytes.
+    bytes: usize,
+    /// The atlas every house kind drew from.
+    sources: String,
 }
 
 /// Which pan directions are held right now; screen space, y down.
@@ -168,9 +196,9 @@ fn axis(positive: bool, negative: bool) -> f32 {
 struct Play {
     window: Arc<Window>,
     gpu: Gpu,
-    march: AiMatch,
+    sim: Sim,
     art: Art,
-    house_art: HouseArt,
+    arts: BuildingArts,
     camera: IsoCamera,
     paused: bool,
     selected: HouseKind,
@@ -187,28 +215,44 @@ struct Play {
 }
 
 impl Play {
-    /// Build the start village, load the soldier and cottage art and open the
+    /// Build the demo village, load the soldier and house art and open the
     /// surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlayError`] when an atlas is missing or broken, when the demo
+    /// village no longer fits its fixed layout, or when the GPU refuses the
+    /// window.
     fn new(
         window: Arc<Window>,
         auto_png: PathBuf,
         f12_png: PathBuf,
         art_dir: &Path,
         house_dir: &Path,
+        buildings_dir: &Path,
     ) -> Result<Self, PlayError> {
         let art = Art::load(art_dir)?;
-        let house_art = HouseArt::load(house_dir)?;
-        let gpu = Gpu::new(Arc::clone(&window), art.sheet(), house_art.sheet())?;
-        let march = AiMatch::village().map_err(PlayError::Match)?;
+        let mut arts = BuildingArts::new(house_dir, buildings_dir);
+        arts.load_all()?;
+        let mut gpu = Gpu::new(Arc::clone(&window), art.sheet())?;
+        for slot in 0..kam2_game::HOUSE_SLOTS {
+            if let Some(sheet) = arts.sheet(slot) {
+                gpu.set_house_sheet(slot, sheet);
+            }
+        }
+        let mut sim = demo_village()?;
+        for _ in 0..STARTUP_TICKS {
+            sim.tick();
+        }
         let size = window.inner_size();
         let camera = IsoCamera::new(size.width.max(1), size.height.max(1));
         let now = engine_clock::now();
         Ok(Self {
             window,
             gpu,
-            march,
+            sim,
             art,
-            house_art,
+            arts,
             camera,
             paused: false,
             selected: HouseKind::Warehouse,
@@ -273,11 +317,14 @@ impl Play {
             "OFF MAP".clone_into(&mut self.notice);
             return;
         };
-        match self.march.order(Command::PlaceHouse {
-            kind: self.selected,
-            x,
-            y,
-        }) {
+        match self
+            .sim
+            .apply(Command::PlaceHouse {
+                kind: self.selected,
+                x,
+                y,
+            })
+        {
             Ok(()) => {
                 self.notice = format!("PLACED {}", self.selected.name().to_ascii_uppercase());
             }
@@ -289,11 +336,11 @@ impl Play {
 
     /// Field one swordsman for `side` on the nearest free tile.
     fn spawn(&mut self, side: u8) {
-        let Some((x, y)) = script::spawn_tile(self.march.sim(), side) else {
+        let Some((x, y)) = script::spawn_tile(&self.sim, side) else {
             "NO ROOM".clone_into(&mut self.notice);
             return;
         };
-        match self.march.order_for(
+        match self.sim.apply_for(
             side,
             Command::SpawnUnit {
                 kind: UnitKind::Swordsman,
@@ -311,11 +358,11 @@ impl Play {
 
     /// The A order: the nearest side-0 swordsman attacks its nearest side-1 enemy.
     fn attack(&mut self) {
-        let Some((id, target)) = script::nearest_enemy(self.march.sim(), 0) else {
+        let Some((id, target)) = script::nearest_enemy(&self.sim, 0) else {
             "NO TARGET".clone_into(&mut self.notice);
             return;
         };
-        match self.march.order(Command::Attack { id, target }) {
+        match self.sim.apply_for(0, Command::Attack { id, target }) {
             Ok(()) => self.notice = format!("ATTACK {id}->{target}"),
             Err(refusal) => {
                 self.notice = format!("REFUSED {refusal:?}").to_ascii_uppercase();
@@ -347,7 +394,7 @@ impl Play {
         while due >= TICK && steps < MAX_CATCH_UP {
             self.last_tick += TICK;
             if !self.paused {
-                self.march.advance(1);
+                self.sim.tick();
             }
             steps += 1;
             due = now.saturating_sub(self.last_tick);
@@ -362,18 +409,18 @@ impl Play {
         let now = engine_clock::now();
         self.pan_camera(now);
         self.advance_ticks(now);
-        let tick = self.march.sim().ticks();
-        let frame_scene = scene::build_with(
-            self.march.sim(),
+        let tick = self.sim.ticks();
+        let frame_scene = scene::build_with_arts(
+            &self.sim,
             &self.camera,
             self.art.units(),
-            self.house_art.houses(),
+            self.arts.registry(),
             tick,
         );
         let hud: HudFrame = hud_frame(
             self.gpu.width(),
             self.gpu.height(),
-            self.march.sim(),
+            &self.sim,
             self.paused,
             self.selected,
             &self.notice,
@@ -404,13 +451,15 @@ impl Play {
                 self.empty_frames = 0;
                 if auto {
                     Ok(Some(Receipt {
+                        kinds: kinds_in(&self.sim),
                         houses: frame_scene.houses.len(),
-                        source: self.house_art.source(),
                         png: capture.png,
+                        bytes: capture.bytes,
+                        sources: sources_line(&self.arts),
                     }))
                 } else {
                     println!(
-                        "KAM2PLAY F12 hud={} units={} unit_source={} png={} bytes={}",
+                        "KAM10 F12 hud={} units={} unit_source={} png={} bytes={}",
                         capture.hud_draws,
                         frame_scene.units.len(),
                         self.art.source(),
@@ -426,12 +475,63 @@ impl Play {
     }
 }
 
+/// The demo village: one road, eleven houses of five kinds on each side and
+/// four swordsmen.
+///
+/// # Errors
+///
+/// Returns the first [`Refusal`] when the fixed layout no longer fits the map
+/// or the stock.
+fn demo_village() -> Result<Sim, Refusal> {
+    let mut sim = Sim::new(MAP_W, MAP_H);
+    for x in 0..MAP_W {
+        sim.apply(Command::PlaceRoad { x, y: ROAD_ROW })?;
+    }
+    for (side, kind, x, y) in DEMO_HOUSES {
+        sim.apply_for(side, Command::PlaceHouse { kind, x, y })?;
+    }
+    for (side, x, y) in DEMO_UNITS {
+        sim.apply_for(
+            side,
+            Command::SpawnUnit {
+                kind: UnitKind::Swordsman,
+                side,
+                x,
+                y,
+            },
+        )?;
+    }
+    Ok(sim)
+}
+
+/// How many house kinds the village holds.
+fn kinds_in(sim: &Sim) -> usize {
+    let mut kinds: Vec<HouseKind> = sim.houses().iter().map(|house| house.kind).collect();
+    kinds.sort_by_key(|kind| kind.index());
+    kinds.dedup();
+    kinds.len()
+}
+
+/// The atlas every house kind drew from: the cottage first, then the kinds in
+/// registry order.
+fn sources_line(arts: &BuildingArts) -> String {
+    let mut line = format!("cottage={}", arts.source(0));
+    for kind in HOUSE_KINDS {
+        line.push(' ');
+        line.push_str(kind.name());
+        line.push('=');
+        line.push_str(arts.source(slot_of(kind)));
+    }
+    line
+}
+
 /// The winit application: one window, one receipt.
 struct PlayApp {
     auto_png: PathBuf,
     f12_png: PathBuf,
     art_dir: PathBuf,
     house_dir: PathBuf,
+    buildings_dir: PathBuf,
     state: Option<Play>,
     result: Option<Result<Receipt, PlayError>>,
 }
@@ -442,11 +542,13 @@ impl PlayApp {
         let root = repo_root();
         let target = root.join("target");
         std::fs::create_dir_all(&target).map_err(PlayError::Io)?;
+        let content = root.join("content").join("kam2");
         Ok(Self {
-            auto_png: target.join("kam2play_house.png"),
+            auto_png: target.join("kam2play_buildings.png"),
             f12_png: target.join("kam2play-f12.png"),
-            art_dir: root.join("content").join("kam2").join("soldier"),
-            house_dir: root.join("content").join("kam2").join("house"),
+            art_dir: content.join("soldier"),
+            house_dir: content.join("house"),
+            buildings_dir: content.join("buildings"),
             state: None,
             result: None,
         })
@@ -464,7 +566,7 @@ impl ApplicationHandler for PlayApp {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("KAM3 first playable window")
+            .with_title("KAM10 play window")
             .with_inner_size(LogicalSize::new(f64::from(WINDOW_W), f64::from(WINDOW_H)));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -476,6 +578,7 @@ impl ApplicationHandler for PlayApp {
             self.f12_png.clone(),
             &self.art_dir,
             &self.house_dir,
+            &self.buildings_dir,
         ) {
             Ok(play) => {
                 self.state = Some(play);
@@ -566,14 +669,69 @@ fn main() -> Result<(), PlayError> {
     match app.result {
         Some(Ok(receipt)) => {
             println!(
-                "KAM7 OK houses={} source={} png={}",
+                "KAM10 OK kinds={} houses={} png={} bytes={}",
+                receipt.kinds,
                 receipt.houses,
-                receipt.source,
-                receipt.png.display()
+                receipt.png.display(),
+                receipt.bytes
             );
+            println!("KAM10 SOURCES {}", receipt.sources);
             Ok(())
         }
         Some(Err(error)) => Err(error),
         None => Err(PlayError::NoFrame),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kam2_sim::Ware;
+
+    #[test]
+    fn the_demo_village_holds_eleven_houses_of_five_kinds() {
+        let sim = demo_village().expect("the demo village places");
+        assert_eq!(sim.houses().len(), 11);
+        assert_eq!(sim.units().len(), 4);
+        assert_eq!(kinds_in(&sim), 5, "one receipt shows all five kinds");
+        for side in [0u8, 1] {
+            let mut kinds: Vec<HouseKind> =
+                sim.houses_of(side).map(|house| house.kind).collect();
+            kinds.sort_by_key(|kind| kind.index());
+            kinds.dedup();
+            assert_eq!(kinds.len(), 5, "side {side} shows all five kinds");
+        }
+        for house in sim.houses() {
+            assert!(
+                house.link.is_some(),
+                "{} has no road link",
+                house.kind.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_demo_village_is_paid_for_out_of_the_starting_stock() {
+        let sim = demo_village().expect("the demo village places");
+        assert_eq!(sim.stock_of(0, Ware::Wood), 4);
+        assert_eq!(sim.stock_of(1, Ware::Wood), 0);
+        assert_eq!(sim.stock_of(0, Ware::Stone), 15);
+        assert_eq!(sim.stock_of(1, Ware::Stone), 15);
+    }
+
+    #[test]
+    fn every_house_is_built_after_the_startup_ticks() {
+        let mut sim = demo_village().expect("the demo village places");
+        for _ in 0..STARTUP_TICKS {
+            sim.tick();
+        }
+        assert_eq!(sim.ticks(), STARTUP_TICKS);
+        for house in sim.houses() {
+            assert!(
+                sim.ticks() >= house.built_at,
+                "{} is still building",
+                house.kind.name()
+            );
+        }
     }
 }

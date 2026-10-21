@@ -44,7 +44,7 @@ Do: keep pure math saturating, queue moves in order, cap defrag, score eviction,
 
 ## 3. Cut notes (recover with git)
 
-- `crates/render/src/uploads.rs` (the staging belt: `StagingBelt::upload`, `OverCapacity`, `advance_frame`, `invalidate_all`) is cut. Check 2 now watches `CpuCache`. Recover the old shape: `git log --follow -- crates/render/src/uploads.rs`.
+- `crates/render/src/uploads.rs` (the staging belt: `StagingBelt::upload`, `OverCapacity`, `advance_frame`, `invalidate_all`) exists, no caller yet (check: `node tools/wiring-scan.mjs crates --diff`). Check 2 now watches `CpuCache`.
 - `crates/render/src/stream.rs` (tile residency: `TileResidency`) is cut. Check 4 now watches `CpuCache`. Recover the old shape: `git log --follow -- crates/render/src/stream.rs`.
 - The cache release on resize, surface loss and device loss is described in skill `wgpu-render` section 6 rule 6.
 

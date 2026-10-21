@@ -1,0 +1,17 @@
+{
+  "provider": "ovh-ai-endpoints",
+  "model": "stable-diffusion-xl-base-v10",
+  "endpoint": "https://stable-diffusion-xl.endpoints.kepler.ai.cloud.ovh.net/api/text2image",
+  "cost": "0 per request, anonymous, 2 requests per minute per IP",
+  "licence": "OpenRAIL++-M (Stability AI Community Licence)",
+  "commercial_use": true,
+  "served_from": "FR/EU",
+  "prompt": "character turnaround reference sheet, front view of an armored orc warrior standing upright straight on, arms held slightly away from the body so every limb is separate, black iron plate armor with bronze trim and crimson cloth, plain white background, flat even lighting, full body visible head to boots, stylized game concept art",
+  "negative_prompt": "text, watermark, extra limbs, extra fingers, blurry, lowres, jpeg artifacts, photorealistic",
+  "size": "1024x1024",
+  "output": "content/generated/concepts/ashkin_gunner_03.jpg",
+  "bytes": 1090125,
+  "purpose": "reference for the base mesh only: never a shipped asset, and the shipped mesh is rebuilt by us",
+  "verdict": "the model answered a turnaround sheet: front, back, head and a detail on one canvas. A sheet is the best design reference and the worst mesh input, because SF3D reads one figure and finds four. The fix is a crop of the front view, and that crop is a much better input than attempt 2.",
+  "compared_to": "content/generated/concepts/ashkin_gunner_02.jpg"
+}

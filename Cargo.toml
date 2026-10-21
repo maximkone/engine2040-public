@@ -232,12 +232,17 @@ engine-assets.workspace = true
 engine-ai.workspace = true
 engine-proof.workspace = true
 
-# Release profile: LTO fat + one codegen unit (measured A/B over PF1
-# workloads; PGO and panic=abort pending game-exe evidence).
+# Release profile: thin LTO + 16 codegen units. The fat-LTO one-unit shape
+# moved to [profile.ship] (the packaged artifact and the CI release-proof leg),
+# so a local release build no longer pays the one-unit relink. The golden hash
+# is shape-independent and stays proven under both: `perf-test` (thin) locally,
+# `ship` (fat) in CI.
+# Measured 2026-10-21 (build-cpu card, docs/research/build-cpu-2026-10-21/CARD.md):
+# fat -> thin on the arena release build, see the card for the numbers.
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 overflow-checks = true
 
 # Dev and test builds: the sim-core crates run the deterministic hot loops of most tests (600-tick
@@ -295,6 +300,7 @@ opt-level = 2
 [profile.profiling]
 inherits = "release"
 lto = "thin"
+codegen-units = 1
 debug = "line-tables-only"
 
 [profile.perf-test]
@@ -302,10 +308,13 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
+# Ship is the shipped shape: LTO fat + one codegen unit (the shape `release`
+# used before the build-cpu change of 2026-10-21). tools/ship.mjs builds the
+# packaged arena and editor with it, and the CI release-proof leg proves the
+# golden hash in it. Cargo writes it to target/ship, not target/release.
 # Ship keeps panic=unwind and no PGO until the unwind audit and a
 # recorded-tape PGO A/B per PF3 land (PF3 wave 32: LTO-fat + CGU-1 kept,
 # abort/PGO pending game-exe evidence).
-# Kept as a named alias: identical to release today so `--profile ship` stays defined for that landing.
 [profile.ship]
 inherits = "release"
 lto = "fat"
