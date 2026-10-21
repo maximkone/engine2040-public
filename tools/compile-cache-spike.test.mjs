@@ -103,12 +103,11 @@ test("each cell owns a fresh target dir; only the cache cells wrap rustc", () =>
 });
 
 test("parseArgs takes repeatable --lane and refuses unknown flags", () => {
-  assert.deepEqual(parseArgs([]), { crates: ["engine-physics"], jobs: 4, json: false, dryRun: false, force: false, error: null });
+  assert.deepEqual(parseArgs([]), { crates: ["engine-physics"], jobs: 4, json: false, dryRun: false, error: null });
   const a = parseArgs(["--lane", "engine-ecs", "--lane", "engine-input", "--jobs", "2", "--dry-run"]);
   assert.deepEqual(a.crates, ["engine-ecs", "engine-input"]);
   assert.equal(a.jobs, 2);
   assert.equal(a.dryRun, true);
-  assert.equal(parseArgs(["--force"]).force, true);
   assert.match(parseArgs(["--nope"]).error, /unknown flag/);
   assert.match(parseArgs(["--jobs", "0"]).error, /--jobs/);
   assert.match(parseArgs(["--lane"]).error, /--lane/);

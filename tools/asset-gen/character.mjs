@@ -110,18 +110,7 @@ const rig = run("22-bone rig", BLENDER, [
   "-P", join(ROOT, "tools", "blender", "rig22.py"),
   "--", join(cookDir, "lod0.glb"), join(rigDir, "rigged.glb"),
 ]);
-// Blender prints its own noise after the script, so the metrics line is the
-// last one that parses as JSON, not the last line there is.
-function lastJson(text) {
-  const lines = String(text || "").split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line.startsWith("{")) continue;
-    try { return JSON.parse(line); } catch { /* keep looking */ }
-  }
-  return null;
-}
-const rigMetrics = lastJson(rig.output) ?? { bones: 0, weighted_vertices: 0, vertices: 0, distance_stats: {} };
+const rigMetrics = JSON.parse(rig.output.trim().split("\n").pop());
 
 const character = {
   name,

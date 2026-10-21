@@ -9,7 +9,6 @@
 //   node tools/asset-gen/concepts.mjs            all twenty
 //   node tools/asset-gen/concepts.mjs --only ashkin_gunner
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 const ROOT = "C:\\engine2040";
@@ -22,31 +21,29 @@ const WARDEN_COLOUR = "bone white and silver plate armour with gold trim, steel 
 const ASHKIN_COLOUR = "black iron plate armour with bronze trim, blood red cloth, bone studs";
 
 // subject, gear, and the body the class wants. "lean" and "arms out" are
-// what keep the generator from fusing the limbs into one mass. The gear
-// follows the class sheet's loadout, so the art and the sheet agree; the
-// gate checks that with a hash of the loadout.
+// what keep the generator from fusing the limbs into one mass.
 const SPECS = {
-  warden_fighter: ["a tall human soldier in a tabard over chain", "an arming sword in the right hand and a buckler in the left", "broad shoulders, squared stance"],
-  warden_defender: ["a stocky human soldier in heavy silver plate", "an arming sword in the right hand and a heater shield in the left", "wide stance, thick armour"],
-  warden_warrior: ["a lean human swordsman in bone white and leather", "an arming sword in each hand, one on each side", "light armour, athletic build"],
-  warden_rogue: ["a lean human scout in a hooded leather coat", "a short sword held low in the right hand, the left hand empty", "slim build, travel cloak"],
-  warden_assassin: ["a lean human in a dark hooded coat", "a short sword held low in the right hand, the left hand empty", "slim build, deep hood"],
-  warden_archer: ["a lean human archer in leather and steel blue cloth", "a short bow held upright in the left hand and a quiver of marked arrows on the back", "slim build, light armour"],
-  warden_mage: ["a human caster in a bone white robe with gold trim", "a long staff held upright in the left hand, the right hand open", "slender build, long robe"],
-  warden_sorcerer: ["a human elementalist in a steel blue and gold robe", "a long silver focus staff in the left hand and an ember glow in the right", "slender build, flowing robe"],
-  warden_enchanter: ["a human enchanter in a bone robe with steel blue trim", "a short silver focus rod in the right hand and a bone white grimoire in the left", "slender build, open hands"],
-  warden_acolyte: ["a human acolyte in a bone white robe", "a mace in the right hand and a tome in the left", "slender build, short robe"],
-  warden_cleric: ["a human cleric in a heavy bone robe with gold trim", "a hymn mace in the right hand and an oak ward shield in the left", "sturdy build, long robe"],
-  warden_priest: ["a human priest in gold trimmed robes", "a censer staff in the right hand and a psalm book in the left", "slender build, long robe"],
+  warden_fighter: ["a tall human soldier in a tabard over chain", "a heavy warhammer in the right hand and a folded net in the left", "broad shoulders, squared stance"],
+  warden_defender: ["a stocky human soldier in heavy silver plate", "a large kite shield held in the left hand and a blunt mace in the right", "wide stance, thick armour"],
+  warden_warrior: ["a lean human swordsman in bone white and leather", "a short sword in each hand, one on each side", "light armour, athletic build"],
+  warden_rogue: ["a lean human scout in a hooded leather coat", "a short sword held low in the right hand and a dagger in the left", "slim build, travel cloak"],
+  warden_assassin: ["a lean human in a dark hooded coat", "a short sword held low in the right hand, left hand empty", "slim build, deep hood"],
+  warden_archer: ["a lean human archer in leather and steel blue cloth", "a longbow held upright in the left hand and a quiver of arrows on the back", "slim build, light armour"],
+  warden_mage: ["a human caster in a bone white robe with gold trim", "a long staff held upright in the left hand, right hand open", "slender build, long robe"],
+  warden_sorcerer: ["a human elementalist in a steel blue and gold robe", "an ember glow in the right hand and a short staff in the left", "slender build, flowing robe"],
+  warden_enchanter: ["a human enchanter in a bone robe with steel blue trim", "floating brass seal plates around both hands", "slender build, open hands"],
+  warden_acolyte: ["a human acolyte in a plain bone white robe", "a small satchel of bandages in the left hand, right hand open", "slender build, short robe"],
+  warden_cleric: ["a human cleric in a heavy bone robe with gold trim", "a bronze mace in the right hand and a book in the left", "sturdy build, long robe"],
+  warden_priest: ["a human priest in gold trimmed robes", "an open psalter book in both hands", "slender build, long robe"],
 
-  ashkin_combatant: ["a lean armoured orc warrior", "a great axe in the right hand, the left hand empty", "broad shoulders, lean build"],
-  ashkin_templar: ["a heavy armoured orc in thick black plate", "an ashkin longsword in the right hand and a tower shield in the left", "thick armour, wide stance"],
-  ashkin_attacker: ["a lean armoured orc with red war paint", "a pair of ashkin paired blades, one in each hand", "lean build, red sash"],
+  ashkin_combatant: ["a lean armoured orc warrior", "a heavy axe in the right hand and a buckler in the left", "broad shoulders, lean build"],
+  ashkin_templar: ["a heavy armoured orc in thick black plate", "a bronze club in the right hand and a coarse net in the left", "thick armour, wide stance"],
+  ashkin_attacker: ["a lean armoured orc with red war paint", "a great axe in the right hand and a hooked blade in the left", "lean build, red sash"],
   ashkin_gunner: ["a lean armoured orc gunner", "a bronze shoulder cannon mounted on the right shoulder, both arms visible and clear of the body", "broad shoulders, lean build"],
-  ashkin_officiator: ["a lean orc caster in a dark robe with ember runes", "a rite rod in the right hand and a charm in the left", "slender build, long robe"],
-  ashkin_rune: ["a lean orc in a bone mask and dark robe", "a runewrought stave held upright in the left hand, the right hand open", "slender build, bone mask"],
-  ashkin_life: ["a lean orc healer in a blood red robe with bone charms", "a ledger stave in the left hand and an oath tablet in the right", "slender build, long robe"],
-  ashkin_shadow: ["a lean orc in a black hooded coat", "twin ash knives, one in each hand", "slim build, deep hood"],
+  ashkin_officiator: ["a lean orc caster in a dark robe with ember runes", "a glowing ember in the right hand and a black staff in the left", "slender build, long robe"],
+  ashkin_rune: ["a lean orc in a bone mask and dark robe", "a rune carved staff held upright in the left hand, right hand open", "slender build, bone mask"],
+  ashkin_life: ["a lean orc healer in a blood red robe with bone charms", "a bone charm rod in the left hand, right hand open", "slender build, long robe"],
+  ashkin_shadow: ["a lean orc in a black hooded coat", "a dark curved blade held low in the right hand, left hand empty", "slim build, deep hood"],
 };
 
 const TEMPLATE = (subject, gear, body, colour) =>
@@ -86,13 +83,6 @@ const only = arg("only");
 const list = roster.classes.filter((c) => !only || c.id === only);
 const delay = Number(arg("delay", "35")) * 1000;
 
-// The art brief is the class sheet: a hash of the loadout, so the gate can
-// tell that the sheet moved and the drawing is stale.
-function loadoutHash(id) {
-  const sheet = JSON.parse(readFileSync(join(ROOT, "content", "classes", `${id}.json`), "utf8"));
-  return createHash("sha256").update(JSON.stringify(sheet.loadout ?? {})).digest("hex").slice(0, 12);
-}
-
 console.log(`generating ${list.length} concept(s) at ${delay / 1000}s apart`);
 for (let i = 0; i < list.length; i++) {
   const cls = list[i];
@@ -124,7 +114,6 @@ for (let i = 0; i < list.length; i++) {
       class_id: cls.id,
       faction: cls.faction,
       role: cls.role,
-      loadout_sha: loadoutHash(cls.id),
       purpose: "reference for the base mesh only: never a shipped asset, and the shipped mesh is rebuilt by us",
       template: "front view, arms out, plain background: the input is the lever",
     }, null, 2) + "\n", "utf8");

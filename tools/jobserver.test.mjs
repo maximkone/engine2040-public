@@ -6,23 +6,19 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { lowerPriority, poolEnv, poolStatus, slotGate } from "./jobserver.mjs";
+import { lowerPriority, poolEnv, poolStatus } from "./jobserver.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PS1 = join(HERE, "jobserver.ps1");
 const MODULE = pathToFileURL(join(HERE, "jobserver.mjs")).href;
-const SPIKE = join(HERE, "compile-cache-spike.mjs");
-const NEXTEST_SPIKE = join(HERE, "nextest-spike.mjs");
-const DEP_SPIKE = join(HERE, "dep-rebuild-count.mjs");
 const WIN = process.platform === "win32";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
-// poolEnv reads the caller's env, so each pool test runs with CARGO_MAKEFLAGS, E2040_NO_POOL and E2040_POOL cleared, then restored.
+// poolEnv reads the caller's env, so each pool test runs with CARGO_MAKEFLAGS and E2040_NO_POOL cleared, then restored.
 async function clean(fn) {
-  const keep = { CARGO_MAKEFLAGS: process.env.CARGO_MAKEFLAGS, E2040_NO_POOL: process.env.E2040_NO_POOL, E2040_POOL: process.env.E2040_POOL };
+  const keep = { CARGO_MAKEFLAGS: process.env.CARGO_MAKEFLAGS, E2040_NO_POOL: process.env.E2040_NO_POOL };
   delete process.env.CARGO_MAKEFLAGS;
   delete process.env.E2040_NO_POOL;
-  delete process.env.E2040_POOL;
   try { return await fn(); } finally {
     for (const [k, v] of Object.entries(keep)) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
@@ -50,26 +46,6 @@ async function waitUp(name, ms) {
   }
 }
 
-// A pool whose every slot is taken: the named semaphore exists with no free
-// token. A background pwsh keeps the handle open, so the semaphore lives for
-// the test and dies with it.
-function holdEverySlot(name) {
-  const ps = `$c = $false; $s = [System.Threading.Semaphore]::new(0, 4, $env:E2040_JS_POOL, [ref]$c); Start-Sleep -Seconds 120`;
-  return spawn("pwsh", ["-NoProfile", "-Command", ps], { stdio: "ignore", env: { ...process.env, E2040_JS_POOL: name } });
-}
-
-// The holder's balance loop can hold a slot for a moment, so the gate check
-// waits for the state it wants instead of racing it.
-async function waitGate(name, want, ms) {
-  const end = Date.now() + ms;
-  for (;;) {
-    const g = slotGate({ name });
-    if (g.ok === want) return g;
-    if (Date.now() >= end) return g;
-    await sleep(200);
-  }
-}
-
 test("poolEnv is empty for a pool nobody holds", () => clean(() => {
   const name = `e2040-js-none-${process.pid}-${Math.random().toString(36).slice(2)}`;
   assert.deepEqual(poolEnv(name), {});
@@ -83,56 +59,9 @@ test("a 1-slot holder under a test name: status counts 1 free and poolEnv names 
     assert.equal(st.up, true, "holder did not come up within 15 s");
     assert.equal(st.free, 1);
     assert.deepEqual(poolEnv(name), { CARGO_MAKEFLAGS: `-j --jobserver-auth=${name}` });
-    // A pool with a free slot never blocks a spike.
-    assert.equal((await waitGate(name, true, 5000)).ok, true);
   } finally {
     killTree(holder);
   }
-}));
-
-test("a spike refuses to start when every slot of the pool is held", { skip: !WIN && "the pool is Windows only" }, () => clean(async () => {
-  const name = `e2040-js-full-${process.pid}`;
-  const holder = holdEverySlot(name);
-  try {
-    const st = await waitUp(name, 15000);
-    assert.equal(st.up, true, "the held pool did not come up within 15 s");
-    assert.equal(st.free, 0, "every slot of the test pool must be taken");
-
-    // The gate refuses, and --force goes past it.
-    const gate = slotGate({ name });
-    assert.equal(gate.ok, false);
-    assert.match(gate.reason, /0 free slots/);
-    assert.equal(slotGate({ name, force: true }).ok, true);
-
-    // The spike tool itself refuses: one line, exit 2, and no build.
-    const r = spawnSync(process.execPath, [SPIKE, "--lane", "e2040-no-such-crate"], {
-      encoding: "utf8",
-      env: { ...process.env, E2040_POOL: name },
-    });
-    assert.equal(r.status, 2, `expected exit 2, got ${r.status}: ${r.stdout}`);
-    const lines = r.stdout.trim().split("\n");
-    assert.equal(lines.length, 1, `expected one line, got: ${r.stdout}`);
-    assert.match(lines[0], /^refused: .*0 free slots/);
-    assert.match(lines[0], /--force/);
-
-    // Every spike tool waits for a slot the same way.
-    for (const [tool, args] of [[NEXTEST_SPIKE, ["--crate", "e2040-no-such-crate"]], [DEP_SPIKE, ["--lane", "e2040-no-such-crate"]]]) {
-      const s = spawnSync(process.execPath, [tool, ...args], { encoding: "utf8", env: { ...process.env, E2040_POOL: name } });
-      assert.equal(s.status, 2, `${tool} must exit 2, got ${s.status}: ${s.stdout}`);
-      const one = s.stdout.trim().split("\n");
-      assert.equal(one.length, 1, `${tool} must print one line, got: ${s.stdout}`);
-      assert.match(one[0], /^refused: .*0 free slots/, `${tool} must name the pool state`);
-    }
-  } finally {
-    killTree(holder);
-  }
-}));
-
-test("no pool at all never blocks a spike", () => clean(() => {
-  const name = `e2040-js-none-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  const gate = slotGate({ name });
-  assert.equal(gate.ok, true);
-  assert.match(gate.reason, /no pool/);
 }));
 
 test("lowerPriority: a child that calls it spawns a grandchild below normal (10)", () => {

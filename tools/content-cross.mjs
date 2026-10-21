@@ -4,7 +4,6 @@
 //
 // Run: node tools/content-cross.mjs
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -120,27 +119,6 @@ for (const m of maps) for (const z of m.zones ?? []) zoneIds.add(z.id);
 const unknownDrops = (items.drops ?? []).filter((d) => d.source && !zoneIds.has(d.source));
 if (unknownDrops.length) {
   note(`${unknownDrops.length} item drop sources are not map zones: ${[...new Set(unknownDrops.map((d) => d.source))].slice(0, 6).join(", ")}`);
-}
-
-// --- the art brief against the sheet ----------------------------------------
-// A concept is drawn from the class sheet, so the drawing carries a hash of
-// the loadout it was made from. If the sheet moved since, the art is stale
-// and the gate says so. A class with no concept yet is not an error: the
-// art has not been drawn, and the absence is not a conflict.
-const conceptDir = join(ROOT, "content", "generated", "concepts");
-if (existsSync(conceptDir)) {
-  for (const c of classes) {
-    const briefPath = join(conceptDir, `concept_${c.id}.provenance.json`);
-    if (!existsSync(briefPath)) continue;
-    let brief;
-    try { brief = JSON.parse(readFileSync(briefPath, "utf8")); } catch { continue; }
-    if (!brief.loadout_sha) continue;
-    const sheet = JSON.stringify(c.loadout ?? {});
-    const now = createHash("sha256").update(sheet).digest("hex").slice(0, 12);
-    if (brief.loadout_sha !== now) {
-      note(`class ${c.id} moved since its concept was drawn: redraw the art brief`);
-    }
-  }
 }
 
 // --- report ----------------------------------------------------------------

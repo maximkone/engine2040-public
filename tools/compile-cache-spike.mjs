@@ -19,7 +19,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { cpus, platform, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { slotGate } from "./jobserver.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -112,7 +111,7 @@ export function verdict({ coldSeconds, primeSeconds, warmSeconds, warm2Seconds, 
 }
 
 export function parseArgs(argv) {
-  const out = { crates: [...DEFAULT_CRATES], jobs: DEFAULT_JOBS, json: false, dryRun: false, force: false, error: null };
+  const out = { crates: [...DEFAULT_CRATES], jobs: DEFAULT_JOBS, json: false, dryRun: false, error: null };
   const lanes = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -126,7 +125,6 @@ export function parseArgs(argv) {
       out.jobs = n;
     } else if (a === "--json") out.json = true;
     else if (a === "--dry-run") out.dryRun = true;
-    else if (a === "--force") out.force = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else { out.error = `unknown flag ${a}`; return out; }
   }
@@ -136,12 +134,11 @@ export function parseArgs(argv) {
 
 export function helpText() {
   return [
-    "Usage: node tools/compile-cache-spike.mjs [--lane <crate>]... [--jobs <n>] [--json] [--dry-run] [--force]",
+    "Usage: node tools/compile-cache-spike.mjs [--lane <crate>]... [--jobs <n>] [--json] [--dry-run]",
     "  cold, prime, warm and warm2 cells of one lane build, each in its own target dir.",
     `  Defaults: --lane ${DEFAULT_CRATES.join(" --lane ")} --jobs ${DEFAULT_JOBS}.`,
     "  A DROP verdict still exits 0: the numbers are the result, not a gate.",
     "  Spike only: it writes target/spike-opt9/<utc>/ and no tracked file.",
-    "  With no free compile slot in the pool it refuses to start (exit 2); --force runs it anyway.",
   ].join("\n") + "\n";
 }
 
@@ -191,17 +188,7 @@ const main = (argv) => {
   // Own port: a server already running for another agent keeps its own dir.
   const dirs = { run: runDir, cache: join(runDir, "sccache"), base: ROOT, port: 4300 + (process.pid % 700) };
   const args = laneArgs(a);
-  // The dry run builds nothing, so it never waits for a slot.
   if (a.dryRun) { for (const cell of CELLS) console.log(cellLine(cell, args, dirs)); return 0; }
-
-  // A spike waits for a free compile slot: with the pool up and no slot free it
-  // must not start, so it never competes with the live work (--force runs it anyway).
-  const gate = slotGate({ force: a.force });
-  if (!gate.ok) {
-    console.log(`refused: ${gate.reason}: a spike must not fight the live work (retry when a slot frees, or pass --force)`);
-    return 2;
-  }
-  console.log(`[pool] ${gate.reason}`);
 
   mkdirSync(dirs.cache, { recursive: true });
   const started = startServer(dirs);

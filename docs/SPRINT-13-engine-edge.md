@@ -30,7 +30,6 @@ Rows marked (orchestrator) land root config or `tools/` edits.
    with the same failures visible. needs: OPT1.
    (DO NOT DISPATCH 2026-10-05: PARKED, cargo-nextest absent exit 101. Retry only after owner installs and posts version. Never re-probe whole, per 510 deep-dive.)
    Progress 2026-10-21: the proof-leg switch is landed and refuses cleanly instead of pretending: `node tools/nextest-spike.mjs --crate engine-core` -> "RESULT could not run: cargo nextest is not installed (error: no such command: 'nextest')", exit 2; `node --test tools/nextest-spike.test.mjs` -> 7/7. The bar (wall time and flake counts before and after, same failures visible) needs the owner's install, so the row stays parked exactly as the 2026-10-05 note says. CI already runs nextest.
-   Progress 2026-10-21 (OPT41): the spike now waits for a free compile slot first. With the pool up and 0 free slots it prints one line ("refused: the compile-slot pool engine2040-jobserver has 0 free slots: a spike must not fight the live work (retry when a slot frees, or pass --force)") and exits 2, before the nextest probe, so the parked message above is what a free slot or `--force` shows. The row is still parked on the owner's nextest install.
 - [x] OPT7 ops: affected-package gate — `tools/affected.mjs` maps a diff Landed cd37e7c4.
   to changed packages plus reverse dependencies via `cargo metadata`;
   lane acceptance runs that closure; the full proof stays once per wave.

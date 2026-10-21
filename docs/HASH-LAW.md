@@ -22,7 +22,7 @@ Scope in plain words. `GOLDEN_600` covers one fixture: the archetype ECS world,
 tape (`crates/proof/src/lib.rs`). It does not run `arena`, `combat`,
 `physics::islands`, the Rapier world, `destruction`, `game`, `physfx`, `net` or
 any GPU path. Those have their own fixtures and digests: the arena match
-`arena=9f162a2fe205f0ff` (1200 ticks, rules v2, kit walls, five targets), the
+`arena=2fbd56040fd091a7` (1200 ticks, rules v2, kit walls, five targets), the
 Rapier ragdoll `GOLDEN_RAGDOLL=8097ccafb6740acb` (300 steps, four targets), the
 20k crowd digest `0x9627a1119822c2e0`, and the per-crate tests named beside
 each row. A green `golden_hash_untouched` says only that the legacy 2D fixture
@@ -188,14 +188,5 @@ not establish model reproducibility. Job completion order cannot decide outcomes
   default, no step changed", old == new `d57b5c8ae3096614`, both outputs
   `cargo test -p engine2040 --release --test proof_cli default_and_max_seed`
   (json `--verify` final_hash plus the text receipt), run 39509470629. A real
-  retirement would move the arena digest (then `arena=2fbd56040fd091a7`), never
+  retirement would move the arena digest `arena=2fbd56040fd091a7`, never
   `GOLDEN_600`, which runs only the `engine-proof` 2D fixture.
-- TC3 (2026-10-21): the arena collision pass feeds `BalanceState` a shove
-  scaled by the push-apart displacement a fighter took in one tick, under
-  rules v2 only (`crates/arena/src/collide.rs`, `PUSH_SHOVE_TABLE`). The arena
-  match digest moved from `2fbd56040fd091a7` to `9f162a2fe205f0ff` (1200
-  ticks, rules v2, kit walls, five targets); both pins in
-  `crates/proof/src/arena_matrix.rs` moved together, and the live path and the
-  spine path still fold the same digest. `GOLDEN_600` did not move: it runs
-  only the `engine-proof` 2D fixture, which never touches the arena. Receipt:
-  `docs/receipts/2026-10-21-tc3-body-push-shove`.

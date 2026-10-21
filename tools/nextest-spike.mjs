@@ -20,7 +20,6 @@
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { slotGate } from "./jobserver.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -102,14 +101,13 @@ export function verdict({ testSeconds, nextestSeconds, testFailures, nextestFail
 }
 
 export function parseArgs(argv) {
-  const out = { crate: "", filter: "", jobs: DEFAULT_JOBS, json: false, force: false, error: null };
+  const out = { crate: "", filter: "", jobs: DEFAULT_JOBS, json: false, error: null };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--crate") { out.crate = argv[++i] ?? ""; if (!out.crate) { out.error = "--crate needs a crate name"; return out; } }
     else if (a === "--filter") { out.filter = argv[++i] ?? ""; if (!out.filter) { out.error = "--filter needs a test name"; return out; } }
     else if (a === "--jobs") { const n = Number(argv[++i]); if (!Number.isInteger(n) || n < 1) { out.error = "--jobs needs a whole number of 1 or more"; return out; } out.jobs = n; }
     else if (a === "--json") out.json = true;
-    else if (a === "--force") out.force = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else { out.error = `unknown flag ${a}`; return out; }
   }
@@ -119,11 +117,9 @@ export function parseArgs(argv) {
 
 export function helpText() {
   return [
-    "Usage: node tools/nextest-spike.mjs --crate <name> [--filter <name>] [--jobs <n>] [--json] [--force]",
+    "Usage: node tools/nextest-spike.mjs --crate <name> [--filter <name>] [--jobs <n>] [--json]",
     "  Runs one proof lane under cargo test and under cargo nextest and compares",
     "  the wall time and the failures (retries reported).",
-    "  With no free compile slot in the pool it refuses to start (exit 2, one line);",
-    "  --force runs it anyway.",
     "  Without cargo-nextest the tool stops with cargo's own error and exit 2:",
     "  the row is parked until the owner installs nextest.",
   ].join("\n") + "\n";
@@ -140,17 +136,6 @@ const main = (argv) => {
   const a = parseArgs(argv);
   if (a.help) { process.stdout.write(helpText()); return 0; }
   if (a.error) { console.log(`refused: ${a.error}`); return 2; }
-  // A spike waits for a free compile slot: with the pool up and no slot free it
-  // must not start, so it never competes with the live work (--force runs it anyway).
-  // The gate comes first, so a refusal is one line and nothing runs.
-  const gate = slotGate({ force: a.force });
-  if (!gate.ok) {
-    console.log(`refused: ${gate.reason}: a spike must not fight the live work (retry when a slot frees, or pass --force)`);
-    return 2;
-  }
-  console.log(`[pool] ${gate.reason}`);
-  // Then the cheap nextest version probe: it compiles nothing, and the row stays
-  // parked with its own message when nextest is not installed.
   const nextest = readNextestVersion();
   if (!nextest.ok) {
     console.log(`RESULT could not run: cargo nextest is not installed (${nextest.error})`);

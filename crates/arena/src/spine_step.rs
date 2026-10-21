@@ -864,12 +864,10 @@ fn after_motion(core: &mut Core, n: usize) {
             core.spear = Some(grapple);
         }
     }
-    // One collision pass after every slot moved (default leg). The body-push
-    // shove needs the balance states, so the pass takes them.
+    // One collision pass after every slot moved (default leg).
     if core.rules.collides() {
-        crate::collide::collide_states_shove(
+        crate::collide::collide_states(
             &mut core.states[..n],
-            &mut core.balance[..n],
             &core.rules,
             core.config.half_extent_m,
             n,

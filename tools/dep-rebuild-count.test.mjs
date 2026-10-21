@@ -59,6 +59,4 @@ test("the arguments are read without surprises", () => {
   assert.equal(parseArgs(["--lane"]).error, "--lane needs a crate name");
   assert.equal(parseArgs(["--nope"]).error, "unknown flag --nope");
   assert.deepEqual(DEFAULT_LANES.length, 5, "the row counts five lane builds");
-  assert.equal(parseArgs([]).force, false);
-  assert.equal(parseArgs(["--force"]).force, true);
 });

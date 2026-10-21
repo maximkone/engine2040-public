@@ -9,14 +9,12 @@
 //
 // Run: node tools/dep-rebuild-count.mjs [--lane <crate>]... [--jobs <n>]
 //                                     [--target-dir <dir>] [--json] [--dry-run]
-//                                     [--force]
 // Exit 0 when every lane built (the number is the result, not a gate),
 // 2 when a lane failed or an argument is wrong.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { slotGate } from "./jobserver.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -64,7 +62,7 @@ export function copyCounts(laneCompiled) {
 }
 
 export function parseArgs(argv) {
-  const out = { crates: [], jobs: DEFAULT_JOBS, targetDir: null, json: false, dryRun: false, force: false, error: null };
+  const out = { crates: [], jobs: DEFAULT_JOBS, targetDir: null, json: false, dryRun: false, error: null };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--lane") {
@@ -81,7 +79,6 @@ export function parseArgs(argv) {
       out.targetDir = v;
     } else if (a === "--json") out.json = true;
     else if (a === "--dry-run") out.dryRun = true;
-    else if (a === "--force") out.force = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else { out.error = `unknown flag ${a}`; return out; }
   }
@@ -91,11 +88,10 @@ export function parseArgs(argv) {
 
 export function helpText() {
   return [
-    "Usage: node tools/dep-rebuild-count.mjs [--lane <crate>]... [--jobs <n>] [--target-dir <dir>] [--json] [--dry-run] [--force]",
+    "Usage: node tools/dep-rebuild-count.mjs [--lane <crate>]... [--jobs <n>] [--target-dir <dir>] [--json] [--dry-run]",
     `  Builds ${DEFAULT_LANES.join(", ")} as lane builds in ONE shared target dir`,
     "  and counts the dependency units they rebuild (the OPT8 bar: a third less).",
     "  --target-dir defaults to target/spike-opt8/<utc>; the dir must be fresh for the count to mean anything.",
-    "  With no free compile slot in the pool it refuses to start (exit 2); --force runs it anyway.",
   ].join("\n") + "\n";
 }
 
@@ -125,14 +121,6 @@ const main = (argv) => {
     }
     return 0;
   }
-  // A spike waits for a free compile slot: with the pool up and no slot free it
-  // must not start, so it never competes with the live work (--force runs it anyway).
-  const gate = slotGate({ force: a.force });
-  if (!gate.ok) {
-    console.log(`refused: ${gate.reason}: a spike must not fight the live work (retry when a slot frees, or pass --force)`);
-    return 2;
-  }
-  console.log(`[pool] ${gate.reason}`);
   mkdirSync(targetDir, { recursive: true });
   const lanes = [];
   for (const crate of a.crates) {

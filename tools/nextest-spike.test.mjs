@@ -77,6 +77,4 @@ test("the arguments are read without surprises", () => {
   assert.equal(ok.crate, "engine-core");
   assert.equal(ok.filter, "fixed");
   assert.equal(ok.jobs, 2);
-  assert.equal(parseArgs(["--crate", "engine-core"]).force, false);
-  assert.equal(parseArgs(["--crate", "engine-core", "--force"]).force, true);
 });
