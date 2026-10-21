@@ -411,7 +411,10 @@ mod tests {
             &empty_view(),
             &wanted("accessFront"),
         );
-        assert!(out.is_empty(), "the floor must not block the front: {out:?}");
+        assert!(
+            out.is_empty(),
+            "the floor must not block the front: {out:?}"
+        );
 
         let mut bench = actor(1, 0.0, 0.0);
         bench.sy = 0.2;

@@ -806,7 +806,6 @@ impl Supervisor {
         self.tape.len()
     }
 
-
     /// Turn on the rolling error-percent breaker for `code`. Opt-in: codes
     /// without one keep the plain attempt-budget path. Re-enabling keeps the
     /// existing window. `reset` leaves the breaker alone; only a probe
@@ -976,7 +975,9 @@ impl Supervisor {
             attempt: attempt_q,
             backoff_ms: 0,
             quarantined: true,
-            scope: self.policy(code).map_or(HealScope::Presentation, |row| row.scope),
+            scope: self
+                .policy(code)
+                .map_or(HealScope::Presentation, |row| row.scope),
             before_digest: None,
             after_digest: None,
             validation: HealValidation::Unproven,
@@ -1064,7 +1065,9 @@ impl Supervisor {
             attempt,
             backoff_ms: backoff,
             quarantined: true,
-            scope: self.policy(code).map_or(HealScope::Presentation, |row| row.scope),
+            scope: self
+                .policy(code)
+                .map_or(HealScope::Presentation, |row| row.scope),
             before_digest: None,
             after_digest: None,
             validation: HealValidation::Unproven,
@@ -1974,7 +1977,10 @@ mod tests {
         let decision = supervisor
             .report_fault(code, 10, &mut events)
             .expect("state fault reports");
-        assert!(decision.deferred, "a state heal waits for the tick boundary");
+        assert!(
+            decision.deferred,
+            "a state heal waits for the tick boundary"
+        );
         let applied = supervisor.apply_tick_boundary(11);
         assert_eq!(applied.len(), 1);
 
@@ -2013,8 +2019,15 @@ mod tests {
     fn heal_that_changes_the_digest_fails_and_quarantines() {
         let mut supervisor = Supervisor::new();
         supervisor.register_policy(
-            FaultPolicy::new(EventCode::PHYSICS_BODY_NONFINITE, HealKind::Restore, 1, 0, 0, 1)
-                .with_scope(HealScope::State),
+            FaultPolicy::new(
+                EventCode::PHYSICS_BODY_NONFINITE,
+                HealKind::Restore,
+                1,
+                0,
+                0,
+                1,
+            )
+            .with_scope(HealScope::State),
         );
         let mut events = ring(32);
         let code = EventCode::PHYSICS_BODY_NONFINITE;
@@ -2099,7 +2112,10 @@ mod tests {
         supervisor
             .report_fault(codes[1], 11, &mut events)
             .expect("fault reports");
-        assert!(!supervisor.heal_cap_exceeded(), "two heals are inside the cap");
+        assert!(
+            !supervisor.heal_cap_exceeded(),
+            "two heals are inside the cap"
+        );
         assert_eq!(supervisor.heal_count_in_window(11), 2);
 
         supervisor
@@ -2120,8 +2136,15 @@ mod tests {
     fn wrong_heal_rolls_back_and_the_restored_digest_matches() {
         let mut supervisor = Supervisor::new();
         supervisor.register_policy(
-            FaultPolicy::new(EventCode::PHYSICS_BODY_NONFINITE, HealKind::Restore, 1, 0, 0, 1)
-                .with_scope(HealScope::State),
+            FaultPolicy::new(
+                EventCode::PHYSICS_BODY_NONFINITE,
+                HealKind::Restore,
+                1,
+                0,
+                0,
+                1,
+            )
+            .with_scope(HealScope::State),
         );
         let mut events = ring(32);
         let code = EventCode::PHYSICS_BODY_NONFINITE;

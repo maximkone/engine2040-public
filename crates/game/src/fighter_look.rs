@@ -591,6 +591,11 @@ pub const LOOK_TEXTURE_ID_BASE: u64 = 0xF16C_0000;
 pub const MAX_LOOK_FIGHTERS: usize = 8;
 /// Steepest fight-camera look down: rise per metre of eye-to-focus reach.
 const MAX_PITCH_SLOPE: f32 = 0.75;
+/// Rise of the fight eye per metre of shot distance. A pack shot twenty-two
+/// metres out sat 6.8 m up at 0.22 (a drone over the pit, measured on
+/// 2026-10-20); 0.06 keeps it near head height while the fit still sees over
+/// the near bodies. Directed captures keep their own orbit and height.
+const FIGHT_RISE_SLOPE: f32 = 0.06;
 /// Fixed ticks per second (clip clocks advance with match ticks).
 /// Single owner of the rate is `engine_core::TICK_HZ`.
 const TICK_HZ: f32 = engine_core::TICK_HZ as f32;
@@ -1282,7 +1287,7 @@ fn shot_camera(base: &Camera, spec: ShotSpec, limit: f32, shake: [f32; 3]) -> Ca
     let height = if spec.height > 0.0 {
         spec.height
     } else {
-        1.6 + spec.distance * 0.22
+        1.6 + spec.distance * FIGHT_RISE_SLOPE
     };
     let (azimuth, reach) = pit_orbit(spec.focus, spec.azimuth, spec.distance, limit);
     let eye = [
@@ -3069,15 +3074,9 @@ impl FighterLook {
                     (half * 2.2 + 3.2).clamp(3.5, 7.0),
                     0.0,
                     1.0,
-                    axis + std::f32::consts::FRAC_PI_2 + turn * 0.3,
+                    axis + std::f32::consts::FRAC_PI_2,
                 ),
-                _ => (
-                    center,
-                    (radius * 1.9 + 4.5).clamp(5.0, 16.0),
-                    0.0,
-                    1.0,
-                    0.9 + turn,
-                ),
+                _ => (center, (radius * 1.9 + 4.5).clamp(5.0, 16.0), 0.0, 1.0, 0.9),
             },
             Shot::Wide => {
                 return Self::wide_camera(base, center, shake);
@@ -3096,9 +3095,11 @@ impl FighterLook {
         };
         let camera = shot_camera(base, spec, limit, shake);
         // The fight shot shows the fight: when the close framing drops a
-        // live body, a wider eye that holds more of them takes over.
+        // live body, a wider eye that holds more of them takes over. The
+        // wanted azimuth is fixed: a per-frame turn made even a still pack
+        // orbit the pit, which read as camera drift in the live window.
         if shot == Shot::Action {
-            let wanted = 0.9 + turn;
+            let wanted = 0.9;
             if let Some(wider) = wide_group_camera(base, &seen, &camera, limit, wanted, shake) {
                 return wider;
             }

@@ -1000,7 +1000,12 @@ fn member<'a>(
 }
 
 /// Read one required string member; an empty string is refused.
-fn text_field(ctx: &Ctx<'_>, node: &Json, key: &str, path: &str) -> Result<String, ClassSheetError> {
+fn text_field(
+    ctx: &Ctx<'_>,
+    node: &Json,
+    key: &str,
+    path: &str,
+) -> Result<String, ClassSheetError> {
     let value = member(ctx, node, key, path)?;
     let Some(text) = value.as_str() else {
         return Err(ctx.bad(
@@ -1150,7 +1155,11 @@ fn optional_string_list(
 }
 
 /// Read one list node: an array of strings.
-fn string_list_node(ctx: &Ctx<'_>, value: &Json, path: &str) -> Result<Vec<String>, ClassSheetError> {
+fn string_list_node(
+    ctx: &Ctx<'_>,
+    value: &Json,
+    path: &str,
+) -> Result<Vec<String>, ClassSheetError> {
     let Some(items) = value.as_array() else {
         return Err(ctx.bad(
             path,
@@ -1548,10 +1557,13 @@ impl<'a> Reader<'a> {
     }
 
     fn hex4(&mut self) -> Result<u32, JsonError> {
-        let digits = self.bytes.get(self.at..self.at + 4).ok_or_else(|| JsonError {
-            offset: self.at,
-            reason: "the escape needs four hex digits".to_string(),
-        })?;
+        let digits = self
+            .bytes
+            .get(self.at..self.at + 4)
+            .ok_or_else(|| JsonError {
+                offset: self.at,
+                reason: "the escape needs four hex digits".to_string(),
+            })?;
         let code = engine_core::parse_hex4(digits).ok_or_else(|| JsonError {
             offset: self.at,
             reason: "the escape is not four hex digits".to_string(),

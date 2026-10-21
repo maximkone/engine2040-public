@@ -11,7 +11,7 @@ use engine_render::kam2_iso::IsoCamera;
 use kam2_game::house::HouseManifest;
 use kam2_game::scene::{build_with, Scene, Units};
 use kam2_game::{stock_line, AiMatch, SoldierManifest};
-use kam2_sim::Refusal;
+use kam2_sim::{Command, HouseKind, Refusal, Ware};
 
 /// One sim tick, in milliseconds: the style lock's 10 Hz shell tick.
 pub const TICK_MS: u32 = 100;
@@ -24,6 +24,8 @@ pub const PAN_LIMIT: f32 = 6.0;
 /// Ticks one [`Shell::advance_ms`] call may play: a long stall drops the
 /// backlog instead of bursting, so a tab that was hidden never fast-forwards.
 pub const MAX_CATCHUP: u32 = 4;
+/// The side the player sits in; the AI mayor holds the other seat.
+pub const PLAYER_SIDE: u8 = 0;
 /// The committed soldier manifest, parsed once per shell.
 const SOLDIER_MANIFEST_JSON: &str = include_str!("../../../content/kam2/soldier/manifest.json");
 /// The committed cottage manifest, parsed once per shell.
@@ -183,12 +185,49 @@ impl Shell {
     pub fn units(&self) -> u32 {
         u32::try_from(self.game.sim().units().len()).unwrap_or(u32::MAX)
     }
+
+    /// The sim's own answer about a house standing at `(x, z)`: `None` when the
+    /// sim would take it, the refusal it gave otherwise.
+    ///
+    /// The answer is the sim's, never a copy of its rule: the probe runs the
+    /// same command on a clone of the live match, so the hover footprint and the
+    /// click can never disagree, and the live match never sees the probe.
+    #[must_use]
+    pub fn placement(&self, kind: HouseKind, x: i32, z: i32) -> Option<Refusal> {
+        let mut probe = self.game.sim().clone();
+        probe
+            .apply_for(PLAYER_SIDE, Command::PlaceHouse { kind, x, y: z })
+            .err()
+    }
+
+    /// Place a house for the player; `None` when the sim took it.
+    pub fn build(&mut self, kind: HouseKind, x: i32, z: i32) -> Option<Refusal> {
+        self.build_for(PLAYER_SIDE, kind, x, z)
+    }
+
+    /// Place a house for one side; `None` when the sim took it.
+    pub fn build_for(&mut self, side: u8, kind: HouseKind, x: i32, z: i32) -> Option<Refusal> {
+        self.game
+            .order_for(side, Command::PlaceHouse { kind, x, y: z })
+            .err()
+    }
+
+    /// How many of each ware one side holds, in ware order: wood, stone, grain,
+    /// flour, bread.
+    #[must_use]
+    pub fn stock_counts(&self, side: u8) -> Vec<u32> {
+        Ware::ALL
+            .iter()
+            .map(|ware| self.game.sim().stock_of(side, *ware))
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Shell, MAX_CATCHUP, PAN_LIMIT, TICK_MS};
     use kam2_game::AiMatch;
+    use kam2_sim::{HouseKind, Refusal};
 
     fn shell() -> Shell {
         Shell::new().expect("the start village places")
@@ -284,5 +323,46 @@ mod tests {
             later[0] > 0.0 && later[3] > 0.0,
             "the later frame still holds ground and a house cell"
         );
+    }
+
+    #[test]
+    fn the_probe_answers_the_sim_and_never_moves_the_match() {
+        let shell = shell();
+        let hash = shell.hash();
+        assert_eq!(
+            shell.placement(HouseKind::Farm, 6, 4),
+            None,
+            "the sim takes a farm beside the road"
+        );
+        assert_eq!(
+            shell.placement(HouseKind::Farm, 6, 6),
+            Some(Refusal::NotBuildable),
+            "the road cannot carry a house"
+        );
+        assert_eq!(shell.hash(), hash, "the probe never moves the live match");
+    }
+
+    #[test]
+    fn a_farm_stands_beside_the_road_and_the_road_refuses_it() {
+        let mut shell = shell();
+        let houses = shell.houses();
+        assert_eq!(shell.build(HouseKind::Farm, 6, 4), None);
+        assert_eq!(shell.houses(), houses + 1, "the farm stands");
+        assert_eq!(
+            shell.build(HouseKind::Farm, 6, 6),
+            Some(Refusal::NotBuildable),
+            "the road refuses the second farm"
+        );
+        assert_eq!(shell.houses(), houses + 1, "the refused house never stands");
+    }
+
+    #[test]
+    fn the_stock_counts_name_the_five_wares() {
+        let shell = shell();
+        let counts = shell.stock_counts(0);
+        assert_eq!(counts.len(), 5, "wood, stone, grain, flour, bread");
+        assert_eq!(counts[0], 18, "the village leaves side 0 eighteen wood");
+        assert_eq!(counts[1], 15, "and fifteen stone");
+        assert_eq!(counts[2..], [0, 0, 0], "no bread chain has run yet");
     }
 }

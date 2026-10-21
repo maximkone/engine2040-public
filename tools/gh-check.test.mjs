@@ -32,6 +32,10 @@ test("flags come before the cargo line; a long check returns instead of dying at
   for (const bad of [["--wait", "x"], ["--wait"], ["--budget", "0", "cargo", "test"], ["--budget", "abc", "cargo", "test"], ["--frobnicate", "cargo", "test"]]) assert.ok(parseArgs(bad, {}).error, bad.join(" "));
   // a flag after the cargo line belongs to cargo
   assert.equal(parseArgs(["cargo", "test", "-p", "x", "--local"], {}).mode, "auto");
+  // ...but gh-check's own flags after it are refused before any push, not handed to cargo to fail on a runner
+  assert.match(parseArgs(["cargo", "test", "-p", "x", "--lib", "f", "--budget", "840"], {}).error ?? "", /--budget is a gh-check flag: put it before/);
+  assert.match(parseArgs(["cargo", "test", "-p", "x", "--fresh"], {}).error ?? "", /--fresh is a gh-check flag/);
+  assert.equal(parseArgs(["cargo", "test", "-p", "x", "--", "--budget"], {}).error, null, "after -- it is the test binary's");
 });
 
 test("GPU, window and Windows-only lines stay on the PC; plain crate lines go to GitHub", () => {

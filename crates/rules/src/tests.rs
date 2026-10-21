@@ -633,7 +633,8 @@ fn a_recorded_tape_decodes_back_into_the_same_match() {
         installs: &[(0, SHIELD_BASH)],
         limits: Limits::DEFAULT,
     };
-    let tape = crate::tape::record(&spec, scripted_inputs(4, 100, 3), &mut library).expect("records");
+    let tape =
+        crate::tape::record(&spec, scripted_inputs(4, 100, 3), &mut library).expect("records");
     let decoded = RulesTape::decode(&tape.encode()).expect("the recorded tape decodes");
     assert_eq!(decoded, tape);
     replay(&decoded, &library, Limits::DEFAULT).expect("the decoded tape replays");

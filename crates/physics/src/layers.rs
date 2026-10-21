@@ -282,7 +282,10 @@ mod tests {
         // accepts the other.
         let fighter = Layers::new(FIGHTER).expect("fighter group");
         let debris = Layers::new(DEBRIS).expect("debris group");
-        assert!(!collides(&fighter, &debris), "a fighter does not meet debris");
+        assert!(
+            !collides(&fighter, &debris),
+            "a fighter does not meet debris"
+        );
         let cloth = Layers::new(CLOTH).expect("cloth group");
         assert!(collides(&cloth, &fighter), "cloth meets a fighter");
         assert!(collides(&cloth, &cloth), "cloth meets cloth");

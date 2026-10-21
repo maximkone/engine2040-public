@@ -1896,10 +1896,7 @@ mod tests {
         assert!(text.contains("next_step LW3 input"), "next step present");
         assert!(text.contains("remote_units=140"), "cost present");
         assert!(text.contains("contradiction_pairs=0"), "ratchet at zero");
-        assert!(
-            text.contains("dropped_rows \n"),
-            "no dropped rows"
-        );
+        assert!(text.contains("dropped_rows \n"), "no dropped rows");
         for label in ["mock", "local", "remote"] {
             assert!(text.contains(label), "report must name {label}");
         }

@@ -76,13 +76,8 @@ impl NavLayers {
             if !(floor.min_x < floor.max_x && floor.min_z < floor.max_z) {
                 return Err(NavLayerError::BadFloor);
             }
-            let (min_x, max_x, min_z, max_z, y) = (
-                floor.min_x,
-                floor.max_x,
-                floor.min_z,
-                floor.max_z,
-                floor.y,
-            );
+            let (min_x, max_x, min_z, max_z, y) =
+                (floor.min_x, floor.max_x, floor.min_z, floor.max_z, floor.y);
             // Counter-clockwise seen from above: the walkable test wants the
             // normal to point up.
             tris.push([[min_x, y, min_z], [max_x, y, max_z], [max_x, y, min_z]]);

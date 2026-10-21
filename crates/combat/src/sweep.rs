@@ -1586,7 +1586,9 @@ mod tests {
             .collect();
         assert_eq!(
             try_resolve_tick(&over_cap, &[], &t, &mut out),
-            Err(SweepError::TooManyFighters(usize::from(MAX_PARTICIPANTS) + 1))
+            Err(SweepError::TooManyFighters(
+                usize::from(MAX_PARTICIPANTS) + 1
+            ))
         );
         let dup = [duel_attacker(), duel_attacker()];
         assert_eq!(
@@ -1761,7 +1763,9 @@ mod tests {
             .collect();
         assert_eq!(
             try_resolve_tick(&over, &[], &t, &mut out),
-            Err(SweepError::TooManyFighters(usize::from(MAX_PARTICIPANTS) + 1))
+            Err(SweepError::TooManyFighters(
+                usize::from(MAX_PARTICIPANTS) + 1
+            ))
         );
     }
 

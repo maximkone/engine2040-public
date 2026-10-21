@@ -165,7 +165,10 @@ impl RulesTape {
         if self.scripts.len() > MAX_TAPE_SCRIPTS {
             return Err(TapeError::Invalid("too many scripts"));
         }
-        if self.scripts.windows(2).any(|pair| pair[0].tick >= pair[1].tick)
+        if self
+            .scripts
+            .windows(2)
+            .any(|pair| pair[0].tick >= pair[1].tick)
             || self.scripts.iter().any(|s| s.tick >= self.ticks)
         {
             return Err(TapeError::Invalid(

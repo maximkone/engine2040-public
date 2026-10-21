@@ -151,7 +151,10 @@ impl std::fmt::Display for BodyError {
                 write!(f, "line {line} has the bone `{bone}` before its parent")
             }
             BodyError::UnknownBone { name, line } => {
-                write!(f, "line {line} names the bone `{name}`, which this body does not have")
+                write!(
+                    f,
+                    "line {line} names the bone `{name}`, which this body does not have"
+                )
             }
         }
     }
@@ -272,12 +275,7 @@ impl BodyFile {
     }
 
     /// A key inside a table: a bone row or a cut row.
-    fn table_key(
-        &mut self,
-        entry: &Entry,
-        kind: &str,
-        item: &str,
-    ) -> Result<(), BodyError> {
+    fn table_key(&mut self, entry: &Entry, kind: &str, item: &str) -> Result<(), BodyError> {
         match kind {
             "bone" => {
                 let row = bone_row(&mut self.bones, item);
@@ -468,7 +466,12 @@ fn extent_of(entry: &Entry, above_zero: bool) -> Result<f32, BodyError> {
         value: raw.to_string(),
         line: entry.line,
     })?;
-    let ok = value.is_finite() && if above_zero { value > 0.0 } else { value >= 0.0 };
+    let ok = value.is_finite()
+        && if above_zero {
+            value > 0.0
+        } else {
+            value >= 0.0
+        };
     if !ok {
         return Err(BodyError::BadValue {
             key: entry.key.clone(),

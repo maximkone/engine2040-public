@@ -100,8 +100,10 @@ mod wiring_tests {
         // The bone auto-map resolves at the root too: `auto_map` never moves silently.
         let _: fn(&[&str]) -> Vec<(crate::bonemap::HumanoidBone, usize)> = crate::bonemap::auto_map;
         // The part-set plan resolves at the root: one pose and one budget per part.
-        let _: fn(&[&crate::GeoMesh], u32) -> Result<crate::parts::PartPlan, crate::parts::PartError> =
-            crate::parts::plan;
+        let _: fn(
+            &[&crate::GeoMesh],
+            u32,
+        ) -> Result<crate::parts::PartPlan, crate::parts::PartError> = crate::parts::plan;
         assert_eq!(crate::parts::MAX_PARTS, 16);
         let _ = mesh::GeoError::NonFinite;
         let _ = primitives::cuboid_faces([1.0, 1.0, 1.0]);

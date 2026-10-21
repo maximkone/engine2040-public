@@ -748,6 +748,59 @@ mod tests {
     }
 
     #[test]
+    fn pilum_pulled_out_of_the_shield_frees_the_guard() {
+        let mut sim = sim_in(2, 40.0);
+        assert!(sim.set_rules(team_rules(1, 2)));
+        place(&mut sim, 0, [0.0, -20.0]);
+        place(&mut sim, 1, [0.0, 0.0]);
+        tick(&mut sim, &horn_script(2, 1));
+        let still = still_script(2, 1);
+        idle(&mut sim, 40, &still);
+        assert!(slot(&sim, 1).shield.stuck, "the pilum is in the scutum");
+        // The bearer works the pilum out: the attack press starts the pull.
+        let pull = [(0, 0), (ATTACK, 18_000)];
+        let mut seen = Vec::new();
+        for _ in 0..u32::from(PULL_TICKS) + 2 {
+            tick(&mut sim, &pull);
+            seen.extend(events(&sim));
+        }
+        assert!(
+            seen.iter()
+                .any(|e| matches!(e, PilumEvent::Pulled { fighter: 1 })),
+            "the pilum came out: {seen:?}"
+        );
+        assert!(!slot(&sim, 1).shield.stuck, "the scutum is free");
+        // The guard is free again: the block press comes up at once.
+        idle(&mut sim, 30, &still);
+        let guard = [(0, 0), (BLOCK, 18_000)];
+        tick(&mut sim, &guard);
+        assert!(sim.fight.fighters[1].is_blocking, "the guard is free");
+    }
+
+    #[test]
+    fn pilum_dropped_shield_frees_the_guard() {
+        let mut sim = sim_in(2, 40.0);
+        assert!(sim.set_rules(team_rules(1, 2)));
+        place(&mut sim, 0, [0.0, -20.0]);
+        place(&mut sim, 1, [0.0, 0.0]);
+        tick(&mut sim, &horn_script(2, 1));
+        let still = still_script(2, 1);
+        idle(&mut sim, 40, &still);
+        assert!(slot(&sim, 1).shield.stuck, "the pilum is in the scutum");
+        // The bearer drops the scutum: the dodge press.
+        let drop = [(0, 0), (DODGE, 18_000)];
+        tick(&mut sim, &drop);
+        let seen = events(&sim);
+        assert!(
+            seen.iter()
+                .any(|e| matches!(e, PilumEvent::Dropped { fighter: 1, .. })),
+            "the scutum went down: {seen:?}"
+        );
+        assert!(!slot(&sim, 1).shield.carried, "the scutum is on the ground");
+        assert!(!slot(&sim, 1).shield.stuck, "the pilum went down with it");
+    }
+
+    #[test]
     fn pilum_replay_twice_gives_the_same_hashes() {
         fn run() -> Vec<u64> {
             let mut sim = sim_in(4, 40.0);

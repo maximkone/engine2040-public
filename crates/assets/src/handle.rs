@@ -320,9 +320,7 @@ impl AssetStore {
     /// [`LoadState::Cancelled`], `None` for other live states.
     pub fn failure(&self, handle: AssetHandle) -> Result<Option<&str>, HandleError> {
         match self.live_slot(handle) {
-            Some(slot)
-                if slot.state == LoadState::Failed || slot.state == LoadState::Cancelled =>
-            {
+            Some(slot) if slot.state == LoadState::Failed || slot.state == LoadState::Cancelled => {
                 Ok(Some(slot.fail.as_str()))
             }
             Some(_) => Ok(None),
@@ -1051,7 +1049,10 @@ mod tests {
         let content_key = engine_core::hash_bytes(&bytes_in);
         let imported = store.import(&bytes_in, &[]).unwrap();
         let staged = store.stage(content_key).expect("stage");
-        assert_ne!(imported, staged, "a staged slot never shares an imported one");
+        assert_ne!(
+            imported, staged,
+            "a staged slot never shares an imported one"
+        );
         assert_eq!(store.len(), 2);
         // Freeing the staged slot leaves the imported one alone.
         store.free(staged).unwrap();
@@ -1068,7 +1069,9 @@ mod tests {
         let handle = store.import(&bytes(5, 8), &[]).unwrap();
         store.request_load(handle).unwrap();
         assert_eq!(
-            store.mark_cancelled(handle, "cancelled by the caller").unwrap(),
+            store
+                .mark_cancelled(handle, "cancelled by the caller")
+                .unwrap(),
             LoadState::Cancelled
         );
         assert_eq!(

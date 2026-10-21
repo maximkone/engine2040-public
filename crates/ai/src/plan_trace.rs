@@ -22,9 +22,9 @@
 //! (row SMX-01): `crates/arena` is held by another lane.
 
 use crate::blackboard::Blackboard;
-use crate::{Brain, Percept};
 use crate::goap::{self, Action, GoalState, PlanError};
 use crate::melee::StrikePhase;
+use crate::{Brain, Percept};
 
 /// The foe is inside strike range.
 const F_IN_RANGE: u64 = 1 << 0;
@@ -404,7 +404,11 @@ fn plan_every_goal(
                     }
                 };
                 if better {
-                    best = Some(Best { goal: id, plan, total });
+                    best = Some(Best {
+                        goal: id,
+                        plan,
+                        total,
+                    });
                 }
             }
             Err(refusal) => outcomes.push(PlanGoalOutcome {
@@ -575,10 +579,7 @@ mod tests {
         );
         assert_eq!(trace.blackboard.get("steps"), Some(2));
         assert_eq!(
-            trace
-                .goals
-                .iter()
-                .find(|g| g.goal == PlanGoalId::Guard),
+            trace.goals.iter().find(|g| g.goal == PlanGoalId::Guard),
             Some(&PlanGoalOutcome {
                 goal: PlanGoalId::Guard,
                 cost: None,

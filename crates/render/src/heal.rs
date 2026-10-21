@@ -617,13 +617,8 @@ impl RenderHeal {
         let mut cleared = true;
         for code in [DEVICE_FAULT, SURFACE_FAULT, OOM_FAULT] {
             let attempt = self.supervisor.attempts(code).max(1);
-            let proof = VerifiedRecovery::new(
-                code,
-                attempt,
-                HealValidation::Recovered,
-                before,
-                after,
-            );
+            let proof =
+                VerifiedRecovery::new(code, attempt, HealValidation::Recovered, before, after);
             if self.supervisor.reset_verified(&proof).is_err() {
                 cleared = false;
             }

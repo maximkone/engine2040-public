@@ -82,6 +82,22 @@ pub fn flatten(scene: &Scene) -> Vec<f32> {
 mod tests {
     use super::{BILLBOARD_STRIDE, GROUND_STRIDE, HEADER, KIND_HOUSE, KIND_UNIT};
     use crate::shell::Shell;
+    use kam2_game::house::{HouseManifest, HouseState};
+    use kam2_game::soldier::SoldierManifest;
+
+    /// The committed cottage manifest; it is the authority for the cell size.
+    const HOUSE_MANIFEST_JSON: &str = include_str!("../../../content/kam2/house/manifest.json");
+    /// The committed soldier manifest; it is the authority for the cell size.
+    const SOLDIER_MANIFEST_JSON: &str =
+        include_str!("../../../content/kam2/soldier/manifest.json");
+
+    fn house_manifest() -> HouseManifest {
+        HouseManifest::parse(HOUSE_MANIFEST_JSON).expect("the committed house manifest parses")
+    }
+
+    fn soldier_manifest() -> SoldierManifest {
+        SoldierManifest::parse(SOLDIER_MANIFEST_JSON).expect("the committed soldier manifest parses")
+    }
 
     fn frame() -> (Shell, Vec<f32>) {
         let shell = Shell::new().expect("the start village places");
@@ -127,7 +143,8 @@ mod tests {
         let (shell, flat) = frame();
         assert_eq!(shell.units(), 4);
         assert_eq!(shell.houses(), 3);
-        let billboards = flat[1] as usize;
+        let soldier = soldier_manifest().size();
+        let cottage = house_manifest().size();        let billboards = flat[1] as usize;
         let base = HEADER + (flat[0] as usize) * GROUND_STRIDE;
         for i in 0..billboards {
             let o = base + i * BILLBOARD_STRIDE;
@@ -135,10 +152,10 @@ mod tests {
             let width = flat[o + 6];
             let height = flat[o + 7];
             if kind == KIND_UNIT {
-                assert_eq!((width, height), (64.0, 64.0), "soldier cell");
+                assert_eq!([width, height], soldier, "soldier cell");
             } else {
                 assert_eq!(kind, KIND_HOUSE);
-                assert_eq!((width, height), (128.0, 128.0), "cottage cell");
+                assert_eq!([width, height], cottage, "cottage cell");
             }
             for value in &flat[o + 8..o + 12] {
                 assert!((0.0..=1.0).contains(value), "uv {value}");
@@ -172,13 +189,21 @@ mod tests {
         let shell = Shell::new().expect("the start village places");
         let scene = shell.scene();
         assert_eq!(shell.ticks(), 0);
+        let manifest = house_manifest();
+        let row = |state: HouseState| {
+            let row = manifest.row(state).expect("the manifest names the state");
+            let [origin, _] = manifest.cell_uv(row).expect("the state row is inside the atlas");
+            origin[1]
+        };
+        let finished = row(HouseState::Finished);
+        let half = row(HouseState::HalfBuilt);
         let rows: Vec<f32> = scene.houses.iter().map(|quad| quad.uv_min[1]).collect();
         assert!(
-            rows.iter().any(|v| (v - 131.0 / 390.0).abs() < 1e-6),
+            rows.iter().any(|v| (v - half).abs() < 1e-6),
             "the farm and the woodcutter still build at tick zero: {rows:?}"
         );
         assert!(
-            rows.iter().any(|v| (v - 1.0 / 390.0).abs() < 1e-6),
+            rows.iter().any(|v| (v - finished).abs() < 1e-6),
             "the warehouse is finished at tick zero: {rows:?}"
         );
     }

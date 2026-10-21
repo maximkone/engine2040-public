@@ -147,16 +147,10 @@ pub fn fx_ragdoll(
 /// The body says which joints a blade may take and what that cut costs; the
 /// sim says the piece came off. A joint the body does not carry, or one a
 /// blade cannot take, is refused and the world is left as it was.
-pub fn fx_limb(
-    world: &mut PhysFx,
-    body: &BodyDesc,
-    event: &LimbEvent,
-) -> Result<LimbFx, Error> {
-    let bone = body
-        .bone(&event.bone)
-        .ok_or_else(|| Error::UnknownBone {
-            name: event.bone.clone(),
-        })?;
+pub fn fx_limb(world: &mut PhysFx, body: &BodyDesc, event: &LimbEvent) -> Result<LimbFx, Error> {
+    let bone = body.bone(&event.bone).ok_or_else(|| Error::UnknownBone {
+        name: event.bone.clone(),
+    })?;
     let energy = body
         .cut_energy(&event.bone)
         .ok_or_else(|| Error::UncuttableJoint {
@@ -166,7 +160,13 @@ pub fn fx_limb(
         radius: bone.radius,
         half_height: bone.half_height,
     };
-    world.spawn_limb_of(crate::Material::Flesh, event.part, shape, event.at, event.velocity)?;
+    world.spawn_limb_of(
+        crate::Material::Flesh,
+        event.part,
+        shape,
+        event.at,
+        event.velocity,
+    )?;
     Ok(LimbFx {
         part: event.part,
         bone: event.bone.clone(),
@@ -177,11 +177,7 @@ pub fn fx_limb(
 
 /// Paints a wall that broke: spawns the pieces and answers with how many went
 /// in. The body's gore rides along in the receipt for the picture.
-pub fn fx_break(
-    world: &mut PhysFx,
-    body: &BodyDesc,
-    event: &BreakEvent,
-) -> Result<BreakFx, Error> {
+pub fn fx_break(world: &mut PhysFx, body: &BodyDesc, event: &BreakEvent) -> Result<BreakFx, Error> {
     let batch = world.spawn_debris_of(crate::Material::Stone, &event.shards, event.impulse)?;
     Ok(BreakFx {
         batch: batch.id,
@@ -192,11 +188,7 @@ pub fn fx_break(
 
 /// Paints a blast: shoves the bodies inside it and answers with how many
 /// moved. The body's gore rides along in the receipt for the picture.
-pub fn fx_blast(
-    world: &mut PhysFx,
-    body: &BodyDesc,
-    event: &BlastEvent,
-) -> Result<BlastFx, Error> {
+pub fn fx_blast(world: &mut PhysFx, body: &BodyDesc, event: &BlastEvent) -> Result<BlastFx, Error> {
     let pushed = world.apply_blast(event.blast)?;
     Ok(BlastFx {
         pushed,

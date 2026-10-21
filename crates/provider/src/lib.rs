@@ -103,9 +103,7 @@ pub use fallback::{
     fallback_for, FallbackCause, FallbackErr, FallbackNotice, ScriptedFallback, MAX_NOTICE_LEN,
 };
 pub use policy::{AiSessionPolicy, CancelReason, Fallback, JobState, ProviderCapabilities};
-pub use pressure::{
-    FrameWindow, PressureError, PressureFeed, FRAME_WINDOW, MAX_FRAME_WINDOW,
-};
+pub use pressure::{FrameWindow, PressureError, PressureFeed, FRAME_WINDOW, MAX_FRAME_WINDOW};
 pub use prompt::{
     gate_edit, score_permille, text_digest, EditReport, EvalModel, PromptAsset, PromptError,
     PromptEval, BUILTIN_KINDS, MAX_EVALS,

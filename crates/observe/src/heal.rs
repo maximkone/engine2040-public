@@ -154,7 +154,10 @@ impl fmt::Display for HealError {
             }
             Self::ScopeMismatch { code } => {
                 let label = code.name().unwrap_or("unknown");
-                write!(f, "heal observation does not match the fault row scope: {label}")
+                write!(
+                    f,
+                    "heal observation does not match the fault row scope: {label}"
+                )
             }
             Self::UnknownHeal { code, attempt } => {
                 let label = code.name().unwrap_or("unknown");

@@ -1,0 +1,25 @@
+# The curated scenario list of the ship differential.
+#
+# One tier per speed. The fast tier runs on every change; the deep tier runs
+# by hand or on a schedule. Every scenario names the binary that prints the
+# receipt, under the build directory the tool is given.
+#
+# Format: the first line names the format, then a tier line per tier and a
+# scenario line per scenario. A scenario is
+# `scenario <name> bin=<file> [args=<arg>]...`.
+
+differential scenario list v1
+
+# The fast tier: the receipts every change must keep. The matrix row holds
+# the legacy golden hash, the break corpus digest and the block digests; the
+# arena rows hold the per tick match tape and the fight tally.
+tier fast
+scenario matrix bin=matrix_line
+scenario arena bin=arena_line
+
+# The deep tier: the slow proofs. The spine column plays twenty seeded
+# 600-tick tapes; the ragdoll rows play the fall. Both need their own
+# features, so the deep tier is built apart: `--features spine,ragdoll`.
+tier deep
+scenario spine bin=spine_parity_line
+scenario ragdoll bin=ragdoll_line

@@ -46,7 +46,10 @@ impl std::fmt::Display for PartError {
         match self {
             Self::Empty => write!(f, "geo: part set is empty"),
             Self::TooManyParts { parts } => {
-                write!(f, "geo: part set holds {parts} parts, MAX_PARTS is {MAX_PARTS}")
+                write!(
+                    f,
+                    "geo: part set holds {parts} parts, MAX_PARTS is {MAX_PARTS}"
+                )
             }
             Self::EmptyPart { index } => write!(f, "geo: part {index} has no triangles"),
             Self::NonFinite => write!(f, "geo: a part position is not finite"),
@@ -76,7 +79,8 @@ impl PartPlan {
     /// Triangles the whole set may keep.
     #[must_use]
     pub fn total_budget(&self) -> u32 {
-        self.budget_per_part.saturating_mul(u32::try_from(self.parts).unwrap_or(u32::MAX))
+        self.budget_per_part
+            .saturating_mul(u32::try_from(self.parts).unwrap_or(u32::MAX))
     }
 }
 
@@ -251,8 +255,14 @@ mod tests {
         let first = plan(&refs, 5_000).expect("plan");
         let second = plan(&refs, 5_000).expect("plan again");
         assert_eq!(first, second);
-        let a: Vec<GeoMesh> = refs.iter().map(|m| translated(m, first.translate)).collect();
-        let b: Vec<GeoMesh> = refs.iter().map(|m| translated(m, second.translate)).collect();
+        let a: Vec<GeoMesh> = refs
+            .iter()
+            .map(|m| translated(m, first.translate))
+            .collect();
+        let b: Vec<GeoMesh> = refs
+            .iter()
+            .map(|m| translated(m, second.translate))
+            .collect();
         for (left, right) in a.iter().zip(b.iter()) {
             assert_eq!(left.digest(), right.digest());
         }

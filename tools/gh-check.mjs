@@ -78,6 +78,10 @@ export const parseArgs = (argv, env = {}) => {
     else { out.error = `unknown flag ${a}`; break; }
   }
   out.cmd = argv.slice(i).join(" ").trim();
+  // cargo has none of these, so one after the cargo line is ours put in the wrong place: cargo would only fail on it remotely
+  const rest = argv.slice(i); const dash = rest.indexOf("--");
+  const late = (dash < 0 ? rest : rest.slice(0, dash)).find((a) => /^--(?:budget|fresh|only|wait|remote-only)$/.test(a));
+  if (late && !out.error) out.error = `${late} is a gh-check flag: put it before the cargo line (node tools/gh-check.mjs ${late} ... cargo ...)`;
   return out;
 };
 

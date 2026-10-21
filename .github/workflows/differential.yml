@@ -1,0 +1,106 @@
+name: differential
+
+# The ship differential: the reference build and the candidate build play the
+# same curated scenario list and every receipt line is diffed. A build that
+# changed behaviour shows up as a divergence; a build that only moved its
+# clock, or that ran on another machine, does not. The tool exits 1 on one
+# divergence, so the job fails on it.
+#
+# The pull request leg plays the fast tier. The manual leg plays any tier
+# and names the ref to compare against.
+on:
+  workflow_dispatch:
+    inputs:
+      reference:
+        description: The ref the candidate is compared against
+        required: false
+        default: master
+      tier:
+        description: The scenario tier to play
+        required: false
+        default: fast
+  pull_request:
+    paths:
+      - "crates/**"
+      - "fixtures/differential/**"
+      - ".github/workflows/differential.yml"
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the older run.
+concurrency:
+  group: differential-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  # CI never reads the line tables the dev profile emits.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+
+jobs:
+  differential:
+    # The public mirror is the build farm; the private dev repo never runs it.
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      TIER: ${{ github.event.inputs.tier || 'fast' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+      - uses: actions/checkout@v5
+        with:
+          path: reference
+          ref: ${{ github.event.pull_request.base.sha || github.event.inputs.reference }}
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml)
+        working-directory: candidate
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: differential
+          path: |
+            candidate/target
+            reference/target
+      - name: build the reference
+        working-directory: reference
+        run: cargo build --locked --release -p engine-proof --features arena --bins
+      - name: build the candidate
+        working-directory: candidate
+        run: cargo build --locked --release -p engine-proof --features arena --bins
+      - name: collect the reference receipt
+        working-directory: candidate
+        run: >-
+          cargo run --locked --release -p engine-proof --bin differential --
+          --scenarios fixtures/differential/scenarios.txt
+          --tier "$env:TIER"
+          --build ../reference/target/release
+          --out ../reference.log
+      - name: collect the candidate receipt
+        working-directory: candidate
+        run: >-
+          cargo run --locked --release -p engine-proof --bin differential --
+          --scenarios fixtures/differential/scenarios.txt
+          --tier "$env:TIER"
+          --build target/release
+          --out ../candidate.log
+      # The tool exits 1 on one divergence, so this step fails the job.
+      - name: compare the two receipts
+        working-directory: candidate
+        run: >-
+          cargo run --locked --release -p engine-proof --bin differential --
+          --reference ../reference.log
+          --candidate ../candidate.log
+      - name: upload the two receipts
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: differential-receipts
+          path: |
+            reference.log
+            candidate.log

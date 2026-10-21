@@ -48,7 +48,9 @@ pub const STAGED_FIGHT_FRAMES: usize = 4;
 /// cube key or the dressing base).
 pub const FIGHT_MESH_ID_BASE: u64 = 0xF167_7400;
 /// Fighter body size in meters `[sx, sy, sz]`: the box the stance in
-/// [`BODY_BOXES`] fits inside, fists and feet included.
+/// [`BODY_BOXES`] fits inside, fists and feet included. The box stands on
+/// the floor: its width and depth are measured around the feet, and its
+/// height runs up from them.
 pub const FIGHT_BODY_SIZE_M: [f32; 3] = [0.9, 1.8, 0.9];
 
 /// One fighter's frame state: sim position plus health plus hit flash.
@@ -1211,12 +1213,21 @@ mod tests {
         // Feet sit exactly on the seam the sim gives; a body that floats or sinks reads wrong.
         assert!((min[1] - feet[1]).abs() < 1e-4, "feet at the seam: {min:?}");
         for axis in 0..3 {
-            let half = 0.5 * FIGHT_BODY_SIZE_M[axis];
+            // The box stands on the floor: up from the feet on the height
+            // axis, around the feet on the other two.
+            let (low, high) = if axis == 1 {
+                (feet[axis], feet[axis] + FIGHT_BODY_SIZE_M[axis])
+            } else {
+                let half = 0.5 * FIGHT_BODY_SIZE_M[axis];
+                (feet[axis] - half, feet[axis] + half)
+            };
             assert!(
-                min[axis] >= feet[axis] - half - 1e-4 && max[axis] <= feet[axis] + half + 1e-4,
-                "axis {axis}: [{}, {}] outside +/-{half}",
+                min[axis] >= low - 1e-4 && max[axis] <= high + 1e-4,
+                "axis {axis}: [{}, {}] outside [{}, {}]",
                 min[axis] - feet[axis],
-                max[axis] - feet[axis]
+                max[axis] - feet[axis],
+                low - feet[axis],
+                high - feet[axis]
             );
         }
         // The head reaches the stated height, so a person reads at fight distance.

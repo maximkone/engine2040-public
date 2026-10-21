@@ -331,7 +331,9 @@ mod tests {
             FrameWindow::new(MAX_FRAME_WINDOW + 1).err(),
             Some(PressureError::Window(MAX_FRAME_WINDOW + 1))
         );
-        assert!(PressureError::Window(0).to_string().contains("frame window"));
+        assert!(PressureError::Window(0)
+            .to_string()
+            .contains("frame window"));
     }
 
     #[test]
@@ -379,7 +381,9 @@ mod tests {
         assert_eq!(notices[0].to, Placement::Defer);
         assert_eq!(
             notices[0].reason,
-            MoveReason::FramePressure { load_permille: 1_200 }
+            MoveReason::FramePressure {
+                load_permille: 1_200
+            }
         );
 
         // The same series twice gives the same notices: no clock, no guess.
@@ -416,7 +420,8 @@ mod tests {
     fn a_vram_reading_feeds_the_arbiter_and_never_guesses() {
         // OPT27: the read_vram seam. Bytes become the MB the thresholds use;
         // a missing half reads as unknown, never as a guess.
-        let known = VramHeadroom::from_bytes(Some(5 * 1024 * 1024 * 1024), Some(1024 * 1024 * 1024));
+        let known =
+            VramHeadroom::from_bytes(Some(5 * 1024 * 1024 * 1024), Some(1024 * 1024 * 1024));
         assert_eq!(
             known,
             VramHeadroom::Known {
@@ -440,7 +445,8 @@ mod tests {
         cfg.degrade_after = 1;
         cfg.recover_after = 1;
         let mut feed = new_feed(cfg, 20);
-        let short = VramHeadroom::from_bytes(Some(2 * 1024 * 1024 * 1024), Some(1_900 * 1024 * 1024));
+        let short =
+            VramHeadroom::from_bytes(Some(2 * 1024 * 1024 * 1024), Some(1_900 * 1024 * 1024));
         for _ in 0..4 {
             assert!(
                 feed.push_frame(at(400), short).is_none(),

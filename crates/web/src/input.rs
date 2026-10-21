@@ -803,7 +803,8 @@ mod tests {
             "the last slot inside the cap is legal"
         );
         assert_eq!(
-            s.fighter_input(0, FighterId(MAX_PARTICIPANTS), 0).unwrap_err(),
+            s.fighter_input(0, FighterId(MAX_PARTICIPANTS), 0)
+                .unwrap_err(),
             FighterError::UnknownFighter(MAX_PARTICIPANTS)
         );
         assert_eq!(

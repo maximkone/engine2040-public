@@ -331,7 +331,10 @@ mod tests {
         let mut cap = HealCap::new(2, 100);
         assert!(!cap.observe(0));
         assert!(!cap.observe(10));
-        assert!(cap.observe(20), "the third heal in the window blows the cap");
+        assert!(
+            cap.observe(20),
+            "the third heal in the window blows the cap"
+        );
         assert!(cap.exceeded());
         assert_eq!(cap.heals_in_window(20), 3);
         // A heal one window later drops the old ones.

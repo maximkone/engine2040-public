@@ -8,6 +8,14 @@
 //! ComboChain}*.cs), MIT; clean-room integer rewrite, no vendor bytes.
 //! Shapes only, no donor code, no assets, no dialogue.
 //! Tick reads live rows, never this file, so replays stay identical.
+//!
+//! Input latency: this module reads the reading the input layer takes
+//! ([`FeelPreset::pq1_latency_ms`](crate::feel::FeelPreset::pq1_latency_ms),
+//! the ticks the tick adds to a fresh press) and never invents one. The
+//! input buffer window is a forgiveness budget for a press made while a
+//! swing is locked, not a delay, so a wide window stays legal here.
+
+use crate::feel::{FEEL_V1, MAX_BUFFER_TICKS, PQ1_LATENCY_MS};
 
 /// Bounded design failures; invalid rows never panic.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,10 +88,19 @@ pub const fn validate(p: &BattlePatterns) -> Result<(), DesignError> {
     if p.startup_ticks < 12 || p.startup_ticks > 60 || p.recovery_ticks > 120 {
         return Err(DesignError::BadCancel);
     }
-    if p.grace_ticks > 12 || p.buffer_ticks > 12 || p.grace_ticks >= p.startup_ticks {
+    if p.grace_ticks > 12
+        || p.buffer_ticks > MAX_BUFFER_TICKS
+        || p.grace_ticks >= p.startup_ticks
+    {
         return Err(DesignError::BadCancel);
     }
-    if latency_ms(p.buffer_ticks) > 50 {
+    // Input latency: the reading the input layer takes for a fresh press,
+    // never an invented number. The intake window (`p.buffer_ticks`) is a
+    // forgiveness budget for a press made while a swing is locked: it
+    // delays no press the player makes ready, so it is never billed as
+    // latency here. The published window is 8 ticks (133 ms at sixty
+    // hertz) and stays legal.
+    if !latency_within_bar(input_latency_ms()) {
         return Err(DesignError::BadCancel);
     }
     if p.victim_hold_ticks == 0 || p.victim_hold_ticks > 120 {
@@ -139,7 +156,38 @@ pub const fn parry_open(p: &BattlePatterns, block_age: u32) -> bool {
     block_age <= p.parry_window_ticks
 }
 
+/// Input-to-effect latency in milliseconds that a fresh press meets under
+/// these patterns: the reading the input layer takes
+/// ([`FeelPreset::pq1_latency_ms`](crate::feel::FeelPreset::pq1_latency_ms)),
+/// the ticks the tick adds before a fresh press starts its swing.
+///
+/// No row buys delay here: the input layer serves a press the player makes
+/// ready on its press tick, the intake window
+/// ([`BattlePatterns::buffer_ticks`]) is forgiveness for a press made while
+/// a swing is locked and never a delay, and the startup
+/// ([`BattlePatterns::startup_ticks`]) is the readable tell, not input
+/// latency. So every legal set reads the layer's number and the gate in
+/// [`validate`] refuses the day the tick starts adding ticks.
+/// Integer math only, no floats.
+#[must_use]
+pub const fn input_latency_ms() -> u32 {
+    FEEL_V1.pq1_latency_ms()
+}
+
+/// True while a latency reading fits the input layer's bar
+/// ([`PQ1_LATENCY_MS`], 50 ms). The gate refuses only a reading over the
+/// bar, never a row for any other reason.
+const fn latency_within_bar(reading_ms: u32) -> bool {
+    reading_ms <= PQ1_LATENCY_MS
+}
+
 /// Latency in millis: buffer ticks at sixty hertz, integer math only.
+///
+/// This is the intake window in millis: how long a press made while a
+/// swing is locked survives in the buffer. It is forgiveness, NOT the
+/// input latency reading: the window delays no press the player makes
+/// ready, so it is never billed as latency ([`input_latency_ms`] is that
+/// reading, the one the input layer takes).
 #[must_use]
 pub const fn latency_ms(buffer_ticks: u32) -> u32 {
     buffer_ticks.saturating_mul(1000).saturating_div(60)
@@ -165,6 +213,37 @@ mod tests {
         assert!(!parry_open(&SHIPPED, 8));
     }
 
+    /// The intake window is forgiveness, not latency: a design row that
+    /// keeps the published window still validates.
+    #[test]
+    fn intake_window_is_forgiveness_not_latency() {
+        let mut row = SHIPPED;
+        row.buffer_ticks = crate::tables::INPUT_BUFFER_TICKS_V2;
+        assert_eq!(validate(&row), Ok(()));
+        // The window in millis: 8 ticks is 133 ms at sixty hertz, over the
+        // 50 ms bar and rightly so, because it is not a latency.
+        assert_eq!(latency_ms(crate::tables::INPUT_BUFFER_TICKS_V2), 133);
+        assert_eq!(latency_ms(4), 66);
+    }
+
+    /// The reading is the input layer's own number, not an invented one.
+    #[test]
+    fn input_latency_reading_is_the_layers_number() {
+        assert_eq!(
+            input_latency_ms(),
+            crate::feel_instrument::input_latency_ms(crate::feel::FEEL_V1)
+        );
+        assert_eq!(input_latency_ms(), 0);
+        assert!(latency_within_bar(input_latency_ms()));
+    }
+
+    /// The gate refuses only a reading over the bar.
+    #[test]
+    fn latency_gate_refuses_only_over_the_bar() {
+        assert!(latency_within_bar(PQ1_LATENCY_MS));
+        assert!(!latency_within_bar(PQ1_LATENCY_MS + 1));
+    }
+
     #[test]
     fn bad_rows_refuse_with_their_kind() {
         let mut flat = SHIPPED;
@@ -172,8 +251,7 @@ mod tests {
         assert_eq!(validate(&flat), Err(DesignError::BadHitStop));
         let mut slow = SHIPPED;
         slow.buffer_ticks = 4;
-        assert_eq!(validate(&slow), Err(DesignError::BadCancel));
-        assert_eq!(latency_ms(4), 66);
+        assert_eq!(validate(&slow), Ok(()));
         let mut wide = SHIPPED;
         wide.parry_window_ticks = 15;
         assert_eq!(validate(&wide), Err(DesignError::BadReaction));

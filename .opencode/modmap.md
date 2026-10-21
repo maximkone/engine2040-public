@@ -1,5 +1,5 @@
 # modmap: engine2040
-_43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the file's own leading `//!` line. Read it with Grep (a crate name or a word), never whole. Generated from tracked files by `node tools/modmap.mjs --write`; do not edit by hand._
+_43 crates, 1402 Rust files. One line per file: `crate/path` · lines · the file's own leading `//!` line. Read it with Grep (a crate name or a word), never whole. Generated from tracked files by `node tools/modmap.mjs --write`; do not edit by hand._
 
 ## ai (engine-ai, 40 files, 27706 lines)
 - `ai/src/lib.rs` · 363 · ai: embedded seam (brief -> patch -> run). Typed, no strings; AI never touches sim memory.
@@ -462,7 +462,7 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `editor/tests/components.rs` · 388 · Typed component ops through the command service: eight kinds set, saved,
 - `editor/tests/material_ops.rs` · 345 · NS31a2: the document holds the material table and edits it with undo.
 
-## endpoint (engine-endpoint, 144 files, 87811 lines)
+## endpoint (engine-endpoint, 144 files, 87817 lines)
 - `endpoint/src/lib.rs` · 97 · endpoint: agent driving seam. Core is std-only; the `mcp` feature adds
 - `endpoint/src/assert_run.rs` · 415 · Sealed assert runs over recorded tapes; harness only, never in the tick.
 - `endpoint/src/assistant.rs` · 2774 · EA1d assistant apply: fork-passed proposals land through `tx.apply` bound
@@ -595,12 +595,12 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `endpoint/tests/it/lib_wiring_vectors.rs` · 148 · Std-only lib wiring vectors: the endpoint crate root without `mcp`.
 - `endpoint/tests/it/main.rs` · 24 · One integration-test binary for engine-endpoint.
 - `endpoint/tests/it/mcp_manifest_vectors.rs` · 45 · MCP manifest pins: ListTools shape plus path gate, registry-direct.
-- `endpoint/tests/it/mcp_stdio.rs` · 531 · MCP5 scripted external client: list, preview, apply and undo over stdio.
+- `endpoint/tests/it/mcp_stdio.rs` · 533 · MCP5 scripted external client: list, preview, apply and undo over stdio.
 - `endpoint/tests/it/redteam.rs` · 612 · RV1 red-team tape suite: replayed prompt injections via briefs, asset
 - `endpoint/tests/it/rules_door.rs` · 285 · Rules through the door. A script set with `rules.set` drives fighter slots in
 - `endpoint/tests/it/rules_pack_vectors.rs` · 147 · Rules pack vectors: the `rules` pack as the door registry sees it.
 - `endpoint/tests/it/scene_drives_match.rs` · 250 · One world: an AI's scene edit changes what is played, undo restores it.
-- `endpoint/tests/it/scene_query_cone.rs` · 338 · scene.query cone vectors: the door answers exact ids over a staged
+- `endpoint/tests/it/scene_query_cone.rs` · 342 · scene.query cone vectors: the door answers exact ids over a staged
 - `endpoint/tests/it/session_chaos.rs` · 761 · Session-isolation chaos: twelve proposers, one object, one winner.
 - `endpoint/tests/it/step20x2.rs` · 253 · `play.step` 20x2-tick PNG receipt proof: twenty live steps of two ticks.
 - `endpoint/tests/it/tool_budget_exhaustion.rs` · 147 · MCP tool-budget exhaustion vectors: the ledger refuses bloat, the floor holds.
@@ -611,7 +611,7 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 ## engine-chaos (engine-chaos, 1 files, 165 lines)
 - `engine-chaos/src/lib.rs` · 165 · Thin A9 chaos facade over the proof suite.
 
-## game (engine-game, 104 files, 85894 lines)
+## game (engine-game, 105 files, 86035 lines)
 - `game/src/lib.rs` · 3914 · game: packaged arena app skeleton.
 - `game/build.rs` · 25 · (no //! line)
 - `game/src/agent_seat.rs` · 478 · An agent seat for the live window: one loopback client pushes validated
@@ -675,6 +675,7 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `game/src/netgame_route.rs` · 310 · netgame_route: where a [`NetGame`](super::NetGame) peer sends and hears
 - `game/src/netgame_wire.rs` · 354 · netgame_wire: the invitation code and the game-level datagrams of a
 - `game/src/pad.rs` · 711 · Gamepad sticks and buttons through one shared bindings table.
+- `game/src/page_duel.rs` · 130 · page_duel: the browser page's duel, sized to the kit corridor.
 - `game/src/pose_hold.rs` · 149 · pose_hold: which fighter slots freeze while sim hitstop holds.
 - `game/src/practice.rs` · 279 · Practice swap: staged combat tuning applied at a tick boundary.
 - `game/src/progress.rs` · 162 · progress: versioned game-progression payload owned by `engine-game`.
@@ -686,7 +687,7 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `game/src/spear_look.rs` · 801 · spear_look: the picture of the spear grapple, a spear in flight, stuck, or dropped, and the
 - `game/src/spear_window.rs` · 745 · spear_window: the spear grapple in the playable window. It draws the spear, its trail and the
 - `game/src/stage_bodies.rs` · 207 · stage_bodies: the CPU pose step of the fighter look, with no GPU.
-- `game/src/staged_fight_frames.rs` · 1474 · staged fight frames: the staged 600-tick receipt drives arena fight frames.
+- `game/src/staged_fight_frames.rs` · 1485 · staged fight frames: the staged 600-tick receipt drives arena fight frames.
 - `game/src/steam.rs` · 353 · Steamworks backend: achievements, stats, versioned cloud generations and
 - `game/src/view_truth.rs` · 1544 · View truth: what the window draws, as numbers, before any pixel exists.
 - `game/src/virt.rs` · 361 · virt: virtual time for the window's tick accumulator (GP45).
@@ -746,7 +747,7 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `input/src/look.rs` · 260 · look: presentation-only look channel beside the tape.
 - `input/src/map.rs` · 413 · map: action map. One action = any-of chords; one chord = all-of inputs. Missing remote ticks repeat last.
 
-## kam2-game (kam2-game, 14 files, 5400 lines)
+## kam2-game (kam2-game, 14 files, 5494 lines)
 - `kam2-game/src/lib.rs` · 41 · kam2-game: KAM6 first playable match - 16x12 window village and the AI mayor on side 1.
 - `kam2-game/src/ai_match.rs` · 483 · KAM6: the AI mayor in the side-1 seat, in the same match the player drives.
 - `kam2-game/src/bin/kam2match/main.rs` · 81 · KAM6 headless match: the AI mayor in the side-1 seat for 3000 ticks.
@@ -754,7 +755,7 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `kam2-game/src/bin/kam2play/art.rs` · 350 · The soldier and cottage art at runtime: manifest, atlas PNG and fallback.
 - `kam2-game/src/bin/kam2play/gpu.rs` · 1059 · The window's GPU leg: two instanced pipelines, two sprite atlases, readback.
 - `kam2-game/src/bin/kam2play/main.rs` · 579 · KAM6: the first playable kam2 match, against the AI mayor.
-- `kam2-game/src/house.rs` · 281 · The packed cottage atlas: manifest fields, build states, cell and pivot.
+- `kam2-game/src/house.rs` · 375 · The packed cottage atlas: manifest fields, build states, cell and pivot.
 - `kam2-game/src/hud.rs` · 350 · The play HUD: the five-ware stock bar, the minimap frame and the status line.
 - `kam2-game/src/orders.rs` · 567 · CMB1: the order layer above the sim - close the distance, then strike.
 - `kam2-game/src/scene.rs` · 562 · One frame of geometry: ground diamonds and house/unit sprite quads.
@@ -1188,7 +1189,7 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `provider/src/vendor.rs` · 1644 · vendor: shared wire helpers for the HTTP adapters.
 - `provider/tests/matrix.rs` · 2409 · Provider conformance matrix: every backend x nine columns.
 
-## render (engine-render, 156 files, 117856 lines)
+## render (engine-render, 157 files, 118138 lines)
 - `render/src/lib.rs` · 531 · render: NullRenderer (headless proof). 16x16 tiles, MAX lights/tile.
 - `render/src/aa_scale.rs` · 2485 · aa_scale: SMAA fallback plus dynamic resolution around RP1 (RP4).
 - `render/src/aa_scale/gpu.rs` · 632 · (no //! line)
@@ -1278,7 +1279,7 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `render/src/present/gpu_present/frame_id_tests.rs` · 53 · frame_id_tests: id-target readback for frame tests (window build).
 - `render/src/present/gpu_present/gate.rs` · 323 · gate: the pass-truth gate's seams on the window's live frame.
 - `render/src/present/gpu_present/gtao_live.rs` · 1016 · gtao_live: GTAO on the forward-stored depth, on the device, in the live frame (LF3).
-- `render/src/present/gpu_present/live.rs` · 3229 · live: the window-path frames (live, opt-in probe, offscreen twin sink).
+- `render/src/present/gpu_present/live.rs` · 3331 · live: the window-path frames (live, opt-in probe, offscreen twin sink).
 - `render/src/present/gpu_present/msaa.rs` · 482 · msaa: 4x MSAA on/off switch state, the edge-blend helper (EG13 slice 1)
 - `render/src/present/gpu_present/presenter.rs` · 3473 · presenter: `Presenter` assembly, lifecycle and cache accessors.
 - `render/src/present/gpu_present/quality_apply.rs` · 150 · quality_apply: a quality tier's knobs reaching the live frame (WEB8 gap).
@@ -1304,8 +1305,9 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `render/src/shadow_cluster.rs` · 2536 · shadow_cluster: cascaded sun shadows plus clustered torch lights.
 - `render/src/shadow_cluster/torch_cluster.rs` · 899 · torch_cluster: clustered torch light assignment over screen tiles.
 - `render/src/shadow_post.rs` · 290 · shadow_post: CSM params + ACES tonemap + Sunset/Noir presets. Data-first, std-only.
+- `render/src/shoulder.rs` · 28 · shoulder: the shoulder camera's geometry, shared by the renderer and the
 - `render/src/sky.rs` · 2367 · sky: physical sky bake (Hillaire 2020 school, reimplemented) + EV100 exposure.
-- `render/src/spot.rs` · 1958 · spot: shadowed spot lights (flashlights and lamps) for the clustered path.
+- `render/src/spot.rs` · 2110 · spot: shadowed spot lights (flashlights and lamps) for the clustered path.
 - `render/src/stump.rs` · 324 · stump: the cap mesh that closes a severed limb on the remaining body (RZ3).
 - `render/src/temporal.rs` · 387 · temporal: named history textures that live across frames, with a
 - `render/src/test_gpu.rs` · 231 · Test GPU gate: a GPU test that finds no adapter says so, and
@@ -1448,17 +1450,17 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `ui/src/tutorial.rs` · 746 · tutorial: guided first fight for a fresh profile.
 - `ui/tests/ime_commit.rs` · 25 · IME gate: commits insert at the cursor only when allowed, controls dropped.
 
-## web (engine-web, 20 files, 9258 lines)
+## web (engine-web, 20 files, 9783 lines)
 - `web/src/lib.rs` · 89 · web: the browser shell, a WebGPU device, a cleared canvas and one JSON line of facts (WEB4).
 - `web/src/anim.rs` · 529 · The visible parts of a frame, as pure functions of time so they run and test without a GPU:
-- `web/src/arena.rs` · 1104 · The arena frame in the browser (WEB5): the render crate's own presenter, driven from
-- `web/src/arena_view.rs` · 430 · What the arena page shows and measures, as pure functions so they test without a GPU: the
+- `web/src/arena.rs` · 1253 · The arena frame in the browser (WEB5): the render crate's own presenter, driven from
+- `web/src/arena_view.rs` · 784 · What the arena page shows and measures, as pure functions so they test without a GPU: the
 - `web/src/audio.rs` · 425 · Audio on the web (WEB7): when the WebAudio context may start, what the page says about it,
 - `web/src/bin/input_tape.rs` · 40 · `input_tape <script>`: replay an input script on the PC and print its tape (WEB7).
 - `web/src/bin/net_join.rs` · 159 · `net_join --server HOST:PORT [--ticks N] [--token N] [--deadline-s N] [--quiet]`: a native
 - `web/src/browser.rs` · 429 · Browser glue for input and audio (WEB7). Compiled for `wasm32` only. The decisions live in
 - `web/src/content.rs` · 294 · content: the cooked arena content, fetched once and read as an asset source.
-- `web/src/fight.rs` · 476 · fight (wasm32): the page plays the match it draws (WEB15).
+- `web/src/fight.rs` · 491 · fight (wasm32): the page plays the match it draws (WEB15).
 - `web/src/golden.rs` · 268 · The engine, not only the GPU: the golden tape and the break corpus, run inside the page.
 - `web/src/input.rs` · 910 · Browser input mapped onto `engine-input` (WEB7): keyboard, mouse with pointer lock, and the
 - `web/src/input_tape.rs` · 228 · The input tape of a script (WEB7): the same device events run through [`InputState`] in the
@@ -1466,7 +1468,7 @@ _43 crates, 1400 Rust files. One line per file: `crate/path` · lines · the fil
 - `web/src/netplay.rs` · 309 · netplay (wasm32): the page plays a duel against a native dedicated server.
 - `web/src/netquery.rs` · 431 · netquery: where the page's address sends the net duel (WEB9, WEB12).
 - `web/src/recovery.rs` · 308 · How often the shell starts over after a lost device before it gives up.
-- `web/src/report.rs` · 478 · The one JSON line the page prints to itself and to the console.
+- `web/src/report.rs` · 485 · The one JSON line the page prints to itself and to the console.
 - `web/src/shell.rs` · 629 · Browser glue: the page's DOM, the WebGPU device through wgpu, and the animation loop.
 - `web/src/tier_view.rs` · 1453 · What the arena page prints about its quality tier and its frame cost, as pure functions so
 

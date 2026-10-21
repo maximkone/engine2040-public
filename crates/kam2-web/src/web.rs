@@ -4,7 +4,10 @@
 //! The page calls `advance(dtMs)` once per animation frame with the delta of the
 //! page's own clock, reads `frame()` into one `Float32Array`, and forwards the
 //! two keys of the milestone: `togglePause()` for Space and `pan(dx, dz)` for the
-//! arrow keys.
+//! arrow keys. The sidebar of the milestone asks the same face: `houseKinds()`
+//! lists the five build cells, `placement(kind, x, z)` asks the sim whether a
+//! house would stand there, `build(kind, x, z)` places one and `stockOf(side)`
+//! counts the wares. The page never decides a rule of its own.
 
 use js_sys::Float32Array;
 use wasm_bindgen::prelude::*;
@@ -93,5 +96,46 @@ impl Kam2Web {
     #[wasm_bindgen(getter, js_name = panOffset)]
     pub fn pan_offset(&self) -> Float32Array {
         Float32Array::from(self.shell.pan_offset().as_slice())
+    }
+
+    /// The five build cells as one JSON line: id, label, footprint and cost.
+    #[wasm_bindgen(js_name = houseKinds)]
+    pub fn house_kinds() -> String {
+        crate::build_menu::house_kinds()
+    }
+
+    /// What the sim says about a house standing at `(x, z)`: an empty string
+    /// when the sim would take it, the sim's own refusal words otherwise.
+    #[wasm_bindgen]
+    pub fn placement(&self, kind: &str, x: i32, z: i32) -> String {
+        let Some(kind) = crate::build_menu::kind_of(kind) else {
+            return crate::build_menu::UNKNOWN_KIND.to_string();
+        };
+        crate::build_menu::answer_line(self.shell.placement(kind, x, z))
+    }
+
+    /// Place the armed house at `(x, z)` for the player: an empty string when
+    /// the sim took it, the sim's own refusal words otherwise.
+    #[wasm_bindgen]
+    pub fn build(&mut self, kind: &str, x: i32, z: i32) -> String {
+        let Some(kind) = crate::build_menu::kind_of(kind) else {
+            return crate::build_menu::UNKNOWN_KIND.to_string();
+        };
+        crate::build_menu::answer_line(self.shell.build(kind, x, z))
+    }
+
+    /// Place a house for one side; the same words as [`Kam2Web::build`].
+    #[wasm_bindgen(js_name = buildFor)]
+    pub fn build_for(&mut self, side: u8, kind: &str, x: i32, z: i32) -> String {
+        let Some(kind) = crate::build_menu::kind_of(kind) else {
+            return crate::build_menu::UNKNOWN_KIND.to_string();
+        };
+        crate::build_menu::answer_line(self.shell.build_for(side, kind, x, z))
+    }
+
+    /// How many of each ware one side holds, in ware order.
+    #[wasm_bindgen(js_name = stockOf)]
+    pub fn stock_of(&self, side: u8) -> Vec<u32> {
+        self.shell.stock_counts(side)
     }
 }

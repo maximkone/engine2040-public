@@ -51,16 +51,16 @@ pub use bundle_cook::{
     load_bundle_file, verify_bundle_bytes, write_bundle_file, BundleCookError, BundleReceipt,
     StagedCooked, STUB_BUNDLE_LEN,
 };
+/// Animation key compression: segment, quantize and error-loop over cooked
+/// clips; decode fills caller buffers with no allocation.
+#[cfg(feature = "import")]
+pub mod anim_compress;
 /// Native BC1/BC3/BC4/BC5/BC7 block codec in-cook: identical bytes x2, encoder
 /// decision UNVERIFIED. Std-only.
 pub mod bc;
 /// Skinned body plus clip-source import for render skinning (fighter look).
 #[cfg(feature = "import")]
 pub mod body_import;
-/// Animation key compression: segment, quantize and error-loop over cooked
-/// clips; decode fills caller buffers with no allocation.
-#[cfg(feature = "import")]
-pub mod anim_compress;
 /// Combat batch intake: retarget plus digest dedupe over canonical clips.
 #[cfg(feature = "import")]
 pub mod clip_intake;
@@ -112,12 +112,12 @@ pub use uv2_chart::{
 };
 #[cfg(feature = "import")]
 pub mod mesh_import;
-/// glTF morph targets (blend shapes) as plain delta arrays; skin import still rejects them.
-#[cfg(feature = "import")]
-pub mod morph_import;
 pub mod meshlet;
 /// Conservative meshlet cull: frustum plus cone, no false negatives.
 pub mod meshlet_cull;
+/// glTF morph targets (blend shapes) as plain delta arrays; skin import still rejects them.
+#[cfg(feature = "import")]
+pub mod morph_import;
 /// RT proxies: a simplified proxy mesh beside the raster mesh, with its
 /// measured deviation bound and a light-leak check.
 #[cfg(feature = "import")]
@@ -128,22 +128,22 @@ pub use proxy::{
     PROXY_DIVISORS, PROXY_LAST_FRACTION, PROXY_MAX_TRIS, PROXY_MIN_BOUND_M, PROXY_MIN_TRIS,
 };
 pub mod recook;
+/// One residency manager over the stream queue: textures, meshes, meshlets
+/// and acceleration structures share one priority-driven byte budget.
+pub mod residency;
 #[cfg(feature = "import")]
 pub mod retarget;
-/// SOMA-77 joint table and its map onto the fighter-65 rig (bake-time names).
-pub mod soma;
 #[cfg(feature = "import")]
 pub mod skin_import;
+/// SOMA-77 joint table and its map onto the fighter-65 rig (bake-time names).
+pub mod soma;
 /// Asset streaming jobs with priorities and budgets: deterministic
 /// completion order over bundles. Std-only; planned, no caller yet (verified
 /// 2026-10-16): the asset browser will consume.
 pub mod stream;
-/// One residency manager over the stream queue: textures, meshes, meshlets
-/// and acceleration structures share one priority-driven byte budget.
-pub mod residency;
 pub use residency::{
-    Admitted, Eviction, ResClass, Residency, ResidencyError, BUDGET_BYTES_RTX_3050,
-    JOBS_RTX_3050, MAX_EVICTIONS_PER_CALL,
+    Admitted, Eviction, ResClass, Residency, ResidencyError, BUDGET_BYTES_RTX_3050, JOBS_RTX_3050,
+    MAX_EVICTIONS_PER_CALL,
 };
 #[cfg(feature = "import")]
 pub mod texture;
