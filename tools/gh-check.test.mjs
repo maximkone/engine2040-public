@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, classify, closureDirs, crateGraph, idAgeMs, keepResult, keptResult, localOnly, main, newId, okCmd, parseArgs, reuseKey, route, runLocal, runnerOs, testsRan, words } from "./gh-check.mjs";
+import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, classify, closureDirs, crateGraph, idAgeMs, keepResult, keptResult, localOnly, main, newId, okCmd, parseArgs, raceLost, reuseKey, route, runLocal, runnerOs, testsRan, words } from "./gh-check.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -189,6 +189,14 @@ test("a workspace-wide line never runs on the PC, even as the fallback", () => {
   for (const line of ["cargo test --workspace --all-targets", "cargo clippy --all -- -D warnings"]) assert.equal(runLocal(line, (s) => said.push(s)), 2, line);
   assert.equal(said.length, 2);
   assert.match(said[0], /workspace-wide/);
+});
+
+test("a fetch that lost the mirror race is retried; a real failure is not", () => {
+  assert.ok(raceLost("fetching ref refs/remotes/origin/main failed: incorrect old value provided"));
+  assert.ok(raceLost("cannot lock ref 'refs/remotes/origin/main'"));
+  assert.ok(raceLost("failed to update ref 'refs/remotes/origin/main'"));
+  assert.equal(raceLost("could not read Username for 'https://github.com': terminal prompts disabled"), false);
+  assert.equal(raceLost("not a git repository"), false);
 });
 
 test("main refuses what is not one plain cargo line, and an unknown job, before any network call", async () => {

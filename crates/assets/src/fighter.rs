@@ -208,7 +208,7 @@ pub fn fighter_skeleton() -> Result<Skeleton, RigError> {
                     ancestor = SOMA77[soma_index(name).ok_or_else(|| RigError::MissingJoint {
                         name: name.to_string(),
                     })?]
-                    .1
+                    .1;
                 }
             }
         };

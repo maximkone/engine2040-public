@@ -595,9 +595,9 @@ mod tests {
         let server = server();
         assert!(
             !server
-                .tools()
+                .tool_cost_table()
                 .iter()
-                .any(|tool| tool.name == TOOL_SIM_OBSERVE),
+                .any(|row| row.name == TOOL_SIM_OBSERVE),
             "unloaded, the verb stays out of the list"
         );
         ApiLoadTool::invoke(
@@ -608,11 +608,16 @@ mod tests {
             },
         )
         .expect("gym loads");
+        // The API6 guardrail trims the advertisement to the ledger's max, so
+        // the verb may be hidden; a hidden verb keeps its exact definition
+        // and stays callable by exact name, so the schemas are read from the
+        // reachable set.
+        crate::mcp::assert_advertised_or_reachable(&server, TOOL_SIM_OBSERVE);
         let tool = server
-            .tools()
+            .all_tools()
             .into_iter()
             .find(|tool| tool.name == TOOL_SIM_OBSERVE)
-            .expect("sim.observe is in the tool list once gym loads");
+            .expect("sim.observe keeps its definition once gym loads");
         let input = Value::Object((*tool.input_schema).clone());
         assert!(
             input["properties"].get("events").is_some(),

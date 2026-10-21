@@ -1176,11 +1176,16 @@ mod tests {
                     continue;
                 };
                 seen.push(line.trim_end().to_owned());
-                writeln!(writer, "tick {tick} {:016x}", 0xABCD_0000 + u64::from(tick))
-                    .expect("tick writes");
-                if tick % 2 == 0 {
-                    writeln!(writer, "view arena view: frames={tick} bodies=2")
-                        .expect("view writes");
+                // The client reads the tick line and may hang up before the
+                // view line lands; a closed connection ends the fake seat's
+                // session, it is not a failure of the seat.
+                if writeln!(writer, "tick {tick} {:016x}", 0xABCD_0000 + u64::from(tick)).is_err() {
+                    break;
+                }
+                if tick % 2 == 0
+                    && writeln!(writer, "view arena view: frames={tick} bodies=2").is_err()
+                {
+                    break;
                 }
             }
             seen

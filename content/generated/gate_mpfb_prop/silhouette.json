@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.4017,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 1.99,
+  "fill_30m": 0.374,
+  "height_30m_px": 89,
+  "height_px": 800,
+  "ortho_scale_m": 2.4875,
+  "px_per_m": 402.01,
+  "resolution_30m": [
+    1356,
+    762
+  ],
+  "scale_applied": 1.154811,
+  "source": "C:\\engine2040\\content\\generated\\mpfb_prop\\warden.glb",
+  "source_height_m": 1.7319,
+  "triangles": 36972,
+  "width_px": 450
+}

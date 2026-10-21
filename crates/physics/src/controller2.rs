@@ -193,18 +193,27 @@ pub struct Ramp {
 }
 
 impl Ramp {
-    /// Surface height under `(x_mm, _)`; callers check the XZ rect first.
-    fn surface_at(&self, x_mm: i32) -> i32 {
-        let run = (self.x1_mm - self.x0_mm).max(1);
-        let num = i64::from(self.rise_mm) * i64::from(x_mm - self.x0_mm);
-        narrow(self.y_base_mm, num / i64::from(run))
+    /// Signed run from `x0_mm` to `x1_mm`; a ramp authored high-x first keeps its slope sign
+    /// (a `max(1)` clamp turned it into a one-millimetre cliff). Only a zero run is degenerate.
+    fn run(&self) -> i64 {
+        let run = i64::from(self.x1_mm) - i64::from(self.x0_mm);
+        if run == 0 {
+            1
+        } else {
+            run
+        }
     }
 
-    /// Grade in rise per mille of run.
+    /// Surface height under `(x_mm, _)`; callers check the XZ rect first.
+    fn surface_at(&self, x_mm: i32) -> i32 {
+        let num = i64::from(self.rise_mm) * (i64::from(x_mm) - i64::from(self.x0_mm));
+        narrow(self.y_base_mm, num / self.run())
+    }
+
+    /// Grade in rise per mille of run along +x (negative descends toward +x).
     fn grade_q(&self) -> i32 {
-        let run = (self.x1_mm - self.x0_mm).max(1);
         let num = i64::from(self.rise_mm) * 1_000;
-        narrow(0, num / i64::from(run))
+        narrow(0, num / self.run())
     }
 
     /// True when `(x_mm, z_mm)` sits on the ramp rect.
@@ -258,6 +267,9 @@ pub struct Walker {
     pub coyote_ticks: u32,
     /// Remaining jump-buffer ticks.
     pub buffer_ticks: u32,
+    /// Travel under one millimetre carried to the next tick, `[x, y, z]` in mm/s units
+    /// (`|lane| < TICKS_PER_S`); see [`travel`].
+    pub carry: [i32; 3],
 }
 
 impl Walker {
@@ -271,8 +283,23 @@ impl Walker {
             ground_platform: None,
             coyote_ticks: 0,
             buffer_ticks: 0,
+            carry: [0, 0, 0],
         }
     }
+}
+
+/// One tick of travel at `vel_mm_s`, in millimetres, with the remainder kept in `carry`.
+///
+/// Plain `vel / TICKS_PER_S` stalls every speed under 60 mm/s and shaves up to 59 mm/s off the
+/// rest (100 mm/s walked at 60). Carrying the remainder moves exactly `vel` millimetres per
+/// second on average at any speed. Truncation toward zero keeps it mirror-symmetric, and a
+/// walker at rest never moves: `|carry| < TICKS_PER_S` alone rounds to zero.
+fn travel(vel_mm_s: i32, carry: &mut i32) -> i64 {
+    let total = i64::from(vel_mm_s) + i64::from(*carry);
+    let ticks = i64::from(TICKS_PER_S);
+    let step = total / ticks;
+    *carry = i32::try_from(total - step * ticks).unwrap_or(0);
+    step
 }
 
 /// Per-tick driver input; lanes clamp to [`MAX_WISH_MM_S`] by default.
@@ -541,14 +568,23 @@ fn support_at(
     (best, ride)
 }
 
-/// Over-steep ramp surface underfoot, if the feet rest on one.
-fn steep_surface_at(x_mm: i32, z_mm: i32, world: &StepWorld<'_>, cfg: &Config) -> Option<i32> {
+/// Over-steep ramp surface underfoot, if the feet rest on one, with the downhill x sign.
+///
+/// Both slope signs count: a steep ramp that descends toward +x was walkable by nobody and
+/// solid to nobody (`support_at` skips it as too steep), so walkers fell through it.
+fn steep_surface_at(
+    x_mm: i32,
+    z_mm: i32,
+    world: &StepWorld<'_>,
+    cfg: &Config,
+) -> Option<(i32, i32)> {
     for ramp in world.ramps {
         if !ramp.contains(x_mm, z_mm) {
             continue;
         }
-        if ramp.grade_q() > cfg.max_slope_grade_q {
-            return Some(ramp.surface_at(x_mm));
+        let grade = ramp.grade_q();
+        if grade > cfg.max_slope_grade_q || grade < -cfg.max_slope_grade_q {
+            return Some((ramp.surface_at(x_mm), -grade.signum()));
         }
     }
     None
@@ -681,19 +717,15 @@ fn move_horizontal(
     let mut stepped = false;
     let mut wall_normal: Option<[i32; 2]> = None;
     for axis in 0..2 {
-        let vel = if axis == 0 {
-            walker.vel_mm_s[0]
-        } else {
-            walker.vel_mm_s[2]
-        };
-        let delta = vel / TICKS_PER_S;
+        let lane = if axis == 0 { 0 } else { 2 };
+        let delta = travel(walker.vel_mm_s[lane], &mut walker.carry[lane]);
         if delta == 0 {
             continue;
         }
         let (nx, nz) = if axis == 0 {
-            (narrow(walker.pos_mm[0], i64::from(delta)), walker.pos_mm[2])
+            (narrow(walker.pos_mm[0], delta), walker.pos_mm[2])
         } else {
-            (walker.pos_mm[0], narrow(walker.pos_mm[2], i64::from(delta)))
+            (walker.pos_mm[0], narrow(walker.pos_mm[2], delta))
         };
         let mut blocked = false;
         for box_ in world.blocks {
@@ -723,11 +755,8 @@ fn move_horizontal(
             } else {
                 Some([0, sign])
             };
-            if axis == 0 {
-                walker.vel_mm_s[0] = 0;
-            } else {
-                walker.vel_mm_s[2] = 0;
-            }
+            walker.vel_mm_s[lane] = 0;
+            walker.carry[lane] = 0;
         }
     }
     (stepped, wall_normal)
@@ -736,10 +765,11 @@ fn move_horizontal(
 /// Land, snap, fall or slip downhill; reports steep-slope slips. Open air
 /// past every support simply keeps falling.
 fn resolve_vertical(walker: &mut Walker, world: &StepWorld<'_>, cfg: &Config) -> bool {
-    let y_new = narrow(
-        walker.pos_mm[1],
-        i64::from(walker.vel_mm_s[1]) / i64::from(TICKS_PER_S),
-    );
+    // The remainder commits only where the walker really travels to `y_new`; landing, snapping,
+    // a ceiling and a slip stop the lane and clear it.
+    let mut carry_y = walker.carry[1];
+    let y_new = narrow(walker.pos_mm[1], travel(walker.vel_mm_s[1], &mut carry_y));
+    walker.carry[1] = 0;
     let mut slipped = false;
     if walker.vel_mm_s[1] > 0 {
         let mut ceiling = i32::MAX;
@@ -759,6 +789,7 @@ fn resolve_vertical(walker: &mut Walker, world: &StepWorld<'_>, cfg: &Config) ->
             walker.vel_mm_s[1] = 0;
         } else {
             walker.pos_mm[1] = y_new;
+            walker.carry[1] = carry_y;
         }
         walker.grounded = false;
         walker.ground_platform = None;
@@ -790,20 +821,22 @@ fn resolve_vertical(walker: &mut Walker, world: &StepWorld<'_>, cfg: &Config) ->
             _ => {
                 let fell_from = walker.pos_mm[1];
                 walker.pos_mm[1] = y_new;
+                walker.carry[1] = carry_y;
                 walker.grounded = false;
                 walker.ground_platform = None;
-                if let Some(surface) =
+                if let Some((surface, downhill)) =
                     steep_surface_at(walker.pos_mm[0], walker.pos_mm[2], world, cfg)
                 {
                     let crossed = fell_from >= surface && y_new <= surface;
                     let resting = y_new <= surface && y_new >= surface - cfg.snap_mm;
                     if crossed || resting {
                         let slide = SLIP_MM_S / TICKS_PER_S;
-                        let sx = narrow(walker.pos_mm[0], -i64::from(slide));
+                        let sx = narrow(walker.pos_mm[0], i64::from(downhill * slide));
                         walker.pos_mm[0] = sx;
-                        walker.pos_mm[1] =
-                            steep_surface_at(sx, walker.pos_mm[2], world, cfg).unwrap_or(surface);
+                        walker.pos_mm[1] = steep_surface_at(sx, walker.pos_mm[2], world, cfg)
+                            .map_or(surface, |(top, _)| top);
                         walker.vel_mm_s[1] = 0;
+                        walker.carry[1] = 0;
                         walker.grounded = true;
                         walker.coyote_ticks = COYOTE_TICKS;
                         slipped = true;
@@ -907,6 +940,9 @@ pub fn state_hash(walker: &Walker) -> u64 {
     h.write_u32(walker.ground_platform.unwrap_or(u32::MAX));
     h.write_u32(walker.coyote_ticks);
     h.write_u32(walker.buffer_ticks);
+    for lane in walker.carry {
+        h.write_i32(lane);
+    }
     h.finish()
 }
 
@@ -1242,6 +1278,132 @@ mod tests {
             step_walker(&mut w, &input, world, cfg);
         }
         w
+    }
+
+    /// Walk `ticks` on the flat slab at a steady wish, returning the walker.
+    fn walk_at(wish_mm_s: [i32; 2], ticks: u32) -> Walker {
+        let cfg = Config::default();
+        let blocks = slab();
+        let world = world_with(&blocks, &[], &[]);
+        let mut w = Walker::spawn(41, [0, 0, 0]);
+        let input = TickInput {
+            wish_mm_s,
+            jump_pressed: false,
+        };
+        for _ in 0..ticks {
+            step_walker(&mut w, &input, &world, &cfg);
+        }
+        w
+    }
+
+    #[test]
+    fn slow_walks_cover_their_true_distance() {
+        // Law: distance = speed x time at any speed. Truncating vel/60 stalled 59 mm/s and
+        // walked 100 mm/s at 60. Past the ramp-up (one second) the walker holds the wish, so
+        // the next ten seconds cover 10 x speed millimetres, give or take the carried remainder.
+        for speed in [30, 59, 100, 1_000, 2_999] {
+            let start = walk_at([speed, 0], 60).pos_mm[0];
+            let end = walk_at([speed, 0], 660).pos_mm[0];
+            let want = speed * 10;
+            assert!(
+                (end - start - want).abs() <= 1,
+                "{speed} mm/s for 10 s moved {} mm, want {want}",
+                end - start
+            );
+        }
+    }
+
+    #[test]
+    fn a_walker_at_rest_stays_exactly_at_rest() {
+        let w = walk_at([0, 0], 600);
+        assert_eq!(w.pos_mm, [0, 0, 0]);
+        assert_eq!(w.vel_mm_s, [0, 0, 0]);
+        // Stopping keeps a sub-millimetre carry; it alone never moves the walker.
+        let cfg = Config::default();
+        let blocks = slab();
+        let world = world_with(&blocks, &[], &[]);
+        let mut w = walk_at([1_030, 0], 61);
+        for _ in 0..30 {
+            step_walker(&mut w, &TickInput::idle(), &world, &cfg);
+        }
+        let parked = w.pos_mm;
+        for _ in 0..600 {
+            step_walker(&mut w, &TickInput::idle(), &world, &cfg);
+        }
+        assert_eq!(w.pos_mm, parked, "a stopped walker crept: {w:?}");
+    }
+
+    #[test]
+    fn mirrored_input_gives_a_mirrored_walk() {
+        for wish in [[1_037, 0], [0, 777], [2_345, -1_234], [41, 59]] {
+            let a = walk_at(wish, 300);
+            let b = walk_at([-wish[0], -wish[1]], 300);
+            assert_eq!(a.pos_mm[0], -b.pos_mm[0], "x not mirrored for {wish:?}");
+            assert_eq!(a.pos_mm[2], -b.pos_mm[2], "z not mirrored for {wish:?}");
+            assert_eq!(a.pos_mm[1], b.pos_mm[1]);
+        }
+    }
+
+    #[test]
+    fn steep_slopes_are_solid_and_slide_downhill_both_ways() {
+        let cfg = Config::default();
+        let blocks = slab();
+        // The same 56-degree face rising toward +x, authored three ways: +x rise, a high-x-first
+        // run, and the mirror descending toward +x. Each must hold the walker on its face and
+        // slide it toward the low end, never drop it through.
+        let rising = Ramp {
+            x0_mm: 2_000,
+            x1_mm: 6_000,
+            z0_mm: -2_000,
+            z1_mm: 2_000,
+            y_base_mm: 0,
+            rise_mm: 6_000,
+        };
+        let reversed = Ramp {
+            x0_mm: 6_000,
+            x1_mm: 2_000,
+            z0_mm: -2_000,
+            z1_mm: 2_000,
+            y_base_mm: 6_000,
+            rise_mm: -6_000,
+        };
+        let falling = Ramp {
+            x0_mm: -6_000,
+            x1_mm: -2_000,
+            z0_mm: -2_000,
+            z1_mm: 2_000,
+            y_base_mm: 6_000,
+            rise_mm: -6_000,
+        };
+        for (ramp, start_x, downhill) in [
+            (rising, 4_000, -1),
+            (reversed, 4_000, -1),
+            (falling, -4_000, 1),
+        ] {
+            let ramps = [ramp];
+            let world = world_with(&blocks, &ramps, &[]);
+            let face = ramp.surface_at(start_x);
+            assert_eq!(face, 3_000, "{ramp:?} face height");
+            let mut w = Walker::spawn(9, [start_x, face + 100, 0]);
+            let mut slipped = false;
+            for _ in 0..20 {
+                let r = step_walker(&mut w, &TickInput::idle(), &world, &cfg);
+                slipped |= r.slipped;
+                let under = ramp.surface_at(w.pos_mm[0]);
+                if ramp.contains(w.pos_mm[0], w.pos_mm[2]) {
+                    assert!(
+                        w.pos_mm[1] >= under - cfg.snap_mm,
+                        "fell through {ramp:?}: {w:?}"
+                    );
+                }
+            }
+            assert!(slipped, "{ramp:?} never slipped: {w:?}");
+            assert_eq!(
+                (w.pos_mm[0] - start_x).signum(),
+                downhill,
+                "{ramp:?} slid uphill: {w:?}"
+            );
+        }
     }
 
     #[test]

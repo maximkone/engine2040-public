@@ -330,9 +330,13 @@ fn tool_list_headroom_holds_with_the_cone_op() {
     // 2026-10-20: PF24's opt-in `timing` receipt (a flag on both play args plus
     // label/p50/p99/samples on both play outputs) took the default list to
     // 53_873: bound 53_000 -> 54_500.
+    // 2026-10-21: GS46's `world.query` (nested data/filter, strict, limit,
+    // 2_472 chars) and the AI-native MCP lane's D19 `verify` string on the
+    // three build outputs (+160 chars) took the default list to 56_897:
+    // bound 54_500 -> 57_500.
     assert!(
-        ledger.total_chars < 54_500,
-        "default list {} stays under the 2026-10-20 timing-receipt bound",
+        ledger.total_chars < 57_500,
+        "default list {} stays under the 2026-10-21 world-query bound",
         ledger.total_chars
     );
 }

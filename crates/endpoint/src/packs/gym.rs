@@ -534,10 +534,10 @@ mod tests {
         )
         .expect("gym loads");
         assert!(loaded.verbs.contains(&TOOL_SIM_RESET.to_owned()));
-        assert!(server
-            .tools()
-            .iter()
-            .any(|tool| tool.name == TOOL_SIM_RESET));
+        // The API6 guardrail trims the advertisement to the ledger's max, so
+        // the loaded verb is advertised when it fits and hidden otherwise; a
+        // hidden verb keeps its definition and stays callable by exact name.
+        crate::mcp::assert_advertised_or_reachable(&server, TOOL_SIM_RESET);
         let unloaded = ApiLoadTool::invoke(
             &server,
             ApiLoadArgs {
@@ -549,9 +549,9 @@ mod tests {
         assert!(!unloaded.loaded);
         assert!(
             !server
-                .tools()
+                .tool_cost_table()
                 .iter()
-                .any(|tool| tool.name == TOOL_SIM_RESET),
+                .any(|row| row.name == TOOL_SIM_RESET),
             "unload hides the verb again"
         );
     }

@@ -290,6 +290,44 @@ pub(crate) fn tool_cost_chars(tool: &rmcp::model::Tool) -> usize {
     )
 }
 
+#[cfg(test)]
+pub(crate) fn hidden_tool_names(server: &McpServer) -> BTreeSet<String> {
+    // The verbs the API6 guardrail hid from the advertisement: they sit on
+    // the door's listed surface (the core plus the packs this session loaded)
+    // and are absent from the advertised one. A hidden verb keeps its
+    // definition and stays callable by exact name, so a test that wants such a
+    // verb asserts reachability instead of advertisement.
+    let listed: BTreeSet<String> = server
+        .tool_cost_table()
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    let advertised: BTreeSet<String> = server
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    listed.difference(&advertised).cloned().collect()
+}
+
+#[cfg(test)]
+pub(crate) fn assert_advertised_or_reachable(server: &McpServer, name: &'static str) {
+    // The API6 contract for one verb: it is advertised, or the guardrail hid
+    // it and it stays reachable by exact name. A verb that is neither
+    // advertised nor hidden is a real gap and fails here.
+    if server.tools().iter().any(|tool| tool.name == name) {
+        return;
+    }
+    assert!(
+        hidden_tool_names(server).contains(name),
+        "{name} is neither advertised nor hidden by the guardrail"
+    );
+    assert!(
+        tool_names().contains(&name),
+        "{name} is hidden and must stay reachable by exact name"
+    );
+}
+
 /// Pure ledger gate over a measured total plus seeded extra chars. Returns
 /// the remaining headroom in chars. Errors: `tool_list_bloated` when
 /// `total + extra` exceeds [`TOOL_LIST_BUDGET_CHARS`],

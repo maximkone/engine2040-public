@@ -19,11 +19,12 @@ use rmcp::serde_json::{self, Value};
 /// Bounded wait per server reply: a silent server fails the test, never hangs it.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 /// What a fresh door lists: the thirteen core tools plus the eight default
-/// `scene`-pack verbs (21 names), in contract order. Every other verb is callable by name and listed
+/// `scene`-pack verbs and GS46's `world.query` (22 names), in contract order.
+/// Every other verb is callable by name and listed
 /// once its pack loads (`api.load`). The last three are the defined TOOL_
 /// consts that inbox row EB-2026-10-08-S178 (E37) registered: `game.build`,
 /// `sim.build_encounter`, `test.run`.
-const EXPECTED_TOOLS: [&str; 21] = [
+const EXPECTED_TOOLS: [&str; 22] = [
     "scene.read",
     "tx.preview",
     "tx.apply",
@@ -42,19 +43,22 @@ const EXPECTED_TOOLS: [&str; 21] = [
     "scene.watch",
     "scene.next",
     "scene.pick",
+    "world.query",
     "game.build",
     "sim.build_encounter",
     "test.run",
 ];
 /// Verbs of the `view` pack: listed only after `api.load`. 2026-10-19: SP62's
 /// `view.observe` and `view.laws` joined the pack, so the list is six now.
-const VIEW_PACK: [&str; 6] = [
+/// 2026-10-21: `view.compare` joined the pack too, so the list is seven now.
+const VIEW_PACK: [&str; 7] = [
     "log.digest",
     "log.query",
     "rpc.discover",
     "look.judge",
     "view.observe",
     "view.laws",
+    "view.compare",
 ];
 /// Fixed node id for the scripted edit (a fresh server serves an empty doc).
 const NODE_ID: &str = "123e4567-e89b-42d3-a456-426614174000";

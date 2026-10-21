@@ -1352,11 +1352,15 @@ mod tests {
     #[test]
     fn api_load_advertises_packs_on_demand_and_unload_hides_them() {
         let server = server();
+        // The API6 guardrail trims the advertisement to the ledger's max, so
+        // the pack mechanics are proven on the door's listed surface (the
+        // core plus the packs this session loaded) and the advertisement only
+        // where the guardrail keeps it.
         let listed = |server: &McpServer| -> Vec<String> {
             server
-                .tools()
-                .iter()
-                .map(|tool| tool.name.to_string())
+                .tool_cost_table()
+                .into_iter()
+                .map(|row| row.name)
                 .collect()
         };
         let before = listed(&server);
@@ -1383,6 +1387,10 @@ mod tests {
         let after = listed(&server);
         assert!(after.contains(&"log.digest".to_owned()));
         assert!(after.len() > before.len());
+        // The verb is advertised when it fits the ledger's max and hidden
+        // otherwise; a hidden verb keeps its definition and stays callable by
+        // exact name.
+        crate::mcp::assert_advertised_or_reachable(&server, "log.digest");
         let unloaded = ApiLoadTool::invoke(
             &server,
             ApiLoadArgs {

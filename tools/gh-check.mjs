@@ -453,6 +453,32 @@ export const whyLine = (e) => {
   return lines.find((l) => /error|rejected|fatal|denied|refused/i.test(l)) ?? lines[0] ?? "unknown";
 };
 
+// A fetch that lost the mirror race is worth another try; anything else is a real failure.
+export const raceLost = (why) => /incorrect old value|cannot lock ref|failed to update ref|reference is not a tree/i.test(String(why));
+
+// The mirror's main moves while other lanes push, so a fetch can lose the race and say
+// "incorrect old value provided". The runner checks out the wip branch tree, so the parent
+// commit is only the diff view: retry the fetch, then carry on with the last known origin/main.
+const fetchOrigin = async () => {
+  for (let attempt = 1; ; attempt++) {
+    try { run("git", ["--git-dir", gdir(), "fetch", "-q", "origin"]); return true; }
+    catch (e) {
+      const why = whyLine(e);
+      if (attempt >= 4 || !raceLost(why)) { console.log(`the fetch did not go through, carrying on with the last origin/main: ${why}`); return false; }
+      console.log(`the fetch lost the mirror race, retrying: ${why}`);
+      await sleep(1000 * attempt);
+    }
+  }
+};
+
+// The parent the wip commit hangs on: the mirror's main when it is known, else the local HEAD.
+const mirrorParent = () => {
+  for (const ref of ["refs/remotes/origin/main", "HEAD"]) {
+    try { const sha = run("git", ["--git-dir", gdir(), "rev-parse", "--verify", `${ref}^{commit}`]).trim(); if (sha) return sha; } catch { /* try the next one */ }
+  }
+  return "";
+};
+
 // One fresh check: snapshot, push, dispatch, wait. A failure before the dispatch is { code: 2, retry: true }.
 // A kept result answers first; a live twin is joined instead of dispatched again.
 // only: build HEAD plus just these working-tree paths (others' unfinished files stay out); such a run is not kept.
@@ -469,7 +495,7 @@ const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
   const job = { id: newId(), cmd, os, key, head, startedAt: Date.now() };
   let pushed = false, res = { code: 2, retry: true };
   try {
-    run("git", ["--git-dir", gdir(), "fetch", "-q", "origin"]);
+    await fetchOrigin();
     sweep();
     const base = await baseTree(head);
     const tree = withIndex(job.id, (env) => {
@@ -481,7 +507,8 @@ const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
       return run("git", ["--git-dir", gdir(), "write-tree"], { env: e }).trim();
     });
     const env = { ...process.env, GIT_AUTHOR_NAME: "maximkone", GIT_AUTHOR_EMAIL: "maximkone@users.noreply.github.com", GIT_COMMITTER_NAME: "maximkone", GIT_COMMITTER_EMAIL: "maximkone@users.noreply.github.com" };
-    const commit = run("git", ["--git-dir", gdir(), "commit-tree", tree, "-p", "refs/remotes/origin/main", "-m", `wip ${job.id} of ${head}: ${cmd}`], { env }).trim();
+    const parent = mirrorParent();
+    const commit = run("git", ["--git-dir", gdir(), "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", `wip ${job.id} of ${head}: ${cmd}`], { env }).trim();
     run("git", ["--git-dir", gdir(), "push", "-q", "origin", `${commit}:refs/heads/${job.id}`]); pushed = true;
     console.log(`[${lapOf(job)}] sent ${job.id} (HEAD ${head} + working tree) to the ${os} runner: ${cmd}`);
     // The os input only when it is not the default, so a mirror whose check.yml predates it still takes Linux lines.

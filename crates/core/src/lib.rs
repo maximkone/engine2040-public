@@ -23,6 +23,10 @@ pub mod fixed;
 pub mod hash;
 /// JSON string escaping for the hand-rolled writers.
 pub mod json;
+/// Physics laws (rest, replay, mirror, energy, conservation, steady rate) any fixed-tick sim
+/// proves in a test. Test-only, like `alloc_probe`.
+#[cfg(any(test, feature = "test-util"))]
+pub mod laws;
 /// The off-tick job pump: one slice per frame, with the tick of every
 /// arrival recorded.
 pub mod pump;

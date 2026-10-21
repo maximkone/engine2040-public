@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "note": "The style is a deformation of the body, not a different body. A 2005 character is a caricature: a bigger head than life, shoulders wider than life, a waist in, short thick legs, big hands and big boots, and everything in a heavy dark armour with a bright trim. The anatomy can be real and the shape can still be a drawing. This is the drawing, as numbers, applied to the body by tools/blender/proportion_pass.py.",
+  "how": "for each vertex, the height t (0 at the feet, 1 at the crown) picks a band, and the band says how much wider or longer that part of the body is. The head is a separate lump: it is scaled about the neck, so the face keeps its shape and the head grows. The waist is the band that is pulled in, because the hourglass is what makes a character read as a drawing.",
+  "factions": {
+    "wardens": {
+      "note": "upright and clean: taller, narrower, the head a little smaller, the shoulders wide but flat",
+      "bands": [
+        {"from": 0.00, "to": 0.45, "x": 1.10, "y": 1.10, "z": 0.94},
+        {"from": 0.45, "to": 0.58, "x": 1.02, "y": 0.98, "z": 1.00},
+        {"from": 0.58, "to": 0.68, "x": 0.84, "y": 0.86, "z": 1.02},
+        {"from": 0.68, "to": 0.86, "x": 1.24, "y": 0.98, "z": 1.00},
+        {"from": 0.86, "to": 1.00, "x": 1.00, "y": 1.00, "z": 1.00}
+      ],
+      "head": {"scale": 1.16, "x": 0.96, "y": 0.96},
+      "hands": {"scale": 1.22},
+      "boots": {"scale": 1.12}
+    },
+    "ashkin": {
+      "note": "the brute: a bigger head, a wider chest, shorter thicker legs, and arms that reach further",
+      "bands": [
+        {"from": 0.00, "to": 0.42, "x": 1.20, "y": 1.20, "z": 0.90},
+        {"from": 0.42, "to": 0.56, "x": 1.14, "y": 1.08, "z": 0.98},
+        {"from": 0.56, "to": 0.66, "x": 0.86, "y": 0.88, "z": 1.02},
+        {"from": 0.66, "to": 0.86, "x": 1.34, "y": 1.10, "z": 1.00},
+        {"from": 0.86, "to": 1.00, "x": 1.00, "y": 1.00, "z": 1.00}
+      ],
+      "head": {"scale": 1.30, "x": 1.06, "y": 1.02},
+      "hands": {"scale": 1.34},
+      "boots": {"scale": 1.22}
+    }
+  },
+  "classes": {
+    "warden_fighter": "wardens", "warden_defender": "wardens", "warden_warrior": "wardens",
+    "warden_rogue": "wardens", "warden_assassin": "wardens", "warden_archer": "wardens",
+    "warden_mage": "wardens", "warden_sorcerer": "wardens", "warden_enchanter": "wardens",
+    "warden_acolyte": "wardens", "warden_cleric": "wardens", "warden_priest": "wardens",
+    "ashkin_combatant": "ashkin", "ashkin_templar": "ashkin", "ashkin_attacker": "ashkin",
+    "ashkin_gunner": "ashkin", "ashkin_officiator": "ashkin", "ashkin_rune": "ashkin",
+    "ashkin_life": "ashkin", "ashkin_shadow": "ashkin"
+  }
+}

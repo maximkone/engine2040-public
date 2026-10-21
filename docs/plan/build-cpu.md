@@ -150,6 +150,25 @@ opened a window proves nothing about these rows and does not tick them.
 - Already on the board: split `engine-render` (PW43, the biggest lever left: 294 s of the 347 s
   dev build), wire `engine-workspace-hack` (OPT8/OPT36), nextest (OPT6).
 
+## 4b. The GPU farm (Kaggle, owner 2026-10-21)
+
+The CPU pool above answers "who builds". The GPU legs are a second queue: every wgpu test, the
+live frame and the arena window need a real adapter, and the one on this PC is shared by every
+session, so those legs wait behind each other.
+
+- `tools/gpu-farm.mjs` pushes one cargo line to a Kaggle GPU kernel (T4, two per account, about
+  30 GPU-hours a week) and pulls the receipt back. `node --test tools/gpu-farm.test.mjs` is green.
+- It needs `KAGGLE_USERNAME` and `KAGGLE_KEY` (or `~/.kaggle/kaggle.json`). Without them it is a
+  NOOP that prints the line it would run and exits 2. The token is an owner decision: no
+  credential is ever written into the tree, and the kernel is private.
+- What the farm is for: the legs that need a GPU, and the long renders this PC cannot afford.
+- What it is not for: cargo builds (GitHub runners are free and faster), the golden (no GPU
+  needed) and look scoring (a T4 frame is not the local RTX 3050 frame, so it can never stand in
+  for that reference; a cloud frame is a second rig with its own gate).
+- Colab is not the tool: the free tier has no headless API, so a session cannot push, poll and
+  pull a notebook without a browser. Kaggle's kernel API can, and `tools/asset-gen/kaggle-sf3d/`
+  already runs a T4 that way.
+
 ## 5. For the owner (I cannot do these)
 
 - Windows Defender scans every `.rlib` and `.exe` that rustc writes. Excluding the build dirs is a

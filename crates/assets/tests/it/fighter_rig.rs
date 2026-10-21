@@ -6,6 +6,9 @@
 //! joints in the SOMA pair order, the parents chain backwards, the bind is the
 //! SOMA rest of the mapped joints with the ankles stretched, and the teacher's
 //! rest pose covers all 77 SOMA joints so the teacher FK has a full body.
+// The rig rides the `import` feature: that is the lane that carries
+// `engine-anim`, whose joint and skeleton types the rig is built from.
+#![cfg(feature = "import")]
 
 use engine_assets::fighter::{
     fighter_bind, fighter_skeleton, joint_index, soma_offsets, soma_skeleton, FOOT_STRETCH,

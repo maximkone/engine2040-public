@@ -33,6 +33,28 @@ Spec: `docs/plan/web-and-realism.md` section 2 and `docs/plan/body-and-break.md`
 7. **Math.** `+ - * /`, `sqrt`, comparisons, integer math. `crates/physics/src/controller.rs::planar_len` is the allowed `sqrt`.
 8. **Never read** wall-clock time, a render value or a hash-map order into any tick.
 
+## 3b. Prove the laws (every new or changed sim step)
+
+Example tests prove the cases you thought of. Laws prove the physics. `engine_core::laws` (dev-dependency `engine-core` with feature `test-util`) steps your state with your step closure and names the law, the tick and the state when it breaks:
+
+```rust
+use engine_core::laws;
+laws::rest_stays_rest(parked, 600, |s| step(s, &idle)).unwrap();
+laws::mirror(east, west, 300, |s, _| step(s, &input_for(s)), |a, b| a.pos[0] == -b.pos[0]).unwrap();
+laws::energy_never_rises(thrown, 600, |s| step(s, &idle), energy, 1.0).unwrap();
+laws::steady_rate(walker, 60, 600, |s| step(s, &walk(59)), |s| f64::from(s.pos[0]), 59.0 / 60.0, 1.0).unwrap();
+```
+
+Pick the laws that apply: rest stays rest (anything with ground or contacts), replay (all), mirror (all), energy never rises (bounce, springs, ropes, damping, drag), conserved (mass through breaks, momentum in pushes), steady rate (anything moved by a velocity). Slack comes from the rounding (1 mm, one unit squared), never from the failure. Worked example: the walker tests in `crates/physics/src/controller2.rs`.
+
+The bugs these catch, all found here on 2026-10-21:
+- `pos += vel / 60` in integer mm stalls every speed under 60 mm/s. Carry the remainder (`controller2.rs::travel`).
+- A rule written for one sign only (`grade > max` with no `grade < -max`): a slope solid one way, hollow the other.
+- `(x1 - x0).max(1)` on a span that may be negative: use the signed run, guard zero only.
+- `>>` on a negative value floors, `/` truncates toward zero: only `/` is mirror-symmetric.
+- Explicit Euler on a spring (both updates from the old state) gains energy every step. Update velocity first, then position.
+- Damping or drag applied as `v - v * k * dt` reverses the velocity once `k * dt > 1`. Use `v / (1 + k * dt)`.
+
 ## 4. Where to add a thing
 
 | Thing | Authority side (test first) | Picture side |
