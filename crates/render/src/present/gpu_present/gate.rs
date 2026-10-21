@@ -47,10 +47,13 @@ pub(super) struct LiveLook {
     pub(super) bloom: bool,
     /// GTAO runs on the stored depth and lights `ao_tex` (`gtao`).
     pub(super) gtao: bool,
+    /// The spot shadow atlas is recorded into the frame's own command buffer
+    /// before the forward draws (`spot`).
+    pub(super) spot: bool,
 }
 
 impl LiveLook {
-    /// Read the five live switches off a toggle set; a pass without a field
+    /// Read the live switches off a toggle set; a pass without a field
     /// leaves the frame as it is.
     #[must_use]
     pub(super) fn from_toggles(toggles: &crate::pass_truth::LookToggles) -> Self {
@@ -60,6 +63,7 @@ impl LiveLook {
             ibl: toggles.is_on("ibl"),
             bloom: toggles.is_on("post"),
             gtao: toggles.is_on("gtao"),
+            spot: toggles.is_on("spot"),
         }
     }
 }
@@ -237,7 +241,8 @@ mod live_look_tests {
                 sun_depth: true,
                 ibl: true,
                 bloom: true,
-                gtao: true
+                gtao: true,
+                spot: true
             }
         );
         let flip = |row: &str| {
@@ -268,6 +273,7 @@ mod live_look_tests {
             }
         );
         assert_eq!(flip("gtao"), LiveLook { gtao: false, ..all });
+        assert_eq!(flip("spot"), LiveLook { spot: false, ..all });
         for row in [
             "sky",
             "material_layer",

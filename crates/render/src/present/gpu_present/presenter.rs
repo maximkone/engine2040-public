@@ -283,6 +283,21 @@ pub struct Presenter {
     /// pays the depth pass, never a texture plus pipeline build.
     /// Presentation only, never hashed.
     pub(crate) sun_sub: super::sun_shadow::SunShadowSubmitter,
+    /// Shadowed spot lights (flashlights and lamps) the frame's spot pass
+    /// bakes into its shadow atlas. Empty by default: no shipped scene
+    /// feeds spots yet, so the live frame skips the pass.
+    pub(crate) spot_lights: Vec<crate::spot::SpotLight>,
+    /// World triangles the spot pass rasterizes into the atlas (the walls
+    /// and props that block a cone).
+    pub(crate) spot_occluders: Vec<crate::spot::OccluderTri>,
+    /// Atlas shape the spot pass bakes: tiles per side and tile edge.
+    pub(crate) spot_config: crate::spot::SpotAtlasConfig,
+    /// Device bake state for the spot atlas (pipeline, slot uniforms and
+    /// the atlas texture): built on the first frame that feeds spots.
+    pub(crate) spot_atlas: Option<crate::spot::SpotAtlasGpu>,
+    /// The last spot receipt of the live frame: the row the frame report
+    /// carries. `None` until the first frame baked an atlas.
+    pub(crate) spot_row: Option<crate::spot::SpotEncode>,
     /// The quality tier applied by `apply_quality`; the live frame reads its cascade, AO and
     /// texture knobs here. Starts at the top tier, which changes nothing.
     pub(crate) quality: crate::quality::Knobs,
@@ -1239,6 +1254,14 @@ impl Presenter {
             twin_shadow_buf,
             contact_feet: [0u8; crate::contact_feet::CONTACT_FEET_BYTES],
             sun_sub: super::sun_shadow::SunShadowSubmitter::build(&device),
+            spot_lights: Vec::new(),
+            spot_occluders: Vec::new(),
+            spot_config: crate::spot::SpotAtlasConfig {
+                grid: crate::spot::ATLAS_GRID,
+                tile_px: 64,
+            },
+            spot_atlas: None,
+            spot_row: None,
             quality: crate::quality::knobs(crate::quality::Quality::High),
             pipelines,
             pipeline_keys,
@@ -1397,6 +1420,30 @@ impl Presenter {
             return wgpu::PresentMode::Mailbox;
         }
         modes.first().copied().unwrap_or(wgpu::PresentMode::Fifo)
+    }
+
+    /// Feed the frame's shadowed spot lights and the world triangles that
+    /// occlude them (the room walls and props). The next live frame bakes
+    /// their shadow atlas into its own command buffer; an empty feed skips
+    /// the pass, so a frame without spots costs nothing.
+    /// Units: meters for positions and ranges. Presentation only, never hashed.
+    /// Caller: the scene owner (the window path's light feed).
+    pub fn set_spot_lights(
+        &mut self,
+        spots: Vec<crate::spot::SpotLight>,
+        occluders: Vec<crate::spot::OccluderTri>,
+    ) {
+        self.spot_lights = spots;
+        self.spot_occluders = occluders;
+    }
+
+    /// The last spot receipt of the live frame: the pass, the number of
+    /// shadowed spots and the encode cost. `None` before the first frame
+    /// baked an atlas (no scene feeds spots yet).
+    /// Units: microseconds for the encode. Presentation only, never hashed.
+    /// Caller: the frame report and the pass-truth gate.
+    pub fn spot_row(&self) -> Option<crate::spot::SpotEncode> {
+        self.spot_row
     }
 
     /// Attach (or re-attach) a surface, reconfiguring the swapchain and

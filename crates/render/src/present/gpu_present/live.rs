@@ -1176,6 +1176,39 @@ impl Presenter {
         Ok(receipt)
     }
 
+    /// Record the frame's shadowed spot lights into their atlas, inside the
+    /// frame's own command buffer: the pass rides the frame's single
+    /// submit, so the live frame never waits on the GPU (no poll, no map, no
+    /// submit of its own). Skipped when the row is off or when no scene
+    /// feeds spot lights; the receipt lands in `spot_row`.
+    /// Units: microseconds for the encode. Presentation only, never hashed.
+    /// Caller: `present_frame_live` before the forward draws.
+    fn encode_spot_live(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        look: &LiveLook,
+    ) -> Option<crate::spot::SpotEncode> {
+        if !look.spot || self.spot_lights.is_empty() {
+            return None;
+        }
+        if self.spot_atlas.is_none() {
+            self.spot_atlas = Some(crate::spot::SpotAtlasGpu::new(&self.device));
+        }
+        let atlas = self.spot_atlas.as_mut()?;
+        let receipt = crate::spot::encode_spot_atlas(
+            &self.device,
+            &self.queue,
+            &self.spot_lights,
+            &self.spot_occluders,
+            self.spot_config,
+            atlas,
+            enc,
+        )
+        .ok()?;
+        self.spot_row = Some(receipt);
+        Some(receipt)
+    }
+
     /// The live window frame: one command buffer, one submit. Forward
     /// draws with the height fog evaluated per fragment, the sky at the far
     /// plane, then the blit. No depth readback, no CPU decode, no
@@ -1246,6 +1279,10 @@ impl Presenter {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ra1-live-frame"),
             });
+        // The spot shadow atlas rides this frame's own command buffer: the
+        // pass runs before the forward draws and the frame never waits on
+        // the GPU. No spot feed means no pass and no row.
+        let _spot = self.encode_spot_live(&mut enc, &look);
         // EG8 sky row: consult the pure gate so the sky row disabled skips the
         // sky pass; all-on draws it (LF1: the live frame shows the sky bake).
         // Caller: `live_sky_should_draw` above over `submit_skips_for`.
@@ -3187,6 +3224,105 @@ mod live_stage_alloc_tests {
             presenter.material_scratch.len(),
             48 * MATERIAL_STRIDE,
             "one 256-byte stride per draw lands in the reused scratch"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The spot row (EG8 registry row `spot`): the live frame bakes the shadowed
+// spot lights into their atlas inside the frame's own command buffer, so the
+// row has a receipt on a frame that really runs. Skips (passes) with no
+// adapter; never a fake pass.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod live_spot_row_tests {
+    use crate::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter};
+    use crate::test_gpu::{require_or_skip, NoAdapter};
+
+    fn init_or_skip(test: &str) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
+            Ok(presenter) => Ok(presenter),
+            Err(PresentError::NoAdapter) => {
+                Err(NoAdapter("no wgpu adapter on this machine".into()))
+            }
+            Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
+        };
+        require_or_skip(test, probe)
+    }
+
+    /// One lit cube on a 128 px twin: a frame with a real forward draw.
+    fn cube_list(presenter: &mut Presenter) -> DrawList {
+        let key = MeshKey::new(0x5707, [0x57; 32]);
+        presenter
+            .upload_mesh(key, &crate::v1::cube())
+            .expect("cube uploads");
+        presenter.resize(128, 128).expect("valid size applies");
+        let scene = crate::v1::default_scene(128, 128).expect("default scene is valid");
+        DrawList {
+            camera: scene.camera,
+            light: scene.light,
+            items: vec![DrawItem {
+                mesh: key,
+                material: scene.material,
+                base_color: None,
+                normal_map: None,
+                orm: None,
+                emissive: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn the_live_frame_records_the_spot_row_for_a_scene_that_feeds_spots() {
+        // Caller: `present_frame_live` (the live window frame).
+        // Behavior: a frame whose scene feeds the dark room's sixteen
+        // shadowed lamps bakes their atlas in the frame's own command buffer
+        // and reports the row; a frame without a spot feed skips the pass
+        // and reports no row.
+        let Some(mut presenter) =
+            init_or_skip("the_live_frame_records_the_spot_row_for_a_scene_that_feeds_spots")
+        else {
+            return;
+        };
+        let list = cube_list(&mut presenter);
+        presenter
+            .render_live_offscreen(&list)
+            .expect("the live frame renders");
+        assert!(
+            presenter.spot_row().is_none(),
+            "no scene feeds spot lights yet, so the frame skips the pass"
+        );
+        presenter.set_spot_lights(crate::spot::dark_room_spots(), crate::spot::dark_room());
+        presenter
+            .render_live_offscreen(&list)
+            .expect("the live frame renders");
+        let row = presenter.spot_row().expect("the spot row is recorded");
+        assert_eq!(row.spots, 16, "every lamp reached the bake");
+        assert_eq!(row.shadowed, 16, "every lamp cast a shadow tile");
+        assert_eq!(row.passes_encoded, 1, "one pass was recorded");
+        assert!(row.ran(), "the row ran");
+        assert_eq!(row.pass(), crate::spot::GATE_PASS);
+        assert!(!row.degraded, "the dark room fits the atlas");
+    }
+
+    #[test]
+    fn the_spot_row_switch_skips_the_live_pass() {
+        // Caller: `present_frame_live` over the look toggles.
+        // Behavior: the spot row switched off skips the bake, so the live
+        // frame records no spot row at all.
+        let Some(mut presenter) = init_or_skip("the_spot_row_switch_skips_the_live_pass") else {
+            return;
+        };
+        let list = cube_list(&mut presenter);
+        presenter.set_spot_lights(crate::spot::dark_room_spots(), crate::spot::dark_room());
+        let mut toggles = crate::pass_truth::LookToggles::all_on();
+        toggles.disable(crate::spot::GATE_ROW);
+        presenter
+            .render_live_offscreen_with_toggles(&list, &toggles)
+            .expect("the live frame renders");
+        assert!(
+            presenter.spot_row().is_none(),
+            "the switched-off row bakes nothing"
         );
     }
 }

@@ -149,6 +149,23 @@ test("the push and pull request legs still play the fast tier", () => {
   assert.doesNotMatch(fast, /schedule:/);
 });
 
+test("the manual and pull request legs are not skipped by the push guard", () => {
+  const guard = /if: >-\n([\s\S]*?)\n    runs-on/.exec(jobBlock("differential"))[1];
+  // The push guard (a push with no previous commit) must only read
+  // `github.event.before` on a push. On the other events `before` is null,
+  // and GitHub compares loosely: null and a string are both cast to a number,
+  // so null and the zero string are the same number and a guard that reads
+  // `before` everywhere skips the manual and the pull request leg as well.
+  assert.match(guard, /github\.event_name != 'push'/, "the guard names the push event");
+  const scopeAt = guard.indexOf("github.event_name != 'push'");
+  const beforeAt = guard.indexOf("github.event.before");
+  assert.ok(scopeAt >= 0 && beforeAt > scopeAt, "the before guard sits inside the push clause");
+  // The rule that makes it matter.
+  const asNumber = (value) => (value === null ? 0 : Number(value));
+  assert.equal(asNumber(null), asNumber("0".repeat(40)), "null and the zero string are the same number");
+  assert.notEqual(asNumber(null), asNumber("a".repeat(40)), "a real commit is a different number");
+});
+
 test("the deep feature string names every feature the deep binaries need", () => {
   const tiers = scenarioTiers();
   const features = fastFeatures();

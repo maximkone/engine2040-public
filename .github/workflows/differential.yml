@@ -66,8 +66,9 @@ jobs:
     # plays the deep tier in the job below, so this one stands down for it.
     if: >-
       github.repository == 'maximkone/engine2040-public' &&
-      github.event.before != '0000000000000000000000000000000000000000' &&
-      github.event_name != 'schedule'
+      github.event_name != 'schedule' &&
+      (github.event_name != 'push' ||
+      github.event.before != '0000000000000000000000000000000000000000')
     runs-on: windows-latest
     timeout-minutes: 60
     env:

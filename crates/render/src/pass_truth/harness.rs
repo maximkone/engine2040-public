@@ -340,6 +340,7 @@ mod tests {
             "material_layer",
             "particles_gpu",
             "decals",
+            "spot",
         ] {
             let r = row(&first, name);
             assert!(!r.verdict.live, "{name} paints nothing here: {r:?}");
@@ -367,7 +368,7 @@ mod tests {
         assert!(report.contains("| sky | LIVE |"));
         assert!(report.contains("| gtao | LIVE |"));
         assert!(report.contains("| decals | PROBE | 0 |"));
-        assert!(report.contains("9 rows, 4 LIVE, 5 PROBE"));
+        assert!(report.contains("10 rows, 4 LIVE, 6 PROBE"));
         // The artifact: dated by the caller (`PASS_TRUTH_DATE`), repo-rooted.
         let date = std::env::var("PASS_TRUTH_DATE").unwrap_or_else(|_| "arena-like".into());
         let path = super::super::live_gate::write_live_gate_report(&repo_root(), &date, &report)

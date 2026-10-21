@@ -2255,6 +2255,10 @@ pub(super) fn forward_skinned_pipeline(
 
 /// `constants` carries the look guard preset (`quality::look_guard_constants`):
 /// the same shader source compiles to the fp32 look or the potato one.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "8 inputs mirror the forward pass"
+)]
 fn forward_pipeline_for(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,

@@ -378,7 +378,7 @@ mod tests {
         }
         assert!(first.contains("| graph | LIVE | 1 | live | frame | 8 | submit_gpu |"));
         assert!(first.contains("| sky | PROBE | 0 | none | sky | 0 | submit_gpu_sky |"));
-        assert!(first.contains("9 rows, 1 LIVE, 8 PROBE"));
+        assert!(first.contains("10 rows, 1 LIVE, 9 PROBE"));
         assert!(first.contains("noise: 0 px"));
     }
 

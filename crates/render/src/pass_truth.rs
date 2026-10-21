@@ -2,7 +2,7 @@
 //!
 //! Owner: render lane (EG8). Units: RGBA bytes row-major, pixels for frames.
 //! Determinism: same bytes give the same flags twice; no clock, no float, no IO.
-//! Errors: [`PassTruthError`] names every ragged input. Budget: nine small
+//! Errors: [`PassTruthError`] names every ragged input. Budget: ten small
 //! frames on a cold path, never per tick; caller-owned buffers, no heap use.
 //!
 //! Shape: the verdict on the window's own frame comes from the live-frame arm
@@ -91,8 +91,8 @@ pub struct PassSpec {
     pub live_today: bool,
 }
 
-/// The nine look passes in proof-registry order.
-pub const LOOK_PASSES: [PassSpec; 9] = [
+/// The ten look passes in proof-registry order.
+pub const LOOK_PASSES: [PassSpec; 10] = [
     PassSpec {
         row: "graph",
         pass: "submit_gpu",
@@ -147,27 +147,33 @@ pub const LOOK_PASSES: [PassSpec; 9] = [
         region: PassRegion::Geometry,
         live_today: false,
     },
+    PassSpec {
+        row: "spot",
+        pass: crate::spot::GATE_PASS,
+        region: PassRegion::Geometry,
+        live_today: false,
+    },
 ];
 
 /// Explicit on/off switch per look pass for the coming capture harness.
 /// Units: row names from `LOOK_PASSES` order. Determinism: pure bools, no
-/// clock, no float, no IO. Budget: nine bools on the stack, no heap.
+/// clock, no float, no IO. Budget: ten bools on the stack, no heap.
 /// Caller: `gate_table_masked_with` (same file) plus the coming capture
 /// harness, which switches passes off to render real on/off arena frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LookToggles {
-    on: [bool; 9],
+    on: [bool; 10],
 }
 
 impl LookToggles {
-    /// All nine passes on, in `LOOK_PASSES` order. Same value twice; pure.
+    /// All ten passes on, in `LOOK_PASSES` order. Same value twice; pure.
     #[must_use]
     pub fn all_on() -> Self {
-        Self { on: [true; 9] }
+        Self { on: [true; 10] }
     }
 
     /// Switch one pass off by row name; unknown rows do nothing, never panic.
-    /// Flips exactly one entry, the named row, leaving the other eight on.
+    /// Flips exactly one entry, the named row, leaving the other nine on.
     pub fn disable(&mut self, row: &str) {
         if let Some(index) = LOOK_PASSES.iter().position(|spec| spec.row == row) {
             self.on[index] = false;
@@ -186,15 +192,15 @@ impl LookToggles {
 
 /// Disabled submit entries in `LOOK_PASSES` order; enabled slots read `None`.
 /// Units: submit entry names in `LOOK_PASSES` order. Determinism: same toggles
-/// give the same array twice; no clock, no float, no IO. Budget: nine options
+/// give the same array twice; no clock, no float, no IO. Budget: ten options
 /// on the stack, no heap.
 /// Caller: `crate::present::gpu_present::live::live_sky_should_draw`
 /// in `crates/render/src/present/gpu_present/live.rs`, which skips the sky
 /// bind when the sky row lists its submit entry, plus the coming capture
 /// harness, which skips each listed submit when rendering real on/off frames.
 #[must_use]
-pub fn submit_skips_for(toggles: &LookToggles) -> [Option<&'static str>; 9] {
-    let mut out: [Option<&'static str>; 9] = [None; 9];
+pub fn submit_skips_for(toggles: &LookToggles) -> [Option<&'static str>; 10] {
+    let mut out: [Option<&'static str>; 10] = [None; 10];
     for (index, spec) in LOOK_PASSES.iter().enumerate() {
         if !toggles.on[index] {
             out[index] = Some(spec.pass);
@@ -518,7 +524,7 @@ pub fn gate_one_masked(spec: &PassSpec, ignore_mask: Option<&[u8]>) -> PassVerdi
 /// pass PROBE. Disabled passes return PROBE with zero diff without running
 /// the diff; enabled passes return `gate_one_masked(spec, mask)`. Ragged
 /// masks resolve to PROBE, never panic. Same toggles plus mask give the same
-/// table twice; stack buffers only, no heap beyond the nine rows.
+/// table twice; stack buffers only, no heap beyond the ten rows.
 /// Caller: `gate_table_masked` (same file, all-on arm) plus the coming
 /// capture harness, which switches passes off to render real on/off frames.
 #[must_use]
@@ -546,7 +552,7 @@ pub fn gate_table_masked_with(
 /// caller mask. `None` keeps the whole frame counted; a mask with the moved
 /// pixel hidden reads every pass PROBE. Ragged masks resolve to PROBE,
 /// never panic. Same inputs give the same table twice; stack buffers only,
-/// no heap beyond the nine rows.
+/// no heap beyond the ten rows.
 /// Caller: `gate_table` (same file, whole-frame arm) plus the EG8 report.
 #[must_use]
 pub fn gate_table_masked(ignore_mask: Option<&[u8]>) -> Vec<PassVerdict> {
@@ -555,7 +561,7 @@ pub fn gate_table_masked(ignore_mask: Option<&[u8]>) -> Vec<PassVerdict> {
 
 /// Run the harness for every look pass and diff-gate each pair. Ragged
 /// pairs resolve to PROBE, never panic. Same table twice; stack buffers
-/// only, no heap beyond the nine rows.
+/// only, no heap beyond the ten rows.
 #[must_use]
 pub fn gate_table() -> Vec<PassVerdict> {
     let mut table = Vec::with_capacity(LOOK_PASSES.len());
@@ -566,7 +572,7 @@ pub fn gate_table() -> Vec<PassVerdict> {
 }
 
 /// Run the harness and return each pass's live flag from its masked diff.
-/// Same flags twice; stack buffers only, heap only the nine flags.
+/// Same flags twice; stack buffers only, heap only the ten flags.
 /// Caller: the EG8 report plus the proof gate's per-pass flags.
 #[must_use]
 pub fn gate_live_flags() -> Vec<bool> {
@@ -601,7 +607,7 @@ fn report_footer(table: &[PassVerdict]) -> String {
     let live = table.iter().filter(|verdict| verdict.live).count();
     let probe = table.len().saturating_sub(live);
     format!(
-        "\nGate: EG8 (crates/render/src/pass_truth.rs). A pass is live only when its\non/off frames differ in the counted region above epsilon {} with floor {}.\nRun x2 gives the same table; {} LIVE, {} PROBE.\nForward (graph row) is LIVE, sky and decals are PROBE today; sky and decals stay PROBE only while their diff sits at 0.\nProduction entry: `WindowShell::look_pass_live` (crates/render/src/window.rs) gates window-read pairs through the same masked diff; synth harness pairs take the same arm.\nSelf-test fixture: these frames are built from the registry, not rendered. The verdict on the window's frame is the live-frame arm's report (pass_truth/live_gate.rs).\nPixels decide; no manifest count.\n",
+        "\nGate: EG8 (crates/render/src/pass_truth.rs). A pass is live only when its\non/off frames differ in the counted region above epsilon {} with floor {}.\nRun x2 gives the same table; {} LIVE, {} PROBE.\nForward (graph row) is LIVE, sky, decals and spot are PROBE today; they stay PROBE only while their diff sits at 0.\nProduction entry: `WindowShell::look_pass_live` (crates/render/src/window.rs) gates window-read pairs through the same masked diff; synth harness pairs take the same arm.\nSelf-test fixture: these frames are built from the registry, not rendered. The verdict on the window's frame is the live-frame arm's report (pass_truth/live_gate.rs).\nPixels decide; no manifest count.\n",
         PASS_EPSILON, PASS_LIVE_FLOOR, live, probe
     )
 }
@@ -623,7 +629,7 @@ pub fn pass_truth_report(date: &str, table: &[PassVerdict]) -> String {
 /// Dated LIVE/PROBE report over one harness run; pure composer for the gate.
 /// Runs [`gate_table`] once and frames it with [`pass_truth_report`].
 /// Same date gives the same bytes twice; date is a plain tag, never parsed.
-/// No clock, no float, no IO; heap only the nine verdicts plus the string.
+/// No clock, no float, no IO; heap only the ten verdicts plus the string.
 /// Caller: `crate::window::WindowShell::look_dated_report` (production wire).
 #[must_use]
 pub fn gate_dated_report(date: &str) -> String {
@@ -808,13 +814,52 @@ mod tests {
     }
 
     #[test]
+    fn the_spot_row_is_registered_with_its_own_submit_entry() {
+        // Caller: the live frame's spot pass (`crates/render/src/spot.rs`).
+        // Behavior: the registry names the spot row, the row's submit entry
+        // is the spot module's own gate pass, the region is the lit surfaces
+        // the atlas shades, and the switch flips that row alone.
+        let spec = LOOK_PASSES
+            .iter()
+            .find(|spec| spec.row == crate::spot::GATE_ROW)
+            .expect("the spot row is registered");
+        assert_eq!(spec.pass, crate::spot::GATE_PASS);
+        assert_eq!(spec.region, PassRegion::Geometry);
+        assert!(
+            !spec.live_today,
+            "the atlas write paints no pixel yet: the forward shader reads no spot atlas"
+        );
+        let mut toggles = LookToggles::all_on();
+        toggles.disable(crate::spot::GATE_ROW);
+        assert!(
+            !toggles.is_on(crate::spot::GATE_ROW),
+            "the row switched off"
+        );
+        assert!(toggles.is_on("graph"), "the other rows stay on");
+        assert_eq!(
+            submit_skips_for(&toggles).len(),
+            LOOK_PASSES.len(),
+            "one skip entry per row"
+        );
+        let spot_index = LOOK_PASSES
+            .iter()
+            .position(|spec| spec.row == crate::spot::GATE_ROW)
+            .expect("the spot row is registered");
+        assert_eq!(
+            submit_skips_for(&toggles)[spot_index],
+            Some(crate::spot::GATE_PASS),
+            "the disabled spot row names its submit entry"
+        );
+    }
+
+    #[test]
     fn forward_live_and_sky_plus_decals_probe() {
         let table = gate_table();
         assert!(flag(&table, "graph"), "forward moves pixels today");
         assert!(!flag(&table, "sky"), "sky stays probe while staged");
         assert!(!flag(&table, "decals"), "decals stay probe while staged");
         for verdict in &table {
-            if verdict.row == "sky" || verdict.row == "decals" {
+            if verdict.row == "sky" || verdict.row == "decals" || verdict.row == "spot" {
                 assert_eq!(verdict.diff_pixels, 0);
             } else {
                 assert!(verdict.diff_pixels > PASS_LIVE_FLOOR);
@@ -992,7 +1037,7 @@ mod tests {
             "the footer pins the gate constants"
         );
         assert!(
-            first.contains("7 LIVE, 2 PROBE"),
+            first.contains("7 LIVE, 3 PROBE"),
             "today's tree counts ride the artifact"
         );
         assert!(
@@ -1090,7 +1135,7 @@ mod tests {
         assert!(text.contains("| graph | LIVE |"), "forward is LIVE");
         assert!(text.contains("| sky | PROBE | 0 |"), "sky stays PROBE");
         assert!(text.contains("| decals | PROBE | 0 |"), "decals stay PROBE");
-        assert!(text.contains("7 LIVE, 2 PROBE"), "counts ride the artifact");
+        assert!(text.contains("7 LIVE, 3 PROBE"), "counts ride the artifact");
         // The gate path is cwd-relative and cargo runs this test from the
         // package root, while the row reads its artifact at the repo root
         // beside the other `pass-truth-<date>.md` files: publish the same
@@ -1185,7 +1230,7 @@ mod tests {
             let (width, height) = capture_pair(spec, &mut on, &mut off).expect("pair fits");
             let supplied = verdict_for_frames(spec, &on, &off, width, height, None);
             assert_eq!(supplied, *gated, "supplied bytes match gate");
-            if spec.row == "sky" || spec.row == "decals" {
+            if spec.row == "sky" || spec.row == "decals" || spec.row == "spot" {
                 assert!(!supplied.live);
                 assert_eq!(supplied.diff_pixels, 0);
             } else {
@@ -1301,9 +1346,9 @@ mod tests {
 
     #[test]
     fn supplied_window_frames_match_synth_gate_x2() {
-        let mut on_frames = [[0u8; PASS_FRAME_LEN]; 9];
-        let mut off_frames = [[0u8; PASS_FRAME_LEN]; 9];
-        let mut dims = [(0usize, 0usize); 9];
+        let mut on_frames = [[0u8; PASS_FRAME_LEN]; LOOK_PASSES.len()];
+        let mut off_frames = [[0u8; PASS_FRAME_LEN]; LOOK_PASSES.len()];
+        let mut dims = [(0usize, 0usize); LOOK_PASSES.len()];
         for (index, spec) in LOOK_PASSES.iter().enumerate() {
             dims[index] = capture_pair(spec, &mut on_frames[index], &mut off_frames[index])
                 .expect("pair fits");
@@ -1331,7 +1376,7 @@ mod tests {
         assert!(!flag(&first, "sky"), "sky PROBE");
         assert!(!flag(&first, "decals"), "decals PROBE");
         for verdict in &first {
-            if verdict.row == "sky" || verdict.row == "decals" {
+            if verdict.row == "sky" || verdict.row == "decals" || verdict.row == "spot" {
                 assert_eq!(verdict.diff_pixels, 0);
                 assert_eq!(verdict_label(verdict.diff_pixels), "PROBE");
             } else {
@@ -1355,9 +1400,9 @@ mod tests {
         assert!(rl11_adapter_pinned("lavapipe") && rl11_adapter_pinned("llvmpipe"));
         assert!(!rl11_adapter_pinned("RTX 3050"));
         let table_a = gate_table();
-        assert_eq!(table_a, gate_table(), "7 LIVE plus 2 PROBE repeat");
+        assert_eq!(table_a, gate_table(), "7 LIVE plus 3 PROBE repeat");
         assert_eq!(table_a.iter().filter(|v| v.live).count(), 7);
-        assert_eq!(table_a.iter().filter(|v| !v.live).count(), 2);
+        assert_eq!(table_a.iter().filter(|v| !v.live).count(), 3);
         let live_spec = LOOK_PASSES
             .iter()
             .find(|s| s.row == "graph")
