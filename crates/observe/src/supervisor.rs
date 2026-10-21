@@ -16,6 +16,7 @@
 //! simulation copies into its own action log for replay.
 
 use super::heal::{applies_at_tick, HealError, HealKind, Registry};
+use super::recovery::{HealCap, HealScope, HealValidation, HEAL_CAP_WINDOW_TICKS};
 use super::{Event, EventCode, RingBuffer};
 use engine_core::hash::{mix64, GOLDEN_GAMMA};
 use std::collections::{BTreeMap, VecDeque};
@@ -39,9 +40,9 @@ pub const HALF_OPEN_MAX_CALLS: u32 = 1;
 
 /// Quarantine entry: closed until until_tick, then one half-open probe when probing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QuarantineEntry {
+pub(crate) struct QuarantineEntry {
     until_tick: u64,
-    probing: bool,
+    pub(crate) probing: bool,
 }
 
 /// Bounded heal policy for one fault code: which runnable recovery, how
@@ -61,6 +62,9 @@ pub struct FaultPolicy {
     /// Ticks between the fault and the next attempt; sim heals also wait
     /// at least one tick for the next boundary.
     pub retry_after_ticks: u64,
+    /// What the heal touches: presentation (no simulation or scene state) or
+    /// state (changes it, so it waits for a tick boundary).
+    pub scope: HealScope,
 }
 
 impl FaultPolicy {
@@ -81,7 +85,23 @@ impl FaultPolicy {
             backoff_base_ms,
             backoff_cap_ms,
             retry_after_ticks,
+            // The shared rule owns the default: the three authoritative
+            // simulation faults are state heals, everything else is a
+            // presentation heal.
+            scope: if applies_at_tick(code) {
+                HealScope::State
+            } else {
+                HealScope::Presentation
+            },
         }
+    }
+
+    /// Set the scope of this row: [`HealScope::Presentation`] (the default)
+    /// or [`HealScope::State`]. A state row always waits for a tick boundary.
+    #[must_use]
+    pub fn with_scope(mut self, scope: HealScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// Seeded jittered backoff for `attempt` with `seed` over this row's
@@ -110,7 +130,8 @@ pub fn catalog() -> [FaultPolicy; 12] {
             0,
             0,
             1,
-        ),
+        )
+        .with_scope(HealScope::State),
         FaultPolicy::new(
             EventCode::BRAIN_FIGHTER_STUCK,
             HealKind::RetryTick,
@@ -118,7 +139,8 @@ pub fn catalog() -> [FaultPolicy; 12] {
             0,
             0,
             1,
-        ),
+        )
+        .with_scope(HealScope::State),
         FaultPolicy::new(
             EventCode::NET_CLIENT_DESYNC,
             HealKind::AiTakeover,
@@ -126,7 +148,8 @@ pub fn catalog() -> [FaultPolicy; 12] {
             100,
             1600,
             1,
-        ),
+        )
+        .with_scope(HealScope::State),
         FaultPolicy::new(
             EventCode::RENDER_DEVICE_LOST,
             HealKind::Reconnect,
@@ -261,7 +284,9 @@ pub struct PendingHeal {
 
 /// One tape row: fault to applied heal, or loud quarantine. The simulation
 /// copies these rows into its own action log so replay reproduces the same
-/// checkpoints with logging on or off.
+/// checkpoints with logging on or off. A row also carries the proof of the
+/// heal: the digest of the last good state, the digest after the heal and the
+/// verdict. An unproven row is evidence that the heal ran, not that it worked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HealTapeRecord {
     /// Fault code that was reported.
@@ -278,6 +303,15 @@ pub struct HealTapeRecord {
     pub backoff_ms: u64,
     /// True when the budget is spent: quarantine loudly, never silently.
     pub quarantined: bool,
+    /// What the heal touches: presentation or state.
+    pub scope: HealScope,
+    /// Digest of the last good state before the heal (`None` while unproven).
+    pub before_digest: Option<u64>,
+    /// Digest of the state after the heal (`None` while unproven).
+    pub after_digest: Option<u64>,
+    /// The verdict of the proof: unproven, recovered, not recovered, frozen
+    /// frame or rolled back.
+    pub validation: HealValidation,
 }
 
 /// Escalation state for one fault code after its latest report.
@@ -599,18 +633,37 @@ impl HedgeBudget {
 /// change: a failed report consumes no attempt.
 #[derive(Debug, Clone)]
 pub struct Supervisor {
-    registry: Registry,
-    policies: BTreeMap<u32, FaultPolicy>,
+    pub(crate) registry: Registry,
+    pub(crate) policies: BTreeMap<u32, FaultPolicy>,
     pending: VecDeque<PendingHeal>,
-    tape: Vec<HealTapeRecord>,
-    escalation: BTreeMap<u32, EscalationState>,
-    quarantine: BTreeMap<u32, QuarantineEntry>,
+    pub(crate) tape: Vec<HealTapeRecord>,
+    pub(crate) escalation: BTreeMap<u32, EscalationState>,
+    pub(crate) quarantine: BTreeMap<u32, QuarantineEntry>,
     /// Opt-in rolling breakers per code. Empty by default, so codes without
     /// one keep the plain attempt-budget path.
     breakers: BTreeMap<u32, RollingBreaker>,
     /// Opt-in hedge budgets per code. Empty by default, so codes without one
     /// keep the plain backoff path.
     hedges: BTreeMap<u32, HedgeBudget>,
+    /// Supervisor-level events: a refused budget reset, a blown heal cap, a
+    /// frozen frame. These have no caller ring to go into, so the supervisor
+    /// keeps its own and never drops them silently.
+    pub(crate) events: RingBuffer,
+    /// Rolling heal cap: how many heals may fire inside one rolling minute
+    /// of ticks. Past the cap the run reads red.
+    pub(crate) heal_cap: HealCap,
+    /// Presentation heals that only held the last good frame. Never green.
+    pub(crate) frozen_frames: u32,
+}
+
+/// Capacity of the supervisor-level event ring.
+pub const SUPERVISOR_EVENT_CAP: usize = 64;
+
+/// Default heal cap: one heal per catalog row per rolling minute. The number
+/// comes from the shipped catalog, so it is measured, not guessed.
+#[must_use]
+pub fn default_heal_cap_max() -> u32 {
+    u32::try_from(catalog().len()).unwrap_or(u32::MAX)
 }
 
 impl Supervisor {
@@ -626,6 +679,9 @@ impl Supervisor {
             quarantine: BTreeMap::new(),
             breakers: BTreeMap::new(),
             hedges: BTreeMap::new(),
+            events: RingBuffer::new(SUPERVISOR_EVENT_CAP),
+            heal_cap: HealCap::new(default_heal_cap_max(), HEAL_CAP_WINDOW_TICKS),
+            frozen_frames: 0,
         };
         for policy in catalog() {
             supervisor.register_policy(policy);
@@ -633,15 +689,14 @@ impl Supervisor {
         supervisor
     }
 
-    /// Register (or replace) one policy row. Re-registering resets that
-    /// code's attempt budget to zero: new knowledge, fresh budget.
+    /// Register (or replace) one policy row. Re-registering keeps that code's
+    /// attempt budget, quarantine and escalation: new knowledge may change the
+    /// policy, never the budget. A heal cannot reopen its own budget.
     /// In-flight deferred heals and tape history are kept.
     pub fn register_policy(&mut self, policy: FaultPolicy) {
         self.registry
-            .register(policy.code, policy.attempts_max, policy.kind);
+            .register_keep_budget(policy.code, policy.attempts_max, policy.kind);
         self.insert_policy(policy);
-        self.quarantine.remove(&policy.code.raw());
-        self.escalation.remove(&policy.code.raw());
     }
 
     /// Copy of the policy row for `code`, if any.
@@ -751,15 +806,6 @@ impl Supervisor {
         self.tape.len()
     }
 
-    /// Clear the attempt budget and escalation for `code` after a verified
-    /// recovery. Deferred heals and tape history are kept: history is
-    /// evidence, not budget. The breaker and hedge budget are kept too:
-    /// they bound load and retries, not health.
-    pub fn reset(&mut self, code: EventCode) {
-        self.registry.reset(code);
-        self.escalation.remove(&code.raw());
-        self.quarantine.remove(&code.raw());
-    }
 
     /// Turn on the rolling error-percent breaker for `code`. Opt-in: codes
     /// without one keep the plain attempt-budget path. Re-enabling keeps the
@@ -930,6 +976,10 @@ impl Supervisor {
             attempt: attempt_q,
             backoff_ms: 0,
             quarantined: true,
+            scope: self.policy(code).map_or(HealScope::Presentation, |row| row.scope),
+            before_digest: None,
+            after_digest: None,
+            validation: HealValidation::Unproven,
         });
         let label = code.name().unwrap_or("unknown");
         ring.push(Event::new(
@@ -988,7 +1038,7 @@ impl Supervisor {
 
     /// Tape and quarantine rows for an over-budget fault. Callers insert the
     /// escalation row first; this moves its retry gate to the cool-down end.
-    fn record_quarantine(
+    pub(crate) fn record_quarantine(
         &mut self,
         code: EventCode,
         fault_tick: u64,
@@ -1014,6 +1064,10 @@ impl Supervisor {
             attempt,
             backoff_ms: backoff,
             quarantined: true,
+            scope: self.policy(code).map_or(HealScope::Presentation, |row| row.scope),
+            before_digest: None,
+            after_digest: None,
+            validation: HealValidation::Unproven,
         });
         SupervisedDecision {
             kind: HealKind::Quarantine,
@@ -1041,6 +1095,7 @@ impl Supervisor {
         kind: HealKind,
         boundary: bool,
         retry_after_ticks: u64,
+        scope: HealScope,
     ) -> SupervisedDecision {
         if boundary {
             let applies_at = fault_tick.saturating_add(retry_after_ticks.max(1));
@@ -1052,6 +1107,10 @@ impl Supervisor {
                 attempt,
                 backoff_ms: backoff,
                 quarantined: false,
+                scope,
+                before_digest: None,
+                after_digest: None,
+                validation: HealValidation::Unproven,
             });
             let tape_index = self.tape.len().saturating_sub(1);
             self.pending.push_back(PendingHeal {
@@ -1081,6 +1140,10 @@ impl Supervisor {
                 attempt,
                 backoff_ms: backoff,
                 quarantined: false,
+                scope,
+                before_digest: None,
+                after_digest: None,
+                validation: HealValidation::Unproven,
             });
             SupervisedDecision {
                 kind,
@@ -1150,7 +1213,9 @@ impl Supervisor {
         }
         let attempt = self.registry.attempts(code).saturating_add(1);
         let backoff = backoff_ms(policy.backoff_base_ms, policy.backoff_cap_ms, attempt);
-        let boundary = applies_at_tick(code);
+        // A state heal changes simulation or scene state, so it waits for a
+        // tick boundary; a presentation heal may apply at once.
+        let boundary = policy.scope.is_state();
         let would_heal = attempt <= policy.attempts_max;
         if would_heal && boundary && self.pending.len() >= MAX_PENDING_HEALS {
             if self.is_half_open(code) {
@@ -1183,8 +1248,22 @@ impl Supervisor {
             decision.kind,
             boundary,
             policy.retry_after_ticks,
+            policy.scope,
         );
         decision.hedged = hedged;
+        // The rolling heal cap: one heal counts once. Past the cap the run
+        // reads red, never degraded.
+        if self.heal_cap.observe(fault_tick) {
+            ring.push(Event::new(
+                EventCode::HEAL_FAILED,
+                fault_tick,
+                &format!(
+                    "heal.failed cause=heal.cap heals in window={} max={} run=red",
+                    self.heal_cap.heals_in_window(fault_tick),
+                    self.heal_cap.max_heals()
+                ),
+            ));
+        }
         Ok(decision)
     }
 
@@ -1248,7 +1327,10 @@ impl Default for Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use super::super::heal::HealDecision;
+    use super::super::heal::{applies_at_tick, HealDecision};
+    use super::super::recovery::{
+        HealObservation, ResetOutcome, RollbackProof, RunHealth, VerifiedRecovery,
+    };
     use super::*;
 
     fn ring(cap: usize) -> RingBuffer {
@@ -1590,6 +1672,9 @@ mod tests {
             quarantine: BTreeMap::new(),
             breakers: BTreeMap::new(),
             hedges: BTreeMap::new(),
+            events: RingBuffer::new(SUPERVISOR_EVENT_CAP),
+            heal_cap: HealCap::new(default_heal_cap_max(), HEAL_CAP_WINDOW_TICKS),
+            frozen_frames: 0,
         };
         assert_eq!(
             bare.report_fault(EventCode::PROVIDER_TIMEOUT, 0, &mut events),
@@ -1660,12 +1745,18 @@ mod tests {
             .escalation_of(EventCode::PROVIDER_TIMEOUT)
             .is_some());
 
-        supervisor.reset(EventCode::PROVIDER_TIMEOUT);
+        supervisor.reset_unverified(EventCode::PROVIDER_TIMEOUT);
         assert_eq!(supervisor.attempts(EventCode::PROVIDER_TIMEOUT), 0);
         assert!(!supervisor.is_quarantined(EventCode::PROVIDER_TIMEOUT));
         assert_eq!(supervisor.escalation_of(EventCode::PROVIDER_TIMEOUT), None);
         // History stays: three rows taped.
         assert_eq!(supervisor.tape_len(), 3);
+        // The unproven reset is loud: it lands in the supervisor events.
+        assert!(supervisor
+            .events()
+            .query(Some(EventCode::HEAL_FAILED))
+            .iter()
+            .any(|event| event.message.contains("reset without proof")));
 
         let healed = supervisor
             .report_fault(EventCode::PROVIDER_TIMEOUT, 4, &mut events)
@@ -1804,7 +1895,7 @@ mod tests {
         assert!(supervisor.is_quarantined(code));
         assert!(!supervisor.is_half_open(code));
         assert_eq!(events.query(Some(EventCode::HEAL_FAILED)).len(), 2);
-        supervisor.reset(code);
+        supervisor.reset_unverified(code);
         assert!(!supervisor.is_quarantined(code));
         assert!(!supervisor.is_half_open(code));
         assert_eq!(supervisor.quarantined_until(code), None);
@@ -1871,5 +1962,339 @@ mod tests {
         }
         assert!(budget.observe(40), "the twentieth allows the second");
         assert_eq!(budget.backups(), 2);
+    }
+
+    /// A state heal that restores the last good digest is a proved recovery:
+    /// the tape row carries both digests and the budget is cleared.
+    #[test]
+    fn heal_that_restores_the_digest_passes() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::PHYSICS_BODY_NONFINITE;
+        let decision = supervisor
+            .report_fault(code, 10, &mut events)
+            .expect("state fault reports");
+        assert!(decision.deferred, "a state heal waits for the tick boundary");
+        let applied = supervisor.apply_tick_boundary(11);
+        assert_eq!(applied.len(), 1);
+
+        let verdict = supervisor
+            .verify_heal(
+                code,
+                1,
+                &HealObservation::State {
+                    before_digest: 0xABCD,
+                    after_digest: 0xABCD,
+                },
+                &mut events,
+            )
+            .expect("the heal is proved");
+        assert_eq!(verdict, HealValidation::Recovered);
+        assert!(verdict.is_green());
+        // The proof carries the budget reset.
+        assert_eq!(supervisor.attempts(code), 0);
+
+        let row = supervisor
+            .tape()
+            .iter()
+            .rev()
+            .find(|row| row.code == code)
+            .expect("the tape holds the row");
+        assert_eq!(row.before_digest, Some(0xABCD));
+        assert_eq!(row.after_digest, Some(0xABCD));
+        assert_eq!(row.validation, HealValidation::Recovered);
+        assert_eq!(row.scope, HealScope::State);
+        assert!(supervisor.run_health().is_green());
+    }
+
+    /// A state heal that changes the digest is a failed attempt: it spends
+    /// the budget and the code is quarantined loudly.
+    #[test]
+    fn heal_that_changes_the_digest_fails_and_quarantines() {
+        let mut supervisor = Supervisor::new();
+        supervisor.register_policy(
+            FaultPolicy::new(EventCode::PHYSICS_BODY_NONFINITE, HealKind::Restore, 1, 0, 0, 1)
+                .with_scope(HealScope::State),
+        );
+        let mut events = ring(32);
+        let code = EventCode::PHYSICS_BODY_NONFINITE;
+        supervisor
+            .report_fault(code, 10, &mut events)
+            .expect("state fault reports");
+        let _ = supervisor.apply_tick_boundary(11);
+
+        let verdict = supervisor
+            .verify_heal(
+                code,
+                1,
+                &HealObservation::State {
+                    before_digest: 7,
+                    after_digest: 9,
+                },
+                &mut events,
+            )
+            .expect("the heal is checked");
+        assert_eq!(verdict, HealValidation::NotRecovered);
+        assert!(!verdict.is_green());
+        assert!(supervisor.is_quarantined(code), "the budget is spent");
+        assert!(supervisor.run_health().is_red());
+        assert!(!events.query(Some(EventCode::HEAL_FAILED)).is_empty());
+        let row = supervisor
+            .tape()
+            .iter()
+            .find(|row| row.code == code && row.attempt == 1)
+            .expect("the tape holds the failed row");
+        assert_eq!(row.validation, HealValidation::NotRecovered);
+    }
+
+    /// A budget reset without a proof on file is refused and stays loud.
+    #[test]
+    fn reset_without_the_proof_is_refused() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::PROVIDER_TIMEOUT;
+        supervisor
+            .report_fault(code, 5, &mut events)
+            .expect("fault reports");
+        assert_eq!(supervisor.attempts(code), 1);
+
+        assert_eq!(
+            supervisor.reset(code),
+            ResetOutcome::Refused,
+            "a heal cannot reopen its own budget"
+        );
+        assert_eq!(supervisor.attempts(code), 1, "the budget stays spent");
+        assert!(supervisor
+            .events()
+            .query(Some(EventCode::HEAL_FAILED))
+            .iter()
+            .any(|event| event.message.contains("refused without proof")));
+
+        let proof = VerifiedRecovery::new(code, 1, HealValidation::Recovered, 5, 5);
+        assert_eq!(supervisor.reset_verified(&proof), Ok(()));
+        assert_eq!(supervisor.attempts(code), 0);
+
+        let frozen = VerifiedRecovery::new(code, 2, HealValidation::FrozenFrame, 5, 5);
+        assert_eq!(
+            supervisor.reset_verified(&frozen),
+            Err(HealError::UnverifiedRecovery { code }),
+            "a frozen frame proves nothing"
+        );
+    }
+
+    /// Past the rolling heal cap the run reads red, never degraded.
+    #[test]
+    fn over_the_heal_cap_the_run_reads_red() {
+        let mut supervisor = Supervisor::new();
+        supervisor.set_heal_cap(2, HEAL_CAP_WINDOW_TICKS);
+        let mut events = ring(64);
+        let codes = [
+            EventCode::PROVIDER_TIMEOUT,
+            EventCode::ASSETS_MISSING,
+            EventCode::RENDER_DEVICE_LOST,
+        ];
+        supervisor
+            .report_fault(codes[0], 10, &mut events)
+            .expect("fault reports");
+        supervisor
+            .report_fault(codes[1], 11, &mut events)
+            .expect("fault reports");
+        assert!(!supervisor.heal_cap_exceeded(), "two heals are inside the cap");
+        assert_eq!(supervisor.heal_count_in_window(11), 2);
+
+        supervisor
+            .report_fault(codes[2], 12, &mut events)
+            .expect("fault reports");
+        assert!(supervisor.heal_cap_exceeded());
+        assert_eq!(supervisor.heal_count_in_window(12), 3);
+        assert_eq!(supervisor.run_health(), RunHealth::Red);
+        assert!(events
+            .query(Some(EventCode::HEAL_FAILED))
+            .iter()
+            .any(|event| event.message.contains("heal.cap")));
+    }
+
+    /// A wrong heal is rolled back to the last good snapshot; the restored
+    /// digest proves the rollback.
+    #[test]
+    fn wrong_heal_rolls_back_and_the_restored_digest_matches() {
+        let mut supervisor = Supervisor::new();
+        supervisor.register_policy(
+            FaultPolicy::new(EventCode::PHYSICS_BODY_NONFINITE, HealKind::Restore, 1, 0, 0, 1)
+                .with_scope(HealScope::State),
+        );
+        let mut events = ring(32);
+        let code = EventCode::PHYSICS_BODY_NONFINITE;
+        supervisor
+            .report_fault(code, 10, &mut events)
+            .expect("state fault reports");
+        let _ = supervisor.apply_tick_boundary(11);
+        let verdict = supervisor
+            .verify_heal(
+                code,
+                1,
+                &HealObservation::State {
+                    before_digest: 0x11,
+                    after_digest: 0x22,
+                },
+                &mut events,
+            )
+            .expect("the heal is checked");
+        assert_eq!(verdict, HealValidation::NotRecovered);
+        assert!(supervisor.is_quarantined(code));
+
+        let proof = RollbackProof::new(code, 1, 12, 0x11, 0x11);
+        let rolled = supervisor
+            .rollback_heal(&proof, &mut events)
+            .expect("the rollback runs");
+        assert_eq!(rolled, HealValidation::RolledBack);
+        assert!(rolled.is_green());
+        assert!(!supervisor.is_quarantined(code), "the state is good again");
+        assert_eq!(supervisor.attempts(code), 0);
+        let row = supervisor
+            .tape()
+            .iter()
+            .rev()
+            .find(|row| row.code == code)
+            .expect("the tape holds the rollback row");
+        assert_eq!(row.validation, HealValidation::RolledBack);
+        assert_eq!(row.before_digest, Some(0x11));
+        assert_eq!(row.after_digest, Some(0x11));
+    }
+
+    /// A rollback that does not restore the last good digest is not proven:
+    /// the code stays quarantined.
+    #[test]
+    fn rollback_with_a_different_digest_does_not_prove_anything() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::RENDER_DEVICE_LOST;
+        supervisor
+            .report_fault(code, 10, &mut events)
+            .expect("fault reports");
+        let proof = RollbackProof::new(code, 1, 11, 0x11, 0x12);
+        let verdict = supervisor
+            .rollback_heal(&proof, &mut events)
+            .expect("the rollback runs");
+        assert_eq!(verdict, HealValidation::NotRecovered);
+        assert!(supervisor.is_quarantined(code));
+        assert!(events
+            .query(Some(EventCode::HEAL_FAILED))
+            .iter()
+            .any(|event| event.message.contains("rollback failed")));
+    }
+
+    /// A presentation heal that only held the last good frame is a frozen
+    /// frame: it never counts as green.
+    #[test]
+    fn presentation_heal_that_holds_the_last_good_frame_is_frozen_and_never_green() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::RENDER_DEVICE_LOST;
+        supervisor
+            .report_fault(code, 10, &mut events)
+            .expect("fault reports");
+        let verdict = supervisor
+            .verify_heal(
+                code,
+                1,
+                &HealObservation::HeldLastGood {
+                    frames: 30,
+                    digest: 0x55,
+                },
+                &mut events,
+            )
+            .expect("the heal is checked");
+        assert_eq!(verdict, HealValidation::FrozenFrame);
+        assert!(!verdict.is_green());
+        assert_eq!(supervisor.frozen_frame_count(), 1);
+        assert_eq!(supervisor.run_health(), RunHealth::Red);
+        assert_eq!(
+            supervisor.attempts(code),
+            1,
+            "a frozen frame is not a recovery: the budget stays"
+        );
+        assert!(events
+            .query(Some(EventCode::HEAL_FAILED))
+            .iter()
+            .any(|event| event.message.contains("frozen frame")));
+    }
+
+    /// A presentation heal that presented a fresh frame is green.
+    #[test]
+    fn presentation_heal_that_presents_a_fresh_frame_is_green() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::RENDER_DEVICE_LOST;
+        supervisor
+            .report_fault(code, 10, &mut events)
+            .expect("fault reports");
+        let verdict = supervisor
+            .verify_heal(
+                code,
+                1,
+                &HealObservation::Presented { digest: 0x66 },
+                &mut events,
+            )
+            .expect("the heal is checked");
+        assert_eq!(verdict, HealValidation::Recovered);
+        assert_eq!(supervisor.attempts(code), 0);
+        assert_eq!(supervisor.frozen_frame_count(), 0);
+    }
+
+    /// Re-registering a policy row keeps the budget it already spent.
+    #[test]
+    fn re_registering_a_policy_keeps_the_budget() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::PROVIDER_TIMEOUT;
+        supervisor
+            .report_fault(code, 1, &mut events)
+            .expect("fault reports");
+        assert_eq!(supervisor.attempts(code), 1);
+        let policy = supervisor.policy(code).expect("the catalog row");
+        supervisor.register_policy(policy);
+        assert_eq!(
+            supervisor.attempts(code),
+            1,
+            "new knowledge may change the policy, never the budget"
+        );
+    }
+
+    /// A state heal waits for a tick boundary; a presentation heal does not.
+    #[test]
+    fn state_heal_waits_for_a_tick_boundary_and_presentation_heal_does_not() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let state = supervisor
+            .report_fault(EventCode::NET_CLIENT_DESYNC, 10, &mut events)
+            .expect("fault reports");
+        assert!(state.deferred);
+        assert_eq!(state.applies_at, 11);
+        let presentation = supervisor
+            .report_fault(EventCode::RENDER_DEVICE_LOST, 10, &mut events)
+            .expect("fault reports");
+        assert!(!presentation.deferred);
+        assert_eq!(presentation.applies_at, 10);
+    }
+
+    /// An observation that does not match the row scope is refused.
+    #[test]
+    fn observation_must_match_the_row_scope() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::PHYSICS_BODY_NONFINITE;
+        supervisor
+            .report_fault(code, 10, &mut events)
+            .expect("fault reports");
+        assert_eq!(
+            supervisor.verify_heal(
+                code,
+                1,
+                &HealObservation::Presented { digest: 1 },
+                &mut events,
+            ),
+            Err(HealError::ScopeMismatch { code })
+        );
     }
 }

@@ -117,6 +117,25 @@ pub enum HealError {
     /// The heal tape is full; the caller must export and clear it before
     /// reporting more faults. History is never dropped silently.
     TapeFull,
+    /// The proof handed to a budget reset does not prove a recovery.
+    UnverifiedRecovery {
+        /// Fault code whose budget was not cleared.
+        code: EventCode,
+    },
+    /// The observation does not match the scope of the fault row: a state
+    /// heal reported a presentation observation, or the other way round.
+    ScopeMismatch {
+        /// Fault code whose row was not applied.
+        code: EventCode,
+    },
+    /// No tape row for that fault code and attempt: the heal was never
+    /// planned, so nothing can be proved about it.
+    UnknownHeal {
+        /// Fault code with no tape row.
+        code: EventCode,
+        /// Attempt number that has no tape row.
+        attempt: u32,
+    },
 }
 
 impl fmt::Display for HealError {
@@ -129,6 +148,18 @@ impl fmt::Display for HealError {
             }
             Self::PendingFull => write!(f, "tick-boundary heal queue is full"),
             Self::TapeFull => write!(f, "heal tape is full"),
+            Self::UnverifiedRecovery { code } => {
+                let label = code.name().unwrap_or("unknown");
+                write!(f, "proof does not verify a recovery: {label}")
+            }
+            Self::ScopeMismatch { code } => {
+                let label = code.name().unwrap_or("unknown");
+                write!(f, "heal observation does not match the fault row scope: {label}")
+            }
+            Self::UnknownHeal { code, attempt } => {
+                let label = code.name().unwrap_or("unknown");
+                write!(f, "no heal tape row for {label} attempt {attempt}")
+            }
         }
     }
 }
@@ -194,6 +225,27 @@ impl Registry {
                 attempts: 0,
             },
         );
+    }
+
+    /// Register (or replace) the heal row for `code`, keeping the attempt
+    /// counter it already spent. New knowledge may change the policy, never
+    /// the budget: a heal cannot reopen its own budget.
+    pub fn register_keep_budget(&mut self, code: EventCode, attempts_max: u32, kind: HealKind) {
+        let attempts = self.attempts(code);
+        self.register(code, attempts_max, kind);
+        if let Some(row) = self.rows.get_mut(&code.raw()) {
+            row.attempts = attempts;
+        }
+    }
+
+    /// Spend one attempt without a new fault report: a heal that ran but
+    /// could not prove itself is a failed attempt. Returns the new count.
+    pub fn burn_attempt(&mut self, code: EventCode) -> u32 {
+        if let Some(row) = self.rows.get_mut(&code.raw()) {
+            row.attempts = row.attempts.saturating_add(1);
+            return row.attempts;
+        }
+        0
     }
 
     /// Register from a raw code, rejecting unregistered values.

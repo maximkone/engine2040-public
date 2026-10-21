@@ -21,6 +21,29 @@ These ten lines are the contract every row below implements. One row per line, s
 9. Heals per rolling minute are capped; over the cap the run is red (G1), not degraded.
 10. A presentation heal that holds the last-good frame is a frozen frame: it never counts as green.
 
+## What landed in `crates/observe` (this pass, no commit)
+
+- `crates/observe/src/recovery.rs` (new): `HealScope`, `HealValidation`, `HealObservation`,
+  `VerifiedRecovery`, `RollbackProof`, `HealCap` (one rolling minute = 3,600 ticks at 60 Hz),
+  `RunHealth` (`Green` / `Degraded` / `Red`) and `ResetOutcome`.
+- `crates/observe/src/supervisor_proof.rs` (new): the proof rules on `Supervisor` —
+  `verify_heal`, `rollback_heal`, `reset` (refused without a proof), `reset_verified`,
+  `reset_unverified`, `has_proof`, `run_health`, `set_heal_cap`, `heal_cap_exceeded`,
+  `heal_count_in_window`, `frozen_frame_count`, `events`.
+- `crates/observe/src/supervisor.rs`: `FaultPolicy::scope` (presentation or state, default from
+  the shared `applies_at_tick` rule), the catalog scopes, `HealTapeRecord` with `scope`,
+  `before_digest`, `after_digest` and `validation`, `register_policy` keeps the budget, the
+  heal cap counts every planned heal, the supervisor's own event ring.
+- `crates/observe/src/heal.rs`: `HealError::{UnverifiedRecovery, ScopeMismatch, UnknownHeal}`,
+  `Registry::register_keep_budget`, `Registry::burn_attempt`.
+- `crates/observe/src/rerun_sink.rs`: heal rows beside the frames (`push_heal`, `heal_rows`,
+  `heal_len`, `first_unproved_heal`), 32 rows, same overflow counter.
+
+Proofs (2026-10-20, on the GitHub runner):
+`cargo test -p engine-observe --lib` → `test result: ok. 95 passed; 0 failed`;
+`cargo clippy -p engine-observe --all-targets -- -D warnings` → PASS;
+`node tools/rust-quality.mjs --crate observe` → `RESULT PASS: score 100 (A), 0 ratchet regressions`.
+
 ## Rows
 
 ### HLX-01 — A heal only runs inside its attempt budget
@@ -32,8 +55,9 @@ retry budget; after it, quarantine the object or task and fail loudly"),
 https://github.com/maximkone/engine2040/blob/master/docs/systems/observability-heal.md, read
 2026-10-20. **Shape, not code:** we port the rule into Rust, not donor bytes (there are none).
 **Closes:** AD14, A9. **Owned paths:** `crates/observe/src/supervisor.rs`,
-`crates/observe/src/heal.rs`. **Status:** landed this pass (the budget was already there; the
-proof that a heal may not reopen its own budget is HLX-06).
+`crates/observe/src/supervisor_proof.rs`, `crates/observe/src/heal.rs`. **Status:** landed this
+pass (the budget was already there; the proof that a heal may not reopen its own budget is
+HLX-06).
 **Accept:** `node tools/gh-check.mjs cargo test -p engine-observe --lib` →
 `test result: ok. 95 passed; 0 failed`. **Kill line:** if a fault past its budget can be healed
 again without a loud quarantine row, the row dies. **Cost:** S.
@@ -48,7 +72,8 @@ https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-pro
 `kubernetes/kubernetes`, GitHub API 2026-10-20), read 2026-10-20. **Shape, not code:** the
 liveness/readiness split is ported into Rust as `HealScope`; we vendor no bytes.
 **Closes:** AD14, E46, N-11. **Owned paths:** `crates/observe/src/recovery.rs`,
-`crates/observe/src/supervisor.rs`. **Status:** landed this pass.
+`crates/observe/src/supervisor.rs`, `crates/observe/src/supervisor_proof.rs`. **Status:** landed
+this pass.
 **Accept:** `node tools/gh-check.mjs cargo test -p engine-observe --lib` →
 `test result: ok. 95 passed; 0 failed`. **Kill line:** if a state heal can be applied off a tick
 boundary, the row dies. **Cost:** S.
@@ -78,7 +103,7 @@ https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/outlier
 "drop the bad one, keep the last good, count it" shape is ported into Rust as
 `HealObservation::State { before_digest, after_digest }`; no donor bytes.
 **Closes:** AD14, A9, G1. **Owned paths:** `crates/observe/src/recovery.rs`,
-`crates/observe/src/supervisor.rs`. **Status:** landed this pass.
+`crates/observe/src/supervisor_proof.rs`. **Status:** landed this pass.
 **Accept:** `node tools/gh-check.mjs cargo test -p engine-observe --lib heal_that_` →
 `test result: ok. 2 passed; 0 failed`. **Kill line:** if a heal with a changed digest can still
 be recorded as recovered, the row dies. **Cost:** M.
@@ -135,8 +160,8 @@ back to green; different digests quarantine the code loudly.
 outlier page above. **Shape, not code:** the "replay the proof and it must match exactly" shape
 is ported into Rust as `RollbackProof`; we write our own code.
 **Closes:** AD14, G1. **Owned paths:** `crates/observe/src/recovery.rs`,
-`crates/observe/src/supervisor.rs`. **Status:** landed this pass (the observe side; the sim side
-that restores the snapshot is HLX-09's follow-up).
+`crates/observe/src/supervisor_proof.rs`. **Status:** landed this pass (the observe side; the sim
+side that restores the snapshot is the follow-up in HLX-08's row).
 **Accept:** `node tools/gh-check.mjs cargo test -p engine-observe --lib rollback_` →
 `test result: ok. 3 passed; 0 failed`. **Kill line:** if a rollback can be recorded without the
 restored digest matching, the row dies. **Cost:** M.
@@ -405,3 +430,17 @@ last good state and the heal that caused it.
 - **A9 (chaos and fuzz):** the same: `crates/proof/src/a9.rs` reads the chaos report, and the
   chaos suite still proves detection, not recovery ("healed 3, quarantined 9"). Until HLX-13
   lands, the A9 count does not move. **The number does not move yet.**
+
+## Measured today (2026-10-20, on the GitHub runner)
+
+- `cargo test -p engine-observe --lib` → `test result: ok. 95 passed; 0 failed`.
+- `cargo clippy -p engine-observe --all-targets -- -D warnings` → PASS.
+- `node tools/rust-quality.mjs --crate observe` → `RESULT PASS: score 100 (A), 0 ratchet regressions`.
+- `cargo test -p engine-audio --lib heal` → `test result: ok. 14 passed; 0 failed` (the audio heal
+  keeps working: its budget clear is the operator path).
+- `cargo test -p engine-render --lib heal` → `test result: FAILED. 10 passed; 2 failed`: the render
+  heal clears its budget with a bare `reset`, which is now refused without a proof. Spec A has
+  the fix list for GS44.
+- `cargo test -p engine-proof --lib golden_hash_untouched` → could not run: `crates/physics` does
+  not compile at that moment (`from_fixed` not found, another lane's file). The golden
+  `d57b5c8ae3096614` was not measured by this lane.

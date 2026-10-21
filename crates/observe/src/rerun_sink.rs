@@ -1,15 +1,18 @@
 //! Rerun recording of simulation state per tick for desync hunts.
 //!
 //! Consumer: the headless paired-rerun harness reads two sinks and names
-//! the first divergent tick; the supervisor keeps its own tape. Data owner:
-//! [`RerunSink`] owns a 120-frame ring of (tick, hash) rows; the caller owns
-//! the hashed bytes. Units: ticks (`u64`), state hashes (`u64` FNV-1a over
-//! little-endian words supplied by the caller). Determinism: insertion order
-//! kept, oldest-first iteration, saturating counters, no clock. Errors: none;
-//! push never fails and over-capacity rows evict the oldest while counting
-//! overflow. Budget: 120 rows (1,920 bytes) inline; zero heap allocation per
-//! push. Tracy span names are `&str` constants beside the supervisor; there
-//! is no Tracy SDK dependency (licenses reviewed, nothing vendored).
+//! the first divergent tick; the crash path in `crates/game` pushes the ring;
+//! the supervisor keeps its own tape. Data owner: [`RerunSink`] owns a
+//! 120-frame ring of (tick, hash) rows plus a 32-row ring of heal rows (the
+//! proof of every heal that ran); the caller owns the hashed bytes. Units:
+//! ticks (`u64`), state hashes (`u64` FNV-1a over little-endian words
+//! supplied by the caller). Determinism: insertion order kept, oldest-first
+//! iteration, saturating counters, no clock. Errors: none; push never fails
+//! and over-capacity rows evict the oldest while counting overflow. Budget:
+//! 120 rows (1,920 bytes) inline plus 32 heal rows inline; zero heap
+//! allocation per push. Tracy span names are `&str` constants beside the
+//! supervisor; there is no Tracy SDK dependency (licenses reviewed, nothing
+//! vendored).
 //!
 //! Pixels, GPU passes and VRAM accounting stay out: deeper capture (2,000
 //! frames, per-pass timers, manifest legs) belongs to the pilot harness. A
@@ -17,10 +20,16 @@
 //! (MCAP, no ring), and [`RerunSink::to_mcap`] exports the ring the same way.
 
 use crate::mcap::{McapError, ReplayRecording};
+use crate::supervisor::HealTapeRecord;
 
 /// Maximum frames retained. The ring holds this many rows; deeper capture
 /// stays with the pilot harness and never grows this type.
 pub const MAX_RERUN_FRAMES: usize = 120;
+
+/// Maximum heal rows retained beside the frames. A heal row is bigger than a
+/// frame row, so the heal ring is smaller. Older rows evict and the drop
+/// lands in the same overflow counter: nothing is dropped silently.
+pub const MAX_RERUN_HEAL_ROWS: usize = 32;
 
 /// One recorded tick: the tick number plus the simulation state hash for it.
 /// The hash is opaque here; the caller hashes with the shared FNV-1a owner
@@ -43,6 +52,11 @@ pub struct RerunSink {
     start: usize,
     len: usize,
     overflow: u64,
+    /// Heal rows beside the frames: the proof of every heal that ran, so a
+    /// hunt can name the first divergent tick and the heal that caused it.
+    heals: [Option<HealTapeRecord>; MAX_RERUN_HEAL_ROWS],
+    heal_start: usize,
+    heal_rows: usize,
 }
 
 impl RerunSink {
@@ -57,6 +71,9 @@ impl RerunSink {
             start: 0,
             len: 0,
             overflow: 0,
+            heals: [None; MAX_RERUN_HEAL_ROWS],
+            heal_start: 0,
+            heal_rows: 0,
         }
     }
 
@@ -106,6 +123,42 @@ impl RerunSink {
             let pos = (self.start + index) % MAX_RERUN_FRAMES;
             &self.frames[pos]
         })
+    }
+
+    /// Record one heal row beside the frames. Evicts the oldest row when the
+    /// heal ring is full and counts the drop in the same overflow counter;
+    /// never fails and never allocates.
+    pub fn push_heal(&mut self, row: &HealTapeRecord) {
+        let pos = (self.heal_start + self.heal_rows) % MAX_RERUN_HEAL_ROWS;
+        if self.heal_rows < MAX_RERUN_HEAL_ROWS {
+            self.heals[pos] = Some(*row);
+            self.heal_rows += 1;
+        } else {
+            self.heals[self.heal_start] = Some(*row);
+            self.heal_start = (self.heal_start + 1) % MAX_RERUN_HEAL_ROWS;
+            self.overflow = self.overflow.saturating_add(1);
+        }
+    }
+
+    /// Oldest-first iterator over the retained heal rows.
+    pub fn heal_rows(&self) -> impl DoubleEndedIterator<Item = &HealTapeRecord> + '_ {
+        (0..self.heal_rows).filter_map(move |index| {
+            let pos = (self.heal_start + index) % MAX_RERUN_HEAL_ROWS;
+            self.heals[pos].as_ref()
+        })
+    }
+
+    /// Number of heal rows currently retained.
+    #[must_use]
+    pub fn heal_len(&self) -> usize {
+        self.heal_rows
+    }
+
+    /// The first heal row that was not proved (not recovered and not rolled
+    /// back), oldest first. `None` when every heal on the sink proved itself.
+    #[must_use]
+    pub fn first_unproved_heal(&self) -> Option<&HealTapeRecord> {
+        self.heal_rows().find(|row| !row.validation.is_green())
     }
 
     /// First tick where the two recordings disagree, oldest-first. Compares
@@ -218,6 +271,9 @@ pub mod tracy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::heal::HealKind;
+    use crate::recovery::{HealScope, HealValidation};
+    use crate::EventCode;
 
     #[test]
     fn holds_120_frames_oldest_first() {
@@ -317,5 +373,65 @@ mod tests {
             .map(|name| name.rsplit('.').next().unwrap_or(""))
             .collect();
         assert_eq!(suffixes, vec!["tick", "frame"]);
+    }
+
+    fn heal_row(tick: u64, validation: HealValidation) -> HealTapeRecord {
+        HealTapeRecord {
+            code: EventCode::NET_CLIENT_DESYNC,
+            fault_tick: tick,
+            applied_tick: Some(tick),
+            kind: HealKind::AiTakeover,
+            attempt: 1,
+            backoff_ms: 0,
+            quarantined: false,
+            scope: HealScope::State,
+            before_digest: Some(0x11),
+            after_digest: Some(if validation == HealValidation::Recovered {
+                0x11
+            } else {
+                0x22
+            }),
+            validation,
+        }
+    }
+
+    /// The heal rows ride inside the same bounded sink and the same overflow
+    /// counter: nothing is dropped silently.
+    #[test]
+    fn rerun_sink_carries_the_heal_rows_inside_the_same_budget() {
+        let mut sink = RerunSink::new();
+        assert_eq!(sink.heal_len(), 0);
+        for index in 0..(MAX_RERUN_HEAL_ROWS + 5) as u64 {
+            sink.push_heal(&heal_row(index, HealValidation::Recovered));
+        }
+        assert_eq!(sink.heal_len(), MAX_RERUN_HEAL_ROWS);
+        assert_eq!(
+            sink.overflow_count(),
+            5,
+            "the dropped heal rows are counted, never silent"
+        );
+        let ticks: Vec<u64> = sink.heal_rows().map(|row| row.fault_tick).collect();
+        assert_eq!(ticks.len(), MAX_RERUN_HEAL_ROWS);
+        assert_eq!(ticks[0], 5, "the oldest rows evicted first");
+    }
+
+    /// A hunt names the first divergent tick and the heal that caused it.
+    #[test]
+    fn rerun_sink_names_the_first_divergent_tick_after_a_bad_heal() {
+        let mut left = RerunSink::new();
+        let mut right = RerunSink::new();
+        for tick in 0..MAX_RERUN_FRAMES as u64 {
+            left.push(tick, tick);
+            right.push(tick, if tick == 41 { tick + 1 } else { tick });
+        }
+        right.push_heal(&heal_row(41, HealValidation::NotRecovered));
+        right.push_heal(&heal_row(42, HealValidation::Recovered));
+        assert_eq!(left.first_divergent(&right), Some(41));
+        let bad = right
+            .first_unproved_heal()
+            .expect("the bad heal is on the sink");
+        assert_eq!(bad.fault_tick, 41);
+        assert_eq!(bad.validation, HealValidation::NotRecovered);
+        assert_eq!(right.heal_len(), 2);
     }
 }

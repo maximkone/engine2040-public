@@ -19,6 +19,11 @@
 //! with backoff, tick-boundary sim heals and the heal tape the simulation
 //! copies into its action log for replay.
 //!
+//! The [`recovery`] module adds the proof a heal must carry: the scope of
+//! the heal, the verdict (recovered, not recovered, frozen frame, rolled
+//! back), the digests of the last good state and of the healed state, and the
+//! rolling heal cap that turns a heal storm into a red run.
+//!
 //! The [`rerun_sink`] module adds the bounded 120-frame rerun recording of
 //! simulation state per tick for desync hunts.
 //!
@@ -40,9 +45,15 @@ pub mod fps;
 pub mod heal;
 /// Std-only MCAP writer and reader for replay recordings Foxglove and Rerun open.
 pub mod mcap;
+/// Heal scope, the recovery proof and the rolling heal cap: a heal counts
+/// only when the healed state hashes to the last good state.
+pub mod recovery;
 /// Bounded 120-frame rerun recording of sim state per tick for desync hunts.
 pub mod rerun_sink;
 pub mod supervisor;
+/// The heal proof rules of the supervisor: the recovery proof, the budget
+/// reset gate, the rollback and the rolling heal cap.
+mod supervisor_proof;
 /// Per-tick timeline over the PF9 shape: seeded desyncs name the first
 /// divergent tick, field and both values; NDJSON export in `time_point` shape.
 pub mod timeline;
