@@ -233,7 +233,8 @@ async function main() {
   }
   if (args.watch) {
     const dir = join(KERNEL_DIR, args.name);
-    for (let i = 0; i < 180; i += 1) {
+    try {
+      for (let i = 0; i < 180; i += 1) {
       let status = "";
       try {
         status = kaggle(["kernels", "status", kernelRef(args.name)]);
@@ -253,6 +254,10 @@ async function main() {
         return 1;
       }
       await new Promise((resolve) => setTimeout(resolve, 60000));
+      }
+    } catch (e) {
+      console.log(`gpu-farm: watch failed: ${String(e?.stack ?? e).slice(0, 400)}`);
+      return 1;
     }
     console.log("gpu-farm: still running after 3 hours; pull it later");
     return 3;

@@ -158,9 +158,11 @@ session, so those legs wait behind each other.
 
 - `tools/gpu-farm.mjs` pushes one cargo line to a Kaggle GPU kernel (T4, two per account, about
   30 GPU-hours a week) and pulls the receipt back. `node --test tools/gpu-farm.test.mjs` is green.
-- It needs `KAGGLE_USERNAME` and `KAGGLE_KEY` (or `~/.kaggle/kaggle.json`). Without them it is a
-  NOOP that prints the line it would run and exits 2. The token is an owner decision: no
-  credential is ever written into the tree, and the kernel is private.
+- It needs no credential of its own: the Kaggle CLI signs in from `~/.kaggle/access_token` (or
+  `kaggle.json`, or `KAGGLE_USERNAME` and `KAGGLE_KEY`), and the tool only asks the CLI whether it
+  can talk to Kaggle. No secret is read, printed or written into the tree, and the kernel is
+  private. The first kernel ran as `maximkonovalovx/engine2040-gpu-farm-<name>` (Kaggle wants
+  `owner/slug`, and the slug is the title slugified).
 - What the farm is for: the legs that need a GPU, and the long renders this PC cannot afford.
 - What it is not for: cargo builds (GitHub runners are free and faster), the golden (no GPU
   needed) and look scoring (a T4 frame is not the local RTX 3050 frame, so it can never stand in
