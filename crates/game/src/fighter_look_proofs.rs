@@ -1343,7 +1343,7 @@ fn the_weapon_hand_holds_the_grip_socket_through_a_swing() {
 /// loader in one line.
 #[test]
 fn the_rig_loads_out_of_a_cooked_bundle_with_the_native_bytes() {
-    use engine_assets::asset_source::{content_digest, FsSource};
+    use engine_assets::asset_source::FsSource;
     use engine_assets::fighter_bundle::cook;
 
     let dir = content_dir();
@@ -1353,13 +1353,29 @@ fn the_rig_loads_out_of_a_cooked_bundle_with_the_native_bytes() {
     let bundle =
         engine_assets::BundleSource::open(cooked.bytes.to_vec()).expect("the bundle opens");
 
-    // The bytes are the same through either source: the digest folds path,
-    // length and bytes, so a renamed or edited file moves it.
-    let native_digest = content_digest(&from_files, "").expect("the tree digests");
-    let bundle_digest = content_digest(&bundle, "").expect("the bundle digests");
+    // The bundle holds the manifest and the rig tree, and every file in it is
+    // byte for byte the file the native window reads. (The digest of the whole
+    // directory would not match: the directory also holds the atlas PNGs and
+    // the previews, which the rig does not need.)
+    let packed = bundle.list("").expect("the bundle lists its entries");
+    assert!(
+        packed.contains(&"manifest.json".to_string()),
+        "the manifest is in the bundle"
+    );
+    for path in &packed {
+        let from_bundle = bundle.read(path).expect("the bundle holds the file");
+        let from_dir = from_files.read(path).expect("the directory holds the file");
+        assert_eq!(
+            from_bundle.as_ref(),
+            from_dir.as_ref(),
+            "{path} is the same bytes through either source"
+        );
+    }
+    let rig_files = from_files.list("glb").expect("the rig tree lists").len() + 1;
     assert_eq!(
-        native_digest, bundle_digest,
-        "the bundle holds the same rig bytes as the directory"
+        packed.len(),
+        rig_files,
+        "the bundle holds the manifest and every rig file, and nothing else"
     );
 
     // The rig itself loads from the bundle: the same four variants, the same
