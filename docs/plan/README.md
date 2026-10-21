@@ -8,6 +8,7 @@ else. Loop work reads NOW files only. Core proofs: Look, Bodies, AI door,
 Multiplayer. Format: file — tag — proof it feeds — scope. A new plan file gets
 one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 
+- `melee-feel.md` — NOW — Look, Bodies, AI door — the owner's 2026-10-21 order: melee with weight (weapon mass, momentum knockback, one hitstop truth, armour, hit particles, clash recoil, landing, impact audio, hit reactions, contact forces) and the game-building door for weak models (game object kinds, persistence, play the authored scene, refusals that name the fix); rows FEEL1-FEEL11 and DOOR1-DOOR5
 - `finish-line.md` — NOW — all four — the finish line as numbers the loop prints itself (gates G1-G8, product check), the order of the LF steal rows, research in `docs/research/steals-2026-10-11/`
 - `kam2-rust.md` — NOW — Look — the owner's 2026-10-20 order: a KaM-economy RTS in Rust with a RA2-look 2.5D renderer, its crates KAM2-SIM/DATA/RENDER/UI/AI/GAME, milestones KAM0-KAM5 and the free-art legal line
 - `kam2-style-lock.md` — NOW — Look — the measured art lock for KAM2: 2:1 diamond at 64x32, 8 facings, turret layer, palette, light rig, team mask, cameo and manifest rules

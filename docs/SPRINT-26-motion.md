@@ -134,6 +134,10 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   grew the whole body: the bake writes one track per fighter joint (65,
   named in the receipt, in the rig's joint order) instead of the two feet,
   and `pack_file::sample_pose` plays a loaded pack on a rig of the same
-  joint count, refusing a pack baked for another rig. Left in the row: the
-  pack carries positions only, so the rig's bind rotations stand, and no
-  game-side caller plays a loaded clip yet.
+  joint count, refusing a pack baked for another rig. Then
+  `pack_file::sample_pose_named` plays the pack on a rig whose joints carry
+  the same names in another order: the caller names the pack's tracks, each
+  rig joint takes the track with its name, and a rig of another size, a name
+  list of another size, or a joint with no track refuses loud (unit tests in
+  `pack_file`). Left in the row: the pack carries positions only, so the
+  rig's bind rotations stand, and no game-side caller plays a loaded clip yet.

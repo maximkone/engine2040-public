@@ -10,8 +10,9 @@
 // whose sha is not HEAD or an ancestor.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ROOT, pickReceipt, stripAnsi } from "./ctrf-report.mjs";
 import { lowerPriority, poolEnv } from "./jobserver.mjs";
 
 // Every cargo this file starts: joins the shared slot pool when it is up, and runs below the desktop's priority (tools/jobserver.mjs).
@@ -49,8 +50,11 @@ export const PROOF_HELP = [
   "  nextest (proof profile; opt-in when `cargo nextest` and",
   "  .config/nextest.toml [profile.proof] both exist, else plain cargo test):",
   "    cargo nextest run --profile proof --cargo-profile fast-test --locked --workspace --all-targets",
-  "  receipt: target/nextest-junit/proof.xml; retries print as `<n> retried` per leg.",
-  "  partitioned (same suite split, no test dropped; merge proof-1-2.xml + proof-2-2.xml to proof.xml):",
+  "  receipt: the leg line names the junit file the run wrote, found by the run id",
+  "  nextest prints; a plain cargo test leg writes none and says `no receipt`.",
+  "  retries print as `<n> retried` per leg.",
+  "  partitioned (same suite split, no test dropped; one receipt per run, so the",
+  "  later partition's file replaces the earlier one):",
   "    cargo nextest run --profile proof --partition count:1/2 --cargo-profile fast-test --locked --workspace --all-targets",
   "    cargo nextest run --profile proof --partition count:2/2 --cargo-profile fast-test --locked --workspace --all-targets",
   "  gungraun (Linux only, 2% Ir budget over the perf_gate baseline):",
@@ -256,24 +260,33 @@ export function findPendingSnapshots(root = ".", skip = SNAPSHOT_SCAN_SKIP) {
 // 60s slow-timeout with terminate-after, bounded fixed-backoff retries
 // count 2 delay 2s, junit receipt); the proof test legs run under it per the
 // `.cargo/config.toml` fast-test comment, with retries reported never hidden.
-// Partitioned run splits the suite without dropping a test:
-// `cargo nextest run --profile proof --partition count:1/2` then `count:2/2`,
-// junit `target/nextest-junit/proof-1-2.xml` plus `proof-2-2.xml` merged to
-// `target/nextest-junit/proof.xml`; persistent flakes (>=2) quarantine via
-// tools/flaky-quarantine.mjs threshold 2 to `--perf`, never hidden.
+// A partitioned run splits the suite without dropping a test:
+// `cargo nextest run --profile proof --partition count:1/2` then `count:2/2`.
+// Nextest writes ONE receipt per run (the configured path rides inside the
+// profile store dir), so the second run replaces the first file; the lane
+// names the file the run wrote instead of guessing it. Persistent flakes
+// (>=2) quarantine via tools/flaky-quarantine.mjs threshold 2 to `--perf`,
+// never hidden.
 export const NEXTEST_PROFILE = "proof";
 export const NEXTEST_CONFIG = ".config/nextest.toml";
-export const NEXTEST_JUNIT = "target/nextest-junit/proof.xml";
 
-// Pure junit path for a leg (exported for tests): unpartitioned legs post
-// `target/nextest-junit/proof.xml`; partitioned legs post
-// `target/nextest-junit/proof-M-N.xml` merged to proof.xml, so every leg
-// posts one junit artifact beside the merged receipt.
-export function nextestJunitPath(partition = null) {
-  if (partition === null || partition === undefined || partition === "") return NEXTEST_JUNIT;
-  const raw = String(partition).startsWith("count:") ? String(partition).slice(6) : String(partition);
-  const [m, n] = raw.split("/");
-  return `target/nextest-junit/proof-${m}-${n}.xml`;
+// The junit receipt a nextest run wrote, as a repo-relative slash path, or
+// null when the run wrote none. Nextest prints `Nextest run ID <uuid>` and
+// stamps the same id on the receipt, so the two are matched and a receipt
+// from an earlier run never matches. A plain `cargo test` leg writes no
+// receipt at all, so it has none either.
+export function nextestReceiptPath(runOutput, root = ROOT) {
+  const text = stripAnsi(`${runOutput ?? ""}`);
+  if (!/Nextest run ID [0-9a-fA-F-]{36}/.test(text)) return null;
+  const found = pickReceipt(text, root);
+  if (!found) return null;
+  return relative(root, found).split("\\").join("/");
+}
+
+// What a leg line says about its receipt: the file the run wrote, or the
+// plain words for a leg that wrote none.
+export function junitLabel(receiptPath) {
+  return receiptPath ? `junit ${receiptPath}` : "no receipt";
 }
 
 // Pure check over the profile file text (exported for tests): true when the
@@ -597,12 +610,12 @@ function cargo(args, timeoutMs = 1_800_000) {
 // pure helpers above): when `cargo nextest` and `.config/nextest.toml`
 // `[profile.proof]` both exist the leg runs as
 // `cargo nextest run --profile proof --cargo-profile fast-test ...` with its
-// junit receipt and visible retry count; otherwise it falls back to the
-// plain `cargo test` leg with the same failures visible and `0 retried`.
-// Partitioned legs add `--partition count:M/N` (default legs run
-// unpartitioned) and post the per-partition junit artifact
-// (`target/nextest-junit/proof-M-N.xml`) beside the merged `proof.xml`, so
-// every leg line names its junit path and its `<n> retried` count.
+// visible retry count; otherwise it falls back to the plain `cargo test` leg
+// with the same failures visible and `0 retried`.
+// A partitioned leg adds `--partition count:M/N` (default legs run
+// unpartitioned). Every leg line names the receipt the run wrote, found by
+// the run id nextest prints, and its `<n> retried` count. A plain `cargo
+// test` leg writes no receipt, so its line says `no receipt`.
 let nextestProbe = null;
 function useNextest() {
   if (nextestProbe !== null) return nextestProbe;
@@ -619,13 +632,25 @@ function useNextest() {
 
 function cargoTest(command, partition = null) {
   const mapped = nextestTestCommand(command, partition);
-  const junit = nextestJunitPath(partition);
   if (!mapped || !useNextest()) {
     const fallback = cargo(command);
-    return { ...fallback, flake: nextestFlakeSummary(`${fallback.out ?? ""}\n${fallback.error ?? ""}`), via: "cargo", junit, partition: partition ?? null };
+    return {
+      ...fallback,
+      flake: nextestFlakeSummary(`${fallback.out ?? ""}\n${fallback.error ?? ""}`),
+      via: "cargo",
+      receipt: null,
+      partition: partition ?? null,
+    };
   }
   const run = cargo(mapped);
-  return { ...run, flake: nextestFlakeSummary(`${run.out ?? ""}\n${run.error ?? ""}`), via: "nextest", junit, partition: partition ?? null };
+  const text = `${run.out ?? ""}\n${run.error ?? ""}`;
+  return {
+    ...run,
+    flake: nextestFlakeSummary(text),
+    via: "nextest",
+    receipt: nextestReceiptPath(text),
+    partition: partition ?? null,
+  };
 }
 
 // GPU tests with no adapter print `SKIPPED <test>: <why>` (render's
@@ -681,13 +706,13 @@ if (!args.includes("--skip-build")) {
     if (isTest && command.includes("engine-render")) {
       renderSkipped = countSkipped(`${result.out ?? ""}\n${result.error ?? ""}`);
     }
-    const flake = isTest ? `, ${result.flake} via ${result.via} junit ${result.junit}` : "";
+    const flake = isTest ? `, ${result.flake} via ${result.via} ${junitLabel(result.receipt)}` : "";
     // Every test leg needs one test to have run, not just exit 0 (see legVerdict).
     const leg = legVerdict(isTest, result.ok, `${result.out ?? ""}\n${result.error ?? ""}`);
     check(
       `cargo ${command.join(" ")}`,
       leg.pass,
-      leg.pass ? (isTest ? `${result.flake} via ${result.via} junit ${result.junit}` : "") : (leg.why ?? `${result.error || result.out}${flake}`),
+      leg.pass ? (isTest ? `${result.flake} via ${result.via} ${junitLabel(result.receipt)}` : "") : (leg.why ?? `${result.error || result.out}${flake}`),
     );
   }
   // Named consumer gates (wave 21): RV1 red-team tapes replay every wave;
@@ -717,10 +742,10 @@ if (!args.includes("--skip-build")) {
       `cargo ${command.join(" ")}`,
       leg.pass,
       leg.pass
-        ? `${result.flake} via ${result.via} junit ${result.junit}`
+        ? `${result.flake} via ${result.via} ${junitLabel(result.receipt)}`
         : leg.why
-          ? `${leg.why}, ${result.flake} via ${result.via} junit ${result.junit}`
-          : `${result.error || result.out}, ${result.flake} via ${result.via} junit ${result.junit}`,
+          ? `${leg.why}, ${result.flake} via ${result.via} ${junitLabel(result.receipt)}`
+          : `${result.error || result.out}, ${result.flake} via ${result.via} ${junitLabel(result.receipt)}`,
     );
   }
   const deny = cargo(["deny", "check"]);

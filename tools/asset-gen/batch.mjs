@@ -48,7 +48,7 @@ for (const file of files) {
   const concept = join(conceptsDir, file);
   const out = join(outRoot, id);
   // Work already done is not done again: the mesh is the expensive part.
-  if (has("--skip-existing") && existsSync(join(out, "character.json"))) {
+  if (has("skip-existing") && existsSync(join(out, "character.json"))) {
     console.log(`skip ${id}: already done`);
     const done = JSON.parse(readFileSync(join(out, "character.json"), "utf8"));
     rows.push({

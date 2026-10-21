@@ -2120,6 +2120,47 @@ mod tests {
         (app, outcomes)
     }
 
+    /// The app shell is built by value, on the stack, by the arena bin at
+    /// startup and by every copy of it up the call chain. It carries the
+    /// live match, the hud, the crowd and the directors. With the legion
+    /// brain inlined into the live match the shell was 39 KB, and the
+    /// startup chain no longer fitted the stack the process had: the arena
+    /// bin died at startup with a stack overflow (0xC00000FD, 2026-10-21).
+    /// The shell is 25 KB now; the budget keeps the big parts behind a
+    /// pointer.
+    #[test]
+    fn the_app_shell_stays_small() {
+        assert!(
+            core::mem::size_of::<App>() <= 32 * 1024,
+            "the app shell is {} bytes: keep the big parts behind a pointer",
+            core::mem::size_of::<App>()
+        );
+    }
+
+    /// The game bins ask the linker for a big main thread stack. The
+    /// window session builds its big value structs (the app shell, the live
+    /// match, the ring) on the stack, and the 1 MB stack Windows gives a
+    /// process by default does not fit them: the arena bin died at startup
+    /// with a stack overflow (0xC00000FD, 2026-10-21). The linker reserves
+    /// the main thread stack, so the ask must stay, and it must stay a
+    /// plain byte count this test can read.
+    #[test]
+    fn the_game_bins_ask_the_linker_for_a_big_stack() {
+        const BUILD: &str = include_str!("../build.rs");
+        let at = BUILD
+            .find("/STACK:")
+            .expect("the build script asks the linker for a stack");
+        let rest = &BUILD[at + "/STACK:".len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let reserve: u32 = digits
+            .parse()
+            .expect("the stack reserve is a plain byte count");
+        assert!(
+            reserve >= 16 * 1024 * 1024,
+            "the linker reserves {reserve} bytes of stack: the arena startup path needs more than the 1 MB Windows default"
+        );
+    }
+
     #[test]
     fn present_every_decouples_ticks_from_frames() {
         // N>1 plays every tick but presents fewer frames with identical tick

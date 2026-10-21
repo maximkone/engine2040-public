@@ -26,7 +26,32 @@ Every line below names a binary or test that exists in this repo. Run from the r
 ## MCP door (e2040-mcp)
 - Help, headless: `cargo run --locked -p engine-endpoint --features mcp --bin e2040-mcp -- --help` (`docs/book/recipes-drive-from-mcp.md`, serve the project folder). The plain build refuses the binary without the `mcp` feature.
 - Run a copy so a rebuild cannot relink the binary under a running server: `cargo build --release --locked -p engine-endpoint --features mcp --bin e2040-mcp`, copy `target/release/e2040-mcp.exe` outside `target/`, and point the client at the copy with `--project-dir <scratch dir>`.
-- Client config: `{"command": "e2040-mcp", "args": ["--project-dir", "<dir>"]}`. Tool names carry the `e2040_` prefix (`e2040_api_search`, `e2040_api_describe`). Search before you describe a path you have not seen. Adding a verb: skill `ai-door`.
+- Client config: `{"command": "e2040-mcp", "args": ["--project-dir", "<dir>"]}`. Tool names: `tools/mcp-install.mjs` writes the server key `e2040`, and OpenCode shows the key as a prefix (`e2040_api_search`). The door itself answers only the bare name: a raw call to `e2040_api_search` returned `unknown_tool` (checked 2026-10-21). Use the names `rpc.discover` prints. Search before you describe a path you have not seen. Adding a verb: skill `ai-door`.
+
+### Stale copy check (run first)
+
+`.opencode/bin/e2040-mcp.exe` is a copy from `tools/mcp-install.mjs` and is gitignored. On 2026-10-21 it was dated 2026-09-26 and served 20 tools with no `api.load`, `api.call`, `game.build`, `level.build`, `scene.next` or `scene.pick`. It also sent 64-bit hashes as JSON numbers, so a JS client rounds the approval and every `tx.apply` fails with `forged_approval`. Before you build anything, check that the tool list from `rpc.discover` shows `api.load`, `game.build` and `level.build`. If it shows 20 tools, report that the copy is stale and stop. Current source sends those hashes as decimal strings (`crates/endpoint/src/mcp_dto.rs`, `u64_text`).
+
+### Build a small game through the door (verified 2026-10-21, `target\release\e2040-mcp.exe`)
+
+The door places props from a fixed catalog. It does not build a game. Catalog kinds (`crates/endpoint/src/build_level.rs::KINDS`): `altar banner barrel bench brazier crate pillar post stand torch`. There is no player, enemy, goal or floor kind; walls come from the room shell. A brief is one directive per line: `prop <kind> <name>`, `want <name> <relation> <target> [<lo>,<hi>]?` (relations `next_to facing inside on_top_of supports`; targets `wall:north|south|east|west`, `object:<name>` or `point:<x_cm>,<z_cm>`), or `spawn <name>`. English fails with `level_refused: ... unknown directive`.
+
+Edits do not survive a restart. Run the whole sequence in one process:
+
+1. `scene.read` `{"limit":64,"cursor":0}`. Note `revision` R.
+2. `level.build` `{"brief":"prop crate c1\nspawn c1","seed":2040,"expected_revision":R,"idempotency_key":8}`. Three props with two `want` lines were refused as `spatial_rejected` (`overlap`) and the message named no pair. Start with one prop and add one at a time.
+3. `scene.read` again. Its `revision` (R1) is the one to pin. Poses from `scene.read` are metres; `scene.brief` and `scene.query` report centimetres.
+4. `play.run` `{"action":"start","ticks":120,"fighters":2,"half_extent_m":10,"seed":2040,"scene_rev":R1}`, then `{"action":"poll","job_id":<id>}`. Without `scene_rev`: `unpinned_run`. At revision 0: `empty_arena`.
+5. `play.step` `{"seed":2040,"upto_tick":30,"width":480,"height":270}` returns an image. The default frame is 96x64, too small to read. `play.step` takes no `scene_rev`; the frame checked was the default two-disc duel, so do not claim your props are in it until you have looked.
+6. `tx.undo` `{}` reverts step 2 as a new revision.
+
+Other verbs, verified:
+
+- `game.build` `{"brief":"prop crate c1\nprop barrel b1\nspawn c1\nwant b1 next_to object:c1","seed":2040}` returned `verdict: pass` and `package_bytes` only. The package is not returned, so there is nothing to open or play. Read-only.
+- `sim.build_encounter` `{"brief":"one enemy guards the goal","seed":2040}` returns `solved`, `plan_id`, `rung` and no geometry.
+- No save verb exists. The project folder held no files after edits, and a fresh process starts at revision 0.
+
+## Playtest crate
 
 ## Playtest crate
 - Tests: `node tools/gh-check.mjs cargo test --locked -p engine-playtest keypoint` (`docs/book/recipes-drive-from-mcp.md`, the play-test section). Package `engine-playtest`, path `crates/playtest`.

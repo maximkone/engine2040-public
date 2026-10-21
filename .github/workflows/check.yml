@@ -42,6 +42,12 @@ jobs:
         if: runner.os == 'Linux'
         run: nohup sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost > /dev/null 2>&1 &
       - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: sccache or plain rustc
+        # sccache that will not start (the cache over its egress limit, 2026-10-21) took the whole job down;
+        # an empty RUSTC_WRAPPER makes cargo compile uncached instead.
+        shell: bash
+        run: |
+          sccache --start-server > /dev/null 2>&1 || { echo "sccache would not start, compiling uncached"; echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"; }
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
       # Restore only: main's ci.yml saves these (test-debug on Linux, win-check from its window-compile job on Windows).

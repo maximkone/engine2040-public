@@ -23,16 +23,43 @@
 //
 // Owner: engine2040. Units: one kernel, one cargo line, one receipt.
 
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 const PUBLIC_REPO = "https://github.com/maximkone/engine2040-public";
 const KERNEL_DIR = "target/gpu-farm";
 const REPORT_DIR = "target/reports/gpu-farm";
+const API = "https://api.kaggle.com/v1/kernels.KernelsApiService";
+
+// The Kaggle credential on this PC is a bearer token in the user's Kaggle
+// folder. The tool reads it to call the Kaggle API and never prints, stores
+// or copies it; the kernels stay private.
+function apiToken() {
+  const file = join(homedir(), ".kaggle", "access_token");
+  if (existsSync(file)) return readFileSync(file, "utf8").trim();
+  return "";
+}
+
+async function apiCall(method, body) {
+  const res = await fetch(`${API}/${method}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiToken()}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${method}: HTTP ${res.status}`);
+  return res.json();
+}
+
+// Where the kernel is: RUNNING, COMPLETE, ERROR or anything else Kaggle says.
+export async function kernelStatus(ref) {
+  const [owner, slug] = ref.split("/");
+  const data = await apiCall("GetKernelSessionStatus", { user_name: owner, kernel_slug: slug });
+  return String(data.status ?? "UNKNOWN");
+}
 
 function parseArgs(argv) {
-  const out = { name: "farm", crate: "", filter: "", line: "", repo: PUBLIC_REPO, ref: "master", status: "", watch: false, pull: false, dry: false };
+  const out = { name: "farm", crate: "", filter: "", line: "", repo: PUBLIC_REPO, ref: "main", status: "", watch: false, pull: false, dry: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--crate") out.crate = argv[++i] ?? "";
@@ -70,13 +97,32 @@ LOG=/kaggle/working/receipt.txt
   echo "kernel: $(date -u +%Y-%m-%dT%H:%MZ)"
   echo "line: ${line}"
   echo "nvidia: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
-  echo "vulkan: $(command -v vulkaninfo >/dev/null && echo yes || echo no)"
   echo "---"
 } >> "$LOG"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >> "$LOG" 2>&1
-apt-get install -y -qq libvulkan1 libvulkan-dev mesa-vulkan-drivers libasound2-dev pkg-config >> "$LOG" 2>&1
+apt-get install -y -qq libvulkan1 libvulkan-dev mesa-vulkan-drivers libasound2-dev pkg-config libegl1 libgles2 >> "$LOG" 2>&1
+
+# What the driver gives us: the Vulkan ICD and the EGL libraries decide
+# whether wgpu can reach the T4 at all. Kaggle mounts the CUDA driver with
+# compute capability only, so the graphics library may be missing; when it
+# is there, the ICD file is written by hand and the T4 becomes a GPU rig.
+{
+  echo "--- gpu probe ---"
+  echo "icd: $(ls /usr/share/vulkan/icd.d/ 2>/dev/null | tr '\\n' ' ')"
+  echo "nvidia libs: $(ls /usr/local/lib /usr/lib/x86_64-linux-gnu 2>/dev/null | grep -i -E 'libGLX_nvidia|libEGL_nvidia' | tr '\\n' ' ')"
+  echo "---"
+} >> "$LOG"
+
+for candidate in /usr/local/lib/libGLX_nvidia.so.0 /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0; do
+  if [ -f "$candidate" ]; then
+    echo "nvidia vulkan icd: $candidate" >> "$LOG"
+    printf '{\\n  "file_format_version": "1.0.0",\\n  "ICD": {\\n    "library_path": "%s",\\n    "api_version": "1.3.242"\\n  }\\n}\\n' "$candidate" > /usr/share/vulkan/icd.d/nvidia_icd.json
+    ldconfig 2>> "$LOG"
+    break
+  fi
+done
 
 if ! command -v cargo >/dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >> "$LOG" 2>&1
@@ -84,13 +130,25 @@ if ! command -v cargo >/dev/null; then
 fi
 export CARGO_INCREMENTAL=0
 export RUST_BACKTRACE=1
+export RUST_LOG=wgpu_core=info,wgpu_hal=info
+export WGPU_BACKTRACE=1
+export EGL_PLATFORM=surfaceless
 
-cd /kaggle/working
+# The clone lives outside the output folder: Kaggle lists every file of
+# /kaggle/working, and a repo tree buries the receipt under thousands.
+rm -rf /kaggle/working/engine2040 /tmp/engine2040
+cd /tmp
 if [ ! -d engine2040 ]; then
   git clone --depth 1 --branch ${ref} ${repo} engine2040 >> "$LOG" 2>&1 || {
-    echo "clone failed" >> "$LOG"; cat "$LOG"; exit 3; }
+    echo "branch ${ref} not found, taking the default branch" >> "$LOG"
+    rm -rf engine2040
+    git clone --depth 1 ${repo} engine2040 >> "$LOG" 2>&1 || {
+      echo "clone failed" >> "$LOG"; cat "$LOG"; exit 3; }
+  }
 fi
 cd engine2040
+echo "--- commit ---" >> "$LOG"
+git rev-parse --short HEAD >> "$LOG" 2>&1
 
 echo "--- cargo ---" >> "$LOG"
 bash -c "${line}" >> "$LOG" 2>&1
@@ -124,17 +182,23 @@ export function slugOf(text) {
     .replace(/^-+|-+$/g, "");
 }
 
-// The owner is the account the CLI is signed in as; Kaggle wants owner/slug.
-export function ownerSlug() {
-  const out = kaggle(["kernels", "list", "--mine", "--page-size", "1"]);
-  const first = out.split("\n").find((line) => line.includes("/"));
-  if (first) {
-    const owner = first.trim().split("/")[0];
-    if (owner) return owner;
+// The Kaggle owner: from the pushed kernels on disk, from KAGGLE_OWNER, or
+// from the owner given on the command line. Kaggle wants owner/slug.
+export function ownerSlug(explicit = "") {
+  if (explicit) return explicit;
+  if (process.env.KAGGLE_OWNER) return process.env.KAGGLE_OWNER;
+  const root = KERNEL_DIR;
+  if (existsSync(root)) {
+    const names = readdirSync(root).sort();
+    for (const name of names.reverse()) {
+      const meta = join(root, name, "kernel-metadata.json");
+      if (!existsSync(meta)) continue;
+      const id = JSON.parse(readFileSync(meta, "utf8")).id ?? "";
+      const owner = id.split("/")[0];
+      if (owner) return owner;
+    }
   }
-  const view = kaggle(["config", "view"]);
-  const hit = /username:\s*(\S+)/.exec(view);
-  return hit ? hit[1] : "";
+  return "";
 }
 
 export function kernelMetadata({ name, line, owner }) {
@@ -157,23 +221,7 @@ export function kernelMetadata({ name, line, owner }) {
   };
 }
 
-// The Kaggle CLI owns the credential: it reads ~/.kaggle/access_token (or
-// kaggle.json, or KAGGLE_USERNAME/KAGGLE_KEY) itself. The tool only asks the
-// CLI whether it can talk to Kaggle, so no secret is read, printed or stored.
-function kaggleReady() {
-  try {
-    kaggle(["kernels", "list", "--page-size", "1"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function kaggle(args, opts = {}) {
-  return execFileSync("kaggle", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts });
-}
-
-// The kernel ref the CLI wants: owner/slug, read from the pushed metadata.
+// The kernel ref the API wants: owner/slug, read from the pushed metadata.
 export function kernelRef(name, owner = "") {
   const meta = join(KERNEL_DIR, name, "kernel-metadata.json");
   if (existsSync(meta)) {
@@ -181,6 +229,39 @@ export function kernelRef(name, owner = "") {
     if (data.id) return data.id;
   }
   return `${owner}/${slugOf(`engine2040 gpu farm ${name}`)}`;
+}
+
+// The output files of a finished kernel session, with their download links.
+export async function sessionOutput(ref) {
+  const [owner, slug] = ref.split("/");
+  const files = [];
+  let raw = {};
+  let pageToken = "";
+  for (let page = 0; page < 20; page += 1) {
+    const data = await apiCall("ListKernelSessionOutput", {
+      user_name: owner,
+      kernel_slug: slug,
+      page_size: 200,
+      page_token: pageToken,
+    });
+    raw = data;
+    const walk = (value) => {
+      if (Array.isArray(value)) {
+        for (const item of value) walk(item);
+        return;
+      }
+      if (value && typeof value === "object") {
+        const name = value.name ?? value.fileName ?? value.title;
+        const url = value.url ?? value.downloadUrl ?? value.download_url;
+        if (name && url) files.push({ name: String(name), url: String(url) });
+        for (const item of Object.values(value)) walk(item);
+      }
+    };
+    walk(data.files ?? data.outputFiles ?? []);
+    pageToken = String(data.nextPageToken ?? "");
+    if (!pageToken) break;
+  }
+  return { files, raw };
 }
 
 export function reportPath(name) {
@@ -196,11 +277,23 @@ export function receiptVerdict(text) {
   return "incomplete";
 }
 
-// Pull the kernel output and write the receipt next to the reports.
-export function pullReceipt(name, line, dir) {
+// Pull the kernel output and write the receipt next to the reports. Kaggle
+// lists every file of the working folder (the whole cloned tree), so only the
+// receipt is downloaded.
+export async function pullReceipt(name, line, dir) {
   const out = join(KERNEL_DIR, `${name}-out`);
   mkdirSync(out, { recursive: true });
-  kaggle(["kernels", "output", kernelRef(name), "-p", "-o", out]);
+  const { files, raw } = await sessionOutput(kernelRef(name));
+  for (const file of files) {
+    const base = file.name.split("/").pop() ?? file.name;
+    if (base !== "receipt.txt") continue;
+    const res = await fetch(file.url);
+    if (!res.ok) continue;
+    writeFileSync(join(out, base), Buffer.from(await res.arrayBuffer()));
+  }
+  if (typeof raw.log === "string" && raw.log) {
+    writeFileSync(join(out, "kernel.log"), raw.log);
+  }
   const receipt = join(out, "receipt.txt");
   const text = existsSync(receipt) ? readFileSync(receipt, "utf8") : "";
   mkdirSync(REPORT_DIR, { recursive: true });
@@ -224,36 +317,32 @@ async function main() {
     console.error("gpu-farm: no cargo line (pass --crate, or --line)");
     return 2;
   }
-  const creds = kaggleReady();
-  if (!creds) {
-    console.log("gpu-farm: NOOP, the Kaggle CLI cannot talk to Kaggle.");
-    console.log("  the CLI reads ~/.kaggle/access_token (or kaggle.json) itself");
+  if (!apiToken()) {
+    console.log("gpu-farm: NOOP, no Kaggle credential on this PC.");
+    console.log("  the token lives in ~/.kaggle/access_token (the Kaggle CLI reads it too)");
     console.log(`  would run on a T4: ${line}`);
     return 2;
   }
   if (args.watch) {
     const dir = join(KERNEL_DIR, args.name);
+    const ref = kernelRef(args.name);
     try {
       for (let i = 0; i < 180; i += 1) {
-      let status = "";
-      try {
-        status = kaggle(["kernels", "status", kernelRef(args.name)]);
-      } catch (e) {
-        status = String(e.stdout ?? e.message);
-      }
-      const line = status.trim().split("\n").pop() ?? status.trim();
-      console.log(`watch ${args.name}: ${line}`);
-      if (/complete/i.test(status)) {
-        const text = pullReceipt(args.name, line === "" ? "" : cargoLine(args), dir);
-        console.log(`gpu-farm: ${args.name} -> ${reportPath(args.name)} (${receiptVerdict(text)})`);
-        console.log(text.slice(-1500));
-        return receiptVerdict(text) === "pass" ? 0 : 1;
-      }
-      if (/error/i.test(status)) {
-        console.log("gpu-farm: the kernel failed on Kaggle");
-        return 1;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 60000));
+        const status = await kernelStatus(ref);
+        console.log(`watch ${args.name}: ${status}`);
+        if (/complete/i.test(status)) {
+          const text = await pullReceipt(args.name, cargoLine(args), dir);
+          console.log(`gpu-farm: ${args.name} -> ${reportPath(args.name)} (${receiptVerdict(text)})`);
+          console.log(text.slice(-1500));
+          return receiptVerdict(text) === "pass" ? 0 : 1;
+        }
+        if (/error/i.test(status)) {
+          const text = await pullReceipt(args.name, cargoLine(args), dir);
+          console.log(`gpu-farm: ${args.name} failed on Kaggle (${receiptVerdict(text)})`);
+          console.log(text.slice(-1500));
+          return 1;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 60000));
       }
     } catch (e) {
       console.log(`gpu-farm: watch failed: ${String(e?.stack ?? e).slice(0, 400)}`);
@@ -263,11 +352,10 @@ async function main() {
     return 3;
   }
   if (args.status) {
-    const dir = join(KERNEL_DIR, args.status);
     try {
-      console.log(kaggle(["kernels", "status", kernelRef(args.status)]));
+      console.log(await kernelStatus(kernelRef(args.status)));
     } catch (e) {
-      console.log(`gpu-farm: status failed: ${String(e.stdout ?? e.message).trim()}`);
+      console.log(`gpu-farm: status failed: ${String(e?.message ?? e).trim()}`);
       return 2;
     }
     return 0;
@@ -275,12 +363,12 @@ async function main() {
   if (args.pull) {
     const dir = join(KERNEL_DIR, args.name);
     try {
-      const text = pullReceipt(args.name, line, dir);
+      const text = await pullReceipt(args.name, line, dir);
       console.log(`gpu-farm: ${args.name} -> ${reportPath(args.name)} (${receiptVerdict(text)})`);
       console.log(text.slice(-1200));
       return receiptVerdict(text) === "pass" ? 0 : 1;
     } catch (e) {
-      console.log(`gpu-farm: pull failed: ${String(e.stdout ?? e.stderr ?? e.message).trim()}`);
+      console.log(`gpu-farm: pull failed: ${String(e?.message ?? e).trim()}`);
       return 2;
     }
   }
@@ -303,21 +391,21 @@ async function main() {
     console.log(`gpu-farm: line ${line}`);
     return 0;
   }
-  let pushOut = "";
-  try {
-    pushOut = kaggle(["kernels", "push", "-p", dir]);
-  } catch (e) {
-    const msg = String(e.stdout ?? "") + String(e.stderr ?? "");
-    console.log(`gpu-farm: push failed: ${msg.trim()}`);
-    mkdirSync(REPORT_DIR, { recursive: true });
-    writeFileSync(reportPath(args.name), JSON.stringify({ name: args.name, line, state: "push-failed", error: msg.trim() }, null, 1));
-    return 1;
-  }
-  console.log(pushOut.trim());
-  console.log("gpu-farm: pushed. Poll with: node tools/gpu-farm.mjs --status " + args.name);
+  // The Kaggle CLI kills the parent process tree when it pushes a kernel on
+  // this PC (the node process dies with exit 255 and no output, in every
+  // stdio mode; the same command from the shell works). So the tool prepares
+  // the kernel and prints the one line to run; the shell runs it.
+  console.log(`gpu-farm: kernel ready at ${dir}`);
+  console.log(`  run: kaggle kernels push -p ${dir}`);
+  console.log(`  then: node tools/gpu-farm.mjs --watch --name ${args.name}`);
   return 0;
 }
 
 if (process.argv[1] && process.argv[1].endsWith("gpu-farm.mjs")) {
-  process.exitCode = await main();
+  try {
+    process.exitCode = await main();
+  } catch (e) {
+    console.log(`gpu-farm: crashed: ${String(e?.stack ?? e).slice(0, 600)}`);
+    process.exitCode = 1;
+  }
 }

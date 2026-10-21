@@ -1633,3 +1633,128 @@ fn a_hair_lock_in_a_mirrored_gust_stays_mirrored_to_the_bit() {
     );
     law_holds(result, "mirrored hair lock");
 }
+
+// ---- The floor (set_ground): a hem lies on the ground and never sinks through it ----
+
+/// The fighter cape as `fighter_look` lays it: half a meter wide, 0.95 m of cloth.
+const FLOOR_CAPE_M: [f32; 2] = [0.5, 0.95];
+
+/// The lowest particle's height, meters.
+fn lowest(cloth: &Cloth) -> f32 {
+    cloth
+        .positions()
+        .iter()
+        .map(|p| p[1])
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// A cape released from its whole top row at `top_y`, over a floor at zero.
+fn dropped_cape(top_y: f32) -> Cloth {
+    let tier = ClothTier::Comfort;
+    let grid = tier.knobs().cape;
+    let params = ClothParams::for_tier(tier);
+    let mut cloth = Cloth::new(grid, FLOOR_CAPE_M, [0.0, top_y, 0.0], params).expect("cape builds");
+    for particle in 0..grid.cols {
+        cloth.unpin(particle).expect("top row particle in range");
+    }
+    cloth
+        .set_ground(Some(0.0))
+        .expect("a floor at zero is valid");
+    cloth
+}
+
+#[test]
+fn a_cape_pinned_over_the_floor_never_sinks_through_it() {
+    let tier = ClothTier::Comfort;
+    let params = ClothParams::for_tier(tier);
+    // The top row is pinned 0.5 m up, so 0.95 m of cloth hangs past the floor.
+    let mut cloth =
+        Cloth::new(tier.knobs().cape, FLOOR_CAPE_M, [0.0, 0.5, 0.0], params).expect("cape builds");
+    cloth
+        .set_ground(Some(0.0))
+        .expect("a floor at zero is valid");
+    for tick in 1..=300 {
+        cloth.step(&[]);
+        let low = lowest(&cloth);
+        assert!(
+            low >= 0.0,
+            "tick {tick}: a particle sank to {low} under the floor"
+        );
+    }
+    // The hem reached the floor and lies on it, skin and all.
+    let low = lowest(&cloth);
+    assert!(
+        (low - CLOTH_GROUND_SKIN_M).abs() < 1e-5,
+        "the hem should lie on the floor, lowest {low}"
+    );
+}
+
+#[test]
+fn a_cape_dropped_onto_the_floor_comes_to_rest_and_stays_there() {
+    let mut cloth = dropped_cape(1.0);
+    sleep_it(&mut cloth);
+    let low = lowest(&cloth);
+    assert!(
+        low >= 0.0,
+        "the dropped cape fell through the floor to {low}"
+    );
+    let result = laws::rest_stays_rest(Sheet(cloth), 600, |s| {
+        s.0.step(&[]);
+    });
+    law_holds(result, "a dropped cape on the floor");
+}
+
+#[test]
+fn a_floor_never_adds_energy_to_a_falling_cape() {
+    let cloth = dropped_cape(1.0);
+    let slack = energy_slack(&cloth);
+    let result = laws::energy_never_rises(
+        cloth,
+        600,
+        |c| {
+            c.step(&[]);
+        },
+        sheet_energy,
+        slack,
+    );
+    law_holds(result, "a cape falling onto the floor");
+}
+
+#[test]
+fn no_floor_leaves_the_sheet_exactly_as_it_was() {
+    let tier = ClothTier::Comfort;
+    let cols = tier.knobs().cape.cols;
+    let mut plain = cape(tier);
+    let mut none = cape(tier);
+    // A refused height changes nothing, and an explicit no-floor is the same as never setting one.
+    assert_eq!(
+        none.set_ground(Some(f32::NAN)),
+        Err(ClothError::BadParam("ground"))
+    );
+    none.set_ground(None).expect("no floor is always valid");
+    for t in 0..300 {
+        let row = shoulder_row(cols, [0.2 * tri(t, 0), 0.0, 0.0]);
+        plain.pin_top_row(&row).expect("pins in range");
+        none.pin_top_row(&row).expect("pins in range");
+        plain.step(&[]);
+        none.step(&[]);
+        assert_eq!(vertex_bits(&plain), vertex_bits(&none), "tick {t}");
+    }
+}
+
+#[test]
+fn a_sleeping_cape_wakes_when_a_floor_comes_up_under_its_hem() {
+    let mut cloth = cape(ClothTier::Comfort);
+    sleep_it(&mut cloth);
+    // The hem hangs at 0.6 m, so a floor at 0.7 m puts the bottom row under it.
+    cloth
+        .set_ground(Some(0.7))
+        .expect("a floor at 0.7 is valid");
+    assert!(
+        !cloth.is_asleep(),
+        "a floor under the hem must wake the sheet"
+    );
+    run(&mut cloth, 300);
+    let low = lowest(&cloth);
+    assert!(low >= 0.7, "the hem sank to {low} under the floor");
+}

@@ -53,6 +53,8 @@ AMBIENT = 0.42
 KEY_STRENGTH = 0.78
 RIM_STRENGTH = 0.22
 SHADOW_LIFT = 0.16
+# The skin is not the faction. A face in black iron is a mask, not a face.
+SKIN_TONE = "#8A6A52"
 ROUGHNESS_MATTE = 0.55
 ROUGHNESS_CLOTH = 0.85
 
@@ -245,12 +247,28 @@ def nearest_palette(pixels, palette):
     if grey.any():
         dist[grey, :] = 10.0
         dist[grey, neutral] = 0.0
+    # A hue the palette does not have must not fall back to the nearest hue:
+    # a blue shirt had no match, fell to bone, and dressed a black iron
+    # brute in white. So the garment is painted in the faction's own colour,
+    # and an accent colour is allowed only where the source's hue really
+    # matches one. The light and shadow stay the picture's.
     choice = dist.argmin(axis=1)
-
+    dominant = 0
+    if len(palette) > 1:
+        matched = dist[:, 1:].min(axis=1)
+        keep = (matched < 0.45) & (sat > 0.25)
+        choice = np.where(keep, choice, dominant)
     out = pal[choice]
-    # Shading: the scale between the pixel value and the palette value.
-    shade = np.where(pv[choice] > 1e-6, v / np.maximum(pv[choice], 1e-6), 1.0)
-    shade = np.clip(shade, 0.35, 1.8)
+    # The shading is the source's own variation around its own mean, not its
+    # absolute brightness. A painter takes the hue from the palette, the
+    # local light and shadow from the picture, and the value from the
+    # palette: black iron is always dark and bone is always light. Scaling by
+    # the source's absolute value instead sent every bright texture to
+    # white, because bone times 1.3 is white.
+    mean = float(v.mean()) if v.size else 1.0
+    mean = max(mean, 1e-4)
+    shade = 0.62 + 0.76 * (v / mean)
+    shade = np.clip(shade, 0.35, 1.90)
     out = np.clip(out * shade[:, None], 0.0, 1.0)
 
     result = np.concatenate([out, alpha], axis=1).reshape(h, w, 4).astype(np.float32)
@@ -274,19 +292,29 @@ def wire_vertex_light(material, attribute="LIGHT"):
             if not bsdf:
                 return False
             base = bsdf.inputs.get("Base Color")
-            if not base or not base.links:
+            if not base:
                 return False
-            source = base.links[0].from_socket
+            if base.links:
+                source = base.links[0].from_socket
+                constant = None
+            else:
+                # A flat colour still has to take the painted light, or the
+                # skin is a flat orange cut-out.
+                source = None
+                constant = tuple(base.default_value)
 
             attribute_node = tree.nodes.new("ShaderNodeVertexColor")
             attribute_node.layer_name = attribute
-            attribute_node.location = (source.node.location.x - 400, source.node.location.y - 220)
+            attribute_node.location = (source.node.location.x - 400, source.node.location.y - 220) if source else (-600, -220)
             mix = tree.nodes.new("ShaderNodeMix")
             mix.data_type = "RGBA"
             mix.blend_type = "MULTIPLY"
-            mix.location = (source.node.location.x - 180, source.node.location.y - 100)
+            mix.location = (source.node.location.x - 180, source.node.location.y - 100) if source else (-380, -100)
             mix.inputs[0].default_value = 1.0
-            tree.links.new(source, mix.inputs[6])
+            if source is not None:
+                tree.links.new(source, mix.inputs[6])
+            else:
+                mix.inputs[6].default_value = constant
             tree.links.new(attribute_node.outputs["Color"], mix.inputs[7])
             tree.links.new(mix.outputs[2], base)
             return True
@@ -294,7 +322,141 @@ def wire_vertex_light(material, attribute="LIGHT"):
         return False
 
 
-def bake_atlas(ob, palette, out_path):
+def slug(name):
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (name or "map"))
+    return safe[:24] or "map"
+
+
+def write_atlas(image, palette, out_path):
+    """Map one texture into the palette and write the atlas."""
+    width, height = image.size
+    buf = np.empty(width * height * 4, dtype=np.float32)
+    image.pixels.foreach_get(buf)
+    pixels = buf.reshape(height, width, 4)
+    painted = nearest_palette(pixels, palette)
+    atlas = bpy.data.images.new("atlas", width=ATLAS_SIZE, height=ATLAS_SIZE, alpha=True)
+    step_x = max(1, width // ATLAS_SIZE)
+    step_y = max(1, height // ATLAS_SIZE)
+    small = painted[::step_y, ::step_x, :]
+    if small.shape[0] < ATLAS_SIZE or small.shape[1] < ATLAS_SIZE:
+        pad_h = ATLAS_SIZE - small.shape[0]
+        pad_w = ATLAS_SIZE - small.shape[1]
+        small = np.pad(small, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+    small = small[:ATLAS_SIZE, :ATLAS_SIZE, :]
+    atlas.pixels.foreach_set(small.reshape(-1).astype(np.float32))
+    atlas.file_format = "PNG"
+    atlas.filepath_raw = out_path
+    atlas.save()
+    unique = len(np.unique(np.round(small.reshape(-1, 4)[:, :3], 3), axis=0))
+    return {"source_size": [width, height], "atlas": ATLAS_SIZE, "distinct_colors": int(unique)}
+
+
+def bake_atlas(ob, palette, out_dir):
+    """One palette atlas per material, and the skin is not the faction.
+
+    A body can carry several materials: the skin and the clothes. Painting
+    them all with one atlas is what put a white face on an armoured brute,
+    because the atlas was built from whichever material came first. So each
+    material gets its own atlas, made from its own texture, and the skin
+    keeps a skin tone instead of a faction colour.
+    """
+    written = []
+    for index, slot in enumerate(ob.material_slots):
+        material = slot.material
+        if material is None:
+            # A slot with no material: the exporter dropped the skin
+            # because MPFB's skin material is procedural. Give it one, in
+            # skin, so the face is a face and not a hole.
+            material = bpy.data.materials.new(name=f"skin{index}")
+            material.use_nodes = True
+            slot.material = material
+        node = None
+        image = None
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                tree = getattr(material, "node_tree", None)
+                if tree:
+                    # The base colour is the one that matters. A material
+                    # carries a normal map and an AO map too, and repainting
+                    # the first image node found repaints the normal map and
+                    # leaves the base colour white.
+                    bsdf = tree.nodes.get("Principled BSDF")
+                    base = bsdf.inputs.get("Base Color") if bsdf else None
+                    if base and base.links:
+                        source = base.links[0].from_node
+                        if source.type == "TEX_IMAGE" and source.image:
+                            node = source
+                            image = source.image
+                    if image is None:
+                        for candidate in tree.nodes:
+                            if candidate.type == "TEX_IMAGE" and candidate.image:
+                                node = candidate
+                                image = candidate.image
+                                break
+        except Exception:
+            continue
+        if image is None or node is None:
+            # No base colour image: the material is a solid colour, and a
+            # solid white face is a mask. Give it the skin tone if it is
+            # skin, the palette's first entry if it is anything else.
+            name = (material.name or "").lower()
+            is_skin = "skin" in name
+            colour = hex_linear(SKIN_TONE if is_skin else palette[0])
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    tree = getattr(material, "node_tree", None)
+                    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+                    if bsdf:
+                        base = bsdf.inputs.get("Base Color")
+                        if base:
+                            base.default_value = (colour[0], colour[1], colour[2], 1.0)
+                            # A flat colour still takes the painted light.
+                            wire_vertex_light(material)
+                            written.append({"material": material.name, "image": "(solid)",
+                                            "atlas": "(solid)", "skin": bool(is_skin),
+                                            "source_size": [0, 0], "atlas_size": 0,
+                                            "distinct_colors": 1})
+            except Exception:
+                pass
+            continue
+        name = (material.name or "").lower()
+        image_name = (image.name or "").lower()
+        is_skin = "skin" in name or "skin" in image_name
+        entry = [SKIN_TONE] if is_skin else palette
+        path = os.path.join(out_dir, f"atlas_{index}_{slug(image.name)}.png")
+        info = write_atlas(image, entry, path)
+        node.image = bpy.data.images.load(path, check_existing=True)
+        wire_vertex_light(material)
+        written.append({"material": material.name, "image": image.name,
+                        "atlas": os.path.basename(path), "skin": bool(is_skin), **info})
+    if not written:
+        path = os.path.join(out_dir, "atlas.png")
+        info = write_synthetic_atlas(palette, path)
+        written.append({"material": "(none)", "image": "(none)", "atlas": "atlas.png",
+                        "skin": False, **info})
+    return written
+
+
+def write_synthetic_atlas(palette, out_path):
+    """No texture to repaint: a flat palette sheet with a vertical ramp."""
+    neutral = hex_linear(palette[0]) if palette else (0.2, 0.2, 0.2)
+    ramp = np.zeros((ATLAS_SIZE, ATLAS_SIZE, 4), dtype=np.float32)
+    for row in range(ATLAS_SIZE):
+        k = 0.55 + 0.45 * (row / float(ATLAS_SIZE - 1))
+        ramp[row, :, :3] = np.clip(np.array(neutral, dtype=np.float32) * k, 0.0, 1.0)
+    ramp[:, :, 3] = 1.0
+    atlas = bpy.data.images.new("atlas", width=ATLAS_SIZE, height=ATLAS_SIZE, alpha=True)
+    atlas.pixels.foreach_set(ramp.reshape(-1))
+    atlas.file_format = "PNG"
+    atlas.filepath_raw = out_path
+    atlas.save()
+    return {"source_size": [0, 0], "atlas": ATLAS_SIZE, "distinct_colors": ATLAS_SIZE,
+            "synthetic": True}
+
+
+def bake_atlas_old(ob, palette, out_path):
     """Write the 512 palette atlas and point the material at it."""
     image = find_base_image(ob)
     if image is None:
@@ -531,6 +693,37 @@ def render_hero(ob, path, palette):
     low, high = mesh_bounds(ob)
     center = (low + high) * 0.5
     height = max(high.z - low.z, 1e-6)
+
+    # The picture the engine will draw: the atlas multiplied by the painted
+    # light, flat. Scene lights on top of that blew the paint out to white
+    # and hid the very thing the cook is supposed to prove.
+    for slot in ob.material_slots:
+        material = slot.material
+        if material is None:
+            continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                tree = getattr(material, "node_tree", None)
+                if not tree:
+                    continue
+                bsdf = tree.nodes.get("Principled BSDF")
+                output = tree.nodes.get("Material Output")
+                if not bsdf or not output:
+                    continue
+                base = bsdf.inputs.get("Base Color")
+                source = base.links[0].from_socket if base and base.links else None
+                emission = tree.nodes.new("ShaderNodeEmission")
+                emission.location = (bsdf.location.x + 120, bsdf.location.y - 180)
+                if source is not None:
+                    tree.links.new(source, emission.inputs["Color"])
+                else:
+                    colour = hex_linear(SKIN_TONE)
+                    emission.inputs["Color"].default_value = (colour[0], colour[1], colour[2], 1.0)
+                tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+        except Exception:
+            continue
+
     target = bpy.data.objects.new("hero_target", None)
     bpy.context.collection.objects.link(target)
     target.location = center
@@ -563,9 +756,12 @@ def export_glb(ob, path):
     bpy.context.view_layer.objects.active = ob
     kwargs = dict(filepath=path, export_format="GLB", export_apply=True,
                   export_texcoords=True, export_normals=True, use_selection=True)
+    # The painted light has to travel with the mesh: the engine multiplies
+    # the atlas by the LIGHT attribute, so a file without it is a file with
+    # no light in it.
     for name in ("export_colors", "export_vertex_color"):
         try:
-            bpy.ops.export_scene.gltf(**kwargs, **{name: "NONE"})
+            bpy.ops.export_scene.gltf(**kwargs, **{name: "ACTIVE"})
             return True
         except TypeError:
             continue
@@ -600,8 +796,7 @@ def main():
     source_height, scale = normalise_height(ob, target_height)
     unwrapped = ensure_uv(ob)
 
-    atlas_path = os.path.join(outdir, "atlas.png")
-    atlas_info = bake_atlas(ob, palette, atlas_path)
+    atlas_info = bake_atlas(ob, palette, outdir)
     light_info = bake_vertex_light(ob)
 
     target_ratio = min(1.0, budget / float(max(raw_tris, 1)))

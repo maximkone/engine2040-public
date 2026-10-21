@@ -867,11 +867,15 @@ fn run(raw: &[String]) -> i32 {
                 // when, and how far that joint missed its prediction.
                 if let Some(pop) = pop {
                     say!(
-                        "arena pop: slot={} joint={} tick={:.1} miss_cm={:.1} from={:.2},{:.2},{:.2} at={:.2},{:.2},{:.2}",
+                        "arena pop: slot={} joint={} tick={:.1} miss_cm={:.1} act={} clip={} clip_s={:.3} prev_clip={} from={:.2},{:.2},{:.2} at={:.2},{:.2},{:.2}",
                         pop.slot,
                         pop.joint,
                         pop.tick,
                         pop.miss_m * 100.0,
+                        pop.act,
+                        pop.clip,
+                        pop.clip_s,
+                        pop.prev_clip,
                         pop.from[0],
                         pop.from[1],
                         pop.from[2],
@@ -1284,6 +1288,8 @@ struct ArenaApp {
     /// The legionary mode: the kit the player wears and the view the window
     /// plays. `None` keeps the ordinary third person fight camera.
     legionary: Option<LegionaryMode>,
+    /// The first-person eye's trauma: the player's own blows only, decaying between them.
+    eye_trauma: engine_game::fps_view::EyeTrauma,
     /// Free-fly view pose (view code only: never hashed, never sim input).
     free_cam: DirectorParams,
     /// Whether the Result line already printed for this bout; cleared on
@@ -1518,6 +1524,7 @@ impl ArenaApp {
             pause_announced: false,
             cam_mode: CameraMode::Director,
             legionary: None,
+            eye_trauma: engine_game::fps_view::EyeTrauma::default(),
             free_cam: DirectorParams::arena(),
             result_announced: false,
             last: Instant::now(),
@@ -1880,7 +1887,7 @@ impl ArenaApp {
             // and how far the joint missed its prediction (AM24).
             if let Some(pop) = self.view.pop_detail() {
                 say!(
-                    "arena pop: slot={} joint={} tick={:.1} miss_cm={:.1} from={:.2},{:.2},{:.2} at={:.2},{:.2},{:.2}",
+                    "arena pop: slot={} joint={} tick={:.1} miss_cm={:.1} from={:.2},{:.2},{:.2} at={:.2},{:.2},{:.2} act={} clip={} clip_s={:.3} prev_clip={}",
                     pop.slot,
                     pop.joint,
                     pop.tick,
@@ -1891,6 +1898,10 @@ impl ArenaApp {
                     pop.at[0],
                     pop.at[1],
                     pop.at[2],
+                    pop.act,
+                    pop.clip,
+                    pop.clip_s,
+                    pop.prev_clip,
                 );
             }
             let warnings = self.view.warnings();
@@ -2648,7 +2659,11 @@ impl ArenaApp {
         let Some(view) = self.app.fighter_views().iter().find(|one| one.slot == slot) else {
             return false;
         };
-        let trauma = engine_game::camera_feed::trauma_for_cues(&self.tick_scratch.cues);
+        // Only the blows the player is in, decaying between ticks: every cue in the arena for
+        // one tick snapped the view in a crowded fight (see `EyeTrauma`).
+        let trauma = self
+            .eye_trauma
+            .feed(self.ticks_done, &self.tick_scratch.cues, slot);
         let eye = match engine_game::fps_view::legionary_eye(
             view.pos_m,
             view.yaw,

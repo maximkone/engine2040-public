@@ -63,6 +63,7 @@ use super::scene_query::QueryFormat;
 mod facing_wants;
 #[cfg(test)]
 mod handle_tests;
+mod labels;
 mod place_blocks;
 #[cfg(test)]
 mod place_facing_tests;
@@ -73,6 +74,7 @@ mod spatial_delta;
 pub(crate) mod spatial_verdict_tests;
 mod spatial_verdicts;
 use crate::spatial_glue::{conflict_texts, quat_of_yaw, yaw_of_quat, ParsedWant};
+pub use labels::object_label;
 use place_blocks::block_output;
 pub use place_blocks::WantBlockDto;
 pub(crate) use read_guard::no_repeat;
@@ -112,34 +114,6 @@ pub const MAX_WANT_CHARS: usize = 256;
 // Unreal_mcp, reimplemented here, never vendored).
 // ---------------------------------------------------------------------------
 
-/// Display label for one staged object: its name plus bracketed id,
-/// `lamp_2 [<uuid>]`. The bracketed id is the only resolution key; the
-/// name part is display-only and never decides placement, so two objects
-/// sharing a display name still resolve to different nodes.
-///
-/// Ownership: pure function, caller owns the returned label. Determinism:
-/// same name and id always render the same label.
-///
-/// # Example
-///
-/// ```rust
-/// use engine_endpoint::scene_tools::{check_scene_op, object_label, parse_object_ref};
-///
-/// assert!(check_scene_op("move").is_ok());
-/// assert!(check_scene_op("insert").is_err());
-/// let id = parse_object_ref("object", "00000000-0000-0000-0000-000000000007")
-///     .expect("bare UUID parses");
-/// let label = object_label("lamp_2", &id);
-/// assert_eq!(label, format!("lamp_2 [{id}]"));
-/// assert_eq!(
-///     parse_object_ref("object", &label).expect("label parses by id"),
-///     id
-/// );
-/// ```
-pub fn object_label(name: &str, id: &ObjectId) -> String {
-    format!("{name} [{id}]")
-}
-
 /// Split a `name [id]` label back to its id. Accepts a bare UUID too, so
 /// older clients keep working; the name part (if any) is ignored and the
 /// bracketed id decides. Anything else names the expected shapes.
@@ -159,7 +133,15 @@ pub fn parse_object_ref(field: &str, text: &str) -> Result<ObjectId, McpToolErro
             });
         }
     }
-    parse_object_id(field, trimmed)
+    ObjectId::parse(trimmed).map_err(|_| {
+        McpToolError::new(
+            "bad_id",
+            format!(
+                "{field} `{text}` is not an object id (expected bare UUID text or \
+                 `name [uuid]`; re-read scene.brief for the staged labels)"
+            ),
+        )
+    })
 }
 
 /// The only scene-tool write operation: a relation-intent root move through
@@ -1593,6 +1575,20 @@ mod tests {
     use engine_editor::commands::Journal;
     use engine_scene::ids::ObjectId;
     use std::sync::Mutex;
+
+    /// A bare staged name is not an object id: the refusal names the label form.
+    #[test]
+    fn bare_name_refusal_names_the_label_form() {
+        let Err(refused) = parse_object_ref("anchor", "prop_1") else {
+            panic!("a bare name is not an object id");
+        };
+        assert_eq!(refused.code, "bad_id");
+        assert!(
+            refused.message.contains("name [uuid]"),
+            "{}",
+            refused.message
+        );
+    }
 
     // Serializes every test that stages a scene apply through the MCP8
     // single-flight guard. The single-flight test holds the process-wide

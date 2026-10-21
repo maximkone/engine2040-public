@@ -74,12 +74,12 @@ impl Fixed {
     pub fn wrapping_sub(self, o: Self) -> Self {
         Self(self.0.wrapping_sub(o.0))
     }
-    /// Product rounded toward negative infinity, wrapping on overflow
-    /// (the `*` operator).
+    /// Product rounded to the nearest 1/65536, ties away from zero, wrapping on overflow
+    /// (the `*` operator). See [`round_q16`].
     pub fn wrapping_mul(self, o: Self) -> Self {
-        Self(wrap_i128_to_i64(
-            (i128::from(self.0) * i128::from(o.0)) >> 16,
-        ))
+        Self(wrap_i128_to_i64(round_q16(
+            i128::from(self.0) * i128::from(o.0),
+        )))
     }
     /// Quotient truncated toward zero, wrapping on overflow (the `/`
     /// operator).
@@ -100,9 +100,9 @@ impl Fixed {
     pub fn checked_sub(self, o: Self) -> Option<Self> {
         self.0.checked_sub(o.0).map(Self)
     }
-    /// Product rounded toward negative infinity, `None` on overflow.
+    /// Product rounded to the nearest 1/65536, ties away from zero, `None` on overflow.
     pub fn checked_mul(self, o: Self) -> Option<Self> {
-        i64::try_from((i128::from(self.0) * i128::from(o.0)) >> 16)
+        i64::try_from(round_q16(i128::from(self.0) * i128::from(o.0)))
             .ok()
             .map(Self)
     }
@@ -173,8 +173,8 @@ impl Fixed {
             return o;
         }
         let inv = Self::ONE.0 - tc.0;
-        let a = saturating_i128_to_i64((i128::from(self.0) * i128::from(inv)) >> 16);
-        let b = saturating_i128_to_i64((i128::from(o.0) * i128::from(tc.0)) >> 16);
+        let a = saturating_i128_to_i64(round_q16(i128::from(self.0) * i128::from(inv)));
+        let b = saturating_i128_to_i64(round_q16(i128::from(o.0) * i128::from(tc.0)));
         Self(a.saturating_add(b))
     }
     /// Square root rounded down to 1/65536; zero for zero and negatives.
@@ -329,6 +329,22 @@ impl_fixed_for_primitives!(
     u8, u16, u32, u64, u128, usize,
     i8, i16, i32, i64, i128, isize,
 );
+/// A Q32 product brought back to Q16: rounded to the nearest 1/65536, ties away from zero.
+///
+/// Odd (`round_q16(-p) == -round_q16(p)`), so mirrored motion stays mirrored bit for bit, and
+/// unbiased, so magnitudes do not creep. The old `p >> 16` floored: every negative product
+/// lost an extra unit, so a round fired west at 900.37 m/s landed 2 mm farther than its
+/// mirror after 132 ticks and 9 mm after 10 s, and a hair strand mirrored in a gust drifted
+/// 1-4 units on its first tick (2026-10-21 physics-law sweep). `|p| <= 2^126` for a product
+/// of two `i64`, so the negation never overflows.
+const fn round_q16(p: i128) -> i128 {
+    const HALF: i128 = 1 << 15;
+    if p >= 0 {
+        (p + HALF) >> 16
+    } else {
+        -((HALF - p) >> 16)
+    }
+}
 fn saturating_i128_to_i64(v: i128) -> i64 {
     // Narrow through the i64 window: values outside hold the bound,
     // values inside keep exact bits. The fallback below is unreachable
@@ -431,6 +447,54 @@ impl std::ops::Neg for Fixed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn products_round_to_nearest_and_mirror_exactly() {
+        // Ties and near-ties on both signs: 0.5 ulp rounds away from zero, 0.5 ulp minus one
+        // rounds toward it, and a negated factor always negates the product.
+        let half_ulp = Fixed::from_bits(1) * Fixed::from_bits(32_768);
+        assert_eq!(half_ulp.to_bits(), 1);
+        assert_eq!(
+            (Fixed::from_bits(-1) * Fixed::from_bits(32_768)).to_bits(),
+            -1
+        );
+        assert_eq!(
+            (Fixed::from_bits(1) * Fixed::from_bits(32_767)).to_bits(),
+            0
+        );
+        assert_eq!(
+            (Fixed::from_bits(-1) * Fixed::from_bits(32_767)).to_bits(),
+            0
+        );
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..10_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let a = Fixed::from_bits(i64::from_le_bytes(seed.to_le_bytes()) >> 20);
+            let b = Fixed::from_bits(i64::from_le_bytes(seed.rotate_left(29).to_le_bytes()) >> 30);
+            assert_eq!((-a) * b, -(a * b), "{a:?} * {b:?}");
+            assert_eq!(a.checked_mul(-b), (a * b).checked_mul(-Fixed::ONE));
+            let exact = i128::from(a.to_bits()) * i128::from(b.to_bits());
+            let err = i128::from((a * b).to_bits()) * 65_536 - exact;
+            assert!(err.abs() <= 32_768, "{a:?} * {b:?} off by {err}/65536 ulp");
+        }
+    }
+
+    #[test]
+    fn a_mirrored_fall_stays_mirrored_to_the_bit() {
+        // Semi-implicit Euler with drag, the shape every Q16 sim here runs: east and west
+        // starts must stay exact negatives (the floored product broke this on tick 1).
+        let dt = Fixed::from_bits(65_536 / 60);
+        let drag = Fixed::from_bits(983);
+        let step = |s: &mut (Fixed, Fixed), _: u32| {
+            s.1 = s.1 - s.1 * drag;
+            s.0 = s.0 + s.1 * dt;
+        };
+        let east = (Fixed::ZERO, Fixed::from_bits(59_008_811));
+        let west = (Fixed::ZERO, Fixed::from_bits(-59_008_811));
+        crate::laws::mirror(east, west, 600, step, |a, b| a.0 == -b.0 && a.1 == -b.1)
+            .expect("a mirrored round stays mirrored");
+    }
     #[test]
     fn q47_scale() {
         assert_eq!(Fixed::from_int(1).to_bits(), 65536);
@@ -538,15 +602,11 @@ mod tests {
         assert_eq!(Fixed::MIN.lerp(Fixed::MAX, Fixed::ZERO), Fixed::MIN);
         assert_eq!(Fixed::MIN.lerp(Fixed::MAX, Fixed::ONE), Fixed::MAX);
         // Old wrap form `self + (o - self) * t` gives MAX here; the
-        // two-term blend gives the convex midpoint at raw -1.
-        assert_eq!(
-            Fixed::MIN.lerp(Fixed::MAX, Fixed::HALF),
-            Fixed::from_bits(-1)
-        );
-        assert_eq!(
-            Fixed::MAX.lerp(Fixed::MIN, Fixed::HALF),
-            Fixed::from_bits(-1)
-        );
+        // two-term blend gives the convex midpoint. The exact midpoint is
+        // raw -0.5: the floored products gave -1, the nearest-rounded ones
+        // give 0, the same in both directions.
+        assert_eq!(Fixed::MIN.lerp(Fixed::MAX, Fixed::HALF), Fixed::ZERO);
+        assert_eq!(Fixed::MAX.lerp(Fixed::MIN, Fixed::HALF), Fixed::ZERO);
     }
     #[test]
     fn saturating_i128_holds_bounds_where_cast_would_wrap() {

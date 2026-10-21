@@ -164,12 +164,31 @@ session, so those legs wait behind each other.
   private. The first kernel ran as `maximkonovalovx/engine2040-gpu-farm-<name>` (Kaggle wants
   `owner/slug`, and the slug is the title slugified).
 - What the farm is for: the legs that need a GPU, and the long renders this PC cannot afford.
+- Two machine facts the first kernel taught us: the public mirror's default branch is `main` (not
+  `master`), and the Kaggle CLI kills the parent process tree when it uploads a kernel from node
+  (the node process dies with exit 255 and no output, in every stdio mode; the same command from
+  the shell works). So status, watch and pull go through the Kaggle REST API
+  (`api.kaggle.com/v1/kernels.KernelsApiService`, bearer token from `~/.kaggle/access_token`, read
+  and never printed), and the push is one shell line the tool prints.
 - What it is not for: cargo builds (GitHub runners are free and faster), the golden (no GPU
   needed) and look scoring (a T4 frame is not the local RTX 3050 frame, so it can never stand in
   for that reference; a cloud frame is a second rig with its own gate).
 - Colab is not the tool: the free tier has no headless API, so a session cannot push, poll and
   pull a notebook without a browser. Kaggle's kernel API can, and `tools/asset-gen/kaggle-sf3d/`
   already runs a T4 that way.
+- First receipt (2026-10-21, kernel `maximkonovalovx/engine2040-gpu-farm-gs43-gpu`): the T4 built
+  `engine-render` with the window feature from the public mirror in 7 m 24 s and ran the GS43 GPU
+  leg: **7 passed, 0 failed**. Two of those tests skipped with "no wgpu adapter on this machine".
+- What the probe says about the cloud GPU (2026-10-21): the image carries the CUDA driver
+  (`nvidia-smi` names a Tesla T4) but **no graphics libraries** - `libGLX_nvidia` and
+  `libEGL_nvidia` are absent, so there is no Vulkan ICD for wgpu to open and the T4 cannot be a
+  GPU rig. The receipt now prints the ICD folder and the NVIDIA libraries, so every run states
+  this instead of skipping silently.
+- So the farm is a second **CPU** box (a clean Linux build plus a full test run, with a GPU
+  attached for compute), not a second GPU rig. The local RTX 3050 stays the reference GPU, and
+  every wgpu leg still runs on this PC. The farm's honest uses: heavy builds and test runs that
+  would queue behind the shared cargo pool, and Linux-side checks (the wasm and web legs, the
+  Linux-only perf work).
 
 ## 5. For the owner (I cannot do these)
 

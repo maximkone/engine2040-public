@@ -1,11 +1,12 @@
 // Run: node --test tools/gh-check.test.mjs
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, classify, closureDirs, crateGraph, idAgeMs, keepResult, keptResult, localOnly, main, newId, okCmd, parseArgs, raceLost, reuseKey, route, runLocal, runnerOs, testsRan, words } from "./gh-check.mjs";
+import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, buildBase, classify, closureDirs, crateGraph, idAgeMs, keepResult, keptResult, localOnly, main, newId, okCmd, parseArgs, raceLost, reuseKey, route, runLocal, runnerOs, testsRan, words } from "./gh-check.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -312,4 +313,67 @@ test("--only takes comma-separated paths (backslashes become slashes) and refuse
   assert.deepEqual(parseArgs(["--only", "crates\\game\\src\\a.rs, crates/game/src/b.rs", "cargo", "test", "-p", "x"]).only, ["crates/game/src/a.rs", "crates/game/src/b.rs"]);
   assert.match(parseArgs(["--only", "", "cargo", "test", "-p", "x"]).error ?? "", /--only needs paths/);
   assert.equal(parseArgs(["cargo", "test", "-p", "x"]).only, null);
+});
+
+// A new HEAD's base is built on the nearest cached one (gh-check.mjs incrementalBase) or whole (wholeBase). Both sit behind the exported
+// buildBase, so this test drives buildBase and gh-check.mjs needs no export for it. tools/public-export.mjs is denied, so the public
+// checkout has no exporter: there the test is skipped (its import would fail), not red.
+const exporterHere = existsSync(join(ROOT, "tools", "public-export.mjs"));
+test("a new HEAD's snapshot built on the old base is the tree a whole build gives: one tree id, denied paths out, nothing missing", { skip: exporterHere ? false : "no exporter in the public checkout" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "ghbase-"));
+  const repo = join(root, "repo");
+  try {
+    mkdirSync(repo);
+    const git = (...args) => execFileSync("git", ["-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", "-c", "user.name=ghcheck", "-c", "user.email=ghcheck@example.invalid", ...args], { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    const put = (rel, text) => { mkdirSync(dirname(join(repo, rel)), { recursive: true }); writeFileSync(join(repo, rel), text); };
+    const drop = (rel) => rmSync(join(repo, rel), { force: true });
+    const commit = (msg) => { git("add", "-A"); git("commit", "-q", "-m", msg); return git("rev-parse", "HEAD"); };
+    git("init", "-q");
+
+    // commit A: a text rule with a CRLF file, a denied roster, a file to rename, one to rename into a denied folder, one to delete, a tools README with one script
+    put(".gitattributes", "*.txt text\n");
+    put("README.md", "# fixture\n");
+    put("src/lib.txt", "one\ntwo\n");
+    put("crlf.txt", "alpha\r\nbeta\r\n");
+    put("docs/guide.md", "guide v1\n");
+    put("docs/old-name.md", "renamed later\n");
+    put("docs/moved-out.md", "moved into team later\n");
+    put("docs/gone.md", "deleted later\n");
+    put("team/roster.md", "private roster\n");
+    put("tools/README.md", "# tools\n1 live scripts\n- `tools/tool-a.mjs` one\n");
+    put("tools/tool-a.mjs", "export const a = 1;\n");
+    const fullA = commit("A");
+
+    // commit B: a change, a rename, a rename into a denied folder, a delete, new files, denied files added and changed, a CRLF change, a new script
+    put("docs/guide.md", "guide v2\n");
+    drop("docs/old-name.md"); put("docs/new-name.md", "renamed later\n");
+    drop("docs/moved-out.md"); put("team/moved.md", "moved into team later\n");
+    drop("docs/gone.md");
+    put("team/roster.md", "private roster v2\n");
+    put("AGENTS.md", "internal\n");
+    put("src/added.mjs", "export const added = true;\n");
+    put("crlf.txt", "alpha\r\ngamma\r\n");
+    put("tools/tool-b.mjs", "export const b = 2;\n");
+    const fullB = commit("B");
+
+    // buildBase(head, full, ctx, say): B finds A's base in `work` and replays the diff; `fresh` has no base, so B is built whole
+    const ctx = (work) => ({ root: repo, work, gd: join(repo, ".git") });
+    const base = async (full, work) => { const said = []; const tree = await buildBase(full.slice(0, 9), full, ctx(work), (s) => said.push(s)); return { tree, said }; };
+    const work = join(root, "work"), fresh = join(root, "fresh");
+    const a = await base(fullA, work);
+    const inc = await base(fullB, work);
+    const whole = await base(fullB, fresh);
+    assert.deepEqual(a.said, [], "A has no earlier base: a whole build");
+    assert.equal(inc.said.length, 1, `B is built on A's base: ${inc.said.join(" | ")}`);
+    assert.match(inc.said[0], /changed paths on top of /);
+    assert.deepEqual(whole.said, []);
+
+    const ls = (tree) => git("ls-tree", "-r", tree);
+    const names = (tree) => ls(tree).split("\n").map((l) => l.split("\t")[1]);
+    assert.equal(ls(inc.tree), ls(whole.tree), "the same paths, modes and blobs");
+    assert.equal(inc.tree, whole.tree, "one git tree id");
+    assert.deepEqual(names(inc.tree).sort(), [".gitattributes", "README.md", "crlf.txt", "docs/guide.md", "docs/new-name.md", "src/added.mjs", "src/lib.txt", "tools/README.md", "tools/tool-a.mjs", "tools/tool-b.mjs"], "denied and deleted or renamed-away paths are out, nothing is missing");
+    assert.equal(git("show", `${inc.tree}:crlf.txt`).includes("\r"), false, "the text rule stores the CRLF file as LF");
+    assert.ok(!names(a.tree).includes("team/roster.md"), "a denied path is out of the first base too");
+  } finally { rmSync(root, { recursive: true, force: true, maxRetries: 3 }); }
 });

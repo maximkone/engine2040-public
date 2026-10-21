@@ -10,6 +10,7 @@ Run:
 
 import json
 import os
+import warnings
 import sys
 
 import bpy
@@ -107,8 +108,56 @@ def main():
             print("no clothes file:", mhclo)
 
     bpy.context.view_layer.update()
-    # MPFB builds helper objects around the human: a big box and the detail
-    # spheres. They are for the editor, and they are not the body.
+    # MPFB builds its materials procedurally, so the glTF exporter has no
+    # image to write and the exported body comes out plain white. The pack
+    # has the diffuse maps, so the suit's texture is wired to the material
+    # here, by hand, before the export.
+    ext_data = os.path.join(os.path.expandvars(r"%APPDATA%"), "Blender Foundation",
+                             "Blender", "5.2", "extensions", "user_default", "mpfb", "data")
+    suit_dir = os.path.join(ext_data, "clothes", clothes_name or "")
+    diffuse = os.path.join(suit_dir, f"{clothes_name}_diffuse.png")
+    for ob in bpy.context.scene.objects:
+        if ob.type != "MESH":
+            continue
+        for slot in ob.material_slots:
+            material = slot.material
+            if material is None:
+                continue
+            name = (material.name or "").lower()
+            if not (clothes_name and clothes_name.lower() in name):
+                continue
+            if not os.path.exists(diffuse):
+                continue
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    tree = getattr(material, "node_tree", None)
+                    bsdf = tree.nodes.get("Principled BSDF") if tree else None
+                    if not bsdf:
+                        continue
+                    image = bpy.data.images.load(diffuse, check_existing=True)
+                    tex = tree.nodes.new("ShaderNodeTexImage")
+                    tex.image = image
+                    tex.location = (-600, 300)
+                    base = bsdf.inputs.get("Base Color")
+                    if base:
+                        tree.links.new(tex.outputs["Color"], base)
+                    print("suit texture wired:", diffuse)
+            except Exception as err:
+                print("suit texture not wired:", err)
+
+    # Name the materials so the cook can tell the skin from the cloth: the
+    # glTF export renames everything to "Material" otherwise, and the cook
+    # would paint the face with the faction's armour.
+    for ob in bpy.context.scene.objects:
+        if ob.type != "MESH":
+            continue
+        label = "skin" if ob.name.lower() == "human" else "cloth"
+        for slot in ob.material_slots:
+            if slot.material is not None:
+                slot.material.name = label
+
+    bpy.context.view_layer.update()
     meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]
     for ob in meshes:
         if len(ob.data.vertices) < 1000:

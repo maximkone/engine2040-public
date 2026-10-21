@@ -441,6 +441,80 @@ impl LegionaryKit {
     }
 }
 
+/// Trauma the player's own eye takes off a 60 Hz tick, per tick, in permille: a full jolt
+/// (1000) fades out in 50 ticks, a hit (180) in 9.
+pub const EYE_TRAUMA_DECAY_PER_TICK: u32 = 20;
+
+/// The first-person eye's trauma: one level that rises with the blows the player is in and
+/// fades smoothly between them.
+///
+/// The eye used to take `trauma_for_cues(this tick's cues)`: every cue in the arena, rivals'
+/// hits on each other included, for that one tick only. In a crowded fight nearly every tick
+/// carried a cue, so the view snapped every tick and each snap vanished the next ("camera
+/// shake as fuck from my pov", owner 2026-10-21). Now a blow the player takes counts in full,
+/// a blow the player lands counts a third (the jolt of connecting), anything between other
+/// fighters counts nothing, and the level decays [`EYE_TRAUMA_DECAY_PER_TICK`] per tick, so
+/// the shake fades instead of popping. Feed it once per frame; a repeated tick is a no-op.
+/// Presentation only, never hashed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EyeTrauma {
+    permille: u32,
+    tick: Option<u32>,
+}
+
+impl EyeTrauma {
+    /// Advance to `tick`: decay by the ticks since the last feed, then add the trauma of the
+    /// cues `slot` is in. Returns the level to hand [`legionary_eye`].
+    pub fn feed(&mut self, tick: u32, cues: &[engine_audio::FightCue], slot: u8) -> u32 {
+        if self.tick == Some(tick) {
+            return self.permille;
+        }
+        let elapsed = self
+            .tick
+            .map_or(1, |last| tick.wrapping_sub(last).clamp(1, 1_000));
+        self.permille = self
+            .permille
+            .saturating_sub(EYE_TRAUMA_DECAY_PER_TICK.saturating_mul(elapsed));
+        for cue in cues {
+            self.permille = self.permille.saturating_add(own_trauma(*cue, slot));
+        }
+        self.permille = self.permille.min(crate::camera::TRAUMA_SCALE);
+        self.tick = Some(tick);
+        self.permille
+    }
+
+    /// The current level, permille.
+    #[must_use]
+    pub fn permille(&self) -> u32 {
+        self.permille
+    }
+}
+
+/// The trauma one cue gives the eye of `slot`: taken in full, dealt at a third, otherwise none.
+fn own_trauma(cue: engine_audio::FightCue, slot: u8) -> u32 {
+    use engine_audio::FightCue as C;
+    let full = crate::camera_feed::trauma_for_cue(cue);
+    let (attacker, victim) = match cue {
+        C::Hit {
+            attacker, victim, ..
+        }
+        | C::Blocked {
+            attacker, victim, ..
+        }
+        | C::Parried { attacker, victim }
+        | C::Dodged { attacker, victim }
+        | C::Knockdown { attacker, victim } => (Some(attacker), Some(victim)),
+        C::StaminaOut { .. } => (None, None),
+    };
+    if victim == Some(slot) {
+        full
+    } else if attacker == Some(slot) {
+        full / 3
+    } else {
+        0
+    }
+}
+
 /// The first-person eye of one fighter body with the eye-space trauma kick
 /// folded in: the shake kicks about the eye instead of moving the world.
 ///
@@ -475,6 +549,51 @@ mod tests {
     use crate::camera::TRAUMA_SCALE;
     use crate::camera_feed::{trauma_for_cue, trauma_for_cues};
     use engine_audio::FightCue;
+    #[test]
+    fn eye_trauma_ignores_rivals_and_fades_without_popping() {
+        let me = 0u8;
+        let mut eye = EyeTrauma::default();
+        // Two rivals trading blows next to the player: the player's eye stays calm.
+        let rivals = [FightCue::Hit {
+            attacker: 3,
+            victim: 4,
+            damage: 200,
+        }];
+        assert_eq!(eye.feed(1, &rivals, me), 0);
+        // A blow taken jolts in full, then fades by the decay every tick, never popping back.
+        let taken = [FightCue::Hit {
+            attacker: 3,
+            victim: me,
+            damage: 200,
+        }];
+        let jolt = eye.feed(2, &taken, me);
+        assert_eq!(jolt, crate::camera_feed::TRAUMA_HIT);
+        // The same tick fed again (a second frame of the tick) changes nothing.
+        assert_eq!(eye.feed(2, &taken, me), jolt);
+        let mut last = jolt;
+        for tick in 3..20 {
+            let now = eye.feed(tick, &[], me);
+            assert!(
+                now <= last && last - now <= EYE_TRAUMA_DECAY_PER_TICK,
+                "tick {tick}: {last} -> {now}"
+            );
+            last = now;
+        }
+        assert_eq!(last, 0, "a hit's shake must be gone inside 20 ticks");
+        // A blow the player lands jolts at a third.
+        let dealt = [FightCue::Hit {
+            attacker: me,
+            victim: 3,
+            damage: 200,
+        }];
+        assert_eq!(eye.feed(30, &dealt, me), crate::camera_feed::TRAUMA_HIT / 3);
+        // Knockdowns stack but cap at full.
+        let floored = [FightCue::Knockdown {
+            attacker: 3,
+            victim: me,
+        }; 5];
+        assert_eq!(eye.feed(31, &floored, me), crate::camera::TRAUMA_SCALE);
+    }
     #[test]
     fn interp_scale_lane_type_holds_the_public_number() {
         // The lane type carries its own permille scale (`INTERP_SCALE_Q`): a

@@ -29,6 +29,9 @@ One plain line only, starting `cargo check`, `cargo test` or `cargo clippy` (aft
 - Start one check and wait until it prints `sent wip-...`, then start the next. Calls starting in the same second share one mirror clone (`target/public-export/repo`) and can hit a ref-lock or snapshot error.
 - A check takes 90 to 190 s, even for a 3 s test. The call returns at 100 s (`--budget <s>`, up to 1740) with exit 3 and `STILL RUNNING ... run: node tools/gh-check.mjs --wait wip-xxxx`. That is not a failure: do other work, then run that `--wait` line. Never rerun the cargo line, which starts a second run. `--budget 840` with `timeout: 900000` waits in one call.
 - Exit codes: 0 passed, 1 failed (the tail is printed: read it and fix), 2 could not run, 3 still running.
+- A long build never finishes as a supervised agent command on this PC: the call's own process tree is killed about 30 s in, and the call ends at exit 255 with no output and no error line (2026-10-21). The machine is fine: the same build launched detached completes, and the golden still proves (`target\release\engine2040.exe --verify`). Launch a build detached and read its log:
+  `Start-Process pwsh -WindowStyle Hidden -ArgumentList '-NoProfile','-Command',"Set-Location C:\engine2040; cargo <line> *> '<log>'; 'DONE ' + `$LASTEXITCODE | Out-File -Append '<log>'"`
+  then poll that log. A call that dies at 255 with no output means the build was killed, not that the build failed.
 - On auto the tool decides where a line runs:
   - a run that could not start is tried once more, then the same line runs on the PC (never `--workspace`);
   - lines that need Windows or a `window`, `app`, `ui` or `device` feature only to build go to a Windows runner: checks, clippy, `--no-run`, a test in a `cfg(windows)` file, tests that open no GPU or window;
@@ -50,6 +53,7 @@ One plain line only, starting `cargo check`, `cargo test` or `cargo clippy` (aft
 | `the runner gave no command output` | setup failed or the run was cancelled | the tool retries, then runs local |
 | exit 2 with `no result in 30 minutes` | runner stuck | file the step as env (section 6), do not loop |
 | exit 1 | the command failed, tail printed | read the tail, quote the error line, fix (section 6) |
+| the call ends at exit 255 with no output, mid-build | the call's process tree was killed; a supervised long build never finishes here | launch the build detached and read its log (section 2); the build itself is fine |
 | passed, `0 tests` | the filter matched nothing | the tool reruns on the PC; if still 0, fix the filter (name a real `fn`, `mod` or file) |
 | a red in a file you did not write | the snapshot holds everyone's dirty files | say whose file; do not edit it |
 

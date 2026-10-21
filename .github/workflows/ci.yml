@@ -118,6 +118,12 @@ jobs:
       - name: install mold linker (Linux only)
         run: sudo apt-get update && sudo apt-get install -y mold
       - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: sccache or plain rustc
+        # sccache that will not start (the cache over its egress limit, 2026-10-21) took the whole job down;
+        # an empty RUSTC_WRAPPER makes cargo compile uncached instead.
+        shell: bash
+        run: |
+          sccache --start-server > /dev/null 2>&1 || { echo "sccache would not start, compiling uncached"; echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"; }
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
       - uses: actions/setup-node@v5
@@ -191,6 +197,12 @@ jobs:
       - name: install mold linker (Linux only)
         run: sudo apt-get update && sudo apt-get install -y mold
       - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: sccache or plain rustc
+        # sccache that will not start (the cache over its egress limit, 2026-10-21) took the whole job down;
+        # an empty RUSTC_WRAPPER makes cargo compile uncached instead.
+        shell: bash
+        run: |
+          sccache --start-server > /dev/null 2>&1 || { echo "sccache would not start, compiling uncached"; echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"; }
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
@@ -216,6 +228,12 @@ jobs:
       - name: install mold linker (Linux only)
         run: sudo apt-get update && sudo apt-get install -y mold
       - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: sccache or plain rustc
+        # sccache that will not start (the cache over its egress limit, 2026-10-21) took the whole job down;
+        # an empty RUSTC_WRAPPER makes cargo compile uncached instead.
+        shell: bash
+        run: |
+          sccache --start-server > /dev/null 2>&1 || { echo "sccache would not start, compiling uncached"; echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"; }
       - uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -258,6 +276,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: sccache or plain rustc
+        # sccache that will not start (the cache over its egress limit, 2026-10-21) took the whole job down;
+        # an empty RUSTC_WRAPPER makes cargo compile uncached instead.
+        shell: bash
+        run: |
+          sccache --start-server > /dev/null 2>&1 || { echo "sccache would not start, compiling uncached"; echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"; }
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
       # shared-key win-check: check.yml's Windows runs (tools/gh-check.mjs app/window lines) restore this cache.
@@ -280,6 +304,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: sccache or plain rustc
+        # sccache that will not start (the cache over its egress limit, 2026-10-21) took the whole job down;
+        # an empty RUSTC_WRAPPER makes cargo compile uncached instead.
+        shell: bash
+        run: |
+          sccache --start-server > /dev/null 2>&1 || { echo "sccache would not start, compiling uncached"; echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"; }
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
       # ARM runners are the slowest and the only place the golden binary is

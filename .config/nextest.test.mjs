@@ -43,12 +43,14 @@ test("junit receipt still wired for the lane log", () => {
   assert.match(text, /path\s*=\s*"target\/nextest-junit\/proof\.xml"/);
 });
 
-test("partitioned run is documented with per-partition junit receipts", () => {
+test("partitioned run is documented with one receipt per run, not a merge", () => {
   const text = load();
   assert.match(text, /partition/);
   assert.match(text, /--partition/);
   assert.match(text, /count:1\/2/);
   assert.match(text, /count:2\/2/);
-  assert.match(text, /proof-1-2\.xml/);
-  assert.match(text, /proof-2-2\.xml/);
+  assert.match(text, /ONE receipt per run/);
+  assert.ok(!/proof-1-2\.xml/.test(text), "per-partition receipt names must be gone");
+  assert.ok(!/proof-2-2\.xml/.test(text), "per-partition receipt names must be gone");
+  assert.ok(!/merged to/i.test(text), "the merge story must be gone");
 });

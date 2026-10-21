@@ -14,9 +14,10 @@
 //! tick runs `substeps` Verlet substeps with `iterations` link passes each, both from
 //! [`ClothParams`] ([`ClothTier`] fills them in). Math: position Verlet with linear air drag
 //! toward the wind, Jakobsen tension-only links (structure plus shear), one long-range tether per
-//! free particle to its nearest pin, and one-way capsule colliders that push cloth and nothing
-//! back. A sleeping cloth costs nothing until a pin moves, the wind changes or a collider
-//! touches it. Tearing is off unless `tear_strain` is set.
+//! free particle to its nearest pin, one-way capsule colliders that push cloth and nothing back,
+//! and an optional floor ([`Cloth::set_ground`]) that no free particle sinks under. A sleeping
+//! cloth costs nothing until a pin moves, the wind changes, a collider touches it or the floor
+//! changes. Tearing is off unless `tear_strain` is set.
 //!
 //! Errors are typed [`ClothError`] and [`StrandError`]; bad caller input is refused before any
 //! state changes, and both steppers allocate nothing.
@@ -89,6 +90,12 @@ const MAX_HASH_AXIS_F32: f32 = 64.0;
 /// How far outside the shell a stopped particle is placed, meters: the touch epsilon that keeps
 /// the push-out from shoving it back in.
 const TOUCH_EPS: f32 = 1.0e-4;
+/// The skin a particle on the floor keeps above the plane, meters: it never sinks under the
+/// floor by rounding, and a resting hem does not flicker through it.
+const CLOTH_GROUND_SKIN_M: f32 = 0.01;
+/// Share of a particle's horizontal step it keeps each substep while on the floor: the ground
+/// friction. Below one, so a hem on the ground slows down instead of sliding or bouncing.
+const GROUND_FRICTION_KEEP: f32 = 0.6;
 
 /// Typed errors for cloth setup, pins, tuning and colliders. The stepper cannot fail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,6 +341,8 @@ pub struct Cloth {
     hash_items: Vec<usize>,
     /// Swept-cast scratch, reused so the step never allocates.
     cast_hits: Vec<SweptHit>,
+    /// The floor height, meters, or `None` for no floor. See [`Cloth::set_ground`].
+    ground: Option<f32>,
     params: ClothParams,
     torn: usize,
     still_ticks: u32,
@@ -388,6 +397,7 @@ impl Cloth {
             hash_items: vec![0; n],
             cast_hits: Vec::with_capacity(4),
             params,
+            ground: None,
             torn: 0,
             still_ticks: 0,
             asleep: false,
@@ -526,6 +536,27 @@ impl Cloth {
         })
     }
 
+    /// Put a floor under the sheet at `ground_y` meters, or take it away with `None`. A free
+    /// particle never stays under the floor: each substep lifts it back onto the floor, takes its
+    /// downward motion away and keeps only [`GROUND_FRICTION_KEEP`] of its horizontal step, so a
+    /// hem lies down instead of sliding or bouncing. Pinned particles never move. A changed floor
+    /// wakes the sheet: a lowered or removed floor must let it fall, a raised one may put
+    /// particles under it.
+    ///
+    /// # Errors
+    /// [`ClothError::BadParam`] when the height is not a finite number inside the world. A bad
+    /// height changes nothing.
+    pub fn set_ground(&mut self, ground_y: Option<f32>) -> Result<(), ClothError> {
+        if let Some(y) = ground_y {
+            check_point([0.0, y, 0.0], "ground")?;
+        }
+        if ground_y != self.ground {
+            self.ground = ground_y;
+            self.wake();
+        }
+        Ok(())
+    }
+
     /// Wake the sheet; it sleeps again after half a second of calm.
     pub fn wake(&mut self) {
         self.asleep = false;
@@ -626,7 +657,7 @@ impl Cloth {
     /// and nothing touched it.
     pub fn step(&mut self, colliders: &[ClothCollider]) -> bool {
         if self.asleep {
-            if !self.touched(colliders) {
+            if !self.touched(colliders) && !self.ground_touched() {
                 return false;
             }
             self.wake();
@@ -645,9 +676,10 @@ impl Cloth {
     /// One Verlet substep of length `h`; `left` counts the substeps still to run this tick,
     /// this one included.
     ///
-    /// The order is the one the PX29 shape used: intercollision runs last, so the tick rests
-    /// separated. The swept collider test runs before the push-out, so a particle that would
-    /// cross a shell stops at the time of impact instead of being pushed out on the far side.
+    /// The order is the one the PX29 shape used: intercollision runs next to last and the floor
+    /// last, so the tick rests separated and on or above the floor. The swept collider test runs
+    /// before the push-out, so a particle that would cross a shell stops at the time of impact
+    /// instead of being pushed out on the far side.
     fn substep(&mut self, left: usize, h: f32, colliders: &[ClothCollider]) {
         self.integrate(left, h);
         self.cap_speed(h);
@@ -671,6 +703,41 @@ impl Cloth {
             }
         }
         self.resolve_self();
+        self.solve_ground();
+    }
+
+    /// True when a free particle sits under the floor.
+    fn ground_touched(&self) -> bool {
+        let Some(y) = self.ground else {
+            return false;
+        };
+        let floor = y + CLOTH_GROUND_SKIN_M;
+        self.pos
+            .iter()
+            .zip(&self.pinned)
+            .any(|(p, pinned)| !pinned && p[1] < floor)
+    }
+
+    /// The floor pass, the last step of a substep: a free particle at or under the floor is held
+    /// on it. Its downward motion is taken away (a rise is kept, so a particle thrown up still
+    /// leaves) and its horizontal step is cut to [`GROUND_FRICTION_KEEP`]. A particle resting on
+    /// the floor is held there too, so the friction works with gravity off as well. Index order,
+    /// float math only.
+    fn solve_ground(&mut self) {
+        let Some(y) = self.ground else {
+            return;
+        };
+        let floor = y + CLOTH_GROUND_SKIN_M;
+        for ((pos, prev), pinned) in self.pos.iter_mut().zip(&mut self.prev).zip(&self.pinned) {
+            if *pinned || pos[1] > floor {
+                continue;
+            }
+            let rising = (pos[1] - prev[1]).max(0.0);
+            pos[1] = floor;
+            prev[1] = floor - rising;
+            prev[0] = pos[0] - (pos[0] - prev[0]) * GROUND_FRICTION_KEEP;
+            prev[2] = pos[2] - (pos[2] - prev[2]) * GROUND_FRICTION_KEEP;
+        }
     }
 
     /// Verlet integration with gravity and air drag toward the wind. Pinned particles walk to

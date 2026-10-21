@@ -56,6 +56,12 @@ pub enum PackFileError {
         /// Joints the rig has.
         expected: usize,
     },
+    /// The rig has a joint the pack has no track for: the pack was baked for a
+    /// rig with other names, so it is not played on this one.
+    NoTrack {
+        /// The joint that has no track.
+        joint: String,
+    },
 }
 
 impl fmt::Display for PackFileError {
@@ -72,6 +78,10 @@ impl fmt::Display for PackFileError {
             PackFileError::TrackCount { got, expected } => write!(
                 f,
                 "pack file: the pack holds {got} tracks, the rig has {expected} joints, it was baked for another rig"
+            ),
+            PackFileError::NoTrack { joint } => write!(
+                f,
+                "pack file: the rig's joint {joint} has no track in the pack, it was baked for a rig with other names"
             ),
         }
     }
@@ -138,6 +148,56 @@ pub fn sample_pose(
     for track in &clip.tracks {
         let mut hint = 0usize;
         positions.push(crate::clip::sample_track(track, time, &mut hint));
+    }
+    let rotations = vec![[0.0, 0.0, 0.0, 1.0]; skeleton.len()];
+    Ok(LocalPose {
+        positions,
+        rotations,
+    })
+}
+
+/// The pose a loaded pack makes at `time` seconds, on a rig whose joints carry
+/// the same names but may sit in another order.
+///
+/// `track_names` names the pack's tracks in the order the pack holds them (the
+/// fighter-65 joint order the bake wrote and the receipt lists). The pose comes
+/// back in the rig's own joint order, each joint taking the track with its
+/// name, so the same joints listed in another order get the same motion. A rig
+/// of another size, a name list of another size, or a rig joint with no track
+/// refuses loud: a pack baked for another rig is not played on this one.
+pub fn sample_pose_named(
+    loaded: &LoadedPack,
+    skeleton: &Skeleton,
+    track_names: &[&str],
+    time: f32,
+) -> Result<LocalPose, PackFileError> {
+    let clip = clip_of(loaded);
+    let tracks = clip.tracks.len();
+    if tracks != skeleton.len() {
+        return Err(PackFileError::TrackCount {
+            got: tracks,
+            expected: skeleton.len(),
+        });
+    }
+    if tracks != track_names.len() {
+        return Err(PackFileError::TrackCount {
+            got: tracks,
+            expected: track_names.len(),
+        });
+    }
+    let mut positions = Vec::with_capacity(skeleton.len());
+    for joint in &skeleton.joints {
+        let Some(index) = track_names.iter().position(|name| *name == joint.name) else {
+            return Err(PackFileError::NoTrack {
+                joint: joint.name.clone(),
+            });
+        };
+        let mut hint = 0usize;
+        positions.push(crate::clip::sample_track(
+            &clip.tracks[index],
+            time,
+            &mut hint,
+        ));
     }
     let rotations = vec![[0.0, 0.0, 0.0, 1.0]; skeleton.len()];
     Ok(LocalPose {
@@ -236,6 +296,103 @@ mod tests {
             PackFileError::TrackCount { got, expected } => {
                 assert_eq!(got, FIGHTER_JOINTS, "the pack's track count");
                 assert_eq!(expected, 40, "the rig's joint count");
+            }
+            other => panic!("expected the track count to refuse, got {other}"),
+        }
+    }
+
+    /// The pack's track names for these tests: `j0`..`j64`, in the pack's order.
+    fn track_name_list() -> Vec<String> {
+        (0..FIGHTER_JOINTS)
+            .map(|index| format!("j{index}"))
+            .collect()
+    }
+
+    #[test]
+    fn pack_file_plays_a_pose_by_name_whatever_the_joint_order() {
+        let path = std::path::Path::new(ROOT).join("fixtures/clips/stagger.am5p");
+        let loaded = load_pack(&path).expect("the committed pack loads");
+        let names = track_name_list();
+        let track_names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let forward = chain(FIGHTER_JOINTS);
+        let by_index = sample_pose(&loaded, &forward, 0.5).expect("the pack plays by index");
+        let named = sample_pose_named(&loaded, &forward, &track_names, 0.5)
+            .expect("the pack plays by name");
+        assert_eq!(
+            named.positions, by_index.positions,
+            "the same names in the pack's order give the same pose"
+        );
+        // The same joints listed in reverse: each joint still takes its own
+        // track, so the pose follows the name and not the index.
+        let mut turned = forward.clone();
+        turned.joints.reverse();
+        let pose = sample_pose_named(&loaded, &turned, &track_names, 0.5)
+            .expect("the pack plays on another joint order");
+        for (index, joint) in turned.joints.iter().enumerate() {
+            let original = forward
+                .joints
+                .iter()
+                .position(|other| other.name == joint.name)
+                .expect("the joint is in the rig");
+            assert_eq!(
+                pose.positions[index], by_index.positions[original],
+                "joint {} follows its name",
+                joint.name
+            );
+        }
+    }
+
+    #[test]
+    fn pack_file_refuses_a_rig_joint_with_no_track_by_name() {
+        let path = std::path::Path::new(ROOT).join("fixtures/clips/stagger.am5p");
+        let loaded = load_pack(&path).expect("the committed pack loads");
+        let names = track_name_list();
+        let track_names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut rig = chain(FIGHTER_JOINTS);
+        rig.joints[0].name = "pelvis".to_string();
+        let err = sample_pose_named(&loaded, &rig, &track_names, 0.5)
+            .expect_err("a joint with no track refuses loud");
+        match err {
+            PackFileError::NoTrack { joint } => {
+                assert_eq!(joint, "pelvis", "the refusal names the joint");
+            }
+            other => panic!("expected the missing track to refuse, got {other}"),
+        }
+    }
+
+    #[test]
+    fn pack_file_refuses_a_smaller_rig_even_when_its_names_are_in_the_pack() {
+        let path = std::path::Path::new(ROOT).join("fixtures/clips/stagger.am5p");
+        let loaded = load_pack(&path).expect("the committed pack loads");
+        let names = track_name_list();
+        let track_names: Vec<&str> = names.iter().map(String::as_str).collect();
+        // Every joint of this rig has a track, but the rig is not the pack's rig.
+        let err = sample_pose_named(&loaded, &chain(40), &track_names, 0.5)
+            .expect_err("a rig of another size refuses loud");
+        match err {
+            PackFileError::TrackCount { got, expected } => {
+                assert_eq!(got, FIGHTER_JOINTS, "the pack's track count");
+                assert_eq!(expected, 40, "the rig's joint count");
+            }
+            other => panic!("expected the track count to refuse, got {other}"),
+        }
+    }
+
+    #[test]
+    fn pack_file_refuses_a_name_list_that_does_not_count_the_pack() {
+        let path = std::path::Path::new(ROOT).join("fixtures/clips/stagger.am5p");
+        let loaded = load_pack(&path).expect("the committed pack loads");
+        let names = track_name_list();
+        let short: Vec<&str> = names[..FIGHTER_JOINTS - 1]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let err = sample_pose_named(&loaded, &chain(FIGHTER_JOINTS), &short, 0.5)
+            .expect_err("a name list of another length refuses loud");
+        match err {
+            PackFileError::TrackCount { got, expected } => {
+                assert_eq!(got, FIGHTER_JOINTS, "the pack's track count");
+                assert_eq!(expected, FIGHTER_JOINTS - 1, "the name count");
             }
             other => panic!("expected the track count to refuse, got {other}"),
         }

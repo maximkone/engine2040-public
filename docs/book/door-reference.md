@@ -527,13 +527,14 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `wants` | `Vec<String>` | yes |  | `at most 16`; Want lines, at most `MAX_PLACE_WANTS` (16), each at most `MAX_WANT_CHARS` (256) chars. |
 | `delta` | `Option<bool>` | no |  | `false` skips the spatial delta (default true). |
 
-<details><summary>27 typed refusals</summary>
+<details><summary>28 typed refusals</summary>
 
 | Code | Message |
 |---|---|
 | `bad_args` | args for `{tool}` do not serialize ({error}); re-run after api.describe `{tool}` for the schema |
 | `audit_exhausted` | (built at run time: error.to_string()) |
 | `bad_id` | {field} `{text}` holds bracket text that is not an object id (expected `name [uuid]` or bare UUID text; re-read scene.brief for the staged labels) |
+| `bad_id` | {field} `{text}` is not an object id (expected bare UUID text or `name [uuid]`; re-read scene.brief for the staged labels) |
 | `denied_op` | scene op `{op}` is denied; allowed scene ops: [{}] (scene tools move staged roots only and instantiate nothing; submit a move intent through scene.place, or a general edit through tx.preview) |
 | `denied_op` | scene op `insert` for node {id} is denied; allowed scene ops: [{}] (scene tools move staged roots only and instantiate nothing; submit a move intent through scene.place, or a general edit through tx.preview) |
 | `denied_op` | scene op `remove` for node {id} is denied; allowed scene ops: [{}] (scene tools move staged roots only and delete nothing; submit a move intent through scene.place, or a general edit through tx.preview) |
@@ -2617,7 +2618,7 @@ Listed in a fresh session: no, call `api.load` with `codex`. Source: `crates/end
 
 ## Coverage
 
-87 tools parsed, 406 refusal rows printed, 0 declarations the parser could not read.
+87 tools parsed, 407 refusal rows printed, 0 declarations the parser could not read.
 A verb whose handler converts a typed error defined in another file (the log tools, the level builder) shows fewer refusals than it can return; the tests next to its source are the full list.
 
 Tools with no refusal site found: `capture`, `scene.next`, `wound.table.get`, `material.list`, `asset.generate`, `sim.plan_goals`, `log.digest`, `log.query`, `rpc.discover`, `settings.get`, `session.activity`, `codex.search`.

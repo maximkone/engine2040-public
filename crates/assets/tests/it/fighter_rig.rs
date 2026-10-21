@@ -96,3 +96,68 @@ fn the_teacher_skeleton_covers_every_soma_joint() {
         );
     }
 }
+
+/// A baked teacher clip plays on the engine's fighter rig: the pack's tracks
+/// are matched to the rig's joints by name, so the rig's own joint order may
+/// differ from the order the bake wrote them in.
+#[test]
+fn a_baked_pack_plays_on_the_rig_by_name() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/clips/stagger.am5p");
+    let loaded = engine_anim::pack_file::load_pack(&path).expect("the committed pack loads");
+    let fighter = fighter_skeleton().expect("the pair table is parent-first");
+    let names: Vec<&str> = fighter
+        .joints
+        .iter()
+        .map(|joint| joint.name.as_str())
+        .collect();
+    let pose = engine_anim::pack_file::sample_pose_named(&loaded, &fighter, &names, 0.5)
+        .expect("the pack plays on the rig");
+    assert_eq!(pose.positions.len(), 65, "one position per joint");
+    // The rig holds its own stance: the tracks are the fighter's local
+    // offsets, so the root carries the standing height and the lowest joint
+    // the ankle's bind offset.
+    let root = pose.positions[0];
+    assert!(
+        (root[1] - 0.95).abs() < 0.25,
+        "the root sits at the rig's height: {root:?}"
+    );
+    let lowest = pose
+        .positions
+        .iter()
+        .map(|p| p[1])
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        (lowest + 0.504).abs() < 0.02,
+        "the feet carry the rig's own bind offset: {lowest}"
+    );
+    // The same rig with its joints in another order gets the same pose, in its
+    // own order: the mapping is by name, not by index.
+    let mut reversed = fighter.clone();
+    reversed.joints.reverse();
+    let turned = engine_anim::pack_file::sample_pose_named(&loaded, &reversed, &names, 0.5)
+        .expect("the pack plays on a rig with another joint order");
+    for (index, joint) in reversed.joints.iter().enumerate() {
+        let original = fighter
+            .joints
+            .iter()
+            .position(|other| other.name == joint.name)
+            .expect("the joint is in the rig");
+        assert_eq!(
+            turned.positions[index], pose.positions[original],
+            "the pose follows the joint by name, not by index"
+        );
+    }
+    // A rig with other names refuses loud: the pack was baked for this rig,
+    // not for that one.
+    let mut renamed = fighter.clone();
+    renamed.joints[0].name = "pelvis".to_string();
+    let err = engine_anim::pack_file::sample_pose_named(&loaded, &renamed, &names, 0.5)
+        .expect_err("a rig with other names refuses loud");
+    match err {
+        engine_anim::pack_file::PackFileError::NoTrack { joint } => {
+            assert_eq!(joint, "pelvis", "the refusal names the joint")
+        }
+        other => panic!("expected the missing track to refuse, got {other}"),
+    }
+}

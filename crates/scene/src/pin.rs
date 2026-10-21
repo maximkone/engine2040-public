@@ -58,12 +58,12 @@ impl fmt::Display for PinError {
         match self {
             Self::MissingPin => write!(
                 f,
-                "run needs a scene pin; read the scene, pin its revision, then start"
+                "run needs a scene pin; call scene.read, then start again with scene_rev set to its revision"
             ),
             Self::EmptyArena => write!(
                 f,
                 "scene pin at revision 0 names the empty arena; apply one edit, \
-                 then pin the new revision"
+                 then start again with scene_rev set to the new revision"
             ),
             Self::StalePin { expected, got } => write!(
                 f,
@@ -161,6 +161,7 @@ mod tests {
         let refused = ScenePin::require(None).expect_err("no pin must refuse");
         assert_eq!(refused, PinError::MissingPin);
         assert!(refused.to_string().contains("scene pin"));
+        assert!(refused.to_string().contains("scene_rev"));
     }
 
     #[test]
@@ -169,6 +170,7 @@ mod tests {
         let refused = scene.pin(0).expect_err("revision 0 must refuse");
         assert_eq!(refused, PinError::EmptyArena);
         assert!(refused.to_string().contains("revision 0"));
+        assert!(refused.to_string().contains("scene_rev"));
     }
 
     #[test]

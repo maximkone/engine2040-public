@@ -874,8 +874,10 @@ mod tests {
     const NEWEST: u32 = CADENCE * (SNAPS - 1);
     /// Digest of every fixture datagram in send order (the delta wire).
     const SNAPSHOT_WIRE_DIGEST: u64 = 0x0e38_ab48_d0ef_28cb;
-    /// Digest of the presentation frames over the fixture query grid.
-    const SNAPSHOT_FRAME_DIGEST: u64 = 0xea00_1b9b_8d43_6cea;
+    /// Digest of the presentation frames over the fixture query grid. Re-pinned 2026-10-21 from
+    /// 0xea00_1b9b_8d43_6cea: `Fixed` products round to nearest instead of flooring, and the
+    /// interpolation blends through `Fixed::lerp` (the wire digest above did not move).
+    const SNAPSHOT_FRAME_DIGEST: u64 = 0x88a8_39e8_a491_3610;
 
     /// Exact integer truth at quarter-tick `q` (t = q / 4): a parabola about
     /// tick 57, so anchors 54 and 60 repeat the same position and a

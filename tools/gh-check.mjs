@@ -222,6 +222,10 @@ export const runLocal = (cmd, say = console.log, { fresh = false, root = ROOT } 
     const [bin, ...args] = words(cmd);
     lowerPriority();
     const r = spawnSync(bin, args, { cwd: root, stdio: "inherit", env: { ...process.env, ...poolEnv() } });
+    // A child that was killed has no exit code and carries a signal: that is not a build failure. On this PC a
+    // long build run as a supervised agent command dies that way, and the call would end at exit 255 with nothing
+    // printed. Say it here, so the log says what happened.
+    if (r.status === null && r.signal) say(`the build was killed (${r.signal}): a long build must run detached, see skills/github-check/SKILL.md`);
     const code = r.error ? 2 : r.status === 0 ? 0 : 1;
     if (key && reuseKey(cmd, "pc", root) === key) keepResult(key, { code, where: "pc", cmd });
     return code;

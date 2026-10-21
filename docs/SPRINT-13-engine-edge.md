@@ -214,3 +214,36 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   Progress 2026-10-21T14:10Z: the Forge seat offered a quiet window (torch chain suspended, 8 processes at 0 s CPU delta) and the window was declined, not taken: the box was at 99.1 / 99.8 / 84.1 % CPU with a compiling `rustc` (pid 18620, 13.14 s over 6 s), a render `spot` test binary (pid 19476, 5.05 s over 6 s) and a claude scratch node (pid 18024, 5.80 s), then 86.1 / 80.8 / 97.0 % with 7 `cargo`/`rustc`. The rebuilt `target/release/arena.exe` (mtime 17:07:38 local) still aborts the main thread before any frame: 60-frame dx12 smoke, stdout stops after `arena zone ... centre ...`, stderr `thread 'main' (6180) has overflowed its stack`, no `interval_ms p50=` (third identical abort, x3, on two binaries), while the same binary's `--view-line 2040 600 8` exits 0 with the full `arena view:` line. So 0 of 2 legs again, no tick, and the build-CPU spike stays skipped. Evidence `target/evidence/backend/opt33-ab-keeper-20261021T1410Z.md`; BLOCKERS row now `opt33-window-stack-overflow-x3`.
   Progress 2026-10-21T14:59Z: the window path presents again on the 17:25:56 rebuild (20,253,696 bytes, sha256 head `635664495C67E520`), so this beat had four 600-frame receipts, interleaved dx12,vulkan,dx12,vulkan, on `--scene arena --fighters 8 --frames 600 --exit`: `interval_ms p50` dx12 16.522 / 16.575 ms (median 16.5485 = **60.43 fps**) and vulkan 16.544 / 16.573 ms (median 16.5585 = **60.39 fps**), x2 spread **0.32 %** and **0.17 %**, A/B above medians **0.06 %**, `validation_errors=0` and `fight_draws=40` on all four legs, adapter `NVIDIA GeForce RTX 3050 6GB Laptop GPU` driver `32.0.16.1062 ` (dx12) / `NVIDIA 610.62` (vulkan); the 240 s cap stopped the fourth leg after its receipt (teardown hang, receipt complete first). Contended on every leg (CPU avg 74.4 / 68.1 / 54.3 / 61.5 %, 1-10 `rustc` — a compiling `engine_render` rustc started at 17:52:03 just after the seat reported quiet), so the interval column is a lower bound and the label is contended, not quiesced. Accept still fails on three columns that are code work, not measurement: `frame-split` prints p50/p99 for cpu/gpu/interval and `per-pass` prints one mean per pass, so there is no p95 per pass (per-pass means also do not repeat: dx12 gpu p50 0.869 vs 0.931 = 7.13 %, vulkan 0.704 vs 0.834 = 18.47 %); VRAM prints `usage_mb=0`; and the default still does not follow the numbers (`pick_backend(resolved, None)`, `backend=auto fallback=dx12 reason=compiled-in default; no pilot report yet`). The stack-overflow BLOCKERS row is closed (removed from `docs/BLOCKERS.md`; the 17:25 build presents). Evidence `target/evidence/backend/opt33-ab-keeper-20261021T1459Z.md` + raw stdout x5. No tick.
   Progress 2026-10-21T15:31Z: four 600-frame receipts on the same 17:25:56 rebuild (sha256 head `635664495C67E520`), interleaved A,B,A,B dx12,vulkan,dx12,vulkan, on `--scene arena --fighters 8 --frames 600 --exit --backend <b>`; all four printed `interval_ms p50=` and all four were force-stopped after it (teardown hang, receipt complete first, 23-28 s wall). `interval_ms p50` dx12 16.530 / 16.684 ms (median **16.607 = 60.22 fps**) and vulkan 16.531 / 16.525 ms (median **16.528 = 60.50 fps**); x2 spread **0.93 %** dx12 and **0.04 %** vulkan, **A/B gap 0.48 %** inside the 5 % bar; adapter `NVIDIA GeForce RTX 3050 6GB Laptop GPU`, driver `32.0.16.1062 ` (dx12) / `NVIDIA 610.62` (vulkan), `validation_errors=0`, `fight_draws=40` on all four. Contended, so a lower bound: beat start 80.9 / 82.8 / 80.2 % CPU with 2 `cargo` + 1 `rustc`, per-leg CPU triples 52-100 % and `cargo`/`rustc` 0->4, 4/1->0, 0->0, 0->2/2. Accept still fails on three code columns, not measurement: no p95 per pass (`frame-split` prints p50/p99 at `crates/game/src/bin/arena_frame/mod.rs:743`, `per-pass` one value), and the per-pass means still do not repeat (gtao dx12 0.403 vs 0.281 = 43 %, ibl 0.085 vs 0.096 = 13 %); VRAM prints `usage_mb=0` with `budget_mb=5233 dedicated_mb=6001`; and no default follows the numbers (`crates/render/src/backend.rs:345` still `pick_backend(resolved, None)`; every leg logged `explicit choice wins over the pilot report` because `--backend` was passed). Evidence `target/evidence/backend/opt33-ab-keeper-20261021T1531Z.md` + raw stdout x4. No tick.
+- [ ] OPT47 proof: the lane names the receipt nextest wrote. Nextest 0.9
+  writes ONE junit receipt per run (the configured path rides inside the
+  profile store dir: `target/nextest/proof/target/nextest-junit/proof.xml`),
+  and the next run replaces it. The lane printed a hardcoded
+  `target/nextest-junit/proof.xml` that no run ever writes, and the docs
+  claimed a per-partition `proof-1-2.xml` + `proof-2-2.xml` merge that never
+  happened. `tools/proof.mjs` now matches the run id nextest prints against the
+  receipt's own `uuid` (the same discovery `tools/ctrf-report.mjs` uses) and
+  prints the file the run wrote; a plain `cargo test` leg writes no receipt
+  and says `no receipt`. Tier A. Size S. Owns `tools/proof.mjs`,
+  `tools/proof.test.mjs`, `.config/nextest.toml`, `.config/nextest.test.mjs`,
+  `.opencode/repomap.md`.
+  Accept: a nextest leg line names the receipt the run wrote and that file
+  exists on disk; a plain `cargo test` leg line says `no receipt`; the help
+  text and `.config/nextest.toml` name no per-partition receipt and no merge;
+  the CI receipt path (`target/nextest/ci/target/nextest-junit/ci.xml`) is
+  unchanged.
+  F2P: the leg line printed `junit target/nextest-junit/proof.xml`, a file no
+  nextest run writes, and a plain `cargo test` leg claimed the same receipt.
+  P2P: `node --test tools/proof.test.mjs .config/nextest.test.mjs` green;
+  `node tools/ctrf-report.mjs` still finds the CI receipt; the golden hash
+  `d57b5c8ae3096614` unchanged (no Rust changed).
+  needs: none.
+  Progress 2026-10-21: the code and the node tests are in: `nextestReceiptPath`
+  matches the run id against the receipt `uuid` and returns the repo-relative
+  path (null when there is no run id, a stale id, or a plain `cargo test`
+  leg), `junitLabel` prints `junit <path>` or `no receipt`, and the fiction
+  text is gone from the help, `tools/proof.mjs` and `.config/nextest.toml`.
+  `node --test tools/proof.test.mjs` -> 41/41 and `.config/nextest.test.mjs`
+  -> 6/6; `node tools/workspace-check.mjs` PASS. The Accept still needs one real
+  nextest leg on a box with `cargo nextest` installed (the PC has none; gh-check
+  refuses `cargo nextest`, and `.github/workflows/check.yml` takes only cargo
+  check|test|clippy and installs no nextest), so the row is NOT ticked.

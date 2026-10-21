@@ -469,17 +469,19 @@ impl FighterLook {
                 near.extend_from_slice(&self.capes.bodies[other.bodies.0..other.bodies.1]);
             }
         }
-        self.cape_step(slot, &anim, (s, c), &near);
+        self.cape_step(slot, &anim, (s, c), pose.root[1], &near);
         self.capes.near = near;
     }
 
-    /// Pin slot `slot`'s sheet to this tick's top row, blow the body's own wind
-    /// through it and step it once against `near`.
+    /// Pin slot `slot`'s sheet to this tick's top row, lay its floor at the slot
+    /// root's height, blow the body's own wind through it and step it once
+    /// against `near`.
     fn cape_step(
         &mut self,
         slot: usize,
         anim: &SlotAnim,
         (s, c): (f32, f32),
+        floor_y: f32,
         near: &[ClothCollider],
     ) {
         let row = std::mem::take(&mut self.capes.row);
@@ -490,6 +492,11 @@ impl FighterLook {
         let pinned = sheet.pin_top_row(&row).is_ok();
         self.capes.row = row;
         if pinned {
+            // The floor under the slot: a hem that crouches or falls lies on the
+            // ground instead of hanging through it.
+            if sheet.set_ground(Some(floor_y)).is_err() {
+                return;
+            }
             // The air a running fighter moves through: the body's own wind,
             // backward at its speed, so the cape streams behind it. Standing
             // still gives zero wind and the sheet stays asleep. Presentation

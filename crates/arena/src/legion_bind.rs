@@ -180,7 +180,14 @@ impl Body {
 /// The contubernium: eight men bound to the legion brain's slots.
 pub struct Contubernium {
     line: Line,
-    legion: Legion,
+    /// The brain behind the line, behind a pointer. The legion brain
+    /// carries 512 soldier slots inline, about 13 KB, and the contubernium
+    /// rides by value inside the live match, and the live match by value
+    /// inside the game's app shell, which the arena bin builds on the main
+    /// thread stack. Inlined there, the shell no longer fitted the 1 MB
+    /// stack Windows gives a process, and the bin died at startup with a
+    /// stack overflow (2026-10-21, exit 0xC00000FD).
+    legion: Box<Legion>,
     bodies: [Body; CONTUBERNIUM],
     /// The line's centre on the ground, in millimetres.
     anchor_mm: (i64, i64),
@@ -214,14 +221,16 @@ impl Contubernium {
         positions: [(i64, i64); CONTUBERNIUM],
     ) -> Result<Self, BindError> {
         let anchor_cell = cell_of(anchor_mm, cell_mm(line));
-        let mut legion = Legion::new(
-            CONTUBERNIUM,
-            formation,
-            anchor_cell,
-            anchor_cell,
-            (GRID_EDGE, GRID_EDGE),
-        )
-        .map_err(brain_error)?;
+        let mut legion = Box::new(
+            Legion::new(
+                CONTUBERNIUM,
+                formation,
+                anchor_cell,
+                anchor_cell,
+                (GRID_EDGE, GRID_EDGE),
+            )
+            .map_err(brain_error)?,
+        );
         legion.set_spacing(FILE_STEP_CELLS).map_err(brain_error)?;
         let bodies = core::array::from_fn(|index| Body {
             pos_mm: positions[index],
@@ -343,7 +352,7 @@ impl Contubernium {
     }
 
     /// The brain behind the line.
-    pub const fn legion(&self) -> &Legion {
+    pub fn legion(&self) -> &Legion {
         &self.legion
     }
 
@@ -972,5 +981,21 @@ mod tests {
             );
         }
         assert_eq!(bind.legion().count(), CONTUBERNIUM);
+    }
+
+    /// The brain rides behind a pointer, never by value. The legion brain
+    /// carries 512 soldier slots inline, about 13 KB, and the contubernium
+    /// is held by value inside the live match, and the live match by value
+    /// inside the game's app shell, which the arena bin builds on the main
+    /// thread stack. With the brain inline, the shell's frame outgrew the
+    /// stack and the bin died at startup with a stack overflow (0xC00000FD,
+    /// 2026-10-21). The budget keeps the brain out of every by-value copy.
+    #[test]
+    fn the_brain_rides_behind_a_pointer() {
+        assert!(
+            core::mem::size_of::<Contubernium>() <= 1024,
+            "the contubernium is {} bytes: the legion brain must stay behind a pointer",
+            core::mem::size_of::<Contubernium>()
+        );
     }
 }

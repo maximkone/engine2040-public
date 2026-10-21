@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { FRAME_P95_BAR_MS, GREEN_MAX_AGE_HOURS, bookBuildVerdict, driftVerdict, findPendingSnapshots, frameCsvVerdict, gpuLiveLine, gpuLiveReceipt, goldenBuildLine, goldenProfile, legVerdict, ranAtLeastOneTest, recordGreen, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, parityVerdict, parseParityLine, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestTestCommand, packageNameOf, parseProofArgs, PENDING_SNAPSHOT_SUFFIX, pendingSnapshotVerdict, runsToolTests, toolTestSummary } from "./proof.mjs";
+import { FRAME_P95_BAR_MS, GREEN_MAX_AGE_HOURS, bookBuildVerdict, driftVerdict, findPendingSnapshots, frameCsvVerdict, gpuLiveLine, gpuLiveReceipt, goldenBuildLine, goldenProfile, junitLabel, legVerdict, ranAtLeastOneTest, recordGreen, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, parityVerdict, parseParityLine, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestReceiptPath, nextestTestCommand, packageNameOf, parseProofArgs, PENDING_SNAPSHOT_SUFFIX, pendingSnapshotVerdict, runsToolTests, toolTestSummary } from "./proof.mjs";
 
 test("parseProofArgs: empty and single-flag runs pass through", () => {
   assert.deepEqual(parseProofArgs([]), []);
@@ -112,6 +112,65 @@ test("nextestFlakeSummary: retry lines count, silence counts zero", () => {
   assert.equal(nextestFlakeSummary(""), "0 retried");
   assert.equal(nextestFlakeSummary("test foo ... RETRIED (1 retry)\ntest bar ... ok\n"), "1 retried");
   assert.equal(nextestFlakeSummary("FLAKY test baz passed after 2 retries\n"), "2 retried");
+});
+
+// The receipt a nextest run wrote carries the run id nextest prints, so the
+// two are matched. The fixture mirrors the real nextest 0.9 layout: the
+// configured junit path rides inside the profile store dir.
+const RUN_ID = "3ac98c2c-b8c0-49ec-8cbd-68d33d9593a2";
+const RECEIPT_XML = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  `<testsuites name="nextest-run" tests="1" uuid="${RUN_ID}">`,
+  '  <testsuite name="probe" tests="1"><testcase name="probe::ok" time="0.1"/></testsuite>',
+  "</testsuites>",
+  "",
+].join("\n");
+
+function writeReceipt(root, uuid) {
+  const dir = join(root, "target", "nextest", "proof", "target", "nextest-junit");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "proof.xml"), RECEIPT_XML.replace(RUN_ID, uuid));
+  return dir;
+}
+
+test("nextestReceiptPath: names the receipt the run wrote, found by the run id", () => {
+  const root = mkdtempSync(join(tmpdir(), "proof-receipt-"));
+  try {
+    writeReceipt(root, RUN_ID);
+    const out = `Starting nextest\nNextest run ID ${RUN_ID}\nnextest profile: proof\n`;
+    assert.equal(nextestReceiptPath(out, root), "target/nextest/proof/target/nextest-junit/proof.xml");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("nextestReceiptPath: no run id means no receipt (a plain cargo test leg)", () => {
+  const root = mkdtempSync(join(tmpdir(), "proof-receipt-"));
+  try {
+    writeReceipt(root, RUN_ID);
+    assert.equal(nextestReceiptPath("running 3 tests\ntest result: ok\n", root), null);
+    assert.equal(nextestReceiptPath("", root), null);
+    assert.equal(nextestReceiptPath(undefined, root), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("nextestReceiptPath: a receipt from another run never matches", () => {
+  const root = mkdtempSync(join(tmpdir(), "proof-receipt-"));
+  try {
+    writeReceipt(root, "11111111-2222-3333-4444-555555555555");
+    const out = `Nextest run ID ${RUN_ID}\n`;
+    assert.equal(nextestReceiptPath(out, root), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("junitLabel: a receipt is named, a leg without one says so", () => {
+  assert.equal(junitLabel("target/nextest/proof/target/nextest-junit/proof.xml"), "junit target/nextest/proof/target/nextest-junit/proof.xml");
+  assert.equal(junitLabel(null), "no receipt");
+  assert.equal(junitLabel(undefined), "no receipt");
 });
 
 test("fixture-only: golden verifies once, tool tests run in CI nightly only", () => {

@@ -82,6 +82,7 @@ Rows live in one shard per section (byte-identical; each shard header is the can
 - [`SPRINT-27-final-picture.md`](SPRINT-27-final-picture.md) — Final picture: auto-fix, compact code, touch and POV
 - [`SPRINT-28-rome.md`](SPRINT-28-rome.md) — Rome: one legionary's war
 - [`SPRINT-29-hunt.md`](SPRINT-29-hunt.md) — Hunt 2026-10-21: steals from outside the engine set
+- [`SPRINT-30-feel.md`](SPRINT-30-feel.md) — Feel: weight, impact, particles and the game-building door (owner 2026-10-21)
 
 ### Ready (live, never a snapshot)
 

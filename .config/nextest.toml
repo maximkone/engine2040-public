@@ -6,12 +6,16 @@
 # itself, bounded fixed-backoff retries (count 2, delay 2s) scoped to the
 # proof profile only so a planted flaky passes after at most 2 retries and
 # still prints `<n> retried` (never silent), and junit receipts per profile
-# for the lane log. Partitioned run splits the suite without dropping a test:
-# `cargo nextest run --profile proof --partition count:1/2` then `count:2/2`,
-# junit to `target/nextest-junit/proof-1-2.xml` plus `proof-2-2.xml` merged to
-# `target/nextest-junit/proof.xml`. Flaky loopback-socket/timing legs
-# quarantine via the E12 list in tools/proof.mjs plus
-# tools/flaky-quarantine.mjs (threshold 2, fail-closed) and run under --perf.
+# for the lane log. A partitioned run splits the suite without dropping a
+# test: `cargo nextest run --profile proof --partition count:1/2` then
+# `count:2/2`. Nextest writes ONE receipt per run: the `path` below rides
+# inside the profile store dir, so the proof profile's file lands at
+# `target/nextest/proof/target/nextest-junit/proof.xml` and the next run
+# replaces it (no per-partition files, nothing is merged). The lane names the
+# file the run wrote, found by the run id nextest prints.
+# Flaky loopback-socket/timing legs quarantine via the E12 list in
+# tools/proof.mjs plus tools/flaky-quarantine.mjs (threshold 2, fail-closed)
+# and run under --perf.
 # Kept only if faster with the same failures visible
 # (OPT6 accept: flake counts before/after ride the proof log).
 

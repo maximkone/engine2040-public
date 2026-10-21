@@ -6,6 +6,10 @@ pub mod asset_source;
 pub use asset_source::{
     AssetSource, BundleSource, FetchSource, FsSource, MemorySource, SourceError,
 };
+/// The CT7 fighter rig as one bundle the page fetches: the manifest, the
+/// bodies and the baked clips, in tiers so a page can fetch the first rig
+/// alone. Std-only.
+pub mod fighter_bundle;
 /// One load queue over an asset source: priority order, a byte budget,
 /// cancellation and generational handles. Std-only.
 pub mod load_queue;

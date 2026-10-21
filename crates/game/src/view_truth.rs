@@ -255,6 +255,8 @@ struct Track {
     airborne: bool,
     /// When this air time began, seconds; zero while on the floor.
     air_since: f64,
+    /// Clip the body played at this frame, so a pop can name the clip it rode.
+    clip: u8,
 }
 
 /// The worst pop of a run: which slot, which joint, when, how far the joint
@@ -273,6 +275,14 @@ pub struct PopDetail {
     pub from: [f32; 3],
     /// The world position of the joint on that tick, meters.
     pub at: [f32; 3],
+    /// What the body played when it popped.
+    pub act: &'static str,
+    /// The clip it sampled when it popped.
+    pub clip: u8,
+    /// The clip's time when it popped, seconds.
+    pub clip_s: f32,
+    /// The clip it sampled the frame before: a different clip means a switch.
+    pub prev_clip: u8,
 }
 
 /// A run's view laws: folded frame by frame, printed as one receipt line.
@@ -489,6 +499,7 @@ impl ViewLaws {
                     root_y: body.root[1],
                     airborne,
                     air_since: if airborne { t } else { 0.0 },
+                    clip: body.clip,
                 });
                 return;
             }
@@ -510,6 +521,7 @@ impl ViewLaws {
                 root_y: body.root[1],
                 airborne,
                 air_since: if airborne { t } else { 0.0 },
+                clip: body.clip,
             });
             return;
         }
@@ -546,6 +558,10 @@ impl ViewLaws {
                         worst,
                         prev.joints[worst_joint],
                         body.joints[worst_joint],
+                        body.act,
+                        body.clip,
+                        body.clip_s,
+                        prev.clip,
                     );
                     popped = true;
                 }
@@ -575,6 +591,7 @@ impl ViewLaws {
             } else {
                 0.0
             },
+            clip: body.clip,
         });
     }
 
@@ -587,6 +604,10 @@ impl ViewLaws {
         miss_m: f64,
         from: [f32; 3],
         at: [f32; 3],
+        act: &'static str,
+        clip: u8,
+        clip_s: f32,
+        prev_clip: u8,
     ) {
         let worse = self.pop_worst.is_none_or(|worst| miss_m > worst.miss_m);
         if worse {
@@ -597,6 +618,10 @@ impl ViewLaws {
                 miss_m,
                 from,
                 at,
+                act,
+                clip,
+                clip_s,
+                prev_clip,
             });
         }
     }
@@ -1630,6 +1655,10 @@ mod tests {
                 "a named pop is over the law: {pop:?}"
             );
             println!("am24 pop: {pop:?}");
+            println!(
+                "am24 clip: act={} clip={} clip_s={} prev_clip={} (a different clip means a cut)",
+                pop.act, pop.clip, pop.clip_s, pop.prev_clip
+            );
         }
         println!("am24 line: {line}");
     }
