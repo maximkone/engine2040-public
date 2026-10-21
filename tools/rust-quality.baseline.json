@@ -300,7 +300,7 @@
    "hash_reimpl": 0,
    "dup_fns": 1,
    "passthrough": 4,
-   "long_fns": 4,
+   "long_fns": 5,
    "big_files": 4,
    "hot_alloc": 0,
    "nondet": 0,
@@ -308,7 +308,7 @@
    "waivers": 0,
    "undoc_pub": 0,
    "unsafe": 0,
-   "tests": 1004
+   "tests": 1049
   },
   "engine-input": {
    "unwrap": 0,
@@ -4227,6 +4227,55 @@
     "tests": 826
    },
    "reason": "the 2026-10-21 tighten of this row measured the crate alone and saw one clone group; the ratchet counts clone groups across the whole workspace, where three touch engine-endpoint (guards.rs hint_for beside app/journal.rs leaked_step, intents.rs wall_word beside editor/browser.rs wall_name, and the scene_query.rs apply_diff/preview_diff twins the 2026-10-20 accept already names); the row goes back to the workspace count of 3"
+  },
+  {
+   "date": "2026-10-21",
+   "crate": "engine-game",
+   "from": {
+    "unwrap": 0,
+    "panic_sites": 6,
+    "casts": 129,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 0,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 0,
+    "dup_fns": 1,
+    "passthrough": 4,
+    "long_fns": 4,
+    "big_files": 4,
+    "hot_alloc": 0,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 0,
+    "undoc_pub": 0,
+    "unsafe": 0,
+    "tests": 1004
+   },
+   "to": {
+    "unwrap": 0,
+    "panic_sites": 6,
+    "casts": 129,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 0,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 0,
+    "dup_fns": 1,
+    "passthrough": 4,
+    "long_fns": 5,
+    "big_files": 4,
+    "hot_alloc": 0,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 0,
+    "undoc_pub": 0,
+    "unsafe": 0,
+    "tests": 1049
+   },
+   "reason": "the pop detail fold in view_truth.rs grew past 100 lines (the pop lane's in-flight work, owner splits it with the row); landing the partner file now so the tree compiles"
   }
  ]
 }

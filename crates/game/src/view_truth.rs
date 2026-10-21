@@ -257,6 +257,24 @@ struct Track {
     air_since: f64,
 }
 
+/// The worst pop of a run: which slot, which joint, when, how far the joint
+/// missed its prediction, and where the joint stood.
+#[derive(Clone, Copy, Debug)]
+pub struct PopDetail {
+    /// The slot whose joint popped.
+    pub slot: u8,
+    /// The joint index in the slot's joint order.
+    pub joint: usize,
+    /// The tick the joint popped on.
+    pub tick: f64,
+    /// How far the joint missed its constant-velocity prediction, meters.
+    pub miss_m: f64,
+    /// Where the joint stood the frame before, meters.
+    pub from: [f32; 3],
+    /// The world position of the joint on that tick, meters.
+    pub at: [f32; 3],
+}
+
 /// A run's view laws: folded frame by frame, printed as one receipt line.
 #[derive(Clone, Debug, Default)]
 pub struct ViewLaws {
@@ -276,6 +294,8 @@ pub struct ViewLaws {
     /// Pops by the act the body played when it popped.
     pop_acts: BTreeMap<&'static str, u32>,
     pop_m: f64,
+    /// The worst pop of the run, with the joint that popped.
+    pop_worst: Option<PopDetail>,
     closest_m: Option<f32>,
     cover_max: f32,
     /// Foot-frames at full plant by how far the drawn ankle sat from the spot
@@ -502,17 +522,31 @@ impl ViewLaws {
         if !crossing {
             if let Some(vel) = &prev.vel {
                 let mut worst = 0.0f64;
-                for ((now, then), v) in body.joints.iter().zip(&prev.joints).zip(vel) {
+                let mut worst_joint = 0usize;
+                for (index, ((now, then), v)) in
+                    body.joints.iter().zip(&prev.joints).zip(vel).enumerate()
+                {
                     let miss = (0..3)
                         .map(|k| (f64::from(now[k]) - (f64::from(then[k]) + v[k] * dt)).powi(2))
                         .sum::<f64>()
                         .sqrt();
-                    worst = worst.max(miss);
+                    if miss > worst {
+                        worst = miss;
+                        worst_joint = index;
+                    }
                 }
                 self.pop_m = self.pop_m.max(worst);
                 if worst > POP_M {
                     self.pops = self.pops.saturating_add(1);
                     *self.pop_acts.entry(body.act).or_insert(0) += 1;
+                    self.note_pop(
+                        body.slot,
+                        worst_joint,
+                        t,
+                        worst,
+                        prev.joints[worst_joint],
+                        body.joints[worst_joint],
+                    );
                     popped = true;
                 }
             }
@@ -542,6 +576,36 @@ impl ViewLaws {
                 0.0
             },
         });
+    }
+
+    /// Keeps the worst pop of the run: the joint, the tick and the miss.
+    fn note_pop(
+        &mut self,
+        slot: u8,
+        joint: usize,
+        tick: f64,
+        miss_m: f64,
+        from: [f32; 3],
+        at: [f32; 3],
+    ) {
+        let worse = self.pop_worst.is_none_or(|worst| miss_m > worst.miss_m);
+        if worse {
+            self.pop_worst = Some(PopDetail {
+                slot,
+                joint,
+                tick,
+                miss_m,
+                from,
+                at,
+            });
+        }
+    }
+
+    /// The worst pop of the run: which slot and joint, when, and how far the
+    /// joint missed its constant-velocity prediction.
+    #[must_use]
+    pub fn pop_detail(&self) -> Option<PopDetail> {
+        self.pop_worst
     }
 
     /// Most bodies drawn from a ragdoll in one folded frame (RZ2w).
@@ -1540,5 +1604,33 @@ mod tests {
         assert_eq!(first, "", "zero ticks fold no frame");
         assert_eq!(second, "", "same seed repeats");
         assert_eq!(first, second, "same inputs repeat bit for bit");
+    }
+
+    #[test]
+    fn the_headless_fold_names_its_worst_pop() {
+        // AM24: the receipt says how many pops the fold had, but the fix
+        // needs to know which joint moved, so the fold names the worst one
+        // and the name agrees with the count.
+        let (line, pop) = crate::fighter_look::FighterLook::view_run_detail(2040, 300, 8)
+            .expect("the headless bout folds");
+        let pops: u32 = line
+            .split(" pops=")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|num| num.parse().ok())
+            .unwrap_or_else(|| panic!("the line counts the pops: {line}"));
+        assert_eq!(
+            pop.is_some(),
+            pops > 0,
+            "the name follows the count: {line}"
+        );
+        if let Some(pop) = pop {
+            assert!(
+                pop.miss_m > super::POP_M,
+                "a named pop is over the law: {pop:?}"
+            );
+            println!("am24 pop: {pop:?}");
+        }
+        println!("am24 line: {line}");
     }
 }
