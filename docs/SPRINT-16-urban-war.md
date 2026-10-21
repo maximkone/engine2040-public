@@ -142,11 +142,22 @@ content rows wait for UW0 (Finish A met). Combat never imports physics
   presentation only. Tier B. Size M. Owns `crates/audio/src/gunfire.rs`.
   Accept: blind listening fixture passes the audio judge; golden
   unchanged; 32 reports ≤ 0.2 ms. needs: SN1, SN2.
-- [ ] UW24 render: shadowed spot lights — flashlights and lamps in the
+- [x] UW24 render: shadowed spot lights - flashlights and lamps in the
   clustered path with a shadow atlas; presentation only. Tier B. Size M.
   Owns `crates/render/src/spot.rs`. Accept: 16 shadowed spots in a dark
   room within the P6 GPU budget (reference GPU); llvmpipe parity with a
-  CPU reference; GX6 gate submits live. needs: GX2.
+  CPU reference; GX6 gate submits live. needs: GX2. Landed 44ffb0e6a (the
+  bake) and 0e55a1330 (the live frame and the registry row). spot device
+  bake on NVIDIA GeForce RTX 3050 6GB Laptop GPU: submit_ms 0.729
+  budget_ms 2.000 shadowed 16 (cold 12.435 ms, samples 0.651/0.729/3.074);
+  spot parity on NVIDIA GeForce RTX 3050 6GB Laptop GPU: compared 65536
+  mismatched 0 max_diff 0.0000026226044 agreement 1; run 39637725126:
+  1267 passed; 0 failed, spot parity on Microsoft Basic Render Driver:
+  compared 65536 mismatched 0 max_diff 0.0000025629997 agreement 1;
+  clippy -D warnings clean (run 39635848211). Left: nothing samples the
+  atlas yet, so the spot row reads PROBE in the pixel-truth table, like
+  the sky and decals rows; the GX6 proof-crate row list
+  (crates/proof/src/gpu_live.rs) still carries nine rows without "spot".
 - [ ] UW25 net: ranged lag compensation — rewind hitboxes to the
   shooter's view tick inside a bounded window, replicate rounds and
   impacts under ON3. Tier B. Size M. Owns ranged hunks in

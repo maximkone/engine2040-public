@@ -227,6 +227,7 @@ Each one says so; the Accept may change when the lane lands.
   F2P: the page draws stand-ins and the parry and block cues are missing.
   P2P: golden d57b5c8ae3096614 x2; the web budget gate stays green.
   needs: none.
+  Progress 2026-10-21 (the live page, fixtures re-taken): the stored gate fixtures went stale - the live page's own capture measured ssim=0.8601 against the old reference (bar 0.95, verdict fail) because the browser frame moved after that capture (the spot atlas pass is native-only on wasm32 now, and the frame bus is a seqlock). The page is still reproducible: two fresh runs of the live page (headless Edge 155 on nvidia/ampere, the RTX 3050) are byte-identical (capture hash 20fa9d4cdce30a25, frame 31, 1256x708, mean luma 197.50), so the fixtures are re-taken from those runs and the bar stays 0.95 - reference against the page run 1.0000, against the stand-in ring 0.5350 (under the bar, so the gate still tells the cooked arena from the placeholder). Proof: `cargo test -p engine-web --lib` 150 passed, 0 failed (run 39640183565). Re-taken because the old reference was stale, not re-pinned to hide a failure.
 
 ### The web, the tools and the workspace (owner 2026-10-21)
 
