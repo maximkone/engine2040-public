@@ -15,7 +15,7 @@ first half of this dive is an audit; the second half is the six rows in
 | Row | State | Evidence |
 |---|---|---|
 | GS43 contact shadows | **landed** (`baf9c07`, board `838665d`) | `--lib gtao` 49 passed; live-frame feet test 8.4% / 8.8% mean luma drop; arena capture pair 519 darker / 0 lighter; a fresh HEAD build reproduces both capture shas |
-| GS44 auto exposure | **core + seams landed, GPU dispatch in flight** | meter 6 tests; `tick_hist` matches `tick` bit for bit (`e812c85`); histogram kernel naga-validated (`73baa12`); the presenter dispatch is a parallel lane's uncommitted `auto_exposure_gpu.rs` |
+| GS44 auto exposure | **landed** (`c59c4ed3`, board `45d550aec`) | meter + 64-bin GPU histogram + blit stops; 13 render tests green (10 remote, 3 GPU on this PC) plus the blit test; golden x2 green (run 39608142881); the captured night arena waits on VS7 (torches as lights) |
 | GS45 pass report | **landed** (`a8be8c9`, board `1e372c6`) | `--lib pass_report` 6 passed; a missing writer names pass and texture; JSON byte-equal x2 |
 | GS46 world.query verb | landed earlier (`008c197`) | 146 packs/door tests |
 | GS48 AI decision log | landed earlier (`4f00b39`) | 5 ai + 4 door + 21 play-pack tests |

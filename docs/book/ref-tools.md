@@ -295,7 +295,7 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 
 ### product-check.mjs
 
-- Built-game floors. Builds `target/release/arena.exe` if older than the code, runs it twice: look run `--scene arena --fighters 8 --frames 300 --exit --require-framing --capture-dir ... --capture-every 60 --sha ... --view-brief ...`; timing run `--scene arena --fighters 8 --frames 300 --exit`.
+- Built-game floors. Builds `target/release/arena.exe` if older than the code, runs it twice: look run `--scene arena --fighters 8 --frames 300 --exit --require-framing --capture-dir ... --capture-every 60 --sha ... --view-brief ...`; timing run `--scene arena --fighters 8 --frames 300 --exit`. A run that dies with a Windows crash status is named by its fault (a stack overflow, an access violation), not by the bare code.
 - Scores against `tools/product-bar.json` and `tools/pass-bar.json`.
 - Writes `target/reports/product/latest.json`, `latest.md`, `history.jsonl`; captures in `target/reports/product/runs/<sha>-<utc>/` (newest 6 kept).
 - For each broken floor prints a `FAIL <floor>: <why>` line and records it in `latest.md`.

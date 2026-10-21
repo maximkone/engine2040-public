@@ -484,14 +484,38 @@ impl Cloth {
             .fold(0.0, f32::max)
     }
 
-    /// Replace the tune. A changed tune wakes the sheet; a bad one changes nothing.
+    /// Replace the tune. A changed tune wakes the sheet; a bad one changes nothing. A new substep
+    /// count changes the Verlet step, so the carried motion is rescaled to it first.
     pub fn set_params(&mut self, params: ClothParams) -> Result<(), ClothError> {
         params.validate()?;
         if params != self.params {
+            if params.substeps != self.params.substeps {
+                self.carry_motion_to_substeps(self.params.substeps, params.substeps);
+            }
             self.params = params;
             self.wake();
         }
         Ok(())
+    }
+
+    /// Rescale every free particle's carried Verlet displacement from `from` substeps per tick to
+    /// `to`. The displacement is one substep's motion and a substep lasts `1 / (60 * substeps)`
+    /// seconds, so the velocity `displacement / dt` is kept by scaling it by `from / to`. Without
+    /// this a 1 to 2 substep switch doubles every velocity and pumps energy into the sheet.
+    fn carry_motion_to_substeps(&mut self, from: usize, to: usize) {
+        let scale = count_f32(from) / count_f32(to);
+        let free = self.pos.iter().zip(&mut self.prev).zip(&self.pinned);
+        for ((pos, prev), pinned) in free {
+            if *pinned {
+                continue;
+            }
+            let moved = sub(*pos, *prev);
+            *prev = [
+                pos[0] - moved[0] * scale,
+                pos[1] - moved[1] * scale,
+                pos[2] - moved[2] * scale,
+            ];
+        }
     }
 
     /// Replace the wind velocity (arena weather, a gust); a changed wind wakes the sheet.

@@ -139,14 +139,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p target/nextest-junit
-          cargo nextest run --locked --all-targets --profile ci ${{ matrix.args }} | tee target/nextest-junit/ci.log
+          cargo nextest run --locked --all-targets --profile ci ${{ matrix.args }} 2>&1 | tee target/nextest-junit/ci.log
       # The structured test report (CTRF): the run's result is read without
       # opening the log. The receipt is written even when a test fails, so a
       # red run is readable too.
       - name: structured test report (CTRF)
         if: ${{ !cancelled() }}
         shell: bash
-        run: node tools/ctrf-report.mjs --in target/nextest-junit/ci.xml --log target/nextest-junit/ci.log --out target/reports/ctrf.json
+        run: node tools/ctrf-report.mjs --log target/nextest-junit/ci.log --out target/reports/ctrf.json
       - name: upload the structured test report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v5

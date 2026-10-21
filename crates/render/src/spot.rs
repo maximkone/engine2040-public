@@ -18,6 +18,13 @@
 //! readback arm `atlas_parity` holds a software adapter to
 //! [`PARITY_AGREEMENT`] at [`PARITY_TOLERANCE`].
 //!
+//! Two device entries share that bake: `submit_spot_atlas` encodes, submits
+//! and waits on the device (the budget arm: one submit against
+//! [`SPOT_PASS_BUDGET_MS`]), and `encode_spot_atlas` records the same pass
+//! into a caller-supplied command encoder without submitting it (the live
+//! window frame's entry: the frame's own one command buffer carries the
+//! atlas, so the frame never waits on the GPU).
+//!
 //! Bounds: a triangle with any vertex at or behind the spot near plane is
 //! dropped by both paths (the room fixture keeps every occluder in front);
 //! more spots than atlas slots and more triangles than [`MAX_OCCLUDER_TRIS`]
@@ -27,6 +34,14 @@
 #![forbid(unsafe_code)]
 
 use crate::shadow_cluster::{LightError, ScreenLight};
+
+/// The encode-only arm of the bake: the live window frame records the spot
+/// pass in its own command buffer, so the frame never waits on the GPU.
+#[cfg(feature = "window")]
+mod encode;
+
+#[cfg(feature = "window")]
+pub use encode::{encode_spot_atlas, SpotEncode};
 
 /// Most shadowed spots in one frame; the atlas has one tile per spot.
 pub const MAX_SPOTS: usize = 16;
@@ -861,7 +876,7 @@ fn raster_run(
             let sx = (clip_p[0] * inv_w * 0.5 + 0.5) * f32_from_small_or(tile);
             let sy = (0.5 - clip_p[1] * inv_w * 0.5) * f32_from_small_or(tile);
             let z_ndc = clip_p[2] * inv_w;
-            *slot = [sx, sy, inv_w, z_ndc * inv_w];
+            *slot = [sx, sy, inv_w, z_ndc];
         }
         written += raster_tri(depth, edge, tile, origin, &screen);
     }
@@ -915,7 +930,9 @@ fn raster_tri(
     written
 }
 
-/// Perspective-correct depth inside the triangle at pixel center (x, y).
+/// Depth the device writes at the pixel centre: the clip-space z/w of the
+/// fragment, interpolated in screen space (the rasterizer's own rule), so
+/// the reference and the device atlas hold the same number.
 fn tri_depth(v: &[[f32; 4]; 3], x: f32, y: f32, inv_area: f32) -> Option<f32> {
     let w0 = ((v[1][0] - x) * (v[2][1] - y) - (v[2][0] - x) * (v[1][1] - y)) * inv_area;
     let w1 = ((v[2][0] - x) * (v[0][1] - y) - (v[0][0] - x) * (v[2][1] - y)) * inv_area;
@@ -923,11 +940,7 @@ fn tri_depth(v: &[[f32; 4]; 3], x: f32, y: f32, inv_area: f32) -> Option<f32> {
     if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
         return None;
     }
-    let inv_w = w0 * v[0][2] + w1 * v[1][2] + w2 * v[2][2];
-    if inv_w <= 0.0 || !inv_w.is_finite() {
-        return None;
-    }
-    let z = (w0 * v[0][3] + w1 * v[1][3] + w2 * v[2][3]) / inv_w;
+    let z = w0 * v[0][3] + w1 * v[1][3] + w2 * v[2][3];
     if z.is_finite() {
         Some(z.clamp(0.0, 1.0))
     } else {
@@ -1127,7 +1140,14 @@ impl SpotAtlasGpu {
             layout: &layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: uniforms.as_entire_binding(),
+                // One 256-byte slot per binding: the dynamic offset walks
+                // the slots. Binding the whole buffer would leave no room
+                // for any offset above zero.
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &uniforms.clone(),
+                    offset: 0,
+                    size: wgpu::BufferSize::new(UNIFORM_SLOT_BYTES),
+                }),
             }],
         });
         Self {
@@ -1218,20 +1238,7 @@ pub fn submit_spot_atlas(
     config: SpotAtlasConfig,
     submitter: &mut SpotAtlasGpu,
 ) -> Result<SpotGpuReceipt, LightError> {
-    config.validate()?;
-    let degraded = spots.len() > config.slots() || tris.len() > MAX_OCCLUDER_TRIS;
-    let spots = &spots[..spots.len().min(config.slots())];
-    let tris = &tris[..tris.len().min(MAX_OCCLUDER_TRIS)];
-    let shadowed = build_slot_clips(spots, config.slots(), &mut submitter.clips)?;
-    let dropped = build_slot_geometry(
-        &mut submitter.vert_scratch,
-        &mut submitter.runs,
-        &submitter.clips,
-        tris,
-        SPOT_NEAR_M,
-    );
-    submitter.ensure_atlas(device, config)?;
-    upload_slots(device, queue, submitter)?;
+    let prep = encode::prepare_atlas(device, queue, spots, tris, config, submitter)?;
     let started = Instant::now();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1247,14 +1254,14 @@ pub fn submit_spot_atlas(
         return Err(scope_err(&err));
     }
     Ok(SpotGpuReceipt {
-        spots: spots.len(),
-        shadowed,
+        spots: prep.spots,
+        shadowed: prep.shadowed,
         texels: config.texels(),
         passes_submitted: 1,
         validation_errors: 0,
-        dropped_tris: dropped,
+        dropped_tris: prep.dropped_tris,
         submit_ms,
-        degraded,
+        degraded: prep.degraded,
     })
 }
 
@@ -1367,6 +1374,12 @@ fn encode_atlas_pass(
         multiview_mask: None,
     });
     pass.set_pipeline(&submitter.pipeline);
+    // The depth pipeline reads its occluder triangles from vertex buffer 0:
+    // the accepted geometry `upload_slots` wrote. Without this binding the
+    // device refuses the draw (the pipeline wants slot 0).
+    if let Some(verts) = submitter.verts.as_ref() {
+        pass.set_vertex_buffer(0, verts.slice(..));
+    }
     let tile = tile_f32(config.tile_px)?;
     let slot_stride = usize::try_from(UNIFORM_SLOT_BYTES)
         .map_err(|_| LightError::Invalid("uniform slot does not fit usize".into()))?;
@@ -1812,6 +1825,200 @@ mod tests {
         };
         assert_eq!(empty.agreement(), 0.0);
         assert!(!empty.passes());
+    }
+
+    // ------------------------------------------------------------------
+    // Device bake (behind `window`): the row's own evidence on the
+    // adapter under test. The device comes from the shared suite device
+    // (skip, never fake, without an adapter).
+    // ------------------------------------------------------------------
+
+    #[cfg(feature = "window")]
+    fn spot_device() -> Option<(
+        &'static wgpu::Device,
+        &'static wgpu::Queue,
+        &'static wgpu::AdapterInfo,
+    )> {
+        crate::graph::gx1_test_device()
+    }
+
+    /// The dark room's atlas shape: four tiles per side at 64 texels.
+    #[cfg(feature = "window")]
+    fn dark_room_config() -> SpotAtlasConfig {
+        SpotAtlasConfig {
+            grid: ATLAS_GRID,
+            tile_px: 64,
+        }
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn the_device_bakes_sixteen_shadowed_spots_in_one_submit() {
+        // Caller: `submit_spot_atlas` (the row's submit entry).
+        // Behavior: the dark room's sixteen lamps each bake one shadow tile
+        // on the device, in one submit, with no validation error.
+        let Some((device, queue, info)) = spot_device() else {
+            eprintln!("SKIPPED spot device bake: no wgpu adapter on this machine");
+            return;
+        };
+        let tris = dark_room();
+        let spots = dark_room_spots();
+        let config = dark_room_config();
+        let mut submitter = SpotAtlasGpu::new(device);
+        // Cold arm: the first submit pays the driver's shader compile, which
+        // no steady frame pays. The steady arm is the budget the row answers
+        // for, so it is the one the test holds.
+        let cold = submit_spot_atlas(device, queue, &spots, &tris, config, &mut submitter)
+            .expect("the dark room bakes on the device");
+        // Three steady submits and the median reported: one slow sample from
+        // a loaded box is not the pass's cost. Every sample is posted.
+        let mut samples = Vec::with_capacity(3);
+        for _ in 0..3 {
+            samples.push(
+                submit_spot_atlas(device, queue, &spots, &tris, config, &mut submitter)
+                    .expect("the steady dark room bakes on the device"),
+            );
+        }
+        samples.sort_by(|a, b| a.submit_ms.total_cmp(&b.submit_ms));
+        let receipt = samples[1].clone();
+        eprintln!(
+            "spot device bake on {}: submit_ms {:.3} budget_ms {:.3} shadowed {} (cold {:.3} ms, samples {:.3}/{:.3}/{:.3})",
+            info.name,
+            receipt.submit_ms,
+            SPOT_PASS_BUDGET_MS,
+            receipt.shadowed,
+            cold.submit_ms,
+            samples[0].submit_ms,
+            samples[1].submit_ms,
+            samples[2].submit_ms
+        );
+        assert_eq!(receipt.spots, MAX_SPOTS, "every lamp reached the bake");
+        assert_eq!(receipt.shadowed, MAX_SPOTS, "every lamp cast a shadow tile");
+        assert_eq!(receipt.passes_submitted, 1, "the pass ran once");
+        assert_eq!(receipt.validation_errors, 0, "the scope saw no error");
+        assert!(receipt.is_clean(), "the submit was clean");
+        assert_eq!(receipt.pass(), GATE_PASS);
+        // The bar is the reference GPU's. A software adapter (the runner's
+        // basic render driver, llvmpipe) posts its own number and never
+        // holds the row to the reference budget: skip, not a fake pass.
+        // Under E2040_REQUIRE_GPU=1 that adapter is a failure instead.
+        let caps = crate::tier::AdapterCaps::new(&info.name, false, false, 0);
+        if caps.is_software() {
+            assert!(
+                !crate::test_gpu::required_by_env(),
+                "the spot budget needs the reference GPU; {} forbids the software adapter {}",
+                crate::test_gpu::REQUIRE_GPU_ENV,
+                info.name
+            );
+            crate::test_gpu::note_skip(
+                "the spot budget",
+                &format!(
+                    "the budget is the reference GPU's; {} posted its own number",
+                    info.name
+                ),
+            );
+            return;
+        }
+        assert!(
+            receipt.within_budget(),
+            "the submit took {:.3} ms, over the {:.3} ms budget",
+            receipt.submit_ms,
+            SPOT_PASS_BUDGET_MS
+        );
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn the_device_atlas_agrees_with_the_cpu_reference() {
+        // Caller: `atlas_parity` (the gate's readback arm).
+        // Behavior: the device atlas and the CPU reference agree on the
+        // dark room's depth, texel for texel, inside the row's tolerance.
+        let Some((device, queue, info)) = spot_device() else {
+            eprintln!("SKIPPED spot parity: no wgpu adapter on this machine");
+            return;
+        };
+        let tris = dark_room();
+        let spots = dark_room_spots();
+        let config = dark_room_config();
+        let mut reference = SpotAtlas::new(config).expect("the reference atlas");
+        reference.bake(&spots, &tris).expect("the reference bakes");
+        let mut submitter = SpotAtlasGpu::new(device);
+        submit_spot_atlas(device, queue, &spots, &tris, config, &mut submitter)
+            .expect("the device bakes the same room");
+        let parity = atlas_parity(device, queue, &submitter, &reference).expect("the readback");
+        eprintln!(
+            "spot parity on {}: compared {} mismatched {} max_diff {} agreement {}",
+            info.name,
+            parity.compared,
+            parity.mismatched,
+            parity.max_diff,
+            parity.agreement()
+        );
+        assert_eq!(
+            parity.compared as usize,
+            config.atlas_px() * config.atlas_px(),
+            "every atlas texel was compared"
+        );
+        assert!(
+            parity.passes(),
+            "the device atlas agrees with the CPU reference: {} of {} texels inside {}",
+            parity.compared - parity.mismatched.min(parity.compared),
+            parity.compared,
+            PARITY_TOLERANCE
+        );
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn the_encode_path_records_the_pass_without_submitting_it() {
+        // Caller: `encode_spot_atlas` (the live frame's entry).
+        // Behavior: the encode records the depth pass into the caller's
+        // command buffer and submits nothing itself: before the caller's
+        // submit the atlas still reads empty, after it the atlas matches the
+        // CPU reference. The live frame keeps its no-wait shape.
+        let Some((device, queue, _info)) = spot_device() else {
+            eprintln!("SKIPPED spot encode: no wgpu adapter on this machine");
+            return;
+        };
+        let tris = dark_room();
+        let spots = dark_room_spots();
+        let config = dark_room_config();
+        let mut reference = SpotAtlas::new(config).expect("the reference atlas");
+        reference.bake(&spots, &tris).expect("the reference bakes");
+        let mut submitter = SpotAtlasGpu::new(device);
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("spot-encode-test"),
+        });
+        let receipt = encode_spot_atlas(
+            device,
+            queue,
+            &spots,
+            &tris,
+            config,
+            &mut submitter,
+            &mut enc,
+        )
+        .expect("the encode records the pass");
+        assert!(receipt.ran(), "one pass was recorded");
+        assert_eq!(receipt.passes_encoded, 1);
+        assert_eq!(receipt.shadowed, MAX_SPOTS);
+        assert_eq!(receipt.pass(), GATE_PASS);
+        let before = atlas_parity(device, queue, &submitter, &reference).expect("the readback");
+        assert!(
+            !before.passes(),
+            "the unsubmitted encode left the atlas empty (agreement {})",
+            before.agreement()
+        );
+        queue.submit(Some(enc.finish()));
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the poll returns");
+        let after = atlas_parity(device, queue, &submitter, &reference).expect("the readback");
+        assert!(
+            after.passes(),
+            "the caller's submit landed the pass: agreement {}",
+            after.agreement()
+        );
     }
 
     #[test]

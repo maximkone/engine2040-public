@@ -4,8 +4,11 @@
 //   node tools/gh-check.mjs cargo clippy -p engine-input --all-targets -- -D warnings
 //   node tools/gh-check.mjs --wait wip-xxxx          pick up a check that was still running (exit 3 prints this line)
 // How: the HEAD snapshot (denylist and LFS applied, like the public export) is built once per HEAD into the mirror clone's object
-// store; each call overlays the dirty files, commits that tree on a throwaway wip-* branch of the public mirror, dispatches
-// .github/workflows/check.yml on it, waits, prints the command's output tail and deletes the branch. Up to 20 run at once.
+// store (from the nearest cached ancestor's base plus the diff, not from scratch); each call overlays the dirty files, commits that
+// tree on a throwaway wip-* branch of the public mirror, dispatches .github/workflows/check.yml on it, waits, prints the command's
+// output tail and deletes the branch. Up to 20 run at once, and calls may start together. A line like
+// [local 12.3s: fetch 0.0 sweep 0.0 base 3.1 overlay 2.4 commit 0.1 push 5.0 dispatch 1.5] says where the local half went.
+// GH_CHECK_DRY=1 stops after the push (no dispatch, the branch is deleted): it measures the local half for free.
 // Exit 0 = the command passed, 1 = it failed (tail printed), 2 = the check could not run, 3 = still running (not a failure).
 // On auto (the default; owner 2026-10-17 "all AIs work like that, heavy stuff on auto on git") the helper never has to decide:
 //   - lines that need Windows or a window|app|ui|device feature only to build (every check and clippy, and tests whose code
@@ -31,7 +34,7 @@ import { lowerPriority, poolEnv } from "./jobserver.mjs";
 // That file is in its own export DENY list, so the public checkout lacks it and
 // every public gate-tool test fails with ERR_MODULE_NOT_FOUND. The small pure
 // pieces (PUBLIC_REPO + DENY/denied) are mirrored below; the heavy snapshot
-// builders load lazily inside baseTree(). Mirror of tools/public-export.mjs
+// builders load lazily inside buildBase(). Mirror of tools/public-export.mjs
 // DENY (audit 2026-10-16): if that list changes, copy it here.
 const PUBLIC_REPO = "maximkone/engine2040-public";
 const DENY = [
@@ -341,49 +344,146 @@ const ownerAlive = (lock) => {
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 // ---- the runner ----
-const withIndex = (name, fn) => {
-  const idx = join(WORK, `${name}.index`); mkdirSync(WORK, { recursive: true }); rmSync(idx, { force: true });
+const withIndex = (name, fn, work = WORK) => {
+  const idx = join(work, `${name}.index`); mkdirSync(work, { recursive: true }); rmSync(idx, { force: true });
   try { return fn({ GIT_INDEX_FILE: idx }); } finally { rmSync(idx, { force: true }); }
 };
 
-// The HEAD snapshot as a git tree object inside the mirror clone, built once per HEAD by the first caller; the others wait for it.
-const baseTree = async (head) => {
-  const cache = join(WORK, `base-${head}.tree`); mkdirSync(WORK, { recursive: true });
-  if (existsSync(cache)) return readFileSync(cache, "utf8").trim();
-  const lock = join(WORK, `base-${head}.lock`);
-  try { writeFileSync(lock, String(process.pid), { flag: "wx" }); } catch {
-    for (let i = 0; i < 60 && !existsSync(cache); i++) await sleep(5000);
-    if (existsSync(cache)) return readFileSync(cache, "utf8").trim();
-    rmSync(lock, { force: true }); throw new Error("the HEAD snapshot did not appear in 5 minutes");
+// Housekeeping one call does for all (a fetch, a sweep): at most once per everyMs, never two at once, the other calls skip it.
+// fn returning false (a failed fetch) does not count as done.
+const oncePer = async (name, everyMs, fn) => {
+  const stamp = join(WORK, `${name}.at`), lock = join(WORK, `${name}.lock`); mkdirSync(WORK, { recursive: true });
+  try { if (Date.now() - statSync(stamp).mtimeMs < everyMs) return false; } catch { /* never done */ }
+  if (existsSync(lock) && !ownerAlive(lock)) rmSync(lock, { force: true });
+  try { writeFileSync(lock, String(process.pid), { flag: "wx" }); } catch { return false; }
+  try { const r = await fn(); if (r === false) return false; writeFileSync(stamp, ""); return true; } finally { rmSync(lock, { force: true }); }
+};
+
+// ---- the base snapshot: HEAD as a git tree object inside the mirror clone, built once per HEAD by the first caller ----
+// A dozen sessions commit every few minutes, so nearly every call meets a new HEAD. Rebuilding the whole public tree for it (copy,
+// denylist, LFS, scan, add: 13 to 20 s) was a quarter of the local half, so a new HEAD starts from the nearest ancestor's cached
+// base and replays `git diff` through the same per-file rules (public-export.mjs buildPaths). tools/gh-check.test.mjs proves that
+// both ways give one tree id.
+export const BASE_LIMIT = 2000; // more changed paths than this: the whole build is as fast and has nothing to get wrong
+const BASE_FORMAT = 1; // bump it when the incremental build changes: older bases stop being starting points
+const STEER = /(?:^|\/)\.git(?:ignore|attributes)$/; // they decide what `git add` skips and converts: a change to one rebuilds everything
+// The exporter's text plus BASE_FORMAT: a base built under other rules is never a starting point.
+const rulesStamp = () => `${BASE_FORMAT}:${createHash("sha256").update(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "public-export.mjs"), "utf8").replace(/\r\n/g, "\n")).digest("hex").slice(0, 16)}`;
+const ctxNow = () => ({ root: ROOT, work: WORK, gd: gdir() });
+const refuseSecrets = (s) => { const secret = s.problems.filter((p) => /secret|token|key/i.test(p)); if (secret.length) throw new Error(`snapshot refused: ${secret[0]}`); };
+const treeKnown = (gd, tree) => { try { run("git", ["--git-dir", gd, "cat-file", "-e", `${tree}^{tree}`]); return true; } catch { return false; } };
+
+// The newest cached base (made under today's rules, every LFS object resolved) whose commit is an ancestor of `full`: its .meta, or null.
+const nearestBase = (ctx, full, stamp) => {
+  const metas = new Map();
+  for (const f of existsSync(ctx.work) ? readdirSync(ctx.work) : []) {
+    if (!/^base-[0-9a-f]+\.meta$/.test(f)) continue;
+    try { const m = JSON.parse(readFileSync(join(ctx.work, f), "utf8")); if (m.rules === stamp && m.lfsMissing === 0 && m.full && m.full !== full) metas.set(m.full, m); } catch { /* a half-written meta */ }
+  }
+  if (!metas.size) return null;
+  for (const c of run("git", ["rev-list", "--max-count=1500", full], { cwd: ctx.root }).split("\n")) { const m = metas.get(c); if (m && treeKnown(ctx.gd, m.tree)) return m; }
+  return null;
+};
+
+// The paths of `files` that git add -A would skip (ignored), judged by the .gitignore files buildPaths extracted into `tree`.
+const ignoredPaths = (ctx, tree, files) => {
+  if (!files.length) return [];
+  try { return run("git", ["--git-dir", ctx.gd, "--work-tree", tree, "check-ignore", "--no-index", "--stdin", "-z"], { cwd: tree, input: `${files.join("\0")}\0` }).split("\0").filter(Boolean); }
+  catch (e) { if (e.status === 1) return []; throw e; }
+};
+
+// prev.tree plus the diff prev..full, null when a whole build is the better answer. Same rules per file as the whole build: the files go through
+// buildPaths (denylist, LFS, README, old name), the secret scan runs on them, and git add (ignore rules, attributes) puts them in the index.
+const incrementalBase = async (ctx, full, prev) => {
+  const raw = run("git", ["diff", "--raw", "-z", "--no-renames", "--no-ext-diff", prev.full, full], { cwd: ctx.root, maxBuffer: 1 << 28 }).split("\0");
+  const del = [], put = [];
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    const m = /^:\d+ (\d+) \w+ \w+ ([A-Z])/.exec(raw[i]); const p = raw[i + 1];
+    if (!m || STEER.test(p)) return null;
+    if (m[2] === "D") del.push(p); else if (m[1] === "100644" || m[1] === "100755") put.push(p); else return null; // a symlink or a submodule: the whole build
+  }
+  if (!del.length && !put.length) return { tree: prev.tree, paths: 0, lfsMissing: 0 };
+  if (del.length + put.length > BASE_LIMIT) return null;
+  const { buildPaths, scan } = await import("./public-export.mjs");
+  const name = `inc-${full.slice(0, 12)}-${process.pid}`; const out = join(ctx.work, name); mkdirSync(out, { recursive: true });
+  try {
+    const b = buildPaths({ out, paths: put, root: ctx.root, rev: full });
+    refuseSecrets(scan(b.tree));
+    const skip = new Set(ignoredPaths(ctx, b.tree, b.files)); const add = b.files.filter((f) => !skip.has(f));
+    const tree = withIndex(name, (env) => {
+      const e = { ...process.env, ...env };
+      run("git", ["--git-dir", ctx.gd, "read-tree", prev.tree], { env: e });
+      const gone = [...new Set([...del, ...put])].map((p) => `0 ${"0".repeat(40)}\t${p}\0`).join(""); // all out first: a file that became a folder and back
+      if (gone) run("git", ["--git-dir", ctx.gd, "update-index", "-z", "--index-info"], { env: e, input: gone });
+      if (add.length) run("git", ["--literal-pathspecs", "--git-dir", ctx.gd, "--work-tree", b.tree, "-c", "core.autocrlf=false", "add", "--pathspec-from-file=-", "--pathspec-file-nul"], { env: e, cwd: b.tree, input: add.join("\0") });
+      return run("git", ["--git-dir", ctx.gd, "write-tree"], { env: e }).trim();
+    }, ctx.work);
+    return { tree, paths: del.length + put.length, lfsMissing: b.lfsMissing.length };
+  } finally { rmSync(out, { recursive: true, force: true }); }
+};
+
+// The whole public tree of `full` (copy, denylist, LFS, scan) added to an empty index.
+const wholeBase = async (ctx, head, full) => {
+  const { buildTree, scan } = await import("./public-export.mjs");
+  const out = join(ctx.work, `base-${head}`);
+  try {
+    const b = buildTree({ out, root: ctx.root, rev: full }); refuseSecrets(scan(b.tree));
+    const tree = withIndex(`base-${head}`, (env) => {
+      run("git", ["--git-dir", ctx.gd, "--work-tree", b.tree, "-c", "core.autocrlf=false", "add", "-A"], { env: { ...process.env, ...env } });
+      return run("git", ["--git-dir", ctx.gd, "write-tree"], { env: { ...process.env, ...env } }).trim();
+    }, ctx.work);
+    return { tree, paths: null, lfsMissing: b.lfsMissing.length };
+  } finally { rmSync(out, { recursive: true, force: true }); }
+};
+
+// The base tree id of commit `full` (cached as base-<head>.tree, which tools/web-run.mjs reads too; base-<head>.meta says how it was made).
+export const buildBase = async (head, full, ctx = ctxNow(), say = console.log) => {
+  const cache = join(ctx.work, `base-${head}.tree`); mkdirSync(ctx.work, { recursive: true });
+  const cached = () => readFileSync(cache, "utf8").trim();
+  if (existsSync(cache)) return cached();
+  const lock = join(ctx.work, `base-${head}.lock`);
+  for (let tries = 0; ; tries++) { // one builder per HEAD; the others wait for its result
+    try { writeFileSync(lock, String(process.pid), { flag: "wx" }); break; } catch {
+      for (let i = 0; i < 1200 && !existsSync(cache) && ownerAlive(lock); i++) await sleep(250);
+      if (existsSync(cache)) return cached();
+      if (ownerAlive(lock) || tries >= 3) throw new Error("the HEAD snapshot did not appear in 5 minutes");
+      rmSync(lock, { force: true }); // its builder died
+    }
   }
   try {
-    const { buildTree, scan } = await import("./public-export.mjs");
-    const out = join(WORK, `base-${head}`); const b = buildTree({ out });
-    const s = scan(b.tree); const secret = s.problems.filter((p) => /secret|token|key/i.test(p));
-    if (secret.length) throw new Error(`snapshot refused: ${secret[0]}`);
-    const tree = withIndex(`base-${head}`, (env) => {
-      run("git", ["--git-dir", gdir(), "--work-tree", b.tree, "-c", "core.autocrlf=false", "add", "-A"], { env: { ...process.env, ...env } });
-      return run("git", ["--git-dir", gdir(), "write-tree"], { env: { ...process.env, ...env } }).trim();
-    });
-    rmSync(out, { recursive: true, force: true }); writeFileSync(cache, tree); return tree;
+    const stamp = rulesStamp(); const prev = nearestBase(ctx, full, stamp); let built = null;
+    if (prev) {
+      try { built = await incrementalBase(ctx, full, prev); if (built) say(`base ${head}: ${built.paths} changed paths on top of ${prev.full.slice(0, 9)}`); }
+      catch (e) { if (/^snapshot refused/.test(e.message)) throw e; say(`base ${head}: the incremental build failed (${whyLine(e)}), building it whole`); }
+    }
+    built ??= await wholeBase(ctx, head, full);
+    writeFileSync(join(ctx.work, `base-${head}.meta`), JSON.stringify({ full, tree: built.tree, rules: stamp, lfsMissing: built.lfsMissing, paths: built.paths }));
+    writeFileSync(cache, built.tree); return built.tree;
   } finally { rmSync(lock, { force: true }); }
 };
 
-// Dirty and untracked files of the working tree as index lines "mode sha<TAB>path" (mode 0 = removed).
-const overlayLines = () => {
+// Dirty and untracked files of the working tree as index lines "mode sha<TAB>path" (mode 0 = removed); only: just these paths.
+// All the blobs go through ONE git call (a process per file took 20 s for 270 files); a file with CRLF is hashed from an LF copy.
+const overlayLines = (only = null) => {
   const raw = run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: ROOT }).split("\0");
-  const lines = [];
-  for (let i = 0; i < raw.length; i++) {
-    const e = raw[i]; if (e.length < 4) continue;
-    const x = e[0], y = e[1], p = e.slice(3);
-    if (x === "R" || x === "C") { lines.push(`0 ${"0".repeat(40)}\t${raw[i + 1]}`); i++; }
-    if (denied(p)) continue;
-    const src = join(ROOT, p);
-    if (x === "D" || y === "D" || !existsSync(src) || statSync(src).isDirectory()) { lines.push(`0 ${"0".repeat(40)}\t${p}`); continue; }
-    let buf = readFileSync(src); if (!buf.includes(0) && buf.includes(13)) buf = Buffer.from(buf.toString("utf8").replace(/\r\n/g, "\n"));
-    lines.push(`100644 ${g(["hash-object", "-w", "--stdin"], { input: buf })}\t${p}`);
-  }
-  return lines;
+  const want = (p) => !only || only.includes(p); const rm = (p) => `0 ${"0".repeat(40)}\t${p}`;
+  const lines = [], todo = []; const tmp = join(WORK, `ov-${process.pid}`);
+  try {
+    for (let i = 0; i < raw.length; i++) {
+      const e = raw[i]; if (e.length < 4) continue;
+      const x = e[0], y = e[1], p = e.slice(3);
+      if (x === "R" || x === "C") { if (want(raw[i + 1])) lines.push(rm(raw[i + 1])); i++; }
+      if (denied(p) || !want(p)) continue;
+      const src = join(ROOT, p);
+      if (x === "D" || y === "D" || !existsSync(src) || statSync(src).isDirectory()) { lines.push(rm(p)); continue; }
+      let buf = readFileSync(src), file = src;
+      if (!buf.includes(0) && buf.includes(13)) { mkdirSync(tmp, { recursive: true }); file = join(tmp, String(todo.length)); writeFileSync(file, buf.toString("utf8").replace(/\r\n/g, "\n")); }
+      if (/[\n"]/.test(file)) { lines.push(`100644 ${g(["hash-object", "-w", "--stdin"], { input: readFileSync(file) })}\t${p}`); continue; } // --stdin-paths cannot spell this name
+      lines.push({ p, at: todo.length }); todo.push(file.split("\\").join("/"));
+    }
+    const shas = todo.length ? g(["hash-object", "-w", "--no-filters", "--stdin-paths"], { input: `${todo.join("\n")}\n` }).split("\n") : [];
+    return lines.map((l) => (typeof l === "string" ? l : `100644 ${shas[l.at].trim()}\t${l.p}`));
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 };
 
 // ---- jobs: a check that outlives one call keeps its state in target/gh-check/jobs/<id>.json ----
@@ -460,8 +560,8 @@ export const raceLost = (why) => /incorrect old value|cannot lock ref|failed to 
 // "incorrect old value provided". The runner checks out the wip branch tree, so the parent
 // commit is only the diff view: retry the fetch, then carry on with the last known origin/main.
 const fetchOrigin = async () => {
-  for (let attempt = 1; ; attempt++) {
-    try { run("git", ["--git-dir", gdir(), "fetch", "-q", "origin"]); return true; }
+  for (let attempt = 1; ; attempt++) { // main only: every other branch is a wip-* of another call, whose files this clone has no use for
+    try { run("git", ["--git-dir", gdir(), "fetch", "-q", "--no-tags", "origin", "main"]); return true; }
     catch (e) {
       const why = whyLine(e);
       if (attempt >= 4 || !raceLost(why)) { console.log(`the fetch did not go through, carrying on with the last origin/main: ${why}`); return false; }
@@ -479,6 +579,33 @@ const mirrorParent = () => {
   return "";
 };
 
+// The newest pushed tree also stays on the mirror under HAVE: a wip branch is deleted at once, and a git push sends everything the remote
+// does not advertise, so the dirty files of other sessions (95 MB of generated assets at times) went up again on every call (60 to 170 s,
+// HTTP 408). With HAVE the next push sends only what changed since. One local pusher moves it at a time (a lock); ci.yml runs on main only.
+const HAVE = "refs/gh-check/have";
+export const transient = (why) => /RPC failed|HTTP [45]\d\d|returned error: [45]\d\d|Could not (?:connect|resolve)|timed out|reset by peer|connection reset|hung up|early EOF|unexpected disconnect|cannot lock ref|failed to update ref|remote unpack|unable to write file|could not write pack|index-pack|pack-objects/i.test(String(why));
+// Pushes the wip commit; a transient network or ref-lock error is tried again (3 pushes, 2 s and 4 s apart).
+const pushWip = async (commit, id) => {
+  const lock = join(WORK, "have.lock"), off = join(WORK, "have.off"); let mine = false;
+  try { if (Date.now() - statSync(off).mtimeMs > 3_600_000) rmSync(off, { force: true }); } catch { /* no off switch */ }
+  if (!existsSync(off)) {
+    if (existsSync(lock) && !ownerAlive(lock)) rmSync(lock, { force: true });
+    try { writeFileSync(lock, String(process.pid), { flag: "wx" }); mine = true; } catch { /* another call moves HAVE */ }
+  }
+  const wip = `refs/heads/${id}`; const refs = [`${commit}:${wip}`, ...(mine ? [`+${commit}:${HAVE}`] : [])];
+  try {
+    for (let attempt = 1; ; attempt++) {
+      try { run("git", ["--git-dir", gdir(), "push", "--porcelain", "origin", ...refs]); return; }
+      catch (e) {
+        const rows = String(e.stdout ?? "").split("\n").filter((l) => l.includes("\t")); const bad = (ref) => rows.some((l) => l.startsWith("!") && l.includes(`:${ref}\t`));
+        if (rows.some((l) => !l.startsWith("!") && l.includes(`:${wip}\t`))) { if (bad(HAVE)) writeFileSync(off, ""); return; } // the wip branch is there; a refused HAVE is switched off for an hour
+        const why = whyLine(e); if (attempt >= 3 || !transient(why)) throw e;
+        console.log(`the push failed (${why}), again in ${2 * attempt} s`); await sleep(2000 * attempt);
+      }
+    }
+  } finally { if (mine) rmSync(lock, { force: true }); }
+};
+
 // One fresh check: snapshot, push, dispatch, wait. A failure before the dispatch is { code: 2, retry: true }.
 // A kept result answers first; a live twin is joined instead of dispatched again.
 // only: build HEAD plus just these working-tree paths (others' unfinished files stay out); such a run is not kept.
@@ -491,32 +618,42 @@ const startRemote = async (cmd, os, budgetMs, fresh = false, only = null) => {
     if (twin) { console.log(`joined ${twin.id}: another call runs the same line on the same inputs`); return finish(twin, await settle(twin, budgetMs)); }
   }
   if (!existsSync(gdir())) { console.log("no mirror clone yet: run node tools/farm.mjs once"); return { code: 2, why: "no mirror clone", retry: false }; }
-  const head = run("git", ["rev-parse", "--short", "HEAD"], { cwd: ROOT }).trim();
+  const rev = (...a) => run("git", ["rev-parse", ...a], { cwd: ROOT }).trim();
+  let full = rev("HEAD"), head = rev("--short", full);
   const job = { id: newId(), cmd, os, key, head, startedAt: Date.now() };
   let pushed = false, res = { code: 2, retry: true };
+  // Seconds per phase of the local half, printed once ([local 12s: fetch 3.0 base 4.1 ...]): where a slow call went.
+  const laps = []; const lap = async (name, fn) => { const t0 = Date.now(); try { return await fn(); } finally { laps.push(`${name} ${((Date.now() - t0) / 1000).toFixed(1)}`); } };
+  const lapLine = () => console.log(`[local ${lapOf(job)}: ${laps.join(" ")}]`);
   try {
-    await fetchOrigin();
-    sweep();
-    const base = await baseTree(head);
-    const tree = withIndex(job.id, (env) => {
-      const e = { ...process.env, ...env };
-      run("git", ["--git-dir", gdir(), "read-tree", base], { env: e });
-      const lines = overlayLines().filter((l) => !only || only.includes(l.split("	")[1]));
-      if (only) console.log(`--only: HEAD ${head} plus ${lines.length} of your paths`);
-      if (lines.length) run("git", ["--git-dir", gdir(), "update-index", "--add", "--index-info"], { env: e, input: `${lines.join("\n")}\n` });
-      return run("git", ["--git-dir", gdir(), "write-tree"], { env: e }).trim();
-    });
+    await lap("fetch", () => oncePer("fetch", 60_000, fetchOrigin)); // origin/main is only the wip commit's parent: a minute old is fine
+    await lap("sweep", () => oncePer("sweep", 600_000, async () => sweep()));
+    let tree;
+    for (let again = 0; ; again++) {
+      const base = await lap("base", () => buildBase(head, full));
+      tree = await lap("overlay", async () => withIndex(job.id, (env) => {
+        const e = { ...process.env, ...env };
+        run("git", ["--git-dir", gdir(), "read-tree", base], { env: e });
+        const lines = overlayLines(only);
+        if (only) console.log(`--only: HEAD ${head} plus ${lines.length} of your paths`);
+        if (lines.length) run("git", ["--git-dir", gdir(), "update-index", "-z", "--add", "--replace", "--index-info"], { env: e, input: lines.map((l) => `${l}\0`).join("") });
+        return run("git", ["--git-dir", gdir(), "write-tree"], { env: e }).trim();
+      }));
+      const now = rev("HEAD"); if (now === full || again >= 2) break;
+      console.log(`HEAD moved to ${now.slice(0, 9)} while the snapshot was built: again`); // the dirty files are judged against the new HEAD
+      full = now; head = job.head = rev("--short", full);
+    }
     const env = { ...process.env, GIT_AUTHOR_NAME: "maximkone", GIT_AUTHOR_EMAIL: "maximkone@users.noreply.github.com", GIT_COMMITTER_NAME: "maximkone", GIT_COMMITTER_EMAIL: "maximkone@users.noreply.github.com" };
-    const parent = mirrorParent();
-    const commit = run("git", ["--git-dir", gdir(), "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", `wip ${job.id} of ${head}: ${cmd}`], { env }).trim();
-    run("git", ["--git-dir", gdir(), "push", "-q", "origin", `${commit}:refs/heads/${job.id}`]); pushed = true;
+    const commit = await lap("commit", async () => { const parent = mirrorParent(); return run("git", ["--git-dir", gdir(), "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", `wip ${job.id} of ${head}: ${cmd}`], { env }).trim(); });
+    await lap("push", () => pushWip(commit, job.id)); pushed = true;
+    if (process.env.GH_CHECK_DRY) { lapLine(); console.log("GH_CHECK_DRY: pushed, not dispatched"); return { code: 2, why: "dry run", retry: false }; } // measures the local half without a GitHub run (use with --remote-only)
     console.log(`[${lapOf(job)}] sent ${job.id} (HEAD ${head} + working tree) to the ${os} runner: ${cmd}`);
     // The os input only when it is not the default, so a mirror whose check.yml predates it still takes Linux lines.
-    try { run("gh", ["workflow", "run", "check.yml", "-R", PUBLIC_REPO, "--ref", job.id, "-f", `cmd=${cmd}`, ...(os === "ubuntu-latest" ? [] : ["-f", `os=${os}`])]); saveJob(job); }
-    catch (e) { const why = whyLine(e); console.log(`dispatch failed (is check.yml on the mirror's main? run node tools/farm.mjs once): ${why}`); res = { code: 2, why: "dispatch failed", retry: true }; return res; }
+    try { await lap("dispatch", async () => run("gh", ["workflow", "run", "check.yml", "-R", PUBLIC_REPO, "--ref", job.id, "-f", `cmd=${cmd}`, ...(os === "ubuntu-latest" ? [] : ["-f", `os=${os}`])])); saveJob(job); lapLine(); }
+    catch (e) { lapLine(); const why = whyLine(e); console.log(`dispatch failed (is check.yml on the mirror's main? run node tools/farm.mjs once): ${why}`); res = { code: 2, why: "dispatch failed", retry: true }; return res; }
     res = await settle(job, budgetMs);
     return res;
-  } catch (e) { console.log(`could not run the check: ${whyLine(e)}`); res = { code: 2, why: "the snapshot or push failed", retry: true }; return res; }
+  } catch (e) { lapLine(); console.log(`could not run the check: ${whyLine(e)}`); res = { code: 2, why: "the snapshot or push failed", retry: true }; return res; }
   finally { if (pushed) finish(job, res); }
 };
 
@@ -540,6 +677,6 @@ export const main = async (argv, env = process.env) => {
     return job ? afterRemote({ res, cmd: job.cmd, mode: "auto", local: (c) => runLocal(c, console.log, { fresh: a.fresh }), say: console.log }) : res.code;
   }
   if (!okCmd(a.cmd)) { console.log("refused: give one plain `cargo check|test|clippy ...` command"); return 2; }
-  return route({ cmd: a.cmd, mode: a.only ? "remote" : a.mode, remote: (c, os) => startRemote(c, os, budgetMs, a.fresh, a.only), local: (c) => runLocal(c, console.log, { fresh: a.fresh }) });
+  return route({ cmd: a.cmd, mode: a.only || env.GH_CHECK_DRY ? "remote" : a.mode, remote: (c, os) => startRemote(c, os, budgetMs, a.fresh, a.only), local: (c) => runLocal(c, console.log, { fresh: a.fresh }) });
 };
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main(process.argv.slice(2)).then((c) => process.exit(c));

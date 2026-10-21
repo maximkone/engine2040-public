@@ -679,7 +679,7 @@ impl SpearState {
         // The reel keeps the old pull toward the goal; the rope decides where
         // the body can go with it.
         push(mine, unit([body[0], body[2]], t.goal_mm), WALL_REEL_ACCEL);
-        *mine = mine.map(|lane| lane - lane / SWING_DAMP_DIV);
+        *mine = damp(*mine);
         cap(mine, WALL_MAX_SPEED);
         // Drop the radial part of (drift, rise): what is left is the arc.
         let unit3 = [
@@ -891,6 +891,16 @@ fn cap(v: &mut [i32; 2], max: i64) {
     }
 }
 
+/// One tick of swing damping: a [`SWING_DAMP_DIV`]th of each lane's speed, at
+/// least one step, so a slow swing still comes to rest (a truncated quotient
+/// alone stalls every lane under `SWING_DAMP_DIV` mm/tick).
+fn damp(v: [i32; 2]) -> [i32; 2] {
+    v.map(|lane| {
+        let bite = lane / SWING_DAMP_DIV;
+        lane - if bite == 0 { lane.signum() } else { bite }
+    })
+}
+
 /// One tick of drift friction: a sixteenth of the speed, at least one step.
 fn friction(v: i32) -> i32 {
     let bite = v / 16;
@@ -977,6 +987,7 @@ mod tests {
     use super::*;
     use crate::world::Obstacle;
     use crate::{ArenaConfig, Sim};
+    use engine_core::laws;
     use engine_input::fighter::{BLOCK, KNOWN_BUTTONS};
     use engine_input::{Buttons, FighterId, FighterTape};
 
@@ -1403,5 +1414,264 @@ mod tests {
             carried > 250,
             "the release carries the arc: {carried} mm in 10 ticks"
         );
+    }
+
+    /// One of a mirrored pair of matches: the same fight with x negated, and
+    /// the facing that throws along its own +x (`-9_000` on the mirror side).
+    struct Twin {
+        sim: Sim,
+        facing: i16,
+    }
+
+    impl std::fmt::Debug for Twin {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let poses: Vec<[f32; 3]> = self.sim.states.iter().map(|s| s.pos).collect();
+            write!(
+                f,
+                "facing {} poses {poses:?} spear {:?}",
+                self.facing,
+                self.sim.spear.as_ref().map(|s| s.slots())
+            )
+        }
+    }
+
+    /// A spear match with both fighters placed; `sign` mirrors x.
+    fn twin(
+        world: MatchWorld,
+        sign: f32,
+        facing: i16,
+        thrower: [f32; 2],
+        victim: [f32; 2],
+    ) -> Twin {
+        let mut sim = sim_in(world);
+        place(
+            &mut sim,
+            [sign * thrower[0], thrower[1]],
+            [sign * victim[0], victim[1]],
+        );
+        Twin { sim, facing }
+    }
+
+    /// Throw once on tick 0, then hold still.
+    fn throw_then_hold(twin: &mut Twin, tick: u32) {
+        let buttons = if tick == 0 { THROW } else { 0 };
+        tick_move(&mut twin.sim, [(buttons, twin.facing, 0, 0), (0, 0, 0, 0)]);
+    }
+
+    /// Run one twin for `ticks`, collecting the spear events of every tick.
+    fn run_twin(twin: &mut Twin, ticks: u32) -> Vec<SpearEvent> {
+        let mut seen = Vec::new();
+        for tick in 0..ticks {
+            throw_then_hold(twin, tick);
+            seen.extend(events(&twin.sim));
+        }
+        seen
+    }
+
+    /// Two spear phases are x-mirrors of each other (positions and velocities
+    /// negate in x only; the anchor, goal and victim match).
+    fn phase_mirrored(p: Phase, q: Phase) -> bool {
+        match (p, q) {
+            (Phase::Idle, Phase::Idle) => true,
+            (Phase::Flight(f), Phase::Flight(g)) => {
+                f.pos_mm[0] == -g.pos_mm[0]
+                    && f.pos_mm[1..] == g.pos_mm[1..]
+                    && f.vel_mm[0] == -g.vel_mm[0]
+                    && f.vel_mm[1..] == g.vel_mm[1..]
+            }
+            (Phase::Tether(t), Phase::Tether(u)) => {
+                t.victim == u.victim
+                    && t.latched == u.latched
+                    && t.goal_mm[0] == -u.goal_mm[0]
+                    && t.goal_mm[1] == u.goal_mm[1]
+                    && t.anchor_mm[0] == -u.anchor_mm[0]
+                    && t.anchor_mm[1] == u.anchor_mm[1]
+            }
+            _ => false,
+        }
+    }
+
+    /// Every body and spear of `b` is the x-mirror of `a`'s; hp and cooldowns match.
+    fn mirrored_twins(a: &Twin, b: &Twin) -> bool {
+        let bodies =
+            a.sim.states.iter().zip(&b.sim.states).all(|(p, q)| {
+                p.pos[0] == -q.pos[0] && p.pos[1] == q.pos[1] && p.pos[2] == q.pos[2]
+            });
+        let hp = a
+            .sim
+            .fight
+            .fighters
+            .iter()
+            .zip(&b.sim.fight.fighters)
+            .all(|(p, q)| p.hp_permille == q.hp_permille);
+        let spears = match (a.sim.spear.as_ref(), b.sim.spear.as_ref()) {
+            (Some(p), Some(q)) => p
+                .slots()
+                .iter()
+                .zip(q.slots())
+                .all(|(s, t)| s.cooldown == t.cooldown && phase_mirrored(s.phase, t.phase)),
+            _ => false,
+        };
+        bodies && hp && spears
+    }
+
+    #[test]
+    fn mirrored_throws_land_mirrored_on_a_fighter() {
+        let right = || twin(MatchWorld::empty(), 1.0, 9_000, [-3.0, 0.0], [1.5, 0.0]);
+        let left = twin(MatchWorld::empty(), -1.0, -9_000, [-3.0, 0.0], [1.5, 0.0]);
+        // The +x throw really lands, so the mirror check below is not vacuous.
+        let seen = run_twin(&mut right(), 80);
+        assert!(
+            seen.iter().any(|e| matches!(
+                e,
+                SpearEvent::Hit {
+                    thrower: 0,
+                    victim: Some(1),
+                    ..
+                }
+            )),
+            "the +x throw hits: {seen:?}"
+        );
+        laws::mirror(right(), left, 80, throw_then_hold, mirrored_twins)
+            .expect("a mirrored throw stays mirrored");
+    }
+
+    #[test]
+    fn mirrored_throws_anchor_mirrored_on_a_wall() {
+        let wall = |x: f32| {
+            MatchWorld::try_new(vec![Obstacle::aligned([x, 0.0], [0.5, 3.0])]).expect("world")
+        };
+        let right = || twin(wall(4.5), 1.0, 9_000, [-2.0, 0.0], [-8.0, -8.0]);
+        let left = twin(wall(-4.5), -1.0, -9_000, [-2.0, 0.0], [-8.0, -8.0]);
+        let seen = run_twin(&mut right(), 60);
+        assert!(
+            seen.iter().any(|e| matches!(
+                e,
+                SpearEvent::Hit {
+                    thrower: 0,
+                    victim: None,
+                    ..
+                }
+            )),
+            "the +x throw sticks in the wall: {seen:?}"
+        );
+        laws::mirror(right(), left, 60, throw_then_hold, mirrored_twins)
+            .expect("a mirrored wall anchor stays mirrored");
+    }
+
+    #[test]
+    fn a_spear_never_passes_a_fighter_between_ticks() {
+        // One tick of SPEAR_SPEED is 600 mm. A fighter centred anywhere on
+        // that path, up to TIP_RADIUS + CAPSULE_RADIUS off it, must be caught.
+        let reach = TIP_RADIUS + CAPSULE_RADIUS;
+        let mut hits = Vec::new();
+        for tick in 0..25 {
+            let z0 = -7_200 + 600 * tick;
+            for quarter in 0..=4 {
+                let z = z0 + 150 * quarter;
+                for lateral in [0, 300, reach - 1] {
+                    let body = [lateral, 0, z];
+                    let caught = cast_contact(
+                        &mut hits,
+                        [0, SPEAR_HEIGHT, z0],
+                        [0, SPEAR_HEIGHT, z0 + 600],
+                        &[hurt_capsule(7, body)],
+                    );
+                    assert_eq!(
+                        caught.map(|(id, _)| id),
+                        Some(7),
+                        "tick {tick}, fighter centred at {body:?}"
+                    );
+                }
+            }
+        }
+        // Just past reach the same sweep misses, so the test above can fail.
+        let past = cast_contact(
+            &mut hits,
+            [0, SPEAR_HEIGHT, -600],
+            [0, SPEAR_HEIGHT, 0],
+            &[hurt_capsule(7, [reach + 20, 0, -300])],
+        );
+        assert_eq!(past, None);
+    }
+
+    #[test]
+    fn a_drifting_body_comes_to_exact_rest_and_stays_there() {
+        let speed = |v: &i32| f64::from(v.abs());
+        for start in -420..=420 {
+            laws::energy_never_rises(start, 2_000, |v| *v = friction(*v), speed, 0.0)
+                .expect("drift never speeds up");
+            let mut v = start;
+            for _ in 0..500 {
+                let next = friction(v);
+                assert!(
+                    next == 0 || next.signum() == v.signum(),
+                    "friction flipped {v} to {next}"
+                );
+                v = next;
+            }
+            assert_eq!(v, 0, "drift from {start} sticks at {v}");
+        }
+        laws::rest_stays_rest(0, 200, |v| *v = friction(*v)).expect("rest stays rest");
+    }
+
+    #[test]
+    fn a_swing_never_gains_energy_without_reel() {
+        // With the reel off, the swing's damping is the only motion term left:
+        // it may take speed out of the arc, never put it in.
+        let energy = |v: &[i32; 2]| v.iter().map(|&l| f64::from(l) * f64::from(l)).sum::<f64>();
+        for start in [[1_000, -700], [420, 420], [63, -63], [5, 0], [-420, 420]] {
+            laws::energy_never_rises(start, 2_000, |v| *v = damp(*v), energy, 0.0)
+                .expect("a swing never pumps");
+        }
+    }
+
+    #[test]
+    fn a_swing_damps_every_speed_to_rest() {
+        for start in [[1_000, -700], [63, -63], [5, 0], [-420, 420]] {
+            let mut v = start;
+            for _ in 0..2_000 {
+                v = damp(v);
+            }
+            assert_eq!(v, [0, 0], "swing damping from {start:?} stalls at {v:?}");
+        }
+    }
+
+    #[test]
+    fn cap_never_raises_speed_and_keeps_direction() {
+        for max in [420_i64, 500] {
+            for x in (-1_200..=1_200).step_by(37) {
+                for z in (-1_200..=1_200).step_by(41) {
+                    let before = [x, z];
+                    let mut after = before;
+                    cap(&mut after, max);
+                    let (sb, sa) = (sq(before[0]) + sq(before[1]), sq(after[0]) + sq(after[1]));
+                    // Truncation only shrinks a lane, so the cap never adds speed.
+                    assert!(sa <= sb, "cap grew {before:?} to {after:?}");
+                    // Each lane keeps its sign, so the direction is kept.
+                    assert!(
+                        before
+                            .iter()
+                            .zip(&after)
+                            .all(|(b, a)| *a == 0 || a.signum() == b.signum()),
+                        "cap turned {before:?} to {after:?}"
+                    );
+                    if isqrt(sb) <= max {
+                        assert_eq!(after, before, "below the cap nothing changes");
+                    } else {
+                        // Each lane truncates by under one mm/tick, so the result
+                        // is at most one mm/tick over the limit.
+                        assert!(sa <= (max + 1) * (max + 1), "cap overshot {max}: {after:?}");
+                    }
+                    // The same per-lane bound caps the bend: |cross| < |b0| + |b1|.
+                    let cross = i64::from(before[0]) * i64::from(after[1])
+                        - i64::from(before[1]) * i64::from(after[0]);
+                    assert!(
+                        cross.abs() <= i64::from(before[0]).abs() + i64::from(before[1]).abs(),
+                        "cap bent {before:?} to {after:?}"
+                    );
+                }
+            }
+        }
     }
 }

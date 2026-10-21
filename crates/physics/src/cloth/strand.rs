@@ -218,9 +218,9 @@ impl Strand {
         for k in 0..nodes {
             let at = Fixed::from_int(i64::try_from(k).unwrap_or(0)) / Fixed::from_int(last);
             let p = [
-                a[0] + (b[0] - a[0]) * at,
-                a[1] + (b[1] - a[1]) * at,
-                a[2] + (b[2] - a[2]) * at,
+                a[0] + mul_sym(b[0] - a[0], at),
+                a[1] + mul_sym(b[1] - a[1], at),
+                a[2] + mul_sym(b[2] - a[2], at),
             ];
             self.pos.push(p);
             self.prev.push(p);
@@ -380,16 +380,20 @@ impl Strand {
             }
             let cur = *pos;
             let mut moved = [
-                (cur[0] - prev[0]) * keep,
-                (cur[1] - prev[1]) * keep,
-                (cur[2] - prev[2]) * keep,
+                mul_sym(cur[0] - prev[0], keep),
+                mul_sym(cur[1] - prev[1], keep),
+                mul_sym(cur[2] - prev[2], keep),
             ];
             let moved2 = moved[0] * moved[0] + moved[1] * moved[1] + moved[2] * moved[2];
             if moved2 > cap2 {
                 let len = moved2.sqrt();
                 if len > Fixed::ZERO {
                     let k = cap / len;
-                    moved = [moved[0] * k, moved[1] * k, moved[2] * k];
+                    moved = [
+                        mul_sym(moved[0], k),
+                        mul_sym(moved[1], k),
+                        mul_sym(moved[2], k),
+                    ];
                 }
             }
             *prev = cur;
@@ -419,8 +423,16 @@ impl Strand {
                 (false, true) => (share, Fixed::ZERO),
                 (false, false) => (share * Fixed::HALF, share * Fixed::HALF),
             };
-            self.pos[i] = [pa[0] + d[0] * ka, pa[1] + d[1] * ka, pa[2] + d[2] * ka];
-            self.pos[i + 1] = [pb[0] - d[0] * kb, pb[1] - d[1] * kb, pb[2] - d[2] * kb];
+            self.pos[i] = [
+                pa[0] + mul_sym(d[0], ka),
+                pa[1] + mul_sym(d[1], ka),
+                pa[2] + mul_sym(d[2], ka),
+            ];
+            self.pos[i + 1] = [
+                pb[0] - mul_sym(d[0], kb),
+                pb[1] - mul_sym(d[1], kb),
+                pb[2] - mul_sym(d[2], kb),
+            ];
         }
     }
 
@@ -440,6 +452,15 @@ impl Strand {
             *out = [from_fixed(p[0]), from_fixed(p[1]), from_fixed(p[2])];
         }
     }
+}
+
+/// Q16 product rounded toward zero. `Fixed`'s `*` floors, so a product with a negative operand
+/// lands one step low on one side of a mirror and not on the other; this keeps a strand's mirror
+/// image exact bit for bit.
+fn mul_sym(a: Fixed, b: Fixed) -> Fixed {
+    let p = i128::from(a.to_bits()) * i128::from(b.to_bits());
+    let m = i64::try_from(p.unsigned_abs() >> 16).unwrap_or(i64::MAX);
+    Fixed::from_bits(if p < 0 { -m } else { m })
 }
 
 /// Squared length of `b - a` in Q32, square rooted back to Q16 meters.

@@ -233,6 +233,10 @@ fn agent_line(agent: &Agent, i: usize, other: &Agent, j: usize, p: &Params) -> L
         let w_len = len(w);
         let unit_w = if w_len > 0 {
             scale(w, ONE, w_len)
+        } else if rel_pos != [0, 0] {
+            // Closing at exactly the push rate (w = 0): push straight apart, away from the
+            // other agent, the way a still pair would be pushed.
+            unit([-rel_pos[0], -rel_pos[1]])
         } else {
             // Coincident and still: the lower index yields toward +x.
             [if i < j { ONE } else { -ONE }, 0]
@@ -966,6 +970,283 @@ mod tests {
         assert!(
             p99_at_1000 <= 2_000,
             "1,000-agent p99 {p99_at_1000} us over 2 ms"
+        );
+    }
+
+    use engine_core::laws;
+
+    /// Overlap slack: positions are whole millimetres and each tick truncates the move to whole
+    /// millimetres, so a gap can be off by one mm and no more.
+    const OVERLAP_SLACK_MM: i64 = 1;
+
+    /// One tick of a crowd with fixed preferred velocities: ORCA picks each velocity, then every
+    /// agent moves for one step.
+    fn drive(orca: &mut Orca, agents: &mut [Agent]) {
+        let mut out = vec![[0; 2]; agents.len()];
+        orca.step(agents, &[], &P, &mut out).expect("steps");
+        advance(agents, &out);
+    }
+
+    /// Two agents at x = -4 m and +4 m, each wanting to walk through the other.
+    fn head_on() -> Vec<Agent> {
+        vec![
+            agent([-4_000, 0], [1_500, 0]),
+            agent([4_000, 0], [-1_500, 0]),
+        ]
+    }
+
+    /// Six agents on a 3 m ring, each wanting the antipode: every route runs through the middle.
+    fn six_on_a_ring() -> Vec<Agent> {
+        [
+            [3_000, 0],
+            [1_500, 2_598],
+            [-1_500, 2_598],
+            [-3_000, 0],
+            [-1_500, -2_598],
+            [1_500, -2_598],
+        ]
+        .into_iter()
+        .map(|p| agent(p, toward(p, [-p[0], -p[1]])))
+        .collect()
+    }
+
+    /// Six agents scattered over a 6 m square, no two closer than 1 m, each wanting the point
+    /// reflection of its start: an asymmetric crossing with no distance ties per agent.
+    fn six_scattered() -> Vec<Agent> {
+        [
+            [-2_600, 300],
+            [2_400, -500],
+            [700, 2_300],
+            [-900, -2_100],
+            [2_100, 1_700],
+            [-1_500, -200],
+        ]
+        .into_iter()
+        .map(|p| agent(p, toward(p, [-p[0], -p[1]])))
+        .collect()
+    }
+
+    /// Every agent reflected through the origin, id for id: position, velocity and preferred
+    /// velocity all change sign.
+    fn reflected(agents: &[Agent]) -> Vec<Agent> {
+        agents
+            .iter()
+            .map(|a| Agent {
+                pos: [-a.pos[0], -a.pos[1]],
+                vel: [-a.vel[0], -a.vel[1]],
+                pref: [-a.pref[0], -a.pref[1]],
+                ..*a
+            })
+            .collect()
+    }
+
+    /// True when `b` is `a` reflected through the origin, agent by agent.
+    fn is_reflection(a: &[Agent], b: &[Agent]) -> bool {
+        reflected(a) == b
+    }
+
+    /// Smallest gap between any two bodies (centre distance minus the radii), in mm.
+    fn min_gap(agents: &[Agent]) -> i64 {
+        let mut worst = i64::MAX;
+        for (i, a) in agents.iter().enumerate() {
+            for b in &agents[i + 1..] {
+                worst = worst.min(gap_mm(a, b));
+            }
+        }
+        worst
+    }
+
+    /// Head-on pair: each tick the two velocities are reflections of each other (the dodge
+    /// splits evenly), and the pair gets past each other.
+    #[test]
+    fn head_on_agents_split_the_dodge_evenly_each_tick() {
+        let mut orca = Orca::new();
+        let mut pair = head_on();
+        for tick in 1..=200 {
+            drive(&mut orca, &mut pair);
+            assert_eq!(
+                pair[0].vel,
+                [-pair[1].vel[0], -pair[1].vel[1]],
+                "tick {tick}: the two velocities are not equal and opposite"
+            );
+        }
+        assert!(
+            pair[0].pos[0] > 0 && pair[1].pos[0] < 0,
+            "never passed: {pair:?}"
+        );
+    }
+
+    /// A head-on pair and its point reflection stay point reflections every tick: the dodge has
+    /// no id-order or floor-rounding bias.
+    #[test]
+    fn head_on_agents_stay_mirror_images_every_tick() {
+        let mut orca = Orca::new();
+        let start = head_on();
+        let mirror_start = reflected(&start);
+        laws::mirror(
+            start,
+            mirror_start,
+            200,
+            |w, _| drive(&mut orca, w),
+            |a, b| is_reflection(a, b),
+        )
+        .expect("mirror holds");
+    }
+
+    /// The six-agent crossing and its point reflection stay point reflections every tick.
+    #[test]
+    fn six_agents_stay_mirror_images_every_tick() {
+        let mut orca = Orca::new();
+        let start = six_scattered();
+        let mirror_start = reflected(&start);
+        laws::mirror(
+            start,
+            mirror_start,
+            200,
+            |w, _| drive(&mut orca, w),
+            |a, b| is_reflection(a, b),
+        )
+        .expect("mirror holds");
+    }
+
+    /// Resting agents never creep: far apart, or a metre apart, all at zero preferred velocity.
+    #[test]
+    fn a_resting_crowd_never_creeps() {
+        let mut orca = Orca::new();
+        let parked = vec![
+            agent([0, 0], [0, 0]),
+            agent([10_000, 0], [0, 0]),
+            agent([0, 10_000], [0, 0]),
+            agent([20_000, 0], [0, 0]),
+            agent([21_000, 0], [0, 0]),
+        ];
+        laws::rest_stays_rest(parked, 300, |w| drive(&mut orca, w)).expect("rest stays rest");
+    }
+
+    /// A zero-preferred-velocity agent with nobody within 4 m stays exactly put, while a walker
+    /// 10 m away walks off the other way.
+    #[test]
+    fn a_zero_pref_agent_with_nobody_near_stays_exactly_at_rest() {
+        let mut orca = Orca::new();
+        let mut agents = [agent([0, 0], [0, 0]), agent([10_000, 0], [1_500, 0])];
+        let mut out = [[0; 2]; 2];
+        for tick in 1..=400 {
+            orca.step(&agents, &[], &P, &mut out).expect("steps");
+            assert_eq!(
+                out[0],
+                [0, 0],
+                "tick {tick}: the resting agent was given a velocity"
+            );
+            advance(&mut agents, &out);
+            assert_eq!(
+                agents[0].pos,
+                [0, 0],
+                "tick {tick}: the resting agent moved"
+            );
+        }
+    }
+
+    /// Six agents crossing: no pair ever overlaps by more than the rounding slack.
+    #[test]
+    fn six_agents_crossing_never_overlap() {
+        for (layout, mut crowd) in [("ring", six_on_a_ring()), ("scattered", six_scattered())] {
+            let mut orca = Orca::new();
+            let (mut worst, mut worst_tick) = (i64::MAX, 0);
+            for tick in 1..=300 {
+                drive(&mut orca, &mut crowd);
+                let gap = min_gap(&crowd);
+                if gap < worst {
+                    (worst, worst_tick) = (gap, tick);
+                }
+            }
+            assert!(
+                worst >= -OVERLAP_SLACK_MM,
+                "{layout}: worst gap {worst} mm at tick {worst_tick}"
+            );
+        }
+    }
+
+    /// Reversing the slice order gives every agent the same velocity and position, every tick.
+    #[test]
+    fn six_agents_give_the_same_velocity_per_id_in_any_slice_order() {
+        let mut forward = six_scattered();
+        let mut reversed: Vec<Agent> = forward.iter().rev().copied().collect();
+        let (mut fwd_orca, mut rev_orca) = (Orca::new(), Orca::new());
+        for tick in 1..=200 {
+            drive(&mut fwd_orca, &mut forward);
+            drive(&mut rev_orca, &mut reversed);
+            for (i, (f, r)) in forward.iter().zip(reversed.iter().rev()).enumerate() {
+                assert_eq!(
+                    f, r,
+                    "tick {tick}, agent {i}: reversing the slice changed it"
+                );
+            }
+        }
+    }
+
+    /// Two copies of the six-agent crossing, stepped side by side with one shared stepper,
+    /// stay equal for 200 ticks.
+    #[test]
+    fn a_six_agent_crossing_replays_equal_from_two_copies() {
+        let mut orca = Orca::new();
+        let end =
+            laws::replay(six_scattered(), 200, |w, _| drive(&mut orca, w)).expect("replay holds");
+        assert_eq!(end.len(), 6);
+    }
+
+    /// Two agents on one point: the velocities repeat on every run, the lower index goes to +x,
+    /// and the pair walks apart with no NaN and no panic.
+    #[test]
+    fn coincident_agents_split_by_id_and_separate_without_nan_or_panic() {
+        let start = [agent([0, 0], [0, 0]), agent([0, 0], [0, 0])];
+        let mut first = [[0; 2]; 2];
+        Orca::new()
+            .step(&start, &[], &P, &mut first)
+            .expect("steps");
+        let mut again = [[0; 2]; 2];
+        Orca::new()
+            .step(&start, &[], &P, &mut again)
+            .expect("steps");
+        assert_eq!(first, again, "one input gave two velocity sets");
+        assert!(first[0][0] > 0 && first[1][0] < 0, "{first:?}");
+        let mut pair = start.to_vec();
+        let mut orca = Orca::new();
+        for _ in 0..20 {
+            drive(&mut orca, &mut pair);
+        }
+        assert!(
+            gap_mm(&pair[0], &pair[1]) >= 0,
+            "still overlapping after 20 ticks: {pair:?}"
+        );
+    }
+
+    /// Overlapping 100 mm apart and closing at exactly the push rate (relative velocity equals
+    /// 20 x relative position, so the touching branch's direction is zero): the pair must not
+    /// close in on itself.
+    #[test]
+    fn an_overlapping_pair_closing_at_the_push_rate_still_separates() {
+        let mut agents = [
+            Agent {
+                pos: [0, 0],
+                vel: [1_500, 0],
+                pref: [0, 0],
+                radius_mm: 300,
+            },
+            Agent {
+                pos: [100, 0],
+                vel: [-500, 0],
+                pref: [0, 0],
+                radius_mm: 300,
+            },
+        ];
+        let before = gap_mm(&agents[0], &agents[1]);
+        let mut out = [[0; 2]; 2];
+        Orca::new().step(&agents, &[], &P, &mut out).expect("steps");
+        advance(&mut agents, &out);
+        let after = gap_mm(&agents[0], &agents[1]);
+        assert!(
+            after >= before,
+            "pair closed from {before} mm to {after} mm, out {out:?}"
         );
     }
 }

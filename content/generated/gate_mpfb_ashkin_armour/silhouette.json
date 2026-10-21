@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.4794,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 1.9491,
+  "fill_30m": 0.5227,
+  "height_30m_px": 86,
+  "height_px": 783,
+  "ortho_scale_m": 2.4892,
+  "px_per_m": 401.73,
+  "resolution_30m": [
+    1386,
+    780
+  ],
+  "scale_applied": 0.893885,
+  "source": "C:\\engine2040\\content\\generated\\armour_mpfb_ashkin\\armoured.glb",
+  "source_height_m": 2.2374,
+  "triangles": 4471,
+  "width_px": 408
+}

@@ -1,14 +1,14 @@
 {
   "background": "world_white",
   "background_30m": "world_white",
-  "bbox_fill": 0.4017,
+  "bbox_fill": 0.4021,
   "field_width_m_30m": 30.0,
-  "figure_height_m": 1.99,
-  "fill_30m": 0.374,
+  "figure_height_m": 1.9913,
+  "fill_30m": 0.3747,
   "height_30m_px": 89,
-  "height_px": 800,
-  "ortho_scale_m": 2.4875,
-  "px_per_m": 402.01,
+  "height_px": 801,
+  "ortho_scale_m": 2.4861,
+  "px_per_m": 402.24,
   "resolution_30m": [
     1356,
     762

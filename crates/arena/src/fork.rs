@@ -711,6 +711,9 @@ impl ForkJob {
                 // Forks come from v1 prefix snapshots only, which carry no
                 // pilum volley: the channel stays off.
                 pilum: None,
+                // The same holds for the manuballista: no bolt flies in a
+                // fork of a v1 prefix.
+                bolt: None,
                 rise: Vec::new(),
                 height: false,
                 #[cfg(test)]

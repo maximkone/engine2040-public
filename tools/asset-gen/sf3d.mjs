@@ -91,7 +91,15 @@ const run = execFileSync(
    "--foreground-ratio", ratio, "--remesh_option", "none", "--batch_size", "1", "--device", device,
    ...(haveWeights ? ["--pretrained-model", WEIGHTS] : [])],
   { cwd: SF3D, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60 * 60 * 1000, maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, HF_HUB_ENABLE_HF_TRANSFER: process.env.SF3D_HF_TRANSFER ?? "0" } },
+    // The hub is never needed: the model weights are local and the DINOv2
+    // encoder is cached. Asking the hub anyway means a stale cache lock
+    // from an earlier run can block every run behind it, silently.
+    env: { ...process.env,
+           HF_HUB_OFFLINE: "1",
+           TRANSFORMERS_OFFLINE: "1",
+           HF_HUB_DISABLE_TELEMETRY: "1",
+           HF_HUB_ENABLE_HF_TRANSFER: "0",
+           SF3D_HF_TRANSFER: process.env.SF3D_HF_TRANSFER ?? "0" } },
 );
 console.log((run.stdout || "").split(/\r?\n/).slice(-10).join("\n"));
 

@@ -140,6 +140,29 @@ export function reportPath(name) {
   return join(REPORT_DIR, `${name}.json`);
 }
 
+// What the kernel receipt says: the last `--- exit: N ---` line decides.
+export function receiptVerdict(text) {
+  if (!text) return "no-receipt";
+  if (text.includes("--- exit: 0 ---")) return "pass";
+  if (text.includes("--- exit:")) return "fail";
+  return "incomplete";
+}
+
+// Pull the kernel output and write the receipt next to the reports.
+export function pullReceipt(name, line, dir) {
+  const out = join(KERNEL_DIR, `${name}-out`);
+  mkdirSync(out, { recursive: true });
+  kaggle(["kernels", "output", dir, "-p", "-o", out]);
+  const receipt = join(out, "receipt.txt");
+  const text = existsSync(receipt) ? readFileSync(receipt, "utf8") : "";
+  mkdirSync(REPORT_DIR, { recursive: true });
+  writeFileSync(
+    reportPath(name),
+    JSON.stringify({ name, line, state: receiptVerdict(text), receipt: text.slice(-4000) }, null, 1),
+  );
+  return text;
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {

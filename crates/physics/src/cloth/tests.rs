@@ -3,9 +3,10 @@
 //! Every test here reads the sheet only through its public API or through a field of its own
 //! module tree, and nothing here is hashed.
 
+use super::convert::from_fixed;
 use super::*;
 use engine_core::fixed::Fixed;
-use engine_core::Rng;
+use engine_core::{laws, Rng};
 
 /// A fighter cape: half a meter wide, a meter long, hung from shoulder height.
 const CAPE_SIZE: [f32; 2] = [0.5, 1.0];
@@ -1347,4 +1348,288 @@ fn cloth_gap_the_layer_table_decides_which_colliders_the_cloth_meets() {
     let deep = body.with_max_distance(0.05).expect("max distance");
     assert_eq!(deep.max_distance(), 0.05);
     assert_eq!(deep.layer(), crate::layers::BODY);
+}
+
+// ---- Physics laws (engine_core::laws): rest, energy, mirror, stretch ----
+
+/// Float slack for the energy laws: about ten f32 ulps of a 2 m height times gravity, per
+/// particle, in J/kg.
+fn energy_slack(cloth: &Cloth) -> f64 {
+    2.5e-5 * f64::from(u16::try_from(cloth.particle_count()).unwrap_or(u16::MAX))
+}
+
+/// One Verlet substep in seconds, at the sheet's current substep count.
+fn substep_len(cloth: &Cloth) -> f64 {
+    f64::from(TICK_DT) / f64::from(u16::try_from(cloth.params().substeps).unwrap_or(1))
+}
+
+/// Kinetic plus gravitational energy per unit mass of the free particles, J/kg (one mass per
+/// particle). Speed is the last substep's Verlet displacement over that substep's length, so a
+/// substep change that does not rescale the carried displacement shows up here as a jump.
+fn sheet_energy(cloth: &Cloth) -> f64 {
+    let h = substep_len(cloth);
+    let g = f64::from(cloth.params().gravity);
+    cloth
+        .pos
+        .iter()
+        .zip(&cloth.prev)
+        .zip(&cloth.pinned)
+        .filter(|(_, pinned)| !**pinned)
+        .map(|((p, q), _)| {
+            let speed2: f64 = p
+                .iter()
+                .zip(q.iter())
+                .map(|(a, b)| {
+                    let v = f64::from(a - b) / h;
+                    v * v
+                })
+                .sum();
+            0.5 * speed2 + g * f64::from(p[1])
+        })
+        .sum()
+}
+
+/// A sheet as a law state: two are equal when every vertex is the same bit for bit.
+#[derive(Clone, Debug)]
+struct Sheet(Cloth);
+
+impl PartialEq for Sheet {
+    fn eq(&self, other: &Self) -> bool {
+        vertex_bits(&self.0) == vertex_bits(&other.0)
+    }
+}
+
+fn vertex_bits(cloth: &Cloth) -> Vec<u32> {
+    cloth
+        .positions()
+        .iter()
+        .flatten()
+        .map(|v| v.to_bits())
+        .collect()
+}
+
+#[test]
+fn a_settled_hanging_cape_falls_asleep_and_then_never_moves() {
+    for tier in ClothTier::ALL {
+        let mut cloth = cape(tier);
+        sleep_it(&mut cloth);
+        let result = laws::rest_stays_rest(Sheet(cloth), 600, |s| {
+            s.0.step(&[]);
+        });
+        law_holds(result, &format!("{tier:?}"));
+    }
+}
+
+#[test]
+#[ignore = "law break: energy rises only at ticks 1-2 from the flat layout (5-10 mJ/kg, projection overshoot), see lead"]
+fn a_hanging_cape_never_gains_energy_without_wind_or_moving_pins() {
+    let mut broke = Vec::new();
+    for tier in ClothTier::ALL {
+        let cloth = cape(tier);
+        let slack = energy_slack(&cloth);
+        let result = laws::energy_never_rises(
+            cloth,
+            300,
+            |c| {
+                c.step(&[]);
+            },
+            sheet_energy,
+            slack,
+        );
+        if let Err(b) = result {
+            let head: String = b.detail.chars().take(160).collect();
+            broke.push(format!("{tier:?} at tick {}: {head}", b.tick));
+        }
+    }
+    assert!(broke.is_empty(), "energy rose:\n{}", broke.join("\n"));
+}
+
+#[test]
+fn switching_the_substep_count_mid_swing_does_not_pump_energy() {
+    let grid = ClothTier::Comfort.knobs().cape;
+    let params = ClothParams {
+        substeps: 1,
+        ..ClothParams::for_tier(ClothTier::Comfort)
+    };
+    let mut cloth = Cloth::new(grid, CAPE_SIZE, SHOULDERS, params).expect("cape builds");
+    for t in 0..30 {
+        cloth
+            .pin_top_row(&shoulder_row(grid.cols, [0.2 * tri(t, 0), 0.0, 0.0]))
+            .expect("pins in range");
+        cloth.step(&[]);
+    }
+    let slack = energy_slack(&cloth);
+    let before = sheet_energy(&cloth);
+    // Retuning the substep count changes the Verlet step. The carried motion must follow it, so
+    // the energy reads the same right after each switch.
+    for substeps in [2, 1, 2] {
+        let params = ClothParams {
+            substeps,
+            ..cloth.params()
+        };
+        cloth.set_params(params).expect("substeps in range");
+        let after = sheet_energy(&cloth);
+        assert!(
+            (after - before).abs() <= slack,
+            "substeps {substeps}: energy {before} -> {after} (slack {slack})"
+        );
+    }
+    let result = laws::energy_never_rises(
+        cloth,
+        120,
+        |c| {
+            c.step(&[]);
+        },
+        sheet_energy,
+        slack,
+    );
+    law_holds(result, "after the substep switch, no input");
+}
+
+/// The cape's top row swaying at tick `t`. The mirrored side takes the mirror image: column `c`
+/// is column `cols - 1 - c` of the other side with x negated.
+fn sway_row(cols: usize, t: usize, mirrored: bool) -> Vec<[f32; 3]> {
+    let rest_x = |c: usize| -CAPE_SIZE[0] / 2.0 + CAPE_SIZE[0] * count_f32(c) / count_f32(cols - 1);
+    let swing = |c: usize| 0.2 * tri(t, c);
+    (0..cols)
+        .map(|c| {
+            if mirrored {
+                let src = cols - 1 - c;
+                [-(rest_x(src) + swing(src)), SHOULDERS[1], 0.0]
+            } else {
+                [rest_x(c) + swing(c), SHOULDERS[1], 0.0]
+            }
+        })
+        .collect()
+}
+
+/// A cape as a mirror-law state: `mirrored` picks which side of the pair this is.
+#[derive(Debug)]
+struct CapeSide {
+    sheet: Cloth,
+    mirrored: bool,
+}
+
+/// True when `b` is `a` mirrored across x = 0 with its columns reversed, within 1e-5 m.
+fn mirror_image(a: &Cloth, b: &Cloth) -> bool {
+    let (pa, pb) = (a.positions(), b.positions());
+    let cols = a.cols;
+    pa.len() == pb.len()
+        && (0..pb.len()).all(|i| {
+            let src = pa[(i / cols) * cols + (cols - 1 - i % cols)];
+            (pb[i][0] + src[0]).abs() <= 1e-5
+                && (pb[i][1] - src[1]).abs() <= 1e-5
+                && (pb[i][2] - src[2]).abs() <= 1e-5
+        })
+}
+
+/// Panics with the law's name, its tick and the first 200 characters of its detail: the numbers
+/// come first, and the state dump after them is long.
+fn law_holds(result: Result<(), laws::Break>, what: &str) {
+    if let Err(b) = result {
+        let head: String = b.detail.chars().take(200).collect();
+        panic!("{what}: law '{}' broke at tick {}: {head}", b.law, b.tick);
+    }
+}
+
+#[test]
+#[ignore = "law break: Gauss-Seidel link order, mirror gap 21 mm at tick 1, 115 mm at tick 10, see lead"]
+fn a_cape_on_mirrored_pins_stays_mirrored() {
+    let grid = ClothTier::Comfort.knobs().cape;
+    let params = ClothParams::for_tier(ClothTier::Comfort);
+    let origin = [-CAPE_SIZE[0] / 2.0, SHOULDERS[1], 0.0];
+    let side = |mirrored| CapeSide {
+        sheet: Cloth::new(grid, CAPE_SIZE, origin, params).expect("cape builds"),
+        mirrored,
+    };
+    laws::mirror(
+        side(false),
+        side(true),
+        240,
+        |s, t| {
+            let t = usize::try_from(t).unwrap_or(0);
+            s.sheet
+                .pin_top_row(&sway_row(grid.cols, t, s.mirrored))
+                .expect("pins in range");
+            s.sheet.step(&[]);
+        },
+        |a, b| mirror_image(&a.sheet, &b.sheet),
+    )
+    .expect("mirror law");
+}
+
+/// Largest gap between a link's length and its rest length, meters.
+fn worst_link_error(strand: &Strand) -> f32 {
+    let rest = from_fixed(strand.rest);
+    strand
+        .positions()
+        .windows(2)
+        .map(|w| {
+            let d = [w[1][0] - w[0][0], w[1][1] - w[0][1], w[1][2] - w[0][2]];
+            ((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - rest).abs()
+        })
+        .fold(0.0, f32::max)
+}
+
+#[test]
+#[ignore = "law break: hair 2.4 mm and rope 5.4 mm stretched at 6 passes, still 1.1 and 3.2 mm at 12, see lead"]
+fn a_settled_hair_lock_and_rope_never_stretch_past_a_millimetre() {
+    let (mut hair, mut rope) = strands();
+    run_strands(&mut hair, &mut rope, 300);
+    let mut worst = [0.0_f32; 2];
+    for _ in 0..300 {
+        run_strands(&mut hair, &mut rope, 1);
+        worst[0] = worst[0].max(worst_link_error(&hair));
+        worst[1] = worst[1].max(worst_link_error(&rope));
+    }
+    let off: Vec<String> = [("hair", worst[0]), ("rope", worst[1])]
+        .into_iter()
+        .filter(|(_, err)| *err > 0.001)
+        .map(|(name, err)| format!("{name} {err} m"))
+        .collect();
+    assert!(
+        off.is_empty(),
+        "links off rest length after settling: {off:?}"
+    );
+}
+
+/// A hair lock as a mirror-law state: `mirrored` picks which side of the pair this is.
+#[derive(Debug)]
+struct LockSide {
+    hair: Strand,
+    mirrored: bool,
+}
+
+/// A gust in Q16 per tick squared: a triangle wave of +-0.037 m/tick^2 with a 48 tick period.
+fn gust_q16(t: u32) -> i64 {
+    let k = i64::from(t % 48);
+    let up = if k < 24 { k } else { 48 - k };
+    (up - 12) * 200
+}
+
+#[test]
+fn a_hair_lock_in_a_mirrored_gust_stays_mirrored_to_the_bit() {
+    let side = |root_x: f32, mirrored| LockSide {
+        hair: Strand::hair([q16(root_x), q16(1.7), q16(0.0)], q16(0.4)).expect("hair builds"),
+        mirrored,
+    };
+    let result = laws::mirror(
+        side(0.05, false),
+        side(-0.05, true),
+        300,
+        |s, t| {
+            let push = gust_q16(t);
+            let x = if s.mirrored { -push } else { push };
+            s.hair.set_push([x, 0, 0]).expect("push in range");
+            s.hair.step(&[]);
+        },
+        |a, b| {
+            a.hair
+                .positions()
+                .iter()
+                .zip(b.hair.positions())
+                .all(|(p, q)| q[0] == -p[0] && q[1] == p[1] && q[2] == p[2])
+        },
+    );
+    law_holds(result, "mirrored hair lock");
 }

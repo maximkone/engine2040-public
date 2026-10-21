@@ -3249,6 +3249,7 @@ name = "engine-physfx"
 version = "0.1.0"
 dependencies = [
  "engine-anim",
+ "engine-core",
  "engine-physics",
  "rapier3d",
 ]

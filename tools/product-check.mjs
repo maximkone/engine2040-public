@@ -151,13 +151,30 @@ export const passFloors = (passes, passBar) => {
   return red;
 };
 
+// A Windows crash status names the fault: the bare code hides the cause
+// (0xC00000FD is a stack overflow, 0xC0000005 an access violation).
+export const crashName = (code) => {
+  const known = {
+    3221225725: "a stack overflow (0xC00000FD)",
+    3221225477: "an access violation (0xC0000005)",
+    3221226505: "a stack buffer overrun (0xC0000409)",
+  };
+  return known[code] ?? null;
+};
+
 // Floors broken by one check: { metric: why } (empty = green). `bar.floors` from product-bar.json.
 export const redFloors = ({ look, timing, caps, ref }, bar, passBar = null) => {
   const f = bar.floors ?? {};
   const red = {};
   if (look.timedOut || timing?.timedOut) red.hang = `arena.exe did not exit within ${RUN_MS / 60_000} min of a --frames 300 --exit run`;
   if (look.panics || timing?.panics) red.panic = `arena.exe panicked (${look.panics + (timing?.panics ?? 0)} panic lines)`;
-  else if (look.exit !== 0 && look.exit !== null && !look.framingFailed) red.exit = `the look run exited ${look.exit}`;
+  else if (look.exit !== 0 && look.exit !== null && !look.framingFailed) {
+    const crash = crashName(look.exit);
+    red.exit = crash ? `the look run died with ${crash}` : `the look run exited ${look.exit}`;
+  } else if (timing && timing.exit !== 0 && timing.exit !== null) {
+    const crash = crashName(timing.exit);
+    if (crash) red.exit = `the timing run died with ${crash}`;
+  }
   if (!look.timedOut && !look.framing) red.receipt = "the look run printed no `arena framing:` line (the fighter look did not draw)";
   if (look.empty > (f.framing_empty ?? 0)) red.framing = `${look.empty} of ${look.frames} frames showed no fighter`;
   if (look.tinted_share !== null && look.tinted_share > (f.tinted_share_max ?? 0.25)) red.strobe = `${Math.round(look.tinted_share * 100)}% of drawn bodies wore the red hit tint (floor ${Math.round((f.tinted_share_max ?? 0.25) * 100)}%)`;

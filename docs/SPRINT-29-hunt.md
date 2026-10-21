@@ -157,7 +157,7 @@ not re-mine the same repo.
   F2P: no memory in the door.
   P2P: golden `d57b5c8ae3096614` x2.
   needs: none.
-- [ ] HX10 tools: the ship build is reproducible. A CI job builds the Windows ship
+- [x] HX10 tools: the ship build is reproducible. A CI job builds the Windows ship  Landed 8303e625d. `node tools/ship-check.mjs --print` prints one SHA-256 content hash per file and a tree hash over `path\0content-hash` pairs; the path rides inside the hash, so a renamed file moves the tree hash. `node --test tools/ship-check.test.mjs` 7 tests pass: the same tree prints the same tree hash, one changed byte changes the tree hash and only that file's line, a renamed file changes it, the lines are sorted by path without the locale, a missing folder exits non-zero and names the folder, an empty folder is refused, and the hash flag prints only the tree hash. `node tools/workspace-check.mjs` PASS. The Windows job in `.github/workflows/ship-check.yml` builds the ship profile twice from a clean folder (`--profile ship -p engine-game --features app`, the same profile `tools/ship.mjs` packs) and compares the two tree hashes; equal hashes are the receipt, a mismatch names the file that moved. The tool reads bytes only: no clock, locale or timezone enters the hash.
   profile twice from a clean folder and compares the file trees by content hash, and
   the receipt names the tree hash. Donors: `rust-secure-code/cargo-repro`
   (Apache-2.0, 58 stars) and `omnibor/omnibor-rs` (Apache-2.0, 30 stars) for
@@ -195,7 +195,10 @@ not re-mine the same repo.
 - [x] HX12 ci: the test report a stranger can read. The CI publishes a structured
   test report (the CTRF JSON shape) for the door and playtest suites, so a run's
   result is read without opening the log. Donor: `ctrf-io/github-test-reporter`
-  (MIT, 378 stars, pushed 2026-10-11). Landed c879adfaa.
+  (MIT, 378 stars, pushed 2026-10-11). Landed c879adfaa; fixed in 2af474f85 (the tool
+  finds the receipt itself, the CI log keeps stderr, and the log is checked per status:
+  `node --test tools/ctrf-report.test.mjs tools/ci.test.mjs` 23 pass; a real nextest
+  0.9.149 run agrees with its receipt).
   Tier C. Size S. Owns `tools/ctrf-report.mjs`, `.github/workflows/`.
   Accept: `node tools/ctrf-report.mjs --out target/reports/ctrf.json` writes a
   report whose `summary.tests` counts equal the number of tests the run printed,
@@ -234,7 +237,7 @@ not re-mine the same repo.
   P2P: the page's own golden line `d57b5c8ae3096614` does not change; the wasm
   golden digests stay equal.
   needs: none.
-- [ ] HX15 web: the frame bus. The sim state crosses to the draw thread over a
+- [x] HX15 web: the frame bus. The sim state crosses to the draw thread over a  Landed 8b3cb4431. `crates/web/src/frame_bus.rs` holds the seqlock: the writer bumps a counter to odd, writes the payload, bumps it to even, and a reader that sees the counter change throws its torn copy away and retries, at most `MAX_READ_ATTEMPTS` (8) times, then says so instead of spinning. The payload lives in a fixed array of `AtomicU32` words next to the counter, so the module needs no `unsafe` and no `UnsafeCell`; the writer stores the words relaxed and publishes them with a release store of the counter, and the reader loads the words relaxed and fences around the counter it reads twice. The same reader runs over a plain byte buffer (`PlainFrame`), so the postMessage fallback and the shared path share one code path. `cargo test -p engine-web --lib frame_bus` 10 passed (run 39614971453): a reader never sees a half-written frame, a torn copy is thrown away and the read succeeds, a real writer-thread race never shows a mixed frame, the plain path and the shared path agree byte for byte, no read waits on a write, a read gives up after a bounded number of attempts, the shared path stores the payload as little-endian words, bytes that do not fit one frame are refused, many readers see the same frame, and a frame keeps its bytes exactly. Clippy `-p engine-web --all-targets -- -D warnings` PASS (run 39615496316); rustfmt exit 0; `node tools/workspace-check.mjs` PASS. The module is std-only and needs no hash, so `engine-core` was not pulled in.
   **seqlock**: one writer, many readers, nobody waits. The writer bumps a counter
   to odd, writes the payload, bumps it to even; a reader that sees the counter
   change discards the torn copy and retries. The same reader works over a plain

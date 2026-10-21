@@ -13,7 +13,7 @@
 //! buffers, so `step` performs no steady-state allocation.
 #![forbid(unsafe_code)]
 
-use super::pd::{clamp_vector, pd_raw};
+use super::pd::{clamp_vector, pd_raw, stable_gains};
 use super::ragdoll::{
     drain_narrow_contacts, insert_joints, joint_depths, normalize_quat, normalized_rotation,
     quat_conj, read_sim_transforms, rotate_vec, BoneShape,
@@ -952,33 +952,18 @@ impl PoweredRagdoll {
         };
         // Linear servo: P on the position offset damped by measured velocity,
         // capped as one vector. Rapier integrates the assigned velocity, so
-        // the loop is stable for any bone mass; the damping settles the
+        // the loop is stable for any bone mass once its gains sit inside
+        // `stable_gains` (D past the edge rang at the cap); the damping settles the
         // recovery with fewer ticks than P-only at the same overshoot.
         if drive.linear_gain > 0.0 {
+            // Inside the servo's stability region whatever the table says (see [`stable_gains`]).
+            let (gain, damping) = stable_gains(drive.linear_gain, drive.linear_damping, dt);
             let p = body.translation();
             let lv = body.linvel();
             let raw = [
-                pd_raw(
-                    target[0] - p.x,
-                    lv.x,
-                    drive.linear_gain,
-                    drive.linear_damping,
-                    dt,
-                ),
-                pd_raw(
-                    target[1] - p.y,
-                    lv.y,
-                    drive.linear_gain,
-                    drive.linear_damping,
-                    dt,
-                ),
-                pd_raw(
-                    target[2] - p.z,
-                    lv.z,
-                    drive.linear_gain,
-                    drive.linear_damping,
-                    dt,
-                ),
+                pd_raw(target[0] - p.x, lv.x, gain, damping, dt),
+                pd_raw(target[1] - p.y, lv.y, gain, damping, dt),
+                pd_raw(target[2] - p.z, lv.z, gain, damping, dt),
             ];
             let v = clamp_vector(raw, drive.max_speed);
             body.set_linvel(Vector::new(v[0], v[1], v[2]), true);
@@ -994,10 +979,13 @@ impl PoweredRagdoll {
                 qe = [-qe[0], -qe[1], -qe[2], -qe[3]];
             }
             let av = body.angvel();
+            // The error vector is sin(angle/2), so the real loop gain is half the table's;
+            // clamping with the full gain is the conservative side of the same edge.
+            let (gain, damping) = stable_gains(drive.angular_gain, drive.angular_damping, dt);
             let raw = [
-                pd_raw(qe[0], av.x, drive.angular_gain, drive.angular_damping, dt),
-                pd_raw(qe[1], av.y, drive.angular_gain, drive.angular_damping, dt),
-                pd_raw(qe[2], av.z, drive.angular_gain, drive.angular_damping, dt),
+                pd_raw(qe[0], av.x, gain, damping, dt),
+                pd_raw(qe[1], av.y, gain, damping, dt),
+                pd_raw(qe[2], av.z, gain, damping, dt),
             ];
             let w = clamp_vector(raw, drive.max_spin);
             body.set_angvel(Vector::new(w[0], w[1], w[2]), true);

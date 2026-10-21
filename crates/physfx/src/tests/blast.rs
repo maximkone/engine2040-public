@@ -2,7 +2,9 @@
 //! object flies the arc that ends on the authority's hit.
 
 use super::*;
+use engine_core::laws;
 use engine_physics::rapier::GRAVITY_Y;
+use std::fmt;
 
 /// Where every blast test hangs its bodies, meters above a world with no floor.
 const AIR: f32 = 50.0;
@@ -499,5 +501,117 @@ fn thrown_refusals_name_the_input_and_leave_the_world_unchanged() {
             Ok(()),
             "{ticks}"
         );
+    }
+}
+
+/// A world held as one value, so the mirror law can compare two of them. Its Debug line names
+/// the bodies' positions, which is all a failing law needs to show.
+struct Scene(PhysFx);
+
+impl fmt::Debug for Scene {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let positions: Vec<[f32; 3]> = self
+            .0
+            .transforms(1.0)
+            .map(|v| v.iter().map(|p| p.at.pos).collect::<Vec<[f32; 3]>>())
+            .unwrap_or_default();
+        write!(f, "{positions:?}")
+    }
+}
+
+/// The angles from +x, radians, of the four shards of a mirror test. They sit on one ring, so one
+/// blast pushes them with equal force, straight out from the center: no two ever meet.
+const RING_ANGLES: [f32; 4] = [0.3, 0.9, 1.5, 2.1];
+
+/// A stone shard on a 2 m ring about `center` at `angle`; `sign` -1 gives its x-mirror.
+fn ring_shard(center: [f32; 3], angle: f32, sign: f32) -> Shard {
+    Shard {
+        at: at([
+            center[0] + sign * 2.0 * angle.cos(),
+            center[1] + 2.0 * angle.sin(),
+            center[2],
+        ]),
+        half: [0.1; 3],
+        velocity: [0.0; 3],
+    }
+}
+
+/// Every body of `a` sits at the x-mirror of the same body of `b`, to a millimetre.
+fn mirrored(a: &Scene, b: &Scene) -> bool {
+    let (Ok(pa), Ok(pb)) = (a.0.transforms(1.0), b.0.transforms(1.0)) else {
+        return false;
+    };
+    pa.len() == pb.len()
+        && pa.iter().zip(&pb).all(|(p, q)| {
+            let (x, y) = (p.at.pos, q.at.pos);
+            (x[0] + y[0]).abs() < 1.0e-3
+                && (x[1] - y[1]).abs() < 1.0e-3
+                && (x[2] - y[2]).abs() < 1.0e-3
+        })
+}
+
+#[test]
+fn blast_debris_mirrored_in_x_flies_mirrored() {
+    // Stone on a ring, and its x-mirror on the other side, the same blast on both, in the air
+    // where nothing touches them: every body stays the x-mirror of its twin for two seconds.
+    let build = |sign: f32| {
+        let mut fx = PhysFx::new(Tier::Comfort);
+        for angle in RING_ANGLES {
+            let shard = ring_shard([0.0, AIR, 0.0], angle, sign);
+            fx.spawn_debris_of(Material::Stone, &[shard], [0.0; 3])
+                .expect("stone");
+        }
+        assert_eq!(fx.apply_blast(BLAST), Ok(4), "all four are in the radius");
+        Scene(fx)
+    };
+    laws::mirror(build(1.0), build(-1.0), 120, |s, _| s.0.step(), mirrored)
+        .expect("mirrored debris flies mirrored");
+}
+
+#[test]
+#[ignore = "law break: a cube sliding on the floor tips by rounding, 4 mm off its mirror at tick 56 (rapier contact), see lead"]
+fn blast_debris_mirrored_in_x_lands_mirrored() {
+    // Stone on a ring and its x-mirror, the same blast on both, down to the floor.
+    let blast = Blast {
+        center_mm: [0, 1_000, 0],
+        radius_mm: 3_000,
+        impulse_ns: 2_000,
+    };
+    let build = |sign: f32| {
+        let mut fx = arena(Tier::Comfort);
+        for angle in RING_ANGLES {
+            let shard = ring_shard([0.0, 1.0, 0.0], angle, sign);
+            fx.spawn_debris_of(Material::Stone, &[shard], [0.0; 3])
+                .expect("stone");
+        }
+        assert_eq!(fx.apply_blast(blast), Ok(4), "all four are in the radius");
+        Scene(fx)
+    };
+    laws::mirror(build(1.0), build(-1.0), 240, |s, _| s.0.step(), mirrored)
+        .expect("mirrored debris lands mirrored");
+}
+
+#[test]
+fn a_thrown_arc_lands_on_its_hit_whatever_the_substep_count() {
+    // The launch velocity is worked out for the world's substeps. A world with n substeps and one
+    // with 2n must both land on the authority's hit, a millimetre off at most.
+    for n in [1, 2, 4, 8] {
+        for substeps in [n, 2 * n] {
+            let caps = Caps {
+                solver_iterations: substeps,
+                ..generous()
+            };
+            let mut fx = PhysFx::with_caps(caps).expect("caps");
+            fx.spawn_thrown(9, arrow(), Material::Wood, SHOT)
+                .expect("thrown");
+            step_n(&mut fx, usize::try_from(SHOT.ticks).expect("ticks"));
+            let here = position(&fx);
+            for k in 0..3 {
+                assert!(
+                    (here[k] - SHOT.to[k]).abs() < 1.0e-3,
+                    "{substeps} substeps: arrived at {here:?}"
+                );
+            }
+        }
     }
 }

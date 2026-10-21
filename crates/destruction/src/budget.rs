@@ -962,4 +962,299 @@ mod tests {
         let other = DebrisLedger::new(&other_cfg).expect("valid");
         assert_ne!(empty_a.state_hash(), other.state_hash());
     }
+
+    // Physics laws (engine_core::laws). The ledger derives no PartialEq, so the
+    // laws get thin wrappers. `Pose` compares position and velocity only: `tick`,
+    // `still_ticks` and the LOD flags move while a shard rests, and they are
+    // bookkeeping rather than physics.
+
+    use engine_core::laws;
+
+    #[derive(Clone, Debug)]
+    struct Pose(DebrisLedger);
+
+    impl PartialEq for Pose {
+        fn eq(&self, other: &Self) -> bool {
+            self.0.len() == other.0.len()
+                && (0..self.0.len()).all(|i| match (self.0.shard_at(i), other.0.shard_at(i)) {
+                    (Some(a), Some(b)) => {
+                        a.pos_mm == b.pos_mm && a.vel_mm_per_tick == b.vel_mm_per_tick
+                    }
+                    _ => false,
+                })
+        }
+    }
+
+    /// The sim state the mirror, replay and count laws step: a ledger plus the camera it sees.
+    #[derive(Clone, Debug)]
+    struct Sim {
+        ledger: DebrisLedger,
+        camera: [i32; 3],
+    }
+
+    impl PartialEq for Sim {
+        fn eq(&self, other: &Self) -> bool {
+            self.camera == other.camera
+                && self.ledger.tick() == other.ledger.tick()
+                && self.ledger.len() == other.ledger.len()
+                && (0..self.ledger.len())
+                    .all(|i| self.ledger.shard_at(i) == other.ledger.shard_at(i))
+        }
+    }
+
+    fn step_with_camera(s: &mut Sim) {
+        let camera = s.camera;
+        s.ledger.step(camera);
+    }
+
+    /// Shard `i` of `b` is shard `i` of `a` with x negated; everything else equal.
+    fn x_mirrored(a: &DebrisLedger, b: &DebrisLedger) -> bool {
+        a.tick() == b.tick()
+            && a.len() == b.len()
+            && (0..a.len()).all(|i| match (a.shard_at(i), b.shard_at(i)) {
+                (Some(p), Some(q)) => {
+                    p.id == q.id
+                        && p.island == q.island
+                        && p.pos_mm == [-q.pos_mm[0], q.pos_mm[1], q.pos_mm[2]]
+                        && p.vel_mm_per_tick
+                            == [
+                                -q.vel_mm_per_tick[0],
+                                q.vel_mm_per_tick[1],
+                                q.vel_mm_per_tick[2],
+                            ]
+                        && p.still_ticks == q.still_ticks
+                        && p.sleeping == q.sleeping
+                        && p.low_lod == q.low_lod
+                }
+                _ => false,
+            })
+    }
+
+    /// Energy that symplectic Euler conserves in free flight: `v^2/2 + g*y + g*v_y/2`.
+    /// The plain `v^2/2 + g*y` rises by g^2/2 = 4.5 mm^2/tick^2 on every tick of a fall,
+    /// because the position step reads the old velocity. That is the scheme's bias, not
+    /// energy gained, so the law is stated for the scheme's own conserved (shadow) energy.
+    fn flight_energy(ledger: &DebrisLedger) -> f64 {
+        let g = f64::from(GRAVITY_MM_PER_TICK2);
+        (0..ledger.len())
+            .filter_map(|i| ledger.shard_at(i))
+            .map(|s| {
+                let [vx, vy, vz] = s.vel_mm_per_tick.map(f64::from);
+                0.5 * (vx * vx + vy * vy + vz * vz) + g * f64::from(s.pos_mm[1]) + 0.5 * g * vy
+            })
+            .sum()
+    }
+
+    fn shard_count(s: &Sim) -> f64 {
+        u32::try_from(s.ledger.len()).map_or(f64::NAN, f64::from)
+    }
+
+    /// One burst of four shards; `sign` 1 is the burst, -1 its x-mirror.
+    fn burst(sign: i32) -> Vec<ShardSeed> {
+        vec![
+            ShardSeed {
+                pos_mm: [-sign * 800, 0, 0],
+                vel_mm_per_tick: [0, 0, 0],
+                ..seed(0, 7)
+            },
+            ShardSeed {
+                pos_mm: [sign * 2000, 4000, 300],
+                vel_mm_per_tick: [sign * 12, 0, 5],
+                ..seed(1, 8)
+            },
+            ShardSeed {
+                pos_mm: [0, 6000, -700],
+                vel_mm_per_tick: [0, 15, 0],
+                ..seed(2, 8)
+            },
+            ShardSeed {
+                pos_mm: [-sign * 1500, 2500, 0],
+                vel_mm_per_tick: [-sign * 30, -5, 2],
+                ..seed(3, 9)
+            },
+        ]
+    }
+
+    #[test]
+    fn a_resting_shard_never_creeps() {
+        let mut ledger = DebrisLedger::new(&arena_default_budget()).expect("valid budget");
+        ledger
+            .admit(
+                0,
+                &[ShardSeed {
+                    pos_mm: [100, 0, -40],
+                    vel_mm_per_tick: [0, 0, 0],
+                    ..seed(0, 7)
+                }],
+            )
+            .expect("one grounded shard");
+        laws::rest_stays_rest(Pose(ledger), 600, |p: &mut Pose| p.0.step([0, 1500, 0]))
+            .expect("a grounded shard stays exactly put");
+    }
+
+    #[test]
+    fn a_flying_shard_never_gains_energy() {
+        let mut ledger = DebrisLedger::new(&arena_default_budget()).expect("valid budget");
+        ledger
+            .admit(
+                0,
+                &[
+                    ShardSeed {
+                        pos_mm: [0, 5000, 0],
+                        vel_mm_per_tick: [7, 0, -3],
+                        ..seed(0, 0)
+                    },
+                    ShardSeed {
+                        pos_mm: [-2000, 8000, 900],
+                        vel_mm_per_tick: [-40, 25, 10],
+                        ..seed(1, 1)
+                    },
+                    ShardSeed {
+                        pos_mm: [1000, 300, 0],
+                        vel_mm_per_tick: [0, -30, 0],
+                        ..seed(2, 2)
+                    },
+                ],
+            )
+            .expect("valid batch");
+        let start = Sim {
+            ledger,
+            camera: [0, 1500, 0],
+        };
+        // Slack is one unit squared: the integer ground clamp is the only rounding here.
+        laws::energy_never_rises(
+            start.clone(),
+            400,
+            step_with_camera,
+            |s| flight_energy(&s.ledger),
+            1.0,
+        )
+        .expect("a flying shard never gains energy");
+        // The run must include landings, or the law only saw free flight.
+        let mut landed = start;
+        for _ in 0..400 {
+            step_with_camera(&mut landed);
+        }
+        assert!(
+            landed.ledger.is_sleeping(0),
+            "the first shard landed and slept"
+        );
+    }
+
+    #[test]
+    fn mirrored_bursts_stay_mirrored() {
+        let cfg = arena_default_budget();
+        let mut left = DebrisLedger::new(&cfg).expect("valid budget");
+        left.admit(0, &burst(1)).expect("burst");
+        let mut right = DebrisLedger::new(&cfg).expect("valid budget");
+        right.admit(0, &burst(-1)).expect("mirrored burst");
+        let a = Sim {
+            ledger: left,
+            camera: [3000, 1500, 0],
+        };
+        let b = Sim {
+            ledger: right,
+            camera: [-3000, 1500, 0],
+        };
+        laws::mirror(
+            a,
+            b,
+            300,
+            |s: &mut Sim, _tick: u32| step_with_camera(s),
+            |p: &Sim, q: &Sim| {
+                p.camera[0] == -q.camera[0]
+                    && p.camera[1] == q.camera[1]
+                    && p.camera[2] == q.camera[2]
+                    && x_mirrored(&p.ledger, &q.ledger)
+            },
+        )
+        .expect("mirrored bursts land mirrored");
+    }
+
+    #[test]
+    fn stepping_never_creates_or_drops_a_shard() {
+        let mut ledger = DebrisLedger::new(&arena_default_budget()).expect("valid budget");
+        let batch: Vec<ShardSeed> = (0..12)
+            .map(|id: u32| {
+                let k = i32::try_from(id).unwrap_or(0);
+                ShardSeed {
+                    pos_mm: [k * 400 - 2000, 3000 + k * 300, 0],
+                    vel_mm_per_tick: [k - 6, 0, 4],
+                    ..seed(id, id % 3)
+                }
+            })
+            .collect();
+        ledger.admit(0, &batch).expect("twelve shards fit the cap");
+        assert_eq!(ledger.len(), 12);
+        let start = Sim {
+            ledger,
+            camera: [600, 1500, 0],
+        };
+        laws::conserved(start, 300, step_with_camera, shard_count, 0.0)
+            .expect("stepping conserves the shard count");
+    }
+
+    #[test]
+    fn a_budget_cull_changes_only_the_newcomers() {
+        let cfg = DebrisBudget {
+            per_event_cap: 4,
+            max_shards: 6,
+            ..arena_default_budget()
+        };
+        let mut ledger = DebrisLedger::new(&cfg).expect("valid budget");
+        let first: Vec<ShardSeed> = (0..4).map(|id| seed(id, 1)).collect();
+        ledger.admit(1, &first).expect("first event fits");
+        for _ in 0..10 {
+            ledger.step([0, 1500, 0]);
+        }
+        let before: Vec<ShardView> = (0..ledger.len())
+            .filter_map(|i| ledger.shard_at(i))
+            .collect();
+        let (tick, dropped) = (ledger.tick(), ledger.dropped_total());
+        let second: Vec<ShardSeed> = (10..16).map(|id| seed(id, 2)).collect();
+        let report = ledger.admit(11, &second).expect("second event");
+        // Six offered: the cap keeps four, the ledger holds six, so two more are refused.
+        assert_eq!(
+            report,
+            AdmitReport {
+                admitted: 2,
+                dropped_cap: 2,
+                dropped_full: 2,
+            }
+        );
+        assert_eq!(ledger.len(), before.len() + 2);
+        for (i, old) in before.iter().enumerate() {
+            assert_eq!(
+                ledger.shard_at(i),
+                Some(*old),
+                "stored shard {i} moved by a cull"
+            );
+        }
+        assert_eq!(ledger.shard_at(4).map(|s| s.id), Some(10));
+        assert_eq!(ledger.shard_at(5).map(|s| s.id), Some(11));
+        assert_eq!(ledger.tick(), tick, "admit never steps the ledger");
+        assert_eq!(
+            ledger.dropped_total(),
+            dropped + 4,
+            "exactly the four culled seeds count as dropped"
+        );
+    }
+
+    #[test]
+    fn two_runs_of_one_script_stay_equal() {
+        let mut ledger = DebrisLedger::new(&arena_default_budget()).expect("valid budget");
+        ledger.admit(0, &burst(1)).expect("burst");
+        let start = Sim {
+            ledger,
+            camera: [0, 1500, 0],
+        };
+        let end = laws::replay(start, 300, |s: &mut Sim, tick: u32| {
+            // The camera sweeps on a script keyed by the tick, so both runs see the same input.
+            let k = i32::try_from(tick % 120).unwrap_or(0);
+            s.camera = [k * 50 - 3000, 1500, 0];
+            step_with_camera(s);
+        })
+        .expect("two identical runs");
+        assert_eq!(end.ledger.tick(), 300);
+    }
 }

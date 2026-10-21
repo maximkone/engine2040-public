@@ -636,7 +636,9 @@ impl BalanceState {
             self.getup_due = false;
             Ok(GaitVerdict::Fallen)
         } else if impulse_q8 >= self.stumble_q8() {
-            if self.gait != GaitPhase::Fallen {
+            // Catching is still down (arms driving, body on the ground): a stumble-level blow
+            // there must not stand the fighter up as a stumble.
+            if !matches!(self.gait, GaitPhase::Fallen | GaitPhase::Catching) {
                 self.gait = GaitPhase::Stumbling;
                 self.gait_left = STUMBLE_TICKS;
                 self.getup_due = false;
@@ -1051,6 +1053,7 @@ fn quantize_mm(v: f32) -> i32 {
 mod tests {
     use super::*;
     use engine_core::alloc_probe;
+    use engine_core::laws;
 
     /// Three-bone asymmetric rig with a hand-computed center: total mass 6,
     /// x = 12/6, y = 14/6, z = 8/6.
@@ -1069,6 +1072,144 @@ mod tests {
     fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
         let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
         (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    /// One standing fighter for the rest law. The tick counter advances with
+    /// time whether or not anything acts, so equality reads every other field.
+    #[derive(Clone, Copy, Debug)]
+    struct Standing(BalanceState);
+
+    impl PartialEq for Standing {
+        fn eq(&self, other: &Self) -> bool {
+            let (a, b) = (&self.0, &other.0);
+            a.com() == b.com()
+                && a.staggered() == b.staggered()
+                && a.stagger_remaining() == b.stagger_remaining()
+                && a.gait() == b.gait()
+                && a.gait_remaining() == b.gait_remaining()
+                && a.fall_count() == b.fall_count()
+                && a.shove_count() == b.shove_count()
+                && a.getup_due() == b.getup_due()
+        }
+    }
+
+    /// One side of the rig for the mirror law: `bones` are the bone centers
+    /// this side sees, so the other side holds them mirrored along x.
+    #[derive(Clone, Debug)]
+    struct Side {
+        state: BalanceState,
+        bones: Vec<[f32; 3]>,
+    }
+
+    /// The blow script both sides and the replay share: a stagger at tick 2,
+    /// a stumble at tick 40, a fall at tick 150. Only the impulse magnitude
+    /// reaches the stagger core, so a blow from either side scripts the same.
+    fn scripted_hit(state: &mut BalanceState, tick: u32) {
+        match tick {
+            2 => {
+                state.apply_impact(256).expect("stagger blow");
+            }
+            40 => {
+                state.apply_impact(512).expect("stumble blow");
+            }
+            150 => {
+                state.apply_impact(640).expect("fall blow");
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn balance_standing_fighter_with_no_hit_stays_exactly_at_rest() {
+        let masses = rig_masses();
+        let bones = rig_positions();
+        let mut state = BalanceState::new(BalanceParams::default());
+        state
+            .observe(&bones, &masses)
+            .expect("observe the standing rig");
+        laws::rest_stays_rest(Standing(state), 600, |s| {
+            s.0.observe(&bones, &masses)
+                .expect("observe the standing rig");
+            s.0.step();
+        })
+        .expect("no hit means no stagger, no drift and no gait");
+    }
+
+    #[test]
+    fn balance_mirrored_hits_stagger_the_mirrored_fighter() {
+        let masses = rig_masses();
+        let east = rig_positions();
+        let west: Vec<[f32; 3]> = east.iter().map(|p| [-p[0], p[1], p[2]]).collect();
+        let a = Side {
+            state: BalanceState::new(BalanceParams::default()),
+            bones: east,
+        };
+        let b = Side {
+            state: BalanceState::new(BalanceParams::default()),
+            bones: west,
+        };
+        laws::mirror(
+            a,
+            b,
+            200,
+            |s, tick| {
+                s.state.observe(&s.bones, &masses).expect("observe");
+                scripted_hit(&mut s.state, tick);
+                s.state.step();
+            },
+            |a, b| {
+                let (ca, cb) = (a.state.com(), b.state.com());
+                ca[0] == -cb[0]
+                    && ca[1] == cb[1]
+                    && ca[2] == cb[2]
+                    && a.state.staggered() == b.state.staggered()
+                    && a.state.stagger_remaining() == b.state.stagger_remaining()
+                    && a.state.gait() == b.state.gait()
+                    && a.state.fall_count() == b.state.fall_count()
+                    && a.state.getup_due() == b.state.getup_due()
+            },
+        )
+        .expect("mirrored blows must stagger the mirrored fighter the same way");
+    }
+
+    #[test]
+    fn balance_scripted_hits_replay_to_one_state() {
+        let masses = rig_masses();
+        let bones = rig_positions();
+        let end = laws::replay(
+            BalanceState::new(BalanceParams::default()),
+            400,
+            |s, tick| {
+                s.observe(&bones, &masses).expect("observe");
+                scripted_hit(s, tick);
+                s.step();
+            },
+        )
+        .expect("two copies of one blow script must agree every tick");
+        assert_eq!(end.shove_count(), 3);
+        assert_eq!(end.fall_count(), 1);
+    }
+
+    #[test]
+    fn balance_blow_never_downgrades_a_fall_in_its_catch_window() {
+        let mut state = BalanceState::new(BalanceParams::default());
+        assert_eq!(
+            state.apply_impact(640).expect("fall blow"),
+            GaitVerdict::Fallen
+        );
+        for _ in 0..FALL_PRONE_TICKS {
+            state.step();
+        }
+        assert_eq!(state.gait(), GaitPhase::Catching);
+        assert_eq!(
+            state.apply_impact(384).expect("stumble blow"),
+            GaitVerdict::Stumbling
+        );
+        assert_eq!(
+            state.gait(),
+            GaitPhase::Catching,
+            "impacts never downgrade an in-flight fall"
+        );
     }
 
     #[test]

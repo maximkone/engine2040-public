@@ -179,10 +179,14 @@ is a shader trick, so it belongs to the render lane: draw the mesh again
 with the vertices pushed along their normals by a fixed world distance, back
 faces only, in black.
 
-**Armour by shrinkwrap.** The standard way to put armour on a body: model
-the plates, then shrinkwrap them onto the base mesh with an offset, then
-bone parent them. Our props are already the plates, so the armour pass is
-a shrinkwrap and a parent, not a modelling job.
+**Armour by fitting, not yet by shrinkwrap.** The standard way to put armour
+on a body is to model the plates, shrinkwrap them onto the base with an
+offset, then bone parent them. What the armour pass does today is the
+honest version of that: it measures the limb's own radius from the body's
+vertices around the bone, scales the plate to clear it, and copies the
+body's weights onto the plate so it moves like the limb it sits on. The
+shrinkwrap itself is not implemented, so a plate edge is still a hard step
+where the body curves away under it. That is the next thing in this lane.
 
 **The input template.** "Lean, arms out from the sides, plain background,
 whole body in frame, one figure, no panels" is the wording that makes the

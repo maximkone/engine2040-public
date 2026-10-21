@@ -627,8 +627,9 @@ fn speed_of(vel: [Fixed; 3]) -> Result<Fixed, FlightError> {
     Ok(square.sqrt())
 }
 
-/// Semi-implicit Euler velocity: shed `vel * (lin + quad * speed) * dt`,
-/// then sink by `gravity * dt` on Y. Only `+ - * /` and `sqrt` run.
+/// Semi-implicit Euler velocity: drag divides by `1 + (lin + quad * speed) * dt`
+/// (backward Euler, see [`shed_velocity`]), then sink by `gravity * dt` on Y.
+/// Only `+ - * /` and `sqrt` run.
 ///
 /// The quadratic term alone reads the speed, so drag-free and linear-only
 /// tables skip the root entirely; the elided product is exactly zero, so
@@ -657,13 +658,21 @@ fn integrate_velocity(vel: [Fixed; 3], tables: &FlightTables) -> Result<[Fixed; 
     Ok([shed[0], down, shed[2]])
 }
 
-/// `vel - vel * loss` component-wise with overflow reported.
+/// `vel / (1 + loss)` component-wise with overflow reported.
+///
+/// Backward Euler. The forward form `vel - vel * loss` flips the sign once
+/// `loss > 2`, and the validated maxima reach `loss` 133 (quad 4/m at 2000 m/s),
+/// so a round would reverse and grow every tick. Dividing by `1 + loss` never
+/// reverses or grows a velocity at any non-negative loss. Zero loss divides by
+/// `ONE`, which is exact, so drag-free tables step bit-identical velocities.
 fn shed_velocity(vel: [Fixed; 3], loss: Fixed) -> Result<[Fixed; 3], FlightError> {
+    let divisor = Fixed::ONE.checked_add(loss).ok_or(FlightError::Overflow)?;
     let mut out = [Fixed::ZERO; 3];
     let mut index = 0;
     while index < out.len() {
-        let shed = vel[index].checked_mul(loss).ok_or(FlightError::Overflow)?;
-        out[index] = vel[index].checked_sub(shed).ok_or(FlightError::Overflow)?;
+        out[index] = vel[index]
+            .checked_div(divisor)
+            .ok_or(FlightError::Overflow)?;
         index += 1;
     }
     Ok(out)
@@ -753,6 +762,7 @@ fn impact_point(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::laws::{energy_never_rises, mirror, steady_rate};
     use engine_core::tick::TICK_HZ;
 
     /// Flat-fire spawn helper: due +X at the origin with no spread.
@@ -990,6 +1000,167 @@ mod tests {
         assert!(pulled > 0);
         assert!(pulled < reach);
         assert_ne!(hash_rounds(&[dragged]), hash_rounds(&[vacuum]));
+    }
+
+    /// Kinetic energy proxy: squared raw Q16 velocity bits, summed. A component
+    /// too wide for `i32` reads as infinite, which the law reports as a break.
+    fn kinetic_bits(round: &Round) -> f64 {
+        round.vel.iter().fold(0.0, |sum, component| {
+            match i32::try_from(component.to_bits()) {
+                Ok(raw) => sum + f64::from(raw) * f64::from(raw),
+                Err(_) => f64::INFINITY,
+            }
+        })
+    }
+
+    /// A Q16 value in metres or metres per second, read from its raw bits.
+    fn metres(value: Fixed) -> f64 {
+        f64::from(i32::try_from(value.to_bits()).expect("under 32 km")) / 65536.0
+    }
+
+    /// Zero gravity and zero drag: nothing acts on a round but its own speed.
+    const COAST: FlightTables = FlightTables {
+        gravity_mps2: Fixed::ZERO,
+        linear_drag_per_s: Fixed::ZERO,
+        quad_drag_per_m: Fixed::ZERO,
+    };
+
+    /// Due +X from the origin at `speed`, with a life long enough for the laws.
+    fn coasting(speed: Fixed) -> Round {
+        spawn(&SpawnParams {
+            tick: 0,
+            shooter: 0,
+            shot: 0,
+            origin: [Fixed::ZERO; 3],
+            dir: [Fixed::ONE, Fixed::ZERO, Fixed::ZERO],
+            speed,
+            spread: Fixed::ZERO,
+            ttl_ticks: MAX_FLIGHT_TICKS,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn mirrored_throws_land_mirrored() {
+        // Due +X and due -X from 2 m up at whole-number speeds: every tick
+        // mirrors bit for bit, so both rounds land the same distance apart.
+        for speed in [60, 900] {
+            let mut east = flat(0, 0, 0, speed, MAX_FLIGHT_TICKS);
+            east.origin[1] = Fixed::from_int(2);
+            let mut west = east;
+            west.dir = [-Fixed::ONE, Fixed::ZERO, Fixed::ZERO];
+            let same = |a: &Round, b: &Round| a.pos[0] == -b.pos[0] && a.pos[1] == b.pos[1];
+            let law = mirror(
+                spawn(&east).unwrap(),
+                spawn(&west).unwrap(),
+                600,
+                |r, _| {
+                    step_round(r, &FLIGHT_V1, &NullCaster).unwrap();
+                },
+                same,
+            );
+            assert_eq!(law, Ok(()), "speed {speed} m/s");
+        }
+    }
+
+    #[test]
+    #[ignore = "law break: Fixed checked_mul floors, so a due -X round runs 1 LSB (15 um) farther per tick than +X at a fractional step; 900.37 m/s is 2.0 mm apart at tick 132 (first 1 mm failure), see lead"]
+    fn mirrored_throws_at_a_fractional_speed_land_mirrored() {
+        let mut east = flat(0, 0, 0, 900, MAX_FLIGHT_TICKS);
+        east.speed = Fixed::from_bits(900 * 65536 + 24248); // 900.37 m/s
+        east.origin[1] = Fixed::from_int(2);
+        let mut west = east;
+        west.dir = [-Fixed::ONE, Fixed::ZERO, Fixed::ZERO];
+        let same = |a: &Round, b: &Round| {
+            a.pos[1] == b.pos[1] && fixed_to_mm(a.pos[0] + b.pos[0]).is_ok_and(|mm| mm.abs() <= 1)
+        };
+        let law = mirror(
+            spawn(&east).unwrap(),
+            spawn(&west).unwrap(),
+            600,
+            |r, _| {
+                step_round(r, &FLIGHT_V1, &NullCaster).unwrap();
+            },
+            same,
+        );
+        assert_eq!(law, Ok(()));
+    }
+
+    #[test]
+    fn drag_at_the_validated_maxima_never_adds_energy() {
+        // Validated maxima (quad 4 1/m, linear 8 1/s, muzzle 2000 m/s), no gravity:
+        // drag only sheds speed, so the kinetic proxy never rises tick to tick.
+        // Slack is one Q16 unit squared, the rounding of the proxy itself.
+        let brake = FlightTables {
+            gravity_mps2: Fixed::ZERO,
+            linear_drag_per_s: FlightTables::MAX_LINEAR_DRAG,
+            quad_drag_per_m: FlightTables::MAX_QUAD_DRAG,
+        };
+        assert_eq!(
+            validate_flight_tables(&FlightTableSet::new(11, brake)),
+            Ok(())
+        );
+        let round = spawn(&flat(0, 0, 0, 2000, MAX_FLIGHT_TICKS)).unwrap();
+        let law = energy_never_rises(
+            round,
+            600,
+            |r| {
+                step_round(r, &brake, &NullCaster).unwrap();
+            },
+            kinetic_bits,
+            1.0,
+        );
+        assert_eq!(law, Ok(()));
+    }
+
+    #[test]
+    fn a_coasting_round_covers_speed_times_time() {
+        // Each tick moves speed * DT, DT = 1092/65536 s (1/60 s, truncated).
+        // Whole-number and half-metre speeds, and a fractional 900.37 m/s, all
+        // land within 1 mm of rate x time over 600 ticks.
+        let dt = metres(Fixed::from_bits(DT.to_bits()));
+        let rates = [
+            Fixed::from_bits(98_304),
+            Fixed::from_int(60),
+            Fixed::from_bits(60 * 65536 - 655),
+            Fixed::from_int(300) + Fixed::from_bits(32_768),
+            Fixed::from_int(900),
+            Fixed::from_bits(900 * 65536 + 24_248),
+        ];
+        for speed in rates {
+            let law = steady_rate(
+                coasting(speed),
+                0,
+                600,
+                |r| {
+                    step_round(r, &COAST, &NullCaster).unwrap();
+                },
+                |r| metres(r.pos[0]),
+                metres(speed) * dt,
+                0.001,
+            );
+            assert_eq!(law, Ok(()), "speed {speed:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "law break: the floor in integrate_position loses up to 1 LSB (15 um) per tick at a fractional step; 0.01 m/s is 8.4 mm short over 600 ticks, see lead"]
+    fn a_crawling_round_covers_speed_times_time() {
+        let dt = metres(Fixed::from_bits(DT.to_bits()));
+        for speed in [Fixed::from_bits(655), Fixed::from_bits(60 * 65536 + 7)] {
+            let law = steady_rate(
+                coasting(speed),
+                0,
+                600,
+                |r| {
+                    step_round(r, &COAST, &NullCaster).unwrap();
+                },
+                |r| metres(r.pos[0]),
+                metres(speed) * dt,
+                0.001,
+            );
+            assert_eq!(law, Ok(()), "speed {speed:?}");
+        }
     }
 
     #[test]

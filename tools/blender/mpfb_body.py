@@ -68,12 +68,43 @@ def main():
     if human is None:
         raise RuntimeError("create_human returned nothing")
 
+    # The rig: MPFB's human has no skeleton and no vertex groups until the
+    # built-in rig is added, and the rig is what tells the proportion pass and
+    # the armour pass which part of the body a vertex is. The rig names in
+    # this build are "default", "default_no_toes", "cmu_mb" and "human_toes".
+    for rig_name in ("default", "human_toes", "default_no_toes"):
+        try:
+            HumanService.add_builtin_rig(human, rig_name)
+            print("rig added:", rig_name)
+            break
+        except Exception as err:
+            print(f"no rig {rig_name}:", err)
+
     # The shape: our proportions, on the body MPFB gives us.
     try:
         human.set_property("macro/width", bulk)
         human.set_property("macro/length", height / 1.8)
     except Exception as err:
         print("shape not applied:", err)
+
+    # The garment. MakeHuman's basemesh wears a loincloth shell; the real
+    # clothes are a separate asset, and they are what makes the body read as
+    # a character rather than a mannequin. The .mhclo file is the asset, and
+    # it carries its own textures.
+    clothes_name = arg("--clothes", "male_casualsuit01")
+    if clothes_name:
+        ext = os.path.join(os.path.expandvars(r"%APPDATA%"), "Blender Foundation",
+                           "Blender", "5.2", "extensions", "user_default", "mpfb", "data", "clothes")
+        mhclo = os.path.join(ext, clothes_name, f"{clothes_name}.mhclo")
+        if os.path.exists(mhclo):
+            try:
+                HumanService.add_mhclo_asset(mhclo, human, asset_type="Clothes",
+                                             set_up_rigging=True, interpolate_weights=True)
+                print("clothes added:", clothes_name)
+            except Exception as err:
+                print("no clothes:", err)
+        else:
+            print("no clothes file:", mhclo)
 
     bpy.context.view_layer.update()
     # MPFB builds helper objects around the human: a big box and the detail
@@ -90,9 +121,13 @@ def main():
     bpy.ops.object.select_all(action="DESELECT")
     for ob in meshes:
         ob.select_set(True)
+    armatures = [o for o in bpy.context.scene.objects if o.type =="ARMATURE"]
+    for ob in armatures:
+        ob.select_set(True)
     bpy.context.view_layer.objects.active = meshes[0] if meshes else None
-    bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", export_apply=True,
-                              export_texcoords=True, export_normals=True, use_selection=True)
+    bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", export_apply=False,
+                              export_texcoords=True, export_normals=True,
+                              export_skins=True, use_selection=True)
     if not os.path.exists(out) or os.path.getsize(out) == 0:
         raise RuntimeError(f"export wrote nothing: {out}")
     metrics = {

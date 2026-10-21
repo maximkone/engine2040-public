@@ -28,6 +28,30 @@ pub fn dt_valid(dt: f32) -> bool {
     dt.is_finite() && dt >= PD_DT_FLOOR
 }
 
+/// Fraction of the stability edge [`stable_gains`] allows: the slowest mode then shrinks by at
+/// least a tenth every tick instead of ringing on the edge.
+pub const STABLE_MARGIN: f32 = 0.9;
+
+/// The gains of the velocity servo `powered.rs` runs, clamped inside its stability region.
+///
+/// The world takes the commanded velocity `v' = kp * e - kd * v` and integrates it, so for one
+/// bone the tick map on `(error, velocity)` has trace `1 - kp*dt - kd` and determinant `-kd`.
+/// The Jury test settles it only while `kp * dt < 2` and `kd < (2 - kp * dt) / 2` (and
+/// `kd < 1`). Past the edge the velocity flips sign every tick and grows until the speed cap
+/// holds the bone buzzing: the shipped D of 1.0 at P 12 and 60 Hz sat past it (edge 0.9).
+/// Both gains are clamped to [`STABLE_MARGIN`] of their edge, so no drive table, however
+/// tuned, can build an unstable servo. A degenerate `dt` (P only, see [`dt_valid`]) returns
+/// the gains unchanged; non-positive gains clamp to zero.
+pub fn stable_gains(kp: f32, kd: f32, dt: f32) -> (f32, f32) {
+    let (kp, kd) = (sanitize(kp).max(0.0), sanitize(kd).max(0.0));
+    if !dt_valid(dt) {
+        return (kp, kd);
+    }
+    let kp = kp.min(STABLE_MARGIN * 2.0 / dt);
+    let edge = ((2.0 - kp * dt) / 2.0).min(1.0);
+    (kp, kd.min(STABLE_MARGIN * edge))
+}
+
 /// Raw servo axis without the cap: `kp * error` damped by `kd * vel`.
 /// Degenerate `dt` (see [`dt_valid`]) answers the P term only; non-finite
 /// intermediates sanitize to zero, so the output is always finite.
@@ -101,6 +125,41 @@ fn sanitize(v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::laws;
+
+    /// A consumer-shaped servo axis: the bone position and the measured
+    /// velocity it carries into the next tick (the body's linvel).
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Servo {
+        x: f32,
+        v: f32,
+    }
+
+    /// Fixed tick, 60 Hz, as the powered ragdoll steps.
+    const TICK_DT: f32 = 1.0 / 60.0;
+
+    /// One tick as `powered.rs` `drive_bone` runs it: the servo answers from
+    /// the measured velocity, then the world integrates the commanded one.
+    /// The target is zero.
+    fn servo_tick(s: &mut Servo, kp: f32, kd: f32, max: f32) {
+        let (kp, kd) = stable_gains(kp, kd, TICK_DT);
+        s.v = pd_axis(-s.x, s.v, kp, kd, TICK_DT, max);
+        s.x += s.v * TICK_DT;
+    }
+
+    /// Shipped linear drive (`DriveParams::default_drive`, powered.rs): P 12,
+    /// D 1.0, cap 8 m/s.
+    const SHIPPED: (f32, f32, f32) = (12.0, 1.0, 8.0);
+
+    /// Damping inside the discrete stability edge at 60 Hz with P 12: the
+    /// lagged D term needs `kd < (2 - kp * dt) / 2`, which is 0.9 here.
+    const SETTLING: (f32, f32, f32) = (12.0, 0.5, 8.0);
+
+    /// Error magnitude, meters. Slack for these laws is f32 rounding at unit
+    /// scale (about 1e-7), so 1e-6 is the honest floor, not a tuned one.
+    fn error(s: &Servo) -> f64 {
+        f64::from(s.x.abs())
+    }
 
     #[test]
     fn pd_drive_p_only_matches_plain_gain_when_still() {
@@ -212,5 +271,125 @@ mod tests {
         }
         assert_eq!(digest(3.0), digest(3.0));
         assert_ne!(digest(3.0), digest(0.0));
+    }
+
+    #[test]
+    fn pd_servo_at_its_target_stays_at_rest() {
+        let (kp, kd, max) = SHIPPED;
+        let at_target = Servo { x: 0.0, v: 0.0 };
+        laws::rest_stays_rest(at_target, 600, |s| servo_tick(s, kp, kd, max))
+            .expect("a servo at its target with zero velocity must not move");
+    }
+
+    #[test]
+    fn pd_servo_from_rest_error_never_grows_and_never_overshoots() {
+        let (kp, kd, max) = SETTLING;
+        let start = Servo { x: 1.0, v: 0.0 };
+        laws::energy_never_rises(start, 600, |s| servo_tick(s, kp, kd, max), error, 1e-6)
+            .expect("settling damping must not let the error grow from rest");
+        let mut s = start;
+        for tick in 1..=600 {
+            servo_tick(&mut s, kp, kd, max);
+            assert!(
+                s.x >= 0.0,
+                "overshoot past the target at tick {tick}: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pd_servo_potential_never_rises_from_rest() {
+        // The servo owns no mass, so its 0.5 v^2 term is not its to conserve:
+        // the spring term 0.5 kp e^2 alone is the servo's own energy. Adding
+        // 0.5 v^2 would rise on the first tick (0.06 to 0.76 at x 0.1, kd 0.5),
+        // because the command sets the velocity from nothing.
+        let (kp, kd, max) = SETTLING;
+        let spring = move |s: &Servo| 0.5 * f64::from(kp) * f64::from(s.x).powi(2);
+        laws::energy_never_rises(
+            Servo { x: 1.0, v: 0.0 },
+            600,
+            |s| servo_tick(s, kp, kd, max),
+            spring,
+            1e-6,
+        )
+        .expect("the spring term must not rise from rest");
+    }
+
+    #[test]
+    fn pd_servo_mirrored_error_drives_mirrored() {
+        let (kp, kd, max) = SHIPPED;
+        let east = Servo { x: 0.3, v: 0.0 };
+        let west = Servo { x: -0.3, v: 0.0 };
+        laws::mirror(
+            east,
+            west,
+            600,
+            |s, _| servo_tick(s, kp, kd, max),
+            |a, b| a.x == -b.x && a.v == -b.v,
+        )
+        .expect("the servo is odd in error and velocity, so mirrored starts stay mirrored");
+    }
+
+    #[test]
+    fn pd_servo_unclamped_shipped_damping_buzzes_at_its_cap() {
+        // The bug the clamp closes: D 1.0 at P 12 and 60 Hz is past the edge (0.9), so the
+        // sign-flipping mode grows about 10% a tick until the cap holds the bone buzzing.
+        let (kp, kd, max) = SHIPPED;
+        let mut s = Servo { x: 1.0, v: 0.0 };
+        let mut ring = 0.0f32;
+        for tick in 0..300 {
+            s.v = pd_axis(-s.x, s.v, kp, kd, TICK_DT, max);
+            s.x += s.v * TICK_DT;
+            if tick >= 240 {
+                ring = ring.max(s.v.abs());
+            }
+        }
+        assert_eq!(
+            ring, max,
+            "the unclamped servo should ring at its cap: {s:?}"
+        );
+    }
+
+    #[test]
+    fn pd_servo_at_shipped_damping_settles_from_rest() {
+        // Through `stable_gains`, as `drive_bone` runs it: D 1.0 clamps to 0.81, the error
+        // never passes its start, and the bone is within a millimetre inside two seconds.
+        let (kp, kd, max) = SHIPPED;
+        let (_, kd_run) = stable_gains(kp, kd, TICK_DT);
+        assert!(
+            kd_run < 0.9 && kd_run > 0.8,
+            "shipped D clamps just inside the edge: {kd_run}"
+        );
+        let mut s = Servo { x: 1.0, v: 0.0 };
+        for tick in 0..240 {
+            servo_tick(&mut s, kp, kd, max);
+            assert!(
+                s.x.abs() <= 1.0,
+                "tick {tick}: the error passed its start: {s:?}"
+            );
+        }
+        assert!(s.x.abs() < 1e-3 && s.v.abs() < 1e-2, "not settled: {s:?}");
+    }
+
+    #[test]
+    fn pd_servo_admitted_large_gain_never_grows_its_error() {
+        // P 150 at 60 Hz (kp*dt 2.5) diverged; clamped to kp*dt 1.8 the error turns to -0.8 of itself
+        // each tick, sign flipping, never growing.
+        let start = Servo { x: 0.01, v: 0.0 };
+        laws::energy_never_rises(start, 30, |s| servo_tick(s, 150.0, 0.0, 8.0), error, 1e-6)
+            .expect("an admitted gain inside the drive range must not diverge");
+        for (kp, kd) in [(1_000.0, 1_000.0), (12.0, 1.0), (59.9, 0.95), (0.0, 0.0)] {
+            let (p, d) = stable_gains(kp, kd, TICK_DT);
+            let a = p * TICK_DT;
+            assert!(
+                a < 2.0 && d < (2.0 - a) / 2.0 && d < 1.0,
+                "({kp}, {kd}) -> ({p}, {d})"
+            );
+        }
+        assert_eq!(
+            stable_gains(12.0, 0.5, TICK_DT),
+            (12.0, 0.5),
+            "stable gains pass through"
+        );
     }
 }

@@ -21,5 +21,11 @@ fn main() {
         ] {
             directive(&format!("rustc-link-arg-bin=arena=/EXPORT:{name},DATA"));
         }
+        // The window session builds its big value structs (the app shell, the
+        // live match, the ring) on the stack, and that no longer fits the
+        // 1 MB stack Windows gives a process by default: the arena bin died
+        // at startup with a stack overflow. The linker reserves the main
+        // thread stack, so the game bins ask for 16 MB instead.
+        directive("rustc-link-arg-bins=/STACK:16777216");
     }
 }

@@ -37,8 +37,9 @@ pub const ITERATIONS: usize = 48;
 const FRAC: u32 = 8;
 /// Gravity per tick squared in Q8 millimeters: 9.81 m/s^2 at 60 Hz is 2.725 mm.
 const GRAVITY_Q8: i64 = 698;
-/// Inverse mass of a 1 kg node, Q16.
-const W_ONE: i64 = 1 << 16;
+/// Inverse mass of a 1 kg node, Q30. At Q16 a 65 t node rounded to zero (and so was pinned) and
+/// a 20 t node came out as 21.8 t; at Q30 every mass up to `MAX_MASS_KG` is within 0.01%.
+const W_ONE: i64 = 1 << 30;
 /// A free node keeps 63/64 of its velocity each tick.
 const KEEP: (i64, i64) = (63, 64);
 
@@ -132,7 +133,11 @@ struct Link {
 struct Winch {
     link: usize,
     target_q8: i64,
-    speed_q8: i64,
+    /// Fastest reel, Q8 millimeters per second.
+    speed_q8_s: i64,
+    /// Reel budget left over from earlier ticks, Q8 millimeters per second; always below 60,
+    /// because one tick is 1/60 s.
+    carry: i64,
 }
 
 /// The constraint graph: nodes, links and winches in canonical order.
@@ -229,7 +234,8 @@ impl Graph {
             driven.push(Winch {
                 link,
                 target_q8: q8(w.target_mm),
-                speed_q8: i64::from(w.speed_mm_s) * 256 / 60,
+                speed_q8_s: i64::from(w.speed_mm_s) * 256,
+                carry: 0,
             });
         }
         driven.sort_unstable_by_key(|w| w.link);
@@ -309,9 +315,20 @@ impl Graph {
 
     /// One tick: winches reel, free nodes fall, then every link pulls taut ends back together.
     pub fn step(&mut self) {
-        for w in &self.winches {
+        for w in &mut self.winches {
+            // This tick's reel is speed x 1/60 s; the remainder rides into the next tick, so the
+            // rest length moves speed x time at every speed (a truncated step stalls slow winches).
+            let owed = w.speed_q8_s + w.carry;
+            let cap = owed / 60;
             let rest = &mut self.links[w.link].rest_q8;
-            *rest += (w.target_q8 - *rest).clamp(-w.speed_q8, w.speed_q8);
+            let want = w.target_q8 - *rest;
+            if want.abs() <= cap {
+                *rest = w.target_q8;
+                w.carry = 0;
+            } else {
+                *rest += cap * want.signum();
+                w.carry = owed % 60;
+            }
         }
         for i in 0..self.pos.len() {
             let cur = self.pos[i];
@@ -366,6 +383,9 @@ impl Graph {
         for l in &self.links {
             h.write_i64(l.rest_q8);
         }
+        for w in &self.winches {
+            h.write_i64(w.carry);
+        }
         h.finish()
     }
 }
@@ -373,6 +393,7 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::laws::{energy_never_rises, mirror, replay, rest_stays_rest, steady_rate};
     use engine_core::Rng;
 
     const PLATFORM: u32 = 100;
@@ -686,5 +707,320 @@ mod tests {
             let r = isqrt(n);
             assert!(r * r <= n && (r + 1) * (r + 1) > n, "isqrt({n}) = {r}");
         }
+    }
+
+    /// A node at height `y` mm on the x = 0 line with `kg` mass (0 pins it).
+    fn node(id: u32, y: i32, kg: u32) -> NodeDef {
+        NodeDef {
+            id,
+            pos_mm: [0, y, 0],
+            mass_kg: kg,
+        }
+    }
+
+    /// A pinned anchor at (0, 2000) and a load of `kg` at `bob`, on one rope of `rest` mm.
+    fn pendulum(kg: u32, bob: [i32; 3], rest: i32) -> Graph {
+        let nodes = [
+            NodeDef {
+                id: 1,
+                pos_mm: [0, 2_000, 0],
+                mass_kg: 0,
+            },
+            NodeDef {
+                id: 2,
+                pos_mm: bob,
+                mass_kg: kg,
+            },
+        ];
+        Graph::build(
+            &nodes,
+            &[LinkDef {
+                a: 1,
+                b: 2,
+                rest_mm: rest,
+            }],
+            &[],
+        )
+        .expect("builds")
+    }
+
+    /// The graph state the laws compare: positions, velocities, rest lengths and winch remainders.
+    /// The tick counter always moves, so it is left out.
+    #[derive(Clone, Debug)]
+    struct Pose(Graph);
+
+    impl PartialEq for Pose {
+        fn eq(&self, other: &Self) -> bool {
+            let (a, b) = (&self.0, &other.0);
+            a.pos == b.pos
+                && a.prev == b.prev
+                && a.links
+                    .iter()
+                    .map(|l| l.rest_q8)
+                    .eq(b.links.iter().map(|l| l.rest_q8))
+                && a.winches
+                    .iter()
+                    .map(|w| w.carry)
+                    .eq(b.winches.iter().map(|w| w.carry))
+        }
+    }
+
+    /// Kinetic plus gravitational energy of node 2, the load, in kg mm^2 per tick^2:
+    /// m (v^2 / 2 + g y), with v = pos - prev per tick and g = GRAVITY_Q8 / 256 per tick squared.
+    fn load_energy(kg: f64) -> impl Fn(&Graph) -> f64 {
+        move |g: &Graph| {
+            let mm = |q: i64| f64::from(i32::try_from(q).expect("Q8 value fits i32")) / 256.0;
+            let v2: f64 = (0..3)
+                .map(|k| {
+                    let v = mm(g.pos[1][k] - g.prev[1][k]);
+                    v * v
+                })
+                .sum();
+            let gravity = f64::from(i32::try_from(GRAVITY_Q8).expect("small")) / 256.0;
+            kg * (0.5 * v2 + gravity * mm(g.pos[1][1]))
+        }
+    }
+
+    /// One Q8 unit (1/256 mm) of height against gravity, per kilogram: the energy a position
+    /// rounded to the module's grid can move by, so the energy slack for `kg` of load.
+    fn one_unit_of_height(kg: f64) -> f64 {
+        kg * f64::from(i32::try_from(GRAVITY_Q8).expect("small")) / 256.0 / 256.0
+    }
+
+    /// The worst stretch of any link past its rest length, in Q8 units (256 is one millimeter).
+    fn worst_stretch_q8(g: &Graph) -> i128 {
+        g.links
+            .iter()
+            .map(|l| {
+                i128::try_from(g.len_q8(l.a, l.b)).expect("length fits") - i128::from(l.rest_q8)
+            })
+            .max()
+            .expect("a link")
+    }
+
+    /// True when `b` is `a` mirrored across the x = 0 plane, node by node, in positions and in
+    /// velocities.
+    fn mirrored_across_x(a: &Graph, b: &Graph) -> bool {
+        let across = |p: &[[i64; 3]], q: &[[i64; 3]]| {
+            p.iter()
+                .zip(q)
+                .all(|(p, q)| p[0] == -q[0] && p[1] == q[1] && p[2] == q[2])
+        };
+        across(&a.pos, &b.pos) && across(&a.prev, &b.prev)
+    }
+
+    #[test]
+    fn a_load_hanging_on_a_taut_rope_stays_put() {
+        // One rope at exact length: nothing moves, bit for bit, for ten seconds.
+        let rope = Graph::build(
+            &[node(1, 6_000, 0), node(2, 5_000, 40)],
+            &[LinkDef {
+                a: 1,
+                b: 2,
+                rest_mm: 1_000,
+            }],
+            &[],
+        )
+        .expect("builds");
+        rest_stays_rest(Pose(rope), 600, |p| p.0.step()).expect("a hanging load crept");
+        // Two links with equal loads: the split of each correction rounds once, so the chain sags
+        // one Q8 unit (1/256 mm) on its first tick, within the module's 1 mm grid, then holds
+        // bit for bit with no creep and no jitter.
+        let mut chain = Graph::build(
+            &[node(1, 6_000, 0), node(2, 5_000, 40), node(3, 4_000, 40)],
+            &[
+                LinkDef {
+                    a: 1,
+                    b: 2,
+                    rest_mm: 1_000,
+                },
+                LinkDef {
+                    a: 2,
+                    b: 3,
+                    rest_mm: 1_000,
+                },
+            ],
+            &[],
+        )
+        .expect("builds");
+        let before = chain.pos.clone();
+        chain.step();
+        let sag = chain
+            .pos
+            .iter()
+            .zip(&before)
+            .flat_map(|(p, q)| (0..3).map(move |k| (p[k] - q[k]).abs()))
+            .max()
+            .expect("nodes");
+        assert!(
+            sag <= 256,
+            "the chain sagged {sag} Q8 units on its first tick"
+        );
+        // The sag's velocity dies on the second tick; from there the state holds bit for bit.
+        chain.step();
+        rest_stays_rest(Pose(chain), 600, |p| p.0.step()).expect("the settled chain moved");
+    }
+
+    #[test]
+    fn a_swinging_load_never_gains_energy_with_the_winch_idle() {
+        // Released from the side and from past the horizontal, 3000 ticks of swing with damping.
+        for bob in [[1_000, 2_000, 0], [-985, 1_826, 0]] {
+            energy_never_rises(
+                pendulum(50, bob, 1_000),
+                3_000,
+                |g| g.step(),
+                load_energy(50.0),
+                one_unit_of_height(50.0),
+            )
+            .expect("a swing gained energy past one Q8 unit of height per kilogram");
+        }
+        // Thrown sideways at the bottom: the rope goes taut at once and the projection does the work.
+        let mut thrown = pendulum(50, [0, 1_000, 0], 1_000);
+        thrown.prev[1][0] -= 180 * 256;
+        energy_never_rises(
+            thrown,
+            2_000,
+            |g| g.step(),
+            load_energy(50.0),
+            one_unit_of_height(50.0),
+        )
+        .expect("a thrown swing gained energy past one Q8 unit of height per kilogram");
+    }
+
+    #[test]
+    fn a_rope_holding_a_load_stays_within_a_millimeter_of_its_rest() {
+        // The lift: a 200 kg platform on three 40 kg chains (5 to 1), winches reeling for 400 ticks.
+        let (nodes, links, winches) = lift();
+        let mut rig = Graph::build(&nodes, &links, &winches).expect("builds");
+        for tick in 1..=400 {
+            rig.step();
+            let worst = worst_stretch_q8(&rig);
+            assert!(
+                worst <= 256,
+                "tick {tick}: a rope ran {worst} Q8 units past its rest"
+            );
+        }
+        // A 1 kg link holding a 20 kg load (20 to 1) stays inside the same millimeter.
+        let mut chain = Graph::build(
+            &[node(1, 6_000, 0), node(2, 5_000, 1), node(3, 4_000, 20)],
+            &[
+                LinkDef {
+                    a: 1,
+                    b: 2,
+                    rest_mm: 1_000,
+                },
+                LinkDef {
+                    a: 2,
+                    b: 3,
+                    rest_mm: 1_000,
+                },
+            ],
+            &[],
+        )
+        .expect("builds");
+        for tick in 1..=300 {
+            chain.step();
+            let worst = worst_stretch_q8(&chain);
+            assert!(
+                worst <= 256,
+                "tick {tick}: a 20 to 1 rope ran {worst} Q8 units past its rest"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "law break: a 1 kg link holding 50 kg stretches 2.2 mm at 48 sweeps (34 mm at 400 kg), see lead"]
+    fn a_rope_under_a_fifty_to_one_load_stays_within_a_millimeter() {
+        let mut chain = Graph::build(
+            &[node(1, 6_000, 0), node(2, 5_000, 1), node(3, 4_000, 50)],
+            &[
+                LinkDef {
+                    a: 1,
+                    b: 2,
+                    rest_mm: 1_000,
+                },
+                LinkDef {
+                    a: 2,
+                    b: 3,
+                    rest_mm: 1_000,
+                },
+            ],
+            &[],
+        )
+        .expect("builds");
+        for tick in 1..=300 {
+            chain.step();
+            let worst = worst_stretch_q8(&chain);
+            assert!(
+                worst <= 256,
+                "tick {tick}: a 50 to 1 rope ran {worst} Q8 units past its rest"
+            );
+        }
+    }
+
+    #[test]
+    fn mirrored_releases_swing_mirrored() {
+        let east = pendulum(50, [707, 1_293, 0], 1_000);
+        let west = pendulum(50, [-707, 1_293, 0], 1_000);
+        mirror(east, west, 1_500, |g, _| g.step(), mirrored_across_x)
+            .expect("mirrored swings split apart");
+    }
+
+    #[test]
+    fn a_winch_lift_replays_bit_for_bit() {
+        let (nodes, links, winches) = lift();
+        let start = Pose(Graph::build(&nodes, &links, &winches).expect("builds"));
+        replay(start, 400, |p, _| p.0.step()).expect("two runs of one lift split apart");
+    }
+
+    #[test]
+    fn a_winch_reels_at_its_speed_at_every_speed() {
+        // A 4000 mm rope on a winch reeling to 0 mm (600 ticks at 250 mm/s never reach it): the rest
+        // length falls speed x time, slow or fast.
+        for speed in [1, 10, 59, 250] {
+            let rig = Graph::build(
+                &[node(1, 4_000, 0), node(2, 0, 50)],
+                &[LinkDef {
+                    a: 1,
+                    b: 2,
+                    rest_mm: 4_000,
+                }],
+                &[WinchDef {
+                    a: 1,
+                    b: 2,
+                    target_mm: 0,
+                    speed_mm_s: speed,
+                }],
+            )
+            .expect("builds");
+            steady_rate(
+                rig,
+                0,
+                600,
+                |g| g.step(),
+                |g| f64::from(i32::try_from(g.links[0].rest_q8).expect("fits")) / 256.0,
+                -f64::from(speed) / 60.0,
+                1.0,
+            )
+            .unwrap_or_else(|b| panic!("at {speed} mm/s: {b}"));
+        }
+    }
+
+    #[test]
+    fn a_seventy_tonne_load_falls_like_a_kilogram() {
+        let fall = |kg: u32| {
+            let mut g = Graph::build(&[node(1, 1_000, kg)], &[], &[]).expect("builds");
+            for _ in 0..60 {
+                g.step();
+            }
+            g
+        };
+        let light = fall(1);
+        let heavy = fall(70_000);
+        assert!(light.pos[0][1] < 1_000 << 8, "a 1 kg load did not fall");
+        assert_eq!(
+            light.pos, heavy.pos,
+            "a 70 t load fell differently from a 1 kg load"
+        );
     }
 }

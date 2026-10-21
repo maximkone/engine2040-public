@@ -36,9 +36,11 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
+      # In the background: deleting these took 108 s of a 155 s check (run 39613202879, 2026-10-21) while
+      # the build itself took 14 s. The delete keeps going beside the compile; the job reaps it at the end.
       - name: free disk
         if: runner.os == 'Linux'
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+        run: nohup sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost > /dev/null 2>&1 &
       - uses: mozilla-actions/sccache-action@v0.0.11
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain

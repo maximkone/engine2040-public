@@ -27,6 +27,7 @@ use engine_anim::inertialize::{AngularLimiter, DEFAULT_ANG_LIMIT_DEG_PER_SEC};
 use engine_anim::pose::sample_pose_with_rots;
 use engine_arena::cloth::{Cloth, ClothCollider, ClothGrid, ClothParams, ClothTier};
 use engine_arena::GaitPhase;
+use engine_assets::asset_source::{AssetSource, FsSource};
 use engine_assets::body_import::{
     import_clip_source, import_skinned_body, ClipSource, SkinnedBody,
 };
@@ -668,6 +669,13 @@ const CLIP_FILES: [&str; 6] = [
     "human_male_cast_main_hand_melee_3.glb",
     "human_male_death.glb",
 ];
+
+/// Logical path of one baked clip inside the fighters content tree
+/// (`glb/clips/<file>`).
+#[must_use]
+fn clip_logical_path(file: &str) -> String {
+    format!("glb/clips/{file}")
+}
 
 /// Load and frame failures.
 #[derive(Clone, PartialEq, Debug)]
@@ -1640,8 +1648,10 @@ fn load_rig(
     binding: &FighterBinding,
     rig_index: usize,
     sources: &[ClipSource],
+    source: &dyn AssetSource,
 ) -> Result<Rig, LookError> {
-    let bytes = std::fs::read(&binding.body_glb)
+    let bytes = source
+        .read(&binding.body_glb)
         .map_err(|err| LookError::Bind(format!("{}: {err}", binding.variant)))?;
     if sha_hex(&bytes) != binding.body_glb_sha256 {
         return Err(LookError::ShaMismatch(binding.variant.clone()));
@@ -1942,14 +1952,25 @@ impl FighterLook {
     /// Bind the CT7 bundles under `content_dir`, re-hash every body against
     /// its pin, import bodies plus clips, retarget the clips per rig and
     /// decode the base-color maps. Cold path; loud on any refusal.
+    /// WEB6: this is the native door into [`FighterLook::load_from`]; the
+    /// browser has no file system and reads the same bytes out of a
+    /// fetched bundle.
     pub fn load(content_dir: &Path) -> Result<Self, LookError> {
+        Self::load_from(&FsSource::new(content_dir))
+    }
+
+    /// The same bind out of a source: the manifest, the body GLBs and the
+    /// baked clips are read by logical path, so a browser and the native
+    /// window see the same bytes. Cold path; loud on any refusal.
+    pub fn load_from(source: &dyn AssetSource) -> Result<Self, LookError> {
         let bindings =
-            fighter_bind::bind_all(content_dir).map_err(|err| LookError::Bind(err.to_string()))?;
+            fighter_bind::bind_all_from(source).map_err(|err| LookError::Bind(err.to_string()))?;
         let mut sources = Vec::with_capacity(CLIP_FILES.len());
         for file in CLIP_FILES {
-            let path = content_dir.join("glb").join("clips").join(file);
-            let bytes =
-                std::fs::read(&path).map_err(|err| LookError::Import(format!("{file}: {err}")))?;
+            let path = clip_logical_path(file);
+            let bytes = source
+                .read(&path)
+                .map_err(|err| LookError::Import(format!("{file}: {err}")))?;
             sources.push(
                 import_clip_source(&bytes)
                     .map_err(|err| LookError::Import(format!("{file}: {err}")))?,
@@ -1957,7 +1978,7 @@ impl FighterLook {
         }
         let mut rigs = Vec::with_capacity(bindings.len());
         for (index, binding) in bindings.iter().enumerate() {
-            rigs.push(load_rig(binding, index, &sources)?);
+            rigs.push(load_rig(binding, index, &sources, source)?);
         }
         let swing_s = rigs
             .first()
@@ -2651,8 +2672,20 @@ impl FighterLook {
     /// Caller: `crates/endpoint/src/packs/view.rs` (SP62 `view.laws` pops this
     /// line); public so that door can reach it without a `Presenter`.
     pub fn view_run(seed: u64, ticks: u32, fighters: u8) -> Result<String, LookError> {
+        Self::view_run_detail(seed, ticks, fighters).map(|(line, _)| line)
+    }
+
+    /// The same headless bout as [`view_run`](Self::view_run), with the worst
+    /// pop named: the slot, the joint, the tick and how far that joint missed
+    /// its prediction. The receipt line is byte-identical to `view_run`'s; the
+    /// name is what the fix needs (AM24).
+    pub fn view_run_detail(
+        seed: u64,
+        ticks: u32,
+        fighters: u8,
+    ) -> Result<(String, Option<crate::view_truth::PopDetail>), LookError> {
         if ticks == 0 {
-            return Ok(String::new());
+            return Ok((String::new(), None));
         }
         let config = crate::GameConfig {
             seed,
@@ -2694,7 +2727,7 @@ impl FighterLook {
                 .collect();
             laws.note(&camera, f64::from(tick) + 0.5, &bodies);
         }
-        Ok(laws.line().unwrap_or_default())
+        Ok((laws.line().unwrap_or_default(), laws.pop_detail()))
     }
 
     /// [`Self::stage_frame`] plus each skinned body as numbers (bounds of

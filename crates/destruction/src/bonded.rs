@@ -1030,6 +1030,7 @@ mod tests {
     use super::*;
     use crate::bake3d::fracture3;
     use engine_core::alloc_probe::measure;
+    use engine_core::laws;
 
     fn baked_chunks() -> Vec<Chunk3> {
         fracture3(0.0, 2.0, 0.0, 1.0, 1.0, 1.0, 6, 11)
@@ -2052,5 +2053,289 @@ mod tests {
             body_p50 < stream_p50,
             "the shipped hash must not be the slower side"
         );
+    }
+
+    /// One 60 Hz tick: the step every law below runs.
+    const LAW_DT: f32 = 1.0 / 60.0;
+    /// Energy slack in joules. Rounding of a crate piece's height and speed
+    /// is about 1e-6 J in total; a crate piece (about 0.1 kg) sheds about
+    /// 1e-3 J per tick of fall (m g^2 dt^2 / 2), so 1e-4 J sits between.
+    const ENERGY_SLACK_J: f64 = 1e-4;
+
+    /// The piece a sword strike lands on: the highest chunk, lowest index on ties.
+    fn highest_chunk(field: &BondedCollection) -> usize {
+        let mut top = 0;
+        for (i, c) in field.chunks().iter().enumerate() {
+            if c.y > field.chunks()[top].y {
+                top = i;
+            }
+        }
+        top
+    }
+
+    /// Canonical state bytes with the tick counter zeroed. The tick moves on
+    /// every step even at rest, so the laws compare everything else.
+    fn law_bytes(field: &BondedCollection) -> Vec<u8> {
+        let mut bytes = canonical_state_bytes(field);
+        bytes[4..8].copy_from_slice(&[0; 4]);
+        bytes
+    }
+
+    /// A collection with the break events it has emitted, drained after every
+    /// step. Equal only when the physical state and the event log both match.
+    #[derive(Clone, Debug)]
+    struct Run {
+        field: BondedCollection,
+        seen: Vec<BreakEvent>,
+    }
+
+    impl PartialEq for Run {
+        fn eq(&self, other: &Self) -> bool {
+            law_bytes(&self.field) == law_bytes(&other.field) && self.seen == other.seen
+        }
+    }
+
+    impl Run {
+        fn new(field: BondedCollection) -> Self {
+            Self {
+                field,
+                seen: Vec::new(),
+            }
+        }
+
+        /// One fixed tick; the events it emitted join the log.
+        fn advance(&mut self) {
+            self.field.step(LAW_DT);
+            self.seen.extend(self.field.drain_events());
+        }
+    }
+
+    /// Mass held by the structure: each piece counts once, as standing or as
+    /// falling. A piece counted twice or dropped would move this sum.
+    fn held_mass(field: &BondedCollection) -> f64 {
+        let freed = field.freed_chunks();
+        (0..field.len())
+            .map(|i| {
+                let standing = u8::from(field.is_supported(i));
+                let falling = u8::from(freed.contains(&wire(i)));
+                f64::from(field.chunks()[i].mass) * f64::from(standing + falling)
+            })
+            .sum()
+    }
+
+    /// Momentum of the whole collection along one axis: the sum of m v, f64.
+    fn momentum(field: &BondedCollection, axis: usize) -> f64 {
+        field
+            .chunks()
+            .iter()
+            .zip(field.velocities())
+            .map(|(c, v)| f64::from(c.mass) * f64::from(v[axis]))
+            .sum()
+    }
+
+    /// Mechanical energy: kinetic plus m g y over every piece, in joules (f64).
+    fn energy(field: &BondedCollection) -> f64 {
+        field
+            .chunks()
+            .iter()
+            .zip(field.velocities())
+            .map(|(c, v)| {
+                let speed_sq: f64 = v.iter().map(|k| f64::from(*k) * f64::from(*k)).sum();
+                let m = f64::from(c.mass);
+                0.5 * m * speed_sq + m * f64::from(GRAVITY_MPS2) * f64::from(c.y)
+            })
+            .sum()
+    }
+
+    /// The x-mirror of a collection: each piece's center x negated, bonds,
+    /// anchors and gate kept, so piece i of the copy mirrors piece i.
+    fn x_mirror(field: &BondedCollection) -> BondedCollection {
+        let chunks = field
+            .chunks()
+            .iter()
+            .map(|c| Chunk3 { x: -c.x, ..*c })
+            .collect();
+        BondedCollection::new(&BondedDesc {
+            chunks,
+            bonds: field.bonds().to_vec(),
+            anchors: field.anchors(),
+            break_threshold: field.break_threshold(),
+        })
+        .expect("the mirror of a valid collection is valid")
+    }
+
+    /// `b` is the x-mirror of `a`, piece by piece: mirrored x, equal heights,
+    /// mirrored sideways speed, same supports, bond strain and snaps, freed set.
+    fn x_mirrored(a: &BondedCollection, b: &BondedCollection) -> bool {
+        let pieces = a
+            .chunks()
+            .iter()
+            .zip(b.chunks())
+            .zip(a.velocities().iter().zip(b.velocities()))
+            .enumerate()
+            .all(|(i, ((ca, cb), (va, vb)))| {
+                ca.x == -cb.x
+                    && ca.y == cb.y
+                    && ca.z == cb.z
+                    && va[0] == -vb[0]
+                    && va[1] == vb[1]
+                    && va[2] == vb[2]
+                    && a.is_supported(i) == b.is_supported(i)
+            });
+        let bonds = (0..a.bond_count()).all(|j| {
+            a.is_bond_broken(j) == b.is_bond_broken(j) && a.strain_of(j) == b.strain_of(j)
+        });
+        a.len() == b.len() && pieces && bonds && a.freed_chunks() == b.freed_chunks()
+    }
+
+    /// An intact crate on the ground, with no strike, stays bit for bit at
+    /// rest for ten seconds: no creep, no bounce, no spontaneous bond snap.
+    #[test]
+    fn an_intact_crate_at_rest_never_creeps_or_breaks() {
+        let field = crate_prop(8, 7);
+        assert_eq!(
+            field.supported_count(),
+            field.len(),
+            "every piece stands at construction"
+        );
+        laws::rest_stays_rest(Run::new(field), 600, Run::advance)
+            .expect("a crate with no strike stays at rest");
+    }
+
+    /// Two copies of one strike, stepped side by side, emit the same breaks
+    /// and fall to the same poses: no hidden input, no order dependence.
+    #[test]
+    fn a_struck_crate_replays_to_the_same_breaks_and_fall() {
+        let field = crate_prop(8, 7);
+        let top = highest_chunk(&field);
+        let impulse = field.chunk_mass(top).expect("top mass") * field.break_threshold() + 1.0;
+        let end = laws::replay(Run::new(field), 600, |run, tick| {
+            if tick == 3 {
+                run.field
+                    .apply_impact(top, impulse, 3)
+                    .expect("valid impact");
+            }
+            run.advance();
+        })
+        .expect("two copies of one strike stay equal");
+        assert!(end
+            .seen
+            .iter()
+            .any(|e| matches!(e, BreakEvent::BondBroken { .. })));
+        assert!(end
+            .seen
+            .iter()
+            .any(|e| matches!(e, BreakEvent::ChunkFreed { .. })));
+    }
+
+    /// A crate struck at piece i and its x-mirror struck at the same piece
+    /// index break mirrored: same snapped bonds, same freed set, mirrored falls.
+    #[test]
+    fn mirrored_strikes_break_mirrored_crates() {
+        let a = crate_prop(8, 7);
+        let b = x_mirror(&a);
+        let top = highest_chunk(&a);
+        let impulse = a.chunk_mass(top).expect("top mass") * a.break_threshold() + 1.0;
+        let mut probe = crate_prop(8, 7);
+        probe.apply_impact(top, impulse, 3).expect("valid impact");
+        assert!(
+            !probe.freed_chunks().is_empty(),
+            "the strike must free pieces"
+        );
+        laws::mirror(
+            a,
+            b,
+            600,
+            |s, tick| {
+                if tick == 3 {
+                    s.apply_impact(top, impulse, 3).expect("valid impact");
+                }
+                s.step(LAW_DT);
+            },
+            x_mirrored,
+        )
+        .expect("a struck crate and its mirror break and fall mirrored");
+    }
+
+    /// A strike adds no energy and gravity only sheds it: after the impact,
+    /// kinetic plus potential over all pieces never rises, including the
+    /// ground stop of each falling piece.
+    #[test]
+    fn a_struck_crate_never_gains_energy_as_its_pieces_fall() {
+        let mut field = crate_prop(8, 7);
+        let top = highest_chunk(&field);
+        let impulse = field.chunk_mass(top).expect("top mass") * field.break_threshold() + 1.0;
+        field.apply_impact(top, impulse, 3).expect("valid impact");
+        assert!(
+            !field.freed_chunks().is_empty(),
+            "the strike must free pieces"
+        );
+        let struck = energy(&field);
+        let mut fallen = field.clone();
+        for _ in 0..600 {
+            fallen.step(LAW_DT);
+        }
+        assert!(energy(&fallen) < struck, "the pieces really fell");
+        laws::energy_never_rises(field, 600, |s| s.step(LAW_DT), energy, ENERGY_SLACK_J)
+            .expect("a strike adds no energy and the fall only sheds it");
+    }
+
+    /// Piece mass is held through a snap and the fall: the pieces sum to the
+    /// original total, each counted once, standing or falling. The masses are
+    /// fixed at construction, so the sum recomputes bit for bit (slack 0).
+    #[test]
+    fn piece_mass_is_held_through_every_snap() {
+        let field = crate_prop(8, 7);
+        let top = highest_chunk(&field);
+        let total: f64 = field.chunks().iter().map(|c| f64::from(c.mass)).sum();
+        assert_eq!(held_mass(&field), total, "the pieces sum to the original");
+        let mut probe = crate_prop(8, 7);
+        probe.sever_chunk(top, 3).expect("in range");
+        assert!(
+            !probe.freed_chunks().is_empty(),
+            "the snap must free pieces"
+        );
+        let mut step_no = 0u32;
+        laws::conserved(
+            field,
+            600,
+            |s| {
+                step_no += 1;
+                if step_no == 3 {
+                    s.sever_chunk(top, 3).expect("in range");
+                }
+                s.step(LAW_DT);
+            },
+            held_mass,
+            0.0,
+        )
+        .expect("every piece is standing or falling, counted once");
+    }
+
+    /// A snap moves nothing, and a freed piece with sideways speed keeps its
+    /// x and z momentum through the fall: gravity and the ground act on y only.
+    #[test]
+    fn sideways_momentum_survives_a_snap_and_the_fall() {
+        let mut field = crate_prop(8, 7);
+        let top = highest_chunk(&field);
+        let before: Vec<f64> = (0..3).map(|axis| momentum(&field, axis)).collect();
+        field.sever_chunk(top, 3).expect("in range");
+        let after: Vec<f64> = (0..3).map(|axis| momentum(&field, axis)).collect();
+        assert_eq!(
+            before, after,
+            "a snap moves nothing: the freed piece carries no velocity"
+        );
+        // Sideways speed for the freed piece; no force acts along x or z.
+        field.vel[top] = [0.8, 0.0, -0.3];
+        laws::conserved(
+            field.clone(),
+            600,
+            |s| s.step(LAW_DT),
+            |s| momentum(s, 0),
+            0.0,
+        )
+        .expect("x momentum holds through the fall");
+        laws::conserved(field, 600, |s| s.step(LAW_DT), |s| momentum(s, 2), 0.0)
+            .expect("z momentum holds through the fall");
     }
 }

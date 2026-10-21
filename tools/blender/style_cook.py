@@ -233,9 +233,18 @@ def nearest_palette(pixels, palette):
 
     # Only saturated pixels take a hue; the rest take the least saturated
     # palette entry, which is the neutral in that palette.
+    # A desaturated pixel takes the palette's neutral, not the nearest hue.
+    # A grey suit is not bone white: it is black iron, and picking the nearest
+    # hue sent every grey in the texture to the lightest entry and blew the
+    # whole character out.
+    neutral = int(psat.argmin())
     weights = np.where(sat[:, None] > 0.12, 1.0, 0.0)
     dist = np.linalg.norm(src_h[:, None, :] - pal_h[None, :, :], axis=2)
     dist = dist + (1.0 - weights) * 10.0
+    grey = weights[:, 0] < 0.5
+    if grey.any():
+        dist[grey, :] = 10.0
+        dist[grey, neutral] = 0.0
     choice = dist.argmin(axis=1)
 
     out = pal[choice]

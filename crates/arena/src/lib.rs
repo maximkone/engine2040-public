@@ -55,6 +55,7 @@
 
 /// The step rules the legacy step and the spine step share (ARC7b).
 mod authority;
+pub mod bolt;
 pub mod branch;
 pub mod collide;
 pub mod controller;
@@ -978,6 +979,10 @@ pub struct Sim {
     /// armed ([`Sim::set_pilum`]); `None` leaves every tick and hash
     /// untouched.
     pilum: Option<pilum::PilumState>,
+    /// Manuballista state, `Some` only for a match whose bolt channel is
+    /// armed ([`Sim::set_bolt`]); `None` leaves every tick and hash
+    /// untouched.
+    bolt: Option<bolt::BoltState>,
     /// Height channel (row SG5): each slot's vertical speed in mm per tick.
     /// Empty while the channel is off, which is the golden and the floor
     /// plane: nothing writes `pos[1]` beyond placement and nothing folds.
@@ -1150,6 +1155,7 @@ impl Sim {
             limbs: LimbPool::new(limb_cap).ok()?,
             spear: None,
             pilum: None,
+            bolt: None,
             rise: Vec::new(),
             height: false,
             #[cfg(test)]
@@ -1217,6 +1223,22 @@ impl Sim {
             return false;
         }
         self.pilum = Some(pilum::PilumState::new(self.fighters));
+        true
+    }
+
+    /// Arm the manuballista before the first tick: the ballistarius then
+    /// winds his two springs, loads a bolt and looses it on the trigger.
+    /// Off by default, and off leaves every tick and every hash untouched,
+    /// so the golden and the arena digest never move.
+    ///
+    /// The engine is a rules v2 weapon, so it refuses under the rules v1
+    /// rows. It also refuses (`false`) past tick 0, and on the Rapier
+    /// `sim` leg, where the arena's own throw channels stay off.
+    pub fn set_bolt(&mut self) -> bool {
+        if cfg!(feature = "sim") || self.tick != 0 || self.rules.version != FIGHT_RULES_V2 {
+            return false;
+        }
+        self.bolt = Some(bolt::BoltState::new(self.fighters));
         true
     }
 
@@ -1663,6 +1685,26 @@ impl Sim {
                 });
                 self.pilum = Some(pilum);
             }
+            // The manuballista: the ballistarius winds his springs, loads a
+            // bolt and looses it. The channel is armed per match, so a match
+            // without one never reaches this step.
+            if let Some(mut bolt) = self.bolt.take() {
+                let tables = if self.config.table_version == TABLES_VERSION_V2 {
+                    &TABLES_V2
+                } else {
+                    &TABLES_V1
+                };
+                bolt.step(&mut bolt::Env {
+                    inputs,
+                    states: &self.states,
+                    fight: &mut self.fight,
+                    rules: &self.rules,
+                    tables,
+                    world: &self.world,
+                    half_extent_m: self.config.half_extent_m,
+                });
+                self.bolt = Some(bolt);
+            }
         }
         // EG20: one collision pass after every slot moved (default leg).
         if self.rules.collides() {
@@ -1746,6 +1788,10 @@ impl Sim {
         // leaves the hash untouched, so the golden and the arena digest
         // never move.
         let hash = self.pilum.as_ref().map_or(hash, |pilum| pilum.fold(hash));
+        // The manuballista folds the same way: a match without the channel
+        // leaves the hash untouched, so the golden and the arena digest
+        // never move.
+        let hash = self.bolt.as_ref().map_or(hash, |bolt| bolt.fold(hash));
         // The height channel folds only when armed, so the golden bytes stay
         // exactly as they were on a floor-plane match.
         let hash = if self.height {
@@ -2085,6 +2131,7 @@ impl Sim {
             limbs: LimbPool::new(MAX_LIMBS).ok()?,
             spear: None,
             pilum: None,
+            bolt: None,
             rise: snapshot.rise,
             height: snapshot.height,
             #[cfg(test)]

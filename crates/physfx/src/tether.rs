@@ -10,6 +10,7 @@
 //! Plain float math, no clock, no randomness: the same ends give the same nodes on one machine.
 
 use crate::error::Error;
+use std::f32::consts::PI;
 
 /// Gravity on a rope node, m/s^2 (the world's).
 const GRAVITY: f32 = -9.81;
@@ -25,6 +26,9 @@ const FLOOR_M: f32 = 0.02;
 pub(crate) const QUIET_TICKS: u32 = 20;
 /// A released rope is removed after this many ticks even if it never quite settles.
 const LOOSE_TICKS: u32 = 240;
+/// Passes of the length projection a slack rope takes before its first tick, so its nodes start
+/// on their length and the first tick does not throw them.
+const SEAT_PASSES: u32 = 4;
 /// An end that moved less than this since the last step, meters, counts as still.
 const STILL_M: f32 = 0.001;
 /// Spring stiffness of the pull, newtons per meter of stretch.
@@ -45,6 +49,7 @@ pub enum TetherState {
 
 /// One rope. `prev` and `curr` are the node positions one tick ago and now, which is both the
 /// verlet velocity and what the render blend reads.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Tether {
     pub(crate) id: u32,
     rest: f32,
@@ -79,8 +84,59 @@ fn lerp(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t)
 }
 
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// The `nodes` points of a rope of length `rest` hung between `a` and `b`, ends included: a circle
+/// arc of that length bowing down from the chord. A chord with no down side (stacked ends) bows
+/// toward +x. Nearly straight or degenerate ends fall back to the chord itself.
+fn sag_arc(a: [f32; 3], b: [f32; 3], rest: f32, nodes: usize) -> Vec<[f32; 3]> {
+    let chord = sub(b, a);
+    let c = len(chord);
+    if c < 1.0e-3 || c >= rest {
+        return (0..nodes)
+            .map(|i| lerp(a, b, share(i, nodes - 1)))
+            .collect();
+    }
+    // sin(t) / t = chord / rest picks the arc's half angle t; the ratio falls from 1 to 0 on (0, pi).
+    let want = c / rest;
+    let (mut lo, mut hi) = (0.0_f32, PI);
+    for _ in 0..40 {
+        let t = 0.5 * (lo + hi);
+        if t.sin() / t > want {
+            lo = t;
+        } else {
+            hi = t;
+        }
+    }
+    let t = 0.5 * (lo + hi);
+    let radius = c / (2.0 * t.sin());
+    let d = chord.map(|x| x / c);
+    let across = |axis: [f32; 3]| {
+        let k = dot(axis, d);
+        [0, 1, 2].map(|i| axis[i] - k * d[i])
+    };
+    let mut g = across([0.0, -1.0, 0.0]);
+    if len(g) < 1.0e-6 {
+        g = across([1.0, 0.0, 0.0]);
+    }
+    let gl = len(g);
+    let g = g.map(|x| x / gl);
+    let mid = [0, 1, 2].map(|k| (a[k] + b[k]) * 0.5);
+    let center = [0, 1, 2].map(|k| mid[k] - g[k] * radius * t.cos());
+    let last = nodes - 1;
+    (0..nodes)
+        .map(|i| {
+            let psi = (2.0 * share(i, last) - 1.0) * t;
+            [0, 1, 2].map(|k| center[k] + radius * (d[k] * psi.sin() + g[k] * psi.cos()))
+        })
+        .collect()
+}
+
 impl Tether {
-    /// A straight rope from `a` to `b` of `nodes` points and `rest` meters of length. The caller
+    /// A rope from `a` to `b` of `nodes` points and `rest` meters of length: straight when the
+    /// ends are as far apart as the rope is long, hung in its arc when they are closer. The caller
     /// has checked the numbers (`nodes >= 2`, `rest > 0`, finite ends).
     pub(crate) fn new(
         id: u32,
@@ -94,7 +150,7 @@ impl Tether {
             .map(|i| lerp(a, b, share(i, nodes - 1)))
             .collect();
         let reach = len(sub(b, a));
-        Self {
+        let mut rope = Self {
             id,
             rest,
             prev: line.clone(),
@@ -109,7 +165,17 @@ impl Tether {
             quiet: 0,
             loose: 0,
             sweeps,
+        };
+        if rope.state == TetherState::Slack {
+            // A straight chord shorter than the rope would buckle on the first tick and throw its
+            // nodes, so a slack rope starts hung in its arc and settled onto its length.
+            rope.lay_sag(a, b);
+            for _ in 0..SEAT_PASSES {
+                rope.satisfy(true);
+            }
+            rope.prev.clone_from(&rope.curr);
         }
+        rope
     }
 
     pub(crate) fn state(&self) -> TetherState {
@@ -224,6 +290,11 @@ impl Tether {
                 self.state = TetherState::Taut;
                 self.lay_straight(a, b);
             } else {
+                if self.state == TetherState::Taut {
+                    // A taut rope that goes slack hangs in its arc at once; projecting its straight
+                    // nodes instead buckles them and throws them.
+                    self.lay_sag(a, b);
+                }
                 self.state = TetherState::Slack;
                 self.satisfy(true);
             }
@@ -231,6 +302,21 @@ impl Tether {
             self.satisfy(false);
         }
         self.settle(&before);
+    }
+
+    /// The slack rope hung in its arc between the ends, with no velocity: the nodes start where
+    /// the rope's length puts them.
+    fn lay_sag(&mut self, a: [f32; 3], b: [f32; 3]) {
+        let last = self.curr.len() - 1;
+        let arc = sag_arc(a, b, self.rest, last + 1);
+        for (i, at) in arc.into_iter().enumerate() {
+            self.prev[i] = at;
+            self.curr[i] = at;
+        }
+        self.prev[0] = a;
+        self.curr[0] = a;
+        self.prev[last] = b;
+        self.curr[last] = b;
     }
 
     /// The taut rope: every node on the line between the ends, evenly spaced. Interior nodes

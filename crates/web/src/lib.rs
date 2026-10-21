@@ -35,6 +35,7 @@ pub mod anim;
 pub mod arena_view;
 pub mod audio;
 pub mod content;
+pub mod frame_bus;
 pub mod golden;
 pub mod input;
 pub mod input_tape;

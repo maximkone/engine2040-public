@@ -80,9 +80,14 @@ test("the CI publishes a structured test report (the CTRF shape)", () => {
   const t = jobBlock("test");
   // The receipt: the `ci` nextest profile writes it next to the run.
   assert.match(t, /cargo nextest run --locked --all-targets --profile ci/);
-  // The report: the receipt plus the run's own words, so the count in the
-  // report is checked against the count the run printed.
-  assert.match(t, /node tools\/ctrf-report\.mjs --in target\/nextest-junit\/ci\.xml --log target\/nextest-junit\/ci\.log/);
+  // The run's own words go to the log. Nextest prints its summary on stderr,
+  // so the log must take stderr too, or the log holds nothing to check.
+  assert.match(t, /2>&1 \| tee target\/nextest-junit\/ci\.log/);
+  // The report: the tool finds the receipt by itself (nextest 0.9 writes it
+  // under its store dir, so a hardcoded path breaks) and checks the receipt
+  // against the run's own words.
+  assert.match(t, /node tools\/ctrf-report\.mjs --log target\/nextest-junit\/ci\.log/);
+  assert.doesNotMatch(t, /ctrf-report\.mjs --in /, "the receipt path is not hardcoded");
   // The report is published: as an artifact and in the job page.
   assert.match(t, /actions\/upload-artifact@v5/);
   assert.match(t, /ctrf-io\/github-test-reporter@v1/);

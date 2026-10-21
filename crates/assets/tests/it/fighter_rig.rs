@@ -16,9 +16,6 @@ use engine_assets::fighter::{
 };
 use engine_assets::soma::{soma_pairs, SOMA77};
 
-/// Repository root, one level above the crate.
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-
 /// The fighter rig the anim contract names.
 #[test]
 fn fighter_rig_is_the_pair_order_with_a_backwards_chain() {

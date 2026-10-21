@@ -1,0 +1,110 @@
+name: ship-check
+
+# HX10: the ship build must be reproducible. This job builds the Windows ship
+# profile twice, each from a clean folder, and compares the two file trees by
+# content hash (tools/ship-check.mjs): one hash per file and a tree hash over
+# them. Equal tree hashes are the receipt; a mismatch names the file that
+# moved. The public mirror is the build farm; the private dev repo never runs
+# this job.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the older run.
+concurrency:
+  group: ship-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A cold build every time: nothing to reuse, so the two builds are equal
+  # only when the compiler is.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  reproducible:
+    # The shipped Windows artifact is the arena binary, built with the `ship`
+    # profile (fat LTO, one codegen unit; Cargo.toml [profile.ship], the same
+    # profile tools/ship.mjs packs and the CI release-proof leg builds).
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: windows-latest
+    # Two cold fat-LTO Windows builds of the arena plus the hashes: 45 min.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - name: build the ship profile twice from a clean folder
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'ship-target'
+          $env:CARGO_TARGET_DIR = $target
+          # MSVC's link.exe writes the wall clock into the PE header; /Brepro
+          # turns it into a hash of the content, so two builds of the same
+          # commit give the same bytes. The remap keeps the source and the
+          # cargo-home paths out of the binary (the flags tools/ship.mjs uses
+          # for the packaged artifact).
+          $env:RUSTFLAGS = "-Clink-arg=/Brepro --remap-path-prefix=$env:GITHUB_WORKSPACE=. --remap-path-prefix=$env:USERPROFILE\.cargo=./cargo-home"
+          New-Item -ItemType Directory -Force -Path target/ship-check/ship-a, target/ship-check/ship-b | Out-Null
+          New-Item -ItemType File -Force -Path target/ship-check/ship-hashes.txt | Out-Null
+          cargo build --locked --profile ship -p engine-game --features app
+          if ($LASTEXITCODE -ne 0) { throw 'the first ship build failed' }
+          # The tree under test: the files the ship profile wrote (the arena
+          # binary and its dep-info). The cargo bookkeeping folders are left
+          # out: they hold mtimes, not the build.
+          Get-ChildItem -LiteralPath (Join-Path $target 'ship') -File | Copy-Item -Destination target/ship-check/ship-a -Force
+          # The second build starts from nothing: the folder is wiped first.
+          Remove-Item -LiteralPath $target -Recurse -Force
+          cargo build --locked --profile ship -p engine-game --features app
+          if ($LASTEXITCODE -ne 0) { throw 'the second ship build failed' }
+          Get-ChildItem -LiteralPath (Join-Path $target 'ship') -File | Copy-Item -Destination target/ship-check/ship-b -Force
+          Get-ChildItem target/ship-check/ship-a, target/ship-check/ship-b | ForEach-Object { "$($_.Directory.Name)/$($_.Name) $($_.Length) bytes" }
+      - name: compare the two trees by content hash
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node tools/ship-check.mjs --print target/ship-check/ship-a > target/ship-check/ship-a.txt
+          if ($LASTEXITCODE -ne 0) { throw 'ship-check could not read the first tree' }
+          node tools/ship-check.mjs --print target/ship-check/ship-b > target/ship-check/ship-b.txt
+          if ($LASTEXITCODE -ne 0) { throw 'ship-check could not read the second tree' }
+          $a = (node tools/ship-check.mjs --hash target/ship-check/ship-a | Select-Object -Last 1).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'ship-check could not hash the first tree' }
+          $b = (node tools/ship-check.mjs --hash target/ship-check/ship-b | Select-Object -Last 1).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'ship-check could not hash the second tree' }
+          @(
+            'ship-check: the ship profile build, twice, from a clean folder'
+            "build a: $a"
+            "build b: $b"
+            'tree a:'
+            (Get-Content target/ship-check/ship-a.txt)
+            'tree b:'
+            (Get-Content target/ship-check/ship-b.txt)
+          ) | Out-File -Encoding utf8 target/ship-check/ship-hashes.txt
+          if ($env:GITHUB_STEP_SUMMARY) {
+            '```' | Out-File -Append -Encoding utf8 -LiteralPath $env:GITHUB_STEP_SUMMARY
+            Get-Content target/ship-check/ship-hashes.txt | Out-File -Append -Encoding utf8 -LiteralPath $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -Encoding utf8 -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+          Get-Content target/ship-check/ship-hashes.txt
+          if ($a -ne $b) {
+            # The red must say which file moved, so the receipt names it.
+            Compare-Object (Get-Content target/ship-check/ship-a.txt) (Get-Content target/ship-check/ship-b.txt) |
+              Select-Object -First 20 | Out-String | Write-Output
+            "SHIP-CHECK FAIL: the two ship builds differ: a=$a b=$b" |
+              Out-File -Append -Encoding utf8 target/ship-check/ship-hashes.txt
+            Write-Output "SHIP-CHECK FAIL: the two ship builds differ: a=$a b=$b"
+            exit 1
+          }
+          Write-Output "SHIP-CHECK PASS: the two ship builds have the same tree hash $a"
+      - name: upload the ship-check receipt
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: ship-check-hashes
+          path: target/ship-check/ship-hashes.txt
+          if-no-files-found: error

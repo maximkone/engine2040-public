@@ -108,12 +108,92 @@ def main():
     head_y = float(head.get("y", 1.0))
     neck_z = z_min + NECK * height
 
+    # The rig is the authority on what a vertex is. MPFB's bone names say
+    # what a vertex belongs to, so the arms are never mistaken for the
+    # shoulders and the hands can be made into mitts at the wrist.
+    group_names = {g.index: g.name.lower() for g in ob.vertex_groups}
+    armatures = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]
+    rig = armatures[0] if armatures else None
+
+    def bone_part(name):
+        # The fingers are weighted to their own bones, so "hand" alone misses
+        # them, and a finger that falls through to the body bands gets
+        # stretched into a claw.
+        for part in ("hand", "finger", "thumb"):
+            if name.startswith(part):
+                return "hand"
+        for side in ("l", "r"):
+            for part in ("arm", "upperarm", "forearm", "shoulder"):
+                if name.startswith(part) and side in name:
+                    return "arm"
+        return ""
+
+    def wrist_for(name):
+        if rig is None:
+            return None, None
+        for candidate in rig.data.bones:
+            cname = candidate.name.lower()
+            if "hand" in cname and not any(x in cname for x in ("thumb", "finger", "index", "middle", "ring", "pinky")):
+                head = rig.matrix_world @ candidate.head_local
+                tail = rig.matrix_world @ candidate.tail_local
+                return head, (tail - head).normalized()
+        return None, None
+
+    def classify(vertex):
+        best = None
+        for entry in vertex.groups:
+            if best is None or entry.weight > best.weight:
+                best = entry
+        if best is None:
+            return ""
+        return group_names.get(best.group, "")
+
     for vertex in me.vertices:
         co = vertex.co
         t = (co.z - z_min) / height
+        name = classify(vertex)
+        part = bone_part(name)
+        if "toe" in name or "foot" in name:
+            part = "foot"
+        elif "leg" in name:
+            part = "leg"
+        if "head" in name or "neck" in name:
+            part = "head"
+
+        if part in ("hand",):
+            # A mitt: the fingers come in and the fist gets fat, at the
+            # wrist, on the hand bone's own axis. The sheet says how fat.
+            mitt = float(profile.get("hands", {}).get("scale", 1.0))
+            wrist, axis = wrist_for(name)
+            if wrist is not None:
+                offset = co - wrist
+                along = offset.dot(axis)
+                across = offset - axis * along
+                co = wrist + axis * (along * (1.0 - 0.30 * (mitt - 1.0) / 0.34)) + across * mitt
+            continue
+        if part in ("arm", "upperarm", "forearm", "shoulder"):
+            # An arm is not ours to draw by height. It gets a little mass
+            # and nothing else.
+            co.y = centre_y + (co.y - centre_y) * 1.06
+            co.z = z_min + (co.z - z_min) * 1.04
+            continue
+        if part == "head":
+            co.z = neck_z + (co.z - neck_z) * head_scale
+            co.x = centre_x + (co.x - centre_x) * (head_x * head_scale)
+            co.y = centre_y + (co.y - centre_y) * (head_y * head_scale)
+            continue
+        if part == "leg" or part == "foot":
+            band = band_for(t, bands)
+            co.x = centre_x + (co.x - centre_x) * float(band["x"])
+            co.y = centre_y + (co.y - centre_y) * float(band["y"])
+            co.z = z_min + (co.z - z_min) * float(band["z"])
+            if part == "foot":
+                # The boot is its own shape: the sheet says how big.
+                boot = float(profile.get("boots", {}).get("scale", 1.0))
+                co.x = centre_x + (co.x - centre_x) * boot
+                co.y = centre_y + (co.y - centre_y) * boot
+            continue
         if t >= HEAD_TOP:
-            # The head is a lump scaled about the neck: the face keeps its
-            # shape and the head grows around it.
             co.z = neck_z + (co.z - neck_z) * head_scale
             co.x = centre_x + (co.x - centre_x) * (head_x * head_scale)
             co.y = centre_y + (co.y - centre_y) * (head_y * head_scale)

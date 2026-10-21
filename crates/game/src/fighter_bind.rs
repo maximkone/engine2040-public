@@ -8,10 +8,17 @@
 //! Errors: [`BindError`] at every boundary; a bad manifest or a missing body
 //! fails loudly, never substitutes another character.
 //!
-//! Budget: one-shot setup IO (one manifest read plus 4 existence checks);
-//! never on the fixed tick.
+//! Budget: one-shot setup IO (one manifest read plus 4 body reads that
+//! prove the body is there and not empty); never on the fixed tick.
+//!
+//! WEB6: every read goes through an [`AssetSource`], so the native build
+//! reads the files under `content/fighters` and a browser reads the same
+//! bytes out of a fetched bundle. The source names the body; the binding
+//! keeps the logical path, never a host path.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use engine_assets::asset_source::{AssetSource, SourceError};
 
 use crate::capture::cap_message;
 
@@ -57,8 +64,9 @@ pub struct FighterBinding {
     pub bundle_sha256: String,
     /// Assembled body GLB SHA-256 (pinned against [`EXPECTED_BODY_SHA256`]).
     pub body_glb_sha256: String,
-    /// Checked body GLB file (`<variant>_body.glb` under `glb/`).
-    pub body_glb: PathBuf,
+    /// Checked body GLB, named by its logical path in the source
+    /// (`glb/hero_body.glb`).
+    pub body_glb: String,
     /// Rig joints (always [`EXPECTED_JOINTS`]).
     pub joints: u32,
     /// LOD0 triangles of the assembled body.
@@ -72,6 +80,9 @@ pub struct FighterBinding {
 pub enum BindError {
     /// Filesystem failure; kind carried (paths stay in the caller).
     Io(std::io::ErrorKind),
+    /// The source refused a read; the logical path and the reason are
+    /// carried.
+    Source(String),
     /// Manifest malformed or not the pinned bytes; reason carried.
     BadManifest(String),
     /// Body GLB missing; file name only (never an absolute path).
@@ -82,6 +93,7 @@ impl core::fmt::Display for BindError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(kind) => write!(f, "fighter bind io ({kind:?})"),
+            Self::Source(reason) => write!(f, "fighter bind source ({reason})"),
             Self::BadManifest(reason) => write!(f, "bad fighter manifest ({reason})"),
             Self::MissingBody(name) => write!(f, "missing fighter body ({name})"),
         }
@@ -94,6 +106,13 @@ impl std::error::Error for BindError {}
 #[must_use]
 pub fn body_file_name(variant: &str) -> String {
     format!("{variant}_body.glb")
+}
+
+/// Logical path of one body inside the fighters content tree
+/// (`glb/hero_body.glb`).
+#[must_use]
+pub fn body_logical_path(variant: &str) -> String {
+    format!("glb/{}", body_file_name(variant))
 }
 
 /// True for 64 lowercase hex chars (a SHA-256 row).
@@ -171,12 +190,33 @@ fn extract_count(block: &str, variant: &str, key: &str) -> Result<u32, BindError
 }
 
 /// Bind all 4 bodies under `content_dir` (`manifest.json` plus `glb/`
-/// beside it): parse each variant block, pin both SHAs against the pinned
-/// constants, check joints/clips and require the body GLB to exist and be
-/// non-empty. Manifest order is preserved in the returned vector.
+/// beside it) through the file-system source: the native door into
+/// [`bind_all_from`]. A browser has no file system, so the same bind runs
+/// there against a fetched bundle.
 pub fn bind_all(content_dir: &Path) -> Result<Vec<FighterBinding>, BindError> {
-    let path = content_dir.join(MANIFEST_NAME);
-    let json = std::fs::read_to_string(&path).map_err(|err| BindError::Io(err.kind()))?;
+    bind_all_from(&engine_assets::asset_source::FsSource::new(content_dir))
+}
+
+/// Map a source failure to a bind failure: a missing name is the file
+/// system kind the native path always reported, anything else is loud.
+fn source_error(path: &str, err: &SourceError) -> BindError {
+    match err {
+        SourceError::Missing { .. } => BindError::Io(std::io::ErrorKind::NotFound),
+        SourceError::Io { kind, .. } => BindError::Io(*kind),
+        other => BindError::Source(cap_message(&format!("{path}: {other}"))),
+    }
+}
+
+/// Bind all 4 bodies out of a source (`manifest.json` plus `glb/` beside
+/// it): parse each variant block, pin both SHAs against the pinned
+/// constants, check joints/clips and require the body GLB to be there and
+/// non-empty. Manifest order is preserved in the returned vector.
+pub fn bind_all_from(source: &dyn AssetSource) -> Result<Vec<FighterBinding>, BindError> {
+    let json = source
+        .read(MANIFEST_NAME)
+        .map_err(|err| source_error(MANIFEST_NAME, &err))?;
+    let json = String::from_utf8(json.into_owned())
+        .map_err(|_| BindError::BadManifest(format!("{MANIFEST_NAME} is not utf-8")))?;
     let mut bindings = Vec::with_capacity(VARIANTS.len());
     for (index, variant) in VARIANTS.iter().enumerate() {
         let block = variant_block(&json, variant)?;
@@ -211,22 +251,19 @@ pub fn bind_all(content_dir: &Path) -> Result<Vec<FighterBinding>, BindError> {
             ))));
         }
         let name = body_file_name(variant);
-        let body_path = content_dir.join("glb").join(&name);
-        let bytes = std::fs::metadata(&body_path).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                BindError::MissingBody(name.clone())
-            } else {
-                BindError::Io(err.kind())
-            }
+        let logical = body_logical_path(variant);
+        let bytes = source.read(&logical).map_err(|err| match err {
+            SourceError::Missing { .. } => BindError::MissingBody(name.clone()),
+            other => source_error(&logical, &other),
         })?;
-        if bytes.len() == 0 {
+        if bytes.is_empty() {
             return Err(BindError::MissingBody(name.clone()));
         }
         bindings.push(FighterBinding {
             variant: (*variant).to_string(),
             bundle_sha256: bundle,
             body_glb_sha256: body_sha,
-            body_glb: body_path,
+            body_glb: logical,
             joints,
             tris_lod0: tris,
             clips,
@@ -238,6 +275,8 @@ pub fn bind_all(content_dir: &Path) -> Result<Vec<FighterBinding>, BindError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_assets::asset_source::{content_digest, FsSource, MemorySource};
+    use std::path::PathBuf;
 
     fn content_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/fighters")
@@ -254,14 +293,11 @@ mod tests {
             assert_eq!(binding.joints, EXPECTED_JOINTS);
             assert_eq!(binding.clips, EXPECTED_CLIPS);
             assert!(binding.tris_lod0 > 0, "{}", binding.variant);
+            assert_eq!(binding.body_glb, body_logical_path(&binding.variant));
             assert!(
-                binding.body_glb.is_file(),
+                content_dir().join(&binding.body_glb).is_file(),
                 "body missing: {}",
-                binding.body_glb.display()
-            );
-            assert_eq!(
-                binding.body_glb.file_name().and_then(|n| n.to_str()),
-                Some(body_file_name(&binding.variant).as_str())
+                binding.body_glb
             );
         }
     }
@@ -326,6 +362,78 @@ mod tests {
             err.to_string().contains("hero_body.glb"),
             "culprit lost: {err}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// WEB6: the same bytes give the same bindings through any source, so a
+    /// browser bind and a native bind agree.
+    #[test]
+    fn the_seam_binds_the_same_bodies_as_the_files() {
+        let dir = fixture_dir("seam");
+        let manifest = synth_manifest(EXPECTED_BUNDLE_SHA256[0]);
+        std::fs::write(dir.join(MANIFEST_NAME), &manifest).unwrap();
+        let mut memory = MemorySource::new();
+        memory
+            .insert(MANIFEST_NAME, manifest.into_bytes())
+            .expect("the manifest is a logical path");
+        for variant in VARIANTS {
+            let name = body_file_name(variant);
+            std::fs::write(dir.join("glb").join(&name), b"glb-bytes").unwrap();
+            memory
+                .insert(&body_logical_path(variant), b"glb-bytes".to_vec())
+                .expect("the body is a logical path");
+        }
+        let from_files = bind_all(&dir).expect("the files bind");
+        let from_seam = bind_all_from(&memory).expect("the seam binds");
+        assert_eq!(
+            from_files, from_seam,
+            "the same bytes give the same bindings"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// WEB6: a body the source does not hold fails loudly, with its name.
+    #[test]
+    fn a_missing_body_through_the_seam_fails_by_name() {
+        let mut memory = MemorySource::new();
+        memory
+            .insert(
+                MANIFEST_NAME,
+                synth_manifest(EXPECTED_BUNDLE_SHA256[0]).into_bytes(),
+            )
+            .expect("the manifest is a logical path");
+        let err = bind_all_from(&memory).expect_err("no body is a refusal");
+        assert!(
+            matches!(err, BindError::MissingBody(_)),
+            "wrong error: {err}"
+        );
+        assert!(
+            err.to_string().contains("hero_body.glb"),
+            "culprit lost: {err}"
+        );
+    }
+
+    /// WEB6: the same files give the same content digest through any source,
+    /// so a browser load can be compared with the native one.
+    #[test]
+    fn the_content_digest_is_the_same_through_any_source() {
+        let dir = fixture_dir("digest");
+        let manifest = synth_manifest(EXPECTED_BUNDLE_SHA256[0]);
+        std::fs::write(dir.join(MANIFEST_NAME), &manifest).unwrap();
+        let mut memory = MemorySource::new();
+        memory
+            .insert(MANIFEST_NAME, manifest.into_bytes())
+            .expect("the manifest is a logical path");
+        for variant in VARIANTS {
+            let name = body_file_name(variant);
+            std::fs::write(dir.join("glb").join(&name), b"glb-bytes").unwrap();
+            memory
+                .insert(&body_logical_path(variant), b"glb-bytes".to_vec())
+                .expect("the body is a logical path");
+        }
+        let from_files = content_digest(&FsSource::new(&dir), "").expect("the files digest");
+        let from_seam = content_digest(&memory, "").expect("the seam digests");
+        assert_eq!(from_files, from_seam, "the same files give the same digest");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

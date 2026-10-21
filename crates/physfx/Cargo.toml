@@ -23,3 +23,7 @@ rapier = ["dep:engine-physics", "engine-physics/rapier", "dep:engine-anim", "dep
 engine-physics = { workspace = true, optional = true }
 engine-anim = { workspace = true, optional = true }
 rapier3d = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The physics-law kit (engine_core::laws) for the tests.
+engine-core = { workspace = true, features = ["test-util"] }

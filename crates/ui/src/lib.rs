@@ -1473,6 +1473,10 @@ pub enum HudRole {
     PoiseSegment,
     /// Unlit poise ring segment.
     PoiseEmpty,
+    /// Filled part of the health bar.
+    HpFill,
+    /// One part of the weapon icon.
+    WeaponIcon,
 }
 
 /// One HUD command kind; each kind is one draw batch.
@@ -1854,6 +1858,575 @@ impl DuelOverlay {
             commands,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Legionary HUD: the three elements of the helmet-POV pictures.
+// ---------------------------------------------------------------------------
+
+/// Default objective line of the HUD: the words of `helmet-pov-march.jpg`.
+///
+/// The march mode reads its own line from its rules file; this is the honest
+/// fallback for a mode that has none.
+pub const LEGIONARY_DEFAULT_OBJECTIVE: &str = "MARCH TO THE CAMP.";
+/// Longest objective line the HUD shows, in characters; the rest clips.
+pub const LEGIONARY_MAX_OBJECTIVE_CHARS: usize = 48;
+/// Label above the objective line, as the march picture writes it.
+pub const LEGIONARY_OBJECTIVE_LABEL: &str = "OBJECTIVE:";
+/// Health bar fill: the blood red of `helmet-pov-battle.jpg`.
+pub const LEGIONARY_HP_COLOR: [u8; 3] = [160, 30, 24];
+/// Stamina bar fill: the antique gold of `helmet-pov-battle.jpg`.
+pub const LEGIONARY_STAMINA_COLOR: [u8; 3] = [176, 160, 73];
+/// Bar track: the near-black the fills sit on.
+pub const LEGIONARY_TRACK_COLOR: [u8; 3] = [18, 18, 16];
+/// Health label: the white of the `HP 78%` line.
+pub const LEGIONARY_LABEL_COLOR: [u8; 3] = [240, 238, 230];
+/// Weapon icon: the steel of the gladius.
+pub const LEGIONARY_ICON_COLOR: [u8; 3] = [198, 190, 174];
+/// Objective line: the ivory of `helmet-pov-march.jpg`.
+pub const LEGIONARY_OBJECTIVE_COLOR: [u8; 3] = [237, 230, 210];
+
+/// Reference viewport of the layout numbers: 1920 by 1080 pixels. The
+/// pictures are 2000 by 1116 and 1376 by 768; the numbers below are the same
+/// places read off a picture and converted to that reference.
+const LEGIONARY_REF_H: i32 = 1080;
+/// Left edge of the bottom-left cluster, in reference pixels.
+const LEGIONARY_BARS_X: i32 = 99;
+/// Width of both bars, in reference pixels.
+const LEGIONARY_BARS_W: i32 = 244;
+/// Top edge of the health bar, in reference pixels.
+const LEGIONARY_HP_BAR_Y: i32 = 993;
+/// Height of the health bar, in reference pixels.
+const LEGIONARY_HP_BAR_H: i32 = 19;
+/// Top edge of the stamina bar, in reference pixels.
+const LEGIONARY_STAMINA_BAR_Y: i32 = 1021;
+/// Height of the stamina bar, in reference pixels.
+const LEGIONARY_STAMINA_BAR_H: i32 = 12;
+/// Top edge of the `HP 78%` line, in reference pixels.
+const LEGIONARY_HP_LABEL_Y: i32 = 959;
+/// Height of the weapon icon box, in reference pixels.
+const LEGIONARY_ICON_H: i32 = 28;
+/// Right margin of the weapon icon, in reference pixels.
+const LEGIONARY_ICON_RIGHT_MARGIN: i32 = 58;
+/// Bottom margin of the weapon icon, in reference pixels.
+const LEGIONARY_ICON_BOTTOM_MARGIN: i32 = 65;
+/// Right margin of the objective line, in per mille of the viewport width.
+const LEGIONARY_OBJECTIVE_RIGHT_PERMILLE: u32 = 100;
+/// Top margin of the objective line, in per mille of the viewport height.
+const LEGIONARY_OBJECTIVE_TOP_PERMILLE: u32 = 50;
+/// Gap between the objective label and the objective line, in reference pixels.
+const LEGIONARY_OBJECTIVE_GAP: i32 = 6;
+
+/// The kit item the weapon slot shows.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LegionaryWeapon {
+    /// The short sword: leaf blade, crossguard, ribbed grip, round pommel.
+    Gladius,
+    /// The curved shield: painted panel with an iron boss.
+    Scutum,
+    /// The throwing spear: long shaft, small iron head.
+    Pilum,
+}
+
+/// One rectangle of the legionary HUD, in pixels, top-left origin.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct LegionaryRect {
+    /// Left edge in pixels.
+    pub x: i32,
+    /// Top edge in pixels.
+    pub y: i32,
+    /// Width in pixels.
+    pub w: i32,
+    /// Height in pixels.
+    pub h: i32,
+}
+
+impl LegionaryRect {
+    /// Right edge in pixels, exclusive.
+    #[must_use]
+    pub fn right(&self) -> i32 {
+        self.x.saturating_add(self.w)
+    }
+
+    /// Bottom edge in pixels, exclusive.
+    #[must_use]
+    pub fn bottom(&self) -> i32 {
+        self.y.saturating_add(self.h)
+    }
+}
+
+/// One bar of the legionary HUD: the empty track and the filled part.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct LegionaryBar {
+    /// The empty track the fill sits on.
+    pub track: LegionaryRect,
+    /// The filled part, in the bar's own colour.
+    pub fill: LegionaryRect,
+}
+
+/// The weapon icon: one kit item drawn as a few rectangles.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LegionaryIcon {
+    /// Which kit item the icon shows.
+    pub weapon: LegionaryWeapon,
+    /// The parts of the icon, in draw order.
+    pub parts: Vec<LegionaryRect>,
+}
+
+/// One text run of the legionary HUD.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LegionaryText {
+    /// Where the run starts, in pixels.
+    pub at: LegionaryRect,
+    /// The text of the run.
+    pub text: String,
+}
+
+/// Every element of the legionary HUD, with its rectangle.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LegionaryLayout {
+    /// The health bar and its fill.
+    pub hp: LegionaryBar,
+    /// The stamina bar and its fill.
+    pub stamina: LegionaryBar,
+    /// The `HP 78%` line above the bars.
+    pub hp_label: LegionaryText,
+    /// The weapon icon.
+    pub weapon: LegionaryIcon,
+    /// The `OBJECTIVE:` label.
+    pub objective_label: LegionaryText,
+    /// The objective line itself.
+    pub objective: LegionaryText,
+}
+
+/// The gladius of the battle picture, drawn as rectangles: the leaf blade
+/// points left, the crossguard stands at its heel, the grip is ribbed and
+/// the pommel is round.
+const LEGIONARY_GLADIUS: [LegionaryRect; 5] = [
+    LegionaryRect {
+        x: 0,
+        y: 8,
+        w: 18,
+        h: 9,
+    },
+    LegionaryRect {
+        x: 18,
+        y: 5,
+        w: 92,
+        h: 16,
+    },
+    LegionaryRect {
+        x: 110,
+        y: 0,
+        w: 12,
+        h: 28,
+    },
+    LegionaryRect {
+        x: 124,
+        y: 7,
+        w: 21,
+        h: 13,
+    },
+    LegionaryRect {
+        x: 148,
+        y: 4,
+        w: 12,
+        h: 18,
+    },
+];
+
+/// The scutum of the legionary's kit: the painted panel and its iron boss.
+const LEGIONARY_SCUTUM: [LegionaryRect; 2] = [
+    LegionaryRect {
+        x: 0,
+        y: 0,
+        w: 114,
+        h: 28,
+    },
+    LegionaryRect {
+        x: 48,
+        y: 8,
+        w: 18,
+        h: 14,
+    },
+];
+
+/// The pilum of the legionary's kit: the iron head, the long shaft and the
+/// butt spike.
+const LEGIONARY_PILUM: [LegionaryRect; 3] = [
+    LegionaryRect {
+        x: 0,
+        y: 7,
+        w: 16,
+        h: 14,
+    },
+    LegionaryRect {
+        x: 16,
+        y: 11,
+        w: 126,
+        h: 6,
+    },
+    LegionaryRect {
+        x: 142,
+        y: 10,
+        w: 12,
+        h: 8,
+    },
+];
+
+impl LegionaryWeapon {
+    /// The icon parts of this kit item, relative to the icon box, in
+    /// reference pixels, in draw order.
+    #[must_use]
+    fn parts(self) -> &'static [LegionaryRect] {
+        match self {
+            Self::Gladius => &LEGIONARY_GLADIUS,
+            Self::Scutum => &LEGIONARY_SCUTUM,
+            Self::Pilum => &LEGIONARY_PILUM,
+        }
+    }
+}
+
+/// The legionary HUD of the helmet-POV pictures.
+///
+/// `docs/design/legionary/helmet-pov-battle.jpg` is the look bar: the health
+/// and the stamina bars sit bottom left, the weapon icon sits bottom right.
+/// `helmet-pov-march.jpg` adds the one objective line top right. In
+/// legionary mode the HUD is only those three things.
+///
+/// Consumer: the HUD renderer (the same flat command list as the arena HUD)
+/// and the legionary mode of `crates/game`. Data owner: `engine-ui`. Units:
+/// health and stamina are permille (`0..=1000`), rectangles are pixels of
+/// the viewport the layout was built for, colours are sRGB triads.
+/// Determinism: a pure function of the inputs, integer math only, no clock,
+/// no IO, no clock and no drawing device. Failure mode: permille values clamp, the objective line
+/// clips to [`LEGIONARY_MAX_OBJECTIVE_CHARS`], nothing panics.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LegionaryHud {
+    width: u32,
+    height: u32,
+    hp_permille: u16,
+    stamina_permille: u16,
+    weapon: LegionaryWeapon,
+    objective: String,
+}
+
+impl LegionaryHud {
+    /// Build the HUD for one viewport. Health and stamina clamp to
+    /// `0..=PERMILLE_MAX`, the objective line clips to
+    /// [`LEGIONARY_MAX_OBJECTIVE_CHARS`] and the viewport clamps to
+    /// `1..=8192` on both sides. Pure.
+    #[must_use]
+    pub fn new(
+        width: u32,
+        height: u32,
+        hp_permille: u16,
+        stamina_permille: u16,
+        weapon: LegionaryWeapon,
+        objective: &str,
+    ) -> Self {
+        Self {
+            width: width.clamp(1, 8192),
+            height: height.clamp(1, 8192),
+            hp_permille: clamp_permille(hp_permille),
+            stamina_permille: clamp_permille(stamina_permille),
+            weapon,
+            objective: objective
+                .chars()
+                .take(LEGIONARY_MAX_OBJECTIVE_CHARS)
+                .collect(),
+        }
+    }
+
+    /// Health in permille, `0..=1000`.
+    #[must_use]
+    pub fn hp_permille(&self) -> u16 {
+        self.hp_permille
+    }
+
+    /// Stamina in permille, `0..=1000`.
+    #[must_use]
+    pub fn stamina_permille(&self) -> u16 {
+        self.stamina_permille
+    }
+
+    /// The kit item the weapon slot shows.
+    #[must_use]
+    pub fn weapon(&self) -> LegionaryWeapon {
+        self.weapon
+    }
+
+    /// The objective line the HUD shows.
+    #[must_use]
+    pub fn objective(&self) -> &str {
+        &self.objective
+    }
+
+    /// The health line above the bars: the health in whole per cent, as the
+    /// battle picture writes it.
+    #[must_use]
+    pub fn hp_label(&self) -> String {
+        format!("HP {}%", self.hp_permille / 10)
+    }
+
+    /// The layout as data: every element of the HUD with its rectangle. The
+    /// numbers come from the two pictures and scale with the viewport
+    /// height. Pure.
+    #[must_use]
+    pub fn layout(&self) -> LegionaryLayout {
+        let width = i32::try_from(self.width.min(8192)).unwrap_or(1920);
+        let height = i32::try_from(self.height.min(8192)).unwrap_or(1080);
+        let scale = |base: i32| -> i32 {
+            base.saturating_mul(height)
+                .checked_div(LEGIONARY_REF_H)
+                .unwrap_or(base)
+                .max(1)
+        };
+        let offset = |base: i32| -> i32 {
+            base.saturating_mul(height)
+                .checked_div(LEGIONARY_REF_H)
+                .unwrap_or(base)
+        };
+        let text_px = text::hud_text_px(self.height);
+        let text_px_i = i32::from(text_px);
+        let bars_x = offset(LEGIONARY_BARS_X);
+        let bars_w = scale(LEGIONARY_BARS_W);
+        let hp_track = LegionaryRect {
+            x: bars_x,
+            y: offset(LEGIONARY_HP_BAR_Y),
+            w: bars_w,
+            h: scale(LEGIONARY_HP_BAR_H),
+        };
+        let stamina_track = LegionaryRect {
+            x: bars_x,
+            y: offset(LEGIONARY_STAMINA_BAR_Y),
+            w: bars_w,
+            h: scale(LEGIONARY_STAMINA_BAR_H),
+        };
+        let hp = LegionaryBar {
+            fill: LegionaryRect {
+                w: bars_w.saturating_mul(i32::from(self.hp_permille)) / 1000,
+                ..hp_track
+            },
+            track: hp_track,
+        };
+        let stamina = LegionaryBar {
+            fill: LegionaryRect {
+                w: bars_w.saturating_mul(i32::from(self.stamina_permille)) / 1000,
+                ..stamina_track
+            },
+            track: stamina_track,
+        };
+        let hp_label = LegionaryText {
+            at: LegionaryRect {
+                x: bars_x,
+                y: offset(LEGIONARY_HP_LABEL_Y),
+                w: 0,
+                h: text_px_i,
+            },
+            text: self.hp_label(),
+        };
+        let (objective_label, objective) = self.objective_block(width, height, text_px);
+        LegionaryLayout {
+            hp,
+            stamina,
+            hp_label,
+            weapon: self.weapon_icon(width, height),
+            objective_label,
+            objective,
+        }
+    }
+
+    /// The flat command list the HUD renderer draws: the two bars bottom
+    /// left, the weapon icon bottom right, the objective lines top right and
+    /// nothing else. Pure.
+    #[must_use]
+    pub fn frame(&self) -> HudFrame {
+        let layout = self.layout();
+        let text_px = text::hud_text_px(self.height);
+        let mut commands: Vec<HudCommand> = Vec::new();
+        push_legionary_bar(
+            &mut commands,
+            &layout.hp,
+            HudRole::HpFill,
+            LEGIONARY_HP_COLOR,
+        );
+        push_legionary_bar(
+            &mut commands,
+            &layout.stamina,
+            HudRole::StaminaFill,
+            LEGIONARY_STAMINA_COLOR,
+        );
+        for part in &layout.weapon.parts {
+            commands.push(HudCommand::Rect {
+                role: HudRole::WeaponIcon,
+                x: part.x,
+                y: part.y,
+                w: part.w,
+                h: part.h,
+                color: rgba(LEGIONARY_ICON_COLOR, 255),
+            });
+        }
+        push_legionary_text(
+            &mut commands,
+            &layout.hp_label,
+            text_px,
+            LEGIONARY_LABEL_COLOR,
+        );
+        push_legionary_text(
+            &mut commands,
+            &layout.objective_label,
+            text_px,
+            LEGIONARY_OBJECTIVE_COLOR,
+        );
+        push_legionary_text(
+            &mut commands,
+            &layout.objective,
+            text_px,
+            LEGIONARY_OBJECTIVE_COLOR,
+        );
+        HudFrame::from_commands(self.width, self.height, text_px, commands)
+    }
+
+    /// The objective block: the label above the line, both right aligned to
+    /// the top right corner. Pure.
+    fn objective_block(
+        &self,
+        width: i32,
+        height: i32,
+        text_px: u16,
+    ) -> (LegionaryText, LegionaryText) {
+        let scale = |base: i32| -> i32 {
+            base.saturating_mul(height)
+                .checked_div(LEGIONARY_REF_H)
+                .unwrap_or(base)
+                .max(1)
+        };
+        let text_px_i = i32::from(text_px);
+        let right = width.saturating_sub(
+            width.saturating_mul(i32::try_from(LEGIONARY_OBJECTIVE_RIGHT_PERMILLE).unwrap_or(0))
+                / 1000,
+        );
+        let top = height
+            .saturating_mul(i32::try_from(LEGIONARY_OBJECTIVE_TOP_PERMILLE).unwrap_or(0))
+            / 1000;
+        let label_w = legionary_text_width(LEGIONARY_OBJECTIVE_LABEL, text_px);
+        let line_w = legionary_text_width(&self.objective, text_px);
+        let label = LegionaryText {
+            at: LegionaryRect {
+                x: right.saturating_sub(label_w),
+                y: top,
+                w: label_w,
+                h: text_px_i,
+            },
+            text: LEGIONARY_OBJECTIVE_LABEL.to_owned(),
+        };
+        let line = LegionaryText {
+            at: LegionaryRect {
+                x: right.saturating_sub(line_w),
+                y: top
+                    .saturating_add(text_px_i)
+                    .saturating_add(scale(LEGIONARY_OBJECTIVE_GAP)),
+                w: line_w,
+                h: text_px_i,
+            },
+            text: self.objective.clone(),
+        };
+        (label, line)
+    }
+
+    /// The weapon icon, anchored to the bottom right corner. Pure.
+    fn weapon_icon(&self, width: i32, height: i32) -> LegionaryIcon {
+        let scale = |base: i32| -> i32 {
+            base.saturating_mul(height)
+                .checked_div(LEGIONARY_REF_H)
+                .unwrap_or(base)
+                .max(1)
+        };
+        let offset = |base: i32| -> i32 {
+            base.saturating_mul(height)
+                .checked_div(LEGIONARY_REF_H)
+                .unwrap_or(base)
+        };
+        let source = self.weapon.parts();
+        let box_w = source
+            .iter()
+            .map(|part| part.x.saturating_add(part.w))
+            .max()
+            .unwrap_or(0);
+        let icon_x = width
+            .saturating_sub(scale(LEGIONARY_ICON_RIGHT_MARGIN))
+            .saturating_sub(scale(box_w));
+        let icon_y = height
+            .saturating_sub(scale(LEGIONARY_ICON_BOTTOM_MARGIN))
+            .saturating_sub(scale(LEGIONARY_ICON_H));
+        let parts = source
+            .iter()
+            .map(|part| LegionaryRect {
+                x: icon_x.saturating_add(offset(part.x)),
+                y: icon_y.saturating_add(offset(part.y)),
+                w: scale(part.w),
+                h: scale(part.h),
+            })
+            .collect();
+        LegionaryIcon {
+            weapon: self.weapon,
+            parts,
+        }
+    }
+}
+
+/// Push the track and the fill of one legionary bar. Pure.
+fn push_legionary_bar(
+    commands: &mut Vec<HudCommand>,
+    bar: &LegionaryBar,
+    fill_role: HudRole,
+    fill_color: [u8; 3],
+) {
+    commands.push(HudCommand::Rect {
+        role: HudRole::BarBack,
+        x: bar.track.x,
+        y: bar.track.y,
+        w: bar.track.w,
+        h: bar.track.h,
+        color: rgba(LEGIONARY_TRACK_COLOR, 255),
+    });
+    commands.push(HudCommand::Rect {
+        role: fill_role,
+        x: bar.fill.x,
+        y: bar.fill.y,
+        w: bar.fill.w,
+        h: bar.fill.h,
+        color: rgba(fill_color, 255),
+    });
+}
+
+/// Push one text run of the legionary HUD. Pure.
+fn push_legionary_text(
+    commands: &mut Vec<HudCommand>,
+    run: &LegionaryText,
+    text_px: u16,
+    color: [u8; 3],
+) {
+    commands.push(HudCommand::Text {
+        x: run.at.x,
+        y: run.at.y,
+        px: text_px,
+        color: rgba(color, 255),
+        text: run.text.clone(),
+    });
+}
+
+/// Width of a text run in pixels at `text_px`: the monospace cell of the HUD
+/// font. Pure.
+fn legionary_text_width(text: &str, text_px: u16) -> i32 {
+    let chars = i32::try_from(text.chars().count()).unwrap_or(i32::MAX);
+    let cell_w = i32::try_from(text::Atlas::CELL_W).unwrap_or(6);
+    let cell_h = i32::try_from(text::Atlas::CELL_H).unwrap_or(8);
+    chars
+        .saturating_mul(cell_w)
+        .saturating_mul(i32::from(text_px))
+        / cell_h
 }
 
 #[cfg(test)]
@@ -2664,7 +3237,7 @@ mod tests {
         );
     }
 
-    fn raster_pixels(frame: &HudFrame) -> [usize; 6] {
+    fn raster_pixels(frame: &HudFrame) -> [usize; 8] {
         let width = usize::try_from(frame.width()).expect("frame width fits usize");
         let height = usize::try_from(frame.height()).expect("frame height fits usize");
         let mut grid: Vec<Option<HudRole>> = vec![None; width.saturating_mul(height)];
@@ -2689,7 +3262,7 @@ mod tests {
                 }
             }
         }
-        let mut counts = [0usize; 6];
+        let mut counts = [0usize; 8];
         for role in grid.into_iter().flatten() {
             counts[role_index(role)] += 1;
         }
@@ -2704,6 +3277,8 @@ mod tests {
             HudRole::StaminaFill => 3,
             HudRole::PoiseSegment => 4,
             HudRole::PoiseEmpty => 5,
+            HudRole::HpFill => 6,
+            HudRole::WeaponIcon => 7,
         }
     }
 
@@ -2940,5 +3515,371 @@ mod tests {
         assert_eq!(text::hud_text_px(2160), 56);
         assert!(text::hud_text_px(720) < 28, "small screens scale down");
         assert_eq!(text::hud_text_px(0), 12, "zero viewport stays readable");
+    }
+
+    /// The legionary HUD of the battle picture: 78 percent health, a gladius
+    /// in the weapon slot and the march objective line.
+    fn legionary_hud() -> LegionaryHud {
+        LegionaryHud::new(
+            1920,
+            1080,
+            780,
+            720,
+            LegionaryWeapon::Gladius,
+            LEGIONARY_DEFAULT_OBJECTIVE,
+        )
+    }
+
+    #[test]
+    fn legionary_hud_bars_sit_bottom_left_at_1080p() {
+        let layout = legionary_hud().layout();
+        assert_eq!(
+            layout.hp.track,
+            LegionaryRect {
+                x: 99,
+                y: 993,
+                w: 244,
+                h: 19
+            },
+            "the health bar keeps the place of the battle picture"
+        );
+        assert_eq!(
+            layout.stamina.track,
+            LegionaryRect {
+                x: 99,
+                y: 1021,
+                w: 244,
+                h: 12
+            },
+            "the stamina bar sits under the health bar"
+        );
+        assert!(layout.hp.track.x < 1920 / 8, "the bars hug the left edge");
+        assert!(
+            layout.stamina.track.bottom() > 1080 - 60,
+            "the bars hug the bottom edge"
+        );
+        assert!(
+            layout.stamina.track.y > layout.hp.track.bottom(),
+            "the stamina bar sits under the health bar"
+        );
+        assert_eq!(
+            layout.hp_label.text, "HP 78%",
+            "the picture writes the percent"
+        );
+        assert_eq!(layout.hp_label.at.x, layout.hp.track.x);
+        assert!(
+            layout.hp_label.at.y + layout.hp_label.at.h <= layout.hp.track.y,
+            "the health line sits above the bar"
+        );
+    }
+
+    #[test]
+    fn legionary_hud_bars_scale_to_720p() {
+        let hud = LegionaryHud::new(
+            1280,
+            720,
+            780,
+            720,
+            LegionaryWeapon::Gladius,
+            LEGIONARY_DEFAULT_OBJECTIVE,
+        );
+        let layout = hud.layout();
+        assert_eq!(
+            layout.hp.track,
+            LegionaryRect {
+                x: 66,
+                y: 662,
+                w: 162,
+                h: 12
+            },
+            "the 720p bar is the 1080p bar scaled down"
+        );
+        assert_eq!(
+            layout.stamina.track,
+            LegionaryRect {
+                x: 66,
+                y: 680,
+                w: 162,
+                h: 8
+            }
+        );
+        assert!(layout.hp.track.x < 1280 / 8, "the bars stay bottom left");
+        assert!(
+            layout.stamina.track.bottom() > 720 - 40,
+            "the bars stay low"
+        );
+    }
+
+    #[test]
+    fn legionary_hud_weapon_icon_sits_bottom_right() {
+        let layout = legionary_hud().layout();
+        let icon = &layout.weapon;
+        assert_eq!(icon.weapon, LegionaryWeapon::Gladius);
+        assert!(!icon.parts.is_empty(), "the icon draws parts");
+        let right = icon
+            .parts
+            .iter()
+            .map(|part| part.right())
+            .max()
+            .expect("the icon has parts");
+        let bottom = icon
+            .parts
+            .iter()
+            .map(|part| part.bottom())
+            .max()
+            .expect("the icon has parts");
+        assert_eq!(right, 1920 - 58, "the icon keeps its right margin");
+        assert_eq!(bottom, 1080 - 65, "the icon keeps its bottom margin");
+        assert!(right > 1920 - 400, "the icon hugs the right edge");
+        assert!(bottom > 1080 - 120, "the icon hugs the bottom edge");
+        // The gladius points left: the tip is the leftmost and the thinnest part.
+        let tip = icon
+            .parts
+            .iter()
+            .min_by_key(|part| part.x)
+            .expect("the icon has parts");
+        assert!(tip.h < icon.parts[1].h, "the tip is thinner than the blade");
+    }
+
+    #[test]
+    fn legionary_hud_objective_line_sits_top_right() {
+        let layout = legionary_hud().layout();
+        assert_eq!(layout.objective_label.text, LEGIONARY_OBJECTIVE_LABEL);
+        assert_eq!(layout.objective.text, LEGIONARY_DEFAULT_OBJECTIVE);
+        assert_eq!(
+            layout.objective.at.right(),
+            1920 - 192,
+            "the objective line ends at the picture's right margin"
+        );
+        assert_eq!(
+            layout.objective_label.at.right(),
+            layout.objective.at.right(),
+            "the label and the line share the right edge"
+        );
+        assert!(
+            layout.objective.at.y < 1080 / 4,
+            "the line sits near the top"
+        );
+        assert!(
+            layout.objective.at.y > layout.objective_label.at.y,
+            "the label sits above the line"
+        );
+    }
+
+    #[test]
+    fn legionary_hud_draws_nothing_else() {
+        let hud = legionary_hud();
+        let layout = hud.layout();
+        let frame = hud.frame();
+        let (rects, borders, texts) = frame.batch_counts();
+        assert_eq!(borders, 0, "the legionary HUD draws no borders");
+        assert_eq!(
+            texts, 3,
+            "the health line, the objective label and the line"
+        );
+        assert_eq!(
+            rects,
+            4 + layout.weapon.parts.len(),
+            "two tracks, two fills and the icon parts, nothing else"
+        );
+        for command in frame.commands() {
+            assert!(
+                !matches!(command, HudCommand::Scissor { .. }),
+                "the legionary HUD draws no scissor"
+            );
+            if let HudCommand::Rect { x, y, w, h, .. } = *command {
+                assert!(x >= 0 && y >= 0, "every part stays on the screen");
+                assert!(
+                    x.saturating_add(w) <= 1920 && y.saturating_add(h) <= 1080,
+                    "every part stays inside the viewport"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legionary_hud_fills_follow_health_and_stamina() {
+        let hud = LegionaryHud::new(
+            1920,
+            1080,
+            780,
+            400,
+            LegionaryWeapon::Gladius,
+            LEGIONARY_DEFAULT_OBJECTIVE,
+        );
+        let layout = hud.layout();
+        assert_eq!(layout.hp.fill.w, 244 * 780 / 1000);
+        assert_eq!(layout.stamina.fill.w, 244 * 400 / 1000);
+        assert_eq!(layout.hp.fill.x, layout.hp.track.x);
+        assert_eq!(layout.hp.fill.h, layout.hp.track.h);
+        assert!(
+            layout.hp.fill.w < layout.hp.track.w,
+            "the fill stays in its track"
+        );
+        assert!(layout.stamina.fill.w < layout.stamina.track.w);
+    }
+
+    #[test]
+    fn legionary_hud_objective_comes_from_the_caller() {
+        let hud = LegionaryHud::new(
+            1920,
+            1080,
+            1000,
+            1000,
+            LegionaryWeapon::Pilum,
+            "HOLD THE LINE",
+        );
+        assert_eq!(hud.objective(), "HOLD THE LINE");
+        let frame = hud.frame();
+        let texts: Vec<&str> = frame
+            .commands()
+            .iter()
+            .filter_map(|row| row.text())
+            .collect();
+        assert!(texts.contains(&"HOLD THE LINE"), "the line is drawn");
+        assert!(
+            texts.contains(&LEGIONARY_OBJECTIVE_LABEL),
+            "the label is drawn"
+        );
+    }
+
+    #[test]
+    fn legionary_hud_clamps_health_and_clips_the_objective() {
+        let long = "M".repeat(LEGIONARY_MAX_OBJECTIVE_CHARS + 12);
+        let hud = LegionaryHud::new(1920, 1080, 5000, 5000, LegionaryWeapon::Scutum, &long);
+        assert_eq!(hud.hp_permille(), PERMILLE_MAX);
+        assert_eq!(hud.stamina_permille(), PERMILLE_MAX);
+        assert_eq!(
+            hud.objective().chars().count(),
+            LEGIONARY_MAX_OBJECTIVE_CHARS,
+            "the long line clips"
+        );
+        let layout = hud.layout();
+        assert_eq!(
+            layout.hp.fill.w, layout.hp.track.w,
+            "a full bar fills the track"
+        );
+        let tiny = LegionaryHud::new(1, 1, 0, 0, LegionaryWeapon::Pilum, "");
+        assert_eq!(tiny.hp_permille(), 0);
+        assert_eq!(tiny.stamina_permille(), 0);
+    }
+
+    #[test]
+    fn legionary_hud_kit_icons_differ() {
+        let mut shapes: Vec<Vec<LegionaryRect>> = Vec::new();
+        for weapon in [
+            LegionaryWeapon::Gladius,
+            LegionaryWeapon::Scutum,
+            LegionaryWeapon::Pilum,
+        ] {
+            let hud =
+                LegionaryHud::new(1920, 1080, 1000, 1000, weapon, LEGIONARY_DEFAULT_OBJECTIVE);
+            shapes.push(hud.layout().weapon.parts.clone());
+        }
+        assert_ne!(shapes[0], shapes[1], "the gladius is not the scutum");
+        assert_ne!(shapes[1], shapes[2], "the scutum is not the pilum");
+        assert_ne!(shapes[0], shapes[2], "the gladius is not the pilum");
+        for shape in &shapes {
+            assert!(!shape.is_empty(), "every icon draws parts");
+        }
+    }
+
+    #[test]
+    fn legionary_hud_is_the_same_twice() {
+        assert_eq!(legionary_hud().frame(), legionary_hud().frame());
+        assert_eq!(legionary_hud().layout(), legionary_hud().layout());
+    }
+
+    /// Write the legionary HUD frame as JSON for the headless capture
+    /// renderer: the layout the crate computed, nothing invented. Test-only.
+    fn write_legionary_capture(hud: &LegionaryHud, path: &std::path::Path) {
+        let frame = hud.frame();
+        let mut json = String::from("{\"width\":");
+        json.push_str(&frame.width().to_string());
+        json.push_str(",\"height\":");
+        json.push_str(&frame.height().to_string());
+        json.push_str(",\"text_px\":");
+        json.push_str(&frame.text_px().to_string());
+        json.push_str(",\"commands\":[");
+        let mut glyphs: Vec<char> = Vec::new();
+        for (index, command) in frame.commands().iter().enumerate() {
+            if index > 0 {
+                json.push(',');
+            }
+            match command {
+                HudCommand::Rect {
+                    x, y, w, h, color, ..
+                } => {
+                    json.push_str(&format!(
+                        "{{\"kind\":\"rect\",\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h},\"color\":[{},{},{},{}]}}",
+                        color[0], color[1], color[2], color[3]
+                    ));
+                }
+                HudCommand::Text {
+                    x,
+                    y,
+                    px,
+                    color,
+                    text,
+                    ..
+                } => {
+                    json.push_str(&format!(
+                        "{{\"kind\":\"text\",\"x\":{x},\"y\":{y},\"px\":{px},\"color\":[{},{},{},{}],\"text\":\"{text}\"}}",
+                        color[0], color[1], color[2], color[3]
+                    ));
+                    for glyph in text.chars() {
+                        if !glyphs.contains(&glyph) {
+                            glyphs.push(glyph);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        json.push_str("],\"glyphs\":{");
+        let atlas = text::Atlas::new();
+        for (index, glyph) in glyphs.iter().enumerate() {
+            if index > 0 {
+                json.push(',');
+            }
+            json.push_str(&format!("\"{glyph}\":["));
+            let rows = atlas.bitmap(*glyph).unwrap_or([0; 7]);
+            for (row_index, row) in rows.iter().enumerate() {
+                if row_index > 0 {
+                    json.push(',');
+                }
+                json.push_str(&row.to_string());
+            }
+            json.push(']');
+        }
+        json.push_str("}}");
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).expect("the report directory must be writable");
+        }
+        std::fs::write(path, json).expect("the capture dump must be written");
+    }
+
+    #[test]
+    fn legionary_hud_capture_dumps_the_layout() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/reports");
+        for (width, height) in [(1920u32, 1080u32), (1280, 720)] {
+            let hud = LegionaryHud::new(
+                width,
+                height,
+                780,
+                720,
+                LegionaryWeapon::Gladius,
+                LEGIONARY_DEFAULT_OBJECTIVE,
+            );
+            let path = dir.join(format!("legionary-hud-{width}x{height}.json"));
+            write_legionary_capture(&hud, &path);
+            let dumped = std::fs::read_to_string(&path).expect("the dump must be readable");
+            assert!(dumped.contains("\"kind\":\"rect\""), "the bars are dumped");
+            assert!(dumped.contains("\"kind\":\"text\""), "the lines are dumped");
+            assert!(
+                dumped.contains(LEGIONARY_DEFAULT_OBJECTIVE),
+                "the objective line is dumped"
+            );
+        }
     }
 }

@@ -328,6 +328,7 @@ impl LimbPool {
             if limb.asleep {
                 continue;
             }
+            let vertical_before = limb.vel_mmps[1];
             limb.vel_mmps[1] = limb.vel_mmps[1].saturating_sub(GRAVITY_MMPS_PER_TICK);
             for axis in 0..3 {
                 let moved = i64::from(limb.vel_mmps[axis]) * 1000 / TICKS_PER_SECOND;
@@ -343,8 +344,11 @@ impl LimbPool {
                 limb.pos_um[1] = floor_um;
                 grounded = true;
                 if limb.vel_mmps[1] < 0 {
-                    // Quarter bounce; the bounce dies once it is tiny.
-                    limb.vel_mmps[1] = -limb.vel_mmps[1] / 4;
+                    // Quarter bounce, capped at the speed the limb had before this tick's
+                    // gravity: gravity alone is not an impact, so a limb lying still must not
+                    // hop, and a landing must not add energy. The bounce dies once it is tiny.
+                    let approach = vertical_before.saturating_abs();
+                    limb.vel_mmps[1] = (-limb.vel_mmps[1] / 4).min(approach);
                     if limb.vel_mmps[1] < STILL_MMPS {
                         limb.vel_mmps[1] = 0;
                     }
@@ -515,6 +519,7 @@ fn take_i32(bytes: &[u8], at: &mut usize) -> Result<i32, LimbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::laws;
 
     fn arm(swing: u32, victim: u8, joint: u8) -> LimbSpawn {
         LimbSpawn {
@@ -756,5 +761,161 @@ mod tests {
             }
         });
         assert_eq!(heap.calls, 0);
+    }
+
+    #[test]
+    fn a_limb_lying_on_the_ground_stays_at_rest() {
+        // Position, velocity and angle are compared bit for bit for 600 ticks. The sleep
+        // counter and the tick number are left out: they count, they do not move the limb.
+        let mut pool = LimbPool::new(4).expect("pool");
+        let lying = LimbSpawn {
+            origin_mm: [0, 60, 0],
+            parent_vel_mmps: [0; 3],
+            impulse_mns: [0; 3],
+            ..arm(1, 0, 7)
+        };
+        pool.spawn(&lying, 0).expect("spawns");
+        // Spin is drawn at spawn and rolls a lying limb; this law is about the ground.
+        pool.limbs[0].spin_mradps = [0; 3];
+        let view = |p: &LimbPool| {
+            let l = p.limbs[0];
+            (l.pos_um, l.vel_mmps, l.angle_urad)
+        };
+        let start = view(&pool);
+        let held = laws::rest_stays_rest(start, 600, |s| {
+            pool.step();
+            *s = view(&pool);
+        });
+        assert!(held.is_ok(), "a limb on the ground hops: {held:?}");
+    }
+
+    #[test]
+    fn a_dropped_limb_never_gains_energy_through_its_bounces() {
+        // Energy per gram in (mm/s)^2: half v squared plus g times height, with g = 163 mm/s
+        // per tick at 60 Hz. Slack: one micrometre of lift, the position's own rounding.
+        let accel = f64::from(GRAVITY_MMPS_PER_TICK)
+            * f64::from(i32::try_from(TICKS_PER_SECOND).expect("60 Hz"));
+        let mut pool = LimbPool::new(4).expect("pool");
+        let drop = LimbSpawn {
+            origin_mm: [0, 1000, 0],
+            parent_vel_mmps: [0; 3],
+            impulse_mns: [0; 3],
+            ..arm(1, 0, 7)
+        };
+        pool.spawn(&drop, 0).expect("spawns");
+        pool.limbs[0].spin_mradps = [0; 3];
+        let mass = f64::from(pool.limbs[0].mass_g);
+        let energy = |p: &LimbPool| {
+            let l = p.limbs[0];
+            let v2: f64 = l
+                .vel_mmps
+                .iter()
+                .map(|v| f64::from(*v) * f64::from(*v))
+                .sum();
+            mass * (0.5 * v2 + accel * f64::from(l.pos_um[1]) / 1000.0)
+        };
+        let law =
+            laws::energy_never_rises(pool, 1_200, |p| p.step(), energy, mass * accel / 1000.0);
+        assert!(law.is_ok(), "{law:?}");
+    }
+
+    #[test]
+    fn mirrored_cuts_throw_mirrored_limbs() {
+        // Same cut key on both sides. Spin draws depend on the key alone, so spin is left out
+        // of the comparison; position and velocity must mirror across x.
+        let east = LimbSpawn {
+            origin_mm: [300, 900, 0],
+            parent_vel_mmps: [2_000, 500, 0],
+            impulse_mns: [30_000, 8_000, 0],
+            ..arm(4, 2, 9)
+        };
+        let west = LimbSpawn {
+            origin_mm: [-300, 900, 0],
+            parent_vel_mmps: [-2_000, 500, 0],
+            impulse_mns: [-30_000, 8_000, 0],
+            ..arm(4, 2, 9)
+        };
+        let mut a = LimbPool::new(4).expect("pool");
+        let mut b = LimbPool::new(4).expect("pool");
+        a.spawn(&east, 0).expect("spawns");
+        b.spawn(&west, 0).expect("spawns");
+        let mirrored = |p: &LimbPool, q: &LimbPool| -> bool {
+            let (l, r) = (p.limbs[0], q.limbs[0]);
+            l.pos_um[0] == -r.pos_um[0]
+                && l.vel_mmps[0] == -r.vel_mmps[0]
+                && l.pos_um[1..] == r.pos_um[1..]
+                && l.vel_mmps[1..] == r.vel_mmps[1..]
+        };
+        let law = laws::mirror(a, b, 900, |p, _| p.step(), mirrored);
+        assert!(law.is_ok(), "{law:?}");
+    }
+
+    #[test]
+    fn a_cut_batch_replays_bit_for_bit() {
+        let cuts = seeded(11, 40);
+        let start = LimbPool::new(MAX_LIMBS).expect("pool");
+        let law = laws::replay(start, 300, |p, tick| {
+            if let Some(cut) = usize::try_from(tick).ok().and_then(|i| cuts.get(i)) {
+                p.spawn(cut, 0).expect("spawns");
+            }
+            p.step();
+        });
+        assert!(law.is_ok(), "{law:?}");
+    }
+
+    #[test]
+    fn a_fast_limb_never_ends_a_tick_under_the_ground() {
+        // The ground is a plane at y = radius, checked after the move. A limb at the speed
+        // cap (40 m/s, 666 mm of travel a tick) dropped from 1.8 m must land, not pass through.
+        let mut pool = LimbPool::new(4).expect("pool");
+        let fast = LimbSpawn {
+            origin_mm: [0, 1800, 0],
+            parent_vel_mmps: [0, -MAX_SPEED_MMPS, 0],
+            impulse_mns: [0; 3],
+            ..arm(1, 0, 7)
+        };
+        pool.spawn(&fast, 0).expect("spawns");
+        let mut bounced = false;
+        for tick in 1..=600 {
+            let before = pool.limbs[0].vel_mmps[1];
+            pool.step();
+            let l = pool.limbs[0];
+            let floor = i32::try_from(l.radius_mm).expect("small") * 1000;
+            assert!(
+                l.pos_um[1] >= floor,
+                "tick {tick}: under the ground at {} um, moving {before} mm/s",
+                l.pos_um[1]
+            );
+            bounced |= before < 0 && l.vel_mmps[1] > 0 && l.pos_um[1] == floor;
+        }
+        assert!(bounced, "the fast limb reached the ground and bounced");
+    }
+
+    #[test]
+    fn the_stump_takes_the_blade_impulse_turned_round() {
+        // Recoil is exactly minus the blade impulse. The limb takes the same impulse, but its
+        // velocity is whole mm/s, so its momentum is within one mm/s of the blade's (3000 g
+        // does not divide 40 000 mN*s evenly).
+        let spec = LimbSpawn {
+            volume_cm3: 3_000,
+            density_kg_m3: 1_000,
+            parent_vel_mmps: [0; 3],
+            impulse_mns: [40_000, -7_000, 123],
+            ..arm(2, 1, 5)
+        };
+        let mut pool = LimbPool::new(4).expect("pool");
+        let report = pool.spawn(&spec, 0).expect("spawns");
+        assert_eq!(report.recoil.impulse_mns, [-40_000, 7_000, -123]);
+        let limb = pool.limbs()[0];
+        let mass = i64::from(limb.mass_g);
+        for (v, impulse) in limb.vel_mmps.iter().zip(spec.impulse_mns.iter()) {
+            // Momentum in g*mm/s; 1 mN*s is 1000 of them.
+            let taken = mass * i64::from(*v);
+            let blade = i64::from(*impulse) * 1000;
+            assert!(
+                (taken - blade).abs() < mass,
+                "limb {taken} vs blade {blade}"
+            );
+        }
     }
 }

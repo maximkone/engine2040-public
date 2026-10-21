@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { sandFrames } from "./iqa-gate.mjs";
-import { failLines, lastGreenRun, lookScore, middleCapture, newestFirst, parseReceipt, parseView, passFloors, pruneRuns, redFloors, referenceInterval, scoreCaptures, summary } from "./product-check.mjs";
+import { crashName, failLines, lastGreenRun, lookScore, middleCapture, newestFirst, parseReceipt, parseView, passFloors, pruneRuns, redFloors, referenceInterval, scoreCaptures, summary } from "./product-check.mjs";
 
 const RECEIPT = `arena smoke: ticks=300 frames=300
 arena frame-split: sim=0.085ms present=117.519ms fighters=2.932ms per frame (mean over 300 frames) cpu_ms p50=7.501 p99=407.215 interval_ms p50=59.597 p99=407.881 gpu_ms p50=0.244 p99=4.156 (forward p50=0.135 blit p50=0.109; 299 frames) acquire=0.068ms present_mode=Fifo
@@ -57,6 +57,18 @@ test("a red strobe and an empty frame break floors; a green run breaks none", ()
   assert.deepEqual(green, {});
   const empty = redFloors({ look: { ...look, tinted_share: 0, empty: 7, exit: 1, framingFailed: true }, timing: null, caps: quietCaps, ref: null }, BAR);
   assert.deepEqual(Object.keys(empty), ["framing"], "a --require-framing exit is the framing floor, not a second exit floor");
+});
+
+test("a crashed run names the fault instead of showing a bare status code", () => {
+  assert.equal(crashName(3221225725), "a stack overflow (0xC00000FD)");
+  assert.equal(crashName(3221225477), "an access violation (0xC0000005)");
+  assert.equal(crashName(2), null);
+  const look = { ...parseReceipt(RECEIPT), tinted_share: 0, exit: 3221225725, timedOut: false };
+  const red = redFloors({ look, timing: null, caps: quietCaps, ref: null }, BAR);
+  assert.match(red.exit, /the look run died with a stack overflow/);
+  const timing = { ...parseReceipt(RECEIPT), exit: 3221225725, loaded: 0 };
+  const redTiming = redFloors({ look: { ...look, exit: 0 }, timing, caps: quietCaps, ref: null }, BAR);
+  assert.match(redTiming.exit, /the timing run died with a stack overflow/);
 });
 
 test("fps is gated only on a quiet run, against the median of recent quiet runs", () => {

@@ -2,6 +2,8 @@
 //! slack, never explodes, sleeps, falls when released and pulls like a spring and a damper.
 
 use super::*;
+use crate::tether::Tether;
+use engine_core::laws;
 
 /// The rope's lowest allowed node height, meters (the module's own constant is private).
 const FLOOR: f32 = 0.02;
@@ -282,4 +284,95 @@ fn tether_retune_reels_rope_in_and_out_and_a_free_carry_lets_the_body_fall() {
     assert!(height(&fx) < 1.5, "nothing holds it up: {}", height(&fx));
     step_n(&mut fx, 240);
     assert!(fx.ragdoll_speed(0).expect("speed") < 0.2, "it lay down");
+}
+
+/// A rope as the laws see it: the nodes it shows, not the counters that count its stillness. A
+/// taut or sleeping rope keeps counting while nothing it shows moves.
+#[derive(Clone, Debug)]
+struct Shown(Tether);
+
+impl PartialEq for Shown {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.nodes(0.0) == other.0.nodes(0.0) && self.0.nodes(1.0) == other.0.nodes(1.0)
+    }
+}
+
+/// The rope's energy with unit mass per node, joules: the motion of its last tick plus gravity's
+/// potential at the rope's own 9.81 m/s^2.
+fn energy(rope: &Tether) -> f64 {
+    let (prev, now) = (rope.nodes(0.0), rope.nodes(1.0));
+    now.iter()
+        .zip(&prev)
+        .map(|(c, p)| {
+            let speed_sq: f64 = (0..3)
+                .map(|k| (f64::from(c[k] - p[k]) / f64::from(FIXED_DT)).powi(2))
+                .sum();
+            0.5 * speed_sq + 9.81 * f64::from(c[1])
+        })
+        .sum()
+}
+
+/// The energy slack for a rope of `nodes` nodes: one millimetre of fall per node, the rope's own
+/// unit of stillness (`STILL_M`). Its integrator and the few projection sweeps stay inside that.
+fn fall_slack(nodes: usize) -> f64 {
+    9.81e-3 * f64::from(u16::try_from(nodes).unwrap_or(u16::MAX))
+}
+
+#[test]
+fn a_taut_rope_held_at_both_ends_stays_at_rest() {
+    // Ends as far apart as the rope is long: it lies straight, and nothing acts on it.
+    let rope = Tether::new(1, A, end(5.0), 4.0, 20, 16);
+    assert_eq!(rope.state(), TetherState::Taut);
+    laws::rest_stays_rest(Shown(rope), 600, |s| s.0.step()).expect("a taut rope at rest");
+}
+
+#[test]
+fn a_slack_rope_that_has_hung_still_stays_at_rest() {
+    let mut rope = Tether::new(1, A, end(3.0), 4.0, 20, 16);
+    for _ in 0..600 {
+        rope.step();
+    }
+    assert!(rope.asleep(), "the rope hangs still first");
+    laws::rest_stays_rest(Shown(rope), 300, |s| s.0.step()).expect("a sleeping rope at rest");
+}
+
+#[test]
+fn a_swinging_rope_never_gains_energy_with_no_input() {
+    // The Potato tier (8 nodes, 8 sweeps) and the Comfort tier (20 nodes, 16 sweeps): held at
+    // both ends, and released from a level line so that it falls and swings.
+    for (nodes, sweeps) in [(8, 8), (20, 16)] {
+        let held = Tether::new(1, A, end(3.0), 4.0, nodes, sweeps);
+        laws::energy_never_rises(held, 600, |t| t.step(), energy, fall_slack(nodes))
+            .expect("a held slack rope never pumps");
+        let mut released = Tether::new(1, A, end(3.0), 4.0, nodes, sweeps);
+        released.release();
+        laws::energy_never_rises(released, 600, |t| t.step(), energy, fall_slack(nodes))
+            .expect("a released rope never pumps");
+    }
+}
+
+#[test]
+fn a_taut_rope_that_goes_slack_hangs_without_adding_energy() {
+    // The thrower steps 10 cm closer, so the rope goes slack on that tick. Taut, it lay straight;
+    // slack, it must hang in its arc at once, and its first tick adds no energy.
+    let mut rope = Tether::new(1, A, end(4.0), 4.0, 20, 16);
+    assert_eq!(rope.state(), TetherState::Taut);
+    for _ in 0..3 {
+        rope.set_ends(A, end(4.0));
+        rope.step();
+    }
+    rope.set_ends(A, end(3.9));
+    laws::energy_never_rises(rope, 1, |t| t.step(), energy, fall_slack(20))
+        .expect("a rope that goes slack does not pump");
+}
+
+#[test]
+fn a_rope_replayed_with_the_same_ends_is_the_same_rope() {
+    let start = Tether::new(4, A, end(3.0), 4.0, 20, 16);
+    laws::replay(start, 400, |t, tick| {
+        let phase = f32::from(u16::try_from(tick).unwrap_or(u16::MAX)) * 0.07;
+        t.set_ends(A, end(3.0 + 1.5 * phase.sin()));
+        t.step();
+    })
+    .expect("two runs of one rope match every tick");
 }

@@ -380,8 +380,10 @@ pub fn ray_cast(
 
 type F3 = [Fixed; 3];
 
-/// Largest coordinate, in meters, that [`swept_cast`] accepts (keeps every Q16 product
-/// far from overflow).
+/// Largest offset, in meters, from the sweep's start that [`swept_cast`] works in: the move
+/// itself and every capsule near its path (keeps every Q16 product far from overflow). The
+/// sweep runs in the frame of its start, so world position is free: a cast 5 km from the
+/// origin answers exactly as the same cast at the origin.
 pub const SWEPT_RANGE_M: i64 = 256;
 /// Largest sphere or capsule radius, in meters, that [`swept_cast`] accepts.
 pub const SWEPT_RADIUS_M: i64 = 64;
@@ -389,8 +391,8 @@ pub const SWEPT_RADIUS_M: i64 = 64;
 /// Why a Q16 cast was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SweptError {
-    /// A coordinate is beyond [`SWEPT_RANGE_M`] or a radius is negative or beyond
-    /// [`SWEPT_RADIUS_M`].
+    /// The move, or a capsule its path can reach, spans beyond [`SWEPT_RANGE_M`] from the
+    /// start, or a radius is negative or beyond [`SWEPT_RADIUS_M`].
     OutOfRange,
 }
 
@@ -533,16 +535,33 @@ fn within(points: &[F3], limit: i64) -> bool {
     points
         .iter()
         .flatten()
-        .all(|v| v.0.abs() <= limit * Fixed::SCALE)
+        .all(|v| v.0.unsigned_abs() <= limit.unsigned_abs() * Fixed::SCALE.unsigned_abs())
+}
+
+/// True when the capsule `a..b` grown by `reach` cannot meet the move `0..d` because their
+/// boxes are apart on some axis (all in the frame of the sweep's start).
+fn apart(d: F3, a: F3, b: F3, reach: Fixed) -> bool {
+    (0..3).any(|axis| {
+        let (move_lo, move_hi) = (d[axis].min(Fixed::ZERO), d[axis].max(Fixed::ZERO));
+        let cap_lo = a[axis].min(b[axis]).saturating_sub(reach);
+        let cap_hi = a[axis].max(b[axis]).saturating_add(reach);
+        cap_hi < move_lo || cap_lo > move_hi
+    })
 }
 
 /// Sweep a sphere of `radius` (zero is a segment) from `from` to `to` against `targets`;
 /// `out` is cleared and filled with every capsule met, nearest time of impact first,
 /// ties by [`CastCapsule::id`]. The order of `targets` never changes `out`.
 ///
+/// The sweep runs in the frame of `from`: every product in it reads an offset (`o - v`,
+/// `to - from`), never an absolute coordinate, so moving the whole scene changes no bit of
+/// the answer. A capsule far from the path is skipped, not refused, so a big map pays nothing
+/// for its far fighters.
+///
 /// # Errors
-/// [`SweptError::OutOfRange`] when a point is beyond [`SWEPT_RANGE_M`] or a radius is
-/// outside `0..=`[`SWEPT_RADIUS_M`].
+/// [`SweptError::OutOfRange`] when the move spans beyond [`SWEPT_RANGE_M`], a capsule that
+/// can reach the path spans beyond it from `from`, or a radius is outside
+/// `0..=`[`SWEPT_RADIUS_M`].
 pub fn swept_cast(
     from: [Fixed; 3],
     to: [Fixed; 3],
@@ -552,18 +571,29 @@ pub fn swept_cast(
 ) -> Result<(), SweptError> {
     out.clear();
     let radius_ok = |r: Fixed| (0..=SWEPT_RADIUS_M * Fixed::SCALE).contains(&r.0);
-    if !within(&[from, to], SWEPT_RANGE_M) || !radius_ok(radius) {
-        return Err(SweptError::OutOfRange);
-    }
-    if targets
-        .iter()
-        .any(|t| !within(&[t.a, t.b], SWEPT_RANGE_M) || !radius_ok(t.radius))
-    {
-        return Err(SweptError::OutOfRange);
-    }
     let d = fsub(to, from);
+    if !within(&[d], SWEPT_RANGE_M) || !radius_ok(radius) {
+        return Err(SweptError::OutOfRange);
+    }
+    let origin = [Fixed::ZERO; 3];
     for cap in targets {
-        if let Some((toi, normal)) = sweep_capsule(from, d, radius, cap) {
+        if !radius_ok(cap.radius) {
+            out.clear();
+            return Err(SweptError::OutOfRange);
+        }
+        let local = CastCapsule {
+            a: fsub(cap.a, from),
+            b: fsub(cap.b, from),
+            ..*cap
+        };
+        if !within(&[local.a, local.b], SWEPT_RANGE_M) {
+            if apart(d, local.a, local.b, radius + cap.radius) {
+                continue;
+            }
+            out.clear();
+            return Err(SweptError::OutOfRange);
+        }
+        if let Some((toi, normal)) = sweep_capsule(origin, d, radius, &local) {
             out.push(SweptHit {
                 id: cap.id,
                 toi,
@@ -933,6 +963,52 @@ mod tests {
             swept_cast([Fixed::ZERO; 3], [Fixed::ONE; 3], q(-1.0), &[], &mut out),
             Err(SweptError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn swept_cast_answers_the_same_anywhere_on_a_big_map() {
+        // Law: physics does not care where the origin is. The same throw 5 km out (a Rome
+        // chapter map, an urban-war city) meets the same capsules at the same times with the
+        // same normals, bit for bit; before, any point past 256 m refused the whole cast and
+        // the spear flew through everyone.
+        let row = [
+            cap(9, [6.0, 0.6, 0.0], [6.0, 0.6, 0.0], 0.5),
+            cap(4, [2.0, 0.3, 0.0], [2.0, 1.8, 0.0], 0.4),
+            cap(7, [4.0, -1.0, 0.2], [4.5, 1.0, -0.3], 0.35),
+        ];
+        let (from, to) = (q3([0.0, 1.0, 0.0]), q3([10.0, 0.5, 0.1]));
+        let home = run_fixed(from, to, &row);
+        assert_eq!(home.len(), 3, "the fixture must hit all three: {home:?}");
+        for shift in [[5_000, -300, 4_000], [-20_000, 0, 77]] {
+            let s = shift.map(Fixed::from_int);
+            let far_row = row.map(|c| CastCapsule {
+                a: fadd(c.a, s),
+                b: fadd(c.b, s),
+                ..c
+            });
+            let far = run_fixed(fadd(from, s), fadd(to, s), &far_row);
+            assert_eq!(far, home, "shift {shift:?} changed the answer");
+        }
+        // A fighter 10 km away cannot meet a 10 m throw: skipped, never a refusal.
+        let mut lonely = row.to_vec();
+        lonely.push(cap(3, [10_000.0, 0.0, 0.0], [10_000.0, 2.0, 0.0], 0.4));
+        assert_eq!(run_fixed(from, to, &lonely), home);
+        // One that straddles the path but spans past the range is still refused, not guessed.
+        let mut wall = row.to_vec();
+        wall.push(cap(5, [5.0, 1.0, -400.0], [5.0, 1.0, 400.0], 0.4));
+        let mut out = Vec::new();
+        assert_eq!(
+            swept_cast(from, to, q(0.08), &wall, &mut out),
+            Err(SweptError::OutOfRange)
+        );
+        assert!(out.is_empty());
+    }
+
+    /// [`swept_cast`] on Q16 points with a 0.08 m sphere.
+    fn run_fixed(from: F3, to: F3, targets: &[CastCapsule]) -> Vec<SweptHit> {
+        let mut out = Vec::new();
+        swept_cast(from, to, q(0.08), targets, &mut out).expect("cast in range");
+        out
     }
 
     /// Distance from `p` to the segment `a..b`, in `f32` (the test's own reference).
