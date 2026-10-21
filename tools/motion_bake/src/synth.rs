@@ -211,7 +211,7 @@ pub fn stagger(seed: i64) -> TeacherClip {
         "the tail starts right after the last pinned frame"
     );
     let amp = amplitudes(seed);
-    let skeleton = soma_skeleton();
+    let skeleton = soma_skeleton().expect("the teacher table is parent-first");
     let rest = rest_world(&skeleton, &soma_offsets());
     let hips_at = joint_index(&skeleton, "hips").expect("soma has hips");
     let mut local_rot = Vec::with_capacity(SOURCE_FRAMES * SOMA77.len());
@@ -379,9 +379,12 @@ mod tests {
     #[test]
     fn the_stagger_plants_both_feet_and_tails_off_the_ground() {
         let clip = stagger(7);
-        let left = soma_index("leftfoot");
-        let right = soma_index("rightfoot");
-        let rest = rest_world(&soma_skeleton(), &soma_offsets());
+        let left = soma_index("leftfoot").expect("the foot is in the table");
+        let right = soma_index("rightfoot").expect("the foot is in the table");
+        let rest = rest_world(
+            &soma_skeleton().expect("the teacher table is parent-first"),
+            &soma_offsets(),
+        );
         let planted = |frame: usize, joint: usize| {
             clip.posed_joints[frame * SOMA77.len() + joint][1] - rest[joint][1] <= PLANT_BAND
         };

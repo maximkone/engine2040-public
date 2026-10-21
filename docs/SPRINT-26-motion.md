@@ -124,3 +124,13 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   loads from disk, its track names come back with the clip, a sampled frame
   matches the pack's own keys, and the feet slip stays under 0.08 like the
   bake gate reads it.
+  Progress 2026-10-21: the loader landed (`crates/anim/src/pack_file.rs`: a
+  path in, a clip out, the wire checked twice, so a cut or edited file
+  refuses instead of playing wrong motion) and the rig moved into the engine
+  (`crates/assets/src/fighter.rs`: the SOMA rest pose, the teacher skeleton
+  and the fighter-65 skeleton with its bind; the bake tool imports it and
+  keeps only its math). The bake is unchanged by the move: the tool's own
+  test still reproduces the committed fixture byte for byte
+  (`the_committed_fixture_is_this_bake_run_twice`). Left in the row: the
+  pack carries only the two foot tracks and no names, so the whole fighter
+  body has to be baked; and no runtime hook plays a loaded clip yet.

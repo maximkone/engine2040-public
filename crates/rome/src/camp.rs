@@ -57,13 +57,17 @@ pub struct Rampart<'a> {
     pub height: Measure<'a>,
 }
 
-/// The two camp streets that stay clear of tents and packs.
+/// The camp streets that stay clear of tents and packs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Streets<'a> {
     /// The via principalis, the main street across the camp.
     pub via_principalis: Measure<'a>,
     /// The via quintana, the second street behind it.
     pub via_quintana: Measure<'a>,
+    /// The via sagularis, the broad street down the middle of the camp.
+    pub via_sagularis: Measure<'a>,
+    /// The via sagularis with five legions under it, which is wider.
+    pub via_sagularis_five_legions: Measure<'a>,
 }
 
 /// The camp works one table describes.
@@ -74,6 +78,10 @@ pub struct Camp<'a> {
     pub rampart: Rampart<'a>,
     /// The streets every camp keeps clear.
     pub streets: Streets<'a>,
+    /// The clear ground left outside the ditch at the gates.
+    pub gate_clear: Measure<'a>,
+    /// The table's own millimetres to a Roman foot.
+    foot: u32,
 }
 
 impl Camp<'static> {
@@ -111,7 +119,15 @@ impl<'a> Camp<'a> {
             ditches,
             rampart: rampart(&table, mm_per_ft)?,
             streets: streets(&table, mm_per_ft)?,
+            gate_clear: gate_clear(&table, mm_per_ft)?,
+            foot: mm_per_ft,
         })
+    }
+
+    /// The table's own millimetres to a Roman foot: every length turns through it.
+    #[must_use]
+    pub fn foot(&self) -> u32 {
+        self.foot
     }
 
     /// The ditch this threat's century digs.
@@ -135,6 +151,9 @@ impl<'a> Camp<'a> {
             self.rampart.height,
             self.streets.via_principalis,
             self.streets.via_quintana,
+            self.streets.via_sagularis,
+            self.streets.via_sagularis_five_legions,
+            self.gate_clear,
         ];
         digest(b"engine-rome/camp/1", lengths.into_iter())
     }
@@ -176,8 +195,25 @@ fn streets<'a>(table: &Table<'a>, mm_per_ft: u32) -> Result<Streets<'a>, LoadErr
         .entry("streets")
         .ok_or(LoadError::MissingEntry { entry: "streets" })?;
     only(entry, &["via_principalis_ft", "via_quintana_ft"])?;
+    let sagularis = table
+        .entry("streets.sagularis")
+        .ok_or(LoadError::MissingEntry {
+            entry: "streets.sagularis",
+        })?;
+    only(sagularis, &["width_ft", "width_five_legions_ft"])?;
     Ok(Streets {
         via_principalis: length(entry, "via_principalis_ft", mm_per_ft)?,
         via_quintana: length(entry, "via_quintana_ft", mm_per_ft)?,
+        via_sagularis: length(sagularis, "width_ft", mm_per_ft)?,
+        via_sagularis_five_legions: length(sagularis, "width_five_legions_ft", mm_per_ft)?,
     })
+}
+
+/// The clear ground outside the ditch at the gates.
+fn gate_clear<'a>(table: &Table<'a>, mm_per_ft: u32) -> Result<Measure<'a>, LoadError<'a>> {
+    let entry = table
+        .entry("gates")
+        .ok_or(LoadError::MissingEntry { entry: "gates" })?;
+    only(entry, &["clear_space_ft"])?;
+    length(entry, "clear_space_ft", mm_per_ft)
 }

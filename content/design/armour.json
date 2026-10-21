@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "note": "The armour each class wears. A piece is a patch of the body's own surface around a bone, pushed out along the normal: the plate fits the body it goes on, whatever the body is. The piece names the bone, the radius around the bone's head, how far the plate stands off the skin, and the surface kind it is painted in.",
+  "kinds": {
+    "plate": "the hard plate: pauldrons, greaves, the gorget",
+    "strap": "the soft stuff: belts, bracers, the sash",
+    "cloth": "the hanging stuff: the tabard, the cape"
+  },
+  "classes": {
+    "warden_fighter": {"faction": "wardens", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.20, "offset": 0.045, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.20, "offset": 0.045, "kind": "plate"},
+      {"bone": "LeftLowerArm", "radius": 0.13, "offset": 0.030, "kind": "strap"},
+      {"bone": "RightLowerArm", "radius": 0.13, "offset": 0.030, "kind": "strap"},
+      {"bone": "LeftLowerLeg", "radius": 0.16, "offset": 0.035, "kind": "plate"},
+      {"bone": "RightLowerLeg", "radius": 0.16, "offset": 0.035, "kind": "plate"},
+      {"bone": "Hips", "radius": 0.24, "offset": 0.030, "kind": "strap"}
+    ]},
+    "warden_defender": {"faction": "wardens", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.24, "offset": 0.055, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.24, "offset": 0.055, "kind": "plate"},
+      {"bone": "LeftLowerArm", "radius": 0.15, "offset": 0.040, "kind": "plate"},
+      {"bone": "RightLowerArm", "radius": 0.15, "offset": 0.040, "kind": "plate"},
+      {"bone": "LeftLowerLeg", "radius": 0.18, "offset": 0.045, "kind": "plate"},
+      {"bone": "RightLowerLeg", "radius": 0.18, "offset": 0.045, "kind": "plate"},
+      {"bone": "Hips", "radius": 0.26, "offset": 0.035, "kind": "strap"}
+    ]},
+    "warden_warrior": {"faction": "wardens", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.18, "offset": 0.040, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.18, "offset": 0.040, "kind": "plate"},
+      {"bone": "LeftLowerArm", "radius": 0.12, "offset": 0.028, "kind": "strap"},
+      {"bone": "RightLowerArm", "radius": 0.12, "offset": 0.028, "kind": "strap"},
+      {"bone": "Hips", "radius": 0.22, "offset": 0.028, "kind": "cloth"}
+    ]},
+    "warden_rogue": {"faction": "wardens", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.15, "offset": 0.030, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.15, "offset": 0.030, "kind": "plate"},
+      {"bone": "LeftLowerLeg", "radius": 0.14, "offset": 0.028, "kind": "strap"},
+      {"bone": "RightLowerLeg", "radius": 0.14, "offset": 0.028, "kind": "strap"}
+    ]},
+    "warden_assassin": {"faction": "wardens", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.15, "offset": 0.032, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.15, "offset": 0.032, "kind": "plate"},
+      {"bone": "Hips", "radius": 0.20, "offset": 0.025, "kind": "cloth"}
+    ]},
+    "warden_archer": {"faction": "wardens", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.15, "offset": 0.030, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.15, "offset": 0.030, "kind": "plate"},
+      {"bone": "LeftLowerLeg", "radius": 0.15, "offset": 0.026, "kind": "strap"},
+      {"bone": "RightLowerLeg", "radius": 0.15, "offset": 0.026, "kind": "strap"},
+      {"bone": "Hips", "radius": 0.20, "offset": 0.022, "kind": "cloth"}
+    ]},
+    "warden_mage": {"faction": "wardens", "pieces": [
+      {"bone": "Hips", "radius": 0.30, "offset": 0.030, "kind": "cloth"},
+      {"bone": "UpperChest", "radius": 0.26, "offset": 0.024, "kind": "cloth"},
+      {"bone": "LeftShoulder", "radius": 0.14, "offset": 0.026, "kind": "strap"},
+      {"bone": "RightShoulder", "radius": 0.14, "offset": 0.026, "kind": "strap"}
+    ]},
+    "warden_sorcerer": {"faction": "wardens", "pieces": [
+      {"bone": "Hips", "radius": 0.30, "offset": 0.030, "kind": "cloth"},
+      {"bone": "UpperChest", "radius": 0.26, "offset": 0.024, "kind": "cloth"},
+      {"bone": "LeftShoulder", "radius": 0.15, "offset": 0.030, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.15, "offset": 0.030, "kind": "plate"}
+    ]},
+    "warden_enchanter": {"faction": "wardens", "pieces": [
+      {"bone": "Hips", "radius": 0.28, "offset": 0.028, "kind": "cloth"},
+      {"bone": "UpperChest", "radius": 0.24, "offset": 0.022, "kind": "cloth"},
+      {"bone": "LeftShoulder", "radius": 0.14, "offset": 0.026, "kind": "strap"},
+      {"bone": "RightShoulder", "radius": 0.14, "offset": 0.026, "kind": "strap"}
+    ]},
+    "warden_acolyte": {"faction": "wardens", "pieces": [
+      {"bone": "Hips", "radius": 0.28, "offset": 0.026, "kind": "cloth"},
+      {"bone": "UpperChest", "radius": 0.24, "offset": 0.020, "kind": "cloth"},
+      {"bone": "LeftShoulder", "radius": 0.13, "offset": 0.022, "kind": "strap"},
+      {"bone": "RightShoulder", "radius": 0.13, "offset": 0.022, "kind": "strap"}
+    ]},
+    "warden_cleric": {"faction": "wardens", "pieces": [
+      {"bone": "Hips", "radius": 0.30, "offset": 0.030, "kind": "cloth"},
+      {"bone": "UpperChest", "radius": 0.27, "offset": 0.026, "kind": "plate"},
+      {"bone": "LeftShoulder", "radius": 0.19, "offset": 0.038, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.19, "offset": 0.038, "kind": "plate"},
+      {"bone": "LeftLowerArm", "radius": 0.14, "offset": 0.032, "kind": "plate"},
+      {"bone": "RightLowerArm", "radius": 0.14, "offset": 0.032, "kind": "plate"}
+    ]},
+    "warden_priest": {"faction": "wardens", "pieces": [
+      {"bone": "Hips", "radius": 0.28, "offset": 0.026, "kind": "cloth"},
+      {"bone": "UpperChest", "radius": 0.24, "offset": 0.022, "kind": "cloth"},
+      {"bone": "LeftShoulder", "radius": 0.16, "offset": 0.030, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.16, "offset": 0.030, "kind": "plate"}
+    ]},
+
+    "ashkin_combatant": {"faction": "ashkin", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.21, "offset": 0.048, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.21, "offset": 0.048, "kind": "plate"},
+      {"bone": "LeftLowerArm", "radius": 0.14, "offset": 0.032, "kind": "plate"},
+      {"bone": "RightLowerArm", "radius": 0.14, "offset": 0.032, "kind": "plate"},
+      {"bone": "Hips", "radius": 0.26, "offset": 0.032, "kind": "cloth"}
+    ]},
+    "ashkin_templar": {"faction": "ashkin", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.25, "offset": 0.058, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.25, "offset": 0.058, "kind": "plate"},
+      {"bone": "LeftLowerArm", "radius": 0.16, "offset": 0.042, "kind": "plate"},
+      {"bone": "RightLowerArm", "radius": 0.16, "offset": 0.042, "kind": "plate"},
+      {"bone": "LeftLowerLeg", "radius": 0.19, "offset": 0.048, "kind": "plate"},
+      {"bone": "RightLowerLeg", "radius": 0.19, "offset": 0.048, "kind": "plate"},
+      {"bone": "Hips", "radius": 0.28, "offset": 0.036, "kind": "plate"}
+    ]},
+    "ashkin_attacker": {"faction": "ashkin", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.20, "offset": 0.044, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.20, "offset": 0.044, "kind": "plate"},
+      {"bone": "LeftLowerArm", "radius": 0.14, "offset": 0.030, "kind": "plate"},
+      {"bone": "RightLowerArm", "radius": 0.14, "offset": 0.030, "kind": "plate"},
+      {"bone": "Hips", "radius": 0.24, "offset": 0.030, "kind": "cloth"}
+    ]},
+    "ashkin_gunner": {"faction": "ashkin", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.22, "offset": 0.050, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.22, "offset": 0.050, "kind": "plate"},
+      {"bone": "RightLowerArm", "radius": 0.16, "offset": 0.040, "kind": "plate"},
+      {"bone": "LeftLowerLeg", "radius": 0.17, "offset": 0.038, "kind": "plate"},
+      {"bone": "RightLowerLeg", "radius": 0.17, "offset": 0.038, "kind": "plate"},
+      {"bone": "Hips", "radius": 0.25, "offset": 0.032, "kind": "cloth"}
+    ]},
+    "ashkin_officiator": {"faction": "ashkin", "pieces": [
+      {"bone": "Hips", "radius": 0.30, "offset": 0.030, "kind": "cloth"},
+      {"bone": "UpperChest", "radius": 0.26, "offset": 0.024, "kind": "cloth"},
+      {"bone": "LeftShoulder", "radius": 0.15, "offset": 0.030, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.15, "offset": 0.030, "kind": "plate"}
+    ]},
+    "ashkin_rune": {"faction": "ashkin", "pieces": [
+      {"bone": "Hips", "radius": 0.30, "offset": 0.030, "kind": "cloth"},
+      {"bone": "UpperChest", "radius": 0.26, "offset": 0.024, "kind": "cloth"},
+      {"bone": "LeftShoulder", "radius": 0.17, "offset": 0.034, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.17, "offset": 0.034, "kind": "plate"}
+    ]},
+    "ashkin_life": {"faction": "ashkin", "pieces": [
+      {"bone": "Hips", "radius": 0.29, "offset": 0.028, "kind": "cloth"},
+      {"bone": "UpperChest", "radius": 0.25, "offset": 0.022, "kind": "cloth"},
+      {"bone": "LeftShoulder", "radius": 0.15, "offset": 0.028, "kind": "strap"},
+      {"bone": "RightShoulder", "radius": 0.15, "offset": 0.028, "kind": "strap"}
+    ]},
+    "ashkin_shadow": {"faction": "ashkin", "pieces": [
+      {"bone": "LeftShoulder", "radius": 0.16, "offset": 0.032, "kind": "plate"},
+      {"bone": "RightShoulder", "radius": 0.16, "offset": 0.032, "kind": "plate"},
+      {"bone": "Hips", "radius": 0.20, "offset": 0.024, "kind": "cloth"}
+    ]}
+  }
+}

@@ -127,6 +127,10 @@ pub use proxy::{
     cook_proxy, light_leaks, LeakReport, ProxyError, ProxyMesh, Ray, PROXY_BOUND_RATIO,
     PROXY_DIVISORS, PROXY_LAST_FRACTION, PROXY_MAX_TRIS, PROXY_MIN_BOUND_M, PROXY_MIN_TRIS,
 };
+/// The fighter rig the teacher lane lands on, and the teacher's rest pose: the
+/// bake and the tick read the same joint order from here.
+#[cfg(feature = "import")]
+pub mod fighter;
 pub mod recook;
 /// One residency manager over the stream queue: textures, meshes, meshlets
 /// and acceleration structures share one priority-driven byte budget.

@@ -12,7 +12,9 @@
 //! asked for, and this file only promises the bytes and the clip.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 use crate::clip::QClip;
 use crate::pack::{unpack_qclip, PackError, PackedClip};
@@ -73,6 +75,10 @@ impl From<PackError> for PackFileError {
 /// The file is checked twice: the wire decoder names a broken header, and the
 /// decoded pack must re-encode to the same bytes. A file that was cut in half
 /// or edited therefore refuses instead of playing wrong motion.
+///
+/// Native only: a browser tab has no file system, so the wasm build gets its
+/// pack bytes from the loader that fetched them, not from a path.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_pack(path: &Path) -> Result<LoadedPack, PackFileError> {
     let bytes = std::fs::read(path).map_err(|why| PackFileError::Io {
         path: path.to_path_buf(),

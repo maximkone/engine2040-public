@@ -12,6 +12,7 @@ mod arena_cook;
 mod blockcomp_cook;
 mod crowd_cook;
 mod extras_wiring;
+mod fighter_rig;
 mod gltf_cc0_corpus;
 mod gltf_conformance;
 mod gltf_corpus_vectors;

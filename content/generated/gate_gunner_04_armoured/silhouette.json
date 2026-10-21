@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.584,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 1.9656,
+  "fill_30m": 0.5677,
+  "height_30m_px": 89,
+  "height_px": 765,
+  "ortho_scale_m": 2.5694,
+  "px_per_m": 389.2,
+  "resolution_30m": [
+    1374,
+    772
+  ],
+  "scale_applied": 0.907427,
+  "source": "C:\\engine2040\\content\\generated\\armour_gunner_04\\armoured.glb",
+  "source_height_m": 2.204,
+  "triangles": 5132,
+  "width_px": 575
+}

@@ -22,6 +22,7 @@ use engine_anim::clip::{avg_slip, bake_clip, bake_track, qclip_hash, TICK_DT};
 use engine_anim::motion_bake::{bake_len, bake_pack, bake_unpack, last_constrained, BakeError};
 use engine_anim::pose::QuatTrack;
 use engine_anim::{sample, Clip, Track};
+use engine_assets::fighter::RigError;
 use engine_assets::retarget::{retarget_cook, retarget_digest, RetargetError};
 use engine_assets::soma::{soma_pairs, SOMA77};
 use engine_assets::{BoneMap, ClipTags, CookConfig, ImportedClip, RetargetPlan};
@@ -59,6 +60,8 @@ pub enum BakeRunError {
     Retarget(RetargetError),
     /// The endpoint rule or the pack refused the bake.
     Bake(BakeError),
+    /// The rig could not be built: a joint or a parent is missing.
+    Rig(RigError),
 }
 
 impl core::fmt::Display for BakeRunError {
@@ -73,6 +76,7 @@ impl core::fmt::Display for BakeRunError {
             Self::NonFinite(lane) => write!(f, "bake: non-finite {lane}"),
             Self::Retarget(cause) => write!(f, "{cause}"),
             Self::Bake(cause) => write!(f, "{cause}"),
+            Self::Rig(cause) => write!(f, "rig: {cause}"),
         }
     }
 }
@@ -94,6 +98,11 @@ impl From<RetargetError> for BakeRunError {
 impl From<BakeError> for BakeRunError {
     fn from(cause: BakeError) -> Self {
         Self::Bake(cause)
+    }
+}
+impl From<RigError> for BakeRunError {
+    fn from(cause: RigError) -> Self {
+        Self::Rig(cause)
     }
 }
 
@@ -251,8 +260,8 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
 
     // One key per teacher frame: local rotations from the matrices, world
     // positions from posed_joints, with root_positions checked against them.
-    let source = soma_skeleton();
-    let source_bind = soma_bind();
+    let source = soma_skeleton()?;
+    let source_bind = soma_bind()?;
     let root = joint_index(&source, "hips").ok_or(BakeRunError::MissingJoint("hips"))?;
     for frame in 0..frames {
         let at = frame * 3;
@@ -310,8 +319,8 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
     };
 
     // The fighter rig and the one name table.
-    let target = fighter_skeleton();
-    let target_bind = fighter_bind();
+    let target = fighter_skeleton()?;
+    let target_bind = fighter_bind()?;
     let pairs = soma_pairs();
     let map = BoneMap::build(&source, &target, &pairs)?;
     let root_joint = joint_index(&target, "hips").ok_or(BakeRunError::MissingJoint("hips"))?;

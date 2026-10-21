@@ -290,6 +290,78 @@ def build_banner(palette):
     return parts
 
 
+def build_pauldron(palette):
+    """A shoulder plate: a dome of metal with a ridge and a spike.
+
+    The plate is what says "armoured" from thirty metres, so it is the
+    biggest single shape on the character.
+    """
+    parts = []
+    parts.append(add_sphere("dome", 0.17, (0.0, 0.0, 0.0), "iron", palette, scale=(1.0, 1.0, 0.72)))
+    parts.append(add_box("ridge", (0.05, 0.30, 0.05), (0.0, 0.0, 0.10), "bronze", palette))
+    parts.append(add_cone("spike", 0.045, 0.22, (0.0, 0.0, 0.22), "bronze", palette, verts=8))
+    parts.append(add_box("rim", (0.30, 0.26, 0.03), (0.0, 0.0, -0.10), "bronze", palette))
+    return parts
+
+
+def build_bracer(palette):
+    """A forearm plate: a tapered sleeve with a band and a stud."""
+    parts = []
+    parts.append(add_cyl("sleeve", 0.075, 0.30, (0.0, 0.0, 0.0), "iron", palette, verts=10))
+    parts.append(add_torus("band", 0.078, 0.016, (0.0, 0.0, 0.10), "bronze", palette,
+                           rot=(math.radians(90.0), 0.0, 0.0)))
+    parts.append(add_sphere("stud", 0.028, (0.0, -0.07, 0.0), "bronze", palette))
+    return parts
+
+
+def build_greave(palette):
+    """A shin plate: a tapered shell with a knee cop and a spur."""
+    parts = []
+    parts.append(add_cyl("shell", 0.085, 0.34, (0.0, 0.0, 0.0), "iron", palette, verts=10))
+    parts.append(add_sphere("cop", 0.075, (0.0, 0.0, 0.17), "bronze", palette, scale=(1.0, 1.0, 0.8)))
+    parts.append(add_cone("spur", 0.030, 0.12, (0.0, -0.09, 0.02), "bronze", palette, verts=6,
+                          rot=(math.radians(90.0), 0.0, 0.0)))
+    return parts
+
+
+def build_belt(palette):
+    """A war belt: a band with a buckle and a hanging strap."""
+    parts = []
+    parts.append(add_torus("band", 0.19, 0.028, (0.0, 0.0, 0.0), "leather", palette,
+                           rot=(math.radians(90.0), 0.0, 0.0)))
+    parts.append(add_box("buckle", (0.10, 0.05, 0.08), (0.0, -0.19, 0.0), "bronze", palette))
+    parts.append(add_box("strap", (0.06, 0.04, 0.26), (0.10, -0.17, -0.14), "leather", palette))
+    return parts
+
+
+def build_helm(palette):
+    """A war helm: a band, a brow and a crest."""
+    parts = []
+    parts.append(add_cyl("cap", 0.13, 0.10, (0.0, 0.0, 0.0), "iron", palette, verts=12))
+    parts.append(add_torus("band", 0.125, 0.020, (0.0, 0.0, -0.04), "bronze", palette,
+                           rot=(math.radians(90.0), 0.0, 0.0)))
+    parts.append(add_box("brow", (0.24, 0.04, 0.05), (0.0, -0.12, -0.02), "bronze", palette))
+    parts.append(add_box("crest", (0.03, 0.20, 0.05), (0.0, 0.02, 0.12), "ember", palette))
+    return parts
+
+
+def build_tabard(palette):
+    """A hanging cloth panel from the waist. The cloth is the faction's read."""
+    parts = []
+    parts.append(add_box("panel", (0.42, 0.05, 0.62), (0.0, -0.16, -0.30), "cloth", palette))
+    parts.append(add_box("stripe", (0.09, 0.03, 0.58), (0.0, -0.19, -0.30), "ember", palette))
+    parts.append(add_box("hem", (0.44, 0.06, 0.05), (0.0, -0.16, -0.60), "bronze", palette))
+    return parts
+
+
+def build_gorget(palette):
+    """A collar plate over the chest."""
+    parts = []
+    parts.append(add_cyl("collar", 0.17, 0.08, (0.0, 0.0, 0.0), "iron", palette, verts=14))
+    parts.append(add_box("brow", (0.26, 0.05, 0.04), (0.0, -0.16, 0.02), "bronze", palette))
+    return parts
+
+
 BUILDERS = {
     "sword": lambda p: build_sword(p, heavy=False),
     "greatsword": lambda p: build_sword(p, heavy=True),
@@ -306,6 +378,13 @@ BUILDERS = {
     "claw": build_claw,
     "crate": build_crate,
     "banner": build_banner,
+    "pauldron": build_pauldron,
+    "bracer": build_bracer,
+    "greave": build_greave,
+    "belt": build_belt,
+    "helm": build_helm,
+    "tabard": build_tabard,
+    "gorget": build_gorget,
 }
 
 
