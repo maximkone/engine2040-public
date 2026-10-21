@@ -13,8 +13,6 @@
 
 #![forbid(unsafe_code)]
 
-use std::time::Instant;
-
 use super::{
     build_slot_clips, build_slot_geometry, encode_atlas_pass, upload_slots, LightError,
     OccluderTri, SpotAtlasConfig, SpotAtlasGpu, SpotLight, GATE_PASS, MAX_OCCLUDER_TRIS,
@@ -123,7 +121,7 @@ pub fn encode_spot_atlas(
     submitter: &mut SpotAtlasGpu,
     encoder: &mut wgpu::CommandEncoder,
 ) -> Result<SpotEncode, LightError> {
-    let started = Instant::now();
+    let started = engine_clock::now();
     let prep = prepare_atlas(device, queue, spots, tris, config, submitter)?;
     encode_atlas_pass(submitter, config, encoder)?;
     Ok(SpotEncode {
@@ -133,6 +131,6 @@ pub fn encode_spot_atlas(
         passes_encoded: 1,
         dropped_tris: prep.dropped_tris,
         degraded: prep.degraded,
-        encode_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        encode_us: u64::try_from(engine_clock::since(started).as_micros()).unwrap_or(u64::MAX),
     })
 }

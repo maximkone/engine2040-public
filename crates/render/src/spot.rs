@@ -1229,7 +1229,8 @@ fn uniform_slots() -> u64 {
 /// frame pays no readback stall; [`atlas_parity`] is the gate's readback arm.
 /// Fails loudly with typed errors: bad frames or shapes are `Invalid`,
 /// adapter or map faults are `Device`, a validation scope hit is `Validation`.
-#[cfg(feature = "window")]
+/// Native only: it waits on the device, and a browser tab may not block.
+#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
 pub fn submit_spot_atlas(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1239,7 +1240,7 @@ pub fn submit_spot_atlas(
     submitter: &mut SpotAtlasGpu,
 ) -> Result<SpotGpuReceipt, LightError> {
     let prep = encode::prepare_atlas(device, queue, spots, tris, config, submitter)?;
-    let started = Instant::now();
+    let started = engine_clock::now();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("spot-atlas-bake"),
@@ -1249,7 +1250,7 @@ pub fn submit_spot_atlas(
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .map_err(|e| device_err("spot submit poll", &e))?;
-    let submit_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let submit_ms = engine_clock::since(started).as_secs_f64() * 1000.0;
     if let Some(err) = pollster::block_on(scope.pop()) {
         return Err(scope_err(&err));
     }
@@ -1267,7 +1268,8 @@ pub fn submit_spot_atlas(
 
 /// Gate arm: copy the resident atlas back and compare every texel with the
 /// CPU reference. Software-adapter parity is this row; it is not per frame.
-#[cfg(feature = "window")]
+/// Native only: the readback waits on the device.
+#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
 pub fn atlas_parity(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1414,8 +1416,8 @@ fn encode_atlas_pass(
 }
 
 /// Copy the atlas into a readback buffer, wait for the map, and compare the
-/// texels with the CPU reference.
-#[cfg(feature = "window")]
+/// texels with the CPU reference. Native only: the map waits on the device.
+#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
 fn read_back_atlas(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1569,9 +1571,6 @@ fn compare_atlas(
         max_diff,
     }
 }
-
-#[cfg(feature = "window")]
-use std::time::Instant;
 
 #[cfg(test)]
 mod tests {
