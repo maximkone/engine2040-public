@@ -21,7 +21,7 @@ workspace = true
 # RZ4: `app` also turns on the float physical layer (`engine-physfx/rapier`) that
 # paints breaks as debris. It only paints: the sim never reads it, and
 # `engine-arena`, `engine-combat` and `engine-proof` never name it.
-app = ["engine-render/window", "engine-audio/device", "dep:winit", "dep:engine-assets", "dep:gilrs", "dep:engine-physfx", "engine-physfx/rapier", "shader-validate", "dep:engine-perf"]
+app = ["engine-render/window", "engine-audio/device", "dep:winit", "engine-assets/import", "dep:gilrs", "dep:engine-physfx", "engine-physfx/rapier", "shader-validate", "dep:engine-perf"]
 
 # CQ23: the hot-reload cook checks every edited `.wgsl` with naga (CPU, no
 # GPU) instead of brace balance alone; a type-broken edit is refused with its
@@ -48,9 +48,12 @@ required-features = ["app"]
 # form; versions centralized in the root table). No unconditional external
 # dependency: every crate below is std-only on its default features.
 engine-arena.workspace = true
-# Arena kit glTF import rides the `app` leg only (the `import` feature pulls
-# `gltf`/`image`), so the headless default graph stays std-only.
-engine-assets = { workspace = true, features = ["import"], optional = true }
+# WEB6: the kit loads through the assets seam (a file source natively, a
+# fetched bundle in the browser) and the game holds its assets by generational
+# handle, so the seam is a plain dependency. Default features keep the
+# headless graph std-only (no `gltf`, no `image`); the `app` leg turns on
+# `import` for the real glTF importer.
+engine-assets = { workspace = true }
 # RZ4 break look: debris bodies from authority break events, `app` leg only
 # (physfx is itself behind its own `rapier` feature, so the headless graph stays std-only).
 engine-physfx = { workspace = true, optional = true }

@@ -63,6 +63,8 @@ pub enum LoadState {
     Loaded,
     /// The load or cook was refused; see [`AssetStore::failure`].
     Failed,
+    /// The load was cancelled before its bytes arrived.
+    Cancelled,
 }
 
 impl LoadState {
@@ -73,6 +75,7 @@ impl LoadState {
             Self::Loading => "loading",
             Self::Loaded => "loaded",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
@@ -203,14 +206,19 @@ struct Slot {
 /// `NotLoaded` to `Loading` to `Loaded` (or `Failed`), and serves a payload
 /// only when the asset and every transitive dependency are `Loaded`.
 /// Same source bytes import to the same live handle, so repeated kit imports
-/// stage once. Single-thread driven; no wall clock, no floats, index order
+/// stage once. A load queue stages a handle before its bytes arrive with
+/// [`AssetStore::stage`] and fills it later; the two key spaces never mix.
+/// Single-thread driven; no wall clock, no floats, index order
 /// iteration only.
 #[derive(Clone, Debug)]
 pub struct AssetStore {
     budget: HandleBudget,
     slots: Vec<Slot>,
     free: Vec<u32>,
-    keys: BTreeMap<AssetKey, AssetHandle>,
+    /// Content keys (from [`AssetStore::import`]) to their live handle.
+    content: BTreeMap<AssetKey, AssetHandle>,
+    /// Caller keys (from [`AssetStore::stage`]) to their live handle.
+    staged: BTreeMap<AssetKey, AssetHandle>,
     live: u32,
 }
 
@@ -221,7 +229,8 @@ impl AssetStore {
             budget,
             slots: Vec::new(),
             free: Vec::new(),
-            keys: BTreeMap::new(),
+            content: BTreeMap::new(),
+            staged: BTreeMap::new(),
             live: 0,
         }
     }
@@ -307,10 +316,15 @@ impl AssetStore {
         }
     }
 
-    /// Failure reason for [`LoadState::Failed`], `None` for other live states.
+    /// Failure or cancel reason for [`LoadState::Failed`] and
+    /// [`LoadState::Cancelled`], `None` for other live states.
     pub fn failure(&self, handle: AssetHandle) -> Result<Option<&str>, HandleError> {
         match self.live_slot(handle) {
-            Some(slot) if slot.state == LoadState::Failed => Ok(Some(slot.fail.as_str())),
+            Some(slot)
+                if slot.state == LoadState::Failed || slot.state == LoadState::Cancelled =>
+            {
+                Ok(Some(slot.fail.as_str()))
+            }
             Some(_) => Ok(None),
             None => Err(unknown_of(handle)),
         }
@@ -398,12 +412,43 @@ impl AssetStore {
             }
         }
         let key = engine_core::hash_bytes(source);
-        if let Some(existing) = self.keys.get(&key).copied() {
+        if let Some(existing) = self.content.get(&key).copied() {
             if self.contains(existing) {
                 return Ok(existing);
             }
-            self.keys.remove(&key);
+            self.content.remove(&key);
         }
+        let handle = self.take_slot(key, deps.to_vec())?;
+        self.content.insert(key, handle);
+        Ok(handle)
+    }
+
+    /// Stage a handle for an asset whose bytes have not arrived yet.
+    ///
+    /// The caller owns the key namespace: the load queue keys by logical
+    /// path, the importer keys by content, and the two never share a slot.
+    /// A staged slot starts [`LoadState::NotLoaded`] and holds no bytes;
+    /// [`AssetStore::mark_loaded`] fills it. Staging a key that is already
+    /// live returns the same handle, so a repeated request never stages
+    /// twice.
+    pub fn stage(&mut self, key: AssetKey) -> Result<AssetHandle, HandleError> {
+        if let Some(existing) = self.staged.get(&key).copied() {
+            if self.contains(existing) {
+                return Ok(existing);
+            }
+            self.staged.remove(&key);
+        }
+        let handle = self.take_slot(key, Vec::new())?;
+        self.staged.insert(key, handle);
+        Ok(handle)
+    }
+
+    /// Take a free slot (or a new one) for `key` and mark it live.
+    fn take_slot(
+        &mut self,
+        key: AssetKey,
+        deps: Vec<AssetHandle>,
+    ) -> Result<AssetHandle, HandleError> {
         if self.live >= self.budget.assets {
             return Err(HandleError::AssetCap {
                 limit: self.budget.assets,
@@ -423,7 +468,7 @@ impl AssetStore {
                 Some(slot) => {
                     slot.key = key;
                     slot.state = LoadState::NotLoaded;
-                    slot.deps = deps.to_vec();
+                    slot.deps = deps;
                     slot.payload = Vec::new();
                     slot.fail = String::new();
                     slot.live = true;
@@ -431,7 +476,6 @@ impl AssetStore {
                         index,
                         generation: slot.generation,
                     };
-                    self.keys.insert(key, handle);
                     self.live = self.live.saturating_add(1);
                     return Ok(handle);
                 }
@@ -455,28 +499,27 @@ impl AssetStore {
             generation: 1,
             key,
             state: LoadState::NotLoaded,
-            deps: deps.to_vec(),
+            deps,
             payload: Vec::new(),
             fail: String::new(),
             live: true,
         });
-        let handle = AssetHandle {
+        self.live = self.live.saturating_add(1);
+        Ok(AssetHandle {
             index,
             generation: 1,
-        };
-        self.keys.insert(key, handle);
-        self.live = self.live.saturating_add(1);
-        Ok(handle)
+        })
     }
 
-    /// Move `NotLoaded` (or retry `Failed`) to `Loading`; idempotent otherwise.
+    /// Move `NotLoaded` (or retry `Failed` or `Cancelled`) to `Loading`;
+    /// idempotent otherwise.
     pub fn request_load(&mut self, handle: AssetHandle) -> Result<LoadState, HandleError> {
         let slot = match self.live_slot_mut(handle) {
             Some(slot) => slot,
             None => return Err(unknown_of(handle)),
         };
         match slot.state {
-            LoadState::NotLoaded | LoadState::Failed => {
+            LoadState::NotLoaded | LoadState::Failed | LoadState::Cancelled => {
                 slot.state = LoadState::Loading;
                 slot.fail = String::new();
             }
@@ -491,6 +534,17 @@ impl AssetStore {
         &mut self,
         handle: AssetHandle,
         cooked: &[u8],
+    ) -> Result<LoadState, HandleError> {
+        self.mark_loaded_owned(handle, cooked.to_vec())
+    }
+
+    /// Store cooked bytes and move to `Loaded`, taking the bytes as they are.
+    /// Same refusals as [`AssetStore::mark_loaded`]; the payload is stored
+    /// without a second copy.
+    pub fn mark_loaded_owned(
+        &mut self,
+        handle: AssetHandle,
+        cooked: Vec<u8>,
     ) -> Result<LoadState, HandleError> {
         if cooked.is_empty() || cooked.len() > MAX_PAYLOAD_BYTES {
             return Err(HandleError::TooLarge {
@@ -514,7 +568,7 @@ impl AssetStore {
             Some(slot) => slot,
             None => return Err(unknown_of(handle)),
         };
-        slot.payload = cooked.to_vec();
+        slot.payload = cooked;
         slot.state = LoadState::Loaded;
         slot.fail = String::new();
         Ok(slot.state)
@@ -545,6 +599,31 @@ impl AssetStore {
         Ok(slot.state)
     }
 
+    /// Move a non-resident asset to `Cancelled` with a bounded reason.
+    /// Resident assets refuse with [`HandleError::WrongState`] so a cancel
+    /// never drops a good payload.
+    pub fn mark_cancelled(
+        &mut self,
+        handle: AssetHandle,
+        reason: &str,
+    ) -> Result<LoadState, HandleError> {
+        let slot = match self.live_slot_mut(handle) {
+            Some(slot) => slot,
+            None => return Err(unknown_of(handle)),
+        };
+        if slot.state == LoadState::Loaded {
+            return Err(HandleError::WrongState {
+                index: handle.index,
+                generation: handle.generation,
+                state: slot.state,
+            });
+        }
+        slot.state = LoadState::Cancelled;
+        slot.fail = bound_fail(reason);
+        slot.payload = Vec::new();
+        Ok(slot.state)
+    }
+
     /// Free one live handle: stale generations fail afterwards, the slot is
     /// reusable with a bumped generation, and the content key unmaps.
     pub fn free(&mut self, handle: AssetHandle) -> Result<(), HandleError> {
@@ -560,8 +639,11 @@ impl AssetStore {
             }
             _ => return Err(unknown_of(handle)),
         };
-        if self.keys.get(&key).copied() == Some(handle) {
-            self.keys.remove(&key);
+        if self.content.get(&key).copied() == Some(handle) {
+            self.content.remove(&key);
+        }
+        if self.staged.get(&key).copied() == Some(handle) {
+            self.staged.remove(&key);
         }
         match self.slots.get_mut(at) {
             Some(slot) => {
@@ -937,11 +1019,78 @@ mod tests {
     }
 
     #[test]
+    fn staged_slots_wait_for_their_bytes_and_free_cleanly() {
+        let mut store = store();
+        let key = engine_core::hash_bytes(b"src/crate.gltf");
+        let handle = store.stage(key).expect("stage");
+        assert_eq!(store.state(handle).unwrap(), LoadState::NotLoaded);
+        assert_eq!(store.key_of(handle).unwrap(), key);
+        assert!(!store.is_ready(handle));
+        assert!(store.payload(handle).is_err());
+        // Staging the same key again hands back the same handle.
+        assert_eq!(store.stage(key).expect("stage twice"), handle);
+        assert_eq!(store.len(), 1);
+        store.mark_loaded(handle, &bytes(9, 24)).unwrap();
+        assert_eq!(store.state(handle).unwrap(), LoadState::Loaded);
+        assert!(store.is_ready(handle));
+        assert_eq!(store.used_bytes(), 24);
+        // A staged slot frees like an imported one: the handle goes stale.
+        store.free(handle).unwrap();
+        assert!(!store.contains(handle));
+        assert_eq!(store.used_bytes(), 0);
+        let again = store.stage(key).expect("restage");
+        assert_eq!(again.index, handle.index);
+        assert_ne!(again.generation, handle.generation);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn staged_and_imported_slots_keep_separate_key_spaces() {
+        let mut store = store();
+        let bytes_in = bytes(4, 16);
+        let content_key = engine_core::hash_bytes(&bytes_in);
+        let imported = store.import(&bytes_in, &[]).unwrap();
+        let staged = store.stage(content_key).expect("stage");
+        assert_ne!(imported, staged, "a staged slot never shares an imported one");
+        assert_eq!(store.len(), 2);
+        // Freeing the staged slot leaves the imported one alone.
+        store.free(staged).unwrap();
+        assert!(store.contains(imported));
+        assert!(!store.contains(staged));
+        // The imported bytes still read back under their content key.
+        store.mark_loaded(imported, &bytes_in).unwrap();
+        assert_eq!(store.payload(imported).unwrap(), bytes_in.as_slice());
+    }
+
+    #[test]
+    fn cancelled_is_its_own_state_and_spares_a_resident_payload() {
+        let mut store = store();
+        let handle = store.import(&bytes(5, 8), &[]).unwrap();
+        store.request_load(handle).unwrap();
+        assert_eq!(
+            store.mark_cancelled(handle, "cancelled by the caller").unwrap(),
+            LoadState::Cancelled
+        );
+        assert_eq!(
+            store.failure(handle).unwrap(),
+            Some("cancelled by the caller")
+        );
+        assert!(!store.is_ready(handle));
+        assert!(store.payload(handle).is_err());
+        // A resident payload is never cancelled away.
+        store.mark_loaded(handle, &bytes(5, 8)).unwrap();
+        assert!(store.mark_cancelled(handle, "late").is_err());
+        assert_eq!(store.state(handle).unwrap(), LoadState::Loaded);
+        assert_eq!(store.payload(handle).unwrap(), bytes(5, 8).as_slice());
+    }
+
+    #[test]
     fn every_error_and_state_displays() {
         assert_eq!(LoadState::NotLoaded.to_string(), "not_loaded");
         assert_eq!(LoadState::Loading.to_string(), "loading");
         assert_eq!(LoadState::Loaded.to_string(), "loaded");
         assert_eq!(LoadState::Failed.to_string(), "failed");
+        assert_eq!(LoadState::Cancelled.to_string(), "cancelled");
         assert!(LoadState::Loaded.is_loaded());
         assert!(!LoadState::Loading.is_loaded());
         assert_eq!(AssetHandle::INVALID.to_string(), "asset 0:0");

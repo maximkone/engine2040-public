@@ -112,6 +112,7 @@ Asset generation, intake only (extends CT40, CT28, LOC2, AS1):
   beside `crates/anim/src/clip.rs`. Accept: F2P one intake clip retargets and
   plays x2 hashed; P2P golden unchanged. Bevy covers: bevy_gltf skin-order
   patterns at import only. needs: CT40, LOC2.
+  Correction 2026-10-21: duplicate - PW33 owns this work now; PW33's row says it closes NS19. This row is not ticked and is not built on its own; retire it when PW33 lands.
 - [ ] NS20 assets: second mesh source plus content-addressed cache — Hunyuan3D
   and Stable-Fast-3D both under community licenses (offline intake only),
   outputs hashed into the cache with CT28 provenance. Size M. Owns cache
@@ -222,6 +223,7 @@ Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask f
   run copies every part file listed in the manifest `extra` array) and passes; one real run on
   `target/make-run/images/image-01-*.png` with `--parts 4` returns 4 part GLBs, each a closed-enough mesh
   (manifest `faces` > 500), GPU minutes under 15. needs: GN3.
+  Correction 2026-10-21: duplicate - PW56 owns this work now; PW56's row says it closes GN7, GN8 and GN5. This row is not ticked and is not built on its own; retire it when PW56 lands.
 - [ ] GN6 assets: intake of a part set into destruction chunks — new function `intake_parts` in
   `crates/assets/src/gen_intake.rs` (same file, new tests in `crates/assets/src/gen_intake/tests.rs`):
   input is N part GLB byte slices plus one `Provenance`; each part runs the existing steps (`weld`,
@@ -235,6 +237,7 @@ Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask f
   meshes whose summed triangles are at most 5,000, union hull contains every part, cook x2 byte-identical,
   one cache hit returns the same bundle hash, a refused model writes nothing; P2P golden
   `d57b5c8ae3096614` unchanged. needs: GN1.
+  Correction 2026-10-21: duplicate - PW57 owns this work now; PW57's row says it closes GN6. This row is not ticked and is not built on its own; retire it when PW57 lands.
 - [ ] GN7 endpoint: `asset.generate` becomes a runner that starts the center job without blocking —
   Correction 2026-10-21: the command this row names is gone - `center/kaggle.mjs` does not exist and has no git history. The new home is `C:\empire\center\make.mjs` (center repo, commit `9fda6705`): `node make.mjs run <kind> --spec <file>` starts a job and prints `started run <id>`, `node make.mjs job <id>` polls it and prints the state and the files, `node make.mjs models --verify` is the licence gate, `node make.mjs selftest` is the no-network check. The run id is the hash of the job spec, so the same spec always names the same run. Re-point the two commands and the accept to those.
   new file `crates/endpoint/src/packs/asset/generate_run.rs` (feature `intake`), `GenerateTool` in
@@ -251,6 +254,7 @@ Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask f
   bundle, a second start with identical inputs returns `cache_hit: true` and the fake script is not run
   again; unset `E2040_CENTER_DIR` is refused with `no_center`; the default build (no `intake`) still
   lists `asset.generate` as the explainer. needs: GN2.
+  Correction 2026-10-21: duplicate - PW56 owns this work now; PW56's row says it closes GN7, GN8 and GN5. This row is not ticked and is not built on its own; retire it when PW56 lands.
 - [ ] GN8 make: licence recheck for the generator chain — new center command `node kaggle.mjs models
   Correction 2026-10-21: the command this row names is gone - `center/kaggle.mjs` does not exist and has no git history. The new home is `C:\empire\center\make.mjs` (center repo, commit `9fda6705`): the licence gate is `node make.mjs models --verify` (one line per model, exits 1 on a mismatch or a refusal), the job runner is `node make.mjs run <kind> --spec <file>` (prints `started run <id>`) and `node make.mjs job <id>` (polls the state and the files), and `node make.mjs selftest` is the no-network check. The gate already fails closed on a missing, gated or non-commercial card. Re-point the row and its accept to those commands.
   --verify` in `kaggle.mjs` (function `verifyModels`, dependency-free `fetch` of
@@ -266,3 +270,4 @@ Make (extends HS26, decision D3 in `FOCUS.md`): generated props the AI can ask f
   `coqui-public-model-license`, `openrail++` with a research-only card, `stability-ai-community`
   unless the revenue flag is set, or no licence tag; TripoSG's HF tag says MIT while our note says a
   Tencent condition string, so read its LICENSE file before any TripoSG asset ships. needs: GN3.
+  Correction 2026-10-21: duplicate - PW56 owns this work now; PW56's row says it closes GN7, GN8 and GN5. This row is not ticked and is not built on its own; retire it when PW56 lands.

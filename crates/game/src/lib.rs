@@ -100,6 +100,9 @@ pub mod fps_view;
 pub mod hitstop;
 /// Engine-owned window input codes (game-agnostic key/mouse maps). Std-only.
 pub mod input;
+/// The arena kit loads through one queue: logical paths, a byte budget,
+/// generational handles and unload. Std-only, no file system of its own.
+pub mod kit_assets;
 /// Ladder, glory ranks, repair-craft hooks LIGHT slice: integer
 /// fold, replayable, nothing CUT. Std-only.
 pub mod ladder;

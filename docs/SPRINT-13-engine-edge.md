@@ -38,16 +38,19 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   Progress 2026-10-21 (the spike ran, the bar is NOT met, so the row stays open and the union shape is in doubt): across five lanes (provider, scene, nav, spatial, observe) the dependency units went from 33 to 183 after `engine-workspace-hack = { workspace = true }` — 5.5x WORSE, not a third less. The union drags serde, serde_json, uuid and image into lanes that use none of them. One union is the wrong shape: the feature set has to be split per group, and the bar (a third less) still has to be met before this row can tick. Proof: `cargo tree --manifest-path <tree>/Cargo.toml -p <crate> -e normal,build --prefix none --format "{p}"` -> 33 before, 183 after; `node --test tools/dep-rebuild-count.test.mjs` -> 6/6. The crates' `Cargo.toml` one-liner is in `docs/research/powerups-2026-10-20/landing-speedup.md` and is NOT applied (a union that costs 5.5x must not be merged). The true rebuild count (the `Compiling` lines of five lane builds in one target dir) is still unmeasured: the cold build ran past 40 min on a loaded box and was cut.
   spike report. Accept: dependency rebuild count across five lane builds
   before/after; kept only if it drops by a third. needs: OPT1.
+  Correction 2026-10-21: duplicate - PW45 owns this work now; PW45's row says it closes OPT8. This row is not ticked and is not built on its own; retire it when PW45 lands.
 - [ ] OPT9 ops: compile cache spike — sccache across lane pools. Progress 2026-10-17: docs/SMOOTH-BUILD.md holds the OPT9 evidence: sccache 0.18.0 is opt-in per run (the pool wrapper was removed on purpose, .cargo/config.test.mjs guards it) and the GitHub check workflow runs with sccache. Left: a cold lane build before/after number (bar: at least 30% faster).
   Progress 2026-10-21 (the spike ran, the bar is NOT met by the cache, so the row stays open): cold 21.6 s vs warm 13.6 s on the clock — 37% faster — but 0 of 2 cacheable units hit, so the cache itself earned none of that. The bar (at least 30% faster) is not met by the cache. A `rebuild` cell in the CI shape (same target-dir path, artifacts removed, cache primed) is landed and pinned; its run did not finish on a loaded box (cold cell 17 min with 24 foreign cargo builds), so the number is open. Proof: `node --test tools/compile-cache-spike.test.mjs` -> 10/10. The rebuild-cell number on a quiet box and the Linux-runner hit rate are what is left.
   (orchestrator) Tier B. Size S. Owns the spike report. Accept: cold lane
   build time before/after; kept only if ≥ 30% faster. needs: OPT1.
+  Correction 2026-10-21: duplicate - PW46 owns this work now; PW46's row says it closes OPT9. This row is not ticked and is not built on its own; retire it when PW46 lands.
 - [ ] OPT11 ops: crate fan-out cut — reverse-dependency closure times
   compile seconds from OPT1 names the costliest edges; split or
   feature-gate the worst one or two. (orchestrator + owning lanes) Tier C.
   Size M. Owns the report plus the named split. Accept: touch-rebuild of
   the chosen crate down ≥ 30%, or the row closes with its numbers. needs:
   OPT1, OPT7.
+  Correction 2026-10-21: duplicate - PW44 owns this work now; PW44's row says it closes OPT11. This row is not ticked and is not built on its own; retire it when PW44 lands.
 - [ ] OPT13 ops: gameplay code hot-patch spike — subsecond or
   hot-lib-reloader (licenses read first) on one gameplay system in the
   window build. Tier C. Size M. Owns the spike report. Accept: an edit
@@ -139,6 +142,7 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   Tier B. Size M. Owns `crates/provider/src/arbiter.rs`. Accept: with a
   local model loaded the window build holds the P6 frame budget; requests
   degrade with typed notices. needs: PV2, RA4.
+  Correction 2026-10-21: duplicate - PW28 owns this work now; PW28's row says it closes OPT27 and LAI7. This row is not ticked and is not built on its own; retire it when PW28 lands.
 - [x] OPT28 provider: prompts as versioned assets — every prompt and Landed aa644693. Run 39052718180.
   brief template is a content-addressed asset with version, provenance
   and an eval set; an edit re-runs its evals and may not lower the score.
@@ -150,6 +154,7 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   budget and a ratchet beside the AX3 ledger. Tier B. Size S. Owns the
   measurement test. Accept: counts per vendor x2; the budget holds.
   needs: MCP7, EV1.
+  Correction 2026-10-21: duplicate - PW43 owns this work now; PW43's row says it closes OPT29. This row is not ticked and is not built on its own; retire it when PW43 lands.
 - [ ] OPT30 ops: crate cards — every crate root header states owner,
   consumers, invariants, budgets and public entry points in one checked
   format that Engine Insight indexes. Tier B. Size S. Owns the

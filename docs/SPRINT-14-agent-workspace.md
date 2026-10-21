@@ -158,3 +158,4 @@ they name another lane; none touches `crates/`.
   before == after; `docs/SPRINT.md` under 120 KB. needs: AW19, AW20, AW21,
   AW22. (audit-board-split 2026-10-03.)
   LATER: parked 2026-10-03 (circus verdict: loop-about-the-loop work, not a graphics/animation/ragdoll/AI-door bar (center runs the loop)); unpark by deleting this line.
+  Correction 2026-10-21: duplicate of AW18, and AW18 owns it - both move old rows into `docs/sprint/later.md` / `docs/board-done.md`. This row is not ticked and is not built on its own; retire it when AW18 lands.

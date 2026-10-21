@@ -230,6 +230,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   Accept: the arena scene's frame draw count drops with GPU cull on; the same frame
   with `E2040_CPU_CULL=1` matches the CPU path; validation errors 0. F2P: draws are
   CPU-culled only. P2P: render lib green; golden unchanged. needs: GS18.
+  Correction 2026-10-21: duplicate - PW05 owns this work now; PW05's row says it closes GS18b and gap B7 cut 5. This row is not ticked and is not built on its own; retire it when PW05 lands.
 - [x] GS19 render: wound maps with a budget — donor naelstrof/SkinnedMeshDecals. New Landed 1d01a41. wound_drain_caps_per_frame_in_order (4,4,2), wound_evicts_oldest_map_over_cap, wound_stable_x2 green in engine-render lib 719 passed, run 39056588691; no draw caller yet (pure budget core).
   `crates/render/src/wound_map.rs`, pure: `WoundMaps::new(cap_bytes,
   paints_per_frame)`, `queue(char_id, uv_rect, kind)`, `drain(frame) -> Vec<Paint>`

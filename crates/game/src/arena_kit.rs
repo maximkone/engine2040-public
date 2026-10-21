@@ -19,6 +19,8 @@ use engine_render::present::{TextureKey, TextureUpload};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+use crate::kit_assets::{kit_logical_path, KitAssets};
+
 /// Placement table loading (parse `placement.json` into actors): the
 /// `kit_load` child module owns it, re-exported here so the twin and the
 /// window keep calling `arena_kit::` paths.
@@ -227,7 +229,7 @@ impl core::fmt::Display for KitError {
 impl std::error::Error for KitError {}
 
 /// Bound a diagnostic string so errors stay small and printable.
-fn bound_diag(text: &str) -> String {
+pub(crate) fn bound_diag(text: &str) -> String {
     text.chars().take(MAX_KIT_DIAG).collect()
 }
 
@@ -1066,16 +1068,15 @@ pub fn import_kit(root: &Path) -> Result<ImportedKit, KitError> {
 #[cfg(feature = "app")]
 fn load_kit_sources(
     source: &dyn engine_assets::AssetSource,
+    assets: &KitAssets<'_>,
     files: &[&'static str],
     maps: &mut KitMaps,
 ) -> Result<(Vec<KitSource>, u64), KitError> {
     let mut sources: Vec<KitSource> = Vec::with_capacity(files.len());
     let mut triangles: u64 = 0;
     for (file_index, file) in files.iter().enumerate() {
-        let bytes = source
-            .read(&format!("src/{file}"))
-            .map_err(|err| KitError::Io(bound_diag(&format!("{file}: {err}"))))?;
-        let import = engine_assets::mesh_import::import_gltf_path(file, &bytes)
+        let bytes = assets.bytes(&kit_logical_path(file))?;
+        let import = engine_assets::mesh_import::import_gltf_path(file, bytes)
             .map_err(|err| KitError::Import(bound_diag(&format!("{file}: {err}"))))?;
         let (pos, nor, uv, idx, tris) = merge_import(file, &import)?;
         triangles += tris;
@@ -1088,13 +1089,15 @@ fn load_kit_sources(
 
 /// [`import_kit`] over any content source: the files are read as
 /// `src/<asset>.gltf` by logical path, so a browser build hands in a fetched
-/// bundle and gets the same kit as the native directory read.
+/// bundle and gets the same kit as the native directory read. The bytes are
+/// held by generational handles and unloaded when the import is done.
 #[cfg(feature = "app")]
 pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<ImportedKit, KitError> {
     let actors = kit_actors()?;
     let files = kit_asset_files(&actors);
+    let mut assets = KitAssets::load(source, &files)?;
     let mut maps = KitMaps::default();
-    let (sources, triangles) = load_kit_sources(source, &files, &mut maps)?;
+    let (sources, triangles) = load_kit_sources(source, &assets, &files, &mut maps)?;
     let mut baked = Vec::with_capacity(actors.len());
     let mut skipped = Vec::new();
     let mut material_fallbacks = 0usize;
@@ -1168,6 +1171,9 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
     if baked.is_empty() {
         return Err(KitError::Import("no kit actor baked".to_string()));
     }
+    // The source bytes are baked into meshes and maps by now: the handles go
+    // stale and the bytes go back to the queue's budget.
+    assets.unload();
     let cooked_sets = maps.cooked_loaded();
     let KitMaps { textures, sets, .. } = maps;
     Ok(ImportedKit {
@@ -1461,17 +1467,28 @@ fn file_triangles(text: &str, file: &'static str) -> Result<u64, KitError> {
 /// (headless leg): std-only JSON counts over the same files the `app` leg
 /// parses, same order and keys. A missing file or floor miss fails loudly.
 ///
+/// The files are read through the content seam (a file source natively, a
+/// fetched bundle in the browser) and held by generational handles, so the
+/// headless leg has no file system of its own.
+///
 /// Caller: default gate tests call `import_kit` with [`kit_content_dir`].
 #[cfg(not(feature = "app"))]
 pub fn import_kit(root: &Path) -> Result<ImportedKit, KitError> {
+    import_kit_from(&engine_assets::FsSource::new(root))
+}
+
+/// [`import_kit`] over any content source: the files are read as
+/// `src/<asset>.gltf` by logical path, so the browser hands in a fetched
+/// bundle and gets the same kit as the native directory read.
+#[cfg(not(feature = "app"))]
+pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<ImportedKit, KitError> {
     let actors = kit_actors()?;
     let files = kit_asset_files(&actors);
+    let mut assets = KitAssets::load(source, &files)?;
     let mut triangles = 0u64;
     for file in &files {
-        let path = root.join("src").join(file);
-        let bytes = std::fs::read(&path)
-            .map_err(|err| KitError::Io(bound_diag(&format!("{file}: {err}"))))?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| import_err(file))?;
+        let bytes = assets.bytes(&kit_logical_path(file))?;
+        let text = std::str::from_utf8(bytes).map_err(|_| import_err(file))?;
         if !text.contains("\"baseColorFactor\"") || !text.contains("\"metallicFactor\"") {
             return Err(import_err(file));
         }
@@ -1480,6 +1497,9 @@ pub fn import_kit(root: &Path) -> Result<ImportedKit, KitError> {
             .checked_add(tris)
             .ok_or_else(|| import_err(file))?;
     }
+    // The counts are in: the handles go stale and the bytes go back to the
+    // queue's budget.
+    assets.unload();
     let mut baked = Vec::with_capacity(actors.len());
     for actor in &actors {
         if !files.contains(&actor.asset.file_name()) {

@@ -5,11 +5,13 @@
 //! separated, relative, no `.` or `..`); a source maps the name to bytes.
 //! [`FsSource`] reads a directory tree (native); [`BundleSource`] reads a
 //! packed `.e2bundle` held in memory (browser: fetched; native: tools and
-//! tests); [`MemorySource`] holds what a cook staged, so a packer never needs
-//! a staging directory. All three return the same bytes for the same name,
-//! list names in the same bytewise order and fail with the missing or damaged
-//! name in the error, so a gap never becomes a silent default. Std-only; no
-//! clock, no RNG; the browser build never compiles [`FsSource`].
+//! tests); [`FetchSource`] fetches that bundle through a host fetcher and
+//! serves it; [`MemorySource`] holds what a cook staged, so a packer never
+//! needs a staging directory. All of them return the same bytes for the same
+//! name, list names in the same bytewise order and fail with the missing or
+//! damaged name in the error, so a gap never becomes a silent default.
+//! Std-only; no clock, no RNG; the browser build never compiles the file
+//! reader of [`FsSource`].
 
 use super::wire::bound_chars;
 use engine_core::{hash_bytes, Fnv64};
@@ -17,9 +19,11 @@ use std::borrow::Cow;
 use std::fmt;
 
 pub mod bundle;
+pub mod fetch;
 #[cfg(not(target_arch = "wasm32"))]
 pub use bundle::bundle_pack;
 pub use bundle::{pack_to, BundleSource, EntryInfo, PackReport, PackRules};
+pub use fetch::FetchSource;
 
 /// Longest logical path in bytes; longer names are refused, never cut.
 pub const MAX_SOURCE_PATH_BYTES: usize = 512;

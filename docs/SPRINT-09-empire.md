@@ -445,6 +445,7 @@ action or line, so replays reproduce without a provider.
    probe 0/12. needs: none. (ADV51.)
   Wave 52: TICK ae98ba8 (checker PASS).
   LATER: parked 2026-10-03 (circus verdict 2: its own wave note says TICK with a commit that exists, but the box was never ticked, so builders re-verify finished work; the lead ticks it with its receipt); unpark by deleting this line.
+  Correction 2026-10-21: the file this row edits is gone - `tools/sprint-lock.mjs` was deleted in e5457d6e ("standalone 4/4: delete the seat guard, the sprint lock, quiet and the knobs") and `git log --all -- tools/sprint-lock.mjs` ends there. engine2040 has no sprint loop, no lock and no seat guard (AGENTS.md: "no sprints, no locks, no claims"), so the row cannot be built as written and the guard is NOT to be rebuilt. The row needs a new home: the lead decides whether the foreign-holder guard belongs anywhere at all. Not ticked.
 - [x] ADV51c tools: showcase frameless tamper bypass + clip escape — Landed ae98ba8. Tick audit 2026-10-17: tools/showcase.test.mjs frameless manifest fails without --allow-unhashed, tampered PNG fails, unsafe manifest.clip refused; node --test 13/13 with docs-coverage.
   check-only PASSes with no `frames` hashes + unsanitized
   `manifest.clip` basename (ADV51 wave 51; incident proposed).

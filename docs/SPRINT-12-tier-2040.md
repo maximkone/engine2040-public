@@ -20,11 +20,13 @@ golden unchanged; kill bars are gates.
   (journal API frozen). Accept: `cargo test --locked -p engine-editor commands`
   green; 2000-object diff posts ms + byte count; undo still whole-batch x2;
   golden unchanged. needs: EV3.
+  Correction 2026-10-21: duplicate - PW29 owns this work now; PW29's row says it closes C12, FU2 and FU3. This row is not ticked and is not built on its own; retire it when PW29 lands.
 - [ ] FU3 futures: open-prompt eval spike (prompt pack on the A6 tasks).
   Tier A spike. Size S. Owns spike hunks beside `crates/endpoint/src/discover.rs`
   (twenty-tool gate frozen). Accept: `cargo test --locked -p engine-endpoint discover`
   green; completion + tokens delta posted; manifest bytes x2; golden unchanged.
   needs: EV3.
+  Correction 2026-10-21: duplicate - PW29 owns this work now; PW29's row says it closes C12, FU2 and FU3. This row is not ticked and is not built on its own; retire it when PW29 lands.
 - [ ] FU4 futures: learned-physics rollout spike (offline advisor only).
   Tier C spike. Size S. Owns spike hunks beside `crates/physics/src/lib.rs`
   (tick step frozen). Accept: `cargo test --locked -p engine-physics learned`
@@ -82,6 +84,7 @@ golden unchanged; kill bars are gates.
   sweep on the material chart matches the RT7 reference within tolerance.
   needs: RT4.
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: duplicate of RT19, and RT19 owns it - both add `crates/render/src/rt_reflect.rs`. This row is not ticked and is not built on its own; retire it when RT19 lands.
 - [ ] RT6 render: engine denoiser — spatiotemporal (SVGF and ReBLUR shape,
   reimplemented from papers) for RT2–RT5; vendor denoisers only as
   optional adapters after a license row. Tier C. Size L. Owns
@@ -95,6 +98,7 @@ golden unchanged; kill bars are gates.
   material chart; RT-tier stills within perceptual tolerance of it.
   Deep 3D pass 2026-09-25: fixtures chart, night (24 of 250 torches) and tunnel; seeds 7 and 17 at 64 to 4,096 spp; converged when 1,024 vs 4,096 spp FLIP is at most 0.02; an ablation with NEE off must score clearly worse on night and tunnel, else the reference is rejected. needs: GX8, RT1, RL6.
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: duplicate - PW11 owns this work now; PW11's row says it closes RT7 and RT13. This row is not ticked and is not built on its own; retire it when PW11 lands.
 - [ ] RT8 render: probe-grid GI for Base — cascaded light grids with
   runtime relight (id Tech 8 shape), so GPUs without ray queries still get
   moving bounce light. Tier C. Size M. Owns
@@ -126,12 +130,14 @@ golden unchanged; kill bars are gates.
   the WIN1 match. needs: VG1,
   AU2.
   LATER: re-aim at renderer 2026-10-06 (owner dropped viewer, D7 Bevy gate dead); CPU oracle seed at target/leftover-2026-10-06/engine-gameplay; planner re-seats into this row's home; unpark by deleting this line.
+  Correction 2026-10-21: duplicate of RL54, and RL54 owns it - both build `crates/render/src/crowd.rs` and RL54's accept carries the VG4 bar (20,000 spectators in 1.5 ms). This row is not ticked and is not built on its own; retire it when RL54 lands.
 - [ ] VX1 render: froxel volumetric fog, light shafts and local fog
   volumes (sand dust, torch smoke), lit by the sun and RT3 lights.
   Tier C. Size M. Owns `crates/render/src/volumetric.rs`. Accept: shafts
   through the gate arch; stable in motion; 1.0 ms at 1080p on the
   reference GPU. Consumer is the WIN1 match. needs: GX7, GX2, RL4.
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: duplicate of VX17, and VX17 owns it - both add `crates/render/src/volumetric.rs`. This row is not ticked and is not built on its own; retire it when VX17 lands.
 - [ ] VX2 render: volumetric clouds and weather sky — rain wetness drives
   the RL6 wet layer. Tier C. Size M. Owns `crates/render/src/clouds.rs`. - code cut 2026-10-16, recover via git log --follow -- crates/render/src/clouds.rs
   Accept: a day-to-night clip with moving clouds; wet sand darkens and
@@ -200,6 +206,7 @@ golden unchanged; kill bars are gates.
   and tunnel or the reference is rejected. needs: RT7, GX8. (PLN
    render-2040, reviewed 2026-09-26; waits RT7.)
    LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: duplicate - PW11 owns this work now; PW11's row says it closes RT7 and RT13. This row is not ticked and is not built on its own; retire it when PW11 lands.
 - [ ] RT19 render: Bevy-SSR screen-space reflection march port - port the
   `ScreenSpaceReflections` settings shape plus plugin plus uniform bind
   shape from `bevy_pbr-0.20.0-rc.2/src/ssr/mod.rs` and the depth-march
@@ -277,6 +284,7 @@ golden unchanged; kill bars are gates.
   Accept: 20k in 1.5 ms on the reference GPU, cheer follows kill, VAT
   bytes x2, else killed with numbers. needs: VG1, VG4, AU2, CT1.
    LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: duplicate of RL55, and RL55 owns it - both want the crowd wave cue, and RL55's accept lands the cue tape (VG9 is LATER-parked). This row is not ticked and is not built on its own; retire it when RL55 lands.
 - [ ] VG13 render: Bevy-meshlet cluster build with LOD cut — port
   `MeshletMesh::from_mesh` cluster build plus `BvhNode`/`Meshlet`/
   `MeshletCullData` layouts plus BVH traversal LOD select
@@ -640,6 +648,7 @@ golden unchanged; kill bars are gates.
   p50 <= 100 ms; SP-clean rate at/above builder+repair baseline;
   rerun byte-identical x2; 0 tick code. needs: WD1.
   (PLN47 verdict TAKE; EMPIRE outcome 4.)
+  Correction 2026-10-21: duplicate - PW55 owns this work now; PW55's row says it closes WD14 and WD15. This row is not ticked and is not built on its own; retire it when PW55 lands.
 - [ ] WD15 world: staged arena-ground bake — ordered seeded passes Progress 2026-10-17: crates/world/src/ground/bake.rs (1d01a410): ten_bakes_rerun_identical_x2, no_blocked_paths_and_connected, staged_has_wear_and_rubble_over_uniform_dirt passed, gh run 39056058112; the 100 ms bake test is #[ignore] (wall clock, not run) and the blind A/B leg has no record.
   (base → wear → scatter) baking courtyard dirt, rubble scatter and
   worn paths to deterministic tile/prop tables with a preview capture
@@ -649,3 +658,4 @@ golden unchanged; kill bars are gates.
   rerun-identical x2; 0 blocked paths or gates; bake <= 100 ms;
   blind A/B prefers staged over single-pass; 0 tick float.
   needs: WD1, NV3. (PLN47 verdict TAKE; EMPIRE outcome 4.)
+  Correction 2026-10-21: duplicate - PW55 owns this work now; PW55's row says it closes WD14 and WD15. This row is not ticked and is not built on its own; retire it when PW55 lands.

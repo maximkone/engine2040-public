@@ -67,6 +67,7 @@ platform outputs enter only as recorded actions.
   audio analysis drive AM12 faces; presentation only. Tier C. Size M.
   Owns `crates/anim/src/lipsync.rs`. Accept: viseme timing within 60 ms
   of the reference track; golden unchanged. needs: AM12, LAI1.
+  Correction 2026-10-21: duplicate - PW35 owns this work now; PW35's row says it closes LAI3. This row is not ticked and is not built on its own; retire it when PW35 lands.
 - [ ] LAI4 provider: moderation — every model line passes a rating
   profile (blocklist, optional classifier adapter, length and topic
   caps) before presentation; refusals fall back to scripted lines;
@@ -95,6 +96,7 @@ platform outputs enter only as recorded actions.
   `crates/provider/src/embedded.rs`. Accept: ≤ 2 s per NPC line on the
   reference CPU while the window build holds its frame budget; moderation
   applies. needs: OPT27, LAI4.
+  Correction 2026-10-21: duplicate - PW27 owns this work now; PW27's row says it closes D18 and LAI7. This row is not ticked and is not built on its own; retire it when PW27 lands.
 - [ ] LAI8 provider: quotas and key safety — per-player and per-session
   model budgets, rate limits, an owner-run key relay option and
   player-owned keys in the OS store; a scanner proves no key ships in

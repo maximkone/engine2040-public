@@ -472,6 +472,7 @@ Same source and routing as the frame section above.
   slot via `Playback`, `rate_q8` carries run scale. Accept: new
   `state_machine_fighter_picks_from_flags` green x2 (fails before); anim plus
   game libs green; golden unchanged; at most 200 lines. needs: EG18.
+  Correction 2026-10-21: duplicate - PW36 owns this work now; PW36's row says it closes EG18b. This row is not ticked and is not built on its own; retire it when PW36 lands.
 - [ ] EG18c game: animation from sim state, slice 3 — sample leaving plus current
   through graph at playback weights, react through layers; landed
   midpoint/flinch tests stay green. Accept: new
@@ -707,6 +708,7 @@ Same source and routing as the frame section above.
   socket and gets one physics body. F2P: a grep for `attach` in anim and game
   finds nothing today. P2P: golden unchanged; `cargo test -p engine-game --lib`
   green. Review: bodies.md G8 (geaen 11.11.5.1). needs: EG18.
+  Correction 2026-10-21: duplicate - PW34 owns this work now; PW34's row says it closes EG40 and the grip half of LF12. This row is not ticked and is not built on its own; retire it when PW34 lands.
 - [x] EG41 perf: packaged smoke, soak and a frame-time gate — the packaged smoke Landed 1d01a41. node --test tools/proof.test.mjs 21 pass (frameCsvVerdict steady rows pass, slow tail fails on p95, same text x2 equal, real timed-smoke header parses), engine-perf lib 122 passed run 39057450320; arena writes target/perf/frame-times.csv (`write_frame_times_csv`) and `node tools/proof.mjs --perf` prints "frame times: frames=600 p50=9.219 ms p95=19.310 ms (bar 50 ms)"; `fps_est` is renamed (perf CSV header).
   is a marker only, the hour soak in `crates/proof/src/online_soak.rs` is
   `#[ignore]` and unwired, and no CI gate reads frame time. Use the existing
@@ -1038,6 +1040,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   digests, `reset` takes no proof, the breaker exists only in `tests/`. P2P:
   `cargo test -p engine-observe --lib` green; golden unchanged. Plan:
   `docs/plan/forge-adoption.md` AD-14. needs: none.
+  Correction 2026-10-21: duplicate - PW30 owns this work now; PW30's row says it closes AD14, E75, A9 and G1. This row is not ticked and is not built on its own; retire it when PW30 lands.
 - [ ] AD15 assets: cook-time clip gates — measure raw-clip foot slide with
   `anim::feet` (assets already depends on anim) and refuse with clip name and
   mm; `BoneMap::build` returns coverage and refuses when a required set (root,
@@ -1094,7 +1097,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   ragdoll tape digest is stale — PX9 moved the fall on 2026-10-19 and AD17
   moves it again, so `engine-proof --features ragdoll` is red on its pinned
   const until a four-machine golden-matrix run re-pins it with a receipt.
-- [ ] AD18 spatial: 3D, yaw-aware overlap in the report, the solver and the
+- [x] AD18 spatial: 3D, yaw-aware overlap in the report, the solver and the Landed c4641f4d.
   gate (prerequisite of SP16) — one box test: 3D interval first, then the XZ
   footprint rotated by the yaw (exact at 90 degrees; integer bound
   `(hx+hz)*1415/2000` at 45-degree steps; otherwise the bounding circle with a
@@ -1110,6 +1113,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   test callers only. P2P: `cargo test -p engine-spatial --lib` green; golden
   unchanged. SP16 should follow AD18. Plan: `docs/plan/forge-adoption.md`
   AD-18. needs: none.
+  Progress 2026-10-21: accept PASS - `node tools/gh-check.mjs --remote-only cargo test -p engine-spatial --lib overlap_3d` -> `test result: ok. 13 passed; 0 failed` (run 39515222235). It covers every accept item: a lamp on a table is clear, a crate under a table is clear, a 4 m plank at 45 degrees is never intersected by a solver result, 20 permutations give equal digests, the flat-room goldens stay byte-identical and the stacked-scene digest is re-pinned. Landed c4641f4d (2026-10-20, "spatial: AD18 3D yaw-aware overlap").
 - [x] AD19 provider: status map and rate-limit gate — 400, 404 and 422 do not Landed aa644693. Run 39052718180.
   retry; 5xx, 408 and socket errors retry with capped seeded jitter inside the
   request deadline; 429 waits for Retry-After once behind one shared gate per
@@ -1525,6 +1529,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   analytic shift within 0.1 px; a moved body's pixels carry its move;
   validation errors 0. F2P: no motion-vector target. P2P: render lib green;
   golden unchanged. needs: LF3.
+  Correction 2026-10-21: duplicate - PW01 owns this work now; PW01's row says it closes LF5 and gap B7 cut 1. This row is not ticked and is not built on its own; retire it when PW01 lands.
 - [ ] LF5b render: TAA slice 2, jitter — Halton(2,3) sub-pixel offsets on the Progress 2026-10-17: the pure half is in: `post_jitter_motion.rs` `halton`, `jitter_offset`, `jitter_ndc`, `jitter_projection` (`jitter_matches_halton_values`, frames inside (-0.5, 0.5), f737386). Left: the presenter flag and the camera-uniform hunk; nothing outside tests calls `jitter_projection`.
   projection, 8-frame cycle, behind a presenter flag that stays off until
   LF5c lands; motion vectors stay un-jittered. Diff: regular. Tier A. Size S.

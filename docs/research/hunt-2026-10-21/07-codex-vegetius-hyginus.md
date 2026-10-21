@@ -13,6 +13,15 @@ Library on 2026-10-21:
 | `VEG` | Vegetius, *De re militari* (Epitoma rei militaris), Liber I | <https://www.thelatinlibrary.com/vegetius1.html> (book index: `vegetius.html`) | public domain |
 | `PHG` | Pseudo-Hyginus, *De munitionibus castrorum* | <https://la.wikisource.org/wiki/De_munitionibus_castrorum> (the Latin Library copy: `thelatinlibrary.com/hyginus/hyginus6.shtml`) | public domain |
 
+**The machine-readable carrier** (found by hunter 5, verified today): the corpus
+`cltk/lat_text_latin_library` (28 stars, Public Domain Mark 1.0) holds the same
+texts as plain UTF-8 with the numbering already in the file:
+`hyginus/hyginus6.txt` (22.6K, paragraphs `1.` to `58.`) and
+`vegetius1.txt` (32.8K, chapters in Roman numerals `XXI.`, `XXIIII.`). The
+paragraph numbers were checked against the passages below and they match, so the
+codex splitter is a line regex and not an XML walk. Fetch:
+`https://raw.githubusercontent.com/cltk/lat_text_latin_library/master/<path>`.
+
 Unit: **1 Roman foot = 296 mm** (the value row ROM2 already uses; 5 feet = 1
 passus, 1000 passus = 1 Roman mile = 480 ft).
 
@@ -63,13 +72,26 @@ The table should therefore carry a `threat` key: `march` -> 5 x 3, `hasty` ->
 
 1. Every number above becomes one row in `content/rome/camp.toml` or
    `content/rome/line.toml`, with `ref = "PHG 49"` or `ref = "VEG 1.21"`.
-2. A cook script may parse the two texts and print the numbers beside the
-   tables, so a change in the text shows up as a diff. That is the proof the
-   codex rows (CDX1, CDX2) want.
-3. Where a figure disagrees (row 1 vs row 18), the table keeps **both** with a
+2. The text is fetched from the machine-readable corpus
+   (`cltk/lat_text_latin_library`, Public Domain Mark 1.0) and split on the
+   numbering the file already carries: `hyginus/hyginus6.txt` paragraphs
+   `1.` to `58.`, `vegetius1.txt` chapters in Roman numerals.
+3. **Store the passage's text hash beside the ref.** Then a re-numbered edition,
+   a corrected transcription or a substituted text **fails the lint** instead
+   of silently changing a ditch from 5 ft to 4 ft. This is the rule that makes
+   "realism is checkable, not a vibe" true.
+4. A cook script prints the numbers beside the tables, so a change in the text
+   shows up as a diff. That is the proof the codex rows (CDX1, CDX2) want.
+5. Where a figure disagrees (row 1 vs row 18), the table keeps **both** with a
    `threat` or `kind` key. A rule that hides the disagreement is a bug.
-4. The passages are short and quotable, so `docs/design/legionary/` can carry
+6. The passages are short and quotable, so `docs/design/legionary/` can carry
    the Latin next to the picture of the camp.
+7. The splitter can be made scheme-driven instead of per-work: the CTS/CapiTainS
+   reader in `tianlynn/tei-cts` (MIT, read 2026-10-21) walks a TEI edition with
+   the edition's own `cRefPattern` XPath, and its **trust manifest** (blocking
+   checks and advisory checks with the thresholds in one commit) is the shape a
+   codex source registry wants. Its fixtures are CC BY-SA Perseus and stay out
+   of our tree; the machinery is the steal.
 
 ## 4. What is still missing in the sources
 

@@ -162,6 +162,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   --lib sweep_noise` x2: a perfect-player run first; with noise on, rung
   strength rises strictly across T1-T3; noise on and off both replay x2. F2P:
   no sweep or noise. P2P: P3 bars unchanged with noise off. needs: GA13.
+  Correction 2026-10-21: the Accept filter `sweep_noise` matches no test (`Grep sweep_noise` over crates/playtest is empty), so the command exits 0 with 0 passed. The sweep half is real: `cargo test -p engine-playtest --lib sweep_` runs `sweep_rows_cover_every_difficulty_at_each_value` (`tournament.rs:2519`), `sweep_skips_bloodless_variants_and_replays_its_csv` (`:2491`), `sweep_stamp_pins_epoch_and_names_csv_files` (`:2550`) and the ignored `full_difficulty_sweep_writes_csv` (`:2560`). The noise test is the work: Accept is `--lib sweep_` printing at least 4 passed AND `--lib sweep_noise` printing at least 1 passed, and the row may not be ticked until the second line prints it.
 - [ ] GP33 playtest: time-to-kill and matchup table — no per-pair numbers exist.
   A test computes time-to-kill per tier and move kind from the loaded tables
   into `target/reports/rome-ttk.csv` and a win matrix from the GA13 tournament
@@ -173,6 +174,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   while the tier ladder puts it elsewhere; which one wins? Question in
   `docs/plan/2026-10-19-owner-queue.md`.
   Owner chat 2026-10-19 (delegated): the tier ladder wins on the label and the row's Accept is unchanged; the row is ordinary agent work again.
+  Correction 2026-10-21: the Accept filter `ttk` matches no test and no module in crates/playtest (`Grep ttk` over crates/playtest is empty), so the command exits 0 with 0 passed. The CSV writer, the odd-cycle check and the `ttk` test are the work: Accept is `cargo test -p engine-playtest --lib ttk` printing a nonzero passed count, and the row may not be ticked until that test exists and prints it.
 - [x] GP36 content: arena zones and the entrance metric — the only cover is a Landed d2b58bd1. `cargo test -p engine-playtest --lib -- tier_ zones` green, gh run 39056997288: zones_shares_sum_to_1000_and_entrance_stays_under_250; content/design/arena-zones.rows on disk; full playtest lib 301 passed, gh run 39059423063.
   1 m crate (`crate_a`, id 10) and `gate_tunnel` (id 5) is the one entrance;
   nothing measures where fights happen. `content/design/arena-zones.rows`
@@ -219,6 +221,8 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   test -p engine-playtest --lib primus` x2: T3 beats T4 phase 1 in under 40%
   of 200 duels; phase 2 starts at 500 permille hp; every T4 attack has an
   answer. F2P: no T4. P2P: tiers test green. needs: GA13, GP30.
+  Correction 2026-10-21: the phase-2 half is landed - `crates/ai/src/depth.rs:459 primus_phase` starts phase 2 at 500 permille hp, `:470 primus_counter` gives it the new answer, and `tier_primus_phase_starts_at_500_permille` (`depth.rs:2782`) is the test. The premise sentence above is stale. What is left is the playtest proof: `cargo test -p engine-playtest --lib primus` matches no test (`Grep primus` over crates/playtest is empty), so the Accept may pass only with a playtest-crate `primus` test that prints a nonzero passed count.
+  Correction 2026-10-21: the phase-2 half is landed, the playtest proof is not. Landed: `crates/ai/src/depth.rs:459 primus_phase` opens phase 2 at 500 permille hp, `:470 primus_counter` is the new v2 answer, and `tier_primus_phase_starts_at_500_permille` (`depth.rs:2782`) proves it. Left: only the playtest proof - `cargo test -p engine-playtest --lib primus` matches no test (`git grep -n primus -- crates/playtest/` exits 1), so the Accept must be re-pointed at a filter that exists. Row stays open on that half only.
 
 ### Engine rows from the books (2026-10-12, `BOOK-GAPS-2-2026-10-12.md` sections 2.1-2.12)
 
@@ -233,6 +237,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   `E2040_THREADS=1` and `=8` both print golden `d57b5c8ae3096614`; ARENA
   frame-split p50 at 8 fighters before and after posted. F2P: no non-test
   caller of `JobPool::scope` in arena. P2P: golden unchanged. needs: none.
+  Correction 2026-10-21: duplicate of PW20 (`ecs: the job pool in the sim`, which closes E21 and RC36); do not run both - PW20 is the owning row.
 - [ ] RC37 arena: fork runs on the shared pool — `crates/arena/src/fork.rs:276-285`
   spawns one OS thread per branch (callers `endpoint/src/assistant.rs:1139`,
   `arena/src/probe.rs:55`), capping AX12's 20-branch speedup. Run branches on
@@ -281,6 +286,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   Size M. Owns those two types and their call sites, the presenter hunk.
   Accept: `rg -n "struct Handle\(pub|struct Fixed\(pub" crates` empty;
   workspace tests green. F2P: public fields. P2P: golden unchanged. needs: none.
+  Correction 2026-10-21: board audit 2 named PW52 (`tools: the layering rule gains three checks`, which closes CQ20) as the owning row, but PW52 only adds crate-layer rules and does none of this row's newtype or `SUN_CACHES` work; keep one of the two and fold the other's items in - do not run both.
 - [x] CQ21 quality: the crate graph is tested acyclic and coupling has an alarm — Landed 5791e829. The DFS cycle check lives in `tools/arch-fitness.mjs` (wired into workspace-check at `tools/workspace-check.mjs:754`): `node --test tools/arch-fitness.test.mjs` 4 pass (seeded cycle a->b->a fails, self loop fails, real graph passes); `node --test tools/crate-map.test.mjs` 3 pass incl. instability Ce/(Ca+Ce); `node tools/crate-map.mjs` prints instability per crate. Tests sit in those two files, not workspace-check.test.mjs.
   `docs/ARCHITECTURE.md:9` promises an acyclic graph; `tools/workspace-check.mjs:308-318`
   only walks reachability; `tools/crate-map.mjs:4-5` prints fan-in and fan-out
@@ -309,6 +315,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   ARENA prints draws and groups; at 16 and 256 kit copies draw calls fall to
   the group count; captures byte-equal before and after. F2P: one draw per
   item. P2P: golden unchanged. needs: RL60.
+  Correction 2026-10-21: duplicate of PW02 (`DrawItem carries a transform and the live loop draws per bin`, which closes RL60 and RL32); do not run both - PW02 is the owning row.
 - [x] RL33 game: cull bounds follow the posed body — `draw.rs:67-70` takes centre Landed 5862b697. `cargo test -p engine-game --features app --lib -- kit_walls free_cam posed_bound` 8 passed on this PC, incl. posed_bound_follows_a_posed_arm_outside_the_bind_sphere (arm 1.5 m out stays inside the bound), posed_bound_replays_same_bytes_twice, posed_bound_refuses_a_nan_vertex, posed_bound_never_shrinks_below_the_bind_radius.
   and radius from the caller and no fighter sets one, so wiring W7 on a
   bind-pose sphere culls limbs (Eberly 3.2). Bound each fighter from its posed

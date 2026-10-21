@@ -91,10 +91,18 @@ impl std::error::Error for NetHealError {}
 
 /// Map a supervisor refusal onto the typed net error. Called only on
 /// [`Err`], so mapping consumes no budget — same as the supervisor.
+///
+/// The three proof refusals (`UnverifiedRecovery`, `ScopeMismatch`, `UnknownHeal`) all mean
+/// the same thing to the net layer: the supervisor did not apply a row, so the fault is not
+/// healed. They map to [`NetHealError::NotRegistered`], the net layer's "no policy row" word.
 fn map_heal_error(error: HealError) -> NetHealError {
     match error {
         HealError::PendingFull | HealError::TapeFull => NetHealError::HealFull,
-        HealError::NotRegistered(_) | HealError::UnknownCode(_) => NetHealError::NotRegistered,
+        HealError::NotRegistered(_)
+        | HealError::UnknownCode(_)
+        | HealError::UnverifiedRecovery { .. }
+        | HealError::ScopeMismatch { .. }
+        | HealError::UnknownHeal { .. } => NetHealError::NotRegistered,
     }
 }
 

@@ -88,17 +88,35 @@ native path has.
 ## Proof (commands and their one-line results)
 
 - `node tools/gh-check.mjs --budget 840 cargo test -p engine-assets --lib`
-  -> `PASS on the runner: 218 passed; 0 failed; 2 ignored` (run
-  39501747641; the new tests: `load_queue::tests` 10, `asset_source::fetch::
-  tests` 4, `handle::tests` +3).
+  -> `PASS on the runner: 218 passed; 0 failed; 2 ignored` (run 39516602832,
+  the run after the re-apply; the same result in run 39501747641). The new
+  tests: `load_queue::tests` 10, `asset_source::fetch::tests` 4,
+  `handle::tests` +3.
 - `node tools/gh-check.mjs --budget 840 cargo clippy -p engine-assets
   --all-targets -- -D warnings` -> `PASS on the runner` (run 39505296566).
 - `node tools/gh-check.mjs --budget 840 cargo test -p engine-game --lib`
   -> `FAIL on the runner: could not compile engine-arena (lib) - missing
   field 'cuts' in initializer of 'Sim' at crates/arena/src/fork.rs:664`
-  (runs 39502244620, 39503726477, 39507547809). That red is another
-  agent's in-flight work in `crates/arena` (not a path of this slice): the
-  game crate cannot compile until that crate compiles. Not re-run green yet.
+  (runs 39502244620, 39503726477, 39507547809, 39508752089). That red is
+  another agent's in-flight work in `crates/arena` (not a path of this
+  slice), and it is red at `HEAD` too (the last arena commits flip-flop on
+  it). The shared tree also has `crates/observe`, `crates/audio`,
+  `crates/render` and `crates/game/src/class_sheet.rs` (another agent's
+  untracked file) red, so the game proof ran in a scratch copy of the tree
+  (`%TEMP%\opencode\web6-check`) where only those foreign reds are patched.
+- `cargo test -p engine-game --lib -- --test-threads=1` (in that scratch
+  copy) -> `469 passed; 7 failed; 6 ignored`. The same 7 fail with
+  `HEAD`'s `crates/game` (466 passed; 7 failed): they are the
+  fighter-cap fallout of commit 15049ef3 (a 17-fighter config is accepted
+  now, the HUD expects 16 slots), not this slice. This slice adds the 3
+  `kit_assets` tests and the kit import tests stay green.
+- `cargo test -p engine-proof --lib golden_hash_untouched` (in the same
+  scratch copy) -> `1 passed; 0 failed` - the golden `d57b5c8ae3096614`
+  stands.
+- `cargo clippy -p engine-game --all-targets --no-deps -- -D warnings` (in
+  the same scratch copy) -> red on 3 foreign lints only (`camera_rig.rs:541`,
+  `crash.rs:658`, `camera.rs:1451`); no lint in `kit_assets.rs` or
+  `arena_kit.rs`.
 - `node tools/wasm-gate.mjs` -> `[IMPROVED] crates/game/src/arena_kit.rs: fs
   1 -> 0` (the headless kit import has no `std::fs` any more). The gate
   itself is red on 11 foreign regressions in `crates/render`, `crates/ai`,
@@ -124,14 +142,26 @@ native path has.
   module graph of this slice is complete (every new file is declared).
 - The golden `d57b5c8ae3096614` cannot move: this slice touches no sim
   crate, no tick and no hash input (`crates/assets` and `crates/game` are
-  outside the fixed tick). The golden test could not be re-run here because
-  `engine-proof` also builds `engine-arena`, which is red for another agent.
+  outside the fixed tick). The proof above re-ran it green.
+
+## Shared-tree hazard (read this before committing)
+
+While this slice worked, another agent's `git checkout`/`git restore` on the
+shared tree wiped the tracked-file edits of this slice twice (the untracked
+new files survived both times). The edits were re-applied and re-proved
+after the last wipe (the assets run 39516602832 above is from the
+re-applied tree). If the tracked edits are missing again, the patch is
+`%TEMP%\opencode\web6-backup\web6-tracked.patch` and the new files are
+beside it (`load_queue.rs`, `fetch.rs`, `kit_assets.rs`). Commit the slice
+by path before the next checkout storm.
 
 ## Still open
 
-1. The game proof: `cargo test -p engine-game --lib` is blocked by the
-   foreign `crates/arena` red. Re-run it once that crate compiles; the game
-   side itself is written and reviewed.
+1. The game proof on the shared tree: `cargo test -p engine-game --lib`
+   cannot run there until `crates/arena` (and the other foreign reds) are
+   fixed by their owners. The scratch copy above is the proof that this
+   slice's game code is green; re-run the same line on the shared tree once
+   the tree compiles.
 2. The `app` leg (`cargo test -p engine-game --features app --lib`) was not
    run here: the window/device stack runs on the PC, not on the runner. The
    app-leg kit import changed (the files come from the queue), so that leg
@@ -148,3 +178,4 @@ native path has.
    game needs the seam on the headless leg. The headless graph stays
    std-only (no `gltf`, no `image`), and `engine-assets` is a std-only
    crate on its default features.
+

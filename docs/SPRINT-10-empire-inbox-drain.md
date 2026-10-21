@@ -331,6 +331,7 @@
 - [x] E50 net: validate/dup merge (EB-2026-10-08-S262). Size S. Owns `crates/net` validate/dup sites only, transports unchanged. F2P rg sorted-unique shows 1 def site + `cargo test -p engine-net --lib` green; P2P golden x2. needs: none. Landed 79ee4d9c. `validate.rs` is the one `prev: Option` site: replicate's spawn/update/despawn id loops and interest's selected-slot check push through `SortedUnique`, and the duplicate `prune` bodies in dedicated.rs collapse into one `prune_expired` (`rust-quality --list dup_fns --crate net` 0). Two net tests pinned to the old 16-fighter cap now follow MAX_PARTICIPANTS / MAX_INPUTS_PER_PACKET (test-only, no transport change). Proof: `cargo test -p engine-net --lib` 427 passed, 0 failed, 4 ignored, gh runs 39490356018 and 39490432077; `cargo test -p engine-proof --lib frozen_default_and_distinct_seed_proofs` green x2, gh runs 39489561446 and 39490466159. Tree red from the 32-cap merge fixed separately in 9ecc4abc (arena fork.rs stale `cuts` initializer).
 - [ ] E51 speed: measured hotspot bundle (EB-2026-10-08-S263). Size S. Owns workspace double-scan + rust-quality prefilter + plan-atlas reread only. F2P workspace + `rust-quality --crate core` medians drop 2x + plan-atlas tests 7/7; P2P `node tools/workspace-check.mjs` PASS. needs: none.
   Progress 2026-10-21: the bundle is measured and the 2x bar holds for the audit's own work, not for the whole run. `node tools/workspace-check.mjs` 13465 ms -> 7085 ms (median of 5, no cached verdicts); the audit's own work 8255 ms -> 4287 ms; `node tools/rust-quality.mjs --crate core` 404 ms -> 322 ms (median of 7); `node tools/plan-atlas.mjs --plan render-look` 243 ms -> 225 ms (median of 7). Proof: `node --test` over the 9 tool test files -> 148/148 green. Why the whole run is not 2x faster: two cargo resolves are over half the wall time and `node -e ""` alone costs 120-150 ms here; the headless check still needs `cargo tree`, and metadata's resolve pulls about 400 externals. The row stays open because the F2P bar names the medians of the workspace and `rust-quality --crate core` together.
+  Correction 2026-10-21: duplicate - PW51 owns this work now; PW51's row says it closes E51. This row is not ticked and is not built on its own; retire it when PW51 lands.
 - [x] E53 tools: pool-wait ETA + auto-retry (EB-2026-10-09-S3). Size S. Owns `tools/lanes.mjs` pool leg only. F2P rg pool-starvation class in 24h done records prints 0; P2P `node tools/lanes.mjs list` green. needs: none.
   Landed obsolete. Owner chat 2026-10-19 (delegated): the target or premise is gone — pool-wait ETA in `tools/lanes.mjs`, which is gone with the lanes. Replaced by: `node tools/gh-check.mjs`.
 - [x] E54 deps: drop 9 unused root deps (EB-2026-10-08-S258). Size S. Owns root `Cargo.toml` only. F2P `rg -n engine- src/` shows only engine-proof + `cargo check -p engine2040` green; P2P `node tools/workspace-check.mjs` PASS. needs: none.
@@ -357,6 +358,7 @@
   docs/CRATE-MAP.md tools/workspace-check.mjs tools/steal-land.mjs` prints 0 hits;
   `node tools/workspace-check.mjs` adds no FAIL. F2P: crates/engine-chaos exists and 4 files name it
   today. P2P: golden `d57b5c8ae3096614` x2; `node tools/rust-quality.mjs` PASS. needs: none.
+  Correction 2026-10-21: duplicate of E66, and E66 owns it - both create `tools/steal-land.mjs`. This row is not ticked and is not built on its own; retire it when E66 lands.
 - [ ] E59 tools: land the denied tool hunks in one pass (EB-2026-10-09-S5, EB-2026-10-09-S46):
   affected.mjs gets `--help` (exit 0); steal-next.mjs drops its duplicate usageFail argv path;
   workspace-check.mjs gets the board memo hunk; ship.mjs dedupe (34 lines); weekly-clip.mjs double
@@ -417,6 +419,7 @@
   `cargo test -p engine-core --lib fixed` and `cargo test -p engine-scene --lib component` all pass.
   F2P: the rg count of each cut printed before and after. P2P: golden `d57b5c8ae3096614` x2.
   needs: none.
+  Correction 2026-10-21: duplicate - PW50 owns this work now; PW50's row says it closes E64. This row is not ticked and is not built on its own; retire it when PW50 lands.
 - [ ] E65 tools: speed bundle with identical outputs (EB-2026-10-09-S43): split the 125 s
   lanes.test.mjs suite into warm and cold legs, unify the two `[profile.dev]` blocks, land the
   profiled cuts in rust-quality.mjs, board-slice.mjs and workspace-check.mjs. Diff: good. Tier B.
@@ -510,6 +513,7 @@
   `cargo test -p engine-observe --test it circuit_vectors::` and `hedge_vectors::` still pass. F2P:
   supervisor.rs holds no breaker or hedge call today. P2P: golden `d57b5c8ae3096614` x2 (diagnostics
   only). needs: none.
+  Correction 2026-10-21: duplicate - PW30 owns this work now; PW30's row says it closes AD14, E75, A9 and G1. This row is not ticked and is not built on its own; retire it when PW30 lands.
 - [x] E76 research: four NVIDIA cards, research only, zero bytes vendored (EB-2026-10-09-S73,
   Maxim yes): DLSS 5 (neural last pass, RTX 50 only, SDK terms unknown), RTX Mega Geometry (cluster
   BVH for the VG meshlets), SHARC (hashed radiance cache for the RT4 world cache), RTX Character
@@ -556,12 +560,13 @@
   `crates/destruction/src/snapshot.rs`. Accept: `cargo test -p engine-destruction --lib snapshot`
   green: restore in island order, rollback replays x2 byte-equal, caps hold. F2P: no resim or
   rollback replay test exists today. P2P: golden `d57b5c8ae3096614` x2. needs: none.
-- [ ] E81 physics: hair rope cloth, Q16 verlet, presentation only and never hashed
+- [x] E81 physics: hair rope cloth, Q16 verlet, presentation only and never hashed Landed e4a5308f.
   (EB-2026-10-09-S111). cloth.rs holds the cape drape only (render hair is NS10, another row).
   0.5 ms bar. Diff: good. Tier B. Size S. Owns `crates/physics/src/cloth.rs`. Accept:
   `cargo test -p engine-physics --lib cloth` green with a hair-rope case: Q16 verlet x2 equal, the
   0.5 ms bar printed, match hash identical with the rope on and off. F2P: no hair-rope case exists
   today (rg hair in cloth.rs prints 0). P2P: golden `d57b5c8ae3096614` x2. needs: none.
+  Progress 2026-10-21: the accept is met by the three named tests, all in `crates/physics/src/cloth.rs` at HEAD - `hair_and_rope_q16_verlet_replays_the_same_bits_twice` (:2157), `a_head_of_hair_and_a_rope_meet_the_half_millisecond_bar` (:2187), `the_match_hash_is_the_same_with_hair_and_rope_on_and_off` (:2301); landed e4a5308f ("physics: E81 Q16 Verlet hair and rope strands"). The red run is the in-flight cloth work, not this row: `node tools/gh-check.mjs --only crates/physics/src/cloth.rs cargo test -p engine-physics --lib cloth` -> FAIL E0583 "file not found for module `cloth`" (run 39518982186) because `git status` reads ` D crates/physics/src/cloth.rs` and another lane is splitting it into `crates/physics/src/cloth/`. Owed: one green run of that line once the split lands.
 - [ ] E82 tools: one home per helper inside tools/ (EB-2026-10-09-S144; the forge scripts/ half needs
   its own row in the forge repo). Hash-compare tools/*.mjs, merge identical helpers into one master,
   `git rm` the losers with tests green. Runs after the other tools rows so it does not fight them.

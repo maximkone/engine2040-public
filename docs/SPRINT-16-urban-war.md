@@ -21,6 +21,7 @@ content rows wait for UW0 (Finish A met). Combat never imports physics
   `crates/combat/src/projectile.rs`. Accept: 1,000-shot range hashes
   x2; drop within 2% of the table curve; 2,048 rounds ≤ 0.3 ms. needs:
   HR3.
+  Correction 2026-10-21: duplicate - PW18 owns this work now; PW18's row says it closes UW2. This row is not ticked and is not built on its own; retire it when PW18 lands.
 - [ ] UW3 combat: penetration and ricochet — thickness × versioned
   material table (drywall, wood, brick, concrete, metal, glass, flesh)
   gives exit energy; shallow hits ricochet; low energy stops. Tier B.
@@ -213,6 +214,7 @@ content rows wait for UW0 (Finish A met). Combat never imports physics
   Owns `games/urban/src/impacts.rs`. Accept: golden unchanged with it
   on, x2; 200 impacts per second in the P6 GPU budget (reference GPU).
   needs: UW3, UW24, UW27, GX9, GX10.
+  Correction 2026-10-21: duplicate - PW21 owns this work now; PW21's row says it closes UC8 and UW36. This row is not ticked and is not built on its own; retire it when PW21 lands.
 - [ ] UW37 game: brief to mission — an AB stage over the public AB7
   envelope: "barricaded suspect, two hostages, two-floor house, night"
   becomes a UW21 house, a UW19 roster and objectives, checked by fork
@@ -300,6 +302,7 @@ content rows wait for UW0 (Finish A met). Combat never imports physics
   presentation only. Tier C. Size M. Owns `crates/render/src/damage.rs`.
   Accept: golden unchanged; 2,000 holes in view inside the P6 GPU
   budget (reference GPU). needs: GX10, RL6, UW3.
+  Correction 2026-10-21: duplicate - PW21 owns this work now; PW21's row says it closes UC8 and UW36. This row is not ticked and is not built on its own; retire it when PW21 lands.
 - [ ] UC9 render: interior mapping — closed windows show seeded fake
   rooms (walls, lights, curtains) with no interior geometry. Tier C.
   Size S. Owns `crates/render/src/interior_map.rs`. Accept: 1,000 lit
