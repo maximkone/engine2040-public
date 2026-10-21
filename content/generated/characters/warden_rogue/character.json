@@ -1,0 +1,87 @@
+{
+  "name": "warden_rogue",
+  "faction": "ashkin",
+  "concept": "C:\\engine2040\\content\\generated\\concepts\\concept_warden_rogue.jpg",
+  "out": "C:\\engine2040\\content\\generated\\characters\\warden_rogue",
+  "gate": {
+    "verdict": "pass",
+    "bbox_fill": 0.674,
+    "fill_band": [
+      0.4,
+      0.7
+    ],
+    "height_30m_px": 89,
+    "fill_30m": 0.6469,
+    "triangles": 2000,
+    "note": "a silhouette passes when it reads at 90 pixels tall: faction first, class second"
+  },
+  "cook": {
+    "lods": [
+      {
+        "file": "lod0.glb",
+        "lod": 0,
+        "triangles": 2000
+      },
+      {
+        "file": "lod1.glb",
+        "lod": 1,
+        "triangles": 1100
+      },
+      {
+        "file": "lod2.glb",
+        "lod": 2,
+        "triangles": 484
+      },
+      {
+        "file": "lod3.glb",
+        "lod": 3,
+        "triangles": 300
+      }
+    ],
+    "atlas": [
+      {
+        "atlas": 512,
+        "distinct_colors": 335,
+        "image": "Image_0",
+        "material": "Material_0",
+        "skin": false,
+        "source_size": [
+          256,
+          256
+        ]
+      }
+    ],
+    "scale_applied": 2.171542,
+    "source_triangles": 19416
+  },
+  "rig": {
+    "bones": 22,
+    "weighted_vertices": 2562,
+    "vertices": 2566,
+    "distance_stats": {
+      "beyond_cutoff": 4,
+      "nearest_p05": 0.0594,
+      "nearest_p50": 0.2062,
+      "nearest_p95": 0.3628
+    },
+    "landmarks": {
+      "foot_z": -0.0028,
+      "hand_z": 0.8763,
+      "height": 1.998,
+      "hip_half": 0.2215,
+      "hip_measured": 0.2215,
+      "hips_z": 0.9962,
+      "shoulder_half": 0.2797,
+      "shoulder_measured": 0.2127,
+      "shoulder_z": 1.6356,
+      "z_min": -0.0028
+    }
+  },
+  "seconds": {
+    "mesh": 140.9,
+    "cook": 7.8,
+    "gate": 6.3,
+    "rig": 3.9
+  },
+  "generated_at": "2026-10-21T19:31:24.575Z"
+}

@@ -27,6 +27,7 @@ pub mod groma;
 pub mod line;
 pub mod scutum;
 pub mod table;
+pub mod timber;
 
 use core::fmt;
 use engine_core::Fnv64;

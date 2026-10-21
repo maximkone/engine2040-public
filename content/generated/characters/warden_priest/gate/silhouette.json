@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.5941,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 1.9663,
+  "fill_30m": 0.584,
+  "height_30m_px": 88,
+  "height_px": 776,
+  "ortho_scale_m": 2.5339,
+  "px_per_m": 394.64,
+  "resolution_30m": [
+    1374,
+    772
+  ],
+  "scale_applied": 1.002386,
+  "source": "C:\\engine2040\\content\\generated\\characters\\warden_priest\\cook\\lod0.glb",
+  "source_height_m": 1.9952,
+  "triangles": 2000,
+  "width_px": 420
+}

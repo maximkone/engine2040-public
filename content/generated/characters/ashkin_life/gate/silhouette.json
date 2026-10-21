@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.6057,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 2.1004,
+  "fill_30m": 0.5924,
+  "height_30m_px": 86,
+  "height_px": 727,
+  "ortho_scale_m": 2.8891,
+  "px_per_m": 346.13,
+  "resolution_30m": [
+    1286,
+    724
+  ],
+  "scale_applied": 1.003887,
+  "source": "C:\\engine2040\\content\\generated\\characters\\ashkin_life\\cook\\lod0.glb",
+  "source_height_m": 1.9923,
+  "triangles": 2000,
+  "width_px": 496
+}

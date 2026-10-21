@@ -1,0 +1,87 @@
+{
+  "name": "warden_warrior",
+  "faction": "ashkin",
+  "concept": "C:\\engine2040\\content\\generated\\concepts\\concept_warden_warrior.jpg",
+  "out": "C:\\engine2040\\content\\generated\\characters\\warden_warrior",
+  "gate": {
+    "verdict": "pass",
+    "bbox_fill": 0.5217,
+    "fill_band": [
+      0.4,
+      0.7
+    ],
+    "height_30m_px": 87,
+    "fill_30m": 0.4968,
+    "triangles": 2000,
+    "note": "a silhouette passes when it reads at 90 pixels tall: faction first, class second"
+  },
+  "cook": {
+    "lods": [
+      {
+        "file": "lod0.glb",
+        "lod": 0,
+        "triangles": 2000
+      },
+      {
+        "file": "lod1.glb",
+        "lod": 1,
+        "triangles": 599
+      },
+      {
+        "file": "lod2.glb",
+        "lod": 2,
+        "triangles": 599
+      },
+      {
+        "file": "lod3.glb",
+        "lod": 3,
+        "triangles": 300
+      }
+    ],
+    "atlas": [
+      {
+        "atlas": 512,
+        "distinct_colors": 248,
+        "image": "Image_0",
+        "material": "Material_0",
+        "skin": false,
+        "source_size": [
+          256,
+          256
+        ]
+      }
+    ],
+    "scale_applied": 2.252996,
+    "source_triangles": 23968
+  },
+  "rig": {
+    "bones": 22,
+    "weighted_vertices": 2113,
+    "vertices": 2590,
+    "distance_stats": {
+      "beyond_cutoff": 477,
+      "nearest_p05": 0.1332,
+      "nearest_p50": 0.3458,
+      "nearest_p95": 0.5574
+    },
+    "landmarks": {
+      "foot_z": 0.0023,
+      "hand_z": 0.8689,
+      "height": 1.9696,
+      "hip_half": 0.3939,
+      "hip_measured": 0.5153,
+      "hips_z": 0.9871,
+      "shoulder_half": 0.4411,
+      "shoulder_measured": 0.4411,
+      "shoulder_z": 1.6174,
+      "z_min": 0.0023
+    }
+  },
+  "seconds": {
+    "mesh": 182.8,
+    "cook": 7.5,
+    "gate": 6,
+    "rig": 3.4
+  },
+  "generated_at": "2026-10-21T19:38:00.010Z"
+}

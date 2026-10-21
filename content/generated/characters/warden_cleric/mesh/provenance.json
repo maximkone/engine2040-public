@@ -1,0 +1,28 @@
+{
+  "provider": "sf3d",
+  "lane": "local stable-fast-3d (the one local lane)",
+  "licence": "Stability AI Community Licence: commercial at or under $1M revenue, attribution required",
+  "attribution_required": "Powered by Stability AI",
+  "commercial_use": true,
+  "weights": "stabilityai/stable-fast-3d, fetched by tools/asset-gen/fetch-weights.mjs",
+  "model": "stabilityai/stable-fast-3d",
+  "weights_source": "C:\\forge-media\\models\\sf3d-weights",
+  "texture_resolution": 256,
+  "foreground_ratio": 0.85,
+  "source_images": [
+    {
+      "path": "C:\\engine2040\\content\\generated\\concepts\\concept_warden_cleric.jpg",
+      "sha256": "7c7eca1ad027bc1060351b7c86143df94eea07d37d7ec5227e969a46efba3c6b"
+    }
+  ],
+  "source_rights": "our own images only: a mesh made from someone else's picture is still derived from it",
+  "meshes": [
+    {
+      "name": "mesh",
+      "path": "C:\\engine2040\\content\\generated\\characters\\warden_cleric\\mesh\\mesh.glb",
+      "bytes": 506788,
+      "sha256": "74a1aa2b9a97488a61fc09ead8043bb0aebe88ebae181d733e643e3761dbe4be"
+    }
+  ],
+  "generated_at": "2026-10-21T19:06:47.154Z"
+}

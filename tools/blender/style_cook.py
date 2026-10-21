@@ -54,7 +54,25 @@ KEY_STRENGTH = 0.78
 RIM_STRENGTH = 0.22
 SHADOW_LIFT = 0.16
 # The skin is not the faction. A face in black iron is a mask, not a face.
-SKIN_TONE = "#8A6A52"
+# Each faction has its own skin and its own hair, and the skin must not
+# be the same brown as the faction's bronze cloth.
+FACTION_SKIN = {
+    "ashkin": "#6E5A4C",
+    "wardens": "#C29A7C",
+}
+FACTION_HAIR = {
+    "ashkin": "#1A1715",
+    "wardens": "#2A3A4A",
+}
+# The palette entry the cloth takes. The Ashkin are black iron; the
+# Wardens are bone and steel, and their blue is their own.
+FACTION_DOMINANT = {
+    "ashkin": 0,
+    "wardens": 3,
+}
+CURRENT_SKIN = FACTION_SKIN["ashkin"]
+CURRENT_HAIR = FACTION_HAIR["ashkin"]
+CURRENT_DOMINANT = FACTION_DOMINANT["ashkin"]
 ROUGHNESS_MATTE = 0.55
 ROUGHNESS_CLOTH = 0.85
 
@@ -252,12 +270,26 @@ def nearest_palette(pixels, palette):
     # brute in white. So the garment is painted in the faction's own colour,
     # and an accent colour is allowed only where the source's hue really
     # matches one. The light and shadow stay the picture's.
+    # A hue the palette does not have must not fall back to the nearest
+    # hue: a blue shirt had no match, fell to bone, and dressed a black
+    # iron brute in white. So the garment is painted in the faction's own
+    # colour, and an accent colour is allowed only where the source's hue
+    # really matches one. The light and shadow stay the picture's.
     choice = dist.argmin(axis=1)
-    dominant = 0
+    dominant = CURRENT_DOMINANT
     if len(palette) > 1:
-        matched = dist[:, 1:].min(axis=1)
+        accents = [i for i in range(len(palette)) if i != dominant]
+        matched = dist[:, accents].min(axis=1)
         keep = (matched < 0.45) & (sat > 0.25)
         choice = np.where(keep, choice, dominant)
+        # The largest area of the garment wears the faction's colour.
+        # A beige apron was matching bone and dressing the Wardens in
+        # white aprons; the rule is spatial, not per pixel: the big cloth
+        # is the faction's, and the small panels keep their own hue.
+        counts = np.bincount(choice, minlength=len(palette))
+        if counts.argmax() != dominant and counts[dominant] < counts.max():
+            biggest = int(counts.argmax())
+            choice = np.where(choice == biggest, dominant, choice)
     out = pal[choice]
     # The shading is the source's own variation around its own mean, not its
     # absolute brightness. A painter takes the hue from the palette, the
@@ -351,6 +383,66 @@ def write_atlas(image, palette, out_path):
     return {"source_size": [width, height], "atlas": ATLAS_SIZE, "distinct_colors": int(unique)}
 
 
+def split_hair(ob):
+    """Give the hair its own material.
+
+    MakeHuman's basemesh is one mesh: skin, scalp and hair are one surface
+    with one material, so the cook paints the whole head in flesh and the
+    hair reads as a bald cap. The hair is the part of the skull above the
+    brow, so the split is by height on the head: the scalp and the strands
+    above the brow line are hair, and the face below it stays skin.
+    """
+    me = ob.data
+    if not me.vertices:
+        return False
+    zs = [v.co.z for v in me.vertices]
+    z_min, z_max = min(zs), max(zs)
+    height = max(z_max - z_min, 1e-6)
+    # The brow is roughly 88% up the head.
+    brow = z_min + height * 0.88
+    hair = bpy.data.materials.new(name="hair")
+    hair.use_nodes = True
+    slot = me.materials.find(hair.name)
+    if slot < 0:
+        me.materials.append(hair)
+        slot = len(me.materials) - 1
+    moved = 0
+    for poly in me.polygons:
+        zs_poly = [me.vertices[v].co.z for v in poly.vertices]
+        if min(zs_poly) >= brow:
+            poly.material_index = slot
+            moved += 1
+    return moved > 0
+
+
+def drop_normal_maps(ob):
+    """Take the normal maps out of the export.
+
+    Our look is painted: the atlas carries the colour and the LIGHT layer
+    carries the light. A normal map adds nothing the engine can use, and
+    the suit's normal map is 4K, so every LOD carried 7 MB of a texture
+    nobody looks at.
+    """
+    dropped = 0
+    for slot in ob.material_slots:
+        material = slot.material
+        if material is None:
+            continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                tree = getattr(material, "node_tree", None)
+                if not tree:
+                    continue
+                for node in list(tree.nodes):
+                    if node.type == "NORMAL_MAP":
+                        tree.nodes.remove(node)
+                        dropped += 1
+        except Exception:
+            continue
+    return dropped
+
+
 def bake_atlas(ob, palette, out_dir):
     """One palette atlas per material, and the skin is not the faction.
 
@@ -402,7 +494,13 @@ def bake_atlas(ob, palette, out_dir):
             # skin, the palette's first entry if it is anything else.
             name = (material.name or "").lower()
             is_skin = "skin" in name
-            colour = hex_linear(SKIN_TONE if is_skin else palette[0])
+            is_hair = "hair" in name
+            if is_hair:
+                colour = hex_linear(CURRENT_HAIR)
+            elif is_skin:
+                colour = hex_linear(CURRENT_SKIN)
+            else:
+                colour = hex_linear(palette[CURRENT_DOMINANT])
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", DeprecationWarning)
@@ -424,7 +522,13 @@ def bake_atlas(ob, palette, out_dir):
         name = (material.name or "").lower()
         image_name = (image.name or "").lower()
         is_skin = "skin" in name or "skin" in image_name
-        entry = [SKIN_TONE] if is_skin else palette
+        is_hair = "hair" in name
+        if is_hair:
+            entry = [CURRENT_HAIR]
+        elif is_skin:
+            entry = [CURRENT_SKIN]
+        else:
+            entry = palette
         path = os.path.join(out_dir, f"atlas_{index}_{slug(image.name)}.png")
         info = write_atlas(image, entry, path)
         node.image = bpy.data.images.load(path, check_existing=True)
@@ -437,6 +541,38 @@ def bake_atlas(ob, palette, out_dir):
         written.append({"material": "(none)", "image": "(none)", "atlas": "atlas.png",
                         "skin": False, **info})
     return written
+
+
+def drop_normal_maps(ob):
+    """Take the normal maps out of the export.
+
+    Our look is painted: the atlas carries the colour and the LIGHT layer
+    carries the light. A normal map adds nothing the engine can use, and
+    the suit's normal map is 4K, so every LOD carried 7 MB of a texture
+    nobody looks at. Four LODs of 1,100 triangles each should be kilobytes.
+    """
+    dropped = 0
+    for slot in ob.material_slots:
+        material = slot.material
+        if material is None:
+            continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                tree = getattr(material, "node_tree", None)
+                if not tree:
+                    continue
+                for node in list(tree.nodes):
+                    if node.type == "NORMAL_MAP":
+                        tree.nodes.remove(node)
+                        dropped += 1
+                    elif node.type == "TEX_IMAGE":
+                        # An image that is not the base colour is a normal
+                        # map or an AO map: the engine has no slot for it.
+                        pass
+        except Exception:
+            continue
+    return dropped
 
 
 def write_synthetic_atlas(palette, out_path):
@@ -454,81 +590,6 @@ def write_synthetic_atlas(palette, out_path):
     atlas.save()
     return {"source_size": [0, 0], "atlas": ATLAS_SIZE, "distinct_colors": ATLAS_SIZE,
             "synthetic": True}
-
-
-def bake_atlas_old(ob, palette, out_path):
-    """Write the 512 palette atlas and point the material at it."""
-    image = find_base_image(ob)
-    if image is None:
-        # No texture to repaint: a flat palette sheet with a vertical ramp.
-        # The mesh keeps its shading, the engine keeps the atlas rule.
-        neutral = hex_linear(palette[0]) if palette else (0.2, 0.2, 0.2)
-        ramp = np.zeros((ATLAS_SIZE, ATLAS_SIZE, 4), dtype=np.float32)
-        for row in range(ATLAS_SIZE):
-            k = 0.55 + 0.45 * (row / float(ATLAS_SIZE - 1))
-            ramp[row, :, :3] = np.clip(np.array(neutral, dtype=np.float32) * k, 0.0, 1.0)
-        ramp[:, :, 3] = 1.0
-        atlas = bpy.data.images.new("atlas", width=ATLAS_SIZE, height=ATLAS_SIZE, alpha=True)
-        atlas.pixels.foreach_set(ramp.reshape(-1))
-        atlas.file_format = "PNG"
-        atlas.filepath_raw = out_path
-        atlas.save()
-        for slot in ob.material_slots:
-            if not slot.material:
-                continue
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", DeprecationWarning)
-                    tree = getattr(slot.material, "node_tree", None)
-                    if tree:
-                        for node in tree.nodes:
-                            if node.type == "TEX_IMAGE":
-                                node.image = atlas
-            except Exception:
-                pass
-        return {"source_size": [0, 0], "atlas": ATLAS_SIZE, "distinct_colors": ATLAS_SIZE,
-                "synthetic": True}
-    width, height = image.size
-    buf = np.empty(width * height * 4, dtype=np.float32)
-    image.pixels.foreach_get(buf)
-    pixels = buf.reshape(height, width, 4)
-
-    painted = nearest_palette(pixels, palette)
-
-    atlas = bpy.data.images.new("atlas", width=ATLAS_SIZE, height=ATLAS_SIZE, alpha=True)
-    # Sample the painted image down to the atlas size.
-    step_x = max(1, width // ATLAS_SIZE)
-    step_y = max(1, height // ATLAS_SIZE)
-    small = painted[::step_y, ::step_x, :]
-    if small.shape[0] < ATLAS_SIZE or small.shape[1] < ATLAS_SIZE:
-        pad_h = ATLAS_SIZE - small.shape[0]
-        pad_w = ATLAS_SIZE - small.shape[1]
-        small = np.pad(small, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
-    small = small[:ATLAS_SIZE, :ATLAS_SIZE, :]
-    atlas.pixels.foreach_set(small.reshape(-1).astype(np.float32))
-    atlas.file_format = "PNG"
-    atlas.filepath_raw = out_path
-    atlas.save()
-
-    # Point the material at the new atlas, and let the painted light in.
-    wired = False
-    for slot in ob.material_slots:
-        if not slot.material:
-            continue
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                tree = getattr(slot.material, "node_tree", None)
-                if tree:
-                    for node in tree.nodes:
-                        if node.type == "TEX_IMAGE":
-                            node.image = atlas
-            wired = wire_vertex_light(slot.material) or wired
-        except Exception:
-            pass
-
-    unique = len(np.unique(np.round(small.reshape(-1, 4)[:, :3], 3), axis=0))
-    return {"source_size": [width, height], "atlas": ATLAS_SIZE, "distinct_colors": int(unique)}
 
 
 # ---------------------------------------------------------------------- AO
@@ -718,7 +779,7 @@ def render_hero(ob, path, palette):
                 if source is not None:
                     tree.links.new(source, emission.inputs["Color"])
                 else:
-                    colour = hex_linear(SKIN_TONE)
+                    colour = hex_linear(CURRENT_SKIN)
                     emission.inputs["Color"].default_value = (colour[0], colour[1], colour[2], 1.0)
                 tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
         except Exception:
@@ -791,11 +852,23 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     palette = PALETTES[faction]
 
+    global CURRENT_SKIN, CURRENT_HAIR, CURRENT_DOMINANT
+    CURRENT_SKIN = FACTION_SKIN.get(faction, FACTION_SKIN["ashkin"])
+    CURRENT_HAIR = FACTION_HAIR.get(faction, FACTION_HAIR["ashkin"])
+    CURRENT_DOMINANT = FACTION_DOMINANT.get(faction, 0)
+
     ob = import_mesh(src)
     raw_tris = triangle_count(ob)
     source_height, scale = normalise_height(ob, target_height)
     unwrapped = ensure_uv(ob)
 
+    # The hair gets its own material before the atlas pass, so the head is
+    # not all flesh.
+    hair_faces = split_hair(ob)
+    # A normal map adds nothing the engine can use: the atlas carries the
+    # colour and the LIGHT layer carries the light. The suit's map is 4K,
+    # so every LOD carried 7 MB of a texture nobody looks at.
+    normals_stripped = drop_normal_maps(ob)
     atlas_info = bake_atlas(ob, palette, outdir)
     light_info = bake_vertex_light(ob)
 
@@ -836,6 +909,8 @@ def main():
         "target_height_m": target_height,
         "triangle_budget": budget,
         "unwrapped": unwrapped,
+        "hair_faces": hair_faces,
+        "normals_stripped": normals_stripped,
         "atlas": atlas_info,
         "light": light_info,
         "lods": lod_tris,

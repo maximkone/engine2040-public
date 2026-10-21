@@ -287,6 +287,10 @@ pub struct Presenter {
     /// bakes into its shadow atlas. Empty by default: no shipped scene
     /// feeds spots yet, so the live frame skips the pass.
     pub(crate) spot_lights: Vec<crate::spot::SpotLight>,
+    /// Torch point lights the scene feeds: the placement actors become
+    /// lights. Empty by default, and the live frame then uses the arena's
+    /// built-in pair, so a scene that feeds none still lights the arena.
+    pub(crate) torch_lights: Vec<crate::torch_light::TorchLight>,
     /// World triangles the spot pass rasterizes into the atlas (the walls
     /// and props that block a cone).
     pub(crate) spot_occluders: Vec<crate::spot::OccluderTri>,
@@ -1255,6 +1259,7 @@ impl Presenter {
             contact_feet: [0u8; crate::contact_feet::CONTACT_FEET_BYTES],
             sun_sub: super::sun_shadow::SunShadowSubmitter::build(&device),
             spot_lights: Vec::new(),
+            torch_lights: Vec::new(),
             spot_occluders: Vec::new(),
             spot_config: crate::spot::SpotAtlasConfig {
                 grid: crate::spot::ATLAS_GRID,
@@ -1435,6 +1440,23 @@ impl Presenter {
     ) {
         self.spot_lights = spots;
         self.spot_occluders = occluders;
+    }
+
+    /// Feed the frame's torch point lights: the scene's placement actors
+    /// become lights. An empty list keeps the arena's built-in night pair,
+    /// so a scene that feeds none still lights the arena. The list is
+    /// capped by the shader block (8) and validated by the frame; a
+    /// refused light fails the frame loudly with the reason named.
+    /// Units: meters for positions and ranges, linear RGB for color.
+    /// Presentation only, never hashed.
+    /// Caller: the scene owner (the window path's light feed).
+    pub fn set_torch_lights(&mut self, lights: Vec<crate::torch_light::TorchLight>) {
+        self.torch_lights = lights;
+    }
+
+    /// The torch lights the next frame will pack.
+    pub fn torch_lights(&self) -> &[crate::torch_light::TorchLight] {
+        &self.torch_lights
     }
 
     /// The last spot receipt of the live frame: the pass, the number of

@@ -22,6 +22,18 @@
         2048,
         2048
       ]
+    },
+    {
+      "atlas": "(solid)",
+      "atlas_size": 0,
+      "distinct_colors": 1,
+      "image": "(solid)",
+      "material": "hair",
+      "skin": false,
+      "source_size": [
+        0,
+        0
+      ]
     }
   ],
   "bounds_m": {
@@ -31,6 +43,7 @@
   },
   "faction": "ashkin",
   "generated_at": null,
+  "hair_faces": true,
   "hero_render": {
     "engine": "BLENDER_EEVEE",
     "ok": true,
@@ -77,6 +90,7 @@
       "triangles": 300
     }
   ],
+  "normals_stripped": 1,
   "palette": [
     "#2B2724",
     "#7A1F1C",

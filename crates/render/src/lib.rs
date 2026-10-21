@@ -383,6 +383,16 @@ pub mod pass_report;
 /// Shadowed spot lights (flashlights and lamps) on the clustered path.
 pub mod spot;
 
+/// Torch point lights the scene feeds the forward pass (VS7): the
+/// placement actors become lights, with a bounded presentation-only
+/// flicker and the arena's night preset.
+pub mod torch_light;
+
+/// Torch point lights the scene feeds the forward pass (VS7): the
+/// placement actors become lights, with a bounded presentation-only
+/// flicker and the arena's night preset.
+pub mod torch_light;
+
 /// Shoulder camera geometry: how far behind the seat the eye sits, how far
 /// to the side and how high. Std-only constants, so the headless crates that
 /// place a fight inside a room read the same numbers the renderer uses.

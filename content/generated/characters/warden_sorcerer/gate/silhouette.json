@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.3176,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 1.9479,
+  "fill_30m": 0.3545,
+  "height_30m_px": 88,
+  "height_px": 619,
+  "ortho_scale_m": 3.1468,
+  "px_per_m": 317.78,
+  "resolution_30m": [
+    1386,
+    780
+  ],
+  "scale_applied": 1.006444,
+  "source": "C:\\engine2040\\content\\generated\\characters\\warden_sorcerer\\cook\\lod0.glb",
+  "source_height_m": 1.9872,
+  "triangles": 2000,
+  "width_px": 618
+}

@@ -1,0 +1,82 @@
+{
+  "atlas": {
+    "atlas": 512,
+    "distinct_colors": 511,
+    "source_size": [
+      256,
+      256
+    ]
+  },
+  "bounds_m": {
+    "x": 1.8527,
+    "y": 0.9133,
+    "z": 2.0
+  },
+  "faction": "ashkin",
+  "generated_at": null,
+  "hero_render": {
+    "engine": "BLENDER_EEVEE",
+    "ok": true,
+    "palette": [
+      "#2B2724",
+      "#7A1F1C",
+      "#9C6B3A",
+      "#D9CBB2",
+      "#C8562A"
+    ]
+  },
+  "light": {
+    "ambient": 0.42,
+    "key": [
+      -0.45,
+      -0.55,
+      0.7
+    ],
+    "key_strength": 0.78,
+    "max": 1.2293,
+    "mean": 0.635,
+    "min": 0.1976,
+    "rim_strength": 0.22
+  },
+  "lods": [
+    {
+      "file": "lod0.glb",
+      "lod": 0,
+      "triangles": 2000
+    },
+    {
+      "file": "lod1.glb",
+      "lod": 1,
+      "triangles": 568
+    },
+    {
+      "file": "lod2.glb",
+      "lod": 2,
+      "triangles": 568
+    },
+    {
+      "file": "lod3.glb",
+      "lod": 3,
+      "triangles": 300
+    }
+  ],
+  "palette": [
+    "#2B2724",
+    "#7A1F1C",
+    "#9C6B3A",
+    "#D9CBB2",
+    "#C8562A"
+  ],
+  "roughness_rule": {
+    "cloth": 0.85,
+    "matte": 0.55,
+    "note": "two values, applied by the engine from the atlas"
+  },
+  "scale_applied": 2.290623,
+  "source": "C:\\engine2040\\content\\generated\\characters\\ashkin_life\\mesh\\mesh.glb",
+  "source_height_m": 0.8731,
+  "source_triangles": 22740,
+  "target_height_m": 2.0,
+  "triangle_budget": 2000,
+  "unwrapped": false
+}

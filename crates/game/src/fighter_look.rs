@@ -1737,6 +1737,76 @@ fn load_rig(
     })
 }
 
+/// One line per staged rig: the variant, its joints, its parts, its clips and
+/// the digest of the bytes it was built from. Two looks that staged the same
+/// rig read the same line, so a browser rig and a native rig can be compared
+/// without a window.
+fn rig_summary(rig: &Rig) -> String {
+    let mut digest = engine_core::Fnv64::new();
+    digest.write(rig.variant.as_bytes());
+    for joint in &rig.skeleton.joints {
+        digest.write(joint.name.as_bytes());
+        match joint.parent {
+            Some(parent) => digest.write_u64(u64::try_from(parent).unwrap_or(u64::MAX)),
+            None => digest.write_u64(u64::MAX),
+        }
+    }
+    for bind in &rig.inverse_binds {
+        for row in bind {
+            for value in row {
+                digest.write_f32(*value);
+            }
+        }
+    }
+    for part in &rig.parts {
+        digest.write_u64(u64::try_from(part.mesh.positions.len()).unwrap_or(u64::MAX));
+        for value in &part.mesh.positions {
+            digest.write_f32(value[0]);
+            digest.write_f32(value[1]);
+            digest.write_f32(value[2]);
+        }
+        for value in &part.mesh.normals {
+            digest.write_f32(value[0]);
+            digest.write_f32(value[1]);
+            digest.write_f32(value[2]);
+        }
+        for value in &part.mesh.uvs {
+            digest.write_f32(value[0]);
+            digest.write_f32(value[1]);
+        }
+        for value in &part.mesh.indices {
+            digest.write_u32(*value);
+        }
+        for row in &part.skin.joints {
+            for joint in row {
+                digest.write_u16(*joint);
+            }
+        }
+        for row in &part.skin.weights {
+            for weight in row {
+                digest.write_f32(*weight);
+            }
+        }
+        for value in part.material.base_color {
+            digest.write_f32(value);
+        }
+        digest.write_f32(part.material.metallic);
+        digest.write_f32(part.material.roughness);
+    }
+    for clip in &rig.clips {
+        digest.write(clip.name.as_bytes());
+        digest.write_f32(clip.duration);
+    }
+    format!(
+        "{} joints={} parts={} clips={} digest={:016x}",
+        rig.variant,
+        rig.skeleton.joints.len(),
+        rig.parts.len(),
+        rig.clips.len(),
+        digest.finish()
+    )
+}
+
 /// Multiply two AN1 row-vector matrices: `p * a * b`.
 fn mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut out = [[0.0f32; 4]; 4];
@@ -2036,6 +2106,21 @@ impl FighterLook {
     #[must_use]
     pub fn bundle_shas(&self) -> &[String] {
         &self.bundle_shas
+    }
+
+    /// How many rigs the look staged (one per bound variant).
+    #[must_use]
+    pub fn rig_count(&self) -> usize {
+        self.rigs.len()
+    }
+
+    /// One line per staged rig: the variant, its joints, its parts and its
+    /// clips, plus the digest of the bytes it was built from. Two looks that
+    /// staged the same rig read the same line, so a browser rig and a native
+    /// rig can be compared without a window.
+    #[must_use]
+    pub fn rig_summaries(&self) -> Vec<String> {
+        self.rigs.iter().map(rig_summary).collect()
     }
 
     /// Variant drawn for a slot: the hero on slot 0, opponents cycle after.

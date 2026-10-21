@@ -1620,6 +1620,14 @@ fn smoke_presenter() -> Result<Option<(Presenter, MeshKey, super::arena_kit::Kit
             // Dressing: stage the torch/banner boxes beside the cube;
             // a refused upload skips those draws, never the smoke.
             let _ = stage_dressing(&mut presenter);
+            // VS7: the placement's torch actors become lights. The feed is
+            // presentation only, so a refused light set keeps the arena's
+            // built-in pair and never fails the smoke.
+            if let Ok(actors) = super::arena_kit::kit_actors() {
+                if let Ok(lights) = super::arena_kit::torch_feed::torch_lights(&actors) {
+                    presenter.set_torch_lights(lights);
+                }
+            }
             // Arena kit: the 8 glTF files fitted to the placement boxes;
             // a refused stage keeps the cube frame, never fails the smoke.
             let kit = super::arena_kit::stage_kit_or_default(&mut presenter);
@@ -1723,6 +1731,14 @@ fn smoke_present_once(
     path: Option<CameraPath>,
     app: &App,
 ) -> Result<u32, WinError> {
+    // VS7: the torches flicker with the frame index, so the flame moves
+    // frame by frame. A refused light set keeps the arena's built-in pair
+    // and never fails the frame.
+    if let Ok(actors) = super::arena_kit::kit_actors() {
+        if let Ok(lights) = super::arena_kit::torch_feed::torch_lights_at(&actors, frame) {
+            presenter.set_torch_lights(lights);
+        }
+    }
     let list = smoke_twin_list(presenter, key, kit, frame, path)?;
     let overlay = duel_overlay_for_app(app)
         .map_err(|err| WinError::Render(cap_message(&format!("{err}"))))?;

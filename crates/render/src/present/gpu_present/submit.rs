@@ -292,6 +292,26 @@ impl Presenter {
         frame.pack_into(&mut out);
         out
     }
+
+    /// Per-frame torch bytes from the scene's torch list (VS7): the
+    /// placement actors become lights. A scene that feeds none keeps the
+    /// arena's built-in pair. Refuses a broken list loudly.
+    pub(crate) fn torch_bytes_from_scene(
+        &self,
+        list: &DrawList,
+    ) -> Result<[u8; super::forward_bind::TORCH_BLOCK_BYTES], PresentError> {
+        let frame = super::forward_bind::TorchFrame::from_scene(
+            !list.items.is_empty(),
+            &self.torch_lights,
+        )
+        .map_err(|e| PresentError::InvalidDraw {
+            index: 0,
+            reason: format!("vs7 torch lights: {e}"),
+        })?;
+        let mut out = [0u8; super::forward_bind::TORCH_BLOCK_BYTES];
+        frame.pack_into(&mut out);
+        Ok(out)
+    }
 }
 
 impl Presenter {
@@ -874,8 +894,9 @@ impl Presenter {
                 .resize((index + 1) * MATERIAL_STRIDE, 0);
         }
         // Torch bytes beside the light bytes; zeroed for clears so clears
-        // stay clean. Staged into `torch_buf` for the forward bind.
-        let torch = self.torch_bytes(list);
+        // stay clean. Staged into `torch_buf` for the forward bind. The
+        // scene's torch list (VS7) rides here when the scene feeds one.
+        let torch = self.torch_bytes_from_scene(list)?;
         self.queue.write_buffer(&self.torch_buf, 0, &torch);
         Ok((cam_u.to_array(), light_u.to_array()))
     }

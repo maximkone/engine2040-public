@@ -1,0 +1,87 @@
+{
+  "name": "warden_priest",
+  "faction": "ashkin",
+  "concept": "C:\\engine2040\\content\\generated\\concepts\\concept_warden_priest.jpg",
+  "out": "C:\\engine2040\\content\\generated\\characters\\warden_priest",
+  "gate": {
+    "verdict": "pass",
+    "bbox_fill": 0.5941,
+    "fill_band": [
+      0.4,
+      0.7
+    ],
+    "height_30m_px": 88,
+    "fill_30m": 0.584,
+    "triangles": 2000,
+    "note": "a silhouette passes when it reads at 90 pixels tall: faction first, class second"
+  },
+  "cook": {
+    "lods": [
+      {
+        "file": "lod0.glb",
+        "lod": 0,
+        "triangles": 2000
+      },
+      {
+        "file": "lod1.glb",
+        "lod": 1,
+        "triangles": 1100
+      },
+      {
+        "file": "lod2.glb",
+        "lod": 2,
+        "triangles": 448
+      },
+      {
+        "file": "lod3.glb",
+        "lod": 3,
+        "triangles": 300
+      }
+    ],
+    "atlas": [
+      {
+        "atlas": 512,
+        "distinct_colors": 209,
+        "image": "Image_0",
+        "material": "Material_0",
+        "skin": false,
+        "source_size": [
+          256,
+          256
+        ]
+      }
+    ],
+    "scale_applied": 2.078481,
+    "source_triangles": 17920
+  },
+  "rig": {
+    "bones": 22,
+    "weighted_vertices": 1920,
+    "vertices": 2120,
+    "distance_stats": {
+      "beyond_cutoff": 200,
+      "nearest_p05": 0.0512,
+      "nearest_p50": 0.2072,
+      "nearest_p95": 0.4958
+    },
+    "landmarks": {
+      "foot_z": 0.0021,
+      "hand_z": 0.88,
+      "height": 1.9952,
+      "hip_half": 0.3213,
+      "hip_measured": 0.3213,
+      "hips_z": 0.9998,
+      "shoulder_half": 0.2793,
+      "shoulder_measured": 0.2603,
+      "shoulder_z": 1.6382,
+      "z_min": 0.0021
+    }
+  },
+  "seconds": {
+    "mesh": 114.1,
+    "cook": 6.8,
+    "gate": 5.8,
+    "rig": 3.5
+  },
+  "generated_at": "2026-10-21T19:28:45.512Z"
+}

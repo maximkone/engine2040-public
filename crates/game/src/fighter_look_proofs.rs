@@ -1331,3 +1331,60 @@ fn the_weapon_hand_holds_the_grip_socket_through_a_swing() {
         "lf12 weapon hand: grip {grip} m from the palm, drift {drift} m, reach miss {miss} m"
     );
 }
+
+/// WEB6: the rig loads out of a fetched bundle exactly as it loads out of the
+/// directory. The browser has no file system, so the page opens the cooked
+/// bundle and hands it to [`FighterLook::load_from`]; the bytes it reads must
+/// be the same bytes the native window reads, or the browser would stage a
+/// different fighter than the desktop does.
+///
+/// The bundle is the one the cook makes (`engine_assets::fighter_bundle`),
+/// tier for tier, so this proof covers the cook, the pack, the reader and the
+/// loader in one line.
+#[test]
+fn the_rig_loads_out_of_a_cooked_bundle_with_the_native_bytes() {
+    use engine_assets::asset_source::{content_digest, FsSource};
+    use engine_assets::fighter_bundle::cook;
+
+    let dir = content_dir();
+    let from_files = FsSource::new(&dir);
+    // The cook reads the same tree the native window reads.
+    let cooked = cook(&from_files).expect("the rig tree cooks");
+    let bundle =
+        engine_assets::BundleSource::open(cooked.bytes.to_vec()).expect("the bundle opens");
+
+    // The bytes are the same through either source: the digest folds path,
+    // length and bytes, so a renamed or edited file moves it.
+    let native_digest = content_digest(&from_files, "").expect("the tree digests");
+    let bundle_digest = content_digest(&bundle, "").expect("the bundle digests");
+    assert_eq!(
+        native_digest, bundle_digest,
+        "the bundle holds the same rig bytes as the directory"
+    );
+
+    // The rig itself loads from the bundle: the same four variants, the same
+    // pinned bundle SHAs and the same skeleton per variant.
+    let from_dir = FighterLook::load(&dir).expect("CT7 bodies load from the directory");
+    let from_bundle = FighterLook::load_from(&bundle).expect("CT7 bodies load from the bundle");
+    assert_eq!(
+        from_dir.bundle_shas(),
+        from_bundle.bundle_shas(),
+        "the same variants are bound, in the same order"
+    );
+    assert_eq!(
+        from_dir.rig_count(),
+        from_bundle.rig_count(),
+        "the same number of rigs is staged"
+    );
+    let dir_summaries = from_dir.rig_summaries();
+    let bundle_summaries = from_bundle.rig_summaries();
+    for (index, rig) in dir_summaries.iter().enumerate() {
+        let other = bundle_summaries
+            .get(index)
+            .expect("the bundle stages the same rigs");
+        assert_eq!(
+            rig, other,
+            "rig {index} is the same rig through either source"
+        );
+    }
+}

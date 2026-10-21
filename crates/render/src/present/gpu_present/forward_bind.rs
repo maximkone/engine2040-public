@@ -154,6 +154,46 @@ impl TorchFrame {
         Self { slots, count: 2 }
     }
 
+    /// Build the frame block from the scene's torch list (VS7): the
+    /// placement actors become lights, in the order the scene gave them.
+    /// An empty list with draws falls back to the arena's built-in pair,
+    /// so a scene that feeds none still lights the arena. Refuses more
+    /// than [`TORCH_MAX`] lights and any light that breaks the rules.
+    pub(crate) fn from_scene(
+        has_draws: bool,
+        lights: &[crate::torch_light::TorchLight],
+    ) -> Result<Self, ForwardMapsError> {
+        if !has_draws {
+            return Ok(Self {
+                slots: [TorchSlot::OFF; TORCH_MAX],
+                count: 0,
+            });
+        }
+        if lights.is_empty() {
+            return Ok(Self::for_draws(true));
+        }
+        if lights.len() > TORCH_MAX {
+            return Err(ForwardMapsError::Invalid(format!(
+                "torch list holds {} lights, at most {TORCH_MAX}",
+                lights.len()
+            )));
+        }
+        let mut slots = [TorchSlot::OFF; TORCH_MAX];
+        for (i, light) in lights.iter().enumerate() {
+            light
+                .validate()
+                .map_err(|e| ForwardMapsError::Invalid(e.to_string()))?;
+            slots[i] = TorchSlot {
+                pos: light.pos,
+                color: light.color,
+                range: light.range_m,
+            };
+        }
+        let count = u32::try_from(lights.len())
+            .map_err(|_| ForwardMapsError::Invalid("torch count exceeds u32".into()))?;
+        Ok(Self { slots, count })
+    }
+
     /// Build a frame from an explicit slot list: the first `slots.len()`
     /// entries burn, the rest stay dark. Refuses more than [`TORCH_MAX`]
     /// entries and any non-finite slot. Sizes nothing.

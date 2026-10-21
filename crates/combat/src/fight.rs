@@ -1,17 +1,11 @@
 //! fight: data-table fight rules as a pure deterministic step.
 //!
-//! Consumer: `arena` maps snapshots into [`FighterInput`] and owns match
-//! state; this module owns combat state/events only. Units: hp in permille
-//! (`0..=1000`), stamina in points (`0..=MAX_STAMINA`), all timing in fixed
-//! ticks (60 Hz). Determinism scope: the resolvers use only integer math and
-//! fighter-ID order; same initial [`FightState`] plus same input slice gives
-//! the same events and end state. Errors: [`CombatError`] for out-of-range
-//! slots/counts/invalid inputs; [`step`] skips invalid inputs instead of
-//! failing, [`try_step`] rejects them. Neither panics on user data. Rules as
-//! data: [`Tables`] owns every tunable row, [`TABLES_V1`] is the frozen
-//! shipped set old tapes replay through; resolvers take a table set plus the
-//! slot count (`fighter_count` in `1..=MAX_PARTICIPANTS`, the canonical cap),
-//! and versioned swaps live in the [`tables`](crate::tables) module.
+//! Consumer: `arena` owns match state; this module owns combat state and
+//! events. Units: hp in permille, stamina in points, timing in fixed ticks
+//! (60 Hz). Determinism: integer math and fighter-ID order only. Errors:
+//! [`CombatError`]; [`step`] skips invalid inputs, [`try_step`] rejects them.
+//! Rules as data: [`Tables`] owns every tunable row and [`TABLES_V1`] is the
+//! frozen shipped set that old tapes replay through.
 
 use engine_core::checked::saturating_u32_to_u16;
 use engine_input::fighter::{ATTACK, BLOCK, DODGE};
@@ -27,11 +21,9 @@ use crate::sweep::{
 pub(crate) const SLOT_COUNT: usize = MAX_PARTICIPANTS as usize;
 
 // ---- data tables (consts) -------------------------------------------------
-// Frozen V1 row source: the step core reads only `Tables`; these
-// consts build TABLES_V1 so shipped tapes replay. New rule sets travel as
-// versioned `Tables` through the tables module, never as source edits.
-// Structural bounds (MAX_HP_PERMILLE, MAX_STAMINA, MAX_INPUTS_PER_TICK) stay
-// consts: they bound the state encoding, and tables validate inside them.
+// The step core reads only `Tables`; these consts build TABLES_V1 so shipped
+// tapes replay. New rule sets travel as versioned `Tables`, never as source
+// edits. Structural bounds stay consts: they bound the state encoding.
 
 /// Full health in permille.
 pub const MAX_HP_PERMILLE: u16 = 1000;
@@ -75,13 +67,10 @@ pub const KNOCKDOWN_TICKS: u32 = 30;
 pub const JUGGLE_BUDGET: u8 = 15;
 /// Hard bound on inputs accepted for one tick.
 pub const MAX_INPUTS_PER_TICK: usize = 32;
-/// Hard bound on events emitted for one tick: at most one `StaminaOut` per
-/// fighter plus, per attacker whose startup completes, one outcome per other
-/// live victim with a possible `Knockdown` beside it. That is
-/// `32 + 32 * 31 * 2 = 2016` at the `MAX_PARTICIPANTS` cap. A buffer reserved
-/// once to this capacity never reallocates on the tick path, so the
-/// `*_into` entries below prove zero steady-state allocation under a
-/// counting allocator. Units: events, exact.
+/// Hard bound on events emitted for one tick: one `StaminaOut` per fighter
+/// plus, per attacker whose startup completes, one outcome per other live
+/// victim with a possible `Knockdown` beside it. A buffer reserved once to
+/// this capacity never reallocates on the tick path.
 pub const MAX_EVENTS_PER_TICK: usize = 2_048;
 
 /// Chip damage dealt through a held block under the frozen V1 row above.
@@ -91,13 +80,9 @@ pub const fn block_chip(damage: u16) -> u16 {
 }
 
 /// Tunable fight-rules row: every number the step core reads, in one place.
-///
-/// Consumer: live tuning and the tuning panel build a replacement
-/// [`Tables`] and hand it to the arena as an immutable swap input (see the
-/// [`tables`](crate::tables) module); the arena applies it only at recorded
-/// authority tick commands. Units match the consts above: damage in
-/// permille, costs in stamina points, all timing in fixed ticks (60 Hz).
-/// Plain integers only, so sets compare and clone deterministically.
+/// Consumer: live tuning hands a replacement [`Tables`] to the arena as an
+/// immutable swap input. Units match the consts above: damage in permille,
+/// costs in stamina points, timing in fixed ticks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Tables {
     /// Damage of one landed attack in permille.
@@ -158,10 +143,7 @@ impl Tables {
     }
 
     /// Chip damage dealt through a held block under this table row.
-    ///
-    /// Saturating and panic-free (zero denominator yields zero, overflow
-    /// saturates), so unvalidated rows still step safely; validation rejects
-    /// such rows before they ever become a [`SwapInput`](crate::tables::SwapInput).
+    /// Saturating and panic-free, so unvalidated rows still step safely.
     pub const fn chip(self, damage: u16) -> u16 {
         match (damage as u32).checked_mul(self.block_chip_num) {
             None => u16::MAX,
@@ -180,34 +162,24 @@ impl Tables {
 }
 
 /// The shipped base rules as one row. Old tapes replay through this table;
-/// [`step`] and [`try_step`] run it. Replacement sets travel versioned
-/// through the [`tables`](crate::tables) module and never mutate this row.
+/// replacement sets travel versioned and never mutate this row.
 pub const TABLES_V1: Tables = Tables::v1();
 
 /// The readable-timing row (version 2): startup 15 ticks, parry window 7.
-/// The 15/7 literals live once in [`v2_rows`](crate::tables::v2_rows); this
-/// row reuses them so the numbers never duplicate. The V1 entries step
-/// [`TABLES_V1`]; the arena steps this row through [`try_step_v2_into`]
-/// and [`try_step_v2_with_cues_into`].
+/// The literals live once in [`v2_rows`](crate::tables::v2_rows); the arena
+/// steps this row through [`try_step_v2_into`].
 pub const TABLES_V2: Tables = crate::tables::v2_rows();
 
-/// [`Tables`] for one Ludus Magnus class over [`TABLES_V2`].
-///
-/// Production caller for [`classes`](crate::classes): the feel survey scores
-/// it and the arena adopts it at match build (distinct-pair survey is the
-/// remainder). Units and determinism follow [`tables`](crate::classes::tables).
+/// [`Tables`] for one Ludus Magnus class over [`TABLES_V2`]. Production
+/// caller for [`classes`](crate::classes): the arena adopts it at match build.
 pub fn class_tables(class: crate::classes::Class) -> Tables {
     crate::classes::tables(class, TABLES_V2)
 }
 
 /// Poise damage for one strike kind under explicit rows, in poise points.
-///
-/// Caller: `DepthSet::apply_poise_kind` (test builds only)
-/// reads this beside the fight step; the fight step itself never writes poise,
-/// so the meter stays read-only past the observe boundary and V1 replays stay
-/// byte-identical. Units: poise points against a 100 cap. Determinism: pure
-/// match on `tables == TABLES_V2` plus kind; same tables plus same kind give
-/// same damage. Errors: none; V1 rows and unknown kinds give 0, never panic.
+/// Caller: `DepthSet::apply_poise_kind` (test builds only); the fight step
+/// never writes poise, so V1 replays stay byte-identical. V1 rows and
+/// unknown kinds give 0, never panic.
 pub fn poise_damage_for_kind(tables: &Tables, kind: u8) -> u16 {
     use crate::depth::{INPUT_HEAVY, INPUT_LIGHT};
     if *tables != TABLES_V2 {
@@ -223,12 +195,9 @@ pub fn poise_damage_for_kind(tables: &Tables, kind: u8) -> u16 {
 }
 
 /// Stamina cost for one strike kind under explicit rows, in stamina points.
-///
-/// Caller: `DepthSet::spend_stamina_kind` (test builds only)
-/// beside the step; the fight intake keeps its single
-/// [`ATTACK_STAMINA_COST`] row, so V1 bouts never fork. Units: stamina points.
-/// Determinism: pure match like [`poise_damage_for_kind`]. Errors: none;
-/// unknown kinds give 0 under V2 and the single attack cost under V1.
+/// Caller: `DepthSet::spend_stamina_kind` (test builds only); the fight
+/// intake keeps its single [`ATTACK_STAMINA_COST`] row, so V1 bouts never
+/// fork. Unknown kinds give 0 under V2 and the attack cost under V1.
 pub fn stamina_cost_for_kind(tables: &Tables, kind: u8) -> u16 {
     use crate::depth::{INPUT_HEAVY, INPUT_LIGHT};
     if *tables != TABLES_V2 {
@@ -243,11 +212,8 @@ pub fn stamina_cost_for_kind(tables: &Tables, kind: u8) -> u16 {
     }
 }
 
-/// Quiet ticks before poise regens under explicit rows, at 60 Hz.
-///
-/// Caller: [`DepthSet::new`](crate::depth::DepthSet::new) builds its meters
-/// with this delay. Units: ticks. Determinism: pure compare; V2 gives 30,
-/// every other row gives the survey-only 90, so V1 meters keep their window.
+/// Quiet ticks before poise regens under explicit rows, at 60 Hz. Caller:
+/// [`DepthSet::new`](crate::depth::DepthSet::new). V2 gives 30, other rows 90.
 pub fn poise_regen_delay_for_tables(tables: &Tables) -> u32 {
     if *tables == TABLES_V2 {
         crate::tables::POISE_REGEN_DELAY_TICKS_V2
@@ -257,13 +223,9 @@ pub fn poise_regen_delay_for_tables(tables: &Tables) -> u32 {
 }
 
 /// Freeze ticks for one impacting strike under explicit rows, at 60 Hz.
-///
-/// Caller: [`resolve_strike`] (parry branch plus the clean-hit branch), so the
-/// two freeze sites never disagree. Units: ticks. Determinism: pure compare;
-/// V2 delegates to the single home [`crate::hitstop_kind::for_impact`]
-/// (parry 8 wins over kind, otherwise light 3, heavy 6, unknown 0); every
+/// Caller: [`resolve_strike`], so the two freeze sites never disagree. V2
+/// delegates to the single home [`crate::hitstop_kind::for_impact`]; every
 /// other row gives the single row, so V1 replays stay byte-identical.
-/// Errors: none.
 #[must_use]
 pub fn hitstop_for_impact(tables: &Tables, kind: u8, parried: bool) -> u32 {
     if tables.attack_startup_ticks != TABLES_V2.attack_startup_ticks
@@ -287,14 +249,14 @@ pub struct FighterState {
     pub attack_age: u32,
     /// Whether an attack is in flight (startup through recovery).
     pub is_attacking: bool,
-    /// Strike kind of the in-flight attack (`INPUT_LIGHT` or `INPUT_HEAVY`
-    /// in `crate::depth`); read by the hit branch for per-kind hit-stop.
-    /// Defaults light; tests set heavy directly.
+    /// Strike kind of the in-flight attack (`INPUT_LIGHT` or `INPUT_HEAVY` in
+    /// `crate::depth`); the hit branch reads it for per-kind hit-stop. Under
+    /// the shield-line rules a weapon holder makes the heavy chord the boss
+    /// push, its own kind.
     pub attack_kind: u8,
     /// Queued attack presses awaiting a cancel window or the first ready
-    /// tick. V2 rows queue taps while a swing is locked so they feint, chain
-    /// or fire on time; V1 rows never queue one, so V1 bouts replay
-    /// byte-identical.
+    /// tick. V2 rows queue taps while a swing is locked; V1 rows never queue
+    /// one, so V1 bouts replay byte-identical.
     pub attack_buffer: StreamBuffer,
     /// Ticks since the current block press; `u32::MAX` when not blocking.
     pub block_age: u32,
@@ -308,10 +270,16 @@ pub struct FighterState {
     pub react: u32,
     /// Ticks remaining knocked down; zero means up.
     pub knockdown: u32,
-    /// Consecutive clean hits taken while already in hitstun (the AIN6
-    /// juggle budget). Reset when hitstun ends, a block lands, or the
-    /// sixteenth hit converts to a knockdown.
+    /// Consecutive clean hits taken while already in hitstun (the AIN6 juggle
+    /// budget). Reset when hitstun ends, a block lands or the budget converts.
     pub juggle: u8,
+    /// Weapon row under the shield-line rules: 0 bare hands, 1 pugio,
+    /// 2 gladius, 3 spatha. Zero keeps the legacy numbers.
+    pub weapon: u8,
+    /// The balance impulse the last push fed this fighter, in Q8 units. The
+    /// arena hands it to its balance state. The channel carries one tick:
+    /// every tick starts clear, so a push feeds it once.
+    pub balance_impulse_q8: u16,
 }
 
 impl Default for FighterState {
@@ -330,6 +298,8 @@ impl Default for FighterState {
             react: 0,
             knockdown: 0,
             juggle: 0,
+            weapon: 0,
+            balance_impulse_q8: 0,
         }
     }
 }
@@ -446,19 +416,13 @@ pub enum FightEvent {
 }
 
 /// Hard bound on press-tick attack cues per tick: at most one per fighter.
-/// A buffer reserved once to this capacity never reallocates on the tick
-/// path. Units: cues, exact.
 pub const MAX_ATTACK_STARTED_PER_TICK: usize = SLOT_COUNT;
 
 /// Press-tick attack cue under readable-timing rows (EG19b slice 1).
-///
 /// Consumer: the game maps each cue into an audio `FightCue` once the audio
-/// side lands; this crate only reports presses, it never plays them. Units:
-/// `attacker` is a fighter slot `0..fighter_count`. Determinism scope: cues
-/// leave in fighter-ID order on the press tick only, under [`TABLES_V2`]
-/// rows; under [`TABLES_V1`] rows the cue buffer stays empty so the V1
-/// [`FightEvent`] stream replays byte-identical. Errors: none; a rejected
-/// tick leaves the cue buffer empty. Never hashed: presentation only.
+/// side lands; this crate only reports presses. Cues leave in fighter-ID
+/// order on the press tick under [`TABLES_V2`] rows and stay empty under
+/// [`TABLES_V1`], so old tapes replay. Never hashed: presentation only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct AttackStarted {
     /// Fighter slot that began an attack this tick.
@@ -514,10 +478,9 @@ pub enum CombatError {
 
 // ---- validation -----------------------------------------------------------
 
-/// Range-check the tick's inputs against the active fighter count.
-///
-/// Checks slice bound, per-input [`FighterInput::validate`], active range
-/// and one-input-per-fighter; first failure wins, deterministically.
+/// Range-check the tick's inputs against the active fighter count. Checks
+/// slice bound, per-input validity, active range and one input per fighter;
+/// first failure wins, deterministically.
 pub fn validate_inputs(inputs: &[FighterInput], fighter_count: u8) -> Result<(), CombatError> {
     if fighter_count == 0 || fighter_count > MAX_PARTICIPANTS {
         return Err(CombatError::BadFighterCount(fighter_count));
@@ -553,20 +516,17 @@ pub fn validate_inputs(inputs: &[FighterInput], fighter_count: u8) -> Result<(),
 // ---- rules v2: hit geometry -------------------------------------------------
 
 /// Fight rules version 1: the frozen hit rule. An impact resolves against
-/// every living foe at any range and a held block covers every direction.
-/// Golden fixtures and old tapes replay through it unchanged.
+/// every living foe at any range; old tapes replay through it unchanged.
 pub const FIGHT_RULES_V1: u32 = 1;
-/// Fight rules version 2: an impact needs geometry. The attacker's blade
-/// path must touch the victim's hurt capsule in front of the attacker (the
-/// [`sweep_one`] capsule test), teammates are never struck, and a block or
-/// parry only counts when the victim's shield cone covers the attacker.
+/// Fight rules version 2: an impact needs geometry. The attacker's blade path
+/// must touch the victim's hurt capsule in front of the attacker, teammates
+/// are never struck, and a block or parry counts only inside the shield cone.
 pub const FIGHT_RULES_V2: u32 = 2;
 
 /// One slot's strike geometry for a rules-v2 step: integer millimetres and
-/// scale-free integer facing only (no floats, no trig).
-///
-/// Consumer: the arena builds one per active slot each tick from its
-/// authoritative pose; combat reads it only inside impact resolution.
+/// scale-free integer facing only (no floats, no trig). Consumer: the arena
+/// builds one per active slot each tick; combat reads it inside impact
+/// resolution.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct StrikePose {
     /// Hurt capsule, facing and shield cone; `body.id` is the slot.
@@ -609,13 +569,21 @@ enum StrikeGate {
     Covered,
 }
 
-/// The v2 gate for one pair: team first, then the sweep capsule test with
-/// the victim's shield cone raised so `Blocked` reads as "guard covers".
-fn strike_gate(poses: &[StrikePose], attacker: usize, victim: usize) -> StrikeGate {
+/// The v2 gate for one pair: team first, then the reach, then the sweep
+/// capsule test with the victim's shield cone raised.
+fn strike_gate(
+    poses: &[StrikePose],
+    attacker: usize,
+    victim: usize,
+    reach: Option<u32>,
+) -> StrikeGate {
     let (Some(a), Some(v)) = (poses.get(attacker), poses.get(victim)) else {
         return StrikeGate::Miss;
     };
     if a.team == v.team {
+        return StrikeGate::Miss;
+    }
+    if !within_reach(&a.body, &v.body, reach) {
         return StrikeGate::Miss;
     }
     let guard = SweepParticipant {
@@ -630,9 +598,7 @@ fn strike_gate(poses: &[StrikePose], attacker: usize, victim: usize) -> StrikeGa
 }
 
 /// Shared rules-v2 intake: validate inputs then geometry and fold the slice
-/// into per-slot button intents. The caller clears its buffers first, so a
-/// rejected tick leaves every buffer empty and `state` untouched. Pure
-/// intake; the step core below decides cues and events.
+/// into per-slot button intents. The caller clears its buffers first.
 fn v2_intents(
     inputs: &[FighterInput],
     poses: &[StrikePose],
@@ -650,12 +616,9 @@ fn v2_intents(
 
 /// Strict rules-v2 step into a reused event buffer: [`try_step_with_tables_into`]
 /// plus hit geometry. Impacts resolve only against foes the blade reaches in
-/// front of the attacker, never teammates, and a block or parry from behind
-/// the shield cone fails (the hit lands in full). Validation (inputs, then
-/// geometry) runs after `out` is cleared, so a rejected tick leaves `out`
-/// empty and `state` untouched. Integer math and fighter-ID order only; a
-/// reserved buffer makes the tick allocate nothing. Never panics on user
-/// data.
+/// front of the attacker, and a block or parry from behind the shield cone
+/// fails. A rejected tick leaves `out` empty and `state` untouched. A
+/// reserved buffer makes the tick allocate nothing.
 pub fn try_step_v2_into(
     inputs: &[FighterInput],
     poses: &[StrikePose],
@@ -670,15 +633,11 @@ pub fn try_step_v2_into(
 }
 
 /// Strict rules-v2 step with press-tick attack cues (EG19b slice 1).
-///
 /// Caller: `try_step_v2_into` shares this core; the arena adopts this entry
-/// once the game maps [`AttackStarted`] into an audio `FightCue` (remainder).
-/// Same validation and [`FightEvent`] stream as [`try_step_v2_into`]; `cues`
-/// is cleared first and filled with one [`AttackStarted`] per fresh attack
-/// start in fighter-ID order when `tables` are [`TABLES_V2`], empty otherwise
-/// (V1 rows cue nothing, so old tapes replay). A buffer reserved once to
-/// [`MAX_ATTACK_STARTED_PER_TICK`] never reallocates. Never panics on user
-/// data.
+/// once the game maps [`AttackStarted`] into an audio cue. Same validation
+/// and [`FightEvent`] stream as [`try_step_v2_into`]; `cues` holds one
+/// [`AttackStarted`] per fresh attack start in fighter-ID order under
+/// [`TABLES_V2`] rows and stays empty otherwise.
 pub fn try_step_v2_with_cues_into(
     inputs: &[FighterInput],
     poses: &[StrikePose],
@@ -694,33 +653,117 @@ pub fn try_step_v2_with_cues_into(
     Ok(())
 }
 
+// ---- rules v2: the shield line ---------------------------------------------
+
+/// The weapon row of a fighter: the bare hand holds no steel.
+const ROW_BARE: u8 = 0;
+// The `type` column of `content/design/weapons.rows` says what a weapon
+// does. The fight crate fights with steel only: 1 thrust, 2 cut.
+const TYPE_NONE: u8 = 0;
+const TYPE_THRUST: u8 = 1;
+const TYPE_CUT: u8 = 2;
+/// Attack kind of the boss push: a shove with the scutum, not a strike of
+/// the steel. It sits above the depth kinds, so the code spaces stay apart.
+const KIND_PUSH: u8 = 3;
+
+/// The weapon type of each shield-line weapon row: bare hands, pugio,
+/// gladius, spatha. The rows mirror `content/design/weapons.rows`.
+const SHIELD_KINDS: [u8; 4] = [TYPE_NONE, TYPE_THRUST, TYPE_THRUST, TYPE_CUT];
+/// The damage of each shield-line weapon row, in permille.
+const SHIELD_DAMAGE: [u16; 4] = [0, 80, 120, 150];
+/// Reach of a thrust under the shield rim, in millimetres.
+const THRUST_REACH_MM: u32 = 900;
+/// Reach of a cut, in millimetres.
+const CUT_REACH_MM: u32 = 600;
+/// Reach of the boss push, in millimetres: a shove with the scutum is short.
+const PUSH_REACH_MM: u32 = 700;
+/// The cut is weak: it does half the row's damage.
+const CUT_DAMAGE_DEN: u16 = 2;
+/// Startup ticks of the boss push, at 60 Hz: a short shove.
+const PUSH_STARTUP_TICKS: u32 = 6;
+/// Recovery ticks after the push lands.
+const PUSH_RECOVERY_TICKS: u32 = 10;
+/// Ticks the pushed fighter cannot act: the shove staggers him.
+const PUSH_STAGGER_TICKS: u32 = 12;
+/// The balance impulse one push feeds, in Q8 units.
+const PUSH_IMPULSE_Q8: u16 = 256;
+/// Freeze ticks of one push landing, at 60 Hz.
+const PUSH_HITSTOP_TICKS: u32 = 3;
+
+/// The damage of one strike of the weapon row, in permille. The bare hand
+/// keeps the table's own damage, a thrust does the row's damage and a cut
+/// is weak: half of it.
+fn strike_damage(tables: &Tables, weapon: u8) -> u16 {
+    let row = usize::from(weapon);
+    if row >= SHIELD_DAMAGE.len() {
+        return tables.attack_damage;
+    }
+    match SHIELD_KINDS[row] {
+        TYPE_THRUST => SHIELD_DAMAGE[row],
+        TYPE_CUT => SHIELD_DAMAGE[row] / CUT_DAMAGE_DEN,
+        _ => tables.attack_damage,
+    }
+}
+
+/// The startup and the recovery of one strike kind, in ticks. The push is a
+/// v2 action: a short shove. Every other kind uses the table's row, so v1
+/// rows keep their own numbers.
+fn kind_timing(tables: &Tables, kind: u8) -> (u32, u32) {
+    if kind == KIND_PUSH && *tables == TABLES_V2 {
+        (PUSH_STARTUP_TICKS, PUSH_RECOVERY_TICKS)
+    } else {
+        (tables.attack_startup_ticks, tables.attack_recovery_ticks)
+    }
+}
+
+/// The reach of one strike in millimetres, or `None` when the arena's own
+/// blade sweep decides (the bare hand). A shove with the scutum is short.
+fn strike_reach(weapon: u8, kind: u8) -> Option<u32> {
+    if kind == KIND_PUSH {
+        return Some(PUSH_REACH_MM);
+    }
+    match SHIELD_KINDS.get(usize::from(weapon)) {
+        Some(&TYPE_THRUST) => Some(THRUST_REACH_MM),
+        Some(&TYPE_CUT) => Some(CUT_REACH_MM),
+        _ => None,
+    }
+}
+
+/// True when the victim stands inside the strike's reach. The reach counts
+/// from the body centre to the skin, so a wide body is easier to reach.
+fn within_reach(
+    attacker: &SweepParticipant,
+    victim: &SweepParticipant,
+    reach: Option<u32>,
+) -> bool {
+    let Some(limit) = reach else {
+        return true;
+    };
+    let dx = i64::from(victim.pos_mm[0]) - i64::from(attacker.pos_mm[0]);
+    let dz = i64::from(victim.pos_mm[2]) - i64::from(attacker.pos_mm[2]);
+    let reach = i64::from(limit) + i64::from(victim.hurt_radius_mm);
+    dx * dx + dz * dz <= reach * reach
+}
+
 // ---- step -----------------------------------------------------------------
 
 /// Lenient pure step under the shipped V1 row: same inputs twice give same
-/// events.
-///
-/// Invalid inputs (bad ranges, inactive slots, repeats beyond the first for
-/// a fighter) are skipped deterministically; valid ones resolve in
-/// fighter-ID order. Never panics on user data. Budget: O(events) time plus
-/// one heap allocation per event tick; hot callers step into a reused buffer
-/// with [`step_into`] instead.
+/// events. Invalid inputs are skipped deterministically; valid ones resolve
+/// in fighter-ID order. Never panics on user data. Budget: O(events) time
+/// plus one heap allocation per event tick; hot callers use [`step_into`].
 pub fn step(inputs: &[FighterInput], state: &mut FightState) -> Vec<FightEvent> {
     step_with_tables(inputs, state, &TABLES_V1)
 }
 
 /// Lenient pure step into a reused event buffer under the shipped V1 row.
-///
-/// Same events as [`step`]; `out` is cleared first and filled in place, so a
-/// buffer reserved once to [`MAX_EVENTS_PER_TICK`] never reallocates and the
-/// tick allocates nothing. Never panics on user data.
+/// Same events as [`step`]; `out` is cleared first, so a buffer reserved once
+/// to [`MAX_EVENTS_PER_TICK`] never reallocates and the tick allocates nothing.
 pub fn step_into(inputs: &[FighterInput], state: &mut FightState, out: &mut Vec<FightEvent>) {
     step_with_tables_into(inputs, state, &TABLES_V1, out);
 }
 
 /// Strict step under the shipped V1 row: same as [`step`] but rejects bad
-/// inputs with [`CombatError`]. Budget: O(events) time plus one heap
-/// allocation per event tick; hot callers step into a reused buffer with
-/// [`try_step_into`] instead.
+/// inputs with [`CombatError`]. Hot callers use [`try_step_into`].
 pub fn try_step(
     inputs: &[FighterInput],
     state: &mut FightState,
@@ -730,13 +773,9 @@ pub fn try_step(
     Ok(events)
 }
 
-/// Strict step into a reused event buffer under the shipped V1 row.
-///
-/// Same events and errors as [`try_step`]: validation runs after `out` is
-/// cleared, so a rejected tick leaves `out` empty and `state` untouched, and
-/// a reused buffer never carries stale events. A buffer reserved once to
-/// [`MAX_EVENTS_PER_TICK`] makes the tick allocate nothing. Never panics on
-/// user data.
+/// Strict step into a reused event buffer under the shipped V1 row. Same
+/// events and errors as [`try_step`]: a rejected tick leaves `out` empty and
+/// `state` untouched. A reserved buffer makes the tick allocate nothing.
 pub fn try_step_into(
     inputs: &[FighterInput],
     state: &mut FightState,
@@ -745,10 +784,8 @@ pub fn try_step_into(
     try_step_with_tables_into(inputs, state, &TABLES_V1, out)
 }
 
-/// Lenient pure step under explicit table rows: same tables plus same
-/// inputs twice give the same events. Input handling matches [`step`].
-/// Budget: O(events) time plus one heap allocation per event tick; hot
-/// callers step into a reused buffer with [`step_with_tables_into`].
+/// Lenient pure step under explicit table rows: same tables plus same inputs
+/// twice give the same events. Hot callers use [`step_with_tables_into`].
 pub fn step_with_tables(
     inputs: &[FighterInput],
     state: &mut FightState,
@@ -760,10 +797,8 @@ pub fn step_with_tables(
 }
 
 /// Lenient pure step into a reused event buffer under explicit table rows.
-///
-/// Same events as [`step_with_tables`]; `out` is cleared first and filled in
-/// place, so a reserved buffer makes the tick allocate nothing. Never panics
-/// on user data.
+/// Same events as [`step_with_tables`]; `out` is cleared first, so a reserved
+/// buffer makes the tick allocate nothing.
 pub fn step_with_tables_into(
     inputs: &[FighterInput],
     state: &mut FightState,
@@ -775,9 +810,8 @@ pub fn step_with_tables_into(
 }
 
 /// Strict step under explicit table rows: same as [`step_with_tables`] but
-/// rejects bad inputs with [`CombatError`]. Budget: O(events) time plus one
-/// heap allocation per event tick; hot callers step into a reused buffer
-/// with [`try_step_with_tables_into`] instead.
+/// rejects bad inputs with [`CombatError`]. Hot callers use
+/// [`try_step_with_tables_into`].
 pub fn try_step_with_tables(
     inputs: &[FighterInput],
     state: &mut FightState,
@@ -788,12 +822,9 @@ pub fn try_step_with_tables(
     Ok(events)
 }
 
-/// Strict step into a reused event buffer under explicit table rows.
-///
-/// Same events and errors as [`try_step_with_tables`]: validation runs after
-/// `out` is cleared, so a rejected tick leaves `out` empty and `state`
-/// untouched. A reserved buffer makes the tick allocate nothing. Never
-/// panics on user data.
+/// Strict step into a reused event buffer under explicit table rows. Same
+/// events and errors as [`try_step_with_tables`]: a rejected tick leaves `out`
+/// empty and `state` untouched. A reserved buffer allocates nothing.
 pub fn try_step_with_tables_into(
     inputs: &[FighterInput],
     state: &mut FightState,
@@ -812,8 +843,7 @@ pub fn try_step_with_tables_into(
 }
 
 /// Fold an input slice into per-fighter button intents, skipping anything
-/// invalid. Stable insertion sort by slot keeps the result independent of
-/// the caller's order; the first input per fighter wins.
+/// invalid. The first input per fighter wins.
 fn lenient_intents(inputs: &[FighterInput], fighter_count: u8) -> [Buttons; SLOT_COUNT] {
     let mut intents = [Buttons::NONE; SLOT_COUNT];
     if fighter_count == 0 || fighter_count > MAX_PARTICIPANTS {
@@ -856,19 +886,13 @@ fn lenient_intents(inputs: &[FighterInput], fighter_count: u8) -> [Buttons; SLOT
     intents
 }
 
-/// Shared deterministic core into a reused event buffer: intents (indexed
-/// by fighter slot) plus state plus explicit table rows give the tick's
-/// events. Hit-stop freezes the tick: it counts down and leaves `events`
-/// empty without touching fighters or the clock. `events` is cleared first
-/// so quiet ticks never allocate; a buffer reserved to
-/// [`MAX_EVENTS_PER_TICK`] never reallocates here (one `StaminaOut` per
-/// fighter plus two events per attacker/victim pair). Integer math and
-/// fighter-ID order only, so the same tables plus the same inputs give the
-/// same events. `geometry` is `None` under rules v1 (every living foe at
-/// any range) and the validated per-slot poses under rules v2. The v2 leg
-/// also carries the shipped streamlining row as the commit lock
-/// (`crate::feel::StreamliningParams`); the v1 leg passes none and keeps
-/// its old cancels.
+/// Shared deterministic core into a reused event buffer: intents (indexed by
+/// fighter slot) plus state plus explicit table rows give the tick's events.
+/// Hit-stop freezes the tick: it counts down and leaves `events` empty
+/// without touching fighters or the clock. `events` is cleared first so
+/// quiet ticks never allocate. Integer math and fighter-ID order only, so the
+/// same tables plus the same inputs give the same events. `geometry` is
+/// `None` under rules v1 and the validated per-slot poses under rules v2.
 fn core_step_into(
     intents: &[Buttons; SLOT_COUNT],
     state: &mut FightState,
@@ -881,11 +905,16 @@ fn core_step_into(
     if let Some(cues) = cues.as_mut() {
         cues.clear();
     }
+    let count = usize::from(state.fighter_count.min(MAX_PARTICIPANTS));
+    // The balance channel carries one tick: every fighter starts the tick
+    // with no impulse, so the arena reads one push per tick.
+    for id in 0..count {
+        state.fighters[id].balance_impulse_q8 = 0;
+    }
     if state.hitstop > 0 {
         state.hitstop -= 1;
         return;
     }
-    let count = usize::from(state.fighter_count.min(MAX_PARTICIPANTS));
     let commit = geometry.map(|_| StreamliningParams::v1());
     latch_block_holds(intents, state, tables, commit, count);
     start_actions(intents, state, tables, events, cues, commit, count);
@@ -896,12 +925,8 @@ fn core_step_into(
     if *tables == TABLES_V2 {
         for (id, intent) in intents.iter().enumerate().take(count) {
             let f = &mut state.fighters[id];
-            if f.is_attacking && f.attack_age == 0 {
-                if attacking(*intent) && blocking(*intent) && !dodging(*intent) {
-                    f.attack_kind = crate::depth::INPUT_HEAVY;
-                } else if attacking(*intent) && !dodging(*intent) {
-                    f.attack_kind = crate::depth::INPUT_LIGHT;
-                }
+            if f.is_attacking && f.attack_age == 0 && attacking(*intent) && !dodging(*intent) {
+                f.attack_kind = kind_for_buttons(intent.0, f.weapon);
             }
         }
     }
@@ -923,32 +948,30 @@ const fn dodging(b: Buttons) -> bool {
 }
 
 /// Strike kind for one button byte: the V2 chord ATTACK+BLOCK (no DODGE) is
-/// heavy, every other press is light. Pure match so press-time kind survives
-/// the queue; the post-step mark reuses it for queued starts.
-const fn kind_for_buttons(buttons: u8) -> u8 {
+/// heavy, every other press is light. A fighter with a weapon row turns the
+/// heavy chord into the boss push, the shove with the scutum.
+const fn kind_for_buttons(buttons: u8, weapon: u8) -> u8 {
     if (buttons & ATTACK != 0) && (buttons & BLOCK != 0) && (buttons & DODGE == 0) {
-        crate::depth::INPUT_HEAVY
+        if weapon > ROW_BARE {
+            KIND_PUSH
+        } else {
+            crate::depth::INPUT_HEAVY
+        }
     } else {
         crate::depth::INPUT_LIGHT
     }
 }
 
-/// Slot index as the fighter-id byte carried by events and cues.
-///
-/// Callers only pass live slots (`id < count`, `count <= MAX_PARTICIPANTS`),
-/// so the conversion holds for every real bout; an out-of-range index maps
-/// to `None` instead of truncating into another fighter's id.
+/// Slot index as the fighter-id byte carried by events and cues. An
+/// out-of-range index maps to `None` instead of truncating.
 fn slot_id_u8(id: usize) -> Option<u8> {
     u8::try_from(id).ok()
 }
 
 /// Step 1: latch block holds (a fresh press sets the parry age to zero).
-/// Under the v2 commit lock (`commit` is `Some`), an in-flight attack past
-/// its feint window refuses a fresh block: the press dies here and the swing
-/// runs on. The v1 leg (`None`) latches as it always has. Under V2 table rows
-/// a release starts block coyote: the guard keeps soaking as a block for the
-/// forgive window ([`coyote_window`](crate::feel::coyote_window) ticks) while
-/// `block_age` counts up from the release; V1 rows reset as before.
+/// Under the v2 commit lock an in-flight attack past its feint window refuses
+/// a fresh block. Under V2 rows a release starts block coyote: the guard
+/// keeps soaking for the forgive window; V1 rows reset as before.
 fn latch_block_holds(
     intents: &[Buttons; SLOT_COUNT],
     state: &mut FightState,
@@ -997,20 +1020,14 @@ fn latch_block_holds(
 }
 
 /// Step 2: start dodges (i-frames) or attacks; failures emit `StaminaOut`.
-/// Under the v2 commit lock (`commit` is `Some`), a dodge past the feint
-/// window is refused silently (no stamina moves, the swing runs on) while a
-/// fresh attack press inside the feint window restarts the swing as a feint
-/// and a press inside the recovery chain window restarts it as a chain. The
-/// v1 leg (`None`) cancels and ignores exactly as before. Fresh attack
-/// starts also report one [`AttackStarted`] cue per starter in fighter-ID
-/// order when `cues` is `Some` and `tables` are [`TABLES_V2`]; feint
-/// restarts stay silent so one swing cues exactly once, while chains cue as
-/// new swings. Under [`TABLES_V1`] rows nothing is pushed, so the V1 event
-/// stream replays byte-identical.
-/// A mid-swing press past both windows is queued in the v2 input buffer
-/// ([`buffer_window`](crate::feel::buffer_window) ticks) and fires on the
-/// first chain or ready tick; a stale hold expires on pop, and V1 rows
-/// (`window == 0`) never queue one, so V1 bouts replay byte-identical.
+/// Under the v2 commit lock a dodge past the feint window is refused
+/// silently, a fresh attack press inside the feint window restarts the swing
+/// as a feint and a press inside the recovery chain window restarts it as a
+/// chain. Fresh attack starts report one [`AttackStarted`] cue per starter
+/// in fighter-ID order under [`TABLES_V2`] rows; feint restarts stay silent
+/// so one swing cues exactly once. A mid-swing press past both windows is
+/// queued and fires on the first chain or ready tick; V1 rows never queue
+/// one, so V1 bouts replay byte-identical.
 fn start_actions(
     intents: &[Buttons; SLOT_COUNT],
     state: &mut FightState,
@@ -1064,7 +1081,7 @@ fn start_actions(
             // Queued-only start keeps its press-time kind for the idle
             // post-step mark; live presses re-mark there.
             let queued_kind = if queued && !fresh && !heavy_press {
-                queued_buttons.map(kind_for_buttons)
+                queued_buttons.map(|buttons| kind_for_buttons(buttons, f.weapon))
             } else {
                 None
             };
@@ -1091,8 +1108,7 @@ fn start_actions(
 }
 
 /// Dodge leg of [`start_actions`]: spends stamina to start a dodge, reports
-/// `StaminaOut` when broke, or bounces off the cancel rules. Returns true
-/// when the tick is consumed and the caller must continue the loop.
+/// `StaminaOut` when broke, or bounces off the cancel rules.
 fn dodge_step(
     intent: Buttons,
     f: &mut FighterState,
@@ -1177,7 +1193,7 @@ fn mid_swing_step(args: MidSwingStep<'_, '_>) {
                     // the idle post-step mark; live presses re-mark.
                     if queued && !fresh && !heavy_press {
                         if let Some(b) = queued_buttons {
-                            f.attack_kind = kind_for_buttons(b);
+                            f.attack_kind = kind_for_buttons(b, f.weapon);
                         }
                     }
                     f.attack_buffer.clear();
@@ -1205,14 +1221,10 @@ fn mid_swing_step(args: MidSwingStep<'_, '_>) {
 }
 
 /// Step 3: resolve impacts whose startup completes this tick, in ID order,
-/// after cancelling in-flight attacks owned by staggered or knocked-out
-/// fighters. Rules v1 (`geometry` `None`) strikes every living foe with the
-/// guard always covering, each strike reading the state the earlier strikes
-/// left (so a lower slot's hit cancels a higher slot's simultaneous impact).
-/// Rules v2 gates each pair through [`strike_gate`] and resolves
-/// symmetrically: who impacts and how each victim's guard stands are read
-/// from the pre-resolution state, and the effects apply together, so slot
-/// order never decides a simultaneous exchange (mutual hits both land).
+/// after cancelling in-flight attacks owned by staggered fighters. Rules v1
+/// strikes every living foe with the guard always covering; rules v2 gates
+/// each pair through [`strike_gate`] and resolves symmetrically, so slot
+/// order never decides a simultaneous exchange.
 fn resolve_impacts(
     state: &mut FightState,
     tables: &Tables,
@@ -1232,8 +1244,7 @@ fn resolve_impacts(
     }
     let symmetric = geometry.is_some();
     // Rules v2 reads each guard from the state before the first same-tick
-    // strike; snapshot the fields it reads once, in place (no heap, no whole
-    // `FighterState` copy). Rules v1 reads live state, so `pre` stays `None`.
+    // strike; snapshot the fields it reads once, in place (no heap copy).
     let pre = geometry.map(|_| {
         let mut snap = [PreState::default(); SLOT_COUNT];
         let mut i = 0;
@@ -1245,14 +1256,16 @@ fn resolve_impacts(
     });
     for attacker in 0..count {
         let f = pre.map_or_else(|| PreState::of(&state.fighters[attacker]), |p| p[attacker]);
+        let (startup, _recovery) = kind_timing(tables, f.attack_kind);
         let impact = f.is_attacking
-            && f.attack_age == tables.attack_startup_ticks
+            && f.attack_age == startup
             && f.hp_permille > 0
             && f.react == 0
             && f.knockdown == 0;
         if !impact {
             continue;
         }
+        let reach = strike_reach(f.weapon, f.attack_kind);
         for victim in 0..count {
             if victim == attacker {
                 continue;
@@ -1261,7 +1274,7 @@ fn resolve_impacts(
             if guard.hp_permille == 0 {
                 continue;
             }
-            let covered = match geometry.map(|poses| strike_gate(poses, attacker, victim)) {
+            let covered = match geometry.map(|poses| strike_gate(poses, attacker, victim, reach)) {
                 None | Some(StrikeGate::Covered) => true,
                 Some(StrikeGate::Open) => false,
                 Some(StrikeGate::Miss) => continue,
@@ -1270,6 +1283,7 @@ fn resolve_impacts(
                 attacker,
                 victim,
                 kind: f.attack_kind,
+                weapon: f.weapon,
                 covered,
                 guard,
                 symmetric,
@@ -1282,18 +1296,15 @@ fn resolve_impacts(
 }
 
 /// Compact pre-resolution view of the [`FighterState`] fields
-/// [`resolve_impacts`] reads before any same-tick strike lands: the attacker
-/// impact fields plus the victim guard fields. Rules v2 needs the state as it
-/// stood before the first strike, so it snapshots once per tick; this view is
-/// a quarter the size of [`FighterState`] (no stamina, buffer or clocks), so
-/// the snapshot stays cheap while every read keeps the exact pre-resolution
-/// value. Values are copied verbatim from [`FighterState`]; nothing is
-/// recomputed.
+/// [`resolve_impacts`] reads before any same-tick strike lands. Rules v2
+/// snapshots once per tick; this view is a quarter the size of
+/// [`FighterState`], so every read keeps the exact pre-resolution value.
 #[derive(Clone, Copy, Default)]
 struct PreState {
     is_attacking: bool,
     attack_age: u32,
     attack_kind: u8,
+    weapon: u8,
     hp_permille: u16,
     react: u32,
     knockdown: u32,
@@ -1310,6 +1321,7 @@ impl PreState {
             is_attacking: f.is_attacking,
             attack_age: f.attack_age,
             attack_kind: f.attack_kind,
+            weapon: f.weapon,
             hp_permille: f.hp_permille,
             react: f.react,
             knockdown: f.knockdown,
@@ -1342,6 +1354,8 @@ struct Strike {
     victim: usize,
     /// Strike kind of the in-flight attack; the hit branch freezes per kind.
     kind: u8,
+    /// Weapon row of the attacker: the damage and the reach come from it.
+    weapon: u8,
     /// Guard faces the attacker (always under v1; shield cone under v2).
     covered: bool,
     /// Victim guard fields the dodge, parry and block checks read: live under
@@ -1353,11 +1367,9 @@ struct Strike {
 }
 
 /// One impacting attacker meets one living victim: dodge, parry, block or hit
-/// in that priority, read from `strike.guard`. Parry and block need
-/// `strike.covered`. Returns true when the attack was parried, which ends the
-/// attacker's remaining victims for this tick. A victim already dropped by
-/// an earlier same-tick strike (v2 only) takes the damage silently: no second
-/// knockdown.
+/// in that priority, read from `strike.guard`. Returns true when the attack
+/// was parried or when a push landed, which ends the attacker's remaining
+/// victims for this tick.
 fn resolve_strike(
     state: &mut FightState,
     tables: &Tables,
@@ -1368,6 +1380,7 @@ fn resolve_strike(
         attacker,
         victim,
         kind,
+        weapon,
         covered,
         guard,
         symmetric,
@@ -1383,6 +1396,13 @@ fn resolve_strike(
         });
         return false;
     }
+    // The boss push: a shove with the scutum. The steel never touches the
+    // man, so a parry of the steel does not catch it; the shove breaks his
+    // guard, staggers him and feeds his balance.
+    if kind == KIND_PUSH {
+        push_strike(state, victim, symmetric);
+        return true;
+    }
     if covered && guard.parry_open_with(tables) {
         state.fighters[victim].juggle = 0;
         events.push(FightEvent::Parried {
@@ -1396,22 +1416,9 @@ fn resolve_strike(
         state.hitstop = hitstop_for_impact(tables, kind, true);
         return true;
     }
-    let blocked = {
-        // V2 coyote: a block released inside the forgive window still soaks
-        // as a block, never a parry (that needs a held block above). V1 rows
-        // grant no forgive window, so old tapes resolve as before.
-        let forgive = crate::feel::coyote_window(tables);
-        let coyote = forgive > 0
-            && !guard.is_blocking
-            && guard.block_age != u32::MAX
-            && guard.block_age <= forgive;
-        covered && (guard.is_blocking || coyote)
-    };
-    let damage = if blocked {
-        tables.chip(tables.attack_damage)
-    } else {
-        tables.attack_damage
-    };
+    let blocked = blocked_by_guard(tables, covered, guard);
+    let raw = strike_damage(tables, weapon);
+    let damage = if blocked { tables.chip(raw) } else { raw };
     let was_up = state.fighters[victim].hp_permille > 0;
     apply_damage(&mut state.fighters[victim], damage);
     events.push(if blocked {
@@ -1458,12 +1465,36 @@ fn resolve_strike(
     false
 }
 
+/// True when the victim's guard soaks the strike: a held block, or the v2
+/// coyote window after a release. V1 rows grant no forgive window.
+fn blocked_by_guard(tables: &Tables, covered: bool, guard: PreState) -> bool {
+    let forgive = crate::feel::coyote_window(tables);
+    let coyote = forgive > 0
+        && !guard.is_blocking
+        && guard.block_age != u32::MAX
+        && guard.block_age <= forgive;
+    covered && (guard.is_blocking || coyote)
+}
+
+/// The boss push lands: the shove breaks the victim's guard, staggers him
+/// and feeds his balance the impulse a body push feeds.
+fn push_strike(state: &mut FightState, victim: usize, symmetric: bool) {
+    let target = &mut state.fighters[victim];
+    target.react = if symmetric {
+        target.react.max(PUSH_STAGGER_TICKS)
+    } else {
+        PUSH_STAGGER_TICKS
+    };
+    target.is_blocking = false;
+    target.block_age = u32::MAX;
+    target.balance_impulse_q8 = PUSH_IMPULSE_Q8;
+    state.hitstop = PUSH_HITSTOP_TICKS;
+}
+
 /// The AIN6 juggle budget on one clean hit: the first hit starts the count,
 /// each further hit while the victim is still in hitstun adds one, and the
 /// first hit past [`JUGGLE_BUDGET`] turns into a knockdown instead of more
-/// stun. A block or an expired stun resets the count (the caller owns those
-/// two resets). Split from [`resolve_strike`] to keep that resolver under the
-/// long-function ratchet.
+/// stun.
 fn apply_juggle_hit(
     state: &mut FightState,
     tables: &Tables,
@@ -1496,16 +1527,15 @@ fn apply_juggle_hit(
 }
 
 /// Step 4: advance attack, dodge, react and knockdown clocks and regen
-/// stamina; the queued input buffer expires lazily when popped, so no clock
-/// ages it here. A swing in flight is exertion, so an attacking fighter does
-/// not regen (the mash drain); idle, blocking and post-swing ticks do.
-/// Clamps health to its ceiling.
+/// stamina. A swing in flight is exertion, so an attacking fighter does not
+/// regen; idle, blocking and post-swing ticks do.
 fn advance_clocks(state: &mut FightState, tables: &Tables, count: usize) {
     for id in 0..count {
         let f = &mut state.fighters[id];
         if f.is_attacking {
             f.attack_age = f.attack_age.saturating_add(1);
-            if f.attack_age > tables.attack_startup_ticks + tables.attack_recovery_ticks {
+            let (startup, recovery) = kind_timing(tables, f.attack_kind);
+            if f.attack_age > startup + recovery {
                 f.is_attacking = false;
                 f.attack_age = 0;
             }
@@ -1532,10 +1562,7 @@ fn advance_clocks(state: &mut FightState, tables: &Tables, count: usize) {
             f.stamina = f.stamina.saturating_sub(tables.block_hold_cost_per_tick);
         }
         // A swing in flight is exertion: no stamina comes back while the
-        // attack clock runs, so a mash cadence drains the bar and the press
-        // the empty bar refuses reports `StaminaOut`. Before this gate the
-        // 25-point cost met 26 points of regen across the 13-tick swing, so
-        // the bar never emptied and no refusal could ever fire.
+        // attack clock runs, so a mash cadence drains the bar.
         if !f.is_attacking {
             f.stamina = (f.stamina.saturating_add(tables.stamina_regen_per_tick)).min(MAX_STAMINA);
         }
@@ -2803,6 +2830,7 @@ mod tests {
                     attacker: 0,
                     victim: 1,
                     kind: crate::depth::INPUT_LIGHT,
+                    weapon: 0,
                     covered: false,
                     guard,
                     symmetric: false,
@@ -2821,6 +2849,7 @@ mod tests {
                 attacker: 0,
                 victim: 1,
                 kind: crate::depth::INPUT_LIGHT,
+                weapon: 0,
                 covered: false,
                 guard,
                 symmetric: false,
@@ -2865,6 +2894,7 @@ mod tests {
                     attacker: 0,
                     victim: 1,
                     kind: crate::depth::INPUT_LIGHT,
+                    weapon: 0,
                     covered: false,
                     guard,
                     symmetric: false,
@@ -3729,14 +3759,16 @@ mod tests {
         let pre: Option<[FighterState; SLOT_COUNT]> = geometry.map(|_| state.fighters);
         for attacker in 0..count {
             let f: FighterState = pre.map_or(state.fighters[attacker], |p| p[attacker]);
+            let (startup, _recovery) = kind_timing(tables, f.attack_kind);
             let impact = f.is_attacking
-                && f.attack_age == tables.attack_startup_ticks
+                && f.attack_age == startup
                 && f.hp_permille > 0
                 && f.react == 0
                 && f.knockdown == 0;
             if !impact {
                 continue;
             }
+            let reach = strike_reach(f.weapon, f.attack_kind);
             for victim in 0..count {
                 if victim == attacker {
                     continue;
@@ -3745,15 +3777,17 @@ mod tests {
                 if guard.hp_permille == 0 {
                     continue;
                 }
-                let covered = match geometry.map(|poses| strike_gate(poses, attacker, victim)) {
-                    None | Some(StrikeGate::Covered) => true,
-                    Some(StrikeGate::Open) => false,
-                    Some(StrikeGate::Miss) => continue,
-                };
+                let covered =
+                    match geometry.map(|poses| strike_gate(poses, attacker, victim, reach)) {
+                        None | Some(StrikeGate::Covered) => true,
+                        Some(StrikeGate::Open) => false,
+                        Some(StrikeGate::Miss) => continue,
+                    };
                 let strike = Strike {
                     attacker,
                     victim,
                     kind: f.attack_kind,
+                    weapon: f.weapon,
                     covered,
                     guard: PreState::of(&guard),
                     symmetric: pre.is_some(),
@@ -3779,23 +3813,24 @@ mod tests {
         if let Some(cues) = cues.as_mut() {
             cues.clear();
         }
+        let count = usize::from(state.fighter_count.min(MAX_PARTICIPANTS));
+        // The balance channel carries one tick: every fighter starts the tick
+        // with no impulse, so the arena reads one push per tick.
+        for id in 0..count {
+            state.fighters[id].balance_impulse_q8 = 0;
+        }
         if state.hitstop > 0 {
             state.hitstop -= 1;
             return;
         }
-        let count = usize::from(state.fighter_count.min(MAX_PARTICIPANTS));
         let commit = geometry.map(|_| StreamliningParams::v1());
         latch_block_holds(intents, state, tables, commit, count);
         start_actions(intents, state, tables, events, cues, commit, count);
         if *tables == TABLES_V2 {
             for (id, intent) in intents.iter().enumerate().take(count) {
                 let f = &mut state.fighters[id];
-                if f.is_attacking && f.attack_age == 0 {
-                    if attacking(*intent) && blocking(*intent) && !dodging(*intent) {
-                        f.attack_kind = crate::depth::INPUT_HEAVY;
-                    } else if attacking(*intent) && !dodging(*intent) {
-                        f.attack_kind = crate::depth::INPUT_LIGHT;
-                    }
+                if f.is_attacking && f.attack_age == 0 && attacking(*intent) && !dodging(*intent) {
+                    f.attack_kind = kind_for_buttons(intent.0, f.weapon);
                 }
             }
         }
@@ -3956,5 +3991,195 @@ mod tests {
                 "the compact snapshot must not be the slower one on {name}: {new_p50:.4} vs {old_p50:.4}"
             );
         }
+    }
+
+    // ---- the shield line ----------------------------------------------------
+
+    /// One row of `content/design/weapons.rows` as the file test reads it.
+    struct WeaponFileRow {
+        /// Row id, e.g. `gladius`.
+        id: String,
+        /// The strike kind: 1 thrust, 2 cut, 3 throw.
+        kind: u32,
+        /// Damage of one landed strike, in permille.
+        damage_permille: u32,
+        /// Hands to wield: 1 or 2.
+        hands: u32,
+    }
+
+    /// The design file's weapon rows: the id, the strike kind, the damage
+    /// and the hands. Whole numbers only; a bad line panics with its number.
+    fn weapon_file_rows() -> Vec<WeaponFileRow> {
+        let text = include_str!("../../../content/design/weapons.rows");
+        let mut rows = Vec::new();
+        for (index, raw) in text.lines().enumerate() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() || line.starts_with("table ") {
+                continue;
+            }
+            let mut fields = line.split_whitespace();
+            let id = fields.next().unwrap_or("").to_string();
+            let mut kind = 0;
+            let mut damage_permille = 0;
+            let mut hands = 0;
+            for field in fields {
+                let (key, value) = field.split_once('=').unwrap_or(("", ""));
+                let number: u32 = value.parse().unwrap_or(0);
+                match key {
+                    "type" => kind = number,
+                    "damage_permille" => damage_permille = number,
+                    "hands" => hands = number,
+                    _ => {}
+                }
+            }
+            assert!(kind > 0, "line {}: the row needs a type", index + 1);
+            rows.push(WeaponFileRow {
+                id,
+                kind,
+                damage_permille,
+                hands,
+            });
+        }
+        rows
+    }
+
+    /// A rules-v2 bout with the attacker's weapon row set: the attacker
+    /// presses the heavy chord on tick 0 and the foe holds his guard.
+    /// Returns the end state, the events and the balance impulse the foe
+    /// carried after each tick.
+    fn shield_line_push(poses: &[StrikePose; 2]) -> (FightState, Vec<FightEvent>, Vec<u16>) {
+        let mut state = FightState::new(2).expect("two fighters fit");
+        state.fighters[0].weapon = 2;
+        let mut out = Vec::with_capacity(MAX_EVENTS_PER_TICK);
+        let mut all = Vec::new();
+        let mut impulses = Vec::new();
+        for tick in 0..=TABLES_V2.attack_startup_ticks {
+            let press = if tick == 0 { ATTACK | BLOCK } else { BLOCK };
+            let inputs = [input(0, press), input(1, BLOCK)];
+            try_step_v2_into(&inputs, poses, &mut state, &TABLES_V2, &mut out)
+                .expect("the v2 step takes these inputs");
+            all.extend_from_slice(&out);
+            impulses.push(state.fighters[1].balance_impulse_q8);
+        }
+        (state, all, impulses)
+    }
+
+    /// A rules-v2 bout with the attacker's weapon row set: the attacker
+    /// strikes on tick 0 and the foe stands unguarded. Returns the damage
+    /// the strike did, or `None` when it fell short.
+    fn shield_line_strike(poses: &[StrikePose; 2], weapon: u8) -> Option<u16> {
+        let mut state = FightState::new(2).expect("two fighters fit");
+        state.fighters[0].weapon = weapon;
+        let mut out = Vec::with_capacity(MAX_EVENTS_PER_TICK);
+        for tick in 0..=TABLES_V2.attack_startup_ticks {
+            let press = if tick == 0 { ATTACK } else { 0 };
+            let inputs = [input(0, press), none(1)];
+            try_step_v2_into(&inputs, poses, &mut state, &TABLES_V2, &mut out)
+                .expect("the v2 step takes these inputs");
+            for event in &out {
+                if let FightEvent::Hit { damage, .. } = *event {
+                    return Some(damage);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn shield_line_boss_push_staggers_a_guarded_foe() {
+        // The foe holds his guard: the shove with the scutum breaks it,
+        // staggers him and feeds his balance, and the steel cuts nothing.
+        let poses = [pose(0, 0, 0, (1000, 0), 0), pose(1, 700, 0, (-1000, 0), 1)];
+        let (state, events, impulses) = shield_line_push(&poses);
+        let foe = state.fighters[1];
+        assert!(foe.react > 0, "the push must stagger the guarded foe");
+        assert!(!foe.is_blocking, "the push breaks the guard");
+        assert_eq!(foe.hp_permille, MAX_HP_PERMILLE, "the shove cuts nothing");
+        // The balance channel carries one tick: the shove feeds it once and
+        // the next tick clears it.
+        let fed: Vec<usize> = impulses
+            .iter()
+            .enumerate()
+            .filter(|(_, impulse)| **impulse != 0)
+            .map(|(tick, _)| tick)
+            .collect();
+        assert_eq!(fed.len(), 1, "one push feeds the balance: {impulses:?}");
+        assert_eq!(impulses[fed[0]], PUSH_IMPULSE_Q8, "the shove impulse");
+        assert_eq!(
+            foe.balance_impulse_q8, 0,
+            "the channel is clear on the tick after the push"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, FightEvent::Hit { .. } | FightEvent::Blocked { .. })),
+            "the shove has no steel event: {events:?}"
+        );
+    }
+
+    #[test]
+    fn shield_line_thrust_beats_a_cut_on_damage_at_the_same_reach() {
+        // The same foe at the same distance: the gladius thrust bites
+        // deeper than the spatha cut.
+        let poses = [pose(0, 0, 0, (1000, 0), 0), pose(1, 700, 0, (-1000, 0), 1)];
+        let thrust = shield_line_strike(&poses, 2).expect("the thrust lands");
+        let cut = shield_line_strike(&poses, 3).expect("the cut lands");
+        assert!(thrust > cut, "the thrust {thrust} must beat the cut {cut}");
+        assert_eq!(thrust, 120);
+        assert_eq!(cut, 75);
+    }
+
+    #[test]
+    fn shield_line_thrust_reaches_past_the_cut() {
+        // At 800 mm the cut falls short and the thrust still lands.
+        let poses = [pose(0, 0, 0, (1000, 0), 0), pose(1, 800, 0, (-1000, 0), 1)];
+        assert_eq!(
+            shield_line_strike(&poses, 2),
+            Some(120),
+            "the thrust reaches under the rim"
+        );
+        assert_eq!(shield_line_strike(&poses, 3), None, "the cut falls short");
+        // The bare hand keeps the arena's own reach: it lands at any range.
+        assert_eq!(shield_line_strike(&poses, 0), Some(TABLES_V2.attack_damage));
+    }
+
+    #[test]
+    fn shield_line_pilum_row_is_a_throw() {
+        let rows = weapon_file_rows();
+        let pilum = rows
+            .iter()
+            .find(|row| row.id == "pilum")
+            .expect("the pilum row ships");
+        assert_eq!(pilum.kind, 3, "the pilum is a throw, not a thrust");
+        assert_eq!(pilum.hands, 1, "a thrown pilum is not a two-hand thrust");
+    }
+
+    #[test]
+    fn shield_line_weapon_rows_match_the_design_file() {
+        let rows = weapon_file_rows();
+        let by_id: [(&str, u8); 3] = [("pugio", 1), ("gladius", 2), ("spatha", 3)];
+        for (id, row) in by_id {
+            let file = rows.iter().find(|r| r.id == id).expect("the row ships");
+            let index = usize::from(row);
+            assert_eq!(file.kind, u32::from(SHIELD_KINDS[index]), "{id} kind");
+            assert_eq!(
+                file.damage_permille,
+                u32::from(SHIELD_DAMAGE[index]),
+                "{id} damage"
+            );
+        }
+    }
+
+    #[test]
+    fn shield_line_replay_twice_equal() {
+        let poses = [pose(0, 0, 0, (1000, 0), 0), pose(1, 700, 0, (-1000, 0), 1)];
+        let (state, events, impulses) = shield_line_push(&poses);
+        let (again, events_again, impulses_again) = shield_line_push(&poses);
+        assert_eq!(state, again, "the same bout gives the same state");
+        assert_eq!(events, events_again, "the same bout gives the same events");
+        assert_eq!(
+            impulses, impulses_again,
+            "the same bout feeds the balance the same way"
+        );
     }
 }

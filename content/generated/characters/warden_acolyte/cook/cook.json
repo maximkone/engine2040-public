@@ -1,0 +1,74 @@
+{
+  "ao": {
+    "max": 1.0,
+    "mean": 0.8495,
+    "min": 0.45
+  },
+  "atlas": {
+    "atlas": 512,
+    "distinct_colors": 289,
+    "source_size": [
+      256,
+      256
+    ]
+  },
+  "bounds_m": {
+    "x": 1.2483,
+    "y": 0.8303,
+    "z": 2.0
+  },
+  "faction": "ashkin",
+  "generated_at": null,
+  "hero_render": {
+    "engine": "BLENDER_EEVEE",
+    "ok": true,
+    "palette": [
+      "#2B2724",
+      "#7A1F1C",
+      "#9C6B3A",
+      "#D9CBB2",
+      "#C8562A"
+    ]
+  },
+  "lods": [
+    {
+      "file": "lod0.glb",
+      "lod": 0,
+      "triangles": 1999
+    },
+    {
+      "file": "lod1.glb",
+      "lod": 1,
+      "triangles": 1100
+    },
+    {
+      "file": "lod2.glb",
+      "lod": 2,
+      "triangles": 536
+    },
+    {
+      "file": "lod3.glb",
+      "lod": 3,
+      "triangles": 300
+    }
+  ],
+  "palette": [
+    "#2B2724",
+    "#7A1F1C",
+    "#9C6B3A",
+    "#D9CBB2",
+    "#C8562A"
+  ],
+  "roughness_rule": {
+    "cloth": 0.85,
+    "matte": 0.55,
+    "note": "two values, applied by the engine from the atlas"
+  },
+  "scale_applied": 2.163922,
+  "source": "C:\\engine2040\\content\\generated\\characters\\warden_acolyte\\mesh\\mesh.glb",
+  "source_height_m": 0.9242,
+  "source_triangles": 21468,
+  "target_height_m": 2.0,
+  "triangle_budget": 2000,
+  "unwrapped": false
+}

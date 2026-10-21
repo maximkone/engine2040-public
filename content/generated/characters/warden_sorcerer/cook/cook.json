@@ -1,0 +1,87 @@
+{
+  "atlas": [
+    {
+      "atlas": 512,
+      "distinct_colors": 211,
+      "image": "Image_0",
+      "material": "Material_0",
+      "skin": false,
+      "source_size": [
+        256,
+        256
+      ]
+    }
+  ],
+  "bounds_m": {
+    "x": 1.9873,
+    "y": 1.0081,
+    "z": 2.0
+  },
+  "faction": "ashkin",
+  "generated_at": null,
+  "hero_render": {
+    "engine": "BLENDER_EEVEE",
+    "ok": true,
+    "palette": [
+      "#2B2724",
+      "#7A1F1C",
+      "#9C6B3A",
+      "#D9CBB2",
+      "#C8562A"
+    ]
+  },
+  "light": {
+    "ambient": 0.42,
+    "key": [
+      -0.45,
+      -0.55,
+      0.7
+    ],
+    "key_strength": 0.78,
+    "max": 1.2287,
+    "mean": 0.6154,
+    "min": 0.189,
+    "rim_strength": 0.22
+  },
+  "lods": [
+    {
+      "file": "lod0.glb",
+      "lod": 0,
+      "triangles": 2000
+    },
+    {
+      "file": "lod1.glb",
+      "lod": 1,
+      "triangles": 1100
+    },
+    {
+      "file": "lod2.glb",
+      "lod": 2,
+      "triangles": 391
+    },
+    {
+      "file": "lod3.glb",
+      "lod": 3,
+      "triangles": 300
+    }
+  ],
+  "palette": [
+    "#2B2724",
+    "#7A1F1C",
+    "#9C6B3A",
+    "#D9CBB2",
+    "#C8562A"
+  ],
+  "roughness_rule": {
+    "cloth": 0.85,
+    "matte": 0.55,
+    "note": "two values, applied by the engine from the atlas"
+  },
+  "scale_applied": 2.273275,
+  "source": "C:\\engine2040\\content\\generated\\characters\\warden_sorcerer\\mesh\\mesh.glb",
+  "source_height_m": 0.8798,
+  "source_triangles": 15660,
+  "target_height_m": 2.0,
+  "triangle_budget": 2000,
+  "unwrapped": false
+}

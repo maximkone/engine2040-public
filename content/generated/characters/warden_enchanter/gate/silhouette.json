@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.6754,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 1.9771,
+  "fill_30m": 0.6579,
+  "height_30m_px": 89,
+  "height_px": 808,
+  "ortho_scale_m": 2.4469,
+  "px_per_m": 408.68,
+  "resolution_30m": [
+    1366,
+    768
+  ],
+  "scale_applied": 1.001227,
+  "source": "C:\\engine2040\\content\\generated\\characters\\warden_enchanter\\cook\\lod0.glb",
+  "source_height_m": 1.9975,
+  "triangles": 1999,
+  "width_px": 340
+}

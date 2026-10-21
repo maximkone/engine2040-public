@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.6916,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 2.0671,
+  "fill_30m": 0.6772,
+  "height_30m_px": 89,
+  "height_px": 702,
+  "ortho_scale_m": 2.9445,
+  "px_per_m": 339.61,
+  "resolution_30m": [
+    1306,
+    734
+  ],
+  "scale_applied": 1.002087,
+  "source": "C:\\engine2040\\content\\generated\\characters\\ashkin_gunner\\cook\\lod0.glb",
+  "source_height_m": 1.9958,
+  "triangles": 2000,
+  "width_px": 478
+}

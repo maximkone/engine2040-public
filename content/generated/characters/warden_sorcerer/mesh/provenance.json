@@ -1,0 +1,28 @@
+{
+  "provider": "sf3d",
+  "lane": "local stable-fast-3d (the one local lane)",
+  "licence": "Stability AI Community Licence: commercial at or under $1M revenue, attribution required",
+  "attribution_required": "Powered by Stability AI",
+  "commercial_use": true,
+  "weights": "stabilityai/stable-fast-3d, fetched by tools/asset-gen/fetch-weights.mjs",
+  "model": "stabilityai/stable-fast-3d",
+  "weights_source": "C:\\forge-media\\models\\sf3d-weights",
+  "texture_resolution": 256,
+  "foreground_ratio": 0.85,
+  "source_images": [
+    {
+      "path": "C:\\engine2040\\content\\generated\\concepts\\concept_warden_sorcerer.jpg",
+      "sha256": "c31d4ec7f217c54176262e14773545b8fd7f799f23e1eb21a5c71668be671008"
+    }
+  ],
+  "source_rights": "our own images only: a mesh made from someone else's picture is still derived from it",
+  "meshes": [
+    {
+      "name": "mesh",
+      "path": "C:\\engine2040\\content\\generated\\characters\\warden_sorcerer\\mesh\\mesh.glb",
+      "bytes": 612864,
+      "sha256": "3fdc202b4e138f7dcf08407638a78843ab3611741ef4a3767dfdd7742e7a9fc2"
+    }
+  ],
+  "generated_at": "2026-10-21T19:34:24.868Z"
+}

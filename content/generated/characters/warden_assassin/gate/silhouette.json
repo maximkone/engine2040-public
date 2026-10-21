@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.492,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 2.0108,
+  "fill_30m": 0.5991,
+  "height_30m_px": 89,
+  "height_px": 776,
+  "ortho_scale_m": 2.5912,
+  "px_per_m": 385.92,
+  "resolution_30m": [
+    1342,
+    754
+  ],
+  "scale_applied": 0.99647,
+  "source": "C:\\engine2040\\content\\generated\\characters\\warden_assassin\\cook\\lod0.glb",
+  "source_height_m": 2.0071,
+  "triangles": 2000,
+  "width_px": 549
+}

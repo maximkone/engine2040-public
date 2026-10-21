@@ -1,0 +1,47 @@
+# The timber table: when a tree may be felled, and what one log becomes.
+#
+# Felling is season-gated (Vitruvius 2.9): a tree is cut to the heart, the
+# sap drains, and only then is it felled, and that is done from early autumn
+# to spring, when the sap is down. Outside that season the felling is refused
+# with the reason the season gives.
+#
+# The wood is cut for its use: oak for ground work, alder for marsh piles.
+# A log becomes stakes or pila shafts.
+#
+# Every number names its source in `ref`, and every section says how sure we
+# are of it in `certainty`. The season is attested, the woods are
+# reconstructed, and the counts of stakes and shafts are ours, because the
+# sources give none.
+
+[season]
+first_month = "September"
+last_month = "March"
+reason = "the sap runs from the Ides of September to the Ides of March, and a tree is felled only then (Vitruvius 2.9)"
+certainty = "attested"
+ref = "rome.md section 4.4, the timber row: fell only from early autumn, cut to the heart and let the sap drain, then fell (Vitruvius 2.9)"
+
+[timber.oak]
+purpose = "ground_work"
+sap_days = 30
+strokes = 40
+certainty = "reconstructed"
+ref = "rome.md section 4.4, the timber row: oak for underground work (Vitruvius 2.9); the sap drain of thirty days and the forty axe strokes are our own first version"
+
+[timber.alder]
+purpose = "marsh_piles"
+sap_days = 20
+strokes = 30
+certainty = "reconstructed"
+ref = "rome.md section 4.4, the timber row: alder for marsh piles (Vitruvius 2.9); the sap drain of twenty days and the thirty axe strokes are our own first version"
+
+[product.stake]
+tree = "oak"
+per_log = 8
+certainty = "invented"
+ref = "rome.md section 4.4, the timber row: a log becomes stakes, and oak is the wood for ground work; the eight stakes a log are our own first version, the sources give no count (stakes per man is on the plan's unsure list)"
+
+[product.pila_shaft]
+tree = "any"
+per_log = 4
+certainty = "invented"
+ref = "rome.md section 4.4, the timber row: a log becomes pila shafts; the four shafts a log are our own first version, the sources give no count"

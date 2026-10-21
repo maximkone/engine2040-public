@@ -1,0 +1,28 @@
+{
+  "provider": "sf3d",
+  "lane": "local stable-fast-3d (the one local lane)",
+  "licence": "Stability AI Community Licence: commercial at or under $1M revenue, attribution required",
+  "attribution_required": "Powered by Stability AI",
+  "commercial_use": true,
+  "weights": "stabilityai/stable-fast-3d, fetched by tools/asset-gen/fetch-weights.mjs",
+  "model": "stabilityai/stable-fast-3d",
+  "weights_source": "C:\\forge-media\\models\\sf3d-weights",
+  "texture_resolution": 256,
+  "foreground_ratio": 0.85,
+  "source_images": [
+    {
+      "path": "C:\\engine2040\\content\\generated\\concepts\\concept_ashkin_combatant.jpg",
+      "sha256": "b3ad06c336b75431e27b106e798a79015b6f87292eb8f8c228d05c181ff7011b"
+    }
+  ],
+  "source_rights": "our own images only: a mesh made from someone else's picture is still derived from it",
+  "meshes": [
+    {
+      "name": "mesh",
+      "path": "C:\\engine2040\\content\\generated\\characters\\ashkin_combatant\\mesh\\mesh.glb",
+      "bytes": 811216,
+      "sha256": "cfd908eaca315e06e19482b4056670ce7c4d955efd9dbd5e0ea4263411e471da"
+    }
+  ],
+  "generated_at": "2026-10-21T12:53:23.931Z"
+}

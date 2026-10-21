@@ -1,0 +1,28 @@
+{
+  "provider": "sf3d",
+  "lane": "local stable-fast-3d (the one local lane)",
+  "licence": "Stability AI Community Licence: commercial at or under $1M revenue, attribution required",
+  "attribution_required": "Powered by Stability AI",
+  "commercial_use": true,
+  "weights": "stabilityai/stable-fast-3d, fetched by tools/asset-gen/fetch-weights.mjs",
+  "model": "stabilityai/stable-fast-3d",
+  "weights_source": "C:\\forge-media\\models\\sf3d-weights",
+  "texture_resolution": 256,
+  "foreground_ratio": 0.85,
+  "source_images": [
+    {
+      "path": "C:\\engine2040\\content\\generated\\concepts\\concept_warden_acolyte.jpg",
+      "sha256": "945548c87903cb7f31d572371560bec08800432d76bdca8b9a2877dcdb568f88"
+    }
+  ],
+  "source_rights": "our own images only: a mesh made from someone else's picture is still derived from it",
+  "meshes": [
+    {
+      "name": "mesh",
+      "path": "C:\\engine2040\\content\\generated\\characters\\warden_acolyte\\mesh\\mesh.glb",
+      "bytes": 760048,
+      "sha256": "c890d235f2ff7243aed2843c04f8fe20daae15e568186d8d267f1c71c9e95dba"
+    }
+  ],
+  "generated_at": "2026-10-21T10:29:42.310Z"
+}

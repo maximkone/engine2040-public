@@ -1,0 +1,209 @@
+{
+  "generated_at": "2026-10-21T19:38:00.063Z",
+  "concepts_dir": "C:\\engine2040\\content\\generated\\concepts",
+  "out": "C:\\engine2040\\content\\generated\\characters",
+  "count": 20,
+  "passed": 17,
+  "rows": [
+    {
+      "id": "ashkin_attacker",
+      "verdict": "pass",
+      "fill": 0.5804,
+      "fill30": 0.5709,
+      "tris": 2000,
+      "rig": 1762,
+      "vertices": 2305,
+      "error": null
+    },
+    {
+      "id": "ashkin_combatant",
+      "verdict": "pass",
+      "fill": 0.6612,
+      "fill30": 0.6607,
+      "tris": 1999,
+      "rig": 1996,
+      "vertices": 2426,
+      "error": null
+    },
+    {
+      "id": "ashkin_gunner",
+      "verdict": "pass",
+      "fill": 0.6916,
+      "fill30": 0.6772,
+      "tris": 2000,
+      "rig": 1811,
+      "vertices": 2326,
+      "error": null
+    },
+    {
+      "id": "ashkin_life",
+      "verdict": "pass",
+      "fill": 0.6057,
+      "fill30": 0.5924,
+      "tris": 2000,
+      "rig": 2056,
+      "vertices": 2453,
+      "error": null
+    },
+    {
+      "id": "ashkin_officiator",
+      "verdict": "pass",
+      "fill": 0.5547,
+      "fill30": 0.5343,
+      "tris": 2000,
+      "rig": 1762,
+      "vertices": 2284,
+      "error": null
+    },
+    {
+      "id": "ashkin_rune",
+      "verdict": "pass",
+      "fill": 0.4913,
+      "fill30": 0.4661,
+      "tris": 1999,
+      "rig": 2049,
+      "vertices": 2414,
+      "error": null
+    },
+    {
+      "id": "ashkin_shadow",
+      "verdict": "pass",
+      "fill": 0.589,
+      "fill30": 0.5593,
+      "tris": 2000,
+      "rig": 2621,
+      "vertices": 2621,
+      "error": null
+    },
+    {
+      "id": "ashkin_templar",
+      "verdict": "pass",
+      "fill": 0.6249,
+      "fill30": 0.6149,
+      "tris": 2000,
+      "rig": 2088,
+      "vertices": 2375,
+      "error": null
+    },
+    {
+      "id": "warden_acolyte",
+      "verdict": "fail_too_solid",
+      "fill": 0.7069,
+      "fill30": 0.7108,
+      "tris": 1999,
+      "rig": 2205,
+      "vertices": 2325,
+      "error": null
+    },
+    {
+      "id": "warden_archer",
+      "verdict": "fail_too_sparse",
+      "fill": 0.3495,
+      "fill30": 0.3234,
+      "tris": 2000,
+      "rig": 2171,
+      "vertices": 2656,
+      "error": null
+    },
+    {
+      "id": "warden_assassin",
+      "verdict": "pass",
+      "fill": 0.492,
+      "fill30": 0.5991,
+      "tris": 2000,
+      "rig": 1661,
+      "vertices": 2028,
+      "error": null
+    },
+    {
+      "id": "warden_cleric",
+      "verdict": "pass",
+      "fill": 0.6138,
+      "fill30": 0.6025,
+      "tris": 2000,
+      "rig": 2008,
+      "vertices": 2358,
+      "error": null
+    },
+    {
+      "id": "warden_defender",
+      "verdict": "pass",
+      "fill": 0.6718,
+      "fill30": 0.6802,
+      "tris": 2000,
+      "rig": 2380,
+      "vertices": 2389,
+      "error": null
+    },
+    {
+      "id": "warden_enchanter",
+      "verdict": "pass",
+      "fill": 0.6754,
+      "fill30": 0.6579,
+      "tris": 1999,
+      "rig": 2322,
+      "vertices": 2322,
+      "error": null
+    },
+    {
+      "id": "warden_fighter",
+      "verdict": "pass",
+      "fill": 0.4083,
+      "fill30": 0.3939,
+      "tris": 1999,
+      "rig": 2143,
+      "vertices": 2278,
+      "error": null
+    },
+    {
+      "id": "warden_mage",
+      "verdict": "pass",
+      "fill": 0.6183,
+      "fill30": 0.6208,
+      "tris": 1999,
+      "rig": 1786,
+      "vertices": 1944,
+      "error": null
+    },
+    {
+      "id": "warden_priest",
+      "verdict": "pass",
+      "fill": 0.5941,
+      "fill30": 0.584,
+      "tris": 2000,
+      "rig": 1920,
+      "vertices": 2120,
+      "error": null
+    },
+    {
+      "id": "warden_rogue",
+      "verdict": "pass",
+      "fill": 0.674,
+      "fill30": 0.6469,
+      "tris": 2000,
+      "rig": 2562,
+      "vertices": 2566,
+      "error": null
+    },
+    {
+      "id": "warden_sorcerer",
+      "verdict": "fail_too_sparse",
+      "fill": 0.3176,
+      "fill30": 0.3545,
+      "tris": 2000,
+      "rig": 2295,
+      "vertices": 2570,
+      "error": null
+    },
+    {
+      "id": "warden_warrior",
+      "verdict": "pass",
+      "fill": 0.5217,
+      "fill30": 0.4968,
+      "tris": 2000,
+      "rig": 2113,
+      "vertices": 2590,
+      "error": null
+    }
+  ]
+}

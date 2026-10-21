@@ -1,0 +1,82 @@
+{
+  "name": "ashkin_officiator",
+  "faction": "ashkin",
+  "concept": "C:\\engine2040\\content\\generated\\concepts\\concept_ashkin_officiator.jpg",
+  "out": "C:\\engine2040\\content\\generated\\characters\\ashkin_officiator",
+  "gate": {
+    "verdict": "pass",
+    "bbox_fill": 0.5547,
+    "fill_band": [
+      0.4,
+      0.7
+    ],
+    "height_30m_px": 88,
+    "fill_30m": 0.5343,
+    "triangles": 2000,
+    "note": "a silhouette passes when it reads at 90 pixels tall: faction first, class second"
+  },
+  "cook": {
+    "lods": [
+      {
+        "file": "lod0.glb",
+        "lod": 0,
+        "triangles": 2000
+      },
+      {
+        "file": "lod1.glb",
+        "lod": 1,
+        "triangles": 1100
+      },
+      {
+        "file": "lod2.glb",
+        "lod": 2,
+        "triangles": 449
+      },
+      {
+        "file": "lod3.glb",
+        "lod": 3,
+        "triangles": 300
+      }
+    ],
+    "atlas": {
+      "atlas": 512,
+      "distinct_colors": 323,
+      "source_size": [
+        256,
+        256
+      ]
+    },
+    "scale_applied": 2.140531,
+    "source_triangles": 17996
+  },
+  "rig": {
+    "bones": 22,
+    "weighted_vertices": 1762,
+    "vertices": 2284,
+    "distance_stats": {
+      "beyond_cutoff": 522,
+      "nearest_p05": 0.0805,
+      "nearest_p50": 0.2487,
+      "nearest_p95": 0.6146
+    },
+    "landmarks": {
+      "foot_z": -0.0133,
+      "hand_z": 0.8697,
+      "height": 2.0067,
+      "hip_half": 0.4013,
+      "hip_measured": 0.4913,
+      "hips_z": 0.9901,
+      "shoulder_half": 0.2809,
+      "shoulder_measured": 0.2392,
+      "shoulder_z": 1.6322,
+      "z_min": -0.0133
+    }
+  },
+  "seconds": {
+    "mesh": 583.4,
+    "cook": 47.2,
+    "gate": 12.1,
+    "rig": 5.1
+  },
+  "generated_at": "2026-10-21T13:13:59.572Z"
+}
