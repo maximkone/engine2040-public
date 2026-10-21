@@ -51,11 +51,11 @@ A wire is proven by three things, not by a green unit test of the old code:
 2. A test that goes through the production entry: build the `TickOutcome`, call the hook the way the window calls it, check the draw list or the state. Name it so the filter finds it (`break_wire_*`). Run it with `node tools/gh-check.mjs cargo test -p engine-game --features app --lib break_wire` (skill `github-check`; `app` runs on the PC).
 3. The hash is equal with the picture on and off, and the golden is unchanged: `golden unchanged` or `d57b5c8ae3096614 x2`.
 
-Then run the window once and read the receipt line (skill `arena-capture-and-view-line`): `arena break: breaks=.. debris=..` must be non-zero after a break. A feature that only shows a zero is still not wired.
+Then run the window once and read the receipt line (skill `door-and-headless-runbook`, window run section): `arena break: breaks=.. debris=..` must be non-zero after a break. A feature that only shows a zero is still not wired.
 
 ## 5. Traps
 
 - A test that builds the object by hand proves the object, not the wire.
 - A `pub fn` that only a `#[cfg(test)]` block calls is still an island.
 - Do not wire the dead list (triage section 5): the old solver, lagcomp, and similar. They stay deleted.
-- Tick the row only with the grep and the receipt line as evidence (skill `tick-a-row`).
+- Tick the row only with the grep and the receipt line as evidence (skill `commit-and-board`, close a row).

@@ -88,15 +88,15 @@ mod tests {
     /// The committed cottage manifest; it is the authority for the cell size.
     const HOUSE_MANIFEST_JSON: &str = include_str!("../../../content/kam2/house/manifest.json");
     /// The committed soldier manifest; it is the authority for the cell size.
-    const SOLDIER_MANIFEST_JSON: &str =
-        include_str!("../../../content/kam2/soldier/manifest.json");
+    const SOLDIER_MANIFEST_JSON: &str = include_str!("../../../content/kam2/soldier/manifest.json");
 
     fn house_manifest() -> HouseManifest {
         HouseManifest::parse(HOUSE_MANIFEST_JSON).expect("the committed house manifest parses")
     }
 
     fn soldier_manifest() -> SoldierManifest {
-        SoldierManifest::parse(SOLDIER_MANIFEST_JSON).expect("the committed soldier manifest parses")
+        SoldierManifest::parse(SOLDIER_MANIFEST_JSON)
+            .expect("the committed soldier manifest parses")
     }
 
     fn frame() -> (Shell, Vec<f32>) {
@@ -144,7 +144,8 @@ mod tests {
         assert_eq!(shell.units(), 4);
         assert_eq!(shell.houses(), 3);
         let soldier = soldier_manifest().size();
-        let cottage = house_manifest().size();        let billboards = flat[1] as usize;
+        let cottage = house_manifest().size();
+        let billboards = flat[1] as usize;
         let base = HEADER + (flat[0] as usize) * GROUND_STRIDE;
         for i in 0..billboards {
             let o = base + i * BILLBOARD_STRIDE;
@@ -192,7 +193,9 @@ mod tests {
         let manifest = house_manifest();
         let row = |state: HouseState| {
             let row = manifest.row(state).expect("the manifest names the state");
-            let [origin, _] = manifest.cell_uv(row).expect("the state row is inside the atlas");
+            let [origin, _] = manifest
+                .cell_uv(row)
+                .expect("the state row is inside the atlas");
             origin[1]
         };
         let finished = row(HouseState::Finished);

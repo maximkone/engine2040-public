@@ -755,10 +755,10 @@ mod tests {
             );
         }
         // Locked ladder content stays readable from the display layer: the
-        // start-to-rank fixture ends on Legend with two owed repairs.
+        // start-to-rank fixture ends on Centurio with two owed repairs.
         let ladder = crate::ladder::start_to_rank();
         assert_eq!(ladder.rank(), 4);
-        assert_eq!(crate::ladder::Ladder::rank_name(ladder.rank()), "Legend");
+        assert_eq!(crate::ladder::Ladder::rank_name(ladder.rank()), "Centurio");
         assert_eq!(ladder.pending_repairs(), 2);
     }
 }

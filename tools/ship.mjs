@@ -751,12 +751,18 @@ function main() {
     CARGO_TARGET_DIR: cleanTargetDir,
     RUSTFLAGS: process.env.RUSTFLAGS ? `${process.env.RUSTFLAGS} ${remapFlags}` : remapFlags,
   };
+  // The shipped artifact is built with the `ship` profile (fat LTO, one codegen
+  // unit), so cargo writes it to <target>/ship, not <target>/release. The
+  // `release` dir stays a fallback so --skip-build can still pick up an older
+  // release build.
   const findReleaseExe = (name) => {
     for (const dir of [cleanTargetDir, join(REPO_ROOT, "target")]) {
-      const winExe = join(dir, "release", `${name}.exe`);
-      if (existsSync(winExe)) return winExe;
-      const unixExe = join(dir, "release", name);
-      if (existsSync(unixExe)) return unixExe;
+      for (const profile of ["ship", "release"]) {
+        const winExe = join(dir, profile, `${name}.exe`);
+        if (existsSync(winExe)) return winExe;
+        const unixExe = join(dir, profile, name);
+        if (existsSync(unixExe)) return unixExe;
+      }
     }
     return null;
   };
@@ -804,8 +810,8 @@ function main() {
   let editorArgPath = args.editorBin ? resolve(args.editorBin) : null;
   if (!args.skipBuild) {
     log.push(`$ build env: CARGO_TARGET_DIR=${cleanTargetDir} RUSTFLAGS=${buildEnv.RUSTFLAGS}`);
-    if (!runBuild(["build", "--release", "-p", "engine-game", "--features", "app"], "arena")) return;
-    if (!runBuild(["build", "--release", "-p", "engine-editor", "--features", "ui"], "editor")) return;
+    if (!runBuild(["build", "--profile", "ship", "-p", "engine-game", "--features", "app"], "arena")) return;
+    if (!runBuild(["build", "--profile", "ship", "-p", "engine-editor", "--features", "ui"], "editor")) return;
     if (!binaryPath) binaryPath = findReleaseExe("arena");
     if (!editorArgPath) editorArgPath = findReleaseExe("e2040-editor");
   } else {
@@ -814,7 +820,7 @@ function main() {
     if (!editorArgPath) editorArgPath = findReleaseExe("e2040-editor");
   }
   if (!binaryPath || !existsSync(binaryPath) || !statSync(binaryPath).isFile()) {
-    done("MISSING_BINARY", `release arena exe missing: ${binaryPath ?? "(none)"} (build it: cargo build --release -p engine-game --features app)`);
+    done("MISSING_BINARY", `release arena exe missing: ${binaryPath ?? "(none)"} (build it: cargo build --profile ship -p engine-game --features app)`);
     return;
   }
   let binaryBytes;

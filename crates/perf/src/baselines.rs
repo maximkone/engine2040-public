@@ -15,19 +15,21 @@
 //!
 //! 2026-10-21, the participant cap moved 16 -> 32 (owner decision GE12), so
 //! the canonical arena run now seats 32 fighters. The appended `arena_tick_32`
-//! row is the canonical gate's row (`arena_baseline` reads it): 600 ticks,
-//! hash 12449757284742186622, 106932 bytes, 240 counts. The 16-fighter
-//! `arena_tick` row stays below unchanged as the legacy record; its hash
-//! (12857399269765116608) still stands as `arena_tick_16`, whose
-//! allocation totals moved when that row was re-recorded. Nothing was
-//! overwritten or deleted.
-//! The other scaled rows were re-recorded for the same deliberate reason
-//! (fixed-array sizes): the arena's arrays are now cap-sized, so the
-//! allocation totals moved (4 fighters 57102/60 -> 86254/61, 8 fighters
-//! 59044/65 -> 88932/66, 16 fighters 63539/151 -> 94899/152) while every
-//! hash stayed identical, which proves the sim state did not move. The
-//! `ai_decide` row moved for the same reason (hash 3634382762935724637,
-//! 4096 bytes, 1 count).
+//! row is the canonical gate's row (`arena_baseline` reads it). The 16-fighter
+//! record is the `arena_tick_16` row (hash 12857399269765116608); the
+//! `arena_tick` row itself now names the live canonical default, which is the
+//! same 32-fighter fight, so no row in this table contradicts a live run.
+//! 2026-10-21 (PF32): the arena sizes its combat-event scratch by the actual
+//! fighter count instead of the cap's worst case (`combat_event_capacity` in
+//! `crates/arena/src/lib.rs`), so a small match no longer reserves the
+//! 32-fighter scratch. Every arena row was re-recorded for that deliberate
+//! reason, and every row moved DOWN: `arena_tick` 106932 -> 106740 bytes,
+//! `arena_tick_32` 106932 -> 106740, `arena_tick_4` 86254 -> 74134,
+//! `arena_tick_8` 88932 -> 77364 and `arena_tick_16` 94899 -> 85587. The
+//! counts and every hash stayed identical, which proves the sim state did not
+//! move. The rows sit above their 16-fighter-era numbers (57102/60, 59044/65,
+//! 63539/151) because the arena grew a per-tick cut log and the per-fighter
+//! brain state since; the scratch fix gives back more than the cap raise took.
 //! No `arena_tick_32_sim` row: the `sim` track does not build in this
 //! workspace, so no sim number was invented. See the table comment.
 
@@ -55,16 +57,16 @@ pub struct Baseline {
 
 /// Recorded baselines, one row per workload.
 pub const BASELINES: &[Baseline] = &[
-    // 2026-10-21: the 16-fighter `arena_tick` record. The canonical run now
-    // seats 32 fighters, so the `arena_tick_32` row at the end of this table
-    // replaced this row for the canonical run; this one is kept unchanged as
-    // the legacy record (its hash still stands as `arena_tick_16`).
+    // 2026-10-21 (PF32): the canonical default is a 32-fighter fight since
+    // the owner decision of 2026-10-20, so this row names that live run
+    // (hash 12449757284742186622, 106740 bytes, 240 counts). The 16-fighter
+    // record is the `arena_tick_16` row below; nothing was overwritten.
     Baseline {
         workload: "arena_tick",
         ticks: 600,
-        hash: 12857399269765116608,
-        alloc_bytes: 63539,
-        alloc_count: 151,
+        hash: 12449757284742186622,
+        alloc_bytes: 106740,
+        alloc_count: 240,
     },
     Baseline {
         workload: "arena_tick_sim",
@@ -112,30 +114,31 @@ pub const BASELINES: &[Baseline] = &[
         alloc_bytes: 1424,
         alloc_count: 6,
     },
-    // 2026-10-21 re-record: the cap raise widened the arena's fixed arrays, so
-    // every scaled row allocates the bigger tables. The hashes did not move
-    // (the sim state is unchanged by the cap), only the allocation totals:
-    // 4 fighters 57102/60 -> 86254/61, 8 fighters 59044/65 -> 88932/66,
-    // 16 fighters 63539/151 -> 94899/152.
+    // 2026-10-21 (PF32) re-record: the arena sizes its combat-event scratch
+    // by the actual fighter count, so a scaled match no longer reserves the
+    // cap's worst case. The hashes did not move (the sim state is unchanged),
+    // only the allocation totals, and every one of them moved DOWN:
+    // 4 fighters 86254/61 -> 74134/61, 8 fighters 88932/66 -> 77364/66,
+    // 16 fighters 94899/152 -> 85587/152.
     Baseline {
         workload: ScaledArenaTick::NAME_4,
         ticks: 600,
         hash: 8938032063638970347,
-        alloc_bytes: 86254,
+        alloc_bytes: 74134,
         alloc_count: 61,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_8,
         ticks: 600,
         hash: 6433453695639145363,
-        alloc_bytes: 88932,
+        alloc_bytes: 77364,
         alloc_count: 66,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_16,
         ticks: 600,
         hash: 12857399269765116608,
-        alloc_bytes: 94899,
+        alloc_bytes: 85587,
         alloc_count: 152,
     },
     Baseline {
@@ -159,15 +162,16 @@ pub const BASELINES: &[Baseline] = &[
         alloc_bytes: 569857,
         alloc_count: 645,
     },
-    // 2026-10-21, the cap-sized (32-fighter) re-record, appended: the
-    // canonical run seats 32 fighters since the owner decision of 2026-10-20.
-    // This row is the canonical gate's row (see `arena_baseline`); the
-    // 16-fighter rows above stay as they are.
+    // 2026-10-21, the cap-sized (32-fighter) row, appended: the canonical run
+    // seats 32 fighters since the owner decision of 2026-10-20. This row is
+    // the canonical gate's row (see `arena_baseline`); the 16-fighter rows
+    // above stay as they are. 2026-10-21 (PF32): 106932 -> 106740 bytes for
+    // the fighter-scaled scratch.
     Baseline {
         workload: ScaledArenaTick::NAME_32,
         ticks: 600,
         hash: 12449757284742186622,
-        alloc_bytes: 106932,
+        alloc_bytes: 106740,
         alloc_count: 240,
     },
     // No `arena_tick_32_sim` row: the `sim` track does not build in this

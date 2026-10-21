@@ -5,9 +5,15 @@
 //! rung, glory and repair counters. Units: wins, losses and glory are
 //! counts; `last_tick` is a fixed-tick cursor. Determinism: integer-only
 //! fold over the outcome script in order; same script gives the same state,
-//! no clock, no allocation. Errors: [`LadderError`] on bad rung, outcome,
-//! length or version. Budget: `apply` is O(1) time and memory; the state is
-//! a 26-byte record on the stack.
+//! no clock, no allocation in the fold. Errors: [`LadderError`] on bad rung,
+//! outcome, length or version. Budget: `apply` is O(1) time and memory; the
+//! state is a 26-byte record on the stack.
+//!
+//! The career ranks (Tiro, Miles, Immunis, Optio, Centurio) and the
+//! service record line are presentation: words and text over the counters,
+//! never part of the hashed state. The data seat is the rank table in
+//! `content/design/loop.rows`; this module holds the code seat, and its
+//! test reads the file so the two cannot drift.
 
 /// Payload version written by [`LadderRecord::encode`].
 pub const LADDER_VERSION: u8 = 1;
@@ -27,8 +33,16 @@ pub const GLORY_LOSS_PENALTY: u32 = 50;
 /// Glory floors for ranks `0..GLORY_RANKS.len()`; the rank is the highest
 /// index whose floor the glory counter reaches.
 pub const GLORY_RANKS: [u32; 5] = [0, 300, 900, 1800, 3600];
-/// Display names per rank index, Roman ladder flavor.
-pub const RANK_NAMES: [&str; 5] = ["Tiro", "Gladiator", "Primus", "Champion", "Legend"];
+/// Career rank names per rank index: the Latin ranks of the legion, Tiro,
+/// Miles, Immunis, Optio and Centurio. Words, so they stay out of the
+/// hashed state. Source: `docs/plan/rome.md` section 0 decision 4 and
+/// section 8; the data seat is the rank table in `content/design/loop.rows`.
+pub const RANK_NAMES: [&str; 5] = ["Tiro", "Miles", "Immunis", "Optio", "Centurio"];
+/// What each rank does, one word: a recruit, a line soldier, an untrained
+/// hand for the shops, the second of a century, its centurion. The
+/// officers optio and centurio are Vegetius 2.7-9 and 2.14
+/// (`docs/plan/rome.md` section 5).
+pub const RANK_DUTIES: [&str; 5] = ["recruit", "soldier", "untrained", "sergeant", "centurion"];
 /// Exact record length: version (1) + wins (4) + losses (4) + glory (4) +
 /// rung (1) + loops (4) + pending repairs (4) + last tick (4).
 pub const RECORD_BYTES: usize = 26;
@@ -284,6 +298,32 @@ impl Ladder {
             .unwrap_or(RANK_NAMES[RANK_NAMES.len() - 1])
     }
 
+    /// Duty word for a rank index; out-of-range pins to the top duty. Pure.
+    #[must_use]
+    pub fn rank_duty(rank: u8) -> &'static str {
+        RANK_DUTIES
+            .get(usize::from(rank))
+            .copied()
+            .unwrap_or(RANK_DUTIES[RANK_DUTIES.len() - 1])
+    }
+
+    /// The service record: the career line the HUD shows instead of a bare
+    /// glory counter. Presentation over the counters, never hashed. Pure.
+    #[must_use]
+    pub fn service_record(&self) -> ServiceRecord {
+        let rank = self.rank();
+        ServiceRecord {
+            rank,
+            name: Self::rank_name(rank),
+            duty: Self::rank_duty(rank),
+            glory: self.glory,
+            wins: self.wins,
+            losses: self.losses,
+            rung: self.rung,
+            loops: self.loops,
+        }
+    }
+
     /// Beat row for the current rung: enemy tier, new elements, minutes.
     /// The rung pins at [`MAX_RUNG`], so this always reads a chart row. Pure.
     #[must_use]
@@ -342,6 +382,76 @@ impl Ladder {
             pending_repairs: record.pending_repairs,
             last_tick: record.last_tick,
         })
+    }
+}
+
+/// The service record: the career line the HUD reads instead of a glory
+/// counter. Plain integers plus the rank words, so the line is pure text
+/// and never enters the hashed state.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ServiceRecord {
+    /// Rank index, `0..=4`.
+    pub rank: u8,
+    /// Rank name: Tiro, Miles, Immunis, Optio or Centurio.
+    pub name: &'static str,
+    /// Duty word of the rank: recruit, soldier, untrained, sergeant or
+    /// centurion.
+    pub duty: &'static str,
+    /// Glory counts; the service record's number.
+    pub glory: u32,
+    /// Bouts won.
+    pub wins: u32,
+    /// Bouts lost.
+    pub losses: u32,
+    /// Rung on the beat chart.
+    pub rung: u8,
+    /// Completed top-rung loops.
+    pub loops: u32,
+}
+
+impl ServiceRecord {
+    /// Append the HUD line to `out`: `{name} ({duty}) - {glory} glory -
+    /// {wins} won, {losses} lost`. The window clears one buffer per frame
+    /// and pushes this line, so a frame costs no new allocation after
+    /// warmup. Pure text.
+    pub fn push_line(&self, out: &mut String) {
+        out.push_str(self.name);
+        out.push_str(" (");
+        out.push_str(self.duty);
+        out.push_str(") - ");
+        push_count(self.glory, out);
+        out.push_str(" glory - ");
+        push_count(self.wins, out);
+        out.push_str(" won, ");
+        push_count(self.losses, out);
+        out.push_str(" lost");
+    }
+
+    /// The same line as its own string, for a one-shot draw or a test.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let mut out = String::new();
+        self.push_line(&mut out);
+        out
+    }
+}
+
+/// Decimal text of `value`, pushed digit by digit: no temp string, so a
+/// caller that reuses its buffer allocates nothing. Pure.
+fn push_count(value: u32, out: &mut String) {
+    let mut digits = [0u8; 10];
+    let mut index = digits.len();
+    let mut rest = value;
+    loop {
+        index -= 1;
+        digits[index] = b'0' + u8::try_from(rest % 10).unwrap_or(0);
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    for slot in digits[index..].iter() {
+        out.push(char::from(*slot));
     }
 }
 
@@ -510,7 +620,8 @@ pub fn is_light_clean(src: &str) -> bool {
 }
 
 /// Fixture: wins from a fresh ladder to the top rank. Two top-rung loops
-/// (16 wins) reach 4000 glory past the 3600 floor, so the rank is Legend.
+/// (16 wins) reach 4000 glory past the 3600 floor, so the rank is
+/// Centurio.
 pub const START_TO_RANK_WINS: usize = 16;
 
 /// Fresh ladder driven start to rank with [`START_TO_RANK_WINS`] wins. Pure.
@@ -590,12 +701,13 @@ mod tests {
         // Third win at rung 2 adds 150, total 375: rank 1.
         assert_eq!(ladder.glory, 375);
         assert_eq!(ladder.rank(), 1);
-        assert_eq!(Ladder::rank_name(ladder.rank()), "Gladiator");
+        assert_eq!(Ladder::rank_name(ladder.rank()), "Miles");
     }
 
     #[test]
     fn rank_name_pins_out_of_range_to_top() {
-        assert_eq!(Ladder::rank_name(u8::MAX), "Legend");
+        assert_eq!(Ladder::rank_name(u8::MAX), "Centurio");
+        assert_eq!(Ladder::rank_duty(u8::MAX), "centurion");
     }
 
     #[test]
@@ -741,7 +853,11 @@ mod tests {
         assert_eq!(GLORY_RANKS, [0, 300, 900, 1800, 3600]);
         assert_eq!(
             RANK_NAMES,
-            ["Tiro", "Gladiator", "Primus", "Champion", "Legend"]
+            ["Tiro", "Miles", "Immunis", "Optio", "Centurio"]
+        );
+        assert_eq!(
+            RANK_DUTIES,
+            ["recruit", "soldier", "untrained", "sergeant", "centurion"]
         );
         assert_eq!(RECORD_BYTES, 26);
         assert_eq!(START_TO_RANK_WINS, 16);
@@ -782,25 +898,25 @@ mod tests {
     }
 
     #[test]
-    fn start_to_rank_reaches_legend() {
+    fn start_to_rank_reaches_centurio() {
         let ladder = start_to_rank();
         assert_eq!(ladder.wins, START_TO_RANK_WINS as u32);
         assert_eq!(ladder.losses, 0);
         assert_eq!((ladder.rung, ladder.loops), (0, 2));
         assert_eq!(ladder.glory, 4000);
         assert_eq!(ladder.rank(), 4);
-        assert_eq!(Ladder::rank_name(ladder.rank()), "Legend");
+        assert_eq!(Ladder::rank_name(ladder.rank()), "Centurio");
         // Rank floors on the way: 2 wins stay Tiro, 3 wins step up, one
-        // full loop (8 wins) reaches Champion at 2000 glory.
+        // full loop (8 wins) reaches Optio at 2000 glory.
         let two = Ladder::run_script(&wins(2));
         assert_eq!((two.glory, two.rank()), (225, 0));
         let three = Ladder::run_script(&wins(3));
         assert_eq!((three.glory, three.rank()), (375, 1));
-        assert_eq!(Ladder::rank_name(three.rank()), "Gladiator");
+        assert_eq!(Ladder::rank_name(three.rank()), "Miles");
         let one_loop = Ladder::run_script(&wins(8));
         assert_eq!((one_loop.glory, one_loop.loops), (2000, 1));
         assert_eq!(one_loop.rank(), 3);
-        assert_eq!(Ladder::rank_name(one_loop.rank()), "Champion");
+        assert_eq!(Ladder::rank_name(one_loop.rank()), "Optio");
     }
 
     #[test]
@@ -976,5 +1092,119 @@ mod tests {
         let before = modded;
         assert!(modded.apply_rows_text(Outcome::Loss, 2, &bad).is_err());
         assert_eq!(modded, before);
+    }
+
+    /// Rank table of a loop rows text: the `ranks Name=floor ...` line of
+    /// the header comment, in file order.
+    fn rank_table(text: &str) -> Vec<(String, u32)> {
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("# ranks ") else {
+                continue;
+            };
+            for pair in rest.split_whitespace() {
+                let (name, floor) = pair.split_once('=').expect("a rank pair holds =");
+                let floor = floor.parse::<u32>().expect("a rank floor is a number");
+                out.push((name.to_string(), floor));
+            }
+        }
+        out
+    }
+
+    /// Rank names of a ladder rows text: every rung row's `rank=` cell and
+    /// its trailing `# rank <n> <name>` comment.
+    fn rung_rank_names(text: &str) -> Vec<(usize, usize, String)> {
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let body = line.trim();
+            if !body.starts_with("rung_") {
+                continue;
+            }
+            let (cells, comment) = body.split_once('#').expect("a rung row names its rank");
+            let cell = cells
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix("rank="))
+                .expect("a rung row holds a rank cell")
+                .parse::<usize>()
+                .expect("a rank cell is a number");
+            let mut words = comment.split_whitespace();
+            assert_eq!(
+                words.next(),
+                Some("rank"),
+                "the rung comment names the rank"
+            );
+            let named = words
+                .next()
+                .expect("the rung comment holds the rank index")
+                .parse::<usize>()
+                .expect("the named rank index is a number");
+            let name = words.next().expect("the rung comment holds the rank name");
+            out.push((cell, named, name.to_string()));
+        }
+        out
+    }
+
+    #[test]
+    fn rank_names_are_the_roman_career_ranks() {
+        // The career replaces the gladiator ranks; the floors stay put.
+        assert_eq!(
+            RANK_NAMES,
+            ["Tiro", "Miles", "Immunis", "Optio", "Centurio"]
+        );
+        for (index, floor) in GLORY_RANKS.iter().enumerate() {
+            let mut ladder = Ladder::new();
+            ladder.glory = *floor;
+            assert_eq!(
+                usize::from(ladder.rank()),
+                index,
+                "floor {floor} holds rank {index}"
+            );
+            assert_eq!(Ladder::rank_name(ladder.rank()), RANK_NAMES[index]);
+        }
+    }
+
+    #[test]
+    fn shipped_rows_carry_the_rank_table() {
+        // The data seat: the rank names and their floors live in the file.
+        let text = include_str!("../../../content/design/loop.rows");
+        let table = rank_table(text);
+        assert_eq!(table.len(), RANK_NAMES.len(), "one name per rank");
+        for (index, (name, floor)) in table.iter().enumerate() {
+            assert_eq!(name, RANK_NAMES[index], "rank {index} keeps its name");
+            assert_eq!(*floor, GLORY_RANKS[index], "rank {index} keeps its floor");
+        }
+    }
+
+    #[test]
+    fn shipped_ladder_rows_name_every_rank() {
+        // The rung chart names the rank each rung reaches, and the name
+        // agrees with the code seat.
+        let text = include_str!("../../../content/design/ladder.rows");
+        let names = rung_rank_names(text);
+        assert_eq!(names.len(), RUNG_COUNT, "every rung names its rank");
+        for (cell, named, name) in names {
+            assert_eq!(cell, named, "the rank cell and the comment agree");
+            assert_eq!(name, RANK_NAMES[named]);
+        }
+    }
+
+    #[test]
+    fn service_record_reads_the_career() {
+        let fresh = Ladder::new().service_record();
+        assert_eq!((fresh.rank, fresh.name, fresh.duty), (0, "Tiro", "recruit"));
+        assert_eq!(fresh.line(), "Tiro (recruit) - 0 glory - 0 won, 0 lost");
+        let ladder = Ladder::run_script(&wins(3));
+        let record = ladder.service_record();
+        assert_eq!(
+            (record.rank, record.name, record.duty),
+            (1, "Miles", "soldier")
+        );
+        assert_eq!(record.glory, 375);
+        assert_eq!((record.wins, record.losses), (3, 0));
+        assert_eq!(record.line(), "Miles (soldier) - 375 glory - 3 won, 0 lost");
+        // The window reuses one buffer: the line is the same, no new string.
+        let mut buffer = String::new();
+        record.push_line(&mut buffer);
+        assert_eq!(buffer, record.line());
     }
 }

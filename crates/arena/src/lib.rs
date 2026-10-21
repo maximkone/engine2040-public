@@ -1124,7 +1124,7 @@ impl Sim {
             cursor: 0,
             checkpoints: Vec::with_capacity(ticks),
             events: Vec::with_capacity(ticks),
-            combat_scratch: Vec::with_capacity(MAX_EVENTS_PER_TICK),
+            combat_scratch: Vec::with_capacity(combat_event_capacity(fighters)),
             last_cues: Vec::with_capacity(cue_cap),
             breaks: Vec::with_capacity(ticks),
             cuts: Vec::with_capacity(ticks),
@@ -2062,8 +2062,8 @@ impl Sim {
             cursor,
             checkpoints: Vec::with_capacity(ticks),
             events: Vec::with_capacity(ticks),
-            combat_scratch: Vec::with_capacity(MAX_EVENTS_PER_TICK),
-            last_cues: Vec::with_capacity(MAX_ATTACK_STARTED_PER_TICK),
+            combat_scratch: Vec::with_capacity(combat_event_capacity(fighters)),
+            last_cues: Vec::with_capacity(fighters.min(MAX_ATTACK_STARTED_PER_TICK)),
             breaks: Vec::with_capacity(ticks),
             cuts: Vec::with_capacity(ticks),
             match_log: Vec::with_capacity(ticks),
@@ -2203,6 +2203,21 @@ fn interrupt_for_slot(events: &[FightEvent], slot: u8) -> Option<CombatInterrupt
 /// one radius inside so no capsule crosses a wall.
 fn wall_limit(half_extent_m: f32) -> f32 {
     (half_extent_m - FIGHTER_RADIUS_M).max(0.0)
+}
+
+/// Combat-event scratch capacity for `fighters` live fighters: the combat
+/// crate's own per-tick bound (at most one `StaminaOut` per fighter, plus
+/// one outcome and one possible `Knockdown` per attacker-victim pair, so
+/// `n + 2n(n-1)`), capped at [`MAX_EVENTS_PER_TICK`]. The scratch is
+/// per-fighter state, so a four-fighter match reserves four fighters worth
+/// of it and never the cap's worst case. The bound is exact, so the
+/// reserved buffer never regrows on the tick path.
+fn combat_event_capacity(fighters: usize) -> usize {
+    let n = fighters.min(MAX_SLOTS);
+    // `n` is at most `MAX_SLOTS` (32), so the bound cannot overflow; the
+    // saturating subtraction only guards the zero-slot case.
+    let bound = n + 2 * n * n.saturating_sub(1);
+    bound.min(MAX_EVENTS_PER_TICK)
 }
 
 /// Bonded crate prop placement: a half-meter cube sitting on the floor at
@@ -2626,6 +2641,56 @@ mod tests {
     #[test]
     fn valid_config_passes() {
         config().validate().unwrap();
+    }
+
+    #[test]
+    fn combat_event_capacity_scales_with_the_fighter_count() {
+        // The per-tick event bound for `n` live fighters is `n + 2n(n-1)`:
+        // one `StaminaOut` per fighter, plus one outcome and one possible
+        // `Knockdown` per attacker-victim pair. The scratch is per-fighter
+        // state, so two fighters reserve two fighters worth of it, never the
+        // cap's worst case.
+        for (fighters, expected) in [(2usize, 6usize), (4, 28), (8, 120), (16, 496), (32, 2016)] {
+            assert_eq!(
+                combat_event_capacity(fighters),
+                expected,
+                "{fighters} fighters reserve their own bound"
+            );
+        }
+        for fighters in 2..=MAX_SLOTS {
+            assert!(
+                combat_event_capacity(fighters) <= MAX_EVENTS_PER_TICK,
+                "{fighters} fighters stay inside the combat cap"
+            );
+        }
+        assert!(
+            combat_event_capacity(4) < MAX_EVENTS_PER_TICK,
+            "a small match never reserves the cap's worst case"
+        );
+    }
+
+    #[test]
+    fn the_reserved_event_scratch_never_regrows() {
+        // A four-fighter match must not regrow its reserved scratch: the
+        // bound is exact, so the reservation is the whole cost.
+        let config = ArenaConfig {
+            seed: 2040,
+            ticks: 64,
+            fighters: 4,
+            half_extent_m: 20.0,
+            table_version: TABLES_VERSION_V1,
+        };
+        let tape = FighterTape(Vec::new());
+        let mut sim = Sim::build(&config, &tape, false, false).expect("valid sim");
+        let reserved = combat_event_capacity(4);
+        while sim.tick < config.ticks {
+            sim.step(&tape).expect("valid step");
+        }
+        assert_eq!(
+            sim.combat_scratch.capacity(),
+            reserved,
+            "the reserved scratch never regrows"
+        );
     }
 
     #[test]

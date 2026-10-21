@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, sourceFilesUnder } from "./workspace-check.mjs";
+import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, sourceFilesUnder, romeSourceAudit, romeSourceViolations, romeContentFiles, codexRefsNamed, codexRefList } from "./workspace-check.mjs";
 import { parseBoard, needsOf } from "./board-slice.mjs";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveFixedApi, genreHits, maskRust, platformMathHits, productionCode } from "./sim-source-scan.mjs";
 import { scanIslandsFrom } from "./wiring-scan.mjs";
@@ -421,4 +421,127 @@ test("the in-process wiring scan answers like the tool it replaces (E51)", () =>
   const tool = spawnSync(process.execPath, [fileURLToPath(new URL("./wiring-scan.mjs", import.meta.url)), root], { encoding: "utf8", maxBuffer: 1 << 26 });
   const line = (tool.stdout ?? "").split("\n")[0].trim();
   assert.equal(line, `islands: ${islands.length}`, "the in-process scan must count what the tool counts");
+});
+
+// ---- CDX6: a Rome number needs a source -----------------------------------
+
+// A tree with Rome tables in it, and the codex index when one is wanted.
+function romeTree(files, index = null) {
+  const root = mkdtempSync(join(tmpdir(), "rome-lint-"));
+  const romeDir = join(root, "content", "rome");
+  mkdirSync(romeDir, { recursive: true });
+  for (const [name, text] of Object.entries(files)) {
+    const file = join(romeDir, name);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, text);
+  }
+  if (index) {
+    const indexDir = join(root, "content", "local", "codex");
+    mkdirSync(indexDir, { recursive: true });
+    writeFileSync(join(indexDir, "index.jsonl"), index);
+  }
+  return root;
+}
+
+test("rome source lint: an entry with a number and no ref is reported by path and key", () => {
+  const root = romeTree({ "camp.toml": "# a camp\n\n[ditch.one_night]\nwidth_ft = 5\ndepth_ft = 3\n" });
+  try {
+    const audit = romeSourceAudit(root);
+    assert.equal(audit.violations.length, 1);
+    assert.match(audit.violations[0], /content\/rome\/camp\.toml/, "the violation names the path");
+    assert.match(audit.violations[0], /ditch\.one_night/, "the violation names the key");
+    assert.match(audit.violations[0], /no ref/, "the violation says what is missing");
+    assert.equal(audit.entries, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rome source lint: a ref with the number passes and an entry with no number needs none", () => {
+  const root = romeTree({
+    "camp.toml": "[units]\nmm_per_ft = 296\nref = \"rome.md section 5\"\n\n[kit.lorica]\ncertainty = \"attested\"\n",
+  });
+  try {
+    const audit = romeSourceAudit(root);
+    assert.deepEqual(audit.violations, []);
+    assert.equal(audit.entries, 1, "only the section with a number is judged");
+    assert.equal(audit.prose, 1, "the ref names a source in prose, not a codex passage");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rome source lint: a draft table is not game data", () => {
+  const root = romeTree({
+    "tech/iron.draft.toml": "draft = true\ntable = \"iron\"\n\n[iron.bar]\nbeats = 6\n",
+    "iron.toml": "draft = true\n\n[iron.bar]\nbeats = 6\n",
+  });
+  try {
+    const audit = romeSourceAudit(root);
+    assert.deepEqual(audit.violations, []);
+    assert.equal(audit.files, 0, "both drafts are left out");
+    assert.equal(romeContentFiles(root).length, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rome source lint: a ref in the codex passage form must be a passage the index holds", () => {
+  const root = romeTree({
+    "tech/iron.toml": "[iron.bar]\nbeats = 6\nref = \"vegetius.3.8\"\n",
+    "tech/axe.toml": "[iron.axe]\nbeats = 4\nref = \"vegetius.3.9\"\n",
+  }, `${JSON.stringify({ ref: "vegetius.3.8" })}\n`);
+  try {
+    const audit = romeSourceAudit(root);
+    assert.equal(audit.violations.length, 1);
+    assert.match(audit.violations[0], /content\/rome\/tech\/axe\.toml/);
+    assert.match(audit.violations[0], /iron\.axe/);
+    assert.match(audit.violations[0], /vegetius\.3\.9/);
+    assert.match(audit.violations[0], /codex index does not hold/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rome source lint: with no codex index the ref-list leg is skipped, not failed", () => {
+  const root = romeTree({ "tech/iron.toml": "[iron.bar]\nbeats = 6\nref = \"vegetius.3.9\"\n" });
+  try {
+    const audit = romeSourceAudit(root);
+    assert.deepEqual(audit.violations, []);
+    assert.equal(audit.refs, null, "there is no list to judge by");
+    assert.equal(audit.indexExists, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rome source lint: a prose ref names no codex passage, a codex ref does", () => {
+  assert.deepEqual(codexRefsNamed("vegetius.3.8"), ["vegetius.3.8"]);
+  assert.deepEqual(codexRefsNamed("see caesar.bg.4.17 for the frontage"), ["caesar.bg.4.17"]);
+  assert.deepEqual(codexRefsNamed("rome.md section 5, Vegetius 3.8; Hyginus 49"), []);
+  assert.deepEqual(codexRefsNamed("rome.md"), []);
+  const list = codexRefList(`${JSON.stringify({ ref: "vegetius.3.8" })}\nnot json\n${JSON.stringify({ ref: "caesar.bg.4.17" })}\n`);
+  assert.deepEqual([...list].sort(), ["caesar.bg.4.17", "vegetius.3.8"]);
+});
+
+test("rome source lint: the shipped Rome tables hold no unsourced number", () => {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const audit = romeSourceAudit(root);
+  assert.deepEqual(audit.violations, []);
+  assert.ok(audit.entries > 0, "the Rome tables hold numbers");
+  assert.ok(audit.files >= 3, "camp, line and kit are read");
+});
+
+test("rome source lint: one table without a ref is refused by path and key", () => {
+  const found = romeSourceViolations("content/rome/camp.toml", "[ditch.light]\nwidth_ft = 9\n");
+  assert.equal(found.length, 1);
+  assert.match(found[0], /content\/rome\/camp\.toml/);
+  assert.match(found[0], /ditch\.light/);
+});
+
+test("workspace-check runs the Rome source lint", () => {
+  const gate = readFileSync(new URL("./workspace-check.mjs", import.meta.url), "utf8");
+  assert.match(gate, /romeSourceAudit\(repoDir\)/);
+  assert.match(gate, /SKIP rome codex refs/);
+  assert.match(gate, /PASS rome sources/);
 });

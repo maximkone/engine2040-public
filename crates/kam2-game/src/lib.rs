@@ -30,9 +30,7 @@ pub use ai_match::{AiMatch, AI_PERIOD, AI_SIDE, DEFENCE_RANGE, RECEIPT_TICKS};
 pub use house::{HouseArt, HouseArts, HouseManifest, HouseState, HOUSE_SLOTS};
 pub use hud::{hud_frame, stock_line, title_line};
 pub use orders::{skirmish, Order, OrderKind, Orders, SKIRMISH_GAP, SKIRMISH_TICKS};
-pub use scene::{
-    build_with, build_with_arts, Part, Scene, ShapeQuad, SpriteQuad, Units,
-};
+pub use scene::{build_with, build_with_arts, Part, Scene, ShapeQuad, SpriteQuad, Units};
 pub use script::{match_start, nearest_enemy, scripted_fight, spawn_tile};
 pub use soldier::{
     frame_index, ManifestError, SoldierAnim, SoldierManifest, UnitClip, FACING_NAMES, SIM_HZ,

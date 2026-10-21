@@ -15,14 +15,18 @@ pub use tether::TetherInfo;
 use crate::caps::{Caps, Tier};
 use crate::check::{self, MAX_IMPULSE, MAX_SPEED};
 use crate::error::{Error, Field};
+use crate::groups;
 use crate::rig::Rig;
 use crate::tether::Tether;
 use crate::types::{Batch, Key, Placed, Shard, Stats, Transform};
 use engine_anim::contract::{validate_pose, LocalPose};
+use engine_physics::layers as table;
 use engine_physics::material::{Material, Props};
 use engine_physics::ragdoll::{insert_joints, world_transforms, BoneShape};
 use engine_physics::rapier::{FIXED_DT, GRAVITY_Y};
 use rapier3d::dynamics::{RigidBody, RigidBodyBuilder, RigidBodyHandle};
+#[cfg(test)]
+use rapier3d::geometry::InteractionGroups;
 use rapier3d::geometry::{ColliderBuilder, ColliderHandle, ContactPair};
 use rapier3d::math::{Rotation, Vector};
 use rapier3d::pipeline::PhysicsWorld;
@@ -60,6 +64,16 @@ enum GroupId {
     Thrown(u32),
     /// One debris shard.
     Shard,
+}
+
+/// The table layer of a group: the bones of a fighter and the limbs that came off are the
+/// body, a shard of a break is debris, a thrown object is a prop.
+fn layer_of(id: &GroupId) -> u32 {
+    match id {
+        GroupId::Ragdoll(_) | GroupId::Limb(_) => table::BODY,
+        GroupId::Thrown(_) => table::PROP,
+        GroupId::Shard => table::DEBRIS,
+    }
 }
 
 /// Bodies spawned together; recycled together, because half a ragdoll is no ragdoll.
@@ -158,10 +172,25 @@ impl PhysFx {
     }
 
     /// Adds an immovable box: the floor, a wall, a prop that never moves. Refused past the
-    /// static cap or with a bad size or position.
+    /// static cap or with a bad size or position. The box is on the world layer.
     pub fn add_static_box(&mut self, half: [f32; 3], pos: [f32; 3]) -> Result<(), Error> {
+        self.add_static_box_on(table::WORLD, half, pos)
+    }
+
+    /// Adds an immovable box on the table layer `layer`: the floor and the walls are the
+    /// world, a crate is a prop. A layer the table does not know is refused, so a box can
+    /// never land on a layer that meets nothing by accident.
+    pub fn add_static_box_on(
+        &mut self,
+        layer: u32,
+        half: [f32; 3],
+        pos: [f32; 3],
+    ) -> Result<(), Error> {
         check::static_half(half)?;
         check::vec3(pos, check::MAX_COORD, Field::Position)?;
+        if !table::is_single(layer) {
+            return Err(Error::OutOfRange(Field::Layer));
+        }
         if self.statics >= self.caps.statics {
             return Err(Error::OverCap {
                 need: self.statics + 1,
@@ -175,6 +204,7 @@ impl PhysFx {
         let collider = ColliderBuilder::cuboid(half[0], half[1], half[2])
             .friction(STATIC_FRICTION)
             .restitution(0.0)
+            .collision_groups(groups::of(layer))
             .build();
         let handle = self.world.bodies.insert(body);
         self.world
@@ -229,6 +259,7 @@ impl PhysFx {
         self.make_room(need);
 
         let overlaps = receipt::unjoined_overlaps(rig, &placed);
+        let layer = layer_of(&GroupId::Ragdoll(slot));
         let mut bodies = Vec::with_capacity(need);
         let mut handles = Vec::with_capacity(need);
         for (bone, (at, shape)) in placed.iter().zip(rig.shapes()).enumerate() {
@@ -241,7 +272,7 @@ impl PhysFx {
                 bone: bone as u16,
             };
             let collider = ColliderBuilder::capsule_y(shape.half_height, shape.radius);
-            let (index, handle) = self.insert_body(key, *at, collider, flesh, v);
+            let (index, handle) = self.insert_body(key, *at, collider, flesh, v, layer);
             bodies.push(index);
             handles.push(handle);
         }
@@ -344,6 +375,7 @@ impl PhysFx {
         self.make_room(admitted);
         let id = self.next_batch;
         self.next_batch = self.next_batch.wrapping_add(1);
+        let layer = layer_of(&GroupId::Shard);
         for (i, (at, half, velocity)) in checked[..admitted].iter().enumerate() {
             let v = [
                 velocity[0] + kick[0],
@@ -355,7 +387,7 @@ impl PhysFx {
                 index: i as u32,
             };
             let collider = ColliderBuilder::cuboid(half[0], half[1], half[2]);
-            let (index, _) = self.insert_body(key, *at, collider, props, v);
+            let (index, _) = self.insert_body(key, *at, collider, props, v, layer);
             self.groups.push(Group {
                 id: GroupId::Shard,
                 bodies: vec![index],
@@ -414,6 +446,41 @@ impl PhysFx {
             .collect()
     }
 
+    /// The collision groups of every collider in the world, the static boxes included: lets a
+    /// test check that each body carries the group and the mask of its table layer.
+    #[cfg(test)]
+    pub(crate) fn collider_groups(&self) -> Vec<InteractionGroups> {
+        self.world
+            .colliders
+            .iter()
+            .map(|(_, collider)| collider.collision_groups())
+            .collect()
+    }
+
+    /// The collision groups of the collider of the body named by `key`: `None` when the world
+    /// holds no such body.
+    #[cfg(test)]
+    pub(crate) fn groups_of(&self, key: Key) -> Option<InteractionGroups> {
+        let rec = self.records.iter().flatten().find(|rec| rec.key == key)?;
+        self.world
+            .colliders
+            .get(rec.collider)
+            .map(|collider| collider.collision_groups())
+    }
+
+    /// The number of contact pairs the body named by `key` holds with anything.
+    #[cfg(test)]
+    pub(crate) fn contact_count(&self, key: Key) -> usize {
+        let Some(rec) = self.records.iter().flatten().find(|rec| rec.key == key) else {
+            return 0;
+        };
+        self.world
+            .narrow_phase
+            .contact_pairs_with(rec.collider)
+            .filter(|pair| pair.has_any_active_contact())
+            .count()
+    }
+
     /// Counters as of the last step.
     pub fn stats(&self) -> Stats {
         Stats {
@@ -439,8 +506,9 @@ impl PhysFx {
     ) -> RigidBodyHandle {
         self.drop_group(id);
         self.make_room(1);
+        let layer = layer_of(&id);
         let collider = ColliderBuilder::capsule_y(shape.half_height, shape.radius);
-        let (index, handle) = self.insert_body(key, at, collider, props, velocity);
+        let (index, handle) = self.insert_body(key, at, collider, props, velocity, layer);
         self.groups.push(Group {
             id,
             bodies: vec![index],
@@ -452,7 +520,8 @@ impl PhysFx {
         handle
     }
 
-    /// Inserts one dynamic body with a record; returns its slab index and Rapier handle.
+    /// Inserts one dynamic body with a record; returns its slab index and Rapier handle. The
+    /// collider takes the group and mask of the table layer it is on.
     fn insert_body(
         &mut self,
         key: Key,
@@ -460,6 +529,7 @@ impl PhysFx {
         collider: ColliderBuilder,
         material: Props,
         velocity: [f32; 3],
+        layer: u32,
     ) -> (u32, RigidBodyHandle) {
         let index = match self.free.pop() {
             Some(index) => index,
@@ -484,6 +554,7 @@ impl PhysFx {
             .density(material.density())
             .friction(material.friction())
             .restitution(material.restitution())
+            .collision_groups(groups::of(layer))
             .build();
         let collider =
             self.world

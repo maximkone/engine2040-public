@@ -9,7 +9,7 @@ Nothing is lost: git has every file. On 2026-10-16 the rot cleanup removed 81 un
 
 ## 1. Find it
 
-- On the list? Open `docs/archive/2026-10-16-rot/RECOVERY.md`, take the deleting commit. Example: the physics LOD file was cut by `3d6ee4a1`.
+- On the list? Open `docs/archive/2026-10-16-rot/RECOVERY.md`, take the deleting commit. Example: the physics LOD file was removed by `3d6ee4a1`.
 - Not on the list: `git log --diff-filter=D --format="%h %s" -- <path>` shows the commit that deleted that path. Add `--all` if it may be on another ref.
 - Path unknown, name known: `git log --diff-filter=D --name-only --format="%h" | Select-String <name>` (pwsh), or `git log --all --oneline -S "<symbol>"` finds commits that added or removed that text.
 - Moved, not deleted? `git log --follow --format="%h %s" -- <new path>`. Also check for a rewrite: the list marks `exists again` yes when a smaller new file took the name (cloth, islands, query).

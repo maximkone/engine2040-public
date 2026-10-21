@@ -2,6 +2,12 @@
 # feet as the sources give them; the loader turns them into millimetres. Every entry
 # that holds a number names its source in `ref` (docs/plan/rome.md section 5), and an
 # entry without one is refused.
+#
+# The `codex.*` sections below are the machine proof of every number here: the passage
+# that gives it, the spelling the source writes and the hash of that passage's text.
+# The Rome loader reads the entries above only, so the proof lives in its own sections
+# and never touches a number the game reads. `node tools/codex-check.mjs` reads the
+# two public-domain sources and checks every row against the passage it names.
 
 [units]
 mm_per_ft = 296
@@ -11,3 +17,79 @@ ref = "rome.md section 5: 1 Roman foot about 0.296 m"
 frontage_ft = 3
 rank_gap_ft = 6
 ref = "rome.md section 5, Vegetius 3.14 (frontage), 3.14-15 (rank gap)"
+
+[cohort]
+frontage_ft = 30
+depth_ft = 720
+ref = "Hyginus 2"
+
+[cohort.first]
+at_standards_ft = 120
+at_rear_ft = 360
+at_standards_alt_ft = 180
+at_rear_alt_ft = 240
+ref = "Hyginus 3"
+
+[hemistrigium]
+width_ft = 30
+ref = "Hyginus 1"
+
+[cavalry]
+frontage_ft = 3
+ref = "Hyginus 16"
+
+[codex.cohort_frontage]
+entry = "cohort"
+key = "frontage_ft"
+ref = "PHG 2"
+form = "XXX"
+hash = "sha256:8ef6f39ada4783c98b877f712109cd820c634fca611a417d83d776b533610e16"
+
+[codex.cohort_depth]
+entry = "cohort"
+key = "depth_ft"
+ref = "PHG 2"
+form = "DCCXX"
+hash = "sha256:8ef6f39ada4783c98b877f712109cd820c634fca611a417d83d776b533610e16"
+
+[codex.first_cohort_standards]
+entry = "cohort.first"
+key = "at_standards_ft"
+ref = "PHG 3"
+form = "CXX"
+hash = "sha256:660cf91cbb84332ca7b39c20d865ecc8133a6ea485c163de85b1e1f3e6643d6f"
+
+[codex.first_cohort_rear]
+entry = "cohort.first"
+key = "at_rear_ft"
+ref = "PHG 3"
+form = "CCCLX"
+hash = "sha256:660cf91cbb84332ca7b39c20d865ecc8133a6ea485c163de85b1e1f3e6643d6f"
+
+[codex.first_cohort_standards_alt]
+entry = "cohort.first"
+key = "at_standards_alt_ft"
+ref = "PHG 3"
+form = "CLXXX"
+hash = "sha256:660cf91cbb84332ca7b39c20d865ecc8133a6ea485c163de85b1e1f3e6643d6f"
+
+[codex.first_cohort_rear_alt]
+entry = "cohort.first"
+key = "at_rear_alt_ft"
+ref = "PHG 3"
+form = "CCXL"
+hash = "sha256:660cf91cbb84332ca7b39c20d865ecc8133a6ea485c163de85b1e1f3e6643d6f"
+
+[codex.hemistrigium]
+entry = "hemistrigium"
+key = "width_ft"
+ref = "PHG 1"
+form = "XXX"
+hash = "sha256:4f4cf785d38978acd2db8402d626df4a6a6d2b9efa0be15ed71941e3bb3b0f97"
+
+[codex.cavalry_frontage]
+entry = "cavalry"
+key = "frontage_ft"
+ref = "PHG 16"
+form = "terni"
+hash = "sha256:75e31236ca60381fd33a970e91bbb3ffc225c4d67d43d64c134a756ccbb021c5"

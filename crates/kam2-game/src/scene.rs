@@ -186,13 +186,7 @@ pub fn build_with_arts(
 
 /// The shared frame builder: `resolve` names the atlas slot, the manifest and
 /// the drawn footprint of one house.
-fn build_frame<'a, F>(
-    sim: &Sim,
-    camera: &IsoCamera,
-    units: &Units,
-    tick: u32,
-    resolve: F,
-) -> Scene
+fn build_frame<'a, F>(sim: &Sim, camera: &IsoCamera, units: &Units, tick: u32, resolve: F) -> Scene
 where
     F: Fn(&House) -> Option<(usize, &'a HouseManifest, (i32, i32))>,
 {

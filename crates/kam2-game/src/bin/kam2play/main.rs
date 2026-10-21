@@ -139,6 +139,7 @@ impl std::error::Error for PlayError {
             Self::Surface(error) => Some(error),
             Self::Adapter(error) => Some(error),
             Self::Device(error) => Some(error),
+            Self::Hud(error) => Some(error),
             Self::Io(error) => Some(error),
             Self::NoSrgbFormat
             | Self::Readback(_)
@@ -240,7 +241,7 @@ impl Play {
                 gpu.set_house_sheet(slot, sheet);
             }
         }
-        let mut sim = demo_village()?;
+        let mut sim = demo_village().map_err(PlayError::Match)?;
         for _ in 0..STARTUP_TICKS {
             sim.tick();
         }
@@ -317,14 +318,11 @@ impl Play {
             "OFF MAP".clone_into(&mut self.notice);
             return;
         };
-        match self
-            .sim
-            .apply(Command::PlaceHouse {
-                kind: self.selected,
-                x,
-                y,
-            })
-        {
+        match self.sim.apply(Command::PlaceHouse {
+            kind: self.selected,
+            x,
+            y,
+        }) {
             Ok(()) => {
                 self.notice = format!("PLACED {}", self.selected.name().to_ascii_uppercase());
             }
@@ -695,8 +693,7 @@ mod tests {
         assert_eq!(sim.units().len(), 4);
         assert_eq!(kinds_in(&sim), 5, "one receipt shows all five kinds");
         for side in [0u8, 1] {
-            let mut kinds: Vec<HouseKind> =
-                sim.houses_of(side).map(|house| house.kind).collect();
+            let mut kinds: Vec<HouseKind> = sim.houses_of(side).map(|house| house.kind).collect();
             kinds.sort_by_key(|kind| kind.index());
             kinds.dedup();
             assert_eq!(kinds.len(), 5, "side {side} shows all five kinds");

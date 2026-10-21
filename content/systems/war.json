@@ -5,9 +5,9 @@
   ],
   "scoring": {"points_per_node_tick": 1, "node_tick_seconds": 10, "win_nodes": 2, "respawn_seconds": 30},
   "nodes": [
-    {"id": "statue_crossroads", "faction": "neutral", "capture_progress": 30, "decay_per_second": 0.5, "buff": {"xp_percent": 10, "drop_percent": 10, "duration_min": 2}},
-    {"id": "statue_mill", "faction": "neutral", "capture_progress": 30, "decay_per_second": 0.5, "buff": {"xp_percent": 10, "drop_percent": 10, "duration_min": 2}},
-    {"id": "statue_watchtower", "faction": "neutral", "capture_progress": 30, "decay_per_second": 0.5, "buff": {"xp_percent": 10, "drop_percent": 10, "duration_min": 2}}
+    {"id": "statue_mid", "label": "The Crossroads", "faction": "neutral", "capture_progress": 90, "decay_per_second": 0.5, "buff": {"xp_percent": 10, "drop_percent": 10, "duration_min": 2}},
+    {"id": "statue_east", "label": "The East Watchtower", "faction": "neutral", "capture_progress": 45, "decay_per_second": 0.5, "buff": {"xp_percent": 10, "drop_percent": 10, "duration_min": 2}},
+    {"id": "statue_west", "label": "The West Watchtower", "faction": "neutral", "capture_progress": 45, "decay_per_second": 0.5, "buff": {"xp_percent": 10, "drop_percent": 10, "duration_min": 2}}
   ],
   "forts": {
     "build_cost": 30,

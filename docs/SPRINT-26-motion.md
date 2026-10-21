@@ -102,3 +102,25 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   `predict_linear` on the held-out fixture, `infer_into` allocates
   nothing, and the net-on tape repeats its `arena sim:` hash.
   Correction 2026-10-21: the Accept filter `traj_student` matches no test (`Grep traj` over crates/anim is empty) and `fixtures/nets/traj.e2nn` does not exist (`Test-Path` false; only `depth_student.e2nn` is in that folder), so the command exits 0 with 0 passed. The net, the fixture and the test are the work; Accept is `--lib traj_student` printing a nonzero passed count, and the row may not be ticked until it does.
+
+- [ ] AM29 anim: a baked teacher clip is playable in the tick - the pack
+  carries the whole fighter body with its track names, the engine loads an
+  `.am5p` from disk and samples it onto the fighter rig. AM27 bakes and proves
+  the wire, but nothing plays it: the bake writes only the two foot tracks
+  (`TRACKS = ["leftfoot", "rightfoot"]`, the gate's evidence), the pack carries
+  no track names, `sample_packed` has no caller outside `pack.rs`, there is no
+  `.am5p` file loader, and the fighter-65 skeleton the bake retargets onto
+  lives in `tools/motion_bake/src/rig.rs` instead of in the engine. So a
+  teacher clip can be made and checked, and the game cannot play it yet.
+  Tier A. Size L. Owns `tools/motion_bake/`, the fighter skeleton in the
+  engine, a pack loader in `crates/anim`, and the runtime hook that plays a
+  loaded clip.
+  needs: AM27.
+  F2P: `node tools/gh-check.mjs cargo test -p engine-anim --lib
+  pack_file` fails before (no loader, no fixture) and passes after.
+  P2P: `node tools/gh-check.mjs cargo test -p engine-anim --lib` stays green;
+  the golden tape hash `d57b5c8ae3096614` does not move.
+  Accept: the same command x2 - the committed `fixtures/clips/stagger.am5p`
+  loads from disk, its track names come back with the clip, a sampled frame
+  matches the pack's own keys, and the feet slip stays under 0.08 like the
+  bake gate reads it.

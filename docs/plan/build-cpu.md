@@ -12,8 +12,9 @@ arena spike. This plan adds the shared slot pool and what neither page has.
   toolchain cargo. So "27 cargo" means about 13 builds, and most of them were not compiling at all.
   They were queued on the one `target/debug` build-dir lock.
 - The builds that did compile ran in four target dirs at once: `target/debug` (tests),
-  `target/release` (the golden verify, fat LTO, one codegen unit), `target/product` (another session's
-  thin-LTO arena probe, since reverted), and an old spike dir (`target/spike-opt8/before2`, compiling `syn` at opt-level 3).
+  `target/release` (the golden verify and the arena; thin LTO, 16 codegen units since OPT45), an old
+  `target/product` probe (another session's thin-LTO arena probe, since reverted), and an old spike dir
+  (`target/spike-opt8/before2`, compiling `syn` at opt-level 3).
 - Each cargo starts its own pool of 12 jobs, and rustc's codegen threads use that same pool. Four
   live builds can ask for 48 jobs on 12 cores. The OS then time-slices them, so every build gets
   slower and the desktop lags.
@@ -72,7 +73,17 @@ the fuk out of it so we save our poor cpu too".
   on a runner. A pass is kept 24 h, a fail 30 min. A line another AI is already running is joined,
   and a local twin is waited for.
 - The golden check goes through gh-check (`cargo test -p engine2040 --release --test proof_cli`), so
-  GitHub builds the fat-LTO binary, not the PC (AGENTS.md "Proof").
+  GitHub builds the binary, not the PC (AGENTS.md "Proof"). The CI leg builds the shipped shape
+  (`--profile ship`, fat LTO, one codegen unit); the local leg builds `--release` (thin
+  LTO, 16 units), and `release` itself is thin LTO since OPT45.
+
+## 2b-2. Clone lanes share one target dir (owner 2026-10-21, "address lane stress")
+
+`C:\e2040-lanes\<lane>` clones had one `target\` each: at 12:50 that was 9 lanes compiling at once (11 rustc, 1.6 GB
+RAM free) and 36 GB of disk. `C:\e2040-lanes\.cargo\config.toml` (outside every repo, read by any cargo started in a
+lane) sets `target-dir = C:/e2040-lanes/_target`, so dependencies compile once and the build lock runs one lane build
+at a time. The campaign ceiling still holds: 7 lanes (`docs/plan/2026-10-20-parallel-campaign.md`). The owner's
+Desktop `e2040-prune.bat` removes a lane only when it is idle 60+ min, clean and fully pushed.
 
 ## 2c. The GPU and window legs stay on this PC (lead decision 2026-10-21)
 
@@ -118,11 +129,13 @@ opened a window proves nothing about these rows and does not tick them.
 
 | Row | Lever | Why | Cost |
 |---|---|---|---|
-| OPT38 | The local golden verify builds with `--profile perf-test` (thin LTO, 16 units, overflow checks from release), not `--release` (fat LTO, 1 unit) | The fat-LTO relink is the slowest build in the tree, and every session's golden check pays it again after any engine edit. A community report puts fat LTO + 1 unit at +128% build time over plain release. The hash must not change: no fast-math, overflow checks stay on. (A `product` profile for the arena bin is the other session's spike: `docs/research/build-cpu-2026-10-21/CARD.md`.) | CI release-proof keeps `--release`; the row proves both profiles pass the golden test |
+| OPT38 | The local golden verify builds with `--profile perf-test` (thin LTO, 16 units, overflow checks from release), not `--release` (fat LTO, 1 unit) | The fat-LTO relink is the slowest build in the tree, and every session's golden check pays it again after any engine edit. A community report puts fat LTO + 1 unit at +128% build time over plain release. The hash must not change: no fast-math, overflow checks stay on. (A `product` profile for the arena bin is the other session's spike: `docs/research/build-cpu-2026-10-21/CARD.md`.) | CI release-proof builds the shipped shape (`--profile ship`); the row proves both profiles pass the golden test. Superseded by OPT45: `release` is thin LTO now, and OPT46 dropped the second name |
+| OPT46 | One build shape for the local golden: it builds on `release`, and the `perf-test` profile is gone | After OPT45 `perf-test` and `release` were the same shape (thin LTO, 16 units) under two names, and two names mean two target dirs: the golden compiled the whole tree again next to the release build | The local golden and the release arena share `target/release`; no `target/perf-test` tree grows |
 | OPT39 | Dependencies build without debug info in dev (`[profile.dev.package."*"] debug = false`) | Debug info is codegen and link work for crates nobody steps into. The perf book says 20-40% with full debug info. We already use line tables, so expect less; the row measures it. | Backtraces lose line numbers inside dependencies only |
 | OPT40 | Tools that spawn cargo run it at below-normal priority | Windows children inherit below-normal priority, so every rustc under that cargo runs below the desktop. The game window, editor and terminal stay smooth while builds still use the idle cores. It saves no CPU; it makes 100% CPU bearable. | One `os.setPriority(PRIORITY_BELOW_NORMAL)` on the tool's own process before `spawnSync` (Windows hands the class down to the child) |
 | OPT41 | Old spike dirs do not build in the background | `target/spike-*` builds compete with live work for the same cores. A spike tool refuses to start when the pool has no free slot (`status`) unless `--force`. | none |
 | OPT42 | LATER: nightly `-Zthreads=8` or the Cranelift backend for dev, in their own target dir | Perf book: up to 50% front-end speedup at best. Cranelift is Windows-x86_64 capable. Both are nightly only, so a spike row, never the default. | nightly toolchain |
+| OPT45 | `[profile.release]` is thin LTO with 16 codegen units; `[profile.ship]` keeps fat LTO with one codegen unit for the packaged artifact and the CI release-proof leg | Measured on the GitHub runner, same line and the same 22 crates compiled from scratch in both shapes: thin 38.08 s vs fat 58.84 s, golden hash `d57b5c8ae3096614` PASS in both. The local arena release build took 11 m 41 s on this PC, ~9.7 min of it in the one-unit relink | One cold rebuild of the tree in the new shape; the fps floor (60) is checked on the thin binary and is never lowered |
 
 ## 4. Not for this PC
 

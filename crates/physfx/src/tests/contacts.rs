@@ -1,6 +1,7 @@
 //! contacts: bones that are not joined push each other apart, inside one ragdoll and between two
-//! (PX9). Rapier gives every collider the same group, and `insert_joints` turns contacts off only
-//! between a bone and its parent, so these tests pin that rule from the outside.
+//! (PX9). Every bone of a fighter is on the body layer of the table, so the bones of a ragdoll
+//! share a group, and `insert_joints` turns contacts off only between a bone and its parent, so
+//! these tests pin that rule from the outside.
 
 use super::*;
 

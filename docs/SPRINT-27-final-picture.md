@@ -147,6 +147,11 @@ Plan: `docs/plan/build-cpu.md`. One pool of compile slots for every cargo on the
   F2P: dependencies carry line tables nobody reads.
   P2P: workspace-crate backtraces keep file:line; golden x2.
   needs: none.
+- [ ] OPT46 build: one build shape for the local golden. OPT45 made `release` thin LTO with 16 units, which is exactly what the `perf-test` profile was (it inherited `release` and set the same LTO and codegen units). Two names for one shape meant two target dirs, so a session that ran the golden next to a release build compiled the whole tree twice. `tools/proof.mjs` now builds the local golden on `release` (CI keeps `ship`), and the `perf-test` profile is gone from the root `Cargo.toml`. Tier A. Size S. Owns `Cargo.toml`, `tools/proof.mjs`, `tools/proof.test.mjs`, `.github/workflows/ci.yml`.
+  Accept: `node --test tools/proof.test.mjs tools/ci.test.mjs` passes (the local golden profile is `--release`, the CI one `--profile=ship`); `cargo build --release -p engine-game --features app --bin arena` and the local golden share one target dir (`target/release`), and no `target/perf-test` tree grows.
+  F2P: the golden builds a second tree of the same shape in `target/perf-test`.
+  P2P: golden d57b5c8ae3096614 unchanged; the CI release-proof leg still builds the shipped `ship` shape.
+  needs: OPT45.
 - [x] OPT40 tools: builds run below the desktop. `tools/gh-check.mjs` and `tools/proof.mjs` call `os.setPriority(os.constants.priority.PRIORITY_BELOW_NORMAL)` on their own process before they spawn cargo, so cargo and every rustc under it inherit below-normal on Windows. Tier B. Size S. Owns `tools/jobserver.mjs`, `tools/jobserver.test.mjs`, `tools/gh-check.mjs`, `tools/proof.mjs`. Landed 6bfb92ed.
   Accept: `node --test tools/jobserver.test.mjs` passes with a test where a process that called `lowerPriority()` spawns a child and the child reads its own `os.getPriority()` as below normal (10).
   F2P: a build at 100% CPU takes the same priority as the game window and the editor.
@@ -172,3 +177,9 @@ Plan: `docs/plan/build-cpu.md`. One pool of compile slots for every cargo on the
   F2P: no nightly numbers.
   P2P: the default toolchain and profiles unchanged.
   needs: none.
+- [ ] OPT45 build: the local release build is thin LTO, the shipped artifact keeps fat LTO. `[profile.release]` is now `lto = "thin"`, `codegen-units = 16`; `[profile.ship]` keeps `lto = "fat"`, `codegen-units = 1` and is what `tools/ship.mjs` and the CI release-proof leg build, so the packaged shape does not change. Tier A. Size S. Owns `Cargo.toml`, `tools/ship.mjs`, `tools/proof.mjs`, `tools/proof.test.mjs`, `tools/ci.test.mjs`, `.github/workflows/ci.yml`.
+  Accept: on the GitHub runner, the same line (`cargo test -p engine2040 --release --test proof_cli default_and_max_seed`) compiles the same 22 crates from scratch in both shapes and passes the golden hash in both - thin 38.08 s (run 39576029326) vs fat 58.84 s (run 39576660515); `node --test tools/ci.test.mjs tools/proof.test.mjs` passes; a 300-frame arena run on the thin binary keeps the 60 fps floor (`tools/product-bar.json`, never lowered).
+  F2P: every local `--release` build pays the fat-LTO one-unit relink (the arena release build took 11 m 41 s on this PC, ~9.7 min of it in the relink).
+  P2P: the golden hash `d57b5c8ae3096614` is the same under both shapes; the packaged artifact still builds fat LTO with one codegen unit.
+  needs: none.
+  Progress 2026-10-21: the profile change and both runner proofs are in and the golden hash holds in both shapes; the 300-frame arena fps check on the thin binary is still open (the local thin arena build was queued behind other sessions' cargo).

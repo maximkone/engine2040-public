@@ -92,7 +92,7 @@ not re-mine the same repo.
   F2P: no `crates/rome` and no `content/rome`.
   P2P: golden `d57b5c8ae3096614` x2.
   needs: ROM2.
-- [ ] HX6 rome: the codex pipeline. A tool reads the two public-domain sources
+- [x] HX6 rome: the codex pipeline. A tool reads the two public-domain sources  Landed aaca5ad5. `node tools/codex-check.mjs` prints `codex: numbers=25 unmatched=0` and exits 0 (two runs byte-equal); a table value no passage supports prints `unmatched` and exits 1; a passage whose text hash moved prints `changed` and exits 1; the ditch reads 1480 mm wide and 888 mm deep with `ref = "PHG 49"`; `node --test tools/codex-check.test.mjs` 6 tests pass; `cargo test -p engine-rome --lib` 18 passed; the golden d57b5c8ae3096614 x2 (`proof_cli default_and_max_seed` 1 passed, the release binary printed final_hash=d57b5c8ae3096614); `node tools/workspace-check.mjs` PASS.
   (Vegetius *De re militari* I, Pseudo-Hyginus *De munitionibus castrorum*) from
   the machine-readable corpus `cltk/lat_text_latin_library` (Public Domain Mark
   1.0: `hyginus/hyginus6.txt` paragraphs `1.`-`58.`, `vegetius1.txt` chapters
@@ -547,7 +547,7 @@ not re-mine the same repo.
   F2P: `pass` is a string in the reply.
   P2P: golden `d57b5c8ae3096614` x2; the existing door tests keep their shape.
   needs: none.
-- [ ] HX31 proof: the differential ship check. A curated scenario list runs
+- [x] HX31 proof: the differential ship check. Landed 583ff9bb. `cargo test -p engine-proof --lib differential` 17 passed (run 39575557613); clippy `-p engine-proof --all-targets -- -D warnings` PASS (run 39575534607); golden `d57b5c8ae3096614` x2 (runs 39575583574, 39576754570). The job in `.github/workflows/differential.yml` ran on the public mirror and passed (run 39579398044): the two receipts match step for step, and the golden row is in both. A curated scenario list runs
   against the **reference** build and the **candidate** build, and every step of
   the receipt is diffed with a normalization list (timestamps, ids, paths),
   where a real behaviour change must still show: a random value is pinned by
@@ -558,8 +558,9 @@ not re-mine the same repo.
   MIT, 28056 stars, read 2026-10-21). We take the **shape**, because our
   receipts are our own line format, not JSON.
   Row **E22** (the Windows ship check from CI); gate G1.
-  Tier A. Size M. Owns `crates/proof/src/differential.rs`, `tools/ship-check.mjs`,
-  `.github/workflows/`.
+  Tier A. Size M. Owns `crates/proof/src/differential.rs`,
+  `crates/proof/src/bin/differential.rs`, `fixtures/differential/scenarios.txt`,
+  `.github/workflows/differential.yml`.
   Accept: `cargo test -p engine-proof --lib differential` passes: two runs of
   the same build give the same normalized receipt, a seeded change shows up as a
   divergence and is not normalized away, and the tool exits 1 on one in-scope

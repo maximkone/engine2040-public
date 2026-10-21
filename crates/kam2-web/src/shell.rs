@@ -13,6 +13,11 @@ use kam2_game::scene::{build_with, Scene, Units};
 use kam2_game::{stock_line, AiMatch, SoldierManifest};
 use kam2_sim::{Command, HouseKind, Refusal, Ware};
 
+use crate::selection::{
+    command, house_json, house_state, select_at, selection_json, unit_json, unit_state, HouseState,
+    Order, Selection, UnitState,
+};
+
 /// One sim tick, in milliseconds: the style lock's 10 Hz shell tick.
 pub const TICK_MS: u32 = 100;
 /// Framebuffer width of the 2.5D scene, in pixels.
@@ -40,6 +45,9 @@ pub struct Shell {
     pan: [f32; 2],
     acc_ms: f64,
     paused: bool,
+    /// What the page picked, oldest first: the panel shows the newest one and
+    /// the orders go to every soldier in the list.
+    selection: Vec<Selection>,
 }
 
 impl Shell {
@@ -63,6 +71,7 @@ impl Shell {
             pan: [0.0, 0.0],
             acc_ms: 0.0,
             paused: false,
+            selection: Vec::new(),
         })
     }
 
@@ -221,11 +230,132 @@ impl Shell {
             .map(|ware| self.game.sim().stock_of(side, *ware))
             .collect()
     }
+
+    /// The camera the page looks through.
+    #[must_use]
+    pub const fn camera(&self) -> &IsoCamera {
+        &self.camera
+    }
+
+    /// What stands under the cursor at `(x, z)`, without touching the
+    /// selection.
+    ///
+    /// The page asks this before it decides what a click means: a foe under the
+    /// cursor is struck by the soldiers already picked, so the pick may not
+    /// change the selection on the way.
+    #[must_use]
+    pub fn pick_at(&self, x: i32, z: i32) -> Option<Selection> {
+        select_at(self.game.sim(), x, z)
+    }
+
+    /// Pick what stands under the cursor at `(x, z)`; returns what it holds.
+    ///
+    /// A plain pick replaces the selection, so a click on open ground clears
+    /// it; `add` keeps the picks and adds this one, which is the shift-click of
+    /// the page. A thing picked twice is picked once.
+    pub fn select_at(&mut self, x: i32, z: i32, add: bool) -> Option<Selection> {
+        let picked = self.pick_at(x, z);
+        if add {
+            if let Some(picked) = picked {
+                if !self.selection.contains(&picked) {
+                    self.selection.push(picked);
+                }
+            }
+        } else {
+            self.selection.clear();
+            if let Some(picked) = picked {
+                self.selection.push(picked);
+            }
+        }
+        picked
+    }
+
+    /// The picked things, oldest first.
+    #[must_use]
+    pub fn selection(&self) -> &[Selection] {
+        &self.selection
+    }
+
+    /// The newest pick, the one the panel shows.
+    #[must_use]
+    pub fn picked(&self) -> Option<Selection> {
+        self.selection.last().copied()
+    }
+
+    /// Give one order to every picked soldier; the first refusal of the sim
+    /// is the answer of the page.
+    ///
+    /// With no soldier picked the sim is still asked, so the refusal carries
+    /// the sim's own words and never the page's.
+    pub fn order_selected(&mut self, order: Order, x: i32, z: i32) -> Option<Refusal> {
+        let soldiers: Vec<u32> = self
+            .selection
+            .iter()
+            .filter_map(|picked| match picked {
+                Selection::Unit(id) => Some(*id),
+                Selection::House(_) => None,
+            })
+            .collect();
+        let mut first = None;
+        for id in &soldiers {
+            let cmd = command(self.game.sim(), Some(Selection::Unit(*id)), order, x, z);
+            if let Err(refusal) = self.game.order_for(PLAYER_SIDE, cmd) {
+                if first.is_none() {
+                    first = Some(refusal);
+                }
+            }
+        }
+        if soldiers.is_empty() {
+            let cmd = command(self.game.sim(), None, order, x, z);
+            if let Err(refusal) = self.game.order_for(PLAYER_SIDE, cmd) {
+                first = Some(refusal);
+            }
+        }
+        first
+    }
+
+    /// The panel's numbers for one house; `None` when no house has that id.
+    #[must_use]
+    pub fn house_state(&self, id: u32) -> Option<HouseState> {
+        house_state(self.game.sim(), id)
+    }
+
+    /// The panel's numbers for one unit; `None` when no unit has that id.
+    #[must_use]
+    pub fn unit_state(&self, id: u32) -> Option<UnitState> {
+        unit_state(self.game.sim(), id)
+    }
+
+    /// The panel's line for one house; empty when no house has that id.
+    #[must_use]
+    pub fn house_json(&self, id: u32) -> String {
+        house_json(self.game.sim(), id)
+    }
+
+    /// The panel's line for one unit; empty when no unit has that id.
+    #[must_use]
+    pub fn unit_json(&self, id: u32) -> String {
+        unit_json(self.game.sim(), id)
+    }
+
+    /// The minimap as one JSON line: the field, its markers and the window the
+    /// camera looks at.
+    #[must_use]
+    pub fn minimap_json(&self) -> String {
+        crate::minimap::minimap_json(self.game.sim(), &self.camera)
+    }
+
+    /// The selection as one JSON list of ids, the newest pick last.
+    #[must_use]
+    pub fn selection_json(&self) -> String {
+        selection_json(&self.selection)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Shell, MAX_CATCHUP, PAN_LIMIT, TICK_MS};
+    use crate::selection::{Order, Selection};
     use kam2_game::AiMatch;
     use kam2_sim::{HouseKind, Refusal};
 
@@ -364,5 +494,114 @@ mod tests {
         assert_eq!(counts[0], 18, "the village leaves side 0 eighteen wood");
         assert_eq!(counts[1], 15, "and fifteen stone");
         assert_eq!(counts[2..], [0, 0, 0], "no bread chain has run yet");
+    }
+
+    #[test]
+    fn a_click_picks_what_stands_under_it_and_open_ground_clears_the_pick() {
+        let mut shell = shell();
+        assert_eq!(shell.select_at(3, 9, false), Some(Selection::Unit(0)));
+        assert_eq!(shell.selection(), &[Selection::Unit(0)]);
+        assert_eq!(shell.picked(), Some(Selection::Unit(0)));
+        assert_eq!(shell.select_at(0, 3, false), Some(Selection::House(0)));
+        assert_eq!(shell.selection(), &[Selection::House(0)]);
+        assert_eq!(shell.select_at(15, 11, false), None);
+        assert!(shell.selection().is_empty(), "open ground clears the pick");
+    }
+
+    #[test]
+    fn a_shift_click_keeps_the_picks_and_adds_one() {
+        let mut shell = shell();
+        shell.select_at(3, 9, false);
+        shell.select_at(5, 9, true);
+        assert_eq!(shell.selection(), &[Selection::Unit(0), Selection::Unit(1)]);
+        shell.select_at(5, 9, true);
+        assert_eq!(
+            shell.selection().len(),
+            2,
+            "the same soldier is picked once"
+        );
+    }
+
+    #[test]
+    fn the_query_under_the_cursor_never_moves_the_selection() {
+        let mut shell = shell();
+        shell.select_at(3, 9, false);
+        assert_eq!(shell.pick_at(11, 9), Some(Selection::Unit(2)));
+        assert_eq!(
+            shell.selection(),
+            &[Selection::Unit(0)],
+            "a foe under the cursor does not become the pick"
+        );
+    }
+
+    #[test]
+    fn an_order_goes_to_every_picked_soldier() {
+        let mut shell = shell();
+        shell.select_at(3, 9, false);
+        shell.select_at(5, 9, true);
+        assert_eq!(shell.order_selected(Order::AttackMove, 7, 9), None);
+        for id in [0, 1] {
+            let state = shell.unit_state(id).expect("the soldier lives");
+            assert!(state.moving, "soldier {id} walks to the named tile");
+        }
+    }
+
+    #[test]
+    fn a_house_takes_no_order_and_the_sim_says_so() {
+        let mut shell = shell();
+        shell.select_at(0, 3, false);
+        assert_eq!(
+            shell.order_selected(Order::AttackMove, 7, 9),
+            Some(Refusal::NoUnit),
+            "a house is not a soldier, so the sim hears no unit"
+        );
+    }
+
+    #[test]
+    fn an_order_without_a_pick_is_the_sim_s_own_refusal() {
+        let mut shell = shell();
+        assert_eq!(
+            shell.order_selected(Order::AttackMove, 7, 9),
+            Some(Refusal::NoUnit),
+            "the sim refuses in its own words"
+        );
+    }
+
+    #[test]
+    fn the_panel_reads_the_numbers_of_the_picked_thing() {
+        let mut shell = shell();
+        shell.select_at(3, 9, false);
+        let soldier = shell.unit_state(0).expect("the panel reads the soldier");
+        assert_eq!(soldier.max_hp, 30);
+        assert_eq!(soldier.hp, 30);
+        let json = shell.unit_json(0);
+        assert!(json.contains("\"name\":\"swordsman\""), "{json}");
+        shell.select_at(0, 3, false);
+        let house = shell.house_state(0).expect("the panel reads the warehouse");
+        assert_eq!(house.kind, HouseKind::Warehouse);
+        assert!(
+            shell.house_json(0).contains("\"name\":\"warehouse\""),
+            "the panel names the house"
+        );
+    }
+
+    #[test]
+    fn the_selection_line_names_the_picks_newest_last() {
+        let mut shell = shell();
+        shell.select_at(3, 9, false);
+        shell.select_at(5, 9, true);
+        assert_eq!(shell.selection_json(), "[\"u0\",\"u1\"]");
+    }
+
+    #[test]
+    fn the_minimap_line_carries_the_field_and_the_window() {
+        let shell = shell();
+        let json = shell.minimap_json();
+        assert!(json.contains("\"w\":160"), "{json}");
+        assert!(json.contains("\"h\":120"), "{json}");
+        assert!(
+            json.contains("\"rect\":[40.00,30.00,80.00,60.00]"),
+            "the window sits where the camera looks: {json}"
+        );
     }
 }

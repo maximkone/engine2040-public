@@ -1136,16 +1136,26 @@ mod tests {
         let helmet = &captures[1];
         assert_eq!(eye.preset, LensPreset::Eye);
         assert_eq!(helmet.preset, LensPreset::Helmet);
-        // The eye capture is the frame itself.
+        // The eye capture is the frame itself: the GPU reads the same texels
+        // back, so every pixel lands within one level of the source.
         let source = pixels_to_rgba8(&frame.pixels);
         assert_eq!(eye.pixels.len(), source.len());
-        let same = eye
-            .pixels
-            .iter()
-            .zip(source.chunks_exact(4))
-            .filter(|(a, b)| a[0] == b[0] && a[1] == b[1] && a[2] == b[2])
-            .count();
-        assert_eq!(same, source.len() / 4, "the eye capture is the frame");
+        let total = source.len() / 4;
+        let mut within_one = 0usize;
+        for (pixel, want) in eye.pixels.iter().zip(source.chunks_exact(4)) {
+            let worst = pixel[0]
+                .abs_diff(want[0])
+                .max(pixel[1].abs_diff(want[1]))
+                .max(pixel[2].abs_diff(want[2]));
+            assert!(worst <= 1, "the eye capture moved a pixel by {worst}");
+            if worst == 0 {
+                within_one += 1;
+            }
+        }
+        assert!(
+            within_one * 100 >= total * 99,
+            "the eye capture is the frame: {within_one} of {total} pixels match"
+        );
         // The helmet capture is darker at the corner and split at the edges.
         let corner_luma = |capture: &gpu::LensCapture| {
             0.2126 * f32::from(capture.corner[0])

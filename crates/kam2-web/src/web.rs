@@ -8,6 +8,13 @@
 //! lists the five build cells, `placement(kind, x, z)` asks the sim whether a
 //! house would stand there, `build(kind, x, z)` places one and `stockOf(side)`
 //! counts the wares. The page never decides a rule of its own.
+//!
+//! The sidebar of KAM13 asks the face about the cursor and the orders:
+//! `pickAt(x, z)` names what stands under the cursor without touching the
+//! selection, `selectAt(x, z, add)` picks it, `selection()` lists the picks,
+//! `orderSelected(order, x, z)` gives the order to the picked soldiers,
+//! `houseState(id)` and `unitState(id)` read the numbers of the panel and
+//! `minimap()` draws the map. Every answer is the crate's own.
 
 use js_sys::Float32Array;
 use wasm_bindgen::prelude::*;
@@ -137,5 +144,69 @@ impl Kam2Web {
     #[wasm_bindgen(js_name = stockOf)]
     pub fn stock_of(&self, side: u8) -> Vec<u32> {
         self.shell.stock_counts(side)
+    }
+
+    /// What stands under the cursor at `(x, z)`: `h3`, `u7` or an empty
+    /// string. The pick never changes the selection, so the page can ask
+    /// whether a foe is under the cursor before a click means anything.
+    #[wasm_bindgen(js_name = pickAt)]
+    pub fn pick_at(&self, x: i32, z: i32) -> String {
+        self.shell
+            .pick_at(x, z)
+            .map_or_else(String::new, |picked| picked.id())
+    }
+
+    /// Pick what stands under the cursor at `(x, z)`: the plain pick replaces
+    /// the selection, `add` keeps it and adds this one. Returns the id of the
+    /// thing under the cursor.
+    #[wasm_bindgen(js_name = selectAt)]
+    pub fn select_at(&mut self, x: i32, z: i32, add: bool) -> String {
+        self.shell
+            .select_at(x, z, add)
+            .map_or_else(String::new, |picked| picked.id())
+    }
+
+    /// The picked things as one JSON list of ids, the newest pick last.
+    #[wasm_bindgen]
+    pub fn selection(&self) -> String {
+        self.shell.selection_json()
+    }
+
+    /// Give one order to the picked soldiers: `attack-move`, `stop` or `hold`.
+    /// The line is empty when the sim took the order and carries the sim's own
+    /// refusal words otherwise.
+    #[wasm_bindgen(js_name = orderSelected)]
+    pub fn order_selected(&mut self, order: &str, x: i32, z: i32) -> String {
+        let Some(order) = crate::selection::Order::parse(order) else {
+            return crate::selection::UNKNOWN_ORDER.to_string();
+        };
+        crate::build_menu::answer_line(self.shell.order_selected(order, x, z))
+    }
+
+    /// The panel's line for one house, named by its id `h3`; empty when no
+    /// house has that id.
+    #[wasm_bindgen(js_name = houseState)]
+    pub fn house_state(&self, id: &str) -> String {
+        match crate::selection::Selection::parse(id) {
+            Some(crate::selection::Selection::House(id)) => self.shell.house_json(id),
+            _ => String::new(),
+        }
+    }
+
+    /// The panel's line for one unit, named by its id `u7`; empty when no unit
+    /// has that id.
+    #[wasm_bindgen(js_name = unitState)]
+    pub fn unit_state(&self, id: &str) -> String {
+        match crate::selection::Selection::parse(id) {
+            Some(crate::selection::Selection::Unit(id)) => self.shell.unit_json(id),
+            _ => String::new(),
+        }
+    }
+
+    /// The minimap as one JSON line: the field, its markers and the window the
+    /// camera looks at.
+    #[wasm_bindgen]
+    pub fn minimap(&self) -> String {
+        self.shell.minimap_json()
     }
 }

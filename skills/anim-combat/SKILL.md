@@ -37,7 +37,7 @@ Ask for each row of `crates/combat/src/tables.rs::MoveTableSet`:
 | Window | a cancel fires only inside its source window (`FighterState`) | a punch-to-react in the first half of the swing |
 | Sparse map | move matrix is sparse, death is a sink (`tables.rs::validate_tables`) | a dense matrix that lets death reach any move |
 | Defaults first | `fight.rs::TABLES_V1` stays frozen; `tables.rs::tables_for_version(2)` overrides listed rows | a v2 edit that rewrites v1 bytes and breaks old tapes |
-| Proof | `cargo test -p engine-combat --lib tables_v2` passes x2, golden unchanged | a green result with no digest, or a hash move with no receipt |
+| Proof | `node tools/gh-check.mjs cargo test -p engine-combat --lib tables_v2` passes x2, golden unchanged | a green result with no digest, or a hash move with no receipt |
 
 Today's numbers: v1 is startup 4, parry 4, hitstop 4 (`ATTACK_STARTUP_TICKS`, `PARRY_WINDOW_TICKS`, `HITSTOP_TICKS` in `fight.rs`) and is grandfathered. v2 (`tables.rs::v2_rows`) is startup 15, parry 7, inside the bands. The replacement rule: parry stays below startup. Start new rows from v2. List from, to, kind, length, curve and window per row. Never ship a timed change with no window or curve.
 
@@ -53,7 +53,7 @@ Numbers live in rows, Rust holds the truth, the text must match it. Loader: `cra
 6. **Digests equal truth.** Parsed v1 and v2 rows equal `TABLES_V1`, `TABLES_V2` and `v2_rows()`. A text fork that moves the golden is a bug.
 7. **Refuse with a line.** Each refusal is a `CombatError` that carries the line number (parse) or the culprit value (range).
 8. **Cold path only.** Std-only, called at a tick boundary, never inside `step_with_tables`. No heap in the step.
-9. **Doc plus x2 proof.** `docs/design/FORMAT.md` matches the file. `cargo test -p engine-combat --lib tables_text` passes x2.
+9. **Doc plus x2 proof.** `docs/design/FORMAT.md` matches the file. `node tools/gh-check.mjs cargo test -p engine-combat --lib tables_text` passes x2.
 
 Never hard-code a tuned number in Rust. Never accept a float key.
 
@@ -96,7 +96,7 @@ Check before you say it is wired: `camera_arm.rs` says `camera.rs` calls `arm_le
 5. **Lift up only, eased over the fall.** The fix is a +y lift by the below-sand depth (`fighter_look.rs::sand_lift_m`, cap `SAND_LIFT_MAX_M`), spread over the fall, view only. No snap to zero, no sideways shift, no sim position change.
 6. **Eye under floor stays separate.** `ViewLaws::note` counts `eye_below_ground` (`eye[1] < GROUND_Y`) apart from sunk. Do not trust `screen_rect` for depth.
 7. **The bar proves rest.** The `arena view:` receipt line shows `sunk_cm_max`. It reads under 2. `tools/product-bar.json` `view_sunk_cm_max` is 3 today.
-8. **View only, hash still.** The diff touches `FighterLook` present data. `cargo test -p engine-game --lib` is green. Golden unchanged.
+8. **View only, hash still.** The diff touches `FighterLook` present data. `node tools/gh-check.mjs cargo test -p engine-game --lib` is green. Golden unchanged.
 
 Do: rest the down pose on the one plane by its lowest vertex and show the `sunk_cm_max` number. Don't: snap bodies to zero, move the sim, or land a sunk fix with no receipt number.
 

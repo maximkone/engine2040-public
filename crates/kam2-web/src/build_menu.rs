@@ -167,6 +167,9 @@ mod tests {
             refusal_line(Refusal::NotBuildable),
             "a refusal keeps the sim's own words"
         );
-        assert!(UNKNOWN_KIND.contains(": "), "even an unknown cell has words");
+        assert!(
+            UNKNOWN_KIND.contains(": "),
+            "even an unknown cell has words"
+        );
     }
 }

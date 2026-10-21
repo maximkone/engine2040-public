@@ -6,19 +6,26 @@ name: differential
 # clock, or that ran on another machine, does not. The tool exits 1 on one
 # divergence, so the job fails on it.
 #
-# The pull request leg plays the fast tier. The manual leg plays any tier
-# and names the ref to compare against.
+# The push leg plays the fast tier on every change of the code. The pull
+# request leg plays it on a pull request. The manual leg plays any tier and
+# names the ref to compare against.
 on:
   workflow_dispatch:
     inputs:
       reference:
         description: The ref the candidate is compared against
         required: false
-        default: master
+        default: main
       tier:
         description: The scenario tier to play
         required: false
         default: fast
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "fixtures/differential/**"
+      - ".github/workflows/differential.yml"
   pull_request:
     paths:
       - "crates/**"
@@ -44,11 +51,18 @@ env:
 jobs:
   differential:
     # The public mirror is the build farm; the private dev repo never runs it.
-    if: github.repository == 'maximkone/engine2040-public'
+    # A push with no previous commit (the first one on a branch) has no
+    # reference to compare against, so the job stands down.
+    if: >-
+      github.repository == 'maximkone/engine2040-public' &&
+      github.event.before != '0000000000000000000000000000000000000000'
     runs-on: windows-latest
     timeout-minutes: 60
     env:
       TIER: ${{ github.event.inputs.tier || 'fast' }}
+      # The deep tier plays binaries that need their own features, so the
+      # build asks for them only when the deep tier is the one that runs.
+      FEATURES: ${{ github.event.inputs.tier == 'deep' && 'arena,spine,ragdoll' || 'arena' }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -56,7 +70,10 @@ jobs:
       - uses: actions/checkout@v5
         with:
           path: reference
-          ref: ${{ github.event.pull_request.base.sha || github.event.inputs.reference }}
+          # The push leg compares against the commit before the push, the pull
+          # request leg against the base of the pull request, and the manual
+          # leg against the ref the human names.
+          ref: ${{ github.event.pull_request.base.sha || github.event.before || github.event.inputs.reference }}
       - uses: mozilla-actions/sccache-action@v0.0.11
       - name: install repository toolchain (rust-toolchain.toml)
         working-directory: candidate
@@ -64,15 +81,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: differential
-          path: |
-            candidate/target
-            reference/target
+          workspaces: |
+            candidate -> target
+            reference -> target
       - name: build the reference
         working-directory: reference
-        run: cargo build --locked --release -p engine-proof --features arena --bins
+        run: cargo build --locked --release -p engine-proof --features $env:FEATURES --bins
       - name: build the candidate
         working-directory: candidate
-        run: cargo build --locked --release -p engine-proof --features arena --bins
+        run: cargo build --locked --release -p engine-proof --features $env:FEATURES --bins
       - name: collect the reference receipt
         working-directory: candidate
         run: >-

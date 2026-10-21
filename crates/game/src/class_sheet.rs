@@ -1,7 +1,7 @@
 //! class_sheet: the class content loader (one class file -> one sheet).
 //!
-//! Owner: this module owns the class sheet shape, the small JSON reader it
-//! needs and the loaders over `content/classes/`. The content contract is
+//! Owner: this module owns the class sheet shape and the loaders over
+//! `content/classes/`; the JSON reader is `engine_material::json`. The content contract is
 //! `content/classes/schema.json`; the rules the schema cannot hold (ability
 //! count, ability ids and names unique in a file, an aoe ability needs a
 //! telegraph, growth sums to a positive number, a primary stat grows) live
@@ -15,8 +15,9 @@
 //! Budget: one-shot setup IO (one file read per sheet); never on the tick.
 
 use std::fmt;
-#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+
+use engine_material::json::{parse_up_to, Value as Json};
 
 /// The roster file in the class directory: [`load_class_dir`] skips it.
 pub const ROSTER_FILE: &str = "roster.json";
@@ -29,9 +30,6 @@ pub const MAX_CLASS_FILE_BYTES: usize = 256 * 1024;
 
 /// Abilities every class file carries.
 pub const MIN_ABILITIES: usize = 6;
-
-/// Deepest JSON nesting the reader accepts.
-const MAX_JSON_DEPTH: usize = 32;
 
 /// The fields one class file may hold.
 const CLASS_FIELDS: [&str; 17] = [
@@ -482,7 +480,6 @@ impl std::error::Error for ClassSheetError {}
 
 /// Load one class file and return its sheet. A missing file, a broken
 /// document or a bad field is refused with the file and the field named.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn load_class_file(path: &Path) -> Result<ClassSheet, ClassSheetError> {
     let label = file_label(path);
     let bytes = std::fs::read(path).map_err(|error| ClassSheetError::Io {
@@ -506,7 +503,6 @@ pub fn load_class_file(path: &Path) -> Result<ClassSheet, ClassSheetError> {
 /// and [`SCHEMA_FILE`] are skipped; a bad file fails the whole load, and the
 /// cross-file rules hold (a branch points at a tier 0 class of the set, an
 /// ability id belongs to one class).
-#[cfg(not(target_arch = "wasm32"))]
 pub fn load_class_dir(dir: &Path) -> Result<Vec<ClassSheet>, ClassSheetError> {
     let entries = std::fs::read_dir(dir).map_err(|error| ClassSheetError::Io {
         file: file_label(dir),
@@ -545,7 +541,6 @@ pub fn load_class_dir(dir: &Path) -> Result<Vec<ClassSheet>, ClassSheetError> {
 /// The rules that span the class files: a branch points at a tier 0 class of
 /// the set and an ability id belongs to one class. `names` holds the file
 /// name of every sheet, in the same order.
-#[cfg(not(target_arch = "wasm32"))]
 fn cross_file_rules(sheets: &[ClassSheet], names: &[String]) -> Result<(), ClassSheetError> {
     let mut owners: Vec<(&str, &str)> = Vec::new();
     for (sheet, name) in sheets.iter().zip(names) {
@@ -586,10 +581,11 @@ impl ClassSheet {
     /// Parse one class sheet from JSON text. `file_name` labels the errors;
     /// the same text always gives the same sheet.
     pub fn parse(file_name: &str, text: &str) -> Result<Self, ClassSheetError> {
-        let root = read_json(text).map_err(|error| ClassSheetError::BadJson {
-            file: file_name.to_string(),
-            reason: error.to_string(),
-        })?;
+        let root =
+            parse_up_to(text, MAX_CLASS_FILE_BYTES).map_err(|error| ClassSheetError::BadJson {
+                file: file_name.to_string(),
+                reason: error.to_string(),
+            })?;
         let ctx = Ctx { file: file_name };
         let Some(members) = root.as_object() else {
             return Err(ctx.bad("the sheet", "the document is not an object"));
@@ -639,7 +635,6 @@ impl ClassSheet {
 }
 
 /// The file label every error carries: the file name, never a whole path.
-#[cfg(not(target_arch = "wasm32"))]
 fn file_label(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -1057,7 +1052,7 @@ fn number_field(
 
 /// Read one number node; a negative or too large number is refused.
 fn number_node(ctx: &Ctx<'_>, value: &Json, path: &str, max: f32) -> Result<f32, ClassSheetError> {
-    let Some(lexeme) = value.as_number_text() else {
+    let Some(lexeme) = value.number_text() else {
         return Err(ctx.bad(
             path,
             &format!("expected a number, found {}", value.kind_name()),
@@ -1081,7 +1076,7 @@ fn number_node(ctx: &Ctx<'_>, value: &Json, path: &str, max: f32) -> Result<f32,
 /// Read one required tier member: a whole number in `0..=4`.
 fn tier_field(ctx: &Ctx<'_>, node: &Json, key: &str, path: &str) -> Result<u8, ClassSheetError> {
     let value = member(ctx, node, key, path)?;
-    let Some(lexeme) = value.as_number_text() else {
+    let Some(lexeme) = value.number_text() else {
         return Err(ctx.bad(
             path,
             &format!("expected a number, found {}", value.kind_name()),
@@ -1106,7 +1101,7 @@ fn optional_tier_field(
     let Some(value) = node.get(key) else {
         return Ok(None);
     };
-    let Some(lexeme) = value.as_number_text() else {
+    let Some(lexeme) = value.number_text() else {
         return Err(ctx.bad(
             path,
             &format!("expected a number, found {}", value.kind_name()),
@@ -1221,374 +1216,6 @@ fn telegraph_field(ctx: &Ctx<'_>, node: &Json, path: &str) -> Result<Telegraph, 
         ));
     };
     Telegraph::from_text(text).ok_or_else(|| ctx.bad(path, &format!("unknown telegraph {text:?}")))
-}
-
-/// One JSON value. Numbers keep their source lexeme, so the sheet reads the
-/// exact text it wrote.
-#[derive(Clone, PartialEq, Debug)]
-enum Json {
-    Null,
-    Bool(bool),
-    Number(String),
-    Str(String),
-    Array(Vec<Json>),
-    Object(Vec<(String, Json)>),
-}
-
-impl Json {
-    fn get(&self, key: &str) -> Option<&Json> {
-        match self {
-            Self::Object(members) => members
-                .iter()
-                .find(|(name, _)| name.as_str() == key)
-                .map(|(_, value)| value),
-            _ => None,
-        }
-    }
-
-    fn as_str(&self) -> Option<&str> {
-        match self {
-            Self::Str(text) => Some(text),
-            _ => None,
-        }
-    }
-
-    fn as_number_text(&self) -> Option<&str> {
-        match self {
-            Self::Number(lexeme) => Some(lexeme),
-            _ => None,
-        }
-    }
-
-    fn as_array(&self) -> Option<&[Json]> {
-        match self {
-            Self::Array(items) => Some(items),
-            _ => None,
-        }
-    }
-
-    fn as_object(&self) -> Option<&[(String, Json)]> {
-        match self {
-            Self::Object(members) => Some(members),
-            _ => None,
-        }
-    }
-
-    fn kind_name(&self) -> &'static str {
-        match self {
-            Self::Null => "null",
-            Self::Bool(_) => "bool",
-            Self::Number(_) => "number",
-            Self::Str(_) => "string",
-            Self::Array(_) => "array",
-            Self::Object(_) => "object",
-        }
-    }
-}
-
-/// Why the JSON reader refused a document: the byte and the cause.
-#[derive(Clone, PartialEq, Eq, Debug)]
-struct JsonError {
-    /// Byte offset of the offending character.
-    offset: usize,
-    /// What was wrong there, in plain words.
-    reason: String,
-}
-
-impl fmt::Display for JsonError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "byte {}: {}", self.offset, self.reason)
-    }
-}
-
-impl std::error::Error for JsonError {}
-
-/// Read one JSON document; the error names the byte offset.
-fn read_json(text: &str) -> Result<Json, JsonError> {
-    let mut reader = Reader::new(text);
-    reader.skip_ws();
-    let value = reader.value()?;
-    reader.skip_ws();
-    if reader.at < reader.bytes.len() {
-        return reader.fail("text sits after the document");
-    }
-    Ok(value)
-}
-
-/// Byte reader over one JSON document.
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-    depth: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(text: &'a str) -> Self {
-        Self {
-            bytes: text.as_bytes(),
-            at: 0,
-            depth: 0,
-        }
-    }
-
-    fn fail<T>(&self, reason: &str) -> Result<T, JsonError> {
-        Err(JsonError {
-            offset: self.at,
-            reason: reason.to_string(),
-        })
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.bytes.get(self.at).copied()
-    }
-
-    fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-            self.at += 1;
-        }
-    }
-
-    fn value(&mut self) -> Result<Json, JsonError> {
-        if self.depth > MAX_JSON_DEPTH {
-            return self.fail("the document nests too deep");
-        }
-        match self.peek() {
-            None => self.fail("the document ends inside a value"),
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
-            Some(b'"') => Ok(Json::Str(self.string()?)),
-            Some(b't') => {
-                self.keyword(b"true")?;
-                Ok(Json::Bool(true))
-            }
-            Some(b'f') => {
-                self.keyword(b"false")?;
-                Ok(Json::Bool(false))
-            }
-            Some(b'n') => {
-                self.keyword(b"null")?;
-                Ok(Json::Null)
-            }
-            Some(b'-' | b'0'..=b'9') => Ok(Json::Number(self.number()?)),
-            Some(byte) => self.fail(&format!("unexpected character {:?}", char::from(byte))),
-        }
-    }
-
-    fn keyword(&mut self, word: &[u8]) -> Result<(), JsonError> {
-        if self.bytes.get(self.at..self.at + word.len()) == Some(word) {
-            self.at += word.len();
-            return Ok(());
-        }
-        self.fail("the literal is not spelled out")
-    }
-
-    fn object(&mut self) -> Result<Json, JsonError> {
-        self.at += 1;
-        self.depth += 1;
-        let mut members: Vec<(String, Json)> = Vec::new();
-        self.skip_ws();
-        if self.peek() == Some(b'}') {
-            self.at += 1;
-            self.depth -= 1;
-            return Ok(Json::Object(members));
-        }
-        loop {
-            self.skip_ws();
-            if self.peek() != Some(b'"') {
-                return self.fail("an object key must be a string");
-            }
-            let key = self.string()?;
-            if members.iter().any(|(seen, _)| seen == &key) {
-                return self.fail(&format!("the key {key:?} appears twice"));
-            }
-            self.skip_ws();
-            if self.peek() != Some(b':') {
-                return self.fail("a member needs a colon");
-            }
-            self.at += 1;
-            self.skip_ws();
-            let value = self.value()?;
-            members.push((key, value));
-            self.skip_ws();
-            match self.peek() {
-                Some(b',') => self.at += 1,
-                Some(b'}') => {
-                    self.at += 1;
-                    self.depth -= 1;
-                    return Ok(Json::Object(members));
-                }
-                _ => return self.fail("a member needs a comma or a closing brace"),
-            }
-        }
-    }
-
-    fn array(&mut self) -> Result<Json, JsonError> {
-        self.at += 1;
-        self.depth += 1;
-        let mut items = Vec::new();
-        self.skip_ws();
-        if self.peek() == Some(b']') {
-            self.at += 1;
-            self.depth -= 1;
-            return Ok(Json::Array(items));
-        }
-        loop {
-            self.skip_ws();
-            items.push(self.value()?);
-            self.skip_ws();
-            match self.peek() {
-                Some(b',') => self.at += 1,
-                Some(b']') => {
-                    self.at += 1;
-                    self.depth -= 1;
-                    return Ok(Json::Array(items));
-                }
-                _ => return self.fail("an item needs a comma or a closing bracket"),
-            }
-        }
-    }
-
-    fn digits(&mut self) -> usize {
-        let start = self.at;
-        while matches!(self.peek(), Some(b'0'..=b'9')) {
-            self.at += 1;
-        }
-        self.at - start
-    }
-
-    fn number(&mut self) -> Result<String, JsonError> {
-        let start = self.at;
-        if self.peek() == Some(b'-') {
-            self.at += 1;
-        }
-        if self.digits() == 0 {
-            return self.fail("the number is malformed");
-        }
-        if self.peek() == Some(b'.') {
-            self.at += 1;
-            if self.digits() == 0 {
-                return self.fail("the number is malformed");
-            }
-        }
-        if matches!(self.peek(), Some(b'e' | b'E')) {
-            self.at += 1;
-            if matches!(self.peek(), Some(b'+' | b'-')) {
-                self.at += 1;
-            }
-            if self.digits() == 0 {
-                return self.fail("the number is malformed");
-            }
-        }
-        let lexeme = std::str::from_utf8(&self.bytes[start..self.at]).map_err(|_| JsonError {
-            offset: start,
-            reason: "the number is not text".to_string(),
-        })?;
-        Ok(lexeme.to_string())
-    }
-
-    fn string(&mut self) -> Result<String, JsonError> {
-        self.at += 1;
-        let mut out = String::new();
-        loop {
-            let Some(byte) = self.peek() else {
-                return self.fail("the string ends early");
-            };
-            match byte {
-                b'"' => {
-                    self.at += 1;
-                    return Ok(out);
-                }
-                b'\\' => {
-                    self.at += 1;
-                    out.push(self.escape()?);
-                }
-                0x00..=0x1f => return self.fail("a raw control character sits in the string"),
-                _ => {
-                    // The text is a `&str`, so the lead byte gives the length
-                    // of the scalar and the slice is valid UTF-8.
-                    let end = (self.at + utf8_len(byte)).min(self.bytes.len());
-                    let piece =
-                        std::str::from_utf8(&self.bytes[self.at..end]).map_err(|_| JsonError {
-                            offset: self.at,
-                            reason: "the string is not UTF-8".to_string(),
-                        })?;
-                    out.push_str(piece);
-                    self.at = end;
-                }
-            }
-        }
-    }
-
-    fn escape(&mut self) -> Result<char, JsonError> {
-        let Some(byte) = self.peek() else {
-            return self.fail("the escape ends early");
-        };
-        self.at += 1;
-        match byte {
-            b'"' => Ok('"'),
-            b'\\' => Ok('\\'),
-            b'/' => Ok('/'),
-            b'b' => Ok('\u{8}'),
-            b'f' => Ok('\u{c}'),
-            b'n' => Ok('\n'),
-            b'r' => Ok('\r'),
-            b't' => Ok('\t'),
-            b'u' => self.unicode(),
-            _ => self.fail("the escape is not a JSON escape"),
-        }
-    }
-
-    fn unicode(&mut self) -> Result<char, JsonError> {
-        let high = self.hex4()?;
-        if (0xD800..0xDC00).contains(&high) {
-            if self.bytes.get(self.at..self.at + 2) != Some(b"\\u".as_slice()) {
-                return self.fail("the escape is not four hex digits");
-            }
-            self.at += 2;
-            let low = self.hex4()?;
-            if !(0xDC00..0xE000).contains(&low) {
-                return self.fail("the escape is not four hex digits");
-            }
-            let code = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
-            return char::from_u32(code).ok_or_else(|| JsonError {
-                offset: self.at,
-                reason: "the escape is not a character".to_string(),
-            });
-        }
-        char::from_u32(high).ok_or_else(|| JsonError {
-            offset: self.at,
-            reason: "the escape is not a character".to_string(),
-        })
-    }
-
-    fn hex4(&mut self) -> Result<u32, JsonError> {
-        let digits = self
-            .bytes
-            .get(self.at..self.at + 4)
-            .ok_or_else(|| JsonError {
-                offset: self.at,
-                reason: "the escape needs four hex digits".to_string(),
-            })?;
-        let code = engine_core::parse_hex4(digits).ok_or_else(|| JsonError {
-            offset: self.at,
-            reason: "the escape is not four hex digits".to_string(),
-        })?;
-        self.at += 4;
-        Ok(code)
-    }
-}
-
-/// Byte length of the UTF-8 sequence that starts with `lead`.
-fn utf8_len(lead: u8) -> usize {
-    if lead < 0x80 {
-        1
-    } else if lead < 0xE0 {
-        2
-    } else if lead < 0xF0 {
-        3
-    } else {
-        4
-    }
 }
 
 #[cfg(test)]

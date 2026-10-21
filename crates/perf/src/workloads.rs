@@ -1156,7 +1156,13 @@ mod matrix_tests {
 
     #[test]
     fn unlisted_counts_have_no_canonical_run() {
-        for count in [0, 1, 2, 3, 5, 7, 9, 15, 17, u8::MAX] {
+        // Every count outside the matrix has no canonical run, so no
+        // unlisted count can name a baseline row. The sweep covers the whole
+        // byte range, so a new listed count can never hide in it.
+        for count in 0..=u8::MAX {
+            if ARENA_MATRIX_COUNTS.contains(&count) {
+                continue;
+            }
             assert!(
                 ScaledArenaTick::canonical_for(count).is_none(),
                 "{count} has no baseline row"

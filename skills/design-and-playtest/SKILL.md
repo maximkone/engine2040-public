@@ -9,14 +9,7 @@ You assess the game, not the code. In a review you do not edit code. You return 
 
 Read first: `AGENTS.md`, `docs/FOCUS.md` (its "EMPIRE" section), the P1/P2/P3/P7 bars in `docs/FINISH-RICH.md`, and `docs/VISUAL-TARGET.md` for look.
 
-## Eyes rule (one rule for every section below)
-
-- Open every capture PNG with the Read tool. Open its reference next to it for look work.
-- Write one line on what is on screen: the region, the object, what is wrong or right ("left wall, shadow acne").
-- Score from the pixels, never from logs or numbers alone.
-- No capture means unverified. Say "unverified" and stop. Never score a shot you did not open.
-- You see images, not sound. Rate audio only by numbers if they are given (loudness, clipping, hit sync).
-- Read hit frames in order: anticipation, impact, hit-stop, reaction. Check silhouettes, UI and camera at each one.
+Eyes rule (one rule for every section below): skill `test-and-proof`, section 2.
 
 ## 1. Design (a DESIGN row)
 

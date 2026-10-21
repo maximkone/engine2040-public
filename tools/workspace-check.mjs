@@ -40,7 +40,7 @@ export const allowedEdges = new Map([
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
   ["engine-chaos", ["engine-observe", "engine-proof"]],
   ["engine-combat", ["engine-input"]],
-  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf"]],
+  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf", "engine-material"]],
   ["engine-destruction", ["engine-core", "engine-nav"]],
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.
@@ -440,6 +440,191 @@ function saveWiringCache(repoDir, fp, line) {
   } catch { /* wiring cache is best-effort */ }
 }
 
+// CDX6: a Rome number needs a source. The Rome loader (crates/rome/src/table.rs)
+// refuses a section that carries a number and no `ref`; this lint refuses the
+// same on disk, before a build ever sees the file, and a ref written in the
+// codex passage form must be a passage the codex index holds.
+//
+// The codex index (content/local/codex/index.jsonl) is a local artifact: when it
+// is missing the ref-list leg cannot run, so the lint says it skipped that leg
+// and the tree still passes. A ref written as prose ("rome.md section 5,
+// Vegetius 3.8") names no codex passage, so the loader alone judges it.
+export const ROME_CONTENT_DIR = join("content", "rome");
+export const CODEX_INDEX_FILE = join("content", "local", "codex", "index.jsonl");
+
+// A codex ref: lowercase word paths, `vegetius.3.8`, `caesar.bg.4.17`.
+const CODEX_REF_RE = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*$/;
+// A codex passage ref: a codex ref whose last part is a number.
+function isPassageRef(text) {
+  if (!CODEX_REF_RE.test(text)) return false;
+  const parts = text.split(".");
+  return /^\d+$/.test(parts[parts.length - 1]);
+}
+
+// A whole number as the Rome loader reads it: digits, no sign, no point.
+function isRomeNumber(value) {
+  return /^\d{1,19}$/.test(value);
+}
+
+// The text of a quoted value, without its quotes.
+function unquote(value) {
+  const text = String(value ?? "");
+  return text.length >= 2 && text.startsWith('"') && text.endsWith('"') ? text.slice(1, -1) : text;
+}
+
+// A draft table is not game data: the Rome loader refuses it, so the lint
+// leaves it alone. A draft says so before its first section header.
+function isDraftTable(text) {
+  for (const raw of String(text ?? "").split(/\r?\n/)) {
+    const body = raw.trim();
+    if (!body || body.startsWith("#")) continue;
+    if (body.startsWith("[")) return false;
+    if (/^draft\s*=\s*true\b/.test(body)) return true;
+  }
+  return false;
+}
+
+// The sections of a Rome table: a `[a.b]` header and the key/value lines under
+// it, in file order. The Rome tables are a strict subset of TOML.
+export function romeSections(text) {
+  const sections = [];
+  let current = null;
+  const lines = String(text ?? "").split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const body = lines[index].trim();
+    if (!body || body.startsWith("#")) continue;
+    const header = /^\[([^\[\]]+)\]$/.exec(body);
+    if (header) {
+      current = { key: header[1].trim(), line: index + 1, values: [] };
+      sections.push(current);
+      continue;
+    }
+    const pair = /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(body);
+    if (!pair || !current) continue;
+    current.values.push({ key: pair[1], value: pair[2].trim() });
+  }
+  return sections;
+}
+
+// The entries of a Rome table that carry a number, with the ref they name.
+export function romeNumberedEntries(text) {
+  const entries = [];
+  for (const section of romeSections(text)) {
+    const numbers = section.values.filter((value) => isRomeNumber(value.value)).map((value) => value.key);
+    if (!numbers.length) continue;
+    const written = section.values.find((value) => value.key === "ref");
+    entries.push({
+      key: section.key,
+      line: section.line,
+      numbers,
+      source: written ? unquote(written.value).trim() : "",
+    });
+  }
+  return entries;
+}
+
+// The codex passages a ref names: the passage refs it holds, whole or inside a
+// longer text. A ref in prose names no passage and is left to the loader.
+export function codexRefsNamed(source) {
+  const text = String(source ?? "");
+  const named = new Set();
+  const whole = text.trim();
+  if (isPassageRef(whole)) named.add(whole);
+  for (const token of text.split(/[^A-Za-z0-9_.]+/)) {
+    const clean = token.replace(/\.+$/, "");
+    if (isPassageRef(clean)) named.add(clean);
+  }
+  return [...named];
+}
+
+// The refs of the codex passage index: one passage per line of json.
+export function codexRefList(text) {
+  const refs = new Set();
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let record = null;
+    try { record = JSON.parse(trimmed); } catch { continue; }
+    const ref = typeof record?.ref === "string" ? record.ref.trim() : "";
+    if (ref) refs.add(ref);
+  }
+  return refs;
+}
+
+// The Rome tables of a tree: every toml under content/rome, drafts left out.
+export function romeContentFiles(root) {
+  const out = [];
+  const stack = [join(root, ROME_CONTENT_DIR)];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile() && entry.name.endsWith(".toml") && !entry.name.endsWith(".draft.toml")) out.push(full);
+    }
+  }
+  out.sort();
+  const files = [];
+  for (const file of out) {
+    const text = readFileSync(file, "utf8");
+    if (isDraftTable(text)) continue;
+    files.push({ path: relative(root, file).split("\\").join("/"), text });
+  }
+  return files;
+}
+
+// The source violations of one Rome table: an entry with a number and no ref,
+// and a ref in the codex passage form that the index does not hold. The
+// violations name the path and the key of the entry.
+export function romeSourceViolations(path, text, refs = null) {
+  const found = [];
+  for (const entry of romeNumberedEntries(text)) {
+    if (!entry.source) {
+      found.push(`rome source: ${path}: [${entry.key}] holds ${entry.numbers.join(", ")} and no ref naming its source`);
+      continue;
+    }
+    if (!refs) continue;
+    for (const named of codexRefsNamed(entry.source)) {
+      if (!refs.has(named)) {
+        found.push(`rome source: ${path}: [${entry.key}] names the ref ${named}, which the codex index does not hold`);
+      }
+    }
+  }
+  return found;
+}
+
+// The Rome source audit of a tree: the violations, the numbers counted and the
+// codex refs the index holds (null when there is no index to judge by).
+export function romeSourceAudit(root) {
+  const files = romeContentFiles(root);
+  const indexPath = join(root, CODEX_INDEX_FILE);
+  const indexExists = existsSync(indexPath);
+  const list = indexExists ? codexRefList(readFileSync(indexPath, "utf8")) : new Set();
+  const refs = list.size ? list : null;
+  const violations = [];
+  let entries = 0;
+  let prose = 0;
+  for (const file of files) {
+    for (const entry of romeNumberedEntries(file.text)) {
+      entries += 1;
+      if (entry.source && !codexRefsNamed(entry.source).length) prose += 1;
+    }
+    violations.push(...romeSourceViolations(file.path, file.text, refs));
+  }
+  return {
+    violations,
+    files: files.length,
+    entries,
+    prose,
+    refs,
+    indexExists,
+    indexEmpty: indexExists && !list.size,
+    indexPath: CODEX_INDEX_FILE.split("\\").join("/"),
+  };
+}
+
 export const WORKSPACE_CHECK_HELP = `workspace-check.mjs — audit the workspace before landing
 
 Usage:
@@ -447,7 +632,7 @@ Usage:
 
 Checks: Cargo metadata, dependency graph, module reachability, sim
 determinism, genre ledger, baseline gate, board needs, new LFS blobs,
-structural maps.
+structural maps, Rome sources.
 
 Lane triage: this audits the whole worktree, not your lane. A FAIL on a
 file outside your owned paths / lane diff is pre-existing dirt, not yours:
@@ -871,6 +1056,27 @@ function audit(repoDir) {
     errors.push(...structuralMapViolations({ headings, paths: mapPathsList, workspaceCrates, repomapHasCrates, missing }));
   } catch (error) {
     errors.push(`structural map check could not run: ${error.message}`);
+  }
+
+  // CDX6: a Rome number needs a source. The Rome loader refuses a section that
+  // carries a number and no `ref`; the lint refuses it on disk too, and a ref
+  // in the codex passage form must be a passage the codex index holds. The
+  // index is a local artifact: with no index the ref-list leg is skipped, and
+  // the tree still passes.
+  const rome = romeSourceAudit(repoDir);
+  errors.push(...rome.violations);
+  if (!rome.refs) {
+    console.log(rome.indexExists
+      ? `SKIP rome codex refs: the codex index holds no passage (${rome.indexPath}); the ref-list leg did not run`
+      : `SKIP rome codex refs: no codex index at ${rome.indexPath}; the ref-list leg did not run`);
+  }
+  if (rome.violations.length) {
+    console.log(`FAIL rome sources: ${rome.violations.length} entry(ies) hold a number with no source`);
+  } else {
+    console.log(`PASS rome sources: ${rome.files} file(s), ${rome.entries} entries with a number, every one names a ref`);
+  }
+  if (rome.prose) {
+    console.log(`WARN rome refs (report-only): ${rome.prose} entries name a source in prose, not in the codex passage form`);
   }
 
   try { const archOut = execFileSync(process.execPath, [join(repoDir, "tools", "arch-fitness.mjs")], { encoding: "utf8" }).trim(); if (archOut === "PASS dependency cycle") console.log(archOut); else errors.push(archOut || "dependency cycle found"); } catch (error) { errors.push(`dependency cycle check failed: ${error.message}`); }

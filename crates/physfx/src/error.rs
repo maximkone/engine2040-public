@@ -28,6 +28,8 @@ pub enum Field {
     Bone,
     /// How hard the joints brace, a 0..=1 scale.
     Muscle,
+    /// A collision layer the layer table does not know.
+    Layer,
 }
 
 impl Field {
@@ -44,6 +46,7 @@ impl Field {
             Field::Angle => "angle",
             Field::Bone => "bone",
             Field::Muscle => "muscle",
+            Field::Layer => "layer",
         }
     }
 }

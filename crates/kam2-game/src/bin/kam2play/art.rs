@@ -188,7 +188,7 @@ impl BuildingArts {
         Self {
             cottage_dir: cottage_dir.to_path_buf(),
             buildings_dir: buildings_dir.to_path_buf(),
-            slots: vec![None; HOUSE_SLOTS],
+            slots: (0..HOUSE_SLOTS).map(|_| None).collect(),
             registry: HouseArts::new(),
         }
     }
@@ -351,7 +351,7 @@ fn decode_if_present(path: &Path) -> Result<Option<(u32, u32, Vec<u8>)>, PlayErr
 }
 
 /// Decode one PNG that has to be there.
-fn decode(path: &Path) -> Result<(u32, u32, Vec<u8>)>, PlayError> {
+fn decode(path: &Path) -> Result<(u32, u32, Vec<u8>), PlayError> {
     decode_if_present(path)?
         .ok_or_else(|| PlayError::Art(format!("{}: missing beside the manifest", path.display())))
 }
@@ -471,10 +471,15 @@ mod tests {
         let mut arts = BuildingArts::new(&root.join("house"), &missing);
         arts.load_cottage().expect("the cottage loads");
         assert!(
-            !arts.ensure(HouseKind::Mill).expect("a missing folder is not an error"),
+            !arts
+                .ensure(HouseKind::Mill)
+                .expect("a missing folder is not an error"),
             "the mill has no building folder here"
         );
-        let art = arts.registry().resolve(HouseKind::Mill).expect("the cottage answers");
+        let art = arts
+            .registry()
+            .resolve(HouseKind::Mill)
+            .expect("the cottage answers");
         assert_eq!(art.slot, 0, "the mill falls back to the cottage");
         assert!(!art.own);
         assert_eq!(arts.source(slot_of(HouseKind::Mill)), "cottage");

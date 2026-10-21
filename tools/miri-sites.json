@@ -2,7 +2,7 @@
   "note": "CQ15: every file with an unsafe site, its exact site count, and the cargo miri test line that runs it (a verbatim step of .github/workflows/miri.yml) or the reason Miri cannot. node tools/miri-gate.mjs keeps this, the source and the workflow in step.",
   "sites": {
     "crates/core/src/alloc_probe.rs": {
-      "count": 5,
+      "count": 10,
       "miri": "cargo miri test -p engine-core --lib alloc_probe"
     },
     "crates/ecs/src/pool.rs": {

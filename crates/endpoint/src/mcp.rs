@@ -2528,9 +2528,19 @@ mod tests {
         // reverse lookup over the Insight callers graph, never code execution.
         // `test.run` is allowlisted by exact name: it runs the read-only
         // harvest checks (scene, preview, budget, manifest, log), never arbitrary code.
+        // `codex.search` and `codex.cite` are allowlisted by exact name: they
+        // read the codex passage index and write one ref line in a Rome table
+        // entry, never arbitrary code.
+        const ALLOWED_BY_NAME: [&str; 5] = [
+            "play.run",
+            "code.callers",
+            "test.run",
+            "codex.search",
+            "codex.cite",
+        ];
         for tool in server.all_tools() {
             let name = tool.name.to_lowercase();
-            if name != "play.run" && name != "code.callers" && name != "test.run" {
+            if !ALLOWED_BY_NAME.contains(&name.as_str()) {
                 for forbidden in ["exec", "shell", "file", "run", "code", "eval", "terminal"] {
                     assert!(
                         !name.contains(forbidden),

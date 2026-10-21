@@ -361,17 +361,17 @@ mod tests {
         let tile = [number(&json, "tile_w"), number(&json, "tile_h")];
         let padding = number(&json, "padding");
         let rows = state_rows(&json);
-        let atlas = [
-            tile[0] + padding * 2,
-            rows * (tile[1] + padding * 2),
-        ];
+        let atlas = [tile[0] + padding * 2, rows * (tile[1] + padding * 2)];
 
         assert_eq!(manifest.id(), "house.cottage");
         assert_eq!(manifest.atlas(), "house.cottage.atlas.png");
         assert_eq!(manifest.mask_atlas(), None, "this look pass ships no mask");
         assert_eq!(manifest.tile(), tile);
         assert_eq!(manifest.padding(), padding);
-        assert_eq!(manifest.pitch(), [tile[0] + padding * 2, tile[1] + padding * 2]);
+        assert_eq!(
+            manifest.pitch(),
+            [tile[0] + padding * 2, tile[1] + padding * 2]
+        );
         assert_eq!(manifest.atlas_size(), atlas);
         assert_eq!(manifest.pivot(), pair(&json, "pivot"));
         assert_eq!(manifest.footprint(), pair(&json, "footprint"));
@@ -396,8 +396,7 @@ mod tests {
         for row in 0..rows {
             let [origin, size] = manifest.cell_uv(row).expect("the row is inside the grid");
             let expected_x = f64::from(padding) / atlas[0];
-            let expected_y =
-                f64::from(row * (tile[1] + padding * 2) + padding) / atlas[1];
+            let expected_y = f64::from(row * (tile[1] + padding * 2) + padding) / atlas[1];
             assert!(
                 (f64::from(origin[0]) - expected_x).abs() < f64::from(EPS),
                 "row {row} origin {origin:?}"
@@ -409,7 +408,11 @@ mod tests {
             assert!((f64::from(size[0]) - f64::from(tile[0]) / atlas[0]).abs() < f64::from(EPS));
             assert!((f64::from(size[1]) - f64::from(tile[1]) / atlas[1]).abs() < f64::from(EPS));
         }
-        assert_eq!(manifest.cell_uv(rows), None, "the atlas holds no row past the last");
+        assert_eq!(
+            manifest.cell_uv(rows),
+            None,
+            "the atlas holds no row past the last"
+        );
     }
 
     #[test]
@@ -473,20 +476,14 @@ mod tests {
         let top_left = manifest.top_left(anchor);
         assert_eq!(
             top_left,
-            [
-                anchor[0] - pivot[0] as f32,
-                anchor[1] - pivot[1] as f32,
-            ],
+            [anchor[0] - pivot[0] as f32, anchor[1] - pivot[1] as f32,],
             "the cell starts that far above the anchor"
         );
         assert_eq!(
             manifest.size(),
             [manifest.tile()[0] as f32, manifest.tile()[1] as f32]
         );
-        let ground = [
-            top_left[0] + pivot[0] as f32,
-            top_left[1] + pivot[1] as f32,
-        ];
+        let ground = [top_left[0] + pivot[0] as f32, top_left[1] + pivot[1] as f32];
         assert_eq!(ground, anchor, "the footprint centre sits on the anchor");
     }
 
@@ -497,10 +494,7 @@ mod tests {
             let (w, h) = kind.footprint();
             assert_eq!(
                 manifest.footprint(),
-                [
-                    u32::try_from(w).unwrap_or(0),
-                    u32::try_from(h).unwrap_or(0),
-                ],
+                [u32::try_from(w).unwrap_or(0), u32::try_from(h).unwrap_or(0),],
                 "the {} manifest must draw the footprint the sim reserves",
                 kind.name()
             );

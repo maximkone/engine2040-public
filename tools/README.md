@@ -31,6 +31,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/cast-safe.mjs` (+ `tools/cast-safe.test.mjs`): node script; see its header.
 - `tools/city-osm.mjs` (+ `tools/city-osm.test.mjs`): convert an offline OSM slice to glTF.
 - `tools/clean.mjs` (+ `tools/clean.test.mjs`): node script; see its header.
+- `tools/codex-check.mjs` (+ `tools/codex-check.test.mjs`): check every Rome table number against the source passage it names.
 - `tools/compile-cache.mjs` (+ `tools/compile-cache.test.mjs`): node script; see its header.
 - `tools/compile-cache-spike.mjs` (+ `tools/compile-cache-spike.test.mjs`): time one lane build cold, then with a warm sccache in fresh target dirs; prints KEEP/DROP, never edits a tracked file.
 - `tools/content-lib.mjs`: shared digest, image-size and generated-block helpers for the content report tools.

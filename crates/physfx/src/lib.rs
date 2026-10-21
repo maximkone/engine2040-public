@@ -26,6 +26,11 @@
 //! - What a body is made of (density, grip, bounce, drag) comes from the one table in
 //!   `engine_physics::material`: bones are flesh, `spawn_debris` is stone, and the `_of`
 //!   spawns take any `Material`.
+//! - Every collider this crate builds carries the group and the mask of the collision layer
+//!   table (`engine_physics::layers`): the floor and the walls are the world, a crate and a
+//!   thrown object are props, the bones of a fighter and the limbs that came off are the
+//!   body, and the pieces of a broken wall are debris. Two bodies meet only when each one
+//!   accepts the other's layer, so a ragdoll rests on a crate and debris never meets cloth.
 //! - A `Blast` (integers, as the sim holds it) shoves every body inside its radius straight
 //!   away from the center, weaker with distance. `spawn_thrown` flies an arrow or a thrown
 //!   object along the drag-free arc that reaches the authority's hit point on the hit tick.
@@ -73,6 +78,8 @@ mod error;
 #[cfg(feature = "rapier")]
 mod fx;
 #[cfg(feature = "rapier")]
+mod groups;
+#[cfg(feature = "rapier")]
 mod rig;
 #[cfg(feature = "rapier")]
 mod tether;
@@ -85,6 +92,9 @@ mod verbs;
 pub use body::{parse as parse_body, BodyDesc, BodyError, BoneRow, CutRow, GORE_FULL, MUSCLE_FULL};
 #[cfg(feature = "rapier")]
 pub use caps::{Caps, Tier};
+/// The collision layer table every collider of this crate takes its group and mask from.
+#[cfg(feature = "rapier")]
+pub use engine_physics::layers;
 #[cfg(feature = "rapier")]
 pub use engine_physics::material::Material;
 #[cfg(feature = "rapier")]

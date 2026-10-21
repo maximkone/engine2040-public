@@ -14,19 +14,22 @@
 # bar is ladder.rs FIRST_BOUT_START_SECS 45 with cap
 # FIRST_BOUT_START_LIMIT_SECS 60, checked by its Rust test),
 # rank (glory rank after winning this rung from fresh under ladder.rs floors
-# 0/300/900/1800/3600, loop bonus 500 lands on the last rung), boss (1 only
-# on the last rung).
+# 0/300/900/1800/3600, the career ranks Tiro, Miles, Immunis, Optio and
+# Centurio; loop bonus 500 lands on the last rung), boss (1 only
+# on the last rung). Each rung row names the rank it reaches in a trailing
+# comment (rank <n> <name>), so the chart and crates/game/src/ladder.rs
+# cannot drift; the floors live in content/design/loop.rows.
 # Beat map (`new` counts RUNG_NEW_ELEMENTS: 2 on even rungs, 1 on odd):
 # rung_0 light + parry (Holder grunt), rung_1 heavy, rung_2 dodge answer +
 # stamina (Flanker veteran), rung_3 riposte, rung_4 stamina pressure + wall
 # band, rung_5 elite pressure, rung_6 gate mouth + ring, rung_7 final bout
 # (boss flag; GA15 primus replaces the tier).
 table ladder version 1
-rung_0 tier=1 new_moves=1 new_rules=1 new_arena=0 reward=100 penalty=25 minutes=2 rank=0 boss=0
-rung_1 tier=1 new_moves=1 new_rules=0 new_arena=0 reward=125 penalty=25 minutes=2 rank=0 boss=0
-rung_2 tier=2 new_moves=1 new_rules=1 new_arena=0 reward=150 penalty=25 minutes=3 rank=1 boss=0
-rung_3 tier=2 new_moves=1 new_rules=0 new_arena=0 reward=175 penalty=25 minutes=3 rank=1 boss=0
-rung_4 tier=2 new_moves=0 new_rules=1 new_arena=1 reward=200 penalty=25 minutes=4 rank=1 boss=0
-rung_5 tier=3 new_moves=1 new_rules=0 new_arena=0 reward=225 penalty=25 minutes=4 rank=2 boss=0
-rung_6 tier=3 new_moves=1 new_rules=0 new_arena=1 reward=250 penalty=25 minutes=5 rank=2 boss=0
-rung_7 tier=3 new_moves=1 new_rules=0 new_arena=0 reward=275 penalty=25 minutes=6 rank=3 boss=1
+rung_0 tier=1 new_moves=1 new_rules=1 new_arena=0 reward=100 penalty=25 minutes=2 rank=0 boss=0 # rank 0 Tiro
+rung_1 tier=1 new_moves=1 new_rules=0 new_arena=0 reward=125 penalty=25 minutes=2 rank=0 boss=0 # rank 0 Tiro
+rung_2 tier=2 new_moves=1 new_rules=1 new_arena=0 reward=150 penalty=25 minutes=3 rank=1 boss=0 # rank 1 Miles
+rung_3 tier=2 new_moves=1 new_rules=0 new_arena=0 reward=175 penalty=25 minutes=3 rank=1 boss=0 # rank 1 Miles
+rung_4 tier=2 new_moves=0 new_rules=1 new_arena=1 reward=200 penalty=25 minutes=4 rank=1 boss=0 # rank 1 Miles
+rung_5 tier=3 new_moves=1 new_rules=0 new_arena=0 reward=225 penalty=25 minutes=4 rank=2 boss=0 # rank 2 Immunis
+rung_6 tier=3 new_moves=1 new_rules=0 new_arena=1 reward=250 penalty=25 minutes=5 rank=2 boss=0 # rank 2 Immunis
+rung_7 tier=3 new_moves=1 new_rules=0 new_arena=0 reward=275 penalty=25 minutes=6 rank=3 boss=1 # rank 3 Optio

@@ -119,5 +119,8 @@
       { "id": "pool_se", "shape": "circle", "x": 18, "z": -76, "r": 12 }
     ]
   },
+  "zones": [
+    { "id": "central_basin", "label": "the contested middle, the basin around the keep ruin", "kind": "war", "x": 0, "z": 0, "radius": 40 }
+  ],
   "notes": "The contested middle: a 300 m bowl of dust with 12 m of relief, the ruined keep on the only rise at the centre. 64 players in four halls of 16: wardens from the south and the south-west, ashkin from the north and the north-east. Three capture points, the three statues: capture_progress_s is the capture time in seconds, radius is the capture ring in metres, contested_by is how many factions can contest one ring at once. The two forts are build plots for guilds, not capture points (capture_progress_s 0) and they persist between wars while the statues reset. The four gates are lane markers, not score points (capture_progress_s 0). Units are metres, +x is east, +z is north, the origin is the middle statue. from and to in sight_lines and terrain.roads are ids of landmarks, nodes, spawns or pve_spots in this file. cover w is the size along x and cover h is the size along z, a footprint box; the standing height of each kind is in contested_middle.md. Water is a hazard band, not a swim area: 40% speed, no cover, visible from the rim. Fog runs from 60 m to 240 m."
 }

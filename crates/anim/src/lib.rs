@@ -75,6 +75,7 @@ pub mod motion_style;
 pub mod net_diverge;
 pub mod net_pose;
 pub mod pack;
+pub mod pack_file;
 /// Per-character eval on the RC3 job pool: index-ordered chunks, one owner per
 /// character, poses identical under every chunking. Presentation and bake only.
 pub mod par;

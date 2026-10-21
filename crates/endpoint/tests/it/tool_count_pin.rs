@@ -41,8 +41,10 @@ use engine_endpoint::{
 /// up by one. `world.query` (GS46, the scene pack's ninth verb) moved every arm
 /// up by one. `ai.decisions` (GS48, the play pack's eighth verb) moved every arm
 /// up by one. The session pack adds `scene.diff` and `session.activity` (D17,
-/// on-demand), so every arm moves up by two.
-const EXPECTED_ROUTER: usize = 78
+/// on-demand), so every arm moves up by two. The codex pack adds
+/// `codex.search` and `codex.cite` (on-demand), so every arm moves up by two
+/// more.
+const EXPECTED_ROUTER: usize = 80
     + if cfg!(feature = "rules") { 3 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

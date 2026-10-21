@@ -54,4 +54,4 @@ Run again after each fix. Do not move code to a test module to hide it.
 - On the shared tree your index may hold other sessions' staged files; commit by path (skill `commit-and-board`). With a temp index (Case B there), the baseline file must be in that index too, or the hook sees no baseline.
 - `rustfmt --edition 2021 --check <files>` is a separate gate. Never `cargo fmt` (it rewrites other sessions' files).
 - The mirror CI runs the ratchet on committed HEAD. A hunk another session left in HEAD can make it red; say whose file, do not fix it.
-- `cargo clippy --fix` can delete a `return` that is only needless on Linux: check `cfg(target_os)` code by hand.
+- A clippy autofix can delete a `return` that is only needless on Linux: check `cfg(target_os)` code by hand.

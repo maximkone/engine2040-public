@@ -4,6 +4,16 @@
 # `#` comments, no floats. Glory is counts (no suffix); the loss drain is
 # the named drain of the pool. Range checks are validate_loop in
 # crates/game/src/loop_text.rs; the compiled constants stay the truth for
-# replays. Rank names stay in code.
+# replays.
+# Rank table: the career ranks, one per glory floor. The floors are the
+# glory_rank0..4 keys of the row below, so the names and the floors stay
+# one table.
+# ranks Tiro=0 Miles=300 Immunis=900 Optio=1800 Centurio=3600
+# Source: docs/plan/rome.md section 0 decision 4 and section 8 (the career
+# replaces the gladiator ranks, and glory reads as the service record). The
+# officers optio and centurio are Vegetius 2.7-9 and 2.14 (rome.md section
+# 5). The rows parser reads numbers only, so this table sits in the header
+# comment; crates/game/src/ladder.rs reads it in its test, so the file and
+# the code cannot drift.
 table loop version 1
 v1 glory_per_win=100 glory_rung_bonus=25 glory_per_loop=500 glory_loss_penalty=50 glory_rank0=0 glory_rank1=300 glory_rank2=900 glory_rank3=1800 glory_rank4=3600

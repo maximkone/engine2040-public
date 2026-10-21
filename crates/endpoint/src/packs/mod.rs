@@ -1,5 +1,5 @@
-//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, seventeen packs load on
-//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `settings`, `web`, `session` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
+//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, eighteen packs load on
+//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `settings`, `web`, `session`, `codex` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
 //!
 //! Consumer: the MCP door (`super::mcp::McpServer`) lists its core tools plus
 //! the packs a session loaded (`api.load`), dispatches any verb by exact
@@ -46,6 +46,9 @@ use super::tool_capabilities::CapabilityCard;
 pub mod anim;
 pub mod asset;
 pub mod break_;
+/// The Rome codex: search the passage index and cite a passage in a Rome
+/// table entry.
+pub mod codex;
 pub mod geo;
 /// Door grammar gate (constrained decoding stays typed).
 pub mod grammar;
@@ -79,7 +82,7 @@ pub mod web;
 /// verifier verbs replace their replay-pack stand-ins in the same slot, so a
 /// build never serves one verb name twice.
 #[cfg(feature = "verify")]
-pub const PACK_NAMES: [&str; 17] = [
+pub const PACK_NAMES: [&str; 18] = [
     scene::PACK,
     break_::PACK,
     anim::PACK,
@@ -97,11 +100,12 @@ pub const PACK_NAMES: [&str; 17] = [
     physics_settings::PACK,
     web::PACK,
     session::PACK,
+    codex::PACK,
 ];
 
 /// Every pack name, in contract order. Each name has one module below.
 #[cfg(not(feature = "verify"))]
-pub const PACK_NAMES: [&str; 17] = [
+pub const PACK_NAMES: [&str; 18] = [
     scene::PACK,
     break_::PACK,
     anim::PACK,
@@ -119,6 +123,7 @@ pub const PACK_NAMES: [&str; 17] = [
     physics_settings::PACK,
     web::PACK,
     session::PACK,
+    codex::PACK,
 ];
 
 /// Core tool: call one verb from any pack by exact name.
@@ -576,6 +581,7 @@ impl PackRegistry {
             packs.push(physics_settings::pack());
             packs.push(web::pack());
             packs.push(session::pack());
+            packs.push(codex::pack());
             Self::build(packs)
         })
     }

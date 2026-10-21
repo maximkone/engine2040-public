@@ -183,10 +183,24 @@ const BODY_VERTS: usize = 4_206;
 /// times 3.
 const BODY_INDICES: usize = 18_864;
 
+/// The six box faces as `(normal, along, up)`, with `along x up = normal`: a
+/// grid built with `u` along `along` and `v` along `up` then runs
+/// counter-clockwise seen from outside, the winding the forward pipeline
+/// keeps. The arena's own box builder owns the same rule.
+const BODY_FACES: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
+    ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+    ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+    ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+    ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+    ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+    ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+];
+
 /// Push one axis-aligned subdivided box with outward face normals and
 /// `0..=1` UVs. Faces are emitted in `+X -X +Y -Y +Z -Z` order with a
-/// `(seg + 1)` squared grid each; winding is informational (both
-/// rasterizers depth-test only, no culling). Pure, headless std-only.
+/// `(seg + 1)` squared grid each, wound counter-clockwise seen from outside:
+/// the forward pipeline culls back faces, so a face wound the other way is
+/// dropped and the box vanishes from that side. Pure, headless std-only.
 /// Out-of-range vertex counts are typed, never panics.
 fn push_subdivided_box(
     min_m: [f32; 3],
@@ -199,54 +213,14 @@ fn push_subdivided_box(
 ) -> Result<(), WinError> {
     let seg_f = f32::from(seg);
     let stride = u32::from(seg) + 1;
-    for face in 0..6 {
-        let normal = match face {
-            0 => [1.0, 0.0, 0.0],
-            1 => [-1.0, 0.0, 0.0],
-            2 => [0.0, 1.0, 0.0],
-            3 => [0.0, -1.0, 0.0],
-            4 => [0.0, 0.0, 1.0],
-            _ => [0.0, 0.0, -1.0],
-        };
+    for (normal, along, up) in BODY_FACES {
         let base = u32::try_from(positions.len())
             .map_err(|_| WinError::Render("staged body verts out of range".to_string()))?;
         for iy in 0..=seg {
             let v = f32::from(iy) / seg_f;
             for ix in 0..=seg {
                 let u = f32::from(ix) / seg_f;
-                let pos = match face {
-                    0 => [
-                        max_m[0],
-                        min_m[1] + (max_m[1] - min_m[1]) * v,
-                        min_m[2] + (max_m[2] - min_m[2]) * u,
-                    ],
-                    1 => [
-                        min_m[0],
-                        min_m[1] + (max_m[1] - min_m[1]) * v,
-                        min_m[2] + (max_m[2] - min_m[2]) * u,
-                    ],
-                    2 => [
-                        min_m[0] + (max_m[0] - min_m[0]) * u,
-                        max_m[1],
-                        min_m[2] + (max_m[2] - min_m[2]) * v,
-                    ],
-                    3 => [
-                        min_m[0] + (max_m[0] - min_m[0]) * u,
-                        min_m[1],
-                        min_m[2] + (max_m[2] - min_m[2]) * v,
-                    ],
-                    4 => [
-                        min_m[0] + (max_m[0] - min_m[0]) * u,
-                        min_m[1] + (max_m[1] - min_m[1]) * v,
-                        max_m[2],
-                    ],
-                    _ => [
-                        min_m[0] + (max_m[0] - min_m[0]) * u,
-                        min_m[1] + (max_m[1] - min_m[1]) * v,
-                        min_m[2],
-                    ],
-                };
-                positions.push(pos);
+                positions.push(face_point(min_m, max_m, normal, along, up, u, v));
                 normals.push(normal);
                 uvs.push([u, v]);
             }
@@ -262,6 +236,35 @@ fn push_subdivided_box(
         }
     }
     Ok(())
+}
+
+/// One point of a box face: the normal axis holds the face plane, `along`
+/// carries the `u` span and `up` the `v` span.
+fn face_point(
+    min_m: [f32; 3],
+    max_m: [f32; 3],
+    normal: [f32; 3],
+    along: [f32; 3],
+    up: [f32; 3],
+    u: f32,
+    v: f32,
+) -> [f32; 3] {
+    std::array::from_fn(|axis| {
+        let span = max_m[axis] - min_m[axis];
+        if normal[axis] > 0.0 {
+            max_m[axis]
+        } else if normal[axis] < 0.0 {
+            min_m[axis]
+        } else if along[axis] > 0.0 {
+            min_m[axis] + span * u
+        } else if along[axis] < 0.0 {
+            max_m[axis] - span * u
+        } else if up[axis] > 0.0 {
+            min_m[axis] + span * v
+        } else {
+            max_m[axis] - span * v
+        }
+    })
 }
 
 /// A staged fighter body: the [`BODY_BOXES`] stance welded into one mesh with
@@ -1235,6 +1238,39 @@ mod tests {
             (max[1] - feet[1] - FIGHT_BODY_SIZE_M[1]).abs() < 0.05,
             "top at {} m",
             max[1] - feet[1]
+        );
+    }
+
+    /// The forward pipeline culls back faces, so a face whose winding runs the
+    /// other way is dropped. The shoulder camera looks at the `+X +Y -Z` sides
+    /// of a fighter: wind those inward and the body never reaches the screen.
+    #[test]
+    fn body_faces_wind_counter_clockwise_seen_from_outside() {
+        let mesh = fight_body_mesh([0.0, 0.0, 0.0]).expect("body mesh builds");
+        let vertex = |index: u32| usize::try_from(index).expect("index fits a vertex");
+        let mut triangles = 0usize;
+        for tri in mesh.indices.chunks_exact(3) {
+            let a = mesh.positions[vertex(tri[0])];
+            let b = mesh.positions[vertex(tri[1])];
+            let c = mesh.positions[vertex(tri[2])];
+            let face = mesh.normals[vertex(tri[0])];
+            // The right-hand normal of the triangle must agree with the face
+            // normal: that is what "counter-clockwise seen from outside" means.
+            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let cross = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+            let dot = cross[0] * face[0] + cross[1] * face[1] + cross[2] * face[2];
+            assert!(dot > 0.0, "a body face is wound inward");
+            triangles += 1;
+        }
+        assert_eq!(
+            triangles,
+            BODY_INDICES / 3,
+            "every body triangle is checked"
         );
     }
 

@@ -2,6 +2,12 @@
 # streets every camp keeps clear. Lengths are Roman feet as the sources give them; the
 # loader turns them into millimetres. Every entry that holds a number names its source
 # in `ref` (docs/plan/rome.md section 5), and an entry without one is refused.
+#
+# The `codex.*` sections below are the machine proof of every number here: the passage
+# that gives it, the spelling the source writes and the hash of that passage's text.
+# The Rome loader reads the entries above only, so the proof lives in its own sections
+# and never touches a number the game reads. `node tools/codex-check.mjs` reads the
+# two public-domain sources and checks every row against the passage it names.
 
 [units]
 mm_per_ft = 296
@@ -22,6 +28,12 @@ width_ft = 12
 depth_ft = 9
 ref = "rome.md section 5, Vegetius 1.24"
 
+[ditch.turf]
+height_ft = 3
+earth_ft = 4
+total_ft = 13
+ref = "Vegetius 1.24"
+
 [rampart]
 width_ft = 8
 height_ft = 6
@@ -31,3 +43,135 @@ ref = "rome.md section 5, Hyginus 50; Vegetius 3.8"
 via_principalis_ft = 60
 via_quintana_ft = 40
 ref = "rome.md section 5, Hyginus 14, 17"
+
+[streets.sagularis]
+width_ft = 30
+width_five_legions_ft = 40
+ref = "Hyginus 20"
+
+[streets.quintana_gate]
+width_ft = 50
+ref = "Hyginus 17"
+
+[gates]
+clear_space_ft = 60
+ref = "Hyginus 49"
+
+[codex.ditch_width]
+entry = "ditch.one_night"
+key = "width_ft"
+ref = "PHG 49"
+form = "quinque"
+hash = "sha256:7d9b0477817ded0122f8195524be4284326b00a776ad0500423eac3ccf071d56"
+
+[codex.ditch_depth]
+entry = "ditch.one_night"
+key = "depth_ft"
+ref = "PHG 49"
+form = "tres"
+hash = "sha256:7d9b0477817ded0122f8195524be4284326b00a776ad0500423eac3ccf071d56"
+
+[codex.hasty_ditch_width]
+entry = "ditch.light"
+key = "width_ft"
+ref = "VEG 1.24"
+form = "nouem"
+hash = "sha256:abd453c6fe99d8fa9dabbab0368ee3379666bb0edd853df4e054e92d9f6e0bf1"
+
+[codex.hasty_ditch_depth]
+entry = "ditch.light"
+key = "depth_ft"
+ref = "VEG 1.24"
+form = "VII"
+hash = "sha256:abd453c6fe99d8fa9dabbab0368ee3379666bb0edd853df4e054e92d9f6e0bf1"
+
+[codex.regular_ditch_width]
+entry = "ditch.serious"
+key = "width_ft"
+ref = "VEG 1.24"
+form = "XII"
+hash = "sha256:abd453c6fe99d8fa9dabbab0368ee3379666bb0edd853df4e054e92d9f6e0bf1"
+
+[codex.regular_ditch_depth]
+entry = "ditch.serious"
+key = "depth_ft"
+ref = "VEG 1.24"
+form = "nouem"
+hash = "sha256:abd453c6fe99d8fa9dabbab0368ee3379666bb0edd853df4e054e92d9f6e0bf1"
+
+[codex.turf_height]
+entry = "ditch.turf"
+key = "height_ft"
+ref = "VEG 1.24"
+form = "tribus"
+hash = "sha256:abd453c6fe99d8fa9dabbab0368ee3379666bb0edd853df4e054e92d9f6e0bf1"
+
+[codex.turf_earth]
+entry = "ditch.turf"
+key = "earth_ft"
+ref = "VEG 1.24"
+form = "IIII"
+hash = "sha256:abd453c6fe99d8fa9dabbab0368ee3379666bb0edd853df4e054e92d9f6e0bf1"
+
+[codex.turf_total]
+entry = "ditch.turf"
+key = "total_ft"
+ref = "VEG 1.24"
+form = "XIII"
+hash = "sha256:abd453c6fe99d8fa9dabbab0368ee3379666bb0edd853df4e054e92d9f6e0bf1"
+
+[codex.rampart_width]
+entry = "rampart"
+key = "width_ft"
+ref = "PHG 50"
+form = "VIII"
+hash = "sha256:537a7e37804bbd3ce8a61310eb10a82934593f9da83d1da6ff49a8dd7b233027"
+
+[codex.rampart_height]
+entry = "rampart"
+key = "height_ft"
+ref = "PHG 50"
+form = "VI"
+hash = "sha256:537a7e37804bbd3ce8a61310eb10a82934593f9da83d1da6ff49a8dd7b233027"
+
+[codex.via_principalis]
+entry = "streets"
+key = "via_principalis_ft"
+ref = "PHG 14"
+form = "LX"
+hash = "sha256:982b1be20e26f86a0b12b456baacb58c12f2fd142493d3c3ea0cdda2c7774f1b"
+
+[codex.via_quintana]
+entry = "streets"
+key = "via_quintana_ft"
+ref = "PHG 17"
+form = "XL"
+hash = "sha256:459d20c96bb8dc211505af136cf053cd454603cd37eb72d135bcc999907c33b7"
+
+[codex.via_quintana_with_gate]
+entry = "streets.quintana_gate"
+key = "width_ft"
+ref = "PHG 17"
+form = "L"
+hash = "sha256:459d20c96bb8dc211505af136cf053cd454603cd37eb72d135bcc999907c33b7"
+
+[codex.via_sagularis]
+entry = "streets.sagularis"
+key = "width_ft"
+ref = "PHG 20"
+form = "XXX"
+hash = "sha256:9f004f82f23242ed4c215b11afed136a6629670d706fd30617953e25cf22df7b"
+
+[codex.via_sagularis_five_legions]
+entry = "streets.sagularis"
+key = "width_five_legions_ft"
+ref = "PHG 20"
+form = "XL"
+hash = "sha256:9f004f82f23242ed4c215b11afed136a6629670d706fd30617953e25cf22df7b"
+
+[codex.gate_clear_space]
+entry = "gates"
+key = "clear_space_ft"
+ref = "PHG 49"
+form = "sexaginta"
+hash = "sha256:7d9b0477817ded0122f8195524be4284326b00a776ad0500423eac3ccf071d56"

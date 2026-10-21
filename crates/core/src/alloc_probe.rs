@@ -25,7 +25,9 @@ thread_local! {
     static PEAK: Cell<i64> = const { Cell::new(0) };
 }
 
-/// `System` allocator that counts this thread's allocations while armed.
+/// The counting allocator over `System`: every call forwards to
+/// [`CountingAllocator`]`<System>`, which counts this thread's allocations
+/// while armed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CountingAlloc;
 
@@ -58,22 +60,21 @@ fn note_dealloc(layout: Layout) {
     reason = "the counting allocators are only expressible as unsafe GlobalAlloc impls: both forward every call unchanged to their inner allocator"
 )]
 // SAFETY: every call forwards the caller's layout and pointer unchanged to
-// `System`, so `System`'s guarantees hold. The counters are const-initialized
-// thread-locals that never allocate, so counting cannot recurse or race.
+// `CountingAllocator<System>`, which forwards them unchanged to `System`, so
+// `System`'s guarantees hold. The counters are const-initialized thread-locals
+// that never allocate, so counting cannot recurse or race. Counting happens
+// once, in `CountingAllocator`, so this forwarder adds no count of its own.
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller upholds `GlobalAlloc::alloc`'s layout contract.
-        let ptr = unsafe { System.alloc(layout) };
-        if !ptr.is_null() {
-            note_alloc(layout);
-        }
-        ptr
+        // SAFETY: the caller upholds `GlobalAlloc::alloc`'s layout contract,
+        // which `CountingAllocator<System>` takes unchanged.
+        unsafe { CountingAllocator(System).alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: `ptr` came from `alloc` above with this same `layout`.
-        unsafe { System.dealloc(ptr, layout) };
-        note_dealloc(layout);
+        // SAFETY: `ptr` came from `alloc` above with this same `layout`, so it
+        // came from `CountingAllocator<System>` with this same `layout`.
+        unsafe { CountingAllocator(System).dealloc(ptr, layout) };
     }
 }
 

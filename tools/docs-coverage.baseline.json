@@ -188,6 +188,12 @@
    "undocumented": 55,
    "coverage": 97.97197640117994
   },
+  "engine-rome": {
+   "total": 51,
+   "documented": 51,
+   "undocumented": 0,
+   "coverage": 100
+  },
   "engine-rules": {
    "total": 132,
    "documented": 132,
