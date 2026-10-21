@@ -40,7 +40,7 @@ const DUP_MIN_TOKENS = 30;
 // Donor: eslint file-hash result cache (MIT)
 // https://github.com/eslint/eslint/blob/main/lib/cli-engine/lint-result-cache.js
 export const CACHE_DIR = "target/rust-quality-cache";
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 function cachePath(root, rel) {
   return join(root, CACHE_DIR, `${encodeURIComponent(rel)}.json`);
@@ -94,7 +94,7 @@ function cacheWrite(cacheFile, key, a) {
 // Metric table: `bad` counts are ratcheted per crate and must not rise. The
 // score interpolates each metric's density per 1,000 code lines (or ratio)
 // between `target` (full weight) and `zeroAt` (no weight). Weights sum to 100.
-const METRICS = {
+export const METRICS = {
   unwrap: { weight: 8, target: 0, zeroAt: 1, bad: true, what: "`.unwrap()` in production code" },
   panic_sites: { weight: 6, target: 1, zeroAt: 5, bad: true, what: "`expect`/`panic!`/`unreachable!`/`todo!` in production code" },
   casts: { weight: 8, target: 5, zeroAt: 40, bad: true, what: "numeric `as` casts (use From/TryFrom or a named conversion)" },
@@ -118,6 +118,41 @@ const METRICS = {
 };
 // Metrics a crate entering the baseline must already have at zero.
 const STRICT_NEW = ["unwrap", "allow_no_reason", "dead_code_allows", "print_in_lib", "string_errors", "board_ids", "hash_reimpl", "dup_fns", "nondet", "float_math"];
+
+// One sentence per rule id: the exact edit that clears the finding, so an
+// agent fixes a red gate without reading the rule source. Guidance only: the
+// text never changes a count, a score or the ratchet.
+export const RULE_FIXES = {
+  unwrap: "replace `.unwrap()` with `?` in a function that returns `Result`, or with `expect(\"why it cannot fail\")` when the value is proven",
+  panic_sites: "return a typed error (`Err(MyError::Case)`) or handle the case with `match` instead of `panic!`, `expect`, `unreachable!` or `todo!`",
+  casts: "replace the `as` cast with `TryFrom` (`u32::try_from(x).map_err(MyError::Narrow)?`), or keep it under `#[expect(clippy::cast_possible_truncation, reason = \"the range is proven\")]`",
+  allow_no_reason: "add the reason to the attribute: `#[expect(lint_name, reason = \"why\")]`",
+  dead_code_allows: "delete `#[allow(dead_code)]` and either call the item from real code or delete the item",
+  print_in_lib: "delete the `println!`/`eprintln!`/`dbg!` from the library and return the value or a typed error instead",
+  string_errors: "replace the `String`/`&'static str` error with a typed error enum of the crate and return `Err(MyError::Case)`",
+  board_ids: "delete the row id from the comment, the history belongs in git and not in the code",
+  hash_reimpl: "use the engine-core owner `engine_core::{Fnv64, hash_bytes, splitmix64}` instead of the local constant or loop",
+  dup_fns: "move the duplicated body to its owner crate (engine-core for a primitive) and call it from both callers",
+  passthrough: "delete the forwarding wrapper and call the target function directly",
+  long_fns: "split the function into named steps, each one under 100 lines",
+  big_files: "move a section of the file into its own module (`mod name;` in lib.rs) and shrink the file under 1500 lines",
+  hot_alloc: "reuse a buffer that lives on the struct (or a scratch arena) instead of allocating inside the hot function",
+  nondet: "use a `BTreeMap` or a sorted `Vec` instead of `HashMap`/`HashSet`, and `engine_core::Tick` instead of `Instant::now`/`SystemTime`",
+  float_math: "use the integer math of `engine_core::fixed::Fixed` (or plain integers) instead of `sin`/`cos`/`exp`/`powf`",
+  waivers: "delete the `det-ok:`/`alloc-ok:` waiver and fix the nondeterminism or the allocation it excuses",
+  undoc_pub: "add a `///` doc comment above the public item that says what it does",
+  unsafe: "delete the `unsafe` block, or keep it with a `// SAFETY:` comment that names the invariant and a test that proves it",
+  tests: "add a `#[test]` that fails when the new behaviour breaks",
+};
+
+// The fix of a rule id, and the tail a reported line carries: " fix: <text>".
+// Every rule id in METRICS has a fix; the fallback keeps a line complete.
+export function fixFor(ruleId) {
+  return RULE_FIXES[ruleId] ?? `apply the ${ruleId} rule of docs/RUST-QUALITY.md (its edit is not written down yet)`;
+}
+export function fixTail(ruleId) {
+  return ` fix: ${fixFor(ruleId)}`;
+}
 
 export const HELP = `rust-quality.mjs - Rust quality scorecard and ratchet for every workspace crate
 
@@ -616,7 +651,7 @@ export function measure(root = ".", filter = null, useCache = true) {
       const formatted = {};
       for (const [k, list] of Object.entries(a.hits)) {
         if (!list.length) continue;
-        formatted[k] = list.map((l) => `${rel}:${l + 1}: ${(a.raw[l] ?? "").trim().slice(0, 100)}`);
+        formatted[k] = list.map((l) => `${rel}:${l + 1}: ${(a.raw[l] ?? "").trim().slice(0, 100)}${fixTail(k)}`);
       }
       if (cacheRoot) cacheWrite(cacheFile, key, { metrics: a.metrics, hits: formatted, clones: a.clones });
       if (!total.metrics) total.metrics = Object.fromEntries(Object.keys(a.metrics).map((k) => [k, 0]));
@@ -644,7 +679,7 @@ export function measure(root = ".", filter = null, useCache = true) {
     for (const member of g.slice(1)) {
       const c = crates.get(member.crate);
       c.metrics.dup_fns++;
-      (c.hits.dup_fns ??= []).push(`${member.at}: fn ${member.name} duplicates ${g[0].at} (fn ${g[0].name})`);
+      (c.hits.dup_fns ??= []).push(`${member.at}: fn ${member.name} duplicates ${g[0].at} (fn ${g[0].name})${fixTail("dup_fns")}`);
     }
   }
   return { crates, groups };
@@ -672,6 +707,13 @@ export function score(m) {
 
 export const grade = (s) => (s >= 90 ? "A" : s >= 80 ? "B" : s >= 70 ? "C" : s >= 60 ? "D" : "F");
 
+// The fix tail of a new-crate regression: every rule that is not zero names
+// its own edit, so the line alone tells the agent what to change.
+function newCrateFix(dirty) {
+  if (!dirty.length) return ` fix: raise the score to 90 with zero ${STRICT_NEW.join("/")}`;
+  return ` fix: clear the nonzero rules first: ${dirty.map((k) => `${k}: ${fixFor(k)}`).join("; ")}`;
+}
+
 // Ratchet: which crate metrics rose above the baseline (or fell, for tests).
 export function compare(baseline, crates) {
   const regressions = [];
@@ -681,14 +723,14 @@ export function compare(baseline, crates) {
     if (!base) {
       const s = score(c.metrics).score;
       const dirty = STRICT_NEW.filter((k) => c.metrics[k] > 0);
-      if (s < 90 || dirty.length) regressions.push(`${name}: new crate must enter at grade A with zero ${STRICT_NEW.join("/")} (score ${s}${dirty.length ? `, nonzero: ${dirty.join(", ")}` : ""})`);
+      if (s < 90 || dirty.length) regressions.push(`${name}: new crate must enter at grade A with zero ${STRICT_NEW.join("/")} (score ${s}${dirty.length ? `, nonzero: ${dirty.join(", ")}` : ""})${newCrateFix(dirty)}`);
       continue;
     }
     for (const [k, spec] of Object.entries(METRICS)) {
       const now = c.metrics[k];
       const was = base[k];
       if (was === undefined) continue;
-      if (spec.bad ? now > was : now < was) regressions.push(`${name}: ${k} ${was} -> ${now} (${spec.what})`);
+      if (spec.bad ? now > was : now < was) regressions.push(`${name}: ${k} ${was} -> ${now} (${spec.what})${fixTail(k)}`);
       else if (spec.bad ? now < was : now > was) improvements.push({ name, k, was, now });
     }
   }
@@ -740,20 +782,22 @@ export function scopeRatchetToOwned(regressions, crates, owned) {
 }
 
 // Every simulation crate carries a byte-identical SIM_CLIPPY, except the
-// pending ones, which must not carry a stale partial copy either.
+// pending ones, which must not carry a stale partial copy either. Every
+// finding names the copy that clears it.
 export function simClippyFindings(root = ".", crates = new Map()) {
   const out = [];
   const canonical = existsSync(join(root, SIM_CLIPPY)) ? readFileSync(join(root, SIM_CLIPPY), "utf8") : null;
-  if (canonical === null) return [`${SIM_CLIPPY} missing`];
+  if (canonical === null) return [`${SIM_CLIPPY} missing fix: restore ${SIM_CLIPPY} from git, it is the canonical copy every simulation crate holds`];
   for (const pkg of packages(root).filter((p) => SIM_CRATES.includes(p.name))) {
     const conf = join(pkg.dir, "clippy.toml");
+    const rel = relative(root, conf).split("\\").join("/");
     const pending = SIM_CLIPPY_PENDING.includes(pkg.name);
     if (pending) {
-      if (crates.get(pkg.name)?.metrics.nondet === 0) out.push(`${pkg.name}: nondet is 0, adopt ${SIM_CLIPPY} and leave SIM_CLIPPY_PENDING`);
+      if (crates.get(pkg.name)?.metrics.nondet === 0) out.push(`${pkg.name}: nondet is 0, adopt ${SIM_CLIPPY} and leave SIM_CLIPPY_PENDING fix: copy ${SIM_CLIPPY} to ${rel} and drop ${pkg.name} from SIM_CLIPPY_PENDING in tools/rust-quality.mjs`);
       continue;
     }
-    if (!existsSync(conf)) out.push(`${pkg.name}: missing clippy.toml (copy ${SIM_CLIPPY})`);
-    else if (readFileSync(conf, "utf8") !== canonical) out.push(`${pkg.name}: clippy.toml differs from ${SIM_CLIPPY}`);
+    if (!existsSync(conf)) out.push(`${pkg.name}: missing clippy.toml (copy ${SIM_CLIPPY}) fix: copy ${SIM_CLIPPY} to ${rel}`);
+    else if (readFileSync(conf, "utf8") !== canonical) out.push(`${pkg.name}: clippy.toml differs from ${SIM_CLIPPY} fix: copy ${SIM_CLIPPY} over ${rel}`);
   }
   return out;
 }
@@ -888,7 +932,7 @@ function main(argv) {
   // Only lower-is-better counts lock in; a rising test density stays informational.
   const lockable = improvements.filter(({ k }) => METRICS[k].bad).length;
   if (lockable) console.log(`[INFO] ${lockable} metric(s) improved below baseline: run --tighten with the landing`);
-  console.log(regressions.length ? `RESULT FAIL: ${regressions.length} ratchet regression(s)` : `RESULT PASS: score ${t.workspace} (${grade(t.workspace)}), 0 ratchet regressions over ${shown.size} crate(s)`);
+  console.log(regressions.length ? `RESULT FAIL: ${regressions.length} ratchet regression(s) fix: every [FAIL] line above names the edit that clears its rule` : `RESULT PASS: score ${t.workspace} (${grade(t.workspace)}), 0 ratchet regressions over ${shown.size} crate(s)`);
   return regressions.length ? 1 : 0;
 }
 
