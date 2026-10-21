@@ -11,8 +11,10 @@ use std::sync::Arc;
 
 use crate::cue::{CueBank, VariantPicker};
 use crate::feed::{feed, Command, FeedRx, FeedTx, MixCounts};
+use crate::heal::{AudioHealError, DeviceHeal, HealReport};
 use crate::playlist::{MusicBed, MusicState};
 use crate::SpatialMixer;
+use engine_observe::supervisor::SupervisedDecision;
 
 /// Most commands one render call applies, so a flooding producer cannot
 /// stretch a callback; the rest wait for the next buffer.
@@ -41,6 +43,7 @@ pub struct AudioEngine {
     applied: u64,
     last_tick: u32,
     early_frames: u32,
+    heal: DeviceHeal,
 }
 
 impl AudioEngine {
@@ -71,6 +74,7 @@ impl AudioEngine {
             applied: 0,
             last_tick: 0,
             early_frames: 0,
+            heal: DeviceHeal::new(),
         };
         (tx, engine)
     }
@@ -145,6 +149,51 @@ impl AudioEngine {
     pub fn applied(&self) -> u64 {
         self.applied
     }
+
+    /// Report a lost default device: the heal degrades to the silent mixer
+    /// and the engine keeps advancing voices, so the game never stops
+    /// playing while the device is away.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`DeviceHeal::report_loss`]: a typed refusal once the budget
+    /// is spent, a supervisor fault when the tape needs exporting.
+    pub fn report_loss(&mut self, tick: u64) -> Result<SupervisedDecision, AudioHealError> {
+        self.heal.report_loss(tick)
+    }
+
+    /// Report a changed default device (headphones plugged, HDMI switched):
+    /// the same reconnect policy as a loss, with its own notice wording.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`DeviceHeal::report_change`].
+    pub fn report_change(&mut self, tick: u64) -> Result<SupervisedDecision, AudioHealError> {
+        self.heal.report_change(tick)
+    }
+
+    /// The device heal: its state, notice, attempts and silent frames are
+    /// readable here, so a host can show the player why the sound is quiet.
+    #[must_use]
+    pub fn heal(&self) -> &DeviceHeal {
+        &self.heal
+    }
+
+    /// Try to reopen the device once through the heal: on success the budget
+    /// resets, the engine goes live and the report says how long the device
+    /// was away; on refusal the backoff escalates.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`DeviceHeal::try_reopen`]: a typed refusal while budget
+    /// remains, a loud quarantine past it.
+    pub fn try_reopen<T, E>(
+        &mut self,
+        tick: u64,
+        opener: impl FnOnce() -> Result<T, E>,
+    ) -> Result<(T, HealReport), AudioHealError> {
+        self.heal.try_reopen(tick, opener)
+    }
 }
 
 impl FrameSource for AudioEngine {
@@ -173,6 +222,13 @@ impl FrameSource for AudioEngine {
         }
         if let Some(odd) = out.get_mut(frames * 2..) {
             odd.fill(0.0);
+        }
+        if !self.heal.is_live() {
+            // The device is down: the mixer keeps advancing (voices and the
+            // music bed move on), the wire gets silence and every frame
+            // counts as a silent frame.
+            out.fill(0.0);
+            self.heal.count_silent_frames(frames);
         }
         let stats = self.mixer.mixer_stats();
         self.rx.publish(
@@ -690,5 +746,56 @@ mod tests {
         assert_eq!(engine.drain(), 1);
         assert!(engine.music_state().is_none());
         assert!(engine.mixer().is_idle());
+    }
+
+    #[test]
+    fn a_device_loss_degrades_the_engine_to_silence_and_the_heal_state_is_readable() {
+        use crate::heal::DeviceState;
+
+        let (mut tx, mut engine) = AudioEngine::with_feed(test_bank(), 16, RATE, 1);
+        tx.play(0, "flat", 1.0, None).expect("room");
+        let mut out = [0.0f32; 64];
+        engine.render_stereo_into(&mut out);
+        assert!(out.iter().any(|&s| s > 0.0), "live: the voice sounds");
+        assert!(engine.heal().is_live());
+        assert_eq!(engine.heal().state(), DeviceState::Live);
+
+        // The mixer path reports the loss into the heal; the state is readable.
+        let decision = engine.report_loss(10).expect("first loss must heal");
+        assert_eq!(decision.attempt, 1);
+        assert_eq!(engine.heal().state(), DeviceState::Silent);
+        assert!(!engine.heal().is_live());
+        assert!(engine.heal().notice().contains("degraded"));
+        assert_eq!(engine.heal().attempts(), 1);
+
+        // Down: the mixer keeps advancing but the wire is silent, and every
+        // silent frame is counted.
+        let mut out = [0.0f32; 64];
+        engine.render_stereo_into(&mut out);
+        assert!(
+            out.iter().all(|&s| s == 0.0),
+            "silent while the device is down"
+        );
+        assert_eq!(engine.heal().silent_frames(), 32);
+
+        // A verified reopen brings the wire back.
+        let (_, report) = engine
+            .try_reopen(20, || Result::<&str, &str>::Ok("stream"))
+            .expect("verified reopen must recover");
+        assert!(report.message.contains("recovered"));
+        assert!(engine.heal().is_live());
+        tx.play(1, "flat", 1.0, None).expect("room");
+        let mut out = [0.0f32; 64];
+        engine.render_stereo_into(&mut out);
+        assert!(out.iter().any(|&s| s > 0.0), "live again");
+    }
+
+    #[test]
+    fn a_device_change_reports_into_the_same_heal() {
+        let (_, mut engine) = AudioEngine::with_feed(test_bank(), 16, RATE, 1);
+        let decision = engine.report_change(7).expect("change must heal");
+        assert_eq!(decision.attempt, 1);
+        assert!(engine.heal().notice().contains("changed"));
+        assert!(!engine.heal().is_live());
     }
 }

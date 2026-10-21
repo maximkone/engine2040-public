@@ -77,6 +77,7 @@ make those live, and every row built on them waits.
   with 0 validation errors; golden unchanged. needs: GX1, GX3, RL6.
   (LOOK-ART 2026-09-28.)
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: the Accept's before frame `target/pilot-gx13/owner-arena/frame_000015.png` is missing (`Test-Path` = False) and `crates/render/src/twin_look.rs` is absent, so the row cannot pass as written; it needs an owner amendment to a pair this seat renders itself, or it closes.
 - [ ] RL18 render: percentile-trimmed histogram auto-exposure with temporal
   adaptation vs fixed exposure (LADDER P4 CANDIDATE ACCEPTED wave-58
   merge). Tier B. Size S. Owns exposure hunks beside
@@ -147,6 +148,7 @@ make those live, and every row built on them waits.
   amends Accept to a before/after pair this seat renders itself (cube
   fallback twin frame vs this kit frame); then one score closes the row.
   BLOCKED: the Accept's before frame is not on disk; needs the owner's artefact or an operator capture (see this row's note). Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Correction 2026-10-21: the bind is landed (26434e12) and only the Accept's before frame `target/pilot-owner-view/r2-20260929/arena/frame_000000.png` is missing (`Test-Path` = False), so the row cannot pass as written; the owner supplies the PNG or amends the Accept.
 - [ ] RL22 render: editor viewport day-rig bind — the editor viewport
   draws the CT8 arena establishing view under the RL4 sky bake plus
   RL15 day rig plus RL7 fog ramp instead of the brown starburst, as
@@ -159,6 +161,7 @@ make those live, and every row built on them waits.
   composition with 0 validation errors; golden unchanged. needs: RL4,
   CT8. (ART wave 86.)
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: the Accept's before frame `target/pilot-owner-view/r2-20260929/editor-a3/viewport.png` is missing (`Test-Path` = False) and `crates/render/src/editor_day_preview.rs` is absent, so the row cannot pass as written; rewrite the Accept or retire it.
 - [ ] RL23 render: twin grade + exposure bind — the WIN1 twin forward path
   samples the RL4 EV100 exposure plus post grade instead of the current
   flat brown/black faces, as bind glue only in a new
@@ -170,6 +173,7 @@ make those live, and every row built on them waits.
   materials with 0 validation errors; golden   unchanged. needs: GX1,
   RL4. (LOOK-ART 2026-09-29.)
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: the Accept's before frame `target/pilot-owner-view/r3-20260929/arena/frame_000014.png` is missing (`Test-Path` = False) and `twin_grade.rs`/`twin_look.rs` are absent, so the row cannot pass as written; rewrite the Accept or retire it.
 - [ ] RL24 render: viewport starburst source removal — name
   the pass emitting the radiating bands from frame center in the editor
   offscreen viewport and remove it, in
@@ -183,6 +187,7 @@ make those live, and every row built on them waits.
   composition with 0 validation errors; golden unchanged. needs: ED1,
   GX1. (ART wave 91.)
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: the Accept's before frame `target/pilot-owner-view/r4-20260929/editor-a3/viewport.png` is missing (`Test-Path` = False; `crates/editor/src/viewport_image.rs` does exist), so the row cannot pass as written; rewrite the Accept as an on-disk pair.
 - [ ] RL25 render: twin dome facet removal — the fullscreen
   background renders as flat-shaded diamonds, identical facets in the
   dark r4 frame and the lighter rl15 day-rig frame so geometry not
@@ -199,6 +204,7 @@ make those live, and every row built on them waits.
   + light with 0 validation errors; golden unchanged. needs: GX1, RL4.
   (ART wave 91.)
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: the Accept's before frame `target/pilot-owner-view/r4-20260929/arena/frame_000014.png` is missing (`Test-Path` = False; `crates/game/src/windowed.rs` does exist), so the row cannot pass as written; rewrite the Accept or retire it.
 - [ ] RP11 render: twin silhouette fringe removal — a thin
   light rim outlines the sharp `v1::cube()` silhouette (no bevel in
   `v1.rs`, frozen frames rule out TAA ghosting); name the emitting pass
@@ -211,6 +217,7 @@ make those live, and every row built on them waits.
   silhouette + materials with 0 validation errors; golden unchanged.
   needs: GX1, RP1. (ART wave 91.)
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: the Accept's before frame `target/pilot-owner-view/r4-20260929/arena/frame_000014.png` is missing (`Test-Path` = False; `crates/render/src/post.rs` does exist), so the row cannot pass as written; rewrite the Accept or retire it.
 - [ ] RL26 render: twin 8-fighter draw bind — the WIN1 twin
   `frame_list` in `crates/game/src/bin/arena.rs` (HUD clear plus one lit
   cube, read 2026-09-29) ignores `--fighters 8 --scene arena` so sim
@@ -263,6 +270,7 @@ make those live, and every row built on them waits.
   renders itself. Test-only hunk, no sim path touched, so the golden
   d57b5c8ae3096614 stands.
   BLOCKED: the Accept's before frame is not on disk; needs the owner's artefact or an operator capture (see this row's note). Unblocks per docs/plan/2026-10-19-owner-queue.md.
+  Correction 2026-10-21: the bind landed (743e3dcc) and `target/rl26-20261019/after8/manifest.json` = True, so only the before half `target/pilot-owner-view/r5-20260929/arena/frame_000014.png` is missing (`Test-Path` = False); the row cannot pass as written until the owner amends the Accept to a pair this seat renders.
 - [ ] RP10 render: twin frame-advance proof — the WIN1 twin presents 30
   distinct frames with advancing HUD plus tick instead of 30
   byte-identical cubes, in a new
@@ -276,6 +284,7 @@ make those live, and every row built on them waits.
   ghost/shimmer inside the RP6 bars and 0 validation errors; golden
     unchanged. needs: GX1, GX4, RP5. (ART wave 86.)
   LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
+  Correction 2026-10-21: the Accept's before manifest `target/pilot-owner-view/r2-20260929/arena/manifest.json` is missing (`Test-Path` = False) and `crates/render/src/clip_advance.rs` is absent, so the row cannot pass as written; rewrite the Accept or retire it.
 - [x] RL27 render: cascaded shadow maps for the arena-day sun — cascade-split Landed 8d5f2ea2. `cargo test -p engine-render --lib -- shadow_cascade post ibl` 91 passed, 2 ignored (13 shadow_cascade tests incl. splits_pinned_as_data and day_sweep_byte_identical_x2, ibl green); render tests run on this PC by design (GPU code).
   selection + per-cascade shadow-map sizing ported from `FyroxEngine/Fyrox`
   `fyrox-impl/src/renderer/shadow/csm.rs` (license MIT, adapt with

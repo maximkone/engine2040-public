@@ -291,6 +291,7 @@
   Progress 2026-10-19: owner: report-only receipt instead of auto-revert?
   Answer in `docs/plan/2026-10-19-owner-queue.md`.
   Owner chat 2026-10-19 (delegated): the report is report-only: a seeded divergence fails the gate and writes its first-divergence receipt, and no auto-revert is wired.
+  Correction 2026-10-21: the Accept asks that a seeded divergence "fails gate + reverts", but the owner refused the revert (Owner chat 2026-10-19: report-only, no auto-revert is wired); the report half exists (`tools/tape-checksum.mjs:56-59` prints `first-divergence: <tick>`), so the Accept needs re-aiming to the owner's report-only answer.
 - [x] ARC14 ecs: spine float quarantine — the spine takes integer-ns
   dt (RC6 shape), never `schedule::Ctx.dt: f32`, and a quarantine test
   fails on any float inside the spine module. Tier A. Size S. Owns
@@ -461,7 +462,7 @@
   starvation; kbps charted vs MP2 caps;
   `cargo test -p engine-net --lib scale` green. needs: MP2.
   (A7, 2026-10-02.)
-- [x] MP16b net: 32-fighter LAN soak revival after the GE12 Landed 1fc9ac23. soak_32_bot_x600_converges_with_matching_hashes x2 (hash 054b08ed9179a1d2, bots=32 ticks=600 snap_bytes=617 hz=15 Bps=9255 kbps=74.04, under the MP2 96 kbps row), combat_inputs_never_starve_under_snapshot_flood at the 800-byte chart cap (combat delta 147 B, all-fields worst 661 B, 139 B headroom), kbps_chart_rows_stay_under_target, thirty_two_slot_gates_follow_the_canonical_cap (=15 Hz, 12000 B/s, 800 B), select_priority_orders_thirty_two_slots; `cargo test -p engine-net --lib scale -- --nocapture` 24 passed run 39517334554 (that run carried the `arena-fork-cuts-x2` one-line fork.rs `cuts` fix in the working tree only: master is red there, not this row); `cargo check -p engine-net --lib` green.
+- [x] MP16b net: 32-fighter LAN soak revival after the GE12 Landed 1fc9ac23. soak_32_bot_x600_converges_with_matching_hashes x2 (hash 054b08ed9179a1d2, bots=32 ticks=600 snap_bytes=617 hz=15 Bps=9255 kbps=74.04, under the MP2 96 kbps row), combat_inputs_never_starve_under_snapshot_flood at the 800-byte chart cap (combat delta 147 B, all-fields worst 661 B, 139 B headroom), kbps_chart_rows_stay_under_target, thirty_two_slot_gates_follow_the_canonical_cap (=15 Hz, 12000 B/s, 800 B), select_priority_orders_thirty_two_slots; `cargo test -p engine-net --lib scale -- --nocapture` 24 passed run 39517334554 (that run carried the `arena-fork-cuts-x2` one-line fork.rs `cuts` fix in the working tree only: master was red there, not this row; the arena owner landed the same line in 1461d2fe, so master now matches the proven tree); `cargo check -p engine-net --lib` green.
   canonical-cap decision — same accept as MP16 parent (32-bot
   x600 hashes x2, zero combat starvation, kbps vs MP2 caps,
   scale tests green). Tier B. Size S. Owns soak hunks in
@@ -609,6 +610,7 @@
   `crates/anim/src/camera_framing.rs`. Accept: PQ1 latency ≤ 50ms;
   silhouette readability ≥ 80% in playtest. Kill: float math in tick.
   needs: PQ1, GP13. (RES-ARXIV wave 35 Dive 11, reviewed 2026-09-26.) Progress 2026-10-17: 535b1590 combat camera_framing.rs integer shoulder-cam framing with a silhouette readability score (>=80% of poses read, both fighters in frame); left: the camera.rs hook (frame_pair 585, frame_group 643) and the human playtest. Progress 2026-10-18: frame_pair and the two-fighter frame_group call frame_melee 40119424 (test two_fighter_group_is_the_gp14_shoulder_shot_for_either_order); left: the live arena camera still comes from fighter_look::fight_camera, so the shoulder shot reaches only the discarded feed in windowed.rs; PQ1 latency and playtest readability.
+  Correction 2026-10-21: the module lives in `crates/combat/src/camera_framing.rs`, not `crates/anim/src/camera_framing.rs` (`Test-Path`: anim False, combat True); the only work left is the live-camera hook (the arena camera still comes from `fighter_look::fight_camera`).
 - [x] ED14 editor: browser real-edge wiring - AS1 `bundle::EntryKind` + Progress 2026-10-17: kind_wire_bytes_match_as1_entrykind, full_bundle_search_stays_under_50ms and the bad-drop conflict-set tests exist in crates/editor/src/browser.rs; left: the local EntryKind / GRID_CM / YAW_STEPS mirror copies are not deleted. Landed 4bd06b85. Mirrors deleted, solver is engine_spatial::place::solve; 4096-entry archive search 1.6 ms; run 39058437704.
   SP5 `place` vocabulary replace the mirrors (ED3 file frozen; lands
   after ED3). Tier B. Size M. Owns `crates/editor/src/browser.rs`
@@ -918,6 +920,7 @@
   quantiles + golden `d57b5c8ae3096614` x2 unchanged; a loaded-box run
   still lands observed-only and never overwrites a baseline row. needs:
   PF13. (Deep-dive 2026-09-30.) Progress 2026-10-18: 4e51bd7a observed only: the box cannot be quiesced (GPU p50 0.52-0.83 ms over 5 runs), arena adds about 0.45-0.65 GiB VRAM; tools/perf-baseline.mjs from the accept line does not exist.
+  Correction 2026-10-21: `Test-Path tools/perf-baseline.mjs` = False, so the Accept `node tools/perf-baseline.mjs --check` cannot run; the row needs the real baseline tool path or closes as an unprovable Accept.
 - [ ] RT14 render: many-light spike — ReSTIR DI vs clustered forward on
   250 torches on the reference GPU. Tier C spike. Size M. Owns a spike
   folder under `examples/`. Accept: ms and noise per method in LADDER;
@@ -1333,6 +1336,7 @@
   visible; RA1 presents with 0 validation errors. needs: WIN6a,
   RA1. (A7, 2026-10-02.)
   LATER: parked 2026-10-03 (circus verdict 2: duplicate of WIN6 (same title and accept; WIN6 holds the judge-PASS lane win6-top)); unpark by deleting this line.
+  Correction 2026-10-21: duplicate of WIN6 (SPRINT-01), which is ticked and holds the judge-PASS win6-top work; both own `crates/game/src/windowed.rs`, so nothing is left to build here.
 - [ ] WIN7 game: pad edge hardening — hot-plug pause/resume proof,
   non-finite deflection rest, 256-code table fuzz over IN1. Tier A.
   Size S. Owns edge hunks in `crates/game/src/pad.rs`. Accept:
@@ -1528,6 +1532,7 @@
   pillar case names the pillar, half-hidden gives a fraction strictly between 0 and 100, relation and sees
   never disagree, <= 0.2 ms per pair. F2P: visible returns a row per actor with no blocker; two definitions.
   P2P: golden d57b5c8ae3096614 unchanged. needs: AD7. Progress 2026-10-18: spatial half landed a2dba030 (engine-spatial --lib 327 passed run 39077306002, clippy run 39077630760); sees::sees_pair (blocker id, entry point, 5-ray fraction) vs an independent oracle, replay x2; left: relation visible_from still does not delegate to sees_pair (two definitions), and the endpoint arm. Progress 2026-10-18 (2): relation visible_from now delegates to sees::sees_pair (755cd907), one visibility definition; relation_visible_from_and_sees_never_disagree over 50 seeded scenes. Endpoint 2026-10-18 (lane A, 5cc241ed): scene.query kind=sees (anchor, other) answers percent seen, rays and a blocker row; query_space_sees_names_the_blocker passed. Progress 2026-10-18 (wave 2): the Accept is met, the tick waits for AD7 (needs). a2dba030 sees.rs, 755cd907 visible_from delegates, 5cc241ed door kind=sees, 9b68ba9f timing. sees_pair_matches_the_oracle_on_50_seeded_pairs (50/50), sees_pair_names_the_pillar_and_half_hidden_reads_strictly_between, relation_visible_from_and_sees_never_disagree (50 seeded scenes) in engine-spatial run 39106576997; 0.319 us per pair (sees_pair_budget_under_a_fifth_of_a_ms --ignored, release, run 39108300340); query_space_sees_names_the_blocker in engine-endpoint --lib 607 passed run 39107175761.
+  Correction 2026-10-21: the Accept passed on the runner (engine-spatial --lib sees_pair: 2 passed, 0 failed, 1 ignored, run 39515251019) and the landing is a2dba030 (sees.rs), with 755cd907 (visible_from delegates) and 5cc241ed (door kind=sees); not ticked because needs AD7 is still open and `node tools/workspace-check.mjs` refuses a ticked row that needs an open one.
 - [ ] SPR8 endpoint: compact answers - `scene.query` and `scene.spatial` accept `format` rows|ids|count and
   `matched_only`; labels go out once in a legend; `visible` stops returning blocked rows unless asked. Diff:
   regular. Tier A. Size S. Owns `crates/endpoint/src/scene_query.rs`, `crates/endpoint/src/watch_ledger.rs`.
@@ -1541,6 +1546,7 @@
   `crates/endpoint/src/scene_query.rs`. Accept: `cargo test -p engine-spatial --lib rooms` x2: a two-room
   house gives 2 rooms and 1 exit, 50 seeded scenes match hand labels 50/50, digest stable under input order.
   F2P: no room concept; groups are arena/zone/object. P2P: golden d57b5c8ae3096614 unchanged. needs: AD7. Landed 2026-10-18 755cd907 (engine-spatial --lib 354 passed run 39079745728, clippy -D warnings run 39080141395): rooms.rs find_rooms flood-fills wall boxes into room_1..n with doorway exits (width, neighbours, outside = 0), room_of, exits_of, members; two-room house = 2 rooms 1 exit, 50 seeded scenes match hand labels, order-invariant; left: scene.query kinds in_room/room_of/exits_of, wants inside room:<n>, brief grouping by room (lane A). Progress 2026-10-18 (wave 2): the Accept is met, the tick waits for AD7 (needs). 755cd907 rooms.rs; 39b0e28a door kinds room_of, in_room, exits_of. rooms tests (a_two_room_house_has_two_rooms_and_one_exit, members_are_listed_per_room_and_a_pillar_does_not_split_a_room, fifty_seeded_scenes_match_their_hand_labels) in engine-spatial run 39106576997; query_rooms_name_the_room_its_members_and_its_exit (engine-endpoint --lib 607 passed run 39107175761). Left: wants inside room:<n> and brief grouping by room.
+  Correction 2026-10-21: the Accept passed on the runner (engine-spatial --lib rooms: 7 passed, 0 failed, run 39513546216) and the landing is 755cd907 (rooms.rs), with 39b0e28a (door kinds room_of, in_room, exits_of); not ticked because needs AD7 is still open and `node tools/workspace-check.mjs` refuses a ticked row that needs an open one.
 - [ ] SPR10 spatial: camera framing verb - `scene.frame target=<id> shot=wide|medium|close` returns eye, yaw,
   pitch, fov that keep the target centered, unoccluded (SPR7 fan) and inside the room, ranked by
   `compose::score_shot`. Diff: hard. Tier B. Size M. Owns `crates/spatial/src/compose.rs`,

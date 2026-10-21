@@ -1193,8 +1193,6 @@ Listed in a fresh session: no, call `api.load` with `asset`. Source: `crates/end
 
 > Cook a generated GLB (center's kaggle mesh job) into a prop: refuses non-commercial or unknown-licence models, repairs, simplifies to at most 5,000 triangles, builds LODs, a collision hull and an E204BNDL bundle, writes a provenance row (model, SPDX licence, image or prompt digest, seed). Same inputs return the cached bundle hash. Declared conditions must be listed in accept_conditions.
 
-Correction 2026-10-21: "center's kaggle mesh job" is the retired name. The center's `kaggle.mjs` was removed on 2026-10-17 with the loop machinery; the generator chain's new home is `C:\empire\center\make.mjs` (`node make.mjs run mesh --spec <file>` starts a job, `node make.mjs job <id>` polls it, `node make.mjs models --verify` is the licence gate). The `lane_json` file the runner writes is still named `kaggle-lane.json` (`:1207`).
-
 - **Scope:** `commit` · writes · cargo feature `intake` · pack `asset` is listed after `api.load`
 - **Undo:** not stated in the source
 - **Source:** `crates/endpoint/src/packs/asset/intake_verb.rs`

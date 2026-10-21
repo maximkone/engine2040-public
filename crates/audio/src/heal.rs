@@ -18,6 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use engine_observe::heal::HealError;
+use engine_observe::recovery::{HealValidation, VerifiedRecovery};
 use engine_observe::supervisor::{SupervisedDecision, Supervisor};
 use engine_observe::{EventCode, RingBuffer};
 
@@ -224,11 +225,35 @@ impl DeviceHeal {
         for _ in 0..frames {
             let _ = mixer.render_frame_stereo();
         }
+        self.count_silent_frames(frames)
+    }
+
+    /// Count `frames` the device never heard, without rendering anything: an
+    /// owner that renders into its own buffer and then drops it (the audio
+    /// engine keeps voices and the music bed advancing) counts the frames
+    /// here instead of rendering a second time. Counts only while silent or
+    /// quarantined; returns the cumulative silent-frame count.
+    pub fn count_silent_frames(&mut self, frames: usize) -> u64 {
         if self.state != DeviceState::Live {
             let delta = u64::try_from(frames).unwrap_or(u64::MAX);
             self.silent_frames = self.silent_frames.saturating_add(delta);
         }
         self.silent_frames
+    }
+
+    /// Digest of the heal's own state (device state plus silent frames): the
+    /// before/after pair a recovery proof carries. Deterministic integer
+    /// math over two fields, no clock.
+    #[must_use]
+    pub fn state_digest(&self) -> u64 {
+        let mut hasher = engine_core::Fnv64::new();
+        hasher.write_u64(match self.state {
+            DeviceState::Live => 0,
+            DeviceState::Silent => 1,
+            DeviceState::Quarantined => 2,
+        });
+        hasher.write_u64(self.silent_frames);
+        hasher.finish()
     }
 
     /// Try `opener` once: on success reset the budget, go live and report
@@ -250,11 +275,29 @@ impl DeviceHeal {
             Ok(device) => {
                 let attempts = self.supervisor.attempts(DEVICE_FAULT_CODE);
                 let backoff_ms = self.next_backoff_ms();
-                self.supervisor.reset(DEVICE_FAULT_CODE);
+                let before = self.state_digest();
                 self.state = DeviceState::Live;
+                let after = self.state_digest();
+                // The budget is only cleared by a proved recovery: the opener
+                // handed the device back, so the heal carries that proof. A
+                // refused proof keeps the budget spent and says so in the
+                // notice, so the refusal is never silent.
+                let proof = VerifiedRecovery::new(
+                    DEVICE_FAULT_CODE,
+                    attempts.max(1),
+                    HealValidation::Recovered,
+                    before,
+                    after,
+                );
+                let cleared = self.supervisor.reset_verified(&proof).is_ok();
                 let message = bound_notice(&format!(
-                    "audio recovered: device reopened at tick {tick} after {attempts} faults (last backoff {backoff_ms}ms); mixer rendered {} silent frames while down",
-                    self.silent_frames
+                    "audio recovered: device reopened at tick {tick} after {attempts} faults (last backoff {backoff_ms}ms); mixer rendered {} silent frames while down{}",
+                    self.silent_frames,
+                    if cleared {
+                        ""
+                    } else {
+                        "; the reconnect budget was NOT cleared"
+                    }
                 ));
                 self.notice.clone_from(&message);
                 Ok((

@@ -158,22 +158,6 @@ impl AutoExposureGpu {
         }
     }
 
-    /// The frame size the bind group was built for, `None` before the
-    /// first dispatch.
-    pub(super) fn bound_size(&self) -> Option<(u32, u32)> {
-        if self.bind.is_some() {
-            Some(self.bind_size)
-        } else {
-            None
-        }
-    }
-
-    /// True while a map is in flight: the frame keeps its stops until the
-    /// map lands.
-    pub(super) fn map_in_flight(&self) -> bool {
-        self.pending.is_some()
-    }
-
     /// Encode the histogram dispatch over the HDR target: clear the bins,
     /// run the kernel on the frame's sample pattern, copy the bins into
     /// the readback buffer. Returns false when the frame is skipped: a
@@ -444,8 +428,9 @@ mod tests {
             "the device bins the frame like the oracle"
         );
         assert_eq!(hist.texels, cpu.texels, "the same samples were binned");
-        assert!(
-            meter.bound_size() == Some((width, height)),
+        assert_eq!(
+            meter.bind_size,
+            (width, height),
             "the bind group rides the frame size"
         );
     }
@@ -488,7 +473,7 @@ mod tests {
         );
         queue.submit(Some(enc.finish()));
         meter.begin_map();
-        assert!(meter.map_in_flight(), "the map is open after the submit");
+        assert!(meter.pending.is_some(), "the map is open after the submit");
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("auto-exposure-hist"),
         });

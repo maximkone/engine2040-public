@@ -19,6 +19,7 @@
   `crates/audio/src/coherence.rs`. Accept: 10 scenarios synced, 0
   audio-thread allocs. needs: PQ8, CB1. (PLAYTEST56 B-row 8 wave 56.)
   LATER: parked 2026-10-03 (circus verdict 2: FOCUS.md parks audio, UI, modding, platform and shipping, living world, and no open finish bar lists this row); unpark by deleting this line.
+  Correction 2026-10-21: this row owns the hit-synced numbers: SN10 (SPRINT-01) is a duplicate of it and PB61 (SPRINT-09) names the same `crates/audio/src/coherence.rs` scenarios; work this row only.
 - [x] SC2 scene: run pin-or-refuse — every `play.step`/`play.run` pins
   (build, scene, adapter) or refuses pre-start with a named error; an
   empty revision-0 arena never plays silently. Tier A. Size S. Owns pin

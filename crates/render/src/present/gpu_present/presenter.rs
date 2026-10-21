@@ -213,7 +213,7 @@ pub struct Presenter {
     /// The device meter: the 64-bin histogram kernel over the HDR target
     /// and its one-frame-late readback. Built once with the device; the
     /// steady frame only dispatches and reads.
-    pub(crate) auto_exp_gpu: super::auto_exposure_gpu::AutoExposureGpu,
+    pub(super) auto_exp_gpu: super::auto_exposure_gpu::AutoExposureGpu,
     /// The adapted stops: the meter state the frame ticks. One state per
     /// presenter, carried across frames.
     pub(crate) auto_exp_state: crate::post::AutoExposure,
