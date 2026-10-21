@@ -8,6 +8,12 @@
 //! pushed out of static pillar boxes, and a round wall keeps every capsule
 //! inside the arena circle.
 //!
+//! TC3: a body push is a shove. The push-apart displacement one fighter
+//! takes in a tick feeds that fighter's balance an impulse scaled by the
+//! push ([`PUSH_SHOVE_TABLE`]): a light blow holds the stance, a packed
+//! crowd staggers, and a hard shove drops the fighter. The shove lands only
+//! under rules v2 ([`ArenaRules::balance`]); rules v1 never runs the pass.
+//!
 //! Consumer: `Sim::step_with` under [`ArenaRules::collision`]
 //! (rules v2 turns it on; v1 never runs it). Data owner: the caller owns the
 //! walkers; pillars travel in the rules. Units: integer millimetres on the
@@ -53,6 +59,42 @@ impl Pillar {
         }
     }
 }
+
+/// One row of the body-push shove table: the push edge in millimetres of one
+/// tick's push-apart displacement and the impulse a push over that edge feeds
+/// the balance.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PushShoveRow {
+    /// The push edge in millimetres: a push over this edge lands the band.
+    pub over_push_mm: i32,
+    /// Impulse the band feeds the balance, Q8 impulse units.
+    pub impulse_q8: u16,
+}
+
+/// The body-push shove table: the push bands, smallest edge first. A push
+/// that does not pass the first edge lands no shove at all; a push past the
+/// last edge lands the last row's impulse. Every edge is the push in
+/// millimetres that matches the impulse in Q8, so one table holds the light
+/// blow, the stagger, the stumble and the fall. The impulses are the
+/// arena's own EG34 balance steps, so a body push reads like a landed blow.
+pub const PUSH_SHOVE_TABLE: [PushShoveRow; 4] = [
+    PushShoveRow {
+        over_push_mm: 40,
+        impulse_q8: crate::BALANCE_BLOCK_Q8,
+    },
+    PushShoveRow {
+        over_push_mm: 256,
+        impulse_q8: crate::BALANCE_PARRY_Q8,
+    },
+    PushShoveRow {
+        over_push_mm: 384,
+        impulse_q8: crate::BALANCE_HIT_Q8,
+    },
+    PushShoveRow {
+        over_push_mm: 640,
+        impulse_q8: crate::BALANCE_FALL_Q8,
+    },
+];
 
 /// Resolve one tick of contacts in place: up to [`COLLIDE_PASSES`] passes of
 /// pairwise push-apart in slot order, then pillar push-out, then the round
@@ -171,15 +213,36 @@ fn hold_inside(walker: &mut Walker, wall_radius_mm: i32) {
 /// EG20 collision pass: every fighter as an integer-mm walker, resolved by
 /// [`resolve`] (push-apart, pillars, round wall at the square clamp's inset),
 /// then only the integer displacement goes back onto the float pose, so an
-/// untouched fighter keeps its exact bits. Shared by the tick and the spear
-/// step, which runs it again after dragging bodies.
+/// untouched fighter keeps its exact bits. The spear step runs it again after
+/// dragging bodies; a drag is not a body push, so it lands no shove.
 pub(crate) fn collide_states(
     states: &mut [crate::FighterState],
     rules: &crate::ArenaRules,
     half_extent_m: f32,
     fighters: usize,
 ) {
-    collide_states_with(states, rules, half_extent_m, fighters, resolve);
+    collide_states_with(states, None, rules, half_extent_m, fighters, resolve);
+}
+
+/// The tick's collision pass: [`collide_states`] plus the body-push shove.
+/// The push-apart displacement each fighter took this tick feeds its balance
+/// an impulse scaled by the push ([`PUSH_SHOVE_TABLE`]); the balance states
+/// live in the tick, so the caller hands them in.
+pub(crate) fn collide_states_shove(
+    states: &mut [crate::FighterState],
+    balance: &mut [crate::BalanceState],
+    rules: &crate::ArenaRules,
+    half_extent_m: f32,
+    fighters: usize,
+) {
+    collide_states_with(
+        states,
+        Some(balance),
+        rules,
+        half_extent_m,
+        fighters,
+        resolve,
+    );
 }
 
 /// [`collide_states`] with the pre-shortcut resolution: the full pass count
@@ -192,15 +255,46 @@ pub(crate) fn collide_states_fixed_passes(
     half_extent_m: f32,
     fighters: usize,
 ) {
-    collide_states_with(states, rules, half_extent_m, fighters, resolve_fixed_passes);
+    collide_states_with(
+        states,
+        None,
+        rules,
+        half_extent_m,
+        fighters,
+        resolve_fixed_passes,
+    );
+}
+
+/// [`collide_states_shove`] with the pre-shortcut resolution: the tick-for-
+/// tick equality oracle shoves exactly like the shipped tick, so the two
+/// runs stay equal in balance as well as in poses.
+#[cfg(test)]
+pub(crate) fn collide_states_fixed_passes_shove(
+    states: &mut [crate::FighterState],
+    balance: &mut [crate::BalanceState],
+    rules: &crate::ArenaRules,
+    half_extent_m: f32,
+    fighters: usize,
+) {
+    collide_states_with(
+        states,
+        Some(balance),
+        rules,
+        half_extent_m,
+        fighters,
+        resolve_fixed_passes,
+    );
 }
 
 /// Shared body of [`collide_states`] and its test oracle. `resolve_passes` is
 /// the resolution the caller pins: the shipped fixed-point stop, or the
 /// oracle's fixed pass count. Both callers pass a function item, so the
-/// indirect call folds into the one resolution at its call site.
+/// indirect call folds into the one resolution at its call site. `balance` is
+/// the caller's balance slice when the tick shoves bodies, `None` when the
+/// caller owns no balance (the spear's drag).
 fn collide_states_with(
     states: &mut [crate::FighterState],
+    balance: Option<&mut [crate::BalanceState]>,
     rules: &crate::ArenaRules,
     half_extent_m: f32,
     fighters: usize,
@@ -224,6 +318,11 @@ fn collide_states_with(
     let radius_mm = crate::match_wire::pos_mm([limit, 0.0, 0.0])[0];
     let fighters = fighters.min(crate::MAX_SLOTS);
     resolve_passes(&mut walkers[..fighters], &pillars[..count], radius_mm);
+    if let Some(balance) = balance {
+        if rules.balance {
+            shove_bodies(balance, &before, &walkers, fighters);
+        }
+    }
     for ((state, after), was) in states.iter_mut().zip(&walkers).zip(&before) {
         for axis in [0, 2] {
             let moved = after.pos_mm[axis] - was.pos_mm[axis];
@@ -234,6 +333,55 @@ fn collide_states_with(
             }
         }
     }
+}
+
+/// The body-push shove: the push-apart displacement the collision pass gave
+/// each fighter this tick, scaled by [`PUSH_SHOVE_TABLE`], feeds that
+/// fighter's balance. A push under the table's threshold lands nothing; a
+/// packed crowd staggers and a hard shove drops the fighter. The impulses
+/// come from the table, so they stay under the balance ceiling and the
+/// impact always lands. Rules v2 only: the caller gates the call on
+/// [`crate::ArenaRules::balance`], so rules v1 never reaches a balance.
+fn shove_bodies(
+    balance: &mut [crate::BalanceState],
+    before: &[Walker],
+    after: &[Walker],
+    fighters: usize,
+) {
+    let count = fighters
+        .min(before.len())
+        .min(after.len())
+        .min(balance.len());
+    for slot in 0..count {
+        let push = push_mm(before[slot].pos_mm, after[slot].pos_mm);
+        let impulse = shove_impulse_q8(push);
+        if impulse == 0 {
+            continue;
+        }
+        let _ = balance[slot].apply_impact(impulse);
+    }
+}
+
+/// The push-apart displacement of one fighter in one tick, millimetres: the
+/// length of the planar delta the collision pass applied. Integer only.
+fn push_mm(before: [i32; 3], after: [i32; 3]) -> i32 {
+    let dx = i64::from(after[0]) - i64::from(before[0]);
+    let dz = i64::from(after[2]) - i64::from(before[2]);
+    let dist2 = u64::try_from(dx * dx + dz * dz).unwrap_or(u64::MAX);
+    i32::try_from(dist2.isqrt()).unwrap_or(i32::MAX)
+}
+
+/// The impulse one push feeds the balance: the band the push falls into, or
+/// zero when the push does not pass the table's first edge. Integer only.
+fn shove_impulse_q8(push_mm: i32) -> u16 {
+    let mut impulse = 0u16;
+    for row in PUSH_SHOVE_TABLE {
+        if push_mm <= row.over_push_mm {
+            break;
+        }
+        impulse = row.impulse_q8;
+    }
+    impulse
 }
 
 #[cfg(test)]
@@ -382,6 +530,137 @@ mod tests {
             events += shipped.events.last().expect("row").events.len();
         }
         assert!(events > 0, "the fixture must land blows, not idle");
+    }
+
+    /// The shove fixture: 30 ticks of eight fighters, so the EG20 collision
+    /// pass runs every tick and a shove has time to land. `v2` picks the
+    /// rules-v2 tables; rules v1 runs the same fight on the v1 tables.
+    fn shove_config(v2: bool) -> crate::ArenaConfig {
+        crate::ArenaConfig {
+            seed: 2040,
+            ticks: 30,
+            fighters: 8,
+            half_extent_m: 20.0,
+            table_version: if v2 {
+                engine_combat::tables::TABLES_VERSION_V2
+            } else {
+                engine_combat::tables::TABLES_VERSION_V1
+            },
+        }
+    }
+
+    /// A still tape: every slot asks for no motion on every tick, so the
+    /// eight fighters stand where the test puts them and every push they
+    /// take comes from the collision pass.
+    fn still_tape(config: &crate::ArenaConfig) -> crate::FighterTape {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            for slot in 0..config.fighters {
+                inputs.push(crate::FighterInput {
+                    tick,
+                    fighter: crate::FighterId(slot),
+                    mx: 0,
+                    mz: 0,
+                    facing: 0,
+                    buttons: engine_input::Buttons::NONE,
+                });
+            }
+        }
+        crate::FighterTape(inputs)
+    }
+
+    /// One packed-crowd run under `rules`: every fighter starts on one point,
+    /// the fight runs to the end, and `each` sees the sim after every tick.
+    fn packed_run(
+        config: &crate::ArenaConfig,
+        tape: &crate::FighterTape,
+        rules: crate::ArenaRules,
+        mut each: impl FnMut(&crate::Sim),
+    ) -> crate::Sim {
+        let mut sim = crate::Sim::build(config, tape, false, false).expect("valid sim");
+        assert!(sim.set_rules(rules), "the rules must pin before tick 0");
+        for state in sim.states.iter_mut() {
+            state.pos = [1.0, 0.0, 2.0];
+        }
+        while sim.tick < config.ticks {
+            sim.step(tape).expect("valid step");
+            each(&sim);
+        }
+        sim
+    }
+
+    /// The balance hashes of a run: one hash per slot, the same order as the
+    /// slots.
+    fn balance_hashes(sim: &crate::Sim) -> Vec<u64> {
+        sim.balance
+            .iter()
+            .map(|balance| balance.state_hash())
+            .collect()
+    }
+
+    /// The shoves a run landed: the balance's applied-shove counters summed.
+    fn balance_shoves(sim: &crate::Sim) -> u64 {
+        sim.balance
+            .iter()
+            .map(|balance| balance.shove_count())
+            .sum()
+    }
+
+    /// TC3: a body push is a shove. Eight fighters spawned on one point under
+    /// rules v2 push each other apart, and the push-apart displacement feeds
+    /// the balance a shove scaled by the push: at least one fighter stumbles
+    /// inside 30 ticks. Two runs agree on the balance hashes, and the same
+    /// spawn under rules v1 lands no shove at all.
+    #[test]
+    fn packed_crowd_push_feeds_the_balance_a_shove() {
+        let config = shove_config(true);
+        let tape = still_tape(&config);
+        let v2 = crate::ArenaRules::v2_free_for_all();
+        let mut stumbled = false;
+        let sim = packed_run(&config, &tape, v2, |sim| {
+            stumbled |= sim
+                .balance
+                .iter()
+                .any(|balance| balance.gait() == crate::GaitPhase::Stumbling);
+        });
+        let hashes = balance_hashes(&sim);
+        let shoves = balance_shoves(&sim);
+        println!(
+            "packed crowd gaits: {:?}",
+            sim.balance.iter().map(|b| b.gait()).collect::<Vec<_>>()
+        );
+        assert!(shoves > 0, "the push must reach the balance");
+        assert!(stumbled, "a packed crowd must stumble inside 30 ticks");
+        let mut again_stumbled = false;
+        let again = packed_run(&config, &tape, v2, |sim| {
+            again_stumbled |= sim
+                .balance
+                .iter()
+                .any(|balance| balance.gait() == crate::GaitPhase::Stumbling);
+        });
+        assert_eq!(
+            hashes,
+            balance_hashes(&again),
+            "two runs agree on the hashes"
+        );
+        assert_eq!(stumbled, again_stumbled);
+        assert_eq!(shoves, balance_shoves(&again));
+        let v1_config = shove_config(false);
+        let v1_tape = still_tape(&v1_config);
+        let mut v1_stumbled = false;
+        let v1 = packed_run(&v1_config, &v1_tape, crate::ArenaRules::V1, |sim| {
+            v1_stumbled |= sim
+                .balance
+                .iter()
+                .any(|balance| balance.gait() == crate::GaitPhase::Stumbling);
+        });
+        assert_eq!(balance_shoves(&v1), 0, "rules v1 never shoves");
+        assert!(!v1_stumbled, "rules v1 never stumbles from a push");
+        assert_ne!(
+            hashes,
+            balance_hashes(&v1),
+            "the shove must reach the v2 balance"
+        );
     }
 
     /// Paired receipt: the p50 microseconds of one bout tick's collision
