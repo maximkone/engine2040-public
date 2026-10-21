@@ -342,7 +342,7 @@ impl TeacherClip {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rig::soma_index;
+    use engine_assets::fighter::soma_index;
 
     #[test]
     fn the_seed_drives_the_clip_and_repeats_exactly() {

@@ -17,9 +17,9 @@ const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 /// The planted foot's slip ceiling, m/s (the row's accept line).
 const SLIP_LIMIT: f32 = 0.08;
 /// `qclip_hash` two seed-7 tool runs printed; the committed pack is one run.
-const SEED7_QCLIP_HASH: u64 = 0x34f7_2e4f_8b72_217a;
+const SEED7_QCLIP_HASH: u64 = 0xbc8c_1300_6a5a_ad0a;
 /// sha256 of the pack bytes the seed-7 run wrote.
-const SEED7_PACK_SHA256: &str = "f255f453a46d47f2327aead292b31197a7d179af714cd169243a3ba2c9e75d4e";
+const SEED7_PACK_SHA256: &str = "250467218d14e7b4fba6b36d86a79daea02b1ae69d3288790116394b1b67565c";
 /// sha256 of the seed-7 teacher `.npz` the pack was baked from.
 const SEED7_SOURCE_SHA256: &str =
     "2bc933c4175af98d2a39303b93ef97809ee8b04361d059c91321daf857d01fa1";
@@ -69,6 +69,20 @@ fn hash(text: &str, key: &str) -> u64 {
         .unwrap_or_else(|why| panic!("{key} is not a hash: {why}"))
 }
 
+/// The index of a named track in the receipt's tracks array: the pack carries
+/// one track per fighter joint, and the receipt names them in the pack's order.
+fn track_index(receipt: &str, name: &str) -> usize {
+    let key = "\"tracks\": [";
+    let at = receipt.find(key).expect("the receipt names its tracks");
+    let rest = &receipt[at + key.len()..];
+    let end = rest.find(']').expect("the tracks array ends");
+    let names: Vec<&str> = rest[..end].split('"').skip(1).step_by(2).collect();
+    names
+        .iter()
+        .position(|n| *n == name)
+        .unwrap_or_else(|| panic!("the receipt has no track {name}"))
+}
+
 #[test]
 fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
     let bytes = fixture("stagger.am5p");
@@ -81,13 +95,27 @@ fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
     );
     let clip = bake_unpack(&bytes).expect("the committed pack loads");
     let ticks = integer(&receipt, "ticks") as u32;
-    assert_eq!(clip.tracks.len(), 2, "left foot then right foot");
+    // The pack carries the whole fighter body: one track per fighter joint, in
+    // the rig's joint order, named by the receipt.
+    assert_eq!(
+        clip.tracks.len() as u64,
+        integer(&receipt, "track_count"),
+        "one track per fighter joint"
+    );
+    assert_eq!(clip.tracks.len(), 65, "the fighter rig has 65 joints");
     assert_eq!(clip.tracks[0].times.len(), ticks as usize, "keys per track");
-    assert_eq!(clip.tracks[1].times.len(), ticks as usize, "keys per track");
+    assert_eq!(
+        clip.tracks[clip.tracks.len() - 1].times.len(),
+        ticks as usize,
+        "keys per track"
+    );
     assert_eq!(clip.dur.to_bits(), (60.0 * TICK_DT).to_bits(), "one second");
 
-    // The planted foot (left, track 0) never slides: under 8 cm/s on average.
-    let slip = avg_slip(&clip, 0, ticks);
+    // The planted foot never slides: under 8 cm/s on average. The feet are
+    // named by the receipt, so the gate reads the same tracks the pack holds.
+    let left = track_index(&receipt, "leftfoot");
+    let right = track_index(&receipt, "rightfoot");
+    let slip = avg_slip(&clip, left, ticks);
     assert!(
         slip < SLIP_LIMIT,
         "left foot slip {slip} is over {SLIP_LIMIT}"
@@ -100,7 +128,7 @@ fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
     );
     println!(
         "AM27_SLIP left={slip:.6} right={:.6}",
-        avg_slip(&clip, 1, ticks)
+        avg_slip(&clip, right, ticks)
     );
 
     // The decode is a fixed point of the wire, and the hash is the receipt's.
@@ -113,7 +141,11 @@ fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
     );
     assert_eq!(bytes.len() as u64, integer(&receipt, "packed_bytes"));
     // The cook found the teacher's plant windows, not a frozen foot.
-    assert_eq!(integer(&receipt, "track_count"), 2);
+    assert_eq!(
+        integer(&receipt, "track_count"),
+        65,
+        "the whole fighter body"
+    );
     assert_eq!(number(&receipt, "source_fps", 0), 30.0);
     println!(
         "AM27_PACK bytes={} ticks={ticks} qclip_hash=0x{hash:016x}",

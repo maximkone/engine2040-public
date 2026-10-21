@@ -104,14 +104,14 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   Correction 2026-10-21: the Accept filter `traj_student` matches no test (`Grep traj` over crates/anim is empty) and `fixtures/nets/traj.e2nn` does not exist (`Test-Path` false; only `depth_student.e2nn` is in that folder), so the command exits 0 with 0 passed. The net, the fixture and the test are the work; Accept is `--lib traj_student` printing a nonzero passed count, and the row may not be ticked until it does.
 
 - [ ] AM29 anim: a baked teacher clip is playable in the tick - the pack
-  carries the whole fighter body with its track names, the engine loads an
-  `.am5p` from disk and samples it onto the fighter rig. AM27 bakes and proves
-  the wire, but nothing plays it: the bake writes only the two foot tracks
-  (`TRACKS = ["leftfoot", "rightfoot"]`, the gate's evidence), the pack carries
-  no track names, `sample_packed` has no caller outside `pack.rs`, there is no
-  `.am5p` file loader, and the fighter-65 skeleton the bake retargets onto
-  lives in `tools/motion_bake/src/rig.rs` instead of in the engine. So a
-  teacher clip can be made and checked, and the game cannot play it yet.
+  carries the whole fighter body, the engine loads an `.am5p` from disk and
+  samples it onto the fighter rig. AM27 bakes and proves the wire, but
+  nothing played it: the bake wrote only the two foot tracks (the gate's
+  evidence), the pack carried no track names, `sample_packed` had no caller
+  outside `pack.rs`, there was no `.am5p` file loader, and the fighter-65
+  skeleton the bake retargets onto lived in `tools/motion_bake/src/rig.rs`
+  instead of in the engine. So a teacher clip could be made and checked, and
+  the game could not play it.
   Tier A. Size L. Owns `tools/motion_bake/`, the fighter skeleton in the
   engine, a pack loader in `crates/anim`, and the runtime hook that plays a
   loaded clip.
@@ -121,16 +121,19 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   P2P: `node tools/gh-check.mjs cargo test -p engine-anim --lib` stays green;
   the golden tape hash `d57b5c8ae3096614` does not move.
   Accept: the same command x2 - the committed `fixtures/clips/stagger.am5p`
-  loads from disk, its track names come back with the clip, a sampled frame
-  matches the pack's own keys, and the feet slip stays under 0.08 like the
-  bake gate reads it.
+  loads from disk, it carries every fighter joint, a sampled pose holds the
+  rig's own stance, a pack baked for another rig refuses, and the feet slip
+  stays under 0.08 like the bake gate reads it.
   Progress 2026-10-21: the loader landed (`crates/anim/src/pack_file.rs`: a
   path in, a clip out, the wire checked twice, so a cut or edited file
   refuses instead of playing wrong motion) and the rig moved into the engine
   (`crates/assets/src/fighter.rs`: the SOMA rest pose, the teacher skeleton
   and the fighter-65 skeleton with its bind; the bake tool imports it and
   keeps only its math). The bake is unchanged by the move: the tool's own
-  test still reproduces the committed fixture byte for byte
-  (`the_committed_fixture_is_this_bake_run_twice`). Left in the row: the
-  pack carries only the two foot tracks and no names, so the whole fighter
-  body has to be baked; and no runtime hook plays a loaded clip yet.
+  test still reproduces the committed fixture byte for byte. Then the pack
+  grew the whole body: the bake writes one track per fighter joint (65,
+  named in the receipt, in the rig's joint order) instead of the two feet,
+  and `pack_file::sample_pose` plays a loaded pack on a rig of the same
+  joint count, refusing a pack baked for another rig. Left in the row: the
+  pack carries positions only, so the rig's bind rotations stand, and no
+  game-side caller plays a loaded clip yet.

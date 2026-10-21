@@ -311,6 +311,129 @@ pub fn camera_for_eye(
     camera.validate().map_err(camera_feed_refused)?;
     Ok(camera)
 }
+
+/// The view the legionary mode plays: the eye of the fighter body (first
+/// person) or the fight camera (third person, the replay view).
+///
+/// Presentation only: the view never enters the simulation, the tape or any
+/// hash, so a toggle cannot move a match.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LegionaryView {
+    /// First person: the camera sits at the fighter's eye.
+    #[default]
+    Eye,
+    /// Third person: the fight camera frames the bout (the replay view).
+    Third,
+}
+
+impl LegionaryView {
+    /// The name the mode line prints: `fps` or `third`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Eye => "fps",
+            Self::Third => "third",
+        }
+    }
+
+    /// The other view: the toggle between the eye and the fight camera.
+    /// Presentation only; the simulation never sees it.
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Eye => Self::Third,
+            Self::Third => Self::Eye,
+        }
+    }
+}
+
+/// The shipped weapons table (`content/design/weapons.rows`): the design
+/// data the kit's sword rides. Embedded at build time, so the tick never
+/// reads a file and every load sees the same bytes.
+const WEAPONS_ROWS: &str = include_str!("../../../content/design/weapons.rows");
+
+/// One row of the weapons table by its id (`gladius`), or `None` when the
+/// table has no such row. The id is the piece name, so the kit's sword and
+/// the design row can never drift apart without the mode saying so.
+fn weapons_row<'a>(text: &'a str, id: &str) -> Option<&'a str> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(id) && line[id.len()..].starts_with(' '))
+}
+
+/// The kit one legionary wears: the galea on the head, the gladius in the
+/// hand, the scutum on the arm.
+///
+/// The names are the shipped ones. The numbers they stand for ride the
+/// engine's own rows (the anatomy row's armor bits, the weapons table's
+/// gladius row), so the mode never invents a value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LegionaryKit {
+    /// The helmet on the head: `galea`.
+    pub helmet: &'static str,
+    /// The sword in the hand: `gladius`.
+    pub weapon: &'static str,
+    /// The shield on the arm: `scutum`.
+    pub shield: &'static str,
+    /// The armor bits this kit covers in the shipped anatomy row: the galea
+    /// on the head and the scutum on the shield arm. The bits are the combat
+    /// crate's own constants, never a local copy.
+    pub worn: u8,
+}
+
+impl LegionaryKit {
+    /// The kit of a legionary of the line: galea, gladius, scutum.
+    pub const LEGIONARY: Self = Self {
+        helmet: "galea",
+        weapon: "gladius",
+        shield: "scutum",
+        worn: engine_combat::ARMOR_GALEA | engine_combat::ARMOR_SCUTUM,
+    };
+
+    /// The three pieces as one line: `galea,gladius,scutum`.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!("{},{},{}", self.helmet, self.weapon, self.shield)
+    }
+
+    /// True when the shipped data still backs the kit: the weapons table
+    /// still has the row the sword rides, and the armor bits are the
+    /// combat crate's own. The bits name what the kit covers in the
+    /// shipped anatomy row; the row names the sword's own numbers.
+    #[must_use]
+    pub fn backed_by_shipped_data(&self) -> bool {
+        weapons_row(WEAPONS_ROWS, self.weapon).is_some()
+            && self.worn & !engine_combat::ARMOR_ALL == 0
+    }
+}
+
+/// The first-person eye of one fighter body with the eye-space trauma kick
+/// folded in: the shake kicks about the eye instead of moving the world.
+///
+/// Units: `pos_m` meters over the feet, `facing_yaw_rad` radians,
+/// `trauma_permille` permille (`0` is calm), `tick` the fixed tick.
+/// Errors: [`CameraError::BadParam`] naming `FV1` for a non-finite position
+/// or facing (the same refusal the eye pose gives).
+/// Determinism: presentation only, never hashed; the same inputs give the
+/// same bytes twice; zero heap.
+pub fn legionary_eye(
+    pos_m: [f32; 3],
+    facing_yaw_rad: f32,
+    trauma_permille: u32,
+    tick: u32,
+) -> Result<RenderEye, CameraError> {
+    let mut eye = eye_for_fighter(pos_m, facing_yaw_rad, EYE_HEIGHT_MM)?;
+    if trauma_permille == 0 {
+        return Ok(eye);
+    }
+    let shake = eye_shake_for_trauma(trauma_permille, tick, u32::from(EYE_SHAKE_GAIN_Q));
+    let kick = eye_space_kick_mm(shake.kick_mm, eye.yaw_rad, eye.pitch_rad);
+    eye.eye_mm[0] += kick[0];
+    eye.eye_mm[1] += kick[1];
+    eye.eye_mm[2] += kick[2];
+    eye.roll_rad = shake.roll_rad;
+    Ok(eye)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +753,112 @@ mod tests {
             let up = rolled.up.normalize();
             let view = (rolled.target - rolled.eye).normalize();
             assert!(up.dot(view).abs() < 1e-6, "up left the view plane");
+        }
+    }
+
+    /// The legionary mode: the kit the player wears, the eye it looks
+    /// through and the camera that eye becomes. The module name carries the
+    /// `legionary` prefix the row's filter command selects.
+    mod legionary_mode {
+        use super::super::{
+            legionary_eye, mm_lane, LegionaryKit, LegionaryView, EYE_HEIGHT_MM, EYE_ROLL_MAX_RAD,
+        };
+        use crate::camera::CameraError;
+
+        #[test]
+        fn legionary_kit_names_the_shipped_pieces_and_their_armor_bits() {
+            let kit = LegionaryKit::LEGIONARY;
+            assert_eq!(kit.line(), "galea,gladius,scutum", "the kit line");
+            assert_eq!(kit.helmet, "galea");
+            assert_eq!(kit.weapon, "gladius");
+            assert_eq!(kit.shield, "scutum");
+            // The armor bits are the combat crate's own constants: the galea
+            // on the head and the scutum on the shield arm, nothing else.
+            assert_eq!(
+                kit.worn & engine_combat::ARMOR_GALEA,
+                engine_combat::ARMOR_GALEA
+            );
+            assert_eq!(
+                kit.worn & engine_combat::ARMOR_SCUTUM,
+                engine_combat::ARMOR_SCUTUM
+            );
+            assert_eq!(
+                kit.worn & !engine_combat::ARMOR_ALL,
+                0,
+                "bits outside the armor set"
+            );
+            // The shipped anatomy row really covers those joints with them.
+            let anatomy = engine_combat::AnatomyTable::rome_kit();
+            let bare = anatomy.protection_q16(engine_combat::JointId::Neck, 0);
+            let worn = anatomy.protection_q16(engine_combat::JointId::Neck, kit.worn);
+            assert!(worn > bare, "the galea must guard the neck");
+        }
+
+        /// The kit's sword is the shipped weapons row, not a free name: the
+        /// gladius row of `content/design/weapons.rows` carries the sword's
+        /// own numbers, and the mode says so when the table loses it.
+        #[test]
+        fn legionary_gladius_is_the_shipped_weapons_row() {
+            let kit = LegionaryKit::LEGIONARY;
+            let row = super::super::weapons_row(super::super::WEAPONS_ROWS, kit.weapon)
+                .expect("the weapons table still names the gladius");
+            assert!(
+                row.contains("damage_permille=") && row.contains("speed_ticks="),
+                "the gladius row carries its own numbers: {row}"
+            );
+            assert!(
+                kit.backed_by_shipped_data(),
+                "the shipped data backs the kit"
+            );
+            // A table without the row is drift the mode must report.
+            let bare = super::super::weapons_row("pugio type=1 damage_permille=80", kit.weapon);
+            assert!(bare.is_none(), "a table without the gladius names nothing");
+        }
+
+        #[test]
+        fn legionary_view_toggles_between_the_eye_and_the_fight_camera() {
+            assert_eq!(
+                LegionaryView::default(),
+                LegionaryView::Eye,
+                "the eye is the start"
+            );
+            assert_eq!(LegionaryView::Eye.name(), "fps");
+            assert_eq!(LegionaryView::Third.name(), "third");
+            let round = LegionaryView::Eye.toggled().toggled();
+            assert_eq!(round, LegionaryView::Eye, "the toggle comes back");
+            assert_eq!(LegionaryView::Eye.toggled(), LegionaryView::Third);
+        }
+
+        #[test]
+        fn legionary_eye_sits_at_head_height_and_kicks_with_trauma() {
+            let calm = legionary_eye([1.0, 0.0, 2.0], 0.5, 0, 7).expect("valid eye");
+            assert_eq!(calm.eye_mm[0], 1000.0, "x missed the feet");
+            assert_eq!(
+                calm.eye_mm[1],
+                mm_lane(EYE_HEIGHT_MM),
+                "y missed the height"
+            );
+            assert_eq!(calm.eye_mm[2], 2000.0, "z missed the feet");
+            assert_eq!(calm.yaw_rad, 0.5, "yaw missed the facing");
+            assert_eq!(calm.roll_rad, 0.0, "a calm eye does not roll");
+            // Trauma moves the eye about itself and rolls the view.
+            let hit = legionary_eye([1.0, 0.0, 2.0], 0.5, 400, 7).expect("valid eye");
+            assert_ne!(hit.eye_mm, calm.eye_mm, "the kick must move the eye");
+            assert!(hit.roll_rad > 0.0, "the kick must roll the view");
+            assert!(
+                hit.roll_rad <= EYE_ROLL_MAX_RAD,
+                "the roll stays under the cap"
+            );
+            // The same inputs give the same bytes twice.
+            let again = legionary_eye([1.0, 0.0, 2.0], 0.5, 400, 7).expect("valid eye");
+            assert_eq!(hit, again, "the eye replay split");
+            // A bad position refuses by name, never a NaN pose.
+            for bad in [[f32::NAN, 0.0, 0.0], [0.0, f32::INFINITY, 0.0]] {
+                assert!(matches!(
+                    legionary_eye(bad, 0.0, 0, 0),
+                    Err(CameraError::BadParam(row)) if row.contains("FV1")
+                ));
+            }
         }
     }
 }

@@ -44,6 +44,7 @@ use engine_game::feel_view::FeelView;
 use engine_game::fight_ring::{ring_prop_row, ring_wall_row};
 use engine_game::fighter_look::{look_down_deg, shot_for_frame, CamFollow, FighterLook, LookFrame};
 use engine_game::flow::{Flow, FlowEvent};
+use engine_game::fps_view::{LegionaryKit, LegionaryView};
 use engine_game::input::{map_key, map_mouse};
 use engine_game::lock_on::nearest_rival_facing;
 use engine_game::modes::{rank_modes, validate_request, AdapterMode, DisplayMode, SwapRequest};
@@ -172,6 +173,22 @@ const SPEAR_DEMO_FLAG: &str = "--spear-demo";
 /// `--height`: the fighter height channel on (rows SG5 and SG4): fighters fall
 /// and land under gravity and the wall tether swings instead of zipping.
 const HEIGHT_FLAG: &str = "--height";
+/// `--legionary`: the legionary mode. The duel starts with slot 0 as the
+/// player, seen in first person from the fighter's eye, wearing the galea,
+/// gladius and scutum kit on the rules v2 tables. The third person view stays
+/// one key away for the replay. View and kit only: the match, its rules and
+/// its hash are the ordinary duel.
+const LEGIONARY_FLAG: &str = "--legionary";
+/// The key that swaps the legionary mode between the eye and the fight
+/// camera: V (the view key). Presentation only; the simulation never reads it.
+const LEGIONARY_VIEW_KEY: winit::keyboard::KeyCode = winit::keyboard::KeyCode::KeyV;
+/// The eye's own-body rule: the near clip of the first person camera, in
+/// meters. The wearer's own head and shoulders sit inside this radius, so
+/// the clip keeps the body out of the picture instead of showing the inside
+/// of the skull. The table-driven rule (hide distance and near clip from one
+/// table) belongs to the no-clip view row; this constant is the coarse
+/// version that lets the mode be watched today.
+const LEGIONARY_EYE_NEAR_M: f32 = 0.30;
 /// `--agent-seat <PORT>`: a loopback client plays the human slot of this
 /// window and reads each fixed tick's hash back (see the `agent_seat`
 /// module). Port 0 asks the OS and the bound port is printed. The seat owns
@@ -190,7 +207,7 @@ const VIEW_LINE_PREFIX: &str = "arena view-line: ";
 /// walking toward the rival. Presentation and input only.
 const HOLD_FLAG: &str = "--hold";
 /// Keys the window answers, shown in the window title and printed at boot.
-const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | [ ] slow-mo speed | R rematch | T title | C free cam";
+const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | [ ] slow-mo speed | R rematch | T title | C free cam | V first/third person (--legionary)";
 /// Surface frames between look-probe rounds under `--look-probes`.
 const LOOK_PROBE_EVERY: u32 = 120;
 /// Surface frames between fog plus contact refreshes under `--look-probes`.
@@ -820,6 +837,7 @@ fn run(raw: &[String]) -> i32 {
     let (spear, raw) = split_flag(&raw, SPEAR_FLAG);
     let (spear_demo, raw) = split_flag(&raw, SPEAR_DEMO_FLAG);
     let (height, raw) = split_flag(&raw, HEIGHT_FLAG);
+    let (legionary, raw) = split_flag(&raw, LEGIONARY_FLAG);
     let (agent_seat, raw) = match split_agent_seat(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -853,7 +871,9 @@ fn run(raw: &[String]) -> i32 {
         };
     }
     // A seat has no Enter key: arming one starts the bout, like `--play`.
-    let play = play || agent_seat.is_some();
+    // The legionary mode starts the duel too: the player is slot 0 and the
+    // picture is the fighter's eye.
+    let play = play || agent_seat.is_some() || legionary;
     let (net, raw) = match arena_net::split_net_args(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -1015,6 +1035,11 @@ fn run(raw: &[String]) -> i32 {
     if let Err(err) = app.enable_spear(spear, spear_demo, height) {
         tell!("arena: {SPEAR_FLAG}/{HEIGHT_FLAG}: {err}");
         return 2;
+    }
+    // The legionary mode: the player is slot 0, the picture is the fighter's
+    // eye and the kit is the legionary's. The mode line says so at boot.
+    if legionary {
+        app.enable_legionary();
     }
     // A script that owns slot 0 must say so: the keys are read but ignored, and
     // without the line the bout looks like a broken controller.
@@ -1238,6 +1263,9 @@ struct ArenaApp {
     pause_announced: bool,
     /// Presentation camera mode; free-fly inspects a held tick.
     cam_mode: CameraMode,
+    /// The legionary mode: the kit the player wears and the view the window
+    /// plays. `None` keeps the ordinary third person fight camera.
+    legionary: Option<LegionaryMode>,
     /// Free-fly view pose (view code only: never hashed, never sim input).
     free_cam: DirectorParams,
     /// Whether the Result line already printed for this bout; cleared on
@@ -1380,6 +1408,27 @@ fn live_session(config: GameConfig, spear: bool, height: bool) -> Result<App, Wi
     Ok(if height { app.into_height()? } else { app })
 }
 
+/// The legionary mode: the kit the player wears and the view the window
+/// plays. The view is presentation only: a toggle never touches the
+/// simulation, the tape or any hash.
+struct LegionaryMode {
+    /// The kit the player wears: galea, gladius, scutum.
+    kit: LegionaryKit,
+    /// The view now: the eye (first person) or the fight camera (third).
+    view: LegionaryView,
+}
+
+impl LegionaryMode {
+    /// The mode line: the view the run plays and the kit the player wears.
+    fn line(&self) -> String {
+        format!(
+            "legionary: eye={} kit={}",
+            self.view.name(),
+            self.kit.line()
+        )
+    }
+}
+
 impl ArenaApp {
     fn new(
         config: GameConfig,
@@ -1450,6 +1499,7 @@ impl ArenaApp {
             step_requested: false,
             pause_announced: false,
             cam_mode: CameraMode::Director,
+            legionary: None,
             free_cam: DirectorParams::arena(),
             result_announced: false,
             last: Instant::now(),
@@ -2074,6 +2124,11 @@ impl ArenaApp {
             scene.frame(&mut list.camera);
         }
         self.feel.shake_camera(&mut list.camera);
+        // The legionary mode: the player's eye takes the frame while the first
+        // person view is on. It runs before the walking heading is read, so
+        // WASD walks where the player looks. Presentation only; the sim never
+        // reads the camera.
+        self.aim_legionary_eye(&mut list);
         // WASD walk where the camera looks: the heading of the shot the player
         // sees, read before the free-fly override (that one inspects, it does
         // not steer).
@@ -2496,6 +2551,116 @@ impl ArenaApp {
         };
     }
 
+    /// Turn the legionary mode on: the player is slot 0, seen in first person
+    /// from the fighter's eye, wearing the legionary kit. The mode line says
+    /// which view and which kit the run plays, and a second line names the
+    /// rules and tables the match really runs under. The mode line is
+    /// returned so a test can read the receipt the row names.
+    fn enable_legionary(&mut self) -> String {
+        let mode = LegionaryMode {
+            kit: LegionaryKit::LEGIONARY,
+            view: LegionaryView::Eye,
+        };
+        let line = mode.line();
+        say!("{line}");
+        if !mode.kit.backed_by_shipped_data() {
+            tell!(
+                "arena: --legionary: the shipped data lost the {} row",
+                mode.kit.weapon
+            );
+        }
+        let live = self.app.live_match();
+        say!(
+            "legionary rules: v{} tables={} slot={}",
+            live.rules().version,
+            live.config().table_version,
+            self.app.human_slot()
+        );
+        self.legionary = Some(mode);
+        line
+    }
+
+    /// Swap the legionary mode between the eye and the fight camera. View
+    /// only: the sim, the tape and every hash are untouched, so the replay
+    /// can be watched from outside without changing the match.
+    fn toggle_legionary_view(&mut self) {
+        let Some(mode) = self.legionary.as_mut() else {
+            return;
+        };
+        mode.view = mode.view.toggled();
+        let line = mode.line();
+        say!("{line}");
+    }
+
+    /// Aim the frame at the player's eye while the legionary mode plays in
+    /// first person: the eye pose over the human slot's feet, the eye-space
+    /// trauma kick folded in and the render camera built from it. The lens
+    /// and the far plane stay the ones of the frame it replaces, so the
+    /// third person toggle changes the place and nothing else.
+    /// Presentation only: the simulation, the tape and every hash are
+    /// untouched. Returns `true` when the frame camera moved to the eye.
+    fn aim_legionary_eye(&mut self, list: &mut DrawList) -> bool {
+        if self.cam_mode == CameraMode::Free {
+            return false;
+        }
+        let Some(mode) = self.legionary.as_ref() else {
+            return false;
+        };
+        if mode.view != LegionaryView::Eye {
+            return false;
+        }
+        let slot = self.app.human_slot();
+        let Some(view) = self.app.fighter_views().iter().find(|one| one.slot == slot) else {
+            return false;
+        };
+        let trauma = engine_game::camera_feed::trauma_for_cues(&self.tick_scratch.cues);
+        let eye = match engine_game::fps_view::legionary_eye(
+            view.pos_m,
+            view.yaw,
+            trauma,
+            self.ticks_done,
+        ) {
+            Ok(eye) => eye,
+            Err(err) => {
+                tell!("arena: legionary eye: {err}");
+                return false;
+            }
+        };
+        let mut camera = match engine_game::fps_view::camera_for_eye(
+            &eye,
+            list.camera.fov_y,
+            list.camera.aspect,
+        ) {
+            Ok(camera) => camera,
+            Err(err) => {
+                tell!("arena: legionary camera: {err}");
+                return false;
+            }
+        };
+        // The near clip sits past the wearer's own head, so the body never
+        // shows from the inside, and the far plane stays the one of the frame
+        // this camera replaces.
+        camera.near = LEGIONARY_EYE_NEAR_M;
+        camera.far = list.camera.far;
+        if let Err(err) = camera.validate() {
+            tell!("arena: legionary camera: {err}");
+            return false;
+        }
+        list.camera = camera;
+        true
+    }
+
+    /// The presentation camera keys: C flies the free camera, V swaps the
+    /// legionary mode between the player's eye and the fight camera.
+    /// Presentation only: the match, its rules and its hash stay untouched.
+    fn presentation_camera_key(&mut self, code: winit::keyboard::KeyCode) {
+        match code {
+            winit::keyboard::KeyCode::KeyC => self.toggle_free_cam(),
+            LEGIONARY_VIEW_KEY => self.toggle_legionary_view(),
+            _ => {}
+        }
+    }
+
     /// One free-fly key step: arrows look (yaw/pitch), WASD move world meters
     /// on the floor plane and Q/E move down/up. The caller keeps the look
     /// inside [`free_cam_step`]'s bounds, so the function itself never clamps;
@@ -2740,8 +2905,8 @@ impl ApplicationHandler for ArenaApp {
                     // Free-fly: C toggles the presentation camera (F is the
                     // attack key); while it is on, WASD/arrows fly the eye one
                     // step per press. Never touches the sim (presentation only).
-                    if struck && code == winit::keyboard::KeyCode::KeyC {
-                        self.toggle_free_cam();
+                    if struck {
+                        self.presentation_camera_key(code);
                     }
                     if struck && self.cam_mode == CameraMode::Free {
                         self.step_free_cam(code);
@@ -2841,6 +3006,102 @@ mod tests {
     }
 
     #[test]
+    fn legionary_flag_splits_off_and_the_strict_parser_still_refuses_it() {
+        let (on, rest) = split_flag(
+            &strings(&["arena", "--legionary", "--exit"]),
+            LEGIONARY_FLAG,
+        );
+        assert!(on, "the flag turns the mode on");
+        assert_eq!(rest, strings(&["arena", "--exit"]));
+        let (off, same) = split_flag(&strings(&["arena", "--exit"]), LEGIONARY_FLAG);
+        assert!(!off, "the mode ships off");
+        assert_eq!(same, strings(&["arena", "--exit"]));
+        // The strict parser still refuses the flag if it were not split.
+        assert!(WinArgs::parse(&strings(&["arena", "--legionary"])).is_err());
+    }
+
+    #[test]
+    fn the_legionary_mode_plays_the_duel_on_rules_v2_with_slot_0_as_the_player() {
+        let app = live_session(bin_config(), false, false).expect("session builds");
+        let live = app.live_match();
+        assert_eq!(
+            live.rules(),
+            engine_arena::ArenaRules::v2_free_for_all(),
+            "the legionary mode plays rules v2"
+        );
+        assert_eq!(
+            live.config().table_version,
+            engine_combat::tables::TABLES_VERSION_V2,
+            "rules v2 runs on the v2 tables"
+        );
+        assert_eq!(app.human_slot(), 0, "slot 0 is the player");
+    }
+
+    #[test]
+    fn the_legionary_view_toggle_leaves_the_match_alone() {
+        let args =
+            WinArgs::parse(&strings(&["arena", "--frames", "60", "--exit"])).expect("args parse");
+        let mut app = ArenaApp::new(bin_config(), args, None).expect("session builds");
+        let line = app.enable_legionary();
+        assert_eq!(
+            line, "legionary: eye=fps kit=galea,gladius,scutum",
+            "the mode line the row names"
+        );
+        app.run_sim_ticks(app.config.ticks, app.human().expect("human slot"));
+        let before: Vec<u64> = app.app.checkpoints().iter().map(|one| one.hash).collect();
+        assert!(!before.is_empty(), "the match really ran");
+        app.toggle_legionary_view();
+        app.toggle_legionary_view();
+        let after: Vec<u64> = app.app.checkpoints().iter().map(|one| one.hash).collect();
+        assert_eq!(before, after, "the toggle must not move the match");
+        let mode = app.legionary.as_ref().expect("the mode is on");
+        assert_eq!(mode.view, LegionaryView::Eye, "two toggles come back");
+        assert_eq!(mode.kit.line(), "galea,gladius,scutum", "the kit line");
+    }
+
+    #[test]
+    fn the_third_person_view_is_one_key_away_on_a_free_key() {
+        // The view key is V: one key from the eye to the fight camera.
+        assert_eq!(LEGIONARY_VIEW_KEY, winit::keyboard::KeyCode::KeyV);
+        assert!(
+            CONTROLS_LINE.contains("V first/third person (--legionary)"),
+            "the boot line names the key: {CONTROLS_LINE}"
+        );
+        // V is no fighter action, so the toggle never eats a move.
+        assert_eq!(
+            arena_winit::from_winit_key(LEGIONARY_VIEW_KEY),
+            None,
+            "the view key must stay off the bindings table"
+        );
+    }
+
+    #[test]
+    fn the_legionary_eye_takes_the_frame_and_the_toggle_gives_it_back() {
+        let args =
+            WinArgs::parse(&strings(&["arena", "--frames", "60", "--exit"])).expect("args parse");
+        let mut app = ArenaApp::new(bin_config(), args, None).expect("session builds");
+        app.enable_legionary();
+        app.run_sim_ticks(app.config.ticks, app.human().expect("human slot"));
+        let mut list = hud_draw_list(1280, 720).expect("hud list builds");
+        assert!(
+            app.aim_legionary_eye(&mut list),
+            "the eye must take the frame"
+        );
+        assert!(list.camera.eye.y > 1.0, "the eye sits over the feet");
+        assert_eq!(
+            list.camera.near, LEGIONARY_EYE_NEAR_M,
+            "the own-body clip rides the eye camera"
+        );
+        // The third person view gives the fight camera back.
+        app.toggle_legionary_view();
+        let mut third = hud_draw_list(1280, 720).expect("hud list builds");
+        assert!(
+            !app.aim_legionary_eye(&mut third),
+            "the eye must step aside"
+        );
+    }
+
+    #[test]
     fn view_line_flag_splits_off_and_refuses_bad_numbers() {
         let (request, rest) = split_view_line(&strings(&[
             "arena",
@@ -2867,7 +3128,9 @@ mod tests {
             vec!["arena", "--view-line", "2040", "x", "2"],
             vec!["arena", "--view-line", "2040", "600", "x"],
             vec!["arena", "--view-line", "2040", "600", "1"],
-            vec!["arena", "--view-line", "2040", "600", "17"],
+            // The cap is `engine_input::MAX_PARTICIPANTS` (32 since GE12), so
+            // one over it is the count that must refuse.
+            vec!["arena", "--view-line", "2040", "600", "33"],
             vec!["arena", "--view-line", "2040", "100001", "2"],
             vec!["arena", "--view-line", "2040", "--frames", "2"],
         ] {

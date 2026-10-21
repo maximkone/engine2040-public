@@ -34,9 +34,6 @@ pub const BAKE_FPS: f32 = 60.0;
 /// must agree this closely, meters; a larger gap means the file disagrees
 /// with itself.
 pub const ROOT_AGREEMENT_M: f32 = 0.01;
-/// Foot lanes packed per clip: left then right, the order the slip meter and
-/// the receipt use.
-pub const TRACKS: [&str; 2] = ["leftfoot", "rightfoot"];
 
 /// Why a bake run was refused; every variant names the fault.
 #[derive(Clone, Debug, PartialEq)]
@@ -136,8 +133,9 @@ pub struct Receipt {
     pub ticks: u32,
     /// Time of the last constrained tick, seconds.
     pub dur_s: f32,
-    /// Track names in clip order.
-    pub tracks: Vec<&'static str>,
+    /// Track names in clip order: one per packed track, the fighter's own joint
+    /// order.
+    pub tracks: Vec<String>,
     /// Keys per track.
     pub keys: usize,
     /// Bytes on the wire.
@@ -148,7 +146,7 @@ pub struct Receipt {
     pub qclip_hash: u64,
     /// Digest of the whole retargeted cook.
     pub retarget_digest: u64,
-    /// `avg_slip` per track, same order as `tracks`.
+    /// `avg_slip` of the two feet, left then right: the gate reads these.
     pub avg_slip: Vec<f32>,
     /// Plant windows per foot inside the baked length.
     pub plant_windows: Vec<u32>,
@@ -366,9 +364,12 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
     let last = last_constrained(&constrained).ok_or(BakeError::NoConstraint)?;
     let len = bake_len(i64::from(last), BAKE_FPS)?;
 
-    // Two foot lanes at the bake rate, packed through the one AM5P home.
-    let mut tracks = Vec::with_capacity(TRACKS.len());
-    for joint in [left_foot, right_foot] {
+    // The whole fighter body at the bake rate, packed through the one AM5P
+    // home: one track per fighter joint, in the fighter's own joint order, so
+    // the tick can play the pack without asking the bake anything.
+    let fighter_joints = target.len();
+    let mut tracks = Vec::with_capacity(fighter_joints);
+    for joint in 0..fighter_joints {
         let times: Vec<f32> = (0..len.ticks).map(|k| k as f32 * TICK_DT).collect();
         let values: Vec<[f32; 3]> = times
             .iter()
@@ -416,15 +417,19 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
         last_constrained_tick: last,
         ticks: len.ticks,
         dur_s: len.dur,
-        tracks: TRACKS.to_vec(),
+        tracks: target
+            .joints
+            .iter()
+            .map(|joint| joint.name.clone())
+            .collect(),
         keys: shipped.tracks.first().map_or(0, |track| track.times.len()),
         packed_bytes: pack.len(),
         bytes_sha256: sha256_hex(&pack),
         qclip_hash: qclip_hash(&shipped),
         retarget_digest: retarget_digest(&cooked),
         avg_slip: vec![
-            avg_slip(&shipped, 0, len.ticks),
-            avg_slip(&shipped, 1, len.ticks),
+            avg_slip(&shipped, left_foot, len.ticks),
+            avg_slip(&shipped, right_foot, len.ticks),
         ],
         plant_windows: windows.to_vec(),
     };
@@ -479,6 +484,6 @@ mod tests {
         assert_eq!(first, on_disk, "the fixture is the tool's own bytes");
         assert_eq!(receipt, on_disk_receipt, "the receipt is the tool's text");
         assert!(receipt.contains("\"qclip_hash\": \"0x"), "a receipt hash");
-        assert_eq!(first.len(), 820, "the committed pack size");
+        assert_eq!(first.len(), 26209, "the committed pack size");
     }
 }

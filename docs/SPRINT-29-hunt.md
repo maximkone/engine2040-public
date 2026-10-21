@@ -480,7 +480,7 @@ not re-mine the same repo.
   F2P: no morale state.
   P2P: golden `d57b5c8ae3096614` x2; the rules v1 scene is untouched.
   needs: none.
-- [ ] HX28 rome: the chapter maps are real ground. The Digital Atlas of the
+- [x] HX28 rome: the chapter maps are real ground. The Digital Atlas of the Landed 6c433bed1. `cargo test -p engine-rome --lib geo` 9 passed, 0 failed (run 39597501940): the two tables load with every entry naming a `ref`, a point in the Danube region finds Drobeta within 5 km, the Limes segments carry the names the atlas gives them, and two loads hash the same. The frontier is 51 named lines (the Upper German and Raetian Limes, the Main, the Neckar, the frontier road and the Wall mile markers); the gazetteer is 25 settlements of the six chapter boxes with their Pleiades, Barrington, DARE and Wikidata ids. Clippy `-p engine-rome --all-targets -- -D warnings` PASS (run 39598639281); golden `d57b5c8ae3096614` x2 (runs 39599002285, 39599338633); licence and sha256 of both donors in `content/rome/PROVENANCE.md`.
   Roman Empire gives the **frontier as geometry**: the Upper German and
   Raetian Limes as named, segmented lines (with the Main and the Neckar named
   as rivers), Hadrian's Wall mile markers, the AD 117 provinces, and the

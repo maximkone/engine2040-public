@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.4045,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 1.986,
+  "fill_30m": 0.3815,
+  "height_30m_px": 89,
+  "height_px": 797,
+  "ortho_scale_m": 2.4919,
+  "px_per_m": 401.3,
+  "resolution_30m": [
+    1360,
+    764
+  ],
+  "scale_applied": 1.180679,
+  "source": "C:\\engine2040\\content\\generated\\mpfb_body\\body.glb",
+  "source_height_m": 1.6939,
+  "triangles": 36972,
+  "width_px": 425
+}

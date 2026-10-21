@@ -297,14 +297,16 @@ mod tests {
         let bytes: &[u8] = include_bytes!("../../../fixtures/clips/stagger.am5p");
         assert_eq!(&bytes[..4], b"AM5P", "the committed pack is AM5P");
         let clip = bake_unpack(bytes).expect("the committed pack loads");
-        assert_eq!(clip.tracks.len(), 2, "left foot then right foot");
+        assert_eq!(clip.tracks.len(), 65, "the whole fighter body");
         assert_eq!(clip.tracks[0].times.len(), 61, "one second at 60 Hz");
         assert_eq!(
             qclip_hash(&clip),
-            0x34f7_2e4f_8b72_217a,
+            0xbc8c_1300_6a5a_ad0a,
             "the seed-7 receipt's qclip_hash"
         );
-        let slip = avg_slip(&clip, 0, 61);
+        // The left foot is the planted one; it is the 58th track of the fighter
+        // rig, and the gate's slip reads that track.
+        let slip = avg_slip(&clip, 57, 61);
         assert!(slip < 0.08, "the planted foot slips {slip}");
         assert_eq!(bake_pack(&clip).expect("repacks"), bytes, "fixed point");
         println!("AM27_FIXTURE ticks=61 slip={slip:.6}");

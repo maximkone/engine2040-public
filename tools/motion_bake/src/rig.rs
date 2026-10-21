@@ -14,8 +14,7 @@
 //! exact for the angles a stagger uses and identical on every CPU.
 
 pub use engine_assets::fighter::{
-    fighter_bind, fighter_skeleton, joint_index, rest_world, soma_bind, soma_index, soma_offsets,
-    soma_skeleton, SOMA_REST,
+    fighter_bind, fighter_skeleton, joint_index, rest_world, soma_bind, soma_offsets, soma_skeleton,
 };
 
 /// A unit quaternion for a turn of `angle` radians about `axis`, built from
@@ -106,6 +105,7 @@ pub fn mat3_to_quat(m: [[f32; 3]; 3]) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_assets::fighter::{soma_index, SOMA_REST};
     use engine_assets::soma::SOMA77;
 
     #[test]

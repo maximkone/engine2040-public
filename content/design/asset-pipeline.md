@@ -188,6 +188,37 @@ a shrinkwrap and a parent, not a modelling job.
 whole body in frame, one figure, no panels" is the wording that makes the
 generator give a character with separated limbs. "Hulking" gives a boulder.
 
+## The real body: MakeHuman / MPFB2
+
+The generated mesh is a lump with a good silhouette, and a lump in armour is
+still a lump. The fix is a body.
+
+MPFB2 is a Blender extension that makes a rigged, textured human. The core
+assets are CC0: "free to do as you see fit with the asset or derivates of the
+assets", no attribution, and MakeHuman's own FAQ says a commercial closed
+source game is fine. The tool's code is GPL, which does not touch the game:
+we use it, we do not ship it.
+
+    blender -b --python tools/blender/mpfb_body.py -- <out.glb> [--height 1.9]
+
+It runs headless, makes the body, throws away MPFB's editor helpers and
+writes one GLB. The body carries its proportions as shape keys, so the cook
+bakes the current shape into the mesh before it decimates: a mesh with shape
+keys cannot be decimated.
+
+What the real body buys, measured on the same pipeline:
+
+- the 30 m read: fill 0.4045 for the naked body, 0.5308 in armour, both
+  inside the band the lumps only reached by luck
+- the rig: 1570 of 1798 vertices weighted (87 percent), against 66 percent
+  on a generated lump, because the limbs are actually limbs
+- the shape: a jaw, elbows, hands, knees, and a head with hair on it, which
+  is what makes the armour read as armour
+
+What it does not buy: the fit of our plates. A plate sized for an ideal
+human is a slab on a real body, and the armour sheet's radius field is what
+gets calibrated per class from here.
+
 ## The chain, as one command
 
     node tools/asset-gen/character.mjs --concept <concept.png> \

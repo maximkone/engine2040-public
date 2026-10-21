@@ -106,6 +106,16 @@ def import_mesh(path):
     ob = bpy.context.view_layer.objects.active
     ob.name = "body"
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    # A body that carries its proportions as shape keys cannot be decimated,
+    # so the current shape is baked into the mesh first.
+    if ob.data.shape_keys is not None:
+        bpy.ops.object.select_all(action="DESELECT")
+        ob.select_set(True)
+        bpy.context.view_layer.objects.active = ob
+        bpy.ops.object.convert(target="MESH")
+        ob = bpy.context.view_layer.objects.active
+        ob.name = "body"
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
     return ob
 
 

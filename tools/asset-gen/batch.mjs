@@ -47,6 +47,22 @@ for (const file of files) {
   const id = basename(file).replace(/^concept_/i, "").replace(/\.(jpg|png)$/i, "");
   const concept = join(conceptsDir, file);
   const out = join(outRoot, id);
+  // Work already done is not done again: the mesh is the expensive part.
+  if (has("--skip-existing") && existsSync(join(out, "character.json"))) {
+    console.log(`skip ${id}: already done`);
+    const done = JSON.parse(readFileSync(join(out, "character.json"), "utf8"));
+    rows.push({
+      id,
+      verdict: done.gate?.verdict ?? "unknown",
+      fill: done.gate?.bbox_fill ?? null,
+      fill30: done.gate?.fill_30m ?? null,
+      tris: done.cook?.lods?.[0]?.triangles ?? null,
+      rig: done.rig?.weighted_vertices ?? null,
+      vertices: done.rig?.vertices ?? null,
+      error: null,
+    });
+    continue;
+  }
   const args = [join(ROOT, "tools", "asset-gen", "character.mjs"),
     "--concept", concept, "--name", id, "--out", out];
 
