@@ -151,9 +151,7 @@ if (probeBin) {
 
 // 5. opencode.jsonc entries (surgical text edit; every other key byte-identical).
 const binRel = destRel;
-// Absolute: OpenCode starts a local MCP server outside the project root, so a relative --project-dir fails
-// ("bad project dir ... does not exist") while the relative binary path still resolves.
-const scratchRel = scratchDir.split("\\").join("/");
+const scratchRel = relPosix(scratchDir);
 const managedNote = "managed by tools/mcp-install.mjs (MCP6)";
 const localEntry = (indent) =>
   `${indent}"e2040": {\n${indent}  "type": "local",\n${indent}  "command": ["${binRel}", "--project-dir", "${scratchRel}"],\n${indent}  "enabled": true\n${indent}}`;

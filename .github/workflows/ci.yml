@@ -163,10 +163,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   release-proof:
-    # The shipped shape (the `ship` profile: fat LTO, one codegen unit), the
-    # recorded-input replay proofs and the legacy golden run twice. The golden
-    # hash is proven under both shapes: here in the shipped one, and in the
-    # thin-LTO `release`/`perf-test` legs.
+    # Release build, the recorded-input replay proofs and the legacy golden run twice.
     if: github.repository == 'maximkone/engine2040-public'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -188,7 +185,7 @@ jobs:
         with:
           shared-key: release
       - name: build
-        run: cargo build --locked --workspace --profile ship
+        run: cargo build --locked --workspace --release
       - name: real seed and recorded-input replay proofs
         if: ${{ !cancelled() }}
         run: node tools/proof.mjs --skip-build
@@ -197,8 +194,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo run -p engine2040 --locked --profile ship --quiet | tee "$RUNNER_TEMP/null-a.log"
-          cargo run -p engine2040 --locked --profile ship --quiet | tee "$RUNNER_TEMP/null-b.log"
+          cargo run -p engine2040 --locked --release --quiet | tee "$RUNNER_TEMP/null-a.log"
+          cargo run -p engine2040 --locked --release --quiet | tee "$RUNNER_TEMP/null-b.log"
           grep -Fx "  ticks=600 final_hash=d57b5c8ae3096614" "$RUNNER_TEMP/null-a.log" > "$RUNNER_TEMP/hash-a"
           grep -Fx "  ticks=600 final_hash=d57b5c8ae3096614" "$RUNNER_TEMP/null-b.log" > "$RUNNER_TEMP/hash-b"
           diff "$RUNNER_TEMP/hash-a" "$RUNNER_TEMP/hash-b"

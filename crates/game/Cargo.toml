@@ -82,10 +82,6 @@ engine-net.workspace = true
 # budget walls from destruction (consumed, never mirrored).
 engine-core.workspace = true
 engine-destruction.workspace = true
-# The class sheet loader reads its JSON through the material crate's reader
-# (`engine_material::json`, the one owner); material takes destruction and
-# core only, so the edge stays acyclic.
-engine-material.workspace = true
 # PQ18: the arena window loop stages its input-to-present stamps through the
 # perf crate's public latency API (`WindowLatencyLog`, `GpuConditions`). The
 # perf crate is a leaf harness (nothing it composes depends on game), so the

@@ -1,44 +1,40 @@
-# START HERE: the 8 skills to read first
+# START HERE: the 10 skills to read first
 
-New session, any model. `AGENTS.md` wins over every skill. Read these eight once (about 15 minutes), then use the task table below. The full map is `skills/SKILLS.md`. Open a skill as `skills/<name>/SKILL.md`.
+New session, any model. `AGENTS.md` wins over every skill. Read these ten once (about 15 minutes), then use the task table below. The full map is `skills/SKILLS.md`. Open a skill as `skills/<name>/SKILL.md`.
 
-## The eight
+## The ten
 
 | # | skill | why first |
 |---|---|---|
 | 1 | `repo-orientation` | where things are; the narrow search that does not die on the glTF |
-| 2 | `commit-and-board` | one shared tree: commit by path, never `git add -A`; how a row is written and closed (`Landed <sha7>`, evidence) |
-| 3 | `github-check` | heavy cargo runs on GitHub (`node tools/gh-check.mjs ...`), never the local lock; what exit 2 or 3 means |
-| 4 | `test-and-proof` | what counts as proof; never write DONE or green without it |
-| 5 | `debug-triage` | root cause before fix, stop after two identical failures |
-| 6 | `engine-code` | how Rust is written here: reuse first, typed errors, no stubs |
-| 7 | `rust-quality-ratchet` | the pre-commit hook and the debt counts that only go down |
-| 8 | `wiring-a-feature` | much of the plan is code that exists and nothing calls: wire before you write |
+| 2 | `commit-and-board` | one shared tree: commit by path, never `git add -A`, how a row is written |
+| 3 | `tick-a-row` | closing a row: `Landed <sha7>`, the evidence, progress notes |
+| 4 | `github-check` | heavy cargo runs on GitHub (`node tools/gh-check.mjs ...`), never the local lock |
+| 5 | `gh-check-playbook` | which form for which job, and what exit 2 or 3 means |
+| 6 | `test-and-proof` | what counts as proof; never write DONE or green without it |
+| 7 | `debug-triage` | root cause before fix, stop after two identical failures |
+| 8 | `engine-code` | how Rust is written here: reuse first, typed errors, no stubs |
+| 9 | `rust-quality-ratchet` | the pre-commit hook and the debt counts that only go down |
+| 10 | `wiring-a-feature` | much of the plan is code that exists and nothing calls: wire before you write |
 
 ## By task
 
 | you are about to | read, in this order |
 |---|---|
-| fix a bug or a red check | `debug-triage`, `github-check`; a hash moved: `determinism-debug` |
-| land a row | `commit-and-board`, `test-and-proof`; a refused commit: `rust-quality-ratchet` |
+| fix a bug or a red check | `debug-triage`, `github-check`, `gh-check-playbook`; a hash moved: `determinism-debug` |
+| land a row | `commit-and-board`, `test-and-proof`, `tick-a-row`; a refused commit: `rust-quality-ratchet` |
 | add a feature | `repo-orientation`, `wiring-a-feature` (does it already exist?), `engine-code`, then the area skill below |
-| review a diff or audit an area | `review`: depth score, rust bar, callers, captures, API review |
-| write unsafe, statics, atomics, locks, threads, real-time callbacks, sim numeric casts | `rust-safety` |
-| change the fixed tick, live window loop, frame budget, asset handles, startup, crash hook | `tick-and-runtime` |
-| read a research card, donor repo, paper or spike | `research` |
-| work on the web build | `web-wasm` (section 8: the browser pane check of the published page), `github-check` (web-run) |
-| work on physics, breaks, ragdolls | `physics-bodies`, `determinism-debug`, `door-and-headless-runbook` (arena receipt lines), `wiring-a-feature` |
-| work on look, render, lights | `wgpu-render`, `render-pipeline-math`, `render-lighting`, `door-and-headless-runbook` |
-| work on fighters, anim, feel | `anim-combat`, `door-and-headless-runbook`, `design-and-playtest` |
-| work on the shell, HUD, menus, sound | `game-shell-audio-ui` |
-| work on sight, hearing, AI placement | `spatial-perception` |
+| work on the web build | `web-wasm`, `gh-check-playbook` (web-run), `browser-test-on-this-pc` |
+| work on physics, breaks, ragdolls | `physics-bodies`, `determinism-debug`, `arena-capture-and-view-line`, `wiring-a-feature` |
+| work on look, render, lights | `wgpu-render`, `render-pipeline-math`, `render-lighting`, `arena-capture-and-view-line` |
+| work on fighters, anim, feel | `anim-combat`, `arena-capture-and-view-line`, `design-and-playtest` |
 | add content or assets | `assets-content`, then `render-cull-vram` if it costs VRAM |
 | online play | `net-rollback`, `determinism-debug` |
 | the MCP door or AI players | `ai-door`, `door-and-headless-runbook` |
 | a file seems to be missing | `recover-deleted-code` |
 | edit docs or the board | `commit-and-board`; then the docs rules below |
 | measure speed | `perf-bench` |
-| run the game without a person | `door-and-headless-runbook` |
+| run the game without a person | `door-and-headless-runbook`, `arena-capture-and-view-line` |
 
 ## Five rules that apply to every task
 

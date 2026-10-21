@@ -7,7 +7,7 @@ description: "Use when you change net session, snapshot, interpolation or online
 
 Crate: `crates/net` (`engine-net`). Game side: `crates/game/src/netgame.rs`. Net never owns transport: IO stays outside the fixed tick (`AGENTS.md` rule 3).
 
-Is ggrs a dependency? No. No `Cargo.toml` in the repo names `ggrs` (grep 2026-10-17). `crates/net/src/netcode.rs` and `rollback.rs` reimplement the request pattern and the input queue std-only, as shape only (ported from gschup/ggrs @ e97e3d2, no donor bytes). If the owner adds the crate, check docs.rs for its current API before you copy a call.
+Is ggrs a dependency? No. No `Cargo.toml` in the repo names `ggrs` (grep 2026-10-17). `crates/net/src/netcode.rs` and `rollback.rs` reimplement the request pattern and the input queue std-only, as shape only (ported from gschup/ggrs @ e97e3d2, no donor bytes). The ggrs API digest is in `references/ggrs-api.md`. Read it when you port a donor idea (sync-layer checksum, save and load cells, input queue) or if the owner adds the crate.
 
 ## Policy: no extrapolation
 
@@ -68,6 +68,6 @@ Full text: `references/ggpo-rules.md`.
 - A client position in a packet is a bug. Inputs only.
 - Full state every tick is too expensive. Send inputs, snapshot on a schedule, delta against confirmed.
 - A skipped or reordered request (save, load, advance) gives wrong behavior or a panic. Fulfil every request in the order given.
-- `ggrs` names change between releases. Check docs.rs before you copy a call.
+- `ggrs` names change between releases. Check the digest and docs.rs before you copy a call.
 
 Sources: Gaffer On Games, "What every programmer needs to know about game networking"; Game Engine Gems 2 ch. 18 (dead reckoning, rejected); ggrs docs (MIT OR Apache-2.0) and the GGPO developer guide (MIT), credit in `references/sources.md`.

@@ -317,14 +317,10 @@ def main():
     outdir = os.path.dirname(os.path.abspath(dest))
     if outdir:
         os.makedirs(outdir, exist_ok=True)
-    bpy.ops.object.select_all(action="DESELECT")
-    ob.select_set(True)
-    arm.select_set(True)
-    bpy.context.view_layer.objects.active = ob
     try:
         bpy.ops.export_scene.gltf(filepath=dest, export_format="GLB", export_apply=True,
                                   export_texcoords=True, export_normals=True,
-                                  export_colors=True, export_skins=True, use_selection=True)
+                                  export_colors=True, export_skins=True)
     except TypeError:
         bpy.ops.export_scene.gltf(filepath=dest, export_format="GLB")
     if not os.path.exists(dest) or os.path.getsize(dest) == 0:

@@ -29,8 +29,8 @@ Other skills own the details. Load them by name:
 5. Test the behavior and one failure case. Then wire the real consumer. A trait that compiles is not integration.
 6. `git grep` every new `pub` name. A caller outside tests must exist. Zero callers: wire one (tick, submit, encoder) with a behavior test on the call path, or board its consumer row.
 7. Finish the capability in one row. If it cannot land whole, say exactly what remains.
-8. Proof: `cargo check -p <crate>` while you work. Then `node tools/gh-check.mjs cargo test -p <crate> --lib <filter>` and `node tools/gh-check.mjs cargo clippy -p <crate> --all-targets -- -D warnings`. `rustfmt --edition 2021 --check <files>` (never `cargo fmt`).
-9. If sim code changed, run the golden exactly as AGENTS.md "Proof" says: `node tools/gh-check.mjs cargo test -p engine2040 --release --test proof_cli default_and_max_seed`. The binary's `--verify` must print `d57b5c8ae3096614` (GitHub builds the fat-LTO binary). `-p` is the package name in `crates/<dir>/Cargo.toml`.
+8. Proof: `cargo check -p <crate>` while you work. Then `node tools/gh-check.mjs cargo test -p <crate> --lib <filter>` and `... cargo clippy -p <crate> --all-targets -- -D warnings`. `rustfmt --edition 2021 --check <files>` (never `cargo fmt`).
+9. If sim code changed: `cargo test -p engine-proof --lib golden_hash_untouched` and `cargo run -p engine2040 --release` twice, same `final_hash=d57b5c8ae3096614`. `-p` is the package name in `crates/<dir>/Cargo.toml`.
 
 "Blocking waiting for file lock" is another cargo build in `target/`. Wait.
 
@@ -80,7 +80,7 @@ Readers are a stranger building a game and an AI calling the engine through MCP.
 
 - Every sentence is true of the code on disk. Never document a planned or `Unsupported` path as working. Say what it does today and name the board row that finishes it.
 - Public items: one-line summary, then units (meters, ticks, permille), ownership, threading, determinism scope, errors and panics. Match the module header style (`crates/arena/src/fork.rs` is the model).
-- Every public entry point gets a short runnable example (doctest or `examples/`). `node tools/gh-check.mjs cargo test --doc -p <crate>` and `cargo run -p <crate> --example <name>`.
+- Every public entry point gets a short runnable example (doctest or `examples/`). `cargo test --doc -p <crate>` and `cargo run -p <crate> --example <name>`.
 - The mdBook in `docs/book/` holds guides: quick start, one page per system, recipes. Link to rustdoc. Never copy signatures by hand.
 - Coverage: raise `#![warn(missing_docs)]` crate by crate. Report `cargo doc --no-deps` warnings before and after. `broken_intra_doc_links` is a workspace rustdoc lint.
 
@@ -90,7 +90,7 @@ Before the first edit, write down:
 
 1. The crates in play, and what is out of scope (generated files, vendor drops, `Cargo.lock`, local cargo config).
 2. Batches. Each names its crates and files. No touched crate is missing.
-3. One CI line and one rollback line per batch, for example `node tools/gh-check.mjs cargo test -p engine-net` and "revert `quic.rs`".
+3. One CI line and one rollback line per batch, for example `cargo test -p engine-net` and "revert `quic.rs`".
 4. Order: security, breaking bugs, architecture, performance, style last.
 
 Land one batch at a time. Restate the out-of-scope list at each batch.

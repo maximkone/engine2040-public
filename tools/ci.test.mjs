@@ -9,9 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
-// A Windows checkout with core.autocrlf=true lands this file as CRLF; the job
-// regexes below match on "\n  name:\n", so normalize before parsing.
-const text = readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8").replace(/\r\n/g, "\n");
+const text = readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8");
 
 function jobNames() {
   const body = text.slice(text.indexOf("\njobs:"));
@@ -56,16 +54,10 @@ test("fmt, ratchet, clippy, release proofs and the golden hash stay gated", () =
   assert.match(jobBlock("quick"), /cargo deny check/);
   assert.match(jobBlock("clippy"), /cargo clippy --locked --workspace --all-targets -- -D warnings/);
   const rp = jobBlock("release-proof");
-  // The shipped shape is the `ship` profile (fat LTO, one codegen unit);
-  // `release` is thin LTO for the local loop.
-  assert.match(rp, /cargo build --locked --workspace --profile ship/);
+  assert.match(rp, /cargo build --locked --workspace --release/);
   assert.match(rp, /node tools\/proof\.mjs --skip-build/);
   assert.match(rp, /d57b5c8ae3096614/);
   assert.match(jobBlock("arm-golden"), /d57b5c8ae3096614/);
-  const rootToml = readFileSync(join(ROOT, "Cargo.toml"), "utf8");
-  const ship = rootToml.split(/\r?\n(?=\[)/).find((s) => s.startsWith("[profile.ship]")) ?? "";
-  assert.match(ship, /lto = "fat"/, "the ship profile keeps fat LTO");
-  assert.match(ship, /codegen-units = 1/, "the ship profile keeps one codegen unit");
 });
 
 test("windows smoke (window check) and ARM golden stay", () => {

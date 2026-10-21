@@ -30,7 +30,7 @@ Do: pause the accumulator at the frame edge and keep the tick count still. Don't
 
 Files: `crates/render/src/overlay.rs` (CPU quad ring, `OVERLAY_MAX_QUADS` = 128, `push_quad`, `push_hp_bar`, `push_text`, `OVERLAY_WGSL`), `crates/render/src/text.rs` (atlas glyph UVs), `crates/ui/src/text.rs` (layout over the bitmap atlas, ASCII only), `crates/ui/src/play_hud.rs` (`PlayHud`, `Crosshair`).
 
-PASS needs a pixel test plus `node tools/gh-check.mjs cargo test -p engine-render --lib` green.
+PASS needs a pixel test plus `cargo test -p engine-render --lib` green.
 
 1. **Draw last, no depth.** The overlay pass runs after the blit with depth test off, so quads sit over the scene. Flag: HUD quads in the 3D pass, or depth-tested so fighters hide them. (render)
 2. **One quad pipeline.** One textured-quad pipeline with alpha blend and a single draw for all cells. Flag: a pipeline per widget, or a draw per quad that grows with HUD size. (render)
@@ -42,7 +42,7 @@ PASS needs a pixel test plus `node tools/gh-check.mjs cargo test -p engine-rende
 8. **Text fits the game.** Text covers the shipped charsets and read directions, with only the features the game uses. Flag: a full animation suite for static hp numbers. (ui)
 9. **Pixel proof.** The arena capture shows hp bars where scene pixels sat, and on-vs-off rects differ. Flag: a receipt line with no capture rect that moved. (game)
 
-Do: draw one blended quad ring after the blit in 0..1 coords and prove hp rects move pixels. Don't: depth-test HUD in the 3D pass, or bake pixels for one window size. Eyes rule for the capture: skill `test-and-proof`.
+Do: draw one blended quad ring after the blit in 0..1 coords and prove hp rects move pixels. Don't: depth-test HUD in the 3D pass, or bake pixels for one window size. Eyes rule for the capture: skill `design-and-playtest`.
 
 ## 3. Audio cues and mix (`crates/audio`)
 

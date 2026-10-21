@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { sandFrames } from "./iqa-gate.mjs";
-import { failLines, lastGreenRun, lookScore, middleCapture, newestFirst, parseReceipt, parseView, passFloors, pruneRuns, redFloors, referenceInterval, scoreCaptures, summary } from "./product-check.mjs";
+import { lastGreenRun, lookScore, middleCapture, newestFirst, packetText, parseReceipt, parseView, passFloors, pruneRuns, redFloors, referenceInterval, scoreCaptures } from "./product-check.mjs";
 
 const RECEIPT = `arena smoke: ticks=300 frames=300
 arena frame-split: sim=0.085ms present=117.519ms fighters=2.932ms per frame (mean over 300 frames) cpu_ms p50=7.501 p99=407.215 interval_ms p50=59.597 p99=407.881 gpu_ms p50=0.244 p99=4.156 (forward p50=0.135 blit p50=0.109; 299 frames) acquire=0.068ms present_mode=Fifo
@@ -89,12 +89,23 @@ test("blank and frozen captures are counted from the files", () => {
   assert.deepEqual(scoreCaptures(files), { captures: 4, blank: 1, frozen: 1 });
 });
 
-test("GS3 pass floors: a required pass with no ms is red and printed as a FAIL line", () => {
+test("the bug packet names its row, suspects, proof and the last green tree", () => {  const text = packetText({ metric: "strobe", why: "83% of drawn bodies wore the red hit tint", sha: "abc1234", runDir: "target/reports/product/runs/x", history: [{ sha: "0ld0000", red: {} }, { sha: "bad0000", red: { strobe: "x" } }] });
+  assert.match(text, /^row: bug:product-strobe$/m);
+  assert.match(text, /^role: builder$/m);
+  assert.match(text, /^chain: start$/m);
+  assert.match(text, /^paths: crates\/game\/src\/fighter_look\.rs$/m);
+  assert.match(text, /--features app/);
+  assert.match(text, /0ld0000\.\.HEAD/);
+  for (const head of ["Goal:", "Scope:", "Proof:", "Stop:"]) assert.ok(text.includes(`\n${head}`), head);
+});
+
+test("GS3 pass floors: a required pass with no ms is red and names bug:product-pass-<name>", () => {
   const look = { ...parseReceipt(RECEIPT), tinted_share: 0, exit: 0, timedOut: false };
   const passBar = { passes: { bloom: "required" } };
   const red = redFloors({ look, timing: null, caps: quietCaps, ref: null }, BAR, passBar);
   assert.ok(red["pass-bloom"], "bloom is required but absent from the canned log");
-  assert.match(failLines(red)[0], /^FAIL pass-bloom: the bloom pass reported no ms/);
+  const text = packetText({ metric: "pass-bloom", why: red["pass-bloom"], sha: "abc1234", runDir: "target/reports/product/runs/x", history: [] });
+  assert.match(text, /^row: bug:product-pass-bloom$/m);
 });
 
 test("GS3 pass floors: every required pass above 0 ms is green; pending never turns red", () => {
@@ -162,25 +173,16 @@ test("the look score's reference run survives pruning", () => {
   assert.deepEqual(readdirSync(root).sort(), ["aaaa1111-20261001T0000Z", "cccc3333-20261003T0000Z", "dddd4444-20261004T0000Z", "eeee5555-20261005T0000Z", "ffff6666-20261006T0000Z", "gggg7777-20261007T0000Z", "hhhh8888-20261008T0000Z"].sort(), "the six newest plus the pinned reference");
 });
 
-test("a look score above the floor is red and printed as a FAIL line", () => {
+test("a look score above the floor is red and files bug:product-look", () => {
   const look = { ...parseReceipt(RECEIPT), tinted_share: 0, exit: 0, timedOut: false, flip: 1500, flip_max: 8000, flip_vs: "abc1234" };
   const red = redFloors({ look, timing: null, caps: quietCaps, ref: null }, BAR);
   assert.deepEqual(Object.keys(red), ["look"]);
   assert.match(red.look, /1500 x10000 against the last green run abc1234 \(floor 1200\)/);
-  assert.match(failLines(red)[0], /^FAIL look: the machine look score read 1500 x10000/);
+  const text = packetText({ metric: "look", why: red.look, sha: "abc1234", runDir: "target/reports/product/runs/x", history: [{ sha: "0ld0000", red: {} }] });
+  assert.match(text, /^row: bug:product-look$/m);
+  assert.ok(text.includes("\nGoal:"), "the packet keeps the builder boilerplate");
   const worstGreen = redFloors({ look: { ...look, flip: 609 }, timing: null, caps: quietCaps, ref: null }, BAR);
   assert.deepEqual(worstGreen, {}, "the worst green-vs-green drift observed (609 between two trees) stays green");
   const none = redFloors({ look: { ...look, flip: null, flip_vs: null, flip_why: "no green run to compare against" }, timing: null, caps: quietCaps, ref: null }, BAR);
   assert.deepEqual(none, {}, "no comparable run is not a red");
-});
-
-test("a broken floor shows as a FAIL line in the output and in latest.md", () => {
-  const red = { strobe: "83% of drawn bodies wore the red hit tint (floor 25%)" };
-  assert.deepEqual(failLines(red), ["FAIL strobe: 83% of drawn bodies wore the red hit tint (floor 25%)"]);
-  const look = { ...parseReceipt(RECEIPT), tinted_share: 0.83, exit: 0, timedOut: false, flip: null, flip_why: "no green run to compare against" };
-  const base = { sha: "abc1234", at: "2026-10-21T00:00:00.000Z", build: "fresh", look, caps: quietCaps, timing: null, ref: null, runDir: "target/reports/product/runs/x", bar: BAR, passBar: null };
-  const broken = summary({ ...base, red });
-  assert.match(broken, /^Verdict: RED \(strobe\)/m);
-  assert.match(broken, /^- FAIL strobe: 83% of drawn bodies wore the red hit tint \(floor 25%\)$/m);
-  assert.match(summary({ ...base, red: {} }), /^Verdict: GREEN/m);
 });

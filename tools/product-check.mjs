@@ -2,13 +2,13 @@
 // product-check: the loop's own eyes on the built game. Builds arena.exe when
 // it is older than the code (one cargo slot), runs it twice (a look run with
 // captures, a timing run), reads its receipt lines, scores them against
-// tools/product-bar.json and, for every floor a run breaks, prints a
-// `FAIL <floor>: ...` line and records it in target/reports/product/latest.md.
-// An OpenChamber scheduled task starts it every four hours with --if-new; it
+// tools/product-bar.json and, for every floor a run breaks, files one bug
+// packet in target/queue/ready/ (bug: rows run right after loop: fixes and go
+// in past the queue cap). The keeper starts it on its beat with --if-new; it
 // returns at once while the crates tree is the one it last checked.
 // Owner 2026-10-11, after the fighters strobed red at every start and no seat
 // said so: "why i got to babysit this".
-//   node tools/product-check.mjs [--if-new] [--no-build] [--json]
+//   node tools/product-check.mjs [--if-new] [--no-build] [--no-file] [--json]
 // Writes target/reports/product/latest.json, latest.md and history.jsonl;
 // captures go to target/reports/product/runs/<sha>-<utc>/ (the six newest are
 // kept, plus the look score's reference run).
@@ -28,10 +28,13 @@ const pidAlive = (pid) => {
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "target", "reports", "product");
+const READY = join(ROOT, "target", "queue", "ready");
+const RUNNING = join(ROOT, "target", "queue", "running");
 const ARENA = join(ROOT, "target", "release", "arena.exe");
 const RUN_MS = 6 * 60_000;
 const BUILD_MS = 45 * 60_000;
 const KEEP_RUNS = 6;
+const REFILE_MS = 6 * 3_600_000;
 
 const num = (s) => (s === undefined || s === "-" ? null : Number(s));
 const field = (line, key) => num(line?.match(new RegExp(`\\b${key}=([-\\d.]+)`))?.[1]);
@@ -188,6 +191,53 @@ export const redFloors = ({ look, timing, caps, ref }, bar, passBar = null) => {
   return red;
 };
 
+// Where each symptom points first; the packet names them as suspects, not as the answer.
+const SUSPECTS = {
+  hang: ["crates/game/src/bin/arena.rs", "crates/render/src/present/mod.rs"],
+  panic: ["crates/game/src/bin/arena.rs"],
+  exit: ["crates/game/src/bin/arena.rs"],
+  receipt: ["crates/game/src/fighter_look.rs", "crates/game/src/bin/arena.rs"],
+  framing: ["crates/game/src/fighter_look.rs", "crates/game/src/director.rs"],
+  strobe: ["crates/game/src/fighter_look.rs"],
+  validation: ["crates/render/src/present/mod.rs"],
+  blank: ["crates/render/src/present/mod.rs", "crates/game/src/bin/arena.rs"],
+  freeze: ["crates/game/src/bin/arena.rs", "crates/game/src/fighter_look.rs"],
+  look: ["crates/game/src/fighter_look.rs", "crates/game/src/director.rs", "crates/render/src/present/mod.rs"],
+  stall: ["crates/game/src/bin/arena.rs", "crates/render/src/present/mod.rs"],
+  slower: ["crates/game/src/bin/arena.rs", "crates/render/src/present/mod.rs"],
+  view_receipt: ["crates/game/src/view_truth.rs", "crates/game/src/fighter_look.rs"],
+  nan: ["crates/game/src/fighter_look.rs", "crates/anim/src/pose.rs"],
+  error_material: ["crates/game/src/fighter_look.rs", "crates/render/src/v1_skin.rs"],
+  camera_in_body: ["crates/game/src/fighter_look.rs"],
+  camera_under_ground: ["crates/game/src/fighter_look.rs"],
+  sunk: ["crates/game/src/fighter_look.rs"],
+  unseen_fight: ["crates/game/src/bin/arena.rs"],
+};
+
+export const packetText = ({ metric, why, sha, runDir, history }) => {
+  const paths = metric.startsWith("pass-")
+    ? ["crates/render/src/present/mod.rs", "tools/pass-bar.json"]
+    : (SUSPECTS[metric] ?? ["crates/game/src/bin/arena.rs"]);
+  const since = history.filter((h) => !h.red?.[metric] && h.sha).at(-1)?.sha;
+  return `---
+role: builder
+seat: coder
+chain: start
+title: Product check ${metric}: ${why.slice(0, 90)}
+row: bug:product-${metric}
+paths: ${paths.join(", ")}
+test: cargo test -p engine-game --features app --lib; cargo check -p engine-game --features app --bin arena
+max_diff: 200
+source: node tools/product-check.mjs (keeper, tree at ${sha}); runs ${runDir}; last green ${since ?? "none recorded"}; target/reports/product/latest.md
+---
+Goal: The built arena broke a product floor at ${sha}: ${why}. Find the cause and fix it so the next product check is green for \`${metric}\`.
+State: the keeper's product check ran \`target/release/arena.exe --scene arena --fighters 8 --frames 300 --exit --require-framing --capture-every 60\` and a timing run. Its numbers and captures: target/reports/product/latest.md and ${runDir}. ${since ? `It was green at ${since}: \`git log --oneline ${since}..HEAD -- crates\` lists the suspects.` : "No green check is recorded yet."}
+Scope: the files in \`paths:\` first (they are where this symptom usually starts, not a verdict). Read the receipt lines in latest.md and the run's \`view.jsonl\` (one JSON line per frame: camera, then each body's act, clip, tint, bounds and screen rect; numbers first, open the capture PNGs with Read only if the numbers do not explain it), then write one failing unit test that shows the cause (a pure function over positions, cues or timings, no window), then the fix. At most 200 changed lines.
+Proof: the new test fails before and passes after; the \`test:\` lines green with --features app (a run with 0 tests proves nothing); paste the before and after numbers from latest.md.
+Stop: the cause is in a crate outside \`paths:\` or needs a rules or hash change: RESULT: BLOCKED - <file and symbol>, one line. Never weaken tools/product-bar.json.
+`;
+};
+
 const run = (args) => {
   const r = spawnSync(ARENA, args, { cwd: ROOT, encoding: "utf8", timeout: RUN_MS, maxBuffer: 64 * 1024 * 1024, windowsHide: false });
   const text = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
@@ -228,10 +278,7 @@ export const pruneRuns = (runs, keep = null) => {
   }
 };
 
-// One FAIL line per broken floor: the console prints them and latest.md lists them.
-export const failLines = (red) => Object.entries(red).map(([k, v]) => `FAIL ${k}: ${v}`);
-
-export const summary = (c) => {
+const summary = (c) => {
   const fps = (ms) => (ms ? `${(1000 / ms).toFixed(1)} fps (p50 ${ms} ms)` : "-");
   const reds = Object.entries(c.red);
   return [
@@ -246,7 +293,7 @@ export const summary = (c) => {
     `Pass floors (tools/pass-bar.json): ${Object.entries(c.passBar?.passes ?? c.bar.passBar?.passes ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "none (no pass-bar)"}`,
     `Finish targets (tools/product-bar.json): ${Object.entries(c.bar.targets ?? {}).map(([k, v]) => `${k} ${v}`).join("; ")}`,
     "",
-    ...failLines(c.red).map((l) => `- ${l}`),
+    ...reds.map(([k, v]) => `- RED ${k}: ${v}${c.filed.includes(k) ? " (bug packet filed)" : ""}`),
     "",
   ].join("\n");
 };
@@ -259,11 +306,7 @@ const main = async () => {
   const latest = readJson(latestFile, null);
   const tree = git("rev-parse", "HEAD:crates");
   const sha = git("rev-parse", "--short", "HEAD");
-  if (has("--if-new") && latest?.tree === tree) {
-    console.log(`product-check: SAME tree as ${latest.sha} (${latest.verdict})`);
-    for (const line of failLines(latest.red ?? {})) console.log(line);
-    return;
-  }
+  if (has("--if-new") && latest?.tree === tree) return console.log(`product-check: SAME tree as ${latest.sha} (${latest.verdict})`);
   const lockFile = join(OUT, "lock.json");
   const lock = readJson(lockFile, null);
   if (lock && pidAlive(lock.pid) && Date.now() - lock.at < 90 * 60_000) return console.log(`product-check: BUSY pid ${lock.pid}`);
@@ -295,16 +338,29 @@ const main = async () => {
     const score = lookScore(prior ? join(runs, prior.dir) : null, runDir);
     const scored = { ...look, flip: score.flip, flip_max: score.flip_max, flip_vs: score.vs === null ? null : prior.sha, flip_why: score.why };
     const red = redFloors({ look: scored, timing, caps, ref }, bar, passBar);
+    const filed = [];
+    const lastFiled = latest?.filedAt ?? {};
+    const filedAt = { ...lastFiled };
+    if (!has("--no-file")) {
+      mkdirSync(READY, { recursive: true });
+      for (const [metric, why] of Object.entries(red)) {
+        const name = `bug-product-${metric}.md`;
+        if ([READY, RUNNING].some((d) => existsSync(join(d, name)))) continue;
+        if (Date.now() - (lastFiled[metric] ?? 0) < REFILE_MS) continue;
+        writeFileSync(join(READY, name), packetText({ metric, why, sha, runDir: runDir.replace(ROOT + "\\", "").replace(/\\/g, "/"), history }));
+        filed.push(metric);
+        filedAt[metric] = Date.now();
+      }
+    }
     const strip = ({ text, ...rest }) => rest;
-    const check = { sha, tree, at: new Date().toISOString(), build: built.why.split("\n")[0], verdict: Object.keys(red).length ? "RED" : "GREEN", red, ref, caps, look: strip(scored), timing: strip(timing), runDir: runDir.replace(/\\/g, "/"), bar, passBar };
+    const check = { sha, tree, at: new Date().toISOString(), build: built.why.split("\n")[0], verdict: Object.keys(red).length ? "RED" : "GREEN", red, filed, filedAt, ref, caps, look: strip(scored), timing: strip(timing), runDir: runDir.replace(/\\/g, "/"), bar, passBar };
     writeFileSync(latestFile, `${JSON.stringify(check, null, 2)}\n`);
     appendFileSync(historyFile, `${JSON.stringify({ sha, tree, at: check.at, verdict: check.verdict, red, timing: { interval_p50_ms: timing.interval_p50_ms, interval_p99_ms: timing.interval_p99_ms, loaded }, look: { empty: look.empty, tinted_share: look.tinted_share, view: look.view, flip: scored.flip, flip_vs: scored.flip_vs } })}\n`);
     writeFileSync(join(OUT, "latest.md"), summary(check));
     pruneRuns(runs, prior?.dir ?? null);
     if (has("--json")) process.stdout.write(`${JSON.stringify(check, null, 2)}\n`);
     const fps = timing.interval_p50_ms ? (1000 / timing.interval_p50_ms).toFixed(1) : "-";
-    for (const line of failLines(red)) console.log(line);
-    console.log(`product-check: ${check.verdict} ${sha} fps=${fps}${loaded ? "(loaded)" : ""} empty=${look.empty} tinted=${look.tinted_share} pops=${look.view?.pops ?? "-"} sunk=${look.view?.sunk_cm_max ?? "-"} ticks=${look.view ? `${look.view.sim_first}..${look.view.sim_last}` : "-"} flip=${scored.flip ?? "-"} blank=${caps.blank} frozen=${caps.frozen} val=${look.validation_errors}${Object.keys(red).length ? ` red=${Object.keys(red).join(",")}` : ""}`);
+    console.log(`product-check: ${check.verdict} ${sha} fps=${fps}${loaded ? "(loaded)" : ""} empty=${look.empty} tinted=${look.tinted_share} pops=${look.view?.pops ?? "-"} sunk=${look.view?.sunk_cm_max ?? "-"} ticks=${look.view ? `${look.view.sim_first}..${look.view.sim_last}` : "-"} flip=${scored.flip ?? "-"} blank=${caps.blank} frozen=${caps.frozen} val=${look.validation_errors}${Object.keys(red).length ? ` red=${Object.keys(red).join(",")}` : ""}${filed.length ? ` filed=${filed.map((m) => `bug-product-${m}`).join(",")}` : ""}`);
     process.exitCode = Object.keys(red).length ? 1 : 0;
   } finally {
     rmSync(lockFile, { force: true });

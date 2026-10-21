@@ -547,7 +547,7 @@ not re-mine the same repo.
   F2P: `pass` is a string in the reply.
   P2P: golden `d57b5c8ae3096614` x2; the existing door tests keep their shape.
   needs: none.
-- [x] HX31 proof: the differential ship check. Landed 026c0f30. `cargo test -p engine-proof --lib differential` 17 passed (run 39575557613); clippy `-p engine-proof --all-targets -- -D warnings` PASS (run 39575534607); golden `d57b5c8ae3096614` x2 (runs 39575583574, 39576754570). The job in `.github/workflows/differential.yml` never ran here, so it stays unproven. A curated scenario list runs
+- [ ] HX31 proof: the differential ship check. A curated scenario list runs
   against the **reference** build and the **candidate** build, and every step of
   the receipt is diffed with a normalization list (timestamps, ids, paths),
   where a real behaviour change must still show: a random value is pinned by
@@ -558,9 +558,8 @@ not re-mine the same repo.
   MIT, 28056 stars, read 2026-10-21). We take the **shape**, because our
   receipts are our own line format, not JSON.
   Row **E22** (the Windows ship check from CI); gate G1.
-  Tier A. Size M. Owns `crates/proof/src/differential.rs`,
-  `crates/proof/src/bin/differential.rs`, `fixtures/differential/scenarios.txt`,
-  `.github/workflows/differential.yml`.
+  Tier A. Size M. Owns `crates/proof/src/differential.rs`, `tools/ship-check.mjs`,
+  `.github/workflows/`.
   Accept: `cargo test -p engine-proof --lib differential` passes: two runs of
   the same build give the same normalized receipt, a seeded change shows up as a
   divergence and is not normalized away, and the tool exits 1 on one in-scope

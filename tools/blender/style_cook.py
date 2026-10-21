@@ -354,126 +354,18 @@ def bake_vertex_ao(ob):
 
 
 def decimate(ob, ratio):
-    """Decimate in steps.
-
-    A single collapse from 27k to 2k shatters the mesh: the faces fold over
-    each other and the shading breaks up. Halving a few times keeps every
-    collapse local, so the silhouette and the UVs survive.
-    """
     if ratio >= 0.999:
         return triangle_count(ob)
-    current = triangle_count(ob)
-    target = max(4, int(current * ratio))
-    while current > target:
-        step = min(0.5, max(0.05, target / float(current)))
-        mod = ob.modifiers.new(name="decimate", type="DECIMATE")
-        mod.ratio = step
-        mod.use_collapse_triangulate = True
-        bpy.ops.object.modifier_apply(modifier=mod.name)
-        after = triangle_count(ob)
-        if after >= current:
-            break
-        current = after
-    return current
-
-
-def render_hero(ob, path, palette):
-    """The picture that proves the style pass: our palette on our mesh.
-
-    Workbench ignores textures, so this needs a real engine: EEVEE if the
-    build has it, Cycles otherwise. One sun, one fill, a 3/4 camera, the
-    same 30 m discipline but close enough to see the paint.
-    """
-    scene = bpy.context.scene
-    for engine in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE", "CYCLES"):
-        try:
-            scene.render.engine = engine
-            break
-        except Exception:
-            continue
-    scene.render.resolution_x, scene.render.resolution_y = 900, 1100
-    scene.render.resolution_percentage = 100
-    scene.render.film_transparent = False
-    scene.render.image_settings.file_format = "PNG"
-    try:
-        scene.view_settings.view_transform = "Standard"
-    except Exception:
-        pass
-
-    world = bpy.data.worlds.new("cook_world")
-    scene.world = world
-    world.color = (0.10, 0.10, 0.11)
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            if getattr(world, "node_tree", None) is None and hasattr(world, "use_nodes"):
-                world.use_nodes = True
-        tree = getattr(world, "node_tree", None)
-        if tree:
-            node = tree.nodes.get("Background")
-            if node:
-                node.inputs[0].default_value = (0.10, 0.10, 0.11, 1.0)
-    except Exception:
-        pass
-
-    sun_data = bpy.data.lights.new("sun", type="SUN")
-    sun_data.energy = 5.5
-    sun_data.angle = math.radians(8.0)
-    sun = bpy.data.objects.new("sun", sun_data)
-    bpy.context.collection.objects.link(sun)
-    sun.rotation_euler = (math.radians(52.0), 0.0, math.radians(34.0))
-
-    fill_data = bpy.data.lights.new("fill", type="AREA")
-    fill_data.energy = 600.0
-    fill_data.size = 5.0
-    fill = bpy.data.objects.new("fill", fill_data)
-    bpy.context.collection.objects.link(fill)
-    fill.location = (-3.0, -3.4, 2.6)
-    fill.rotation_euler = (math.radians(64.0), 0.0, math.radians(-44.0))
-
-    rim_data = bpy.data.lights.new("rim", type="AREA")
-    rim_data.energy = 900.0
-    rim_data.size = 3.0
-    rim = bpy.data.objects.new("rim", rim_data)
-    bpy.context.collection.objects.link(rim)
-    rim.location = (2.6, 3.2, 3.0)
-    rim.rotation_euler = (math.radians(128.0), 0.0, math.radians(150.0))
-
-    low, high = mesh_bounds(ob)
-    center = (low + high) * 0.5
-    height = max(high.z - low.z, 1e-6)
-    target = bpy.data.objects.new("hero_target", None)
-    bpy.context.collection.objects.link(target)
-    target.location = center
-    cam_data = bpy.data.cameras.new("hero_cam")
-    cam_data.lens = 70.0
-    cam = bpy.data.objects.new("hero_cam", cam_data)
-    bpy.context.collection.objects.link(cam)
-    direction = Vector((0.75, -1.0, 0.32)).normalized()
-    cam.location = center + direction * (height * 2.4)
-    con = cam.constraints.new("TRACK_TO")
-    con.target = target
-    con.track_axis = "TRACK_NEGATIVE_Z"
-    con.up_axis = "UP_Y"
-    scene.camera = cam
-
-    scene.render.filepath = path
-    try:
-        bpy.ops.render.render(write_still=True)
-    except Exception as err:
-        return {"ok": False, "error": str(err)}
-    ok = os.path.exists(path) and os.path.getsize(path) > 0
-    return {"ok": ok, "engine": scene.render.engine, "palette": palette}
+    mod = ob.modifiers.new(name="decimate", type="DECIMATE")
+    mod.ratio = ratio
+    mod.use_collapse_triangulate = True
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+    return triangle_count(ob)
 
 
 def export_glb(ob, path):
-    """Export one object, not the scene: the export operator writes every
-    visible object, and the cook keeps a pristine copy around."""
-    bpy.ops.object.select_all(action="DESELECT")
-    ob.select_set(True)
-    bpy.context.view_layer.objects.active = ob
     kwargs = dict(filepath=path, export_format="GLB", export_apply=True,
-                  export_texcoords=True, export_normals=True, use_selection=True)
+                  export_texcoords=True, export_normals=True)
     for name in ("export_colors", "export_vertex_color"):
         try:
             bpy.ops.export_scene.gltf(**kwargs, **{name: "NONE"})
@@ -515,33 +407,33 @@ def main():
     atlas_info = bake_atlas(ob, palette, atlas_path)
     ao_info = bake_vertex_ao(ob)
 
+    # LOD0 first, then the rest as shares of it.
     target_ratio = min(1.0, budget / float(max(raw_tris, 1)))
-
-    # Every LOD is a share of the same pristine base, not a share of the last
-    # one: otherwise the ladder collapses onto the same triangle count.
-    pristine = ob.copy()
-    pristine.data = ob.data.copy()
-    bpy.context.collection.objects.link(pristine)
-
     lod_tris = []
     for level, share in enumerate(LOD_RATIOS):
-        ob_level = pristine.copy()
-        ob_level.data = pristine.data.copy()
-        bpy.context.collection.objects.link(ob_level)
-        bpy.ops.object.select_all(action="DESELECT")
-        ob_level.select_set(True)
-        bpy.context.view_layer.objects.active = ob_level
-        tris = decimate(ob_level, target_ratio * share)
+        if level == 0:
+            tris = decimate(ob, target_ratio)
+        else:
+            # Work from a copy of the LOD0 state so each LOD is a share of
+            # the same base, not a share of the last one.
+            ob2 = ob.copy()
+            ob2.data = ob.data.copy()
+            bpy.context.collection.objects.link(ob2)
+            bpy.context.view_layer.objects.active = ob2
+            tris = decimate(ob2, target_ratio * share)
+            path = os.path.join(outdir, f"lod{level}.glb")
+            if not export_glb(ob2, path):
+                raise CookError(f"could not write {path}")
+            bpy.data.objects.remove(ob2, do_unlink=True)
+            bpy.context.view_layer.objects.active = ob
+            lod_tris.append({"lod": level, "triangles": tris, "file": os.path.basename(path)})
+            continue
         path = os.path.join(outdir, f"lod{level}.glb")
-        if not export_glb(ob_level, path):
+        if not export_glb(ob, path):
             raise CookError(f"could not write {path}")
         lod_tris.append({"lod": level, "triangles": tris, "file": os.path.basename(path)})
-        bpy.data.objects.remove(ob_level, do_unlink=True)
-    bpy.data.objects.remove(pristine, do_unlink=True)
-    bpy.context.view_layer.objects.active = ob
 
     low, high = mesh_bounds(ob)
-    hero = render_hero(ob, os.path.join(outdir, "hero.png"), palette)
     metrics = {
         "source": os.path.abspath(src),
         "faction": faction,
@@ -562,7 +454,6 @@ def main():
         },
         "roughness_rule": {"matte": ROUGHNESS_MATTE, "cloth": ROUGHNESS_CLOTH,
                            "note": "two values, applied by the engine from the atlas"},
-        "hero_render": hero,
         "generated_at": None,
     }
     with open(os.path.join(outdir, "cook.json"), "w", encoding="utf-8") as handle:

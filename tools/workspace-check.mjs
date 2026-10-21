@@ -40,7 +40,7 @@ export const allowedEdges = new Map([
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
   ["engine-chaos", ["engine-observe", "engine-proof"]],
   ["engine-combat", ["engine-input"]],
-  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf", "engine-material"]],
+  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf"]],
   ["engine-destruction", ["engine-core", "engine-nav"]],
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.

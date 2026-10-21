@@ -448,10 +448,10 @@ export function gpuLiveLine(receipt, file, unitGate) {
 
 // OPT38: the golden legs build on the thin-LTO `perf-test` profile, not the
 // fat-LTO `release` one: a local golden check no longer pays the one-unit
-// relink. CI keeps the shipped shape (`ship`, fat LTO and one codegen unit),
-// so the golden is still proven under both profiles.
+// relink. CI keeps `--release` (the release-proof leg proves the hash there
+// twice), so the golden is still proven under both profiles.
 export function goldenProfile(ci) {
-  return ci ? "--profile=ship" : "--profile=perf-test";
+  return ci ? "--release" : "--profile=perf-test";
 }
 const GOLDEN_PROFILE = goldenProfile(process.env.CI);
 // The receipt line of the golden build: the profile it used and the seconds
@@ -776,9 +776,7 @@ try {
   // ARC10 spine scorecard: the parity column per build (legacy step against
   // spine step, 20 seeded 600-tick tapes). A mismatch fails the gate; the
   // canary run must fail too, or the column proves nothing.
-  // The parity leg runs in the golden profile, so CI (which builds the shipped
-  // shape) does not pay a second build of the same crates in another profile.
-  const parityRun = (extra) => spawnSync("cargo", ["run", "-p", "engine-proof", "--locked", GOLDEN_PROFILE, "--quiet", "--features", "spine", "--bin", "spine_parity_line", "--", ...extra], { encoding: "utf8", timeout: 1_800_000, maxBuffer: 16 * 1024 * 1024, env: cargoEnv() });
+  const parityRun = (extra) => spawnSync("cargo", ["run", "-p", "engine-proof", "--locked", "--release", "--quiet", "--features", "spine", "--bin", "spine_parity_line", "--", ...extra], { encoding: "utf8", timeout: 1_800_000, maxBuffer: 16 * 1024 * 1024, env: cargoEnv() });
   const parity = parityVerdict(parityRun([]));
   check("spine parity column", parity.ok, parity.line);
   const canary = parityVerdict(parityRun(["--seeded-wall"]), { canary: true });

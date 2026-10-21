@@ -9,7 +9,7 @@ Verdict: NOT WORTH STEALING for the engine (2D-only video/storybook port: no 3D,
 
 Engine2040 anchors it lands on:
 - crates/game/src/windowed.rs:639 (TickAccumulator) and :94 (WIN_MAX_STEPS_PER_FRAME) — window loop.
-- the arena capture tooling (door-and-headless-runbook, window run section): headless frames.
+- the arena capture tooling (arena-capture-and-view-line): headless frames.
 - crates/game window/UI input mapping (pad.rs / window handlers).
 
 === TRANSFERABLE BITS (small; not engine steals) ===

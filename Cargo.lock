@@ -3131,7 +3131,6 @@ dependencies = [
  "engine-core",
  "engine-destruction",
  "engine-input",
- "engine-material",
  "engine-net",
  "engine-perf",
  "engine-physfx",

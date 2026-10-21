@@ -988,10 +988,10 @@ fn decision_row(decision: &Decision) -> AiDecisionsRow {
 fn ai_decisions_core(args: &AiDecisionsArgs) -> Result<AiDecisionsOutput, McpToolError> {
     let left = tape("left", &args.left)?;
     let rows = u32::try_from(left.len()).unwrap_or(u32::MAX);
-    let mode =
-        args.mode
-            .as_deref()
-            .unwrap_or_else(|| if args.right.is_some() { "diff" } else { "show" });
+    let mode = args
+        .mode
+        .as_deref()
+        .unwrap_or_else(|| if args.right.is_some() { "diff" } else { "show" });
     match mode {
         "show" => Ok(AiDecisionsOutput {
             mode: "show".to_owned(),

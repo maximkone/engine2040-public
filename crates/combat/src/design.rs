@@ -88,7 +88,10 @@ pub const fn validate(p: &BattlePatterns) -> Result<(), DesignError> {
     if p.startup_ticks < 12 || p.startup_ticks > 60 || p.recovery_ticks > 120 {
         return Err(DesignError::BadCancel);
     }
-    if p.grace_ticks > 12 || p.buffer_ticks > MAX_BUFFER_TICKS || p.grace_ticks >= p.startup_ticks {
+    if p.grace_ticks > 12
+        || p.buffer_ticks > MAX_BUFFER_TICKS
+        || p.grace_ticks >= p.startup_ticks
+    {
         return Err(DesignError::BadCancel);
     }
     // Input latency: the reading the input layer takes for a fresh press,

@@ -61,14 +61,16 @@ Add one verb to a pack in `crates/endpoint/src/packs`, then prove it with the re
 4. Read verbs use the Observe card. A Commit verb follows `packs/geo.rs::geo_apply`: dry run first, then tx preview and apply inside one dispatch. Cards: `tool_capabilities.rs::card_for_tool`.
 5. Call `dispatch(TOOL_NAME, ...)` in the handler (`door_dispatch.rs`). It runs the scope policy and seals one audit record. A handler that skips it seals nothing (`geo_preview` is read-only and does not call it).
 6. Errors are `McpToolError` with a static code. The message names the legal values and one recovery word such as `re-run` or `granted` (`tool_capabilities.rs::message_carries_recovery`). A poisoned state lock fails closed as `lock_poisoned`.
-7. A verb in a default-loaded pack counts toward the advertised tool list. The list must keep `TOOL_LIST_MIN_HEADROOM_CHARS` of headroom under `TOOL_LIST_BUDGET_CHARS` (both in `crates/endpoint/src/mcp.rs`; `check_tool_budget`). Read the constants, do not trust a number written elsewhere. Count pin: check the pin test `crates/endpoint/tests/it/tool_count_pin.rs` (`EXPECTED_ROUTER` per feature set) and update it when you add a verb. Run it and `tool_budget_exhaustion` with `node tools/gh-check.mjs cargo test --locked -p engine-endpoint --features mcp --test it tool_count_pin` (and the same with `tool_budget_exhaustion`).
+7. A verb in a default-loaded pack counts toward the advertised tool list. The list must keep `TOOL_LIST_MIN_HEADROOM_CHARS` of headroom under `TOOL_LIST_BUDGET_CHARS` (both in `crates/endpoint/src/mcp.rs`; `check_tool_budget`). Read the constants, do not trust a number written elsewhere. Count pin: check the pin test `crates/endpoint/tests/it/tool_count_pin.rs` (`EXPECTED_ROUTER` per feature set) and update it when you add a verb.
 
 Check (all four must pass):
 
-- `node tools/gh-check.mjs cargo test --locked -p engine-endpoint --features mcp --lib shipped_registry_is_clean_and_covers_every_pack`
-- `node tools/gh-check.mjs cargo test --locked -p engine-endpoint --features mcp --lib every_refusal_carries_a_recovery_for_weak_models`
-- `node tools/gh-check.mjs cargo test --locked -p engine-endpoint --features mcp --lib seeded_bloat_of_500_chars_fails_the_gate`
-- `node tools/gh-check.mjs cargo test --locked -p engine-endpoint --features mcp --test it mcp_stdio::` (a scripted client lists, previews, applies and undoes over stdio)
+- `cargo test --locked -p engine-endpoint --features mcp --lib shipped_registry_is_clean_and_covers_every_pack`
+- `cargo test --locked -p engine-endpoint --features mcp --lib every_refusal_carries_a_recovery_for_weak_models`
+- `cargo test --locked -p engine-endpoint --features mcp --lib seeded_bloat_of_500_chars_fails_the_gate`
+- `cargo test --locked -p engine-endpoint --features mcp --test it mcp_stdio::` (a scripted client lists, previews, applies and undoes over stdio)
+
+Also run `--test it tool_count_pin` and `tool_budget_exhaustion`. Send these through `node tools/gh-check.mjs`.
 
 Don't:
 

@@ -38,7 +38,7 @@ Spec: `docs/plan/web-and-realism.md` section 2 and `docs/plan/body-and-break.md`
 | Thing | Authority side (test first) | Picture side |
 |---|---|---|
 | Break (wall, crate, prop) | `crates/destruction/src/bonded.rs` emits `BreakEvent`; `fracture.rs` and `shards3d.rs` make chunks | `crates/game/src/break_look.rs` calls `PhysFx::spawn_debris(shards, impulse)` or `spawn_debris_of(material, ..)` |
-| Limb loss | severing tables `crates/combat/src/cut.rs`, limb state `limbloss.rs`, 16-byte event `crates/arena/src/limbs.rs` | game calls `PhysFx::spawn_limb(part, shape, transform, velocity)` or `spawn_limb_of(Material, ..)` on the event |
+| Limb or cut | cut tables `crates/combat/src/cut.rs`, limb state `limbloss.rs`, 16-byte event `crates/arena/src/limbs.rs` | game calls `PhysFx::spawn_limb(part, shape, transform, velocity)` or `spawn_limb_of(Material, ..)` on the event |
 | Ragdoll | balance and stagger state (integer) says floored | game seeds `PhysFx::spawn_ragdoll(slot, rig, pose, velocity, impulse)` once, then reads `PhysFx::transforms(alpha)` each frame (`ragdoll_look.rs`) |
 | Material | one table: `crates/physics/src/material.rs::Material`, integer thousandths; `Material::props`, `sound`, `cue` | physfx (density, bounce, damping, grip), the authority walker (grip, step height) and the audio cue picker read it |
 | Cap or tier | `crates/physfx/src/caps.rs` (`Tier::Potato`, `Web`, `Comfort`, `High`) | bodies, ragdolls, contacts, solver budget in one table |
@@ -55,7 +55,22 @@ Spec: `docs/plan/web-and-realism.md` section 2 and `docs/plan/body-and-break.md`
 
 ## 6. Soft body and cloth
 
-Soft-body and cloth checks are design work, not code: see `docs/plan/body-and-break.md`. The cloth that exists is `crates/physics/src/cloth/mod.rs` (presentation only: floats, never hashed).
+`crates/physics/src/cloth/mod.rs` exists (RZ7). It is CPU position-Verlet cloth for capes and banners: `Cloth`, `ClothParams`, `ClothTier`, `Cloth::pin_top_row`, `Cloth::step`, `Cloth::positions`. Jakobsen tension-only links, tethers, one-way capsule colliders, sleeps when still, tearing off unless `tear_strain` is set. It is presentation only: floats, never hashed, never read by the sim. `cloth/mod.rs` says the fighter look and arena banners consume it. A grep of `crates/` on 2026-10-17 found no caller outside `cloth.rs` itself: verify with Grep before you call it wired.
+
+An earlier element-constraint module (`ClothWorld`, `step_cloth`, `MAX_CONSTRAINTS`) was cut on 2026-10-16 and is gone: `git log --follow -- crates/physics/src/cloth.rs`. `docs/plan/body-and-break.md` still sketches it.
+
+The checks below are a design target for the next soft-body or strain-based module. They do not describe today's `cloth/mod.rs`. PASS needs element-constraint tests plus x2-equal bytes with `cargo test -p engine-physics --lib` green. A lively capture alone is not proof.
+
+1. **One constraint per element.** Each triangle or tet carries one element constraint solved per pass. Flag: per-edge soup where element shear is invisible to the solver.
+2. **Stretch split from shear.** Diagonal stretch and off-diagonal shear get separate stiffness fractions. Rest stretch defaults to one. Flag: one k for both.
+3. **Rest inverse baked once.** Build the per-element rest inverse at init and store it. Refuse degenerate rest shapes. Flag: inverse recomputed per tick, or a zero-area rest triangle that smuggles NaN.
+4. **Bending keeps its rest angle.** Store the rest dihedral angle at init. Scale stiffness by iteration count, cap at one, solve after the element pass. Flag: raw k per iteration, so more iterations means stiffer.
+5. **Volume and area held.** Tets carry a volume constraint, tris an area one, with analytic gradients that sum to zero, inside one fixed constraint cap. Flag: squeezed elements invert or vanish.
+6. **Zeroed scratch, fixed order.** Clear the correction accumulator each solve. Run constraints in index order for a fixed iteration count. Flag: corrections leaking across ticks, or hash-order merges.
+7. **Damp along the correction, pin the anchors.** Pinned particles hold their position and are never integrated. Flag: energy gained per tick, or anchors integrated then snapped back.
+8. **Collide last, draw from a map.** Colliders run after the internal passes (push out, kill velocity). Surface verts come from a barycentric map built once. Flag: collide-then-solve re-penetration, or a per-frame nearest-element search.
+
+Do: bake rest state at init, collide after the solve, prove x2 equal plus frame ms. Don't: pile per-edge distances, share one stiffness, ship "looks soft" with no numbers.
 
 ## 7. Proof commands
 

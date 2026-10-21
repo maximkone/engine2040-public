@@ -298,9 +298,9 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 - Built-game floors. Builds `target/release/arena.exe` if older than the code, runs it twice: look run `--scene arena --fighters 8 --frames 300 --exit --require-framing --capture-dir ... --capture-every 60 --sha ... --view-brief ...`; timing run `--scene arena --fighters 8 --frames 300 --exit`.
 - Scores against `tools/product-bar.json` and `tools/pass-bar.json`.
 - Writes `target/reports/product/latest.json`, `latest.md`, `history.jsonl`; captures in `target/reports/product/runs/<sha>-<utc>/` (newest 6 kept).
-- For each broken floor prints a `FAIL <floor>: <why>` line and records it in `latest.md`.
-- `--if-new`: returns at once when the tree is the last checked (`SAME tree as <sha> (<verdict>)`). `--no-build`, `--json`.
-- Output line: `product-check: <GREEN|RED> <sha> fps=... empty=... tinted=... pops=... sunk=... blank=... frozen=... val=...`, with `red=` when present.
+- For each broken floor writes `bug-product-<metric>.md` to `target/queue/ready/` (section 14).
+- `--if-new`: returns at once when the tree is the last checked (`SAME tree as <sha> (<verdict>)`). `--no-build`, `--no-file`, `--json`.
+- Output line: `product-check: <GREEN|RED> <sha> fps=... empty=... tinted=... pops=... sunk=... blank=... frozen=... val=...`, with `red=` and `filed=` when present.
 - Exit: 0 green, 1 floor broke, 2 not run (`NOT RUN at <sha>: <why>`).
 
 ### potato-check.mjs
@@ -499,7 +499,7 @@ These `tools/*.test.mjs` files have no same-name module. Some import a module un
 
 - `arch-fitness.mjs` exits 0 even on a cycle. It prints `FAIL cycle` and sets no exit code.
 - `secret-gate.mjs` is called by the local `pre-commit` hook (installed from the tracked `tools/hooks/pre-commit`). The local `pre-push` hook runs `git lfs pre-push`, `cargo deny check licenses`, and `node tools/license-gate.mjs`; `pre-commit` also runs `tools/rust-quality.mjs`. Hooks live in `.git/hooks/`, not versioned.
-- `product-check.mjs` files no queue packets: the queue was removed 2026-10-17, so a broken floor is a `FAIL` line and a `latest.md` entry (the keeper that filed packets was cut, `docs/plan/finish-line.md`).
+- `product-check.mjs` writes `bug-product-*.md` to `target/queue/ready/`. The keeper that consumed that queue was cut (`docs/plan/finish-line.md`). Nothing in this repo reads it.
 - Several tools name lane machinery that the standalone repo cut: `clean.mjs` (`lanes-worktrees.json`, `target/lanes`), `doctor.mjs` (`target/lanes/*.patch`), `mutants.mjs` (`target/lanes/<id>.patch`, `.lanes/<id>`). `books.mjs` and `ship.mjs` use paths outside the repo (`C:/empire/...`, `C:/e2040-clean/`).
 - `docs/WORKFLOW.md` names `tools/sprint-lock.mjs`, `tools/sprint-loop.mjs`, `builder` and `planner` agents. None exists in `tools/`.
 - `docs/FOCUS.md` names `tools/drift-check.mjs` and `tools/steal-next.mjs`. Neither exists in `tools/`.

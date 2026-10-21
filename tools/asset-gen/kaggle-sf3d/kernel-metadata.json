@@ -7,13 +7,12 @@
   "is_private": true,
   "enable_gpu": true,
   "dataset_sources": [
+    "empire/sf3d-weights",
     "empire/faction-war-concepts"
   ],
   "competition_sources": [],
   "kernel_sources": [],
   "notes": {
-    "what": "the one 3D lane on a Kaggle GPU",
-    "weights": "ModelScope mirror, no token: 4024289892 bytes",
-    "clip": "the checkpoint carries the CLIP weights, so open_clip builds the architecture only"
+    "what": "one 3D lane, run on a Kaggle GPU; weights travel as a private dataset"
   }
 }

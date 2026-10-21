@@ -34,15 +34,7 @@ Run lines: `node tools/gh-check.mjs cargo test ...` (skill `github-check`). Loca
 | 8 | A motion statement is backed by a frame-rate sequence, not one still (game). | A frozen frame sold as smooth play. |
 | 9 | A test where blank frames fail and staged captures pass, with node and cargo green (playtest). | Synthetic frames only. The window path never runs in any gate. |
 
-Eyes rule (every visual, render and content check; other skills link here):
-
-- Open every capture PNG with the Read tool. Open its reference next to it for look work.
-- Write one line on what is on screen: the region, the object, what is wrong or right ("left wall, shadow acne").
-- Score from the pixels, never from logs or numbers alone.
-- No capture means unverified. Say "unverified" and stop. Never score a shot you did not open.
-- Black, empty, magenta, NaN-speckled or T-posed frames are `FAIL - <reason>`.
-- Read hit frames in order: anticipation, impact, hit-stop, reaction. Check silhouettes, UI and camera at each one.
-- You see images, not sound. Rate audio only by numbers if they are given (loudness, clipping, hit sync).
+Open the capture PNGs yourself and write one line on what is on screen (the Eyes rule: skill `review`).
 
 ## 3. Rust test shape
 
@@ -51,10 +43,10 @@ Eyes rule (every visual, render and content check; other skills link here):
 - Error cases: `#[should_panic(expected = "...")]` pinned to the right guard. A bare `should_panic` passes on any panic. A test that can fail with `Err` returns `Result` and uses `?`.
 - Tests run in parallel. No shared file, dir or env between tests unless pinned to one thread.
 - Run control: filter by name, run one file, park slow tests as `#[ignore]`.
-- Integration tests live as modules of one binary: `crates/<c>/tests/it/` (each `tests/it/<name>.rs` plus one `mod <name>;` line in `main.rs`; shared setup is a module too). Run one with `node tools/gh-check.mjs cargo test -p <crate> --test it <name>::`.
+- Integration tests live as modules of one binary: `crates/<c>/tests/it/` (each `tests/it/<name>.rs` plus one `mod <name>;` line in `main.rs`; shared setup is a module too). Run one with `cargo test -p <crate> --test it <name>::`.
 - A new top-level `crates/<c>/tests/*.rs` fails `tools/workspace-check.mjs` (test layout guard). The exception is a file that needs its own process, listed in `OWN_TEST_BINARY` in that tool with a reason (for example `game/crash_hook`).
 - Integration tests use the public API. Binary logic goes in a lib so tests can reach it.
-- PASS needs a run line (`node tools/gh-check.mjs cargo test -p <crate>`), never a promise.
+- PASS needs a run line (`cargo test -p <crate>`), never a promise.
 
 ## 4. Evidence pack
 

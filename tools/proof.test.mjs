@@ -247,10 +247,10 @@ test("goldenVerdict: hash law plus version pin in one receipt", () => {
   assert.equal(goldenVerdict(good, ""), false);
 });
 
-test("goldenProfile: a local golden builds on perf-test, CI keeps the shipped shape", () => {
+test("goldenProfile: a local golden builds on perf-test, CI keeps release", () => {
   assert.equal(goldenProfile(undefined), "--profile=perf-test");
   assert.equal(goldenProfile(""), "--profile=perf-test");
-  assert.equal(goldenProfile("true"), "--profile=ship");
+  assert.equal(goldenProfile("true"), "--release");
 });
 
 test("goldenBuildLine: the receipt names the profile and the build seconds", () => {
