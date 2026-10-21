@@ -470,6 +470,50 @@ impl Camera {
     }
 }
 
+/// Test-only eye camera (FV3): the first-person eye pose as the camera the
+/// game feed builds. The feed itself belongs to the game crate
+/// (`crates/game/src/fps_view.rs::camera_for_eye`); the render crate cannot
+/// depend on it, so this constructor lays the same eye out for the render
+/// crate's own submit proof. Frame: right-handed, `+y` up, yaw `0` faces
+/// `+z`; the target sits one meter along the forward, and the roll turns the
+/// up axis about that forward, so the roll never moves the eye or the target.
+/// Units: eye in meters, angles in radians, aspect width over height.
+/// Errors: the camera's own [`CameraError`]; the camera validates before it
+/// returns, so a caller never holds an unchecked pose.
+#[cfg(test)]
+pub fn eye_camera_for_test(
+    eye_m: [f32; 3],
+    yaw_rad: f32,
+    pitch_rad: f32,
+    roll_rad: f32,
+    fov_y_rad: f32,
+    aspect: f32,
+) -> Result<Camera, CameraError> {
+    let (sy, cy) = yaw_rad.sin_cos();
+    let (sp, cp) = pitch_rad.sin_cos();
+    // Forward from yaw and pitch: yaw 0 level faces +z, and the triple is unit
+    // length, so the target stays exactly one meter from the eye.
+    let forward = [sy * cp, sp, cy * cp];
+    let target = [
+        eye_m[0] + forward[0],
+        eye_m[1] + forward[1],
+        eye_m[2] + forward[2],
+    ];
+    // Rodrigues over the world up about the forward axis: the roll turns the
+    // up axis only. Roll 0 is exact, `sin_cos(0.0)` giving (0.0, 1.0).
+    let (sr, cr) = roll_rad.sin_cos();
+    let along_up = forward[1];
+    let up = [
+        -forward[2] * sr + forward[0] * along_up * (1.0 - cr),
+        cr + forward[1] * along_up * (1.0 - cr),
+        forward[0] * sr + forward[2] * along_up * (1.0 - cr),
+    ];
+    let mut camera = Camera::new(eye_m, target, up, fov_y_rad);
+    camera.aspect = aspect;
+    camera.validate()?;
+    Ok(camera)
+}
+
 // ---------------------------------------------------------------------------
 // Light + material: one directional light, metallic-roughness factors.
 // ---------------------------------------------------------------------------
@@ -1616,6 +1660,126 @@ mod tests {
         let mut bad = base.clone();
         bad.eye = glam::Vec3::new(f32::NAN, 0.0, 0.0);
         assert_eq!(bad.validate(), Err(CameraError::NonFinite("eye")));
+    }
+
+    /// The eye camera the game feed builds: identical eyes give the same
+    /// view-proj bytes, twice.
+    #[test]
+    fn camera_eye_camera_view_proj_is_bit_identical_twice() {
+        let eye = [1.0, 3.6, 3.0];
+        let a =
+            eye_camera_for_test(eye, 0.75, -0.25, 0.1, 1.0, 16.0 / 9.0).expect("valid eye camera");
+        let b =
+            eye_camera_for_test(eye, 0.75, -0.25, 0.1, 1.0, 16.0 / 9.0).expect("valid eye camera");
+        assert_eq!(a, b, "the eye camera must replay exactly");
+        let ma = a.view_proj().expect("valid").to_cols_array();
+        let mb = b.view_proj().expect("valid").to_cols_array();
+        assert!(
+            ma.iter().all(|v| v.is_finite()),
+            "the view-proj must be finite"
+        );
+        assert_eq!(ma, mb, "identical eyes gave different view-proj bytes");
+    }
+
+    /// The frame the game feed uses: yaw `0` faces `+z`, the target sits one
+    /// meter ahead and a level roll keeps `+y` up. The game crate pins the
+    /// same literals, so a drift on either side turns one of the two tests
+    /// red.
+    #[test]
+    fn camera_eye_camera_frame_matches_the_game_feed() {
+        let camera = eye_camera_for_test([1.0, 3.6, 3.0], 0.0, 0.0, 0.0, 1.0, 16.0 / 9.0)
+            .expect("valid eye camera");
+        assert_eq!(camera.eye.to_array(), [1.0, 3.6, 3.0], "eye missed");
+        assert_eq!(
+            camera.target.to_array(),
+            [1.0, 3.6, 4.0],
+            "yaw 0 must face +z one meter ahead"
+        );
+        assert_eq!(
+            camera.up.to_array(),
+            [0.0, 1.0, 0.0],
+            "a level roll must keep +y up"
+        );
+        // The roll turns the up axis about the forward, never the eye or the
+        // target.
+        let rolled = eye_camera_for_test([1.0, 3.6, 3.0], 0.0, 0.0, 0.3, 1.0, 16.0 / 9.0)
+            .expect("valid eye camera");
+        assert_eq!(rolled.eye, camera.eye, "the roll moved the eye");
+        assert_eq!(rolled.target, camera.target, "the roll moved the target");
+        assert_ne!(rolled.up, camera.up, "the roll left the up axis alone");
+        let up = rolled.up.normalize();
+        let view = (rolled.target - rolled.eye).normalize();
+        assert!(
+            up.dot(view).abs() < 1e-6,
+            "the rolled up axis left the view plane"
+        );
+    }
+
+    /// The window submit runs the eye camera: the forward GPU submit takes
+    /// the frame camera from the scene, so the eye camera's view-proj reaches
+    /// the GPU through the same camera uniform every other caller uses. Zero
+    /// validation errors at a test size, and the warm submit stays inside
+    /// `GPU_SUBMIT_BUDGET_MS`.
+    #[test]
+    #[cfg(feature = "window")]
+    fn camera_eye_camera_window_submit_is_clean_and_inside_the_budget() {
+        use crate::test_gpu::{require_or_skip, NoAdapter};
+        // A standing eye three meters from the cube, looking down at it.
+        let eye = eye_camera_for_test(
+            [0.0, 1.6, 3.0],
+            std::f32::consts::PI,
+            -0.45,
+            0.0,
+            1.0,
+            16.0 / 9.0,
+        )
+        .expect("valid eye camera");
+        let gpu = match crate::v1_gpu::GpuForward::init() {
+            Ok(gpu) => gpu,
+            Err(crate::v1_gpu::GpuError::NoAdapter) => {
+                let _ = require_or_skip(
+                    "camera_eye_camera_window_submit",
+                    Err::<crate::v1_gpu::GpuForward, NoAdapter>(NoAdapter(
+                        "no wgpu adapter on this machine".into(),
+                    )),
+                );
+                return;
+            }
+            Err(e) => panic!("the forward GPU path must not fail for a valid eye camera: {e}"),
+        };
+        let mut scene = default_scene(160, 120).expect("the default scene is valid");
+        scene.camera = eye;
+        // One warm capture: the first frame pays the driver and pipeline
+        // warm-up, the measured frames pay only the submit.
+        let (_png, manifest) = gpu
+            .render_capture(&scene, 160, 120)
+            .expect("the warm capture submits");
+        assert!(manifest.is_clean(), "the warm capture was not clean");
+        // The best of three warm frames: a busy shared PC cannot fake a red
+        // here, and the frame itself is the cheap one.
+        let mut best = f64::INFINITY;
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let (_png, manifest) = gpu
+                .render_capture(&scene, 160, 120)
+                .expect("the eye camera frame submits");
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(
+                manifest.validation_errors, 0,
+                "the eye camera frame had validation errors"
+            );
+            assert!(manifest.is_clean(), "the eye camera frame was not clean");
+            best = best.min(ms);
+        }
+        eprintln!(
+            "eye camera submit: {best:.3} ms (budget {:.1} ms)",
+            crate::graph::GPU_SUBMIT_BUDGET_MS
+        );
+        assert!(
+            best <= crate::graph::GPU_SUBMIT_BUDGET_MS,
+            "the eye camera submit took {best:.3} ms, over the {:.1} ms budget",
+            crate::graph::GPU_SUBMIT_BUDGET_MS
+        );
     }
 
     #[test]

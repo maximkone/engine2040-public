@@ -75,3 +75,20 @@ test("windows smoke (window check) and ARM golden stay", () => {
   assert.match(wc, /cargo check --locked --workspace --all-targets --features window/);
   assert.match(jobBlock("arm-golden"), /ubuntu-24\.04-arm/);
 });
+
+test("the CI publishes a structured test report (the CTRF shape)", () => {
+  const t = jobBlock("test");
+  // The receipt: the `ci` nextest profile writes it next to the run.
+  assert.match(t, /cargo nextest run --locked --all-targets --profile ci/);
+  // The report: the receipt plus the run's own words, so the count in the
+  // report is checked against the count the run printed.
+  assert.match(t, /node tools\/ctrf-report\.mjs --in target\/nextest-junit\/ci\.xml --log target\/nextest-junit\/ci\.log/);
+  // The report is published: as an artifact and in the job page.
+  assert.match(t, /actions\/upload-artifact@v5/);
+  assert.match(t, /ctrf-io\/github-test-reporter@v1/);
+  const cfg = readFileSync(join(ROOT, ".config", "nextest.toml"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(cfg, /\[profile\.ci\.junit\]/);
+  assert.match(cfg, /path = "target\/nextest-junit\/ci\.xml"/);
+  // Skipped tests are reported, so the receipt counts every test the run printed.
+  assert.match(cfg, /report-skipped = "all"/);
+});

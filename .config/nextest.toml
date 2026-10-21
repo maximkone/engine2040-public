@@ -28,3 +28,15 @@ delay = "2s"
 path = "target/nextest-junit/proof.xml"
 store-success-output = true
 store-failure-output = true
+
+# HX12: the CI publishes a structured test report, so a run's result is read
+# without opening the log. The `ci` profile adds a JUnit receipt to the run
+# and nothing else (it inherits the default profile, so the CI keeps the same
+# fail-fast and retry behaviour). Skipped tests are reported too, so the
+# receipt counts every test the run printed. `tools/ctrf-report.mjs` turns
+# the receipt into the CTRF 0.2.0 JSON shape.
+[profile.ci.junit]
+path = "target/nextest-junit/ci.xml"
+store-success-output = false
+store-failure-output = true
+report-skipped = "all"

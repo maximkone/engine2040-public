@@ -9,10 +9,15 @@
 //! are of it ([`certainty`]), names its source, and says where the object was found when
 //! one survives. An item without a certainty or without a source is refused by name.
 //!
+//! The registry is the rule for the numbers: every number the game shows lives in one
+//! table with its tier, a note and its source ([`Registry`]). The loader refuses a
+//! number with no tier, and the renderer asks the registry for a number by key, so a
+//! number that is not registered cannot be drawn at all.
+//!
 //! The tables are embedded at build time with `include_str!` ([`Camp::shipped`],
-//! [`Line::shipped`], [`Kit::shipped`]), so the tick never reads a file, two loads of one
-//! table hash the same, and no clock, IO or render edge exists. Values are integers only:
-//! no float ever enters a Rome rule.
+//! [`Line::shipped`], [`Kit::shipped`]) or as a Rust const ([`Registry::shipped`]), so
+//! the tick never reads a file, two loads of one table hash the same, and no clock, IO
+//! or render edge exists. Values are integers only: no float ever enters a Rome rule.
 
 pub mod camp;
 pub mod certainty;
@@ -23,7 +28,9 @@ use core::fmt;
 use engine_core::Fnv64;
 
 pub use camp::{Camp, Ditch, Rampart, Streets, Threat};
-pub use certainty::{Certainty, Find, Item, Kit, Reading, Standing};
+pub use certainty::{
+    Certainty, Claim, Find, Item, Kit, Number, Reading, Registry, Rendered, Standing,
+};
 pub use line::Line;
 pub use table::{Entry, Table, TableError};
 
@@ -74,15 +81,21 @@ pub enum LoadError<'a> {
         /// The overflowing key.
         key: &'a str,
     },
-    /// A kit item has no `certainty`, so we cannot say how sure we are of it.
+    /// A kit item or a registered number has no `certainty`, so we cannot say how
+    /// sure we are of it.
     MissingCertainty {
-        /// The item key, for example `kit.manuballista`.
+        /// The item key, for example `kit.manuballista`, or the number's key.
         entry: &'a str,
     },
     /// A kit item has no `ref` naming where the claim comes from.
     MissingRef {
         /// The item key, for example `kit.manuballista`.
         entry: &'a str,
+    },
+    /// A number was asked for that the registry does not hold, so it cannot be drawn.
+    Unregistered {
+        /// The key that was asked for, for example `weapon.pilum.length`.
+        key: &'a str,
     },
     /// A value is not one the typed form knows.
     BadValue {
@@ -118,6 +131,9 @@ impl fmt::Display for LoadError<'_> {
             }
             Self::MissingRef { entry } => {
                 write!(f, "`[{entry}]` has no `ref` naming its source")
+            }
+            Self::Unregistered { key } => {
+                write!(f, "`{key}` is not registered, so it cannot be drawn")
             }
             Self::BadValue { entry, key, value } => {
                 write!(

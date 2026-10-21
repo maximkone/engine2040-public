@@ -536,6 +536,27 @@ mod tests {
         }
 
         #[test]
+        fn camera_for_eye_level_yaw_zero_faces_plus_z() {
+            // The frame the render crate's test-only constructor mirrors: yaw 0
+            // looks down +z, the target sits one meter ahead and the up axis
+            // is +y. Both crates pin the same literals, so a drift on either
+            // side turns one of the two tests red.
+            let eye = eye_for_fighter([1.0, 2.0, 3.0], 0.0, EYE_HEIGHT_MM).expect("valid eye");
+            let camera = camera_for_eye(&eye, 1.0, 16.0 / 9.0).expect("valid camera");
+            assert_eq!(camera.eye.to_array(), [1.0, 3.6, 3.0], "eye missed");
+            assert_eq!(
+                camera.target.to_array(),
+                [1.0, 3.6, 4.0],
+                "yaw 0 must face +z one meter ahead"
+            );
+            assert_eq!(
+                camera.up.to_array(),
+                [0.0, 1.0, 0.0],
+                "a level roll must keep +y up"
+            );
+        }
+
+        #[test]
         fn camera_for_eye_replays_and_allocates_nothing() {
             let eye = eye_for_fighter([1.5, 0.5, -2.0], -1.2, EYE_HEIGHT_MM).expect("valid eye");
             let (_, probe) = engine_core::alloc_probe::measure(|| black_box(vec![0u8; 64]));

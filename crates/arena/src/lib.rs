@@ -65,6 +65,7 @@ pub mod gameworld;
 pub mod gym;
 pub mod input_layers;
 pub mod limbs;
+pub mod legion_bind;
 pub mod live;
 mod match_observer;
 mod match_wire;
@@ -1820,21 +1821,24 @@ impl Sim {
     }
 
     /// EG20 collision pass over this sim's fighters; see [`collide_states`].
-    /// The test-only oracle switch routes the same rows through the
+    /// The body-push shove needs the balance states, so the pass takes them:
+    /// the push-apart each fighter took this tick feeds its balance. The
+    /// test-only oracle switch routes the same rows through the
     /// pre-shortcut fixed pass count; the shipped path never sets it.
     fn collide(&mut self) {
-        let (states, rules, half, fighters) = (
+        let (states, balance, rules, half, fighters) = (
             &mut self.states,
+            &mut self.balance,
             &self.rules,
             self.config.half_extent_m,
             self.fighters,
         );
         #[cfg(test)]
         if self.full_collide_passes {
-            collide::collide_states_fixed_passes(states, rules, half, fighters);
+            collide::collide_states_fixed_passes_shove(states, balance, rules, half, fighters);
             return;
         }
-        collide::collide_states(states, rules, half, fighters);
+        collide::collide_states_shove(states, balance, rules, half, fighters);
     }
 
     /// Merged per-slot inputs from the last stepped tick. `None` slots never

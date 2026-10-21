@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "note": "Our props: the weapons, off hands and world props the twenty classes carry. The shapes are authored in tools/blender/prop_gen.py, the bindings live here, and the loadout of every class sheet in content/classes names the same thing. A 2005 weapon was a handful of strong shapes in a faction palette, not a texture, and that is what this is.",
+  "palette_rule": "a prop takes the palette of the faction that carries it: Wardens read bone, silver, gold and steel blue, Ashkin read black iron, blood red, bronze and bone",
+  "kinds": ["iron", "bronze", "bone", "cloth", "leather", "ember", "steel"],
+  "props": [
+    {"id": "warden_sword", "build": "sword", "faction": "wardens", "role": "weapon", "scale": 1.0, "classes": ["warden_fighter", "warden_warrior"], "sheet": "sword / buckler"},
+    {"id": "warden_buckler", "build": "shield", "faction": "wardens", "role": "offhand", "scale": 0.52, "classes": ["warden_fighter"], "sheet": "sword / buckler"},
+    {"id": "warden_arming_sword", "build": "sword", "faction": "wardens", "role": "weapon", "scale": 1.12, "classes": ["warden_defender"], "sheet": "arming sword / heater shield"},
+    {"id": "warden_heater_shield", "build": "shield", "faction": "wardens", "role": "offhand", "scale": 1.05, "classes": ["warden_defender", "warden_cleric"], "sheet": "arming sword / heater shield"},
+    {"id": "warden_short_sword", "build": "dagger", "faction": "wardens", "role": "weapon", "scale": 1.0, "classes": ["warden_rogue", "warden_assassin"], "sheet": "short_sword / null"},
+    {"id": "warden_bow", "build": "bow", "faction": "wardens", "role": "weapon", "scale": 1.0, "classes": ["warden_archer"], "sheet": "short bow, one handed"},
+    {"id": "warden_staff", "build": "staff", "faction": "wardens", "role": "weapon", "scale": 1.0, "classes": ["warden_mage", "warden_priest"], "sheet": "staff / null"},
+    {"id": "warden_focus_staff", "build": "focus_staff", "faction": "wardens", "role": "weapon", "scale": 1.0, "classes": ["warden_sorcerer"], "sheet": "long silver focus staff"},
+    {"id": "warden_focus_rod", "build": "focus_staff", "faction": "wardens", "role": "weapon", "scale": 0.72, "classes": ["warden_enchanter"], "sheet": "short silver focus rod"},
+    {"id": "warden_grimoire", "build": "tome", "faction": "wardens", "role": "offhand", "scale": 1.0, "classes": ["warden_enchanter"], "sheet": "bone white grimoire bound in gold"},
+    {"id": "warden_tome", "build": "tome", "faction": "wardens", "role": "offhand", "scale": 0.95, "classes": ["warden_acolyte", "warden_priest"], "sheet": "mace / tome"},
+    {"id": "warden_mace", "build": "mace", "faction": "wardens", "role": "weapon", "scale": 1.0, "classes": ["warden_acolyte", "warden_cleric"], "sheet": "mace / tome"},
+
+    {"id": "ashkin_great_axe", "build": "great_axe", "faction": "ashkin", "role": "weapon", "scale": 1.0, "classes": ["ashkin_combatant"], "sheet": "great_axe / null"},
+    {"id": "ashkin_longsword", "build": "greatsword", "faction": "ashkin", "role": "weapon", "scale": 1.0, "classes": ["ashkin_templar"], "sheet": "ashkin longsword / tower shield"},
+    {"id": "ashkin_tower_shield", "build": "shield", "faction": "ashkin", "role": "offhand", "scale": 1.18, "classes": ["ashkin_templar"], "sheet": "ashkin longsword / tower shield"},
+    {"id": "ashkin_paired_blade", "build": "dagger", "faction": "ashkin", "role": "weapon", "scale": 1.15, "classes": ["ashkin_attacker", "ashkin_shadow"], "sheet": "ashkin paired blades / twin ash knives"},
+    {"id": "ashkin_cannon", "build": "cannon", "faction": "ashkin", "role": "weapon", "scale": 1.0, "classes": ["ashkin_gunner"], "sheet": "arm cannon / mechanical claw"},
+    {"id": "ashkin_claw", "build": "claw", "faction": "ashkin", "role": "offhand", "scale": 1.0, "classes": ["ashkin_gunner"], "sheet": "arm cannon / mechanical claw"},
+    {"id": "ashkin_rite_rod", "build": "focus_staff", "faction": "ashkin", "role": "weapon", "scale": 0.85, "classes": ["ashkin_officiator"], "sheet": "rite_rod / charm"},
+    {"id": "ashkin_rune_stave", "build": "focus_staff", "faction": "ashkin", "role": "weapon", "scale": 1.15, "classes": ["ashkin_rune"], "sheet": "Runewrought stave"},
+    {"id": "ashkin_ledger_stave", "build": "staff", "faction": "ashkin", "role": "weapon", "scale": 1.0, "classes": ["ashkin_life"], "sheet": "Ledger stave"},
+    {"id": "ashkin_tablet", "build": "tablet", "faction": "ashkin", "role": "offhand", "scale": 1.0, "classes": ["ashkin_officiator", "ashkin_rune", "ashkin_life"], "sheet": "Bound rune tablet / Oath tablet"},
+
+    {"id": "world_crate", "build": "crate", "faction": "neutral", "role": "world", "scale": 1.0, "classes": [], "sheet": ""},
+    {"id": "world_banner", "build": "banner", "faction": "neutral", "role": "world", "scale": 1.0, "classes": [], "sheet": ""}
+  ]
+}

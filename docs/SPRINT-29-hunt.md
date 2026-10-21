@@ -192,10 +192,10 @@ not re-mine the same repo.
   F2P: the temporal resolve has no neighbourhood clamp and no disocclusion.
   P2P: golden `d57b5c8ae3096614` x2; `cargo test -p engine-render --lib` stays green.
   needs: none.
-- [ ] HX12 ci: the test report a stranger can read. The CI publishes a structured
+- [x] HX12 ci: the test report a stranger can read. The CI publishes a structured
   test report (the CTRF JSON shape) for the door and playtest suites, so a run's
   result is read without opening the log. Donor: `ctrf-io/github-test-reporter`
-  (MIT, 378 stars, pushed 2026-10-11).
+  (MIT, 378 stars, pushed 2026-10-11). Landed c879adfaa.
   Tier C. Size S. Owns `tools/ctrf-report.mjs`, `.github/workflows/`.
   Accept: `node tools/ctrf-report.mjs --out target/reports/ctrf.json` writes a
   report whose `summary.tests` counts equal the number of tests the run printed,

@@ -48,6 +48,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/fighter-count.mjs` (+ `tools/fighter-count.test.mjs`): node script; see its header.
 - `tools/fighter-report.mjs` (+ `tools/fighter-report.test.mjs`): gate the fighter LOD table, clip dedupe set and clip sidecars.
 - `tools/finish.mjs` (+ `tools/finish.test.mjs`): node script; see its header.
+- `tools/fix.mjs` (+ `tools/fix.test.mjs`): apply the toolchain's mechanical fixes to the paths an agent owns.
 - `tools/fk1_determinism.mjs`: run the scripted FK1 headless match twice and compare the per-tick hash chains.
 - `tools/flaky-quarantine.mjs` (+ `tools/flaky-quarantine.test.mjs`): quarantine flaky tests.
 - `tools/fnv1a64.mjs` (+ `tools/fnv1a64.test.mjs`): node script; see its header.

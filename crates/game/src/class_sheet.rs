@@ -15,6 +15,7 @@
 //! Budget: one-shot setup IO (one file read per sheet); never on the tick.
 
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use engine_material::json::{parse_up_to, Value as Json};
@@ -480,6 +481,7 @@ impl std::error::Error for ClassSheetError {}
 
 /// Load one class file and return its sheet. A missing file, a broken
 /// document or a bad field is refused with the file and the field named.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_class_file(path: &Path) -> Result<ClassSheet, ClassSheetError> {
     let label = file_label(path);
     let bytes = std::fs::read(path).map_err(|error| ClassSheetError::Io {
@@ -503,6 +505,7 @@ pub fn load_class_file(path: &Path) -> Result<ClassSheet, ClassSheetError> {
 /// and [`SCHEMA_FILE`] are skipped; a bad file fails the whole load, and the
 /// cross-file rules hold (a branch points at a tier 0 class of the set, an
 /// ability id belongs to one class).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_class_dir(dir: &Path) -> Result<Vec<ClassSheet>, ClassSheetError> {
     let entries = std::fs::read_dir(dir).map_err(|error| ClassSheetError::Io {
         file: file_label(dir),
@@ -541,6 +544,7 @@ pub fn load_class_dir(dir: &Path) -> Result<Vec<ClassSheet>, ClassSheetError> {
 /// The rules that span the class files: a branch points at a tier 0 class of
 /// the set and an ability id belongs to one class. `names` holds the file
 /// name of every sheet, in the same order.
+#[cfg(not(target_arch = "wasm32"))]
 fn cross_file_rules(sheets: &[ClassSheet], names: &[String]) -> Result<(), ClassSheetError> {
     let mut owners: Vec<(&str, &str)> = Vec::new();
     for (sheet, name) in sheets.iter().zip(names) {
@@ -635,6 +639,7 @@ impl ClassSheet {
 }
 
 /// The file label every error carries: the file name, never a whole path.
+#[cfg(not(target_arch = "wasm32"))]
 fn file_label(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())

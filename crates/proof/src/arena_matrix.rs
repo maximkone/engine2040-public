@@ -290,9 +290,11 @@ mod tests {
     fn arena_digest_is_pinned() {
         // The five-target matrix established this value (HASH-LAW.md, arena
         // line). Pinning it in-tree catches a silent arena change on one host;
-        // it does not touch GOLDEN_600.
+        // it does not touch GOLDEN_600. TC3 moved it on 2026-10-21: the body
+        // push feeds the balance, so the folded balance differs (receipt
+        // docs/receipts/2026-10-21-tc3-body-push-shove).
         let match_run = run(&Fixture::STANDARD).expect("standard match");
-        assert_eq!(match_run.digest, 0x2fbd_5604_0fd0_91a7);
+        assert_eq!(match_run.digest, 0x9f16_2a2f_e205_f0ff);
     }
 
     /// The spine step plays the same match and must fold the same arena
@@ -301,7 +303,7 @@ mod tests {
     #[test]
     fn spine_arena_digest_is_pinned() {
         let first = spine_digest(&Fixture::STANDARD).expect("spine match");
-        assert_eq!(first, 0x2fbd_5604_0fd0_91a7);
+        assert_eq!(first, 0x9f16_2a2f_e205_f0ff);
         let second = spine_digest(&Fixture::STANDARD).expect("spine match");
         assert_eq!(second, first);
     }

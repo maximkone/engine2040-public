@@ -26,6 +26,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::UdpSocket;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;

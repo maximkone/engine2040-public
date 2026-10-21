@@ -141,6 +141,53 @@ Two habits follow: commit by path as soon as a file is written, and keep the
 proof of what a file is in its commit body, because the object database is
 the only copy that survives a stray clean.
 
+## What we took from other people
+
+Every lead below was checked for licence before it was used. The rule: no
+paid service, no paid tier, no licence that asks anything of the game.
+
+**MakeHuman / MPFB2 — CC0 core assets.** <https://static.makehumancommunity.org/about/license.html>
+says the core assets are "shared under Creative Commons, CC0... you are
+free to do as you see fit with the asset or derivates of the assets. You do
+not need to pay anything, include any copyright notices nor give
+attribution", and the MakeHuman FAQ answers the commercial closed source
+question with a yes. MPFB2 is a live Blender extension (2.0.18, October
+2026) that needs Blender 4.2 or newer, and it makes a rigged, textured
+human with clothes. The tool's own code is GPL and MakeHuman's is AGPL, but
+the assets are CC0 and the output is ours to shape, armour and paint. This
+is the answer to "our characters are lumps": a real body, a real rig, then
+our proportions, our armour and our palette on top.
+
+**Quaternius and Kenney — CC0.** <https://quaternius.com/> ships hundreds of
+low poly models under CC0, including a Fantasy Props MegaKit of 200-odd
+medieval props, game ready and rigged. CC0 means ship them, no credit. Use
+them for the world's neutral clutter, the crates, the market stalls, the
+furniture: the world is not the faction, and the faction's identity stays
+ours. Kenney's kits are CC0 too.
+
+**The painted-light technique.** The 2005 look is baked light, not engine
+light. Blender Conference 2024's "Vertex colors: the hidden workhorse of
+shaders" and the Polycount Retro 3D Art FAQ both land on the same recipe:
+paint the light into the vertex colours, a strong key from the upper front,
+one bounce of fill, a rim on the edges, the crevices darkened, and let the
+engine's own light be soft. That is now the cook's `LIGHT` layer.
+
+**The inverted-hull outline.** The era's games drew a black rim by drawing
+the mesh twice: once normally, once with the normals pushed out and the
+front faces culled. It is the cheapest silhouette read ever invented and it
+is a shader trick, so it belongs to the render lane: draw the mesh again
+with the vertices pushed along their normals by a fixed world distance, back
+faces only, in black.
+
+**Armour by shrinkwrap.** The standard way to put armour on a body: model
+the plates, then shrinkwrap them onto the base mesh with an offset, then
+bone parent them. Our props are already the plates, so the armour pass is
+a shrinkwrap and a parent, not a modelling job.
+
+**The input template.** "Lean, arms out from the sides, plain background,
+whole body in frame, one figure, no panels" is the wording that makes the
+generator give a character with separated limbs. "Hulking" gives a boulder.
+
 ## The chain, as one command
 
     node tools/asset-gen/character.mjs --concept <concept.png> \

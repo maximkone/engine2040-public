@@ -27,10 +27,10 @@ The shape is Agentless: reproduce, localize, patch, prove, land. One cause at a 
 
 ## 3. Patch
 
-1. Patch only the file that owns the failure, and only the lines that cause it.
-2. One cause, one change. No refactor, no new file, no weakened assert, no `#[allow]`. Use `#[expect(reason = "...")]` if a lint must be expected.
-3. New behavior needs a test first (skill `test-and-proof`).
-4. The machine can patch part of this: row AF1 adds the mechanical-fix tool for the paths you own. It is not in the tree yet, so hand-edit until it lands.
+1. The machine goes first: row AF1 adds the mechanical-fix tool for the paths you own. It is not in the tree yet, so hand-edit until it lands.
+2. Patch only the file that owns the failure, and only the lines that cause it.
+3. One cause, one change. No refactor, no new file, no weakened assert, no `#[allow]`. Use `#[expect(reason = "...")]` if a lint must be expected.
+4. New behavior needs a test first (skill `test-and-proof`).
 
 ## 4. Prove
 

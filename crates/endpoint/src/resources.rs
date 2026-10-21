@@ -361,6 +361,10 @@ pub const CRATE_MAP: &[(&str, &str)] = &[
         "the wgpu renderer: passes, the frame graph and the passes.",
     ),
     (
+        "rome",
+        "the Rome tables: the shipped Roman practice values in integer millimetres.",
+    ),
+    (
         "rules",
         "the rules worker: integer script and the plan goals.",
     ),

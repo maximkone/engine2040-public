@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveFixedApi } from "./sim-source-scan.mjs";
+import * as rq from "./rust-quality.mjs";
 import { HELP, analyzeFile, cfgTestModPaths, cfgTestMods, cloneKey, compare, compareCloneMembers, functions, hitIsOwned, isPassthrough, lex, measure, onlyBase, packages, scopeRatchetToOwned, score, testLines, testOnlyFile, testPath } from "./rust-quality.mjs";
 
 const lib = { crate: "engine-x", lib: true, bin: false, sim: false, hot: false, core: false, testFile: false };
@@ -306,4 +307,116 @@ test("the package list is read once per root (E51)", () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   assert.equal(packages(root), packages(root), "the second call reuses the list");
   assert.ok(packages(root).some((p) => p.name === "engine-core"));
+});
+
+// AF2: every rule id the tool reports names the exact edit that clears it, so
+// an agent fixes a red gate without reading the rule source. The fixture below
+// fires every rule id of the metric table, one file per group of defects.
+test("every rule id names its fix on the seeded fixture", () => {
+  assert.ok(rq.METRICS, "the tool must list its rule ids");
+  assert.ok(rq.RULE_FIXES, "the tool must list a fix per rule id");
+  const root = mkdtempSync(join(tmpdir(), "rq-fix-"));
+  try {
+    mkdirSync(join(root, "crates", "physics", "src"), { recursive: true });
+    mkdirSync(join(root, "docs"), { recursive: true });
+    mkdirSync(join(root, "tools"), { recursive: true });
+    writeFileSync(join(root, "crates", "physics", "Cargo.toml"), '[package]\nname = "engine-physics"\n');
+    writeFileSync(join(root, "docs", "SPRINT.md"), "- [ ] SEED1 the seeded fixture\n");
+    writeFileSync(join(root, "crates", "physics", "src", "lib.rs"), [
+      "use std::collections::HashMap;",
+      "",
+      "#[allow(dead_code)]",
+      "#[allow(clippy::too_many_arguments)]",
+      "pub fn staged(id: u64) -> Result<u32, String> {",
+      "    // SEED1 staged rig",
+      "    let map: HashMap<u32, u32> = HashMap::new();",
+      "    let hash = 0xcbf2_9ce4_8422_2325u64;",
+      "    let raw = id as u32;",
+      "    let value = map.get(&raw).unwrap();",
+      "    let other = map.get(&raw).expect(\"seeded\");",
+      "    println!(\"{value} {other}\");",
+      "    let angle = value as f32;",
+      "    let sine = angle.sin();",
+      "    let _ = hash;",
+      "    Ok(sine as u32)",
+      "}",
+      "",
+      "// det-ok: seeded fixture only, never hashed",
+      "",
+      "pub unsafe fn raw_read(ptr: *const u8) -> u8 {",
+      "    *ptr",
+      "}",
+      "",
+      "pub fn follow_stage(a: Vec3, b: &Params) -> Pose { frame_pair(a, b) }",
+      "",
+      "pub fn step(world: &mut World) {",
+      "    let scratch: Vec<u32> = Vec::new();",
+      "    let _ = scratch;",
+      "}",
+      "",
+    ].join("\n"));
+    // The same body in two files: one owner, one duplicate.
+    const mix = (name, local) => [
+      `pub fn ${name}(seed: u32) -> u32 {`,
+      `    let mut ${local} = 0xcbf2_9ce4_8422_2325u64;`,
+      "    for byte in [seed, seed] {",
+      `        ${local} ^= u64::from(byte);`,
+      `        ${local} = ${local}.wrapping_mul(0x100000001b3);`,
+      "    }",
+      `    ${local} as u32`,
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(join(root, "crates", "physics", "src", "dup_a.rs"), mix("mix_a", "h"));
+    writeFileSync(join(root, "crates", "physics", "src", "dup_b.rs"), mix("mix_b", "acc"));
+    // A file over 1500 production lines.
+    const long = Array.from({ length: 1600 }, (_, i) => `    let pad${i} = ${i};`).join("\n");
+    writeFileSync(join(root, "crates", "physics", "src", "big.rs"), `pub fn big_body() {\n${long}\n}\n`);
+    const zero = Object.fromEntries(Object.keys(rq.METRICS).map((k) => [k, 0]));
+    const baseline = { crates: { "engine-physics": { ...zero, tests: 5 }, engine2040: zero } };
+    writeFileSync(join(root, "tools", "rust-quality.baseline.json"), `${JSON.stringify(baseline, null, 1)}\n`);
+
+    // Every rule id has its own fix text.
+    for (const rule of Object.keys(rq.METRICS)) {
+      assert.equal(typeof rq.RULE_FIXES[rule], "string", `${rule} needs a fix`);
+      assert.ok(rq.RULE_FIXES[rule].trim().length > 0, `${rule} fix text must not be empty`);
+    }
+    assert.equal(new Set(Object.values(rq.RULE_FIXES)).size, Object.keys(rq.METRICS).length, "every rule names its own edit");
+
+    const { crates } = measure(root, null, false);
+    const seeded = crates.get("engine-physics");
+    const { regressions } = compare(baseline, crates);
+
+    // Every rule id fails on the fixture and its line ends with the fix.
+    for (const rule of Object.keys(rq.METRICS)) {
+      const line = regressions.find((r) => r.startsWith(`engine-physics: ${rule} `));
+      assert.ok(line, `the seeded fixture must fail ${rule}`);
+      const tail = line.slice(line.lastIndexOf(" fix: ") + 6);
+      assert.ok(tail.trim().length > 0, `${rule} must end with a fix tail: ${line}`);
+      assert.equal(tail, rq.RULE_FIXES[rule], `${rule} must carry its own fix`);
+    }
+    // Every hit of every crate names its fix too.
+    for (const [name, c] of crates) {
+      for (const [rule, hits] of Object.entries(c.hits ?? {})) {
+        for (const h of hits) {
+          const tail = h.slice(h.lastIndexOf(" fix: ") + 6);
+          assert.ok(tail.trim().length > 0, `${name} ${rule} hit must end with a fix tail: ${h}`);
+          assert.equal(tail, rq.RULE_FIXES[rule], `${name} ${rule} hit must carry its own fix`);
+        }
+      }
+    }
+    // The tool prints the same fix on every FAIL line.
+    const tool = join(dirname(fileURLToPath(import.meta.url)), "rust-quality.mjs");
+    const run = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
+    const printed = `${run.stdout ?? ""}${run.stderr ?? ""}`.split("\n");
+    const failLines = printed.filter((l) => l.startsWith("[FAIL]") || l.startsWith("RESULT FAIL"));
+    assert.ok(failLines.length >= Object.keys(rq.METRICS).length, `the fixture must fail every rule, got ${failLines.length} FAIL lines`);
+    for (const l of failLines) {
+      const tail = l.slice(l.lastIndexOf(" fix: ") + 6);
+      assert.ok(tail.trim().length > 0, `printed FAIL line must end with a fix tail: ${l}`);
+    }
+    assert.ok(seeded.metrics.hot_alloc > 0, "the fixture allocates in a hot function");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

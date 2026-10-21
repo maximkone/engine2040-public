@@ -23,7 +23,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
+import { join, dirname, basename, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -57,7 +57,7 @@ if (!existsSync(join(SF3D, "run.py"))) {
 }
 if (!existsSync(PYTHON)) fail(`no python at ${PYTHON}: make the 3.11 venv, or set SF3D_PYTHON`);
 
-const inputPath = join(ROOT, image);
+const inputPath = isAbsolute(image) ? image : join(ROOT, image);
 if (!existsSync(inputPath)) fail(`input not found: ${inputPath}`);
 const isDir = statSync(inputPath).isDirectory();
 const images = isDir

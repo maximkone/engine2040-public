@@ -1,0 +1,63 @@
+# The bloomery and the forge: ore and charcoal into a bar of iron.
+#
+# The loop is the Roman one from `docs/plan/rome.md` section 4.4: smelt in a
+# shaft furnace, break out the bloom, reheat it, then forge a bar on the anvil.
+# The engine reads this file as data (`crates/world/src/process.rs`): the steps
+# run in the order they are written, each one eats its inputs, uses its tool,
+# takes its work and makes its outputs.
+#
+# Every number names its source in `ref`. A section that holds a number and no
+# `ref` is refused by the reader, so no number enters the game unsourced.
+
+[recipe]
+id = "iron.bar"
+ref = "rome.md section 4.4, the bloomery and the forge row (experimental archaeology, EXARC 2020)"
+
+[tool.shaft_furnace]
+height_mm_least = 1200
+height_mm_most = 1500
+ref = "rome.md section 4.4, the bloomery and the forge row: shaft furnace 1.2-1.5 m (experimental archaeology, EXARC 2020)"
+
+[step.smelt]
+tool = "shaft_furnace"
+inputs = "ore 1 charcoal 1"
+outputs = "bloom 1"
+unit = "hour"
+least = 10
+most = 20
+ticks_per_unit = 1
+rule = "short_work"
+ref = "rome.md section 4.4, the bloomery and the forge row: smelt 10-20 h in a shaft furnace, one ore and one charcoal make one bloom in this first version; the smelt is time-skipped, one tick stands for one hour of game time (experimental archaeology, EXARC 2020)"
+
+[step.break_out]
+tool = "tongs"
+inputs = "bloom 1"
+outputs = "bloom 1"
+unit = "stroke"
+least = 1
+most = 1
+ticks_per_unit = 1
+rule = "short_work"
+ref = "rome.md section 4.4, the bloomery and the forge row: break out the iron sponge with the tongs, one stroke in this first version (experimental archaeology, EXARC 2020)"
+
+[step.reheat]
+tool = "hearth"
+inputs = "bloom 1"
+outputs = "bloom 1"
+unit = "heat"
+least = 1
+most = 1
+ticks_per_unit = 1
+rule = "short_work"
+ref = "rome.md section 4.4, the bloomery and the forge row: reheat the bloom before forging, one heat in this first version (experimental archaeology, EXARC 2020)"
+
+[step.forge]
+tool = "anvil"
+inputs = "bloom 1"
+outputs = "bar 1"
+unit = "beat"
+least = 6
+most = 10
+ticks_per_unit = 60
+rule = "short_work"
+ref = "rome.md section 4.4, the bloomery and the forge row: 6-10 hammer beats per bar on the anvil; one beat is one second of game time, the engine tick is 1/60 s (experimental archaeology, EXARC 2020)"

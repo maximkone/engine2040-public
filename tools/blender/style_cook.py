@@ -45,6 +45,14 @@ LOD_RATIOS = [1.0, 0.55, 0.30, 0.15]
 ATLAS_SIZE = 512
 AO_RAYS = 14
 AO_STRENGTH = 0.55
+# The painted light: a key from the upper front left, one bounce of fill, a
+# rim on the edges that leave the vertical. This is the 2005 look: the light
+# is in the mesh, not in the engine.
+KEY = (-0.45, -0.55, 0.70)
+AMBIENT = 0.42
+KEY_STRENGTH = 0.78
+RIM_STRENGTH = 0.22
+SHADOW_LIFT = 0.16
 ROUGHNESS_MATTE = 0.55
 ROUGHNESS_CLOTH = 0.85
 
@@ -189,6 +197,12 @@ def nearest_palette(pixels, palette):
     pv = pmx
     psat = np.where(pmx > 1e-6, (pmx - pmn) / np.maximum(pmx, 1e-6), 0.0)
 
+    # Lift the shadows, the way a painter does. Black iron at #2B2724 is
+    # 0.026 in linear light: multiplied by a painted light it is simply
+    # black, and the whole character reads as a hole. A painted black is
+    # never black: the brush leaves the bounce.
+    pal = pal + (1.0 - pal) * SHADOW_LIFT
+
     # Hue as a vector, so the distance is a real hue distance.
     def hue_vec(rgb_arr, sat_arr, val_arr):
         r, g, b = rgb_arr[:, 0], rgb_arr[:, 1], rgb_arr[:, 2]
@@ -222,6 +236,43 @@ def nearest_palette(pixels, palette):
 
     result = np.concatenate([out, alpha], axis=1).reshape(h, w, 4).astype(np.float32)
     return result
+
+
+def wire_vertex_light(material, attribute="LIGHT"):
+    """Multiply the atlas by the painted light layer.
+
+    The engine does this in the shader; the cook has to do it too, or the
+    hero render shows a flat texture and the painted light looks like it
+    did nothing.
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            tree = getattr(material, "node_tree", None)
+            if not tree:
+                return False
+            bsdf = tree.nodes.get("Principled BSDF")
+            if not bsdf:
+                return False
+            base = bsdf.inputs.get("Base Color")
+            if not base or not base.links:
+                return False
+            source = base.links[0].from_socket
+
+            attribute_node = tree.nodes.new("ShaderNodeVertexColor")
+            attribute_node.layer_name = attribute
+            attribute_node.location = (source.node.location.x - 400, source.node.location.y - 220)
+            mix = tree.nodes.new("ShaderNodeMix")
+            mix.data_type = "RGBA"
+            mix.blend_type = "MULTIPLY"
+            mix.location = (source.node.location.x - 180, source.node.location.y - 100)
+            mix.inputs[0].default_value = 1.0
+            tree.links.new(source, mix.inputs[6])
+            tree.links.new(attribute_node.outputs["Color"], mix.inputs[7])
+            tree.links.new(mix.outputs[2], base)
+            return True
+    except Exception:
+        return False
 
 
 def bake_atlas(ob, palette, out_path):
@@ -278,7 +329,8 @@ def bake_atlas(ob, palette, out_path):
     atlas.filepath_raw = out_path
     atlas.save()
 
-    # Point the material at the new atlas.
+    # Point the material at the new atlas, and let the painted light in.
+    wired = False
     for slot in ob.material_slots:
         if not slot.material:
             continue
@@ -290,6 +342,7 @@ def bake_atlas(ob, palette, out_path):
                     for node in tree.nodes:
                         if node.type == "TEX_IMAGE":
                             node.image = atlas
+            wired = wire_vertex_light(slot.material) or wired
         except Exception:
             pass
 
@@ -300,12 +353,17 @@ def bake_atlas(ob, palette, out_path):
 # ---------------------------------------------------------------------- AO
 
 
-def bake_vertex_ao(ob):
-    """Painted AO as a vertex colour layer.
+def bake_vertex_light(ob):
+    """Painted light, baked into the vertex colours.
 
-    Real occlusion: rays from every vertex into its own hemisphere. Cheap
-    enough on a LOD0 budget and it reads like the hand-painted darkening
-    the faction art uses.
+    This is the old look. A 2005 character was lit by hand: a strong key
+    from the upper front, the undersides filled by one bounce, a rim on the
+    top edges, and the crevices darkened. The engine multiplies the palette
+    atlas by this layer, so the colour stays ours and the light is painted.
+
+    The key is a direction, the fill is the ambient term, the rim comes from
+    the normal leaving the vertical, and the occlusion is the real thing:
+    rays from every vertex into its own hemisphere.
     """
     me = ob.data
     verts = [v.co.copy() for v in me.vertices]
@@ -315,9 +373,9 @@ def bake_vertex_ao(ob):
         raise CookError("the mesh has no faces")
     bvh = BVHTree.FromPolygons(verts, polys)
 
-    layer = me.color_attributes.get("AO")
+    layer = me.color_attributes.get("LIGHT")
     if layer is None:
-        layer = me.color_attributes.new(name="AO", type="FLOAT_COLOR", domain="POINT")
+        layer = me.color_attributes.new(name="LIGHT", type="FLOAT_COLOR", domain="POINT")
 
     directions = []
     for i in range(AO_RAYS):
@@ -325,6 +383,9 @@ def bake_vertex_ao(ob):
         z = 1.0 - (i + 0.5) / AO_RAYS
         r = math.sqrt(max(0.0, 1.0 - z * z))
         directions.append(Vector((r * math.cos(a), r * math.sin(a), z)))
+
+    # The key light: high, a little to the front and to the left.
+    key = Vector(KEY).normalized()
 
     values = []
     for index, (co, normal) in enumerate(zip(verts, normals)):
@@ -340,14 +401,23 @@ def bake_vertex_ao(ob):
                 hits += 1
         occlusion = hits / float(len(directions))
         ao = 1.0 - AO_STRENGTH * occlusion
-        values.append(max(0.0, min(1.0, ao)))
+
+        lambert = max(0.0, up.dot(key))
+        # The rim: the more the normal leaves the vertical, the more it
+        # catches the light from the side.
+        rim = (1.0 - abs(up.z)) ** 2.0
+        value = ao * (AMBIENT + KEY_STRENGTH * lambert) + RIM_STRENGTH * rim * ao
+        value = max(0.0, min(1.35, value))
+        values.append(value)
 
     data = layer.data
-    for index, ao in enumerate(values):
-        data[index].color = (ao, ao, ao, 1.0)
+    for index, value in enumerate(values):
+        data[index].color = (value, value, value, 1.0)
     me.update()
     return {"min": round(min(values), 4), "max": round(max(values), 4),
-            "mean": round(sum(values) / len(values), 4)}
+            "mean": round(sum(values) / len(values), 4),
+            "ambient": AMBIENT, "key_strength": KEY_STRENGTH,
+            "rim_strength": RIM_STRENGTH, "key": list(KEY)}
 
 
 # ------------------------------------------------------------------- LODs
@@ -424,7 +494,7 @@ def render_hero(ob, path, palette):
     sun.rotation_euler = (math.radians(52.0), 0.0, math.radians(34.0))
 
     fill_data = bpy.data.lights.new("fill", type="AREA")
-    fill_data.energy = 600.0
+    fill_data.energy = 1400.0
     fill_data.size = 5.0
     fill = bpy.data.objects.new("fill", fill_data)
     bpy.context.collection.objects.link(fill)
@@ -432,7 +502,7 @@ def render_hero(ob, path, palette):
     fill.rotation_euler = (math.radians(64.0), 0.0, math.radians(-44.0))
 
     rim_data = bpy.data.lights.new("rim", type="AREA")
-    rim_data.energy = 900.0
+    rim_data.energy = 1500.0
     rim_data.size = 3.0
     rim = bpy.data.objects.new("rim", rim_data)
     bpy.context.collection.objects.link(rim)
@@ -513,7 +583,7 @@ def main():
 
     atlas_path = os.path.join(outdir, "atlas.png")
     atlas_info = bake_atlas(ob, palette, atlas_path)
-    ao_info = bake_vertex_ao(ob)
+    light_info = bake_vertex_light(ob)
 
     target_ratio = min(1.0, budget / float(max(raw_tris, 1)))
 
@@ -553,7 +623,7 @@ def main():
         "triangle_budget": budget,
         "unwrapped": unwrapped,
         "atlas": atlas_info,
-        "ao": ao_info,
+        "light": light_info,
         "lods": lod_tris,
         "bounds_m": {
             "x": round(high.x - low.x, 4),

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KAM11 - the KAM2 village, its sidebar and its build cells</title>
+<title>KAM13 - the KAM2 village, its minimap, its selection and its orders</title>
 <style>
   :root { color-scheme: dark; --ink: #241c12; --parchment: #e7d7b4; --line: #1b1f24; }
   html, body { margin: 0; height: 100%; background: #0b0f14; overflow: hidden; }
@@ -20,9 +20,12 @@
   .tag.paused { background: #a33b2e; }
   #sidebar { position: fixed; top: 0; right: 0; bottom: 0; width: 176px; box-sizing: border-box; padding: 8px;
     background: var(--parchment); color: var(--ink); border-left: 1px solid var(--line);
-    box-shadow: 0 0 12px rgba(0, 0, 0, 0.45); }
-  #sidebar .panel-title { margin: 0 0 6px; font: 600 14px/1.2 "Cinzel", Georgia, "Times New Roman", serif;
+    box-shadow: 0 0 12px rgba(0, 0, 0, 0.45); overflow-y: auto; }
+  #sidebar .panel-title { margin: 8px 0 4px; font: 600 14px/1.2 "Cinzel", Georgia, "Times New Roman", serif;
     letter-spacing: 0.08em; text-transform: uppercase; color: #3a2a18; }
+  #sidebar .panel-title:first-child { margin-top: 0; }
+  #minimap { display: block; width: 160px; height: 120px; border: 1px solid var(--line); background: #1f1a12;
+    cursor: pointer; }
   #build-grid { display: grid; grid-template-columns: repeat(2, 64px); grid-auto-rows: 48px; gap: 4px; }
   .cell { position: relative; width: 64px; height: 48px; padding: 0; border: 1px solid #9c865c; background: #cdb98f;
     cursor: pointer; overflow: hidden; }
@@ -30,6 +33,25 @@
   .cell .key { position: absolute; left: 2px; top: 0; font-size: 10px; line-height: 1.1; color: #fff;
     text-shadow: 0 0 3px #000, 0 0 3px #000; }
   .cell[aria-pressed="true"] { border-color: #2b6fd6; box-shadow: 0 0 0 2px #2b6fd6 inset; }
+  #selection-panel { display: flex; gap: 6px; width: 160px; height: 72px; box-sizing: border-box; padding: 4px;
+    background: #dcc9a2; border: 1px solid #9c865c; }
+  #sel-cameo { width: 64px; height: 48px; flex: 0 0 auto; background: #cbb994; }
+  #sel-info { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+  #sel-name { display: block; font: 600 11px/1.2 "Cinzel", Georgia, serif; text-transform: uppercase;
+    letter-spacing: 0.04em; color: #3a2a18; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #sel-bar { height: 8px; margin: 4px 0 3px; background: #b39c72; border: 1px solid #8d7550; }
+  #sel-bar-fill { display: block; height: 100%; width: 0; background: #2b6fd6; }
+  #sel-line { display: block; font-size: 10px; line-height: 1.25; color: #5b4a30;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #command-row { display: flex; gap: 8px; }
+  .command { width: 48px; height: 48px; box-sizing: border-box; padding: 0; border: 1px solid #9c865c;
+    background: #cdb98f; color: #3a2a18; cursor: pointer; display: flex; flex-direction: column;
+    align-items: center; justify-content: flex-start; overflow: hidden; }
+  .command canvas { display: block; width: 46px; height: 36px; }
+  .command span { display: block; font: 600 8px/10px "Segoe UI", system-ui, sans-serif; text-transform: uppercase;
+    letter-spacing: 0.02em; }
+  .command:hover { background: #dbc79b; }
+  .command:active { background: #b99f6f; box-shadow: 0 0 0 2px #2b6fd6 inset; }
   .side-hint { margin-top: 8px; font-size: 10px; line-height: 1.35; color: #5b4a30; }
   #order-line { position: fixed; left: 0; right: 176px; bottom: 0; height: 24px; box-sizing: border-box;
     padding: 4px 8px; pointer-events: none; background: rgba(231, 215, 180, 0.94); color: #7a1d12;
@@ -49,9 +71,27 @@
   <span class="tag" id="hud-state">RUN</span>
 </div>
 <aside id="sidebar">
+  <p class="panel-title">Map</p>
+  <canvas id="minimap" width="160" height="120"></canvas>
   <p class="panel-title">Build</p>
   <div id="build-grid"></div>
-  <p class="side-hint">1-5 arm &middot; left click places &middot; right click or ESC cancels &middot; SPACE pause &middot; ARROWS pan</p>
+  <p class="panel-title">Selection</p>
+  <div id="selection-panel">
+    <canvas id="sel-cameo" width="64" height="48"></canvas>
+    <div id="sel-info">
+      <b id="sel-name">nothing picked</b>
+      <div id="sel-bar"><i id="sel-bar-fill"></i></div>
+      <span id="sel-line">click a soldier or a house</span>
+    </div>
+  </div>
+  <p class="panel-title">Orders</p>
+  <div id="command-row">
+    <button class="command" type="button" data-order="attack-move" title="attack-move: walk to the tile under the cursor"><canvas width="46" height="36"></canvas><span>move</span></button>
+    <button class="command" type="button" data-order="stop" title="stop: stand still and forget the target"><canvas width="46" height="36"></canvas><span>stop</span></button>
+    <button class="command" type="button" data-order="hold" title="hold: stand still and strike the unit under the cursor"><canvas width="46" height="36"></canvas><span>hold</span></button>
+  </div>
+  <p class="side-hint">1-5 arm &middot; left click places &middot; right click or ESC cancels &middot; SPACE pause &middot; ARROWS pan<br>
+  left click picks &middot; left click on a foe attacks &middot; right click attack-moves &middot; shift adds</p>
 </aside>
 <div id="order-line"></div>
 <pre id="report">{}</pre>

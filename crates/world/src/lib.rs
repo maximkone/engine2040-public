@@ -9,6 +9,9 @@ pub mod ground;
 /// Map assembly manifests: versioned cell bytes with per-cell asset lists and
 /// the EVIDENCE provenance gate.
 pub mod manifest;
+/// Timed processes: a step eats inputs, uses a tool, takes work and makes
+/// outputs, and a recipe is the list of steps that run in order.
+pub mod process;
 /// Seeded spawn rosters over tagged spawn points: min/max per group, matching-based so a
 /// greedy pick never strands a later group.
 pub mod roster;

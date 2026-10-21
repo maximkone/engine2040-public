@@ -1,12 +1,7 @@
 {
-  "ao": {
-    "max": 1.0,
-    "mean": 0.8507,
-    "min": 0.45
-  },
   "atlas": {
     "atlas": 512,
-    "distinct_colors": 445,
+    "distinct_colors": 453,
     "source_size": [
       256,
       256
@@ -29,6 +24,19 @@
       "#D9CBB2",
       "#C8562A"
     ]
+  },
+  "light": {
+    "ambient": 0.42,
+    "key": [
+      -0.45,
+      -0.55,
+      0.7
+    ],
+    "key_strength": 0.78,
+    "max": 1.2295,
+    "mean": 0.602,
+    "min": 0.1891,
+    "rim_strength": 0.22
   },
   "lods": [
     {

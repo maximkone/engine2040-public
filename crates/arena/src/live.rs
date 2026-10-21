@@ -29,10 +29,13 @@
 //! [`run_loco_poses`]: crate::run_loco_poses
 //! [`run_presentation`]: crate::run_presentation
 
+use engine_ai::legion::Formation;
+use engine_ai::orders::SquadOrder;
 use engine_anim::contract::{LocalPose, RootDelta, RootTable};
 use engine_anim::pose::extract_root;
 use engine_input::{FighterInput, FighterTape};
 
+use crate::legion_bind::{Contubernium, Facing, Line, CONTUBERNIUM};
 use crate::recorder::{on_fork_step, DamageLedger, Row, StepRecord};
 use crate::world::MatchWorld;
 #[cfg(not(feature = "sim"))]
@@ -159,6 +162,11 @@ pub struct LiveMatch {
     /// Past-deadline replies refused in arrival order, one row per late
     /// reply. Diagnostics only; never enters the tick or the hash.
     fallbacks: Vec<LateFallback>,
+    /// The contubernium under rules v2: slot 0 the player and his seven
+    /// comrades in the Roman line. `None` until
+    /// [`LiveMatch::arm_contubernium`] arms it; the frozen v1 match never
+    /// arms it, so its checkpoints stay byte for byte.
+    contubernium: Option<Contubernium>,
 }
 
 impl LiveMatch {
@@ -222,6 +230,7 @@ impl LiveMatch {
             steps: 0,
             poisoned: false,
             fallbacks: Vec::new(),
+            contubernium: None,
         })
     }
 
@@ -250,6 +259,47 @@ impl LiveMatch {
     #[must_use]
     pub const fn rules(&self) -> ArenaRules {
         self.sim.rules
+    }
+
+    /// Arm the contubernium: eight men in the Roman line, slot 0 the
+    /// player and seven comrades beside him, the frontage and the rank gap
+    /// from the shipped Rome line table. Only rules v2 arms it, and only
+    /// a match with a full contubernium of bodies; the frozen v1 match
+    /// never arms it, so its checkpoints stay byte for byte.
+    ///
+    /// The line starts at `anchor_mm` with all eight men on that spot:
+    /// the fall-in seats them by the slot nearest to where they stand.
+    /// False when the rules or the body count refuse.
+    pub fn arm_contubernium(&mut self, anchor_mm: (i64, i64), facing: Facing) -> bool {
+        if self.sim.rules.version != crate::FIGHT_RULES_V2 || self.sim.fighters < CONTUBERNIUM {
+            return false;
+        }
+        let Ok(line) = Line::shipped() else {
+            return false;
+        };
+        let places = [(anchor_mm.0, anchor_mm.1); CONTUBERNIUM];
+        let Ok(bind) = Contubernium::new(line, anchor_mm, facing, Formation::Line, places) else {
+            return false;
+        };
+        self.contubernium = Some(bind);
+        true
+    }
+
+    /// The armed contubernium, or `None` when the match never armed one.
+    #[must_use]
+    pub fn contubernium(&self) -> Option<&Contubernium> {
+        self.contubernium.as_ref()
+    }
+
+    /// Give the contubernium a squad order: `fall in` closes the line up,
+    /// `hold` stops it, `move` marches it on the point the order names.
+    /// False when no contubernium is armed or the order is outside the
+    /// drill; a refused order changes nothing.
+    pub fn set_squad_order(&mut self, order: SquadOrder) -> bool {
+        let Some(bind) = self.contubernium.as_mut() else {
+            return false;
+        };
+        bind.apply_order(order).is_ok()
     }
 
     /// Next tick [`LiveMatch::step`] simulates (ticks stepped so far).
@@ -372,6 +422,7 @@ impl LiveMatch {
             self.poisoned = true;
             return None;
         }
+        self.step_contubernium();
         Some(LiveTick {
             checkpoint: self.checkpoint,
             events: &self.events,
@@ -516,6 +567,7 @@ impl LiveMatch {
             steps: 0,
             poisoned: false,
             fallbacks: Vec::new(),
+            contubernium: None,
         })
     }
 
@@ -527,6 +579,19 @@ impl LiveMatch {
         self.breaks = self.sim.breaks.pop()?;
         self.cuts = self.sim.cuts.pop()?;
         Some(())
+    }
+
+    /// Step the contubernium one tick when the match armed one. The line
+    /// stands beside the sim and never touches it, so the checkpoint hash
+    /// cannot move. A refused step disarms the line and leaves the match
+    /// running.
+    fn step_contubernium(&mut self) {
+        let Some(bind) = self.contubernium.as_mut() else {
+            return;
+        };
+        if bind.step(self.sim.tick).is_err() {
+            self.contubernium = None;
+        }
     }
 }
 

@@ -118,6 +118,9 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test-debug
@@ -126,8 +129,40 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      # HX12: the `ci` profile writes a JUnit receipt next to the run, and the
+      # run's own words go to a log, so the report can be checked against what
+      # the run printed. `shell: bash` keeps pipefail on: a failed test still
+      # fails this step.
       - name: test ${{ matrix.group }}
-        run: cargo nextest run --locked --all-targets ${{ matrix.args }}
+        shell: bash
+        run: |
+          mkdir -p target/nextest-junit
+          cargo nextest run --locked --all-targets --profile ci ${{ matrix.args }} | tee target/nextest-junit/ci.log
+      # The structured test report (CTRF): the run's result is read without
+      # opening the log. The receipt is written even when a test fails, so a
+      # red run is readable too.
+      - name: structured test report (CTRF)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: node tools/ctrf-report.mjs --in target/nextest-junit/ci.xml --log target/nextest-junit/ci.log --out target/reports/ctrf.json
+      - name: upload the structured test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: ctrf-report-${{ matrix.group }}
+          path: target/reports/ctrf.json
+      # The donor renders the report in the job page (ctrf-io/github-test-reporter
+      # @v1, MIT). It never decides the job: the gate above already did.
+      - name: publish the structured test report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/reports/ctrf.json
+          summary-report: true
+          failed-report: true
+          exit-on-no-files: false
+          exit-on-fail: false
       # The shipped-WGSL gate (CQ23): the render lib validates every
       # crates/render/src/shaders file in its shipped composition, so a
       # type-broken shader fails here, not at cook time on a seat. CPU only.

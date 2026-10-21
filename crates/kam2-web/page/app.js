@@ -1,4 +1,4 @@
-// KAM11 page: the wasm module owns the match and the fixed 10 Hz tick; this file
+// KAM13 page: the wasm module owns the match and the fixed 10 Hz tick; this file
 // draws its flat 2.5D frame with Canvas2D, fills the build sidebar from the
 // module's own cell list, and paints the footprint the cursor would place.
 //
@@ -9,6 +9,11 @@
 // and every refusal come from the wasm module (`houseKinds`, `stockOf`,
 // `placement`, `build`): the page paints and clicks, the sim decides. Nothing
 // here feeds a value back into the sim.
+//
+// The minimap, the selection panel and the three command buttons read the same
+// way: the module owns the field (`minimap`), the pick (`pickAt`, `selectAt`),
+// the panel numbers (`houseState`, `unitState`) and the orders (`orderSelected`),
+// so the page never keeps a rule of the match of its own.
 
 import init, { Kam2Web } from "./kam2web.js";
 
@@ -21,6 +26,14 @@ const wares = document.getElementById("wares");
 const grid = document.getElementById("build-grid");
 const orderLine = document.getElementById("order-line");
 const fatal = document.getElementById("fatal");
+const minimap = document.getElementById("minimap");
+const minimapCtx = minimap.getContext("2d");
+const selCameo = document.getElementById("sel-cameo");
+const selCtx = selCameo.getContext("2d");
+const selName = document.getElementById("sel-name");
+const selBarFill = document.getElementById("sel-bar-fill");
+const selLine = document.getElementById("sel-line");
+const commandRow = document.getElementById("command-row");
 
 // Presentation scale: the scene is built for 1280x720 at 100% zoom (the same
 // answer the window's camera gives); the page shows it at 125% so the 16x12
@@ -36,6 +49,11 @@ const KIND_HOUSE = 2;
 // Tiles per ground row: scene_flat writes one diamond per tile in row order.
 const MAP_W = 16;
 const WARE_NAMES = ["wood", "stone", "grain", "flour", "bread"];
+// The side the player sits in; the module's own side 0.
+const PLAYER_SIDE = 0;
+// The line for a cursor that is not on the field; the page's own words,
+// because no sim rule was ever asked.
+const NO_TILE = "NoTile: put the cursor on the field first";
 
 const keys = new Set();
 const state = {
@@ -51,6 +69,8 @@ const state = {
   hover: null,
   hoverOk: false,
   order: "",
+  map: null,
+  panel: "",
 };
 const params = new URLSearchParams(location.search);
 const frameLimit = Number(params.get("frames") ?? 0);
@@ -59,6 +79,8 @@ state.limit = Number.isFinite(frameLimit) && frameLimit > 0 ? frameLimit : 0;
 let game = null;
 let soldier = null;
 let cottage = null;
+// The committed cameos by house kind: the build cells and the panel share them.
+const cameos = new Map();
 let last = 0;
 
 const byte = (linear) => {
@@ -87,10 +109,17 @@ async function loadArt(manifestPath) {
   return { manifest, image };
 }
 
+async function loadCameo(id) {
+  const image = new Image();
+  image.src = `cameos/${id}.png`;
+  await image.decode();
+  return image;
+}
+
 async function probeWebgpu() {
   if (!navigator.gpu) return "no-webgpu";
   try {
-    const adapter = await navigator.gpu.requestAdapter();
+    const adapter = await navigator.gpu.requestWebGpuAdapter?.() ?? await navigator.gpu.requestAdapter();
     if (!adapter) return "no-adapter";
     const info = adapter.info ?? {};
     return [info.vendor, info.architecture].filter(Boolean).join("/") || "adapter";
@@ -312,12 +341,181 @@ function tileUnder(px, py) {
   return null;
 }
 
-function applyCursor() {
-  if (!state.armed) {
-    stage.style.cursor = "default";
+// The tile under the pointer, in the page's own event space.
+function pointerTile(event) {
+  const point = scenePoint(event);
+  return point ? tileUnder(point[0], point[1]) : null;
+}
+
+// What the sim says stands on a tile: `h3`, `u7` or an empty string.
+function pickAt(tile) {
+  return tile ? game.pickAt(tile.x, tile.z) : "";
+}
+
+// The state of one picked thing, straight from the module.
+function stateOf(id) {
+  if (!id) return null;
+  const json = id.startsWith("h") ? game.houseState(id) : game.unitState(id);
+  if (!json) return null;
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+// True when the unit under the cursor belongs to the other side.
+function isFoe(id) {
+  const state = stateOf(id);
+  return Boolean(state) && state.what === "unit" && state.side !== PLAYER_SIDE;
+}
+
+// The atlas cell of the soldier sheet: the manifest is the authority for the
+// cell size and the gutter, so the page never keeps a pixel of its own.
+function soldierCell(row, column) {
+  const manifest = soldier.manifest;
+  const pitchW = manifest.tile_w + manifest.padding * 2;
+  const pitchH = manifest.tile_h + manifest.padding * 2;
+  return [
+    column * pitchW + manifest.padding,
+    row * pitchH + manifest.padding,
+    manifest.tile_w,
+    manifest.tile_h,
+  ];
+}
+
+// The atlas row of one clip: the held pose or the walk cycle.
+function soldierRow(clip) {
+  const anim = soldier.manifest.anims.find((entry) => entry.name === clip);
+  return anim ? anim.row : 0;
+}
+
+// One command icon: a cell of the soldier sheet, drawn as it is, never a glyph.
+function drawIcon(canvas, row, column) {
+  const iconCtx = canvas.getContext("2d");
+  iconCtx.clearRect(0, 0, canvas.width, canvas.height);
+  const cell = soldierCell(row, column);
+  const scale = Math.min(canvas.width / cell[2], canvas.height / cell[3]);
+  const w = cell[2] * scale;
+  const h = cell[3] * scale;
+  iconCtx.drawImage(
+    soldier.image,
+    cell[0],
+    cell[1],
+    cell[2],
+    cell[3],
+    (canvas.width - w) / 2,
+    (canvas.height - h) / 2,
+    w,
+    h,
+  );
+}
+
+// The three icons of the command row: a walking soldier, a soldier that
+// stands, and the same soldier turned to the side it holds.
+function commandIcons() {
+  const walk = soldierRow("walk") + 3;
+  const pose = soldierRow("walk_pose");
+  const icons = {
+    "attack-move": [walk, 0],
+    stop: [pose, 0],
+    hold: [pose, 6],
+  };
+  for (const button of commandRow.querySelectorAll(".command")) {
+    const cell = icons[button.dataset.order];
+    if (cell) drawIcon(button.querySelector("canvas"), cell[0], cell[1]);
+  }
+}
+
+// The portrait of the panel: the cameo of a house, the atlas cell of a unit.
+function drawPortrait(picked) {
+  selCtx.clearRect(0, 0, selCameo.width, selCameo.height);
+  if (!picked) return;
+  if (picked.what === "house") {
+    const image = cameos.get(picked.name);
+    if (image) selCtx.drawImage(image, 0, 0, image.width, image.height, 0, 0, 64, 48);
     return;
   }
-  stage.style.cursor = state.hoverOk ? "crosshair" : "not-allowed";
+  const cell = soldierCell(soldierRow("walk_pose"), 0);
+  selCtx.drawImage(soldier.image, cell[0], cell[1], cell[2], cell[3], 8, 0, 48, 48);
+}
+
+// The panel of the picked thing: the module's own numbers, drawn as they are.
+function refreshPanel() {
+  const ids = JSON.parse(game.selection());
+  const id = ids.length ? ids[ids.length - 1] : "";
+  const picked = stateOf(id);
+  if (!picked) {
+    state.panel = "";
+    selName.textContent = "nothing picked";
+    selBarFill.style.width = "0";
+    selLine.textContent = "click a soldier or a house";
+    drawPortrait(null);
+    return;
+  }
+  state.panel = picked.name;
+  selName.textContent = picked.name;
+  if (picked.what === "unit") {
+    const fill = picked.maxHp ? Math.round((100 * picked.hp) / picked.maxHp) : 0;
+    selBarFill.style.width = `${fill}%`;
+    selLine.textContent = picked.moving ? "walking" : "standing";
+  } else {
+    selBarFill.style.width = "0";
+    const waiting = picked.waitsFor ? ` · waits for ${picked.waitsFor}` : "";
+    selLine.textContent = picked.building
+      ? `building: ${picked.ticksLeft} of ${picked.ticksTotal} ticks${waiting}`
+      : `standing${waiting}`;
+  }
+  drawPortrait(picked);
+}
+
+// The minimap: the field, its markers and the window the camera looks at, all
+// from the module's one JSON line.
+function drawMinimap() {
+  const map = JSON.parse(game.minimap());
+  state.map = map;
+  const tile = map.tile;
+  minimapCtx.fillStyle = "#1f1a12";
+  minimapCtx.fillRect(0, 0, minimap.width, minimap.height);
+  minimapCtx.strokeStyle = "rgba(231, 215, 180, 0.22)";
+  minimapCtx.lineWidth = 1;
+  minimapCtx.strokeRect(0.5, 0.5, minimap.width - 1, minimap.height - 1);
+  const colour = (side) => {
+    const rgbSide = map.sideColours[side] ?? map.sideColours[0];
+    return rgb(rgbSide[0], rgbSide[1], rgbSide[2]);
+  };
+  for (const house of map.houses) {
+    minimapCtx.fillStyle = colour(house.side);
+    minimapCtx.fillRect(
+      (house.x + 0.5) * tile - 1,
+      (house.z + 0.5) * tile - 1,
+      2,
+      2,
+    );
+  }
+  for (const unit of map.units) {
+    minimapCtx.fillStyle = colour(unit.side);
+    minimapCtx.fillRect(
+      Math.round((unit.x + 0.5) * tile),
+      Math.round((unit.z + 0.5) * tile),
+      1,
+      1,
+    );
+  }
+  const [rx, ry, rw, rh] = map.rect;
+  minimapCtx.strokeStyle = "#e9d9b4";
+  minimapCtx.lineWidth = 1;
+  minimapCtx.strokeRect(rx + 0.5, ry + 0.5, rw, rh);
+}
+
+function applyCursor() {
+  if (state.armed) {
+    // A hammer over ground the sim would take: a pointing hand stands in.
+    stage.style.cursor = state.hoverOk ? "pointer" : "not-allowed";
+    return;
+  }
+  // A crossed sword over a foe: the crosshair stands in until the UI set lands.
+  stage.style.cursor = isFoe(pickAt(state.hover)) ? "crosshair" : "default";
 }
 
 function setOrder(text) {
@@ -326,22 +524,15 @@ function setOrder(text) {
 }
 
 function refreshHover(event) {
-  if (!state.armed || !game) {
-    state.hover = null;
-    state.hoverOk = false;
-    applyCursor();
-    return;
-  }
-  const point = scenePoint(event);
-  const tile = point ? tileUnder(point[0], point[1]) : null;
+  const tile = pointerTile(event);
   state.hover = tile;
-  state.hoverOk = tile ? game.placement(state.armed.id, tile.x, tile.z) === "" : false;
+  state.hoverOk =
+    state.armed && tile ? game.placement(state.armed.id, tile.x, tile.z) === "" : false;
   applyCursor();
 }
 
 function arm(cell) {
   state.armed = cell;
-  state.hover = null;
   state.hoverOk = false;
   for (const other of state.cells) {
     other.button.setAttribute("aria-pressed", String(other === cell));
@@ -353,7 +544,6 @@ function arm(cell) {
 function disarm() {
   if (!state.armed) return;
   state.armed = null;
-  state.hover = null;
   state.hoverOk = false;
   for (const cell of state.cells) cell.button.setAttribute("aria-pressed", "false");
   applyCursor();
@@ -362,14 +552,81 @@ function disarm() {
 
 function placeAtPointer(event) {
   if (!state.armed || !game) return;
-  const point = scenePoint(event);
-  const tile = point ? tileUnder(point[0], point[1]) : null;
+  const tile = pointerTile(event);
   if (!tile) return;
   setOrder(game.build(state.armed.id, tile.x, tile.z));
   state.hover = tile;
   state.hoverOk = state.order === "";
   applyCursor();
   publish();
+}
+
+// Left click without a build cell armed: the pointer contract of the plan.
+// The pick is the module's own answer; a foe under the cursor is struck by the
+// soldiers already picked, and empty ground clears the selection.
+function pickAtPointer(event) {
+  const tile = pointerTile(event);
+  if (!tile) return;
+  if (event.shiftKey) {
+    game.selectAt(tile.x, tile.z, true);
+    refreshPanel();
+    publish();
+    return;
+  }
+  const foe = isFoe(pickAt(tile));
+  const picked = JSON.parse(game.selection());
+  if (foe && picked.length) {
+    setOrder(game.orderSelected("hold", tile.x, tile.z));
+  } else {
+    setOrder("");
+    game.selectAt(tile.x, tile.z, false);
+  }
+  refreshPanel();
+  publish();
+}
+
+// Right click: the camera moves to the tile, or the picked soldiers walk to it.
+function orderAtPointer(event) {
+  if (state.armed) {
+    disarm();
+    return;
+  }
+  const tile = pointerTile(event);
+  if (!tile) return;
+  setOrder(game.orderSelected("attack-move", tile.x, tile.z));
+  publish();
+}
+
+// The three command buttons: the order goes to the picked soldiers, the tile
+// under the cursor is the target.
+function commandAt(button) {
+  const order = button.dataset.order;
+  if (order === "stop") {
+    setOrder(game.orderSelected("stop", 0, 0));
+    publish();
+    return;
+  }
+  if (!state.hover) {
+    setOrder(NO_TILE);
+    publish();
+    return;
+  }
+  setOrder(game.orderSelected(order, state.hover.x, state.hover.z));
+  publish();
+}
+
+// A click on the minimap moves the camera there: the map is centred on the
+// world origin, so the pixel of the click is the world point under it.
+function cameraToPointer(event) {
+  if (!state.map) return;
+  const rect = minimap.getBoundingClientRect();
+  const px = ((event.clientX - rect.left) * minimap.width) / rect.width;
+  const py = ((event.clientY - rect.top) * minimap.height) / rect.height;
+  const map = state.map;
+  const worldX = px / map.tile - map.mapW / 2;
+  const worldZ = py / map.tile - map.mapH / 2;
+  const pan = game.panOffset;
+  game.pan(worldX - pan[0], worldZ - pan[1]);
 }
 
 function buildGrid() {
@@ -428,6 +685,8 @@ function publish() {
     stock: game.stock,
     armed: state.armed ? state.armed.id : null,
     order: state.order,
+    selection: JSON.parse(game.selection()),
+    panel: state.panel,
     webgpu: state.webgpu,
     canvas: "canvas2d",
   });
@@ -441,12 +700,16 @@ function tickFrame(now) {
   const frame = game.frame();
   state.frame = frame;
   drawFrame(frame);
+  drawMinimap();
   state.frames += 1;
   window.kam2Frames = state.frames;
   if (state.frames === 1) {
     document.body.dataset.state = "running";
   }
-  if (state.frames % REPORT_EVERY === 0) publish();
+  if (state.frames % REPORT_EVERY === 0) {
+    refreshPanel();
+    publish();
+  }
   if (state.limit > 0 && state.frames >= state.limit) {
     document.body.dataset.state = "frozen";
     return;
@@ -487,13 +750,19 @@ function onKeyUp(event) {
 async function start() {
   try {
     state.webgpu = await probeWebgpu();
+    // The module is ready before anything is asked of it: the static cell list
+    // is a call into the wasm too.
+    await init();
+    game = new Kam2Web();
     [soldier, cottage] = await Promise.all([
       loadArt("soldier/manifest.json"),
       loadArt("house/manifest.json"),
     ]);
-    await init();
-    game = new Kam2Web();
+    for (const cell of JSON.parse(Kam2Web.houseKinds())) {
+      cameos.set(cell.id, await loadCameo(cell.id));
+    }
     buildGrid();
+    commandIcons();
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     window.kam2 = {
@@ -509,6 +778,12 @@ async function start() {
       order: () => orderLine.textContent,
       placement: (kind, x, z) => game.placement(kind, x, z),
       stock: (side) => Array.from(game.stockOf(side ?? 0)),
+      selection: () => JSON.parse(game.selection()),
+      panel: () => state.panel,
+      pick: (x, z) => game.pickAt(x, z),
+      unit: (id) => JSON.parse(game.unitState(id) || "null"),
+      house: (id) => JSON.parse(game.houseState(id) || "null"),
+      map: () => JSON.parse(game.minimap()),
       // Client pixel of a tile centre, for the headless pointer drill.
       pixelOf: (x, z) => {
         const diamond = groundDiamond(state.frame, x, z);
@@ -528,19 +803,27 @@ async function start() {
       applyCursor();
     });
     stage.addEventListener("mousedown", (event) => {
-      if (event.button !== 0 || !state.armed) return;
-      event.preventDefault();
-      refreshHover(event);
-      placeAtPointer(event);
+      if (event.button !== 0) return;
+      if (state.armed) {
+        event.preventDefault();
+        refreshHover(event);
+        placeAtPointer(event);
+        return;
+      }
+      pickAtPointer(event);
     });
     stage.addEventListener("contextmenu", (event) => {
-      if (!state.armed) return;
       event.preventDefault();
-      disarm();
+      orderAtPointer(event);
     });
+    minimap.addEventListener("click", cameraToPointer);
+    for (const button of commandRow.querySelectorAll(".command")) {
+      button.addEventListener("click", () => commandAt(button));
+    }
     document.addEventListener("visibilitychange", () => {
       last = 0;
     });
+    refreshPanel();
     publish();
     requestAnimationFrame(tickFrame);
   } catch (error) {

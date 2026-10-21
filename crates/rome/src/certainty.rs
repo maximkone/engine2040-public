@@ -1,4 +1,4 @@
-//! certainty: the kit table, and how sure we are of every piece of it.
+//! certainty: how sure we are of every piece of kit, and of every number the game shows.
 //!
 //! Every item in `content/rome/kit.toml` says how sure we are (`attested`,
 //! `reconstructed`, `contested`, `invented`), names its source in `ref`, and, when an
@@ -12,6 +12,13 @@
 //! `include_str!`, so the tick never reads a file, two loads of one table hash the
 //! same, and a draft table from another tool can never be loaded. Values are strings
 //! and whole numbers only: no float, no clock, no IO.
+//!
+//! The registry is the same rule for the numbers. Every number the game shows lives
+//! in one table with its tier, a note and its source. The loader refuses a number
+//! with no tier and names its key, and the renderer asks the registry for a number
+//! by key ([`Registry::render`]), so a number that is not registered cannot be drawn
+//! at all. The contested numbers stay visible: the Roman foot is 295.7 mm or
+//! 297.4 mm, and the card says so next to the 296 mm the game uses.
 
 use crate::table::{Entry, Table};
 use crate::{only, LoadError};
@@ -354,11 +361,498 @@ fn write_text(hasher: &mut Fnv64, text: &str) {
     hasher.write_str(text);
 }
 
+/// One number as the registry table holds it, before the loader has checked it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Claim<'a> {
+    /// The key the renderer asks for, for example `weapon.pilum.length`.
+    pub key: &'a str,
+    /// The name the HUD shows, for example `pila`.
+    pub label: &'a str,
+    /// The number, in units of ten to the minus `decimals` of `unit`.
+    pub value: u32,
+    /// How many decimals the number carries.
+    pub decimals: u8,
+    /// The unit of the number, for example `m`. Empty for a plain count.
+    pub unit: &'a str,
+    /// How sure we are of the number. `None` means the table forgot to say.
+    pub tier: Option<Certainty>,
+    /// Why the number says what it says.
+    pub note: &'a str,
+    /// Where the number comes from.
+    pub source: &'a str,
+}
+
+/// One loaded number: a claim that has a tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Number<'a> {
+    /// The key of the number, for example `weapon.pilum.length`.
+    pub key: &'a str,
+    /// The name the HUD shows, for example `pila`.
+    pub label: &'a str,
+    /// The number, in units of ten to the minus `decimals` of `unit`.
+    pub value: u32,
+    /// How many decimals the number carries.
+    pub decimals: u8,
+    /// The unit of the number, for example `m`. Empty for a plain count.
+    pub unit: &'a str,
+    /// How sure we are of the number.
+    pub tier: Certainty,
+    /// Why the number says what it says.
+    pub note: &'a str,
+    /// Where the number comes from.
+    pub source: &'a str,
+}
+
+impl<'a> Number<'a> {
+    /// The loaded form of one claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::MissingCertainty`] when the claim has no tier; the
+    /// refusal names the claim's key.
+    fn load(claim: &Claim<'a>) -> Result<Self, LoadError<'a>> {
+        let tier = claim
+            .tier
+            .ok_or(LoadError::MissingCertainty { entry: claim.key })?;
+        Ok(Self {
+            key: claim.key,
+            label: claim.label,
+            value: claim.value,
+            decimals: claim.decimals,
+            unit: claim.unit,
+            tier,
+            note: claim.note,
+            source: claim.source,
+        })
+    }
+
+    /// The number as it is written, for example `2.0`.
+    #[must_use]
+    pub fn value_text(&self) -> String {
+        let scale = scale(self.decimals);
+        let whole = self.value / scale;
+        let rest = self.value % scale;
+        if self.decimals == 0 {
+            return whole.to_string();
+        }
+        format!("{whole}.{rest:0width$}", width = usize::from(self.decimals))
+    }
+
+    /// The line the HUD draws for this number: `pila 2.0 m (Vegetius 2.15)`.
+    #[must_use]
+    pub fn text(&self) -> String {
+        let value = self.value_text();
+        if self.unit.is_empty() {
+            return format!("{} {} ({})", self.label, value, self.source);
+        }
+        format!("{} {} {} ({})", self.label, value, self.unit, self.source)
+    }
+}
+
+/// What the HUD draws for one number of the registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rendered<'a> {
+    /// The line the HUD shows: `pila 2.0 m (Vegetius 2.15)`.
+    pub text: String,
+    /// The tier chip beside the number.
+    pub tier: Certainty,
+    /// The note the codex card shows under the number.
+    pub note: &'a str,
+    /// The source the codex card names.
+    pub source: &'a str,
+}
+
+impl Rendered<'_> {
+    /// The word the tier chip carries: `attested`, `reconstructed`, `contested` or
+    /// `invented`.
+    #[must_use]
+    pub fn chip(&self) -> &'static str {
+        self.tier.as_str()
+    }
+}
+
+/// The registry: every number the game shows, with its tier, its note and its source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Registry<'a> {
+    numbers: Vec<Number<'a>>,
+}
+
+impl Registry<'static> {
+    /// The registry shipped with the crate.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Registry::load`]; a test keeps the shipped table valid, so this
+    /// doubles as a build check on the table.
+    pub fn shipped() -> Result<Self, LoadError<'static>> {
+        Self::load(&SHIPPED_CLAIMS)
+    }
+}
+
+impl<'a> Registry<'a> {
+    /// Load a registry from its table of claims.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::MissingCertainty`] when a claim has no tier; the refusal
+    /// names the claim's key.
+    pub fn load(claims: &[Claim<'a>]) -> Result<Self, LoadError<'a>> {
+        let mut numbers = Vec::with_capacity(claims.len());
+        for claim in claims {
+            numbers.push(Number::load(claim)?);
+        }
+        Ok(Self { numbers })
+    }
+
+    /// Every number of the registry, in table order.
+    #[must_use]
+    pub fn numbers(&self) -> &[Number<'a>] {
+        &self.numbers
+    }
+
+    /// The number with this key, for example `weapon.pilum.length`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Unregistered`] when the registry holds no such key.
+    pub fn number<'k>(&self, key: &'k str) -> Result<&Number<'a>, LoadError<'k>> {
+        self.numbers
+            .iter()
+            .find(|number| number.key == key)
+            .ok_or(LoadError::Unregistered { key })
+    }
+
+    /// The HUD line for one number, with the tier chip that goes beside it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Unregistered`] when the registry holds no such key: a
+    /// number that is not registered cannot be drawn at all.
+    pub fn render<'k>(&self, key: &'k str) -> Result<Rendered<'a>, LoadError<'k>> {
+        let number = self.number(key)?;
+        Ok(Rendered {
+            text: number.text(),
+            tier: number.tier,
+            note: number.note,
+            source: number.source,
+        })
+    }
+
+    /// A digest of the loaded registry: two loads of one table agree.
+    #[must_use]
+    pub fn hash(&self) -> u64 {
+        let mut hasher = Fnv64::new();
+        hasher.write(b"engine-rome/registry/1");
+        for number in &self.numbers {
+            write_text(&mut hasher, number.key);
+            write_text(&mut hasher, number.label);
+            hasher.write_u32(number.value);
+            hasher.write_u8(number.decimals);
+            write_text(&mut hasher, number.unit);
+            write_text(&mut hasher, number.tier.as_str());
+            write_text(&mut hasher, number.note);
+            write_text(&mut hasher, number.source);
+        }
+        hasher.finish()
+    }
+}
+
+/// Ten to the power of the decimals of a number.
+const fn scale(decimals: u8) -> u32 {
+    let mut factor = 1u32;
+    let mut left = decimals;
+    while left > 0 {
+        factor = factor.saturating_mul(10);
+        left -= 1;
+    }
+    factor
+}
+
+/// The registry table: one claim per number the game shows.
+///
+/// The order of a claim is key, label, value, decimals, unit, tier, note, source.
+macro_rules! claims {
+    ($($key:literal => $label:literal, $value:literal, $decimals:literal, $unit:literal, $tier:ident, $note:literal, $source:literal;)*) => {
+        [$(Claim {
+            key: $key,
+            label: $label,
+            value: $value,
+            decimals: $decimals,
+            unit: $unit,
+            tier: Some(Certainty::$tier),
+            note: $note,
+            source: $source,
+        }),*]
+    };
+}
+
+/// Every number the game shows, with its tier, its note and its source.
+///
+/// The table is a Rust const, so it is embedded at build time: the tick never reads
+/// a file, two loads of it hash the same, and a draft table from another tool can
+/// never be loaded. The values are the ones `docs/plan/rome.md` section 5 gives, in
+/// the unit the source itself uses.
+const SHIPPED_CLAIMS: [Claim<'static>; 38] = claims! {
+    "units.roman_foot_mm" => "Roman foot", 296, 0, "mm", Contested,
+        "The Roman foot is contested: 295.7 mm or 297.4 mm. We use 296 mm, and the card says so.",
+        "rome.md section 5 units";
+    "units.roman_mile_m" => "Roman mile", 1480, 0, "m", Reconstructed,
+        "A thousand paces of five feet, about 1.48 km.",
+        "rome.md section 5 units";
+    "line.frontage_ft" => "Frontage per man", 3, 0, "ft", Attested,
+        "Three feet of front for each man in the line.",
+        "Vegetius 3.14";
+    "line.rank_gap_ft" => "Gap between ranks", 6, 0, "ft", Attested,
+        "Six feet from one rank to the next.",
+        "Vegetius 3.14-15";
+    "camp.ditch.one_night.width_ft" => "One-night ditch, width", 5, 0, "ft", Attested,
+        "The smallest ditch the sources give, cut in one night.",
+        "Vegetius 3.8; Hyginus 49";
+    "camp.ditch.one_night.depth_ft" => "One-night ditch, depth", 3, 0, "ft", Attested,
+        "Three feet deep.",
+        "Vegetius 3.8; Hyginus 49";
+    "camp.ditch.light.width_ft" => "Light ditch, width", 9, 0, "ft", Attested,
+        "Nine feet wide, for a night that brings a light threat.",
+        "Vegetius 1.24";
+    "camp.ditch.light.depth_ft" => "Light ditch, depth", 7, 0, "ft", Attested,
+        "Seven feet deep.",
+        "Vegetius 1.24";
+    "camp.ditch.serious.width_ft" => "Serious ditch, width", 12, 0, "ft", Attested,
+        "Twelve feet wide, for a serious threat.",
+        "Vegetius 1.24";
+    "camp.ditch.serious.depth_ft" => "Serious ditch, depth", 9, 0, "ft", Attested,
+        "Nine feet deep.",
+        "Vegetius 1.24";
+    "camp.rampart.width_ft" => "Rampart, width", 8, 0, "ft", Attested,
+        "Turf, thrown up out of the ditch.",
+        "Hyginus 50; Vegetius 3.8";
+    "camp.rampart.height_ft" => "Rampart, height", 6, 0, "ft", Attested,
+        "Six feet of turf wall.",
+        "Hyginus 50; Vegetius 3.8";
+    "camp.street.via_principalis_ft" => "Via principalis", 60, 0, "ft", Attested,
+        "The main street across the camp.",
+        "Hyginus 14";
+    "camp.street.via_quintana_ft" => "Via quintana", 40, 0, "ft", Attested,
+        "The second street, behind the first.",
+        "Hyginus 17";
+    "order.watch_count" => "Watches a night", 4, 0, "", Attested,
+        "Four watches a night.",
+        "Vegetius 3.8; Polybius 6.35";
+    "order.watch_hours" => "Hours on a watch", 3, 0, "h", Attested,
+        "A watch runs up to three hours.",
+        "Vegetius 3.8; Polybius 6.35";
+    "order.century_men" => "Men in a century", 80, 0, "men", Reconstructed,
+        "Eighty men under a centurion and an optio; Vegetius gives a hundred for his day.",
+        "rome.md section 5; Vegetius 2.14";
+    "order.tent_men" => "Men in a tent", 8, 0, "men", Reconstructed,
+        "Eight men in the early Imperial tent; Vegetius gives ten for his day.",
+        "rome.md section 5; Vegetius 2.13";
+    "march.pack_load_lb" => "Pack load", 60, 0, "lb", Attested,
+        "Sixty pounds, about 20 kg, besides arms; the recruit's drill.",
+        "Vegetius 1.19";
+    "march.step_regular_mi" => "Regular step", 20, 0, "mi", Attested,
+        "Twenty Roman miles, about 29.6 km, in five summer hours.",
+        "Vegetius 1.9";
+    "march.step_full_mi" => "Full step", 24, 0, "mi", Attested,
+        "Twenty-four Roman miles, about 35.5 km, in five summer hours.",
+        "Vegetius 1.9";
+    "weapon.gladius.blade_cm" => "Gladius, blade", 45, 0, "cm", Attested,
+        "The Pompeii blades run 45 to 50 cm.",
+        "rome.md section 3";
+    "weapon.gladius.kill_depth_in" => "Gladius, killing depth", 2, 0, "in", Attested,
+        "A thrust two inches deep kills.",
+        "Vegetius 1.12";
+    "weapon.pilum.length" => "pila", 20, 1, "m", Reconstructed,
+        "The sources give the shaft and the head; the total is the plan's round figure.",
+        "Vegetius 2.15";
+    "weapon.pilum.shaft_ft" => "pila, shaft", 55, 1, "ft", Attested,
+        "The wooden shaft is five and a half feet.",
+        "Vegetius 2.15";
+    "weapon.pilum.head_in" => "pila, head", 9, 0, "in", Attested,
+        "The iron head is nine inches.",
+        "Vegetius 2.15";
+    "weapon.pilum.throw_min_m" => "pila, shortest throw", 15, 0, "m", Attested,
+        "The shortest throw that still carries.",
+        "Vegetius 2.15";
+    "weapon.pilum.throw_max_m" => "pila, longest throw", 25, 0, "m", Attested,
+        "The far end of the effective throw.",
+        "Vegetius 2.15";
+    "weapon.pilum.throw_far_m" => "pila, utmost reach", 30, 0, "m", Reconstructed,
+        "About thirty metres: the reach of a pilum in modern tests, not in the sources.",
+        "rome.md section 5; modern tests";
+    "weapon.pilum.throw_speed_mps" => "pila, throw speed", 36, 0, "m/s", Invented,
+        "Ours: the arena throws at 36 m/s so a volley lands inside the thirty metres.",
+        "crates/arena/src/pilum.rs";
+    "siege.alesia.ditch_ft" => "Alesia, ditch", 20, 0, "ft", Attested,
+        "The ditch Caesar's army dug at Alesia.",
+        "Caesar BG 7.72-73";
+    "siege.alesia.rampart_ft" => "Alesia, rampart", 12, 0, "ft", Attested,
+        "The rampart that closed the works.",
+        "Caesar BG 7.72-73";
+    "siege.alesia.tower_ft" => "Alesia, towers", 80, 0, "ft", Attested,
+        "A tower every eighty feet.",
+        "Caesar BG 7.72-73";
+    "bridge.pile_ft" => "Caesar's bridge, pile", 15, 1, "ft", Attested,
+        "Piles a foot and a half thick.",
+        "Caesar BG 4.17";
+    "bridge.pile_gap_ft" => "Caesar's bridge, gap", 2, 0, "ft", Attested,
+        "Two feet apart, in pairs.",
+        "Caesar BG 4.17";
+    "bridge.build_days" => "Caesar's bridge, days", 10, 0, "", Attested,
+        "Ten days to build the bridge over the Rhine.",
+        "Caesar BG 4.17";
+    "engine.carroballistae" => "Carroballistae in a legion", 55, 0, "", Attested,
+        "The late army keeps fifty-five carroballistae.",
+        "Vegetius 2.25";
+    "engine.onagri" => "Onagri in a legion", 10, 0, "", Attested,
+        "And ten onagri.",
+        "Vegetius 2.25";
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::camp::{Camp, Threat};
+    use crate::line::Line;
 
     const MANUBALLISTA: &str = "kit.manuballista";
+    const FOOT: &str = "units.roman_foot_mm";
+    const PILUM: &str = "weapon.pilum.length";
+
+    #[test]
+    fn a_number_with_no_tier_is_refused_and_names_its_key() {
+        let claim = Claim {
+            key: FOOT,
+            label: "Roman foot",
+            value: 296,
+            decimals: 0,
+            unit: "mm",
+            tier: None,
+            note: "The Roman foot is contested.",
+            source: "rome.md section 5 units",
+        };
+        let error = Registry::load(&[claim]).expect_err("a number with no tier");
+        assert_eq!(
+            error,
+            LoadError::MissingCertainty {
+                entry: "units.roman_foot_mm"
+            }
+        );
+        assert!(error.to_string().contains("units.roman_foot_mm"), "{error}");
+    }
+
+    #[test]
+    fn an_unregistered_key_cannot_be_rendered() {
+        let registry = Registry::shipped().expect("shipped registry");
+        let error = registry
+            .render("weapon.pilum.nope")
+            .expect_err("a number that is not registered");
+        assert_eq!(
+            error,
+            LoadError::Unregistered {
+                key: "weapon.pilum.nope"
+            }
+        );
+        assert!(error.to_string().contains("weapon.pilum.nope"), "{error}");
+    }
+
+    #[test]
+    fn the_roman_foot_is_printed_with_the_tier_that_says_it_is_contested() {
+        let registry = Registry::shipped().expect("shipped registry");
+        let rendered = registry.render(FOOT).expect("the Roman foot");
+        assert_eq!(rendered.tier, Certainty::Contested);
+        assert_eq!(rendered.chip(), "contested");
+        assert!(rendered.text.contains("296"), "{}", rendered.text);
+        assert!(rendered.note.contains("295.7"), "{}", rendered.note);
+        assert!(rendered.note.contains("297.4"), "{}", rendered.note);
+    }
+
+    #[test]
+    fn the_hud_line_of_the_pila_reads_pila_2_0_m_vegetius_2_15() {
+        let registry = Registry::shipped().expect("shipped registry");
+        let rendered = registry.render(PILUM).expect("the pilum");
+        assert_eq!(rendered.text, "pila 2.0 m (Vegetius 2.15)");
+        assert_eq!(rendered.source, "Vegetius 2.15");
+    }
+
+    #[test]
+    fn every_registered_number_carries_a_tier_a_note_and_a_source() {
+        let registry = Registry::shipped().expect("shipped registry");
+        for number in registry.numbers() {
+            assert!(
+                Certainty::ALL.contains(&number.tier),
+                "{} has no tier of the four",
+                number.key
+            );
+            assert!(!number.note.is_empty(), "{} has no note", number.key);
+            assert!(!number.source.is_empty(), "{} has no source", number.key);
+        }
+    }
+
+    #[test]
+    fn the_registry_holds_each_key_once() {
+        let registry = Registry::shipped().expect("shipped registry");
+        let mut keys: Vec<&str> = registry.numbers().iter().map(|number| number.key).collect();
+        let count = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), count, "a key is registered twice");
+    }
+
+    #[test]
+    fn the_registry_agrees_with_the_camp_and_line_tables() {
+        let registry = Registry::shipped().expect("shipped registry");
+        let camp = Camp::shipped().expect("shipped camp table");
+        let line = Line::shipped().expect("shipped line table");
+        let foot = registry.number(FOOT).expect("the Roman foot").value;
+        let mm = |key: &str| -> u32 {
+            let feet = registry.number(key).expect("a registered number").value;
+            feet * foot
+        };
+        assert_eq!(
+            mm("camp.ditch.one_night.width_ft"),
+            camp.ditch(Threat::OneNight).width.mm
+        );
+        assert_eq!(
+            mm("camp.ditch.one_night.depth_ft"),
+            camp.ditch(Threat::OneNight).depth.mm
+        );
+        assert_eq!(
+            mm("camp.ditch.light.width_ft"),
+            camp.ditch(Threat::Light).width.mm
+        );
+        assert_eq!(
+            mm("camp.ditch.light.depth_ft"),
+            camp.ditch(Threat::Light).depth.mm
+        );
+        assert_eq!(
+            mm("camp.ditch.serious.width_ft"),
+            camp.ditch(Threat::Serious).width.mm
+        );
+        assert_eq!(
+            mm("camp.ditch.serious.depth_ft"),
+            camp.ditch(Threat::Serious).depth.mm
+        );
+        assert_eq!(mm("camp.rampart.width_ft"), camp.rampart.width.mm);
+        assert_eq!(mm("camp.rampart.height_ft"), camp.rampart.height.mm);
+        assert_eq!(
+            mm("camp.street.via_principalis_ft"),
+            camp.streets.via_principalis.mm
+        );
+        assert_eq!(
+            mm("camp.street.via_quintana_ft"),
+            camp.streets.via_quintana.mm
+        );
+        assert_eq!(mm("line.frontage_ft"), line.frontage.mm);
+        assert_eq!(mm("line.rank_gap_ft"), line.rank_gap.mm);
+    }
+
+    #[test]
+    fn two_loads_of_the_registry_hash_the_same() {
+        let registry = Registry::shipped().expect("shipped registry");
+        let again = Registry::shipped().expect("shipped registry");
+        assert_eq!(registry.hash(), again.hash());
+    }
 
     #[test]
     fn the_kit_table_loads() {

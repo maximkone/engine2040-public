@@ -1,0 +1,226 @@
+{
+  "count": 24,
+  "props": [
+    {
+      "build": "sword",
+      "classes": [
+        "warden_fighter",
+        "warden_warrior"
+      ],
+      "file": "warden_sword.glb",
+      "id": "warden_sword",
+      "triangles": 172
+    },
+    {
+      "build": "shield",
+      "classes": [
+        "warden_fighter"
+      ],
+      "file": "warden_buckler.glb",
+      "id": "warden_buckler",
+      "triangles": 156
+    },
+    {
+      "build": "sword",
+      "classes": [
+        "warden_defender"
+      ],
+      "file": "warden_arming_sword.glb",
+      "id": "warden_arming_sword",
+      "triangles": 172
+    },
+    {
+      "build": "shield",
+      "classes": [
+        "warden_defender",
+        "warden_cleric"
+      ],
+      "file": "warden_heater_shield.glb",
+      "id": "warden_heater_shield",
+      "triangles": 156
+    },
+    {
+      "build": "dagger",
+      "classes": [
+        "warden_rogue",
+        "warden_assassin"
+      ],
+      "file": "warden_short_sword.glb",
+      "id": "warden_short_sword",
+      "triangles": 44
+    },
+    {
+      "build": "bow",
+      "classes": [
+        "warden_archer"
+      ],
+      "file": "warden_bow.glb",
+      "id": "warden_bow",
+      "triangles": 172
+    },
+    {
+      "build": "staff",
+      "classes": [
+        "warden_mage",
+        "warden_priest"
+      ],
+      "file": "warden_staff.glb",
+      "id": "warden_staff",
+      "triangles": 1194
+    },
+    {
+      "build": "focus_staff",
+      "classes": [
+        "warden_sorcerer"
+      ],
+      "file": "warden_focus_staff.glb",
+      "id": "warden_focus_staff",
+      "triangles": 2452
+    },
+    {
+      "build": "focus_staff",
+      "classes": [
+        "warden_enchanter"
+      ],
+      "file": "warden_focus_rod.glb",
+      "id": "warden_focus_rod",
+      "triangles": 2452
+    },
+    {
+      "build": "tome",
+      "classes": [
+        "warden_enchanter"
+      ],
+      "file": "warden_grimoire.glb",
+      "id": "warden_grimoire",
+      "triangles": 36
+    },
+    {
+      "build": "tome",
+      "classes": [
+        "warden_acolyte",
+        "warden_priest"
+      ],
+      "file": "warden_tome.glb",
+      "id": "warden_tome",
+      "triangles": 36
+    },
+    {
+      "build": "mace",
+      "classes": [
+        "warden_acolyte",
+        "warden_cleric"
+      ],
+      "file": "warden_mace.glb",
+      "id": "warden_mace",
+      "triangles": 208
+    },
+    {
+      "build": "great_axe",
+      "classes": [
+        "ashkin_combatant"
+      ],
+      "file": "ashkin_great_axe.glb",
+      "id": "ashkin_great_axe",
+      "triangles": 1324
+    },
+    {
+      "build": "greatsword",
+      "classes": [
+        "ashkin_templar"
+      ],
+      "file": "ashkin_longsword.glb",
+      "id": "ashkin_longsword",
+      "triangles": 172
+    },
+    {
+      "build": "shield",
+      "classes": [
+        "ashkin_templar"
+      ],
+      "file": "ashkin_tower_shield.glb",
+      "id": "ashkin_tower_shield",
+      "triangles": 156
+    },
+    {
+      "build": "dagger",
+      "classes": [
+        "ashkin_attacker",
+        "ashkin_shadow"
+      ],
+      "file": "ashkin_paired_blade.glb",
+      "id": "ashkin_paired_blade",
+      "triangles": 44
+    },
+    {
+      "build": "cannon",
+      "classes": [
+        "ashkin_gunner"
+      ],
+      "file": "ashkin_cannon.glb",
+      "id": "ashkin_cannon",
+      "triangles": 1264
+    },
+    {
+      "build": "claw",
+      "classes": [
+        "ashkin_gunner"
+      ],
+      "file": "ashkin_claw.glb",
+      "id": "ashkin_claw",
+      "triangles": 76
+    },
+    {
+      "build": "focus_staff",
+      "classes": [
+        "ashkin_officiator"
+      ],
+      "file": "ashkin_rite_rod.glb",
+      "id": "ashkin_rite_rod",
+      "triangles": 2452
+    },
+    {
+      "build": "focus_staff",
+      "classes": [
+        "ashkin_rune"
+      ],
+      "file": "ashkin_rune_stave.glb",
+      "id": "ashkin_rune_stave",
+      "triangles": 2452
+    },
+    {
+      "build": "staff",
+      "classes": [
+        "ashkin_life"
+      ],
+      "file": "ashkin_ledger_stave.glb",
+      "id": "ashkin_ledger_stave",
+      "triangles": 1194
+    },
+    {
+      "build": "tablet",
+      "classes": [
+        "ashkin_officiator",
+        "ashkin_rune",
+        "ashkin_life"
+      ],
+      "file": "ashkin_tablet.glb",
+      "id": "ashkin_tablet",
+      "triangles": 1176
+    },
+    {
+      "build": "crate",
+      "classes": [],
+      "file": "world_crate.glb",
+      "id": "world_crate",
+      "triangles": 36
+    },
+    {
+      "build": "banner",
+      "classes": [],
+      "file": "world_banner.glb",
+      "id": "world_banner",
+      "triangles": 52
+    }
+  ]
+}
