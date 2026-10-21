@@ -64,6 +64,10 @@ pub mod link;
 /// Lobby with beacon browser, ready-up and AI-fill slots: two
 /// machines form a fight with no manual addresses. Std-only.
 pub mod lobby;
+/// The desync locator: a Merkle tree over the entity state finds the first
+/// differing entity in log2(n) comparisons instead of a full compare.
+/// Diagnostic only: it never feeds a tick hash and it never gates. Std-only.
+pub mod merkle;
 pub mod netcode;
 /// Online played bout: invite join, hole-punch decision and the bout over QUIC
 /// through the relay. Feature-gated with the QUIC transport.

@@ -252,7 +252,7 @@ not re-mine the same repo.
   F2P: no bus between the sim and the draw.
   P2P: golden `d57b5c8ae3096614` x2; the page still plays the same match.
   needs: none.
-- [ ] HX16 net: the desync locator. A Merkle tree over the entity state finds a
+- [x] HX16 net: the desync locator. A Merkle tree over the entity state finds a Landed 39e2fef8f. `cargo test -p engine-net --lib merkle` 9 passed (local lane, CARGO_INCREMENTAL=0); rustfmt exit 0; `node tools/rust-quality.mjs --owned crates/net/src/merkle.rs,crates/net/src/lib.rs` PASS (score 97, grade A); `node tools/workspace-check.mjs` PASS. The locator lives in `crates/net/src/merkle.rs` on top of `engine_core::digest::MerkleDigest`; `crates/net/src/guard.rs` was left alone because it is the input admission screen, not a desync check.
   desync in O(log n) instead of a full compare: the root hash is compared first
   and only the differing branch is walked, down to the entity. It is a
   **diagnostic only** and never a gate, so it stays off the golden. Donor:

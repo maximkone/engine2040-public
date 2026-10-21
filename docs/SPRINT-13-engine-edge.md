@@ -62,10 +62,11 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   reaches the running game in ≤ 2 s with state kept, or the row closes
   with the failure. needs: OPT3.
 - [x] OPT14 ecs: spine performance bars — PF1 workloads on the ARC spine: Progress 2026-10-17: `SpineTransformBody` (10k entity-steps) and `SpineFullTick` (1,024 agent-ticks) exist in crates/perf/src/workloads.rs with recorded hash baselines, kill-bar rows 0.5 ms and 2.0 ms in `TIME_BUDGETS_MS` (baselines.rs), a zero-alloc `steady()` slice and the tests `spine_transform_body_matches_baseline` and `spine_full_tick_matches_baseline` (tests/it/canonical.rs). Left: measured ms x2 posted in the PF1 table.
-  10k entities transform and body step ≤ 0.5 ms, 1k agents full tick
-  ≤ 2 ms, 0 allocations; the ARC3 parity harness prints them. Tier B.
+  20k entities transform and body step ≤ 1.0 ms, 2k agents full tick
+  ≤ 4.0 ms, 0 allocations; the ARC3 parity harness prints them. Tier B.
   Size S. Owns `crates/perf` spine workloads. Accept: numbers x2 in the
   PF1 table. needs: ARC2, PF1. Landed 8139e86d. SpineTransformBody::run_steps and SpineFullTick::run_steps time the passes alone (run_hash digests every pass and measured 1.10 ms p50 for the 0.5 ms bar, it is the equality proof); perf_time_budgets now times both spine rows through them. Measured x2, GitHub runner, release, p50: transform+body 10k entity-steps 0.037 ms (run 39103012592) and 0.022 ms (run 39104362102) against the 0.5 ms bar; full tick 1k agent-ticks 0.008 and 0.005 ms against 2.0 ms. Zero allocations: steady_windows_allocate_nothing_x2, engine-perf --no-fail-fast green run 39105354580. No PF1 table file exists; the numbers are posted here and in the commit.
+  2026-10-21 (lead): the spine's own slot cap moved 16 -> 32 with the participant cap, so the canonical runs cover 20k entity-steps and 2k agent-ticks now and the two kill bars scale with the work (the same rate per unit of work): 0.5 -> 1.0 ms and 2.0 -> 4.0 ms. The p50 numbers above were measured at the 16-slot cap and are kept as they are; the release-mode p50 re-measurement at 32 slots is still owed. The two spine baseline rows were re-recorded (the fixed array size moved, which the table's own rule allows) and the 16-slot hashes live in the dated comment above them.
 - [ ] OPT15 app: CPU frame pipelining — sim tick N+1 overlaps render
   extraction and submit of tick N; the extraction view is the only sync
   point. Tier C. Size M. Owns the frame loop in `crates/app`. Accept: CPU

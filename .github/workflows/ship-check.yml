@@ -6,6 +6,13 @@ name: ship-check
 # them. Equal tree hashes are the receipt; a mismatch names the file that
 # moved. The public mirror is the build farm; the private dev repo never runs
 # this job.
+#
+# A Windows PE image carries two fields the linker writes fresh in every
+# build: the COFF time stamp and the CodeView debug record (the PDB GUID and
+# its age). The tool hashes a PE image with those fields zeroed and leaves
+# the PDB out of the tree, naming it in the receipt: the PDB is debug data
+# and it is not part of the shipped bundle. Every other byte is compared as
+# it is, so the code, the imports and the data must match.
 on:
   push:
     branches: [main]
@@ -46,10 +53,12 @@ jobs:
           $target = Join-Path $env:RUNNER_TEMP 'ship-target'
           $env:CARGO_TARGET_DIR = $target
           # MSVC's link.exe writes the wall clock into the PE header; /Brepro
-          # turns it into a hash of the content, so two builds of the same
-          # commit give the same bytes. The remap keeps the source and the
-          # cargo-home paths out of the binary (the flags tools/ship.mjs uses
-          # for the packaged artifact).
+          # turns it into a hash of the content, so the raw artifact carries no
+          # clock. The link still writes a fresh debug GUID into the image, so
+          # the comparison zeroes that field (and the time stamp) before it
+          # hashes: tools/ship-check.mjs does that. The remap keeps the source
+          # and the cargo-home paths out of the binary (the flags tools/ship.mjs
+          # uses for the packaged artifact).
           $env:RUSTFLAGS = "-Clink-arg=/Brepro --remap-path-prefix=$env:GITHUB_WORKSPACE=. --remap-path-prefix=$env:USERPROFILE\.cargo=./cargo-home"
           New-Item -ItemType Directory -Force -Path target/ship-check/ship-a, target/ship-check/ship-b | Out-Null
           New-Item -ItemType File -Force -Path target/ship-check/ship-hashes.txt | Out-Null

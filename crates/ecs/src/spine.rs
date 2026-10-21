@@ -29,7 +29,15 @@ use crate::snapshot::{hash_bytes, CanonicalBytes, CanonicalHasher};
 pub const SPINE_VERSION: u16 = 1;
 
 /// Most actor slots one spine holds (the input contract's participant cap).
-pub const MAX_SPINE_SLOTS: usize = 16;
+///
+/// 2026-10-21 (lead): the cap was 16 while the participant cap moved to 32
+/// (owner decision GE12, 2026-10-20), so a 32-fighter match could not build
+/// a spine at all: `Spine::with_capacity` clamped the reservation to 16 and
+/// the 17th [`Spine::spawn`] returned [`SpineError::TooManySlots`], so the
+/// arena's spine step answered `None` for a fight the legacy path could seat.
+/// The doc comment already called this the participant cap, so the constant
+/// now matches it.
+pub const MAX_SPINE_SLOTS: usize = 32;
 
 /// Slot index as the `u32` word canonical bytes carry (slots never exceed
 /// [`MAX_SPINE_SLOTS`], so the fallback is unreachable).

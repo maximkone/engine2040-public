@@ -1160,6 +1160,29 @@ mod tests {
         }
     }
 
+    /// A full-size match (the participant cap) must build a spine.
+    ///
+    /// 2026-10-21 (lead): the spine's own slot cap was 16 while the
+    /// participant cap is 32, so `spawn_columns` reserved 16 slots, the 17th
+    /// `Spine::spawn` refused with `TooManySlots`, and the spine step
+    /// answered `None` - which `run_spine` turns into an empty checkpoint
+    /// list. The legacy path seated the same fight, so the two paths
+    /// disagreed on a match size the engine claims to support.
+    #[test]
+    fn a_full_size_match_builds_a_spine() {
+        let cfg = config(9, 60, MAX_SLOTS as u8);
+        let tape = FighterTape(Vec::new());
+        let legacy = run(&cfg, &tape);
+        let spine = run_spine(&cfg, &tape, &MatchWorld::empty());
+        assert_eq!(legacy.len(), 60, "the legacy path seats the full match");
+        assert_eq!(
+            spine.len(),
+            60,
+            "the spine path seats the full match too"
+        );
+        assert_eq!(spine, legacy, "both paths agree on the full match");
+    }
+
     #[test]
     fn a_wall_changes_the_hash_even_untouched() {
         let cfg = config(5, 60, 2);

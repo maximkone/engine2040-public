@@ -2809,7 +2809,7 @@ mod tests {
             }
             .validate(),
             Ok(()),
-            "GE3: 5 fighters fits the 16-slot cap"
+            "GE3: 5 fighters fits the participant cap"
         );
         assert_eq!(
             ArenaConfig {

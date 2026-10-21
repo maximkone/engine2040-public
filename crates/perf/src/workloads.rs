@@ -436,7 +436,7 @@ impl DestructionStep {
     }
 }
 
-/// Seeded 16-slot spine both spine bars step: slot-derived lanes in
+/// Seeded full-slot spine both spine bars step: slot-derived lanes in
 /// [-20, 20) meters (the [`SpatialQuery`] lane shape), the frozen capsule
 /// size, full-health vitals. Single owner of the spine setup in this file.
 fn seeded_spine(seed: u64) -> Spine {
@@ -523,14 +523,20 @@ fn step_full_tick(spine: &mut Spine, tick: u32) {
     });
 }
 
-/// Transform-plus-body bar (OPT14): 10k entity-steps of the Motion-column
+/// Transform-plus-body bar (OPT14): 20k entity-steps of the Motion-column
 /// writes with a streaming digest fold per pass. Ticks counts spine passes;
 /// entities covered are slots times passes.
+///
+/// 2026-10-21 (lead): the spine's slot cap moved 16 -> 32 with the
+/// participant cap, so the canonical run covers 20k entity-steps now. The
+/// shape follows [`MAX_SPINE_SLOTS`] instead of a copied 16, and the
+/// baseline row was re-recorded (a deliberate design change: the fixed
+/// array size moved, per the table's own rule).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpineTransformBody {
     /// Seed for the spine lanes and body drift.
     pub seed: u64,
-    /// Passes over the full 16-slot spine per canonical run.
+    /// Passes over the full 32-slot spine per canonical run.
     pub passes: u32,
 }
 
@@ -538,10 +544,16 @@ impl SpineTransformBody {
     /// Workload name used in baselines and budget errors.
     pub const NAME: &'static str = "spine_transform_body";
 
-    /// Entity-steps per canonical run: every pass steps all 16 slots.
-    pub const ENTITIES: usize = 10_000;
+    /// Entity-steps per canonical run: every pass steps all slots.
+    ///
+    /// The slot count is the ecs constant, so the shape follows the cap.
+    /// The pass count is this workload's canonical 625, spelled as a
+    /// literal because a `u32` pass count cannot multiply a `usize` slot
+    /// count without a numeric cast; the shape test below pins the product
+    /// against the run's own `passes`, so the two cannot drift apart.
+    pub const ENTITIES: usize = MAX_SPINE_SLOTS * 625;
 
-    /// Canonical workload: seed 2040, 625 passes of 16 slots.
+    /// Canonical workload: seed 2040, 625 passes over the full spine.
     pub const fn canonical() -> Self {
         Self {
             seed: 2_040,
@@ -613,14 +625,20 @@ impl SpineTransformBody {
     }
 }
 
-/// Full-tick bar (OPT14): 1k agent-ticks of all-five-column writes with a
+/// Full-tick bar (OPT14): 2k agent-ticks of all-five-column writes with a
 /// streaming digest fold per pass. Ticks counts spine passes; agents covered
 /// are slots times passes.
+///
+/// 2026-10-21 (lead): the spine's slot cap moved 16 -> 32 with the
+/// participant cap, so the canonical run covers 2k agent-ticks now. The
+/// shape follows [`MAX_SPINE_SLOTS`] instead of a copied 16, and the
+/// baseline row was re-recorded (a deliberate design change: the fixed
+/// array size moved, per the table's own rule).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpineFullTick {
     /// Seed for the spine lanes.
     pub seed: u64,
-    /// Passes over the full 16-slot spine per canonical run.
+    /// Passes over the full 32-slot spine per canonical run.
     pub passes: u32,
 }
 
@@ -628,10 +646,16 @@ impl SpineFullTick {
     /// Workload name used in baselines and budget errors.
     pub const NAME: &'static str = "spine_full_tick";
 
-    /// Agent-ticks per canonical run: every pass ticks all 16 slots.
-    pub const AGENTS: usize = 1_024;
+    /// Agent-ticks per canonical run: every pass ticks all slots.
+    ///
+    /// The slot count is the ecs constant, so the shape follows the cap.
+    /// The pass count is this workload's canonical 64, spelled as a literal
+    /// because a `u32` pass count cannot multiply a `usize` slot count
+    /// without a numeric cast; the shape test below pins the product against
+    /// the run's own `passes`, so the two cannot drift apart.
+    pub const AGENTS: usize = MAX_SPINE_SLOTS * 64;
 
-    /// Canonical workload: seed 2040, 64 passes of 16 slots.
+    /// Canonical workload: seed 2040, 64 passes over the full spine.
     pub const fn canonical() -> Self {
         Self {
             seed: 2_040,

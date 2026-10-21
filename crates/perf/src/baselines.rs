@@ -100,18 +100,29 @@ pub const BASELINES: &[Baseline] = &[
         alloc_bytes: 3764,
         alloc_count: 37,
     },
+    // 2026-10-21 (lead): the spine's slot cap moved 16 -> 32 with the
+    // participant cap (owner decision GE12), so the canonical spine runs
+    // cover 20k entity-steps and 2k agent-ticks now instead of 10k and 1k.
+    // That is a deliberate design change (the fixed array size moved), so
+    // the two spine rows are re-recorded: the hashes moved
+    // (`spine_transform_body` 17614562845881895340 -> 9370682329320749301,
+    // `spine_full_tick` 5694617205498698940 -> 1258135662891929159) and the
+    // allocation totals follow the wider reservation. The old rows are the
+    // 16-slot record and live in this comment. No other row moved, and the
+    // legacy golden d57b5c8ae3096614 is untouched (the proof crate's spine
+    // parity tapes seat 2 to 4 fighters).
     Baseline {
         workload: "spine_transform_body",
         ticks: 625,
-        hash: 17614562845881895340,
-        alloc_bytes: 1424,
+        hash: 9370682329320749301,
+        alloc_bytes: 2848,
         alloc_count: 6,
     },
     Baseline {
         workload: "spine_full_tick",
         ticks: 64,
-        hash: 5694617205498698940,
-        alloc_bytes: 1424,
+        hash: 1258135662891929159,
+        alloc_bytes: 2848,
         alloc_count: 6,
     },
     // 2026-10-21 (PF32) re-record: the arena sizes its combat-event scratch
@@ -416,16 +427,25 @@ pub fn verify_seal_against(row: &Baseline, presented: u64, key: &[u8]) -> Result
 /// sample trips `check_time_ms`, so widening a row hides a regression exactly
 /// like the audio rows above. Presentation only: cloth never hashes and the
 /// servo never enters the tick hash, golden `d57b5c8ae3096614` stands.
-/// Spine rows post the OPT14 bars as kill bars (transform-body 0.5 ms over
-/// 10k entity-steps, full tick 2.0 ms over 1k agent-ticks): a seeded
+/// Spine rows post the OPT14 bars as kill bars (transform-body 1.0 ms over
+/// 20k entity-steps, full tick 4.0 ms over 2k agent-ticks): a seeded
 /// over-budget sample trips `check_time_ms` like every row above.
+///
+/// 2026-10-21 (lead): the spine's slot cap moved 16 -> 32 with the
+/// participant cap, so the canonical runs cover 20k entity-steps and 2k
+/// agent-ticks now. The bars keep the same rate per unit of work (the
+/// workload's pass count and its digest-per-pass mix did not move, only the
+/// slots per pass), so they scale with the work: 0.5 -> 1.0 ms and
+/// 2.0 -> 4.0 ms. The release-mode p50 re-measurement is an open item on a
+/// quiet box (the local release build is memory-bound while other lanes
+/// build); the derived bars keep the rate the OPT14 bars were written for.
 pub const TIME_BUDGETS_MS: &[(&str, f64)] = &[
     ("arena_tick", 50.0),
     ("physics_step", 120.0),
     ("ai_decide", 5.0),
     ("destruction_step", 25.0),
-    ("spine_transform_body", 0.5),
-    ("spine_full_tick", 2.0),
+    ("spine_transform_body", 1.0),
+    ("spine_full_tick", 4.0),
     ("audio_reverb", 0.4),
     ("audio_occlusion_per_voice", 0.1),
     ("audio_director", 0.05),

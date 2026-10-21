@@ -8,7 +8,9 @@ name: differential
 #
 # The push leg plays the fast tier on every change of the code. The pull
 # request leg plays it on a pull request. The manual leg plays any tier and
-# names the ref to compare against.
+# names the ref to compare against. The scheduled leg plays the deep tier:
+# the deep binaries are slow to build and slow to play, so they run once a
+# week instead of on every change.
 on:
   workflow_dispatch:
     inputs:
@@ -31,13 +33,19 @@ on:
       - "crates/**"
       - "fixtures/differential/**"
       - ".github/workflows/differential.yml"
+  # The deep tier, once a week. The cron is UTC and the slot is off-peak, so
+  # the weekly run does not fight the push legs for a runner.
+  schedule:
+    - cron: '17 4 * * 1'
 
 permissions:
   contents: read
 
-# A newer push to the same ref supersedes the older run.
+# A newer push to the same ref supersedes the older run. The event name is
+# in the group, so the weekly deep run never cancels a push run that plays
+# the fast tier on the same ref.
 concurrency:
-  group: differential-${{ github.ref }}
+  group: differential-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -54,10 +62,12 @@ jobs:
   differential:
     # The public mirror is the build farm; the private dev repo never runs it.
     # A push with no previous commit (the first one on a branch) has no
-    # reference to compare against, so the job stands down.
+    # reference to compare against, so the job stands down. The scheduled leg
+    # plays the deep tier in the job below, so this one stands down for it.
     if: >-
       github.repository == 'maximkone/engine2040-public' &&
-      github.event.before != '0000000000000000000000000000000000000000'
+      github.event.before != '0000000000000000000000000000000000000000' &&
+      github.event_name != 'schedule'
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -120,6 +130,103 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: differential-receipts
+          path: |
+            reference.log
+            candidate.log
+
+  # The deep tier, on a schedule. The deep binaries (the spine parity column
+  # and the ragdoll fall) need their own features and are slow to build and
+  # to play, so they run once a week instead of on every change. Without this
+  # leg a broken deep tier would keep the mirror green forever.
+  differential-deep:
+    # The public mirror is the build farm; the private dev repo never runs it.
+    if: >-
+      github.repository == 'maximkone/engine2040-public' &&
+      github.event_name == 'schedule'
+    runs-on: windows-latest
+    # The deep build compiles Rapier and plays twenty 600-tick tapes, so this
+    # leg needs more room than the fast one.
+    timeout-minutes: 120
+    env:
+      TIER: deep
+      # The deep tier plays binaries that need their own features.
+      FEATURES: arena,spine,ragdoll
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          ref: ${{ github.sha }}
+      - uses: actions/checkout@v5
+        with:
+          path: reference
+          # A scheduled run has no "before" commit and no input, so the
+          # reference is the scheduled commit itself: two builds of the same
+          # commit must play the same receipt. The leg proves the deep tier
+          # builds, runs and gives the same receipt twice. It does not
+          # compare two commits, because the tool holds no receipt of an
+          # older commit to compare against.
+          ref: ${{ github.sha }}
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: install repository toolchain (rust-toolchain.toml)
+        working-directory: candidate
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Its own cache key: the fast leg and the deep leg build different
+          # features and would throw each other's cache away.
+          shared-key: differential-deep
+          workspaces: |
+            candidate -> target
+            reference -> target
+      - name: build the reference
+        working-directory: reference
+        run: cargo build --locked --release -p engine-proof --features $env:FEATURES --bins
+      - name: build the candidate
+        working-directory: candidate
+        run: cargo build --locked --release -p engine-proof --features $env:FEATURES --bins
+      - name: collect the reference receipt
+        working-directory: candidate
+        run: >-
+          cargo run --locked --release -p engine-proof --bin differential --
+          --scenarios fixtures/differential/scenarios.txt
+          --tier "$env:TIER"
+          --build ../reference/target/release
+          --out ../reference.log
+      - name: collect the candidate receipt
+        working-directory: candidate
+        run: >-
+          cargo run --locked --release -p engine-proof --bin differential --
+          --scenarios fixtures/differential/scenarios.txt
+          --tier "$env:TIER"
+          --build target/release
+          --out ../candidate.log
+      # The tool exits 1 on one divergence, so this step fails the job.
+      - name: compare the two receipts
+        working-directory: candidate
+        run: >-
+          cargo run --locked --release -p engine-proof --bin differential --
+          --reference ../reference.log
+          --candidate ../candidate.log
+      # Two builds of one commit that both crash look alike, so the
+      # comparison alone would call a broken deep tier clean. Every scenario
+      # must have run and exited zero.
+      - name: every deep scenario exited zero
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          $log = "../candidate.log"
+          if (-not (Test-Path $log)) { throw "the candidate receipt is missing" }
+          $steps = @(Select-String -Path $log -Pattern '^STEP ').Count
+          $codes = @(Select-String -Path $log -Pattern '^exit=' | ForEach-Object { $_.Line })
+          if ($steps -eq 0) { throw "the receipt holds no step" }
+          if ($codes.Count -ne $steps) { throw "the receipt holds $steps steps and $($codes.Count) exit lines" }
+          $bad = @($codes | Where-Object { $_ -ne 'exit=0' })
+          if ($bad.Count -gt 0) { throw "a deep scenario did not exit zero: $($bad -join ', ')" }
+      - name: upload the two receipts
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: differential-deep-receipts
           path: |
             reference.log
             candidate.log
