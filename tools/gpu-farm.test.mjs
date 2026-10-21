@@ -1,7 +1,7 @@
 // tools/gpu-farm.test.mjs: the pure parts of the GPU farm driver.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cargoLine, kernelScript, kernelMetadata, receiptVerdict } from "./gpu-farm.mjs";
+import { cargoLine, kernelScript, kernelMetadata, receiptVerdict, slugOf } from "./gpu-farm.mjs";
 
 test("the cargo line comes from the crate and the filter", () => {
   assert.equal(
@@ -29,14 +29,24 @@ test("the kernel script runs one plain line and reports the exit code", () => {
   assert.ok(script.includes("CARGO_INCREMENTAL=0"), "no stale incremental link");
   assert.ok(script.includes("libvulkan1"), "the graphics libraries are installed");
   assert.ok(script.includes("nvidia-smi"), "the GPU is named in the receipt");
+  assert.ok(script.includes("import subprocess"), "Kaggle script kernels take python");
+  assert.ok(script.includes("sys.exit(proc.returncode)"), "the kernel keeps the exit code");
 });
 
 test("the kernel metadata asks for a GPU and stays private", () => {
-  const meta = kernelMetadata({ name: "gs44-meter", line: "cargo test -p engine-render --lib auto_exposure" });
+  const meta = kernelMetadata({ name: "gs44-meter", line: "cargo test -p engine-render --lib auto_exposure", owner: "maximkonovalovx" });
   assert.equal(meta.enable_gpu, true, "the kernel runs on a T4");
   assert.equal(meta.is_private, true, "the engine tree is not public on Kaggle");
-  assert.equal(meta.id, "maximkone/engine2040-gpu-farm-gs44-meter");
-  assert.equal(meta.code_file, "run.sh");
+  assert.equal(meta.id, "maximkonovalovx/engine2040-gpu-farm-gs44-meter", "Kaggle wants owner/slug");
+  assert.equal(meta.title, "engine2040 gpu farm gs44-meter");
+  assert.equal(meta.code_file, "main.py");
+  assert.equal(meta.language, "python", "Kaggle retired the bash script kernel");
+});
+
+test("a slug is lowercase, hyphenated and trimmed", () => {
+  assert.equal(slugOf("engine2040 gpu farm gs43-gpu"), "engine2040-gpu-farm-gs43-gpu");
+  assert.equal(slugOf("  Engine Farm  "), "engine-farm");
+  assert.equal(slugOf("a--b"), "a-b");
 });
 
 test("the receipt verdict reads the exit line of the kernel", () => {

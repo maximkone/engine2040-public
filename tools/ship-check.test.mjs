@@ -5,11 +5,14 @@
 // fresh in every build (the time stamp and the CodeView debug GUID), so those
 // are zeroed before the hash and the PDB is left out of the tree.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { contentHash, isPeImage, main, normalizePeImage } from "./ship-check.mjs";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // A temp tree: { "sub/a.txt": "bytes" }. The fixtures stay out of the repo.
 function tree(files) {
@@ -203,4 +206,13 @@ test("a debug file is named apart and does not move the tree hash", (t) => {
   // The code does.
   writeFileSync(join(root, "a.exe"), "other bytes");
   assert.notEqual(treeLine(before.text), treeLine(run("--print", root).text));
+});
+
+test("the ship workflow is not cancelled by a newer push", () => {
+  const workflow = readFileSync(join(ROOT, ".github", "workflows", "ship-check.yml"), "utf8").replace(/\r\n/g, "\n");
+  // Two cold builds take longer than the gap between two pushes to the
+  // mirror. A job that every newer push cancels would never finish, so the
+  // proof would never land.
+  assert.match(workflow, /cancel-in-progress: false/);
+  assert.doesNotMatch(workflow, /cancel-in-progress: true/);
 });

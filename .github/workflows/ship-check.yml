@@ -20,10 +20,14 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same ref supersedes the older run.
+# A newer push to the same ref does not supersede this job. Two cold fat-LTO
+# builds take longer than the gap between two pushes to the mirror, so a job
+# that a newer push cancels would never finish and the check would never
+# prove anything. The job reads the commit it was started on, so an old run
+# still says something true.
 concurrency:
   group: ship-check-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
