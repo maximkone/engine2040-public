@@ -120,6 +120,10 @@ pub mod loop_text;
 /// Living ludus voices — trainer, blacksmith and crowd: fight memories
 /// with goals over the district yard, scripted fallback offline. Std-only.
 pub mod ludus_npcs;
+/// The road march: the column on the road line, the pace of the step, the
+/// stamina the pack load costs and the time skip to the next set piece.
+/// Std-only, cold path at a chapter boundary.
+pub mod march;
 /// Display mode list plus validated swap keeping last-good: adapter modes
 /// in, one staged swap out at a frame boundary. Std-only, presentation only.
 pub mod modes;

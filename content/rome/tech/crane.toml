@@ -1,0 +1,39 @@
+# The Roman lifting machines: the trispastos and the pentaspastos.
+#
+# A crane is data. `crates/rome/src/crane.rs` reads this file: the pulleys are
+# the purchase of the machine, the gangs are the crew it is rated for, the pull
+# of a gang is what the ropes feel, and the capacity is the most it lifts.
+#
+# The rule the game plays by: the force on the load is the pull times the
+# purchase, and the load rises at the rate of that force over its own weight.
+# A crane short of a gang is out of balance and works at a fraction of its
+# rate; the balance divisor says how much.
+#
+# Every number names its source in `ref`. A section that holds a number and no
+# `ref` is refused by the reader, so no number enters the game unsourced.
+
+[crane.trispastos]
+pulleys = 3
+gangs = 3
+men_per_gang = 8
+pull_kg_per_gang = 400
+capacity_kg = 1800
+drive = "treadwheel"
+ref = "rome.md section 4.4, the crane row: trispastos, three pulleys and three gangs on the ropes (Vitruvius 10.2); the men in a gang, the pull of a gang and the capacity are our design values, the sources give no number"
+
+[crane.pentaspastos]
+pulleys = 5
+gangs = 3
+men_per_gang = 8
+pull_kg_per_gang = 400
+capacity_kg = 3000
+drive = "treadwheel"
+ref = "rome.md section 4.4, the crane row: pentaspastos, five pulleys and three gangs on the ropes (Vitruvius 10.2); the men in a gang, the pull of a gang and the capacity are our design values, the sources give no number"
+
+[treadwheel]
+men = 12
+ref = "rome.md section 4.4, the crane row: the wheel the crew walks in turns the drums (Vitruvius 10.2); the number of men in the wheel is our design value, the sources give no number"
+
+[balance]
+short_gang_divisor = 2
+ref = "rome.md section 4.4, the crane row: the crew count sets the lift speed; a crane short of one gang works at half speed (our rule, the sources give no number)"

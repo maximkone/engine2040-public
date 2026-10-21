@@ -21,9 +21,11 @@
 
 pub mod camp;
 pub mod certainty;
+pub mod crane;
 pub mod geo;
 pub mod groma;
 pub mod line;
+pub mod scutum;
 pub mod table;
 
 use core::fmt;

@@ -1,0 +1,37 @@
+# The scutum: the legionary's shield, built and re-covered.
+#
+# Polybius 6.23 gives the build: two layers of planks glued together, a cover
+# of linen and then of calfskin, and a rim of iron or bronze round the edge.
+# A blow wears the cover first and the boards after it, and the drawn shield
+# shows the damage.
+#
+# The build is Polybius. The measure of the shield, the grid of its face and
+# the wear of a blow are ours: the sources give the shield, not its size and
+# not how long it lasts.
+#
+# Every number names its source in `ref`. A section that holds a number and no
+# `ref` is refused by the reader, so no number enters the game unsourced.
+
+[shield]
+height_mm = 1200
+width_mm = 750
+cells_x = 3
+cells_y = 4
+ref = "rome.md section 4.4: the scutum of the legionary (Polybius 6.23); the measure and the face grid are ours, the sources give the build and no size"
+
+[build]
+plank_layers = 2
+joint = "glued"
+linen_layers = 1
+calfskin_layers = 1
+ref = "Polybius 6.23: the shield is made of two layers of planks glued together, covered with linen, and the outside covered with calfskin"
+
+[rim]
+strips = 1
+material = "iron_or_bronze"
+ref = "Polybius 6.23: the edge of the shield is rimmed with iron or bronze"
+
+[wear]
+cover_hit_wear = 250
+board_hit_wear = 500
+ref = "rome.md section 4.4: the scutum (Polybius 6.23) gives the build; the wear of a blow on the cover and on the boards is ours, the sources give no wear"

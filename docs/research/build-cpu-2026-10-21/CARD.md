@@ -1,7 +1,7 @@
 # Build CPU: fewer cores burned per iteration
 
 Owner ask 2026-10-21: "optimize our cpu usage af and all rust and cargo too".
-Status: **SPIKE ran, idea 1 LANDED** (row OPT45). `[profile.release]` is now
+Status: **SPIKE ran, idea 1 LANDED and the row is ticked** (OPT45). `[profile.release]` is now
 thin LTO + 16 codegen units; the fat-LTO one-unit shape moved to `[profile.ship]`
 (the packaged artifact and the CI release-proof leg). Measured on the GitHub
 runner, same tree overlay, same 22 crates compiled in both runs:
@@ -18,11 +18,18 @@ Local numbers (this PC) stay as the noisy reference only: the fat arena release
 build took **11 m 41 s** with ~9.7 min of it in the one-unit relink, on a box
 that was 100% busy with other sessions' cargo.
 
-Still open: the 300-frame arena run on the **thin** build must keep the 60 fps
-floor (`tools/product-bar.json`). The local thin arena build was still queued
-behind other sessions' cargo when this card was written, so no fps number is
-claimed here yet. The floor was never lowered; it is the same bar the fat build
-had to pass.
+Still open: nothing. The 300-frame arena run on the **thin** build keeps the
+60 fps floor (`tools/product-bar.json`), measured 2026-10-22 on the reference
+GPU (RTX 3050 6GB Laptop, driver `32.0.16.1062`, 1280x720): six runs of
+`--scene arena --fighters 8 --frames 300 --exit`, `interval_ms p50` =
+16.770 / 16.618 / 16.688 ms in a quiet batch (median 16.688 ms = **59.9 fps**)
+and 16.639 / 16.719 / 17.111 ms in a batch on a box at 100 % CPU with 19
+cargo/rustc running (median 16.719 ms = **59.8 fps**). `validation_errors=0`
+and `fight_draws=40` on every leg. The binary is `target/release/arena.exe`
+(20,216,320 bytes), so the `release` profile dir, and `release` is thin LTO
+with 16 units; the fat-LTO `ship` profile has its own `target/ship` dir, so
+the two shapes never shared a target tree. The floor was never lowered; it is
+the same bar the fat build had to pass. OPT45 is ticked.
 
 Ideas 2-8 below are untouched. Idea 4 (dependency debug info off) is the next
 cheap lever and stays its own commit.

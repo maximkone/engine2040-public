@@ -30,6 +30,7 @@ and they carry no authority.
 | ROADMAP.md | Integrated milestones M0–M6 |
 | ARCHITECTURE.md | Acyclic layers, crate integration status, schema contracts |
 | CRATE-MAP.md | One row per crate: package, dir, job, engine deps and users (generated: `node tools/crate-map.mjs`) |
+| ../.opencode/modmap.md | Files per crate, one line each (Grep it, never read it whole); `node tools/modmap.mjs --pack <crate>` prints one crate's packet (map slice, crate row, plan line, board rows) under 6,000 tokens |
 | compaction-baseline.md | Measured size of the tree and of an agent's context: crates, src lines, lock names, dead flags (2026-10-20 snapshot) |
 | FINISH-RICH.md | Developer alpha and v1 acceptance with gate status |
 | FOCUS.md | Rome at war: Now order + keep/cut lists |

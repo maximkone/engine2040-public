@@ -12,6 +12,7 @@ Read `docs/book/for-ai.md` first. It is short, and a test checks that every path
 - [docs/INDEX.md](docs/INDEX.md): the doc map
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): crate layers and who may depend on whom
 - [docs/CRATE-MAP.md](docs/CRATE-MAP.md): every crate with its job
+- `node tools/modmap.mjs --pack <crate>`: one crate's packet (map slice, crate row, plan line, board rows), under 6,000 tokens
 
 ## Prove it works
 

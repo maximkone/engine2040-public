@@ -1,0 +1,63 @@
+# The march: the column on the road, the pace of the step, the pack on the
+# man's back, the set pieces the road holds and the objective line the mode
+# shows. Lengths are Roman feet or Roman miles as the sources give them; the
+# loader turns them into millimetres and ticks. Every entry that holds a
+# number names its source in `ref` (docs/plan/rome.md section 5), and an entry
+# without one is refused.
+#
+# The sourced numbers are rome.md section 5: the regular step (20 Roman miles
+# in five summer hours), the full step (24 Roman miles in the same five hours),
+# the 60 lb pack load, the 3 ft frontage and the 6 ft rank gap. A Roman mile is
+# 1000 paces of 5 ft, so 5000 ft of 296 mm gives the 1.48 km the plan names.
+#
+# The stamina rates are ours: the plan gives no source for them, so their `ref`
+# says so. Every pound on the man's back costs the leg a permille per
+# kilometre, so the 60 lb of Vegetius 1.19 cost 60 permille of a man's 1000
+# per kilometre, and the full step costs more than the regular one.
+#
+# The set pieces and the objective line are ours too: the plan gives no
+# source for them, so their `ref` says so.
+
+[units]
+mm_per_ft = 296
+mm_per_mile = 1480000
+ref = "rome.md section 5: 1 Roman foot about 0.296 m; 1 Roman mile about 1.48 km"
+
+[pace.regular]
+miles = 20
+hours = 5
+ref = "rome.md section 5, Vegetius 1.9 (regular step)"
+
+[pace.full]
+miles = 24
+hours = 5
+ref = "rome.md section 5, Vegetius 1.9 (full step)"
+
+[pack]
+load_lb = 60
+ref = "rome.md section 5, Vegetius 1.19 (pack load)"
+
+[column]
+files = 4
+frontage_ft = 3
+rank_gap_ft = 6
+ref = "rome.md section 5, Vegetius 3.14 (frontage), 3.14-15 (rank gap)"
+
+[stamina]
+max_permille = 1000
+drain_per_lb_per_km = 1
+full_step_extra_per_km = 10
+ref = "game tuning (ours): the pack load costs the leg stamina per kilometre; the full step costs more than the regular step"
+
+[objective]
+line = "March to the camp"
+
+[set_piece.camp]
+miles = 8
+start_hour = 4
+ref = "game tuning (ours): the camp site on the chapter II march road"
+
+[set_piece.ambush]
+miles = 12
+start_hour = 7
+ref = "game tuning (ours): the ambush ground on the chapter II march road"
