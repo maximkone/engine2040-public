@@ -21,6 +21,7 @@
 
 pub mod camp;
 pub mod certainty;
+pub mod geo;
 pub mod groma;
 pub mod line;
 pub mod table;

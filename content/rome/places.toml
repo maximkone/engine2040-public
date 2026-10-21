@@ -1,0 +1,444 @@
+# The settlements of the Rome chapter maps: a gazetteer slice of the Roman Empire
+# under Hadrian, cut to the six chapter areas of docs/plan/rome.md section 3.
+#
+# Source: Diasito/urbesetorbis, `public/downloads/301023_AD130.csv` (7,891 settlements
+# of the Roman Empire under Hadrian), BSD-2-Clause. Every row keeps the ids of the
+# databases it can be checked against: Pleiades, the Barrington Atlas square, DARE
+# and Wikidata. The licence and the sha256 of the file are in the provenance section
+# below and in content/rome/PROVENANCE.md.
+#
+# The slice: every gazetteer row inside the box of a chapter area. Five areas keep
+# every row of their box; the Rome box holds 29 rows in the gazetteer and the three
+# of rank 5 or better are kept here, so the table stays small. The plan's second
+# box for chapter IV, the Tapae pass, holds no row of the gazetteer and is left out.
+#
+# Units: a coordinate is micro-degrees (a millionth of a degree) written as signed
+# integer text, because the table's numbers are unsigned and Hadrian's Wall lies
+# west of Greenwich. `m_per_deg_lat` and the `m_per_deg_lon` of an area turn a
+# coordinate into millimetres, so every distance the loader reads is an integer
+# number of millimetres.
+#
+# Every entry names its source in `ref`. The loader refuses an entry with no `ref`,
+# a place that names an area the table does not hold, and a place that lies
+# outside the box of its area.
+
+[units]
+m_per_deg_lat = 111132
+ref = "WGS84: the length of one degree of latitude at 45 degrees north is 111132 m"
+
+[provenance.urbesetorbis]
+id = "urbesetorbis"
+file = "public/downloads/301023_AD130.csv"
+url = "https://github.com/Diasito/urbesetorbis/blob/main/public/downloads/301023_AD130.csv"
+licence = "BSD-2-Clause"
+sha256 = "b9c98bf71389b3fee4e17280cb70cb319a009342e7c6915afb2dc9c0f6b41315"
+
+[area.bonna]
+name = "Bonna"
+chapter = "I"
+lat_min = "51450000"
+lat_max = "51800000"
+lon_min = "6250000"
+lon_max = "6700000"
+m_per_deg_lon = 69108
+ref = "docs/plan/rome.md section 3, the chapter I box; the longitude scale is metres per degree at the box centre"
+
+[area.nida]
+name = "Nida (Taunus)"
+chapter = "II"
+lat_min = "49950000"
+lat_max = "50400000"
+lon_min = "8400000"
+lon_max = "8850000"
+m_per_deg_lon = 71294
+ref = "docs/plan/rome.md section 3, the chapter II box; the longitude scale is metres per degree at the box centre"
+
+[area.mogontiacum]
+name = "Mogontiacum"
+chapter = "III"
+lat_min = "49800000"
+lat_max = "50200000"
+lon_min = "8070000"
+lon_max = "8480000"
+m_per_deg_lon = 71555
+ref = "docs/plan/rome.md section 3, the chapter III box; the longitude scale is metres per degree at the box centre"
+
+[area.danube]
+name = "Danube (Drobeta)"
+chapter = "IV"
+lat_min = "44400000"
+lat_max = "44850000"
+lon_min = "22150000"
+lon_max = "22900000"
+m_per_deg_lon = 79229
+ref = "docs/plan/rome.md section 3, the chapter IV box; the longitude scale is metres per degree at the box centre"
+
+[area.sarmizegetusa]
+name = "Sarmizegetusa"
+chapter = "V"
+lat_min = "45300000"
+lat_max = "45750000"
+lon_min = "22550000"
+lon_max = "23400000"
+m_per_deg_lon = 77991
+ref = "docs/plan/rome.md section 3, the chapter V box; the longitude scale is metres per degree at the box centre"
+
+[area.roma]
+name = "Roma"
+chapter = "VI"
+lat_min = "41700000"
+lat_max = "42050000"
+lon_min = "12250000"
+lon_max = "12700000"
+m_per_deg_lon = 82889
+ref = "docs/plan/rome.md section 3, the chapter VI box; the longitude scale is metres per degree at the box centre"
+
+[place.ulpia_traiana]
+name = "Ulpia Traiana"
+area = "bonna"
+rank = 6
+province = "Germania Inferior"
+founded = "14"
+lat = "51667934"
+lon = "6448177"
+pleiades = "108896"
+barrington = "11 G1"
+dare = "558"
+wikidata = "464588"
+ref = "urbesetorbis:301023_AD130.csv row 991, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.nida]
+name = "Nida"
+area = "nida"
+rank = 8
+province = "Germania Superior"
+founded = "-30"
+lat = "50154109"
+lon = "8637743"
+pleiades = "109205"
+barrington = "11 I2"
+dare = "2000"
+wikidata = "685706"
+ref = "urbesetorbis:301023_AD130.csv row 3831, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.frankfurt]
+name = "Frankfurt"
+area = "nida"
+rank = 9
+province = "Germania Superior"
+founded = "-30"
+lat = "50111491"
+lon = "8680469"
+pleiades = "108992"
+barrington = "11 I2"
+dare = "361"
+wikidata = "1796434"
+ref = "urbesetorbis:301023_AD130.csv row 6050, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.mogontiacum]
+name = "Mogontiacum"
+area = "mogontiacum"
+rank = 4
+province = "Germania Superior"
+founded = "1"
+lat = "49998912"
+lon = "8273869"
+pleiades = "109169"
+barrington = "11 I2"
+dare = "3"
+wikidata = "1720"
+ref = "urbesetorbis:301023_AD130.csv row 40, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.aquae_mattiacorum]
+name = "Aquae Mattiacorum"
+area = "mogontiacum"
+rank = 7
+province = "Germania Superior"
+founded = "14"
+lat = "50084206"
+lon = "8238584"
+pleiades = "108750"
+barrington = "11 I2"
+dare = "1981"
+wikidata = "622981"
+ref = "urbesetorbis:301023_AD130.csv row 1076, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.vicus_augustanus]
+name = "Vicus Augustanus"
+area = "mogontiacum"
+rank = 8
+province = "Germania Superior"
+founded = "-30"
+lat = "49924327"
+lon = "8409495"
+pleiades = "109423"
+barrington = "11 I3"
+dare = "537"
+wikidata = "21556458"
+ref = "urbesetorbis:301023_AD130.csv row 5175, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.trebur]
+name = "Trebur"
+area = "mogontiacum"
+rank = 9
+province = "Germania Superior"
+founded = "-30"
+lat = "49897132"
+lon = "8389670"
+pleiades = "109388"
+barrington = "11 I3"
+dare = "20724"
+wikidata = "1474168"
+ref = "urbesetorbis:301023_AD130.csv row 7676, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.dierna]
+name = "Dierna"
+area = "danube"
+rank = 6
+province = "Dacia"
+founded = "107"
+lat = "44731710"
+lon = "22401908"
+pleiades = "207078"
+barrington = "21 E5"
+dare = "21387"
+wikidata = "16898405"
+ref = "urbesetorbis:301023_AD130.csv row 491, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.drobeta]
+name = "Drobeta"
+area = "danube"
+rank = 6
+province = "Moesia Superior"
+founded = "101"
+lat = "44629271"
+lon = "22657172"
+pleiades = "207100"
+barrington = "21 E5"
+dare = "21375"
+wikidata = "4168259"
+ref = "urbesetorbis:301023_AD130.csv row 503, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.izvorul_anestilor]
+name = "Izvorul Aneştilor"
+area = "danube"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "44555266"
+lon = "22855274"
+pleiades = "207195"
+barrington = "21 E5"
+dare = "33475"
+wikidata = ""
+ref = "urbesetorbis:301023_AD130.csv row 6341, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.jupalnic]
+name = "Jupalnic"
+area = "danube"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "44708738"
+lon = "22396529"
+pleiades = "207202"
+barrington = "21 E5"
+dare = "33477"
+wikidata = "12731501"
+ref = "urbesetorbis:301023_AD130.csv row 6360, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.malovat]
+name = "Malovaţ"
+area = "danube"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "44699986"
+lon = "22733430"
+pleiades = "207262"
+barrington = "21 E5"
+dare = "33496"
+wikidata = "108201327"
+ref = "urbesetorbis:301023_AD130.csv row 6708, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.tiganasi]
+name = "Ţigănaşi"
+area = "danube"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "44433627"
+lon = "22499581"
+pleiades = "207497"
+barrington = "21 E5"
+dare = "33545"
+wikidata = "12109980"
+ref = "urbesetorbis:301023_AD130.csv row 7633, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.ulpia_traiana_sarmizegetusa]
+name = "Ulpia Traiana Sarmizegetusa"
+area = "sarmizegetusa"
+rank = 4
+province = "Dacia"
+founded = "108"
+lat = "45514744"
+lon = "22785266"
+pleiades = "207527"
+barrington = "21 E4"
+dare = "19910"
+wikidata = "2671791"
+ref = "urbesetorbis:301023_AD130.csv row 56, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.sarmizegetusa]
+name = "Sarmizegetusa"
+area = "sarmizegetusa"
+rank = 8
+province = "Dacia"
+founded = "-330"
+lat = "45669615"
+lon = "23323961"
+pleiades = "207425"
+barrington = "21 F4"
+dare = "19909"
+wikidata = "739802"
+ref = "urbesetorbis:301023_AD130.csv row 4511, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.bucova]
+name = "Bucova"
+area = "sarmizegetusa"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "45507574"
+lon = "22639720"
+pleiades = "206993"
+barrington = "21 E4"
+dare = "32632"
+wikidata = "37581438"
+ref = "urbesetorbis:301023_AD130.csv row 5627, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.hateg]
+name = "Haţeg"
+area = "sarmizegetusa"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "45607005"
+lon = "22950196"
+pleiades = "207166"
+barrington = "21 E4"
+dare = "33470"
+wikidata = "837167"
+ref = "urbesetorbis:301023_AD130.csv row 6194, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.pui]
+name = "Pui"
+area = "sarmizegetusa"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "45518158"
+lon = "23092043"
+pleiades = "207367"
+barrington = "21 F4"
+dare = "33513"
+wikidata = "1022837"
+ref = "urbesetorbis:301023_AD130.csv row 7113, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.strei_sacel]
+name = "Strei-Săcel"
+area = "sarmizegetusa"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "45744928"
+lon = "23023823"
+pleiades = "207469"
+barrington = "21 F4"
+dare = "33536"
+wikidata = "824620"
+ref = "urbesetorbis:301023_AD130.csv row 7455, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.sub_cununi]
+name = "Sub Cununi"
+area = "sarmizegetusa"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "45649541"
+lon = "23294846"
+pleiades = "207472"
+barrington = "21 F4"
+dare = "33538"
+wikidata = "42921630"
+ref = "urbesetorbis:301023_AD130.csv row 7463, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.sintamaria_orlea]
+name = "Sîntămăria-Orlea"
+area = "sarmizegetusa"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "45588811"
+lon = "22970493"
+pleiades = "207445"
+barrington = "21 E4"
+dare = "33529"
+wikidata = "1022831"
+ref = "urbesetorbis:301023_AD130.csv row 7364, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.teliucu_inferior]
+name = "Teliucu Inferior"
+area = "sarmizegetusa"
+rank = 9
+province = "Dacia"
+founded = "-30"
+lat = "45716618"
+lon = "22883308"
+pleiades = "207492"
+barrington = "21 E4"
+dare = "33543"
+wikidata = "26272218"
+ref = "urbesetorbis:301023_AD130.csv row 7517, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.roma]
+name = "Roma"
+area = "roma"
+rank = 1
+province = "Italia"
+founded = "-753"
+lat = "41891775"
+lon = "12486137"
+pleiades = "423025"
+barrington = "43 B2"
+dare = "1438"
+wikidata = "1747689"
+ref = "urbesetorbis:301023_AD130.csv row 5, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.ostia]
+name = "Ostia"
+area = "roma"
+rank = 5
+province = "Italia"
+founded = "-350"
+lat = "41754855"
+lon = "12287656"
+pleiades = "422995"
+barrington = "43 B2"
+dare = "15960"
+wikidata = "1012797"
+ref = "urbesetorbis:301023_AD130.csv row 155, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
+
+[place.portus]
+name = "Portus"
+area = "roma"
+rank = 5
+province = "Italia"
+founded = "41"
+lat = "41778403"
+lon = "12258472"
+pleiades = "423012"
+barrington = "43 B2"
+dare = "16710"
+wikidata = "2037271"
+ref = "urbesetorbis:301023_AD130.csv row 175, the gazetteer of the settlements under Hadrian (BSD-2-Clause)"
