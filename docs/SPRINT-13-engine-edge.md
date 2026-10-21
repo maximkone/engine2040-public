@@ -247,3 +247,19 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   nextest leg on a box with `cargo nextest` installed (the PC has none; gh-check
   refuses `cargo nextest`, and `.github/workflows/check.yml` takes only cargo
   check|test|clippy and installs no nextest), so the row is NOT ticked.
+  Progress 2026-10-22: the two halves are now joined, and the row is still NOT
+  ticked because the shell around them is missing. A **real** cargo-nextest
+  0.9.149 run with this repository's own `.config/nextest.toml`, in a probe
+  crate, wrote one receipt at `target/nextest/proof/target/nextest-junit/proof.xml`
+  (6698 bytes) and printed `Nextest run ID 92ad6c8f-3a83-4e77-aabc-147e3aee9fd2`;
+  the receipt's own `uuid` is that id. The lane's own `nextestReceiptPath` was
+  then run against that real run's output and named that file
+  (`junit target/nextest/proof/target/nextest-junit/proof.xml`), the file is on
+  disk, and the receipt's uuid equals the run id. A stale run id, output with
+  no run id, and a plain `cargo test` leg each name `no receipt`. What is still
+  missing is the leg line itself: a nextest leg inside this repository needs
+  `cargo-nextest` in PATH (this PC has none; OPT6 is parked for the same
+  reason) and a workspace that compiles (on 2026-10-22 another seat's staged
+  `crates/render/src/lib.rs` declared `pub mod torch_light;` twice, so the
+  shared tree did not compile). The Accept therefore stays open, and this
+  Progress line is the evidence for the row, not a tick.
