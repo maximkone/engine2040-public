@@ -79,6 +79,8 @@ pub mod pack;
 /// character, poses identical under every chunking. Presentation and bake only.
 pub mod par;
 pub mod pose;
+#[cfg(test)]
+mod pose_c1_test;
 pub mod readable;
 pub mod space;
 /// Blend-space cues: each sample's event track speaks by integer weight

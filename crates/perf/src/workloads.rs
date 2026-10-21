@@ -113,12 +113,12 @@ impl ArenaTick {
     /// Workload name used in baselines and budget errors.
     pub const NAME: &'static str = "arena_tick";
 
-    /// Canonical workload: `MAX_PARTICIPANTS` (16, the engine maximum) with an
-    /// empty tape, so every slot is AI-filled and the run covers arena plus
-    /// brains plus combat plus the destruction prop. Seed 1 is chosen
-    /// because its spawn geometry produces organic combat (40 combat events
-    /// and 17 crate breaks over 600 ticks), covering the hit and break
-    /// paths, not just movement.
+    /// Canonical workload: `MAX_PARTICIPANTS` (the engine maximum, 32 since
+    /// the owner decision of 2026-10-20) with an empty tape, so every slot is
+    /// AI-filled and the run covers arena plus brains plus combat plus the
+    /// destruction prop. Seed 1 is chosen because its spawn geometry produces
+    /// organic combat (hits and crate breaks over 600 ticks), covering the hit
+    /// and break paths, not just movement.
     pub const fn canonical() -> Self {
         Self {
             seed: 1,
@@ -827,10 +827,12 @@ impl RenderCull {
     }
 }
 
-/// Fighter counts in the scaled arena matrix: 4/8/16-fighter canonical
-/// runs beside the 16-slot [`ArenaTick`] default. Counts are fixed so every
-/// row has a recorded baseline; unlisted counts have no row and no report.
-pub const ARENA_MATRIX_COUNTS: [u8; 3] = [4, 8, 16];
+/// Fighter counts in the scaled arena matrix: 4/8/16-fighter canonical runs
+/// plus the 32-fighter cap run that the [`ArenaTick`] default now is. Counts
+/// are fixed so every row has a recorded baseline; unlisted counts have no row
+/// and no report. The 16 row stays a legitimate bar beside the cap row: it
+/// is a size, never a claim about the cap.
+pub const ARENA_MATRIX_COUNTS: [u8; 4] = [4, 8, 16, MAX_PARTICIPANTS];
 /// Scaled arena tick: the [`ArenaTick`] canonical shape with an explicit
 /// fighter count, so per-count hashes and allocation budgets are recorded
 /// separately. Consumer: the per-machine baseline table plus the perf
@@ -855,19 +857,23 @@ impl ScaledArenaTick {
     pub const NAME_8: &'static str = "arena_tick_8";
     /// Workload name for the 16-fighter canonical run.
     pub const NAME_16: &'static str = "arena_tick_16";
+    /// Workload name for the cap-sized (32-fighter) canonical run.
+    pub const NAME_32: &'static str = "arena_tick_32";
     /// Workload name for the 4-fighter run on the `sim` track.
     pub const NAME_4_SIM: &'static str = "arena_tick_4_sim";
     /// Workload name for the 8-fighter run on the `sim` track.
     pub const NAME_8_SIM: &'static str = "arena_tick_8_sim";
     /// Workload name for the 16-fighter run on the `sim` track.
     pub const NAME_16_SIM: &'static str = "arena_tick_16_sim";
+    /// Workload name for the cap-sized (32-fighter) run on the `sim` track.
+    pub const NAME_32_SIM: &'static str = "arena_tick_32_sim";
 
     /// Canonical scaled run: seed 1, 600 ticks, 20 m half-extent, the same
     /// shape as [`ArenaTick::canonical`]. `None` unless `fighters` is one of
     /// [`ARENA_MATRIX_COUNTS`], so every instance has a baseline row.
     pub const fn canonical_for(fighters: u8) -> Option<Self> {
         match fighters {
-            4 | 8 | 16 => Some(Self {
+            4 | 8 | 16 | MAX_PARTICIPANTS => Some(Self {
                 seed: 1,
                 ticks: 600,
                 half_extent_m: 20.0,
@@ -882,12 +888,14 @@ impl ScaledArenaTick {
         Self { seed, ..self }
     }
 
-    /// Workload name for this count, matching `baselines`.
+    /// Workload name for this count, matching `baselines`. Only the listed
+    /// counts reach here, so the fall-through is the cap row.
     pub const fn workload_name(&self) -> &'static str {
         match self.fighters {
             4 => Self::NAME_4,
             8 => Self::NAME_8,
-            _ => Self::NAME_16,
+            16 => Self::NAME_16,
+            _ => Self::NAME_32,
         }
     }
 
@@ -897,10 +905,12 @@ impl ScaledArenaTick {
         match (self.fighters, engine_arena::SIM_TRACK) {
             (4, false) => Self::NAME_4,
             (8, false) => Self::NAME_8,
-            (_, false) => Self::NAME_16,
+            (16, false) => Self::NAME_16,
+            (_, false) => Self::NAME_32,
             (4, true) => Self::NAME_4_SIM,
             (8, true) => Self::NAME_8_SIM,
-            (_, true) => Self::NAME_16_SIM,
+            (16, true) => Self::NAME_16_SIM,
+            (_, true) => Self::NAME_32_SIM,
         }
     }
 
@@ -910,7 +920,7 @@ impl ScaledArenaTick {
     }
 
     /// Canonical hash: the shared arena fold over this count's checkpoints.
-    /// The 16-fighter run matches [`ArenaTick::canonical`] exactly (same
+    /// The cap-sized run matches [`ArenaTick::canonical`] exactly (same
     /// config, same fold); smaller counts diverge by design.
     pub fn run_hash(&self) -> u64 {
         arena_run_hash(&self.config())
@@ -1136,7 +1146,7 @@ mod matrix_tests {
 
     #[test]
     fn matrix_counts_are_listed_once() {
-        assert_eq!(ARENA_MATRIX_COUNTS, [4, 8, 16]);
+        assert_eq!(ARENA_MATRIX_COUNTS, [4, 8, 16, MAX_PARTICIPANTS]);
         for count in ARENA_MATRIX_COUNTS {
             let workload = ScaledArenaTick::canonical_for(count).expect("matrix count listed");
             assert_eq!(workload.fighters, count);
@@ -1155,8 +1165,11 @@ mod matrix_tests {
     }
 
     #[test]
-    fn scaled_sixteen_matches_the_sixteen_slot_default() {
-        let scaled = ScaledArenaTick::canonical_for(16).expect("16 listed");
+    fn scaled_cap_run_matches_the_cap_slot_default() {
+        // The canonical default runs at the participant cap, so the cap-sized
+        // scaled row is the same shape: same config, same fold, same hash and
+        // the same allocation totals. The 16 row is its own bar beside it.
+        let scaled = ScaledArenaTick::canonical_for(MAX_PARTICIPANTS).expect("cap is listed");
         assert_eq!(scaled.run_hash(), ArenaTick::canonical().run_hash());
         assert_eq!(scaled.run_report(), {
             let default = ArenaTick::canonical().run_report();
@@ -1315,7 +1328,12 @@ mod spine_tests {
 
     #[test]
     fn canonical_shapes_cover_the_opt14_bars() {
-        assert_eq!(MAX_SPINE_SLOTS, 16);
+        // The spine cap is the ecs lane's `MAX_SPINE_SLOTS`; this crate owns
+        // no copy of it. The 16 here was the copied input cap and is stale
+        // (the owner decision of 2026-10-20 makes the cap 32), so the bar
+        // pins the relation instead: the spine never holds more slots than a
+        // match seats, and the workload geometry follows the ecs constant.
+        assert!(MAX_SPINE_SLOTS <= usize::from(MAX_PARTICIPANTS));
         let body = SpineTransformBody::canonical();
         assert_eq!(body.passes, 625);
         assert_eq!(

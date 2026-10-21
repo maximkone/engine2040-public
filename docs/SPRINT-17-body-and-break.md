@@ -28,6 +28,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   interest managed, clients settle limbs within 5 cm in 10 ticks. Tier A. Size
   M. Owns hunks beside `crates/net/src/server.rs`. Accept: 64-client soak with 8
   cuts per second for 1 h, zero desync (ON4 pattern). needs: BX4, ON4.
+  rot: crates/net/src/server.rs was deleted outright in 3151bd46 (no rename, its symbols appear nowhere else); the net crate's server now lives in crates/net/src/dedicated.rs (HeadlessServer) with the wire types in crates/net/src/session.rs, so re-home Owns to those two.
 - [ ] BX11 audio: material and tissue sound — blade on bone, flesh, wood,
   stone and armor; stump, limb landing, structure groan before collapse. Tier
   A. Size S. Owns hunks beside `crates/audio`. Accept: event-to-sound table

@@ -1,6 +1,7 @@
 //! tests: caps, recycling, determinism, refusals, sleeping, interpolation and the budget.
 
 mod blast;
+mod body;
 mod contacts;
 mod hinge;
 mod hit;
@@ -10,6 +11,7 @@ mod materials;
 mod receipt;
 mod sever;
 mod tether;
+mod verbs;
 
 use super::*;
 use engine_anim::contract::{AnimError, Joint, LocalPose, Skeleton};

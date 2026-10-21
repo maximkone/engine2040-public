@@ -15,6 +15,9 @@ engine-anim.workspace = true
 engine-combat.workspace = true
 engine-ai.workspace = true
 engine-destruction.workspace = true
+# UW12/UW40: the layered navmesh the arena floor is baked into
+# (`arena::nav_layers`), one walkable layer per column.
+engine-nav.workspace = true
 # Std-only by default: EG20 integer fighter collision reuses `controller2`.
 # The Rapier settling track lives behind `sim` (AR2-fix): `sim` turns on
 # `engine-physics/rapier` for gravity settling plus wall collision.

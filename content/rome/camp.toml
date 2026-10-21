@@ -1,0 +1,33 @@
+# Roman camp works: the ditch the army digs, the turf rampart behind it and the two
+# streets every camp keeps clear. Lengths are Roman feet as the sources give them; the
+# loader turns them into millimetres. Every entry that holds a number names its source
+# in `ref` (docs/plan/rome.md section 5), and an entry without one is refused.
+
+[units]
+mm_per_ft = 296
+ref = "rome.md section 5: 1 Roman foot about 0.296 m"
+
+[ditch.one_night]
+width_ft = 5
+depth_ft = 3
+ref = "rome.md section 5, Vegetius 3.8; Hyginus 49"
+
+[ditch.light]
+width_ft = 9
+depth_ft = 7
+ref = "rome.md section 5, Vegetius 1.24"
+
+[ditch.serious]
+width_ft = 12
+depth_ft = 9
+ref = "rome.md section 5, Vegetius 1.24"
+
+[rampart]
+width_ft = 8
+height_ft = 6
+ref = "rome.md section 5, Hyginus 50; Vegetius 3.8"
+
+[streets]
+via_principalis_ft = 60
+via_quintana_ft = 40
+ref = "rome.md section 5, Hyginus 14, 17"

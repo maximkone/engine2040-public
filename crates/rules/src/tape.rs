@@ -151,6 +151,50 @@ pub fn checkpoint_count(ticks: u32, every: u32) -> usize {
 }
 
 impl RulesTape {
+    /// Field rules every tape must pass, decoded or built in memory: the
+    /// counts inside their ranges, the script ticks rising inside the match,
+    /// the inputs unique and sorted, and one checkpoint per cadence
+    /// boundary. A tape that fails this is refused, never replayed.
+    pub fn validate(&self) -> Result<(), TapeError> {
+        if self.fighters == 0 || usize::from(self.fighters) > MAX_FIGHTERS {
+            return Err(TapeError::Invalid("fighter count"));
+        }
+        if self.ticks == 0 || self.ticks > MAX_TAPE_TICKS || self.checkpoint_every == 0 {
+            return Err(TapeError::Invalid("ticks or checkpoint cadence"));
+        }
+        if self.scripts.len() > MAX_TAPE_SCRIPTS {
+            return Err(TapeError::Invalid("too many scripts"));
+        }
+        if self.scripts.windows(2).any(|pair| pair[0].tick >= pair[1].tick)
+            || self.scripts.iter().any(|s| s.tick >= self.ticks)
+        {
+            return Err(TapeError::Invalid(
+                "script ticks must be increasing and inside the match",
+            ));
+        }
+        if self.inputs.len() > MAX_TAPE_INPUTS {
+            return Err(TapeError::Invalid("too many inputs"));
+        }
+        for input in &self.inputs {
+            if !input_in_range(input, self.ticks, self.fighters) {
+                return Err(TapeError::Invalid("input out of range"));
+            }
+        }
+        if self
+            .inputs
+            .windows(2)
+            .any(|p| (p[0].tick, p[0].fighter) >= (p[1].tick, p[1].fighter))
+        {
+            return Err(TapeError::Invalid(
+                "inputs must be unique and sorted by (tick, fighter)",
+            ));
+        }
+        if self.checkpoints.len() != checkpoint_count(self.ticks, self.checkpoint_every) {
+            return Err(TapeError::Invalid("checkpoint count"));
+        }
+        Ok(())
+    }
+
     /// The header bytes: everything except inputs and checkpoints. What the game's own tape
     /// header embeds (`header_digest`) to bind a match to its rules.
     pub fn header_bytes(&self) -> Vec<u8> {
@@ -202,6 +246,11 @@ impl RulesTape {
     }
 
     /// Decode and validate a tape without trusting any size, count or trailing data.
+    ///
+    /// The field rules live in [`RulesTape::validate`], the one owner for
+    /// decoded and hand-built tapes alike. This reader keeps only the
+    /// guards that must run before any allocation: the counts inside their
+    /// caps, and the cadence, because the checkpoint count divides by it.
     pub fn decode(bytes: &[u8]) -> Result<Self, TapeError> {
         let mut r = Reader { bytes, at: 0 };
         if r.take(4)? != TAPE_MAGIC {
@@ -217,14 +266,11 @@ impl RulesTape {
         let ticks = r.u32()?;
         let checkpoint_every = r.u32()?;
         let script_count = usize::from(r.u16()?);
-        if usize::from(fighters) == 0 || usize::from(fighters) > MAX_FIGHTERS {
-            return Err(TapeError::Invalid("fighter count"));
+        if script_count > MAX_TAPE_SCRIPTS {
+            return Err(TapeError::Invalid("too many scripts"));
         }
         if ticks == 0 || ticks > MAX_TAPE_TICKS || checkpoint_every == 0 {
             return Err(TapeError::Invalid("ticks or checkpoint cadence"));
-        }
-        if script_count > MAX_TAPE_SCRIPTS {
-            return Err(TapeError::Invalid("too many scripts"));
         }
         let mut scripts = Vec::with_capacity(script_count);
         for _ in 0..script_count {
@@ -233,45 +279,20 @@ impl RulesTape {
                 hash: r.u64()?,
             });
         }
-        if scripts.windows(2).any(|pair| pair[0].tick >= pair[1].tick)
-            || scripts.iter().any(|s| s.tick >= ticks)
-        {
-            return Err(TapeError::Invalid(
-                "script ticks must be increasing and inside the match",
-            ));
-        }
         let input_count = usize::try_from(r.u32()?).unwrap_or(usize::MAX);
         if input_count > MAX_TAPE_INPUTS {
             return Err(TapeError::Invalid("too many inputs"));
         }
         let mut inputs = Vec::with_capacity(input_count.min(r.remaining() / ScriptInput::BYTES));
         for _ in 0..input_count {
-            let input = ScriptInput {
+            inputs.push(ScriptInput {
                 tick: r.u32()?,
                 fighter: r.u8()?,
                 mx: i8::from_le_bytes([r.u8()?]),
                 mz: i8::from_le_bytes([r.u8()?]),
                 facing: i16::from_le_bytes([r.u8()?, r.u8()?]),
                 buttons: r.u8()?,
-            };
-            let legal = input.tick < ticks
-                && input.fighter < fighters
-                && (-100..=100).contains(&input.mx)
-                && (-100..=100).contains(&input.mz)
-                && (-18_000..=18_000).contains(&input.facing)
-                && input.buttons & !(BTN_ATTACK | BTN_BLOCK | BTN_DODGE) == 0;
-            if !legal {
-                return Err(TapeError::Invalid("input out of range"));
-            }
-            inputs.push(input);
-        }
-        if inputs
-            .windows(2)
-            .any(|p| (p[0].tick, p[0].fighter) >= (p[1].tick, p[1].fighter))
-        {
-            return Err(TapeError::Invalid(
-                "inputs must be unique and sorted by (tick, fighter)",
-            ));
+            });
         }
         let checkpoint_total = usize::try_from(r.u32()?).unwrap_or(usize::MAX);
         if checkpoint_total != checkpoint_count(ticks, checkpoint_every) {
@@ -284,7 +305,7 @@ impl RulesTape {
         if r.remaining() != 0 {
             return Err(TapeError::Trailing);
         }
-        Ok(Self {
+        let tape = Self {
             abi,
             seed,
             fighters,
@@ -293,8 +314,20 @@ impl RulesTape {
             scripts,
             inputs,
             checkpoints,
-        })
+        };
+        tape.validate()?;
+        Ok(tape)
     }
+}
+
+/// One input inside the ranges a tape may hold.
+fn input_in_range(input: &ScriptInput, ticks: u32, fighters: u8) -> bool {
+    input.tick < ticks
+        && input.fighter < fighters
+        && (-100..=100).contains(&input.mx)
+        && (-100..=100).contains(&input.mz)
+        && (-18_000..=18_000).contains(&input.facing)
+        && input.buttons & !(BTN_ATTACK | BTN_BLOCK | BTN_DODGE) == 0
 }
 
 struct Reader<'a> {
@@ -363,6 +396,11 @@ pub struct RecordSpec<'a> {
 /// Run the reference arena over `inputs` with scripts installed at the given ticks, and write
 /// down the tape. Every script goes through `Rules::set` (smoke run included) and into
 /// `library`.
+///
+/// The spec must describe a match the decoder accepts: a tape this writes has
+/// to decode back into the same match, so a spec that would break that is
+/// refused here with [`RulesError::BadSpec`] instead of writing a tape nobody
+/// can read.
 pub fn record(
     spec: &RecordSpec<'_>,
     inputs: Vec<ScriptInput>,
@@ -376,6 +414,56 @@ pub fn record(
         installs,
         limits,
     } = *spec;
+    if fighters == 0 || fighters > MAX_FIGHTERS {
+        return Err(RulesError::BadSpec {
+            field: "fighters",
+            value: u64::try_from(fighters).unwrap_or(u64::MAX),
+        });
+    }
+    if ticks == 0 || ticks > MAX_TAPE_TICKS {
+        return Err(RulesError::BadSpec {
+            field: "ticks",
+            value: u64::from(ticks),
+        });
+    }
+    if checkpoint_every == 0 {
+        return Err(RulesError::BadSpec {
+            field: "checkpoint_every",
+            value: 0,
+        });
+    }
+    // One script per tick: two installs on the same tick would write two
+    // rows with the same tick, and the decoder refuses a tape whose script
+    // ticks do not rise.
+    let mut install_ticks: Vec<u32> = Vec::with_capacity(installs.len());
+    for (at, _) in installs {
+        if *at >= ticks || install_ticks.contains(at) {
+            return Err(RulesError::BadSpec {
+                field: "installs",
+                value: u64::from(*at),
+            });
+        }
+        install_ticks.push(*at);
+    }
+    if inputs.len() > MAX_TAPE_INPUTS {
+        return Err(RulesError::BadSpec {
+            field: "inputs",
+            value: u64::try_from(inputs.len()).unwrap_or(u64::MAX),
+        });
+    }
+    let fighter_count = u8::try_from(fighters).unwrap_or(u8::MAX);
+    let mut last_input: Option<(u32, u8)> = None;
+    for input in &inputs {
+        if !input_in_range(input, ticks, fighter_count)
+            || last_input.is_some_and(|prev| prev >= (input.tick, input.fighter))
+        {
+            return Err(RulesError::BadSpec {
+                field: "inputs",
+                value: u64::from(input.tick),
+            });
+        }
+        last_input = Some((input.tick, input.fighter));
+    }
     let mut rules = Rules::new(limits);
     let mut sim = Sim::new(fighters, seed);
     let mut scripts = Vec::new();
@@ -420,6 +508,9 @@ pub fn replay(
     library: &ScriptLibrary,
     limits: Limits,
 ) -> Result<u64, ReplayError> {
+    // A tape built in memory can be malformed. Refuse it with a typed error
+    // instead of indexing past its checkpoints.
+    tape.validate().map_err(ReplayError::Tape)?;
     let engine_abi = rules_abi(&limits);
     if tape.abi != engine_abi {
         return Err(ReplayError::AbiMismatch {

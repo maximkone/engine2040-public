@@ -107,9 +107,11 @@ pub fn step_with_h(b: &mut Body, h: f32, gh: f32) {
 ///
 /// Hot finite bodies never call it, so the 11k loop keeps one finite branch
 /// plus the ground clamp. Units and determinism match [`step_with_h`].
+/// The perf harness steps the same body, so it calls this tail too: one
+/// copy of the fixup keeps one set of bits.
 #[cold]
 #[inline(never)]
-fn step_with_h_slow(b: &mut Body) {
+pub fn step_with_h_slow(b: &mut Body) {
     if !b.x.is_finite() {
         b.x = 0.0;
         b.vx = 0.0;
@@ -136,10 +138,11 @@ fn step_with_h_slow(b: &mut Body) {
 /// one predictable branch per stepped body in the 1k dynamic prefix
 /// ([geaen | 3.4.3.2 Branch Prediction]). Tiny `h` never reaches it: the
 /// `integrate` slow path keeps [`step_with_h`].
-/// Units and determinism match [`step_with_h`]. Caller: [`integrate`].
+/// Units and determinism match [`step_with_h`]. Callers: [`integrate`] and
+/// the perf harness, which steps the same body.
 #[expect(clippy::inline_always, reason = "11k hot loop")]
 #[inline(always)]
-fn step_with_h_fast(b: &mut Body, h: f32, gh: f32) {
+pub fn step_with_h_fast(b: &mut Body, h: f32, gh: f32) {
     if b.vy.to_bits() == 0 {
         let y_bits = b.y.to_bits();
         let hy_bits = b.hy.to_bits();

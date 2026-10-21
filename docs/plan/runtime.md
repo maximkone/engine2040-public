@@ -39,7 +39,7 @@ Pre-merge text: `git show d96091cd:docs/plan/general.md`
 | Minimap presentation floats | implemented, unquarantined (GE16 open) |
 | Human-slot HUD/wins follow local slot | implemented, slot-0 hardcode remains (GE17 open) |
 | HUD cap literals mirror the canonical caps | implemented, literal caps remain (GE18 open) |
-| Provider observation 8-window on a 16-slot bout | implemented, single-window limit remains (GE19 open) |
+| Provider observation 8-window on a 32-slot bout | implemented, single-window limit remains (GE19 open) |
 | Beacon browser capacity vs match slots | implemented, transport bound undocumented (GE20 open) |
 
 ## 2. Finish line
@@ -111,12 +111,14 @@ ledger refreshed, GE12 cap decision, GE13 camera-16 framing, GE14 bench
 verdict + smoke, GE15 split-32 composition, GE16 minimap quarantine. Bar:
 `git grep -i fighter|gladiator|arena` over engine crates below
 `arena`/`game` returns only ledger-listed contract sites; `ui` builds
-with no `engine-input` fighter import; camera frames 16 slots without
-heap; the 4-fighter golden `d57b5c8ae3096614` is identical twice.
+with no `engine-input` fighter import; camera frames the full roster without
+heap (last measured at 16 slots, the cap is 32); the 4-fighter golden
+`d57b5c8ae3096614` is identical twice.
 
 Tier B v1 (a second game fits): GE4/GE5/GE7 land — all ticked. Bar met:
 the GP5 fixture rules crate (different tables, different params, same
-framework) boots headless; a 16-slot loopback soak converges; a fixture
+framework) boots headless; a 16-slot loopback soak converges (measured at
+16; a soak at the 32 cap is still owed); a fixture
 table set with different numbers resolves without engine edits; a
 scripted non-gladiator policy drives the same tick.
 

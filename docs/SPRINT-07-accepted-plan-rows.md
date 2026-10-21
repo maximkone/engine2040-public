@@ -506,7 +506,7 @@
   outside their window fail; replay exact;
   `cargo test -p engine-net --lib lagcomp` green. needs: MP6,
   MP11. (PLN multiplayer.md EXTEND, proposed 2026-09-29.) Landed cc91744a. The window is now sized live per slot from the measured lag (5 ticks stays only as the pre-measurement default). Sizing math in lagcomp::tests::window_is_whole_ticks_capped_at_sixteen; data fixture played::admission_tests::played_window_is_sized_by_the_posted_delay_distribution_on_lan_and_wan (seat 0 lag_max equals the top bucket of its posted uplink delay histogram; pinned LAN 3 / WAN 10 = the configured holds, fails when the distribution moves); hits outside the window refused and replay exact (verify_replay); run 39111873633, full net suite 39111897900.
-- [ ] MP21 net: 64-player interest-handoff spike (LAN-SCALE-SPIKE)
+- [x] MP21 net: 64-player interest-handoff spike (LAN-SCALE-SPIKE) Landed 25c144a8. Maximal legal shape proven: 1024 entities = 64 fighters + 960 legion, because the row's 64+1000=1064 is over MAX_INTEREST_ENTITIES=1024 and for_entities(0, 1064) refuses with TooManyEntities{got:1064} (scale::tests::mp21_row_population_is_over_the_interest_cap). 64 connections x600 ticks converge hash 606f2da478d2de0c x2; 32.25 kbps per client of the ON9 128 kbps cap; worst snapshot 959 B of 1200; starve_max 24 under STARVE_TICKS 30; combat gap 12 ticks over 100 snapshots; no hash drift, integer mm only, no float; release p99 0.829 ms essentials tick and 0.004 ms world step against the P6 4 ms budget. cargo test -p engine-net --lib scale 26 passed run 39541168972; cargo test -p engine-net --release --lib mp21 2 passed run 39540911422; cargo clippy -p engine-net --all-targets run 39540604736 (foreign arena question_mark and large_types lints allowed for the run); rust-quality PASS owned scale.rs; workspace-check red only on foreign files (ai/src/plan_trace.rs genre ledger, physics/src/cloth ledger, stale modmap row). A cap raise for the literal 1064 is a follow-up row for the ON owner.
   — the loopback reads ON3 `ConnectionInterest::select` per
   connection for 64 fighters plus a 1000-agent legion inside
   `MAX_INTEREST_ENTITIES=1024`, sends the selected set only at
@@ -790,12 +790,12 @@
   Size M. Owns `crates/spatial/src/brief.rs`. Accept: a 2,000-object
   fixture briefs under 4k tokens and the A6 spatial proof still passes.
   needs: SP18. (PLN48 frontier.md.)
-- [ ] SP20 spatial: spatial question answering from the graph — "left of", Progress 2026-10-17: ea34de95 parse_rel and relation kind on scene.query; left: the model-vs-raw-brief comparison needs a live model.
+- [x] SP20 spatial: spatial question answering from the graph — "left of", Progress 2026-10-17: ea34de95 parse_rel and relation kind on scene.query; left: the model-vs-raw-brief comparison needs a live model. Landed 6984d81. The model-vs-raw-brief number: one free model (minimax/minimax-m3.1-flash:free, OpenRouter free tier) on the 50 seeded questions, raw scene.brief 11/50 22% -> scene.query/scene.place verb 46/50 92%, +70 points, cassette replay offline x2 identical, numbers in LADDER SPIKE | P1 (SPR4).
   "visible from", "reachable from" as engine queries over MCP. Tier A.
   Size M. Owns `crates/spatial/src/relation.rs`, `crates/endpoint` verb.
   Accept: 50 seeded questions answered exactly; a model using the verb
   beats the same model reading the raw brief (numbers in LADDER). needs:
-  SP19. (PLN48 frontier.md.) Progress 2026-10-20: engine half re-proven on today's tree, 50 seeded questions answered exactly (relation::sp20_qa50::qa_fifty_seeded_questions_answer_exactly, engine-spatial run 39486878406), and the door verb re-proven: scene_query:: 27 passed incl. query_tool_answers_relation_words_like_the_spatial_oracle and relation_plain_left_and_right_of_the_table, engine-endpoint run 39489285305 (two earlier attempts died on other lanes' reds in anim motion_bake and arena fork.rs, not in scene_query.rs). Left: the model-vs-raw-brief number is boarded as SPR4 (harness landed 390d65c2, fixtures/spatial-gold/llm/ holds no cassette) and needs SPR1 labels plus one live-model recording; that needs an owner call on which model and key to spend, so SP20 stays open until the table lands in LADDER.
+  SP19. (PLN48 frontier.md.) Progress 2026-10-20: engine half re-proven on today's tree, 50 seeded questions answered exactly (relation::sp20_qa50::qa_fifty_seeded_questions_answer_exactly, engine-spatial run 39486878406), and the door verb re-proven: scene_query:: 27 passed incl. query_tool_answers_relation_words_like_the_spatial_oracle and relation_plain_left_and_right_of_the_table, engine-endpoint run 39489285305 (two earlier attempts died on other lanes' reds in anim motion_bake and arena fork.rs, not in scene_query.rs). Left: the model-vs-raw-brief number is boarded as SPR4 (harness landed 390d65c2, fixtures/spatial-gold/llm/ holds no cassette) and needs SPR1 labels plus one live-model recording; that needed an owner call on which model and key to spend, so SP20 stayed open until the table landed in LADDER.
 - [x] SP21 spatial: incremental free-space field on `index3` for placement Landed ea34de95. index3_sp21_edit_updates_free_field_under_1ms, run 39054360489.
   and reachability. Tier A. Size M. Owns `crates/spatial/src/index3.rs`.
   Accept: an edit updates the field in under 1 ms on the arena fixture;
@@ -814,7 +814,7 @@
    MCP5. (PLN48 reader P2 Card 1; RideWay idea-only. PLN20: AX11 keeps
    its ID; EV18 shares its distractor fixture shape, AX17 its agreement
    numbers — no second harness.) Landed da46e355. EvalReport::utility_text, floors in fixtures/eval-utility/floors.txt, failure mode fallback_tool_overhead (15 of 75 rows); playtest --lib 318 passed, run 39071693694.
-- [ ] AX12 mcp/arena: recorded branch-merge fork receipts — fork-ID
+- [x] AX12 mcp/arena: recorded branch-merge fork receipts — fork-ID Landed 3271ddf9. crates/arena/src/branch.rs: BranchSet::speculate runs 20 branches off one snapshot and merges them atomically, dense fork ids and bolt-on interval tags over the frozen fork API. Runner report: branches=20 merged=20/20 speedup=5.4x parallel=2.5x x2_equal=true, run 39533622412 (timing probe, alone). cargo test -p engine-arena --lib branch:: 3 passed 1 ignored, run 39534613547. On the committed bytes: branches=20 merged=20/20 window=240 prefix=360 speedup=5.0x parallel=2.8x serial_ms=21.2 branch_ms=4.2 x2_equal=true, run 39535610062.
   plumbing beside FK1/EA1c for speculative level-edit branches (bolt-on
   interval tags, merge atomic). Tier B. Size S. Owns fork-ID hunks (fork
   API frozen). Accept: 20-branch speedup + atomicity + x2 equality
@@ -896,7 +896,7 @@
   or stays held. Kill: auto-apply, any success loss, format drift,
   weights in git. needs: none. (PLN20 ai-native; 2026-10-18: AX16, AX17
   landed, dropped from needs.)
-- [ ] API6 mcp: protocol-pinned collapse guardrail — retain-list +
+- [x] API6 mcp: protocol-pinned collapse guardrail — retain-list + Landed 1b1c2ab. 76 tools/164,676 chars -> 24 tools/41,220 (75% fewer tokens), 20/20 answers, per-fixture median p95 3,231 us vs 3,247 flat, guard plan 2,039 us once per session; 4 collapse unit tests; runs 39538109120, 39537204415, post-merge 07f84179 run 39539186773. Clippy and workspace-check still red only outside this hunk (packs/play.rs, world_query.rs, ai/plan_trace.rs at HEAD).
   adaptive budget beside the API4 collapse (protocol-aware trimming
   reimplemented, never model summarization). Tier C. Size S. Owns
   guardrail hunks beside `crates/endpoint/src/collapse.rs` (API1 frozen).
@@ -921,6 +921,7 @@
   still lands observed-only and never overwrites a baseline row. needs:
   PF13. (Deep-dive 2026-09-30.) Progress 2026-10-18: 4e51bd7a observed only: the box cannot be quiesced (GPU p50 0.52-0.83 ms over 5 runs), arena adds about 0.45-0.65 GiB VRAM; tools/perf-baseline.mjs from the accept line does not exist.
   Correction 2026-10-21: `Test-Path tools/perf-baseline.mjs` = False, so the Accept `node tools/perf-baseline.mjs --check` cannot run; the row needs the real baseline tool path or closes as an unprovable Accept.
+  rot: tools/perf-baseline.mjs was cut on purpose in c1c426d7 (dead-tool sweep, zero callers verified); only the data file tools/perf-baseline.json survives and no perf script remains, so the Accept must name the JSON or a new tool.
 - [ ] RT14 render: many-light spike — ReSTIR DI vs clustered forward on
   250 torches on the reference GPU. Tier C spike. Size M. Owns a spike
   folder under `examples/`. Accept: ms and noise per method in LADDER;
@@ -1501,7 +1502,7 @@
   engine-endpoint --features mcp --lib query_schema_docs` x2: every field documented, 9 kinds list required
   fields, door-reference Range column non-empty for scene.query, `visible` without eye_m refuses with the
   example. F2P: no field docs, `kind` is a String. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed fc0babc8. query_schema_docs 3 passed: every field documented, kind is an enum of the kind words, KIND_CARDS lists required fields, visible without eye_m refuses missing_arg with a working call, api.describe query:<kind> has one example per kind; door-reference Range column filled. cargo test -p engine-endpoint -p engine-render --features engine-endpoint/mcp,engine-render/v1 --lib on the runner (gh run 39079245584; the 5 build_level tests are red, not from this lane); golden d57b5c8ae3096614 unchanged.
-- [ ] SPR4 playtest: real-model spatial A/B on cassettes (the missing SP20 number) - 50 seeded questions
+- [x] SPR4 playtest: real-model spatial A/B on cassettes (the missing SP20 number) - 50 seeded questions Landed 6984d81. Cassette fixtures/spatial-gold/llm/minimax-m3.1-flash-free.tsv: 50 seeded questions x 2 arms recorded live from minimax/minimax-m3.1-flash:free (OpenRouter free tier, 100 rows, 0 empty answers, gold never sent); replay offline x2 byte-identical, cargo test -p engine-playtest --lib spatial_llm_replay 5 passed, same table in both runs (runs 39537602695, 39538015542): raw 11/50 22 (left_of 1/15, can_see 10/15, where_fits 0/10, why_failed 0/10, 0 calls, 147495 tokens) vs verb 46/50 92 (11/15, 15/15, 10/10, 10/10, 233 calls, 282138 tokens), verdict KEEP (+70 points, need 20), train: no; do-nothing arm stays 0; live unit tests 5 passed (run 39538872737); golden d57b5c8ae3096614 unchanged (proof_cli run 39538601159).
   (left of, can see, where fits, why failed) answered by one model from the raw `scene.brief` versus via
   `scene.query`/`scene.place`; provider cassettes make the score replay offline and byte-identical; prints
   exact-match, calls and estimated tokens per arm plus a train-or-not note. Diff: good. Tier A. Size M. Owns

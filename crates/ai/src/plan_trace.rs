@@ -22,7 +22,7 @@
 //! (row SMX-01): `crates/arena` is held by another lane.
 
 use crate::blackboard::Blackboard;
-use crate::gladiator::{Brain, Percept};
+use crate::{Brain, Percept};
 use crate::goap::{self, Action, GoalState, PlanError};
 use crate::melee::StrikePhase;
 

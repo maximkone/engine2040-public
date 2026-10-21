@@ -1,7 +1,7 @@
 # Gameplay, game design and brains (Game, Bodies, AI door)
 
 Outcome: the duel plays like a designed game, not a tech demo: every swing commits and reads, every attack has an answer, opponents climb in tiers a player can feel, the arena has places that matter, and AI fills empty slots fairly on ground that breaks.
-Proof: (1) input to effect p95 at most 50 ms, hit-stop, reaction and sound on one tick (PQ1); move tables versioned, swaps validated; (2) same seed and tape give the same intents, paths and steering, x2; (3) NV4 and NV6 bars; (4) design bars (section 2, Game): each enemy tier beats the one below in 60%+ of 200 seeded duels, no move above 35% of kills, a new player reaches the first exchange within 60 s of launch, every live attack has a tell of 12+ ticks and an answer.
+Proof: (1) input to effect p95 at most 50 ms, hit-stop, reaction and sound on one tick (PQ1); move tables versioned, swaps validated; (2) same seed and tape give the same intents, paths and steering, x2; (3) NV4 and NV6 bars; (4) design bars (section 2, Game): each enemy tier beats the one below in 60%+ of 200 seeded duels, no move above 35% of kills, a new player reaches the first bout within 45 s of launch, capped at 60 s (`content/design/ladder.rows:13-15`), every live attack has a tell of 12+ ticks and an answer.
 Order: FOCUS Now group 8 "Game" (owner 2026-10-12) holds GP27-GP42 and GA13-GA15 in its order; then GP18, GP21, NV4, NV6, GA7, GA8, then the section 7 table.
 Crates: combat, game, input, ai, nav, arena, playtest, ui (duel HUD only).
 Open board IDs: GP18 GP21 NV4 NV6 GA7 GA8, the new game rows GP27-GP42 GA13-GA15 (board shard `docs/SPRINT-20-game.md`), and the table in section 7. GP24 is not on the board (dropped). Landed 2026-10-13: GP28 GP29 GP30 (4c6d817); code-built ahead of tick: GP27 GP31 GP37 GP39, partial GP41 (see section 1). Data-built ahead of tick 2026-10-13: GA13 part (`enemies.rows` plus ai `TierRow`, no tournament hook), GP36 part (`arena-zones.rows`, no metric), GP40 part (`loop.rows` glory only, no beat chart).
@@ -40,24 +40,24 @@ and content gate, GP19 staged rig, GP20 damping split, GP23 phased tables.
 | Capability | Status | Evidence (file or commit) |
 |---|---|---|
 | Design vision, pillars, core loop | NEW (section 0) | `rg "concept statement|core loop|design pillar" docs/plan` was empty (N27) |
-| Design data a seat can change without Rust | BUILT, board open (GP27) | loader `crates/combat/src/tables_text.rs:1-10`, `pub mod tables_text` in `crates/combat/src/lib.rs:47`, `content/design/combat.rows:7-9`, `docs/design/FORMAT.md` (needs review tick) |
-| Input buffer | LANDED (GP28, 4c6d817) | v2 buffer queued at intake `combat/src/fight.rs:988-989,1026-1078`, tests `fight.rs:3042-3112` |
-| Commit lock on dodge | LANDED (GP29, 4c6d817) | v2 lock `fight.rs:924-945,978-1019`, tests `fight.rs:1483-1680` |
-| Poise and per-kind stamina, hit-stop | LANDED poise/stamina (GP30, 4c6d817); hit-stop BUILT, board open (GP31) | `poise_damage_for_kind` `combat/src/fight.rs:205`, `stamina_cost_for_kind` `:226`, `PoiseMeter` `combat/src/depth.rs:208`; per-kind freeze `hitstop_for_kind` `fight.rs:260`, `hitstop_for_parry` `:279`, wired `:1214,1265`, tests `:2014-2019` |
-| Readable startup in the live match | PARTIAL | V2 rows exist (`tables.rs:51,100`, EG19); the arena ships `TABLES_V1` (`arena/src/lib.rs:105,1302`), 4-tick startup (N13, GP32) |
-| Enemy tiers and a boss | MISSING | `rg "grunt|veteran|elite|boss" crates/ai/src` empty; `Role` `ai/src/depth.rs:213` has no tier rows (N17, GA13, GA15) |
-| Difficulty curve, human error model | MISSING | `playtest/src/tournament.rs:36-40` holds one 40-60% band and the 350 permille kill share; no sweep, no timing noise (N18, GA14) |
-| Matchups and time-to-kill | MISSING | no per-pair table; forge hero side is 100 hp, 25 dmg, 0.5 s = 4 hits, 2.0 s (N23, GP33) |
-| Second balance harness | dead | `game/src/bench.rs:61-63` ceiling 1000 permille cannot trip, no caller; the live bar is `tournament.rs:40` (N22, GP34) |
-| Arena walls in the match | MISSING | 11 actors in `content/arena/placement.json` say `"physical": true`; `arena_kit.rs` never reads it; the fight runs on open sand (N19, GP35) |
-| Zones, cover, entrances | MISSING | one 1 m crate (`crate_a`, id 10), one entrance `gate_tunnel` (id 5), nothing measured (N20, GP36) |
-| One Rome numbers file | BUILT, board open (GP37) | `content/arena/rome-spec.json:2` half extent 10 m, drift test `crates/game/tests/it/rome_spec_drift.rs:1-17` wired in `main.rs:26` |
-| Round and match loop | BUILT, board open (GP39) | best-of-5 `crates/game/src/rounds.rs:1-8`, verdict `decide_round` `:24-37`, app fold `crates/game/src/lib.rs:491-492,751-776` |
-| Duel HUD | built, never drawn | `ui/src/lib.rs:781 DuelOverlay` built only in ui tests; UI parked (`FOCUS.md:41`) (N5, GP38) |
-| Ladder pacing | PARTIAL | `game/src/ladder.rs` ranks and `apply`; no beat chart, no per-rung new element, enemy or minutes (N28, GP40) |
-| Playtest that asks a question | PARTIAL (GP41, board open) | charter runner `crates/playtest/src/charter.rs:94-127`, C1 ships `crates/playtest/charters/c1.toml:1-6`; C2 (camera separation) missing |
-Status 2026-10-16: disk shows `:58` is stale on both halves: `node tools/board-slice.mjs --find GP41` prints one row, `GP41 done Game ... GP21 accepts on Landed 06134105` (so GP41 is not board open), and C2 is on disk: `crates/playtest/charters/c2.toml:1-6` ships id c2 with question `a light hit shakes the camera at most a quarter of a heavy`, `crates/playtest/src/charter.rs:158` `C2_SRC` `include_str!`s that file, `:161 load_c2`, `:166 run_c2`, `:174 light_within_quarter` and test `:316 charter_c2_parses_and_prints_pass` cover it, so C2 is not missing and the shipped C2 question is camera shake, not camera separation; the C1 half still holds (`crates/playtest/charters/c1.toml:1-6` ships, `charter.rs:94-127` is `parse_charter` plus `evaluate`).
-| Debug camera, pause and step in the game binary | MISSING | only `--camera-path` in `bin/arena.rs:250`; pause/step live in the editor only (`editor/src/play_in.rs:131-164`) (N31, GP42) |
+| Design data a seat can change without Rust | LANDED (GP27) | loader `crates/combat/src/tables_text.rs:176`, `pub mod tables_text` in `crates/combat/src/lib.rs:79`, `content/design/combat.rows:7-9`, `docs/design/FORMAT.md` |
+| Input buffer | LANDED (GP28, 4c6d817) | v2 buffer queued at intake `combat/src/fight.rs:1010-1032` (`feel.rs:305` `buffer_window`), tests `fight.rs:3611-3678` |
+| Commit lock on dodge | LANDED (GP29, 4c6d817) | v2 lock `combat/src/feel.rs:237-262`, dodge refusal `fight.rs:1096`, tests `fight.rs:1727-1880` |
+| Poise and per-kind stamina, hit-stop | LANDED (GP30, GP31) | `poise_damage_for_kind` `combat/src/fight.rs:211`, `stamina_cost_for_kind` `:232`, `PoiseMeter` `combat/src/depth.rs:208`; per-kind freeze `crates/combat/src/hitstop_kind.rs:23,25,37` into `fight.rs:268` (GP30, 4c6d817; GP31, 624938f5) |
+| Readable startup in the live match | LANDED (GP32) | V2 rows exist (`crates/combat/src/tables.rs:134`); the arena picks the table per match (`crates/arena/src/lib.rs:207,492,523`): the window and capture builds pass v2, the proof scene keeps v1 (N13, GP32) |
+| Enemy tiers and a boss | PARTIAL (GA13 landed; GA15 open) | four tier rows in `content/design/enemies.rows:23-26`, `SHIPPED_TIERS` `crates/ai/src/depth.rs:440`, `parse_tiers` `:571`; the boss move set and its two phases are still open (N17, GA13, GA15) |
+| Difficulty curve, human error model | PARTIAL (GA14 open) | the sweep and the 400-600 permille band live in `playtest/src/tournament.rs:38,43-47`; the seeded 2-4 tick human noise is `playtest/src/winrates.rs:45-49`; the strict rung-strength rise check is still open (N18, GA14) |
+| Matchups and time-to-kill | PARTIAL (GP33 open) | a hand-written per-pair table ships in `docs/design/matchups.csv:12-21`; the `ttk` test and the odd-cycle check do not exist yet, and the table still carries the old sword numbers (N23, GP33) |
+| Second balance harness | LANDED (GP34) | the bench mirrors the tournament bar (`game/src/bench.rs:69` `PQ2_KILL_SHARE_MAX_PERMILLE` 350); the caller is `game/src/bin/staged_fight.rs:499,507` (N22, GP34) |
+| Arena walls in the match | LANDED (GP35) | the 11 physical kit actors become 6 floor boxes (`crates/arena/src/kit.rs:111,260-265`) and a match loads the kit world (N19, GP35) |
+| Zones, cover, entrances | LANDED (GP36) | `content/design/arena-zones.rows` seats the centre (`:16`) and the gate mouth (`:9`); the tournament prints the zone shares and holds `entrance_share` under 250 permille (`crates/playtest/src/tournament.rs:1980`) (N20, GP36) |
+| One Rome numbers file | LANDED (GP37) | `content/arena/rome-spec.json:2` half extent 10 m, drift test `crates/game/tests/it/rome_spec_drift.rs` wired in `main.rs:27` |
+| Round and match loop | LANDED (GP39) | best-of-5 `crates/game/src/rounds.rs:1-8`, verdict `decide_round` `:24-37`, app fold `crates/game/src/lib.rs:790,981` |
+| Duel HUD | LANDED (GP38) | `ui/src/lib.rs:855 DuelOverlay` is built for the app in `crates/game/src/windowed.rs:1091-1096` (N5, GP38) |
+| Ladder pacing | LANDED (GP40) | the beat chart is `content/design/ladder.rows:25-32`, the gate is `tools/beat-lint.mjs`, the compiled chart is `game/src/ladder.rs:290` `Ladder::beat()` (N28, GP40) |
+| Playtest that asks a question | LANDED (GP41) | charter runner `crates/playtest/src/charter.rs:95-127`, C1 ships `crates/playtest/charters/c1.toml:1-6`, C2 ships `crates/playtest/charters/c2.toml:1-6` (`charter.rs:158-174`) |
+Status 2026-10-21: both halves of GP41 hold. The board says done: `node tools/board-slice.mjs --find GP41` prints one row, `GP41 done Game ... GP21 accepts on Landed 06134105`. C2 is on disk: `crates/playtest/charters/c2.toml:1-6` ships id c2 with question `a light hit shakes the camera at most a quarter of a heavy`, `crates/playtest/src/charter.rs:158` `C2_SRC` `include_str!`s that file, `:161 load_c2`, `:166 run_c2`, `:174 light_within_quarter` and test `:316 charter_c2_parses_and_prints_pass` cover it, so the shipped C2 question is camera shake, not camera separation; the C1 half still holds (`crates/playtest/charters/c1.toml:1-6` ships, `charter.rs:94-127` is `parse_charter` plus `evaluate`).
+| Debug camera, pause and step in the game binary | LANDED (GP42) | the binary takes `--pause-at-tick <N>` and `--step` (`crates/game/src/bin/arena.rs:219-226`), plus `--camera-path` (`:3426`), and the free-fly camera flies the eye by hand (`crates/game/src/camera.rs:145,373`); the editor keeps its own lanes (`editor/src/play_in.rs:131-164`) (N31, GP42) |
 | Camera feel cores (GP8) | open, board | flax-mcp camera rig and damping cores, MIT; needs GP3 |
 | Combat depth cores (GP9) | partly on disk | `combat/src/depth.rs:202-275` PoiseMeter exists: GP30 wires it instead of a port |
 | Juice pipeline, gamefeel port, feel-flow (GF1-GF3) | open, plan-only | LF10 hitstop hold, LF11 shake and GP31 cover the Rome need first |
@@ -145,7 +145,7 @@ locked riposte and clash ties over CB1 table rows in integer ticks with
 fighter-ID order; `sweep.rs` solves swept arcs continuously per tick as
 segment-vs-capsule in fixed point (Q13) with shields as coverage cones;
 the camera is a deterministic director (lock-on target, distance and
-angle rules, trauma decaying in ticks, recorded in-sim, shaken in
+angle rules, trauma decaying in ticks, presented outside the sim, shaken in
 presentation); modes are content over AR1 (ladder table, glory-rank
 counters, repair-craft hooks, LIGHT slice only); the second-game proof
 is a checklist enforced by a fixture build with an engine-diff gate.
@@ -207,7 +207,7 @@ Starting values, tuned only by the GA14 sweep, never by hand in Rust:
 | Input buffer | 8 ticks (133 ms), table value | a press in recovery is a promise kept, not lost | GP28 |
 | Commit point | the hit tick: no dodge, block or new attack cancels after it | commitment pillar | GP29 |
 | Cancel window | from startup tick 0 to the hit tick minus `cancel_grace` | a feint is allowed early, never late | GP29 |
-| Hit-stop | light 3, heavy 6, parry 8 ticks | weight reads in the freeze | GP31, LF10 |
+| Hit-stop | light 3, heavy 6, parry 8 ticks (`crates/combat/src/tables.rs:107,116,125`); the v2 row keeps one flat `hitstop_ticks=4` (`content/design/combat.rows:9`) | weight reads in the freeze | GP31, LF10 |
 | Poise | light hits below the stagger threshold, a heavy or two lights in 60 ticks stagger | poise turns damage into rhythm | GP30 |
 | Stamina | per-kind cost (heavy above light, dodge above light), regen after a 30-tick delay | the slow negative leg: the leader who spams tires | GP30 |
 
@@ -223,47 +223,47 @@ window build pass v2 (GP32).
 `counter` (the answer that beats it), `silhouette` (one word for the look seat).
 A tier is mostly skill, not stats: the P3 tournament `Difficulty`
 (`playtest/src/tournament.rs:55-104`) stays morale-only for the mirror balance
-proof, and tiers are a separate axis. Tiers: T1 recruit, T2 veteran, T3
-champion, T4 primus (boss, GA15: its own move set and two phases, a new answer
-in phase 2, never just more hp). Rule: each tier beats the one below in 60%+ of
-200 seeded duels and loses to the one above in 60%+ (an odd cycle check keeps
-no tier dominant). Difficulty (GA14): a sweep of one `BalanceConfig` field
-writes `target/reports/difficulty-<knob>.csv`; scripted players carry seeded
-timing noise (sigma 2-4 ticks, about 36-61 ms) and a reaction delay of 12-18
-ticks after a perfect-player check; rung strength must rise strictly. The
-noise is part of the AI input tape, so replays stay exact.
+proof, and tiers are a separate axis. Tiers: T1 grunt, T2 veteran, T3 elite, T4
+primus (boss, GA15: its own move set and two phases, a new answer in phase 2,
+never just more hp; names from `content/design/enemies.rows:10-13`). Rule: each
+tier beats the one below in 60%+ of 200 seeded duels and loses to the one above
+in 60%+ (an odd cycle check keeps no tier dominant). Difficulty (GA14): a sweep of
+one `BalanceConfig` field writes `target/reports/difficulty-<knob>.csv`; scripted
+players carry seeded timing noise of 2-4 ticks (33-66 ms) and act once per 8 ticks
+(`content/design/enemies.rows:15-17`, `crates/playtest/src/winrates.rs:45-49`); rung
+strength must rise strictly. The noise is part of the AI input tape, so replays stay exact.
 
 ### Resource ledger (Adams-Dormans ch4-7; every pool has a source and a drain)
 
 | Pool | Source | Drain | Loop | File |
 |---|---|---|---|---|
-| hp | none in a round; full at round start | hits (`damage_permille`) | the win condition | `combat/src/fight.rs` |
+| hp | none in a round; full at round start | hits (`attack_damage` 120 permille, `content/design/combat.rows:9`) | the win condition | `combat/src/fight.rs` |
 | stamina | regen after a 30-tick delay | attack, dodge, block (per kind) | negative: spam tires | `combat/src/tables.rs` (GP30) |
 | poise | regen per tick | poise damage per hit | stagger turns hits into openings | `combat/src/depth.rs` PoiseMeter (GP30) |
 | morale (AI) | landed hits, crowd | taken hits, hp share | AI aggression and retreat | `ai/src/gladiator.rs:146-158` |
 | round wins | a won round | none | best of 5 | `game/src/lib.rs` (GP39) |
-| glory | a won bout (rung weight) | a lost bout (penalty column, N25) | ladder progress | `game/src/ladder.rs` (GP40) |
+| glory | a won bout (rung weight) | a lost bout (flat 50, `content/design/loop.rows:9`, `crates/game/src/ladder.rs:26`) | ladder progress | `crates/game/src/ladder.rs` (GP40); the `penalty=25` column of `content/design/ladder.rows:25-32` is lint-bounded only (`tools/beat-lint.mjs:171-173`) |
 
 ### The arena as a level (Vazhenich *Worlds* II.6, Rogers L9, Killick ch5)
 
-Numbers come from `content/arena/rome-spec.json` (GP37): half extent 10 m,
-spawns at -4 m and +4 m, march speed 1.7 m/s, sword range 2.0 m. The approach
-beat is (8 - 2) m / 1.7 m/s = about 3.5 s (212 ticks) of a 600-tick round: the
-first exchange must start by tick 240 in 90% of bot duels. Kit actors marked
-`physical` become obstacles in the match (GP35). Zones in
-`content/design/arena-zones.rows` (GP36): centre (r < 3 m), ring (3-8 m), wall
-band (over 8 m), gate mouth (`gate_tunnel`). Metrics per tournament: time share
-per zone, `entrance_share` (time any fighter holds the gate mouth, bar under
-25%), kills per zone, cover uses. A layout change lands only with these numbers
+Numbers come from `content/arena/rome-spec.json` (GP37): half extent 10 m, spawns at -4 m and +4 m; the march speed 1.7 m/s is the Rome
+design number (`docs/plan/rome-spec.md:31`). The sword does 120 permille damage with a 15-tick startup and an 8-tick recovery
+(`content/design/combat.rows:9`, `content/design/weapons.rows:24`); the blade reach is 1500 mm (`crates/arena/src/match_wire.rs:33`), while the json keeps
+`range_mm` 2000 for forge parity only. The approach beat is (8 - 1.5) m / 1.7 m/s = about 3.8 s (229 ticks) of a 600-tick round: the first
+exchange must start by tick 240 in 90% of bot duels. Kit actors marked `physical` become obstacles in the match (GP35).
+Zones in `content/design/arena-zones.rows` (GP36): the centre circle r 250 cm (`:16`) and the gate mouth r 200 cm (`:9`); the code classifier
+bands are 3 m and 8 m (`crates/arena/src/zones.rs:17,19`). Metrics per tournament: time share per zone, `entrance_share` (time any fighter
+holds the gate mouth, bar under 250 permille of fighter ticks, `crates/playtest/src/tournament.rs:1980`; the level check keeps a
+floor-area band of 25..60, `docs/design/LEVELS.md:174`), kills per zone, cover uses. A layout change lands only with these numbers
 before and after.
 
 ### Ladder pacing (Rogers ch4, Prokhorenko ch3, Trefry)
 
-`content/design/ladder.rows` (GP40): per rung the enemy tier, at most 3 new
-elements (a move, a rule, an arena variant), the reward and the penalty, and the
-expected minutes. Lint `tools/beat-lint.mjs`: new elements at most 3 per rung,
-tier never falls, the boss is last, the first bout starts within 60 s of launch
-(parked ED18 "first fight within 15 minutes" is replaced by this bar for Rome).
+`content/design/ladder.rows` (GP40): per rung the enemy tier, at most 3 new elements (a move, a rule, an arena variant), the reward and the penalty, and the
+expected minutes. The first bout starts within 45 s of launch, capped at 60 s (`content/design/ladder.rows:13-15`, `crates/game/src/ladder.rs:49,51`;
+parked ED18 "first fight within 15 minutes" is replaced by this bar for Rome). Lint `tools/beat-lint.mjs`: new elements at most 3 per rung and equal to
+the compiled chart (`tools/beat-lint.mjs:164-166`), tier never falls, the boss is last, minutes equal the compiled chart (`:183-185`); the first-bout cap is
+not a lint rule (`tools/beat-lint.mjs:11-15`), `crates/game/src/ladder.rs` owns it.
 
 ### HUD and readability (Rogers L8, McLean-Sharp ch4)
 
@@ -302,12 +302,12 @@ Ownership: `ai` owns decisions, morale, squads, difficulty, enemy tiers and the
 legion brain; `nav` owns meshes, tiles, links, queries, steering,
 platoons and funnels; `arena` owns the match and calls both through
 public APIs (arena maps snapshots into AI observation types; no reverse
-imports). `arena/src/engage.rs:20` and `fork.rs:148` already use `engine_ai`
+imports). `arena/src/engage.rs:20` and `fork.rs:271` already use `engine_ai`
 brains; nav steering is the unwired part (BOOK-GAPS W12). Traversal links are
 authored in content (sidecar markers) and baked by the cooker; TV1 consumes them
 at runtime. DX1 break sets invalidate tiles through the `rebake.rs` registry;
 WD8 stitches per-cell NV1 bakes on shared edges once tiles land.
-Status 2026-10-17: disk shows the S11 left line is gone, so the gap no longer holds: `rg -n "AI[-]to[-]arena" docs/plan/gameplay.md` exits 1 with zero hits, and the row's cite `docs/plan/gameplay.md:150` now reads "counters, repair-craft hooks, LIGHT slice only); the second-game proof", while the corrected text sits at `docs/plan/gameplay.md:305-306` ("`arena/src/engage.rs:20` and `fork.rs:148` already use `engine_ai` brains; nav steering is the unwired part (BOOK-GAPS W12)"); the disk half holds with one drifted cite: `crates/arena/src/engage.rs:20` is `use engine_ai::{FoeView, MeleeView, Percept, Squad, StrikePhase};` and the brains field is at `crates/arena/src/fork.rs:174` `brains: Vec<engine_ai::DepthBrain>`, so the row's `fork.rs:148` cite now points at `pub damage_dealt: Vec<(u8, u16)>` and only the nav-steering half (W12) stays open, with `docs/plan/gameplay.md:436` keeping GA8 "needs: -".
+Status 2026-10-17: disk shows the S11 left line is gone, so the gap no longer holds: `rg -n "AI[-]to[-]arena" docs/plan/gameplay.md` exits 1 with zero hits, and the row's cite `docs/plan/gameplay.md:150` now reads "counters, repair-craft hooks, LIGHT slice only); the second-game proof", while the corrected text sits at `docs/plan/gameplay.md:305-306` ("`arena/src/engage.rs:20` and `fork.rs:271` already use `engine_ai` brains; nav steering is the unwired part (BOOK-GAPS W12)"); the disk half holds: `crates/arena/src/engage.rs:20` is `use engine_ai::{FoeView, MeleeView, Percept, Squad, StrikePhase};` and the brains field is at `crates/arena/src/fork.rs:271` `brains: Vec<engine_ai::DepthBrain>`, so only the nav-steering half (W12) stays open, with `docs/plan/gameplay.md:437` keeping GA8 "needs: -".
 
 Determinism: same seed plus same tape gives same intents, paths and
 steering. Bakes sort everything and emit versioned bytes (`E2NAV1` v1;
@@ -478,9 +478,9 @@ Producer (studio stages and burndown, owner 2026-10-15): the producer seat keeps
 - Opponents: each tier beats the one below in 60%+ of 200 seeded duels and
   loses to the one above; rung strength rises strictly in the GA14 sweep; no
   move above 35% of kills; the noise-on and noise-off runs both replay x2.
-- Arena: no fighter passes a physical kit actor in 1,000 seeded ticks;
-  `entrance_share` under 25%; the first exchange starts by tick 240 in 90% of
-  bot duels; arena numbers equal `content/arena/rome-spec.json` (drift test).
+- Arena: no fighter passes a physical kit actor in 1,000 seeded ticks; `entrance_share` under 250 permille of fighter ticks
+  (`crates/playtest/src/tournament.rs:1980`; the level check keeps a floor-area band of 25..60, `docs/design/LEVELS.md:174`); the first
+  exchange starts by tick 240 in 90% of bot duels; arena numbers equal `content/arena/rome-spec.json` (drift test).
 - Clash mirror test: scripted exchange with fighter IDs swapped mirrors
   the outcome; container order never decides.
 - Sweep coverage: every weapon length by speed bin keeps a tunneling

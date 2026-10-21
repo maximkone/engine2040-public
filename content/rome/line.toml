@@ -1,0 +1,13 @@
+# The battle line: one man's frontage and the gap between ranks. Lengths are Roman
+# feet as the sources give them; the loader turns them into millimetres. Every entry
+# that holds a number names its source in `ref` (docs/plan/rome.md section 5), and an
+# entry without one is refused.
+
+[units]
+mm_per_ft = 296
+ref = "rome.md section 5: 1 Roman foot about 0.296 m"
+
+[line]
+frontage_ft = 3
+rank_gap_ft = 6
+ref = "rome.md section 5, Vegetius 3.14 (frontage), 3.14-15 (rank gap)"

@@ -13,6 +13,13 @@
 //! [`sample_pose_with_rots`]: a joint keeps its sampled quat when a valid
 //! track is present for its index, and falls back to identity otherwise.
 //!
+//! Sampling shape: a key track is read with a C1 curve, not with straight
+//! lines. The key values are hit exactly, the rate at a key is the same on
+//! both sides of it, and the sampled value never leaves the key pair's
+//! span. A clip keyed at 24 Hz and read at 60 Hz otherwise changes its rate
+//! at every key, and the arena's pop law reads that corner as a clip snap
+//! (AM24).
+//!
 //! Determinism: sampling, blending and extraction use only `+ - * /`,
 //! `%` (via [`f32::rem_euclid`]) and [`f32::sqrt`]; no transcendentals, no
 //! wall clock, stable joint order. Same inputs twice give identical outputs.
@@ -23,7 +30,7 @@ use super::clip::clamp01;
 use super::contract::{
     validate_root, validate_skeleton, AnimError, LocalPose, RootDelta, RootTable, Skeleton,
 };
-use super::{sample as sample_vec3, Clip};
+use super::Clip;
 use std::f32::consts::{PI, TAU};
 
 /// One joint rotation track: strictly increasing times plus unit quaternions
@@ -144,6 +151,269 @@ fn nlerp(a: [f32; 4], b: [f32; 4], w: f32) -> [f32; 4] {
     [q[0] * inv, q[1] * inv, q[2] * inv, q[3] * inv]
 }
 
+/// Tangent rate cap: a key's tangent never runs past this many times the
+/// smallest chord rate around it, so the sampled curve stays monotone inside
+/// a key pair and never leaves the two keys it sits between.
+const TANGENT_RATE_CAP: f32 = 3.0;
+
+/// The rate between two key values per second. A non-positive span reads as
+/// no rate.
+fn rate_between<const N: usize>(a: [f32; N], b: [f32; N], span: f32) -> [f32; N] {
+    if !span.is_finite() || span <= 0.0 {
+        return [0.0; N];
+    }
+    let mut out = [0.0; N];
+    for k in 0..N {
+        out[k] = (b[k] - a[k]) / span;
+    }
+    out
+}
+
+/// The tangent from a key's central difference and the two chords around
+/// it: zeroed where the central difference disagrees with the chord into or
+/// out of the key (a local extremum reads as a flat spot) and capped at
+/// [`TANGENT_RATE_CAP`] times the smaller of the two chord rates, so the
+/// curve never leaves the key pair it sits in.
+fn tangent_of<const N: usize>(
+    central: [f32; N],
+    chord_in: Option<[f32; N]>,
+    chord_out: Option<[f32; N]>,
+) -> [f32; N] {
+    let mut out = [0.0; N];
+    for k in 0..N {
+        let c = central[k];
+        let agrees_in = chord_in.is_none_or(|ch| c * ch[k] > 0.0);
+        let agrees_out = chord_out.is_none_or(|ch| c * ch[k] > 0.0);
+        if !agrees_in || !agrees_out {
+            continue;
+        }
+        let mut limit = f32::INFINITY;
+        if let Some(ch) = chord_in {
+            limit = limit.min(TANGENT_RATE_CAP * ch[k].abs());
+        }
+        if let Some(ch) = chord_out {
+            limit = limit.min(TANGENT_RATE_CAP * ch[k].abs());
+        }
+        out[k] = c.signum() * c.abs().min(limit);
+    }
+    out
+}
+
+/// The tangent at one key of a scalar track, in units per second.
+///
+/// The tangent is the central difference of the neighbouring keys, so the
+/// rate on both sides of the key is the same (the curve is C1 there). It is
+/// zeroed where it disagrees with the chord into or out of the key (a local
+/// extremum reads as a flat spot) and capped at [`TANGENT_RATE_CAP`] times
+/// the smaller of the two chord rates, so the curve never leaves the key
+/// pair it sits in.
+fn tangent_at<const N: usize>(times: &[f32], values: &[[f32; N]], i: usize) -> [f32; N] {
+    let n = values.len();
+    let prev = i.saturating_sub(1);
+    let next = (i + 1).min(n - 1);
+    let chord_in = if i > 0 {
+        Some(rate_between(values[prev], values[i], times[i] - times[prev]))
+    } else {
+        None
+    };
+    let chord_out = if i + 1 < n {
+        Some(rate_between(values[i], values[next], times[next] - times[i]))
+    } else {
+        None
+    };
+    let central = rate_between(values[prev], values[next], times[next] - times[prev]);
+    tangent_of(central, chord_in, chord_out)
+}
+
+/// The cubic Hermite blend of two key values with their tangents, `u` in
+/// 0..=1 across a segment `h` seconds wide.
+fn hermite<const N: usize>(
+    start: [f32; N],
+    end: [f32; N],
+    m0: [f32; N],
+    m1: [f32; N],
+    h: f32,
+    u: f32,
+) -> [f32; N] {
+    let u2 = u * u;
+    let u3 = u2 * u;
+    let h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+    let h10 = u3 - 2.0 * u2 + u;
+    let h01 = -2.0 * u3 + 3.0 * u2;
+    let h11 = u3 - u2;
+    let mut out = [0.0; N];
+    for k in 0..N {
+        out[k] = h00 * start[k] + h10 * h * m0[k] + h01 * end[k] + h11 * h * m1[k];
+    }
+    out
+}
+
+/// The key pair a time falls in: `lo` and `lo + 1`, with the time inside the
+/// pair as `u` in 0..=1. `None` when the track cannot hold a pair.
+fn key_pair(times: &[f32], t: f32) -> Option<(usize, f32)> {
+    let n = times.len();
+    if n < 2 || !t.is_finite() {
+        return None;
+    }
+    if t <= times[0] {
+        return Some((0, 0.0));
+    }
+    if t >= times[n - 1] {
+        return Some((n - 2, 1.0));
+    }
+    let mut lo = 0usize;
+    let mut hi = n - 1;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if times[mid] <= t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let span = times[hi] - times[lo];
+    let u = if span > 0.0 {
+        ((t - times[lo]) / span).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    Some((lo, u))
+}
+
+/// The dot of two quaternions.
+fn quat_dot(a: [f32; 4], b: [f32; 4]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+}
+
+/// A unit quaternion from any four finite components; a degenerate one reads
+/// as the identity.
+fn unit_quat(q: [f32; 4]) -> [f32; 4] {
+    let n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+    if !n2.is_finite() || n2 <= 0.0 {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    let inv = 1.0 / n2.sqrt();
+    [q[0] * inv, q[1] * inv, q[2] * inv, q[3] * inv]
+}
+
+/// Sample one position track with the C1 curve: the key values are hit
+/// exactly, the rate at a key is the same on both sides of it, and the
+/// sampled value never leaves the key pair's span. A keyframed clip read
+/// with straight lines changes its rate at every key, and the arena's pop
+/// law reads that corner as a clip snap (AM24). A track with fewer than
+/// three keys reads as the straight line.
+fn sample_track_c1(times: &[f32], values: &[[f32; 3]], t: f32) -> [f32; 3] {
+    let n = values.len();
+    if times.len() != n || n == 0 {
+        return [0.0; 3];
+    }
+    if n < 3 {
+        // Fewer than three keys: the straight line between the two keys.
+        if n == 1 {
+            return values[0];
+        }
+        let span = times[1] - times[0];
+        let f = if span > 0.0 {
+            ((t - times[0]) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (a, b) = (values[0], values[1]);
+        return [
+            a[0] + (b[0] - a[0]) * f,
+            a[1] + (b[1] - a[1]) * f,
+            a[2] + (b[2] - a[2]) * f,
+        ];
+    }
+    let Some((lo, u)) = key_pair(times, t) else {
+        return [0.0; 3];
+    };
+    let hi = lo + 1;
+    let h = times[hi] - times[lo];
+    let m0 = tangent_at(times, values, lo);
+    let m1 = tangent_at(times, values, hi);
+    hermite(values[lo], values[hi], m0, m1, h, u)
+}
+
+/// Sample one rotation track with the C1 curve, the same shape as the
+/// position track: the key quaternions are hit exactly and the rate at a key
+/// is the same on both sides of it. The neighbours are lined up with the
+/// key's own sign first, so a key written as `-q` (the same rotation) does
+/// not read as a flip.
+fn sample_quat_track_c1(track: &QuatTrack, t: f32) -> Option<[f32; 4]> {
+    let n = track.values.len();
+    if track.times.len() != n || n == 0 {
+        return None;
+    }
+    if track.times.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    if track.values.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    if n < 3 {
+        return sample_quat_track(track, t);
+    }
+    let (lo, u) = key_pair(&track.times, t)?;
+    let hi = lo + 1;
+    let p1 = track.values[lo];
+    // The segment's second key on the short arc: a key written as `-q` is
+    // the same rotation, so the pair never reads as a flip.
+    let flip = quat_dot(p1, track.values[hi]) < 0.0;
+    let p2 = if flip {
+        [
+            -track.values[hi][0],
+            -track.values[hi][1],
+            -track.values[hi][2],
+            -track.values[hi][3],
+        ]
+    } else {
+        track.values[hi]
+    };
+    let h = track.times[hi] - track.times[lo];
+    let m0 = quat_tangent_at(track, lo);
+    let mut m1 = quat_tangent_at(track, hi);
+    if flip {
+        // The tangent belongs to the key's own sign; the segment's end is
+        // the other sign, so the tangent turns with it.
+        for m in m1.iter_mut() {
+            *m = -*m;
+        }
+    }
+    Some(unit_quat(hermite(p1, p2, m0, m1, h, u)))
+}
+
+/// The tangent at one key of a rotation track: the component-wise central
+/// difference of the neighbouring keys, with the neighbours lined up with
+/// the key's own sign so a key written as `-q` does not read as a flip.
+fn quat_tangent_at(track: &QuatTrack, i: usize) -> [f32; 4] {
+    let n = track.values.len();
+    let prev = i.saturating_sub(1);
+    let next = (i + 1).min(n - 1);
+    let p = track.values[i];
+    let align = |q: [f32; 4]| {
+        if quat_dot(q, p) < 0.0 {
+            [-q[0], -q[1], -q[2], -q[3]]
+        } else {
+            q
+        }
+    };
+    let prev_v = align(track.values[prev]);
+    let next_v = align(track.values[next]);
+    let central = rate_between(prev_v, next_v, track.times[next] - track.times[prev]);
+    let chord_in = if i > 0 {
+        Some(rate_between(prev_v, p, track.times[i] - track.times[prev]))
+    } else {
+        None
+    };
+    let chord_out = if i + 1 < n {
+        Some(rate_between(p, next_v, track.times[next] - track.times[i]))
+    } else {
+        None
+    };
+    tangent_of(central, chord_in, chord_out)
+}
+
 /// Sample one quat track at a wrapped time; `None` when the track is absent
 /// or invalid (caller falls back to identity).
 fn sample_quat_track(track: &QuatTrack, time: f32) -> Option<[f32; 4]> {
@@ -234,10 +504,14 @@ pub fn sample_pose_with_rots_into(
     out.positions.reserve(skeleton.len());
     out.rotations.reserve(skeleton.len());
     for joint in 0..skeleton.len() {
-        out.positions.push(sample_vec3(clip, joint, wrapped));
+        out.positions.push(sample_track_c1(
+            &clip.tracks[joint].times,
+            &clip.tracks[joint].values,
+            wrapped,
+        ));
         out.rotations.push(
             rots.get(joint)
-                .and_then(|track| sample_quat_track(track, wrapped))
+                .and_then(|track| sample_quat_track_c1(track, wrapped))
                 .unwrap_or([0.0, 0.0, 0.0, 1.0]),
         );
     }

@@ -6,14 +6,33 @@
 //! fixed-array sizes, a scratch buffer reuse that lowers allocations), never
 //! to absorb a regression; hashes of unchanged paths and the legacy golden
 //! d57b5c8ae3096614 stay identical across re-recordings.
-//! The scaled matrix rows (arena_tick_4/8/16 plus per-track `_sim` twins)
+//! The scaled matrix rows (arena_tick_4/8/16/32 plus per-track `_sim` twins)
 //! come from the same machine; the 16-fighter rows repeat the default-track
 //! shape beside the `arena_tick` default (same config, same fold, identical
 //! hash and allocations by construction). The non-sim arena rows hold 36 bytes
 //! per fighter for the per-brain tier state (`DepthBrain` is 168 bytes at
 //! align 8, was 132 at align 4); hashes and counts did not move.
+//!
+//! 2026-10-21, the participant cap moved 16 -> 32 (owner decision GE12), so
+//! the canonical arena run now seats 32 fighters. The appended `arena_tick_32`
+//! row is the canonical gate's row (`arena_baseline` reads it): 600 ticks,
+//! hash 12449757284742186622, 106932 bytes, 240 counts. The 16-fighter
+//! `arena_tick` row stays below unchanged as the legacy record; its hash
+//! (12857399269765116608) still stands as `arena_tick_16`, whose
+//! allocation totals moved when that row was re-recorded. Nothing was
+//! overwritten or deleted.
+//! The other scaled rows were re-recorded for the same deliberate reason
+//! (fixed-array sizes): the arena's arrays are now cap-sized, so the
+//! allocation totals moved (4 fighters 57102/60 -> 86254/61, 8 fighters
+//! 59044/65 -> 88932/66, 16 fighters 63539/151 -> 94899/152) while every
+//! hash stayed identical, which proves the sim state did not move. The
+//! `ai_decide` row moved for the same reason (hash 3634382762935724637,
+//! 4096 bytes, 1 count).
+//! No `arena_tick_32_sim` row: the `sim` track does not build in this
+//! workspace, so no sim number was invented. See the table comment.
 
 use crate::workloads::ScaledArenaTick;
+use engine_arena::MAX_PARTICIPANTS;
 use engine_core::seal_key::{self, SealKeyError, MIN_SEAL_KEY_BYTES};
 use engine_core::Fnv64;
 use std::fmt::{self, Display, Formatter};
@@ -36,6 +55,10 @@ pub struct Baseline {
 
 /// Recorded baselines, one row per workload.
 pub const BASELINES: &[Baseline] = &[
+    // 2026-10-21: the 16-fighter `arena_tick` record. The canonical run now
+    // seats 32 fighters, so the `arena_tick_32` row at the end of this table
+    // replaced this row for the canonical run; this one is kept unchanged as
+    // the legacy record (its hash still stands as `arena_tick_16`).
     Baseline {
         workload: "arena_tick",
         ticks: 600,
@@ -57,11 +80,15 @@ pub const BASELINES: &[Baseline] = &[
         alloc_bytes: 12192,
         alloc_count: 7,
     },
+    // 2026-10-21 re-record: the cap raise widened the arena's fixed arrays,
+    // so the ai decide path allocates a bigger brain table (hash
+    // 5808393643730122605, 1344 bytes, 1 count before the change). Same
+    // workload, deliberate fixed-array size change.
     Baseline {
         workload: "ai_decide",
         ticks: 600,
-        hash: 5808393643730122605,
-        alloc_bytes: 1344,
+        hash: 3634382762935724637,
+        alloc_bytes: 4096,
         alloc_count: 1,
     },
     Baseline {
@@ -85,26 +112,31 @@ pub const BASELINES: &[Baseline] = &[
         alloc_bytes: 1424,
         alloc_count: 6,
     },
+    // 2026-10-21 re-record: the cap raise widened the arena's fixed arrays, so
+    // every scaled row allocates the bigger tables. The hashes did not move
+    // (the sim state is unchanged by the cap), only the allocation totals:
+    // 4 fighters 57102/60 -> 86254/61, 8 fighters 59044/65 -> 88932/66,
+    // 16 fighters 63539/151 -> 94899/152.
     Baseline {
         workload: ScaledArenaTick::NAME_4,
         ticks: 600,
         hash: 8938032063638970347,
-        alloc_bytes: 57102,
-        alloc_count: 60,
+        alloc_bytes: 86254,
+        alloc_count: 61,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_8,
         ticks: 600,
         hash: 6433453695639145363,
-        alloc_bytes: 59044,
-        alloc_count: 65,
+        alloc_bytes: 88932,
+        alloc_count: 66,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_16,
         ticks: 600,
         hash: 12857399269765116608,
-        alloc_bytes: 63539,
-        alloc_count: 151,
+        alloc_bytes: 94899,
+        alloc_count: 152,
     },
     Baseline {
         workload: ScaledArenaTick::NAME_4_SIM,
@@ -127,6 +159,25 @@ pub const BASELINES: &[Baseline] = &[
         alloc_bytes: 569857,
         alloc_count: 645,
     },
+    // 2026-10-21, the cap-sized (32-fighter) re-record, appended: the
+    // canonical run seats 32 fighters since the owner decision of 2026-10-20.
+    // This row is the canonical gate's row (see `arena_baseline`); the
+    // 16-fighter rows above stay as they are.
+    Baseline {
+        workload: ScaledArenaTick::NAME_32,
+        ticks: 600,
+        hash: 12449757284742186622,
+        alloc_bytes: 106932,
+        alloc_count: 240,
+    },
+    // No `arena_tick_32_sim` row: the `sim` track does not build in this
+    // workspace, so its numbers cannot be measured here and are never
+    // invented. `engine-net` (the net lane) calls `LiveMatch::snapshot`,
+    // which `engine-arena` compiles only with the `sim` feature off, so
+    // `--features engine-arena/sim` fails to compile `engine-net` and the
+    // perf crate with it. The `sim` twins above (4/8/16 fighters) keep their
+    // historical values for the same reason. Record the cap-sized `sim` row
+    // where that track builds; the lookup fails loudly until then.
 ];
 
 /// Look up a baseline by workload name.
@@ -136,26 +187,44 @@ pub fn baseline(workload: &str) -> Option<Baseline> {
 
 /// Baseline for the canonical arena run on the compiled track: checkpoint
 /// hashes carry a track tag byte, so `sim` builds hash differently by
-/// design and need their own row.
+/// design and need their own row. The canonical run seats the participant
+/// cap (32 fighters since 2026-10-20), so the cap-sized row is the gate's
+/// row; the 16-fighter `arena_tick` row stays in the table as the legacy
+/// record.
+///
+/// # Panics
+///
+/// On the `sim` track the cap-sized row is not recorded yet (the track does
+/// not build in this workspace, see the table comment), so the lookup fails
+/// loudly instead of guessing a number.
 pub fn arena_baseline() -> Baseline {
     let name = if engine_arena::SIM_TRACK {
-        "arena_tick_sim"
+        ScaledArenaTick::NAME_32_SIM
     } else {
-        "arena_tick"
+        ScaledArenaTick::NAME_32
     };
-    baseline(name).expect("arena baseline recorded for this track")
+    // One panic site for both tracks: the default track has its row, so the
+    // lookup only fails on the `sim` track, where the cause is named.
+    baseline(name).expect(
+        "the cap-sized arena row is not recorded for this track: the sim track cannot be built in this workspace (engine-net does not compile with engine-arena/sim), so its row must be recorded where that track builds",
+    )
 }
 
 /// Baseline for the scaled arena run with `fighters` on the compiled track:
-/// one row per count per track. `None` for counts outside the matrix.
+/// one row per count per track. `None` for counts outside the matrix and for
+/// the cap count on the `sim` track, where the row is not recorded yet (see
+/// [`arena_baseline`]).
 pub fn scaled_arena_baseline(fighters: u8) -> Option<Baseline> {
     let name = match (fighters, engine_arena::SIM_TRACK) {
         (4, false) => ScaledArenaTick::NAME_4,
         (8, false) => ScaledArenaTick::NAME_8,
         (16, false) => ScaledArenaTick::NAME_16,
+        (MAX_PARTICIPANTS, false) => ScaledArenaTick::NAME_32,
         (4, true) => ScaledArenaTick::NAME_4_SIM,
         (8, true) => ScaledArenaTick::NAME_8_SIM,
         (16, true) => ScaledArenaTick::NAME_16_SIM,
+        // The cap-sized `sim` row is unrecorded; see `arena_baseline`.
+        (MAX_PARTICIPANTS, true) => return None,
         _ => return None,
     };
     baseline(name)
@@ -547,19 +616,23 @@ mod matrix_tests {
     #[test]
     fn scaled_rows_exist_one_per_count_on_this_track() {
         for count in crate::workloads::ARENA_MATRIX_COUNTS {
-            let recorded = scaled_arena_baseline(count).expect("one row per count per track");
+            let recorded = scaled_arena_baseline(count).expect(
+                "one row per count per track (the sim cap row is unrecorded: see arena_baseline)",
+            );
             assert_eq!(recorded.ticks, 600, "{count} keeps its tick count");
             let expected_name = if engine_arena::SIM_TRACK {
                 match count {
                     4 => ScaledArenaTick::NAME_4_SIM,
                     8 => ScaledArenaTick::NAME_8_SIM,
-                    _ => ScaledArenaTick::NAME_16_SIM,
+                    16 => ScaledArenaTick::NAME_16_SIM,
+                    _ => ScaledArenaTick::NAME_32_SIM,
                 }
             } else {
                 match count {
                     4 => ScaledArenaTick::NAME_4,
                     8 => ScaledArenaTick::NAME_8,
-                    _ => ScaledArenaTick::NAME_16,
+                    16 => ScaledArenaTick::NAME_16,
+                    _ => ScaledArenaTick::NAME_32,
                 }
             };
             assert_eq!(
@@ -789,7 +862,9 @@ mod append_only_tests {
         for count in ARENA_MATRIX_COUNTS {
             let workload = ScaledArenaTick::canonical_for(count).expect("matrix count listed");
             let report = workload.run_report();
-            let recorded = scaled_arena_baseline(count).expect("one row per count per track");
+            let recorded = scaled_arena_baseline(count).expect(
+                "one row per count per track (the sim cap row is unrecorded: see arena_baseline)",
+            );
             assert_eq!(
                 report.workload, recorded.workload,
                 "{count} names its track row"

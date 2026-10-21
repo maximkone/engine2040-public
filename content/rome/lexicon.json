@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "generated_by": "tools/codex/places.mjs",
+  "sources": [
+    {
+      "id": "pleiades",
+      "file": "pleiades-places-latest.json.gz",
+      "url": "https://atlantides.org/downloads/pleiades/json/pleiades-places-latest.json.gz",
+      "licence": "CC BY 3.0",
+      "sha256": "d9c544b2fa8a1aa79f6b3195685f27aa65625a981b9c95b1022c89d7bd61f707"
+    },
+    {
+      "id": "wikidata",
+      "file": "battles.json",
+      "url": "https://query.wikidata.org/sparql?query=SELECT%20%3Fitem%20%3FitemLabel%20%3Fkind%20%3Fcoord%20%3Fdate%20WHERE%20%7B%20%3Fitem%20wdt%3AP31%20wd%3AQ178561%20.%20BIND(wd%3AQ178561%20AS%20%3Fkind)%20%3Fitem%20wdt%3AP625%20%3Fcoord%20.%20OPTIONAL%20%7B%20%3Fitem%20wdt%3AP585%20%3Fdate%20.%20%7D%20SERVICE%20wikibase%3Alabel%20%7B%20bd%3AserviceParam%20wikibase%3Alanguage%20%22en%22.%20%7D%20%7D&format=json",
+      "licence": "CC0",
+      "sha256": "eec1913cb489b22822aca68f2d5fdbbffffe94dc3e102a9de8cf388998ff33df"
+    },
+    {
+      "id": "wikidata",
+      "file": "legions-and-places.json",
+      "url": "https://query.wikidata.org/sparql?query=SELECT%20%3Fitem%20%3FitemLabel%20%3Fkind%20%3Fplace%20%3FplaceLabel%20%3FplaceCoord%20WHERE%20%7B%20%3Fitem%20wdt%3AP31%20wd%3AQ163323%20.%20BIND(wd%3AQ163323%20AS%20%3Fkind)%20%3Fitem%20wdt%3AP276%20%3Fplace%20.%20%3Fplace%20wdt%3AP625%20%3FplaceCoord%20.%20SERVICE%20wikibase%3Alabel%20%7B%20bd%3AserviceParam%20wikibase%3Alanguage%20%22en%22.%20%7D%20%7D&format=json",
+      "licence": "CC0",
+      "sha256": "e4dba03f8c0f7e24da755881c21e52093b9644efcb2f0ccf9ccc26bfebeb76a2"
+    },
+    {
+      "id": "itinere",
+      "file": "itinere_roads.geojson",
+      "url": "https://zenodo.org/records/17122148/files/itinere_roads.geojson",
+      "licence": "CC BY 4.0",
+      "sha256": "4f8f5cf99f387bab2c509b1bf50143e9a3117691e316f2f46a9bb1d3d4b1cc34"
+    }
+  ],
+  "orders": [
+    {
+      "order": "move",
+      "label": "move",
+      "term": "procedere",
+      "meaning": "to move forward, to advance",
+      "use": "the order the player gives to move the line forward",
+      "ref": "caesar.bg.8.27",
+      "source": "perseus",
+      "file": "phi0448.phi001.perseus-lat2.xml",
+      "url": "https://raw.githubusercontent.com/PerseusDL/canonical-latinLit/master/data/phi0448/phi001/phi0448.phi001.perseus-lat2.xml",
+      "licence": "CC BY-SA 4.0",
+      "quote": "Itaque cum copiis ad eundem pontem contendit equitatumque tantum procedere ante agmen imperat legionum, quantum cum processisset, sine defatigatione equorum in eadem se reciperet castra"
+    },
+    {
+      "order": "hold",
+      "label": "hold",
+      "term": "consistere",
+      "meaning": "to stand fast, to hold the ground",
+      "use": "the order to hold the ground while the ranks close up",
+      "ref": "caesar.bg.2.11",
+      "source": "perseus",
+      "file": "phi0448.phi001.perseus-lat2.xml",
+      "url": "https://raw.githubusercontent.com/PerseusDL/canonical-latinLit/master/data/phi0448/phi001/phi0448.phi001.perseus-lat2.xml",
+      "licence": "CC BY-SA 4.0",
+      "quote": "Hi novissimos adorti et multa milia passuum prosecuti magnam multitudinem eorum fugientium conciderunt, cum ab extremo agmine, ad quos ventum erat, consisterent fortiterque impetum nostrorum militum sustinerent, priores, quod abesse a periculo viderentur neque ulla necessitate neque imperio continerentur, exaudito clamore perturbatis ordinibus omnes in fuga sibi praesidium ponerent"
+    },
+    {
+      "order": "form_line",
+      "label": "form line",
+      "term": "aciem instruere",
+      "meaning": "to draw up the battle line",
+      "use": "the order to form the line",
+      "ref": "caesar.bg.1.24",
+      "source": "perseus",
+      "file": "phi0448.phi001.perseus-lat2.xml",
+      "url": "https://raw.githubusercontent.com/PerseusDL/canonical-latinLit/master/data/phi0448/phi001/phi0448.phi001.perseus-lat2.xml",
+      "licence": "CC BY-SA 4.0",
+      "quote": "Ipse interim in colle medio triplicem aciem instruxit legionum quattuor veteranarum"
+    },
+    {
+      "order": "loose_pila",
+      "label": "loose pila",
+      "term": "pila immittere",
+      "meaning": "to throw the javelins at the enemy",
+      "use": "the order to loose the pila",
+      "ref": "caesar.bg.6.8",
+      "source": "perseus",
+      "file": "phi0448.phi001.perseus-lat2.xml",
+      "url": "https://raw.githubusercontent.com/PerseusDL/canonical-latinLit/master/data/phi0448/phi001/phi0448.phi001.perseus-lat2.xml",
+      "licence": "CC BY-SA 4.0",
+      "quote": "Celeriter nostri clamore sublato pila in hostes immittunt"
+    },
+    {
+      "order": "relieve",
+      "label": "relieve",
+      "term": "succedere",
+      "meaning": "to take the place of the tired, to relieve",
+      "use": "the order to relieve the front rank with fresh men",
+      "ref": "caesar.bg.7.85",
+      "source": "perseus",
+      "file": "phi0448.phi001.perseus-lat2.xml",
+      "url": "https://raw.githubusercontent.com/PerseusDL/canonical-latinLit/master/data/phi0448/phi001/phi0448.phi001.perseus-lat2.xml",
+      "licence": "CC BY-SA 4.0",
+      "quote": "defatigatis in vicem integri succedunt"
+    }
+  ]
+}

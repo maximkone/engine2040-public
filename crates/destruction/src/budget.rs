@@ -449,7 +449,10 @@ impl DebrisLedger {
             }
         }
         // Islands are contiguous in canonical order: one scan sleeps runs
-        // whose every shard cooled long enough.
+        // whose every shard cooled long enough. An island sleeps and wakes
+        // as one unit: a kicked shard clears its still count, so the island
+        // leaves sleep with it instead of leaving one shard awake beside
+        // neighbours that stay asleep and frozen in mid-air forever.
         let mut run_start = 0;
         while run_start < self.shards.len() {
             let island = self.shards[run_start].island;
@@ -457,17 +460,11 @@ impl DebrisLedger {
             while run_end < self.shards.len() && self.shards[run_end].island == island {
                 run_end += 1;
             }
-            let mut cooled = true;
-            for shard in &self.shards[run_start..run_end] {
-                if shard.still_ticks < sleep_limit {
-                    cooled = false;
-                    break;
-                }
-            }
-            if cooled {
-                for shard in &mut self.shards[run_start..run_end] {
-                    shard.sleeping = true;
-                }
+            let cooled = self.shards[run_start..run_end]
+                .iter()
+                .all(|shard| shard.still_ticks >= sleep_limit);
+            for shard in &mut self.shards[run_start..run_end] {
+                shard.sleeping = cooled;
             }
             run_start = run_end;
         }
@@ -833,6 +830,42 @@ mod tests {
         assert!(!ledger.is_sleeping(0));
         assert_eq!(ledger.island_sleeping(7), Some(false));
         assert!(ledger.sleep_ratio_q16() < RATIO_SCALE);
+    }
+
+    #[test]
+    fn a_kick_wakes_the_whole_island_on_the_next_step() {
+        // A kick wakes one shard. The island must then leave sleep as one
+        // unit: a shard left asleep next to an awake one freezes in mid-air
+        // forever, because an asleep shard never integrates again.
+        let cfg = DebrisBudget {
+            sleep_ticks: 5,
+            sleep_speed_mm_per_tick: 0,
+            ..arena_default_budget()
+        };
+        let mut ledger = DebrisLedger::new(&cfg).expect("valid budget");
+        let mut rest_a = seed(0, 7);
+        rest_a.pos_mm = [100, 0, 0];
+        let mut rest_b = seed(1, 7);
+        rest_b.pos_mm = [-100, 0, 0];
+        ledger.admit(0, &[rest_a, rest_b]).expect("island 7");
+        for _ in 0..6 {
+            ledger.step([0, 1500, 0]);
+        }
+        assert_eq!(ledger.island_sleeping(7), Some(true));
+        assert!(ledger.is_sleeping(0) && ledger.is_sleeping(1));
+        ledger.kick(0, [10, 0, 0]).expect("kick works");
+        assert!(!ledger.is_sleeping(0), "the kicked shard is awake at once");
+        assert!(
+            ledger.is_sleeping(1),
+            "the island is still asleep until the next step"
+        );
+        ledger.step([0, 1500, 0]);
+        assert!(
+            !ledger.is_sleeping(1),
+            "the whole island leaves sleep on the next step"
+        );
+        assert_eq!(ledger.island_sleeping(7), Some(false));
+        assert_eq!(ledger.sleeping_count(), 0, "no shard of the island sleeps");
     }
 
     #[test]

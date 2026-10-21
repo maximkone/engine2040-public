@@ -1,5 +1,5 @@
-//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, sixteen packs load on
-//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `settings`, `web` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
+//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, seventeen packs load on
+//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `settings`, `web`, `session` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
 //!
 //! Consumer: the MCP door (`super::mcp::McpServer`) lists its core tools plus
 //! the packs a session loaded (`api.load`), dispatches any verb by exact
@@ -61,6 +61,10 @@ pub mod play;
 pub mod replay;
 pub mod rules;
 pub mod scene;
+/// D17: the scene diff and the session activity feed (`scene.diff`,
+/// `session.activity`), on demand so the tool budget is untouched until a
+/// client asks for them.
+pub mod session;
 /// AD8: the verifier verbs (`replay.verify`, `replay.bisect`, `bug.replay`,
 /// `trace.summary`, `verify.proof`); feature `verify` only, and it takes the
 /// `replay` contract slot so every verb name has one owner.
@@ -75,7 +79,7 @@ pub mod web;
 /// verifier verbs replace their replay-pack stand-ins in the same slot, so a
 /// build never serves one verb name twice.
 #[cfg(feature = "verify")]
-pub const PACK_NAMES: [&str; 16] = [
+pub const PACK_NAMES: [&str; 17] = [
     scene::PACK,
     break_::PACK,
     anim::PACK,
@@ -92,11 +96,12 @@ pub const PACK_NAMES: [&str; 16] = [
     physics::PACK,
     physics_settings::PACK,
     web::PACK,
+    session::PACK,
 ];
 
 /// Every pack name, in contract order. Each name has one module below.
 #[cfg(not(feature = "verify"))]
-pub const PACK_NAMES: [&str; 16] = [
+pub const PACK_NAMES: [&str; 17] = [
     scene::PACK,
     break_::PACK,
     anim::PACK,
@@ -113,6 +118,7 @@ pub const PACK_NAMES: [&str; 16] = [
     physics::PACK,
     physics_settings::PACK,
     web::PACK,
+    session::PACK,
 ];
 
 /// Core tool: call one verb from any pack by exact name.
@@ -540,7 +546,7 @@ impl PackRegistry {
         self.packs.push(pack);
     }
 
-    /// The shipped registry: the fifteen packs of [`PACK_NAMES`], built once.
+    /// The shipped registry: the seventeen packs of [`PACK_NAMES`], built once.
     /// Registration errors never panic here; the guard test asserts the
     /// shipped list is clean.
     pub fn shipped() -> &'static Self {
@@ -569,6 +575,7 @@ impl PackRegistry {
             packs.push(physics::pack());
             packs.push(physics_settings::pack());
             packs.push(web::pack());
+            packs.push(session::pack());
             Self::build(packs)
         })
     }
@@ -787,8 +794,12 @@ impl ServerState {
         })?;
         if unload {
             self.loaded_packs.remove(def.name);
+            self.load_order.retain(|name| *name != def.name);
         } else {
             self.loaded_packs.insert(def.name);
+            if !self.load_order.contains(&def.name) {
+                self.load_order.push(def.name);
+            }
         }
         Ok(def)
     }

@@ -117,8 +117,9 @@ fn frame_of(sim: &SpineMatch) -> Vec<Frame> {
 }
 
 /// Whole millimeters of a meter value (same-machine scope, like the capture
-/// raster).
-fn mm(meters: f32) -> i32 {
+/// raster). `pub(super)`: the injected verification units place the same
+/// millimeter grid, so they read this one helper instead of a second copy.
+pub(super) fn mm(meters: f32) -> i32 {
     let magnitude = saturating_f64_to_u64((f64::from(meters) * 1000.0).abs().round());
     let signed = i64::try_from(magnitude).unwrap_or(i64::MAX);
     saturating_i64_to_i32(if meters < 0.0 { -signed } else { signed })

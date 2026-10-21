@@ -21,7 +21,7 @@ use engine_perf::alloc::{
 use engine_perf::profiler::{self, CAPTURE_FRAMES_DEFAULT, CAPTURE_FRAMES_MAX};
 use engine_perf::vram::{self, VramInfo};
 use engine_perf::workloads::ScaledArenaTick;
-use engine_physics::rigid::{is_settled, step_with_h};
+use engine_physics::rigid::{is_settled, step_with_h, step_with_h_fast};
 use engine_physics::{Body, Space};
 use engine_render::NullRenderer;
 use std::time::Instant;
@@ -189,78 +189,6 @@ fn chunk_all_settled32_narrow(chunk: &[Body]) -> bool {
     remainder_all_settled_narrow(chunk)
 }
 
-/// Cold non-finite fixup for [`mixed_step_with_h_fast`], bit-identical to
-/// the physics scalar tail.
-///
-/// Hot finite bodies never call it, so the 11k loop keeps one finite branch
-/// plus the ground clamp. Same slot order, same float order, no allocation.
-/// Caller: `mixed_step_with_h_fast` only.
-#[cold]
-#[inline(never)]
-fn mixed_step_slow(b: &mut Body) {
-    if !b.x.is_finite() {
-        b.x = 0.0;
-        b.vx = 0.0;
-    }
-    if !b.y.is_finite() || !b.vy.is_finite() {
-        b.y = b.hy;
-        b.vy = 0.0;
-        return;
-    }
-    if b.y < b.hy {
-        b.y = b.hy;
-        if b.vy < 0.0 {
-            b.vy = 0.0;
-        }
-    }
-}
-
-/// Fast per-body Euler plus ground clamp for the `mixed_space_step` fast
-/// path.
-///
-/// Same body as `step_with_h` with the `h >= FIXED_DT` guard hoisted:
-/// `mixed_space_step` calls this only when `h >= FIXED_DT`, so the
-/// ground-slide test reduces to `vy == +0` with the same truth table and
-/// the same `+ - *` order, slot order, and cold fixup. Saves one float
-/// compare plus one predictable branch per stepped body in the 1k dynamic
-/// prefix (sequential scan keeps cache misses low
-/// [geaen | 3.4.2.7 Avoiding Cache Misses], one predictable branch
-/// [geaen | 3.4.3.2 Branch Prediction]). Tiny `h` never reaches it: the
-/// `mixed_space_step` slow path keeps `step_with_h`. Same bits as the
-/// physics `step_with_h_fast`, no allocation. Caller: `mixed_space_step`
-/// fast path only.
-#[expect(clippy::inline_always, reason = "11k hot loop")]
-#[inline(always)]
-fn mixed_step_with_h_fast(b: &mut Body, h: f32, gh: f32) {
-    if b.vy.to_bits() == 0 {
-        let y_bits = b.y.to_bits();
-        let hy_bits = b.hy.to_bits();
-        if y_bits == hy_bits && (hy_bits & 0x7FFF_FFFF) < 0x4700_0000 {
-            b.x += b.vx * h;
-            if (b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000 {
-                b.x = 0.0;
-                b.vx = 0.0;
-            }
-            return;
-        }
-    }
-    b.vy -= gh;
-    b.x += b.vx * h;
-    b.y += b.vy * h;
-    let bad = u32::from((b.x.to_bits() & 0x7F80_0000) == 0x7F80_0000)
-        | u32::from((b.y.to_bits() & 0x7F80_0000) == 0x7F80_0000);
-    if bad != 0 {
-        mixed_step_slow(b);
-        return;
-    }
-    if b.y < b.hy {
-        b.y = b.hy;
-        if b.vy < 0.0 {
-            b.vy = 0.0;
-        }
-    }
-}
-
 /// Test reference whole-step beside the harness split: 32-wide
 /// settled-skip plus scalar tail, bit-identical to the physics integrate.
 /// Caller: `mixed_*` bit-identity tests only.
@@ -278,7 +206,7 @@ fn mixed_space_step(bodies: &mut [Body], dt: f32) {
                 continue;
             }
             for b in chunk.iter_mut() {
-                mixed_step_with_h_fast(b, h, gh);
+                step_with_h_fast(b, h, gh);
             }
         }
         let rem = chunks.into_remainder();
@@ -289,7 +217,7 @@ fn mixed_space_step(bodies: &mut [Body], dt: f32) {
         // skip; the scalar loop stays the fallback for tiny `h`.
         if !remainder_all_settled_narrow(rem) {
             for b in rem.iter_mut() {
-                mixed_step_with_h_fast(b, h, gh);
+                step_with_h_fast(b, h, gh);
             }
         }
         return;
@@ -299,7 +227,7 @@ fn mixed_space_step(bodies: &mut [Body], dt: f32) {
     }
 }
 
-/// Mixed prefix sliding-group predicate beside `mixed_step_with_h_fast`.
+/// Mixed prefix sliding-group predicate beside `step_with_h_fast`.
 ///
 /// True only when all thirty-two share the fast slide lane (`vy == +0`,
 /// `y == hy`, small `hy`), so the group slide keeps every bit. Velocity
@@ -354,7 +282,7 @@ fn prefix_remainder_all_sliding(remainder: &[Body]) -> bool {
     acc == 0
 }
 
-/// Mixed prefix slide update beside `mixed_step_with_h_fast`.
+/// Mixed prefix slide update beside `step_with_h_fast`.
 ///
 /// Bit-identical to the per-body slide (`x += vx * h` plus non-finite
 /// `x = 0, vx = 0` fixup) in slot order with the same float order. The
@@ -427,7 +355,7 @@ fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32, sliding: &mut bool) {
             }
             all_sliding = false;
             for b in chunk.iter_mut() {
-                mixed_step_with_h_fast(b, h, gh);
+                step_with_h_fast(b, h, gh);
             }
         }
         let rem = chunks.into_remainder();
@@ -436,7 +364,7 @@ fn mixed_prefix_step_direct(prefix: &mut [Body], dt: f32, sliding: &mut bool) {
         } else {
             all_sliding = false;
             for b in rem.iter_mut() {
-                mixed_step_with_h_fast(b, h, gh);
+                step_with_h_fast(b, h, gh);
             }
         }
         *sliding = all_sliding;
@@ -562,6 +490,12 @@ fn vram_plan_text() -> String {
 /// [`ScaledArenaTick::canonical_for`] for 8 (seed 1, 600 ticks, 20 m);
 /// the match is deterministic, so the same build gives the same peak twice.
 /// Presentation gate only, never enters the simulation hash.
+///
+/// 2026-10-21: the recorded bar in `baselines/heap_peak.txt` moved 56672 ->
+/// 86560 bytes. The cause is the participant cap 16 -> 32 (owner decision
+/// GE12): the arena's fixed slot arrays doubled, so the same 8-fighter match
+/// holds more live heap. The file itself holds one number (a second row would
+/// read as a corrupt pin), so the old bar is recorded here.
 /// Caller: `main --heap-peak` plus the `heap_peak` integration test.
 fn heap_peak_peak_bytes() -> (u64, u64, u64) {
     let workload = ScaledArenaTick {
@@ -722,14 +656,14 @@ fn render_space_step(bodies: &mut [Body], dt: f32, settled: &mut bool) {
             }
             all_settled = false;
             for b in chunk.iter_mut() {
-                mixed_step_with_h_fast(b, h, gh);
+                step_with_h_fast(b, h, gh);
             }
         }
         let rem = chunks.into_remainder();
         if !render_slice_all_settled(rem) {
             all_settled = false;
             for b in rem.iter_mut() {
-                mixed_step_with_h_fast(b, h, gh);
+                step_with_h_fast(b, h, gh);
             }
         }
         if all_settled {
@@ -1443,7 +1377,7 @@ mod tests {
             assert!(is_settled(&base), "fixture must be settled: {base:?}");
             let mut stepped = [base];
             for body in stepped.iter_mut() {
-                mixed_step_with_h_fast(body, h, gh);
+                step_with_h_fast(body, h, gh);
             }
             assert_eq!(
                 (
@@ -1524,7 +1458,7 @@ mod tests {
 
     #[test]
     fn mixed_fast_assumes_ge_fixed_matches_scalar() {
-        // Behavior: `mixed_step_with_h_fast` (h >= FIXED_DT only) matches
+        // Behavior: `step_with_h_fast` (h >= FIXED_DT only) matches
         // scalar `step_with_h` bit for bit when h == FIXED_DT; failure: any
         // lane diverges, so the hoisted guard would have moved the hash.
         // Caller: `mixed_space_step` fast path only.
@@ -1546,7 +1480,7 @@ mod tests {
                 step_with_h(body, h, gh);
             }
             for body in b.iter_mut() {
-                mixed_step_with_h_fast(body, h, gh);
+                step_with_h_fast(body, h, gh);
             }
             assert_eq!(
                 (

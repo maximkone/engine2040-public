@@ -2,6 +2,9 @@
 //! Pathfinding lives in engine-nav (single A* owner); world only emits cells.
 
 pub mod cells;
+/// The dig layer: an integer height grid in millimetres where earth moves
+/// between cells and conserves its volume.
+pub mod dig;
 pub mod ground;
 /// Map assembly manifests: versioned cell bytes with per-cell asset lists and
 /// the EVIDENCE provenance gate.

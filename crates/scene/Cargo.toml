@@ -23,8 +23,6 @@ uuid = { version = "1", features = ["js"] }
 [dev-dependencies]
 serde_json = "1"
 
-# N1 math lane: reserved name (unused dep removed).
 # NJ1 authored-file lane: canonical JSON for provenance, opt-in.
 [features]
-math = []
 json = ["dep:serde_json"]

@@ -19,8 +19,13 @@ pub const EXTRACTION_SCHEMA: u32 = SCHEMA_VERSION;
 /// the layout changes; every older frame then refuses with a refresh hint.
 pub const PRESENTATION_FRAME_SCHEMA: u32 = 1;
 
-/// Most actors one frame carries (the arena participant cap).
-pub const MAX_FRAME_ACTORS: usize = 16;
+/// Most actors one frame carries: the arena participant cap.
+///
+/// 2026-10-21: a literal (never a numeric cast) pinned to the canonical cap
+/// at compile time, the house pattern of `crates/game/src/director.rs:271`:
+/// a cap change fails the build here instead of mis-sizing the frame.
+pub const MAX_FRAME_ACTORS: usize = 32;
+const _: () = assert!(engine_arena::MAX_PARTICIPANTS == 32);
 
 /// Leading bytes of every frame, so a foreign file refuses before parsing.
 const FRAME_MAGIC: [u8; 4] = *b"E2PF";
@@ -418,12 +423,14 @@ mod tests {
 
     #[test]
     fn bad_counts_flags_and_numbers_refuse() {
+        // One past the participant cap: the count byte itself must refuse.
+        let over_cap = u8::try_from(MAX_FRAME_ACTORS + 1).expect("cap fits a byte");
         let mut bytes = sample_frame().encode();
-        bytes[FRAME_HEADER_BYTES - 1] = 17;
+        bytes[FRAME_HEADER_BYTES - 1] = over_cap;
         assert!(PresentationFrame::decode(&bytes)
             .unwrap_err()
             .to_string()
-            .contains("17 actors"));
+            .contains(&format!("{over_cap} actors")));
         let mut bytes = sample_frame().encode();
         let hit_at = FRAME_HEADER_BYTES + FRAME_ACTOR_BYTES - 1;
         bytes[hit_at] = 2;

@@ -35,7 +35,7 @@ checkpoint hash. Default build is std-only. Feature `sim` adds Rapier controller
 | `TickEvents` / `TickBreaks` / `TickMatchEvents` | `{ tick, events: Vec<FightEvent> }` / `{ tick, events: Vec<BreakEvent> }` / `{ tick, exchange, sweep }`. Fighter-ID order; breaks are bond snaps then freed chunks. | events feed the hash; match events are observed only | none |
 | `FighterState` | `{ id, pos: [f32;3] (feet, m), yaw: f32 (rad) }` | presentation view | none |
 | `MatchSnapshot` | Opaque full restore state (tick, poses, wishes, buttons, combat, match track, brains, locomotion, destruction; controllers under `sim`). Single-use. | restore resimulates identically | consumed by `resume` |
-| `ArenaRules` | `{ version, teams: [u8;16], collision: bool, pillars: [Option<Pillar>;8], balance: bool }` | v2 digest adds tags (1.3) | `is_known()` |
+| `ArenaRules` | `{ version, teams: [u8;32], collision: bool, pillars: [Option<Pillar>;8], balance: bool }` | v2 digest adds tags (1.3) | `is_known()` |
 | `FighterInput`, `FighterTape`, `FighterId`, `Buttons` | Re-exported from `engine-input` (section 4). | canonical bytes | `FighterError` |
 
 Re-exports: `BodyId`, `BodyInput`, `BodyTape` (genre-neutral aliases), `MAX_PARTICIPANTS` (32),
@@ -90,7 +90,7 @@ Tests: `node tools/gh-check.mjs cargo test -p engine-arena --lib`. Named: `neigh
 | Item | Behaviour |
 |---|---|
 | `ArenaRules::V1` | `version = FIGHT_RULES_V1`, solo teams, `collision = false`, no pillars, `balance = false`. |
-| `v2_free_for_all()` (= `v2_teams(solo_teams())`); `v2_teams(teams: [u8;16])`; `with_pillar(self, Pillar) -> Option<Self>` | v2 sets `collision = true`, `balance = true`. Equal team ids never strike. `None` when 8 pillar slots are used. |
+| `v2_free_for_all()` (= `v2_teams(solo_teams())`); `v2_teams(teams: [u8;32])`; `with_pillar(self, Pillar) -> Option<Self>` | v2 sets `collision = true`, `balance = true`. Equal team ids never strike. `None` when 8 pillar slots are used. |
 | v2 rules (`FIGHT_RULES_V2` docs) | Impacts need the sweep-capsule test over integer-mm poses and `Fixed` facing. Teammates are not struck. Block and parry need the shield cone to face the attacker. Simultaneous impacts resolve from pre-resolution state. Brain wishes act in the foe frame. |
 | v2 digest (`ArenaRules::fold`) | version u32, team ids, then `0xC0` plus pillar footprints (when collision runs), then `0xB1` plus each slot's `BalanceState::state_hash`, `0xB2` plus `StaggerMemory::state_hash`, `0xB3` plus `LimbPool::state_hash` (when balance is on). V1 with no collision and no balance returns the hash unchanged. |
 | `collides()` | `collision && !cfg!(feature = "sim")`. Under `sim` the controller resolves motion. |
@@ -192,7 +192,7 @@ module a pure resolver that the arena calls.
 
 | Item | Signature and behaviour |
 |---|---|
-| `FightState::new(count: u8) -> Result<Self, CombatError>` | `count` 1..=16. Fields `fighters: [FighterState; 16]`, `fighter_count`, `tick`, `hitstop`. |
+| `FightState::new(count: u8) -> Result<Self, CombatError>` | `count` 1..=32. Fields `fighters: [FighterState; 32]`, `fighter_count`, `tick`, `hitstop`. |
 | `FighterState` | `hp_permille` (0..=1000), `stamina` (0..=100), `attack_age`, `is_attacking`, `attack_kind`, `attack_buffer: StreamBuffer`, `block_age` (`u32::MAX` when not blocking), `is_blocking`, `dodge_age`, dodging, stagger, knockdown. Methods: `can_act`, `invulnerable[_with]`, `parry_open[_with]`. |
 | `try_step(&[FighterInput], &mut FightState) -> Result<Vec<FightEvent>, CombatError>` | Strict, V1 rows. Validates first; a rejected tick leaves state untouched. |
 | `try_step_into(inputs, state, &mut Vec<FightEvent>) -> Result<(), CombatError>` | Reused buffer; no heap per tick. `step`, `step_into` are lenient. |

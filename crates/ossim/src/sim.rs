@@ -272,6 +272,8 @@ impl Sim {
 
     /// Force a page fault on a running process, the same path ambient faults
     /// take. Tools, tests and a tutorial use it; a running process is required.
+    /// The swap file must have room for the pages: a full swap refuses the
+    /// fault with [`Refusal::NoSwap`] instead of over-committing the file.
     pub fn fault(&mut self, process: u32) -> Result<(), Refusal> {
         let Some((slot, p)) = self.locate(process) else {
             return Err(Refusal::NoSuchProcess);
@@ -279,8 +281,7 @@ impl Sim {
         if p.state != ProcState::Running || !p.resident {
             return Err(Refusal::WrongState);
         }
-        self.fault_slot(slot);
-        Ok(())
+        self.fault_slot(slot)
     }
 
     fn apply(&mut self, action: Action, now: u64) -> Result<(), Refusal> {
@@ -363,7 +364,10 @@ impl Sim {
         if !p.resident || !matches!(p.state, ProcState::Idle | ProcState::Running) {
             return Err(Refusal::WrongState);
         }
-        if self.swap_used + u16::from(p.pages) > self.swap_slots {
+        // The swap file must hold the pages when they land, so a swap already
+        // on its way counts against the room: two swaps in flight may not
+        // both pass a check that only looks at the pages already in swap.
+        if self.swap_committed() + u16::from(p.pages) > self.swap_slots {
             return Err(Refusal::NoSwap);
         }
         if let Some(cpu) = self.cpu_of(p.id) {
@@ -578,7 +582,9 @@ impl Sim {
             return;
         };
         match word % 3 {
-            0 => self.fault_slot(slot),
+            0 => {
+                let _ = self.fault_slot(slot);
+            }
             1 => self.request_io_slot(slot, now),
             _ => {}
         }
@@ -620,7 +626,7 @@ impl Sim {
         let resident = if self.ram_used + pages16 <= self.ram_pages {
             self.ram_used += pages16;
             true
-        } else if self.swap_used + pages16 <= self.swap_slots {
+        } else if self.swap_committed() + pages16 <= self.swap_slots {
             self.swap_used += pages16;
             false
         } else {
@@ -686,12 +692,18 @@ impl Sim {
         });
     }
 
-    fn fault_slot(&mut self, slot: usize) {
+    fn fault_slot(&mut self, slot: usize) -> Result<(), Refusal> {
         let Some(p) = self.processes[slot] else {
-            return;
+            return Err(Refusal::NoSuchProcess);
         };
         if p.state != ProcState::Running || !p.resident {
-            return;
+            return Err(Refusal::WrongState);
+        }
+        // A page fault has to land in the swap file. A full swap refuses the
+        // fault: the process keeps running instead of pushing the swap file
+        // past the slots the stage owns.
+        if self.swap_committed() + u16::from(p.pages) > self.swap_slots {
+            return Err(Refusal::NoSwap);
         }
         if let Some(cpu) = self.cpu_of(p.id) {
             self.cpus[cpu] = None;
@@ -708,6 +720,7 @@ impl Sim {
             kind: EventKind::PageFault,
             process: p.id,
         });
+        Ok(())
     }
 
     fn finish(&mut self, slot: usize, kind: EventKind) {
@@ -764,6 +777,20 @@ impl Sim {
 
     fn cpu_of(&self, process: u32) -> Option<usize> {
         self.cpus.iter().position(|cpu| *cpu == Some(process))
+    }
+
+    /// Pages the swap file must hold right now: the ones already in swap
+    /// plus the ones on their way there (a swap-out in flight claims its
+    /// pages, they are counted when the swap lands).
+    fn swap_committed(&self) -> u16 {
+        let in_flight = self
+            .processes
+            .iter()
+            .flatten()
+            .filter(|p| p.state != ProcState::Done && p.pending == Pending::SwapOut)
+            .map(|p| u16::from(p.pages))
+            .fold(0u16, |sum, pages| sum.saturating_add(pages));
+        self.swap_used.saturating_add(in_flight)
     }
 
     fn free_slot(&self) -> Option<usize> {

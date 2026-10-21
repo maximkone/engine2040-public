@@ -74,6 +74,46 @@ the fuk out of it so we save our poor cpu too".
 - The golden check goes through gh-check (`cargo test -p engine2040 --release --test proof_cli`), so
   GitHub builds the fat-LTO binary, not the PC (AGENTS.md "Proof").
 
+## 2c. The GPU and window legs stay on this PC (lead decision 2026-10-21)
+
+RL5, RL18, RL20, RL27 and RL28 need a real GPU adapter and a real window. The mirror's
+`windows-latest` runner has neither, so these rows are not a CI check and never become one:
+they are a PC-only leg, and they stay OPEN until a dated receipt exists under `docs/research/`.
+
+The recipe, one command per step, no invented flags:
+
+1. Build the window binary in release: `cargo build --release -p engine-game --features app --bin
+   arena` (the product check rebuilds it when it is older than the code, one cargo slot).
+2. Run the keeper's own eyes: `node tools/product-check.mjs`. It runs arena.exe twice (a look run
+   with captures, a timing run), scores them against `tools/product-bar.json` and writes
+   `target/reports/product/latest.md` plus the captures under
+   `target/reports/product/runs/<sha>-<utc>/`.
+3. Pin the stills layout: `node tools/q1-check.mjs` (read-only scan of `target/q1`: 4 synth and 30
+   orbit PNGs, 2 manifests).
+4. Read the frames: `node tools/frame-triage.mjs`. It counts the fighter-kit pixels in each frame
+   and passes only above the floor; the manifest's claimed fighter count is reported and never
+   decides.
+5. Look at every PNG. The numbers do not replace the eye, and the eye does not replace the numbers.
+6. Write the receipt: a dated file under `docs/research/` naming the commit, the GPU, the frame
+   count, the triage numbers and what the eye saw.
+
+A capture run is a heavy job, so it goes through center's queue instead of the box:
+
+```
+cd C:\empire\center
+HEAVY_CMD_B64=<base64 of the command> node heavy.mjs run --repo engine --class priority
+```
+
+`priority` is the class the `proof` and `finish` runs take: it goes first in the queue, and
+every wait is bounded (20 minutes), then the command runs anyway and the log says `failopen`.
+When the frames must be timed, ask for `--class exclusive` instead: it waits for half the slots
+to drain and holds that half, so the capture run is not fighting the other lanes for the same
+cores. Center's own note from 2026-10-13 says exclusive was meant for fresh-clone runs, so it
+is a deliberate choice for a timed capture, not the default.
+
+A row ticks when the receipt exists and names the commit it was measured at. A CI run that never
+opened a window proves nothing about these rows and does not tick them.
+
 ## 3. Smaller levers, in order
 
 | Row | Lever | Why | Cost |

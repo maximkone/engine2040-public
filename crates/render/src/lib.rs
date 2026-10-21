@@ -370,6 +370,11 @@ pub mod pass_report;
 /// Shadowed spot lights (flashlights and lamps) on the clustered path.
 pub mod spot;
 
+/// Shoulder camera geometry: how far behind the seat the eye sits, how far
+/// to the side and how high. Std-only constants, so the headless crates that
+/// place a fight inside a room read the same numbers the renderer uses.
+pub mod shoulder;
+
 /// Twin fighter draw bind (RL26): one box body per fighter slot (the hero
 /// stand-in plus staged opponents) for the window twin's
 /// `--fighters 8 --scene arena` frame list. Bind glue over the v1 draw

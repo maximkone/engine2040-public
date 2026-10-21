@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "askAboveBytes": 524288000,
+  "sources": [
+    {
+      "id": "perseus",
+      "label": "Perseus canonical Latin literature",
+      "format": "TEI XML",
+      "licence": "CC BY-SA 4.0",
+      "rateLimitMs": 2000,
+      "sizeCapBytes": 2097152,
+      "unitBytes": 692000,
+      "url": "https://raw.githubusercontent.com/PerseusDL/canonical-latinLit/master/data/phi0448/phi001/phi0448.phi001.{id}.xml",
+      "items": [
+        { "id": "perseus-lat2", "name": "phi0448.phi001.perseus-lat2.xml" },
+        { "id": "perseus-eng2", "name": "phi0448.phi001.perseus-eng2.xml" }
+      ],
+      "note": "Caesar, Bellum Gallicum: the Latin and the English XML of phi0448.phi001. The Greek side lives in the canonical-greekLit repo and joins the codex in the same folder when a game entry needs it."
+    },
+    {
+      "id": "gutenberg",
+      "label": "Project Gutenberg plain text",
+      "format": "UTF-8 text",
+      "licence": "US public domain",
+      "rateLimitMs": 5000,
+      "sizeCapBytes": 8388608,
+      "unitBytes": 1048576,
+      "url": "https://www.gutenberg.org/ebooks/{id}.txt.utf-8",
+      "items": [
+        { "id": "10657", "name": "caesar-bellum-gallicum.txt" },
+        { "id": "20239", "name": "vitruvius-de-architectura.txt" },
+        { "id": "44125", "name": "polybius-histories-vol1.txt" },
+        { "id": "44126", "name": "polybius-histories-vol2.txt" },
+        { "id": "2995", "name": "tacitus-germania.txt" },
+        { "id": "16927", "name": "tacitus-histories.txt" },
+        { "id": "6400", "name": "suetonius-twelve-caesars.txt" }
+      ],
+      "note": "About 1 MB per book. The plan also lists Pliny's Natural History volumes; their ebook ids are not in docs/plan/rome-codex.md, so they are added here as they are confirmed against the site."
+    },
+    {
+      "id": "wikipedia",
+      "label": "Wikipedia article list of the Roman army categories",
+      "format": "JSON",
+      "licence": "CC BY-SA 4.0",
+      "rateLimitMs": 1000,
+      "sizeCapBytes": 1048576,
+      "unitBytes": 65536,
+      "url": "https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category%3A{id}&cmlimit=500&format=json",
+      "items": [
+        { "id": "Military_of_ancient_Rome", "name": "category-military-of-ancient-rome.json" },
+        { "id": "Roman_legions", "name": "category-roman-legions.json" }
+      ],
+      "note": "Each answer lists the member articles (88 and 77 in the plan). One member summary is https://en.wikipedia.org/api/rest_v1/page/summary/<title>, fetched with the same rate limit as the member title is added to the table."
+    },
+    {
+      "id": "wikidata",
+      "label": "Wikidata query of the Roman legions and their places",
+      "format": "JSON",
+      "licence": "CC0",
+      "rateLimitMs": 60000,
+      "sizeCapBytes": 33554432,
+      "unitBytes": 2227028,
+      "url": "https://query.wikidata.org/sparql?query={id}&format=json",
+      "items": [
+        {
+          "id": "SELECT ?legion ?legionLabel ?place ?placeLabel ?coord WHERE { ?legion wdt:P31 wd:Q11303 . OPTIONAL { ?legion wdt:P276 ?place . } OPTIONAL { ?legion wdt:P625 ?coord . } SERVICE wikibase:label { bd:serviceParam wikibase:language \"en\". } }",
+          "name": "legions-and-places.json"
+        }
+      ],
+      "note": "One query every 60 s, as the plan states. The query text is url encoded into the sparql url."
+    },
+    {
+      "id": "pleiades",
+      "label": "Pleiades ancient world places",
+      "format": "JSON gz",
+      "licence": "CC BY 3.0",
+      "rateLimitMs": 2000,
+      "sizeCapBytes": 157286400,
+      "unitBytes": 135788869,
+      "url": "https://atlantides.org/downloads/pleiades/json/pleiades-places-latest.json.gz",
+      "items": [{ "id": "places", "name": "pleiades-places-latest.json.gz" }],
+      "note": "The place ids of the map (pleiades:423025 and friends) come from this dump. The gz stays gz: the loader gunzips it."
+    },
+    {
+      "id": "itinere",
+      "label": "Itiner-e Roman road network",
+      "format": "GeoJSON",
+      "licence": "CC BY 4.0",
+      "rateLimitMs": 5000,
+      "sizeCapBytes": 81861920,
+      "unitBytes": 81861920,
+      "url": "https://zenodo.org/records/17122148/files/itinere_roads.geojson",
+      "items": [{ "id": "roads", "name": "itinere_roads.geojson" }],
+      "note": "78 MB of Roman roads, the biggest single pull of the codex. March time on a road comes from this file."
+    },
+    {
+      "id": "met",
+      "label": "Met Museum open access object list",
+      "format": "CSV",
+      "licence": "CC0",
+      "rateLimitMs": 1000,
+      "sizeCapBytes": 348000000,
+      "unitBytes": 340770716,
+      "url": "https://media.githubusercontent.com/media/metmuseum/openaccess/master/MetObjects.csv",
+      "items": [{ "id": "csv", "name": "MetObjects.csv" }],
+      "note": "The Met retired its search api in 2024 (it answers 410 now), so the list comes from the open access csv on github, 340 MB with the lfs media url. The one object api, https://collectionapi.metmuseum.org/public/collection/v1/objects/{id}, still answers and is the second form once the csv names the ids."
+    },
+    {
+      "id": "artic",
+      "label": "Art Institute of Chicago open access search",
+      "format": "JSON",
+      "licence": "CC0",
+      "rateLimitMs": 1000,
+      "sizeCapBytes": 33554432,
+      "unitBytes": 2097152,
+      "url": "https://api.artic.edu/api/v1/artworks/search?q={id}",
+      "items": [
+        { "id": "roman helmet", "name": "search-roman-helmet.json" },
+        { "id": "roman gladius", "name": "search-roman-gladius.json" },
+        { "id": "roman fresco", "name": "search-roman-fresco.json" }
+      ],
+      "note": "The search answer holds the artwork ids and the IIIF image ids. The image itself is https://www.artic.edu/iiif/2/<image_id>/full/843,/0/default.jpg."
+    },
+    {
+      "id": "commons",
+      "label": "Wikimedia Commons Trajan's Column files",
+      "format": "JSON",
+      "licence": "per file, as the file page states",
+      "rateLimitMs": 1000,
+      "sizeCapBytes": 8388608,
+      "unitBytes": 1048576,
+      "url": "https://commons.wikimedia.org/w/api.php?action=query&titles=Category%3A{id}&prop=imageinfo&iiprop=url%7Cextmetadata%7Cmime&iilimit=500&format=json",
+      "items": [{ "id": "Trajan's Column", "name": "category-trajans-column.json" }],
+      "note": "About 280 files in the category. The answer holds every file url and its licence string, so the reference boards can point at the file and the licence together."
+    },
+    {
+      "id": "polyhaven",
+      "label": "Poly Haven texture list",
+      "format": "JSON",
+      "licence": "CC0",
+      "rateLimitMs": 1000,
+      "sizeCapBytes": 33554432,
+      "unitBytes": 855237,
+      "url": "https://api.polyhaven.com/assets?type=textures",
+      "items": [{ "id": "textures", "name": "polyhaven-assets-textures.json" }],
+      "note": "The answer holds every texture slug; the files of one texture are https://api.polyhaven.com/files/<slug>. The game takes the handful it needs, not the whole set."
+    },
+    {
+      "id": "smiths",
+      "label": "Smith's Dictionary of Antiquities, one entry at a time",
+      "format": "HTML",
+      "licence": "1875 text is public domain; Thayer's own notes are his",
+      "rateLimitMs": 2000,
+      "sizeCapBytes": 2097152,
+      "unitBytes": 262144,
+      "url": "https://penelope.uchicago.edu/Thayer/E/Roman/Texts/secondary/SMIGRA*/{id}.html",
+      "items": [
+        { "id": "Ara", "name": "ara.html" },
+        { "id": "Cloaca", "name": "cloaca.html" },
+        { "id": "Gladius", "name": "gladius.html" },
+        { "id": "Scutum", "name": "scutum.html" },
+        { "id": "Castra", "name": "castra.html" },
+        { "id": "Pons", "name": "pons.html" },
+        { "id": "Testudo", "name": "testudo.html" }
+      ],
+      "note": "No bulk scrape: one entry per request, added as the game cites it. The folder name holds a literal star (SMIGRA*), so the url keeps it. An entry that answers 404 is reported and left out, never faked."
+    },
+    {
+      "id": "latin-audio",
+      "label": "Wikimedia Commons Latin pronunciation audio",
+      "format": "JSON",
+      "licence": "per file, as the file page states",
+      "rateLimitMs": 1000,
+      "sizeCapBytes": 8388608,
+      "unitBytes": 1048576,
+      "url": "https://commons.wikimedia.org/w/api.php?action=query&titles=Category%3A{id}&prop=imageinfo&iiprop=url%7Cextmetadata%7Cmime&iilimit=500&format=json",
+      "items": [{ "id": "Latin pronunciation", "name": "category-latin-pronunciation.json" }],
+      "note": "The answer holds every ogg url and its licence, so the voice of a legion can carry the licence with it."
+    }
+  ]
+}

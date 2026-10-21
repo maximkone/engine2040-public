@@ -237,10 +237,6 @@ impl Atlas {
     pub const CELL_W: u32 = 6;
     /// Atlas cell height in pixels: 7 glyph pixels plus 1 descender row.
     pub const CELL_H: u32 = 8;
-    /// Full font atlas width in pixels (`COLS * CELL_W`).
-    pub const ATLAS_W: u32 = 96;
-    /// Full font atlas height in pixels (`ROWS * CELL_H`).
-    pub const ATLAS_H: u32 = 48;
 
     /// Empty atlas handle; the bitmaps live in static data. Pure.
     #[must_use]

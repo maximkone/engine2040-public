@@ -51,6 +51,9 @@ mod spec_parse;
 use spec_parse::*;
 mod spine;
 pub use spine::{SpineRule, SPINE_RULES};
+// Injected verification units (arXiv 2605.07442 port): one gameplay claim
+// checked in isolation, the state it needs reached by playing to it.
+pub mod inject;
 
 // ---- spec types -----------------------------------------------------------
 

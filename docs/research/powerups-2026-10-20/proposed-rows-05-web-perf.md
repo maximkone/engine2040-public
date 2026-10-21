@@ -416,3 +416,69 @@ Each line is a correction to the wave's earlier notes, with the file and line th
 | The potato gate (G9) | `tools/potato-check.mjs` (18346 bytes) with its own test, `crates/render/src/tier.rs`, and the GS10 tier rules that landed as `dc517ed` | Closed. |
 | The draw count in the receipt | `crates/web/src/arena.rs` already carried `receipt.draws` and `last_cpu_ms` into `crates/web/src/arena_view.rs` before this wave | WEBX-02 adds the window over them, not the first count. |
 | `basisu 0.1.0` | `docs/research/steals-2026-10-11/engine-landscape.md:181` | Fixed in this wave: the repo, the licence and the date read are now on that line. |
+
+---
+
+## What landed in this wave (G5's own landing, 2026-10-21)
+
+**Files changed (code).**
+- `crates/audio/src/block.rs` (new): `render_block` — one block of interleaved stereo out of the
+  mixer, with the loudness number, clipped and NaN-proof.
+- `crates/audio/src/lib.rs`: the `block` module and its re-export.
+- `crates/web/src/audio_worklet.rs` (new): the worklet processor's JavaScript (inside the wasm
+  binary, loaded from a blob URL), the counters, and the wasm32 glue (blob → `addModule` →
+  `AudioWorkletNode` → the message pump).
+- `crates/web/src/audio.rs`: `AudioPath`, `AudioFacts` and `PageSource` (the engine's mixer
+  over the placeholder cue bank, the chime as the fallback).
+- `crates/web/src/browser.rs`: the worklet sink with the deprecated `ScriptProcessorNode` as the
+  fallback, the page's `#audioworklet` line, and `audio_facts()` for the receipt.
+- `crates/web/src/perf_count.rs` (new): `FramePerf` — the per-frame draw count and CPU
+  milliseconds with a 120-frame window (worst, 95th percentile, mean).
+- `crates/web/src/arena_view.rs`: `ReceiptFacts` and the receipt line's new fields
+  (`cpuP95Ms`, `cpuMaxMs`, `drawsMax`, `audioPath`, `audioBlocks`, `audioUnderruns`, `audioPeak`).
+- `crates/web/src/arena.rs`: the frame counters feed the window; the receipt carries them; the
+  HUD line shows the p95 and the draw count.
+- `crates/web/src/lib.rs`, `crates/web/Cargo.toml` (the web-sys features: `AudioWorklet`,
+  `AudioWorkletNode`, `AudioWorkletNodeOptions`, `Blob`, `BlobPropertyBag`, `MessageEvent`,
+  `MessagePort`, `Url`), `crates/web/index.html` (the `#audioworklet` line).
+- `crates/net/src/heal.rs`: the three new supervisor proof refusals mapped onto the net layer's
+  `NotRegistered` word (the observe crate's API grew while we worked; crates/net is G5's).
+
+**No new Cargo dependency, so `deny.toml` needs no change.** The worklet path is a hand-written
+processor, not `cpal` (see WEBX-01). `deny.toml` already allows Apache-2.0, MIT and Unlicense,
+which is what the donors in the other rows carry.
+
+**Proofs.**
+- `node tools/gh-check.mjs cargo test -p engine-audio --lib block::` → `5 passed; 0 failed`
+  (runner run 39514568025, current tree).
+- `node tools/gh-check.mjs cargo test -p engine-web --lib` → `149 passed; 1 failed` (runner run
+  39512679973). The one failure is foreign: `input::tests::bad_slot_or_facing_is_refused_not_clamped`
+  in `crates/web/src/input.rs:797` (a file this lane did not touch; the input crate's slot
+  bounds moved under us). Every test this lane added or changed passes, including
+  `audio_worklet::tests::*`, `audio::tests::the_page_source_is_the_mixer_over_the_placeholder_bank`,
+  `perf_count::tests::*` and `arena_view::tests::the_receipt_carries_the_window_numbers_and_the_audio_path`.
+  Later runs of the same line stopped earlier in the tree on foreign reds that moved while we
+  worked (`crates/arena/src/fork.rs` missing `Sim::cuts`, `crates/arena` using `engine_ecs`
+  without the dependency, `crates/physics/src/cloth.rs` calling a missing `layers::collides`),
+  all in files this lane does not own.
+- wasm32 type check of the new modules (a scratch crate with the copies of `audio.rs`,
+  `audio_worklet.rs`, `perf_count.rs` and `arena_view.rs` and a stub of the engine-audio API):
+  `cargo check --target wasm32-unknown-unknown` → clean, and `cargo test` → `44 passed; 0 failed`.
+  The repo's own wasm leg (`cargo check -p engine-web --target wasm32-unknown-unknown`, and
+  `.github/workflows/wasm-check.yml`) could not finish on this PC or on the runner while
+  `crates/physics/src/cloth/**` is being refactored by another lane (the run stops in
+  `engine-physics` with `E0624`/`E0425` in that crate, never in `engine-web`). The two
+  wasm-only modules this lane changed (`browser.rs`, `arena.rs`) are therefore still unproven
+  on the wasm target: the CI wasm leg must run for them on the next push.
+
+**Still open.**
+- The headless run that proves the worklet in a real browser (`audio: path=worklet blocks=<n>`):
+  it needs the web-build job, and the browser check tool belongs to another lane.
+- The fight cues as the worklet's sound: WEB16 (crates/game is held).
+- The RenderBundle half of QW10: crates/render is held by GS44.
+- The KTX2/Basis landing (WEBX-03): crates/assets is held by the WEB6 agent.
+- A shared-tree hazard to note: another session reverted this lane's files twice while it
+  worked (`crates/web/src/audio.rs`, `crates/web/src/{arena,arena_view,browser,lib}.rs`,
+  `crates/web/Cargo.toml`, `crates/audio/src/{block,lib}.rs`). Everything was re-applied and
+  re-proved; a copy of every file this lane changed sits in `%TEMP%\opencode\g5-backup2` if
+  they vanish again. The lead should land these paths by name.

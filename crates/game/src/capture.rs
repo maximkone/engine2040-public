@@ -1360,6 +1360,7 @@ fn manifest_number_field(text: &str, key: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_input::MAX_PARTICIPANTS;
 
     fn test_config(ticks: u32) -> GameConfig {
         GameConfig {
@@ -1900,7 +1901,8 @@ mod tests {
         assert!(arena_capture_config("dungeon", 2040, 48, 8).is_err());
         assert!(arena_capture_config("arena", 2040, 48, 1).is_err());
         assert!(arena_capture_config("arena", 2040, 0, 8).is_err());
-        assert!(arena_capture_config("arena", 2040, 48, 17).is_err());
+        // One fighter past the participant cap refuses.
+        assert!(arena_capture_config("arena", 2040, 48, MAX_PARTICIPANTS + 1).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1938,9 +1940,9 @@ mod tests {
         let mut bad_buttons = scripted_inputs();
         bad_buttons[2].buttons = Buttons(0x08);
         assert!(decode_tape_bytes(&encode_tape_bytes(&bad_buttons)).is_err());
-        // Unknown fighter slot fails.
+        // Unknown fighter slot fails: one past the participant cap.
         let mut bad_slot = good.clone();
-        bad_slot[HEADER_BYTES + 4] = 16;
+        bad_slot[HEADER_BYTES + 4] = MAX_PARTICIPANTS;
         assert!(decode_tape_bytes(&bad_slot).is_err());
         // Missing files fail with IO, never a panic.
         assert!(matches!(

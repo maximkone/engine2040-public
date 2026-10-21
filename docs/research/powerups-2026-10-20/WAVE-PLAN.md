@@ -53,3 +53,32 @@ speedup tools/ + .github/workflows/ + root Cargo.toml + crates/workspace-hack.
 - No agent edits a Cargo.toml of a crate it does not own.
 - Nobody runs two cargo commands at once. "Blocking waiting for file lock" means another build holds `target/`: wait.
 - Nobody touches `.git/index.lock`, never `git clean`, never deletes under `target/`.
+
+## Commit rule, changed 2026-10-21 after a wipe
+
+**Lanes commit their own paths AND push master, with the proof line in the commit body.**
+
+The owner landed the same rule in `AGENTS.md` on 2026-10-21 ("we work locally"):
+commit by path and push each small change as soon as it is proven; never leave
+work uncommitted across a pull; pull with `--no-rebase --no-edit` and **no
+`--autostash`**; when a pull refuses because an uncommitted file is also changed
+upstream, wait for its owner to commit - never stash, commit or revert their work
+to force the merge through; the `Empire-AutoPush` task is snapshot-only for
+engine2040 (it holds the dirty tree on `refs/auto-backup/master` and never
+commits, merges or pushes master). Sessions own their commits and their pushes.
+
+Why the wave changed too: a session in the shared tree restored tracked files
+under the wave's lanes at 2026-10-21 (no `git reset` in the reflog, so it was a
+path restore, which leaves no trace). The smart lane's audio wiring was
+uncommitted and gone; the plan trace came back at the untightened version. A path
+restore is not revertible by git, and uncommitted work has no copy of it.
+
+So: the lead still merges the board and still owns the docs of record, but a lane
+that owns a crate commits that crate's paths itself, by path, with the proof
+command and its one-line result in the body, and pushes master. The pre-commit
+hook still refuses a commit whose rust-quality ratchet regresses; that refusal is
+not to be bypassed with `--accept` on fresh code. If a push is rejected because
+the remote moved, pull without autostash and push again - and if the pull refuses
+because another lane has an uncommitted file, wait for that lane.
+
+

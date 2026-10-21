@@ -26,6 +26,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `crates/render/src` = 1 (today 6), longest equal 8-bit run on a 0.002..0.02
   ramp <= 4 px (today about 60). F2P: the hue and one-copy tests fail today.
   P2P: golden unchanged. needs: none.
+  Correction 2026-10-21: duplicate of PW12 (`material: the colour metric, the hue-keeping tonemap and the dither gate`, which closes RL34), and PW12 records that the six-ACES half is already closed by `aces_one_source_gate` (`crates/render/src/lib.rs:494`); do not run both - PW12 is the owning row.
 - [ ] RL35 render: sun shadows from a static arena map and a dynamic fighter map,
   texel-snapped, PCF — the sun pass redraws every item into one 256 map over the
   32 m pit each frame (12.5 cm texel, `twin_shadow.rs:57,65`,
@@ -44,6 +45,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   equal to the dynamic caster count and the static map re-renders at most once
   per 600 frames; shadow passes <= 1.0 ms in `arena per-pass`. F2P: every item is
   redrawn into one 256 map each frame. P2P: golden unchanged. needs: EG11, RL60.
+  Correction 2026-10-21: duplicate of PW06 (`render: the sun shadow the frame samples, 2 cascades`, which closes RL35 and QA4); do not run both - PW06 is the owning row.
 - [ ] RL36 render: dual-filter bloom on the live frame — the window blit runs no
   bloom (`blit.wgsl:55`); RP1 is test-only, a hard threshold over box levels on
   storage buffers capped at 2048 (`post.rs:967,1266,53`). 13-tap downsample,
@@ -64,6 +66,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   --lib fighter_motion_vector_matches_sweep`: blade-tip vector within 0.25 px of
   analytic over a 120 px sweep, forward +<= 0.3 ms. F2P: no motion attachment.
   P2P: golden unchanged. needs: VS5b.
+  Correction 2026-10-21: the Accept filter `fighter_motion_vector_matches_sweep` matches no test (`Grep` over crates/render is empty), so the command exits 0 with 0 passed. The only motion code is the camera jitter field (`post_jitter_motion`, `motion_field_validates_inputs`), not a skinned-fighter vector; the fighter test is the work. Accept is a named test that prints a nonzero passed count, and the row may not be ticked until it does.
 - [ ] RL38 render: TAA v2 with upsample — three TAA copies with a hard 32 px
   history cut (`post.rs:348-366`, `taa_compute.wgsl:36-63`,
   `taa_resolve.wgsl:7-26`). Closest-depth dilation, YCoCg variance clip,
@@ -74,6 +77,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   gpu_taa_sword_sweep`: ghost trail <= 0.10 on a 120 px/frame blade sweep (gate
   today 0.25), shimmer var <= 0.01, TAA copies 3 -> 1. F2P: the sweep fixture
   fails 0.10 today. P2P: golden unchanged. needs: RL37.
+  Correction 2026-10-21: duplicate of PW04 (`render: TAA as one real pass`, which closes RL38); do not run both - PW04 is the owning row.
 - [ ] RL39 render: lens pass in the blit (vignette, chromatic aberration, grain)
   — none exists in `crates/render/src`. FidelityFX lens shape (MIT). Diff:
   regular. Tier B. Size S. Owns the lens hunk of `shaders/blit.wgsl` and
@@ -81,6 +85,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   lens_pass_budget_and_off_identity`: off is byte-identical to the plain blit,
   on <= 0.15 ms, grain 0 at pure black and white. F2P: no LensConfig. P2P:
   golden unchanged. needs: RL34.
+  Correction 2026-10-21: the Accept filter `lens_pass_budget_and_off_identity` matches no test (`Grep lens` over crates/render is empty and `crates/render/src/lens.rs` does not exist), so the command exits 0 with 0 passed. The lens pass and its test are the work; Accept is `--lib lens_pass_budget_and_off_identity` printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] RL40 render: sky-driven IBL and sun colour for time of day — ambient is one
   fixed studio HDRI (`presenter.rs:384-389`) while the sky comes from the arena
   rig (`:370`), so sun height never changes the sand. Bake 5 sun keyframes from
@@ -106,6 +111,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   wall-base and stand-underside pixels >= 25 percent darker, open sand within 2
   percent, a sunlit-sand capture shows no AO on direct light. F2P: no prepass;
   AO multiplies direct light. P2P: golden unchanged. needs: LF3, RL60.
+  Correction 2026-10-21: duplicate of PW03 (`render: depth and normal prepass, AO on ambient only`, which closes RL41); do not run both - PW03 is the owning row.
 - [ ] RL42 render: torch point lights with sphere radius, range window and
   seeded flicker — the live frame has only the sun; EG12 plans 8 plain lights.
   Bevy `point_light` with `(1 - (d/r)^4)^2` range falloff and a representative
@@ -187,6 +193,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `cargo test -p engine-game --lib fighter_coverage`: after 3 torso hits torso
   blood u8 >= 128 and legs <= 25; replay from the tape twice gives equal bytes.
   F2P: every part shows the same coverage. P2P: golden unchanged. needs: RL46a.
+  Correction 2026-10-21: the Accept filter `fighter_coverage` matches no test (`Grep fighter_coverage` over crates/game is empty), so the command exits 0 with 0 passed. The per-part coverage block and its test are the work; Accept is `--lib fighter_coverage` printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] RL49 render: the sand remembers the fight — blood on sand lasts 600 ticks in
   a 128-slot view-space pool with no caller (`decals.rs:22,37,626`). A planar
   ground-state map over the 20 x 20 m pit: stamps, slow fade, a byte cap, no
@@ -211,6 +218,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `shaders/forward.wgsl`. Accept: `cargo test -p engine-render --lib hextile`:
   luminance autocorrelation at one period lag 1.0 -> <= 0.5 on a 4x4 patch. F2P:
   autocorrelation is 1.0. P2P: golden unchanged. needs: RL46a.
+  Correction 2026-10-21: the Accept filter `hextile` matches no test (`Grep hextile` over crates/render is empty), so the command exits 0 with 0 passed. The hex and biplanar tiling and its autocorrelation test are the work; Accept is `--lib hextile` printing a nonzero passed count, and the row may not be ticked until it does.
 
 **Particles, trails, crowd and fog (render-look.md; crowd with content.md)**
 
@@ -255,6 +263,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   a staged cue tape gives uniform bytes x2, <= 8 events x 32 B, >= 90 percent of
   seats within 25 m of the origin leave idle within 20 ticks. F2P: no visual
   reaction. P2P: golden unchanged. needs: RL54.
+  Correction 2026-10-21: duplicate of RL54 (both build the crowd module, `crates/render/src/crowd.rs`; RL54's accept names the VG4 bar of 20000 spectators in 1.5 ms); do not run both - RL54 is the owning row.
 - [ ] RL56 render: froxel sun fog and light shafts through the arches — fog is
   closed-form only (`forward.wgsl:356-382`). Density and sun in-scatter per
   froxel, Beer-Lambert integrate, temporal reproject (Godot
@@ -273,6 +282,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   --lib particles_gpu`: a staged hit spawns the counts above and the light count
   is back to baseline at tick+4, bytes x2. F2P: EMITTER_COUNT is 3, no flash
   kind. P2P: golden unchanged. needs: RL52, VS7.
+  Correction 2026-10-21: the Accept filter `particles_gpu` is not hollow - it matches the module (`crates/render/src/lib.rs:248`; 33 `#[test]` in `particles_gpu.rs`), so the command exits 0 today whatever a hit does - but no test in it checks this row's counts (`Grep flash` over crates/render is empty), so a tick would prove nothing. Accept is a named hit-flash test of your own (for example `--lib hit_flash`) that prints a nonzero passed count, and the row may not be ticked until it does.
 
 **Animation and camera feel (animation.md, gameplay.md)**
 
@@ -288,6 +298,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   hit_react_rot` x2 (weight 0 equals base bytes, two strikes sum within 1e-5),
   and `node tools/product-check.mjs` prints react_head_cm_max >= 8 with pops not
   above before. F2P: react_head_cm_max is 0. P2P: golden unchanged. needs: EG18.
+  Correction 2026-10-21: duplicate of PW32 (`anim: rotation-additive hit flinch`, which closes AM23 and C14); do not run both - PW32 is the owning row.
 - [ ] AM24 anim: last-stage joint angular-speed limiter — 35-55 pops per 300 Progress 2026-10-17: AngularLimiter landed in anim inertialize.rs and SpacePlayer (ang_limit_takes_ten_ticks_for_180_deg_at_1080_degs, ang_limit_space_player_caps_180_deg_step, run 39056591616); left: not wired into fighter_look observe_tick and slot_pose, and product-check pops=0 is not shown. Progress 2026-10-20: the limiter is wired at observe_tick/slot_sample (default 1080 deg/s; forced falls land whole). The seed-2040 600-tick 2-fighter line is pops=0 (was 31, pop_cm 12.1 -> 9.0) and the 300-tick 4-fighter line is pops=0; the 8-fighter 300-frame product-check window is still pops=258 pop_cm_max=109.3 (attack 62/idle 68/run 128). The residual is root/translation and frame-cadence motion the bone cap does not cover, so the row stays open. Landed 007c4528.
   frames up to 1 m (`tools/product-bar.json:24`); no stage guards the final pose
   (`fighter_look.rs:838-885`). Keep the last output rotation per bone, slerp
@@ -307,6 +318,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   head yaw <= 0.5 deg/tick^2 over a 0..180 deg sweep, a target swap eases in 12
   ticks, the head never leaves 70 deg. F2P: the clamp steps velocity. P2P:
   golden unchanged. needs: LF12.
+  Correction 2026-10-21: the Accept filter `look_soft` matches no test (`Grep look_soft` over crates/anim is empty), so the command exits 0 with 0 passed. The only real look-at test is `look_and_aim_face_the_target` (`crates/anim/src/fbik.rs:856`), which covers the hard look-at only, not the soft limit or the 12-tick ease; that new test is the work. Accept is `--lib look_soft` printing a nonzero passed count, and the row may not be ticked until it does.
 - [x] GP43 game: one stateful fight camera — `present_into` overwrites the director Progress 2026-10-17: FightCamSpring landed in camera_rig.rs with fight_cam_spring_smooths_duel_at_both_rates (yaw p99 <= 60 deg/s, eye step <= 25 cm, 30 vs 144 fps within 1 cm) and trauma tests; left: nothing outside tests calls it, fighter_look present_into still uses the stateless fight_camera.
   camera with a stateless fight_camera (`fighter_look.rs:1089,1133-1218`), trauma
   never shows, DampedSync is frame-rate dependent (`camera.rs:2487-2552`). Exact
@@ -327,6 +339,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   Accept: `cargo test -p engine-game --features app --lib telegraph_warp` x2: the
   hand is >= 25 cm from guard by impact minus 3 ticks, impact phase error <= 1
   tick. F2P: windup is 0 ticks. P2P: golden unchanged. needs: EG19c.
+  Correction 2026-10-21: the Accept filter `telegraph_warp` matches no test (`Grep telegraph` over crates/game finds only the unrelated `class_sheet` ability telegraph), so the command exits 0 with 0 passed. The phase-warped clip time and its test are the work; Accept is `--lib telegraph_warp` printing a nonzero passed count, and the row may not be ticked until it does.
 - [x] GP45 game: kill slow-mo through a virtual-time scale — the tick accumulator
   takes raw wall ms (`crates/game/src/windowed.rs:906`). Scale the wall delta,
   ramp it, local and replay only, netgame forces 1.0 (Bevy `virt.rs`). Diff:
@@ -348,6 +361,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   cut_cap`: 0 added draw calls, cap coverage >= 98 percent of the stump
   silhouette, validation errors 0, <= 0.15 ms for 8 stumps. F2P: the stump
   capture shows 0 cap pixels. P2P: golden unchanged. needs: BX8.
+  Correction 2026-10-21: the Accept filter `cut_cap` matches no test (`Grep cut_cap` over crates/render is empty), so the command exits 0 with 0 passed. The real cap tests are CPU geometry only - `stump_cap_is_closed_with_the_asked_radius_and_depth` (`crates/render/src/stump.rs:246`) and `stump_cap_refuses_bad_numbers_loudly` (`:275`) - and none covers the shader's discard and cap coverage. The shader cap and its coverage test are the work; Accept is `--lib cut_cap` printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] PX42 bodies: a human ragdoll joint table — every joint is spherical with one Progress 2026-10-17: ragdoll.rs humanoid joint table landed with joint_table_humanoid_defaults and fifty_seeded_human_falls_measured (0 backward-hinge frames after clamp, physics green run 39057362796); left: the human_fall report in ragdoll_tape.rs and the peak-speed baseline under --test ragdoll_tape do not exist.
   limit per depth (`crates/physics/src/ragdoll.rs:1116-1145,1167`), so knees and
   elbows fold backward. Hinges for knee and elbow, cone plus twist elsewhere, a
@@ -416,6 +430,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   (today 256 draws), order stable under input permutation; ARENA prints `draws=`
   and `bins=`; captures byte-equal. F2P: no transform, one draw per item. P2P:
   golden unchanged. needs: none.
+  Correction 2026-10-21: duplicate of PW02 (`DrawItem carries a transform and the live loop draws per bin`, which closes RL60 and RL32); do not run both - PW02 is the owning row.
 - [ ] OPT35 render: the window is paced by vsync, uncapped only by flag —
   `presenter.rs:643` takes `present_modes[0]` (Mailbox on DX12, presents with
   interval 0) and `crates/game/src/bin/arena.rs:1383` polls, so the window runs at
@@ -447,6 +462,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   caps (UHD-like, 3050-like, GL-like) picks the right mode; validation errors 0
   with every requested feature on the 3050. F2P: one feature requested, no mode.
   P2P: golden unchanged. needs: none.
+  Correction 2026-10-21: duplicate of PW08 (`render: one feature table for the ladder`, which closes GS35); do not run both - PW08 is the owning row.
 - [ ] GS36 render: quality knobs are WGSL override constants — tier variants are
   copied strings or nothing (`crates/render/src/variants.rs` holds a manifest only).
   IBL specular, shadow taps, skin and fog become `override` constants set per
@@ -500,6 +516,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   240/600", the final digest equals the blocking run, cancel ends `cancelled` with
   the scene revision unchanged. F2P: no task arm is used. P2P: golden unchanged.
   needs: none.
+  Correction 2026-10-21: the Accept filter `task_play_run` matches no test (`Grep task_play_run` over crates/endpoint is empty), so the command exits 0 with 0 passed. The nearest real test is `play_run_and_play_step_are_found_and_described_under_client_names` (`crates/endpoint/src/insight/mcp_tools.rs:496`), which covers the tool names only, not the task arm; the task arm and its test are the work. Accept is `--lib task_play_run` printing a nonzero passed count, and the row may not be ticked until it does.
 - [x] PQ21 playtest: flicker you can see on moving fighters — shimmer is gated only
   on a 64x36 synthetic hold (`crates/render/src/clip_hold.rs:26-31`) and the
   judge's motion check is consecutive-frame SSIM (`crates/playtest/src/look/judge.rs:344`).
@@ -521,6 +538,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   stills compared, a blessed change keeps `.old`, a missing golden fails, a stale
   known-failure fails. F2P: 0 pixel compares. P2P: golden unchanged. needs:
   none.
+  Correction 2026-10-21: the Accept filter `golden_bless` matches no test (`Grep golden_bless` over crates/playtest is empty) and `crates/playtest/src/look/golden.rs` does not exist (`Test-Path` false; `tools/q1-check.mjs` does exist), so the command exits 0 with 0 passed. The module, its mod line, the bless flow and the test are the work; Accept is `--lib golden_bless` printing a nonzero passed count, and the row may not be ticked until it does.
 - [x] PF26 observe: replay export as MCAP — `replay_verbose` emits sim.tick only
   (`crates/proof/src/trace.rs:34-35`) and the sink is a 120-row (tick, hash) ring
   (`crates/observe/src/rerun_sink.rs:19`). A std-only MCAP writer (header,
@@ -582,6 +600,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   7 cues mapped, motors off <= 10 ms after focus loss; a pad disconnect pauses a
   local duel within 1 tick (Steam Deck rule); a `--features pad` test lists >= 1
   fake pad. F2P: no rumble code. P2P: golden unchanged. needs: EG27.
+  Correction 2026-10-21: the Accept filter `rumble_merge` matches no test (`Grep rumble` over crates/game is empty and `crates/game/src/rumble.rs` does not exist), so the command exits 0 with 0 passed. The rumble table, the focus-loss cut and their test are the work; Accept is `--lib rumble_merge` printing a nonzero passed count, and the row may not be ticked until it does.
 - [x] GP46 input: tick-counted gestures and action sets — 7 actions and 3 button Landed 7d13d5f. Tick audit 2026-10-17: bindings.rs conditions_tap/hold/hold_and_release/chord, conditions_menu_presses_never_reach_duel, conditions_same_script_gives_same_tape_bytes_x2 (v1 keeps 3 bits) green in gh-check run 39057174696 (engine-input, 51 passed).
   bits (`crates/input/src/bindings.rs:21`, `fighter.rs:24-30`), only press exists.
   Tap, hold, hold-and-release and chord conditions counted in integer ticks before
@@ -600,6 +619,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `windowed.rs`. Accept: `cargo test -p engine-perf --lib hitch` x2: a seeded 3x
   spike writes one report naming the slow pass; the overlay off costs 0 draws. F2P:
   no overlay, no hitch file. P2P: golden unchanged. needs: PF25, UIX13. Progress 2026-10-19: the perf half landed e39dd7a — `crates/perf/src/overlay.rs` gives `Overlay` (toggle off by default; rows = frame ms, alloc per frame, top 3 passes or one `gpu none` row; `draw_count` 0 when off) and `HitchCatcher` (120-frame ring, median over the window, hitch above 2x, latch so a slow run writes one file, `-2` suffix instead of overwriting a same-second report, hand-written JSON, UTC and output dir passed in so nothing reads the clock). Proof: 7 hitch tests twice on the runner (gh 39314646273, 39315244242), the 3x spike writes exactly one report naming `ra1.forward` at 9.500 ms, overlay off costs 0 draws, 120 quiet frames write nothing; scoped clippy PASS (39314004461) because the exact line is blocked by another session's `render/src/present.rs`; golden green (39313199811). LEFT: `crates/game/src/windowed.rs` must declare one `Overlay` and one `HitchCatcher`, bind a key to `toggle()`, draw `rows()` while `draw_count() > 0`, and call `observe(sample, utc, Path::new("target/reports"))` after each frame with that frame's alloc count and any PF25 pass timings; PF25 is still open, so the row reads `gpu none` until it lands.
+  Correction 2026-10-21: duplicate of PW41 (`perf: one Perfetto-readable trace file`, which closes finish-line item 13 and PF27); PW41 writes the trace and not this row's overlay, and the overlay half already landed at e39dd7a, so keep one row and fold the other's item in - do not run both.
 - [ ] GS37 assets: BC7 and BC5 texture cook with mips for the 6 GB card — the encoder
   has BC1 and BC3 only (`crates/assets/src/bc.rs:1`), so normal maps and albedo
   either bloat VRAM or lose quality. Cook BC7 for colour, BC5 for normals, full mip
@@ -635,6 +655,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   writes `target/reports/perf-<date>.csv` with >= 12 pass rows (p50, p99) and
   `pass-trace.json`; `cargo test -p engine-render --lib pass_timing` x2. F2P: the
   csv has no production pass row. P2P: golden unchanged. needs: none.
+  Correction 2026-10-21: duplicate of PW07 (`render: one named scope per pass, and the pass report wired to the live frame`, which closes PF25); do not run both - PW07 is the owning row, and the halves that already landed are named in this row's own Progress note.
 - [x] CQ23 render: CPU naga gate for every shipped WGSL — `crates/render/src/shader_gate.rs` Landed 801b43cc. The cited check moved: the gate is `crates/render/src/shader_gate.rs` (naga 30 via engine-material's `validate` owner) plus the game cook (`crates/game/src/reload.rs`), both behind `shader-validate` (rides `app`). Accept adapted (the row predates the feature): `cargo test -p engine-render --lib --features shader-validate shader_validate` x2 green over all 24 shipped files in the composition the pipelines compile (`forward.wgsl`/`blit.wgsl` take the `tonemap.wgsl` prepend) + 3 inline chunks; the `window`-feature run adds 6 window chunks; game reload 6/6 under the feature (a type-broken edit keeps last-good, `reload_shader_gate_refuses_a_type_broken_edit_and_keeps_last_good`); seeded type error names line:col. F2P held: the brace check accepted both defects the gate caught — `taa_resolve.wgsl` built `vec2<f32>` from i32 loop vars, `post_chain.wgsl` sampled without declaring its sampler — fixed in `8d8c0a80`. Golden d57b5c8ae3096614 x2 unchanged. Follow-up 2026-10-19 (main pass): the committed wasm baseline counted this new file's `std::fs` walk as a hazard (`shader_gate.rs:80,86`, `fs 0 -> 2`), and `tools/wasm-gate.test.mjs` was red on it. The walk is native-only now (`#[cfg(not(target_arch = "wasm32"))]` on `shipped_files` and `walk`, with the reason in the doc comment): `node --test tools/wasm-gate.test.mjs` 20 pass, 0 fail. Behaviour on native is unchanged.
   counts braces; `crates/material/src/compile.rs:770-779` already validates with
   naga; 0 of 11 .wgsl files are checked without a GPU. Diff: regular. Tier A.
@@ -655,6 +676,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   debug_draw` x2; a capture with 4 groups on has >= 1000 line pixels that differ
   from the beauty frame; the tick-600 hash equals d57b5c8ae3096614 with groups on
   and off. F2P: no line pass exists. P2P: golden unchanged. needs: none.
+  Correction 2026-10-21: duplicate of PW13 (`render: the debug views, and the first caller of the dead debug_draw.rs`, which closes RL59 and gives RL58 a caller); do not run both - PW13 is the owning row.
 - [ ] RL59 render: renderer debug views through the door capture — no view
   selector exists (Godot lists 29 named views). Each view is a false-colour blit
   of an existing frame-graph resource, pinned out of the alias pool. Diff:
@@ -664,6 +686,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   shadow atlas, cascades, AO, motion, luminance) give 8 non-black PNGs with 8
   different SHA-256; < 0.1 ms with no view selected. F2P: an unknown view name is
   accepted and no view PNG exists. P2P: golden unchanged. needs: PF25.
+  Correction 2026-10-21: duplicate of PW13 (`render: the debug views, and the first caller of the dead debug_draw.rs`, which closes RL59); do not run both - PW13 is the owning row.
 - [x] OPT34 render: pipeline-creation counter by cause — OPT19 tests a frame-time Landed 1d01a41. Tick audit 2026-10-17: cache.rs pipeline_counter_material_walk_counts_four_causes_with_late_zero (prints late=0 and 4 counters) and pipeline_counter_failed_insert_counts_no_build green in gh-check run 39057362669 (render --features window) and render lib run 39057649152; the cache.rs doc lists the 19 sites that bypass the counters.
   spike, which needs a quiet box; Godot counts builds by cause. Count every
   pipeline built in `crates/render/src/cache.rs` by cause (mesh, surface, draw,

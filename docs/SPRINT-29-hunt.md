@@ -502,3 +502,158 @@ not re-mine the same repo.
   F2P: no `crates/rome` and no `content/rome`.
   P2P: golden `d57b5c8ae3096614` x2.
   needs: ROM2.
+- [ ] HX29 playtest: the referee and the mutant. The build tasks are scored by
+  **named predicates with a declared evidence source** (a snapshot, a diff, a
+  project file, a runtime probe) and a **fixed severity order**, so the verdict
+  names the first failing predicate instead of a bare false. Three honesty rules
+  travel with it: **unevaluable is a fail, never a skip**; every referee ships a
+  **mutant** (a build broken in exactly one way) that must fail **exactly** its
+  named predicate, because an assertion that fails for the wrong reason is not
+  discriminating; and the agent's own on-disk state is read **before** the
+  runner's save. The Play@k arithmetic is the unbiased estimator with
+  **unscored and skipped trials excluded from the denominator**, which is exactly
+  our mirror's `UNKNOWN` cell. Donors: `SummerEngine/summer`
+  (`evals/outcomes/lib/assert.ts`, 816 lines, `runner.ts`; MIT, 85 stars, read
+  2026-10-21) and `everruns/mira` (`crates/mira-eval/src/aggregate.rs`, MIT,
+  8 stars) for the arithmetic.
+  Rows **D18** (the task suite), **D19** (verifier output in every build verb).
+  Gate G7.
+  Tier A. Size M. Owns `crates/playtest/src/referee/mod.rs`,
+  `crates/playtest/src/referee/criteria.rs`, `crates/playtest/src/referee/aggregate.rs`.
+  Accept: `cargo test -p engine-playtest --lib referee` passes: a task with a
+  missing evidence source is a fail with the source named, the mutant of each
+  criterion fails exactly that criterion, pass@k excludes the unscored cells
+  from the denominator, and the verdict names the first failing predicate in
+  the fixed order.
+  F2P: no referee, no predicates, no pass@k.
+  P2P: golden `d57b5c8ae3096614` x2; the 30-task mirror keeps its `UNKNOWN`
+  cells and its parity numbers.
+  needs: none.
+- [ ] HX30 endpoint: the verdict that cannot be forged. The door's `pass` stops
+  being a string anyone can write: it becomes a value with **no public
+  constructor**, minted only by a checker run that actually ran and read an exit
+  status, carrying the digest of the inputs it was handed, and answerable to
+  "is this verdict about the artefact in my hand". A build verb that did not
+  run its referee returns "not run", never "pass"; a missing key counts as
+  **-inf and aborts**, never as zero. Donor: `fabio-rovai/open-ontologies`
+  (`src/verdict.rs`, 35K, `src/feedback.rs`; MIT, 1158 stars, read 2026-10-21).
+  The type must be ours: our own digest (FNV-1a 64), our own checker process.
+  Rows **D19**, **D18**; gates G7 and G1.
+  Tier A. Size M. Owns `crates/endpoint/src/verdict.rs`, `crates/endpoint/src/lib.rs`.
+  Accept: `cargo test -p engine-endpoint --lib verdict` passes: a verdict cannot
+  be built without a checker run, a verdict about a different input is refused
+  by `is_about`, a build verb with no referee returns "not run", and a missing
+  criterion aborts instead of scoring zero.
+  F2P: `pass` is a string in the reply.
+  P2P: golden `d57b5c8ae3096614` x2; the existing door tests keep their shape.
+  needs: none.
+- [ ] HX31 proof: the differential ship check. A curated scenario list runs
+  against the **reference** build and the **candidate** build, and every step of
+  the receipt is diffed with a normalization list (timestamps, ids, paths),
+  where a real behaviour change must still show: a random value is pinned by
+  seed rather than normalized away. Exit 0 means every in-scope step matched,
+  1 means one divergence. Two tiers: a fast curated set on every change and a
+  deep catalog off by default. Donor: `gastownhall/beads`
+  (`tests/oracle-a/harness/src/differential.rs`, 30K, `tests/oracle-a/README.md`;
+  MIT, 28056 stars, read 2026-10-21). We take the **shape**, because our
+  receipts are our own line format, not JSON.
+  Row **E22** (the Windows ship check from CI); gate G1.
+  Tier A. Size M. Owns `crates/proof/src/differential.rs`, `tools/ship-check.mjs`,
+  `.github/workflows/`.
+  Accept: `cargo test -p engine-proof --lib differential` passes: two runs of
+  the same build give the same normalized receipt, a seeded change shows up as a
+  divergence and is not normalized away, and the tool exits 1 on one in-scope
+  divergence.
+  F2P: no ship check.
+  P2P: golden `d57b5c8ae3096614` x2; the golden matrix workflow is untouched.
+  needs: none.
+- [ ] HX32 endpoint: the door's contract is a committed file. The tool surface
+  is snapshotted into a committed lockfile, and a change is classified the way
+  a human would (breaking, minor, patch) with a **direction-aware** table: the
+  same structural change has an opposite blast radius for what a caller sends
+  and what a caller receives. The lint adds the rules that matter for agents (a
+  duplicate tool name is an error, a missing description is a warning, because
+  the model cannot tell when to call it). The published schema is **generated**
+  from the live tool list, so it cannot drift. Donors:
+  `studiomeyer-io/mcp-covenant` (`src/diff.rs`, `src/lint.rs`, `src/lockfile.rs`;
+  MIT, read 2026-10-21) and `xerj-org/xerj`
+  (`engine/crates/xerj-mcp/tests/published_schema_drift.rs`; Apache-2.0, 12423
+  stars) for the drift test.
+  Rows **D16** (the door's published contract), **D19**.
+  Tier B. Size M. Owns `crates/endpoint/src/contract.rs`, `docs/door-tools.json`,
+  `tools/door-contract.mjs`.
+  Accept: `cargo test -p engine-endpoint --lib contract` passes: a new required
+  input field is classified breaking, a removed output field is classified
+  breaking, a new enum value is minor for input and breaking for output, and
+  the committed file is byte-equal to the live tool list.
+  F2P: no committed contract and no drift test.
+  P2P: golden `d57b5c8ae3096614` x2; the 33 shipped prompt skills still list.
+  needs: none.
+- [ ] HX33 game: the debug kit. The window gets **cvars** (a flat registry of
+  named settings with a typed value, a default and a help string, read by name
+  from a string while the game still reads them as ordinary fields) and a
+  **console** (a command parser trait so the engine owns the parser and the UI
+  owns the text, a lexer that splits the word from the arguments, and a hint
+  that carries a span into the input, so a bad command points at the wrong
+  characters). The naming convention is the useful part: a prefix by owner
+  (`cl_`, `d_`, `g_`, `hud_`, `r_`, `sv_`, `sys_`) and a `d_draw_*` group for
+  the debug draw that already has a trait and no caller. Donors:
+  `doonv/bevy_dev_console` (`src/command.rs`, `src/builtin_parser/lexer.rs`;
+  Apache-2.0, 139 stars) and `martin-t/cvars` (`cvars/src/lib.rs`; AGPL-3.0, so
+  the **shape and the naming only** are taken and the bytes are not).
+  Row **C13** (the debug kit in the game and on the door); gates G1 and G2.
+  Tier B. Size M. Owns `crates/game/src/cvar.rs`, `crates/game/src/console.rs`,
+  `crates/render/src/debug_draw.rs`.
+  Accept: `cargo test -p engine-game --lib cvar` passes: a cvar is set by name
+  from a string, an unknown name is refused with the name, a cvar with a help
+  string lists it, and **no cvar read happens inside the fixed tick** (the test
+  asserts the cvar table is only read on the service path).
+  F2P: no cvar, no console, and `debug_draw.rs` has no caller.
+  P2P: golden `d57b5c8ae3096614` x2; the pause and step keys still work.
+  needs: none.
+- [ ] HX34 endpoint: the build verb returns the build. `project.build` runs the
+  **real** build and answers with the build's own output (status, message,
+  stdout, stderr) as structured content, not a summary of it. A `project.run`
+  verb starts the game and returns its first receipt line. Donor:
+  `dojoengine/dojo` (`crates/sozo/mcp/src/tools/build.rs`,
+  `crates/sozo/mcp/src/lib.rs`; Apache-2.0, 478 stars, read 2026-10-21), whose
+  rmcp server is a complete door in one file: five typed tools, resource
+  templates with `{profile}/{name}` placeholders, a typed `resource_not_found`,
+  and every failure carrying a **code and a reason payload** (our typed-refusal
+  shape). `project.new` is the part we still owe a story for: a `new` that
+  writes a real playable project is more than a scaffold.
+  Row **C12** (`engine2040 new / build / run` plus the door verbs); gate G7.
+  Tier A. Size M. Owns `crates/endpoint/src/packs/project.rs`,
+  `crates/endpoint/src/packs/mod.rs`.
+  Accept: `cargo test -p engine-endpoint --features mcp --lib packs::project`
+  passes: `project.build` returns the build's own stdout in the reply, a
+  failing build returns a typed refusal with the failing line, `project.run`
+  returns the first receipt line, and an unknown resource is a typed
+  `resource_not_found`.
+  F2P: no `project.*` verb.
+  P2P: golden `d57b5c8ae3096614` x2; the door keeps its 33 prompt skills.
+  needs: none.
+- [ ] HX35 playtest: the knob sweep comes out of the test module. The knob
+  sweep is **already written** but behind `#[cfg(test)]`, so it never runs in a
+  build and no verb reaches it: `crates/playtest/src/tournament.rs:1490-1700`
+  holds `SWEEP_KNOB`, `SweepConfig`, `SweepReport`, `sweep_difficulty_curve` and
+  `render_sweep_csv`, and the CSV already prints
+  `knob,value,difficulty,player,win_rate_permille,kill_shares,stuck_count,trials`
+  with `# skipped` comment rows. The work: promote the block out of the test
+  module, add a `tune.sweep` verb over it (one knob, a range, 5 fixed seeds),
+  return the rows and the CSV bytes, and land the winning value as one
+  `settings.set` plus one `settings.undo` so the tape stays replayable. No
+  donor needed: this is a re-land of our own code. Row **D20** (tune.sweep).
+  Tier A. Size S. Owns `crates/playtest/src/tournament.rs`,
+  `crates/endpoint/src/packs/sweep.rs`, `crates/endpoint/src/packs/mod.rs`.
+  Accept: `cargo test -p engine-playtest --lib sweep` and
+  `cargo test -p engine-endpoint --features mcp --lib packs::sweep` pass:
+  `tune.sweep` over one knob and 5 fixed seeds returns the CSV bytes, the same
+  knob and seeds give the same CSV twice, the knob may be any name in the
+  `settings.get` table, and a bad knob name is a typed refusal. The sweep reads
+  no clock and no unseeded RNG.
+  F2P: the sweep exists only inside the test module and no `tune.sweep` verb
+  answers.
+  P2P: golden `d57b5c8ae3096614` x2; the existing `play.sweep` verb keeps its
+  behaviour.
+  needs: none.

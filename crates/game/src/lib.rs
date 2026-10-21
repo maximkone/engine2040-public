@@ -64,6 +64,10 @@ pub mod camera_wish;
 /// Showcase clip capture: tape-bound PNG sequence plus manifest.
 /// Headless-safe: flags, tape codec, std-only PNG writer and frame sink.
 pub mod capture;
+/// Class content loader: one class file in `content/classes/` gives one
+/// sheet, with the schema rules the loader refuses instead of patching.
+/// Std-only; setup IO, never on the tick.
+pub mod class_sheet;
 /// Crash reports to a local file: version, adapter, tape tail,
 /// checkpoint, loud exit. Std-only.
 pub mod crash;
@@ -128,6 +132,9 @@ pub mod net_seat;
 pub mod netgame;
 /// Gamepad sticks plus buttons through the shared bindings table. Std-only.
 pub mod pad;
+/// The browser page's duel: its seed, its arena extent and the start it
+/// gives. Std-only.
+pub mod page_duel;
 /// Clip-clock hold: which fighter slots freeze while sim hitstop is above
 /// zero. Std-only.
 pub mod pose_hold;
@@ -2156,7 +2163,8 @@ mod tests {
                 ..config()
             },
             GameConfig {
-                fighters: 17,
+                // One fighter past the participant cap.
+                fighters: MAX_PARTICIPANTS + 1,
                 ..config()
             },
             GameConfig {
@@ -2174,7 +2182,7 @@ mod tests {
         ] {
             assert!(App::new(bad).is_err(), "config accepted: {bad:?}");
         }
-        // 5 fighters fits the 16-slot cap.
+        // 5 fighters fits the participant cap.
         assert!(App::new(GameConfig {
             fighters: 5,
             ..config()
@@ -2278,7 +2286,14 @@ mod tests {
     fn hit_matrix_eight_kinds_twelve_clips_no_repeat_no_alloc() {
         let plays = 2 * ImpactKind::COUNT * ImpactSurface::COUNT;
         let bank = engine_audio::CueBank::placeholder(48_000).expect("shipped table is valid");
-        assert!(bank.len() <= 16, "the clip ledger sizes 16 cues");
+        // The ledger's size belongs to the audio lane's shipped cue table;
+        // this gate pins that the bank carries every cue of it, not a
+        // hardcoded count that goes stale when the table grows.
+        assert_eq!(
+            bank.len(),
+            engine_audio::ARENA_CUES.len(),
+            "the clip ledger carries the shipped cue table"
+        );
         let mut first = vec![(0u16, 0usize); plays];
         let (distinct, repeats, kinds, probe) = route_impact_matrix(&bank, 2040, &mut first);
         assert!(distinct >= 12, "distinct clips {distinct} < 12");
@@ -2988,7 +3003,7 @@ mod tests {
             std::hint::black_box(&dst);
         });
         assert_eq!(steady.calls, 0, "populated sync must not alloc");
-        assert_eq!(dst.fighters.len(), 16);
+        assert_eq!(dst.fighters.len(), usize::from(MAX_PARTICIPANTS));
     }
 
     /// Full replay spelling for the first `ticks` of a session's tape: the

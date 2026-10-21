@@ -12,7 +12,7 @@
 //! every other timed row stays observed-only.
 
 use engine_perf::allocator::{active_kind, box_conditions, csv_row, system_rows, CSV_HEADER};
-use engine_perf::baselines::baseline;
+use engine_perf::baselines::{arena_baseline, baseline};
 use engine_perf::budget::{check_report, BudgetError};
 use engine_perf::workloads::ArenaTick;
 use std::time::Instant;
@@ -36,7 +36,7 @@ fn seeded_row_trips_the_gate_through_the_harness() {
     let report = ArenaTick::canonical()
         .with_seed(1 ^ SEED_TWEAK)
         .run_report();
-    let recorded = baseline(report.workload).expect("arena row recorded");
+    let recorded = arena_baseline();
     assert_eq!(report.ticks, recorded.ticks, "tweak keeps the tick count");
     assert_ne!(report.hash, recorded.hash, "tweak moves the hash");
     let error = check_report(&report, &recorded).expect_err("harness gate must trip");
@@ -68,9 +68,11 @@ fn system_wall_ms_rows() {
                 Box::new(|| engine_perf::workloads::DestructionStep::canonical().run_hash())
             }
             _ => Box::new(|| {
-                engine_perf::workloads::ScaledArenaTick::canonical_for(16)
-                    .expect("16 is a listed matrix count")
-                    .run_hash()
+                engine_perf::workloads::ScaledArenaTick::canonical_for(
+                    engine_arena::MAX_PARTICIPANTS,
+                )
+                .expect("the cap is a listed matrix count")
+                .run_hash()
             }),
         };
         // Warmup first: cold caches never enter the samples.

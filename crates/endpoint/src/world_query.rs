@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(out.hits.len(), 1);
         assert_eq!(out.hits[0].id, "crate");
         assert_eq!(out.hits[0].components, vec!["mesh", "collider"]);
-        assert_eq!(out.hits[0].has["light"], false);
+        assert!(!out.hits[0].has["light"]);
     }
 
     #[test]
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(out.hits.len(), 1);
         assert_eq!(out.hits[0].id, "statue");
         assert_eq!(out.hits[0].components, vec!["mesh"]);
-        assert_eq!(out.hits[0].has["light"], false);
+        assert!(!out.hits[0].has["light"]);
     }
 
     #[test]

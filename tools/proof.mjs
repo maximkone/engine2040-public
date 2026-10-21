@@ -350,6 +350,18 @@ export function ranAtLeastOneTest(output) {
   return nextest.some(([, n]) => Number(n) > 0);
 }
 
+// One finished leg's verdict (exported for tests): a compile or exit failure is
+// red, and so is a test leg that ran zero tests, because `cargo test` exits 0
+// when its filter (or an --exclude set) matches nothing and a hollow green
+// proves nothing. Non-test legs (fmt, build, clippy, deny) grade on exit code.
+export function legVerdict(isTest, ok, output) {
+  if (!ok) return { pass: false, why: null };
+  if (isTest && !ranAtLeastOneTest(output)) {
+    return { pass: false, why: "zero tests ran (filter matched nothing)" };
+  }
+  return { pass: true, why: null };
+}
+
 // Per-packet fixture-only discipline: the golden receipt verifies once; the
 // seed double-runs below still prove determinism, so a second 600-tick verify
 // is duplicate work. Tool self-tests run in CI nightly only
@@ -432,6 +444,21 @@ export function gpuLiveLine(receipt, file, unitGate) {
   return receipt
     ? `[INFO] gpu-live truth gate (report-only): LIVE ${receipt.live}/PROBE ${receipt.probe} from the device report ${file}; unit gate: ${unitGate}`
     : `[INFO] gpu-live truth gate (report-only): not_wired, no device report with live rows (target/reports/pass-truth-<date>.md), so no pass counts as LIVE; unit gate: ${unitGate}`;
+}
+
+// OPT38: the golden legs build on the thin-LTO `perf-test` profile, not the
+// fat-LTO `release` one: a local golden check no longer pays the one-unit
+// relink. CI keeps `--release` (the release-proof leg proves the hash there
+// twice), so the golden is still proven under both profiles.
+export function goldenProfile(ci) {
+  return ci ? "--release" : "--profile=perf-test";
+}
+const GOLDEN_PROFILE = goldenProfile(process.env.CI);
+// The receipt line of the golden build: the profile it used and the seconds
+// the build plus the run took. A local run prints the `perf-test` time, a CI
+// run the `release` time, so the two build times are readable from the logs.
+export function goldenBuildLine(profile, seconds) {
+  return `[INFO] golden build (${profile}): ${seconds.toFixed(1)} s`;
 }
 
 function main() {
@@ -612,8 +639,13 @@ function check(name, passed, detail = "") {
 }
 
 function proof(args) {
-  const result = cargo(["run", "-p", "engine2040", "--locked", "--release", "--quiet", "--", ...args, "--format", "json"]);
+  const started = Date.now();
+  const result = cargo(["run", "-p", "engine2040", "--locked", GOLDEN_PROFILE, "--quiet", "--", ...args, "--format", "json"]);
+  const seconds = (Date.now() - started) / 1000;
   if (!result.ok) throw new Error(result.error || result.out || "proof process failed");
+  if (args.includes("--verify") && args.length === 1) {
+    console.log(goldenBuildLine(GOLDEN_PROFILE, seconds));
+  }
   return JSON.parse(result.out);
 }
 
@@ -646,7 +678,13 @@ if (!args.includes("--skip-build")) {
       renderSkipped = countSkipped(`${result.out ?? ""}\n${result.error ?? ""}`);
     }
     const flake = isTest ? `, ${result.flake} via ${result.via} junit ${result.junit}` : "";
-    check(`cargo ${command.join(" ")}`, result.ok, result.ok ? (isTest ? `${result.flake} via ${result.via} junit ${result.junit}` : "") : `${result.error || result.out}${flake}`);
+    // Every test leg needs one test to have run, not just exit 0 (see legVerdict).
+    const leg = legVerdict(isTest, result.ok, `${result.out ?? ""}\n${result.error ?? ""}`);
+    check(
+      `cargo ${command.join(" ")}`,
+      leg.pass,
+      leg.pass ? (isTest ? `${result.flake} via ${result.via} junit ${result.junit}` : "") : (leg.why ?? `${result.error || result.out}${flake}`),
+    );
   }
   // Named consumer gates (wave 21): RV1 red-team tapes replay every wave;
   // PQ2 balance-tournament gate reproduces its report x2 (GA3 consumes the
@@ -670,16 +708,15 @@ if (!args.includes("--skip-build")) {
   ]) {
     const result = cargoTest(command);
     const combined = `${result.out ?? ""}\n${result.error ?? ""}`;
-    const ran = ranAtLeastOneTest(combined);
-    const passed = result.ok && ran;
+    const leg = legVerdict(true, result.ok, combined);
     check(
       `cargo ${command.join(" ")}`,
-      passed,
-      passed
+      leg.pass,
+      leg.pass
         ? `${result.flake} via ${result.via} junit ${result.junit}`
-        : !result.ok
-          ? `${result.error || result.out}, ${result.flake} via ${result.via} junit ${result.junit}`
-          : `zero tests ran (filter matched nothing), ${result.flake} via ${result.via} junit ${result.junit}`,
+        : leg.why
+          ? `${leg.why}, ${result.flake} via ${result.via} junit ${result.junit}`
+          : `${result.error || result.out}, ${result.flake} via ${result.via} junit ${result.junit}`,
     );
   }
   const deny = cargo(["deny", "check"]);
@@ -721,9 +758,9 @@ try {
   const bytes = readFileSync(path);
   bytes[bytes.length - 1] ^= 1;
   writeFileSync(path, bytes);
-  const corrupted = cargo(["run", "-p", "engine2040", "--locked", "--release", "--quiet", "--", "--replay", path]);
+  const corrupted = cargo(["run", "-p", "engine2040", "--locked", GOLDEN_PROFILE, "--quiet", "--", "--replay", path]);
   check("corrupted checkpoint fails with first divergent tick", !corrupted.ok && corrupted.error.includes("diverged at tick 119"));
-  const unsupported = cargo(["run", "-p", "engine2040", "--locked", "--release", "--quiet", "--", "--backend", "wgpu"]);
+  const unsupported = cargo(["run", "-p", "engine2040", "--locked", GOLDEN_PROFILE, "--quiet", "--", "--backend", "wgpu"]);
   check("unsupported proof backend cannot fall back silently", !unsupported.ok && unsupported.error.includes("unsupported proof backend"));
 
   // GX6 truth gate (report-only): only forward is LIVE by on/off pixel proof;

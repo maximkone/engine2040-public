@@ -53,25 +53,12 @@ const SKY_BAND_TOP_M: f32 = 18.0;
 /// Segments of the band: the same count as the wall, so the two line up.
 const SKY_BAND_SEGMENTS: usize = WALL_SEGMENTS;
 
-/// Third-person camera: how far behind the human seat the eye sits, meters. Far enough that the
-/// seat's own body reads as a silhouette in the lower frame instead of filling it.
-pub const SHOULDER_BACK_M: f32 = 5.2;
-/// Sideways offset of the eye (over the human's right shoulder), meters. The seats stand close
-/// (about a meter apart), so most of the offset is what keeps the human from hiding the rival:
-/// the shot is three-quarter, not straight down the pair's own line.
-pub const SHOULDER_SIDE_M: f32 = 2.4;
-/// Height of the eye, meters.
-pub const SHOULDER_EYE_M: f32 = 2.3;
-/// Seat gap above which the camera pulls back and widens so both stay framed, meters.
-pub const SHOULDER_GAP_M: f32 = 10.0;
-/// Largest shake the camera takes at full hit weight, meters.
-pub const SHOULDER_SHAKE_M: f32 = 0.085;
-/// Nearest the shoulder camera ever gets to what it looks at, meters: a seat that turns its
-/// back on the rival would otherwise put the eye past the rival, looking back at it.
-pub const SHOULDER_MIN_SHOT_M: f32 = 4.0;
-/// How far above the midpoint of the two seats the eye looks, meters: chest height, so both
-/// seats sit in frame with the floor and the wall behind them.
-pub const SHOULDER_LOOK_UP_M: f32 = 1.15;
+// The shoulder camera's geometry lives in `engine_render::shoulder`, std-only, so the headless
+// crates that place a fight inside a room read the same numbers the renderer builds its eye from.
+pub use crate::shoulder::{
+    SHOULDER_BACK_M, SHOULDER_EYE_M, SHOULDER_GAP_M, SHOULDER_LOOK_UP_M, SHOULDER_MIN_SHOT_M,
+    SHOULDER_SHAKE_M, SHOULDER_SIDE_M,
+};
 /// The eye never goes closer to the wall than this radius, meters.
 pub const CAMERA_RADIUS_M: f32 = WALL_RADIUS_M - 1.4;
 

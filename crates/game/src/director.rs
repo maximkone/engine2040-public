@@ -1394,7 +1394,13 @@ mod tests {
         assert_eq!(peak.focus, 1);
         assert_eq!(peak.weight, HIT_WEIGHT + 150 / HIT_DAMAGE_DIV);
         // Corrupt slots never frame: out-of-range ids hold the shot.
-        assert!(select_peak(&[hit(20, 21, 60)], 12, &healthy, 1.0).is_none());
+        assert!(select_peak(
+            &[hit(MAX_PARTICIPANTS, MAX_PARTICIPANTS + 1, 60)],
+            12,
+            &healthy,
+            1.0
+        )
+        .is_none());
     }
 
     #[test]

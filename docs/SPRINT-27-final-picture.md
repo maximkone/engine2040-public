@@ -22,6 +22,7 @@ self-heal rows already on the board (AD14, E75) and the compaction rows the powe
   F2P: no skill for a red test beyond `debug-triage`'s triage steps.
   P2P: workspace-check PASS.
   needs: AF1.
+  Correction 2026-10-21: board audit 2 called this a duplicate of AF1, but the two do not build the same thing: AF1 owns `tools/fix.mjs` (absent today) and this row owns `skills/fix-red/SKILL.md` (absent today), which cites that tool and waits on it. Keep this row as the skill; it cannot be ticked until AF1 lands its tool and the skill file exists.
 - [ ] AF4 assets: content rules with a fix. `crates/assets/src/validate.rs` holds `Rule { id, severity, check, fix }` over a cooked mesh: `tangents.missing` (fix: `import_repair::recompute_tangents`), `tri.degenerate` (fix: drop zero-area triangles), `normal.not_unit` (fix: renormalize), `float.nonfinite` (no fix, error), `collider.missing` (fix: TC2's hull). `validate(&mesh)` returns hits in rule order; `fix(&mut mesh, id)` applies one rule and re-checks it. Donors: Unreal EditorValidatorBase, Godot configuration warnings, glTF-Validator (Apache-2.0), read 2026-10-20; none ship a fix callback, which is the part we add. Tier A. Size M. Owns `crates/assets/src/validate.rs`, `crates/assets/src/lib.rs`.
   Accept: `cargo test -p engine-assets --lib validate` passes: a seeded mesh with each defect reports exactly its rule ids, each fixable rule's fix clears its hit and no other, a clean CT7 body reports none, and two runs give identical hits.
   F2P: no rule registry; `validate.rs` absent.
@@ -47,7 +48,7 @@ self-heal rows already on the board (AD14, E75) and the compaction rows the powe
   F2P: a 6,000-line file may grow without a signal.
   P2P: rust-quality PASS.
   needs: AF2.
-- [ ] TC1 game: a cape meets every body near it, not only its wearer's torso. The cape steps against its wearer's torso capsule plus all ragdoll bone capsules from the one bone table (`ragdoll_look::bone_capsules`, radius plus 2 cm skin) and the same set for every posed rival within 1.6 m. Presentation only; the cloth is never hashed. Tier A. Size S. Owns `crates/game/src/fighter_look.rs`, `crates/game/src/ragdoll_look.rs`.
+- [x] TC1 game: a cape meets every body near it, not only its wearer's torso. The cape steps against its wearer's torso capsule plus all ragdoll bone capsules from the one bone table (`ragdoll_look::bone_capsules`, radius plus 2 cm skin) and the same set for every posed rival within 1.6 m. Presentation only; the cloth is never hashed. Tier A. Size S. Owns `crates/game/src/fighter_look.rs`, `crates/game/src/ragdoll_look.rs`. Landed 12de023d. cargo test -p engine-game --features app --lib cape on a Windows runner: 5 passed, the new rival test green (run 39519896373); the golden stays d57b5c8ae3096614 with the cape change (run 39563189351).
   Accept: `cargo test -p engine-game --features app --lib cape` passes, including `a_rival_pressed_behind_pushes_the_cape_instead_of_passing_through` (a rival 0.35 m behind: no free cape particle more than 2 cm inside its torso shell) and `capes_never_reach_the_authority_checkpoints`.
   F2P: the cape stepped against one collider (its wearer's torso), so legs and rivals passed through it.
   P2P: golden d57b5c8ae3096614 x2; `capes_pin_to_the_shoulders_and_trail_a_running_fighter` green.
@@ -67,16 +68,19 @@ self-heal rows already on the board (AD14, E75) and the compaction rows the powe
   F2P: `orca.rs` has 0 callers.
   P2P: golden d57b5c8ae3096614 x2.
   needs: none.
+  Correction 2026-10-21: the Accept filter `orca` matches no test in engine-arena (`Grep orca` over crates/arena/src is empty), so the command exits 0 with 0 passed; the orca tests live in `crates/nav/src/orca.rs` and only run under `-p engine-nav`. The arena caller and its test are the work; Accept is `--lib orca` in engine-arena printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] TC5 nav: crowds that touch. `crates/nav/src/crowd_contact.rs`: integer position-based contact for 64 to 512 discs, one projection pass per tick after ORCA (disc vs disc, disc vs wall), each agent's pressure in newtons-equivalent as an integer, and a crush threshold that hands TC3 a shove. Donor: Weiss et al., Computers and Graphics 78 (2019), DOI 10.1016/j.cag.2018.10.008 (paper, ideas only), read 2026-10-20. Tier B. Size M. Owns `crates/nav/src/crowd_contact.rs`, `crates/nav/src/lib.rs`.
   Accept: `cargo test -p engine-nav --lib crowd_contact` passes: 256 discs pushed through a 2 m gate keep every overlap under 5 mm after the pass, pressure peaks at the gate, the step allocates nothing warm, 512 discs step under 1 ms on the build PC (bench line printed), two runs give identical bytes.
   F2P: no crowd contact module.
   P2P: golden d57b5c8ae3096614 x2.
   needs: TC4.
+  Correction 2026-10-21: the Accept filter `crowd_contact` matches no test (`Grep crowd_contact` over crates/nav is empty) and `crates/nav/src/crowd_contact.rs` does not exist (`Test-Path` false), so the command exits 0 with 0 passed. The module and its test are the work; Accept is `--lib crowd_contact` printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] TC6 physfx: ragdolls, limbs and debris use the layer table. Every Rapier collider in `crates/physfx` carries the group and mask from `engine_physics::layers` as `InteractionGroups`, so a falling body lands on a crate, debris hits bodies, and debris never meets cloth. Donor: Rapier `src/geometry/interaction_groups.rs` (Apache-2.0), read 2026-10-20. Tier A. Size S. Owns `crates/physfx/src/`.
   Accept: `cargo test -p engine-physfx --lib layers` passes: a ragdoll dropped on a crate rests on it, a debris piece and a cloth-layer probe never generate a contact pair, and the existing physfx tests stay green.
   F2P: physfx has no group table (0 `InteractionGroups` hits).
   P2P: golden d57b5c8ae3096614 x2 (physfx is never hashed).
   needs: none.
+  Correction 2026-10-21: the Accept filter `layers` matches no test in engine-physfx (`Grep layers` over crates/physfx finds one doc comment only), so the command exits 0 with 0 passed. `engine_physics::layers` does exist (`crates/physics/src/lib.rs:37`) but physfx builds no `InteractionGroups`. The wiring and its test are the work; Accept is `--lib layers` printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] TC7 game: lean and brace look. When TC3 or TC5 reports pressure on a slot, the look tilts the upper body away from the push and puts the near hand on the pusher's shoulder with two-bone IK; it eases out over 0.25 s. Presentation only. Donor: Overgrowth `Data/Scripts/aschar.as` tilt and target tilt (Apache-2.0), read 2026-10-20. Tier B. Size M. Owns `crates/game/src/fighter_look.rs`.
   Accept: `cargo test -p engine-game --features app --lib lean` passes: a slot pushed from its left tilts its torso joint right by 4 to 15 degrees within 10 ticks and returns under 1 degree 30 ticks after the push stops; a window capture pair (pushed vs free) is opened.
   F2P: pressure does not change the pose.
@@ -87,21 +91,25 @@ self-heal rows already on the board (AD14, E75) and the compaction rows the powe
   F2P: no lens pass.
   P2P: golden d57b5c8ae3096614 x2; `--lib post` green.
   needs: none.
+  Correction 2026-10-21: the Accept filter `lens` matches no test (`Grep lens` over crates/render is empty and `crates/render/src/lens.rs` does not exist), so the command exits 0 with 0 passed. The lens pass and its test are the work; Accept is `--lib lens` printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] POV2 game: the helmet mount. The first-person camera rides a halflife spring attached to the head joint (helmet) or the torso joint (chest) while the aim ray stays on the FV1 eye, so the view shakes and the aim does not. Halflives come from the `touch-and-pov.md` table (helmet 0.06 s, chest 0.10 s). Reuse the fight camera's halflife spring, no new spring type. Tier A. Size S. Owns `crates/game/src/fps_view.rs`.
   Accept: `cargo test -p engine-game --lib fps_view` passes with a test where a scripted head bob of 3 cm moves the camera by more than 1 cm and the aim ray by 0, chest moves more than helmet, and the same tape gives the same camera bytes twice.
   F2P: camera and aim are one pose.
   P2P: golden x2.
   needs: FV3.
+  Correction 2026-10-21: the Accept filter `fps_view` is not hollow - it matches the module's 12 tests (`crates/game/src/lib.rs:97`; 12 `#[test]` in `fps_view.rs`), so the command exits 0 today - but no test in it covers a helmet or chest spring (`Grep helmet|chest|halflife` in `fps_view.rs` is empty), so a tick would prove nothing. Accept is a named spring test of your own that prints a nonzero passed count, and the row may not be ticked until it does.
 - [ ] POV3 game: viewmodel weight. The held weapon lags the look by a spring (`sway_halflife_s` 0.12), breathes (`breath_amp_deg` 0.15, zero while breath is held) and sways with grip; prone sways less than crouch, crouch less than stand. Donor: Arma 3 OPREP weapon sway post (ideas), GodotSpringDamper (MIT) read 2026-10-20. Tier B. Size S. Owns `crates/game/src/fps_view.rs`.
   Accept: `cargo test -p engine-game --lib viewmodel` passes: a 90-degree flick leaves the weapon behind the look and settles inside 0.5 s; breath hold drops breath amplitude to 0; stance order holds; replay twice equal.
   F2P: the weapon is glued to the view.
   P2P: golden x2.
   needs: POV2.
+  Correction 2026-10-21: the Accept filter `viewmodel` matches no test (`Grep viewmodel` over crates/game is empty), so the command exits 0 with 0 passed. The viewmodel spring, the breath table and their test are the work; Accept is `--lib viewmodel` printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] POV4 render: second cameras to textures. A throttled render-to-texture camera (default 15 Hz, 512 px) that the game points at an optiwand tip under a door or a teammate's helmet, drawn as a picture-in-picture quad; a budget line prints its GPU ms. Donor: Godot SubViewport docs (ideas), read 2026-10-20. Tier B. Size M. Owns `crates/render/src/present/rtt.rs`, `crates/render/src/present.rs`.
   Accept: `cargo test -p engine-render --features window --lib rtt` passes on the PC: the second camera renders a known scene into its texture, skips frames at the set rate, and its GPU ms prints; a capture with the PiP quad is opened.
   F2P: one camera per frame.
   P2P: golden x2; `validation_errors=0` on the arena run.
   needs: POV1.
+  Correction 2026-10-21: the Accept filter `rtt` matches no test (`Grep rtt` over crates/render is empty and `crates/render/src/present/rtt.rs` does not exist), so the command exits 0 with 0 passed. The second camera and its test are the work; Accept is `--lib rtt` printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] POV5 game: flashbang and suppression. A flash cue whites out the view and decays over 2 to 4 s by distance and facing; the audio mix gets a low-pass and a 4 kHz ring for the same time; near misses blur the screen edges. Presentation only. Tier B. Size S. Owns `crates/game/src/fps_view.rs`, `crates/game/src/audio_mix.rs`.
   Accept: `cargo test -p engine-game --lib flash` passes: a flash facing the eye at 2 m holds full white at least 1 s and is gone by 4 s, a flash behind the eye is weaker, the ring and low-pass ramp out on the same curve, replay twice equal.
   F2P: no flash response.
@@ -112,11 +120,13 @@ self-heal rows already on the board (AD14, E75) and the compaction rows the powe
   F2P: no comfort controls.
   P2P: golden x2.
   needs: POV2.
+  Correction 2026-10-21: the Accept filter `comfort` matches no test (`Grep comfort` over crates/game is empty), so the command exits 0 with 0 passed. The FOV restrictor, the five sliders, their settings round-trip and the test are the work; Accept is `--lib comfort` printing a nonzero passed count, and the row may not be ticked until it does.
 - [ ] POV7 proof: the helmet-cam tape. A scripted 600-tick first-person run (walk, turn, flash, optiwand peek) records eye and camera bytes with lens on and off, writes `target/reports/pov-<stamp>.md` with the digests and four captures, and runs twice equal. Extends FV6. Tier B. Size S. Owns `crates/game/src/fps_view.rs`, `crates/game/tests/it/`.
   Accept: `cargo test -p engine-game --test it pov_tape` passes twice with identical digests; the report lists four opened captures.
   F2P: no POV tape.
   P2P: golden x2.
   needs: FV6, POV1, POV2, POV4, POV5.
+  Correction 2026-10-21: the Accept command `cargo test -p engine-game --test it pov_tape` cannot pass on its own: `crates/game/tests/it/pov_tape.rs` does not exist (`Test-Path` false) and `Grep pov_tape` over crates/game is empty, so the integration binary has no such test and an empty filter exits 0. The tape file, its `mod` line in `tests/it/main.rs` and the report writer are the work; Accept is that command printing a nonzero passed count, and the row may not be ticked until it does.
 
 #### Build CPU (owner 2026-10-21: "optimize our cpu usage af ... 27 cargo, 20 rustc")
 
@@ -127,7 +137,7 @@ Plan: `docs/plan/build-cpu.md`. One pool of compile slots for every cargo on the
   F2P: each cargo starts its own 12-job pool; four live builds ask for 48 jobs on 12 cores.
   P2P: with no holder running every tool behaves as before; golden d57b5c8ae3096614 x2.
   needs: none.
-- [ ] OPT38 proof: the local golden verify builds on `perf-test` (thin LTO, 16 units), not fat-LTO `release`. `tools/proof.mjs` runs `cargo run -p engine2040 --locked --profile perf-test` for `--verify`, `--replay` and the backend check; CI's release-proof leg keeps `--release`. If the keeper's thin-LTO `product` profile (`docs/research/build-cpu-2026-10-21/CARD.md`) lands first, use it instead so the golden shares that target dir. Tier A. Size S. Owns `tools/proof.mjs`.
+- [x] OPT38 proof: the local golden verify builds on `perf-test` (thin LTO, 16 units), not fat-LTO `release`. `tools/proof.mjs` runs `cargo run -p engine2040 --locked --profile perf-test` for `--verify`, `--replay` and the backend check; CI's release-proof leg keeps `--release`. If the keeper's thin-LTO `product` profile (`docs/research/build-cpu-2026-10-21/CARD.md`) lands first, use it instead so the golden shares that target dir. Tier A. Size S. Owns `tools/proof.mjs`.
   Accept: `node tools/gh-check.mjs cargo test -p engine2040 --locked --profile perf-test --test proof_cli default_and_max_seed` and the same line with `--release` pass twice each (1 test each; it asserts `final_hash` `d57b5c8ae3096614` from the binary built in that profile); `node --test tools/proof.test.mjs` passes; the receipt line gives the two build times.
   F2P: every local golden check pays the fat-LTO, one-unit relink in `target/release`.
   P2P: golden d57b5c8ae3096614 x2 on both profiles.

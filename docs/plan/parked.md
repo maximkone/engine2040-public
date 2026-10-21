@@ -170,8 +170,8 @@ PLF rows are board-only tracking rows; their plan, docs/archive/2026-10-10/plans
 | UIX4 | Accessibility: subtitles-minimal, remap UI, contrast over UI1 palettes | B | UI1, CB1 |
 | UIX6 | Settings persistence: versioned file with first-run adapter defaults | A | UIX2 |
 | UIX7 | Settings dispatch wiring: OpenSettings rows into UIX2 staging | A | UIX1, UIX2 |
-| UIX8 | Lobby scale proof: 16-slot list virtualized, 64-slot projection | B | UIX3, MP3 |
-| UIX9 | Subtitle storm bound: drop-and-count queue under a 16-fighter storm | B | UIX4, CB1; waits UIX4 |
+| UIX8 | Lobby scale proof: 32-slot list virtualized, 64-slot projection | B | UIX3, MP3 |
+| UIX9 | Subtitle storm bound: drop-and-count queue under a full-roster (32) storm | B | UIX4, CB1; waits UIX4 |
 | UIX10 | Remap-by-pad drill: full rebind with the keyboard unplugged | B | UIX2, WIN3 |
 | UIX11 | Stale-beacon eviction: beacons older than K refresh periods | B | UIX3, MP3 |
 | UIX12 | Tutorial-2 defense lesson: block, parry and riposte window | B | UIX5, GP1 |

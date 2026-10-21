@@ -101,3 +101,4 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   traj_student` x2 - mean endpoint error at least 20% under
   `predict_linear` on the held-out fixture, `infer_into` allocates
   nothing, and the net-on tape repeats its `arena sim:` hash.
+  Correction 2026-10-21: the Accept filter `traj_student` matches no test (`Grep traj` over crates/anim is empty) and `fixtures/nets/traj.e2nn` does not exist (`Test-Path` false; only `depth_student.e2nn` is in that folder), so the command exits 0 with 0 passed. The net, the fixture and the test are the work; Accept is `--lib traj_student` printing a nonzero passed count, and the row may not be ticked until it does.

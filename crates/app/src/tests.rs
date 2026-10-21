@@ -588,7 +588,11 @@ fn root_reaches_every_module_with_headline_receipts() {
     // Platform plus snapshot plus verify frame: null name, actor cap,
     // deterministic build hash and the two-fighter verify config.
     assert_eq!(NullPlatform::new().name(), "null", "null backend via root");
-    assert_eq!(MAX_FRAME_ACTORS, 16, "frame actor cap via root");
+    assert_eq!(
+        MAX_FRAME_ACTORS,
+        usize::from(engine_arena::MAX_PARTICIPANTS),
+        "frame actor cap via root"
+    );
     assert_eq!(
         build_hash_for(2040),
         build_hash_for(2040),

@@ -26,6 +26,8 @@ pub enum Field {
     Angle,
     /// A bone index the rig does not have, or the root where a joint is needed.
     Bone,
+    /// How hard the joints brace, a 0..=1 scale.
+    Muscle,
 }
 
 impl Field {
@@ -41,6 +43,7 @@ impl Field {
             Field::Direction => "direction",
             Field::Angle => "angle",
             Field::Bone => "bone",
+            Field::Muscle => "muscle",
         }
     }
 }
@@ -63,6 +66,16 @@ pub enum Error {
     },
     /// `spawn_debris` was given no shards.
     NoShards,
+    /// A bone the body does not have.
+    UnknownBone {
+        /// The name that is not a bone of this body.
+        name: String,
+    },
+    /// A joint a blade may not take.
+    UncuttableJoint {
+        /// The joint that may not be cut.
+        joint: String,
+    },
     /// The skeleton, pose or bone list failed the animation contract.
     Anim(AnimError),
 }
@@ -75,6 +88,8 @@ impl Display for Error {
             Error::BadCaps => f.write_str("cap table needs every limit above zero"),
             Error::OverCap { need, cap } => write!(f, "{need} needed, the cap holds {cap}"),
             Error::NoShards => f.write_str("no shards to spawn"),
+            Error::UnknownBone { name } => write!(f, "`{name}` is not a bone of this body"),
+            Error::UncuttableJoint { joint } => write!(f, "`{joint}` may not be cut"),
             Error::Anim(e) => write!(f, "invalid skeleton, pose or bones: {e:?}"),
         }
     }

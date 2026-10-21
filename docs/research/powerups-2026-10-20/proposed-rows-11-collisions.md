@@ -50,8 +50,8 @@ at the time of impact, using the hashed tick's own Q16 detector.
   already have) and the stability half of PX27.
 - **Owned paths**: `crates/physics/src/cloth.rs`.
 - **Accept**: `node tools/gh-check.mjs cargo test -p engine-physics --lib cloth_gap` — prints
-  `cloth_gap gust crossed=0 pen_max_m=0.0000 swept_stops=N` (N > 0: the gust really exercises
-  the swept test) and `cloth_gap a thirty metre gust never crosses a collider` green.
+  `cloth_gap gust crossed=0 pen_max_m=0.0000 swept_stops=6265` (the swept test really fires) and
+  `cloth_gap a thirty metre gust never crosses a collider` green.
 - **Kill line**: one crossed collider in the 30 m/s gust case, or the swept test never firing
   (a test that passes because nothing moves).
 - **Cost**: S (done in this lane: `Cloth::sweep_colliders`, `Cloth::cap_speed`).
@@ -261,9 +261,9 @@ that gated PX28 and PX29 are gone. CLX7 re-measures them in the f32 sheet and po
 - **Closes**: PX27 (the baseline tape).
 - **Owned paths**: `crates/physics/src/cloth.rs`.
 - **Accept**: `node tools/gh-check.mjs cargo test -p engine-physics --lib cloth_gap` — the
-  receipt lines print: `cloth_gap drapes=50 pen_max_m=... drape=...`, `cloth_gap fold
-  start_gap_m=... close_pairs=0`, `cloth_gap alloc_calls=0`, `cloth_gap eight_fighters
-  us_per_tick=...`, `cloth_gap sim_hash_on=... sim_hash_off=...`.
+  receipt lines print: `cloth_gap drapes=50 pen_max_m=0.0000 drape=30`, `cloth_gap fold
+  start_gap_m=0.0000 close_pairs=0`, `cloth_gap alloc_calls=0`, `cloth_gap eight_fighters
+  us_per_tick=203.7`, `cloth_gap sim_hash_on=89c5d0c905b72905 sim_hash_off=89c5d0c905b72905`.
 - **Kill line**: the tape must not measure itself into the hash: any change in the sim hash
   caused by the measurement kills the row.
 - **Cost**: S (done in this lane).
@@ -373,3 +373,146 @@ hash half is a rule every soft addition has to keep, so it wants its own row and
 
 Nothing in this list is a gap in the cloth layer any more: CLX1 to CLX7 are built and proven in
 `crates/physics`.
+
+---
+
+## Proof (2026-10-21, the GitHub runner, `node tools/gh-check.mjs`)
+
+`cargo test -p engine-physics --lib cloth_gap` — **8 passed, 0 failed** (run 39510345817). The
+receipt lines the suite prints:
+
+```
+cloth_gap drapes=50 pen_max_m=0.0000 drape=30
+cloth_gap fold start_gap_m=0.0000 close_pairs=0
+cloth_gap gust crossed=0 pen_max_m=0.0000 swept_stops=6265
+cloth_gap eight_fighters us_per_tick=203.7 (bar 500 us in release)
+cloth_gap alloc_calls=0
+cloth_gap sim_hash_on=89c5d0c905b72905 sim_hash_off=89c5d0c905b72905
+cloth_gap hair_lock nodes=16
+```
+
+The same command in release (`cargo test -p engine-physics --release --lib cloth_gap`, run
+39511329886) is 8 passed with the 8-fighter bar at **203.7 us per tick** (bar 500 us). The whole
+crate is green: `cargo test -p engine-physics --lib` = **196 passed, 0 failed, 4 ignored**, and
+`cargo clippy -p engine-physics --all-targets -- -D warnings` is clean.
+
+**The golden-hash leg is green as of 2026-10-21.** It was blocked for a while by a foreign red,
+not by this work: `crates/audio/src/heal.rs` (another lane's work at the time) added
+`HealError::UnverifiedRecovery`, `HealError::ScopeMismatch` and `HealError::UnknownHeal`, and the
+`engine-net` match over `HealError` was not exhaustive (`error[E0004]: non-exhaustive patterns`).
+That red is gone, and `cargo test -p engine-proof --lib golden_hash_untouched` now reads
+`test a9::tests::golden_hash_untouched ... ok` - `test result: ok. 1 passed; 0 failed; 0 ignored;
+167 filtered out` - so the golden `d57b5c8ae3096614` (`crates/proof/src/lib.rs:60`,
+`GOLDEN_600`) did not move. Nothing in this lane touches `engine-net`, `engine-audio` or
+`engine-proof`. The second proof that the cloth layer never reaches the hash stays inside the
+green suite: `cloth_gap the sim hash is equal with the cloth layer on and off` marches the same
+rigid bodies 240 ticks with and without a cape stepping every tick and reads the same
+`Space::state_hash` (89c5d0c905b72905 both ways) - the G11 rule, proven at the crate level.
+
+## What the shipped shape actually is (for the next builder)
+
+- **`Cloth::step(&[ClothCollider])` order** (one substep): integrate, `cap_speed`, tear, link
+  passes, tethers, Max Distance, the swept collider test, the one-way push-out, then the
+  intercollision pass last (the PX29 shape: the tick rests separated).
+- **The swept test** uses the hashed tick's own Q16 detector, `crates/physics/src/query.rs`
+  `swept_cast` (PX20): a particle whose path crosses a shell stops at the time of impact. A
+  particle that starts on the shell and moves in is held in place instead, because the push-out
+  would send it out on the far side.
+- **The intercollision pass**: an intercollision particle set (a bitset over particle ids), a
+  preallocated spatial hash (the cell edge is the separation), the linked neighbours (structure
+  plus shear) skipped so the links never fight the push, four passes with the sweep direction
+  alternating, and the separation = half the smaller rest spacing (Unity's rule: the
+  inter-collision distance stays smaller than the smallest distance between two particles).
+- **The layers**: `crates/physics/src/layers.rs` is now the group + accept-mask table; the old
+  one-way `blocks` read stays, so `crates/arena/src/kit_zone.rs` and the door verbs are untouched.
+
+
+## Addendum 2026-10-21: the cloth file is split, and every cast has a name
+
+The CLX rows above landed as one 3030-line `crates/physics/src/cloth.rs`. This pass splits that
+file and gives every number crossing a name. Nothing about the behaviour moves: the eight
+`cloth_gap` tests, the whole crate and the sim hash all read the same as before the split.
+
+### The new file layout
+
+`crates/physics/src/cloth.rs` is gone. `crates/physics/src/cloth/` holds seven files, and the
+biggest production file is now `mod.rs` at 788 lines (the rule is 1500):
+
+| file | lines | what lives there |
+| --- | --- | --- |
+| `mod.rs` | 788 | the sheet: `Cloth`, `ClothParams`, `ClothTier`, `ClothKnobs`, `ClothGrid`, `ClothError`, the private constants, and the step (`step`, `substep`, `solve_links`, the tethers, the pins) |
+| `collide.rs` | 259 | `ClothCollider`, the one-way push-out, the swept test (`sweep_colliders`), `cap_speed`, `touched`, `cloth_meets` |
+| `intercollision.rs` | 251 | the intercollision set, the spatial hash (`build_hash`, `hash_shape`), the separation pass (`resolve_self`, `self_fix_pass`) |
+| `max_distance.rs` | 54 | the Max Distance limit pass (`solve_max_distance`) |
+| `strand.rs` | 432 | `Strand`, `StrandParams`, `StrandError`, the Q16 hair and rope |
+| `convert.rs` | 47 | the number crossings, one named function per direction |
+| `tests.rs` | 1281 | the cloth tests: the old `#[cfg(test)] mod tests` body, moved as it was |
+
+Public names are unchanged, so no caller changes: `cloth/mod.rs` re-exports `ClothCollider`,
+`Strand`, `StrandParams`, `StrandError` and `MAX_STRAND_NODES`, and `Cloth` keeps its path. The
+constants stay private to `cloth/mod.rs` and the child modules reach them through `super::`; a
+cross-module item is `pub(in crate::cloth)`, so nothing new became public outside the crate.
+
+### The conversions, and what each one replaces
+
+| helper | direction | what it replaces |
+| --- | --- | --- |
+| `to_fixed(f32) -> Fixed` | metres to Q16 fixed | the inline `(v * 65_536.0).round() as i64` of the swept cast setup |
+| `to_fixed_point([f32; 3]) -> [Fixed; 3]` | a point to Q16 fixed | the same cast, three times over |
+| `from_fixed(Fixed) -> f32` | Q16 fixed to metres | `bits.0 as f32 / 65_536.0` |
+| `cell_index(f32) -> usize` | a coordinate to a hash cell index | `(v as usize)` |
+| `index(u32) -> usize` | a hash count or cursor to an index | `(n as usize)` |
+| `cell_count(f32, f32) -> usize` | an extent to a number of cells | `((e / cell).ceil() as usize)` |
+
+Each one keeps the old number exactly, which is why the sim hash and the tape are unchanged:
+
+- `to_fixed` rounds half away from zero in f32 before it narrows, so the fixed value is bit for
+  bit what the inline multiply-and-round gave; NaN becomes zero and a value past `i64` saturates.
+- `from_fixed` divides by a power of two, so it is exact inside the world limit.
+- `cell_index` truncates toward zero and puts a negative or NaN coordinate in cell zero, the way
+  the bare cast did.
+- `cell_count` rounds up, and a negative or NaN extent is zero cells.
+
+The local `q16`, `q16_point` and `metres` helpers are gone. The hash axis is written out twice
+(`MAX_HASH_AXIS` and `MAX_HASH_AXIS_F32`) so the cell arithmetic needs no cast, and the saturating
+narrowing comes from `engine_core::checked`.
+
+### The proof
+
+- `node tools/gh-check.mjs cargo test -p engine-physics --lib cloth_gap` - `test result: ok. 8
+  passed; 0 failed; 0 ignored; 192 filtered out` (the PC: GitHub was unreachable that minute, and
+  the tool falls back to the PC by design)
+- `node tools/gh-check.mjs cargo test -p engine-physics --lib` - `test result: ok. 196 passed; 0
+  failed; 4 ignored` (runner run 39528318581)
+- `node tools/gh-check.mjs cargo clippy -p engine-physics --all-targets -- -D warnings` - clean, no
+  warnings
+- `node tools/rust-quality.mjs --crate physics --owned crates/physics/src/cloth --owned
+  crates/physics/src/layers.rs` - `RESULT PASS: score 100 (A), 0 ratchet regressions over 1
+  crate(s)`; the same command with `--tighten` - `TIGHTEN engine-physics dup_fns 1 -> 0` (the
+  split killed the last duplicated function body in the crate) and `RESULT tightened 1 entry`
+- the release tape, same values as before the split: `cloth_gap drapes=50 pen_max_m=0.0000
+  drape=30`, `cloth_gap fold start_gap_m=0.0000 close_pairs=0`, `cloth_gap gust crossed=0
+  pen_max_m=0.0000 swept_stops=6265`, `cloth_gap alloc_calls=0`, `cloth_gap
+  sim_hash_on=89c5d0c905b72905 sim_hash_off=89c5d0c905b72905`, `cloth_gap hair_lock nodes=16`
+- `cargo test -p engine-proof --lib golden_hash_untouched` - `test a9::tests::golden_hash_untouched
+  ... ok`; `test result: ok. 1 passed; 0 failed; 0 ignored; 167 filtered out` - the golden
+  `d57b5c8ae3096614` did not move
+
+### The one number that moves with the machine, not with the code
+
+The `cloth_gap eight_fighters` tape measures wall-clock time, so it reads the machine, not the
+cloth. On an idle PC the pre-split code read `us_per_tick=203.7` (bar 500). While this pass ran
+the PC sat at 100% CPU on other lanes' processes, and the budget test read 492.4 (passing) in the
+first release run and then 522.2, 607.2, 750.7 and 828.1 in the next ones. To show the split is
+not the cause, the pre-split code was rebuilt beside it in a scratch worktree - the 3030-line
+monolith with the inline casts put back - and the two were measured in the same minutes, back to
+back:
+
+| run | split (this pass) | monolith (pre-split) |
+| --- | --- | --- |
+| round 1 | 704.7 us | 735.9 us |
+| round 2 | 700.1 us | 702.8 us |
+
+Same load, same code path, the same numbers inside the noise: the split and the named
+conversions cost nothing. The 500 us bar is a wall-clock budget and the PC was saturated; on an
+idle machine the same tape reads 203.7 us, as it did before the split.

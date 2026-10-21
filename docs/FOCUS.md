@@ -56,7 +56,7 @@ the first proof; nothing below skips its gates.
 
 Since 2026-10-21 (D10) the game is `docs/plan/rome.md`: one legionary's career in six chapters. The four places below live on inside it: the arena as fortress drill and the Colosseum games, the district as chapter VI, the siege field as chapter V, the ludus as the fortress.
 
-- **Arena (Colosseum):** duels and team fights, 2–16 fighters, AI fills slots,
+- **Arena (Colosseum):** duels and team fights, 2-32 fighters, AI fills slots,
   a 20k–50k GPU crowd that reacts. First map, first proof (Finish A).
 - **Rome district:** streets, rooftops and a market between the ludus and the
   arena; traversal/parkour fights, free-roam between matches. Streamed cells,

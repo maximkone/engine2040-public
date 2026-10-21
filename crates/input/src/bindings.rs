@@ -174,6 +174,18 @@ impl ActionSet {
         }
     }
 
+    /// The digest byte of this set: its table index as a byte.
+    ///
+    /// A named conversion, never a numeric cast: the layer digest folds one
+    /// byte per layer, and the table has three entries, so the byte is exact.
+    pub const fn byte(self) -> u8 {
+        match self {
+            Self::Duel => 0,
+            Self::Menu => 1,
+            Self::Pause => 2,
+        }
+    }
+
     /// Set for a table index; `None` when out of range.
     pub const fn from_index(index: usize) -> Option<Self> {
         match index {

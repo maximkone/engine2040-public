@@ -53,6 +53,9 @@
 //! [`extract_root`]: engine_anim::pose::extract_root
 //! [`sample_pose`]: engine_anim::pose::sample_pose
 
+/// The step rules the legacy step and the spine step share (ARC7b).
+mod authority;
+pub mod branch;
 pub mod collide;
 pub mod controller;
 mod engage;
@@ -60,12 +63,15 @@ pub mod eqs_bind;
 pub mod fork;
 pub mod gameworld;
 pub mod gym;
+pub mod input_layers;
 pub mod limbs;
 pub mod live;
 mod match_observer;
 mod match_wire;
+pub mod nav_layers;
 #[cfg(all(feature = "spine", not(feature = "sim")))]
 pub mod parity;
+mod pilum;
 pub mod probe;
 pub mod recorder;
 pub mod seed;
@@ -108,22 +114,20 @@ use engine_anim::warp_ground::GroundWarp;
 use engine_anim::Clip;
 use engine_combat::arena::MatchState as CombatMatchState;
 use engine_combat::depth::{DepthSet, PoiseMeter};
-use engine_combat::exchange::{ExchangeEvent, ExchangeIntent, PhasedFighter};
+use engine_combat::exchange::PhasedFighter;
 use engine_combat::fight::TABLES_V2;
 use engine_combat::fight::{
     try_step_v2_with_cues_into, AttackStarted, StrikePose, MAX_ATTACK_STARTED_PER_TICK,
 };
 use engine_combat::sweep::WeaponSweep;
-use engine_combat::sweep::MAX_SWEEPS_PER_TICK;
 use engine_combat::tables::{TABLES_VERSION_V1, TABLES_VERSION_V2};
 use engine_combat::{
-    resolve_swing, try_step_into, AnatomyTable, BladeSwing, Cut, FightEvent, FightState, JointId,
-    JointTarget, CUT_V1, MAX_CUTS_PER_SWING, MAX_ENERGY_Q16, MAX_EVENTS_PER_TICK,
-    MAX_SHARPNESS_Q16, SEVERABLE_JOINT_COUNT, TABLES_V1,
+    try_step_into, Cut, FightEvent, FightState, JointId, JointTarget, MAX_EVENTS_PER_TICK,
+    SEVERABLE_JOINT_COUNT, TABLES_V1,
 };
 use engine_core::fixed::Fixed;
 use engine_destruction::bonded::{event_bytes as break_bytes, BondedCollection, BreakEvent};
-use engine_input::fighter::{ATTACK, DODGE, JUMP, THROW_SPEAR};
+use engine_input::fighter::{ATTACK, JUMP, THROW_SPEAR};
 use engine_physics::balance::BalanceParams;
 /// Integer balance verdicts the window reads (`Sim::balance`): re-exported so
 /// the presentation leg names the return without a physics edge.
@@ -969,6 +973,10 @@ pub struct Sim {
     /// Spear grapple state, `Some` only for a match built with
     /// `MatchSpec::spear`; `None` leaves every tick and hash untouched.
     spear: Option<spear::SpearState>,
+    /// Pilum volley state, `Some` only for a match whose pilum channel is
+    /// armed ([`Sim::set_pilum`]); `None` leaves every tick and hash
+    /// untouched.
+    pilum: Option<pilum::PilumState>,
     /// Height channel (row SG5): each slot's vertical speed in mm per tick.
     /// Empty while the channel is off, which is the golden and the floor
     /// plane: nothing writes `pos[1]` beyond placement and nothing folds.
@@ -1140,6 +1148,7 @@ impl Sim {
             depth,
             limbs: LimbPool::new(limb_cap).ok()?,
             spear: None,
+            pilum: None,
             rise: Vec::new(),
             height: false,
             #[cfg(test)]
@@ -1195,36 +1204,33 @@ impl Sim {
         true
     }
 
+    /// Arm the pilum volley before the first tick: every legionary then
+    /// carries two pila and looses one on the horn, the arena's press-tick
+    /// call cue. Off by default, and off leaves every tick and every hash
+    /// untouched, so the golden and the arena digest never move.
+    ///
+    /// Refuses (`false`) past tick 0, and on the Rapier `sim` leg, where
+    /// the arena's own throw channels stay off.
+    pub fn set_pilum(&mut self) -> bool {
+        if cfg!(feature = "sim") || self.tick != 0 {
+            return false;
+        }
+        self.pilum = Some(pilum::PilumState::new(self.fighters));
+        true
+    }
+
     /// One tick of the height channel: gravity on every slot that is off the
     /// floor, a landing at floor height with the vertical speed cleared.
     /// Integer mm, so a replay lands on the same height twice. Near the apex
     /// (`AIR_APEX_MM_TICK`) a held jump halves gravity, the AIN6 table's
     /// float-free copy; the spear swing keeps the plain arc.
     fn fall(&mut self) {
-        for (slot, state) in self.states.iter_mut().enumerate().take(self.fighters) {
-            let at_mm = match_wire::pos_mm(state.pos)[1];
-            if self.rise[slot] == 0 && at_mm <= 0 {
-                continue;
-            }
-            // The apex hang belongs to the live jump only: a held jump button
-            // near the top halves gravity. Other height users (the spear rope
-            // swing) keep the plain arc, so their receipts stay exact.
-            let held_jump = self.last_inputs[slot].is_some_and(|input| input.buttons.0 & JUMP != 0);
-            let gravity = if held_jump && self.rise[slot].abs() < AIR_APEX_MM_TICK {
-                FIGHTER_GRAVITY / 2
-            } else {
-                FIGHTER_GRAVITY
-            };
-            let rise = self.rise[slot].saturating_sub(gravity);
-            let next = at_mm.saturating_add(rise);
-            if next <= 0 {
-                self.rise[slot] = 0;
-                state.pos[1] = 0.0;
-            } else {
-                self.rise[slot] = rise;
-                state.pos[1] = match_wire::metres(next);
-            }
-        }
+        authority::fall_states(
+            &mut self.states,
+            &mut self.rise,
+            self.fighters,
+            &self.last_inputs,
+        );
     }
 
     /// AIN7 live jump: arm the height channel from any tick (the `--height`
@@ -1366,6 +1372,16 @@ impl Sim {
             // controller with none drains an empty vec, the legacy path exactly.
             let effects = decider.take_effects();
             controller::apply_script_effects(&mut self.fight, &effects);
+        }
+        // A pilum in a scutum weighs it down: the guard comes up late, so
+        // the block press is masked before the fight step sees it. The mask
+        // goes back into the slots, so the hashed button byte carries it
+        // too and the fight state and the hash never disagree.
+        if let Some(pilum) = self.pilum.as_mut() {
+            pilum.hold_guards(&mut row[..self.fighters]);
+            for (cell, input) in slots.iter_mut().zip(&row[..self.fighters]) {
+                *cell = Some(*input);
+            }
         }
         let inputs = &row[..self.fighters];
         // Latch the merged inputs for the DT1 recorder (tape plus brain
@@ -1616,6 +1632,36 @@ impl Sim {
                 });
                 self.spear = Some(spear);
             }
+            // The pilum volley rides the arena's press-tick call cue: a cue
+            // tick sounds the horn, and the side that called it looses its
+            // pila. The cue exists under the rules v2 rows only, so a v1
+            // match never sounds the horn.
+            if let Some(mut pilum) = self.pilum.take() {
+                let horn = if self.rules.version == FIGHT_RULES_V2 {
+                    self.last_cues
+                        .first()
+                        .map(|cue| self.rules.teams[usize::from(cue.attacker)])
+                } else {
+                    None
+                };
+                let tables = if self.config.table_version == TABLES_VERSION_V2 {
+                    &TABLES_V2
+                } else {
+                    &TABLES_V1
+                };
+                pilum.step(&mut pilum::Env {
+                    inputs,
+                    states: &self.states,
+                    fight: &mut self.fight,
+                    rules: &self.rules,
+                    tables,
+                    world: &self.world,
+                    half_extent_m: self.config.half_extent_m,
+                    horn,
+                    tick: self.tick,
+                });
+                self.pilum = Some(pilum);
+            }
         }
         // EG20: one collision pass after every slot moved (default leg).
         if self.rules.collides() {
@@ -1670,15 +1716,7 @@ impl Sim {
         let destruction_hash = self.destruction.state_hash();
 
         #[cfg(feature = "sim")]
-        let physics_hash = {
-            const PRIME: u64 = 0x1000_0000_01b3;
-            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            for controller in &self.controllers {
-                hash ^= controller.state_hash();
-                hash = hash.wrapping_mul(PRIME);
-            }
-            hash
-        };
+        let physics_hash = authority::controller_hash(&self.controllers);
         #[cfg(not(feature = "sim"))]
         let physics_hash = 0u64;
 
@@ -1703,6 +1741,10 @@ impl Sim {
         // The spear state folds after the rules and before the world; a match
         // without one leaves the hash untouched.
         let hash = self.spear.as_ref().map_or(hash, |spear| spear.fold(hash));
+        // The pilum state folds the same way: a match without the channel
+        // leaves the hash untouched, so the golden and the arena digest
+        // never move.
+        let hash = self.pilum.as_ref().map_or(hash, |pilum| pilum.fold(hash));
         // The height channel folds only when armed, so the golden bytes stay
         // exactly as they were on a floor-plane match.
         let hash = if self.height {
@@ -1746,64 +1788,14 @@ impl Sim {
     /// buffers; the owned tick rows clone exact-size on event ticks only,
     /// so quiet ticks move nothing.
     fn resolve_match_tick(&mut self, row: &[FighterInput; MAX_SLOTS]) {
-        let fighters = self.fighters;
-        let mut intents = [ExchangeIntent::Idle; MAX_SLOTS];
-        for (slot, input) in row.iter().enumerate().take(fighters) {
-            intents[slot] = match_wire::exchange_intent(input);
-        }
-        let mut poses = [match_wire::sweep_fighter(0, &self.states[0], &row[0]); MAX_SLOTS];
-        for (slot, input) in row.iter().enumerate().take(fighters) {
-            poses[slot] = match_wire::sweep_fighter(slot as u8, &self.states[slot], input);
-        }
-        let mut sweeps =
-            [match_wire::sweep_for_attacker(0, [0, 0, 0], (0, 1)); MAX_SWEEPS_PER_TICK];
-        let mut sweep_n: usize = 0;
-        for (slot, input) in row.iter().enumerate().take(fighters) {
-            if input.buttons.0 & ATTACK != 0 && sweep_n < MAX_SWEEPS_PER_TICK {
-                let facing = match_wire::facing_vector(input.mx, input.mz, input.facing);
-                let origin = match_wire::pos_mm(self.states[slot].pos);
-                sweeps[sweep_n] = match_wire::sweep_for_attacker(slot as u8, origin, facing);
-                sweep_n += 1;
-            }
-        }
-        self.match_track
-            .resolve(&intents, &poses[..fighters], &sweeps[..sweep_n]);
-        // Locked riposte: a dodge-bit press while this slot holds an open
-        // parry window attempts the riposte against the lowest-ID foe
-        // through the match state; denials are silently skipped. The call
-        // is pure resolver work (no heap); only a landed riposte grows the
-        // tick log below, never a quiet tick.
-        let mut landed = [ExchangeEvent::Parried {
-            attacker: 0,
-            victim: 0,
-        }; MAX_SLOTS];
-        let mut landed_n: usize = 0;
-        for (slot, input) in row.iter().enumerate().take(fighters) {
-            if input.buttons.0 & DODGE != 0 {
-                let victim = i32::from(slot == 0) as u8;
-                if let Ok(event) = self.match_track.riposte(slot as u8, victim) {
-                    landed[landed_n] = event;
-                    landed_n += 1;
-                }
-            }
-        }
-        // Single-alloc staging for the owned tick row: the track
-        // slices plus landed ripostes size both rows exactly, so an
-        // event tick allocates once per row (no regrow past the old
-        // exact-size `to_vec` buffer) and quiet ticks move nothing.
-        // The track keeps its buffers for the next tick.
-        let track_exchange = self.match_track.exchange_events();
-        let track_sweep = self.match_track.sweep_events();
-        let mut exchange = Vec::with_capacity(track_exchange.len() + landed_n);
-        exchange.extend_from_slice(track_exchange);
-        exchange.extend_from_slice(&landed[..landed_n]);
-        let mut sweep = Vec::with_capacity(track_sweep.len());
-        sweep.extend_from_slice(track_sweep);
-        self.match_log.push(TickMatchEvents {
-            tick: self.tick,
-            exchange,
-            sweep,
-        });
+        let row_events = authority::match_observer_row(
+            &mut self.match_track,
+            &self.states,
+            row,
+            self.fighters,
+            self.tick,
+        );
+        self.match_log.push(row_events);
     }
 
     /// EG34: feed one tick's combat outcomes into the integer balance, in
@@ -1815,33 +1807,7 @@ impl Sim {
     /// out-of-range impulse (unreachable: the table stays inside the
     /// ceiling).
     fn feed_balance(&mut self, events: &[FightEvent]) -> Option<()> {
-        let Self {
-            balance, stagger, ..
-        } = self;
-        for event in events {
-            let (slot, impulse) = match *event {
-                FightEvent::Hit { victim, .. } => {
-                    let staggered = balance
-                        .get(usize::from(victim))
-                        .is_some_and(BalanceState::staggered);
-                    let impulse = if staggered {
-                        BALANCE_FALL_Q8
-                    } else {
-                        BALANCE_HIT_Q8
-                    };
-                    (victim, impulse)
-                }
-                FightEvent::Blocked { victim, .. } => (victim, BALANCE_BLOCK_Q8),
-                FightEvent::Parried { attacker, .. } => (attacker, BALANCE_PARRY_Q8),
-                FightEvent::Knockdown { victim, .. } => (victim, BALANCE_FALL_Q8),
-                FightEvent::Dodged { .. } | FightEvent::StaminaOut { .. } => continue,
-            };
-            let index = usize::from(slot);
-            if let (Some(state), Some(memory)) = (balance.get_mut(index), stagger.get_mut(index)) {
-                state.apply_memory_hit(memory, impulse, 0).ok()?;
-            }
-        }
-        Some(())
+        authority::feed_balance(&mut self.balance, &mut self.stagger, events)
     }
 
     /// Resolve one tick's landed hits into severed joints. V2 only: the cut
@@ -1850,55 +1816,7 @@ impl Sim {
     /// capsules use the standing rest layout at its feet. Presentation owns
     /// the pose and blood; this path owns the integer cut.
     fn resolve_cuts(&mut self, events: &[FightEvent]) -> Vec<Cut> {
-        let anatomy = AnatomyTable::rome_kit();
-        let mut cuts = Vec::new();
-        for event in events {
-            let FightEvent::Hit {
-                attacker, victim, ..
-            } = *event
-            else {
-                continue;
-            };
-            let (a, v) = (usize::from(attacker), usize::from(victim));
-            if a >= self.fighters || v >= self.fighters {
-                continue;
-            }
-            let from = match_wire::pos_mm(self.states[a].pos);
-            let to = match_wire::pos_mm(self.states[v].pos);
-            let facing = ((to[0] - from[0]).signum(), (to[2] - from[2]).signum());
-            let sweep = match_wire::sweep_for_attacker(attacker, from, facing);
-            let blade = BladeSwing {
-                attacker,
-                victim,
-                swing: self.tick.wrapping_mul(8).wrapping_add(u32::from(attacker)),
-                p0_mm: [sweep.p0_mm[0], 1_000, sweep.p0_mm[2]],
-                p1_mm: [sweep.p1_mm[0], 1_000, sweep.p1_mm[2]],
-                blade_half_mm: sweep.blade_half_mm,
-                // A landed blade is a full-force cut for the first authority
-                // slice; damage scaling and edge wear land with the feel pass.
-                energy_q16: MAX_ENERGY_Q16,
-                sharpness_q16: MAX_SHARPNESS_Q16,
-                wear_q16: 0,
-            };
-            let targets = rest_targets(to);
-            let mut out = [Cut {
-                swing: 0,
-                attacker: 0,
-                victim: 0,
-                joint: 1,
-                flags: 0,
-                energy_q16: 0,
-                protection_q16: 0,
-            }; MAX_CUTS_PER_SWING];
-            let count = resolve_swing(&blade, &targets, &anatomy, 0, &CUT_V1, &mut out);
-            if count > 0 {
-                cuts.push(out[0]);
-            }
-        }
-        if !cuts.is_empty() && crate::limbs::spawn_limbs(&mut self.limbs, &cuts, 0).is_err() {
-            cuts.clear();
-        }
-        cuts
+        authority::resolve_cuts(&self.states, self.tick, &mut self.limbs, events)
     }
 
     /// EG20 collision pass over this sim's fighters; see [`collide_states`].
@@ -2129,7 +2047,7 @@ impl Sim {
             buttons: snapshot.buttons,
             fight: snapshot.fight,
             match_track: match_wire::MatchTrack::from_state(
-                snapshot.match_state,
+                &snapshot.match_state,
                 snapshot.match_version,
                 snapshot.phased,
             ),
@@ -2162,6 +2080,7 @@ impl Sim {
             depth,
             limbs: LimbPool::new(MAX_LIMBS).ok()?,
             spear: None,
+            pilum: None,
             rise: snapshot.rise,
             height: snapshot.height,
             #[cfg(test)]
@@ -2465,6 +2384,11 @@ pub(crate) fn event_bytes(event: &FightEvent) -> [u8; 5] {
     }
 }
 
+/// The arena's FNV-1a multiplier: every checkpoint fold in this crate uses
+/// it, so it is pinned here once. The golden hash depends on these bytes;
+/// the value is the arena's own, not `engine_core`'s FNV prime.
+const HASH_PRIME: u64 = 0x1000_0000_01b3;
+
 /// Fold a [`MatchWorld::digest`] into a checkpoint hash. A zero digest (the
 /// empty world) returns `hash` untouched, so the legacy golden stays
 /// byte-frozen; a non-empty world mixes its bytes with the same prime the
@@ -2473,11 +2397,10 @@ fn fold_world(digest: u64, hash: u64) -> u64 {
     if digest == 0 {
         return hash;
     }
-    const PRIME: u64 = 0x1000_0000_01b3;
     let mut hash = hash;
     for byte in digest.to_le_bytes() {
         hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
     }
     hash
 }
@@ -2486,14 +2409,13 @@ fn fold_world(digest: u64, hash: u64) -> u64 {
 /// behind the tag byte `0xB4` so a height match never shares a hash with a
 /// floor-plane one. Called only while the channel is armed.
 fn fold_rise(rise: &[i32], hash: u64) -> u64 {
-    const PRIME: u64 = 0x1000_0000_01b3;
     let mut hash = hash;
     hash ^= 0xB4u64;
-    hash = hash.wrapping_mul(PRIME);
+    hash = hash.wrapping_mul(HASH_PRIME);
     for lane in rise {
         for byte in lane.to_le_bytes() {
             hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(PRIME);
+            hash = hash.wrapping_mul(HASH_PRIME);
         }
     }
     hash
@@ -2558,45 +2480,44 @@ fn hash_state_with_sim(
     breaks: &[BreakEvent],
     sim: bool,
 ) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x1000_0000_01b3;
+    const OFFSET: u64 = engine_core::hash::FNV64_OFFSET;
     let mut hash = OFFSET;
     for byte in tick.to_le_bytes() {
         hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
     }
     hash ^= u64::from(sim as u8);
-    hash = hash.wrapping_mul(PRIME);
+    hash = hash.wrapping_mul(HASH_PRIME);
     for (state, button) in states.iter().zip(buttons.iter()) {
         hash ^= u64::from(state.id.0);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
         for axis in state.pos {
             for byte in canon_zero(axis).to_bits().to_le_bytes() {
                 hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(PRIME);
+                hash = hash.wrapping_mul(HASH_PRIME);
             }
         }
         for byte in canon_zero(state.yaw).to_bits().to_le_bytes() {
             hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(PRIME);
+            hash = hash.wrapping_mul(HASH_PRIME);
         }
         hash ^= u64::from(*button);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
     }
     for loco in locos {
         let disc = u8::try_from(state_code(loco.state)).unwrap_or(u8::MAX);
         hash ^= u64::from(disc);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
         for axis in [loco.phase(), loco.facing()[0], loco.facing()[1]] {
             for byte in canon_zero(axis).to_bits().to_le_bytes() {
                 hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(PRIME);
+                hash = hash.wrapping_mul(HASH_PRIME);
             }
         }
         hash ^= u64::from(loco.is_airborne() as u8);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
         hash ^= u64::from(loco.interrupt_active() as u8);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
     }
     for slot in 0..states.len() {
         if let Some(combat) = fight.fighter(u8::try_from(slot).unwrap_or(u8::MAX)) {
@@ -2607,37 +2528,37 @@ fn hash_state_with_sim(
                 .chain(combat.stamina.to_le_bytes())
             {
                 hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(PRIME);
+                hash = hash.wrapping_mul(HASH_PRIME);
             }
         }
     }
     for byte in (events.len() as u64).to_le_bytes() {
         hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
     }
     for event in events {
         for byte in event_bytes(event) {
             hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(PRIME);
+            hash = hash.wrapping_mul(HASH_PRIME);
         }
     }
     for byte in destruction.to_le_bytes() {
         hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
     }
     for byte in (breaks.len() as u64).to_le_bytes() {
         hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
     }
     for brk in breaks {
         for byte in break_bytes(brk) {
             hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(PRIME);
+            hash = hash.wrapping_mul(HASH_PRIME);
         }
     }
     for byte in physics_hash.to_le_bytes() {
         hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
+        hash = hash.wrapping_mul(HASH_PRIME);
     }
     hash
 }

@@ -1263,7 +1263,7 @@ mod tests {
         let expired = runner.submit(oversized, tape.clone(), tape.clone());
         assert_eq!(runner.status(expired), Some(JobStatus::Expired));
         let invalid = ArenaConfig {
-            fighters: 17,
+            fighters: MAX_PARTICIPANTS + 1,
             ..config
         };
         let rejected = runner.submit(invalid, tape.clone(), tape.clone());

@@ -133,6 +133,15 @@ const CAPE_SIZE_M: [f32; 2] = [0.5, 0.95];
 const CAPE_BACK_M: f32 = 0.28;
 /// Radius of the one-way body capsule a cape must keep clear, meters.
 const CAPE_BODY_RADIUS_M: f32 = 0.16;
+/// Skin added to a ragdoll bone's radius when it pushes a cape, meters: the
+/// drawn body is fuller than the ragdoll capsule, so the cloth rests on the
+/// surface instead of inside a thigh.
+const CAPE_LIMB_SKIN_M: f32 = 0.02;
+/// A rival's body pushes this fighter's cape once their roots are this close
+/// on the ground plane, meters: a body leaning into a cape moves it.
+const CAPE_NEIGHBOR_M: f32 = 1.6;
+/// Most limb capsules one rig gives its cape: room for the ragdoll's table.
+const MAX_CAPE_LIMBS: usize = 16;
 /// Fastest body speed, m/s, the cape's own airflow follows: a teleport or a
 /// respawn never blows a sheet across the arena.
 const CAPE_WIND_MAX_M_S: f32 = 12.0;
@@ -167,23 +176,68 @@ struct CapeJoints {
     shoulders: [usize; 2],
     /// Chest and pelvis joints: the one-way body capsule runs between them.
     torso: [usize; 2],
+    /// Limb capsules from the ragdoll bone table: joint, tip joint and radius
+    /// in meters. The first `limb_count` entries are real.
+    limbs: [(usize, usize, f32); MAX_CAPE_LIMBS],
+    /// How many entries of `limbs` the rig has.
+    limb_count: usize,
 }
 
 impl CapeJoints {
-    /// The cape joints of a skeleton found by name; `None` when one is missing.
+    /// The cape joints of a skeleton found by name; `None` when a shoulder or
+    /// the torso is missing. A limb whose joint or tip is missing is skipped.
     fn find(skeleton: &Skeleton) -> Option<Self> {
         let at = |name: &str| skeleton.joints.iter().position(|joint| joint.name == name);
+        let mut limbs = [(0, 0, 0.0); MAX_CAPE_LIMBS];
+        let mut limb_count = 0;
+        for (joint, tip, radius) in ragdoll_look::bone_capsules() {
+            let (Some(a), Some(b)) = (at(joint), at(tip)) else {
+                continue;
+            };
+            let Some(entry) = limbs.get_mut(limb_count) else {
+                break;
+            };
+            *entry = (a, b, radius + CAPE_LIMB_SKIN_M);
+            limb_count += 1;
+        }
         Some(Self {
             shoulders: [at("arm_upper_l")?, at("arm_upper_r")?],
             torso: [at("torso")?, at("pelvis")?],
+            limbs,
+            limb_count,
         })
     }
+
+    /// The limb capsules this rig really has.
+    fn limbs(&self) -> &[(usize, usize, f32)] {
+        &self.limbs[..self.limb_count.min(MAX_CAPE_LIMBS)]
+    }
+}
+
+/// One slot's body for this tick's capes: the shoulders the top row pins to,
+/// the facing, the ground point, and the range of `Capes::bodies` holding the
+/// slot's own colliders.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct CapePose {
+    shoulders: [[f32; 3]; 2],
+    /// Sine and cosine of the slot's yaw.
+    yaw_sc: (f32, f32),
+    /// The slot root on the ground, meters.
+    root: [f32; 3],
+    /// Start and end of the slot's colliders in `Capes::bodies`.
+    bodies: (usize, usize),
 }
 
 /// The cape layer of a [`FighterLook`]: one Verlet sheet per look slot.
 struct Capes {
     /// Per rig: the joints its capes pin to, `None` when the rig has none.
     joints: Vec<Option<CapeJoints>>,
+    /// Per slot: this tick's body, `None` for an unseen or unposed slot.
+    poses: [Option<CapePose>; MAX_LOOK_FIGHTERS],
+    /// Every posed slot's colliders this tick (torso and limbs), slot order.
+    bodies: Vec<ClothCollider>,
+    /// The colliders one cape steps against: its own body plus near rivals.
+    near: Vec<ClothCollider>,
     /// Per slot: the sheet, `None` before the slot is first seen.
     sheets: Vec<Option<Cloth>>,
     /// Per slot: the body's backward direction, the side a cape hangs on.
@@ -199,24 +253,26 @@ struct Capes {
 impl Capes {
     /// The layer for `rigs`: the cape joints of every rig, cold.
     fn for_rigs(rigs: &[Rig]) -> Self {
-        Self {
-            joints: rigs
-                .iter()
+        Self::with_joints(
+            rigs.iter()
                 .map(|rig| CapeJoints::find(&rig.skeleton))
                 .collect(),
-            sheets: vec![None; MAX_LOOK_FIGHTERS],
-            outward: [[0.0, 0.0, -1.0]; MAX_LOOK_FIGHTERS],
-            row: Vec::new(),
-            stepped: 0,
-            published: Vec::new(),
-        }
+        )
     }
 
     /// A layer with no rigs: the tests' looks that draw no bodies.
     #[cfg(test)]
     fn empty() -> Self {
+        Self::with_joints(Vec::new())
+    }
+
+    /// A cold layer over per-rig cape joints.
+    fn with_joints(joints: Vec<Option<CapeJoints>>) -> Self {
         Self {
-            joints: Vec::new(),
+            joints,
+            poses: [None; MAX_LOOK_FIGHTERS],
+            bodies: Vec::new(),
+            near: Vec::new(),
             sheets: vec![None; MAX_LOOK_FIGHTERS],
             outward: [[0.0, 0.0, -1.0]; MAX_LOOK_FIGHTERS],
             row: Vec::new(),
@@ -330,34 +386,65 @@ impl FighterLook {
     /// Presentation only; the sim never reads a cape.
     fn cape_tick(&mut self) {
         self.capes.stepped = 0;
+        self.capes.bodies.clear();
+        for slot in 0..MAX_LOOK_FIGHTERS {
+            self.capes.poses[slot] = self.cape_pose(slot);
+        }
         for slot in 0..MAX_LOOK_FIGHTERS {
             self.cape_slot(slot);
         }
     }
 
+    /// One slot's body for this tick's capes: sample the pose once, read the
+    /// shoulders and push the torso and limb capsules onto `Capes::bodies`.
+    /// `None` for an unseen slot, a rig with no cape joints or a refused pose.
+    /// A refused capsule is left out; the rest of the body still collides.
+    fn cape_pose(&mut self, slot: usize) -> Option<CapePose> {
+        let anim = self.slots[slot];
+        if !anim.seen {
+            return None;
+        }
+        let rig_index = self.rig_for_slot(slot);
+        let joints = self.capes.joints.get(rig_index).copied().flatten()?;
+        let sample = {
+            let rig = &self.rigs[rig_index];
+            self.slot_sample(rig, slot, &anim, 1.0)
+        }
+        .ok()?;
+        let at = |joint: usize| joint_world(&sample.world, &sample.root, joint);
+        let start = self.capes.bodies.len();
+        let torso =
+            ClothCollider::capsule(at(joints.torso[1]), at(joints.torso[0]), CAPE_BODY_RADIUS_M);
+        let limbs = joints
+            .limbs()
+            .iter()
+            .map(|&(a, b, radius)| ClothCollider::capsule(at(a), at(b), radius));
+        self.capes
+            .bodies
+            .extend(std::iter::once(torso).chain(limbs).flatten());
+        Some(CapePose {
+            shoulders: [at(joints.shoulders[0]), at(joints.shoulders[1])],
+            yaw_sc: sample.yaw.sin_cos(),
+            root: anim.pos,
+            bodies: (start, self.capes.bodies.len()),
+        })
+    }
+
     /// One slot's cape for this tick: build the sheet on first sight, pin its
-    /// top row to the shoulders and step it once. An unseen slot, a rig with no
-    /// cape joints, a refused pose or a refused collider leaves no cape.
+    /// top row to the shoulders and step it once against the slot's own body
+    /// and every rival body within [`CAPE_NEIGHBOR_M`]. An unseen slot, a rig
+    /// with no cape joints or a refused pose leaves no cape.
     fn cape_slot(&mut self, slot: usize) {
         let anim = self.slots[slot];
         if !anim.seen {
             self.capes.sheets[slot] = None;
             return;
         }
-        let rig_index = self.rig_for_slot(slot);
-        let Some(joints) = self.capes.joints.get(rig_index).copied().flatten() else {
+        let Some(pose) = self.capes.poses[slot] else {
             return;
         };
-        let sample = {
-            let rig = &self.rigs[rig_index];
-            self.slot_sample(rig, slot, &anim, 1.0)
-        };
-        let Ok(sample) = sample else {
-            return;
-        };
-        let left = joint_world(&sample.world, &sample.root, joints.shoulders[0]);
-        let right = joint_world(&sample.world, &sample.root, joints.shoulders[1]);
-        let (s, c) = sample.yaw.sin_cos();
+        let [left, right] = pose.shoulders;
+        let (s, c) = pose.yaw_sc;
         // The body faces `(sin yaw, 0, cos yaw)`; the cape hangs on the other side.
         let back = [-s * CAPE_BACK_M, 0.0, -c * CAPE_BACK_M];
         let grid = CAPE_TIER.knobs().cape;
@@ -370,11 +457,30 @@ impl FighterLook {
                 Err(_) => return,
             }
         }
-        let body = ClothCollider::capsule(
-            joint_world(&sample.world, &sample.root, joints.torso[1]),
-            joint_world(&sample.world, &sample.root, joints.torso[0]),
-            CAPE_BODY_RADIUS_M,
-        );
+        // Every posed body close enough to lean into the sheet, the slot's own
+        // (distance zero) included, in slot order: the same poses give the same
+        // collider list.
+        let mut near = std::mem::take(&mut self.capes.near);
+        near.clear();
+        for other in self.capes.poses.iter().flatten() {
+            let (dx, dz) = (other.root[0] - pose.root[0], other.root[2] - pose.root[2]);
+            if dx * dx + dz * dz <= CAPE_NEIGHBOR_M * CAPE_NEIGHBOR_M {
+                near.extend_from_slice(&self.capes.bodies[other.bodies.0..other.bodies.1]);
+            }
+        }
+        self.cape_step(slot, &anim, (s, c), &near);
+        self.capes.near = near;
+    }
+
+    /// Pin slot `slot`'s sheet to this tick's top row, blow the body's own wind
+    /// through it and step it once against `near`.
+    fn cape_step(
+        &mut self,
+        slot: usize,
+        anim: &SlotAnim,
+        (s, c): (f32, f32),
+        near: &[ClothCollider],
+    ) {
         let row = std::mem::take(&mut self.capes.row);
         let Some(sheet) = self.capes.sheets[slot].as_mut() else {
             self.capes.row = row;
@@ -401,16 +507,9 @@ impl FighterLook {
             if sheet.set_wind(wind).is_err() {
                 return;
             }
-            // One 60 Hz Verlet step, the tick the pose belongs to. A refused
-            // body capsule steps the sheet with nothing to clear.
-            match body {
-                Ok(body) => {
-                    sheet.step(&[body]);
-                }
-                Err(_) => {
-                    sheet.step(&[]);
-                }
-            }
+            // One 60 Hz Verlet step, the tick the pose belongs to, against
+            // every near body; a body with no valid capsule clears nothing.
+            sheet.step(near);
             self.capes.outward[slot] = [-s, 0.0, -c];
             self.capes.stepped += 1;
         }
@@ -3349,6 +3448,38 @@ mod tests {
     }
 
     #[test]
+    fn fight_camera_stays_near_head_height_and_does_not_orbit() {
+        // The live fight shot on a spread pack: the eye stays near head
+        // height (the old 0.22 rise put a 22 m pack shot at 6.8 m, a drone
+        // over the pit) and a still pack does not orbit with the frame
+        // counter. Both measured on 2026-10-20 from --view-brief.
+        for spread in &ARENA_SPREADS {
+            let look = look_at(spread);
+            let mut azimuth: Option<f32> = None;
+            for tick in [0u32, 30, 90, 150] {
+                let cam = look.fight_camera(&arena_base(), Shot::Action, 8, tick);
+                let eye = cam.eye.to_array();
+                let focus = cam.target.to_array();
+                let reach = (eye[0] - focus[0]).hypot(eye[2] - focus[2]);
+                assert!(
+                    eye[1] <= 1.6 + 0.07 * reach + 1.0e-2,
+                    "tick {tick}: eye {eye:?} rises above 1.6 + 0.07 * {reach} m"
+                );
+                let bearing = eye[0].atan2(eye[2]);
+                if let Some(prev) = azimuth {
+                    assert!(
+                        (bearing - prev).abs() < 1.0e-3,
+                        "tick {tick}: the still pack orbited {} rad",
+                        bearing - prev
+                    );
+                } else {
+                    azimuth = Some(bearing);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn wide_group_camera_holds_the_arena_spread_from_inside_the_pit() {
         // The pit wall sits 21 m out, the eye 0.6 m inside it.
         let limit = 20.4;
@@ -6227,6 +6358,60 @@ mod tests {
         assert!(
             moved > 0.15,
             "the cape moves with the run: rest {rest:?}, running {running:?}"
+        );
+    }
+
+    /// Distance in meters from `p` to the segment `a`-`b`.
+    fn segment_distance(p: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
+        let (ab, ap) = (sub3(b, a), sub3(p, a));
+        let len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+        let t = if len2 > 0.0 {
+            ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let d = sub3(ap, [ab[0] * t, ab[1] * t, ab[2] * t]);
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    #[test]
+    fn a_rival_pressed_behind_pushes_the_cape_instead_of_passing_through() {
+        // Collision by default: a cape meets every body near it, not only its
+        // wearer's torso. The rival stands 0.35 m behind slot 0, so its torso
+        // shell fills the space the cape hangs in. After one second no free
+        // cape particle sits more than 2 cm inside that shell; with only the
+        // wearer's torso as a collider the sheet hung straight through it.
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let views = [view(0, 0.0, 0.0), view(1, 0.0, -0.35)];
+        let hp = [1000u16; 2];
+        for tick in 0..60u32 {
+            look.observe_tick(tick, &views, &hp, &[]);
+        }
+        let anim = look.slots[1];
+        let rig_index = look.rig_for_slot(1);
+        let joints = look.capes.joints[rig_index].expect("CT7 has cape joints");
+        let sample = look
+            .slot_sample(&look.rigs[rig_index], 1, &anim, 1.0)
+            .expect("slot 1 poses");
+        let at = |joint: usize| joint_world(&sample.world, &sample.root, joint);
+        let (a, b) = (at(joints.torso[1]), at(joints.torso[0]));
+        let sheet = look.capes.sheets[0].as_ref().expect("slot 0 cape");
+        let deepest = sheet
+            .positions()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !sheet.is_pinned(*i))
+            .map(|(_, p)| CAPE_BODY_RADIUS_M - segment_distance(*p, a, b))
+            .fold(f32::MIN, f32::max);
+        println!("cape vs rival torso: deepest particle {deepest:.3} m inside the shell");
+        assert!(
+            deepest < 0.02,
+            "the cape passes through the rival: {deepest:.3} m deep"
+        );
+        assert!(
+            look.capes.near.len() > 2 * joints.limbs().len(),
+            "the cape stepped against both bodies, limbs included: {}",
+            look.capes.near.len()
         );
     }
 

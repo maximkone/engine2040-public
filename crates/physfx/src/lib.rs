@@ -63,6 +63,8 @@
 #![forbid(unsafe_code)]
 
 #[cfg(feature = "rapier")]
+mod body;
+#[cfg(feature = "rapier")]
 mod caps;
 #[cfg(feature = "rapier")]
 mod check;
@@ -76,7 +78,11 @@ mod rig;
 mod tether;
 #[cfg(feature = "rapier")]
 mod types;
+#[cfg(feature = "rapier")]
+mod verbs;
 
+#[cfg(feature = "rapier")]
+pub use body::{parse as parse_body, BodyDesc, BodyError, BoneRow, CutRow, GORE_FULL, MUSCLE_FULL};
 #[cfg(feature = "rapier")]
 pub use caps::{Caps, Tier};
 #[cfg(feature = "rapier")]
@@ -93,6 +99,11 @@ pub use rig::{Hinge, Rig};
 pub use tether::TetherState;
 #[cfg(feature = "rapier")]
 pub use types::{Batch, Blast, Flight, Impact, Key, Placed, Shard, Stats, Transform};
+#[cfg(feature = "rapier")]
+pub use verbs::{
+    fx_blast, fx_break, fx_limb, fx_ragdoll, BlastEvent, BlastFx, BreakEvent, BreakFx, LimbEvent,
+    LimbFx, RagdollEvent, RagdollFx,
+};
 
 #[cfg(all(test, feature = "rapier"))]
 mod tests;

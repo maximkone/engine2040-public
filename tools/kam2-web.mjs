@@ -163,8 +163,8 @@ async function prove(options) {
     // 1. The picture: exactly `frames` animation frames, then the page freezes itself.
     const url = `http://127.0.0.1:${server.port}/index.html?frames=${options.frames}`;
     await cdp.send("Page.navigate", { url });
-    const state = await waitFor(cdp, "[document.body.dataset.state ?? null, document.getElementById('report')?.textContent ?? '']", (v) => v && (v[0] === "frozen" || v[0] === "fatal"), 120000, "the page never reached its frame budget");
-    if (state[0] === "fatal") throw new Error(`the page failed: ${state[1]}`);
+    const state = await waitFor(cdp, "[document.body.dataset.state ?? null, document.getElementById('report')?.textContent ?? '', document.getElementById('fatal')?.innerText ?? '']", (v) => v && (v[0] === "frozen" || v[0] === "fatal"), 120000, "the page never reached its frame budget");
+    if (state[0] === "fatal") throw new Error(`the page failed: ${state[2] || state[1]}`);
     const frames = await evaluate(cdp, "window.kam2Frames");
     if (frames !== options.frames) throw new Error(`the page ran ${frames} frames, asked ${options.frames}`);
     const report = JSON.parse(state[1]);
@@ -207,7 +207,9 @@ async function prove(options) {
     if ((await evaluate(cdp, "window.kam2.paused()")) !== true) throw new Error("the match did not hold before the build drill");
     const cells = await evaluate(cdp, "document.querySelectorAll('#build-grid .cell').length");
     if (cells !== 5) throw new Error(`the sidebar holds ${cells} build cells, not 5`);
-    await waitFor(cdp, "Array.from(document.querySelectorAll('#build-grid img')).map((i) => [i.naturalWidth, i.naturalHeight])", (sizes) => Array.isArray(sizes) && sizes.length === 5 && sizes.every(([w, h]) => w === 96 && h === 72), 30000, "the five 96x72 cameos never loaded");
+    await waitFor(cdp, "Array.from(document.querySelectorAll('#build-grid img')).map((i) => [i.naturalWidth, i.naturalHeight])", (sizes) => Array.isArray(sizes) && sizes.length === 5 && sizes.every(([w, h]) => w > 0 && h > 0), 30000, "the five cameos never loaded");
+    const cellSize = await evaluate(cdp, "(() => { const i = document.querySelector('#build-grid img'); return [i.clientWidth, i.clientHeight]; })()");
+    if (cellSize[0] !== 64 || cellSize[1] !== 48) throw new Error(`a cameo draws ${cellSize.join("x")}, not 64x48`);
     const sidebar = await evaluate(cdp, "(() => { const s = document.getElementById('sidebar'); return { width: getComputedStyle(s).width, background: getComputedStyle(s).backgroundColor }; })()");
     if (sidebar.width !== "176px") throw new Error(`the sidebar is ${sidebar.width} wide, not 176px`);
     const before = await evaluate(cdp, "window.kam2.houses()");
@@ -232,14 +234,20 @@ async function prove(options) {
     const after = await evaluate(cdp, "window.kam2.houses()");
     if (!(after > before)) throw new Error(`the house count did not rise: ${before} then ${after} after the farm`);
 
-    // The refusal: the same armed farm over the village road.
+    // The refusal: the same armed farm over the village road. The first road tile
+    // the sim refuses as unbuildable ground is the one the page tries, so a unit
+    // that happens to stand on the road cannot stand in for the road rule.
     const road = await evaluate(cdp, `(() => {
-      for (let x = 0; x < 16; x += 1) { const p = window.kam2.pixelOf(x, 6); if (p && p.x > 30 && p.x < 1090) return { x, z: 6, px: p.x, py: p.y }; }
+      for (let x = 0; x < 16; x += 1) {
+        const text = window.kam2.placement("farm", x, 6);
+        if (!text.startsWith("NotBuildable")) continue;
+        const p = window.kam2.pixelOf(x, 6);
+        if (p && p.x > 30 && p.x < 1090) return { x, z: 6, px: p.x, py: p.y, text };
+      }
       return null;
     })()`);
-    if (!road) throw new Error("no road tile of row 6 is on screen");
-    const refusal = await evaluate(cdp, `window.kam2.placement("farm", ${road.x}, ${road.z})`);
-    if (!refusal) throw new Error(`the road tile (${road.x},6) is not refused`);
+    if (!road) throw new Error("no road tile of row 6 is refused as unbuildable ground");
+    const refusal = road.text;
     await moveMouse(cdp, road.px, road.py);
     await sleep(250);
     await clickAt(cdp, road.px, road.py);

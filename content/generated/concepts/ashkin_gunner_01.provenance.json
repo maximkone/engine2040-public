@@ -1,0 +1,16 @@
+{
+  "provider": "ovh-ai-endpoints",
+  "model": "stable-diffusion-xl-base-v10",
+  "endpoint": "https://stable-diffusion-xl.endpoints.kepler.ai.cloud.ovh.net/api/text2image",
+  "cost": "0 per request, anonymous, 2 requests per minute per IP",
+  "licence": "OpenRAIL++-M (Stability AI Community Licence)",
+  "commercial_use": true,
+  "served_from": "FR/EU",
+  "prompt": "low-poly stylized game concept art, hulking armoured orc gunner, black iron plate with bronze trim and crimson accents, mechanical arm-mounted cannon, wide stance, dusty coastal battlefield, overcast low sun, three-quarter view, clean silhouette",
+  "negative_prompt": "text, watermark, extra limbs, extra fingers, blurry, lowres, jpeg artifacts, photorealistic",
+  "size": "1024x1024",
+  "output": "content/generated/concepts/ashkin_gunner_01.jpg",
+  "bytes": 877801,
+  "purpose": "reference for the base mesh only: never a shipped asset, and the shipped mesh is rebuilt by us",
+  "verdict": "silhouette reads as a hulking armoured Ashkin. The arm-mounted cannon did not survive the prompt: the cannon read as a gauntlet. Next attempt must name the cannon and a plain background."
+}

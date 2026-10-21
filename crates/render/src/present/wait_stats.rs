@@ -235,7 +235,15 @@ pub fn percentiles(samples: &mut [f32]) -> Option<Percentiles> {
     if samples.is_empty() || samples.iter().any(|s| !s.is_finite()) {
         return None;
     }
-    samples.sort_by(f32::total_cmp);
+    // `sort_unstable_by`, not `sort_by`: the stable sort monomorphises
+    // `core::slice::sort::shared::smallsort`, a std-private shim that this
+    // toolchain (rustc 1.97.1) fails to emit in this crate, so the render
+    // test binary failed to link with an undefined
+    // `smallsort::insert_tail` symbol. The unstable sort uses the pdqsort
+    // path instead. The result is the same array: `total_cmp` is a total
+    // order, so no two samples compare equal and the sorted order is
+    // unique - stability cannot change it.
+    samples.sort_unstable_by(f32::total_cmp);
     let rank = |numerator: usize| {
         let n = samples.len();
         let idx = (n * numerator).div_ceil(100).max(1) - 1;

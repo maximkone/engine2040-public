@@ -1087,7 +1087,9 @@ mod rl9_tests {
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(&words[..5], &[0.5, 0.25, 1.0, 64.0, 32.0]);
-        assert_eq!(&words[5..], &[0.0, 0.0, 0.0]);
+        // Word 6 is the camera exposure (GS44): neutral 1.0. The words
+        // around it stay zero.
+        assert_eq!(&words[5..], &[0.0, 1.0, 0.0]);
         // Counter-case: a second color packs differently, so the pack is not
         // a constant fixture.
         let other = fog_blit_uniform_bytes([0.0, 0.0, 0.0], 64, 32);

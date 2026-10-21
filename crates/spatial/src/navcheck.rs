@@ -198,9 +198,19 @@ pub fn run_nav(actors: &[Actor], nav: &NavView, wanted: &BTreeSet<&str>) -> Vec<
             .iter()
             .map(|r| (r.id, (r.min_x, r.max_x, r.min_z, r.max_z)))
             .collect();
+        // The floor of the layout is what the actors step onto, so it never
+        // blocks a front probe, and it never needs a free front of its own.
+        let plates: BTreeSet<u32> = actors
+            .iter()
+            .filter(|a| super::checks::is_ground_plate(a))
+            .map(|a| a.id)
+            .collect();
         let mut blocked: Vec<u32> = Vec::new();
         for a in actors {
             if !pos_known(a) || !a.yaw.is_finite() {
+                continue;
+            }
+            if plates.contains(&a.id) {
                 continue;
             }
             let (dx, dz) = octant(a.yaw);
@@ -209,6 +219,9 @@ pub fn run_nav(actors: &[Actor], nav: &NavView, wanted: &BTreeSet<&str>) -> Vec<
             let (x0, x1, z0, z1) = (px - PROBE_CM, px + PROBE_CM, pz - PROBE_CM, pz + PROBE_CM);
             for (id, (ox0, ox1, oz0, oz1)) in &by_id {
                 if *id == a.id {
+                    continue;
+                }
+                if plates.contains(id) {
                     continue;
                 }
                 if x0 < *ox1 && *ox0 < x1 && z0 < *oz1 && *oz0 < z1 {
@@ -379,6 +392,35 @@ mod tests {
         let out2 = run_nav(std::slice::from_ref(&fast), &nav, &wanted("flowPath"));
         assert_eq!(out2.len(), 1);
         assert_eq!(out2[0].severity, "yellow");
+    }
+
+    #[test]
+    fn accessfront_ground_plate_never_blocks_but_a_bench_does() {
+        // The floor of the layout is what the actor steps onto, so it never
+        // blocks the front probe. A bench is not a floor and still blocks.
+        let mut floor = actor(1, 0.0, 0.0);
+        floor.sx = 30.0;
+        floor.sy = 0.2;
+        floor.sz = 30.0;
+        floor.y = 0.1;
+        // The walker stands a metre to the side of the slab, so the slab is
+        // in front of the walker and the walker is not in front of the slab.
+        let walker = actor(2, -1.0, 0.0);
+        let out = run_nav(
+            &[floor, walker.clone()],
+            &empty_view(),
+            &wanted("accessFront"),
+        );
+        assert!(out.is_empty(), "the floor must not block the front: {out:?}");
+
+        let mut bench = actor(1, 0.0, 0.0);
+        bench.sy = 0.2;
+        bench.y = 0.1;
+        let out = run_nav(&[bench, walker], &empty_view(), &wanted("accessFront"));
+        assert_eq!(out.len(), 1, "a bench must block the front: {out:?}");
+        assert_eq!(out[0].check, "accessFront");
+        assert_eq!(out[0].a, 2);
+        assert_eq!(out[0].severity, "yellow");
     }
 
     #[test]

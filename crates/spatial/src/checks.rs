@@ -383,7 +383,17 @@ pub fn run_spatial_eps(
         let fp: Vec<YawBox> = good.iter().filter_map(yaw_box_of).collect();
         let boxes3: Vec<_> = fp.iter().map(YawBox::as_box3).collect();
         let box_of: BTreeMap<u32, YawBox> = fp.iter().map(|b| (b.id, *b)).collect();
+        // The floor of the layout is what the actors stand in: a sand patch
+        // 20 cm proud of the ground plane is not ten interpenetrations.
+        let plates: BTreeSet<u32> = good
+            .iter()
+            .filter(|a| is_ground_plate(a))
+            .map(|a| a.id)
+            .collect();
         for (lo, hi) in super::index3::sweep_xz(&boxes3) {
+            if plates.contains(&lo) || plates.contains(&hi) {
+                continue;
+            }
             let (a, b) = (&box_of[&lo], &box_of[&hi]);
             if !yaw_hit(a, b) {
                 continue;
@@ -416,6 +426,45 @@ pub fn run_spatial_eps(
 /// when measuring the layout they carry.
 pub(crate) const PLATE_H_CM: i32 = 50;
 pub(crate) const PLATE_SIDE_CM: i32 = 5_000;
+
+/// The smallest side a ground plate may have, in cm. A floor is wide; a
+/// bench or a crate is not.
+pub(crate) const PLATE_MIN_SIDE_CM: i32 = 200;
+
+/// How far a ground plate may rise above the ground plane, in cm. Sand on
+/// the ground is still the ground.
+pub(crate) const PLATE_TOP_CM: i32 = 50;
+
+/// True when the actor is the floor of the layout: a wide flat layer lying
+/// on the ground (at most 50 cm thick, both sides between 2 m and 50 m, and
+/// its top no more than 50 cm above the ground plane).
+///
+/// The floor is what the actors stand in. It never overlaps them (they stand
+/// on it or in it) and it never blocks a front probe (it is what they step
+/// onto). A bench, a table or a low wall is not a floor: too small, too
+/// thick or off the ground, so it keeps reporting.
+pub(crate) fn is_ground_plate(a: &Actor) -> bool {
+    if !(pos_known(a) && size_known(a)) {
+        return false;
+    }
+    if !(a.sx > 0.0 && a.sy > 0.0 && a.sz > 0.0) {
+        return false;
+    }
+    let size = [to_cm(a.sx).abs(), to_cm(a.sy).abs(), to_cm(a.sz).abs()];
+    if size[1] > PLATE_H_CM {
+        return false;
+    }
+    if size[0] < PLATE_MIN_SIDE_CM || size[2] < PLATE_MIN_SIDE_CM {
+        return false;
+    }
+    if size[0] > PLATE_SIDE_CM || size[2] > PLATE_SIDE_CM {
+        return false;
+    }
+    let half = size[1] / 2;
+    let min_y = to_cm(a.y) - half;
+    let max_y = to_cm(a.y) + half;
+    min_y <= 0 && max_y <= PLATE_TOP_CM
+}
 
 /// Solid boxes of the layout as `(id, min, max, largest side)` in cm: known,
 /// positive-size, physical actors that are not ground plates, id ascending.
@@ -1148,6 +1197,44 @@ mod overlap_3d_tests {
             report.count("overlap"),
             0,
             "crate under a table must be clear: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn overlap_3d_ground_plate_never_overlaps_what_stands_on_it() {
+        // The sand patch of the shipped arena is 20 cm proud of the ground
+        // plane and the props stand on the ground plane: they stand in the
+        // sand, they do not interpenetrate the floor of the layout.
+        let mut floor = mk(1, "sand_floor", -2.0, 0.1, 0.0, 30.0, 0.2, 30.0, 0.0);
+        floor.physical = false;
+        let scene = vec![
+            floor,
+            mk(2, "crate_a", -5.0, 0.5, -5.0, 1.0, 1.0, 1.0, 0.0),
+            mk(3, "debris_field", 5.0, 0.5, 5.0, 2.5, 1.0, 2.5, 0.0),
+        ];
+        let report = run(&scene);
+        assert_eq!(
+            report.count("overlap"),
+            0,
+            "the floor of the layout must be clear: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn overlap_3d_small_flat_slab_still_overlaps() {
+        // A bench is not the floor of the layout: too small to be a plate, so
+        // the crate sunk into it still reports.
+        let scene = vec![
+            mk(1, "bench", 0.0, 0.2, 0.0, 1.0, 0.4, 1.0, 0.0),
+            mk(2, "crate", 0.0, 0.2, 0.0, 0.4, 0.4, 0.4, 0.0),
+        ];
+        let report = run(&scene);
+        assert_eq!(
+            report.count("overlap"),
+            1,
+            "a bench is not a floor: {:?}",
             report.findings
         );
     }

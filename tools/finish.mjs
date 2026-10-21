@@ -420,6 +420,13 @@ export function runProbe(entry, { cwd = process.cwd(), env = process.env } = {})
   const passed =
     [...out.matchAll(/(\d+) passed/g)].reduce((n, m) => n + Number(m[1]), 0) +
     [...out.matchAll(/^# pass (\d+)$/gm)].reduce((n, m) => n + Number(m[1]), 0);
+  // A run that reports tests but ran none is never a pass: `test result: ok. 0
+  // passed` (a filter that matched nothing) and TAP `# pass 0` both exit 0, so
+  // the marker alone would grade a probe green having checked nothing. This
+  // holds whatever minPassed says, including when a --probes fixture omits it.
+  if (passed === 0 && /test result:|^# pass \d+$/m.test(out)) {
+    return { ...base, state: "fail", why: "0 tests passed (the run checked nothing)" };
+  }
   if (entry.minPassed !== undefined && passed < entry.minPassed) {
     return { ...base, state: "fail", why: `${passed} test(s) passed (min ${entry.minPassed})` };
   }

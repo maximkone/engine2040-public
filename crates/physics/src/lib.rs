@@ -32,7 +32,6 @@ pub mod islands;
 /// groups, read from the skeleton at spawn. Float, client-local, never hashed.
 #[cfg(feature = "rapier")]
 pub mod joint_limits;
-pub mod kcc;
 /// The collision layer table (fighter, prop, debris, sensor, world) as plain integers.
 pub mod layers;
 /// Severed limbs as bodies: mass from volume and density, inherited velocity

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "commit": "f7f3b5347b95",
+  "commit": "2e32ea6b27d2",
   "target": "wasm32-unknown-unknown",
   "profile": "web",
   "files": {
@@ -10,49 +10,41 @@
       "sha256": "6c999d357ba67152a8e9063133d8d9b1b1c35a9c8580fea5130fb8f13cc615f9"
     },
     "coi-serviceworker.js": {
-      "bytes": 1656,
-      "gzipBytes": 822,
-      "sha256": "dabf39855d892809e852eeda7712bec2bb55d8fdff19a8bebdea316355549d48"
+      "bytes": 1690,
+      "gzipBytes": 828,
+      "sha256": "884d5829f2e6d22540d53de394de8bb7e24ed66c3c9321231665b4bd2c225a04"
     },
     "engine.js": {
-      "bytes": 102806,
-      "gzipBytes": 17301,
-      "sha256": "8fe2e0dd4da780031acc4d71b03dc8f0c76e8b77018d242eb2364eb8f59a72be"
+      "bytes": 103070,
+      "gzipBytes": 17349,
+      "sha256": "0703cd2b9aa0b455630f1e79038c7277a26db7a1bc29be1aa41dbd3eab142794"
     },
     "engine_bg.wasm": {
-      "bytes": 2954980,
-      "gzipBytes": 1144913,
-      "sha256": "b006b3275502b22e6e3cee3fd04f1df6f047f10842b3395e7ec583a6fd19815f"
+      "bytes": 4150422,
+      "gzipBytes": 1319787,
+      "sha256": "cbdb9e0e23d091759a011e440965a2eac0462cab64ad362b51507e0e7bd53392"
     },
     "index.html": {
-      "bytes": 16501,
-      "gzipBytes": 5658,
-      "sha256": "f97a2a308feecacc25e3a522c373ee513cf9a16b21c450a363056bccda5530b0"
+      "bytes": 17437,
+      "gzipBytes": 5847,
+      "sha256": "ed7397cc93a4551977f850ebb2af7eec7d7ad45de5daa7f57ae5f4f250123b53"
     },
     "loader.js": {
-      "bytes": 10604,
-      "gzipBytes": 4153,
-      "sha256": "e421db056cbfef5b63df1485a887502ff3bef96ffaeccc1e2b8778f23e5e9ccd"
+      "bytes": 10824,
+      "gzipBytes": 4174,
+      "sha256": "0c63c3cef141655cf06162d7b586302cddfa62c2fd0b14d28c1bf9b2dae9e9e7"
     }
   },
-  "totalBytes": 4447365,
+  "totalBytes": 5644261,
   "limitBytes": 8388608,
   "underLimit": true,
-  "rawWasmBytes": 4011805,
+  "rawWasmBytes": 4150422,
   "tools": {
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
     "wasmBindgen": "0.2.128",
-    "wasmOpt": "wasm-opt version 133 (version_133)"
+    "wasmOpt": null
   },
-  "wasmOptFlags": [
-    "-Oz",
-    "--enable-bulk-memory",
-    "--enable-nontrapping-float-to-int",
-    "--enable-sign-ext",
-    "--enable-multivalue",
-    "--enable-reference-types",
-    "--enable-mutable-globals"
-  ],
+  "wasmOptFlags": null,
   "wasmOptAb": null,
   "twiggy": []
 }

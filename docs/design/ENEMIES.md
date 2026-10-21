@@ -14,9 +14,9 @@ Read 2026-10-12, byte-exact:
 - `crates/ai/src/personality.rs`: `Personality` (reaction 0-5 ticks, range 1000-1500 mm, aggression 250-750). Not a kind. A temperament.
 - `crates/ai/src/legion.rs`: `Formation` (Line, Column, Wedge, ShieldWall) and `Order` (Hold, Advance, Charge, Retreat, FlankLeft, FlankRight). Squad shapes for hundreds of soldiers. Not single-duel kinds.
 
-Tier check (re-checked 2026-10-17): `rg -n "grunt|veteran|elite|boss" crates/ai/src` hits `crates/ai/src/depth.rs:460` only — one `elite` doc comment. The ladder is the tier *number*: `SHIPPED_TIERS` seats tiers 1-3 (`depth.rs:433`) and `PRIMUS_TIER` seats tier 4 (`depth.rs:463`), `parse_tiers` returns `[TierRow; 4]` (`depth.rs:585`), and `crates/ai/src/tier.rs:14` re-exports the ladder for the non-AI crates.
+Tier check (re-checked 2026-10-21): `rg -n "grunt|veteran|elite|boss" crates/ai/src` hits `crates/ai/src/depth.rs:449` only — one `elite` doc comment. The ladder is the tier *number*: `SHIPPED_TIERS` seats tiers 1-3 (`depth.rs:440`) and `PRIMUS_TIER` seats tier 4 (`depth.rs:453`), `parse_tiers` returns `[TierRow; 4]` (`depth.rs:571`), and `crates/ai/src/tier.rs:14` re-exports the ladder for the non-AI crates.
 Tiers 1-4 are shipped in code and the tier_4 file row landed: `content/design/enemies.rows` carries tier_1..tier_4 and `crates/game/tests/it/design_enemy.rs::header_holds_four_tiers` seats four rows.
-Wiring check (re-checked 2026-10-17): the rows live in `depth.rs` and `DepthBrain` reads them; the install path out of the crate is `ForkProposal::SetTier` in `crates/arena/src/fork.rs:83`, applied through `DepthBrain::set_tier` at `fork.rs:262`, and the caller is the tournament ladder (`crates/playtest/src/tournament.rs:1073` puts `SHIPPED_TIERS[index]` on every brain of the duel). That caller is landed at HEAD (row GA13) and it posts 995 permille per adjacent pair on the real duel — see "Curve and bar numbers" below. `crates/endpoint/src/assistant.rs:1108` only narrates `SetTier`. The rung that clears the bar without freezing the ladder is a packet for the AI builder (`target/queue/ready/0-des-enemy-tier-ladder-20261017.md`), never an edit here.
+Wiring check (re-checked 2026-10-21): the rows live in `depth.rs` and `DepthBrain` reads them; the install path out of the crate is `ForkProposal::SetTier` in `crates/arena/src/fork.rs:85`, applied through `DepthBrain::set_tier` at `fork.rs:366`, and the caller is the tournament ladder (`crates/playtest/src/tournament.rs:1096` puts `SHIPPED_TIERS[index]` on every brain of the duel). That caller is landed at HEAD (row GA13) and it posts 995 permille per adjacent pair on the real duel — see "Curve and bar numbers" below. `crates/endpoint/src/assistant/fork.rs:274` only narrates `SetTier`. The rung that clears the bar without freezing the ladder is a packet for the AI builder (`target/queue/ready/0-des-enemy-tier-ladder-20261017.md`), never an edit here.
 
 ## Global numbers both cards use
 
@@ -50,7 +50,7 @@ Two numbers below are house numbers, not measured facts:
 - Moves: Attack, Block, Dodge, Advance, Retreat (plus Reposition when far). Same `Intent` set as the player.
 - Tell in ticks: 15. Windup 15, Active 1, Recovery 8. Read from `StrikePhase`.
 - Counter: parry. A fresh block press inside the 7-tick window negates the hit and staggers the holder 12 ticks. Dodge (6 i-frames) also works, but parry is the intended answer.
-- Reason for HP: 1000 permille (100 display). Same as the player. HP tests answers, not grind. Stats stay in the narrow 900-1100 band per `docs/design/matchups.csv`. Edge comes from hit rate, not from HP.
+- Reason for HP: 950 permille (95 display), the `tier_1` row (`content/design/enemies.rows:23`). Just under the player. HP tests answers, not grind. Stats stay in the narrow 900-1200 band (`content/design/enemies.rows:6`). Edge comes from hit rate, not from HP.
 - Silhouette note: square stance, shield forward, feet planted. Reads as a wall. Spectacle serves information, never hides the tell.
 - Question it asks the player:
   - "Can you avoid my damage?" Answer: parry. Fresh block inside 7 ticks.
@@ -65,7 +65,7 @@ Two numbers below are house numbers, not measured facts:
 - Moves: Attack, Block, Dodge, Advance, Retreat (plus Reposition when far). Same `Intent` set as the player. It prefers Dodge and Advance.
 - Tell in ticks: 15. Windup 15, Active 1, Recovery 8. Same clock as Holder. Its arc reads as a sidestep before the swing.
 - Counter: dodge. Sidestep the arc. The 6 i-frame ticks cover the 1 Active tick with margin. Block is the backup answer. Parry still works but the window is harder on a moving foe.
-- Reason for HP: 1000 permille (100 display). Same as the player, same reason as Holder. Skill first. Veterans in `matchups.csv` sit at 110 HP only to set the odd cycle, still inside the narrow band.
+- Reason for HP: 1000 permille (100 display), the `tier_2` row (`content/design/enemies.rows:24`). Same as the player, same reason as Holder. Skill first. Veterans in `matchups.csv` sit at 110 HP only to set the odd cycle, still inside the narrow band.
 - Silhouette note: bladed stance, body sideways, always moving. Reads as a knife circling. Distinct from the Holder wall at a glance.
 - Question it asks the player:
   - "Can you avoid my damage?" Answer: dodge. Move with the arc, not into it.
@@ -80,11 +80,12 @@ Two numbers below are house numbers, not measured facts:
 
 ## Tier plan (names PROPOSED; T1-T4 rows shipped in `depth.rs` and in the designer file)
 
-The four names — grunt, veteran, elite, boss — are PROPOSED designer labels for
-the code's `tier_1..tier_4` rows: `rg -n "grunt|veteran|elite|boss" crates/ai/src`
-hits one doc comment only (`depth.rs:460`), so the ladder is the tier *number*
+The four names — grunt, veteran, elite, primus — are the designer labels the
+rows file carries (`content/design/enemies.rows:10-13`) for the code's
+`tier_1..tier_4` rows: `rg -n "grunt|veteran|elite|boss" crates/ai/src`
+hits one doc comment only (`depth.rs:449`), so the ladder is the tier *number*
 and the name is this card's word for it. The `tier_4` file row landed:
-`parse_tiers` seats four rows (`crates/ai/src/depth.rs:585`),
+`parse_tiers` seats four rows (`crates/ai/src/depth.rs:571`),
 `content/design/enemies.rows` carries tier_1..tier_4, and
 `crates/game/tests/it/design_enemy.rs` seats four rows, checks the 15-tick tell
 against the v2 table and runs the 60% bar over its stat model. What is still
@@ -103,15 +104,15 @@ both asks closed.
 | T1 | grunt | Holder, calm (nerve 400, reaction 4) | first foe, slow to notice | beats nothing yet, teaches parry |
 | T2 | veteran | Flanker, even (nerve 500, reaction 2) | adds the arc, must dodge | beats T1 in 60%+ of seeded duels (house number) |
 | T3 | elite | Holder, bold (nerve 700, reaction 1); a Flanker-kit mix stays a card proposal | stamina pressure, riposte | beats T2 in 60%+ of seeded duels (house number) |
-| T4 | boss (row landed) | Holder body, Flanker feet, phase 2 | phase answer, see below | beats T3 in 60%+ of seeded duels (house number) |
+| T4 | primus (row landed) | Holder body, Flanker feet, phase 2 | phase answer, see below | beats T3 in 60%+ of seeded duels (house number) |
 
 Noise for all tiers: perfect player first (a variant nobody can finish is skipped), then the seeded 2-4 tick human error, default off. House number until human tapes calibrate it.
 
-Tier rows scale HP inside the narrow band only: `hp_permille` 950/1000/1050/1100 with `stagger_permille` 400/500/600/700 (`content/design/enemies.rows`), so HP stays a test of answers, never a wall. The tier rows name the counter which the tables allow (`counter` 1 parry, 2 dodge, 3 block); the first two tiers teach parry then dodge.
+Tier rows scale HP inside the narrow band only: `hp_permille` 950/1000/1050/1100 with `stagger_permille` 400/500/600/700 (`content/design/enemies.rows:23-26`), so HP stays a test of answers, never a wall. The tier rows name the counter which the tables allow (`counter` 1 parry, 2 dodge, 3 block); the first two tiers teach parry then dodge.
 
-Tier composition (PROPOSED, and it adds no kind): T1 and T3 hold the Holder card, T2 the Flanker card, T4 a Holder body with Flanker feet. `Role` still has its two kinds, so no card below was invented. The rung is derived, not authored: `TierRow::role()` maps tier 2 to `Role::Flanker` and every other tier to `Role::Holder`, and `reaction_ticks()`/`aggression_permille()` climb 4/2/1/1 and 400/500/700/700 (`crates/ai/src/depth.rs:281,289,298`). The row file still carries no role column, so a designer cannot retune a rung without a Rust edit — which is what the packet changes.
+Tier composition (PROPOSED, and it adds no kind): T1 and T3 hold the Holder card, T2 the Flanker card, T4 a Holder body with Flanker feet. `Role` still has its two kinds, so no card below was invented. The rung is derived, not authored: `TierRow::role()` maps tier 2 to `Role::Flanker` and every other tier to `Role::Holder`, and `reaction_ticks()`/`aggression_permille()` climb 4/2/1/1 and 400/500/700/700 (`crates/ai/src/depth.rs:287,295,304`). The row file still carries no role column, so a designer cannot retune a rung without a Rust edit — which is what the packet changes.
 
-Boss: owner answered with `EB-2026-10-13-S2` [BOSS-primus-t4] (both asks CLOSED 2026-10-12/13): build the T4 primus boss as these cards propose it. The answer is recorded by the earlier runs of this seat (`target/queue/archive/builder-design-enemy-r10.md`, `r13.md`); today's `node C:/empire/center/empire.mjs inbox engine2040 list` does not list it, so no second ask was filed. Code and file landed: `PRIMUS_TIER` in `crates/ai/src/depth.rs:463` (1100 HP inside the narrow band, 15-tick tell, parry answer, phase 2 at or below 500 HP) and the tier_4 row in `content/design/enemies.rows`. No new boss stats beyond that answer; what the boss still needs is the skill rung and a sweep that counts its phase-2 answer, not the stat model alone.
+Boss: owner answered with `EB-2026-10-13-S2` [BOSS-primus-t4] (both asks CLOSED 2026-10-12/13): build the T4 primus boss as these cards propose it. The answer is recorded by the earlier runs of this seat (`target/queue/archive/builder-design-enemy-r10.md`, `r13.md`); today's `node C:/empire/center/empire.mjs inbox engine2040 list` does not list it, so no second ask was filed. Code and file landed: `PRIMUS_TIER` in `crates/ai/src/depth.rs:453` (1100 HP inside the narrow band, 15-tick tell, parry answer, phase 2 at or below 500 HP) and the tier_4 row in `content/design/enemies.rows:26`. No new boss stats beyond that answer; what the boss still needs is the skill rung and a sweep that counts its phase-2 answer, not the stat model alone.
 
 ## Curve and bar numbers (measured, not proposed)
 
@@ -131,5 +132,5 @@ The 60% tier bar and the 2-4 tick noise are house numbers (stated at the top). T
 - Every swing shows its 15-tick Windup. No instant hit.
 - Holder parry works in the 7-tick window and staggers 12.
 - Flanker arc is dodged with the 6 i-frame ticks.
-- Both cards at 1000 HP feel fair. Wins come from answers, not from HP.
+- Both cards feel fair: Holder at 950 HP (`content/design/enemies.rows:23`), Flanker at 1000 HP (`:24`). Wins come from answers, not from HP.
 - Open: boss kit, phase 2, the calibrated noise number, and the skill rung that makes the 60% bar true on the real ladder (packet `des-enemy-tier-skill-rung-20261017`).

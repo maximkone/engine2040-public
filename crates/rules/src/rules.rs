@@ -184,6 +184,7 @@ fn write_fault_error(hasher: &mut Fnv64, error: &RulesError) {
         RulesError::Runtime { .. } => hasher.write_u8(12),
         RulesError::BadWorld { .. } => hasher.write_u8(13),
         RulesError::NoScript => hasher.write_u8(14),
+        RulesError::BadSpec { .. } => hasher.write_u8(15),
     }
 }
 

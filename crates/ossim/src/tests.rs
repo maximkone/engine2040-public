@@ -324,6 +324,76 @@ fn swap_out_needs_swap_room() {
 }
 
 #[test]
+fn a_full_swap_file_refuses_the_page_fault() {
+    // The page fault has to land in the swap file. A full swap refuses it:
+    // the process keeps its pages and no fault is counted.
+    let stage = Stage {
+        swap_slots: 0,
+        ..lab()
+    };
+    let mut sim = Sim::with_config(7, stage, silent());
+    assign(&mut sim, 0, 0).expect("assign");
+    assert_eq!(sim.fault(0), Err(Refusal::NoSwap));
+    assert!(process(&sim, 0).resident, "the process keeps its pages");
+    assert_eq!(sim.parts().faults, 0, "a refused fault is not a fault");
+}
+
+#[test]
+fn the_swap_file_never_holds_more_pages_than_it_owns() {
+    // A tiny swap file with ambient faults and later spawns: the swap usage
+    // must never pass the slots the stage owns. A swap on its way claims its
+    // pages, so two swaps in flight may not both pass a check that only
+    // looks at the pages already in swap.
+    let stage = Stage {
+        ram_rows: 2,
+        swap_slots: 2,
+        start_processes: 2,
+        spawn_first: 30,
+        spawn_every: 30,
+        spawn_count: 6,
+        ..lab()
+    };
+    let cfg = Config {
+        ambient_period: 1,
+        ..Config::default()
+    };
+    let mut sim = Sim::with_config(7, stage, cfg);
+    for _ in 0..300 {
+        // Keep the fighters on the CPUs so the ambient roll can fault them.
+        let _ = sim.tick(Some(Action::Assign { cpu: 0, process: 0 }));
+        let _ = sim.tick(Some(Action::Assign { cpu: 1, process: 1 }));
+        let state = sim.state();
+        assert!(
+            state.swap_slots_used <= state.swap_slots_cap,
+            "swap holds {} of {} at tick {}",
+            state.swap_slots_used,
+            state.swap_slots_cap,
+            state.tick
+        );
+        assert!(
+            state.ram_pages_used <= state.ram_pages_cap,
+            "ram holds {} of {} at tick {}",
+            state.ram_pages_used,
+            state.ram_pages_cap,
+            state.tick
+        );
+        let pages: u16 = state
+            .processes
+            .iter()
+            .flatten()
+            .filter(|p| p.state != ProcState::Done)
+            .map(|p| u16::from(p.pages))
+            .sum();
+        assert_eq!(
+            state.ram_pages_used + state.swap_slots_used,
+            pages,
+            "pages are counted once at tick {}",
+            state.tick
+        );
+    }
+}
+
+#[test]
 fn swap_in_needs_ram_room() {
     let stage = Stage {
         ram_rows: 0,

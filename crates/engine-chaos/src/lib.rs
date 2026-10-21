@@ -6,52 +6,93 @@
 //! second chaos system here: every count below comes from one
 //! `engine-proof` run at the recorded A9 seed. Units: counts (`usize`).
 //! Determinism: same seed always gives the same counts on every machine.
+//!
+//! One run, one report: [`a9_report`] runs the suite once and tabulates
+//! every fault row into exactly one list - healed, quarantined, or broken.
+//! A broken row is a harness failure, never a quarantine, and it stays
+//! visible: it must not vanish from both lists and leave the counts looking
+//! complete while a row never ran.
 
 use engine_observe::EventCode;
 
 /// Recorded A9 seed (mirrors `engine-proof` `a9::A9_SEED`).
 pub const A9_SEED: u64 = 9;
 
+/// One run of the A9 suite: every fault row in exactly one list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct A9Report {
+    /// Faults that healed, in fault-table order: code plus attempt count.
+    pub healed: Vec<(EventCode, u32)>,
+    /// Faults that quarantined, in fault-table order: code plus attempts.
+    pub quarantined: Vec<(EventCode, u32)>,
+    /// Rows whose injection broke the harness; the row never ran.
+    pub broken: Vec<EventCode>,
+}
+
+/// Run the A9 suite once and tabulate every fault row.
+///
+/// One run feeds every count below: the healed list, the quarantined list
+/// and the broken rows come from the same report, so they always describe
+/// one run of the suite.
+#[must_use]
+pub fn a9_report() -> A9Report {
+    use engine_proof::chaos::LoudReason;
+    let report = engine_proof::chaos::run(A9_SEED);
+    let mut healed = Vec::with_capacity(report.healed.len());
+    for (code, attempts) in report.healed {
+        healed.push((code, attempts));
+    }
+    let mut quarantined = Vec::with_capacity(report.loud.len());
+    let mut broken = Vec::new();
+    for (code, reason) in report.loud {
+        match reason {
+            LoudReason::Quarantined { attempts } => quarantined.push((code, attempts)),
+            LoudReason::InjectionFailed(_) => broken.push(code),
+        }
+    }
+    A9Report {
+        healed,
+        quarantined,
+        broken,
+    }
+}
+
 /// Healed fault codes at the recorded seed, in fault-table order.
 #[must_use]
 pub fn healed_codes() -> Vec<(EventCode, u32)> {
-    engine_proof::chaos::run(A9_SEED).healed
+    a9_report().healed
 }
 
 /// Quarantined fault codes at the recorded seed, in fault-table order.
 /// Injection failures are excluded: they are harness breaks, never
-/// quarantines, and fail the suite loudly instead of counting here.
+/// quarantines. They are not hidden either - [`broken_codes`] names them.
 #[must_use]
 pub fn quarantined_codes() -> Vec<(EventCode, u32)> {
-    use engine_proof::chaos::LoudReason;
-    engine_proof::chaos::run(A9_SEED)
-        .loud
-        .into_iter()
-        .filter_map(|(code, reason)| match reason {
-            LoudReason::Quarantined { attempts } => Some((code, attempts)),
-            LoudReason::InjectionFailed(_) => None,
-        })
-        .collect()
+    a9_report().quarantined
 }
 
-/// `(healed, quarantined)` counts at the recorded seed.
+/// Fault rows whose injection broke the harness, in fault-table order.
+///
+/// A broken row is a harness break: the fault was never injected, so the
+/// row was neither healed nor quarantined. Empty at the recorded seed.
+#[must_use]
+pub fn broken_codes() -> Vec<EventCode> {
+    a9_report().broken
+}
+
+/// `(healed, quarantined)` counts at the recorded seed, from one run.
 #[must_use]
 pub fn a9_counts() -> (usize, usize) {
-    (healed_codes().len(), quarantined_codes().len())
+    let report = a9_report();
+    (report.healed.len(), report.quarantined.len())
 }
 
 /// True when every fault healed or quarantined with no harness failure.
 #[must_use]
 pub fn is_clean() -> bool {
-    use engine_proof::chaos::LoudReason;
-    let report = engine_proof::chaos::run(A9_SEED);
-    let quarantined = report
-        .loud
-        .iter()
-        .filter(|(_, reason)| matches!(reason, LoudReason::Quarantined { .. }))
-        .count();
-    let broken = report.loud.len() - quarantined;
-    broken == 0 && report.healed.len() + quarantined == engine_proof::chaos::FAULTS.len()
+    let report = a9_report();
+    report.broken.is_empty()
+        && report.healed.len() + report.quarantined.len() == engine_proof::chaos::FAULTS.len()
 }
 
 #[cfg(test)]
@@ -92,5 +133,33 @@ mod tests {
     #[test]
     fn same_seed_twice_gives_same_counts() {
         assert_eq!(a9_counts(), a9_counts());
+    }
+
+    #[test]
+    fn every_fault_row_is_accounted_for_by_one_run() {
+        // The suite has one row per fault. Every row lands in exactly one
+        // list: healed, quarantined or broken. A broken row (the harness
+        // itself failed) used to be dropped from both lists, so the counts
+        // still looked complete while a row never ran.
+        let report = a9_report();
+        assert_eq!(
+            report.healed.len() + report.quarantined.len() + report.broken.len(),
+            engine_proof::chaos::FAULTS.len(),
+            "every fault row is in exactly one list"
+        );
+        assert!(
+            report.broken.is_empty(),
+            "the recorded seed has no harness break: {:?}",
+            report.broken
+        );
+        assert!(is_clean());
+        // The counts of one run add up to the fault table.
+        let (healed, quarantined) = a9_counts();
+        assert_eq!(
+            healed + quarantined,
+            engine_proof::chaos::FAULTS.len(),
+            "the count pair comes from one run"
+        );
+        assert!(broken_codes().is_empty());
     }
 }

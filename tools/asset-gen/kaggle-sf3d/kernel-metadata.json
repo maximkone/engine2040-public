@@ -1,0 +1,18 @@
+{
+  "id": "empire/sf3d-base-mesh",
+  "title": "SF3D base mesh",
+  "code_file": "sf3d.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "dataset_sources": [
+    "empire/sf3d-weights",
+    "empire/faction-war-concepts"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "notes": {
+    "what": "one 3D lane, run on a Kaggle GPU; weights travel as a private dataset"
+  }
+}

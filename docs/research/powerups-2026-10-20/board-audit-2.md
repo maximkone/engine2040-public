@@ -571,11 +571,11 @@ explicitly *not* a prerequisite of PW38. PW10 and PW58 (`SPRINT-28`) are not min
 `exit=1`, first lines: `PASS dependency cycle` then
 `FAIL workspace audit: engine-arena -> engine-nav: undocumented local dependency edge` plus the
 "not declared by any module" lines (endpoint `packs/session.rs`, game `class_sheet.rs`, physfx
-`body.rs`, physics `cloth/tests.rs`), the GE2 genre-ledger line and the stale `modmap.md` line.
-Every one of those is another lane's uncommitted file: the same run before my edits printed the
-same FAIL. No board error. The board check itself is clean: `parseBoardTasks` over the index
-plus every shard returns **1689 tasks, 0 errors** (it prints nothing on stdout because the audit
-FAIL ends the run early; run it directly to see the line).
+`body.rs` and `verbs.rs`, physics `cloth/tests.rs`), the GE2 genre-ledger line and the stale
+`modmap.md` line. Every one of those is another lane's uncommitted file: the same run before my
+edits printed the same FAIL. No board error. The board check itself is clean: `parseBoardTasks`
+over the index plus every shard returns **1689 tasks, 0 errors** (it prints nothing on stdout
+because the audit FAIL ends the run early; run it directly to see the line).
 
 
 ## 8. Board fixer pass, 2026-10-21 (scope SPRINT-09 through SPRINT-18)

@@ -18,6 +18,9 @@ window = ["dep:engine-render", "engine-render/window", "dep:wgpu", "dep:pollster
 # Opt-in HTTPS for cloud LLMs: forwards to engine-provider `tls`
 # (rustls/ring plus platform roots). Default stays plain HTTP.
 tls = ["engine-provider/tls"]
+# SPR4 live recorder: one real-model run over the door tools, written as a
+# cassette. Network + provider key, so never on by default or in CI.
+live = ["dep:serde_json", "engine-provider/tls"]
 
 [dependencies]
 # QA3 bout bots: the bot harness ticks the shipped pressure/guard trees.
@@ -39,12 +42,20 @@ hmac = "0.12"
 sha2 = "0.10"
 # EV1 eval harness drives mock/local/remote providers (std + serde_json).
 engine-provider.workspace = true
+# SPR4 live recorder decodes OpenRouter tool-call envelopes (feature `live`).
+serde_json = { workspace = true, optional = true }
 engine-spatial.workspace = true
 engine-render = { workspace = true, optional = true, features = ["v1"] }
 # NS31h2 window leg: the gallery holds a device and builds one pipeline per
 # record through render's `pipeline_for`. Off unless `window` is on.
 wgpu = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
+
 # Look judge PNG decode (MIT/Apache-2.0): the same `image` 0.25 the render and
 # assets crates already resolve, PNG codec only, so the lock gains no package.
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# SPR4 live recorder: one real-model cassette run, never built by default.
+[[example]]
+name = "spatial_llm_record"
+required-features = ["live"]

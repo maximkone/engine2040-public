@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { FRAME_P95_BAR_MS, GREEN_MAX_AGE_HOURS, bookBuildVerdict, driftVerdict, findPendingSnapshots, frameCsvVerdict, gpuLiveLine, gpuLiveReceipt, ranAtLeastOneTest, recordGreen, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, parityVerdict, parseParityLine, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestTestCommand, packageNameOf, parseProofArgs, PENDING_SNAPSHOT_SUFFIX, pendingSnapshotVerdict, runsToolTests, toolTestSummary } from "./proof.mjs";
+import { FRAME_P95_BAR_MS, GREEN_MAX_AGE_HOURS, bookBuildVerdict, driftVerdict, findPendingSnapshots, frameCsvVerdict, gpuLiveLine, gpuLiveReceipt, goldenBuildLine, goldenProfile, legVerdict, ranAtLeastOneTest, recordGreen, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, parityVerdict, parseParityLine, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestTestCommand, packageNameOf, parseProofArgs, PENDING_SNAPSHOT_SUFFIX, pendingSnapshotVerdict, runsToolTests, toolTestSummary } from "./proof.mjs";
 
 test("parseProofArgs: empty and single-flag runs pass through", () => {
   assert.deepEqual(parseProofArgs([]), []);
@@ -143,6 +143,17 @@ test("ranAtLeastOneTest: a filter that matches nothing is RED, a real run is not
   assert.equal(ranAtLeastOneTest("Summary [   0.510s] 4 tests run: 4 passed, 210 skipped"), true);
 });
 
+test("legVerdict: a test leg that ran nothing is RED, every other cleared leg is green", () => {
+  const hollow = legVerdict(true, true, RAN_NOTHING);
+  assert.equal(hollow.pass, false, "a workspace test leg with 0 tests is not a pass");
+  assert.equal(hollow.why, "zero tests ran (filter matched nothing)");
+  assert.equal(legVerdict(true, true, "running 3 tests\ntest result: ok. 3 passed; 0 failed").pass, true);
+  assert.equal(legVerdict(true, false, "error[E0603]: private item").pass, false, "a build failure stays red");
+  assert.equal(legVerdict(true, false, "test result: FAILED. 0 passed; 1 failed").pass, false);
+  assert.equal(legVerdict(false, true, "no test output at all").pass, true, "fmt/build/clippy/deny grade on exit code");
+  assert.equal(legVerdict(false, false, "clippy -D warnings").pass, false);
+});
+
 const HEAD = "a".repeat(40);
 const GREEN_AT = new Date("2026-10-18T00:00:00.000Z");
 const hoursLater = (h) => new Date(GREEN_AT.getTime() + h * 3_600_000);
@@ -234,6 +245,17 @@ test("goldenVerdict: hash law plus version pin in one receipt", () => {
   assert.equal(goldenVerdict({ ...good, verified: false }, "0.1.0"), false);
   assert.equal(goldenVerdict({ ...good, golden_checked: false }, "0.1.0"), false);
   assert.equal(goldenVerdict(good, ""), false);
+});
+
+test("goldenProfile: a local golden builds on perf-test, CI keeps release", () => {
+  assert.equal(goldenProfile(undefined), "--profile=perf-test");
+  assert.equal(goldenProfile(""), "--profile=perf-test");
+  assert.equal(goldenProfile("true"), "--release");
+});
+
+test("goldenBuildLine: the receipt names the profile and the build seconds", () => {
+  assert.equal(goldenBuildLine("--profile=perf-test", 12.34), "[INFO] golden build (--profile=perf-test): 12.3 s");
+  assert.equal(goldenBuildLine("--release", 402.5), "[INFO] golden build (--release): 402.5 s");
 });
 
 test("frameCsvVerdict: 100 steady rows pass", () => {

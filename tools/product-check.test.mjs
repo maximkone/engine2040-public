@@ -69,6 +69,15 @@ test("fps is gated only on a quiet run, against the median of recent quiet runs"
   assert.equal(redFloors({ look, timing: { ...slow, interval_p50_ms: 70 }, caps: quietCaps, ref: 58 }, BAR).slower, undefined);
 });
 
+test("a run that scored no captures is RED, not a silent green", () => {
+  const look = { ...parseReceipt(RECEIPT), tinted_share: 0, exit: 0, timedOut: false };
+  const red = redFloors({ look, timing: null, caps: { captures: 0, blank: 0, frozen: 0 }, ref: null }, BAR);
+  assert.deepEqual(Object.keys(red), ["captures"]);
+  assert.match(red.captures, /no captures/);
+  // The same numbers with captures present are green: the floor is the empty dir, not a weaker bar.
+  assert.deepEqual(redFloors({ look, timing: null, caps: quietCaps, ref: null }, BAR), {});
+});
+
 test("blank and frozen captures are counted from the files", () => {
   const dir = mkdtempSync(join(tmpdir(), "product-"));
   const big = Buffer.alloc(80_000, 7);

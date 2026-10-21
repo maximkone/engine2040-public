@@ -473,7 +473,7 @@ Ticked rows are dropped. Rows never boarded are not listed (git keeps them). Now
 | MP14 | resim auto-tune | A | MP6 |
 | MP15 | dedicated auto-theater | A | MP1, MP4, CR1 |
 | MP16 | 32-fighter LAN soak | B | MP2 |
-| MP16a | 16-fighter LAN soak baseline within the current cap | B | MP2 |
+| MP16a | 16-fighter LAN soak baseline (the pre-GE12 holding bar; the cap row is MP16b) | B | MP2 |
 | MP16b | 32-fighter LAN soak revival after the GE12 canonical-cap decision | B | MP2, GE12 |
 | MP18 | channel + compression flood chart | B | MP8, MP9, MP16 |
 | MP19 | every-match theater receipt | A | MP7, MP15 |

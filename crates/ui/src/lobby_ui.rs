@@ -1068,23 +1068,30 @@ mod tests {
     fn lobby_scale_sixteen_virtualized_with_cost_and_projection() {
         let slots = vec![SlotRow::Ai; usize::from(MAX_PARTICIPANTS)];
         let screen = in_lobby(true, &slots);
+        // The slot list is virtualized: every window in order rebuilds it.
         let mut gathered = Vec::new();
-        gathered.extend_from_slice(screen.visible_slots(0));
-        gathered.extend_from_slice(screen.visible_slots(LOBBY_VIEW_ROWS));
+        let mut offset = 0;
+        while offset < slots.len() {
+            gathered.extend_from_slice(screen.visible_slots(offset));
+            offset += LOBBY_VIEW_ROWS;
+        }
         assert_eq!(gathered, slots);
         assert_eq!(screen.visible_slots(LOBBY_VIEW_ROWS).len(), LOBBY_VIEW_ROWS);
         let one = LobbyScale::for_slots(1);
         assert_eq!(one.units, SLOT_ROW_UNITS);
         assert_eq!(one.bytes, core::mem::size_of::<SlotRow>());
-        let sixteen = LobbyScale::for_slots(slots.len());
-        assert_eq!(sixteen.units, 48);
+        let all = LobbyScale::for_slots(slots.len());
+        assert_eq!(all.units, slots.len() * SLOT_ROW_UNITS);
         let projected = LobbyScale::for_slots(64);
         assert_eq!(projected.units, 192);
         assert_eq!(projected.bytes, one.bytes.saturating_mul(64));
-        assert_eq!(projected.units, sixteen.units.saturating_mul(4));
+        // Twice the slots costs twice the units and twice the bytes.
+        let twice = LobbyScale::for_slots(slots.len() * 2);
+        assert_eq!(twice.units, all.units.saturating_mul(2));
+        assert_eq!(twice.bytes, one.bytes.saturating_mul(slots.len() * 2));
     }
 
-    /// Screen with room for a full beacon list (the net cap is 16).
+    /// Screen with room for a full beacon list (the canonical fighter cap).
     fn wide_screen() -> LobbyScreen {
         LobbyScreen::new(LobbyLimits {
             refresh_period_ms: 250,
@@ -1145,21 +1152,25 @@ mod tests {
 
     #[test]
     fn a_thousand_ghosts_never_outgrow_the_list_or_lock_a_real_host_out() {
+        // The screen's own cap, never a mirror of it.
+        let cap = usize::from(MAX_PARTICIPANTS);
         let mut screen = wide_screen();
         for step in 0..1000u64 {
             screen.poll(step);
             screen
                 .see_host(host(100 + u16::try_from(step).unwrap(), 2))
                 .unwrap();
-            assert!(screen.hosts().len() <= 16);
+            assert!(screen.hosts().len() <= cap);
         }
         screen.see_host(host(1, 2)).unwrap();
         assert!(screen.hosts().contains(&host(1, 2)));
-        assert_eq!(screen.hosts().len(), 16);
+        assert_eq!(screen.hosts().len(), cap);
         // The evictions were counted, not lost.
         assert_eq!(
             screen.take_notice(),
-            Some(LobbyNotice::HostsGone { count: 985 })
+            Some(LobbyNotice::HostsGone {
+                count: 1000 - cap + 1
+            })
         );
     }
 

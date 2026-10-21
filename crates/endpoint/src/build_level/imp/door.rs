@@ -127,6 +127,11 @@ pub struct BuildLevelOutput {
     #[serde(default)]
     #[schemars(default)]
     pub relation_diff: Vec<String>,
+    // D19: the checks that judged this build: the bucket first, then one
+    // check per line. A plain comment on purpose: a doc comment here would
+    // land in the tool list.
+    #[serde(default)]
+    pub verify: String,
 }
 
 /// Run the level chain against the live document through the relation-diff
@@ -162,6 +167,21 @@ pub(super) fn build_level_on_state(
                     conflicts.push(line);
                 }
             }
+            // D19: the refusal answers with the checks that judged it.
+            let checks = vec![
+                crate::verify_tasks::check(
+                    "level.solved",
+                    TOOL_BUILD_LEVEL,
+                    false,
+                    refusal.reason.clone(),
+                ),
+                crate::verify_tasks::check(
+                    "level.findings",
+                    TOOL_BUILD_LEVEL,
+                    refusal.findings.is_empty(),
+                    format!("{} findings", refusal.findings.len()),
+                ),
+            ];
             Ok(BuildLevelOutput {
                 revision: state.doc.revision,
                 solved: false,
@@ -177,6 +197,7 @@ pub(super) fn build_level_on_state(
                 undo_token: 0,
                 record_line: env.record_line(),
                 relation_diff: Vec::new(),
+                verify: crate::verify_tasks::VerifyBlock::of(TOOL_BUILD_LEVEL, &checks).wire(),
             })
         }
         EditOutcome::Edited(edit) => {
@@ -229,6 +250,16 @@ pub(super) fn build_level_on_state(
                     yaw: placement.yaw,
                 })
                 .collect();
+            // D19: the landed build answers with the checks that judged it.
+            let checks = vec![
+                crate::verify_tasks::check("level.solved", TOOL_BUILD_LEVEL, true, ""),
+                crate::verify_tasks::check(
+                    "level.placed",
+                    TOOL_BUILD_LEVEL,
+                    !placements.is_empty(),
+                    format!("{} placements", placements.len()),
+                ),
+            ];
             Ok(BuildLevelOutput {
                 revision: applied.revision,
                 solved: true,
@@ -244,6 +275,7 @@ pub(super) fn build_level_on_state(
                 undo_token: applied.key,
                 record_line: env.record_line(),
                 relation_diff: edit.changes,
+                verify: crate::verify_tasks::VerifyBlock::of(TOOL_BUILD_LEVEL, &checks).wire(),
             })
         }
     }

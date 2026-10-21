@@ -35,7 +35,7 @@ export const allowedEdges = new Map([
   ["engine-save", ["engine-observe", "engine-ecs"]], // ARC5: dev-only edge; the spine payload test consumes real `Spine::snapshot`/`restore`, the crate itself stays ecs-free
   ["engine-anim", ["engine-nn", "engine-combat", "engine-ecs", "engine-nav"]],
   ["engine-playtest", ["engine-ai", "engine-arena", "engine-combat", "engine-material", "engine-render", "engine-provider", "engine-spatial"]], // NS31h2: the material gallery reads compiled records (std-only; outside the headless default graph)
-  ["engine-arena", ["engine-input", "engine-physics", "engine-combat", "engine-ai", "engine-anim", "engine-destruction", "engine-ecs", "engine-provider"]], // AL1 dev-only: mock provider drives the stamped-reply test; provider takes core only, no cycle
+  ["engine-arena", ["engine-input", "engine-physics", "engine-combat", "engine-ai", "engine-anim", "engine-destruction", "engine-ecs", "engine-provider", "engine-nav"]], // AL1 dev-only: mock provider drives the stamped-reply test; provider takes core only, no cycle. NAV-01: the nav_layers caller (docs/ARCHITECTURE.md, commit 23fe8a67) declares engine-nav for the sim-lane caller; the edge was sanctioned in the architecture doc and never written down here.
   ["engine-assets", ["engine-scene", "engine-anim", "engine-clock"]],
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
   ["engine-chaos", ["engine-observe", "engine-proof"]],
@@ -662,6 +662,9 @@ function audit(repoDir) {
   const genreLedger = new Set([
     // ai, combat, ui, net: move (GE4/GE5/GE6/GE7) or contract sites.
     "ai/src/apply.rs", "ai/src/depth.rs", "ai/src/gladiator.rs",
+    // The plan trace asks the ai crate's own gladiator percept for its plan
+    // (contract site, the same site ai/src/gladiator.rs already carries).
+    "ai/src/plan_trace.rs",
     "anim/src/pack.rs",
     "app/src/app.rs", "app/src/tests.rs",
     "combat/src/exchange.rs", "combat/src/fight.rs", "combat/src/lib.rs",
@@ -671,6 +674,8 @@ function audit(repoDir) {
     "endpoint/src/assistant.rs", "endpoint/src/assistant/fork.rs", "endpoint/src/play.rs",
     "endpoint/src/build_game.rs",
     "input/src/bindings.rs", "input/src/fighter.rs", "input/src/lib.rs",
+    // The layer tape wraps the input FighterTape and names FighterError (contract site, like input/src/fighter.rs).
+    "input/src/layers.rs",
     "net/src/dedicated.rs", "net/src/delta.rs", "net/src/quic.rs",
     "net/src/replay.rs", "net/src/scale.rs", "net/src/session.rs",
     // The snapshot codec copies FullSnap/FighterSnap bytes (contract site).
@@ -681,6 +686,8 @@ function audit(repoDir) {
     // Keypoint submodules split out of keypoint.rs (listed above): the spec parser and the spine track name the arena
     // FighterTape/FighterInput contract types, the same sites keypoint.rs already carries.
     "playtest/src/keypoint/spec_parse.rs", "playtest/src/keypoint/spine.rs",
+    // The injected verification unit names the arena FighterInput contract type, the same site keypoint.rs already carries.
+    "playtest/src/keypoint/inject.rs",
     "playtest/src/tournament.rs", "playtest/src/winrates.rs",
     "proof/src/fuzz.rs",
     // provider: the 8-observation window (budget-shape); render: the baked-GI sample budget (presentation).
@@ -705,6 +712,10 @@ function audit(repoDir) {
     "observe/src/supervisor.rs",
     "perf/src/fight_cost.rs",
     "physics/src/islands.rs", "physics/src/layers.rs", "physics/src/lod.rs",
+    // GE12-era splits: the cloth module moved from one file into a directory, and the
+    // collide track names the physics layer group's FIGHTER const (the same site
+    // physics/src/layers.rs already carries).
+    "physics/src/cloth/collide.rs", "physics/src/cloth/tests.rs",
     "playtest/src/brief_eval.rs",
     // proof: Rome harnesses (fixtures must not import them).
     "proof/src/a9.rs", "proof/src/arena_matrix.rs", "proof/src/chaos.rs", "proof/src/tape_fuzz.rs",

@@ -175,7 +175,7 @@ impl MatchTrack {
     /// flag and phased cursors (snapshots carry all three; buffers are tick
     /// scratch). The caller passes a version already validated as V0/V1.
     pub(crate) fn from_state(
-        state: MatchState,
+        state: &MatchState,
         version: u32,
         phased: [PhasedFighter; crate::MAX_SLOTS],
     ) -> Self {
@@ -188,7 +188,7 @@ impl MatchTrack {
             victim: 0,
         };
         Self {
-            state,
+            state: *state,
             exchange_buf: [EXCHANGE_DUMMY; EXCHANGE_CAP],
             sweep_buf: [SWEEP_DUMMY; SWEEP_CAP],
             exchange_n: 0,

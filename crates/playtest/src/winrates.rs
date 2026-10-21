@@ -479,7 +479,7 @@ mod tests {
         assert!(report(&variant).is_err());
         let mut variant = reference_arena();
         variant.balance = tiny_balance();
-        variant.morale = vec![500; 17];
+        variant.morale = vec![500; usize::from(engine_arena::MAX_PARTICIPANTS) + 1];
         assert!(report(&variant).is_err());
         let mut variant = reference_arena();
         variant.balance = tiny_balance();

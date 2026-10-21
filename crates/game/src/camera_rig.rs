@@ -538,7 +538,9 @@ pub fn smooth_trauma_offset_axis(
         return Err(CameraError::BadParam("axis"));
     }
     let axis_len = axis.len();
-    if !(axis_len > 0.0) {
+    // NaN-safe "is greater than zero": the negated comparison refuses a
+    // zero-length axis and a NaN length alike.
+    if axis_len.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return Err(CameraError::BadParam("axis"));
     }
     let share = f32::from(u16::try_from(share_permille).unwrap_or(1000)) / 1000.0;

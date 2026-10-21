@@ -171,6 +171,14 @@ fn check_depth_feed_inputs(
     Ok((w, h))
 }
 
+/// What one unproject gives back: the world position of every texel, its eye
+/// distance and its world height, in three parallel vectors.
+///
+/// A named alias, not a bare tuple: the tuple type is complex enough that
+/// `clippy::type_complexity` refused it in the signature, and the lint was
+/// debt that blocked the clippy proof of every crate that depends on render.
+type UnprojectedTexels = (Vec<[f64; 3]>, Vec<f32>, Vec<f32>);
+
 /// Unproject every texel through the inverse view-projection into world space
 /// plus its eye distance and world height. Row 0 is NDC y `+1` (top), matching
 /// the `v1` CPU rasterizer row map. A depth outside `0..=1`, a degenerate
@@ -181,7 +189,7 @@ fn unproject_texels(
     h: usize,
     inv_view_proj_cols: &[[f32; 4]; 4],
     eye64: [f64; 3],
-) -> Result<(Vec<[f64; 3]>, Vec<f32>, Vec<f32>), PresentError> {
+) -> Result<UnprojectedTexels, PresentError> {
     let n = w * h;
     let (w64, h64) = (w as f64, h as f64);
     let mut world = vec![[0.0f64; 3]; n];

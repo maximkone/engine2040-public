@@ -2983,6 +2983,7 @@ dependencies = [
  "engine-destruction",
  "engine-ecs",
  "engine-input",
+ "engine-nav",
  "engine-physics",
  "engine-provider",
 ]
@@ -3276,6 +3277,7 @@ dependencies = [
  "hmac",
  "image",
  "pollster",
+ "serde_json",
  "sha2 0.10.9",
  "wgpu 30.0.1",
 ]
@@ -3329,6 +3331,13 @@ dependencies = [
  "wgpu 30.0.1",
  "windows",
  "winit",
+]
+
+[[package]]
+name = "engine-rome"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
 ]
 
 [[package]]

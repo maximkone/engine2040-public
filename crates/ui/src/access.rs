@@ -223,7 +223,7 @@ impl SubtitleFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DuelOverlay;
+    use crate::{DuelOverlay, MAX_PARTICIPANTS};
 
     fn fighter(slot: u8) -> ParticipantId {
         ParticipantId::new(slot).expect("test slot is valid")
@@ -380,11 +380,12 @@ mod tests {
         assert_eq!(strip.cap(), 2);
     }
 
-    /// Every ordered pair of 16 fighters lands a hit in one tick: 240 cues.
-    fn sixteen_fighter_storm() -> Vec<FightNote> {
+    /// Every ordered pair of the full roster lands a hit in one tick: the cap
+    /// times one fewer (992 cues today).
+    fn full_roster_storm() -> Vec<FightNote> {
         let mut storm = Vec::new();
-        for attacker in 0..16 {
-            for victim in (0..16).filter(|&victim| victim != attacker) {
+        for attacker in 0..MAX_PARTICIPANTS {
+            for victim in (0..MAX_PARTICIPANTS).filter(|&victim| victim != attacker) {
                 storm.push(FightNote::Hit {
                     attacker: fighter(attacker),
                     victim: fighter(victim),
@@ -395,9 +396,10 @@ mod tests {
     }
 
     #[test]
-    fn a_sixteen_fighter_hit_storm_stays_bounded_and_counts_every_drop() {
-        let storm = sixteen_fighter_storm();
-        assert_eq!(storm.len(), 240);
+    fn a_full_roster_hit_storm_stays_bounded_and_counts_every_drop() {
+        let storm = full_roster_storm();
+        let cap = usize::from(MAX_PARTICIPANTS);
+        assert_eq!(storm.len(), cap * (cap - 1));
         let mut strip = SubtitleFeed::new(DEFAULT_SUBTITLE_LINES).expect("default cap is valid");
         let mut pushed = 0u64;
         for tick in 0..50u64 {
@@ -416,7 +418,7 @@ mod tests {
 
     #[test]
     fn the_storm_shortcut_matches_pushing_one_cue_at_a_time() {
-        let storm = sixteen_fighter_storm();
+        let storm = full_roster_storm();
         let mut batched = SubtitleFeed::new(2).expect("cap 2 is valid");
         let mut single = batched.clone();
         batched.push_cues(7, &storm[..40]);
@@ -430,7 +432,7 @@ mod tests {
     #[test]
     fn a_quiet_strip_drops_nothing() {
         let mut strip = SubtitleFeed::new(MAX_SUBTITLE_LINES).expect("max cap is valid");
-        strip.push_cues(1, &sixteen_fighter_storm()[..MAX_SUBTITLE_LINES]);
+        strip.push_cues(1, &full_roster_storm()[..MAX_SUBTITLE_LINES]);
         assert_eq!(strip.dropped(), 0);
         assert_eq!(strip.lines().len(), MAX_SUBTITLE_LINES);
     }

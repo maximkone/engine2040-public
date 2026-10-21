@@ -501,6 +501,33 @@ Until the lead applies that line, `node tools/workspace-check.mjs` prints
 `engine-arena -> engine-nav: undocumented local dependency edge` — that red is
 this lane's edge, not dirt.
 
+## Proof results (this lane, CI runner, 2026-10-21)
+
+| Command | Result |
+|---|---|
+| `node tools/gh-check.mjs cargo test -p engine-arena --lib nav_layers` | PASS — `3 passed; 0 failed` |
+| `node tools/gh-check.mjs cargo test -p engine-arena --lib layers` | PASS — `4 passed; 0 failed` (nav_layers 3 + input_layers 1) |
+| `node tools/gh-check.mjs cargo test -p engine-input --lib layers` | PASS — `3 passed; 0 failed` |
+| `node tools/gh-check.mjs cargo test -p engine-ecs --lib job_pool_threads` | PASS — `11 passed; 0 failed` (2 new: the env worker count, 1 vs 8 workers) |
+| `node tools/gh-check.mjs cargo test -p engine-arena --lib fork` | PASS — `18 passed; 0 failed` (the fork runs on the shared pool; the recorded rows stay byte-equal) |
+| `node tools/gh-check.mjs cargo test -p engine-arena --lib gym` | PASS — `6 passed; 0 failed` |
+| `node tools/gh-check.mjs cargo test -p engine-arena --lib vec_step` | PASS — `2 passed; 0 failed` (the branch fan-out keeps the input order) |
+| `node tools/gh-check.mjs cargo test -p engine-arena --lib` | PASS — `231 passed; 0 failed; 5 ignored` (the whole arena lib suite with the pool, the nav table and the layer table in it) |
+| `node tools/gh-check.mjs cargo test -p engine-proof --lib golden` | BLOCKED — `engine-physics` does not compile in the shared tree (`crates/physics/src/cloth.rs`: `from_fixed` and `layers::collides` are missing). That is the collisions lane's in-flight file, not this lane's. |
+| `node tools/proof.mjs --skip-build` with `E2040_THREADS=1` and `=8` | BLOCKED by the same `engine-physics` red file (the root package depends on `engine-physics`, so the golden binary cannot build until that lane lands) |
+
+Why the golden cannot move from this lane's changes (DERIVED from the diff): the
+600-tick default leg runs `crate::run`, which does not touch the fork, the gym
+fan-out, the live match's nav refresh (presentation-only, never hashed), the new
+nav table or the new layer table. `engine-ecs`'s shared pool keeps the same
+worker count when `E2040_THREADS` is unset (cores minus one, capped), and the
+pool decides only where a job runs, never what it returns.
+
+One test in another lane's crate was stale and is fixed here: `crates/arena`
+`tests::config_ranges_rejected` still expected the 16-fighter cap that commit
+15049ef3 ("input/net: raise the canonical fighter cap to 32 (GE12, MP16b)")
+raised, so it now names 33 as the first refused count.
+
 ## Rejections
 
 - `engine-ecs` `JobPool::shared()` was crate-private; making it public was the

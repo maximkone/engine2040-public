@@ -477,6 +477,14 @@ pub fn table_hash(q: Quality) -> u64 {
 mod tests {
     use super::*;
 
+    /// The probed tier pick: the function pointer type the test pins.
+    ///
+    /// A named alias, not a bare signature: the pointer type is complex
+    /// enough that `clippy::type_complexity` refused it, and the lint was
+    /// debt that blocked the clippy proof of every crate that depends on
+    /// render.
+    type ProbedTierPick = fn(Option<&str>, u32, Option<f64>) -> (Quality, &'static str);
+
     #[test]
     fn quality_monotone_tiers() {
         let p = knobs(Quality::Potato);
@@ -905,8 +913,7 @@ mod tests {
         // The pick reads the query and the limits and nothing else. The adapter text is a hint
         // for the receipt; only the denylist, a separate step, reads it.
         let pick: fn(Option<&str>, u32) -> (Quality, &'static str) = choose_web_tier;
-        let probed: fn(Option<&str>, u32, Option<f64>) -> (Quality, &'static str) =
-            choose_web_tier_probed;
+        let probed: ProbedTierPick = choose_web_tier_probed;
         assert_eq!(pick(None, 8192), (Quality::Web, "default"));
         assert_eq!(probed(None, 8192, None), (Quality::Web, "default"));
     }

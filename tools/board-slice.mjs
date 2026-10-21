@@ -15,7 +15,7 @@
 //
 // Exit codes: 0 ok (self-check passes) - 1 unknown row or self-check FAIL - 2 usage.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -24,6 +24,7 @@ const BOARD = join(ROOT, "docs", "SPRINT.md");
 const DOCS_DIR = join(ROOT, "docs");
 const PLAN_DIR = join(ROOT, "docs", "plan");
 const SLICE_BUDGET = 8192;
+const PLAN3_CAP = 4096;
 const ID_WIDTH = 8;
 const SECTION_WIDTH = 26;
 const TITLE_WIDTH = 110;
@@ -353,6 +354,18 @@ function planEntry(planText, id) {
   return "";
 }
 
+// Private, not exported: only buildSlice below needs the cap.
+// A plan §3 can run to many kilobytes (one section holds a whole design
+// essay). The slice budget is 8192 bytes, so the excerpt is capped and
+// names the file to read the rest from. The row itself is never touched.
+function capExcerpt(text, cap, where) {
+  if (!text || Buffer.byteLength(text, "utf8") <= cap) return text;
+  let cut = text.slice(0, cap);
+  const nl = cut.lastIndexOf("\n");
+  if (nl > 0) cut = cut.slice(0, nl);
+  return `${cut}\n… (excerpt truncated at ${cap} bytes; the full text is in ${where})`;
+}
+
 // Private, not exported: no external importer (verified 2026-10-08, only
 // main below slices rows for the CLI).
 function buildSlice(boardText, tasks, task) {
@@ -373,6 +386,7 @@ function buildSlice(boardText, tasks, task) {
     const planText = readPlanCached(planFile).replace(/\r\n/g, "\n");
     plan3 = sectionText(planText, 3);
     plan7 = planEntry(planText, task.id);
+    plan3 = capExcerpt(plan3, PLAN3_CAP, `docs/plan/${basename(planFile)} §3`);
   }
   const owned = ownedOf(task);
   const slice = [

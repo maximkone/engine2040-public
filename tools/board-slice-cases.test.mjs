@@ -94,3 +94,23 @@ test("loadBoardText receipts:false keeps rows of a shard after the receipts shar
   assert.deepEqual([...tasks.keys()].sort(), ["A1", "Z1"]);
   assert.ok(parseBoard(loadBoardText(root)).tasks.has("R9"), "default keeps the receipts text");
 });
+
+// 2026-10-21: a plan §3 is a design essay (render-look.md held ~9 KB), so
+// every row sliced from that plan blew the 8192 byte budget and the board
+// self-check read FAIL. The excerpt is capped now; the row stays verbatim.
+test("slice budget: every ready slice fits the budget (self-check passes)", () => {
+  const r = runSlice(["--self-check"]);
+  assert.equal(r.code, 0, "self-check exit: " + r.stdout.slice(-240));
+  assert.match(r.stdout, /RESULT PASS: \d+\/\d+ ready slices within budget/);
+});
+
+test("plan §3 excerpt is capped with a pointer, the row stays byte-identical", () => {
+  const r = runSlice(["VS3"]);
+  if (r.code !== 0) return; // VS3 later archived: the self-check test still guards the budget.
+  assert.ok(
+    Buffer.byteLength(r.stdout, "utf8") <= 8192,
+    "slice within the 8192 byte budget",
+  );
+  assert.match(r.stdout, /excerpt truncated at \d+ bytes; the full text is in docs\/plan\//);
+  assert.match(r.stdout, /- \[ \] VS3 game: kit textures/);
+});

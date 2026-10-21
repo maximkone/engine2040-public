@@ -224,9 +224,11 @@ Rules, per tick, integer, wall tether only:
 1. `d` = distance from anchor to thrower, in mm. If `d > REST`, radial correction:
    move the thrower back toward the anchor by `d - REST` along the unit direction.
 2. Gravity per tick pulls the thrower down before the correction; the correction is what
-   turns the fall into an arc. Same `SPEAR_GRAVITY` step the flight uses.
-3. Damping is a constant fraction, not a multiplier chain: `v -= v / 32` per tick, so a
-   release keeps most of the swing speed.
+   turns the fall into an arc. The swing falls with `FIGHTER_GRAVITY` (11 mm/tick²,
+   `crates/arena/src/lib.rs:171`); the spear in flight falls with `SPEAR_GRAVITY`
+   (3 mm/tick², `crates/arena/src/spear.rs:38`).
+3. Damping is a constant fraction, not a multiplier chain: `v -= v / 64` per tick
+   (`crates/arena/src/spear.rs:82`), so a release keeps most of the swing speed.
 4. Release (`TetherEnd(Released)`) keeps the current velocity, as SG1 already does. The
    new part is that the velocity is now tangential, so it is worth more.
 5. Enemy tethers keep the existing reel. Only the wall tether swings.

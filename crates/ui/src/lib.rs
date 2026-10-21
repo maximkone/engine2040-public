@@ -35,8 +35,18 @@ pub const DEFAULT_FEED_CAP: usize = 8;
 pub const MAX_FEED_CAP: usize = 64;
 /// Default minimap capacity in dots.
 pub const DEFAULT_MAP_CAP: usize = 8;
-/// Maximum minimap capacity in dots.
-pub const MAX_MAP_CAP: usize = 16;
+/// The participant cap as a count: the canonical cap constant
+/// (`MAX_PARTICIPANTS`) is a `u8`, and the map dots, the overlay rows and the
+/// overlay byte budget below are counts.
+///
+/// 2026-10-21: a literal (never a numeric cast) pinned to the canonical cap
+/// at compile time, the house pattern of `crates/game/src/director.rs:271`:
+/// a cap change fails the build here instead of mis-sizing the overlay.
+const PARTICIPANT_CAP: usize = 32;
+const _: () = assert!(MAX_PARTICIPANTS == 32);
+/// Maximum minimap capacity in dots: the canonical match-slot cap from
+/// `engine-input` (one cap everywhere; legal range `1..=MAX_PARTICIPANTS`).
+pub const MAX_MAP_CAP: usize = PARTICIPANT_CAP;
 /// Minimap quantization: cells per arena meter.
 pub const CELLS_PER_METER: f32 = 16.0;
 /// Minimap half-extent in meters; world positions clamp to `+/-MAP_HALF_METERS`.
@@ -633,8 +643,9 @@ impl Hud {
 /// `MAX_OVERLAY_ROWS` rows, names at most `MAX_NAME_LEN` bytes, frames at most
 /// `OVERLAY_MAX_BYTES` bytes. Failures return `OverlayError`.
 pub const OVERLAY_VERSION: u8 = 1;
-/// Most fighters one overlay names; matches the `engine-input` slot cap.
-pub const MAX_OVERLAY_ROWS: usize = 16;
+/// Most fighters one overlay names: the canonical match-slot cap from
+/// `engine-input` (one cap everywhere; legal range `1..=MAX_PARTICIPANTS`).
+pub const MAX_OVERLAY_ROWS: usize = PARTICIPANT_CAP;
 /// Longest fighter name, in UTF-8 bytes.
 pub const MAX_NAME_LEN: usize = 24;
 /// HP bar resolution: full health lights every pip.
@@ -2332,12 +2343,13 @@ mod tests {
             .upsert_fighter(fighter_id(0), "Rook", 500)
             .expect("single row tracks");
         let bytes = single.to_bytes();
-        // Count byte sits at 21 - 1 = 20; 17 rows exceed the slot cap.
+        // Count byte sits at 21 - 1 = 20; one row over the cap is refused.
+        let over_cap = MAX_OVERLAY_ROWS + 1;
         let mut many = bytes.clone();
-        many[20] = 17;
+        many[20] = u8::try_from(over_cap).expect("the over-cap count fits in a byte");
         assert_eq!(
             DuelOverlay::from_bytes(&many),
-            Err(OverlayError::TooManyRows(17))
+            Err(OverlayError::TooManyRows(over_cap))
         );
         // The same row body twice is a duplicate, not two fighters.
         let mut dup = bytes.clone();
@@ -2606,7 +2618,7 @@ mod tests {
     #[test]
     fn overlay_full_house_stays_inside_max_bytes() {
         let mut overlay = DuelOverlay::new(600);
-        for slot in 0..16u8 {
+        for slot in 0..MAX_PARTICIPANTS {
             let name = format!("Fighter{slot:02}");
             overlay
                 .upsert_fighter(fighter_id(slot), &name, 500)

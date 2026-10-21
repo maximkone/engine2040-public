@@ -171,6 +171,11 @@ pub struct SimBuildEncounterOutput {
     pub repairs_used: u8,
     pub reason: String,
     pub conflicts: Vec<String>,
+    // D19: the checks that judged this build: the bucket first, then one
+    // check per line. A plain comment on purpose: a doc comment here would
+    // land in the tool list.
+    #[serde(default)]
+    pub verify: String,
 }
 
 /// `sim.build_encounter` handler: brief text to validated encounter plan
@@ -195,24 +200,58 @@ fn sim_build_encounter(
         )?;
         let oracle = crate::build_encounter::DeterministicOracle;
         match crate::build_encounter::build_encounter(&brief, &oracle) {
-            Ok(built) => Ok(SimBuildEncounterOutput {
-                solved: true,
-                plan_id: built.plan_id,
-                rung: built.rung,
-                fork_id: built.fork_id,
-                repairs_used: u8::try_from(built.repairs_used.len()).unwrap_or(u8::MAX),
-                reason: String::new(),
-                conflicts: Vec::new(),
-            }),
-            Err(refusal) => Ok(SimBuildEncounterOutput {
-                solved: false,
-                plan_id: 0,
-                rung: 0,
-                fork_id: 0,
-                repairs_used: u8::try_from(refusal.repairs_used.len()).unwrap_or(u8::MAX),
-                reason: refusal.to_string(),
-                conflicts: refusal.conflicts,
-            }),
+            Ok(built) => {
+                // D19: the landed plan answers with the checks that judged it.
+                let checks = vec![
+                    crate::verify_tasks::check("sim.solved", TOOL_SIM_BUILD_ENCOUNTER, true, ""),
+                    crate::verify_tasks::check(
+                        "sim.plan_id",
+                        TOOL_SIM_BUILD_ENCOUNTER,
+                        built.plan_id != 0,
+                        "the plan id is zero",
+                    ),
+                    crate::verify_tasks::check("sim.conflicts", TOOL_SIM_BUILD_ENCOUNTER, true, ""),
+                ];
+                Ok(SimBuildEncounterOutput {
+                    solved: true,
+                    plan_id: built.plan_id,
+                    rung: built.rung,
+                    fork_id: built.fork_id,
+                    repairs_used: u8::try_from(built.repairs_used.len()).unwrap_or(u8::MAX),
+                    reason: String::new(),
+                    conflicts: Vec::new(),
+                    verify: crate::verify_tasks::VerifyBlock::of(TOOL_SIM_BUILD_ENCOUNTER, &checks)
+                        .wire(),
+                })
+            }
+            Err(refusal) => {
+                // D19: a refusal answers with the checks that judged it too.
+                let checks = vec![
+                    crate::verify_tasks::check(
+                        "sim.solved",
+                        TOOL_SIM_BUILD_ENCOUNTER,
+                        false,
+                        refusal.to_string(),
+                    ),
+                    crate::verify_tasks::check(
+                        "sim.conflicts",
+                        TOOL_SIM_BUILD_ENCOUNTER,
+                        refusal.conflicts.is_empty(),
+                        format!("{} conflicts", refusal.conflicts.len()),
+                    ),
+                ];
+                Ok(SimBuildEncounterOutput {
+                    solved: false,
+                    plan_id: 0,
+                    rung: 0,
+                    fork_id: 0,
+                    repairs_used: u8::try_from(refusal.repairs_used.len()).unwrap_or(u8::MAX),
+                    reason: refusal.to_string(),
+                    conflicts: refusal.conflicts,
+                    verify: crate::verify_tasks::VerifyBlock::of(TOOL_SIM_BUILD_ENCOUNTER, &checks)
+                        .wire(),
+                })
+            }
         }
     })
 }
@@ -253,6 +292,11 @@ pub struct GameBuildOutput {
     pub package_bytes: u32,
     pub verdict: String,
     pub reason: String,
+    // D19: the checks that judged this build: the bucket first, then one
+    // check per line. A plain comment on purpose: a doc comment here would
+    // land in the tool list.
+    #[serde(default)]
+    pub verify: String,
 }
 
 /// `game.build` handler: brief text to packaged playable slice (level,
@@ -283,6 +327,22 @@ fn game_build(service: &McpServer, args: &GameBuildArgs) -> Result<GameBuildOutp
                 format!("slice refused ({error}); fix the brief and re-run"),
             )
         })?;
+        // D19: the packaged slice answers with the checks that judged it.
+        let checks = vec![
+            crate::verify_tasks::check("game.solved", TOOL_GAME_BUILD, true, ""),
+            crate::verify_tasks::check(
+                "game.replay_digest",
+                TOOL_GAME_BUILD,
+                slice.eval.replay_digest != 0,
+                "the replay digest is zero",
+            ),
+            crate::verify_tasks::check(
+                "game.ticks",
+                TOOL_GAME_BUILD,
+                slice.eval.ticks_played > 0,
+                "no tick was played",
+            ),
+        ];
         Ok(GameBuildOutput {
             solved: true,
             play_digest: slice.play_digest,
@@ -291,6 +351,7 @@ fn game_build(service: &McpServer, args: &GameBuildArgs) -> Result<GameBuildOutp
             package_bytes: slice.eval.package_bytes,
             verdict: slice.eval.verdict.clone(),
             reason: String::new(),
+            verify: crate::verify_tasks::VerifyBlock::of(TOOL_GAME_BUILD, &checks).wire(),
         })
     })
 }

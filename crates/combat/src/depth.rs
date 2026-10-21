@@ -968,7 +968,9 @@ mod tests {
     #[test]
     fn depth_budgets_hold() {
         const { assert!(MAX_PATTERN_LEN <= MAX_CHAIN) };
-        assert_eq!(MAX_SLOTS, 16);
+        // One pool pair per canonical match slot: the depth set follows the
+        // slot cap the owner publishes, never a literal that goes stale.
+        assert_eq!(MAX_SLOTS, MAX_PARTICIPANTS as usize);
         assert!(core::mem::size_of::<DepthSet>() <= 2048);
         assert!(core::mem::size_of::<ComboChain>() <= 256);
     }

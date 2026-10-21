@@ -249,6 +249,31 @@ pub fn run(fixture: &Fixture) -> Result<ArenaTape, ArenaTapeError> {
     })
 }
 
+/// The same match through the spine step (ARC7b): the same spec, the same
+/// inputs and the same digest, folded over the spine's checkpoints. The
+/// spine owns the same authority the legacy live match owns, so the two
+/// digests must be equal.
+#[cfg(feature = "spine")]
+pub fn spine_digest(fixture: &Fixture) -> Result<u64, ArenaTapeError> {
+    use engine_arena::spine_step::SpineMatch;
+    let spec = fixture.spec()?;
+    let mut inputs = Vec::new();
+    for tick in 0..TICKS {
+        inputs.extend(fixture.inputs(tick));
+    }
+    let tape = engine_arena::FighterTape(inputs);
+    let mut sim =
+        SpineMatch::build(&spec.config, &tape, spec.world.clone()).ok_or(ArenaTapeError::Spec)?;
+    let mut digest = Fnv64::new();
+    digest.write_u64(spec.identity());
+    while sim.tick() < TICKS {
+        let tick = sim.tick();
+        let stepped = sim.step().ok_or(ArenaTapeError::Step(tick))?;
+        digest.write_u64(stepped.hash);
+    }
+    Ok(digest.finish())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +293,17 @@ mod tests {
         // it does not touch GOLDEN_600.
         let match_run = run(&Fixture::STANDARD).expect("standard match");
         assert_eq!(match_run.digest, 0x2fbd_5604_0fd0_91a7);
+    }
+
+    /// The spine step plays the same match and must fold the same arena
+    /// digest, twice (ARC7b).
+    #[cfg(feature = "spine")]
+    #[test]
+    fn spine_arena_digest_is_pinned() {
+        let first = spine_digest(&Fixture::STANDARD).expect("spine match");
+        assert_eq!(first, 0x2fbd_5604_0fd0_91a7);
+        let second = spine_digest(&Fixture::STANDARD).expect("spine match");
+        assert_eq!(second, first);
     }
 
     #[test]

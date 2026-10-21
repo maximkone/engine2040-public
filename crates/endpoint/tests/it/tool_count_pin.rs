@@ -13,7 +13,7 @@ use engine_endpoint::{
     tools::TOOLS,
 };
 
-/// Reachable tools under `--features mcp`: 13 core + 52 pack verbs (the web pack adds
+/// Reachable tools under `--features mcp`: 13 core + 65 pack verbs (the web pack adds
 /// `build.web`, `serve.web`, `browser.capture` and `browser.input`; the physics
 /// pack adds `physics.read`, `physics.raycast` and `physics.shapecast`; the play
 /// pack adds `play.step_until`, `input.inject`, `state.digest`, `seat.open`,
@@ -40,8 +40,9 @@ use engine_endpoint::{
 /// arm up by three. `view.compare` (the two-PNG machine score) moved every arm
 /// up by one. `world.query` (GS46, the scene pack's ninth verb) moved every arm
 /// up by one. `ai.decisions` (GS48, the play pack's eighth verb) moved every arm
-/// up by one.
-const EXPECTED_ROUTER: usize = 76
+/// up by one. The session pack adds `scene.diff` and `session.activity` (D17,
+/// on-demand), so every arm moves up by two.
+const EXPECTED_ROUTER: usize = 78
     + if cfg!(feature = "rules") { 3 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

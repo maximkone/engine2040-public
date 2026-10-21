@@ -2095,7 +2095,13 @@ impl ArenaApp {
                 return;
             };
             // One health bar per fighter (the capture path already stages them).
-            let overlay = engine_game::windowed::duel_overlay_for_app(&self.app);
+            let overlay = match engine_game::windowed::duel_overlay_for_app(&self.app) {
+                Ok(overlay) => overlay,
+                Err(err) => {
+                    self.fail(event_loop, WinError::Render(capped(&err.to_string())), 1);
+                    return;
+                }
+            };
             engine_game::windowed::stage_hp_bars(presenter, &overlay);
             // PQ18 stage three: the frame submits its present call now. Only a
             // frame with an accepted tick stamps, so an idle frame never reads

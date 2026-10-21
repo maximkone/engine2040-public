@@ -54,6 +54,9 @@ const WARM_FRAMES: u32 = 3;
 /// The animation time (seconds) a `?freeze` page holds: the fighters stand mid-pose and every frame
 /// is the same picture, so the headless check can compare two captures (QW14).
 const FROZEN_T_S: f32 = 1.5;
+/// The fixed match ticks a `?gate` page runs once, before it holds the picture: the fighters
+/// stand in the arena and the capture is the same frame on every load.
+const GATE_TICKS: u64 = 30;
 /// Fewest probe frames that make a median worth believing.
 const PROBE_MIN_FRAMES: usize = 8;
 /// How many 250 ms waits a hidden tab gets before the startup probe gives up on an answer.
@@ -109,6 +112,18 @@ struct ArenaLoop {
     pace: Pace,
     sim_ms: f64,
     late_reported: usize,
+    /// PW37: a `?gate` page holds one known picture (frozen time, no match step), so the capture
+    /// is the same frame on every load and the frame gate can compare it with the reference.
+    gate: bool,
+    /// The fixed match ticks a `?gate` page still owes: it runs them once, then holds.
+    gate_ticks: u64,
+    /// The word for the last fight cue the page saw (`PARRY`, `BLOCK`, ...).
+    cue: Option<&'static str>,
+    /// The cues the page already named, so a cue is named once and not on every frame it
+    /// stays in the match's cue list.
+    named_cues: Vec<engine_audio::FightCue>,
+    /// What the frame gate measured against the reference capture, once a frame was captured.
+    gate_result: Option<crate::arena_view::Gate>,
 }
 
 impl ArenaLoop {
@@ -248,7 +263,16 @@ impl ArenaLoop {
         // A slow frame asks the clock for every tick it missed; with a heavy tick that is a spiral
         // (missed ticks make the next frame slower). The page plays at most two steps per frame:
         // below 30 fps the match runs in slow motion instead of dragging the frame rate down.
-        let steps = self.clock.steps().min(FIGHT_STEPS_PER_FRAME);
+        // PW37: a `?gate` page runs a fixed number of ticks once (the fighters stand in the
+        // arena) and then no step at all, so the capture is the same frame on every load and
+        // the frame gate can compare it with the reference capture.
+        let steps = if self.gate {
+            let left = self.gate_ticks;
+            self.gate_ticks = 0;
+            left
+        } else {
+            self.clock.steps().min(FIGHT_STEPS_PER_FRAME)
+        };
         let frames = self.counters.frames;
         let (yaw, left, right) = crate::browser::seat_look();
         for _ in 0..steps {
@@ -259,6 +283,15 @@ impl ArenaLoop {
                 None => break,
             }
         }
+        if steps > 0 {
+            let cues = fight.cues();
+            if cues != self.named_cues.as_slice() {
+                self.named_cues = cues.to_vec();
+                if let Some(word) = crate::arena_view::cue_word(cues) {
+                    self.say_cue(word);
+                }
+            }
+        }
         if frames % 15 == 1 {
             set_text("fight", &fight.line());
         }
@@ -266,6 +299,25 @@ impl ArenaLoop {
             paint_hud(hud);
         }
         fight.list(&mut self.presenter, w, h, t_s)
+    }
+
+    /// PW37: say the cue the tick gave: the word in the console, in the page's body attribute
+    /// and in the receipt, so a headless read sees which cue the fight produced (a parry, a
+    /// block, a hit). The word stays until the next cue.
+    fn say_cue(&mut self, word: &'static str) {
+        self.cue = Some(word);
+        set_body_attr("data-cue", &word.to_ascii_lowercase());
+        web_sys::console::log_1(&JsValue::from_str(&format!("cue: {word}")));
+    }
+
+    /// PW37: the scene the last frame drew: the cooked kit's own name once any of it draws
+    /// resident, the stand-in ring's name otherwise.
+    fn scene(&self) -> &'static str {
+        let kit_drawn = self
+            .fight
+            .as_ref()
+            .map_or(0, crate::fight::Match::kit_drawn);
+        crate::arena_view::scene_word(kit_drawn, self.fight.is_some())
     }
 
     /// Feed the frame to the one-second window (unless it spans a hidden gap); once a second print
@@ -353,23 +405,27 @@ impl ArenaLoop {
 
     fn publish_receipt(&self) {
         let (waiting, dropped) = self.presenter.deferred_validation_waiting();
-        let line = crate::arena_view::receipt_line(
-            self.tier.name(),
-            &self.counters,
-            self.stats.last_ms(),
-            self.last_cpu_ms,
-            self.last_draws,
-            self.first_error.as_deref(),
-            LOSSES
-                .with(|losses| losses.borrow().last().cloned())
-                .as_ref(),
-        );
+        let last_loss = LOSSES.with(|losses| losses.borrow().last().cloned());
+        let receipt = crate::arena_view::Receipt {
+            tier: self.tier.name(),
+            counters: self.counters,
+            frame_ms: self.stats.last_ms(),
+            cpu_ms: self.last_cpu_ms,
+            draws: self.last_draws,
+            first_error: self.first_error.as_deref(),
+            last_loss: last_loss.as_ref(),
+            scene: self.scene(),
+            cue: self.cue,
+            gate: self.gate_result,
+        };
+        let line = crate::arena_view::receipt_line(&receipt);
         set_text("receipt", &line);
         set_body_attr(
             "data-validation-errors",
             &self.counters.validation_total().to_string(),
         );
         set_body_attr("data-scopes-waiting", &format!("{waiting}/{dropped}"));
+        set_body_attr("data-scene", receipt.scene);
     }
 
     /// Ask for the GPU copy of the canvas once the first frames have settled (or when the page
@@ -399,6 +455,14 @@ impl ArenaLoop {
                 publish_capture(&frame.rgba, &line);
                 set_text("capture", &line);
                 set_body_attr("data-capture", if facts.blank { "blank" } else { "ready" });
+                // PW37: the frame gate measures this capture against the reference capture of
+                // the cooked arena and prints the SSIM it got.
+                let grid = crate::arena_view::luma_grid(&frame.rgba, frame.width, frame.height);
+                let gate = crate::arena_view::frame_gate(&grid);
+                let gate_line = gate.line(self.scene());
+                web_sys::console::log_1(&JsValue::from_str(&gate_line));
+                set_body_attr("data-gate", &format!("{:.4}", gate.ssim));
+                self.gate_result = Some(gate);
             }
             Ok(None) => {}
             Err(e) => {
@@ -628,7 +692,83 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
     let kit_source = fetch_kit(&search).await;
     // WEB15: `?fight` plays a real match over the same scenery; nothing else changes.
     let fight = open_fight(&search, kit_source.as_ref(), &mut presenter)?;
-    let mut frame = ArenaLoop {
+    let mut frame = arena_loop(LoopParts {
+        presenter,
+        arena,
+        fight,
+        canvas,
+        lost,
+        uncaptured,
+        max_dim,
+        search: search.clone(),
+        hint,
+        tier,
+        tier_why,
+        scale_pct,
+        software,
+    });
+    frame.stage()?;
+    let surface_format = frame.surface_format.clone();
+    let ready = ready_line(
+        &info,
+        raw,
+        features,
+        limits,
+        generation,
+        (w, h),
+        surface_format,
+    );
+    let line = Box::pin(publish_and_run(
+        frame,
+        ready,
+        StartupFacts::new(&search, tier_why, software, max_texture_2d),
+        &work_queue,
+        built_at,
+        canvas_id,
+    ))
+    .await;
+    Ok(line)
+}
+
+/// The parts the frame loop needs from the device and the page, gathered so the loop's
+/// construction is one call and [`start`] stays one screen of code.
+struct LoopParts {
+    presenter: Presenter,
+    arena: ProceduralArena,
+    fight: Option<crate::fight::Match>,
+    canvas: HtmlCanvasElement,
+    lost: Arc<LostBox>,
+    uncaptured: Arc<Uncaptured>,
+    max_dim: u32,
+    search: String,
+    hint: String,
+    tier: Quality,
+    tier_why: &'static str,
+    scale_pct: u32,
+    software: bool,
+}
+
+/// The frame loop over the device and the page: the presenter, the scenery, the match and the
+/// counters the receipt reads. PW37: a `?gate` page holds one known picture, so it runs a fixed
+/// number of match ticks once and then freezes the animation time.
+fn arena_loop(parts: LoopParts) -> ArenaLoop {
+    let LoopParts {
+        presenter,
+        arena,
+        fight,
+        canvas,
+        lost,
+        uncaptured,
+        max_dim,
+        search,
+        hint,
+        tier,
+        tier_why,
+        scale_pct,
+        software,
+    } = parts;
+    let gate = has_flag(&search, "gate");
+    ArenaLoop {
         presenter,
         arena,
         fight,
@@ -638,7 +778,7 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         max_dim,
         stats: FrameStats::default(),
         clock: StepClock::new(MAX_STEPS_PER_FRAME),
-        frozen_s: has_flag(&search, "freeze").then_some(FROZEN_T_S),
+        frozen_s: (has_flag(&search, "freeze") || gate).then_some(FROZEN_T_S),
         seen_visibility: VISIBILITY_CHANGES.with(Cell::get),
         adapter_hint: hint,
         counters: Counters {
@@ -657,27 +797,34 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
         pace: Pace::new(ladder_for(&search, software)),
         sim_ms: 0.0,
         late_reported: 0,
-    };
-    frame.stage()?;
-    let surface_format = frame.surface_format.clone();
-    let line = Box::pin(publish_and_run(
-        frame,
-        Ready {
-            adapter: adapter_facts(&info, raw),
-            features,
-            limits,
-            generation,
-            canvas: (w, h),
-            surface_format,
-            ..page_facts()
-        },
-        StartupFacts::new(&search, tier_why, software, max_texture_2d),
-        &work_queue,
-        built_at,
-        canvas_id,
-    ))
-    .await;
-    Ok(line)
+        gate,
+        gate_ticks: u64::from(gate) * GATE_TICKS,
+        cue: None,
+        named_cues: Vec::new(),
+        gate_result: None,
+    }
+}
+
+/// The ready line's facts: the adapter's own words, the device's features and limits, the
+/// canvas and the surface format, with the page's own facts filled in.
+fn ready_line(
+    info: &wgpu::AdapterInfo,
+    raw: [String; 4],
+    features: Vec<String>,
+    limits: Vec<(&'static str, u64)>,
+    generation: u32,
+    canvas: (u32, u32),
+    surface_format: String,
+) -> Ready {
+    Ready {
+        adapter: adapter_facts(info, raw),
+        features,
+        limits,
+        generation,
+        canvas,
+        surface_format,
+        ..page_facts()
+    }
 }
 
 /// Warm behind the loader, publish the ready line and hand the frame to the loop. Split out of
@@ -1034,6 +1181,7 @@ fn publish_ready(frame: &ArenaLoop, ready: &Ready, warmed: &Warmed, init_ms: f64
         pipelines_ms: whole_ms(warm_ms),
         late_pipelines: 0,
         validation: frame.counters.validation_total(),
+        scene: frame.scene().to_string(),
     };
     let line = ready.line_with(&facts);
     set_text("report", &line);
@@ -1042,6 +1190,7 @@ fn publish_ready(frame: &ArenaLoop, ready: &Ready, warmed: &Warmed, init_ms: f64
     set_body_attr("data-tier", tier.name());
     set_body_attr("data-fallback", fallback_for(tier_why));
     set_body_attr("data-pipelines", &ledger.warm().to_string());
+    set_body_attr("data-scene", &facts.scene);
     web_sys::console::log_1(&JsValue::from_str(&tier_line));
     web_sys::console::log_1(&JsValue::from_str(&pipelines_line));
     set_text("init", &format!("arena ready in {init_ms:.0} ms"));

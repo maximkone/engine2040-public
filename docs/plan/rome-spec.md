@@ -31,16 +31,16 @@ duel proof; EMPIRE outcome "AI makes games".
 - Speed **1.7 m/s** march. Forge stays (`speedCmS 170`). No fixed
   engine locomotion constant surfaced in this run's read budget, so
   the engine adopts 1.7 m/s; the first parity row verifies it.
-- Sword **25 HP damage, 0.5 s cooldown, 200 cm range**. Range: forge
-  200 cm meets the engine bound HURT_RADIUS 200 cm exactly
-  (`crates/combat/src/sweep.rs:29-31`) — neither moves. Damage and
-  cooldown land as a **Rome Tables preset beside V1**
-  (`crates/combat/src/fight.rs:34-38`, shipped 120 permille / 4+8
-  ticks untouched): the engine moves by addition, the core by nothing.
+- Sword: forge **25 HP damage, 30 ticks cooldown, 2000 mm range**
+  (`content/arena/rome-spec.json`); engine **120 permille damage, 15-tick
+  startup, 8-tick recovery, 1500 mm reach** (`content/design/combat.rows:9`,
+  `content/design/weapons.rows:24`, `crates/arena/src/match_wire.rs:33`). The
+  Rome Tables preset (250 permille, 30 ticks) stays planned only; the 2000 mm
+  in `crates/combat/src/sweep.rs:29-31` is a validation cap, not the reach.
 
 ## Bouts and win rules
 
-- **Duel** 1v1 (slot 0 human, slot 1 AI). **Team** 4-16, even sides,
+- **Duel** 1v1 (slot 0 human, slot 1 AI). **Team** 4-32, even sides,
   slot 0 human, rest AI.
 - **Round** = 600 ticks; all opponents at 0 HP wins early, else higher
   total HP wins, exact tie replays the round. **Match** = best of 5,
@@ -93,7 +93,7 @@ invented — UNKNOWN stays UNKNOWN with the reason.
 
 The run log is `git show a0e13976:docs/plan/rome-parity.md` (archived under `docs/archive/2026-10-10/plans/`). One line per open gap; rows with no gap are dropped.
 
-- Units (2026-10-05): range exact match (200 cm = 2000 mm bound) and HP (100 x 10) do not move; damage and cooldown differ by design (V1 120 permille / 12 ticks stays; Rome 250 permille / 30 ticks lands as a Tables preset); speed 1.7 m/s adopted.
+- Units (2026-10-05, restated 2026-10-21): HP (100 x 10) does not move; the range does not match either (forge 2000 mm, engine blade reach 1500 mm, `crates/arena/src/match_wire.rs:33`); damage and cooldown differ by design (shipped row 120 permille, 15-tick startup, 8-tick recovery, `content/design/combat.rows:9`; Rome 250 permille / 30 ticks is planned only); speed 1.7 m/s adopted.
 - Bouts and win rules (2026-10-05): tick base differs (engine 60 Hz, forge 20 Hz; the spec says forge moves to 60); round loop missing on engine; duel mode missing on forge.
 - Look (2026-10-05): hue matches exactly; fov differs by design (duel 60, helmet 55 in the parity preset); engine has no head-bob, helmet vignette or flicker constant.
 - Seed rule (2026-10-05): engine seed slot fixed (2040); forge has no seed slot; tick base still differs.

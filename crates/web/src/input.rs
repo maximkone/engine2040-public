@@ -473,6 +473,7 @@ impl InputState {
 mod tests {
     use super::*;
     use engine_input::fighter::{ATTACK, BLOCK, DODGE};
+    use engine_input::MAX_PARTICIPANTS;
 
     fn fighter() -> FighterId {
         FighterId::new(0).expect("slot 0 exists")
@@ -793,9 +794,17 @@ mod tests {
     #[test]
     fn bad_slot_or_facing_is_refused_not_clamped() {
         let s = InputState::default();
+        // The cap is the engine's, not a number typed here: the last slot
+        // inside it is legal and the first slot past it is refused, never
+        // clamped onto the last one.
+        let last = FighterId(MAX_PARTICIPANTS - 1);
+        assert!(
+            s.fighter_input(0, last, 0).is_ok(),
+            "the last slot inside the cap is legal"
+        );
         assert_eq!(
-            s.fighter_input(0, FighterId(16), 0).unwrap_err(),
-            FighterError::UnknownFighter(16)
+            s.fighter_input(0, FighterId(MAX_PARTICIPANTS), 0).unwrap_err(),
+            FighterError::UnknownFighter(MAX_PARTICIPANTS)
         );
         assert_eq!(
             s.fighter_input(0, fighter(), 18_001).unwrap_err(),

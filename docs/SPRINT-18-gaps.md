@@ -18,6 +18,7 @@ FC3 (at 3.29 fps the 18,000-frame run takes 91 min against a 45 min slot).
   `target/reports/perf-<date>.md`. Run it again after EG1 and EG2 land.
   F2P: no arena frame table under target/reports today. P2P: no source
   change; golden `d57b5c8ae3096614` unchanged.
+  rot: tools/quiet.mjs was deleted in e5457d6 (the seat guard, the sprint lock, quiet and the knobs went out; product-check and doctor stand on their own); the surviving runner is tools/quiet-run.mjs ([--times N] [--max-wait MIN] [--cpu PCT] [--samples N] [--gap SEC] -- <cmd>), so re-home the Accept command to it.
 - [x] FC2 render: halve the top frame cost FC1 names — one pass, one file, a
   half-res or skip switch on that pass. EG2 (Claude) removes the blocking
   fog and GTAO readbacks; tick FC2 with EG2 if the numbers hold. Tier A. Size M. Owns the one file FC1
@@ -1031,7 +1032,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   or does not run. Source: E01#2/#11, E09#7/#8, E13#7. Diff: good. Tier A.
   Size M. Owns `crates/observe/src/supervisor.rs`,
   `crates/observe/src/breaker.rs` (new),
-  `crates/observe/tests/circuit_vectors.rs` and `bulkhead_vectors.rs` (point
+  `crates/observe/tests/it/circuit_vectors.rs` and `bulkhead_vectors.rs` (point
   at src). Accept: `cargo test -p engine-observe --lib supervisor_proof` x2: a
   heal that "applies" while read-back still faults ends in quarantine;
   re-register does not reopen the budget; tape rows carry both digests; the
@@ -1041,6 +1042,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `cargo test -p engine-observe --lib` green; golden unchanged. Plan:
   `docs/plan/forge-adoption.md` AD-14. needs: none.
   Correction 2026-10-21: duplicate - PW30 owns this work now; PW30's row says it closes AD14, E75, A9 and G1. This row is not ticked and is not built on its own; retire it when PW30 lands.
+  rot: crates/observe/tests/circuit_vectors.rs -> crates/observe/tests/it/circuit_vectors.rs (e651bbd); bulkhead_vectors.rs moved with it.
 - [ ] AD15 assets: cook-time clip gates — measure raw-clip foot slide with
   `anim::feet` (assets already depends on anim) and refuse with clip name and
   mm; `BoneMap::build` returns coverage and refuses when a required set (root,

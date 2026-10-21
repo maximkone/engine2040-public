@@ -178,6 +178,10 @@ export const redFloors = ({ look, timing, caps, ref }, bar, passBar = null) => {
   if ((look.validation_errors ?? 0) > (f.validation_errors ?? 0)) red.validation = `${look.validation_errors} wgpu validation errors`;
   if (caps.blank > (f.blank_frames ?? 0)) red.blank = `${caps.blank} of ${caps.captures} captures are blank (PNG under 60 KB)`;
   if (caps.frozen > (f.frozen_pairs ?? 0)) red.freeze = `${caps.frozen} pairs of consecutive captures (60 frames apart) are byte-identical: the picture froze`;
+  // No capture is not a pass: with an empty capture dir the blank and frozen
+  // floors judge nothing at all, so the look half of this check would be green
+  // without having looked at a single frame.
+  if (!caps.captures) red.captures = "the look run scored no captures: an empty capture dir proves nothing about the picture";
   if (look.flip !== null && look.flip !== undefined && look.flip > (f.look_flip_max ?? 1200)) red.look = `the machine look score read ${look.flip} x10000 against the last green run ${look.flip_vs ?? "?"} (floor ${f.look_flip_max ?? 1200})`;
   if (timing && !timing.loaded && timing.interval_p99_ms > (f.stall_p99_ms_max ?? 1500)) red.stall = `frame interval p99 ${timing.interval_p99_ms} ms (floor ${f.stall_p99_ms_max ?? 1500} ms)`;
   if (timing && !timing.loaded && ref && timing.interval_p50_ms > ref / (1 - (f.fps_drop_max ?? 0.3))) {

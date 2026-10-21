@@ -110,6 +110,16 @@ pub enum RulesError {
         /// Actors given.
         fighters: usize,
     },
+    /// The recording spec is out of range: fighters, ticks, checkpoint
+    /// cadence, script installs or inputs. A tape the recorder writes has to
+    /// decode back into the same match, so a spec that would break that is
+    /// refused here instead of at the decoder.
+    BadSpec {
+        /// Which field is out of range.
+        field: &'static str,
+        /// Offending value.
+        value: u64,
+    },
     /// `explain` was asked with no script installed.
     NoScript,
 }
@@ -136,6 +146,9 @@ impl fmt::Display for RulesError {
             Self::Thrown { value } => write!(f, "script threw {value}"),
             Self::Runtime { message } => write!(f, "runtime: {message}"),
             Self::BadWorld { fighters } => write!(f, "bad world with {fighters} fighters"),
+            Self::BadSpec { field, value } => {
+                write!(f, "recording spec {field} is out of range: {value}")
+            }
             Self::NoScript => f.write_str("no script installed"),
         }
     }

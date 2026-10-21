@@ -655,6 +655,10 @@ fn format_bundle_readme(facts: &BundleFacts<'_>) -> String {
 /// Errors: [`CrashError::BadValue`]`("metric")` for an unsafe directory token,
 /// [`CrashError::Io`] for a failed directory or file; the caller keeps its own
 /// exit code and only logs the refusal.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the bundle's fields mirror report.toml one to one"
+)]
 pub fn write_warning_bundle(
     dir: &Path,
     metric: &str,

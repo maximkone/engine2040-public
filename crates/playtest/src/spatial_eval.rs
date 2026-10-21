@@ -122,6 +122,9 @@ use world::*;
 #[cfg(test)]
 mod known_good;
 pub mod llm;
+/// SPR4 live recorder: one real model over the eval-room door tools.
+#[cfg(feature = "live")]
+pub mod llm_live;
 mod tsv;
 pub use tsv::*;
 

@@ -26,6 +26,8 @@ pub struct Rig {
     shapes: Vec<BoneShape>,
     depths: Vec<u32>,
     hinges: Vec<Hinge>,
+    /// How hard the joints brace when a blow lands, permille of the whole.
+    muscle_permille: u16,
 }
 
 impl Rig {
@@ -48,7 +50,24 @@ impl Rig {
             shapes,
             depths,
             hinges: Vec::new(),
+            muscle_permille: crate::body::MUSCLE_FULL,
         })
+    }
+
+    /// Sets how hard the joints brace when a blow lands, permille of the whole:
+    /// 1000 braces as hard as the motors can, 0 gives way at once. A value past
+    /// the whole is refused and nothing is kept.
+    pub fn with_muscle_permille(mut self, permille: u16) -> Result<Self, Error> {
+        if permille > crate::body::MUSCLE_FULL {
+            return Err(Error::OutOfRange(Field::Muscle));
+        }
+        self.muscle_permille = permille;
+        Ok(self)
+    }
+
+    /// How hard the joints brace when a blow lands, permille of the whole.
+    pub(crate) fn muscle_permille(&self) -> u16 {
+        self.muscle_permille
     }
 
     /// Makes the joints of `hinges` hinges; every other joint stays a ball. A bone that is the

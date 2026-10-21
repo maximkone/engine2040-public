@@ -1071,12 +1071,23 @@ pub(crate) fn human_dwell(seed: u64, slot: u8, epoch: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::delta::MASK_HP;
+    use crate::interest::{
+        entity_room, room_mask, ConnectionInterest, InterestCfg, InterestEntity, InterestError,
+        MAX_INTEREST_ENTITIES, ON9_CAP_KBPS_X100, SCOPE_ROOMS, SIEGE_BUDGET_BYTES,
+        SNAPSHOT_EVERY_TICKS, STARVE_TICKS,
+    };
     use crate::netcode::kind_channel;
     use crate::replicate::{
         decode_snapshot_packet, encode_snapshot_packet, EntityId, ReplicationClient,
         ReplicationServer, Transform, Vitals, MASK_VITALS, REPLICATE_VERSION_OFFSET,
     };
     use crate::session::{decode_input, NetError};
+    use crate::tick_budget::{check_p99, TickQuantiles, BUDGET_P99_MS};
+    #[expect(
+        clippy::disallowed_types,
+        reason = "wall-clock perf sample, never hashed."
+    )]
+    use std::time::Instant;
 
     fn view(slot: u8) -> FighterView {
         FighterView {
@@ -1827,6 +1838,402 @@ mod tests {
             Err(NetError::VersionMismatch {
                 got: crate::replicate::REPLICATE_VERSION + 1
             })
+        );
+    }
+
+    // ---- MP21: 64-player interest handoff spike -------------------------
+
+    /// MP21 fighters: replicated entity ids, not fighter slots (cap 32).
+    const MP21_FIGHTERS: u32 = 64;
+    /// Legion stand-ins the row names beside the fighters.
+    const MP21_LEGION: u32 = 1_000;
+    /// Legion stand-ins that fit beside 64 fighters under the interest cap
+    /// (1024 - 64). The row's literal 1_000 does not; the refusal test below
+    /// records that, and widening the cap is an ON row, not a spike edit.
+    const MP21_LEGION_FIT: u32 = MAX_INTEREST_ENTITIES as u32 - MP21_FIGHTERS;
+    /// Entities in one spike tick: the interest cap, full.
+    const MP21_ENTITIES: u32 = MP21_FIGHTERS + MP21_LEGION_FIT;
+    /// Spike length: 600 ticks (10 s at 60 Hz), like the MP16b soak.
+    const MP21_TICKS: u32 = 600;
+    /// Half-side of a fighter's square orbit, in millimetres.
+    const MP21_ORBIT_MM: i32 = 40_000;
+    /// Fighter walk per tick along that orbit, in millimetres (2 m per tick,
+    /// so one 320 m lap takes 160 ticks: rings hand off about every quarter).
+    const MP21_ORBIT_STEP_MM: i32 = 2_000;
+    /// Room cluster pitch: room `r` sits `r` x 800 m east of room 0.
+    const MP21_ROOM_PITCH_MM: i32 = 800_000;
+    /// World-step p99 bar for the spike: the P6 1,000-agent sim read.
+    const MP21_STEP_P99_MS: f64 = 2.0;
+
+    /// Where room `room` sits: its cluster centre on the x axis, in mm.
+    fn mp21_room_x(room: u32) -> i32 {
+        i32::try_from(room).expect("room fits") * MP21_ROOM_PITCH_MM
+    }
+
+    /// Fighter pose at `tick`: a square orbit around its room centre plus the
+    /// facing of the side it walks along (yaw -1800 faces +x, -1125 +z,
+    /// -225 -x, 675 -z). Integer only, so every tick replays bit-exactly.
+    fn mp21_fighter_pose(id: u32, tick: u32) -> (i32, i32, i16) {
+        let side = 2 * MP21_ORBIT_MM;
+        let perimeter = u32::try_from(4 * side).expect("perimeter fits");
+        let walk = u32::try_from(MP21_ORBIT_STEP_MM).expect("walk fits");
+        let along = tick.wrapping_mul(walk).wrapping_add(id.wrapping_mul(9_000)) % perimeter;
+        let side = u32::try_from(side).expect("side fits");
+        let rem = i32::try_from(along % side).expect("rem fits");
+        let o = MP21_ORBIT_MM;
+        let (x, z, yaw) = match along / side {
+            0 => (rem - o, -o, -1_800),
+            1 => (o, rem - o, -1_125),
+            2 => (o - rem, o, -225),
+            _ => (-o, o - rem, 675),
+        };
+        (mp21_room_x(entity_room(id)) + x, z, yaw)
+    }
+
+    /// Legion position at `tick`: a 12 x 10 grid per room at 30 x 36 m pitch,
+    /// drifting 4 m east or west every 7 ticks so ring membership really
+    /// hands off during the run (the spike's handoff churn).
+    fn mp21_legion_pos(id: u32, tick: u32) -> (i32, i32) {
+        let local = (id - MP21_FIGHTERS) / SCOPE_ROOMS;
+        let col = local % 12;
+        let row = local / 12;
+        let drift = if (tick / 7).wrapping_add(local).is_multiple_of(2) {
+            4_000
+        } else {
+            -4_000
+        };
+        let x = i32::try_from(col).expect("col fits") * 30_000 - 165_000 + drift;
+        let z = i32::try_from(row).expect("row fits") * 36_000 - 162_000;
+        (mp21_room_x(entity_room(id)) + x, z)
+    }
+
+    /// MP21 world: every entity, the 64 scoped connections and one shared
+    /// selection buffer. Positions and combat words are integers only.
+    struct HandoffWorld {
+        entities: Vec<InterestEntity>,
+        conns: Vec<ConnectionInterest>,
+        out: Vec<u32>,
+    }
+
+    impl HandoffWorld {
+        /// Build the world at tick 0 and register that roster as every
+        /// connection's delta baseline (match start). Each connection scopes
+        /// one room, so about 128 of the 1024 entities are candidates and
+        /// combat-dirty bodies still ship across rooms.
+        fn new() -> Self {
+            let entities: Vec<InterestEntity> = (0..MP21_ENTITIES)
+                .map(|id| {
+                    let (x_mm, z_mm) = if id < MP21_FIGHTERS {
+                        let (x, z, _) = mp21_fighter_pose(id, 0);
+                        (x, z)
+                    } else {
+                        mp21_legion_pos(id, 0)
+                    };
+                    InterestEntity {
+                        id,
+                        x_mm,
+                        z_mm,
+                        combat: 1_000,
+                    }
+                })
+                .collect();
+            let count = usize::try_from(MP21_ENTITIES).expect("entities fit");
+            let mut conns = Vec::with_capacity(usize::try_from(MP21_FIGHTERS).expect("fits"));
+            for viewer in 0..MP21_FIGHTERS {
+                let mut conn =
+                    ConnectionInterest::for_entities(viewer, count).expect("inside the cap");
+                conn.set_rooms(room_mask(viewer % SCOPE_ROOMS));
+                conn.register_baseline(&entities).expect("baseline");
+                conns.push(conn);
+            }
+            Self {
+                entities,
+                conns,
+                out: vec![0u32; count],
+            }
+        }
+
+        /// Step to `tick`: the integer walk plus scripted fighter attrition
+        /// (one hit every 23 ticks, staggered by id), so combat state is
+        /// really dirty and never float.
+        fn step(&mut self, tick: u32) {
+            for entity in &mut self.entities {
+                let id = entity.id;
+                if id < MP21_FIGHTERS {
+                    let (x_mm, z_mm, _) = mp21_fighter_pose(id, tick);
+                    entity.x_mm = x_mm;
+                    entity.z_mm = z_mm;
+                    let hits = tick.wrapping_add(id) / 23;
+                    entity.combat = 1_000u32.saturating_sub(hits * 3);
+                } else {
+                    let (x_mm, z_mm) = mp21_legion_pos(id, tick);
+                    entity.x_mm = x_mm;
+                    entity.z_mm = z_mm;
+                }
+            }
+        }
+
+        /// Fold one tick: every entity's state plus every selection receipt.
+        fn digest(&self, tick: u32, receipts: &[(u32, u32, u32)]) -> u64 {
+            let mut hash = Fnv64::new();
+            hash.write_u32(tick);
+            hash.write_len(self.entities.len());
+            for entity in &self.entities {
+                hash.write_u32(entity.id);
+                hash.write_i32(entity.x_mm);
+                hash.write_i32(entity.z_mm);
+                hash.write_u32(entity.combat);
+            }
+            for (viewer, selected, bytes) in receipts {
+                hash.write_u32(*viewer);
+                hash.write_u32(*selected);
+                hash.write_u32(*bytes);
+            }
+            hash.finish()
+        }
+    }
+
+    /// One MP21 spike run: the evidence the row quotes.
+    struct Mp21Report {
+        /// Per-tick digests (two runs must match element by element).
+        digests: Vec<u64>,
+        /// Fold of every digest.
+        hash: u64,
+        /// Worst per-client rate over the run, kbps x100 (integer).
+        kbps_x100: u64,
+        /// Worst per-client bytes/s over the run.
+        bytes_per_sec: u64,
+        /// Worst snapshot bytes any client was handed.
+        snapshot_bytes: usize,
+        /// Worst ticks-since-sent on any in-scope entity.
+        starve_max: u32,
+        /// Worst ticks a changed combat body stayed unsent.
+        combat_gap: u32,
+        /// Snapshots one client received.
+        snapshots_per_client: u64,
+        /// Wall-clock p99 of a full essentials tick (step plus due selects).
+        tick_p99_ms: f64,
+        /// Wall-clock p99 of the world step alone.
+        step_p99_ms: f64,
+    }
+
+    /// One MP21 spike arm: 600 ticks at 60 Hz over 1024 entities and 64
+    /// scoped connections, each selecting every sixth tick on its own lane
+    /// (`viewer % 6 == tick % 6`), so no tick pays all 64 selects.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "wall-clock perf sample, never hashed."
+    )]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "wall-clock perf sample, never hashed."
+    )]
+    fn mp21_run() -> Mp21Report {
+        let cfg = InterestCfg::default_siege();
+        let mut world = HandoffWorld::new();
+        let ticks = usize::try_from(MP21_TICKS).expect("ticks fit");
+        let mut digests = Vec::with_capacity(ticks);
+        let mut tick_ms = Vec::with_capacity(ticks);
+        let mut step_ms = Vec::with_capacity(ticks);
+        let mut receipts: Vec<(u32, u32, u32)> =
+            Vec::with_capacity(usize::try_from(MP21_FIGHTERS).expect("fits"));
+        // Per connection: the combat word the receiver holds for its watched
+        // fighter (viewer + 8, same room, never the viewer) and the tick it
+        // fell behind on.
+        let mut held = vec![1_000u32; usize::try_from(MP21_FIGHTERS).expect("fits")];
+        let mut stale = vec![None::<u32>; usize::try_from(MP21_FIGHTERS).expect("fits")];
+        let mut snapshot_bytes = 0usize;
+        let mut combat_gap = 0u32;
+        for tick in 1..=MP21_TICKS {
+            let full = Instant::now();
+            let started = Instant::now();
+            world.step(tick);
+            step_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            receipts.clear();
+            let entities = &world.entities;
+            let out = &mut world.out;
+            for (index, conn) in world.conns.iter_mut().enumerate() {
+                let viewer = u32::try_from(index).expect("viewer fits");
+                if tick % SNAPSHOT_EVERY_TICKS != viewer % SNAPSHOT_EVERY_TICKS {
+                    continue;
+                }
+                let me = &entities[usize::try_from(viewer).expect("viewer fits")];
+                let (_, _, yaw) = mp21_fighter_pose(viewer, tick);
+                let report = conn
+                    .select(
+                        &cfg,
+                        entities,
+                        viewer,
+                        me.x_mm,
+                        me.z_mm,
+                        yaw,
+                        tick,
+                        SIEGE_BUDGET_BYTES,
+                        out,
+                    )
+                    .expect("select inside the cap and budget");
+                snapshot_bytes = snapshot_bytes.max(report.bytes);
+                receipts.push((
+                    viewer,
+                    u32::try_from(report.selected).expect("selected fits"),
+                    u32::try_from(report.bytes).expect("bytes fit"),
+                ));
+                let watcher = (viewer + SCOPE_ROOMS) % MP21_FIGHTERS;
+                let watching = entities[usize::try_from(watcher).expect("watcher fits")].combat;
+                if out[..report.selected].contains(&watcher) {
+                    held[index] = watching;
+                    stale[index] = None;
+                } else if held[index] != watching {
+                    let since = *stale[index].get_or_insert(tick);
+                    combat_gap = combat_gap.max(tick - since);
+                }
+            }
+            tick_ms.push(full.elapsed().as_secs_f64() * 1000.0);
+            digests.push(world.digest(tick, &receipts));
+        }
+        let mut bytes_per_sec = 0u64;
+        let mut starve_max = 0u32;
+        let mut snapshots_per_client = 0u64;
+        for conn in &world.conns {
+            bytes_per_sec = bytes_per_sec.max(conn.bytes_per_sec(MP21_TICKS));
+            starve_max = starve_max.max(conn.starve_max());
+            snapshots_per_client = snapshots_per_client.max(conn.snapshots());
+        }
+        let hash = digests
+            .iter()
+            .fold(0u64, |acc, digest| acc.rotate_left(7) ^ digest);
+        let tick_p99_ms = TickQuantiles::of("mp21 tick", &tick_ms)
+            .expect("finite samples")
+            .p99_ms;
+        let step_p99_ms = TickQuantiles::of("mp21 step", &step_ms)
+            .expect("finite samples")
+            .p99_ms;
+        Mp21Report {
+            digests,
+            hash,
+            kbps_x100: bytes_per_sec * 8 * 100 / 1_000,
+            bytes_per_sec,
+            snapshot_bytes,
+            starve_max,
+            combat_gap,
+            snapshots_per_client,
+            tick_p99_ms,
+            step_p99_ms,
+        }
+    }
+
+    #[test]
+    fn mp21_handoff_64_players_and_1024_entities_converge_x2() {
+        let first = mp21_run();
+        let second = mp21_run();
+        // Hash x2, tick by tick: the first divergent tick names the drift.
+        assert_eq!(
+            first.digests.len(),
+            usize::try_from(MP21_TICKS).expect("ticks fit")
+        );
+        for (index, (left, right)) in first.digests.iter().zip(&second.digests).enumerate() {
+            assert_eq!(
+                left,
+                right,
+                "MP21 drifted at tick {}: {left:016x} vs {right:016x}",
+                index + 1
+            );
+        }
+        assert_eq!(first.hash, second.hash, "MP21 hash x2 must agree");
+        assert_ne!(first.hash, 0, "the spike must actually simulate");
+        // Per client: inside the ON9 128 kbps bar, worst snapshot in budget.
+        assert!(
+            first.kbps_x100 <= ON9_CAP_KBPS_X100,
+            "client {} kbps x100 over the {ON9_CAP_KBPS_X100} (128 kbps) bar",
+            first.kbps_x100
+        );
+        assert!(
+            first.snapshot_bytes <= SIEGE_BUDGET_BYTES,
+            "worst snapshot {} B over the {SIEGE_BUDGET_BYTES} B budget",
+            first.snapshot_bytes
+        );
+        // The two ledgers that desync a receiver: starve and combat handoff.
+        assert!(
+            first.starve_max <= STARVE_TICKS,
+            "worst starve {} ticks over the {STARVE_TICKS}-tick bar",
+            first.starve_max
+        );
+        assert!(
+            first.combat_gap <= STARVE_TICKS,
+            "combat body stale {} ticks over the {STARVE_TICKS}-tick bar",
+            first.combat_gap
+        );
+        assert_eq!(
+            first.snapshots_per_client,
+            u64::from(MP21_TICKS) / u64::from(SNAPSHOT_EVERY_TICKS),
+            "every client snapshots on its own lane"
+        );
+        // Timing sits in sight of the P6 bar; P6's own proof is release-only,
+        // so a debug build prints the numbers instead of gating on them.
+        if cfg!(debug_assertions) {
+            println!(
+                "MP21 timing (debug, not gated): tick_p99={:.3}ms step_p99={:.3}ms",
+                first.tick_p99_ms, first.step_p99_ms
+            );
+        } else {
+            check_p99(first.tick_p99_ms).expect("MP21 essentials p99 inside the P6 bar");
+            assert!(
+                first.step_p99_ms <= MP21_STEP_P99_MS,
+                "world-step p99 {:.3} ms over {MP21_STEP_P99_MS} ms",
+                first.step_p99_ms
+            );
+        }
+        println!(
+            "MP21 entities={} fighters={} legion={} ticks={} hash={:016x} \
+             kbps_x100={} Bps={} snapshot_bytes={} starve_max={} combat_gap={} \
+             snaps={} tick_p99={:.3}ms step_p99={:.3}ms budget_p99={BUDGET_P99_MS}ms",
+            MP21_ENTITIES,
+            MP21_FIGHTERS,
+            MP21_LEGION_FIT,
+            MP21_TICKS,
+            first.hash,
+            first.kbps_x100,
+            first.bytes_per_sec,
+            first.snapshot_bytes,
+            first.starve_max,
+            first.combat_gap,
+            first.snapshots_per_client,
+            first.tick_p99_ms,
+            first.step_p99_ms,
+        );
+    }
+
+    #[test]
+    fn mp21_row_population_is_over_the_interest_cap() {
+        // The row's literal population (64 fighters + 1000 legion = 1064)
+        // does not fit the 1024-entity interest cap. The spike proves the
+        // maximal legal shape; this test records the refusal by name so the
+        // gap is a cap decision (owner / ON row), not a silent trim.
+        assert_eq!(MP21_FIGHTERS + MP21_LEGION, 1_064);
+        assert_eq!(MP21_LEGION_FIT, 960);
+        assert_eq!(
+            usize::try_from(MP21_ENTITIES).expect("entities fit"),
+            MAX_INTEREST_ENTITIES
+        );
+        assert_eq!(
+            ConnectionInterest::for_entities(0, 1_064).err(),
+            Some(InterestError::TooManyEntities { got: 1_064 })
+        );
+        assert!(
+            ConnectionInterest::for_entities(0, MAX_INTEREST_ENTITIES).is_ok(),
+            "the cap itself is accepted"
+        );
+        let world = HandoffWorld::new();
+        assert_eq!(world.entities.len(), MAX_INTEREST_ENTITIES);
+        assert_eq!(
+            world.conns.len(),
+            usize::try_from(MP21_FIGHTERS).expect("fits")
+        );
+        println!(
+            "MP21 cap: fighters={MP21_FIGHTERS} legion_row={MP21_LEGION} \
+             total_row={} cap={MAX_INTEREST_ENTITIES} legion_fit={MP21_LEGION_FIT} \
+             entities={MP21_ENTITIES} refused=1064",
+            MP21_FIGHTERS + MP21_LEGION
         );
     }
 }

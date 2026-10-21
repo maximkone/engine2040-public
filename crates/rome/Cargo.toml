@@ -1,0 +1,13 @@
+[package]
+name = "engine-rome"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Rome: shipped Roman practice tables (camp works, battle line) read into typed millimetre values; std-only, no IO"
+
+[lints]
+workspace = true
+
+[dependencies]
+engine-core.workspace = true

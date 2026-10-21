@@ -213,6 +213,14 @@ const BONES: [Bone; 15] = [
     },
 ];
 
+/// Every bone of [`BONES`] that ends at a tip joint, as `(joint, tip, radius_m)`: the capsules
+/// a cape meets are the ragdoll's own body shapes, read from the one table.
+pub(super) fn bone_capsules() -> impl Iterator<Item = (&'static str, &'static str, f32)> {
+    BONES
+        .iter()
+        .filter_map(|bone| bone.tip.map(|tip| (bone.joint, tip, bone.radius_m)))
+}
+
 /// The physical rig: the reduced skeleton and one capsule per bone, validated once. `None` only
 /// if the table above is wrong (a test pins that it is not).
 fn physical_rig() -> Option<FxRig> {

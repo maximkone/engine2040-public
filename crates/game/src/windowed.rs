@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 use engine_arena::GaitPhase;
 use engine_audio::{device::DeviceOutput, Bank, CueBank, FeedTx, HoldLastMixer, Mixer};
 use engine_input::fighter::JUMP;
-use engine_input::{Bindings, FighterError, FighterId, FighterInput, Key, PhysicalButton};
+use engine_input::{
+    Bindings, FighterError, FighterId, FighterInput, Key, PhysicalButton, MAX_PARTICIPANTS,
+};
 use engine_render::{
     backend::{BackendChoice, BackendError},
     present::{DrawList, MeshKey, PresentError, Presenter, SizeClass},
@@ -25,7 +27,7 @@ use engine_render::{
 };
 use engine_ui::{
     text::{emit_quads, feed_lines, hp_text, layout, Align, Atlas},
-    DuelOverlay, Hud,
+    DuelOverlay, Hud, OverlayError,
 };
 
 use self::windowed_captions::{caption_strip, push_caption_tick};
@@ -1087,23 +1089,30 @@ pub fn result_cells_quads(app: &App) -> (usize, usize) {
 /// the built `DuelOverlay` has a live caller outside its own tests; the tick
 /// never sees it (presentation only, pixels never enter the sim hash). Heap on
 /// the presentation path only (row names inside the overlay), zero per tick.
-#[must_use]
-pub fn duel_overlay_for_app(app: &App) -> DuelOverlay {
-    const NAMES: [&str; 16] = [
+/// The name table covers the whole participant cap, so every live slot gets a
+/// row; a refusal is reported, never swallowed.
+pub fn duel_overlay_for_app(app: &App) -> Result<DuelOverlay, OverlayError> {
+    // The name table has one entry per participant slot. 2026-10-21: a
+    // literal (never a numeric cast) pinned to the canonical cap at compile
+    // time, the house pattern of `crates/game/src/director.rs:271`: a cap
+    // change fails the build here instead of leaving a slot without a name.
+    const NAMES: [&str; 32] = [
         "F0", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "F13",
-        "F14", "F15",
+        "F14", "F15", "F16", "F17", "F18", "F19", "F20", "F21", "F22", "F23", "F24", "F25", "F26",
+        "F27", "F28", "F29", "F30", "F31",
     ];
+    const _: () = assert!(MAX_PARTICIPANTS == 32);
     let mut overlay = DuelOverlay::new(app.hud().tick);
     let live = usize::from(app.config().fighters);
     for (slot, name) in NAMES.iter().enumerate().take(live) {
         let hp = app.hp().get(slot).copied().unwrap_or(0);
         if let Ok(byte) = u8::try_from(slot) {
             if let Some(id) = FighterId::new(byte) {
-                let _ = overlay.upsert_fighter(id, name, hp);
+                overlay.upsert_fighter(id, name, hp)?;
             }
         }
     }
-    overlay
+    Ok(overlay)
 }
 
 /// (rect, fraction) pairs for each duel overlay row in row order. Pure; heap
@@ -1715,7 +1724,8 @@ fn smoke_present_once(
     app: &App,
 ) -> Result<u32, WinError> {
     let list = smoke_twin_list(presenter, key, kit, frame, path)?;
-    let overlay = duel_overlay_for_app(app);
+    let overlay = duel_overlay_for_app(app)
+        .map_err(|err| WinError::Render(cap_message(&format!("{err}"))))?;
     let _ = overlay.to_bytes();
     stage_hp_bars(presenter, &overlay);
     let out = presenter.render_offscreen(&list)?;
@@ -3306,7 +3316,7 @@ mod tests {
             );
             let _ = app.tick(input);
         }
-        let overlay = super::duel_overlay_for_app(&app);
+        let overlay = super::duel_overlay_for_app(&app).expect("overlay builds");
         assert_eq!(overlay.len(), 2);
         assert_eq!(overlay.tick(), app.hud().tick);
         for slot in 0..2u8 {
@@ -3322,18 +3332,18 @@ mod tests {
     }
 
     #[test]
-    fn duel_overlay_caps_at_sixteen_with_stable_names() {
-        // Corner: a full 16-fighter match still builds 16 distinct rows with
-        // stable short names; the same snapshot repeats exactly.
+    fn duel_overlay_covers_the_full_roster_with_stable_names() {
+        // Corner: a full-roster match still builds one distinct row per live
+        // slot with stable short names; the same snapshot repeats exactly.
         let full = GameConfig {
-            fighters: 16,
+            fighters: MAX_PARTICIPANTS,
             ..config()
         };
         let app = App::new(full).unwrap();
-        let overlay = super::duel_overlay_for_app(&app);
-        assert_eq!(overlay.len(), 16);
-        assert_eq!(overlay.rows().len(), 16);
-        let again = super::duel_overlay_for_app(&app);
+        let overlay = super::duel_overlay_for_app(&app).expect("overlay builds");
+        assert_eq!(overlay.len(), usize::from(MAX_PARTICIPANTS));
+        assert_eq!(overlay.rows().len(), usize::from(MAX_PARTICIPANTS));
+        let again = super::duel_overlay_for_app(&app).expect("overlay builds again");
         assert_eq!(overlay, again, "same snapshot repeats");
         for (slot, row) in overlay.rows().iter().enumerate() {
             let byte = u8::try_from(slot).expect("slot fits");
@@ -3347,7 +3357,7 @@ mod tests {
         // Behavior: one (rect, fraction) pair per row in row order, using the
         // render overlay ring owner for rects and fills.
         let app = App::new(config()).unwrap();
-        let overlay = super::duel_overlay_for_app(&app);
+        let overlay = super::duel_overlay_for_app(&app).expect("overlay builds");
         let bars = super::hp_bars_for_overlay(&overlay);
         assert_eq!(bars.len(), overlay.len());
         for (slot, ((rect, fill), row)) in bars.iter().zip(overlay.rows()).enumerate() {
@@ -3458,7 +3468,7 @@ mod tests {
         // names its winner plus ticks, both through the HUD text path with
         // one quad per cell while the overlay rows never move for either.
         let app = App::new(config()).unwrap();
-        let overlay = super::duel_overlay_for_app(&app);
+        let overlay = super::duel_overlay_for_app(&app).expect("overlay builds");
         assert_eq!(super::title_text(), "TITLE press Enter");
         let (cells, quads) = super::title_cells_quads();
         assert_eq!(quads, cells);
@@ -3469,7 +3479,10 @@ mod tests {
         let (cells, quads) = super::result_cells_quads(&app);
         assert_eq!(quads, cells);
         assert!(cells >= fresh.len());
-        assert_eq!(super::duel_overlay_for_app(&app), overlay);
+        assert_eq!(
+            super::duel_overlay_for_app(&app).expect("overlay builds"),
+            overlay
+        );
     }
 
     #[test]

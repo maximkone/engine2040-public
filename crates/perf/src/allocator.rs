@@ -15,6 +15,7 @@
 //! construction, so the swap stays dropped per `SPEEDUP_PCT` until then.
 
 use crate::workloads::{AiDecide, DestructionStep, PhysicsStep, ScaledArenaTick, WorkloadReport};
+use engine_arena::MAX_PARTICIPANTS;
 use std::fmt::{self, Display, Formatter};
 
 /// Acceptance bar for an allocator swap: the candidate's wall ms must sit at
@@ -169,20 +170,20 @@ pub fn compare_ms(system_ms: f64, candidate_ms: f64) -> Result<AllocatorDelta, A
     })
 }
 
-/// System-allocator canonical rows: the 16-fighter arena run on this track
-/// (same shape as the sixteen-fighter default: seed 1, 600 ticks, 20 m
+/// System-allocator canonical rows: the cap-sized arena run on this track
+/// (same shape as the canonical default: seed 1, 600 ticks, 20 m
 /// half-extent) plus physics, AI and destruction. Hash and allocation
 /// totals pin to `baselines`; wall ms joins later via [`csv_row`], never
 /// here. The arena params repeat the canonical shape field for field, so
 /// production code carries no `Option` unwrap; the harness test pins this
-/// row equal to the canonical sixteen-fighter run.
+/// row equal to the canonical cap-sized run.
 #[must_use]
 pub fn system_rows() -> [WorkloadReport; 4] {
     let arena = ScaledArenaTick {
         seed: 1,
         ticks: 600,
         half_extent_m: 20.0,
-        fighters: 16,
+        fighters: MAX_PARTICIPANTS,
     };
     [
         arena.run_report(),
@@ -356,8 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn system_arena_matches_canonical_sixteen() {
-        let canonical = ScaledArenaTick::canonical_for(16).expect("16 is a listed matrix count");
+    fn system_arena_matches_the_canonical_cap_run() {
+        let canonical = ScaledArenaTick::canonical_for(MAX_PARTICIPANTS)
+            .expect("the cap is a listed matrix count");
         let rows = system_rows();
         assert_eq!(
             rows[0],

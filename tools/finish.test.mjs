@@ -490,6 +490,23 @@ test("runProbe enforces marker, exit and minPassed", () => {
     timeoutMs: 5000,
   });
   assert.equal(zeroTests.state, "fail", "a hollow green is not a pass");
+  // The same hollow run through a probe entry with no minPassed (a --probes
+  // fixture, or a entry that only names a marker): still red, never a pass.
+  const hollow = runProbe({
+    cmd: process.execPath,
+    args: ["-e", "console.log('running 0 tests'); console.log('test result: ok. 0 passed; 0 failed; 0 filtered out')"],
+    marker: "test result: ok\\.",
+    timeoutMs: 5000,
+  });
+  assert.equal(hollow.state, "fail", "a run that checked nothing fails without minPassed");
+  assert.match(hollow.why, /0 tests/);
+  const tapHollow = runProbe({
+    cmd: process.execPath,
+    args: ["-e", "console.log('# pass 0'); console.log('# fail 0')"],
+    marker: "# fail 0\\b",
+    timeoutMs: 5000,
+  });
+  assert.equal(tapHollow.state, "fail", "TAP `# pass 0` is a hollow green too");
   assert.equal(runProbe({ missing: "needs a GPU" }).state, "missing");
   const timed = runProbe({
     cmd: process.execPath,

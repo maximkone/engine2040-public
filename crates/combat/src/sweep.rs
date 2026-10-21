@@ -1483,7 +1483,7 @@ mod tests {
             ),
             Err(SweepError::BadParticipantCount(MAX_PARTICIPANTS + 1))
         );
-        // Five fighters are legal under the 16-slot cap: routing still
+        // Five fighters are legal under the canonical slot cap: routing still
         // validates slots against the count.
         assert_eq!(
             try_sweep_one(
@@ -1570,7 +1570,9 @@ mod tests {
             try_resolve_tick(&[], &[], &t, &mut out),
             Err(SweepError::BadParticipantCount(0))
         );
-        // Five fighters are legal under the 16-slot cap; seventeen refuse.
+        // Five fighters are legal; one past the canonical slot cap refuses.
+        // The cap is `MAX_PARTICIPANTS`, so the count follows it instead of a
+        // literal that goes stale when the owner moves the cap.
         let five = [
             duel_attacker(),
             duel_defender(),
@@ -1579,12 +1581,12 @@ mod tests {
             pose(4, 0, 0, 1, 0, 800, 60, false),
         ];
         assert!(try_resolve_tick(&five, &[], &t, &mut out).is_ok());
-        let seventeen: Vec<SweepParticipant> = (0..17u8)
+        let over_cap: Vec<SweepParticipant> = (0..=MAX_PARTICIPANTS)
             .map(|id| pose(id, 0, 0, 1, 0, 800, 60, false))
             .collect();
         assert_eq!(
-            try_resolve_tick(&seventeen, &[], &t, &mut out),
-            Err(SweepError::TooManyFighters(17))
+            try_resolve_tick(&over_cap, &[], &t, &mut out),
+            Err(SweepError::TooManyFighters(usize::from(MAX_PARTICIPANTS) + 1))
         );
         let dup = [duel_attacker(), duel_attacker()];
         assert_eq!(
@@ -1718,7 +1720,7 @@ mod tests {
     #[test]
     fn slots_beyond_four_resolve_in_id_order() {
         // Generic slots: attackers past the old 4-cap resolve in
-        // attacker-ID order, and the full 16-slot cap validates.
+        // attacker-ID order, and the full canonical slot cap validates.
         let t = tables();
         let fighters = [
             pose(0, -1000, 0, 1, 0, 800, 60, false),
@@ -1759,7 +1761,7 @@ mod tests {
             .collect();
         assert_eq!(
             try_resolve_tick(&over, &[], &t, &mut out),
-            Err(SweepError::TooManyFighters(17))
+            Err(SweepError::TooManyFighters(usize::from(MAX_PARTICIPANTS) + 1))
         );
     }
 

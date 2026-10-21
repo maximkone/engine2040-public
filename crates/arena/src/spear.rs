@@ -399,14 +399,7 @@ impl SpearState {
         let (sin, cos) = facing_q16(input.facing);
         let dir = [sin, cos];
         let body = pos_mm(env.states[slot].pos);
-        let ahead = |lane: i32| lane.saturating_mul(SPEAR_AHEAD) / 65_536;
-        let pos_mm = [
-            body[0].saturating_add(ahead(dir[0])),
-            SPEAR_HEIGHT,
-            body[2].saturating_add(ahead(dir[1])),
-        ];
-        let muzzle = |lane: i32| lane.saturating_mul(SPEAR_SPEED) / 65_536;
-        let vel_mm = [muzzle(dir[0]), 0, muzzle(dir[1])];
+        let (pos_mm, vel_mm) = throw_start(body, dir, SPEAR_AHEAD, SPEAR_HEIGHT, SPEAR_SPEED);
         self.slots[slot].cooldown = THROW_COOLDOWN;
         self.slots[slot].phase = Phase::Flight(Flight {
             pos_mm,
@@ -435,7 +428,7 @@ impl SpearState {
             from[1] + f.vel_mm[1],
             from[2] + f.vel_mm[2],
         ];
-        let (to, geometry) = march(env, from, full);
+        let (to, geometry) = march_segment(env.world, env.rules, env.half_extent_m, from, full);
         if let Some((victim, at)) = self.cast(slot, env, from, to) {
             self.strike(slot, victim, at, f, env);
         } else if geometry {
@@ -486,24 +479,11 @@ impl SpearState {
                 continue;
             }
             let body = pos_mm(state.pos);
-            caps[count] = CastCapsule {
-                id: u32::from(slot_id(victim)),
-                a: [fx(body[0]), fx(CAPSULE_BOTTOM), fx(body[2])],
-                b: [fx(body[0]), fx(CAPSULE_TOP), fx(body[2])],
-                radius: fx(CAPSULE_RADIUS),
-            };
+            caps[count] = hurt_capsule(u32::from(slot_id(victim)), body);
             count += 1;
         }
-        let tip = [fx(from[0]), fx(from[1]), fx(from[2])];
-        let end = [fx(to[0]), fx(to[1]), fx(to[2])];
-        swept_cast(tip, end, fx(TIP_RADIUS), &caps[..count], &mut self.hits).ok()?;
-        let hit = self.hits.first()?;
-        let t = i64::from(u32::try_from(hit.toi.to_bits()).unwrap_or(0).min(65_536));
-        let at = [0, 1, 2].map(|lane| {
-            let span = i64::from(to[lane]) - i64::from(from[lane]);
-            from[lane] + i32::try_from(span * t / 65_536).unwrap_or(0)
-        });
-        Some((usize::try_from(hit.id).ok()?, at))
+        let (id, at) = cast_contact(&mut self.hits, from, to, &caps[..count])?;
+        Some((usize::try_from(id).ok()?, at))
     }
 
     /// The spear met fighter `victim`: a guard turns it away, anything else
@@ -803,18 +783,77 @@ fn slot_id(slot: usize) -> u8 {
 }
 
 /// Q16 metres from integer millimetres.
-fn fx(mm: i32) -> Fixed {
+pub(crate) fn fx(mm: i32) -> Fixed {
     Fixed::from_bits(i64::from(mm) * Fixed::SCALE / 1000)
 }
 
 /// Square of a millimetre lane.
-fn sq(lane: i32) -> i64 {
+pub(crate) fn sq(lane: i32) -> i64 {
     i64::from(lane) * i64::from(lane)
 }
 
 /// Integer square root of a non-negative value.
-fn isqrt(value: i64) -> i64 {
+pub(crate) fn isqrt(value: i64) -> i64 {
     i64::try_from(u64::try_from(value).unwrap_or(0).isqrt()).unwrap_or(0)
+}
+
+/// The spawn point and the muzzle velocity of a thrown weapon: ahead of
+/// the thrower along the Q16 facing, `height_mm` over the floor, at
+/// `speed_mm` per tick. The spear and the pilum share it, so both leave
+/// the hand at the same place.
+pub(crate) fn throw_start(
+    body_mm: [i32; 3],
+    dir: [i32; 2],
+    ahead_mm: i32,
+    height_mm: i32,
+    speed_mm: i32,
+) -> ([i32; 3], [i32; 3]) {
+    let ahead = |lane: i32| lane.saturating_mul(ahead_mm) / 65_536;
+    let at = [
+        body_mm[0].saturating_add(ahead(dir[0])),
+        height_mm,
+        body_mm[2].saturating_add(ahead(dir[1])),
+    ];
+    let muzzle = |lane: i32| lane.saturating_mul(speed_mm) / 65_536;
+    let vel = [muzzle(dir[0]), 0, muzzle(dir[1])];
+    (at, vel)
+}
+
+/// The hurt capsule of one fighter: the axis from the knees to the head
+/// with the body radius around it.
+pub(crate) fn hurt_capsule(id: u32, body_mm: [i32; 3]) -> CastCapsule {
+    CastCapsule {
+        id,
+        a: [fx(body_mm[0]), fx(CAPSULE_BOTTOM), fx(body_mm[2])],
+        b: [fx(body_mm[0]), fx(CAPSULE_TOP), fx(body_mm[2])],
+        radius: fx(CAPSULE_RADIUS),
+    }
+}
+
+/// The first capsule the segment `from..to` meets, with the contact
+/// point in millimetres. `None` when the sweep meets nothing.
+pub(crate) fn cast_contact(
+    hits: &mut Vec<SweptHit>,
+    from: [i32; 3],
+    to: [i32; 3],
+    caps: &[CastCapsule],
+) -> Option<(u32, [i32; 3])> {
+    let tip = [fx(from[0]), fx(from[1]), fx(from[2])];
+    let end = [fx(to[0]), fx(to[1]), fx(to[2])];
+    swept_cast(tip, end, fx(TIP_RADIUS), caps, hits).ok()?;
+    let hit = hits.first()?;
+    let t = i64::from(u32::try_from(hit.toi.to_bits()).unwrap_or(0).min(65_536));
+    let at = [0, 1, 2].map(|lane| {
+        let span = i64::from(to[lane]) - i64::from(from[lane]);
+        from[lane] + i32::try_from(span * t / 65_536).unwrap_or(0)
+    });
+    Some((hit.id, at))
+}
+
+/// Take `damage` permille off a fighter, flooring at zero.
+pub(crate) fn hurt_fighter(fight: &mut FightState, victim: usize, damage: u16) {
+    let hp = &mut fight.fighters[victim].hp_permille;
+    *hp = hp.saturating_sub(damage);
 }
 
 /// Planar millimetre position of a pose.
@@ -869,35 +908,39 @@ fn arrived(at: [i32; 2], t: Tether) -> bool {
 
 /// March `from..full` in [`MARCH_STEP`] steps; the first point inside
 /// geometry (arena wall, rule pillar, obstacle) ends the segment there.
-fn march(env: &Env<'_>, from: [i32; 3], full: [i32; 3]) -> ([i32; 3], bool) {
+/// The spear and the pilum share it: a thrown weapon stops at the wall
+/// the same way.
+pub(crate) fn march_segment(
+    world: &MatchWorld,
+    rules: &ArenaRules,
+    half_extent_m: f32,
+    from: [i32; 3],
+    full: [i32; 3],
+) -> ([i32; 3], bool) {
     let span = [0, 1, 2].map(|lane| full[lane] - from[lane]);
     let len = isqrt(sq(span[0]) + sq(span[1]) + sq(span[2]));
     let steps = (len / i64::from(MARCH_STEP) + 1).clamp(1, 16);
     for k in 1..=steps {
         let point = [0, 1, 2]
             .map(|lane| from[lane] + i32::try_from(i64::from(span[lane]) * k / steps).unwrap_or(0));
-        if in_geometry(env, point) {
+        if in_geometry(world, rules, half_extent_m, point) {
             return (point, true);
         }
     }
     (full, false)
 }
 
-/// True when a spear tip at `p` is in the arena wall, a pillar or an obstacle.
-fn in_geometry(env: &Env<'_>, p: [i32; 3]) -> bool {
-    let face = pos_mm([env.half_extent_m, 0.0, 0.0])[0];
+/// True when a weapon tip at `p` is in the arena wall, a pillar or an obstacle.
+fn in_geometry(world: &MatchWorld, rules: &ArenaRules, half_extent_m: f32, p: [i32; 3]) -> bool {
+    let face = pos_mm([half_extent_m, 0.0, 0.0])[0];
     if p[0].abs() >= face || p[2].abs() >= face {
         return true;
     }
-    let in_pillar = env.rules.pillars.iter().flatten().any(|pillar| {
+    let in_pillar = rules.pillars.iter().flatten().any(|pillar| {
         (pillar.min_mm[0]..=pillar.max_mm[0]).contains(&p[0])
             && (pillar.min_mm[1]..=pillar.max_mm[1]).contains(&p[2])
     });
-    in_pillar
-        || (!env.world.is_empty()
-            && env
-                .world
-                .overlaps([metres(p[0]), metres(p[2])], TIP_RADIUS_M))
+    in_pillar || (!world.is_empty() && world.overlaps([metres(p[0]), metres(p[2])], TIP_RADIUS_M))
 }
 
 /// Add an integer displacement to a pose and resolve it like walking does:
@@ -919,8 +962,8 @@ fn move_body(env: &mut Env<'_>, slot: usize, drift: [i32; 2]) {
 
 /// Take `damage` permille off a fighter, flooring at zero.
 fn hurt(env: &mut Env<'_>, victim: usize, damage: i64) {
-    let hp = &mut env.fight.fighters[victim].hp_permille;
-    *hp = hp.saturating_sub(u16::try_from(damage).unwrap_or(u16::MAX));
+    let amount = u16::try_from(damage).unwrap_or(u16::MAX);
+    hurt_fighter(env.fight, victim, amount);
 }
 
 /// Parry stagger on a thrower whose spear or tether was parried.

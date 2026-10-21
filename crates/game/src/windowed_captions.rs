@@ -41,7 +41,7 @@ pub(crate) fn push_caption_tick(
 }
 
 /// One fight cue as a caption [`FightNote`], field for field, or `None` when a
-/// slot is outside the 16-fighter range. Pure; the caption layer keeps no
+/// slot is outside the participant range. Pure; the caption layer keeps no
 /// damage amounts (the audio layer owns those).
 fn fight_note(cue: FightCue) -> Option<FightNote> {
     let slot = FighterId::new;
@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(feed.lines()[2].text, "Knockdown");
         assert!(cells > 0, "captions lay out HUD cells");
         assert_eq!(quads, cells, "one quad per caption cell");
-        // A slot past the 16-fighter range drops the note, never a panic.
+        // A slot past the participant range drops the note, never a panic.
         let (after, _) = push_caption_tick(
             Some(&mut feed),
             43,

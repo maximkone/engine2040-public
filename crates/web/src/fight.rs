@@ -28,18 +28,20 @@ use engine_render::procedural_arena::{ProceduralArena, ShoulderView};
 use crate::input::Facing;
 
 /// Seats in the page's match: the human seat plus one brain.
-pub const SEATS: u8 = 2;
+pub const SEATS: u8 = engine_game::page_duel::PAGE_DUEL_SEATS;
 /// Fixed steps the page's match may run before it stops: ten minutes at 60 Hz, so a person
 /// plays rather than watching a 600-tick receipt end.
 pub const MATCH_TICKS: u32 = 36_000;
-/// Seed of the page's match; the native arena's default seed.
-pub const MATCH_SEED: u64 = 2040;
-/// Half-extent of the arena the page plays in, meters. The duel spawns at random points in a box
-/// whose limit is this extent minus a fighter radius. Three and a half keeps both seats inside
-/// the kit's corridor (walls at z ±10 between x -6 and 2, stand backs at x -14, gate from x 7),
-/// so the shoulder camera stays behind its seat and inside the stone instead of clamping past
-/// a wall.
-pub const HALF_EXTENT_M: f32 = 3.5;
+/// Seed of the page's match; engine-game owns it (`page_duel`), and picks the one seed whose
+/// two seats start on the corridor's centre line with the rival in front of the camera.
+pub const MATCH_SEED: u64 = engine_game::page_duel::PAGE_DUEL_SEED;
+/// Half-extent of the arena the page plays in, meters; engine-game owns it (`page_duel`). The
+/// duel spawns at random points in a box whose limit is this extent minus a fighter radius, so
+/// the extent is big enough that the kit's own walls (z ±10 between x -6 and 2, stand backs at
+/// x -14, gate from x 7) stop a fighter instead of an invisible box in the middle of the sand.
+/// Thirteen meters, well over the config floor of 5.0 (`half_extent_m` is `5.0..=100.0`), so
+/// the sim's own walls sit past the corridor's stone and the stone does the stopping.
+pub const HALF_EXTENT_M: f32 = engine_game::page_duel::PAGE_DUEL_HALF_EXTENT_M;
 
 /// The kit corridor's free ground, meters, with the eye kept a margin off its walls: the walls'
 /// inner faces at z ±9.5, the gate's at x 7, the stands' at x -14.
@@ -242,6 +244,19 @@ impl Match {
     #[must_use]
     pub fn next_tick(&self) -> u32 {
         self.tick
+    }
+
+    /// The fight cues of the last tick the match ran, so the page can name what happened (the
+    /// parry, the block, the hit) instead of showing a silent fight (PW37).
+    #[must_use]
+    pub fn cues(&self) -> &[FightCue] {
+        &self.cues
+    }
+
+    /// The kit draws resident on the last frame: zero while the stand-in ring still draws.
+    #[must_use]
+    pub fn kit_drawn(&self) -> usize {
+        self.kit_drawn
     }
 
     /// The seat's facing for this tick: the mouse look plus a tick of Q/E, as the native window

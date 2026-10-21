@@ -1019,7 +1019,7 @@ mod tests {
         for bad in [
             LobbyBoot::new(WorldMode::Arena, 1, 0, 2, 20.0),
             LobbyBoot::new(WorldMode::Arena, 1, 64, 1, 20.0),
-            LobbyBoot::new(WorldMode::Arena, 1, 64, 17, 20.0),
+            LobbyBoot::new(WorldMode::Arena, 1, 64, MAX_PARTICIPANTS + 1, 20.0),
             LobbyBoot::new(WorldMode::Arena, 1, 64, 2, f32::NAN),
             LobbyBoot::new(WorldMode::Arena, 1, 64, 2, 4.9),
             LobbyBoot::new(WorldMode::Siege, 1, SIEGE_SMOKE_TICKS, 8, 20.0),

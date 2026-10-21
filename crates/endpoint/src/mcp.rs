@@ -72,15 +72,18 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResponse,
-    GetPromptResult, InitializeResult, JsonObject, ListPromptsResult, ListToolsResult,
-    PaginatedRequestParams, Prompt, PromptMessage, PromptsCapability, ProtocolVersion, ResultType,
-    Role, ServerCapabilities, ServerConfig, ToolAnnotations, ToolsCapability,
+    GetPromptResult, InitializeResult, JsonObject, ListPromptsResult, ListResourceTemplatesResult,
+    ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt, PromptMessage,
+    PromptsCapability, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, ResourcesCapability, ResultType, Role, ServerCapabilities, ServerConfig,
+    ToolAnnotations, ToolsCapability,
 };
 use rmcp::serde_json::Value;
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 
 use super::audit::DoorAudit;
+use super::build_level::TOOL_BUILD_LEVEL;
 use super::insight::mcp_tools::{
     ApiDescribeTool, ApiSearchTool, TOOL_API_DESCRIBE, TOOL_API_SEARCH,
 };
@@ -144,7 +147,7 @@ pub const SCENE_READ_MAX_ROWS: u32 = 128;
 /// stays at 43514 so the number is comparable to the old 21-tool door, and the
 /// ledger gate now measures whatever a session advertises. The frozen
 /// [`crate::tools::TOOLS`] registry now holds 26 tools.
-/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000. On 2026-10-19 SP62's two view-truth verbs (`view.observe`, `view.laws`: camera, per-body act/clip/tint/root/bounds/rect/cover and the laws line) took the loaded list to 58703 (297 headroom): 59000 → 61500. On 2026-10-19 PF24's opt-in `timing` receipt (a flag on both play args, plus label/p50/p99/samples on both play outputs: 931 chars) took the default list to 53873 and the loaded one to 60228: 61500 → 62500. On 2026-10-20 GS46's `world.query` (nested data/filter, strict, limit) plus the day's other verbs took the default list to 56345 and the loaded one to 62869: 62500 → 65000. Same day GS48's `ai.decisions` (show/diff over hex tapes) took the loaded one to 63830 (1170 headroom): 65000 → 66500.
+/// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000. On 2026-10-19 SP62's two view-truth verbs (`view.observe`, `view.laws`: camera, per-body act/clip/tint/root/bounds/rect/cover and the laws line) took the loaded list to 58703 (297 headroom): 59000 → 61500. On 2026-10-19 PF24's opt-in `timing` receipt (a flag on both play args, plus label/p50/p99/samples on both play outputs: 931 chars) took the default list to 53873 and the loaded one to 60228: 61500 → 62500. On 2026-10-20 GS46's `world.query` (nested data/filter, strict, limit) plus the day's other verbs took the default list to 56345 and the loaded one to 62869: 62500 → 65000. Same day GS48's `ai.decisions` (show/diff over hex tapes) took the loaded one to 63830 (1170 headroom): 65000 → 66500. On 2026-10-21 the AI-native MCP lane landed D19's `verify` string on the three build outputs (+160 chars) and D17's `scene.diff` and `session.activity` in a pack that is not default-loaded (0 chars of the default list; resources and prompts cost 0 chars too): the default list measures 56897 (was 56737 at HEAD 37c33077) and the `view`-loaded one 64382 (was 64222; the view pack is untouched by this lane, its 7485 chars measured on both trees). The budget stays at 66500 with 2118 chars of headroom over the 2048 floor.
 pub const TOOL_LIST_BUDGET_CHARS: usize = 66_500;
 
 /// The thirteen core tools, in contract order. The router holds exactly these;
@@ -264,20 +267,27 @@ pub struct ToolBudgetLedger {
 /// output schemas. Shared by the total and the per-tool table so the rows
 /// always sum to the total.
 fn tool_cost_row(tool: &rmcp::model::Tool) -> ToolCostRow {
+    ToolCostRow {
+        name: tool.name.to_string(),
+        chars: tool_cost_chars(tool),
+    }
+}
+
+/// Discovery chars for one advertised tool: name, description, input and
+/// output schemas as JSON text. The API6 guardrail budgets in this measure, so
+/// an advertised list passes [`check_tool_budget`] by construction.
+pub(crate) fn tool_cost_chars(tool: &rmcp::model::Tool) -> usize {
     fn schema_chars(schema: &rmcp::model::JsonObject) -> usize {
         rmcp::serde_json::to_string(schema).map_or(0, |text| text.len())
     }
-    ToolCostRow {
-        name: tool.name.to_string(),
-        chars: crate::discover::discovery_cost_chars(
-            tool.name.len(),
-            tool.description.as_deref().map_or(0, str::len),
-            schema_chars(&tool.input_schema),
-            tool.output_schema
-                .as_ref()
-                .map_or(0, |schema| schema_chars(schema)),
-        ),
-    }
+    crate::discover::discovery_cost_chars(
+        tool.name.len(),
+        tool.description.as_deref().map_or(0, str::len),
+        schema_chars(&tool.input_schema),
+        tool.output_schema
+            .as_ref()
+            .map_or(0, |schema| schema_chars(schema)),
+    )
 }
 
 /// Pure ledger gate over a measured total plus seeded extra chars. Returns
@@ -708,6 +718,10 @@ pub struct ServerState {
     /// Verb packs this session advertises in `tools/list` (`api.load`
     /// moves them); every verb stays callable by name regardless.
     pub(crate) loaded_packs: BTreeSet<&'static str>,
+    /// Packs this session loaded itself, oldest first, newest last. The API6
+    /// guardrail spends its budget on the newest load first, so the pack a
+    /// client just asked for is the one it sees advertised.
+    pub(crate) load_order: Vec<&'static str>,
     /// The session's thread-confined rules worker (feature `rules`, off by default).
     #[cfg(feature = "rules")]
     pub(crate) rules: super::packs::rules::RulesSlot,
@@ -715,6 +729,9 @@ pub struct ServerState {
     pub(crate) web: super::packs::web::WebSlot,
     /// The settings pack's live knobs, replay tape and undo stack.
     pub(crate) settings: super::packs::physics_settings::SettingsSlot,
+    /// D17: the session's scene snapshots, the revisions a `scene.diff` can
+    /// be taken against.
+    pub(crate) snapshots: super::packs::session::Snapshots,
     pub(crate) reads: super::guards::ReadClock,
     /// The baked nav mesh of the staged floor, when the host holds one. Without
     /// it `scene.query reachable` refuses `needs_nav_view` instead of guessing.
@@ -734,6 +751,11 @@ impl ServerState {
         let registry = PackRegistry::shipped();
         let mut insight = super::insight::Index::new();
         registry.seed_index(&mut insight);
+        // D17: the session opens with a snapshot of the revision it started
+        // at, so a client that read the scene once can ask for the deltas
+        // since that read and pays for the delta, not for the scene.
+        let mut snapshots = super::packs::session::Snapshots::new();
+        snapshots.take(doc.revision);
         Self {
             doc,
             journal,
@@ -749,10 +771,12 @@ impl ServerState {
             watch_subscription: None,
             watch_digest: None,
             loaded_packs: registry.default_loaded(),
+            load_order: Vec::new(),
             #[cfg(feature = "rules")]
             rules: super::packs::rules::RulesSlot::default(),
             web: super::packs::web::WebSlot::default(),
             settings: super::packs::physics_settings::SettingsSlot::default(),
+            snapshots,
             reads: super::guards::ReadClock::new(),
             nav: None,
         }
@@ -761,6 +785,20 @@ impl ServerState {
     /// The engine session id approvals bind to (never the protocol's).
     pub fn session(&self) -> u64 {
         self.session
+    }
+
+    /// D17: the session's scene snapshots, so `scene.diff` can answer the
+    /// deltas since a named snapshot instead of the whole scene again.
+    pub fn snapshots(&self) -> &super::packs::session::Snapshots {
+        &self.snapshots
+    }
+
+    /// D17: take a snapshot of the current revision and return its id.
+    ///
+    /// A landed write and an undo both call this, so the snapshot table
+    /// holds the revisions a diff can be taken against.
+    pub fn take_snapshot(&mut self) -> u64 {
+        self.snapshots.take(self.doc.revision)
     }
 
     /// Evidence receipt of the newest state-changing `tx.apply`, if any.
@@ -926,6 +964,8 @@ impl ServerState {
         .map_err(|error| cap_error(&error, &granted))?;
         // A landed write is a watch event: the digest cache moves, the hub fans it out.
         self.refresh_watch();
+        // D17: the landed revision is a snapshot a diff can be taken against.
+        self.take_snapshot();
         super::door_dispatch::witness_seal_apply(self, pre_revision, &proposal)?;
         let after = super::scene_tools::snapshot(&self.doc);
         let changes =
@@ -971,6 +1011,8 @@ impl ServerState {
         })?;
         // Undo publishes a new revision, so the watch cache moves with it.
         self.refresh_watch();
+        // D17: the undone revision is a snapshot a diff can be taken against.
+        self.take_snapshot();
         Ok(TxUndoOutput {
             revision: applied.revision,
             undone_key: applied.key,
@@ -1058,12 +1100,22 @@ impl McpServer {
     /// Published skill prompts, sorted by name. These cost no tool budget.
     #[must_use]
     pub fn prompt_list(&self) -> Vec<Prompt> {
-        crate::skills::SkillRegistry::shipped().prompts()
+        let mut prompts = crate::skills::SkillRegistry::shipped().prompts();
+        // D16: the five scenario prompts sit after the skills, in contract
+        // order, so a client lists them the same way every build.
+        prompts.extend(crate::scenarios::prompts());
+        prompts
     }
 
-    /// One skill body for `prompts/get`; `None` for an unknown name.
+    /// One prompt body for `prompts/get`; `None` for an unknown name.
+    ///
+    /// The skills answer by their own name; the D16 scenarios answer by
+    /// theirs.
     #[must_use]
     pub fn prompt_text(&self, name: &str) -> Option<String> {
+        if let Some(body) = crate::scenarios::body(name) {
+            return Some(body.to_owned());
+        }
         crate::skills::SkillRegistry::shipped()
             .body(name)
             .map(str::to_owned)
@@ -1100,14 +1152,35 @@ impl McpServer {
     }
 
     /// Advertised tools: the core plus the packs this session loaded, name
-    /// sorted. A poisoned session lock advertises the core alone (fail
-    /// closed); every verb stays callable by name either way.
+    /// sorted, then the API6 guardrail. A poisoned session lock advertises the
+    /// core alone (fail closed); every verb stays callable by name either way.
     pub fn tools(&self) -> Vec<rmcp::model::Tool> {
+        match self.lock() {
+            Ok(state) => {
+                let listed = self.tools_with(&state.loaded_packs);
+                let order = state.load_order.clone();
+                crate::collapse::guard(listed, &order)
+            }
+            Err(_) => crate::collapse::guard(self.core_tools(), &[]),
+        }
+    }
+
+    /// Advertised tools before the API6 guardrail: the core plus the packs
+    /// this session loaded, name sorted. [`Self::surface_chars`] measures this
+    /// surface, so the growing contract stays measurable.
+    fn listed_tools(&self) -> Vec<rmcp::model::Tool> {
         let loaded = self
             .lock()
             .map(|state| state.loaded_packs.clone())
             .unwrap_or_default();
         self.tools_with(&loaded)
+    }
+
+    /// Packs this session loaded itself, oldest first, newest last. Read-only.
+    pub fn load_order(&self) -> Vec<&'static str> {
+        self.lock()
+            .map(|state| state.load_order.clone())
+            .unwrap_or_default()
     }
 
     /// Every reachable tool: the core plus every pack verb, name sorted.
@@ -1136,10 +1209,58 @@ impl McpServer {
         tools
     }
 
+    /// The door reference rows: one row per reachable tool, with its pack
+    /// and capability card, in name order.
+    ///
+    /// D16: the `door-reference` resource reads these rows, so the served
+    /// reference cannot drift from the router.
+    #[must_use]
+    pub fn tool_reference_rows(&self) -> Vec<(String, String, String)> {
+        let registry = PackRegistry::shipped();
+        let mut rows: Vec<(String, String, String)> = self
+            .all_tools()
+            .iter()
+            .map(|tool| {
+                let pack = registry
+                    .verb(&tool.name)
+                    .map_or("core", super::packs::VerbSpec::pack);
+                let card = crate::tool_capabilities::card_for_tool(&tool.name);
+                (
+                    tool.name.clone().into_owned(),
+                    pack.to_owned(),
+                    card.name().to_owned(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
     /// Dispatch one `tools/call` by exact name: core tools through the
     /// router, pack verbs through the registry (loaded or not), anything
     /// else through the audited name gate (`unknown_tool`, fail closed).
     async fn call_by_name(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        // D16: progress notes. A client that sent a progress token gets one
+        // note before a long call and one after it, so a slow build reads as
+        // progress and not as a hang.
+        let call_name = request.name.clone();
+        let note = ProgressNote::for_call(&call_name, &context);
+        if let Some(note) = &note {
+            note.send(0.0, &format!("{call_name}: started")).await;
+        }
+        let answer = self.dispatch_call(request, context).await;
+        if let Some(note) = &note {
+            note.send(1.0, &format!("{call_name}: done")).await;
+        }
+        answer
+    }
+
+    /// The body of [`Self::call_by_name`]: the dispatch itself.
+    async fn dispatch_call(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
@@ -1178,16 +1299,26 @@ impl McpServer {
     }
 
     /// Discovery cost in chars: names, descriptions, input and output
-    /// schemas. The budget test keeps this bounded. The per-tool rows in
-    /// [`Self::tool_cost_table`] sum to this total.
+    /// schemas, over the advertised list, so the ledger gate measures exactly
+    /// what a client is handed. The per-tool rows in [`Self::tool_cost_table`]
+    /// sum to this total; [`Self::surface_chars`] measures the untrimmed
+    /// surface beside it.
     pub fn tool_list_budget_chars(&self) -> usize {
-        self.tools()
+        self.tool_cost_table().iter().map(|row| row.chars).sum()
+    }
+
+    /// Discovery cost in chars of the surface before the API6 guardrail: what
+    /// this session would advertise if the ledger had no ceiling. Read-only;
+    /// the guardrail trims to [`crate::collapse::MAX_ADVERTISED_CHARS`] and
+    /// this number is what proves the contract still grows.
+    pub fn surface_chars(&self) -> usize {
+        self.listed_tools()
             .iter()
             .map(|tool| tool_cost_row(tool).chars)
             .sum()
     }
 
-    /// Per-tool discovery cost table, one row per advertised tool in router
+    /// Per-tool discovery cost table, one row per advertised tool, in router
     /// order. Read-only; rows sum to [`Self::tool_list_budget_chars`].
     pub fn tool_cost_table(&self) -> Vec<ToolCostRow> {
         self.tools().iter().map(tool_cost_row).collect()
@@ -1256,13 +1387,92 @@ impl McpServer {
     }
 }
 
+/// D16: the progress notes one call sends.
+///
+/// A client that sent a progress token gets one note before a long call and
+/// one after it. A client that sent no token gets nothing: the notes cost
+/// nothing when nobody asked for them.
+///
+/// The note is a notification, never a second answer: the call still answers
+/// once, with its own result.
+struct ProgressNote {
+    peer: rmcp::service::Peer<RoleServer>,
+    token: rmcp::model::ProgressToken,
+}
+
+impl ProgressNote {
+    /// The note for this call, when the client asked for one and the call
+    /// is one of the long ones.
+    fn for_call(name: &str, context: &RequestContext<RoleServer>) -> Option<Self> {
+        if !is_long_call(name) {
+            return None;
+        }
+        let token = context.meta.get_progress_token()?;
+        Some(Self {
+            peer: context.peer.clone(),
+            token,
+        })
+    }
+
+    /// Send one note.
+    async fn send(&self, progress: f64, message: &str) {
+        let param = progress_note_params(&self.token, progress, message);
+        let _ = self
+            .peer
+            .send_notification(rmcp::model::ServerNotification::ProgressNotification(
+                rmcp::model::Notification::new(param),
+            ))
+            .await;
+    }
+}
+
+/// D16: the payload of one progress note.
+///
+/// The builder is pure: the same token, progress and message always make the
+/// same payload, so a test can read what the client would have received
+/// without a transport. The note is a notification, never a second answer:
+/// the call still answers once, with its own result.
+fn progress_note_params(
+    token: &rmcp::model::ProgressToken,
+    progress: f64,
+    message: &str,
+) -> rmcp::model::ProgressNotificationParam {
+    rmcp::model::ProgressNotificationParam::new(token.clone(), progress)
+        .with_message(message.to_owned())
+}
+
+/// The calls that are worth a progress note: the builds and the long runs.
+///
+/// D16: a note costs the client one message, so it is worth it only where
+/// the call can take more than a heartbeat.
+fn is_long_call(name: &str) -> bool {
+    matches!(
+        name,
+        TOOL_BUILD_LEVEL
+            | TOOL_GAME_BUILD
+            | TOOL_SIM_BUILD_ENCOUNTER
+            | TOOL_PLAY_RUN
+            | TOOL_CAPTURE
+            | "play.step_until"
+            | "build.web"
+            | "serve.web"
+            | "browser.capture"
+            | "sim.step"
+    )
+}
+
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         let mut capabilities = ServerCapabilities::default();
         capabilities.tools = Some(ToolsCapability::default());
-        if !crate::skills::SkillRegistry::shipped().is_empty() {
-            capabilities.prompts = Some(PromptsCapability::default());
-        }
+        // D16: the door serves four resources (crate map, door reference,
+        // error catalog, game.toml schema). Resources cost no tool-list
+        // budget: they are a read side, not verbs.
+        capabilities.resources = Some(ResourcesCapability::default());
+        // The door always publishes prompts: the shipped skills plus the five
+        // D16 scenarios, so the capability does not depend on the skills
+        // registry being non-empty.
+        capabilities.prompts = Some(PromptsCapability::default());
         let mut info = InitializeResult::new(capabilities);
         info.protocol_version = ProtocolVersion::V_2026_07_28;
         "engine-endpoint".clone_into(&mut info.server_info.name);
@@ -1326,6 +1536,49 @@ impl ServerHandler for McpServer {
             prompts: self.prompt_list(),
             ..Default::default()
         })
+    }
+
+    /// D16: the four resources the door serves, in contract order.
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult {
+            resources: crate::resources::resource_list(),
+            ..Default::default()
+        })
+    }
+
+    /// D16: one template per resource family, so a client can learn the
+    /// child URI shape before it reads the root.
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        Ok(ListResourceTemplatesResult {
+            resource_templates: crate::resources::resource_templates(),
+            ..Default::default()
+        })
+    }
+
+    /// D16: read one resource body as text.
+    ///
+    /// The door reference row list is built from the live advertised tools,
+    /// so the resource never drifts from the router.
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let uri = request.uri.as_ref();
+        match crate::resources::read_resource(uri, &self.tool_reference_rows()) {
+            Ok(contents) => Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+                vec![contents],
+            ))),
+            Err(error) => Err(ErrorData::invalid_params(error.to_string(), None)),
+        }
     }
 
     async fn get_prompt(
@@ -2326,9 +2579,21 @@ mod tests {
         // 53.9k: bound 53_000 -> 54_500.
         // 2026-10-20 (GS46): `world.query` (nested data/filter plus the flat aliases) took
         // the default list to 55.8k: bound 54_500 -> 56_500.
+        // 2026-10-21 (D19, the AI-native MCP lane): the verifier block on the three build
+        // outputs (`level.build`, `game.build`, `sim.build_encounter`) grew the default list
+        // past this bound. Measured on 2026-10-21: HEAD (37c33077) already stood at 56,737
+        // chars, over the 56,500 bound (another lane's growth), and the nested block cost 290
+        // chars per build tool (871 for the three). The wire shape is now one flat list of
+        // lines (the bucket first, then one line per check), about 60 chars per build tool.
+        // 2026-10-21 (API6): the merged verb and schema growth since GS46 measures 56_737
+        // ledger chars on the default list (59_386 serialized, 22 tools), so bound
+        // 56_500 -> 58_000. The API6 guardrail caps what a session advertises at the
+        // ledger ceiling, so this bound still guards a doubling contract.
+        // Both lanes grew the list on the same day from the same measurement, so the door
+        // takes the looser of the two measured bounds.
         assert!(
-            budget < 56_500,
-            "default list {budget} stays near the measured 2026-10-20 world-query door"
+            budget < 58_000,
+            "default list {budget} stays near the measured 2026-10-21 door (56_737)"
         );
         assert!(budget < everything, "the default list hides something");
         assert!(core_only < budget, "the scene pack adds to the core");
@@ -2358,6 +2623,10 @@ mod tests {
         assert!(listed.contains(&"log.digest".to_owned()));
         assert!(listed.contains(&"rpc.discover".to_owned()));
         let grown = server.tool_list_budget_chars();
+        eprintln!(
+            "door v2: view-loaded list {grown} chars, headroom {} chars, floor {TOOL_LIST_MIN_HEADROOM_CHARS}",
+            TOOL_LIST_BUDGET_CHARS.saturating_sub(grown)
+        );
         assert!(
             grown > budget,
             "loading view grows the list: {grown} vs {budget}"
@@ -2384,6 +2653,64 @@ mod tests {
         assert_default_packs(&names);
         let all = assert_back_compat(&server);
         assert_budget_grows(&server, &all);
+    }
+
+    /// D16: a progress note is a notification on the call, not a tool.
+    ///
+    /// It carries the client's own token and the progress value, it never
+    /// becomes a second answer, and it costs no tool-list budget: the
+    /// advertised list holds no progress tool, and no description sells the
+    /// notification surface.
+    #[test]
+    fn progress_note_costs_no_tool_budget_and_carries_the_client_token() {
+        // The long calls get a note; the short ones do not.
+        assert!(is_long_call(TOOL_BUILD_LEVEL));
+        assert!(is_long_call(TOOL_GAME_BUILD));
+        assert!(is_long_call(TOOL_SIM_BUILD_ENCOUNTER));
+        assert!(is_long_call(TOOL_PLAY_RUN));
+        assert!(!is_long_call(TOOL_SCENE_READ));
+        assert!(!is_long_call(TOOL_API_CALL));
+
+        // The payload carries the client's own token and the progress value.
+        let token = rmcp::model::ProgressToken(rmcp::model::NumberOrString::Number(7));
+        let param = progress_note_params(&token, 0.5, "level.build: started");
+        assert_eq!(param.progress_token, token);
+        assert_eq!(param.progress, 0.5);
+        assert_eq!(param.message.as_deref(), Some("level.build: started"));
+        assert!(param.total.is_none(), "the total is unknown, not zero");
+
+        // The same token, progress and message make the same payload: no wall
+        // clock, no session id, nothing that changes between two sends.
+        assert_eq!(
+            param,
+            progress_note_params(&token, 0.5, "level.build: started"),
+            "the note is pure"
+        );
+
+        // No tool carries the progress surface: the list pays nothing for it.
+        let server = test_server();
+        for tool in server.tools() {
+            let name = tool.name.to_lowercase();
+            assert!(
+                !name.contains("progress"),
+                "tool `{name}` adds a progress surface"
+            );
+            let description = tool
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase();
+            // The check names the notification wording, not the plain word:
+            // `play.run` already said "poll reads progress" about the job's
+            // own progress (it predates D16), and that word is not a
+            // notification surface.
+            assert!(
+                !description.contains("progress notification")
+                    && !description.contains("progress token"),
+                "tool `{name}` advertises a progress surface"
+            );
+        }
+        println!("progress_note: progress notifications sent, 0 tool-budget chars PASS");
     }
 
     #[test]

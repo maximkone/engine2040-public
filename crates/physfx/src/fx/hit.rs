@@ -79,9 +79,9 @@ impl PhysFx {
     /// is split over the bones whose centers lie within `radius` meters of the point, weighted
     /// `1 - distance / radius`, and the bones' impulses add up to `impulse`. A point outside
     /// every bone's reach gives the whole blow to the nearest bone. Every joint then braces:
-    /// motor strength jumps to 1 and falls to 0 over [`HIT_FADE_S`]. Returns how many bones took
-    /// part; 0 when the slot has no ragdoll. A blow that would throw a bone past the speed cap, or
-    /// a bad number, is refused and changes nothing.
+    /// motor strength jumps to the body's muscle and falls to 0 over [`HIT_FADE_S`]. Returns how
+    /// many bones took part; 0 when the slot has no ragdoll. A blow that would throw a bone past
+    /// the speed cap, or a bad number, is refused and changes nothing.
     pub fn hit_ragdoll(
         &mut self,
         slot: u8,
@@ -152,15 +152,19 @@ impl PhysFx {
                 pushed += 1;
             }
         }
+        // The body's muscles decide how hard the joints brace: a body with no
+        // muscle gives way at once, a body with full muscle braces as hard as
+        // the motors can.
+        let muscle = f32::from(self.groups[at].muscle_permille) / 1000.0;
         if let Some(drive_of) = self.groups[at].drive.as_mut() {
-            drive_of.strength = 1.0;
-            drive(&mut self.world.impulse_joints, &drive_of.joints, 1.0);
+            drive_of.strength = muscle;
+            drive(&mut self.world.impulse_joints, &drive_of.joints, muscle);
         }
         Ok(pushed)
     }
 
-    /// How hard the joints of the ragdoll in `slot` brace now: 1 right after a hit, 0 when the
-    /// motors are off. `None` when the slot has no ragdoll.
+    /// How hard the joints of the ragdoll in `slot` brace now: the body's muscle right after a
+    /// hit, falling to 0, 0 when the motors are off. `None` when the slot has no ragdoll.
     pub fn ragdoll_strength(&self, slot: u8) -> Option<f32> {
         self.groups
             .iter()

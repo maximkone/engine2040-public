@@ -1,0 +1,1307 @@
+{
+  "version": 1,
+  "generated_by": "tools/codex/places.mjs",
+  "sources": [
+    {
+      "id": "pleiades",
+      "file": "pleiades-places-latest.json.gz",
+      "url": "https://atlantides.org/downloads/pleiades/json/pleiades-places-latest.json.gz",
+      "licence": "CC BY 3.0",
+      "sha256": "d9c544b2fa8a1aa79f6b3195685f27aa65625a981b9c95b1022c89d7bd61f707"
+    },
+    {
+      "id": "wikidata",
+      "file": "battles.json",
+      "url": "https://query.wikidata.org/sparql?query=SELECT%20%3Fitem%20%3FitemLabel%20%3Fkind%20%3Fcoord%20%3Fdate%20WHERE%20%7B%20%3Fitem%20wdt%3AP31%20wd%3AQ178561%20.%20BIND(wd%3AQ178561%20AS%20%3Fkind)%20%3Fitem%20wdt%3AP625%20%3Fcoord%20.%20OPTIONAL%20%7B%20%3Fitem%20wdt%3AP585%20%3Fdate%20.%20%7D%20SERVICE%20wikibase%3Alabel%20%7B%20bd%3AserviceParam%20wikibase%3Alanguage%20%22en%22.%20%7D%20%7D&format=json",
+      "licence": "CC0",
+      "sha256": "eec1913cb489b22822aca68f2d5fdbbffffe94dc3e102a9de8cf388998ff33df"
+    },
+    {
+      "id": "wikidata",
+      "file": "legions-and-places.json",
+      "url": "https://query.wikidata.org/sparql?query=SELECT%20%3Fitem%20%3FitemLabel%20%3Fkind%20%3Fplace%20%3FplaceLabel%20%3FplaceCoord%20WHERE%20%7B%20%3Fitem%20wdt%3AP31%20wd%3AQ163323%20.%20BIND(wd%3AQ163323%20AS%20%3Fkind)%20%3Fitem%20wdt%3AP276%20%3Fplace%20.%20%3Fplace%20wdt%3AP625%20%3FplaceCoord%20.%20SERVICE%20wikibase%3Alabel%20%7B%20bd%3AserviceParam%20wikibase%3Alanguage%20%22en%22.%20%7D%20%7D&format=json",
+      "licence": "CC0",
+      "sha256": "e4dba03f8c0f7e24da755881c21e52093b9644efcb2f0ccf9ccc26bfebeb76a2"
+    },
+    {
+      "id": "itinere",
+      "file": "itinere_roads.geojson",
+      "url": "https://zenodo.org/records/17122148/files/itinere_roads.geojson",
+      "licence": "CC BY 4.0",
+      "sha256": "4f8f5cf99f387bab2c509b1bf50143e9a3117691e316f2f46a9bb1d3d4b1cc34"
+    }
+  ],
+  "chapter_areas": [
+    {
+      "chapter": "I",
+      "name": "Bonna",
+      "label": "Bonna fortress",
+      "year": 83,
+      "plan": "docs/plan/rome.md section 3: I Bonna fortress, 83 (Bonna, modern Alfen)",
+      "source": "pleiades",
+      "id": "108896",
+      "title": "Col. Ulpia Traiana/Tricensimae",
+      "note": "the plan calls this chapter Bonna; Pleiades gives the place as Col. Ulpia Traiana/Tricensimae, the Roman colony at Xanten, and its fortress Castra Vetera (108867) as a fort of the same box. The Pleiades place titled Bonna (108818) is modern Bonn and is not in this box.",
+      "boxes": [
+        {
+          "lat_min": 51.45,
+          "lat_max": 51.8,
+          "lon_min": 6.25,
+          "lon_max": 6.7
+        }
+      ],
+      "lat": 51.666461,
+      "lon": 6.443716,
+      "uri": "https://pleiades.stoa.org/places/108896"
+    },
+    {
+      "chapter": "II",
+      "name": "Nida",
+      "label": "Taunus forest",
+      "year": 83,
+      "plan": "docs/plan/rome.md section 3: II Taunus forest, 83 (Nida, modern Heddernheim / Taunus)",
+      "source": "pleiades",
+      "id": "109205",
+      "title": "Nida",
+      "note": "the plan calls this chapter the Taunus forest and names Nida as its place; Pleiades gives Nida as a settlement.",
+      "boxes": [
+        {
+          "lat_min": 49.95,
+          "lat_max": 50.4,
+          "lon_min": 8.4,
+          "lon_max": 8.85
+        }
+      ],
+      "lat": 50.154109,
+      "lon": 8.637743,
+      "uri": "https://pleiades.stoa.org/places/109205"
+    },
+    {
+      "chapter": "III",
+      "name": "Mogontiacum",
+      "label": "Mogontiacum",
+      "year": 89,
+      "plan": "docs/plan/rome.md section 3: III Mogontiacum, 89 (Mainz)",
+      "source": "pleiades",
+      "id": "109169",
+      "title": "Mogontiacum",
+      "note": "the plan calls this chapter Mogontiacum; Pleiades gives Mogontiacum as a settlement.",
+      "boxes": [
+        {
+          "lat_min": 49.8,
+          "lat_max": 50.2,
+          "lon_min": 8.07,
+          "lon_max": 8.48
+        }
+      ],
+      "lat": 49.998912,
+      "lon": 8.273869,
+      "uri": "https://pleiades.stoa.org/places/109169"
+    },
+    {
+      "chapter": "IV",
+      "name": "Drobeta",
+      "label": "Danube",
+      "year": "101-105",
+      "plan": "docs/plan/rome.md section 3: IV Danube, 101-105 (Drobeta, modern Turnu Severin, and the Tapae pass)",
+      "source": "pleiades",
+      "id": "207100",
+      "title": "Drobeta",
+      "note": "the plan calls this chapter the Danube and names Drobeta and the Tapae pass; Pleiades gives Drobeta as a settlement and Insula Banului (207187) as the Iron Gates site. Wikidata gives the two Tapae battles their own point.",
+      "boxes": [
+        {
+          "lat_min": 44.4,
+          "lat_max": 44.85,
+          "lon_min": 22.15,
+          "lon_max": 22.9
+        },
+        {
+          "lat_min": 45.4556,
+          "lat_max": 45.5556,
+          "lon_min": 22.6747,
+          "lon_max": 22.7747
+        }
+      ],
+      "lat": 44.629271,
+      "lon": 22.657173,
+      "uri": "https://pleiades.stoa.org/places/207100"
+    },
+    {
+      "chapter": "V",
+      "name": "Sarmizegetusa",
+      "label": "Dacian mountains",
+      "year": 106,
+      "plan": "docs/plan/rome.md section 3: V Dacian mountains, 106 (Sarmizegetusa)",
+      "source": "pleiades",
+      "id": "207425",
+      "title": "Sarmizegetusa (Regia)",
+      "note": "the plan calls this chapter the Dacian mountains and names Sarmizegetusa; Pleiades gives Sarmizegetusa (Regia) as the Dacian capital and Ulpia Traiana Sarmizegetusa (207527) as the Roman colony of the same box.",
+      "boxes": [
+        {
+          "lat_min": 45.3,
+          "lat_max": 45.75,
+          "lon_min": 22.55,
+          "lon_max": 23.4
+        }
+      ],
+      "lat": 45.669615,
+      "lon": 23.323961,
+      "uri": "https://pleiades.stoa.org/places/207425"
+    },
+    {
+      "chapter": "VI",
+      "name": "Rome",
+      "label": "Rome",
+      "year": 107,
+      "plan": "docs/plan/rome.md section 3: VI Rome, 107 (Rome)",
+      "source": "pleiades",
+      "id": "423025",
+      "title": "Roma",
+      "note": "the plan calls this chapter Rome; Pleiades gives Roma as the ancient city.",
+      "boxes": [
+        {
+          "lat_min": 41.7,
+          "lat_max": 42.05,
+          "lon_min": 12.25,
+          "lon_max": 12.7
+        }
+      ],
+      "lat": 41.889977,
+      "lon": 12.491258,
+      "uri": "https://pleiades.stoa.org/places/423025"
+    }
+  ],
+  "places": [
+    {
+      "chapter": "I",
+      "area": "Bonna",
+      "name": "Bonna",
+      "kind": "chapter-place",
+      "lat": 51.666461,
+      "lon": 6.443716,
+      "source": "pleiades",
+      "id": "108896",
+      "uri": "https://pleiades.stoa.org/places/108896",
+      "title": "Col. Ulpia Traiana/Tricensimae",
+      "types": [
+        "settlement",
+        "archaeological-site"
+      ],
+      "note": "the plan calls this chapter Bonna; Pleiades gives the place as Col. Ulpia Traiana/Tricensimae, the Roman colony at Xanten, and its fortress Castra Vetera (108867) as a fort of the same box. The Pleiades place titled Bonna (108818) is modern Bonn and is not in this box."
+    },
+    {
+      "chapter": "I",
+      "area": "Bonna",
+      "name": "Burginatium",
+      "kind": "fort",
+      "lat": 51.72684,
+      "lon": 6.305935,
+      "source": "pleiades",
+      "id": "108837",
+      "uri": "https://pleiades.stoa.org/places/108837",
+      "title": "Burginatium",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "I",
+      "area": "Bonna",
+      "name": "Calo?",
+      "kind": "fort",
+      "lat": 51.569108,
+      "lon": 6.582542,
+      "source": "pleiades",
+      "id": "108849",
+      "uri": "https://pleiades.stoa.org/places/108849",
+      "title": "Calo?",
+      "types": [
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "I",
+      "area": "Bonna",
+      "name": "Castra Vetera",
+      "kind": "fort",
+      "lat": 51.644379,
+      "lon": 6.469807,
+      "source": "pleiades",
+      "id": "108867",
+      "uri": "https://pleiades.stoa.org/places/108867",
+      "title": "Castra Vetera",
+      "types": [
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "I",
+      "area": "Bonna",
+      "name": "Castra Vetera",
+      "kind": "fort",
+      "lat": 51.64639,
+      "lon": 6.47,
+      "source": "wikidata",
+      "id": "Q532466",
+      "uri": "http://www.wikidata.org/entity/Q532466",
+      "legions": [
+        {
+          "name": "Legio VI Victrix",
+          "id": "Q1434251"
+        }
+      ]
+    },
+    {
+      "chapter": "I",
+      "area": "Bonna",
+      "name": "Wesel-Büderich",
+      "kind": "fort",
+      "lat": 51.634703,
+      "lon": 6.58208,
+      "source": "pleiades",
+      "id": "109458",
+      "uri": "https://pleiades.stoa.org/places/109458",
+      "title": "Wesel-Büderich",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "I",
+      "area": "Bonna",
+      "name": "Xanten",
+      "kind": "fort",
+      "lat": 51.662222,
+      "lon": 6.453889,
+      "source": "wikidata",
+      "id": "Q162890",
+      "uri": "http://www.wikidata.org/entity/Q162890",
+      "legions": [
+        {
+          "name": "Legio XVII",
+          "id": "Q317576"
+        },
+        {
+          "name": "Legio XVIII",
+          "id": "Q317711"
+        }
+      ]
+    },
+    {
+      "chapter": "II",
+      "area": "Nida",
+      "name": "Nida",
+      "kind": "chapter-place",
+      "lat": 50.154109,
+      "lon": 8.637743,
+      "source": "pleiades",
+      "id": "109205",
+      "uri": "https://pleiades.stoa.org/places/109205",
+      "title": "Nida",
+      "types": [
+        "settlement"
+      ],
+      "note": "the plan calls this chapter the Taunus forest and names Nida as its place; Pleiades gives Nida as a settlement."
+    },
+    {
+      "chapter": "II",
+      "area": "Nida",
+      "name": "Bad Nauheim",
+      "kind": "fort",
+      "lat": 50.360605,
+      "lon": 8.735747,
+      "source": "pleiades",
+      "id": "118588",
+      "uri": "https://pleiades.stoa.org/places/118588",
+      "title": "Bad Nauheim",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "II",
+      "area": "Nida",
+      "name": "Feldberg",
+      "kind": "fort",
+      "lat": 50.227143,
+      "lon": 8.444725,
+      "source": "pleiades",
+      "id": "108979",
+      "uri": "https://pleiades.stoa.org/places/108979",
+      "title": "Feldberg",
+      "types": [
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "II",
+      "area": "Nida",
+      "name": "Friedberg",
+      "kind": "fort",
+      "lat": 50.336719,
+      "lon": 8.753676,
+      "source": "pleiades",
+      "id": "118681",
+      "uri": "https://pleiades.stoa.org/places/118681",
+      "title": "Friedberg",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "II",
+      "area": "Nida",
+      "name": "Kapersburg",
+      "kind": "fort",
+      "lat": 50.313015,
+      "lon": 8.635684,
+      "source": "pleiades",
+      "id": "109074",
+      "uri": "https://pleiades.stoa.org/places/109074",
+      "title": "Kapersburg",
+      "types": [
+        "fort-2",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "II",
+      "area": "Nida",
+      "name": "Karben",
+      "kind": "fort",
+      "lat": 50.240281,
+      "lon": 8.76393,
+      "source": "pleiades",
+      "id": "118777",
+      "uri": "https://pleiades.stoa.org/places/118777",
+      "title": "Karben",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "II",
+      "area": "Nida",
+      "name": "Langenhain",
+      "kind": "fort",
+      "lat": 50.365244,
+      "lon": 8.636999,
+      "source": "pleiades",
+      "id": "109100",
+      "uri": "https://pleiades.stoa.org/places/109100",
+      "title": "Langenhain",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "II",
+      "area": "Nida",
+      "name": "Rödgen",
+      "kind": "fort",
+      "lat": 50.371,
+      "lon": 8.7665,
+      "source": "pleiades",
+      "id": "220408239",
+      "uri": "https://pleiades.stoa.org/places/220408239",
+      "title": "Rödgen",
+      "types": [
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "II",
+      "area": "Nida",
+      "name": "Saalburg Roman Fort",
+      "kind": "fort",
+      "lat": 50.271532,
+      "lon": 8.566652,
+      "source": "pleiades",
+      "id": "109297",
+      "uri": "https://pleiades.stoa.org/places/109297",
+      "title": "Saalburg Roman Fort",
+      "types": [
+        "fort-2",
+        "earthwork",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Mogontiacum",
+      "kind": "chapter-place",
+      "lat": 49.998912,
+      "lon": 8.273869,
+      "source": "pleiades",
+      "id": "109169",
+      "uri": "https://pleiades.stoa.org/places/109169",
+      "title": "Mogontiacum",
+      "types": [
+        "settlement"
+      ],
+      "note": "the plan calls this chapter Mogontiacum; Pleiades gives Mogontiacum as a settlement."
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Castellum Mattiacorum",
+      "kind": "fort",
+      "lat": 50.008631,
+      "lon": 8.282733,
+      "source": "pleiades",
+      "id": "108864",
+      "uri": "https://pleiades.stoa.org/places/108864",
+      "title": "Castellum Mattiacorum",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Flörsheim",
+      "kind": "fort",
+      "lat": 50.014408,
+      "lon": 8.431347,
+      "source": "pleiades",
+      "id": "108986",
+      "uri": "https://pleiades.stoa.org/places/108986",
+      "title": "Flörsheim",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Heidekringen",
+      "kind": "fort",
+      "lat": 50.152012,
+      "lon": 8.190632,
+      "source": "pleiades",
+      "id": "109037",
+      "uri": "https://pleiades.stoa.org/places/109037",
+      "title": "Heidekringen",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Hofheim",
+      "kind": "fort",
+      "lat": 50.080772,
+      "lon": 8.450889,
+      "source": "pleiades",
+      "id": "109047",
+      "uri": "https://pleiades.stoa.org/places/109047",
+      "title": "Hofheim",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Mainz",
+      "kind": "fort",
+      "lat": 49.999444,
+      "lon": 8.273611,
+      "source": "wikidata",
+      "id": "Q1720",
+      "uri": "http://www.wikidata.org/entity/Q1720",
+      "legions": [
+        {
+          "name": "Legio VI Gallicana",
+          "id": "Q3829882"
+        },
+        {
+          "name": "Legio XV Primigenia",
+          "id": "Q977359"
+        },
+        {
+          "name": "Legio XVI Gallica",
+          "id": "Q660347"
+        }
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Mogontiacum",
+      "kind": "fort",
+      "lat": 50,
+      "lon": 8.27111,
+      "source": "wikidata",
+      "id": "Q571790",
+      "uri": "http://www.wikidata.org/entity/Q571790",
+      "legions": [
+        {
+          "name": "Legio I Adiutrix",
+          "id": "Q608574"
+        },
+        {
+          "name": "Legio XIV Gemina",
+          "id": "Q707649"
+        }
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Roman city gate, Mainz",
+      "kind": "fort",
+      "lat": 49.996246,
+      "lon": 8.263687,
+      "source": "pleiades",
+      "id": "433943630",
+      "uri": "https://pleiades.stoa.org/places/433943630",
+      "title": "Roman city gate, Mainz",
+      "types": [
+        "city-gate",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Rüsselsheim",
+      "kind": "fort",
+      "lat": 49.994882,
+      "lon": 8.410847,
+      "source": "pleiades",
+      "id": "109294",
+      "uri": "https://pleiades.stoa.org/places/109294",
+      "title": "Rüsselsheim",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Wiesbaden-Biebrich",
+      "kind": "fort",
+      "lat": 50.044849,
+      "lon": 8.241041,
+      "source": "pleiades",
+      "id": "109461",
+      "uri": "https://pleiades.stoa.org/places/109461",
+      "title": "Wiesbaden-Biebrich",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "III",
+      "area": "Mogontiacum",
+      "name": "Zugmantel",
+      "kind": "fort",
+      "lat": 50.191355,
+      "lon": 8.202941,
+      "source": "pleiades",
+      "id": "109472",
+      "uri": "https://pleiades.stoa.org/places/109472",
+      "title": "Zugmantel",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Battle of Tapae",
+      "kind": "battle",
+      "lat": 45.5056,
+      "lon": 22.7247,
+      "source": "wikidata",
+      "id": "Q1476280",
+      "uri": "http://www.wikidata.org/entity/Q1476280",
+      "year": 87
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Third Battle of Tapae",
+      "kind": "battle",
+      "lat": 45.5056,
+      "lon": 22.7247,
+      "source": "wikidata",
+      "id": "Q2707263",
+      "uri": "http://www.wikidata.org/entity/Q2707263",
+      "year": 101
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Drobeta",
+      "kind": "chapter-place",
+      "lat": 44.629271,
+      "lon": 22.657173,
+      "source": "pleiades",
+      "id": "207100",
+      "uri": "https://pleiades.stoa.org/places/207100",
+      "title": "Drobeta",
+      "types": [
+        "settlement"
+      ],
+      "note": "the plan calls this chapter the Danube and names Drobeta and the Tapae pass; Pleiades gives Drobeta as a settlement and Insula Banului (207187) as the Iron Gates site. Wikidata gives the two Tapae battles their own point."
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "*Caput Bovis",
+      "kind": "fort",
+      "lat": 44.675207,
+      "lon": 22.474592,
+      "source": "pleiades",
+      "id": "207008",
+      "uri": "https://pleiades.stoa.org/places/207008",
+      "title": "*Caput Bovis",
+      "types": [
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "*Diana",
+      "kind": "fort",
+      "lat": 44.630682,
+      "lon": 22.563687,
+      "source": "pleiades",
+      "id": "207077",
+      "uri": "https://pleiades.stoa.org/places/207077",
+      "title": "*Diana",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "*Una",
+      "kind": "fort",
+      "lat": 44.483327,
+      "lon": 22.349996,
+      "source": "pleiades",
+      "id": "207529",
+      "uri": "https://pleiades.stoa.org/places/207529",
+      "title": "*Una",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Batoţi",
+      "kind": "fort",
+      "lat": 44.514704,
+      "lon": 22.680592,
+      "source": "pleiades",
+      "id": "206962",
+      "uri": "https://pleiades.stoa.org/places/206962",
+      "title": "Batoţi",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Castra of Drobeta",
+      "kind": "fort",
+      "lat": 44.624862,
+      "lon": 22.668091,
+      "source": "pleiades",
+      "id": "573484325",
+      "uri": "https://pleiades.stoa.org/places/573484325",
+      "title": "Castra of Drobeta",
+      "types": [
+        "fort-2",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Egeta",
+      "kind": "fort",
+      "lat": 44.469116,
+      "lon": 22.445309,
+      "source": "pleiades",
+      "id": "207107",
+      "uri": "https://pleiades.stoa.org/places/207107",
+      "title": "Egeta",
+      "types": [
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Gradac",
+      "kind": "fort",
+      "lat": 44.449776,
+      "lon": 22.195771,
+      "source": "pleiades",
+      "id": "207153",
+      "uri": "https://pleiades.stoa.org/places/207153",
+      "title": "Gradac",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Hajdučka Vodenica",
+      "kind": "fort",
+      "lat": 44.600081,
+      "lon": 22.280242,
+      "source": "pleiades",
+      "id": "207162",
+      "uri": "https://pleiades.stoa.org/places/207162",
+      "title": "Hajdučka Vodenica",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Hinova",
+      "kind": "fort",
+      "lat": 44.538132,
+      "lon": 22.77729,
+      "source": "pleiades",
+      "id": "207169",
+      "uri": "https://pleiades.stoa.org/places/207169",
+      "title": "Hinova",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Insula Banului",
+      "kind": "fort",
+      "lat": 44.658331,
+      "lon": 22.549997,
+      "source": "pleiades",
+      "id": "207187",
+      "uri": "https://pleiades.stoa.org/places/207187",
+      "title": "Insula Banului",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Izvorul Frumos",
+      "kind": "fort",
+      "lat": 44.45426,
+      "lon": 22.495044,
+      "source": "pleiades",
+      "id": "207196",
+      "uri": "https://pleiades.stoa.org/places/207196",
+      "title": "Izvorul Frumos",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Korbovo",
+      "kind": "fort",
+      "lat": 44.53073,
+      "lon": 22.719115,
+      "source": "pleiades",
+      "id": "207216",
+      "uri": "https://pleiades.stoa.org/places/207216",
+      "title": "Korbovo",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Pontes",
+      "kind": "fort",
+      "lat": 44.61306,
+      "lon": 22.669232,
+      "source": "pleiades",
+      "id": "207359",
+      "uri": "https://pleiades.stoa.org/places/207359",
+      "title": "Pontes",
+      "types": [
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Puţinei",
+      "kind": "fort",
+      "lat": 44.68072,
+      "lon": 22.70204,
+      "source": "pleiades",
+      "id": "207368",
+      "uri": "https://pleiades.stoa.org/places/207368",
+      "title": "Puţinei",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Schela Cladovei",
+      "kind": "fort",
+      "lat": 44.608008,
+      "lon": 22.613416,
+      "source": "pleiades",
+      "id": "207432",
+      "uri": "https://pleiades.stoa.org/places/207432",
+      "title": "Schela Cladovei",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Transdierna",
+      "kind": "fort",
+      "lat": 44.662795,
+      "lon": 22.404513,
+      "source": "pleiades",
+      "id": "207508",
+      "uri": "https://pleiades.stoa.org/places/207508",
+      "title": "Transdierna",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "Vajuga",
+      "kind": "fort",
+      "lat": 44.543438,
+      "lon": 22.619768,
+      "source": "pleiades",
+      "id": "207534",
+      "uri": "https://pleiades.stoa.org/places/207534",
+      "title": "Vajuga",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "IV",
+      "area": "Drobeta",
+      "name": "‘Gerulatis’",
+      "kind": "fort",
+      "lat": 44.463517,
+      "lon": 22.250032,
+      "source": "pleiades",
+      "id": "207130",
+      "uri": "https://pleiades.stoa.org/places/207130",
+      "title": "‘Gerulatis’",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "V",
+      "area": "Sarmizegetusa",
+      "name": "Battle of Sarmisegetusa",
+      "kind": "battle",
+      "lat": 45.6219,
+      "lon": 23.3093,
+      "source": "wikidata",
+      "id": "Q3494883",
+      "uri": "http://www.wikidata.org/entity/Q3494883",
+      "year": 106
+    },
+    {
+      "chapter": "V",
+      "area": "Sarmizegetusa",
+      "name": "Sarmizegetusa",
+      "kind": "chapter-place",
+      "lat": 45.669615,
+      "lon": 23.323961,
+      "source": "pleiades",
+      "id": "207425",
+      "uri": "https://pleiades.stoa.org/places/207425",
+      "title": "Sarmizegetusa (Regia)",
+      "types": [
+        "settlement"
+      ],
+      "note": "the plan calls this chapter the Dacian mountains and names Sarmizegetusa; Pleiades gives Sarmizegetusa (Regia) as the Dacian capital and Ulpia Traiana Sarmizegetusa (207527) as the Roman colony of the same box."
+    },
+    {
+      "chapter": "V",
+      "area": "Sarmizegetusa",
+      "name": "Costeşti",
+      "kind": "fort",
+      "lat": 45.706495,
+      "lon": 23.165999,
+      "source": "pleiades",
+      "id": "207050",
+      "uri": "https://pleiades.stoa.org/places/207050",
+      "title": "Costeşti",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "V",
+      "area": "Sarmizegetusa",
+      "name": "Costești-Blidaru",
+      "kind": "fort",
+      "lat": 45.667615,
+      "lon": 23.162827,
+      "source": "pleiades",
+      "id": "876112477",
+      "uri": "https://pleiades.stoa.org/places/876112477",
+      "title": "Costești-Blidaru",
+      "types": [
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "V",
+      "area": "Sarmizegetusa",
+      "name": "Costești-Cetățuie",
+      "kind": "fort",
+      "lat": 45.680359,
+      "lon": 23.15433,
+      "source": "pleiades",
+      "id": "711745091",
+      "uri": "https://pleiades.stoa.org/places/711745091",
+      "title": "Costești-Cetățuie",
+      "types": [
+        "fort-2",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "V",
+      "area": "Sarmizegetusa",
+      "name": "Jigorul Mare",
+      "kind": "fort",
+      "lat": 45.600098,
+      "lon": 23.113233,
+      "source": "pleiades",
+      "id": "207201",
+      "uri": "https://pleiades.stoa.org/places/207201",
+      "title": "Jigorul Mare",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "V",
+      "area": "Sarmizegetusa",
+      "name": "Luncani-Tîrsa",
+      "kind": "fort",
+      "lat": 45.642506,
+      "lon": 23.111159,
+      "source": "pleiades",
+      "id": "207249",
+      "uri": "https://pleiades.stoa.org/places/207249",
+      "title": "Luncani-Tîrsa",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "V",
+      "area": "Sarmizegetusa",
+      "name": "Orăştiora de Sus",
+      "kind": "fort",
+      "lat": 45.730334,
+      "lon": 23.170707,
+      "source": "pleiades",
+      "id": "207323",
+      "uri": "https://pleiades.stoa.org/places/207323",
+      "title": "Orăştiora de Sus",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Battle of the Colline Gate",
+      "kind": "battle",
+      "lat": 41.907222,
+      "lon": 12.498611,
+      "source": "wikidata",
+      "id": "Q1230563",
+      "uri": "http://www.wikidata.org/entity/Q1230563",
+      "year": -81
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Rome",
+      "kind": "chapter-place",
+      "lat": 41.889977,
+      "lon": 12.491258,
+      "source": "pleiades",
+      "id": "423025",
+      "uri": "https://pleiades.stoa.org/places/423025",
+      "title": "Roma",
+      "types": [
+        "urban",
+        "settlement"
+      ],
+      "note": "the plan calls this chapter Rome; Pleiades gives Roma as the ancient city."
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Albano Laziale",
+      "kind": "fort",
+      "lat": 41.733333,
+      "lon": 12.666667,
+      "source": "wikidata",
+      "id": "Q191115",
+      "uri": "http://www.wikidata.org/entity/Q191115",
+      "legions": [
+        {
+          "name": "Legio II Parthica",
+          "id": "Q543055"
+        }
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Castra Albana",
+      "kind": "fort",
+      "lat": 41.729023,
+      "lon": 12.660213,
+      "source": "pleiades",
+      "id": "422885",
+      "uri": "https://pleiades.stoa.org/places/422885",
+      "title": "Castra Albana",
+      "types": [
+        "fort-2",
+        "settlement"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Castra Peregrina",
+      "kind": "fort",
+      "lat": 41.884531,
+      "lon": 12.494212,
+      "source": "pleiades",
+      "id": "914763973",
+      "uri": "https://pleiades.stoa.org/places/914763973",
+      "title": "Castra Peregrina",
+      "types": [
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Castrum Caetani",
+      "kind": "fort",
+      "lat": 41.851453,
+      "lon": 12.5214,
+      "source": "pleiades",
+      "id": "156802663",
+      "uri": "https://pleiades.stoa.org/places/156802663",
+      "title": "Castrum Caetani",
+      "types": [
+        "fort-2",
+        "church-2",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "La Giostra",
+      "kind": "fort",
+      "lat": 41.786028,
+      "lon": 12.562897,
+      "source": "pleiades",
+      "id": "422935",
+      "uri": "https://pleiades.stoa.org/places/422935",
+      "title": "La Giostra",
+      "types": [
+        "fortified-settlement",
+        "fort-2"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Tor Marancia",
+      "kind": "fort",
+      "lat": 41.856647,
+      "lon": 12.497345,
+      "source": "pleiades",
+      "id": "423089",
+      "uri": "https://pleiades.stoa.org/places/423089",
+      "title": "Tor Marancia",
+      "types": [
+        "villa",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Tor de' Schiavi",
+      "kind": "fort",
+      "lat": 41.895173,
+      "lon": 12.552843,
+      "source": "pleiades",
+      "id": "85815300",
+      "uri": "https://pleiades.stoa.org/places/85815300",
+      "title": "Tor de' Schiavi",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Torre Valca",
+      "kind": "fort",
+      "lat": 41.858132,
+      "lon": 12.529253,
+      "source": "pleiades",
+      "id": "384365955",
+      "uri": "https://pleiades.stoa.org/places/384365955",
+      "title": "Torre Valca",
+      "types": [
+        "tower-single",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Torre dei Capocci",
+      "kind": "fort",
+      "lat": 41.894895,
+      "lon": 12.497547,
+      "source": "pleiades",
+      "id": "554777910",
+      "uri": "https://pleiades.stoa.org/places/554777910",
+      "title": "Torre dei Capocci",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Torre dei Conti",
+      "kind": "fort",
+      "lat": 41.893579,
+      "lon": 12.487946,
+      "source": "pleiades",
+      "id": "728475463",
+      "uri": "https://pleiades.stoa.org/places/728475463",
+      "title": "Torre dei Conti",
+      "types": [
+        "tower-defensive",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Torre del Papito",
+      "kind": "fort",
+      "lat": 41.894985,
+      "lon": 12.477204,
+      "source": "pleiades",
+      "id": "327838685",
+      "uri": "https://pleiades.stoa.org/places/327838685",
+      "title": "Torre del Papito",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Torre delle Milizie",
+      "kind": "fort",
+      "lat": 41.895902,
+      "lon": 12.486681,
+      "source": "pleiades",
+      "id": "767766096",
+      "uri": "https://pleiades.stoa.org/places/767766096",
+      "title": "Torre delle Milizie",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Torre di Centocelle",
+      "kind": "fort",
+      "lat": 41.871847,
+      "lon": 12.570702,
+      "source": "pleiades",
+      "id": "108334324",
+      "uri": "https://pleiades.stoa.org/places/108334324",
+      "title": "Torre di Centocelle",
+      "types": [
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Torre di Pietra Pertusa",
+      "kind": "fort",
+      "lat": 42.039881,
+      "lon": 12.480198,
+      "source": "pleiades",
+      "id": "560526963",
+      "uri": "https://pleiades.stoa.org/places/560526963",
+      "title": "Torre di Pietra Pertusa",
+      "types": [
+        "tower-single",
+        "fort"
+      ]
+    },
+    {
+      "chapter": "VI",
+      "area": "Rome",
+      "name": "Vatican City",
+      "kind": "fort",
+      "lat": 41.903265,
+      "lon": 12.452818,
+      "source": "pleiades",
+      "id": "88500321",
+      "uri": "https://pleiades.stoa.org/places/88500321",
+      "title": "Vatican City",
+      "types": [
+        "fortified-settlement"
+      ]
+    }
+  ]
+}

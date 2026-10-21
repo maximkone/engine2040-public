@@ -135,6 +135,8 @@ pub struct ArenaFacts {
     pub late_pipelines: u64,
     /// Validation errors of every kind counted when the line is printed.
     pub validation: u64,
+    /// PW37: the scene the first frames drew (the cooked kit's name, or the stand-in ring's).
+    pub scene: String,
 }
 
 impl Ready {
@@ -144,7 +146,7 @@ impl Ready {
         self.object().finish()
     }
 
-    /// The ready line with the arena facts (tier, pipelines, validation) appended.
+    /// The ready line with the arena facts (tier, pipelines, validation, scene) appended.
     #[must_use]
     pub fn line_with(&self, facts: &ArenaFacts) -> String {
         let mut line = self.object();
@@ -153,7 +155,8 @@ impl Ready {
             .uint("pipelines", facts.pipelines)
             .uint("pipelinesMs", facts.pipelines_ms)
             .uint("latePipelines", facts.late_pipelines)
-            .uint("validation", facts.validation);
+            .uint("validation", facts.validation)
+            .str("scene", &facts.scene);
         line.finish()
     }
 
@@ -353,6 +356,7 @@ mod tests {
             pipelines_ms: 2,
             late_pipelines: 0,
             validation: 0,
+            scene: "arena-kit".into(),
         };
         let arena = ready.line_with(&facts);
         assert!(arena.contains(r#""crossOriginIsolated":true"#), "{arena}");
@@ -368,6 +372,7 @@ mod tests {
             pipelines_ms: 412,
             late_pipelines: 0,
             validation: 0,
+            scene: "arena-kit".into(),
         };
         let line = sample().line_with(&facts);
         assert!(!line.contains('\n'), "{line}");
@@ -379,6 +384,8 @@ mod tests {
             r#""pipelinesMs":412"#,
             r#""latePipelines":0"#,
             r#""validation":0"#,
+            // PW37: the line names the scene the first frames drew.
+            r#""scene":"arena-kit""#,
             // The plain facts are still there, in front.
             r#""commit":"abc1234""#,
             r#""userAgent":"Mozilla/5.0 HeadlessChrome""#,

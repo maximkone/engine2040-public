@@ -327,6 +327,30 @@ pilum volley timing, tool weights, gladius forging times, road thickness and cam
 | Pilum as a two-hand thrust | a thrown javelin |
 | No sources | every number cites the codex |
 
+### 8.1 The 15 fixes (ROM1)
+
+Rule: the `content/design/*.rows` file wins and the prose changes; where no data file
+exists, the newest owner decision wins (decision 7 in section 0). No data file changed
+in this pass: only prose. Each row names the line the prose now matches.
+
+| # | Item | Before | After | Winning line |
+|---|---|---|---|---|
+| 1 | Ladder rungs and ranks | the rung table took tier and rank from the Rust constants: tier 4 on rung 7, names "T1 recruit" and "T3 champion", the last rung ranked Champion to Legend | the rows file seats tier 1,1,2,2,2,3,3,3 with the boss flag on rung 7 and rank 0,0,1,1,1,2,2,3; the code seat (tier 4) is named as the open gap | `content/design/ladder.rows:25-32`, `content/design/loop.rows:9` |
+| 2 | Loss penalty | a lost bout drained "the penalty column", 25 | a lost bout drains a flat 50; the `penalty=25` column is lint-bounded only | `content/design/loop.rows:9`, `crates/game/src/ladder.rs:26` |
+| 3 | Sword damage and reach | 25 HP damage, 0.5 s cooldown, 200 cm range, with a landed Rome Tables preset of 250 permille and 30 ticks | the engine does 120 permille damage, 15-tick startup, 8-tick recovery, blade reach 1500 mm; the forge 25 HP / 30 ticks / 2000 mm stays forge-parity data; the Rome Tables preset stays planned only | `content/design/combat.rows:9`, `content/design/weapons.rows:24`, `crates/arena/src/match_wire.rs:33` |
+| 4 | Dodge | "dodge distance 2 m" | dodge 10 ticks with 6 i-frame ticks; no dodge impulse exists, so no distance is claimed | `content/design/combat.rows:9` |
+| 5 | Tier names and HP | "T1 recruit, T2 veteran, T3 champion, T4 primus"; Holder and Flanker both at 1000 HP; band 900-1100 | grunt, veteran, elite, primus; Holder 950 HP, Flanker 1000 HP; band 900-1200 | `content/design/enemies.rows:10-13`, `content/design/enemies.rows:6`, `content/design/enemies.rows:23-24` |
+| 6 | Reaction delay | scripted players carry "a reaction delay of 12-18 ticks" | no 12-18 tick delay exists: the tier reaction is 4/2/1/1 ticks, the scripted player carries 2-4 tick noise and acts once per 8 ticks | `crates/ai/src/depth.rs:295`, `crates/playtest/src/winrates.rs:45,49`, `content/design/enemies.rows:16` |
+| 7 | Hit stop | "light 3, heavy 6, parry 8 ticks" only | the same per-kind numbers, plus the shipped flat `hitstop_ticks=4` of the v2 row | `content/design/combat.rows:9`, `crates/combat/src/tables.rs:107,116,125` |
+| 8 | Zone radius | centre r under 3 m, ring 3-8 m, wall band over 8 m, from the code bands only | the layout rows seat the centre circle r 250 cm and the gate mouth r 200 cm; the 3 m and 8 m bands stay the code classifier | `content/design/arena-zones.rows:16`, `content/design/arena-zones.rows:9`, `crates/arena/src/zones.rs:17,19` |
+| 9 | Entrance bar | "entrance_share under 25%" | the tournament holds the gate mouth under 250 permille of fighter ticks; the level check keeps its own floor-area band of 25..60 | `crates/playtest/src/tournament.rs:1980`, `docs/design/LEVELS.md:174` |
+| 10 | Camera recording | the camera is "recorded in-sim" | the camera state is presentation only: the sim records the hits, the windowed leg feeds the trauma in, the shake never feeds back | `crates/game/src/camera.rs:1020` (no rows file; the code seat wins) |
+| 11 | Rope damping | `v -= v / 32` per tick | `v -= v / 64` per tick, as the swing code and the landed status note already said | `crates/arena/src/spear.rs:82` |
+| 12 | Spear gravity | the swing used "the same `SPEAR_GRAVITY` step the flight uses" | the swing falls with `FIGHTER_GRAVITY` 11 mm/tick², the spear in flight with `SPEAR_GRAVITY` 3 | `crates/arena/src/lib.rs:171`, `crates/arena/src/spear.rs:38` |
+| 13 | First-fight bar | the first bout starts within 60 s of launch | 45 s target with a 60 s cap, owned by the ladder code; the cap is not a lint rule | `content/design/ladder.rows:13-15`, `crates/game/src/ladder.rs:49,51` |
+| 14 | Stale MISSING lines in `gameplay.md` | the section 1 status table called tiers, the tier bar, the ladder, the debug camera and more MISSING, BUILT or dead | each row carries LANDED or PARTIAL with the code that proves it; GA14, GP33 and GA15 stay open | board rows GP27-GP42 and GA13-GA15 (`docs/SPRINT-20-game.md`) and the code each row cites |
+| 15 | Wrong line cites | cites to moved code lines (`depth.rs:460,433,463,585,281,289,298`, `fork.rs:83,262,148`, `tournament.rs:1073`, `assistant.rs:1108`) | every cite points at the line that holds the symbol now (`depth.rs:449,440,453,571,287,295,304`, `fork.rs:85,366,271`, `tournament.rs:1096`, `assistant/fork.rs:274`) | those code lines |
+
 ## 9. Order
 
 1. **M0 slice (now):** LEG3, LEG5, LEG6 and CDX1-CDX2 start at once; LEG1, LEG2, LEG9 after FV3

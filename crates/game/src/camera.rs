@@ -1446,10 +1446,7 @@ mod tests {
         assert!((walk.x - LEAD_HORIZON_S).abs() < 1e-6, "{walk:?}");
         let run = look_ahead_m(Vec3::new(9.0, 0.0, 0.0));
         assert!((run.x - LEAD_MAX_M).abs() < 1e-6, "a run hits the cap");
-        assert_eq!(
-            look_ahead_m(Vec3::new(-1.0, 0.0, 0.0)).x,
-            -1.0 * LEAD_HORIZON_S
-        );
+        assert_eq!(look_ahead_m(Vec3::new(-1.0, 0.0, 0.0)).x, -LEAD_HORIZON_S);
 
         // A held 5 m/s walk: the lead grows and settles on the cap. It is
         // still short on the first frame (ease-in), never over the cap.

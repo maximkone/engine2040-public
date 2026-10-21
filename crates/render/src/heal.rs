@@ -10,6 +10,7 @@
 //! over-budget faults quarantine loudly with a notice plus the last-good frame.
 
 use engine_observe::heal::{HealError, HealKind};
+use engine_observe::recovery::{HealValidation, VerifiedRecovery};
 use engine_observe::supervisor::{SupervisedDecision, Supervisor};
 use engine_observe::{EventCode, RingBuffer};
 
@@ -309,6 +310,23 @@ impl RenderHeal {
         }
     }
 
+    /// Digest of the heal's own state (playback state, quality tier,
+    /// last-good generation, held frames): the before/after pair a recovery
+    /// proof carries. Deterministic integer math over four fields, no clock.
+    #[must_use]
+    pub fn state_digest(&self) -> u64 {
+        let mut hasher = engine_core::Fnv64::new();
+        hasher.write_u64(match self.state {
+            RenderState::Live => 0,
+            RenderState::Degraded => 1,
+            RenderState::Quarantined => 2,
+        });
+        hasher.write_u64(u64::from(self.quality.tier()));
+        hasher.write_u64(self.last_good_generation);
+        hasher.write_u64(self.held_frames);
+        hasher.finish()
+    }
+
     /// Record one verified clean frame: the generation becomes last-good.
     /// Never resets budgets or quality; only [`Self::try_recover`] does.
     pub fn note_presented(&mut self, generation: u64) {
@@ -475,14 +493,26 @@ impl RenderHeal {
             Ok(value) => {
                 let attempts = self.supervisor.attempts(code);
                 let backoff_ms = self.next_backoff_ms(code);
-                self.reset_render_budgets();
+                let before = self.state_digest();
                 self.state = RenderState::Live;
                 self.quality = QualityLevel::DEFAULT;
+                let after = self.state_digest();
+                // A budget is only cleared by a proved recovery (the observe
+                // rule). The rebuild is that proof: it hands a fresh pipeline
+                // back, so the render heal writes the proof for every render
+                // code it clears. A refused proof keeps the budget spent and
+                // says so in the notice, so the refusal is never silent.
+                let cleared = self.reset_render_budgets(before, after);
                 let message = bound_notice(&format!(
-                    "render recovered: {event:?} rebuilt at tick {tick} after {attempts} faults (last backoff {backoff_ms}ms); last-good generation {} held {} frames, quality restored to {}",
+                    "render recovered: {event:?} rebuilt at tick {tick} after {attempts} faults (last backoff {backoff_ms}ms); last-good generation {} held {} frames, quality restored to {}{}",
                     self.last_good_generation,
                     self.held_frames,
-                    self.quality.label()
+                    self.quality.label(),
+                    if cleared {
+                        ""
+                    } else {
+                        "; a render fault budget was NOT cleared"
+                    }
                 ));
                 self.notice.clone_from(&message);
                 Ok((
@@ -517,10 +547,15 @@ impl RenderHeal {
         }
     }
 
-    /// Clear one render fault budget after operator-verified recovery.
+    /// Clear one render fault budget after an operator-verified recovery.
     /// Tape history is kept: history is evidence, not budget.
+    ///
+    /// The operator's word is the verification here, so this is the loud
+    /// escape hatch: the supervisor records that the budget was reset
+    /// without a machine proof. A machine-proved recovery goes through
+    /// [`Self::try_recover`], which carries its own proof.
     pub fn reset(&mut self, code: EventCode) {
-        self.supervisor.reset(code);
+        self.supervisor.reset_unverified(code);
         if !self.any_quarantined() && self.state == RenderState::Quarantined {
             self.state = RenderState::Degraded;
         }
@@ -573,10 +608,27 @@ impl RenderHeal {
 
     /// Reset every render fault budget after a verified rebuild. History
     /// stays: tape and ring rows are evidence, not budget.
-    fn reset_render_budgets(&mut self) {
+    ///
+    /// The rebuild is the proof: it hands a fresh pipeline back, so every
+    /// render code gets a proved recovery that clears its budget. A code
+    /// whose proof is refused keeps its budget, and the caller says so in
+    /// the notice.
+    fn reset_render_budgets(&mut self, before: u64, after: u64) -> bool {
+        let mut cleared = true;
         for code in [DEVICE_FAULT, SURFACE_FAULT, OOM_FAULT] {
-            self.supervisor.reset(code);
+            let attempt = self.supervisor.attempts(code).max(1);
+            let proof = VerifiedRecovery::new(
+                code,
+                attempt,
+                HealValidation::Recovered,
+                before,
+                after,
+            );
+            if self.supervisor.reset_verified(&proof).is_err() {
+                cleared = false;
+            }
         }
+        cleared
     }
 
     /// True while any render fault row spent its budget.

@@ -670,7 +670,7 @@ impl ForkJob {
                 buttons: self.buttons,
                 fight: self.fight,
                 match_track: super::match_wire::MatchTrack::from_state(
-                    self.match_state,
+                    &self.match_state,
                     self.match_version,
                     self.phased,
                 ),
@@ -708,6 +708,9 @@ impl ForkJob {
                 depth,
                 limbs: LimbPool::new(MAX_LIMBS).ok()?,
                 spear: None,
+                // Forks come from v1 prefix snapshots only, which carry no
+                // pilum volley: the channel stays off.
+                pilum: None,
                 rise: Vec::new(),
                 height: false,
                 #[cfg(test)]
@@ -821,9 +824,7 @@ impl ForkJob {
                 let tick = base_tick + index as u32;
                 let observed = &pre_states[..fighters];
                 let row_of = |slot: usize| -> Option<Row> {
-                    let Some(input) = inputs[slot] else {
-                        return None;
-                    };
+                    let input = inputs[slot]?;
                     let step = StepRecord {
                         tick,
                         states: observed,

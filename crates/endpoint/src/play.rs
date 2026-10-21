@@ -221,6 +221,9 @@ pub struct PlayRunOutput {
     // timing existed. Wall time never enters a digest or a hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<PlayTimingDto>,
+    // AX28: where the disk-backed job counters live, relative to the
+    // workspace root. Empty when the door could not write them.
+    pub counters: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,23 +324,165 @@ pub struct CaptureOutput {
 // Job registry: poll/cancel/expiry plus bounded logs over eager matches.
 // ---------------------------------------------------------------------------
 
-/// Live job phase; serialized as `running|completed|cancelled|expired`.
+/// Live job phase; serialized as `pending|running|completed|failed|cancelled|expired`.
+///
+/// AX28: one vocabulary for every job the door serves, so a client polls
+/// one set of words instead of one per job kind. `pending` is a job that is
+/// filed but not yet run, `running` is a job that is working, `completed` is
+/// a job that finished with a result, `failed` is a job that finished with
+/// a refusal, `cancelled` is a job the caller stopped, `expired` is a job
+/// that outlived its poll budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JobStatus {
+pub enum JobStatus {
+    /// Filed, not yet running.
+    Pending,
+    /// Working.
     Running,
+    /// Finished with a result.
     Completed,
+    /// Finished with a refusal.
+    Failed,
+    /// Stopped by the caller.
     Cancelled,
+    /// Outlived its poll budget.
     Expired,
 }
 
 impl JobStatus {
-    fn as_str(self) -> &'static str {
+    /// Every status, in vocabulary order.
+    pub const ALL: [JobStatus; 6] = [
+        JobStatus::Pending,
+        JobStatus::Running,
+        JobStatus::Completed,
+        JobStatus::Failed,
+        JobStatus::Cancelled,
+        JobStatus::Expired,
+    ];
+
+    /// The wire word for this status.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::Running => "running",
             Self::Completed => "completed",
+            Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Expired => "expired",
         }
+    }
+
+    /// Read a status word back; `None` for a word outside the vocabulary.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|status| status.as_str() == text)
+    }
+
+    /// True when the job will not move again.
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::Pending | Self::Running)
+    }
+}
+
+/// The job counters: one count per status word.
+///
+/// AX28: the counts are backed by disk. The table keeps them live and writes
+/// them to `target/reports/play-jobs.json` when a job reaches a terminal
+/// status, so a session that starts later reconciles against the file
+/// instead of counting from zero. The file is the evidence; the live
+/// counters are this session's view of it.
+///
+/// Units: jobs. Determinism: the same jobs in the same order give the same
+/// counts and the same file body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+pub struct JobCounters {
+    /// Jobs filed and not yet run.
+    pub pending: u64,
+    /// Jobs working.
+    pub running: u64,
+    /// Jobs that finished with a result.
+    pub completed: u64,
+    /// Jobs that finished with a refusal.
+    pub failed: u64,
+    /// Jobs the caller stopped.
+    pub cancelled: u64,
+    /// Jobs that outlived their poll budget.
+    pub expired: u64,
+}
+
+impl JobCounters {
+    /// Where the counters live, relative to the workspace root.
+    pub const FILE: &'static str = "target/reports/play-jobs.json";
+
+    /// Count one job in one status.
+    pub fn bump(&mut self, status: JobStatus) {
+        match status {
+            JobStatus::Pending => self.pending += 1,
+            JobStatus::Running => self.running += 1,
+            JobStatus::Completed => self.completed += 1,
+            JobStatus::Failed => self.failed += 1,
+            JobStatus::Cancelled => self.cancelled += 1,
+            JobStatus::Expired => self.expired += 1,
+        }
+    }
+
+    /// The count for one status.
+    #[must_use]
+    pub fn count(&self, status: JobStatus) -> u64 {
+        match status {
+            JobStatus::Pending => self.pending,
+            JobStatus::Running => self.running,
+            JobStatus::Completed => self.completed,
+            JobStatus::Failed => self.failed,
+            JobStatus::Cancelled => self.cancelled,
+            JobStatus::Expired => self.expired,
+        }
+    }
+
+    /// Every count, one line per status, in vocabulary order.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        for status in JobStatus::ALL {
+            out.push_str(&format!("{}: {}\n", status.as_str(), self.count(status)));
+        }
+        out
+    }
+
+    /// The total number of jobs counted.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        JobStatus::ALL
+            .into_iter()
+            .map(|status| self.count(status))
+            .sum()
+    }
+
+    /// Write the counters under `root` and return the relative path.
+    ///
+    /// The write is best effort for the caller: a job that already happened
+    /// is never undone because the disk said no.
+    pub fn write(&self, root: &std::path::Path) -> Result<String, McpToolError> {
+        let dir = root.join("target/reports");
+        let failed = |why: std::io::Error| {
+            McpToolError::new(
+                "counters_unwritten",
+                format!("could not write {} ({why})", Self::FILE),
+            )
+        };
+        std::fs::create_dir_all(&dir).map_err(failed)?;
+        let body = rmcp::serde_json::to_string_pretty(self).unwrap_or_default();
+        std::fs::write(root.join(Self::FILE), body).map_err(failed)?;
+        Ok(Self::FILE.to_owned())
+    }
+
+    /// Read the counters back from `root`; `None` when there is no file.
+    #[must_use]
+    pub fn read(root: &std::path::Path) -> Option<Self> {
+        let text = std::fs::read_to_string(root.join(Self::FILE)).ok()?;
+        rmcp::serde_json::from_str(&text).ok()
     }
 }
 
@@ -390,6 +535,11 @@ pub struct PlayJobs {
     jobs: BTreeMap<u64, PlayJob>,
     /// Bounded ring of start wall times: read only when `timing` is asked.
     timing: play_session::TimingRing,
+    /// AX28: the live job counters, backed by `target/reports/play-jobs.json`.
+    counters: JobCounters,
+    /// AX28: where the counters were last written; empty until a write
+    /// landed.
+    counters_path: String,
 }
 
 impl PlayJobs {
@@ -399,6 +549,53 @@ impl PlayJobs {
             next_id: 1,
             jobs: BTreeMap::new(),
             timing: play_session::TimingRing::default(),
+            counters: JobCounters::default(),
+            counters_path: String::new(),
+        }
+    }
+
+    /// The live job counters.
+    #[must_use]
+    pub fn counters(&self) -> &JobCounters {
+        &self.counters
+    }
+
+    /// Reconcile the live counters with the file on disk.
+    ///
+    /// AX28: a session that starts after a crash keeps the jobs the earlier
+    /// session counted, so the count names the work and not the process.
+    /// The merged counts stay in memory until the next write. Read-only over
+    /// the file: a missing or unreadable file changes nothing.
+    pub fn reconcile_counters(&mut self, root: &std::path::Path) -> bool {
+        let Some(on_disk) = JobCounters::read(root) else {
+            return false;
+        };
+        for status in JobStatus::ALL {
+            let seen = self.counters.count(status);
+            let stored = on_disk.count(status);
+            if stored > seen {
+                match status {
+                    JobStatus::Pending => self.counters.pending = stored,
+                    JobStatus::Running => self.counters.running = stored,
+                    JobStatus::Completed => self.counters.completed = stored,
+                    JobStatus::Failed => self.counters.failed = stored,
+                    JobStatus::Cancelled => self.counters.cancelled = stored,
+                    JobStatus::Expired => self.counters.expired = stored,
+                }
+            }
+        }
+        true
+    }
+
+    /// Count one job and write the counters out.
+    ///
+    /// The write is best effort: a job that already happened is never
+    /// undone because the disk said no, so a failed write leaves the live
+    /// counts ahead of the file.
+    fn count_job(&mut self, status: JobStatus) {
+        self.counters.bump(status);
+        if let Ok(path) = self.counters.write(std::path::Path::new(".")) {
+            self.counters_path = path;
         }
     }
 
@@ -611,12 +808,16 @@ impl PlayJobs {
             job.truncated_logs = true;
         }
         self.jobs.insert(id, job);
+        // AX28: the filed job is counted as running and the counters hit the
+        // disk.
+        self.count_job(JobStatus::Running);
         let job = self.jobs.get(&id).expect("inserted job reads back");
         Ok(render_output(
             id,
             job,
             vec![format!("job {id} staged")],
             requested_timing(job, wants_timing),
+            &self.counters_path,
         ))
     }
 
@@ -631,9 +832,20 @@ impl PlayJobs {
         })?;
         let timing = requested_timing(job, wants_timing);
         match job.status {
-            JobStatus::Completed | JobStatus::Cancelled | JobStatus::Expired => {
-                Ok(render_output(id, job, Vec::new(), timing))
-            }
+            JobStatus::Completed | JobStatus::Cancelled | JobStatus::Expired => Ok(render_output(
+                id,
+                job,
+                Vec::new(),
+                timing,
+                &self.counters_path,
+            )),
+            JobStatus::Pending | JobStatus::Failed => Err(McpToolError::new(
+                "job_not_running",
+                format!(
+                    "job {id} is {}; only running jobs poll (action=`start` opens one)",
+                    job.status.as_str()
+                ),
+            )),
             JobStatus::Running => {
                 if job.polls_used >= job.ttl_polls {
                     job.status = JobStatus::Expired;
@@ -641,7 +853,11 @@ impl PlayJobs {
                     let ttl = job.ttl_polls;
                     push_log(job, format!("job {id} expired after {ttl} polls"));
                     let job = self.jobs.get(&id).expect("expired job reads back");
-                    return Ok(render_output(id, job, Vec::new(), timing));
+                    let out = render_output(id, job, Vec::new(), timing, &self.counters_path);
+                    // AX28: the expired job is counted and the counters hit
+                    // the disk.
+                    self.count_job(JobStatus::Expired);
+                    return Ok(out);
                 }
                 job.polls_used += 1;
                 if job.polls_used == 1 {
@@ -663,6 +879,7 @@ impl PlayJobs {
                             format!("halfway checkpoint tick {mid} hash {mid_hash:016x}"),
                         ],
                         timing,
+                        &self.counters_path,
                     ));
                 }
                 let done = job.checkpoints.len();
@@ -678,7 +895,11 @@ impl PlayJobs {
                     },
                 );
                 let job = self.jobs.get(&id).expect("completed job reads back");
-                Ok(render_output(id, job, Vec::new(), timing))
+                let out = render_output(id, job, Vec::new(), timing, &self.counters_path);
+                // AX28: the completed job is counted and the counters hit the
+                // disk.
+                self.count_job(JobStatus::Completed);
+                Ok(out)
             }
         }
     }
@@ -699,7 +920,11 @@ impl PlayJobs {
                 job.checkpoints = Vec::new();
                 push_log(job, format!("job {id} cancelled; result dropped"));
                 let job = self.jobs.get(&id).expect("cancelled job reads back");
-                Ok(render_output(id, job, Vec::new(), timing))
+                let out = render_output(id, job, Vec::new(), timing, &self.counters_path);
+                // AX28: the cancelled job is counted and the counters hit the
+                // disk.
+                self.count_job(JobStatus::Cancelled);
+                Ok(out)
             }
             JobStatus::Completed => Err(McpToolError::new(
                 "job_already_done",
@@ -881,6 +1106,7 @@ fn render_output(
     job: &PlayJob,
     events: Vec<String>,
     timing: Option<PlayTimingDto>,
+    counters: &str,
 ) -> PlayRunOutput {
     let (progress, events, checkpoints, final_hash) = match job.status {
         JobStatus::Running => {
@@ -919,6 +1145,18 @@ fn render_output(
             Vec::new(),
             None,
         ),
+        JobStatus::Pending => (
+            0.0,
+            vec!["job pending; no result yet".to_owned()],
+            Vec::new(),
+            None,
+        ),
+        JobStatus::Failed => (
+            0.0,
+            vec!["job failed; result dropped".to_owned()],
+            Vec::new(),
+            None,
+        ),
     };
     PlayRunOutput {
         job_id: id,
@@ -935,6 +1173,7 @@ fn render_output(
         scene_rev: job.scene_rev,
         scene_digest: job.scene_digest.clone(),
         timing,
+        counters: counters.to_owned(),
     }
 }
 
@@ -1534,6 +1773,108 @@ mod tests {
             .expect_err("cancel after done fails");
         assert_eq!(late.code, "job_already_done");
         assert!(late.message.contains("poll"));
+    }
+
+    /// AX28 (the landed half of MCX-7): a play job is a handle with a status
+    /// vocabulary, the job digest equals the blocking run's digest, and a
+    /// cancel of a finished job is refused by name. The scene never moves: a
+    /// job reads the scene, it never writes it.
+    #[test]
+    fn task_play_run_returns_a_handle_with_a_status_and_counters() {
+        let server = server();
+        let scene_before = server.lock().expect("lock").doc.revision;
+        let started = invoke(&server, start_args(32)).expect("start validates");
+        let id = started.job_id;
+        assert_ne!(id, 0, "the handle comes back");
+        assert_eq!(started.status, "running");
+
+        // The status vocabulary is the six AX28 words and nothing else.
+        let words: Vec<&str> = JobStatus::ALL
+            .iter()
+            .map(|status| status.as_str())
+            .collect();
+        assert_eq!(
+            words,
+            vec![
+                "pending",
+                "running",
+                "completed",
+                "failed",
+                "cancelled",
+                "expired"
+            ]
+        );
+        for status in JobStatus::ALL {
+            assert_eq!(JobStatus::parse(status.as_str()), Some(status));
+            assert_eq!(
+                status.is_terminal(),
+                !matches!(status, JobStatus::Pending | JobStatus::Running),
+                "{status:?} terminal word"
+            );
+        }
+
+        // The job digest equals the digest of the blocking run.
+        invoke(&server, run_action("poll", Some(id))).expect("progress poll");
+        let done = invoke(&server, run_action("poll", Some(id))).expect("completing poll");
+        assert_eq!(done.status, "completed");
+        let config = ArenaConfig {
+            seed: 2040,
+            ticks: 32,
+            fighters: 2,
+            half_extent_m: 20.0,
+            table_version: 1,
+        };
+        let direct = run(&config, &FighterTape(Vec::new()));
+        assert_eq!(done.final_hash, Some(direct.last().expect("32 ticks").hash));
+
+        // A cancel of a finished job is refused by name and moves nothing.
+        let refused = invoke(&server, run_action("cancel", Some(id))).expect_err("cancel refuses");
+        assert_eq!(refused.code, "job_already_done");
+        assert!(
+            refused.message.contains("poll"),
+            "the refusal names the legal next step: {}",
+            refused.message
+        );
+        assert_eq!(
+            server.lock().expect("lock").doc.revision,
+            scene_before,
+            "a job and a cancel never touch the scene"
+        );
+
+        // The answer names the counters file, and the live counters counted
+        // this job under its status words.
+        assert_eq!(started.counters, JobCounters::FILE);
+        let live = server.lock().expect("lock").jobs.counters().clone();
+        assert!(
+            live.count(JobStatus::Running) >= 1,
+            "the started job was counted: {live:?}"
+        );
+        assert!(
+            live.count(JobStatus::Completed) >= 1,
+            "the completed job was counted: {live:?}"
+        );
+
+        // The counters round trip through the disk under their own path.
+        let root = std::env::temp_dir().join(format!("play-counters-{}", std::process::id()));
+        let written = JobCounters {
+            pending: 1,
+            running: 2,
+            completed: 3,
+            failed: 4,
+            cancelled: 5,
+            expired: 6,
+        }
+        .write(&root)
+        .expect("counters write");
+        assert_eq!(written, JobCounters::FILE);
+        let read_back = JobCounters::read(&root).expect("counters read back");
+        assert_eq!(read_back.completed, 3);
+        assert_eq!(read_back.total(), 21);
+
+        println!(
+            "task_play_run: job handle returned, digest equal to blocking run, \
+             cancel refused the job PASS"
+        );
     }
 
     #[test]
@@ -2284,7 +2625,8 @@ mod tests {
     // exactly these bytes. Wall time never enters a digest or a hash.
     // -----------------------------------------------------------------------
 
-    /// `play.run` output before PF24 (same field order and types).
+    /// `play.run` output before PF24 (same field order and types), plus the
+    /// AX28 `counters` path, which the job table owns.
     #[derive(Serialize)]
     #[serde(crate = "rmcp::serde")]
     struct LegacyRunOutput {
@@ -2301,6 +2643,7 @@ mod tests {
         half_extent_m: f32,
         scene_rev: Option<u64>,
         scene_digest: Option<String>,
+        counters: String,
     }
 
     impl LegacyRunOutput {
@@ -2319,6 +2662,7 @@ mod tests {
                 half_extent_m: out.half_extent_m,
                 scene_rev: out.scene_rev,
                 scene_digest: out.scene_digest.clone(),
+                counters: out.counters.clone(),
             }
         }
     }

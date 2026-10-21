@@ -7,21 +7,30 @@ use engine_ecs::archetype::{Position as APos, Velocity as AVel, World as AWorld}
 use engine_nav::flow::{bake_flow, flow_hash, follow};
 use engine_net::netcode::MAX_ROLLBACK;
 use engine_net::rollback::FrameLog;
-use engine_physics::kcc::{self, KccConfig, KccInput, KccState, World as KccWorld, V3};
+use engine_physics::controller2::{
+    state_hash, step_walker, Block, Config, StepWorld, TickInput, Walker,
+};
 use engine_render::graph::Graph;
 
-/// Runs the kinematic controller 60 fixed ticks and returns its state hash.
-fn kcc_run() -> u64 {
-    let cfg = KccConfig::default();
-    let mut world = KccWorld::new();
-    world.ground(0.0);
-    let mut state = KccState::new(V3::new(0.0, 1.0, 0.0));
+/// Runs the integer character controller 60 fixed ticks and returns its state hash.
+fn walker_run() -> u64 {
+    let ground = Block::new([-50_000, -1_000, -50_000], [50_000, 0, 50_000]);
+    let world = StepWorld {
+        blocks: &[ground],
+        ramps: &[],
+        platforms: &[],
+    };
+    let cfg = Config::default();
+    let mut walker = Walker::spawn(1, [0, 1_000, 0]);
     for tick in 0..60 {
-        let input = KccInput::new(V3::new(1.0, 0.0, 0.0), tick == 59);
-        kcc::step(&cfg, &world, &mut state, &input, 1.0 / 60.0);
+        let input = TickInput {
+            wish_mm_s: [1_000, 0],
+            jump_pressed: tick == 59,
+        };
+        step_walker(&mut walker, &input, &world, &cfg);
     }
-    assert!(state.pos.y >= 0.0, "controller fell through the ground");
-    kcc::state_hash(&state)
+    assert!(walker.pos_mm[1] >= 0, "the walker fell through the ground");
+    state_hash(&walker)
 }
 
 fn main() {
@@ -34,9 +43,9 @@ fn main() {
     arch.integrate(1.0);
     assert!(arch.despawn(e));
     let arch_hash = arch.state_hash();
-    // character controller (kcc): drop onto ground, jump on the last tick
-    let ch_hash = kcc_run();
-    assert_eq!(kcc_run(), ch_hash);
+    // character controller: drop onto ground, jump on the last tick
+    let ch_hash = walker_run();
+    assert_eq!(walker_run(), ch_hash);
     // flow
     let blocked = vec![false; 8 * 8];
     let flow = bake_flow(&blocked, 8, 8, (7, 7));

@@ -2,10 +2,10 @@
 
 ## Scale first
 
-Fighter height 1800mm (1.8 m, eye 170cm), sword reach 2000mm (200 cm, rome-spec),
-dodge distance 2m. No geometry below means anything until these three hold:
-a fighter must fit under the gate (500cm), be hit inside 2000mm of a zone
-centre, and clear a bumper with one 2m dodge.
+Fighter height 1800mm (1.8 m, eye 170cm), blade reach 1500mm
+(`crates/arena/src/match_wire.rs:33`), dodge 10 ticks (`content/design/combat.rows:9`).
+No geometry below means anything until these three hold: a fighter must fit under
+the gate (500cm), be hit inside 2000mm of a zone centre, and strike inside 1500mm.
 
 Function before form: every actor below names its use first, then one past
 event (cause and result, two sentences), then its goal.
@@ -81,12 +81,12 @@ at all (measured 2026-10-17):
   (`|cx|,|cz| <= 1000`): `cover crate_a stands outside the duel floor at
   (3400,0): the fight never reaches it`, exit 1.
 - A dominance flag no fighter can hold. A `dominance=1` row on the 15 m
-  `sand_floor` passed, though two fighters stand outside each other's 2000mm
+  `sand_floor` passed, though two fighters stand outside each other's 1500mm
   reach across it. Now a dominance row must sit on the floor and its radius must
-  stay inside the hold circle (sword reach 2000mm plus one 100 cm body step =
-  `DOMINANCE_HOLD_RADIUS_CM` 300 cm; the tool owns the cap until the director
-  names one, as it owns the walk band): `dominance sand_floor is not holdable
-  alone (radius_cm 1500 above cap 300 or centre off the duel floor)`, exit 1.
+  stay inside the hold circle (the tool's own cap `DOMINANCE_HOLD_RADIUS_CM`
+  300 cm; the engine blade reach is 1500mm, `crates/arena/src/match_wire.rs:33`):
+  `dominance sand_floor is not holdable alone (radius_cm 1500 above cap 300 or
+  centre off the duel floor)`, exit 1.
 - A risk flag no rule read. The fourth column (`risk`) was read by nothing:
   seeding `risk=1` on the live 60 m `sand_floor` row printed `failures: []` and
   exit 0 while the fight never walks 60 m out (Worlds II.6: a risk point the

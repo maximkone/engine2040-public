@@ -2,6 +2,8 @@
 //! canvas size for a CSS box, the frame line, the JSON the headless check reads, and the
 //! verdict on a captured frame (WEB5).
 
+use engine_audio::FightCue;
+
 use crate::recovery::LossNote;
 use crate::report::Object;
 
@@ -136,18 +138,32 @@ impl Counters {
     }
 }
 
+/// Everything the receipt line says, in one place: the tier, the counters, the frame time, the
+/// draw count, the first error text, the last device loss (the browser's reason and message, and
+/// who ended the device) and the scene the frame drew (PW37).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Receipt<'a> {
+    pub tier: &'a str,
+    pub counters: Counters,
+    pub frame_ms: f64,
+    pub cpu_ms: f64,
+    pub draws: u32,
+    pub first_error: Option<&'a str>,
+    pub last_loss: Option<&'a LossNote>,
+    /// The scene the last frame drew, as [`scene_word`] names it.
+    pub scene: &'a str,
+    /// The word for the last fight cue the page saw (`PARRY`, `BLOCK`, ...), if any.
+    pub cue: Option<&'a str>,
+    /// What the frame gate measured against the reference capture, once a frame was captured.
+    pub gate: Option<Gate>,
+}
+
 /// The receipt JSON: the tier, counters, the frame time, the draw count, the last device loss
-/// (the browser's reason and message, and who ended the device) and the first error text.
+/// (the browser's reason and message, and who ended the device), the first error text and the
+/// name of the scene the frame drew.
 #[must_use]
-pub fn receipt_line(
-    tier: &str,
-    counters: &Counters,
-    frame_ms: f64,
-    cpu_ms: f64,
-    draws: u32,
-    first_error: Option<&str>,
-    last_loss: Option<&LossNote>,
-) -> String {
+pub fn receipt_line(r: &Receipt<'_>) -> String {
+    let counters = &r.counters;
     let mut o = Object::new();
     o.bool(
         "ok",
@@ -155,7 +171,8 @@ pub fn receipt_line(
             && counters.frame_errors == 0
             && counters.late_pipelines == 0,
     )
-    .str("tier", tier)
+    .str("tier", r.tier)
+    .str("scene", r.scene)
     .uint("frames", counters.frames)
     .uint("frameErrors", counters.frame_errors)
     .uint("validationErrors", counters.validation_total())
@@ -166,29 +183,225 @@ pub fn receipt_line(
     )
     .uint("uncapturedErrors", counters.uncaptured_errors)
     .uint("latePipelines", counters.late_pipelines)
-    .raw("frameMs", &format!("{frame_ms:.2}"))
-    .raw("cpuMs", &format!("{cpu_ms:.2}"))
-    .uint("draws", u64::from(draws))
+    .raw("frameMs", &format!("{:.2}", r.frame_ms))
+    .raw("cpuMs", &format!("{:.2}", r.cpu_ms))
+    .uint("draws", u64::from(r.draws))
     .uint("steps", counters.steps)
     .uint("maxStepsPerFrame", u64::from(counters.max_steps_per_frame))
     .uint("hiddenSkips", u64::from(counters.hidden_skips))
     .uint("losses", u64::from(counters.losses));
-    if let Some(loss) = last_loss {
+    if let Some(cue) = r.cue {
+        o.str("cue", cue);
+    }
+    if let Some(gate) = r.gate {
+        let mut g = Object::new();
+        g.raw("ssim", &format!("{:.4}", gate.ssim))
+            .raw("bar", &format!("{:.2}", gate.bar))
+            .bool("pass", gate.pass);
+        o.raw("gate", &g.finish());
+    }
+    if let Some(loss) = r.last_loss {
         let mut note = Object::new();
         note.str("reason", &loss.reason)
             .str("cause", loss.cause.word())
             .str("message", &loss.message);
         o.raw("lastLoss", &note.finish());
     }
-    if let Some(text) = first_error {
+    if let Some(text) = r.first_error {
         o.str("firstError", text);
     }
     o.finish()
 }
 
+/// The scene name for a drawn frame: the cooked kit's own name once any of it draws resident,
+/// `procedural-fight` for a played match on the stand-in ring, `procedural-ring` for the
+/// stand-in arena alone. A capture can be checked against the scene the receipt names.
+#[must_use]
+pub fn scene_word(kit_drawn: usize, played: bool) -> &'static str {
+    if kit_drawn > 0 {
+        "arena-kit"
+    } else if played {
+        "procedural-fight"
+    } else {
+        "procedural-ring"
+    }
+}
+
+/// The page's word for one frame of fight cues, `None` on a quiet tick. Two cues can land on
+/// one tick (a block and the chip hit behind it), so the words have a fixed order: a knockdown
+/// speaks loudest, then a parry, a block, a plain hit, a dodge and an empty stamina bar.
+#[must_use]
+pub fn cue_word(cues: &[FightCue]) -> Option<&'static str> {
+    let rank = |cue: &FightCue| match *cue {
+        FightCue::Knockdown { .. } => Some(("DOWN", 6u8)),
+        FightCue::Parried { .. } => Some(("PARRY", 5)),
+        FightCue::Blocked { .. } => Some(("BLOCK", 4)),
+        FightCue::Hit { .. } => Some(("HIT", 3)),
+        FightCue::Dodged { .. } => Some(("DODGE", 2)),
+        FightCue::StaminaOut { .. } => Some(("TIRED", 1)),
+    };
+    cues.iter()
+        .filter_map(rank)
+        .max_by_key(|(_, weight)| *weight)
+        .map(|(word, _)| word)
+}
+
+/// The luma grid the frame gate compares: a fixed picture, small enough to keep in the module
+/// and coarse enough that two runs of the same scene land on it.
+pub const GRID_W: usize = 160;
+/// The grid's height in cells: 90 rows over a 16:9 frame.
+pub const GRID_H: usize = 90;
+/// The SSIM a captured frame must reach against the reference capture to pass the gate.
+pub const GATE_BAR: f64 = 0.95;
+/// The reference capture of the cooked arena: the luma grid of a real page capture, one luma
+/// byte per cell. It is the picture the gate measures against.
+pub const REFERENCE: &[u8] = include_bytes!("../fixtures/arena-gate-reference.luma");
+
+/// The luma grid of an RGBA frame: every pixel lands in one cell of a fixed 160x90 grid and a
+/// cell holds the mean luma of its pixels (0.2126 r + 0.7152 g + 0.0722 b, colours in 0..1).
+/// A frame too small for the grid gives an empty grid, and an empty grid fails the gate.
+#[must_use]
+pub fn luma_grid(rgba: &[u8], width: u32, height: u32) -> Vec<f64> {
+    let mut grid = vec![0.0f64; GRID_W * GRID_H];
+    let (w, h) = (
+        usize::try_from(width).unwrap_or(0),
+        usize::try_from(height).unwrap_or(0),
+    );
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return Vec::new();
+    }
+    // Every cell owns the pixels between its own share of the width and the next one's, so
+    // each pixel is counted once and a cell holds a true average of its own pixels.
+    for gy in 0..GRID_H {
+        let y0 = (gy * h) / GRID_H;
+        let y1 = ((gy + 1) * h) / GRID_H;
+        for gx in 0..GRID_W {
+            let x0 = (gx * w) / GRID_W;
+            let x1 = ((gx + 1) * w) / GRID_W;
+            let mut sum = 0.0f64;
+            let mut count = 0u32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let at = (y * w + x) * 4;
+                    sum += 0.2126 * f64::from(rgba[at])
+                        + 0.7152 * f64::from(rgba[at + 1])
+                        + 0.0722 * f64::from(rgba[at + 2]);
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                grid[gy * GRID_W + gx] = sum / f64::from(count) / 255.0;
+            }
+        }
+    }
+    grid
+}
+
+/// The mean SSIM of two luma grids over the 8x8 windows they share: how alike the two
+/// pictures are, 1.0 for the same picture.
+#[must_use]
+pub fn ssim(a: &[f64], b: &[f64]) -> f64 {
+    const WIN: usize = 8;
+    const C1: f64 = 0.01 * 0.01;
+    const C2: f64 = 0.03 * 0.03;
+    let cells = f64::from(u32::try_from(WIN * WIN).unwrap_or(u32::MAX));
+    let mut total = 0.0f64;
+    let mut windows = 0usize;
+    let mut y = 0usize;
+    while y + WIN <= GRID_H {
+        let mut x = 0usize;
+        while x + WIN <= GRID_W {
+            let mut sa = 0.0f64;
+            let mut sb = 0.0f64;
+            let mut saa = 0.0f64;
+            let mut sbb = 0.0f64;
+            let mut sab = 0.0f64;
+            for j in 0..WIN {
+                for i in 0..WIN {
+                    let at = (y + j) * GRID_W + (x + i);
+                    let (Some(&va), Some(&vb)) = (a.get(at), b.get(at)) else {
+                        return 0.0;
+                    };
+                    sa += va;
+                    sb += vb;
+                    saa += va * va;
+                    sbb += vb * vb;
+                    sab += va * vb;
+                }
+            }
+            let ma = sa / cells;
+            let mb = sb / cells;
+            let va = saa / cells - ma * ma;
+            let vb = sbb / cells - mb * mb;
+            let cov = sab / cells - ma * mb;
+            total += ((2.0 * ma * mb + C1) * (2.0 * cov + C2))
+                / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+            windows += 1;
+            x += WIN;
+        }
+        y += WIN;
+    }
+    if windows == 0 {
+        return 0.0;
+    }
+    total / f64::from(u32::try_from(windows).unwrap_or(u32::MAX))
+}
+
+/// What the frame gate measured: the SSIM the page's own capture reached against the reference
+/// capture, the bar it had to reach, and whether it did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gate {
+    pub ssim: f64,
+    pub bar: f64,
+    pub pass: bool,
+}
+
+impl Gate {
+    /// The gate's own line: `frame gate: ssim=0.9812 bar=0.95 verdict=pass scene=arena-kit`.
+    #[must_use]
+    pub fn line(self, scene: &str) -> String {
+        format!(
+            "frame gate: ssim={:.4} bar={:.2} verdict={} scene={scene}",
+            self.ssim,
+            self.bar,
+            if self.pass { "pass" } else { "fail" }
+        )
+    }
+}
+
+/// The reference capture's luma grid: the stored bytes, one luma byte per cell.
+#[must_use]
+pub fn reference_grid() -> Vec<f64> {
+    luma_bytes_grid(REFERENCE)
+}
+
+/// A stored luma grid (one byte per cell) as the numbers the gate compares.
+#[must_use]
+pub fn luma_bytes_grid(bytes: &[u8]) -> Vec<f64> {
+    bytes.iter().map(|byte| f64::from(*byte) / 255.0).collect()
+}
+
+/// The gate for one captured frame: the SSIM of its luma grid against the reference capture's
+/// grid, and whether it reached the bar.
+#[must_use]
+pub fn frame_gate(page: &[f64]) -> Gate {
+    let ssim = ssim(page, &reference_grid());
+    Gate {
+        ssim,
+        bar: GATE_BAR,
+        pass: ssim >= GATE_BAR,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A second real capture of the same page, from another browser run: the gate's own margin.
+    const PAGE_CAPTURE: &[u8] = include_bytes!("../fixtures/arena-gate-page.luma");
+    /// A real capture of the stand-in ring (`?nokit`): the gate must tell the cooked arena
+    /// from the placeholder.
+    const RING_CAPTURE: &[u8] = include_bytes!("../fixtures/arena-gate-ring.luma");
 
     #[test]
     fn a_small_box_renders_at_its_device_pixels() {
@@ -275,13 +488,29 @@ mod tests {
         );
     }
 
+    /// A receipt for a healthy page: the tier `web`, the counters given, no error and no loss.
+    fn receipt<'a>(counters: &Counters, scene: &'a str) -> Receipt<'a> {
+        Receipt {
+            tier: "web",
+            counters: *counters,
+            frame_ms: 16.7,
+            cpu_ms: 3.2,
+            draws: 13,
+            first_error: None,
+            last_loss: None,
+            scene,
+            cue: None,
+            gate: None,
+        }
+    }
+
     #[test]
     fn the_receipt_is_ok_only_with_no_error_of_any_kind() {
         let healthy = Counters {
             frames: 120,
             ..Counters::default()
         };
-        let line = receipt_line("web", &healthy, 16.7, 3.2, 13, None, None);
+        let line = receipt_line(&receipt(&healthy, "arena-kit"));
         assert!(
             line.contains("\"ok\":true") && line.contains("\"validationErrors\":0"),
             "{line}"
@@ -313,15 +542,9 @@ mod tests {
                 ..healthy
             },
         ] {
-            let line = receipt_line(
-                "web",
-                &bad,
-                16.7,
-                3.2,
-                13,
-                Some("bind group \"x\" is invalid"),
-                None,
-            );
+            let mut r = receipt(&bad, "arena-kit");
+            r.first_error = Some("bind group \"x\" is invalid");
+            let line = receipt_line(&r);
             assert!(line.contains("\"ok\":false"), "{line}");
             assert!(line.contains("firstError"), "{line}");
         }
@@ -335,9 +558,7 @@ mod tests {
             ..Counters::default()
         };
         assert_eq!(all.validation_total(), 9, "the three kinds add up");
-        assert!(
-            receipt_line("web", &all, 1.0, 1.0, 1, None, None).contains("\"validationErrors\":9")
-        );
+        assert!(receipt_line(&receipt(&all, "arena-kit")).contains("\"validationErrors\":9"));
     }
 
     #[test]
@@ -350,7 +571,7 @@ mod tests {
             losses: 1,
             ..Counters::default()
         };
-        let none = receipt_line("web", &counters, 16.7, 3.2, 13, None, None);
+        let none = receipt_line(&receipt(&counters, "arena-kit"));
         for needle in [
             "\"steps\":290",
             "\"maxStepsPerFrame\":2",
@@ -365,7 +586,9 @@ mod tests {
             message: "the GPU process \"crashed\"".into(),
             cause: crate::recovery::Cause::Forced,
         };
-        let line = receipt_line("web", &counters, 16.7, 3.2, 13, None, Some(&loss));
+        let mut r = receipt(&counters, "arena-kit");
+        r.last_loss = Some(&loss);
+        let line = receipt_line(&r);
         assert!(
             line.contains(
                 "\"lastLoss\":{\"reason\":\"unknown\",\"cause\":\"forced\",\"message\":\"the GPU process \\\"crashed\\\"\"}"
@@ -425,6 +648,137 @@ mod tests {
         assert_eq!(
             scaled_frame_size(640.0, 360.0, f64::NAN, 100, 8192),
             (640, 360)
+        );
+    }
+
+    #[test]
+    fn the_receipt_names_the_scene_the_frame_drew() {
+        // The cooked kit's own name once any of it draws resident.
+        assert_eq!(scene_word(1, true), "arena-kit");
+        assert_eq!(scene_word(37, true), "arena-kit");
+        // A played match on the stand-in ring, and the ring alone.
+        assert_eq!(scene_word(0, true), "procedural-fight");
+        assert_eq!(scene_word(0, false), "procedural-ring");
+        let line = receipt_line(&receipt(&Counters::default(), "arena-kit"));
+        assert!(line.contains("\"scene\":\"arena-kit\""), "{line}");
+        let ring = receipt_line(&receipt(&Counters::default(), "procedural-ring"));
+        assert!(ring.contains("\"scene\":\"procedural-ring\""), "{ring}");
+        // A quiet fight has no cue word; a fight that parried names it.
+        assert!(!line.contains("\"cue\""), "{line}");
+        let mut cued = receipt(&Counters::default(), "arena-kit");
+        cued.cue = Some("PARRY");
+        assert!(
+            receipt_line(&cued).contains("\"cue\":\"PARRY\""),
+            "{cued:?}"
+        );
+    }
+
+    #[test]
+    fn the_page_speaks_the_strongest_cue_of_a_tick() {
+        let hit = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 120,
+        };
+        let block = FightCue::Blocked {
+            attacker: 1,
+            victim: 0,
+            chip: 40,
+        };
+        let parry = FightCue::Parried {
+            attacker: 1,
+            victim: 0,
+        };
+        let dodge = FightCue::Dodged {
+            attacker: 1,
+            victim: 0,
+        };
+        let tired = FightCue::StaminaOut { fighter: 0 };
+        let down = FightCue::Knockdown {
+            attacker: 1,
+            victim: 0,
+        };
+        assert_eq!(cue_word(&[]), None, "a quiet tick says nothing");
+        assert_eq!(cue_word(&[hit]), Some("HIT"));
+        assert_eq!(cue_word(&[block]), Some("BLOCK"));
+        assert_eq!(cue_word(&[parry]), Some("PARRY"));
+        assert_eq!(cue_word(&[dodge]), Some("DODGE"));
+        assert_eq!(cue_word(&[tired]), Some("TIRED"));
+        assert_eq!(cue_word(&[down]), Some("DOWN"));
+        // Two cues on one tick: the loudest word wins, whatever the order.
+        assert_eq!(cue_word(&[hit, block]), Some("BLOCK"));
+        assert_eq!(cue_word(&[block, hit]), Some("BLOCK"));
+        assert_eq!(cue_word(&[block, parry]), Some("PARRY"));
+        assert_eq!(cue_word(&[hit, down]), Some("DOWN"));
+        assert_eq!(cue_word(&[tired, dodge]), Some("DODGE"));
+    }
+
+    #[test]
+    fn the_luma_grid_holds_the_mean_luma_of_every_cell() {
+        // A frame with one pixel per grid cell: red in the first cell, green in the second.
+        let mut frame = vec![0u8; GRID_W * GRID_H * 4];
+        frame[0] = 255; // the first pixel is red
+        frame[5] = 255; // the second pixel is green
+        let (w, h) = (
+            u32::try_from(GRID_W).unwrap_or(160),
+            u32::try_from(GRID_H).unwrap_or(90),
+        );
+        let grid = luma_grid(&frame, w, h);
+        assert_eq!(grid.len(), GRID_W * GRID_H);
+        assert!((grid[0] - 0.2126).abs() < 1e-9, "{}", grid[0]);
+        assert!((grid[1] - 0.7152).abs() < 1e-9, "{}", grid[1]);
+        // A frame too small for the grid gives an empty grid: nothing to measure.
+        assert!(luma_grid(&frame[..8], 2, 2).is_empty());
+        assert!(luma_grid(&frame, 0, 2).is_empty());
+    }
+
+    #[test]
+    fn the_same_picture_measures_one_and_a_different_one_less() {
+        let grid = luma_grid(&[128u8; 64 * 64 * 4], 64, 64);
+        assert!(
+            (ssim(&grid, &grid) - 1.0).abs() < 1e-9,
+            "the same picture is one"
+        );
+        // A picture of a different brightness is not the same picture.
+        let darker: Vec<f64> = grid.iter().map(|v| v * 0.5).collect();
+        let value = ssim(&grid, &darker);
+        assert!(value < 1.0, "a darker picture is not one: {value}");
+        // The gate measures against the reference capture: the reference passes it, a flat
+        // grey frame does not.
+        let gate = frame_gate(&reference_grid());
+        assert!(gate.pass, "{gate:?}");
+        assert_eq!(gate.bar, GATE_BAR);
+        assert!(
+            gate.line("arena-kit").contains("verdict=pass"),
+            "{:?}",
+            gate.line("arena-kit")
+        );
+        let grey = frame_gate(&grid);
+        assert!(!grey.pass, "a grey frame is not the arena: {grey:?}");
+    }
+
+    #[test]
+    fn the_gate_measures_the_stored_captures_of_the_real_page() {
+        // The reference capture is a real page capture, and the page capture beside it is a
+        // second real run of the same page: the two must measure above the bar.
+        let reference = reference_grid();
+        assert_eq!(
+            reference.len(),
+            GRID_W * GRID_H,
+            "the reference is one grid"
+        );
+        let page = luma_bytes_grid(PAGE_CAPTURE);
+        let gate = frame_gate(&page);
+        assert!(
+            gate.ssim >= GATE_BAR,
+            "a second run of the same page measured {gate:?}, under the bar"
+        );
+        // The stand-in ring is a different picture: the gate must tell it apart.
+        let ring = luma_bytes_grid(RING_CAPTURE);
+        let ring_gate = frame_gate(&ring);
+        assert!(
+            ring_gate.ssim < GATE_BAR,
+            "the stand-in ring measured {ring_gate:?}, at or over the bar"
         );
     }
 }

@@ -554,6 +554,110 @@ fn second_machine_replays_tape_with_same_abi_and_ops() {
     assert_eq!(ops_a, ops_b);
 }
 
+/// A spec the recorder must refuse: the tape it would write cannot decode
+/// back into the same match, or the recorder trips over it.
+fn spec_with(field: &str) -> crate::tape::RecordSpec<'static> {
+    crate::tape::RecordSpec {
+        fighters: 4,
+        seed: 3,
+        ticks: 100,
+        checkpoint_every: 10,
+        installs: &[],
+        limits: Limits::DEFAULT,
+    }
+    .with(field)
+}
+
+trait With {
+    fn with(self, field: &str) -> crate::tape::RecordSpec<'static>;
+}
+
+impl With for crate::tape::RecordSpec<'static> {
+    fn with(mut self, field: &str) -> crate::tape::RecordSpec<'static> {
+        match field {
+            "fighters" => self.fighters = 0,
+            "ticks" => self.ticks = 0,
+            "checkpoint_every" => self.checkpoint_every = 0,
+            "installs" => self.installs = &[(10, SHIELD_BASH), (10, SHIELD_BASH)],
+            _ => panic!("unknown field {field}"),
+        }
+        self
+    }
+}
+#[test]
+fn record_refuses_a_spec_the_decoder_would_reject() {
+    let mut library = ScriptLibrary::new();
+    // A zero cadence divided the checkpoint count by zero: the recorder
+    // panicked instead of refusing the spec.
+    assert_eq!(
+        crate::tape::record(&spec_with("checkpoint_every"), Vec::new(), &mut library),
+        Err(RulesError::BadSpec {
+            field: "checkpoint_every",
+            value: 0
+        })
+    );
+    // A match with no fighters or no ticks is a tape the decoder refuses.
+    assert_eq!(
+        crate::tape::record(&spec_with("fighters"), Vec::new(), &mut library),
+        Err(RulesError::BadSpec {
+            field: "fighters",
+            value: 0
+        })
+    );
+    assert_eq!(
+        crate::tape::record(&spec_with("ticks"), Vec::new(), &mut library),
+        Err(RulesError::BadSpec {
+            field: "ticks",
+            value: 0
+        })
+    );
+    // Two installs on one tick write two rows with the same tick, and the
+    // decoder refuses a tape whose script ticks do not rise.
+    assert_eq!(
+        crate::tape::record(&spec_with("installs"), Vec::new(), &mut library),
+        Err(RulesError::BadSpec {
+            field: "installs",
+            value: 10
+        })
+    );
+}
+
+#[test]
+fn a_recorded_tape_decodes_back_into_the_same_match() {
+    let mut library = ScriptLibrary::new();
+    let spec = crate::tape::RecordSpec {
+        fighters: 4,
+        seed: 3,
+        ticks: 100,
+        checkpoint_every: 10,
+        installs: &[(0, SHIELD_BASH)],
+        limits: Limits::DEFAULT,
+    };
+    let tape = crate::tape::record(&spec, scripted_inputs(4, 100, 3), &mut library).expect("records");
+    let decoded = RulesTape::decode(&tape.encode()).expect("the recorded tape decodes");
+    assert_eq!(decoded, tape);
+    replay(&decoded, &library, Limits::DEFAULT).expect("the decoded tape replays");
+}
+
+#[test]
+fn replay_refuses_a_malformed_tape_instead_of_panicking() {
+    let mut library = ScriptLibrary::new();
+    let mut tape = record_scripted(4, 21, 600, SHIELD_BASH, &mut library).unwrap();
+    // One checkpoint short: the replay used to index past the end.
+    tape.checkpoints.pop();
+    assert!(matches!(
+        replay(&tape, &library, Limits::DEFAULT),
+        Err(ReplayError::Tape(TapeError::Invalid(_)))
+    ));
+    // A tape whose inputs are not sorted is refused as well.
+    let mut unsorted = record_scripted(2, 21, 60, SHIELD_BASH, &mut library).unwrap();
+    unsorted.inputs.reverse();
+    assert!(matches!(
+        replay(&unsorted, &library, Limits::DEFAULT),
+        Err(ReplayError::Tape(TapeError::Invalid(_)))
+    ));
+}
+
 #[test]
 fn committed_old_tape_replays() {
     // Written once by `bless_old_tape` and committed: a tape from the past with its script.

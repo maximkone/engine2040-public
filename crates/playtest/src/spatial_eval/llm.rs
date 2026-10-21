@@ -42,7 +42,7 @@ const COUCH: (i32, i32) = (100, 45);
 const BRIEF_BYTES: usize = 4096;
 
 const SYSTEM: &str = "You answer one spatial question about a game scene. Reply with the answer only, no explanation. Coordinates are cm on a floor plan: +x is east, +z is north.";
-const VERB_TOOLS: &str = "Tools: scene.query kind=relation|near|between|visible|reachable|cover_near|largest_open|free_space|cone; scene.place with wants and dry_run. Call them, then answer.";
+const VERB_TOOLS: &str = "Tools: scene.query kind=relation|sees|near|between|visible|reachable|cover_near|largest_open; scene.place at=[x_cm,z_cm] with footprint_cm and dry_run. Call them, then answer.";
 
 /// Question family, in report order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,12 +155,12 @@ impl Rng {
 }
 
 /// Door-style label: scene index order, like the `prop_NNNN` names.
-fn label(scene: &Scene, id: u32) -> String {
+pub(super) fn label(scene: &Scene, id: u32) -> String {
     let at = scene.actors.iter().position(|a| a.id == id).unwrap_or(0);
     format!("prop_{at:04}")
 }
 
-fn labels(scene: &Scene, ids: &[u32]) -> String {
+pub(super) fn labels(scene: &Scene, ids: &[u32]) -> String {
     ids.iter()
         .map(|id| label(scene, *id))
         .collect::<Vec<_>>()
@@ -168,7 +168,7 @@ fn labels(scene: &Scene, ids: &[u32]) -> String {
 }
 
 /// Crates: everything but the four boundary walls (ids 0..=3 in every scene).
-fn crates_of(scene: &Scene) -> Vec<u32> {
+pub(super) fn crates_of(scene: &Scene) -> Vec<u32> {
     scene
         .actors
         .iter()
@@ -483,6 +483,18 @@ pub struct Cassette {
 
 /// Record `agent` over all questions and both arms.
 pub fn record(model: &str, agent: &dyn Model, qs: &[Question]) -> Cassette {
+    record_with_progress(model, agent, qs, &|_, _| {})
+}
+
+/// Record `agent` over all questions and both arms, calling `on_row` with the
+/// arm and question id after each answer. A live recorder uses it to show
+/// that the run moves.
+pub fn record_with_progress(
+    model: &str,
+    agent: &dyn Model,
+    qs: &[Question],
+    on_row: &dyn Fn(&str, &str),
+) -> Cassette {
     let mut rows = BTreeMap::new();
     for arm in [Arm::Raw, Arm::Verb] {
         for q in qs {
@@ -490,6 +502,7 @@ pub fn record(model: &str, agent: &dyn Model, qs: &[Question]) -> Cassette {
             reply.answer = reply.answer.replace(['\t', '\n', '\r'], " ");
             let key = key_of(model, arm, q);
             rows.insert((arm.as_str().to_owned(), q.id.clone()), Row { key, reply });
+            on_row(arm.as_str(), &q.id);
         }
     }
     Cassette {

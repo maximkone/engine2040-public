@@ -29,7 +29,7 @@ reports, beacon transit and wall clocks never enter a hash ("OUT" list in HASH-L
 | `link` | Seeded fault-injection wire: loss, jitter, reorder, outage, delay histograms. |
 | `heal` | `NetHeal`: disconnect, reconnect and desync resync through `engine_observe::supervisor`. |
 | `interest` | Relevancy, per-connection priority, bandwidth ledger for siege replication. |
-| `scale`, `wan_soak`, `tick_budget` | 8 to 16 fighter hardening, WAN soak, siege tick budget (presentation numbers only). |
+| `scale`, `wan_soak`, `tick_budget` | 8 to 32 fighter hardening, WAN soak, siege tick budget (presentation numbers only). |
 | `cells` | Tick-budgeted pre-cooked map-cell streaming (`CellQueue`, `CellPacket`, `CellReceipt`). |
 | `replay`, `receipt` | Input-tape replays with keyframes and divergence attribution; JSON receipts for posted proofs. |
 
@@ -211,7 +211,7 @@ Tests: `webtransport_plays_a_600_tick_snapshot_duel_with_a_pinned_client`,
 |---|---|
 | `heal.rs` | `NetHeal` owns the `engine_observe::supervisor::Supervisor`, a ring buffer, per-slot quarantine and operator notices. `QuarantineNotice`, `ReconnectPlan`, `AppliedHeal`, `NetHealError`. Over-budget faults quarantine the triggering slot loudly. Backoff is tick-derived, not clock-derived. |
 | `interest.rs` | Per-connection relevancy by distance and view, rate LOD for far entities, bandwidth ledger (u128 headroom). Snapshot slots are named through the `BodySnap` alias. |
-| `scale.rs` | 8 to 16 fighter bandwidth caps, priority deltas and soak. Loopback only. |
+| `scale.rs` | 8 to 32 fighter bandwidth caps, priority deltas and soak. Loopback only. |
 | `cells.rs` | `CellQueue`, `CellPacket`, `CellReceipt`: pre-cooked map cells streamed under a per-tick byte budget; hashed with `engine-core` FNV. |
 | `tick_budget.rs` | Siege server tick budget; `author_ai(seed, tick, index)` and `author_ai_bytes`. Wall-clock ms are presentation only. |
 | `replay.rs` | Records input tapes with keyframes, frame-steps them (`Theater`), reports the first divergence (`divergence_report`). |

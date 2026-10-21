@@ -15,6 +15,10 @@ pub mod build_game;
 #[cfg(feature = "mcp")]
 pub mod build_level;
 pub mod canon;
+/// API6 guardrail over the advertised tool list: a pinned retain list plus an
+/// adaptive char budget, deterministic and never a model call.
+#[cfg(feature = "mcp")]
+pub mod collapse;
 #[cfg(feature = "mcp")]
 pub mod discover;
 /// Audited dispatch seam: one audit record per door call, pinned by holders.
@@ -51,7 +55,14 @@ pub mod receipts;
 /// BRP-shaped loopback shim over the verb table (in-process, no socket).
 #[cfg(feature = "mcp")]
 pub mod remote_shim;
+/// D16: the four MCP resources the door serves (crate map, door reference,
+/// error catalog, game.toml schema).
+#[cfg(feature = "mcp")]
+pub mod resources;
 pub mod sandbox;
+/// D16: the five scenario prompts the door publishes.
+#[cfg(feature = "mcp")]
+pub mod scenarios;
 #[cfg(feature = "mcp")]
 pub mod scene_next;
 #[cfg(feature = "mcp")]
@@ -74,6 +85,9 @@ pub mod tool_capabilities;
 pub mod tool_macro;
 pub mod tools;
 pub mod transport;
+/// D19: the per-instance verifier checks and the SWE-bench style buckets.
+#[cfg(feature = "mcp")]
+pub mod verify_tasks;
 #[cfg(feature = "mcp")]
 pub mod watch_ledger;
 /// Witnessed-plan gate plus evidence receipts (std-only, no `mcp` needed).

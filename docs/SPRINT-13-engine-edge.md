@@ -78,6 +78,7 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   `crates/render/src/stream.rs`. Accept: a dense fixture stays under
   budget; no frame hitch > 2 ms from uploads; sharp within 1 s of a cut.
   needs: RA4, RA6.
+  rot: crates/render/src/stream.rs was removed in the render wip sweep f737386e; the work now lives in crates/assets/src/stream.rs (StreamError) and crates/render/src/present/cache.rs (CpuCache), so re-home Owns to those two.
 - [ ] OPT18 render: frame pacing and latency — present mode per setting,
   frame latency 1 in low-latency mode, input sampled late for the camera;
   measured by the PQ1 meter. Tier B. Size M. Owns
@@ -161,17 +162,24 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   `workspace-check` rule (orchestrator) plus header edits. Accept: 30 of
   30 crates pass; a seeded missing field fails. needs: API1.
   LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
-- [ ] OPT31 pilot: dev window arena ≥ 30 fps on the reference GPU over
+- [x] OPT31 pilot: dev window arena ≥ 30 fps on the reference GPU over
   the fixed arena camera path after OPT3, x2 within 5%, with the frame
   report under `target/evidence/build/`. Tier A. Size S. Owns the
   report. Accept: numbers x2 name adapter and driver; blocked until the
   BLOCKERS window-path entry closes. needs: OPT3, WIN1. (OPT3 VERDICT
   wave 84.) Progress 2026-10-19: operator: reference-GPU frame report x2;
   line in `docs/plan/2026-10-19-owner-queue.md`.
-  BLOCKED: needs the reference-GPU frame report x2 (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.
   Progress 2026-10-20T21:47Z: no receipt in four keeper runs (300, 300, 30, 30 frames) at 100 % CPU with 27-45 foreign `cargo` and 10-25 `rustc`: the window stops after `arena particles: per-tier ...`, never presents a frame (`Responding: False`, 3 % GPU, 1-2 s CPU per 240 s), so there is no fps, no spread and no tick. Evidence `target/evidence/build/opt31-attempt-20261020T2147Z.md`; one BLOCKERS row added.
   Progress 2026-10-20T22:02Z: the stall is the window/GPU path only — `arena.exe --view-line 2040 600 8` printed its 600-tick view line and exited on the same box, while `--backend vulkan --frames 30` stalled exactly like dx12 (no receipt in 120 s, 100 % CPU, 45 cargo / 20 rustc). So OPT33 has no leg either. Same evidence file, addendum.
   Progress 2026-10-21T23:50Z: two more keeper runs, 300 frames each, at CPU 100 / 100 / 99.9 % with 36 `cargo` and 25 `rustc`: both stopped after `arena: staged 6 dressing boxes` (before presenter creation), no `interval_ms p50=` line, `nvidia-smi` 8 % GPU. No fps, no spread — contended and unmeasured, not a floor pass, so no tick. Evidence `target/evidence/build/opt31-opt33-keeper-20261021T2350Z.md` (BLOCKERS fingerprint now x8).
+  Landed 69ce744. Four interleaved 300-frame runs on `target/release/arena.exe --scene arena
+  --fighters 8 --frames 300 --exit`, adapter NVIDIA GeForce RTX 3050 6GB Laptop GPU driver
+  32.0.16.1062: interval_ms p50 16.874 / 17.421 / 16.829 / 16.863 ms = 57.4-59.4 fps against the
+  30 fps floor, worst pair spread 3.19 % and all four within 3.52 %. Contended (CPU 61.8-66.3 %,
+  0-4 transient cargo/rustc, no build storm), so a lower bound on both the floor and the spread.
+  Every run printed the full receipt and exited alone, which closes the window-path BLOCKERS row.
+  Evidence `docs/receipts/2026-10-22-opt31-frame-report.md`, raw stdout
+  `target/evidence/build/opt31-frame-report-20261022T0202Z.md`.
 - [ ] OPT32 ops: build-baseline promotion on the quiet box — rerun the
   OPT1 matrix back-to-back x2 (clean plus 4-crate touches x 3 profiles),
   single cargo, lanes halted, load <10%, root `target/`.
@@ -192,3 +200,6 @@ Rows marked (orchestrator) land root config or `tools/` edits.
   `docs/plan/2026-10-19-owner-queue.md`.
   BLOCKED: needs the reference-GPU DX12 vs Vulkan A/B (operator). Unblocks per docs/plan/2026-10-19-owner-queue.md.
   Progress 2026-10-21T23:50Z: both legs ran 600 fixed-camera frames on the reference adapter (`NVIDIA GeForce RTX 3050 6GB Laptop GPU`, driver `610.62`) and neither presented a frame — no `interval_ms p50=` receipt, stop after `arena: staged 6 dressing boxes`; dx12 CPU 99.7 % avg with 50 `cargo` / 43 `rustc`, vulkan 99.6 % with 51 / 40. Both contended, so no 5 % A/B, no per-pass column and no default named; the startup line still logs the compiled-in default (`fallback=dx12`). Evidence `target/evidence/backend/opt33-ab-keeper-20261021T2350Z.md`. No tick.
+  Progress 2026-10-21T03:37Z: four 600-frame receipts this time, interleaved A,B,A,B on `--scene arena --fighters 8 --frames 600 --exit`, adapter `NVIDIA GeForce RTX 3050 6GB Laptop GPU`, driver `32.0.16.1062` (dx12) / `NVIDIA 610.62` (vulkan): `interval_ms p50` dx12 16.967 / 16.701 ms (median 16.834 = 59.4 fps) and vulkan 16.854 / 16.984 ms (median 16.919 = 59.1 fps); x2 spread 1.59 % dx12 and 0.77 % vulkan, A/B gap 0.50 %, `validation_errors=0`, `fight_draws=40`. Still contended (CPU 66.8-86.7 % avg per leg, 7-12 `cargo`/`rustc`), and GPU `p50` does not repeat: dx12 2.328 vs 2.090 ms, vulkan 1.088 vs 1.979 ms (82 %), so no default is named. The Accept's p95 column cannot be filled at all: the `arena frame-split` line prints only p50 and p99 for `cpu_ms`/`gpu_ms`/`interval_ms` (`crates/game/src/bin/arena_frame/mod.rs:743`), so a p95 column is code work before this row can tick. Evidence `target/evidence/backend/opt33-ab-keeper-20261021T0330Z.md` with raw stdout x4. No tick.
+  Progress 2026-10-21T05:39Z: four more 600-frame receipts, interleaved dx12,vulkan,dx12,vulkan, adapter `NVIDIA GeForce RTX 3050 6GB Laptop GPU`, driver `32.0.16.1062` / `NVIDIA 610.62`: `interval_ms p50` dx12 18.156 / 16.726 ms (median 17.441 = 57.3 fps) and vulkan 16.756 / 16.874 ms (median 16.815 = 59.5 fps); dx12 x2 spread **8.55 %** over the 5 % bar, vulkan 0.70 %, A/B gap 3.72 %. Still contended, no quiet leg (CPU 59.7-68.2 % avg, 2-5 `cargo` on the first two legs), dx12 GPU `p50` 2.213 vs 2.070 ms (6.92 %) does not repeat, VRAM prints budget only (`usage_mb=0`), and the p95 column stays unprintable (receipt prints p50/p99 only), so no default is named and no tick. Evidence `target/evidence/backend/opt33-ab-keeper-20261021T0539Z.md` + raw stdout x4.
+  Progress 2026-10-21T07:37Z: four 600-frame receipts again, interleaved dx12,vulkan,dx12,vulkan, adapter `NVIDIA GeForce RTX 3050 6GB Laptop GPU`, driver `32.0.16.1062` (dx12) / `NVIDIA 610.62` (vulkan): `interval_ms p50` dx12 16.810 / 17.001 ms (median 16.906 = 59.2 fps) and vulkan 17.141 / 17.054 ms (median 17.098 = 58.5 fps); x2 spread 1.13 % dx12 and 0.51 % vulkan, A/B gap **1.14 %** inside the 5 % bar, `validation_errors=0`, `fight_draws=40`. Contended on every leg (CPU avg 97.7-99.2 %, 15-28 `cargo`/`rustc` + `arena`), so the interval pair is a lower bound; the Accept still fails: GPU per-pass does not repeat (dx12 forward 0.342 vs 0.861 ms, gpu `p50` 0.997 vs 2.072 ms; vulkan forward 0.863 vs 0.221 ms, gpu `p50` 2.055 vs 0.582 ms), VRAM prints budget only (`usage_mb=0`), and the p95 column stays unprintable (receipt prints p50/p99 only), so no default is named and no tick. Evidence `target/evidence/backend/opt33-ab-keeper-20261021T0737Z.md` + raw stdout x4.

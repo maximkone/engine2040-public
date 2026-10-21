@@ -92,6 +92,33 @@ caller. The smart layer is a set of islands. The engine is fast and mostly smart
 | 11 | A live motion tracker that turns a clip into servo targets | `google-ai-edge/mediapipe` (pose landmarker + confidence per landmark); read 2026-10-20 | Apache-2.0 (LICENSE SHA 0e03e3911e0ac02c72ed527b34efe250f0fb9bef) | NS8 | the landmark-to-servo mapping plus the per-frame confidence gate (never a hard target under a floor); the clip-to-servo path stays offline | M | the tracker needs a model download at runtime, or the PC has no camera, so NS8 stays the offline path | RESEARCH-ONLY |
 | 12 | A free offline locomotion teacher with no closed SDK | `google-deepmind/mujoco` (CPU physics, Apache-2.0, LICENSE SHA d645695673349e3947e8e5ae42332d0ac3164cd7). The classic curriculum repo `leggedrobotics/legged_gym` is BSD-3-Clause but needs the closed NVIDIA Isaac Gym download | Apache-2.0 (MuJoCo) / BSD-3-Clause + closed SDK (legged_gym) | GA7, EG24 | only the observation/action contract and the domain-randomisation list, into `crates/distill` (offline, never in the tick) | L | the teacher needs a GPU and a Python environment the build does not have, or the student loses to the scripted brain | RESEARCH-ONLY |
 
+### Donor row 4, landed (2026-10-21, the AI-native MCP lane)
+
+The SWE-bench per-instance grading shape of donor row 4 is in the tree, so this
+file owns the spec and the AI-native lane's row file points here instead of
+repeating it (OBSERVED, the tree on 2026-10-21):
+
+- `crates/endpoint/src/verify_tasks.rs` grades one build into one of the eight
+  buckets above (`completed`, `resolved`, `error`, `unresolved`, `incomplete`,
+  `infra_failure`, `ambiguous`, `empty_patch`), names the checks that failed,
+  and rolls the per-instance verdicts up into one run report: one row per
+  instance, one summary over the rows.
+- Every real build verb answers with its own text: `level.build`,
+  `game.build` and `sim.build_encounter` return one string, the bucket
+  first (`bucket=resolved`), then one check per line (`name=verdict`, or
+  `name=fail:reason` when the check named a reason). The instance id stays on
+  the Rust side, because the verb that carries the text is the instance. The
+  wire shape was measured before it was frozen: as a nested object (instance,
+  bucket, checks) it cost 290 chars per build tool, 871 for the three, and
+  the door could not spare that; as an array of strings it cost 78 per build
+  tool and still left the view-loaded list 5 chars under the 2,048 floor, so
+  the one string is the shape.
+- The judge half stayed out on purpose: a judge needs OpenAI or Anthropic keys
+  and the FREE-models-only rule forbids them. There is no judge call in the
+  crate, and a test scans that module's own production code (everything before
+  its `#[cfg(test)]` block) and refuses `openai`, `anthropic`, `api_key`,
+  `apikey`, `http`, `reqwest` and `std::net`.
+
 ## Rejections
 
 - `Sollimann/bonsai` (MIT) — already mined by the GA11 row (STEAL 2026-10-03). New fact: its trees are Rust structs, not data, so `crates/ai/src/bt.rs` is already ahead of it. Not a new find.

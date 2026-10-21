@@ -1317,7 +1317,16 @@ impl LivingReport {
     /// Gate verdict: every row either passes its keypoints or drops with
     /// contradictions remaining after the repair budget, and every row
     /// replays exactly with providers off.
+    ///
+    /// A report with no rows is never a pass: a gate that judged nothing has
+    /// proved nothing, and a green light on it would be a lie.
     pub fn verdict(&self) -> LivingVerdict {
+        if self.rows.is_empty() {
+            return LivingVerdict {
+                pass: false,
+                reason: "fail: 0 rows ran, so the report judged nothing".to_string(),
+            };
+        }
         let mut bad = 0usize;
         for row in &self.rows {
             if row.completed {
@@ -1888,14 +1897,23 @@ mod tests {
         assert!(text.contains("remote_units=140"), "cost present");
         assert!(text.contains("contradiction_pairs=0"), "ratchet at zero");
         assert!(
-            text.contains(
-                "dropped_rows 
-"
-            ),
+            text.contains("dropped_rows \n"),
             "no dropped rows"
         );
         for label in ["mock", "local", "remote"] {
             assert!(text.contains(label), "report must name {label}");
         }
+    }
+
+    #[test]
+    fn zero_rows_is_never_a_pass() {
+        let report = LivingReport { rows: Vec::new() };
+        let verdict = report.verdict();
+        assert!(!verdict.pass, "a report that ran nothing proves nothing");
+        assert!(
+            verdict.reason.contains("0 rows ran"),
+            "the reason says nothing ran: {}",
+            verdict.reason
+        );
     }
 }

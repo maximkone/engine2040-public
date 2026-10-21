@@ -763,7 +763,8 @@ pub(crate) mod capture {
                     &kit_draws,
                 )
                 .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
-                let overlay = engine_game::windowed::duel_overlay_for_app(&app);
+                let overlay = engine_game::windowed::duel_overlay_for_app(&app)
+                    .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
                 engine_game::windowed::stage_hp_bars(&mut presenter, &overlay);
                 push_crate(&mut crate_scene, &mut presenter, &mut list);
                 let out = presenter.render_offscreen(&list)?;

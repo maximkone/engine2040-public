@@ -74,6 +74,9 @@ struct Group {
     /// Parent bone of every bone, in skeleton order; empty for every other group. `sever` reads
     /// the joint this names, so the ragdoll keeps no second copy of its rig.
     parents: Vec<Option<usize>>,
+    /// How hard the joints of a ragdoll brace, permille of the whole; zero for
+    /// every other group.
+    muscle_permille: u16,
 }
 
 /// A clock that always reads zero: the default, so the crate never touches `Instant`.
@@ -261,6 +264,7 @@ impl PhysFx {
             receipt: Some(receipt),
             drive: Some(drive),
             parents,
+            muscle_permille: rig.muscle_permille(),
         });
         Ok(())
     }
@@ -358,6 +362,7 @@ impl PhysFx {
                 receipt: None,
                 drive: None,
                 parents: Vec::new(),
+                muscle_permille: 0,
             });
         }
         Ok(Batch { id, admitted })
@@ -442,6 +447,7 @@ impl PhysFx {
             receipt: None,
             drive: None,
             parents: Vec::new(),
+            muscle_permille: 0,
         });
         handle
     }

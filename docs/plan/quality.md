@@ -95,7 +95,7 @@ CUT (never): consoles, mobile, AAA-scale worlds, engine-wide parity with other e
 
 ## 3. Target design
 
-Workloads measure, baselines remember, the gate compares, the supervisor heals, chaos checks the healer, and the slim law deletes whatever lied. Data flow: workloads (`ArenaTick` 16 slots seed 1, `PhysicsStep`, `AiDecide`, `DestructionStep`) run canonical seeds that own all state locally → `WorkloadReport` (ticks, hash, alloc bytes and count) → `check_report` against `BASELINES` (one row per track, selected by `SIM_TRACK`) → `BudgetError` on any miss. Millisecond budgets live separately (release p50 with headroom) and run only under `--perf`.
+Workloads measure, baselines remember, the gate compares, the supervisor heals, chaos checks the healer, and the slim law deletes whatever lied. Data flow: workloads (`ArenaTick` 32 slots seed 1, `PhysicsStep`, `AiDecide`, `DestructionStep`) run canonical seeds that own all state locally → `WorkloadReport` (ticks, hash, alloc bytes and count) → `check_report` against `BASELINES` (one row per track, selected by `SIM_TRACK`) → `BudgetError` on any miss. Millisecond budgets live separately (release p50 with headroom) and run only under `--perf`.
 
 Ownership: `perf` owns workloads, baselines, budgets, profiler, latency and server-budget harnesses; `observe` owns events, spans, digest, registry and supervisor catalog; `proof` owns gate invocation, fixtures, museum, soak and the GPU-liveness gate. No mirrors: tick-tuning constants live in net only (SL17); FNV-1a converges on `engine_core::Fnv64` (SL5); balance constants converge on single owners (SL16).
 

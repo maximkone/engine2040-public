@@ -1,0 +1,113 @@
+# The kit of the period, and how sure we are of every piece of it.
+#
+# Every item says how sure we are: `attested` (an object was found and its date is
+# fixed), `reconstructed` (built from texts and pictures), `contested` (scholars
+# disagree) or `invented` (ours). Every item names its source in `ref`, which points
+# at docs/plan/rome.md and the ancient source it names. An item that survives as an
+# object carries a `found` section: the site, the year it was found and the date of
+# the object. An open question about an item is a `reading` with its standing, so the
+# codex card shows the debate instead of hiding it.
+#
+# The list is rome.md section 3 (the kit of the period) and the section 4.9 table (rare
+# and contested kit). The loader refuses an item without a `certainty` or without a
+# `ref`, and the refusal names the item's key.
+#
+# The section 3 items are the types of the period that rome.md lists for our years,
+# so they are attested types. rome.md gives no separate find for them, so they carry
+# no `found` section; the finds below are the ones rome.md states.
+
+[kit.lorica]
+certainty = "attested"
+ref = "rome.md section 3, kit of the period: Corbridge-type lorica segmentata"
+
+[kit.helmet]
+certainty = "attested"
+ref = "rome.md section 3, kit of the period: Imperial Gallic (Weisenau) helmet"
+
+[kit.gladius]
+certainty = "attested"
+ref = "rome.md section 3, kit of the period: Pompeii gladius, blade 45-50 cm; Vegetius 1.12 for the thrust"
+
+[kit.pilum]
+certainty = "attested"
+ref = "rome.md section 3, kit of the period: pilum about 2 m with an iron shank of about 600 mm; Vegetius 2.15"
+
+[kit.scutum]
+certainty = "attested"
+ref = "rome.md section 4.4: scutum of two glued plank layers, linen, then calfskin, an iron or bronze rim (Polybius 6.23)"
+
+[kit.pugio]
+certainty = "attested"
+ref = "rome.md section 4.9: the Haltern inlaid pugio (early 1st c.) is outside our years, a codex card only"
+
+[kit.pugio.found]
+site = "Haltern"
+object_date = "early 1st century AD"
+ref = "rome.md section 4.9: Haltern inlaid pugio, early 1st c."
+
+[kit.dolabra]
+certainty = "attested"
+ref = "rome.md section 4.4: the dolabra digs and chops; Josephus, Jewish War 3.95 for the tool kit"
+
+[kit.caligae]
+certainty = "attested"
+ref = "rome.md section 3, kit of the period: hobnailed caligae; section 4.4 for the hobnails"
+
+[kit.carroballista]
+certainty = "reconstructed"
+ref = "rome.md section 4.9: cart-mounted torsion engine on Trajan's Column scene XL (Dacian war, carved c. 113), rebuilt from the picture"
+
+[kit.falx]
+certainty = "attested"
+ref = "rome.md section 4.9: two-handed falx (Adamklisi; Trajan's Column); the type is attested"
+
+[kit.sica]
+certainty = "attested"
+ref = "rome.md section 4.9: one-handed sica about 41 cm (Adamklisi; Trajan's Column); the type is attested"
+
+[kit.manica]
+certainty = "reconstructed"
+ref = "rome.md section 4.9: metal arm guard (Adamklisi metope XVII, c. 109), rebuilt from the monument"
+
+[kit.helmet_reinforced]
+certainty = "reconstructed"
+ref = "rome.md section 4.9: helmet with a cross-braced bowl (Adamklisi metope XVII, c. 109), rebuilt from the monument"
+
+[kit.boss]
+certainty = "attested"
+ref = "rome.md section 4.9: the boss punched Junius Dubitatus, legio VIII Augusta (River Tyne, early 2nd c.); attested, but no published reference found yet"
+
+[kit.boss.found]
+site = "River Tyne"
+object_date = "early 2nd century AD"
+ref = "rome.md section 4.9: boss punched Junius Dubitatus, legio VIII Augusta (River Tyne, early 2nd c.)"
+
+[kit.glande]
+certainty = "contested"
+ref = "rome.md section 4.9: lead glandes with taunts and unit names, about 1,000 casts catalogued (Berlin, 2021); no fixed date, contested for our years"
+
+[kit.glande.found]
+site = "Berlin"
+object_date = "no fixed date"
+ref = "rome.md section 4.9: about 1,000 casts catalogued (Berlin, 2021); no fixed date"
+
+[kit.tribuli]
+certainty = "contested"
+ref = "rome.md section 4.9: iron caltrops from Tyras (2nd to early 3rd c.) and Caerleon (3rd c.); contested for our years"
+
+[kit.tribuli.found]
+site = "Tyras and Caerleon"
+object_date = "2nd to early 3rd c. at Tyras, 3rd c. at Caerleon"
+ref = "rome.md section 4.9: iron caltrops from Tyras (2nd to early 3rd c.) and Caerleon (3rd c.)"
+
+[kit.manuballista]
+certainty = "attested"
+ref = "rome.md section 4.9: the manuballista (cheiroballistra), Xanten-Wardt frame (found 1999, mid 1st c.); Hero, Cheiroballistra"
+reading = "hand-held or on a stand"
+reading_status = "debated"
+
+[kit.manuballista.found]
+site = "Xanten-Wardt"
+year_found = 1999
+object_date = "mid 1st century AD"
+ref = "rome.md section 4.9: found in 1999 in a Rhine side arm, published in 2010 (Schalles, Xantener Berichte 18)"

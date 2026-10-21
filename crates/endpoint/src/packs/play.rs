@@ -939,7 +939,7 @@ fn tape_hex(side: &str, text: &str) -> Result<Vec<u8>, McpToolError> {
             text.len()
         )));
     }
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err(bad_args(format!(
             "{side} tape has an odd hex length {}",
             text.len()
@@ -991,7 +991,7 @@ fn ai_decisions_core(args: &AiDecisionsArgs) -> Result<AiDecisionsOutput, McpToo
     let mode = args
         .mode
         .as_deref()
-        .unwrap_or(if args.right.is_some() { "diff" } else { "show" });
+        .unwrap_or_else(|| if args.right.is_some() { "diff" } else { "show" });
     match mode {
         "show" => Ok(AiDecisionsOutput {
             mode: "show".to_owned(),

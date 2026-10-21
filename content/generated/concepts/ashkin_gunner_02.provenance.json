@@ -1,0 +1,17 @@
+{
+  "provider": "ovh-ai-endpoints",
+  "model": "stable-diffusion-xl-base-v10",
+  "endpoint": "https://stable-diffusion-xl.endpoints.kepler.ai.cloud.ovh.net/api/text2image",
+  "cost": "0 per request, anonymous, 2 requests per minute per IP",
+  "licence": "OpenRAIL++-M (Stability AI Community Licence)",
+  "commercial_use": true,
+  "served_from": "FR/EU",
+  "prompt": "full body character concept art of a hulking armored orc soldier, black iron plate armor with bronze trim and crimson cloth, a large bronze shoulder cannon mounted on his right arm, standing three-quarter view on a plain neutral grey background, even flat studio lighting, stylized game concept art, clean readable silhouette, no scenery, no text",
+  "negative_prompt": "text, watermark, extra limbs, extra fingers, blurry, lowres, jpeg artifacts, photorealistic",
+  "size": "1024x1024",
+  "output": "content/generated/concepts/ashkin_gunner_02.jpg",
+  "bytes": 1057577,
+  "purpose": "reference for the base mesh only: never a shipped asset, and the shipped mesh is rebuilt by us",
+  "verdict": "much better input than attempt 1: clean studio background, no scenery competing with the outline, wide stance, spiked shoulders, black iron with bronze trim and crimson cloth. The cannon still did not survive: it came back as a spiked mace in the left hand. The silhouette is what the 30 m gate reads, and this one reads. The cannon has to be modelled by us, not by the prompt.",
+  "compared_to": "content/generated/concepts/ashkin_gunner_01.jpg"
+}

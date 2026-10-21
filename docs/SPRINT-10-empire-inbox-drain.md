@@ -7,10 +7,12 @@
   rows wait for UW0. Tier B. Size M. Owns the boarded rows. Accept: the 9
   rows stand with done-whens; `node tools/workspace-check.mjs` PASS;
   `node tools/drift-check.mjs` PASS. needs: none. (EB-2026-10-01-S177.)
+  rot: tools/drift-check.mjs left this repo with the center link in 6bdf32bf (standalone 1/3: cut the center link, the keeper, the queue tools); this is an empire-inbox row and belongs to C:\empire\center, not this repo.
 - [ ] E-SR155 plan: spatial-reasoning rows (EB-2026-10-01-S155) - SR-01..SR-03
   boarded; SP19/SP20/SP33 unpiled with SR follow-ups sequenced. Tier B.
   Size S. Owns `docs/plan/spatial-reasoning.md` rows. Accept: SR rows on the
   board; checks PASS. needs: none. (EB-2026-10-01-S155.)
+  rot: docs/plan/spatial-reasoning.md -> docs/archive/2026-10-08/plan/spatial-reasoning.md (c5531b7).
 - [ ] E-AXIOM182 plan: AXIOM game rows (EB-2026-10-01-S182) - AXIOM rows
   boarded with done-whens, spatial upgrades in plan headers, Rome Finish A
   still first. Tier B. Size S. Owns the AXIOM rows. Accept: rows + header
@@ -21,6 +23,7 @@
   `docs/research/DISCOVERED.md`; 1 bounded spike with numbers. Tier A.
   Size M. Owns the DELTA cards + spike. Accept: cards land; spike line in
   handoff; judged PASS. needs: none. (EB-2026-10-01-S142.)
+  rot: docs/research/DISCOVERED.md was deleted in 3685a00f and its archive copy in 750435e; no successor file exists anywhere in the repo, so the DELTA donor notes went with it.
 - [ ] E-STEAL139 research: STEAL-ENG batch spikes (EB-2026-10-01-S139) - one Progress 2026-10-17: Donor ports landed without a baseline table: hanabi dispatch vfx_hanabi.rs (1d01a410), meshoptimizer-style cone-weighted meshlets (-15 pct test, gh run 39056659814), ggrs discard history (e449553e); the avian, lightyear, backroll, Jolt and bvh SAH spikes and the bar-moving row are not found.
   light test + baseline each: bevy RenderApp split, avian XPBD, lightyear
   net, backroll-rs, hanabi, Jolt BodyInterface (BX28), meshoptimizer meshlets,
@@ -114,6 +117,7 @@
   Owns the showcase sets + gate lines. Accept: playtest duty PASS 3 waves in
   a row; set under 24h; `node tools/drift-check.mjs` PASS. needs: none.
   (EB-2026-09-26-95.)
+  rot: tools/drift-check.mjs left this repo with the center link in 6bdf32bf (standalone 1/3: cut the center link, the keeper, the queue tools); this is an empire-inbox row and belongs to C:\empire\center, not this repo.
 - [ ] E-LEASH96 research: leash standing (EB-2026-09-26-96) - planner verdicts
   same wave, researcher+planner co-own extensions, Avoid list with guards,
   blank corners first, FIN first-pass volume. Tier B. Size M. Owns the leash
@@ -359,6 +363,7 @@
   `node tools/workspace-check.mjs` adds no FAIL. F2P: crates/engine-chaos exists and 4 files name it
   today. P2P: golden `d57b5c8ae3096614` x2; `node tools/rust-quality.mjs` PASS. needs: none.
   Correction 2026-10-21: duplicate of E66, and E66 owns it - both create `tools/steal-land.mjs`. This row is not ticked and is not built on its own; retire it when E66 lands.
+  rot: tools/steal-land.mjs was removed by Maxim's 2026-10-17 order (510b8dfe, DELETE LOOP MACHINERY); the tool is void by owner order, not re-homed, so the row must land its hunks by another path or close.
 - [ ] E59 tools: land the denied tool hunks in one pass (EB-2026-10-09-S5, EB-2026-10-09-S46):
   affected.mjs gets `--help` (exit 0); steal-next.mjs drops its duplicate usageFail argv path;
   workspace-check.mjs gets the board memo hunk; ship.mjs dedupe (34 lines); weekly-clip.mjs double
@@ -371,6 +376,7 @@
   `node --test tools/ship.test.mjs` prints 18 pass; `rg -n node_modules .gitignore` prints 1 hit.
   F2P: affected.mjs has no --help and steal-next.mjs defines usageFail (4 hits) today. P2P:
   `node tools/workspace-check.mjs` adds no FAIL. needs: none. Progress 2026-10-18: live hunks landed in f93fb5f3: affected.mjs --help prints the usage on stdout and exits 0 (a bad flag still exits 2; affected.test.mjs 26 pass incl. the new help case), .gitignore holds node_modules/. Void by now: steal-next.mjs and weekly-clip.mjs are gone, clean.mjs has no trailing space, VISUAL-TARGET.md has no stale tools path; ship.test.mjs prints 23 pass (not 18). Left: the workspace-check.mjs board-memo hunk (file held by another session), ship.mjs dedupe (34 lines), README width line.
+  rot: tools/steal-next.mjs and tools/weekly-clip.mjs were cut in 6bdf32bf (standalone 1/3: the center link, the keeper and the queue tools went out); no successor script exists in tools/, so the hunks land by another path or the row closes.
 - [x] E60 agents: rewrite or revert the researcher re-read guard from 901d8975 (EB-2026-10-09-S14):
   center's warden shows researcher-reread-guard WORSE, 25 to 34, goal under 20. The guard text sits
   at line 60 of researcher.md. Rewrite it so a repeat read is refused without extra turns, or
@@ -420,6 +426,7 @@
   F2P: the rg count of each cut printed before and after. P2P: golden `d57b5c8ae3096614` x2.
   needs: none.
   Correction 2026-10-21: duplicate - PW50 owns this work now; PW50's row says it closes E64. This row is not ticked and is not built on its own; retire it when PW50 lands.
+  rot: crates/world/src/blockout.rs was cut as a dead module in a7d2af50 - that cut IS this row's own work; what is left is the pinned test, not a new home.
 - [ ] E65 tools: speed bundle with identical outputs (EB-2026-10-09-S43): split the 125 s
   lanes.test.mjs suite into warm and cold legs, unify the two `[profile.dev]` blocks, land the
   profiled cuts in rust-quality.mjs, board-slice.mjs and workspace-check.mjs. Diff: good. Tier B.
@@ -638,6 +645,7 @@
   `.opencode/skills/loop-failfix`. Accept: `node C:/empire/center/agentlint.mjs engine2040` prints
   PASS and `(Get-Item skills/engine-code/SKILL.md).Length` prints under 4096. F2P: engine-code is 6,486 bytes
   today. P2P: agentlint PASS; the merged rules keep their error codes. needs: E89.
+  rot: skills/opencode-loop/SKILL.md and the 7 .opencode/skills homes are gone (6bdf32b, 0b6daaf0, 6f2195b0, b0aa532c, 4d10c40d); the merged set lives in skills/ (33 skill dirs), so re-home Owns to skills/<name>/SKILL.md.
 - [ ] E91 skills: land three staged skill texts, by path only, never forced
   (EB-2026-10-11-S22, EB-2026-10-11-S44, EB-2026-10-12-S5). Text comes from
   C:/empire/center/sprint/staged/engine2040/skills: door-and-headless-runbook line 11 (full proof for
@@ -650,6 +658,7 @@
   skills/engine-proof/SKILL.md` prints 1 line; `rg -n "run cargo or node tools/proof.mjs"
   .opencode/skills/cargo-scope-guard/SKILL.md` prints 1 line. F2P: all three greps print 0 today.
   P2P: `node C:/empire/center/agentlint.mjs engine2040` PASS. needs: none.
+  rot: skills/engine-proof/SKILL.md (0b6daaf0) and .opencode/skills/cargo-scope-guard/SKILL.md (4d10c40d) are gone; the merged set lives in skills/ (33 skill dirs, the engine-proof text now reads from skills/engine-code/SKILL.md), so re-home Owns to skills/<name>/SKILL.md.
 - [ ] E92 docs: one finish file (EB-2026-10-12-S9) — docs/plan/finish-line.md becomes the gate file
   (FOCUS.md line 5 already says so), tools/finish.mjs reads it, FINISH-RICH.md keeps a pointer,
   SPRINT.md line 7 agrees, ADR 0002 is set to Accepted. Diff: regular. Tier B. Size M. Owns
