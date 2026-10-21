@@ -156,7 +156,7 @@ fn a_baked_pack_plays_on_the_rig_by_name() {
         .expect_err("a rig with other names refuses loud");
     match err {
         engine_anim::pack_file::PackFileError::NoTrack { joint } => {
-            assert_eq!(joint, "pelvis", "the refusal names the joint")
+            assert_eq!(joint, "pelvis", "the refusal names the joint");
         }
         other => panic!("expected the missing track to refuse, got {other}"),
     }

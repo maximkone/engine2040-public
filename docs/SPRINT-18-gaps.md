@@ -695,6 +695,19 @@ Same source and routing as the frame section above.
   12 ticks. F2P: the resim test restarts the clip today. P2P: golden unchanged;
   `cargo test -p engine-game --lib` green. Review: bodies.md G10 (gems2 ch 18).
   needs: EG18.
+  Progress 2026-10-21 (hunt wave 2, `docs/research/hunt2-2026-10-21/`): the steal
+  is the same donor as MP25, `nilpunch/unity-prediction-rollback` (MIT, 48 stars,
+  archived), because "presentation is rollback-safe" is exactly the row's
+  subject. `FadeOutPrediction` (2.1K) gives the drawn pose a fade toward the
+  confirmed input: `fadeOutPercent = clamp(ticksPassed - startDecayTick, 0,
+  decayDurationTicks) / decayDurationTicks`, `startDecayTick = 30`,
+  `decayDurationTicks = 60`. Our row asks for a decaying visual error offset
+  that is above 0 on the correction tick and under 1 cm after 12 ticks; the donor
+  says the offset should reach 0 **exactly** when the confirmed input arrives,
+  so the offset is a function of the confirmation, not a timer. Landing:
+  `crates/anim/src/net_pose.rs:42` (`NetPose`) and the `fighter_look.rs` slot
+  hunk. Golden: does not threaten — render only, never hashed, and the row's
+  own Accept already says the golden is unchanged.
 - [ ] EG40 game: weapons and shields on sockets — the sword and shield are baked
   into the body mesh (`crates/game/src/fighter_bind.rs` hero graft), so a sword
   cannot drop after a hand cut or be swapped; nothing named `attach` exists in
@@ -1546,6 +1559,31 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   Accept: static camera, two frames: sand-edge luminance flicker drops at
   least 50% vs off; a running fighter's ghost stays under 3 px; validation
   errors 0. F2P: no resolve pass. P2P: render lib green. needs: LF5b.
+  Progress 2026-10-21 (hunt wave 2, `docs/research/hunt2-2026-10-21/`): the steal
+  is `RARS-oss/decibels` (MIT, 2 stars, no arXiv id yet, the repo says the
+  paper track is in progress), and the steal is the **method**, not a filter:
+  price every loss in dB against an exact reference instead of reporting one
+  end-to-end number, and compute an oracle bound (rejection with access to the
+  reference) that bounds what any history-rejection heuristic could achieve.
+  The donor's own numbers, all measured on its side: a half-pixel
+  jitter-convention bug is worth **1.12 dB** on its own; a relative
+  depth-rejection threshold threw out two thirds of the valid history and
+  fixing the scale gave **+0.31 dB**; a non-recursive resolve is **+1.57 dB**
+  on a static scene; the oracle rejection bound is **+3.3 dB**, a colour test
+  recovers 39 % of it and an albedo-demodulated test 55 %; a temporal-gradient
+  test recovers **2.7 dB** while an FSR2-style luminance reset **collapses
+  -3.4 dB** on aliased content; and **PSNR under-values rejection** (the
+  gradient test lowers PSNR by 0.3 dB but moves LPIPS 0.178 -> 0.115). Landing:
+  `crates/render/src/post/taa.rs:9` (`TaaParams`), `:145` (`taa_resolve`),
+  `:201` (`taa_resolve_jittered`), and `crates/render/src/post_jitter_motion.rs:22`
+  (`halton`). The row's Accept is **not** lowered; it gains one printed line
+  per cause (jitter registration, depth-rejection scale, history length) with a
+  measured dB each, and the sum is within **1 dB** of the end-to-end delta. A
+  regression test fails when the half-pixel jitter convention is off (the
+  donor measured 1.12 dB on that bug alone). The report prints **PSNR and
+  LPIPS side by side**, because the donor's negative result is that PSNR alone
+  draws the wrong conclusion. Golden: does not threaten — the render crate is
+  presentation, and the row's own P2P says the golden is unchanged.
 - [ ] LF5d render: TAA slice 4, sharpen and choose — an RCAS pass after the
   resolve (Bevy `robust_contrast_adaptive_sharpening.wesl`, `render-steals.md`
   item 11), then keep TAA or EG13's MSAA by the calmer capture (sand-edge

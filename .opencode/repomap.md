@@ -375,8 +375,8 @@ _generated 2026-10-17T09:50:36.334Z | 6202 files mapped (post-exclusion: tree co
 - `function toolTestSummary`
 - `const NEXTEST_PROFILE`
 - `const NEXTEST_CONFIG`
-- `const NEXTEST_JUNIT`
-- `function nextestJunitPath`
+- `function nextestReceiptPath`
+- `function junitLabel`
 - ... (+7 more, see file)
 ### `tools/board-slice.mjs` x17 +ref10 (23KB, ~5880 tok)
 - `function boardShardFiles`

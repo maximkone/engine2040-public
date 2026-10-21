@@ -179,6 +179,24 @@ Plan: `docs/plan/build-cpu.md`. One pool of compile slots for every cargo on the
   F2P: no nightly numbers.
   P2P: the default toolchain and profiles unchanged.
   needs: none.
+  Progress 2026-10-21 (hunt wave 2, `docs/research/hunt2-2026-10-21/`): the steal
+  is `Kobzol/cargo-wizard` (MIT, 1087 stars), whose `src/predefined.rs` (4.5K)
+  keeps three ready-made cargo profile templates in one file: **fast-compile** =
+  `debug = 0` + linker `lld` + (nightly) `codegen-backend = "cranelift"` +
+  `frontend-threads = cores`; **fast-runtime** = fat LTO + `codegen-units = 1` +
+  `panic = "abort"`; **min-size** = `debug = false` + `strip` +
+  `opt-level = "z"`. Two of the three shapes are already ours and were landed
+  as other rows: fast-runtime is `[profile.ship]` (OPT45) and the `debug = 0`
+  half of fast-compile is in `.cargo/config.toml` (the `test` profile). What
+  the row still owes is the **nightly** half — the parallel front end and the
+  Cranelift dev backend — and the donor's point is that a build shape is a
+  table, not a hand-edited block, so the spike can state "fast-compile" as one
+  named template instead of three hand-written flags. Landing: `Cargo.toml:265`
+  (`[profile.dev]`), `:267` (`[profile.dev.package."*"]`), `:242`
+  (`[profile.release]`) and the spike's own receipt under `docs/receipts/`.
+  Golden: does not threaten — a build profile cannot change what the tick
+  hashes, and the row's own P2P says the default toolchain and profiles are
+  unchanged. The row stays LATER: it needs the owner's nightly toolchain.
 - [ ] OPT45 build: the local release build is thin LTO, the shipped artifact keeps fat LTO. `[profile.release]` is now `lto = "thin"`, `codegen-units = 16`; `[profile.ship]` keeps `lto = "fat"`, `codegen-units = 1` and is what `tools/ship.mjs` and the CI release-proof leg build, so the packaged shape does not change. Tier A. Size S. Owns `Cargo.toml`, `tools/ship.mjs`, `tools/proof.mjs`, `tools/proof.test.mjs`, `tools/ci.test.mjs`, `.github/workflows/ci.yml`.
   Accept: on the GitHub runner, the same line (`cargo test -p engine2040 --release --test proof_cli default_and_max_seed`) compiles the same 22 crates from scratch in both shapes and passes the golden hash in both - thin 38.08 s (run 39576029326) vs fat 58.84 s (run 39576660515); `node --test tools/ci.test.mjs tools/proof.test.mjs` passes; a 300-frame arena run on the thin binary keeps the 60 fps floor (`tools/product-bar.json`, never lowered).
   F2P: every local `--release` build pays the fat-LTO one-unit relink (the arena release build took 11 m 41 s on this PC, ~9.7 min of it in the relink).

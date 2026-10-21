@@ -396,6 +396,22 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   Left: the drawn half — `netgame.rs` does not yet note the resim jump and the
   window does not add `Correction::offset` to the local fighter, so nothing is
   drawn through it and the row stays open.
+  Progress 2026-10-21 (hunt wave 2, `docs/research/hunt2-2026-10-21/`): the steal
+  is `nilpunch/unity-prediction-rollback` (MIT, 48 stars, archived), the safest
+  donor in the wave because the row's own Accept can be written as "hash equal
+  with correction on and off". Its `FadeOutPrediction` (2.1K) makes a predicted
+  input a blend instead of a boolean: `fadeOutPercent = clamp(ticksPassed -
+  startDecayTick, 0, decayDurationTicks) / decayDurationTicks`, with
+  `startDecayTick = 30` and `decayDurationTicks = 60` by default, so the drawn
+  pose reaches the confirmed one exactly when it arrives instead of decaying
+  toward it. The shape is re-derived, never copied (the repo is archived). The
+  second steal from the same file is `CommandTimeline` (3.6K): a `Dictionary`
+  plus a **sorted** tick list, so "the latest tick with a command before T" is
+  a binary search and a rollback trims the filled ticks in order. Landing:
+  `crates/net/src/interp.rs:463` (`Correction`) and `crates/anim/src/net_pose.rs:42`
+  (`NetPose`). Accept unchanged (the donor cannot lower it); the added number is
+  the fade: the visual error reaches 0 exactly at the confirmed tick, not
+  asymptotically. Golden: does not threaten — a drawn-pose rule, never hashed.
 - [ ] MP26 net: clock slew and a 30-frame advantage window — `delay.rs:56-65`
   steps the delay +-1 from one sample. Average frame advantage over 30 frames
   (ggrs `time_sync.rs`), slew the client clock up to 5 percent (lightyear

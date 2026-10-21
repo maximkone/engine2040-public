@@ -129,6 +129,25 @@ not re-mine the same repo.
   F2P: the cull has no cone test.
   P2P: golden `d57b5c8ae3096614` x2; the CPU oracle in `draw.rs` stays green.
   needs: none.
+  Progress 2026-10-21 (hunt wave 2, `docs/research/hunt2-2026-10-21/`): a second
+  donor for the same row, `Scthe/nanite-webgpu` (MIT, 1124 stars, pushed
+  2026-05-09) — an independent WebGPU Nanite, **not** the paper's own code
+  (GitHub code search for the paper id `2404.06359` returns only paper-digest
+  repos, so the paper's codec was never released). What it adds to this row is
+  the **per-meshlet** half: it culls per instance *and* per meshlet, builds the
+  meshlet LOD hierarchy in the browser with meshoptimizer + METIS, and packs
+  depth `u16` + octahedron normals `2xu8` into 32 bits because WebGPU has no
+  `atomic<u64>`. Its numbers to hold us to: 16:1 index-buffer compression, and
+  15.5 M triangles decompressed and rendered in **0.59 ms** on an RX 7900 XTX;
+  its Jinx scene is 640 M triangles with nearly 98 % of them software
+  rasterized. Our gap is named: `crates/render/src/shaders/cull.wgsl:64` has one
+  Hi-Z wall test and `:25` a sphere-vs-6-planes reject, so nothing culls a
+  single cluster. Landing: `crates/render/src/shaders/cull.wgsl`, `:25`, `:64`;
+  `crates/render/src/gpu_cull.rs:237` (`cull`), `:366` (`verify`);
+  `crates/render/src/meshlet.rs:39` (`Cluster`), `:47` (`cluster_cut`). The
+  row's Accept is not lowered; it gains the cluster count the LOD cut chose in
+  the same report, and the 16:1 ratio as a target line on the cooked meshlet
+  index payload. Golden: does not threaten — the cull is presentation.
 - [ ] HX8 physfx: cloth for capes and banners. The float physics layer gains a
   cloth solver in wgpu compute, with a headless mode and a throughput example, so
   capes and banners move in the arena. Donor:
