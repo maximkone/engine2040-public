@@ -1175,11 +1175,7 @@ mod tests {
         let legacy = run(&cfg, &tape);
         let spine = run_spine(&cfg, &tape, &MatchWorld::empty());
         assert_eq!(legacy.len(), 60, "the legacy path seats the full match");
-        assert_eq!(
-            spine.len(),
-            60,
-            "the spine path seats the full match too"
-        );
+        assert_eq!(spine.len(), 60, "the spine path seats the full match too");
         assert_eq!(spine, legacy, "both paths agree on the full match");
     }
 

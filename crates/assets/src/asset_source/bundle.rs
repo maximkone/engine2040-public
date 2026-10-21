@@ -329,6 +329,9 @@ pub struct BundleSource {
     entries: Vec<Entry>,
     /// Indices into `entries` in file (blob) order.
     file_order: Vec<usize>,
+    /// True when the bytes are a fetched prefix of a bigger bundle: the index
+    /// names every file, but the files of the later tiers are not here yet.
+    prefix: bool,
 }
 
 impl BundleSource {
@@ -344,7 +347,34 @@ impl BundleSource {
             bytes,
             entries,
             file_order,
+            prefix: false,
         })
+    }
+
+    /// Open a fetched prefix of a bundle: the header, the index and the blobs
+    /// the bytes hold. The index names every file of the bundle, so the files
+    /// of the later tiers are known but not here yet; reading one fails with
+    /// its name.
+    ///
+    /// The prefix must end on a blob boundary: bytes that stop inside a blob
+    /// are refused, so a reader never serves half a file.
+    pub fn open_prefix(bytes: impl Into<Arc<[u8]>>) -> Result<Self, SourceError> {
+        let bytes: Arc<[u8]> = bytes.into();
+        let header = parse_header(&bytes)?;
+        let entries = parse_index(header.index, header.count)?;
+        let file_order = check_prefix_layout(&entries, header.data_start, bytes.len())?;
+        Ok(Self {
+            bytes,
+            entries,
+            file_order,
+            prefix: true,
+        })
+    }
+
+    /// True when this source holds a fetched prefix of a bigger bundle.
+    #[must_use]
+    pub fn is_prefix(&self) -> bool {
+        self.prefix
     }
 
     /// Files in the bundle.
@@ -393,7 +423,16 @@ impl AssetSource for BundleSource {
         let blob = self
             .bytes
             .get(entry.offset..entry.offset + entry.len)
-            .ok_or_else(|| SourceError::bad_bundle(&format!("blob {path:?} left the bundle")))?;
+            .ok_or_else(|| {
+                if self.prefix {
+                    SourceError::bad_bundle(&format!(
+                        "blob {path:?} is not in the fetched prefix ({} bytes)",
+                        self.bytes.len()
+                    ))
+                } else {
+                    SourceError::bad_bundle(&format!("blob {path:?} left the bundle"))
+                }
+            })?;
         let actual = hash_bytes(blob);
         if actual != entry.hash {
             return Err(SourceError::HashMismatch {
@@ -572,6 +611,48 @@ fn check_layout(
     Ok(order)
 }
 
+/// The blobs of a fetched prefix: the same (priority, path) order as the whole
+/// file, with the blobs the bytes hold at the front. The index gives every
+/// blob's place, so the layout is checked whole; the prefix itself must end on
+/// a blob boundary, and bytes that stop inside a blob are refused by name.
+fn check_prefix_layout(
+    entries: &[Entry],
+    data_start: usize,
+    total: usize,
+) -> Result<Vec<usize>, SourceError> {
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|&i| (entries[i].priority, i));
+    let mut at = data_start;
+    let mut prefix_end = data_start;
+    for &i in &order {
+        let entry = &entries[i];
+        if entry.offset != at {
+            return Err(SourceError::bad_bundle(&format!(
+                "blob {:?} is at {} but the layout puts it at {at}",
+                entry.path, entry.offset
+            )));
+        }
+        let end = at
+            .checked_add(entry.len)
+            .ok_or_else(|| SourceError::bad_bundle("blob lengths overflow"))?;
+        if end <= total {
+            prefix_end = end;
+        }
+        at = end;
+    }
+    if total != prefix_end {
+        let cut = order
+            .iter()
+            .map(|&i| &entries[i])
+            .find(|entry| entry.offset + entry.len > total);
+        let name = cut.map_or("a blob", |entry| entry.path.as_str());
+        return Err(SourceError::bad_bundle(&format!(
+            "the prefix ends inside blob {name:?} (have {total} bytes, the file has {at})"
+        )));
+    }
+    Ok(order)
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::super::fs_tests::fixture;
@@ -608,6 +689,77 @@ mod tests {
         for dir in [a, b] {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn a_prefix_bundle_reads_its_first_tier_and_names_what_it_lacks() {
+        let dir = fixture("prefix");
+        let bytes = packed(&dir, &tiered());
+        let whole = BundleSource::open(bytes.clone()).expect("opens");
+        assert!(!whole.is_prefix(), "the whole file is not a prefix");
+        // The bytes of the first tier are one prefix of the file.
+        let cut = whole
+            .entries_in_file_order()
+            .filter(|entry| entry.priority == 0)
+            .map(|entry| entry.offset + entry.len)
+            .max()
+            .expect("a tier 0 file");
+        let prefix = BundleSource::open_prefix(bytes[..cut].to_vec()).expect("prefix opens");
+        assert!(prefix.is_prefix(), "the prefix says so");
+        assert_eq!(
+            prefix.read("placement.json").expect("tier 0"),
+            whole.read("placement.json").expect("whole"),
+            "the tier 0 file is the same bytes"
+        );
+        let err = prefix
+            .read("src/crate.gltf")
+            .expect_err("a later tier is not here");
+        let text = err.to_string();
+        assert!(
+            text.contains("src/crate.gltf"),
+            "the refusal names the file: {text}"
+        );
+        assert!(text.contains("prefix"), "the refusal says why: {text}");
+        // The index still knows every file of the bundle.
+        assert_eq!(
+            prefix.list("").expect("list").len(),
+            whole.list("").expect("list").len(),
+            "the prefix knows the whole index"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_prefix_that_stops_inside_a_blob_is_refused() {
+        let dir = fixture("cut");
+        let bytes = packed(&dir, &tiered());
+        let whole = BundleSource::open(bytes.clone()).expect("opens");
+        let first = whole.entries_in_file_order().next().expect("a file");
+        let cut = first.offset + first.len - 1;
+        let err =
+            BundleSource::open_prefix(bytes[..cut].to_vec()).expect_err("half a file is no file");
+        let text = err.to_string();
+        assert!(
+            text.contains(first.path),
+            "the refusal names the blob: {text}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_whole_file_opens_as_a_prefix_and_reads_everything() {
+        let dir = fixture("whole_prefix");
+        let bytes = packed(&dir, &tiered());
+        let prefix = BundleSource::open_prefix(bytes.clone()).expect("opens");
+        let whole = BundleSource::open(bytes).expect("opens");
+        for name in whole.list("").expect("list") {
+            assert_eq!(
+                prefix.read(&name).expect("read"),
+                whole.read(&name).expect("read"),
+                "{name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

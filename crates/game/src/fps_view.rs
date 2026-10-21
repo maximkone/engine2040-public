@@ -1,6 +1,7 @@
 //! fps_view: first-person eye pose, presentation side.
-//! Status: retired, no production caller (only the `lib.rs` export plus
-//! unit tests).
+//! Status: the legionary mode's eye feed (the arena bin calls it) plus the
+//! helmet the first-person view wears: the aperture, the rim's own depth
+//! range and the lens the view takes.
 //! Owner: engine-game. Units: mm in, m out for the camera feed; yaw and pitch in rad.
 //! Determinism: presentation only, never hashed; same deltas give same bytes twice.
 use crate::camera::camera_rig::{smooth_trauma_offset, trauma_gain};
@@ -59,6 +60,34 @@ pub struct LogicalFrame {
     pub prev_mm: [i32; 3],
     pub look: LookState,
 }
+/// The helmet the first-person view wears: the aperture the wearer looks
+/// through, the depth range its rim draws in and the lens the view takes.
+///
+/// The rim never leans on the world's clip. The world's near plane sits
+/// inside the rim's range, so world geometry can stand right in front of
+/// the eye; the rim draws in its own range on its own depth target, so
+/// nothing the world draws can cover it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct HelmetWorn {
+    /// The aperture the wearer has.
+    pub preset: engine_render::viewmodel::AperturePreset,
+    /// The depth range the rim draws in, in meters.
+    pub depth: engine_render::viewmodel::DepthRange,
+    /// The lens the first-person view takes.
+    pub lens: engine_render::lens::LensPreset,
+}
+
+impl HelmetWorn {
+    /// The helmet of the legionary kit: the galea with cheek guards, the
+    /// rim's own depth range and the helmet lens.
+    pub const fn galea() -> Self {
+        Self {
+            preset: engine_render::viewmodel::AperturePreset::GaleaCheekGuards,
+            depth: engine_render::viewmodel::VIEWMODEL_DEPTH,
+            lens: engine_render::lens::LensPreset::Helmet,
+        }
+    }
+}
 /// Render eye: interpolated feet plus height, with look attached and the
 /// trauma roll (`0` when calm). Millimetre lanes are `f32`, the feed's own
 /// unit: whole millimetres land exact (`i16` covers every arena span) and a
@@ -71,6 +100,9 @@ pub struct RenderEye {
     pub pitch_rad: f32,
     /// Roll about the view axis from the shake, always `0` in [`render_eye`].
     pub roll_rad: f32,
+    /// The helmet the wearer has: the rim the view draws, with the depth
+    /// range it draws in.
+    pub helmet: HelmetWorn,
 }
 /// Whole millimetres as the lane's own type: `i16` holds 32.7 m, wider than any
 /// arena span, and the `f32` step is `From`, so a lane narrows without a
@@ -98,6 +130,7 @@ pub fn render_eye(frame: &LogicalFrame, alpha_q: u32, height_mm: i32) -> RenderE
         yaw_rad: frame.look.yaw_rad,
         pitch_rad: frame.look.pitch_rad,
         roll_rad: 0.0,
+        helmet: HelmetWorn::galea(),
     }
 }
 /// Eye-space shake for one tick (kick mm, roll and FOV punch rad): presentation only.
@@ -228,6 +261,7 @@ pub fn eye_for_fighter(
         yaw_rad: facing_yaw_rad,
         pitch_rad: 0.0,
         roll_rad: 0.0,
+        helmet: HelmetWorn::galea(),
     })
 }
 /// Map a render-camera refusal onto the game camera error: the eye feed adds
@@ -858,6 +892,77 @@ mod tests {
                     legionary_eye(bad, 0.0, 0, 0),
                     Err(CameraError::BadParam(row)) if row.contains("FV1")
                 ));
+            }
+        }
+
+        /// The first-person view wears the galea, and the rim draws in its
+        /// own depth range: a wall five centimetres in front of the eye
+        /// cannot cover it, and the rim sits at the edge of the frame where
+        /// the reference pictures show it.
+        #[test]
+        fn legionary_eye_wears_the_galea_and_its_rim_draws_in_its_own_depth_range() {
+            use engine_render::viewmodel::{DepthRange, DepthTarget};
+            let eye = super::super::legionary_eye([1.0, 0.0, 2.0], 0.5, 0, 7).expect("valid eye");
+            assert_eq!(
+                eye.helmet.preset,
+                engine_render::viewmodel::AperturePreset::GaleaCheekGuards,
+                "the legionary wears the galea"
+            );
+            assert_eq!(
+                eye.helmet.depth,
+                engine_render::viewmodel::VIEWMODEL_DEPTH,
+                "the rim draws in its own depth range"
+            );
+            assert_eq!(
+                eye.helmet.lens,
+                engine_render::lens::LensPreset::Helmet,
+                "the helmet lens rides the view"
+            );
+            // The world may draw right in front of the eye: the world's
+            // near plane sits inside the rim's range, so the rim cannot
+            // lean on the world's clip.
+            let mut world = DepthTarget::new(DepthRange::new(0.001, 100.0).expect("a world range"));
+            assert!(
+                world.write(0.01),
+                "the wall one centimetre in front of the eye is drawn"
+            );
+            let mut rim = DepthTarget::new(eye.helmet.depth);
+            assert!(rim.write(0.060), "the rim is drawn");
+            assert!(
+                !world.write(0.060),
+                "the wall covers the rim in the world's target"
+            );
+            // The rim is in view: its inner edge sits inside the frame and
+            // its outer edge past it, so the rim frames the picture.
+            let row = eye.helmet.preset.table_row();
+            let projection =
+                engine_render::viewmodel::viewmodel_view_proj(eye.helmet.depth, 1.05, 16.0 / 9.0)
+                    .expect("a valid projection");
+            let edge = |y_mm: f32| {
+                let y = y_mm / 1000.0;
+                let z = row.z_front_mm / 1000.0;
+                (projection[5] * y) / (projection[11] * z)
+            };
+            let inner = row.half_height_mm - row.band_mm;
+            assert!(
+                edge(inner).abs() < 1.0,
+                "the opening's edge must be inside the frame, got {}",
+                edge(inner)
+            );
+            assert!(
+                edge(row.half_height_mm).abs() > 1.0,
+                "the rim must reach past the frame's edge, got {}",
+                edge(row.half_height_mm)
+            );
+            // The rim's own mesh builds from the table row the eye names.
+            let mesh = engine_render::viewmodel::build_rim_mesh(eye.helmet.preset)
+                .expect("the table row builds");
+            assert!(mesh.triangle_count() > 0, "the rim has triangles");
+            for vertex in &mesh.vertices {
+                assert!(
+                    vertex.position_m[2] > eye.helmet.depth.near_m,
+                    "the rim must sit inside its own range"
+                );
             }
         }
     }

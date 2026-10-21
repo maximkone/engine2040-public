@@ -341,6 +341,12 @@ pub mod post_jitter_motion;
 /// the GPU pass and the capture helper ride the `window` feature.
 pub mod lens;
 
+/// The first-person helmet rim: the aperture outline table, the closed rim
+/// mesh it builds, the rim's own depth range and the GPU pass that draws
+/// it on its own depth target. Std-only core; the capture helper rides the
+/// `window` feature.
+pub mod viewmodel;
+
 /// SMAA fallback plus dynamic resolution around RP1 (RP4): edge-detect
 /// area blend for the TAA-off path plus a hysteresis scale controller on
 /// PF2 frame ms. Std-only; consumer is the WIN1 viewport TAA-off path.

@@ -60,14 +60,30 @@ The legacy golden `d57b5c8ae3096614` stays: the proof crate's spine parity
 tapes seat 2 to 4 fighters, so the cap never bit them
 (`crates/proof/src/spine_parity.rs`).
 
-## Still owed
+## The release-mode p50, measured
 
-The release-mode p50 re-measurement of the two spine rows
-(`cargo test --release -p engine-perf -- --ignored --test-threads=1`) is an
-open item on this box: the local release build is memory-bound while other
-lanes build (4.8 GB free of 15.7 GB, and the release link was killed twice
-at exit 255). The two bars above are the derived rate, not a fresh
-measurement, and the receipt says so.
+The two bars above were derived from the 16-slot measurement (the same rate
+per unit of work). The fresh measurement at the 32-slot cap came from the
+GitHub runner, in the house shape (release, one thread, the
+`perf_time_budgets` test only):
+
+| row | p50 | max | bar |
+|-----|-----|-----|-----|
+| `spine_transform_body` (20k entity-steps) | 0.044 ms | 0.058 ms | 1.0 ms |
+| `spine_full_tick` (2k agent-ticks) | 0.012 ms | 0.013 ms | 4.0 ms |
+
+Both rows land far under the bar (23x and 333x of headroom), so the scaled
+bars hold at the cap: the work doubled, the p50 did not even double.
+
+One note on the shape: the first dispatch of this measurement used
+`cargo test --release -p engine-perf -- --ignored --test-threads=1`, which
+runs *every* ignored test in the crate. That includes
+`bet_wall_spike::bet_seeded_overrun_fails_the_time_gate`, which asserts a
+budget that must FAIL on purpose (it is the red-by-design proof that the
+wall-clock gate catches a regression), so that run is red by construction
+and proves nothing about the spine. The measurement above is the filtered
+leg (`--test it perf_time_budgets`), the same shape the OPT14 board row
+cites.
 
 ## Proof
 
@@ -78,3 +94,4 @@ measurement, and the receipt says so.
 - `cargo clippy -p engine-ecs -p engine-arena -p engine-perf --all-targets -- -D warnings` -> exit 0
 - the same arena run names the new test: `spine_step::tests::a_full_size_match_builds_a_spine ... ok`
 - `cargo test -p engine-ecs --all-targets` and `-p engine-arena --all-targets` also ran green on the GitHub runner (runs 39636725864 and 39637740089, the same counts); the clippy leg is green there too (run 39638216244)
+- `cargo test --release -p engine-perf --test it perf_time_budgets -- --ignored --nocapture --test-threads=1` -> spine_transform_body: p50 0.044 ms, max 0.058 ms, budget 1.0 ms; spine_full_tick: p50 0.012 ms, max 0.013 ms, budget 4.0 ms (run 39640250921)
