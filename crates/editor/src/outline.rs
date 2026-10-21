@@ -1601,7 +1601,16 @@ mod tests {
         d.as_secs_f64() * 1_000_000.0
     }
 
+    /// Timing receipt: the new `search` against the pre-change allocating
+    /// form, paired over 201 alternating runs so one load patch sits under
+    /// both sides. The empty-needle case does the same work on both sides by
+    /// construction (every row matches), so its ratio is a tie and the bar
+    /// there is a floor, not a win. Wall clock never belongs in the default
+    /// suite: the ratio moves with the machine's load. Run:
+    /// cargo test -p engine-editor --release --lib
+    /// folded_search_probe_old_vs_new -- --ignored --nocapture
     #[test]
+    #[ignore = "timing: run with --ignored (release, one thread) for the receipt"]
     fn folded_search_probe_old_vs_new() {
         const RUNS: usize = 201;
         let (shell, names) = siege_scene();
@@ -1637,7 +1646,15 @@ mod tests {
         let best = ratios.iter().copied().fold(f64::MIN, f64::max);
         eprintln!("PF31 probe best case {best:.3}x");
         assert!(ratios[0] >= 1.0, "short query regressed: {:.3}x", ratios[0]);
-        assert!(ratios[1] >= 1.0, "empty query regressed: {:.3}x", ratios[1]);
+        // The empty needle does the same work on both sides by construction
+        // (every row matches), so its ratio is a tie that moves with the
+        // machine's load. The bar there is "not slower", the shape the other
+        // perf receipts use, and the wins are carried by the other two cases.
+        assert!(
+            ratios[1] >= 0.95,
+            "empty query regressed: {:.3}x",
+            ratios[1]
+        );
         assert!(
             ratios[2] >= 1.0,
             "long-needle query regressed: {:.3}x",
