@@ -28,6 +28,8 @@ const SLOT_WORDS: usize = 8;
 
 const TAG_PLAY: u32 = 1;
 const TAG_PLAY_AT: u32 = 2;
+const TAG_PLAY_TAKE: u32 = 7;
+const TAG_PLAY_AT_TAKE: u32 = 8;
 const TAG_LISTENER: u32 = 3;
 const TAG_STOP: u32 = 4;
 const TAG_TENSION: u32 = 5;
@@ -45,6 +47,10 @@ pub struct AudioCommand {
     /// Source position `[east, up, south]` in centimeters; `None` plays the
     /// cue flat.
     pub pos_cm: Option<[i32; 3]>,
+    /// The exact take of the cue to play, when the producer picked one (the
+    /// round-robin of the impact table). `None` lets the audio side pick,
+    /// the way it always did.
+    pub take: Option<u16>,
 }
 
 /// Everything the game thread can tell the audio thread.
@@ -182,9 +188,11 @@ impl Slot {
     fn store(&self, cmd: Command) {
         let words: [u32; SLOT_WORDS] = match cmd {
             Command::Play(p) => {
-                let (tag, pos) = match p.pos_cm {
-                    Some(pos) => (TAG_PLAY_AT, pos),
-                    None => (TAG_PLAY, [0; 3]),
+                let (tag, pos) = match (p.pos_cm, p.take.is_some()) {
+                    (Some(pos), true) => (TAG_PLAY_AT_TAKE, pos),
+                    (Some(pos), false) => (TAG_PLAY_AT, pos),
+                    (None, true) => (TAG_PLAY_TAKE, [0; 3]),
+                    (None, false) => (TAG_PLAY, [0; 3]),
                 };
                 [
                     tag,
@@ -194,7 +202,7 @@ impl Slot {
                     word_of(pos[0]),
                     word_of(pos[1]),
                     word_of(pos[2]),
-                    0,
+                    p.take.map_or(0, |take| u32::from(take) + 1),
                 ]
             }
             Command::Listener {
@@ -230,12 +238,18 @@ impl Slot {
         let cue = || u16::try_from(w(1)).ok().map(CueId);
         let pos = [int_of(w(4)), int_of(w(5)), int_of(w(6))];
         match w(0) {
-            tag @ (TAG_PLAY | TAG_PLAY_AT) => Some(Command::Play(AudioCommand {
-                tick: w(2),
-                cue: cue()?,
-                gain: f32::from_bits(w(3)),
-                pos_cm: (tag == TAG_PLAY_AT).then_some(pos),
-            })),
+            tag @ (TAG_PLAY | TAG_PLAY_AT | TAG_PLAY_TAKE | TAG_PLAY_AT_TAKE) => {
+                // Word 7 holds the take plus one; zero means the audio side
+                // picks the take itself.
+                let take = w(7).checked_sub(1).and_then(|t| u16::try_from(t).ok());
+                Some(Command::Play(AudioCommand {
+                    tick: w(2),
+                    cue: cue()?,
+                    gain: f32::from_bits(w(3)),
+                    pos_cm: (tag == TAG_PLAY_AT || tag == TAG_PLAY_AT_TAKE).then_some(pos),
+                    take,
+                }))
+            }
             TAG_LISTENER => Some(Command::Listener {
                 tick: w(2),
                 pos_cm: pos,
@@ -345,7 +359,7 @@ impl FeedTx {
 
     /// Queue a play of the cue called `cue`. A positional cue given
     /// `pos_cm` (`[east, up, south]` cm) is placed against the listener;
-    /// `None` plays it flat.
+    /// `None` plays it flat. The audio side picks the take.
     ///
     /// # Errors
     ///
@@ -358,12 +372,33 @@ impl FeedTx {
         gain: f32,
         pos_cm: Option<[i32; 3]>,
     ) -> Result<(), FeedError> {
+        self.play_take(tick, cue, gain, pos_cm, None)
+    }
+
+    /// Queue a play of the cue called `cue`, with the exact take to sound.
+    /// The take is the one the round robin of the impact table picked, so
+    /// the audio thread plays the take the producer meant. `None` lets the
+    /// audio side pick, the way it always did.
+    ///
+    /// # Errors
+    ///
+    /// [`FeedError::UnknownCue`] (counted) for a name the bank lacks, else
+    /// as [`Self::send`].
+    pub fn play_take(
+        &mut self,
+        tick: u32,
+        cue: &str,
+        gain: f32,
+        pos_cm: Option<[i32; 3]>,
+        take: Option<u16>,
+    ) -> Result<(), FeedError> {
         let id = self.resolve(cue)?;
         self.send(Command::Play(AudioCommand {
             tick,
             cue: id,
             gain,
             pos_cm,
+            take,
         }))
     }
 
@@ -440,6 +475,7 @@ impl FeedTx {
             cue: id,
             gain: 1.0,
             pos_cm: None,
+            take: None,
         }))
     }
 
@@ -542,6 +578,7 @@ mod tests {
             cue: CueId(1),
             gain: 0.5,
             pos_cm: None,
+            take: None,
         })
     }
 
@@ -555,6 +592,7 @@ mod tests {
                 cue: CueId(u16::MAX),
                 gain: f32::NAN,
                 pos_cm: Some([i32::MIN, -7, i32::MAX]),
+                take: None,
             }),
             Command::Listener {
                 tick: 9,
@@ -658,6 +696,7 @@ mod tests {
                 cue: CueId(1),
                 gain: 0.25,
                 pos_cm: Some([1, 2, 3]),
+                take: None,
             }))
         );
         assert!(rx.pop().is_none(), "unknown names queue nothing");
@@ -671,6 +710,25 @@ mod tests {
                 cue: CueId(0)
             })
         );
+    }
+
+    /// The take the producer names rides the ring and comes back whole, so
+    /// the audio thread plays the take the round robin picked. A play with
+    /// no take keeps the old shape and lets the audio side pick.
+    #[test]
+    fn the_named_take_rides_the_ring_and_comes_back_whole() {
+        let (mut tx, mut rx) = feed(8, bank());
+        tx.play_take(1, "b", 0.5, Some([1, 2, 3]), Some(2))
+            .expect("known cue");
+        tx.play_take(2, "b", 0.5, None, Some(0)).expect("known cue");
+        tx.play(3, "b", 0.5, None).expect("known cue");
+        let takes: Vec<Option<u16>> = std::iter::from_fn(|| rx.pop())
+            .filter_map(|cmd| match cmd {
+                Command::Play(play) => Some(play.take),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(takes, vec![Some(2), Some(0), None], "{takes:?}");
     }
 
     #[test]
@@ -722,6 +780,7 @@ mod tests {
                 cue: CueId(2),
                 gain: 1.0,
                 pos_cm: None,
+                take: None,
             }))
         );
         assert_eq!(

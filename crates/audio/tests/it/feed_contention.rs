@@ -42,6 +42,7 @@ fn a_thousand_commands_cross_a_small_ring_in_order_with_nothing_lost() {
                 cue: CueId(1),
                 gain: 1.0,
                 pos_cm: Some([i32::try_from(tick).unwrap_or(0), 0, -5]),
+                take: None,
             });
             while let Err(err) = tx.send(cmd) {
                 assert_eq!(err, FeedError::Full);

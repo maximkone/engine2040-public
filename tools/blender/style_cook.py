@@ -437,6 +437,64 @@ def write_atlas(image, palette, out_path):
     return {"source_size": [width, height], "atlas": ATLAS_SIZE, "distinct_colors": int(unique)}
 
 
+def fit_skin_under_cloth(ob, amount=0.035):
+    """Shrink the skin, so the garment always covers it.
+
+    The garment is fitted to the body, so the two surfaces are a hair
+    apart, and the body shows through the cloth as patches of flesh.
+    After the decimation the two surfaces move about, and the body pokes
+    through in more places.
+
+    The skin is pushed in towards the body's own axis, a little, and
+    nothing else. It is not moved onto the garment: the first version
+    did that with a ray from above, and the skin that the garment does
+    not cover - the arms, the legs, the face - was dragged into long
+    vertical ribbons, because the ray found the garment's surface far
+    above the vertex and the vertex was moved there.
+
+    The push is measured per vertex: the closer the vertex is to the
+    body's centre line, the more it can give way, so the arms and the
+    legs keep their shape and the torso gives way to the cloth.
+    """
+    me = ob.data
+    if not me.vertices:
+        return 0
+
+    skin_slots = set()
+    for index, slot in enumerate(ob.material_slots):
+        material = slot.material
+        if material is None:
+            continue
+        if "skin" in (material.name or "").lower():
+            skin_slots.add(index)
+    if not skin_slots:
+        return 0
+
+    xs = [v.co.x for v in me.vertices]
+    centre = (min(xs) + max(xs)) * 0.5
+    span = max(max(xs) - min(xs), 1e-6)
+
+    moved = 0
+    for poly in me.polygons:
+        if poly.material_index not in skin_slots:
+            continue
+        for index in poly.vertices:
+            co = me.vertices[index].co
+            # How far the vertex is from the body's centre line, as a
+            # share of the body's width. A vertex on the centre line can
+            # give way the most; one out at the arm cannot give way at
+            # all.
+            away = min(1.0, abs(co.x - centre) / (span * 0.5))
+            give = amount * (1.0 - away * away)
+            if give <= 0.0:
+                continue
+            me.vertices[index].co = Vector((co.x - (co.x - centre) * give,
+                                           co.y, co.z))
+            moved += 1
+    me.update()
+    return moved
+
+
 def split_hair(ob):
     """Give the hair its own material.
 
@@ -453,6 +511,14 @@ def split_hair(ob):
 
     Only the skin is split. The cloth keeps its own material, or a
     shoulder pad turns into hair.
+
+    The hair is the top of the head: the crown, and the sides down to
+    the temples. The split is a share of the head's own surface, not a
+    height on the body, so it does not depend on where the head sits.
+    The first version used the head's own median height, and it moved
+    two faces: the median of a skull is in the middle of the skull, and
+    nearly every face of the head is below that, because the face hangs
+    down from the crown. So the whole head stayed skin.
     """
     me = ob.data
     count = len(me.vertices)
@@ -480,26 +546,68 @@ def split_hair(ob):
                 adjacency[vs[i]].append(vs[j])
                 adjacency[vs[j]].append(vs[i])
 
-    # The component that holds the top vertex.
-    top = max(range(count), key=lambda i: me.vertices[i].co.z)
-    seen = {top}
-    stack = [top]
-    head = []
-    while stack:
-        v = stack.pop()
-        head.append(v)
-        for w in adjacency[v]:
-            if w not in seen:
-                seen.add(w)
-                stack.append(w)
+    # The head is the piece that reaches highest and is a head's worth
+    # of figure. The skin's highest vertex belongs to a scrap of
+    # fourteen vertices, and the head is below it, so the search cannot
+    # start at the top vertex.
+    zs = [v.co.z for v in me.vertices]
+    z_min, z_max = min(zs), max(zs)
+    figure_height = max(z_max - z_min, 1e-6)
+    crown = z_min + figure_height * 0.80
 
-    # A component that is most of the figure is not a head.
-    if len(head) > count * 0.25:
+    seen = set()
+    pieces = []
+    for start_vertex in range(count):
+        if start_vertex in seen:
+            continue
+        stack = [start_vertex]
+        seen.add(start_vertex)
+        piece = []
+        while stack:
+            v = stack.pop()
+            piece.append(v)
+            for w in adjacency[v]:
+                if w not in seen:
+                    seen.add(w)
+                    stack.append(w)
+        pieces.append(piece)
+
+    # The head is the biggest piece that reaches the crown.
+    head = []
+    for piece in pieces:
+        if len(piece) > count * 0.25:
+            # A piece that is most of the figure is not a head.
+            continue
+        piece_zs = [me.vertices[v].co.z for v in piece]
+        if max(piece_zs) < crown:
+            continue
+        if len(piece) > len(head):
+            head = piece
+    if not head:
+        return False
+    head_set = set(head)
+
+    # The head's own faces, and the height of each.
+    head_faces = []
+    for index, poly in enumerate(me.polygons):
+        if poly.material_index not in skin_slots:
+            continue
+        verts = [me.vertices[v] for v in poly.vertices]
+        if not verts:
+            continue
+        on_head = sum(1 for v in verts if v.index in head_set)
+        if on_head < len(verts) * 0.6:
+            continue
+        head_faces.append((index, min(v.co.z for v in verts)))
+    if len(head_faces) < 20:
         return False
 
-    head_zs = sorted(me.vertices[i].co.z for i in head)
-    mid = head_zs[len(head_zs) // 2]
-    head_set = set(head)
+    # The hair is the top of the head's own faces. The face of the head
+    # hangs down from the crown, so the split is a share of the head's
+    # surface and not a height.
+    head_faces.sort(key=lambda item: item[1])
+    cut = int(len(head_faces) * 0.58)
+    hair_faces = {index for index, _ in head_faces[cut:]}
 
     hair = bpy.data.materials.new(name="hair")
     hair.use_nodes = True
@@ -509,47 +617,10 @@ def split_hair(ob):
         slot = len(me.materials) - 1
 
     moved = 0
-    for poly in me.polygons:
-        if poly.material_index not in skin_slots:
-            continue
-        verts = [me.vertices[v] for v in poly.vertices]
-        if not verts:
-            continue
-        on_head = sum(1 for v in verts if v.index in head_set)
-        if on_head < len(verts) * 0.6:
-            continue
-        if min(v.co.z for v in verts) >= mid:
-            poly.material_index = slot
-            moved += 1
+    for index in hair_faces:
+        me.polygons[index].material_index = slot
+        moved += 1
     return moved > 0
-
-
-def drop_normal_maps(ob):
-    """Take the normal maps out of the export.
-
-    Our look is painted: the atlas carries the colour and the LIGHT layer
-    carries the light. A normal map adds nothing the engine can use, and
-    the suit's normal map is 4K, so every LOD carried 7 MB of a texture
-    nobody looks at.
-    """
-    dropped = 0
-    for slot in ob.material_slots:
-        material = slot.material
-        if material is None:
-            continue
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                tree = getattr(material, "node_tree", None)
-                if not tree:
-                    continue
-                for node in list(tree.nodes):
-                    if node.type == "NORMAL_MAP":
-                        tree.nodes.remove(node)
-                        dropped += 1
-        except Exception:
-            continue
-    return dropped
 
 
 def bake_atlas(ob, palette, out_dir):
@@ -650,6 +721,7 @@ def bake_atlas(ob, palette, out_dir):
         written.append({"material": "(none)", "image": "(none)", "atlas": "atlas.png",
                         "skin": False, **info})
     return written
+
 
 
 def drop_normal_maps(ob):
@@ -936,8 +1008,31 @@ def decimate_by_part(ob, budget, share=1.0):
     # The parts go back together, and the faces keep their material. A
     # joined object is freed, so the live one is asked for after every
     # join: the list of parts would otherwise hold dead references.
+    #
+    # The material list is built by hand. The join merges the lists, and
+    # a part's faces keep their own index, so a part with a material the
+    # survivor does not have - the head's hair - loses it: the head's
+    # faces land on the survivor's skin and the hair is gone.
     keep = parts[0]
     for part in parts[1:]:
+        # Where each of the part's materials lands in the survivor's list.
+        remap = {}
+        for index, slot in enumerate(part.material_slots):
+            material = slot.material
+            if material is None:
+                continue
+            target = None
+            for i, existing in enumerate(keep.data.materials):
+                if existing is material or existing.name == material.name:
+                    target = i
+                    break
+            if target is None:
+                keep.data.materials.append(material)
+                target = len(keep.data.materials) - 1
+            remap[index] = target
+        for poly in part.data.polygons:
+            if poly.material_index in remap:
+                poly.material_index = remap[poly.material_index]
         bpy.ops.object.select_all(action="DESELECT")
         keep.select_set(True)
         part.select_set(True)
@@ -1170,6 +1265,9 @@ def main():
     # A normal map adds nothing the engine can use: the atlas carries the
     # colour and the LIGHT layer carries the light. The suit's map is 4K,
     # so every LOD carried 7 MB of a texture nobody looks at.
+    # The skin is fitted under the garment, so the body does not show
+    # through the cloth as patches of flesh.
+    fitted = fit_skin_under_cloth(ob)
     normals_stripped = drop_normal_maps(ob)
     atlas_info = bake_atlas(ob, palette, outdir)
     light_info = bake_vertex_light(ob)
@@ -1227,6 +1325,7 @@ def main():
         "triangle_budget": budget,
         "unwrapped": unwrapped,
         "hair_faces": hair_faces,
+        "skin_fitted": fitted,
         "normals_stripped": normals_stripped,
         "atlas": atlas_info,
         "light": light_info,

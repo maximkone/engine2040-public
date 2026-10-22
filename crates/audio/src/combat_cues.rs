@@ -448,6 +448,7 @@ mod tests {
                     cue: bank.id(name).expect("shipped cue"),
                     gain,
                     pos_cm: Some(pos),
+                    take: None,
                 })),
                 "{name} at tick {tick}"
             );
@@ -511,6 +512,7 @@ mod tests {
                     cue: bank.id(name).expect("shipped cue"),
                     gain: 0.8,
                     pos_cm: Some(VICTIM),
+                    take: None,
                 })),
                 "{name}"
             );

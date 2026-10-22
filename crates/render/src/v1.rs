@@ -1000,62 +1000,23 @@ pub fn specular_light(
     fr
 }
 
-/// PORT(bevyengine/bevy@v0.15.0:crates/bevy_core_pipeline/src/tonemapping/tonemapping_shared.wgsl): `RRTAndODTFit` + `ACESFitted` — the Stephen Hill fit
-/// Bevy ships (matrices and constants verbatim), clamping output to [0, 1].
-fn rrt_odt_fit(v: [f32; 3]) -> [f32; 3] {
-    let mut out = [0.0; 3];
+/// The per-channel compressive fit, applied to every channel: the CPU twin
+/// of the WGSL `tonemap.wgsl` chunk's per-channel curve. The one source is
+/// [`crate::tonemap::fit_one`], so the CPU oracle and the shader agree on
+/// the numbers.
+pub fn aces_fitted(color: [f32; 3]) -> [f32; 3] {
+    let mut out = [0.0f32; 3];
     for i in 0..3 {
-        let a = v[i] * (v[i] + 0.0245786) - 0.000090537;
-        // Trailing zero dropped: 0.432951 rounds to the same f32 as Bevy's 0.4329510.
-        let b = v[i] * (0.983729 * v[i] + 0.432951) + 0.238081;
-        out[i] = a / b;
+        out[i] = crate::tonemap::fit_one(color[i]);
     }
     out
-}
-
-/// sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT (Bevy `rgb_to_rrt`, columns).
-const RGB_TO_RRT: [[f32; 3]; 3] = [
-    [0.59719, 0.35458, 0.04823],
-    [0.07600, 0.90834, 0.01566],
-    [0.02840, 0.13383, 0.83777],
-];
-
-/// ODT_SAT => XYZ => D60_2_D65 => sRGB (Bevy `odt_to_rgb`, columns).
-const ODT_TO_RGB: [[f32; 3]; 3] = [
-    [1.60475, -0.53108, -0.07367],
-    [-0.10208, 1.10813, -0.00605],
-    [-0.00327, -0.07276, 1.07602],
-];
-
-/// Row-vector times column-major matrix, matching Bevy's `color *= mat`.
-fn row_mul(v: [f32; 3], cols: [[f32; 3]; 3]) -> [f32; 3] {
-    [dot3(v, cols[0]), dot3(v, cols[1]), dot3(v, cols[2])]
-}
-
-/// PORT(bevyengine/bevy@v0.15.0:crates/bevy_core_pipeline/src/tonemapping/tonemapping_shared.wgsl): `ACESFitted`.
-pub fn aces_fitted(color: [f32; 3]) -> [f32; 3] {
-    let fitted = rrt_odt_fit(row_mul(color, RGB_TO_RRT));
-    let out = row_mul(fitted, ODT_TO_RGB);
-    [saturate(out[0]), saturate(out[1]), saturate(out[2])]
 }
 
 /// `linear_to_srgb`: sRGB EOTF (IEC 61966-2-1) reimplemented from the
 /// standard, not a Bevy port — Bevy v0.15.0 `color_operations.wgsl` and
 /// `tonemapping_shared.wgsl` carry no such function (verified 2026-09-25).
-pub fn linear_to_srgb(color: [f32; 3]) -> [f32; 3] {
-    let mut out = [0.0; 3];
-    for i in 0..3 {
-        let v = color[i];
-        out[i] = if v <= 0.0 {
-            v
-        } else if v <= 0.0031308 {
-            v * 12.92
-        } else {
-            1.055 * v.powf(1.0 / 2.4) - 0.055
-        };
-    }
-    out
-}
+/// The one source is `crate::tonemap::linear_to_srgb`, the CPU twin of the
+/// WGSL `tonemap.wgsl` chunk.
 
 /// One shaded surface point: material factors plus the geometric terms.
 /// Bundled so the shade entry point stays a single argument.
@@ -1110,7 +1071,7 @@ pub fn shade_pbr(p: &ShadePoint) -> [f32; 3] {
         exposed[1].max(0.0),
         exposed[2].max(0.0),
     ];
-    linear_to_srgb(aces_fitted(clamped))
+    crate::tonemap::linear_to_srgb(aces_fitted(clamped))
 }
 
 // ---------------------------------------------------------------------------

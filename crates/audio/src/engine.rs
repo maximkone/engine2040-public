@@ -102,10 +102,17 @@ impl AudioEngine {
                 let Some(cue) = self.bank.cue(play.cue) else {
                     return;
                 };
-                let Some(picker) = self.pickers.get_mut(usize::from(play.cue.0)) else {
-                    return;
+                // The producer may name the exact take (the round robin of
+                // the impact table); otherwise the audio side picks one.
+                let variant = match play.take {
+                    Some(take) => usize::from(take),
+                    None => {
+                        let Some(picker) = self.pickers.get_mut(usize::from(play.cue.0)) else {
+                            return;
+                        };
+                        picker.pick(cue.variants.len())
+                    }
                 };
-                let variant = picker.pick(cue.variants.len());
                 let voice = self
                     .mixer
                     .play_cue(play.cue, cue, variant, play.gain, play.pos_cm);
@@ -503,6 +510,34 @@ mod tests {
         assert_ne!(first, run(2041), "another seed picks another sequence");
     }
 
+    /// The take the producer names is the take that sounds. The round robin
+    /// of the impact table picks a take on the game thread; the audio
+    /// thread must play that one, not pick its own.
+    #[test]
+    fn the_named_take_is_the_take_that_sounds() {
+        // The "clack" cue has four takes, each a constant level: 0.1, 0.2,
+        // 0.3, 0.4. The Sfx bus trims them all by the same factor, so the
+        // ratios are what matter.
+        let level = |take: u16| {
+            let (mut tx, mut engine) = AudioEngine::with_feed(test_bank(), 16, RATE, 1);
+            tx.play_take(0, "clack", 1.0, None, Some(take))
+                .expect("room");
+            let mut out = [0.0f32; 4];
+            engine.render_stereo_into(&mut out);
+            out[0]
+        };
+        let (low, mid, high) = (level(0), level(2), level(3));
+        assert!(low > 0.0, "take 0 sounds");
+        assert!(
+            (mid / low - 3.0).abs() < 0.01,
+            "take 2 is three times take 0: {low} {mid}"
+        );
+        assert!(
+            (high / low - 4.0).abs() < 0.01,
+            "take 3 is four times take 0: {low} {high}"
+        );
+    }
+
     #[test]
     fn unknown_ids_in_the_ring_are_ignored() {
         let (mut tx, mut engine) = AudioEngine::with_feed(test_bank(), 4, RATE, 0);
@@ -511,6 +546,7 @@ mod tests {
             cue: CueId(77),
             gain: 1.0,
             pos_cm: None,
+            take: None,
         }))
         .expect("room");
         assert_eq!(engine.drain(), 1);

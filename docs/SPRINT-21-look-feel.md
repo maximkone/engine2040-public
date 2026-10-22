@@ -798,7 +798,7 @@ no-clip rule at eye level, eye-space shake, one scripted proof tape. Every row i
   from the same gain inside a table cap; calm reports zero; replays
   twice. F2P: no eye-space shake exists. P2P: shake never hashed,
   golden unchanged. needs: FV1.
-- [ ] FV6 proof: scripted 600-tick eye tape with receipt. Tier B.
+- [x] FV6 proof: scripted 600-tick eye tape with receipt. Tier B. Landed 5f103e6. Tick audit 2026-10-22: `crates/game/tests/it/fps_view_tape.rs` (new) and the `mod fps_view_tape;` line in `crates/game/tests/it/main.rs` land the tape: 600 fighter inputs recorded from the real arena match (the script closes on the rival, so the fight lands real cues) plus 600 scripted look deltas on the presentation channel; the eye bytes replay exactly twice and the camera feed replays with them. `cargo test -p engine-game --test it fps_view_tape` green (3 passed, gh-check run 39722459677); `cargo test -p engine-game --features app --test it fps_view_tape` green (3 passed, 1 ignored, run 39722442096) and the same line with `-- --nocapture` prints the receipt: `eye_travel_peak_cm=6.76 shake_peak_cm=0.10 submit_ms=0.0002 trauma_peak_permille=180` (run 39722506609), the travel peak under the 25 cm budget at 30 fps and the submit cost under the 16.0 ms `GPU_SUBMIT_BUDGET_MS`; the submit bar test is `#[ignore]`d (wall clock) and green under `--ignored` on this PC at 0.0004 ms. The eye never enters a tick hash: golden `d57b5c8ae3096614` unchanged, `cargo test -p engine2040 --release --test proof_cli default_and_max_seed` green (run 39722454328).
   Size S. Owns `crates/game/tests/it/fps_view_tape.rs` (new file,
   wired as a `mod` line in its `main.rs`).
   Accept: one tape drives fighter plus look deltas for 600 ticks;

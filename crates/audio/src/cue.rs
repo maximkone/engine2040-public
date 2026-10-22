@@ -204,7 +204,7 @@ impl ImpactSurface {
 ///
 /// Row order is [`ImpactKind::index`]; column order is
 /// [`ImpactSurface::index`].
-pub const IMPACT_CUES: [[&'static str; ImpactSurface::COUNT]; ImpactKind::COUNT] = [
+pub const IMPACT_CUES: [[&str; ImpactSurface::COUNT]; ImpactKind::COUNT] = [
     // Hit: a body blow takes the body sound; metal, wood and stone take
     // their own.
     [

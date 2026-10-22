@@ -27,7 +27,7 @@
 
 use std::fmt;
 
-use crate::v1::{aces_fitted, linear_to_srgb, MAX_CAPTURE_DIM};
+use crate::v1::{aces_fitted, MAX_CAPTURE_DIM};
 use crate::v1_ibl_shadow::{
     bake_shadow, light_space_uv, luminance, prefilter, EnvMap, SampleError, ShadowError, ShadowMap,
     MAX_SHADOW_SIZE, MIN_SHADOW_SIZE, SHADOW_PCF_TAPS,
@@ -873,7 +873,7 @@ impl GradeSettings {
     /// `v1_gpu` evaluates the same order (grade uniforms, then the shared
     /// tonemap chunk). Output: sRGB, finite for finite input.
     pub fn tonemap(&self, linear: [f32; 3]) -> [f32; 3] {
-        linear_to_srgb(aces_fitted(self.apply_linear(linear)))
+        crate::tonemap::linear_to_srgb(aces_fitted(self.apply_linear(linear)))
     }
 
     /// Grade as a GPU uniform `[exposure, contrast, saturation, 0]` for the
@@ -1175,7 +1175,7 @@ mod tests {
             );
             assert_eq!(
                 grade.tonemap(rgb),
-                linear_to_srgb(aces_fitted(rgb)),
+                crate::tonemap::linear_to_srgb(aces_fitted(rgb)),
                 "default graded tonemap equals the R1 tonemap on {rgb:?}"
             );
         }
