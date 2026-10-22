@@ -200,7 +200,6 @@ fn every_combat_clip_carries_the_joint_rotations() {
 fn a_combat_clip_turns_its_arms_over_the_swing() {
     // The slash_over clip: a sword swung overhead. Its arm joints turn over
     // the clip, so a rig playing it shows the swing and not a slide.
-    let bytes = fixture("slash_over.am5p");
     let text = receipt("slash_over");
     let names = track_names(&text);
     let rig = fighter_skeleton().expect("the fighter rig builds");
@@ -237,7 +236,6 @@ fn a_combat_clip_turns_its_arms_over_the_swing() {
 
 #[test]
 fn a_combat_clip_refuses_a_rig_it_was_not_baked_for() {
-    let bytes = fixture("slash_over.am5p");
     let text = receipt("slash_over");
     let names = track_names(&text);
     let path = format!("{ROOT}/fixtures/clips/combat/slash_over.am5p");

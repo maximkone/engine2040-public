@@ -39,7 +39,7 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 | `cargo-guard.mjs` | One cargo command with time and message caps | `cargo-guard.test.mjs` | child code; 2 usage, 124 time cap, 127 spawn failed |
 | `compile-cache.mjs` | Warm compiler-cache plan | `compile-cache.test.mjs` | see code |
 | `compile-cache-spike.mjs` | Cold lane build vs a warm sccache in fresh dirs (KEEP/DROP) | `compile-cache-spike.test.mjs` | 0 measured or help, 2 usage or a failed build |
-| `clean.mjs` | Removes trash under `target/` | `clean.test.mjs` | 2 bad arguments |
+| `clean.mjs` | Moves trash under `target/` to the quarantine, never deletes | `clean.test.mjs` | 2 bad arguments, 3 a build runs |
 | `doctor.mjs` | Health report and consented repair | `doctor.test.mjs` | 0 healthy or healed, 1 needs a person, 2 bad consent |
 | `seal-keys.mjs` | Makes seal keys, runs a command with them | `seal-keys.test.mjs` | child code via `--`; 2 bad arguments |
 | `farm.mjs` | Exports HEAD to the mirror and waits for CI | `farm.test.mjs` | 0 green, 1 red, 2 no run, timeout or all skipped |
@@ -399,9 +399,12 @@ Mirror workflows (`.github/workflows/`): `check.yml` (dispatch, one cargo line),
 
 ### clean.mjs
 
-- Removes trash under `target/`.
+- Moves trash under `target/` to the quarantine. Nothing is ever hard-deleted.
 - Run: `node tools/clean.mjs --dry-run` (default when no `--yes` or `--auto`); `--auto`; `--deep --yes` (also release cache); `--include-debug` (also `target/debug`).
-- Removes `target/tmp`, `target/debug-workspace-check`, hunt, prov, j4 and perf logs, old per-lane build dirs, and pool dirs no lane uses. Never touches `*.patch`, `lanes-worktrees.json`, `sprint.lock`, `sprint.halt`, `sprint.handoff`.
+- Moves `target/tmp`, `target/debug-workspace-check`, hunt, prov, j4 and perf logs, old per-lane build dirs, and pool dirs no lane uses. Never touches `*.patch`, `lanes-worktrees.json`, `sprint.lock`, `sprint.halt`, `sprint.handoff`.
+- A removed path is moved to `C:\_quarantine\<date>\` and one `MOVES.tsv` row records it (date, from, to, reason). The bytes stay on the same volume: the owner alone decides when the quarantine goes.
+- A live `cargo` or `rustc` means the tree is in use: the tool refuses and changes nothing (exit 3).
+- A dry run names `target/debug` and says it needs `--include-debug`.
 - Unknown argument: usage line, exit 2. Names lane paths (section 14).
 
 ### doctor.mjs

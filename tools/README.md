@@ -30,7 +30,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/cargo-guard.mjs` (+ `tools/cargo-guard.test.mjs`): cap cargo time and messages.
 - `tools/cast-safe.mjs` (+ `tools/cast-safe.test.mjs`): node script; see its header.
 - `tools/city-osm.mjs` (+ `tools/city-osm.test.mjs`): convert an offline OSM slice to glTF.
-- `tools/clean.mjs` (+ `tools/clean.test.mjs`): node script; see its header.
+- `tools/clean.mjs` (+ `tools/clean.test.mjs`): move trash under `target/` to `C:\_quarantine\<date>\` with a `MOVES.tsv` row; never deletes, and refuses while a cargo build runs.
 - `tools/codex-check.mjs` (+ `tools/codex-check.test.mjs`): check every Rome table number against the source passage it names.
 - `tools/compile-cache.mjs` (+ `tools/compile-cache.test.mjs`): node script; see its header.
 - `tools/compile-cache-spike.mjs` (+ `tools/compile-cache-spike.test.mjs`): time one lane build cold, then with a warm sccache in fresh target dirs; prints KEEP/DROP, never edits a tracked file.
