@@ -11,12 +11,12 @@
 //! `specular_multiscatter`, diffuse/`F0` helpers) is ported from Bevy Engine's
 //! MIT/Apache-2.0 renderer at `v0.15.0`
 //! (`crates/bevy_pbr/src/render/pbr_lighting.wgsl`, each function carrying a
-//! `PORT(bevyengine/bevy@v0.15.0:<path>)` marker below), and the tonemap
-//! tonemap (`rrt_odt_fit`, `aces_fitted` with Bevy's exact matrices) from
-//! Bevy's `crates/bevy_core_pipeline/src/tonemapping/tonemapping_shared.wgsl`
-//! at `v0.15.0` (same marker shape); the sRGB EOTF (`linear_to_srgb`) is
-//! reimplemented from IEC 61966-2-1, not a Bevy port (no such function in
-//! Bevy v0.15.0 `color_operations.wgsl` or `tonemapping_shared.wgsl`). Upstream renamed these shader modules after v0.19;
+//! `PORT(bevyengine/bevy@v0.15.0:<path>)` marker below). The tone map is
+//! the crate's one hue-keeping curve (`crate::tonemap::tone_map`, the CPU
+//! twin of the WGSL `tonemap.wgsl` chunk); the sRGB EOTF
+//! (`linear_to_srgb`) is reimplemented from IEC 61966-2-1, not a Bevy port
+//! (no such function in Bevy v0.15.0 `color_operations.wgsl` or
+//! `tonemapping_shared.wgsl`). Upstream renamed these shader modules after v0.19;
 //! every release tag through v0.19.1 ships them under the `.wgsl` names
 //! cited here. The wgpu port of that math lives in
 //! `v1_gpu::FORWARD_PBR_WGSL`. The orchestrator records the matching
@@ -1000,16 +1000,15 @@ pub fn specular_light(
     fr
 }
 
-/// The per-channel compressive fit, applied to every channel: the CPU twin
-/// of the WGSL `tonemap.wgsl` chunk's per-channel curve. The one source is
-/// [`crate::tonemap::fit_one`], so the CPU oracle and the shader agree on
-/// the numbers.
-pub fn aces_fitted(color: [f32; 3]) -> [f32; 3] {
-    let mut out = [0.0f32; 3];
-    for i in 0..3 {
-        out[i] = crate::tonemap::fit_one(color[i]);
-    }
-    out
+/// The one tone map of the crate, applied to every channel at once: the
+/// hue-keeping path. The fit is evaluated at the peak of the frame and the
+/// result is one scale for all three channels, so the input ratios (the
+/// hue) survive and a torch flame keeps its orange. The one source is
+/// [`crate::tonemap::tone_map`], the CPU twin of the WGSL
+/// `tonemap.wgsl` chunk, so the CPU oracle and the shader agree on the
+/// numbers.
+pub fn tone_map(color: [f32; 3]) -> [f32; 3] {
+    crate::tonemap::tone_map(color, 1.0, crate::tonemap::DISPLAY_WHITE)
 }
 
 /// `linear_to_srgb`: sRGB EOTF (IEC 61966-2-1) reimplemented from the
@@ -1044,7 +1043,8 @@ pub struct ShadePoint {
 /// plus Cook-Torrance specular with multiscatter compensation
 /// (PORT(bevyengine/bevy@v0.15.0:crates/bevy_pbr/src/render/pbr_lighting.wgsl): Bevy `directional_light` combine
 /// `color = (diffuse + specular) * NdotL * light_color`), then exposure,
-/// ACES and sRGB encode. Output: sRGB in `0..=1`.
+/// the crate's one hue-keeping tone map and the sRGB encode. Output: sRGB
+/// in `0..=1`.
 /// No ambient/IBL yet: that is R2.
 pub fn shade_pbr(p: &ShadePoint) -> [f32; 3] {
     let roughness = perceptual_to_roughness(p.perceptual_roughness);
@@ -1071,7 +1071,7 @@ pub fn shade_pbr(p: &ShadePoint) -> [f32; 3] {
         exposed[1].max(0.0),
         exposed[2].max(0.0),
     ];
-    crate::tonemap::linear_to_srgb(aces_fitted(clamped))
+    crate::tonemap::linear_to_srgb(tone_map(clamped))
 }
 
 // ---------------------------------------------------------------------------
@@ -1525,9 +1525,17 @@ pub fn capture_scene(
                 });
                 depth[idx] = z;
                 let o = idx * 4;
-                rgba[o] = (saturate(srgb[0]) * 255.0) as u8;
-                rgba[o + 1] = (saturate(srgb[1]) * 255.0) as u8;
-                rgba[o + 2] = (saturate(srgb[2]) * 255.0) as u8;
+                // The shared dither, the same fixed 4x4 pattern the GPU
+                // capture (`forward.wgsl` `fs_display`) and the live blit
+                // use, so the 8-bit output breaks the bands the tone map
+                // leaves behind.
+                let dither = crate::tonemap::dither4(
+                    u32::try_from(x).unwrap_or(0),
+                    u32::try_from(y).unwrap_or(0),
+                );
+                rgba[o] = (saturate(srgb[0] + dither) * 255.0) as u8;
+                rgba[o + 1] = (saturate(srgb[1] + dither) * 255.0) as u8;
+                rgba[o + 2] = (saturate(srgb[2] + dither) * 255.0) as u8;
                 rgba[o + 3] = 255;
             }
         }
@@ -1948,9 +1956,9 @@ mod tests {
         let fab = f_ab(0.4, 0.6);
         assert!(fab[0] > 0.0 && fab[1] > 0.0);
         // ACES maps black to black, compresses HDR into [0, 1], monotonic.
-        assert_eq!(aces_fitted([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
-        let dim = aces_fitted([0.5, 0.5, 0.5]);
-        let hot = aces_fitted([4.0, 4.0, 4.0]);
+        assert_eq!(tone_map([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        let dim = tone_map([0.5, 0.5, 0.5]);
+        let hot = tone_map([4.0, 4.0, 4.0]);
         assert!(dim.iter().all(|c| *c >= 0.0 && *c <= 1.0));
         assert!(hot.iter().all(|c| *c >= 0.0 && *c <= 1.0));
         assert!(hot[0] >= dim[0] && hot[1] >= dim[1] && hot[2] >= dim[2]);

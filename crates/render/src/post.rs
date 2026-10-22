@@ -657,12 +657,13 @@ mod tests {
         assert!(approx(exposure_mult(1.0).expect("ev"), 2.0, 1e-6));
         assert!(approx(exposure_mult(-1.0).expect("ev"), 0.5, 1e-6));
         assert!(matches!(exposure_mult(9.0), Err(PostError::Invalid(_))));
-        // ACES fit pins: 0->0, 1->~0.8, monotone, saturates at 1.
-        assert_eq!(aces_fitted(0.0), 0.0);
-        assert!((aces_fitted(1.0) - 0.8).abs() < 0.01);
-        assert!(aces_fitted(0.5) < aces_fitted(1.0));
-        assert!(aces_fitted(1.0) < aces_fitted(4.0));
-        assert_eq!(aces_fitted(100.0), 1.0);
+        // The one source's per-channel fit pins: 0->0, 1->~0.8, monotone,
+        // saturates at 1. The fit itself is `crate::tonemap::fit_one`.
+        assert_eq!(crate::tonemap::fit_one(0.0), 0.0);
+        assert!((crate::tonemap::fit_one(1.0) - 0.8).abs() < 0.01);
+        assert!(crate::tonemap::fit_one(0.5) < crate::tonemap::fit_one(1.0));
+        assert!(crate::tonemap::fit_one(1.0) < crate::tonemap::fit_one(4.0));
+        assert_eq!(crate::tonemap::fit_one(100.0), 1.0);
         let mid = tonemap_aces([0.5, 0.5, 0.5], 1.0, 11.2).expect("tonemaps");
         let hi = tonemap_aces([2.0, 2.0, 2.0], 1.0, 11.2).expect("tonemaps");
         assert!(hi[0] > mid[0] && hi[0] <= 1.0);
@@ -934,11 +935,16 @@ mod tests {
             assert_eq!(proj.y_axis, glam::Mat4::IDENTITY.y_axis);
             assert_eq!(proj.w_axis, glam::Mat4::IDENTITY.w_axis);
         }
-        for x in [0.0, 0.25, 1.0, 4.0] {
+        for c in [
+            [0.0, 0.0, 0.0],
+            [0.25, 0.25, 0.25],
+            [1.0, 1.0, 1.0],
+            [4.0, 2.0, 0.5],
+        ] {
             assert_eq!(
-                aces_fitted(x),
-                crate::shadow_post::aces_fitted(x),
-                "aces fit matches the shadow_post path at {x}"
+                tonemap_aces(c, 1.0, 11.2).expect("tonemaps"),
+                crate::shadow_post::tonemap_aces(c, &crate::shadow_post::AcesConfig::default()),
+                "the post chain and the shadow path share the one tone map on {c:?}"
             );
         }
         let src: Vec<[f32; 3]> = (0..64).map(|i| [i as f32 * 0.01, 0.2, 0.05]).collect();

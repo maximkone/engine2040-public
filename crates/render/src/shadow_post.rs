@@ -117,16 +117,18 @@ pub fn ev_mult(ev: f32) -> f32 {
     2f32.powf(ev)
 }
 /// Narkowicz ACES fit (filament): cheap, monotonic, 0->0, 1->~0.804, big->1.
-/// One owner: `post::aces_fitted` (this path re-exports it).
+/// One owner: `post::aces_fitted` (this path re-exports it). It is a pointer
+/// to the one source's fit, not a second curve.
 pub use crate::post::aces_fitted;
+/// The shadow path's tone map: the crate's one hue-keeping curve
+/// (`crate::tonemap::tone_map`, the CPU twin of the WGSL `tonemap.wgsl`
+/// chunk). One scale for every channel, so the input ratios - the hue -
+/// survive; the per-channel fit this replaced shifted a torch flame's hue
+/// by +32.3 degrees.
 pub fn tonemap_aces(c: [f32; 3], cfg: &AcesConfig) -> [f32; 3] {
     let m = ev_mult(cfg.exposure_ev);
-    let w = aces_fitted(cfg.white).max(1e-4);
-    [
-        (aces_fitted(c[0] * m) / w).clamp(0.0, 1.0),
-        (aces_fitted(c[1] * m) / w).clamp(0.0, 1.0),
-        (aces_fitted(c[2] * m) / w).clamp(0.0, 1.0),
-    ]
+    let exposed = [c[0] * m, c[1] * m, c[2] * m];
+    crate::tonemap::tone_map(exposed, 1.0, cfg.white)
 }
 pub fn luma_srgb(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]

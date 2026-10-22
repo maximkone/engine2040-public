@@ -214,8 +214,120 @@ export function chunkPlan(totalFrames, legs = 1) {
   return { totalFrames: total, legs: out };
 }
 
+// GM3 chunked plan: the additive proof hash. Every leg contributes a value
+// that is a pure function of its own frame range and its own reported
+// counts, so the legs' values sum to one number that depends only on the
+// whole proof: the same 18,000 frames cut into 1, 3 or 7 legs give the
+// same full-proof hash, and a dropped or duplicated leg (ranges that do not
+// tile the proof) breaks it. The leg index and the leg count stay out of
+// the per-chunk value, so the sum is partition-invariant; the joined digest
+// keeps the order check.
+const PROOF_MASK = (1n << 64n) - 1n;
+const RANGE_K = 0x9e3779b97f4a7c15n; // frame-index weight
+const RANGE_C = 0xc2b2ae3d27d4eb4fn; // per-frame constant
+const TICKS_K = 0xff51afd7ed558ccdn; // tick-count weight
+const PRESENTED_K = 0x1f83d9abfb41bd6bn; // presented-count weight
+
+// One inclusive frame range's weight: the closed form of
+// sum_{f=first}^{last} (f * RANGE_K + RANGE_C) mod 2^64. O(1) per range
+// and exactly additive over a partition of the frames.
+export function proofRangeWeight(first, last) {
+  const a = BigInt(Math.trunc(Number(first)));
+  const b = BigInt(Math.trunc(Number(last)));
+  if (b < a) return 0n;
+  const count = b - a + 1n;
+  const sumIndex = ((a + b) * count) / 2n; // exact: (a+b)*count is even
+  return (sumIndex * RANGE_K + count * RANGE_C) & PROOF_MASK;
+}
+
+// One leg's part of the proof hash: its frame range plus its own reported
+// counts. No leg index, no leg count, no wall time: the same leg always
+// adds the same value.
+export function chunkContribution({ first, last, ticks = 0, frames_presented = 0 } = {}) {
+  const tickCount = BigInt(Math.max(0, Math.trunc(Number(ticks ?? 0))));
+  const presentedCount = BigInt(Math.max(0, Math.trunc(Number(frames_presented ?? 0))));
+  return (proofRangeWeight(first, last) + tickCount * TICKS_K + presentedCount * PRESENTED_K) & PROOF_MASK;
+}
+
+// The legs' values added up. Addition is commutative, so the sum is
+// partition-invariant and order-blind: the joined digest is the order check.
+export function chunkSum(rows = []) {
+  let sum = 0n;
+  for (const row of rows) sum = (sum + chunkContribution(row)) & PROOF_MASK;
+  return sum;
+}
+
+// The full-proof hash from the plan side: the whole frame range plus the
+// proof's expected totals. It takes scalars, never a chunk row, so a chunk
+// set that does not tile the proof cannot reproduce it.
+export function fullProofHash({ totalFrames, totalTicks = 0, totalPresented = 0 } = {}) {
+  const tickCount = BigInt(Math.max(0, Math.trunc(Number(totalTicks ?? 0))));
+  const presentedCount = BigInt(Math.max(0, Math.trunc(Number(totalPresented ?? 0))));
+  return (proofRangeWeight(1, totalFrames) + tickCount * TICKS_K + presentedCount * PRESENTED_K) & PROOF_MASK;
+}
+
+export function proofHex64(value) {
+  return (BigInt(value) & PROOF_MASK).toString(16).padStart(16, "0");
+}
+
+// The legs' ranges must tile the proof: every frame once, no gap, no
+// overlap, no leg outside. Exact, not a hash argument: a dropped or
+// duplicated leg cannot tile it.
+export function chunkRangesTile(plan, rows = []) {
+  const sorted = [...rows].sort((a, b) => Number(a.first ?? 0) - Number(b.first ?? 0));
+  let next = 1;
+  for (const row of sorted) {
+    if (Number(row.first) !== next) return false;
+    if (Number(row.last) < Number(row.first)) return false;
+    if (Number(row.frames) !== Number(row.last) - Number(row.first) + 1) return false;
+    next = Number(row.last) + 1;
+  }
+  return next === plan.totalFrames + 1;
+}
+
+// The rows are the plan's legs, in the plan's order. The joined digest
+// covers the order; this is the check that reads it.
+export function chunkOrderOk(plan, rows = []) {
+  if (rows.length !== plan.legs.length) return false;
+  for (let i = 0; i < rows.length; i++) {
+    const leg = plan.legs[i];
+    const row = rows[i];
+    if (Number(row.index) !== Number(leg.index)) return false;
+    if (Number(row.first) !== Number(leg.firstFrame)) return false;
+    if (Number(row.last) !== Number(leg.lastFrame)) return false;
+  }
+  return true;
+}
+
+// The chunk set against the plan side: the legs' values summed next to the
+// full proof hash the plan expects. `expected` carries the plan's expected
+// totals (the dry-run twin plays ticks=presented=frames per leg, so the
+// proof expects the whole frame count); the real run passes the totals it
+// reported, because the exe's tick count follows the wall clock. Either way
+// the frame range part is the plan's own range against the legs' ranges, so
+// a leg that does not tile the proof cannot reproduce it.
+export function chunkProofHash(plan, rows = [], expected = null) {
+  const want = expected ?? { totalTicks: plan.totalFrames, totalPresented: plan.totalFrames };
+  const totalTicks = rows.reduce((n, row) => n + (typeof row.ticks === "number" ? row.ticks : 0), 0);
+  const totalPresented = rows.reduce((n, row) => n + (typeof row.frames_presented === "number" ? row.frames_presented : 0), 0);
+  const sum = chunkSum(rows);
+  const wantHash = fullProofHash({ totalFrames: plan.totalFrames, totalTicks: want.totalTicks, totalPresented: want.totalPresented });
+  return {
+    sum: proofHex64(sum),
+    expected: proofHex64(wantHash),
+    matches: sum === wantHash,
+    tiled: chunkRangesTile(plan, rows),
+    ordered: chunkOrderOk(plan, rows),
+    totalTicks,
+    totalPresented,
+    expectedTicks: want.totalTicks,
+    expectedPresented: want.totalPresented,
+  };
+}
+
 // One leg's row: plan facts plus the leg's own reported counts. Wall time
-// never enters, so the same plan prints the same hashes on every run.
+// never enters, so the same plan prints the same hashes on every run. The
+// row's `value` is the leg's additive part of the full proof hash.
 export function chunkLegRow(plan, leg, { ticks = null, framesPresented = null } = {}) {
   const hash = fnv1a64Hex(Buffer.from([
     "gm3-chunk",
@@ -228,13 +340,32 @@ export function chunkLegRow(plan, leg, { ticks = null, framesPresented = null } 
     `ticks=${ticks ?? ""}`,
     `presented=${framesPresented ?? ""}`,
   ].join("|"), "utf8"));
-  return { index: leg.index, frames: leg.frames, first: leg.firstFrame, last: leg.lastFrame, ticks, frames_presented: framesPresented, hash };
+  const value = proofHex64(chunkContribution({ first: leg.firstFrame, last: leg.lastFrame, ticks, frames_presented: framesPresented }));
+  return { index: leg.index, frames: leg.frames, first: leg.firstFrame, last: leg.lastFrame, ticks, frames_presented: framesPresented, hash, value };
 }
 
-export function joinedChunkProof(plan, rows = []) {
+// The joined proof: the frame sum, the order-sensitive joined digest over
+// the legs' hashes, and the additive proof hash (the legs' values summed
+// next to the plan-side full proof hash). The digest catches an order
+// change; the sum catches a missing or doubled leg.
+export function joinedChunkProof(plan, rows = [], expected = null) {
   const frames = rows.reduce((n, row) => n + Number(row.frames ?? 0), 0);
   const digest = fnv1a64Hex(Buffer.from(rows.map((row) => String(row.hash ?? "")).join("\n"), "utf8"));
-  return { frames, expected: plan.totalFrames, matches: frames === plan.totalFrames, digest };
+  const proof = chunkProofHash(plan, rows, expected);
+  return {
+    frames,
+    expected: plan.totalFrames,
+    matches: frames === plan.totalFrames,
+    digest,
+    sum: proof.sum,
+    expected_hash: proof.expected,
+    // The additive proof holds when the legs tile the proof and their
+    // values add up to the plan-side full proof hash. The order is the
+    // joined digest's job, not the sum's.
+    proof_matches: proof.matches && proof.tiled,
+    tiled: proof.tiled,
+    ordered: proof.ordered,
+  };
 }
 
 // Per-leg wall projection from one probe rate, against the 30 min slot.
@@ -1255,6 +1386,10 @@ function usage() {
     "proof) whose frame counts sum to --frames; each leg is its own --exit play",
     "with its own wall bound, its hash is stable across runs, and the joined",
     "hash covers the legs in order. --chunks 1 (default) is one play, as before.",
+    "Chunk proof: each leg adds a value built from its own frame range and its",
+    "own reported counts, and the legs' values sum to the full proof hash: the",
+    "same frames cut into 1, 3 or 7 legs give the same full proof hash, and a",
+    "missing or doubled leg fails the run as CLEAN-RUN FAIL [CHUNK_PROOF].",
     "Dry-run mode: same harness against fixtures/clean-run/ in a temp dir; the",
     "smoke launcher runs under the current Node while a probe proves the",
     "sanitized env hides Node. Never touches C:/e2040-clean/.",
@@ -1937,12 +2072,17 @@ function main() {
         const row = chunkLegRow(plan, leg, counts);
         dryRows.push(row);
         dryWallMs += wallMs;
-        log.push(`$ chunk ${leg.index}/${plan.legs.length}: frames ${leg.firstFrame}-${leg.lastFrame} (${leg.frames}) ticks=${row.ticks} presented=${row.frames_presented} wall_ms=${wallMs} hash=${row.hash}`);
+        log.push(`$ chunk ${leg.index}/${plan.legs.length}: frames ${leg.firstFrame}-${leg.lastFrame} (${leg.frames}) ticks=${row.ticks} presented=${row.frames_presented} wall_ms=${wallMs} hash=${row.hash} value=${row.value}`);
       }
       dryJoined = joinedChunkProof(plan, dryRows);
       log.push(`$ chunks: ${dryRows.length} legs, ${dryJoined.frames} of ${dryJoined.expected} frames played, sum ${dryJoined.matches ? "matches" : "MISMATCH"}, joined hash=${dryJoined.digest}`);
+      log.push(`$ chunk proof: ${dryRows.length} chunks, chunk sum=${dryJoined.sum}, full proof hash=${dryJoined.expected_hash}, ${dryJoined.proof_matches ? "the sum equals the full proof hash" : "MISMATCH"}`);
       if (!dryJoined.matches) {
         done(true, "CHUNK_SUM", `legs played ${dryJoined.frames} of ${dryJoined.expected} frames`);
+        return;
+      }
+      if (!dryJoined.proof_matches) {
+        done(true, "CHUNK_PROOF", `the chunk sum ${dryJoined.sum} is not the full proof hash ${dryJoined.expected_hash} (a leg is missing or doubled)`);
         return;
       }
       log.push(`$ dry-run smoke ok: exit 0 with marker (frames=${dryJoined.frames})`);
@@ -1972,6 +2112,9 @@ function main() {
           chunks: dryRows,
           chunk_plan: { legs: plan.legs.length, total_frames: plan.totalFrames },
           chunk_sum: dryJoined?.matches ?? false,
+          chunk_hash_sum: dryJoined?.sum ?? null,
+          proof_hash: dryJoined?.expected_hash ?? null,
+          proof_matches: dryJoined?.proof_matches ?? false,
           joined_hash: dryJoined?.digest ?? null,
           exit: 0,
           log: logPath,
@@ -2218,13 +2361,27 @@ function main() {
       playWallMs += wallMs;
       const row = chunkLegRow(plan, leg, parseSmokeCounts(legOut));
       playRows.push(row);
-      log.push(`$ chunk ${leg.index}/${plan.legs.length}: frames ${leg.firstFrame}-${leg.lastFrame} (${leg.frames}) ticks=${row.ticks} presented=${row.frames_presented} wall_ms=${wallMs} hash=${row.hash}`);
+      log.push(`$ chunk ${leg.index}/${plan.legs.length}: frames ${leg.firstFrame}-${leg.lastFrame} (${leg.frames}) ticks=${row.ticks} presented=${row.frames_presented} wall_ms=${wallMs} hash=${row.hash} value=${row.value}`);
     }
     playOut = outputs.join("\n");
-    playJoined = joinedChunkProof(plan, playRows);
+    // The real exe's tick count follows the wall clock (the accumulator owes
+    // ticks by elapsed time), so the proof's expected totals are the totals
+    // the run reported, not the requested frame count. The frame range part
+    // is still the plan's own range against the legs' ranges: a leg that
+    // does not tile the proof cannot reproduce it.
+    const playTotals = {
+      totalTicks: playRows.reduce((n, row) => n + (typeof row.ticks === "number" ? row.ticks : 0), 0),
+      totalPresented: playRows.reduce((n, row) => n + (typeof row.frames_presented === "number" ? row.frames_presented : 0), 0),
+    };
+    playJoined = joinedChunkProof(plan, playRows, playTotals);
     log.push(`$ chunks: ${playRows.length} legs, ${playJoined.frames} of ${playJoined.expected} frames played, sum ${playJoined.matches ? "matches" : "MISMATCH"}, joined hash=${playJoined.digest}`);
+    log.push(`$ chunk proof: ${playRows.length} chunks, chunk sum=${playJoined.sum}, full proof hash=${playJoined.expected_hash}, ${playJoined.proof_matches ? "the sum equals the full proof hash" : "MISMATCH"}`);
     if (!playJoined.matches) {
       done(true, "CHUNK_SUM", `legs played ${playJoined.frames} of ${playJoined.expected} frames`);
+      return;
+    }
+    if (!playJoined.proof_matches) {
+      done(true, "CHUNK_PROOF", `the chunk sum ${playJoined.sum} is not the full proof hash ${playJoined.expected_hash} (a leg is missing or doubled)`);
       return;
     }
   }
@@ -2262,6 +2419,9 @@ function main() {
       chunks: playRows,
       chunk_plan: { legs: plan.legs.length, total_frames: plan.totalFrames },
       chunk_sum: playJoined?.matches ?? false,
+      chunk_hash_sum: playJoined?.sum ?? null,
+      proof_hash: playJoined?.expected_hash ?? null,
+      proof_matches: playJoined?.proof_matches ?? false,
       joined_hash: playJoined?.digest ?? null,
       exit: 0,
       manifest: {

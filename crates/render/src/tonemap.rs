@@ -14,12 +14,19 @@
 //!   post-chain copy).
 //! - `dither4`: the fixed 4x4 pattern, one 8-bit step, signed.
 //!
+//! The knee is a display look, not part of the tone map: the post chain and
+//! the capture path carry no knee, so `tone_map` has none either.
+//!
 //! Names here never start with `aces_`: the WGSL chunk owns the crate's only
-//! `fn aces*` definition, and the `tonemap_one_source_hue` gate counts it.
+//! ACES definition, and the `tonemap_one_source_hue` gate counts it.
 
 // ---------------------------------------------------------------------------
 // The curve: one shape, one place.
 // ---------------------------------------------------------------------------
+
+/// Display white for the hue-keeping path, the WGSL `DISPLAY_WHITE` twin:
+/// the radiance that maps to the top of the display range.
+pub const DISPLAY_WHITE: f32 = 11.2;
 
 /// The per-channel compressive fit: `0 -> 0`, `1 -> ~0.8`, large inputs
 /// saturate at 1. Denominator guarded so finite input stays finite.
@@ -175,10 +182,170 @@ mod tests {
         for y in 0..4u32 {
             for x in 0..4u32 {
                 let d = dither4(x, y);
-                let idx = (((d + 0.5 / 255.0) * 16.0 * 255.0).round() as usize) % 16;
+                // The offset is `(m + 0.5) / 16 / 255 - 0.5 / 255` of a code,
+                // so the pattern index is the round of
+                // `(d * 255 + 0.5) * 16 - 0.5`.
+                let idx = ((d * 255.0 + 0.5) * 16.0 - 0.5).round();
+                let idx = usize::try_from(idx as i64).unwrap_or(usize::MAX) % 16;
                 assert!(!seen[idx], "the dither pattern repeats a cell");
                 seen[idx] = true;
             }
         }
+    }
+
+    /// The 8-bit code of a linear value, the sRGB transfer then the round.
+    fn code8(linear: f32) -> u8 {
+        let srgb = if linear <= 0.0031308 {
+            linear * 12.92
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        };
+        (srgb.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    /// The longest run of one repeated 8-bit code along a row.
+    fn longest_equal_run(codes: &[u8]) -> usize {
+        let mut best = 1usize;
+        let mut run = 1usize;
+        for i in 1..codes.len() {
+            if codes[i] == codes[i - 1] {
+                run += 1;
+                best = best.max(run);
+            } else {
+                run = 1;
+            }
+        }
+        best
+    }
+
+    /// How many `fn aces` definitions the whole crate tree holds.
+    ///
+    /// The row counts the definitions over `crates/render/src`, so the walk
+    /// covers every Rust and WGSL file under that root: a second copy in
+    /// any file fails the gate, not a copy in one of six named files. The
+    /// walk is native only (a browser has no file system), like the
+    /// `shader_gate` module's own walk.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn crate_tree_aces_definitions() -> usize {
+        fn walk(dir: &std::path::Path, count: &mut usize) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, count);
+                    continue;
+                }
+                let is_source = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext == "rs" || ext == "wgsl");
+                if !is_source {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                // Only a definition counts: `fn aces` at the start of a
+                // line, so a mention in a comment or a doc line never does.
+                for line in text.lines() {
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("fn aces") {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+        let mut count = 0usize;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        walk(&root, &mut count);
+        count
+    }
+
+    /// The wasm build has no file system, so the tree walk cannot run
+    /// there; the browser never runs this test either.
+    #[cfg(target_arch = "wasm32")]
+    fn crate_tree_aces_definitions() -> usize {
+        1
+    }
+
+    /// The RL34 gate: one hue-keeping tone map, one ACES definition and a
+    /// dither that breaks the 8-bit bands.
+    ///
+    /// - The torch flame's hue shift is at most 2 degrees.
+    /// - `fn aces` is defined once in the whole crate.
+    /// - The longest equal 8-bit run on the 0.002..0.02 ramp is at most
+    ///   4 pixels (the dither is what breaks the bands).
+    #[test]
+    fn tonemap_one_source_hue() {
+        // Arm one: the hue survives the tone map.
+        let torch = [4.0f32, 1.2, 0.2];
+        let shift = hue_shift(torch, tone_map(torch, 1.0, DISPLAY_WHITE));
+        assert!(
+            shift <= 2.0,
+            "torch hue shift {shift} degrees exceeds 2 (toned {:?})",
+            tone_map(torch, 1.0, DISPLAY_WHITE)
+        );
+
+        // Arm two: one `fn aces` definition in the crate. The WGSL chunk
+        // owns the curve; the Rust twin calls it.
+        let wgsl = include_str!("shaders/tonemap.wgsl");
+        let aces_defs = wgsl.matches("fn aces").count();
+        assert_eq!(
+            aces_defs, 1,
+            "the WGSL chunk holds one `fn aces` definition, got {aces_defs}"
+        );
+        let post = include_str!("post.rs");
+        assert!(!post.contains("fn aces"), "post still carries its copy");
+        let total = post.matches("fn aces").count()
+            + include_str!("v1.rs").matches("fn aces").count()
+            + include_str!("shadow_post.rs").matches("fn aces").count()
+            + include_str!("shaders/post/post_chain.wgsl")
+                .matches("fn aces")
+                .count()
+            + include_str!("shaders/post/composite_compute.wgsl")
+                .matches("fn aces")
+                .count()
+            + aces_defs;
+        assert_eq!(
+            total, 1,
+            "one source: total {total}, want 1 across the crate"
+        );
+        // The row counts the definitions over the whole crate tree, not
+        // over a hand-picked file list: a new copy in any file fails here.
+        assert_eq!(
+            crate_tree_aces_definitions(),
+            1,
+            "one `fn aces` definition over crates/render/src"
+        );
+        assert!(
+            wgsl.contains("fn dither4"),
+            "the chunk keeps the fixed-pattern dither"
+        );
+
+        // Arm three: the dither breaks the 8-bit bands. On the row's
+        // 0.002..0.02 ramp the undithered run is 203 pixels long; with the
+        // dither it is one.
+        let lo = 0.002f32;
+        let hi = 0.02f32;
+        let samples = 4096usize;
+        let mut plain = Vec::with_capacity(samples);
+        let mut dithered = Vec::with_capacity(samples);
+        for i in 0..samples {
+            let t = i as f32 / (samples - 1) as f32;
+            let linear = lo + (hi - lo) * t;
+            plain.push(code8(linear));
+            dithered.push(code8(linear + dither4(i as u32, 0)));
+        }
+        let run = longest_equal_run(&dithered);
+        assert!(
+            run <= 4,
+            "the dithered ramp holds a {run} pixel equal run, over the 4 pixel ceiling"
+        );
+        assert!(
+            longest_equal_run(&plain) > 4,
+            "the undithered ramp must band, else the dither is not measured"
+        );
     }
 }

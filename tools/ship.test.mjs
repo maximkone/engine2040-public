@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { CHUNK_SLOT_MS, archiveExistingDir, chunkLegRow, chunkPlan, chunkSlotReport, cleanFingerprint, cleanLedgerRow, cleanNormalize, createWallEstimator, describePresentMode, joinedChunkProof, nextestArchiveArgs, nextestRunArgs, parseSmokeCounts, projectProbeWall, resolvePresentFlags, stagedFileReceipt, wallBudgetMs, writeArchiveAndJunit, writeArchiveReceipt, writeJunitReceipt, writeStagedReceipt } from "./ship.mjs";
+import { CHUNK_SLOT_MS, archiveExistingDir, chunkContribution, chunkLegRow, chunkPlan, chunkProofHash, chunkSlotReport, chunkSum, cleanFingerprint, cleanLedgerRow, cleanNormalize, createWallEstimator, describePresentMode, fullProofHash, joinedChunkProof, nextestArchiveArgs, nextestRunArgs, parseSmokeCounts, projectProbeWall, proofHex64, proofRangeWeight, resolvePresentFlags, stagedFileReceipt, wallBudgetMs, writeArchiveAndJunit, writeArchiveReceipt, writeJunitReceipt, writeStagedReceipt } from "./ship.mjs";
 import { fnv1a64Hex } from "./fnv1a64.mjs";
 
 // Remove every temp folder this file makes when it exits (test temp folders piled up in %TEMP%).
@@ -393,7 +393,7 @@ test("each chunk hash is stable across runs and blind to wall time", () => {
   assert.deepEqual(first.map((r) => r.hash), again.map((r) => r.hash), "same plan twice: same leg hashes");
   assert.equal(new Set(first.map((r) => r.hash)).size, 3, "one hash per leg");
   assert.match(first[0].hash, /^[0-9a-f]{16}$/);
-  assert.deepEqual(first[0], { index: 1, frames: 6000, first: 1, last: 6000, ticks: 6000, frames_presented: 6000, hash: first[0].hash });
+  assert.deepEqual(first[0], { index: 1, frames: 6000, first: 1, last: 6000, ticks: 6000, frames_presented: 6000, hash: first[0].hash, value: first[0].value });
   const shifted = chunkLegRow(chunkPlan(18000, 3), chunkPlan(18000, 3).legs[0], { ticks: 5999, framesPresented: 5999 });
   assert.notEqual(shifted.hash, first[0].hash, "a different tick count changes the hash");
   const otherPlan = chunkLegRow(chunkPlan(12000, 2), chunkPlan(12000, 2).legs[0], counts);
@@ -412,6 +412,88 @@ test("the joined proof sums the legs and reports a missing leg as a mismatch", (
   const short = joinedChunkProof(plan, rows.slice(0, 2));
   assert.equal(short.frames, 12000);
   assert.equal(short.matches, false, "2 of 3 legs never counts as the full proof");
+});
+
+test("the chunk values sum to one full proof hash, whatever the cut (1, 3 or 7 legs)", () => {
+  // The proof surface: the dry-run twin reports ticks=presented=the leg's own
+  // frames, so the same 18,000 frames cut three ways must give one hash.
+  const cutHash = (legs) => {
+    const plan = chunkPlan(18000, legs);
+    const rows = plan.legs.map((leg) => chunkLegRow(plan, leg, { ticks: leg.frames, framesPresented: leg.frames }));
+    const joined = joinedChunkProof(plan, rows);
+    return { plan, rows, joined };
+  };
+  const one = cutHash(1);
+  const three = cutHash(3);
+  const seven = cutHash(7);
+  for (const { plan, rows, joined } of [one, three, seven]) {
+    assert.equal(joined.proof_matches, true, `${plan.legs.length} legs: the chunk sum equals the full proof hash`);
+    assert.equal(joined.sum, joined.expected_hash, `${plan.legs.length} legs: the sum is the plan-side value`);
+    assert.match(joined.sum, /^[0-9a-f]{16}$/);
+    assert.equal(rows.length, plan.legs.length, "one row per leg");
+    for (const row of rows) assert.match(row.value, /^[0-9a-f]{16}$/, "each leg carries its own value");
+  }
+  assert.equal(one.joined.sum, three.joined.sum, "1 leg and 3 legs give the same full proof hash");
+  assert.equal(three.joined.sum, seven.joined.sum, "3 legs and 7 legs give the same full proof hash");
+  // The joined digest is the order check and stays cut-dependent.
+  assert.notEqual(one.joined.digest, three.joined.digest, "the joined digest covers the cut");
+});
+
+test("the plan-side full proof hash never reads a chunk row", () => {
+  const plan = chunkPlan(18000, 3);
+  const rows = plan.legs.map((leg) => chunkLegRow(plan, leg, { ticks: leg.frames, framesPresented: leg.frames }));
+  const proof = chunkProofHash(plan, rows);
+  assert.equal(proof.matches, true, "the legs tile the proof and add up to it");
+  assert.equal(proof.tiled, true);
+  const fromPlan = fullProofHash({ totalFrames: 18000, totalTicks: 18000, totalPresented: 18000 });
+  assert.equal(proofHex64(fromPlan), proof.expected, "the plan side is the range plus the totals");
+  // A dropped leg: the ranges no longer tile the proof, so the sum moves.
+  const dropped = chunkProofHash(plan, rows.slice(0, 2));
+  assert.equal(dropped.matches, false, "2 of 3 legs never reproduce the full proof hash");
+  assert.equal(dropped.tiled, false, "2 of 3 legs never tile the proof");
+  assert.notEqual(dropped.sum, proof.expected);
+  // A doubled leg: the same range counted twice moves the sum too.
+  const doubled = chunkProofHash(plan, [...rows, rows[0]]);
+  assert.equal(doubled.matches, false, "a doubled leg never reproduces the full proof hash");
+  assert.equal(doubled.tiled, false, "a doubled leg never tiles the proof");
+  assert.notEqual(doubled.sum, proof.expected);
+  // A leg that reports different counts is a different chunk, so the sum moves.
+  const drifted = rows.map((row, i) => (i === 0 ? { ...row, ticks: row.ticks - 1 } : row));
+  const driftedProof = chunkProofHash(plan, drifted);
+  assert.equal(driftedProof.matches, false, "a chunk with other counts never reproduces the full proof hash");
+  assert.notEqual(driftedProof.sum, proof.expected);
+});
+
+test("the chunk value is stable, blind to the leg index, and blind to wall time", () => {
+  const plan = chunkPlan(18000, 3);
+  const leg = plan.legs[0];
+  const row = chunkLegRow(plan, leg, { ticks: leg.frames, framesPresented: leg.frames });
+  const again = chunkLegRow(plan, leg, { ticks: leg.frames, framesPresented: leg.frames });
+  assert.equal(row.value, again.value, "the same leg always adds the same value");
+  // The same frame range under another plan adds the same value: the leg
+  // index and the leg count stay out of it.
+  const other = chunkPlan(12000, 2);
+  const otherLeg = other.legs[0];
+  assert.equal(otherLeg.firstFrame, leg.firstFrame, "both cuts open with the same range");
+  assert.equal(otherLeg.lastFrame, leg.lastFrame, "both cuts open with the same range");
+  const otherRow = chunkLegRow(other, otherLeg, { ticks: leg.frames, framesPresented: leg.frames });
+  assert.equal(otherRow.value, row.value, "the value is the range and the counts, not the leg index");
+  assert.notEqual(otherRow.hash, row.hash, "the per-leg hash still covers the cut");
+  // The range weight is additive over a partition (mod 2^64).
+  const whole = proofRangeWeight(1, 6000);
+  const parts = proofRangeWeight(1, 3000) + proofRangeWeight(3001, 6000);
+  assert.equal(proofHex64(parts), proofHex64(whole), "a range splits into parts that add up");
+  assert.equal(proofHex64(proofRangeWeight(1, 3000) + proofRangeWeight(3001, 6000) + proofRangeWeight(6001, 9000)), proofHex64(proofRangeWeight(1, 9000)), "three parts add up like the whole");
+});
+
+test("a reordered chunk set fails the joined digest but not the sum", () => {
+  const plan = chunkPlan(18000, 3);
+  const rows = plan.legs.map((leg) => chunkLegRow(plan, leg, { ticks: leg.frames, framesPresented: leg.frames }));
+  const ordered = joinedChunkProof(plan, rows);
+  const swapped = joinedChunkProof(plan, [rows[1], rows[0], rows[2]]);
+  assert.notEqual(swapped.digest, ordered.digest, "the joined digest catches an order change");
+  assert.equal(swapped.sum, ordered.sum, "the sum is order-blind: it is the proof, not the order");
+  assert.equal(swapped.proof_matches, true, "a reordered set still covers the same frames");
 });
 
 test("chunk slots project each leg against the 30 min slot from one probe", () => {
@@ -443,6 +525,7 @@ test("an 18000-frame dry-run in 3 legs prints a joined proof whose hashes repeat
     assert.match(first.log, new RegExp(`\\$ chunk ${i}/3: frames ${(i - 1) * 6000 + 1}-${i * 6000} \\(6000\\) ticks=6000 presented=6000 wall_ms=\\d+ hash=[0-9a-f]{16}`));
   }
   assert.match(first.log, /\$ chunks: 3 legs, 18000 of 18000 frames played, sum matches, joined hash=[0-9a-f]{16}/);
+  assert.match(first.log, /\$ chunk proof: 3 chunks, chunk sum=[0-9a-f]{16}, full proof hash=[0-9a-f]{16}, the sum equals the full proof hash/);
   assert.match(first.log, /\$ chunk slots: legs project \d+\+\d+\+\d+ ms against the 1800000 ms slot \(fits\)/);
   assert.equal(first.receipt.chunks.length, 3, "one row per leg");
   assert.deepEqual(first.receipt.chunks.map((c) => c.frames), [6000, 6000, 6000]);
@@ -453,7 +536,39 @@ test("an 18000-frame dry-run in 3 legs prints a joined proof whose hashes repeat
   assert.deepEqual(first.receipt.chunk_plan, { legs: 3, total_frames: 18000 });
   assert.deepEqual(first.receipt.chunks.map((c) => c.hash), second.receipt.chunks.map((c) => c.hash), "each leg hash is stable across runs");
   assert.equal(second.receipt.joined_hash, first.receipt.joined_hash, "the joined hash is stable across runs");
+  assert.equal(first.receipt.proof_matches, true, "the chunk sum is the full proof hash");
+  assert.equal(first.receipt.chunk_hash_sum, first.receipt.proof_hash, "the receipt names the sum and the full proof hash");
+  assert.match(first.receipt.chunk_hash_sum, /^[0-9a-f]{16}$/);
   assert.equal(second.log.match(/CLEAN-RUN PASS/g).length, 1, "a chunked pass closes with 1 PASS line");
+});
+
+test("the same 18000 frames cut into 1, 3 or 7 legs print the same full proof hash", () => {
+  const fixture = stageFixture(mkdtempSync(join(tmpdir(), "e2040-ship-test-")));
+  const runCut = (chunks) => {
+    const work = mkdtempSync(join(tmpdir(), "e2040-ship-test-"));
+    const logPath = join(work, "clean-run.log");
+    const receiptPath = join(work, "clean-run-receipt.json");
+    const r = runShip(["run", "--dry-run", "--fixture", fixture, "--work", work, "--log", logPath, "--receipt", receiptPath, "--frames", "18000", "--chunks", String(chunks)]);
+    const log = readFileSync(logPath, "utf8");
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+    const proof = log.match(/\$ chunk proof: (\d+) chunks, chunk sum=([0-9a-f]{16}), full proof hash=([0-9a-f]{16}),/);
+    assert.ok(proof, `the ${chunks}-leg run prints its chunk proof line: ${log.slice(-600)}`);
+    return { status: r.status, legs: Number(proof[1]), sum: proof[2], expected: proof[3], receipt, log };
+  };
+  const one = runCut(1);
+  const three = runCut(3);
+  const seven = runCut(7);
+  for (const cut of [one, three, seven]) {
+    assert.equal(cut.status, 0, `the ${cut.legs}-leg run passes`);
+    assert.equal(cut.sum, cut.expected, "the chunk sum equals the full proof hash");
+    assert.equal(cut.receipt.proof_matches, true);
+  }
+  assert.equal(one.legs, 1);
+  assert.equal(three.legs, 3);
+  assert.equal(seven.legs, 7);
+  assert.equal(one.sum, three.sum, "1 leg and 3 legs print the same full proof hash");
+  assert.equal(three.sum, seven.sum, "3 legs and 7 legs print the same full proof hash");
+  assert.notEqual(one.receipt.joined_hash, three.receipt.joined_hash, "the joined digest still covers the cut");
 });
 
 test("--chunks past the frame count is a usage error", () => {

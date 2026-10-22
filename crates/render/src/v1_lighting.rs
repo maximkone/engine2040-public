@@ -12,7 +12,8 @@
 //! accumulation for means; same complete inputs give bit-identical outputs.
 //! Errors are typed; invalid caller data never panics.
 //!
-//! Builds on the R1 v1 tonemap path (`aces_fitted`, `linear_to_srgb`) and the
+//! Builds on the R1 v1 tonemap path (`v1::tone_map`, the crate's one
+//! hue-keeping tone map, plus `linear_to_srgb`) and the
 //! R2 ortho shadow path (`bake_shadow`, `light_space_uv`, `SHADOW_PCF_TAPS`)
 //! without changing either file: per-cascade bias needs its own compare, so
 //! the cascade sample reuses the R2 UV/PCF tables with a per-level bias.
@@ -27,7 +28,7 @@
 
 use std::fmt;
 
-use crate::v1::{aces_fitted, MAX_CAPTURE_DIM};
+use crate::v1::{tone_map, MAX_CAPTURE_DIM};
 use crate::v1_ibl_shadow::{
     bake_shadow, light_space_uv, luminance, prefilter, EnvMap, SampleError, ShadowError, ShadowMap,
     MAX_SHADOW_SIZE, MIN_SHADOW_SIZE, SHADOW_PCF_TAPS,
@@ -869,11 +870,11 @@ impl GradeSettings {
     }
 
     /// Grade-then-tonemap: the tonemap-path application. Grades in linear
-    /// space, then runs the R1 Bevy-ported ACES fit plus sRGB encode.
-    /// `v1_gpu` evaluates the same order (grade uniforms, then the shared
-    /// tonemap chunk). Output: sRGB, finite for finite input.
+    /// space, then runs the crate's one hue-keeping tone map plus the sRGB
+    /// encode. `v1_gpu` evaluates the same order (grade uniforms, then the
+    /// shared tonemap chunk). Output: sRGB, finite for finite input.
     pub fn tonemap(&self, linear: [f32; 3]) -> [f32; 3] {
-        crate::tonemap::linear_to_srgb(aces_fitted(self.apply_linear(linear)))
+        crate::tonemap::linear_to_srgb(tone_map(self.apply_linear(linear)))
     }
 
     /// Grade as a GPU uniform `[exposure, contrast, saturation, 0]` for the
@@ -1175,7 +1176,7 @@ mod tests {
             );
             assert_eq!(
                 grade.tonemap(rgb),
-                crate::tonemap::linear_to_srgb(aces_fitted(rgb)),
+                crate::tonemap::linear_to_srgb(tone_map(rgb)),
                 "default graded tonemap equals the R1 tonemap on {rgb:?}"
             );
         }

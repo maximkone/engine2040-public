@@ -746,28 +746,29 @@ pub fn exposure_mult(ev: f32) -> Result<f32, PostError> {
     ExposureConfig { exposure_ev: ev }.mult()
 }
 
-/// Neutral-fit scalar shared with the one-source mirror: cheap, monotonic,
-/// `0 -> 0`, `1 -> ~0.8`, large inputs saturate at 1. Units: linear HDR
-/// in, display `0..=1` out. Same numbers the mirror pins; hue-keeping
-/// wrapper below keeps ratios. Determinism: pure, finite in gives finite out.
-pub(super) fn neutral_fit_one(x: f32) -> f32 {
-    let v = x.max(0.0);
-    let num = v * (2.51 * v + 0.03);
-    let den = (v * (2.43 * v + 0.59) + 0.14).max(1e-4);
-    (num / den).clamp(0.0, 1.0)
-}
+/// The per-channel fit of the one source: `crate::tonemap::fit_one` is the
+/// CPU twin of the WGSL `tonemap.wgsl` chunk, so this path and every shader
+/// consumer share one curve. Re-exported here because the post chain is the
+/// crate's parity oracle and the shadow path imports it from this module.
+pub(super) use crate::tonemap::fit_one as neutral_fit_one;
 
 #[expect(
     non_upper_case_globals,
     reason = "compat alias keeps the shadow path until later slices"
 )]
 /// Compatibility alias for the shadow path until later slices route it to
-/// the one source. Units: linear HDR in, display `0..=1` out. Errors: none.
+/// the one source. This is a pointer to the one source's fit, not a second
+/// curve: the WGSL `tonemap.wgsl` chunk owns the curve and every consumer
+/// calls it. Units: linear HDR in, display `0..=1` out. Errors: none.
 /// Determinism: pure; same input gives same output twice.
 pub const aces_fitted: fn(f32) -> f32 = neutral_fit_one;
 
 /// ACES tonemap with white normalization: exposure-scaled hue-keeping
 /// display over the shared Neutral fit, output `0..=1` with ratios kept.
+/// This is the crate's one tone map: the WGSL `tonemap.wgsl` chunk and
+/// `crate::tonemap::tone_map` hold the same curve, and the shader
+/// consumers (the live blit, the offscreen capture, the post chain and its
+/// compute twin) all call it.
 /// Units: linear HDR in, display `0..=1` out. Errors: typed [`PostError`]
 /// on non-finite or non-positive exposure, white, or color.
 /// Determinism: pure; same inputs give same outputs twice.
@@ -786,17 +787,14 @@ pub fn tonemap_aces(c: [f32; 3], exposure: f32, white: f32) -> Result<[f32; 3], 
     if !c.iter().all(|v| v.is_finite()) {
         return Err(PostError::Invalid("aces color is not finite".into()));
     }
+    // The exposure rides the colour, then the tone map sees the exposed
+    // value with exposure 1.0: the same order the WGSL post chain runs
+    // (`post_chain.wgsl`), so the CPU oracle and the shader agree bit for
+    // bit. One scale for every channel, so the hue survives (the per
+    // channel fit this replaced shifted a torch flame's hue by +32.3
+    // degrees).
     let exposed = [c[0] * exposure, c[1] * exposure, c[2] * exposure];
-    let capped = [
-        exposed[0].clamp(0.0, 1e6),
-        exposed[1].clamp(0.0, 1e6),
-        exposed[2].clamp(0.0, 1e6),
-    ];
-    let peak = capped[0].max(capped[1].max(capped[2]));
-    let w = neutral_fit_one(white).max(1e-4);
-    let toned_peak = neutral_fit_one(peak) / w;
-    let scale = toned_peak / peak.max(1e-6);
-    Ok([capped[0] * scale, capped[1] * scale, capped[2] * scale])
+    Ok(crate::tonemap::tone_map(exposed, 1.0, white))
 }
 
 /// Display-space grade: contrast around mid-grey, saturation mix toward

@@ -39,6 +39,9 @@ pub mod seal_key;
 /// The deterministic simulation testing harness: a seeded run, the same seed
 /// run twice with the checkpoints compared, and seeded failure injection.
 pub mod sim_verify;
+/// The 32-bit soft float: IEEE-754 binary32 in integer math, so every
+/// machine gives the same bits.
+pub mod soft_float;
 pub mod tick;
 pub mod time;
 pub mod vec3;

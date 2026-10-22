@@ -28,6 +28,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use arena_args::{
+    AGENT_SEAT_FLAG, HOLD_FLAG, PAUSE_AT_TICK_FLAG, STEP_FLAG, VIEW_BRIEF_FLAG, VIEW_LINE_FLAG,
+};
 use engine_assets::watcher::{WatchSettings, Watcher};
 use engine_audio::{AudioEngine, Bank, FeedTx, FightCue, FrameSource, Mixer};
 use engine_game::agent_seat::Seat;
@@ -112,6 +115,7 @@ static NV_OPTIMUS_ENABLEMENT: u32 = 1;
 #[export_name = "AmdPowerXpressRequestHighPerformance"]
 static AMD_POWER_XPRESS_REQUEST_HIGH_PERFORMANCE: u32 = 1;
 
+mod arena_args;
 mod arena_capture;
 mod arena_frame;
 mod arena_net;
@@ -189,23 +193,9 @@ const LEGIONARY_VIEW_KEY: winit::keyboard::KeyCode = winit::keyboard::KeyCode::K
 /// table) belongs to the no-clip view row; this constant is the coarse
 /// version that lets the mode be watched today.
 const LEGIONARY_EYE_NEAR_M: f32 = 0.30;
-/// `--agent-seat <PORT>`: a loopback client plays the human slot of this
-/// window and reads each fixed tick's hash back (see the `agent_seat`
-/// module). Port 0 asks the OS and the bound port is printed. The seat owns
-/// slot 0: the keyboard is ignored, and the boot line says so.
-const AGENT_SEAT_FLAG: &str = "--agent-seat";
-/// `--view-line <SEED> <TICKS> <FIGHTERS>`: fold the headless bout into one
-/// `arena view-line: <arena view: ...>` line, print it and exit. No window, no
-/// GPU; the MCP door's `view.laws` spawns this (see `FighterLook::view_run`).
-const VIEW_LINE_FLAG: &str = "--view-line";
 /// Prefix of the one line [`VIEW_LINE_FLAG`] prints, mirrored by
 /// `engine_endpoint`'s view host.
 const VIEW_LINE_PREFIX: &str = "arena view-line: ";
-/// `--hold <KEYS>`: keys held down from the first tick, as if pressed by hand (`W`, `W,F`; the
-/// names are W A S D F Q SPACE SHIFT). A dev flag for receipts and smoke runs: the keys take the
-/// keyboard's own road (bindings, camera-relative wish, spear key), so a capture can show W
-/// walking toward the rival. Presentation and input only.
-const HOLD_FLAG: &str = "--hold";
 /// Keys the window answers, shown in the window title and printed at boot.
 const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | [ ] slow-mo speed | R rematch | T title | C free cam | V first/third person (--legionary)";
 /// Surface frames between look-probe rounds under `--look-probes`.
@@ -228,193 +218,8 @@ const NO_BREAK_LOOK_FLAG: &str = "--no-break-look";
 /// The sim floors it either way; presentation only (RZ2), the off half of a capture pair.
 const NO_RAGDOLL_FLAG: &str = "--no-ragdoll";
 
-/// `--view-brief <path>`: write the view truth of every presented frame as
-/// one JSON line (camera, then each drawn body's act, clip, tint, bounds and
-/// screen rect), so a script or a model reads the scene with no screenshot.
-const VIEW_BRIEF_FLAG: &str = "--view-brief";
-
-/// `--pause-at-tick <N>`: hold the fixed-tick accumulator once the accumulated
-/// tick count reaches `N` (`0` holds before the first tick). Presentation only:
-/// the sim's integer cursor stops, the frozen hash stands.
-const PAUSE_AT_TICK_FLAG: &str = "--pause-at-tick";
-/// `--step`: a bare flag that lets one Space press advance exactly one held
-/// tick while `--pause-at-tick` holds. One press is one tick, never one per
-/// presented frame. Presentation only.
-const STEP_FLAG: &str = "--step";
 /// The exact stop line a smoke greps: `paused tick=<N>`, no other tokens.
 const PAUSE_LINE_PREFIX: &str = "paused tick=";
-
-/// Pull `--view-brief <path>` out of the argument list; a flag with no
-/// path is an error.
-fn split_view_brief(raw: &[String]) -> Result<(Option<PathBuf>, Vec<String>), String> {
-    let Some(at) = raw.iter().position(|arg| arg == VIEW_BRIEF_FLAG) else {
-        return Ok((None, raw.to_vec()));
-    };
-    let path = raw
-        .get(at + 1)
-        .filter(|value| !value.starts_with("--"))
-        .ok_or_else(|| format!("{VIEW_BRIEF_FLAG} needs a file path"))?;
-    let mut rest = raw.to_vec();
-    rest.drain(at..=at + 1);
-    Ok((Some(PathBuf::from(path)), rest))
-}
-
-/// Pull `--hold <KEYS>` out of the argument list: the held buttons (a
-/// comma list of W A S D F Q SPACE SHIFT, any case) and the rest in order. A
-/// flag with no list, or a key it does not know, is an error.
-fn split_hold(raw: &[String]) -> Result<(Vec<PhysicalButton>, Vec<String>), String> {
-    use engine_input::map::Key;
-    let Some(at) = raw.iter().position(|arg| arg == HOLD_FLAG) else {
-        return Ok((Vec::new(), raw.to_vec()));
-    };
-    let list = raw
-        .get(at + 1)
-        .filter(|value| !value.starts_with("--"))
-        .ok_or_else(|| format!("{HOLD_FLAG} needs keys, for example W"))?;
-    let mut held = Vec::new();
-    for name in list.split(',') {
-        let key = match name.trim().to_ascii_uppercase().as_str() {
-            "W" => Key::W,
-            "A" => Key::A,
-            "S" => Key::S,
-            "D" => Key::D,
-            "F" => Key::F,
-            "Q" => Key::Q,
-            "SPACE" => Key::SPACE,
-            "SHIFT" => Key::SHIFT,
-            other => return Err(format!("{HOLD_FLAG} {other}: use W A S D F Q SPACE SHIFT")),
-        };
-        held.push(PhysicalButton::Key(key.0));
-    }
-    let mut rest = raw.to_vec();
-    rest.drain(at..=at + 1);
-    Ok((held, rest))
-}
-
-/// Pull one bare `flag` (`--look-probes`, `--require-framing`) out of the
-/// argument list (the rest still goes to the strict `WinArgs` parser, which
-/// refuses unknown flags).
-fn split_flag(raw: &[String], flag: &str) -> (bool, Vec<String>) {
-    let on = raw.iter().any(|arg| arg == flag);
-    let rest = raw
-        .iter()
-        .filter(|arg| arg.as_str() != flag)
-        .cloned()
-        .collect();
-    (on, rest)
-}
-
-/// Split the value flag `--pause-at-tick <N>` plus the bare `--step` flag off
-/// the argument list before the strict `WinArgs` parser (it would refuse either
-/// as unknown), same shape as [`split_flag`]. Returns the pause tick (if any),
-/// whether stepping is armed, and the remainder in order. A `--pause-at-tick`
-/// with a missing or unparsable tick fails loudly, never silently defaulted.
-/// Pure over the argument slice.
-fn split_pause_flags(raw: &[String]) -> Result<(Option<u64>, bool, Vec<String>), String> {
-    let step_on = raw.iter().any(|arg| arg == STEP_FLAG);
-    let mut pause_at = None;
-    let mut rest = Vec::with_capacity(raw.len());
-    let mut index = 0usize;
-    while index < raw.len() {
-        let arg = &raw[index];
-        if arg == PAUSE_AT_TICK_FLAG {
-            let value = raw
-                .get(index + 1)
-                .filter(|value| !value.starts_with("--"))
-                .ok_or_else(|| format!("{PAUSE_AT_TICK_FLAG} needs a tick"))?;
-            let tick: u64 = value
-                .parse()
-                .map_err(|_| format!("{PAUSE_AT_TICK_FLAG} {value}"))?;
-            pause_at = Some(tick);
-            index += 2;
-            continue;
-        }
-        if arg == STEP_FLAG {
-            index += 1;
-            continue;
-        }
-        rest.push(arg.clone());
-        index += 1;
-    }
-    Ok((pause_at, step_on, rest))
-}
-
-/// Split the value flag `--agent-seat <PORT>` off the argument list before
-/// the strict parser (it would refuse an unknown flag). Port 0 asks the OS
-/// for a free port; the bound one is printed at boot. A missing or
-/// unparsable port fails loudly, never silently falls back to the keyboard.
-fn split_agent_seat(raw: &[String]) -> Result<(Option<u16>, Vec<String>), String> {
-    let mut port = None;
-    let mut rest = Vec::with_capacity(raw.len());
-    let mut index = 0usize;
-    while index < raw.len() {
-        let arg = &raw[index];
-        if arg == AGENT_SEAT_FLAG {
-            let value = raw
-                .get(index + 1)
-                .filter(|value| !value.starts_with("--"))
-                .ok_or_else(|| format!("{AGENT_SEAT_FLAG} needs a port"))?;
-            let parsed: u16 = value
-                .parse()
-                .map_err(|_| format!("{AGENT_SEAT_FLAG} {value}"))?;
-            port = Some(parsed);
-            index += 2;
-            continue;
-        }
-        rest.push(arg.clone());
-        index += 1;
-    }
-    Ok((port, rest))
-}
-
-/// A `--view-line` request (seed, ticks, fighters) and the arguments left for the strict parser.
-type ViewLineSplit = (Option<(u64, u32, u8)>, Vec<String>);
-
-/// Split `--view-line <SEED> <TICKS> <FIGHTERS>` off before the strict parser
-/// (it would refuse an unknown flag) and check the three numbers against the
-/// session config's own ranges, so a bad request fails loudly at boot instead
-/// of building a bout the sim would refuse. Zero ticks is the empty line.
-fn split_view_line(raw: &[String]) -> Result<ViewLineSplit, String> {
-    let mut request = None;
-    let mut rest = Vec::with_capacity(raw.len());
-    let mut index = 0usize;
-    while index < raw.len() {
-        let arg = &raw[index];
-        if arg != VIEW_LINE_FLAG {
-            rest.push(arg.clone());
-            index += 1;
-            continue;
-        }
-        let three = raw
-            .get(index + 1..index + 4)
-            .filter(|values| values.iter().all(|value| !value.starts_with("--")))
-            .ok_or_else(|| format!("{VIEW_LINE_FLAG} needs SEED TICKS FIGHTERS"))?;
-        let seed: u64 = three[0]
-            .parse()
-            .map_err(|_| format!("{VIEW_LINE_FLAG} seed {}", three[0]))?;
-        let ticks: u32 = three[1]
-            .parse()
-            .map_err(|_| format!("{VIEW_LINE_FLAG} ticks {}", three[1]))?;
-        let fighters: u8 = three[2]
-            .parse()
-            .map_err(|_| format!("{VIEW_LINE_FLAG} fighters {}", three[2]))?;
-        if ticks > engine_game::MAX_TICKS {
-            return Err(format!(
-                "{VIEW_LINE_FLAG} ticks {ticks} is outside 0..={}",
-                engine_game::MAX_TICKS
-            ));
-        }
-        if !(2..=engine_arena::MAX_PARTICIPANTS).contains(&fighters) {
-            return Err(format!(
-                "{VIEW_LINE_FLAG} fighters {fighters} is outside 2..={}",
-                engine_arena::MAX_PARTICIPANTS
-            ));
-        }
-        request = Some((seed, ticks, fighters));
-        index += 4;
-    }
-    Ok((request, rest))
-}
 
 /// What the fight camera showed over a run: frames tallied, frames with no
 /// fighter in the picture (and the first), the fewest fighters seen, the
@@ -832,16 +637,16 @@ fn run(raw: &[String]) -> i32 {
     // `--staged-fight` drives the human slot with the staged script over
     // the staged session (seed 2040, 600 ticks, 4 fighters).
     let (staged, raw) = split_staged_flag(raw);
-    let (look_probes, raw) = split_flag(&raw, LOOK_PROBES_FLAG);
-    let (require_framing, raw) = split_flag(&raw, REQUIRE_FRAMING_FLAG);
-    let (no_break_look, raw) = split_flag(&raw, NO_BREAK_LOOK_FLAG);
-    let (no_ragdoll, raw) = split_flag(&raw, NO_RAGDOLL_FLAG);
-    let (play, raw) = split_flag(&raw, PLAY_FLAG);
-    let (spear, raw) = split_flag(&raw, SPEAR_FLAG);
-    let (spear_demo, raw) = split_flag(&raw, SPEAR_DEMO_FLAG);
-    let (height, raw) = split_flag(&raw, HEIGHT_FLAG);
-    let (legionary, raw) = split_flag(&raw, LEGIONARY_FLAG);
-    let (agent_seat, raw) = match split_agent_seat(&raw) {
+    let (look_probes, raw) = arena_args::split_flag(&raw, LOOK_PROBES_FLAG);
+    let (require_framing, raw) = arena_args::split_flag(&raw, REQUIRE_FRAMING_FLAG);
+    let (no_break_look, raw) = arena_args::split_flag(&raw, NO_BREAK_LOOK_FLAG);
+    let (no_ragdoll, raw) = arena_args::split_flag(&raw, NO_RAGDOLL_FLAG);
+    let (play, raw) = arena_args::split_flag(&raw, PLAY_FLAG);
+    let (spear, raw) = arena_args::split_flag(&raw, SPEAR_FLAG);
+    let (spear_demo, raw) = arena_args::split_flag(&raw, SPEAR_DEMO_FLAG);
+    let (height, raw) = arena_args::split_flag(&raw, HEIGHT_FLAG);
+    let (legionary, raw) = arena_args::split_flag(&raw, LEGIONARY_FLAG);
+    let (agent_seat, raw) = match arena_args::split_agent_seat(&raw) {
         Ok(split) => split,
         Err(err) => {
             tell!("arena: {err}");
@@ -850,7 +655,7 @@ fn run(raw: &[String]) -> i32 {
     };
     // Windowless `view.laws` host: split and run before any GPU or window work,
     // so the MCP door can fold a bout on a build with no display.
-    let (view_line, raw) = match split_view_line(&raw) {
+    let (view_line, raw) = match arena_args::split_view_line(&raw) {
         Ok(split) => split,
         Err(err) => {
             tell!("arena: {err}");
@@ -906,21 +711,21 @@ fn run(raw: &[String]) -> i32 {
             return 2;
         }
     };
-    let (view_brief, raw) = match split_view_brief(&raw) {
+    let (view_brief, raw) = match arena_args::split_view_brief(&raw) {
         Ok(split) => split,
         Err(err) => {
             tell!("arena: {err}");
             return 2;
         }
     };
-    let (pause_at_tick, step_mode, raw) = match split_pause_flags(&raw) {
+    let (pause_at_tick, step_mode, raw) = match arena_args::split_pause_flags(&raw) {
         Ok(split) => split,
         Err(err) => {
             tell!("arena: {err}");
             return 2;
         }
     };
-    let (held_keys, raw) = match split_hold(&raw) {
+    let (held_keys, raw) = match arena_args::split_hold(&raw) {
         Ok(split) => split,
         Err(err) => {
             tell!("arena: {err}");
@@ -3079,13 +2884,13 @@ mod tests {
 
     #[test]
     fn look_probes_flag_splits_off_and_defaults_off() {
-        let (on, rest) = split_flag(
+        let (on, rest) = arena_args::split_flag(
             &strings(&["arena", "--frames", "3", "--look-probes", "--exit"]),
             LOOK_PROBES_FLAG,
         );
         assert!(on, "the flag turns the blocking probes on");
         assert_eq!(rest, strings(&["arena", "--frames", "3", "--exit"]));
-        let (off, same) = split_flag(&strings(&["arena", "--exit"]), LOOK_PROBES_FLAG);
+        let (off, same) = arena_args::split_flag(&strings(&["arena", "--exit"]), LOOK_PROBES_FLAG);
         assert!(!off, "probes ship off");
         assert_eq!(same, strings(&["arena", "--exit"]));
         // The strict parser still refuses the flag if it were not split.
@@ -3094,13 +2899,13 @@ mod tests {
 
     #[test]
     fn legionary_flag_splits_off_and_the_strict_parser_still_refuses_it() {
-        let (on, rest) = split_flag(
+        let (on, rest) = arena_args::split_flag(
             &strings(&["arena", "--legionary", "--exit"]),
             LEGIONARY_FLAG,
         );
         assert!(on, "the flag turns the mode on");
         assert_eq!(rest, strings(&["arena", "--exit"]));
-        let (off, same) = split_flag(&strings(&["arena", "--exit"]), LEGIONARY_FLAG);
+        let (off, same) = arena_args::split_flag(&strings(&["arena", "--exit"]), LEGIONARY_FLAG);
         assert!(!off, "the mode ships off");
         assert_eq!(same, strings(&["arena", "--exit"]));
         // The strict parser still refuses the flag if it were not split.
@@ -3190,7 +2995,7 @@ mod tests {
 
     #[test]
     fn view_line_flag_splits_off_and_refuses_bad_numbers() {
-        let (request, rest) = split_view_line(&strings(&[
+        let (request, rest) = arena_args::split_view_line(&strings(&[
             "arena",
             "--view-line",
             "2040",
@@ -3203,7 +3008,7 @@ mod tests {
         assert_eq!(request, Some((2040, 600, 2)));
         assert_eq!(rest, strings(&["arena", "--frames", "3"]));
         assert_eq!(
-            split_view_line(&strings(&["arena", "--frames", "3"]))
+            arena_args::split_view_line(&strings(&["arena", "--frames", "3"]))
                 .expect("absent is fine")
                 .0,
             None
@@ -3222,7 +3027,7 @@ mod tests {
             vec!["arena", "--view-line", "2040", "--frames", "2"],
         ] {
             assert!(
-                split_view_line(&strings(&bad)).is_err(),
+                arena_args::split_view_line(&strings(&bad)).is_err(),
                 "bad request {bad:?} refuses"
             );
         }
@@ -3415,7 +3220,7 @@ mod tests {
             framing.failure().as_deref(),
             Some("2 of 4 frames showed no fighter (first at frame 2)")
         );
-        let (on, rest) = split_flag(
+        let (on, rest) = arena_args::split_flag(
             &strings(&["arena", "--require-framing", "--exit"]),
             REQUIRE_FRAMING_FLAG,
         );
@@ -3934,7 +3739,7 @@ mod tests {
             "--step",
             "--exit",
         ]);
-        let (pause_at, step, rest) = split_pause_flags(&raw).expect("flags split");
+        let (pause_at, step, rest) = arena_args::split_pause_flags(&raw).expect("flags split");
         assert_eq!(pause_at, Some(120));
         assert!(step, "--step is armed");
         assert_eq!(rest, strings(&["arena", "--frames", "200", "--exit"]));
@@ -3942,11 +3747,16 @@ mod tests {
         assert!(WinArgs::parse(&rest).is_ok());
         assert!(WinArgs::parse(&raw).is_err());
         // A missing or unparsable tick fails loudly, never silently defaulted.
-        assert!(split_pause_flags(&strings(&["arena", "--pause-at-tick"])).is_err());
-        assert!(split_pause_flags(&strings(&["arena", "--pause-at-tick", "x"])).is_err());
-        assert!(split_pause_flags(&strings(&["arena", "--pause-at-tick", "--step"])).is_err());
-        let (none, no_step, same) =
-            split_pause_flags(&strings(&["arena", "--exit"])).expect("no pause flags still splits");
+        assert!(arena_args::split_pause_flags(&strings(&["arena", "--pause-at-tick"])).is_err());
+        assert!(
+            arena_args::split_pause_flags(&strings(&["arena", "--pause-at-tick", "x"])).is_err()
+        );
+        assert!(
+            arena_args::split_pause_flags(&strings(&["arena", "--pause-at-tick", "--step"]))
+                .is_err()
+        );
+        let (none, no_step, same) = arena_args::split_pause_flags(&strings(&["arena", "--exit"]))
+            .expect("no pause flags still splits");
         assert!(none.is_none() && !no_step);
         assert_eq!(same, strings(&["arena", "--exit"]));
     }
@@ -4407,15 +4217,16 @@ mod tests {
     fn hold_flag_splits_off_and_names_its_keys() {
         use engine_input::map::Key;
         let (held, rest) =
-            split_hold(&strings(&["arena", "--hold", "w,Shift", "--exit"])).expect("valid keys");
+            arena_args::split_hold(&strings(&["arena", "--hold", "w,Shift", "--exit"]))
+                .expect("valid keys");
         assert_eq!(held, vec![key(Key::W), key(Key::SHIFT)]);
         assert_eq!(rest, strings(&["arena", "--exit"]));
-        let (none, same) = split_hold(&strings(&["arena", "--exit"])).expect("no flag");
+        let (none, same) = arena_args::split_hold(&strings(&["arena", "--exit"])).expect("no flag");
         assert!(none.is_empty() && same == strings(&["arena", "--exit"]));
         // A missing list or an unknown key fails loudly, never silently.
-        assert!(split_hold(&strings(&["arena", "--hold"])).is_err());
-        assert!(split_hold(&strings(&["arena", "--hold", "--exit"])).is_err());
-        assert!(split_hold(&strings(&["arena", "--hold", "W,Z"])).is_err());
+        assert!(arena_args::split_hold(&strings(&["arena", "--hold"])).is_err());
+        assert!(arena_args::split_hold(&strings(&["arena", "--hold", "--exit"])).is_err());
+        assert!(arena_args::split_hold(&strings(&["arena", "--hold", "W,Z"])).is_err());
         // The strict parser still refuses the flag if it were not split.
         assert!(WinArgs::parse(&strings(&["arena", "--hold", "W"])).is_err());
     }
@@ -5091,8 +4902,8 @@ mod tests {
                 .map(|arg| (*arg).to_string())
                 .collect::<Vec<_>>()
         };
-        let (port, rest) =
-            split_agent_seat(&raw(&["--agent-seat", "0", "--exit"])).expect("a port splits");
+        let (port, rest) = arena_args::split_agent_seat(&raw(&["--agent-seat", "0", "--exit"]))
+            .expect("a port splits");
         assert_eq!(port, Some(0), "0 asks the OS for a free port");
         assert_eq!(rest, vec!["--exit".to_string()]);
         for bad in [
@@ -5102,7 +4913,7 @@ mod tests {
             vec!["--agent-seat", "70000"],
         ] {
             assert!(
-                split_agent_seat(&raw(&bad)).is_err(),
+                arena_args::split_agent_seat(&raw(&bad)).is_err(),
                 "{bad:?} must fail loudly"
             );
         }

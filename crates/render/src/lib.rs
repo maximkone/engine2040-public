@@ -518,38 +518,4 @@ mod tests {
             (MAX_LIGHTS_PER_TILE, MAX_LIGHTS_PER_TILE, 2)
         );
     }
-
-    #[test]
-    fn aces_one_source_gate() {
-        // Moved from the deleted test-only `tonemap` mirror (wave-4 mining):
-        // the CPU mirror never compared against the WGSL it mirrored, so only
-        // this cross-file count stays. One ACES source in the owned WGSL copy.
-        let wgsl = include_str!("shaders/tonemap.wgsl");
-        let aces_defs = wgsl.matches("fn aces").count();
-        assert_eq!(aces_defs, 1, "one `fn aces` definition, got {aces_defs}");
-        let post = include_str!("post.rs");
-        assert!(!post.contains("fn aces"), "post still carries its copy");
-        let total = post.matches("fn aces").count()
-            + include_str!("v1.rs").matches("fn aces").count()
-            + include_str!("shadow_post.rs").matches("fn aces").count()
-            + include_str!("shaders/post/post_chain.wgsl")
-                .matches("fn aces")
-                .count()
-            + include_str!("shaders/post/composite_compute.wgsl")
-                .matches("fn aces")
-                .count()
-            + aces_defs;
-        assert_eq!(
-            total, 4,
-            "one source: total {total}, want 4 with post clean"
-        );
-        assert!(
-            wgsl.contains("fn rrt_odt_fit") && wgsl.contains("fn aces_fitted"),
-            "keeps the single fitted source"
-        );
-        assert!(
-            wgsl.contains("fn dither4"),
-            "keeps the fixed-pattern helper"
-        );
-    }
 }
