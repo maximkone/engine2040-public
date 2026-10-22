@@ -135,6 +135,17 @@ mod imp {
             .map(|entry| entry.1)
     }
 
+    /// Legal prop kind words in catalog order, comma-joined. The one list the
+    /// grammar validates against: refusals and the tool description read it,
+    /// so they cannot drift from `KINDS`.
+    pub fn kind_words() -> String {
+        KINDS
+            .iter()
+            .map(|entry| entry.0)
+            .collect::<Vec<&str>>()
+            .join(", ")
+    }
+
     /// What stopped a brief, a plan or a session call. Every message names
     /// the legal values; failures before apply write nothing.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,19 +208,17 @@ mod imp {
                 Self::EmptyBrief => write!(
                     f,
                     "empty_brief: the brief holds no prop line; \
-                     submit `prop <kind> <name>` with kind one of altar, banner, barrel, \
-                     bench, brazier, crate, pillar, post, stand, torch"
+                     submit `prop <kind> <name>` with kind one of {}",
+                    kind_words()
                 ),
                 Self::BriefTooLong { len } => write!(
                     f,
                     "brief_too_long: brief holds {len} chars; at most {BRIEF_MAX_CHARS}"
                 ),
                 Self::BadLine { line, reason } => write!(f, "bad_line {line}: {reason}"),
-                Self::UnknownKind { kind } => write!(
-                    f,
-                    "unknown_kind `{kind}`: submit one of altar, banner, barrel, bench, \
-                     brazier, crate, pillar, post, stand, torch"
-                ),
+                Self::UnknownKind { kind } => {
+                    write!(f, "unknown_kind `{kind}`: submit one of {}", kind_words())
+                }
                 Self::DuplicateName { name } => write!(
                     f,
                     "duplicate_name `{name}`: every prop name must be unique in one brief"
@@ -1232,6 +1241,28 @@ mod imp {
                 .min()
                 .expect("props exist");
             assert_eq!(default.spawn_id, first, "default spawn is the first prop");
+        }
+
+        #[test]
+        fn unknown_kind_names_the_culprit_and_every_legal_kind() {
+            let legal = kind_words();
+            for (kind, _) in KINDS {
+                assert!(legal.contains(kind), "{kind} missing from `{legal}`");
+            }
+            let description = BuildLevelTool::description().expect("level.build describes itself");
+            assert!(
+                description.contains(legal.as_str()),
+                "the tool description lists the kinds: {description}"
+            );
+            let env = envelope("prop dragon dragon_01", 11).expect("envelopes even bad grammar");
+            let refused = plan_brief(&env).expect_err("unknown kind must refuse");
+            assert_eq!(refused.code(), "unknown_kind");
+            let text = refused.to_string();
+            assert!(text.contains("`dragon`"), "names the culprit: {text}");
+            assert!(
+                text.contains(legal.as_str()),
+                "lists the legal kinds: {text}"
+            );
         }
 
         #[test]

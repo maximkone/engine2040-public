@@ -149,12 +149,29 @@ def main():
     # Name the materials so the cook can tell the skin from the cloth: the
     # glTF export renames everything to "Material" otherwise, and the cook
     # would paint the face with the faction's armour.
+    #
+    # The body gets a slot of its own even though it has none: MPFB's skin
+    # is procedural, so the exporter has nothing to write for it and the
+    # slot comes back empty, which the cook reads as a hole in the face.
+    # A slot with a plain material in it is written out with the name it
+    # has, and the cook can then paint the face.
     for ob in bpy.context.scene.objects:
         if ob.type != "MESH":
             continue
         label = "skin" if ob.name.lower() == "human" else "cloth"
+        if not ob.material_slots:
+            material = bpy.data.materials.new(name=label)
+            material.use_nodes = True
+            ob.data.materials.append(material)
+            for poly in ob.data.polygons:
+                poly.material_index = 0
+            continue
         for slot in ob.material_slots:
-            if slot.material is not None:
+            if slot.material is None:
+                material = bpy.data.materials.new(name=label)
+                material.use_nodes = True
+                slot.material = material
+            else:
                 slot.material.name = label
 
     bpy.context.view_layer.update()

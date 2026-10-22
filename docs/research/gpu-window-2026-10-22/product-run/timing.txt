@@ -1,0 +1,43 @@
+arena backend=auto fallback=dx12 reason=compiled-in default; no pilot report yet
+arena vram budget_mb=5233 usage_mb=0 headroom_mb=5233 dedicated_mb=6001
+arena zone sand_floor class=0 advantage=0 dominance=0 risk=0 zone=Centre
+arena zone stands class=1 advantage=0 dominance=0 risk=0 zone=Wall
+arena zone wall_north class=0 advantage=0 dominance=0 risk=0 zone=Wall
+arena zone wall_south class=0 advantage=0 dominance=0 risk=0 zone=Wall
+arena zone gate_tunnel class=2 advantage=0 dominance=0 risk=1 zone=Gate
+arena zone torch_west class=3 advantage=0 dominance=0 risk=0 zone=Wall
+arena zone torch_east class=3 advantage=0 dominance=0 risk=0 zone=Wall
+arena zone banner_west class=0 advantage=0 dominance=0 risk=0 zone=Wall
+arena zone banner_east class=0 advantage=0 dominance=0 risk=0 zone=Wall
+arena zone crate_a class=4 advantage=1 dominance=0 risk=0 zone=Ring
+arena zone debris_field class=4 advantage=1 dominance=0 risk=1 zone=Ring
+arena zone centre class=1 advantage=1 dominance=1 risk=0 zone=Centre
+arena pacing: period_ms=16.667 tick_rule=wall-clock
+arena controls: WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | [ ] slow-mo speed | R rematch | T title | C free cam | V first/third person (--legionary)
+arena particles: per-tier potato=512 dust=153 flame=78 sparks=153 blood=128 web=2048 dust=614 flame=308 sparks=614 blood=512 comfort=4096 dust=1228 flame=616 sparks=1228 blood=1024 high=8192 dust=2457 flame=1230 sparks=2457 blood=2048
+PQ18 window=0 events=120 input_p50=3.800ms input_p95=4.925ms sim_p50=0.051ms sim_p95=0.074ms present_p50=6.159ms present_p95=8.745ms dropped=0
+arena smoke: ticks=255 frames=300 alpha=0.442 hud_cells=12 hud_quads=12 fight_draws=40 audio="audio muted: no device opened; mixer voices render offline" presenter="presenter surface: NVIDIA GeForce RTX 3050 6GB Laptop GPU (32.0.16.1062 ) 1280x720"
+arena sim: ticks=255 hash=20bd47d7224838a3
+arena audio feed: sent=495 applied=495 dropped_full=0 unknown_cue=0
+arena audio space: placed=17 flat=0 footsteps=33 tension_sends=1 tension_unheard=1 bed_writes=187 refused=0 breaks=1
+arena frame-split: sim=1.167ms present=5.192ms fighters=2.092ms fighters_pose=1.835ms fighters_upload=0.077ms per frame (mean over 300 frames) cpu_ms p50=5.689 p99=15.099 interval_ms p50=16.655 p99=18.907 gpu_ms p50=0.920 p99=2.830 (forward p50=0.348 sky p50=0.041 blit p50=0.238; 299 frames) acquire=0.538ms present_mode=Immediate slow_frames=4 first_slow_index=0 slowest=2:163.018ms/present=160.932ms/fighters=2.654ms,0:38.368ms/present=36.096ms/fighters=3.434ms,1:37.235ms/present=34.651ms/fighters=2.214ms ticks=255 us_per_tick_present=6109 us_per_tick_fighters=2462 skipped=0
+arena feel: steps=300 triggers=16 shaken=149 peak_shake_milli=2500 stopped=52 slowed=0 refused=0
+arena framing: frames=300 fighters=8 seen=8 empty=0 first_empty=- fewest_in_view=6 steepest_down_deg=5.1 tinted_share=0.12
+arena view: frames=300 sim_ticks=0.1..254.4 bodies=2400 offscreen_share=0.08 nonfinite=0 error_parts=0 sunk_cm_max=0.0 idle_float_cm_max=18.3 pops=5 pop_acts=attack:4/idle:1 pop_cm_max=15.6 eye_in_body=0 eye_below_ground=0 closest_cm=34 cover_max=0.01 foot_slide_cm=0.0 planted_feet=802 ragdolls=2 spear=0 tether=0
+arena pop: slot=7 joint=18 tick=53.5 miss_cm=15.6 from=-2.25,-0.05,-0.47 at=-2.10,-0.00,-0.46 act=attack clip=2 clip_s=0.208 prev_clip=2
+arena break: breaks=12 debris=1 awake=1
+physfx: bodies=1 contacts=1 us=0
+arena per-pass: adapter="NVIDIA GeForce RTX 3050 6GB Laptop GPU" driver="32.0.16.1062 " resolution=1280x720 frames=300 sky=0.037ms layers=0.000ms particles=0.000ms decals=0.000ms ibl=0.059ms fog=0.000ms gtao=0.269ms shadow=0.026ms forward=0.348ms validation_errors=0 gpu_frames=300 probe_frames=300
+arena waits: live_frames=300 live_maps=0 live_waits=0 live_buffers=141 live_bind_groups=31 steady_buffers=10 steady_bind_groups=0 probe_frames=0 probe_maps=0 probe_waits=0 capture_frames=0 capture_maps=0 capture_waits=0
+PQ18 window=1 events=75 input_p50=3.771ms input_p95=4.837ms sim_p50=0.044ms sim_p95=0.060ms present_p50=5.694ms present_p95=8.335ms dropped=0
+input_latency_gpu samples=75 warmup=60 profile=release scene="arena" build="arena window 0.1.0" adapter="NVIDIA GeForce RTX 3050 6GB Laptop GPU" driver="32.0.16.1062 " backend="wgpu" resolution="1280x720" vsync="Immediate" power="not sampled" clocks="not sampled" cpu="Intel64 Family 6 Model 186 Stepping 2, GenuineIntel" load="not sampled"
+input_latency events=75 sim_p50=0.044ms sim_p95=0.060ms present_p50=5.694ms present_p95=8.335ms p95_budget=50.0ms verdict=pass
+PQ18 OK window=1 input_p50=3.771ms input_p95=4.837ms sim_p50=0.044ms present_p50=5.694ms gpu=reported
+
+arena log: target\logs\arena-20261021T231903Z.log
+arena notice: audio muted: no device opened; mixer voices render offline
+arena msaa: 1x
+arena: staged 6 dressing boxes
+arena: arena: staged 11 kit draws (0 skipped)
+arena: fighter look bound 4 CT7 bodies
+arena: presenter surface: NVIDIA GeForce RTX 3050 6GB Laptop GPU (32.0.16.1062 ) 1280x720

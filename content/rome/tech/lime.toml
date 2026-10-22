@@ -1,0 +1,34 @@
+# Lime and mortar: burn the stone, slake the hot lime, mix it with sand.
+#
+# The loop is the Roman one from `docs/plan/rome.md` section 4.4: burn the stone in
+# a kiln, where a third of its weight leaves as gas; slake the lime while it is hot;
+# then mix it with sand. `crates/rome/src/lime.rs` reads this file as data.
+#
+# The mixes are the ones Vitruvius 2.5 gives through the plan's own table (rome.md
+# section 5): 1 lime : 3 pit sand, or 1 lime : 2 river sand. The right mix for the
+# sand at hand sets at full strength; a mix off the ratio sets weaker.
+#
+# Every number names its source in `ref`. A section that holds a number and no `ref`
+# is refused by the reader, so no number enters the game unsourced.
+
+[recipe]
+id = "lime.mortar"
+ref = "rome.md section 4.4, the lime and mortar row (Vitruvius 2.5)"
+
+[burn]
+lost_numerator = 1
+lost_denominator = 3
+ref = "rome.md section 4.4, the lime and mortar row: burning the stone loses a third of its weight (Vitruvius 2.5)"
+
+[mix.pit_sand]
+sand_per_lime = 3
+ref = "rome.md section 5, the Mortar row: 1 lime : 3 pit sand (Vitruvius 2.5)"
+
+[mix.river_sand]
+sand_per_lime = 2
+ref = "rome.md section 5, the Mortar row: 1 lime : 2 river sand (Vitruvius 2.5)"
+
+[strength]
+full_per_mille = 1000
+penalty_per_part = 250
+ref = "rome.md section 4.4, the lime and mortar row: the right mix sets at full strength and a wrong mix sets weaker; the step per part off the ratio is ours"

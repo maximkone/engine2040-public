@@ -43,8 +43,9 @@ use engine_endpoint::{
 /// up by one. The session pack adds `scene.diff` and `session.activity` (D17,
 /// on-demand), so every arm moves up by two. The codex pack adds
 /// `codex.search` and `codex.cite` (on-demand), so every arm moves up by two
-/// more.
-const EXPECTED_ROUTER: usize = 80
+/// more. `tune.sweep` (HX35, the play pack's ninth verb) moved every arm up by
+/// one.
+const EXPECTED_ROUTER: usize = 81
     + if cfg!(feature = "rules") { 3 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

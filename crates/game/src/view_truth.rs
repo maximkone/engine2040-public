@@ -596,6 +596,10 @@ impl ViewLaws {
     }
 
     /// Keeps the worst pop of the run: the joint, the tick and the miss.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one field per PopDetail column; kept flat until the pop moves into a params struct"
+    )]
     fn note_pop(
         &mut self,
         slot: u8,

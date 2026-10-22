@@ -3,8 +3,12 @@
 //!
 //! Consumer: the proof quality gate plus DESIGN move-table packets, which
 //! read [`TournamentReport`] for win rates, kill shares, stuck counts and
-//! exchange reachability. Data owner: the caller owns the config; every
-//! match builds its own [`ArenaConfig`](engine_arena::ArenaConfig) from it.
+//! exchange reachability. The difficulty-curve sweep
+//! ([`sweep_difficulty_curve`], [`sweep_points`], [`render_sweep_csv`]) is
+//! production: the door's `tune.sweep` verb runs it over one knob and a
+//! range of values, so the curve is a number an agent can read, not a test
+//! artifact. Data owner: the caller owns the config; every match builds its
+//! own [`ArenaConfig`](engine_arena::ArenaConfig) from it.
 //! Units: fixed ticks, permille rates, raw button bytes for moves.
 //! Determinism: seeded and replay-exact (same config twice gives the same
 //! report; difficulty `d` replays `base_seed + d * SEED_GAP + i`).
@@ -22,6 +26,13 @@ use engine_arena::fork::{
 use engine_arena::recorder::Dataset;
 use engine_arena::zones::{shipped_gate_anchor, zone_at, ZoneTally};
 use engine_arena::{ArenaConfig, FighterId, FighterInput, FighterTape, TICK_HZ};
+
+mod sweep;
+
+pub use sweep::{
+    render_sweep_csv, sweep_difficulty_curve, sweep_points, SweepConfig, SweepPoint, SweepReport,
+    SweepRow, SweepSkip, SWEEP_HUMAN, SWEEP_KNOB, SWEEP_MAX_VALUES, SWEEP_PERFECT, SWEEP_VALUES,
+};
 
 /// This harness's name in [`Failure::verifier`].
 pub const VERIFIER: &str = "BalanceTournament";
@@ -1482,217 +1493,6 @@ pub fn proof_gate() -> Result<GateOutcome, Failure> {
     Ok(GateOutcome { report, failures })
 }
 
-/// Difficulty-curve knob: the ONE [`BalanceConfig`](super::BalanceConfig)
-/// field the sweep varies (`match_ticks`, fight length in fixed ticks).
-/// Both configs carry it; longer fights let skill decide while short fights
-/// compress to draws, so the curve proves the win-rate bands hold across
-/// fight lengths instead of at one shape only.
-#[cfg(test)]
-const SWEEP_KNOB: &str = "match_ticks";
-/// Standard sweep values: short, standard and long fights.
-#[cfg(test)]
-const SWEEP_VALUES: [u32; 3] = [300, 600, 1_200];
-/// Upper bound on knob values per sweep (the knob cap): one short run each.
-#[cfg(test)]
-const SWEEP_MAX_VALUES: usize = 8;
-/// Player label for the perfect tape in the curve CSV.
-#[cfg(test)]
-const SWEEP_PERFECT: &str = "perfect";
-/// Player label for the human-error tape in the curve CSV.
-#[cfg(test)]
-const SWEEP_HUMAN: &str = "human";
-
-/// Difficulty-curve sweep configuration: one 200-match tournament per knob
-/// value, perfect player first, then the seeded human-like error when
-/// enabled (default off). Owned by the enemy designer; the curve CSV is its
-/// report to the balance log.
-#[cfg(test)]
-#[derive(Clone, PartialEq, Debug)]
-struct SweepConfig {
-    /// Base tournament; `matches` stays at the proof size, only the knob
-    /// (`match_ticks`) varies per value.
-    base: TournamentConfig,
-    /// Knob values (`1..=MAX_MATCH_TICKS`, `1..=SWEEP_MAX_VALUES` entries).
-    values: Vec<u32>,
-    /// Seeded human-like error on slot zero; off is the perfect player.
-    error: HumanError,
-}
-
-#[cfg(test)]
-impl SweepConfig {
-    /// Standard curve: the P3 proof shape at short, standard and long fight
-    /// lengths with the perfect player.
-    fn standard() -> Self {
-        Self {
-            base: TournamentConfig::standard(),
-            values: SWEEP_VALUES.to_vec(),
-            error: HumanError::off(),
-        }
-    }
-}
-
-/// One finished curve point: a difficulty's outcome at one knob value.
-#[cfg(test)]
-#[derive(Clone, PartialEq, Eq, Debug)]
-struct SweepRow {
-    /// Knob value (fight length in ticks).
-    value: u32,
-    /// Difficulty name, in config order.
-    difficulty: String,
-    /// True for the human-error replay, false for the perfect player.
-    human: bool,
-    /// Matches fighter 0 won outright.
-    wins: u32,
-    /// Matches tied for top damage.
-    draws: u32,
-    /// Matches another fighter won outright.
-    losses: u32,
-    /// `(2 * wins + draws) * 1000 / (2 * trials)`.
-    rate_permille: u16,
-    /// Kill attribution per observed killing byte, sorted by byte.
-    kill_shares: Vec<KillShare>,
-    /// Matches with a fighter slow 180+ ticks, summed over both slots.
-    stuck_count: u32,
-    /// Matches played (== the tournament size).
-    trials: u32,
-}
-
-/// One skipped curve point: a variant nobody finished (zero kills), so it
-/// carries no win-rate signal and the curve skips it instead of printing a
-/// bloodless row as difficulty data.
-#[cfg(test)]
-#[derive(Clone, PartialEq, Eq, Debug)]
-struct SweepSkip {
-    /// Knob value (fight length in ticks).
-    value: u32,
-    /// Difficulty name, in config order.
-    difficulty: String,
-    /// Why the variant was skipped (always names the empty kill count).
-    reason: String,
-}
-
-/// Whole difficulty curve: finished rows plus skips, in sweep order.
-/// Deterministic: the same config twice gives the same report.
-#[cfg(test)]
-#[derive(Clone, PartialEq, Eq, Debug)]
-struct SweepReport {
-    /// Finished curve points, in `(value, difficulty, player)` order.
-    rows: Vec<SweepRow>,
-    /// Skipped variants, in `(value, difficulty)` order.
-    skipped: Vec<SweepSkip>,
-}
-
-/// One curve row from a finished difficulty report. Pure.
-#[cfg(test)]
-fn sweep_row(value: u32, row: &DifficultyReport, human: bool) -> SweepRow {
-    SweepRow {
-        value,
-        difficulty: row.name.clone(),
-        human,
-        wins: row.wins,
-        draws: row.draws,
-        losses: row.losses,
-        rate_permille: row.rate_permille,
-        kill_shares: row.kill_shares.clone(),
-        stuck_count: row.stuck_trips.iter().map(|(_, n)| *n).sum(),
-        trials: row.matches,
-    }
-}
-
-/// Run the difficulty curve: per knob value the perfect-player tournament
-/// first; a difficulty nobody finished (`kills_total == 0`) is skipped;
-/// finished difficulties also replay under the seeded human error when
-/// enabled. Discovery, spotlight and exchange probes stay perfect brains —
-/// only duel rows take the error tape. Fails without simulating on a bad
-/// knob list; per-value tournaments validate like [`run`].
-#[cfg(test)]
-fn sweep_difficulty_curve(sweep: &SweepConfig) -> Result<SweepReport, Failure> {
-    if sweep.values.is_empty() || sweep.values.len() > SWEEP_MAX_VALUES {
-        return Err(fail(format!(
-            "invalid sweep values {}: must be 1..={SWEEP_MAX_VALUES}",
-            sweep.values.len()
-        )));
-    }
-    for value in &sweep.values {
-        if *value == 0 || *value > MAX_MATCH_TICKS {
-            return Err(fail(format!(
-                "invalid sweep value {value}: must be 1..={MAX_MATCH_TICKS}"
-            )));
-        }
-    }
-    let mut rows = Vec::new();
-    let mut skipped = Vec::new();
-    for value in &sweep.values {
-        let valued = TournamentConfig {
-            match_ticks: *value,
-            ..sweep.base.clone()
-        };
-        let perfect = run_with_error(&valued, HumanError::off())?;
-        for (index, row) in perfect.per_difficulty.iter().enumerate() {
-            if row.kills_total == 0 {
-                skipped.push(SweepSkip {
-                    value: *value,
-                    difficulty: row.name.clone(),
-                    reason: "no-finisher (kills_total=0)".to_string(),
-                });
-                continue;
-            }
-            rows.push(sweep_row(*value, row, false));
-            if sweep.error.enabled {
-                let difficulty = &valued.difficulties[index];
-                let erred = run_difficulty(&valued, index, difficulty, sweep.error)?;
-                rows.push(sweep_row(*value, &erred, true));
-            }
-        }
-    }
-    Ok(SweepReport { rows, skipped })
-}
-
-/// Render the curve as CSV: `knob,value,difficulty,player,win_rate_permille,
-/// kill_shares,stuck_count,trials` data rows plus `# skipped ...` comment
-/// lines. Kill shares print `byte:share` pairs joined by `;` (`none` when a
-/// finished row drew no blood attribution). Pure and byte-stable: the same
-/// report twice gives the same text (no clock inside; the UTC stamp names
-/// the file only).
-#[cfg(test)]
-fn render_sweep_csv(report: &SweepReport) -> String {
-    let mut out = String::from(
-        "knob,value,difficulty,player,win_rate_permille,kill_shares,stuck_count,trials\n",
-    );
-    for row in &report.rows {
-        let shares = if row.kill_shares.is_empty() {
-            "none".to_string()
-        } else {
-            row.kill_shares
-                .iter()
-                .map(|share| format!("{}:{}", share.move_byte, share.share_permille))
-                .collect::<Vec<_>>()
-                .join(";")
-        };
-        out.push_str(&format!(
-            "{SWEEP_KNOB},{},{},{},{},{},{},{}\n",
-            row.value,
-            row.difficulty,
-            if row.human {
-                SWEEP_HUMAN
-            } else {
-                SWEEP_PERFECT
-            },
-            row.rate_permille,
-            shares,
-            row.stuck_count,
-            row.trials,
-        ));
-    }
-    for skip in &report.skipped {
-        out.push_str(&format!(
-            "# skipped {SWEEP_KNOB}={} difficulty={} reason={}\n",
-            skip.value, skip.difficulty, skip.reason,
-        ));
-    }
-    out
-}
-
 /// UTC stamp `yyyymmddTHHMMZ` from unix seconds (integer civil-from-days,
 /// Howard Hinnant's algorithm). The stamp names the `difficulty-<UTC>.csv`
 /// file; it never enters the report or the CSV body, so the curve stays
@@ -2531,6 +2331,43 @@ mod tests {
         }
         let again = sweep_difficulty_curve(&sweep).expect("tiny sweep replays");
         assert_eq!(render_sweep_csv(&report), render_sweep_csv(&again));
+    }
+
+    /// The knob name rides in the report, so a caller that sweeps its own
+    /// knob gets its own name in the CSV, and the same points replay.
+    #[test]
+    fn sweep_points_name_the_knob_and_replay_the_same_curve() {
+        let base = tiny_config();
+        let points = vec![
+            SweepPoint {
+                value: 60,
+                config: base.clone(),
+            },
+            SweepPoint {
+                value: 120,
+                config: base.clone(),
+            },
+        ];
+        let first = sweep_points("gravity", &points, HumanError::off()).expect("points sweep");
+        let second = sweep_points("gravity", &points, HumanError::off()).expect("points replay");
+        assert_eq!(first, second);
+        assert_eq!(first.knob, "gravity");
+        let csv = render_sweep_csv(&first);
+        assert_eq!(csv, render_sweep_csv(&second));
+        assert!(csv.starts_with(
+            "knob,value,difficulty,player,win_rate_permille,kill_shares,stuck_count,trials\n"
+        ));
+        // Every point lands in a row or in a skip, and no row rides another
+        // point's value.
+        assert_eq!(
+            first.rows.len() + first.skipped.len(),
+            points.len() * base.difficulties.len()
+        );
+        for row in &first.rows {
+            assert!(points.iter().any(|point| point.value == row.value));
+        }
+        // An empty point list refuses without simulating.
+        assert!(sweep_points("gravity", &[], HumanError::off()).is_err());
     }
 
     #[test]

@@ -453,6 +453,9 @@ struct WeaponRow {
     recovery_ticks: u32,
     /// Punish window in ticks; sits inside recovery, at least one.
     punish_ticks: u32,
+    /// Mass of the weapon in grams (FEEL1): a heavier weapon starts later,
+    /// recovers longer and staggers harder.
+    mass_g: u32,
 }
 
 /// The avoid word for a counter code: 1 parry, 2 dodge, 3 block
@@ -516,6 +519,7 @@ fn weapons_parse_line(line_text: &str, line: usize) -> WeaponRow {
     let mut active: Option<u32> = None;
     let mut recovery: Option<u32> = None;
     let mut punish: Option<u32> = None;
+    let mut mass: Option<u32> = None;
     for field in &parts[1..] {
         let (k, v) = field
             .split_once('=')
@@ -541,6 +545,7 @@ fn weapons_parse_line(line_text: &str, line: usize) -> WeaponRow {
             "active_ticks" => active = Some(parsed),
             "recovery_ticks" => recovery = Some(parsed),
             "punish_ticks" => punish = Some(parsed),
+            "mass_g" => mass = Some(parsed),
             _ => panic!("line {line}: unknown key `{k}`"),
         }
     }
@@ -561,6 +566,7 @@ fn weapons_parse_line(line_text: &str, line: usize) -> WeaponRow {
         active_ticks: need("active_ticks", active),
         recovery_ticks: need("recovery_ticks", recovery),
         punish_ticks: need("punish_ticks", punish),
+        mass_g: need("mass_g", mass),
     }
 }
 
@@ -594,14 +600,20 @@ fn weapons_parse_table(src: &str) -> (u64, Vec<WeaponRow>) {
 }
 
 #[test]
-fn weapons_header_holds_four() {
+fn weapons_header_holds_five() {
     let (version, rows) = weapons_parse_table(WEAPONS_SRC);
     assert!(version != 0, "version never 0");
-    assert_eq!(rows.len(), 4, "want four Rome weapons, got {}", rows.len());
+    assert_eq!(rows.len(), 5, "want five Rome weapons, got {}", rows.len());
     for row in &rows {
         assert!(
-            (1..=3).contains(&row.weapon_type),
-            "line {}: type {} must be 1 dagger, 2 sword or 3 spear",
+            (1..=20_000).contains(&row.mass_g),
+            "line {}: mass_g {} must sit in 1..=20000",
+            row.line,
+            row.mass_g
+        );
+        assert!(
+            (1..=4).contains(&row.weapon_type),
+            "line {}: type {} must be 1 thrust, 2 cut, 3 throw or 4 blow",
             row.line,
             row.weapon_type
         );

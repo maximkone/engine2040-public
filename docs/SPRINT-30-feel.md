@@ -44,7 +44,7 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   `bin/arena.rs`, `crates/arena/src/authority.rs`, `fighter_look_cam.rs`,
   `window_audio_space.rs`, `fighter_look_feet.rs`. Accept: a scripted jump shows the squash,
   dip and land cue in one tick; a fall from 4 m costs the table's damage; rules v1 unchanged.
-- [ ] FEEL8 audio: a hit sounds like what hit what. Gain and pitch follow damage and weapon
+- [x] FEEL8 audio: a hit sounds like what hit what. Gain and pitch follow damage and weapon Landed ad9f95aa4.
   mass; metal, wood and flesh cues come from `impact_cue` by material; the App mirror stops
   hard-coding Flesh. Files: `crates/audio/src/combat_cues.rs`, `cue.rs`, `strike_sound.rs`,
   `crates/game/src/window_audio_space.rs`, `lib.rs`. Accept: a test maps a dagger-on-flesh and a

@@ -31,10 +31,6 @@ rules = ["mcp", "dep:engine-rules"]
 # plain `mcp` build carries no proof crate; playtest already rides `mcp`.
 verify = ["mcp", "dep:engine-proof"]
 
-# Opt-in HTTPS for cloud LLMs: forwards to engine-provider `tls`
-# (rustls/ring plus platform roots). Default stays plain HTTP.
-tls = ["dep:engine-provider", "engine-provider/tls"]
-
 # MCP5: the stdio door binary. Gated on the feature so headless and window
 # graphs without `mcp` never build it.
 [[bin]]

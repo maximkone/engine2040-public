@@ -56,8 +56,6 @@ pub const MAX_FRAC_NAME_CHARS: usize = 128;
 pub const MAX_FRAC_PIECE_CHARS: usize = 64;
 /// Most chunks one import collects; bounds the cooked payload.
 pub const MAX_FRAC_CHUNKS: usize = 1024;
-/// Collider-name prefix (content pipeline convention).
-pub const COL_PREFIX: &str = "COL_";
 /// Socket-name prefix (content pipeline convention).
 pub const SOCKET_PREFIX: &str = "SOCKET_";
 /// Bound for diagnostics carried in [`MeshCookError`].
@@ -959,9 +957,11 @@ pub fn is_lod_name(name: &str) -> bool {
 }
 
 /// True for the `COL_` collider convention.
-pub fn is_col_name(name: &str) -> bool {
-    name.starts_with(COL_PREFIX) && name.len() > COL_PREFIX.len()
-}
+///
+/// The rule lives in the collider cook, which reads node names without the
+/// import lane; it is re-exported here so the mesh pipeline keeps one name for
+/// the convention.
+pub use crate::collider_cook::{is_col_name, COL_PREFIX};
 
 /// True for the `SOCKET_` socket convention.
 pub fn is_socket_name(name: &str) -> bool {

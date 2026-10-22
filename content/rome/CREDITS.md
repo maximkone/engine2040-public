@@ -37,11 +37,12 @@ that section: its url, its licence and its sha256.
 ## Project Gutenberg plain text (`gutenberg`)
 
 - licence: US public domain
-- used by: `camp.toml`, `kit.toml`, `line.toml`
+- used by: `camp.toml`, `kit.toml`, `line.toml`, `march.toml`, `tech/crane.toml`, `tech/mend.toml`, `tech/scutum.toml`, `tech/timber.toml`
 
 - `gutenberg/polybius-histories-vol1.txt` - url <https://www.gutenberg.org/ebooks/44125.txt.utf-8> - licence US public domain - from the source table
 - `gutenberg/polybius-histories-vol2.txt` - url <https://www.gutenberg.org/ebooks/44126.txt.utf-8> - licence US public domain - from the source table
 - `gutenberg/vegetius-de-re-militari.txt` - url <https://www.gutenberg.org/ebooks/{id}.txt.utf-8> - licence US public domain - from the source table
+- `gutenberg/vitruvius-de-architectura.txt` - url <https://www.gutenberg.org/ebooks/20239.txt.utf-8> - licence US public domain - from the source table
 
 ## Itiner-e Roman road network (`itinere`)
 
@@ -101,4 +102,7 @@ A ref the codex does not hold. It is reported, never guessed and never credited.
 A ref that cites our own plan is not listed: the plan is not a source.
 
 - `fortifications.toml`: WGS84: the length of one degree of latitude at 45 degrees north is 111132 m
+- `march.toml`: game tuning (ours): the pack load costs the leg stamina per kilometre; the full step costs more than the regular step
+- `march.toml`: game tuning (ours): the camp site on the chapter II march road
+- `march.toml`: game tuning (ours): the ambush ground on the chapter II march road
 - `places.toml`: WGS84: the length of one degree of latitude at 45 degrees north is 111132 m

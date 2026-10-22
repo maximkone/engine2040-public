@@ -19,6 +19,8 @@ pub mod fps_visibility;
 pub mod frame;
 /// Deterministic fuzz harness: seeded op streams with first-divergence receipts.
 pub mod fuzz;
+/// Fuzzy referring-expression grounding over the SP3/SP7 graph (advisory, never auto-apply).
+pub mod grounding;
 mod index;
 pub mod index3;
 mod intmath;

@@ -222,7 +222,7 @@ pub(super) fn map_cap_error(error: CapError) -> ApplyError {
         CapError::OverBudget { remaining, needed } => ApplyError::BadApproval {
             reason: format!("budget exhausted: {needed} ops needed, {remaining} left"),
         },
-        CapError::Spatial { check } => ApplyError::Conflict {
+        CapError::Spatial { check, .. } => ApplyError::Conflict {
             reason: format!(
                 "staged spatial check `{check}`: proposal adds {check}, document unchanged"
             ),

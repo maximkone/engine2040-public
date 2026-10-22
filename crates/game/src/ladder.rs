@@ -9,6 +9,10 @@
 //! outcome, length or version. Budget: `apply` is O(1) time and memory; the
 //! state is a 26-byte record on the stack.
 //!
+//! Rung 0 is the drill at the post (see [`palus`]): the armatura's first
+//! rung is 30 s of thrusts at a fixed post with three marked targets, and
+//! the duel rungs follow it.
+//!
 //! The career ranks (Tiro, Miles, Immunis, Optio, Centurio) and the
 //! service record line are presentation: words and text over the counters,
 //! never part of the hashed state. The data seat is the rank table in
@@ -55,6 +59,18 @@ pub const RUNG_ENEMY_TIER: [u8; RUNG_COUNT] = [1, 1, 2, 2, 3, 3, 3, 4];
 pub const RUNG_NEW_ELEMENTS: [u8; RUNG_COUNT] = [2, 1, 2, 1, 2, 1, 2, 1];
 /// Expected minutes per rung bout, counts.
 pub const RUNG_MINUTES: [u32; RUNG_COUNT] = [2, 2, 3, 3, 4, 4, 5, 6];
+/// What every rung asks for: the drill at the post first, then the duels
+/// (ROM4, the armatura at the post).
+pub const RUNG_KINDS: [RungKind; RUNG_COUNT] = [
+    RungKind::Drill,
+    RungKind::Duel,
+    RungKind::Duel,
+    RungKind::Duel,
+    RungKind::Duel,
+    RungKind::Duel,
+    RungKind::Duel,
+    RungKind::Duel,
+];
 /// Boss tier id, always the last rung.
 pub const BOSS_TIER: u8 = 4;
 /// Most new elements one rung may teach.
@@ -330,10 +346,18 @@ impl Ladder {
     pub fn beat(&self) -> RungBeat {
         let index = usize::from(self.rung.min(MAX_RUNG));
         RungBeat {
+            kind: RUNG_KINDS[index],
             enemy_tier: RUNG_ENEMY_TIER[index],
             new_elements: RUNG_NEW_ELEMENTS[index],
             minutes: RUNG_MINUTES[index],
         }
+    }
+
+    /// What this rung asks for: the drill at the post or a duel. Rung 0 is
+    /// the drill; the duel rungs follow it. Pure.
+    #[must_use]
+    pub fn rung_kind(&self) -> RungKind {
+        RUNG_KINDS[usize::from(self.rung.min(MAX_RUNG))]
     }
 
     /// Repairs owed by completed loops.
@@ -455,10 +479,21 @@ fn push_count(value: u32, out: &mut String) {
     }
 }
 
+/// What a rung asks the trainee to do.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum RungKind {
+    /// The drill at the post: 30 s of thrusts at the palus, no opponent.
+    Drill,
+    /// A duel against the tier foe.
+    Duel,
+}
+
 /// One rung beat: who stands there, what is new, how long it runs.
 /// Plain integers only, so the chart replays exactly.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct RungBeat {
+    /// What the rung asks for: the drill at the post or a duel.
+    pub kind: RungKind,
     /// Enemy tier id for this rung.
     pub enemy_tier: u8,
     /// New elements taught on this rung, at most 3.
@@ -475,6 +510,7 @@ pub fn rung_beat(rung: u8) -> Option<RungBeat> {
     }
     let index = usize::from(rung);
     Some(RungBeat {
+        kind: RUNG_KINDS[index],
         enemy_tier: RUNG_ENEMY_TIER[index],
         new_elements: RUNG_NEW_ELEMENTS[index],
         minutes: RUNG_MINUTES[index],
@@ -628,6 +664,229 @@ pub const START_TO_RANK_WINS: usize = 16;
 #[must_use]
 pub fn start_to_rank() -> Ladder {
     Ladder::run_script(&[Outcome::Win; START_TO_RANK_WINS])
+}
+
+/// The drill at the post: the armatura's first rung, before the duels.
+///
+/// Consumer: the mode loop stages the drill at rung 0 and folds the score
+/// into the ladder through [`Ladder::apply_drill`]. Data owner: this module
+/// owns the drill rules; the post itself is stage geometry owned by
+/// `engine_arena::world::kit`, and the mark heights come from there, so the
+/// post and the scoring cannot drift. Units: ticks at 60 Hz, points as
+/// counts, mark heights in millimeters. Determinism: integer-only fold over
+/// the action script in order; the same script always scores the same.
+/// Errors: none; a blow that lands on nothing scores nothing. Budget:
+/// O(actions) time, no allocation.
+pub mod palus {
+    use super::{Ladder, Outcome};
+
+    /// The drill at the post runs 30 seconds.
+    pub const DRILL_SECS: u32 = 30;
+    /// The drill length in ticks at 60 Hz.
+    pub const DRILL_TICKS: u32 = DRILL_SECS * engine_core::TICK_HZ_U32;
+    /// The wooden sword of the drill weighs twice the steel one
+    /// (Vegetius 1.11), so every blow needs a full second to come back.
+    pub const DRILL_SWORD_WEIGHT_MULTIPLIER: u32 = 2;
+    /// Ticks a blow needs to come back with the double-weight wooden sword.
+    pub const DRILL_RECOVERY_TICKS: u32 = 60;
+    /// Points a clean thrust on the head mark scores.
+    pub const HEAD_POINTS: u32 = 6;
+    /// Points a clean thrust on the body mark scores.
+    pub const BODY_POINTS: u32 = 4;
+    /// Points a clean thrust on the legs mark scores.
+    pub const LEGS_POINTS: u32 = 2;
+    /// Points a cut scores, whatever mark it lands on: a cut with the heavy
+    /// wooden sword is a wild blow, never a clean thrust.
+    pub const CUT_POINTS: u32 = 1;
+    /// Half height of a mark band in millimeters: a blade tip inside the
+    /// band lands on the mark.
+    pub const MARK_BAND_MM: u32 = 150;
+    /// Points the drill must score to leave the drill rung: ten clean
+    /// thrusts on the head mark.
+    pub const PALUS_BAR: u32 = 60;
+
+    /// The three marked targets of the post, top to bottom.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub enum Target {
+        /// The head mark.
+        Head,
+        /// The body mark.
+        Body,
+        /// The legs mark.
+        Legs,
+    }
+
+    impl Target {
+        /// The marked targets in post order: head, body, legs.
+        pub const TARGETS: [Target; 3] = [Target::Head, Target::Body, Target::Legs];
+
+        /// Index of the mark in the post's mark table: head 0, body 1, legs 2.
+        #[must_use]
+        pub const fn index(self) -> usize {
+            match self {
+                Self::Head => 0,
+                Self::Body => 1,
+                Self::Legs => 2,
+            }
+        }
+
+        /// Height of the mark above the floor in millimeters, read from the
+        /// staged post, so the post and the scoring cannot drift.
+        #[must_use]
+        pub fn height_mm(self) -> u32 {
+            engine_arena::world::kit::PALUS_POST.marks_mm[self.index()]
+        }
+
+        /// Points a clean thrust on this mark scores.
+        #[must_use]
+        pub const fn points(self) -> u32 {
+            match self {
+                Self::Head => HEAD_POINTS,
+                Self::Body => BODY_POINTS,
+                Self::Legs => LEGS_POINTS,
+            }
+        }
+    }
+
+    /// The marked target a blade tip at `height_mm` lands on: the mark whose
+    /// band holds the height. `None` when the tip is off every band.
+    #[must_use]
+    pub fn target_at(height_mm: u32) -> Option<Target> {
+        for target in Target::TARGETS {
+            let mark = target.height_mm();
+            if height_mm >= mark.saturating_sub(MARK_BAND_MM)
+                && height_mm <= mark.saturating_add(MARK_BAND_MM)
+            {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    /// Height of the post top above the floor in millimeters: the drill's
+    /// wooden sword cannot reach past it.
+    #[must_use]
+    pub fn post_height_mm() -> u32 {
+        engine_arena::world::kit::PALUS_POST.height_mm
+    }
+
+    /// What the trainee does with the wooden sword.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub enum Attack {
+        /// A thrust: the drill's scoring blow.
+        Thrust,
+        /// A cut: a wild swing with the double-weight wooden sword.
+        Cut,
+    }
+
+    /// One blow of the drill script: when it lands, what it is and the
+    /// height of the blade tip at the landing, in millimeters.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub struct DrillAction {
+        /// Tick the blow lands on.
+        pub tick: u32,
+        /// What the blow is.
+        pub attack: Attack,
+        /// Height of the blade tip at the landing, millimeters.
+        pub height_mm: u32,
+    }
+
+    impl DrillAction {
+        /// A thrust whose tip lands at `height_mm` on `tick`.
+        #[must_use]
+        pub const fn thrust(tick: u32, height_mm: u32) -> Self {
+            Self {
+                tick,
+                attack: Attack::Thrust,
+                height_mm,
+            }
+        }
+
+        /// A cut whose tip lands at `height_mm` on `tick`.
+        #[must_use]
+        pub const fn cut(tick: u32, height_mm: u32) -> Self {
+            Self {
+                tick,
+                attack: Attack::Cut,
+                height_mm,
+            }
+        }
+    }
+
+    /// The score of one drill at the post.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    pub struct PalusScore {
+        /// Points scored by the drill.
+        pub points: u32,
+        /// Clean thrusts that landed on a mark.
+        pub clean_thrusts: u32,
+        /// Cuts that landed on the post.
+        pub cuts: u32,
+        /// Blows that hit nothing: rushed, off the marks or past the post.
+        pub misses: u32,
+    }
+
+    /// Score a scripted drill: the same script always scores the same.
+    ///
+    /// A blow inside the recovery gap of the previous one is rushed and
+    /// scores nothing: the double-weight wooden sword needs a full second
+    /// back. A blow at or past the drill's 30 s never lands. A thrust scores
+    /// the points of the mark its tip lands on; a thrust off every mark
+    /// scores nothing; a cut scores [`CUT_POINTS`] when it lands on the
+    /// post at all.
+    #[must_use]
+    pub fn score_drill(actions: &[DrillAction]) -> PalusScore {
+        let mut score = PalusScore::default();
+        let mut last_tick: Option<u32> = None;
+        for action in actions {
+            if action.tick >= DRILL_TICKS {
+                break;
+            }
+            let rushed = match last_tick {
+                Some(last) => action.tick.saturating_sub(last) < DRILL_RECOVERY_TICKS,
+                None => false,
+            };
+            last_tick = Some(action.tick);
+            if rushed {
+                score.misses = score.misses.saturating_add(1);
+                continue;
+            }
+            match action.attack {
+                Attack::Thrust => match target_at(action.height_mm) {
+                    Some(target) => {
+                        score.points = score.points.saturating_add(target.points());
+                        score.clean_thrusts = score.clean_thrusts.saturating_add(1);
+                    }
+                    None => score.misses = score.misses.saturating_add(1),
+                },
+                Attack::Cut => {
+                    if action.height_mm <= post_height_mm() {
+                        score.points = score.points.saturating_add(CUT_POINTS);
+                        score.cuts = score.cuts.saturating_add(1);
+                    } else {
+                        score.misses = score.misses.saturating_add(1);
+                    }
+                }
+            }
+        }
+        score
+    }
+
+    impl Ladder {
+        /// Fold a finished drill into the ladder: a drill that scored the
+        /// bar is a win and the rung advances to the first duel, a drill
+        /// below the bar is a loss and the rung stays. Returns true when the
+        /// rung moved. Pure aside from the fold.
+        pub fn apply_drill(&mut self, drill: &PalusScore, tick: u32) -> bool {
+            if drill.points >= PALUS_BAR {
+                self.apply(Outcome::Win, tick);
+                true
+            } else {
+                self.apply(Outcome::Loss, tick);
+                false
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1186,6 +1445,132 @@ mod tests {
             assert_eq!(cell, named, "the rank cell and the comment agree");
             assert_eq!(name, RANK_NAMES[named]);
         }
+    }
+
+    /// A script of 30 thrusts, one per second: the whole drill.
+    fn palus_thrust_script() -> Vec<palus::DrillAction> {
+        (0..palus::DRILL_SECS)
+            .map(|index| {
+                palus::DrillAction::thrust(
+                    index * palus::DRILL_RECOVERY_TICKS,
+                    palus::Target::Head.height_mm(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn palus_drill_scores_the_same_twice() {
+        let script = palus_thrust_script();
+        let first = palus::score_drill(&script);
+        let second = palus::score_drill(&script);
+        assert_eq!(first, second, "the same script scores the same");
+        assert_eq!(first.points, palus::DRILL_SECS * palus::HEAD_POINTS);
+        assert_eq!(first.clean_thrusts, palus::DRILL_SECS);
+        assert_eq!(first.misses, 0);
+    }
+
+    #[test]
+    fn palus_cut_scores_less_than_a_thrust() {
+        let head = palus::Target::Head.height_mm();
+        let thrust = palus::score_drill(&[palus::DrillAction::thrust(0, head)]);
+        let cut = palus::score_drill(&[palus::DrillAction::cut(0, head)]);
+        assert_eq!(thrust.points, palus::HEAD_POINTS);
+        assert_eq!(cut.points, palus::CUT_POINTS);
+        assert!(
+            cut.points < thrust.points,
+            "a cut scores less than a thrust"
+        );
+        for target in palus::Target::TARGETS {
+            let thrust = palus::score_drill(&[palus::DrillAction::thrust(0, target.height_mm())]);
+            let cut = palus::score_drill(&[palus::DrillAction::cut(0, target.height_mm())]);
+            assert!(
+                cut.points < thrust.points,
+                "a cut scores less than a thrust on {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn palus_rung_advances_at_the_bar() {
+        let mut ladder = Ladder::new();
+        assert_eq!(ladder.rung, 0);
+        let short = palus::score_drill(&[palus::DrillAction::thrust(
+            0,
+            palus::Target::Body.height_mm(),
+        )]);
+        assert!(short.points < palus::PALUS_BAR);
+        assert!(
+            !ladder.apply_drill(&short, 10),
+            "a short drill keeps the rung"
+        );
+        assert_eq!(ladder.rung, 0);
+        assert_eq!(ladder.losses, 1);
+        let at_bar = palus::PalusScore {
+            points: palus::PALUS_BAR,
+            ..palus::PalusScore::default()
+        };
+        assert!(ladder.apply_drill(&at_bar, 20), "the bar advances the rung");
+        assert_eq!(ladder.rung, 1);
+        assert_eq!(ladder.wins, 1);
+        assert_eq!(ladder.rung_kind(), RungKind::Duel);
+    }
+
+    #[test]
+    fn palus_rung_zero_is_the_drill_and_the_duels_follow() {
+        let fresh = Ladder::new();
+        assert_eq!(fresh.rung_kind(), RungKind::Drill, "rung 0 is the drill");
+        assert_eq!(fresh.beat().kind, RungKind::Drill);
+        for rung in 1..=MAX_RUNG {
+            let mut ladder = Ladder::new();
+            ladder.rung = rung;
+            assert_eq!(ladder.rung_kind(), RungKind::Duel, "rung {rung} is a duel");
+        }
+    }
+
+    #[test]
+    fn palus_marks_are_the_staged_post_marks() {
+        let post = engine_arena::world::kit::PALUS_POST;
+        assert_eq!(post.marks_mm.len(), palus::Target::TARGETS.len());
+        for target in palus::Target::TARGETS {
+            assert_eq!(target.height_mm(), post.marks_mm[target.index()]);
+            assert_eq!(
+                palus::target_at(target.height_mm()),
+                Some(target),
+                "a tip at the mark lands on it"
+            );
+        }
+        assert_eq!(palus::target_at(0), None, "the floor is off every band");
+        assert_eq!(
+            palus::target_at(post.height_mm + palus::MARK_BAND_MM + 1),
+            None,
+            "past the post top is off every band"
+        );
+    }
+
+    #[test]
+    fn palus_rushed_blow_scores_nothing() {
+        let head = palus::Target::Head.height_mm();
+        let script = [
+            palus::DrillAction::thrust(0, head),
+            palus::DrillAction::thrust(palus::DRILL_RECOVERY_TICKS - 1, head),
+        ];
+        let score = palus::score_drill(&script);
+        assert_eq!(score.clean_thrusts, 1);
+        assert_eq!(score.misses, 1, "the second blow was rushed");
+        assert_eq!(score.points, palus::HEAD_POINTS);
+    }
+
+    #[test]
+    fn palus_drill_ends_after_thirty_seconds() {
+        let head = palus::Target::Head.height_mm();
+        let late = palus::score_drill(&[palus::DrillAction::thrust(palus::DRILL_TICKS, head)]);
+        assert_eq!(late.points, 0, "the drill is over");
+        assert_eq!(late.misses, 0, "a blow past the end never lands");
+        assert_eq!(
+            palus::DRILL_TICKS,
+            palus::DRILL_SECS * engine_core::TICK_HZ_U32
+        );
     }
 
     #[test]

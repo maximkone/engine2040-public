@@ -1,4 +1,5 @@
-//! kit: FPS template slice over the arena placement table.
+//! kit: FPS template slice over the arena placement table, plus the drill
+//! post of the armatura.
 //!
 //! Owner: engine-arena (`world::kit`). Consumer: the game windowed plus
 //! headless twin stages this template (collision plus FPS spawn points)
@@ -8,6 +9,10 @@
 //! here feeds the sim hash. Errors: typed [`KitError`], never panics.
 //! Budget: one box per physical actor (6 on the shipped placement) parsed
 //! once at init; zero per-tick work.
+//!
+//! The armatura's drill post ([`PALUS_POST`]) is staged here too: a fixed
+//! post with three marked targets. The game scores the drill against these
+//! mark heights, so the post and the scoring cannot drift.
 
 use core::fmt;
 
@@ -56,6 +61,46 @@ pub struct FpsMap {
     pub spawns: [[f32; 2]; FPS_SPAWN_COUNT],
     /// Spawn facing yaw about +Y in radians (0 faces +z).
     pub yaws: [f32; FPS_SPAWN_COUNT],
+}
+
+/// The drill post of the armatura: one fixed post with three marked
+/// targets. The post is stage geometry, not a fighter: the box only stops
+/// the trainee from standing inside the post.
+/// Units: meters on the floor, millimeters up the post.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PalusPost {
+    /// Post center on the arena floor, meters.
+    pub center: [f32; 2],
+    /// Half extents of the post box, meters.
+    pub half: [f32; 2],
+    /// Height of each mark above the floor, millimeters: head, body, legs.
+    pub marks_mm: [u32; 3],
+    /// Height of the post top above the floor, millimeters.
+    pub height_mm: u32,
+}
+
+/// The drill post of the armatura stage: a fixed post with three marked
+/// targets (head, body, legs). The game scores the drill against these
+/// mark heights, so the post and the scoring cannot drift.
+pub const PALUS_POST: PalusPost = PalusPost {
+    center: [0.0, 0.0],
+    half: [0.2, 0.2],
+    marks_mm: [1700, 1200, 500],
+    height_mm: 1800,
+};
+
+/// Where the trainee stands for the drill: in front of the post and clear
+/// of it, so the wooden sword reaches the marks.
+pub const PALUS_SPOT_M: [f32; 2] = [0.0, -1.5];
+
+/// Facing yaw of the drill spot: 0 faces +z, toward the post.
+pub const PALUS_SPOT_YAW: f32 = 0.0;
+
+/// The drill stage world: the post box alone, so a fighter cannot stand
+/// inside the post. Built once at init; zero per-tick work.
+pub fn palus_post_world() -> Result<MatchWorld, KitError> {
+    MatchWorld::try_new(vec![Obstacle::aligned(PALUS_POST.center, PALUS_POST.half)])
+        .map_err(KitError::World)
 }
 
 /// Raw FPS spawn feet: west pair between the walls, clear of the gate and
@@ -351,5 +396,38 @@ mod tests {
         assert!(world
             .settle([-2.0, -6.0], crate::FIGHTER_RADIUS_M, FPS_LIMIT_M)
             .is_none());
+    }
+
+    /// The drill post of the armatura: one post, three marks and a spot the
+    /// trainee can stand on.
+    #[test]
+    fn kit_palus_post_stands_with_three_marks() {
+        let world = palus_post_world().expect("the post collides");
+        assert_eq!(world.obstacles().len(), 1);
+        assert_eq!(world.obstacles()[0].center, PALUS_POST.center);
+        assert_eq!(world.obstacles()[0].half, PALUS_POST.half);
+        // The post blocks its own center and leaves the drill spot free.
+        assert!(world.overlaps(PALUS_POST.center, crate::FIGHTER_RADIUS_M));
+        assert!(!world.overlaps(PALUS_SPOT_M, crate::FIGHTER_RADIUS_M));
+        // The marks run head, body, legs down the post.
+        assert_eq!(PALUS_POST.marks_mm, [1700, 1200, 500]);
+        const {
+            assert!(PALUS_POST.marks_mm[0] > PALUS_POST.marks_mm[1]);
+            assert!(PALUS_POST.marks_mm[1] > PALUS_POST.marks_mm[2]);
+            assert!(PALUS_POST.marks_mm[0] <= PALUS_POST.height_mm);
+        }
+        // The spot faces the post: yaw 0 faces +z.
+        assert_eq!(PALUS_SPOT_YAW, 0.0);
+        const {
+            assert!(PALUS_POST.center[1] > PALUS_SPOT_M[1]);
+        }
+    }
+
+    #[test]
+    fn kit_palus_post_world_digest_is_stable_x2() {
+        let first = palus_post_world().expect("the post collides");
+        let second = palus_post_world().expect("the post collides");
+        assert_eq!(first.digest(), second.digest());
+        assert_ne!(first.digest(), MatchWorld::empty().digest());
     }
 }

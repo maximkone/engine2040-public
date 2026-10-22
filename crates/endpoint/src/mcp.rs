@@ -58,7 +58,7 @@ use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard};
 
 use engine_editor::capability::{
-    self, approve, canonical_action_hash, Approval, ApprovalLedger, CapError, Capability, OpMask,
+    self, approve, canonical_action_hash, Approval, ApprovalLedger, Capability,
 };
 use engine_editor::commands::{self, Batch, Document, Journal, MaterialName, Op, ProvenanceStamp};
 use engine_scene::component::{
@@ -618,107 +618,9 @@ pub(crate) fn build_batch(
     })
 }
 
-/// Map a command refusal to a tool error with the legal values attached.
-/// Crate-visible: the scene tools map staging failures the same way.
-pub(crate) fn batch_error(error: &commands::BatchError) -> McpToolError {
-    match error {
-        commands::BatchError::StaleRevision { expected, got } => McpToolError::new(
-            "stale_revision",
-            format!(
-                "document is at revision {expected}, batch expects {got}; \
-                 re-read scene.read, re-preview, then apply"
-            ),
-        ),
-        commands::BatchError::DuplicateKey { key } => McpToolError::new(
-            "duplicate_key",
-            format!(
-                "idempotency key {key} was already used with a different payload; \
-                 submit a new batch with a fresh key"
-            ),
-        ),
-        commands::BatchError::UndoneKey { key } => McpToolError::new(
-            "undone_key",
-            format!(
-                "idempotency key {key} belongs to an undone batch; \
-                 submit a new batch with a fresh key to reapply"
-            ),
-        ),
-        _ => McpToolError::new("invalid_batch", error.to_string()),
-    }
-}
-
-/// Map a capability refusal to a tool error. `granted` is the op-class list
-/// snapshotted before the gated apply, so denials name what is allowed.
-/// Crate-visible: `scene.place` applies through the same gate.
-pub(crate) fn cap_error(error: &CapError, granted: &[&str]) -> McpToolError {
-    match error {
-        CapError::ForgedApproval => McpToolError::new(
-            "forged_approval",
-            "approval does not match this session and batch; \
-             re-run tx.preview for a fresh approval",
-        ),
-        CapError::StaleRevision { expected, got } => McpToolError::new(
-            "stale_revision",
-            format!(
-                "document is at revision {expected}, approval expects {got}; \
-                 re-read scene.read, re-preview, then apply"
-            ),
-        ),
-        CapError::Expired { expiry, current } => McpToolError::new(
-            "expired_approval",
-            format!(
-                "approval expired at revision {expiry}, document is at {current}; \
-                 re-run tx.preview for a fresh approval"
-            ),
-        ),
-        CapError::ReusedApproval => McpToolError::new(
-            "reused_approval",
-            "approval was already spent; re-run tx.preview for a fresh approval",
-        ),
-        CapError::OpNotAllowed { op } => McpToolError::new(
-            "op_not_allowed",
-            format!(
-                "capability does not grant `{op}` ops; granted: [{}]",
-                granted.join(", ")
-            ),
-        ),
-        CapError::OutOfScope { id } => McpToolError::new(
-            "out_of_scope",
-            format!("node {id} is outside this session's object scope"),
-        ),
-        CapError::OverBudget { remaining, needed } => McpToolError::new(
-            "over_budget",
-            format!("batch needs {needed} ops, {remaining} left in this session"),
-        ),
-        CapError::Spatial { check } => McpToolError::new(
-            "spatial_rejected",
-            format!(
-                "staged spatial check `{check}` failed: the proposal adds {check}; \
-                 document unchanged"
-            ),
-        ),
-        CapError::Command(inner) => batch_error(inner),
-    }
-}
-
-/// Op classes granted by a capability, for denial messages.
-/// Crate-visible: `scene.place` snapshots the same list before its apply.
-pub(crate) fn granted_ops(cap: &Capability) -> Vec<&'static str> {
-    let mut granted = Vec::with_capacity(4);
-    if cap.ops.contains(OpMask::INSERT) {
-        granted.push("insert");
-    }
-    if cap.ops.contains(OpMask::MOVE) {
-        granted.push("move");
-    }
-    if cap.ops.contains(OpMask::EDIT) {
-        granted.push("edit");
-    }
-    if cap.ops.contains(OpMask::DELETE) {
-        granted.push("delete");
-    }
-    granted
-}
+#[path = "mcp_refusal.rs"]
+mod mcp_refusal;
+pub(crate) use self::mcp_refusal::{batch_error, cap_error, granted_ops};
 
 // ---------------------------------------------------------------------------
 // Server state: thin sync core over the command service. The rmcp tools call
@@ -999,7 +901,7 @@ impl ServerState {
             &approval,
             &mut self.ledger,
         )
-        .map_err(|error| cap_error(&error, &granted))?;
+        .map_err(|error| cap_error(&error, &granted, &self.doc))?;
         // A landed write is a watch event: the digest cache moves, the hub fans it out.
         self.refresh_watch();
         // D17: the landed revision is a snapshot a diff can be taken against.
@@ -1354,6 +1256,13 @@ impl McpServer {
             .iter()
             .map(|tool| tool_cost_row(tool).chars)
             .sum()
+    }
+
+    /// Discovery cost in chars of the surface that the given loaded packs
+    /// would advertise, before the API6 guardrail. Takes no lock, so a caller
+    /// may hold the session lock while it measures a load it has not made yet.
+    pub(crate) fn surface_chars_with(&self, loaded: &BTreeSet<&'static str>) -> usize {
+        self.tools_with(loaded).iter().map(tool_cost_chars).sum()
     }
 
     /// Per-tool discovery cost table, one row per advertised tool, in router
@@ -2193,6 +2102,15 @@ mod tests {
         let error = refused.expect_err("overlap must fail");
         assert_eq!(error.code, "spatial_rejected");
         assert!(error.message.contains("overlap"));
+        // The refusal names both objects of the pair in the `name [uuid]` form.
+        for culprit in [a, b] {
+            let label = format!("[{culprit}]");
+            assert!(
+                error.message.contains(&label),
+                "refusal must name {culprit}: {}",
+                error.message
+            );
+        }
         before.assert_same_all(&server);
 
         // A clean grounded nudge nearby still applies through the same gate.

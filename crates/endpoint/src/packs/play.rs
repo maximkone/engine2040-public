@@ -24,6 +24,7 @@ use crate::play::{build_tape, PlayInputDto, MAX_PLAY_INPUTS, MAX_PLAY_TICKS};
 use crate::tool_capabilities::CapabilityCard;
 use engine_ai::decision_log::{Decision, DecisionLog};
 use engine_arena::MAX_PARTICIPANTS;
+use engine_input::fighter::WISH_RANGE;
 use engine_input::{Buttons, ParticipantError, ParticipantInput, PARTICIPANT_ZERO};
 use rmcp::schemars::JsonSchema;
 // `self` for schemars derive with `serde(with)`.
@@ -289,7 +290,11 @@ pub struct SeatOpenOutput {
 #[schemars(crate = "rmcp::schemars")]
 pub struct SeatStepArgs {
     pub tick: u32,
+    /// Wish x in percent of top speed, `-100..=100` (the range the handler takes).
+    #[schemars(range(min = -100, max = 100))]
     pub mx: i8,
+    /// Wish z in percent of top speed, `-100..=100` (the range the handler takes).
+    #[schemars(range(min = -100, max = 100))]
     pub mz: i8,
     pub facing: i16,
     #[serde(default)]
@@ -699,6 +704,22 @@ fn seat_action(args: &SeatStepArgs) -> Result<ParticipantInput, ParticipantError
     Ok(input)
 }
 
+/// Names the refused field and the range the handler takes for a wish
+/// outside it; any other contract breach keeps its raw refusal text.
+fn refusal_detail(args: &SeatStepArgs, why: &ParticipantError) -> String {
+    match why {
+        ParticipantError::WishOutOfRange(_) => {
+            let (axis, value) = if (-WISH_RANGE..=WISH_RANGE).contains(&args.mx) {
+                ("mz", args.mz)
+            } else {
+                ("mx", args.mx)
+            };
+            format!("{axis} {value} is outside -{WISH_RANGE}..={WISH_RANGE}")
+        }
+        other => format!("{other:?}"),
+    }
+}
+
 /// One `seat.step` on a live host: validate, author, read the tick's hash.
 fn seat_step_core(
     host: &mut SeatHost,
@@ -711,8 +732,9 @@ fn seat_step_core(
             return Err(McpToolError::new(
                 "invalid_action",
                 format!(
-                    "input refused ({why:?}); the seat counted it invalid and sent nothing; \
-                     re-run in range"
+                    "input refused ({}); the seat counted it invalid and sent nothing; \
+                     re-run in range",
+                    refusal_detail(args, &why)
                 ),
             ));
         }
@@ -1298,6 +1320,20 @@ mod tests {
     }
 
     #[test]
+    fn seat_step_schema_states_the_wish_range_the_handler_takes() {
+        use rmcp::handler::server::router::tool::ToolBase;
+        let schema = SeatStepTool::input_schema().expect("seat.step carries an input schema");
+        let text = rmcp::serde_json::to_string(&*schema).expect("schema serializes");
+        let value: rmcp::serde_json::Value =
+            rmcp::serde_json::from_str(&text).expect("schema is JSON");
+        for axis in ["mx", "mz"] {
+            let field = &value["properties"][axis];
+            assert_eq!(field["minimum"], -100, "{axis} minimum: {text}");
+            assert_eq!(field["maximum"], 100, "{axis} maximum: {text}");
+        }
+    }
+
+    #[test]
     fn seat_step_counts_invalid_and_late_actions_on_a_live_host() {
         let (port, server) = fake_seat();
         let mut host = fake_host(port);
@@ -1306,6 +1342,11 @@ mod tests {
         assert!(
             refused.message.contains("counted it invalid"),
             "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("mx 127 is outside -100..=100"),
+            "the refusal names the field and the range: {}",
             refused.message
         );
         assert_eq!(host.invalid, 1, "the refused action is counted");

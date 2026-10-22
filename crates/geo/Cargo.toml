@@ -13,7 +13,6 @@ workspace = true
 # the default build depends on this crate, and every donor library sits behind its own
 # feature that is off by default. `cargo tree -p engine-game -e normal` shows no geo.
 [features]
-default = []
 # Mesh booleans (union, difference, intersection) on the Manifold kernel, pure Rust.
 boolean = ["dep:manifold-rust"]
 # UV unwrap and chart packing: vendored xatlas (MIT) compiled by build.rs with the cc crate.
@@ -24,20 +23,21 @@ lod = ["dep:meshopt"]
 collision = ["dep:parry3d"]
 # Object-space normal baker (parry ray casts + dilate).
 bake = ["collision"]
-# The kit tests read the arena glTF files through the engine importer; a feature (not a
-# dev-dependency) so the workspace graph the headless check walks never sees assets' import feature.
-kit = ["dep:engine-assets", "engine-assets/import"]
 # FBX import: ufbx (MIT OR Unlicense) compiled from source by its own build script (GEO9a).
 fbx = ["dep:ufbx"]
-all = ["boolean", "uv", "lod", "collision", "bake", "kit", "fbx"]
 
 [dependencies]
 engine-core.workspace = true
-engine-assets = { workspace = true, optional = true }
 manifold-rust = { version = "0.16.0", optional = true }
 meshopt = { version = "0.6.2", optional = true }
 parry3d = { version = "0.31.1", optional = true, default-features = false, features = ["dim3", "f32", "std", "alloc", "enhanced-determinism"] }
 ufbx = { version = "0.11.5", optional = true }
+
+# The kit tests read the arena glTF files through the engine importer. A dev-dependency, not
+# a feature: the import leg is test-only, and the workspace graph the headless check walks
+# never sees it.
+[dev-dependencies]
+engine-assets = { workspace = true, features = ["import"] }
 
 [build-dependencies]
 cc = { version = "1", optional = true }

@@ -124,21 +124,11 @@ impl SeatStats {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
 struct Shared {
     pending: VecDeque<SeatCommand>,
     stats: SeatStats,
     writer: Option<TcpStream>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Default for Shared {
-    fn default() -> Self {
-        Self {
-            pending: VecDeque::new(),
-            stats: SeatStats::default(),
-            writer: None,
-        }
-    }
 }
 
 /// The listening seat. Drop closes the listener; a client already attached

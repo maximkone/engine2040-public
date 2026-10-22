@@ -15,9 +15,6 @@ capture = ["dep:engine-render"]
 # NS31h2: the material gallery draws compiled records on a real device
 # through render's `pipeline_for`; the default build stays GPU-free.
 window = ["dep:engine-render", "engine-render/window", "dep:wgpu", "dep:pollster"]
-# Opt-in HTTPS for cloud LLMs: forwards to engine-provider `tls`
-# (rustls/ring plus platform roots). Default stays plain HTTP.
-tls = ["engine-provider/tls"]
 # SPR4 live recorder: one real-model run over the door tools, written as a
 # cassette. Network + provider key, so never on by default or in CI.
 live = ["dep:serde_json", "engine-provider/tls"]

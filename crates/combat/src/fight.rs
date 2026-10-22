@@ -276,6 +276,11 @@ pub struct FighterState {
     /// Weapon row under the shield-line rules: 0 bare hands, 1 pugio,
     /// 2 gladius, 3 spatha. Zero keeps the legacy numbers.
     pub weapon: u8,
+    /// The weight of the steel this fighter swings (FEEL1, [`crate::heft`]):
+    /// its own startup, recovery, bare-row damage and the stagger it deals.
+    /// `None` swings the table row, so a match that never arms one steps
+    /// exactly as before.
+    pub heft: Option<crate::heft::Heft>,
     /// The balance impulse the last push fed this fighter, in Q8 units. The
     /// arena hands it to its balance state. The channel carries one tick:
     /// every tick starts clear, so a push feeds it once.
@@ -299,6 +304,7 @@ impl Default for FighterState {
             knockdown: 0,
             juggle: 0,
             weapon: 0,
+            heft: None,
             balance_impulse_q8: 0,
         }
     }
@@ -655,94 +661,25 @@ pub fn try_step_v2_with_cues_into(
 
 // ---- rules v2: the shield line ---------------------------------------------
 
-/// The weapon row of a fighter: the bare hand holds no steel.
-const ROW_BARE: u8 = 0;
-// The `type` column of `content/design/weapons.rows` says what a weapon
-// does. The fight crate fights with steel only: 1 thrust, 2 cut.
-const TYPE_NONE: u8 = 0;
-const TYPE_THRUST: u8 = 1;
-const TYPE_CUT: u8 = 2;
-/// Attack kind of the boss push: a shove with the scutum, not a strike of
-/// the steel. It sits above the depth kinds, so the code spaces stay apart.
-const KIND_PUSH: u8 = 3;
+mod shield_line;
+use shield_line::{
+    strike_damage, strike_reach, within_reach, KIND_PUSH, PUSH_HITSTOP_TICKS, PUSH_IMPULSE_Q8,
+    PUSH_RECOVERY_TICKS, PUSH_STAGGER_TICKS, PUSH_STARTUP_TICKS, ROW_BARE,
+};
 
-/// The weapon type of each shield-line weapon row: bare hands, pugio,
-/// gladius, spatha. The rows mirror `content/design/weapons.rows`.
-const SHIELD_KINDS: [u8; 4] = [TYPE_NONE, TYPE_THRUST, TYPE_THRUST, TYPE_CUT];
-/// The damage of each shield-line weapon row, in permille.
-const SHIELD_DAMAGE: [u16; 4] = [0, 80, 120, 150];
-/// Reach of a thrust under the shield rim, in millimetres.
-const THRUST_REACH_MM: u32 = 900;
-/// Reach of a cut, in millimetres.
-const CUT_REACH_MM: u32 = 600;
-/// Reach of the boss push, in millimetres: a shove with the scutum is short.
-const PUSH_REACH_MM: u32 = 700;
-/// The cut is weak: it does half the row's damage.
-const CUT_DAMAGE_DEN: u16 = 2;
-/// Startup ticks of the boss push, at 60 Hz: a short shove.
-const PUSH_STARTUP_TICKS: u32 = 6;
-/// Recovery ticks after the push lands.
-const PUSH_RECOVERY_TICKS: u32 = 10;
-/// Ticks the pushed fighter cannot act: the shove staggers him.
-const PUSH_STAGGER_TICKS: u32 = 12;
-/// The balance impulse one push feeds, in Q8 units.
-const PUSH_IMPULSE_Q8: u16 = 256;
-/// Freeze ticks of one push landing, at 60 Hz.
-const PUSH_HITSTOP_TICKS: u32 = 3;
-
-/// The damage of one strike of the weapon row, in permille. The bare hand
-/// keeps the table's own damage, a thrust does the row's damage and a cut
-/// is weak: half of it.
-fn strike_damage(tables: &Tables, weapon: u8) -> u16 {
-    let row = usize::from(weapon);
-    if row >= SHIELD_DAMAGE.len() {
-        return tables.attack_damage;
-    }
-    match SHIELD_KINDS[row] {
-        TYPE_THRUST => SHIELD_DAMAGE[row],
-        TYPE_CUT => SHIELD_DAMAGE[row] / CUT_DAMAGE_DEN,
-        _ => tables.attack_damage,
-    }
-}
-
-/// The startup and the recovery of one strike kind, in ticks. The push is a
-/// v2 action: a short shove. Every other kind uses the table's row, so v1
-/// rows keep their own numbers.
-fn kind_timing(tables: &Tables, kind: u8) -> (u32, u32) {
-    if kind == KIND_PUSH && *tables == TABLES_V2 {
+/// The startup and the recovery of one strike of `f`, in ticks. The push is
+/// a v2 action: a short shove. Every other kind swings the fighter's armed
+/// weight ([`crate::heft`]) or the table's row, so v1 rows keep their own
+/// numbers.
+fn kind_timing(tables: &Tables, f: &FighterState) -> (u32, u32) {
+    if f.attack_kind == KIND_PUSH && *tables == TABLES_V2 {
         (PUSH_STARTUP_TICKS, PUSH_RECOVERY_TICKS)
     } else {
-        (tables.attack_startup_ticks, tables.attack_recovery_ticks)
+        (
+            crate::heft::startup(f.heft, tables),
+            crate::heft::recovery(f.heft, tables),
+        )
     }
-}
-
-/// The reach of one strike in millimetres, or `None` when the arena's own
-/// blade sweep decides (the bare hand). A shove with the scutum is short.
-fn strike_reach(weapon: u8, kind: u8) -> Option<u32> {
-    if kind == KIND_PUSH {
-        return Some(PUSH_REACH_MM);
-    }
-    match SHIELD_KINDS.get(usize::from(weapon)) {
-        Some(&TYPE_THRUST) => Some(THRUST_REACH_MM),
-        Some(&TYPE_CUT) => Some(CUT_REACH_MM),
-        _ => None,
-    }
-}
-
-/// True when the victim stands inside the strike's reach. The reach counts
-/// from the body centre to the skin, so a wide body is easier to reach.
-fn within_reach(
-    attacker: &SweepParticipant,
-    victim: &SweepParticipant,
-    reach: Option<u32>,
-) -> bool {
-    let Some(limit) = reach else {
-        return true;
-    };
-    let dx = i64::from(victim.pos_mm[0]) - i64::from(attacker.pos_mm[0]);
-    let dz = i64::from(victim.pos_mm[2]) - i64::from(attacker.pos_mm[2]);
-    let reach = i64::from(limit) + i64::from(victim.hurt_radius_mm);
-    dx * dx + dz * dz <= reach * reach
 }
 
 // ---- step -----------------------------------------------------------------
@@ -988,7 +925,7 @@ fn latch_block_holds(
         }
         if let Some(streamlining) = commit {
             if f.is_attacking
-                && !streamlining.cancel_allowed(f.attack_age, tables.attack_startup_ticks)
+                && !streamlining.cancel_allowed(f.attack_age, crate::heft::startup(f.heft, tables))
             {
                 f.is_blocking = false;
                 f.block_age = u32::MAX;
@@ -1121,7 +1058,8 @@ fn dodge_step(
         return false;
     }
     if let Some(streamlining) = commit {
-        if f.is_attacking && !streamlining.cancel_allowed(f.attack_age, tables.attack_startup_ticks)
+        if f.is_attacking
+            && !streamlining.cancel_allowed(f.attack_age, crate::heft::startup(f.heft, tables))
         {
             return true;
         }
@@ -1172,11 +1110,11 @@ fn mid_swing_step(args: MidSwingStep<'_, '_>) {
         id,
     } = args;
     if let Some(streamlining) = commit {
-        let feint = streamlining.cancel_allowed(f.attack_age, tables.attack_startup_ticks);
+        let feint = streamlining.cancel_allowed(f.attack_age, crate::heft::startup(f.heft, tables));
         let chain = streamlining.recovery_cancel_allowed(
             f.attack_age,
-            tables.attack_startup_ticks,
-            tables.attack_recovery_ticks,
+            crate::heft::startup(f.heft, tables),
+            crate::heft::recovery(f.heft, tables),
         );
         if feint || chain {
             let queued_buttons = if window > 0 && !f.is_dodging && !blocking(intent) {
@@ -1256,7 +1194,11 @@ fn resolve_impacts(
     });
     for attacker in 0..count {
         let f = pre.map_or_else(|| PreState::of(&state.fighters[attacker]), |p| p[attacker]);
-        let (startup, _recovery) = kind_timing(tables, f.attack_kind);
+        let swinger = FighterState {
+            attack_kind: f.attack_kind,
+            ..state.fighters[attacker]
+        };
+        let (startup, _recovery) = kind_timing(tables, &swinger);
         let impact = f.is_attacking
             && f.attack_age == startup
             && f.hp_permille > 0
@@ -1417,7 +1359,10 @@ fn resolve_strike(
         return true;
     }
     let blocked = blocked_by_guard(tables, covered, guard);
-    let raw = strike_damage(tables, weapon);
+    let raw = strike_damage(
+        crate::heft::damage(state.fighters[attacker].heft, tables),
+        weapon,
+    );
     let damage = if blocked { tables.chip(raw) } else { raw };
     let was_up = state.fighters[victim].hp_permille > 0;
     apply_damage(&mut state.fighters[victim], damage);
@@ -1504,6 +1449,12 @@ fn apply_juggle_hit(
     victim_id: u8,
     symmetric: bool,
 ) {
+    let react = state
+        .fighters
+        .get(usize::from(attacker))
+        .map_or(tables.hit_react_ticks, |swinger| {
+            crate::heft::react(swinger.heft, tables)
+        });
     let target = &mut state.fighters[victim];
     if target.react > 0 {
         target.juggle = target.juggle.saturating_add(1);
@@ -1520,9 +1471,9 @@ fn apply_juggle_hit(
             victim: victim_id,
         });
     } else if symmetric {
-        target.react = target.react.max(tables.hit_react_ticks);
+        target.react = target.react.max(react);
     } else {
-        target.react = tables.hit_react_ticks;
+        target.react = react;
     }
 }
 
@@ -1534,7 +1485,7 @@ fn advance_clocks(state: &mut FightState, tables: &Tables, count: usize) {
         let f = &mut state.fighters[id];
         if f.is_attacking {
             f.attack_age = f.attack_age.saturating_add(1);
-            let (startup, recovery) = kind_timing(tables, f.attack_kind);
+            let (startup, recovery) = kind_timing(tables, f);
             if f.attack_age > startup + recovery {
                 f.is_attacking = false;
                 f.attack_age = 0;
@@ -1579,6 +1530,7 @@ fn apply_damage(fighter: &mut FighterState, damage: u16) {
 
 #[cfg(test)]
 mod tests {
+    use super::shield_line::{SHIELD_DAMAGE, SHIELD_KINDS};
     use super::*;
     use engine_core::alloc_probe::measure;
     use engine_input::{Buttons, FighterId};
@@ -3759,7 +3711,7 @@ mod tests {
         let pre: Option<[FighterState; SLOT_COUNT]> = geometry.map(|_| state.fighters);
         for attacker in 0..count {
             let f: FighterState = pre.map_or(state.fighters[attacker], |p| p[attacker]);
-            let (startup, _recovery) = kind_timing(tables, f.attack_kind);
+            let (startup, _recovery) = kind_timing(tables, &f);
             let impact = f.is_attacking
                 && f.attack_age == startup
                 && f.hp_permille > 0

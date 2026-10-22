@@ -24,6 +24,8 @@ pub mod certainty;
 pub mod crane;
 pub mod geo;
 pub mod groma;
+pub mod kit;
+pub mod lime;
 pub mod line;
 pub mod scutum;
 pub mod table;

@@ -235,7 +235,7 @@ pub(super) fn build_level_on_state(
                 &approval,
                 &mut state.ledger,
             )
-            .map_err(|error| cap_error(&error, &granted))?;
+            .map_err(|error| cap_error(&error, &granted, &state.doc))?;
             // A landed level is a watch event: move the session cache.
             state.refresh_watch();
             let placements: Vec<PlacedDto> = ids
@@ -297,10 +297,14 @@ impl ToolBase for BuildLevelTool {
 
     fn description() -> Option<Cow<'static, str>> {
         Some(
-            "Build a level from a text brief: relation plan, SP5 placement and cell \
+            format!(
+                "Build a level from a text brief: relation plan, SP5 placement and cell \
                  layout with nav checks, applied through the command gate; conflicts and \
-                 findings on refusal."
-                .into(),
+                 findings on refusal. Brief lines: `prop <kind> <name>` with kind one of \
+                 {}; `want <name> <relation> <target> [<lo>,<hi>]?`; `spawn <name>`.",
+                kind_words()
+            )
+            .into(),
         )
     }
 

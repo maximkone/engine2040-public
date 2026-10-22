@@ -264,8 +264,23 @@ overflow-checks = true
 # stay on (dev defaults). Undo: delete the package."*" block.
 [profile.dev]
 opt-level = 1
+# OPT39: dependencies build without debug info. The wildcard covers only the
+# dependencies, so the workspace crates keep their line tables and their
+# backtraces still show file:line.
+# Measured 2026-10-22 (cold `cargo build -p engine-game --timings` runs, each
+# in its own target dir, on a copy of HEAD so the arms build the same
+# sources): the dependency rlibs are 6.6 % smaller (32.7 MB -> 30.6 MB) and
+# the workspace rlibs do not move at all (23 crates, 0.00 % mean change), so
+# the row's P2P holds. The `target/` total moves 0.2 % (944.1 MB ->
+# 943.6 MB), because `incremental/` is 701 MB of it and the setting does not
+# touch that, so the row's 15 % size bar is not met. The row's 10 % wall bar
+# is not claimed yet: on a shared box the same build measured 818 s and
+# 641 s, and the workspace crates' codegen (byte-identical code in every
+# arm) spread 49 % between samples, so the wall cannot carry the claim.
+# Undo: delete the `debug = false` line.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 [profile.dev.package.engine-core]
 opt-level = 2
 [profile.dev.package.engine-ecs]

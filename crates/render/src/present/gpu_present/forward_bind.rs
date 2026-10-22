@@ -13,6 +13,8 @@
 #[cfg(test)]
 use std::fmt;
 
+use crate::torch_light::TorchError;
+
 /// Staged EG12 WGSL chunk: torch uniform array plus map hooks.
 #[cfg(test)]
 pub(crate) const FORWARD_MAPS_WGSL: &str = include_str!("../../shaders/forward_maps.wgsl");
@@ -159,10 +161,14 @@ impl TorchFrame {
     /// An empty list with draws falls back to the arena's built-in pair,
     /// so a scene that feeds none still lights the arena. Refuses more
     /// than [`TORCH_MAX`] lights and any light that breaks the rules.
+    ///
+    /// The refusal is the crate's own [`TorchError`]: the staged
+    /// `ForwardMapsError` is a test-only mirror of the shader terms and is
+    /// not compiled into the window build that calls this.
     pub(crate) fn from_scene(
         has_draws: bool,
         lights: &[crate::torch_light::TorchLight],
-    ) -> Result<Self, ForwardMapsError> {
+    ) -> Result<Self, TorchError> {
         if !has_draws {
             return Ok(Self {
                 slots: [TorchSlot::OFF; TORCH_MAX],
@@ -173,16 +179,11 @@ impl TorchFrame {
             return Ok(Self::for_draws(true));
         }
         if lights.len() > TORCH_MAX {
-            return Err(ForwardMapsError::Invalid(format!(
-                "torch list holds {} lights, at most {TORCH_MAX}",
-                lights.len()
-            )));
+            return Err(TorchError::TooMany(lights.len()));
         }
         let mut slots = [TorchSlot::OFF; TORCH_MAX];
         for (i, light) in lights.iter().enumerate() {
-            light
-                .validate()
-                .map_err(|e| ForwardMapsError::Invalid(e.to_string()))?;
+            light.validate()?;
             slots[i] = TorchSlot {
                 pos: light.pos,
                 color: light.color,
@@ -190,7 +191,7 @@ impl TorchFrame {
             };
         }
         let count = u32::try_from(lights.len())
-            .map_err(|_| ForwardMapsError::Invalid("torch count exceeds u32".into()))?;
+            .map_err(|_| TorchError::Invalid("torch count exceeds u32".into()))?;
         Ok(Self { slots, count })
     }
 

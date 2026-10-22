@@ -225,6 +225,9 @@ pub enum CapError {
     Spatial {
         /// The added check that failed.
         check: &'static str,
+        /// Culprit object ids (text form): both objects of the first new
+        /// overlapping pair, lower id first, or the one floating object.
+        culprits: Vec<String>,
     },
     /// Staging or apply through the command service failed; nothing ran.
     Command(BatchError),
@@ -248,9 +251,10 @@ impl fmt::Display for CapError {
             Self::OverBudget { remaining, needed } => {
                 write!(f, "budget exhausted: {needed} ops needed, {remaining} left")
             }
-            Self::Spatial { check } => write!(
+            Self::Spatial { check, culprits } => write!(
                 f,
-                "staged spatial check `{check}`: proposal adds {check}, document unchanged"
+                "staged spatial check `{check}`: proposal adds {check} on {}, document unchanged",
+                culprits.join(" and ")
             ),
             Self::Command(error) => write!(f, "command refused: {error}"),
         }
@@ -602,17 +606,19 @@ fn floating_findings(rows: &[StagedObj]) -> BTreeSet<String> {
 pub fn check_staged_delta(before: &[StagedObj], staged: &[StagedObj]) -> Result<(), CapError> {
     let before_overlap = overlap_findings(before);
     let staged_overlap = overlap_findings(staged);
-    if staged_overlap.difference(&before_overlap).next().is_some() {
-        return Err(CapError::Spatial { check: "overlap" });
+    if let Some((lo, hi)) = staged_overlap.difference(&before_overlap).next() {
+        return Err(CapError::Spatial {
+            check: "overlap",
+            culprits: vec![lo.clone(), hi.clone()],
+        });
     }
     let before_floating = floating_findings(before);
     let staged_floating = floating_findings(staged);
-    if staged_floating
-        .difference(&before_floating)
-        .next()
-        .is_some()
-    {
-        return Err(CapError::Spatial { check: "floating" });
+    if let Some(key) = staged_floating.difference(&before_floating).next() {
+        return Err(CapError::Spatial {
+            check: "floating",
+            culprits: vec![key.clone()],
+        });
     }
     Ok(())
 }
@@ -1178,7 +1184,9 @@ mod tests {
         let past = journal.past_len();
         let mut cap = Capability::new(7, OpMask::ALL, vec![a.to_string(), b.to_string()], 10);
         let mut ledger = ApprovalLedger::new();
-        // Overlap: drag `b` onto `a`.
+        // Overlap: drag `b` onto `a`. The pair comes back lower id text first.
+        let mut pair = [a.to_string(), b.to_string()];
+        pair.sort();
         let clash = Batch {
             ops: vec![Op::SetLocal {
                 id: b,
@@ -1198,7 +1206,10 @@ mod tests {
                 &clash_approval,
                 &mut ledger
             ),
-            Err(CapError::Spatial { check: "overlap" })
+            Err(CapError::Spatial {
+                check: "overlap",
+                culprits: pair.to_vec(),
+            })
         );
         assert_eq!(doc, before);
         assert_eq!(journal.past_len(), past);
@@ -1222,7 +1233,10 @@ mod tests {
                 &lift_approval,
                 &mut ledger
             ),
-            Err(CapError::Spatial { check: "floating" })
+            Err(CapError::Spatial {
+                check: "floating",
+                culprits: vec![a.to_string()],
+            })
         );
         assert_eq!(doc, before);
         assert_eq!(journal.past_len(), past);
@@ -1306,8 +1320,11 @@ mod tests {
         .to_string()
         .contains('1'));
         assert!(CapError::ReusedApproval.to_string().contains("spent"));
-        assert!(CapError::Spatial { check: "overlap" }
-            .to_string()
-            .contains("overlap"));
+        assert!(CapError::Spatial {
+            check: "overlap",
+            culprits: vec!["x".to_owned(), "y".to_owned()],
+        }
+        .to_string()
+        .contains("adds overlap on x and y"));
     }
 }

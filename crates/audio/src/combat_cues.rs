@@ -8,8 +8,29 @@
 //! the `queue_` helpers put it on a [`FeedTx`] (no lock, no allocation).
 
 use crate::crowd::FightCue;
-use crate::cue::names;
+use crate::cue::{impact_cue, names, ImpactKind, ImpactSurface};
 use crate::feed::{FeedError, FeedTx};
+
+/// Blow strength that plays at full level for a body hit: a standard blow
+/// (`ATTACK_DAMAGE` in engine-combat). Lighter blows play softer; heavier ones
+/// cap at full until a weapon-mass row (FEEL1) gives them headroom.
+pub const HIT_FULL_PERMILLE: u16 = 120;
+/// Chip that plays at full level for a block: a standard blow's chip (a fifth
+/// of its damage).
+pub const BLOCK_FULL_PERMILLE: u16 = 24;
+/// Level of the lightest body hit: a graze plays at this gain.
+pub const HIT_GAIN_FLOOR: f32 = 0.5;
+/// Level of the lightest block: shield blows stay near full.
+pub const BLOCK_GAIN_FLOOR: f32 = 0.8;
+
+/// Play level of a blow of `permille` strength (damage landed, or chip through
+/// a block): `floor` at nothing, `1.0` from `full` up, linear between. Weapon
+/// mass plugs in here (FEEL1): scale `permille` by the weapon's mass before the
+/// call, once a fight event carries one.
+pub fn strike_gain(floor: f32, permille: u16, full: u16) -> f32 {
+    let t = f32::from(permille.min(full)) / f32::from(full.max(1));
+    floor + (1.0 - floor) * t
+}
 
 /// One cue play request: which cue, how loud, and where.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,29 +74,41 @@ impl Surface {
     }
 }
 
-/// Map one fight event onto its cue play. Impacts sound at the victim
-/// (the blow lands there); a dodged swing whooshes at the attacker (the
-/// weapon missed from there). `Blocked` and `Parried` are distinct cues,
-/// not a quieter hit: shield wood and blade metal read differently.
-/// `StaminaOut` is silent (no cue in the arena bank). Never panics.
-pub fn cue_for_event(
+/// The surface a blow lands on when the fight event says nothing about the kit
+/// (it carries none): a body for a hit, a wooden shield for a block, steel for
+/// a parry. The window and the App both start from this.
+pub fn default_surface(event: FightCue) -> ImpactSurface {
+    match event {
+        FightCue::Blocked { .. } => ImpactSurface::ShieldWood,
+        FightCue::Parried { .. } => ImpactSurface::Plate,
+        _ => ImpactSurface::Flesh,
+    }
+}
+
+/// Map one fight event onto its cue play, the blow landing on `surface`. The
+/// name is [`impact_cue`] (kind by material); the level follows the blow's
+/// strength ([`strike_gain`]). Impacts sound at the victim (the blow lands
+/// there); a dodged swing whooshes at the attacker. `StaminaOut` is silent.
+/// Never panics.
+pub fn cue_for_impact(
     event: FightCue,
+    surface: ImpactSurface,
     attacker_pos: [i32; 3],
     victim_pos: [i32; 3],
 ) -> Option<CuePlay> {
     match event {
-        FightCue::Hit { .. } => Some(CuePlay {
-            name: names::HIT,
-            gain: 1.0,
+        FightCue::Hit { damage, .. } => Some(CuePlay {
+            name: impact_cue(ImpactKind::Hit, surface),
+            gain: strike_gain(HIT_GAIN_FLOOR, damage, HIT_FULL_PERMILLE),
             pos_cm: Some(victim_pos),
         }),
-        FightCue::Blocked { .. } => Some(CuePlay {
-            name: names::BLOCK,
-            gain: 0.9,
+        FightCue::Blocked { chip, .. } => Some(CuePlay {
+            name: impact_cue(ImpactKind::Block, surface),
+            gain: strike_gain(BLOCK_GAIN_FLOOR, chip, BLOCK_FULL_PERMILLE),
             pos_cm: Some(victim_pos),
         }),
         FightCue::Parried { .. } => Some(CuePlay {
-            name: names::PARRY,
+            name: impact_cue(ImpactKind::Parry, surface),
             gain: 0.9,
             pos_cm: Some(victim_pos),
         }),
@@ -85,12 +118,23 @@ pub fn cue_for_event(
             pos_cm: Some(attacker_pos),
         }),
         FightCue::Knockdown { .. } => Some(CuePlay {
-            name: names::KNOCKDOWN,
+            name: impact_cue(ImpactKind::Knockdown, surface),
             gain: 1.0,
             pos_cm: Some(victim_pos),
         }),
         FightCue::StaminaOut { .. } => None,
     }
+}
+
+/// Map one fight event onto its cue play with the default surface for its
+/// kind ([`default_surface`]). `Blocked` and `Parried` are distinct cues, not
+/// a quieter hit: shield wood and blade metal read differently. Never panics.
+pub fn cue_for_event(
+    event: FightCue,
+    attacker_pos: [i32; 3],
+    victim_pos: [i32; 3],
+) -> Option<CuePlay> {
+    cue_for_impact(event, default_surface(event), attacker_pos, victim_pos)
 }
 
 /// One footstep on `surface` at `pos_cm`, at walking level.
@@ -169,7 +213,7 @@ mod tests {
                     chip: 24,
                 },
                 names::BLOCK,
-                0.9,
+                1.0,
                 VICTIM,
             ),
             (
@@ -237,6 +281,75 @@ mod tests {
         assert_eq!(at_victim, VICTIM);
     }
 
+    /// FEEL8 accept: a light flesh hit and a heavy metal impact name different
+    /// cues, and the heavy one plays louder after each cue's own trim. A dagger
+    /// (damage 60) on flesh against a mace (damage 120) on plate; a heavy
+    /// blocked hit on iron rings like metal too.
+    #[test]
+    fn a_light_flesh_hit_and_a_heavy_metal_hit_sound_different_and_the_heavy_is_louder() {
+        let bank = bank();
+        let level = |play: CuePlay| {
+            let cue = bank
+                .cue(bank.id(play.name).expect("shipped cue"))
+                .expect("id");
+            play.gain * cue.gain
+        };
+        let hit = |damage| FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage,
+        };
+        let dagger =
+            cue_for_impact(hit(60), ImpactSurface::Flesh, ATTACKER, VICTIM).expect("a hit plays");
+        let mace =
+            cue_for_impact(hit(120), ImpactSurface::Plate, ATTACKER, VICTIM).expect("a hit plays");
+        assert_eq!(
+            (dagger.name, mace.name),
+            (names::HIT, names::PARRY),
+            "flesh takes the body take, plate the metal ring"
+        );
+        assert!(
+            level(mace) > level(dagger),
+            "mace {} dagger {}",
+            level(mace),
+            level(dagger)
+        );
+        let block = cue_for_impact(
+            FightCue::Blocked {
+                attacker: 0,
+                victim: 1,
+                chip: 48,
+            },
+            ImpactSurface::ShieldIron,
+            ATTACKER,
+            VICTIM,
+        )
+        .expect("a block plays");
+        assert_eq!(block.name, names::PARRY, "a block on iron rings like metal");
+        assert!(level(block) > level(dagger), "heavy block beats light hit");
+    }
+
+    /// Gain runs from the floor at nothing to full at a standard blow, and never
+    /// past full: a heavier blow caps there until a weapon-mass row gives headroom.
+    #[test]
+    fn strike_gain_runs_floor_to_full_and_caps_there() {
+        let at = |p| strike_gain(HIT_GAIN_FLOOR, p, HIT_FULL_PERMILLE);
+        assert_eq!(at(0), 0.5);
+        assert_eq!(at(60), 0.75);
+        assert_eq!(at(HIT_FULL_PERMILLE), 1.0);
+        assert_eq!(at(240), 1.0, "a heavy blow caps at full");
+        let curve: Vec<f32> = (0..=HIT_FULL_PERMILLE).step_by(6).map(at).collect();
+        assert!(
+            curve.windows(2).all(|w| w[0] <= w[1]),
+            "louder with damage: {curve:?}"
+        );
+        assert_eq!(
+            strike_gain(BLOCK_GAIN_FLOOR, BLOCK_FULL_PERMILLE, BLOCK_FULL_PERMILLE),
+            1.0,
+            "a standard block's chip plays full"
+        );
+    }
+
     #[test]
     fn footsteps_cover_every_surface() {
         let surfaces = [
@@ -283,7 +396,7 @@ mod tests {
                     chip: 24,
                 },
                 names::BLOCK,
-                0.9,
+                1.0,
                 VICTIM,
             ),
             (

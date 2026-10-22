@@ -40,8 +40,11 @@ use rmcp::serde::{Deserialize, Serialize};
 use rmcp::serde_json::Value;
 
 use super::insight::Index;
-use super::mcp::{McpServer, McpToolError, ServerState, TOOL_LIST_BUDGET_CHARS};
+use super::mcp::{
+    McpServer, McpToolError, ServerState, TOOL_LIST_BUDGET_CHARS, TOOL_LIST_MIN_HEADROOM_CHARS,
+};
 use super::tool_capabilities::CapabilityCard;
+use crate::collapse::MAX_ADVERTISED_CHARS;
 
 pub mod anim;
 pub mod asset;
@@ -914,10 +917,46 @@ pub struct ApiLoadOutput {
     pub budget_chars: u64,
 }
 
+/// Refuse a load that would push the surface past the tool budget. Without
+/// this check the API6 guardrail trims the advertisement and the door still
+/// answers `loaded`, with verbs hidden. A load that changes nothing, or a name
+/// no pack carries (`load_pack` names that), passes through unchanged.
+fn refuse_over_budget(
+    service: &McpServer,
+    state: &ServerState,
+    pack: &str,
+) -> Result<(), McpToolError> {
+    let Some(def) = PackRegistry::shipped().pack(pack) else {
+        return Ok(());
+    };
+    if state.loaded_packs().contains(def.name) {
+        return Ok(());
+    }
+    let mut loaded = state.loaded_packs().clone();
+    loaded.insert(def.name);
+    let reach = service.surface_chars_with(&loaded);
+    if reach <= MAX_ADVERTISED_CHARS {
+        return Ok(());
+    }
+    Err(McpToolError::new(
+        "tool_budget_exceeded",
+        format!(
+            "api.load refused: loading pack `{}` would advertise {reach} tool chars; the \
+             tool budget is {TOOL_LIST_BUDGET_CHARS} chars with {TOOL_LIST_MIN_HEADROOM_CHARS} \
+             kept as headroom, so a list may cost at most {MAX_ADVERTISED_CHARS}; unload a \
+             pack first (api.load unload:true) or load a smaller one",
+            def.name
+        ),
+    ))
+}
+
 /// `api.load` handler: advertise or hide one verb pack for this session.
 fn api_load(service: &McpServer, param: &ApiLoadArgs) -> Result<ApiLoadOutput, McpToolError> {
     let unload = param.unload.unwrap_or(false);
     let (verbs, loaded_packs) = service.dispatch(TOOL_API_LOAD, |state| {
+        if !unload {
+            refuse_over_budget(service, state, &param.pack)?;
+        }
         let def = state.load_pack(&param.pack, unload)?;
         let verbs: Vec<String> = def
             .verb_names()
@@ -1346,6 +1385,54 @@ mod tests {
                 "api.call",
                 "api.call"
             ]
+        );
+    }
+
+    #[test]
+    fn api_load_refuses_a_pack_that_breaks_the_tool_budget() {
+        let server = server();
+        let mut refused = 0usize;
+        for name in PACK_NAMES {
+            let args = ApiLoadArgs {
+                pack: (*name).to_owned(),
+                unload: None,
+            };
+            let Err(error) = ApiLoadTool::invoke(&server, args) else {
+                continue;
+            };
+            refused += 1;
+            assert_eq!(error.code, "tool_budget_exceeded", "{}", error.message);
+            assert!(
+                error.message.contains(&format!("pack `{name}`")),
+                "the refusal names the pack: {}",
+                error.message
+            );
+            assert!(
+                error
+                    .message
+                    .contains(&format!("budget is {TOOL_LIST_BUDGET_CHARS} chars")),
+                "the refusal states the budget: {}",
+                error.message
+            );
+            let reach: usize = error
+                .message
+                .split("would advertise ")
+                .nth(1)
+                .and_then(|rest| rest.split(' ').next())
+                .and_then(|count| count.parse().ok())
+                .expect("the refusal states the count it would reach");
+            assert!(
+                reach > MAX_ADVERTISED_CHARS,
+                "{reach} must exceed the ceiling {MAX_ADVERTISED_CHARS}"
+            );
+            assert!(
+                !server.load_order().iter().any(|loaded| *loaded == name),
+                "a refused pack is never reported loaded: {name}"
+            );
+        }
+        assert!(
+            refused > 0,
+            "loading every pack must break the budget somewhere"
         );
     }
 

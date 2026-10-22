@@ -117,12 +117,66 @@ def import_mesh(path):
     meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]
     if not meshes:
         raise CookError(f"no mesh in {path}")
-    bpy.ops.object.select_all(action="DESELECT")
-    for ob in meshes:
-        ob.select_set(True)
-    bpy.context.view_layer.objects.active = meshes[0]
-    if len(meshes) > 1:
+
+    # The names the file carries are kept, and so are the faces' own
+    # material indices. The cook used to rebuild the material list and
+    # repaint every face onto the first material, so a file that already
+    # carried a skin and a cloth came out with the whole figure in flesh.
+    #
+    # A material with no name is the skin: MPFB's skin is procedural, so
+    # it is the one material that arrives empty, and that is the one case
+    # the cook cannot get wrong.
+    keep = meshes[0]
+    keep.name = "body"
+    for source in meshes:
+        if not source.material_slots:
+            material = bpy.data.materials.new(name="skin")
+            material.use_nodes = True
+            source.data.materials.append(material)
+            for poly in source.data.polygons:
+                poly.material_index = 0
+            continue
+        for slot in source.material_slots:
+            if slot.material is None:
+                material = bpy.data.materials.new(name="skin")
+                material.use_nodes = True
+                slot.material = material
+
+    # The rest of the objects come across, each with its own material.
+    # The join does not keep the material index of the faces that come
+    # across: they land on the survivor's first slot, which is the skin's,
+    # and the whole figure comes out in flesh. So the faces are counted
+    # before the join, and the ones that came across are repainted after
+    # it, onto the material they had.
+    for source in meshes[1:]:
+        material = None
+        for slot in source.material_slots:
+            if slot.material is not None:
+                material = slot.material
+                break
+        if material is None:
+            continue
+        offset = len(keep.data.materials)
+        keep.data.materials.append(material)
+        source.data.materials.clear()
+        source.data.materials.append(material)
+        for poly in source.data.polygons:
+            poly.material_index = 0
+        faces_before = len(keep.data.polygons)
+        bpy.ops.object.select_all(action="DESELECT")
+        keep.select_set(True)
+        source.select_set(True)
+        bpy.context.view_layer.objects.active = keep
         bpy.ops.object.join()
+        keep = bpy.context.view_layer.objects.active
+        keep.name = "body"
+        for index, poly in enumerate(keep.data.polygons):
+            if index >= faces_before:
+                poly.material_index = offset
+
+    bpy.ops.object.select_all(action="DESELECT")
+    keep.select_set(True)
+    bpy.context.view_layer.objects.active = keep
     ob = bpy.context.view_layer.objects.active
     ob.name = "body"
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
@@ -388,28 +442,83 @@ def split_hair(ob):
 
     MakeHuman's basemesh is one mesh: skin, scalp and hair are one surface
     with one material, so the cook paints the whole head in flesh and the
-    hair reads as a bald cap. The hair is the part of the skull above the
-    brow, so the split is by height on the head: the scalp and the strands
-    above the brow line are hair, and the face below it stays skin.
+    hair reads as a bald cap.
+
+    The head is a connected surface of its own. MPFB builds the body from
+    parts, and the parts do not share vertices, so the head can be found
+    as the component that holds the top of the figure. The split moves
+    the faces of that component and leaves every other face where it is:
+    the garment's collar reaches above the brow line on a short figure,
+    and a split by height alone turns the collar into hair.
+
+    Only the skin is split. The cloth keeps its own material, or a
+    shoulder pad turns into hair.
     """
     me = ob.data
-    if not me.vertices:
+    count = len(me.vertices)
+    if not count:
         return False
-    zs = [v.co.z for v in me.vertices]
-    z_min, z_max = min(zs), max(zs)
-    height = max(z_max - z_min, 1e-6)
-    # The brow is roughly 88% up the head.
-    brow = z_min + height * 0.88
+
+    # Only the skin is split. The cloth keeps its own material, or a
+    # collar that reaches the brow line turns into hair.
+    skin_slots = set()
+    for index, slot in enumerate(ob.material_slots):
+        material = slot.material
+        if material is not None and "skin" in (material.name or "").lower():
+            skin_slots.add(index)
+    if not skin_slots:
+        return False
+
+    # Adjacency, by shared edges, over the skin's faces only.
+    adjacency = [[] for _ in range(count)]
+    for poly in me.polygons:
+        if poly.material_index not in skin_slots:
+            continue
+        vs = list(poly.vertices)
+        for i in range(len(vs)):
+            for j in range(i + 1, len(vs)):
+                adjacency[vs[i]].append(vs[j])
+                adjacency[vs[j]].append(vs[i])
+
+    # The component that holds the top vertex.
+    top = max(range(count), key=lambda i: me.vertices[i].co.z)
+    seen = {top}
+    stack = [top]
+    head = []
+    while stack:
+        v = stack.pop()
+        head.append(v)
+        for w in adjacency[v]:
+            if w not in seen:
+                seen.add(w)
+                stack.append(w)
+
+    # A component that is most of the figure is not a head.
+    if len(head) > count * 0.25:
+        return False
+
+    head_zs = sorted(me.vertices[i].co.z for i in head)
+    mid = head_zs[len(head_zs) // 2]
+    head_set = set(head)
+
     hair = bpy.data.materials.new(name="hair")
     hair.use_nodes = True
     slot = me.materials.find(hair.name)
     if slot < 0:
         me.materials.append(hair)
         slot = len(me.materials) - 1
+
     moved = 0
     for poly in me.polygons:
-        zs_poly = [me.vertices[v].co.z for v in poly.vertices]
-        if min(zs_poly) >= brow:
+        if poly.material_index not in skin_slots:
+            continue
+        verts = [me.vertices[v] for v in poly.vertices]
+        if not verts:
+            continue
+        on_head = sum(1 for v in verts if v.index in head_set)
+        if on_head < len(verts) * 0.6:
+            continue
+        if min(v.co.z for v in verts) >= mid:
             poly.material_index = slot
             moved += 1
     return moved > 0

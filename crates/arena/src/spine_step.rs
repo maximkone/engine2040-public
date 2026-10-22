@@ -952,6 +952,9 @@ fn sys_extract(core: &mut Core, _: &mut Ctx) {
     // The spear state folds after the rules and before the world; a match
     // without one leaves the hash untouched.
     hash = core.spear.as_ref().map_or(hash, |spear| spear.fold(hash));
+    // Armed weapon rows fold next, as on the legacy step; none armed leaves
+    // the hash untouched.
+    hash = crate::heft::fold(hash, &core.fight, n);
     // The height channel folds only when armed, so the golden bytes stay
     // exactly as they were on a floor-plane match.
     if core.height {

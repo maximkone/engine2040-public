@@ -199,6 +199,7 @@ use engine_arena::world::MatchWorld;
 use engine_arena::{
     run_loco_poses, ArenaConfig, ArenaRules, Checkpoint, LiveMatch, LivePresentation, MatchSpec,
 };
+use engine_audio::combat_cues::{strike_gain, HIT_FULL_PERMILLE, HIT_GAIN_FLOOR};
 use engine_audio::cue::{impact_cue, ImpactKind, ImpactSurface};
 use engine_audio::{BankSound, Crowd, FightCue, Reaction};
 use engine_combat::{fight::MAX_HP_PERMILLE, FightEvent};
@@ -1478,7 +1479,9 @@ impl App {
                     tick,
                     sound: BankSound::Hit,
                     cue: impact_cue(ImpactKind::Hit, ImpactSurface::Flesh),
-                    gain: 1.0,
+                    // Same scale as the window (combat_cues::strike_gain): a
+                    // light blow plays softer, weapon mass plugs in at FEEL1.
+                    gain: strike_gain(HIT_GAIN_FLOOR, damage, HIT_FULL_PERMILLE),
                 });
             }
             FightCue::Blocked { victim, chip, .. } => {
@@ -2356,6 +2359,28 @@ mod tests {
         let mut again = vec![(0u16, 0usize); plays];
         let (_, _, _, _) = route_impact_matrix(&bank, 2040, &mut again);
         assert_eq!(first, again, "same seed routes the same takes");
+    }
+
+    /// FEEL8: the live fold's hit level follows the damage it carries. A
+    /// standard blow plays full; a light one plays softer on the same flesh cue.
+    #[test]
+    fn live_fold_hit_gain_follows_damage() {
+        let mut app = App::new(small_config()).expect("config");
+        let mut out = TickOutcome::default();
+        let mut fold = |damage: u16| {
+            out.audio.clear();
+            let hit = FightCue::Hit {
+                attacker: 0,
+                victim: 1,
+                damage,
+            };
+            app.fold_cue_into(7, hit, &mut out);
+            out.audio.first().copied().expect("a hit emits a voice")
+        };
+        let light = fold(60);
+        let standard = fold(120);
+        assert_eq!(light.cue, impact_cue(ImpactKind::Hit, ImpactSurface::Flesh));
+        assert_eq!((light.gain, standard.gain), (0.75, 1.0));
     }
 
     /// The live fold reads the same table: each impact event names the cue

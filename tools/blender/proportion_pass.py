@@ -205,8 +205,64 @@ def main():
     me.update()
 
     os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
+
+    # Every mesh goes into the file, each with its own material. Exporting
+    # one object dropped the garment, and the body arrived with no
+    # materials at all, so the cook had nothing to paint.
+    meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]
+    def label_for(source, material):
+        """What a material is: the skin, or the cloth.
+
+        The object name is the authority, because the objects still have
+        their own names here: the body is "Human" and everything else is
+        the garment. The material's own node tree cannot be trusted, for
+        the exporter rewrites it, and the body's slot comes back looking
+        as if it carried a texture.
+
+        A material with no image at all is the skin whatever it is
+        called: MPFB's skin is procedural and has no image to write, and
+        that is the one case the cook cannot get wrong.
+        """
+        if material is None:
+            return "skin"
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                tree = getattr(material, "node_tree", None)
+                if tree:
+                    has_image = any(node.type == "TEX_IMAGE" and node.image
+                                    for node in tree.nodes)
+                    if not has_image:
+                        return "skin"
+        except Exception:
+            pass
+        return "skin" if source.name.lower() == "human" else "cloth"
+
+    for source in meshes:
+        if not source.material_slots:
+            # The import hands back the body with no slots at all, not with
+            # a slot that has nothing in it, so the slot is made here. A
+            # body with no material arrives at the cook as one flat colour
+            # for the skin, the hair and the cloth alike.
+            material = bpy.data.materials.new(name="skin")
+            material.use_nodes = True
+            source.data.materials.append(material)
+            for poly in source.data.polygons:
+                poly.material_index = 0
+            continue
+        for slot in source.material_slots:
+            label = label_for(source, slot.material)
+            if slot.material is None:
+                # A slot with nothing in it: the skin, whose material was
+                # procedural and could not be written.
+                material = bpy.data.materials.new(name=label)
+                material.use_nodes = True
+                slot.material = material
+            else:
+                slot.material.name = label
     bpy.ops.object.select_all(action="DESELECT")
-    ob.select_set(True)
+    for source in meshes:
+        source.select_set(True)
     bpy.context.view_layer.objects.active = ob
     try:
         bpy.ops.export_scene.gltf(filepath=dest, export_format="GLB", export_apply=True,

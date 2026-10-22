@@ -68,6 +68,7 @@ mod place_blocks;
 #[cfg(test)]
 mod place_facing_tests;
 mod read_guard;
+pub(crate) mod refusals;
 mod spatial_checks;
 mod spatial_delta;
 #[cfg(test)]
@@ -1130,7 +1131,7 @@ fn apply_placement(
         &approval,
         &mut state.ledger,
     )
-    .map_err(|error| cap_error(&error, &granted))?;
+    .map_err(|error| cap_error(&error, &granted, &state.doc))?;
     // A solved placement is a watch event: move the session-local cache.
     state.refresh_watch();
     let spatial_delta = before.map(|before| spatial_delta(before, &snapshot(&state.doc), &[node]));

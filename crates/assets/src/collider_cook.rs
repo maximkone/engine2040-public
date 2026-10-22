@@ -3,11 +3,11 @@
 //! Consumer: the arena kit zone and the door's cast verbs read the cooked bytes
 //! through `engine-physics` (`collider::decode`); this module is the writer.
 //! Data owner: `engine-assets`; the glTF `COL_` nodes own the geometry
-//! ([`super::mesh_cook::COL_PREFIX`] convention). Units: meters, Y up; one layer
-//! integer per collider, chosen by the caller (the layer table lives in
-//! `engine-physics`, which this crate does not link). Determinism: `+ - * /` and
-//! `sqrt` only, canonical point order, no hash maps, no clock; the same art gives
-//! the same bytes, and a hull's bytes do not depend on input point order.
+//! ([`COL_PREFIX`] convention). Units: meters, Y up; one layer integer per
+//! collider, chosen by the caller (the layer table lives in `engine-physics`,
+//! which this crate does not link). Determinism: `+ - * /` and `sqrt` only,
+//! canonical point order, no hash maps, no clock; the same art gives the same
+//! bytes, and a hull's bytes do not depend on input point order.
 //! Errors: typed [`ColliderCookError`], never a panic.
 //!
 //! Two shapes are cooked. A dynamic prop becomes a convex hull: the extreme
@@ -16,6 +16,18 @@
 //! points). A static kit piece becomes a triangle mesh: vertices welded by exact
 //! position, degenerate triangles dropped. Heightfields are not cooked: no kit
 //! piece needs one yet.
+//!
+//! Collision is on by default: every node of the art tree that carries a mesh
+//! collides unless the art says otherwise.
+//!
+//! - a node named `COL_...` cooks its own shape (the tagged art);
+//! - a node that carries a `COL_` child cooks nothing (the child holds the shape);
+//! - a node named `NOCOL_...` cooks nothing (the art opts out);
+//! - every other node cooks an automatic convex hull of its render mesh, on the
+//!   [`PROP_LAYER`] layer, because an untagged mesh is a prop.
+//!
+//! The receipt says where the colliders came from:
+//! `colliders: <tagged> tagged, <auto> auto, <opted out> opted out`.
 //!
 //! Wire format v1 (little-endian), read by `engine_physics::collider::decode`:
 //!
@@ -28,7 +40,7 @@
 
 use super::wire::{push_u16, push_u32};
 use core::fmt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// First four bytes of a cooked collider blob.
 pub const MAGIC: [u8; 4] = *b"E2CC";
@@ -46,6 +58,30 @@ pub const MAX_MESH_VERTS: usize = 65_536;
 pub const MAX_MESH_TRIS: usize = 20_000;
 /// Most input points one hull cook accepts.
 pub const MAX_INPUT_POINTS: usize = 100_000;
+
+/// Node names that carry an explicit collider shape: `COL_<piece>`.
+pub const COL_PREFIX: &str = "COL_";
+/// Node names that opt out of collision: `NOCOL_<piece>`.
+pub const NOCOL_PREFIX: &str = "NOCOL_";
+
+/// The PROP layer bit: the group an untagged mesh collides in.
+///
+/// Mirrors `engine-physics::layers::PROP` (one bit, `1 << 1`). This crate does
+/// not link the layer table, so the bit is written here and the table names it.
+pub const PROP_LAYER: u32 = 1 << 1;
+
+/// True when the name carries an explicit collider shape (`COL_` prefix).
+///
+/// The rule lives here, not in the mesh cook: the collider cook reads node
+/// names without the import lane, so every rule stays testable there.
+pub fn is_col_name(name: &str) -> bool {
+    name.starts_with(COL_PREFIX) && name.len() > COL_PREFIX.len()
+}
+
+/// True when the name opts out of collision (`NOCOL_` prefix).
+pub fn is_nocol_name(name: &str) -> bool {
+    name.starts_with(NOCOL_PREFIX)
+}
 
 /// Hull plane slack relative to the input's diagonal: a point this close to a
 /// face plane counts as on it, so coplanar points never join the hull.
@@ -83,7 +119,7 @@ pub enum ColliderCookError {
     DuplicateName,
     /// A layer is not exactly one bit.
     BadLayer(u32),
-    /// The glTF has no `COL_` node with a mesh.
+    /// The art carries no mesh at all: there is nothing to collide with.
     NoCollider,
     /// The glTF failed to parse or read; bounded reason.
     Gltf(String),
@@ -113,7 +149,7 @@ impl fmt::Display for ColliderCookError {
             Self::BadLayer(layer) => {
                 write!(f, "collider cook: layer {layer} is not exactly one bit")
             }
-            Self::NoCollider => write!(f, "collider cook: the glTF has no COL_ node with a mesh"),
+            Self::NoCollider => write!(f, "collider cook: the art carries no mesh to collide"),
             Self::Gltf(detail) => write!(f, "collider cook: glTF {detail}"),
         }
     }
@@ -156,6 +192,220 @@ pub struct CookedCollider {
 pub struct ColliderSet {
     /// Colliders in write order.
     pub colliders: Vec<CookedCollider>,
+}
+
+/// What a file's tagged collider art becomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColliderRole {
+    /// A static kit piece: a triangle mesh of the node's triangles.
+    StaticKit,
+    /// A dynamic prop: the convex hull of the node's points.
+    DynamicProp,
+}
+
+/// Where the colliders of one cook came from.
+///
+/// The receipt line is `colliders: <tagged> tagged, <auto> auto, <opted out>
+/// opted out`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ColliderReceipt {
+    /// Colliders cooked from `COL_` art.
+    pub tagged: usize,
+    /// Colliders cooked as an automatic hull of a render mesh.
+    pub auto: usize,
+    /// Nodes that cook no collider: the art opted out with `NOCOL_`, or the
+    /// mesh has no solid to wrap.
+    pub opted_out: usize,
+}
+
+impl fmt::Display for ColliderReceipt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "colliders: {} tagged, {} auto, {} opted out",
+            self.tagged, self.auto, self.opted_out
+        )
+    }
+}
+
+/// One node of the art tree the collider cook walks.
+///
+/// The glTF reader builds these from a document; the cook's rules never touch
+/// glTF types, so every rule is testable without the import lane.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColliderNode {
+    /// The art's own name for the node.
+    pub name: String,
+    /// The node's render mesh: triangle positions in world space, in meters.
+    pub points: Vec<[f32; 3]>,
+    /// Triangle indices into `points`; empty when the node has no mesh.
+    pub indices: Vec<u32>,
+    /// Child nodes, in document order.
+    pub children: Vec<ColliderNode>,
+}
+
+/// One collider cook: the colliders plus the receipt that says where they came
+/// from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CookedColliders {
+    /// The colliders, in document order.
+    pub set: ColliderSet,
+    /// Where the colliders came from.
+    pub receipt: ColliderReceipt,
+}
+
+/// The cook state while it walks an art tree.
+struct TreeCook {
+    role: ColliderRole,
+    layer: u32,
+    colliders: Vec<CookedCollider>,
+    names: BTreeSet<String>,
+    receipt: ColliderReceipt,
+    meshes: usize,
+}
+
+impl TreeCook {
+    /// Cook one node and then its children, in document order.
+    fn visit(&mut self, node: &ColliderNode) -> Result<(), ColliderCookError> {
+        if !node.points.is_empty() {
+            self.meshes += 1;
+        }
+        if is_col_name(&node.name) {
+            self.tagged(node)?;
+        } else if is_nocol_name(&node.name) {
+            self.opt_out(node);
+        } else if node.children.iter().any(|child| is_col_name(&child.name)) {
+            // The child holds the shape: this node cooks nothing of its own.
+        } else if !node.points.is_empty() {
+            self.auto(node)?;
+        }
+        for child in &node.children {
+            self.visit(child)?;
+        }
+        Ok(())
+    }
+
+    /// Cook the tagged shape of a `COL_` node: the role's shape on the
+    /// caller's layer.
+    fn tagged(&mut self, node: &ColliderNode) -> Result<(), ColliderCookError> {
+        if node.points.is_empty() {
+            return Ok(());
+        }
+        if node.name.len() > MAX_NAME_BYTES {
+            return Err(ColliderCookError::BadName);
+        }
+        let shape = match self.role {
+            ColliderRole::DynamicProp => cook_hull(&node.points, MAX_HULL_POINTS)?,
+            ColliderRole::StaticKit => cook_mesh(&node.points, &node.indices)?,
+        };
+        self.names.insert(node.name.clone());
+        self.colliders.push(CookedCollider {
+            name: node.name.clone(),
+            layer: self.layer,
+            shape,
+        });
+        self.receipt.tagged += 1;
+        Ok(())
+    }
+
+    /// Cook the automatic hull of an untagged render mesh: a prop hull on the
+    /// PROP layer.
+    fn auto(&mut self, node: &ColliderNode) -> Result<(), ColliderCookError> {
+        match cook_hull(&node.points, MAX_HULL_POINTS) {
+            Ok(shape) => {
+                let name = auto_id(&node.name, &self.names);
+                self.names.insert(name.clone());
+                self.colliders.push(CookedCollider {
+                    name,
+                    layer: PROP_LAYER,
+                    shape,
+                });
+                self.receipt.auto += 1;
+                Ok(())
+            }
+            // A mesh with no solid to wrap (a plane, a line, a point) collides
+            // with nothing: the art has no volume to wrap.
+            Err(ColliderCookError::Flat | ColliderCookError::TooFewPoints { .. }) => {
+                self.opt_out(node);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Count a node that cooks no collider.
+    fn opt_out(&mut self, node: &ColliderNode) {
+        if !node.points.is_empty() {
+            self.receipt.opted_out += 1;
+        }
+    }
+}
+
+/// The collider id of an automatic hull: the node's own name, cut to the wire
+/// limit and made unique among the ids already written.
+fn auto_id(name: &str, used: &BTreeSet<String>) -> String {
+    let mut base = String::new();
+    for ch in name.chars() {
+        if base.len() + ch.len_utf8() > MAX_NAME_BYTES - 8 {
+            break;
+        }
+        base.push(ch);
+    }
+    if base.is_empty() {
+        base.push_str("auto");
+    }
+    let mut id = base.clone();
+    let mut take = 1;
+    while used.contains(&id) {
+        take += 1;
+        id = format!("{base}#{take}");
+    }
+    id
+}
+
+/// Cook the colliders of an art tree.
+///
+/// `roots` are the scene's root nodes, in document order. Every node follows
+/// the rule: a node named `COL_...` cooks its own shape (the tagged art, the
+/// role's shape, the caller's layer); a node named `NOCOL_...` cooks nothing; a
+/// node that carries a `COL_` child cooks nothing (the child holds the shape);
+/// every other node with a mesh cooks an automatic convex hull of its render
+/// mesh on the [`PROP_LAYER`] layer.
+///
+/// The art that carries no mesh at all is refused with
+/// [`ColliderCookError::NoCollider`]; art that opts out of every mesh cooks an
+/// empty set and says so in the receipt.
+pub fn cook_nodes(
+    roots: &[ColliderNode],
+    role: ColliderRole,
+    layer: u32,
+) -> Result<CookedColliders, ColliderCookError> {
+    if !layer.is_power_of_two() {
+        return Err(ColliderCookError::BadLayer(layer));
+    }
+    let mut cook = TreeCook {
+        role,
+        layer,
+        colliders: Vec::new(),
+        names: BTreeSet::new(),
+        receipt: ColliderReceipt::default(),
+        meshes: 0,
+    };
+    for root in roots {
+        cook.visit(root)?;
+    }
+    if cook.colliders.is_empty() && cook.meshes == 0 {
+        return Err(ColliderCookError::NoCollider);
+    }
+    let set = ColliderSet {
+        colliders: cook.colliders,
+    };
+    // Refuse a repeated id or bound here, with the typed reason, not at write time.
+    set.encode()?;
+    Ok(CookedColliders {
+        set,
+        receipt: cook.receipt,
+    })
 }
 
 type V3 = [f64; 3];
@@ -678,27 +928,17 @@ fn encode_shape(out: &mut Vec<u8>, shape: &ColliderShape) -> Result<(), Collider
 }
 
 #[cfg(feature = "import")]
-pub use from_gltf::{cook_gltf_colliders, ColliderRole};
+pub use from_gltf::cook_gltf_colliders;
 
-/// glTF extraction: every `COL_` node with a mesh becomes one collider.
+/// glTF extraction: the document becomes a tree of nodes and the tree cooks.
 #[cfg(feature = "import")]
 mod from_gltf {
-    use super::{cook_hull, cook_mesh, ColliderCookError, ColliderSet, CookedCollider};
-    use super::{MAX_HULL_POINTS, MAX_NAME_BYTES};
-    use crate::mesh_cook::is_col_name;
+    use super::CookedColliders;
+    use super::{cook_nodes, is_col_name, ColliderCookError, ColliderNode, ColliderRole};
     use crate::mesh_import::{bound_detail, MAX_BYTES};
 
     /// Deepest node nesting followed; deeper art is refused, never walked.
     const MAX_DEPTH: usize = 64;
-
-    /// What a file's `COL_` nodes become.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum ColliderRole {
-        /// A static kit piece: a triangle mesh of the node's triangles.
-        StaticKit,
-        /// A dynamic prop: the convex hull of the node's points.
-        DynamicProp,
-    }
 
     type Mat = [[f32; 4]; 4];
 
@@ -726,97 +966,89 @@ mod from_gltf {
         [row(0), row(1), row(2)]
     }
 
-    struct Cook<'a> {
-        buffers: &'a [gltf::buffer::Data],
-        role: ColliderRole,
-        layer: u32,
-        out: Vec<CookedCollider>,
+    /// Read one node of the document into the cook's tree, parent transform
+    /// first.
+    fn read_node(
+        node: &gltf::Node<'_>,
+        buffers: &[gltf::buffer::Data],
+        parent: &Mat,
+        depth: usize,
+    ) -> Result<ColliderNode, ColliderCookError> {
+        if depth > MAX_DEPTH {
+            return Err(ColliderCookError::Gltf("nests nodes too deep".to_owned()));
+        }
+        let world = mul(parent, &node.transform().matrix());
+        let name = node.name().unwrap_or("").to_owned();
+        let (points, indices) = match node.mesh() {
+            Some(mesh) => read_mesh(&mesh, buffers, &world, is_col_name(&name))?,
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut children = Vec::new();
+        for child in node.children() {
+            children.push(read_node(&child, buffers, &world, depth + 1)?);
+        }
+        Ok(ColliderNode {
+            name,
+            points,
+            indices,
+            children,
+        })
     }
 
-    impl Cook<'_> {
-        /// Walk one node and its children, parent transform first.
-        fn visit(
-            &mut self,
-            node: &gltf::Node<'_>,
-            parent: &Mat,
-            depth: usize,
-        ) -> Result<(), ColliderCookError> {
-            if depth > MAX_DEPTH {
-                return Err(ColliderCookError::Gltf("nests nodes too deep".to_owned()));
-            }
-            let world = mul(parent, &node.transform().matrix());
-            let name = node.name().unwrap_or("");
-            if let (true, Some(mesh)) = (is_col_name(name), node.mesh()) {
-                self.collect(name, &mesh, &world)?;
-            }
-            for child in node.children() {
-                self.visit(&child, &world, depth + 1)?;
-            }
-            Ok(())
-        }
-
-        /// Merge a node's primitives (world space) and cook the one collider.
-        fn collect(
-            &mut self,
-            name: &str,
-            mesh: &gltf::Mesh<'_>,
-            world: &Mat,
-        ) -> Result<(), ColliderCookError> {
-            if name.len() > MAX_NAME_BYTES {
-                return Err(ColliderCookError::BadName);
-            }
-            let mut positions: Vec<[f32; 3]> = Vec::new();
-            let mut indices: Vec<u32> = Vec::new();
-            for primitive in mesh.primitives() {
-                if primitive.mode() != gltf::mesh::Mode::Triangles {
+    /// Merge a node's primitives (world space) into points and triangle
+    /// indices. A primitive that is not triangles carries no surface for a
+    /// hull, so it is only refused for tagged art, which must be exact.
+    fn read_mesh(
+        mesh: &gltf::Mesh<'_>,
+        buffers: &[gltf::buffer::Data],
+        world: &Mat,
+        tagged: bool,
+    ) -> Result<(Vec<[f32; 3]>, Vec<u32>), ColliderCookError> {
+        let mut positions: Vec<[f32; 3]> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for primitive in mesh.primitives() {
+            if primitive.mode() != gltf::mesh::Mode::Triangles {
+                if tagged {
                     return Err(ColliderCookError::Gltf(
                         "collider primitive is not triangles".to_owned(),
                     ));
                 }
-                let buffers = self.buffers;
-                let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| &*d.0));
-                let base =
-                    u32::try_from(positions.len()).map_err(|_| ColliderCookError::TooLarge {
-                        what: "vertices",
-                        count: positions.len(),
-                    })?;
-                let local: Vec<[f32; 3]> = reader
-                    .read_positions()
-                    .ok_or_else(|| ColliderCookError::Gltf("collider has no POSITION".to_owned()))?
-                    .collect();
-                let count =
-                    u32::try_from(local.len()).map_err(|_| ColliderCookError::TooLarge {
-                        what: "vertices",
-                        count: local.len(),
-                    })?;
-                match reader.read_indices() {
-                    Some(read) => indices.extend(read.into_u32().map(|i| i.saturating_add(base))),
-                    None => indices.extend((0..count).map(|i| i + base)),
-                }
-                positions.extend(local.into_iter().map(|p| apply(world, p)));
+                continue;
             }
-            let shape = match self.role {
-                ColliderRole::DynamicProp => cook_hull(&positions, MAX_HULL_POINTS)?,
-                ColliderRole::StaticKit => cook_mesh(&positions, &indices)?,
-            };
-            self.out.push(CookedCollider {
-                name: name.to_owned(),
-                layer: self.layer,
-                shape,
-            });
-            Ok(())
+            let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| &*d.0));
+            let base = u32::try_from(positions.len()).map_err(|_| ColliderCookError::TooLarge {
+                what: "vertices",
+                count: positions.len(),
+            })?;
+            let local: Vec<[f32; 3]> = reader
+                .read_positions()
+                .ok_or_else(|| ColliderCookError::Gltf("collider has no POSITION".to_owned()))?
+                .collect();
+            let count = u32::try_from(local.len()).map_err(|_| ColliderCookError::TooLarge {
+                what: "vertices",
+                count: local.len(),
+            })?;
+            match reader.read_indices() {
+                Some(read) => indices.extend(read.into_u32().map(|i| i.saturating_add(base))),
+                None => indices.extend((0..count).map(|i| i + base)),
+            }
+            positions.extend(local.into_iter().map(|p| apply(world, p)));
         }
+        Ok((positions, indices))
     }
 
-    /// Cook every `COL_` node with a mesh in glTF bytes (`.gltf` or `.glb`) into
-    /// one collider each, in scene document order, node transforms applied (so a
-    /// file authored in place cooks in place). `role` picks hull or mesh and
-    /// `layer` is the single layer bit every collider carries.
+    /// Cook the colliders of glTF bytes (`.gltf` or `.glb`), in scene document
+    /// order, node transforms applied (so a file authored in place cooks in
+    /// place).
+    ///
+    /// `role` picks the shape of the tagged art (hull or mesh) and `layer` is
+    /// the layer bit the tagged colliders carry; an untagged mesh cooks an
+    /// automatic hull on the PROP layer.
     pub fn cook_gltf_colliders(
         bytes: &[u8],
         role: ColliderRole,
         layer: u32,
-    ) -> Result<ColliderSet, ColliderCookError> {
+    ) -> Result<CookedColliders, ColliderCookError> {
         if bytes.len() > MAX_BYTES {
             return Err(ColliderCookError::TooLarge {
                 what: "glTF bytes",
@@ -831,26 +1063,13 @@ mod from_gltf {
         let parsed = gltf::Gltf::from_slice(bytes).map_err(|e| gltf_err(&e))?;
         let buffers = gltf::import_buffers(&parsed.document, None, parsed.blob.clone())
             .map_err(|e| gltf_err(&e))?;
-        let mut cook = Cook {
-            buffers: &buffers,
-            role,
-            layer,
-            out: Vec::new(),
-        };
+        let mut roots = Vec::new();
         for scene in parsed.document.scenes() {
             for node in scene.nodes() {
-                cook.visit(&node, &IDENTITY, 0)?;
+                roots.push(read_node(&node, &buffers, &IDENTITY, 0)?);
             }
         }
-        if cook.out.is_empty() {
-            return Err(ColliderCookError::NoCollider);
-        }
-        let set = ColliderSet {
-            colliders: cook.out,
-        };
-        // Refuse a repeated id or bound here, with the typed reason, not at write time.
-        set.encode()?;
-        Ok(set)
+        cook_nodes(&roots, role, layer)
     }
 }
 
@@ -1205,6 +1424,160 @@ mod tests {
         );
     }
 
+    /// One cube node: the eight corners and the twelve triangles of a box.
+    fn cube_node(name: &str) -> ColliderNode {
+        ColliderNode {
+            name: name.to_owned(),
+            points: cube_points(),
+            indices: vec![
+                0, 1, 3, 0, 3, 2, 4, 6, 7, 4, 7, 5, 0, 4, 5, 0, 5, 1, 2, 3, 7, 2, 7, 6, 0, 2, 6, 0,
+                6, 4, 1, 5, 7, 1, 7, 3,
+            ],
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn collider_cook_a_plain_mesh_cooks_one_hull() {
+        let cooked =
+            cook_nodes(&[cube_node("Body")], ColliderRole::DynamicProp, WORLD).expect("cooks");
+        assert_eq!(
+            cooked.set.colliders.len(),
+            1,
+            "an untagged mesh cooks a hull"
+        );
+        let c = &cooked.set.colliders[0];
+        assert_eq!((c.name.as_str(), c.layer), ("Body", PROP_LAYER));
+        let (points, faces) = hull_parts(c.shape.clone());
+        assert_eq!(points.len(), 8, "the hull of a box is 8 points");
+        assert_eq!(faces.len(), 12);
+        assert_eq!(
+            cooked.receipt,
+            ColliderReceipt {
+                tagged: 0,
+                auto: 1,
+                opted_out: 0
+            }
+        );
+    }
+
+    #[test]
+    fn collider_cook_a_nocol_mesh_cooks_none() {
+        let cooked = cook_nodes(
+            &[cube_node("NOCOL_flame")],
+            ColliderRole::DynamicProp,
+            WORLD,
+        )
+        .expect("cooks");
+        assert!(cooked.set.colliders.is_empty(), "the art opted out");
+        assert_eq!(
+            cooked.receipt,
+            ColliderReceipt {
+                tagged: 0,
+                auto: 0,
+                opted_out: 1
+            }
+        );
+        assert_eq!(
+            cooked.receipt.to_string(),
+            "colliders: 0 tagged, 0 auto, 1 opted out"
+        );
+    }
+
+    #[test]
+    fn collider_cook_a_mesh_with_a_col_child_cooks_only_the_tagged_shape() {
+        let mut parent = cube_node("Body");
+        parent.children.push(cube_node("COL_box"));
+        let cooked = cook_nodes(&[parent], ColliderRole::DynamicProp, WORLD).expect("cooks");
+        assert_eq!(cooked.set.colliders.len(), 1, "only the tagged shape cooks");
+        let c = &cooked.set.colliders[0];
+        assert_eq!((c.name.as_str(), c.layer), ("COL_box", WORLD));
+        let (points, _) = hull_parts(c.shape.clone());
+        assert_eq!(points.len(), 8);
+        assert_eq!(
+            cooked.receipt,
+            ColliderReceipt {
+                tagged: 1,
+                auto: 0,
+                opted_out: 0
+            }
+        );
+    }
+
+    #[test]
+    fn collider_cook_the_receipt_line_names_the_three_counts() {
+        let cooked = cook_nodes(
+            &[
+                cube_node("Body"),
+                cube_node("NOCOL_flame"),
+                cube_node("COL_box"),
+            ],
+            ColliderRole::DynamicProp,
+            WORLD,
+        )
+        .expect("cooks");
+        assert_eq!(cooked.set.colliders.len(), 2, "the opt-out cooks nothing");
+        assert_eq!(
+            cooked.receipt.to_string(),
+            "colliders: 1 tagged, 1 auto, 1 opted out"
+        );
+    }
+
+    #[test]
+    fn collider_cook_two_cooks_give_identical_bytes() {
+        let tree = [cube_node("Body"), cube_node("COL_box")];
+        let first = cook_nodes(&tree, ColliderRole::DynamicProp, WORLD).expect("cooks");
+        let again = cook_nodes(&tree, ColliderRole::DynamicProp, WORLD).expect("cooks");
+        assert_eq!(first, again, "same art, same cook");
+        assert_eq!(
+            first.set.encode().expect("encodes"),
+            again.set.encode().expect("encodes"),
+            "same art, same bytes"
+        );
+    }
+
+    #[test]
+    fn collider_cook_two_meshes_with_one_name_cook_two_hulls() {
+        let cooked = cook_nodes(
+            &[cube_node("Body"), cube_node("Body")],
+            ColliderRole::DynamicProp,
+            WORLD,
+        )
+        .expect("cooks");
+        assert_eq!(cooked.set.colliders.len(), 2);
+        assert_eq!(cooked.set.colliders[0].name, "Body");
+        assert_eq!(cooked.set.colliders[1].name, "Body#2");
+    }
+
+    #[test]
+    fn collider_cook_a_mesh_with_no_solid_cooks_no_hull() {
+        let mut plane = cube_node("Plane");
+        plane.points = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        plane.indices = vec![0, 1, 2];
+        let cooked = cook_nodes(&[plane], ColliderRole::DynamicProp, WORLD).expect("cooks");
+        assert!(
+            cooked.set.colliders.is_empty(),
+            "a plane has no volume to wrap"
+        );
+        assert_eq!(cooked.receipt.opted_out, 1);
+    }
+
+    #[test]
+    fn collider_cook_art_without_a_mesh_is_refused() {
+        let node = ColliderNode {
+            name: "Body".to_owned(),
+            ..ColliderNode::default()
+        };
+        assert_eq!(
+            cook_nodes(&[node], ColliderRole::DynamicProp, WORLD),
+            Err(ColliderCookError::NoCollider)
+        );
+        assert_eq!(
+            cook_nodes(&[cube_node("Body")], ColliderRole::DynamicProp, 0),
+            Err(ColliderCookError::BadLayer(0))
+        );
+    }
+
     #[cfg(feature = "import")]
     mod gltf_files {
         use super::*;
@@ -1231,8 +1604,9 @@ mod tests {
             out
         }
 
-        /// A glTF with one cube mesh (corners at +-0.5) and the given nodes JSON.
-        fn cube_gltf(nodes: &str) -> Vec<u8> {
+        /// A glTF with one cube mesh (corners at +-0.5), the given nodes JSON and
+        /// the given scene roots.
+        fn cube_gltf(nodes: &str, scene: &str) -> Vec<u8> {
             let mut buffer = Vec::new();
             for x in [-0.5f32, 0.5] {
                 for y in [-0.5f32, 0.5] {
@@ -1262,7 +1636,7 @@ mod tests {
             }
             format!(
                 concat!(
-                    "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0,1]}}],",
+                    "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":{scene}}}],",
                     "\"nodes\":{nodes},",
                     "\"meshes\":[{{\"primitives\":[{{\"attributes\":{{\"POSITION\":0}},\"indices\":1}}]}}],",
                     "\"buffers\":[{{\"uri\":\"data:application/octet-stream;base64,{uri}\",\"byteLength\":{len}}}],",
@@ -1273,20 +1647,23 @@ mod tests {
                     "{{\"bufferView\":1,\"componentType\":5123,\"count\":36,\"type\":\"SCALAR\"}}]}}"
                 ),
                 nodes = nodes,
+                scene = scene,
                 uri = b64(&buffer),
                 len = buffer.len(),
             )
             .into_bytes()
         }
 
-        const PLACED: &str = "[{\"name\":\"Body\",\"mesh\":0},{\"name\":\"COL_pillar\",\"mesh\":0,\"translation\":[4,1,2],\"scale\":[1,3,1]}]";
+        /// A render mesh with a `COL_` child: the child holds the shape.
+        const PLACED: &str = "[{\"name\":\"Body\",\"mesh\":0,\"children\":[1]},{\"name\":\"COL_pillar\",\"mesh\":0,\"translation\":[4,1,2],\"scale\":[1,3,1]}]";
 
         #[test]
         fn collider_cook_a_prop_node_becomes_a_hull_in_world_space() {
-            let set = cook_gltf_colliders(&cube_gltf(PLACED), ColliderRole::DynamicProp, PROP)
-                .expect("cooks");
-            assert_eq!(set.colliders.len(), 1, "only the COL_ node cooks");
-            let c = &set.colliders[0];
+            let cooked =
+                cook_gltf_colliders(&cube_gltf(PLACED, "[0]"), ColliderRole::DynamicProp, PROP)
+                    .expect("cooks");
+            assert_eq!(cooked.set.colliders.len(), 1, "only the COL_ node cooks");
+            let c = &cooked.set.colliders[0];
             assert_eq!((c.name.as_str(), c.layer), ("COL_pillar", PROP));
             let (points, faces) = hull_parts(c.shape.clone());
             assert_eq!(points.len(), 8, "the hull of a box is 8 points");
@@ -1299,33 +1676,49 @@ mod tests {
                 );
                 assert!((1.5..=2.5).contains(&p[2]), "z placed: {p:?}");
             }
+            assert_eq!(cooked.receipt.tagged, 1);
+            assert_eq!(cooked.receipt.auto, 0);
+        }
+
+        #[test]
+        fn collider_cook_an_untagged_mesh_cooks_an_automatic_hull() {
+            let gltf = cube_gltf("[{\"name\":\"Body\",\"mesh\":0}]", "[0]");
+            let cooked =
+                cook_gltf_colliders(&gltf, ColliderRole::DynamicProp, PROP).expect("cooks");
+            assert_eq!(cooked.set.colliders.len(), 1, "an untagged mesh cooks");
+            let c = &cooked.set.colliders[0];
+            assert_eq!((c.name.as_str(), c.layer), ("Body", PROP_LAYER));
+            let (points, _) = hull_parts(c.shape.clone());
+            assert_eq!(points.len(), 8);
+            assert_eq!(cooked.receipt.auto, 1);
+            assert_eq!(cooked.receipt.tagged, 0);
         }
 
         #[test]
         fn collider_cook_a_static_node_becomes_a_welded_mesh_and_cooks_twice_equal() {
-            let gltf = cube_gltf(PLACED);
+            let gltf = cube_gltf(PLACED, "[0]");
             let first = cook_gltf_colliders(&gltf, ColliderRole::StaticKit, WORLD).expect("cooks");
-            let ColliderShape::Mesh { vertices, indices } = &first.colliders[0].shape else {
+            let ColliderShape::Mesh { vertices, indices } = &first.set.colliders[0].shape else {
                 panic!("a static piece is a mesh");
             };
             assert_eq!((vertices.len(), indices.len()), (8, 36));
             let again = cook_gltf_colliders(&gltf, ColliderRole::StaticKit, WORLD).expect("cooks");
             assert_eq!(
-                first.encode().expect("bytes"),
-                again.encode().expect("bytes")
+                first.set.encode().expect("bytes"),
+                again.set.encode().expect("bytes")
             );
         }
 
         #[test]
         fn collider_cook_refuses_a_file_without_colliders_or_a_bad_layer_or_junk() {
-            let plain =
-                cube_gltf("[{\"name\":\"Body\",\"mesh\":0},{\"name\":\"Prop\",\"mesh\":0}]");
+            let plain = cube_gltf("[{\"name\":\"Body\"},{\"name\":\"Prop\"}]", "[0,1]");
             assert_eq!(
-                cook_gltf_colliders(&plain, ColliderRole::StaticKit, WORLD),
+                cook_gltf_colliders(&plain, ColliderRole::StaticKit, WORLD).map(|c| c.set),
                 Err(ColliderCookError::NoCollider)
             );
             assert_eq!(
-                cook_gltf_colliders(&cube_gltf(PLACED), ColliderRole::StaticKit, 0),
+                cook_gltf_colliders(&cube_gltf(PLACED, "[0]"), ColliderRole::StaticKit, 0)
+                    .map(|c| c.set),
                 Err(ColliderCookError::BadLayer(0))
             );
             assert!(matches!(
@@ -1336,22 +1729,38 @@ mod tests {
 
         /// The shipped kit art already carries `COL_` boxes (each face cut 4x4): the
         /// crate is a prop (eight points), the walls a static piece (the welded
-        /// 98-vertex, 192-triangle skin of a box).
+        /// 98-vertex, 192-triangle skin of a box). Every other mesh of the kit
+        /// collides too: collision is on unless the art says otherwise.
         #[test]
         fn collider_cook_reads_the_shipped_kit_colliders() {
             let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../content/arena/src/");
             let crate_bytes = std::fs::read(format!("{dir}crate.gltf")).expect("kit crate");
-            let set =
+            let cooked =
                 cook_gltf_colliders(&crate_bytes, ColliderRole::DynamicProp, PROP).expect("cooks");
-            let (points, _) = hull_parts(set.colliders[0].shape.clone());
+            let tagged = cooked
+                .set
+                .colliders
+                .iter()
+                .find(|c| c.name == "COL_crate")
+                .expect("the crate carries a tagged collider");
+            let (points, _) = hull_parts(tagged.shape.clone());
+            assert_eq!((tagged.layer, points.len()), (PROP, 8));
+            assert_eq!(cooked.receipt.tagged, 1, "one tagged collider");
             assert_eq!(
-                (set.colliders[0].name.as_str(), points.len()),
-                ("COL_crate", 8)
+                cooked.receipt.auto, 7,
+                "the crate body and its six fracture panels"
             );
+            assert_eq!(cooked.receipt.opted_out, 0);
             let walls_bytes = std::fs::read(format!("{dir}walls.gltf")).expect("kit walls");
             let walls =
                 cook_gltf_colliders(&walls_bytes, ColliderRole::StaticKit, WORLD).expect("cooks");
-            let ColliderShape::Mesh { vertices, indices } = &walls.colliders[0].shape else {
+            let tagged = walls
+                .set
+                .colliders
+                .iter()
+                .find(|c| c.name == "COL_walls")
+                .expect("the walls carry a tagged collider");
+            let ColliderShape::Mesh { vertices, indices } = &tagged.shape else {
                 panic!("walls are a mesh");
             };
             assert_eq!(indices.len(), 3 * 192, "6 faces x 16 cells x 2 triangles");
@@ -1360,6 +1769,8 @@ mod tests {
                 "welding joins the shared box edges, got {}",
                 vertices.len()
             );
+            assert_eq!(walls.receipt.tagged, 1);
+            assert_eq!(walls.receipt.auto, 6, "the wall and its five merlons");
         }
     }
 }

@@ -1,6 +1,5 @@
 //! The eight arena kit glTF files (`content/arena/src`) through every geo tool: the bars of
-//! rows GEO2-GEO5 on real content. Needs feature `kit`; each test is also gated by its tool's feature.
-#![cfg(feature = "kit")]
+//! rows GEO2-GEO5 on real content. Each test is gated by its tool's feature.
 
 use engine_assets::cooked::CookedMesh;
 use engine_assets::mesh_import::import_gltf_path;

@@ -1,0 +1,20 @@
+{
+  "provider": "ovh-ai-endpoints",
+  "model": "stable-diffusion-xl-base-v10",
+  "endpoint": "https://stable-diffusion-xl.endpoints.kepler.ai.cloud.ovh.net/api/text2image",
+  "cost": "0 per request, anonymous, 2 requests per minute per IP",
+  "licence": "OpenRAIL++-M (Stability AI Community Licence)",
+  "commercial_use": true,
+  "served_from": "FR/EU",
+  "prompt": "single character only, one figure, front view full body of a lean orc in a bone mask and dark robe, slender build, bone mask, a runewrought stave held upright in the left hand, the right hand open, black iron plate armour with bronze trim, blood red cloth, bone studs, standing straight facing the viewer, both arms held out from the sides away from the body, plain mid grey background, even flat lighting, whole body from head to boots in frame, stylized video game concept art, no layout, no panels, no studies, no text",
+  "negative_prompt": "text, watermark, extra limbs, extra fingers, blurry, lowres, jpeg artifacts, photorealistic, multiple characters, scenery, background objects",
+  "size": "1024x1024",
+  "output": "content/generated/concepts/concept_ashkin_rune.jpg",
+  "bytes": 1155723,
+  "class_id": "ashkin_rune",
+  "faction": "ashkin",
+  "role": "AoE nuker",
+  "loadout_sha": "14bdf57c64d4",
+  "purpose": "reference for the base mesh only: never a shipped asset, and the shipped mesh is rebuilt by us",
+  "template": "front view, arms out, plain background: the input is the lever"
+}

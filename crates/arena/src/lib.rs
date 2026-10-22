@@ -64,6 +64,8 @@ pub mod eqs_bind;
 pub mod fork;
 pub mod gameworld;
 pub mod gym;
+/// Weapon weight in the live duel (FEEL1): one `weapons.rows` row per slot.
+pub mod heft;
 pub mod input_layers;
 pub mod legion_bind;
 pub mod limbs;
@@ -1792,6 +1794,9 @@ impl Sim {
         // leaves the hash untouched, so the golden and the arena digest
         // never move.
         let hash = self.bolt.as_ref().map_or(hash, |bolt| bolt.fold(hash));
+        // Armed weapon rows fold the same way: a match that never arms one
+        // leaves the hash untouched.
+        let hash = heft::fold(hash, &self.fight, self.fighters);
         // The height channel folds only when armed, so the golden bytes stay
         // exactly as they were on a floor-plane match.
         let hash = if self.height {

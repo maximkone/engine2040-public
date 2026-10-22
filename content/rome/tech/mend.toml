@@ -1,0 +1,80 @@
+# The mend bench: the kit wears, and the mend puts it back to work.
+#
+# Rome's soldiers carried kit that wore out and broke: the gladius lost its
+# edge, the dolabra dulled with every dig, the lorica plates lost their rivets
+# and the hobnails wore out of the caligae. The mend restores them: the edge is
+# reground, the lobate hinge is riveted again, the nails are replaced.
+#
+# The file is data. `crates/rome/src/kit.rs` reads it: a `[wear.<piece>]` rule
+# says what a stroke or a hit takes off a piece and where it stops working (its
+# bar), and a `[mend.<piece>]` job says what a mend takes (tool, work and the
+# material it eats). A lobate hinge is two halves, so a mend wants five rivets
+# per half.
+#
+# Every number names its source in `ref`. A section that holds a number and no
+# `ref` is refused by the reader, so no number enters the game unsourced. The
+# wear and the work are our first version; the sources name the method.
+
+[wear.dolabra.edge]
+full = 250
+bar = 100
+halves = 1
+wear_per_stroke = 1
+wear_per_hit = 0
+ref = "rome.md section 4.4, the mend kit row: the dolabra digs and chops (Josephus, Jewish War 3.95); the edge is spent after a day's digging, the numbers are our first version"
+
+[wear.gladius.edge]
+full = 100
+bar = 25
+halves = 1
+wear_per_stroke = 0
+wear_per_hit = 2
+ref = "rome.md section 4.4, the mend kit row: regrind a gladius edge (Vegetius 1.12 for the thrust); a blow dulls the edge, the numbers are our first version"
+
+[wear.lorica.hinge]
+full = 60
+bar = 15
+halves = 2
+wear_per_stroke = 0
+wear_per_hit = 1
+ref = "rome.md section 4.4, the mend kit row: rivet a lorica plate (lobate hinges, 5 rivets per half); a blow works the rivets loose, the numbers are our first version"
+
+[wear.caligae.hobnails]
+full = 200
+bar = 50
+halves = 2
+wear_per_stroke = 1
+wear_per_hit = 0
+ref = "rome.md section 4.4, the mend kit row: replace hobnails (section 4.4 for the hobnails); a step on the march wears a nail like a stroke wears a dig, the numbers are our first version"
+
+[mend.dolabra.edge]
+tool = "whetstone"
+unit = "stroke"
+work = 4
+ticks_per_unit = 60
+ref = "rome.md section 4.4, the mend kit row: regrind a gladius edge; the dolabra is ground on the same whetstone, the work is our first version"
+
+[mend.gladius.edge]
+tool = "whetstone"
+unit = "stroke"
+work = 4
+ticks_per_unit = 60
+ref = "rome.md section 4.4, the mend kit row: regrind a gladius edge; the grind takes four strokes on the whetstone, the work is our first version"
+
+[mend.lorica.hinge]
+tool = "hammer"
+unit = "stroke"
+work = 5
+ticks_per_unit = 60
+material = "rivets"
+per_half = 5
+ref = "rome.md section 4.4, the mend kit row: rivet a lorica plate (lobate hinges, 5 rivets per half); a lobate hinge is two halves, so the mend wants ten rivets"
+
+[mend.caligae.hobnails]
+tool = "hammer"
+unit = "stroke"
+work = 2
+ticks_per_unit = 60
+material = "nails"
+per_half = 4
+ref = "rome.md section 4.4, the mend kit row: replace hobnails; a pair of caligae is two halves, the nails are our first version"
