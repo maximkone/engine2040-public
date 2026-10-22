@@ -30,10 +30,22 @@ are test-only and I say so instead of deleting them. Five have a live caller.
 | `crates/ui/src/settings.rs` | 1,722 | live. `crates/ui/src/menus.rs:18` imports it | `git grep -n "crate::settings" -- crates/ui/src` = 1 hit | no |
 
 Removed: 6 lines in 2 files. The two constants were public, so
-`tools/api-break.baseline.json` still lists `text::Atlas::ATLAS_W` and `text::Atlas::ATLAS_H`.
+`tools/api-break.baseline.json` still listed `text::Atlas::ATLAS_W` and `text::Atlas::ATLAS_H`.
 That file records the whole workspace, so the lead re-blesses it once after the deletion wave
 (`node tools/api-break.mjs --write`). `tools/` belongs to the speedup lane, so I did not touch it.
 `api-break` is not in CI (`ci.yml` runs `workspace-check` and `rust-quality` only).
+
+**Re-blessed 2026-10-22, commit 44ebebe18.** The lead ran the write, in a clean worktree of
+70ffe43d6, and it recorded 38 crates with 0 breaks. The clean worktree is the point: `--write`
+records the WORKING TREE, so running it in the shared tree while other lanes had in-flight code
+there would have blessed their half-written API instead of the committed surface. The re-bless
+also cleared the whole accumulated drift, not just these two constants: before it, the check
+reported breaks in 38 of 38 crates (100 in engine-ai, 180 in engine-arena, 22 in engine-combat),
+so the gate had gone to noise. `text::Atlas::ATLAS_W` and `text::Atlas::ATLAS_H` are gone from
+the baseline, as the deletion wave intended.
+
+The row that asked for this is OPT23 in `docs/plan/quality.md`. It stays open: `api-break` is
+still not a CI gate, so a break is only found when someone runs the tool.
 
 ## 2. Feature flags in my four crates
 

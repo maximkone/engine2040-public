@@ -18,9 +18,23 @@ impl Presenter {
         device: wgpu::Device,
         queue: wgpu::Queue,
     ) -> Result<Self, PresentError> {
+        Self::init_offscreen_from_device_with_preset(adapter, device, queue, false)
+    }
+
+    /// Build the headless presenter under one sky preset on a device the
+    /// caller opened itself. `night` picks the arena night rig: the
+    /// moonlit sky, its ambient and its fog, so the placement's torches
+    /// are the light the frame reads. The day rig is the default and keeps
+    /// every existing capture byte-equal.
+    pub fn init_offscreen_from_device_with_preset(
+        adapter: &wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        night: bool,
+    ) -> Result<Self, PresentError> {
         // EG13: the adapter owns the MSAA count; read its 4x support once.
         let support = Self::msaa_support_for(adapter);
-        Self::build(device, queue, adapter.get_info(), support)
+        Self::build_with_preset(device, queue, adapter.get_info(), support, night)
     }
 
     /// What every presenter device is opened with: pass timestamps when the

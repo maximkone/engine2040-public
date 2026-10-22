@@ -409,7 +409,7 @@ add CQ37 typed-error slice packet 2 (post.rs `PostError` String variants at `cra
 | OPT11 | crate fan-out cut | C | waits OPT7 |
 | OPT15 | CPU frame pipelining | C | waits ARC6 |
 | OPT16 | GPU feature ladder | B | waits VG1 |
-| OPT23 | API-break check | C | waits API2 |
+| OPT23 | API-break check | C | the baseline is re-blessed (44ebebe18, 2026-10-22): 0 breaks over 38 crates at 70ffe43d6. The row stays open: `api-break` is still not a CI gate (`ci.yml` runs `workspace-check` and `rust-quality` only), so a break is only found when someone runs the tool. Wiring it into CI is the rest of this row. |
 | OPT26 | scorecard router | B | waits OPT24 |
 | OPT28 | prompts as versioned assets | B | waits OPT24 |
 | OPT21 | mutation testing ratchet | A | LATER |

@@ -16,9 +16,16 @@
 //! offline per key from several seeded Voronoi candidates by a fixed score
 //! (no slivers, no big leftover slab). No network, weights or donor bytes
 //! exist; the tick only reads the table.
+//!
+//! Two callers ride on the table. [`ImpactTable::spawn`] is the raw read:
+//! one integer index, one borrowed fragment set. [`ImpactTable::spawn_bonded`]
+//! is the runtime path over bonded chunks: it serves the fragment set for
+//! the impact, turns it into a bonded descriptor and severs the struck
+//! chunk, so a caller gets break events without clipping at the tick.
 
 use crate::bake3d::Chunk3;
 use crate::bond_grade::{floor_to_i32, sliver_chunks};
+use crate::bonded::BreakEvent;
 use crate::csg::{mesh_aabb, validate_mesh, PropMesh};
 use crate::fracture::{
     chunk_boxes, fracture_at, Fracture, FractureError, FractureSpec, MAX_FRACTURE_CELLS,
@@ -117,6 +124,19 @@ pub struct ImpactTable {
     min_mm: [i32; 3],
     max_mm: [i32; 3],
     entries: Vec<Fracture>,
+}
+
+/// What one spawn over bonded chunks produced: the fragment count of the
+/// served set, the chunk that took the hit and the break events of the
+/// strike, in the bonded layer's own order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpawnedBreak {
+    /// Bonded chunks in the served fragment set.
+    pub chunks: usize,
+    /// Chunk that took the hit.
+    pub hit_chunk: u32,
+    /// Break events of the strike, bond snaps before freed chunks.
+    pub events: Vec<BreakEvent>,
 }
 
 impl ImpactTable {
@@ -233,6 +253,34 @@ impl ImpactTable {
     ) -> Result<&Fracture, ImpactError> {
         let slot = self.index_of(pos_mm, dir_mm, impulse)?;
         self.entries.get(slot).ok_or(ImpactError::BadImpact)
+    }
+
+    /// Runtime spawn over bonded chunks: the fragment set for the impact,
+    /// turned into a bonded descriptor, and the break events of the strike
+    /// on that descriptor. The struck chunk is severed at `tick`, so the
+    /// events name the bond snaps and the freed chunks. This is the call
+    /// the tick makes: no clip runs, the table read is the whole cost.
+    ///
+    /// The events are the bonded chunks' own, so a caller hashes them the
+    /// way it hashes any other break.
+    pub fn spawn_bonded(
+        &self,
+        pos_mm: [i32; 3],
+        dir_mm: [i32; 3],
+        impulse: u32,
+        tick: u32,
+        breaking_strain: f32,
+        break_threshold: f32,
+    ) -> Result<SpawnedBreak, ImpactError> {
+        let cut = self.spawn(pos_mm, dir_mm, impulse)?;
+        let events = cut
+            .break_events(tick, breaking_strain, break_threshold)
+            .map_err(ImpactError::Fracture)?;
+        Ok(SpawnedBreak {
+            chunks: cut.chunks.len(),
+            hit_chunk: cut.hit_chunk,
+            events,
+        })
     }
 
     /// Table bytes: version, grid, box, then every entry's bytes
@@ -382,6 +430,79 @@ mod tests {
         )
     }
 
+    /// Integer volumes of a fragment set, in cubic millimeters, sorted; the
+    /// zero-volume pieces are dropped (they carry no mass). Integer only, so
+    /// the same set reads the same on every PC.
+    fn piece_volumes_mm3(chunks: &[Chunk3]) -> Vec<i64> {
+        let mut volumes: Vec<i64> = chunks
+            .iter()
+            .map(|c| {
+                let (hx, hy, hz) = (
+                    i64::from(floor_to_i32(f64::from(c.hx) * 1000.0)),
+                    i64::from(floor_to_i32(f64::from(c.hy) * 1000.0)),
+                    i64::from(floor_to_i32(f64::from(c.hz) * 1000.0)),
+                );
+                (2 * hx).max(0) * (2 * hy).max(0) * (2 * hz).max(0)
+            })
+            .filter(|v| *v > 0)
+            .collect();
+        volumes.sort_unstable();
+        volumes
+    }
+
+    /// The blind judge's rubric for one fragment set, lower is better.
+    ///
+    /// The judge never sees which set came from the learned table, so it
+    /// must read a property the bake does not optimize. The bake's own
+    /// `score` is the sliver count (a needle's aspect ratio) plus the
+    /// biggest leftover share; the judge reads the *size distribution*
+    /// instead:
+    ///
+    /// - a speck (under a sixteenth of the mean piece) is a piece the player
+    ///   cannot see: 16 points each,
+    /// - a slab (over sixteen times the mean piece) is a lump that did not
+    ///   break: 16 points each,
+    /// - the spread of the pieces around their mean, in per-mille of the
+    ///   mean, is the rest: an even break has a low spread.
+    ///
+    /// Integer, so the same set always scores the same.
+    fn judge_penalty(chunks: &[Chunk3]) -> i64 {
+        let volumes = piece_volumes_mm3(chunks);
+        if volumes.len() < 2 {
+            return 0;
+        }
+        let count = i64::try_from(volumes.len()).unwrap_or(0);
+        let total: i64 = volumes.iter().sum();
+        let mean = total / count;
+        if mean <= 0 {
+            return 0;
+        }
+        let mut penalty = 0i64;
+        for v in &volumes {
+            if v * 16 < mean || *v > mean * 16 {
+                penalty += 16;
+            }
+        }
+        let spread: i64 = volumes.iter().map(|v| (v - mean).abs()).sum();
+        penalty + spread * 1000 / (mean * count)
+    }
+
+    /// The blind pick between two fragment sets: the judge reads the rubric
+    /// of each and names the better one, lower penalty first. It is blind to
+    /// which set is the learned one, so the caller shuffles the order and
+    /// checks the answer against the truth.
+    ///
+    /// `None` means the judge cannot tell them apart; the caller then flips
+    /// a seeded coin, which is the only fair reading of two sets it rates
+    /// equal.
+    fn judge_blind(a: &[Chunk3], b: &[Chunk3]) -> Option<bool> {
+        let (pa, pb) = (judge_penalty(a), judge_penalty(b));
+        if pa != pb {
+            return Some(pa < pb);
+        }
+        None
+    }
+
     #[test]
     fn three_shapes_bake_big_small_and_twice_the_same() {
         let mut total = 0usize;
@@ -472,6 +593,109 @@ mod tests {
         );
     }
 
+    /// The blind pick: on 20 seeded impact fixtures, the judge sees the
+    /// learned set and the plain seeded Voronoi cut in a shuffled order and
+    /// names the better one. The judge reads the size rubric, not the bake's
+    /// own score, so the pick is evidence and not a restatement.
+    ///
+    /// A fixture is a seeded impact (position, direction, impulse) drawn
+    /// from the table's own box; it lands on a key by the integer lookup.
+    /// Both tables hold the same key, so the two sets differ only in which
+    /// cut the codebook kept: the learned table keeps the best of the
+    /// candidate budget by the bake's own score, the plain table keeps the
+    /// plain seeded Voronoi cut (candidate 0) of the same key.
+    ///
+    /// A judge that cannot tell the two apart names neither: the fixture
+    /// counts as a miss, because a coin flip would only measure the seed.
+    #[test]
+    fn blind_pick_names_the_learned_set_on_most_fixtures() {
+        const FIXTURES: usize = 20;
+        let mesh = &shapes()[0];
+        let learned = ImpactTable::bake(mesh, &spec(), 3, MAX_CANDIDATES).expect("learned bakes");
+        let plain = ImpactTable::bake(mesh, &spec(), 3, 1).expect("plain bakes");
+        let mut rng = Rng::new(2040).fork_named("blind-pick");
+        let mut won = 0usize;
+        let mut tied = 0usize;
+        let mut same = 0usize;
+        for _ in 0..FIXTURES {
+            let (pos, dir, power) = impact(&mut rng, &learned);
+            let key = learned.index_of(pos, dir, power).expect("inside");
+            assert_eq!(
+                plain.index_of(pos, dir, power),
+                Ok(key),
+                "both tables share the key"
+            );
+            let (lb, pb) = (
+                chunk_boxes(&learned.entries[key]),
+                chunk_boxes(&plain.entries[key]),
+            );
+            if lb.len() == pb.len() && judge_penalty(&lb) == judge_penalty(&pb) {
+                same += 1;
+            }
+            // The order is shuffled per fixture, so the judge cannot read
+            // the answer off the position.
+            let learned_first = rng.next_range(0, 2) == 0;
+            let (first, second) = if learned_first {
+                (&lb, &pb)
+            } else {
+                (&pb, &lb)
+            };
+            let named_learned = match judge_blind(first, second) {
+                Some(first_is_better) => first_is_better == learned_first,
+                None => {
+                    tied += 1;
+                    false
+                }
+            };
+            won += usize::from(named_learned);
+        }
+        println!(
+            "blind pick: learned set named on {won} of {FIXTURES} fixtures \
+             ({tied} judge ties, {same} identical sets)",
+        );
+        assert!(
+            won >= 12,
+            "blind judge named the learned set on {won} of {FIXTURES} fixtures"
+        );
+    }
+
+    /// The judge's rubric is not the bake's own score: on a witness pair the
+    /// two orderings disagree, so a blind pick under the rubric is evidence
+    /// and not a restatement of the bake.
+    ///
+    /// The witness: two even cubes against the same two cubes plus a speck.
+    /// The bake's score prefers the specked set (the biggest piece holds a
+    /// smaller share of it); the rubric prefers the even set (no speck, no
+    /// spread).
+    #[test]
+    fn the_blind_judge_does_not_restate_the_bake_score() {
+        let cube = |h: f32| Chunk3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            hx: h,
+            hy: h,
+            hz: h,
+            mass: h * h * h * 8.0,
+        };
+        let even = vec![cube(0.5), cube(0.5)];
+        let specked = vec![cube(0.5), cube(0.5), cube(0.5), cube(0.05)];
+        assert!(
+            score(&specked) < score(&even),
+            "the bake score prefers the specked set: {} vs {}",
+            score(&specked),
+            score(&even)
+        );
+        assert!(
+            judge_penalty(&specked) > judge_penalty(&even),
+            "the rubric prefers the even set: {} vs {}",
+            judge_penalty(&specked),
+            judge_penalty(&even)
+        );
+        assert_eq!(judge_blind(&specked, &even), Some(false));
+        assert_eq!(judge_blind(&even, &specked), Some(true));
+    }
+
     #[test]
     fn spawn_is_a_table_read_under_half_a_millisecond() {
         let table = bake(&shapes()[0]);
@@ -490,6 +714,46 @@ mod tests {
             start.elapsed().as_micros() < 500 * 1000,
             "1000 spawns over 0.5 ms each"
         );
+    }
+
+    /// The spawn caller at the bonded level: an impact reads one table
+    /// entry and comes back with break events over the bonded chunks, and
+    /// the same impact reads the same events twice.
+    #[test]
+    fn spawn_bonded_serves_break_events_and_replays() {
+        use crate::bake::BREAKING_THRESHOLD;
+        let table = bake(&shapes()[0]);
+        let rng = Rng::new(31);
+        let run = || {
+            let mut rng = rng.fork(1);
+            let mut h = Fnv64::new();
+            for _ in 0..50 {
+                let (pos, dir, power) = impact(&mut rng, &table);
+                let out = table
+                    .spawn_bonded(pos, dir, power, 7, 2.0, BREAKING_THRESHOLD)
+                    .expect("spawns");
+                assert!(out.chunks >= 2, "{} bonded chunks", out.chunks);
+                assert!(out.hit_chunk < out.chunks as u32);
+                assert!(
+                    out.events.iter().all(|e| matches!(
+                        e,
+                        BreakEvent::BondBroken { tick: 7, .. }
+                            | BreakEvent::ChunkFreed { tick: 7, .. }
+                    )),
+                    "every event carries the strike tick"
+                );
+                for e in &out.events {
+                    h.write(&crate::bonded::event_bytes(e));
+                }
+            }
+            h.finish()
+        };
+        assert_eq!(run(), run(), "the bonded spawn replays to the same hash");
+        // A refused impact never reaches the bonded layer.
+        assert!(matches!(
+            table.spawn_bonded([999_999, 0, 0], [1, 0, 0], 0, 1, 2.0, BREAKING_THRESHOLD),
+            Err(ImpactError::BadImpact)
+        ));
     }
 
     #[test]

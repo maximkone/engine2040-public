@@ -11,6 +11,7 @@ import { archivedDoneRows, needsOf } from "./board-slice.mjs";
 import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
 import { OWN_MATH_FILES, deriveFixedApi, genreFindings, platformMathHits } from "./sim-source-scan.mjs";
 import { runWithVerdictCache, scanIslandsFrom } from "./wiring-scan.mjs";
+import { rowsWithReason, scan as scanUnwired, summaryLine as unwiredSummaryLine } from "./unwired-code-gate.mjs";
 
 // engine-core is the bottom layer (ARCHITECTURE.md): any crate may use it.
 // Without this, packets re-derived its hash, rng and alloc probe instead.
@@ -438,6 +439,29 @@ function saveWiringCache(repoDir, fp, line) {
     mkdirSync(join(repoDir, "target"), { recursive: true });
     writeFileSync(join(repoDir, "target", WIRING_CACHE), JSON.stringify({ fp, line, at: Date.now() }));
   } catch { /* wiring cache is best-effort */ }
+}
+
+// PW48: the unwired-code gate gets a caller. AD5 asked for a gate that no
+// dead public module hides behind; the tool existed and nobody ran it, which
+// is the same disease it reports. The audit runs the scan in process (no
+// child, no node startup) and prints one report-only line.
+//
+// Report-only on purpose: the sharp half is a count of dead public modules
+// today, so a hard gate would be red before any work lands. The hard version
+// is the same scan with `--fail`.
+//
+// The sharp half stays separate from the feature-gated modules: a module
+// whose only callers sit behind a feature the default build does not turn on
+// is a different disease, so only the `no-caller` rows are counted here. The
+// numbers come from the scan, never from a constant.
+export function unwiredModulesLine(cratesDir) {
+  try {
+    const unwired = scanUnwired(cratesDir);
+    const sharp = rowsWithReason(unwired, "no-caller");
+    return `WARN unwired modules (report-only): ${unwiredSummaryLine(unwired, sharp)}`;
+  } catch (error) {
+    return `WARN unwired modules (report-only): check failed: ${String(error.message).split("\n")[0]}`;
+  }
 }
 
 // CDX6: a Rome number needs a source. The Rome loader (crates/rome/src/table.rs)
@@ -1097,6 +1121,11 @@ function audit(repoDir) {
     console.log(`WARN wiring (report-only): ${wireOut}`);
   } catch (error) { console.log(`WARN wiring (report-only): check failed: ${String(error.message).split("\n")[0]}`); }
   try { const flakyOut = execFileSync(process.execPath, [join(repoDir, "tools", "flaky-quarantine.mjs"), "--self-test"], { encoding: "utf8" }).split("\n").find((l) => l.startsWith("PASS"))?.trim(); console.log(`WARN flaky (report-only): ${flakyOut ?? "no PASS line"}`); } catch (error) { console.log(`WARN flaky (report-only): check failed: ${String(error.message).split("\n")[0]}`); }
+  // PW48: the unwired-code gate gets a caller. AD5 asked for a gate that no
+  // dead public module hides behind; the tool existed and nobody ran it,
+  // which is the same disease it reports. The audit runs it in process (no
+  // child, no node startup) and prints one report-only line.
+  console.log(unwiredModulesLine(cratesDir));
   if (errors.length) throw new Error(errors.join("\n"));
   console.log(`PASS workspace: ${workspacePackages.length} packages share version/edition/license/rust-version`);
   console.log("PASS dependency edges and std-only engine-core");

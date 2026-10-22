@@ -804,6 +804,20 @@ impl Presenter {
         info: wgpu::AdapterInfo,
         support: MsaaSupport,
     ) -> Result<Self, PresentError> {
+        Self::build_with_preset(device, queue, info, support, false)
+    }
+
+    /// Build the presenter under one sky preset. `night` picks the arena
+    /// night rig: the moonlit sky, its ambient and its fog, so the
+    /// placement's torches are the light the frame reads. The day preset
+    /// is the default and keeps every existing capture byte-equal.
+    pub(super) fn build_with_preset(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        info: wgpu::AdapterInfo,
+        support: MsaaSupport,
+        night: bool,
+    ) -> Result<Self, PresentError> {
         // The one forward shader file: static and sky vertex entries, the
         // linear HDR fragment entry, the sky fragment entry. No patching.
         let forward_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1014,9 +1028,14 @@ impl Presenter {
         // never grows the steady-state path. A failed bake fails init
         // loudly: the preset params are fixed valid inputs, so this is
         // unreachable unless the sky contract itself changed.
-        let sky_capture = crate::arena_day::bake_arena_day()
-            .map(|rig| rig.capture)
-            .map_err(|e| PresentError::Device(format!("look day rig bake: {e}")))?;
+        let sky_rig = if night {
+            crate::arena_day::bake_arena_night()
+                .map_err(|e| PresentError::Device(format!("look night rig bake: {e}")))?
+        } else {
+            crate::arena_day::bake_arena_day()
+                .map_err(|e| PresentError::Device(format!("look day rig bake: {e}")))?
+        };
+        let sky_capture = sky_rig.capture;
         // The look bake over the day capture runs on the plan worker
         // thread and joins before bind, so the first frame never hitches
         // on a same-thread bake. A failed bake fails init loudly: the
@@ -1030,8 +1049,7 @@ impl Presenter {
         // it by ray direction. Once at init, never per frame; the live
         // layout carries it at forward 15. SkyError fails init loudly.
         let (sky_upload_texels, sky_horizon, sky_zenith, sky_exposure) =
-            sky::sky_forward_feed(&sky_look, crate::arena_day::ARENA_DAY_EXPOSURE_EV100)
-                .map_err(sky_err)?;
+            sky::sky_forward_feed(&sky_look, sky_rig.params.exposure_ev100).map_err(sky_err)?;
         debug_assert_eq!(sky_upload_texels.len(), sky_look.texels.len());
         if !sky_exposure.is_finite() || sky_exposure <= 0.0 {
             return Err(sky_err(sky::SkyError::Invalid(format!(
@@ -1098,8 +1116,12 @@ impl Presenter {
         // bake, so the steady-state path never cooks. A failed bake fails init
         // loudly: the sky parameters are fixed valid inputs, so this is
         // unreachable unless the sky contract itself changed.
-        let (ibl_bake, _) = crate::ibl_arena_env::bake_arena_day()
-            .map_err(|e| PresentError::Device(format!("look ibl bake: {e}")))?;
+        let (ibl_bake, _) = if night {
+            crate::ibl_arena_env::bake_arena_night()
+        } else {
+            crate::ibl_arena_env::bake_arena_day()
+        }
+        .map_err(|e| PresentError::Device(format!("look ibl bake: {e}")))?;
         // Live forward bake upload once through the bake owner.
         let (ibl_prefilter, ibl_brdf, ibl_sh_buf) =
             ibl::gpu::upload_live_bake(&device, &queue, &ibl_bake)
@@ -1323,6 +1345,20 @@ impl Presenter {
     /// forward plus blit pipelines. `NoAdapter` on headless machines is
     /// skip-not-green for callers, never a fake pass.
     pub fn init_offscreen() -> Result<Self, PresentError> {
+        Self::init_offscreen_with_preset(false)
+    }
+
+    /// The night presenter: the arena night rig (the moonlit sky, its
+    /// ambient and its fog), so the placement's torches are the light the
+    /// frame reads. The day presenter is the default and keeps every
+    /// existing capture byte-equal.
+    pub fn init_offscreen_night() -> Result<Self, PresentError> {
+        Self::init_offscreen_with_preset(true)
+    }
+
+    /// Bring up the offscreen presenter under one sky preset. `night`
+    /// picks the arena night rig; the day rig is the default.
+    pub fn init_offscreen_with_preset(night: bool) -> Result<Self, PresentError> {
         // Test builds only: cap the GPU tests that hold a device at once.
         #[cfg(test)]
         crate::test_gpu::hold_gpu_slot();
@@ -1342,7 +1378,8 @@ impl Presenter {
         ))
         .map_err(|_| PresentError::NoAdapter)?;
         let (device, queue) = Self::request_device(&adapter)?;
-        let mut presenter = Self::init_offscreen_from_device(&adapter, device, queue)?;
+        let mut presenter =
+            Self::init_offscreen_from_device_with_preset(&adapter, device, queue, night)?;
         presenter.backend_selection = selection;
         Ok(presenter)
     }

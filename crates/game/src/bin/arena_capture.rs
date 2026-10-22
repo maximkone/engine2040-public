@@ -584,11 +584,20 @@ pub(crate) mod capture {
         };
         let ticks = frames.min(config.ticks);
         let started = Instant::now();
+        // VS7: the night preset bakes the arena night rig (the moonlit sky,
+        // its ambient and its fog), so the placement's torches are the light
+        // the frame reads. Off by default: the day capture keeps the day rig
+        // and stays byte-equal.
+        let night = engine_game::windowed::night_enabled(
+            std::env::var(engine_game::windowed::NIGHT_ENV)
+                .ok()
+                .as_deref(),
+        );
         // One adapter probe: the twin owns it when present, otherwise the synth
         // path runs (same receipts, static pixels, never a fake orbit).
-        let report = match Presenter::init_offscreen() {
+        let report = match Presenter::init_offscreen_with_preset(night) {
             Ok(presenter) => {
-                twin_headless_capture(config, ticks, presenter, tape, flags, camera_path)
+                twin_headless_capture(config, ticks, presenter, tape, flags, camera_path, night)
             }
             Err(engine_render::present::PresentError::NoAdapter) => {
                 let req = capture::HeadlessRequest {
@@ -788,6 +797,7 @@ pub(crate) mod capture {
         tape: Option<capture::LoadedTape>,
         flags: &capture::CaptureFlags,
         camera_path: Option<engine_game::windowed::CameraPath>,
+        night: bool,
     ) -> Result<capture::CaptureReport, WinError> {
         let inputs = tape
             .as_ref()
@@ -817,14 +827,9 @@ pub(crate) mod capture {
         let human = FighterId::new(HUMAN_SLOT).ok_or(WinError::BadConfig("fighters"))?;
         let mut cursor = TapeInputs::new(tape.map(|loaded| loaded.inputs).unwrap_or_default());
         let mut presented = 0u32;
-        // VS7: the night preset drops the sun and the placement's torch
-        // actors burn, so the torches carry the picture. Off by default: the
-        // day capture keeps the built-in light pair and stays byte-equal.
-        let night = engine_game::windowed::night_enabled(
-            std::env::var(engine_game::windowed::NIGHT_ENV)
-                .ok()
-                .as_deref(),
-        );
+        // VS7: the placement's torch actors burn, so the torches carry the
+        // picture. Off by default: the day capture keeps the built-in light
+        // pair and stays byte-equal.
         let torch_actors = engine_game::arena_kit::kit_actors().ok();
         for tick in 0..ticks {
             let live = engine_input::FighterInput {

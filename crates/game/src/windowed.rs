@@ -1766,17 +1766,13 @@ fn smoke_present_once(
     Ok(u32::from(out.receipt.presented))
 }
 
+/// The smoke presenter, its mesh key and the kit report; `None` without hardware.
+type SmokePresenter = Option<(Presenter, MeshKey, super::arena_kit::KitReport)>;
+
 /// The presenter twin, its notice line and the night switch: one helper
 /// for both smoke paths, so the notice and the preset stay in step.
 /// Presentation only; never panics without hardware.
-fn smoke_presenter_with_notice() -> Result<
-    (
-        Option<(Presenter, MeshKey, super::arena_kit::KitReport)>,
-        String,
-        bool,
-    ),
-    WinError,
-> {
+fn smoke_presenter_with_notice() -> Result<(SmokePresenter, String, bool), WinError> {
     let presenter = smoke_presenter()?;
     let notice = match presenter {
         Some((ref presenter, _, _)) => format!(

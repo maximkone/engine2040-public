@@ -108,6 +108,33 @@ pub fn arena_day_params() -> SkyParams {
     }
 }
 
+/// Moon direction for the arena night rig: the sun's own angle with a low
+/// elevation, so the moon rakes the sand from the same side as the day sun
+/// and the torch shadows fall the same way.
+pub const ARENA_NIGHT_SUN_DIR: [f32; 3] = [-0.62, 0.18, 0.45];
+/// Air turbidity for the night rig: clear night air, so the stars read and
+/// the horizon stays a clean dark blue.
+pub const ARENA_NIGHT_TURBIDITY: f32 = 2.0;
+/// Night ground albedo per channel in 0..=1: dark sand, a touch cooler
+/// than the day ground so the warm torches read against it.
+pub const ARENA_NIGHT_GROUND_ALBEDO: [f32; 3] = [0.16, 0.13, 0.10];
+/// Exposure anchor in EV100 for the night rig: a moonlit scene sits many
+/// stops under the noon sun, so the anchor drops and the torches carry the
+/// picture instead of the sky.
+pub const ARENA_NIGHT_EXPOSURE_EV100: f32 = 4.0;
+
+/// The arena night preset as sky bake inputs: a moonlit sky over dark sand,
+/// so the placement's torches are the light the frame reads. Pure: the same
+/// preset gives the same bake bytes twice.
+pub fn arena_night_params() -> SkyParams {
+    SkyParams {
+        sun_dir: ARENA_NIGHT_SUN_DIR,
+        turbidity: ARENA_NIGHT_TURBIDITY,
+        ground_albedo: ARENA_NIGHT_GROUND_ALBEDO,
+        exposure_ev100: ARENA_NIGHT_EXPOSURE_EV100,
+    }
+}
+
 /// Sun elevation of the day-rig sun in degrees (35..37 expected).
 /// Returns an error for a non-finite or ~zero sun direction.
 pub fn sun_elevation_deg(sun_dir: [f32; 3]) -> Result<f32, ArenaDayError> {
@@ -206,6 +233,14 @@ pub fn bake_arena_day() -> Result<ArenaDayRig, ArenaDayError> {
     bake_preset(&arena_day_params())
 }
 
+/// Bake the arena night preset: the same one-bake-three-readers path over
+/// the moonlit sky params, so the night sky, ambient and fog read from one
+/// capture and can never drift. Fails loudly on ragged or non-finite bake
+/// output, exactly like the day bake.
+pub fn bake_arena_night() -> Result<ArenaDayRig, ArenaDayError> {
+    bake_preset(&arena_night_params())
+}
+
 /// Bake any day-style preset through the same one-bake-three-readers path.
 /// The fog extinction always rides the day-rig values so ad-hoc callers
 /// cannot fork a second fog truth.
@@ -279,6 +314,33 @@ mod tests {
         let b = bake_arena_day().expect("second bake holds");
         assert_eq!(a.to_bytes(), b.to_bytes(), "day rig bytes x2");
         assert_eq!(a.capture.texels.len(), 64 * 32, "capture backing full");
+    }
+
+    /// VS7: the night rig is a moonlit sky: the ambient sits far under the
+    /// day's, so the placement's torches are the light the frame reads.
+    #[test]
+    fn the_night_rig_sits_far_under_the_day_ambient() {
+        let day = bake_arena_day().expect("day rig bakes");
+        let night = bake_arena_night().expect("night rig bakes");
+        let day_mean = day.ibl_ambient.iter().sum::<f32>() / 3.0;
+        let night_mean = night.ibl_ambient.iter().sum::<f32>() / 3.0;
+        assert!(
+            night_mean < day_mean * 0.2,
+            "the night ambient is under a fifth of the day's ({night_mean} vs {day_mean})"
+        );
+        assert!(night_mean > 0.0, "the night is moonlit, not black");
+        assert!(
+            night.exposure < day.exposure,
+            "the night exposure sits under the day's"
+        );
+    }
+
+    /// VS7: the night bake is as deterministic as the day bake.
+    #[test]
+    fn the_night_bake_gives_identical_bytes_twice() {
+        let a = bake_arena_night().expect("first night bake holds");
+        let b = bake_arena_night().expect("second night bake holds");
+        assert_eq!(a.to_bytes(), b.to_bytes(), "night rig bytes x2");
     }
 
     #[test]

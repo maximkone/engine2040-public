@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, sourceFilesUnder, romeSourceAudit, romeSourceViolations, romeContentFiles, codexRefsNamed, codexRefList } from "./workspace-check.mjs";
+import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, sourceFilesUnder, romeSourceAudit, romeSourceViolations, romeContentFiles, codexRefsNamed, codexRefList, unwiredModulesLine } from "./workspace-check.mjs";
+import { mentions, pathTokens, tokensMention, rowsWithReason, summaryLine, scan as scanUnwired } from "./unwired-code-gate.mjs";
 import { parseBoard, needsOf } from "./board-slice.mjs";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -421,6 +422,98 @@ test("the in-process wiring scan answers like the tool it replaces (E51)", () =>
   const tool = spawnSync(process.execPath, [fileURLToPath(new URL("./wiring-scan.mjs", import.meta.url)), root], { encoding: "utf8", maxBuffer: 1 << 26 });
   const line = (tool.stdout ?? "").split("\n")[0].trim();
   assert.equal(line, `islands: ${islands.length}`, "the in-process scan must count what the tool counts");
+});
+
+// ---- PW48: the unwired-code gate gets a caller ------------------------------
+
+// One tree scan for the whole group: the scan reads every crate file, and
+// three tests want the same answer.
+let unwiredScan = null;
+function unwiredTreeScan() {
+  if (unwiredScan !== null) return unwiredScan;
+  const root = fileURLToPath(new URL("../crates/", import.meta.url));
+  if (!existsSync(root)) return null;
+  unwiredScan = scanUnwired(root);
+  return unwiredScan;
+}
+
+// The path token index is the fast answer; `mentions` is the readable
+// reference. They must agree, or the index hides a caller.
+test("unwired gate: the path token index answers like the reference (PW48)", () => {
+  const shapes = [
+    ["engine_ai::behavior::tick", ["engine_ai"], "behavior", []],
+    ["engine_ai::behaviorx::tick", ["engine_ai"], "behavior", []],
+    ["engine_ai::{behavior, other}", ["engine_ai"], "behavior", []],
+    ["engine_ai::{behavior as b, other}", ["engine_ai"], "behavior", []],
+    ["engine_ai::{other, behavior as b}", ["engine_ai"], "behavior", []],
+    ["foo_engine_ai::behavior", ["engine_ai"], "behavior", []],
+    ["engine_ai :: behavior", ["engine_ai"], "behavior", []],
+    ["engine_ai::LoadQueue", ["engine_ai"], "load_queue", ["LoadQueue"]],
+    ["engine_ai::behavior!", ["engine_ai"], "behavior", []],
+    ["use engine_ai::behavior;", ["engine_ai"], "behavior", []],
+    ["engine_ai::{a, engine_render::thing}", ["engine_render"], "thing", []],
+    ["engine_ai::{a, engine_render::thing}", ["engine_ai"], "a", []],
+    ["engine_ai::{a}", ["engine_ai"], "b", []],
+    ["engine_ai::{a::b, c}", ["engine_ai"], "a", []],
+  ];
+  for (const [text, idents, module, reExported] of shapes) {
+    const reference = mentions(text, idents, module, reExported);
+    const index = tokensMention(pathTokens(text), idents, module, reExported);
+    assert.equal(index, reference, `the index and the reference must agree on ${JSON.stringify(text)}`);
+  }
+});
+
+test("unwired gate: the summary line counts the rows it is given (PW48)", () => {
+  const result = { publicCount: 10, crateCount: 3, rows: [] };
+  const rows = [{ reason: "no-caller" }, { reason: "no-caller" }, { reason: "behind-features:import" }];
+  assert.equal(
+    summaryLine(result, rows),
+    "SUMMARY unwired modules: 3 of 10 public modules in 3 crates have no caller outside their own crate",
+  );
+  const sharp = rowsWithReason({ rows }, "no-caller");
+  assert.equal(sharp.length, 2, "the sharp half keeps the feature-gated modules out");
+  assert.equal(summaryLine(result, sharp),
+    "SUMMARY unwired modules: 2 of 10 public modules in 3 crates have no caller outside their own crate");
+});
+
+test("unwired gate: the sharp half is a strict subset of the whole list (PW48)", () => {
+  const result = unwiredTreeScan();
+  if (!result) return;
+  const sharp = rowsWithReason(result, "no-caller");
+  assert.ok(sharp.length > 0, "the tree holds dead public modules today");
+  assert.ok(sharp.length < result.rows.length, "the feature-gated modules are a separate class");
+  for (const row of sharp) assert.equal(row.reason, "no-caller", "the sharp half holds only no-caller rows");
+  for (const row of result.rows) {
+    if (row.reason !== "no-caller") assert.ok(row.reason.startsWith("behind-features:"), "every other row names its features");
+  }
+});
+
+test("unwired gate: the self-test still proves the known dead modules (PW48)", () => {
+  const tool = spawnSync(process.execPath, [fileURLToPath(new URL("./unwired-code-gate.mjs", import.meta.url)), "--self-test"], { encoding: "utf8", maxBuffer: 1 << 26 });
+  assert.equal(tool.status, 0, "the self-test must pass");
+  assert.match(tool.stdout, /PASS unwired-code-gate: 12 known dead modules found, 2 live modules not flagged, fixture ok/);
+  assert.match(tool.stdout, /index-matches-reference \d+ pairs, 0 differences/, "the index must answer like the reference");
+});
+
+test("unwired gate: the audit prints one report-only line with the live count (PW48)", () => {
+  const root = fileURLToPath(new URL("../crates/", import.meta.url));
+  if (!existsSync(root)) return;
+  const line = unwiredModulesLine(root);
+  assert.match(line, /^WARN unwired modules \(report-only\): SUMMARY unwired modules: \d+ of \d+ public modules in \d+ crates have no caller outside their own crate$/);
+  const numbers = line.match(/SUMMARY unwired modules: (\d+) of (\d+) public modules in (\d+) crates/);
+  const sharp = Number(numbers[1]);
+  const publicCount = Number(numbers[2]);
+  const crateCount = Number(numbers[3]);
+  assert.ok(sharp > 0, "the tree holds dead public modules today");
+  assert.ok(sharp < publicCount, "not every public module is dead");
+  assert.ok(crateCount > 1, "the tree holds many crates");
+  // The count comes from the scan, not from a constant: the sharp rows of a
+  // fresh scan must give the same numbers.
+  const result = unwiredTreeScan();
+  const fresh = rowsWithReason(result, "no-caller");
+  assert.equal(fresh.length, sharp, "the printed count is the scan's own count");
+  assert.equal(result.publicCount, publicCount, "the printed total is the scan's own total");
+  assert.equal(result.crateCount, crateCount, "the printed crate count is the scan's own count");
 });
 
 // ---- CDX6: a Rome number needs a source -----------------------------------

@@ -50,12 +50,12 @@ pub mod fight;
 /// bump, hit-stop and slow-mo easing. Presentation only, no heap.
 pub mod gamefeel;
 pub mod gore;
-/// Hit simulation: one blade state against every severable joint over many
-/// clean hits, as a seeded distribution (the door's `hit.simulate`). Std-only.
-pub mod hitsim;
 /// Weapon weight in the fight (FEEL1): a weapon row's own startup, recovery,
 /// damage and stagger, parsed from `content/design/weapons.rows`. Std-only.
 pub mod heft;
+/// Hit simulation: one blade state against every severable joint over many
+/// clean hits, as a seeded distribution (the door's `hit.simulate`). Std-only.
+pub mod hitsim;
 /// Per-kind hit-stop freeze rows: light taps, heavy lands, parry answers
 /// longest. V2 kind-to-ticks map; V1 keeps its single row. Std-only.
 pub mod hitstop_kind;

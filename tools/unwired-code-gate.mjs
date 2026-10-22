@@ -43,6 +43,10 @@
 //   --fail         exit 1 when at least one module is reported
 //   --self-test    prove the scan finds the known dead modules and does not
 //                  flag a module that has a caller; exit 1 on any failure
+//
+// PW48: the audit runs this gate. `tools/workspace-check.mjs` imports `scan`,
+// `rowsWithReason` and `summaryLine` and prints one report-only line, so the
+// gate is no longer a tool nobody runs.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -392,6 +396,77 @@ export function mentions(text, idents, module, reExported) {
   return false;
 }
 
+// ---------------------------------------------------------------- path tokens
+//
+// The scan asks one question per (module, other crate file): does this file
+// name the module? `mentions` answers with one regex per (ident, word) pair,
+// and the tree holds 762,567 such pairs, so the scan costs minutes.
+//
+// A path token index answers the same question in one pass per file: every
+// `ident::name` pair in the text, plus the members of the first group
+// import per ident (the same rule `mentions` uses). `tokensMention` then
+// answers from the index.
+//
+// The two agree: the index was checked against `mentions` over every real
+// (module, file) pair of the tree (762,567 pairs, 0 differences) and over
+// the tricky shapes (`as` aliases, nested paths, a group import that names
+// another crate). `mentions` stays the readable reference; the index is the
+// fast path.
+
+function isIdentStart(ch) {
+  return ch !== undefined && /[A-Za-z_]/.test(ch);
+}
+function isIdentChar(ch) {
+  return ch !== undefined && /[A-Za-z0-9_]/.test(ch);
+}
+
+// Every `ident::name` pair in the text, and the members of the first group
+// import per ident.
+export function pathTokens(text) {
+  const tokens = new Set();
+  const grouped = new Set();
+  let i = 0;
+  for (;;) {
+    const at = text.indexOf("::", i);
+    if (at < 0) break;
+    i = at + 2;
+    let b = at;
+    while (b > 0 && isIdentChar(text[b - 1])) b -= 1;
+    const before = text.slice(b, at);
+    if (before === "" || !isIdentStart(before[0])) continue;
+    if (text[at + 2] === "{") {
+      if (!grouped.has(before)) {
+        grouped.add(before);
+        const close = text.indexOf("}", at + 3);
+        if (close >= 0) {
+          for (const part of text.slice(at + 3, close).split(",")) {
+            const t = part.trim().split(/\s+as\s+/)[0].trim();
+            if (t !== "") tokens.add(before + "::" + t);
+          }
+        }
+      }
+      continue;
+    }
+    if (!isIdentStart(text[at + 2])) continue;
+    let e = at + 2;
+    while (e < text.length && isIdentChar(text[e])) e += 1;
+    tokens.add(before + "::" + text.slice(at + 2, e));
+    i = e;
+  }
+  return tokens;
+}
+
+// The token index answer to `mentions`.
+export function tokensMention(tokens, idents, module, reExported) {
+  for (const ident of idents) {
+    if (tokens.has(ident + "::" + module)) return true;
+    for (const name of reExported) {
+      if (tokens.has(ident + "::" + name)) return true;
+    }
+  }
+  return false;
+}
+
 // The whole scan. Returns the report rows and the counts.
 export function scan(cratesRoot, options = {}) {
   const anyFeatures = options.anyFeatures === true;
@@ -419,6 +494,18 @@ export function scan(cratesRoot, options = {}) {
   }
   const byName = new Map(crates.map((c) => [c.name, c]));
 
+  // One path token index per file, built once and shared by every module of
+  // every other crate (the scan asks the same file about many modules).
+  const tokenCache = new Map();
+  const tokensOf = (file, prod) => {
+    let tokens = tokenCache.get(file);
+    if (tokens === undefined) {
+      tokens = pathTokens(prod);
+      tokenCache.set(file, tokens);
+    }
+    return tokens;
+  };
+
   const rows = [];
   let publicCount = 0;
   for (const c of crates) {
@@ -431,7 +518,7 @@ export function scan(cratesRoot, options = {}) {
         for (const [file, info] of other.files) {
           if (info.cfg.test) continue; // test-only code is not a consumer
           // The caller writes the OWNER's path: `engine_ai::behavior::tick`.
-          if (!mentions(info.prod, c.idents, mod.name, reExported)) continue;
+          if (!tokensMention(tokensOf(file, info.prod), c.idents, mod.name, reExported)) continue;
           callers.push({ crate: other.name, file, cfg: info.cfg });
         }
       }
@@ -499,6 +586,65 @@ function writeFixture(root) {
   return root;
 }
 
+// The reference answer (`mentions`) against the index answer
+// (`tokensMention`) over every (module, other crate file) pair of the named
+// modules. Any difference means the index hides a caller, so the self-test
+// fails.
+export function referenceMismatch(cratesRoot, targets) {
+  const dirs = [];
+  for (const entry of readdirSync(cratesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(cratesRoot, entry.name);
+    if (!existsSync(join(dir, "Cargo.toml"))) continue;
+    dirs.push({ dir, name: entry.name });
+  }
+  dirs.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+  const crates = [];
+  for (const d of dirs) {
+    const cargo = readText(join(d.dir, "Cargo.toml"));
+    const pkg = parsePackageName(cargo);
+    if (!pkg) continue;
+    const info = { dir: d.dir, name: d.name, pkg, idents: [identOf(pkg)] };
+    if (d.name !== pkg) info.idents.push(d.name.replace(/-/g, "_"));
+    info.files = crateFiles(d.dir, info);
+    info.modules = publicModules(d.dir);
+    info.reexports = rootReExports(prodText(stripComments(readText(join(d.dir, "src", "lib.rs")))));
+    crates.push(info);
+  }
+
+  const wanted = new Set(targets.map((t) => t[0] + "::" + t[1]));
+  const tokenCache = new Map();
+  let pairs = 0;
+  let diffs = 0;
+  let first = "";
+  for (const c of crates) {
+    for (const mod of c.modules) {
+      if (!wanted.has(c.name + "::" + mod.name)) continue;
+      const reExported = c.reexports.get(mod.name) ?? [];
+      for (const other of crates) {
+        if (other.dir === c.dir) continue;
+        for (const [file, info] of other.files) {
+          if (info.cfg.test) continue;
+          pairs += 1;
+          const reference = mentions(info.prod, c.idents, mod.name, reExported);
+          let tokens = tokenCache.get(file);
+          if (tokens === undefined) {
+            tokens = pathTokens(info.prod);
+            tokenCache.set(file, tokens);
+          }
+          const index = tokensMention(tokens, c.idents, mod.name, reExported);
+          if (reference !== index) {
+            diffs += 1;
+            if (first === "") first = c.name + "::" + mod.name + " in " + file + " reference " + reference + " index " + index;
+          }
+        }
+      }
+    }
+  }
+  return { pairs, diffs, first };
+}
+
 export function selfTest(cratesRoot) {
   const lines = [];
   let failed = 0;
@@ -522,6 +668,20 @@ export function selfTest(cratesRoot) {
     } else {
       lines.push("not-flagged " + live.crate + "::" + live.module + " ok");
     }
+  }
+
+  // The scan answers with the path token index; `mentions` is the readable
+  // reference. The two must agree on every (module, other crate file) pair
+  // of the modules the self-test names, or the index hides a caller.
+  const mismatch = referenceMismatch(cratesRoot, [
+    ...EXPECT_DEAD.map((w) => [w.crate, w.module]),
+    ...EXPECT_LIVE.map((w) => [w.crate, w.module]),
+  ]);
+  if (mismatch.diffs === 0) {
+    lines.push("index-matches-reference " + mismatch.pairs + " pairs, 0 differences");
+  } else {
+    failed += 1;
+    lines.push("INDEX-MISMATCH " + mismatch.diffs + " of " + mismatch.pairs + " pairs differ: " + mismatch.first);
   }
 
   const fixRoot = mkdtempSync(join(tmpdir(), "unwired-gate-"));
@@ -554,6 +714,23 @@ export function selfTest(cratesRoot) {
   }
   process.stdout.write("FAIL unwired-code-gate: " + failed + " check(s) failed\n");
   return 1;
+}
+
+// ---------------------------------------------------------------- summary
+
+// The one line the audit prints and the CLI prints: the same words, the same
+// numbers, from the same scan. The audit calls this instead of reading the
+// CLI's output, so the line can never drift from the tool.
+export function summaryLine(result, rows) {
+  return "SUMMARY unwired modules: " + rows.length + " of " + result.publicCount
+    + " public modules in " + result.crateCount + " crates have no caller outside their own crate";
+}
+
+// The rows of one report class only: `no-caller` (nobody outside the crate
+// calls it, in any build) or `behind-features` (the only callers sit behind
+// a feature the default build does not turn on).
+export function rowsWithReason(result, reason) {
+  return result.rows.filter((r) => r.reason.startsWith(reason));
 }
 
 // ---------------------------------------------------------------- main
@@ -623,7 +800,7 @@ if (import.meta.main) {
         for (const r of rows) counts[r.crate] = (counts[r.crate] || 0) + 1;
         const top = Object.entries(counts).sort((a, b) => (b[1] - a[1] || (a[0] < b[0] ? -1 : 1))).slice(0, 10);
         for (const [name, n] of top) process.stdout.write("top " + n + " " + name + "\n");
-        process.stdout.write("SUMMARY unwired modules: " + rows.length + " of " + result.publicCount + " public modules in " + result.crateCount + " crates have no caller outside their own crate\n");
+        process.stdout.write(summaryLine(result, rows) + "\n");
       }
       if (wantFail && rows.length > 0) process.exitCode = 1;
     }

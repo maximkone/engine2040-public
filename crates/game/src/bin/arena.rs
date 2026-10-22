@@ -367,11 +367,14 @@ fn split_agent_seat(raw: &[String]) -> Result<(Option<u16>, Vec<String>), String
     Ok((port, rest))
 }
 
+/// A `--view-line` request (seed, ticks, fighters) and the arguments left for the strict parser.
+type ViewLineSplit = (Option<(u64, u32, u8)>, Vec<String>);
+
 /// Split `--view-line <SEED> <TICKS> <FIGHTERS>` off before the strict parser
 /// (it would refuse an unknown flag) and check the three numbers against the
 /// session config's own ranges, so a bad request fails loudly at boot instead
 /// of building a bout the sim would refuse. Zero ticks is the empty line.
-fn split_view_line(raw: &[String]) -> Result<(Option<(u64, u32, u8)>, Vec<String>), String> {
+fn split_view_line(raw: &[String]) -> Result<ViewLineSplit, String> {
     let mut request = None;
     let mut rest = Vec::with_capacity(raw.len());
     let mut index = 0usize;
@@ -401,7 +404,7 @@ fn split_view_line(raw: &[String]) -> Result<(Option<(u64, u32, u8)>, Vec<String
                 engine_game::MAX_TICKS
             ));
         }
-        if fighters < 2 || fighters > engine_arena::MAX_PARTICIPANTS {
+        if !(2..=engine_arena::MAX_PARTICIPANTS).contains(&fighters) {
             return Err(format!(
                 "{VIEW_LINE_FLAG} fighters {fighters} is outside 2..={}",
                 engine_arena::MAX_PARTICIPANTS
@@ -744,7 +747,7 @@ fn warning_metric(warning: &str) -> Option<&str> {
 
 /// The metric that must write this run's one warning bundle now: `None` when
 /// the run is clean, a bundle already landed, or the first line is malformed.
-fn warning_bundle_metric<'a>(warnings: &'a [String], written: bool) -> Option<&'a str> {
+fn warning_bundle_metric(warnings: &[String], written: bool) -> Option<&str> {
     if written {
         return None;
     }
@@ -1208,8 +1211,9 @@ fn frame_pacer(period_ms: Option<u32>) -> arena_frame::FixedDtPacer {
     };
     arena_frame::FixedDtPacer::new(period, Instant::now())
 }
-/// Live fight bodies: one dot per simulated fighter from the rolling pose
-/// cursor (planar position, feet on the floor), live hp, this tick's flash.
+
+// Live fight bodies: one dot per simulated fighter from the rolling pose
+// cursor (planar position, feet on the floor), live hp, this tick's flash.
 
 /// Live window session: winit events feed the bindings table, the accumulator
 /// steps the [`App`] match at 60 Hz, voices play into the shared mixer, and
@@ -2903,7 +2907,7 @@ impl ApplicationHandler for ArenaApp {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Focused(focused) => self.note_window_state(focused, self.window_occluded),
             WindowEvent::Occluded(occluded) => {
-                self.note_window_state(self.window_focused, occluded)
+                self.note_window_state(self.window_focused, occluded);
             }
             WindowEvent::Resized(size) => {
                 if let Some(presenter) = self.presenter.as_mut() {
@@ -5080,12 +5084,12 @@ mod tests {
             "a clean run writes nothing"
         );
         assert_eq!(
-            warning_bundle_metric(&[warning.clone()], true),
+            warning_bundle_metric(std::slice::from_ref(&warning), true),
             None,
             "a written bundle never writes again"
         );
         assert_eq!(
-            warning_bundle_metric(&[warning.clone()], false),
+            warning_bundle_metric(std::slice::from_ref(&warning), false),
             Some("view_sunk_cm_max")
         );
         assert_eq!(

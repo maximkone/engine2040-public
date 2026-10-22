@@ -23,7 +23,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use engine_assets::rig_cook::{cook_body_at, ATLAS_MAX_DIM};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     /// Default input: the fighters content dir, next to `glb/`.
     const DEFAULT_ROOT: &str = "content/fighters";

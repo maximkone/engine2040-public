@@ -83,9 +83,7 @@ pub fn mean_luminance_within(
 /// The far sand point: the same sand, far from every torch, so the far
 /// luminance is the baseline the near sand is compared against.
 #[must_use]
-pub fn far_sand_luminance(
-    lights: &[engine_render::torch_light::TorchLight],
-) -> f32 {
+pub fn far_sand_luminance(lights: &[engine_render::torch_light::TorchLight]) -> f32 {
     // The arena's far corner, well past every torch's reach.
     let point = [18.0, 0.0, 18.0];
     sand_luminance_at(point, lights)
@@ -96,10 +94,7 @@ pub fn far_sand_luminance(
 /// ratio measures what the frame draws. Zero when the scene has no
 /// torches, so the caller can tell "no torch light" from "torch light".
 #[must_use]
-pub fn night_ratio(
-    lights: &[engine_render::torch_light::TorchLight],
-    tick: u32,
-) -> f32 {
+pub fn night_ratio(lights: &[engine_render::torch_light::TorchLight], tick: u32) -> f32 {
     if lights.is_empty() {
         return 0.0;
     }
@@ -156,12 +151,10 @@ mod tests {
     #[test]
     fn the_frame_light_list_holds_every_torch_actor() {
         let actors = kit_actors().expect("embedded placement parses");
-        let torch_count = actors
-            .iter()
-            .filter(|a| a.asset == KitAsset::Torch)
-            .count();
+        let torch_count = actors.iter().filter(|a| a.asset == KitAsset::Torch).count();
         assert!(torch_count > 0, "the placement has torch actors");
-        let lights = crate::arena_kit::torch_feed::torch_lights(&actors).expect("the lights are valid");
+        let lights =
+            crate::arena_kit::torch_feed::torch_lights(&actors).expect("the lights are valid");
         assert_eq!(
             lights.len(),
             torch_count,
@@ -175,7 +168,8 @@ mod tests {
     #[test]
     fn the_near_sand_is_much_brighter_than_the_far_sand() {
         let actors = kit_actors().expect("embedded placement parses");
-        let lights = crate::arena_kit::torch_feed::torch_lights(&actors).expect("the lights are valid");
+        let lights =
+            crate::arena_kit::torch_feed::torch_lights(&actors).expect("the lights are valid");
         assert!(!lights.is_empty(), "the placement lights the arena");
         let ratio = night_ratio(&lights, 0);
         assert!(
@@ -187,7 +181,8 @@ mod tests {
     #[test]
     fn the_ratio_holds_across_the_flicker() {
         let actors = kit_actors().expect("embedded placement parses");
-        let lights = crate::arena_kit::torch_feed::torch_lights(&actors).expect("the lights are valid");
+        let lights =
+            crate::arena_kit::torch_feed::torch_lights(&actors).expect("the lights are valid");
         for tick in [0u32, 17, 120, 401, 900] {
             let ratio = night_ratio(&lights, tick);
             assert!(

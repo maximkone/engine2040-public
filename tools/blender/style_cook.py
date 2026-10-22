@@ -774,6 +774,185 @@ def bake_vertex_light(ob):
 # ------------------------------------------------------------------- LODs
 
 
+def separate_parts(ob):
+    """The mesh's connected parts, each on its own.
+
+    MPFB builds the body from parts, and the parts do not share vertices,
+    so a loose separation gives the head, the hands, the boots, the limbs
+    and the garment's panels back as they were.
+
+    The separation runs on a copy, because Blender's separate operator
+    frees the object it was made from: the mesh moves onto the new
+    objects and the old one is removed. The figure the cook is holding,
+    and the pristine base every LOD is copied from, both died at the
+    first separation that way.
+
+    The work copy is one of the parts: the separation leaves it holding
+    the last part it split off, and leaving it out loses the garment.
+    """
+    work = ob.copy()
+    work.data = ob.data.copy()
+    bpy.context.collection.objects.link(work)
+    work.name = "parts_work"
+    bpy.ops.object.select_all(action="DESELECT")
+    work.select_set(True)
+    bpy.context.view_layer.objects.active = work
+    bpy.ops.mesh.separate(type="LOOSE")
+    # The parts are found by name: "every mesh that is not the work
+    # copy" would catch the figure the cook is holding and the pristine
+    # base as well.
+    return [o for o in bpy.context.scene.objects
+            if o.type == "MESH" and o.name.startswith("parts_work")]
+
+
+def part_centre(part):
+    """Where a part sits, so the small ones can find their neighbour."""
+    verts = part.data.vertices
+    if not verts:
+        return (0.0, 0.0, 0.0)
+    count = len(verts)
+    return (sum(v.co.x for v in verts) / count,
+            sum(v.co.y for v in verts) / count,
+            sum(v.co.z for v in verts) / count)
+
+
+def part_role(part, figure, cloth_names):
+    """What a part is, read off its own shape.
+
+    The rig's vertex groups do not survive the export, so the parts are
+    told apart by where they are and how big they are.
+    """
+    me = part.data
+    if not me.vertices:
+        return "body"
+    zs = [v.co.z for v in me.vertices]
+    xs = [v.co.x for v in me.vertices]
+    z_min, z_max = min(zs), max(zs)
+    x_min, x_max = min(xs), max(xs)
+    height = max(figure["z_max"] - figure["z_min"], 1e-6)
+    width = max(figure["x_max"] - figure["x_min"], 1e-6)
+
+    # A part of the garment is cloth, and the cloth is judged on its own.
+    for index in {p.material_index for p in me.polygons}:
+        if index < len(part.material_slots):
+            material = part.material_slots[index].material
+            if material is not None and (material.name or "").lower() in cloth_names:
+                return "cloth"
+
+    if z_max >= figure["z_max"] - height * 0.02:
+        return "head"
+    if z_min <= figure["z_min"] + height * 0.04:
+        return "foot"
+    centre = (x_min + x_max) * 0.5
+    if (z_max - z_min) < height * 0.13 and abs(centre) > width * 0.22:
+        return "hand"
+    return "body"
+
+
+# What each part is worth, per face, when the triangle budget is spent.
+# The head and the hands are what a player reads at thirty metres, so they
+# get the most; the body and the garment fill in.
+ROLE_WEIGHT = {"head": 2.5, "hand": 2.0, "foot": 1.5, "body": 1.0, "cloth": 1.2}
+
+# A part smaller than this is a scrap, not a part of the body. MPFB's
+# basemesh is full of them.
+SCRAP_FACES = 100
+
+
+def fold_scraps(parts):
+    """Fold the small parts into their nearest big neighbour.
+
+    MPFB's basemesh is 443 loose pieces, most of them two-face scraps.
+    Budgeting the triangle count across 443 parts gave every scrap four
+    faces, and the scraps ate the whole budget while the head and the
+    hands were starved. So the scraps go into the big part nearest to
+    them, and the budget is spent on the parts a player reads.
+    """
+    big = [p for p in parts if len(p.data.polygons) >= SCRAP_FACES]
+    scraps = [p for p in parts if len(p.data.polygons) < SCRAP_FACES]
+    if not big or not scraps:
+        return big or parts
+
+    centres = {p.name: part_centre(p) for p in big}
+    for scrap in scraps:
+        centre = part_centre(scrap)
+        nearest = min(big, key=lambda p: sum(
+            (a - b) ** 2 for a, b in zip(centres[p.name], centre)))
+        bpy.ops.object.select_all(action="DESELECT")
+        nearest.select_set(True)
+        scrap.select_set(True)
+        bpy.context.view_layer.objects.active = nearest
+        bpy.ops.object.join()
+        centres[nearest.name] = part_centre(nearest)
+    return big
+
+
+def decimate_by_part(ob, budget, share=1.0):
+    """Spend the triangle budget on the parts, where they are read from.
+
+    One collapse from 44k faces to a thousand shatters the mesh: the hands
+    come apart, holes open where the garment meets the body, and a limb
+    comes loose and hangs between the feet. So each part is decimated on
+    its own, in steps of at most a half, and the budget is shared out by
+    what the part is: the head, the hands and the boots keep their shape,
+    the body and the garment give way.
+
+    The live object is handed back: the separation frees the object it was
+    made from, so the caller's handle on it is dead by the time the parts
+    are put back together.
+    """
+    faces_budget = max(4, int(budget * share))
+
+    # The figure's own bounds, read before the separation frees the mesh.
+    zs = [v.co.z for v in ob.data.vertices]
+    xs = [v.co.x for v in ob.data.vertices]
+    figure = {"z_min": min(zs), "z_max": max(zs),
+              "x_min": min(xs), "x_max": max(xs)}
+
+    parts = separate_parts(ob)
+    if len(parts) <= 1:
+        tris = decimate(ob, min(1.0, faces_budget / max(triangle_count(ob), 1)))
+        return tris, ob
+
+    cloth_names = set()
+    for slot in ob.material_slots:
+        material = slot.material
+        if material is not None and "cloth" in (material.name or "").lower():
+            cloth_names.add((material.name or "").lower())
+
+    parts = fold_scraps(parts)
+    parts = [p for p in parts if p.name in bpy.data.objects]
+    roles = [part_role(part, figure, cloth_names) for part in parts]
+    weights = [ROLE_WEIGHT.get(role, 1.0) * max(len(part.data.polygons), 1)
+               for part, role in zip(parts, roles)]
+    total_weight = sum(weights) or 1.0
+
+    for part, weight in zip(parts, weights):
+        faces = len(part.data.polygons)
+        target = max(4, int(faces_budget * weight / total_weight))
+        target = min(target, faces)
+        decimate(part, target / float(max(faces, 1)))
+
+    # The parts go back together, and the faces keep their material. A
+    # joined object is freed, so the live one is asked for after every
+    # join: the list of parts would otherwise hold dead references.
+    keep = parts[0]
+    for part in parts[1:]:
+        bpy.ops.object.select_all(action="DESELECT")
+        keep.select_set(True)
+        part.select_set(True)
+        bpy.context.view_layer.objects.active = keep
+        bpy.ops.object.join()
+        keep = bpy.context.view_layer.objects.active
+    # A name of its own: Blender frees an object when a new one takes its
+    # name, and this part was called "body" like the figure the cook is
+    # holding, so the figure died here and the hero render had nothing
+    # to draw.
+    keep.name = "lod_part"
+    bpy.context.view_layer.objects.active = keep
+    return triangle_count(keep), keep
+
+
 def decimate(ob, ratio):
     """Decimate in steps.
 
@@ -785,8 +964,21 @@ def decimate(ob, ratio):
         return triangle_count(ob)
     current = triangle_count(ob)
     target = max(4, int(current * ratio))
+    # The part has to be the active object: Blender's modifier_apply
+    # works on the active object, and the active object was whatever the
+    # last join left, so the parts were barely decimated at all.
+    bpy.ops.object.select_all(action="DESELECT")
+    ob.select_set(True)
+    bpy.context.view_layer.objects.active = ob
     while current > target:
-        step = min(0.5, max(0.05, target / float(current)))
+        # Halve while there is far to go, then take the last step exactly.
+        # A floor on the step made one collapse do all the work: a single
+        # collapse from 44k to a thousand shatters the mesh, and the hands
+        # come apart and holes open where the garment meets the body.
+        if current > target * 2:
+            step = 0.5
+        else:
+            step = target / float(current)
         mod = ob.modifiers.new(name="decimate", type="DECIMATE")
         mod.ratio = step
         mod.use_collapse_triangulate = True
@@ -967,6 +1159,7 @@ def main():
     CURRENT_DOMINANT = FACTION_DOMINANT.get(faction, 0)
 
     ob = import_mesh(src)
+    ob.name = "figure"
     raw_tris = triangle_count(ob)
     source_height, scale = normalise_height(ob, target_height)
     unwrapped = ensure_uv(ob)
@@ -985,24 +1178,39 @@ def main():
 
     # Every LOD is a share of the same pristine base, not a share of the last
     # one: otherwise the ladder collapses onto the same triangle count.
+    print("STEP before pristine", sorted(o.name for o in bpy.data.objects))
     pristine = ob.copy()
     pristine.data = ob.data.copy()
     bpy.context.collection.objects.link(pristine)
+    # A name of its own: Blender frees an object when a new one takes its
+    # name, and the LOD's joined part took the name "body", which is the
+    # name the figure and the pristine base both had.
+    pristine.name = "pristine_base"
 
+    print("STEP before ladder", sorted(o.name for o in bpy.data.objects))
     lod_tris = []
     for level, share in enumerate(LOD_RATIOS):
+        print("STEP level start", level, sorted(o.name for o in bpy.data.objects))
         ob_level = pristine.copy()
         ob_level.data = pristine.data.copy()
         bpy.context.collection.objects.link(ob_level)
+        # A name of its own, for the same reason: the part the join
+        # produces takes a name, and a name that is taken frees the
+        # object that had it.
+        ob_level.name = "lod_%d" % level
         bpy.ops.object.select_all(action="DESELECT")
         ob_level.select_set(True)
         bpy.context.view_layer.objects.active = ob_level
-        tris = decimate(ob_level, target_ratio * share)
+        print("STEP before decimate", level, sorted(o.name for o in bpy.data.objects))
+        tris, ob_level = decimate_by_part(ob_level, budget, share)
+        print("STEP after decimate", level, sorted(o.name for o in bpy.data.objects))
         path = os.path.join(outdir, f"lod{level}.glb")
         if not export_glb(ob_level, path):
             raise CookError(f"could not write {path}")
         lod_tris.append({"lod": level, "triangles": tris, "file": os.path.basename(path)})
+        print("STEP before remove", level, sorted(o.name for o in bpy.data.objects))
         bpy.data.objects.remove(ob_level, do_unlink=True)
+        print("STEP after remove", level, sorted(o.name for o in bpy.data.objects))
     bpy.data.objects.remove(pristine, do_unlink=True)
     bpy.context.view_layer.objects.active = ob
 
@@ -1047,6 +1255,8 @@ if __name__ == "__main__":
         code = EXIT_FAIL
     except Exception as err:
         sys.stderr.write(f"E_COOK {type(err).__name__}: {err}\n")
+        import traceback
+        traceback.print_exc()
         code = EXIT_FAIL
     if code != 0:
         sys.exit(code)

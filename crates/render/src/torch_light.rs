@@ -49,9 +49,7 @@ impl TorchLight {
     /// Check finiteness and ranges before the light reaches the frame.
     pub fn validate(&self) -> Result<(), TorchError> {
         if !self.pos.iter().all(|c| c.is_finite()) {
-            return Err(TorchError::Invalid(
-                "torch position is not finite".into(),
-            ));
+            return Err(TorchError::Invalid("torch position is not finite".into()));
         }
         if !self.color.iter().all(|c| c.is_finite() && *c >= 0.0) {
             return Err(TorchError::Invalid(

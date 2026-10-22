@@ -30,16 +30,16 @@ pub use kit_load::{
     kit_actors, kit_actors_from_json, KitActor, KitAsset, KIT_ACTOR_COUNT, KIT_JSON,
 };
 
-/// VS7: the placement's torch actors become lights. The feed from the
-/// placement to the presenter's torch list, with a bounded flicker.
-/// Presentation only, never hashed.
-#[path = "torch_feed.rs"]
-pub mod torch_feed;
 /// VS7 proof: the frame light list holds every torch actor, and the sand
 /// near a torch is far brighter than the far sand. The CPU mirror of the
 /// shader's torch falloff, so the numbers are the drawn ones.
 #[path = "torch_acceptance.rs"]
 pub mod torch_acceptance;
+/// VS7: the placement's torch actors become lights. The feed from the
+/// placement to the presenter's torch list, with a bounded flicker.
+/// Presentation only, never hashed.
+#[path = "torch_feed.rs"]
+pub mod torch_feed;
 
 /// VR2 material sets (cooked CC0 base, normal and ORM per kit file, tiling
 /// UVs, glTF fallback maps): the `kit_pbr` child module, `app` leg only.

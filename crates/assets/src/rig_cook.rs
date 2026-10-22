@@ -384,6 +384,9 @@ fn strip_document(
 }
 
 /// Write a glTF container: the header, the JSON chunk and the binary chunk.
+///
+/// The JSON chunk is padded with spaces, as the glTF spec asks: a JSON parser
+/// reads the whole chunk, so null bytes would be trailing characters.
 fn write_glb(json: &str, bin: &[u8]) -> Vec<u8> {
     let json_bytes = json.as_bytes();
     let json_pad = (4 - (json_bytes.len() % 4)) % 4;
@@ -398,7 +401,7 @@ fn write_glb(json: &str, bin: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&u32::try_from(json_len).unwrap_or(u32::MAX).to_le_bytes());
     out.extend_from_slice(b"JSON");
     out.extend_from_slice(json_bytes);
-    out.extend(std::iter::repeat_n(0u8, json_pad));
+    out.extend(std::iter::repeat_n(b' ', json_pad));
     out.extend_from_slice(&u32::try_from(bin_len).unwrap_or(u32::MAX).to_le_bytes());
     out.extend_from_slice(b"BIN\0");
     out.extend_from_slice(bin);

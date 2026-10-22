@@ -17,7 +17,7 @@
 
 use crate::arena_day::arena_day_params;
 use crate::ibl::{bake_env, IblBake, IblError};
-use crate::sky::sky_radiance;
+use crate::sky::{sky_radiance, SkyParams};
 use crate::v1_ibl_shadow::{uv_to_dir, EnvMap};
 
 /// Environment width in texels: the sky is smooth, 128 columns hold it.
@@ -51,7 +51,29 @@ pub const ARENA_GROUND_BLEND: f32 = 0.3;
 /// the sand's own bounce light under the horizon ([`ARENA_GROUND_BOUNCE`]).
 /// Pure; the same call twice gives identical texels.
 pub fn arena_day_env() -> Result<EnvMap, IblError> {
-    let params = arena_day_params();
+    arena_env(&arena_day_params(), ARENA_GROUND_BOUNCE)
+}
+
+/// The arena night sky as an equirectangular environment: the same env map
+/// over the moonlit sky params, with the dark sand's own bounce light under
+/// the horizon. Pure; the same call twice gives identical texels.
+pub fn arena_night_env() -> Result<EnvMap, IblError> {
+    arena_env(
+        &crate::arena_day::arena_night_params(),
+        ARENA_NIGHT_GROUND_BOUNCE,
+    )
+}
+
+/// The night sand's own bounce light under the horizon: dark and cool, so
+/// the warm torches read against it.
+pub const ARENA_NIGHT_GROUND_BOUNCE: [f32; 3] = [0.16, 0.13, 0.10];
+
+/// One arena sky as an equirectangular environment: every texel is the sky
+/// radiance along its direction (horizon haze included, the sun disc clamped
+/// away at [`ARENA_ENV_MAX`]), scaled by [`ARENA_ENV_GAIN`], with the
+/// ground's own bounce light under the horizon. Pure; the same call twice
+/// gives identical texels.
+pub fn arena_env(params: &SkyParams, ground_bounce: [f32; 3]) -> Result<EnvMap, IblError> {
     let (w, h) = (ARENA_ENV_W, ARENA_ENV_H);
     let mut pixels = Vec::with_capacity(usize::try_from(w * h).unwrap_or(0));
     // Texel centers over the (small, `u16`-sized) map edges.
@@ -60,14 +82,14 @@ pub fn arena_day_env() -> Result<EnvMap, IblError> {
         for x in 0..w {
             let uv = [(edge(x) + 0.5) / edge(w), (edge(y) + 0.5) / edge(h)];
             let dir = uv_to_dir(uv);
-            let radiance = sky_radiance(dir, &params)
-                .map_err(|e| IblError::Invalid(format!("arena day env: {e}")))?;
+            let radiance = sky_radiance(dir, params)
+                .map_err(|e| IblError::Invalid(format!("arena env: {e}")))?;
             // 0 on and above the horizon, 1 once the sand fully takes over.
             let ground = (-dir[1] / ARENA_GROUND_BLEND).clamp(0.0, 1.0);
             let mut texel = [0.0f32; 3];
             for c in 0..3 {
                 let sky = radiance[c].min(ARENA_ENV_MAX) * ARENA_ENV_GAIN[c];
-                texel[c] = sky + (ARENA_GROUND_BOUNCE[c] - sky) * ground;
+                texel[c] = sky + (ground_bounce[c] - sky) * ground;
             }
             pixels.push(texel);
         }
@@ -85,6 +107,18 @@ pub fn arena_day_env() -> Result<EnvMap, IblError> {
 pub fn bake_arena_day() -> Result<(IblBake, f64), IblError> {
     let started = engine_clock::now();
     let env = arena_day_env()?;
+    let (bake, _) = bake_env(&env)?;
+    let ms = engine_clock::since(started).as_secs_f64() * 1000.0;
+    Ok((bake, ms))
+}
+
+/// The live IBL bake from the arena night sky: the moonlit environment the
+/// presenter uploads under the night preset, so the ambient sits far under
+/// the day level and the torches carry the picture. Returns the bake plus
+/// its wall ms (evidence only).
+pub fn bake_arena_night() -> Result<(IblBake, f64), IblError> {
+    let started = engine_clock::now();
+    let env = arena_night_env()?;
     let (bake, _) = bake_env(&env)?;
     let ms = engine_clock::since(started).as_secs_f64() * 1000.0;
     Ok((bake, ms))

@@ -361,7 +361,7 @@ impl ArenaApp {
         };
         let hash = self.app.hud().state_hash();
         seat.publish(&format!("tick {tick} {hash:016x}\n"));
-        if tick % engine_game::agent_seat::VIEW_EVERY_TICKS == 0 {
+        if tick.is_multiple_of(engine_game::agent_seat::VIEW_EVERY_TICKS) {
             if let Some(line) = self.view.line() {
                 seat.publish(&format!("view {line}\n"));
             }
