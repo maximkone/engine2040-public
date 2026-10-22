@@ -169,7 +169,10 @@
    "clock": 6
   },
   "crates/render/src/present/gpu_present/presenter.rs": {
-   "block": 4
+   "block": 3
+  },
+  "crates/render/src/present/gpu_present/preset.rs": {
+   "block": 1
   },
   "crates/render/src/present/gpu_present/submit.rs": {
    "block": 2

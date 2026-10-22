@@ -803,6 +803,39 @@ fn probe_exchange(
     })
 }
 
+/// One seeded tier duel at the standard match length: slot 0 holds
+/// `higher`, slot 1 `lower`, morale even. `Some(true)` when the higher
+/// rung dealt the most damage, `Some(false)` when it did not, `None` when
+/// the duel refused. The tier pair check and the primus boss proof (GA15)
+/// both read this, so the tier duel wiring lives in one place.
+///
+/// Pure fork measurement: same seed gives the same answer.
+pub fn tier_duel_wins(higher: TierRow, lower: TierRow, index: u32) -> Option<bool> {
+    let base = TournamentConfig::standard().base_seed;
+    let config = ArenaConfig {
+        seed: base.wrapping_add(u64::from(index)),
+        ticks: STANDARD_TICKS,
+        fighters: 2,
+        half_extent_m: 20.0,
+        table_version: 1,
+    };
+    let (snapshot, _) = engine_arena::run_prefix(&config, &FighterTape::default(), 0)?;
+    let mut fork = Fork::from_snapshot(snapshot, 0)?;
+    for (slot, tier) in [higher, lower].iter().enumerate() {
+        let fighter = u8::try_from(slot).ok()?;
+        fork.apply_proposal(ForkProposal::SetTier {
+            fighter,
+            tier: *tier,
+        })
+        .ok()?;
+    }
+    let metrics = fork.run_n(config.ticks);
+    Some(matches!(
+        winrates::slot_zero_result(&metrics.damage_dealt),
+        winrates::SlotZero::Win
+    ))
+}
+
 /// Killer slot of finished `metrics`: top damage, ties to the lowest slot.
 pub(crate) fn killer_of(metrics: &ForkMetrics) -> u8 {
     let mut killer = 0u8;

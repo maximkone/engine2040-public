@@ -372,6 +372,14 @@ mod tests {
 
     /// A pack that carries rotations: one track per joint, each joint turning
     /// a quarter turn about Y over the clip.
+    ///
+    /// The quaternion below is a test fixture, never tick state, so the sim
+    /// clippy gate takes a scoped expectation here: the round it needs is
+    /// libm, and the value never reaches a replay.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only quaternion fixture, never tick state"
+    )]
     fn pack_with_rots() -> (Vec<u8>, Skeleton) {
         let times: Vec<f32> = (0..8).map(|k| k as f32 * 0.1).collect();
         let mut tracks = Vec::with_capacity(FIGHTER_JOINTS);

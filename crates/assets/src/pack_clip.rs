@@ -26,7 +26,11 @@ use engine_anim::clip::QTrack;
 use engine_anim::contract::Skeleton;
 use engine_anim::motion_bake::bake_unpack_rots;
 use engine_anim::pack::{unpack_qclip, PackedClip};
-use engine_anim::pack_file::{load_pack, PackFileError};
+use engine_anim::pack_file::PackFileError;
+// The file reader is native only (a browser tab has no file system), so the
+// import rides the same gate. The error type itself is everywhere.
+#[cfg(not(target_arch = "wasm32"))]
+use engine_anim::pack_file::load_pack;
 use engine_anim::pose::QuatTrack;
 use engine_anim::{Clip, Track};
 

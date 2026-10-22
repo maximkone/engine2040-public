@@ -352,12 +352,26 @@
   `crates/game/src/fighter_draw.rs`. Accept: F2P over 30 frames each fighter's
   silhouette mask changes (limb motion) and no frame has magenta over 0.5%;
   P2P golden unchanged. needs: VS5a.
-- [ ] VS7 game: torches are lights — torch actors from the placement feed the
+- [x] VS7 game: torches are lights — torch actors from the placement feed the
   clustered light list (GX2) with presentation-only flicker; a night preset.
   Tier B. Size M. Owns the light feed in `crates/game/src/arena_kit.rs`.
   Accept: F2P the frame light list holds every torch actor; at night the mean
   luminance within 2 m of a torch is at least 2 times the far sand; P2P
-  golden unchanged, 0 validation errors. needs: VS1, GX2. Progress
+  golden unchanged, 0 validation errors. needs: VS1, GX2. Landed 283f9fc3.
+  F2P `node tools/gh-check.mjs cargo test -p engine-game --lib torch` ->
+  12 passed, 0 failed (run 39724798962): the frame light list holds every
+  torch actor, and the sand within 2 m of a torch is at least twice the far
+  sand across the flicker; `node tools/gh-check.mjs cargo test -p engine-render
+  --lib torch` -> 15 passed, 0 failed. The night arena, captured on the
+  reference GPU (RTX 3050, `E2040_NIGHT=1`, `target/vs7-night5/`, sha
+  `d918ab5c9dc4a96e`, `validation_errors=0`): the sky is black, the sand is
+  dark, the torch-lit wall reads warm, and the opened PNG measures the
+  brightest sand cell at 10.1x the far sand (frame 0) and 6.0x (frame 1).
+  P2P golden d57b5c8ae3096614 unchanged
+  (`cargo test -p engine2040 --release --test proof_cli default_and_max_seed`,
+  run 39724333202); the day capture is unchanged too (the day rig keeps every
+  bit: `the_day_rig_keeps_the_shipped_bytes`, 10 passed, run 39719248827).
+  Progress
   2026-10-22: the feed landed (`ffc7dce26`, the duplicate module declaration
   fixed in `b5ba1ddf5`). `crates/render/src/torch_light.rs` owns the light
   type (position, warm color, reach, intensity, a bounded flicker), the
@@ -374,7 +388,13 @@
   torches carry the picture; unset keeps the shipped daylight look, so
   every existing capture stays byte-equal. Golden leg PASS
   (`cargo test -p engine2040 --release --test proof_cli default_and_max_seed`,
-  run 39704439941). Left: a captured night arena on the reference GPU.
+  run 39704439941). The night rig landed too (`923f177c9`, the night gain in
+  `f478e7c47`): the arena night preset bakes a moonlit sky (the sky params
+  carry a `night_gain`, so the ambient sits under the torches), the presenter
+  builds under that rig (`init_offscreen_with_preset`,
+  `init_for_window_with_preset`), and the capture feeds the placement's torch
+  actors per frame. The day rig keeps every bit
+  (`the_day_rig_keeps_the_shipped_bytes`), so the day capture is unchanged.
 - [x] VS9 proof: daily arena shot — one command runs the arena capture
   (`--scene arena --fighters 2 --camera-path arena600 --frames 120 --exit`),
   writes 3 PNGs, their manifests and silhouette masks under `target/vs9/`, and

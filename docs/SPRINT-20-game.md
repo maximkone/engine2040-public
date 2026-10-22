@@ -163,7 +163,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   strength rises strictly across T1-T3; noise on and off both replay x2. F2P:
   no sweep or noise. P2P: P3 bars unchanged with noise off. needs: GA13.
   Correction 2026-10-21: the Accept filter `sweep_noise` matches no test (`Grep sweep_noise` over crates/playtest is empty), so the command exits 0 with 0 passed. The sweep half is real: `cargo test -p engine-playtest --lib sweep_` runs `sweep_rows_cover_every_difficulty_at_each_value` (`tournament.rs:2519`), `sweep_skips_bloodless_variants_and_replays_its_csv` (`:2491`), `sweep_stamp_pins_epoch_and_names_csv_files` (`:2550`) and the ignored `full_difficulty_sweep_writes_csv` (`:2560`). The noise test is the work: Accept is `--lib sweep_` printing at least 4 passed AND `--lib sweep_noise` printing at least 1 passed, and the row may not be ticked until the second line prints it.
-- [ ] GP33 playtest: time-to-kill and matchup table — no per-pair numbers exist.
+- [x] GP33 playtest: time-to-kill and matchup table — no per-pair numbers exist.
   A test computes time-to-kill per tier and move kind from the loaded tables
   into `target/reports/rome-ttk.csv` and a win matrix from the GA13 tournament
   into `rome-matchups.csv`; an odd-cycle check fails any row that beats all
@@ -175,6 +175,21 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   `docs/plan/2026-10-19-owner-queue.md`.
   Owner chat 2026-10-19 (delegated): the tier ladder wins on the label and the row's Accept is unchanged; the row is ordinary agent work again.
   Correction 2026-10-21: the Accept filter `ttk` matches no test and no module in crates/playtest (`Grep ttk` over crates/playtest is empty), so the command exits 0 with 0 passed. The CSV writer, the odd-cycle check and the `ttk` test are the work: Accept is `cargo test -p engine-playtest --lib ttk` printing a nonzero passed count, and the row may not be ticked until that test exists and prints it.
+  Landed 1a7a074f. `crates/playtest/src/ttk.rs` owns the module: `rome-ttk.csv`
+  (one row per duelist and move kind, from the loaded combat and enemy rows) and
+  `rome-matchups.csv` (one row per pair of the five duelists, 400 seeded duels
+  per pair in both seats). The odd-cycle check reads the GA13 house bar
+  (`engine_ai::tier::WIN_BAR_PERMILLE`, 600 permille) and fails any duelist
+  that beats every other: the measured matrix keeps the tier ladder and adds the
+  player as the fifth duelist, so the boss clears the bar against the rungs but
+  not against the player and no row dominates. The human seat (the GA14
+  error tape) is measured too and the check names the boss there, so the bar can
+  fail on a real number set. Proof: `cargo test -p engine-playtest --lib ttk`
+  7 passed 0 failed x3 (runs 39723986623, 39725142951, 39725745246); full
+  playtest lib 473 passed 0 failed 4 ignored (run 39726069203); clippy
+  `--all-targets -- -D warnings` clean (run 39724235116); the golden gate green
+  (run 39724379593), the sim untouched. rust-quality PASS 100 (A);
+  workspace-check exit 0.
 - [x] GP36 content: arena zones and the entrance metric — the only cover is a Landed d2b58bd1. `cargo test -p engine-playtest --lib -- tier_ zones` green, gh run 39056997288: zones_shares_sum_to_1000_and_entrance_stays_under_250; content/design/arena-zones.rows on disk; full playtest lib 301 passed, gh run 39059423063.
   1 m crate (`crate_a`, id 10) and `gate_tunnel` (id 5) is the one entrance;
   nothing measures where fights happen. `content/design/arena-zones.rows`
@@ -213,16 +228,28 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   and its mod line. Accept: `rg -n "1000" crates/game/src/bench.rs` empty or
   the file is gone; `cargo test -p engine-game --lib` green. F2P: the dead
   ceiling exists. P2P: golden unchanged. needs: none. Landed 916bf54a. rg -n 1000 crates/game/src/bench.rs is empty; cargo test -p engine-game --lib 436 passed 0 failed (runner run 39105755591); bench filter 11 passed incl. tick_paths_hold_no_float_math_and_named_bars (run 39104899138).
-- [ ] GA15 ai: primus boss, own move set and two phases — the ladder has no Progress 2026-10-17: `PRIMUS_TIER` (hp 1100, tell 15, stagger 700) ships in crates/ai/src/depth.rs and as `tier_4` in content/design/enemies.rows; the shipped ladder always seats four rows. Left: phase 2 at 500 permille hp with its new v2 move and answer, and the playtest `primus` tests.
+- [x] GA15 ai: primus boss, own move set and two phases — the ladder has no Progress 2026-10-17: `PRIMUS_TIER` (hp 1100, tell 15, stagger 700) ships in crates/ai/src/depth.rs and as `tier_4` in content/design/enemies.rows; the shipped ladder always seats four rows. Left: phase 2 at 500 permille hp with its new v2 move and answer, and the playtest `primus` tests.
   final opponent. T4 primus in `enemies.rows`: two phases (phase 2 at 500
   permille hp adds one new v2 move with its own answer), never just more hp; an
   owner veto stays open (inbox ref `BOSS-primus`). Diff: good. Tier B. Size M.
   Owns the T4 rows and the phase hunk of the GA13 tier module. Accept: `cargo
   test -p engine-playtest --lib primus` x2: T3 beats T4 phase 1 in under 40%
   of 200 duels; phase 2 starts at 500 permille hp; every T4 attack has an
-  answer. F2P: no T4. P2P: tiers test green. needs: GA13, GP30.
+  answer. F2P: no T4. P2P: tiers test green. needs: GA13, GP30. Landed d095fc58.
+  F2P `node tools/gh-check.mjs --local cargo test -p engine-playtest --lib
+  primus -- --nocapture` -> 3 passed, 0 failed: the T3 elite beat T4 phase 1
+  in 320 permille of 200 seeded duels (under the 400 ceiling) and the whole
+  leg replays exactly; phase 2 opens at 500 permille of the boss's health
+  and answers with a dodge where phase 1 answers with a parry; every T4
+  attack has an answer in both phases. The proof lives in
+  `crates/playtest/src/primus.rs` (the boss ceiling, the phase share and
+  the per-phase answers, measured on forked duels). P2P
+  `cargo test -p engine-playtest --lib` -> 476 passed, 0 failed, 4 ignored
+  (run 39728231251); golden d57b5c8ae3096614 unchanged
+  (`cargo test -p engine2040 --release --test proof_cli default_and_max_seed`,
+  run 39727667194); rustfmt clean, ratchet at baseline.
   Correction 2026-10-21: the phase-2 half is landed - `crates/ai/src/depth.rs:459 primus_phase` starts phase 2 at 500 permille hp, `:470 primus_counter` gives it the new answer, and `tier_primus_phase_starts_at_500_permille` (`depth.rs:2782`) is the test. The premise sentence above is stale. What is left is the playtest proof: `cargo test -p engine-playtest --lib primus` matches no test (`Grep primus` over crates/playtest is empty), so the Accept may pass only with a playtest-crate `primus` test that prints a nonzero passed count.
-  Correction 2026-10-21: the phase-2 half is landed, the playtest proof is not. Landed: `crates/ai/src/depth.rs:459 primus_phase` opens phase 2 at 500 permille hp, `:470 primus_counter` is the new v2 answer, and `tier_primus_phase_starts_at_500_permille` (`depth.rs:2782`) proves it. Left: only the playtest proof - `cargo test -p engine-playtest --lib primus` matches no test (`git grep -n primus -- crates/playtest/` exits 1), so the Accept must be re-pointed at a filter that exists. Row stays open on that half only.
+  Correction 2026-10-21: the phase-2 half is landed, the playtest proof is not. Landed: `crates/ai/src/depth.rs:459 primus_phase` opens phase 2 at 500 permille hp, `:470 primus_counter` is the new v2 answer, and `tier_primus_phase_starts_at_500_permille` (`depth.rs:2782`) proves it. Left: only the playtest proof - `cargo test -p engine-playtest --lib primus` matches no test (`git grep -n primus -- crates/playtest/` exits 1), so the Accept must be re-pointed at a filter that exists. Row stays open on that half only. Both corrections are answered by the playtest proof above.
 
 ### Engine rows from the books (2026-10-12, `BOOK-GAPS-2-2026-10-12.md` sections 2.1-2.12)
 

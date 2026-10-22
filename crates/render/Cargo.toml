@@ -39,6 +39,14 @@ name = "kam1c"
 path = "src/bin/kam1c.rs"
 required-features = ["window"]
 
+# The WebGPU conformance gate runner (HX4): one case per process, so a driver
+# abort in one case never takes the run with it. The strict instance comes
+# from the render stack's own maker, so the flag cannot be forgotten.
+[[bin]]
+name = "webgpu_cts"
+path = "src/bin/webgpu_cts.rs"
+required-features = ["window"]
+
 [dependencies]
 # HUD command lane owner (UIX13): the hud pass draws `engine-ui` frames. Std-only.
 engine-ui.workspace = true

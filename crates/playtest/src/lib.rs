@@ -62,6 +62,9 @@ pub mod mirror_logic;
 mod norm_score;
 /// Shared parse errors and tokenizer core for the fixture grammars.
 pub mod parse;
+/// The T4 primus boss proof: the boss ceiling, the phase-2 share and the
+/// per-phase answers, measured on seeded duels (GA15).
+pub mod primus;
 pub mod probe_sync;
 pub mod rating;
 pub mod reachability;
