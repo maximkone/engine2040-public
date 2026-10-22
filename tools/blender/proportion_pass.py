@@ -317,6 +317,13 @@ def main():
         """
         if material is None:
             return "skin"
+        # mpfb_body.py names its materials skin, cloth and hair already; that
+        # name is the truth. Guessing again here turned the hair and the
+        # skin into cloth (the body object is renamed "body" above, so the
+        # "human" test below never matches it).
+        given = (material.name or "").lower().split(".")[0]
+        if given in ("skin", "cloth", "hair"):
+            return given
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)

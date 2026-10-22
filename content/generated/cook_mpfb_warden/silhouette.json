@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.4478,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 2.0355,
+  "fill_30m": 0.4192,
+  "height_30m_px": 89,
+  "height_px": 831,
+  "ortho_scale_m": 2.4494,
+  "px_per_m": 408.26,
+  "resolution_30m": [
+    1326,
+    746
+  ],
+  "scale_applied": 0.999857,
+  "source": "C:\\engine2040\\content\\generated\\cook_mpfb_warden\\lod0.glb",
+  "source_height_m": 2.0003,
+  "triangles": 1986,
+  "width_px": 376
+}

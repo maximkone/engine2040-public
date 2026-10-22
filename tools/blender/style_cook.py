@@ -317,8 +317,14 @@ def nearest_palette(pixels, palette):
     dist = dist + (1.0 - weights) * 10.0
     grey = weights[:, 0] < 0.5
     if grey.any():
+        # A grey texture (a grey suit) takes the neutral. A grey patch inside
+        # a coloured texture (faded denim) takes the garment's own colour:
+        # the Wardens' neutral is bone white, and the jeans came out with
+        # white blotches where the denim was worn.
+        coloured = float(np.median(sat)) > 0.12 and CURRENT_DOMINANT < len(palette)
+        fill = CURRENT_DOMINANT if coloured else neutral
         dist[grey, :] = 10.0
-        dist[grey, neutral] = 0.0
+        dist[grey, fill] = 0.0
     # A hue the palette does not have must not fall back to the nearest hue:
     # a blue shirt had no match, fell to bone, and dressed a black iron
     # brute in white. So the garment is painted in the faction's own colour,
@@ -332,7 +338,13 @@ def nearest_palette(pixels, palette):
     choice = dist.argmin(axis=1)
     dominant = CURRENT_DOMINANT
     if len(palette) > 1:
-        accents = [i for i in range(len(palette)) if i != dominant]
+        # Only a saturated accent can be matched by hue. A near-grey entry
+        # (the Wardens' steel) has a hue vector near zero, so every mildly
+        # coloured pixel sat within reach of it: faded denim turned steel
+        # white in blotches.
+        accents = [i for i in range(len(palette)) if i != dominant and psat[i] > 0.25]
+        if not accents:
+            accents = [i for i in range(len(palette)) if i != dominant]
         matched = dist[:, accents].min(axis=1)
         keep = (matched < 0.45) & (sat > 0.25)
         choice = np.where(keep, choice, dominant)
@@ -354,7 +366,9 @@ def nearest_palette(pixels, palette):
     mean = float(v.mean()) if v.size else 1.0
     mean = max(mean, 1e-4)
     shade = 0.62 + 0.76 * (v / mean)
-    shade = np.clip(shade, 0.35, 1.90)
+    # The top is capped at 1.5: a lone bright thread in a denim map, scaled
+    # by 1.9, turned bone white and the trousers came out speckled.
+    shade = np.clip(shade, 0.35, 1.50)
     out = np.clip(out * shade[:, None], 0.0, 1.0)
 
     result = np.concatenate([out, alpha], axis=1).reshape(h, w, 4).astype(np.float32)
@@ -419,11 +433,15 @@ def write_atlas(image, palette, out_path):
     buf = np.empty(width * height * 4, dtype=np.float32)
     image.pixels.foreach_get(buf)
     pixels = buf.reshape(height, width, 4)
-    painted = nearest_palette(pixels, palette)
-    atlas = bpy.data.images.new("atlas", width=ATLAS_SIZE, height=ATLAS_SIZE, alpha=True)
+    # Average down to the atlas first, then paint. Taking every Nth pixel kept
+    # single bright threads at full value (white speckles at a distance), and
+    # painting 2048 px to keep 512 px was sixteen times the work.
     step_x = max(1, width // ATLAS_SIZE)
     step_y = max(1, height // ATLAS_SIZE)
-    small = painted[::step_y, ::step_x, :]
+    hh, ww = (height // step_y) * step_y, (width // step_x) * step_x
+    small = pixels[:hh, :ww, :].reshape(hh // step_y, step_y, ww // step_x, step_x, 4).mean(axis=(1, 3))
+    small = nearest_palette(small.astype(np.float32), palette)
+    atlas = bpy.data.images.new("atlas", width=ATLAS_SIZE, height=ATLAS_SIZE, alpha=True)
     if small.shape[0] < ATLAS_SIZE or small.shape[1] < ATLAS_SIZE:
         pad_h = ATLAS_SIZE - small.shape[0]
         pad_w = ATLAS_SIZE - small.shape[1]
@@ -524,6 +542,12 @@ def split_hair(ob):
     count = len(me.vertices)
     if not count:
         return False
+    # A real hair asset (MPFB's own, from mpfb_body.py) brings its own
+    # material: then there is nothing to guess, and splitting the scalp too
+    # would paint the forehead.
+    for slot in ob.material_slots:
+        if slot.material is not None and "hair" in (slot.material.name or "").lower():
+            return False
 
     # Only the skin is split. The cloth keeps its own material, or a
     # collar that reaches the brow line turns into hair.
@@ -553,7 +577,12 @@ def split_hair(ob):
     zs = [v.co.z for v in me.vertices]
     z_min, z_max = min(zs), max(zs)
     figure_height = max(z_max - z_min, 1e-6)
-    crown = z_min + figure_height * 0.80
+    # The head reaches the crown: the top of the figure is the top of
+    # the head and nothing else is up there. The old measure took the
+    # top fifth of the figure, and the torso reached it too: the
+    # shoulders are at eighty percent of a figure's height, so the
+    # torso was the head and the hair was painted on the chest.
+    crown = z_min + figure_height * 0.95
 
     seen = set()
     pieces = []
@@ -602,12 +631,46 @@ def split_hair(ob):
     if len(head_faces) < 20:
         return False
 
-    # The hair is the top of the head's own faces. The face of the head
-    # hangs down from the crown, so the split is a share of the head's
-    # surface and not a height.
-    head_faces.sort(key=lambda item: item[1])
-    cut = int(len(head_faces) * 0.58)
-    hair_faces = {index for index, _ in head_faces[cut:]}
+    # The hair is the top of the head, with the hairline lower at the
+    # front than at the back. The face hangs down from the crown, so a
+    # split by height alone puts the face inside the hair and the
+    # character comes out wearing a helmet with a slot in it.
+    #
+    # The head faces the -Y way: the eyes are at y -0.166 and the jaw
+    # at -0.150, and the head's own extent is y -0.168 to 0.055, so the
+    # face is at the -Y end and the back of the head is at the +Y end.
+    head_zs = [me.vertices[v].co.z for v in head]
+    head_centre_z = sum(head_zs) / len(head_zs)
+    head_bottom = min(head_zs)
+    head_top = max(head_zs)
+    head_ys = [me.vertices[v].co.y for v in head]
+    head_front = min(head_ys)
+    head_back = max(head_ys)
+    head_depth = max(head_back - head_front, 1e-6)
+    head_height = max(head_top - head_bottom, 1e-6)
+
+    hair_faces = set()
+    for index, _ in head_faces:
+        ys = [me.vertices[v].co.y for v in me.polygons[index].vertices]
+        zs = [me.vertices[v].co.z for v in me.polygons[index].vertices]
+        if not ys or not zs:
+            continue
+        z = min(zs)
+        y = sum(ys) / len(ys)
+        # How far forward this face is, from 0 at the back of the head to
+        # 1 at the face.
+        forward = (head_back - y) / head_depth
+        forward = max(0.0, min(1.0, forward))
+        # The hairline: high at the back of the head, low at the front.
+        # The head's own bottom is the chin and its own top is the
+        # crown, and a brow sits at about two thirds of the way up from
+        # the chin. The hair is above the brow at the front and above
+        # the nape at the back.
+        brow = head_bottom + head_height * 0.66
+        nape = head_bottom + head_height * 0.22
+        line = nape + (brow - nape) * forward
+        if z >= line:
+            hair_faces.add(index)
 
     hair = bpy.data.materials.new(name="hair")
     hair.use_nodes = True
@@ -1276,7 +1339,6 @@ def main():
 
     # Every LOD is a share of the same pristine base, not a share of the last
     # one: otherwise the ladder collapses onto the same triangle count.
-    print("STEP before pristine", sorted(o.name for o in bpy.data.objects))
     pristine = ob.copy()
     pristine.data = ob.data.copy()
     bpy.context.collection.objects.link(pristine)
@@ -1285,10 +1347,8 @@ def main():
     # name the figure and the pristine base both had.
     pristine.name = "pristine_base"
 
-    print("STEP before ladder", sorted(o.name for o in bpy.data.objects))
     lod_tris = []
     for level, share in enumerate(LOD_RATIOS):
-        print("STEP level start", level, sorted(o.name for o in bpy.data.objects))
         ob_level = pristine.copy()
         ob_level.data = pristine.data.copy()
         bpy.context.collection.objects.link(ob_level)
@@ -1299,16 +1359,12 @@ def main():
         bpy.ops.object.select_all(action="DESELECT")
         ob_level.select_set(True)
         bpy.context.view_layer.objects.active = ob_level
-        print("STEP before decimate", level, sorted(o.name for o in bpy.data.objects))
         tris, ob_level = decimate_by_part(ob_level, budget, share)
-        print("STEP after decimate", level, sorted(o.name for o in bpy.data.objects))
         path = os.path.join(outdir, f"lod{level}.glb")
         if not export_glb(ob_level, path):
             raise CookError(f"could not write {path}")
         lod_tris.append({"lod": level, "triangles": tris, "file": os.path.basename(path)})
-        print("STEP before remove", level, sorted(o.name for o in bpy.data.objects))
         bpy.data.objects.remove(ob_level, do_unlink=True)
-        print("STEP after remove", level, sorted(o.name for o in bpy.data.objects))
     bpy.data.objects.remove(pristine, do_unlink=True)
     bpy.context.view_layer.objects.active = ob
 

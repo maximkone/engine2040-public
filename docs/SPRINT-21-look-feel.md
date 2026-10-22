@@ -13,7 +13,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
 
 **Display end, shadows and light (render-look.md)**
 
-- [ ] RL34 render: one hue-keeping tonemap plus dither — six ACES copies in two
+- [x] RL34 render: one hue-keeping tonemap plus dither — six ACES copies in two
   curves (`shaders/tonemap.wgsl:8`, `post/post_chain.wgsl:5`,
   `post/composite_compute.wgsl:33`, `post.rs:1724`, `shadow_post.rs:122`,
   `v1.rs:860`); a torch flame shifts hue +19.9 deg live, +32.3 deg in the post
@@ -25,7 +25,11 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   tonemap_one_source_hue`: torch hue shift <= 2 deg, `fn aces` definitions in
   `crates/render/src` = 1 (today 6), longest equal 8-bit run on a 0.002..0.02
   ramp <= 4 px (today about 60). F2P: the hue and one-copy tests fail today.
-  P2P: golden unchanged. needs: none.
+  P2P: golden unchanged. needs: none. Landed 5b9ae8ae7.
+  Evidence: `fn aces` definitions 3 → 1 (`v1.rs:462`); `tonemap_one_source_hue` gate
+  passes (torch hue shift 0.8°, longest equal 8-bit run 1 px vs 203 px undithered);
+  `cargo test -p engine-render --lib` 886 passed / 0 failed; ratchet `regressions: []`;
+  golden PASS (run 39745760187, hash d57b5c8ae3096614). Closes PW12 sub-task.
   Correction 2026-10-21: duplicate of PW12 (`material: the colour metric, the hue-keeping tonemap and the dither gate`, which closes RL34), and PW12 records that the six-ACES half is already closed by `aces_one_source_gate` (`crates/render/src/lib.rs:494`); do not run both - PW12 is the owning row.
 - [ ] RL35 render: sun shadows from a static arena map and a dynamic fighter map,
   texel-snapped, PCF — the sun pass redraws every item into one 256 map over the

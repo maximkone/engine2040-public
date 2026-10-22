@@ -7,6 +7,15 @@ description: "Use when you need new content or touch content/ or crates/assets: 
 
 Plan: `docs/plan/content.md`. Take one content row: its text, its owned `content/` paths, its budgets and the consumer that must load the result. Commit by path (skill `commit-and-board`). Report files, provenance rows, budgets and the proof.
 
+## Make a fighter body
+
+One command per lane. Each runs its steps in order and stops at the first failure, which names the step.
+
+- MPFB body (the lane the game uses now): `node tools/asset-gen/character.mjs --from mpfb --name <id> --faction ashkin|wardens [--height 1.9] [--bulk 1.0] [--out target/chargen/<id>]`. It runs mpfb_body, proportion_pass, style_cook, the 30 m gate, rig22 and the page budget check (LOD0 tris, 256 px atlas cap, first-bundle and memory bytes). It writes `receipt.json` in the out dir and prints one `RECEIPT` line. Exit 3 means the gate or the budget said no; exit 1 means a step failed.
+- Concept image (the older lane): `node tools/asset-gen/character.mjs --concept <image> --name <id> --faction ashkin`. It runs sf3d, style_cook, the gate and rig22.
+- Tests: `node --test tools/asset-gen/character.test.mjs`.
+- Not wired yet: a cooked MPFB body does not reach `content/fighters` or `fighters.e2bundle`. The receipt's `next_step` says what is missing.
+
 ## 1. Sources and licence
 
 - Find sources with websearch: Quaternius, Poly Haven, ambientCG, Kenney, 100STYLE and other CC0 or CC-BY libraries. Read each licence page live.

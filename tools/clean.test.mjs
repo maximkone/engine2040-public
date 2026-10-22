@@ -120,7 +120,7 @@ test("--auto --include-debug moves target/debug to the quarantine and writes a M
     assert.ok(existsSync(join(moved, "deps", "libcore.rlib")), "the bytes are in the quarantine, not deleted");
     assert.ok(existsSync(join(dir, "target", "keep.txt")), "non-trash survives");
     const moves = readFileSync(join(quarantine, "2026-10-22", "MOVES.tsv"), "utf8");
-    const row = moves.split("\n").find((l) => l.includes("target\\debug"));
+    const row = moves.split("\n").find((l) => l.includes(join("target", "debug")));
     assert.ok(row, `MOVES.tsv names the moved path: ${moves}`);
     const [date, from, to, ...rest] = row.split("\t");
     assert.equal(date, "2026-10-22", "the row carries the date");
@@ -223,7 +223,7 @@ test("two moves of the same name land side by side, each with its own MOVES.tsv 
     assert.equal(second.status, 0, `the second move succeeds, got: ${second.out}`);
     assert.ok(existsSync(join(quarantine, "2026-10-22", "target-debug", "deps", "libcore.rlib")), "the first move stays");
     assert.ok(existsSync(join(quarantine, "2026-10-22", "target-debug-2", "again.bin")), "the second move gets its own name");
-    const rows = readFileSync(join(quarantine, "2026-10-22", "MOVES.tsv"), "utf8").split("\n").filter((l) => l.includes("target\\debug"));
+    const rows = readFileSync(join(quarantine, "2026-10-22", "MOVES.tsv"), "utf8").split("\n").filter((l) => l.includes(join("target", "debug")));
     assert.equal(rows.length, 2, `two rows in MOVES.tsv: ${rows.length}`);
   } finally {
     rmSync(base, { recursive: true, force: true });

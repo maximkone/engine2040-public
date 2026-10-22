@@ -17,7 +17,7 @@ Wins over everything below and over `SPRINT.md`, `ROADMAP.md`, `PLAN-REVIEW.md`.
 
 11. **Rome is one legionary's war (owner 2026-10-21: "roman arena to focus to roman soldier simulator with all engineering", "realistic af with making tools ... real rome docs"):** first person through the helmet; march, make camp, fight in the shield line beside AI comrades; Roman engineering and making with every number from a source. The arena duel stays the first proof and the golden (rules v1); the simulator runs on rules v2+. Runs beside 1-3 in its own crates (`crates/rome`, `crates/world`). Plans: `docs/plan/rome.md` (the game), `docs/plan/rome-codex.md` (the sources), `docs/plan/touch-and-pov.md` (touch and helmet view); rows `docs/SPRINT-28-rome.md`; look bar `docs/design/legionary/`. Proof: LEG10 (the 3-minute slice twice equal beside the two pictures). Rows: LEG3 TC3 POV1 LEG4 LEG7 LEG1 LEG2 LEG8 LEG9 LEG10
 
-Next: OPT36 first (build speed); GP42 GP33 GP36 GP40 GP34 and the book rows (`docs/SPRINT-20-game.md`); look and feel steals `docs/SPRINT-21-look-feel.md`, first RL60 RL34 RL46 RL52 RL53 GP43 OPT35 PF25. `--focus` empty: take at most 2 other ready rows from `--ready`.
+Next: OPT36 first (build speed); GP42 GP33 GP36 GP40 GP34 and the book rows (`docs/SPRINT-20-game.md`); look and feel steals `docs/SPRINT-21-look-feel.md`, first RL60 RL46 RL52 RL53 GP43 OPT35 PF25. `--focus` empty: take at most 2 other ready rows from `--ready`.
 
 History: the 10-10 notes, the old Now and the delivery plan sit verbatim in `docs/archive/focus-notes-2026-10-15.md`, `docs/archive/focus-old-now-2026-10-10.md` and `docs/archive/focus-delivery-2026-10-11.md` (no authority).
 

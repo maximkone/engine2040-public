@@ -1,0 +1,21 @@
+{
+  "background": "world_white",
+  "background_30m": "world_white",
+  "bbox_fill": 0.4545,
+  "field_width_m_30m": 30.0,
+  "figure_height_m": 2.0365,
+  "fill_30m": 0.4107,
+  "height_30m_px": 89,
+  "height_px": 828,
+  "ortho_scale_m": 2.4595,
+  "px_per_m": 406.58,
+  "resolution_30m": [
+    1326,
+    746
+  ],
+  "scale_applied": 0.999864,
+  "source": "C:\\engine2040\\content\\generated\\cook_mpfb_ashkin\\lod0.glb",
+  "source_height_m": 2.0003,
+  "triangles": 1986,
+  "width_px": 371
+}

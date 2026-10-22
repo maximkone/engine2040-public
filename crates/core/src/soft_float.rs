@@ -13,6 +13,7 @@
 //! Errors: no panics; a division by zero gives an infinity and `0/0` a NaN.
 //! Budget: zero heap; every operation is a fixed number of integer steps.
 use core::cmp::Ordering;
+use core::ops::{Add, Div, Mul, Sub};
 
 /// The exponent of a zero or a subnormal: every finite value is a multiple of
 /// `2^MIN_EXP`, so this is the grid the subnormals sit on.
@@ -203,13 +204,17 @@ impl SoftFloat {
     pub const fn is_negative(self) -> bool {
         self.neg
     }
+}
+
+impl Add for SoftFloat {
+    type Output = Self;
 
     /// The sum, correctly rounded to the nearest binary32.
     ///
     /// A NaN operand gives a NaN, an infinity beats a finite value, and two
     /// infinities of opposite signs give a NaN. A zero of either sign adds
     /// nothing but its own sign rules.
-    pub fn add(self, other: Self) -> Self {
+    fn add(self, other: Self) -> Self {
         if self.is_nan() {
             return self.quiet();
         }
@@ -263,14 +268,22 @@ impl SoftFloat {
         };
         Self::from_bits(pack(neg, num, small.exp, false))
     }
+}
+
+impl Sub for SoftFloat {
+    type Output = Self;
 
     /// The difference, correctly rounded to the nearest binary32.
-    pub fn sub(self, other: Self) -> Self {
+    fn sub(self, other: Self) -> Self {
         self.add(other.negated())
     }
+}
+
+impl Mul for SoftFloat {
+    type Output = Self;
 
     /// The product, correctly rounded to the nearest binary32.
-    pub fn mul(self, other: Self) -> Self {
+    fn mul(self, other: Self) -> Self {
         if self.is_nan() {
             return self.quiet();
         }
@@ -296,12 +309,16 @@ impl SoftFloat {
             false,
         ))
     }
+}
+
+impl Div for SoftFloat {
+    type Output = Self;
 
     /// The quotient, correctly rounded to the nearest binary32.
     ///
     /// A zero divisor gives an infinity, a zero over zero gives a NaN, and an
     /// infinity over an infinity gives a NaN.
-    pub fn div(self, other: Self) -> Self {
+    fn div(self, other: Self) -> Self {
         if self.is_nan() {
             return self.quiet();
         }
@@ -340,7 +357,9 @@ impl SoftFloat {
         let rest = scaled % divisor;
         Self::from_bits(pack(neg, quotient, exp - b.exp - 39, rest != 0))
     }
+}
 
+impl SoftFloat {
     /// The largest integer that is not above this value.
     ///
     /// A value that is already an integer, an infinity and a NaN keep their
@@ -1092,7 +1111,7 @@ mod tests {
 
     #[test]
     fn the_order_is_total() {
-        let mut values = vec![
+        let mut values = [
             SoftFloat::NEG_INFINITY,
             SoftFloat::NEG_ONE,
             SoftFloat::NEG_ZERO,

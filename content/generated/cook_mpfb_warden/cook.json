@@ -1,22 +1,10 @@
 {
   "atlas": [
     {
-      "atlas": "(solid)",
-      "atlas_size": 0,
-      "distinct_colors": 1,
-      "image": "(solid)",
-      "material": "skin0",
-      "skin": true,
-      "source_size": [
-        0,
-        0
-      ]
-    },
-    {
       "atlas": 512,
-      "distinct_colors": 249,
-      "image": "male_worksuit01_diffuse",
-      "material": "cloth.001",
+      "distinct_colors": 845,
+      "image": "male_casualsuit01_diffuse",
+      "material": "cloth",
       "skin": false,
       "source_size": [
         2048,
@@ -28,22 +16,44 @@
       "atlas_size": 0,
       "distinct_colors": 1,
       "image": "(solid)",
-      "material": "hair",
-      "skin": false,
+      "material": "skin",
+      "skin": true,
       "source_size": [
         0,
         0
       ]
+    },
+    {
+      "atlas": 512,
+      "distinct_colors": 498,
+      "image": "shoes01_diffuse",
+      "material": "cloth.001",
+      "skin": false,
+      "source_size": [
+        1024,
+        1024
+      ]
+    },
+    {
+      "atlas": 512,
+      "distinct_colors": 302,
+      "image": "short02_diffuse",
+      "material": "hair",
+      "skin": false,
+      "source_size": [
+        2048,
+        2048
+      ]
     }
   ],
   "bounds_m": {
-    "x": 1.2164,
-    "y": 0.5285,
+    "x": 0.9102,
+    "y": 0.5294,
     "z": 2.0
   },
   "faction": "wardens",
   "generated_at": null,
-  "hair_faces": true,
+  "hair_faces": false,
   "hero_render": {
     "engine": "BLENDER_EEVEE",
     "ok": true,
@@ -63,8 +73,8 @@
       0.7
     ],
     "key_strength": 0.78,
-    "max": 1.2293,
-    "mean": 0.4299,
+    "max": 1.2298,
+    "mean": 0.6247,
     "min": 0.189,
     "rim_strength": 0.22
   },
@@ -72,17 +82,17 @@
     {
       "file": "lod0.glb",
       "lod": 0,
-      "triangles": 1098
+      "triangles": 1986
     },
     {
       "file": "lod1.glb",
       "lod": 1,
-      "triangles": 1098
+      "triangles": 1086
     },
     {
       "file": "lod2.glb",
       "lod": 2,
-      "triangles": 600
+      "triangles": 588
     },
     {
       "file": "lod3.glb",
@@ -90,6 +100,7 @@
       "triangles": 299
     }
   ],
+  "normals_stripped": 2,
   "palette": [
     "#E8E2D4",
     "#B9BEC4",
@@ -102,10 +113,11 @@
     "matte": 0.55,
     "note": "two values, applied by the engine from the atlas"
   },
-  "scale_applied": 1.154812,
+  "scale_applied": 1.154906,
+  "skin_fitted": 2244,
   "source": "C:\\engine2040\\content\\generated\\mpfb_prop\\warden.glb",
-  "source_height_m": 1.7319,
-  "source_triangles": 43958,
+  "source_height_m": 1.7317,
+  "source_triangles": 24084,
   "target_height_m": 2.0,
   "triangle_budget": 2000,
   "unwrapped": false
