@@ -246,7 +246,7 @@
   passes with a duplicate-claim case and an expired-claim case. F2P: no dedupe or expiry code in
   lane-board.mjs today. P2P: `node tools/workspace-check.mjs` adds no FAIL. needs: none.
   Landed obsolete. Owner chat 2026-10-19 (delegated): the target or premise is gone — one live claim per path in `tools/lane-board.mjs`, which is gone. Replaced by: lead commits by path, no claims.
-- [ ] E86 ops: cap target/debug (EB-2026-10-10-S15; pool-1 and the lane targets are already gone).
+- [x] E86 ops: cap target/debug (EB-2026-10-10-S15; pool-1 and the lane targets are already gone). Landed 31788c7e4. node tools/clean.mjs --dry-run --include-debug listed WOULD target\debug 21.34 GB; node tools/clean.mjs --auto --include-debug with no cargo running moved it to C:\_quarantine\2026-10-22\target-debug (49,450 files, 21,341,494,475 bytes) with one MOVES.tsv row, and nothing was deleted; the dry run now lists no target/debug entry (across 0 path(s)); gh-check cargo check -p engine-core PASS (run 39718650854); node --test tools/clean.test.mjs 11 of 11 pass.
   With no cargo running, `node tools/clean.mjs --dry-run`, then `--auto --include-debug`; anything
   removed goes to C:\_quarantine\<date>\ with a MOVES.tsv line, never a hard delete. Diff: regular.
   Tier B. Size S. Owns `target/debug` (outside git). Accept: `node tools/clean.mjs --dry-run` lists no

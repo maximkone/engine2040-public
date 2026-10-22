@@ -1846,6 +1846,7 @@ mod tests {
             turbidity: 4.5,
             ground_albedo: [0.4, 0.32, 0.2],
             exposure_ev100: 11.0,
+            night_gain: 1.0,
         };
         crate::sky::bake_sky(
             &params,

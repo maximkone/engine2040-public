@@ -155,7 +155,7 @@ test("a running cargo build makes the tool refuse and change nothing", () => {
   }
 });
 
-test("a dry run moves nothing and lists the debug cache as needing --include-debug", () => {
+test("a dry run moves nothing and lists no target/debug entry", () => {
   const { base, dir, quarantine } = debugFixture();
   try {
     const r = clean(dir, ["--dry-run"], {
@@ -163,10 +163,27 @@ test("a dry run moves nothing and lists the debug cache as needing --include-deb
       E2040_QUARANTINE_DATE: "2026-10-22",
     });
     assert.equal(r.status, 0, `exit 0 on report-only, got: ${r.out}`);
-    assert.match(r.out, /target[\\/]debug/, "the debug cache is named");
-    assert.match(r.out, /needs --include-debug/, "the report says how to move it");
+    // The row's Accept: the plain dry run lists no target/debug entry, because
+    // the debug cache only enters the plan with --include-debug.
+    assert.ok(!/target[\\/]debug/.test(r.out), `no target/debug entry: ${r.out}`);
     assert.ok(existsSync(join(dir, "target", "debug", "deps", "libcore.rlib")), "a dry run changes nothing");
     assert.ok(!existsSync(quarantine), "a dry run writes no quarantine folder");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("--include-debug puts the debug cache in the plan, and only then", () => {
+  const { base, dir, quarantine } = debugFixture();
+  try {
+    const env = {
+      E2040_QUARANTINE_ROOT: quarantine,
+      E2040_QUARANTINE_DATE: "2026-10-22",
+    };
+    const withFlag = clean(dir, ["--dry-run", "--include-debug"], env);
+    assert.equal(withFlag.status, 0, `exit 0 on report-only, got: ${withFlag.out}`);
+    assert.match(withFlag.out, /target[\\/]debug/, "the flag names the debug cache");
+    assert.match(withFlag.out, /WOULD reclaim/, "the reclaim summary is printed");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

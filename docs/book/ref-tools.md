@@ -404,7 +404,7 @@ Mirror workflows (`.github/workflows/`): `check.yml` (dispatch, one cargo line),
 - Moves `target/tmp`, `target/debug-workspace-check`, hunt, prov, j4 and perf logs, old per-lane build dirs, and pool dirs no lane uses. Never touches `*.patch`, `lanes-worktrees.json`, `sprint.lock`, `sprint.halt`, `sprint.handoff`.
 - A removed path is moved to `C:\_quarantine\<date>\` and one `MOVES.tsv` row records it (date, from, to, reason). The bytes stay on the same volume: the owner alone decides when the quarantine goes.
 - A live `cargo` or `rustc` means the tree is in use: the tool refuses and changes nothing (exit 3).
-- A dry run names `target/debug` and says it needs `--include-debug`.
+- `target/debug` enters the plan only with `--include-debug`, so a plain dry run never lists it.
 - Unknown argument: usage line, exit 2. Names lane paths (section 14).
 
 ### doctor.mjs

@@ -2019,6 +2019,7 @@ mod tests {
             turbidity: 3.0,
             ground_albedo: [0.42, 0.32, 0.20],
             exposure_ev100: 12.0,
+            night_gain: 1.0,
         }
     }
 

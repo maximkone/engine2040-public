@@ -129,8 +129,7 @@ if (deep && usedPools !== null && [...usedPools].length === 0) {
   if (existsSync(at(join("target", "release")))) deepTargets.push(join("target", "release"));
 }
 const debugDir = join("target", "debug");
-// target/debug only enters the plan with --include-debug; the report names it
-// either way, so a dry run shows the big cache instead of hiding it.
+// target/debug only enters the plan with --include-debug.
 const debugTarget = includeDebug ? [debugDir] : [];
 
 const plan = [
@@ -141,9 +140,6 @@ const plan = [
   ...deepTargets.map((d) => ({ dir: d, kind: "deep-release" })),
   ...debugTarget.filter((d) => existsSync(at(d))).map((d) => ({ dir: d, kind: "deep-debug" })),
 ];
-// Report-only: the debug cache the owner wants capped. It moves only with
-// --include-debug, so the report says so.
-const reportOnly = !includeDebug && existsSync(at(debugDir)) ? [debugDir] : [];
 
 if (deep && usedPools !== null && [...usedPools].length !== 0) {
   console.log(`SKIP release: ${[...usedPools].length} lane(s) registered, delete it by hand when idle`);
@@ -176,9 +172,6 @@ for (const t of plan) {
     console.error(`FAIL move ${t.dir}: ${err?.message ?? err}`);
     process.exitCode = 1;
   }
-}
-for (const d of reportOnly) {
-  console.log(`${dryRun ? "WOULD" : "KEEP"} ${d} ${gb(du(at(d)))} (needs --include-debug)`);
 }
 console.log(`${dryRun ? "WOULD reclaim" : "MOVED"} ${gb(total)} across ${plan.length} path(s), ${moved} moved to ${quarantineDir()}`);
 if (!dryRun && moved > 0) console.log(`MOVES.tsv ${movesFile()}`);
