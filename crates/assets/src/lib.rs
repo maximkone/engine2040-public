@@ -13,12 +13,12 @@ pub mod fighter_bundle;
 /// One load queue over an asset source: priority order, a byte budget,
 /// cancellation and generational handles. Std-only.
 pub mod load_queue;
+pub use load_queue::{LoadError, LoadEvent, LoadQueue};
 /// The CT7 fighter rig as a body the page can hold: the atlas becomes KTX2
 /// block maps and the body drops its images, keeping the rig byte for byte.
 /// Std-only; the cook itself rides the `import` lane.
 #[cfg(feature = "import")]
 pub mod rig_cook;
-pub use load_queue::{LoadError, LoadEvent, LoadQueue};
 pub mod budget;
 pub mod datanode;
 pub use datanode::{parse, DataNodeError, Node};
@@ -136,6 +136,10 @@ pub use proxy::{
     cook_proxy, light_leaks, LeakReport, ProxyError, ProxyMesh, Ray, PROXY_BOUND_RATIO,
     PROXY_DIVISORS, PROXY_LAST_FRACTION, PROXY_MAX_TRIS, PROXY_MIN_BOUND_M, PROXY_MIN_TRIS,
 };
+/// The CT7 body rig's joint names and the map onto the engine's fighter
+/// rig: the bridge a baked combat pack needs to play on the game's body.
+#[cfg(feature = "import")]
+pub mod ct7_map;
 /// The fighter rig the teacher lane lands on, and the teacher's rest pose: the
 /// bake and the tick read the same joint order from here.
 #[cfg(feature = "import")]

@@ -516,6 +516,65 @@ mod tests {
         assert!(total < 50 * 1024 * 1024, "{total} bytes");
     }
 
+    /// The receipt the row's evidence quotes: entries per shape, the total
+    /// table bytes, the mean microseconds one spawn costs and the hash the
+    /// 1000-impact replay lands on. The numbers are printed, so a reader
+    /// can check them against the run that claims them.
+    #[test]
+    fn the_table_receipts_its_own_numbers() {
+        let mut entries = Vec::new();
+        let mut total_bytes = 0usize;
+        let mut digests = Vec::new();
+        for mesh in &shapes() {
+            let table = bake(mesh);
+            entries.push(table.len());
+            total_bytes += table.bytes().len();
+            digests.push(table.digest());
+        }
+        // One spawn on the siege wall, over 1000 seeded impacts.
+        let table = bake(&shapes()[0]);
+        let mut rng = Rng::new(4242);
+        let impacts: Vec<([i32; 3], [i32; 3], u32)> =
+            (0..1000).map(|_| impact(&mut rng, &table)).collect();
+        #[expect(
+            clippy::disallowed_types,
+            clippy::disallowed_methods,
+            reason = "test-only timing, never the tick"
+        )]
+        let start = std::time::Instant::now();
+        let mut replay = Fnv64::new();
+        for (pos, dir, power) in &impacts {
+            let cut = table.spawn(*pos, *dir, *power).expect("spawns");
+            replay.write_u64(cut.digest());
+        }
+        let elapsed = start.elapsed();
+        let per_spawn_us = elapsed.as_micros() / 1000;
+        let hash = replay.finish();
+        println!(
+            "impact table: entries {entries:?} ({} per shape), bytes {total_bytes}, \
+             spawn {per_spawn_us} us per impact, replay hash {hash:016x}, \
+             digests {:016x?}",
+            entries[0], digests[0],
+        );
+        assert_eq!(entries, vec![486, 486, 486]);
+        assert!(total_bytes < 50 * 1024 * 1024, "{total_bytes} bytes");
+        assert!(
+            per_spawn_us < 500,
+            "{per_spawn_us} us per spawn is over 0.5 ms"
+        );
+        // The same impacts replay to the same hash.
+        let mut again = Fnv64::new();
+        for (pos, dir, power) in &impacts {
+            let cut = table.spawn(*pos, *dir, *power).expect("spawns");
+            again.write_u64(cut.digest());
+        }
+        assert_eq!(
+            again.finish(),
+            hash,
+            "the spawn path replays to the same hash"
+        );
+    }
+
     #[test]
     fn keys_are_integer_buckets() {
         assert_eq!(direction_bucket([5, 1, -1]), Some(0));

@@ -335,7 +335,13 @@ fn sample_track_c1(times: &[f32], values: &[[f32; 3]], t: f32) -> [f32; 3] {
 
 /// Sample one quat track at a wrapped time; `None` when the track is absent
 /// or invalid (caller falls back to identity).
-fn sample_quat_track(track: &QuatTrack, time: f32) -> Option<[f32; 4]> {
+/// One rotation track read at `time` seconds, or `None` when the track holds
+/// nothing usable (an empty track, a non-finite value or times that do not
+/// step forward), in which case the joint keeps its bind rotation.
+///
+/// The read is a straight shortest-arc lerp between the two knots around the
+/// time, the same law the pose sampler uses for a rotation lane.
+pub fn sample_quat_track(track: &QuatTrack, time: f32) -> Option<[f32; 4]> {
     if track.times.len() != track.values.len() || track.times.is_empty() {
         return None;
     }

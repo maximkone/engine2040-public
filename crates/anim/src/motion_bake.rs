@@ -68,6 +68,16 @@ pub enum BakeError {
     /// The bytes did not decode back to the same clip bits; a bake never
     /// ships a lossy pack.
     NotRoundTrip,
+    /// The rotation half did not decode back to the same motion; the joint
+    /// and key name where the swing was lost.
+    LostRotation {
+        /// The joint whose rotation changed.
+        joint: usize,
+        /// The key within that joint's track.
+        key: usize,
+        /// The worst component gap seen at that key.
+        worst: f32,
+    },
 }
 
 impl core::fmt::Display for BakeError {
@@ -81,6 +91,14 @@ impl core::fmt::Display for BakeError {
             Self::BadFps(fps) => write!(f, "bake: {fps} is not a bake rate"),
             Self::Pack(cause) => write!(f, "bake: {cause}"),
             Self::NotRoundTrip => write!(f, "bake: the AM5P pack did not round-trip"),
+            Self::LostRotation {
+                joint,
+                key,
+                worst,
+            } => write!(
+                f,
+                "bake: the AM5P pack lost the rotation at joint {joint} key {key} (gap {worst:e})"
+            ),
         }
     }
 }
@@ -161,6 +179,116 @@ pub fn bake_unpack(bytes: &[u8]) -> Result<QClip, BakeError> {
         return Err(BakeError::NotRoundTrip);
     }
     Ok(unpack_qclip(&packed))
+}
+
+/// Bake one clip to AM5P bytes that also carry the joint rotations.
+///
+/// The position-only bake ([`bake_pack`]) writes a version-1 pack: the feet
+/// move, the arms never turn. A combat clip needs the swing, so this packs
+/// the rotation tracks as well and writes a version-2 pack
+/// ([`super::pack::PACK_VERSION_ROT`]), one rotation track per joint, in the
+/// same joint order as the position tracks.
+///
+/// The round trip is proved on both halves: the bytes decode back to the same
+/// position clip ([`bake_unpack`]) and to the same rotations
+/// ([`bake_unpack_rots`]), so a pack that lost a swing refuses to be baked
+/// instead of shipping a fighter that only slides.
+pub fn bake_pack_with_rots(
+    clip: &QClip,
+    rotations: &[super::pose::QuatTrack],
+) -> Result<Vec<u8>, BakeError> {
+    if rotations.len() != clip.tracks.len() {
+        return Err(BakeError::Pack(PackError::BadLength {
+            track: 0,
+            times: rotations.len(),
+            keys: clip.tracks.len(),
+        }));
+    }
+    let mut packed = pack_qclip(clip)?;
+    let mut rot_tracks = Vec::with_capacity(rotations.len());
+    for (index, track) in rotations.iter().enumerate() {
+        rot_tracks.push(super::pack::pack_quat_track(index, &track.times, &track.values)?);
+    }
+    packed.rotations = rot_tracks;
+    let bytes = packed.to_bytes();
+    // Both halves must come back: the positions and the rotations.
+    let back = bake_unpack(&bytes)?;
+    if qclip_hash(&back) != qclip_hash(clip) {
+        return Err(BakeError::NotRoundTrip);
+    }
+    let back_rots = bake_unpack_rots(&bytes)?;
+    if back_rots.len() != rotations.len() {
+        return Err(BakeError::NotRoundTrip);
+    }
+    for (joint, (back, raw)) in back_rots.iter().zip(rotations.iter()).enumerate() {
+        // The times come back through the wire's time base: a uniform run is
+        // rebuilt as `t0 + k * dt`, which is not bit for bit the knots the
+        // bake wrote (`k * TICK_DT`), so the times are compared as the
+        // numbers they are, not as bits.
+        if back.times.len() != raw.times.len() {
+            return Err(BakeError::LostRotation { joint, key: 0, worst: 0.0 });
+        }
+        for (at, wanted) in back.times.iter().zip(raw.times.iter()) {
+            if (at - wanted).abs() > 1.0e-6 {
+                return Err(BakeError::LostRotation { joint, key: 0, worst: 0.0 });
+            }
+        }
+        // The rotations come back through the wire's smallest-three lanes, so
+        // they match the raw ones to the wire's own bound, not bit for bit.
+        // The wire normalizes on the way in and rebuilds the largest
+        // component non-negative (a rotation and its negation are one
+        // rotation), so the comparison tries both signs and takes the
+        // closer one: a flipped quaternion is the same turn.
+        for (key, (decoded, wanted)) in back.values.iter().zip(raw.values.iter()).enumerate() {
+            let unit = crate::pack::unit_quat(*wanted);
+            let mut worst = 0.0f32;
+            for lane in 0..4 {
+                let gap = (decoded[lane] - unit[lane]).abs();
+                let flipped = (decoded[lane] + unit[lane]).abs();
+                worst = worst.max(gap.min(flipped));
+            }
+            if worst > super::pack::QUAT_BOUND {
+                return Err(BakeError::LostRotation {
+                    joint,
+                    key,
+                    worst,
+                });
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+/// The wire's own smallest-three error bound, named here so the bake's
+/// refusal says which half of the pack lost the motion.
+pub const ROT_BOUND: f32 = super::pack::QUAT_BOUND;
+
+/// Read the rotation tracks out of an AM5P blob, one per joint, in the pack's
+/// joint order. A version-1 pack (positions only) reads as no rotations.
+///
+/// The values come back through the wire's own decoder
+/// ([`super::pack::sample_packed_quat`]), so what a caller reads is what the
+/// tick will play, not the pre-pack float.
+pub fn bake_unpack_rots(bytes: &[u8]) -> Result<Vec<super::pose::QuatTrack>, BakeError> {
+    let packed = PackedClip::from_bytes(bytes)?;
+    if packed.to_bytes() != bytes {
+        return Err(BakeError::NotRoundTrip);
+    }
+    let mut out = Vec::with_capacity(packed.rotations.len());
+    for (index, track) in packed.rotations.iter().enumerate() {
+        let keys = track.key_count();
+        let mut times = Vec::with_capacity(keys);
+        let mut values = Vec::with_capacity(keys);
+        for k in 0..keys {
+            let at = track.time_at(k);
+            times.push(at);
+            values.push(super::pack::sample_packed_quat(
+                &packed, index, at, &mut 0usize,
+            ));
+        }
+        out.push(super::pose::QuatTrack { times, values });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -308,7 +436,20 @@ mod tests {
         // rig, and the gate's slip reads that track.
         let slip = avg_slip(&clip, 57, 61);
         assert!(slip < 0.08, "the planted foot slips {slip}");
-        assert_eq!(bake_pack(&clip).expect("repacks"), bytes, "fixed point");
+        // The committed pack carries the rotations too, so the fixed point is
+        // checked on the whole pack, not only on its positions.
+        let rots = bake_unpack_rots(bytes).expect("the rotations read back");
+        assert_eq!(rots.len(), 65, "one rotation track per joint");
+        let mut rebuilt = pack_qclip(&clip).expect("packs");
+        let mut rot_tracks = Vec::with_capacity(rots.len());
+        for (index, track) in rots.iter().enumerate() {
+            rot_tracks.push(
+                crate::pack::pack_quat_track(index, &track.times, &track.values)
+                    .expect("the quat track packs"),
+            );
+        }
+        rebuilt.rotations = rot_tracks;
+        assert_eq!(rebuilt.to_bytes(), bytes, "fixed point");
         println!("AM27_FIXTURE ticks=61 slip={slip:.6}");
     }
 }

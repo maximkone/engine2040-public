@@ -139,5 +139,36 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   the same names in another order: the caller names the pack's tracks, each
   rig joint takes the track with its name, and a rig of another size, a name
   list of another size, or a joint with no track refuses loud (unit tests in
-  `pack_file`). Left in the row: the pack carries positions only, so the
-  rig's bind rotations stand, and no game-side caller plays a loaded clip yet.
+  `pack_file`).
+  Progress 2026-10-22: the pack now carries the rotations too, so a combat
+  clip shows its swing instead of sliding on the rig's bind rotation. The
+  wire already had the second half (AM5P version 2, smallest-three
+  quaternion lanes, `pack_quat_track` and `sample_packed_quat`), but nothing
+  wrote it: `pack_qclip` always left the rotation list empty, so every baked
+  pack was a version-1 pack. Now the bake packs the retargeted joint
+  rotations as well (`bake_pack_with_rots`), the loader reads them back
+  (`pack_file::rotations_of`) and the named pose plays them
+  (`pack_file::sample_pose_named_with_rots`); a version-1 pack still plays
+  exactly as before, with the bind rotations standing. The bake proves both
+  halves round-trip: a pack that lost a swing refuses to be baked.
+  Then the four real combat clips landed: the empire card's attested Kimodo
+  teacher clips (an overhead strike, a spear thrust, a parry and a horizontal
+  slash) were converted from the teacher's SOMA BVH into the teacher's NPZ
+  layout and baked by the engine's own tool onto the fighter-65 rig. Their
+  slip numbers are the card's, reproduced to the sixth decimal
+  (slash_over 0.000389/0.000140, spear_thrust 0.003025/0.003173, parry
+  0.080097/0.068190, slash_h 0.133841/0.116123), which is the proof that the
+  engine's bake and the card's bake read the same teacher data through the
+  same name table. The packs and their receipts live in
+  `fixtures/clips/combat/`, with the teacher, the prompts, the seeds and the
+  licence in `fixtures/clips/combat/PROVENANCE.md`.
+  Then the CT7 name map (`crates/assets/src/ct7_map.rs`): the game plays a
+  CT7 body whose 44 joints the game sanitizes to Mixamo-style names
+  (`pelvis`, `foot_l`, `arm_upper_l`), while the engine's fighter rig names
+  its 65 joints SOMA-style (`hips`, `leftfoot`, `leftarm`). The map is
+  written out, one row per game joint, and it covers all 44: every row names
+  a joint the fighter rig really has, and a joint with no counterpart (the
+  root, the two weapon sockets, the two heels) holds its bind pose.
+  Left in the row: no game-side caller plays a loaded clip yet. The map and
+  the loader are in place; the caller that loads a pack and plays it on the
+  game's rig is still to write.

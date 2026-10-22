@@ -19,8 +19,10 @@
 use crate::npz::{Npz, NpzError};
 use crate::rig::{fighter_bind, fighter_skeleton, joint_index, soma_bind, soma_skeleton};
 use engine_anim::clip::{avg_slip, bake_clip, bake_track, qclip_hash, TICK_DT};
-use engine_anim::motion_bake::{bake_len, bake_pack, bake_unpack, last_constrained, BakeError};
-use engine_anim::pose::QuatTrack;
+use engine_anim::motion_bake::{
+    bake_len, bake_pack_with_rots, bake_unpack, last_constrained, BakeError,
+};
+use engine_anim::pose::{sample_quat_track, QuatTrack};
 use engine_anim::{sample, Clip, Track};
 use engine_assets::fighter::RigError;
 use engine_assets::retarget::{retarget_cook, retarget_digest, RetargetError};
@@ -138,6 +140,9 @@ pub struct Receipt {
     pub tracks: Vec<String>,
     /// Keys per track.
     pub keys: usize,
+    /// The wire version the pack was written in: 1 for a position-only pack,
+    /// 2 for a pack that also carries the joint rotations.
+    pub pack_version: u16,
     /// Bytes on the wire.
     pub packed_bytes: usize,
     /// sha256 of the pack bytes, hex.
@@ -163,7 +168,7 @@ impl Receipt {
         let slips: Vec<String> = self.avg_slip.iter().map(|v| format!("{v:.6}")).collect();
         let windows: Vec<String> = self.plant_windows.iter().map(u32::to_string).collect();
         format!(
-            "{{\n  \"tool\": \"motion_bake\",\n  \"clip\": \"{}\",\n  \"source_kind\": \"{}\",\n  \"source_sha256\": \"{}\",\n  \"source_frames\": {},\n  \"source_fps\": {},\n  \"seed\": {},\n  \"endpoint_rule\": \"partigen-last-constrained-frame\",\n  \"last_constrained_tick\": {},\n  \"ticks\": {},\n  \"dur_s\": {:.6},\n  \"tracks\": [{}],\n  \"track_count\": {},\n  \"keys_per_track\": {},\n  \"pack_magic\": \"AM5P\",\n  \"pack_version\": 1,\n  \"packed_bytes\": {},\n  \"bytes_sha256\": \"{}\",\n  \"qclip_hash\": \"0x{:016x}\",\n  \"retarget_digest\": \"0x{:016x}\",\n  \"avg_slip\": {{\"leftfoot\": {}, \"rightfoot\": {}}},\n  \"plant_windows\": {{\"leftfoot\": {}, \"rightfoot\": {}}}\n}}\n",
+            "{{\n  \"tool\": \"motion_bake\",\n  \"clip\": \"{}\",\n  \"source_kind\": \"{}\",\n  \"source_sha256\": \"{}\",\n  \"source_frames\": {},\n  \"source_fps\": {},\n  \"seed\": {},\n  \"endpoint_rule\": \"partigen-last-constrained-frame\",\n  \"last_constrained_tick\": {},\n  \"ticks\": {},\n  \"dur_s\": {:.6},\n  \"tracks\": [{}],\n  \"track_count\": {},\n  \"keys_per_track\": {},\n  \"pack_magic\": \"AM5P\",\n  \"pack_version\": {},\n  \"packed_bytes\": {},\n  \"bytes_sha256\": \"{}\",\n  \"qclip_hash\": \"0x{:016x}\",\n  \"retarget_digest\": \"0x{:016x}\",\n  \"avg_slip\": {{\"leftfoot\": {}, \"rightfoot\": {}}},\n  \"plant_windows\": {{\"leftfoot\": {}, \"rightfoot\": {}}}\n}}\n",
             self.clip,
             self.source_kind,
             self.source_sha256,
@@ -176,6 +181,7 @@ impl Receipt {
             tracks.join(", "),
             self.tracks.len(),
             self.keys,
+            self.pack_version,
             self.packed_bytes,
             self.bytes_sha256,
             self.qclip_hash,
@@ -383,7 +389,27 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
         tracks.push(bake_track(times, values));
     }
     let clip = bake_clip(tracks);
-    let pack = bake_pack(&clip)?;
+    // The rotations ride with the positions: a combat clip that carries only
+    // the feet would slide the arms on their bind rotations, so the swing
+    // would never show. The pack becomes a version-2 wire.
+    let times: Vec<f32> = (0..len.ticks).map(|k| k as f32 * TICK_DT).collect();
+    let mut rot_tracks = Vec::with_capacity(fighter_joints);
+    for joint in 0..fighter_joints {
+        let values: Vec<[f32; 4]> = times
+            .iter()
+            .map(|t| {
+                if !t.is_finite() {
+                    return [0.0, 0.0, 0.0, 1.0];
+                }
+                sample_quat_at(&cooked.clip.rotations, joint, *t)
+            })
+            .collect();
+        rot_tracks.push(QuatTrack {
+            times: times.clone(),
+            values,
+        });
+    }
+    let pack = bake_pack_with_rots(&clip, &rot_tracks)?;
     let shipped = bake_unpack(&pack)?;
 
     let mut windows = [0u32; 2];
@@ -423,6 +449,7 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
             .map(|joint| joint.name.clone())
             .collect(),
         keys: shipped.tracks.first().map_or(0, |track| track.times.len()),
+    pack_version: u16::from_le_bytes([pack[4], pack[5]]),
         packed_bytes: pack.len(),
         bytes_sha256: sha256_hex(&pack),
         qclip_hash: qclip_hash(&shipped),
@@ -457,6 +484,17 @@ fn round(fps: f32) -> f32 {
 }
 
 /// The mtime-free helper the tests use: bake the committed fixture bytes.
+/// One joint's rotation at `time` seconds, read from the retargeted clip.
+///
+/// A joint with no rotation lane (or a lane that holds nothing usable) reads
+/// as the identity, so the pack always carries a unit quaternion per joint.
+fn sample_quat_at(rotations: &[QuatTrack], joint: usize, time: f32) -> [f32; 4] {
+    let Some(track) = rotations.get(joint) else {
+        return [0.0, 0.0, 0.0, 1.0];
+    };
+    sample_quat_track(track, time).unwrap_or([0.0, 0.0, 0.0, 1.0])
+}
+
 #[cfg(test)]
 pub fn committed() -> (Vec<u8>, String) {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
@@ -484,6 +522,6 @@ mod tests {
         assert_eq!(first, on_disk, "the fixture is the tool's own bytes");
         assert_eq!(receipt, on_disk_receipt, "the receipt is the tool's text");
         assert!(receipt.contains("\"qclip_hash\": \"0x"), "a receipt hash");
-        assert_eq!(first.len(), 26209, "the committed pack size");
+        assert_eq!(first.len(), 54813, "the committed pack size");
     }
 }

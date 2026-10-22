@@ -458,11 +458,16 @@ impl PackedQuatTrack {
             TimeBase::Explicit { .. } => 1 + 4 + 4 * n + 7 * n,
         }
     }
+
+    /// Knot `i`; callers hold `i < key_count()`.
+    pub fn time_at(&self, i: usize) -> f32 {
+        self.time.at(i)
+    }
 }
 
 /// The unit quaternion [`quantize_quat`] reads from `q`: normalized, with a
 /// zero or non-finite input read as identity.
-fn unit_quat(q: [f32; 4]) -> [f32; 4] {
+pub fn unit_quat(q: [f32; 4]) -> [f32; 4] {
     let norm = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
     if norm.is_finite() && norm > 0.0 {
         q.map(|c| c / norm)

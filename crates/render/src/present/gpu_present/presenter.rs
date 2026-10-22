@@ -798,15 +798,6 @@ impl Presenter {
         )
     }
 
-    pub(super) fn build(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        info: wgpu::AdapterInfo,
-        support: MsaaSupport,
-    ) -> Result<Self, PresentError> {
-        Self::build_with_preset(device, queue, info, support, false)
-    }
-
     /// Build the presenter under one sky preset. `night` picks the arena
     /// night rig: the moonlit sky, its ambient and its fog, so the
     /// placement's torches are the light the frame reads. The day preset
@@ -1403,6 +1394,20 @@ impl Presenter {
         width: u32,
         height: u32,
     ) -> Result<Self, PresentError> {
+        Self::init_windowed_with_preset(instance, surface, width, height, false)
+    }
+
+    /// The windowed presenter under one sky preset. `night` picks the
+    /// arena night rig: the moonlit sky, its ambient and its fog, so the
+    /// placement's torches are the light the frame reads. The day rig is
+    /// the default and keeps every existing capture byte-equal.
+    pub fn init_windowed_with_preset(
+        instance: &wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+        night: bool,
+    ) -> Result<Self, PresentError> {
         if SizeClass::classify(width, height) != SizeClass::Sizes {
             return Err(PresentError::InvalidSize { width, height });
         }
@@ -1421,7 +1426,7 @@ impl Presenter {
         let (device, queue) = Self::request_device(&adapter)?;
         // EG13: the adapter owns the MSAA count; read its 4x support once.
         let support = Self::msaa_support_for(&adapter);
-        let mut presenter = Self::build(device, queue, info, support)?;
+        let mut presenter = Self::build_with_preset(device, queue, info, support, night)?;
         presenter.backend_selection = selection;
         presenter.attach_surface(instance, surface, width, height)?;
         Ok(presenter)
@@ -1440,6 +1445,19 @@ impl Presenter {
         width: u32,
         height: u32,
     ) -> Result<Self, PresentError> {
+        Self::init_for_window_with_preset(window, width, height, false)
+    }
+
+    /// The visible presenter under one sky preset. `night` picks the arena
+    /// night rig: the moonlit sky, its ambient and its fog, so the
+    /// placement's torches are the light the frame reads. The day rig is
+    /// the default and keeps every existing capture byte-equal.
+    pub fn init_for_window_with_preset(
+        window: Arc<winit::window::Window>,
+        width: u32,
+        height: u32,
+        night: bool,
+    ) -> Result<Self, PresentError> {
         if SizeClass::classify(width, height) != SizeClass::Sizes {
             return Err(PresentError::InvalidSize { width, height });
         }
@@ -1447,7 +1465,7 @@ impl Presenter {
         let pick = crate::backend::pick_backend(choice, None);
         let instance = crate::backend::new_instance(crate::backend::wgpu_backends(pick.primary));
         let surface = create_surface(&instance, window)?;
-        Self::init_windowed(&instance, surface, width, height)
+        Self::init_windowed_with_preset(&instance, surface, width, height, night)
     }
 
     /// Pick the swapchain present mode: the shortest acquire wait the

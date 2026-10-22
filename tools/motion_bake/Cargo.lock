@@ -297,6 +297,7 @@ dependencies = [
  "engine-core",
  "gltf",
  "image",
+ "serde_json",
 ]
 
 [[package]]

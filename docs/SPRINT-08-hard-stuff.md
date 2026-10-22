@@ -278,7 +278,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   `cargo test -p engine-destruction --lib debris_snapshot` stays green.
    needs: DX1. (FLAX-MCP HARVEST EB-2026-10-02-S93;
    research/flax-mcp-harvest/plugins-gameplay-world.md #4.)
-- [ ] DX17 destruction: impact-keyed fracture table over bonded chunks —
+- [x] DX17 destruction: impact-keyed fracture table over bonded chunks — Landed 421c108. `crates/destruction/src/impact_table.rs` holds the codebook: 3 shapes x 486 entries (>= 200 each), 17,348,373 bytes total (under 50 MB), 27 us per impact spawn (under 0.5 ms), the 1000-impact replay lands on fa0dd1d0e4fc8050 twice and reads 0 NaN. The blind pick: on 20 seeded impact fixtures a judge that reads the size distribution (speck, slab, spread around the mean) and never sees which set is the learned one named the learned set on 13, with 2 judge ties and 2 identical sets counted as misses; a witness pair proves the rubric is not the bake's own score, whose two orderings disagree. The caller at spawn is `spawn_bonded`: the table read becomes the bonded descriptor and the strike's break events, no clip at the tick. Proof: `cargo test -p engine-destruction --lib impact_table` 10 passed (runs 39711056776 and 39712009404), `cargo test -p engine-destruction --lib` 200 passed 4 ignored (run 39711410888), `cargo clippy -p engine-destruction --all-targets -- -D warnings` green (run 39711681954), golden d57b5c8ae3096614 held (run 39712147953).
   offline per-shape fragment-set codebook bake with integer
   impact-to-index lookup at spawn, reimplemented std-only with zero
   donor bytes (DeepFracture 2310.13344v2 shape, network and weights never

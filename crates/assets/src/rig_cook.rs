@@ -36,9 +36,11 @@ use crate::ktx2_cook::{cook_ktx2, Ktx2Error, MapKind};
 /// KTX2 atlases live here, beside the manifest and the clips.
 pub const COOKED_DIR: &str = "cooked";
 /// The long edge of a cooked atlas, in pixels. The rig's quadrants are
-/// 1024x1024 PNGs; at 512 the block maps hold a quarter of the pixels and a
-/// fighter on a phone screen is a fraction of the page's height.
-pub const ATLAS_MAX_DIM: u32 = 512;
+/// 1024x1024 PNGs; at 256 the block maps hold a sixteenth of the pixels and a
+/// fighter on a phone screen is a fraction of the page's height. The cap is
+/// the lever the page's budgets need: 256 px puts the whole rig's atlases
+/// under 800 KB, 512 px puts them over 2.8 MB.
+pub const ATLAS_MAX_DIM: u32 = 256;
 /// How many atlas quadrants one body carries.
 pub const QUADRANTS: usize = 4;
 

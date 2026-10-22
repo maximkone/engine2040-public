@@ -1351,6 +1351,12 @@ struct ArenaApp {
     fighters_upload_us: u64,
     /// `--look-probes`: run the blocking look probes in the window.
     look_probes: bool,
+    /// VS7: the night preset is on (the moonlit rig, the torches burn).
+    /// Off by default, so the day frame stays byte-equal.
+    night: bool,
+    /// VS7: the placement's torch actors, when the placement parsed. They
+    /// become the frame's lights under the night preset.
+    torch_actors: Option<Vec<engine_game::arena_kit::KitActor>>,
     /// `--require-framing`: a frame with no fighter in the picture fails.
     require_framing: bool,
     /// What the fight camera showed (the `arena framing:` line).
@@ -1554,6 +1560,12 @@ impl ArenaApp {
             fighters_pose_us: 0,
             fighters_upload_us: 0,
             look_probes: Presenter::look_probes_for_capture(false, capture_armed),
+            night: engine_game::windowed::night_enabled(
+                std::env::var(engine_game::windowed::NIGHT_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
+            torch_actors: engine_game::arena_kit::kit_actors().ok(),
             require_framing: false,
             framing: Framing::default(),
             view: ViewLaws::default(),
@@ -2156,6 +2168,22 @@ impl ArenaApp {
             if let Some(presenter) = self.presenter.as_ref() {
                 let resident = presenter.mesh_keys();
                 push_kit_draws(&mut list, &resident, &self.kit);
+            }
+        }
+        // VS7: the night preset drops the sun and the placement's torch
+        // actors burn, so the torches carry the picture. Off by default: the
+        // day frame keeps the built-in light pair and stays byte-equal.
+        if self.night {
+            if let Some(presenter) = self.presenter.as_mut() {
+                if let Some(actors) = self.torch_actors.as_ref() {
+                    if let Ok(lights) = engine_game::arena_kit::torch_feed::torch_lights_at(
+                        actors,
+                        self.app.cursor(),
+                    ) {
+                        presenter.set_torch_lights(lights);
+                    }
+                }
+                engine_game::arena_kit::torch_feed::apply_night_sun(&mut list);
             }
         }
         let fighters_started = Instant::now();
@@ -2779,7 +2807,12 @@ impl ArenaApp {
         };
         let size = window.inner_size();
         let (width, height) = (size.width.max(1), size.height.max(1));
-        match Presenter::init_for_window(Arc::clone(window), width, height) {
+        // VS7: the night preset bakes the arena night rig (the moonlit sky,
+        // its ambient and its fog), so the placement's torches are the light
+        // the frame reads. Off by default: the day frame keeps the day rig
+        // and stays byte-equal.
+        match Presenter::init_for_window_with_preset(Arc::clone(window), width, height, self.night)
+        {
             Ok(mut presenter) => {
                 // The live frame never waits on the GPU: fog is a fragment
                 // function and the probes are off. `--look-probes` or an

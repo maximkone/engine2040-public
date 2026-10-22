@@ -9,8 +9,8 @@
 //! endpoint rule cut the teacher's trailing tail.
 
 use engine_anim::clip::{avg_slip, qclip_hash, TICK_DT};
-use engine_anim::motion_bake::{bake_len, bake_pack, bake_unpack, last_constrained};
-use engine_anim::pack::BUDGET_BYTES_PER_FIGHTER;
+use engine_anim::motion_bake::{bake_len, bake_pack, bake_unpack, bake_unpack_rots, last_constrained};
+use engine_anim::pack::{pack_qclip, BUDGET_BYTES_PER_FIGHTER};
 
 /// Repository root, one level above the crate.
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
@@ -19,7 +19,7 @@ const SLIP_LIMIT: f32 = 0.08;
 /// `qclip_hash` two seed-7 tool runs printed; the committed pack is one run.
 const SEED7_QCLIP_HASH: u64 = 0xbc8c_1300_6a5a_ad0a;
 /// sha256 of the pack bytes the seed-7 run wrote.
-const SEED7_PACK_SHA256: &str = "250467218d14e7b4fba6b36d86a79daea02b1ae69d3288790116394b1b67565c";
+const SEED7_PACK_SHA256: &str = "7d46ef7e40e9408a876e3dd2d36cf87826272e4527b47bb53590df6b3e9ef65c";
 /// sha256 of the seed-7 teacher `.npz` the pack was baked from.
 const SEED7_SOURCE_SHA256: &str =
     "2bc933c4175af98d2a39303b93ef97809ee8b04361d059c91321daf857d01fa1";
@@ -90,8 +90,8 @@ fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
     assert_eq!(&bytes[..4], b"AM5P", "the wire magic");
     assert_eq!(
         u16::from_le_bytes([bytes[4], bytes[5]]),
-        1,
-        "position-only clips stay version 1"
+        2,
+        "the bake writes a pack with rotations, the version-2 wire"
     );
     let clip = bake_unpack(&bytes).expect("the committed pack loads");
     let ticks = integer(&receipt, "ticks") as u32;
@@ -132,7 +132,20 @@ fn stagger_pack_loads_round_trips_and_slips_under_eight_centimetres() {
     );
 
     // The decode is a fixed point of the wire, and the hash is the receipt's.
-    assert_eq!(bake_pack(&clip).expect("repacks"), bytes, "same bytes");
+    // The committed pack carries the rotations too, so the fixed point is
+    // checked on the whole pack: the positions and the rotations.
+    let rots = bake_unpack_rots(&bytes).expect("the rotations read back");
+    assert_eq!(rots.len(), 65, "one rotation track per joint");
+    let mut rebuilt = pack_qclip(&clip).expect("packs");
+    let mut rot_tracks = Vec::with_capacity(rots.len());
+    for (index, track) in rots.iter().enumerate() {
+        rot_tracks.push(
+            engine_anim::pack::pack_quat_track(index, &track.times, &track.values)
+                .expect("the quat track packs"),
+        );
+    }
+    rebuilt.rotations = rot_tracks;
+    assert_eq!(rebuilt.to_bytes(), bytes, "same bytes");
     assert_eq!(qclip_hash(&clip), hash(&receipt, "qclip_hash"), "hash");
     assert!(
         bytes.len() <= BUDGET_BYTES_PER_FIGHTER,

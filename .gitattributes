@@ -7,8 +7,8 @@ fixtures/khronos/*.gltf -text
 fixtures/gltf/*.gltf -text
 # SP12 spatial-gold fixtures: the generator writes LF and the check compares the
 # file byte-for-byte, so a CRLF checkout (core.autocrlf=true on Windows) drifts
-# the file and the check fails on a Windows box but passes on the Linux runner.
-# Never convert these either.
-fixtures/spatial-gold/*.tsv -text
+# the file and the check fails there. Never convert these either. The pattern
+# covers the llm/ subdirectory too, so it is a recursive one.
+fixtures/spatial-gold/** -text
 # engine-geo vendored xatlas: byte-exact, never converted.
 crates/geo/vendor/** -text

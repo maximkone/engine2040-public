@@ -10,7 +10,9 @@
 mod ai_props;
 mod arena_cook;
 mod blockcomp_cook;
+mod combat_clips;
 mod crowd_cook;
+mod ct7_map;
 mod extras_wiring;
 mod fighter_rig;
 mod gltf_cc0_corpus;

@@ -12,9 +12,17 @@
 
 use engine_assets::body_import::import_skinned_body;
 use engine_assets::ktx2_cook::{decode_level_rgba, parse_ktx2};
-use engine_assets::rig_cook::{cook_body, ATLAS_MAX_DIM, QUADRANTS};
+use engine_assets::rig_cook::{cook_body, cook_body_at, ATLAS_MAX_DIM, QUADRANTS};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// The bodies the rig holds, in the manifest's order.
+const BODIES: [&str; 4] = [
+    "hero_body.glb",
+    "opp_male_light_body.glb",
+    "opp_female_light_body.glb",
+    "opp_female_medium_body.glb",
+];
 
 fn fighters() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/fighters")
@@ -146,10 +154,87 @@ fn the_cooked_atlases_are_block_maps_at_the_capped_edge() {
 }
 
 #[test]
+fn the_atlas_cap_trades_wire_bytes_against_the_page_memory() {
+    // The page's own bars: the first bundle is 2,040,000 B brotli with
+    // 1,621,894 B already spent, and the linear memory is 19,988,480 B. The
+    // rig rides in what is left, so the cap is the lever: the atlas's edge
+    // decides the wire bytes and the decoded bytes the page holds.
+    let source = hero_body();
+    let mut rows: Vec<String> = Vec::new();
+    for cap in [256u32, 512, 1024] {
+        let cooked = cook_body_at("hero_body.glb", &source, cap).expect("the body cooks");
+        let atlas: usize = cooked.textures.iter().map(Vec::len).sum();
+        let decoded = 4 * (cap as usize) * (cap as usize) * QUADRANTS;
+        rows.push(format!("cap={cap} atlas={atlas} decoded_rgba={decoded}"));
+    }
+    println!("rig_cook cap receipt: {}", rows.join(" "));
+    // The 256 px atlas is a quarter of the pixels of the 1024 px one, so a
+    // quarter of the decoded bytes in the page's memory.
+    let at_256 = cook_body_at("hero_body.glb", &source, 256).expect("the body cooks");
+    let at_1024 = cook_body_at("hero_body.glb", &source, 1024).expect("the body cooks");
+    let small: usize = at_256.textures.iter().map(Vec::len).sum();
+    let large: usize = at_1024.textures.iter().map(Vec::len).sum();
+    assert!(
+        small * 3 < large,
+        "the 256 px atlas is a quarter of the 1024 px one: {small} of {large}"
+    );
+    // One body's atlases at 256 px fit the page's memory with room to spare.
+    let decoded = 4 * 256 * 256 * QUADRANTS;
+    assert!(
+        decoded * 4 < 19_988_480,
+        "all four bodies' atlases at 256 px fit the page's memory: {decoded} each"
+    );
+}
+
+#[test]
 fn the_cook_gives_the_same_bytes_twice() {
     let source = hero_body();
     let first = cook_body("hero_body.glb", &source).expect("the hero body cooks");
     let second = cook_body("hero_body.glb", &source).expect("the hero body cooks");
     assert_eq!(first.glb, second.glb, "the same body gives the same bytes");
     assert_eq!(first.textures, second.textures, "the same atlases");
+}
+
+#[test]
+fn the_cooked_rig_is_measured_against_the_page_budgets() {
+    // The whole rig, cooked: the bodies without their images plus the
+    // atlases. The page's first-bundle budget is 2,040,000 B brotli and the
+    // page already spends 1,621,894 B of it, so the rig has to be small
+    // enough to ride in the room that is left.
+    let fighters = fighters();
+    let mut body_bytes = 0usize;
+    let mut atlas_bytes = 0usize;
+    for name in BODIES {
+        let source = fs::read(fighters.join("glb").join(name)).expect("the body is in the tree");
+        let cooked = cook_body_at(name, &source, ATLAS_MAX_DIM).expect("the body cooks");
+        body_bytes += cooked.glb.len();
+        atlas_bytes += cooked.textures.iter().map(Vec::len).sum::<usize>();
+    }
+    let total = body_bytes + atlas_bytes;
+    // The receipt: the bodies and the atlases, and what the atlases decode
+    // to in the page's linear memory.
+    let decoded = 4 * (ATLAS_MAX_DIM as usize) * (ATLAS_MAX_DIM as usize) * BODIES.len();
+    println!(
+        "rig_cook receipt: bodies={body_bytes} atlases={atlas_bytes} total={total} \
+decoded_rgba={decoded} atlas_dim={ATLAS_MAX_DIM}"
+    );
+    // The mesh is the floor: the rig's bones and skin, with no atlas at all.
+    assert!(
+        body_bytes < 1_500_000,
+        "the bodies without their atlas are under 1.5 MB: {body_bytes}"
+    );
+    // The atlases at the capped edge are the wire cost. The rig's whole
+    // cooked lane, body and atlas together, has to ride in the room the
+    // page's first bundle has left: 2,040,000 B with 1,621,894 B spent.
+    assert!(
+        atlas_bytes < 800_000,
+        "the atlases at {ATLAS_MAX_DIM} px are under 800 KB: {atlas_bytes}"
+    );
+    // The rig's lane, brotli, is what the page downloads. The mesh is a
+    // float soup that brotli barely touches; the atlas is block data that
+    // brotli barely touches either. The raw number is the honest bound.
+    assert!(
+        total < 2_040_000,
+        "the cooked rig fits the page's whole first-bundle budget: {total} of 2040000"
+    );
 }

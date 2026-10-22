@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use crate::clip::QClip;
 use crate::contract::{LocalPose, Skeleton};
 use crate::pack::{unpack_qclip, PackError, PackedClip};
+use crate::pose::QuatTrack;
 
 /// A pack file read from disk, with the bytes it came from.
 #[derive(Clone, Debug)]
@@ -206,6 +207,68 @@ pub fn sample_pose_named(
     })
 }
 
+/// The rotation tracks a loaded pack carries, one per pack joint, in the
+/// pack's own joint order.
+///
+/// A version-1 pack (the position-only bake) carries none and reads as an
+/// empty list: the rig's bind rotations stand, as they always did. A
+/// version-2 pack carries one track per joint, and the values come back
+/// through the wire's own decoder, so what a caller reads is what the tick
+/// plays.
+pub fn rotations_of(loaded: &LoadedPack) -> Vec<QuatTrack> {
+    let mut out = Vec::with_capacity(loaded.clip.rotations.len());
+    for (index, track) in loaded.clip.rotations.iter().enumerate() {
+        let keys = track.key_count();
+        let mut times = Vec::with_capacity(keys);
+        let mut values = Vec::with_capacity(keys);
+        for k in 0..keys {
+            let at = track.time_at(k);
+            times.push(at);
+            values.push(crate::pack::sample_packed_quat(
+                &loaded.clip, index, at, &mut 0usize,
+            ));
+        }
+        out.push(QuatTrack { times, values });
+    }
+    out
+}
+
+/// The pose a loaded pack makes at `time` seconds, on a rig whose joints carry
+/// the same names but may sit in another order, with the pack's rotations.
+///
+/// The same mapping as [`sample_pose_named`]: each rig joint takes the track
+/// with its name, and a rig of another size, a name list of another size, or
+/// a joint with no track refuses loud. The difference is the rotations: a
+/// version-2 pack's joint turns come back with the pose, so an arm swings
+/// instead of sliding on its bind rotation. A version-1 pack carries no
+/// rotations and the rig's bind rotations stand, exactly as before.
+pub fn sample_pose_named_with_rots(
+    loaded: &LoadedPack,
+    skeleton: &Skeleton,
+    track_names: &[&str],
+    time: f32,
+) -> Result<LocalPose, PackFileError> {
+    let mut pose = sample_pose_named(loaded, skeleton, track_names, time)?;
+    let rotations = rotations_of(loaded);
+    if rotations.len() == skeleton.len() {
+        // The rotation tracks are in the pack's own order, the rig may list
+        // its joints in another, so the name finds the pack's row for each
+        // rig joint, exactly as the positions do.
+        for (joint, joint_def) in skeleton.joints.iter().enumerate() {
+            let Some(index) = track_names.iter().position(|other| *other == joint_def.name) else {
+                continue;
+            };
+            let Some(track) = rotations.get(index) else {
+                continue;
+            };
+            if let Some(quat) = crate::pose::sample_quat_track(track, time) {
+                pose.rotations[joint] = quat;
+            }
+        }
+    }
+    Ok(pose)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +362,125 @@ mod tests {
             }
             other => panic!("expected the track count to refuse, got {other}"),
         }
+    }
+
+    /// A pack that carries rotations: one track per joint, each joint turning
+    /// a quarter turn about Y over the clip.
+    fn pack_with_rots() -> (Vec<u8>, Skeleton) {
+        let times: Vec<f32> = (0..8).map(|k| k as f32 * 0.1).collect();
+        let mut tracks = Vec::with_capacity(FIGHTER_JOINTS);
+        let mut rots = Vec::with_capacity(FIGHTER_JOINTS);
+        for _ in 0..FIGHTER_JOINTS {
+            tracks.push(crate::clip::bake_track(
+                times.clone(),
+                times.iter().map(|_| [0.0, 0.95, 0.0]).collect(),
+            ));
+            let values: Vec<[f32; 4]> = times
+                .iter()
+                .map(|t| {
+                    // A unit quaternion turning a quarter turn about Y over
+                    // the clip: `sin(half)`, `cos(half)`.
+                    let half = *t * std::f32::consts::PI;
+                    [0.0, half.sin(), 0.0, half.cos()]
+                })
+                .collect();
+            rots.push(QuatTrack {
+                times: times.clone(),
+                values,
+            });
+        }
+        let clip = crate::clip::bake_clip(tracks);
+        let bytes = crate::motion_bake::bake_pack_with_rots(&clip, &rots).expect("the pack bakes");
+        (bytes, chain(FIGHTER_JOINTS))
+    }
+
+    #[test]
+    fn a_version_two_pack_carries_the_joint_rotations() {
+        let (bytes, _rig) = pack_with_rots();
+        assert_eq!(&bytes[..4], b"AM5P", "the wire magic");
+        assert_eq!(
+            u16::from_le_bytes([bytes[4], bytes[5]]),
+            crate::pack::PACK_VERSION_ROT,
+            "a pack with rotations is the version-2 wire"
+        );
+        // The rotations read back out of the wire, one track per joint.
+        let rots = crate::motion_bake::bake_unpack_rots(&bytes).expect("the rotations read back");
+        assert_eq!(rots.len(), FIGHTER_JOINTS, "one rotation track per joint");
+        assert_eq!(rots[0].times.len(), 8, "one key per bake tick");
+        // The bytes decode back to themselves: the wire is a fixed point.
+        let again = crate::motion_bake::bake_unpack_rots(&bytes).expect("the rotations read back");
+        assert_eq!(again.len(), rots.len(), "the same track count");
+        for (a, b) in again.iter().zip(rots.iter()) {
+            assert_eq!(a.times, b.times, "the same knot times");
+            for (x, y) in a.values.iter().zip(b.values.iter()) {
+                for lane in 0..4 {
+                    assert!((x[lane] - y[lane]).abs() < 1.0e-6, "the same value");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pack_with_rotations_turns_the_joints_when_it_plays() {
+        let (bytes, rig) = pack_with_rots();
+        let dir = std::env::temp_dir().join("engine2040-pack-rot-test.am5p");
+        std::fs::write(&dir, &bytes).expect("the pack is written");
+        let loaded = load_pack(&dir).expect("the pack loads");
+        let mut names: Vec<String> = (0..FIGHTER_JOINTS).map(|i| format!("j{i}")).collect();
+        names.reverse();
+        let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+        // The rig's joints are in the pack's own order, so the names line up
+        // one for one; the pose still comes back by name.
+        let pose = sample_pose_named_with_rots(&loaded, &rig, &listed, 0.4).expect("the pack plays");
+        assert_eq!(pose.positions.len(), FIGHTER_JOINTS, "one position per joint");
+        assert_eq!(pose.rotations.len(), FIGHTER_JOINTS, "one rotation per joint");
+        // The first joint turned: at 0.4 s it is off the identity, and the
+        // rotation is a unit quaternion.
+        let turned = pose.rotations[0];
+        assert!(
+            turned.iter().any(|v| v.abs() > 0.01),
+            "the joint turned: {turned:?}"
+        );
+        let norm = turned.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1.0e-4, "a unit quaternion: {norm}");
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn a_position_only_pack_keeps_the_rigs_bind_rotations() {
+        // A version-1 pack: the position-only bake, the shape the wire had
+        // before the rotations landed.
+        let times: Vec<f32> = (0..8).map(|k| k as f32 * 0.1).collect();
+        let mut tracks = Vec::with_capacity(FIGHTER_JOINTS);
+        for _ in 0..FIGHTER_JOINTS {
+            tracks.push(crate::clip::bake_track(
+                times.clone(),
+                times.iter().map(|_| [0.0, 0.95, 0.0]).collect(),
+            ));
+        }
+        let clip = crate::clip::bake_clip(tracks);
+        let bytes = crate::motion_bake::bake_pack(&clip).expect("the pack bakes");
+        assert_eq!(
+            u16::from_le_bytes([bytes[4], bytes[5]]),
+            crate::pack::PACK_VERSION,
+            "a position-only pack is the version-1 wire"
+        );
+        let dir = std::env::temp_dir().join("engine2040-pack-pos-test.am5p");
+        std::fs::write(&dir, &bytes).expect("the pack is written");
+        let loaded = load_pack(&dir).expect("the pack loads");
+        let rig = chain(FIGHTER_JOINTS);
+        let names: Vec<String> = (0..FIGHTER_JOINTS).map(|i| format!("j{i}")).collect();
+        let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+        let pose =
+            sample_pose_named_with_rots(&loaded, &rig, &listed, 0.5).expect("the pack plays");
+        for rotation in &pose.rotations {
+            assert_eq!(
+                *rotation,
+                [0.0, 0.0, 0.0, 1.0],
+                "a version-1 pack leaves the bind rotation standing"
+            );
+        }
+        let _ = std::fs::remove_file(&dir);
     }
 
     /// The pack's track names for these tests: `j0`..`j64`, in the pack's order.
