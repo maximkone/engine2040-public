@@ -148,6 +148,11 @@ pub struct SkyParams {
     pub ground_albedo: [f32; 3],
     /// Exposure anchor in EV100, must be finite.
     pub exposure_ev100: f32,
+    /// How much of the sky's own radiance the frame keeps, `0..=1`. The
+    /// day rig keeps all of it; the night rig keeps the moonlight, so the
+    /// ambient sits far under the day level and the torches carry the
+    /// picture. `1.0` is the shipped day look.
+    pub night_gain: f32,
 }
 
 impl SkyParams {
@@ -158,6 +163,7 @@ impl SkyParams {
             turbidity: 2.0,
             ground_albedo: [0.45, 0.35, 0.22],
             exposure_ev100: 12.0,
+            night_gain: 1.0,
         }
     }
 
@@ -191,6 +197,12 @@ impl SkyParams {
         }
         if !self.exposure_ev100.is_finite() {
             return Err(SkyError::Invalid("sky exposure_ev100 is not finite".into()));
+        }
+        if !self.night_gain.is_finite() || self.night_gain < 0.0 || self.night_gain > 1.0 {
+            return Err(SkyError::Invalid(format!(
+                "sky night_gain {} is outside 0..=1",
+                self.night_gain
+            )));
         }
         Ok(())
     }
@@ -301,7 +313,9 @@ pub fn sky_radiance(view_dir: [f32; 3], params: &SkyParams) -> Result<[f32; 3], 
                 "sky radiance channel {c} is not finite nonnegative"
             )));
         }
-        rgb[c] = out[c] as f32;
+        // The night gain keeps only the moonlight of the same sky model, so
+        // the night ambient sits far under the day's without a second model.
+        rgb[c] = (out[c] as f32) * params.night_gain;
     }
     Ok(rgb)
 }
@@ -1333,6 +1347,35 @@ mod tests {
         );
     }
 
+    /// VS7: the night gain keeps only the moonlight of the same sky model,
+    /// so the night ambient sits far under the day's.
+    #[test]
+    fn the_night_gain_scales_the_sky_radiance() {
+        let day = SkyParams::midday();
+        let night = SkyParams {
+            night_gain: 0.06,
+            ..day
+        };
+        let view = [0.3, 0.6, 0.7];
+        let day_texel = sky_radiance(view, &day).expect("day radiates");
+        let night_texel = sky_radiance(view, &night).expect("night radiates");
+        for c in 0..3 {
+            assert!(
+                night_texel[c] < day_texel[c] * 0.1,
+                "channel {c}: the night sky is under a tenth of the day's"
+            );
+        }
+        assert!(
+            night.validate().is_ok(),
+            "a night gain inside 0..=1 is a valid preset"
+        );
+        let bad = SkyParams {
+            night_gain: 1.5,
+            ..day
+        };
+        assert!(bad.validate().is_err(), "a gain over 1 is refused");
+    }
+
     #[test]
     fn noon_zenith_is_blue_and_finite() {
         // Overhead sun, clean air: the zenith texel must read blue (short
@@ -1453,6 +1496,7 @@ mod tests {
             turbidity: 4.5,
             ground_albedo: [0.4, 0.32, 0.2],
             exposure_ev100: 11.0,
+            night_gain: 1.0,
         };
         let (a, _) = bake_sky(&params, SKY_CAPTURE_W, SKY_CAPTURE_H).expect("first bakes");
         let (b, _) = bake_sky(&params, SKY_CAPTURE_W, SKY_CAPTURE_H).expect("second bakes");

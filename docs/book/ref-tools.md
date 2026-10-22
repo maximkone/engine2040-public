@@ -336,7 +336,7 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 
 ### iqa-gate.mjs
 
-- PQ4 capture-pair gate. Reads two PNGs, prints one JSON line with SSIM (`10000` = 1.0; default threshold `9800`). ssimulacra2 and butteraugli are null offline.
+- PQ4 capture-pair gate. Reads two PNGs, prints one JSON line with SSIM (`10000` = 1.0; default threshold `9800`), FLIP (`10000` = identical), SSIMULACRA2 v2.1 (`10000` = identical, 0 = worst) and deltaE (`0` = identical). butteraugli is null offline.
 - Run: `node tools/iqa-gate.mjs [--threshold N] <reference.png> <capture.png>`; `--selfcheck`; `--help`. Exit 0 pass, 1 not pass or selfcheck fail, 2 error.
 
 ### rdc-diff.mjs

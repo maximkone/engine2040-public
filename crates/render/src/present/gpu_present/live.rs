@@ -1306,11 +1306,9 @@ impl Presenter {
             let (blit_view, blit_pipeline) = self.sink_target(sink)?;
             let timer = self.gpu_timer.as_ref().zip(timer_slot);
             // LF1: re-read bake pair before forward; `None` keeps off identical.
-            if let Some((sky_horizon, sky_exposure)) = live_sky_feed_for_frame(
-                toggles,
-                &self.sky_look,
-                crate::arena_day::ARENA_DAY_EXPOSURE_EV100,
-            ) {
+            if let Some((sky_horizon, sky_exposure)) =
+                live_sky_feed_for_frame(toggles, &self.sky_look, self.sky_exposure_ev100)
+            {
                 debug_assert_eq!(sky_horizon, self.fog_fwd.color);
                 debug_assert_eq!(sky_exposure, self.sky_exposure);
             }

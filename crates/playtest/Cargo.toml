@@ -52,6 +52,12 @@ pollster = { workspace = true, optional = true }
 # assets crates already resolve, PNG codec only, so the lock gains no package.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# SSIMULACRA2 v2.1, the look gate's second metric (BSD-2-Clause, LICENSE read
+# live 2026-10-21, rust-av/ssimulacra2). default-features = false drops rayon:
+# one pair at a time, so the pool buys nothing and the score stays in one
+# thread. Pulls yuvxyb (MIT) plus v_frame, av-data and yuvxyb-math.
+ssimulacra2 = { version = "0.5.1", default-features = false }
+
 # SPR4 live recorder: one real-model cassette run, never built by default.
 [[example]]
 name = "spatial_llm_record"

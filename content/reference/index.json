@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "scene": "arena-duel",
+  "camera": "arena600",
+  "seed": 2040,
+  "rows": [
+    {
+      "tier": "native",
+      "shot": "arena600-duel",
+      "png": "native/arena600-duel.png",
+      "pixel_fnv": "5a339182e5a93ace",
+      "width": 1280,
+      "height": 720,
+      "seed": 2040,
+      "camera": "arena600",
+      "source": "recipe arena-duel: the stands band over textured sand and two staged fighters, painted at the native window canvas"
+    },
+    {
+      "tier": "web",
+      "shot": "arena600-duel",
+      "png": "web/arena600-duel.png",
+      "pixel_fnv": "b4128b0941176421",
+      "width": 640,
+      "height": 360,
+      "seed": 2040,
+      "camera": "arena600",
+      "source": "recipe arena-duel: the same scene, camera and seed at the browser page canvas"
+    },
+    {
+      "tier": "potato",
+      "shot": "arena600-duel",
+      "png": "potato/arena600-duel.png",
+      "pixel_fnv": "1bbf4d1a744c0029",
+      "width": 320,
+      "height": 180,
+      "seed": 2040,
+      "camera": "arena600",
+      "source": "recipe arena-duel: the same scene, camera and seed at the low-end fallback canvas"
+    }
+  ]
+}

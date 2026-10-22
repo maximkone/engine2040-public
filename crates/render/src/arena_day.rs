@@ -105,6 +105,7 @@ pub fn arena_day_params() -> SkyParams {
         turbidity: ARENA_DAY_TURBIDITY,
         ground_albedo: ARENA_DAY_GROUND_ALBEDO,
         exposure_ev100: ARENA_DAY_EXPOSURE_EV100,
+        night_gain: 1.0,
     }
 }
 
@@ -122,6 +123,10 @@ pub const ARENA_NIGHT_GROUND_ALBEDO: [f32; 3] = [0.16, 0.13, 0.10];
 /// stops under the noon sun, so the anchor drops and the torches carry the
 /// picture instead of the sky.
 pub const ARENA_NIGHT_EXPOSURE_EV100: f32 = 4.0;
+/// How much of the sky's radiance the night rig keeps: the moonlight only.
+/// The frame's ambient sits at this fraction of the day level, so the
+/// placement's torches are the light the arena reads.
+pub const ARENA_NIGHT_GAIN: f32 = 0.06;
 
 /// The arena night preset as sky bake inputs: a moonlit sky over dark sand,
 /// so the placement's torches are the light the frame reads. Pure: the same
@@ -132,6 +137,7 @@ pub fn arena_night_params() -> SkyParams {
         turbidity: ARENA_NIGHT_TURBIDITY,
         ground_albedo: ARENA_NIGHT_GROUND_ALBEDO,
         exposure_ev100: ARENA_NIGHT_EXPOSURE_EV100,
+        night_gain: ARENA_NIGHT_GAIN,
     }
 }
 

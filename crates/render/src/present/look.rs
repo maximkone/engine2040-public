@@ -140,13 +140,23 @@ pub fn ibl_ambient_for_capture(capture: &crate::sky::SkyCapture) -> Result<[f32;
 pub fn fog_params_for_look_bake(
     bake: &crate::sky::SkyLookBake,
 ) -> Result<crate::fog::FogParams, PresentError> {
+    fog_params_for_look_bake_at(bake, RL9_FOG_EXPOSURE_EV100)
+}
+
+/// The same fog params under one sky rig's EV100 anchor: the fog's own
+/// exposure follows the rig that baked the sky, so a moonlit fog never
+/// reads as a noon fog. Pure: the same bake and anchor give the same params.
+pub fn fog_params_for_look_bake_at(
+    bake: &crate::sky::SkyLookBake,
+    exposure_ev100: f32,
+) -> Result<crate::fog::FogParams, PresentError> {
     let params = crate::fog::FogParams {
         fog_color: crate::sky::look_fog_color(bake),
         density_per_m: RL9_FOG_DENSITY_PER_M,
         falloff_m: RL9_FOG_FALLOFF_M,
         base_height_m: RL9_FOG_BASE_M,
         max_distance_m: RL9_FOG_MAX_DIST_M,
-        exposure_ev100: RL9_FOG_EXPOSURE_EV100,
+        exposure_ev100,
     };
     params.validate().map_err(|e| fog_err("look", e))?;
     Ok(params)

@@ -186,6 +186,10 @@ pub struct Presenter {
     /// LF1 live exposure: EV100 scale from the one `sky_forward_feed`
     /// call, staged into frame materials. Presentation only.
     pub(crate) sky_exposure: f32,
+    /// The sky rig's EV100 anchor: the day rig's 12, the night rig's own
+    /// moonlit value. The live sky feed reads it, so the frame's exposure
+    /// follows the rig that baked it and never drifts from the sky.
+    pub(crate) sky_exposure_ev100: f32,
     /// RL4 sky bind state (steady-state submits size nothing).
     pub(crate) sky_sub: sky::SkySubmitter,
     /// RL6 layer chart bind state (steady-state submits size nothing).
@@ -1329,6 +1333,7 @@ impl Presenter {
             _sky_view: sky_view,
             sky_view_view,
             sky_exposure,
+            sky_exposure_ev100: sky_rig.params.exposure_ev100,
         })
     }
 
@@ -2794,7 +2799,7 @@ impl Presenter {
     /// allocation per frame: reads the precomputed fog triple off the
     /// cached bake.
     pub(crate) fn look_fog_params(&self) -> Result<fog::FogParams, PresentError> {
-        super::super::fog_params_for_look_bake(&self.sky_look)
+        super::super::fog_params_for_look_bake_at(&self.sky_look, self.sky_exposure_ev100)
     }
 
     /// RA1 skybox bind (RL8 reader 1 of 3): bilinear sample of the bound

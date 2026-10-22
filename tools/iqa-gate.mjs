@@ -5,12 +5,20 @@
 // C1/C2 constants, BT.601 luma; Lab/XYZ constants for deltaE; FLIP beside SSIM:
 // the E7 sRGB table, YCxCyCz, one CSF pass each way, Sobel feature weighting).
 // Zero bytes vendored.
+// SSIMULACRA2 v2.1 beside SSIM: PORT(rust-av/ssimulacra2@0.5.1), the algorithm
+// shape and the 108-weight table only, reimplemented dependency-free against the
+// same maths the Rust donor runs (sRGB -> linear -> XYB, six scales, the recursive
+// Gaussian blur, the SSIM and edge-diff error maps, the weighted sum). Donor:
+// BSD 2-Clause, Copyright (c) 2022-2022, the rav1e contributors,
+// <https://github.com/rust-av/ssimulacra2>, LICENSE read live 2026-10-21.
+// Zero bytes vendored: the weights below are the donor's published table and the
+// constants are computed from the donor's own build-time maths.
 // Consumer: PQ4 reference comparison once Q1/RT7 references land; run headless in CI.
-// Donor slots ssimulacra2/butteraugli stay null offline; fill with iqa-cli --metric.
+// The butteraugli slot stays null offline: that donor is not in the tree.
 import { readFileSync } from "node:fs";
 import { inflateSync } from "node:zlib";
 export const WINDOW = 8, SSIM_ONE = 10000, DEFAULT_THRESHOLD = 9800;
-export const NOTE = "ssimulacra2/butteraugli null offline; fill with justin13888/iqa-rs iqa-cli --metric ssimulacra2|butteraugli";
+export const NOTE = "ssimulacra2 is the SSIMULACRA2 v2.1 twin (10000 = identical, 0 = worst); butteraugli is null offline";
 const SIG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const C1 = 26634n, C2 = 239708n, WN = 64n, PM = 1000000n;
 function divRound(n, d) { const a = 2n * n + d, b = 2n * d; let q = a / b; if (a < 0n && a % b !== 0n) q -= 1n; return q; }
@@ -51,7 +59,308 @@ export function flipX10000(a, b, w, h) { // RGBA bytes, same size; mirrors metri
   const mean = Number(divRound(BigInt(sum) * 10000n, BigInt(n) * 10000000n));
   return { flip_x10000: Math.min(mean, FLIP_ONE), flip_max_x10000: Math.min(max, FLIP_ONE), pixels: n };
 }
-export function scorePair(a, b, w, h, th = DEFAULT_THRESHOLD) { if (a.length !== b.length || a.length !== w * h * 4) throw new Error("size mismatch"); const s = ssimX10000(a, b, w, h), d = meanDeX100(a, b), f = flipX10000(a, b, w, h); return { ssim_x10000: s, flip_x10000: f.flip_x10000, ssimulacra2: null, butteraugli: null, mean_de_x100: d, verdict: s >= th ? "pass" : "fail", note: NOTE }; }
+// ---- SSIMULACRA2 v2.1 (the second metric) ----
+// PORT(rust-av/ssimulacra2@0.5.1): the algorithm shape and the 108-weight
+// table only, reimplemented against the same maths the Rust donor runs.
+// Units: the donor scores 0..100 with 100 identical; this twin publishes
+// hundredths of a donor point, so 10000 is identical and 0 is worst.
+// Determinism: the donor is float and not bit-reproducible across machines
+// (its own test tolerates a quarter of a point), so the twin's value is a
+// coarse fixed point that may differ by a unit from the Rust donor's; nothing
+// here enters a hash.
+
+// The donor's 108 weights: 6 scales x 3 components x 2 norms x 3 error maps.
+export const SSIMULACRA2_WEIGHTS = [
+  0.0, 0.0007376606707406586, 0.0, 0.0, 0.0007793481682867309, 0.0, 0.0, 0.0004371155730107379,
+  0.0, 1.1041726426657346, 0.00066284834129271, 0.00015231632783718752, 0.0, 0.0016406437456599754,
+  0.0, 1.8422455520539298, 11.441172603757666, 0.0, 0.0007989109436015163, 0.000176816438078653,
+  0.0, 1.8787594979546387, 10.94906990605142, 0.0, 0.0007289346991508072, 0.9677937080626833,
+  0.0, 0.00014003424285435884, 0.9981766977854967, 0.00031949755934435053, 0.0004550992113792063,
+  0.0, 0.0, 0.0013648766163243398, 0.0, 0.0, 0.0, 0.0, 0.0, 7.466890328078848, 0.0,
+  17.445833984131262, 0.0006235601634041466, 0.0, 0.0, 6.683678146179332, 0.00037724407979611296,
+  1.027889937768264, 225.20515300849274, 0.0, 0.0, 19.213238186143016, 0.0011401524586618361,
+  0.001237755635509985, 176.39317598450694, 0.0, 0.0, 24.43300999870476, 0.28520802612117757,
+  0.0004485436923833408, 0.0, 0.0, 0.0, 34.77906344483772, 44.835625328877896, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0008680556573291698, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0005313191874358747,
+  0.0, 0.00016533814161379112, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0004179171803251336,
+  0.0017290828234722833, 0.0, 0.0020827005846636437, 0.0, 0.0, 8.826982764996862, 23.19243343998926,
+  0.0, 95.1080498811086, 0.9863978034400682, 0.9834382792465353, 0.0012286405048278493,
+  171.2667255897307, 0.9807858872435379, 0.0, 0.0, 0.0, 0.0005130064588990679, 0.0,
+  0.00010854057858411537,
+];
+// Identical frames score this: 10000 hundredths of a donor point.
+export const SSIMULACRA2_ONE = 10000;
+// Smallest edge the donor accepts on each side.
+export const SSIMULACRA2_MIN_EDGE = 8;
+const NUM_SCALES = 6;
+const fr = Math.fround;
+// The donor's own build-time constants (ssimulacra2 build.rs, equations 33-57).
+const SIGMA = 1.5;
+const RADIUS = Math.round(3.2795 * SIGMA + 0.2546);
+const SRGB_ALPHA = fr(1.0550107);
+const SRGB_BETA = fr(0.0030412825);
+// The opsin absorbance matrix (yuvxyb 0.4, rgb_xyb.rs).
+const K_M02 = fr(0.078), K_M00 = fr(0.3), K_M01 = fr(1.0 - K_M02 - K_M00);
+const K_M12 = fr(0.078), K_M10 = fr(0.23), K_M11 = fr(1.0 - K_M12 - K_M10);
+const K_M20 = fr(0.24342269), K_M21 = fr(0.20476745), K_M22 = fr(1.0 - K_M20 - K_M21);
+const K_B0 = fr(0.0037930734);
+const OPSIN = [K_M00, K_M01, K_M02, K_M10, K_M11, K_M12, K_M20, K_M21, K_M22];
+const BIAS = [K_B0, K_B0, K_B0];
+/** sRGB electro-optical transfer function (yuvxyb 0.4, transfer.rs). */
+function srgbEotf(x) {
+  const v = fr(Math.max(x, 0.0));
+  return v < fr(12.92 * SRGB_BETA) ? fr(v / 12.92) : fr(Math.pow(fr((v + fr(SRGB_ALPHA - 1.0)) / SRGB_ALPHA), 2.4));
+}
+/** The donor's cbrt (yuvxyb-math 0.1.1, cbrtf.rs): two Newton steps. */
+function cbrtf(x) {
+  if (x === 0) return 0;
+  const negative = x < 0;
+  const a = negative ? -x : x;
+  let t = Math.cbrt(a);
+  for (let i = 0; i < 2; i++) { const r = t * t * t; t = (t * (a + a + r)) / (a + r + r); }
+  const out = fr(t);
+  return negative ? -out : out;
+}
+/** Solve a 3x3 system by Gaussian elimination with partial pivoting. */
+function solve3(rows, rhs) {
+  const m = rows.map((row, i) => [...row, rhs[i]]);
+  for (let c = 0; c < 3; c++) {
+    let piv = c;
+    for (let r = c + 1; r < 3; r++) if (Math.abs(m[r][c]) > Math.abs(m[piv][c])) piv = r;
+    [m[c], m[piv]] = [m[piv], m[c]];
+    const d = m[c][c];
+    for (let k = c; k < 4; k++) m[c][k] /= d;
+    for (let r = 0; r < 3; r++) {
+      if (r === c) continue;
+      const factor = m[r][c];
+      for (let k = c; k < 4; k++) m[r][k] -= factor * m[c][k];
+    }
+  }
+  return [m[0][3], m[1][3], m[2][3]];
+}
+/** The recursive Gaussian's filter weights (ssimulacra2 build.rs). */
+function gaussianConstants() {
+  const piDiv2r = Math.PI / (2.0 * RADIUS);
+  const omega = [piDiv2r, 3.0 * piDiv2r, 5.0 * piDiv2r];
+  const p1 = 1.0 / Math.tan(0.5 * omega[0]), p3 = -1.0 / Math.tan(0.5 * omega[1]), p5 = 1.0 / Math.tan(0.5 * omega[2]);
+  const r1 = (p1 * p1) / Math.sin(omega[0]), r3 = (-p3 * p3) / Math.sin(omega[1]), r5 = (p5 * p5) / Math.sin(omega[2]);
+  const negHalfSigma2 = -0.5 * SIGMA * SIGMA, recipRadius = 1.0 / RADIUS;
+  const rho = omega.map((w) => Math.exp(negHalfSigma2 * w * w) * recipRadius);
+  const d13 = p1 * r3 + -r1 * p3, d35 = p3 * r5 + -r3 * p5, d51 = p5 * r1 + -r5 * p1;
+  const recipD13 = 1.0 / d13;
+  const zeta15 = d35 * recipD13, zeta35 = d51 * recipD13;
+  const rows = [[p1, p3, p5], [r1, r3, r5], [zeta15, zeta35, 1.0]];
+  const gamma = [1.0, RADIUS * RADIUS - SIGMA * SIGMA, zeta15 * rho[0] + zeta35 * rho[1] + rho[2]];
+  const beta = solve3(rows, gamma).map(fr);
+  // The donor's own check: the filter weights normalize to 1.
+  const norm = fr(beta[2] * p5 + fr(beta[0] * p1 + beta[1] * p3));
+  if (Math.abs(norm - 1.0) > 1e-9) throw new Error(`the Gaussian weights do not normalize: ${norm}`);
+  const n2 = [], d1 = [], mulIn = [], mulPrev = [], mulPrev2 = [];
+  for (let i = 0; i < 3; i++) {
+    n2.push(fr(-beta[i] * Math.cos(omega[i] * (RADIUS + 1.0))));
+    d1.push(fr(-2.0 * Math.cos(omega[i])));
+    const d2 = fr(d1[i] * d1[i]);
+    mulIn.push(fr(n2[i]), fr(-d1[i] * n2[i]), fr(d2 * n2[i] - n2[i]), fr((-d2 * d1[i]) * n2[i] + 2.0 * d1[i] * n2[i]));
+    mulPrev.push(fr(-d1[i]), fr(d2 - 1.0), fr(-d2 * d1[i] + 2.0 * d1[i]), fr(d2 * d2 + 3.0 * (-d2 + 1.0)));
+    mulPrev2.push(fr(-1.0), fr(d1[i]), fr(-d2 + 1.0), fr(d2 * d1[i] - 2.0 * d1[i]));
+  }
+  return { n2, d1, mulIn, mulPrev, mulPrev2 };
+}
+const GAUSS = gaussianConstants();
+/** One row of the recursive Gaussian (ssimulacra2 blur/gaussian.rs). */
+function gaussianRow(input, output, width) {
+  const bigN = RADIUS;
+  let prev1 = 0, prev3 = 0, prev5 = 0, prev2a = 0, prev2b = 0, prev2c = 0;
+  for (let n = -bigN + 1; n < width; n++) {
+    const left = n - bigN - 1, right = n + bigN - 1;
+    const leftVal = left >= 0 ? input[left] : 0, rightVal = right < width ? input[right] : 0;
+    const sum = fr(leftVal + rightVal);
+    let out1 = fr(sum * GAUSS.mulIn[0]), out3 = fr(sum * GAUSS.mulIn[4]), out5 = fr(sum * GAUSS.mulIn[8]);
+    out1 = fr(GAUSS.mulPrev2[0] * prev2a + out1);
+    out3 = fr(GAUSS.mulPrev2[4] * prev2b + out3);
+    out5 = fr(GAUSS.mulPrev2[8] * prev2c + out5);
+    prev2a = prev1; prev2b = prev3; prev2c = prev5;
+    out1 = fr(GAUSS.mulPrev[0] * prev1 + out1);
+    out3 = fr(GAUSS.mulPrev[4] * prev3 + out3);
+    out5 = fr(GAUSS.mulPrev[8] * prev5 + out5);
+    prev1 = out1; prev3 = out3; prev5 = out5;
+    if (n >= 0) output[n] = fr(out1 + out3 + out5);
+  }
+}
+/** One column of the recursive Gaussian (ssimulacra2 blur/gaussian.rs). */
+function gaussianColumn(input, output, width, height) {
+  const bigN = RADIUS;
+  for (let x = 0; x < width; x++) {
+    let prev = [0, 0, 0], prev2 = [0, 0, 0];
+    const out = [0, 0, 0];
+    for (let n = -bigN + 1; n < height; n++) {
+      const top = n - bigN - 1, bottom = n + bigN - 1;
+      const topVal = top >= 0 ? input[top * width + x] : 0, bottomVal = bottom < height ? input[bottom * width + x] : 0;
+      const sum = fr(topVal + bottomVal);
+      const p1 = fr(GAUSS.d1[0] * prev[0] + prev2[0]);
+      const p3 = fr(GAUSS.d1[1] * prev[1] + prev2[1]);
+      const p5 = fr(GAUSS.d1[2] * prev[2] + prev2[2]);
+      out[0] = fr(sum * GAUSS.n2[0] - p1);
+      out[1] = fr(sum * GAUSS.n2[1] - p3);
+      out[2] = fr(sum * GAUSS.n2[2] - p5);
+      if (n >= 0) output[n * width + x] = fr(out[0] + out[1] + out[2]);
+      prev2 = prev; prev = out.slice();
+    }
+  }
+}
+/** The donor's plane blur: one horizontal pass then one vertical pass. */
+function blurPlane(plane, width, height) {
+  const temp = new Float32Array(width * height), out = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) gaussianRow(plane.subarray(y * width, (y + 1) * width), temp.subarray(y * width, (y + 1) * width), width);
+  gaussianColumn(temp, out, width, height);
+  return out;
+}
+/** Linear RGB to XYB (yuvxyb 0.4, rgb_xyb.rs). */
+function linearToXyb(rgb) {
+  const absorbBias = BIAS.map((b) => -cbrtf(b));
+  const out = new Float32Array(rgb.length);
+  for (let i = 0; i < rgb.length; i += 3) {
+    const mixed = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      let m = fr(OPSIN[c * 3] * rgb[i] + OPSIN[c * 3 + 1] * rgb[i + 1] + OPSIN[c * 3 + 2] * rgb[i + 2] + BIAS[c]);
+      if (m < 0) m = 0;
+      mixed[c] = fr(cbrtf(m) + absorbBias[c]);
+    }
+    out[i] = fr(0.5 * (mixed[0] - mixed[1]));
+    out[i + 1] = fr(0.5 * (mixed[0] + mixed[1]));
+    out[i + 2] = mixed[2];
+  }
+  return out;
+}
+/** The donor's make_positive_xyb (ssimulacra2 lib.rs). */
+function makePositiveXyb(xyb) {
+  for (let i = 0; i < xyb.length; i += 3) {
+    xyb[i + 2] = fr(fr(xyb[i + 2] - xyb[i + 1]) + 0.55);
+    xyb[i] = fr(fr(xyb[i]) * 14.0 + 0.42);
+    xyb[i + 1] = fr(xyb[i + 1] + 0.01);
+  }
+}
+/** The donor's downscale_by_2 (ssimulacra2 lib.rs). */
+function downscaleBy2(rgb, width, height) {
+  const outW = Math.ceil(width / 2), outH = Math.ceil(height / 2);
+  const out = new Float32Array(outW * outH * 3), normalize = fr(1.0 / 4.0);
+  for (let oy = 0; oy < outH; oy++) for (let ox = 0; ox < outW; ox++) for (let c = 0; c < 3; c++) {
+    let sum = 0;
+    for (let iy = 0; iy < 2; iy++) for (let ix = 0; ix < 2; ix++) {
+      const x = Math.min(ox * 2 + ix, width - 1), y = Math.min(oy * 2 + iy, height - 1);
+      sum = fr(sum + rgb[(y * width + x) * 3 + c]);
+    }
+    out[(oy * outW + ox) * 3 + c] = fr(sum * normalize);
+  }
+  return { data: out, width: outW, height: outH };
+}
+/** The donor's ssim_map (ssimulacra2 lib.rs): six averages per plane. */
+function ssimMap(width, height, m1, m2, s11, s22, s12) {
+  const one = 1.0 / (width * height);
+  const averages = new Float64Array(6);
+  for (let c = 0; c < 3; c++) {
+    let sum0 = 0, sum1 = 0;
+    for (let i = 0; i < width * height; i++) {
+      const mu1 = m1[c][i], mu2 = m2[c][i];
+      const mu11 = fr(mu1 * mu1), mu22 = fr(mu2 * mu2), mu12 = fr(mu1 * mu2);
+      const muDiff = fr(mu1 - mu2);
+      const numM = fr(muDiff * -muDiff + 1.0);
+      const numS = fr(2.0 * (fr(s12[c][i] - mu12)) + 0.0009);
+      const denomS = fr(fr(s11[c][i] - mu11) + fr(s22[c][i] - mu22) + 0.0009);
+      let d = 1.0 - fr(fr(numM * numS) / denomS);
+      if (d < 0) d = 0;
+      sum0 += d;
+      sum1 += d * d * d * d;
+    }
+    averages[c * 2] = one * sum0;
+    averages[c * 2 + 1] = Math.sqrt(Math.sqrt(one * sum1));
+  }
+  return averages;
+}
+/** The donor's edge_diff_map (ssimulacra2 lib.rs): twelve averages. */
+function edgeDiffMap(width, height, img1, mu1, img2, mu2) {
+  const one = 1.0 / (width * height);
+  const averages = new Float64Array(12);
+  for (let c = 0; c < 3; c++) {
+    const sums = [0, 0, 0, 0];
+    for (let i = 0; i < width * height; i++) {
+      const d1 = fr(1.0 + Math.abs(fr(img2[c][i] - mu2[c][i]))) / fr(1.0 + Math.abs(fr(img1[c][i] - mu1[c][i]))) - 1.0;
+      const artifact = Math.max(d1, 0), detailLost = Math.max(-d1, 0);
+      sums[0] += artifact; sums[1] += artifact * artifact * artifact * artifact;
+      sums[2] += detailLost; sums[3] += detailLost * detailLost * detailLost * detailLost;
+    }
+    for (let k = 0; k < 4; k++) averages[c * 4 + k] = k % 2 === 0 ? one * sums[k] : Math.sqrt(Math.sqrt(one * sums[k]));
+  }
+  return averages;
+}
+/** RGBA bytes to linear RGB floats (the donor's Rgb -> LinearRgb path). */
+function toLinearRgb(rgba, count) {
+  const out = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    out[i * 3] = srgbEotf(fr(rgba[i * 4] / 255.0));
+    out[i * 3 + 1] = srgbEotf(fr(rgba[i * 4 + 1] / 255.0));
+    out[i * 3 + 2] = srgbEotf(fr(rgba[i * 4 + 2] / 255.0));
+  }
+  return out;
+}
+/** The donor's score: the weighted sum over the scales (ssimulacra2 lib.rs). */
+function donorScore(rgbaA, rgbaB, width, height) {
+  let img1 = toLinearRgb(rgbaA, width * height), img2 = toLinearRgb(rgbaB, width * height);
+  let w = width, h = height;
+  const scales = [];
+  for (let scale = 0; scale < NUM_SCALES; scale++) {
+    if (w < 8 || h < 8) break;
+    if (scale > 0) {
+      const a = downscaleBy2(img1, w, h), b = downscaleBy2(img2, w, h);
+      img1 = a.data; img2 = b.data; w = a.width; h = a.height;
+    }
+    const xyb1 = linearToXyb(img1), xyb2 = linearToXyb(img2);
+    makePositiveXyb(xyb1); makePositiveXyb(xyb2);
+    const planes = (xyb) => {
+      const out = [new Float32Array(w * h), new Float32Array(w * h), new Float32Array(w * h)];
+      for (let i = 0; i < w * h; i++) { out[0][i] = xyb[i * 3]; out[1][i] = xyb[i * 3 + 1]; out[2][i] = xyb[i * 3 + 2]; }
+      return out;
+    };
+    const p1 = planes(xyb1), p2 = planes(xyb2);
+    const mul = (a, b) => a.map((plane, c) => {
+      const out = new Float32Array(plane.length);
+      for (let i = 0; i < plane.length; i++) out[i] = fr(plane[i] * b[c][i]);
+      return out;
+    });
+    const blur = (planesIn) => planesIn.map((plane) => blurPlane(plane, w, h));
+    const s11 = blur(mul(p1, p1)), s22 = blur(mul(p2, p2)), s12 = blur(mul(p1, p2));
+    const mu1 = blur(p1), mu2 = blur(p2);
+    scales.push({ avgSsim: ssimMap(w, h, mu1, mu2, s11, s22, s12), avgEdge: edgeDiffMap(w, h, p1, mu1, p2, mu2) });
+  }
+  let ssim = 0.0, i = 0;
+  for (let c = 0; c < 3; c++) for (const scale of scales) for (let n = 0; n < 2; n++) {
+    ssim = fr(SSIMULACRA2_WEIGHTS[i] * Math.abs(scale.avgSsim[c * 2 + n]) + ssim); i++;
+    ssim = fr(SSIMULACRA2_WEIGHTS[i] * Math.abs(scale.avgEdge[c * 4 + n]) + ssim); i++;
+    ssim = fr(SSIMULACRA2_WEIGHTS[i] * Math.abs(scale.avgEdge[c * 4 + n + 2]) + ssim); i++;
+  }
+  ssim = fr(ssim * 0.9562382616834844);
+  ssim = fr(fr(6.248496625763138e-5 * ssim * ssim) * ssim + fr(fr(2.326765642916932 * ssim) + -0.020884521182843837 * ssim * ssim));
+  if (ssim > 0) ssim = fr(100.0 - Math.pow(ssim, 0.6276336467831387) * 10.0);
+  else ssim = 100.0;
+  return ssim;
+}
+/**
+ * SSIMULACRA2 v2.1 for two RGBA frames of the same size.
+ *
+ * The source is the pristine reference and the distorted one is the capture.
+ * The score is published in hundredths of a donor point, so 10000 is
+ * identical and 0 is worst.
+ *
+ * @throws when the frames differ in size or a side is under 8x8.
+ */
+export function ssimulacra2X10000(source, distorted, width, height) {
+  if (source.length !== distorted.length || source.length !== width * height * 4) throw new Error("size mismatch");
+  if (width < SSIMULACRA2_MIN_EDGE || height < SSIMULACRA2_MIN_EDGE) throw new Error("frame under 8x8");
+  const points = donorScore(source, distorted, width, height);
+  if (!Number.isFinite(points)) return 0;
+  return Math.max(0, Math.min(SSIMULACRA2_ONE, Math.round(points * 100)));
+}
+export function scorePair(a, b, w, h, th = DEFAULT_THRESHOLD) { if (a.length !== b.length || a.length !== w * h * 4) throw new Error("size mismatch"); const s = ssimX10000(a, b, w, h), d = meanDeX100(a, b), f = flipX10000(a, b, w, h); let second = null; try { second = ssimulacra2X10000(a, b, w, h); } catch { second = null; } return { ssim_x10000: s, flip_x10000: f.flip_x10000, ssimulacra2: second, butteraugli: null, mean_de_x100: d, verdict: s >= th ? "pass" : "fail", note: NOTE }; }
 export function sandAt(x, y) { const t = (x * 7 + y * 13 + (x * y) % 5) % 23 - 11; const c = (v) => Math.min(255, Math.max(0, v + t)); return [c(194), c(160), c(104)]; }
 const bri = (v) => Math.min(255, Math.floor((v * 6 + 2) / 5));
 export function sandFrames(W = 64, H = 48) { const r = Buffer.alloc(W * H * 4), c = Buffer.alloc(W * H * 4); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const p = (y * W + x) * 4; const s = sandAt(x, y); r.set([...s, 255], p); const q = y >= 8 ? s.map(bri) : s; c.set([...q, 255], p); } return { ref: r, cap: c, w: W, h: H }; }

@@ -1748,7 +1748,7 @@ Listed in a fresh session: no, call `api.load` with `view`. Source: `crates/endp
 | [`log.query`](#logquery) | `observe` · read-only | Cursor-paged observe events in stable order with overflow counters. |
 | [`rpc.discover`](#rpcdiscover) | `observe` · read-only | Self-describing manifest: every tool with its input and output schemas. |
 | [`look.judge`](#lookjudge) | `observe` · read-only | Machine look score for a capture directory: rubric L1-L9 from pixels, frame checks and references, as integer permille JSON. |
-| [`view.compare`](#viewcompare) | `observe` · read-only | Compare two relative PNG captures over the whole frame: SSIM, FLIP, deltaE and histogram distances as fixed-point integers. |
+| [`view.compare`](#viewcompare) | `observe` · read-only | Compare two relative PNG captures over the whole frame: SSIM, FLIP, deltaE, histogram distances and SSIMULACRA2 v2.1 as fixed-point integers. |
 
 ### `view.observe`
 
@@ -1863,7 +1863,7 @@ Listed in a fresh session: no, call `api.load` with `view`. Source: `crates/endp
 
 ### `view.compare`
 
-> Compare two relative PNG captures over the whole frame: SSIM, FLIP, deltaE and histogram distances as fixed-point integers. Read-only; SSIMULACRA2 is a null slot until the pure-Rust crate lands.
+> Compare two relative PNG captures over the whole frame: SSIM, FLIP, deltaE, histogram distances and SSIMULACRA2 v2.1 as fixed-point integers. Read-only; SSIMULACRA2 reads 10000 for identical frames.
 
 - **Scope:** `observe` · read-only · pack `view` is listed after `api.load`
 - **Undo:** none: read-only

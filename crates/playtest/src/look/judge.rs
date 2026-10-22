@@ -31,7 +31,11 @@
 //! Units: permille for scores, hundredths of a deltaE unit, SSIM x10000,
 //! pixels, millimetres in manifests. Determinism: integer only (see
 //! [`super::metric`]); the report digest covers every byte of the JSON body,
-//! so the same capture set gives byte-identical JSON twice. Errors:
+//! so the same capture set gives byte-identical JSON twice. The one
+//! exception is the second metric beside the Q1 SSIM score
+//! ([`Q1Match::ssimulacra2_x10000`]): it is a coarse fixed point of a float
+//! donor, so it is stable on one machine and may differ by a unit between
+//! machines - it never enters any simulation hash. Errors:
 //! [`JudgeError`] for a set that cannot be judged at all; a single bad frame
 //! is a scored fault inside the report, never a panic.
 //! Budget: at most [`MAX_FRAMES`] frames of at most [`MAX_PNG_BYTES`] each;
@@ -104,6 +108,16 @@ pub enum JudgeError {
     },
     /// The manifest is present and unreadable (garbled or the wrong shape).
     BadManifest(ManifestError),
+    /// A capture frame has no paired Q1 reference while the reference set
+    /// says one should: a named refusal, never a silent pass.
+    MissingReference {
+        /// The reference-set tier the pool must cover.
+        tier: String,
+        /// The frame that has no reference (`name`).
+        frame: String,
+        /// What the pool held and what the frame needed.
+        why: String,
+    },
     /// A directory or file could not be read.
     Io {
         /// Path (lossy; for diagnostics).
@@ -125,6 +139,11 @@ impl fmt::Display for JudgeError {
                 "{name} is {bytes} bytes; at most {MAX_PNG_BYTES} per PNG and {MAX_MANIFEST_BYTES} per manifest"
             ),
             Self::BadManifest(error) => write!(f, "{error}; fix or remove manifest.json and judge again"),
+            Self::MissingReference { tier, frame, why } => write!(
+                f,
+                "reference set tier {tier} cannot score {frame}: {why}; \
+                 point q1 at the tier's captures in content/reference or drop the reference set"
+            ),
             Self::Io { path, kind } => write!(f, "cannot read {path} ({kind:?})"),
         }
     }
@@ -200,6 +219,10 @@ pub struct JudgeConfig {
     pub refused_png_fnv: Vec<String>,
     /// Thresholds handed to `frame_check`.
     pub frame_thresholds: Thresholds,
+    /// The reference-set tier the Q1 pool must cover, when the pool came
+    /// from the reference set: a capture frame without its paired
+    /// reference then refuses by name instead of skipping L8.
+    pub q1_tier: Option<String>,
 }
 
 impl Default for JudgeConfig {
@@ -224,6 +247,7 @@ impl Default for JudgeConfig {
             hero_pass_permille: 800,
             refused_png_fnv: Vec::new(),
             frame_thresholds: Thresholds::default(),
+            q1_tier: None,
         }
     }
 }
@@ -297,6 +321,11 @@ pub struct Q1Match {
     pub name: String,
     /// Metrics, or none when the sizes differ.
     pub comparison: Option<Comparison>,
+    /// SSIMULACRA2 v2.1 beside the SSIM score, in hundredths of a donor
+    /// point: 10000 is identical, 0 is worst, higher is better. `None`
+    /// when the donor refused the pair (mismatched sizes, or a side under
+    /// 8x8).
+    pub ssimulacra2_x10000: Option<u32>,
 }
 
 /// Everything the judge found about one frame.
@@ -683,16 +712,32 @@ fn load_previews(list: &[NamedPng], cfg: &JudgeConfig, notes: &mut Vec<String>) 
     out
 }
 
-fn load_q1(list: &[NamedPng], notes: &mut Vec<String>) -> Vec<Option<(String, Frame)>> {
-    list.iter()
-        .map(|item| match Frame::decode_png(&item.png) {
-            Ok(frame) => Some((item.name.clone(), frame)),
+/// Decode the Q1 pool. With `tier` set the pool came from the reference
+/// set, so a capture that does not decode refuses by name instead of
+/// being skipped: a missing reference must never read as a silent pass.
+fn load_q1(
+    list: &[NamedPng],
+    tier: Option<&str>,
+    notes: &mut Vec<String>,
+) -> Result<Vec<Option<(String, Frame)>>, JudgeError> {
+    let mut out = Vec::with_capacity(list.len());
+    for item in list {
+        match Frame::decode_png(&item.png) {
+            Ok(frame) => out.push(Some((item.name.clone(), frame))),
             Err(error) => {
+                if let Some(tier) = tier {
+                    return Err(JudgeError::MissingReference {
+                        tier: tier.to_owned(),
+                        frame: item.name.clone(),
+                        why: format!("the reference does not decode: {error}"),
+                    });
+                }
                 notes.push(format!("q1 reference {} skipped: {error}", item.name));
-                None
+                out.push(None);
             }
-        })
-        .collect()
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -913,9 +958,18 @@ fn score_q1(ctx: &Context<'_>, index: usize, frame: &Frame, report: &mut FrameRe
         Err(_) => (0, i64::from(-SSIM_ONE)),
     };
     set_item(report, 7, score, raw);
+    // The second metric rides beside the SSIM score: the source is the
+    // reference frame, the distorted one is the capture, so the score says
+    // how far the capture moved from the reference.
+    let second = if comparison.is_ok() {
+        super::ssim2::score_x10000(reference, frame).ok()
+    } else {
+        None
+    };
     report.q1 = Some(Q1Match {
         name: name.clone(),
         comparison: comparison.ok(),
+        ssimulacra2_x10000: second,
     });
 }
 
@@ -1054,6 +1108,31 @@ fn passes_all(frame: &FrameReport, cfg: &JudgeConfig) -> bool {
         && frame.scores[0].is_some()
 }
 
+/// The reference pool the Q1 tier must cover, or a named refusal.
+///
+/// A short pool must never read as "L8 did not apply" and pass silently.
+fn check_reference_pool(set: &CaptureSet, q1: usize, tier: Option<&str>) -> Result<(), JudgeError> {
+    let Some(tier) = tier else {
+        return Ok(());
+    };
+    if q1 >= set.frames.len() {
+        return Ok(());
+    }
+    let frame = set
+        .frames
+        .get(q1)
+        .map_or("the set", |item| item.name.as_str());
+    Err(JudgeError::MissingReference {
+        tier: tier.to_owned(),
+        frame: frame.to_owned(),
+        why: format!(
+            "the tier holds {} captures for {} frames",
+            q1,
+            set.frames.len()
+        ),
+    })
+}
+
 /// Judge a capture set against optional references.
 ///
 /// # Errors
@@ -1073,10 +1152,12 @@ pub fn judge(
         .transpose()
         .map_err(JudgeError::BadManifest)?;
     let mut notes = Vec::new();
+    let q1 = load_q1(&refs.q1, cfg.q1_tier.as_deref(), &mut notes)?;
+    check_reference_pool(set, q1.len(), cfg.q1_tier.as_deref())?;
     let ctx = Context {
         cfg,
         previews: load_previews(&refs.fighters, cfg, &mut notes),
-        q1: load_q1(&refs.q1, &mut notes),
+        q1,
     };
     let (rows, integrity) = bind_rows(&set.frames, manifest.as_ref(), &mut notes);
     let mut frames = Vec::with_capacity(set.frames.len());
@@ -1178,145 +1259,14 @@ fn check_bounds(set: &CaptureSet, refs: &References) -> Result<(), JudgeError> {
 }
 
 // ---------------------------------------------------------------------------
-// JSON (fixed field order, integers only)
+// JSON (fixed field order, integers only; the body lives in report_json)
 // ---------------------------------------------------------------------------
-
-fn json_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
-fn json_opt<T: fmt::Display>(out: &mut String, value: Option<T>) {
-    match value {
-        Some(v) => out.push_str(&v.to_string()),
-        None => out.push_str("null"),
-    }
-}
-
-fn json_list<T>(out: &mut String, items: &[T], mut write: impl FnMut(&mut String, &T)) {
-    out.push('[');
-    for (i, item) in items.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        write(out, item);
-    }
-    out.push(']');
-}
-
-fn write_item(out: &mut String, item: &RubricItem) {
-    out.push_str(&format!("{{\"id\":\"{}\",\"name\":\"{}\",\"applicable\":{},\"score\":{},\"pass\":{},\"frames_passing\":{},\"detail\":", item.id, item.name, item.applicable, item.score_permille, item.pass, item.frames_passing));
-    json_str(out, &item.detail);
-    out.push('}');
-}
-
-fn write_comparison(out: &mut String, c: &Comparison) {
-    out.push_str(&format!(
-        "{{\"ssim\":{},\"mean_de\":{},\"hist_tv\":{},\"hist_emd\":{},\"flip\":{}}}",
-        c.ssim_x10000, c.mean_de_x100, c.hist_tv_x10000, c.hist_emd_x10000, c.flip_x10000
-    ));
-}
-
-fn write_frame(out: &mut String, f: &FrameReport) {
-    out.push_str("{\"name\":");
-    json_str(out, &f.name);
-    out.push_str(&format!(
-        ",\"png_fnv\":\"{}\",\"pixel_fnv\":\"{}\",\"width\":{},\"height\":{},\"fault\":",
-        f.png_fnv, f.pixel_fnv, f.width, f.height
-    ));
-    match &f.fault {
-        Some(words) => json_str(out, words),
-        None => out.push_str("null"),
-    }
-    out.push_str(",\"manifest_tick\":");
-    json_opt(out, f.manifest_tick);
-    out.push_str(",\"manifest_png_ok\":");
-    json_opt(out, f.manifest_png_ok);
-    out.push_str(",\"scores\":");
-    json_list(out, &f.scores, |o, s| json_opt(o, *s));
-    out.push_str(",\"raw\":");
-    json_list(out, &f.raw, |o, r| json_opt(o, *r));
-    out.push_str(&format!(
-        ",\"fighters\":{{\"count\":{},\"pixels\":{},\"regions\":",
-        f.fighters.count, f.fighters.pixels
-    ));
-    json_list(out, &f.fighters.regions, |o, r| {
-        o.push_str("{\"entity\":");
-        json_opt(o, r.entity);
-        o.push_str(&format!(
-            ",\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"pixels\":{}}}",
-            r.x, r.y, r.w, r.h, r.pixels
-        ));
-    });
-    out.push_str(",\"manifest_slots\":");
-    json_list(out, &f.fighters.manifest_slots, |o, s| {
-        o.push_str(&s.to_string());
-    });
-    out.push_str(",\"manifest_unseen\":");
-    json_list(out, &f.fighters.manifest_unseen, |o, s| {
-        o.push_str(&s.to_string());
-    });
-    out.push_str("},\"preview\":");
-    match &f.preview {
-        Some(p) => {
-            out.push_str("{\"name\":");
-            json_str(out, &p.name);
-            out.push_str(&format!(
-                ",\"emd\":{},\"mean_de\":{}}}",
-                p.emd_x10000, p.mean_de_x100
-            ));
-        }
-        None => out.push_str("null"),
-    }
-    out.push_str(",\"q1\":");
-    match &f.q1 {
-        Some(q) => {
-            out.push_str("{\"name\":");
-            json_str(out, &q.name);
-            out.push_str(",\"comparison\":");
-            match &q.comparison {
-                Some(c) => write_comparison(out, c),
-                None => out.push_str("null"),
-            }
-            out.push('}');
-        }
-        None => out.push_str("null"),
-    }
-    out.push('}');
-}
 
 impl LookJudgement {
     /// Every JSON member after the digest, without the braces: the bytes the
     /// digest covers.
     fn json_body(&self) -> String {
-        let mut out = format!(
-            "\"pass\":{},\"score\":{},\"integrity_ok\":{},\"rubric\":",
-            self.pass, self.score_permille, self.integrity_ok
-        );
-        json_list(&mut out, &self.rubric, write_item);
-        let s = &self.sequence;
-        out.push_str(&format!(
-            ",\"sequence\":{{\"frames\":{},\"distinct\":{},\"frozen\":{},\"motion_ssim\":",
-            s.frames, s.distinct, s.frozen
-        ));
-        json_list(&mut out, &s.motion_ssim_x10000, |o, m| json_opt(o, *m));
-        out.push_str(&format!(
-            ",\"flicker\":{}}},\"frames\":",
-            s.flicker_permille
-        ));
-        json_list(&mut out, &self.frames, write_frame);
-        out.push_str(",\"notes\":");
-        json_list(&mut out, &self.notes, |o, n| json_str(o, n));
-        out
+        super::report_json::body(self)
     }
 
     /// The typed result as JSON: fixed field order, integers only, so the
@@ -1646,6 +1596,12 @@ mod tests {
 
     fn score(judgement: &LookJudgement, id: &str) -> u32 {
         judgement.item(id).expect("item exists").score_permille
+    }
+
+    /// One channel a fifth brighter, clamped to a byte.
+    fn brighter_byte(value: u8) -> u8 {
+        let scaled = (u32::from(value) * 6 + 2) / 5;
+        u8::try_from(scaled.min(255)).expect("clamped")
     }
 
     #[test]
@@ -2183,6 +2139,195 @@ mod tests {
         assert_eq!(score(&skew, "L8"), 0);
         assert_eq!(skew.frames[0].q1.as_ref().expect("q1").comparison, None);
         assert!(!run(Vec::new()).item("L8").expect("L8").applicable);
+    }
+
+    #[test]
+    fn look_judge_scores_l8_against_a_registered_reference() {
+        // The reference set's capture: the same scene, camera and seed the
+        // judge scores against, so a frame equal to it must clear the bar.
+        let reference = super::super::reference::rgba(64, 48, super::super::reference::SEED);
+        let reference_png = NamedPng {
+            name: "reference.png".to_owned(),
+            png: png_of(64, 48, &reference),
+        };
+        let capture = reference_png.clone();
+        let refs = References {
+            fighters: Vec::new(),
+            q1: vec![reference_png],
+        };
+        let cfg = JudgeConfig {
+            q1_tier: Some("native".to_owned()),
+            ..JudgeConfig::default()
+        };
+        let judgement = judge(&set_of(vec![capture]), &refs, &cfg).expect("judges");
+        // L8 is applicable and above its bar (700 permille).
+        let l8 = judgement.item("L8").expect("L8");
+        assert!(l8.applicable);
+        assert!(l8.score_permille >= 700, "{}", l8.score_permille);
+        // The second metric rides beside the SSIM score: identical frames
+        // are the identical value.
+        let second = judgement.frames[0]
+            .q1
+            .as_ref()
+            .expect("q1")
+            .ssimulacra2_x10000
+            .expect("the donor scores the pair");
+        assert_eq!(second, 10_000, "{second}");
+    }
+
+    #[test]
+    fn look_judge_scores_the_same_capture_twice_identically() {
+        let reference = super::super::reference::rgba(64, 48, super::super::reference::SEED);
+        let refs = References {
+            fighters: Vec::new(),
+            q1: vec![NamedPng {
+                name: "reference.png".to_owned(),
+                png: png_of(64, 48, &reference),
+            }],
+        };
+        let cfg = JudgeConfig {
+            q1_tier: Some("native".to_owned()),
+            ..JudgeConfig::default()
+        };
+        let capture = NamedPng {
+            name: "capture.png".to_owned(),
+            png: png_of(64, 48, &reference),
+        };
+        let first = judge(&set_of(vec![capture.clone()]), &refs, &cfg).expect("judges");
+        let second = judge(&set_of(vec![capture]), &refs, &cfg).expect("judges");
+        assert_eq!(score(&first, "L8"), score(&second, "L8"));
+        assert_eq!(first.digest, second.digest);
+    }
+
+    #[test]
+    fn look_judge_scores_a_worse_capture_lower() {
+        let reference = super::super::reference::rgba(64, 48, super::super::reference::SEED);
+        let refs = References {
+            fighters: Vec::new(),
+            q1: vec![NamedPng {
+                name: "reference.png".to_owned(),
+                png: png_of(64, 48, &reference),
+            }],
+        };
+        let cfg = JudgeConfig {
+            q1_tier: Some("native".to_owned()),
+            ..JudgeConfig::default()
+        };
+        // The same frame with every channel a fifth brighter: a worse
+        // capture of the same scene.
+        let brighter = reference
+            .chunks_exact(4)
+            .flat_map(|chunk| {
+                [
+                    brighter_byte(chunk[0]),
+                    brighter_byte(chunk[1]),
+                    brighter_byte(chunk[2]),
+                    255,
+                ]
+            })
+            .collect::<Vec<u8>>();
+        let capture = NamedPng {
+            name: "capture.png".to_owned(),
+            png: png_of(64, 48, &brighter),
+        };
+        let good = judge(
+            &set_of(vec![NamedPng {
+                name: "capture.png".to_owned(),
+                png: png_of(64, 48, &reference),
+            }]),
+            &refs,
+            &cfg,
+        )
+        .expect("judges");
+        let worse = judge(&set_of(vec![capture]), &refs, &cfg).expect("judges");
+        assert!(
+            score(&worse, "L8") < score(&good, "L8"),
+            "{} vs {}",
+            score(&worse, "L8"),
+            score(&good, "L8")
+        );
+        let second = worse.frames[0]
+            .q1
+            .as_ref()
+            .expect("q1")
+            .ssimulacra2_x10000
+            .expect("the donor scores the pair");
+        assert!(second < 10_000, "{second}");
+    }
+
+    #[test]
+    fn look_judge_refuses_a_missing_reference_by_name() {
+        let reference = super::super::reference::rgba(64, 48, super::super::reference::SEED);
+        let cfg = JudgeConfig {
+            q1_tier: Some("native".to_owned()),
+            ..JudgeConfig::default()
+        };
+        // The reference set says one capture per frame, but the pool holds
+        // none: the judge must refuse by name, never pass silently.
+        let missing = judge(
+            &set_of(vec![NamedPng {
+                name: "capture.png".to_owned(),
+                png: png_of(64, 48, &reference),
+            }]),
+            &References::default(),
+            &cfg,
+        )
+        .expect_err("a missing reference refuses");
+        assert!(
+            matches!(&missing, JudgeError::MissingReference { tier, .. } if tier == "native"),
+            "{missing}"
+        );
+        let words = missing.to_string();
+        assert!(words.contains("native"), "{words}");
+        assert!(words.contains("capture.png"), "{words}");
+
+        // A pool shorter than the frame set refuses the same way.
+        let short = judge(
+            &set_of(vec![
+                NamedPng {
+                    name: "a.png".to_owned(),
+                    png: png_of(64, 48, &reference),
+                },
+                NamedPng {
+                    name: "b.png".to_owned(),
+                    png: png_of(64, 48, &reference),
+                },
+            ]),
+            &References {
+                fighters: Vec::new(),
+                q1: vec![NamedPng {
+                    name: "reference.png".to_owned(),
+                    png: png_of(64, 48, &reference),
+                }],
+            },
+            &cfg,
+        )
+        .expect_err("a short pool refuses");
+        assert!(
+            matches!(&short, JudgeError::MissingReference { frame, .. } if frame == "b.png"),
+            "{short}"
+        );
+
+        // A reference that does not decode refuses by name too.
+        let junk = judge(
+            &set_of(vec![NamedPng {
+                name: "capture.png".to_owned(),
+                png: png_of(64, 48, &reference),
+            }]),
+            &References {
+                fighters: Vec::new(),
+                q1: vec![NamedPng {
+                    name: "junk.png".to_owned(),
+                    png: vec![1, 2, 3],
+                }],
+            },
+            &cfg,
+        )
+        .expect_err("an undecodable reference refuses");
+        assert!(
+            matches!(&junk, JudgeError::MissingReference { frame, .. } if frame == "junk.png"),
+            "{junk}"
+        );
     }
 
     #[test]

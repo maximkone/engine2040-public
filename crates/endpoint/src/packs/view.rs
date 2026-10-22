@@ -47,6 +47,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use engine_playtest::look::metric::{self, Frame, Region};
+use engine_playtest::look::ssim2;
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
@@ -361,7 +362,9 @@ pub struct ViewCompareArgs {
 
 /// Whole-frame machine score. All scores are fixed point; 10000 is identical
 /// for SSIM and 0 is identical for FLIP and deltaE. `ssimulacra2_x10000` is
-/// the reserved slice-2 slot until the pure-Rust crate lands.
+/// SSIMULACRA2 v2.1 in hundredths of a donor point: 10000 is identical, 0 is
+/// worst and higher is better, the same direction as SSIM. It is `None` when
+/// the donor refused the pair (mismatched sizes, or a side under 8x8).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -407,10 +410,17 @@ fn read_frame(field: &str, path: &str) -> Result<Frame, McpToolError> {
 }
 
 /// Score two decoded frames over the whole frame.
+///
+/// The second metric reads `left` as the source (the pristine reference)
+/// and `right` as the distorted one (the capture), so its score says how
+/// far the capture moved from the reference. The donor is float, so the
+/// score is published as a coarse fixed point: 10000 is identical, 0 is
+/// worst.
 fn compare_frames(left: &Frame, right: &Frame) -> Result<ViewCompareOutput, McpToolError> {
     let compared = metric::compare(left, right, Region::Full).map_err(|error| {
         McpToolError::new("bad_image", format!("frames do not compare: {error}"))
     })?;
+    let second = ssim2::score_x10000(left, right).ok();
     Ok(ViewCompareOutput {
         width: left.width(),
         height: left.height(),
@@ -419,7 +429,7 @@ fn compare_frames(left: &Frame, right: &Frame) -> Result<ViewCompareOutput, McpT
         mean_de_x100: compared.mean_de_x100,
         hist_tv_x10000: compared.hist_tv_x10000,
         hist_emd_x10000: compared.hist_emd_x10000,
-        ssimulacra2_x10000: None,
+        ssimulacra2_x10000: second,
     })
 }
 
@@ -446,8 +456,8 @@ impl ToolBase for ViewCompareTool {
     fn description() -> Option<Cow<'static, str>> {
         Some(
             "Compare two relative PNG captures over the whole frame: SSIM, FLIP, \
-             deltaE and histogram distances as fixed-point integers. Read-only; \
-             SSIMULACRA2 is a null slot until the pure-Rust crate lands."
+             deltaE, histogram distances and SSIMULACRA2 v2.1 as fixed-point \
+             integers. Read-only; SSIMULACRA2 reads 10000 for identical frames."
                 .into(),
         )
     }
@@ -1656,7 +1666,9 @@ mod tests {
         assert_eq!(compared.mean_de_x100, 0);
         assert_eq!(compared.hist_tv_x10000, 0);
         assert_eq!(compared.hist_emd_x10000, 0);
-        assert_eq!(compared.ssimulacra2_x10000, None);
+        // The second metric: identical frames are the identical value, the
+        // same 10000 the SSIM score uses for a perfect match.
+        assert_eq!(compared.ssimulacra2_x10000, Some(10000));
     }
 
     #[test]
@@ -1680,6 +1692,32 @@ mod tests {
         let compared = compare_frames(&dark, &bright).expect("different frames compare");
         assert!(compared.ssim_x10000 < 10000, "{}", compared.ssim_x10000);
         assert!(compared.flip_x10000 > 0, "{}", compared.flip_x10000);
+    }
+
+    #[test]
+    fn view_compare_scores_the_second_metric_below_identical() {
+        let left = frame_of(|i| {
+            [
+                u8::try_from((i * 5) % 120).expect("byte"),
+                u8::try_from((i * 11) % 100).expect("byte"),
+                u8::try_from((i * 3) % 80).expect("byte"),
+                255,
+            ]
+        });
+        let right = frame_of(|i| {
+            [
+                u8::try_from(120 + (i * 5) % 120).expect("byte"),
+                u8::try_from(100 + (i * 11) % 100).expect("byte"),
+                u8::try_from(80 + (i * 3) % 80).expect("byte"),
+                255,
+            ]
+        });
+        let compared = compare_frames(&left, &right).expect("different frames compare");
+        let second = compared
+            .ssimulacra2_x10000
+            .expect("the donor scores two same-size frames");
+        assert!(second < 10000, "{second}");
+        assert!(second > 0, "{second}");
     }
 
     #[test]

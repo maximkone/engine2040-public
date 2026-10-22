@@ -49,10 +49,11 @@ pub use cache::{
 pub use look::{
     bake_look_on_worker, baked_gi_frame_sample, baked_gi_receipt_for_frame,
     compile_fog_for_presenter, contact_for_frame, fog_blit_uniform_bytes, fog_err, fog_fits_frame,
-    fog_params_for_capture, fog_params_for_look_bake, ibl_ambient_for_capture,
-    look_bake_for_capture, rl8_err, skybox_sample_for_capture, FOG_BLIT_UNIFORM_BYTES,
-    RL9_CONTACT_INTENSITY, RL9_CONTACT_RADIUS_PX, RL9_CONTACT_THICKNESS_M, RL9_FOG_BASE_M,
-    RL9_FOG_DENSITY_PER_M, RL9_FOG_EXPOSURE_EV100, RL9_FOG_FALLOFF_M, RL9_FOG_MAX_DIST_M,
+    fog_params_for_capture, fog_params_for_look_bake, fog_params_for_look_bake_at,
+    ibl_ambient_for_capture, look_bake_for_capture, rl8_err, skybox_sample_for_capture,
+    FOG_BLIT_UNIFORM_BYTES, RL9_CONTACT_INTENSITY, RL9_CONTACT_RADIUS_PX, RL9_CONTACT_THICKNESS_M,
+    RL9_FOG_BASE_M, RL9_FOG_DENSITY_PER_M, RL9_FOG_EXPOSURE_EV100, RL9_FOG_FALLOFF_M,
+    RL9_FOG_MAX_DIST_M,
 };
 pub use surface::{
     surface_action, surface_fault_code, PresentError, RecoveryAction, SizeClass, SurfaceAction,

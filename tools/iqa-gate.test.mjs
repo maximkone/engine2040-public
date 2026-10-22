@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_THRESHOLD, FLIP_ONE, SRGB_E7, flipX10000, sandFrames, scorePair } from "./iqa-gate.mjs";
+import { DEFAULT_THRESHOLD, FLIP_ONE, SRGB_E7, SSIMULACRA2_ONE, flipX10000, sandFrames, scorePair, ssimulacra2X10000 } from "./iqa-gate.mjs";
 const TOOL = fileURLToPath(new URL("./iqa-gate.mjs", import.meta.url));
 const KEYS = ["ssim_x10000", "ssimulacra2", "butteraugli"];
 test("equal sand scores 10000 with verdict pass", () => {
@@ -17,7 +17,7 @@ test("equal sand scores 10000 with verdict pass", () => {
   assert.equal(j.verdict, "pass");
   assert.equal(j.mean_de_x100, 0);
   for (const k of KEYS) assert.ok(k in j);
-  assert.equal(j.ssimulacra2, null);
+  assert.equal(j.ssimulacra2, SSIMULACRA2_ONE);
   assert.equal(j.butteraugli, null);
 });
 test("+20% sand scores below 9800 with verdict fail", () => {
@@ -26,6 +26,24 @@ test("+20% sand scores below 9800 with verdict fail", () => {
   assert.ok(j.ssim_x10000 < 9800, `ssim ${j.ssim_x10000}`);
   assert.equal(j.verdict, "fail");
   assert.ok(j.mean_de_x100 > 0);
+});
+test("ssimulacra2 twin: identical 10000, the sand pair near the Rust donor", () => {
+  const { ref, cap, w, h } = sandFrames();
+  assert.equal(ssimulacra2X10000(ref, ref, w, h), SSIMULACRA2_ONE);
+  const worse = ssimulacra2X10000(ref, cap, w, h);
+  assert.ok(worse < SSIMULACRA2_ONE, `ssimulacra2 ${worse}`);
+  assert.ok(worse > 0, `ssimulacra2 ${worse}`);
+  // The Rust donor is float and not bit-reproducible across machines, so the
+  // twin and the donor agree inside a band, never on one exact number.
+  assert.ok(worse >= 6200 && worse <= 6600, `ssimulacra2 ${worse}, outside the band`);
+  assert.equal(ssimulacra2X10000(ref, cap, w, h), worse);
+});
+test("ssimulacra2 twin refuses a pair it cannot score", () => {
+  const { ref, w, h } = sandFrames();
+  const small = Buffer.alloc(32 * 24 * 4, 128);
+  assert.throws(() => ssimulacra2X10000(ref, small, w, h), /size mismatch/);
+  const tiny = Buffer.alloc(4 * 4 * 4, 128);
+  assert.throws(() => ssimulacra2X10000(tiny, tiny, 4, 4), /under 8x8/);
 });
 test("rerun of the same pair is byte-identical", () => {
   const { ref, cap, w, h } = sandFrames();

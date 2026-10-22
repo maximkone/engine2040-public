@@ -11,6 +11,9 @@ use engine_spatial::compose::{rank_order, spearman_permille, ComposeError};
 pub mod judge;
 pub mod manifest;
 pub mod metric;
+pub mod reference;
+pub mod report_json;
+pub mod ssim2;
 
 /// Per-frame look hook the play host owns, re-exported for the window host.
 ///
