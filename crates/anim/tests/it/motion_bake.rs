@@ -9,7 +9,7 @@
 //! endpoint rule cut the teacher's trailing tail.
 
 use engine_anim::clip::{avg_slip, qclip_hash, TICK_DT};
-use engine_anim::motion_bake::{bake_len, bake_pack, bake_unpack, bake_unpack_rots, last_constrained};
+use engine_anim::motion_bake::{bake_len, bake_unpack, bake_unpack_rots, last_constrained};
 use engine_anim::pack::{pack_qclip, BUDGET_BYTES_PER_FIGHTER};
 
 /// Repository root, one level above the crate.

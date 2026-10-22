@@ -156,7 +156,11 @@ fn every_combat_clip_loads_and_plays_on_the_fighter_rig() {
         let loaded = load_pack(std::path::Path::new(&path)).expect("{name}: the pack loads");
         let pose = sample_pose_named_with_rots(&loaded, &rig, &listed, 0.5)
             .expect("{name}: the pack plays on the rig");
-        assert_eq!(pose.positions.len(), FIGHTER_JOINTS, "{name}: one pose per joint");
+        assert_eq!(
+            pose.positions.len(),
+            FIGHTER_JOINTS,
+            "{name}: one pose per joint"
+        );
         assert!(
             pose.positions.iter().flatten().all(|v| v.is_finite()),
             "{name}: every position is finite"

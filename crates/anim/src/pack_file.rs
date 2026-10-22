@@ -225,7 +225,10 @@ pub fn rotations_of(loaded: &LoadedPack) -> Vec<QuatTrack> {
             let at = track.time_at(k);
             times.push(at);
             values.push(crate::pack::sample_packed_quat(
-                &loaded.clip, index, at, &mut 0usize,
+                &loaded.clip,
+                index,
+                at,
+                &mut 0usize,
             ));
         }
         out.push(QuatTrack { times, values });
@@ -255,7 +258,10 @@ pub fn sample_pose_named_with_rots(
         // its joints in another, so the name finds the pack's row for each
         // rig joint, exactly as the positions do.
         for (joint, joint_def) in skeleton.joints.iter().enumerate() {
-            let Some(index) = track_names.iter().position(|other| *other == joint_def.name) else {
+            let Some(index) = track_names
+                .iter()
+                .position(|other| *other == joint_def.name)
+            else {
                 continue;
             };
             let Some(track) = rotations.get(index) else {
@@ -431,9 +437,18 @@ mod tests {
         let listed: Vec<&str> = names.iter().map(String::as_str).collect();
         // The rig's joints are in the pack's own order, so the names line up
         // one for one; the pose still comes back by name.
-        let pose = sample_pose_named_with_rots(&loaded, &rig, &listed, 0.4).expect("the pack plays");
-        assert_eq!(pose.positions.len(), FIGHTER_JOINTS, "one position per joint");
-        assert_eq!(pose.rotations.len(), FIGHTER_JOINTS, "one rotation per joint");
+        let pose =
+            sample_pose_named_with_rots(&loaded, &rig, &listed, 0.4).expect("the pack plays");
+        assert_eq!(
+            pose.positions.len(),
+            FIGHTER_JOINTS,
+            "one position per joint"
+        );
+        assert_eq!(
+            pose.rotations.len(),
+            FIGHTER_JOINTS,
+            "one rotation per joint"
+        );
         // The first joint turned: at 0.4 s it is off the identity, and the
         // rotation is a unit quaternion.
         let turned = pose.rotations[0];

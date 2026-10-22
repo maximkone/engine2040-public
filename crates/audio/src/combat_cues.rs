@@ -305,8 +305,8 @@ mod tests {
             cue_for_impact(hit(120), ImpactSurface::Plate, ATTACKER, VICTIM).expect("a hit plays");
         assert_eq!(
             (dagger.name, mace.name),
-            (names::HIT, names::PARRY),
-            "flesh takes the body take, plate the metal ring"
+            (names::HIT, names::IMPACT_ARMOR),
+            "flesh takes the body take, plate the armor ring"
         );
         assert!(
             level(mace) > level(dagger),
@@ -325,7 +325,11 @@ mod tests {
             VICTIM,
         )
         .expect("a block plays");
-        assert_eq!(block.name, names::PARRY, "a block on iron rings like metal");
+        assert_eq!(
+            block.name,
+            names::IMPACT_ARMOR,
+            "a block on iron rings like metal"
+        );
         assert!(level(block) > level(dagger), "heavy block beats light hit");
     }
 

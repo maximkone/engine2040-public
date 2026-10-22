@@ -100,6 +100,10 @@ impl Bank {
             Synth::Armor => Self::bake_armor(sr, variant),
             Synth::Stump => Self::bake_stump(sr, variant),
             Synth::Groan => Self::bake_groan(sr, variant),
+            Synth::Clash => Self::bake_clash(sr, variant),
+            Synth::Riposte => Self::bake_riposte(sr, variant),
+            Synth::Sever => Self::bake_sever(sr, variant),
+            Synth::Gore => Self::bake_gore(sr, variant),
             Synth::Kill => Self::bake_kill(sr),
             Synth::Roar => Self::bake_roar(sr),
         }
@@ -291,6 +295,83 @@ impl Bank {
         Pcm::new(sr, 1, out)
     }
 
+    /// Clash: two blades bind. A hard steel transient (a bright scrape over
+    /// a short ring) with no body under it, so a clash reads apart from a
+    /// parry's slower ring.
+    fn bake_clash(sr: u32, variant: u8) -> Pcm {
+        let n = frames_for(sr, CLASH_SECS);
+        let mut rng: u64 = seeded(0x63_6c_61_73_68_32_30, variant);
+        let mut out = Vec::with_capacity(n);
+        let tau = std::f32::consts::TAU;
+        let detune = 1.0 + 0.02 * f32::from(variant);
+        let low = 1900.0 * detune;
+        let high = 2850.0 * detune;
+        for i in 0..n {
+            let t = ratio(i, sr);
+            let ring = (tau * low * t).sin() * (-14.0 * t).exp() * 0.4
+                + (tau * high * t).sin() * (-20.0 * t).exp() * 0.28;
+            let scrape = noise(&mut rng) * (-45.0 * t).exp() * 0.35;
+            let strike = (tau * 320.0 * t).sin() * (-40.0 * t).exp() * 0.3;
+            out.push(((ring + scrape + strike) * d(i, n)).clamp(-1.0, 1.0));
+        }
+        Pcm::new(sr, 1, out)
+    }
+
+    /// Riposte: a fast counter blow. A bright cutting swipe (bandpassed
+    /// noise under a fast pitch fall) over a short body knock.
+    fn bake_riposte(sr: u32, variant: u8) -> Pcm {
+        let n = frames_for(sr, RIPOSTE_SECS);
+        let mut rng: u64 = seeded(0x72_69_70_6f_73_74_65, variant);
+        let mut out = Vec::with_capacity(n);
+        let mut body = crate::dsp::ResonantBody::new(sr, 1500 + 180 * u32::from(variant), 1400);
+        let tau = std::f32::consts::TAU;
+        for i in 0..n {
+            let t = ratio(i, sr);
+            let fall = 900.0 - 420.0 * f32::from(variant);
+            let cut = (tau * fall * t).sin() * (-9.0 * t).exp() * 0.4;
+            let swipe = noise(&mut rng) * (-24.0 * t).exp() * 0.4;
+            let knock = (tau * 210.0 * t).sin() * (-22.0 * t).exp() * 0.35;
+            let shaped = body.step(swipe) * 0.6;
+            out.push(((cut + shaped + knock) * d(i, n)).clamp(-1.0, 1.0));
+        }
+        Pcm::new(sr, 1, out)
+    }
+
+    /// Sever: a joint leaves the body. A tearing crack (a descending
+    /// bandpassed noise burst) over a wet low thump.
+    fn bake_sever(sr: u32, variant: u8) -> Pcm {
+        let n = frames_for(sr, SEVER_SECS);
+        let mut rng: u64 = seeded(0x73_65_76_65_72_32_30, variant);
+        let mut out = Vec::with_capacity(n);
+        let mut body = crate::dsp::ResonantBody::new(sr, 2600 + 200 * u32::from(variant), 1200);
+        let tau = std::f32::consts::TAU;
+        for i in 0..n {
+            let t = ratio(i, sr);
+            let tear = body.step(noise(&mut rng)) * (-16.0 * t).exp() * 0.6;
+            let crack = (tau * 780.0 * t).sin() * (-30.0 * t).exp() * 0.35;
+            let thump = (tau * 95.0 * t).sin() * (-14.0 * t).exp() * 0.45;
+            out.push(((tear + crack + thump) * d(i, n)).clamp(-1.0, 1.0));
+        }
+        Pcm::new(sr, 1, out)
+    }
+
+    /// Gore: a wet body blow. A low wet slap (a lowpassed noise burst) under
+    /// a dull body thud, so it sits below the clean hit in the mix.
+    fn bake_gore(sr: u32, variant: u8) -> Pcm {
+        let n = frames_for(sr, GORE_SECS);
+        let mut rng: u64 = seeded(0x67_6f_72_65_32_30_32_30, variant);
+        let mut out = Vec::with_capacity(n);
+        let mut body = crate::dsp::ResonantBody::new(sr, 620 + 70 * u32::from(variant), 700);
+        let tau = std::f32::consts::TAU;
+        for i in 0..n {
+            let t = ratio(i, sr);
+            let wet = body.step(noise(&mut rng)) * (-13.0 * t).exp() * 0.7;
+            let thud = (tau * 130.0 * t).sin() * (-18.0 * t).exp() * 0.4;
+            out.push(((wet + thud) * d(i, n)).clamp(-1.0, 1.0));
+        }
+        Pcm::new(sr, 1, out)
+    }
+
     /// Kill stinger: a body whose pitch falls from 110 Hz toward 40 Hz, an
     /// A minor triad stab and a short noise click.
     fn bake_kill(sr: u32) -> Pcm {
@@ -377,6 +458,14 @@ pub enum Synth {
     Stump,
     /// Structure creak under load.
     Groan,
+    /// Two blades bind: a hard steel-on-steel clash.
+    Clash,
+    /// A counter blow off a parry: a fast cutting strike.
+    Riposte,
+    /// A joint leaves the body: the blade tears through.
+    Sever,
+    /// A wet body blow: blood and tissue.
+    Gore,
     /// Kill stinger.
     Kill,
     /// Crowd roar stinger.
@@ -390,6 +479,7 @@ impl Synth {
             Self::Crowd | Self::Kill | Self::Roar => 1,
             Self::Hit | Self::Footstep | Self::Swing | Self::Friction => 3,
             Self::Bone | Self::Armor | Self::Stump | Self::Groan => 3,
+            Self::Clash | Self::Riposte | Self::Sever | Self::Gore => 3,
         }
     }
 }
@@ -406,6 +496,14 @@ pub const ARMOR_SECS: f32 = 0.45;
 pub const STUMP_SECS: f32 = 0.4;
 /// Structure groan length in seconds.
 pub const GROAN_SECS: f32 = 1.2;
+/// Blade-on-blade clash length in seconds.
+pub const CLASH_SECS: f32 = 0.35;
+/// Riposte counter blow length in seconds.
+pub const RIPOSTE_SECS: f32 = 0.3;
+/// Severing blow length in seconds.
+pub const SEVER_SECS: f32 = 0.4;
+/// Wet body blow length in seconds.
+pub const GORE_SECS: f32 = 0.3;
 /// Kill stinger length in seconds.
 pub const KILL_SECS: f32 = 1.0;
 /// Roar stinger length in seconds.
@@ -424,6 +522,11 @@ fn ratio(num: impl TryInto<u32>, den: impl TryInto<u32>) -> f32 {
 /// Frames in `secs` seconds at `sr` Hz, at least one.
 fn frames_for(sr: u32, secs: f32) -> usize {
     ((f32_of(sr) * secs) as usize).max(1)
+}
+
+/// Decay envelope over a clip of `n` frames: 1 at the start, 0 at the end.
+fn d(i: usize, n: usize) -> f32 {
+    1.0 - ratio(i, n)
 }
 
 /// Noise seed for `variant`: the base seed itself for variant 0, a

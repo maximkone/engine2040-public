@@ -82,6 +82,14 @@ pub mod names {
     pub const IMPACT_BONE: &str = "impact_bone";
     /// Blade on armor: a metal ring over a body thud.
     pub const IMPACT_ARMOR: &str = "impact_armor";
+    /// Two blades bind on the same tick: a hard steel clash.
+    pub const CLASH: &str = "clash";
+    /// A counter blow off a parry: a fast cutting strike.
+    pub const RIPOSTE: &str = "riposte";
+    /// A blow severs a joint: the blade tears through.
+    pub const SEVER: &str = "sever";
+    /// A wet body blow: blood and tissue leave the body.
+    pub const GORE: &str = "gore";
     /// A severed joint opens: wet spurt and bone crack.
     pub const STUMP: &str = "stump";
     /// Loaded structure creaks before it fails.
@@ -182,47 +190,67 @@ impl ImpactSurface {
             Self::Stone => 5,
         }
     }
-
-    /// True for the metal families (plate, iron shield): a blow on them rings
-    /// like the blade-on-metal cue. Mail keeps the body family.
-    fn is_metal(self) -> bool {
-        matches!(self, Self::Plate | Self::ShieldIron)
-    }
 }
+
+/// The impact table: one row per [`ImpactKind`], one column per
+/// [`ImpactSurface`], each cell the arena cue that blow plays.
+///
+/// Rows are the kind of blow, columns the material it met. The Godot
+/// `AudioStreamRandomizer` shape: the kind and the surface live on the
+/// presentation side, so the sim event carries no extra field. Every kind
+/// owns a family, so a clash never sounds like a parry and a riposte never
+/// sounds like a hit; the surface then picks the material take inside that
+/// family. Every cell names a cue of [`ARENA_CUES`].
+///
+/// Row order is [`ImpactKind::index`]; column order is
+/// [`ImpactSurface::index`].
+pub const IMPACT_CUES: [[&'static str; ImpactSurface::COUNT]; ImpactKind::COUNT] = [
+    // Hit: a body blow takes the body sound; metal, wood and stone take
+    // their own.
+    [
+        names::HIT,
+        names::HIT,
+        names::IMPACT_ARMOR,
+        names::BLOCK,
+        names::IMPACT_ARMOR,
+        names::IMPACT_STONE,
+    ],
+    // Block: a held shield soaks the blow; iron and plate ring.
+    [
+        names::BLOCK,
+        names::BLOCK,
+        names::IMPACT_ARMOR,
+        names::BLOCK,
+        names::IMPACT_ARMOR,
+        names::BLOCK,
+    ],
+    // Parry: blade on blade, whatever the kit.
+    [names::PARRY; ImpactSurface::COUNT],
+    // Knockdown: the body hits the floor; a wall takes the stone sound.
+    [
+        names::KNOCKDOWN,
+        names::KNOCKDOWN,
+        names::KNOCKDOWN,
+        names::KNOCKDOWN,
+        names::KNOCKDOWN,
+        names::IMPACT_STONE,
+    ],
+    // Clash: two blades bind on the same tick.
+    [names::CLASH; ImpactSurface::COUNT],
+    // Riposte: a counter blow off a parry.
+    [names::RIPOSTE; ImpactSurface::COUNT],
+    // Sever: a joint leaves the body.
+    [names::SEVER; ImpactSurface::COUNT],
+    // Gore: blood and tissue leave the body.
+    [names::GORE; ImpactSurface::COUNT],
+];
 
 /// The arena cue for one impact: the kind of blow and the material it hit.
 ///
-/// One table for every impact the arena can report, so the `FightEvent`
-/// contract stays field-for-field (the Godot `AudioStreamRandomizer` shape:
-/// variant choice and kind/surface live on the presentation side). All four
-/// material families of [`ARENA_CUES`] are reachable: flesh/mail take the
-/// body takes, wood the shield takes, plate/iron the metal takes, stone the
-/// stone takes. Sever uses the heavy knockdown takes; a recorded sever take
-/// would add a fifth family. Never panics.
+/// A lookup in [`IMPACT_CUES`], so the table is the one place the mapping
+/// lives. Never panics.
 pub fn impact_cue(kind: ImpactKind, surface: ImpactSurface) -> &'static str {
-    let metal = surface.is_metal();
-    match kind {
-        ImpactKind::Knockdown | ImpactKind::Sever => names::KNOCKDOWN,
-        ImpactKind::Parry | ImpactKind::Clash | ImpactKind::Riposte => names::PARRY,
-        ImpactKind::Block => {
-            if metal {
-                names::PARRY
-            } else {
-                names::BLOCK
-            }
-        }
-        ImpactKind::Hit | ImpactKind::Gore => {
-            if metal {
-                names::PARRY
-            } else if surface == ImpactSurface::ShieldWood {
-                names::BLOCK
-            } else if surface == ImpactSurface::Stone {
-                names::IMPACT_STONE
-            } else {
-                names::HIT
-            }
-        }
-    }
+    IMPACT_CUES[kind.index()][surface.index()]
 }
 
 /// Index of a cue inside its [`CueBank`]; stable because the bank sorts by
@@ -621,10 +649,11 @@ const fn synthesized(name: &'static str, synth: Synth, priority: u8, gain: f32) 
 }
 
 /// Every cue the arena plays, mapped onto the CC0 clips in `content/audio`.
-/// `swing`, `crowd`, the two stingers and the BX11 material/tissue takes
-/// (`impact_bone`, `impact_armor`, `stump`, `structure_groan`) have no
-/// recording yet: they are synthesized.
-pub const ARENA_CUES: [CueSpec; 19] = [
+/// `swing`, `crowd`, the two stingers, the BX11 material/tissue takes
+/// (`impact_bone`, `impact_armor`, `stump`, `structure_groan`) and the four
+/// SN12 kind cues (`clash`, `riposte`, `sever`, `gore`) have no recording yet:
+/// they are synthesized.
+pub const ARENA_CUES: [CueSpec; 23] = [
     impact(
         names::HIT,
         &[
@@ -680,6 +709,10 @@ pub const ARENA_CUES: [CueSpec; 19] = [
     synthesized(names::IMPACT_ARMOR, Synth::Armor, 165, 0.9),
     synthesized(names::STUMP, Synth::Stump, 185, 0.9),
     synthesized(names::STRUCTURE_GROAN, Synth::Groan, 110, 0.8),
+    synthesized(names::CLASH, Synth::Clash, 172, 0.9),
+    synthesized(names::RIPOSTE, Synth::Riposte, 168, 0.9),
+    synthesized(names::SEVER, Synth::Sever, 178, 1.0),
+    synthesized(names::GORE, Synth::Gore, 150, 0.8),
     CueSpec {
         name: names::SWING,
         files: &[],
@@ -920,6 +953,63 @@ impl CueBank {
     }
 }
 
+/// One routed impact: the cue that plays, its id in the bank, and the take
+/// of that cue to play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoutedImpact {
+    /// Cue name in the bank.
+    pub name: &'static str,
+    /// Cue id in the bank.
+    pub id: CueId,
+    /// Take of that cue to play, in `0..variants`.
+    pub take: usize,
+}
+
+/// The impact table on a live bank: the kind of blow and the material it
+/// met name a cue, and a round robin picks the take.
+///
+/// The presentation side owns this whole choice (the Godot
+/// `AudioStreamRandomizer` shape), so the sim event carries no kind and no
+/// surface field. The router holds one round-robin cycle per bank cue, so
+/// two blows of the same kind walk the takes in turn and never play the
+/// same take twice in a row.
+///
+/// One router per session: it owns the cycles, so it allocates once at
+/// build time and never on a play. A play is O(1) and touches no heap.
+pub struct ImpactRouter {
+    bank: Arc<CueBank>,
+    cycles: Vec<VariantCycle>,
+}
+
+impl ImpactRouter {
+    /// Router over `bank`: one round-robin cycle per cue, started from
+    /// `seed`, so the same seed replays the same takes.
+    pub fn new(bank: Arc<CueBank>, seed: u64) -> Self {
+        let cycles = (0..bank.len())
+            .map(|idx| VariantCycle::new(seed, CueId(u16::try_from(idx).unwrap_or(0))))
+            .collect();
+        Self { bank, cycles }
+    }
+
+    /// The bank the router names cues against.
+    pub fn bank(&self) -> &Arc<CueBank> {
+        &self.bank
+    }
+
+    /// Route one blow: the cue the (kind, surface) table names, its id and
+    /// the next take of that cue. `None` when the bank lacks the cue.
+    pub fn route(&mut self, kind: ImpactKind, surface: ImpactSurface) -> Option<RoutedImpact> {
+        let name = impact_cue(kind, surface);
+        let id = self.bank.id(name)?;
+        let cue = self.bank.cue(id)?;
+        let take = self
+            .cycles
+            .get_mut(usize::from(id.0))?
+            .next_take(cue.variants.len());
+        Some(RoutedImpact { name, id, take })
+    }
+}
+
 /// Seeded variant choice for one cue: uniform over the variants except the
 /// one picked last, so a cue never plays the same take twice in a row.
 #[derive(Clone, Copy, Debug)]
@@ -963,6 +1053,47 @@ impl VariantPicker {
             idx += 1;
         }
         self.last = Some(idx);
+        idx
+    }
+}
+
+/// Round-robin variant choice: the next take in a fixed cycle, so a cue
+/// walks its variants in order and never plays the same take twice in a row.
+///
+/// The seeded [`VariantPicker`] spreads takes at random; the round robin
+/// spreads them evenly. The impact table uses this one, so a busy fight
+/// hears every take of a cue in turn instead of clumping on one. The
+/// starting point is a seed, so a replay starts at the same take. One
+/// counter per cue, no allocation, no clock: the same call sequence gives
+/// the same takes twice.
+#[derive(Clone, Copy, Debug)]
+pub struct VariantCycle {
+    start: usize,
+    played: usize,
+}
+
+impl VariantCycle {
+    /// Cycle for one cue, starting at a seed-derived take. The start is
+    /// `seed` scrambled, so two seeds start at different takes.
+    pub fn new(seed: u64, cue: CueId) -> Self {
+        let scramble = splitmix64(seed ^ u64::from(cue.0));
+        Self {
+            start: usize::try_from(scramble % u64::try_from(MAX_VARIANTS).unwrap_or(1))
+                .unwrap_or(0),
+            played: 0,
+        }
+    }
+
+    /// Next variant index in `0..variants` (0 when there is no choice). The
+    /// index walks the cycle, so a cue with three takes plays its takes in
+    /// order and wraps, never the same take twice in a row.
+    pub fn next_take(&mut self, variants: usize) -> usize {
+        if variants < 2 {
+            self.played = 0;
+            return 0;
+        }
+        let idx = (self.start + self.played) % variants;
+        self.played = self.played.wrapping_add(1);
         idx
     }
 }
@@ -1268,12 +1399,12 @@ mod tests {
         let iron = impact_cue(ImpactKind::Hit, ImpactSurface::ShieldIron);
         assert_eq!(
             (flesh, wood, iron),
-            (names::HIT, names::BLOCK, names::PARRY),
-            "the surface picks the material family"
+            (names::HIT, names::BLOCK, names::IMPACT_ARMOR),
+            "the surface picks the material take"
         );
         assert_eq!(
             impact_cue(ImpactKind::Block, ImpactSurface::ShieldIron),
-            names::PARRY,
+            names::IMPACT_ARMOR,
             "a block on iron rings like metal"
         );
         assert_eq!(
@@ -1282,33 +1413,126 @@ mod tests {
         );
         assert_eq!(
             impact_cue(ImpactKind::Clash, ImpactSurface::Flesh),
-            names::PARRY,
+            names::CLASH,
             "a clash is blade on blade whatever the kit"
         );
         assert_eq!(
             impact_cue(ImpactKind::Knockdown, ImpactSurface::Stone),
-            names::KNOCKDOWN
+            names::IMPACT_STONE,
+            "a body on a wall takes the stone sound"
         );
         assert_eq!(
             impact_cue(ImpactKind::Sever, ImpactSurface::Flesh),
-            names::KNOCKDOWN,
-            "sever uses the heavy takes"
+            names::SEVER,
+            "sever has its own cue"
         );
         assert_eq!(
             impact_cue(ImpactKind::Parry, ImpactSurface::Plate),
             impact_cue(ImpactKind::Parry, ImpactSurface::Plate),
             "same inputs, same play"
         );
+    }
+
+    /// SN12: every kind owns a family, so a clash never sounds like a
+    /// parry and a riposte never sounds like a hit. The eight kinds name
+    /// eight different cues on the shipped bank.
+    #[test]
+    fn every_impact_kind_owns_its_own_cue() {
+        let bank = CueBank::placeholder(48_000).expect("shipped table is valid");
         let mut families = std::collections::BTreeSet::new();
         for kind in ImpactKind::ALL {
-            for surface in ImpactSurface::ALL {
-                families.insert(impact_cue(kind, surface));
-            }
+            let name = impact_cue(kind, ImpactSurface::Flesh);
+            assert!(
+                bank.id(name).is_some(),
+                "{kind:?} names {name} outside the bank"
+            );
+            families.insert(name);
         }
         assert_eq!(
             families.len(),
-            5,
-            "every material family plus the knockdown takes: {families:?}"
+            ImpactKind::COUNT,
+            "one family per kind: {families:?}"
+        );
+        for (kind, want) in [
+            (ImpactKind::Hit, names::HIT),
+            (ImpactKind::Block, names::BLOCK),
+            (ImpactKind::Parry, names::PARRY),
+            (ImpactKind::Knockdown, names::KNOCKDOWN),
+            (ImpactKind::Clash, names::CLASH),
+            (ImpactKind::Riposte, names::RIPOSTE),
+            (ImpactKind::Sever, names::SEVER),
+            (ImpactKind::Gore, names::GORE),
+        ] {
+            assert_eq!(
+                impact_cue(kind, ImpactSurface::Flesh),
+                want,
+                "{kind:?} plays {want}"
+            );
+        }
+    }
+
+    /// The round robin walks the takes of a cue in order and never plays
+    /// the same take twice in a row. Same seed, same takes.
+    #[test]
+    fn the_round_robin_walks_the_takes_and_never_repeats() {
+        let mut cycle = VariantCycle::new(2040, CueId(3));
+        let picks: Vec<usize> = (0..12).map(|_| cycle.next_take(3)).collect();
+        assert!(
+            picks.windows(2).all(|w| w[0] != w[1]),
+            "no immediate repeat: {picks:?}"
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for take in &picks {
+            seen.insert(*take);
+        }
+        assert_eq!(seen.len(), 3, "every take is heard: {picks:?}");
+        let mut again = VariantCycle::new(2040, CueId(3));
+        let replay: Vec<usize> = (0..12).map(|_| again.next_take(3)).collect();
+        assert_eq!(picks, replay, "same seed, same takes");
+        let mut other = VariantCycle::new(2041, CueId(3));
+        let differs: Vec<usize> = (0..12).map(|_| other.next_take(3)).collect();
+        assert_ne!(picks, differs, "another seed starts elsewhere");
+        let mut single = VariantCycle::new(1, CueId(0));
+        assert!((0..8).all(|_| single.next_take(1) == 0));
+        assert_eq!(single.next_take(0), 0);
+    }
+
+    /// The router walks the whole (kind, surface) table over the shipped
+    /// bank: every cell names a cue, every kind owns a family, and the
+    /// round robin never plays the same take twice in a row.
+    #[test]
+    fn the_router_walks_the_table_over_the_shipped_bank() {
+        let bank = Arc::new(CueBank::placeholder(48_000).expect("shipped table is valid"));
+        let mut router = ImpactRouter::new(Arc::clone(&bank), 2040);
+        let mut last: Option<(CueId, usize)> = None;
+        let mut kinds = std::collections::BTreeSet::new();
+        let mut takes = std::collections::BTreeSet::new();
+        for _round in 0..2 {
+            for kind in ImpactKind::ALL {
+                for surface in ImpactSurface::ALL {
+                    let routed = router
+                        .route(kind, surface)
+                        .expect("the table names a bank cue");
+                    assert_eq!(routed.name, impact_cue(kind, surface));
+                    let cue = bank.cue(routed.id).expect("id resolves");
+                    assert!(routed.take < cue.variants.len());
+                    kinds.insert(kind.index());
+                    takes.insert((routed.id, routed.take));
+                    if let Some((id, take)) = last {
+                        assert!(
+                            id != routed.id || take != routed.take,
+                            "the same take twice in a row: {kind:?} on {surface:?}"
+                        );
+                    }
+                    last = Some((routed.id, routed.take));
+                }
+            }
+        }
+        assert_eq!(kinds.len(), ImpactKind::COUNT, "8 of 8 kinds routed");
+        assert!(
+            takes.len() >= 12,
+            "the table reaches 12 or more distinct takes: {}",
+            takes.len()
         );
     }
 }

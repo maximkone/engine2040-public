@@ -101,7 +101,11 @@ fn the_map_drives_the_right_bone_on_each_side() {
         .iter()
         .position(|joint| joint.name == "leftfoot")
         .expect("the fighter rig has the left foot");
-    assert_eq!(map.source_of(left_foot), Some(fighter_foot), "the left foot");
+    assert_eq!(
+        map.source_of(left_foot),
+        Some(fighter_foot),
+        "the left foot"
+    );
 }
 
 #[test]
@@ -115,7 +119,8 @@ fn the_fighter_track_names_are_the_pack_order() {
     // The names are the anim contract's charset, so a pack can carry them.
     for name in &names {
         assert!(
-            name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
             "{name} is a contract name"
         );
     }

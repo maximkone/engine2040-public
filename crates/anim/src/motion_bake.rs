@@ -91,11 +91,7 @@ impl core::fmt::Display for BakeError {
             Self::BadFps(fps) => write!(f, "bake: {fps} is not a bake rate"),
             Self::Pack(cause) => write!(f, "bake: {cause}"),
             Self::NotRoundTrip => write!(f, "bake: the AM5P pack did not round-trip"),
-            Self::LostRotation {
-                joint,
-                key,
-                worst,
-            } => write!(
+            Self::LostRotation { joint, key, worst } => write!(
                 f,
                 "bake: the AM5P pack lost the rotation at joint {joint} key {key} (gap {worst:e})"
             ),
@@ -207,7 +203,11 @@ pub fn bake_pack_with_rots(
     let mut packed = pack_qclip(clip)?;
     let mut rot_tracks = Vec::with_capacity(rotations.len());
     for (index, track) in rotations.iter().enumerate() {
-        rot_tracks.push(super::pack::pack_quat_track(index, &track.times, &track.values)?);
+        rot_tracks.push(super::pack::pack_quat_track(
+            index,
+            &track.times,
+            &track.values,
+        )?);
     }
     packed.rotations = rot_tracks;
     let bytes = packed.to_bytes();
@@ -226,11 +226,19 @@ pub fn bake_pack_with_rots(
         // bake wrote (`k * TICK_DT`), so the times are compared as the
         // numbers they are, not as bits.
         if back.times.len() != raw.times.len() {
-            return Err(BakeError::LostRotation { joint, key: 0, worst: 0.0 });
+            return Err(BakeError::LostRotation {
+                joint,
+                key: 0,
+                worst: 0.0,
+            });
         }
         for (at, wanted) in back.times.iter().zip(raw.times.iter()) {
             if (at - wanted).abs() > 1.0e-6 {
-                return Err(BakeError::LostRotation { joint, key: 0, worst: 0.0 });
+                return Err(BakeError::LostRotation {
+                    joint,
+                    key: 0,
+                    worst: 0.0,
+                });
             }
         }
         // The rotations come back through the wire's smallest-three lanes, so
@@ -248,11 +256,7 @@ pub fn bake_pack_with_rots(
                 worst = worst.max(gap.min(flipped));
             }
             if worst > super::pack::QUAT_BOUND {
-                return Err(BakeError::LostRotation {
-                    joint,
-                    key,
-                    worst,
-                });
+                return Err(BakeError::LostRotation { joint, key, worst });
             }
         }
     }
@@ -283,7 +287,10 @@ pub fn bake_unpack_rots(bytes: &[u8]) -> Result<Vec<super::pose::QuatTrack>, Bak
             let at = track.time_at(k);
             times.push(at);
             values.push(super::pack::sample_packed_quat(
-                &packed, index, at, &mut 0usize,
+                &packed,
+                index,
+                at,
+                &mut 0usize,
             ));
         }
         out.push(super::pose::QuatTrack { times, values });

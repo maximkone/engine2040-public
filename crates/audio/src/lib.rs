@@ -68,8 +68,8 @@ use dsp::Bus;
 pub use bank::{Bank, BankSound, Synth};
 pub use crowd::{Crowd, FightCue, Reaction};
 pub use cue::{
-    names as cue_names, Clip, Cue, CueBank, CueError, CueId, Group, LoadReport, Spatial,
-    VariantPicker, ARENA_CUES, MAX_VARIANTS,
+    names as cue_names, Clip, Cue, CueBank, CueError, CueId, Group, ImpactRouter, LoadReport,
+    RoutedImpact, Spatial, VariantCycle, VariantPicker, ARENA_CUES, IMPACT_CUES, MAX_VARIANTS,
 };
 #[cfg(feature = "device")]
 pub use decode::{

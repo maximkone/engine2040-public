@@ -20,6 +20,7 @@ mod design_cues;
 mod design_enemy;
 mod design_loop;
 mod env_prefix_layers;
+mod fps_view_tape;
 mod ime_vectors;
 mod knob_rules_vectors;
 mod lobby_ui_flow;
