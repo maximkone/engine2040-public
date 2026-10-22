@@ -140,6 +140,10 @@ pub use proxy::{
 /// rig: the bridge a baked combat pack needs to play on the game's body.
 #[cfg(feature = "import")]
 pub mod ct7_map;
+/// A baked combat pack, played on the game's CT7 body: the loader the game
+/// needs to make a teacher's clip move.
+#[cfg(feature = "import")]
+pub mod pack_clip;
 /// The fighter rig the teacher lane lands on, and the teacher's rest pose: the
 /// bake and the tick read the same joint order from here.
 #[cfg(feature = "import")]

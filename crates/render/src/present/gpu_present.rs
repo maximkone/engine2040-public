@@ -53,6 +53,7 @@ mod gtao_live;
 mod live;
 mod msaa;
 mod presenter;
+mod preset;
 mod quality_apply;
 #[cfg(any(target_arch = "wasm32", test))]
 mod scope_ledger;

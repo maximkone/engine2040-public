@@ -51,6 +51,12 @@ pub mod quality;
 /// WEB13: a ledger of every pipeline build, so a build after the loader is a loud `late_compile`.
 pub mod pipeline_warmup;
 
+/// The crate's one display transform, as the CPU twin of
+/// `shaders/tonemap.wgsl`: the per-channel fit, the hue-keeping tone map
+/// and the fixed dither. The WGSL chunk is the source; this module is its
+/// Rust mirror, so the CPU oracle and the shader agree on the numbers.
+pub mod tonemap;
+
 /// V1 forward-PBR receipt (R1): CPU rasterizer, behind the `v1` feature so
 /// the headless default stays std-only.
 #[cfg(feature = "v1")]

@@ -76,6 +76,9 @@ pub mod spatial_shapes;
 pub mod tasks;
 pub mod tournament;
 pub mod trigger;
+/// Rome duel tables: time-to-kill per duelist and move kind, and the win
+/// matrix of the duel ladder with the odd-cycle check (GP33).
+pub mod ttk;
 pub mod winrates;
 
 /// Exploit-sweep gate (playtest side): the proof harness resolves the sweep

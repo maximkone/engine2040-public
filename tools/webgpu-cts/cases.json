@@ -1,0 +1,983 @@
+{
+  "donor": {
+    "repo": "gpuweb/cts",
+    "commit": "e97492c38728b11ee336bf3ddf513cb27f1331ed",
+    "license": "BSD-3-Clause",
+    "read": "2026-10-22",
+    "note": "The case names, the WGSL and the expected compile result are taken from the official WebGPU conformance test suite. Only the shader-validation area is ported: every case there is one WGSL program and one expected outcome, which is what a native wgpu instance can answer."
+  },
+  "cases": [
+    {
+      "id": "webgpu:shader,validation,decl,const:no_direct_recursion:target=\"a\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const a : i32 = 42;\nconst b : i32 = a;\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:no_direct_recursion:target=\"b\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const a : i32 = 42;\nconst b : i32 = b;\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:no_indirect_recursion:target=\"a\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const a : i32 = 42;\nconst b : i32 = c;\nconst c : i32 = a;\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:no_indirect_recursion:target=\"b\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const a : i32 = 42;\nconst b : i32 = c;\nconst c : i32 = b;\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:no_indirect_recursion_via_array_size:target=\"a\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const a = 4;\nconst b = c[0];\nconst c = array<i32, a>(4, 4, 4, 4);\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:no_indirect_recursion_via_array_size:target=\"b\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const a = 4;\nconst b = c[0];\nconst c = array<i32, b>(4, 4, 4, 4);\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"no_init\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x : u32;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"no_type\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x = 0;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"no_init_no_type\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"init_matching_type\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x : i32 = 1i;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"init_mismatch_type\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x : u32 = 1i;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"abs_int_init_convert\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x : u32 = 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"abs_float_init_convert\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x : f32 = 1.0;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"init_const_expr\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x = 0;\nconst y = x + 2;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"init_override_expr\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "override x : u32;\nconst y = x * 2;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"init_runtime_expr\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "var<private> x = 1i;\nconst y = x - 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"init_func\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x = max(1,2);"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:initializer:case=\"init_non_const_func\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x = foo(1);\n    fn foo(p : i32) -> i32 { return p; }"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:function_scope",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "fn foo() { const x = 0; }"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:immutable",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x = 0;\n    fn foo() {\n      x = 1;\n    }"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,const:assert",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/const.spec.ts",
+      "wgsl": "const x = 0;\n    const_assert x == 0;"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"any_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(any(vec3(false, false, false))));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"any_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (any(vec3(false, false, false)));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"any_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (any(vec3(false, true, false)));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"any_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(any(vec3(false, true, false))));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"binary_op_eq_const_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(one + 5 == two));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"binary_op_eq_const_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (one + 5 == two);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"binary_op_eq_const_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (one + 1 == two);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"binary_op_eq_const_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(one + 1 == two));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"const_eq_literal_float_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(one == 0.0));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"const_eq_literal_float_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (one == 0.0);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"const_eq_literal_float_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (one == 1.0);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"const_eq_literal_float_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(one == 1.0));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"const_eq_literal_int_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(one == 10));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"const_eq_literal_int_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (one == 10);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"const_eq_literal_int_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (one == 1);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"const_eq_literal_int_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(one == 1));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"literal_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(false));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"literal_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (false);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"literal_not_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!false);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"literal_not_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(!false));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"literal_not_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(!true));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"literal_not_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!true);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"literal_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (true);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"literal_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(true));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"min_max_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(min(three, max(two, one)) == 3));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"min_max_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (min(three, max(two, one)) == 3);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"min_max_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (min(three, max(two, one)) == 2);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"min_max_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(min(three, max(two, one)) == 2));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"variable_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(is_false));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"variable_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (is_false);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"variable_not_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!is_false);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"variable_not_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(!is_false));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"variable_not_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(!is_true));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"variable_not_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!is_true);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"module\";case=\"variable_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (is_true);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"module\";case=\"variable_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nconst_assert (!(is_true));"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"any_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(any(vec3(false, false, false)))); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"any_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (any(vec3(false, false, false))); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"any_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (any(vec3(false, true, false))); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"any_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(any(vec3(false, true, false)))); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"binary_op_eq_const_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(one + 5 == two)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"binary_op_eq_const_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (one + 5 == two); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"binary_op_eq_const_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (one + 1 == two); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"binary_op_eq_const_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(one + 1 == two)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"const_eq_literal_float_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(one == 0.0)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"const_eq_literal_float_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (one == 0.0); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"const_eq_literal_float_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (one == 1.0); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"const_eq_literal_float_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(one == 1.0)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"const_eq_literal_int_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(one == 10)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"const_eq_literal_int_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (one == 10); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"const_eq_literal_int_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (one == 1); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"const_eq_literal_int_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(one == 1)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"literal_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(false)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"literal_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (false); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"literal_not_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!false); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"literal_not_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(!false)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"literal_not_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(!true)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"literal_not_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!true); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"literal_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (true); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"literal_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(true)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"min_max_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(min(three, max(two, one)) == 3)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"min_max_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (min(three, max(two, one)) == 3); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"min_max_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (min(three, max(two, one)) == 2); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"min_max_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(min(three, max(two, one)) == 2)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"variable_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(is_false)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"variable_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (is_false); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"variable_not_false\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!is_false); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"variable_not_false\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(!is_false)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"variable_not_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(!is_true)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"variable_not_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!is_true); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_no_assert:scope=\"function\";case=\"variable_true\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (is_true); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:constant_expression_assert:scope=\"function\";case=\"variable_true\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "\nconst one = 1;\nconst two = 2;\nconst three = 3;\nconst is_true = true;\nconst is_false = false;\nfn f() { const_assert (!(is_true)); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:evaluation_stage:scope=\"module\";stage=\"constant\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "const value = true;\nconst_assert (value);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:evaluation_stage:scope=\"module\";stage=\"override\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "override value = true;\nconst_assert (value);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:evaluation_stage:scope=\"module\";stage=\"runtime\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "var<private> value = true;\nconst_assert (value);"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:evaluation_stage:scope=\"function\";stage=\"constant\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "const value = true;\nfn f() { const_assert (value); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:evaluation_stage:scope=\"function\";stage=\"override\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "override value = true;\nfn f() { const_assert (value); }"
+    },
+    {
+      "id": "webgpu:shader,validation,const_assert,const_assert:evaluation_stage:scope=\"function\";stage=\"runtime\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/const_assert/const_assert.spec.ts",
+      "wgsl": "var<private> value = true;\nfn f() { const_assert (value); }"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_direct_recursion:target=\"i32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias T = i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_direct_recursion:target=\"T\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias T = T;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion:target=\"i32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias S = T;\nalias T = i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion:target=\"S\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias S = T;\nalias T = S;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_vector_element:target=\"i32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias V = vec4<T>;\nalias T = i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_vector_element:target=\"V\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias V = vec4<T>;\nalias T = V;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_array_element:target=\"i32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias A = array<T, 4>;\nalias T = i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_array_element:target=\"A\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias A = array<T, 4>;\nalias T = A;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_array_size:target=\"i32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias A = array<i32, T(1)>;\nalias T = i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_array_size:target=\"A\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias A = array<i32, T(1)>;\nalias T = A;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_atomic:target=\"i32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias A = atomic<T>;\nalias T = i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_atomic:target=\"A\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias A = atomic<T>;\nalias T = A;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_ptr_store_type:target=\"i32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias P = ptr<function, T>;\nalias T = i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_ptr_store_type:target=\"P\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "alias P = ptr<function, T>;\nalias T = P;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_struct_member:target=\"i32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "struct S {\n  a : T\n}\nalias T = i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:no_indirect_recursion_via_struct_member:target=\"S\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "struct S {\n  a : T\n}\nalias T = S;"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:match_non_alias:case=\"function_param\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "\n    alias alias_u32 = u32;\n    alias alias_alias_u32 = alias_u32;\n    \n    fn foo(x : u32) { }\n    fn bar() {\n      var x : alias_alias_u32;\n      foo(x);\n    }"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:match_non_alias:case=\"constructor\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "\n    alias alias_u32 = u32;\n    alias alias_alias_u32 = alias_u32;\n    \n    var<private> v : u32 = alias_u32(1);"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:match_non_alias:case=\"template_param\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "\n    alias alias_u32 = u32;\n    alias alias_alias_u32 = alias_u32;\n    \n    var<private> v : vec2<alias_u32> = vec2<u32>();"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:match_non_alias:case=\"predeclared_alias\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "\n    alias alias_u32 = u32;\n    alias alias_alias_u32 = alias_u32;\n    \n    var<private> v : vec2<alias_alias_u32> = vec2u();"
+    },
+    {
+      "id": "webgpu:shader,validation,types,alias:match_non_alias:case=\"struct_element\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/types/alias.spec.ts",
+      "wgsl": "\n    alias alias_u32 = u32;\n    alias alias_alias_u32 = alias_u32;\n    \n    struct S { x : alias_u32 }\n    const c_u32 = 0u;\n    const c = S(c_u32);"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:no_direct_recursion:target=\"a\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override a : i32 = 42;\noverride b : i32 = a;\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:no_direct_recursion:target=\"b\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override a : i32 = 42;\noverride b : i32 = b;\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:no_indirect_recursion:target=\"a\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override a : i32 = 42;\noverride b : i32 = c;\noverride c : i32 = a;\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:no_indirect_recursion:target=\"b\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override a : i32 = 42;\noverride b : i32 = c;\noverride c : i32 = b;\n"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:id:case=\"min\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "@id(0) override x = 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:id:case=\"max\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "@id(65535) override x = 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:id:case=\"neg\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "@id(-1) override x = 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:id:case=\"too_large\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "@id(65536) override x = 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:id:case=\"duplicate\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "\n      @id(1) override x = 1;\n      @id(1) override y = 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"bool\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : bool;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"i32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"u32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : u32;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"f32\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : f32;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"abs_int_conversion\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"abs_float_conversion\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = 1.0;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"vec2_bool\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : vec2<bool>;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"vec2i\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : vec2i;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"vec3u\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : vec3u;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"vec4f\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : vec4f;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"mat2x2f\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : mat2x2f;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"matrix\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : mat4x3<f32>;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"array\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : array<u32, 4>;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"struct\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "struct S { x : u32 }\noverride x : S;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:type:case=\"atomic\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : atomic<u32>;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"no_init_no_type\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"no_init\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : u32;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"no_type\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"init_matching_type\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : u32 = 1u;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"init_mismatch_type\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : u32 = 1i;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"init_mismatch_vector\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : u32 = vec2i();"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"abs_int_init_convert\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : f32 = 1;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"abs_float_init_convert\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x : f32 = 1.0;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"init_const_expr\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "const x = 1;\noverride y = 2 * x;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"init_override_expr\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = 1;\noverride y = x + 2;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"init_runtime_expr\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "var<private> x = 2;\noverride y = x;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"const_func_init\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = max(1, 2);"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"non_const_func_init\"",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = foo(1);\n    fn foo(p : i32) -> i32 { return p; }"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"mix_order_init\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = y;\n    override y : i32;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"logical_lhs_override\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = 2;\n      override y = x == 2 && 1 < 2;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"logical_rhs_override\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = 2;\n      override y = 1 < 2 || x == 2;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:initializer:case=\"logical_both_override\"",
+      "expect": "pass",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "override x = 2;\n      override y = x > 2 || x == 2;"
+    },
+    {
+      "id": "webgpu:shader,validation,decl,override:function_scope",
+      "expect": "fail",
+      "source": "src/webgpu/shader/validation/decl/override.spec.ts",
+      "wgsl": "fn foo() { override x : u32; }"
+    }
+  ]
+}

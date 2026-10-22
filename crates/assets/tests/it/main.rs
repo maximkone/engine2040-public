@@ -23,6 +23,7 @@ mod meshlet_cull_vectors;
 mod meshlet_lod_cook;
 mod meshlet_vectors;
 mod optimize_vectors;
+mod pack_clip;
 mod pilot_corner;
 mod quant_vectors;
 mod quantize_grid_vectors;

@@ -1,11 +1,11 @@
 //! Door check/profile/overlay helpers: hinted refusals plus staged costs.
 //! Consumer, units, determinism, errors: door pre-checks, integer math only.
-/// Check verb name.
-pub const TOOL_DOOR_CHECK: &str = "door.check";
-/// Profile verb name.
-pub const TOOL_DOOR_PROFILE: &str = "door.profile";
-/// Overlay verb name.
-pub const TOOL_DOOR_OVERLAY: &str = "door.debug_overlay";
+//!
+//! These helpers carry no `TOOL_` verb name: the door serves no
+//! `door.check`, `door.profile` or `door.debug_overlay` verb, so a name
+//! constant for one would be a name no caller could reach. The rule paths
+//! the refusals carry (`door.check/...`) live in [`crate::guards`].
+///
 /// One hinted refusal: code plus path and hint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckIssue {

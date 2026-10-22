@@ -1,0 +1,14 @@
+# rome-ttk: time-to-kill per duelist and move kind from the loaded
+# design rows (content/design/combat.rows and enemies.rows).
+# ticks are fixed ticks at 60 Hz; ttk_centiseconds is ttk_ticks * 100 / 60.
+duelist,move_kind,hp_permille,damage_permille,hits_to_kill,startup_ticks,recovery_ticks,hitstop_ticks,ttk_ticks,ttk_centiseconds
+hero,light,1000,120,9,15,8,3,234,390
+hero,heavy,1000,120,9,15,8,6,261,435
+tier_1,light,950,120,8,15,8,3,208,347
+tier_1,heavy,950,120,8,15,8,6,232,387
+tier_2,light,1000,120,9,15,8,3,234,390
+tier_2,heavy,1000,120,9,15,8,6,261,435
+tier_3,light,1050,120,9,15,8,3,234,390
+tier_3,heavy,1050,120,9,15,8,6,261,435
+tier_4,light,1100,120,10,15,8,3,260,433
+tier_4,heavy,1100,120,10,15,8,6,290,483

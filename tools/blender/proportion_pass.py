@@ -26,6 +26,10 @@ EXIT_USAGE = 2
 EXIT_FAIL = 3
 
 HEAD_TOP = 0.88
+# A hand is about a tenth of the figure's height, from the wrist to the
+# tip of the middle finger.
+HAND_LENGTH = 0.19
+
 NECK = 0.86
 
 
@@ -100,8 +104,36 @@ def main():
     z_min, z_max = min(zs), max(zs)
     height = max(z_max - z_min, 1e-6)
     centre_x = sum(v.co.x for v in me.vertices) / len(me.vertices)
+    span = max(v.co.x for v in me.vertices) - min(v.co.x for v in me.vertices)
+    # The torso's own width, measured at chest height where there are no
+    # arms. The arms' reach is measured against the torso and not
+    # against the figure, because the figure is as wide as the arms are
+    # spread: measured against itself, an arm at the figure's edge was
+    # pulled by nothing at all.
+    chest_lo = z_min + height * 0.58
+    chest_hi = z_min + height * 0.74
+    # The innermost vertex at each height is the body's own edge: the
+    # arm is outboard of it. So the body's half width is the median of
+    # the innermost vertices across the chest band. The old measure took
+    # the median of every vertex there, which is the arm's width and not
+    # the body's, so the reference was too big and the pull was measured
+    # against itself and the hands stayed out.
+    edges = []
+    steps = 12
+    for step in range(steps):
+        lo = chest_lo + (chest_hi - chest_lo) * step / steps
+        hi = chest_lo + (chest_hi - chest_lo) * (step + 1) / steps
+        row = sorted(abs(v.co.x - centre_x) for v in me.vertices
+                     if lo <= v.co.z < hi)
+        if row:
+            edges.append(row[0])
+    edges.sort()
+    torso = (edges[len(edges) // 2] * 2.0) if edges else span * 0.5
     centre_y = sum(v.co.y for v in me.vertices) / len(me.vertices)
 
+    # How far the hands come in, and how far the arms reach. Both are
+    # shares of the torso's own width.
+    hands_in = float(profile.get("hands", {}).get("in", 1.0))
     head = profile.get("head", {})
     head_scale = float(head.get("scale", 1.0))
     head_x = float(head.get("x", 1.0))
@@ -119,13 +151,24 @@ def main():
         # The fingers are weighted to their own bones, so "hand" alone misses
         # them, and a finger that falls through to the body bands gets
         # stretched into a claw.
-        for part in ("hand", "finger", "thumb"):
-            if name.startswith(part):
+        # The rig has no "hand" group: the hands are weighted to
+        # "wrist.r", "metacarpal1.r" and the fingers' own groups. The
+        # rule that looked for a name starting with "hand" matched
+        # nothing, so the hands fell through to the body bands: they
+        # were never made into mitts and never brought in.
+        for part in ("hand", "finger", "thumb", "metacarpal", "wrist",
+                     "pinky", "ring", "middle", "index"):
+            if part in name and name[-1:] in ("l", "r"):
                 return "hand"
-        for side in ("l", "r"):
-            for part in ("arm", "upperarm", "forearm", "shoulder"):
-                if name.startswith(part) and side in name:
-                    return "arm"
+        # The bone names are "upperarm01.r", "lowerarm01.r" and
+        # "shoulder01.r", and the rule used to ask for a name that
+        # started with "arm", so it matched nothing: no vertex was ever
+        # an arm, and the arms were never touched. The name contains the
+        # part, and the side is the last letter.
+        for part in ("upperarm", "lowerarm", "forearm", "arm", "shoulder",
+                     "clavicle"):
+            if part in name and name[-1:] in ("l", "r"):
+                return "arm"
         return ""
 
     def wrist_for(name):
@@ -163,18 +206,67 @@ def main():
         if part in ("hand",):
             # A mitt: the fingers come in and the fist gets fat, at the
             # wrist, on the hand bone's own axis. The sheet says how fat.
+            #
+            # The fingers are shortened and fattened, both measured from
+            # the wrist, and the palm keeps its own size. The old rule
+            # scaled the whole distance from the wrist along the axis, so
+            # the fingertips were pulled back to the wrist and the fingers
+            # stretched into spikes.
             mitt = float(profile.get("hands", {}).get("scale", 1.0))
             wrist, axis = wrist_for(name)
             if wrist is not None:
                 offset = co - wrist
                 along = offset.dot(axis)
                 across = offset - axis * along
-                co = wrist + axis * (along * (1.0 - 0.30 * (mitt - 1.0) / 0.34)) + across * mitt
+                # The palm is the first third of the hand's length; the
+                # fingers are the rest.
+                length = HAND_LENGTH
+                palm = min(1.0, along / length) if length > 0 else 1.0
+                # How much of this vertex is in the fingers.
+                finger = max(0.0, (along - length * 0.33) / max(length * 0.67, 1e-6))
+                # The fingers get shorter and fatter; the palm only gets
+                # fatter, a little.
+                shorten = 1.0 - 0.34 * finger
+                fatten = 1.0 + (mitt - 1.0) * (0.35 + 0.65 * finger)
+                co = (wrist + axis * (along * shorten)
+                      + across * fatten)
+            # The hand comes in towards the body. The hands were the
+            # widest part of the figure, and a figure is as wide as its
+            # hands' spread, so the box was wide and the body inside it
+            # was thin. A character stands with its hands in beside it.
+            if hands_in < 1.0:
+                out = abs(co.x - centre_x)
+                limit = max(torso * 0.5, 1e-6)
+                pull = 1.0 - (1.0 - hands_in) * min(1.0, out / limit)
+                co.x = centre_x + (co.x - centre_x) * pull
             continue
         if part in ("arm", "upperarm", "forearm", "shoulder"):
-            # An arm is not ours to draw by height. It gets a little mass
-            # and nothing else.
-            co.y = centre_y + (co.y - centre_y) * 1.06
+            # An arm is not ours to draw by height, but it is ours to
+            # draw by mass and by where it hangs.
+            #
+            # The arms are the widest part of a figure's silhouette, so a
+            # character with heavy shoulders and thin arms reads as a
+            # stick. But the arms were spread out to the sides: the
+            # measured figure was 1.23 m wide, with 82% of that width at
+            # chest height and 28% at the thighs, so the box was wide
+            # and the body inside it was thin. A character with its arms
+            # out reads as a scarecrow.
+            #
+            # So the arm is brought in towards the body, by how far out
+            # it is, and kept thick. An arm that already hangs down is
+            # left alone, and an arm that reaches out is pulled in. The
+            # sheet says how heavy it is.
+            arm = float(profile.get("arms", {}).get("scale", 1.0))
+            reach = float(profile.get("arms", {}).get("reach", 1.0))
+            # How far out this vertex is, as a share of the torso's own
+            # half width. The shoulder sits at the torso's edge and the
+            # arm comes down from there, so the reach is a share of the
+            # torso and not of the figure.
+            out = abs(co.x - centre_x)
+            limit = max(torso * 0.5, 1e-6)
+            pull = 1.0 - (1.0 - reach) * min(1.0, out / limit)
+            co.x = centre_x + (co.x - centre_x) * pull * arm
+            co.y = centre_y + (co.y - centre_y) * (1.0 + (arm - 1.0) * 0.6)
             co.z = z_min + (co.z - z_min) * 1.04
             continue
         if part == "head":

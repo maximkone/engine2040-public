@@ -4,29 +4,31 @@
   "how": "for each vertex, the height t (0 at the feet, 1 at the crown) picks a band, and the band says how much wider or longer that part of the body is. The head is a separate lump: it is scaled about the neck, so the face keeps its shape and the head grows. The waist is the band that is pulled in, because the hourglass is what makes a character read as a drawing.",
   "factions": {
     "wardens": {
-      "note": "upright and clean: taller, narrower, the head a little smaller, the shoulders wide but flat",
+      "note": "upright and clean: the head a little smaller, the shoulders wide but flat, and enough mass to read at thirty metres. The gate says a character fills 0.40 to 0.70 of its box, and the Wardens came out at 0.3631: a stick. The suit is close to the body, so the figure's width is the body's width, and the mass has to come from the shoulders, the head and the boots.",
       "bands": [
-        {"from": 0.00, "to": 0.45, "x": 1.10, "y": 1.10, "z": 0.94},
-        {"from": 0.45, "to": 0.58, "x": 1.02, "y": 0.98, "z": 1.00},
-        {"from": 0.58, "to": 0.68, "x": 0.84, "y": 0.86, "z": 1.02},
-        {"from": 0.68, "to": 0.86, "x": 1.24, "y": 0.98, "z": 1.00},
+        {"from": 0.00, "to": 0.45, "x": 1.34, "y": 1.26, "z": 0.86},
+        {"from": 0.45, "to": 0.58, "x": 1.20, "y": 1.10, "z": 1.00},
+        {"from": 0.58, "to": 0.68, "x": 0.86, "y": 0.88, "z": 1.02},
+        {"from": 0.68, "to": 0.86, "x": 1.42, "y": 1.10, "z": 1.00},
         {"from": 0.86, "to": 1.00, "x": 1.00, "y": 1.00, "z": 1.00}
       ],
-      "head": {"scale": 1.16, "x": 0.96, "y": 0.96},
-      "hands": {"scale": 1.22},
-      "boots": {"scale": 1.12}
+      "head": {"scale": 1.24, "x": 1.04, "y": 1.00},
+      "arms": {"scale": 1.30, "reach": 0.62},
+      "hands": {"scale": 1.26, "in": 0.72},
+      "boots": {"scale": 1.20}
     },
     "ashkin": {
       "note": "the brute: a bigger head, a wider chest, shorter thicker legs, and arms that reach further",
       "bands": [
-        {"from": 0.00, "to": 0.42, "x": 1.20, "y": 1.20, "z": 0.90},
-        {"from": 0.42, "to": 0.56, "x": 1.14, "y": 1.08, "z": 0.98},
+        {"from": 0.00, "to": 0.42, "x": 1.28, "y": 1.28, "z": 0.84},
+        {"from": 0.42, "to": 0.56, "x": 1.18, "y": 1.12, "z": 0.98},
         {"from": 0.56, "to": 0.66, "x": 0.86, "y": 0.88, "z": 1.02},
         {"from": 0.66, "to": 0.86, "x": 1.34, "y": 1.10, "z": 1.00},
         {"from": 0.86, "to": 1.00, "x": 1.00, "y": 1.00, "z": 1.00}
       ],
       "head": {"scale": 1.30, "x": 1.06, "y": 1.02},
-      "hands": {"scale": 1.34},
+      "arms": {"scale": 1.36, "reach": 0.66},
+      "hands": {"scale": 1.34, "in": 0.74},
       "boots": {"scale": 1.22}
     }
   },

@@ -116,6 +116,7 @@ Test-only mates with no live script (audit pins kept on purpose):
 - `tools/board-slice-cases.test.mjs`
 - `tools/book-commands.test.mjs` (runs the dry commands of `tools/book-commands.json`)
 - `tools/for-ai.test.mjs`
+- `tools/license-gate-py.test.mjs` (runs the python generator licence gate suite of `content/ai-loop`)
 - `tools/pages-workflow.test.mjs`
 - `tools/ci.test.mjs`
 - `tools/compare-split.test.mjs`

@@ -12,3 +12,8 @@ fixtures/gltf/*.gltf -text
 fixtures/spatial-gold/** -text
 # engine-geo vendored xatlas: byte-exact, never converted.
 crates/geo/vendor/** -text
+# GP33 Rome duel reference tables: the playtest reads them byte-for-byte
+# (include_str! plus an exact CSV compare), so a CRLF checkout
+# (core.autocrlf=true on Windows) would drift the file and the check would
+# fail there. Never convert these either.
+crates/playtest/src/ttk/*.csv -text

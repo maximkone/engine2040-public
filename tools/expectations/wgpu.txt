@@ -1,0 +1,21 @@
+# The WebGPU conformance expectations for this backend (HX4).
+#
+# One case id per line. A case named here that fails is reported as
+# `expected`, never as `pass`: it is a known backend defect, and the count
+# line keeps it in its own column. A case named here that PASSES is a stale
+# line: the gate fails and says so, so the file never hides a fixed defect.
+#
+# The format follows infosia/webgpu-native-cts
+# (`expectations/wgpu-native-vulkan.txt`): one case query per line, `#`
+# comments allowed, a comment may follow the id.
+#
+# The cases come from gpuweb/cts, the official WebGPU conformance test suite
+# (BSD-3-Clause), read at commit
+# e97492c38728b11ee336bf3ddf513cb27f1331ed on 2026-10-22. The list below is
+# the ported slice of the `shader,validation` area.
+#
+# Empty on purpose: the strict wgpu instance (naga frontend, wgpu 30.0.1)
+# answered every case of the slice the way the suite expects, so there is no
+# known defect to excuse yet. A defect found later gets its case id here,
+# with the reason after the id, and the gate keeps the run green while the
+# defect stays visible.

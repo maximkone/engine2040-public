@@ -1,0 +1,16 @@
+# rome-matchups: the Rome duel win matrix, one row per pair of
+# distinct duelists, measured over seeded duels in both seats so no
+# seat reads as skill. A row beats when its win_rate_permille reaches
+# the duel law (600 permille, engine_ai::tier::WIN_BAR_PERMILLE); a
+# draw counts as half a win for both duelists.
+duelist,opponent,duels,wins,draws,losses,win_rate_permille,opponent_rate_permille,beats
+hero,tier_1,400,42,339,19,528,472,no
+hero,tier_2,400,38,347,15,528,472,no
+hero,tier_3,400,27,333,40,483,517,no
+hero,tier_4,400,12,340,48,455,545,no
+tier_1,tier_2,400,7,82,311,120,880,no
+tier_1,tier_3,400,1,35,364,46,954,no
+tier_1,tier_4,400,1,9,390,13,987,no
+tier_2,tier_3,400,20,163,217,253,747,no
+tier_2,tier_4,400,1,55,344,71,929,no
+tier_3,tier_4,400,42,225,133,386,614,no

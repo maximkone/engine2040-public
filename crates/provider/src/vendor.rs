@@ -217,24 +217,17 @@ impl<'a> JCur<'a> {
         Ok(val)
     }
 
+    /// Read one `\uXXXX` payload as a code point.
+    ///
+    /// The hex rule has one owner: `engine_core::parse_hex4`. This cursor
+    /// only takes the four bytes and moves past them, so every `\u` escape
+    /// in every adapter decodes exactly like the JSON and vault readers.
     fn hex4(&mut self) -> Result<u32, AiError> {
-        let mut acc: u32 = 0;
-        for _ in 0..4 {
-            let c = self.peek().ok_or(AiError::MalformedOutput)?;
-            let d = match c {
-                b'0'..=b'9' => u32::from(c).saturating_sub(u32::from(b'0')),
-                b'a'..=b'f' => u32::from(c)
-                    .saturating_sub(u32::from(b'a'))
-                    .saturating_add(10),
-                b'A'..=b'F' => u32::from(c)
-                    .saturating_sub(u32::from(b'A'))
-                    .saturating_add(10),
-                _ => return Err(AiError::MalformedOutput),
-            };
-            acc = acc.saturating_mul(16).saturating_add(d);
-            self.p += 1;
-        }
-        Ok(acc)
+        let end = self.p.saturating_add(4);
+        let digits = self.b.get(self.p..end).ok_or(AiError::MalformedOutput)?;
+        let value = engine_core::parse_hex4(digits).ok_or(AiError::MalformedOutput)?;
+        self.p = end;
+        Ok(value)
     }
 
     fn string(&mut self) -> Result<String, AiError> {
