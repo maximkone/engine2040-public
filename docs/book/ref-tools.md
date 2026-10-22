@@ -77,6 +77,7 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 | `playtest-log.mjs` | Checks a playtest CSV | `playtest-log.test.mjs` | see code |
 | `pe-exports.mjs` | Lists PE export names | `pe-exports.test.mjs` | 2 usage or error |
 | `physfx-backends.mjs` | RZ1 soak on Rapier wasm and Jolt wasm, one table | `physfx-backends.test.mjs` | 0 both backends ran, 1 a backend failed to load or step, 2 usage |
+| `webgpu-cts.mjs` | A slice of the official WebGPU conformance suite against the strict instance | `webgpu-cts.test.mjs` | 0 the slice ran, 1 a case failed or crashed or the instance was not strict, 2 the tool could not run |
 | `flaky-quarantine.mjs` | Quarantines tests that fail repeatedly | `flaky-quarantine.test.mjs` | 0 ok, 1 fail, 2 usage |
 | `duration-fmt.mjs` | Duration formatter CLI | `duration-fmt.test.mjs` | 0 pass, 1 fail, 2 usage |
 | `argv.mjs` | Library: shell-safe spawn and CLI failure helpers | `argv.test.mjs` | not a CLI |

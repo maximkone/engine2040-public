@@ -4,11 +4,12 @@
 // and the strict switch are all checked without a device.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parseYaml } from "./pages-workflow.test.mjs";
 import {
   COMPILED,
   CRASH,
@@ -29,6 +30,7 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOOL = resolve(HERE, "webgpu-cts.mjs");
+const ROOT = resolve(HERE, "..");
 
 /** A fake runner: a node script that prints the receipt line the tool reads. */
 function fakeRunner(lines) {
@@ -296,4 +298,19 @@ test("the expectations file is read with its comments and its trailing notes", (
   assert.equal(expectations.get("case-a"), "the backend rejects it");
   assert.equal(expectations.get("case-b"), "");
   assert.equal(expectations.size, 2);
+});
+
+test("the CI leg builds the runner and runs the slice with the strict switch on", () => {
+  const text = readFileSync(join(ROOT, ".github", "workflows", "webgpu-cts.yml"), "utf8");
+  const wf = parseYaml(text);
+  // The strict switch is the render stack's own env name, and the gate
+  // refuses to run without it, so the leg must set it.
+  assert.equal(wf.env.E2040_STRICT_WEBGPU, "1");
+  // The leg builds the runner the tool spawns.
+  const runs = wf.jobs.slice.steps.filter((s) => s.run).map((s) => s.run).join("\n");
+  assert.match(runs, /cargo build --locked -p engine-render --features window --bin webgpu_cts/);
+  // The leg runs the tool itself.
+  assert.match(runs, /node tools\/webgpu-cts\.mjs/);
+  // The leg never touches the golden matrix workflow.
+  assert.ok(!/golden-matrix/.test(text), "the golden matrix workflow is untouched");
 });

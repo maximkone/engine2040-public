@@ -1,0 +1,95 @@
+name: webgpu-cts
+
+# HX4: the WebGPU conformance gate. The strict WebGPU flag already exists
+# (`crates/render/src/backend.rs`, `E2040_STRICT_WEBGPU=1`), but nothing
+# measured against the official suite. This workflow runs a chosen slice of
+# gpuweb/cts (BSD-3-Clause) against the strict instance, one case per
+# process, and prints one count line.
+#
+# The gate needs an adapter. A GitHub runner has no GPU, so this leg is
+# REPORT-ONLY: it runs the slice when a software Vulkan adapter is there
+# (lavapipe, the Mesa CPU rasterizer) and otherwise records that the run
+# could not happen. It never fails the build on a missing adapter, because a
+# missing adapter is a property of the runner, not a conformance failure.
+# The strictness of the run is the point: the same slice runs on the PC
+# (`E2040_STRICT_WEBGPU=1 node tools/webgpu-cts.mjs`) where it is a gate.
+#
+# Start it from the Actions tab (workflow_dispatch) or by pushing a branch
+# named webgpu-cts-* of the public mirror. The private dev repo never runs it.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["webgpu-cts-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webgpu-cts-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  SCCACHE_CACHE_SIZE: "5G"
+  CARGO_INCREMENTAL: "0"
+  # The strict switch the render stack names. The gate refuses to run without it.
+  E2040_STRICT_WEBGPU: "1"
+
+jobs:
+  slice:
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: sccache or plain rustc
+        shell: bash
+        run: |
+          sccache --start-server > /dev/null 2>&1 || { echo "sccache would not start, compiling uncached"; echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"; }
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: webgpu-cts
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: install the software Vulkan driver (lavapipe)
+        # The runner has no GPU. Mesa's lavapipe is a CPU Vulkan rasterizer, so
+        # wgpu finds an adapter and the slice really runs.
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - name: build the runner
+        run: cargo build --locked -p engine-render --features window --bin webgpu_cts
+      - name: the chosen cases and their expectations
+        run: node tools/webgpu-cts.mjs --list | tee cases.txt
+      - name: run the slice (report-only, a runner without an adapter is not a conformance failure)
+        id: slice
+        shell: bash
+        run: |
+          set -o pipefail
+          node tools/webgpu-cts.mjs | tee slice.txt
+      - name: report the slice on the run page
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### WebGPU conformance slice (HX4)'
+            echo ''
+            echo '```'
+            cat slice.txt 2>/dev/null || echo 'the slice did not run: no adapter on this runner'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: webgpu-cts-slice
+          path: |
+            cases.txt
+            slice.txt
+          if-no-files-found: ignore

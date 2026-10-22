@@ -106,6 +106,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/web-input-check.mjs` (+ `tools/web-input-check.test.mjs`): send real key and mouse events to the web page in headless Chrome and check input and audio.
 - `tools/web-run.mjs` (+ `tools/web-run.test.mjs`): run the web-build workflow (build, clippy, tests, headless Chrome) on an isolated snapshot.
 - `tools/web-search.mjs` (+ `tools/web-search.test.mjs`): web search.
+- `tools/webgpu-cts.mjs` (+ `tools/webgpu-cts.test.mjs`): run a slice of the official WebGPU conformance suite (gpuweb/cts) against the strict instance, one case per process, with an expectations file.
 - `tools/wiring-cov.mjs` (+ `tools/wiring-cov.test.mjs`): list functions the arena never runs.
 - `tools/wiring-scan.mjs` (+ `tools/wiring-scan.test.mjs`): list pub items with no user.
 - `tools/workspace-check.mjs` (+ `tools/workspace-check.test.mjs`): audit after board edits.

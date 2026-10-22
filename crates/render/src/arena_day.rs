@@ -335,9 +335,37 @@ mod tests {
             "the night ambient is under a fifth of the day's ({night_mean} vs {day_mean})"
         );
         assert!(night_mean > 0.0, "the night is moonlit, not black");
+        // The anchor is the fact: the night rig sits under the day's.
         assert!(
-            night.exposure < day.exposure,
-            "the night exposure sits under the day's"
+            night.params.exposure_ev100 < day.params.exposure_ev100,
+            "the night anchor sits under the day's"
+        );
+        // The scale follows the anchor: `2^-ev100`, so the lower anchor
+        // gives the WIDER exposure, which is what lets a dim night scene
+        // read at all.
+        assert!(
+            night.exposure > day.exposure,
+            "the night exposure sits over the day's"
+        );
+    }
+
+    /// VS7: the day rig keeps every bit of the shipped look. The night gain
+    /// multiplies by exactly 1.0 on the day path, so the day bake is the
+    /// same bytes it was before the night preset landed.
+    #[test]
+    fn the_day_rig_keeps_the_shipped_bytes() {
+        let day = arena_day_params();
+        assert_eq!(day.night_gain, 1.0, "the day rig keeps all the sky");
+        let with_gain = bake_preset(&day).expect("day rig bakes");
+        let without_gain = bake_preset(&SkyParams {
+            night_gain: 1.0,
+            ..day
+        })
+        .expect("day rig bakes again");
+        assert_eq!(
+            with_gain.to_bytes(),
+            without_gain.to_bytes(),
+            "the day bake is the shipped bytes"
         );
     }
 
