@@ -242,12 +242,15 @@ pub fn open_project(dir: &Path) -> Result<(Document, Journal), StartupError> {
 /// verbs for this session; the verbs stay refused (`unscoped`) without it.
 pub fn build_server(config: &StartupConfig) -> Result<McpServer, StartupError> {
     let (doc, journal) = open_project(&config.project_dir)?;
-    let server = McpServer::with_document(
+    // DOOR2: scene.save and scene.load seal into and read from this folder.
+    let mut state = super::mcp::ServerState::with_document(
         doc,
         journal,
         MCP_SESSION,
         Capability::unrestricted(MCP_SESSION),
     );
+    state.project_dir = Some(config.project_dir.clone());
+    let server = McpServer::with_state(state);
     if let Some(grant) = &config.web {
         if !grant.root.is_dir() {
             return Err(StartupError::BadDir {

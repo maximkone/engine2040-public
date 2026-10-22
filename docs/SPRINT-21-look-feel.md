@@ -25,11 +25,19 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   tonemap_one_source_hue`: torch hue shift <= 2 deg, `fn aces` definitions in
   `crates/render/src` = 1 (today 6), longest equal 8-bit run on a 0.002..0.02
   ramp <= 4 px (today about 60). F2P: the hue and one-copy tests fail today.
-  P2P: golden unchanged. needs: none. Landed 5b9ae8ae7.
+  P2P: golden unchanged. needs: none. Landed 7d943942b.
   Evidence: `fn aces` definitions 3 → 1 (`v1.rs:462`); `tonemap_one_source_hue` gate
   passes (torch hue shift 0.8°, longest equal 8-bit run 1 px vs 203 px undithered);
   `cargo test -p engine-render --lib` 886 passed / 0 failed; ratchet `regressions: []`;
   golden PASS (run 39745760187, hash d57b5c8ae3096614). Closes PW12 sub-task.
+  Evidence (WGSL half, 7d943942b; the Rust half was 5b9ae8ae7): the crate tree
+  holds one `fn aces` definition (`shaders/tonemap.wgsl`); the post chain, the
+  composite compute and the forward 8-bit capture call `aces_tonemap` and the
+  shared `dither4`; `shaders/forward.wgsl` is whole again (86971b5af had
+  replaced the pass with its 35-line toon stub); `cargo test -p engine-render
+  --lib` 887 passed / 0 failed; `--test it` 69 passed / 0 failed; clippy
+  `-D warnings` PASS (run 39767412095); golden PASS (run 39767477731, hash
+  d57b5c8ae3096614).
   Correction 2026-10-21: duplicate of PW12 (`material: the colour metric, the hue-keeping tonemap and the dither gate`, which closes RL34), and PW12 records that the six-ACES half is already closed by `aces_one_source_gate` (`crates/render/src/lib.rs:494`); do not run both - PW12 is the owning row.
 - [ ] RL35 render: sun shadows from a static arena map and a dynamic fighter map,
   texel-snapped, PCF — the sun pass redraws every item into one 256 map over the
@@ -82,7 +90,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   today 0.25), shimmer var <= 0.01, TAA copies 3 -> 1. F2P: the sweep fixture
   fails 0.10 today. P2P: golden unchanged. needs: RL37.
   Correction 2026-10-21: duplicate of PW04 (`render: TAA as one real pass`, which closes RL38); do not run both - PW04 is the owning row.
-- [ ] RL39 render: lens pass in the blit (vignette, chromatic aberration, grain)
+- [x] RL39 render: lens pass in the blit (vignette, chromatic aberration, grain) Landed 088789a8f.
   — none exists in `crates/render/src`. FidelityFX lens shape (MIT). Diff:
   regular. Tier B. Size S. Owns the lens hunk of `shaders/blit.wgsl` and
   `post.rs`. Accept: `cargo test -p engine-render --lib
@@ -90,6 +98,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   on <= 0.15 ms, grain 0 at pure black and white. F2P: no LensConfig. P2P:
   golden unchanged. needs: RL34.
   Correction 2026-10-21: the Accept filter `lens_pass_budget_and_off_identity` matches no test (`Grep lens` over crates/render is empty and `crates/render/src/lens.rs` does not exist), so the command exits 0 with 0 passed. The lens pass and its test are the work; Accept is `--lib lens_pass_budget_and_off_identity` printing a nonzero passed count, and the row may not be ticked until it does.
+  Evidence 2026-10-22: the pass itself was landed as `shaders/post/lens.wgsl` (one compute pass, not a blit hunk) with `LensProfile`/`LensPreset` and the CPU oracle. This commit closes the named accept test: `cargo test -p engine-render --lib lens_pass_budget_and_off_identity` prints 1 passed (run 39760626096 for the filter, 39760788246 for the full lib). Off (the eye) leaves a test frame byte-identical; on (the helmet) costs 0.133 ms modeled at 1920x1080 inside `LENS_PASS_BUDGET_MS` 0.15; grain is 0 at pure black and pure white. The grain mask also fixed a real defect: the old step added noise to every channel, so a true black or a clipped highlight gained a noise step. 8 lens tests green, ratchet PASS (0 regressions, 1 metric improved). The 13 shader-parity reds in the full lib come from `86971b5af` (TOON1/DOOR-READONLY forward.wgsl) and are not from this diff, proven by `--only <the two lens paths>`: the same 13 fail there.
 - [ ] RL40 render: sky-driven IBL and sun colour for time of day — ambient is one
   fixed studio HDRI (`presenter.rs:384-389`) while the sky comes from the arena
   rig (`:370`), so sun height never changes the sand. Bake 5 sun keyframes from
@@ -417,7 +426,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   (`NetPose`). Accept unchanged (the donor cannot lower it); the added number is
   the fade: the visual error reaches 0 exactly at the confirmed tick, not
   asymptotically. Golden: does not threaten — a drawn-pose rule, never hashed.
-- [ ] MP26 net: clock slew and a 30-frame advantage window — `delay.rs:56-65`
+- [x] MP26 net: clock slew and a 30-frame advantage window — `delay.rs:56-65` Landed 7d1e1227.
   steps the delay +-1 from one sample. Average frame advantage over 30 frames
   (ggrs `time_sync.rs`), slew the client clock up to 5 percent (lightyear
   `sync.rs`); input delay stays the slow knob. Diff: good. Tier A. Size M. Owns
@@ -425,6 +434,38 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `node tools/mp6-check.mjs`: over_cap 0 on every WAN profile, < 3 rollbacks per
   1000 ticks at 2-frame delay, max slew <= 5 percent, 0 skipped frames. F2P: no
   slew data posted. P2P: golden unchanged, tape bytes equal. needs: MP24.
+  Progress 2026-10-22: `delay.rs` grew the three parts of the row. The window
+  is the ggrs one: 30 samples of the two seats' confirmed frontiers (the newest
+  tick the authority took each seat's input for), read from the same broadcast
+  the peer reads, so the two windows are exact mirrors and the two slews are
+  equal and opposite. The slew is the lightyear speed controller: a dead zone
+  of one tick, 10 permille per tick of averaged advantage, capped at 50
+  permille (5 percent). The pacer applies it as 0, 1 or 2 client ticks a frame
+  inside a one-tick band around the schedule the input delay gave the seat, so
+  a trim never drifts the client's input age and never skips a tick: the
+  predicted stream stays contiguous.
+  The played bout paces each seat's prediction loop with it. The seat whose
+  inputs reach the authority first runs ahead of its peer, so its clock is
+  trimmed (the LAN and WAN receipts post max slew 50 permille, 7 slewed
+  frames, 0 skipped frames on that seat; the dropped seat hears nothing and
+  holds its clock). The resims get shallower for it: the LAN and WAN
+  rollback histograms move from one deep bucket into several shallow ones
+  with the same event count (448 and 368 events), the deepest stays 6 (LAN)
+  and 8 (WAN) and `deeper_than_8_tick_window` stays 0 on every profile.
+  The send side is untouched, so the server tape and the golden never move:
+  the LAN input tape hash stays 90859bdb419e62b9 and the tape bytes are
+  equal. The receipts also post the pacing measurement the bar names: the
+  rollback rate over 1000 ticks at the 2-frame delay (0) beside the same link
+  with the delay off (776), so the number has teeth.
+  Proof: `cargo test -p engine-net --lib` 460 passed 0 failed 4 ignored
+  (runner run 39777227573); `cargo clippy -p engine-net --all-targets -- -D
+  warnings` green (runner run 39776567541); the golden unmoved: `cargo test
+  -p engine2040 --release --test proof_cli default_and_max_seed` 1 passed
+  (runner run 39777766673, final_hash d57b5c8ae3096614);
+  `node tools/mp6-check.mjs` 31 pass
+  0 fail on the fresh receipts and the old receipts fail it (F2P: no slew
+  data posted); `node --test tools/mp6-check.test.mjs` 11 passed; rust-quality
+  engine-net no regression; rustfmt clean.
 - [x] MP27 proof: sync test at every tick and confirmed-only peer compare — Progress 2026-10-17: arena sync.rs sync_heavy_mode_clean_reports_zero_false_positives verifies rollback at every tick of the test config; left: no 600 split points at depth 8, no deliberately unsnapshotted LimbPool counter caught test, check_remote confirmed-only compare unchanged.
   `verify_rollback` tests one split point (`crates/arena/src/sync.rs:141-179`);
   `check_remote` (`crates/net/src/netcode.rs:211`) compares predicted frames and
@@ -590,7 +631,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `windowed.rs`. Accept: `cargo test -p engine-render --lib hud_pass`: draws <= 3,
   text_ms <= 0.3 at 1080p, stamina, poise and pip pixels > 0, text contrast >= 4.5.
   F2P: the arena capture has 0 HUD pixels. P2P: golden unchanged. needs: none.
-- [ ] SN12 audio: hit kind by surface cue table on the live CueBank — 
+- [x] SN12 audio: hit kind by surface cue table on the live CueBank — Landed 9d003eaef.
   `crates/game/src/lib.rs:911-948` plays one sound for hit, block, parry and
   knockdown; the 15-cue CueBank has no game user; clash, riposte, sever and gore
   have no cue. A presentation-side (kind x surface) lookup, round-robin variants,

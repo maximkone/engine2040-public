@@ -45,6 +45,7 @@ mod bind_memo;
 mod capture;
 mod contact_live;
 mod device_init;
+mod fight_fx;
 mod fog_tranche;
 mod forward_bind;
 mod frame;
@@ -130,7 +131,7 @@ mod root_wiring_tests {
     #[test]
     fn blit_and_reexports_stay_wired_for_window_loop() {
         assert!(
-            BLIT_WGSL.contains("fn aces_fitted("),
+            BLIT_WGSL.contains("fn aces_tonemap("),
             "blit keeps the display transform via root"
         );
         assert!(

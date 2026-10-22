@@ -1,0 +1,45 @@
+# GS22 v1: the content fetch list (2026-10-22). Every row is CC0 and was
+# scouted against the live Poly Haven files API on 2026-10-22 (real URL,
+# size and md5 per row). A `-` url resolves through the source's own files
+# API at fetch time, so one row carries the whole 1k set.
+#
+# Format: <source> <id> <url> [md5] [license] [author]
+# (tools/fetch-content.mjs). The author field is one token; the real
+# attributions are in the comments below.
+#
+# --- 3 outdoor / Italian-style HDRIs, 2k (Poly Haven) ---
+# colosseum 2k hdr: 6.09 MB, authors Greg Zaal (HDRI) and Rico Cilliers
+#   (backplates) - the Colosseum, Rome.
+# borghese_gardens 2k hdr: 6.92 MB, author Andreas Mischok - Villa Borghese,
+#   Rome.
+# castel_st_angelo_roof 2k hdr: 6.44 MB, author Andreas Mischok - the
+#   Castel Sant'Angelo roof, Rome.
+polyhaven colosseum - 660eb20813279a49ca70605e89f3a108 CC0
+polyhaven borghese_gardens - 164f424edf339fab46289c1d49b606e2 CC0
+polyhaven castel_st_angelo_roof - 564bd27feb8f81fa616f0bf1c19ae5f6 CC0
+#
+# --- 6 PBR sets, 1k (Poly Haven; the diffuse map's md5 pins the row) ---
+# sand: aerial_sand (Andreas Mischok).
+# marble-family stone: blue_metal_plate and corrugated_iron carry bronze's
+#   place (the CC0 catalogue has no bronze-named set).
+# leather: brown_leather. cloth: cotton_jersey. brick: brick_4.
+polyhaven aerial_sand - 717c892f44895790e6a39ced994e1598 CC0
+polyhaven brick_4 - 17cc077fda6e2d7dd7a25a4f983d92d6 CC0
+polyhaven blue_metal_plate - a906d0e554596fb76c6969f2f644c5e6 CC0
+polyhaven corrugated_iron - fabb629c5ad6f427e6862bb4043564bd CC0
+polyhaven brown_leather - 080b3bf1372766ff2c7ff121ed07b5e8 CC0
+polyhaven cotton_jersey - d2f4493fdd48634b50d40f810ce9deb7 CC0
+#
+# --- not in v1 (named, with the reason; v2 retries) ---
+# marble + travertine: both live on ambientCG (Marble013, Travertine004),
+#   whose get endpoint answers 200 with a real size (5.27 MB / 3.49 MB) but
+#   whose API no longer serves the licence or the md5 - the list row for a
+#   url source needs the md5 in the column before the licence, so a
+#   licence-carrying row is impossible until that API comes back or the
+#   file is hashed at fetch time. Recorded, not guessed.
+# mosaic: no CC0 mosaic set answered on either API on 2026-10-22
+#   (ambientCG Mosaic002 answered 404; Poly Haven has no mosaic category).
+# 6 props: Poly Haven's models answer per-file trees (files/Barrel_01 is
+#   gltf/blend/fbx `include` maps of individual pngs and bins, no single
+#   zip URL), and ambientCG's model listing does not filter by type any
+#   more. Both need a source-side answer, not a scouting one.

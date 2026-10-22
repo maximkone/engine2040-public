@@ -41,6 +41,15 @@ pub mod seal_key;
 pub mod sim_verify;
 /// The 32-bit soft float: IEEE-754 binary32 in integer math, so every
 /// machine gives the same bits.
+///
+/// The owner of the type. `tools/sim-clippy.toml` bans
+/// [`SoftFloat`](soft_float::SoftFloat) in every simulation crate so the
+/// hashed authority never reaches for it; the module itself names the ban
+/// so the definition stays legal here.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the owner of SoftFloat: the ban is for the sim crates that would import it"
+)]
 pub mod soft_float;
 pub mod tick;
 pub mod time;

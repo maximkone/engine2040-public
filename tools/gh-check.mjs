@@ -499,10 +499,40 @@ const dropJob = (id) => rmSync(jobPath(id), { force: true });
 // wip-<8 chars of Date.now() in base 36><3 random chars>: the age of a branch is in its name.
 export const newId = (now = Date.now()) => `wip-${now.toString(36)}${Math.random().toString(36).slice(2, 5).padEnd(3, "0")}`;
 export const idAgeMs = (id, now = Date.now()) => { const t = parseInt(String(id).slice(4, 12), 36); return /^wip-[0-9a-z]{8}/.test(id) && Number.isFinite(t) ? now - t : 0; };
+// Throwaway prefixes every check tool pushes to the public mirror. `wip-` and `web-build-` encode their
+// age in the name; `docs-probe-`, `golden-matrix-*` and the older `wip-am24-*` lanes do not, so the
+// name alone cannot date them and the sweeper reads the commit date instead. Without this list those
+// families live forever: `idAgeMs` answers 0 for a name it cannot parse, which reads as "not stale".
+export const THROWAWAY_PREFIXES = ["wip-", "web-build-", "docs-probe-", "golden-matrix-"];
+/** True when `name` is a branch one of the check tools pushed, not a real branch of the mirror. */
+export const isThrowawayBranch = (name) => THROWAWAY_PREFIXES.some((p) => String(name).startsWith(p));
 // Branches and job files of killed calls (the finally of a killed process never runs): older than LEAK_MS, gone.
 const sweep = () => {
   try {
-    const stale = g(["ls-remote", "--heads", "origin", "wip-*"]).split("\n").map((l) => l.split("\t")[1]?.replace("refs/heads/", "")).filter((id) => id && idAgeMs(id) > LEAK_MS);
+    // Ask the mirror itself, not the local refs: a wip branch is pushed straight to the remote and a
+    // stale local clone lags behind it. Every throwaway family is read, not only `wip-`, because a
+    // branch whose name carries no timestamp answered idAgeMs 0 and read as "not stale" forever.
+    const heads = g(["ls-remote", "--heads", "origin"])
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/))
+      .filter(([sha, ref]) => sha && ref)
+      .map(([sha, ref]) => ({ sha, name: ref.replace("refs/heads/", "") }))
+      .filter(({ name }) => name !== "main" && isThrowawayBranch(name));
+    const now = Date.now();
+    const stale = [];
+    for (const { sha, name } of heads) {
+      // A name that carries its own age stays exact and needs no round trip.
+      const named = idAgeMs(name, now);
+      if (named > 0) {
+        if (named > LEAK_MS) stale.push(name);
+        continue;
+      }
+      // Anything else is dated by its commit, which is the only age a `wip-am24-*` lane has.
+      try {
+        const unix = Number(g(["show", "-s", "--format=%ct", sha]).trim()) * 1000;
+        if (Number.isFinite(unix) && unix > 0 && now - unix > LEAK_MS) stale.push(name);
+      } catch { /* an unreadable commit just stays */ }
+    }
     dropBranch(...stale);
     for (const f of existsSync(JOBS) ? readdirSync(JOBS) : []) if (Date.now() - statSync(join(JOBS, f)).mtimeMs > LEAK_MS) rmSync(join(JOBS, f), { force: true });
   } catch { /* a sweep never fails a check */ }

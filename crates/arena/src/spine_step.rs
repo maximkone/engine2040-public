@@ -45,7 +45,7 @@ use engine_ecs::schedule::{Ctx, Schedule};
 use engine_ecs::spine::{AiState, AnimState, Body, Intent, Spine, Transform, Vitals};
 use engine_ecs::spine_schedule::{SpineSchedule, SpineSystem};
 use engine_input::fighter::{Buttons, JUMP, THROW_SPEAR};
-use engine_physics::balance::{BalanceParams, BalanceState, GaitPhase};
+use engine_physics::balance::{BalanceParams, BalanceState, GaitPhase, Knockback};
 #[cfg(feature = "sim")]
 use engine_physics::controller::Controller;
 use engine_physics::limb::{LimbPool, MAX_LIMBS};
@@ -123,6 +123,9 @@ struct Core {
     balance: Vec<BalanceState>,
     /// Per-slot stagger memory, stepped only under `rules.balance`.
     stagger: Vec<StaggerMemory>,
+    /// Per-slot knockback (FEEL2): the velocity a landed blow handed the
+    /// body, in millimetres per tick.
+    knockback: Vec<Knockback>,
     /// Combat-depth poise meters, stepped beside the fight step.
     depth: DepthSet,
     /// Severed-limb pool, stepped only under `rules.balance`.
@@ -255,6 +258,7 @@ fn new_core(
         id: FighterId(0),
         pos: [0.0; 3],
         yaw: 0.0,
+        worn: 0,
     }; MAX_SLOTS];
     state_array[..fighters].copy_from_slice(&states[..fighters]);
     let core = Core {
@@ -287,6 +291,7 @@ fn new_core(
             .map(|_| BalanceState::new(BalanceParams::default()))
             .collect(),
         stagger: (0..fighters).map(|_| StaggerMemory::new()).collect(),
+        knockback: (0..fighters).map(|_| Knockback::new()).collect(),
         depth: DepthSet::new(depth_tables, config.fighters),
         limbs: LimbPool::new(limb_cap).ok()?,
         spear: None,
@@ -709,7 +714,16 @@ fn sys_rules(core: &mut Core, _: &mut Ctx) {
         return;
     }
     if core.rules.balance
-        && authority::feed_balance(&mut core.balance, &mut core.stagger, &core.events).is_none()
+        && authority::feed_balance(
+            &mut core.balance,
+            &mut core.stagger,
+            &mut core.knockback,
+            &core.states,
+            &core.fight,
+            &core.rules,
+            &core.events,
+        )
+        .is_none()
     {
         core.failed = true;
         return;
@@ -870,6 +884,7 @@ fn after_motion(core: &mut Core, n: usize) {
         crate::collide::collide_states_shove(
             &mut core.states[..n],
             &mut core.balance[..n],
+            &mut core.knockback[..n],
             &core.rules,
             core.config.half_extent_m,
             n,
@@ -885,7 +900,7 @@ fn sys_extract(core: &mut Core, _: &mut Ctx) {
     // V2 landed hits resolve to cuts before the limb pool steps, so a limb
     // loses its first tick immediately. V1 never enters this path.
     core.cuts = if core.rules.version == FIGHT_RULES_V2 {
-        authority::resolve_cuts(&core.states[..n], core.tick, &mut core.limbs, &core.events)
+        authority::resolve_cuts_bare(&core.states[..n], core.tick, &mut core.limbs, &core.events)
     } else {
         Vec::new()
     };
@@ -946,9 +961,15 @@ fn sys_extract(core: &mut Core, _: &mut Ctx) {
         &core.breaks,
         cfg!(feature = "sim"),
     );
-    hash = core
-        .rules
-        .fold(hash, n, &core.balance, &core.stagger, &core.limbs);
+    hash = authority::fold_rules(
+        hash,
+        &core.rules,
+        n,
+        &core.balance,
+        &core.stagger,
+        &core.limbs,
+        &core.knockback,
+    );
     // The spear state folds after the rules and before the world; a match
     // without one leaves the hash untouched.
     hash = core.spear.as_ref().map_or(hash, |spear| spear.fold(hash));

@@ -14,6 +14,7 @@
 use engine_core::Fnv64;
 use engine_editor::capability::{canonical_action_hash, Capability, OpMask};
 use engine_editor::commands::{Batch, Document, Op};
+use engine_observe::{Event, EventCode};
 
 use super::audit::{code_hash, AuditError, AuditOutcome, DoorAudit};
 use super::guards::DESTRUCTIVE_TIER;
@@ -187,7 +188,10 @@ impl McpServer {
         let revision = state.doc.revision;
         let (outcome, detail) = match &result {
             Ok(_) => (AuditOutcome::Ok, revision),
-            Err(error) => (AuditOutcome::Refused, code_hash(error.code)),
+            Err(error) => {
+                note_refusal(&mut state, tool, error.code);
+                (AuditOutcome::Refused, code_hash(error.code))
+            }
         };
         seal_locked(&mut state, tool, session, revision, outcome, detail)?;
         result
@@ -206,6 +210,7 @@ impl McpServer {
         let session = state.session;
         let revision = state.doc.revision;
         let detail = code_hash(refusal.code);
+        note_refusal(&mut state, tool, refusal.code);
         match seal_locked(
             &mut state,
             tool,
@@ -243,6 +248,21 @@ pub(crate) fn audit_payload_text<T: rmcp::serde::Serialize>(
             ),
         )
     })
+}
+
+/// Record one refusal in the session's observe ring, so `log.query` answers
+/// what the agent just did wrong instead of an empty page. AD9: the ring had
+/// test writers only, so a refused call left no trace. The message names the
+/// tool and its machine code, never the free text, so a secret in an argument
+/// cannot reach the log. Bounded like every other event: one per refused call,
+/// oldest evicted at [`super::log_tools::LOG_RING_CAP`], and the audit record
+/// beside it stays the tamper-evident one.
+fn note_refusal(state: &mut ServerState, tool: &str, code: &str) {
+    state.push_log(Event::new(
+        EventCode::DOOR_REFUSED,
+        state.doc.revision,
+        &format!("{tool} refused {code}"),
+    ));
 }
 
 /// Append one audit record over an already-locked state: the lock words,

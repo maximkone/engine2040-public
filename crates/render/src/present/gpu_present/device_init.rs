@@ -59,6 +59,10 @@ impl Presenter {
     /// `surface` (kept alive by the presenter). The native constructors above
     /// are unchanged. Zero area fails loudly like `init_windowed`. `uncapped`
     /// picks Immediate or Mailbox present mode instead of Fifo (vsync).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the browser's async handles plus size and pacing, one call"
+    )]
     pub fn init_from_device(
         instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,

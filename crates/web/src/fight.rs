@@ -11,6 +11,11 @@
 //! feed the shoulder camera's shake. [`Match::hud`] is a small snapshot of the round state the
 //! page paints as two health bars, round pips and a K.O./WINNER banner.
 //!
+//! WEB16: every cue kind paints its own flash ([`crate::exchange`]): a parry is gold, a block is
+//! a cold blue, a hit is red, a dodge is a pale after-image. The stamina bar and the poise pips
+//! come from the sim's own numbers through the app's live match. A landed cue freezes the body
+//! for the cue's hit-stop, exactly as the sim does.
+//!
 //! Names stay neutral here (seat, body), so the page does not grow a genre assumption: the
 //! crate's own ledger lists the words it may use.
 use std::fmt;
@@ -25,10 +30,16 @@ use engine_net::session::BodyInput;
 use engine_render::present::{DrawList, Presenter};
 use engine_render::procedural_arena::{ProceduralArena, ShoulderView};
 
+use crate::exchange::{self, Exchange, Flash};
 use crate::input::Facing;
 
 /// Seats in the page's match: the human seat plus one brain.
 pub const SEATS: u8 = engine_game::page_duel::PAGE_DUEL_SEATS;
+/// [`SEATS`] as the array length the page's per-seat state uses, spelled once so no array size
+/// needs a numeric cast. `usize::from` is not callable in a const (it is not a const trait yet),
+/// so the length is written out; `seats_len_matches_the_match` in the tests keeps it equal to
+/// [`SEATS`], and a seat added to `page_duel` without this line fails there.
+pub const SEATS_LEN: usize = 2;
 /// Fixed steps the page's match may run before it stops: ten minutes at 60 Hz, so a person
 /// plays rather than watching a 600-tick receipt end.
 pub const MATCH_TICKS: u32 = 36_000;
@@ -58,8 +69,10 @@ pub const KO_HOLD_TICKS: u32 = 75;
 /// Ticks the match-winner banner stays up before a fresh match starts: two and a half seconds.
 pub const WINNER_HOLD_TICKS: u32 = 150;
 /// Ticks a landed hit keeps the body white. Longer than one fixed step, because the page draws
-/// at 30 Hz and steps up to two ticks per frame.
-pub const HIT_FLASH_TICKS: u32 = 8;
+/// at 30 Hz and steps up to two ticks per frame. WEB16: the per-kind flash of
+/// [`crate::exchange`] holds for its own [`exchange::FLASH_TICKS`]; this stays the whole-match
+/// hit white the native leg uses.
+pub const HIT_FLASH_TICKS: u32 = exchange::FLASH_TICKS;
 
 /// Why the page could not build or draw a match frame.
 #[derive(Debug)]
@@ -112,6 +125,9 @@ impl HudBanner {
 
 /// The played page's whole HUD, from the match's own state. Small and `Copy`, so the caller can
 /// compare it with the last frame's snapshot and touch the DOM only when something changed.
+///
+/// WEB16: the stamina bar, the poise pips and the one-word call travel here, so the page paints
+/// the v2 exchange the duel already runs and not only its health.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct MatchHud {
     /// Health in permille for (human, rival).
@@ -124,6 +140,14 @@ pub struct MatchHud {
     pub winner: Option<u8>,
     /// The K.O./WINNER flash while it holds.
     pub banner: Option<HudBanner>,
+    /// Stamina points for (human, rival) against [`exchange::STAMINA_MAX`], straight from the
+    /// sim's own stamina. A bad slot reads 0, so an empty bar never shows as a full one.
+    pub stamina: [u16; 2],
+    /// Poise as `(points left, cap)` for (human, rival), from the sim's own meters.
+    pub poise: [(u16, u16); 2],
+    /// The one-word call the last tick spoke (`PARRY`, `RIPOSTE`, `CLASH`, `BREAK`, ...), held
+    /// for [`exchange::CALL_TICKS`] so a person can read it.
+    pub call: Option<&'static str>,
 }
 
 impl MatchHud {
@@ -152,6 +176,29 @@ impl MatchHud {
     pub fn round_number(&self) -> u32 {
         self.rounds_played.saturating_add(1)
     }
+
+    /// One side's stamina bar width in percent, from the sim's own points.
+    #[must_use]
+    pub fn stamina_percent(&self, side: usize) -> u32 {
+        exchange::stamina_percent(self.stamina.get(side).copied())
+    }
+
+    /// One side's poise pips: filled for the points left, hollow for the rest.
+    #[must_use]
+    pub fn poise_pips(&self, side: usize) -> String {
+        let reading = self.poise.get(side).copied().filter(|(_, max)| *max > 0);
+        exchange::poise_pips(reading)
+    }
+
+    /// True while the side's poise meter holds a break. A slot the sim does not
+    /// run reads no points and no cap, which is not a break.
+    #[must_use]
+    pub fn poise_broken(&self, side: usize) -> bool {
+        self.poise
+            .get(side)
+            .copied()
+            .is_some_and(|(current, max)| current == 0 && max > 0)
+    }
 }
 
 /// One played match on the page plus the scenery it is drawn over.
@@ -164,8 +211,22 @@ pub struct Match {
     facing_cdeg: i16,
     /// This tick's fight cues, so hits flash on the frame that follows them.
     cues: Vec<FightCue>,
-    /// Ticks each seat's body still flashes white, index by slot.
-    flash: [u32; 2],
+    /// The latency toggle: which cue kind each seat's body flashes, and for how many ticks.
+    /// `None` on a quiet seat, so the body draws its own material (WEB16).
+    flash: [Option<(Flash, u32)>; SEATS_LEN],
+    /// The exchange state that names a riposte, a clash and a break between ticks.
+    exchange: Exchange,
+    /// The one-word call of the last tick that spoke one, and the ticks it has left.
+    call: Option<(&'static str, u32)>,
+    /// The poise readings of the tick before this one, so a fresh zero is a real break.
+    poise_prev: [(u16, u16); 2],
+    /// The last animation time a frame drew with, held while hit-stop freezes the picture.
+    held_t: f32,
+    /// The animation time a frozen frame draws with: the last unfrozen one, so the body stands
+    /// exactly where the cue left it.
+    frozen_t: Option<f32>,
+    /// True while a frame drew under hit-stop freeze.
+    flash_frozen: bool,
     /// Round wins by (human, rival) this match, folded from the app's round verdicts.
     wins: [u32; 2],
     /// The banner up right now, and the ticks it has left.
@@ -207,7 +268,13 @@ impl Match {
             facing: Facing::default(),
             facing_cdeg: 0,
             cues: Vec::new(),
-            flash: [0; 2],
+            flash: [None; SEATS_LEN],
+            exchange: Exchange::new(),
+            call: None,
+            poise_prev: [(0, 0); 2],
+            held_t: 0.0,
+            frozen_t: None,
+            flash_frozen: false,
             wins: [0; 2],
             banner: None,
             hold: 0,
@@ -271,12 +338,38 @@ impl Match {
     /// decided round closes and starts the next one, and a session at its bound starts a fresh
     /// match, so an idle or long-running page keeps playing instead of freezing.
     ///
+    /// WEB16: a landed cue freezes the body for the cue's hit-stop. The count comes from the
+    /// sim's own mirror (`App::hitstop_remaining`), so the page holds exactly as long as the
+    /// fight does and never invents its own timing.
+    ///
     /// A round that ends on a knockout holds the match for [`KO_HOLD_TICKS`] (or
     /// [`WINNER_HOLD_TICKS`] for the match itself) so the last pose, the empty bar and the
     /// banner are readable; the hold never advances the sim.
     pub fn step(&mut self, input: BodyInput) {
-        for left in &mut self.flash {
-            *left = left.saturating_sub(1);
+        // Hit-stop freezes the picture, not the sim: the tick still steps (combat drains its own
+        // counter there), but the flash and the one-word call hold and the scene clock does not
+        // advance, so the body stands exactly where the cue left it (WEB16).
+        let frozen = self.app.hitstop_remaining() > 0;
+        self.flash_frozen = frozen;
+        if frozen {
+            self.frozen_t = Some(self.held_t);
+        } else {
+            self.frozen_t = None;
+            for slot in &mut self.flash {
+                if let Some((_, left)) = slot {
+                    *left = left.saturating_sub(1);
+                    if *left == 0 {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+        if let Some((word, left)) = self.call {
+            if left > 1 {
+                self.call = Some((word, left - 1));
+            } else {
+                self.call = None;
+            }
         }
         if self.hold > 0 {
             self.hold -= 1;
@@ -293,6 +386,7 @@ impl Match {
         self.tick = self.tick.saturating_add(1);
         self.cues = outcome.cues;
         self.latch_flash();
+        self.latch_call();
         let hp = self.app.hp();
         if hp.first().copied().unwrap_or(0) == 0 || hp.get(1).copied().unwrap_or(0) == 0 {
             match self.app.close_round() {
@@ -310,20 +404,75 @@ impl Match {
         }
     }
 
-    /// Light the flash of every seat the tick's cues hit.
+    /// Light the flash of every seat the tick's cues hit, one kind per seat (WEB16): the loudest
+    /// cue that happened to the body wins, so a parry is never painted as a plain hit.
     fn latch_flash(&mut self) {
-        for cue in &self.cues {
-            let victim = match *cue {
-                FightCue::Hit { victim, .. } | FightCue::Knockdown { victim, .. } => victim,
-                FightCue::Blocked { .. }
-                | FightCue::Parried { .. }
-                | FightCue::Dodged { .. }
-                | FightCue::StaminaOut { .. } => continue,
+        for seat in 0..SEATS {
+            let Some(kind) = exchange::seat_flash(&self.cues, seat) else {
+                continue;
             };
-            if let Some(left) = self.flash.get_mut(usize::from(victim)) {
-                *left = HIT_FLASH_TICKS;
+            if let Some(slot) = self.flash.get_mut(usize::from(seat)) {
+                *slot = Some((kind, exchange::FLASH_TICKS));
             }
         }
+    }
+
+    /// Name the tick's exchange: a riposte, a clash or a poise break speaks over the plain
+    /// parry/block/hit words the cues carry (WEB16).
+    fn latch_call(&mut self) {
+        let broke = self.poise_broken();
+        if let Some(call) = self.exchange.call(&self.cues, broke, self.tick) {
+            self.call = Some((call.word(), exchange::CALL_TICKS));
+        }
+        self.exchange = self.exchange.after(&self.cues, broke, self.tick);
+    }
+
+    /// The two seats' poise meters, read from the sim's own state as `(points, cap)`.
+    fn poise_read(&self) -> [(u16, u16); 2] {
+        let read = |seat: u8| {
+            self.app
+                .live_match()
+                .poise(seat)
+                .map_or((0u16, 0u16), |meter| (meter.current, meter.max))
+        };
+        [read(0), read(1)]
+    }
+
+    /// True when a poise meter tripped on this tick: a meter with points left last tick that is
+    /// empty now. A meter with no cap at all (a bad slot) is empty by construction and never
+    /// counts as a break. Under the shipped v2 rows the strike drains the meter by its whole
+    /// cap, so the first landed hit is the trip the page names `BREAK`.
+    fn poise_broken(&mut self) -> bool {
+        let now = self.poise_read();
+        let tripped = |(points, cap): (u16, u16)| points == 0 && cap > 0;
+        let broke =
+            now.iter().copied().any(tripped) && !self.poise_prev.iter().copied().any(tripped);
+        self.poise_prev = now;
+        broke
+    }
+
+    /// The call the page speaks right now, or `None` on a quiet tick.
+    #[must_use]
+    pub fn call(&self) -> Option<&'static str> {
+        self.call.map(|(word, _)| word)
+    }
+
+    /// The animation time one frame draws with: the caller's own clock while the fight runs,
+    /// the last unfrozen time while hit-stop holds the picture (WEB16). The caller also checks
+    /// [`Match::frozen`] to say so on the page.
+    #[must_use]
+    pub fn animation_t(&self, t_s: f32) -> f32 {
+        if self.frozen() {
+            self.frozen_t.unwrap_or(t_s)
+        } else {
+            t_s
+        }
+    }
+
+    /// True while the last frame drew under the sim's own hit-stop freeze.
+    #[must_use]
+    pub fn frozen(&self) -> bool {
+        self.flash_frozen
     }
 
     /// The hold after a round or match ended: clear the banner, then start the next round or a
@@ -343,7 +492,13 @@ impl Match {
             self.app = app;
             self.tick = 0;
             self.cues.clear();
-            self.flash = [0; 2];
+            self.flash = [None; SEATS_LEN];
+            self.exchange = Exchange::new();
+            self.call = None;
+            self.poise_prev = [(0, 0); 2];
+            self.held_t = 0.0;
+            self.frozen_t = None;
+            self.flash_frozen = false;
             self.wins = [0; 2];
             self.banner = None;
             self.hold = 0;
@@ -352,28 +507,55 @@ impl Match {
     }
 
     /// The match's live bodies: one dot per seat, with this tick's hit and the flash the last
-    /// few steps latched (so a hit reads at the page's 30 Hz draw rate too).
+    /// few steps latched (so a hit reads at the page's 30 Hz draw rate too). WEB16: a latched
+    /// flash of any kind marks the dot `hit`, so the body's own white flash still reads while
+    /// the per-kind material paints over it.
     fn dots(&self) -> Vec<BodyDot> {
         let mut dots = live_fight_dots(&self.app, &self.cues);
         for dot in &mut dots {
-            if self.flash.get(usize::from(dot.slot)).copied().unwrap_or(0) > 0 {
+            if self
+                .flash
+                .get(usize::from(dot.slot))
+                .copied()
+                .flatten()
+                .is_some_and(|(_, left)| left > 0)
+            {
                 dot.hit = true;
             }
         }
         dots
     }
 
-    /// The camera shake weight, `0.0..=1.0`: the strongest hit flash still lit.
+    /// The cue kind a seat's body is flashing, or `None` on a quiet seat (WEB16).
+    fn seat_flash(&self, seat: u8) -> Option<Flash> {
+        self.flash
+            .get(usize::from(seat))
+            .copied()
+            .flatten()
+            .filter(|(_, left)| *left > 0)
+            .map(|(kind, _)| kind)
+    }
+
+    /// The camera shake weight, `0.0..=1.0`: the strongest flash still lit. WEB16: a parry and a
+    /// hit shake alike, so the weight reads the loudest cue kind still painting.
     fn shake(&self) -> f32 {
-        let left = self.flash.iter().copied().max().unwrap_or(0);
+        let left = self
+            .flash
+            .iter()
+            .flatten()
+            .map(|(_, left)| *left)
+            .max()
+            .unwrap_or(0);
         f32::from(u16::try_from(left).unwrap_or(0))
             / f32::from(u16::try_from(HIT_FLASH_TICKS).unwrap_or(1))
     }
 
-    /// The HUD snapshot the page paints: health, round wins, the round number and the banner.
+    /// The HUD snapshot the page paints: health, round wins, the round number, the banner, the
+    /// stamina bars, the poise pips and the one-word call (WEB16).
     #[must_use]
     pub fn hud(&self) -> MatchHud {
         let hp = self.app.hp();
+        let stamina = [self.stamina_of(0), self.stamina_of(1)];
         MatchHud {
             hp: [
                 hp.first().copied().unwrap_or(0),
@@ -387,7 +569,16 @@ impl Match {
                 RoundWinner::Tie => None,
             }),
             banner: self.banner,
+            stamina,
+            poise: self.poise_read(),
+            call: self.call(),
         }
+    }
+
+    /// One seat's stamina points, straight from the sim's own fight state. A bad slot reads 0,
+    /// so an empty bar never shows as a full one.
+    fn stamina_of(&self, seat: u8) -> u16 {
+        self.app.live_match().stamina(seat).unwrap_or(0)
     }
 
     /// The HUD snapshot when it changed since the last call, so the page touches its DOM only
@@ -413,16 +604,19 @@ impl Match {
             .collect::<Vec<_>>()
             .join(" ");
         format!(
-            "match: tick={} hp={}/{} rounds={}/{} bodies={}/{} kit={}/{} at={at} cam=({:.1},{:.1},{:.1})->({:.1},{:.1},{:.1})",
+            "match: tick={} hp={}/{} stam={}/{} rounds={}/{} bodies={}/{} kit={}/{} call={} at={at} cam=({:.1},{:.1},{:.1})->({:.1},{:.1},{:.1})",
             self.app.cursor(),
             hp.first().copied().unwrap_or(0),
             hp.get(1).copied().unwrap_or(0),
+            self.stamina_of(0),
+            self.stamina_of(1),
             self.wins[0],
             self.wins[1],
             self.drawn,
             self.staged,
             self.kit_drawn,
             self.kit.as_ref().map_or(0, KitReport::draw_count),
+            self.call().unwrap_or("-"),
             self.cam[0],
             self.cam[1],
             self.cam[2],
@@ -444,13 +638,17 @@ impl Match {
         height: u32,
         t_s: f32,
     ) -> Result<DrawList, MatchError> {
+        let drawn_t = self.animation_t(t_s);
+        if !self.frozen() {
+            self.held_t = drawn_t;
+        }
         let dots = self.dots();
         self.staged =
             stage_fight_bodies(presenter, &dots).map_err(|e| MatchError::Stage(e.to_string()))?;
         let resident = presenter.mesh_keys();
         let mut list = self
             .arena
-            .list_scenery(width, height, t_s)
+            .list_scenery(width, height, drawn_t)
             .map_err(|e| MatchError::Scenery(e.to_string()))?;
         // WEB17: once the cooked kit is staged, it is the arena: the procedural ring's items go
         // and the kit's own draws take their place, under the same camera and light.
@@ -465,7 +663,7 @@ impl Match {
                 rival_m: b.pos_m,
                 facing_cdeg: self.facing_cdeg,
                 shake: self.shake(),
-                t_s,
+                t_s: drawn_t,
             };
             // The kit's corridor is a rectangle, not a ring: keep the eye inside its walls too.
             let camera = if self.kit.is_some() {
@@ -484,8 +682,29 @@ impl Match {
             list.camera.target.y,
             list.camera.target.z,
         ];
+        let bodies_at = list.items.len();
         self.drawn = push_fight_draws(&mut list, &resident, &dots)
             .map_err(|e| MatchError::Bodies(e.to_string()))?;
+        self.paint_flash_materials(&mut list, &dots, bodies_at);
         Ok(list)
+    }
+
+    /// WEB16: a seat with a latched flash paints its own material over the plain body one, so a
+    /// parry is gold, a block a cold blue, a hit red and a dodge a pale after-image. The fight
+    /// body's own draw comes from `engine-game`'s shared fight helpers (a per-kind tint there
+    /// would change every window's picture), so the page applies the tint to the draws it owns;
+    /// the mesh, camera and light stay the shared ones. The body draws are the last
+    /// [`Self::drawn`](Match::drawn) items, in the same seat order as `dots`.
+    fn paint_flash_materials(&self, list: &mut DrawList, dots: &[BodyDot], from: usize) {
+        for (dot, item) in dots
+            .iter()
+            .zip(list.items.iter_mut().skip(from).take(self.drawn))
+        {
+            let Some(kind) = self.seat_flash(dot.slot) else {
+                continue;
+            };
+            item.material.base_color = kind.color();
+            item.material.exposure = kind.exposure();
+        }
     }
 }

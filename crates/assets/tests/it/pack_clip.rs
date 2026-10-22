@@ -59,6 +59,131 @@ fn joint(body: &engine_anim::contract::Skeleton, name: &str) -> usize {
         .unwrap_or_else(|| panic!("the body has the {name} joint"))
 }
 
+/// The body's bind world positions, composed down each chain with its bind
+/// rotations: the game skins from these, so the standing height is the head's
+/// world Y here.
+fn bind_world_pos(
+    body: &engine_anim::contract::Skeleton,
+    bind: &engine_assets::retarget::BindPose,
+) -> Vec<[f32; 3]> {
+    let mut world = vec![[0.0f32; 3]; body.len()];
+    for (index, joint) in body.joints.iter().enumerate() {
+        let (parent_pos, parent_rot) = match joint.parent {
+            Some(parent) => (world[parent], bind.rotations[parent]),
+            None => ([0.0; 3], [0.0, 0.0, 0.0, 1.0]),
+        };
+        let turned = rotate(bind.positions[index], parent_rot);
+        world[index] = [
+            parent_pos[0] + turned[0],
+            parent_pos[1] + turned[1],
+            parent_pos[2] + turned[2],
+        ];
+    }
+    world
+}
+
+/// The transferred clip's world positions per joint per key, composed down
+/// each chain exactly the skinning convention: `world = parent + R * local`
+/// where `R` accumulates the clip's own rotations.
+///
+/// The key count is the **longest** position track's, not track zero's: a
+/// joint the map does not bind holds a single key (its bind pose), so track
+/// zero — the body root — can be one key long while the clip is two seconds.
+fn clip_world_positions(
+    clip: &engine_assets::skin_import::ImportedClip,
+    body: &engine_anim::contract::Skeleton,
+) -> Vec<Vec<[f32; 3]>> {
+    let keys = clip
+        .positions
+        .tracks
+        .iter()
+        .map(|track| track.values.len())
+        .max()
+        .unwrap_or(0);
+    let mut out: Vec<Vec<[f32; 3]>> = vec![Vec::with_capacity(keys); body.len()];
+    for at in 0..keys {
+        let mut world_pos = vec![[0.0f32; 3]; body.len()];
+        for (index, joint) in body.joints.iter().enumerate() {
+            let local = pos_at(&clip.positions.tracks[index].values, at);
+            let (parent_pos, parent_rot) = match joint.parent {
+                Some(parent) => (world_pos[parent], world_rot(parent, clip, body, at)),
+                None => ([0.0; 3], [0.0, 0.0, 0.0, 1.0]),
+            };
+            let turned = rotate(local, parent_rot);
+            world_pos[index] = [
+                parent_pos[0] + turned[0],
+                parent_pos[1] + turned[1],
+                parent_pos[2] + turned[2],
+            ];
+        }
+        for (index, pos) in world_pos.iter().enumerate() {
+            out[index].push(*pos);
+        }
+    }
+    out
+}
+
+/// One joint's accumulated world rotation at one key: the clip's rotations
+/// composed from the identity down to the joint.
+///
+/// A joint the map does not bind carries a single key (its bind pose held),
+/// so a lane shorter than the clip's key count reads its last value.
+fn world_rot(
+    joint: usize,
+    clip: &engine_assets::skin_import::ImportedClip,
+    body: &engine_anim::contract::Skeleton,
+    at: usize,
+) -> [f32; 4] {
+    let mut chain = Vec::new();
+    let mut cur = Some(joint);
+    while let Some(j) = cur {
+        chain.push(j);
+        cur = body.joints[j].parent;
+    }
+    chain.reverse();
+    let mut rot = [0.0, 0.0, 0.0, 1.0];
+    for j in chain {
+        rot = quat_mul(rot, lane_at(&clip.rotations[j].values, at));
+    }
+    rot
+}
+
+/// The value of a position lane at one key, or its last value when the lane
+/// is shorter (a joint the map does not bind holds one key, its bind pose).
+fn pos_at(lane: &[[f32; 3]], at: usize) -> [f32; 3] {
+    lane.get(at)
+        .copied()
+        .unwrap_or_else(|| lane.last().copied().unwrap_or([0.0; 3]))
+}
+
+/// The value of a lane at one key, or its last value when the lane is
+/// shorter (a held bind pose).
+fn lane_at(lane: &[[f32; 4]], at: usize) -> [f32; 4] {
+    lane.get(at)
+        .copied()
+        .unwrap_or_else(|| lane.last().copied().unwrap_or([0.0, 0.0, 0.0, 1.0]))
+}
+
+/// The raw Hamilton product of two `[x, y, z, w]` quaternions, no
+/// normalization: the tests compose offsets exactly like the anim skinning.
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
+}
+
+/// Rotate a vector by a quaternion, `q * v * conj(q)`: length-preserving.
+fn rotate(v: [f32; 3], quat: [f32; 4]) -> [f32; 3] {
+    let r = quat_mul(
+        quat_mul(quat, [v[0], v[1], v[2], 0.0]),
+        [-quat[0], -quat[1], -quat[2], quat[3]],
+    );
+    [r[0], r[1], r[2]]
+}
+
 #[test]
 fn every_combat_pack_plays_on_the_game_body() {
     let (body, bind) = game_body();
@@ -157,6 +282,59 @@ fn the_feet_stay_on_the_ground() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn the_clip_stands_on_the_body_and_reaches_its_own_height() {
+    // The transfer must place the teacher's motion on the game's own body:
+    // the head stays near the body's height and the feet on the ground, in
+    // every clip. A transfer that scaled the motion wrong (the old retarget
+    // grew the torso by 36x) would push the head past the body or sink the
+    // feet through the floor.
+    let (body, bind) = game_body();
+    let head = joint(&body, "head");
+    let bind_world = bind_world_pos(&body, &bind);
+    let body_height = bind_world[head][1];
+    assert!(
+        body_height > 1.0,
+        "the body has a standing height, got {body_height}"
+    );
+    for clip in CLIPS {
+        let bytes = fixture(&format!("fixtures/clips/combat/{clip}.am5p"));
+        let played = clip_from_pack_bytes(&bytes, &body, &bind).expect("the clip plays");
+        // The transferred world positions, composed down each chain exactly
+        // the way the game skins (world = parent + R_parent * local, with
+        // the clip's own rotations).
+        let world = clip_world_positions(&played, &body);
+        let mut head_max = f32::NEG_INFINITY;
+        let mut foot_min = f32::INFINITY;
+        let mut foot_max = f32::NEG_INFINITY;
+        for (joint, joint_def) in body.joints.iter().enumerate() {
+            let is_foot = joint_def.name == "foot_l" || joint_def.name == "foot_r";
+            for pos in &world[joint] {
+                if joint == head {
+                    head_max = head_max.max(pos[1]);
+                } else if is_foot {
+                    foot_min = foot_min.min(pos[1]);
+                    foot_max = foot_max.max(pos[1]);
+                }
+            }
+        }
+        assert!(
+            (head_max - body_height).abs() < 0.30,
+            "{clip}: the head stays near the body height, got {head_max} vs {body_height}"
+        );
+        // The feet ride the body's own ground: they may lift through a
+        // stride (a slash raises the trailing foot about 26 cm) but never
+        // sink through the sand. The band holds a stride, not a float.
+        assert!(
+            foot_min > -0.15 && foot_max < 0.30,
+            "{clip}: the feet stay on the ground, got {foot_min}..{foot_max}"
+        );
+        println!(
+            "AM29_BODY clip={clip} body_height={body_height:.3} head_max={head_max:.3} foot_y={foot_min:.3}..{foot_max:.3}"
+        );
     }
 }
 

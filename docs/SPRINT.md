@@ -84,6 +84,8 @@ Rows live in one shard per section (byte-identical; each shard header is the can
 - [`SPRINT-29-hunt.md`](SPRINT-29-hunt.md) — Hunt 2026-10-21: steals from outside the engine set (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
 - [`SPRINT-30-feel.md`](SPRINT-30-feel.md) — Feel: weight, impact, particles and the game-building door (owner 2026-10-21)
 - [`SPRINT-31-research.md`](SPRINT-31-research.md) — Research 2026-10-22: engine, feel, arXiv and agent steals (verdict in docs/research/finish-line-2026-10-22/00-verdict.md)
+- [`SPRINT-32-real-chars.md`](SPRINT-32-real-chars.md) — Realistic characters 2026-10-22: Rocketbox bodies, Mixamo mocap, Kimodo prompt library, weapons in hand, no-pop attack clips
+- [`SPRINT-33-speed-demo.md`](SPRINT-33-speed-demo.md) — Speed demo 2026-10-22: fly and drive ever faster over generated terrain, a giant sword that cuts towers in half (`arena --demo speed`)
 
 ### Ready (live, never a snapshot)
 

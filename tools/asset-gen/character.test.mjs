@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import {
   argValue, chooseLane, gateVerdict, mpfbPlan, pngSize, glbImages, budgetCheck,
   receiptLine, buildReceipt, PAGE, FILL_MIN, FILL_MAX, rocketboxPlan, ROOT,
+  ROCKETBOX_BAND, ktx2Bytes, cappedDims, rocketboxShippedBytes,
 } from "./character.mjs";
 import {
   parseAvatar, parseListing, listingText, fetchPlan, alreadyHave, curlArgs,
@@ -73,12 +74,14 @@ test("pngSize reads the IHDR of a PNG and refuses anything else", () => {
 });
 
 // A minimal GLB: a JSON chunk naming one image in a bufferView, then the BIN chunk.
-function fakeGlb(imageBytes) {
+// `extra` adds more JSON (materials, textures) to the document.
+function fakeGlb(imageBytes, extra = {}) {
   const json = Buffer.from(JSON.stringify({
     asset: { version: "2.0" },
     images: [{ bufferView: 0, mimeType: "image/png" }],
     bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: imageBytes.length }],
     buffers: [{ byteLength: imageBytes.length }],
+    ...extra,
   }));
   const jsonPad = Buffer.concat([json, Buffer.alloc((4 - (json.length % 4)) % 4, 0x20)]);
   const binPad = Buffer.concat([imageBytes, Buffer.alloc((4 - (imageBytes.length % 4)) % 4)]);
@@ -158,6 +161,99 @@ test("receiptLine prints the one line with tris, atlas, fill, gate and budget", 
   assert.match(line, /budget fail: lod0 2500 tris over the 2000 tri budget \| 312\.4 s$/);
   assert.equal(receipt.lods[1].bytes, 131152);
   assert.match(receipt.next_step, /not wired into the game/);
+});
+
+test("glbImages marks the image a material uses as its normal map", () => {
+  const png = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png, 0);
+  png.writeUInt32BE(1024, 16);
+  png.writeUInt32BE(1024, 20);
+  const plain = glbImages(fakeGlb(png));
+  assert.equal(plain[0].normal, false);
+  const tagged = glbImages(fakeGlb(png, {
+    textures: [{ source: 0 }],
+    materials: [{ pbrMetallicRoughness: {}, normalTexture: { index: 0 } }],
+  }));
+  assert.equal(tagged[0].normal, true);
+});
+
+// ------------------------------------------------ the Rocketbox gate and budget
+
+test("the Rocketbox band passes the two proven avatars and fails a rectangle", () => {
+  assert.deepEqual(ROCKETBOX_BAND, { min: 0.25, max: 0.70 });
+  // Male_Adult_08 (0.30) and Military_Male_01 (0.35), arms out in the T-pose.
+  assert.equal(gateVerdict(0.30, ROCKETBOX_BAND), "pass");
+  assert.equal(gateVerdict(0.35, ROCKETBOX_BAND), "pass");
+  // The blockout that read as a rectangle still fails, and so does the other heavy.
+  assert.equal(gateVerdict(0.7443, ROCKETBOX_BAND), "fail_too_solid");
+  assert.equal(gateVerdict(0.7519, ROCKETBOX_BAND), "fail_too_solid");
+  assert.equal(gateVerdict(0.24, ROCKETBOX_BAND), "fail_too_sparse");
+});
+
+test("the blockout lanes keep their band: a T-pose fill fails there, a rectangle still fails", () => {
+  assert.equal(gateVerdict(0.30), "fail_too_sparse");
+  assert.equal(gateVerdict(0.35), "fail_too_sparse");
+  assert.equal(gateVerdict(0.7443), "fail_too_solid");
+});
+
+test("buildReceipt judges the gate by the band it is given", () => {
+  const budget = budgetCheck({ lod0Triangles: 1, trisBudget: 2000, laneBytes: 1, atlases: [] });
+  const base = {
+    name: "rb_male08", faction: "rocketbox", tris: 7400, seconds: { total: 1 },
+    cookJson: { lods: [{ lod: 0, triangles: 7000 }] }, lodBytes: { 0: 1 },
+    silhouette: { bbox_fill: 0.3052, fill_30m: 0.31, height_30m_px: 90 },
+    rig: null, budget, verdict: "pass", stopped: null,
+  };
+  assert.equal(buildReceipt({ ...base, band: ROCKETBOX_BAND }).gate.verdict, "pass");
+  assert.deepEqual(buildReceipt({ ...base, band: ROCKETBOX_BAND }).gate.band, [0.25, 0.70]);
+  assert.equal(buildReceipt(base).gate.verdict, "fail_too_sparse");
+});
+
+test("ktx2Bytes counts the rig cook's KTX2: BC1 colour, BC5 normal, full mip chain", () => {
+  // 256 px: 9 levels. BC1 levels 32768+8192+2048+512+128+32+16+16+16 = 43728,
+  // header 80 + 9*24 + DFD 44 = 340, aligned to 352: 352 + 43728.
+  assert.equal(ktx2Bytes(256, 256, false), 44080);
+  // BC5 levels 87408, header 80 + 9*24 + DFD 60 = 356, aligned to 368.
+  assert.equal(ktx2Bytes(256, 256, true), 87776);
+  // A 4 px map is three levels of one block each (8 B, padded to 16): header 80 + 3*24 + 44 = 196,
+  // aligned to 208, then 3 * 16 = 48.
+  assert.equal(ktx2Bytes(4, 4, false), 256);
+});
+
+test("cappedDims holds the long edge to the 256 px page cap, aspect kept", () => {
+  assert.deepEqual(cappedDims({ width: 1024, height: 1024 }), { width: 256, height: 256 });
+  assert.deepEqual(cappedDims({ width: 1024, height: 512 }), { width: 256, height: 128 });
+  assert.deepEqual(cappedDims({ width: 128, height: 64 }), { width: 128, height: 64 });
+});
+
+test("rocketboxShippedBytes: the GLB without its PNGs, plus the capped KTX2 of each map", () => {
+  const atlases = [
+    { width: 1024, height: 1024, bytes: 1191862, normal: false },
+    { width: 1024, height: 1024, bytes: 1220101, normal: true },
+  ];
+  const shipped = rocketboxShippedBytes({ lodBytes: 2500000, atlases });
+  assert.equal(shipped, 2500000 - (1191862 + 1220101) + ktx2Bytes(256, 256, false) + ktx2Bytes(256, 256, true));
+  assert.equal(shipped, 2500000 - 2411963 + 44080 + 87776);
+});
+
+test("the Rocketbox budget counts the shipped lane, not the 1024 px PNGs", () => {
+  // The measured Male_Adult_08 cook: a 6.67 MB LOD0 of which 6.36 MB is five 1024 px PNGs.
+  const atlases = [
+    { width: 1024, height: 1024, bytes: 1191862, normal: false },
+    { width: 1024, height: 1024, bytes: 1220101, normal: true },
+    { width: 1024, height: 1024, bytes: 1188729, normal: false },
+    { width: 1024, height: 1024, bytes: 1194001, normal: true },
+    { width: 1024, height: 1024, bytes: 1562869, normal: false },
+  ];
+  const lodBytes = 6670856;
+  const laneBytes = rocketboxShippedBytes({ lodBytes, atlases });
+  assert.ok(laneBytes < PAGE.firstBundleBytes, `shipped ${laneBytes} B should fit the first bundle`);
+  // The raw PNG count would have failed the same lane.
+  assert.ok(lodBytes >= PAGE.firstBundleBytes);
+  const r = budgetCheck({ lod0Triangles: 7000, trisBudget: 7400, laneBytes, atlases });
+  assert.equal(r.verdict, "pass", r.findings.join(" | "));
+  assert.equal(r.numbers.cookedEdge, 256);
+  assert.equal(r.numbers.decodedBytes, 5 * 256 * 256 * 4);
 });
 
 // ------------------------------------------------------- the Rocketbox lane

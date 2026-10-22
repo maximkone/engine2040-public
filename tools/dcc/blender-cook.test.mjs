@@ -53,3 +53,87 @@ test("a pin file with a wrong sha exits 2 before Blender starts", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// GEO1b: the recipe runner. The three tests that cook run the pinned Blender
+// and skip on a machine without it; the two refusal tests never start it.
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+
+function cook(...args) {
+  const r = spawnSync("node", [script, ...args], { encoding: "utf8" });
+  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+}
+
+function sha256FileSync(path) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    createReadStream(path).on("data", (c) => hash.update(c)).on("error", reject).on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+const RECIPE = join(here, "recipes", "crate.json");
+
+test("two cooks of the crate recipe give the same glb sha256", { skip: !existsSync(pin.exe) && "pinned Blender not installed" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-cook-"));
+  try {
+    const a = join(dir, "a.glb");
+    const b = join(dir, "b.glb");
+    const ra = cook("--recipe", RECIPE, "--out", a);
+    assert.equal(ra.code, 0, ra.out);
+    const rb = cook("--recipe", RECIPE, "--out", b);
+    assert.equal(rb.code, 0, rb.out);
+    const sideA = JSON.parse(readFileSync(`${a}.json`, "utf8"));
+    const sideB = JSON.parse(readFileSync(`${b}.json`, "utf8"));
+    assert.equal(sideA.output, sideB.output, "two cooks, one glb digest");
+    assert.match(sideA.output, /^[0-9a-f]{64}$/);
+    assert.match(sideA.blender_version, /^[0-9a-f]{64}$/);
+    assert.match(sideA.recipe, /^[0-9a-f]{64}$/);
+    assert.match(sideA.script, /^[0-9a-f]{64}$/);
+    assert.equal(sideA.recipe, sideB.recipe);
+    assert.equal(sideA.script, sideB.script);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the cooked glb is glTF 2 and the sidecar names its bytes", { skip: !existsSync(pin.exe) && "pinned Blender not installed" }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-cook-"));
+  try {
+    const glb = join(dir, "crate.glb");
+    const r = cook("--recipe", RECIPE, "--out", glb);
+    assert.equal(r.code, 0, r.out);
+    const head = readFileSync(glb).subarray(0, 12);
+    assert.equal(head.subarray(0, 4).toString("latin1"), "glTF", "the glb magic");
+    assert.equal(head.readUInt32LE(4), 2, "glTF version 2");
+    const side = JSON.parse(readFileSync(`${glb}.json`, "utf8"));
+    assert.equal(side.output, await sha256FileSync(glb), "the sidecar's output digest is the file's");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unknown op exits 4 recipe.unknown_op before Blender starts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-cook-"));
+  try {
+    const bad = join(dir, "bad.json");
+    writeFileSync(bad, JSON.stringify({ ops: [{ op: "sky" }] }));
+    const r = cook("--recipe", bad, "--out", join(dir, "x.glb"));
+    assert.equal(r.code, 4, r.out);
+    assert.ok(r.out.includes("recipe.unknown_op"), r.out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a python key is refused the same way", () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-cook-"));
+  try {
+    const bad = join(dir, "python.json");
+    writeFileSync(bad, JSON.stringify({ python: "bpy", ops: [{ op: "cube" }] }));
+    const r = cook("--recipe", bad, "--out", join(dir, "x.glb"));
+    assert.equal(r.code, 4, r.out);
+    assert.ok(r.out.includes("recipe.unknown_op"), r.out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

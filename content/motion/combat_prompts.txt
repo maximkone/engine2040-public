@@ -1,0 +1,207 @@
+# Kimodo combat prompt library. One prompt per line: id<TAB>prompt
+# Ids: lower case letters, digits, underscore (1..60). Prompts: 1..500 characters,
+# HumanML3D style ("A person ..."). Blank lines and lines starting with # are skipped.
+# Encode the whole file on Kaggle with tools/motion/kaggle_encode.py --library <this file>.
+# Check the cache with: node tools/motion/clip.mjs --list-library
+
+# Shipped clips (the cache must keep these texts)
+slash_h	A person swings a sword in a fast horizontal slash.
+slash_over	A person raises a sword and brings it down in a strong overhead strike.
+spear_thrust	A person lunges forward and thrusts a spear.
+parry	A person parries an attack with a sword and then strikes back.
+
+# Locomotion and idles
+walk_fwd	A person walks forward.
+run_fwd	A person runs forward at a fast pace.
+turn_left	A person turns left on the spot.
+guard_idle_ready	A person stands in a ready fighting stance, shifting their weight slightly.
+guard_idle_sword	A person holds a sword in a low guard and waits, breathing.
+guard_idle_shield	A person stands behind a raised shield, waiting for an attack.
+guard_idle_two_hand	A person holds a two-handed sword in a ready stance.
+guard_idle_spear	A person holds a spear level in a ready guard.
+guard_idle_crouch	A person crouches low in a defensive guard and watches.
+guard_idle_sway	A person sways gently side to side in a guard position.
+guard_idle_tense	A person stands tense in a fighting stance, weight on the back foot.
+guard_idle_relaxed	A person holds a sword loosely in a relaxed fighting stance.
+guard_idle_high	A person holds a sword high in a guard above the head.
+draw_sword_hip	A person draws a sword from the hip and settles into a fighting stance.
+draw_bow	A person draws a bow, aims, and releases the arrow.
+walk_guard	A person walks forward slowly in a fighting guard, sword held ready.
+walk_guard_back	A person walks backward slowly in a fighting guard.
+walk_guard_left	A person sidesteps slowly to the left in a fighting guard.
+walk_guard_right	A person sidesteps slowly to the right in a fighting guard.
+walk_guard_heavy	A person walks forward heavily in full armour, sword held in guard.
+walk_shield	A person walks forward behind a raised shield.
+walk_circle_left	A person circles to the left slowly with a sword in guard.
+walk_circle_right	A person circles to the right slowly with a sword in guard.
+run_guard	A person runs forward in a fighting guard with a sword held ready.
+run_guard_shield	A person runs forward behind a shield, low and ready.
+run_guard_back	A person runs backward quickly in a fighting guard.
+run_charge	A person charges forward at a run with a sword raised.
+turn_guard	A person turns on the spot while holding a sword in guard.
+
+# Horizontal cuts
+slash_h_light	A person makes a quick light slash from right to left with one hand.
+slash_h_heavy	A person slashes a heavy sword from right to left with both hands.
+slash_h_left_right	A person slashes a sword from left to right at chest height.
+slash_h_backhand	A person swings a sword in a wide backhand slash from left to right.
+slash_h_double	A person slashes a sword across the body with two quick horizontal strokes.
+slash_h_low	A person swings a sword low in a horizontal slash at knee height.
+slash_h_waist	A person cuts a sword in a flat horizontal slash at waist height.
+slash_h_spin	A person spins and swings a sword in a wide horizontal slash.
+slash_h_running	A person runs and makes a horizontal slash with a sword.
+slash_h_step_in	A person steps forward and slashes a sword horizontally.
+
+# Overhead cuts
+slash_over_light	A person quickly brings a sword down in a light overhead chop.
+slash_over_heavy	A person raises a heavy sword overhead with both hands and brings it down hard.
+slash_over_two_hand	A person grips a sword with two hands and chops it straight down overhead.
+slash_over_step	A person steps forward and brings a sword down in an overhead strike.
+slash_over_axe	A person swings an axe overhead and brings it down in a heavy strike.
+slash_over_mace	A person raises a mace overhead and smashes it down.
+
+# Diagonal and rising cuts
+slash_diag_left	A person slashes a sword diagonally from the upper right to the lower left.
+slash_diag_right	A person slashes a sword diagonally from the upper left to the lower right.
+slash_diag_light	A person makes a quick diagonal cut with a sword from high shoulder to low hip.
+slash_diag_heavy	A person swings a heavy sword in a deep diagonal cut from shoulder to hip.
+slash_rise	A person swings a sword up in a rising cut from the hip to over the head.
+slash_rise_light	A person makes a quick rising slash with a sword from the hip.
+slash_rise_heavy	A person drives a heavy blade upward in a rising cut from the ground.
+slash_rise_axe	A person swings an axe upward in a rising strike.
+slash_hook	A person swings a sword in a short hooking cut at the side of the head.
+
+# Thrusts and stabs
+thrust_light	A person quickly jabs a short sword forward.
+thrust_heavy	A person lunges forward and drives a long spear into the target.
+thrust_low	A person thrusts a spear low at the leg from a crouched stance.
+thrust_stab_down	A person stabs a dagger downward into the target.
+thrust_shield	A person stabs forward with a sword held low behind a shield.
+thrust_retreat	A person thrusts a spear forward and then steps back.
+thrust_two_hand	A person thrusts a sword forward with both hands on the hilt.
+thrust_feint_jab	A person jabs forward quickly with a short blade and pulls back.
+thrust_high	A person thrusts a spear high at the head.
+
+# Blocks
+block_high_sword	A person raises a sword above the head to block a downward strike.
+block_high_light	A person quickly raises an arm to block a strike above the head.
+block_high_heavy	A person braces against a heavy blow with a sword held overhead in both hands.
+block_low_sword	A person lowers a sword to block a strike at the legs.
+block_low_shield	A person drops a shield low to block a strike at the knees.
+block_mid_sword	A person holds a sword across the chest to block a strike.
+block_shield_brace	A person raises a shield to block an incoming attack and braces behind it.
+block_shield_high	A person raises a shield high to block an overhead blow.
+block_shield_mid	A person lifts a shield in front of the chest and braces against a hit.
+block_shield_heavy	A person plants a shield and takes a heavy blow with the arm braced.
+block_shield_turn	A person angles a shield to deflect a blow to the side.
+block_hold_push	A person holds a block with a sword and pushes back against the attacker.
+
+# Parries
+parry_light	A person quickly flicks a sword up to parry an incoming cut.
+parry_heavy	A person catches a heavy blow on the sword and pushes it aside.
+parry_riposte	A person parries a thrust with a sword and then slashes back.
+parry_low	A person parries a low strike by dropping the blade and sweeping it aside.
+parry_overhead	A person parries an overhead strike and steps off the line.
+parry_counter_thrust	A person knocks a blade aside and counters with a thrust.
+parry_spear	A person deflects a spear thrust with a sword and steps in.
+parry_wide	A person pushes an attacker's sword wide with a sweeping parry.
+
+# Shield bashes
+shield_bash_light	A person quickly jabs a shield forward into the attacker.
+shield_bash_heavy	A person charges forward and slams a shield into the attacker.
+shield_bash_step	A person steps in and bashes forward with the rim of a shield.
+shield_bash_low	A person drives a shield low into the attacker's knees.
+shield_bash_knock	A person shoves forward with a shield and knocks the attacker backward.
+shield_bash_cut	A person bashes with a shield and follows with a sword cut.
+
+# Feints
+feint_head_slash	A person fakes a slash at the head and then cuts to the side.
+feint_thrust	A person feints a thrust and pulls back quickly.
+feint_step	A person feints a step forward and then stops.
+feint_shoulder	A person raises a shoulder as if to strike and holds still.
+feint_overhead_low	A person makes a fake overhead cut and changes it to a low sweep.
+feint_bait	A person lowers the guard as bait and then snaps the sword up.
+
+# Dodges and sidesteps
+dodge_back	A person leans back quickly to dodge an incoming blow.
+dodge_left	A person sidesteps left to avoid an attack.
+dodge_right	A person sidesteps right to avoid a thrust.
+dodge_duck	A person ducks low to avoid a horizontal slash.
+dodge_roll	A person rolls forward away from an attack and comes up on one knee.
+dodge_long_back	A person jumps back a long step to avoid a heavy blow.
+dodge_lean	A person leans sideways out of the way of a thrust.
+dodge_shuffle	A person quickly shuffles left and right to dodge.
+dodge_side_turn	A person sidesteps and turns to face the attacker.
+dodge_side_back	A person dodges sideways and steps back.
+
+# Staggers
+stagger_light_front	A person is hit lightly in the chest and rocks back a step.
+stagger_heavy_front	A person is hit hard in the chest and staggers back several steps.
+stagger_light_back	A person is hit lightly from behind and stumbles forward a step.
+stagger_heavy_back	A person is struck hard in the back and lurches forward.
+stagger_chest_back	A person is hit in the chest and staggers backward.
+stagger_head	A person is hit on the side of the head and staggers sideways.
+stagger_shoulder	A person is hit on the shoulder and turns away from the blow.
+stagger_arm	A person is hit on the arm and recoils with the arm pulled in.
+stagger_leg	A person is hit on the leg and hops to keep balance.
+stagger_shield	A person is struck on the shield and is pushed back.
+stagger_recover	A person is hit, staggers, then catches balance and steadies.
+
+# Knockdowns
+knockdown_struck	A person is struck and collapses to the ground.
+knockdown_front	A person is knocked off their feet and falls forward onto the ground.
+knockdown_back	A person is knocked backward and falls flat onto their back.
+knockdown_side	A person is swept off their feet and falls onto one side.
+knockdown_heavy	A heavy blow sends a person crashing to the ground.
+knockdown_slide	A person is knocked down and slides across the ground.
+knockdown_trip	A person trips over an obstacle and falls to the ground.
+knockdown_kick	A person is kicked in the chest and falls backward onto the ground.
+
+# Get-ups
+getup_quick	A person quickly pushes up from the ground and rises to a stance.
+getup_slow	A person slowly gets up from the ground, pushing with one hand.
+getup_knee	A person rises from a kneeling position to stand.
+getup_side	A person rolls onto one side and gets to their feet.
+getup_back	A person rolls over from their back, rises to their knees, and then stands.
+getup_sword	A person gets up from the ground while holding a sword.
+getup_shield	A person rises from the ground and raises a shield.
+getup_wobble	A person gets up unsteadily, wobbles, and then stands firm.
+
+# Deaths
+death_front	A person is struck and collapses forward, dying on the ground.
+death_back	A person is struck in the chest and falls backward, dying.
+death_kneel	A person sinks to their knees and slumps forward.
+death_twist	A person is struck and spins as they fall to the ground.
+death_slow	A person slowly falls to the ground and goes limp.
+death_heavy	A person is struck by a heavy blow and drops straight down.
+death_side	A person falls to the side and lies still.
+death_throw	A person is thrown backward and lands on the ground, dead.
+death_clutch	A person clutches a wound, falls to their knees, and collapses.
+
+# Taunts
+taunt_victory	A person raises both arms in victory and cheers.
+taunt_wave	A person waves a sword in front of them and beckons the enemy forward.
+taunt_chest	A person beats their chest and shouts a challenge.
+taunt_point	A person points a sword at the enemy and taunts them.
+taunt_spit	A person spits to the side and stares down the enemy.
+taunt_shield_slap	A person slaps their shield and calls out.
+taunt_flex	A person flexes and spreads their arms wide in a challenge.
+
+# Combinations, kicks, grapples
+combo_slash_two	A person makes two quick slashes, one horizontal and then one overhead.
+combo_thrust_slash	A person thrusts forward and then slashes with the same sword.
+combo_shield_sword	A person bashes with a shield and then slashes with a sword.
+combo_spin_cut	A person spins once and cuts across with the sword.
+swing_recover	A person misses a swing, recovers, and resets into a guard.
+swing_finish_guard	A person finishes a swing and pulls the sword back into guard.
+kick_front	A person delivers a strong front kick.
+kick_low_sweep	A person sweeps a leg low to knock the attacker's feet away.
+kick_side	A person kicks sideways into the attacker's knee.
+punch_jab	A person throws a quick punch with a closed fist.
+punch_heavy	A person throws a heavy punch forward with the full body behind it.
+headbutt	A person lunges forward and butts with the head.
+grapple_push	A person pushes forward with both hands into the attacker's chest.
+grapple_pull	A person grabs the attacker's arm and pulls them forward off balance.
+grapple_throw	A person grabs an attacker and throws them over one shoulder.
+disarm_twist	A person twists a sword out of the attacker's hand.
+cross_guard_push	A person locks blades with the attacker in a cross guard and pushes.

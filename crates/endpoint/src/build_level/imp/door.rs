@@ -250,6 +250,16 @@ pub(super) fn build_level_on_state(
                     yaw: placement.yaw,
                 })
                 .collect();
+            // DOOR1: keep the game parts on the session so `game.play` plays this level.
+            // The writes list is id-sorted and `ids` is built in the same order, so each
+            // part pairs with the live node it became.
+            #[cfg(feature = "rules")]
+            {
+                let live_ids: Vec<String> = ids.iter().map(|(id, _)| id.to_string()).collect();
+                let plan = plan_brief(&env).map_err(bad_brief)?;
+                state.game_parts = game_parts(&plan, &edit.writes, &live_ids);
+                state.game_rev = applied.revision;
+            }
             // D19: the landed build answers with the checks that judged it.
             let checks = vec![
                 crate::verify_tasks::check("level.solved", TOOL_BUILD_LEVEL, true, ""),

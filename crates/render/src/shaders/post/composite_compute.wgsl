@@ -30,10 +30,10 @@ fn sample_level(base: u32, mw: u32, mh: u32, uu: f32, vv: f32) -> vec3<f32> {
     let d = mips[base + y1 * mw + x1].rgb;
     return mix(mix(a, b, tx), mix(c, d, tx), ty);
 }
-fn aces_fit(x: f32) -> f32 {
-    let v = max(x, 0.0);
-    return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
-}
+// The tone map is the shared chunk: `tonemap.wgsl` is prepended at compile
+// time (`post/gpu.rs` `COMPOSITE_COMPUTE_WGSL`), so `aces_tonemap` is the one
+// hue-keeping curve of the crate. The per-channel copy that used to live
+// here shifted a torch flame's hue by +32.3 degrees.
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = u.dims.x;
@@ -77,8 +77,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let per = select(u.bloom.x / f32(max(count, 1u)), 0.0, count == 0u);
     let exposed = (hdr + acc * per) * u.bloom.y;
-    let white = max(aces_fit(u.bloom.z), 1e-4);
-    let toned = vec3<f32>(aces_fit(exposed.x), aces_fit(exposed.y), aces_fit(exposed.z)) / white;
+    let toned = aces_tonemap(exposed, 1.0, u.bloom.z);
     let mid = vec3<f32>(0.18);
     let con = (toned - mid) * u.bloom.w + mid;
     let luma = dot(con, vec3<f32>(0.2126, 0.7152, 0.0722));

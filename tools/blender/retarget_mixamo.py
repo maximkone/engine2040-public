@@ -82,7 +82,13 @@ def rot(m):
 
 def import_fbx(path):
     before = set(bpy.data.objects)
-    bpy.ops.import_scene.fbx(filepath=path, automatic_bone_orientation=False)
+    if path.lower().endswith(".bvh"):
+        # A BVH source (the combat-motion sidecar writes HumanML3D-22 with
+        # Mixamo-style names, no fingers): Y-up file, Blender turns it Z-up.
+        bpy.ops.import_anim.bvh(filepath=path, axis_forward="-Z", axis_up="Y",
+                                update_scene_fps=True, update_scene_duration=True)
+    else:
+        bpy.ops.import_scene.fbx(filepath=path, automatic_bone_orientation=False)
     new = [o for o in set(bpy.data.objects) - before]
     arms = [o for o in new if o.type == "ARMATURE"]
     if len(arms) != 1:
@@ -128,21 +134,15 @@ def wire_textures(meshes, tex_dir):
             bsdf.inputs["Roughness"].default_value = 0.6
 
 
-def main():
-    target_path, source_path, out = arg("--target"), arg("--source"), arg("--out")
-    if not (target_path and source_path and out):
-        sys.stderr.write(__doc__)
-        return EXIT_USAGE
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    tgt, tgt_meshes = import_fbx(target_path)
-    src, src_meshes = import_fbx(source_path)
-    for ob in src_meshes:
-        bpy.data.objects.remove(ob, do_unlink=True)
-    wire_textures(tgt_meshes, arg("--textures"))
+def retarget_onto(tgt, src, in_place, action_name):
+    """Key the source armature's action onto the target as a new action.
 
+    Returns (action, first, last, pairs, scale). The target's pose is reset
+    first, so several clips can be put on one body in a row.
+    """
     action = src.animation_data.action if src.animation_data else None
     if action is None:
-        raise RuntimeError(f"{source_path}: no animation")
+        raise RuntimeError(f"{src.name}: no animation")
     first, last = (int(round(v)) for v in action.frame_range)
     scene = bpy.context.scene
 
@@ -181,15 +181,17 @@ def main():
     scale = leg("tgt") / max(leg("src"), 1e-9)
     hips0 = src_head_rest("Hips")
     pelvis0 = tgt_head_rest("Bip01 Pelvis")
-    in_place = flag("--in-place")
 
     # Parent-first order on the target.
     order = [b.name for b in tgt.data.bones]
     by_tgt = {p[1]: p for p in pairs}
     tgt.animation_data_create()
-    tgt.animation_data.action = bpy.data.actions.new(name=os.path.splitext(os.path.basename(out))[0])
+    out_action = bpy.data.actions.new(name=action_name)
+    tgt.animation_data.action = out_action
     for pb in tgt.pose.bones:
         pb.rotation_mode = "QUATERNION"
+        pb.matrix_basis = Matrix.Identity(4)
+    bpy.context.view_layer.update()
 
     for frame in range(first, last + 1):
         scene.frame_set(frame)
@@ -215,7 +217,25 @@ def main():
                 pb.keyframe_insert("rotation_quaternion", frame=frame)
                 if pb.name == "Bip01 Pelvis":
                     pb.keyframe_insert("location", frame=frame)
+    return out_action, first, last, pairs, scale
 
+
+def main():
+    target_path, source_path, out = arg("--target"), arg("--source"), arg("--out")
+    if not (target_path and source_path and out):
+        sys.stderr.write(__doc__)
+        return EXIT_USAGE
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    tgt, tgt_meshes = import_fbx(target_path)
+    src, src_meshes = import_fbx(source_path)
+    for ob in src_meshes:
+        bpy.data.objects.remove(ob, do_unlink=True)
+    wire_textures(tgt_meshes, arg("--textures"))
+    in_place = flag("--in-place")
+    _, first, last, pairs, scale = retarget_onto(
+        tgt, src, in_place, os.path.splitext(os.path.basename(out))[0])
+
+    scene = bpy.context.scene
     scene.frame_start, scene.frame_end = first, last
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
     bpy.ops.object.select_all(action="DESELECT")

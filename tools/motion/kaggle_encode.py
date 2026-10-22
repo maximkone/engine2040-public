@@ -5,9 +5,13 @@
 # file in and run it. It writes /kaggle/working/emb.npz and emb.provenance.json:
 # copy both to <KIMODO_HOME>\emb.npz and <KIMODO_HOME>\emb.provenance.json.
 #
-# To add a prompt: append it to PROMPTS below (keep the old lines, the cache is
-# rebuilt from this whole list), then rerun. tools/motion/kimodo_gen.py matches a
-# prompt by exact text.
+# The prompts come from one library file, content/motion/combat_prompts.txt (one
+# "id<TAB>prompt" per line). Upload it as a Kaggle dataset named kimodo-combat-prompts
+# (or pass --library <file> / set PROMPT_LIBRARY), then run this kernel. The whole file
+# is encoded in one run, and the cache is rebuilt from all of it, so keep every line.
+# Check the file on this PC first, no GPU:
+#   python tools/motion/kaggle_encode.py --check --library content/motion/combat_prompts.txt
+# tools/motion/kimodo_gen.py matches a prompt by exact text.
 #
 # Why this is not a plain encode(): the 8B encoder does not fit on a 16 GB card
 # with the Kimodo copy of it, so the weights are split over GPU and CPU
@@ -18,8 +22,10 @@
 # The Kaggle image cannot build the kimodo wheel (MotionCorrection C++ fails), so
 # the vendored llm2vec folder is copied out of the Kimodo source and used alone.
 
+import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,24 +33,52 @@ import time
 
 import numpy as np
 
-PROMPTS = [
-    "A person swings a sword in a fast horizontal slash.",
-    "A person raises a sword and brings it down in a strong overhead strike.",
-    "A person raises a shield to block an incoming attack and braces behind it.",
-    "A person lunges forward and thrusts a spear.",
-    "A person parries an attack with a sword and then strikes back.",
-    "A person is hit in the chest and staggers backward.",
-    "A person is struck and collapses to the ground.",
-    "A person delivers a strong front kick.",
-    "A person draws a bow, aims, and releases the arrow.",
-    "A person draws a sword from the hip and settles into a fighting stance.",
-    "A person raises both arms in victory and cheers.",
-    "A person stands in a ready fighting stance, shifting their weight slightly.",
-    "A person dodges sideways and steps back.",
-    "A person walks forward.",
-    "A person runs forward at a fast pace.",
-    "A person turns left on the spot.",
+# Searched in order when no --library and no PROMPT_LIBRARY are given.
+LIBRARY_CANDIDATES = [
+    "/kaggle/input/kimodo-combat-prompts/combat_prompts.txt",
+    "/kaggle/working/combat_prompts.txt",
 ]
+ID_RE = re.compile(r"[a-z0-9_]{1,60}")
+PROMPT_MAX = 500  # same cap as tools/motion/clip.mjs and kimodo_gen.py
+
+
+def read_library(path):
+    """(ids, prompts) from an id<TAB>prompt file. Refuses the whole file on any bad line.
+
+    The same rules as tools/motion/library.mjs parseLibrary: comments (#) and blank lines
+    skipped, ids lower case letters, digits, underscore; no repeated id or prompt text.
+    """
+    ids, prompts, errors = [], [], []
+    seen_ids, seen_prompts = {}, {}
+    with open(path, encoding="utf-8") as fh:
+        for n, raw in enumerate(fh, 1):
+            line = raw.rstrip("\r\n")
+            if not line.strip() or line.strip().startswith("#"):
+                continue
+            if "\t" not in line:
+                errors.append(f"line {n}: want id<TAB>prompt")
+                continue
+            pid, prompt = (s.strip() for s in line.split("\t", 1))
+            if not ID_RE.fullmatch(pid):
+                errors.append(f"line {n}: id {pid!r} must be lower case letters, digits or underscore (1..60)")
+            elif not prompt:
+                errors.append(f"line {n}: id {pid} has an empty prompt")
+            elif len(prompt) > PROMPT_MAX:
+                errors.append(f"line {n}: id {pid} prompt is {len(prompt)} characters, past the {PROMPT_MAX} cap")
+            elif pid in seen_ids:
+                errors.append(f"line {n}: id {pid} repeats line {seen_ids[pid]}")
+            elif prompt in seen_prompts:
+                errors.append(f"line {n}: id {pid} has the same prompt text as line {seen_prompts[prompt]}")
+            else:
+                seen_ids[pid] = n
+                seen_prompts[prompt] = n
+                ids.append(pid)
+                prompts.append(prompt)
+    if errors:
+        sys.exit("kaggle_encode: " + path + " is not a valid prompt library:\n  " + "\n  ".join(errors))
+    if not prompts:
+        sys.exit(f"kaggle_encode: {path} has no prompts")
+    return ids, prompts
 
 BASE = "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp"
 SUP = "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised"
@@ -57,6 +91,23 @@ PROV = "/kaggle/working/emb.provenance.json"
 
 
 def main():
+    ap = argparse.ArgumentParser(description="Encode the Kimodo prompt library into emb.npz (Kaggle GPU).")
+    ap.add_argument("--library", default="", help="id<TAB>prompt file to encode in one run")
+    ap.add_argument("--check", action="store_true", help="read and check the library, then stop")
+    args, _ = ap.parse_known_args()  # Kaggle may add its own argv
+    lib = args.library or os.environ.get("PROMPT_LIBRARY", "")
+    if not lib:
+        lib = next((p for p in LIBRARY_CANDIDATES if os.path.isfile(p)), "")
+    if not lib or not os.path.isfile(lib):
+        print("STOP: no prompt library. Upload content/motion/combat_prompts.txt as the Kaggle dataset "
+              "kimodo-combat-prompts, or pass --library <file>.", flush=True)
+        sys.exit(8)
+    ids, lib_prompts = read_library(lib)
+    print(f"library {os.path.basename(lib)}: {len(ids)} prompts", flush=True)
+    if args.check:
+        print("check ok", flush=True)
+        return
+
     t0 = time.time()
     from kaggle_secrets import UserSecretsClient  # Kaggle only
 
@@ -105,7 +156,7 @@ def main():
         print("STOP: the adapter did not resolve to Llama-3-8B-Instruct. Do not use this cache.", flush=True)
         sys.exit(8)
 
-    texts = sorted(set(PROMPTS))
+    texts = sorted(set(lib_prompts))
     rows = []
     for i, text in enumerate(texts):
         t1 = time.time()
@@ -131,6 +182,7 @@ def main():
     np.savez(OUT, texts=np.array(texts), emb=emb)
     prov = {
         "texts": len(texts),
+        "library": {"file": os.path.basename(lib), "ids": len(ids)},
         "encoder": "LLM2Vec on Meta-Llama-3-8B-Instruct",
         "adapters": [BASE, SUP],
         "base": LLAMA,

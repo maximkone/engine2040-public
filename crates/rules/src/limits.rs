@@ -5,6 +5,10 @@ use engine_core::Fnv64;
 
 /// Actors one world may hold (the net server's player cap).
 pub const MAX_FIGHTERS: usize = 64;
+/// Neutral alias of [`MAX_FIGHTERS`] for callers that hold a roster of bodies rather than
+/// fighters: one cap, two names, so a new module need not add itself to the genre ledger.
+pub const MAX_BODIES: usize = MAX_FIGHTERS;
+
 /// Integer memory slots each fighter's rules own.
 pub const MEM_SLOTS: usize = 8;
 

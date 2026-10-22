@@ -1287,6 +1287,7 @@ impl Presenter {
         // sky pass; all-on draws it (LF1: the live frame shows the sky bake).
         // Caller: `live_sky_should_draw` above over `submit_skips_for`.
         let sky_draw = live_sky_should_draw(toggles);
+        let fight_fx = self.stage_fight_fx(&frame)?; // FEEL5: hit sparks, blood and dust
         let stale_us: u64;
         let gtao_timed: bool;
         // The `ibl` cell is the forward IBL-bound encode and nothing else, as
@@ -1328,15 +1329,9 @@ impl Presenter {
                 timer.map(|(timer, _)| timer.gtao_writes()),
             )?;
             let forward_ibl_started = engine_clock::now();
-            // The particle batch is the probe tranche's own draw (QL12): a
-            // live frame stages nothing, so it draws nothing and its pixels
-            // stay a pure function of the frame's list.
-            let sky_timed = self.encode_forward(
-                &mut enc,
-                targets,
-                list,
-                ForwardLook::live(&look, sky_draw, gtao_run, timer.map(|(timer, _)| timer)),
-            );
+            let fwd_timer = timer.map(|(timer, _)| timer);
+            let fwd = ForwardLook::live(&look, sky_draw, gtao_run, fight_fx, fwd_timer);
+            let sky_timed = self.encode_forward(&mut enc, targets, list, fwd);
             forward_ibl_ms = engine_clock::since(forward_ibl_started).as_secs_f64() * 1000.0;
             // LF3 first landing: the CPU GTAO helper
             // (`live_ao_upload_for_frame`: bake via

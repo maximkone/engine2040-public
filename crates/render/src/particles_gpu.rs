@@ -22,6 +22,9 @@ pub mod fluids_gpu;
 /// Hanabi batch layer over the seeded pool; see [`vfx_hanabi`].
 pub mod vfx_hanabi;
 
+#[path = "particle_events.rs"]
+mod particle_events;
+pub use particle_events::{BURST_EXTENT_M, MAX_BURST};
 #[cfg(feature = "window")]
 #[path = "particle_draw_gpu.rs"]
 mod particle_draw_gpu;

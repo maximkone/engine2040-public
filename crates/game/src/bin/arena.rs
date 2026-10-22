@@ -28,9 +28,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use arena_args::{
-    AGENT_SEAT_FLAG, HOLD_FLAG, PAUSE_AT_TICK_FLAG, STEP_FLAG, VIEW_BRIEF_FLAG, VIEW_LINE_FLAG,
-};
+use arena_args::{AGENT_SEAT_FLAG, VIEW_BRIEF_FLAG, VIEW_LINE_FLAG};
 use engine_assets::watcher::{WatchSettings, Watcher};
 use engine_audio::{AudioEngine, Bank, FeedTx, FightCue, FrameSource, Mixer};
 use engine_game::agent_seat::Seat;
@@ -174,6 +172,9 @@ const SPEAR_FLAG: &str = "--spear";
 /// `--spear-demo`: `--spear` plus a script for the human slot that walks at the nearest
 /// fighter and throws whenever the spear is ready (captures, trying the grapple hands-off).
 const SPEAR_DEMO_FLAG: &str = "--spear-demo";
+/// `--speed-demo`: fly or drive ever faster over a generated terrain and cut towers in half
+/// with a giant sword (docs/SPRINT-33-speed-demo.md). Presentation only.
+const SPEED_DEMO_FLAG: &str = "--speed-demo";
 /// `--height`: the fighter height channel on (rows SG5 and SG4): fighters fall
 /// and land under gravity and the wall tether swings instead of zipping.
 const HEIGHT_FLAG: &str = "--height";
@@ -644,6 +645,8 @@ fn run(raw: &[String]) -> i32 {
     let (play, raw) = arena_args::split_flag(&raw, PLAY_FLAG);
     let (spear, raw) = arena_args::split_flag(&raw, SPEAR_FLAG);
     let (spear_demo, raw) = arena_args::split_flag(&raw, SPEAR_DEMO_FLAG);
+    let (speed_demo, raw) = arena_args::split_flag(&raw, SPEED_DEMO_FLAG);
+    let (nyc, raw) = arena_args::split_flag(&raw, "--nyc");
     let (height, raw) = arena_args::split_flag(&raw, HEIGHT_FLAG);
     let (legionary, raw) = arena_args::split_flag(&raw, LEGIONARY_FLAG);
     let (agent_seat, raw) = match arena_args::split_agent_seat(&raw) {
@@ -864,6 +867,13 @@ fn run(raw: &[String]) -> i32 {
     }
     if let Err(err) = app.enable_spear(spear, spear_demo, height) {
         tell!("arena: {SPEAR_FLAG}/{HEIGHT_FLAG}: {err}");
+        return 2;
+    }
+    if let Err(err) = speed_demo
+        .then(|| app.enable_speed_demo(nyc, raw.iter().any(|a| a == "--exit")))
+        .transpose()
+    {
+        tell!("arena: {SPEED_DEMO_FLAG}: {err}");
         return 2;
     }
     // The legionary mode: the player is slot 0, the picture is the fighter's
@@ -1210,6 +1220,8 @@ struct ArenaApp {
     feel: FeelView,
     /// The spear grapple: on or off, scripted or not, and its picture.
     spear: SpearMode,
+    /// The speed demo (`--speed-demo`): its world, movers, sword and cut pieces.
+    speed: Option<arena_frame::speed_demo::scene::SpeedDemo>,
     /// Height channel on (`--height`): the wall tether swings (rows SG5, SG4).
     height: bool,
     /// Set when a script owns the human slot (`--spear-demo`, `--staged-fight`):
@@ -1392,6 +1404,7 @@ impl ArenaApp {
             bout_tape: Vec::new(),
             feel: FeelView::new(),
             spear: SpearMode::default(),
+            speed: None,
             height: false,
             scripted: None,
             view_forward: None,
@@ -1702,6 +1715,8 @@ impl ArenaApp {
     /// first warning of the run also writes its one repro bundle (view only,
     /// never the sim or the hash), so the failing frame leaves a tape.
     fn report_view(&mut self) {
+        say!("{}", self.fight_fx_line()); // FEEL5: what the fight threw on screen
+        self.report_speed_demo();
         if let Some(line) = self.view.line() {
             say!("{line}");
             // The worst pop of the run, named: which slot, which joint, when,
@@ -1831,10 +1846,11 @@ impl ArenaApp {
         self.report_latency();
         if let Some(report) = self.finalize_capture() {
             say!(
-                "arena capture: frames={} manifest=\"{}\" sha={}",
+                "arena capture: frames={} manifest=\"{}\" sha={} view={}",
                 report.frames,
                 report.manifest.display(),
                 report.sequence_fnv,
+                self.view.verdict(),
             );
             self.write_per_pass_sidecar(&report.manifest);
         }
@@ -2019,6 +2035,7 @@ impl ArenaApp {
         if self.cam_mode == CameraMode::Free {
             self.aim_free_cam(&mut list);
         }
+        self.push_speed_demo(&mut list);
         // The ears sit where the camera does (EG21w): the next tick's
         // listener, so a blow on the left of the picture sounds on the left.
         self.audio_space
@@ -2040,7 +2057,9 @@ impl ArenaApp {
                     return;
                 }
             };
-            engine_game::windowed::stage_hp_bars(presenter, &overlay);
+            if self.speed.is_none() {
+                engine_game::windowed::stage_hp_bars(presenter, &overlay);
+            }
             // PQ18 stage three: the frame submits its present call now. Only a
             // frame with an accepted tick stamps, so an idle frame never reads
             // as a stray event.
@@ -2294,6 +2313,17 @@ impl ArenaApp {
         }
     }
 
+    /// The fighter look did not load, so the window draws staged boxes. An
+    /// armed capture of boxes is no evidence (2026-10-22: a refused body
+    /// still exited 0 with a clip), so that run fails.
+    fn look_refused(&mut self, why: &str) {
+        tell!("arena notice: {why}; drawing staged boxes");
+        if self.capture.is_some() {
+            tell!("arena: an armed capture of staged boxes is no evidence; the run fails");
+            self.failure = Some(1);
+        }
+    }
+
     /// Write the capture manifest (if armed) and disarm. Runs on smoke exit
     /// and after the loop, so every armed capture run leaves exactly one.
     /// An armed capture that ends with zero frames fails loudly: a manifest
@@ -2303,10 +2333,11 @@ impl ArenaApp {
         match slot.sink.finish() {
             Ok(report) => {
                 tell!(
-                    "arena capture: frames={} manifest=\"{}\" sha={}",
+                    "arena capture: frames={} manifest=\"{}\" sha={} view={}",
                     report.frames,
                     report.manifest.display(),
                     report.sequence_fnv,
+                    self.view.verdict(),
                 );
                 if report.frames == 0 {
                     tell!("arena: armed capture ended with zero frames (no adapter or all suspended?)");
@@ -2681,7 +2712,7 @@ impl ArenaApp {
                         // (two whole-prefix replays per tick) is unused.
                         self.app.set_presentation_cursor(false);
                     }
-                    Err(err) => tell!("arena notice: {err}; drawing staged boxes"),
+                    Err(err) => self.look_refused(&err.to_string()),
                 }
                 self.presenter_notice = format!(
                     "presenter surface: {} ({}) {width}x{height}",
@@ -2765,11 +2796,10 @@ impl ApplicationHandler for ArenaApp {
                     {
                         self.flow = self.flow.on(FlowEvent::TogglePause);
                     }
-                    // Shell keys without repeat: Title starts on Enter or
-                    // Space, Result rematches on R and returns to title on
-                    // T, both clearing the finished bout first. Escape keeps
-                    // its pause toggle above.
+                    // Shell keys without repeat: Title starts on Enter/Space; Result
+                    // rematches on R, titles on T (both clear the finished bout).
                     let struck = event.state == ElementState::Pressed && !event.repeat;
+                    self.speed_demo_key(code, event.state == ElementState::Pressed);
                     // `--step`: one Space press advances exactly one held tick.
                     // A no-op outside the running bout, so Title/Space still
                     // only starts the bout (see `pause_decision`).
@@ -2831,6 +2861,7 @@ impl ApplicationHandler for ArenaApp {
             }
             WindowEvent::MouseInput { button, state, .. } => {
                 let pressed = state == ElementState::Pressed;
+                self.speed_demo_click(pressed);
                 self.set_pressed(map_mouse(arena_winit::from_winit_mouse(button)), pressed);
             }
             WindowEvent::RedrawRequested => {
@@ -3504,6 +3535,7 @@ mod tests {
             present_skip: false,
             fixed_dt_ms: None,
             window_size: None,
+            uncapped: false,
         };
         let display = WinError::NoDisplay("test headless".to_string());
         assert_eq!(
@@ -3562,6 +3594,7 @@ mod tests {
             present_skip: false,
             fixed_dt_ms: None,
             window_size: None,
+            uncapped: false,
         };
         let display = WinError::NoDisplay("test headless".to_string());
         assert_eq!(

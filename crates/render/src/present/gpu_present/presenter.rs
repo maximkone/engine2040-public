@@ -195,6 +195,8 @@ pub struct Presenter {
     pub(crate) layer_sub: material_layer::LayerSubmitter,
     /// RP2 live particle pool stepped once per presented frame.
     pub(crate) particles: particles_gpu::ParticlePool,
+    /// FEEL5 fight particles: built on the first event, stepped per sim tick.
+    pub(crate) fight_fx: Option<particles_gpu::ParticlePool>,
     /// RP2 particle bind state (sizes only when the word shape moves).
     pub(crate) particle_sub: particles_gpu::ParticleSubmitter,
     /// RP3 resident decal pool (empty until WIN1 maps CB2 gore events).
@@ -1241,6 +1243,7 @@ impl Presenter {
             sky_sub: sky::SkySubmitter::new(&device),
             layer_sub: material_layer::LayerSubmitter::new(&device),
             particles: particles_gpu::ParticlePool::new(super::quality_apply::POOL_SEED),
+            fight_fx: None,
             particle_sub: particles_gpu::ParticleSubmitter::new(&device),
             decal_pool: decals::DecalPool::new(),
             decal_sub: decals::DecalSubmitter::new(&device),
@@ -2831,10 +2834,7 @@ mod presenter_adapter_tests {
     #[test]
     fn present_mode_prefers_short_wait_when_ready() {
         let picked = crate::present::Presenter::pick_present_mode(
-            &[
-                wgpu::PresentMode::Fifo,
-                wgpu::PresentMode::Mailbox,
-            ],
+            &[wgpu::PresentMode::Fifo, wgpu::PresentMode::Mailbox],
             true,
         );
         assert_eq!(picked, wgpu::PresentMode::Mailbox);
@@ -2859,10 +2859,7 @@ mod presenter_adapter_tests {
 
     #[test]
     fn present_mode_keeps_old_path_when_not_ready() {
-        let picked = crate::present::Presenter::pick_present_mode(
-            &[wgpu::PresentMode::Fifo],
-            true,
-        );
+        let picked = crate::present::Presenter::pick_present_mode(&[wgpu::PresentMode::Fifo], true);
         assert_eq!(picked, wgpu::PresentMode::Fifo);
         let picked = crate::present::Presenter::pick_present_mode(&[], true);
         assert_eq!(picked, wgpu::PresentMode::Fifo);

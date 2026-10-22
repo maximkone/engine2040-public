@@ -292,6 +292,19 @@ fn put_seat_stats(out: &mut Vec<u8>, s: &SeatStats) {
             s.input_delay,
         ],
     );
+    // The pacing evidence rides the split wire beside the delay: the
+    // largest clock slew in permille, the frames the paced clock ran off
+    // the nominal rate and the bout ticks the client never covered. They
+    // are logged evidence, never hashed, so the split bout and the loopback
+    // bout fold to the same report.
+    put_words(
+        out,
+        &[
+            u32::try_from(s.max_slew_permille).unwrap_or(0),
+            s.slewed_frames,
+            s.skipped_frames,
+        ],
+    );
     out.push(u8::from(s.granted));
     put_words(out, &s.delivery.to_words());
 }
@@ -302,6 +315,7 @@ fn read_seat_stats(r: &mut Reader<'_>) -> Result<SeatStats, SplitError> {
     let [rollback_max, over_cap, catchups, resync_depth] = r.words()?;
     let caught = r.flag()?;
     let [last, gap_resyncs, input_delay] = r.words()?;
+    let [max_slew_permille, slewed_frames, skipped_frames] = r.words()?;
     Ok(SeatStats {
         applied,
         rejected,
@@ -315,6 +329,9 @@ fn read_seat_stats(r: &mut Reader<'_>) -> Result<SeatStats, SplitError> {
         gap_resyncs,
         granted: r.flag()?,
         delivery: DeliveryStats::from_words(r.words()?),
+        max_slew_permille: i32::try_from(max_slew_permille).unwrap_or(0),
+        slewed_frames,
+        skipped_frames,
     })
 }
 

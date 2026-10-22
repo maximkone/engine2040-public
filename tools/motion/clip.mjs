@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { loadLibrary, readCacheTexts, cacheReport, DEFAULT_LIBRARY } from './library.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(HERE, '..', '..');
@@ -40,7 +41,12 @@ const USAGE = `usage: node tools/motion/clip.mjs --prompt "<text>" --name <name>
   --install   copy the pack into content/fighters/packs/clips/ and fixtures/clips/combat/
   --allow-slip  keep a clip that fails the foot-slip gate (the numbers still print)
   --slip-max  gate in m/s, default ${SLIP_MAX}
-  --kimodo-home  default $KIMODO_HOME or ${DEFAULT_KIMODO_HOME}`;
+  --kimodo-home  default $KIMODO_HOME or ${DEFAULT_KIMODO_HOME}
+
+usage: node tools/motion/clip.mjs --list-library [<library file>] [--kimodo-home <dir>] [--cache <emb.npz>]
+  Prints which prompt ids of the library are in the embedding cache and which are missing.
+  Exit 0 all cached, 1 some missing, 2 the library or cache cannot be read.
+  Default library: content/motion/combat_prompts.txt. Cache: <kimodo-home>/emb.npz.`;
 
 const FLAGS_BOOL = new Set(['install', 'allow-slip', 'help']);
 const FLAGS_VALUE = new Set(['prompt', 'name', 'seed', 'seconds', 'samples', 'pick', 'slip-max', 'kimodo-home']);
@@ -214,6 +220,59 @@ export function sha256File(file) {
   return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+// --list-library [file] [--kimodo-home dir] [--cache emb.npz]: which library ids are cached.
+// Returns the exit code: 0 all cached, 1 some missing, 2 unreadable library or cache.
+export function listLibrary(argv) {
+  let file;
+  let kimodoHome;
+  let cache;
+  try {
+    for (let i = 0; i < argv.length; i++) {
+      const tok = argv[i];
+      if (tok === '--kimodo-home' || tok === '--cache') {
+        const value = argv[i + 1];
+        if (value === undefined || value.startsWith('--')) throw new Error(`${tok} needs a value`);
+        if (tok === '--cache') cache = value;
+        else kimodoHome = value;
+        i++;
+      } else if (tok.startsWith('--')) {
+        throw new Error(`unknown flag ${tok} for --list-library`);
+      } else if (file === undefined) {
+        file = tok;
+      } else {
+        throw new Error(`unexpected argument ${JSON.stringify(tok)}`);
+      }
+    }
+  } catch (err) {
+    console.error(`clip: ${err.message}`);
+    return 2;
+  }
+  const libFile = file || DEFAULT_LIBRARY;
+  const home = kimodoHome || process.env.KIMODO_HOME || DEFAULT_KIMODO_HOME;
+  const cacheFile = cache || process.env.KIMODO_CACHE || path.join(home, 'emb.npz');
+  let entries;
+  let texts;
+  try {
+    entries = loadLibrary(libFile);
+  } catch (err) {
+    console.error(`clip: ${err.message}`);
+    return 2;
+  }
+  try {
+    texts = readCacheTexts(cacheFile);
+  } catch (err) {
+    console.error(`clip: cache ${cacheFile} cannot be read: ${err.message}`);
+    return 2;
+  }
+  const rep = cacheReport(entries, texts);
+  console.log(`library: ${libFile} (${rep.total} prompts)`);
+  console.log(texts === null ? `cache: none at ${cacheFile}` : `cache: ${cacheFile} (${texts.length} texts)`);
+  console.log(`cached: ${rep.cached.length} of ${rep.total}`);
+  console.log(`missing: ${rep.missing.length}`);
+  for (const e of rep.missing) console.log(`  ${e.id}`);
+  return rep.missing.length === 0 ? 0 : 1;
+}
+
 class ClipError extends Error {}
 
 function fail(message) {
@@ -227,6 +286,7 @@ function runOrFail(cmd, args, options, what, fix) {
 }
 
 function main(argv) {
+  if (argv[0] === '--list-library') return listLibrary(argv.slice(1));
   let opts;
   try {
     opts = parseArgs(argv);
@@ -265,7 +325,7 @@ function main(argv) {
   );
   const result = parseGenResult(gen.stdout);
   if (gen.status === 2) {
-    fail(`prompt is not in the Kimodo embedding cache. Follow the steps printed above (tools/motion/kaggle_encode.py), then run this again.`);
+    fail(`prompt is not in the Kimodo embedding cache. Follow the steps printed above (tools/motion/kaggle_encode.py), then run this again. node tools/motion/clip.mjs --list-library shows every library id still missing.`);
   }
   if (gen.status !== 0 || !result || !result.ok) {
     fail(`kimodo_gen.py failed (exit ${gen.status}). Fix: read the message above; the venv is ${py}.`);

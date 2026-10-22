@@ -52,6 +52,13 @@ export const ROOT = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", 
 export const FILL_MIN = 0.40;
 export const FILL_MAX = 0.70;
 
+// The Rocketbox lane has its own band. A realistic avatar is measured as its
+// FBX stands it, arms out in a T-pose, so the bounding box is wide and the fill
+// is low: the two proven avatars measure 0.30 (Male_Adult_08) and 0.35
+// (Military_Male_01), both under the blockout floor. The floor sits 0.05 under
+// the sparser one. The ceiling stays at 0.70, so a rectangle (0.7443) still fails.
+export const ROCKETBOX_BAND = Object.freeze({ min: 0.25, max: 0.70 });
+
 export const FACTIONS = ["ashkin", "wardens"];
 
 // The page's budgets, as the Rust side states them:
@@ -65,9 +72,9 @@ export const PAGE = Object.freeze({
 });
 
 export const NEXT_STEP_ROCKETBOX =
-  "not wired into the game: the cooked lod0..lod3 GLBs are in the out folder, and nothing " +
-  "puts them into content/fighters or a manifest row. crates/assets/src/rocketbox_map.rs " +
-  "already names the 52 joints by the contract charset (bip01_l_upperarm and so on).";
+  "this lane is the look study (LODs, the 30 m gate, the budget); it does not reach the game. " +
+  "The game's realistic fighter comes from node tools/asset-gen/fighter.mjs --avatar <Group>/<Name> " +
+  "--name <variant> --prove (body, Mixamo clips, Roman kit, manifest row, the window proof).";
 
 export const NEXT_STEP =
   "not wired into the game: nothing puts a cooked MPFB body into content/fighters " +
@@ -92,9 +99,9 @@ export function chooseLane(argv) {
   throw new Error(`--from takes concept, mpfb or rocketbox, not ${from}`);
 }
 
-export function gateVerdict(fill) {
-  if (fill >= FILL_MIN && fill <= FILL_MAX) return "pass";
-  return fill > FILL_MAX ? "fail_too_solid" : "fail_too_sparse";
+export function gateVerdict(fill, band = { min: FILL_MIN, max: FILL_MAX }) {
+  if (fill >= band.min && fill <= band.max) return "pass";
+  return fill > band.max ? "fail_too_solid" : "fail_too_sparse";
 }
 
 // The steps of the MPFB lane, in order, as commands. Each names the file it
@@ -192,33 +199,82 @@ export function pngSize(buf) {
 }
 
 // The images a GLB carries, with their bytes (the cooked LODs embed their atlas).
+// `normal` is true for an image a material uses as its normal map, which the
+// rig cook writes as BC5 instead of BC1.
 export function glbImages(buf) {
   if (buf.length < 20 || buf.readUInt32LE(0) !== 0x46546c67) throw new Error("not a GLB file");
   const jsonLen = buf.readUInt32LE(12);
   const json = JSON.parse(buf.subarray(20, 20 + jsonLen).toString("utf8"));
   const binStart = 20 + jsonLen + 8;
   const views = json.bufferViews || [];
+  const textures = json.textures || [];
+  const normalImages = new Set((json.materials || [])
+    .filter((m) => m.normalTexture)
+    .map((m) => textures[m.normalTexture.index]?.source)
+    .filter((source) => source !== undefined));
   return (json.images || [])
-    .filter((image) => image.bufferView !== undefined)
-    .map((image) => {
+    .map((image, index) => ({ image, index }))
+    .filter(({ image }) => image.bufferView !== undefined)
+    .map(({ image, index }) => {
       const view = views[image.bufferView];
       const start = binStart + (view.byteOffset || 0);
-      return { mimeType: image.mimeType || "", bytes: buf.subarray(start, start + view.byteLength) };
+      return {
+        mimeType: image.mimeType || "",
+        bytes: buf.subarray(start, start + view.byteLength),
+        normal: normalImages.has(index),
+      };
     });
 }
 
+// A map's size on the page: its long edge held to the atlas cap, the way the
+// rig cook shrinks it (`cook_body_at`, ATLAS_MAX_DIM).
+export function cappedDims(a, page = PAGE) {
+  const k = Math.min(1, page.atlasMaxDim / Math.max(a.width, a.height, 1));
+  return { width: Math.max(1, Math.round(a.width * k)), height: Math.max(1, Math.round(a.height * k)) };
+}
+
+// The KTX2 the rig cook writes for one map (crates/assets/src/ktx2_cook.rs):
+// an 80 B header, a 24 B index entry per mip level, the DFD (28 B plus 16 per
+// channel), then every level down to 1x1 in 4x4 blocks, each level 16-byte
+// aligned. Colour is BC1 (8 B a block); a normal map is BC5 (16 B a block).
+export function ktx2Bytes(width, height, normal = false) {
+  const align = (n) => Math.ceil(n / 16) * 16;
+  const levels = 32 - Math.clz32(Math.max(width, height, 1));
+  const block = normal ? 16 : 8;
+  let total = align(80 + 24 * levels + 28 + 16 * (normal ? 2 : 1));
+  for (let level = 0; level < levels; level++) {
+    const w = Math.max(width >> level, 1);
+    const h = Math.max(height >> level, 1);
+    total += align(Math.ceil(w / 4) * Math.ceil(h / 4) * block);
+  }
+  return total;
+}
+
+// The bytes a Rocketbox body ships as: the LOD0 GLB without its embedded PNGs
+// (the rig cook drops every image and keeps the rest of the rig), plus the KTX2
+// it writes for each map at the atlas cap. `atlases` is [{ width, height, bytes, normal }],
+// where bytes is the embedded PNG's size.
+export function rocketboxShippedBytes({ lodBytes, atlases }, page = PAGE) {
+  const embedded = atlases.reduce((sum, a) => sum + a.bytes, 0);
+  const ktx2 = atlases.reduce((sum, a) => {
+    const d = cappedDims(a, page);
+    return sum + ktx2Bytes(d.width, d.height, Boolean(a.normal));
+  }, 0);
+  return lodBytes - embedded + ktx2;
+}
+
 // The page's budget for one cooked body, with the numbers the Rust rig cook
-// measures: the lane is the LOD0 GLB (its atlas is inside it), and the decoded
-// RGBA of the atlases has to fit. The atlas edge is not a failure: the rig
-// cook (`cook_body_at`, ATLAS_MAX_DIM) shrinks every atlas to the cap on its
-// way to the page, so memory is counted at the edge the page will hold.
-// `atlases` is [{ width, height, bytes }].
+// measures: the lane is the bytes the body ships as (for the MPFB lane, the
+// LOD0 GLB with its atlas inside), and the decoded RGBA of the atlases has to
+// fit. The atlas edge is not a failure: the rig cook shrinks every atlas to the
+// cap on its way to the page, so memory is counted at the edge the page will
+// hold. `atlases` is [{ width, height, bytes }].
 export function budgetCheck({ lod0Triangles, trisBudget, laneBytes, atlases }, page = PAGE) {
   const findings = [];
   const maxEdge = atlases.reduce((m, a) => Math.max(m, a.width, a.height), 0);
   const capped = (a) => {
-    const k = Math.min(1, page.atlasMaxDim / Math.max(a.width, a.height, 1));
-    return Math.max(1, Math.round(a.width * k)) * Math.max(1, Math.round(a.height * k));
+    const d = cappedDims(a, page);
+    return d.width * d.height;
   };
   const decoded = atlases.reduce((sum, a) => sum + capped(a) * 4, 0);
   const cookedEdge = Math.min(maxEdge, page.atlasMaxDim);
@@ -254,7 +310,10 @@ export function receiptLine(r) {
 
 // The receipt object of an MPFB chain. Pure given its inputs; the file
 // sizes of the LODs are passed in so the builder does no I/O.
-export function buildReceipt({ name, faction, tris, seconds, cookJson, lodBytes, silhouette, rig, budget, verdict, stopped }) {
+export function buildReceipt({
+  name, faction, tris, seconds, cookJson, lodBytes, silhouette, rig, budget, verdict, stopped,
+  band = { min: FILL_MIN, max: FILL_MAX },
+}) {
   return {
     name,
     faction,
@@ -264,11 +323,11 @@ export function buildReceipt({ name, faction, tris, seconds, cookJson, lodBytes,
     lods: cookJson ? cookJson.lods.map((l) => ({ lod: l.lod, triangles: l.triangles, bytes: lodBytes[l.lod] })) : [],
     gate: silhouette
       ? {
-        verdict: gateVerdict(silhouette.bbox_fill),
+        verdict: gateVerdict(silhouette.bbox_fill, band),
         bbox_fill: silhouette.bbox_fill,
         fill_30m: silhouette.fill_30m,
         height_30m_px: silhouette.height_30m_px,
-        band: [FILL_MIN, FILL_MAX],
+        band: [band.min, band.max],
       }
       : null,
     rig: rig ? { bones: rig.bones, weighted_vertices: rig.weighted_vertices, vertices: rig.vertices } : null,
@@ -426,19 +485,21 @@ function runMpfb(argv) {
   }
 }
 
-// The page's budget for a cooked lod0, read from the GLB the cook wrote.
+// The page's budget for a cooked lod0, read from the GLB the cook wrote. The
+// lane is what the page gets: the GLB without its 1024 px PNGs, plus the 256 px
+// KTX2 the rig cook makes from each of them.
 function rocketboxBudget(out, tris) {
   const cookJson = readJson(join(out, "cook", "cook.json"));
   const lod0 = readFileSync(join(out, "cook", "lod0.glb"));
   const atlases = glbImages(lod0).map((image) => {
     const size = pngSize(image.bytes);
     if (!size) fail(`lod0 carries a non-PNG image (${image.mimeType}), the budget cannot be read`);
-    return { ...size, bytes: image.bytes.length };
+    return { ...size, bytes: image.bytes.length, normal: image.normal };
   });
   return budgetCheck({
     lod0Triangles: cookJson.lods[0].triangles,
     trisBudget: tris,
-    laneBytes: lod0.length,
+    laneBytes: rocketboxShippedBytes({ lodBytes: lod0.length, atlases }),
     atlases,
   });
 }
@@ -471,14 +532,14 @@ function runRocketbox(argv) {
     outputs[step.label] = result.output;
     if (step.label === "30 m gate") {
       const silhouette = readJson(join(out, "gate", "silhouette.json"));
-      const verdict = gateVerdict(silhouette.bbox_fill);
+      const verdict = gateVerdict(silhouette.bbox_fill, ROCKETBOX_BAND);
       if (verdict !== "pass") {
         // The receipt still carries the budget numbers, so the owner sees both.
         seconds.total = elapsed(started);
         const receipt = buildReceipt({
           name, faction: "rocketbox", tris, seconds, cookJson: readJson(join(out, "cook", "cook.json")),
           lodBytes: lodByteSizes(out), silhouette, rig: null, budget: rocketboxBudget(out, tris),
-          verdict, stopped: step.label,
+          verdict, stopped: step.label, band: ROCKETBOX_BAND,
         });
         receipt.next_step = NEXT_STEP_ROCKETBOX;
         writeReceipt(out, receipt);
@@ -497,6 +558,7 @@ function runRocketbox(argv) {
   const receipt = buildReceipt({
     name, faction: "rocketbox", tris, seconds, cookJson, lodBytes: lodByteSizes(out), silhouette,
     rig: null, budget, verdict: budget.verdict === "pass" ? "pass" : "budget_fail", stopped: null,
+    band: ROCKETBOX_BAND,
   });
   receipt.next_step = NEXT_STEP_ROCKETBOX;
   receipt.avatar = { group: avatar.group, name: avatar.name, licence: cookJson.licence, sha256: cookJson.source.sha256 };

@@ -1011,11 +1011,11 @@ pub fn tone_map(color: [f32; 3]) -> [f32; 3] {
     crate::tonemap::tone_map(color, 1.0, crate::tonemap::DISPLAY_WHITE)
 }
 
-/// `linear_to_srgb`: sRGB EOTF (IEC 61966-2-1) reimplemented from the
-/// standard, not a Bevy port — Bevy v0.15.0 `color_operations.wgsl` and
-/// `tonemapping_shared.wgsl` carry no such function (verified 2026-09-25).
-/// The one source is `crate::tonemap::linear_to_srgb`, the CPU twin of the
-/// WGSL `tonemap.wgsl` chunk.
+// `linear_to_srgb`: sRGB EOTF (IEC 61966-2-1) reimplemented from the
+// standard, not a Bevy port — Bevy v0.15.0 `color_operations.wgsl` and
+// `tonemapping_shared.wgsl` carry no such function (verified 2026-09-25).
+// The one source is `crate::tonemap::linear_to_srgb`, the CPU twin of the
+// WGSL `tonemap.wgsl` chunk.
 
 /// One shaded surface point: material factors plus the geometric terms.
 /// Bundled so the shade entry point stays a single argument.

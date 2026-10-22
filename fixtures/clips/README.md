@@ -14,8 +14,8 @@ Two kinds of clip live here, and the difference matters:
 | file | what | sha256 |
 |---|---|---|
 | `stagger.npz` | teacher source: 36 frames at 30 fps, `local_rot_mats`, `root_positions`, `posed_joints`, `fps`, `seed` | `2bc933c4175af98d2a39303b93ef97809ee8b04361d059c91321daf857d01fa1` |
-| `stagger.am5p` | baked pack: AM5P v2, 61 ticks at 60 Hz, one track per fighter joint (65) plus one rotation track per joint, 54813 bytes | `7d46ef7e40e9408a876e3dd2d36cf87826272e4527b47bb53590df6b3e9ef65c` |
-| `stagger.receipt.json` | the bake receipt: `qclip_hash 0xbc8c13006a5aad0a`, `ticks 61`, `track_count 65`, `avg_slip` 0.004975 / 0.102805, `plant_windows` 2/3, `retarget_digest 0x592af8cffb61ff84` | — |
+| `stagger.am5p` | baked pack: AM5P v2, 61 ticks at 60 Hz, one track per fighter joint (65) plus one rotation track per joint, 54813 bytes | `a9204ea95e00f9c0b2339cbea3674446c9797b5a17b2052f0e7cf4d9d16acbdc` |
+| `stagger.receipt.json` | the bake receipt: `qclip_hash 0xf5f4de57dd5a7280`, `ticks 61`, `track_count 65`, `avg_slip` 0.024264 / 0.496259, `plant_windows` 0/0, `retarget_digest 0x0f326636a24f4f30` | — |
 
 Regenerate (same bytes):
 

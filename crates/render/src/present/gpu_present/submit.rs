@@ -141,13 +141,14 @@ pub(super) struct ForwardLook<'a> {
 impl<'a> ForwardLook<'a> {
     /// The live window frame: the draw, sun and sky switches the frame's
     /// `LiveLook` carries (the sky in its own pass when on), depth kept for the
-    /// sky pass and for GTAO (`gtao`), no particle batch (a live frame never
-    /// steps the pool), and the device timestamps of the frame's timer slot.
+    /// sky pass and for GTAO (`gtao`), the fight particles when staged (FEEL5,
+    /// `fight_fx.rs`), and the device timestamps of the frame's timer slot.
     #[must_use]
     pub(super) fn live(
         look: &LiveLook,
         sky: bool,
         gtao: bool,
+        particles: bool,
         timer: Option<&'a GpuTimer>,
     ) -> Self {
         Self {
@@ -155,7 +156,7 @@ impl<'a> ForwardLook<'a> {
             sun_depth: look.sun_depth,
             sky: if sky { SkyPlan::OwnPass } else { SkyPlan::Skip },
             keep_depth: gtao,
-            particles: false,
+            particles,
             timestamps: timer.map(GpuTimer::forward_writes),
             sky_timestamps: timer.map(GpuTimer::sky_writes),
             particle_timestamps: None,
@@ -184,17 +185,15 @@ impl<'a> ForwardLook<'a> {
 impl ForwardLook<'_> {
     /// A blocking frame (capture twin, probe composite): every pass on, no
     /// sky of its own (a capture decision may add it), depth kept for the fog
-    /// feed and no device timestamps. The live particle batch is left out: a
-    /// capture of one list must repeat byte-exact, and the pool steps one
-    /// tick per look frame, so drawing it would move pixels between twins.
+    /// feed, no timestamps; fight particles when staged (stepped per tick, so twins repeat).
     #[must_use]
-    pub(super) fn blocking() -> Self {
+    pub(super) fn blocking(particles: bool) -> Self {
         Self {
             draws: true,
             sun_depth: true,
             sky: SkyPlan::Skip,
             keep_depth: true,
-            particles: false,
+            particles,
             timestamps: None,
             sky_timestamps: None,
             particle_timestamps: None,
@@ -1454,11 +1453,12 @@ impl Presenter {
         // LF3 landing 2: the capture twin runs the same occlusion field as
         // the live frame, so the capture and the window agree.
         let gtao_run = self.gtao_live_plan(true, width, height);
+        let particles = self.stage_fight_fx(&frame)?; // FEEL5: the capture shows them too
         {
             let targets = self.targets.as_ref().expect("ensured above");
             let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
             self.encode_ao_field(&mut enc, targets, list, &frame, gtao_run, None)?;
-            self.encode_forward(&mut enc, targets, list, ForwardLook::blocking());
+            self.encode_forward(&mut enc, targets, list, ForwardLook::blocking(particles));
             // RL9 depth-readback seam: this frame's depth feeds the fog
             // tranche below (same queue order, so the copy sees the
             // forward pass writes).

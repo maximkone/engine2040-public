@@ -16,9 +16,9 @@
   "pack_magic": "AM5P",
   "pack_version": 2,
   "packed_bytes": 54813,
-  "bytes_sha256": "7d46ef7e40e9408a876e3dd2d36cf87826272e4527b47bb53590df6b3e9ef65c",
-  "qclip_hash": "0xbc8c13006a5aad0a",
-  "retarget_digest": "0x592af8cffb61ff84",
-  "avg_slip": {"leftfoot": 0.004975, "rightfoot": 0.102805},
-  "plant_windows": {"leftfoot": 2, "rightfoot": 3}
+  "bytes_sha256": "a9204ea95e00f9c0b2339cbea3674446c9797b5a17b2052f0e7cf4d9d16acbdc",
+  "qclip_hash": "0xf5f4de57dd5a7280",
+  "retarget_digest": "0x0f326636a24f4f30",
+  "avg_slip": {"leftfoot": 0.024264, "rightfoot": 0.496259},
+  "plant_windows": {"leftfoot": 0, "rightfoot": 0}
 }

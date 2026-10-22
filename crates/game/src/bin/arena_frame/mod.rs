@@ -7,6 +7,9 @@ use engine_audio::CueBank;
 
 use super::*;
 
+mod fight_fx;
+pub(crate) mod speed_demo;
+
 pub(super) mod latency;
 pub(super) mod pace;
 pub(super) mod trace;
@@ -450,6 +453,9 @@ impl ArenaApp {
                 tally.observe(&self.tick_scratch.cues);
             }
             self.feel.observe(&self.tick_scratch.cues);
+            // FEEL5: sparks, blood and dust where the blow lands.
+            self.throw_fight_fx();
+            self.step_speed_demo();
             // FEEL3: the feel and the look freeze for the live fight's count, read after the tick.
             self.feel.observe_hitstop(self.app.hitstop_remaining());
             self.observe_spear_events(tick);

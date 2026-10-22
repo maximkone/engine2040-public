@@ -22,7 +22,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use engine_assets::rig_cook::{cook_body_at, ATLAS_MAX_DIM};
+    use engine_assets::rig_cook::{cook_body_at, cooked_names, ATLAS_MAX_DIM, COOKED_DIR};
     use std::path::PathBuf;
 
     /// Default input: the fighters content dir, next to `glb/`.
@@ -108,16 +108,28 @@ mod native {
             atlas_bytes += atlas;
             decoded_bytes += decoded;
             if let Some(out) = &config.out {
-                let dir = out.join("cooked");
+                let dir = out.join(COOKED_DIR);
                 std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
-                let stem = name.trim_end_matches(".glb");
-                let body_path = dir.join(format!("{stem}_body.glb"));
-                std::fs::write(&body_path, &cooked.glb)
-                    .map_err(|err| format!("{}: {err}", body_path.display()))?;
-                for (quadrant, texture) in cooked.textures.iter().enumerate() {
-                    let texture_path = dir.join(format!("{stem}_q{quadrant}.ktx2"));
-                    std::fs::write(&texture_path, texture)
-                        .map_err(|err| format!("{}: {err}", texture_path.display()))?;
+                // The names come from `cooked_names`, the same map the loader
+                // reads, so the lane can never hold a file the page will not
+                // ask for. A body is `glb/<variant>_body.glb` in the rig tree,
+                // so the variant is that file name without the suffix.
+                let variant = name.trim_end_matches("_body.glb");
+                let mut atlases = cooked.textures.iter();
+                for key in cooked_names(variant).keys() {
+                    let bytes = if key.ends_with(".glb") {
+                        cooked.glb.as_slice()
+                    } else {
+                        atlases
+                            .next()
+                            .ok_or_else(|| format!("{name}: more cooked names than atlases"))?
+                            .as_slice()
+                    };
+                    let path = out.join(key);
+                    std::fs::write(&path, bytes).map_err(|err| format!("{key}: {err}"))?;
+                }
+                if atlases.next().is_some() {
+                    return Err(format!("{name}: more atlases than cooked names"));
                 }
             }
             rows.push(format!(

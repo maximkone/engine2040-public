@@ -12,7 +12,8 @@
 
 use engine_assets::body_import::import_skinned_body;
 use engine_assets::ktx2_cook::{decode_level_rgba, parse_ktx2};
-use engine_assets::rig_cook::{cook_body, cook_body_at, ATLAS_MAX_DIM, QUADRANTS};
+use engine_assets::rig_cook::{cook_body, cook_body_at, ATLAS_MAX_DIM, COOKED_DIR, QUADRANTS};
+use engine_assets::{AssetSource, BundleSource};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -230,11 +231,59 @@ decoded_rgba={decoded} atlas_dim={ATLAS_MAX_DIM}"
         atlas_bytes < 800_000,
         "the atlases at {ATLAS_MAX_DIM} px are under 800 KB: {atlas_bytes}"
     );
-    // The rig's lane, brotli, is what the page downloads. The mesh is a
-    // float soup that brotli barely touches; the atlas is block data that
-    // brotli barely touches either. The raw number is the honest bound.
+    // The raw number is the bound a test here can check, because the crate
+    // has no brotli encoder. Measured with the page's own gate the packed
+    // lane brotli's to 353 007 B, well under the room first_bundle has left
+    // (418 106 B): the atlases are block-compressed and the body JSON chunks
+    // are space-padded, so the arena kit's 0.486 ratio does not carry over.
     assert!(
         total < 2_040_000,
         "the cooked rig fits the page's whole first-bundle budget: {total} of 2040000"
     );
+}
+
+/// The file the page fetches is the cook's own bytes.
+///
+/// `content/fighters/rig.e2bundle` is packed from the cooked lane
+/// (`e2bundle pack content/fighters content/fighters/rig.e2bundle --include
+/// cooked/`) and ships in `dist/web` as `assets/fighters.e2bundle`. Every
+/// entry has to equal what `cook_body` makes from the body in the tree, and
+/// the lane has to hold nothing else: a recook that changes the lane without
+/// re-packing the file is a failure here, not a page that quietly ships a
+/// stale rig.
+#[test]
+fn the_shipped_lane_file_is_the_cook() {
+    let lane = fs::read(fighters().join("rig.e2bundle")).expect("the lane file is in the tree");
+    let bundle = BundleSource::open(lane).expect("the lane bundle opens");
+
+    let mut want: Vec<String> = Vec::new();
+    for body in BODIES {
+        let variant = body.trim_end_matches("_body.glb");
+        let source =
+            fs::read(fighters().join(format!("glb/{body}"))).expect("the body is in the tree");
+        let cooked = cook_body(body, &source).expect("the body cooks");
+
+        let name = format!("{COOKED_DIR}/{variant}_body.glb");
+        assert_eq!(
+            &bundle.read(&name).expect("the body is in the lane")[..],
+            &cooked.glb[..],
+            "{name}"
+        );
+        want.push(name);
+
+        for quadrant in 0..QUADRANTS {
+            let name = format!("{COOKED_DIR}/{variant}_q{quadrant}.ktx2");
+            assert_eq!(
+                &bundle.read(&name).expect("the atlas is in the lane")[..],
+                &cooked.textures[quadrant][..],
+                "{name}"
+            );
+            want.push(name);
+        }
+    }
+
+    want.sort();
+    let mut got = bundle.list("").expect("the lane lists its files");
+    got.sort();
+    assert_eq!(got, want, "the lane holds the rig and nothing else");
 }

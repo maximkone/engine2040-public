@@ -385,3 +385,59 @@ fn window_audio_space_sent_equals_applied_over_a_scripted_duel() {
         (0, 0, 0)
     );
 }
+
+/// The takes a routed cue names over `plays` hits of the same kind, each on
+/// its own tick so the round robin moves once per blow.
+fn routed_takes(plays: usize) -> Vec<Option<u16>> {
+    let (mut tx, mut rx) = feed(64, bank());
+    let mut space = AudioSpace::with_parts(SpaceParts::EVENTS_ONLY);
+    let views = [view(0, 0.0, 0.0), view(1, 1.0, 0.0)];
+    let mut takes = Vec::new();
+    for tick in 0..plays as u32 {
+        space.feed(&mut tx, tick, &outcome_with(vec![hit(0, 1)]), &views);
+        while let Some(cmd) = rx.pop() {
+            if let Command::Play(play) = cmd {
+                takes.push(play.take);
+            }
+        }
+    }
+    takes
+}
+
+/// SN12 game half: the window routes its impacts over the live bank, so the
+/// take the round robin picked rides the feed and the mixer plays that take
+/// instead of choosing its own. Takes walk without repeating one in a row.
+#[test]
+fn window_audio_space_routed_impacts_name_a_take_and_never_repeat_one() {
+    let takes = routed_takes(6);
+    assert_eq!(takes.len(), 6, "one hit per tick: {takes:?}");
+    assert!(
+        takes.iter().all(Option::is_some),
+        "every take named: {takes:?}"
+    );
+    let values: Vec<u16> = takes.iter().flatten().copied().collect();
+    let hit_bank = bank();
+    let cue = hit_bank
+        .cue(
+            hit_bank
+                .id(cue_names::HIT)
+                .expect("the shipped bank carries the hit cue"),
+        )
+        .expect("id resolves");
+    let limit = u16::try_from(cue.variants.len()).expect("a small take");
+    assert!(
+        values.iter().all(|&t| t < limit),
+        "a take the cue has: {values:?} of {} takes",
+        cue.variants.len()
+    );
+    assert!(cue.variants.len() >= 2, "the hit cue offers takes");
+    assert!(
+        values.windows(2).all(|w| w[0] != w[1]),
+        "the same take twice in a row: {values:?}"
+    );
+    // Two rounds of plays cover every take of the cue.
+    let mut seen: Vec<u16> = values.clone();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), cue.variants.len(), "every take heard: {seen:?}");
+}

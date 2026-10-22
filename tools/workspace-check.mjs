@@ -3,7 +3,7 @@
 // board needs, and new LFS blobs.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SIM_CRATES } from "./rust-quality.mjs";
@@ -11,6 +11,7 @@ import { archivedDoneRows, needsOf } from "./board-slice.mjs";
 import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
 import { OWN_MATH_FILES, deriveFixedApi, genreFindings, ioHits, platformMathHits, productionCode, softFloatHits } from "./sim-source-scan.mjs";
 import { runWithVerdictCache, scanIslandsFrom } from "./wiring-scan.mjs";
+import { crateRows, committedTree, deadFeatures, lockVersions } from "./crate-map.mjs";
 import { rowsWithReason, scan as scanUnwired, summaryLine as unwiredSummaryLine } from "./unwired-code-gate.mjs";
 
 // engine-core is the bottom layer (ARCHITECTURE.md): any crate may use it.
@@ -596,6 +597,69 @@ export function unwiredModulesLine(cratesDir) {
   } catch (error) {
     return `WARN unwired modules (report-only): check failed: ${String(error.message).split("\n")[0]}`;
   }
+}
+
+// PW51: the compaction baseline (closes E51). docs/compaction-baseline.md holds
+// the recorded size of the engine: crate count, src lines, multi-version lock
+// names and dead feature flags, one number per line in the `- crates: 42`
+// shape. It is prose around them, so the reader takes the four lines and leaves
+// the words. Null when the block is missing, so the gate can say so instead of
+// comparing against nothing.
+export const BASELINE_KEYS = ["crates", "src lines", "multi-version lock names", "dead feature flags"];
+export function readBaseline(text) {
+  const source = String(text ?? "").replace(/\r\n/g, "\n");
+  const number = (key) => {
+    const m = new RegExp(`^- ${key}: (\\d+)$`, "m").exec(source);
+    return m ? Number(m[1]) : null;
+  };
+  const recorded = {
+    crates: number(BASELINE_KEYS[0]),
+    srcLines: number(BASELINE_KEYS[1]),
+    lockNames: number(BASELINE_KEYS[2]),
+    deadFlags: number(BASELINE_KEYS[3]),
+  };
+  return Object.values(recorded).every((v) => Number.isInteger(v)) ? recorded : null;
+}
+
+// The measured side of the baseline: every number is counted from the tree, so
+// no number is written down in a tool and goes stale. One tool owns the counts
+// (tools/crate-map.mjs), one walk of crates/ answers all four.
+export function baselineCounts(repoDir) {
+  const rows = crateRows(repoDir);
+  return {
+    crates: rows.length,
+    srcLines: rows.reduce((a, r) => a + (r.srcLines ?? 0), 0),
+    lockNames: lockVersions(repoDir).names,
+    deadFlags: deadFeatures(repoDir).length,
+  };
+}
+
+// A moved number is a FAIL naming both sides, so the fix is one paste into the
+// doc. The dead feature flags are left out on purpose: deleting one is the
+// point of the compaction rows, so that one is a WARN the lead re-records.
+export function baselineDrift(recorded, measured) {
+  const found = [];
+  if (recorded.crates !== measured.crates) found.push(`baseline: crates ${recorded.crates} -> ${measured.crates}`);
+  if (recorded.srcLines !== measured.srcLines) found.push(`baseline: src lines ${recorded.srcLines} -> ${measured.srcLines}`);
+  if (recorded.lockNames !== measured.lockNames) found.push(`baseline: multi-version lock names ${recorded.lockNames} -> ${measured.lockNames}`);
+  return found;
+}
+
+// The whole baseline check in one place, so the audit and a test read the
+// same numbers: the four recorded lines of docs/compaction-baseline.md and the
+// four measured ones of the committed tree.
+export function baselineAudit(repoDir) {
+  const basePath = join(repoDir, "docs", "compaction-baseline.md");
+  const recorded = readBaseline(existsSync(basePath) ? readFileSync(basePath, "utf8") : "");
+  const tree = committedTree(repoDir);
+  const measured = baselineCounts(tree ?? repoDir);
+  if (tree) rmSync(tree, { recursive: true, force: true });
+  return {
+    recorded,
+    measured,
+    drift: recorded ? baselineDrift(recorded, measured) : [],
+    treeRead: Boolean(tree),
+  };
 }
 
 // CDX6: a Rome number needs a source. The Rome loader (crates/rome/src/table.rs)
@@ -1347,6 +1411,49 @@ function audit(repoDir) {
   // which is the same disease it reports. The audit runs it in process (no
   // child, no node startup) and prints one report-only line.
   console.log(unwiredModulesLine(cratesDir));
+
+  // PW51: the compaction baseline drift gate (closes E51).
+  // docs/compaction-baseline.md records the measured size of the engine, and
+  // this gate fails when a number moves without that file moving with it. The
+  // counts come from tools/crate-map.mjs (one tool, one walk of the tree), so
+  // no number is written down here.
+  // A dead feature flag drifting is a WARN, not a failure: deleting one is the
+  // point of the compaction work, and the doc is re-recorded in the same
+  // commit. Crates, source lines and multi-version lock names are hard
+  // signals: a new crate or a growing file must be named in the baseline.
+  let baselineCrates = 0;
+  let baselineSrcLines = 0;
+  let baselineLockNames = 0;
+  let baselineDeadFlags = 0;
+  try {
+    // The baseline is a snapshot of a commit, so the gate measures the
+    // committed tree (HEAD). A dirty working tree from another session must
+    // not turn this audit red; a commit that moves the size without the doc
+    // moving does.
+    const check = baselineAudit(repoDir);
+    const { recorded, measured } = check;
+    baselineCrates = measured.crates;
+    baselineSrcLines = measured.srcLines;
+    baselineLockNames = measured.lockNames;
+    baselineDeadFlags = measured.deadFlags;
+    if (!check.treeRead) console.log("WARN baseline: the committed tree could not be read, the working tree was measured instead");
+    if (!recorded) {
+      errors.push("baseline: docs/compaction-baseline.md has no machine-readable block (crates, src lines, multi-version lock names, dead feature flags); record it with node tools/crate-map.mjs --baseline");
+    } else {
+      // A moved number prints its own FAIL line, so the reader sees the old
+      // and the new value without looking for them in the error text.
+      for (const line of check.drift) console.log(`FAIL ${line}`);
+      if (check.drift.length) {
+        errors.push(`baseline: ${check.drift.length} number(s) moved (see the FAIL lines above); record docs/compaction-baseline.md in the same commit (node tools/crate-map.mjs --baseline)`);
+      }
+      if (measured.deadFlags !== recorded.deadFlags) {
+        console.log(`WARN baseline: dead feature flags ${recorded.deadFlags} -> ${measured.deadFlags}: record docs/compaction-baseline.md in the same commit`);
+      }
+    }
+  } catch (error) {
+    errors.push(`baseline drift gate could not run: ${error.message}`);
+  }
+
   if (errors.length) throw new Error(errors.join("\n"));
   console.log(`PASS workspace: ${workspacePackages.length} packages share version/edition/license/rust-version`);
   console.log("PASS dependency edges and std-only engine-core");
@@ -1356,6 +1463,7 @@ function audit(repoDir) {
   console.log("PASS lfs guard: no newly tracked non-LFS blob over 5 MB");
   console.log(`PASS test layout: ${layoutCrates} crates keep one integration-test binary (tests/it)`);
   console.log(`PASS maps: ${mapCrates} crates, ${mapPaths} paths match the tree`);
+  console.log(`PASS baseline: ${baselineCrates} crates, ${baselineSrcLines} src lines, ${baselineLockNames} multi-version lock names, ${baselineDeadFlags} dead feature flags`);
   console.log("PASS layer rules: no simulation crate imports a presentation crate");
   console.log(`WARN gpu boundary: ${gpu.offenders.length} files outside present/ name wgpu:: (report-only)`);
   if (gpu.stale.length) {

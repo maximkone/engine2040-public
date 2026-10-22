@@ -670,9 +670,62 @@ mod tests {
         assert!(!empty.truncated);
     }
 
+    /// AD9: the ring has a real production writer. A refusal through the
+    /// audited dispatch seam leaves one typed `door.refused` row naming the
+    /// tool and its machine code, so `log.query` answers what went wrong
+    /// instead of an empty page that reads as "no problems".
     #[test]
-    fn external_client_pages_log_and_checks_stable_digest() {
-        // A9 shape: one client pages the whole log, another (or the same one
+    fn door_refusal_writes_one_typed_row_and_query_finds_it() {
+        let server = server();
+        let empty = query(&server, None, None);
+        assert_eq!(empty.total, 0, "a fresh session has no refusals");
+
+        // A refusal, through the same seam every tool call uses.
+        let refused = server.dispatch("tx.apply", |_state| {
+            Err::<(), McpToolError>(McpToolError::new("stale_revision", "seeded"))
+        });
+        assert!(refused.is_err(), "the path under test refuses");
+
+        let page = LogQueryTool::invoke(
+            &server,
+            LogQueryArgs {
+                cursor: None,
+                limit: None,
+                code: Some(EventCode::DOOR_REFUSED.raw()),
+            },
+        )
+        .expect("log.query reads the refusal");
+        assert_eq!(page.total, 1, "exactly one row for one refusal");
+        assert_eq!(page.events[0].message, "tx.apply refused stale_revision");
+        assert!(
+            page.events[0].message.len() <= engine_observe::MAX_MESSAGE_LEN,
+            "one bounded line, never an argument echoed back"
+        );
+        // The ring row and the audit record are two different proofs.
+        assert_eq!(
+            server.lock().expect("lock holds").audit_total_appended(),
+            1,
+            "the tamper-evident record chains beside it"
+        );
+
+        // A success writes no refusal row: the ring records failures only.
+        server
+            .dispatch("scene.read", |_state| Ok(()))
+            .expect("a clean call answers");
+        let after = LogQueryTool::invoke(
+            &server,
+            LogQueryArgs {
+                cursor: None,
+                limit: None,
+                code: Some(EventCode::DOOR_REFUSED.raw()),
+            },
+        )
+        .expect("still one refusal");
+        assert_eq!(after.total, 1, "successes never look like failures");
+    }
+
+    #[test]
+    fn external_client_pages_log_and_checks_stable_digest() {        // A9 shape: one client pages the whole log, another (or the same one
         // later) takes the digest; both agree, and a re-digest is identical.
         let server = server();
         seed_mixed(&server);

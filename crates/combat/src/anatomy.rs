@@ -312,6 +312,14 @@ impl AnatomyTable {
         row.total_q16() + guard
     }
 
+    /// Whether a worn set carries plate (the lorica segmentata, FEEL4) over
+    /// this joint. Only the lorica is plate; the galea, manica, greave and
+    /// scutum guard by [`AnatomyTable::protection_q16`] and never deflect.
+    #[must_use]
+    pub fn plated(self, joint: JointId, worn: u8) -> bool {
+        self.cover[joint.index()] & worn & ARMOR_LORICA != 0
+    }
+
     /// Content digest over the table bytes in canonical joint order.
     ///
     /// The break-tool verbs and BreakBench pin this: the same rows give the same

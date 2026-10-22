@@ -3262,6 +3262,7 @@ dependencies = [
  "gungraun",
  "mimalloc",
  "puffin",
+ "serde_json",
 ]
 
 [[package]]

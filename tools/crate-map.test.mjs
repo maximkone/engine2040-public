@@ -1,10 +1,11 @@
 // crate-map: rows come from Cargo.toml and lib.rs; the rendered table has one row per crate.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { crateRows, dependencyNames, instability, packageName, renderCrateMap } from "./crate-map.mjs";
+import { crateRows, committedTree, deadFeatures, dependencyNames, instability, lockVersions, packageName, renderCrateMap, sourceLines } from "./crate-map.mjs";
 
 // alpha uses beta (dotted key), a non-engine crate, and a dev-dependency on gamma.
 // gamma uses beta through a renamed key. delta has no lib.rs.
@@ -63,4 +64,106 @@ test("instability is Ce/(Ca+Ce) and the table prints it per crate", () => {
     assert.ok(text.includes("Instability"), "the header names the alarm column");
     assert.match(text, /\| `engine-alpha` \| `crates\/alpha` \| alpha: the first doc line\. \| beta \| - \| 1\.00 \|/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// ---- PW51: the measured side of the compaction baseline ----
+
+test("sourceLines counts every .rs under a crate's src, nested folders included", () => {
+  const root = mkdtempSync(join(tmpdir(), "source-lines-"));
+  try {
+    const files = {
+      "crates/a/src/lib.rs": "fn main() {}\n",
+      "crates/a/src/inner/mod.rs": "// one\n// two\n",
+      "crates/a/src/notes.md": "not rust, not counted\n",
+      "crates/b/Cargo.toml": '[package]\nname = "engine-b"\n',
+    };
+    for (const [path, body] of Object.entries(files)) {
+      mkdirSync(join(root, path, ".."), { recursive: true });
+      writeFileSync(join(root, path), body);
+    }
+    assert.deepEqual(sourceLines(join(root, "crates"), "a"), { files: 2, lines: 3 }, "physical lines, blank lines included, nested folders walked");
+    assert.deepEqual(sourceLines(join(root, "crates"), "b"), { files: 0, lines: 0 }, "a crate with no src/ counts zero");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("lockVersions counts the packages and the names that carry more than one version", () => {
+  const root = mkdtempSync(join(tmpdir(), "lock-versions-"));
+  try {
+    writeFileSync(join(root, "Cargo.lock"), [
+      "[[package]]", 'name = "a"', 'version = "1.0.0"', "",
+      "[[package]]", 'name = "a"', 'version = "2.0.0"', "",
+      "[[package]]", 'name = "b"', 'version = "3.0.0"', "",
+      "[[package]]", 'name = "c"', 'version = "0.1.0"', "",
+      "[[package]]", 'name = "c"', 'version = "0.2.0"', "",
+      "[[package]]", 'name = "c"', 'version = "0.3.0"', "",
+    ].join("\n"));
+    const lock = lockVersions(root);
+    assert.equal(lock.packages, 6, "six package blocks in the fixture");
+    assert.equal(lock.names, 2, "a and c carry more than one version, b does not");
+    assert.equal(lock.copies, 3, "one extra copy of a plus two of c");
+    assert.deepEqual(lock.byName.map((r) => r.name), ["c", "a"], "most copies first, then the name");
+    assert.deepEqual(lock.byName[0].versions, ["0.1.0", "0.2.0", "0.3.0"]);
+    const bare = mkdtempSync(join(tmpdir(), "lock-bare-"));
+    try { assert.deepEqual(lockVersions(bare), { packages: 0, names: 0, copies: 0, byName: [] }, "no Cargo.lock counts nothing"); }
+    finally { rmSync(bare, { recursive: true, force: true }); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("deadFeatures finds a declared flag nobody asks for and nobody reads", () => {
+  const root = mkdtempSync(join(tmpdir(), "dead-features-"));
+  try {
+    const files = {
+      "crates/a/Cargo.toml": '[package]\nname = "engine-a"\n\n[features]\ndead = []\nread = []\nasked = []\n',
+      "crates/a/src/lib.rs": '#[cfg(feature = "read")]\npub fn f() {}\n',
+      "crates/b/Cargo.toml": '[package]\nname = "engine-b"\n\n[dependencies]\nengine-a = { path = "../a", features = ["asked"] }\n',
+      "crates/b/src/lib.rs": "pub fn g() {}\n",
+    };
+    for (const [path, body] of Object.entries(files)) {
+      mkdirSync(join(root, path, ".."), { recursive: true });
+      writeFileSync(join(root, path), body);
+    }
+    // read = one cfg in its own src (weak, not dead); asked = another crate asks.
+    assert.deepEqual(deadFeatures(root).map((f) => f.key), ["engine-a/dead"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("every crate row carries its measured src files and src lines", () => {
+  const root = fixture();
+  try {
+    const rows = Object.fromEntries(crateRows(root).map((r) => [r.dir, r]));
+    assert.equal(rows.alpha.srcFiles, 1);
+    assert.equal(rows.alpha.srcLines, 3, "alpha's lib.rs is three physical lines");
+    assert.equal(rows.beta.srcLines, 1, "a single ///! line");
+    assert.equal(rows.delta.srcFiles, 0, "no src/: nothing to count");
+    const total = crateRows(root).reduce((a, r) => a + r.srcLines, 0);
+    assert.equal(total, 5, "the sum the baseline records: 3 + 1 + 1");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("committedTree reads the committed tree and leaves the working tree alone", () => {
+  const root = mkdtempSync(join(tmpdir(), "crate-map-head-"));
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
+  let tree = null;
+  try {
+    mkdirSync(join(root, "crates", "a", "src"), { recursive: true });
+    writeFileSync(join(root, "crates", "a", "Cargo.toml"), '[package]\nname = "engine-a"\n');
+    writeFileSync(join(root, "crates", "a", "src", "lib.rs"), "fn committed() {}\n");
+    writeFileSync(join(root, "Cargo.lock"), '[[package]]\nname = "a"\nversion = "1.0.0"\n');
+    git("init", "-q");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "add", "-A");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "one");
+    // A file that is only in the working tree must not be in the snapshot.
+    writeFileSync(join(root, "crates", "a", "src", "dirty.rs"), "fn dirty() {}\n");
+
+    tree = committedTree(root);
+    assert.ok(tree, "the committed tree is read");
+    assert.equal(existsSync(join(tree, "crates", "a", "src", "lib.rs")), true, "the committed file is there");
+    assert.equal(existsSync(join(tree, "crates", "a", "src", "dirty.rs")), false, "the uncommitted file is not");
+    assert.equal(existsSync(join(tree, "Cargo.lock")), true, "the lock is there");
+    assert.equal(crateRows(tree).length, 1, "the snapshot holds the committed crates");
+    assert.equal(lockVersions(tree).packages, 1, "the snapshot holds the committed lock");
+  } finally {
+    if (tree) rmSync(tree, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
 });

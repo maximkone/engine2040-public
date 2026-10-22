@@ -1049,6 +1049,128 @@ fn quantize_mm(v: f32) -> i32 {
     }
 }
 
+// ---------------------------------------------------------- FEEL2 knockback
+
+/// Knockback velocity one unity impulse (Q8 256) gives a body, in
+/// millimetres per tick: the base hit (384 Q8) reads 60 mm/tick, a 3.6 m/s
+/// shove the walker carries and friction stops.
+pub const KNOCKBACK_MM_PER_UNITY: i32 = 40;
+
+/// Friction a carried knockback loses per tick, millimetres per tick: it
+/// eats `6` off each end and saturates at zero, so every blow stops at
+/// EXACT rest and never creeps on a remainder (`laws::rest_stays_rest`).
+pub const KNOCKBACK_FRICTION_MM: i32 = 6;
+
+/// Largest knockback velocity the mapping gives, millimetres per tick:
+/// even the heaviest blow lands a charge, not a launch across the arena.
+pub const KNOCKBACK_MAX_MM_PER_TICK: i32 = 240;
+
+/// The knockback velocity one landed blow carries, signed by the blow's
+/// direction (`-1` or `+1`). The magnitude comes from the impulse - the
+/// weapon's mass times swing speed under FEEL2, the constant before it -
+/// and is capped. Zero impulse reads zero velocity: a body at rest is
+/// never nudged.
+pub fn knockback_velocity(impulse_q8: u16, direction: i32) -> i32 {
+    if impulse_q8 == 0 {
+        return 0;
+    }
+    let magnitude =
+        (i32::from(impulse_q8) * KNOCKBACK_MM_PER_UNITY / 256).min(KNOCKBACK_MAX_MM_PER_TICK);
+    if direction < 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// One tick of the walker's friction on a carried velocity: six
+/// millimetres per tick off each end, saturating AT zero. The zero is
+/// exact, so a stopped body stays stopped.
+pub const fn friction_tick(velocity_mm: i32) -> i32 {
+    if velocity_mm > KNOCKBACK_FRICTION_MM {
+        velocity_mm - KNOCKBACK_FRICTION_MM
+    } else if velocity_mm < -KNOCKBACK_FRICTION_MM {
+        velocity_mm + KNOCKBACK_FRICTION_MM
+    } else {
+        0
+    }
+}
+
+/// Ticks the walker carries a blow before exact rest, and the millimetres
+/// it covers while it stops. A heavier blow travels farther at every
+/// mass: both grow with the impulse. Integer accumulation only, no float
+/// and no square root, because the decay is linear.
+pub fn knockback_travel(impulse_q8: u16) -> (u32, i32) {
+    let mut velocity = knockback_velocity(impulse_q8, 1);
+    let mut ticks: u32 = 0;
+    let mut distance = 0i32;
+    while velocity != 0 {
+        distance = distance.saturating_add(velocity);
+        velocity = friction_tick(velocity);
+        ticks = ticks.saturating_add(1);
+    }
+    (ticks, distance)
+}
+
+/// The knockback velocity one landed blow carries on the XZ plane,
+/// millimetres per tick: the impulse's magnitude along a unit direction in
+/// Q10 (1024 is one). Truncation toward zero keeps a mirrored blow
+/// mirrored, and a zero direction leaves the body alone.
+pub fn knockback_velocity_q10(impulse_q8: u16, dir_q10: [i32; 2]) -> [i32; 2] {
+    let magnitude = knockback_velocity(impulse_q8, 1);
+    [
+        i32::try_from(i64::from(magnitude) * i64::from(dir_q10[0]) / 1024).unwrap_or(0),
+        i32::try_from(i64::from(magnitude) * i64::from(dir_q10[1]) / 1024).unwrap_or(0),
+    ]
+}
+
+/// The knockback one body carries (FEEL2): the velocity a blow handed it on
+/// the XZ plane, in millimetres per tick. The caller moves the body by the
+/// velocity and then steps this, so the same ground friction the walker's
+/// own carries brings the body to EXACT rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Knockback {
+    /// Planar velocity, millimetres per tick, `[x, z]`.
+    vel_mm: [i32; 2],
+}
+
+impl Knockback {
+    /// A body at rest: it carries nothing.
+    pub const fn new() -> Self {
+        Self { vel_mm: [0, 0] }
+    }
+
+    /// The planar velocity the body carries, millimetres per tick.
+    pub const fn velocity(&self) -> [i32; 2] {
+        self.vel_mm
+    }
+
+    /// Take a blow: the velocity replaces what the body carried.
+    pub fn launch(&mut self, vel_mm: [i32; 2]) {
+        self.vel_mm = vel_mm;
+    }
+
+    /// One tick of ground friction on both lanes: the same bite the walker's
+    /// own friction takes, exact at zero.
+    pub fn step(&mut self) {
+        self.vel_mm[0] = friction_tick(self.vel_mm[0]);
+        self.vel_mm[1] = friction_tick(self.vel_mm[1]);
+    }
+
+    /// True when the body carries nothing: it is at exact rest.
+    pub const fn at_rest(&self) -> bool {
+        self.vel_mm[0] == 0 && self.vel_mm[1] == 0
+    }
+
+    /// FNV-1a64 over the planar lanes; identical carriers hash identically.
+    pub fn state_hash(&self) -> u64 {
+        let mut hash = Fnv64::new();
+        hash.write_i32(self.vel_mm[0]);
+        hash.write_i32(self.vel_mm[1]);
+        hash.finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,6 +1239,123 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    /// One walker the knockback carries: its position and the velocity it
+    /// was given, both millimetres per tick.
+    #[derive(Clone, PartialEq, Debug)]
+    struct Walker {
+        pos_mm: i32,
+        vel_mm: i32,
+    }
+
+    /// Carry `walker` one tick: the velocity moves the body, then friction
+    /// takes its share. The walker stops at exact rest and holds. The tick
+    /// index is the laws-kit step signature's clock; the decay does not
+    /// read it.
+    fn carry_tick(walker: &mut Walker, _tick: u32) {
+        walker.pos_mm = walker.pos_mm.saturating_add(walker.vel_mm);
+        walker.vel_mm = friction_tick(walker.vel_mm);
+    }
+
+    #[test]
+    fn knockback_a_heavier_blow_travels_farther() {
+        // Three impulse strengths from the momentum map: the shipped
+        // gladius row, the pilum row and the Heft cap. Each travels
+        // strictly farther than the last, and the distance grows with the
+        // impulse at every mass.
+        let light = knockback_travel(852); // gladius at a 30 mm swing
+        let heavy = knockback_travel(1368); // pilum at the same travel
+        let cap = knockback_travel(1408); // the momentum ceiling
+        assert_eq!(knockback_travel(0), (0, 0), "no impulse, no movement");
+        assert_eq!(light, (23, 1541));
+        assert_eq!(heavy, (36, 3888));
+        assert_eq!(cap, (37, 4144));
+        assert!(
+            light.1 < heavy.1 && heavy.1 < cap.1,
+            "{light:?} < {heavy:?} < {cap:?}"
+        );
+        assert!(
+            light.0 < heavy.0 && heavy.0 < cap.0,
+            "the heavier blow also carries longer"
+        );
+    }
+
+    #[test]
+    fn knockback_mirrored_blows_mirror_the_carry() {
+        // Two fighters take the same blow from mirrored directions: their
+        // carried paths mirror around zero for the whole decay.
+        let a = Walker {
+            pos_mm: 0,
+            vel_mm: knockback_velocity(1368, 1),
+        };
+        let b = Walker {
+            pos_mm: 0,
+            vel_mm: knockback_velocity(1368, -1),
+        };
+        laws::mirror(a, b, 40, carry_tick, |a: &Walker, b: &Walker| {
+            a.pos_mm == -b.pos_mm && a.vel_mm == -b.vel_mm
+        })
+        .expect("mirrored blows mirror");
+    }
+
+    #[test]
+    fn knockback_comes_to_exact_rest_and_stays_there() {
+        // Carry the heaviest blow to its rest, then hold: the walker stops
+        // at exactly zero and never moves again.
+        let (ticks, distance) = knockback_travel(4096);
+        let stopped = Walker {
+            pos_mm: distance,
+            vel_mm: 0,
+        };
+        assert!(ticks <= 48, "the heaviest blow rests inside {ticks} ticks");
+        assert_eq!(friction_tick(0), 0, "rest reads exactly zero");
+        laws::rest_stays_rest(stopped, 600, |walker: &mut Walker| carry_tick(walker, 0))
+            .expect("a stopped body stays stopped");
+    }
+
+    /// FEEL2: the plane carrier the arena walks. A blow hands it a velocity
+    /// on both lanes; friction brings it to exact rest, and a mirrored blow
+    /// gives a mirrored carrier.
+    #[test]
+    fn the_plane_carrier_carries_a_blow_to_exact_rest() {
+        let mut carried = Knockback::new();
+        carried.launch(knockback_velocity_q10(719, [1024, 0]));
+        assert_eq!(carried.velocity(), [112, 0]);
+        let mut ticks = 0;
+        while !carried.at_rest() {
+            carried.step();
+            ticks += 1;
+            assert!(ticks < 100, "the friction must stop the body");
+        }
+        assert_eq!(carried.velocity(), [0, 0]);
+        let resting = carried;
+        laws::rest_stays_rest(resting, 600, |carrier: &mut Knockback| {
+            carrier.step();
+            assert_eq!(carrier.velocity(), [0, 0], "a body at rest carries nothing");
+        })
+        .expect("rest stays rest");
+        // A mirrored direction gives a mirrored carrier, tick for tick.
+        let mut east = Knockback::new();
+        let mut west = Knockback::new();
+        east.launch(knockback_velocity_q10(719, [724, 724]));
+        west.launch(knockback_velocity_q10(719, [-724, -724]));
+        let mirrored = |a: &Knockback, b: &Knockback| {
+            a.velocity()[0] == -b.velocity()[0] && a.velocity()[1] == -b.velocity()[1]
+        };
+        laws::mirror(
+            east,
+            west,
+            200,
+            |carrier: &mut Knockback, _| carrier.step(),
+            mirrored,
+        )
+        .expect("mirrored blows mirror");
+        // A zero impulse or a zero direction leaves the body alone.
+        let mut still = Knockback::new();
+        still.launch(knockback_velocity_q10(0, [1024, 0]));
+        assert!(still.at_rest());
+        assert_eq!(knockback_velocity_q10(719, [0, 0]), [0, 0]);
     }
 
     #[test]

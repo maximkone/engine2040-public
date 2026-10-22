@@ -226,10 +226,6 @@ mod tests {
     /// walk is native only (a browser has no file system), like the
     /// `shader_gate` module's own walk.
     #[cfg(not(target_arch = "wasm32"))]
-    #[expect(
-        dead_code,
-        reason = "temporarily disabled with arm two of tonemap_one_source_hue"
-    )]
     fn crate_tree_aces_definitions() -> usize {
         fn walk(dir: &std::path::Path, count: &mut usize) {
             let Ok(entries) = std::fs::read_dir(dir) else {
@@ -294,10 +290,6 @@ mod tests {
 
         // Arm two: one `fn aces` definition in the crate. The WGSL chunk
         // owns the curve; the Rust twin calls it.
-        // TEMPORARILY DISABLED: the WGSL refactor (post_chain.wgsl,
-        // composite_compute.wgsl, forward.wgsl) is mid-flight in the render
-        // lane's dirty worktree. Once they commit, restore this arm.
-        /*
         let wgsl = include_str!("shaders/tonemap.wgsl");
         let aces_defs = wgsl.matches("fn aces").count();
         assert_eq!(
@@ -331,7 +323,6 @@ mod tests {
             wgsl.contains("fn dither4"),
             "the chunk keeps the fixed-pattern dither"
         );
-        */
 
         // Arm three: the dither breaks the 8-bit bands. On the row's
         // 0.002..0.02 ramp the undithered run is 203 pixels long; with the

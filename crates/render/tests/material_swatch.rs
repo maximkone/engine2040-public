@@ -58,7 +58,7 @@ const RADIUS: f32 = 0.5;
 /// Eye height above the pit floor: the sphere fills about 85% of the frame.
 const EYE_Z: f32 = 1.6;
 /// Vertical field of view in radians.
-const FOV_Y: f32 = 0.785_398_1;
+const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 /// Coverage every swatch is drawn at: the blood channel runs the layer code of
 /// the records that carry a blood layer, and leaves the ones that do not
 /// untouched. A wet layer is left out on purpose: the fragment mixes a wet

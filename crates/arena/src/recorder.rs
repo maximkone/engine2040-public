@@ -807,11 +807,13 @@ mod tests {
                 id: FighterId::new(0).expect("slot 0 legal"),
                 pos: [0.0, 0.0, 0.0],
                 yaw: 0.0,
+                worn: 0,
             },
             FighterState {
                 id: FighterId::new(1).expect("slot 1 legal"),
                 pos: [1.0, 0.0, 0.0],
                 yaw: 0.0,
+                worn: 0,
             },
         ];
         let good_input = input(3, 0);
@@ -890,11 +892,13 @@ mod tests {
                 id: FighterId::new(0).expect("slot 0 legal"),
                 pos: [0.0, 0.0, 0.0],
                 yaw: 0.0,
+                worn: 0,
             },
             FighterState {
                 id: FighterId::new(1).expect("slot 1 legal"),
                 pos: [1.0, 0.0, 0.0],
                 yaw: 0.0,
+                worn: 0,
             },
         ];
         let fight = FightState::new(2).expect("2 fighters legal");
@@ -959,11 +963,13 @@ mod tests {
                 id: FighterId::new(0).expect("slot 0 legal"),
                 pos: [0.0, 0.0, 0.0],
                 yaw: 0.0,
+                worn: 0,
             },
             FighterState {
                 id: FighterId::new(1).expect("slot 1 legal"),
                 pos: [1.0, 0.0, 0.0],
                 yaw: 0.0,
+                worn: 0,
             },
         ];
         let fight = FightState::new(2).expect("2 fighters legal");

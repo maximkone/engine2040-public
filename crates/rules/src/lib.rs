@@ -37,6 +37,7 @@ pub mod error;
 pub mod fixtures;
 pub mod host;
 pub mod limits;
+pub mod objective;
 mod rules;
 mod script;
 pub mod sim;
@@ -44,7 +45,8 @@ pub mod tape;
 
 pub use error::{HostFault, LimitKind, RulesError};
 pub use host::{Action, ActorView, Emitted, HostCall, World};
-pub use limits::{Limits, MAX_FIGHTERS, MEM_SLOTS};
+pub use limits::{Limits, MAX_BODIES, MAX_FIGHTERS, MEM_SLOTS};
+pub use objective::{GoalZone, ObjectiveMatch, ObjectiveOutcome};
 pub use rules::{
     rules_abi, ActorExplain, CaseReport, Explanation, Fault, Installed, MemSnapshot, Rules,
     SetReceipt, TestReport, TickReport, RHAI_VERSION, RULES_ABI_VERSION,

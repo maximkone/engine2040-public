@@ -1,17 +1,35 @@
 # Compaction baseline - the measured size of engine2040 and of an agent's context
 
-Measured on 2026-10-20 at HEAD `77789c2a` (the tree moves every wave; the
-numbers below are a snapshot, the commands reproduce them).
+The four machine-readable lines below are the numbers the drift gate reads, and
+they move with every size change. The tables in section 1 are a dated snapshot
+of the committed tree at HEAD `06124ea96` (2026-10-22); the commands reproduce
+them.
 
-**Machine-readable baseline** (the drift gate in SPEC B reads these four
-lines; update them in the same commit as any size change):
+**Machine-readable baseline.** The drift gate in `tools/workspace-check.mjs`
+reads these four lines. Update them in the commit that lands the size change:
 
 ```
-- crates: 42
-- src lines: 816611
+- crates: 43
+- src lines: 890802
 - multi-version lock names: 80
-- dead feature flags: 7
+- dead feature flags: 0
 ```
+
+**How to refresh this file.** Run `node tools/crate-map.mjs --baseline`. It
+counts the committed tree (HEAD) and prints the four numbers; paste them into
+the block above. The audit then prints
+`PASS baseline: 43 crates, 888420 src lines, 80 multi-version lock names,
+0 dead feature flags`. A number that moves without this file moving fails the
+audit with `FAIL baseline: src lines 888420 -> 888517`, so the recorded size
+of the engine cannot go stale without a signal.
+
+**Why the committed tree.** The baseline is a snapshot of a commit, so the
+gate measures HEAD and not the working tree. Another session's uncommitted
+work must not turn the shared audit red; a commit that moves the size
+without this file moving does. The numbers in sections 1.1 to 1.6 are the
+committed tree too. The docs, token and disk numbers (1.7 to 1.9) are this
+PC's working tree, because `.opencode/` is a local file and `target/` is
+build output.
 
 **Line definition used everywhere in this file:** physical lines, blank lines
 included (the count `wc -l` gives). Where a second number matters it is
@@ -19,18 +37,14 @@ labelled *non-blank*. Two counts exist because two tools count differently:
 `Get-Content | Measure-Object -Line` skips blank lines, a node
 `split("\n").length - 1` does not. The baseline uses the second.
 
-**How to reproduce the crate and file numbers:**
+**How to reproduce the crate and file numbers:** `node tools/crate-map.mjs
+--baseline` counts them from the committed tree. The same numbers come out of
+`git archive HEAD crates | tar -x -C <tmp>` and a walk of
+`<tmp>/crates/*/src/*.rs` that counts `split("\n").length - 1`.
 
-```
-git archive HEAD crates | tar -x -C <tmp>
-node <script that walks <tmp>/crates/*/src/*.rs and counts split("\n").length - 1>
-```
-
-**How to reproduce the lock numbers:**
-
-```
-git show HEAD:Cargo.lock > <tmp>/Cargo.lock
-```
+**How to reproduce the lock numbers:** `git show HEAD:Cargo.lock > <tmp>/Cargo.lock`
+(one pass over the `[[package]]` blocks: a name with more than one version is
+a multi-version name, the extra copies are `copies - 1` per name).
 
 **How to reproduce the orphan evidence** (no production caller reaches the
 module): search every `crates/**/*.rs` for the module path itself -
@@ -46,91 +60,97 @@ module's own file. A type name alone is not evidence: `World`, `Tier`,
 
 | item | value |
 |---|---|
-| workspace members | 43 (42 library crates under `crates/*` + the root package `engine2040`) |
-| crates with a `src/` | 42 |
-| `crates/*/src` .rs files | 1,153 |
-| `crates/*/src` lines (all) | **816,611** |
-| `crates/*/src` lines (non-blank) | 771,870 |
-| `crates/**` .rs files (with `tests/`) | 1,358 |
-| `crates/**` lines (all) | 861,384 |
-| top 3 crates | render + endpoint + game = 270,098 lines = 33.1% |
+| workspace members | 44 (43 library crates under `crates/*` + the root package `engine2040`) |
+| crates with a `src/` | 43 |
+| `crates/*/src` .rs files | 1,256 |
+| `crates/*/src` lines (all) | **887,923** |
+| `crates/*/src` lines (non-blank) | 838,886 |
+| `crates/**` .rs files (with `tests/`) | 1,469 |
+| `crates/**` lines (all) | 934,787 |
+| top 3 crates | render + endpoint + game = 289,736 lines = 32.6% |
+
+`crates/rome` is new since the last snapshot (the Rome slice).
 
 ### 1.2 Lines per crate (`crates/<c>/src`, all physical lines)
 
 | crate | files | lines | non-blank | % of src |
 |---|---|---|---|---|
-| render | 139 | 113,519 | 107,807 | 13.9% |
-| endpoint | 118 | 78,701 | 74,503 | 9.6% |
-| game | 82 | 77,878 | 73,997 | 9.5% |
-| net | 66 | 52,588 | 49,483 | 6.4% |
-| assets | 58 | 41,307 | 39,065 | 5.1% |
-| playtest | 57 | 40,147 | 37,798 | 4.9% |
-| editor | 40 | 38,202 | 36,008 | 4.7% |
-| anim | 61 | 37,220 | 35,332 | 4.6% |
-| spatial | 44 | 36,587 | 34,773 | 4.5% |
-| ai | 37 | 26,008 | 24,503 | 3.2% |
-| physics | 26 | 25,571 | 24,300 | 3.1% |
-| combat | 27 | 23,741 | 22,515 | 2.9% |
-| provider | 31 | 21,984 | 20,623 | 2.7% |
-| arena | 24 | 20,276 | 19,239 | 2.5% |
-| audio | 25 | 19,989 | 18,770 | 2.4% |
-| proof | 30 | 16,947 | 16,062 | 2.1% |
-| destruction | 25 | 16,172 | 15,381 | 2.0% |
-| perf | 18 | 12,246 | 11,515 | 1.5% |
-| ecs | 16 | 11,534 | 10,957 | 1.4% |
-| ui | 9 | 10,792 | 10,105 | 1.3% |
-| material | 17 | 9,953 | 9,341 | 1.2% |
-| nav | 14 | 9,291 | 8,795 | 1.1% |
-| web | 20 | 9,247 | 8,606 | 1.1% |
-| distill | 12 | 6,261 | 5,901 | 0.8% |
-| core | 24 | 6,241 | 5,795 | 0.8% |
-| scene | 10 | 6,039 | 5,611 | 0.7% |
-| physfx | 25 | 6,002 | 5,643 | 0.7% |
-| observe | 8 | 5,928 | 5,490 | 0.7% |
-| geo | 13 | 5,468 | 5,161 | 0.7% |
-| kam2-game | 14 | 5,400 | 5,041 | 0.7% |
-| rules | 11 | 4,935 | 4,646 | 0.6% |
-| world | 9 | 4,526 | 4,288 | 0.6% |
-| app | 10 | 3,575 | 3,325 | 0.4% |
-| input | 7 | 2,761 | 2,547 | 0.3% |
-| kam2-sim | 6 | 2,528 | 2,375 | 0.3% |
-| ossim | 6 | 2,407 | 2,263 | 0.3% |
-| nn | 3 | 2,136 | 2,009 | 0.3% |
+| render | 151 | 120,477 | 114,396 | 13.6% |
+| endpoint | 127 | 84,749 | 80,217 | 9.5% |
+| game | 89 | 84,510 | 80,234 | 9.5% |
+| net | 68 | 55,534 | 52,271 | 6.3% |
+| assets | 69 | 45,781 | 43,288 | 5.2% |
+| playtest | 65 | 44,692 | 42,076 | 5.0% |
+| anim | 63 | 39,434 | 37,449 | 4.4% |
+| spatial | 45 | 38,355 | 36,450 | 4.3% |
+| editor | 40 | 38,236 | 36,042 | 4.3% |
+| physics | 31 | 28,135 | 26,667 | 3.2% |
+| ai | 38 | 26,996 | 25,434 | 3.0% |
+| arena | 32 | 26,593 | 25,186 | 3.0% |
+| combat | 29 | 24,681 | 23,382 | 2.8% |
+| provider | 32 | 22,572 | 21,161 | 2.5% |
+| audio | 25 | 20,729 | 19,471 | 2.3% |
+| proof | 33 | 18,568 | 17,577 | 2.1% |
+| destruction | 25 | 17,108 | 16,272 | 1.9% |
+| perf | 18 | 12,329 | 11,600 | 1.4% |
+| ui | 9 | 11,776 | 11,046 | 1.3% |
+| ecs | 16 | 11,542 | 10,965 | 1.3% |
+| web | 21 | 10,585 | 9,841 | 1.2% |
+| material | 17 | 9,953 | 9,341 | 1.1% |
+| nav | 14 | 9,572 | 9,057 | 1.1% |
+| rome | 12 | 8,065 | 7,485 | 0.9% |
+| physfx | 32 | 7,928 | 7,439 | 0.9% |
+| core | 26 | 7,872 | 7,335 | 0.9% |
+| observe | 10 | 7,282 | 6,762 | 0.8% |
+| world | 11 | 6,322 | 5,957 | 0.7% |
+| distill | 12 | 6,261 | 5,901 | 0.7% |
+| kam2-game | 14 | 6,189 | 5,781 | 0.7% |
+| scene | 10 | 6,041 | 5,613 | 0.7% |
+| geo | 14 | 5,810 | 5,480 | 0.7% |
+| rules | 11 | 5,148 | 4,852 | 0.6% |
+| app | 10 | 3,586 | 3,336 | 0.4% |
+| input | 8 | 2,972 | 2,742 | 0.3% |
+| kam2-sim | 6 | 2,853 | 2,692 | 0.3% |
+| ossim | 6 | 2,504 | 2,357 | 0.3% |
+| nn | 3 | 2,136 | 2,009 | 0.2% |
+| kam2-web | 7 | 2,067 | 1,897 | 0.2% |
 | save | 4 | 1,675 | 1,556 | 0.2% |
-| kam2-web | 4 | 593 | 537 | 0.1% |
+| engine-chaos | 1 | 165 | 150 | 0.0% |
 | clock | 1 | 138 | 117 | 0.0% |
-| engine-chaos | 1 | 96 | 85 | 0.0% |
 | workspace-hack | 1 | 2 | 2 | 0.0% |
 
-### 1.3 The 20 largest files (74,176 lines = 9.1% of the tree)
+### 1.3 The 20 largest files (76,737 lines = 8.6% of the tree)
 
-| # | file | lines |
-|---|---|---|
-| 1 | crates/game/src/fighter_look.rs | 6,288 |
-| 2 | crates/arena/src/lib.rs | 5,326 |
-| 3 | crates/game/src/bin/arena.rs | 4,775 |
-| 4 | crates/render/src/ibl.rs | 4,409 |
-| 5 | crates/combat/src/fight.rs | 3,960 |
-| 6 | crates/game/src/lib.rs | 3,896 |
-| 7 | crates/render/src/gtao.rs | 3,486 |
-| 8 | crates/game/src/windowed.rs | 3,472 |
-| 9 | crates/game/src/camera.rs | 3,462 |
-| 10 | crates/editor/src/commands.rs | 3,441 |
-| 11 | crates/endpoint/src/scene_tools.rs | 3,419 |
-| 12 | crates/render/src/present/gpu_present/presenter.rs | 3,380 |
-| 13 | crates/physics/src/ragdoll.rs | 3,376 |
-| 14 | crates/spatial/src/relation.rs | 3,250 |
-| 15 | crates/render/src/present/gpu_present/submit.rs | 3,221 |
-| 16 | crates/ai/src/depth.rs | 3,143 |
-| 17 | crates/render/src/present/gpu_present/live.rs | 3,068 |
-| 18 | crates/endpoint/src/discover.rs | 2,947 |
-| 19 | crates/ui/src/lib.rs | 2,932 |
-| 20 | crates/endpoint/src/build_level.rs | 2,925 |
+| # | file | lines | non-blank |
+|---|---|---|---|
+| 1 | crates/game/src/fighter_look.rs | 6,599 | 6,335 |
+| 2 | crates/arena/src/lib.rs | 5,390 | 5,169 |
+| 3 | crates/game/src/bin/arena.rs | 4,949 | 4,768 |
+| 4 | crates/render/src/ibl.rs | 4,409 | 4,245 |
+| 5 | crates/combat/src/fight.rs | 4,137 | 3,970 |
+| 6 | crates/game/src/lib.rs | 4,004 | 3,811 |
+| 7 | crates/ui/src/lib.rs | 3,907 | 3,679 |
+| 8 | crates/game/src/windowed.rs | 3,588 | 3,412 |
+| 9 | crates/render/src/gtao.rs | 3,486 | 3,336 |
+| 10 | crates/game/src/camera.rs | 3,459 | 3,308 |
+| 11 | crates/render/src/present/gpu_present/presenter.rs | 3,453 | 3,311 |
+| 12 | crates/editor/src/commands.rs | 3,441 | 3,281 |
+| 13 | crates/endpoint/src/scene_tools.rs | 3,422 | 3,306 |
+| 14 | crates/physics/src/ragdoll.rs | 3,376 | 3,247 |
+| 15 | crates/render/src/present/gpu_present/live.rs | 3,326 | 3,206 |
+| 16 | crates/spatial/src/relation.rs | 3,250 | 3,103 |
+| 17 | crates/render/src/present/gpu_present/submit.rs | 3,249 | 3,129 |
+| 18 | crates/ai/src/depth.rs | 3,145 | 2,959 |
+| 19 | crates/net/src/interest.rs | 3,076 | 2,948 |
+| 20 | crates/endpoint/src/mcp.rs | 3,071 | 2,884 |
+
+`tools/rust-quality.mjs` pins every file over 3,000 lines and fails when one
+grows, so this table and that gate must agree.
 
 ### 1.4 The lock: 80 names with more than one version, 101 extra copies
 
-`Cargo.lock` at `77789c2a`: **1,032 packages**, **80 names carry more than one
-version**, **101 extra version copies** are compiled.
+`Cargo.lock`: **1,038 packages**, **80 names carry more than one version**,
+**101 extra version copies** are compiled.
 
 First five to fix (19 of the 101 copies from five names): `hashbrown` 5,
 `glam` 4, `windows-sys` 4, `rand` 3, `syn` 3.
@@ -144,11 +164,11 @@ First five to fix (19 of the 101 copies from five names): `hashbrown` 5,
 | glam | 4 | 0.30.10 0.31.1 0.32.1 0.33.9 |
 | windows-sys | 4 | 0.52.0 0.59.0 0.60.2 0.61.2 |
 | base64 | 3 | 0.13.1 0.22.1 0.23.1 |
-| bit-set | 3 | 0.5.3 0.9.1 0.10.0 |
+| bit-set | 3 | 0.10.0 0.5.3 0.9.1 |
 | getrandom | 3 | 0.2.17 0.3.4 0.4.3 |
 | itertools | 3 | 0.13.0 0.14.0 0.15.0 |
-| rand | 3 | 0.8.8 0.9.5 0.10.3 |
-| rand_core | 3 | 0.6.4 0.9.5 0.10.1 |
+| rand | 3 | 0.10.3 0.8.8 0.9.5 |
+| rand_core | 3 | 0.10.1 0.6.4 0.9.5 |
 | redox_syscall | 3 | 0.4.1 0.5.18 0.9.4 |
 | syn | 3 | 1.0.109 2.0.119 3.0.6 |
 | bit-vec, bitflags, block-buffer, block2, calloop, calloop-wayland-source, constant_time_eq, convert_case, core-foundation, cpufeatures, crypto-common, digest, downcast-rs, embedded-hal, fixedbitset, foldhash, jni-sys, libloading, linux-raw-sys, miniz_oxide, naga, nb, ndarray, nix, nom, num-derive, objc2, objc2-app-kit, objc2-foundation, objc2-metal, objc2-quartz-core, objc2-ui-kit, ordered-float, pastey, r-efi, rand_chacha, rand_distr, rustc-hash, rustix, safetensors, sha2, shlex, signal-hook, smithay-client-toolkit, synstructure, thiserror, thiserror-impl, webpki-roots, wgpu, wgpu-core, wgpu-core-deps-apple, wgpu-core-deps-emscripten, wgpu-core-deps-windows-linux-android, wgpu-hal, wgpu-naga-bridge, wgpu-types, windows_aarch64_gnullvm, windows_aarch64_msvc, windows_i686_gnu, windows_i686_gnullvm, windows_i686_msvc, windows_x86_64_gnu, windows_x86_64_gnullvm, windows_x86_64_msvc, windows-targets, zip | 2 each | see `Cargo.lock` |
@@ -156,526 +176,149 @@ First five to fix (19 of the 101 copies from five names): `hashbrown` 5,
 `serde_json` = **one** version (1.0.151). `num-traits` = **one** version
 (0.2.19) and is **not** a direct dependency of any crate.
 
-### 1.5 Feature flags: 54 declared, 7 dead, 7 weak
+### 1.5 Feature flags: 50 declared, 0 dead, 6 weak
 
 Dead = declared, no other crate requests it, no `cfg(feature = ...)` in its
-own crate.
+own crate. **There are none left**: the seven of the last snapshot
+(`engine-endpoint/tls`, `engine-geo/default`, `engine-geo/kit`,
+`engine-geo/all`, `kam2-game/window`, `engine-playtest/tls`,
+`engine-scene/math`) are cut or live now. The count is measured by
+`node tools/feature-scan.mjs` and by `node tools/crate-map.mjs --baseline`.
 
-| crate | dead feature | body |
-|---|---|---|
-| engine-endpoint | `tls` | `["dep:engine-provider", "engine-provider/tls"]` |
-| engine-geo | `default` | `[]` |
-| engine-geo | `kit` | `["dep:engine-assets", "engine-assets/import"]` |
-| engine-geo | `all` | `["boolean", "uv", "lod", "collision", "bake", "kit", "fbx"]` |
-| kam2-game | `window` | `["dep:winit", "dep:wgpu", "dep:pollster", "dep:image", "engine-render/window"]` |
-| engine-playtest | `tls` | `["engine-provider/tls"]` |
-| engine-scene | `math` | `[]` |
+Weak = no external request, exactly one `cfg` use: `engine-geo/bake`,
+`engine-geo/fbx`, `engine-playtest/live`, `engine-proof/arena`,
+`engine-proof/ragdoll`, `engine-rules/arena`.
 
-Weak = no external request, exactly one `cfg` use: `engine-core/test-util`,
-`engine-geo/bake`, `engine-geo/fbx`, `engine-proof/arena`,
-`engine-proof/spine`, `engine-proof/ragdoll`, `engine-rules/arena`.
-
-### 1.6 Dead lines: 4,334 lines no production path reaches
+### 1.6 Dead lines: 3,101 lines no production path reaches
 
 | file | lines (all) | non-blank | evidence | verdict |
 |---|---|---|---|---|
-| crates/nav/src/orca.rs | 971 | 910 | `git grep -n "orca::" -- crates/` = 0 hits; `git grep -n "Orca" -- crates/` = 0 hits outside the file | dead: 0 callers |
-| crates/render/src/heal.rs | 1,090 | 1,014 | `RenderHeal` only in its own file; `crates/render/src/present/surface.rs:252` is a doc link (`/// Consumer: [`crate::heal::RenderHeal`]`) | no production constructor |
-| crates/audio/src/heal.rs | 749 | 686 | `DeviceHeal::new` only in `crates/game/src/audio_mix.rs:390`, inside `#[cfg(test)] mod tests` (`crates/game/src/audio_mix.rs:171`) | no production constructor |
-| crates/physics/src/kcc.rs | 928 | 925 | `git grep -n "kcc::" -- crates/` = 0 hits | dead: 0 callers |
-| crates/observe/src/rerun_sink.rs | 321 | 297 | `RerunSink` only in `crates/observe/src/timeline.rs` (doc links) and `crates/observe/tests/it/w1_pf9_rerun.rs:9` | no outside caller |
-| crates/ai/src/behavior.rs | 275 | 260 | `git grep -n "behavior::" -- crates/` = 2 hits, both inside engine-ai (`crates/ai/src/lib.rs:23` re-export, `crates/ai/src/gladiator.rs:12` doc comment); `engine_ai::Behavior`, `engine_ai::tick`, `engine_ai::Status` = 0 hits each | dead: re-exported, never called |
-| **total** | **4,334** | 4,090 | | |
+| crates/nav/src/orca.rs | 1,252 | 1,172 | `git grep -n "orca::" -- crates/` = 0 hits | dead: 0 callers |
+| crates/render/src/heal.rs | 1,137 | 1,060 | `RenderHeal` only in its own file; `crates/render/src/present/surface.rs:261` and `:281` are doc links | dead: no production constructor |
+| crates/observe/src/rerun_sink.rs | 437 | 405 | `RerunSink` only in its own file, one doc link in `crates/observe/src/timeline.rs` and `crates/observe/tests/it/w1_pf9_rerun.rs` | dead: no outside caller |
+| crates/ai/src/behavior.rs | 275 | 260 | `git grep -n "behavior::" -- crates/` = 2 hits, both inside engine-ai (`crates/ai/src/lib.rs` re-export, `crates/ai/src/gladiator.rs` doc comment) | dead: re-exported, never called |
+| **total** | **3,101** | 2,897 | | |
 
-**Live, do not delete:** `crates/ai/src/utility.rs` (354 lines, used by
-`crates/ai/src/gladiator.rs:144` and `crates/ai/src/personality.rs:155`),
-`crates/anim/src/lod.rs` (194 lines, used by `crates/anim/src/crowd_scale.rs:10`),
-`crates/audio/src/crowd.rs` (512 lines, six intra-crate callers plus
-`crates/game/src/audio_director.rs:17`), `crates/assets/src/import_repair.rs`
-(1,310 lines, wired - see section 6).
+Two rows of the old list are no longer dead:
 
-### 1.7 Disk
+| file | lines (all) | verdict |
+|---|---|---|
+| crates/audio/src/heal.rs | 792 | live: `crates/audio/src/engine.rs:77` builds `DeviceHeal::new()` |
+| crates/physics/src/kcc.rs | - | gone: cut by board row PW50 |
 
-| item | value |
-|---|---|
-| `target/debug` | 84,947 files, 30,974,305,957 bytes (28.9 GiB) |
-| tracked `.profraw` in git | **91 files, 55,519,832 bytes** (90 at the repo root, 1 in `crates/game/`) |
+**Live, do not delete:** `crates/ai/src/utility.rs`, `crates/anim/src/lod.rs`,
+`crates/audio/src/crowd.rs`, `crates/assets/src/import_repair.rs`.
 
-### 1.8 Docs
+### 1.7 Disk (this PC)
 
 | item | value |
 |---|---|
-| `docs/` | 1,207 files, 54,519,106 bytes |
-| `docs/` .md only | 627 files, 9,207,076 bytes |
-| `docs/archive/` | 851 files, 41,803,786 bytes = **76.7% of all docs bytes** |
-| `docs/plan/` | 70 files, 1,170,549 bytes |
-| `docs/research/` | 109 files, 1,662,692 bytes |
-| `docs/plan/kam2-ui.md` | not listed in `docs/plan/README.md` |
+| `target/debug` | 16,006 files, 6,411,562,986 bytes (6.0 GiB) |
+| tracked `.profraw` in git | **0 files, 0 bytes** (the 91 of the last snapshot are gone) |
 
-### 1.9 Agent context (tokens = bytes / 4)
+### 1.8 Docs (this PC)
+
+| item | value |
+|---|---|
+| `docs/` | 1,336 files, 67,372,356 bytes |
+| `docs/` .md only | 734 files, 11,857,555 bytes |
+| `docs/archive/` | 852 files, 41,884,650 bytes = **62.2% of all docs bytes** |
+| `docs/plan/` | 80 files, 1,623,839 bytes |
+| `docs/research/` | 223 files, 13,497,820 bytes |
+
+### 1.9 Agent context (this PC, tokens = bytes / 4)
 
 | file | lines | bytes | approx tokens |
 |---|---|---|---|
-| llms.txt | 41 | 3,422 | 856 |
-| AGENTS.md | 34 | 5,679 | 1,420 |
-| docs/book/for-ai.md | 45 | 6,047 | 1,512 |
-| docs/CRATE-MAP.md | 48 | 8,037 | 2,009 |
-| .opencode/repomap.md | 483 | 15,866 | 3,966 |
-| docs/plan/README.md | 177 | 19,759 | 4,940 |
-| **entry set total** | | | **~14,703** |
-| .opencode/modmap.md (whole) | 1,397 | 144,615 | 36,154 |
+| llms.txt | 58 | 3,607 | 902 |
+| AGENTS.md | 59 | 8,957 | 2,239 |
+| docs/book/for-ai.md | 62 | 6,047 | 1,512 |
+| docs/CRATE-MAP.md | 64 | 8,964 | 2,241 |
+| .opencode/repomap.md | 486 | 15,868 | 3,967 |
+| docs/plan/README.md | 217 | 23,002 | 5,751 |
+| **entry set total** | | | **~16,612** |
+| .opencode/modmap.md (whole) | 1,552 | 157,888 | 39,472 |
 
 One crate's modmap slice (the map is grep-only, never read whole): render
-4,068 tok (11.3% of the map), endpoint 3,810, game 2,652, assets 2,289, net
-2,136, anim 1,561, playtest 1,540, editor 1,191, spatial 1,153, ai 973, perf
-971, physics 947, combat 843, proof 842, audio 820, provider 810, core 797.
-Top 3 crates = 10,529 tok = 29.1% of the map. A packet for one crate (map
-slice + CRATE-MAP row + plan line + board row) must stay **under 6,000
-tokens**.
+4,309 tok (10.9% of the map), endpoint 4,016, game 2,807, assets 2,709, net
+2,166, playtest 1,781, anim 1,670, editor 1,193, spatial 1,182, physics 1,112,
+ai 996, perf 974, physfx 926, proof 922, combat 901. Top 3 crates = 11,132
+tok = 28.2% of the map. A packet for one crate (map slice + CRATE-MAP row +
+plan line + board row) must stay **under 6,000 tokens**.
 
 ---
 
-## 2. SPEC A - extend `tools/crate-map.mjs` (one tool, not a second tool)
+## 2. How the drift gate works
 
-Do **not** create `tools/crate-stats.mjs`. The project rule is no zoo: never
-add a copy, a variant, a twin. `tools/crate-map.mjs` already walks every
-`crates/<dir>` and reads every `Cargo.toml`; the line counts, the lock
-version counts and the dead-feature count belong there, and
-`tools/workspace-check.mjs` calls them.
+Two halves, one rule, no number written in a tool:
 
-All of this is a **spec** - the lead applies it. Nothing below was applied by
-the lane that measured it.
+1. **The measured side** is `tools/crate-map.mjs`. It walks every
+   `crates/<dir>` once and counts the crates, the physical lines of Rust under
+   `crates/<dir>/src`, the names that carry more than one version in
+   `Cargo.lock` and the dead feature flags (the dead rule is
+   `tools/feature-scan.mjs`, so there is one rule and not two).
+   `node tools/crate-map.mjs --baseline` prints the numbers of the committed
+   tree: `git archive HEAD` and `tar` read it into a temp folder, and the
+   same helpers measure it, so the gate and this file always count the same
+   bytes.
+2. **The recorded side** is the four machine-readable lines at the top of this
+   file. `tools/workspace-check.mjs` reads them with `readBaseline`, measures
+   the committed tree with `baselineCounts` and compares them with
+   `baselineDrift`.
 
-**A1. New import.** Line 6 stays as it is (`readdirSync` with
-`{ withFileTypes: true }` is enough for a recursive walk); no new import is
-needed.
+The audit prints one PASS line:
 
-**A2. Add after `export const dependencyNames = ...` (after line 33):**
-
-```js
-// Physical lines of Rust under crates/<dir>/src (blank lines included, the
-// count `wc -l` gives). One walk per crate. Pure helper for tests.
-export const sourceLines = (cratesDir, dir) => {
-  const src = join(cratesDir, dir, "src");
-  if (!existsSync(src)) return { files: 0, lines: 0 };
-  let files = 0;
-  let lines = 0;
-  const walk = (p) => {
-    for (const e of readdirSync(p, { withFileTypes: true })) {
-      const q = join(p, e.name);
-      if (e.isDirectory()) walk(q);
-      else if (e.name.endsWith(".rs")) {
-        files += 1;
-        lines += readFileSync(q, "utf8").split("\n").length - 1;
-      }
-    }
-  };
-  walk(src);
-  return { files, lines };
-};
+```
+PASS baseline: 43 crates, 888420 src lines, 80 multi-version lock names, 0 dead feature flags
 ```
 
-**A3. Add after `export const instability = ...` (after line 61):**
+and fails with the old and the new value when a number moved:
 
-```js
-// Multi-version names in Cargo.lock: what `cargo tree --duplicates` prints,
-// without calling cargo. One pass over the lock.
-export const lockVersions = (root = ROOT) => {
-  const lockPath = join(root, "Cargo.lock");
-  if (!existsSync(lockPath)) return { packages: 0, names: 0, copies: 0, byName: [] };
-  const versions = new Map();
-  let packages = 0;
-  for (const block of readFileSync(lockPath, "utf8").split("[[package]]").slice(1)) {
-    const name = /name = "([^"]+)"/.exec(block)?.[1];
-    const version = /version = "([^"]+)"/.exec(block)?.[1];
-    if (!name || !version) continue;
-    packages += 1;
-    if (!versions.has(name)) versions.set(name, new Set());
-    versions.get(name).add(version);
-  }
-  const byName = [...versions.entries()]
-    .filter(([, v]) => v.size > 1)
-    .map(([name, v]) => ({ name, copies: v.size, versions: [...v].sort() }))
-    .sort((a, b) => b.copies - a.copies || a.name.localeCompare(b.name));
-  return { packages, names: byName.length, copies: byName.reduce((a, r) => a + r.copies - 1, 0), byName };
-};
-
-// Feature flags that no other crate requests and that their own crate never
-// reads with cfg(feature = ...). One pass over crates/*/Cargo.toml plus one
-// pass over crates/*/src. Pure helper for tests.
-export const deadFeatures = (root = ROOT) => {
-  const cratesDir = join(root, "crates");
-  const dirs = existsSync(cratesDir)
-    ? readdirSync(cratesDir).filter((d) => existsSync(join(cratesDir, d, "Cargo.toml"))).sort()
-    : [];
-  const pkgOf = new Map();
-  for (const d of dirs) pkgOf.set(d, packageName(readFileSync(join(cratesDir, d, "Cargo.toml"), "utf8")));
-  const declared = new Map();   // "pkg/feature" -> body
-  for (const d of dirs) {
-    const text = readFileSync(join(cratesDir, d, "Cargo.toml"), "utf8");
-    let inFeatures = false;
-    for (const raw of text.replace(/\r\n/g, "\n").split("\n")) {
-      const line = raw.trim();
-      if (/^\[/.test(line)) { inFeatures = line === "[features]"; continue; }
-      if (!inFeatures) continue;
-      const m = /^([A-Za-z0-9_.-]+)\s*=\s*(.*)$/.exec(line);
-      if (m) declared.set(`${pkgOf.get(d)}/${m[1]}`, m[2]);
-    }
-  }
-  const requested = new Set();  // "pkg/feature" asked for by another crate
-  for (const d of dirs) {
-    const text = readFileSync(join(cratesDir, d, "Cargo.toml"), "utf8");
-    for (const m of text.matchAll(/^\s*([A-Za-z0-9_-]+)\s*=\s*\{([^}]*)\}/gm)) {
-      const fm = /features\s*=\s*\[([^\]]*)\]/.exec(m[2]);
-      if (!fm) continue;
-      for (const f of fm[1].split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean)) {
-        requested.add(`${m[1]}/${f}`);
-      }
-    }
-  }
-  const used = new Set();       // "pkg/feature" read with cfg(feature = ...)
-  for (const d of dirs) {
-    const src = join(cratesDir, d, "src");
-    if (!existsSync(src)) continue;
-    const walk = (p) => {
-      for (const e of readdirSync(p, { withFileTypes: true })) {
-        const q = join(p, e.name);
-        if (e.isDirectory()) walk(q);
-        else if (e.name.endsWith(".rs")) {
-          for (const m of readFileSync(q, "utf8").matchAll(/feature\s*=\s*"([^"]+)"/g)) {
-            used.add(`${pkgOf.get(d)}/${m[1]}`);
-          }
-        }
-      }
-    };
-    walk(src);
-  }
-  const dead = [];
-  for (const [feature, body] of declared) {
-    if (!requested.has(feature) && !used.has(feature)) dead.push({ feature, body });
-  }
-  dead.sort((a, b) => a.feature.localeCompare(b.feature));
-  return dead;
-};
+```
+FAIL baseline: src lines 888420 -> 888517
 ```
 
-**A4. In `crateRows` (lines 38-52), add the line counts to every row:**
+The audit then exits 1 and says which file to record. The dead feature flags
+are a WARN, not a failure: cutting one is the point of the compaction work,
+and this file is re-recorded with the size change.
 
-```js
-    const src = sourceLines(crates, d);
-    return { dir: d, name: packageName(toml), job: clip(job, JOB_MAX).replace(/\|/g, "/"), deps: dependencyNames(toml), srcFiles: src.files, srcLines: src.lines };
-```
+**The workflow for a size change.** Land the change, then run
+`node tools/crate-map.mjs --baseline` and commit the four numbers with it.
+The doc update is the commit after the size change, because the numbers are
+the ones of the committed tree.
 
-**A5. In `renderCrateMap` (lines 66-77), add two columns and one legend
-line:**
-
-```js
-export const renderCrateMap = (rows) => [
-  "# Crate map",
-  "",
-  "Generated by `node tools/crate-map.mjs` from each `crates/<dir>/Cargo.toml` and its `lib.rs` `//!` line. Do not edit by hand.",
-  "`Depends on` = engine crates in `[dependencies]`; `Used by` = the reverse. Both drop the `engine-` prefix.",
-  "`Instability` = Ce / (Ca + Ce): fan-out over fan-in plus fan-out. 0 is stable, 1 is unstable.",
-  "`src files` / `src lines` = the .rs files under `crates/<dir>/src` and their physical lines (blank lines included).",
-  "",
-  "| Package | Dir | Job (lib.rs) | Depends on | Used by | Instability | src files | src lines |",
-  "|---|---|---|---|---|---|---|---|",
-  ...rows.map((r) => `| \`${r.name}\` | \`crates/${r.dir}\` | ${r.job} | ${list(r.deps)} | ${list(r.usedBy)} | ${instability(r).toFixed(2)} | ${r.srcFiles} | ${r.srcLines} |`),
-  "",
-].join("\n");
-```
-
-**A6. Add a `--baseline` mode to the CLI (lines 81-94):** widen the usage
-guard to `!["--check", "--baseline"].includes(args[0])` and add, before the
-`--check` branch:
-
-```js
-  if (args[0] === "--baseline") {
-    const rows = crateRows();
-    const lock = lockVersions();
-    const dead = deadFeatures();
-    const srcLines = rows.reduce((a, r) => a + r.srcLines, 0);
-    console.log(`crates: ${rows.length}`);
-    console.log(`src lines: ${srcLines}`);
-    console.log(`lock packages: ${lock.packages}`);
-    console.log(`multi-version lock names: ${lock.names}`);
-    console.log(`extra version copies: ${lock.copies}`);
-    console.log(`dead feature flags: ${dead.length}`);
-    for (const r of lock.byName) console.log(`  ${r.name} (${r.copies}): ${r.versions.join(" ")}`);
-    for (const f of dead) console.log(`  dead feature: ${f.feature}`);
-    process.exit(0);
-  }
-```
-
-**A7. After the change**, `docs/CRATE-MAP.md` gains two columns: the lead
-runs `node tools/crate-map.mjs` once and commits `docs/CRATE-MAP.md` with the
-change, so `node tools/crate-map.mjs --check` still prints
-`PASS docs/CRATE-MAP.md`.
-
-**A8. Tests, in the existing `tools/crate-map.test.mjs` (no new test file):**
-`sourceLines` counts a temp `crates/<d>/src` tree; `lockVersions` counts a
-temp `Cargo.lock` (2 names, 1 extra copy); `deadFeatures` finds one dead and
-one used feature in a temp tree; `crateRows` returns `srcFiles` and
-`srcLines` for every row.
+Proofs: `node --test tools/crate-map.test.mjs` (7 pass),
+`node --test tools/workspace-check.test.mjs` (67 pass),
+`node tools/crate-map.mjs --check` prints `PASS docs/CRATE-MAP.md`.
 
 ---
 
-## 3. SPEC B - the `tools/workspace-check.mjs` gate lines
-
-**Do not edit `tools/workspace-check.mjs` from this lane** - the speedup lane
-may be in there. This is the exact patch the lead applies.
-
-**B1. One import, next to the existing ones (after line 12):**
-
-```js
-import { crateRows, deadFeatures, lockVersions } from "./crate-map.mjs";
-```
-
-**B2. The gate block.** Paste it into `audit(repoDir)` immediately **before**
-the line `if (errors.length) throw new Error(errors.join("\n"));`:
-
-```js
-  // CMP01 baseline drift gate (lane 09, 2026-10-20): the measured size of the
-  // engine must not move without docs/compaction-baseline.md moving with it.
-  // The counts come from tools/crate-map.mjs, so there is one tool, not a
-  // zoo, and no second walk of the tree.
-  let baselineCrates = 0;
-  let baselineSrcLines = 0;
-  let baselineLockNames = 0;
-  let baselineDeadFlags = 0;
-  try {
-    const basePath = join(repoDir, "docs", "compaction-baseline.md");
-    const base = existsSync(basePath) ? readFileSync(basePath, "utf8") : "";
-    const rows = crateRows(repoDir);
-    const lock = lockVersions(repoDir);
-    const dead = deadFeatures(repoDir);
-    const srcLines = rows.reduce((a, r) => a + (r.srcLines ?? 0), 0);
-    const want = {
-      crates: Number(/^- crates: (\d+)$/m.exec(base)?.[1] ?? -1),
-      srcLines: Number(/^- src lines: (\d+)$/m.exec(base)?.[1] ?? -1),
-      lockNames: Number(/^- multi-version lock names: (\d+)$/m.exec(base)?.[1] ?? -1),
-      deadFlags: Number(/^- dead feature flags: (\d+)$/m.exec(base)?.[1] ?? -1),
-    };
-    baselineCrates = rows.length;
-    baselineSrcLines = srcLines;
-    baselineLockNames = lock.names;
-    baselineDeadFlags = dead.length;
-    if (want.crates !== rows.length) errors.push(`baseline: crates ${want.crates} -> ${rows.length}`);
-    if (want.srcLines !== srcLines) errors.push(`baseline: src lines ${want.srcLines} -> ${srcLines}`);
-    if (want.lockNames !== lock.names) errors.push(`baseline: multi-version lock names ${want.lockNames} -> ${lock.names}`);
-    // The dead flags are a warning, not a failure: deleting one is the point
-    // of row CMP-08, and the lead updates this file in the same commit.
-    if (want.deadFlags !== dead.length) {
-      console.log(`WARN baseline: dead feature flags ${want.deadFlags} -> ${dead.length}: update docs/compaction-baseline.md in the same commit`);
-    }
-  } catch (error) {
-    errors.push(`baseline drift gate could not run: ${error.message}`);
-  }
-```
-
-**B3. The PASS line.** Add it with the other PASS lines, after
-`console.log(\`PASS maps: ...\`)`:
-
-```js
-  console.log(`PASS baseline: ${baselineCrates} crates, ${baselineSrcLines} src lines, ${baselineLockNames} multi-version lock names, ${baselineDeadFlags} dead feature flags`);
-```
-
-**B4. The baseline file must carry the four machine-read lines** so the
-regexes above match. Put this block near the top of
-`docs/compaction-baseline.md`:
-
-```
-- crates: 42
-- src lines: 816611
-- multi-version lock names: 80
-- dead feature flags: 7
-```
-
-**B5. Expected output after the patch:**
-
-```
-PASS baseline: 42 crates, 816611 src lines, 80 multi-version lock names, 7 dead feature flags
-```
-
-and when a number moves without the baseline moving:
-
-```
-FAIL workspace audit: baseline: src lines 816611 -> 816700
-```
-
-**B6.** `node --test tools/workspace-check.test.mjs` still passes; the gate
-adds no `cargo` call and no second tree walk (the counts come from the
-in-process helpers).
-
----
-
-## 4. SPEC C - the 91 `.profraw` files: `.gitignore` line and the index command
-
-**C1. The exact `.gitignore` line** (the lead appends it; the lane did not
-touch `.gitignore`):
-
-```
-# CMP10: cargo profile artifacts are build output, never tracked (91 were, 55.5 MB).
-*.profraw
-```
-
-**C2. The exact command** (the lead runs it; the lane never touched the
-index):
-
-```
-git rm --cached -- "*.profraw"
-```
-
-Verified read-only on 2026-10-20:
-`git rm --cached -n -- "*.profraw"` prints exactly **91** `rm '<path>'` lines
-(the list below), and `git ls-files "*.profraw"` prints 91 paths.
-
-**C3. The 91 paths** (`git ls-files "*.profraw"`):
-
-```
-crates/game/default_6592166020663119231_0_21600.profraw
-default_11531410208419812330_0_14908.profraw
-default_11531410208419812330_0_21932.profraw
-default_11531410208419812330_0_29260.profraw
-default_11531410208419812330_0_32408.profraw
-default_12114940404156725336_0_14908.profraw
-default_12114940404156725336_0_21932.profraw
-default_12114940404156725336_0_29260.profraw
-default_12114940404156725336_0_32408.profraw
-default_12766043644524746671_0_14908.profraw
-default_12766043644524746671_0_21932.profraw
-default_12766043644524746671_0_29260.profraw
-default_12766043644524746671_0_32408.profraw
-default_13151844070501877706_0_14908.profraw
-default_13151844070501877706_0_21932.profraw
-default_13151844070501877706_0_25864.profraw
-default_13151844070501877706_0_29260.profraw
-default_13151844070501877706_0_32408.profraw
-default_14592561836793919282_0_14908.profraw
-default_14592561836793919282_0_21932.profraw
-default_14592561836793919282_0_29260.profraw
-default_14592561836793919282_0_32408.profraw
-default_15407677909019594497_0_14908.profraw
-default_15407677909019594497_0_22912.profraw
-default_15407677909019594497_0_32408.profraw
-default_15407677909019594497_0_34352.profraw
-default_15407677909019594497_0_34684.profraw
-default_15407677909019594497_0_35944.profraw
-default_15407677909019594497_0_9272.profraw
-default_15421558880541078991_0_14908.profraw
-default_15421558880541078991_0_21932.profraw
-default_15421558880541078991_0_22912.profraw
-default_15421558880541078991_0_29260.profraw
-default_15421558880541078991_0_32408.profraw
-default_15421558880541078991_0_34352.profraw
-default_15421558880541078991_0_34684.profraw
-default_15421558880541078991_0_35944.profraw
-default_15421558880541078991_0_9272.profraw
-default_15538312708823871364_0_14908.profraw
-default_15538312708823871364_0_21932.profraw
-default_15538312708823871364_0_22912.profraw
-default_15538312708823871364_0_25864.profraw
-default_15538312708823871364_0_29260.profraw
-default_15538312708823871364_0_32408.profraw
-default_15538312708823871364_0_34352.profraw
-default_15538312708823871364_0_34684.profraw
-default_15538312708823871364_0_35944.profraw
-default_15538312708823871364_0_9272.profraw
-default_15763605578570292452_0_14908.profraw
-default_15763605578570292452_0_21932.profraw
-default_15763605578570292452_0_22912.profraw
-default_15763605578570292452_0_25864.profraw
-default_15763605578570292452_0_29260.profraw
-default_15763605578570292452_0_32408.profraw
-default_15763605578570292452_0_34352.profraw
-default_15763605578570292452_0_34684.profraw
-default_15763605578570292452_0_35944.profraw
-default_15763605578570292452_0_9272.profraw
-default_15999050843751615430_0_14908.profraw
-default_15999050843751615430_0_21932.profraw
-default_15999050843751615430_0_29260.profraw
-default_15999050843751615430_0_32408.profraw
-default_16628792701168341809_0_14908.profraw
-default_16628792701168341809_0_21932.profraw
-default_16628792701168341809_0_29260.profraw
-default_16628792701168341809_0_32408.profraw
-default_4151401301713125766_0_14908.profraw
-default_4151401301713125766_0_21932.profraw
-default_4151401301713125766_0_29260.profraw
-default_4151401301713125766_0_32408.profraw
-default_4526706205214488633_0_14908.profraw
-default_4526706205214488633_0_22912.profraw
-default_4526706205214488633_0_32408.profraw
-default_4526706205214488633_0_34352.profraw
-default_4526706205214488633_0_34684.profraw
-default_4526706205214488633_0_35944.profraw
-default_4526706205214488633_0_9272.profraw
-default_5217871785964836725_0_14908.profraw
-default_5217871785964836725_0_21932.profraw
-default_5217871785964836725_0_25840.profraw
-default_5217871785964836725_0_32408.profraw
-default_6393772639977521661_0_14908.profraw
-default_6393772639977521661_0_21932.profraw
-default_6393772639977521661_0_25840.profraw
-default_6393772639977521661_0_32408.profraw
-default_8070615554531034728_0_14908.profraw
-default_8070615554531034728_0_21932.profraw
-default_8070615554531034728_0_29260.profraw
-default_8070615554531034728_0_32408.profraw
-default_874140065828270945_0_14908.profraw
-default_874140065828270945_0_21932.profraw
-default_874140065828270945_0_29260.profraw
-default_874140065828270945_0_32408.profraw
-```
-
-**C4. The disk half (E86):** `node tools/clean.mjs --dry-run` then
-`node tools/clean.mjs --auto --include-debug`. The dry run must list no
-`target/debug` entry afterwards; anything removed goes to
-`C:\_quarantine\<date>\` with a `MOVES.tsv` line, never a hard delete.
-
----
-
-## 5. SPEC D - the deletion manifest (the lead applies it, one crate at a time)
+## 3. The deletion manifest
 
 Every row: the crate's own test must stay green and the golden
 `d57b5c8ae3096614` must not move. The proof command is
 `node tools/gh-check.mjs cargo test -p <crate> --lib`, which prints
 `PASS on the runner: cargo test -p <crate> --lib (run <url>)` and exits 0.
-The golden check is `cargo run --locked -- --verify`, which prints
-`final_hash=d57b5c8ae3096614` and `verified=true`, twice.
 
-| # | path | lines | evidence (must print this) | crate test that stays green | golden |
-|---|---|---|---|---|---|
-| D1 | crates/nav/src/orca.rs | 971 | `git grep -n "orca::" -- crates/` = 0 hits | `cargo test -p engine-nav --lib` | unchanged |
-| D2 | crates/render/src/heal.rs | 1,090 | `git grep -n "RenderHeal::new" -- crates/` = 0 hits | `cargo test -p engine-render --lib` | unchanged |
-| D3 | crates/audio/src/heal.rs | 749 | `git grep -n "DeviceHeal::new" -- crates/` = 0 hits outside `#[cfg(test)]` | `cargo test -p engine-audio --lib` | unchanged |
-| D4 | crates/physics/src/kcc.rs | 928 | `git grep -n "kcc::" -- crates/` = 0 hits | `cargo test -p engine-physics --lib` | unchanged |
-| D5 | crates/observe/src/rerun_sink.rs | 321 | `git grep -n "RerunSink::" -- crates/` = 0 hits outside `crates/observe/src/rerun_sink.rs` | `cargo test -p engine-observe --lib` | unchanged |
-| D6 | crates/ai/src/behavior.rs | 275 | `git grep -n "behavior::" -- crates/` = 0 hits after the cut (2 today, both inside engine-ai: `crates/ai/src/lib.rs:23`, `crates/ai/src/gladiator.rs:12`); `engine_ai::Behavior` / `engine_ai::tick` / `engine_ai::Status` = 0 hits | `cargo test -p engine-ai --lib` | unchanged |
-| **total** | | **4,334** | | | |
+| # | path | lines | evidence (must print this) | crate test that stays green |
+|---|---|---|---|---|
+| D1 | crates/nav/src/orca.rs | 1,252 | `git grep -n "orca::" -- crates/` = 0 hits | `cargo test -p engine-nav --lib` |
+| D2 | crates/render/src/heal.rs | 1,137 | `git grep -n "RenderHeal::new" -- crates/` = 0 hits outside the file | `cargo test -p engine-render --lib` |
+| D3 | crates/observe/src/rerun_sink.rs | 437 | `git grep -n "RerunSink::" -- crates/` = 0 hits outside the file | `cargo test -p engine-observe --lib` |
+| D4 | crates/ai/src/behavior.rs | 275 | `git grep -n "behavior::" -- crates/` = 0 hits after the cut | `cargo test -p engine-ai --lib` |
+| **total** | | **3,101** | | |
 
 Each cut also touches the owning crate's `src/lib.rs` (the `pub mod` line) and
-the test file that covered the module; the row lists the owned paths in
-`docs/research/powerups-2026-10-20/proposed-rows-09-code-compaction.md`.
+the test file that covered the module. Record the new numbers at the top of
+this file with the cut (the drift gate would otherwise fail).
 
-Order the lead should follow: one crate at a time, the crate's test green
-before the next crate starts, the golden hash checked after each crate, and
-`docs/compaction-baseline.md` updated in the same commit (the drift gate
-would otherwise fail).
-
-**Do not cut** (live code, verified 2026-10-20): `crates/ai/src/utility.rs`,
+**Do not cut** (live code): `crates/ai/src/utility.rs`,
 `crates/anim/src/lod.rs`, `crates/audio/src/crowd.rs`,
-`crates/assets/src/import_repair.rs`.
-
-**Do not drop** (they are live, only the *flag* is dead): the `engine-provider`
-`tls` feature, the `engine-geo` `boolean` / `uv` / `lod` / `collision` /
-`bake` / `fbx` features, the `engine-core` `test-util` feature, the
-`engine-proof` `arena` / `spine` / `ragdoll` features, the `engine-rules`
-`arena` feature. The dead ones are the seven in section 1.5 and nothing else.
+`crates/assets/src/import_repair.rs`, `crates/audio/src/heal.rs`.
 
 ---
 
-## 6. Corrections to the stale audit (three + one doc line)
+## 4. Corrections to the stale audit (three + one doc line)
 
 These three are in `docs/plan/forge-adoption.md` section A.3 item 5 (and
 item 3). Other lanes repeated them from that stale list, so they are
@@ -696,8 +339,8 @@ and a second one at `crates/render/src/present/gpu_present/presenter.rs:2197`
 `crates/assets/src/import_repair.rs` is 1,310 lines and live.
 
 **(b) `engine-playtest` HAS a consumer.** `crates/endpoint/Cargo.toml:16`
-puts `dep:engine-playtest` in the endpoint's `mcp` feature; line 32 defines
-`verify = ["mcp", "dep:engine-proof"]`; line 79 declares
+puts `dep:engine-playtest` in the endpoint's `mcp` feature, line 32 defines
+`verify = ["mcp", "dep:engine-proof"]`, and line 79 declares
 `engine-playtest = { workspace = true, optional = true }`. The call site is
 `crates/endpoint/src/packs/verify.rs:34-37`:
 
@@ -708,12 +351,12 @@ use engine_playtest::replay::{bisect_tape, verify_tape, ReplayError};
 use engine_playtest::seeded_bug::{...};
 ```
 
-plus `crates/endpoint/src/look_host.rs:7` and `crates/endpoint/src/packs/view.rs:49`.
-One stale comment survives and must be fixed:
-`crates/endpoint/src/assistant/fork.rs:19` still says "`engine-playtest` stays
-outside the endpoint dep edge".
+plus `crates/endpoint/src/look_host.rs:7` and
+`crates/endpoint/src/packs/view.rs:49`. One stale comment survives and must
+be fixed: `crates/endpoint/src/assistant/fork.rs:19` still says
+"`engine-playtest` stays outside the endpoint dep edge".
 
-**(c) There is NO `nav::crowd` in the tree.** Zero-hit proof, 2026-10-20:
+**(c) There is NO `nav::crowd` in the tree.** Zero-hit proof:
 
 ```
 git grep -n "nav::crowd" -- crates/       -> no output, exit 1
@@ -723,56 +366,20 @@ git grep -n "engine_nav::crowd" -- crates/ -> no output, exit 1
 `crates/nav/src/` holds 14 files and no `crowd.rs`: bake.rs, cursor.rs,
 flow.rs, funnel.rs, layers.rs, lib.rs, links.rs, mesh.rs, orca.rs, quant.rs,
 reach.rs, rebake.rs, spline.rs, tiles.rs. The ORCA code the audit meant is
-`crates/nav/src/orca.rs` (971 lines, zero callers - row D1). The shared cue
-type is `crates/audio/src/crowd.rs` (512 lines, live: six intra-crate
-callers plus `crates/game/src/audio_director.rs:17`).
+`crates/nav/src/orca.rs` (1,252 lines, zero callers - row D1). The shared cue
+type is `crates/audio/src/crowd.rs`, which is live.
 
 **Doc line that must change (`docs/SMOOTH-BUILD.md`, "Build speed facts") and
-`docs/SPRINT-13-engine-edge.md:34` (the OPT8 progress note).** Today they
-say "16 syn, 12 serde_json, 14 num_traits copies in target/debug/deps before
-the hack". Those are **build-artifact counts from 2026-10-17**, not
-`Cargo.lock` facts. The corrected line:
+`docs/SPRINT-13-engine-edge.md:34` (the OPT8 progress note).** They said
+"16 syn, 12 serde_json, 14 num_traits copies in target/debug/deps before the
+hack". Those were **build-artifact counts from 2026-10-17**, not `Cargo.lock`
+facts. The corrected line:
 
-> `Cargo.lock` holds 1,032 packages; 80 names carry more than one version and
+> `Cargo.lock` holds 1,038 packages; 80 names carry more than one version and
 > 101 extra copies are compiled. `serde_json` is one version (1.0.151),
 > `num-traits` is one version (0.2.19) and is not a direct dependency of any
 > crate, and `syn` is three versions (1.0.109, 2.0.119, 3.0.6). The
 > "16 / 12 / 14" figures counted files in `target/debug/deps`, which drift
 > with every build.
 
-Status 2026-10-21: this correction is now in the tree. `docs/SMOOTH-BUILD.md`
-"Build speed facts" carries the Cargo.lock numbers (measured by parsing
-`Cargo.lock` at HEAD `c36c060e`: 1,032 packages, 80 multi-version names, 101
-extra copies, `serde_json` 1.0.151, `num-traits` 0.2.19 and not a direct
-dependency, `syn` 1.0.109 / 2.0.119 / 3.0.6), and the `docs/SPRINT-13-engine-edge.md:34`
-OPT8 progress note carries a dated correction beside the old figures. The old
-"16 / 12 / 14" text is gone from both places.
-
----
-
-## For the OPT8 lane
-
-Measured at HEAD `77789c2a` on 2026-10-20, `Cargo.lock`:
-
-- **80 names carry more than one version; 101 extra version copies; 1,032
-  packages in the lock.**
-- **Fix these five first (19 of the 101 copies from five names):** `hashbrown`
-  5 versions (0.13.2 0.14.5 0.15.5 0.16.1 0.17.1), `glam` 4 (0.30.10 0.31.1
-  0.32.1 0.33.9), `windows-sys` 4 (0.52.0 0.59.0 0.60.2 0.61.2), `rand` 3
-  (0.8.8 0.9.5 0.10.3), `syn` 3 (1.0.109 2.0.119 3.0.6).
-- **Not the target:** `serde_json` is one version and `num-traits` is one
-  version and is not a direct dependency - the old "12 serde_json / 14
-  num_traits" numbers were build artifacts, not dependencies.
-- **12 dependency names are declared by more than one crate with divergent
-  feature sets** (this is what breaks unification): `image` 3 variants,
-  `engine-assets` 3, `engine-render` 3, `engine-core`, `engine-arena`,
-  `engine-anim`, `engine-scene`, `engine-game`, `wgpu`, `uuid`, `tokio`,
-  `web-sys` 2 each.
-- `crates/workspace-hack` is 2 lines of `lib.rs` with 4 externals and **no
-  dependent crate**, so it unifies nothing today.
-- **Bar for the row:** the dependency rebuild count across five lane builds
-  drops by a third. Our number to compare against, measured from `Cargo.lock`
-  at HEAD `77789c2a`: 80 names with more than one version and 101 extra
-  copies; after the lane it must be at most 67 names and at most 67 extra
-  copies.
-- This lane lands no code for OPT8.
+Status 2026-10-21: this correction is in the tree.

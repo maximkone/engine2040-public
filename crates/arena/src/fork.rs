@@ -690,6 +690,7 @@ impl ForkJob {
                 // Forks come from v1 prefix snapshots only, so the cue buffer
                 // stays empty; it still needs its reservation to build.
                 last_cues: Vec::with_capacity(MAX_ATTACK_STARTED_PER_TICK),
+                last_deflects: Vec::new(),
                 breaks: Vec::with_capacity(steps),
                 // Cut rows fill as the fork replays, one row per tick like
                 // `breaks`; a v1 prefix snapshot carries none.
@@ -705,6 +706,7 @@ impl ForkJob {
                 rules: super::ArenaRules::V1,
                 balance: Vec::new(),
                 stagger: Vec::new(),
+                knockback: Vec::new(),
                 depth,
                 limbs: LimbPool::new(MAX_LIMBS).ok()?,
                 spear: None,

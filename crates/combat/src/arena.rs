@@ -229,6 +229,12 @@ pub fn canonical_bytes(
         out.extend_from_slice(&f.poise.to_le_bytes());
         out.extend_from_slice(&f.bind.to_le_bytes());
         out.extend_from_slice(&f.last_parry_tick.to_le_bytes());
+        // Rules v2 recoil: written only while a blade is thrown back, so
+        // every v1 row keeps its bytes.
+        if f.recoil > 0 {
+            out.extend_from_slice(&[32]);
+            out.extend_from_slice(&f.recoil.to_le_bytes());
+        }
         i += 1;
     }
 }

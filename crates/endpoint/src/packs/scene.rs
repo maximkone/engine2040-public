@@ -8,6 +8,8 @@
 use super::{PackDef, PackError, VerbSpec};
 use crate::build_level::{BuildLevelTool, TOOL_BUILD_LEVEL};
 use crate::discover::{WatchTool, TOOL_SCENE_WATCH};
+#[cfg(feature = "rules")]
+use crate::game_play::{GamePlayTool, TOOL_GAME_PLAY};
 use crate::scene_next::{SceneNextTool, TOOL_SCENE_NEXT};
 use crate::scene_pick::{ScenePickTool, TOOL_SCENE_PICK};
 use crate::scene_query::{SceneQueryTool, TOOL_SCENE_QUERY};
@@ -18,6 +20,9 @@ use crate::scene_tools::{
 use crate::tool_capabilities::CapabilityCard;
 use crate::world_query::{WorldQueryTool, TOOL_WORLD_QUERY};
 use engine_scene::component::ComponentKind;
+
+mod save;
+use save::{SceneLoadTool, SceneSaveTool, TOOL_SCENE_LOAD, TOOL_SCENE_SAVE};
 
 /// Pack name.
 pub const PACK: &str = "scene";
@@ -62,13 +67,13 @@ pub fn component_doc(kind: ComponentKind) -> (&'static str, &'static str) {
     }
 }
 
-/// The scene pack: nine verbs, loaded by default.
+/// The scene pack: twelve verbs, loaded by default.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
         "layout authoring: brief, spatial findings, intent placement, brief-to-level build, \
-         spatial questions, the digest watch, the next-call planner, pointing at a capture \
-         and the BRP component filter",
+         play the built game, spatial questions, the digest watch, the next-call planner, \
+         pointing at a capture and the BRP component filter",
         true,
     );
     pack.add(VerbSpec::of::<SceneBriefTool>(
@@ -90,6 +95,12 @@ pub fn pack() -> Result<PackDef, PackError> {
         TOOL_BUILD_LEVEL,
         PACK,
         CapabilityCard::Commit,
+    )?);
+    #[cfg(feature = "rules")]
+    pack.add(VerbSpec::of::<GamePlayTool>(
+        TOOL_GAME_PLAY,
+        PACK,
+        CapabilityCard::Observe,
     )?);
     pack.add(VerbSpec::of::<SceneQueryTool>(
         TOOL_SCENE_QUERY,
@@ -115,6 +126,16 @@ pub fn pack() -> Result<PackDef, PackError> {
         TOOL_WORLD_QUERY,
         PACK,
         CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<SceneSaveTool>(
+        TOOL_SCENE_SAVE,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<SceneLoadTool>(
+        TOOL_SCENE_LOAD,
+        PACK,
+        CapabilityCard::Commit,
     )?);
     Ok(pack)
 }

@@ -53,6 +53,7 @@
 //! [`extract_root`]: engine_anim::pose::extract_root
 //! [`sample_pose`]: engine_anim::pose::sample_pose
 
+pub mod armour;
 /// The step rules the legacy step and the spine step share (ARC7b).
 mod authority;
 pub mod bolt;
@@ -102,7 +103,7 @@ pub use gym::{
     initial_state, legal_mask_of, observe_state, reward_of, vec_step, BatchEnv, GymFighterState,
     GymSnapshot, GYM_ACTION_ATTACK, GYM_ACTION_BLOCK, GYM_ACTION_DODGE, GYM_NUM_ACTIONS,
 };
-pub use live::{LiveMatch, LivePresentation, LiveTick};
+pub use live::{LiveMatch, LivePresentation, LiveTick, PoiseReading};
 pub use spear::{EndWhy, MissWhy, SpearEvent, SpearSlot};
 pub use spec::{MatchSpec, DEFAULT_INPUT_DELAY_TICKS};
 
@@ -135,7 +136,7 @@ use engine_input::fighter::{ATTACK, JUMP, THROW_SPEAR};
 use engine_physics::balance::BalanceParams;
 /// Integer balance verdicts the window reads (`Sim::balance`): re-exported so
 /// the presentation leg names the return without a physics edge.
-pub use engine_physics::balance::{BalanceState, GaitPhase};
+pub use engine_physics::balance::{BalanceState, GaitPhase, Knockback};
 /// RZ7 capes: the CPU Verlet cloth sheet the window pins at each fighter's
 /// shoulders and hangs on the arena banners. Re-exported like the balance
 /// verdicts above so the presentation leg cloths a fighter without a physics
@@ -295,51 +296,6 @@ impl ArenaRules {
     /// True when the default-leg collision pass runs (never under `sim`).
     const fn collides(&self) -> bool {
         self.collision && !cfg!(feature = "sim")
-    }
-
-    /// Fold the rules into a v1 checkpoint hash: version, the active slots'
-    /// team ids, then (when collision runs) the collision tag byte `0xC0`
-    /// plus each pillar footprint, then (when balance is wired) the balance
-    /// tag byte `0xB1` plus every slot's [`BalanceState::state_hash`], then
-    /// the stagger tag byte `0xB2` plus every slot's
-    /// [`StaggerMemory::state_hash`], then the limb tag byte `0xB3` plus
-    /// [`LimbPool::state_hash`]. Plain v1 returns the hash untouched
-    /// (golden-frozen bytes).
-    fn fold(
-        &self,
-        hash: u64,
-        fighters: usize,
-        balance: &[BalanceState],
-        stagger: &[StaggerMemory],
-        limbs: &LimbPool,
-    ) -> u64 {
-        if self.version == FIGHT_RULES_V1 && !self.collides() && !self.balance {
-            return hash;
-        }
-        let mut digest = engine_core::hash::Fnv64::with_state(hash);
-        digest.write_u32(self.version);
-        digest.write(self.teams.get(..fighters).unwrap_or(&[]));
-        if self.collides() {
-            digest.write_u8(0xC0);
-            for pillar in self.pillars.iter().flatten() {
-                for lane in pillar.min_mm.iter().chain(&pillar.max_mm) {
-                    digest.write_i32(*lane);
-                }
-            }
-        }
-        if self.balance {
-            digest.write_u8(0xB1);
-            for state in balance.iter().take(fighters) {
-                digest.write_u64(state.state_hash());
-            }
-            digest.write_u8(0xB2);
-            for memory in stagger.iter().take(fighters) {
-                digest.write_u64(memory.state_hash());
-            }
-            digest.write_u8(0xB3);
-            digest.write_u64(limbs.state_hash());
-        }
-        digest.finish()
     }
 }
 
@@ -544,6 +500,8 @@ pub struct FighterState {
     pub pos: [f32; 3],
     /// Facing yaw in radians.
     pub yaw: f32,
+    /// Worn armour bits (`ARMOR_*`, FEEL4); `0` is unarmoured.
+    pub worn: u8,
 }
 
 /// Post-step checkpoint: tick plus the match state hash.
@@ -941,6 +899,7 @@ pub struct Sim {
     /// buffer never fills and no stale cue can linger. Read through
     /// [`Sim::cues`]; presentation only, never hashed, never logged.
     last_cues: Vec<AttackStarted>,
+    last_deflects: Vec<armour::DeflectCue>,
     breaks: Vec<TickBreaks>,
     /// Severed-joint cuts per tick, one row per tick like [`Self::breaks`].
     cuts: Vec<TickCuts>,
@@ -965,6 +924,11 @@ pub struct Sim {
     /// Per-slot stagger memory (EG46), stepped only under
     /// [`ArenaRules::balance`]; empty on snapshot and fork sims (v1 only).
     stagger: Vec<StaggerMemory>,
+    /// Per-slot knockback (FEEL2): the velocity a landed blow handed the
+    /// body, in millimetres per tick. The collision pass moves the body by
+    /// it and ground friction brings it to exact rest; a match that never
+    /// arms a weapon never fills it.
+    knockback: Vec<Knockback>,
     /// Combat-depth poise meters stepped beside the fight step: every hit
     /// moves poise through [`DepthSet::observe`] and trips one stagger
     /// through [`PoiseMeter::staggered`]. Presentation only, never hashed,
@@ -1134,6 +1098,7 @@ impl Sim {
             events: Vec::with_capacity(ticks),
             combat_scratch: Vec::with_capacity(combat_event_capacity(fighters)),
             last_cues: Vec::with_capacity(cue_cap),
+            last_deflects: Vec::new(),
             breaks: Vec::with_capacity(ticks),
             cuts: Vec::with_capacity(ticks),
             // Cold authority sims keep no match rows at all: even the outer
@@ -1153,6 +1118,7 @@ impl Sim {
                 .map(|_| BalanceState::new(BalanceParams::default()))
                 .collect(),
             stagger: (0..fighters).map(|_| StaggerMemory::new()).collect(),
+            knockback: (0..fighters).map(|_| Knockback::new()).collect(),
             depth,
             limbs: LimbPool::new(limb_cap).ok()?,
             spear: None,
@@ -1776,12 +1742,14 @@ impl Sim {
             destruction_hash,
             &tick_breaks,
         );
-        let hash = self.rules.fold(
+        let hash = authority::fold_rules(
             hash,
+            &self.rules,
             self.fighters,
             &self.balance,
             &self.stagger,
             &self.limbs,
+            &self.knockback,
         );
         // The spear state folds after the rules and before the world; a match
         // without one leaves the hash untouched.
@@ -1797,6 +1765,7 @@ impl Sim {
         // Armed weapon rows fold the same way: a match that never arms one
         // leaves the hash untouched.
         let hash = heft::fold(hash, &self.fight, self.fighters);
+        let hash = armour::fold(hash, &self.states[..self.fighters]);
         // The height channel folds only when armed, so the golden bytes stay
         // exactly as they were on a floor-plane match.
         let hash = if self.height {
@@ -1858,17 +1827,17 @@ impl Sim {
     /// bone 0 through [`BalanceState::apply_memory_hit`]. `None` only on an
     /// out-of-range impulse (unreachable: the table stays inside the
     /// ceiling).
+    /// FEEL2: an armed blow also hands the victim a knockback velocity.
     fn feed_balance(&mut self, events: &[FightEvent]) -> Option<()> {
-        authority::feed_balance(&mut self.balance, &mut self.stagger, events)
-    }
-
-    /// Resolve one tick's landed hits into severed joints. V2 only: the cut
-    /// event names the joint and the limb pool carries it into the hash; the
-    /// blade is the attacker's mapped sweep at torso height, and the victim's
-    /// capsules use the standing rest layout at its feet. Presentation owns
-    /// the pose and blood; this path owns the integer cut.
-    fn resolve_cuts(&mut self, events: &[FightEvent]) -> Vec<Cut> {
-        authority::resolve_cuts(&self.states, self.tick, &mut self.limbs, events)
+        authority::feed_balance(
+            &mut self.balance,
+            &mut self.stagger,
+            &mut self.knockback,
+            &self.states,
+            &self.fight,
+            &self.rules,
+            events,
+        )
     }
 
     /// EG20 collision pass over this sim's fighters; see [`collide_states`].
@@ -1877,19 +1846,22 @@ impl Sim {
     /// test-only oracle switch routes the same rows through the
     /// pre-shortcut fixed pass count; the shipped path never sets it.
     fn collide(&mut self) {
-        let (states, balance, rules, half, fighters) = (
+        let (states, balance, knockback, rules, half, fighters) = (
             &mut self.states,
             &mut self.balance,
+            &mut self.knockback,
             &self.rules,
             self.config.half_extent_m,
             self.fighters,
         );
         #[cfg(test)]
         if self.full_collide_passes {
-            collide::collide_states_fixed_passes_shove(states, balance, rules, half, fighters);
+            collide::collide_states_fixed_passes_shove(
+                states, balance, knockback, rules, half, fighters,
+            );
             return;
         }
-        collide::collide_states_shove(states, balance, rules, half, fighters);
+        collide::collide_states_shove(states, balance, knockback, rules, half, fighters);
     }
 
     /// Merged per-slot inputs from the last stepped tick. `None` slots never
@@ -1937,6 +1909,21 @@ impl Sim {
     #[must_use]
     pub fn poise(&self, slot: u8) -> Option<&PoiseMeter> {
         self.depth.poise(slot)
+    }
+
+    /// Read-only stamina points for `slot` in `0..=MAX_STAMINA`, or `None`
+    /// for a bad slot. The fight state owns the number: an attack or a dodge
+    /// spends it, a held block costs a point a tick and a quiet fighter
+    /// regains the table's rate. No copy, no lock. Presentation only; the
+    /// digest path never reads this, so the hash cannot move.
+    ///
+    /// Consumer: the browser page (`crates/web/src/fight.rs`) paints the
+    /// stamina bar. Data owner: this crate's fight state. Units: stamina
+    /// points against a 100 cap. Determinism scope: same-machine read of
+    /// hashed state, never hashed here.
+    #[must_use]
+    pub fn stamina(&self, slot: u8) -> Option<u16> {
+        self.fight.fighter(slot).map(|fighter| fighter.stamina)
     }
 
     /// Read-only press-tick attack cues from the last stepped tick (EG19b):
@@ -2132,6 +2119,7 @@ impl Sim {
             events: Vec::with_capacity(ticks),
             combat_scratch: Vec::with_capacity(combat_event_capacity(fighters)),
             last_cues: Vec::with_capacity(fighters.min(MAX_ATTACK_STARTED_PER_TICK)),
+            last_deflects: Vec::new(),
             breaks: Vec::with_capacity(ticks),
             cuts: Vec::with_capacity(ticks),
             match_log: Vec::with_capacity(ticks),
@@ -2145,6 +2133,7 @@ impl Sim {
             rules: ArenaRules::V1,
             balance: Vec::new(),
             stagger: Vec::new(),
+            knockback: Vec::new(),
             depth,
             limbs: LimbPool::new(MAX_LIMBS).ok()?,
             spear: None,
@@ -2382,6 +2371,7 @@ fn spawn_states(seed: u64, fighters: u8, half_extent_m: f32) -> Vec<FighterState
                 id: FighterId(i),
                 pos: [canon_zero(x * limit), 0.0, canon_zero(z * limit)],
                 yaw: 0.0,
+                worn: 0,
             }
         })
         .collect()
@@ -2705,6 +2695,20 @@ mod tests {
             half_extent_m: 20.0,
             table_version: TABLES_VERSION_V1,
         }
+    }
+
+    /// The rules fold of a sim, base hash first: the checkpoint hash a sim
+    /// carries under its own rules.
+    fn fold(sim: &Sim, base: u64) -> u64 {
+        authority::fold_rules(
+            base,
+            &sim.rules,
+            sim.fighters,
+            &sim.balance,
+            &sim.stagger,
+            &sim.limbs,
+            &sim.knockback,
+        )
     }
 
     #[test]
@@ -4915,13 +4919,7 @@ mod tests {
         ];
         sim.feed_balance(&events).expect("bounded impulses");
         let gait = sim.balance(1).expect("victim slot").gait();
-        let digest = sim.rules.fold(
-            0x9e37_79b9_7f4a_7c15,
-            sim.fighters,
-            &sim.balance,
-            &sim.stagger,
-            &sim.limbs,
-        );
+        let digest = fold(&sim, 0x9e37_79b9_7f4a_7c15);
         (gait, digest)
     }
 
@@ -4964,9 +4962,7 @@ mod tests {
         let tape = idle_tape(&config);
         let mut sim = Sim::build(&config, &tape, false, false).expect("valid sim");
         let base = 0x9e37_79b9_7f4a_7c15;
-        let frozen = sim
-            .rules
-            .fold(base, sim.fighters, &sim.balance, &sim.stagger, &sim.limbs);
+        let frozen = fold(&sim, base);
         assert_eq!(frozen, base, "v1 leaves the hash untouched");
         assert!(sim.balance(99).is_none(), "bad slot reads None");
         let bad = ArenaRules {
@@ -5002,13 +4998,7 @@ mod tests {
             crate::limbs::spawn_limbs(&mut sim.limbs, &[cut], 0).expect("valid cut");
             sim.limbs.step();
         }
-        sim.rules.fold(
-            0x9e37_79b9_7f4a_7c15,
-            sim.fighters,
-            &sim.balance,
-            &sim.stagger,
-            &sim.limbs,
-        )
+        fold(&sim, 0x9e37_79b9_7f4a_7c15)
     }
 
     #[test]
@@ -5098,7 +5088,8 @@ mod tests {
 
     /// Decomposition receipt: the p50 microseconds of one rules-v2 8-fighter
     /// tick's whole step, then of the pieces it spends its time in
-    /// ([`engage::Plan::build`], the destruction digest, [`ArenaRules::fold`],
+    /// ([`engage::Plan::build`], the destruction digest,
+    /// [`authority::fold_rules`],
     /// [`collide::collide_states`], the eight [`strike_pose`] builds, and the
     /// fold's own sub-hashes). Every piece runs on the poses one warmed real
     /// bout holds, interleaved so one machine load sits under each. Run:
@@ -5149,13 +5140,7 @@ mod tests {
             columns[1].push(micros_per(begin.elapsed(), BATCH));
             let begin = std::time::Instant::now();
             for _ in 0..BATCH {
-                std::hint::black_box(warm.rules.fold(
-                    base,
-                    count,
-                    &warm.balance,
-                    &warm.stagger,
-                    &warm.limbs,
-                ));
+                std::hint::black_box(fold(&warm, base));
             }
             columns[2].push(micros_per(begin.elapsed(), BATCH));
             let begin = std::time::Instant::now();

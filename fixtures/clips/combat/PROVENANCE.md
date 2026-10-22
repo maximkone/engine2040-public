@@ -15,10 +15,10 @@ or the empire repo.
 
 | pack | source clip | prompt | seed | steps | ticks | slip (left/right) |
 |---|---|---|---|---|---|---|
-| `slash_over.am5p` | `slash_over` | A person raises a sword and brings it down in a strong overhead strike. | 71235 | 100 | 119 | 0.000389 / 0.000140 |
-| `spear_thrust.am5p` | `spear_thrust` | A person lunges forward and thrusts a spear. | 31236 | 100 | 95 | 0.003025 / 0.003173 |
-| `parry.am5p` | `parry` | A person parries an attack with a sword and then strikes back. | 71234 | 100 | 119 | 0.080097 / 0.068190 |
-| `slash_h.am5p` | `slash_h` | A person swings a sword in a fast horizontal slash. | 31234 | 100 | 95 | 0.133841 / 0.116123 |
+| `slash_over.am5p` | `slash_over` | A person raises a sword and brings it down in a strong overhead strike. | 71235 | 100 | 119 | 0.003739 / 0.002573 |
+| `spear_thrust.am5p` | `spear_thrust` | A person lunges forward and thrusts a spear. | 31236 | 100 | 95 | 0.015842 / 0.016747 |
+| `parry.am5p` | `parry` | A person parries an attack with a sword and then strikes back. | 71234 | 100 | 119 | 0.387609 / 0.330258 |
+| `slash_h.am5p` | `slash_h` | A person swings a sword in a fast horizontal slash. | 31234 | 100 | 95 | 0.646281 / 0.561439 |
 
 Each pack is AM5P version 2: 65 position tracks (one per fighter joint) and 65
 rotation tracks, so the arm turns over the swing instead of sliding on the
@@ -26,15 +26,17 @@ rig's bind rotation. `slash_over` and `parry` are 103823 bytes,
 `spear_thrust` and `slash_h` are 83543 bytes, against the 2 MiB per-fighter
 budget.
 
-The slip numbers are the whole-clip average foot speed in m/s, the metric the
-bake's own receipt prints. They are also the numbers the empire card attested
-for these clips, reproduced here to the sixth decimal by the engine's own
-bake: the card's receipts and the engine's receipts agree because both came
-from the same teacher data through the same name table.
+The slip numbers are the whole-clip average speed of the foot over the
+ground in m/s, measured on the foot's **world** position from the retarget's
+own world output, so a planted foot reads near zero and a sliding one reads
+its real speed over the sand. They are also the numbers the empire card
+attested for these clips, reproduced to the sixth decimal by the engine's
+own bake: the card's receipts and the engine's receipts agree because both
+came from the same teacher data through the same name table.
 
-`slash_over` and `spear_thrust` slide under 8 cm/s. `parry` sits at the
-engine's 0.08 gate and `slash_h` is over it: those two are carried with their
-numbers visible, not tuned into passing.
+`slash_over` and `spear_thrust` slide under 8 cm/s. `parry` sits over the
+engine's 0.08 gate and `slash_h` is further over it: those two are carried
+with their numbers visible, not tuned into passing.
 
 ## Teacher
 

@@ -479,6 +479,7 @@ mod tests {
                 id: FighterId(u8::try_from(slot).expect("slot")),
                 pos: [xz[0], 0.0, xz[1]],
                 yaw: 0.0,
+                worn: 0,
             })
             .collect()
     }

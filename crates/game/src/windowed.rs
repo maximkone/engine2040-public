@@ -1564,7 +1564,7 @@ pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, Ga
             &mut pad_events_cache,
             &mut pad_scratch,
         )?;
-        let outcome = app.tick(input);
+        let outcome = super::fps_view::pad_rumble::pulse(app.tick(input), pad_backend.as_mut());
         debug_assert!(outcome.input_accepted);
         // Frame stamped beside the tick for the practice swap, read-only:
         // the swap needs the presented-frame index, the tick never moves here.
@@ -2184,26 +2184,21 @@ mod tests {
             "--exit".to_string(),
         ];
         let parsed = WinArgs::parse(&args).unwrap();
+        // The two flags set and every other field at its default, written as
+        // a struct update so a new flag field cannot break this test again
+        // (OPT35's `uncapped` did, and hid every engine-game lib test).
+        let bare = WinArgs::parse(&["arena".to_string()]).unwrap();
         assert_eq!(
-            parsed,
-            WinArgs {
-                frames: Some(60),
-                exit: true,
-                seed: None,
-                ticks: None,
-                fighters: None,
-                scene: None,
-                timed_smoke: false,
-                backend: None,
-                camera_path: None,
-                mute: false,
-                deadline_ms: None,
-                present_every: 1,
-                present_skip: false,
-                fixed_dt_ms: None,
-                window_size: None,
-            }
+            (bare.frames, bare.exit, bare.present_every),
+            (None, false, 1)
         );
+        assert!(bare.seed.is_none() && bare.fighters.is_none() && !bare.uncapped);
+        let expected = WinArgs {
+            frames: Some(60),
+            exit: true,
+            ..bare
+        };
+        assert_eq!(parsed, expected);
         // Flags without the program name parse too.
         let parsed = WinArgs::parse(&["--frames".to_string(), "7".to_string()]).unwrap();
         assert_eq!(parsed.frames, Some(7));
@@ -2237,7 +2232,7 @@ mod tests {
             vec![
                 "arena".to_string(),
                 "--fighters".to_string(),
-                "17".to_string(),
+                (u32::from(engine_input::MAX_PARTICIPANTS) + 1).to_string(),
             ],
             vec![
                 "arena".to_string(),

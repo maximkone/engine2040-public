@@ -485,27 +485,7 @@ pub fn cut_one(
     if !target.joint.is_severable() {
         return CutOutcome::Miss(CutMiss::NotSeverable);
     }
-    if !in_envelope(swing, target) {
-        return CutOutcome::Miss(CutMiss::OutOfReach);
-    }
-    let dx = i64::from(swing.p1_mm[0]) - i64::from(swing.p0_mm[0]);
-    let dy = i64::from(swing.p1_mm[1]) - i64::from(swing.p0_mm[1]);
-    let dz = i64::from(swing.p1_mm[2]) - i64::from(swing.p0_mm[2]);
-    let max = i64::from(tables.max_swing_len_mm);
-    if dx * dx + dy * dy + dz * dz > max * max {
-        return CutOutcome::Miss(CutMiss::OutOfReach);
-    }
-    let radius_sum = u64::from(swing.blade_half_mm)
-        .saturating_add(u64::from(target.radius_mm))
-        .saturating_add(u64::from(tables.contact_slack_mm));
-    let radius_mm = u32::try_from(radius_sum).unwrap_or(u32::MAX);
-    if !edge_touches_capsule(
-        swing.p0_mm,
-        swing.p1_mm,
-        target.q0_mm,
-        target.q1_mm,
-        radius_mm,
-    ) {
+    if !edge_reaches(swing, target, tables) {
         return CutOutcome::Miss(CutMiss::OutOfReach);
     }
     let masked_worn = worn & ARMOR_ALL;
@@ -526,6 +506,70 @@ pub fn cut_one(
     } else {
         CutOutcome::Miss(CutMiss::Held)
     }
+}
+
+/// Whether the edge reaches one joint capsule: the envelope, the travel bound
+/// and the contact gate (blade half-thickness plus capsule radius plus the
+/// table slack). Pure integer, shared by [`cut_one`] and [`plate_struck`].
+#[must_use]
+pub fn edge_reaches(swing: &BladeSwing, target: &JointTarget, tables: &CutTables) -> bool {
+    if !in_envelope(swing, target) {
+        return false;
+    }
+    let dx = i64::from(swing.p1_mm[0]) - i64::from(swing.p0_mm[0]);
+    let dy = i64::from(swing.p1_mm[1]) - i64::from(swing.p0_mm[1]);
+    let dz = i64::from(swing.p1_mm[2]) - i64::from(swing.p0_mm[2]);
+    let max = i64::from(tables.max_swing_len_mm);
+    if dx * dx + dy * dy + dz * dz > max * max {
+        return false;
+    }
+    let radius_sum = u64::from(swing.blade_half_mm)
+        .saturating_add(u64::from(target.radius_mm))
+        .saturating_add(u64::from(tables.contact_slack_mm));
+    let radius_mm = u32::try_from(radius_sum).unwrap_or(u32::MAX);
+    edge_touches_capsule(
+        swing.p0_mm,
+        swing.p1_mm,
+        target.q0_mm,
+        target.q1_mm,
+        radius_mm,
+    )
+}
+
+/// Flat block of a worn plate in Q16 (FEEL4): `64.0`, the strongest edge the
+/// table can land (`MAX_ENERGY_Q16 * MAX_SHARPNESS_Q16 / CUT_Q16`, pinned by
+/// a test). An edge at or under the block is stopped by plate; past it the
+/// blow would cut through, and the penetration reduction waits for weapon
+/// energy (FEEL1 mass). The arena lands full-force blades, so today every
+/// blow on plate is stopped.
+pub const PLATE_BLOCK_Q16: u64 = 4_194_304;
+
+/// Plate check (FEEL4): the first plated joint, in wire order, that the
+/// edge reaches, when the edge is under the plate's flat block. `None` when
+/// the blow carries past the block or no plated joint is reached, so the
+/// caller resolves the blow with [`resolve_swing`]. Pure, no heap.
+#[must_use]
+pub fn plate_struck(
+    swing: &BladeSwing,
+    targets: &[JointTarget],
+    anatomy: &AnatomyTable,
+    worn: u8,
+    tables: &CutTables,
+) -> Option<JointId> {
+    if effective_q16(swing) > PLATE_BLOCK_Q16 {
+        return None;
+    }
+    let mut struck: Option<JointId> = None;
+    for target in targets {
+        if !anatomy.plated(target.joint, worn) || !edge_reaches(swing, target, tables) {
+            continue;
+        }
+        let earlier = struck.is_some_and(|hit| hit.as_u8() <= target.joint.as_u8());
+        if !earlier {
+            struck = Some(target.joint);
+        }
+    }
+    struck
 }
 
 /// Strict one-pair solve: validates the swing and the capsule, then solves.
@@ -794,6 +838,7 @@ fn edge_touches_capsule(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anatomy::{ARMOR_GALEA, ARMOR_LORICA};
     use engine_core::Rng;
 
     const ENERGY_HARD_Q16: u32 = 589_824;
@@ -1165,5 +1210,38 @@ mod tests {
             resolve_swing(&probe, &targets, &anatomy, 0, &table, &mut out)
         });
         assert_eq!(heap.calls, 0, "resolve allocated {} times", heap.calls);
+    }
+
+    #[test]
+    fn plate_blocks_the_full_force_edge_and_names_its_waist() {
+        // The flat block is the strongest edge the table lands (64.0 Q16 product).
+        assert_eq!(
+            PLATE_BLOCK_Q16,
+            u64::from(MAX_ENERGY_Q16) * u64::from(MAX_SHARPNESS_Q16) / CUT_Q16
+        );
+        let anatomy = rome();
+        let full = swing(MAX_ENERGY_Q16, MAX_SHARPNESS_Q16, 0, 3);
+        let targets = [limb(JointId::Waist), limb(JointId::HipL)];
+        // Bare, nothing is struck by plate; plated, the waist it reaches is named.
+        assert_eq!(plate_struck(&full, &targets, &anatomy, 0, &tables()), None);
+        assert_eq!(
+            plate_struck(&full, &targets, &anatomy, ARMOR_LORICA, &tables()),
+            Some(JointId::Waist)
+        );
+        // A galea guards the neck, not plate: no deflect.
+        assert_eq!(
+            plate_struck(&full, &targets, &anatomy, ARMOR_GALEA, &tables()),
+            None
+        );
+        // An edge past the block cuts through plate: no deflect.
+        let past = swing(MAX_ENERGY_Q16, MAX_SHARPNESS_Q16, 0, 4);
+        let past = BladeSwing {
+            sharpness_q16: MAX_SHARPNESS_Q16 + 1,
+            ..past
+        };
+        assert_eq!(
+            plate_struck(&past, &targets, &anatomy, ARMOR_LORICA, &tables()),
+            None
+        );
     }
 }

@@ -34,17 +34,29 @@ pub(super) fn is_shell(id: u32) -> bool {
 pub(super) fn stage_actor(plan: &PlannedProp, slot: usize) -> Actor {
     let (_, sy, _) = kind_size(&plan.kind).unwrap_or((1.0, 1.0, 1.0));
     let (sx, _, sz) = kind_size(&plan.kind).unwrap_or((1.0, 1.0, 1.0));
+    // A floor plate is the ground the level stands on: it never routes, never moves and
+    // never counts as a prop the solver can place. It sits at the room centre, flat, with
+    // its top at ground level so the staged gate reads it as floor and not as a float.
+    let floor = role_of(&plan.kind) == Role::Floor;
     Actor {
         id: plan.id,
         name: plan.name.clone(),
-        x: -4.0 + (slot % 6) as f32 * 1.6,
-        y: sy * 0.5,
-        z: 3.2 - (slot / 6) as f32 * 1.6,
+        x: if floor {
+            0.0
+        } else {
+            -4.0 + (slot % 6) as f32 * 1.6
+        },
+        y: if floor { -sy * 0.5 } else { sy * 0.5 },
+        z: if floor {
+            0.0
+        } else {
+            3.2 - (slot / 6) as f32 * 1.6
+        },
         sx,
         sy,
         sz,
         parent: None,
-        physical: true,
+        physical: !floor,
         vx: 0.0,
         vz: 0.0,
         yaw: 0.0,
@@ -86,6 +98,13 @@ pub(super) fn solve_plan(
     actors.extend(staged);
     let mut solved: BTreeSet<u32> = BTreeSet::new();
     let mut conflicts: BTreeMap<u32, engine_spatial::ConflictSet> = BTreeMap::new();
+    // A floor plate is already where it belongs (the room centre, flat): it needs no
+    // solve, so it never appears as unsolved or as a culprit.
+    for prop in &plan.props {
+        if role_of(&prop.kind) == Role::Floor {
+            solved.insert(prop.id);
+        }
+    }
     for _ in 0..PASSES_MAX {
         let mut progress = false;
         for prop in &plan.props {
@@ -259,7 +278,7 @@ pub fn routes(nav: &NavView, actors: &[Actor]) -> Vec<RouteInfo> {
     }
     let mut infos: Vec<RouteInfo> = actors
         .iter()
-        .filter(|a| !is_shell(a.id) && a.id < LIVE_BASE)
+        .filter(|a| !is_shell(a.id) && a.id < LIVE_BASE && a.physical)
         .map(|a| {
             let tile = tile_of(cm(a.x), cm(a.z));
             match dist.get(&tile).copied() {

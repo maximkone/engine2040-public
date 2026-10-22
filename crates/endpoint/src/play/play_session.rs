@@ -67,6 +67,10 @@ use rmcp::schemars::JsonSchema;
 use rmcp::serde::{self, Deserialize, Serialize};
 
 use super::requery::{requery_key, RequeryCache, RequeryParams};
+use super::scene_frame::{
+    paint_props, pin_scene, StepScene, PLAY_STEP_FRAME_HEIGHT, PLAY_STEP_FRAME_WIDTH,
+};
+use super::world_load::Block;
 use super::{
     build_tape, capture_with, CaptureArgs, CaptureManifestDto, CaptureOutput, NoSample,
     PlayInputDto, PlayTimingDto, StepMillis, CAPTURE_DEFAULT_HEIGHT, CAPTURE_DEFAULT_WIDTH,
@@ -176,6 +180,9 @@ pub struct PlayStepArgs {
     // wall ms labelled `software`); absent or `false` reads no clock and
     // keeps the output byte-identical.
     pub timing: Option<bool>,
+    // DOOR3: a pinned scene revision to play (refused as play.run refuses it).
+    // Absent plays the default two-disc duel.
+    pub scene_rev: Option<u64>,
 }
 
 /// Step answer: tick count, state digest, the numbers and the PNG receipt.
@@ -477,6 +484,12 @@ impl LiveBout {
 /// checkpoints equal these bytes (ARC4 parity). `None` when the spine refuses
 /// a tape the legacy step accepted; `0` before the first tick.
 fn spine_digest(spec: BoutSpec, tape: &BoutTape, ticks: u32) -> Option<u64> {
+    spine_digest_in(spec, tape, ticks, MatchWorld::empty())
+}
+
+/// [`spine_digest`] over `world`: a scene step (DOOR3) hashes the same world
+/// `play.run` builds from that scene revision.
+fn spine_digest_in(spec: BoutSpec, tape: &BoutTape, ticks: u32, world: MatchWorld) -> Option<u64> {
     if ticks == 0 {
         return Some(0);
     }
@@ -489,7 +502,7 @@ fn spine_digest(spec: BoutSpec, tape: &BoutTape, ticks: u32) -> Option<u64> {
         half_extent_m: spec.half_extent_m(),
         table_version: 1,
     };
-    let mut sim = SpineMatch::build(&config, tape, MatchWorld::empty())?;
+    let mut sim = SpineMatch::build(&config, tape, world)?;
     let mut digest = 0;
     while sim.tick() < ticks {
         digest = sim.step()?.hash;
@@ -615,14 +628,26 @@ pub fn play_step_with(
     args: &PlayStepArgs,
     hook: Option<StepCaptureHook>,
 ) -> Result<PlayStepOutput, McpToolError> {
-    play_step_in(&mut PlaySlot::with_hook(hook), args)
+    if args.scene_rev.is_some() {
+        return Err(McpToolError::new(
+            "scene_needs_door",
+            "play.step with scene_rev reads the session's scene; call it through the door \
+             (re-run it there, not on a stateless slot)",
+        ));
+    }
+    play_step_in(&mut PlaySlot::with_hook(hook), args, None)
 }
 
 /// Step over a full tape prefix inside `slot`: extends the slot's live bout
 /// when the request continues it, else rebuilds from tick 0; the slot's hook
 /// and cache decide the receipt. With `timing` on, the call's own wall time is
-/// recorded in the slot's ring and returned; nothing else changes.
-fn play_step_in(slot: &mut PlaySlot, args: &PlayStepArgs) -> Result<PlayStepOutput, McpToolError> {
+/// recorded in the slot's ring and returned; nothing else changes. A `scene`
+/// (DOOR3) sets the digest and the frame props instead.
+fn play_step_in(
+    slot: &mut PlaySlot,
+    args: &PlayStepArgs,
+    scene: Option<&StepScene>,
+) -> Result<PlayStepOutput, McpToolError> {
     let seed = args.seed.unwrap_or(0);
     let participants = args.participants.unwrap_or(2);
     let half = args.half_extent_m.unwrap_or(20.0);
@@ -644,10 +669,11 @@ fn play_step_in(slot: &mut PlaySlot, args: &PlayStepArgs) -> Result<PlayStepOutp
             participants,
             half,
             upto,
-            width: args.width,
-            height: args.height,
+            width: Some(args.width.unwrap_or(PLAY_STEP_FRAME_WIDTH)),
+            height: Some(args.height.unwrap_or(PLAY_STEP_FRAME_HEIGHT)),
         },
         &inputs,
+        scene,
     )?;
     if let Some(clock) = clock {
         slot.timing
@@ -671,6 +697,7 @@ fn step_core(
     slot: &mut PlaySlot,
     request: &StepRequest,
     inputs: &[PlayInputDto],
+    scene: Option<&StepScene>,
 ) -> Result<PlayStepOutput, McpToolError> {
     let participants = request.participants;
     let half = request.half;
@@ -704,10 +731,26 @@ fn step_core(
     }
     let tape = build_tape(inputs, upto, participants)?;
     let spec = BoutSpec::new(request.seed, participants, half);
-    let view = slot.advance_to(spec, &tape, upto)?.observe(EVENT_DEFAULT);
+    let mut view = slot.advance_to(spec, &tape, upto)?.observe(EVENT_DEFAULT);
+    if let Some(scene) = scene {
+        // DOOR3: the checkpoint over the scene's own world, the one play.run hashes.
+        view.digest = spine_digest_in(spec, &tape, upto, scene.world.clone()).ok_or_else(|| {
+            McpToolError::new(
+                "invalid_tape",
+                format!(
+                    "the spine step refused the tape through tick {upto} over the scene; \
+                     report the tape verbatim"
+                ),
+            )
+        })?;
+        let props = Some((scene.blocks.as_slice(), request.half));
+        // A scene step renders in software (the props are ours to paint) and is
+        // never filed in the cache, which keys on the bout alone.
+        return step_compute(None, request, inputs.len(), view, props);
+    }
     match slot.hook {
         None => step_cached(&slot.requery, request, inputs, view),
-        Some(hook) => step_compute(Some(hook), request, inputs.len(), view),
+        Some(hook) => step_compute(Some(hook), request, inputs.len(), view, None),
     }
 }
 
@@ -733,7 +776,7 @@ fn step_cached(
     if let Some(hit) = cache.requery_lookup(&key, inputs)? {
         return Ok(hit);
     }
-    let out = step_compute(None, request, inputs.len(), view)?;
+    let out = step_compute(None, request, inputs.len(), view, None)?;
     cache.requery_store(&key, inputs, &out)?;
     Ok(out)
 }
@@ -745,6 +788,7 @@ fn step_compute(
     request: &StepRequest,
     inputs_len: usize,
     view: BoutView,
+    props: Option<(&[Block], f32)>,
 ) -> Result<PlayStepOutput, McpToolError> {
     let seed = request.seed;
     let participants = request.participants;
@@ -757,7 +801,7 @@ fn step_compute(
     };
     let capture = match hook {
         Some(render) => capture_with(&asked, Box::new(|asked| render(asked, digest, upto)))?,
-        None => software_capture(&asked, digest, upto, seed, &view)?,
+        None => software_capture(&asked, digest, upto, seed, &view, props)?,
     };
     Ok(PlayStepOutput {
         tick: upto,
@@ -901,6 +945,7 @@ impl PlaySession {
                 height,
             },
             &combined,
+            None,
         )?;
         self.tape = combined;
         self.cursor = upto;
@@ -914,7 +959,12 @@ impl crate::mcp::ServerState {
     /// continuing prefix cheap. Uses this session's GPU hook when one was
     /// wired at construction, else the software rasterizer.
     pub fn play_step(&mut self, args: &PlayStepArgs) -> Result<PlayStepOutput, McpToolError> {
-        play_step_in(&mut self.play, args)
+        // DOOR3: a scene_rev plays that pinned scene; the pin is checked here, on the document.
+        let scene = args
+            .scene_rev
+            .map(|revision| pin_scene(&self.doc, revision))
+            .transpose()?;
+        play_step_in(&mut self.play, args, scene.as_ref())
     }
 
     /// Wire the GPU capture callback for this session's `play.step` (the
@@ -948,7 +998,7 @@ impl ToolBase for PlayStepTool {
              longer prefix of the same tape only simulates the new ticks); same \
              inputs twice give the same digests. upto_tick N simulates ticks 0..N \
              and reports tick N with the checkpoint N-1 digest (the play.run \
-             tick_count/final_hash for the same prefix)."
+             tick_count/final_hash for the same prefix). scene_rev N plays that pinned scene: its props are hashed and drawn; default frame 320x180."
                 .into(),
         )
     }
@@ -978,6 +1028,7 @@ fn software_capture(
     tick: u32,
     seed: u64,
     view: &BoutView,
+    props: Option<(&[Block], f32)>,
 ) -> Result<CaptureOutput, McpToolError> {
     let width = args.width.unwrap_or(CAPTURE_DEFAULT_WIDTH);
     let height = args.height.unwrap_or(CAPTURE_DEFAULT_HEIGHT);
@@ -1002,14 +1053,14 @@ fn software_capture(
             ),
         ));
     }
-    let rgb = render_step_pixels(
-        width,
-        height,
+    let rgb = render_step_scene(
+        (width, height),
         tick,
         digest,
         seed,
         &view.fighters,
         &view.events,
+        props,
     );
     require_non_black(&rgb)?;
     let png_bytes = encode_png_rgb(width, height, &rgb);
@@ -1037,6 +1088,7 @@ fn software_capture(
 /// Deterministic duel raster: slate gradient plus checker, one bright disc
 /// per participant placed by the state digest, and the tick/digest bits along the
 /// top row so consecutive steps never render identical. Integer math only.
+#[cfg(test)]
 fn render_step_pixels(
     width: u32,
     height: u32,
@@ -1046,10 +1098,27 @@ fn render_step_pixels(
     fighters: &[ActorNumbers],
     events: &[BoutEvent],
 ) -> Vec<u8> {
+    render_step_scene((width, height), tick, digest, seed, fighters, events, None)
+}
+
+/// [`render_step_pixels`] with the scene's solid blocks (DOOR3) painted over
+/// the backdrop: `props` is the blocks and the arena half-extent in meters.
+fn render_step_scene(
+    (width, height): (u32, u32),
+    tick: u32,
+    digest: u64,
+    seed: u64,
+    fighters: &[ActorNumbers],
+    events: &[BoutEvent],
+    props: Option<(&[Block], f32)>,
+) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
     let mut rgb = vec![0u8; w * h * 3];
     paint_backdrop(&mut rgb, w, h);
+    if let Some((blocks, half)) = props {
+        paint_props(&mut rgb, w, h, half, blocks);
+    }
     if w >= 16 && h >= 16 {
         paint_fighter_discs(&mut rgb, (w, h), tick, digest, seed, fighters, events);
     }
@@ -1577,6 +1646,7 @@ mod tests {
                 width: Some(W),
                 height: Some(H),
                 timing: None,
+                scene_rev: None,
             },
         )
         .expect("play.step serves");
@@ -1639,6 +1709,7 @@ mod tests {
             width: Some(W),
             height: Some(H),
             timing: None,
+            scene_rev: None,
         };
         let via_tool = PlayStepTool::invoke(&server(), args.clone()).expect("tool serves one step");
         let via_fn = play_step_with(&args, None).expect("stateless step serves");
@@ -1707,11 +1778,12 @@ mod tests {
             width: None,
             height: None,
             timing: None,
+            scene_rev: None,
         };
         let mut slot = PlaySlot::default();
-        let first = play_step_in(&mut slot, &args).expect("seed95 upto120 serves");
+        let first = play_step_in(&mut slot, &args, None).expect("seed95 upto120 serves");
         assert_eq!(slot.requery.len(), 1, "the first query files its receipt");
-        let second = play_step_in(&mut slot, &args).expect("seed95 re-query serves");
+        let second = play_step_in(&mut slot, &args, None).expect("seed95 re-query serves");
         assert_eq!(slot.requery.len(), 1, "the re-query replays, never refiles");
         assert_eq!(slot.steps, 120, "the re-query simulated nothing");
         assert_eq!(
@@ -1735,7 +1807,12 @@ mod tests {
         // The same composition through the live session prefix agrees.
         let mut session = PlaySession::new(95, 2, 20.0).expect("duel opens");
         let via_session = session
-            .advance(&inputs, 120, None, None)
+            .advance(
+                &inputs,
+                120,
+                Some(crate::play::scene_frame::PLAY_STEP_FRAME_WIDTH),
+                Some(crate::play::scene_frame::PLAY_STEP_FRAME_HEIGHT),
+            )
             .expect("session prefix serves");
         assert_eq!(via_session.digest, first.digest);
         assert_eq!(via_session.png_bytes, first.png_bytes);
@@ -1934,6 +2011,7 @@ mod tests {
                 width: Some(W),
                 height: Some(H),
                 timing: None,
+                scene_rev: None,
             },
             Some(|_, _, _| {
                 Ok(CaptureOutput {
@@ -1963,6 +2041,7 @@ mod tests {
                 width: Some(W),
                 height: Some(H),
                 timing: None,
+                scene_rev: None,
             },
             Some(|_, _, _| {
                 Ok(CaptureOutput {
@@ -2000,6 +2079,7 @@ mod tests {
             width: Some(W),
             height: Some(H),
             timing: None,
+            scene_rev: None,
         }
     }
 
@@ -2214,6 +2294,7 @@ mod tests {
                 width: None,
                 height: None,
                 timing: None,
+                scene_rev: None,
             };
             let step = play_step_with(&step_args, None).expect("step serves");
             assert_eq!(step.tick, TICKS, "seed {seed}: receipt carries the count");

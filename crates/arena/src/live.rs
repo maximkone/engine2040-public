@@ -44,6 +44,7 @@ use crate::{
     ArenaConfig, ArenaRules, BalanceState, Checkpoint, FighterState, MatchSpec, Sim, TickBreaks,
     TickCuts, TickEvents, MAX_SLOTS,
 };
+use engine_combat::depth::PoiseMeter;
 
 /// Dataset recorder leg: pre-step poses, fight state and damage counters
 /// around one `Sim::step`, then one [`Row`] per fighter. Shared by
@@ -116,6 +117,34 @@ pub struct LiveTick<'a> {
     /// The tick's dataset rows, one per fighter in slot order: the last
     /// `fighters` rows of [`run_dataset`](crate::run_dataset) over `0..=tick`.
     pub rows: &'a [Row],
+}
+
+/// One fighter's combat-depth poise, read from the meter: the points left,
+/// the meter's cap and whether it is holding a stagger trip.
+///
+/// Data owner: this crate's [`DepthSet`]. Units: poise points against the
+/// meter's own cap (100 under the shipped v2 rows). Presentation only; the
+/// digest path never reads this, so the hash cannot move. Determinism
+/// scope: same-machine read of tick output, never hashed here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PoiseReading {
+    /// Points left on the meter.
+    pub current: u16,
+    /// The meter's cap.
+    pub max: u16,
+    /// True while the meter holds a stagger trip (a poise break).
+    pub staggered: bool,
+}
+
+impl PoiseReading {
+    /// Read one meter into a plain value.
+    fn of(meter: &PoiseMeter) -> Self {
+        Self {
+            current: meter.current,
+            max: meter.max,
+            staggered: meter.staggered,
+        }
+    }
 }
 
 /// Engine-observe reason name for a past-deadline provider reply. Names, not
@@ -346,6 +375,37 @@ impl LiveMatch {
     #[must_use]
     pub fn hitstop(&self) -> u32 {
         self.sim.hitstop()
+    }
+
+    /// Read-only combat-depth poise for `slot`: the meter's points, its cap
+    /// and whether it is holding a stagger trip. `None` for a bad slot.
+    /// Forwards to [`Sim::poise`](crate::Sim::poise), which owns the
+    /// per-slot [`DepthSet`]. No copy, no lock.
+    /// Presentation only; the digest path never reads this, so the hash
+    /// cannot move. V1 meters stay full (never stagger); V2 meters drain on
+    /// hits and chips and trip a stagger at zero.
+    ///
+    /// Consumer: the browser page (`crates/web/src/fight.rs`) paints the
+    /// poise pips and names a poise break. Data owner: this crate's
+    /// [`DepthSet`]. Units: poise points against the meter's own cap.
+    /// Determinism scope: same-machine read of tick output, never hashed here.
+    #[must_use]
+    pub fn poise(&self, slot: u8) -> Option<PoiseReading> {
+        self.sim.poise(slot).map(PoiseReading::of)
+    }
+
+    /// Read-only stamina points for `slot` in `0..=MAX_STAMINA`, or `None`
+    /// for a bad slot. Forwards to [`Sim::stamina`](crate::Sim::stamina),
+    /// which owns the fight state. No copy, no lock.
+    /// Presentation only; the digest path never reads this, so the hash
+    /// cannot move.
+    ///
+    /// Consumer: the browser page paints the stamina bar. Data owner: this
+    /// crate's fight state. Units: stamina points against a 100 cap.
+    /// Determinism scope: same-machine read of hashed state, never hashed here.
+    #[must_use]
+    pub fn stamina(&self, slot: u8) -> Option<u16> {
+        self.sim.stamina(slot)
     }
 
     /// Read-only press-tick attack cues from the last stepped tick (EG19b):

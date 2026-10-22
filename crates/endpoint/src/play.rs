@@ -25,6 +25,7 @@
 
 pub mod play_session;
 pub mod requery;
+pub mod scene_frame;
 pub mod world_load;
 
 use std::borrow::Cow;
@@ -2362,6 +2363,7 @@ mod tests {
             width: None,
             height: None,
             timing: None,
+            scene_rev: None,
         }
     }
 
@@ -2590,6 +2592,7 @@ mod tests {
             width: None,
             height: None,
             timing: None,
+            scene_rev: None,
         };
         let first = play_session::play_step_with(&args, None).expect("seed95 serves");
         let second = play_session::play_step_with(&args, None).expect("seed95 replays");
@@ -2597,9 +2600,10 @@ mod tests {
         assert_eq!(first.png_bytes, second.png_bytes);
         assert_ne!(first.digest, 0);
         assert_eq!(&first.png_bytes[..PNG_MAGIC.len()], &PNG_MAGIC);
-        assert_eq!((first.manifest.width, first.manifest.height), (96, 64));
+        // DOOR3: play.step's default frame is 320x180.
+        assert_eq!((first.manifest.width, first.manifest.height), (320, 180));
         assert_eq!(first.fighters.len(), 2);
-        assert_eq!(legend_span_px(first.manifest.width), 84);
+        assert_eq!(legend_span_px(first.manifest.width), 308);
         assert_eq!(legend_bar_h_px(first.manifest.height), 3);
         assert_eq!(jab_flash_ticks(), 8);
         let plain = play_session::PlayStepArgs {
@@ -2611,6 +2615,7 @@ mod tests {
             width: None,
             height: None,
             timing: None,
+            scene_rev: None,
         };
         let no_jab = play_session::play_step_with(&plain, None).expect("no-jab serves");
         assert_ne!(

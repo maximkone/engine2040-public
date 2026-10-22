@@ -976,6 +976,11 @@ pub struct RoutedImpact {
 ///
 /// One router per session: it owns the cycles, so it allocates once at
 /// build time and never on a play. A play is O(1) and touches no heap.
+///
+/// Cloneable and debuggable so the window can hold one beside its other
+/// presentation state (see `engine_game::window_audio_space::AudioSpace`):
+/// a clone of a mid-cycle router continues the same cycle.
+#[derive(Clone, Debug)]
 pub struct ImpactRouter {
     bank: Arc<CueBank>,
     cycles: Vec<VariantCycle>,

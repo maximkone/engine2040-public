@@ -96,7 +96,9 @@ mod imp {
 
     /// Prop catalog: kind name plus `(sx, sy, sz)` meters. Furniture-scale so
     /// props rest grounded and never seal the nav grid; walls come from the
-    /// room shell, never the brief.
+    /// room shell, never the brief. The last five kinds are the game parts
+    /// (DOOR1): they carry a [`Role`], so a caller can read which placement is
+    /// the player, the enemy, the goal, the floor or a wall.
     pub const KINDS: &[(&str, (f32, f32, f32))] = &[
         ("altar", (1.5, 1.0, 1.0)),
         ("banner", (0.9, 2.0, 0.1)),
@@ -108,7 +110,22 @@ mod imp {
         ("post", (0.3, 2.2, 0.3)),
         ("stand", (1.2, 0.8, 1.2)),
         ("torch", (0.3, 1.6, 0.3)),
+        // Game parts. The door's staged check sees every bare node as a unit cube, so a
+        // game part keeps a 1 m body: it rests on the floor, overlaps nothing, and the
+        // role (not the box) says what it is. The goal's reach is its role zone, not the
+        // box. The room shell is already the floor.
+        ("enemy", (0.6, 1.0, 0.6)),
+        ("floor", (10.0, 0.1, 10.0)),
+        ("goal", (2.0, 1.0, 2.0)),
+        ("player", (0.6, 1.0, 0.6)),
+        ("wall", (2.0, 1.0, 0.4)),
     ];
+
+    /// The game parts of a placed level: its role, its brief name and the pose it landed
+    /// at, so `game.play` plays exactly what `level.build` placed. The [`Role`] table and
+    /// its kind lookup live here too, so the grammar and the door read one list.
+    mod game;
+    pub use game::{game_parts, role_of, GamePart, Role};
 
     /// Legal relation words: the SP3 vocabulary the SP5 solver understands.
     /// `next_to` and `facing` place on the grounded plane; `inside`,

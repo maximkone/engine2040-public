@@ -23,6 +23,7 @@ mod env_prefix_layers;
 mod fps_view_tape;
 mod ime_vectors;
 mod knob_rules_vectors;
+mod legionary_slice;
 mod lobby_ui_flow;
 mod rome_numbers;
 mod rome_spec_drift;

@@ -266,7 +266,8 @@ Every row is one crate, small, with a named donor and a test that fails before.
   tools/fetch-content.test.mjs` green.
 - [ ] GS22 content: fetch list v1 — `content/fetch.list` with 3 outdoor or Italian-style
   HDRIs (2k), 8 PBR sets (1k: sand, marble, travertine, brick, mosaic, bronze, leather,
-  cloth) and 6 props, all CC0, chosen by querying the APIs. Diff: regular. Tier A. Size
+  cloth) and 6 props, all CC0, chosen by querying the APIs. Progress 2026-10-22 (v1, 06124ea96): the list exists and its Accept passes live — `node tools/fetch-content.mjs --list content/fetch.list --dry-run` prints `total_bytes=218288 files=9`, nine `LICENSE CC0` lines and no duplicate ids. Landed: 3 Rome HDRIs at 2k (colosseum, borghese_gardens, castel_st_angelo_roof) and 6 PBR sets at 1k (aerial_sand, brick_4, blue_metal_plate, corrugated_iron, brown_leather, cotton_jersey), every row scouted live from the Poly Haven files API with its real md5. Owed for the tick (v2): marble and travertine (ambientCG serves the zips but its API no longer serves the licence or md5, and a url row needs the md5 before the licence column), mosaic (no CC0 mosaic on either API: ambientCG Mosaic002 answers 404, Poly Haven has no mosaic category), and the 6 props (Poly Haven models are per-file trees with no zip URL; ambientCG's model listing does not filter by type any more). P2P: `node --test tools/` is red tonight on the foreign board-cut fallout (finish.test.mjs names rows the 2026-10-22 cut moved off the shards), not on this row.
+  Diff: regular. Tier A. Size
   S. Owns `content/fetch.list`. Accept: `node tools/fetch-content.mjs --dry-run
   content/fetch.list` prints at most 250 MB, every row CC0, no duplicate ids (needs
   network once). F2P: no list. P2P: `node --test tools/` green. needs: GS21.

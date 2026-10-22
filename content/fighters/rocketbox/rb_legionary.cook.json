@@ -1,0 +1,60 @@
+{
+ "body": "rb_legionary_body.glb",
+ "body_sha256": "54369af488fd0f7f63d3c76b1caa19c0a8231deb42bba3fa3dca57af5f9ee74e",
+ "clips": [
+  {
+   "file": "glb/clips/rb_legionary_idle.glb",
+   "fps": 30,
+   "frames": 107,
+   "role": "idle",
+   "sha256": "cecb8243289c89c5f3e14404ce054c081f72315064b522c298d70ff8ba901c1d",
+   "source": "sword and shield idle.fbx"
+  },
+  {
+   "file": "glb/clips/rb_legionary_run.glb",
+   "fps": 30,
+   "frames": 22,
+   "role": "run",
+   "sha256": "48b908b8a58950426a87765592e5f881c6c977c5b43e96b584323d02cba2a826",
+   "source": "sword and shield run.fbx"
+  },
+  {
+   "file": "glb/clips/rb_legionary_attack1.glb",
+   "fps": 30,
+   "frames": 46,
+   "role": "attack1",
+   "sha256": "0603a57392327c05d14fbcb57fc6c7edde3ab0f11526ece0991e2b95a5f5cdea",
+   "source": "sword and shield slash.fbx"
+  },
+  {
+   "file": "glb/clips/rb_legionary_attack2.glb",
+   "fps": 30,
+   "frames": 71,
+   "role": "attack2",
+   "sha256": "9047b97c6cb8311d6836f085b956c54126fdf185c7ed6cdc6f32dd7881b48fc6",
+   "source": "sword and shield attack.fbx"
+  },
+  {
+   "file": "glb/clips/rb_legionary_attack3.glb",
+   "fps": 30,
+   "frames": 107,
+   "role": "attack3",
+   "sha256": "a6e7ca909c625fc630d91adc092b6b50c2b8cd924e0eb8f41eaec6fa172ab218",
+   "source": "sword and shield slash (2).fbx"
+  },
+  {
+   "file": "glb/clips/rb_legionary_death.glb",
+   "fps": 30,
+   "frames": 70,
+   "role": "death",
+   "sha256": "7b38f9dd12c8b1e0f5ed63f4efc264a6a29f658cd01591ed2af0f0dc699a1297",
+   "source": "sword and shield death.fbx"
+  }
+ ],
+ "family": "rocketbox",
+ "joints": 57,
+ "licence": "Microsoft Rocketbox MIT; motion Adobe Mixamo",
+ "source": "Military_Male_01.fbx",
+ "tris": 16689,
+ "variant": "rb_legionary"
+}

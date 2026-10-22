@@ -13,7 +13,9 @@
 //! - the listener at the camera (position and yaw), so a hit on the left of
 //!   the picture sounds on the left and a far one is quieter;
 //! - one named play per fight event, placed where the blow landed (victim for
-//!   impacts, attacker for a dodged swing) from the fighter views;
+//!   impacts, attacker for a dodged swing) from the fighter views, with the
+//!   take the impact table's round robin picked (SN12), so two blows of the
+//!   same kind sound different takes in turn;
 //! - a footstep per stride of each walking fighter, on the floor's
 //!   [`Surface`] cue;
 //! - the tension level, on the ticks it changes (rises at once, falls after a
@@ -31,9 +33,11 @@
 //! golden `d57b5c8ae3096614` cannot move. Budget: a handful of feed writes
 //! per tick, no heap.
 
+use std::sync::Arc;
+
 use engine_arena::{EndWhy, SpearEvent};
 use engine_audio::combat_cues::{cue_for_event, footstep, Surface};
-use engine_audio::{cue_names, FeedError, FeedTx, FightCue, Tension, TensionTracker};
+use engine_audio::{cue_names, FeedError, FeedTx, FightCue, ImpactRouter, Tension, TensionTracker};
 use engine_spatial::to_cm;
 
 use crate::{FighterView, TickOutcome};
@@ -50,6 +54,9 @@ const TELEPORT_M: f32 = 1.5;
 pub const CHEST_CM: i32 = 100;
 /// Smallest bed-gain move worth a feed write.
 const BED_EPSILON: f32 = 1.0 / 256.0;
+/// Seed of the impact table's round robin: the one the arena feed is opened
+/// with, so a replay starts at the same take.
+const CUE_SEED: u64 = 2040;
 
 /// Which parts of the room [`AudioSpace::feed`] drives. All on in the window;
 /// tests switch parts off to hear one part alone.
@@ -125,6 +132,11 @@ pub struct AudioSpace {
     bed_gain_sent: f32,
     stride: [Stride; MAX_SLOTS],
     stats: SpaceStats,
+    /// The impact table over the live [`CueBank`](engine_audio::CueBank) the
+    /// feed resolves against: which cue an impact plays and which take of it
+    /// the round robin picks. Built once per session, so the cycle survives
+    /// the tick and a cue never plays the same take twice in a row.
+    router: Option<ImpactRouter>,
 }
 
 /// The crowd bed's life: not started, running, or given up on.
@@ -171,6 +183,7 @@ impl AudioSpace {
             bed_gain_sent: 1.0,
             stride: [Stride::default(); MAX_SLOTS],
             stats: SpaceStats::default(),
+            router: None,
         }
     }
 
@@ -294,6 +307,27 @@ impl AudioSpace {
         self.stats.breaks += 1;
     }
 
+    /// The take of `name` the round robin picks next, or `None` when the bank
+    /// lacks the cue (the feed counts that as `unknown_cue`). The router is
+    /// built on the first impact, over the very bank `tx` resolves against,
+    /// and rebuilt only when that bank changes: the take is always one of the
+    /// clips that will sound.
+    fn impact_take(&mut self, name: &str, tx: &FeedTx) -> Option<u16> {
+        let bank = tx.bank();
+        if self
+            .router
+            .as_ref()
+            .is_some_and(|router| !Arc::ptr_eq(router.bank(), bank))
+        {
+            self.router = None;
+        }
+        let router = self
+            .router
+            .get_or_insert_with(|| ImpactRouter::new(Arc::clone(bank), CUE_SEED));
+        let (_, take) = router.route_name(name)?;
+        u16::try_from(take).ok()
+    }
+
     fn feed_events(
         &mut self,
         tx: &mut FeedTx,
@@ -321,7 +355,11 @@ impl AudioSpace {
             } else {
                 self.stats.positioned += 1;
             }
-            let sent = tx.play(tick, play.name, play.gain, play.pos_cm);
+            // An impact cue names its take too, so the mixer plays the take
+            // the round robin meant; every other play (a swing, a cue the
+            // bank lacks) lets the audio side choose.
+            let take = self.impact_take(play.name, tx);
+            let sent = tx.play_take(tick, play.name, play.gain, play.pos_cm, take);
             self.note(sent);
             if matches!(event, FightCue::Knockdown { .. }) && self.parts.tension {
                 let sent = tx.stinger(tick, cue_names::STINGER_KILL);

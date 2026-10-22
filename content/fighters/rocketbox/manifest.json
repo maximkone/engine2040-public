@@ -1,0 +1,14 @@
+{
+ "family": "rocketbox",
+ "variants": [
+  {
+   "name": "rb_legionary",
+   "body_glb_sha256": "54369af488fd0f7f63d3c76b1caa19c0a8231deb42bba3fa3dca57af5f9ee74e",
+   "joints": 57,
+   "clips": 6,
+   "tris_lod0": 16689,
+   "source": "Military_Male_01.fbx",
+   "licence": "Microsoft Rocketbox MIT; motion Adobe Mixamo"
+  }
+ ]
+}

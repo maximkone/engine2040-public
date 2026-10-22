@@ -907,6 +907,51 @@ pub fn separate_pair(a: &mut Walker, b: &mut Walker) {
     b.pos_mm[2] = narrow(b.pos_mm[2], dz * step / dist);
 }
 
+/// FEEL10 contact push: two bodies in contact exchange equal and opposite impulses along
+/// the contact normal, so close contact pushes back and not only apart.
+///
+/// `pa_mm` and `pb_mm` are planar centres in millimetres, `va` and `vb` planar velocities in
+/// the caller's unit (the same unit for both, the unit it steps by). Equal masses: the
+/// closing speed along the normal is halved into each body, a restitution of zero, so a
+/// bounce never appears. Returns the velocity change `b` takes; `a` takes the exact negation,
+/// so the pair's total planar momentum never moves. `None` when the pair is apart, or not
+/// closing (a resting pair, or a pair moving apart, gives no push). Coincident centres take
+/// the normal `+x` from `a` to `b`: callers pass the lower slot as `a`. Integer only; `/`
+/// truncates toward zero, so the result is mirror-symmetric.
+pub fn push_exchange(
+    pa_mm: [i32; 2],
+    pb_mm: [i32; 2],
+    va: [i32; 2],
+    vb: [i32; 2],
+) -> Option<[i32; 2]> {
+    let need = i64::from(2 * RADIUS_MM);
+    let dx = i64::from(pb_mm[0]) - i64::from(pa_mm[0]);
+    let dz = i64::from(pb_mm[1]) - i64::from(pa_mm[1]);
+    let dist2 = dx * dx + dz * dz;
+    if dist2 >= need * need {
+        return None;
+    }
+    let (dx, dz, dist2) = if dist2 == 0 {
+        (1, 0, 1)
+    } else {
+        (dx, dz, dist2)
+    };
+    // Closing rate along the normal times the centre distance: a plain integer, so the
+    // impulse below needs no square root.
+    let rel_x = i64::from(vb[0]) - i64::from(va[0]);
+    let rel_z = i64::from(vb[1]) - i64::from(va[1]);
+    let closing = rel_x * dx + rel_z * dz;
+    if closing >= 0 {
+        return None;
+    }
+    // b takes -closing / (2 dist) along the unit normal, which is -closing * d / (2 dist2).
+    let den = 2 * dist2;
+    Some([
+        narrow(0, -closing * dx / den),
+        narrow(0, -closing * dz / den),
+    ])
+}
+
 /// Crowd shove: add a capped impulse along `dir_mm_s`; a zero direction or
 /// a non-positive strength leaves the walker untouched.
 pub fn apply_shove(walker: &mut Walker, dir_mm: [i32; 2], strength_mm_s: i32) {
@@ -950,6 +995,98 @@ pub fn state_hash(walker: &Walker) -> u64 {
 mod tests {
     use super::*;
     use engine_core::alloc_probe;
+    use engine_core::laws;
+
+    /// One tick of a two-walker contact: the push exchange, then the positional
+    /// separation, then the walkers carry their velocity.
+    fn push_step(pair: &mut (Walker, Walker)) {
+        let (a, b) = pair;
+        if let Some(d) = push_exchange(
+            [a.pos_mm[0], a.pos_mm[2]],
+            [b.pos_mm[0], b.pos_mm[2]],
+            [a.vel_mm_s[0], a.vel_mm_s[2]],
+            [b.vel_mm_s[0], b.vel_mm_s[2]],
+        ) {
+            b.vel_mm_s[0] += d[0];
+            b.vel_mm_s[2] += d[1];
+            a.vel_mm_s[0] -= d[0];
+            a.vel_mm_s[2] -= d[1];
+        }
+        separate_pair(a, b);
+        a.pos_mm[0] += a.vel_mm_s[0] / TICKS_PER_S;
+        a.pos_mm[2] += a.vel_mm_s[2] / TICKS_PER_S;
+        b.pos_mm[0] += b.vel_mm_s[0] / TICKS_PER_S;
+        b.pos_mm[2] += b.vel_mm_s[2] / TICKS_PER_S;
+    }
+
+    /// Planar momentum of the pair, squared, so one number carries both lanes.
+    fn pair_momentum_sq(pair: &(Walker, Walker)) -> f64 {
+        let x = i64::from(pair.0.vel_mm_s[0]) + i64::from(pair.1.vel_mm_s[0]);
+        let z = i64::from(pair.0.vel_mm_s[2]) + i64::from(pair.1.vel_mm_s[2]);
+        (x * x + z * z) as f64
+    }
+
+    /// True when `b` is `a` seen in a mirror across the z axis (x flips sign).
+    fn is_x_mirror(a: &(Walker, Walker), b: &(Walker, Walker)) -> bool {
+        [(&a.0, &b.0), (&a.1, &b.1)].iter().all(|(p, q)| {
+            p.pos_mm[0] == -q.pos_mm[0]
+                && p.pos_mm[2] == q.pos_mm[2]
+                && p.vel_mm_s[0] == -q.vel_mm_s[0]
+                && p.vel_mm_s[2] == q.vel_mm_s[2]
+        })
+    }
+
+    #[test]
+    fn a_contact_push_conserves_momentum() {
+        // a comes in at 800 mm/s, b stands 500 mm off: they overlap, b takes a share of a's
+        // speed and a loses exactly that share. The pair's momentum never moves.
+        let start = (
+            Walker {
+                vel_mm_s: [800, 0, 0],
+                ..Walker::spawn(0, [0, 0, 0])
+            },
+            Walker::spawn(1, [500, 0, 0]),
+        );
+        let mut once = start;
+        push_step(&mut once);
+        assert_eq!((once.0.vel_mm_s[0], once.1.vel_mm_s[0]), (400, 400));
+        laws::conserved(start, 300, push_step, pair_momentum_sq, 0.0).unwrap();
+    }
+
+    #[test]
+    fn a_resting_pair_stays_at_rest_under_the_push() {
+        // Touching at exactly two radii, standing still: no push, no move, bit-identical.
+        let touching = (
+            Walker::spawn(0, [0, 0, 0]),
+            Walker::spawn(1, [2 * RADIUS_MM, 0, 0]),
+        );
+        laws::rest_stays_rest(touching, 600, push_step).unwrap();
+        // Overlapping but standing still: nothing is closing, so no push at all.
+        assert_eq!(push_exchange([0, 0], [RADIUS_MM, 0], [0, 0], [0, 0]), None);
+        // Moving apart gives no push either.
+        assert_eq!(push_exchange([0, 0], [RADIUS_MM, 0], [-5, 0], [5, 0]), None);
+    }
+
+    #[test]
+    fn mirrored_contact_pushes_mirror() {
+        // The east pair, then its x-mirror image: the push must mirror exactly, z lanes included.
+        let east = (
+            Walker {
+                vel_mm_s: [800, 0, 300],
+                ..Walker::spawn(0, [0, 0, 0])
+            },
+            Walker::spawn(1, [500, 0, -200]),
+        );
+        let west = (
+            Walker {
+                vel_mm_s: [-800, 0, 300],
+                ..Walker::spawn(0, [0, 0, 0])
+            },
+            Walker::spawn(1, [-500, 0, -200]),
+        );
+        assert!(is_x_mirror(&east, &west));
+        laws::mirror(east, west, 300, |p, _| push_step(p), is_x_mirror).unwrap();
+    }
 
     fn slab() -> Vec<Block> {
         vec![Block::new([-50_000, -1_000, -50_000], [50_000, 0, 50_000])]

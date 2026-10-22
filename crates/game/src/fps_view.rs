@@ -7,6 +7,9 @@
 use crate::camera::camera_rig::{smooth_trauma_offset, trauma_gain};
 use crate::camera::CameraError;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
+/// The pad rumbles on a hit: the mapping from this eye's trauma to a rumble, and the gilrs call.
+#[path = "pad_rumble.rs"]
+pub mod pad_rumble;
 /// Mouse sensitivity.
 pub const SENSITIVITY: f32 = 0.001;
 /// Pitch pad from the pole.

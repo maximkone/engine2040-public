@@ -1,34 +1,18 @@
 // tonemap.wgsl: the display transform, one copy for every pass that ends a
-// frame. Linear HDR radiance in, display value out: hue-keeping display curve,
-// then the sRGB transfer (found2 5.3, gems1 15.4). The window frame runs it once,
-// in the blit, never in the forward fragment. Prepended (compile-time
-// concat) to forward.wgsl and to blit.wgsl, so this text exists once.
+// frame. Linear HDR radiance in, display value out: one hue-keeping tone
+// map, then the sRGB transfer (found2 5.3, gems1 15.4). The window frame
+// runs it once, in the blit, never in the forward fragment. Prepended
+// (compile-time concat) to forward.wgsl, to blit.wgsl and to the two post
+// shaders, so this text exists once.
+//
+// One source, one curve: the tone map below is the crate's only ACES
+// definition, and every consumer (the live blit, the offscreen capture, the
+// post chain and its compute twin) calls it. A torch flame keeps its hue
+// through it: the fit is evaluated at the peak and the result is one scale
+// for all three channels, so the input ratios survive.
 // PORT(BabylonJS/Babylon.js@136feacc96b011d98f26413edef252e098c846fd:packages/dev/core/src/ShadersWGSL/tonemap.fragment.fx): ACES shape, reimplemented.
 // PORT(BabylonJS/Babylon.js@136feacc96b011d98f26413edef252e098c846fd:packages/dev/core/src/ShadersWGSL/imageProcessing.fragment.fx): grade shape, reimplemented.
 // Zero donor bytes vendored in this file.
-
-// PORT(bevyengine/bevy@v0.15.0:crates/bevy_core_pipeline/src/tonemapping/tonemapping_shared.wgsl): RRTAndODTFit + ACESFitted.
-fn rrt_odt_fit(v: vec3<f32>) -> vec3<f32> {
-    let a = v * (v + 0.0245786) - 0.000090537;
-    let b = v * (0.983729 * v + 0.4329510) + 0.238081;
-    return a / b;
-}
-fn aces_fitted(color: vec3<f32>) -> vec3<f32> {
-    let rgb_to_rrt = mat3x3<f32>(
-        vec3<f32>(0.59719, 0.35458, 0.04823),
-        vec3<f32>(0.07600, 0.90834, 0.01566),
-        vec3<f32>(0.02840, 0.13383, 0.83777)
-    );
-    let odt_to_rgb = mat3x3<f32>(
-        vec3<f32>(1.60475, -0.53108, -0.07367),
-        vec3<f32>(-0.10208, 1.10813, -0.00605),
-        vec3<f32>(-0.00327, -0.07276, 1.07602)
-    );
-    var c = color * rgb_to_rrt;
-    c = rrt_odt_fit(c);
-    c = c * odt_to_rgb;
-    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-}
 
 // Display white for the hue-keeping path, same units as the post white.
 const DISPLAY_WHITE: f32 = 11.2;
@@ -52,13 +36,18 @@ const DISPLAY_EXPOSURE: f32 = 0.6;
 // and leaves the sky band (toned peak 0.21, below the knee) untouched.
 const DISPLAY_KNEE: f32 = 0.35;
 const DISPLAY_KNEE_GAIN: f32 = 0.80;
-// One hue-preserving display scale for a peak: the fit of the anchored peak
-// plus the knee expansion, divided back by the peak so every channel keeps
-// its ratio (the same shape as the unanchored path, anchor applied once).
-fn display_scale(peak: f32, toned_peak: f32) -> f32 {
-    let knee = max(toned_peak - DISPLAY_KNEE, 0.0);
-    let lifted = toned_peak + knee * DISPLAY_KNEE_GAIN;
-    return lifted / max(peak, 1e-6);
+// The knee is a display look, not part of the tone map: the post chain and
+// the capture path carry no knee, so it lives beside the tone map and the
+// blit applies it as its own step. One scale for every channel, so the hue
+// survives it too.
+fn display_knee(toned: vec3<f32>) -> vec3<f32> {
+    let peak = max(toned.x, max(toned.y, toned.z));
+    if (peak <= 1e-6) {
+        return toned;
+    }
+    let knee = max(peak - DISPLAY_KNEE, 0.0);
+    let lifted = peak + knee * DISPLAY_KNEE_GAIN;
+    return toned * (lifted / peak);
 }
 // Stone drain: above DISPLAY_DRAIN_KNEE the display colour drains toward its
 // own luma, so the lit stands read pale travertine instead of the sand's warm
@@ -96,14 +85,27 @@ fn analytic_one(x: f32) -> f32 {
 }
 // Pipeline-selectable branch: false keeps the default hue-keeping path.
 override DISPLAY_ANALYTIC: bool = false;
-// Hue-keeping display: one scale from the per-channel curve keeps input ratios.
-fn hue_keep_display(color: vec3<f32>) -> vec3<f32> {
+// The one tone map of the crate: hue-keeping by construction. The neutral
+// fit is evaluated at the peak of the frame, the white point normalises it,
+// and the result is a single scale applied to all three channels. A per
+// channel fit would compress the channels by different amounts and turn a
+// torch flame's orange into a different hue (measured +32.3 degrees on the
+// old post-chain copy); one scale keeps every ratio, so the hue survives.
+// The exposure rides the peak and the white point is the display white the
+// peak is normalised against. The knee is NOT here: it is the blit's own
+// display look, so this curve is the same for every consumer.
+fn aces_tonemap(color: vec3<f32>, exposure: f32, white: f32) -> vec3<f32> {
     let safe = max(color, vec3<f32>(0.0));
     let capped = min(safe, vec3<f32>(1e6));
     let peak = max(capped.x, max(capped.y, capped.z));
-    let white = max(fit_one(DISPLAY_WHITE), 1e-4);
-    let toned_peak = fit_one(peak * DISPLAY_EXPOSURE) / white;
-    return capped * display_scale(peak, toned_peak);
+    let w = max(fit_one(white), 1e-4);
+    let toned_peak = fit_one(peak * exposure) / w;
+    return capped * (toned_peak / max(peak, 1e-6));
+}
+// The hue-keeping default branch of the one tone map: the same one-scale
+// shape as `aces_tonemap`, at the live display's own exposure and white.
+fn hue_keep_display(color: vec3<f32>) -> vec3<f32> {
+    return aces_tonemap(color, DISPLAY_EXPOSURE, DISPLAY_WHITE);
 }
 // Analytic display: same one-scale shape over the analytic curve.
 fn analytic_display(color: vec3<f32>) -> vec3<f32> {
@@ -112,15 +114,16 @@ fn analytic_display(color: vec3<f32>) -> vec3<f32> {
     let peak = max(capped.x, max(capped.y, capped.z));
     let white = max(analytic_one(DISPLAY_WHITE), 1e-4);
     let toned_peak = analytic_one(peak * DISPLAY_EXPOSURE) / white;
-    return capped * display_scale(peak, toned_peak);
+    return capped * (toned_peak / max(peak, 1e-6));
 }
 // One display source for the frame: default hue-keeping, analytic when
-// selected, then the value-gated stone drain (one grade for both branches).
+// selected, then the display look (the highlight knee, then the value-gated
+// stone drain) for both branches.
 fn display_tonemap(color: vec3<f32>) -> vec3<f32> {
     if (DISPLAY_ANALYTIC) {
-        return stone_drain(analytic_display(color));
+        return stone_drain(display_knee(analytic_display(color)));
     }
-    return stone_drain(hue_keep_display(color));
+    return stone_drain(display_knee(hue_keep_display(color)));
 }
 // Fixed-pattern 4x4 dither scaled to one 8-bit step, signed offset.
 fn dither4(x: u32, y: u32) -> f32 {

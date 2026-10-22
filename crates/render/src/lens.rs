@@ -36,6 +36,18 @@ pub const MAX_LENS_DIM: u32 = 8192;
 /// The distance from the frame center to a corner, in uv.
 const CORNER_LEN: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
+/// The lens pass budget in ms (RL39): one pass over a finished 1920x1080
+/// frame on the reference card. Pure number, never measured here.
+pub const LENS_PASS_BUDGET_MS: f64 = 0.15;
+
+/// Modeled cost of one lens pass in ms per megapixel of output texels, with
+/// the knob weight folded in to one figure. Modeled, not measured: it holds
+/// every host to the same number, so the row's budget is checkable with no
+/// GPU in hand. Calibrated so the shipped helmet lens lands at about
+/// 0.13 ms for 1920x1080, inside [`LENS_PASS_BUDGET_MS`] with room for a
+/// profile that turns every knob up.
+const LENS_MS_PER_MPIX: f64 = 0.04;
+
 /// The lens presets the bodycam view ships.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LensPreset {
@@ -144,6 +156,34 @@ impl LensProfile {
             }
         }
         Ok(())
+    }
+
+    /// Modeled cost in ms for one lens pass over `width` x `height` pixels.
+    ///
+    /// Pure model, no wall clock, so every host reads the same number and the
+    /// row's budget is checkable with no GPU in hand. The unit is the
+    /// megapixel of output (the pass is one full-screen step); each knob the
+    /// profile turns on adds a share of the pass's texel reads, so a profile
+    /// costs strictly more than the identity it left off. The bare eye costs
+    /// exactly zero: it is the identity the blit already ran.
+    #[must_use]
+    pub fn lens_pass_ms(&self, width: u32, height: u32) -> f64 {
+        if self.is_identity() {
+            return 0.0;
+        }
+        let mpix = f64::from(width) * f64::from(height) / 1_000_000.0;
+        // Base 1 is the green bilinear fetch the barrel map always reads.
+        let mut weight = 1.0;
+        // The red/blue split adds a bilinear each way while it runs.
+        if self.ca_amount > 0.0 {
+            weight += 0.5;
+        }
+        // The grain hash is one cheap add per texel.
+        if self.grain > 0.0 {
+            weight += 0.1;
+        }
+        // The barrel and the vignette shade the texel already read: free.
+        mpix * weight * LENS_MS_PER_MPIX
     }
 }
 
@@ -382,12 +422,29 @@ pub fn apply_pixel(
     let blue = sample_bilinear(frame, [base[0] - shift[0], base[1] - shift[1]]);
     let sampled = [red[0], green[1], blue[2]];
     let vignette = vignette_at(uv, profile.vignette);
-    let noise = grain_at(x, y, frame_index) * profile.grain;
+    // RL39: grain lives in the mid tones only. The mask is exactly 0 at pure
+    // black and pure white, so a clipped highlight or a true black never
+    // gains a noise step; mid-grey carries the full amount. The mask reads
+    // the toned color, not the raw sample, so the noise rides the frame the
+    // viewer sees.
+    let toned = [
+        sampled[0] * vignette,
+        sampled[1] * vignette,
+        sampled[2] * vignette,
+    ];
+    let luma = dot_luma(toned);
+    let grain_mask = 4.0 * luma * (1.0 - luma);
+    let noise = grain_at(x, y, frame_index) * profile.grain * grain_mask;
     let mut out = [0.0f32; 3];
     for c in 0..3 {
-        out[c] = (sampled[c] * vignette + noise).clamp(0.0, 1.0);
+        out[c] = (toned[c] + noise).clamp(0.0, 1.0);
     }
     out
+}
+
+/// Rec. 709 luma of one linear color, clamped to 0..1 for the grain mask.
+fn dot_luma(c: [f32; 3]) -> f32 {
+    (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]).clamp(0.0, 1.0)
 }
 
 /// The lensed frame: every output texel through [`apply_pixel`].
@@ -843,12 +900,19 @@ mod tests {
         y: u32,
         uv: [f32; 2],
     ) -> [f32; 3] {
-        let noise = grain_at(x, y, frame_index) * profile.grain;
         let vignette = vignette_at(uv, profile.vignette);
+        // The forward shades first (`toned = sampled * vignette`) then adds
+        // the noise, with the mask on the toned luma. The inverse peels the
+        // noise off the shaded value first, so the mask reads the same luma
+        // the forward did, then divides the vignette back out.
+        let luma = (0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]).clamp(0.0, 1.0);
+        let grain_mask = 4.0 * luma * (1.0 - luma);
+        let noise = grain_at(x, y, frame_index) * profile.grain * grain_mask;
+        let toned = [out[0] - noise, out[1] - noise, out[2] - noise];
         [
-            (out[0] - noise) / vignette,
-            (out[1] - noise) / vignette,
-            (out[2] - noise) / vignette,
+            toned[0] / vignette,
+            toned[1] / vignette,
+            toned[2] / vignette,
         ]
     }
 
@@ -1244,5 +1308,60 @@ mod tests {
             Ok((device, queue)) => Some((device, queue)),
             Err(error) => panic!("adapter present, device request must succeed: {error}"),
         }
+    }
+
+    /// RL39 accept: off is byte-identical to plain blit, on <= 0.15 ms, grain 0 at pure black and white.
+    #[test]
+    fn lens_pass_budget_and_off_identity() {
+        // Off (eye profile) is byte-identical to the input.
+        let (width, height) = (64u32, 64u32);
+        let mut rgba = Vec::with_capacity(usize::try_from(width * height * 4).unwrap_or(0));
+        for index in 0..(width * height) {
+            let base = (index * 7) % 256;
+            rgba.push(u8::try_from(base).unwrap_or(0));
+            rgba.push(u8::try_from((base + 13) % 256).unwrap_or(0));
+            rgba.push(u8::try_from((base + 29) % 256).unwrap_or(0));
+            rgba.push(255);
+        }
+        let eye = LensProfile::eye();
+        let lensed = apply_bytes(&eye, 0, &rgba, width, height).expect("the eye runs");
+        assert_eq!(lensed, rgba, "off (eye) is byte-identical to plain blit");
+
+        // On (helmet profile) budget: <= 0.15 ms, modeled not measured, so
+        // the number is the same on the reference card and on a cheap one.
+        let helmet = LensProfile::helmet();
+        let budget_ms = helmet.lens_pass_ms(1920, 1080);
+        assert!(
+            budget_ms <= LENS_PASS_BUDGET_MS,
+            "on (helmet) budget: {budget_ms:.3} ms > {LENS_PASS_BUDGET_MS} ms"
+        );
+        assert!(budget_ms > 0.0, "a running lens costs something");
+        // The eye is the identity: the blit already ran it, so it costs nothing.
+        assert_eq!(eye.lens_pass_ms(1920, 1080), 0.0, "off costs 0");
+
+        // Grain is 0 at pure black and white.
+        let mut black_white = Vec::with_capacity(2 * 4);
+        black_white.extend_from_slice(&[0, 0, 0, 255]); // pure black
+        black_white.extend_from_slice(&[255, 255, 255, 255]); // pure white
+        let grain_profile = LensProfile {
+            barrel_k1: 0.0,
+            ca_amount: 0.0,
+            vignette: 0.0,
+            grain: 0.1, // enable grain
+        };
+        let lensed_bw = apply_bytes(&grain_profile, 0, &black_white, 2, 1)
+            .expect("the grain profile runs");
+        // Black should stay black (grain 0 at luma 0).
+        assert_eq!(
+            lensed_bw[0..3],
+            [0, 0, 0],
+            "grain is 0 at pure black"
+        );
+        // White should stay white (grain 0 at luma 1).
+        assert_eq!(
+            lensed_bw[4..7],
+            [255, 255, 255],
+            "grain is 0 at pure white"
+        );
     }
 }

@@ -284,7 +284,7 @@ mod tests {
     /// Repository root, one level above the crate.
     const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
     /// `qclip_hash` two seed-7 tool runs printed; the committed pack is one run.
-    const SEED7_QCLIP_HASH: u64 = 0xbc8c_1300_6a5a_ad0a;
+    const SEED7_QCLIP_HASH: u64 = 0xf5f4_de57_dd5a_7280;
     /// The fighter rig's joint count: one track per joint.
     const FIGHTER_JOINTS: usize = 65;
 

@@ -286,6 +286,9 @@ pub fn distributions_json(profiles: &[(&str, &BoutReport)]) -> String {
                     .num("state_ack_latest", s.delivery.state_latest)
                     .num("state_ack_bits", s.delivery.state_bits)
                     .num("catchup_resync_depth_ticks", s.resync_depth)
+                    .num("max_slew_permille", s.max_slew_permille)
+                    .num("slewed_frames", s.slewed_frames)
+                    .num("skipped_frames", s.skipped_frames)
                     .raw("rollback_hist_per_tick", numbers(&s.rollback));
                 r.inline()
             })
@@ -295,6 +298,28 @@ pub fn distributions_json(profiles: &[(&str, &BoutReport)]) -> String {
     }
     let mut top = Obj::new();
     top.num("resim_window_ticks", crate::scale::RESIM_CAP_TICKS)
+        .num("max_slew_permille", crate::delay::MAX_SLEW_PERMILLE)
+        .num("advantage_window_frames", crate::delay::WINDOW_FRAMES)
+        .raw("pacing", {
+            let measured = crate::delay::measure_rollback_rate(1000);
+            let mut p = Obj::new();
+            p.num("input_delay_ticks", measured.input_delay_ticks)
+                .num("frames", measured.frames)
+                .num("predicted", measured.predicted)
+                .num("mispredicted", measured.mispredicted)
+                .num("rollbacks", measured.rollbacks)
+                .num(
+                    "rollbacks_per_1000_ticks",
+                    measured.rollbacks_per_1000_ticks,
+                )
+                .num(
+                    "delay_off_rollbacks_per_1000_ticks",
+                    measured.baseline_rollbacks_per_1000_ticks,
+                )
+                .num("max_rollback_ticks", measured.max_rollback_ticks)
+                .flag("tip_matches_truth", measured.tip_matches_truth);
+            p.inline()
+        })
         .raw("profiles", lines(rows));
     top.finish()
 }

@@ -179,6 +179,50 @@ pub const fn react(heft: Option<Heft>, tables: &Tables) -> u32 {
     }
 }
 
+/// The base hit impulse under rules v1 (and v2 with no weapon armed): the
+/// constant the arena feeds every blow. A v1 bout or an unarmed seat reads
+/// exactly this, so those replays never move (FEEL2's momentum path only
+/// opens for an armed weapon).
+pub const BASE_HIT_Q8: u16 = 384;
+
+/// Blade travel the momentum reads, capped (millimetres per tick): a
+/// teleporting blade is not a swing.
+pub const MAX_BLADE_TRAVEL_MM: u32 = 128;
+
+/// Largest momentum bonus one blow may add to the base impulse, in Q8
+/// units: base plus bonus stays well inside the balance ceiling
+/// (`engine_physics::balance::MAX_IMPULSE_Q8`, 4096 Q8).
+pub const MAX_MOMENTUM_BONUS_Q8: u16 = 1024;
+
+/// Q8 impulse per gram-millimetre of blade momentum, as a right shift:
+/// mass times this tick's blade travel, divided by 256. The arena's real
+/// swing - the blade's span over the weapon's startup ticks, 54 to 108 mm
+/// a tick - puts the shipped rows between 126 and 442 Q8 over the base, so
+/// a dagger stumbles (510) and a sword floors (719 to 826) without the
+/// cap ever binding.
+pub const MOMENTUM_Q8_SHIFT: u32 = 8;
+
+/// The hit impulse one blow gives the victim: the base impulse plus the
+/// weapon's momentum - its mass times this tick's blade travel - capped.
+/// `heft` is `None` for v1 rows and an unarmed seat, which reads exactly
+/// the base, so those bouts replay byte for byte.
+///
+/// Monotone in mass at fixed travel (a heavier blow lands harder) and in
+/// travel at fixed mass (a faster swing lands harder); the balance layer
+/// turns the impulse into distance. Determinism: one multiply, one shift,
+/// no float and no clock.
+pub fn hit_impulse_q8(heft: Option<Heft>, blade_travel_mm: u32) -> u16 {
+    let Some(heft) = heft else {
+        return BASE_HIT_Q8;
+    };
+    let travel = blade_travel_mm.min(MAX_BLADE_TRAVEL_MM);
+    let momentum = heft.mass_g.saturating_mul(travel) >> MOMENTUM_Q8_SHIFT;
+    let bonus = u16::try_from(momentum)
+        .unwrap_or(MAX_MOMENTUM_BONUS_Q8)
+        .min(MAX_MOMENTUM_BONUS_Q8);
+    BASE_HIT_Q8.saturating_add(bonus)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +240,84 @@ mod tests {
             })
             .filter_map(|line| line.split_whitespace().next())
             .collect()
+    }
+
+    #[test]
+    fn momentum_impulse_reads_the_base_without_an_armed_weapon() {
+        // Rules v1 and an unarmed seat: the constant, byte for byte.
+        assert_eq!(hit_impulse_q8(None, 30), BASE_HIT_Q8);
+        assert_eq!(hit_impulse_q8(None, 0), BASE_HIT_Q8);
+        assert_eq!(BASE_HIT_Q8, 384);
+    }
+
+    #[test]
+    fn momentum_impulse_follows_the_shipped_rows_over_their_own_swings() {
+        // The arena's real swing: the blade's 1 300 mm span over each
+        // weapon's startup ticks, so the travel shrinks as the weapon grows.
+        // The momentum (mass times travel) still grows with the weight, so
+        // every row lands harder than the one below it and no row reaches
+        // the bonus cap.
+        let rows: [(&str, u32, u32); 5] = [
+            ("pugio", 300, 12),
+            ("gladius", 1_000, 15),
+            ("spatha", 1_300, 18),
+            ("clava", 1_700, 21),
+            ("pilum", 2_100, 24),
+        ];
+        let mut last: Option<(u16, u64)> = None;
+        for (id, mass, startup) in rows {
+            let heft = Heft::from_rows(ROWS, id).expect("the shipped row parses");
+            assert_eq!(heft.mass_g, mass, "{id} weighs {mass} g");
+            let travel = 1_300 / startup;
+            let impulse = hit_impulse_q8(Some(heft), travel);
+            let momentum = u64::from(mass) * u64::from(travel);
+            println!("{id}: travel {travel} mm, momentum {momentum}, impulse {impulse}");
+            assert!(
+                impulse < BASE_HIT_Q8 + MAX_MOMENTUM_BONUS_Q8,
+                "{id} must stay under the bonus cap"
+            );
+            if let Some((last_impulse, last_momentum)) = last {
+                assert!(momentum > last_momentum, "{id} must carry more momentum");
+                assert!(impulse > last_impulse, "{id} must land harder");
+            }
+            last = Some((impulse, momentum));
+        }
+    }
+
+    #[test]
+    fn momentum_impulse_heavier_lands_harder_at_fixed_travel() {
+        // The shipped rows in file order: pugio 300 g, gladius 1000 g,
+        // clava 1700 g, pilum 2100 g. Heavier lands harder at one travel.
+        let light = hit_impulse_q8(Heft::from_rows(ROWS, "pugio").ok(), 30);
+        let mid = hit_impulse_q8(Heft::from_rows(ROWS, "gladius").ok(), 30);
+        let clava = hit_impulse_q8(Heft::from_rows(ROWS, "clava").ok(), 30);
+        let heavy = hit_impulse_q8(Heft::from_rows(ROWS, "pilum").ok(), 30);
+        assert_eq!(light, 419);
+        assert_eq!(mid, 501);
+        assert_eq!(clava, 583);
+        assert_eq!(heavy, 630);
+        assert!(
+            light < mid && mid < clava && clava < heavy,
+            "{light} < {mid} < {clava} < {heavy}"
+        );
+    }
+
+    #[test]
+    fn momentum_impulse_faster_swing_lands_harder_at_fixed_mass() {
+        let gladius = Heft::from_rows(ROWS, "gladius").expect("the gladius row parses");
+        let slow = hit_impulse_q8(Some(gladius), 10);
+        let fast = hit_impulse_q8(Some(gladius), 60);
+        assert!(slow < fast, "{slow} < {fast}");
+    }
+
+    #[test]
+    fn momentum_impulse_caps_a_huge_travel_or_mass() {
+        let mut huge = Heft::from_rows(ROWS, "pilum").expect("the pilum row parses");
+        huge.mass_g = MAX_MASS_G;
+        assert_eq!(
+            hit_impulse_q8(Some(huge), u32::MAX),
+            BASE_HIT_Q8 + MAX_MOMENTUM_BONUS_Q8
+        );
     }
 
     #[test]

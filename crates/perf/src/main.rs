@@ -8,6 +8,10 @@
 //!   for the 6 GiB accept reading (presentation only, never hashed).
 //! heap-peak: cargo run -p engine-perf -- --heap-peak prints the 8-fighter
 //!   peak-heap csv plus the 10 percent gate verdict (presentation only).
+//! trace: cargo run -p engine-perf -- --trace <file.json> [frames] writes one
+//!   Chrome Trace Event JSON file (the tick spans, the GPU passes and the
+//!   frame marks) that a trace viewer reads with no viewer code in the
+//!   engine (presentation only, never hashed).
 
 use engine_core::hash::FNV64_PRIME;
 use engine_core::{run_ticks, Rng, Tick};
@@ -19,11 +23,13 @@ use engine_perf::alloc::{
     HeapPeakBaseline, PeakSnapshot,
 };
 use engine_perf::profiler::{self, CAPTURE_FRAMES_DEFAULT, CAPTURE_FRAMES_MAX};
+use engine_perf::trace_file::{self, TRACE_FRAMES_DEFAULT, TRACE_FRAMES_MAX};
 use engine_perf::vram::{self, VramInfo};
 use engine_perf::workloads::ScaledArenaTick;
 use engine_physics::rigid::{is_settled, step_with_h, step_with_h_fast};
 use engine_physics::{Body, Space};
 use engine_render::NullRenderer;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Scratch headroom above the live count: census plus checkpoint fit with
@@ -556,6 +562,70 @@ fn capture_arg() -> Option<u32> {
     None
 }
 
+/// The `--trace` run: capture the frames, write the file and print the line.
+/// A refused capture or a refused write ends the run with code 1.
+fn write_trace_file(path: &Path, frames: u32) {
+    let file = match trace_file::capture_trace(frames) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("trace capture refused: {error}");
+            std::process::exit(1);
+        }
+    };
+    let rows = file.len();
+    let started = Instant::now();
+    let written = file.write_to(path);
+    let write_ms = started.elapsed().as_secs_f64() * 1000.0;
+    match written {
+        Ok(()) => {
+            println!(
+                "trace file {} rows={rows} frames={frames} write_ms={write_ms:.3}",
+                path.display()
+            );
+        }
+        Err(error) => {
+            eprintln!("trace file refused: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The `--trace <file.json> [frames]` flag: capture the frames and write one
+/// Chrome Trace Event JSON file a trace viewer reads. The file holds the tick
+/// spans, the GPU passes and the frame marks; it carries wall-clock
+/// milliseconds only, so it never enters a simulation hash.
+/// Returns the path and the frame count; a bad count exits with code 2.
+fn trace_arg() -> Option<(PathBuf, u32)> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--trace" {
+            let path = match args.next() {
+                None => {
+                    eprintln!("--trace needs a file path");
+                    std::process::exit(2);
+                }
+                Some(path) => PathBuf::from(path),
+            };
+            let frames = match args.next() {
+                None => TRACE_FRAMES_DEFAULT,
+                Some(text) => match text.parse::<u32>() {
+                    Ok(frames) => frames,
+                    Err(_) => {
+                        eprintln!("--trace needs frames 1..={TRACE_FRAMES_MAX}, got {text:?}");
+                        std::process::exit(2);
+                    }
+                },
+            };
+            if frames == 0 || frames > TRACE_FRAMES_MAX {
+                eprintln!("--trace needs frames 1..={TRACE_FRAMES_MAX}, got {frames}");
+                std::process::exit(2);
+            }
+            return Some((path, frames));
+        }
+    }
+    None
+}
+
 /// PF18 comparison: the four canonical workloads under both the pinned
 /// `system` rows and the `mimalloc` candidate rows (same backend until the
 /// mimalloc manifest/deny/lock lane lands). No wall-clock delta here: the
@@ -815,6 +885,10 @@ fn main() {
         }
         return;
     }
+    if let Some((path, frames)) = trace_arg() {
+        write_trace_file(&path, frames);
+        return;
+    }
     if let Some(frames) = capture_arg() {
         profiler::set_enabled(true);
         match profiler::capture(frames) {
@@ -844,6 +918,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_flag_writes_one_trace_file() {
+        // The `--trace` run writes one Chrome Trace Event JSON file: the
+        // rows are in it and it opens as one JSON document.
+        let dir = std::env::temp_dir()
+            .join("engine2040-perf-trace")
+            .join("bin");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("trace.json");
+        write_trace_file(&path, 1);
+        let text = std::fs::read_to_string(&path).expect("the trace file is readable");
+        assert!(text.starts_with("{\"traceEvents\":["), "{text}");
+        assert!(text.contains("\"ph\":\"X\""), "{text}");
+        assert!(text.contains("\"ph\":\"C\""), "{text}");
+        assert!(text.contains("ra1.forward"), "{text}");
+    }
 
     fn tick_hash(world: &mut World, space: &mut Space) -> u64 {
         world.state_hash() ^ space.state_hash().wrapping_mul(FNV64_PRIME)

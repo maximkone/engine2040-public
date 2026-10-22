@@ -36,6 +36,10 @@ pub mod profiler;
 pub mod smoke;
 /// Hour soak: long-run stability check for the frame-time gate.
 pub mod soak;
+/// Chrome Trace Event JSON: one file a trace viewer reads with no trace
+/// viewer code in the engine. The writer is pure and std-only; the capture
+/// runs only when the caller asks for a file.
+pub mod trace_file;
 /// Pure integer VRAM budget math.
 pub mod vram;
 /// Canonical budget workloads: arena tick, physics, AI, destruction.

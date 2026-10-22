@@ -10,7 +10,7 @@ use engine_combat::arena::{
 };
 use engine_combat::exchange::{
     phased_row, ExchangeError, ExchangeEvent, ExchangeIntent, MovePhase, PhasedFighter,
-    MAX_EVENTS_PER_TICK as EXCHANGE_CAP, NO_MOVE, PHASED_V1,
+    EXCHANGE_V2, MAX_EVENTS_PER_TICK as EXCHANGE_CAP, NO_MOVE, PHASED_V1,
 };
 use engine_combat::sweep::{
     sweep_live_for, SweepEvent, SweepFighter, WeaponSweep, MAX_SWEEPS_PER_TICK as SWEEP_IN_CAP,
@@ -40,6 +40,17 @@ pub const MATCH_WIRE_VERSION_V0: u32 = 0;
 /// (attack intakes forward only on live ticks with the age as timing, sweeps
 /// only while [`sweep_live_for`] holds, cancels ride via `try_cancel`).
 pub const MATCH_WIRE_VERSION_V1: u32 = 1;
+/// Intake path behind the version flag: the phased intake of V1 with the
+/// rules-v2 exchange rows, so a clash throws both blades back for
+/// [`CLASH_RECOIL_TICKS`](engine_combat::exchange::CLASH_RECOIL_TICKS). V0 and
+/// V1 keep the v1 rows (no recoil), so their bytes never move.
+pub const MATCH_WIRE_VERSION_V2: u32 = 2;
+
+/// The rules-v2 match rows: the shipped sweep rows with the recoil exchange row.
+const MATCH_V2: MatchTables = MatchTables {
+    exchange: EXCHANGE_V2,
+    ..MatchTables::v1()
+};
 
 /// Map one merged tick input to its exchange intent: an attack press
 /// strikes with fixed timing, a held block guards in-window, everything
@@ -198,10 +209,13 @@ impl MatchTrack {
         }
     }
 
-    /// Pin the intake path behind the version flag. Only V0/V1 land;
+    /// Pin the intake path behind the version flag. Only V0/V1/V2 land;
     /// anything else returns `false` and keeps the old path, never panics.
     pub(crate) fn set_version(&mut self, version: u32) -> bool {
-        if version != MATCH_WIRE_VERSION_V0 && version != MATCH_WIRE_VERSION_V1 {
+        if version != MATCH_WIRE_VERSION_V0
+            && version != MATCH_WIRE_VERSION_V1
+            && version != MATCH_WIRE_VERSION_V2
+        {
             return false;
         }
         self.version = version;
@@ -213,14 +227,29 @@ impl MatchTrack {
         self.version
     }
 
-    /// Phased cursors, live only while the version is V1.
+    /// Phased cursors, live only while the version is V1 or V2.
     pub(crate) fn phased(&self) -> &[PhasedFighter; crate::MAX_SLOTS] {
         &self.phased
     }
 
-    /// The shipped GP1/GP2 rows this track resolves under.
+    /// The shipped GP1/GP2 rows this track resolves under (rules v1).
     pub(crate) fn tables() -> &'static MatchTables {
         &MATCH_V1
+    }
+
+    /// The rows one intake version resolves under: V2 carries the clash
+    /// recoil, V0 and V1 keep the v1 rows.
+    fn tables_for(version: u32) -> &'static MatchTables {
+        if version == MATCH_WIRE_VERSION_V2 {
+            &MATCH_V2
+        } else {
+            Self::tables()
+        }
+    }
+
+    /// True on the phased intakes (V1 and V2).
+    fn phased_intake(&self) -> bool {
+        self.version == MATCH_WIRE_VERSION_V1 || self.version == MATCH_WIRE_VERSION_V2
     }
 
     /// Current match state (clocks, poise, binds).
@@ -230,7 +259,7 @@ impl MatchTrack {
 
     /// Resolve one tick through both landed resolvers into the owned
     /// buffers. No heap, no floats, no panics. V0 forwards every intake
-    /// untouched; V1 gates intakes through the phased rows first. The
+    /// untouched; V1 and V2 gate intakes through the phased rows first. The
     /// resolvers themselves are never re-entered differently: both paths end
     /// in the same [`match_step`] call.
     pub(crate) fn resolve(
@@ -239,7 +268,7 @@ impl MatchTrack {
         fighters: &[SweepFighter],
         sweeps: &[WeaponSweep],
     ) {
-        if self.version == MATCH_WIRE_VERSION_V1 {
+        if self.phased_intake() {
             self.resolve_phased(intents, fighters, sweeps);
         } else {
             self.resolve_legacy(intents, fighters, sweeps);
@@ -258,7 +287,7 @@ impl MatchTrack {
             intents,
             fighters,
             sweeps,
-            Self::tables(),
+            Self::tables_for(self.version),
             &mut self.exchange_buf,
             &mut self.sweep_buf,
         );
@@ -343,7 +372,7 @@ impl MatchTrack {
             &gated,
             fighters,
             &live[..live_n],
-            Self::tables(),
+            Self::tables_for(self.version),
             &mut self.exchange_buf,
             &mut self.sweep_buf,
         );
@@ -367,14 +396,19 @@ impl MatchTrack {
         attacker: u8,
         victim: u8,
     ) -> Result<ExchangeEvent, ExchangeError> {
-        match_riposte(&mut self.state, Self::tables(), attacker, victim)
+        match_riposte(
+            &mut self.state,
+            Self::tables_for(self.version),
+            attacker,
+            victim,
+        )
     }
 
     /// Advance one match tick: decay binds, run the clock. Saturating.
-    /// The phased cursors age only on the V1 path, so the legacy track keeps
-    /// exactly the clocks it always had.
+    /// The phased cursors age only on the V1 and V2 paths, so the legacy track
+    /// keeps exactly the clocks it always had.
     pub(crate) fn advance(&mut self) {
-        if self.version == MATCH_WIRE_VERSION_V1 {
+        if self.phased_intake() {
             for cursor in self.phased.iter_mut() {
                 cursor.advance();
             }
@@ -404,6 +438,7 @@ mod tests {
     use super::*;
     use engine_combat::arena::MatchTableSet;
     use engine_combat::exchange::ExchangeIntent as Intent;
+    use engine_combat::exchange::CLASH_RECOIL_TICKS;
 
     fn idle() -> [Intent; MAX_PARTICIPANTS as usize] {
         [Intent::Idle; MAX_PARTICIPANTS as usize]
@@ -862,6 +897,74 @@ mod tests {
         // Both paths replay byte-identical twice.
         assert_eq!(run(MATCH_WIRE_VERSION_V0).1, v0_bytes);
         assert_eq!(run(MATCH_WIRE_VERSION_V1), (v1_ticks, v1_bytes));
+    }
+
+    #[test]
+    fn v2_clash_throws_both_blades_back_the_same_ticks_and_cues_once() {
+        // Same shared live ticks as the V1 clash. Under V2 both blades are
+        // thrown back for the same ticks, each clash emits one Clash event
+        // (one cue), and the rows replay byte-identical. V1 throws nothing.
+        let fighters = duel();
+        let clash_intents = || {
+            let mut intents = idle();
+            intents[0] = Intent::Attack { timing: 1 };
+            intents[1] = Intent::Attack { timing: 1 };
+            intents
+        };
+        let run = |version: u32| {
+            let mut track = MatchTrack::new(2).unwrap();
+            assert!(track.set_version(version));
+            let mut clash_ticks: Vec<u32> = Vec::new();
+            let mut recoil: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+            let mut bytes = Vec::new();
+            for tick in 0u32..16 {
+                track.resolve(&clash_intents(), &fighters, &[]);
+                let clashes = track
+                    .exchange_events()
+                    .iter()
+                    .filter(|e| matches!(e, ExchangeEvent::Clash { .. }))
+                    .count();
+                if clashes > 0 {
+                    assert_eq!(clashes, 1, "one clash per tick");
+                    clash_ticks.push(tick);
+                }
+                let exchange = track.state().exchange;
+                let (first, second) = (exchange.is_recoiling(0), exchange.is_recoiling(1));
+                assert_eq!(first, second, "both blades thrown back on tick {tick}");
+                if first {
+                    recoil[0].push(tick);
+                }
+                if second {
+                    recoil[1].push(tick);
+                }
+                track.append_bytes(&mut bytes);
+                track.advance();
+            }
+            (clash_ticks, recoil, bytes)
+        };
+        let (clash_ticks, recoil, v2_bytes) = run(MATCH_WIRE_VERSION_V2);
+        assert_eq!(
+            clash_ticks,
+            vec![4, 10],
+            "V2 clashes on the same live ticks"
+        );
+        // Each clash holds its recoil for the recoil row, from the clash tick.
+        let expected: Vec<u32> = (0u32..16)
+            .filter(|t| {
+                clash_ticks
+                    .iter()
+                    .any(|c| *t >= *c && *t < *c + CLASH_RECOIL_TICKS)
+            })
+            .collect();
+        assert!(!expected.is_empty());
+        assert_eq!(recoil[0], expected, "slot 0 recoil window");
+        assert_eq!(recoil[1], expected, "slot 1 recoil window");
+        // Replays byte-identical twice.
+        assert_eq!(run(MATCH_WIRE_VERSION_V2), (clash_ticks, recoil, v2_bytes));
+        // V1 binds the same clashes and throws nothing back.
+        let (v1_ticks, v1_recoil, _) = run(MATCH_WIRE_VERSION_V1);
+        assert_eq!(v1_ticks, vec![4, 10]);
+        assert!(v1_recoil[0].is_empty() && v1_recoil[1].is_empty());
     }
 
     #[test]

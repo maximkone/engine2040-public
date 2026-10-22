@@ -714,6 +714,26 @@ impl ViewLaws {
         self.warnings_with(&ViewFloors::default())
     }
 
+    /// The run's view verdict for the capture line: `ok`, or `FAIL(` and the
+    /// broken floors' metrics `)`, e.g. `FAIL(view_eye_in_body)`. The WARN
+    /// lines alone went unread: a run with the camera inside a giant body
+    /// still printed a clean-looking capture line (2026-10-22), so the
+    /// verdict rides on the one line every caller reads.
+    #[must_use]
+    pub fn verdict(&self) -> String {
+        let broken: Vec<String> = self
+            .warnings()
+            .iter()
+            .filter_map(|w| w.strip_prefix("arena WARN: ")?.split_whitespace().next())
+            .map(str::to_string)
+            .collect();
+        if broken.is_empty() {
+            "ok".to_string()
+        } else {
+            format!("FAIL({})", broken.join(","))
+        }
+    }
+
     /// [`Self::warnings`] against explicit floors; the bar-pin test reads the
     /// product bar this way.
     #[must_use]
@@ -847,10 +867,16 @@ pub fn light_ok(light: &FrameLight) -> bool {
     true
 }
 
+/// A prop no taller than this is ground a foot stands on (the dune sand
+/// slab, a kerb), never a volume a fighter is trapped in: feet sunk into it
+/// are the `sunk_cm` law's business, not `inside_props`. Meters.
+pub const STEP_M: f32 = 0.3;
+
 /// True when the body root (feet) sits inside the prop volume: X and Z
 /// within bounds, Y from the base face up to but below the top face. A
 /// fighter standing on the ring floor or atop a prop is on it, not in it;
-/// one clipped into the volume counts as inside.
+/// one clipped into the volume counts as inside. A prop no taller than
+/// [`STEP_M`] is ground and never holds a fighter inside.
 ///
 /// View only; feeds the brief text, never the sim hash. Units: meters.
 /// Errors: none; a non-finite root or prop bound never counts as inside.
@@ -866,7 +892,8 @@ pub fn fighter_in_prop(body: &BodyTruth, prop: &PropTruth) -> bool {
     let in_xz = [0usize, 2]
         .iter()
         .all(|&axis| prop.min[axis] <= feet[axis] && feet[axis] <= prop.max[axis]);
-    in_xz && prop.min[1] <= feet[1] && feet[1] < prop.max[1]
+    let solid = prop.max[1] - prop.min[1] > STEP_M;
+    solid && in_xz && prop.min[1] <= feet[1] && feet[1] < prop.max[1]
 }
 
 /// One frame of the `--view-brief` JSONL with props and light: the bodies
@@ -1175,6 +1202,12 @@ mod tests {
                 "arena WARN: view_sunk_cm_max value=12.0 floor=3.0".to_string(),
             ]
         );
+        // The capture line carries the verdict, so no caller has to read
+        // the WARN lines to learn the view broke.
+        assert_eq!(
+            laws.verdict(),
+            "FAIL(view_nonfinite,view_error_parts,view_eye_below_ground,view_sunk_cm_max)"
+        );
     }
 
     #[test]
@@ -1187,6 +1220,11 @@ mod tests {
         );
         assert!(laws.line().is_some(), "the run still prints its receipt");
         assert!(laws.warnings().is_empty(), "a clean run is silent");
+        assert_eq!(
+            laws.verdict(),
+            "ok",
+            "a clean run reads ok on the capture line"
+        );
     }
 
     #[test]
@@ -1417,7 +1455,10 @@ mod tests {
             "ring draw lists once: {a}"
         );
         assert!(a.contains("\"light_ok\":true"), "good light holds: {a}");
-        let first = &props[0];
+        let first = props
+            .iter()
+            .find(|prop| prop.max[1] - prop.min[1] > STEP_M)
+            .expect("the kit has a prop taller than a step");
         let center = [
             (first.min[0] + first.max[0]) / 2.0,
             (first.min[1] + first.max[1]) / 2.0,
@@ -1522,6 +1563,17 @@ mod tests {
         assert!(
             fighter_in_prop(&at_base, &crate_prop),
             "feet at the base footprint stay inside"
+        );
+        // The dune sand: a 20 cm slab under the lane is ground, not a box.
+        let sand = PropTruth {
+            kind: "sand_floor.gltf",
+            min: [-17.0, 0.0, -15.0],
+            max: [13.0, 0.2, 15.0],
+        };
+        let on_sand = body(3, "idle", [0.0, 0.0, 0.0], vec![[0.0, 1.0, 0.0]]);
+        assert!(
+            !fighter_in_prop(&on_sand, &sand),
+            "feet in a slab lower than a step stand on it"
         );
     }
 

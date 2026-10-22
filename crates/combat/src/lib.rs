@@ -93,12 +93,13 @@ pub use combo::{
     COMBO_VERSION_V1, MAX_STRING, STANCE_COUNT,
 };
 pub use cut::{
-    chance_q16, cut_for_version, cut_one, digest_cuts, effective_q16, resolve_swing, roll_q16,
-    saturate_q16, try_cut_one, try_resolve_swing, validate_cut_tables, validate_swing,
-    validate_target, BladeSwing, Cut, CutError, CutMiss, CutOutcome, CutTableSet, CutTables,
-    JointTarget, CUT_BLADE_HALF_MAX_MM, CUT_JOINT_RADIUS_MAX_MM, CUT_POS_BOUND_MM, CUT_Q16,
-    CUT_SLACK_MM_V1, CUT_SWING_LEN_MM_V1, CUT_V1, CUT_VERSION_V1, MAX_CUTS_PER_SWING,
-    MAX_ENERGY_Q16, MAX_SHARPNESS_Q16, MAX_TARGETS_PER_SWING, MAX_WEAR_Q16, SEVER_SPAN_Q16_V1,
+    chance_q16, cut_for_version, cut_one, digest_cuts, edge_reaches, effective_q16, plate_struck,
+    resolve_swing, roll_q16, saturate_q16, try_cut_one, try_resolve_swing, validate_cut_tables,
+    validate_swing, validate_target, BladeSwing, Cut, CutError, CutMiss, CutOutcome, CutTableSet,
+    CutTables, JointTarget, CUT_BLADE_HALF_MAX_MM, CUT_JOINT_RADIUS_MAX_MM, CUT_POS_BOUND_MM,
+    CUT_Q16, CUT_SLACK_MM_V1, CUT_SWING_LEN_MM_V1, CUT_V1, CUT_VERSION_V1, MAX_CUTS_PER_SWING,
+    MAX_ENERGY_Q16, MAX_SHARPNESS_Q16, MAX_TARGETS_PER_SWING, MAX_WEAR_Q16, PLATE_BLOCK_Q16,
+    SEVER_SPAN_Q16_V1,
 };
 pub use fight::{
     step, step_into, step_with_tables, step_with_tables_into, try_step, try_step_into,

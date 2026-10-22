@@ -54,6 +54,15 @@ pub enum BodyImportError {
         /// Image index in document order.
         image: usize,
     },
+    /// A skeleton node carries a scale. The engine reads joints as rotation
+    /// plus translation, so a scaled node (an FBX armature's 0.01) would come
+    /// in a hundred times too big with no error; it is refused instead.
+    ScaledJoint {
+        /// The node's name (or its index when it has none).
+        joint: String,
+        /// The scale the file carries.
+        scale: [f32; 3],
+    },
 }
 
 impl fmt::Display for BodyImportError {
@@ -65,6 +74,10 @@ impl fmt::Display for BodyImportError {
             Self::UnskinnedPart { part } => write!(f, "body part {part} has no skin rows"),
             Self::BadInverseBind => write!(f, "body inverse binds missing or non-finite"),
             Self::ExternalImage { image } => write!(f, "body image {image} is not embedded"),
+            Self::ScaledJoint { joint, scale } => write!(
+                f,
+                "body joint {joint} carries scale {scale:?}: joints are read as rotation and                  translation only, so bake the object scale into the rig before export                  (Blender: Apply Scale on the armature and its meshes)"
+            ),
         }
     }
 }
@@ -131,7 +144,12 @@ fn load(bytes: &[u8]) -> Result<Loaded, BodyImportError> {
     })
 }
 
-/// Node bind pose in skeleton order (scale is ignored, as in the skin import).
+/// Largest distance from 1 a joint's scale may have and still be "no scale".
+pub const JOINT_SCALE_TOLERANCE: f32 = 1.0e-3;
+
+/// Node bind pose in skeleton order. A joint with a scale is refused
+/// ([`BodyImportError::ScaledJoint`]): the pose has no scale lane, and
+/// dropping it silently drew a 0.01-scaled armature a hundred times too big.
 fn bind_pose(document: &gltf::Document, order: &[usize]) -> Result<BindPose, BodyImportError> {
     let mut positions = Vec::with_capacity(order.len());
     let mut rotations = Vec::with_capacity(order.len());
@@ -140,7 +158,18 @@ fn bind_pose(document: &gltf::Document, order: &[usize]) -> Result<BindPose, Bod
             .nodes()
             .nth(*node_index)
             .ok_or_else(|| parse_error("node order names a missing node"))?;
-        let (translation, rotation, _scale) = node.transform().decomposed();
+        let (translation, rotation, scale) = node.transform().decomposed();
+        if scale
+            .iter()
+            .any(|s| !s.is_finite() || (s - 1.0).abs() > JOINT_SCALE_TOLERANCE)
+        {
+            return Err(BodyImportError::ScaledJoint {
+                joint: node
+                    .name()
+                    .map_or_else(|| format!("#{node_index}"), str::to_string),
+                scale,
+            });
+        }
         positions.push(translation);
         rotations.push(rotation);
     }
@@ -297,6 +326,57 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Rewrite a GLB's JSON chunk with `edit`, keeping the binary chunk.
+    fn with_json(bytes: &[u8], edit: impl Fn(&str) -> String) -> Vec<u8> {
+        let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let json = std::str::from_utf8(&bytes[20..20 + json_len]).unwrap();
+        let mut text = edit(json).into_bytes();
+        while text.len() % 4 != 0 {
+            text.push(b' ');
+        }
+        let rest = &bytes[20 + json_len..];
+        let total = 12 + 8 + text.len() + rest.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&bytes[0..8]);
+        out.extend_from_slice(&u32::try_from(total).unwrap().to_le_bytes());
+        out.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&text);
+        out.extend_from_slice(rest);
+        out
+    }
+
+    /// A joint with a scale is refused by name, never drawn a hundred times
+    /// too big: the 2026-10-22 Rocketbox body came in with a 0.01 armature and
+    /// the window put the camera inside it.
+    #[test]
+    fn a_scaled_joint_is_refused_by_name() {
+        let bytes = std::fs::read(fighters_dir().join("hero_body.glb")).expect("hero body on disk");
+        // heel_L already writes a unit scale; set it to the FBX armature's 0.01.
+        let scaled = with_json(&bytes, |json| {
+            let node = json.find(r#"{"name":"heel_L","#).expect("heel_L node");
+            let key = node
+                + json[node..]
+                    .find(r#""scale":["#)
+                    .expect("heel_L has a scale");
+            let open = key + r#""scale":["#.len();
+            let close = open + json[open..].find(']').expect("scale closes");
+            format!("{}0.01,0.01,0.01{}", &json[..open], &json[close..])
+        });
+        assert_ne!(scaled, bytes, "the edit landed");
+        let err = import_skinned_body(&scaled).expect_err("a scaled joint is refused");
+        assert!(
+            matches!(&err, BodyImportError::ScaledJoint { joint, .. } if joint == "heel_L"),
+            "wrong refusal: {err}"
+        );
+        assert!(
+            err.to_string().contains("Apply Scale"),
+            "the fix is named: {err}"
+        );
+        // The unedited body still imports: the shipped rigs carry no scale.
+        import_skinned_body(&bytes).expect("the hero still imports");
     }
 
     #[test]

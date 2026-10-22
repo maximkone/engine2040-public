@@ -13,7 +13,9 @@ use crate::rules::{Rules, TickReport};
 /// Attack lasts this many ticks; it lands on `HIT_AGE`.
 const ATTACK_TICKS: u32 = 20;
 const HIT_AGE: u32 = 8;
-const REACH_MM: i64 = 1_500;
+/// Reach in millimetres: an attack lands on the nearest foe inside it. Read by the
+/// objective so a chasing enemy swings exactly at the range the sim hits at.
+pub const REACH_MM: i64 = 1_500;
 const ATTACK_COST: u16 = 100;
 const BASE_DAMAGE: u16 = 120;
 const ARENA_MM: i32 = 20_000;
@@ -257,6 +259,18 @@ impl Sim {
     /// The static wall, if any.
     pub fn wall(&self) -> Option<Wall> {
         self.wall
+    }
+
+    /// Move one fighter to `(x_mm, z_mm)`. False when the slot is outside the layout.
+    /// Callers use it to start a match from authored poses; it writes no timer and no
+    /// health, so a placed seat starts exactly where the level put it.
+    pub fn place(&mut self, slot: u8, x_mm: i32, z_mm: i32) -> bool {
+        let Some(view) = self.fighters.get_mut(usize::from(slot)) else {
+            return false;
+        };
+        view.x_mm = x_mm.clamp(-ARENA_MM, ARENA_MM);
+        view.z_mm = z_mm.clamp(-ARENA_MM, ARENA_MM);
+        true
     }
 
     /// The FPS observer so far (rounds folded at every `FPS_ROUND_TICKS` boundary).

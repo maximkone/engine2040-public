@@ -16,7 +16,21 @@ One command per lane. Each runs its steps in order and stops at the first failur
 - Tests: `node --test tools/asset-gen/character.test.mjs`.
 - Not wired yet: a cooked MPFB body does not reach `content/fighters` or `fighters.e2bundle`. The receipt's `next_step` says what is missing.
 
-## Realistic characters (Rocketbox)
+## Realistic fighter into the game (the path the arena uses)
+
+One command, from a Rocketbox avatar to a fighter the arena draws: `node tools/asset-gen/fighter.mjs --avatar Professions/Military_Male_01 --name rb_legionary --prove`. `--dry-run` prints the steps; `--help` the flags.
+
+- Steps: fetch the avatar (`rocketbox.mjs`), build the Roman kit (`tools/blender/roman_kit.py`: gladius and scutum into `content/generated/roman_kit`, `--kit none` skips it), cook (`tools/blender/rocketbox_fighter.py`: body plus six clips on one skeleton, Mixamo sword-and-shield mocap, weapon and shield grafted to the hands), check the manifest row against the files, and with `--prove` open the real window.
+- Output: `content/fighters/rocketbox/` (`glb/<name>_body.glb`, `glb/clips/<name>_<role>.glb` for idle, run, attack1-3, death, `<name>.cook.json`, `manifest.json`). The manifest is the game's only variant list (`fighter_bind::rocketbox_variants`): cooking a second avatar adds its row and keeps the others. No Rust edit adds a fighter.
+- Clips: the proven pack map is `SWORD_AND_SHIELD` in `fighter.mjs`; `--clip attack3=<file.fbx>` swaps one role. The pack lives in `C:\forge-media\mixamo\sword_and_shield` (section Mixamo packs below).
+- What the engine refuses, so you see it instead of a broken picture: a joint carrying scale (`BodyImportError::ScaledJoint`: apply scale in Blender), a pelvis outside 0.6 to 1.4 m (`check_body_units`: wrong units), fewer than 45 joints, not six clips, a body that does not match its manifest sha, a variant name outside lowercase/digits/_.
+- `--prove` runs `E2040_BODIES=rocketbox target/debug/arena.exe ... --capture-dir target/clips/<name>` and passes only on exit 0 with `view=ok` on every capture line (skill `door-and-headless-runbook`). Then open the frames yourself: the checks catch broken views, not ugly ones.
+- Proof in CI: `node tools/gh-check.mjs cargo test -p engine-game --features app --lib rocketbox` (binder and family load, every variant held to the same bar).
+- Tests: `node --test tools/asset-gen/fighter.test.mjs`.
+
+## Realistic characters (Rocketbox), the look study
+
+This lane is for studying an avatar (LODs, the 30 m gate, the page budget). It does not reach the game; the section above does.
 
 Microsoft Rocketbox avatars (MIT, 115 rigged humans, 3ds Max Biped skeleton) are the realistic body. One command fetches one avatar and cooks it: `node tools/asset-gen/character.mjs --from rocketbox --avatar Adults/Male_Adult_08 --name rb_male08 [--home C:\forge-media\rocketbox] [--tris0 7400] [--out target/chargen/rb_male08]`. Groups are Adults, Children and Professions.
 
@@ -24,8 +38,20 @@ Microsoft Rocketbox avatars (MIT, 115 rigged humans, 3ds Max Biped skeleton) are
 - The cook is `tools/blender/rocketbox_cook.py`: bones renamed to the contract charset (`bip01_l_upperarm`, the names `crates/assets/src/rocketbox_map.rs` expects), colour and normal maps at 1024 px, LOD0 to LOD3 GLBs with the skin kept, `hero.png` at 80% of the frame, `cook.json` with the MIT licence and the source sha256.
 - Out dir: `cook/` (lod0..lod3.glb, textures/, hero.png, cook.json), `gate/silhouette_30m.png`, `receipt.json`, and one `RECEIPT` line. Exit 3 means the 30 m gate or the page budget said no; exit 1 means a step failed. Look at `cook/hero.png` before anything else.
 - Same gates as the other lanes: the 30 m fill band (0.40 to 0.70) and `budgetCheck`. As of 2026-10-22 both proven avatars stop there: Male_Adult_08 fills 0.30 at 30 m and its lane is 6.7 MB against the 2.04 MB first-bundle budget; Military_Male_01 fills 0.35 and its lane is 12.8 MB. A human with arms out fills less of its box than a blockout, so the band itself is the open question.
-- Not wired yet: nothing puts the cooked GLBs into `content/fighters` or a manifest row. The receipt's `next_step` says what is missing.
+- Not the game path: `fighter.mjs` (above) is. The receipt's `next_step` says so.
 - Tests: `node --test tools/asset-gen/character.test.mjs` (no network, no Blender).
+
+## Mixamo packs
+
+Mixamo animation packs, fetched by `tools/asset-gen/mixamo.mjs` into `C:\forge-media\mixamo\<pack_slug>\` (outside the repo; never commit them). The owner signs in once; the tool reuses that browser profile (`C:\forge-media\mixamo-lane\profile2`, override with env `MIXAMO_PROFILE`).
+
+- Sign in once (owner, by hand; the tool never types credentials): `node tools/asset-gen/mixamo.mjs --login`
+- List packs with animation counts: `node tools/asset-gen/mixamo.mjs --list sword` (exit 4 means not signed in: run `--login` first)
+- Fetch one pack as FBX, T-pose with skin, no keyframe reduction: `node tools/asset-gen/mixamo.mjs --pack "Sword and Shield Pack" [--fps 60] [--out <dir>]`
+- Plan only, no browser: `node tools/asset-gen/mixamo.mjs --pack "<Pack Name>" --dry-run`
+- API trace for debugging: add `--trace` (method, path and status to stderr; never headers or bodies)
+- Each pack writes `PROVENANCE.json` (source "Adobe Mixamo", licence note: royalty-free for use in games; do not redistribute the raw files as a library). A pack with one FBX per animation plus one is skipped.
+- Tests: `node --test tools/asset-gen/mixamo.test.mjs`
 
 ## 1. Sources and licence
 

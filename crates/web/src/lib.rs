@@ -35,6 +35,7 @@ pub mod anim;
 pub mod arena_view;
 pub mod audio;
 pub mod content;
+pub mod exchange;
 pub mod frame_bus;
 pub mod golden;
 pub mod input;
@@ -71,9 +72,21 @@ pub const SHADER_WGSL: &str = include_str!("shader.wgsl");
 mod tests {
     use super::*;
 
+    /// The page's per-seat arrays must be exactly as long as the match has seats. `SEATS_LEN`
+    /// is written out because `usize::from` is not const-callable yet; this test is what keeps
+    /// the two equal, so a seat added to `page_duel` fails here instead of silently dropping a
+    /// seat's HUD.
     #[test]
-    fn shader_block_has_the_fields_square_to_bytes_writes_in_order() {
-        let at = |needle: &str| {
+    fn seats_len_matches_the_match_seats() {
+        assert_eq!(
+            fight::SEATS_LEN,
+            usize::from(fight::SEATS),
+            "SEATS_LEN must equal the page match's seat count"
+        );
+    }
+
+    #[test]
+    fn shader_block_has_the_fields_square_to_bytes_writes_in_order() {        let at = |needle: &str| {
             SHADER_WGSL
                 .find(needle)
                 .unwrap_or_else(|| panic!("shader.wgsl lost `{needle}`"))

@@ -59,14 +59,14 @@ mod shader_text {
         for term in [
             "fn d_ggx(",
             "fn fresnel_term(",
-            "fn aces_fitted(",
+            "fn aces_tonemap(",
             "fn linear_to_srgb_term(",
         ] {
             assert_eq!(FORWARD_PBR_WGSL.matches(term).count(), 1, "{term} once");
         }
         let skin = include_str!("../v1_skin.rs");
         assert!(
-            !skin.contains("fn d_ggx(") && !skin.contains("fn aces_fitted("),
+            !skin.contains("fn d_ggx(") && !skin.contains("fn aces_tonemap("),
             "the skinned pass keeps no second BRDF or tonemap copy"
         );
     }
@@ -89,22 +89,26 @@ mod shader_text {
     fn forward_fragment_writes_linear_radiance_and_never_tone_maps() {
         let fs = wgsl_fn_body(FORWARD_PBR_WGSL, "fs");
         assert!(fs.contains("mat.exposure"), "exposure is the only scale");
-        for banned in ["aces_fitted", "linear_to_srgb_term", "pow("] {
+        for banned in ["aces_tonemap", "linear_to_srgb_term", "pow("] {
             assert!(!fs.contains(banned), "forward fs must not contain {banned}");
         }
         let sky = wgsl_fn_body(FORWARD_PBR_WGSL, "fs_sky");
-        assert!(!sky.contains("aces_fitted") && !sky.contains("linear_to_srgb_term"));
+        assert!(!sky.contains("aces_tonemap") && !sky.contains("linear_to_srgb_term"));
         // The offscreen 8-bit capture entry is the one that does map.
         let display = wgsl_fn_body(FORWARD_PBR_WGSL, "fs_display");
-        assert!(display.contains("aces_fitted") && display.contains("linear_to_srgb_term"));
+        assert!(display.contains("aces_tonemap") && display.contains("linear_to_srgb_term"));
+        assert!(
+            display.contains("dither4("),
+            "the 8-bit capture carries the shared dither"
+        );
         assert_eq!(HDR_FORMAT, wgpu::TextureFormat::Rgba16Float);
     }
 
     #[test]
     fn the_blit_does_the_one_tone_map() {
         // The blit's one tone map is `display_tonemap` (the hue-keeping
-        // display, 4d88a021); `aces_fitted` stays in the same source for the
-        // offscreen capture entries.
+        // display, 4d88a021); `aces_tonemap` stays in the same source for
+        // the offscreen capture entries.
         let blit = crate::present::gpu_present::BLIT_WGSL;
         let fs = wgsl_fn_body(blit, "fs");
         assert!(fs.contains("display_tonemap") && fs.contains("linear_to_srgb_term"));
@@ -115,7 +119,7 @@ mod shader_text {
             "a *Srgb view encodes on write, the shader must not encode twice"
         );
         assert_eq!(blit.matches("fn display_tonemap(").count(), 1);
-        assert_eq!(blit.matches("fn aces_fitted(").count(), 1);
+        assert_eq!(blit.matches("fn aces_tonemap(").count(), 1);
     }
 
     #[test]

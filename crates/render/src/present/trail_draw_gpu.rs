@@ -28,7 +28,7 @@ pub const TRAIL_DRAW_VERT_BYTES: usize = 16;
 /// the seeded stream are untouched. The draw path is the `shaders/trail.wgsl`
 /// file; `TrailSubmitter` stages the live strip and the frame records it.
 /// Engine-owned WGSL, fixed math only, no wall clock.
-pub const TRAIL_DRAW_WGSL: &str = include_str!("shaders/trail.wgsl");
+pub const TRAIL_DRAW_WGSL: &str = include_str!("../shaders/trail.wgsl");
 
 /// Append one little-endian `f32` at `*at`; stack bytes only.
 fn trail_put_f32(out: &mut [u8], at: &mut usize, v: f32) {

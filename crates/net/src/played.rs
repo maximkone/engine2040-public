@@ -23,6 +23,7 @@ use engine_input::fighter::{Buttons, ATTACK, BLOCK};
 
 use crate::ack::input::{DeliveryStats, InputDelivery};
 use crate::dedicated::{HeadlessServer, ServerError};
+use crate::delay::{AdvantageWindow, ClockPacer};
 use crate::guard::SlotReceipt;
 use crate::heal::NetHealError;
 use crate::lagcomp::LagTape;
@@ -535,6 +536,17 @@ pub struct SeatStats {
     /// ticks the server counted, and the loss of the live state datagrams.
     /// Logged, never hashed, like `input_delay`.
     pub delivery: DeliveryStats,
+    /// Largest clock slew the pacer ran with, in permille of the tick rate
+    /// (MP26: the cap is 5 percent, 50 permille). Logged, never hashed, like
+    /// `input_delay`.
+    pub max_slew_permille: i32,
+    /// Frames the paced clock ran off the nominal one-tick rate: held frames
+    /// and run-up ticks both count. Logged, never hashed.
+    pub slewed_frames: u32,
+    /// Bout ticks the client never predicted: the frame-skip guard. Zero by
+    /// construction, because the pacer never runs past the nominal path.
+    /// Logged, never hashed.
+    pub skipped_frames: u32,
 }
 
 impl SeatStats {
@@ -552,6 +564,9 @@ impl SeatStats {
             gap_resyncs: 0,
             granted: false,
             delivery: DeliveryStats::EMPTY,
+            max_slew_permille: 0,
+            slewed_frames: 0,
+            skipped_frames: 0,
         }
     }
 
@@ -603,7 +618,9 @@ impl Coverage {
     }
 }
 
-/// One human seat: a predicting client plus its input tape.
+/// One human seat: a predicting client plus its input tape. The seat paces
+/// its prediction loop against the peer: the 30-frame advantage window
+/// (MP26, ggrs `time_sync.rs`) and the clock pacer (lightyear `sync.rs`).
 struct Seat {
     seat: u8,
     token: u64,
@@ -621,6 +638,18 @@ struct Seat {
     rejoin_at: Option<u32>,
     delay: u32,
     ticks: u32,
+    /// The peer seat's slot: the frontier the advantage window compares.
+    peer_slot: u8,
+    /// This seat's own slot (the frontier sample of the local side).
+    slot: u8,
+    /// Newest tick the authority took this seat's input for.
+    local_frontier: u32,
+    /// Newest tick the authority took the peer seat's input for.
+    peer_frontier: u32,
+    /// The 30-frame window of the two seats' confirmed frontiers.
+    window: AdvantageWindow,
+    /// The clock pacer the window drives.
+    pacer: ClockPacer,
     stats: SeatStats,
 }
 
@@ -629,6 +658,7 @@ impl Seat {
         arena: ArenaConfig,
         seat: u8,
         slot: u8,
+        peer_slot: u8,
         token: u64,
         rejoin_at: Option<u32>,
     ) -> Result<Self, BoutError> {
@@ -650,6 +680,12 @@ impl Seat {
             rejoin_at,
             delay: 0,
             ticks: arena.ticks,
+            slot,
+            peer_slot,
+            local_frontier: 0,
+            peer_frontier: 0,
+            window: AdvantageWindow::new(),
+            pacer: ClockPacer::new(),
             stats: SeatStats::new(),
         })
     }
@@ -693,12 +729,37 @@ impl Seat {
             self.burst_left = REJOIN_BURST_STEPS;
         }
         if step >= self.delay && self.client.tick_now() < self.ticks {
-            let tick = self.client.tick_now();
-            if let Some(input) = self
-                .predicted
-                .get(usize::try_from(tick).unwrap_or(usize::MAX))
-                .copied()
-            {
+            // The paced clock (MP26): the prediction rate is trimmed by the
+            // clock slew the 30-frame advantage window asks for, and the
+            // pacer holds the client's tip inside the band its input delay
+            // gave it. The send side is untouched, so the server tape and
+            // the golden never move.
+            let tip = self.client.tick_now();
+            let nominal = step.saturating_sub(self.delay);
+            let error = i32::try_from(tip.saturating_sub(nominal)).unwrap_or(i32::MAX);
+            let available = u32::try_from(
+                self.predicted
+                    .len()
+                    .saturating_sub(usize::try_from(tip).unwrap_or(usize::MAX)),
+            )
+            .unwrap_or(0);
+            let slew =
+                crate::delay::ClockSlew::for_advantage(self.window.average_frame_advantage());
+            let pace = self.pacer.pace_within(&slew, error, available);
+            for _ in 0..pace {
+                let tick = self.client.tick_now();
+                let Some(input) = self
+                    .predicted
+                    .get(usize::try_from(tick).unwrap_or(usize::MAX))
+                    .copied()
+                else {
+                    // The seat holds no authored input for the next tick, so
+                    // the frame is held rather than skipped: the tick stays
+                    // covered by the authority's AI-fill the same way a
+                    // lagging prediction does, and the stream never jumps
+                    // over a tick.
+                    break;
+                };
                 self.client.predict(input)?;
             }
         }
@@ -758,7 +819,16 @@ impl Seat {
                 .on_state(packet.checkpoint.tick, &packet.inputs, STATE_COVER);
         }
         for input in packet.inputs {
-            self.known.insert((input.tick, input.fighter.get()), input);
+            let fighter = input.fighter.get();
+            // The confirmed frontier of each seat (MP26): the newest tick
+            // the authority took that seat's input for. Both seats read the
+            // same broadcast, so the two windows are exact mirrors.
+            if fighter == self.slot {
+                self.local_frontier = self.local_frontier.max(input.tick);
+            } else if fighter == self.peer_slot {
+                self.peer_frontier = self.peer_frontier.max(input.tick);
+            }
+            self.known.insert((input.tick, fighter), input);
         }
         if !self.coverage.extend(packet.checkpoint.tick, is_stream) {
             self.gap = true;
@@ -773,6 +843,14 @@ impl Seat {
     /// Apply the newest checkpoint heard this step: name the mispredicts,
     /// record how far the client ran ahead of the earliest one, resimulate.
     fn apply(&mut self, step: u32) {
+        // The 30-frame advantage window (MP26): one sample per frame, taken
+        // from the two seats' confirmed frontiers. Both seats read the same
+        // broadcast, so the two windows are exact mirrors and their slews are
+        // equal and opposite.
+        self.window.advance(
+            i32::try_from(self.local_frontier).unwrap_or(i32::MAX),
+            i32::try_from(self.peer_frontier).unwrap_or(i32::MAX),
+        );
         let Some(checkpoint) = self.top.take() else {
             return;
         };
@@ -1230,7 +1308,15 @@ impl BoutPart {
             }
             let index = usize::from(seat);
             let rejoin = (cfg.drop.seat == seat).then_some(cfg.drop.back);
-            let mut opened_seat = Seat::new(arena, seat, slots[index], cfg.tokens[index], rejoin)?;
+            let peer_slot = if seat == 0 { slots[1] } else { slots[0] };
+            let mut opened_seat = Seat::new(
+                arena,
+                seat,
+                slots[index],
+                peer_slot,
+                cfg.tokens[index],
+                rejoin,
+            )?;
             opened_seat.delay = delay;
             opened_seat.stats.input_delay = delay;
             opened.push(opened_seat);
@@ -1290,16 +1376,30 @@ impl BoutPart {
     pub fn outcomes(&self) -> Vec<SeatOutcome> {
         self.seats
             .iter()
-            .map(|seat| SeatOutcome {
-                seat: seat.seat,
-                token: seat.token,
-                slot: seat.client.local().get(),
-                checkpoints: seat.client.checkpoints().to_vec(),
-                mispredict_ticks: seat.client.total_mispredicts(),
-                stats: SeatStats {
-                    delivery: seat.delivery.stats(),
-                    ..seat.stats
-                },
+            .map(|seat| {
+                let mut stats = seat.stats;
+                // The paced clock's evidence: the largest slew the pacer ran
+                // with and the frames it ran off the nominal rate. Logged,
+                // never hashed, like `input_delay`, so the digests stay put.
+                stats.max_slew_permille = seat.pacer.max_permille();
+                stats.slewed_frames = seat.pacer.slewed_frames();
+                // The frame-skip guard: the bout ticks the client's history
+                // does not cover. Zero, because the pacer holds a frame
+                // rather than skipping the tick it would have run.
+                stats.skipped_frames = seat
+                    .ticks
+                    .saturating_sub(u32::try_from(seat.client.checkpoints().len()).unwrap_or(0));
+                SeatOutcome {
+                    seat: seat.seat,
+                    token: seat.token,
+                    slot: seat.client.local().get(),
+                    checkpoints: seat.client.checkpoints().to_vec(),
+                    mispredict_ticks: seat.client.total_mispredicts(),
+                    stats: SeatStats {
+                        delivery: seat.delivery.stats(),
+                        ..stats
+                    },
+                }
             })
             .collect()
     }
@@ -1585,6 +1685,33 @@ mod tests {
     }
 
     #[test]
+    fn played_wan_bout_paces_the_client_clock_inside_the_cap() {
+        // MP26: the seat whose inputs reach the authority first runs ahead
+        // of its peer, so the 30-frame window trims its clock: the posted
+        // slew stays inside 5 percent, the paced clock holds frames instead
+        // of skipping them, and the bout still converges.
+        let cfg = short(7, LinkProfile::WAN);
+        let report = run_loopback(&cfg, LinkProfile::WAN, LinkProfile::WAN).expect("bout runs");
+        assert!(report.converged(), "{report}");
+        let mut slewed = 0u32;
+        for seat in &report.seats {
+            assert!(
+                seat.stats.max_slew_permille <= crate::delay::MAX_SLEW_PERMILLE,
+                "slot {} slewed past the cap: {}",
+                seat.slot,
+                seat.stats.max_slew_permille
+            );
+            assert_eq!(
+                seat.stats.skipped_frames, 0,
+                "slot {} skipped a frame",
+                seat.slot
+            );
+            slewed += seat.stats.slewed_frames;
+        }
+        assert!(slewed > 0, "the paced clock never trimmed a frame");
+    }
+
+    #[test]
     fn adaptive_steps_cover_delay_for_every_hold() {
         // MP24: the bout must run long enough for delayed predictions to
         // finish: steps cover ticks plus the adaptive delay, so a large
@@ -1739,7 +1866,8 @@ mod tests {
     fn played_seat_refuses_a_checkpoint_past_a_gap_and_asks_to_resync() {
         let cfg = short(5, LinkProfile::LAN);
         let slots = form_match(&cfg).expect("lobby");
-        let mut seat = Seat::new(cfg.arena(), 1, slots[1], TOKENS[1], None).expect("seat");
+        let mut seat =
+            Seat::new(cfg.arena(), 1, slots[1], slots[0], TOKENS[1], None).expect("seat");
         let clean = LinkProfile {
             latency: 1,
             jitter: 0,

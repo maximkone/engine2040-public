@@ -108,6 +108,8 @@ impl EventCode {
     pub const FPS_HIT: Self = Self(17);
     /// FPS view frame cost split in microseconds.
     pub const FPS_FRAME_SPLIT: Self = Self(18);
+    /// The door refused one call: the message names the tool and its code.
+    pub const DOOR_REFUSED: Self = Self(19);
 
     /// Raw stable value for serialization into tapes and bundles.
     #[must_use]
@@ -160,6 +162,7 @@ pub fn name(code: u32) -> Option<&'static str> {
         16 => "fps.pose",
         17 => "fps.hit",
         18 => "fps.frame.split",
+        19 => "door.refused",
         _ => return None,
     })
 }

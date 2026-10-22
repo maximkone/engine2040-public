@@ -272,6 +272,145 @@ pub fn bind_all_from(source: &dyn AssetSource) -> Result<Vec<FighterBinding>, Bi
     Ok(bindings)
 }
 
+/// The realistic body family (owner 2026-10-22): Microsoft Rocketbox avatars
+/// (MIT), cooked by `tools/blender/rocketbox_fighter.py` with their matching
+/// Biped bones renamed to the CT7 joint names (so the look's legs, throwing
+/// arm, cape and ragdoll find them) and their clips put on the body's own
+/// skeleton from Mixamo mocap. The family lives in its own tree
+/// (`content/fighters/rocketbox/`) with its own manifest, so the CT7 pins
+/// above never move for it.
+pub const ROCKETBOX_DIR: &str = "rocketbox";
+/// One clip file per role, in the look's slot order (idle, run, the three
+/// attack slots, death).
+pub const ROCKETBOX_CLIP_ROLES: [&str; 6] =
+    ["idle", "run", "attack1", "attack2", "attack3", "death"];
+/// Fewest joints a Rocketbox body may carry: the 45 CT7 joints are the floor
+/// (the Biped adds spine, neck and face bones on top).
+pub const ROCKETBOX_MIN_JOINTS: u32 = 45;
+
+/// Logical path of one Rocketbox clip inside the family tree
+/// (`glb/clips/rb_legionary_idle.glb`).
+#[must_use]
+pub fn rocketbox_clip_path(variant: &str, role: &str) -> String {
+    format!("glb/clips/{variant}_{role}.glb")
+}
+
+/// The Rocketbox variants the family manifest names, in its order. The
+/// manifest is the only list: a new avatar cooked into the tree
+/// (`tools/asset-gen/fighter.mjs`) is in the game with no code edit. A name
+/// outside the contract charset, a repeat or an empty list is refused.
+pub fn rocketbox_variants(json: &str) -> Result<Vec<String>, BindError> {
+    const KEY: &str = "\"name\": \"";
+    let mut names: Vec<String> = Vec::new();
+    let mut rest = json;
+    while let Some(at) = rest.find(KEY) {
+        rest = &rest[at + KEY.len()..];
+        let end = rest
+            .find('"')
+            .ok_or_else(|| BindError::BadManifest(cap_message("a variant name is not closed")))?;
+        let name = &rest[..end];
+        let charset = name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if name.is_empty() || !charset {
+            return Err(BindError::BadManifest(cap_message(&format!(
+                "variant name {name:?} is not lowercase, digits and _"
+            ))));
+        }
+        if names.iter().any(|seen| seen == name) {
+            return Err(BindError::BadManifest(cap_message(&format!(
+                "variant {name} is named twice"
+            ))));
+        }
+        names.push(name.to_string());
+        rest = &rest[end..];
+    }
+    if names.is_empty() {
+        return Err(BindError::BadManifest(cap_message(
+            "the family names no variant",
+        )));
+    }
+    Ok(names)
+}
+
+/// A Rocketbox variant's block: from its name to the next variant's name.
+fn family_block<'a>(json: &'a str, variant: &str) -> Result<&'a str, BindError> {
+    let marker = format!("\"name\": \"{variant}\"");
+    let start = json.find(marker.as_str()).ok_or_else(|| {
+        BindError::BadManifest(cap_message(&format!("variant {variant} not in manifest")))
+    })?;
+    let rest = &json[start..];
+    let end = rest[marker.len()..]
+        .find("\"name\":")
+        .map_or(rest.len(), |at| marker.len() + at);
+    Ok(&rest[..end])
+}
+
+/// Bind the Rocketbox bodies out of a source rooted at the family tree
+/// (`manifest.json` plus `glb/` beside it). Each variant names its body SHA
+/// (the look checks the bytes against it), a joint count no lower than the
+/// CT7 floor, exactly one clip per role and its triangles; the body and
+/// every clip must be in the source. Manifest order is preserved.
+pub fn bind_rocketbox_from(source: &dyn AssetSource) -> Result<Vec<FighterBinding>, BindError> {
+    let json = source
+        .read(MANIFEST_NAME)
+        .map_err(|err| source_error(MANIFEST_NAME, &err))?;
+    let json = String::from_utf8(json.into_owned())
+        .map_err(|_| BindError::BadManifest(format!("{MANIFEST_NAME} is not utf-8")))?;
+    let variants = rocketbox_variants(&json)?;
+    let mut bindings = Vec::with_capacity(variants.len());
+    for variant in &variants {
+        let variant = variant.as_str();
+        let block = family_block(&json, variant)?;
+        let body_sha = extract_hex64(block, variant, "body_glb_sha256")?;
+        let joints = extract_count(block, variant, "joints")?;
+        if joints < ROCKETBOX_MIN_JOINTS {
+            return Err(BindError::BadManifest(cap_message(&format!(
+                "{variant} joints {joints} < {ROCKETBOX_MIN_JOINTS}"
+            ))));
+        }
+        let clips = extract_count(block, variant, "clips")?;
+        if usize::try_from(clips).ok() != Some(ROCKETBOX_CLIP_ROLES.len()) {
+            return Err(BindError::BadManifest(cap_message(&format!(
+                "{variant} clips {clips} != {}",
+                ROCKETBOX_CLIP_ROLES.len()
+            ))));
+        }
+        let tris = extract_count(block, variant, "tris_lod0")?;
+        if tris == 0 {
+            return Err(BindError::BadManifest(cap_message(&format!(
+                "{variant} has no triangles"
+            ))));
+        }
+        let logical = body_logical_path(variant);
+        let name = body_file_name(variant);
+        let bytes = source.read(&logical).map_err(|err| match err {
+            SourceError::Missing { .. } => BindError::MissingBody(name.clone()),
+            other => source_error(&logical, &other),
+        })?;
+        if bytes.is_empty() {
+            return Err(BindError::MissingBody(name));
+        }
+        for role in ROCKETBOX_CLIP_ROLES {
+            let path = rocketbox_clip_path(variant, role);
+            source.read(&path).map_err(|err| match err {
+                SourceError::Missing { .. } => BindError::MissingBody(path.clone()),
+                other => source_error(&path, &other),
+            })?;
+        }
+        bindings.push(FighterBinding {
+            variant: variant.to_string(),
+            bundle_sha256: body_sha.clone(),
+            body_glb_sha256: body_sha,
+            body_glb: logical,
+            joints,
+            tris_lod0: tris,
+            clips,
+        });
+    }
+    Ok(bindings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +574,83 @@ mod tests {
         let from_seam = content_digest(&memory, "").expect("the seam digests");
         assert_eq!(from_files, from_seam, "the same files give the same digest");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod rocketbox_tests {
+    use super::*;
+    use engine_assets::asset_source::MemorySource;
+
+    const SHA: &str = "4bdc600a7acb1fa057f33e5c680bff9f74d047f5d2de22df6a8addc1e94bbbd5";
+
+    fn manifest(joints: u32, clips: u32) -> String {
+        format!(
+            "{{\"family\": \"rocketbox\", \"variants\": [{{\"name\": \"rb_legionary\", \"body_glb_sha256\": \"{SHA}\", \"joints\": {joints}, \"clips\": {clips}, \"tris_lod0\": 15387}}]}}"
+        )
+    }
+
+    fn source(manifest_text: &str, with_clips: bool) -> MemorySource {
+        let mut memory = MemorySource::new();
+        memory
+            .insert(MANIFEST_NAME, manifest_text.as_bytes().to_vec())
+            .expect("the manifest is a logical path");
+        memory
+            .insert(&body_logical_path("rb_legionary"), b"glb".to_vec())
+            .expect("the body is a logical path");
+        if with_clips {
+            for role in ROCKETBOX_CLIP_ROLES {
+                memory
+                    .insert(&rocketbox_clip_path("rb_legionary", role), b"clip".to_vec())
+                    .expect("the clip is a logical path");
+            }
+        }
+        memory
+    }
+
+    #[test]
+    fn a_rocketbox_body_binds_with_its_own_clips() {
+        let bindings = bind_rocketbox_from(&source(&manifest(85, 6), true)).expect("binds");
+        assert_eq!(bindings.len(), 1);
+        let body = &bindings[0];
+        assert_eq!(body.variant, "rb_legionary");
+        assert_eq!(body.body_glb, "glb/rb_legionary_body.glb");
+        assert_eq!(body.joints, 85);
+        assert_eq!(body.body_glb_sha256, SHA);
+        assert_eq!(
+            rocketbox_clip_path("rb_legionary", "attack1"),
+            "glb/clips/rb_legionary_attack1.glb"
+        );
+    }
+
+    /// The manifest is the variant list: every name in order, and a bad
+    /// list refused by what is wrong with it.
+    #[test]
+    fn the_manifest_names_the_rocketbox_variants() {
+        let two = "{\"variants\": [{\"name\": \"rb_legionary\"}, {\"name\": \"rb_centurion\"}]}";
+        assert_eq!(
+            rocketbox_variants(two).expect("two names"),
+            vec!["rb_legionary".to_string(), "rb_centurion".to_string()]
+        );
+        let none = rocketbox_variants("{\"variants\": []}").expect_err("no variant");
+        assert!(none.to_string().contains("no variant"), "{none}");
+        let twice = "{\"variants\": [{\"name\": \"rb_a\"}, {\"name\": \"rb_a\"}]}";
+        let twice = rocketbox_variants(twice).expect_err("a repeat");
+        assert!(twice.to_string().contains("twice"), "{twice}");
+        let caps = rocketbox_variants("{\"name\": \"RB Legionary\"}").expect_err("charset");
+        assert!(caps.to_string().contains("RB Legionary"), "{caps}");
+    }
+
+    #[test]
+    fn a_rocketbox_body_refuses_short_rigs_wrong_clip_counts_and_missing_clips() {
+        let short = bind_rocketbox_from(&source(&manifest(44, 6), true)).expect_err("short rig");
+        assert!(short.to_string().contains("joints 44"), "{short}");
+        let clips = bind_rocketbox_from(&source(&manifest(85, 5), true)).expect_err("5 clips");
+        assert!(clips.to_string().contains("clips 5"), "{clips}");
+        let missing = bind_rocketbox_from(&source(&manifest(85, 6), false)).expect_err("no clips");
+        assert!(
+            missing.to_string().contains("rb_legionary_idle.glb"),
+            "{missing}"
+        );
     }
 }

@@ -189,6 +189,9 @@ pub fn part_members(members: &mut [Member<'_>]) -> ClinchStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ragdoll::BoneShape;
+    use engine_anim::contract::{Joint, LocalPose, Skeleton};
+    use engine_core::laws;
 
     fn capsule(a: [f32; 3], b: [f32; 3], radius: f32) -> BoneCapsule {
         BoneCapsule {
@@ -235,5 +238,99 @@ mod tests {
         assert!(depth > 0.29 && n.iter().all(|c| c.is_finite()));
         // The same capsule twice parts along +X.
         assert_eq!(overlap(&a, &a).1, [1.0, 0.0, 0.0]);
+    }
+
+    /// Four-bone vertical chain at `x`, the ragdoll tests' rig shifted sideways.
+    fn chain_at(x: f32) -> Ragdoll {
+        let skeleton = Skeleton {
+            joints: (0..4)
+                .map(|i: usize| Joint {
+                    name: format!("bone{i}"),
+                    parent: i.checked_sub(1),
+                })
+                .collect(),
+        };
+        let pose = LocalPose {
+            positions: vec![
+                [x, 3.0, 0.0],
+                [0.0, 0.5, 0.0],
+                [0.0, 0.5, 0.0],
+                [0.0, 0.5, 0.0],
+            ],
+            rotations: vec![[0.0, 0.0, 0.0, 1.0]; 4],
+        };
+        let shapes: Vec<BoneShape> = (0..4)
+            .map(|_| BoneShape {
+                radius: 0.15,
+                half_height: 0.2,
+            })
+            .collect();
+        Ragdoll::spawn(&skeleton, &pose, &shapes).expect("spawn chain")
+    }
+
+    /// The two clinching fighters, as one state the laws can step and print.
+    struct Pair(Ragdoll, Ragdoll);
+
+    impl std::fmt::Debug for Pair {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("clinch pair")
+        }
+    }
+
+    /// Momentum along x of every bone, `v / inv_mass` per bone (`m v`).
+    fn momentum_x(r: &Ragdoll) -> f64 {
+        (0..r.bone_count())
+            .map(|i| {
+                let v = r.bone_linvel(i).map_or(0.0, |v| f64::from(v[0]));
+                r.bone_capsule(i).map_or(0.0, |c| v / f64::from(c.inv_mass))
+            })
+            .sum()
+    }
+
+    fn pair_momentum(p: &Pair) -> f64 {
+        momentum_x(&p.0) + momentum_x(&p.1)
+    }
+
+    /// Total bone speed of the pair: zero exactly while both fighters rest.
+    fn pair_speed(p: &Pair) -> f64 {
+        [&p.0, &p.1]
+            .iter()
+            .flat_map(|r| (0..r.bone_count()).map(move |i| r.bone_linvel(i)))
+            .flatten()
+            .map(|v| f64::from(v[0].abs() + v[1].abs() + v[2].abs()))
+            .sum()
+    }
+
+    fn clinch(p: &mut Pair) {
+        let mut members = [
+            Member {
+                id: 0,
+                ragdoll: &mut p.0,
+            },
+            Member {
+                id: 1,
+                ragdoll: &mut p.1,
+            },
+        ];
+        part_members(&mut members);
+    }
+
+    /// FEEL10: a clinch push is an equal and opposite exchange, so the pair's
+    /// momentum holds every tick; a pair standing still gets no velocity from the
+    /// clinch, even when it overlaps and has to part.
+    #[test]
+    fn a_clinch_push_conserves_momentum_and_a_resting_pair_stays_put() {
+        let mut moving = Pair(chain_at(0.0), chain_at(0.25));
+        moving
+            .0
+            .part_bone(0, [0.0; 3], [1.0, 0.0, 0.0])
+            .expect("kick the root");
+        laws::conserved(moving, 60, clinch, pair_momentum, 1.0e-3).unwrap();
+
+        let mut resting = Pair(chain_at(0.0), chain_at(0.25));
+        for _ in 0..60 {
+            clinch(&mut resting);
+        }
+        assert_eq!(pair_speed(&resting), 0.0);
     }
 }

@@ -8,6 +8,7 @@ disallowed-types = [
     { path = "std::collections::HashSet", reason = "iteration order is seeded per process: use BTreeSet or a sorted Vec" },
     { path = "std::time::Instant", reason = "wall clock never enters the tick: use engine_core::Tick" },
     { path = "std::time::SystemTime", reason = "wall clock never enters the tick: use engine_core::Tick" },
+    { path = "engine_core::soft_float::SoftFloat", reason = "the soft float belongs to the float physfx layer, never to the hashed authority: use engine_core::fixed::Fixed" },
 ]
 disallowed-methods = [
     { path = "f32::sin", reason = "libm rounding differs across platforms: use engine_core::fixed or integer math" },

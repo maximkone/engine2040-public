@@ -9,8 +9,11 @@ use engine_perf::baselines::{arena_baseline, baseline};
 use engine_perf::budget::check_report;
 use engine_perf::profiler::{
     self, GpuPass, GpuSample, MarkSeries, PlotSeries, ProfileError, Quantiles, Sample,
-    CAPTURE_FRAMES_MAX, MARK_EVERY, MARK_FRAME, MARK_TICK, SPAN_AI_DECIDE, SYSTEM_SPANS,
-    TICK_FRAME_TICKS,
+    CAPTURE_FRAMES_MAX, MARK_EVERY, MARK_FRAME, MARK_TICK, SPAN_AI_DECIDE, SPAN_ARENA_TICK,
+    SPAN_DESTRUCTION_STEP, SPAN_PHYSICS_STEP, SYSTEM_SPANS, TICK_FRAME_TICKS,
+};
+use engine_perf::trace_file::{
+    capture_trace, CAT_COUNTER, CAT_FRAME, CAT_GPU, CAT_TICK, COUNTER_FRAME_MS, SPAN_FRAME,
 };
 use engine_perf::workloads::{AiDecide, ArenaTick, DestructionStep, PhysicsStep};
 use std::sync::Mutex;
@@ -238,6 +241,63 @@ fn engine_hash_unperturbed_x2_with_profiler_off() {
     );
     let report = ArenaTick::canonical().run_report();
     check_report(&report, &arena_baseline()).expect("off-gate run passes its gate");
+}
+
+#[test]
+fn trace_capture_carries_the_tick_gpu_and_frame_rows() {
+    // The capture moves the process-wide switch, so it lives in this binary
+    // under the same mutex as the other flag tests.
+    let _guard = lock();
+    let file = capture_trace(1).expect("one frame captures");
+    let rows = file.rows();
+    assert_eq!(rows.len(), 12, "one frame is twelve rows: {rows:?}");
+    assert_eq!(rows[0].name(), SPAN_FRAME);
+    assert_eq!(rows[0].cat(), CAT_FRAME);
+    // The four tick spans carry the simulation workload names.
+    let tick_names: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.cat() == CAT_TICK)
+        .map(|row| row.name())
+        .collect();
+    assert_eq!(
+        tick_names,
+        vec![
+            SPAN_ARENA_TICK,
+            SPAN_PHYSICS_STEP,
+            SPAN_AI_DECIDE,
+            SPAN_DESTRUCTION_STEP,
+        ]
+    );
+    // The six GPU spans carry the pass names.
+    let gpu_names: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.cat() == CAT_GPU)
+        .map(|row| row.name())
+        .collect();
+    assert_eq!(gpu_names.len(), 6, "{gpu_names:?}");
+    assert!(gpu_names.contains(&"ra1.forward"), "{gpu_names:?}");
+    assert!(gpu_names.contains(&"rp1.post"), "{gpu_names:?}");
+    // The counter closes the frame.
+    let counter = rows.last().expect("the frame carries a counter");
+    assert_eq!(counter.cat(), CAT_COUNTER);
+    assert_eq!(counter.name(), COUNTER_FRAME_MS);
+    // Every row sits inside its frame.
+    let frame_end = rows[0].ts_us() + rows[0].dur_us();
+    for row in rows {
+        assert!(row.ts_us() <= frame_end, "row outside the frame: {row:?}");
+    }
+}
+
+#[test]
+fn trace_capture_does_not_move_the_simulation_hash() {
+    // The capture times the engine's own workloads; the canonical hash is
+    // the same before and after, so the trace never enters the sim hash.
+    let _guard = lock();
+    let before = ArenaTick::canonical().run_hash();
+    let file = capture_trace(1).expect("one frame captures");
+    let after = ArenaTick::canonical().run_hash();
+    assert_eq!(before, after, "the trace capture moved the simulation hash");
+    assert!(!file.is_empty(), "the capture wrote rows");
 }
 
 #[test]

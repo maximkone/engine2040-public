@@ -70,9 +70,11 @@ EXPECTED_NDIM = {
 MISS_HELP = """\
 prompt not in the encoder cache: {prompt!r}
 The text encoder never runs on this PC, so a new prompt needs a one-time encode:
-  1. Add the prompt as a new line in PROMPTS in tools/motion/kaggle_encode.py
-     (keep the existing lines; the cache is rebuilt from the whole list).
-  2. Run that file on a Kaggle GPU notebook (T4). Its header says how.
+  1. Add a line "id<TAB>prompt" to content/motion/combat_prompts.txt
+     (keep the existing lines; the cache is rebuilt from the whole library).
+     node tools/motion/clip.mjs --list-library shows which ids are missing.
+  2. Run tools/motion/kaggle_encode.py --library on a Kaggle GPU notebook (T4),
+     with the library as the kimodo-combat-prompts dataset. Its header says how.
   3. Copy the kernel's emb.npz and emb.provenance.json to {cache_dir}
      (the cache file is {cache}).
 Then run this command again.

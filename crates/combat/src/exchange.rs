@@ -14,6 +14,9 @@ use engine_input::MAX_PARTICIPANTS;
 
 /// Version tag of the shipped exchange rows.
 pub const EXCHANGE_VERSION_V1: u32 = 1;
+/// Version tag of the rules-v2 exchange rows: a clash throws both blades back
+/// for [`CLASH_RECOIL_TICKS`]. Rows v1 never move; v1 carries no recoil.
+pub const EXCHANGE_VERSION_V2: u32 = 2;
 /// First parry-open tick after a block press (inclusive).
 pub const PARRY_START_TICK: u32 = 0;
 /// Parry-open ticks from start (inclusive end: open while age <= start+active).
@@ -26,6 +29,10 @@ pub const RIPOSTE_DAMAGE_PERMILLE: u16 = 140;
 pub const RIPOSTE_STAGGER_TICKS: u32 = 8;
 /// Ticks both fighters stay bound after a clash.
 pub const CLASH_BIND_TICKS: u32 = 6;
+/// Rules v2: ticks both blades stay thrown back after a clash. Equal to the
+/// bind so the held recoil spans exactly the bind window (6 ticks, 100 ms at
+/// 60 Hz): a bound blade shows the throw for as long as it cannot swing.
+pub const CLASH_RECOIL_TICKS: u32 = CLASH_BIND_TICKS;
 /// Poise lost by the parried attacker.
 pub const PARRY_POISE_DAMAGE: u16 = 250;
 /// Poise lost by the clash loser.
@@ -54,6 +61,8 @@ pub struct ExchangeTables {
     pub riposte_stagger_ticks: u32,
     /// Ticks both fighters stay bound after a clash.
     pub clash_bind_ticks: u32,
+    /// Ticks both fighters stay thrown back after a clash (0 under v1).
+    pub clash_recoil_ticks: u32,
     /// Poise lost by the parried attacker.
     pub parry_poise_damage: u16,
     /// Poise lost by the clash loser.
@@ -63,7 +72,7 @@ pub struct ExchangeTables {
 }
 
 impl ExchangeTables {
-    /// The shipped exchange rows.
+    /// The shipped exchange rows (rules v1: a clash binds, no recoil).
     pub const fn v1() -> Self {
         Self {
             parry_start_tick: PARRY_START_TICK,
@@ -72,9 +81,18 @@ impl ExchangeTables {
             riposte_damage_permille: RIPOSTE_DAMAGE_PERMILLE,
             riposte_stagger_ticks: RIPOSTE_STAGGER_TICKS,
             clash_bind_ticks: CLASH_BIND_TICKS,
+            clash_recoil_ticks: 0,
             parry_poise_damage: PARRY_POISE_DAMAGE,
             clash_poise_damage: CLASH_POISE_DAMAGE,
             poise_max: POISE_MAX,
+        }
+    }
+
+    /// Rules v2: the v1 rows plus the clash recoil row.
+    pub const fn v2() -> Self {
+        Self {
+            clash_recoil_ticks: CLASH_RECOIL_TICKS,
+            ..Self::v1()
         }
     }
 
@@ -87,6 +105,8 @@ impl ExchangeTables {
 
 /// The shipped exchange rows as one versioned row.
 pub const EXCHANGE_V1: ExchangeTables = ExchangeTables::v1();
+/// The rules-v2 exchange rows: the clash throws both blades back.
+pub const EXCHANGE_V2: ExchangeTables = ExchangeTables::v2();
 
 /// Versioned exchange rows, mirroring the [`MoveTableSet`](crate::tables::MoveTableSet)
 /// discipline (a copy of its shape): nonzero version, validated rows.
@@ -104,6 +124,14 @@ impl ExchangeTableSet {
         Self {
             version: EXCHANGE_VERSION_V1,
             tables: EXCHANGE_V1,
+        }
+    }
+
+    /// The rules-v2 rows (clash recoil) as version 2.
+    pub const fn v2() -> Self {
+        Self {
+            version: EXCHANGE_VERSION_V2,
+            tables: EXCHANGE_V2,
         }
     }
 
@@ -142,8 +170,8 @@ pub enum ExchangeError {
 ///
 /// Rules: version nonzero; parry start `0..=60`, active `0..=60`, end
 /// `<=60`; riposte window `1..=60`; riposte damage `1..=1000`; stagger
-/// `0..=120`; bind `1..=60`; poise costs `0..=1000`; poise max `1..=1000`
-/// with both costs inside it.
+/// `0..=120`; bind `1..=60`; recoil `0..=60`; poise costs `0..=1000`; poise
+/// max `1..=1000` with both costs inside it.
 pub fn validate_exchange(set: &ExchangeTableSet) -> Result<(), ExchangeError> {
     if set.version == 0 {
         return Err(ExchangeError::BadVersion(0));
@@ -166,6 +194,7 @@ pub fn validate_exchange(set: &ExchangeTableSet) -> Result<(), ExchangeError> {
     )?;
     range("riposte_stagger_ticks", t.riposte_stagger_ticks, 0, 120)?;
     range("clash_bind_ticks", t.clash_bind_ticks, 1, 60)?;
+    range("clash_recoil_ticks", t.clash_recoil_ticks, 0, 60)?;
     range(
         "parry_poise_damage",
         u32::from(t.parry_poise_damage),
@@ -356,6 +385,8 @@ pub struct ExchangeFighter {
     pub poise: u16,
     /// Remaining bound ticks; zero means free.
     pub bind: u32,
+    /// Remaining clash recoil ticks (rules v2: blade thrown back); zero means none.
+    pub recoil: u32,
     /// Tick of the last parry performed; `u32::MAX` means none yet.
     pub last_parry_tick: u32,
 }
@@ -367,6 +398,7 @@ impl ExchangeFighter {
             id,
             poise: tables.poise_max,
             bind: 0,
+            recoil: 0,
             last_parry_tick: u32::MAX,
         }
     }
@@ -432,12 +464,23 @@ impl ExchangeState {
         self.fighters[id as usize].bind > 0
     }
 
-    /// Advance one exchange tick: decay binds, run the clock. Saturating.
+    /// True while the slot's blade is thrown back by a clash (rules v2).
+    pub const fn is_recoiling(self, id: u8) -> bool {
+        if id >= self.count {
+            return false;
+        }
+        self.fighters[id as usize].recoil > 0
+    }
+
+    /// Advance one exchange tick: decay binds and recoils, run the clock. Saturating.
     pub fn advance(&mut self) {
         let mut i: usize = 0;
         while i < usize::from(self.count) {
             if self.fighters[i].bind > 0 {
                 self.fighters[i].bind -= 1;
+            }
+            if self.fighters[i].recoil > 0 {
+                self.fighters[i].recoil -= 1;
             }
             i += 1;
         }
@@ -580,6 +623,10 @@ fn resolve_clashes(
             );
             state.fighters[a].bind = tables.clash_bind_ticks;
             state.fighters[b].bind = tables.clash_bind_ticks;
+            // Both blades are thrown back for the same ticks (rules v2; the
+            // v1 row carries zero, so v1 writes nothing new).
+            state.fighters[a].recoil = tables.clash_recoil_ticks;
+            state.fighters[b].recoil = tables.clash_recoil_ticks;
             let loser = usize::from(decided.loser);
             state.fighters[loser].poise = state.fighters[loser]
                 .poise
@@ -1360,6 +1407,10 @@ mod tests {
         assert_eq!((t.parry_poise_damage, t.clash_poise_damage), (250, 200));
         assert_eq!(t.poise_max, 1000);
         assert_eq!(ExchangeTableSet::v1().version, 1);
+        // Rules v1 has no clash recoil; rules v2 carries the recoil row.
+        assert_eq!(t.clash_recoil_ticks, 0);
+        assert_eq!(EXCHANGE_V2.clash_recoil_ticks, CLASH_RECOIL_TICKS);
+        assert_eq!(ExchangeTableSet::v2().version, EXCHANGE_VERSION_V2);
     }
 
     #[test]
@@ -1578,6 +1629,56 @@ mod tests {
         let mut out2 = out;
         let n2 = resolve_tick(&mut state, &idle_in, &t, &mut out2);
         assert_eq!(n2, 0);
+    }
+
+    #[test]
+    fn clash_recoil_throws_both_blades_the_same_ticks_once() {
+        // Rules v2: one clash, both blades thrown back for the same ticks,
+        // exactly one Clash event (the cue fires once).
+        let t = EXCHANGE_V2;
+        assert!(validate_exchange(&ExchangeTableSet::v2()).is_ok());
+        let mut state = ExchangeState::new(2, &t).unwrap();
+        let mut out = [ExchangeEvent::Parried {
+            attacker: 0,
+            victim: 0,
+        }; MAX_EVENTS_PER_TICK];
+        let mut clashes = 0;
+        let mut recoil_ticks = Vec::new();
+        for tick in 0..12u32 {
+            let mut intents = idle();
+            if tick == 0 {
+                intents[0] = ExchangeIntent::Attack { timing: 1 };
+                intents[1] = ExchangeIntent::Attack { timing: 1 };
+            }
+            let n = resolve_tick(&mut state, &intents, &t, &mut out);
+            clashes += out[..n]
+                .iter()
+                .filter(|e| matches!(e, ExchangeEvent::Clash { .. }))
+                .count();
+            let (first, second) = (state.is_recoiling(0), state.is_recoiling(1));
+            assert_eq!(first, second, "both blades thrown back on tick {tick}");
+            if first {
+                recoil_ticks.push(tick);
+            }
+            state.advance();
+        }
+        assert_eq!(clashes, 1, "one clash, one cue");
+        assert_eq!(
+            recoil_ticks,
+            (0..CLASH_RECOIL_TICKS).collect::<Vec<u32>>(),
+            "recoil holds for the recoil row, from the clash tick"
+        );
+        // Rules v1 binds the same clash but throws nothing back.
+        let mut v1 = ExchangeState::new(2, &EXCHANGE_V1).unwrap();
+        let mut intents = idle();
+        intents[0] = ExchangeIntent::Attack { timing: 1 };
+        intents[1] = ExchangeIntent::Attack { timing: 1 };
+        resolve_tick(&mut v1, &intents, &EXCHANGE_V1, &mut out);
+        assert!(
+            !v1.is_recoiling(0) && !v1.is_recoiling(1),
+            "v1 has no recoil"
+        );
+        assert!(v1.is_bound(0) && v1.is_bound(1), "v1 still binds");
     }
 
     #[test]

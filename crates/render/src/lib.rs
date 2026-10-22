@@ -439,7 +439,10 @@ pub mod trail;
 
 /// Sword ribbon GPU draw (RL53 slice 2): the staged uniform and strip buffer
 /// the window presenter binds. Window build only; the CPU ring stays std-only.
+/// Lives under `present/` with the crate's other window device code (the
+/// GPU boundary gate reads the path, not the module name).
 #[cfg(feature = "window")]
+#[path = "present/trail_draw_gpu.rs"]
 pub mod trail_draw_gpu;
 
 /// CPU naga gate over the shipped WGSL (CQ23): every file under `src/shaders`

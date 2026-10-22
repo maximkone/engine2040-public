@@ -360,7 +360,7 @@ mod tests {
         assert!(sky.contains("sky_on"), "{sky}");
         assert!(sky.contains("sky_view_sample"), "{sky}");
         assert!(sky.contains("fog_factor_infinite"), "{sky}");
-        assert!(!sky.contains("aces_fitted"), "{sky}");
+        assert!(!sky.contains("aces_tonemap"), "{sky}");
         assert!(!sky.contains("linear_to_srgb"), "{sky}");
     }
 }

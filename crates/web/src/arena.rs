@@ -473,15 +473,39 @@ impl ArenaLoop {
     }
 }
 
-/// Paint the played match's HUD: two health bars, the round pips, the round number and the
-/// K.O./WINNER banner. The caller only reaches here when the snapshot changed, so a quiet tick
-/// costs one comparison and no DOM work.
+/// Paint the played match's HUD: two health bars, two stamina bars, the poise pips, the round
+/// pips, the round number, the one-word call and the K.O./WINNER banner. The caller only reaches
+/// here when the snapshot changed, so a quiet tick costs one comparison and no DOM work.
 fn paint_hud(hud: crate::fight::MatchHud) {
     let percent = |hp: u16| u32::from(hp.min(1000)) / 10;
     set_style("duel-you-bar", &format!("width:{}%", percent(hud.hp[0])));
     set_style("duel-rival-bar", &format!("width:{}%", percent(hud.hp[1])));
+    // WEB16: the stamina bar and the poise pips read the sim's own numbers, so the page shows the
+    // v2 exchange's other two gauges, not only health.
+    set_style(
+        "duel-you-stam",
+        &format!("width:{}%", hud.stamina_percent(0)),
+    );
+    set_style(
+        "duel-rival-stam",
+        &format!("width:{}%", hud.stamina_percent(1)),
+    );
     set_text("duel-you-pips", &hud.pips(0));
     set_text("duel-rival-pips", &hud.pips(1));
+    set_text("duel-you-poise", &hud.poise_pips(0));
+    set_text("duel-rival-poise", &hud.poise_pips(1));
+    set_body_attr(
+        "data-poise",
+        if hud.poise_broken(0) && hud.poise_broken(1) {
+            "both"
+        } else if hud.poise_broken(0) {
+            "you"
+        } else if hud.poise_broken(1) {
+            "rival"
+        } else {
+            "full"
+        },
+    );
     set_text(
         "duel-round",
         &if hud.winner.is_some() {
@@ -490,6 +514,8 @@ fn paint_hud(hud: crate::fight::MatchHud) {
             format!("round {}", hud.round_number())
         },
     );
+    set_text("duel-call", hud.call.unwrap_or(""));
+    set_body_attr("data-call", hud.call.unwrap_or(""));
     let (banner, state) = match hud.banner {
         Some(banner) => (
             banner.text(),

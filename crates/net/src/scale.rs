@@ -55,6 +55,15 @@ pub const fn adaptive_input_delay_for_hold(hold: u32) -> u32 {
     worst.saturating_add(hold).saturating_sub(RESIM_CAP_TICKS)
 }
 
+/// Posted MP6 pacing measurement the MP26 accept bar reads (seed 2040
+/// `net-bout mp6`, `target/mp6/distributions.json`): at the 2-tick default
+/// delay over 1000 ticks of the clean one-tick link, the client never
+/// mispredicted, so the rollbacks taken per 1000 ticks stayed under the bar
+/// and the deepest sat inside the resim window. The same link with the
+/// delay off mispredicts on every frame, so the posted rate has teeth.
+/// Logged, never hashed.
+pub const MP6_POSTED_ROLLBACKS_PER_1000: u32 = 0;
+
 /// Posted MP6 live distributions sizing the resim window and the input
 /// delay (seed 2040 `net-bout mp6`, `target/mp6/distributions.json`):
 /// LAN live rollback max 6, WAN live rollback max 8, WAN one-way delay

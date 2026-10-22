@@ -1,4 +1,4 @@
-//! delay: input-delay helpers driven by frame advantage.
+//! delay: input-delay helpers and the clock slew driven by frame advantage.
 //!
 //! Owner: `engine-net`; consumers: `snapshot.rs`, which pins its hold-back
 //! through [`clamp_delay`] and [`DEFAULT_DELAY`], and `played.rs`, which
@@ -91,6 +91,13 @@ pub const SLEW_PER_ADVANTAGE_PERMILLE: i32 = 10;
 /// all (the lightyear `sync.rs` error margin): the clock holds its rate
 /// instead of chasing noise.
 pub const SLEW_DEAD_ZONE_TICKS: i32 = 1;
+
+/// How far the client's tip may sit from its own schedule, in ticks.
+///
+/// The pacer holds the tip inside this band, so a trim never drifts the
+/// client's input age and never runs the tip ahead of the schedule it was
+/// given by the input delay.
+pub const SCHEDULE_BAND: i32 = 1;
 
 /// The 30-frame advantage window: the confirmed frame of each peer, sampled
 /// once per frame, averaged over the window.
@@ -220,7 +227,7 @@ impl ClockSlew {
 
     /// The largest slew magnitude this controller can ask for, in permille.
     #[must_use]
-    pub const fn cap_permille(&self) -> i32 {
+    pub fn cap_permille(&self) -> i32 {
         MAX_SLEW_PERMILLE
     }
 }
@@ -251,21 +258,56 @@ impl ClockPacer {
         }
     }
 
-    /// The ticks this frame should run: 0, 1 or 2.
-    ///
-    /// The accumulator keeps the fraction of a tick, so the long-run rate is
-    /// exactly `1 + permille / 1000` ticks per frame. The caller runs the
-    /// ticks in order; the pacer never skips one.
-    pub fn pace(&mut self, slew: &ClockSlew) -> u32 {
+    /// The accumulator step and the slew it asks for: 0, 1 or 2 ticks. The
+    /// accumulator keeps the fraction of a tick, so the long-run rate is
+    /// exactly `1 + permille / 1000` ticks per frame.
+    fn step(&mut self, slew: &ClockSlew) -> u32 {
         let total = self.accumulator + 1000 + slew.permille();
         let ticks = total.div_euclid(1000);
         self.accumulator = total.rem_euclid(1000);
         let magnitude = slew.permille().saturating_abs();
         self.max_permille = self.max_permille.max(magnitude);
+        u32::try_from(ticks).unwrap_or(0)
+    }
+
+    /// Count a frame that ran off the nominal one-tick rate.
+    fn note(&mut self, ticks: u32) {
         if ticks != 1 {
             self.slewed = self.slewed.saturating_add(1);
         }
-        u32::try_from(ticks).unwrap_or(0)
+    }
+
+    /// The ticks this frame should run: 0, 1 or 2. The caller runs the ticks
+    /// in order; the pacer never skips one.
+    pub fn pace(&mut self, slew: &ClockSlew) -> u32 {
+        let ticks = self.step(slew);
+        self.note(ticks);
+        ticks
+    }
+
+    /// [`Self::pace`] bounded by the seat's schedule.
+    ///
+    /// `error` is the client's signed distance from its schedule: positive
+    /// means the tip runs ahead of it, negative means it fell behind. The
+    /// pacer holds the frame back when the tip runs more than
+    /// [`SCHEDULE_BAND`] ticks ahead, runs a lag up when the tip fell more
+    /// than [`SCHEDULE_BAND`] ticks behind, and otherwise runs the trim's
+    /// rate. `available` is the authored inputs the seat still holds: the
+    /// pacer never runs a tick the seat has no input for, so the predicted
+    /// stream never skips one.
+    pub fn pace_within(&mut self, slew: &ClockSlew, error: i32, available: u32) -> u32 {
+        let base = self.step(slew);
+        let want = if error < -SCHEDULE_BAND {
+            2
+        } else if error > SCHEDULE_BAND {
+            0
+        } else {
+            base
+        };
+        let cap = available.min(2);
+        let ticks = want.min(cap);
+        self.note(ticks);
+        ticks
     }
 
     /// The largest slew magnitude the pacer ran with, in permille.
@@ -276,20 +318,200 @@ impl ClockPacer {
 
     /// The frames that ran off the nominal one-tick rate.
     #[must_use]
-    pub const fn slewed_frames(&self) -> u32 {
+    pub fn slewed_frames(&self) -> u32 {
         self.slewed
     }
 }
 
-/// Fault profile of the input-delay sweep: the WAN base latency (4 ticks,
-/// 67 ms) with 30 ms jitter (2 ticks), no reordering, at `loss_pct` loss.
-#[cfg(test)]
-fn sweep_profile(loss_pct: u32) -> super::link::LinkProfile {
+/// The measurement profile: one tick each way, no jitter and no loss. The
+/// 2-tick default delay covers that transit, so the client never predicts a
+/// wrong frame; the same profile at delay 0 is the contrast that shows the
+/// delay is what hides the lag.
+fn clean_profile() -> super::link::LinkProfile {
     super::link::LinkProfile {
-        latency: 4,
-        jitter: 2,
-        loss_pct,
+        latency: 1,
+        jitter: 0,
+        loss_pct: 0,
         reorder_pct: 0,
+    }
+}
+
+/// The measurement probe: one endpoint predicts against a peer whose inputs
+/// cross a seeded link.
+///
+/// The probe is the delay sweep's seeded loopback, reimplemented here as
+/// production code so the posted rate never depends on a test module. The
+/// peer repeats its last input in every datagram, so a frame that is lost
+/// still lets the tip be checked against the truth.
+#[derive(Clone, Default)]
+struct ProbeSim {
+    acc: u64,
+}
+
+impl super::rollback::SimTick for ProbeSim {
+    fn advance(&mut self, inputs: [u32; super::rollback::PLAYERS]) {
+        let mix = (u64::from(inputs[0]) << 8) | u64::from(inputs[1]);
+        self.acc = engine_core::mix64(self.acc ^ mix);
+    }
+
+    fn state_hash(&self) -> u64 {
+        self.acc
+    }
+}
+
+/// The probe's peer input: a held button, human-shaped.
+fn probe_script(salt: u64, frame: u32) -> u32 {
+    u32::try_from(engine_core::mix64(u64::from(frame / 4) ^ salt) % 5).unwrap_or(0)
+}
+
+/// What one probe run measured.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ProbeReceipt {
+    predicted: u64,
+    mispredicted: u64,
+    rollbacks: u64,
+    max_rollback: usize,
+    tip_matches_truth: bool,
+}
+
+/// Play `frames` ticks of one endpoint against a peer whose inputs cross a
+/// seeded link, both sides holding `delay` ticks of input delay.
+fn probe_run(
+    delay: u32,
+    profile: super::link::LinkProfile,
+    seed: u64,
+    frames: u32,
+) -> ProbeReceipt {
+    use super::link::{FaultLink, Frame as LinkFrame};
+    use super::rollback::SimTick;
+
+    let (local_salt, remote_salt) = (seed ^ 0xA5A5, seed ^ 0x5A5A);
+    let mut session = super::rollback::P2pSession::with_frame_delay(ProbeSim::default(), delay);
+    let mut link = FaultLink::new(profile, seed);
+    let deliver = |session: &mut super::rollback::P2pSession<ProbeSim>, link: &mut FaultLink| {
+        for due in link.due() {
+            let LinkFrame::Datagram(bytes) = due else {
+                continue;
+            };
+            for pair in bytes.chunks_exact(8) {
+                let word = |at: usize| {
+                    u32::from_le_bytes([pair[at], pair[at + 1], pair[at + 2], pair[at + 3]])
+                };
+                let _ = session.confirm_input(word(0), word(4));
+            }
+        }
+        let _ = session.resolve_incorrect();
+    };
+    for frame in 0..frames {
+        // The peer's input for the frames the client still needs, repeated
+        // in one datagram.
+        let mut datagram = [0u8; 32];
+        let mut at = 0usize;
+        for k in (0..4u32.min(frame + 1)).rev() {
+            let word = (frame - k + delay).to_le_bytes();
+            datagram[at..at + 4].copy_from_slice(&word);
+            let word = probe_script(remote_salt, frame - k).to_le_bytes();
+            datagram[at + 4..at + 8].copy_from_slice(&word);
+            at += 8;
+        }
+        link.send_datagram(&datagram[..at]);
+        deliver(&mut session, &mut link);
+        link.tick();
+        let neutral = (frame < delay).then_some(0);
+        session.advance_frame(probe_script(local_salt, frame), neutral);
+    }
+    // Drain: let the datagrams still in flight land, so the tail frames are
+    // corrected before the tip is read.
+    for _ in 0..profile.worst_delay() {
+        deliver(&mut session, &mut link);
+        link.tick();
+    }
+    // The truth: the same inputs, applied on time.
+    let mut truth = ProbeSim::default();
+    for frame in 0..frames {
+        let at = |salt| {
+            frame
+                .checked_sub(delay)
+                .map_or(0, |s| probe_script(salt, s))
+        };
+        truth.advance([at(local_salt), at(remote_salt)]);
+    }
+    // Catch the tip up from the truth so the two can be compared.
+    for frame in 0..frames {
+        if session.was_predicted(frame) == Some(true) {
+            let at = |salt| {
+                frame
+                    .checked_sub(delay)
+                    .map_or(0, |s| probe_script(salt, s))
+            };
+            let _ = session.confirm_frame(frame, at(remote_salt));
+        }
+    }
+    ProbeReceipt {
+        predicted: session.predicted_count(),
+        mispredicted: session.mispredicted_count(),
+        rollbacks: session.rollback_count(),
+        max_rollback: session.max_rollback(),
+        tip_matches_truth: session.sim().state_hash() == truth.state_hash(),
+    }
+}
+
+/// One paced measurement: the frames played against a seeded link at a
+/// fixed input delay, the rollbacks taken, those rollbacks per 1000 ticks
+/// and the deepest one.
+///
+/// Shape: the seeded two-endpoint probe the delay sweep runs, reached from
+/// production so the receipts can post the rollback rate the MP26 accept bar
+/// names ("< 3 rollbacks per 1000 ticks at 2-frame delay"). Determinism:
+/// the probe is a pure function of (delay, profile, seed, frames), so the
+/// posted rate is the same number on every machine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PacingMeasurement {
+    /// Input delay in ticks both endpoints held.
+    pub input_delay_ticks: u32,
+    /// Frames played.
+    pub frames: u32,
+    /// Frames the endpoints predicted.
+    pub predicted: u64,
+    /// Frames the local endpoint's guesses were wrong about.
+    pub mispredicted: u64,
+    /// Rollback events taken.
+    pub rollbacks: u64,
+    /// Rollbacks per 1000 ticks, rounded down.
+    pub rollbacks_per_1000_ticks: u32,
+    /// The same rate with the delay off: the contrast that gives the rate
+    /// above its teeth.
+    pub baseline_rollbacks_per_1000_ticks: u32,
+    /// Deepest rollback, in ticks.
+    pub max_rollback_ticks: u32,
+    /// The run's tip still matches the truth computed from the tape.
+    pub tip_matches_truth: bool,
+}
+
+/// Rollback rate at [`DEFAULT_DELAY`] over `frames` of the clean link the
+/// delay sweep measures on, with the delay-off rate beside it.
+#[must_use]
+pub fn measure_rollback_rate(frames: u32) -> PacingMeasurement {
+    let profile = clean_profile();
+    let on = probe_run(DEFAULT_DELAY, profile, 0x5EE9, frames);
+    let bare = probe_run(MIN_DELAY, profile, 0x5EE9, frames);
+    let per_1000 = |rollbacks: u64| {
+        rollbacks
+            .saturating_mul(1000)
+            .checked_div(u64::from(frames))
+            .unwrap_or(u64::MAX)
+    };
+    PacingMeasurement {
+        input_delay_ticks: DEFAULT_DELAY,
+        frames,
+        predicted: on.predicted,
+        mispredicted: on.mispredicted,
+        rollbacks: on.rollbacks,
+        rollbacks_per_1000_ticks: u32::try_from(per_1000(on.rollbacks)).unwrap_or(u32::MAX),
+        baseline_rollbacks_per_1000_ticks: u32::try_from(per_1000(bare.rollbacks))
+            .unwrap_or(u32::MAX),
+        max_rollback_ticks: u32::try_from(on.max_rollback).unwrap_or(u32::MAX),
+        tip_matches_truth: on.tip_matches_truth && bare.tip_matches_truth,
     }
 }
 
@@ -297,8 +519,21 @@ fn sweep_profile(loss_pct: u32) -> super::link::LinkProfile {
 #[cfg(test)]
 fn sweep(loss_pct: u32) -> Vec<super::rollback::loopback::Receipt> {
     (MIN_DELAY..=MAX_DELAY)
-        .map(|delay| super::rollback::loopback::run(delay, sweep_profile(loss_pct), 0x5EE9, 600))
+        .map(|delay| super::rollback::loopback::run(delay, fault_profile(loss_pct), 0x5EE9, 600))
         .collect()
+}
+
+/// The lossy profile the delay sweep sizes the default on: the WAN base
+/// latency (4 ticks, 67 ms) with 30 ms jitter (2 ticks), no reordering, at
+/// `loss_pct` loss.
+#[cfg(test)]
+fn fault_profile(loss_pct: u32) -> super::link::LinkProfile {
+    super::link::LinkProfile {
+        latency: 4,
+        jitter: 2,
+        loss_pct,
+        reorder_pct: 0,
+    }
 }
 
 #[cfg(test)]
@@ -448,6 +683,67 @@ mod tests {
             ticks += slow.pace(&drag);
         }
         assert_eq!(ticks, (100 + 100 * drag.permille() / 1000) as u32);
+    }
+
+    #[test]
+    fn pacer_holds_the_schedule_band_and_never_skips_a_tick() {
+        // The trim never drifts the client's schedule: a tip that ran ahead
+        // holds its frame back, and a tip that fell behind runs its lag up.
+        let mut pacer = ClockPacer::new();
+        let hold = ClockSlew::new();
+        // On the schedule: the pacer runs the trim's rate.
+        assert_eq!(pacer.pace_within(&hold, 0, 4), 1);
+        // One tick ahead: still inside the band, so the rate holds.
+        assert_eq!(pacer.pace_within(&hold, SCHEDULE_BAND, 4), 1);
+        // Two ticks ahead: the frame is held, never skipped.
+        assert_eq!(pacer.pace_within(&hold, SCHEDULE_BAND + 1, 4), 0);
+        // Two ticks behind: the lag runs up, two ticks at once.
+        assert_eq!(pacer.pace_within(&hold, -(SCHEDULE_BAND + 1), 4), 2);
+        // One tick behind: inside the band, so the rate holds.
+        assert_eq!(pacer.pace_within(&hold, -SCHEDULE_BAND, 4), 1);
+        // The seat has no input for the next tick: the frame is held, so
+        // the stream never runs a tick the seat cannot fill.
+        assert_eq!(pacer.pace_within(&hold, 0, 0), 0);
+        assert_eq!(pacer.pace_within(&hold, 0, 1), 1);
+        assert_eq!(pacer.max_permille(), 0);
+    }
+
+    #[test]
+    fn posted_measurement_holds_the_1000_tick_bar_at_the_default_delay() {
+        // The MP26 bar: "< 3 rollbacks per 1000 ticks at 2-frame delay". The
+        // measurement is a pure function of the profile, the seed and the
+        // frames, so the number the receipt posts is the number here.
+        let measured = measure_rollback_rate(1000);
+        assert_eq!(measured.input_delay_ticks, DEFAULT_DELAY);
+        assert_eq!(measured.frames, 1000);
+        assert!(measured.tip_matches_truth, "the run diverged: {measured:?}");
+        println!(
+            "mp26 pacing d={} frames={} predicted={} mispred={} rollbacks={} per_1000={} baseline={} max={}",
+            measured.input_delay_ticks,
+            measured.frames,
+            measured.predicted,
+            measured.mispredicted,
+            measured.rollbacks,
+            measured.rollbacks_per_1000_ticks,
+            measured.baseline_rollbacks_per_1000_ticks,
+            measured.max_rollback_ticks,
+        );
+        assert!(
+            measured.rollbacks_per_1000_ticks < 3,
+            "rollback rate over the bar: {measured:?}"
+        );
+        // The bar has teeth: the same link with the delay off mispredicts on
+        // most frames, so the rate above is the delay's work.
+        assert!(
+            measured.baseline_rollbacks_per_1000_ticks > 100,
+            "the delay-off contrast is too small to prove anything: {measured:?}"
+        );
+        // The posted number is the sizing input the MP26 accept bar reads.
+        assert_eq!(
+            measured.rollbacks_per_1000_ticks,
+            crate::scale::MP6_POSTED_ROLLBACKS_PER_1000,
+            "the posted per-1000 rate moved: update the scale fixture"
+        );
     }
 
     #[test]

@@ -13,18 +13,22 @@
 /// Shipped shader directory; [`shipped_files`] and the tests walk it.
 pub const SHADER_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders");
 
-/// The display transform the two frame-ending files are compiled with
-/// prepended: `v1_gpu.rs:34` `FORWARD_PBR_WGSL` and `present/gpu_present.rs:38`
-/// `BLIT_WGSL` are each `concat!` of this chunk and their file.
+/// The display transform the frame-ending files are compiled with
+/// prepended: `v1_gpu.rs:34` `FORWARD_PBR_WGSL`,
+/// `present/gpu_present.rs:38` `BLIT_WGSL`, `post/gpu.rs:14`
+/// `POST_CHAIN_WGSL` and `post/gpu.rs:119` `COMPOSITE_COMPUTE_WGSL` are
+/// each `concat!` of this chunk and their file.
 const TONEMAP_CHUNK: &str = include_str!("shaders/tonemap.wgsl");
 
-/// One source as the pipelines compile it: `forward.wgsl` and `blit.wgsl`
-/// take [`TONEMAP_CHUNK`] prepended (they call `aces_fitted`), every other
-/// file compiles alone.
+/// One source as the pipelines compile it: `forward.wgsl`, `blit.wgsl` and
+/// the two post shaders take [`TONEMAP_CHUNK`] prepended (they call
+/// `aces_tonemap`), every other file compiles alone.
 fn shipped_source<'a>(name: &str, wgsl: &'a str) -> std::borrow::Cow<'a, str> {
     let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
     match file {
-        "forward.wgsl" | "blit.wgsl" => std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{wgsl}")),
+        "forward.wgsl" | "blit.wgsl" | "post_chain.wgsl" | "composite_compute.wgsl" => {
+            std::borrow::Cow::Owned(format!("{TONEMAP_CHUNK}{wgsl}"))
+        }
         _ => std::borrow::Cow::Borrowed(wgsl),
     }
 }

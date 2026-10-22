@@ -102,6 +102,10 @@ mod ragdoll_look;
 use self::ragdoll_look::RagdollLook;
 pub use self::ragdoll_look::RagdollStump;
 
+/// The realistic body family (Rocketbox bodies with their own clips) beside
+/// the CT7 bodies: same look, its own bind and per-rig clip sets.
+#[path = "fighter_look_family.rs"]
+mod fighter_look_family;
 /// Limb look (RZ3): an authority cut event hands the named joint's chain to the
 /// float physical layer and draws a stump cap where it left. Presentation only.
 #[path = "limb_look.rs"]
@@ -2026,73 +2030,6 @@ fn rot_lerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 }
 
 impl FighterLook {
-    /// Bind the CT7 bundles under `content_dir`, re-hash every body against
-    /// its pin, import bodies plus clips, retarget the clips per rig and
-    /// decode the base-color maps. Cold path; loud on any refusal.
-    /// WEB6: this is the native door into [`FighterLook::load_from`]; the
-    /// browser has no file system and reads the same bytes out of a
-    /// fetched bundle.
-    pub fn load(content_dir: &Path) -> Result<Self, LookError> {
-        Self::load_from(&FsSource::new(content_dir))
-    }
-
-    /// The same bind out of a source: the manifest, the body GLBs and the
-    /// baked clips are read by logical path, so a browser and the native
-    /// window see the same bytes. Cold path; loud on any refusal.
-    pub fn load_from(source: &dyn AssetSource) -> Result<Self, LookError> {
-        let bindings =
-            fighter_bind::bind_all_from(source).map_err(|err| LookError::Bind(err.to_string()))?;
-        let mut sources = Vec::with_capacity(CLIP_FILES.len());
-        for file in CLIP_FILES {
-            let path = clip_logical_path(file);
-            let bytes = source
-                .read(&path)
-                .map_err(|err| LookError::Import(format!("{file}: {err}")))?;
-            sources.push(
-                import_clip_source(&bytes)
-                    .map_err(|err| LookError::Import(format!("{file}: {err}")))?,
-            );
-        }
-        let mut rigs = Vec::with_capacity(bindings.len());
-        for (index, binding) in bindings.iter().enumerate() {
-            rigs.push(load_rig(binding, index, &sources, source)?);
-        }
-        let swing_s = rigs
-            .first()
-            .and_then(|rig| rig.clips.get(2))
-            .map_or(0.0, |clip| clip.duration);
-        // Whole ticks covering the swing; clip lengths are a few seconds.
-        let mut swing_ticks = 1u32;
-        while f32::from(u16::try_from(swing_ticks).unwrap_or(u16::MAX)) < swing_s * TICK_HZ
-            && swing_ticks < 600
-        {
-            swing_ticks += 1;
-        }
-        let inertia = fighter_look_inertia::slot_sets(&rigs)?;
-        let limit = limit_lanes(&rigs)?;
-        let ragdoll = Self::ragdoll_for_rigs(&rigs);
-        let capes = Capes::for_rigs(&rigs);
-        Ok(Self {
-            rigs,
-            ring: None,
-            slots: vec![SlotAnim::new(); MAX_LOOK_FIGHTERS],
-            bridge: bridge_slots(),
-            trails: TrailRing::new(),
-            tick: 0,
-            swing_ticks,
-            bundle_shas: bindings.into_iter().map(|b| b.bundle_sha256).collect(),
-            truth: Vec::new(),
-            shake_trauma_permille: 0,
-            uploaded_digest: empty_upload_digest(),
-            inertia,
-            limit,
-            ragdoll,
-            limbs: LimbLook::new(),
-            capes,
-            hero: 0,
-        })
-    }
-
     /// Ride the fight camera behind `slot` (the window's human) instead of
     /// slot 0: the shoulder shot, the hero close-up and the duel framing all
     /// follow it. A slot past the look's range keeps the last one. View only.
@@ -2966,7 +2903,13 @@ impl FighterLook {
     ) -> Result<Self, LookError> {
         // Keep the built GPU skin path constructed in the live window frame.
         let _ = gpu_skin_adapter();
-        let mut look = Self::load(&fighters_content_dir())?;
+        // `E2040_BODIES=rocketbox` draws the realistic family instead of the
+        // CT7 bodies; the default never changes.
+        let mut look = if std::env::var("E2040_BODIES").as_deref() == Ok("rocketbox") {
+            Self::load_rocketbox(&fighters_content_dir().join(fighter_bind::ROCKETBOX_DIR))?
+        } else {
+            Self::load(&fighters_content_dir())?
+        };
         look.stage_textures(presenter)?;
         // The window draws the skin on the GPU: bind-pose vertices plus one
         // joint block per body. `E2040_CPU_SKIN` keeps the CPU-skinned

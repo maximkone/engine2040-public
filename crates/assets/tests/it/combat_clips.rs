@@ -13,11 +13,17 @@
 //! loads from disk, it round-trips to the same bytes, the receipt's hash and
 //! slip are the pack's own, and the clip plays on the fighter rig by name.
 //!
+//! The slip the receipt prints is the foot's average speed over the sand,
+//! measured on its **world** position: the pack's bone-axis offsets are
+//! composed with the joint rotations down the rig's chain, exactly the
+//! skinning convention ([`avg_world_slip`]). A planted foot reads near zero,
+//! a sliding one reads its real speed.
+//!
 //! The sources are Kimodo teacher clips (NVIDIA Open Model License), converted
 //! from the teacher's own SOMA BVH into the teacher's NPZ layout and baked
 //! here. The provenance sidecars sit next to the packs.
 
-use engine_anim::clip::{avg_slip, qclip_hash, TICK_DT};
+use engine_anim::clip::{avg_world_slip, qclip_hash, TICK_DT};
 use engine_anim::motion_bake::{bake_unpack, bake_unpack_rots};
 use engine_anim::pack_file::{load_pack, rotations_of, sample_pose_named_with_rots};
 use engine_assets::fighter::fighter_skeleton;
@@ -27,15 +33,15 @@ const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 /// The fighter rig's joint count: one track per joint.
 const FIGHTER_JOINTS: usize = 65;
 
-/// The four combat clips: the name, the receipt's slip for the left foot and
-/// the number of ticks the clip holds. The slip numbers are the card's
-/// attested values: a slash that lands without the foot sliding, a thrust
-/// that steps, a parry that stands and a slash that slides.
+/// The four combat clips: the name, the receipt's world slip for the left
+/// foot and the number of ticks the clip holds. The slip numbers are the
+/// card's attested values: a slash that lands with the foot planted, a
+/// thrust that steps, a parry that shuffles and a slash that slides.
 const CLIPS: [(&str, f32, u32); 4] = [
-    ("slash_over", 0.000389, 119),
-    ("spear_thrust", 0.003025, 95),
-    ("parry", 0.080097, 119),
-    ("slash_h", 0.133841, 95),
+    ("slash_over", 0.003739, 119),
+    ("spear_thrust", 0.015842, 95),
+    ("parry", 0.387609, 119),
+    ("slash_h", 0.646281, 95),
 ];
 
 /// The committed bytes of one fixture path.
@@ -139,15 +145,17 @@ fn every_combat_clip_loads_and_plays_on_the_fighter_rig() {
             hash(&text, "qclip_hash"),
             "{name}: the receipt's hash is the pack's"
         );
-        // The slip the card attested is the slip the pack measures.
+        // The slip the card attested is the slip the pack measures: the foot
+        // over the sand, world position composed from the pack's own bytes.
         let names = track_names(&text);
         let left = names
             .iter()
             .position(|n| n == "leftfoot")
             .expect("the receipt names the left foot");
-        let measured = avg_slip(&clip, left, ticks);
+        let rots = bake_unpack_rots(&bytes).expect("{name}: the rotations read back");
+        let measured = avg_world_slip(&clip, &rots, &rig, left, ticks);
         assert!(
-            (measured - slip).abs() < 1.0e-5,
+            (measured - slip).abs() < 1.0e-4,
             "{name}: the receipt says {slip}, the pack measures {measured}"
         );
         // The pack plays on the rig, by name, and the pose is a real pose.

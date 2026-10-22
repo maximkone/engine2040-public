@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, buildBase, classify, closureDirs, crateGraph, idAgeMs, keepResult, keptResult, localOnly, main, newId, okCmd, parseArgs, raceLost, reuseKey, route, runLocal, runnerOs, testsRan, words } from "./gh-check.mjs";
+import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, buildBase, classify, closureDirs, crateGraph, idAgeMs, isThrowawayBranch, keepResult, keptResult, localOnly, main, newId, okCmd, parseArgs, raceLost, reuseKey, route, runLocal, runnerOs, testsRan, words } from "./gh-check.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -112,6 +112,21 @@ test("a job name carries its age so a leaked branch can be swept", () => {
   assert.equal(idAgeMs(id, t + 4 * 3_600_000), 4 * 3_600_000);
   assert.equal(idAgeMs("wip-zz", t), 0, "an id of another shape is never swept");
   assert.equal(idAgeMs("main", t), 0);
+});
+
+test("every throwaway branch family is sweepable, not only wip-", () => {
+  // The 2026-10-22 branch pile: 41 branches on the mirror, because a family whose name carries no
+  // timestamp answered idAgeMs 0 and read as "not stale". These are the families the tools push.
+  for (const name of ["wip-mvju6qvvn1r", "web-build-mvcsnbgjuc2", "docs-probe-mvcky5cv", "golden-matrix-dsn2-mvcofsdk", "wip-am24-after"]) {
+    assert.ok(isThrowawayBranch(name), `${name} is a branch a check tool pushed`);
+  }
+  // Real branches are never swept, however old they look.
+  for (const name of ["main", "master", "recovery/lane-work-2026-10-22", "feature-x"]) {
+    assert.ok(!isThrowawayBranch(name), `${name} is a real branch and stays`);
+  }
+  // A family that does not encode its age is still datable by the commit, which is what the sweeper reads.
+  assert.equal(idAgeMs("wip-am24-after"), 0, "no timestamp in the name");
+  assert.ok(isThrowawayBranch("wip-am24-after"), "so the commit date decides it");
 });
 
 const fakes = (remoteResults, localCode = 0) => {

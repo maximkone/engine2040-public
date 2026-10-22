@@ -9,9 +9,13 @@ use crate::aa_scale::gpu::pack_pixels;
 /// around the current texel, velocity rejection, blend.
 pub const TAA_RESOLVE_WGSL: &str = include_str!("../shaders/post/taa_resolve.wgsl");
 
-/// Post chain chunk (WGSL): soft-knee bloom add, exposure, Narkowicz
-/// ACES with white normalization, contrast/saturation grading.
-pub const POST_CHAIN_WGSL: &str = include_str!("../shaders/post/post_chain.wgsl");
+/// Post chain chunk (WGSL): soft-knee bloom add, exposure, the crate's one
+/// hue-keeping tone map (the `tonemap.wgsl` chunk, prepended) with white
+/// normalization, contrast/saturation grading.
+pub const POST_CHAIN_WGSL: &str = concat!(
+    include_str!("../shaders/tonemap.wgsl"),
+    include_str!("../shaders/post/post_chain.wgsl")
+);
 
 /// History color target descriptor: `Rgba32Float` render-attachment
 /// plus sampler binding for the resolve pass.
@@ -109,14 +113,18 @@ pub const DOWNSAMPLE_COMPUTE_WGSL: &str = include_str!("../shaders/post/downsamp
 
 /// Composite shader: bilinear add-back of every halo mip (the caller
 /// leaves the 2x2 and 1x1 veil out) with even intensity split, then
-/// exposure, Narkowicz ACES with white
-/// normalization, contrast/saturation grading. Mirrors
+/// exposure, the crate's one hue-keeping tone map (the `tonemap.wgsl`
+/// chunk, prepended) with white normalization, contrast/saturation
+/// grading. Mirrors
 /// [`super::apply_bloom`] add-back plus [`super::tonemap_aces`] plus
 /// [`super::apply_grade`]. All mip levels live in ONE concatenated
 /// storage buffer (`mipsN = (w, h, texel_offset, 0)`); with the source
 /// and the target that is three storage bindings total, inside every
 /// native minimum. The six slots are unrolled under the `count` guard.
-pub const COMPOSITE_COMPUTE_WGSL: &str = include_str!("../shaders/post/composite_compute.wgsl");
+pub const COMPOSITE_COMPUTE_WGSL: &str = concat!(
+    include_str!("../shaders/tonemap.wgsl"),
+    include_str!("../shaders/post/composite_compute.wgsl")
+);
 
 /// One GPU TAA resolve: pixels plus the validation outcome plus ms.
 #[derive(Clone, Debug)]

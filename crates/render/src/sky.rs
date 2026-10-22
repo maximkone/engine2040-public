@@ -2319,7 +2319,7 @@ mod tests {
             "fs_sky keeps the infinite-distance fog mix"
         );
         assert!(
-            !sky.contains("aces_fitted") && !sky.contains("linear_to_srgb_term"),
+            !sky.contains("aces_tonemap") && !sky.contains("linear_to_srgb_term"),
             "fs_sky stays linear HDR, tone map lives in the blit"
         );
         assert!(

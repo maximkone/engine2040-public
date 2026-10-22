@@ -27,6 +27,7 @@ impl Presenter {
             quality::particle_pool_slots(knobs),
         )
         .unwrap_or_else(|_| particles_gpu::ParticlePool::new(POOL_SEED));
+        self.fight_fx = None; // FEEL5: the next event rebuilds it at this tier's cap
         self.decal_pool = decals::DecalPool::with_capacity(quality::decal_pool_slots(knobs));
         // QL5: the look guard preset is a pipeline constant, so only a tier
         // that moves it rebuilds the four forward pipelines (the potato edge).

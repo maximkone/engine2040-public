@@ -26,6 +26,11 @@ pub mod discover;
 pub mod door_dispatch;
 #[cfg(feature = "mcp")]
 pub mod explain;
+/// DOOR1: play the level a session built and read a win or a loss. The objective runs on
+/// `engine-rules`, so this verb rides the off-by-default `rules` feature like the scripted
+/// rule verbs do.
+#[cfg(all(feature = "mcp", feature = "rules"))]
+pub mod game_play;
 /// Shared guard block for tool writes (std-only, no `mcp` feature needed).
 pub mod guards;
 pub mod injection;

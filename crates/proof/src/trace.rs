@@ -39,6 +39,21 @@
 //! two exports name their first divergent tick with
 //! [`engine_observe::mcap::first_divergent_tick`].
 //!
+//! # The other trace file: Chrome JSON for Perfetto
+//!
+//! The engine has two trace files, and they answer different questions.
+//!
+//! - This module owns the MCAP recording: the deterministic events of a tape
+//!   and the first divergent tick.
+//! - The Chrome Trace Event JSON file that Perfetto reads is written by
+//!   `engine-perf` (`crates/perf/src/trace_file.rs`): the tick spans, the GPU
+//!   passes and the frame marks of a live run. The perf harness owns those
+//!   numbers, and no crate edge joins the proof crate to it, so this module
+//!   only names the format and its owner.
+//!
+//! Both files carry wall-clock timing. Timing is evidence, never input: no
+//! timing number reaches a simulation hash.
+//!
 //! # Tracing overhead (measured, not zero-cost)
 //!
 //! Tracing is not free: [`replay_verbose`] retains one [`SimEvent`] (tick,

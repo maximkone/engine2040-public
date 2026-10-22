@@ -17,10 +17,12 @@
 //! correction expects.
 
 use crate::npz::{Npz, NpzError};
-use crate::rig::{fighter_bind, fighter_skeleton, joint_index, soma_bind, soma_skeleton};
-use engine_anim::clip::{avg_slip, bake_clip, bake_track, qclip_hash, TICK_DT};
+use crate::rig::{
+    fighter_bind, fighter_skeleton, joint_index, rest_world, soma_bind, soma_skeleton,
+};
+use engine_anim::clip::{avg_world_slip, bake_clip, bake_track, qclip_hash, TICK_DT};
 use engine_anim::motion_bake::{
-    bake_len, bake_pack_with_rots, bake_unpack, last_constrained, BakeError,
+    bake_len, bake_pack_with_rots, bake_unpack, bake_unpack_rots, last_constrained, BakeError,
 };
 use engine_anim::pose::{sample_quat_track, QuatTrack};
 use engine_anim::{sample, Clip, Track};
@@ -325,6 +327,13 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
     // The fighter rig and the one name table.
     let target = fighter_skeleton()?;
     let target_bind = fighter_bind()?;
+    // The retarget works in world space: it takes the teacher's world
+    // positions against the teacher's world bind and writes a world
+    // position per joint. So the target bind it reads must be the
+    // fighter's **world** bind, or the world displacement lands on a local
+    // offset and the rig sinks through the floor. The pack wants local
+    // offsets, so the world result is turned into local below.
+    let target_world_bind = world_bind(&target, &target_bind)?;
     let pairs = soma_pairs();
     let map = BoneMap::build(&source, &target, &pairs)?;
     let root_joint = joint_index(&target, "hips").ok_or(BakeRunError::MissingJoint("hips"))?;
@@ -345,7 +354,7 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
         source: &source,
         source_bind: &source_bind,
         target: &target,
-        target_bind: &target_bind,
+        target_bind: &target_world_bind,
         map: &map,
         config: &config,
     };
@@ -374,25 +383,12 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
     // home: one track per fighter joint, in the fighter's own joint order, so
     // the tick can play the pack without asking the bake anything.
     let fighter_joints = target.len();
-    let mut tracks = Vec::with_capacity(fighter_joints);
-    for joint in 0..fighter_joints {
-        let times: Vec<f32> = (0..len.ticks).map(|k| k as f32 * TICK_DT).collect();
-        let values: Vec<[f32; 3]> = times
-            .iter()
-            .map(|t| {
-                if !t.is_finite() {
-                    return [0.0; 3];
-                }
-                sample(&cooked.clip.positions, joint, *t)
-            })
-            .collect();
-        tracks.push(bake_track(times, values));
-    }
-    let clip = bake_clip(tracks);
-    // The rotations ride with the positions: a combat clip that carries only
-    // the feet would slide the arms on their bind rotations, so the swing
-    // would never show. The pack becomes a version-2 wire.
     let times: Vec<f32> = (0..len.ticks).map(|k| k as f32 * TICK_DT).collect();
+    // The retarget wrote **world** positions; the pack carries **local**
+    // offsets, which is the frame the fighter rig's hierarchy expects (a
+    // joint's offset from its parent, in the parent's own frame). Turning
+    // world into local needs the parent's world rotation, so the rotation
+    // tracks are sampled first and composed down each chain.
     let mut rot_tracks = Vec::with_capacity(fighter_joints);
     for joint in 0..fighter_joints {
         let values: Vec<[f32; 4]> = times
@@ -409,8 +405,64 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
             values,
         });
     }
+    // The fighter's posed world rotations: the local rotations composed down
+    // each chain from the identity bind. A valid skeleton lists parents
+    // before their children, so one pass fills every joint.
+    let mut world_rot: Vec<Vec<[f32; 4]>> =
+        vec![vec![[0.0, 0.0, 0.0, 1.0]; times.len()]; fighter_joints];
+    for joint in 0..fighter_joints {
+        let parent = target.joints[joint].parent;
+        for (key, local) in rot_tracks[joint].values.iter().enumerate() {
+            world_rot[joint][key] = match parent {
+                Some(parent) => quat_mul(world_rot[parent][key], *local),
+                None => *local,
+            };
+        }
+    }
+    // Every tick's world position of every joint, in the fighter's frame.
+    let mut world_at_tick: Vec<Vec<[f32; 3]>> = Vec::with_capacity(times.len());
+    for time in &times {
+        let mut row = Vec::with_capacity(fighter_joints);
+        for joint in 0..fighter_joints {
+            row.push(if time.is_finite() {
+                sample(&cooked.clip.positions, joint, *time)
+            } else {
+                [0.0; 3]
+            });
+        }
+        world_at_tick.push(row);
+    }
+    // World to local, exactly the frame the anim skinning expects: the
+    // offset from the parent's world position, turned into the parent's
+    // world frame by the inverse of its world rotation. The root carries its
+    // own world position (it has no parent to offset from).
+    let mut tracks = Vec::with_capacity(fighter_joints);
+    for joint in 0..fighter_joints {
+        let parent = target.joints[joint].parent;
+        let values: Vec<[f32; 3]> = world_at_tick
+            .iter()
+            .enumerate()
+            .map(|(key, row)| {
+                let world = row[joint];
+                match parent {
+                    Some(parent) => {
+                        let offset = [
+                            world[0] - row[parent][0],
+                            world[1] - row[parent][1],
+                            world[2] - row[parent][2],
+                        ];
+                        unrotate(offset, world_rot[parent][key])
+                    }
+                    None => world,
+                }
+            })
+            .collect();
+        tracks.push(bake_track(times.clone(), values));
+    }
+    let clip = bake_clip(tracks);
     let pack = bake_pack_with_rots(&clip, &rot_tracks)?;
     let shipped = bake_unpack(&pack)?;
+    let rot_shipped = bake_unpack_rots(&pack)?;
 
     let mut windows = [0u32; 2];
     let mut down = [false; 2];
@@ -449,14 +501,14 @@ pub fn bake(bytes: &[u8], name: &str) -> Result<Baked, BakeRunError> {
             .map(|joint| joint.name.clone())
             .collect(),
         keys: shipped.tracks.first().map_or(0, |track| track.times.len()),
-    pack_version: u16::from_le_bytes([pack[4], pack[5]]),
+        pack_version: u16::from_le_bytes([pack[4], pack[5]]),
         packed_bytes: pack.len(),
         bytes_sha256: sha256_hex(&pack),
         qclip_hash: qclip_hash(&shipped),
         retarget_digest: retarget_digest(&cooked),
         avg_slip: vec![
-            avg_slip(&shipped, left_foot, len.ticks),
-            avg_slip(&shipped, right_foot, len.ticks),
+            avg_world_slip(&shipped, &rot_shipped, &target, left_foot, len.ticks),
+            avg_world_slip(&shipped, &rot_shipped, &target, right_foot, len.ticks),
         ],
         plant_windows: windows.to_vec(),
     };
@@ -484,6 +536,21 @@ fn round(fps: f32) -> f32 {
 }
 
 /// The mtime-free helper the tests use: bake the committed fixture bytes.
+/// The bind in world space: the summed offsets along each chain.
+///
+/// The fighter rig's own bind holds **local** offsets, and the retarget's
+/// world arithmetic needs the world positions, so the world bind is the
+/// local one summed along the rig's chain.
+fn world_bind(
+    skeleton: &engine_anim::contract::Skeleton,
+    bind: &engine_assets::retarget::BindPose,
+) -> Result<engine_assets::retarget::BindPose, BakeRunError> {
+    Ok(engine_assets::retarget::BindPose {
+        positions: rest_world(skeleton, bind),
+        rotations: bind.rotations.clone(),
+    })
+}
+
 /// One joint's rotation at `time` seconds, read from the retargeted clip.
 ///
 /// A joint with no rotation lane (or a lane that holds nothing usable) reads
@@ -493,6 +560,45 @@ fn sample_quat_at(rotations: &[QuatTrack], joint: usize, time: f32) -> [f32; 4] 
         return [0.0, 0.0, 0.0, 1.0];
     };
     sample_quat_track(track, time).unwrap_or([0.0, 0.0, 0.0, 1.0])
+}
+
+/// The raw Hamilton product `a * b` without normalization: the identity
+/// quaternion law the engine keeps in `engine_core::quat_mul`. Vector
+/// rotation builds on it so lengths survive.
+fn quat_mul_raw(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
+}
+
+/// Compose two quaternions, `a` then `b`; `[x, y, z, w]`, unit output.
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let out = quat_mul_raw(a, b);
+    let norm = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3]).sqrt();
+    if norm <= 0.0 || !norm.is_finite() {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    [out[0] / norm, out[1] / norm, out[2] / norm, out[3] / norm]
+}
+
+/// Rotate a vector by a quaternion: `q * v * conj(q)`, no normalization.
+///
+/// The vector's length is preserved exactly (up to f32); normalizing the
+/// intermediate product would scale it toward unit length and break every
+/// offset it touches.
+fn rotate(v: [f32; 3], quat: [f32; 4]) -> [f32; 3] {
+    let conj = [-quat[0], -quat[1], -quat[2], quat[3]];
+    let r = quat_mul_raw(quat_mul_raw(quat, [v[0], v[1], v[2], 0.0]), conj);
+    [r[0], r[1], r[2]]
+}
+
+/// Rotate a vector by the inverse of a quaternion: a world offset turned
+/// into the parent's world frame, the frame the local offset runs in.
+fn unrotate(v: [f32; 3], quat: [f32; 4]) -> [f32; 3] {
+    rotate(v, [-quat[0], -quat[1], -quat[2], quat[3]])
 }
 
 #[cfg(test)]

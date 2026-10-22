@@ -24,7 +24,7 @@
 //! [`ArenaRules::collision`]: crate::ArenaRules::collision
 //! [`separate_pair`]: engine_physics::controller2::separate_pair
 
-use engine_physics::controller2::{separate_pair, Walker, RADIUS_MM};
+use engine_physics::controller2::{push_exchange, separate_pair, Walker, RADIUS_MM};
 
 /// Most relaxation passes per tick: each pass pushes every overlapping pair
 /// half its overlap, then resolves pillars and the wall. The pass loop stops
@@ -221,16 +221,19 @@ pub(crate) fn collide_states(
     half_extent_m: f32,
     fighters: usize,
 ) {
-    collide_states_with(states, None, rules, half_extent_m, fighters, resolve);
+    collide_states_with(states, None, None, rules, half_extent_m, fighters, resolve);
 }
 
-/// The tick's collision pass: [`collide_states`] plus the body-push shove.
-/// The push-apart displacement each fighter took this tick feeds its balance
-/// an impulse scaled by the push ([`PUSH_SHOVE_TABLE`]); the balance states
-/// live in the tick, so the caller hands them in.
+/// The tick's collision pass: [`collide_states`] plus the body-push shove and
+/// the FEEL2 knockback. The push-apart displacement each fighter took this
+/// tick feeds its balance an impulse scaled by the push
+/// ([`PUSH_SHOVE_TABLE`]); the balance states live in the tick, so the
+/// caller hands them in. The knockback carrier rides along: the body moves
+/// by the velocity it carries and ground friction brings it to rest.
 pub(crate) fn collide_states_shove(
     states: &mut [crate::FighterState],
     balance: &mut [crate::BalanceState],
+    knockback: &mut [crate::Knockback],
     rules: &crate::ArenaRules,
     half_extent_m: f32,
     fighters: usize,
@@ -238,6 +241,7 @@ pub(crate) fn collide_states_shove(
     collide_states_with(
         states,
         Some(balance),
+        Some(knockback),
         rules,
         half_extent_m,
         fighters,
@@ -258,6 +262,7 @@ pub(crate) fn collide_states_fixed_passes(
     collide_states_with(
         states,
         None,
+        None,
         rules,
         half_extent_m,
         fighters,
@@ -272,6 +277,7 @@ pub(crate) fn collide_states_fixed_passes(
 pub(crate) fn collide_states_fixed_passes_shove(
     states: &mut [crate::FighterState],
     balance: &mut [crate::BalanceState],
+    knockback: &mut [crate::Knockback],
     rules: &crate::ArenaRules,
     half_extent_m: f32,
     fighters: usize,
@@ -279,6 +285,7 @@ pub(crate) fn collide_states_fixed_passes_shove(
     collide_states_with(
         states,
         Some(balance),
+        Some(knockback),
         rules,
         half_extent_m,
         fighters,
@@ -291,15 +298,24 @@ pub(crate) fn collide_states_fixed_passes_shove(
 /// oracle's fixed pass count. Both callers pass a function item, so the
 /// indirect call folds into the one resolution at its call site. `balance` is
 /// the caller's balance slice when the tick shoves bodies, `None` when the
-/// caller owns no balance (the spear's drag).
+/// caller owns no balance (the spear's drag). `knockback` is the caller's
+/// knockback carrier, the same way: `None` when the caller owns none.
 fn collide_states_with(
     states: &mut [crate::FighterState],
     balance: Option<&mut [crate::BalanceState]>,
+    knockback: Option<&mut [crate::Knockback]>,
     rules: &crate::ArenaRules,
     half_extent_m: f32,
     fighters: usize,
     resolve_passes: fn(&mut [Walker], &[Pillar], i32),
 ) {
+    // FEEL2: the body carries the knockback a blow handed it. The travel
+    // moves the pose before the walkers are built, so the push-apart shove
+    // measure stays clean and the wall clamp holds the knocked-back body.
+    let mut knockback = knockback;
+    if let Some(carriers) = &mut knockback {
+        carry_knockback(states, carriers, fighters);
+    }
     let mut walkers = [Walker::spawn(0, [0; 3]); crate::MAX_SLOTS];
     for ((slot, walker), state) in walkers.iter_mut().enumerate().zip(states.iter()) {
         *walker = Walker::spawn(
@@ -317,6 +333,13 @@ fn collide_states_with(
     let limit = crate::wall_limit(half_extent_m);
     let radius_mm = crate::match_wire::pos_mm([limit, 0.0, 0.0])[0];
     let fighters = fighters.min(crate::MAX_SLOTS);
+    // FEEL10: contact pushes back before the positional pass takes the overlap
+    // away. Gated above rules v2, so every shipped v2 bout keeps its bytes.
+    if rules.version > crate::FIGHT_RULES_V2 {
+        if let Some(carriers) = &mut knockback {
+            exchange_contact_pushes(&walkers[..fighters], carriers, fighters);
+        }
+    }
     resolve_passes(&mut walkers[..fighters], &pillars[..count], radius_mm);
     if let Some(balance) = balance {
         if rules.balance {
@@ -330,6 +353,52 @@ fn collide_states_with(
                 let clamped = moved.clamp(i32::from(i16::MIN), i32::from(i16::MAX));
                 let metres = f32::from(i16::try_from(clamped).unwrap_or(0)) / 1000.0;
                 state.pos[axis] = crate::canon_zero(state.pos[axis] + metres);
+            }
+        }
+    }
+}
+
+/// FEEL2: the knockback a body carries moves it this tick, and the ground
+/// friction takes its bite out of the velocity. A body at rest never moves
+/// and never carries anything, so it rests exactly.
+fn carry_knockback(
+    states: &mut [crate::FighterState],
+    knockback: &mut [crate::Knockback],
+    fighters: usize,
+) {
+    for (slot, carrier) in knockback.iter_mut().enumerate().take(fighters) {
+        let velocity = carrier.velocity();
+        if velocity != [0, 0] {
+            if let Some(state) = states.get_mut(slot) {
+                for (axis, speed) in [(0, velocity[0]), (2, velocity[1])] {
+                    if speed != 0 {
+                        let metres = crate::match_wire::metres(speed);
+                        state.pos[axis] = crate::canon_zero(state.pos[axis] + metres);
+                    }
+                }
+            }
+        }
+        carrier.step();
+    }
+}
+
+/// FEEL10: bodies in contact push back. Every pair of fighters whose centres
+/// overlap exchanges the equal and opposite impulse [`push_exchange`] gives,
+/// on the velocities the knockback carriers hold (post-friction, so the
+/// exchanged speed moves the body next tick). A sliding body that runs into a
+/// resting one hands it the speed it shares along the contact normal; the pair
+/// keeps its total momentum. Pairs go in slot order, low slot first, so the
+/// coincident tie-break is canonical.
+fn exchange_contact_pushes(walkers: &[Walker], carriers: &mut [crate::Knockback], fighters: usize) {
+    let count = fighters.min(walkers.len()).min(carriers.len());
+    for low in 0..count {
+        for high in low + 1..count {
+            let pa = [walkers[low].pos_mm[0], walkers[low].pos_mm[2]];
+            let pb = [walkers[high].pos_mm[0], walkers[high].pos_mm[2]];
+            let (va, vb) = (carriers[low].velocity(), carriers[high].velocity());
+            if let Some(d) = push_exchange(pa, pb, va, vb) {
+                carriers[high].launch([vb[0].saturating_add(d[0]), vb[1].saturating_add(d[1])]);
+                carriers[low].launch([va[0].saturating_sub(d[0]), va[1].saturating_sub(d[1])]);
             }
         }
     }
@@ -387,6 +456,7 @@ fn shove_impulse_q8(push_mm: i32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_combat::FightEvent;
 
     fn walkers_at(count: u32, pos: [i32; 3]) -> Vec<Walker> {
         (0..count).map(|id| Walker::spawn(id, pos)).collect()
@@ -447,6 +517,65 @@ mod tests {
                 assert!(dx * dx + dz * dz >= 4 * i64::from(RADIUS_MM).pow(2) - 4);
             }
         }
+    }
+
+    /// Two fighters 0.5 m apart on the x axis, nothing worn, both carriers at rest.
+    fn touching_pair() -> Vec<crate::FighterState> {
+        // spawn_states builds the fighters in whatever field set the tree has; only the poses are set here.
+        let mut states = crate::spawn_states(2040, 2, 20.0);
+        for (slot, state) in states.iter_mut().take(2).enumerate() {
+            state.pos = [0.5 * slot as f32, 0.0, 0.0];
+        }
+        states.truncate(2);
+        states
+    }
+
+    /// FEEL10: a knocked-back fighter runs into a resting one. Above rules v2 the
+    /// speed it shares along the contact normal goes to the resting body; under
+    /// v2 the bytes are the same as before the push existed (no hand-over).
+    #[test]
+    fn a_contact_push_hands_the_speed_over_past_v2_only() {
+        let rule_v3 = crate::ArenaRules {
+            version: crate::FIGHT_RULES_V2 + 1,
+            ..crate::ArenaRules::v2_free_for_all()
+        };
+        let carriers = || {
+            let mut carriers: Vec<crate::Knockback> =
+                (0..2).map(|_| crate::Knockback::new()).collect();
+            carriers[0].launch([40, 0]);
+            carriers
+        };
+        let (mut states_v2, mut carriers_v2) = (touching_pair(), carriers());
+        collide_states_with(
+            &mut states_v2,
+            None,
+            Some(&mut carriers_v2),
+            &crate::ArenaRules::v2_free_for_all(),
+            20.0,
+            2,
+            resolve,
+        );
+        assert!(carriers_v2[1].at_rest(), "v2 must not hand speed over");
+
+        let (mut states_v3, mut carriers_v3) = (touching_pair(), carriers());
+        collide_states_with(
+            &mut states_v3,
+            None,
+            Some(&mut carriers_v3),
+            &rule_v3,
+            20.0,
+            2,
+            resolve,
+        );
+        assert!(
+            carriers_v3[1].velocity()[0] > 0,
+            "the resting body takes the push: {:?}",
+            carriers_v3[1].velocity()
+        );
+        assert!(
+            carriers_v3[0].velocity()[0] < 40,
+            "the sliding body gives speed"
+        );
     }
 
     #[test]
@@ -661,6 +790,178 @@ mod tests {
             balance_hashes(&v1),
             "the shove must reach the v2 balance"
         );
+    }
+
+    /// FEEL2: the row's law tests. A rules-v2 duel at arm's length: slot 0
+    /// swings the weapon under test at slot 1, which stands still. The
+    /// victim's travel is measured from the tick the blow lands to the tick
+    /// the knockback comes to rest.
+    ///
+    /// A weapon row for the victim, which never swings: the gladius numbers
+    /// under another name, so the row arms.
+    const BARE_ROW: &str =
+        "mass_g=1000 damage_permille=120 speed_ticks=15 recovery_ticks=8 stagger_permille=400";
+
+    /// The duel's tape: slot 0 swings on tick 0 and faces `facing`, every
+    /// fighter holds still.
+    fn duel_tape(config: &crate::ArenaConfig, facing: i16) -> crate::FighterTape {
+        let mut inputs = Vec::new();
+        for tick in 0..config.ticks {
+            for fighter in 0..config.fighters {
+                inputs.push(crate::FighterInput {
+                    tick,
+                    fighter: crate::FighterId::new(fighter).expect("slots 0..2 are legal"),
+                    mx: 0,
+                    mz: 0,
+                    facing: if fighter == 0 { facing } else { 0 },
+                    buttons: if tick == 0 && fighter == 0 {
+                        engine_input::Buttons(engine_input::fighter::ATTACK)
+                    } else {
+                        engine_input::Buttons::NONE
+                    },
+                });
+            }
+        }
+        crate::FighterTape(inputs)
+    }
+
+    /// A rules-v2 duel with the weapon under test in slot 0's hands and the
+    /// victim at `victim`. The attacker faces the victim, so the blow travels
+    /// from the attacker to the victim.
+    fn armed_duel(weapon: &str, facing: i16, victim: [f32; 3]) -> (crate::Sim, crate::FighterTape) {
+        let config = crate::ArenaConfig {
+            seed: 2040,
+            ticks: 200,
+            fighters: 2,
+            half_extent_m: 20.0,
+            table_version: engine_combat::tables::TABLES_VERSION_V2,
+        };
+        let tape = duel_tape(&config, facing);
+        let mut sim = crate::Sim::build(&config, &tape, false, false).expect("the duel builds");
+        sim.states[0].pos = [0.0, 0.0, 0.0];
+        sim.states[1].pos = victim;
+        sim.arm_weapon_rows(
+            &format!("{}\nbare {BARE_ROW}", crate::heft::WEAPONS_ROWS),
+            &[weapon, "bare"],
+        )
+        .expect("the rows arm");
+        (sim, tape)
+    }
+
+    /// Step the duel until the blow lands. Returns the sim on the tick the
+    /// blow landed, the pose the victim held before it, and the knockback
+    /// the blow handed the victim.
+    fn duel_to_hit(
+        mut sim: crate::Sim,
+        tape: &crate::FighterTape,
+    ) -> (crate::Sim, [f32; 3], crate::Knockback) {
+        let mut before = sim.states[1].pos;
+        while sim.tick < 200 {
+            sim.step(tape).expect("the duel steps");
+            let landed = sim.events.last().is_some_and(|row| {
+                row.events
+                    .iter()
+                    .any(|e| matches!(e, FightEvent::Hit { .. }))
+            });
+            if landed {
+                let carrier = sim.knockback[1];
+                return (sim, before, carrier);
+            }
+            before = sim.states[1].pos;
+        }
+        panic!("the duel never landed a blow");
+    }
+
+    /// Step the duel until the knockback comes to rest.
+    fn duel_to_rest(mut sim: crate::Sim, tape: &crate::FighterTape) -> crate::Sim {
+        let mut guard = 0;
+        while !sim.knockback[1].at_rest() {
+            sim.step(tape).expect("the duel steps");
+            guard += 1;
+            assert!(guard < 300, "the knockback must come to rest");
+        }
+        sim
+    }
+
+    /// How far the victim of a duel travels, in millimetres: the distance
+    /// between its pose when the blow lands and its pose at rest.
+    fn victim_travel_mm(weapon: &str) -> f32 {
+        let (sim, tape) = armed_duel(weapon, 0, [0.0, 0.0, 1.0]);
+        let (sim, before, _) = duel_to_hit(sim, &tape);
+        let sim = duel_to_rest(sim, &tape);
+        ((sim.states[1].pos[2] - before[2]) * 1000.0).abs()
+    }
+
+    /// FEEL2: a heavier blow moves the victim farther. The same duel with a
+    /// dagger and with a club: the club carries more momentum, so the victim
+    /// slides farther and the balance takes the heavier blow.
+    #[test]
+    fn a_heavier_blow_moves_the_victim_farther() {
+        let dagger = victim_travel_mm("pugio");
+        let club = victim_travel_mm("clava");
+        println!("pugio: {dagger} mm, clava: {club} mm");
+        assert!(dagger > 0.0, "the blow must move the victim");
+        assert!(
+            club > dagger,
+            "the club must move the victim farther: {club} vs {dagger}"
+        );
+    }
+
+    /// FEEL2: mirrored blows give mirrored knockback. The same blow lands
+    /// from the east and from the west: the victims' knockback carries
+    /// mirror around zero, tick for tick, and the bodies travel the same
+    /// distance the other way.
+    #[test]
+    fn mirrored_blows_give_mirrored_knockback() {
+        let (east, east_tape) = armed_duel("clava", 9_000, [1.0, 0.0, 0.0]);
+        let (west, west_tape) = armed_duel("clava", -9_000, [-1.0, 0.0, 0.0]);
+        let (east, east_before, east_carrier) = duel_to_hit(east, &east_tape);
+        let (west, west_before, west_carrier) = duel_to_hit(west, &west_tape);
+        let east = duel_to_rest(east, &east_tape);
+        let west = duel_to_rest(west, &west_tape);
+        let east_travel = (east.states[1].pos[0] - east_before[0]) * 1000.0;
+        let west_travel = (west.states[1].pos[0] - west_before[0]) * 1000.0;
+        assert!(east_travel > 0.0, "the east blow pushes the victim east");
+        assert!(west_travel < 0.0, "the west blow pushes the victim west");
+        assert!(
+            (east_travel + west_travel).abs() < 1.0,
+            "the mirrored blows travel the same distance: {east_travel} vs {west_travel}"
+        );
+        let mirrored = |a: &crate::Knockback, b: &crate::Knockback| {
+            a.velocity()[0] == -b.velocity()[0] && a.velocity()[1] == -b.velocity()[1]
+        };
+        engine_core::laws::mirror(
+            east_carrier,
+            west_carrier,
+            200,
+            |carrier: &mut crate::Knockback, _| carrier.step(),
+            mirrored,
+        )
+        .expect("mirrored blows mirror");
+    }
+
+    /// FEEL2: a knocked-back body comes to exact rest. The carrier stops at
+    /// zero and the body holds its pose, tick after tick.
+    #[test]
+    fn a_knocked_back_body_comes_to_exact_rest() {
+        let (sim, tape) = armed_duel("clava", 0, [0.0, 0.0, 1.0]);
+        let (sim, _, _) = duel_to_hit(sim, &tape);
+        let mut sim = duel_to_rest(sim, &tape);
+        let resting = sim.knockback[1];
+        assert!(resting.at_rest(), "the carrier must rest");
+        engine_core::laws::rest_stays_rest(resting, 600, |carrier: &mut crate::Knockback| {
+            carrier.step();
+            assert_eq!(carrier.velocity(), [0, 0], "a body at rest carries nothing");
+        })
+        .expect("rest stays rest");
+        // The body holds its pose: thirty more ticks move it not one
+        // thousandth of a millimetre.
+        let held = sim.states[1].pos;
+        for _ in 0..30 {
+            sim.step(&tape).expect("the duel steps");
+        }
+        let drift = ((sim.states[1].pos[2] - held[2]) * 1000.0).abs();
+        assert!(drift < 0.001, "a body at rest holds its pose: {drift} mm");
     }
 
     /// Paired receipt: the p50 microseconds of one bout tick's collision

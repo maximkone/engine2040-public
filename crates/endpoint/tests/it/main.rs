@@ -7,6 +7,7 @@
 
 mod collapse_fixtures;
 mod diagnostic_render_vectors;
+mod game_build;
 mod injection_door;
 mod jsonrpc_conformance_vectors;
 mod lib_std_wiring;

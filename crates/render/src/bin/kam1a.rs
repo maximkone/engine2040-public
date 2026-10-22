@@ -13,7 +13,7 @@ fn main() -> Result<(), engine_render::kam2_iso_proof::ProofError> {
 #[cfg(not(target_arch = "wasm32"))]
 fn target_png() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest.ancestors().nth(2).unwrap_or(Path::new("."));
+    let root = manifest.ancestors().nth(2).unwrap_or_else(|| Path::new("."));
     root.join("target").join("kam1a.png")
 }
 

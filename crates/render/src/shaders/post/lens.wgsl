@@ -101,7 +101,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let blue = sample_at(base - shift);
     var color = vec3<f32>(red.r, green.g, blue.b);
     color = color * vignette_at(uv, params.knobs.z);
-    let noise = grain_at(gid.x, gid.y, params.dims.z) * params.knobs.w;
+    // RL39: grain lives in the mid tones only. The mask is exactly 0 at pure
+    // black and pure white (matches the CPU oracle's `dot_luma` mask), so a
+    // true black and a clipped highlight never gain a noise step.
+    let luma = clamp(dot(color, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    let grain_mask = 4.0 * luma * (1.0 - luma);
+    let noise = grain_at(gid.x, gid.y, params.dims.z) * params.knobs.w * grain_mask;
     color = color + vec3<f32>(noise);
     let index = gid.y * w + gid.x;
     lens_out[index] = vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
