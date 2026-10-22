@@ -6,8 +6,12 @@
 // no arms; attempt 4 asked for a lean one with the arms out and got a
 // character with a jaw, elbows, knees and a shield. The input is the lever.
 //
-//   node tools/asset-gen/concepts.mjs            all twenty
-//   node tools/asset-gen/concepts.mjs --only ashkin_gunner
+//   node tools/asset-gen/concepts.mjs --help                  usage, no network
+//   node tools/asset-gen/concepts.mjs --dry-run               the jobs it would run; no network, no writes
+//   node tools/asset-gen/concepts.mjs --yes                   all twenty, for real
+//   node tools/asset-gen/concepts.mjs --only ashkin_gunner --yes
+//
+// Without --yes nothing is requested: the plan prints and the exit code is 2.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -16,6 +20,20 @@ const ROOT = "C:\\engine2040";
 const OUT = join(ROOT, "content", "generated", "concepts");
 const ENDPOINT = "https://stable-diffusion-xl.endpoints.kepler.ai.cloud.ovh.net/api/text2image";
 const NEGATIVE = "text, watermark, extra limbs, extra fingers, blurry, lowres, jpeg artifacts, photorealistic, multiple characters, scenery, background objects";
+
+const USAGE = `usage: node tools/asset-gen/concepts.mjs [--only <class_id>] [--delay <s>] [--dry-run | --yes]
+
+  Writes one front-view concept picture per class, from content/classes/roster.json,
+  to content/generated/concepts/concept_<id>.jpg with a .provenance.json beside it.
+
+  Cost: one image request to the image endpoint per class (20 for the full roster).
+  Nothing is requested without --yes.
+
+  --only <id>   one class
+  --delay <s>   seconds between requests (default 35; the endpoint allows 2 a minute)
+  --dry-run     print the jobs it would run; no network, no writes; exit 0
+  --yes         run the jobs; without it the plan prints and the exit code is 2
+  --help        this text; exit 0`;
 
 // The two faction palettes, in words the model understands.
 const WARDEN_COLOUR = "bone white and silver plate armour with gold trim, steel blue cloth, leather straps";
@@ -61,6 +79,13 @@ function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
+const has = (name) => process.argv.includes(`--${name}`);
+
+// Help is answered before anything else is read or sent.
+if (has("help")) {
+  console.log(USAGE);
+  process.exit(0);
+}
 
 async function fetchOne(prompt) {
   const res = await fetch(ENDPOINT, {
@@ -81,10 +106,36 @@ async function fetchOne(prompt) {
 }
 
 const roster = JSON.parse(readFileSync(join(ROOT, "content", "classes", "roster.json"), "utf8"));
-mkdirSync(OUT, { recursive: true });
 const only = arg("only");
 const list = roster.classes.filter((c) => !only || c.id === only);
 const delay = Number(arg("delay", "35")) * 1000;
+
+// One job per class: the picture's name and its prompt. Null when the class has no spec.
+function jobFor(cls) {
+  const spec = SPECS[cls.id];
+  if (!spec) return null;
+  const colour = cls.faction === "wardens" ? WARDEN_COLOUR : ASHKIN_COLOUR;
+  return { name: `concept_${cls.id}`, prompt: TEMPLATE(spec[0], spec[1], spec[2], colour) };
+}
+
+// The dry run and the default without --yes both stop here, before any
+// directory is made or any request is sent.
+if (has("dry-run") || !has("yes")) {
+  const jobs = list.map((cls) => ({ cls, job: jobFor(cls) }));
+  const runnable = jobs.filter((j) => j.job).length;
+  console.log(`${has("dry-run") ? "dry run" : "plan"}: ${runnable} image job(s), ${delay / 1000}s apart, endpoint ${ENDPOINT}`);
+  for (const { cls, job } of jobs) {
+    if (!job) {
+      console.log(`  skip ${cls.id}: no spec`);
+      continue;
+    }
+    console.log(`  ${cls.id}: ${join(OUT, `${job.name}.jpg`)} + ${job.name}.provenance.json`);
+    console.log(`    prompt: ${job.prompt}`);
+  }
+  if (has("dry-run")) process.exit(0);
+  console.error(`nothing was requested: add --yes to spend (${runnable} image job(s))`);
+  process.exit(2);
+}
 
 // The art brief is the class sheet: a hash of the loadout, so the gate can
 // tell that the sheet moved and the drawing is stale.
@@ -93,17 +144,16 @@ function loadoutHash(id) {
   return createHash("sha256").update(JSON.stringify(sheet.loadout ?? {})).digest("hex").slice(0, 12);
 }
 
+mkdirSync(OUT, { recursive: true });
 console.log(`generating ${list.length} concept(s) at ${delay / 1000}s apart`);
 for (let i = 0; i < list.length; i++) {
   const cls = list[i];
-  const spec = SPECS[cls.id];
-  if (!spec) {
+  const job = jobFor(cls);
+  if (!job) {
     console.log(`skip ${cls.id}: no spec`);
     continue;
   }
-  const colour = cls.faction === "wardens" ? WARDEN_COLOUR : ASHKIN_COLOUR;
-  const prompt = TEMPLATE(spec[0], spec[1], spec[2], colour);
-  const name = `concept_${cls.id}`;
+  const { name, prompt } = job;
   try {
     const bytes = await fetchOne(prompt);
     const path = join(OUT, `${name}.jpg`);

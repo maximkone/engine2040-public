@@ -72,19 +72,21 @@ impl Presenter {
         width: u32,
         height: u32,
     ) -> Result<Self, PresentError> {
-        Self::init_windowed_with_preset(instance, surface, width, height, false)
+        Self::init_windowed_with_preset(instance, surface, width, height, false, false)
     }
 
     /// The windowed presenter under one sky preset. `night` picks the
     /// arena night rig: the moonlit sky, its ambient and its fog, so the
     /// placement's torches are the light the frame reads. The day rig is
-    /// the default and keeps every existing capture byte-equal.
+    /// the default and keeps every existing capture byte-equal. `uncapped`
+    /// picks Immediate or Mailbox present mode instead of Fifo (vsync).
     pub fn init_windowed_with_preset(
         instance: &wgpu::Instance,
         surface: wgpu::Surface<'static>,
         width: u32,
         height: u32,
         night: bool,
+        uncapped: bool,
     ) -> Result<Self, PresentError> {
         if SizeClass::classify(width, height) != SizeClass::Sizes {
             return Err(PresentError::InvalidSize { width, height });
@@ -106,7 +108,7 @@ impl Presenter {
         let support = Self::msaa_support_for(&adapter);
         let mut presenter = Self::build_with_preset(device, queue, info, support, night)?;
         presenter.backend_selection = selection;
-        presenter.attach_surface(instance, surface, width, height)?;
+        presenter.attach_surface(instance, surface, width, height, uncapped)?;
         Ok(presenter)
     }
 
@@ -123,18 +125,20 @@ impl Presenter {
         width: u32,
         height: u32,
     ) -> Result<Self, PresentError> {
-        Self::init_for_window_with_preset(window, width, height, false)
+        Self::init_for_window_with_preset(window, width, height, false, false)
     }
 
     /// The visible presenter under one sky preset. `night` picks the arena
     /// night rig: the moonlit sky, its ambient and its fog, so the
     /// placement's torches are the light the frame reads. The day rig is
-    /// the default and keeps every existing capture byte-equal.
+    /// the default and keeps every existing capture byte-equal. `uncapped`
+    /// picks Immediate or Mailbox present mode instead of Fifo (vsync).
     pub fn init_for_window_with_preset(
         window: Arc<Window>,
         width: u32,
         height: u32,
         night: bool,
+        uncapped: bool,
     ) -> Result<Self, PresentError> {
         if SizeClass::classify(width, height) != SizeClass::Sizes {
             return Err(PresentError::InvalidSize { width, height });
@@ -143,6 +147,6 @@ impl Presenter {
         let pick = crate::backend::pick_backend(choice, None);
         let instance = crate::backend::new_instance(crate::backend::wgpu_backends(pick.primary));
         let surface = crate::present::gpu_present::create_surface(&instance, window)?;
-        Self::init_windowed_with_preset(&instance, surface, width, height, night)
+        Self::init_windowed_with_preset(&instance, surface, width, height, night, uncapped)
     }
 }

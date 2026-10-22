@@ -2,10 +2,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   argValue, chooseLane, gateVerdict, mpfbPlan, pngSize, glbImages, budgetCheck,
-  receiptLine, buildReceipt, PAGE, FILL_MIN, FILL_MAX,
+  receiptLine, buildReceipt, PAGE, FILL_MIN, FILL_MAX, rocketboxPlan, ROOT,
 } from "./character.mjs";
+import {
+  parseAvatar, parseListing, listingText, fetchPlan, alreadyHave, curlArgs,
+  pickFbx, provenance, MEDIA, RAW, DEFAULT_HOME,
+} from "./rocketbox.mjs";
 
 test("argValue reads a flag's value, or the fallback", () => {
   const argv = ["node", "x", "--name", "probe", "--height"];
@@ -19,7 +26,8 @@ test("chooseLane: --from wins, --concept means the image lane, nothing means non
   assert.equal(chooseLane(["--from", "concept", "--concept", "a.jpg"]), "concept");
   assert.equal(chooseLane(["--concept", "a.jpg"]), "concept");
   assert.equal(chooseLane(["--name", "x"]), null);
-  assert.throws(() => chooseLane(["--from", "sf3d"]), /--from takes concept or mpfb/);
+  assert.equal(chooseLane(["--from", "rocketbox"]), "rocketbox");
+  assert.throws(() => chooseLane(["--from", "sf3d"]), /--from takes concept, mpfb or rocketbox/);
 });
 
 test("gateVerdict: the band edges pass, outside them says why", () => {
@@ -150,4 +158,126 @@ test("receiptLine prints the one line with tris, atlas, fill, gate and budget", 
   assert.match(line, /budget fail: lod0 2500 tris over the 2000 tri budget \| 312\.4 s$/);
   assert.equal(receipt.lods[1].bytes, 131152);
   assert.match(receipt.next_step, /not wired into the game/);
+});
+
+// ------------------------------------------------------- the Rocketbox lane
+
+test("parseAvatar takes Group/Name and refuses anything else", () => {
+  assert.deepEqual(parseAvatar("Adults/Male_Adult_08"), {
+    group: "Adults", name: "Male_Adult_08", path: "Assets/Avatars/Adults/Male_Adult_08",
+  });
+  assert.equal(parseAvatar("Professions/Military_Male_01").name, "Military_Male_01");
+  assert.throws(() => parseAvatar("Robots/Male_Adult_08"), /Group one of Adults, Children, Professions/);
+  assert.throws(() => parseAvatar("Adults/../etc"), /<Group>\/<Name>/);
+  assert.throws(() => parseAvatar("Male_Adult_08"), /<Group>\/<Name>/);
+  assert.throws(() => parseAvatar(undefined), /<Group>\/<Name>/);
+});
+
+test("parseListing reads name and size lines and refuses a bad one", () => {
+  const entries = parseListing("m014_body_color.tga 12582956\r\nm014_opacity_color.tga 16777260\n");
+  assert.deepEqual(entries, [
+    { name: "m014_body_color.tga", size: 12582956 },
+    { name: "m014_opacity_color.tga", size: 16777260 },
+  ]);
+  assert.equal(listingText(entries), "m014_body_color.tga 12582956\nm014_opacity_color.tga 16777260\n");
+  assert.throws(() => parseListing("no_size_here\n"), /bad listing line/);
+  assert.throws(() => parseListing("name.tga -4\n"), /bad listing line/);
+});
+
+test("pickFbx takes the main FBX, not the _facial one, and refuses when it is missing", () => {
+  const avatar = parseAvatar("Adults/Male_Adult_08");
+  const list = parseListing("Male_Adult_08_facial.fbx 1913408\nMale_Adult_08.fbx 508784\n");
+  assert.deepEqual(pickFbx(list, avatar), { name: "Male_Adult_08.fbx", size: 508784 });
+  assert.throws(() => pickFbx(parseListing("other.fbx 1\n"), avatar), /no Male_Adult_08.fbx/);
+});
+
+test("fetchPlan: the FBX from media first with raw as fallback, textures from raw, skips by size", () => {
+  const avatar = parseAvatar("Adults/Male_Adult_08");
+  const home = join("H:", "rocketbox");
+  const items = fetchPlan({
+    home, avatar,
+    fbx: { name: "Male_Adult_08.fbx", size: 508784 },
+    textures: [{ name: "m014_body_color.tga", size: 12582956 }, { name: "m014_opacity_color.tga", size: 16777260 }],
+  });
+  assert.equal(items.length, 3);
+  assert.equal(items[0].kind, "fbx");
+  assert.equal(items[0].urls[0], `${MEDIA}/Assets/Avatars/Adults/Male_Adult_08/Export/Male_Adult_08.fbx`);
+  assert.equal(items[0].urls[1], `${RAW}/Assets/Avatars/Adults/Male_Adult_08/Export/Male_Adult_08.fbx`);
+  assert.equal(items[1].urls.length, 1);
+  assert.ok(items[1].urls[0].startsWith("https://raw.githubusercontent.com/"));
+  assert.equal(items[1].dest, join(home, "Male_Adult_08", "Textures", "m014_body_color.tga"));
+  // A file already at its listed size is skipped; a partial one is fetched again.
+  const sizes = { [items[0].dest]: 508784, [items[1].dest]: 100, [items[2].dest]: -1 };
+  const sizeOf = (p) => (p in sizes ? sizes[p] : -1);
+  assert.deepEqual(items.map((i) => alreadyHave(i, sizeOf)), [true, false, false]);
+});
+
+test("curlArgs caps the rate, retries and resumes into the destination", () => {
+  const args = curlArgs("https://example.invalid/x.tga", "H:/x.tga");
+  assert.ok(args.includes("--fail"));
+  assert.equal(args[args.indexOf("--limit-rate") + 1], "3M");
+  assert.equal(args[args.indexOf("--retry") + 1], "3");
+  assert.equal(args[args.indexOf("-C") + 1], "-");
+  assert.equal(args[args.indexOf("-o") + 1], "H:/x.tga");
+  assert.equal(args[args.length - 1], "https://example.invalid/x.tga");
+});
+
+test("provenance records the repo, the path, MIT and the file counts", () => {
+  const avatar = parseAvatar("Professions/Military_Male_01");
+  const p = provenance({ avatar, fbxName: "Military_Male_01.fbx", textures: [{}, {}], bytes: 9, now: new Date(0) });
+  assert.equal(p.licence, "MIT");
+  assert.equal(p.source, "https://github.com/microsoft/Microsoft-Rocketbox");
+  assert.equal(p.path, "Assets/Avatars/Professions/Military_Male_01");
+  assert.equal(p.textures, 2);
+  assert.equal(p.fetched_at, "1970-01-01T00:00:00.000Z");
+  assert.equal(DEFAULT_HOME, "C:\\forge-media\\rocketbox");
+});
+
+test("rocketboxPlan: fetch, then cook, then the 30 m gate, with the proven arguments", () => {
+  const home = join("H:", "rocketbox");
+  const out = join("C:", "out", "rb_male08");
+  const avatar = parseAvatar("Adults/Male_Adult_08");
+  const steps = rocketboxPlan({ root: "R", blender: "B.exe", node: "N.exe", home, out, avatar, tris0: 7400 });
+  assert.deepEqual(steps.map((s) => s.label), ["fetch (rocketbox.mjs)", "cook (Blender, bones and maps)", "30 m gate"]);
+  const [fetch, cook, gate] = steps;
+  assert.equal(fetch.command, "N.exe");
+  assert.ok(fetch.args.some((a) => a.endsWith(join("tools", "asset-gen", "rocketbox.mjs"))));
+  assert.deepEqual(fetch.args.slice(-4), ["--avatar", "Adults/Male_Adult_08", "--home", home]);
+  assert.equal(fetch.writes, join(home, "Male_Adult_08", "Export", "Male_Adult_08.fbx"));
+  assert.equal(fetch.inherit, true);
+  assert.equal(cook.command, "B.exe");
+  assert.ok(cook.args.some((a) => a.endsWith("rocketbox_cook.py")));
+  const dash = cook.args.indexOf("--");
+  assert.equal(cook.args[dash + 1], fetch.writes);
+  assert.equal(cook.args[dash + 2], join(out, "cook"));
+  assert.deepEqual(cook.args.slice(-2), ["--tris0", "7400"]);
+  assert.equal(cook.writes, join(out, "cook", "cook.json"));
+  assert.ok(gate.args.some((a) => a.endsWith("mesh_silhouette.py")));
+  assert.ok(gate.args.some((a) => a.endsWith(join("cook", "lod0.glb"))));
+  assert.equal(gate.writes, join(out, "gate", "silhouette.json"));
+});
+
+test("the rocketbox dry run plans from the listing cache and touches no network", () => {
+  // A guard: the gh binary is replaced by a missing name on PATH, so any call
+  // to GitHub fails the run. With textures.txt present, none is made.
+  const home = mkdtempSync(join(tmpdir(), "rb-dry-"));
+  try {
+    const dir = join(home, "Male_Adult_08");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "textures.txt"), "m014_body_color.tga 12582956\n", "utf8");
+    const env = { ...process.env, PATH: join(home, "no-such-bin"), HTTPS_PROXY: "http://127.0.0.1:9", https_proxy: "http://127.0.0.1:9" };
+    const r = spawnSync(process.execPath, [join(ROOT, "tools", "asset-gen", "rocketbox.mjs"),
+      "--avatar", "Adults/Male_Adult_08", "--home", home, "--dry-run"], { encoding: "utf8", env });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /dry run: nothing fetched, nothing written/);
+    assert.match(r.stdout, /get  texture m014_body_color.tga 12582956/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("rocketbox.mjs --help prints the usage and exits 0 without any work", () => {
+  const r = spawnSync(process.execPath, [join(ROOT, "tools", "asset-gen", "rocketbox.mjs"), "--help"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /usage: node tools\/asset-gen\/rocketbox.mjs --avatar/);
 });

@@ -434,6 +434,8 @@ fn parse_window_size(raw: &str) -> Result<(u32, u32), WinError> {
 /// `--size <width>x<height>` names the window inner size in pixels (both
 /// sides whole numbers in `320..=2048`); without it the window opens at
 /// [`WINDOW_SIZE`], so a default run is byte-identical to today.
+/// `--uncapped` picks Immediate or Mailbox present mode instead of Fifo
+/// (vsync); captures use it, default is vsync-paced.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct WinArgs {
     /// Fixed ticks (and frames) to run when `Some`; unbounded window play
@@ -475,6 +477,9 @@ pub struct WinArgs {
     /// `320..=2048`. The window opens at this size and the camera aspect
     /// follows the real window, so a 1080p run measures 1080p.
     pub window_size: Option<(u32, u32)>,
+    /// Uncapped present mode: pick Immediate or Mailbox instead of Fifo.
+    /// `--uncapped` for captures; default is vsync-paced (Fifo).
+    pub uncapped: bool,
 }
 
 impl WinArgs {
@@ -701,6 +706,7 @@ fn apply_win_flag(
             let raw = flag_value(rest, *index, "--size")?;
             out.window_size = Some(parse_window_size(raw)?);
         }
+        "--uncapped" => out.uncapped = true,
         other => return Err(WinError::BadArgs(other.to_string())),
     }
     Ok(())
@@ -735,6 +741,7 @@ impl WinArgs {
             present_skip: false,
             fixed_dt_ms: None,
             window_size: None,
+            uncapped: false,
         };
         // Skip argv[0] when it does not look like a flag (the program name).
         let rest: &[String] = match args.first() {

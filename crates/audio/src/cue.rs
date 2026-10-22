@@ -1008,6 +1008,24 @@ impl ImpactRouter {
             .next_take(cue.variants.len());
         Some(RoutedImpact { name, id, take })
     }
+
+    /// Route one blow the caller already named: the id of the cue called
+    /// `name` in the bank and the next take of it. `None` when the bank
+    /// lacks the cue.
+    ///
+    /// The window knows the cue name (the table named it) but not the
+    /// (kind, surface) pair that produced it, so it routes by name. The
+    /// round robin is the same one [`Self::route`] walks: one cycle per cue,
+    /// so two blows of the same cue take different takes in turn.
+    pub fn route_name(&mut self, name: &str) -> Option<(CueId, usize)> {
+        let id = self.bank.id(name)?;
+        let cue = self.bank.cue(id)?;
+        let take = self
+            .cycles
+            .get_mut(usize::from(id.0))?
+            .next_take(cue.variants.len());
+        Some((id, take))
+    }
 }
 
 /// Seeded variant choice for one cue: uniform over the variants except the
@@ -1533,6 +1551,37 @@ mod tests {
             takes.len() >= 12,
             "the table reaches 12 or more distinct takes: {}",
             takes.len()
+        );
+    }
+
+    /// The window knows the cue name, not the (kind, surface) pair, so it
+    /// routes by name. The round robin is the same one the table route
+    /// walks: two blows of the same cue take different takes in turn, and
+    /// the same seed replays the same takes.
+    #[test]
+    fn routing_by_name_walks_the_same_round_robin() {
+        let bank = Arc::new(CueBank::placeholder(48_000).expect("shipped table is valid"));
+        let mut router = ImpactRouter::new(Arc::clone(&bank), 2040);
+        let name = impact_cue(ImpactKind::Hit, ImpactSurface::Flesh);
+        let mut takes = Vec::new();
+        for _ in 0..6 {
+            let (id, take) = router.route_name(name).expect("the bank carries the cue");
+            let cue = bank.cue(id).expect("id resolves");
+            assert!(take < cue.variants.len());
+            takes.push((id, take));
+        }
+        assert!(
+            takes.windows(2).all(|w| w[0] != w[1]),
+            "the same take twice in a row: {takes:?}"
+        );
+        let mut again = ImpactRouter::new(Arc::clone(&bank), 2040);
+        let replay: Vec<(CueId, usize)> = (0..6)
+            .map(|_| again.route_name(name).expect("the bank carries the cue"))
+            .collect();
+        assert_eq!(takes, replay, "same seed, same takes");
+        assert!(
+            router.route_name("no_such_cue").is_none(),
+            "a name the bank lacks routes nothing"
         );
     }
 }

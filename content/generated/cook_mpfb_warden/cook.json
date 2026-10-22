@@ -12,15 +12,15 @@
       ]
     },
     {
-      "atlas": "(solid)",
-      "atlas_size": 0,
-      "distinct_colors": 1,
-      "image": "(solid)",
+      "atlas": "atlas_1_face_skin.png",
+      "atlas_size": 512,
+      "distinct_colors": 3,
+      "image": "face_skin",
       "material": "skin",
       "skin": true,
       "source_size": [
-        0,
-        0
+        512,
+        512
       ]
     },
     {

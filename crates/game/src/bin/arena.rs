@@ -2616,7 +2616,7 @@ impl ArenaApp {
         // its ambient and its fog), so the placement's torches are the light
         // the frame reads. Off by default: the day frame keeps the day rig
         // and stays byte-equal.
-        match Presenter::init_for_window_with_preset(Arc::clone(window), width, height, self.night)
+        match Presenter::init_for_window_with_preset(Arc::clone(window), width, height, self.night, self.args.uncapped)
         {
             Ok(mut presenter) => {
                 // The live frame never waits on the GPU: fog is a fragment

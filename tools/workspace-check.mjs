@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { SIM_CRATES } from "./rust-quality.mjs";
 import { archivedDoneRows, needsOf } from "./board-slice.mjs";
 import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
-import { OWN_MATH_FILES, deriveFixedApi, genreFindings, ioHits, platformMathHits, productionCode } from "./sim-source-scan.mjs";
+import { OWN_MATH_FILES, deriveFixedApi, genreFindings, ioHits, platformMathHits, productionCode, softFloatHits } from "./sim-source-scan.mjs";
 import { runWithVerdictCache, scanIslandsFrom } from "./wiring-scan.mjs";
 import { rowsWithReason, scan as scanUnwired, summaryLine as unwiredSummaryLine } from "./unwired-code-gate.mjs";
 
@@ -1058,6 +1058,22 @@ function audit(repoDir) {
   }
   if (mathFindings.length && DETERMINISM_STRICT) {
     errors.push(`platform float math in simulation code (a Fixed call passes only when its receiver is provably Fixed in the file: use a typed binding like \`let a: Fixed = ..\`): ${mathFindings.join(", ")}`);
+  }
+
+  // HX20: the soft float is owned by engine-core — the slow, exact determinism
+  // tier between Fixed and the float physfx layer. A production file outside
+  // crates/core naming soft_float/SoftFloat fails; opening a new crate for it
+  // is an edit here with a reason in the commit.
+  const softFloatFindings = [];
+  for (const pkg of workspacePackages.filter((p) => p.name !== "engine-core")) {
+    for (const file of crateFilesByPkg.get(pkg.name) ?? []) {
+      const rel = relative(crates, file).split("\\").join("/");
+      const names = softFloatHits(cachedRead(file));
+      if (names.length) softFloatFindings.push(`${rel} (${names.join(", ")})`);
+    }
+  }
+  if (softFloatFindings.length) {
+    errors.push(`soft float outside engine-core (the type is rejected outside the crates that own it, HX20): ${softFloatFindings.join(", ")}`);
   }
 
   // GE2 genre-assumption ledger, re-audited by GE11 (2026-10-18, 85 files):

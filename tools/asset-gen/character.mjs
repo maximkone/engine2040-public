@@ -14,6 +14,18 @@
 //   tools/blender/mesh_silhouette.py  the 30 m read test (fill band)
 //   tools/blender/rig22.py            our 22-bone template
 //
+// --from rocketbox (realistic people, Microsoft Rocketbox avatars, MIT):
+//
+//   node tools/asset-gen/character.mjs --from rocketbox --avatar Adults/Male_Adult_08 --name rb_male08 \
+//     [--home C:\forge-media\rocketbox] [--tris0 7400] [--out target/chargen/rb_male08]
+//   (Group is Adults, Children or Professions. The FBX and textures are fetched
+//   once into --home, resumable; nothing downloaded goes into the repo.)
+//
+//   tools/asset-gen/rocketbox.mjs     fetch the avatar (MIT, resumable, 3 MB/s cap)
+//   tools/blender/rocketbox_cook.py   bone names, PNG maps, LOD0-3 GLBs, hero.png
+//   tools/blender/mesh_silhouette.py  the 30 m read test (fill band)
+//   the page's budget check           the same budgetCheck as the MPFB lane
+//
 // --concept (the older image lane, unchanged):
 //
 //   node tools/asset-gen/character.mjs --concept content/generated/concepts/ashkin_gunner_02.jpg \
@@ -31,6 +43,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseAvatar, DEFAULT_HOME } from "./rocketbox.mjs";
 
 export const ROOT = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", ".."));
 
@@ -51,6 +64,11 @@ export const PAGE = Object.freeze({
   memoryBytes: 19988480,
 });
 
+export const NEXT_STEP_ROCKETBOX =
+  "not wired into the game: the cooked lod0..lod3 GLBs are in the out folder, and nothing " +
+  "puts them into content/fighters or a manifest row. crates/assets/src/rocketbox_map.rs " +
+  "already names the 52 joints by the contract charset (bip01_l_upperarm and so on).";
+
 export const NEXT_STEP =
   "not wired into the game: nothing puts a cooked MPFB body into content/fighters " +
   "(no glb/ file, no manifest.json row), so fighters.e2bundle is never rebuilt from it. " +
@@ -70,8 +88,8 @@ export function argValue(argv, name, fallback = null) {
 export function chooseLane(argv) {
   const from = argValue(argv, "from");
   if (from === null) return argValue(argv, "concept") !== null ? "concept" : null;
-  if (from === "concept" || from === "mpfb") return from;
-  throw new Error(`--from takes concept or mpfb, not ${from}`);
+  if (from === "concept" || from === "mpfb" || from === "rocketbox") return from;
+  throw new Error(`--from takes concept, mpfb or rocketbox, not ${from}`);
 }
 
 export function gateVerdict(fill) {
@@ -127,6 +145,41 @@ export function mpfbPlan({ root = ROOT, blender, out, faction, height, bulk, tri
       args: [...headless, "-P", join(tools, "rig22.py"),
         "--", join(cook, "lod0.glb"), rig],
       writes: rig,
+    },
+  ];
+}
+
+// The steps of the Rocketbox lane, in order. The fetch is the one step that
+// touches the network, and it is resumable: a file already on disk at its
+// listed size is not downloaded again.
+export function rocketboxPlan({ root = ROOT, blender, node = process.execPath, home, out, avatar, tris0 }) {
+  const tools = join(root, "tools", "blender");
+  const fbx = join(home, avatar.name, "Export", `${avatar.name}.fbx`);
+  const cook = join(out, "cook");
+  const gate = join(out, "gate");
+  const headless = ["-b", "--factory-startup", "--python-exit-code", "1"];
+  return [
+    {
+      label: "fetch (rocketbox.mjs)",
+      command: node,
+      args: [join(root, "tools", "asset-gen", "rocketbox.mjs"),
+        "--avatar", `${avatar.group}/${avatar.name}`, "--home", home],
+      writes: fbx,
+      inherit: true,
+    },
+    {
+      label: "cook (Blender, bones and maps)",
+      command: blender,
+      args: [...headless, "-P", join(tools, "rocketbox_cook.py"),
+        "--", fbx, cook, "--tris0", String(tris0)],
+      writes: join(cook, "cook.json"),
+    },
+    {
+      label: "30 m gate",
+      command: blender,
+      args: [...headless, "-P", join(tools, "mesh_silhouette.py"),
+        "--", join(cook, "lod0.glb"), gate],
+      writes: join(gate, "silhouette.json"),
     },
   ];
 }
@@ -278,7 +331,8 @@ function runMpfbStep(step) {
       cwd: ROOT,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
+      // A download shows its progress meter; the Blender steps keep their output.
+      stdio: step.inherit ? ["ignore", "inherit", "inherit"] : ["ignore", "pipe", "pipe"],
       timeout: 4 * 60 * 60 * 1000,
     });
   } catch (err) {
@@ -366,6 +420,91 @@ function runMpfb(argv) {
   console.log(receiptLine(receipt));
   console.log(`WROTE ${join(out, "receipt.json")}`);
   console.log(`next step: ${NEXT_STEP}`);
+  if (budget.verdict !== "pass") {
+    console.error(`character: the cook is over the page's budget: ${budget.findings.join("; ")}`);
+    process.exit(3);
+  }
+}
+
+// The page's budget for a cooked lod0, read from the GLB the cook wrote.
+function rocketboxBudget(out, tris) {
+  const cookJson = readJson(join(out, "cook", "cook.json"));
+  const lod0 = readFileSync(join(out, "cook", "lod0.glb"));
+  const atlases = glbImages(lod0).map((image) => {
+    const size = pngSize(image.bytes);
+    if (!size) fail(`lod0 carries a non-PNG image (${image.mimeType}), the budget cannot be read`);
+    return { ...size, bytes: image.bytes.length };
+  });
+  return budgetCheck({
+    lod0Triangles: cookJson.lods[0].triangles,
+    trisBudget: tris,
+    laneBytes: lod0.length,
+    atlases,
+  });
+}
+
+function runRocketbox(argv) {
+  const name = argValue(argv, "name");
+  const avatarSpec = argValue(argv, "avatar");
+  if (!name) fail("--from rocketbox needs --name <id>");
+  if (!avatarSpec) fail("--from rocketbox needs --avatar <Group>/<Name>, e.g. Adults/Male_Adult_08");
+  let avatar;
+  try {
+    avatar = parseAvatar(avatarSpec);
+  } catch (err) {
+    fail(err.message);
+  }
+  const home = resolve(argValue(argv, "home", DEFAULT_HOME));
+  const tris = Number(argValue(argv, "tris0", "7400"));
+  if (!(tris > 0)) fail("--tris0 must be a positive number");
+
+  const out = resolve(ROOT, argValue(argv, "out", `target/chargen/${name}`));
+  mkdirSync(join(out, "cook"), { recursive: true });
+  mkdirSync(join(out, "gate"), { recursive: true });
+  const started = Date.now();
+  const seconds = {};
+  const outputs = {};
+  const plan = rocketboxPlan({ blender: blender(), home, out, avatar, tris0: tris });
+  for (const step of plan) {
+    const result = runMpfbStep(step);
+    seconds[step.label] = result.seconds;
+    outputs[step.label] = result.output;
+    if (step.label === "30 m gate") {
+      const silhouette = readJson(join(out, "gate", "silhouette.json"));
+      const verdict = gateVerdict(silhouette.bbox_fill);
+      if (verdict !== "pass") {
+        // The receipt still carries the budget numbers, so the owner sees both.
+        seconds.total = elapsed(started);
+        const receipt = buildReceipt({
+          name, faction: "rocketbox", tris, seconds, cookJson: readJson(join(out, "cook", "cook.json")),
+          lodBytes: lodByteSizes(out), silhouette, rig: null, budget: rocketboxBudget(out, tris),
+          verdict, stopped: step.label,
+        });
+        receipt.next_step = NEXT_STEP_ROCKETBOX;
+        writeReceipt(out, receipt);
+        console.log(receiptLine(receipt));
+        console.error(`character: the silhouette does not read (${verdict}). ` +
+          `Look at ${join(out, "gate", "silhouette_30m.png")} before painting anything.`);
+        process.exit(3);
+      }
+    }
+  }
+
+  const cookJson = readJson(join(out, "cook", "cook.json"));
+  const silhouette = readJson(join(out, "gate", "silhouette.json"));
+  const budget = rocketboxBudget(out, tris);
+  seconds.total = elapsed(started);
+  const receipt = buildReceipt({
+    name, faction: "rocketbox", tris, seconds, cookJson, lodBytes: lodByteSizes(out), silhouette,
+    rig: null, budget, verdict: budget.verdict === "pass" ? "pass" : "budget_fail", stopped: null,
+  });
+  receipt.next_step = NEXT_STEP_ROCKETBOX;
+  receipt.avatar = { group: avatar.group, name: avatar.name, licence: cookJson.licence, sha256: cookJson.source.sha256 };
+  writeReceipt(out, receipt);
+  console.log(receiptLine(receipt));
+  console.log(`WROTE ${join(out, "receipt.json")}`);
+  console.log(`hero: ${join(out, "cook", "hero.png")}`);
+  console.log(`next step: ${NEXT_STEP_ROCKETBOX}`);
   if (budget.verdict !== "pass") {
     console.error(`character: the cook is over the page's budget: ${budget.findings.join("; ")}`);
     process.exit(3);
@@ -498,8 +637,10 @@ function runConcept(argv) {
 export function main(argv = process.argv) {
   const lane = chooseLane(argv);
   if (lane === "mpfb") return runMpfb(argv);
+  if (lane === "rocketbox") return runRocketbox(argv);
   if (lane === "concept") return runConcept(argv);
-  fail("--concept <image> (the image lane) or --from mpfb --name <id> --faction <f> (the body lane) is required");
+  fail("--concept <image> (the image lane), --from mpfb --name <id> --faction <f> (the body lane) " +
+    "or --from rocketbox --avatar <Group>/<Name> --name <id> (the realistic lane) is required");
 }
 
 // Run only as the command, so the tests can import the pure parts.

@@ -57,7 +57,8 @@ impl Presenter {
     /// adapter and device asynchronously and hands the results here. `adapter`
     /// is the one `device` came from, `instance` the one that created
     /// `surface` (kept alive by the presenter). The native constructors above
-    /// are unchanged. Zero area fails loudly like `init_windowed`.
+    /// are unchanged. Zero area fails loudly like `init_windowed`. `uncapped`
+    /// picks Immediate or Mailbox present mode instead of Fifo (vsync).
     pub fn init_from_device(
         instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
@@ -66,12 +67,13 @@ impl Presenter {
         surface: wgpu::Surface<'static>,
         width: u32,
         height: u32,
+        uncapped: bool,
     ) -> Result<Self, PresentError> {
         if SizeClass::classify(width, height) != SizeClass::Sizes {
             return Err(PresentError::InvalidSize { width, height });
         }
         let mut presenter = Self::init_offscreen_from_device(adapter, device, queue)?;
-        presenter.attach_surface_for(instance, adapter, surface, width, height)?;
+        presenter.attach_surface_for(instance, adapter, surface, width, height, uncapped)?;
         Ok(presenter)
     }
 

@@ -685,7 +685,7 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
     pipeline_warmup::reset();
     let work_queue = queue.clone();
     let mut presenter =
-        Presenter::init_from_device(&instance, &adapter, device, queue, surface, w, h)
+        Presenter::init_from_device(&instance, &adapter, device, queue, surface, w, h, false)
             .map_err(|e| present_failure(&e))?;
     presenter.apply_quality(&quality::knobs(tier));
     let arena = ProceduralArena::build().map_err(|e| (Failure::NoDevice, e.to_string()))?;

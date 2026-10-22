@@ -22,7 +22,6 @@ use crate::v1::{self};
 use crate::v1_gpu::FORWARD_PBR_WGSL;
 use crate::{decals, fog, gtao, ibl, material_layer, overlay, particles_gpu, sky};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 /// LF4 slice 1 bloom state: enable flag plus CPU-mirrored thresholds.
 /// Owner presenter, consumer `submit.rs` live encode. Units linear HDR
@@ -1348,14 +1347,20 @@ impl Presenter {
 
     /// Pick the swapchain present mode: the shortest acquire wait the
     /// driver offers (Immediate tears but never waits for vsync), then
-    /// Mailbox, else the first listed mode. Units: none.
+    /// Pick the present mode: Fifo (vsync) by default for stable frame pacing,
+    /// Immediate or Mailbox when `uncapped` for captures. Units: none.
     /// Caller: `Presenter::attach_surface`.
-    pub fn pick_present_mode(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
-        if modes.contains(&wgpu::PresentMode::Immediate) {
-            return wgpu::PresentMode::Immediate;
+    pub fn pick_present_mode(modes: &[wgpu::PresentMode], uncapped: bool) -> wgpu::PresentMode {
+        if uncapped {
+            if modes.contains(&wgpu::PresentMode::Immediate) {
+                return wgpu::PresentMode::Immediate;
+            }
+            if modes.contains(&wgpu::PresentMode::Mailbox) {
+                return wgpu::PresentMode::Mailbox;
+            }
         }
-        if modes.contains(&wgpu::PresentMode::Mailbox) {
-            return wgpu::PresentMode::Mailbox;
+        if modes.contains(&wgpu::PresentMode::Fifo) {
+            return wgpu::PresentMode::Fifo;
         }
         modes.first().copied().unwrap_or(wgpu::PresentMode::Fifo)
     }
@@ -1414,12 +1419,13 @@ impl Presenter {
         surface: wgpu::Surface<'static>,
         width: u32,
         height: u32,
+        uncapped: bool,
     ) -> Result<(), PresentError> {
         if SizeClass::classify(width, height) != SizeClass::Sizes {
             return Err(PresentError::InvalidSize { width, height });
         }
         let adapter = Self::compatible_adapter(instance, &surface)?;
-        self.attach_surface_for(instance, &adapter, surface, width, height)
+        self.attach_surface_for(instance, &adapter, surface, width, height, uncapped)
     }
 
     /// [`Self::attach_surface`] for a caller that already holds the adapter
@@ -1431,6 +1437,7 @@ impl Presenter {
         surface: wgpu::Surface<'static>,
         width: u32,
         height: u32,
+        uncapped: bool,
     ) -> Result<(), PresentError> {
         if SizeClass::classify(width, height) != SizeClass::Sizes {
             return Err(PresentError::InvalidSize { width, height });
@@ -1451,7 +1458,7 @@ impl Presenter {
             color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
-            present_mode: Self::pick_present_mode(&caps.present_modes),
+            present_mode: Self::pick_present_mode(&caps.present_modes, uncapped),
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -2823,10 +2830,13 @@ mod presenter_adapter_tests {
 
     #[test]
     fn present_mode_prefers_short_wait_when_ready() {
-        let picked = crate::present::Presenter::pick_present_mode(&[
-            wgpu::PresentMode::Fifo,
-            wgpu::PresentMode::Mailbox,
-        ]);
+        let picked = crate::present::Presenter::pick_present_mode(
+            &[
+                wgpu::PresentMode::Fifo,
+                wgpu::PresentMode::Mailbox,
+            ],
+            true,
+        );
         assert_eq!(picked, wgpu::PresentMode::Mailbox);
     }
 
@@ -2836,19 +2846,40 @@ mod presenter_adapter_tests {
         // Behavior: Immediate (tearing, no vsync wait) is the shortest
         // acquire wait, so it wins when the driver offers it; pixels and
         // draws are unchanged, only the wait is skipped.
-        let picked = crate::present::Presenter::pick_present_mode(&[
-            wgpu::PresentMode::Fifo,
-            wgpu::PresentMode::Mailbox,
-            wgpu::PresentMode::Immediate,
-        ]);
+        let picked = crate::present::Presenter::pick_present_mode(
+            &[
+                wgpu::PresentMode::Fifo,
+                wgpu::PresentMode::Mailbox,
+                wgpu::PresentMode::Immediate,
+            ],
+            true,
+        );
         assert_eq!(picked, wgpu::PresentMode::Immediate);
     }
 
     #[test]
     fn present_mode_keeps_old_path_when_not_ready() {
-        let picked = crate::present::Presenter::pick_present_mode(&[wgpu::PresentMode::Fifo]);
+        let picked = crate::present::Presenter::pick_present_mode(
+            &[wgpu::PresentMode::Fifo],
+            true,
+        );
         assert_eq!(picked, wgpu::PresentMode::Fifo);
-        let picked = crate::present::Presenter::pick_present_mode(&[]);
+        let picked = crate::present::Presenter::pick_present_mode(&[], true);
+        assert_eq!(picked, wgpu::PresentMode::Fifo);
+    }
+
+    #[test]
+    fn present_mode_defaults_to_fifo_when_not_uncapped() {
+        // OPT35: the window is paced by vsync (Fifo) by default; `--uncapped`
+        // picks Immediate or Mailbox for captures.
+        let picked = crate::present::Presenter::pick_present_mode(
+            &[
+                wgpu::PresentMode::Fifo,
+                wgpu::PresentMode::Mailbox,
+                wgpu::PresentMode::Immediate,
+            ],
+            false,
+        );
         assert_eq!(picked, wgpu::PresentMode::Fifo);
     }
 }

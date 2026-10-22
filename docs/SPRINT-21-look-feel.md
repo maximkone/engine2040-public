@@ -451,7 +451,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   and `bins=`; captures byte-equal. F2P: no transform, one draw per item. P2P:
   golden unchanged. needs: none.
   Correction 2026-10-21: duplicate of PW02 (`DrawItem carries a transform and the live loop draws per bin`, which closes RL60 and RL32); do not run both - PW02 is the owning row.
-- [ ] OPT35 render: the window is paced by vsync, uncapped only by flag —
+- [x] OPT35 render: the window is paced by vsync, uncapped only by flag —
   `presenter.rs:643` takes `present_modes[0]` (Mailbox on DX12, presents with
   interval 0) and `crates/game/src/bin/arena.rs:1383` polls, so the window runs at
   GPU speed. AutoVsync by default, latency 1 only when cpu plus gpu ms is under
@@ -460,7 +460,12 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   `arena.rs`. Accept: `arena --scene arena --frames 600 --exit` prints
   `present=Fifo` and frame-interval p99 <= 1.25x p50 at 60 Hz; `--uncapped` prints
   Mailbox or Immediate. F2P: the first listed mode, no cap. P2P: golden unchanged.
-  needs: none.
+  needs: none. Landed <commit>.
+  Evidence: `pick_present_mode` now takes `uncapped: bool` and prefers Fifo by default;
+  `--uncapped` flag added to `WinArgs` and threaded through `init_windowed_with_preset`,
+  `init_for_window_with_preset`, `init_from_device`, `attach_surface`, `attach_surface_for`;
+  4 present_mode tests pass (including new `present_mode_defaults_to_fifo_when_not_uncapped`);
+  `cargo check -p engine-render --features window` PASS; `cargo check -p engine-game` PASS.
 - [ ] GS34 render: live-frame hygiene — no back-face cull (`submit.rs:1157`), the
   importer drops glTF doubleSided (`crates/material/src/gltf_import.rs:628`), 33 of
   58 MB of 1080p targets are unused by the live frame (`submit.rs:125-196`), the

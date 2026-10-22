@@ -3,13 +3,18 @@
 // The key is never written to disk and never printed. It comes from
 // TRIPO_API_KEY in the environment, or from --key-file <path>.
 //
-//   node tools/asset-gen/tripo.mjs --image concept.png --out content/generated/gunner
-//   node tools/asset-gen/tripo.mjs --text "..." --out content/generated/kit --rig
+//   node tools/asset-gen/tripo.mjs --help                     usage, no network
+//   node tools/asset-gen/tripo.mjs --image concept.png --out content/generated/gunner --dry-run
+//   node tools/asset-gen/tripo.mjs --image concept.png --out content/generated/gunner --yes
+//   node tools/asset-gen/tripo.mjs --text "..." --out content/generated/kit --rig --yes
 //
 // Licence, checked before any call: Tripo free plan output is non-commercial
 // and Tripo keeps the rights. Only a paid plan gives commercial rights to
 // ship a model in a game. --plan must therefore be "paid" for anything that
 // enters the repo.
+//
+// Every run is a paid Tripo task. Without --yes nothing is sent: the plan
+// prints and the exit code is 2.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -17,6 +22,20 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HOSTS = ["https://api.tripo3d.ai", "https://openapi.tripo3d.ai"];
+
+const USAGE = `usage: node tools/asset-gen/tripo.mjs (--image <file> | --text "<prompt>") --out <dir>
+         [--rig] [--model <id>] [--plan paid] [--key-file <path>] [--dry-run | --yes]
+
+  One paid Tripo task: the model as <dir>/model.glb with <dir>/provenance.json.
+  --image     our own picture (Tripo grants rights to the output, not to the input)
+  --text      a prompt instead of a picture
+  --rig       a second, paid rig task on the model
+  --plan      must be "paid" (the default); the free plan is refused
+  --key-file  read the key from a file; the key also comes from TRIPO_API_KEY and is never printed
+  --dry-run   print the plan; no network, no key read, no writes; exit 0
+  --yes       spend: without it the plan prints and the exit code is 2
+  --help      this text; exit 0`;
+
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -77,6 +96,10 @@ function pickModelUrl(task) {
 }
 
 async function main() {
+  if (has("help")) {
+    console.log(USAGE);
+    process.exit(0);
+  }
   const image = arg("image");
   const text = arg("text");
   if (!image && !text) fail("one of --image or --text is required");
@@ -86,12 +109,25 @@ async function main() {
   if (plan !== "paid") {
     fail("--plan must be \"paid\": Tripo free plan output is non-commercial and Tripo retains the rights");
   }
+  const inputPath = image ? join(ROOT, image) : null;
+  if (inputPath && !existsSync(inputPath)) fail(`input image not found: ${inputPath}`);
+
+  // The dry run and the default without --yes stop here: no key is read,
+  // no directory is made, nothing is sent.
+  if (has("dry-run") || !has("yes")) {
+    console.log(`plan: one paid Tripo ${image ? "image" : "text"}-to-model task, model ${arg("model", "v3.1-20260211")}, ` +
+      `texture and pbr on, ${has("rig") ? "then a second, paid rig task" : "no rig task"}`);
+    console.log(`  input:  ${image ? inputPath : `text ${JSON.stringify(text)}`}`);
+    console.log(`  output: ${join(outDir, "model.glb")} and ${join(outDir, "provenance.json")}`);
+    if (has("dry-run")) process.exit(0);
+    console.error("nothing was sent: add --yes to spend (one paid Tripo task)");
+    process.exit(2);
+  }
+
   const keyFile = arg("key-file");
   const key = process.env.TRIPO_API_KEY || (keyFile && existsSync(keyFile) ? readFileSync(keyFile, "utf8").trim() : null);
   if (!key) fail("no key: set TRIPO_API_KEY or pass --key-file <path>");
 
-  const inputPath = image ? join(ROOT, image) : null;
-  if (inputPath && !existsSync(inputPath)) fail(`input image not found: ${inputPath}`);
   const inputBytes = inputPath ? readFileSync(inputPath) : null;
   const inputSha = inputBytes ? createHash("sha256").update(inputBytes).digest("hex") : null;
 

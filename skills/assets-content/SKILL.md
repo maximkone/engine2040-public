@@ -16,6 +16,17 @@ One command per lane. Each runs its steps in order and stops at the first failur
 - Tests: `node --test tools/asset-gen/character.test.mjs`.
 - Not wired yet: a cooked MPFB body does not reach `content/fighters` or `fighters.e2bundle`. The receipt's `next_step` says what is missing.
 
+## Realistic characters (Rocketbox)
+
+Microsoft Rocketbox avatars (MIT, 115 rigged humans, 3ds Max Biped skeleton) are the realistic body. One command fetches one avatar and cooks it: `node tools/asset-gen/character.mjs --from rocketbox --avatar Adults/Male_Adult_08 --name rb_male08 [--home C:\forge-media\rocketbox] [--tris0 7400] [--out target/chargen/rb_male08]`. Groups are Adults, Children and Professions.
+
+- The fetch is `tools/asset-gen/rocketbox.mjs`: the FBX and textures go once into `--home` (never into the repo), resumable, one download at a time, 3 MB/s cap. `--dry-run` shows the plan and makes no network call once `textures.txt` is cached.
+- The cook is `tools/blender/rocketbox_cook.py`: bones renamed to the contract charset (`bip01_l_upperarm`, the names `crates/assets/src/rocketbox_map.rs` expects), colour and normal maps at 1024 px, LOD0 to LOD3 GLBs with the skin kept, `hero.png` at 80% of the frame, `cook.json` with the MIT licence and the source sha256.
+- Out dir: `cook/` (lod0..lod3.glb, textures/, hero.png, cook.json), `gate/silhouette_30m.png`, `receipt.json`, and one `RECEIPT` line. Exit 3 means the 30 m gate or the page budget said no; exit 1 means a step failed. Look at `cook/hero.png` before anything else.
+- Same gates as the other lanes: the 30 m fill band (0.40 to 0.70) and `budgetCheck`. As of 2026-10-22 both proven avatars stop there: Male_Adult_08 fills 0.30 at 30 m and its lane is 6.7 MB against the 2.04 MB first-bundle budget; Military_Male_01 fills 0.35 and its lane is 12.8 MB. A human with arms out fills less of its box than a blockout, so the band itself is the open question.
+- Not wired yet: nothing puts the cooked GLBs into `content/fighters` or a manifest row. The receipt's `next_step` says what is missing.
+- Tests: `node --test tools/asset-gen/character.test.mjs` (no network, no Blender).
+
 ## 1. Sources and licence
 
 - Find sources with websearch: Quaternius, Poly Haven, ambientCG, Kenney, 100STYLE and other CC0 or CC-BY libraries. Read each licence page live.

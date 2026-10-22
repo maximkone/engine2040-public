@@ -894,13 +894,13 @@
   "crates/game/src/camera.rs": 3459,
   "crates/game/src/fighter_look.rs": 6599,
   "crates/game/src/lib.rs": 4004,
-  "crates/game/src/windowed.rs": 3581,
+  "crates/game/src/windowed.rs": 3588,
   "crates/net/src/interest.rs": 3076,
   "crates/physics/src/ragdoll.rs": 3376,
   "crates/render/src/gtao.rs": 3486,
   "crates/render/src/ibl.rs": 4409,
   "crates/render/src/present/gpu_present/live.rs": 3326,
-  "crates/render/src/present/gpu_present/presenter.rs": 3422,
+  "crates/render/src/present/gpu_present/presenter.rs": 3453,
   "crates/render/src/present/gpu_present/submit.rs": 3249,
   "crates/spatial/src/relation.rs": 3250,
   "crates/ui/src/lib.rs": 3907
@@ -4298,6 +4298,20 @@
     "tests": 1049
    },
    "reason": "the pop detail fold in view_truth.rs grew past 100 lines (the pop lane's in-flight work, owner splits it with the row); landing the partner file now so the tree compiles"
+  },
+  {
+   "date": "2026-10-22",
+   "file": "crates/game/src/windowed.rs",
+   "from": 3581,
+   "to": 3588,
+   "reason": "OPT35: added --uncapped flag to WinArgs struct and parse logic (7 lines)"
+  },
+  {
+   "date": "2026-10-22",
+   "file": "crates/render/src/present/gpu_present/presenter.rs",
+   "from": 3422,
+   "to": 3453,
+   "reason": "OPT35: added uncapped parameter to pick_present_mode and attach_surface methods, plus new test (31 lines)"
   }
  ]
 }

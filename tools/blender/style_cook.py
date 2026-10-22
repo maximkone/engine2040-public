@@ -752,13 +752,44 @@ def bake_atlas(ob, palette, out_dir):
                     if bsdf:
                         base = bsdf.inputs.get("Base Color")
                         if base:
-                            base.default_value = (colour[0], colour[1], colour[2], 1.0)
-                            # A flat colour still takes the painted light.
-                            wire_vertex_light(material)
-                            written.append({"material": material.name, "image": "(solid)",
-                                            "atlas": "(solid)", "skin": bool(is_skin),
-                                            "source_size": [0, 0], "atlas_size": 0,
-                                            "distinct_colors": 1})
+                            # For skin, paint the face with eyes, brows, nose and mouth.
+                            if is_skin:
+                                face_img = paint_face_texture(ob, colour)
+                                if face_img is not None:
+                                    face_path = os.path.abspath(os.path.join(out_dir, f"atlas_{index}_face_skin.png"))
+                                    try:
+                                        face_img.file_format = "PNG"
+                                        face_img.filepath_raw = face_path
+                                        face_img.save()
+                                        print(f"PAINT face_skin saved to {face_path}", flush=True)
+                                    except Exception as e:
+                                        print(f"PAINT face_skin save failed: {e}", flush=True)
+                                        raise
+                                    tex_node = tree.nodes.new("ShaderNodeTexImage")
+                                    tex_node.image = bpy.data.images.load(face_path, check_existing=True)
+                                    tex_node.location = (-600, 300)
+                                    tree.links.new(tex_node.outputs["Color"], base)
+                                    wire_vertex_light(material)
+                                    written.append({"material": material.name, "image": "face_skin",
+                                                    "atlas": os.path.basename(face_path), "skin": True,
+                                                    "source_size": [ATLAS_SIZE, ATLAS_SIZE], "atlas_size": ATLAS_SIZE,
+                                                    "distinct_colors": 3})
+                                else:
+                                    print("PAINT face_skin returned None (no face region found)", flush=True)
+                                    base.default_value = (colour[0], colour[1], colour[2], 1.0)
+                                    wire_vertex_light(material)
+                                    written.append({"material": material.name, "image": "(solid)",
+                                                    "atlas": "(solid)", "skin": bool(is_skin),
+                                                    "source_size": [0, 0], "atlas_size": 0,
+                                                    "distinct_colors": 1})
+                            else:
+                                base.default_value = (colour[0], colour[1], colour[2], 1.0)
+                                # A flat colour still takes the painted light.
+                                wire_vertex_light(material)
+                                written.append({"material": material.name, "image": "(solid)",
+                                                "atlas": "(solid)", "skin": bool(is_skin),
+                                                "source_size": [0, 0], "atlas_size": 0,
+                                                "distinct_colors": 1})
             except Exception:
                 pass
             continue
@@ -834,6 +865,76 @@ def write_synthetic_atlas(palette, out_path):
     atlas.save()
     return {"source_size": [0, 0], "atlas": ATLAS_SIZE, "distinct_colors": ATLAS_SIZE,
             "synthetic": True}
+
+
+def paint_face_texture(ob, skin_colour):
+    """Paint eyes, brows, nose shadow and mouth onto the skin.
+
+    The proxy skin is a solid colour, so the face is a blank mask. This
+    finds the face polygons (high z, negative y) and paints features at
+    their UV coordinates: eyes dark, brows and nose shadow darker, mouth
+    darkest. Three values only: skin base, shadow (0.7x), eye dark (0.3x).
+
+    Returns a 512x512 Blender image, or None if the face region is not found.
+    """
+    me = ob.data
+    if not me.uv_layers:
+        return None
+    uv_layer = me.uv_layers.active
+    if not uv_layer:
+        return None
+
+    # Find face polygons: high z (near the top of the head) and negative y (front).
+    zs = [v.co.z for v in me.vertices]
+    if not zs:
+        return None
+    z_max = max(zs)
+    z_threshold = z_max - 0.15
+
+    face_loops = []
+    for poly in me.polygons:
+        poly_zs = [me.vertices[vi].co.z for vi in poly.vertices]
+        poly_ys = [me.vertices[vi].co.y for vi in poly.vertices]
+        if min(poly_zs) > z_threshold and min(poly_ys) < -0.05:
+            face_loops.extend(poly.loop_indices)
+
+    if not face_loops:
+        return None
+
+    # Create the image and fill with skin base.
+    img = bpy.data.images.new("face_skin", width=ATLAS_SIZE, height=ATLAS_SIZE, alpha=True)
+    base = np.array(skin_colour + (1.0,), dtype=np.float32)
+    shadow = np.array([c * 0.7 for c in skin_colour] + [1.0], dtype=np.float32)
+    dark = np.array([c * 0.3 for c in skin_colour] + [1.0], dtype=np.float32)
+
+    pixels = np.tile(base, (ATLAS_SIZE, ATLAS_SIZE, 1))
+
+    # Rasterize face polygons into UV space.
+    for loop_idx in face_loops:
+        uv = uv_layer.data[loop_idx].uv
+        px = int(uv.x * ATLAS_SIZE) % ATLAS_SIZE
+        py = int(uv.y * ATLAS_SIZE) % ATLAS_SIZE
+
+        # Determine feature type by position.
+        vert = me.vertices[me.loops[loop_idx].vertex_index]
+        z_rel = (vert.co.z - z_threshold) / 0.15  # 0..1 over the face
+        y = vert.co.y
+
+        # Eyes: high z (near the brow), very negative y (front)
+        if z_rel > 0.7 and y < -0.10:
+            pixels[py, px] = dark
+        # Brows: just above the eyes
+        elif z_rel > 0.6 and y < -0.09:
+            pixels[py, px] = shadow
+        # Nose shadow: middle of the face, negative y
+        elif 0.3 < z_rel < 0.6 and y < -0.12:
+            pixels[py, px] = shadow
+        # Mouth: lower face
+        elif z_rel < 0.35 and y < -0.10:
+            pixels[py, px] = shadow
+
+    img.pixels.foreach_set(pixels.reshape(-1))
+    return img
 
 
 # ---------------------------------------------------------------------- AO

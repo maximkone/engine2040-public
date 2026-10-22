@@ -8,6 +8,7 @@ import {
   maskRust,
   platformMathHits,
   productionCode,
+  softFloatHits,
 } from "./sim-source-scan.mjs";
 
 const FIXED_MINI = "use engine_core::fixed::Fixed;\n";
@@ -38,6 +39,20 @@ test("productionCode stops at the first real cfg(test)", () => {
 test("genreHits ignores comments and strings", () => {
   const src = "// Fighter\n/* Gladiator */\nfn f() -> &'static str { \"Fighter\" }\n";
   assert.deepEqual(genreHits(src), []);
+});
+
+test("softFloatHits names the type in production code only", () => {
+  assert.deepEqual(softFloatHits("use engine_core::soft_float::SoftFloat;\nlet a = SoftFloat::from_int(1);\n"), ["SoftFloat", "soft_float"]);
+  assert.deepEqual(softFloatHits("mod soft_float {}\n"), ["soft_float"]);
+});
+
+test("softFloatHits ignores comments, strings and test modules", () => {
+  const src = "// SoftFloat\nlet s = \"soft_float\";\n#[cfg(test)]\nmod tests { fn t() { SoftFloat::from_int(1); } }\n";
+  assert.deepEqual(softFloatHits(src), []);
+});
+
+test("softFloatHits does not match longer identifiers", () => {
+  assert.deepEqual(softFloatHits("let soft_float_helper = 1;\n"), []);
 });
 
 test("genreHits counts UPPER_SNAKE caps and ids, not lowercase words (GE11)", () => {

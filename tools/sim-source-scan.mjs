@@ -195,6 +195,23 @@ export function genreFindings(files, ledger) {
   return { unlisted, stale: [...ledger].filter((rel) => !named.has(rel)) };
 }
 
+// ------------------------------------------------------------- HX20 soft float
+
+const SOFT_FLOAT_RAW = /^(soft_float|SoftFloat)$/;
+
+/** Identifiers in production code that name the engine-core soft float. The
+ * type is rejected outside the crates that own it (HX20): it is the slow,
+ * exact determinism tier, and opening a new crate for it is a board decision.
+ * Comments, strings and test modules do not count. */
+export function softFloatHits(src) {
+  if (!/soft_float|SoftFloat/.test(src)) return [];
+  const found = new Set();
+  for (const m of productionCode(src).matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    if (SOFT_FLOAT_RAW.test(m[0])) found.add(m[0]);
+  }
+  return [...found].sort();
+}
+
 // ------------------------------------------------------------- determinism
 
 /** Files (relative to crates/) that define Fixed's own integer sin/cos; the

@@ -38,6 +38,20 @@ function fail(msg) {
   process.exit(1);
 }
 
+// Local only: no key and no money, so there is no --yes. --help is answered
+// before any path is checked or any python is run.
+if (process.argv.includes("--help")) {
+  console.log(`usage: node tools/asset-gen/sf3d.mjs --image <file|dir> --out <dir> [--texture 512] [--ratio 0.85]
+
+  Local only: Stability AI SF3D on this PC, no key, no cash. Writes <out>/<name>.glb
+  per image plus provenance.json. Needs the SF3D install (SF3D_DIR, SF3D_PYTHON) and
+  the local weights (SF3D_WEIGHTS); it runs the mesh on this PC's GPU or CPU.
+  --texture N   texture resolution (default 512)
+  --ratio F     foreground ratio (default 0.85)
+  --help        this text; exit 0`);
+  process.exit(0);
+}
+
 const image = arg("image");
 const outDir = arg("out");
 if (!image || !outDir) fail("--image <file|dir> and --out <dir> are required");

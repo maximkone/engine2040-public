@@ -140,6 +140,10 @@ pub use proxy::{
 /// rig: the bridge a baked combat pack needs to play on the game's body.
 #[cfg(feature = "import")]
 pub mod ct7_map;
+/// The Rocketbox body's Biped joint names and the map onto the engine's
+/// fighter rig: the realistic bodies play the same combat packs.
+#[cfg(feature = "import")]
+pub mod rocketbox_map;
 /// The fighter rig the teacher lane lands on, and the teacher's rest pose: the
 /// bake and the tick read the same joint order from here.
 #[cfg(feature = "import")]
