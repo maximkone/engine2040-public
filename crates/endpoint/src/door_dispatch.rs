@@ -257,7 +257,16 @@ pub(crate) fn audit_payload_text<T: rmcp::serde::Serialize>(
 /// cannot reach the log. Bounded like every other event: one per refused call,
 /// oldest evicted at [`super::log_tools::LOG_RING_CAP`], and the audit record
 /// beside it stays the tamper-evident one.
+///
+/// The ring readers are the one exception: a refused `log.query`/`log.digest`
+/// names the live window, and pushing a row first would evict the oldest
+/// event, so a client that retried at the window it was just given would miss
+/// it again on every attempt and could never catch up. A read must not move
+/// the evidence it reports; the typed error still names the window.
 fn note_refusal(state: &mut ServerState, tool: &str, code: &str) {
+    if tool == super::log_tools::TOOL_LOG_QUERY || tool == super::log_tools::TOOL_LOG_DIGEST {
+        return;
+    }
     state.push_log(Event::new(
         EventCode::DOOR_REFUSED,
         state.doc.revision,

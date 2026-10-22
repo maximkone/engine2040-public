@@ -5,10 +5,10 @@
 //! (`u32`). Determinism: fixed 10-call ring, no clock, same vector twice
 //! gives the same `opened_at`. Errors: [`BreakerError`] typed rejections.
 //!
-//! The breaker under test is `engine_observe::supervisor::RollingBreaker`,
-//! the only copy in the crate (`crates/observe/src/supervisor.rs`).
+//! The breaker under test is `engine_observe::breaker::RollingBreaker`, the
+//! only copy in the crate (`crates/observe/src/breaker.rs`).
 
-use engine_observe::supervisor::{BreakerError, RollingBreaker};
+use engine_observe::breaker::{BreakerError, RollingBreaker};
 
 /// Feed one outcome vector through a fresh breaker.
 fn run_vector(outcomes: &[bool]) -> RollingBreaker {

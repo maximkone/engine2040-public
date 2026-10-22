@@ -113,6 +113,7 @@ Usage:
   node tools/board-slice.mjs --focus [--open]     the same, only for the ids in docs/FOCUS.md "## Now", in its order, plus the ready rows they wait on
   node tools/board-slice.mjs --find <text>        one line per row (done too) whose text holds <text>
   node tools/board-slice.mjs --parked             ready rows whose dated note parks them on a person (operator:/owner:/blocked:) without the BLOCKED: marker the ready filter reads; exit 1 when any (the janitor sweep)
+  node tools/board-slice.mjs --wave <N> [--open] [--json]  pick N ready rows whose file lists do not overlap (one helper each)
 
 The board is 598 KB: read it through one --next (list plus slice), never whole.
 
@@ -137,6 +138,12 @@ Options:
   --parked       list ready rows whose dated note says operator:/owner:/blocked: but
                  that carry no BLOCKED:/LATER: marker (exit 1 when any): run this
                  after parking a row, so the ready list does not keep offering it
+  --wave <N>     pick N rows for one parallel wave: focus order first, then board
+                 order; a row is taken only when none of its backticked paths
+                 overlaps a row already taken (a path holds a nested path, so
+                 crates/game blocks crates/game/src/lib.rs). A row that names no
+                 path is skipped: a wave is a lease, and a lease needs a file list.
+                 Use --open to plan a wave over unready rows too.
   -h, --help     print this help and exit 0
 
 Exit codes: 0 ok - 1 unknown row or self-check FAIL - 2 usage.
@@ -286,6 +293,42 @@ export function ownedOf(task) {
     (s) => !/[\s<>]/.test(s) && (s.includes("/") || /\.(mjs|md|json|rs)$/.test(s)),
   );
   return [...new Set(paths)];
+}
+
+// AGT05: a row's file list is its lease. Two helpers never take rows whose
+// paths overlap in one wave. Paths overlap when they are equal or one holds
+// the other (`crates/game` holds `crates/game/src/lib.rs`), so a broad
+// directory lease blocks every row inside it.
+export function pathsOverlap(a, b) {
+  const x = String(a).replace(/\/$/, "");
+  const y = String(b).replace(/\/$/, "");
+  if (x === y) return true;
+  return x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+}
+
+export function rowsOverlap(a, b) {
+  return a.some((p) => b.some((q) => pathsOverlap(p, q)));
+}
+
+/// Greedy wave: candidates in the order given, each taken only when its paths
+/// are disjoint from every row already taken. A row that names no path is
+/// skipped: a wave is a lease, and a lease needs a file list.
+export function planWave(candidates, n) {
+  const picked = [];
+  const skipped = [];
+  for (const row of candidates) {
+    if (picked.length >= n) break;
+    if (!row.owned || row.owned.length === 0) {
+      skipped.push({ id: row.id, why: "no paths" });
+      continue;
+    }
+    if (picked.some((p) => rowsOverlap(p.owned, row.owned))) {
+      skipped.push({ id: row.id, why: "overlap" });
+      continue;
+    }
+    picked.push(row);
+  }
+  return { picked, skipped };
 }
 
 // Private, not exported: no external importer (verified 2026-10-08, only
@@ -520,6 +563,7 @@ function main(argv) {
   let listNext = false;
   let listParked = false;
   let find = null;
+  let wave = 0;
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === "--json") json = true;
@@ -528,6 +572,11 @@ function main(argv) {
     else if (a === "--next") listNext = true;
     else if (a === "--open") listOpen = true;
     else if (a === "--parked") listParked = true;
+    else if (a === "--wave") {
+      wave = Number(args[i + 1]);
+      i += 1;
+      if (!Number.isInteger(wave) || wave < 1) usageFail("--wave needs a count of 1 or more");
+    }
     else if (a === "--find") {
       find = args[i + 1];
       i += 1;
@@ -579,6 +628,42 @@ function main(argv) {
     }
     console.log(`${rows.length} ready row(s) parked without a BLOCKED: marker`);
     process.exit(rows.length ? 1 : 0);
+  }
+
+  if (wave > 0) {
+    if (listReady || listFocus || listNext || find || selfCheck || listParked || id) {
+      usageFail("--wave runs with --open or --json only: not with --ready, --focus, --next, --find, --parked, --self-check or <ID>");
+    }
+    const ids = focusNowIds(existsSync(FOCUS) ? readFileSync(FOCUS, "utf8") : "");
+    const seen = new Set();
+    const candidates = [];
+    const consider = (t) => {
+      if (!t || t.done || seen.has(t.id)) return;
+      if (!listOpen && !rowReady(tasks, t)) return;
+      seen.add(t.id);
+      candidates.push({
+        id: t.id,
+        title: t.lines[0].replace(HEAD, "$3").trim().replace(/\s+/g, " ").slice(0, TITLE_WIDTH),
+        owned: ownedOf(t),
+      });
+    };
+    for (const k of ids) consider(tasks.get(k));
+    for (const a of focusAncestors(tasks, ids)) consider(tasks.get(a.id));
+    for (const k of order) consider(tasks.get(k));
+    const { picked, skipped } = planWave(candidates, wave);
+    if (json) {
+      process.stdout.write(`${JSON.stringify({ wave, picked, skipped }, null, 2)}\n`);
+      process.exit(0);
+    }
+    for (const r of picked) {
+      console.log(`${r.id.padEnd(ID_WIDTH)} ${r.title}`);
+      const shown = r.owned.slice(0, 3).join(", ");
+      console.log(`         owns ${shown}${r.owned.length > 3 ? ` (+${r.owned.length - 3} more)` : ""}`);
+    }
+    const noPaths = skipped.filter((s) => s.why === "no paths").length;
+    const overlap = skipped.length - noPaths;
+    console.log(`wave ${picked.length}/${wave}: ${overlap} skipped for overlap with a picked row, ${noPaths} skipped for naming no path`);
+    process.exit(0);
   }
 
   if (listReady || listFocus || find) {

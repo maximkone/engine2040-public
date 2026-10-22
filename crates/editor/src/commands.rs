@@ -1189,7 +1189,7 @@ fn stage(doc: &Document, batch: &Batch) -> Result<Staged, BatchError> {
 
 /// Run staged ops without recording (undo/redo internals). Atomic by the
 /// same rule: the caller swaps the tree in only on full success.
-fn apply_ops(
+pub(crate) fn apply_ops(
     tree: &mut Hierarchy,
     materials: &mut BTreeMap<String, MaterialName>,
     components: &mut ComponentTable,

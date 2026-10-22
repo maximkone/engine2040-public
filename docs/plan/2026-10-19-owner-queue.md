@@ -70,8 +70,9 @@ on teardown, so the keeper reads the receipt and stops the process.
 - Brotli or gzip for the web budget (`crates/web` budget leg)?
 - SP50 Accept wording: the digest `4aae94af` came from a JS spike and cannot be
   reproduced in Rust. Reword the Accept or drop the digest?
-- GP33 contradicts the tier ladder (docs/SPRINT-12-tier-2040.md). Which one
-  wins?
+- GP33 contradicts the tier ladder (docs/SPRINT-12-tier-2040.md) — answered
+  2026-10-19 (the tier ladder wins on the label, the Accept is unchanged) and
+  landed 1a7a074f.
 - API2: closed 2026-10-19 (delegated). The row's Accept is the bar, not the
   three description legs, and all three clauses are verified: the coverage
   ratchet is wired into `tools/proof.mjs` and PASSes (`node

@@ -352,3 +352,288 @@ impl Supervisor {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::breaker::RollingBreaker;
+    use crate::heal::HealKind;
+    use crate::recovery::{HealObservation, HealValidation, RollbackProof, VerifiedRecovery};
+    use crate::supervisor::{FaultPolicy, Supervisor};
+    use crate::{EventCode, RingBuffer};
+
+    fn ring(cap: usize) -> RingBuffer {
+        RingBuffer::new(cap)
+    }
+
+    /// The acceptance proof: a heal that "applies" while the read-back still
+    /// faults is not a recovery. It spends the budget, quarantines the code
+    /// and cannot reset itself.
+    #[test]
+    fn heal_that_applies_while_read_back_still_faults_ends_in_quarantine() {
+        let mut supervisor = Supervisor::new();
+        supervisor.register_policy(
+            FaultPolicy::new(
+                EventCode::PHYSICS_BODY_NONFINITE,
+                HealKind::Restore,
+                1,
+                0,
+                0,
+                1,
+            )
+            .with_scope(crate::recovery::HealScope::State),
+        );
+        let mut events = ring(32);
+        let code = EventCode::PHYSICS_BODY_NONFINITE;
+        let decision = supervisor
+            .report_fault(code, 10, &mut events)
+            .expect("the state fault must report");
+        assert!(decision.deferred);
+        assert_eq!(supervisor.apply_tick_boundary(11).len(), 1);
+
+        // The heal ran and was taped, but the read-back still faults.
+        let verdict = supervisor
+            .verify_heal(
+                code,
+                1,
+                &HealObservation::State {
+                    before_digest: 0xAA,
+                    after_digest: 0xBB,
+                },
+                &mut events,
+            )
+            .expect("the applied heal must be checked");
+        assert_eq!(verdict, HealValidation::NotRecovered);
+        assert!(
+            supervisor.is_quarantined(code),
+            "a failed proof quarantines"
+        );
+        assert_eq!(supervisor.run_health(), crate::recovery::RunHealth::Red);
+
+        // A heal cannot reopen its own budget: the reset without a proof is
+        // refused and the budget stays spent.
+        assert_eq!(
+            supervisor.reset(code),
+            crate::recovery::ResetOutcome::Refused
+        );
+        assert!(supervisor.is_quarantined(code));
+        let fast = supervisor
+            .report_fault(code, 12, &mut events)
+            .expect("a quarantined fault still returns advice");
+        assert!(fast.is_quarantine());
+    }
+
+    /// Re-registering a policy row keeps the attempts it already spent.
+    #[test]
+    fn re_registering_a_policy_does_not_reopen_the_budget() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(32);
+        let code = EventCode::PROVIDER_TIMEOUT;
+        supervisor
+            .report_fault(code, 1, &mut events)
+            .expect("first fault heals");
+        supervisor
+            .report_fault(code, 2, &mut events)
+            .expect("second fault heals");
+        supervisor
+            .report_fault(code, 3, &mut events)
+            .expect("over-budget fault quarantines");
+        assert!(supervisor.is_quarantined(code));
+        assert_eq!(supervisor.attempts(code), 3);
+
+        // New knowledge may change the policy, never the budget.
+        let policy = supervisor.policy(code).expect("the catalog row");
+        supervisor.register_policy(policy);
+        assert_eq!(supervisor.attempts(code), 3);
+        assert!(
+            supervisor.is_quarantined(code),
+            "re-registering must not clear quarantine"
+        );
+        assert_eq!(
+            supervisor.reset(code),
+            crate::recovery::ResetOutcome::Refused
+        );
+        assert_eq!(supervisor.attempts(code), 3, "the budget stays spent");
+
+        // Only an explicit proof clears it.
+        let proof = VerifiedRecovery::new(code, 3, HealValidation::Recovered, 7, 7);
+        assert_eq!(supervisor.reset_verified(&proof), Ok(()));
+        assert_eq!(supervisor.attempts(code), 0);
+        assert!(!supervisor.is_quarantined(code));
+    }
+
+    /// Every proven heal tape row carries both digests: before and after.
+    #[test]
+    fn tape_rows_carry_the_before_and_after_digests() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(64);
+        let state = EventCode::PHYSICS_BODY_NONFINITE;
+        let presentation = EventCode::RENDER_DEVICE_LOST;
+
+        // A recovered state heal.
+        supervisor
+            .report_fault(state, 10, &mut events)
+            .expect("state fault reports");
+        let _ = supervisor.apply_tick_boundary(11);
+        let recovered = supervisor
+            .verify_heal(
+                state,
+                1,
+                &HealObservation::State {
+                    before_digest: 0x11,
+                    after_digest: 0x11,
+                },
+                &mut events,
+            )
+            .expect("the heal is checked");
+        assert_eq!(recovered, HealValidation::Recovered);
+
+        // A presentation heal that only held the last good frame.
+        supervisor
+            .report_fault(presentation, 20, &mut events)
+            .expect("presentation fault reports");
+        let frozen = supervisor
+            .verify_heal(
+                presentation,
+                1,
+                &HealObservation::HeldLastGood {
+                    frames: 30,
+                    digest: 0x22,
+                },
+                &mut events,
+            )
+            .expect("the heal is checked");
+        assert_eq!(frozen, HealValidation::FrozenFrame);
+
+        // A wrong heal rolled back to the last good snapshot.
+        supervisor
+            .report_fault(state, 30, &mut events)
+            .expect("state fault reports again");
+        let _ = supervisor.apply_tick_boundary(31);
+        let _ = supervisor
+            .verify_heal(
+                state,
+                1,
+                &HealObservation::State {
+                    before_digest: 0x33,
+                    after_digest: 0x44,
+                },
+                &mut events,
+            )
+            .expect("the heal is checked");
+        let rolled = supervisor
+            .rollback_heal(&RollbackProof::new(state, 2, 32, 0x33, 0x33), &mut events)
+            .expect("the rollback runs");
+        assert_eq!(rolled, HealValidation::RolledBack);
+
+        let rows: Vec<(u64, u64, HealValidation)> = supervisor
+            .tape()
+            .iter()
+            .filter(|row| {
+                row.validation.is_green() || row.validation == HealValidation::FrozenFrame
+            })
+            .map(|row| {
+                (
+                    row.before_digest
+                        .expect("every proven row has a before digest"),
+                    row.after_digest
+                        .expect("every proven row has an after digest"),
+                    row.validation,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (0x11, 0x11, HealValidation::Recovered),
+                (0x22, 0x22, HealValidation::FrozenFrame),
+                (0x33, 0x33, HealValidation::RolledBack),
+            ]
+        );
+        assert!(supervisor
+            .tape()
+            .iter()
+            .all(|row| row.before_digest.is_some() && row.after_digest.is_some()));
+    }
+
+    /// The circuit vectors run against the src module, not a copy in tests.
+    #[test]
+    fn the_existing_vectors_run_against_the_src_breaker() {
+        // Five errors then five successes: exactly 50% over a full window.
+        let mut breaker = RollingBreaker::new();
+        for at in 0..10_u64 {
+            breaker.admit().expect("the closed breaker admits");
+            breaker.observe(at >= 5);
+        }
+        assert!(breaker.is_open(), "50% errors over 10 must open");
+        assert_eq!(breaker.opened_at(), Some(10));
+        assert_eq!(breaker.attempt(), 10);
+        assert_eq!(breaker.admit(), Err(crate::breaker::BreakerError::Open));
+
+        // One probe admits; success closes; a second probe is refused.
+        breaker.half_open_probe().expect("one probe admitted");
+        assert!(breaker.is_half_open());
+        assert_ne!(breaker.half_open_probe(), Ok(()));
+        breaker.observe(true);
+        assert!(!breaker.is_open());
+        assert!(!breaker.is_half_open());
+
+        // A fresh window holds 40% errors without opening.
+        let mut low = RollingBreaker::new();
+        for at in 0..10_u64 {
+            low.observe(at >= 4);
+        }
+        assert!(!low.is_open());
+        assert_eq!(low.error_percent(), 40);
+        assert_eq!(low.opened_at(), None);
+
+        // The same vector twice gives the same open revision.
+        let mut replay = RollingBreaker::new();
+        for at in 0..10_u64 {
+            replay.observe(at >= 5);
+        }
+        assert_eq!(replay.opened_at(), breaker.opened_at());
+    }
+
+    /// A provider timeout storm opens the breaker, the next fault stops
+    /// without budget, and exactly one half-open probe is admitted.
+    #[test]
+    fn a_timeout_storm_opens_the_breaker_and_admits_one_half_open_probe() {
+        let mut supervisor = Supervisor::new();
+        let mut events = ring(64);
+        let code = EventCode::PROVIDER_TIMEOUT;
+        supervisor
+            .enable_breaker(code)
+            .expect("the provider row is registered");
+        // Ten timeouts clocked by tick: the open revision is the tick.
+        for tick in 100..110_u64 {
+            supervisor.record_attempt_outcome_at(code, tick, false);
+        }
+        assert!(supervisor.breaker_is_open(code));
+        assert_eq!(supervisor.breaker_opened_at(code), Some(109));
+
+        // Open: the next fault stops here, with no budget, tape or event.
+        let attempts = supervisor.attempts(code);
+        let tape_len = supervisor.tape_len();
+        let rejected = supervisor
+            .report_fault(code, 110, &mut events)
+            .expect("an open breaker returns advice");
+        assert!(rejected.is_quarantine());
+        assert_eq!(rejected.kind, HealKind::Quarantine);
+        assert_eq!(supervisor.attempts(code), attempts);
+        assert_eq!(supervisor.tape_len(), tape_len);
+        assert!(events.query(Some(EventCode::HEAL_FAILED)).is_empty());
+
+        // One probe, then the recovery closes the breaker again.
+        assert!(supervisor.breaker_probe(code));
+        assert!(supervisor.breaker_is_half_open(code));
+        assert!(!supervisor.breaker_probe(code), "one probe per period");
+        supervisor.record_attempt_outcome_at(code, 111, true);
+        assert!(!supervisor.breaker_is_open(code));
+        assert!(!supervisor.breaker_is_half_open(code));
+        let healed = supervisor
+            .report_fault(code, 112, &mut events)
+            .expect("a closed breaker heals again");
+        assert!(!healed.is_quarantine());
+        assert_eq!(healed.kind, HealKind::Degrade);
+    }
+}

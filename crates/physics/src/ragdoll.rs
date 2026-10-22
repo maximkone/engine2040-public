@@ -113,6 +113,9 @@ pub enum Error {
     SnapshotMismatch,
     /// The ragdoll params builder refused the table.
     Params(ParamsError),
+    /// The joint table refused the skeleton (a limit outside 0..180 degrees or a
+    /// bone without its joint).
+    Joint(JointError),
 }
 
 impl Display for Error {
@@ -139,6 +142,7 @@ impl Display for Error {
             }
             Error::SnapshotMismatch => f.write_str("snapshot does not match this ragdoll"),
             Error::Params(e) => write!(f, "ragdoll params refused: {e}"),
+            Error::Joint(e) => write!(f, "ragdoll joint table refused: {e}"),
         }
     }
 }
@@ -154,6 +158,12 @@ impl From<AnimError> for Error {
 impl From<ParamsError> for Error {
     fn from(e: ParamsError) -> Self {
         Error::Params(e)
+    }
+}
+
+impl From<JointError> for Error {
+    fn from(e: JointError) -> Self {
+        Error::Joint(e)
     }
 }
 
@@ -388,13 +398,13 @@ fn build_bones(
     world_pos: &[[f32; 3]],
     world_rot: &[[f32; 4]],
     params: &RagdollParams,
+    table: &JointTable,
 ) -> (
     RigidBodySet,
     ColliderSet,
     ImpulseJointSet,
     Vec<RigidBodyHandle>,
 ) {
-    let depths = joint_depths(skeleton);
     let mut bodies = RigidBodySet::new();
     let mut colliders = ColliderSet::new();
     let mut impulse_joints = ImpulseJointSet::new();
@@ -446,7 +456,7 @@ fn build_bones(
         skeleton,
         world_pos,
         world_rot,
-        &depths,
+        table,
         &order,
         &mut impulse_joints,
     );
@@ -488,6 +498,9 @@ impl Ragdoll {
         validate_skeleton(skeleton).map_err(Error::Anim)?;
         validate_pose(skeleton, pose).map_err(Error::Anim)?;
         validate_capsules(skeleton, capsule_dims)?;
+        // The table refuses a limit outside 0..180 degrees and a skeleton whose
+        // parent links do not make one tree, before a body is built.
+        let table = JointTable::try_humanoid(skeleton).map_err(Error::Joint)?;
         if params.bones() != skeleton.len() {
             return Err(Error::Params(ParamsError::BoneCount {
                 want: skeleton.len(),
@@ -495,8 +508,14 @@ impl Ragdoll {
             }));
         }
         let (world_pos, world_rot) = world_transforms(skeleton, pose);
-        let (bodies, colliders, impulse_joints, order) =
-            build_bones(skeleton, capsule_dims, &world_pos, &world_rot, params);
+        let (bodies, colliders, impulse_joints, order) = build_bones(
+            skeleton,
+            capsule_dims,
+            &world_pos,
+            &world_rot,
+            params,
+            &table,
+        );
         let integration = params.integration(FIXED_DT);
         Ok(Self {
             pipeline: PhysicsPipeline::new(),
@@ -1122,17 +1141,17 @@ pub fn insert_joints(
 /// Parent-to-child joints read from [`JointTable`]: a hinge for a knee or an
 /// elbow, a ball with its own swing cone and twist range for every other bone,
 /// each carrying the row's friction motor, anchored at the rest-pose midpoint of
-/// the pair, with contacts off between joined bodies. `_depths` is kept for
-/// callers that precompute it; the table derives its own.
+/// the pair, with contacts off between joined bodies. `spawn` passes the table it
+/// already validated; a caller whose table is shorter than the skeleton gets the
+/// tightest depth row for the rows past the end.
 pub fn insert_table_joints(
     skeleton: &Skeleton,
     world_pos: &[[f32; 3]],
     world_rot: &[[f32; 4]],
-    _depths: &[u32],
+    table: &JointTable,
     order: &[RigidBodyHandle],
     impulse_joints: &mut ImpulseJointSet,
 ) {
-    let table = JointTable::humanoid(skeleton);
     // Hinges bend about the root body's side axis: one shared frame for the
     // whole rig, so a knee and an elbow fold in their own planes and nowhere else.
     let root = skeleton
@@ -1153,23 +1172,18 @@ pub fn insert_table_joints(
         ];
         let a1 = to_local(&world_pos[parent], &world_rot[parent], &mid);
         let a2 = to_local(&world_pos[i], &world_rot[i], &mid);
-        let spec = table.spec(i).unwrap_or(JointSpec {
-            kind: JointKind::Spherical,
-            swing_limit: SWING_MIN,
-            twist_min: -JOINT_TWIST_SPHERICAL_RAD,
-            twist_max: JOINT_TWIST_SPHERICAL_RAD,
-            friction_torque: JOINT_FRICTION_SPHERICAL_NM,
-            spring_hz: JOINT_SPRING_SPHERICAL_HZ,
-        });
+        let spec = table
+            .spec(i)
+            .unwrap_or_else(|| JointSpec::fallback(SWING_MIN));
         let data = match spec.kind {
             JointKind::Hinge => {
                 // A knee folds backward (+X), an elbow forward (-X): the row's
                 // range is one-sided, so the joint cannot hyperextend.
                 let knee = joint.name.contains("knee") || joint.name.contains("shin");
                 let range = if knee {
-                    [0.0, spec.swing_limit]
+                    [spec.swing_min, spec.swing_limit]
                 } else {
-                    [-spec.swing_limit, 0.0]
+                    [-spec.swing_limit, -spec.swing_min]
                 };
                 let q1 = normalized_rotation(&world_rot[parent]);
                 let q2 = normalized_rotation(&world_rot[i]);
@@ -1187,13 +1201,13 @@ pub fn insert_table_joints(
                     .contacts_enabled(false)
                     .build()
             }
-            JointKind::Spherical => SphericalJointBuilder::new()
+            JointKind::Ball => SphericalJointBuilder::new()
                 .local_anchor1(Vector::new(a1[0], a1[1], a1[2]))
                 .local_anchor2(Vector::new(a2[0], a2[1], a2[2]))
                 .contacts_enabled(false)
                 .limits(JointAxis::AngX, [-spec.swing_limit, spec.swing_limit])
                 .limits(JointAxis::AngY, [spec.twist_min, spec.twist_max])
-                .limits(JointAxis::AngZ, [-spec.swing_limit, spec.swing_limit])
+                .limits(JointAxis::AngZ, [-spec.swing_lateral, spec.swing_lateral])
                 .motor_velocity(JointAxis::AngX, 0.0, spec.friction_torque)
                 .motor_velocity(JointAxis::AngY, 0.0, spec.friction_torque)
                 .motor_velocity(JointAxis::AngZ, 0.0, spec.friction_torque)
@@ -1254,8 +1268,9 @@ pub const MASS_RATIO_LO: f32 = 0.8;
 pub const MASS_RATIO_HI: f32 = 1.2;
 
 pub use super::joint_limits::{
-    JointKind, JointSpec, JointTable, JOINT_FRICTION_HINGE_NM, JOINT_FRICTION_SPHERICAL_NM,
-    JOINT_SPRING_HINGE_HZ, JOINT_SPRING_SPHERICAL_HZ, JOINT_TWIST_SPHERICAL_RAD,
+    JointError, JointKind, JointSpec, JointTable, JOINT_FRICTION_BALL_NM, JOINT_FRICTION_HINGE_NM,
+    JOINT_LIMIT_MAX_DEG, JOINT_LIMIT_MAX_RAD, JOINT_SPRING_BALL_HZ, JOINT_SPRING_HINGE_HZ,
+    JOINT_TWIST_BALL_RAD,
 };
 
 /// Stabilize child-to-parent mass ratios into `[0.8, 1.2]` preserving total
@@ -2481,78 +2496,7 @@ mod tests {
         (f32::from(hi) * 65_536.0 + f32::from(lo)) / 16_777_216.0
     }
 
-    #[test]
-    fn joint_table_humanoid_defaults() {
-        let skeleton = humanoid_skeleton();
-        let table = JointTable::humanoid(&skeleton);
-        assert_eq!(table.len(), 17);
-        assert!(!table.is_empty());
-        assert!(table.is_valid(), "every row inside 0..180 degrees");
-        // Hinge knees and elbows (4), cone plus twist elsewhere (13); the named
-        // rows carry their own numbers, so depth is only the fallback.
-        let mut hinges = 0usize;
-        let depths = joint_depths(&skeleton);
-        for (i, joint) in skeleton.joints.iter().enumerate() {
-            let spec = table.spec(i).expect("row per bone");
-            if joint.name.contains("knee") || joint.name.contains("elbow") {
-                assert_eq!(spec.kind, JointKind::Hinge, "bone {i} must hinge");
-                assert_eq!((spec.twist_min, spec.twist_max), (0.0, 0.0));
-                assert!((spec.swing_limit - 145.0 * 0.017_453_292).abs() < 1e-5);
-                assert_eq!(spec.friction_torque, JOINT_FRICTION_HINGE_NM);
-                assert_eq!(spec.spring_hz, JOINT_SPRING_HINGE_HZ);
-                hinges += 1;
-            } else {
-                assert_eq!(spec.kind, JointKind::Spherical, "bone {i} spherical");
-                assert!(
-                    spec.twist_min < 0.0 && spec.twist_max > 0.0,
-                    "bone {i} keeps a twist range"
-                );
-                assert_eq!(spec.friction_torque, JOINT_FRICTION_SPHERICAL_NM);
-                assert_eq!(spec.spring_hz, JOINT_SPRING_SPHERICAL_HZ);
-            }
-            // A known name departs from the depth fallback; the root and an
-            // unknown name (ankle, wrist) keep it.
-            let depth_limit = swing_limit(depths[i]);
-            if joint.parent.is_none()
-                || joint.name.contains("ankle")
-                || joint.name.contains("wrist")
-            {
-                assert!(
-                    (spec.swing_limit - depth_limit).abs() < 1e-6,
-                    "bone {i} ({}) keeps the depth fallback",
-                    joint.name
-                );
-            } else {
-                assert!(
-                    (spec.swing_limit - depth_limit).abs() > 1e-6,
-                    "bone {i} ({}) must read the table, not depth",
-                    joint.name
-                );
-            }
-            assert!(
-                (5.0..=10.0).contains(&spec.friction_torque),
-                "friction 5..10 N.m: {spec:?}"
-            );
-            assert!(
-                (0.5..=2.0).contains(&spec.spring_hz),
-                "spring 0.5..2 Hz: {spec:?}"
-            );
-        }
-        assert_eq!(hinges, 4, "knees plus elbows hinge");
-        assert_eq!(table.spec(99), None, "past-end bone is none");
-        // Failure cases: non-finite hinge maps to 0, twist clamps both ends.
-        let hinge = table.spec(6).expect("elbow_l");
-        assert_eq!(hinge.clamp_hinge(f32::NAN), 0.0);
-        assert_eq!(hinge.clamp_hinge(-0.5), 0.0);
-        assert_eq!(hinge.clamp_hinge(99.0), hinge.swing_limit);
-        let ball = table.spec(2).expect("chest");
-        assert_eq!(ball.clamp_twist(-99.0), ball.twist_min);
-        assert_eq!(ball.clamp_twist(99.0), ball.twist_max);
-        assert_eq!(ball.clamp_twist(f32::INFINITY), ball.twist_min);
-        // Same skeleton twice gives the same table.
-        assert_eq!(table, JointTable::humanoid(&humanoid_skeleton()));
-        println!("JOINT_TABLE hinges={hinges} rows=17 friction=5..10Nm spring=0.5..2Hz");
-    }
+    mod joint_table;
 
     /// True for a joint name the table has no row for (ankle, wrist): it keeps
     /// the depth fallback.

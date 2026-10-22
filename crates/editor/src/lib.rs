@@ -29,6 +29,9 @@ pub mod durable;
 /// Findings panel: spatial findings on a staged AI proposal, fixes via commands.
 #[cfg(feature = "ui")]
 pub mod findings;
+/// Geometry-only batch staging shared by the CAP1 spatial gate and the
+/// findings panel: same staged poses and components a commit would produce.
+mod geometry;
 pub mod gizmo;
 /// Data-only node graph for material and VFX graphs; wired to Document.
 pub mod graph;
@@ -69,6 +72,10 @@ pub mod save;
 pub mod shell;
 #[cfg(feature = "ui")]
 pub mod shell_ui;
+/// One scene -> spatial adapter: real collider extents, the labelled fallback
+/// and the only owner of "how big is this node" (CAP1 gate, findings, door,
+/// play). Std-only.
+pub mod spatial_view;
 /// Spine inspector: spine actor columns as read-only inspector nodes through
 /// the RC2 extraction bridge and the RC4 schemas (consumed by `shell_ui.rs`).
 pub mod spine_inspect;

@@ -1,0 +1,18 @@
+{
+  "name": "duel.exchange",
+  "system": "duel",
+  "seed": 2040,
+  "bout": { "ticks": 80, "fighters": 2, "half_extent_m": 20, "table_version": 1 },
+  "steps": [
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 0 },
+    { "input": "attack", "ticks": 1, "fighter": 1, "at": 20 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 40 },
+    { "input": "attack", "ticks": 1, "fighter": 1, "at": 60 }
+  ],
+  "assertions": [
+    { "check": "digest", "expect": "0x977dcdc92e6c5e9e" },
+    { "check": "ticks", "expect": "80" },
+    { "check": "hits", "expect": "4" }
+  ],
+  "tags": ["replay", "duel"]
+}

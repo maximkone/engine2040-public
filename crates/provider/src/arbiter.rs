@@ -139,6 +139,116 @@ impl PressureSample {
     }
 }
 
+/// Why a model does not sit whole on the GPU.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LayerNotice {
+    /// No VRAM reading on this machine: the whole model keeps the GPU, and
+    /// the frame-time rungs still decide placement.
+    Unknown,
+    /// The renderer's reserve plus the whole model do not fit: what fits
+    /// runs on the GPU, the rest on the CPU.
+    Partial {
+        /// MB short of the whole model, MB.
+        short_mb: u32,
+    },
+    /// Not even one layer fits beside the reserve: the CPU runs the model.
+    NoneFit,
+}
+
+impl LayerNotice {
+    /// One receipt line for the window log: what the budget left on the GPU.
+    #[must_use]
+    pub fn line(self) -> String {
+        match self {
+            Self::Unknown => "no vram reading: every layer stays on the gpu".to_owned(),
+            Self::Partial { short_mb } => {
+                format!("{short_mb} MB short of the whole model: fewer layers on the gpu")
+            }
+            Self::NoneFit => "no layer fits beside the reserve: cpu runs the model".to_owned(),
+        }
+    }
+}
+
+/// The VRAM budget as a GPU layer count, the `--n-gpu-layers` a local
+/// sidecar takes. Every layer costs the same, so the count is integer
+/// division, and the renderer's reserve is never spent on the model.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LayerPlan {
+    /// Layers that fit on the GPU.
+    pub gpu_layers: u32,
+    /// The model's layer count.
+    pub of_layers: u32,
+    /// MB one layer costs on the GPU, rounded up.
+    pub mb_per_layer: u32,
+    /// Why the plan is short of the whole model, `None` when it is whole.
+    pub notice: Option<LayerNotice>,
+}
+
+impl LayerPlan {
+    /// The whole model on the GPU: no VRAM limit seen or nothing to place.
+    #[must_use]
+    pub fn whole(of_layers: u32) -> Self {
+        Self {
+            gpu_layers: of_layers,
+            of_layers,
+            mb_per_layer: 0,
+            notice: None,
+        }
+    }
+
+    /// True when every layer of the model rides the GPU.
+    #[must_use]
+    pub fn is_whole(self) -> bool {
+        self.gpu_layers == self.of_layers
+    }
+}
+
+/// Plan the GPU layers of a `model_vram_mb` model with `of_layers` equal
+/// layers, keeping `reserve_mb` free for the renderer. Integer math only, so
+/// the same reading gives the same plan.
+#[must_use]
+pub fn plan_layers(
+    vram: VramHeadroom,
+    model_vram_mb: u32,
+    reserve_mb: u32,
+    of_layers: u32,
+) -> LayerPlan {
+    if of_layers == 0 || model_vram_mb == 0 {
+        return LayerPlan::whole(of_layers);
+    }
+    let mb_per_layer = model_vram_mb.div_ceil(of_layers).max(1);
+    let whole = LayerPlan {
+        gpu_layers: of_layers,
+        of_layers,
+        mb_per_layer,
+        notice: None,
+    };
+    let Some(free_mb) = vram.free_mb() else {
+        return LayerPlan {
+            notice: Some(LayerNotice::Unknown),
+            ..whole
+        };
+    };
+    let usable_mb = free_mb.saturating_sub(reserve_mb);
+    if usable_mb >= model_vram_mb {
+        return whole;
+    }
+    let gpu_layers = (usable_mb / mb_per_layer).min(of_layers);
+    let notice = if gpu_layers == 0 {
+        LayerNotice::NoneFit
+    } else {
+        LayerNotice::Partial {
+            short_mb: model_vram_mb - usable_mb,
+        }
+    };
+    LayerPlan {
+        gpu_layers,
+        of_layers,
+        mb_per_layer,
+        notice: Some(notice),
+    }
+}
+
 /// Thresholds and dwell for [`Arbiter`]. Each `*_exit` sits below its
 /// `*_enter`, so a load between them keeps the current placement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -196,6 +306,15 @@ impl ArbiterConfig {
             return Err(ArbiterError::Bands);
         }
         Ok(())
+    }
+
+    /// The GPU layer plan for this config's model at `vram`: the count a
+    /// local sidecar launches with. The arbiter's whole-model rule stays the
+    /// hard fallback (see [`Arbiter::observe`]); this says what the budget
+    /// would carry instead of guessing.
+    #[must_use]
+    pub fn layer_plan(&self, vram: VramHeadroom, of_layers: u32) -> LayerPlan {
+        plan_layers(vram, self.model_vram_mb, self.vram_reserve_mb, of_layers)
     }
 }
 
@@ -931,5 +1050,90 @@ mod tests {
         assert_eq!(route.refused_full(), 0);
         assert_eq!(route.last(), Some((Placement::Remote, Some(Hold::Remote))));
         assert!(route.next_ready().is_none(), "remote waits off the tick");
+    }
+
+    /// 32 equal layers costing 4,000 MB: 125 MB each.
+    const LAYERS: u32 = 32;
+    const MODEL_MB: u32 = 4_000;
+
+    #[test]
+    fn roomy_vram_keeps_every_layer_on_the_gpu() {
+        // 5,000 MB free minus the 512 reserve covers the 4,000 MB model.
+        let roomy = VramHeadroom::Known {
+            budget_mb: 5_000,
+            used_mb: 0,
+        };
+        let plan = plan_layers(roomy, MODEL_MB, 512, LAYERS);
+        assert_eq!(plan.gpu_layers, LAYERS);
+        assert_eq!(plan.of_layers, LAYERS);
+        assert_eq!(plan.mb_per_layer, 125);
+        assert_eq!(plan.notice, None);
+        assert!(plan.is_whole());
+    }
+
+    #[test]
+    fn a_short_budget_becomes_a_layer_count_not_a_guess() {
+        // 2,000 free minus 512 reserve = 1,488 usable, 11 layers of 125 MB.
+        let short = VramHeadroom::Known {
+            budget_mb: 2_000,
+            used_mb: 0,
+        };
+        let plan = plan_layers(short, MODEL_MB, 512, LAYERS);
+        assert_eq!(plan.gpu_layers, 11);
+        assert_eq!(
+            plan.notice,
+            Some(LayerNotice::Partial {
+                short_mb: MODEL_MB - 1_488
+            })
+        );
+        assert!(!plan.is_whole());
+        // The plan is a receipt a person can read.
+        assert!(plan.notice.expect("notice").line().contains("fewer layers"));
+    }
+
+    #[test]
+    fn the_reserve_is_never_spent_on_the_model() {
+        // 600 MB free with a 512 MB reserve: one 125 MB layer is still room,
+        // but 500 MB free leaves nothing under the reserve.
+        let tight = VramHeadroom::Known {
+            budget_mb: 600,
+            used_mb: 0,
+        };
+        assert_eq!(plan_layers(tight, MODEL_MB, 512, LAYERS).gpu_layers, 0);
+        assert_eq!(
+            plan_layers(tight, MODEL_MB, 512, LAYERS).notice,
+            Some(LayerNotice::NoneFit)
+        );
+        let nothing_fits = plan_layers(tight, MODEL_MB, 0, LAYERS);
+        assert_eq!(nothing_fits.gpu_layers, 4, "4 x 125 = 500 <= 600");
+    }
+
+    #[test]
+    fn an_unknown_reading_keeps_the_whole_model_on_the_gpu() {
+        let plan = plan_layers(VramHeadroom::Unknown, MODEL_MB, 512, LAYERS);
+        assert!(plan.is_whole());
+        assert_eq!(plan.notice, Some(LayerNotice::Unknown));
+        // Nothing to place reads as nothing to limit.
+        assert_eq!(
+            plan_layers(VramHeadroom::Unknown, 0, 512, LAYERS),
+            LayerPlan::whole(LAYERS)
+        );
+        assert_eq!(
+            plan_layers(VramHeadroom::Unknown, MODEL_MB, 512, 0).gpu_layers,
+            0
+        );
+    }
+
+    #[test]
+    fn the_config_plans_its_own_model() {
+        let cfg = ArbiterConfig::reference(MODEL_MB);
+        let short = VramHeadroom::Known {
+            budget_mb: 2_000,
+            used_mb: 0,
+        };
+        // reference keeps 512 MB: the same 11 layers as above.
+        assert_eq!(cfg.layer_plan(short, LAYERS).gpu_layers, 11);
+        // ROOMY has 3,500 MB free, so 2,988 usable: 23 layers of 125 MB.
+        assert_eq!(cfg.layer_plan(ROOMY, LAYERS).gpu_layers, 23);
     }
 }

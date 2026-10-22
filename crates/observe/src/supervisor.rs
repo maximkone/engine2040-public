@@ -20,7 +20,8 @@ use super::recovery::{HealCap, HealScope, HealValidation, HEAL_CAP_WINDOW_TICKS}
 use super::{Event, EventCode, RingBuffer};
 use engine_core::hash::{mix64, GOLDEN_GAMMA};
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt;
+
+pub use crate::breaker::{BreakerError, HedgeBudget, RollingBreaker};
 
 /// Maximum sim heals waiting for a tick boundary. Past this the supervisor
 /// returns [`HealError::PendingFull`] so the caller drains first.
@@ -35,8 +36,9 @@ pub const MAX_TAPE_RECORDS: usize = 1024;
 /// Ticks a quarantined code stays closed before one half-open probe is admitted.
 pub const QUARANTINE_COOLDOWN_TICKS: u64 = 10;
 
-/// Maximum half-open probe calls admitted per cool-down expiry.
-pub const HALF_OPEN_MAX_CALLS: u32 = 1;
+/// Maximum half-open probe calls admitted per cool-down expiry. The breaker
+/// owns the value; it is re-exported here for the quarantine re-admit.
+pub use crate::breaker::HALF_OPEN_MAX_CALLS;
 
 /// Quarantine entry: closed until until_tick, then one half-open probe when probing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,260 +371,6 @@ pub struct AppliedHeal {
     pub attempt: u32,
 }
 
-/// Calls in one rolling breaker window before its error percent is judged.
-const BREAKER_WINDOW_CALLS: usize = 10;
-
-/// Error percent at or above which a full window opens the breaker.
-const BREAKER_ERROR_PERCENT: u32 = 50;
-
-/// Breaker position. Closed admits retries, open rejects them fast,
-/// half-open admits one recovery probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BreakerState {
-    /// Retries flow; outcomes fill the rolling window.
-    Closed,
-    /// Retry storm guard: retries stop here without touching the budget.
-    Open,
-    /// One probe is admitted to test recovery.
-    HalfOpen,
-}
-
-/// Typed breaker rejection: open means stop retrying, not try again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BreakerError {
-    /// Breaker is open, or its one probe is already spent.
-    Open,
-}
-
-impl fmt::Display for BreakerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Open => write!(f, "circuit is open"),
-        }
-    }
-}
-
-/// Rolling error-percent breaker: opens at 50% or more errors over the last
-/// 10 calls, then one half-open probe closes it on success or reopens it.
-/// No clock: `opened_at` counts calls, so the same outcomes give the same state.
-#[derive(Debug, Clone)]
-pub struct RollingBreaker {
-    /// Ring of the last [`BREAKER_WINDOW_CALLS`] outcomes (`true` is an error).
-    window: [bool; BREAKER_WINDOW_CALLS],
-    /// Next ring slot to overwrite.
-    next: usize,
-    /// Outcomes recorded in the current window (caps at the window size).
-    filled: usize,
-    /// Total calls observed (1-based, saturating).
-    attempt: u64,
-    /// Position of the breaker.
-    state: BreakerState,
-    /// 1-based call index where the breaker last opened (`None` if never).
-    opened_at: Option<u64>,
-    /// Probe calls consumed while half-open (caps at [`HALF_OPEN_MAX_CALLS`]).
-    probes: u32,
-}
-
-impl RollingBreaker {
-    /// Closed breaker with an empty window.
-    pub fn new() -> Self {
-        Self {
-            window: [false; BREAKER_WINDOW_CALLS],
-            next: 0,
-            filled: 0,
-            attempt: 0,
-            state: BreakerState::Closed,
-            opened_at: None,
-            probes: 0,
-        }
-    }
-
-    /// Total calls observed so far.
-    #[must_use]
-    pub fn attempt(&self) -> u64 {
-        self.attempt
-    }
-
-    /// True while new retries must reject fast.
-    pub fn is_open(&self) -> bool {
-        self.state == BreakerState::Open
-    }
-
-    /// True while the single recovery probe is admitted.
-    pub fn is_half_open(&self) -> bool {
-        self.state == BreakerState::HalfOpen
-    }
-
-    /// 1-based call index where the breaker last opened.
-    pub fn opened_at(&self) -> Option<u64> {
-        self.opened_at
-    }
-
-    /// Gate one retry: `Ok` admits it, `Err` stops it without using window
-    /// budget. Half-open admits here; `half_open_probe` is what spends the
-    /// single probe.
-    pub fn admit(&self) -> Result<(), BreakerError> {
-        match self.state {
-            BreakerState::Closed | BreakerState::HalfOpen => Ok(()),
-            BreakerState::Open => Err(BreakerError::Open),
-        }
-    }
-
-    /// Record one retry outcome (`ok` is success). A closed window trips at
-    /// 50% or more errors once full; a half-open probe closes on success or
-    /// reopens on failure; an open breaker ignores outcomes.
-    pub fn observe(&mut self, ok: bool) {
-        match self.state {
-            BreakerState::HalfOpen => self.complete_probe(ok),
-            BreakerState::Open => {}
-            BreakerState::Closed => {
-                self.push(!ok);
-                if self.filled == BREAKER_WINDOW_CALLS
-                    && self.error_percent() >= BREAKER_ERROR_PERCENT
-                {
-                    self.state = BreakerState::Open;
-                    self.opened_at = Some(self.attempt);
-                }
-            }
-        }
-    }
-
-    /// Move an open breaker to half-open and spend its one probe. A closed
-    /// breaker admits without moving; a second probe in one half-open period
-    /// is refused.
-    pub fn half_open_probe(&mut self) -> Result<(), BreakerError> {
-        match self.state {
-            BreakerState::Closed => Ok(()),
-            BreakerState::HalfOpen => {
-                if self.probes >= HALF_OPEN_MAX_CALLS {
-                    Err(BreakerError::Open)
-                } else {
-                    self.probes = self.probes.saturating_add(1);
-                    Ok(())
-                }
-            }
-            BreakerState::Open => {
-                self.state = BreakerState::HalfOpen;
-                self.probes = 1;
-                Ok(())
-            }
-        }
-    }
-
-    /// Finish the half-open probe: success closes and clears the window,
-    /// failure reopens at once.
-    fn complete_probe(&mut self, ok: bool) {
-        if ok {
-            self.state = BreakerState::Closed;
-            self.window = [false; BREAKER_WINDOW_CALLS];
-            self.next = 0;
-            self.filled = 0;
-            self.probes = 0;
-        } else {
-            self.state = BreakerState::Open;
-            self.attempt = self.attempt.saturating_add(1);
-            self.opened_at = Some(self.attempt);
-            self.probes = 0;
-        }
-    }
-
-    /// Push one error flag into the ring and count the call.
-    fn push(&mut self, is_error: bool) {
-        self.window[self.next] = is_error;
-        self.next = (self.next + 1) % BREAKER_WINDOW_CALLS;
-        if self.filled < BREAKER_WINDOW_CALLS {
-            self.filled = self.filled.saturating_add(1);
-        }
-        self.attempt = self.attempt.saturating_add(1);
-    }
-
-    /// Error percent over the filled window (0 while empty).
-    pub fn error_percent(&self) -> u32 {
-        if self.filled == 0 {
-            return 0;
-        }
-        let errors =
-            u32::try_from(self.window.iter().filter(|hit| **hit).count()).unwrap_or(u32::MAX);
-        let filled = u32::try_from(self.filled).unwrap_or(u32::MAX);
-        errors.saturating_mul(100) / filled.max(1)
-    }
-}
-
-impl Default for RollingBreaker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Per-code hedge budget: a retry that faults past `hedge_after_ms` may run
-/// one backup at once, while backups stay within `max_extra_percent` of the
-/// reported primaries. Units: ms (`u64`), counts (`u64`), percent (`u32`).
-/// Determinism: integer counts only, no clock, same latencies give the same
-/// decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HedgeBudget {
-    /// Latency past which a late retry owes a backup, in milliseconds.
-    hedge_after_ms: u64,
-    /// Extra-load cap as integer percent of reported primaries.
-    max_extra_percent: u32,
-    /// Reported primary attempts counted against the cap.
-    primaries: u64,
-    /// Backups spent so far, never above the cap.
-    backups: u64,
-}
-
-impl HedgeBudget {
-    /// Empty budget: no backups spent, cap applies to future reports.
-    #[must_use]
-    pub fn new(hedge_after_ms: u64, max_extra_percent: u32) -> Self {
-        Self {
-            hedge_after_ms,
-            max_extra_percent,
-            primaries: 0,
-            backups: 0,
-        }
-    }
-
-    /// Latency past which a late retry owes a backup, in milliseconds.
-    #[must_use]
-    pub fn hedge_after_ms(&self) -> u64 {
-        self.hedge_after_ms
-    }
-
-    /// Extra-load cap as integer percent of reported primaries.
-    #[must_use]
-    pub fn max_extra_percent(&self) -> u32 {
-        self.max_extra_percent
-    }
-
-    /// Reported primaries counted against the cap.
-    #[must_use]
-    pub fn primaries(&self) -> u64 {
-        self.primaries
-    }
-
-    /// Backups spent so far.
-    #[must_use]
-    pub fn backups(&self) -> u64 {
-        self.backups
-    }
-
-    /// Count one reported primary at `latency_ms`; `true` spends one backup
-    /// when the sample is past the threshold and the cap still allows it.
-    pub fn observe(&mut self, latency_ms: u64) -> bool {
-        self.primaries = self.primaries.saturating_add(1);
-        let allowed = self
-            .primaries
-            .saturating_mul(u64::from(self.max_extra_percent))
-            / 100;
-        let hedge = latency_ms > self.hedge_after_ms && self.backups < allowed;
-        if hedge {
-            self.backups = self.backups.saturating_add(1);
-        }
-        hedge
-    }
-}
-
 /// MAPE-K supervisor: catalog policies with attempt budgets, escalation
 /// with backoff, a tick-boundary queue for sim heals and a heal tape.
 ///
@@ -851,6 +599,17 @@ impl Supervisor {
     pub fn record_attempt_outcome(&mut self, code: EventCode, ok: bool) {
         if let Some(breaker) = self.breakers.get_mut(&code.raw()) {
             breaker.observe(ok);
+        }
+    }
+
+    /// Feed one retry outcome (`ok` is success) into the code's breaker at
+    /// the caller's `revision`: a tick, a journal revision or any other
+    /// monotonic count, never a wall clock. The open revision is that
+    /// `revision`, so the same storm at the same revisions replays the same
+    /// breaker state. Codes without a breaker are a no-op.
+    pub fn record_attempt_outcome_at(&mut self, code: EventCode, revision: u64, ok: bool) {
+        if let Some(breaker) = self.breakers.get_mut(&code.raw()) {
+            breaker.observe_at(revision, ok);
         }
     }
 

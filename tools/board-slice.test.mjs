@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { archivedDoneRows, blockedBy, boardShardFiles, focusAncestors, focusNowIds, loadBoardText, needsOf, parseBoard, parkedUnmarked, pickNext, rowReady, ticksOf } from "./board-slice.mjs";
+import { archivedDoneRows, blockedBy, boardShardFiles, focusAncestors, focusNowIds, loadBoardText, needsOf, ownedOf, parseBoard, parkedUnmarked, pathsOverlap, pickNext, planWave, rowReady, rowsOverlap, ticksOf } from "./board-slice.mjs";
 
 // Remove every temp folder this file makes when it exits (test temp folders piled up in %TEMP%).
 const madeDirs = [];
@@ -665,4 +665,62 @@ test("done rows in the older board snapshots still tick a needs:", () => {
   assert.deepEqual(order, ["L1", "L2"], "the archived rows never join the order");
   const ready = runIn(root, ["--ready"]);
   assert.deepEqual(listIds(ready.out), ["L1", "L2"], "and are never listed");
+});
+
+test("paths overlap when equal or nested, never by a name prefix", () => {
+  assert.equal(pathsOverlap("crates/game/src/lib.rs", "crates/game/src/lib.rs"), true);
+  assert.equal(pathsOverlap("crates/game", "crates/game/src/lib.rs"), true);
+  assert.equal(pathsOverlap("crates/game/src/lib.rs", "crates/game"), true);
+  assert.equal(pathsOverlap("crates/game/src/", "crates/game/src/lib.rs"), true, "a trailing slash is the same lease");
+  assert.equal(pathsOverlap("crates/game/src/a.rs", "crates/game/src/a.rs.bak"), false, "a name prefix is not a hold");
+  assert.equal(pathsOverlap("crates/game/src", "crates/game/src2/lib.rs"), false);
+  assert.equal(rowsOverlap(["crates/anim/src/a.rs"], ["crates/anim", "crates/render"]), true);
+  assert.equal(rowsOverlap(["crates/anim/src/a.rs"], ["crates/render/src/b.rs"]), false);
+});
+
+test("a wave takes a row only when its paths are disjoint from every row taken", () => {
+  const rows = [
+    { id: "R1", owned: ["crates/render/src/a.rs"], title: "a" },
+    { id: "R2", owned: ["crates/render/src/a.rs"], title: "b" },
+    { id: "R3", owned: ["crates/render"], title: "c" },
+    { id: "R4", owned: ["crates/anim/src/b.rs"], title: "d" },
+    { id: "R5", owned: [], title: "e" },
+  ];
+  const { picked, skipped } = planWave(rows, 9);
+  assert.deepEqual(picked.map((r) => r.id), ["R1", "R4"]);
+  assert.deepEqual(skipped, [
+    { id: "R2", why: "overlap" },
+    { id: "R3", why: "overlap" },
+    { id: "R5", why: "no paths" },
+  ]);
+  assert.deepEqual(planWave(rows, 1).picked.map((r) => r.id), ["R1"], "the count is a hard cap");
+});
+
+test("--wave prints N rows with disjoint paths and counts what it skipped", () => {
+  const index = [
+    "# SPRINT",
+    "## Board",
+    "- [ ] W1 render: owns `crates/render/src/a.rs`. needs: none.",
+    "- [ ] W2 render: owns `crates/render/src/a.rs`. needs: none.",
+    "- [ ] W3 anim: owns `crates/anim/src/b.rs`. needs: none.",
+    "- [ ] W4 broad: owns `crates/render`. needs: none.",
+    "- [ ] W5 nothing: no path here. needs: none.",
+    "",
+  ].join("\n");
+  const root = boardRoot(index);
+  const wave = runIn(root, ["--wave", "3"]);
+  assert.equal(wave.code, 0);
+  assert.match(wave.out, /^W1\s/m);
+  assert.match(wave.out, /^W3\s/m);
+  assert.doesNotMatch(wave.out, /^W2\s/m, "the same file is never in one wave twice");
+  assert.doesNotMatch(wave.out, /^W4\s/m, "a row that holds a picked file is skipped");
+  assert.doesNotMatch(wave.out, /^W5\s/m, "a row with no path cannot hold a lease");
+  assert.match(wave.out, /wave 2\/3: 2 skipped for overlap with a picked row, 1 skipped for naming no path/);
+
+  const json = runIn(root, ["--wave", "3", "--json"]);
+  assert.equal(json.code, 0);
+  const parsed = JSON.parse(json.out);
+  assert.deepEqual(parsed.picked.map((r) => r.id), ["W1", "W3"]);
+  assert.deepEqual(parsed.picked[0].owned, ["crates/render/src/a.rs"]);
+  assert.equal(parsed.skipped.length, 3);
 });

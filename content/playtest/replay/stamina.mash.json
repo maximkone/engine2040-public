@@ -1,0 +1,16 @@
+{
+  "name": "stamina.mash",
+  "system": "stamina",
+  "seed": 2040,
+  "bout": { "ticks": 80, "fighters": 2, "half_extent_m": 20, "table_version": 1 },
+  "steps": [
+    { "input": "attack", "ticks": 80, "fighter": 0, "at": 0 }
+  ],
+  "assertions": [
+    { "check": "digest", "expect": "0xc513971e10374716" },
+    { "check": "ticks", "expect": "80" },
+    { "check": "hits", "expect": "4" },
+    { "check": "stamina_out", "expect": "9" }
+  ],
+  "tags": ["replay", "stamina"]
+}

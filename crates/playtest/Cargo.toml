@@ -24,6 +24,9 @@ live = ["dep:serde_json", "engine-provider/tls"]
 engine-ai.workspace = true
 # ARC8: the keypoint spine track steps `engine_arena::spine_step` (`spine` flag).
 engine-arena = { workspace = true, features = ["spine"] }
+# Named replay corpus: the arena re-exports the tape types but not the
+# `Buttons` bit consts, so the corpus names its own button bytes.
+engine-input.workspace = true
 # GP7 feel keypoints play the presentation feel (shake, hit-stop, framing) from combat.
 engine-combat.workspace = true
 # Keyed evidence seal for the a6/a7 writers: HMAC-SHA256 over the manifest

@@ -336,3 +336,13 @@ test('--orphans is the default report and --help lists the diff flags', () => {
     cleanup(root);
   }
 });
+
+test('a root that is not a directory exits 2, never a vacuous pass', () => {
+  // docs/plan/potato.md:120 ran `--baseline tools/wiring-baseline.json` and
+  // read exit 0: the path was scanned as a crates root and held no .rs file,
+  // so the gate passed on zero islands without touching a crate.
+  const file = join(dirname(fileURLToPath(import.meta.url)), 'wiring-scan.baseline.json');
+  const r = spawnSync(process.execPath, [TOOL, file, '--check'], { encoding: 'utf8' });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /not a directory/);
+});

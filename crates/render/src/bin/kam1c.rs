@@ -6,9 +6,6 @@
 //! both the scene and the HUD.
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::{Path, PathBuf};
-
-#[cfg(not(target_arch = "wasm32"))]
 use engine_render::kam2_sprite_proof::{run_proof_with_hud, SpriteProofError, WINDOW_H, WINDOW_W};
 #[cfg(not(target_arch = "wasm32"))]
 use engine_ui::text::hud_text_px;
@@ -47,7 +44,8 @@ const SLOT_FULL: u32 = 120;
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), SpriteProofError> {
     let frame = stock_hud(WINDOW_W, WINDOW_H);
-    let proof = run_proof_with_hud(target_png(), Some(frame))?;
+    let png = engine_render::capture_path::target_png("kam1c.png");
+    let proof = run_proof_with_hud(png, Some(frame))?;
     println!(
         "KAM1C OK hud={} png={}",
         proof.hud_draws,
@@ -56,15 +54,9 @@ fn main() -> Result<(), SpriteProofError> {
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn target_png() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest
-        .ancestors()
-        .nth(2)
-        .unwrap_or_else(|| Path::new("."));
-    root.join("target").join("kam1c.png")
-}
+/// The proof writes a PNG and blocks on the GPU adapter: native only.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
 
 /// One HUD frame for the proof: viewport scissor, stock panel with three
 /// wares, minimap placeholder frame and two text lines. ASCII only so the

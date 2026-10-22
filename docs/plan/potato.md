@@ -117,7 +117,9 @@ Row changes: none to existing rows. PLF10, OPT20, OPT18, RL5, LF9, LF10 and E32 
 
 - `node tools/workspace-check.mjs` PASS (board ids unique, needs resolve).
 - Golden `d57b5c8ae3096614` unchanged by every row; hash x2.
-- `node tools/wiring-scan.mjs --baseline tools/wiring-baseline.json` exits 0 (island count never rises).
+- `node tools/wiring-scan.mjs --check` exits 0 (island count never rises); the pin lives in
+  `tools/wiring-scan.baseline.json`, and a root that is not a directory exits 2 instead of
+  passing on zero islands.
 - `node tools/potato-check.mjs` prints the `potato:` line; with `--floor` it exits 0 once the owner accepts the numbers.
 - `cargo test -p engine-perf` heap peak within 10% of the baseline.
 - Every new pure module has a test that fails before and a `x2 equal` check.

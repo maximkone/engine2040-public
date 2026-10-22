@@ -1,0 +1,20 @@
+{
+  "name": "parry.window",
+  "system": "parry",
+  "seed": 2040,
+  "bout": { "ticks": 64, "fighters": 2, "half_extent_m": 20, "table_version": 1 },
+  "steps": [
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 6 },
+    { "input": "block", "ticks": 3, "fighter": 1, "at": 8 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 28 },
+    { "input": "block", "ticks": 7, "fighter": 1, "at": 26 }
+  ],
+  "assertions": [
+    { "check": "digest", "expect": "0x01207fc4a745b00b" },
+    { "check": "ticks", "expect": "64" },
+    { "check": "parried", "expect": "1" },
+    { "check": "blocked", "expect": "1" },
+    { "check": "hits", "expect": "0" }
+  ],
+  "tags": ["replay", "parry"]
+}

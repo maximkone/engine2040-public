@@ -22,13 +22,13 @@
 //! script names are never consulted, so injected context cannot widen scope.
 //!
 //! Spatial rule: AI proposals are staged on a private copy first and checked
-//! as plain local [`StagedObj`] rows (id plus meters box, no spatial or
-//! command types cross crate boundaries and no new dependency): any ADDED
-//! overlap or floating finding rejects the batch with the document UNCHANGED.
-//! The check mirrors the spatial thresholds (integer centimeters, touching edges
-//! are not overlap, min-y above 1 cm is floating). The editor hierarchy
-//! carries poses, not extents, so every row assumes a 1 m cube centered on
-//! the node's world position, like the spatial resting fixtures.
+//! as [`StagedObj`] rows built by the one scene adapter
+//! ([`crate::spatial_view`]): any ADDED overlap or floating finding rejects the
+//! batch with the document UNCHANGED. Rows carry the node's real collider
+//! extents (times world scale) and only fall back to the node scale when the
+//! node has no collider at all, so a wide wall is not a 1 m cube here. The
+//! check mirrors the spatial thresholds (integer centimeters, touching edges
+//! are not overlap, min-y above 1 cm is floating).
 //!
 //! Budget rule: [`authorize`] spends one unit per op on success; failures
 //! before authorization spend nothing, and a spent-but-unapplied approval
@@ -41,9 +41,9 @@ use std::fmt;
 
 use engine_core::Fnv64;
 use engine_scene::ids::ObjectId;
-use engine_scene::transform::{Hierarchy, HierarchyError, Transform};
+use engine_scene::transform::{Hierarchy, Transform};
 
-use crate::commands::{self, Applied, Batch, BatchError, Document, Journal, Op};
+use crate::commands::{self, Applied, Batch, BatchError, ComponentTable, Document, Journal, Op};
 
 /// Operation classes a token may grant, as bit flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -492,8 +492,9 @@ impl ApprovalLedger {
     }
 }
 
-/// Plain staged-actor snapshot row: id text plus a meters box. Local mirror
-/// of the spatial staged-actor shape; no spatial or command types cross here.
+/// Plain staged-actor snapshot row: id text plus a meters box. Local mirror of
+/// the spatial staged-actor shape; the size comes from
+/// [`crate::spatial_view`] and is never guessed here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StagedObj {
     /// Object id text (prefix scope matches on this).
@@ -504,48 +505,43 @@ pub struct StagedObj {
     pub y: f32,
     /// World position in meters.
     pub z: f32,
-    /// Full extents in meters (always 1 m: the hierarchy holds poses only).
+    /// Full extents in meters, from the node's collider or its labelled
+    /// fallback ([`crate::spatial_view::SizeBasis`]).
     pub sx: f32,
     /// Full extents in meters.
     pub sy: f32,
     /// Full extents in meters.
     pub sz: f32,
+    /// True when the box is the fallback, not a measured collider.
+    pub default_size: bool,
 }
 
-/// Snapshot a hierarchy into deterministic plain rows: depth-first from
-/// roots sorted by id, children sorted, unit 1 m cubes on world
-/// positions (id byte order equals id text order: hyphenated lowercase hex).
-/// Rows with missing or non-finite world poses are skipped, like
-/// the spatial crate skipping unknown positions (the command service still rejects NaN).
-pub fn snapshot_hierarchy(tree: &Hierarchy) -> Vec<StagedObj> {
-    let mut rows = Vec::with_capacity(tree.len());
-    let mut roots = tree.roots();
-    roots.sort();
-    let mut stack: Vec<ObjectId> = roots.into_iter().rev().collect();
-    while let Some(id) = stack.pop() {
-        let Some(world) = tree.world(id) else {
-            continue;
-        };
-        if !world.position.iter().all(|lane| lane.is_finite()) {
-            continue;
-        }
-        rows.push(StagedObj {
-            key: id.to_string(),
-            x: world.position[0],
-            y: world.position[1],
-            z: world.position[2],
-            sx: 1.0,
-            sy: 1.0,
-            sz: 1.0,
-        });
-        let mut kids = tree.children(id);
-        kids.sort();
-        for kid in kids.into_iter().rev() {
-            stack.push(kid);
-        }
-    }
-    rows.sort_by(|a, b| a.key.cmp(&b.key));
-    rows
+/// Snapshot a document into deterministic plain rows: one row per node with a
+/// finite world pose, id-text order, sized by the one spatial adapter
+/// ([`crate::spatial_view::rows_of`]). Rows with missing or non-finite world
+/// poses are skipped, like the spatial crate skipping unknown positions (the
+/// command service still rejects NaN).
+pub fn snapshot_hierarchy(doc: &Document) -> Vec<StagedObj> {
+    snapshot_rows(&doc.hierarchy, &doc.components)
+}
+
+/// [`snapshot_hierarchy`] over a staged tree plus component table, the shape
+/// [`commands::stage_geometry`] returns.
+pub fn snapshot_rows(tree: &Hierarchy, components: &ComponentTable) -> Vec<StagedObj> {
+    crate::spatial_view::rows(tree, components)
+        .rows
+        .iter()
+        .map(|row| StagedObj {
+            key: row.id.to_string(),
+            x: row.world.position[0],
+            y: row.world.position[1],
+            z: row.world.position[2],
+            sx: row.size[0],
+            sy: row.size[1],
+            sz: row.size[2],
+            default_size: row.basis.is_default(),
+        })
+        .collect()
 }
 
 /// Meters to integer centimeters, mirroring the spatial index math.
@@ -623,67 +619,6 @@ pub fn check_staged_delta(before: &[StagedObj], staged: &[StagedObj]) -> Result<
     Ok(())
 }
 
-/// Stage a batch on a private copy of `tree`, returning the staged tree.
-/// Failures name the culprit and leave the caller's tree untouched.
-fn stage_tree(tree: &Hierarchy, ops: &[Op]) -> Result<Hierarchy, BatchError> {
-    let mut staged = tree.clone();
-    for op in ops {
-        apply_to_tree(&mut staged, op)?;
-    }
-    Ok(staged)
-}
-
-/// One op against a staging copy, with culprit-naming errors like the
-/// command service.
-fn apply_to_tree(tree: &mut Hierarchy, op: &Op) -> Result<(), BatchError> {
-    let id = op_target(op);
-    let parent = match op {
-        Op::Insert { parent, .. } => *parent,
-        Op::Reparent { new_parent, .. } => *new_parent,
-        Op::Remove { .. }
-        | Op::SetLocal { .. }
-        | Op::SetMaterial { .. }
-        | Op::SetComponent { .. }
-        | Op::RemoveComponent { .. }
-        | Op::PutMaterial { .. }
-        | Op::SetMaterialParam { .. }
-        | Op::RemoveLastMaterial => ObjectId::NIL,
-    };
-    let result = match op {
-        Op::Insert { id, parent, local } => tree.insert(*id, *parent, *local),
-        Op::Remove { id } => tree.remove(*id),
-        Op::SetLocal { id, local } => tree.set_local(*id, *local),
-        Op::Reparent { id, new_parent } => tree.reparent(*id, *new_parent),
-        // Bindings and components ride the document beside the tree: no pose
-        // moves, so the spatial delta is empty, but the node must exist like
-        // the service.
-        Op::SetMaterial { id, .. }
-        | Op::SetComponent { id, .. }
-        | Op::RemoveComponent { id, .. } => {
-            if tree.contains(*id) {
-                Ok(())
-            } else {
-                Err(engine_scene::transform::HierarchyError::UnknownNode)
-            }
-        }
-        // Material-table ops change no pose: the spatial delta over a batch
-        // that only edits records is empty.
-        Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => Ok(()),
-    };
-    result.map_err(|error| match error {
-        HierarchyError::UnknownNode => BatchError::UnknownNode { id },
-        HierarchyError::UnknownParent => BatchError::UnknownParent { id, parent },
-        HierarchyError::Duplicate => BatchError::Duplicate { id },
-        HierarchyError::Cycle => BatchError::Cycle {
-            id,
-            new_parent: parent,
-        },
-        HierarchyError::NonFinite => BatchError::NonFinite { id },
-        HierarchyError::DegenerateScale => BatchError::DegenerateScale { id },
-        HierarchyError::NilId => BatchError::NilId,
-    })
-}
-
 /// Apply a token-bearing batch through the shared gate: idempotent replay,
 /// then staging plus the spatial delta on a private copy, then
 /// single-use authorization, then the atomic command apply.
@@ -719,11 +654,12 @@ pub fn apply_gated(
             });
         }
     }
-    // Stage plus spatial delta on a private copy: added overlap/floating
-    // fails before any authorization spend or document write.
-    let staged = stage_tree(&doc.hierarchy, &batch.ops)?;
-    let before = snapshot_hierarchy(&doc.hierarchy);
-    let after = snapshot_hierarchy(&staged);
+    // Stage geometry on a private copy (pose AND component ops, so a new
+    // collider is measured too) and run the spatial delta: added
+    // overlap/floating fails before any authorization spend or document write.
+    let (staged_tree, staged_components) = crate::geometry::stage(doc, &batch.ops)?;
+    let before = snapshot_hierarchy(doc);
+    let after = snapshot_rows(&staged_tree, &staged_components);
     check_staged_delta(&before, &after)?;
     // Single-use authorization spends the budget; the apply below then
     // commits atomically (a command refusal still spends, by design: the
@@ -737,6 +673,7 @@ pub fn apply_gated(
 mod tests {
     use super::*;
     use crate::commands::ProvenanceStamp;
+    use engine_scene::component::{Collider, ColliderShape, Component};
 
     fn pose_at(x: f32, y: f32) -> Transform {
         Transform::new([x, y, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0])
@@ -1260,6 +1197,129 @@ mod tests {
             &mut ledger,
         )
         .unwrap();
+        assert_eq!(doc.hierarchy.local(b), Some(pose_at(5.0, 0.0)));
+    }
+
+    /// The gate measures the real boxes, not a 1 m cube: a wall collider
+    /// `[2, 1.5, 0.1]` turns a pass into a refusal both when the batch stages
+    /// the collider and when the document already holds it.
+    #[test]
+    fn spatial_gate_measures_collider_extents() {
+        let wall = Component::Collider(Collider {
+            shape: ColliderShape::Box,
+            half: [2.0, 1.5, 0.1],
+            sensor: false,
+        });
+        // 1. Staged component: the batch adds the wall while `b` sits 1.6 m
+        // east. A 1 m cube pair that far apart was clean; the real 4 m wall is
+        // not.
+        let (mut doc, mut journal, a, b) = setup_two_roots();
+        let place = Batch {
+            ops: vec![Op::SetLocal {
+                id: b,
+                local: pose_at(1.6, 0.5),
+            }],
+            base_revision: doc.revision,
+            idempotency_key: 920,
+            provenance: None,
+        };
+        commands::apply(&mut doc, &mut journal, &place).expect("unit cubes 1.6 m apart are clean");
+        let before = doc.clone();
+        let mut cap = scoped_cap(7, a, OpMask::ALL, 10);
+        let mut ledger = ApprovalLedger::new();
+        let grow = Batch {
+            ops: vec![Op::SetComponent {
+                id: a,
+                component: wall,
+            }],
+            base_revision: doc.revision,
+            idempotency_key: 921,
+            provenance: None,
+        };
+        let approval = approve(7, &grow, doc.revision, doc.revision + 9);
+        let mut pair = [a.to_string(), b.to_string()];
+        pair.sort();
+        assert_eq!(
+            apply_gated(
+                &mut doc,
+                &mut journal,
+                &grow,
+                &mut cap,
+                &approval,
+                &mut ledger
+            ),
+            Err(CapError::Spatial {
+                check: "overlap",
+                culprits: pair.to_vec(),
+            })
+        );
+        assert_eq!(doc, before);
+        assert_eq!(cap.remaining(), 10, "a spatial refusal spends nothing");
+
+        // 2. Existing collider: with the wall applied, dragging `b` inside it
+        // creates a new overlap. The old 1 m snapshot passed this.
+        let (mut doc, mut journal, a, b) = setup_two_roots();
+        let mut pair = [a.to_string(), b.to_string()];
+        pair.sort();
+        let grow = Batch {
+            ops: vec![Op::SetComponent {
+                id: a,
+                component: wall,
+            }],
+            base_revision: doc.revision,
+            idempotency_key: 922,
+            provenance: None,
+        };
+        commands::apply(&mut doc, &mut journal, &grow).expect("wall applies");
+        let before = doc.clone();
+        let mut cap = Capability::new(7, OpMask::ALL, vec![a.to_string(), b.to_string()], 10);
+        let mut ledger = ApprovalLedger::new();
+        let inside = Batch {
+            ops: vec![Op::SetLocal {
+                id: b,
+                local: pose_at(1.6, 0.5),
+            }],
+            base_revision: doc.revision,
+            idempotency_key: 923,
+            provenance: None,
+        };
+        let approval = approve(7, &inside, doc.revision, doc.revision + 9);
+        assert_eq!(
+            apply_gated(
+                &mut doc,
+                &mut journal,
+                &inside,
+                &mut cap,
+                &approval,
+                &mut ledger
+            ),
+            Err(CapError::Spatial {
+                check: "overlap",
+                culprits: pair.to_vec(),
+            })
+        );
+        assert_eq!(doc, before);
+        assert_eq!(cap.remaining(), 10);
+        // The same gate still passes a clean grounded move outside the wall.
+        let clear = Batch {
+            ops: vec![Op::SetLocal {
+                id: b,
+                local: pose_at(5.0, 0.0),
+            }],
+            base_revision: doc.revision,
+            idempotency_key: 924,
+            provenance: None,
+        };
+        let approval = approve(7, &clear, doc.revision, doc.revision + 9);
+        apply_gated(
+            &mut doc,
+            &mut journal,
+            &clear,
+            &mut cap,
+            &approval,
+            &mut ledger,
+        )
+        .expect("5 m east clears the 2 m wall face");
         assert_eq!(doc.hierarchy.local(b), Some(pose_at(5.0, 0.0)));
     }
 

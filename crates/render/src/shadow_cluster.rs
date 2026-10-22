@@ -362,6 +362,9 @@ impl SunShadowPass {
 
 pub mod torch_cluster;
 
+pub mod cluster_mask;
+
+pub use cluster_mask::{mask_groups, ClusterMask, CLUSTER_MASK_LIGHTS};
 #[cfg(feature = "v1")]
 pub use torch_cluster::project_perspective;
 pub use torch_cluster::{

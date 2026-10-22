@@ -471,6 +471,14 @@ if (isMain) {
     process.exitCode = 0;
   } else {
   const root = resolve(arg);
+  // A root that exists but is not a directory scans no file, so every mode
+  // would pass on zero islands: a mistyped path has to fail loudly instead
+  // (docs/plan/potato.md:120 ran `--baseline tools/wiring-baseline.json` and
+  // read exit 0 while scanning a JSON file).
+  if (existsSync(root) && !statSync(root).isDirectory()) {
+    process.stderr.write('wiring-scan: root is not a directory: ' + root + '\n');
+    process.exit(2);
+  }
   const toolDir = dirname(fileURLToPath(import.meta.url));
   const mode = wantDiff ? 'diff' : wantCheck ? 'check' : wantBaseline ? 'baseline' : wantJson ? 'json' : 'report';
   runWithVerdictCache({ repoDir: dirname(toolDir), name: 'wiring-scan', extra: mode + '|' + root,

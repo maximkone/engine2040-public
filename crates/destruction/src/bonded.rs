@@ -27,6 +27,13 @@ pub const MAX_BONDS: usize = 4096;
 pub const MAX_CRATE_PIECES: usize = 64;
 /// Default per-bond strain limit; a sword strike lands well above it.
 pub const DEFAULT_BOND_STRAIN: f32 = 1.0;
+/// Elastic band as a fraction of the fatal gate: a blow at or below
+/// `mass * threshold * ELASTIC_BAND` is fully elastic and adds no damage.
+pub const ELASTIC_BAND: f32 = 0.5;
+/// Most of a bond's limit a single blow below the fatal gate may chip, at the
+/// gate itself; scaled by the excess over the elastic limit. A sub-fatal blow
+/// never snaps a bond alone, so only a repeat wears it through.
+pub const ELASTIC_CHIP: f32 = 0.5;
 /// Accepted per-bond strain limit range; (0, `MAX_BOND_STRAIN`].
 pub const MAX_BOND_STRAIN: f32 = 1e6;
 /// Accepted fracture-threshold range; (0, `MAX_BREAK_THRESHOLD`].
@@ -357,10 +364,14 @@ impl BondedCollection {
         })
     }
 
-    /// Applies a hit to one chunk: sub-threshold impulses change nothing;
-    /// above `mass * threshold` every intact incident bond gains
-    /// `impulse / mean-mass` strain and snaps past its limit, then support
-    /// refreshes and detached islands free. Events queue in the log.
+    /// Applies a hit to one chunk, in two bands like Blast's stress solver:
+    /// below `mass * threshold * ELASTIC_BAND` the blow is fully elastic and
+    /// changes nothing; between that elastic limit and `mass * threshold`
+    /// every intact incident bond gains a chip scaled by the excess over the
+    /// elastic limit, so a run of light blows cracks a prop the way one heavy
+    /// blow breaks it; above the gate the full `impulse / mean-mass` strain
+    /// lands and snaps past the limit. Support refreshes and detached islands
+    /// free when any bond snaps. Events queue in the log.
     pub fn apply_impact(
         &mut self,
         chunk: usize,
@@ -374,10 +385,13 @@ impl BondedCollection {
             return Err(BreakError::BadImpulse);
         }
         // Impulse is validated finite above, so `<=` also rejects NaN-free
-        // sub-threshold hits without a fallible comparison.
-        if impulse <= self.chunks[chunk].mass * self.threshold {
+        // elastic hits without a fallible comparison.
+        let gate = self.chunks[chunk].mass * self.threshold;
+        let elastic = gate * ELASTIC_BAND;
+        if impulse <= elastic {
             return Ok(());
         }
+        let fatal = impulse > gate;
         let mut broke_any = false;
         for bi in 0..self.bonds.len() {
             if self.bond_broken[bi] {
@@ -389,7 +403,15 @@ impl BondedCollection {
             }
             // Validated masses are positive, so the mean mass divides safely.
             let mean = (self.chunks[a].mass + self.chunks[b].mass) * 0.5;
-            self.strain[bi] += impulse / mean;
+            let gain = if fatal {
+                impulse / mean
+            } else {
+                // The elastic limit is below the gate, so this span is positive.
+                // Bit-exact `+ - * /` only: same bytes on every PC.
+                let excess = (impulse - elastic) / (gate - elastic);
+                self.bonds[bi].breaking_strain * ELASTIC_CHIP * excess
+            };
+            self.strain[bi] += gain;
             if self.strain[bi] > self.bonds[bi].breaking_strain {
                 self.bond_broken[bi] = true;
                 broke_any = true;
@@ -1195,6 +1217,41 @@ mod tests {
         assert!(field.drain_events().is_empty());
         assert_eq!(field.tick(), 0);
         assert_eq!(field.state_hash(), before);
+    }
+
+    /// Blast's elastic and fatal bands: a blow at half the gate is elastic and
+    /// changes nothing, a blow at four fifths of it chips the bond by the
+    /// excess over the elastic limit, and a run of those light blows breaks
+    /// what one heavy blow would.
+    #[test]
+    fn light_blows_below_the_gate_crack_a_bond_then_break_it() {
+        let mut field = BondedCollection::new(&chain_desc()).expect("valid chain");
+        let gate = field.chunk_mass(2).expect("mass") * field.break_threshold();
+        // Four fifths of the fatal gate: past the elastic half, below the gate.
+        let light = gate * 0.8;
+        // Each blow chips `limit * ELASTIC_CHIP * 0.6` = 0.3 of the one-unit limit.
+        for tick in 0..3 {
+            field.apply_impact(2, light, tick).expect("light blow");
+        }
+        let strain = field.strain_of(1).expect("bond 1 exists");
+        assert!(
+            strain > 0.8 && strain < 1.0,
+            "three light blows crack but hold: {strain}"
+        );
+        assert!(!field.is_bond_broken(1), "three light blows hold the bond");
+        field.apply_impact(2, light, 3).expect("fourth light blow");
+        assert!(
+            field.is_bond_broken(1),
+            "the fourth light blow wears the bond through"
+        );
+        assert_eq!(field.freed_chunks(), vec![2], "the tip frees and falls");
+        assert!(
+            field
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, BreakEvent::BondBroken { bond: 1, .. })),
+            "a worn-through bond logs one break event"
+        );
     }
 
     #[test]

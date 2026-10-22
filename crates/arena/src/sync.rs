@@ -16,6 +16,13 @@
 //! diagnostic only and never feed [`Checkpoint`](super::Checkpoint). Byte
 //! layout mirrors the authority sections so a diverging system points at the
 //! real field family.
+//!
+//! Beside the system split, [`SlotHashes`] folds each fighter's own bytes
+//! into one digest per slot, so a report can name the fighter and not only
+//! the system. Slice layout: a slot digest covers the world, combat and ai
+//! bytes of that slot; shared rows (the tick's event list, the limb pool and
+//! the destruction prop) stay in the system digest, because no single slot
+//! owns them.
 
 use super::MAX_SLOTS;
 use super::{canon_zero, event_bytes, ArenaConfig, Checkpoint, MatchSnapshot};
@@ -70,6 +77,10 @@ pub struct SyncError {
     pub tick: u32,
     /// First diverging system in [`SYSTEM_NAMES`] order.
     pub system: &'static str,
+    /// First fighter slot whose slice digest differs, when the split can see
+    /// one. `None` when the divergence is in a shared row (the tick's event
+    /// list, the limb pool) or in the driver, where no single slot owns it.
+    pub slot: Option<u8>,
     /// Checkpoint hash of the uninterrupted run at [`SyncError::tick`].
     pub expected: u64,
     /// Checkpoint hash of the snapshot/resume continuation there.
@@ -82,9 +93,15 @@ impl core::fmt::Display for SyncError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "sync diverged at tick {} (system {}): expected {:016x}, got {:016x} ({} inputs)",
-            self.tick,
-            self.system,
+            "sync diverged at tick {} (system {}",
+            self.tick, self.system
+        )?;
+        if let Some(slot) = self.slot {
+            write!(f, ", slot {slot}")?;
+        }
+        write!(
+            f,
+            "): expected {:016x}, got {:016x} ({} inputs)",
             self.expected,
             self.actual,
             self.inputs.len()
@@ -94,11 +111,33 @@ impl core::fmt::Display for SyncError {
 
 impl std::error::Error for SyncError {}
 
+/// One digest per fighter slot over that slot's own bytes, for the report
+/// that has to name the fighter. Diagnostics only: never folded into
+/// [`Checkpoint`](super::Checkpoint).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SlotHashes {
+    /// One digest per slot in fighter order; `None` past the fighter count.
+    pub slots: [Option<u64>; MAX_SLOTS],
+}
+
+/// First slot whose slice digests differ. A slot present on one side and
+/// absent on the other counts as a difference: the two runs did not fight the
+/// same cast, which is itself the finding.
+pub fn first_diverging_slot(a: &SlotHashes, b: &SlotHashes) -> Option<u8> {
+    for (slot, (left, right)) in a.slots.iter().zip(b.slots.iter()).enumerate() {
+        if left != right {
+            return u8::try_from(slot).ok();
+        }
+    }
+    None
+}
+
 /// One post-step tick: its checkpoint plus its system split.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct TickHashes {
     checkpoint: Checkpoint,
     systems: SystemHashes,
+    slots: SlotHashes,
 }
 
 /// Tagged dump (Factorio `level_with_tags` idea-only): same bytes plus tags.
@@ -152,6 +191,24 @@ pub fn system_canonical_bytes(
     system_tagged_bytes(config, tape, steps, system).map(|tagged| tagged.bytes)
 }
 
+/// Per-slot slice digests at the post-`steps` state, rebuilt from scratch
+/// (`steps` ticks stepped from tick 0). `None` on invalid config/tape or
+/// `steps > config.ticks`.
+///
+/// Consumer: a desync report that has to name the fighter, not only the
+/// system (`tools/desync-diff.mjs` prints [`SyncError::slot`]). Units: one
+/// digest per slot over that slot's world, combat and ai bytes.
+pub fn slot_hashes_at(config: &ArenaConfig, tape: &FighterTape, steps: u32) -> Option<SlotHashes> {
+    if steps > config.ticks {
+        return None;
+    }
+    let mut sim = super::Sim::build(config, tape, false, false)?;
+    while sim.tick < steps {
+        sim.step(tape)?;
+    }
+    Some(slot_hashes_of(&sim))
+}
+
 /// Per-tick system hashes for a full run, post-step per tick. Empty on
 /// invalid config/tape, never partial.
 pub fn run_system_hashes(config: &ArenaConfig, tape: &FighterTape) -> Vec<SystemHashes> {
@@ -200,36 +257,36 @@ fn resume_matches(
         let row = TickHashes {
             checkpoint: resumed.checkpoints.last().copied()?,
             systems: hashes_of(&resumed),
+            slots: slot_hashes_of(&resumed),
         };
         let want = full.get(tick as usize)?;
         if *want != row {
-            return Some(Err(dual_save_report(
-                tick,
-                &want.systems,
-                &row.systems,
-                want.checkpoint.hash,
-                row.checkpoint.hash,
-                tape,
-            )));
+            return Some(Err(dual_save_report(tick, want, &row, tape)));
         }
     }
     Some(Ok(()))
 }
 
 /// Dual-save envelope (Factorio idea-only): reference plus desynced plus inputs.
+/// The slot is named only for a per-slot system (`world`, `combat`, `ai`); a
+/// divergence in `space` or `rng` belongs to the shared world or the driver,
+/// so reporting a fighter there would point at the wrong place.
 fn dual_save_report(
     tick: u32,
-    reference: &SystemHashes,
-    desynced: &SystemHashes,
-    expected: u64,
-    actual: u64,
+    reference: &TickHashes,
+    desynced: &TickHashes,
     tape: &FighterTape,
 ) -> SyncError {
+    let system = first_diverging_system(&reference.systems, &desynced.systems).unwrap_or("world");
+    let slot = matches!(system, "world" | "combat" | "ai")
+        .then(|| first_diverging_slot(&reference.slots, &desynced.slots))
+        .flatten();
     SyncError {
         tick,
-        system: first_diverging_system(reference, desynced).unwrap_or("world"),
-        expected,
-        actual,
+        system,
+        slot,
+        expected: reference.checkpoint.hash,
+        actual: desynced.checkpoint.hash,
         inputs: inputs_at(tape, tick),
     }
 }
@@ -256,6 +313,7 @@ fn drive_with(
         rows.push(TickHashes {
             checkpoint,
             systems: hashes_of(&sim),
+            slots: slot_hashes_of(&sim),
         });
     }
     Some(rows)
@@ -376,16 +434,32 @@ fn append_world(
     fighters: usize,
     out: &mut Vec<u8>,
 ) {
-    for (slot, state) in states.iter().enumerate().take(fighters) {
-        out.push(state.id.0);
-        for axis in state.pos {
-            out.extend_from_slice(&canon_zero(axis).to_bits().to_le_bytes());
-        }
-        out.extend_from_slice(&canon_zero(state.yaw).to_bits().to_le_bytes());
-        out.extend_from_slice(&wishes[slot][0].to_le_bytes());
-        out.extend_from_slice(&wishes[slot][1].to_le_bytes());
-        out.push(buttons[slot]);
+    for slot in 0..fighters.min(states.len()) {
+        push_world_slot(states, wishes, buttons, slot, out);
     }
+}
+
+/// One fighter's kinematic authority bytes: id, pos bits, yaw bits, wish
+/// pair, button. Shared by the system split and the slot split so the two
+/// layouts cannot drift apart.
+fn push_world_slot(
+    states: &[super::FighterState],
+    wishes: &[[i8; 2]; MAX_SLOTS],
+    buttons: &[u8; MAX_SLOTS],
+    slot: usize,
+    out: &mut Vec<u8>,
+) {
+    let Some(state) = states.get(slot) else {
+        return;
+    };
+    out.push(state.id.0);
+    for axis in state.pos {
+        out.extend_from_slice(&canon_zero(axis).to_bits().to_le_bytes());
+    }
+    out.extend_from_slice(&canon_zero(state.yaw).to_bits().to_le_bytes());
+    out.extend_from_slice(&wishes[slot][0].to_le_bytes());
+    out.extend_from_slice(&wishes[slot][1].to_le_bytes());
+    out.push(buttons[slot]);
 }
 
 /// Spatial authority bytes: destruction hash, limb pool counters and limbs,
@@ -411,10 +485,7 @@ fn append_space(sim: &super::Sim, out: &mut Vec<u8>) {
 /// Fight authority bytes: hp/stamina per slot plus tick event rows.
 fn append_combat(sim: &super::Sim, out: &mut Vec<u8>) {
     for slot in 0..sim.fighters {
-        if let Some(combat) = sim.fight.fighter(slot as u8) {
-            out.extend_from_slice(&combat.hp_permille.to_le_bytes());
-            out.extend_from_slice(&combat.stamina.to_le_bytes());
-        }
+        push_combat_slot(sim, slot, out);
     }
     let events = sim.events.last().map_or(&[][..], |row| &*row.events);
     out.extend_from_slice(&(events.len() as u64).to_le_bytes());
@@ -423,17 +494,53 @@ fn append_combat(sim: &super::Sim, out: &mut Vec<u8>) {
     }
 }
 
+/// One fighter's fight authority bytes. Absent slot writes nothing, exactly
+/// like the whole-system loop it replaces.
+fn push_combat_slot(sim: &super::Sim, slot: usize, out: &mut Vec<u8>) {
+    if let Some(combat) = sim.fight.fighter(slot as u8) {
+        out.extend_from_slice(&combat.hp_permille.to_le_bytes());
+        out.extend_from_slice(&combat.stamina.to_le_bytes());
+    }
+}
+
 /// Brain-driven motion bytes: locomotion state per slot.
 fn append_ai(sim: &super::Sim, out: &mut Vec<u8>) {
-    for loco in sim.locos.iter().take(sim.fighters) {
-        let disc = u8::try_from(state_code(loco.state)).unwrap_or(u8::MAX);
-        out.push(disc);
-        for axis in [loco.phase(), loco.facing()[0], loco.facing()[1]] {
-            out.extend_from_slice(&canon_zero(axis).to_bits().to_le_bytes());
-        }
-        out.push(u8::from(loco.is_airborne()));
-        out.push(u8::from(loco.interrupt_active()));
+    for slot in 0..sim.fighters.min(sim.locos.len()) {
+        push_ai_slot(sim, slot, out);
     }
+}
+
+/// One fighter's locomotion bytes; absent slot writes nothing.
+fn push_ai_slot(sim: &super::Sim, slot: usize, out: &mut Vec<u8>) {
+    let Some(loco) = sim.locos.get(slot) else {
+        return;
+    };
+    let disc = u8::try_from(state_code(loco.state)).unwrap_or(u8::MAX);
+    out.push(disc);
+    for axis in [loco.phase(), loco.facing()[0], loco.facing()[1]] {
+        out.extend_from_slice(&canon_zero(axis).to_bits().to_le_bytes());
+    }
+    out.push(u8::from(loco.is_airborne()));
+    out.push(u8::from(loco.interrupt_active()));
+}
+
+/// Per-slot slice digests over the per-fighter bytes of one post-step state.
+fn slot_hashes_of(sim: &super::Sim) -> SlotHashes {
+    let mut slots = [None; MAX_SLOTS];
+    for (slot, cell) in slots
+        .iter_mut()
+        .enumerate()
+        .take(sim.fighters.min(MAX_SLOTS))
+    {
+        let mut bytes = Vec::new();
+        push_world_slot(&sim.states, &sim.wishes, &sim.buttons, slot, &mut bytes);
+        push_combat_slot(sim, slot, &mut bytes);
+        push_ai_slot(sim, slot, &mut bytes);
+        let mut fold = Fnv64::new();
+        fold.write(&bytes);
+        *cell = Some(fold.finish());
+    }
+    SlotHashes { slots }
 }
 
 #[cfg(test)]
@@ -546,12 +653,14 @@ mod tests {
         let probe = SyncError {
             tick: 60,
             system: "world",
+            slot: Some(0),
             expected: base[60].world,
             actual: systems[60].world,
             inputs: inputs_at(&altered, 60),
         };
         assert!(format!("{probe}").contains("tick 60"));
         assert!(format!("{probe}").contains("world"));
+        assert!(format!("{probe}").contains("slot 0"));
         assert_eq!(probe.inputs.len(), 2);
         // A perturbed button still moves the world first (latched buttons
         // are kinematic authority), before combat answers ticks later.
@@ -579,22 +688,14 @@ mod tests {
         assert!((tagged.tick, tagged.system, tagged.offset) == (60, "world", 0));
         assert_eq!(tagged.len, raw.len());
         assert_eq!(hash_bytes(&tagged.bytes), hash_bytes(&raw));
-        let base = run_system_hashes(&config, &tape);
         let mut altered = tape.clone();
         let victim = 60 * usize::from(config.fighters);
         altered.0[victim].mx = 100;
-        let moved = run_system_hashes(&config, &altered);
-        let idle_full = run(&config, &tape);
-        let moved_full = run(&config, &altered);
-        let report = dual_save_report(
-            60,
-            &base[60],
-            &moved[60],
-            idle_full[60].hash,
-            moved_full[60].hash,
-            &altered,
-        );
+        let idle_rows = drive(&config, &tape, 61).expect("idle run");
+        let moved_rows = drive(&config, &altered, 61).expect("moved run");
+        let report = dual_save_report(60, &idle_rows[60], &moved_rows[60], &altered);
         assert!((report.tick, report.system, report.inputs.len()) == (60, "world", 2));
+        assert_eq!(report.slot, Some(0), "the moved fighter is slot 0");
     }
 
     #[test]
@@ -723,5 +824,62 @@ mod tests {
             .expect("valid window")
             .expect_err("caught from an early split");
         assert_eq!((early.tick, early.system), (100, "space"));
+    }
+
+    #[test]
+    fn slot_split_names_the_perturbed_fighter() {
+        let config = config();
+        let tape = idle_tape(&config);
+        let clean = drive(&config, &tape, 40).expect("clean run");
+        let bent = drive_with(&config, &tape, 40, |sim| {
+            if let Some(state) = sim.states.get_mut(1) {
+                state.pos[0] += 0.25;
+            }
+        })
+        .expect("bent run");
+        let at = 39;
+        assert_eq!(
+            first_diverging_system(&clean[at].systems, &bent[at].systems),
+            Some("world"),
+            "the nudge must reach the world split"
+        );
+        assert_eq!(
+            first_diverging_slot(&clean[at].slots, &bent[at].slots),
+            Some(1),
+            "the slot split names the fighter that moved, not slot 0"
+        );
+        assert_eq!(
+            clean[at].slots.slots[2], None,
+            "two fighters leave the rest of the slices empty"
+        );
+    }
+
+    #[test]
+    fn slot_split_matches_the_run_it_was_taken_from() {
+        let config = config();
+        let tape = idle_tape(&config);
+        let rows = drive(&config, &tape, 30).expect("run");
+        let direct = slot_hashes_at(&config, &tape, 30).expect("slots");
+        assert_eq!(direct, rows[29].slots, "the rebuilt tick is the run's tick");
+        assert_ne!(
+            direct.slots[0], direct.slots[1],
+            "each slice holds its own fighter's bytes"
+        );
+        assert!(slot_hashes_at(&config, &tape, config.ticks + 1).is_none());
+    }
+
+    #[test]
+    fn a_shared_row_divergence_names_no_slot() {
+        let config = config();
+        let tape = idle_tape(&config);
+        let rows = drive(&config, &tape, 4).expect("run");
+        let reference = rows[3];
+        let mut desynced = rows[3];
+        desynced.systems.space ^= 1;
+        assert_eq!(desynced.slots, reference.slots, "the pool is not a slot");
+        let report = dual_save_report(3, &reference, &desynced, &tape);
+        assert_eq!(report.system, "space");
+        assert_eq!(report.slot, None, "no fighter owns the limb pool");
+        assert!(format!("{report}").contains("(system space)"));
     }
 }

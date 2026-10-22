@@ -50,11 +50,16 @@ The physical layer (see [Physics layers](physics-layers.md)) has four tiers, one
 | statics | 64 | 128 | 256 | 512 |
 | solver iterations | 2 | 3 | 4 | 6 |
 | CCD substeps | 0 | 1 | 1 | 2 |
+| soft CCD mm | 0 | 0 | 0 | 300 |
 | blast bodies | 24 | 48 | 96 | 192 |
 | impact bodies | 3 | 4 | 6 | 8 |
 | tethers | 2 | 3 | 6 | 12 |
 | tether nodes | 8 | 12 | 20 | 32 |
 | step bar (microseconds) | 400 | 800 | 1500 | 2000 |
+
+Soft CCD is the look-ahead one body keeps for another, so a fast body stops
+instead of passing through. Only High has the headroom to pay for it; the
+other tiers read 0 and turn it off.
 
 The step bar is five times the mean measured on a GitHub runner on 2026-10-17 (72, 161, 266 and 380 microseconds) for the plan scene cut to what the tier admits: 8 ragdolls, 200 debris bodies and 6 limbs. A slowdown of that size fails the soak; runner noise does not. At the cap the oldest body is recycled first, and a whole ragdoll counts as one unit.
 

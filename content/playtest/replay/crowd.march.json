@@ -1,0 +1,21 @@
+{
+  "name": "crowd.march",
+  "system": "locomotion",
+  "seed": 2040,
+  "bout": { "ticks": 300, "fighters": 8, "half_extent_m": 5, "table_version": 1 },
+  "steps": [
+    { "input": "neutral", "ticks": 300, "fighter": 0, "mx": 100, "mz": 0, "at": 0 },
+    { "input": "neutral", "ticks": 300, "fighter": 1, "mx": 0, "mz": 100, "at": 0 },
+    { "input": "neutral", "ticks": 300, "fighter": 2, "mx": -100, "mz": 0, "at": 0 },
+    { "input": "neutral", "ticks": 300, "fighter": 3, "mx": 0, "mz": -100, "at": 0 },
+    { "input": "neutral", "ticks": 300, "fighter": 4, "mx": 100, "mz": 100, "at": 0 },
+    { "input": "neutral", "ticks": 300, "fighter": 5, "mx": -100, "mz": 100, "at": 0 },
+    { "input": "neutral", "ticks": 300, "fighter": 6, "mx": 100, "mz": -100, "at": 0 },
+    { "input": "neutral", "ticks": 300, "fighter": 7, "mx": -100, "mz": -100, "at": 0 }
+  ],
+  "assertions": [
+    { "check": "digest", "expect": "0x91b512091646b71d" },
+    { "check": "ticks", "expect": "300" }
+  ],
+  "tags": ["replay", "locomotion"]
+}

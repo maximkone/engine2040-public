@@ -1,11 +1,16 @@
 name: ship-check
 
-# HX10: the ship build must be reproducible. This job builds the Windows ship
-# profile twice, each from a clean folder, and compares the two file trees by
-# content hash (tools/ship-check.mjs): one hash per file and a tree hash over
-# them. Equal tree hashes are the receipt; a mismatch names the file that
-# moved. The public mirror is the build farm; the private dev repo never runs
-# this job.
+# HX10 + ENG19: the ship build must be reproducible and it must run. This job
+# builds the Windows ship profile twice, each from a clean folder, and compares
+# the two file trees by content hash (tools/ship-check.mjs): one hash per file
+# and a tree hash over them. Equal tree hashes are the receipt; a mismatch
+# names the file that moved. Then it builds the root proof binary with the same
+# profile, copies it into the clean folder, starts it there with a sanitized
+# environment and checks the run receipt: a missing line, a zero tick or a hash
+# that is not the golden fails the job (tools/ship-run.mjs). The shipped arena
+# binary also plays a short headless run, so the job proves the game boots, not
+# only that it links. The public mirror is the build farm; the private dev repo
+# never runs this job.
 #
 # A Windows PE image carries two fields the linker writes fresh in every
 # build: the COFF time stamp and the CodeView debug record (the PDB GUID and
@@ -42,7 +47,8 @@ jobs:
     # profile tools/ship.mjs packs and the CI release-proof leg builds).
     if: github.repository == 'maximkone/engine2040-public'
     runs-on: windows-latest
-    # Two cold fat-LTO Windows builds of the arena plus the hashes: 45 min.
+    # Two cold fat-LTO Windows builds of the arena, the small proof build and
+    # the headless runs: 45 min.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -51,6 +57,11 @@ jobs:
           node-version: 24
       - name: install repository toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustup show active-toolchain
+      - name: prove the receipt checker refuses a broken receipt
+        # The same checker the run step uses; a good receipt passes, a wrong
+        # hash or a zero tick is red by name. Cheap, so it runs before the
+        # cold builds and its failures are visible at once.
+        run: node --test tools/ship-check.test.mjs tools/ship-run.test.mjs
       - name: build the ship profile twice from a clean folder
         run: |
           $ErrorActionPreference = 'Stop'
@@ -114,6 +125,34 @@ jobs:
             exit 1
           }
           Write-Output "SHIP-CHECK PASS: the two ship builds have the same tree hash $a"
+      - name: run the shipped build and check the receipt
+        # The build proof above says the artifact is reproducible; this step
+        # says it runs. The root proof binary is built with the same ship
+        # profile and the same target folder (so it shares the second build's
+        # dependencies) and is copied into the clean folder beside arena.exe.
+        # tools/ship-run.mjs starts it there with a sanitized environment,
+        # requires `ticks=<n> final_hash=d57b5c8ae3096614` with n > 0, prints
+        # `SHIP-RUN tick=<n> hash=<h>`, then plays the shipped arena binary
+        # headless and quotes its boot receipt. A missing receipt, a zero tick
+        # or a non-golden hash exits 1 and turns the job red.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'ship-target'
+          $env:CARGO_TARGET_DIR = $target
+          $env:RUSTFLAGS = "-Clink-arg=/Brepro --remap-path-prefix=$env:GITHUB_WORKSPACE=. --remap-path-prefix=$env:USERPROFILE\.cargo=./cargo-home"
+          cargo build --locked --profile ship -p engine2040
+          if ($LASTEXITCODE -ne 0) { throw 'the ship proof binary build failed' }
+          $proof = Join-Path $target 'ship/engine2040.exe'
+          if (-not (Test-Path -LiteralPath $proof)) { throw "the ship proof binary is missing: $proof" }
+          Copy-Item -LiteralPath $proof -Destination target/ship-check/ship-a/engine2040.exe -Force
+          node tools/ship-run.mjs --proof target/ship-check/ship-a/engine2040.exe --arena target/ship-check/ship-a/arena.exe --log target/ship-check/ship-run.txt
+          if ($LASTEXITCODE -ne 0) { throw 'the shipped build did not prove itself; see target/ship-check/ship-run.txt' }
+          if ($env:GITHUB_STEP_SUMMARY) {
+            '```' | Out-File -Append -Encoding utf8 -LiteralPath $env:GITHUB_STEP_SUMMARY
+            Get-Content target/ship-check/ship-run.txt | Select-String -Pattern '^SHIP-' | ForEach-Object { $_.Line } |
+              Out-File -Append -Encoding utf8 -LiteralPath $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -Encoding utf8 -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
       - name: upload the ship-check receipt
         if: always()
         uses: actions/upload-artifact@v5
@@ -121,3 +160,10 @@ jobs:
           name: ship-check-hashes
           path: target/ship-check/ship-hashes.txt
           if-no-files-found: error
+      - name: upload the ship-run receipt
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: ship-run-receipt
+          path: target/ship-check/ship-run.txt
+          if-no-files-found: ignore

@@ -24,8 +24,8 @@ Every row is one crate, small, with a named donor and a test that fails before.
   `target/reports/wiring-scan.json`; the first run writes `tools/wiring-baseline.json`
   and `--baseline` exits 1 when any crate's island count rises. F2P: no
   wiring-scan tool. P2P: `node --test tools/wiring-scan.test.mjs`;
-  `node tools/workspace-check.mjs` PASS. Landed so far (2026-10-12 check): ec5d0f45 (scanner and fixtures). Remaining: `--json` byte-equal x2, the ten crates with most islands, `target/reports/wiring-scan.json`, a baseline file and `--baseline` exit 1 when a crate's island count rises.
-- [ ] GS2 tools: wiring coverage, nightly and report only — which functions does the Progress 2026-10-17: tool and 15 tests green (node --test tools/wiring-cov.test.mjs, NOOP exit 2 without llvm-cov, canned fixture grouped list x2, fake-cargo plan); f1456ff. Left: the real run, `cargo llvm-cov` is not installed on this PC so target/reports/wiring-cov.json is still the canned fixture.
+  `node tools/workspace-check.mjs` PASS. Landed so far (2026-10-12 check): ec5d0f45 (scanner and fixtures). Progress 2026-10-23: every Accept part checks green — 18 tests (`node --test tools/wiring-scan.test.mjs`: `--json` byte-equal x2, top ten by count, a baseline rise detected, the committed pin), the report written to `target/reports/wiring-scan.json`, the pin refreshed to `total: 6935` over 41 crates, and a root that is not a directory now exits 2 instead of passing on zero islands (HEAD exited 0 on `tools/wiring-baseline.json`, which is what `docs/plan/potato.md` had been reading as a green gate).
+- [x] GS2 tools: wiring coverage, nightly and report only — which functions does the Progress 2026-10-17: tool and 15 tests green (node --test tools/wiring-cov.test.mjs, NOOP exit 2 without llvm-cov, canned fixture grouped list x2, fake-cargo plan); f1456ff. Left: the real run, `cargo llvm-cov` is not installed on this PC so target/reports/wiring-cov.json is still the canned fixture.
   real arena never run? `cargo llvm-cov run` on the arena binary for a short
   scripted run (same flags as FC1: `--scene arena --fighters 8 --frames 300 --exit`),
   then list zero-hit functions per crate for render, game, anim, audio, ai (donor:
@@ -54,7 +54,12 @@ Every row is one crate, small, with a named donor and a test that fails before.
   of 64-bit reads over 32-bit counters. The tool, its 15 tests and the `--from-json`
   route stay green; the all-zero export was discarded, not kept as the report. Left:
   run the three `cargoPlan` calls on Linux (the same line is the standard path there)
-  or fix the arena exit path, then write `target/reports/wiring-cov.json`.
+  or fix the arena exit path, then write `target/reports/wiring-cov.json`. Progress 2026-10-23:
+  the exit path is fixed (`a5d149aa5`): `main` returns `ExitCode`, so Windows runs the CRT
+  exit path and the profile flushes; the only `std::process::exit(1)` left is the wedged-run
+  watchdog (`crates/game/src/bin/arena.rs:784`), which has no profile worth saving. So the
+  first cause is closed and the row waits on the second (counter layout on 1.97.1 MSVC) or on
+  the Linux `cargoPlan` route, run on a game crate with no other seat's edits in it. Landed 2026-10-23: the real run writes `target/reports/wiring-cov.json`. The blocker was the arena's own exit: `std::process::exit(code)` at the end of `main` ends the process without the CRT exit path, so an instrumented build wrote a 0-byte `.profraw` (measured both ways on this PC, 0 bytes for `process::exit` and 464 bytes for a returned `ExitCode`); `main` now returns `std::process::ExitCode` and the wedged-loop watchdog keeps its forced exit. `cargo-llvm-cov 0.9.1` on this PC then ran the whole plan (`llvm-cov clean --workspace`, `llvm-cov run -p engine-game --features app --bin arena -- --scene arena --fighters 8 --frames 300 --exit`, `llvm-cov report --json`) on the RTX 3050 and the report is real, not the old all-zero export: 8069 functions in the row's 5 crates, 6069 zero-hit, 2000 hit (engine-game 3017 total, engine-render 3217, engine-anim 732, engine-ai 552, engine-audio 551). The tool's own 15 tests stay green (`node --test tools/wiring-cov.test.mjs`, 15/15), so NOOP without llvm-cov and the canned fixture are unchanged. Clippy `-p engine-game --features app --bin arena -- -D warnings` PASS on the Windows runner (run 39861858337, 2026-10-23), after `crates/assets/src/pack_clip.rs` was made clippy-clean under `import`.
 - [x] GS3 tools: pass floors — the product check already reads `name=Xms` per pass Landed d74e785f.
   (`tools/product-check.mjs` `passes`). Add `tools/pass-bar.json` listing each look
   pass (sky, ibl, shadow, gtao, bloom, taa, particles, decals) as `required` or

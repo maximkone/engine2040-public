@@ -58,7 +58,7 @@ Red-team tape (RV1) | unit-tested, integrated, ticked | `crates/endpoint/tests/r
 Stacked score-gate (RV3) | unit-tested, integrated, ticked | 12/22 baseline to 22/22 stacked (+83%), 0/20 FP; door wired at collect |
 Injection defense (RV2) | unit-tested, integrated, ticked | `injection/` 5-category screen wired into `scene.place` |
 Agent play session (VP1) | unit-tested, integrated, ticked | `play_session.rs` (step cursor, tape, PNG receipt) |
-Tool-list budget | enforced by gate, total + per-tool table in code | `TOOL_LIST_BUDGET_CHARS = 38_944` in `crates/endpoint/src/mcp.rs:126` (raised 36864 → 38944 on 2026-09-30: live list 35872, headroom over the 2048 floor); per-tool ledger + bloat/headroom gates; board AX15 ticked |
+| Tool-list budget | enforced by gate, total + per-tool table in code | `TOOL_LIST_BUDGET_CHARS` in `crates/endpoint/src/mcp.rs` (the constant is the number; its dated raise history sits above it), the per-tool ledger + bloat/headroom gates; board AX15 ticked |
 Session-isolation chaos (AX14) | unit-tested, integrated, ticked | `crates/endpoint/tests/session_chaos.rs` (741 lines; 12 proposers x 1 object, one winner, typed conflicts); wave-54 TICK (session_chaos 6/0, endpoint 300+ green) |
 Trace export (AX16) | unit-tested, integrated, ticked | `crates/playtest/src/trace_export.rs` (322 lines; `e2040-ev1-trace v1`, 75 rows + external line, escape `\\ \\t \\r \\n`, unknown versions refuse); wave-54 TICK (`dcaaa7a`, playtest 171/0, round-trip x2) |
 Tool-budget ledger (AX15) | unit-tested, integrated, ticked | per-tool ledger structs + gates in code beside `mcp.rs` (`ToolCostRow`/`ToolBudgetLedger`, `check_tool_budget`, `tool_budget_gate_with_bloat`; no separate `ApprovalLedger` per-tool claim — the ledger is the per-tool table); ticked on the board with receipt; needs MCP7, API1 ticked |
@@ -271,7 +271,6 @@ Per-row data shapes (frozen once the row lands):
   reruns compare bytes, never prose.
 
 **Steals 2026-10-12** (board shard `../SPRINT-21-look-feel.md`, scout files `../research/steals-2026-10-12/`). Result modality: pixels go out as an MCP image block (base64 PNG, max_size 768 by default) with their sha256, numbers as structuredContent, never a byte array (AX27). Long calls (play.run, judge sets, cooks) return an MCP task to clients that declare it and start-poll to the rest; a task result equals the blocking result byte for byte (AX28). Visual judging has three tiers: bit-exact on the software adapter, FLIP pooled p95/p99 with a per-adapter threshold table, and a VLM only on crops FLIP names, never alone (PQ22). Flicker is judged on consecutive frames after motion compensation (PQ21).
-- Fix: this plan says the tool-list budget is 38_944 at `mcp.rs:126`; the code has 43_514 at `mcp.rs:149`.
 
 ## 4. Hard problems
 

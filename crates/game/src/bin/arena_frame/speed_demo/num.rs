@@ -4,16 +4,10 @@
 
 pub(super) use engine_core::checked::saturating_usize_to_u32 as u32_of;
 use engine_core::checked::{f32_from_u64, saturating_f64_to_u64};
+pub(super) use engine_core::vec3::cross3 as cross;
 
 pub(super) fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-pub(super) fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
 }
 pub(super) fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]

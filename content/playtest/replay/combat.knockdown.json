@@ -1,0 +1,24 @@
+{
+  "name": "combat.knockdown",
+  "system": "knockdown",
+  "seed": 2040,
+  "bout": { "ticks": 260, "fighters": 2, "half_extent_m": 20, "table_version": 1 },
+  "steps": [
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 0 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 30 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 60 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 90 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 120 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 150 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 180 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 210 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 240 }
+  ],
+  "assertions": [
+    { "check": "digest", "expect": "0x355e404f713c18e2" },
+    { "check": "ticks", "expect": "260" },
+    { "check": "hits", "expect": "9" },
+    { "check": "knockdowns", "expect": "1" }
+  ],
+  "tags": ["replay", "knockdown"]
+}

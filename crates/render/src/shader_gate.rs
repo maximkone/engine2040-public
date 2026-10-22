@@ -186,6 +186,14 @@ mod tests {
         );
     }
 
+    /// The froxel light mask pass validates on its own, by name, so a red
+    /// elsewhere in the shipped dir cannot hide a broken `cluster.wgsl`.
+    #[test]
+    fn cluster_wgsl_validates() {
+        let src = include_str!("shaders/cluster.wgsl");
+        validate_source("cluster.wgsl", src).expect("cluster.wgsl validates");
+    }
+
     /// A seeded type error in forward.wgsl fails with naga's line:col, which
     /// the brace check the live swap used before would accept.
     #[test]

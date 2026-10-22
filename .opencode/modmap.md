@@ -1091,6 +1091,7 @@ _43 crates, 1468 Rust files. One line per file: `crate/path` · lines · the fil
 ## playtest (engine-playtest, 69 files, 45210 lines)
 - `playtest/src/lib.rs` · 557 · playtest verifiers as content compilers (AI-NATIVE pillar 5).
 - `playtest/examples/spatial_llm_record.rs` · 50 · SPR4 operator entry: record one live model into the spatial-llm cassette.
+- `playtest/src/bin/playtest-replay.rs` · 68 · Replay CLI: one named scenario per line, PASS/FAIL receipt.
 - `playtest/src/agent.rs` · 1327 · AI playtest agent: drive headless arena matches, watch metrics
 - `playtest/src/bench_mirror.rs` · 307 · Public-benchmark mirror report: the 30-task score table over the live HS20
 - `playtest/src/bot_harness.rs` · 316 · Bot harness: hold F, delay D, six moves, batch receipts over fixed ticks.
@@ -1138,7 +1139,8 @@ _43 crates, 1468 Rust files. One line per file: `crate/path` · lines · the fil
 - `playtest/src/reachability.rs` · 444 · Spawn/gate reachability over plain scene data.
 - `playtest/src/rebuild.rs` · 235 · Checksummed sparse rebuilds for the brief-to-game eval (EV16).
 - `playtest/src/replay.rs` · 263 · Tape replay: verify a resimulation against its recorded hash chain.
-- `playtest/src/scenario_shape.rs` · 424 · Declarative scenario fixtures.
+- `playtest/src/replay_corpus.rs` · 595 · Named replay scenarios: one per system, replayed to a recorded digest.
+- `playtest/src/scenario_shape.rs` · 623 · Declarative scenario fixtures.
 - `playtest/src/seeded_bug.rs` · 848 · A7 seeded-bug proof: one deterministic bug with replay + cause.
 - `playtest/src/spatial_eval.rs` · 1689 · Spatial gold eval: 100 place/query/fix tasks with gold answers.
 - `playtest/src/spatial_eval/known_good.rs` · 467 · SPF1 known-good scene gate with negative controls.

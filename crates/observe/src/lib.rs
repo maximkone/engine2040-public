@@ -19,6 +19,11 @@
 //! with backoff, tick-boundary sim heals and the heal tape the simulation
 //! copies into its action log for replay.
 //!
+//! The [`breaker`] module adds the rolling error-percent circuit breaker and
+//! the hedge budget: a retry storm stops without spending budget, and a late
+//! primary may spend one backup. Its clock is the caller's revision, never a
+//! wall clock.
+//!
 //! The [`recovery`] module adds the proof a heal must carry: the scope of
 //! the heal, the verdict (recovered, not recovered, frozen frame, rolled
 //! back), the digests of the last good state and of the healed state, and the
@@ -38,6 +43,9 @@
 //! adjudicated hits and frame cost splits, read by the endpoint
 //! `check_profile` pack.
 
+/// Std-only circuit breaker and hedge budget over the supervisor: the retry
+/// storm gate and the extra-load cap, clocked by the caller's revision.
+pub mod breaker;
 /// Deterministic diagnostic event queue with phased delivery (test-only, OB4).
 pub mod event_queue;
 /// Std-only typed FPS view events: pose, hits and frame splits.

@@ -144,6 +144,11 @@ pub mod page_duel;
 pub mod pose_hold;
 /// Practice swap: staged combat tuning applied at a tick boundary. Std-only.
 pub mod practice;
+/// The window's pressure watch (OPT27): presented frame times and the OS VRAM
+/// reading into the arbiter, placement and GPU layer count out. App leg only:
+/// the headless graph never arbitrates a local model.
+#[cfg(feature = "app")]
+pub mod pressure_watch;
 pub mod progress;
 /// Ragdoll stump caps: one dark-red cap draw where a go-down cue took an arm.
 /// Presentation only, never hashed. App leg only.

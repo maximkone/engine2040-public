@@ -133,13 +133,27 @@ mod tests {
     }
 
     #[test]
-    fn blast_falloff_decides_the_break_and_a_weak_blast_changes_nothing() {
+    fn blast_falloff_decides_the_break_and_a_weak_blast_only_chips() {
         let mut weak = chain();
         let before = weak.state_hash();
-        // 7 units at the center is 5.6 at the tip: under the 6 threshold.
+        // 7 units at the center is 5.6 at the tip: under the 6 fatal gate, so
+        // no bond snaps, but past the elastic half (3) it chips the bond.
         assert_eq!(weak.apply_blast(AT_TIP, 1_000, 7, 4), Ok(1));
-        assert!(weak.drain_events().is_empty());
-        assert_eq!(weak.state_hash(), before);
+        assert!(weak.drain_events().is_empty(), "no bond may snap");
+        assert!(!weak.is_bond_broken(1), "the weak blast only chips");
+        let strain = weak.strain_of(1).expect("bond 1 exists");
+        assert!(
+            strain > 0.0 && strain < 1.0,
+            "chipped below the limit: {strain}"
+        );
+        assert_ne!(weak.state_hash(), before, "the chip is hashed state");
+        // At or inside the elastic band the blast changes nothing at all:
+        // 3 units is 2.4 at the tip, under the elastic 3.
+        let mut elastic = chain();
+        let intact = elastic.state_hash();
+        assert_eq!(elastic.apply_blast(AT_TIP, 1_000, 3, 4), Ok(1));
+        assert!(elastic.drain_events().is_empty());
+        assert_eq!(elastic.state_hash(), intact);
         // A wide reach brings the middle chunk in too, at a smaller share.
         let mut wide = chain();
         assert_eq!(wide.apply_blast(AT_TIP, 2_000, 40, 4), Ok(2));

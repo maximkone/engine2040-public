@@ -8,9 +8,11 @@ close it.
 
 Method and evidence:
 
-- `node tools/workspace-check.mjs` (report-only wiring line): `islands: 5852`.
-  `tools/wiring-scan.baseline.json` pins `total: 5317`, so the official number
-  has risen ~535 since the pin (report-only, no gate fails).
+- `node tools/workspace-check.mjs` (report-only wiring line): `islands: 5852` on 2026-10-18.
+  `tools/wiring-scan.baseline.json` pinned `total: 5317` that day; refreshed 2026-10-23 to
+  `total: 6935` (41 crates, the new `rome` and `web` crates included), so `--check` is a gate
+  on new islands again instead of a permanently red pin. The number rose ~1618 in five days
+  (endpoint, render, provider and game carry most of it).
 - The 7 crates carry 2910 of those islands (endpoint 620, render 1015, game 471,
   playtest 276, net 267, assets 221, web 40). 1825 are `fn`/`struct`/`enum`/
   `trait`; the rest are `const` (mostly table rows, low value).

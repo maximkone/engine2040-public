@@ -50,6 +50,7 @@ use engine_game::input::{map_key, map_mouse};
 use engine_game::lock_on::nearest_rival_facing;
 use engine_game::modes::{rank_modes, validate_request, AdapterMode, DisplayMode, SwapRequest};
 use engine_game::practice::PracticeSwap;
+use engine_game::pressure_watch::PressureWatch;
 use engine_game::reload::{settle_paths, HotReload};
 use engine_game::spear_window::{demo_input, SpearMode, SpearScene};
 use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, ViewLaws};
@@ -609,7 +610,7 @@ fn session_config(args: &WinArgs) -> Result<GameConfig, WinError> {
 /// tick N runs. Unset in every real run; the crash-hook test sets it.
 const TEST_PANIC_ENV: &str = "E2040_TEST_PANIC_AT_TICK";
 
-fn main() {
+fn main() -> std::process::ExitCode {
     // First call in the binary: the crash hook and the run log. A panic from
     // here on writes `crash-<UTC>.toml` beside `arena-<UTC>.log` and exits
     // with the crash code (see `engine_game::crash`).
@@ -624,7 +625,12 @@ fn main() {
         Ok(code) => code,
         Err(payload) => crash::fatal_unwind(payload),
     };
-    std::process::exit(code);
+    // Return the code instead of calling `std::process::exit`: on Windows that
+    // call ends the process without running the CRT exit path, so an
+    // instrumented build writes a zero-byte `.profraw` and `tools/wiring-cov.mjs`
+    // reads every function as unhit. A plain return flushes the profile. Codes
+    // are 0..=2; anything else reads as a failure.
+    std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
 /// Parse, configure and run; returns the process exit code (0 green).
@@ -1203,6 +1209,9 @@ struct ArenaApp {
     /// The present path's split for the frame just presented: the
     /// swapchain acquire plus the render crate's live wall split.
     last_frame_split: arena_frame::FrameSplit,
+    /// OPT27: the local model's pressure watch — this frame's work and the
+    /// OS VRAM reading in, placement and GPU layer count out.
+    pressure: Option<PressureWatch>,
     /// Tick index that panics on purpose (`TEST_PANIC_ENV`); `None` otherwise.
     test_panic_at: Option<u32>,
     /// Reused scratch for one tick's canonical input bytes (crash tape).
@@ -1396,6 +1405,15 @@ impl ArenaApp {
             window_focused: true,
             window_occluded: false,
             last_frame_split: arena_frame::FrameSplit::default(),
+            // OPT27: the 4 GB, 32-layer local model at 60 Hz. A refused
+            // config says so once and the run goes on without a watch.
+            pressure: match PressureWatch::reference() {
+                Ok(watch) => Some(watch),
+                Err(why) => {
+                    say!("arena pressure: off ({why})");
+                    None
+                }
+            },
             test_panic_at,
             crash_bytes: Vec::with_capacity(16),
             watcher,
@@ -1609,15 +1627,42 @@ impl ArenaApp {
     }
 
     /// Step fixed ticks for the elapsed wall time, then present one HUD frame.
-    fn tick_and_present(&mut self, event_loop: &ActiveEventLoop) {
-        // The automated `--exit` run owns its wall-clock bound (`--deadline-ms`
-        // overrides the 5 min default): a hung smoke ends itself loudly instead
-        // of burning a core behind the open window.
-        if self.args.exit {
-            let wall_ms = self.started.elapsed().as_secs_f64() * 1000.0;
-            if let Err(err) = check_exit_wall_deadline(wall_ms, self.args.wall_limit_ms()) {
-                return self.fail(event_loop, err, 1);
+    /// The automated `--exit` run's wall-clock bound (`--deadline-ms`
+    /// overrides the 5 min default): a hung smoke ends itself loudly instead
+    /// of burning a core behind the open window. False ends the frame.
+    fn within_exit_deadline(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if !self.args.exit {
+            return true;
+        }
+        let wall_ms = self.started.elapsed().as_secs_f64() * 1000.0;
+        match check_exit_wall_deadline(wall_ms, self.args.wall_limit_ms()) {
+            Ok(()) => true,
+            Err(err) => {
+                self.fail(event_loop, err, 1);
+                false
             }
+        }
+    }
+
+    /// OPT27: this presented frame's work (sim plus present) feeds the local
+    /// model's pressure watch, whose OS VRAM read is refreshed once a second.
+    /// A placement move or a new layer plan prints its receipt here, off the
+    /// tick; the request path reads the placement as one atomic byte.
+    fn note_pressure(&mut self, work_us: u64, interval: Duration) {
+        let frame_us = u32::try_from(work_us).unwrap_or(u32::MAX);
+        let dt_ms = duration_us(interval) / 1_000;
+        if let Some(line) = self
+            .pressure
+            .as_mut()
+            .and_then(|watch| watch.frame(frame_us, dt_ms))
+        {
+            say!("{line}");
+        }
+    }
+
+    fn tick_and_present(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.within_exit_deadline(event_loop) {
+            return;
         }
         let interval = self.last.elapsed();
         let elapsed_ms = interval.as_secs_f64() * 1000.0;
@@ -1664,6 +1709,7 @@ impl ArenaApp {
             let present_wall_us = duration_us(present_started.elapsed());
             self.present_us = self.present_us.saturating_add(present_wall_us);
             let work_wall_us = duration_us(sim_started.elapsed());
+            self.note_pressure(work_wall_us, interval);
             if self.args.exit && self.frames_presented > 0 {
                 self.work_us.push(work_wall_us);
                 self.interval_us.push(duration_us(interval));
@@ -2643,12 +2689,14 @@ impl ArenaApp {
         };
         let size = window.inner_size();
         let (width, height) = (size.width.max(1), size.height.max(1));
-        // VS7: the night preset bakes the arena night rig (the moonlit sky,
-        // its ambient and its fog), so the placement's torches are the light
-        // the frame reads. Off by default: the day frame keeps the day rig
-        // and stays byte-equal.
-        match Presenter::init_for_window_with_preset(Arc::clone(window), width, height, self.night, self.args.uncapped)
-        {
+        // VS7: the night preset bakes the night rig; the day frame keeps the day rig.
+        match Presenter::init_for_window_with_preset(
+            Arc::clone(window),
+            width,
+            height,
+            self.night,
+            self.args.uncapped,
+        ) {
             Ok(mut presenter) => {
                 // The live frame never waits on the GPU: fog is a fragment
                 // function and the probes are off. `--look-probes` or an

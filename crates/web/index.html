@@ -202,6 +202,16 @@ try {
   showCoi(false, 0, "the isolation check failed");
 }
 
+// A first visit registers the isolation worker and reloads before the engine starts. Starting the engine here as
+// well would fetch the module twice: the store finishes before the reload commits, so the reloaded page reads its
+// own cache copy and reports a cache hit as the first load. Park this document; the reload starts the engine.
+if (window.coi?.note === "reloading for isolation") {
+  await new Promise((resolve) => {
+    addEventListener("pagehide", resolve, { once: true });
+    setTimeout(resolve, 5000);
+  });
+}
+
 // For the headless check: loseDevice destroys the device as a forced loss and the page starts over; destroyDevice is the
 // page ending its device on purpose (no retry, data-state=stopped); the check also asks for a fresh GPU copy of the canvas.
 window.loseDevice = lose_device;
@@ -217,8 +227,6 @@ const square = query.has("square");
 // WEB15: a played page (?fight, or a joined duel with &play) keeps the arena, the frame line, the
 // match line and the controls; the proof chrome steps aside so the picture is not buried.
 if (query.has("fight") || (query.has("server") && query.has("play"))) document.body.dataset.play = "1";
-// ?debug keeps the frame and match dev lines on screen during play; a plain ?fight hides them.
-if (query.has("debug")) document.body.dataset.debug = "1";
 // ?debug keeps the frame and match dev lines on screen during play; a plain ?fight hides them.
 if (query.has("debug")) document.body.dataset.debug = "1";
 

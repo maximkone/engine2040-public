@@ -1,0 +1,22 @@
+{
+  "name": "combat.dodge",
+  "system": "dodge",
+  "seed": 2040,
+  "bout": { "ticks": 48, "fighters": 2, "half_extent_m": 20, "table_version": 1 },
+  "steps": [
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 0 },
+    { "input": "dodge", "ticks": 1, "fighter": 1, "at": 3 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 14 },
+    { "input": "dodge", "ticks": 1, "fighter": 1, "at": 17 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 28 },
+    { "input": "dodge", "ticks": 1, "fighter": 1, "at": 31 },
+    { "input": "attack", "ticks": 1, "fighter": 0, "at": 42 }
+  ],
+  "assertions": [
+    { "check": "digest", "expect": "0x30afbf9d6c6ef0c4" },
+    { "check": "ticks", "expect": "48" },
+    { "check": "dodged", "expect": "3" },
+    { "check": "hits", "expect": "1" }
+  ],
+  "tags": ["replay", "dodge"]
+}

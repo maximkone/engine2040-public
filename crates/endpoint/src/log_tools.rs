@@ -681,10 +681,18 @@ mod tests {
         assert_eq!(empty.total, 0, "a fresh session has no refusals");
 
         // A refusal, through the same seam every tool call uses.
+        let audit_before = server.lock().expect("lock holds").audit_total_appended();
         let refused = server.dispatch("tx.apply", |_state| {
             Err::<(), McpToolError>(McpToolError::new("stale_revision", "seeded"))
         });
         assert!(refused.is_err(), "the path under test refuses");
+        // The ring row and the audit record are two different proofs: the
+        // refusal seals exactly one tamper-evident record of its own.
+        assert_eq!(
+            server.lock().expect("lock holds").audit_total_appended(),
+            audit_before + 1,
+            "the refusal chains exactly one tamper-evident record"
+        );
 
         let page = LogQueryTool::invoke(
             &server,
@@ -701,13 +709,6 @@ mod tests {
             page.events[0].message.len() <= engine_observe::MAX_MESSAGE_LEN,
             "one bounded line, never an argument echoed back"
         );
-        // The ring row and the audit record are two different proofs.
-        assert_eq!(
-            server.lock().expect("lock holds").audit_total_appended(),
-            1,
-            "the tamper-evident record chains beside it"
-        );
-
         // A success writes no refusal row: the ring records failures only.
         server
             .dispatch("scene.read", |_state| Ok(()))
@@ -722,10 +723,29 @@ mod tests {
         )
         .expect("still one refusal");
         assert_eq!(after.total, 1, "successes never look like failures");
+
+        // A refused ring read leaves the ring alone: pushing a row would evict
+        // the oldest event, and the window the `bad_cursor` error just named
+        // would move out of reach on every retry.
+        let bad = LogQueryTool::invoke(
+            &server,
+            LogQueryArgs {
+                cursor: Some(u64::MAX),
+                limit: None,
+                code: None,
+            },
+        );
+        assert_eq!(bad.expect_err("past-end cursor refuses").code, "bad_cursor");
+        assert_eq!(
+            query(&server, None, None).total,
+            1,
+            "the reader moves nothing"
+        );
     }
 
     #[test]
-    fn external_client_pages_log_and_checks_stable_digest() {        // A9 shape: one client pages the whole log, another (or the same one
+    fn external_client_pages_log_and_checks_stable_digest() {
+        // A9 shape: one client pages the whole log, another (or the same one
         // later) takes the digest; both agree, and a re-digest is identical.
         let server = server();
         seed_mixed(&server);

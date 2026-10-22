@@ -10,11 +10,12 @@
 use std::fmt;
 
 use engine_scene::ids::ObjectId;
-use engine_scene::transform::{Hierarchy, HierarchyError, Transform};
+use engine_scene::transform::{Hierarchy, Transform};
 use engine_spatial::{check_staged, suggest, Actor, Proposal, RepairKind};
 
-use crate::capability::op_target;
-use crate::commands::{self, Applied, Batch, BatchError, Document, Journal, Op, Preview};
+use crate::commands::{
+    self, Applied, Batch, BatchError, ComponentTable, Document, Journal, Op, Preview,
+};
 use crate::gizmo::world_to_local;
 
 /// Actor name for one table slot. Grammar-clean (`obj_000007`) so UUID text
@@ -234,13 +235,13 @@ impl FindingsPanel {
             });
         }
         commands::validate(doc, batch).map_err(FindingsError::Command)?;
-        let staged_tree = stage_tree(&doc.hierarchy, &batch.ops)?;
+        let (staged_tree, staged_components) = crate::geometry::stage(doc, &batch.ops)?;
         let mut order = doc.hierarchy.propagation_order();
         order.extend(staged_tree.propagation_order());
         order.sort();
         order.dedup();
-        let before = snapshot_actors(&doc.hierarchy, &order);
-        let staged = snapshot_actors(&staged_tree, &order);
+        let before = snapshot_actors(&doc.hierarchy, &doc.components, &order);
+        let staged = snapshot_actors(&staged_tree, &staged_components, &order);
         let delta = check_staged(&before, &staged);
         let proposals = suggest(&delta.findings, &staged, doc.revision);
         let count = delta.findings.len();
@@ -404,88 +405,32 @@ impl Default for FindingsPanel {
     }
 }
 
-/// Snapshot one hierarchy into spatial actors: world position plus world
-/// scale as the 1 m-cube extents, grammar-clean names by table index. Nodes
-/// missing from `tree` (removed by the proposal) are skipped; every other
-/// node maps, even degenerate ones, so spatial reports them instead of the
-/// adapter silently dropping them.
-fn snapshot_actors(tree: &Hierarchy, order: &[ObjectId]) -> Vec<Actor> {
+/// Snapshot one hierarchy into spatial actors through the one scene adapter
+/// ([`crate::spatial_view`]): real collider extents times world scale, the
+/// labelled fallback for bare nodes, working yaw. Names are grammar-clean
+/// (index in `order`, the union table). Nodes missing from `tree` (removed by
+/// the proposal) are skipped; every node with a finite world pose maps, so
+/// spatial reports them instead of the adapter silently dropping them.
+fn snapshot_actors(
+    tree: &Hierarchy,
+    components: &ComponentTable,
+    order: &[ObjectId],
+) -> Vec<Actor> {
     let mut out = Vec::new();
     for (index, id) in order.iter().enumerate() {
-        let Some(world) = tree.world(*id) else {
+        let Some(row) = crate::spatial_view::row_of(tree, components, *id) else {
             continue;
         };
-        out.push(Actor {
-            id: index as u32,
-            name: actor_name(index),
-            x: world.position[0],
-            y: world.position[1],
-            z: world.position[2],
-            sx: world.scale[0].abs(),
-            sy: world.scale[1].abs(),
-            sz: world.scale[2].abs(),
-            parent: None,
-            physical: true,
-            vx: 0.0,
-            vz: 0.0,
-            yaw: 0.0,
-        });
+        let Ok(actor_id) = u32::try_from(index) else {
+            break;
+        };
+        out.push(crate::spatial_view::actor(
+            &row,
+            actor_id,
+            actor_name(index),
+        ));
     }
     out
-}
-
-/// Stage batch ops on a private hierarchy copy. The caller commits nothing:
-/// failures name the culprit and leave the input untouched.
-fn stage_tree(tree: &Hierarchy, ops: &[Op]) -> Result<Hierarchy, BatchError> {
-    let mut staged = tree.clone();
-    for op in ops {
-        let result = match op {
-            Op::Insert { id, parent, local } => staged.insert(*id, *parent, *local),
-            Op::Remove { id } => staged.remove(*id),
-            Op::SetLocal { id, local } => staged.set_local(*id, *local),
-            Op::Reparent { id, new_parent } => staged.reparent(*id, *new_parent),
-            // Bindings leave poses alone; the node must still exist.
-            Op::SetMaterial { id, .. }
-            | Op::SetComponent { id, .. }
-            | Op::RemoveComponent { id, .. } => {
-                if staged.contains(*id) {
-                    Ok(())
-                } else {
-                    Err(engine_scene::transform::HierarchyError::UnknownNode)
-                }
-            }
-            // Material-table ops touch no node: no pose moves.
-            Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => Ok(()),
-        };
-        result.map_err(|error| {
-            let id = op_target(op);
-            let parent = match op {
-                Op::Insert { parent, .. } => *parent,
-                Op::Reparent { new_parent, .. } => *new_parent,
-                Op::Remove { .. }
-                | Op::SetLocal { .. }
-                | Op::SetMaterial { .. }
-                | Op::SetComponent { .. }
-                | Op::RemoveComponent { .. }
-                | Op::PutMaterial { .. }
-                | Op::SetMaterialParam { .. }
-                | Op::RemoveLastMaterial => ObjectId::NIL,
-            };
-            match error {
-                HierarchyError::UnknownNode => BatchError::UnknownNode { id },
-                HierarchyError::UnknownParent => BatchError::UnknownParent { id, parent },
-                HierarchyError::Duplicate => BatchError::Duplicate { id },
-                HierarchyError::Cycle => BatchError::Cycle {
-                    id,
-                    new_parent: parent,
-                },
-                HierarchyError::NonFinite => BatchError::NonFinite { id },
-                HierarchyError::DegenerateScale => BatchError::DegenerateScale { id },
-                HierarchyError::NilId => BatchError::NilId,
-            }
-        })?;
-    }
-    Ok(staged)
 }
 
 #[cfg(test)]

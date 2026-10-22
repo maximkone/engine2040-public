@@ -71,6 +71,9 @@ pub mod reachability;
 /// Checksummed sparse rebuilds: per-tick checksums plus sparse snapshots (EV16).
 pub mod rebuild;
 pub mod replay;
+/// One named replay scenario per system under test, embedded from
+/// `content/playtest/replay` (determinism gate for the corpus).
+pub mod replay_corpus;
 pub mod scenario_shape;
 pub mod seeded_bug;
 pub mod spatial_eval;

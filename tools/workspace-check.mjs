@@ -36,13 +36,13 @@ export const allowedEdges = new Map([
   ["engine-audio", ["engine-observe"]],
   ["engine-save", ["engine-observe", "engine-ecs"]], // ARC5: dev-only edge; the spine payload test consumes real `Spine::snapshot`/`restore`, the crate itself stays ecs-free
   ["engine-anim", ["engine-nn", "engine-combat", "engine-ecs", "engine-nav"]],
-  ["engine-playtest", ["engine-ai", "engine-arena", "engine-combat", "engine-material", "engine-render", "engine-provider", "engine-spatial"]], // NS31h2: the material gallery reads compiled records (std-only; outside the headless default graph)
+  ["engine-playtest", ["engine-ai", "engine-arena", "engine-combat", "engine-material", "engine-render", "engine-provider", "engine-spatial", "engine-input"]], // NS31h2: the material gallery reads compiled records (std-only; outside the headless default graph). Replay corpus: the arena re-exports the tape types but not the `Buttons` bit consts, so the corpus names its own button bytes.
   ["engine-arena", ["engine-input", "engine-physics", "engine-combat", "engine-ai", "engine-anim", "engine-destruction", "engine-ecs", "engine-provider", "engine-nav"]], // AL1 dev-only: mock provider drives the stamped-reply test; provider takes core only, no cycle. NAV-01: the nav_layers caller (docs/ARCHITECTURE.md, commit 23fe8a67) declares engine-nav for the sim-lane caller; the edge was sanctioned in the architecture doc and never written down here.
   ["engine-assets", ["engine-scene", "engine-anim", "engine-clock"]],
   // A9 chaos facade: counts only; proof owns fault injection, observe owns heal records.
   ["engine-chaos", ["engine-observe", "engine-proof"]],
   ["engine-combat", ["engine-input"]],
-  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf", "engine-material"]],
+  ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf", "engine-material", "engine-provider"]], // OPT27: the window's pressure watch feeds frame time and the OS VRAM reading to the provider arbiter and reads back a placement and a GPU layer count; `app` only, so the headless graph never arbitrates a local model.
   ["engine-destruction", ["engine-core", "engine-nav"]],
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.

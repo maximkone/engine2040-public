@@ -394,6 +394,248 @@ pub fn solve_aim(pose: &mut Pose, joint: usize, target: [f32; 3]) -> Result<bool
     turn_to(pose, joint, target)
 }
 
+/// Soft-limit knee in degrees of head yaw: below it the head follows the
+/// target exactly, so a near target reads as aimed.
+pub const LOOK_KNEE_DEG: f32 = 50.0;
+/// Soft limit in degrees of head yaw: the head never yaws past this off the
+/// body forward, so a target behind the back clamps here instead of turning
+/// the head around (the behind-the-back guard).
+pub const LOOK_LIMIT_DEG: f32 = 70.0;
+/// Soft-limit band in degrees: knee to limit, where the ease-in lives.
+/// Wide enough that the map's slope stays under 4/3, so the head never
+/// speeds up while it eases into the limit.
+pub const LOOK_BAND_DEG: f32 = LOOK_LIMIT_DEG - LOOK_KNEE_DEG;
+/// Ticks a target swap eases over: a smoothstep from the head's current yaw
+/// to the live goal, both ends at rest, landing on the goal at the last tick.
+pub const LOOK_EASE_TICKS: u32 = 12;
+/// The same count as a float, for the smoothstep weight. `From<u32>` is not
+/// implemented for `f32`, so the float twin is spelled out; the pair is
+/// asserted equal by the look tests.
+const LOOK_EASE_TICKS_F: f32 = 12.0;
+/// Goal move that counts as a target swap, in degrees. A continuous sweep
+/// stays well under it, so only a real target jump eases; the margin keeps
+/// fast tracking from tripping the ease by rounding.
+pub const LOOK_SWAP_DEG: f32 = 8.0;
+
+fn scale3(v: [f32; 3], s: f32) -> [f32; 3] {
+    [v[0] * s, v[1] * s, v[2] * s]
+}
+
+/// The body's yaw axis: +Y up in every rig pose this module solves.
+const UNIT_UP: [f32; 3] = [0.0, 1.0, 0.0];
+
+/// `atan(t)` for `t` in `[0, 0.4142]`: Taylor to `t^13`, error under
+/// 2e-7 rad. Polynomial only, for the same reason `inertialize` keeps its
+/// own trig helpers: libm rounds differently across CPUs.
+fn atan_fold(t: f32) -> f32 {
+    let t2 = t * t;
+    t * (1.0
+        + t2 * (-1.0 / 3.0
+            + t2 * (1.0 / 5.0
+                + t2 * (-1.0 / 7.0 + t2 * (1.0 / 9.0 + t2 * (-1.0 / 11.0 + t2 / 13.0))))))
+}
+
+/// `atan(t)` for `t` in `[0, 1]`: the half-angle fold
+/// `t' = t / (1 + sqrt(1 + t^2))` lands in `[0, 0.4142]`, where the Taylor
+/// above is exact to a hair. Uses `sqrt` only.
+fn atan_unit(t: f32) -> f32 {
+    2.0 * atan_fold(t / (1.0 + (1.0 + t * t).sqrt()))
+}
+
+/// `atan(t)` in radians for any finite `t`, sign kept.
+fn atan_any(t: f32) -> f32 {
+    let a = t.abs();
+    let r = if a > 1.0 {
+        std::f32::consts::FRAC_PI_2 - atan_unit(1.0 / a)
+    } else {
+        atan_unit(a)
+    };
+    if t < 0.0 {
+        -r
+    } else {
+        r
+    }
+}
+
+/// Signed head yaw in degrees from its sine and cosine in the body's yaw
+/// plane. The behind pole (`1 + cos` ~ 0, the target directly behind the
+/// head) resolves on `sticky`, the side the head is already on, so a target
+/// parked behind never jitters between +-180 deg.
+fn yaw_deg_of(s: f32, c: f32, sticky: f32) -> f32 {
+    let den = 1.0 + c;
+    let half = if den > 1e-6 {
+        atan_any(s / den)
+    } else {
+        std::f32::consts::FRAC_PI_2 * if sticky < 0.0 { -1.0 } else { 1.0 }
+    };
+    2.0 * half * 180.0 / std::f32::consts::PI
+}
+
+/// `sin(x)` for `x` in `[0, PI/2]`: Taylor to `x^9`, error under 4e-6 rad.
+fn sin_small(x: f32) -> f32 {
+    let c = if x.is_finite() {
+        x.clamp(0.0, std::f32::consts::FRAC_PI_2)
+    } else {
+        0.0
+    };
+    let x2 = c * c;
+    c * (1.0 + x2 * (-1.0 / 6.0 + x2 * (1.0 / 120.0 + x2 * (-1.0 / 5040.0 + x2 / 362880.0))))
+}
+
+/// Rotation by `yaw_deg` about `up`: `[up * sin(t/2), cos(t/2)]` with the
+/// half-sine from [`sin_small`], so the construction stays inside `sqrt`.
+fn yaw_quat(up: [f32; 3], yaw_deg: f32) -> [f32; 4] {
+    let half = (yaw_deg.abs() * std::f32::consts::PI / 360.0).min(std::f32::consts::FRAC_PI_2);
+    let s = sin_small(half);
+    let w = (1.0 - s * s).max(0.0).sqrt();
+    let side = if yaw_deg < 0.0 { -s } else { s };
+    [up[0] * side, up[1] * side, up[2] * side, w]
+}
+
+/// Soft head-limit map in degrees: identity below [`LOOK_KNEE_DEG`], then a
+/// C1 cubic Hermite ease into the limit, then a flat wall at
+/// [`LOOK_LIMIT_DEG`]. `h(u) = u + u^2 (1 - u)` on `[0, 1]` gives
+/// `h(0)=0, h(1)=1, h'(0)=1, h'(1)=0`, so the head's *velocity is
+/// continuous* where a hard clamp would step it, and the map never exceeds
+/// the limit. Called on the yaw's magnitude, then the sign put back.
+fn soft_limit_deg(yaw_deg: f32) -> f32 {
+    let a = yaw_deg.abs();
+    let mag = if a <= LOOK_KNEE_DEG {
+        a
+    } else {
+        let u = ((a - LOOK_KNEE_DEG) / LOOK_BAND_DEG).clamp(0.0, 1.0);
+        LOOK_KNEE_DEG + LOOK_BAND_DEG * (u + u * u * (1.0 - u))
+    };
+    if yaw_deg < 0.0 {
+        -mag
+    } else {
+        mag
+    }
+}
+
+/// Soft-limited head look: a soft limit, a target-switch ease and a
+/// behind-the-back guard. The head-yaw stateful sibling of [`solve_look`],
+/// which turns the head with no limit at all.
+///
+/// Owner: `engine-anim`; consumer: the fighter look (crates/game). Units:
+/// degrees of head yaw off the body forward, one tick per [`step`](Self::step).
+/// Determinism: `+ - * /` plus `sqrt`, polynomial atan and sine, a fixed
+/// ease length and no clock; the same target script replays
+/// byte-identically, and the head stays inside [`LOOK_LIMIT_DEG`] on every
+/// tick. Errors: the pose lanes refuse loudly through [`FbikError`]; a
+/// non-finite target or one sitting on the head joint keeps the current yaw.
+/// The yaw is measured in the plane perpendicular to the head joint's own up
+/// axis, so it follows the body's roll; pass the rest head rotation each
+/// tick (the pose the animation produced before the look).
+#[derive(Clone, Debug)]
+pub struct LookSoft {
+    yaw_deg: f32,
+    last_goal_deg: f32,
+    ease_from_deg: f32,
+    ease_step: f32,
+    primed: bool,
+}
+
+impl Default for LookSoft {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LookSoft {
+    /// New state: head straight ahead, no target seen, no ease running.
+    pub fn new() -> Self {
+        Self {
+            yaw_deg: 0.0,
+            last_goal_deg: 0.0,
+            ease_from_deg: 0.0,
+            ease_step: LOOK_EASE_TICKS_F,
+            primed: false,
+        }
+    }
+
+    /// Clear the yaw, the last goal and the ease. Steady-state calls
+    /// allocate nothing.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// One tick: yaw the `head` joint toward `target` inside the soft limit.
+    /// A target beyond the limit clamps at it; a target that jumps swaps and
+    /// eases over [`LOOK_EASE_TICKS`] ticks, both ends at rest; a target
+    /// sitting on the joint keeps the current yaw. Returns whether the head
+    /// turned. Positions never move.
+    ///
+    /// The yaw is measured against the forward the pose carries on entry
+    /// (the body's forward this tick), not the head rotation of the previous
+    /// tick, so repeated calls on one pose do not accumulate error.
+    pub fn step(
+        &mut self,
+        pose: &mut Pose,
+        head: usize,
+        target: [f32; 3],
+    ) -> Result<bool, FbikError> {
+        let joints = checked_joints(pose)?;
+        if head >= joints {
+            return Err(FbikError::BadJoint(head));
+        }
+        if !finite3(target) {
+            return Err(FbikError::NonFinite("target"));
+        }
+        let to = sub3(target, pose.positions[head]);
+        if !len3(to).is_finite() || len3(to) <= 1e-6 {
+            return Ok(false);
+        }
+        // Undo last tick's yaw first: the pose's head rotation carries it,
+        // and the goal must be measured from the body's own forward.
+        let carried = quat_mul(yaw_quat(UNIT_UP, -self.yaw_deg), pose.rotations[head]);
+        let rot = quat_norm(carried);
+        pose.rotations[head] = rot;
+        let up = norm3_or(quat_rot(rot, [0.0, 1.0, 0.0]), [0.0, 1.0, 0.0]);
+        let base = quat_rot(rot, [0.0, 0.0, 1.0]);
+        let base_h = norm3_or(sub3(base, scale3(up, dot3(base, up))), base);
+        let dir_h = {
+            let dir = norm3_or(to, [0.0, 0.0, 1.0]);
+            norm3_or(sub3(dir, scale3(up, dot3(dir, up))), base_h)
+        };
+        let right = norm3_or(cross3(up, base_h), base_h);
+        let theta = yaw_deg_of(dot3(right, dir_h), dot3(base_h, dir_h), self.yaw_deg);
+        let goal = soft_limit_deg(theta);
+        // A swap eases in 12 ticks from the live start of this tick, so it
+        // can never inherit a stale origin from an earlier ease. The first
+        // tick is priming, not a swap: the head takes the goal directly, so
+        // a pose never starts mid-ease.
+        if !self.primed {
+            self.ease_from_deg = goal;
+            self.ease_step = LOOK_EASE_TICKS_F;
+        } else if (goal - self.last_goal_deg).abs() > LOOK_SWAP_DEG {
+            self.ease_from_deg = self.yaw_deg;
+            self.ease_step = 0.0;
+        }
+        self.last_goal_deg = goal;
+        self.primed = true;
+        let yaw = if self.ease_step >= LOOK_EASE_TICKS_F {
+            goal
+        } else {
+            let from = self.ease_from_deg;
+            let u = self.ease_step / LOOK_EASE_TICKS_F;
+            let w = u * u * (3.0 - 2.0 * u);
+            from + (goal - from) * w
+        };
+        // One float step per tick, capped, so the ease can never run away.
+        self.ease_step = (self.ease_step + 1.0).min(LOOK_EASE_TICKS_F);
+        let delta = yaw - self.yaw_deg;
+        self.yaw_deg = yaw;
+        if !delta.is_finite() || !yaw.is_finite() {
+            return Ok(false);
+        }
+        // Re-apply the absolute yaw on the unwound rest, so the pose carries
+        // the head's real yaw and the next tick's unwind sees it exactly.
+        pose.rotations[head] = quat_norm(quat_mul(yaw_quat(UNIT_UP, yaw), rot));
+        Ok(delta.abs() > 1e-6)
+    }
+}
+
 /// Off-hand grip mode for a full-body solve.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum GripMode {
@@ -889,6 +1131,248 @@ mod tests {
         let head_pos = pose.positions[2];
         assert!(!solve_look(&mut pose, 2, head_pos).expect("on-joint"));
         assert_eq!(pose.rotations[2], IDENTITY);
+    }
+
+    /// Target point at `deg` of yaw off the body forward (+Z), `dist` away.
+    /// Test-only: libm builds the fixture, production never calls it.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only libm oracle builds the sweep fixture; production keeps the polynomial"
+    )]
+    fn look_target_at(deg: f32, dist: f32, height: f32) -> [f32; 3] {
+        let rad = deg.to_radians();
+        [dist * rad.sin(), height, dist * rad.cos()]
+    }
+
+    /// Head yaw off the body forward, in degrees, read back from the pose.
+    /// Test-only: libm measures yaw, production writes it polynomial-only.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only libm oracle measures the head yaw; production keeps the polynomial"
+    )]
+    fn head_yaw_deg(pose: &Pose, head: usize) -> f32 {
+        let fwd = norm3_or(
+            quat_rot(pose.rotations[head], [0.0, 0.0, 1.0]),
+            [0.0, 0.0, 1.0],
+        );
+        fwd[0].atan2(fwd[2]).to_degrees()
+    }
+
+    /// Worst second difference of a per-tick series, deg/tick^2.
+    fn worst_second_diff(ys: &[f32]) -> f32 {
+        (2..ys.len())
+            .map(|i| (ys[i] - 2.0 * ys[i - 1] + ys[i - 2]).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Step `look` toward `deg` and read the head yaw back. `Ok(false)` (the
+    /// head already sits on the goal) is a fine tick, not a failure.
+    fn look_yaw_at(look: &mut LookSoft, pose: &mut Pose, deg: f32, height: f32) -> f32 {
+        let _ = look
+            .step(pose, 2, look_target_at(deg, 2.0, height))
+            .expect("soft look");
+        head_yaw_deg(pose, 2)
+    }
+
+    #[test]
+    fn look_soft_limit_is_smooth_and_bounded() {
+        let height = rig().positions[2][1];
+        let mut look = LookSoft::new();
+        let mut pose = rig();
+        // Sweep the target 0..180 deg at 1 deg/tick: the head's second
+        // difference stays under the 0.5 deg/tick^2 bar and the head never
+        // leaves the 70 deg limit.
+        let mut ys: Vec<f32> = Vec::with_capacity(181);
+        for d in 0..=180u32 {
+            ys.push(look_yaw_at(&mut look, &mut pose, d as f32, height));
+        }
+        for (i, y) in ys.iter().enumerate() {
+            assert!(
+                y.abs() <= LOOK_LIMIT_DEG + 1e-3,
+                "yaw {y} at {i} deg leaves {LOOK_LIMIT_DEG}"
+            );
+        }
+        let d2 = worst_second_diff(&ys);
+        assert!(
+            d2 <= 0.5,
+            "second difference {d2} deg/tick^2 over the sweep"
+        );
+        // The ease's tick count and its float twin stay in step.
+        assert_eq!(
+            f32::from(u16::try_from(LOOK_EASE_TICKS).expect("ease ticks fit u16")),
+            LOOK_EASE_TICKS_F
+        );
+        // Near targets read as aimed; the far wall is the limit.
+        assert!((ys[0]).abs() < 1e-3, "front yaw {}", ys[0]);
+        assert!((ys[30] - 30.0).abs() < 0.2, "near yaw {}", ys[30]);
+        assert!(
+            (ys[180] - LOOK_LIMIT_DEG).abs() < 0.05,
+            "wall yaw {}",
+            ys[180]
+        );
+        // Determinism: the same script twice gives the same yaw to the last bit.
+        let mut again = LookSoft::new();
+        let mut pose2 = rig();
+        for (d, want) in ys.iter().enumerate() {
+            let a = look_yaw_at(&mut again, &mut pose2, d as f32, height);
+            assert_eq!(a.to_bits(), want.to_bits(), "yaw {a} vs {want}");
+        }
+        // F2P leg: a hard clamp steps the velocity at the limit, the soft
+        // limit eases in, so the same sweep fails the bar on the clamp.
+        let hard: Vec<f32> = (0..=180u32)
+            .map(|d| (d as f32).min(LOOK_LIMIT_DEG))
+            .collect();
+        assert!(
+            worst_second_diff(&hard) > 0.5,
+            "a hard clamp must step the velocity at the limit"
+        );
+        println!(
+            "look_soft: sweep 0..180 deg, max |d2yaw| = {d2} deg/tick^2, clamp would be {}",
+            worst_second_diff(&hard)
+        );
+    }
+
+    #[test]
+    fn look_soft_swap_eases_in_twelve_ticks() {
+        let height = rig().positions[2][1];
+        let mut look = LookSoft::new();
+        let mut pose = rig();
+        // Settle on a front target, then swap far across the body.
+        for _ in 0..4 {
+            look_yaw_at(&mut look, &mut pose, 0.0, height);
+        }
+        let start = head_yaw_deg(&pose, 2);
+        let mut ys = [0.0f32; 13];
+        for (tick, slot) in ys.iter_mut().enumerate() {
+            *slot = look_yaw_at(&mut look, &mut pose, 150.0, height);
+            assert!(
+                slot.abs() <= LOOK_LIMIT_DEG + 1e-3,
+                "tick {tick}: yaw {slot} leaves {LOOK_LIMIT_DEG}"
+            );
+        }
+        // No snap: the swap tick barely moves, the ease accelerates from rest.
+        assert!(
+            (ys[0] - start).abs() < 2.0,
+            "swap tick moved {} deg (start {start})",
+            ys[0] - start
+        );
+        // Reaches the goal at the twelfth tick, and not a tick before.
+        assert!(
+            (ys[12] - LOOK_LIMIT_DEG).abs() < 0.05,
+            "goal yaw {}",
+            ys[12]
+        );
+        assert!(
+            LOOK_LIMIT_DEG - ys[11] > 0.2,
+            "yaw {} at tick 11 must still be easing",
+            ys[11]
+        );
+        // Monotone toward the goal, no overshoot past it.
+        for i in 1..ys.len() {
+            assert!(ys[i] >= ys[i - 1] - 1e-3, "yaw stepped back at tick {i}");
+        }
+        // Both ends at rest: the first and last steps are small next to the
+        // peak step in the middle of the ease (a smoothstep's shape).
+        let peak = (1..ys.len())
+            .map(|i| ys[i] - ys[i - 1])
+            .fold(0.0f32, f32::max);
+        let first = ys[1] - ys[0];
+        let last = ys[12] - ys[11];
+        assert!(
+            first < 0.25 * peak,
+            "ease jump-started with {first} deg/tick (peak {peak})"
+        );
+        assert!(
+            last < 0.25 * peak,
+            "ease did not settle: last step {last} deg/tick (peak {peak})"
+        );
+        println!(
+            "look_soft swap: start {start}, peak step {peak}, first {first}, last {last}, tick 12 {}",
+            ys[12]
+        );
+    }
+
+    #[test]
+    fn look_soft_behind_target_clamps_without_flipping() {
+        let height = rig().positions[2][1];
+        let mut look = LookSoft::new();
+        let mut pose = rig();
+        // Sweep the target around the full circle at 5 deg/tick: out to the
+        // back, across the pole, and back to the front on the other side.
+        // The head clamps at the limit for the whole back half and holds,
+        // never exceeding the limit, never turning around, and the pole
+        // crossing never jitters it from side to side.
+        let mut ys: Vec<f32> = Vec::with_capacity(145);
+        for d in 0..=36u32 {
+            ys.push(look_yaw_at(&mut look, &mut pose, d as f32 * 5.0, height));
+        }
+        for d in 1..=36u32 {
+            ys.push(look_yaw_at(
+                &mut look,
+                &mut pose,
+                180.0 - d as f32 * 5.0,
+                height,
+            ));
+        }
+        for d in 1..=36u32 {
+            ys.push(look_yaw_at(
+                &mut look,
+                &mut pose,
+                -180.0 + d as f32 * 5.0,
+                height,
+            ));
+        }
+        for d in 0..=35u32 {
+            ys.push(look_yaw_at(&mut look, &mut pose, d as f32 * 5.0, height));
+        }
+        for (i, y) in ys.iter().enumerate() {
+            assert!(
+                y.is_finite() && y.abs() <= LOOK_LIMIT_DEG + 1e-3,
+                "step {i}: yaw {y} is unbounded or non-finite"
+            );
+        }
+        // The circle finishes at a front-left target; let the last ease land.
+        for _ in 0..13 {
+            look_yaw_at(&mut look, &mut pose, -5.0, height);
+        }
+        let front = head_yaw_deg(&pose, 2);
+        assert!((front + 5.0).abs() < 0.5, "front-left yaw {front}");
+        // Park directly behind: the head settles on the limit (on whichever
+        // side it arrived, the pole is a sticky point) and then holds it tick
+        // after tick, so the pole never jitters the head from side to side.
+        let mut side = 0.0f32;
+        let mut settled = 0u32;
+        for _ in 0..18 {
+            let y = look_yaw_at(&mut look, &mut pose, 180.0, height);
+            assert!(
+                y.is_finite() && y.abs() <= LOOK_LIMIT_DEG + 1e-3,
+                "pole yaw {y}"
+            );
+            let on_limit = (y.abs() - LOOK_LIMIT_DEG).abs() < 0.05;
+            if settled > 0 {
+                assert!(
+                    on_limit,
+                    "once settled on the limit the head must hold it, saw {y}"
+                );
+            }
+            if on_limit {
+                settled += 1;
+            }
+            side = y;
+        }
+        assert!(settled >= 5, "the head never settled behind: side {side}");
+        assert!(side.abs() <= LOOK_LIMIT_DEG + 1e-3, "pole side {side}");
+        // A front-left target after the pole eases across instead of snapping.
+        let before = head_yaw_deg(&pose, 2);
+        for _ in 0..13 {
+            look_yaw_at(&mut look, &mut pose, -20.0, height);
+        }
+        let back = head_yaw_deg(&pose, 2);
+        assert!((back + 20.0).abs() < 0.5, "front-left yaw {back}");
+        assert!(
+            (back - before).abs() <= LOOK_LIMIT_DEG + 5.0,
+            "the head turned around: {before} to {back}"
+        );
     }
 
     #[test]

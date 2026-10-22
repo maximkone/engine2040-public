@@ -38,21 +38,41 @@ report section has the mechanism. Feel donors live in `02-feel.md` beside the FE
   wordings and returns the spread; it never gates alone (2607.25921). Files:
   `crates/endpoint/src/packs/view.rs`. Accept: a test with a fake judge that flips on one wording
   reports the spread and no pass.
+- [ ] ENG17 web: audio runs on an AudioWorklet fed by the existing mixer. The page ships a
+  worklet processor that pulls from a ring buffer the mixer writes and keeps the
+  ScriptProcessorNode only as the fallback when the worklet cannot load; the page receipt
+  prints `audio: state=running underruns=<n>` (finish-line A5). Files: `crates/web`, the page's
+  audio module, `crates/audio` (no device change). Accept: headless Chrome prints
+  `state=running` with a counted underrun total; a scripted fight plays its cue set with no
+  missing cue; a forced worklet load failure prints why the fallback was taken. Size S. Tier B.
+  F2P: the page uses the deprecated ScriptProcessorNode. P2P: native audio unchanged; golden
+  untouched. needs: none.
+- [ ] ENG19 proof: the Windows ship check runs the game, not only the build. The ship job
+  (HX10, `.github/workflows/ship-check.yml`) also starts the shipped binary from the clean folder
+  for N seconds, reads the run receipt (tick and hash) and quotes that line; when the runner
+  exposes a GPU adapter it also compares one frame to `content/reference/` and prints the score,
+  and names the adapter (`warp`) when it cannot. A missing receipt or a hash that is not the
+  golden fails the job (finish-line E22, gate G1). Files: `.github/workflows/ship-check.yml`,
+  `tools/ship*.mjs`, `crates/proof`. Accept: the job is green on the mirror and its log quotes
+  `tick=... hash=d57b5c8ae3096614`; a deliberately broken receipt turns it red. Size M. Tier B.
+  F2P: G1 "never broken" is unmeasured - the job compares two builds and never a run. P2P: no
+  sim change. needs: none.
 - [ ] AGT01 tools: OpenCode helpers do not spawn helpers. `experimental.subagent_depth` 1 and
   `permission.task: deny` for helper agents (2512.08296: central verification spreads fewer
   errors; depth beyond one helper level is unmeasured). Owner decision (2026-10-04 chose 2).
   Accept: `opencode debug config` shows depth 1.
-- [ ] AGT03 tools: a dead helper's work becomes a patch file, not a rot pile. `tools/leftovers.mjs
+- [x] AGT03 tools: a dead helper's work becomes a patch file, not a rot pile. `tools/leftovers.mjs
   --save` writes each idle group's diff to `target/leftovers/<group>.patch` with the board row it
   touches, so a fresh helper applies it instead of re-reading (2608.03222, restart from state).
-  Accept: node test: an idle group writes one patch that `git apply --check` accepts.
-- [ ] AGT04 tools: the AGENTS.md rules are one review-gate script. Commit only own paths, no
+  Accept: node test: an idle group writes one patch that `git apply --check` accepts. Landed c9a558f2e.
+- [x] AGT04 tools: the AGENTS.md rules are one review-gate script. Commit only own paths, no
   whole-file rewrite over a dirty file, no new genre names, ratchet, rustfmt, proof line in the
   message: `node tools/review-gate.mjs <commit>` prints PASS or the broken rule (2609.04167: a
-  third of passing patches broke review rules). Accept: node tests, one per rule.
-- [ ] AGT05 tools: a row's file list is its lease. Two helpers never take rows whose file lists
+  third of passing patches broke review rules). Accept: node tests, one per rule. Landed d4a094eb8.
+  9 tests pass; R4/R5 read the working tree, so another lane's dirty Rust can colour them.
+- [x] AGT05 tools: a row's file list is its lease. Two helpers never take rows whose file lists
   overlap in one wave; `node tools/board-slice.mjs --wave N` prints N rows with disjoint files
-  (2608.23740). Accept: node test: overlapping rows never share a wave.
+  (2608.23740). Accept: node test: overlapping rows never share a wave. Landed e1157b2ff.
 - [ ] AGT19 tools: measure the worker-count curve here. Rows landed per hour and reds per landing at
   2, 4, 8 and 16 helpers over one day each, read from git and gh-check receipts. Accept: a CSV and
   a one-line verdict in `docs/research/`.

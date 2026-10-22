@@ -39,6 +39,12 @@ pub mod kam2_iso_proof;
 #[cfg(all(feature = "window", not(target_arch = "wasm32")))]
 pub mod kam2_sprite_proof;
 
+/// The one PNG path a windowed proof writes (KAM1a/b/c): the repository's
+/// `target/` folder under the crate's manifest dir. Native only, like the
+/// proofs that call it.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod capture_path;
+
 pub mod graph;
 
 /// Named history textures across frames with a validity flag (RL62): take,

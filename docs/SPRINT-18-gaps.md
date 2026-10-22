@@ -976,7 +976,14 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `ServerState::push_log` has only test callers (`log_tools.rs:423`). P2P:
   `cargo test -p engine-endpoint --lib` green; golden unchanged. Plan:
   `docs/plan/forge-adoption.md` AD-9. Owner Decision 3: yes (`door.status`).
-  needs: none.
+  needs: none. Progress 2026-10-23: half 1 landed - `door_dispatch` writes
+  one typed `door.refused` row (code 19) per refused call, so `log.query`
+  answers the tool and its code, and a refused `log.query`/`log.digest` writes
+  nothing so a `bad_cursor` retry cannot move the window it just named
+  (b41a59b20 plus the reader-exempt follow-up; runner run 39858166402, 10/10).
+  The `door.status` verb half is open: adding it pushed the `view` pack over
+  the tool-list budget (`tool_budget_exceeded`, 67578 > 64452 chars) and was
+  reverted.
 - [ ] AD10 editor: gate undo by capability and group undo by AI session —
   `undo_gated` checks the inverse ops against mask, scope and budget; human
   undo with no token is unchanged; receipts group by capability session.
@@ -1037,7 +1044,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `cargo test -p engine-rules --lib` green; golden unchanged. Plan:
   `docs/plan/forge-adoption.md` AD-13. BLOCKED: owner Decision 1 in
   `docs/plan/forge-adoption.md` section I. needs: none.
-- [ ] AD14 observe: supervisor hardening — heal tape rows carry before and
+- [x] AD14 observe: supervisor hardening — heal tape rows carry before and Landed 42b025c00. Breaker and hedge now live in observe/src/breaker.rs, clocked by the caller revision. Accept x2: 5 passed (runs 39857706182, 39857985693); lib 102 passed (39858202368); circuit_vectors 5 (39858369096); bulkhead_vectors 4 (39858539730); clippy all-targets -D warnings (39858714068); golden d57b5c8ae3096614 unchanged (39858901387).
   after digests; `reset(code, VerifiedRecovery)` needs proof; re-registering a
   policy keeps the budget unless asked; circuit breaker (then hedge) moves
   from test files into `observe/src/breaker.rs`, std-only, tick or revision as
@@ -1070,7 +1077,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   returns the clip only (`retarget.rs:396-412`). P2P: `cargo test -p
   engine-assets --lib` green; golden unchanged. Plan:
   `docs/plan/forge-adoption.md` AD-15. needs: none.
-- [ ] AD16 physics: ragdoll joint table with a hinge kind — amends PX9. Typed Progress 2026-10-17: a `JointKind::{Hinge, Spherical}` table exists (`JointTable::humanoid`, `joint_table_humanoid_defaults`, ragdoll.rs, fb7466b) with knees and elbows as hinges. Left: the proven numbers (spine 20/20/35, forearm and leg hinge 1/145, thigh 70/40/30), the 0..180 degree and joints-equal-bodies-minus-one refusals, `joint_limits.rs`, and the `spawn` read (the table says it is measurement only); needs AD17 open.
+- [x] AD16 physics: ragdoll joint table with a hinge kind — amends PX9. Typed Progress 2026-10-17: a `JointKind::{Hinge, Spherical}` table exists (`JointTable::humanoid`, `joint_table_humanoid_defaults`, ragdoll.rs, fb7466b) with knees and elbows as hinges. Left: the proven numbers (spine 20/20/35, forearm and leg hinge 1/145, thigh 70/40/30), the 0..180 degree and joints-equal-bodies-minus-one refusals, `joint_limits.rs`, and the `spawn` read (the table says it is measurement only); needs AD17 open. Landed 2afcc9de9. Accept passed: `node tools/gh-check.mjs cargo test -p engine-physics --features rapier --lib joint_table` x2, 6 passed each (runs 39861387948, 39861374037); full `--lib` 333 passed (run 39861403505), balance hash tests green; golden unchanged (proof_cli run 39861745441). `joint_table_no_joint_over_limit_1000_seeds` worst swing inside 180 deg, `joint_table_refuses_a_missing_joint` green (detached knee refused, two free roots spawn). Refusal note: the joints-equal-bodies-minus-one rule narrows to a detached bone the table names, because the CCD P2P scene spawns a two-root blade plus limb.
   `JointKind::{Ball, Hinge}` keyed by humanoid bone, with the proven numbers
   (spine 20/20/35, arm ball 85/85/70, forearm and leg hinge 1/145, thigh ball
   70/40/30, head 35/35/45) and their failure notes as comments; refuse a limit

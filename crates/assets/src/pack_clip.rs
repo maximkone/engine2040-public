@@ -740,11 +740,10 @@ fn conj(quat: [f32; 4]) -> [f32; 4] {
 ///
 /// The result is indexed by joint and then by key. Every track in a pack
 /// holds the same keys, so one index means one moment for every joint.
-fn posed_world(
-    source: &Clip,
-    source_rots: &[QuatTrack],
-    rig: &Skeleton,
-) -> (Vec<Vec<[f32; 3]>>, Vec<Vec<[f32; 4]>>) {
+type PosedWorld = (Vec<Vec<[f32; 3]>>, Vec<Vec<[f32; 4]>>);
+
+/// Posed world positions and rotations for one clip, joint then key.
+fn posed_world(source: &Clip, source_rots: &[QuatTrack], rig: &Skeleton) -> PosedWorld {
     let mut positions: Vec<Vec<[f32; 3]>> = Vec::with_capacity(rig.len());
     let mut rotations: Vec<Vec<[f32; 4]>> = Vec::with_capacity(rig.len());
     for joint in 0..rig.len() {
@@ -779,7 +778,7 @@ fn posed_world(
                         .times
                         .iter()
                         .position(|other| *other >= time)
-                        .unwrap_or(track.times.len().saturating_sub(1));
+                        .unwrap_or_else(|| track.times.len().saturating_sub(1));
                     track.values.get(at).copied()
                 })
                 .unwrap_or([0.0, 0.0, 0.0, 1.0]);

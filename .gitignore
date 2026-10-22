@@ -27,6 +27,8 @@ content/fighters/incoming/batch-a/recheck/
 /pack-clean.log
 # Packaged-build outputs (GM3 row): never track them.
 /build/
+# Headless web checks (tools/web-*.mjs) write their run dumps here: never track them.
+/out/
 # AW3 shell-safe research: pwsh once sprayed these redirect droppings at the root.
 /=*
 /1
