@@ -174,6 +174,7 @@ fn sand_rest_real_fight_dead_lie_on_the_sand_and_the_living_never_sink() {
     let (mut dead_frames, mut worst_cm, mut living_lifted) = (0u32, 0.0f32, 0u32);
     for tick in 0..900u32 {
         let out = app.tick_empty();
+        look.observe_hitstop(tick, &out.cues, app.hitstop_remaining());
         look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
         look.observe_live_balances(app.live_match(), 8);
         for body in look.pose_frame(8, 0.5).expect("CPU pose") {
@@ -262,6 +263,8 @@ struct Window {
     attacker: u8,
     victim: u8,
     impact: u32,
+    /// The live freeze the impact set (3 light, 6 heavy, 8 parry under v2).
+    freeze: u32,
     frozen: Vec<Vec<Option<Shape>>>,
     clocks: [Clocks; 2],
 }
@@ -287,12 +290,15 @@ fn hitstop_hold_posed_pair_does_not_move_through_the_freeze() {
     let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
     let mut window: Option<Window> = None;
     let (mut windows, mut held_ticks, mut thaws) = (0u32, 0u32, 0u32);
+    let mut held_owed = 0u32;
     let (mut bystanders_moved, mut blends_held, mut resumed) = (0u32, 0u32, 0u32);
     for tick in 0..300u32 {
         let out = app.tick_empty();
+        // FEEL3: the pair holds the live fight's count (3, 6 or 8 under v2), read after the tick.
+        let remaining = app.hitstop_remaining();
+        look.observe_hitstop(tick, &out.cues, remaining);
         look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
         look.observe_live_balances(app.live_match(), 4);
-        let remaining = app.hitstop_remaining();
         let impacts = out
             .cues
             .iter()
@@ -315,7 +321,7 @@ fn hitstop_hold_posed_pair_does_not_move_through_the_freeze() {
                             gap(got, want)
                         );
                     }
-                    if age == 3 {
+                    if age + 1 == open.freeze {
                         for (other, before) in open.frozen[index].iter().enumerate() {
                             let paired = pair.contains(&u8::try_from(other).unwrap_or(u8::MAX));
                             if let (false, Some(before), Some(after)) =
@@ -339,7 +345,7 @@ fn hitstop_hold_posed_pair_does_not_move_through_the_freeze() {
                 blends_held += u32::from(open.clocks.iter().any(|c| c.fade > 0));
                 held_ticks += 1;
                 window = Some(open);
-            } else if remaining == 0 && impacts == 0 && age == 4 {
+            } else if remaining == 0 && impacts == 0 && age == open.freeze {
                 // The sim thawed: every clock resumes one tick on.
                 let now = shapes(&look, 4, 0.5);
                 for (which, slot) in pair.into_iter().enumerate() {
@@ -368,9 +374,10 @@ fn hitstop_hold_posed_pair_does_not_move_through_the_freeze() {
                     );
                 }
                 thaws += 1;
+                held_owed += open.freeze.saturating_sub(1);
             }
         }
-        let single_hit = impacts == 1 && remaining == 4;
+        let single_hit = impacts == 1 && remaining > 0;
         if window.is_none() && single_hit {
             let pair = out.cues.iter().find_map(|cue| match *cue {
                 FightCue::Hit {
@@ -398,6 +405,7 @@ fn hitstop_hold_posed_pair_does_not_move_through_the_freeze() {
                     attacker,
                     victim,
                     impact: tick,
+                    freeze: remaining,
                     frozen: ALPHAS.iter().map(|a| shapes(&look, 4, *a)).collect(),
                     clocks: [clocks(&look, attacker), clocks(&look, victim)],
                 });
@@ -410,8 +418,8 @@ fn hitstop_hold_posed_pair_does_not_move_through_the_freeze() {
     );
     assert!(windows >= 3, "the fight landed {windows} clean impacts");
     assert!(
-        held_ticks + 3 >= 3 * windows,
-        "held ticks {held_ticks} for {windows} windows"
+        held_ticks >= held_owed,
+        "held ticks {held_ticks} for {held_owed} owed by the thawed freezes"
     );
     assert!(thaws >= 2, "the freeze thawed {thaws} times");
     assert!(resumed >= 2, "{resumed} clocks resumed in place");
@@ -492,6 +500,7 @@ fn duel_feet(frames_per_tick: u16, ik: bool) -> DuelFeet {
     let mut drift_cm = Vec::new();
     for tick in 0..300u32 {
         let out = app.tick_empty();
+        look.observe_hitstop(tick, &out.cues, app.hitstop_remaining());
         look.observe_tick(tick, app.fighter_views(), app.hp(), &out.cues);
         look.observe_live_balances(app.live_match(), 4);
         for frame in 0..frames_per_tick {
@@ -1343,7 +1352,7 @@ fn the_weapon_hand_holds_the_grip_socket_through_a_swing() {
 /// loader in one line.
 #[test]
 fn the_rig_loads_out_of_a_cooked_bundle_with_the_native_bytes() {
-    use engine_assets::asset_source::FsSource;
+    use engine_assets::asset_source::{AssetSource, FsSource};
     use engine_assets::fighter_bundle::cook;
 
     let dir = content_dir();

@@ -1,0 +1,8 @@
+opt39-after1.receipt = 166.14|942
+opt39-after2.receipt = 177.65|942
+opt39-before1.receipt = 304.73|944.1
+opt39-before2.receipt = 212.5|944.1
+opt39f-after1.receipt = 728.67|943.6
+opt39f-after2.receipt = 536.65|943.5
+opt39f-before1.receipt = 818.41|945.7
+opt39f-before2.receipt = 640.85|945.7

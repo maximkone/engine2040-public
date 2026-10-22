@@ -450,9 +450,12 @@ impl ArenaApp {
                 tally.observe(&self.tick_scratch.cues);
             }
             self.feel.observe(&self.tick_scratch.cues);
+            // FEEL3: the feel and the look freeze for the live fight's count, read after the tick.
+            self.feel.observe_hitstop(self.app.hitstop_remaining());
             self.observe_spear_events(tick);
             if let Some(look) = self.look.as_mut() {
                 let (views, hp) = (self.app.fighter_views(), self.app.hp());
+                look.observe_hitstop(tick, &self.tick_scratch.cues, self.app.hitstop_remaining());
                 observe_tick_with_sim(look, tick, views, hp, &self.tick_scratch.cues, None);
                 if let Some(scene) = self.spear.scene.as_mut() {
                     scene.observe_tick(look, self.app.live_match(), views);

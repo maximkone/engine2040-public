@@ -150,6 +150,18 @@ pub fn auto_exposure_enabled(value: Option<&str>) -> bool {
     value.is_some_and(|value| value.trim() == "1")
 }
 
+/// Night preset (VS7): `1` lights the arena by its torches (the sun drops
+/// to a moonlit fraction, the placement's torch actors burn), any other
+/// value (unset included) keeps the shipped daylight look. Off by default,
+/// so every existing capture stays byte-equal.
+pub const NIGHT_ENV: &str = "E2040_NIGHT";
+
+/// Parse the night switch: true only for `1` after trimming. Pure string
+/// parse; the returned flag is the setting's only effect.
+pub fn night_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "1")
+}
+
 /// Windowed failures: bounded diagnostics, never panics. Audio loss is not an
 /// error: opening the device returns a notice string and the headless mixer
 /// keeps rendering voices offline.
@@ -1730,6 +1742,7 @@ fn smoke_present_once(
     frame: u32,
     path: Option<CameraPath>,
     app: &App,
+    night: bool,
 ) -> Result<u32, WinError> {
     // VS7: the torches flicker with the frame index, so the flame moves
     // frame by frame. A refused light set keeps the arena's built-in pair
@@ -1739,13 +1752,44 @@ fn smoke_present_once(
             presenter.set_torch_lights(lights);
         }
     }
-    let list = smoke_twin_list(presenter, key, kit, frame, path)?;
+    let mut list = smoke_twin_list(presenter, key, kit, frame, path)?;
+    if night {
+        // The night preset: the sun drops to a moonlit fraction and the
+        // placement's torches carry the picture.
+        super::arena_kit::torch_feed::apply_night_sun(&mut list);
+    }
     let overlay = duel_overlay_for_app(app)
         .map_err(|err| WinError::Render(cap_message(&format!("{err}"))))?;
     let _ = overlay.to_bytes();
     stage_hp_bars(presenter, &overlay);
     let out = presenter.render_offscreen(&list)?;
     Ok(u32::from(out.receipt.presented))
+}
+
+/// The presenter twin, its notice line and the night switch: one helper
+/// for both smoke paths, so the notice and the preset stay in step.
+/// Presentation only; never panics without hardware.
+fn smoke_presenter_with_notice() -> Result<
+    (
+        Option<(Presenter, MeshKey, super::arena_kit::KitReport)>,
+        String,
+        bool,
+    ),
+    WinError,
+> {
+    let presenter = smoke_presenter()?;
+    let notice = match presenter {
+        Some((ref presenter, _, _)) => format!(
+            "presenter twin: {} ({})",
+            presenter.adapter_name(),
+            presenter.adapter_driver()
+        ),
+        None => "presenter skipped: no wgpu adapter on this machine".to_string(),
+    };
+    // VS7: the night preset (the sun drops, the torches carry the frame).
+    // Off by default, so every existing capture stays byte-equal.
+    let night = night_enabled(std::env::var(NIGHT_ENV).ok().as_deref());
+    Ok((presenter, notice, night))
 }
 
 /// Headless smoke: the `--frames N --exit` path with no display. Feeds
@@ -1787,15 +1831,7 @@ pub fn run_headless_smoke_with_options(
     drop(_device);
 
     // Presenter twin when an adapter exists; skip-not-green otherwise.
-    let mut presenter = smoke_presenter()?;
-    let presenter_notice = match presenter {
-        Some((ref presenter, _, _)) => format!(
-            "presenter twin: {} ({})",
-            presenter.adapter_name(),
-            presenter.adapter_driver()
-        ),
-        None => "presenter skipped: no wgpu adapter on this machine".to_string(),
-    };
+    let (mut presenter, presenter_notice, night) = smoke_presenter_with_notice()?;
 
     let ticks_run = frames.min(config.ticks);
     let mut mixed_frames = 0usize;
@@ -1834,8 +1870,15 @@ pub fn run_headless_smoke_with_options(
             continue;
         }
         if let Some((ref mut presenter, key, ref kit)) = presenter {
-            frames_presented +=
-                smoke_present_once(presenter, key, kit, frames_presented, camera_path, &app)?;
+            frames_presented += smoke_present_once(
+                presenter,
+                key,
+                kit,
+                frames_presented,
+                camera_path,
+                &app,
+                night,
+            )?;
         }
     }
 
@@ -1887,15 +1930,7 @@ pub fn run_headless_smoke(
     let audio_notice = MUTED_AUDIO_NOTICE.to_string();
 
     // Presenter twin when an adapter exists; skip-not-green otherwise.
-    let mut presenter = smoke_presenter()?;
-    let presenter_notice = match presenter {
-        Some((ref presenter, _, _)) => format!(
-            "presenter twin: {} ({})",
-            presenter.adapter_name(),
-            presenter.adapter_driver()
-        ),
-        None => "presenter skipped: no wgpu adapter on this machine".to_string(),
-    };
+    let (mut presenter, presenter_notice, night) = smoke_presenter_with_notice()?;
 
     let ticks_run = frames.min(config.ticks);
     let mut mixed_frames = 0usize;
@@ -1930,8 +1965,15 @@ pub fn run_headless_smoke(
         mixer.render_into(&mut scratch);
         mixed_frames += scratch.len();
         if let Some((ref mut presenter, key, ref kit)) = presenter {
-            frames_presented +=
-                smoke_present_once(presenter, key, kit, frames_presented, camera_path, &app)?;
+            frames_presented += smoke_present_once(
+                presenter,
+                key,
+                kit,
+                frames_presented,
+                camera_path,
+                &app,
+                night,
+            )?;
         }
     }
 
@@ -2007,6 +2049,18 @@ mod tests {
         assert!(auto_exposure_enabled(Some(" 1 ")), "trimmed 1 is on");
         assert!(!auto_exposure_enabled(Some("on")), "a word stays off");
         assert_eq!(AUTO_EXPOSURE_ENV, "E2040_AUTO_EXPOSURE", "name is pinned");
+    }
+
+    /// VS7: the night preset ships off, so every existing capture stays
+    /// byte-equal; only `1` turns the sun down and the torches up.
+    #[test]
+    fn night_defaults_off_and_only_one_turns_it_on() {
+        assert!(!night_enabled(None), "unset keeps the day frame");
+        assert!(!night_enabled(Some("0")), "0 is off");
+        assert!(night_enabled(Some("1")), "1 is on");
+        assert!(night_enabled(Some(" 1 ")), "trimmed 1 is on");
+        assert!(!night_enabled(Some("on")), "a word stays off");
+        assert_eq!(NIGHT_ENV, "E2040_NIGHT", "the setting name is pinned");
     }
 
     #[test]
@@ -3397,7 +3451,7 @@ mod tests {
         // Production path stages before render: one call presents and leaves
         // the ring non-empty at render time (the old after-render order left
         // the first frame empty).
-        let staged = smoke_present_once(&mut presenter, key, &kit, 0, None, &app)
+        let staged = smoke_present_once(&mut presenter, key, &kit, 0, None, &app, false)
             .expect("smoke stages before render");
         assert_eq!(staged, 1, "fresh twin presents once");
         assert!(

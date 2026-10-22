@@ -1426,7 +1426,7 @@ mod tests {
                 "{reach} must exceed the ceiling {MAX_ADVERTISED_CHARS}"
             );
             assert!(
-                !server.load_order().iter().any(|loaded| *loaded == name),
+                !server.load_order().contains(&name),
                 "a refused pack is never reported loaded: {name}"
             );
         }

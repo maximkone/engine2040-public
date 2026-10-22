@@ -1912,6 +1912,19 @@ impl Sim {
         self.balance.get(usize::from(slot))
     }
 
+    /// Hit-stop ticks left in the live fight after the last stepped tick: the
+    /// count the impact set for the strike that landed (`hitstop_for_impact`,
+    /// light 3, heavy 6, parry 8 under v2; 4 under v1), counting down on frozen
+    /// ticks. Read-only, no copy. Presentation only; never hashed here.
+    ///
+    /// Consumer: `engine-game` `App` mirrors it for the look and the feel
+    /// (`App::hitstop_remaining`). Data owner: this crate's fight state.
+    /// Units: fixed ticks at 60 Hz.
+    #[must_use]
+    pub fn hitstop(&self) -> u32 {
+        self.fight.hitstop
+    }
+
     /// Read-only poise meter for `slot`: the [`PoiseMeter`] entry or `None`
     /// for a bad slot. No copy, no lock. Presentation only; the digest path
     /// never reads this, so the hash cannot move. V1 meters stay full (never

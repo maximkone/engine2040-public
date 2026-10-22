@@ -283,6 +283,11 @@ impl Presenter {
     /// Stack image, allocates nothing. Reuses the `forward_bind` owner.
     /// Caller: `stage_frame` below stages the same bytes into `torch_buf`;
     /// tests in `present/tests_gpu.rs` pin the byte layout.
+    ///
+    /// Test-only: the live path stages the scene's own list through
+    /// [`Presenter::torch_bytes_from_scene`], so this one exists for the
+    /// byte-layout pins and would be dead code in a release build.
+    #[cfg(test)]
     pub(crate) fn torch_bytes(
         &self,
         list: &DrawList,
@@ -300,14 +305,12 @@ impl Presenter {
         &self,
         list: &DrawList,
     ) -> Result<[u8; super::forward_bind::TORCH_BLOCK_BYTES], PresentError> {
-        let frame = super::forward_bind::TorchFrame::from_scene(
-            !list.items.is_empty(),
-            &self.torch_lights,
-        )
-        .map_err(|e| PresentError::InvalidDraw {
-            index: 0,
-            reason: format!("vs7 torch lights: {e}"),
-        })?;
+        let frame =
+            super::forward_bind::TorchFrame::from_scene(!list.items.is_empty(), &self.torch_lights)
+                .map_err(|e| PresentError::InvalidDraw {
+                    index: 0,
+                    reason: format!("vs7 torch lights: {e}"),
+                })?;
         let mut out = [0u8; super::forward_bind::TORCH_BLOCK_BYTES];
         frame.pack_into(&mut out);
         Ok(out)

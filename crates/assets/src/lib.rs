@@ -13,6 +13,11 @@ pub mod fighter_bundle;
 /// One load queue over an asset source: priority order, a byte budget,
 /// cancellation and generational handles. Std-only.
 pub mod load_queue;
+/// The CT7 fighter rig as a body the page can hold: the atlas becomes KTX2
+/// block maps and the body drops its images, keeping the rig byte for byte.
+/// Std-only; the cook itself rides the `import` lane.
+#[cfg(feature = "import")]
+pub mod rig_cook;
 pub use load_queue::{LoadError, LoadEvent, LoadQueue};
 pub mod budget;
 pub mod datanode;

@@ -136,7 +136,7 @@ These are always advertised.
 | `approval` | `ApprovalDto` | yes |  | Approval minted by `tx.preview` for this exact batch. |
 | `delta` | `Option<bool>` | no |  | `false` skips the spatial delta (default true). |
 
-**Typed refusals:**
+<details><summary>23 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -148,6 +148,23 @@ These are always advertised.
 | `bad_component` | ops[{index}].component `{name}` is not a component schema; the schemas are [{}]; re-run with one of those |
 | `empty_batch` | ops holds 0 entries; submit 1..=256 ops |
 | `too_many_ops` | ops holds {} entries; at most 256 per transaction |
+| `stale_revision` | document is at revision {expected}, batch expects {got}; re-read scene.read, re-preview, then apply |
+| `duplicate_key` | idempotency key {key} was already used with a different payload; submit a new batch with a fresh key |
+| `undone_key` | idempotency key {key} belongs to an undone batch; submit a new batch with a fresh key to reapply |
+| `invalid_batch` | (built at run time: error.to_string()) |
+| `forged_approval` | approval does not match this session and batch; re-run tx.preview for a fresh approval |
+| `stale_revision` | document is at revision {expected}, approval expects {got}; re-read scene.read, re-preview, then apply |
+| `expired_approval` | approval expired at revision {expiry}, document is at {current}; re-run tx.preview for a fresh approval |
+| `reused_approval` | approval was already spent; re-run tx.preview for a fresh approval |
+| `op_not_allowed` | capability does not grant `{op}` ops; granted: [{}] |
+| `out_of_scope` | node {id} is outside this session's object scope |
+| `over_budget` | batch needs {needed} ops, {remaining} left in this session |
+| `bad_budget` | budget_bytes {budget} is outside 1..=16384 (default 4096) |
+| `needs_nav_view` | nav checks need a baked nav view which this tool has no access to; submit offline checks only |
+| `bad_check` | check refused; submit any of {} |
+| `spatial_rejected` | (built at run time: message) |
+
+</details>
 
 ### `tx.undo`
 
@@ -164,12 +181,21 @@ These are always advertised.
 |---|---|---|---|---|
 | `undo_token` | `Option<u64>` | no |  | When given, must match the newest batch key (decimal string or number in). |
 
-**Typed refusals:**
+<details><summary>9 typed refusals</summary>
 
 | Code | Message |
 |---|---|
 | `nothing_to_undo` | the journal holds no applied batches |
 | `undo_mismatch` | newest undoable batch is key {}, not token {token}; omit undo_token to undo the newest batch |
+| `bad_limit` | limit {limit} is outside 1..=256 (default 64) |
+| `too_many_checks` | checks holds {} entries; at most 32 |
+| `bad_check` | check `{name}` is unknown; submit any of {} |
+| `bad_budget` | budget_bytes {budget} is outside 1..=16384 (default 4096) |
+| `needs_nav_view` | nav checks need a baked nav view which this tool has no access to; submit offline checks only |
+| `bad_check` | check refused; submit any of {} |
+| `bad_epsilon` | epsilon_cm {cm} is outside 0..=50 (default {ZFIGHT_EPS_CM}) |
+
+</details>
 
 ### `play.run`
 
@@ -270,6 +296,8 @@ These are always advertised.
 |---|---|
 | `audit_exhausted` | (built at run time: error.to_string()) |
 | `bad_payload` | payload encode failed: {error} |
+| `malformed_output` | outside grammar; re-submit typed actions plus diagnostics, then re-run |
+| `stale_policy` | scope policy version {} is stale; re-run with scope-policy-version: 1 |
 
 ### `api.describe`
 
@@ -292,6 +320,8 @@ These are always advertised.
 |---|---|
 | `audit_exhausted` | (built at run time: error.to_string()) |
 | `bad_payload` | payload encode failed: {error} |
+| `malformed_output` | outside grammar; re-submit typed actions plus diagnostics, then re-run |
+| `stale_policy` | scope policy version {} is stale; re-run with scope-policy-version: 1 |
 
 ### `api.call`
 
@@ -313,6 +343,7 @@ These are always advertised.
 
 | Code | Message |
 |---|---|
+| `audit_exhausted` | (built at run time: error.to_string()) |
 | `unknown_verb` | verb `{verb}` is served by no pack ({}); re-run api.search for the verb, then api.describe `pack:<name>` for its exact names |
 
 ### `api.load`
@@ -408,6 +439,12 @@ These are always advertised.
 
 | Code | Message |
 |---|---|
+| `bad_args` | package has a bad length |
+| `bad_args` | package magic is not ABG1 |
+| `bad_args` | package version is not 1 |
+| `bad_args` | package ticks or tip count are not the five-minute shape |
+| `bad_args` | package has trailing bytes past the tips |
+| `bad_args` | package digest does not verify |
 | `bad_variant` | variant `{variant_name}` is refused ({error}); re-run with one of [hero, opp_male_light, opp_female_medium, opp_female_light] |
 
 ## Pack `scene`
@@ -456,6 +493,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `needs_nav_view` | nav checks need a baked nav view which this tool has no access to; submit offline checks only |
 | `bad_check` | check refused; submit any of {} |
 | `read_repeat` | {tool} was called {count} times in a row with the same arguments and the scene has not changed; call {next} instead, or change an argument |
+| `bad_epsilon` | epsilon_cm {cm} is outside 0..=50 (default {ZFIGHT_EPS_CM}) |
 
 ### `scene.spatial`
 
@@ -475,7 +513,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `cursor` | `Option<u32>` | no |  | First object index of the `ids`/`objects` page (default 0). |
 | `format` | `Option<String>` | no |  | Answer shape: rows (default), ids (only the objects that carry a finding, no finding rows), count (verdict and counts only). |
 | `matched_only` | `Option<bool>` | no |  | True keeps only red findings (rows, total and ids). |
-| `epsilon_cm` | `Option<i32>` | no |  | Z-fight tolerance in cm, 0..=50, default 1 (zfight). |
+| `epsilon_cm` | `Option<i32>` | no |  | `0..=50`; Z-fight tolerance in cm, 0..=50, default 1 (zfight). |
 | `triage` | `Option<bool>` | no |  | True judges overlaps by component role (collider on its mesh is intentional). |
 | `allow` | `Option<Vec<String>>` | no |  | Verdict rows, max 256: `check a b\|- verdict rev expiry reason` (uuids, 0 = none). Matched findings move to `suppressed`. |
 
@@ -489,6 +527,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `needs_nav_view` | nav checks need a baked nav view which this tool has no access to; submit offline checks only |
 | `bad_check` | check refused; submit any of {} |
 | `read_repeat` | {tool} was called {count} times in a row with the same arguments and the scene has not changed; call {next} instead, or change an argument |
+| `bad_epsilon` | epsilon_cm {cm} is outside 0..=50 (default {ZFIGHT_EPS_CM}) |
 
 ### `scene.place`
 
@@ -509,12 +548,20 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `wants` | `Vec<String>` | yes |  | `at most 16`; Want lines, at most `MAX_PLACE_WANTS` (16), each at most `MAX_WANT_CHARS` (256) chars. |
 | `delta` | `Option<bool>` | no |  | `false` skips the spatial delta (default true). |
 
-<details><summary>28 typed refusals</summary>
+<details><summary>35 typed refusals</summary>
 
 | Code | Message |
 |---|---|
 | `bad_args` | args for `{tool}` do not serialize ({error}); re-run after api.describe `{tool}` for the schema |
 | `audit_exhausted` | (built at run time: error.to_string()) |
+| `forged_approval` | approval does not match this session and batch; re-run tx.preview for a fresh approval |
+| `stale_revision` | document is at revision {expected}, approval expects {got}; re-read scene.read, re-preview, then apply |
+| `expired_approval` | approval expired at revision {expiry}, document is at {current}; re-run tx.preview for a fresh approval |
+| `reused_approval` | approval was already spent; re-run tx.preview for a fresh approval |
+| `op_not_allowed` | capability does not grant `{op}` ops; granted: [{}] |
+| `out_of_scope` | node {id} is outside this session's object scope |
+| `over_budget` | batch needs {needed} ops, {remaining} left in this session |
+| `malformed_output` | outside grammar; re-submit typed actions plus diagnostics, then re-run |
 | `bad_id` | {field} `{text}` holds bracket text that is not an object id (expected `name [uuid]` or bare UUID text; re-read scene.brief for the staged labels) |
 | `bad_id` | {field} `{text}` is not an object id (expected bare UUID text or `name [uuid]`; re-read scene.brief for the staged labels) |
 | `denied_op` | scene op `{op}` is denied; allowed scene ops: [{}] (scene tools move staged roots only and instantiate nothing; submit a move intent through scene.place, or a general edit through tx.preview) |
@@ -529,9 +576,6 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `bad_pose` | placement {lane} {value} m is not a finite value within                          +-{PLACED_LIMIT_M} m; re-run with a pose inside the world bound |
 | `bad_pose` | placement yaw {yaw} rad is not a finite angle within +-2\*pi;                      re-run with a yaw in radians |
 | `bad_relation` | relation `{other}` is unknown; submit supports, on_top_of, inside, next_to or facing (or in_front_of, behind, left_of, right_of, outside) |
-| `bad_wall` | wall `{other}` is unknown; submit north, south, east or west |
-| `bad_id` | {field} `{text}` is not an object id (expected UUID text) |
-| `bad_want` | want `{source}` has a bad {what} `{value}`; want grammar is `<relation> <target> [<lo>,<hi>]?` with target `wall:<north\|south\|east\|west>`, `object:<uuid>` or `point:<x_cm>,<z_cm>` |
 | `bad_want` | want `{source}` is malformed ({detail}); want grammar is `<relation> <target> [<lo>,<hi>]?` with target `wall:<north\|south\|east\|west>`, `object:<uuid>` or `point:<x_cm>,<z_cm>` |
 | `bad_relation` | want `{source}`: {} |
 | `bad_wall` | want `{source}`: {} |
@@ -541,6 +585,8 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `unknown_tool` | tool `scene.place` is not a classified Mutating write; re-run through scene.place or tx.preview |
 | `injection_refused` | untrusted scene text refused ({} {} score {}; redacted note `{}`); discard the line, re-read scene.brief, then place again with clean wants (grammar `<relation> <target> [<lo>,<hi>]?`) |
 | `not_a_root` | node {object} is parented; scene.place moves roots only (reparent it to a root first, then place) |
+| `bad_want` | facing wants (in_front_of, behind, left_of, right_of, outside) solve alone: drop the other wants, place, then adjust with a second call |
+| `stale_policy` | scope policy version {} is stale; re-run with scope-policy-version: 1 |
 
 </details>
 
@@ -562,11 +608,31 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `expected_revision` | `u64` | yes |  | Must equal the document revision, else nothing runs. |
 | `idempotency_key` | `u64` | yes |  | Retry identity for the landed batch. |
 
-**Typed refusals:**
+<details><summary>19 typed refusals</summary>
 
 | Code | Message |
 |---|---|
 | `stale_revision` | document is at revision {}, intent expects {}; re-read scene.brief, then build again |
+| `stale_revision` | document is at revision {expected}, batch expects {got}; re-read scene.read, re-preview, then apply |
+| `duplicate_key` | idempotency key {key} was already used with a different payload; submit a new batch with a fresh key |
+| `undone_key` | idempotency key {key} belongs to an undone batch; submit a new batch with a fresh key to reapply |
+| `invalid_batch` | (built at run time: error.to_string()) |
+| `forged_approval` | approval does not match this session and batch; re-run tx.preview for a fresh approval |
+| `stale_revision` | document is at revision {expected}, approval expects {got}; re-read scene.read, re-preview, then apply |
+| `expired_approval` | approval expired at revision {expiry}, document is at {current}; re-run tx.preview for a fresh approval |
+| `reused_approval` | approval was already spent; re-run tx.preview for a fresh approval |
+| `op_not_allowed` | capability does not grant `{op}` ops; granted: [{}] |
+| `out_of_scope` | node {id} is outside this session's object scope |
+| `over_budget` | batch needs {needed} ops, {remaining} left in this session |
+| `bad_limit` | limit {limit} is outside 1..=256 (default 64) |
+| `too_many_checks` | checks holds {} entries; at most 32 |
+| `bad_check` | check `{name}` is unknown; submit any of {} |
+| `bad_budget` | budget_bytes {budget} is outside 1..=16384 (default 4096) |
+| `needs_nav_view` | nav checks need a baked nav view which this tool has no access to; submit offline checks only |
+| `bad_check` | check refused; submit any of {} |
+| `spatial_rejected` | (built at run time: message) |
+
+</details>
 
 ### `scene.query`
 
@@ -611,6 +677,9 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 |---|---|
 | `missing_arg` | scene.query kind `{}` needs `{field}`; working call: {} |
 | `unknown_actor` | {field} `{text}` names no staged object ({} staged; re-read scene.brief for the staged labels) |
+| `needs_nav_view` | reachable needs a baked nav mesh and this session holds none; ask the host to bake the floor, or use between, sees or near for questions that need no walkable floor |
+| `bad_id` | {field} `{text}` holds bracket text that is not an object id (expected `name [uuid]` or bare UUID text; re-read scene.brief for the staged labels) |
+| `bad_id` | {field} `{text}` is not an object id (expected bare UUID text or `name [uuid]`; re-read scene.brief for the staged labels) |
 | `read_repeat` | {tool} was called {count} times in a row with the same arguments and the scene has not changed; call {next} instead, or change an argument |
 
 ### `scene.watch`
@@ -642,6 +711,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `bad_budget` | budget_bytes {budget} is outside 1..=16384 (default 4096) |
 | `needs_nav_view` | nav checks need a baked nav view which this tool has no access to; submit offline checks only |
 | `bad_check` | check refused; submit any of {} |
+| `bad_epsilon` | epsilon_cm {cm} is outside 0..=50 (default {ZFIGHT_EPS_CM}) |
 
 ### `scene.next`
 
@@ -654,7 +724,17 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 
 **Arguments:** none (`SceneNextArgs`).
 
-**Typed refusals:** none found in the handler source (see Coverage at the end of the page).
+**Typed refusals:**
+
+| Code | Message |
+|---|---|
+| `bad_limit` | limit {limit} is outside 1..=256 (default 64) |
+| `too_many_checks` | checks holds {} entries; at most 32 |
+| `bad_check` | check `{name}` is unknown; submit any of {} |
+| `bad_budget` | budget_bytes {budget} is outside 1..=16384 (default 4096) |
+| `needs_nav_view` | nav checks need a baked nav view which this tool has no access to; submit offline checks only |
+| `bad_check` | check refused; submit any of {} |
+| `bad_epsilon` | epsilon_cm {cm} is outside 0..=50 (default {ZFIGHT_EPS_CM}) |
 
 ### `scene.pick`
 
@@ -678,7 +758,7 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `object` | `Option<String>` | no |  | Question 2: object label (`lamp_2 [uuid]`) to find in the frame. |
 | `cell` | `Option<u32>` | no |  | `1..=4096`; Question 3: cell edge in pixels; answers the frame as rectangles of objects. |
 
-<details><summary>10 typed refusals</summary>
+<details><summary>12 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -692,6 +772,8 @@ Listed in a fresh session: yes. Source: `crates/endpoint/src/packs/scene.rs`.
 | `bad_pick` | send exactly one of pixel, object or cell; pixel reads one point, object finds a label in the frame, cell lists the frame as regions |
 | `unknown_actor` | object `{object}` names no staged object ({} staged; re-read scene.brief for the staged labels) |
 | `ambiguous_name` | name `{object}` is shared by {} objects; send one label with its bracketed id: {} |
+| `bad_id` | {field} `{text}` holds bracket text that is not an object id (expected `name [uuid]` or bare UUID text; re-read scene.brief for the staged labels) |
+| `bad_id` | {field} `{text}` is not an object id (expected bare UUID text or `name [uuid]`; re-read scene.brief for the staged labels) |
 
 </details>
 
@@ -1017,13 +1099,23 @@ Listed in a fresh session: no, call `api.load` with `material`. Source: `crates/
 |---|---|---|---|---|
 | `record` | `String` | yes |  | Record JSON text (at most 16 KB). It may name a shipped record in `extends` and then only write what differs. |
 
-**Typed refusals:**
+<details><summary>11 typed refusals</summary>
 
 | Code | Message |
 |---|---|
+| `bad_args` | grid needs 1..=8 rows and cols, got {rows}x{cols} |
+| `bad_args` | grid {rows}x{cols} holds {} cells for {count} names; rows \* cols must equal the headcount |
+| `bad_args` | grid spacing {spacing_m} m is outside 0.5..=4.0 m |
+| `bad_args` | grid spans {span_x:.1}x{span_z:.1} m, the room fits {room:.1}x{room:.1} m; shrink the grid or grow the bootstrap |
+| `bad_args` | circle radius {radius_m} m needs 0.5..={:.1} m in this room |
+| `bad_args` | wall lanes hold 1..=12 names, got {count} |
+| `bad_args` | lane of {count} spans {span:.1} m, the wall fits {room:.1} m; shorten the lane or grow the bootstrap |
 | `unknown_material` | no material `{name}`; the shipped ones are {} |
 | `bad_record` | $: record text is {} bytes; the limit is {MAX_RECORD_TEXT} |
 | `bad_record` | {}: {} |
+| `bad_want` | facing wants (in_front_of, behind, left_of, right_of, outside) solve alone: drop the other wants, place, then adjust with a second call |
+
+</details>
 
 ### `material.param`
 
@@ -1087,16 +1179,41 @@ Listed in a fresh session: no, call `api.load` with `material`. Source: `crates/
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `node` | `String` | yes |  | Node (UUID text) that receives the `material` component. |
-| `material` | `String` | yes |  | Shipped record name. |
+| `material` | `String` | yes |  | `1..=64`; Shipped record name. |
 | `tint` | `Option<[f32; 3]>` | no |  | Linear RGB tint, each channel in 0..=1; default white. |
 | `expected_revision` | `u64` | yes |  | Must equal the document revision, else nothing runs. |
 | `idempotency_key` | `u64` | yes |  | Retry identity of the committed batch. |
 
-**Typed refusals:**
+<details><summary>24 typed refusals</summary>
 
 | Code | Message |
 |---|---|
+| `bad_id` | ops[{index}].{field} `{text}` is not an object id (expected UUID text; the nil id `{nil}` means 'no parent' on parent fields) |
+| `bad_pose` | ops[{index}].local holds a non-finite lane; poses must be finite (meters position, quaternion, scale) |
+| `bad_id` | ops[{index}].id must not be nil; insert needs a fresh id |
+| `bad_material` | ops[{index}].material `{text}` is not a material name ({error}; expected 1..=64 bytes of 0-9 A-Z a-z - _ .; null clears the binding) |
+| `bad_component` | ops[{index}].value for `{}` is refused: {error} |
+| `bad_component` | ops[{index}].component `{name}` is not a component schema; the schemas are [{}]; re-run with one of those |
+| `empty_batch` | ops holds 0 entries; submit 1..=256 ops |
+| `too_many_ops` | ops holds {} entries; at most 256 per transaction |
+| `stale_revision` | document is at revision {expected}, batch expects {got}; re-read scene.read, re-preview, then apply |
+| `duplicate_key` | idempotency key {key} was already used with a different payload; submit a new batch with a fresh key |
+| `undone_key` | idempotency key {key} belongs to an undone batch; submit a new batch with a fresh key to reapply |
+| `invalid_batch` | (built at run time: error.to_string()) |
+| `forged_approval` | approval does not match this session and batch; re-run tx.preview for a fresh approval |
+| `stale_revision` | document is at revision {expected}, approval expects {got}; re-read scene.read, re-preview, then apply |
+| `expired_approval` | approval expired at revision {expiry}, document is at {current}; re-run tx.preview for a fresh approval |
+| `reused_approval` | approval was already spent; re-run tx.preview for a fresh approval |
+| `op_not_allowed` | capability does not grant `{op}` ops; granted: [{}] |
+| `out_of_scope` | node {id} is outside this session's object scope |
+| `over_budget` | batch needs {needed} ops, {remaining} left in this session |
 | `unknown_material` | no material `{name}`; the shipped ones are {} |
+| `bad_budget` | budget_bytes {budget} is outside 1..=16384 (default 4096) |
+| `needs_nav_view` | nav checks need a baked nav view which this tool has no access to; submit offline checks only |
+| `bad_check` | check refused; submit any of {} |
+| `spatial_rejected` | (built at run time: message) |
+
+</details>
 
 ## Pack `asset`
 
@@ -1132,6 +1249,8 @@ Listed in a fresh session: no, call `api.load` with `asset`. Source: `crates/end
 |---|---|
 | `audit_exhausted` | (built at run time: error.to_string()) |
 | `bad_payload` | payload encode failed: {error} |
+| `malformed_output` | outside grammar; re-submit typed actions plus diagnostics, then re-run |
+| `stale_policy` | scope policy version {} is stale; re-run with scope-policy-version: 1 |
 
 ### `asset.refs`
 
@@ -1154,6 +1273,8 @@ Listed in a fresh session: no, call `api.load` with `asset`. Source: `crates/end
 |---|---|
 | `audit_exhausted` | (built at run time: error.to_string()) |
 | `bad_payload` | payload encode failed: {error} |
+| `malformed_output` | outside grammar; re-submit typed actions plus diagnostics, then re-run |
+| `stale_policy` | scope policy version {} is stale; re-run with scope-policy-version: 1 |
 
 ### `asset.generate`
 
@@ -1274,15 +1395,25 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters`; Participant count, 2..=`MAX_PARTICIPANTS`. |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half-extent in meters, 5.0..=100.0, explicit (never defaulted across tools when comparing receipts). |
 | `upto_tick` | `Option<u32>` | no |  | `0..N`, `1..=3600`; Ticks to simulate as the 1-indexed count N of the 0-indexed prefix `0..N` (1..=`MAX_PLAY_TICKS`); the digest is the checkpoint `N - 1` hash. See the module legend. |
-| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`; Tape inputs with 0-indexed tick ids inside `0..upto_tick`. |
+| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `-100..=100`, `-18000..=18000`, `at most 2048`; Tape inputs with 0-indexed tick ids inside `0..upto_tick`. |
 | `width` | `Option<u32>` | no |  | Receipt width in pixels, 1..=512 software. |
 | `height` | `Option<u32>` | no |  | `1..=2048`, `up to 2048`; Receipt height in pixels, 1..=512 software. |
 | `timing` | `Option<bool>` | no |  |  |
 
-<details><summary>13 typed refusals</summary>
+<details><summary>24 typed refusals</summary>
 
 | Code | Message |
 |---|---|
+| `invalid_tape` | inputs[{index}].tick {} is past the match end {ticks}; ticks run 0..{ticks} |
+| `invalid_tape` | inputs[{index}].fighter {} is outside 0..{fighters} (match runs {fighters} fighters) |
+| `invalid_tape` | inputs[{index}].mx {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].mz {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].facing {} is outside -18000..=18000 |
+| `invalid_tape` | inputs[{index}].buttons 0x{:02x} holds unknown bits; known bits are 0x{KNOWN_BUTTONS:02x} (attack 0x01, block 0x02, dodge 0x04) |
+| `unsorted_tape` | inputs[{index}] runs before its predecessor; order inputs by (tick, fighter) |
+| `duplicate_input` | inputs[{index}] repeats tick {} fighter {}; one input per slot tick |
+| `invalid_tape` | fighter {} is outside 0..{fighters}; checked above, so report this tape verbatim |
+| `invalid_tape` | arena tape check failed ({error:?}); checked ranges already passed |
 | `invalid_tape` | arena refused the inputs of tick {tick}; they passed MCP range checks, so report the tape verbatim |
 | `invalid_tape` | the spine step refused the tape through tick {ticks}; the legacy step accepted it, so report the tape verbatim |
 | `bad_ticks` | play.step needs upto_tick; submit 1..=3600 |
@@ -1296,6 +1427,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | `bad_receipt` | receipt holds {} png bytes; at most {MAX_CAPTURE_BYTES} |
 | `black_capture` | capture holds no pixels; a step receipt must be non-black |
 | `black_capture` | capture is black or flat (mean {mean}, variance {variance}); a step receipt must vary |
+| `lock_poisoned` | re-query store lock poisoned by a failed call; restart the server |
 
 </details>
 
@@ -1322,6 +1454,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | `rules_worker_down` | the OS refused to start a rules worker |
 | `bad_slots` | slot {bad} is outside 0..32; submit slots in that range |
 | `rules_refused` | {error}; {kept_text} |
+| `rules_worker_down` | the session's rules worker stopped; call rules.set again to start a fresh one |
 
 ### `rules.test`
 
@@ -1343,6 +1476,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | Code | Message |
 |---|---|
 | `rules_worker_down` | the OS refused to start a rules worker |
+| `rules_worker_down` | the session's rules worker stopped; call rules.set again to start a fresh one |
 
 ### `rules.explain`
 
@@ -1363,7 +1497,7 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half extent in meters, `5.0..=100.0` (default 12). |
 | `scene_rev` | `Option<u64>` | no |  | Scene revision to play on, as in play.run. |
 
-**Typed refusals:**
+<details><summary>11 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -1374,6 +1508,12 @@ Listed in a fresh session: no, call `api.load` with `rules`. Source: `crates/end
 | `no_script` | no rule script drives any slot; call rules.set first |
 | `invalid_config` | arena refused this seed, fighters and extent |
 | `no_script` | the script was not installed at that tick |
+| `rules_worker_down` | the session's rules worker stopped; call rules.set again to start a fresh one |
+| `scene_too_big` | the scene holds {} solid nodes; a match plays at most {MAX_OBSTACLES} (remove nodes or move them above {FIGHTER_HEIGHT_M} m) |
+| `bad_scene` | the scene cannot be played: {error}; every solid node needs a finite pose and a size in (0, {}] meters on x and z |
+| `stale_scene_rev` | scene_rev {scene_rev} is not the current revision {}; read the scene (scene.read) and submit its revision |
+
+</details>
 
 ## Pack `geo`
 
@@ -1445,10 +1585,26 @@ Listed in a fresh session: no, call `api.load` with `geo`. Source: `crates/endpo
 | `expected_revision` | `u64` | yes |  | Must equal the document revision, else nothing runs. |
 | `idempotency_key` | `u64` | yes |  | Retry identity of the committed batch. |
 
-<details><summary>19 typed refusals</summary>
+<details><summary>37 typed refusals</summary>
 
 | Code | Message |
 |---|---|
+| `bad_id` | ops[{index}].id must not be nil; insert needs a fresh id |
+| `bad_material` | ops[{index}].material `{text}` is not a material name ({error}; expected 1..=64 bytes of 0-9 A-Z a-z - _ .; null clears the binding) |
+| `bad_component` | ops[{index}].value for `{}` is refused: {error} |
+| `empty_batch` | ops holds 0 entries; submit 1..=256 ops |
+| `too_many_ops` | ops holds {} entries; at most 256 per transaction |
+| `stale_revision` | document is at revision {expected}, batch expects {got}; re-read scene.read, re-preview, then apply |
+| `duplicate_key` | idempotency key {key} was already used with a different payload; submit a new batch with a fresh key |
+| `undone_key` | idempotency key {key} belongs to an undone batch; submit a new batch with a fresh key to reapply |
+| `invalid_batch` | (built at run time: error.to_string()) |
+| `forged_approval` | approval does not match this session and batch; re-run tx.preview for a fresh approval |
+| `stale_revision` | document is at revision {expected}, approval expects {got}; re-read scene.read, re-preview, then apply |
+| `expired_approval` | approval expired at revision {expiry}, document is at {current}; re-run tx.preview for a fresh approval |
+| `reused_approval` | approval was already spent; re-run tx.preview for a fresh approval |
+| `op_not_allowed` | capability does not grant `{op}` ops; granted: [{}] |
+| `out_of_scope` | node {id} is outside this session's object scope |
+| `over_budget` | batch needs {needed} ops, {remaining} left in this session |
 | `feature_off` | ops[{index}] needs the geo kernel; build engine-endpoint with feature `geo` |
 | `bad_args` | source {label} {value} is outside (0, {MAX_SOURCE_SIZE_M}] meters; send a finite positive size |
 | `bad_recipe` | source {label} {value} is outside (0, {MAX_SOURCE_SIZE_M}] meters; send a finite positive size |
@@ -1468,6 +1624,8 @@ Listed in a fresh session: no, call `api.load` with `geo`. Source: `crates/endpo
 | `bad_args` | ops[{index}].name `{name}` repeats an earlier selection; names are unique |
 | `bad_recipe` | ops[{index}].name `{name}` repeats an earlier selection; names are unique |
 | `too_big` | recipe holds more than 16 selections; merge predicates |
+| `bad_budget` | budget_bytes {budget} is outside 1..=16384 (default 4096) |
+| `spatial_rejected` | (built at run time: message) |
 
 </details>
 
@@ -1525,10 +1683,10 @@ Listed in a fresh session: no, call `api.load` with `gym`. Source: `crates/endpo
 | `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters`; Participant count, `2..=MAX_PARTICIPANTS`. |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0`; Arena half-extent in meters, 5.0..=100.0. |
 | `ticks` | `Option<u32>` | no |  | `1..=3600`, `2..=32`, `5.0..=100.0m`; Ticks to simulate as the 1-indexed count N (1..=3600). |
-| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`; Tape inputs with 0-indexed tick ids inside `0..ticks`. |
+| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`, `-100..=100`, `-18000..=18000`; Tape inputs with 0-indexed tick ids inside `0..ticks`. |
 | `events` | `Option<u32>` | no |  | `0..=64`; How many of the newest combat events to return, 0..=64 (default 16). |
 
-**Typed refusals:**
+<details><summary>19 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -1539,6 +1697,20 @@ Listed in a fresh session: no, call `api.load` with `gym`. Source: `crates/endpo
 | `bad_ticks` | ticks {ticks} is outside 1..=3600 (MCP sim.step bound); re-run in range |
 | `too_many_inputs` | inputs holds {} entries; at most 2048 per step; re-run with a shorter tape |
 | `bad_config` | step for seed {seed} with {participants} fighters at {half}m for {ticks} ticks holds nothing; ranges already check 2..=32, 5.0..=100.0m and 1..=3600, so re-run in range and report the seed |
+| `invalid_tape` | inputs[{index}].tick {} is past the match end {ticks}; ticks run 0..{ticks} |
+| `invalid_tape` | inputs[{index}].fighter {} is outside 0..{fighters} (match runs {fighters} fighters) |
+| `invalid_tape` | inputs[{index}].mx {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].mz {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].facing {} is outside -18000..=18000 |
+| `invalid_tape` | inputs[{index}].buttons 0x{:02x} holds unknown bits; known bits are 0x{KNOWN_BUTTONS:02x} (attack 0x01, block 0x02, dodge 0x04) |
+| `unsorted_tape` | inputs[{index}] runs before its predecessor; order inputs by (tick, fighter) |
+| `duplicate_input` | inputs[{index}] repeats tick {} fighter {}; one input per slot tick |
+| `invalid_tape` | fighter {} is outside 0..{fighters}; checked above, so report this tape verbatim |
+| `invalid_tape` | arena tape check failed ({error:?}); checked ranges already passed |
+| `invalid_tape` | arena refused the inputs of tick {tick}; they passed MCP range checks, so report the tape verbatim |
+| `invalid_tape` | the spine step refused the tape through tick {ticks}; the legacy step accepted it, so report the tape verbatim |
+
+</details>
 
 ### `sim.observe`
 
@@ -1553,12 +1725,13 @@ Listed in a fresh session: no, call `api.load` with `gym`. Source: `crates/endpo
 
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
-| `events` | `Option<u32>` | no |  | How many of the newest combat events to return, 0..=64 (default 16). |
+| `events` | `Option<u32>` | no |  | `0..=64`; How many of the newest combat events to return, 0..=64 (default 16). |
 
 **Typed refusals:**
 
 | Code | Message |
 |---|---|
+| `bad_events` | events {count} is outside 0..=64 (default 16); re-run with a count in that range |
 | `no_live_bout` | no live bout in this session; call sim.reset or sim.step first, then re-run sim.observe |
 
 ## Pack `view`
@@ -1831,12 +2004,12 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
 | `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
-| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048` |
+| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`, `-100..=100`, `-18000..=18000` |
 | `tick_cap` | `Option<u32>` | no |  | `1..=3600` |
 | `fighter` | `Option<u8>` | no |  |  |
 | `hp_below` | `Option<u16>` | no |  | `0..=1000` |
 
-<details><summary>9 typed refusals</summary>
+<details><summary>21 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -1849,6 +2022,18 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `bad_args` | hp_below missing; submit 0..=1000; re-run |
 | `bad_args` | hp_below {below} is outside 0..=1000; re-run in range |
 | `too_many_inputs` | inputs holds {} entries; at most 2048; re-run shorter |
+| `invalid_tape` | inputs[{index}].tick {} is past the match end {ticks}; ticks run 0..{ticks} |
+| `invalid_tape` | inputs[{index}].fighter {} is outside 0..{fighters} (match runs {fighters} fighters) |
+| `invalid_tape` | inputs[{index}].mx {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].mz {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].facing {} is outside -18000..=18000 |
+| `invalid_tape` | inputs[{index}].buttons 0x{:02x} holds unknown bits; known bits are 0x{KNOWN_BUTTONS:02x} (attack 0x01, block 0x02, dodge 0x04) |
+| `unsorted_tape` | inputs[{index}] runs before its predecessor; order inputs by (tick, fighter) |
+| `duplicate_input` | inputs[{index}] repeats tick {} fighter {}; one input per slot tick |
+| `invalid_tape` | fighter {} is outside 0..{fighters}; checked above, so report this tape verbatim |
+| `invalid_tape` | arena tape check failed ({error:?}); checked ranges already passed |
+| `invalid_tape` | arena refused the inputs of tick {tick}; they passed MCP range checks, so report the tape verbatim |
+| `invalid_tape` | the spine step refused the tape through tick {ticks}; the legacy step accepted it, so report the tape verbatim |
 
 </details>
 
@@ -1868,7 +2053,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `fighters` | `Option<u8>` | no |  | `2..=32` |
 | `frames` | `Option<u32>` | no |  | `1..=100000` |
 
-**Typed refusals:**
+<details><summary>9 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -1880,6 +2065,9 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `seat_start_failed` | the arena printed no seat line within {} s: {}; re-run with a built arena.exe |
 | `bad_args` | fighters {fighters} is outside 2..=32; re-run in range |
 | `bad_args` | frames {frames} is outside 1..=100000; re-run in range |
+| `rules_worker_down` | the session's rules worker stopped; call rules.set again to start a fresh one |
+
+</details>
 
 ### `seat.step`
 
@@ -1980,7 +2168,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `ticks` | `Option<u32>` | no |  | `1..=3600` |
 | `start_tick` | `Option<u32>` | no |  |  |
 
-<details><summary>10 typed refusals</summary>
+<details><summary>22 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -1994,6 +2182,18 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `bad_ticks` | start_tick {start} plus {ticks} ticks overflows; re-run inside 1..=3600 |
 | `bad_ticks` | end tick {end} is past 3600; re-run inside the bound |
 | `too_many_inputs` | inputs holds {} entries; at most 2048; re-run shorter |
+| `invalid_tape` | inputs[{index}].tick {} is past the match end {ticks}; ticks run 0..{ticks} |
+| `invalid_tape` | inputs[{index}].fighter {} is outside 0..{fighters} (match runs {fighters} fighters) |
+| `invalid_tape` | inputs[{index}].mx {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].mz {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].facing {} is outside -18000..=18000 |
+| `invalid_tape` | inputs[{index}].buttons 0x{:02x} holds unknown bits; known bits are 0x{KNOWN_BUTTONS:02x} (attack 0x01, block 0x02, dodge 0x04) |
+| `unsorted_tape` | inputs[{index}] runs before its predecessor; order inputs by (tick, fighter) |
+| `duplicate_input` | inputs[{index}] repeats tick {} fighter {}; one input per slot tick |
+| `invalid_tape` | fighter {} is outside 0..{fighters}; checked above, so report this tape verbatim |
+| `invalid_tape` | arena tape check failed ({error:?}); checked ranges already passed |
+| `invalid_tape` | arena refused the inputs of tick {tick}; they passed MCP range checks, so report the tape verbatim |
+| `invalid_tape` | the spine step refused the tape through tick {ticks}; the legacy step accepted it, so report the tape verbatim |
 
 </details>
 
@@ -2014,9 +2214,9 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters` |
 | `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
 | `ticks` | `Option<u32>` | no |  | `1..=3600` |
-| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048` |
+| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`, `-100..=100`, `-18000..=18000` |
 
-**Typed refusals:**
+<details><summary>17 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -2025,6 +2225,20 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `bad_ticks` | ticks missing; submit 1..=3600; re-run with a count |
 | `bad_ticks` | ticks {ticks} is outside 1..=3600; re-run in range |
 | `too_many_inputs` | inputs holds {} entries; at most 2048; re-run shorter |
+| `invalid_tape` | inputs[{index}].tick {} is past the match end {ticks}; ticks run 0..{ticks} |
+| `invalid_tape` | inputs[{index}].fighter {} is outside 0..{fighters} (match runs {fighters} fighters) |
+| `invalid_tape` | inputs[{index}].mx {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].mz {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].facing {} is outside -18000..=18000 |
+| `invalid_tape` | inputs[{index}].buttons 0x{:02x} holds unknown bits; known bits are 0x{KNOWN_BUTTONS:02x} (attack 0x01, block 0x02, dodge 0x04) |
+| `unsorted_tape` | inputs[{index}] runs before its predecessor; order inputs by (tick, fighter) |
+| `duplicate_input` | inputs[{index}] repeats tick {} fighter {}; one input per slot tick |
+| `invalid_tape` | fighter {} is outside 0..{fighters}; checked above, so report this tape verbatim |
+| `invalid_tape` | arena tape check failed ({error:?}); checked ranges already passed |
+| `invalid_tape` | arena refused the inputs of tick {tick}; they passed MCP range checks, so report the tape verbatim |
+| `invalid_tape` | the spine step refused the tape through tick {ticks}; the legacy step accepted it, so report the tape verbatim |
+
+</details>
 
 ### `play.sweep`
 
@@ -2044,7 +2258,7 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `ticks` | `Option<u32>` | no |  | `60..=3600` |
 | `fighters` | `Option<u8>` | no |  | `2..=32`; alias `participants` |
 
-**Typed refusals:**
+<details><summary>14 typed refusals</summary>
 
 | Code | Message |
 |---|---|
@@ -2052,6 +2266,18 @@ Listed in a fresh session: no, call `api.load` with `play`. Source: `crates/endp
 | `bad_args` | ticks {ticks} is outside 60..=3600; re-run with a bout length in range |
 | `bad_args` | fighters {fighters} is outside 2..=32; re-run with a headcount in range |
 | `evidence_unwritten` | could not write {rel} ({why}); re-run after freeing target/reports |
+| `invalid_tape` | inputs[{index}].tick {} is past the match end {ticks}; ticks run 0..{ticks} |
+| `invalid_tape` | inputs[{index}].fighter {} is outside 0..{fighters} (match runs {fighters} fighters) |
+| `invalid_tape` | inputs[{index}].mx {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].mz {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].facing {} is outside -18000..=18000 |
+| `invalid_tape` | inputs[{index}].buttons 0x{:02x} holds unknown bits; known bits are 0x{KNOWN_BUTTONS:02x} (attack 0x01, block 0x02, dodge 0x04) |
+| `unsorted_tape` | inputs[{index}] runs before its predecessor; order inputs by (tick, fighter) |
+| `duplicate_input` | inputs[{index}] repeats tick {} fighter {}; one input per slot tick |
+| `invalid_tape` | fighter {} is outside 0..{fighters}; checked above, so report this tape verbatim |
+| `invalid_tape` | arena tape check failed ({error:?}); checked ranges already passed |
+
+</details>
 
 ### `tune.sweep`
 
@@ -2116,17 +2342,37 @@ Listed in a fresh session: no, call `api.load` with `verify`. Source: `crates/en
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
-| `ticks` | `Option<u32>` | no |  |  |
-| `participants` | `Option<u8>` | no |  | alias `fighters` |
-| `half_extent_m` | `Option<f32>` | no |  |  |
-| `inputs` | `Option<Vec<PlayInputDto>>` | no |  |  |
-| `chain` | `Vec<u64>` | no |  | decimal string on the wire |
+| `ticks` | `Option<u32>` | no |  | `1..=3600` |
+| `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters` |
+| `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
+| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`, `-100..=100`, `-18000..=18000` |
+| `chain` | `Vec<u64>` | no |  | `at most 3600`; decimal string on the wire |
 
-**Typed refusals:**
+<details><summary>19 typed refusals</summary>
 
 | Code | Message |
 |---|---|
+| `no_chain` | chain holds 0 hashes; submit the recorded per-tick chain in tick order, then re-run |
+| `bad_fighters` | participants {participants} is outside 2..=32; re-run in range |
+| `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
+| `bad_ticks` | ticks missing; submit 1..=3600; re-run with a tick count |
+| `bad_ticks` | ticks {ticks} is outside 1..=3600; re-run in range |
+| `too_many_inputs` | inputs holds {} entries; at most 2048; re-run shorter |
+| `bad_chain` | chain holds {} hashes; at most 3600; re-run with the recorded prefix |
+| `corrupt_tape` | arena refused the bout config; checked ranges already passed, so report this request verbatim |
 | `corrupt_tape` | the tape bytes do not replay ({detail}); re-record the tape, then re-run |
+| `invalid_tape` | inputs[{index}].tick {} is past the match end {ticks}; ticks run 0..{ticks} |
+| `invalid_tape` | inputs[{index}].fighter {} is outside 0..{fighters} (match runs {fighters} fighters) |
+| `invalid_tape` | inputs[{index}].mx {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].mz {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].facing {} is outside -18000..=18000 |
+| `invalid_tape` | inputs[{index}].buttons 0x{:02x} holds unknown bits; known bits are 0x{KNOWN_BUTTONS:02x} (attack 0x01, block 0x02, dodge 0x04) |
+| `unsorted_tape` | inputs[{index}] runs before its predecessor; order inputs by (tick, fighter) |
+| `duplicate_input` | inputs[{index}] repeats tick {} fighter {}; one input per slot tick |
+| `invalid_tape` | fighter {} is outside 0..{fighters}; checked above, so report this tape verbatim |
+| `invalid_tape` | arena tape check failed ({error:?}); checked ranges already passed |
+
+</details>
 
 ### `replay.bisect`
 
@@ -2142,20 +2388,47 @@ Listed in a fresh session: no, call `api.load` with `verify`. Source: `crates/en
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `seed` | `Option<u64>` | no |  | decimal string on the wire |
-| `ticks` | `Option<u32>` | no |  |  |
-| `participants` | `Option<u8>` | no |  | alias `fighters` |
-| `half_extent_m` | `Option<f32>` | no |  |  |
-| `inputs` | `Option<Vec<PlayInputDto>>` | no |  |  |
-| `chain` | `Vec<u64>` | no |  | decimal string on the wire |
+| `ticks` | `Option<u32>` | no |  | `1..=3600` |
+| `participants` | `Option<u8>` | no |  | `2..=32`; alias `fighters` |
+| `half_extent_m` | `Option<f32>` | no |  | `5.0..=100.0` |
+| `inputs` | `Option<Vec<PlayInputDto>>` | no |  | `at most 2048`, `-100..=100`, `-18000..=18000` |
+| `chain` | `Vec<u64>` | no |  | `at most 3600`; decimal string on the wire |
 | `metric` | `Option<String>` | no |  |  |
 | `floor` | `Option<f64>` | no |  |  |
 | `receipts` | `Option<Vec<f64>>` | no |  |  |
 
-**Typed refusals:**
+<details><summary>26 typed refusals</summary>
 
 | Code | Message |
 |---|---|
+| `bad_metric` | metric {metric:?} is not one of {}; re-run with one of those monotone receipt metrics |
+| `bad_floor` | floor {why}; submit a finite floor of 0 or more, then re-run |
+| `no_receipts` | receipts holds 0 samples; submit one finite value per tick in tick order, then re-run |
+| `no_chain` | chain holds 0 hashes; submit the recorded per-tick chain in tick order, then re-run |
+| `bad_fighters` | participants {participants} is outside 2..=32; re-run in range |
+| `bad_extent` | half_extent_m {half} is outside 5.0..=100.0; re-run in range |
+| `bad_ticks` | ticks missing; submit 1..=3600; re-run with a tick count |
+| `bad_ticks` | ticks {ticks} is outside 1..=3600; re-run in range |
+| `too_many_inputs` | inputs holds {} entries; at most 2048; re-run shorter |
+| `bad_chain` | chain holds {} hashes; at most 3600; re-run with the recorded prefix |
+| `corrupt_tape` | arena refused the bout config; checked ranges already passed, so report this request verbatim |
+| `bad_ticks` | ticks 0 is outside 1..=3600; re-run with a tick count |
+| `bad_receipts` | receipt at tick {tick} is not finite; submit finite values, then re-run |
+| `bad_receipts` | receipts holds {} samples for {ticks} ticks; submit one value per tick, then re-run |
+| `bad_receipts` | receipt for tick {tick} missing |
 | `corrupt_tape` | the tape bytes do not replay ({detail}); re-record the tape, then re-run |
+| `invalid_tape` | inputs[{index}].tick {} is past the match end {ticks}; ticks run 0..{ticks} |
+| `invalid_tape` | inputs[{index}].fighter {} is outside 0..{fighters} (match runs {fighters} fighters) |
+| `invalid_tape` | inputs[{index}].mx {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].mz {} is outside -100..=100 |
+| `invalid_tape` | inputs[{index}].facing {} is outside -18000..=18000 |
+| `invalid_tape` | inputs[{index}].buttons 0x{:02x} holds unknown bits; known bits are 0x{KNOWN_BUTTONS:02x} (attack 0x01, block 0x02, dodge 0x04) |
+| `unsorted_tape` | inputs[{index}] runs before its predecessor; order inputs by (tick, fighter) |
+| `duplicate_input` | inputs[{index}] repeats tick {} fighter {}; one input per slot tick |
+| `invalid_tape` | fighter {} is outside 0..{fighters}; checked above, so report this tape verbatim |
+| `invalid_tape` | arena tape check failed ({error:?}); checked ranges already passed |
+
+</details>
 
 ### `bug.replay`
 
@@ -2636,7 +2909,7 @@ Listed in a fresh session: no, call `api.load` with `codex`. Source: `crates/end
 
 ## Coverage
 
-88 tools parsed, 400 refusal rows printed, 0 declarations the parser could not read.
+88 tools parsed, 646 refusal rows printed, 0 declarations the parser could not read.
 A verb whose handler converts a typed error defined in another file (the log tools, the level builder) shows fewer refusals than it can return; the tests next to its source are the full list.
 
-Tools with no refusal site found: `capture`, `scene.next`, `wound.table.get`, `material.list`, `asset.generate`, `sim.plan_goals`, `log.digest`, `log.query`, `rpc.discover`, `settings.get`, `session.activity`, `codex.search`.
+Tools with no refusal site found: `capture`, `wound.table.get`, `material.list`, `asset.generate`, `sim.plan_goals`, `log.digest`, `log.query`, `rpc.discover`, `settings.get`, `session.activity`, `codex.search`.

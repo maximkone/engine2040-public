@@ -404,6 +404,15 @@ export function buildModel(files) {
   if (modSrc) for (const s of refusalSites(modSrc, 0, modSrc.code.length)) if (!modSrc.inTest(s.at) && s.code && s.message) doorWide.push({ code: s.code, message: fillConsts(idx, modSrc, s.message) });
   model.doorWide = dedupe(doorWide);
 
+  // Every function in the crate by name, so a call into another file is one
+  // lookup and not a scan of the whole tree per call.
+  const allByName = new Map();
+  for (const g of idx.srcs) for (const h of fnIndex(g)) {
+    const list = allByName.get(h.name) ?? [];
+    list.push([g, h]);
+    allByName.set(h.name, list);
+  }
+
   const makeVerb = (def, extra) => {
     const verb = { name: def.name, type: def.type, file: def.src.rel, description: def.description, readonly: def.readonly, ...extra };
     const st = structOf(idx, def.args);
@@ -436,7 +445,14 @@ export function buildModel(files) {
       const local = fnsOf(s);
       for (const name of calledNames(s, f.body[0], f.body[1])) {
         const same = local.filter((g) => g.name === name);
-        if (same.length === 1) queue.push([s, same[0]]);
+        if (same.length === 1) { queue.push([s, same[0]]); continue; }
+        // A call into another file: the handler may have moved there, so the
+        // refusal sites it owns belong to the verb. A name that is not
+        // unique across the crate is ambiguous and stays out.
+        if (!same.length) {
+          const all = allByName.get(name) ?? [];
+          if (all.length === 1) queue.push(all[0]);
+        }
       }
     }
     // Helpers that wrap a refusal around a message the caller supplies are sites at every call of the helper.

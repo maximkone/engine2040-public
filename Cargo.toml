@@ -264,9 +264,11 @@ overflow-checks = true
 # stay on (dev defaults). Undo: delete the package."*" block.
 [profile.dev]
 opt-level = 1
-# OPT39: dependencies build without debug info. The wildcard covers only the
-# dependencies, so the workspace crates keep their line tables and their
-# backtraces still show file:line.
+# OPT39: dependencies build without debug info. The workspace crates keep
+# their line tables and their backtraces still show file:line, because
+# `.cargo/config.toml` sets `[profile.dev] debug = "line-tables-only"` and a
+# config file's profile wins over the manifest's: the manifest's
+# `package."*"` block never reaches a workspace member.
 # Measured 2026-10-22 (cold `cargo build -p engine-game --timings` runs, each
 # in its own target dir, on a copy of HEAD so the arms build the same
 # sources): the dependency rlibs are 6.6 % smaller (32.7 MB -> 30.6 MB) and
@@ -274,9 +276,14 @@ opt-level = 1
 # the row's P2P holds. The `target/` total moves 0.2 % (944.1 MB ->
 # 943.6 MB), because `incremental/` is 701 MB of it and the setting does not
 # touch that, so the row's 15 % size bar is not met. The row's 10 % wall bar
-# is not claimed yet: on a shared box the same build measured 818 s and
-# 641 s, and the workspace crates' codegen (byte-identical code in every
-# arm) spread 49 % between samples, so the wall cannot carry the claim.
+# is not met either: six interleaved cold builds (before, after, before,
+# after, three rounds) gave a -10.4 % wall mean, but the before arm alone
+# spans 142 s to 333 s, and the per-crate times in cargo's --timings report
+# are wall times too, so they move with the box. The CPU time the build
+# burns was measured instead: 627.4 s, 621.9 s, 819.0 s (before) and
+# 690.6 s, 869.0 s, 712.3 s (after), a +9.8 % mean. The after arm burns no
+# less CPU than the before arm, so the dev build is not measurably faster.
+# The setting is worth the 6.6 % smaller dependencies and nothing else.
 # Undo: delete the `debug = false` line.
 [profile.dev.package."*"]
 opt-level = 3

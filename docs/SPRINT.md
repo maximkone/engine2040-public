@@ -59,16 +59,16 @@ Rows live in one shard per section (byte-identical; each shard header is the can
 - [`SPRINT-04-finish-quality.md`](SPRINT-04-finish-quality.md) — Finish quality
 - [`SPRINT-05-code-quality.md`](SPRINT-05-code-quality.md) — Code quality
 - [`SPRINT-06-plans.md`](SPRINT-06-plans.md) — Plans
-- [`SPRINT-07-accepted-plan-rows.md`](SPRINT-07-accepted-plan-rows.md) — Accepted plan rows
+- [`SPRINT-07-accepted-plan-rows.md`](SPRINT-07-accepted-plan-rows.md) — Accepted plan rows (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
 - [`SPRINT-08-hard-stuff.md`](SPRINT-08-hard-stuff.md) — Hard stuff
-- [`SPRINT-09-empire.md`](SPRINT-09-empire.md) — Empire
-- [`SPRINT-10-empire-inbox-drain.md`](SPRINT-10-empire-inbox-drain.md) — Empire inbox drain
-- [`SPRINT-11-north-star.md`](SPRINT-11-north-star.md) — North star 2026 (S44)
-- [`SPRINT-12-tier-2040.md`](SPRINT-12-tier-2040.md) — 2040 tier
-- [`SPRINT-13-engine-edge.md`](SPRINT-13-engine-edge.md) — Engine edge
-- [`SPRINT-14-agent-workspace.md`](SPRINT-14-agent-workspace.md) — Agent workspace
-- [`SPRINT-15-platform-live-ai.md`](SPRINT-15-platform-live-ai.md) — Platform and live AI
-- [`SPRINT-16-urban-war.md`](SPRINT-16-urban-war.md) — Urban war
+- [`SPRINT-09-empire.md`](SPRINT-09-empire.md) — Empire (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
+- [`SPRINT-10-empire-inbox-drain.md`](SPRINT-10-empire-inbox-drain.md) — Empire inbox drain (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
+- [`SPRINT-11-north-star.md`](SPRINT-11-north-star.md) — North star 2026 (S44) (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
+- [`SPRINT-12-tier-2040.md`](SPRINT-12-tier-2040.md) — 2040 tier (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
+- [`SPRINT-13-engine-edge.md`](SPRINT-13-engine-edge.md) — Engine edge (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
+- [`SPRINT-14-agent-workspace.md`](SPRINT-14-agent-workspace.md) — Agent workspace (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
+- [`SPRINT-15-platform-live-ai.md`](SPRINT-15-platform-live-ai.md) — Platform and live AI (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
+- [`SPRINT-16-urban-war.md`](SPRINT-16-urban-war.md) — Urban war (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
 - [`SPRINT-17-body-and-break.md`](SPRINT-17-body-and-break.md) — Body and break and hard systems
 - [`SPRINT-18-gaps.md`](SPRINT-18-gaps.md) — Look gaps (shard header `docs/SPRINT-18-gaps.md:1` is canonical per `docs/SPRINT.md:70`; O10 not in title 2026-10-16)
 - [`SPRINT-18-steals.md`](SPRINT-18-steals.md) — Steals and potato tier
@@ -81,8 +81,9 @@ Rows live in one shard per section (byte-identical; each shard header is the can
 - [`SPRINT-26-steals-wave3.md`](SPRINT-26-steals-wave3.md) — Steals wave 3, verified against the tree
 - [`SPRINT-27-final-picture.md`](SPRINT-27-final-picture.md) — Final picture: auto-fix, compact code, touch and POV
 - [`SPRINT-28-rome.md`](SPRINT-28-rome.md) — Rome: one legionary's war
-- [`SPRINT-29-hunt.md`](SPRINT-29-hunt.md) — Hunt 2026-10-21: steals from outside the engine set
+- [`SPRINT-29-hunt.md`](SPRINT-29-hunt.md) — Hunt 2026-10-21: steals from outside the engine set (2026-10-22: open rows parked in `plan/parked-2026-10-22.md`)
 - [`SPRINT-30-feel.md`](SPRINT-30-feel.md) — Feel: weight, impact, particles and the game-building door (owner 2026-10-21)
+- [`SPRINT-31-research.md`](SPRINT-31-research.md) — Research 2026-10-22: engine, feel, arXiv and agent steals (verdict in docs/research/finish-line-2026-10-22/00-verdict.md)
 
 ### Ready (live, never a snapshot)
 

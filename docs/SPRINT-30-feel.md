@@ -3,20 +3,26 @@
 Spec: `docs/plan/melee-feel.md`. Sim rows go under a new rules version: rules v1 and the
 golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine_core::laws`.
 
-- [ ] FEEL1 combat: weapons weigh what they are. `content/design/weapons.rows` (damage, speed,
+- [x] FEEL1 combat: weapons weigh what they are. `content/design/weapons.rows` (damage, speed, Landed 1843106.
   stagger, recovery) plus a mass per weapon in grams feed the live attack tables through the
   class sheet loader, under a new rules version: a heavier weapon starts later, recovers longer
   and staggers harder. Files: `crates/combat/src/tables.rs`, `tables_text.rs`, `fight.rs`,
   `crates/game/src/class_sheet.rs`, `content/design/weapons.rows`. Accept: a live-duel test
   pits a dagger row against a mace row and prints startup, recovery and stagger for each; the
   mace numbers are larger; rules v1 replays unchanged (`golden_hash_untouched`).
+- [ ] FEEL1b game: the window duel swings real weapons. `App::into_duel` arms each slot's kit weapon
+  through `LiveMatch` (`Sim::arm_weapons`, FEEL1), the look times each swing by its own startup
+  (`Sim::weapon`) and the HUD names the weapon. Files: `crates/arena/src/live.rs`,
+  `crates/game/src/lib.rs`, `fighter_look_acts.rs`. Accept: a game test arms pugio against clava
+  and reads the clava's first hit 9 ticks after the pugio's; the default duel hash moves only by
+  the armed-weapon fold.
 - [ ] FEEL2 arena: a blow moves a body by its momentum. The victim takes a knockback velocity
   and a balance impulse from weapon mass times swing speed (FEEL1), not the constant
   `BALANCE_HIT_Q8`; the walker carries the velocity and friction stops it. Files:
   `crates/arena/src/authority.rs`, `lib.rs`, `collide.rs`, `crates/physics/src/balance.rs`.
   Accept: law tests: a heavier blow moves the victim farther; mirrored blows give mirrored
   knockback (`laws::mirror`); a knocked-back body comes to exact rest (`laws::rest_stays_rest`).
-- [ ] FEEL3 game: one hitstop truth. The look mirror and the feel stop read the live fight's
+- [x] FEEL3 game: one hitstop truth. The look mirror and the feel stop read the live fight's Landed 2c24e95.
   hitstop count for the strike kind instead of their own constants. Files:
   `crates/game/src/hitstop.rs`, `lib.rs`, `fighter_look_acts.rs`, `crates/combat/src/feel_flow.rs`.
   Accept: a test feeds a light, a heavy and a parry and asserts the look holds exactly the
@@ -76,7 +82,7 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
 - [ ] DOOR3 endpoint: the authored scene is what plays. `play.run` and `play.step` take a
   scene revision and run that scene; the default frame is readable (at least 320x180). Accept:
   a level built over MCP shows its own props in the first `play.step` frame.
-- [ ] DOOR4 endpoint: every refusal says what to fix. Overlap names the pair, kinds are listed
+- [x] DOOR4 endpoint: every refusal says what to fix. Landed d4c73fe, clippy green at f2a7f19: overlap names the pair, kinds come from one list, the `mx` schema states -100..=100, `api.load` refuses a pack past the tool budget. Overlap names the pair, kinds are listed
   in the tool description, the `mx` schema states the range the handler takes, `api.load`
   refuses a pack that would break the tool budget instead of reporting loaded. Accept: one
   test per refusal asserts the named culprit or the stated range.

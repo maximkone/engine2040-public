@@ -50,6 +50,20 @@ The MCP audit drove `e2040-mcp` as a weak model would (report in this session's 
 6. **A stale installed bridge** (2026-09-26) failed every apply (a JSON hash above 2^53); the
    10/20 build is now installed; the install must refuse a stale copy.
 
+## Donors (research 2026-10-22, `docs/research/finish-line-2026-10-22/02-feel.md`)
+
+Open melee code is AngelScript, Go or float physics, so donors give the mechanism and we write the integer version. FEEL1 landed (`1843106`): each weapon row has its own startup, recovery, damage, stagger and mass.
+
+- **FEEL2 knockback** (Veloren `common/src/combat.rs`, read by the lead): impulse = base x strength x target resistance (1/2 when resistant) x attacker multiplier x a direction blended toward up (1/2 for away and towards, 0.85 for towards-up). Our strength is weapon mass x swing speed; the blend is integer weights out of 1024 with an integer square root to renormalise. A capture-point choice picks stagger, step or fall (ARX01).
+- **FEEL3 one hitstop:** derived hit fields computed once at parse time (Ikemen HitDef), and the latest hit replaces a freeze, never adds to it.
+- **FEEL4 armour order** (Veloren): flat block first, then reduction scaled by penetration; a crushing blow turns the blocked part into poise damage. All permille.
+- **FEEL5 and FEEL6 trigger:** an event only above an approach-speed threshold, carrying point and normal (Box2D `hitEventThreshold`, `b2ContactHitEvent`); sparks and the clash recoil read it. Particle speed capped at 1 m/s with a fixed spawn offset (Overgrowth).
+- **FEEL7 landing:** the land event is the air-to-ground tick after a step-down snap, not a speed test (Jolt character controller).
+- **FEEL8 and FEEL11 loudness and rumble:** the sum of contact impulse magnitudes in the tick drives gain, pitch and rumble.
+- **FEEL9 hit reaction:** one hit record (direction, attacker, both multipliers) picks the reaction; two designer strength knobs map to per-joint drive gains on the integer powered servo.
+- **FEEL10 contact:** a restitution speed floor so a resting body never bounces (Jolt `mMinVelocityForRestitution`, 1 m/s), and a capped push-out per tick with damping 230/256.
+- Still to read: Overgrowth's AngelScript character scripts (`Data/Scripts/`), where its melee and active-ragdoll blend live; the report read only the C++ side.
+
 ## Rules for these rows
 
 - Sim changes (weight, impulse, armour) go under a new rules version; rules v1 and the golden

@@ -5,6 +5,10 @@
 // A gate whose rows are all ticked but carries no evidence line prints
 // partial, never met (P10 evidence bar).
 //
+// The board prune moved finished rows into docs/archive/, so a row's tick
+// is read from the live board and from the archive: the prune must not
+// drop a met gate. The live board wins when it still carries the id.
+//
 // Usage from the repo/lane root:
 //   node tools/finish.mjs [--finish <path>] [--sprint <path>] [--archive <dir>] [--json]
 //   node --test tools/finish.test.mjs
@@ -65,45 +69,19 @@ export const FALLBACK_ROWS = {
 // again and finish.mjs warns.
 export const DROPPED_ROWS = new Set(["GX5"]);
 
-// Rows ticked-and-pruned into docs/archive/ with landed code behind them:
-// OB3 (crates/endpoint/src/log_tools.rs, endpoint lib green), DOC1 (doctor
-// drills green on tools/doctor.mjs), FX3 (retired by design: report-first
-// /fix is standing practice, no code row). Extended 2026-10-08 (verified
-// archive tick + landed code + green tests each): LW3
-// (docs/archive/SPRINT-2026-10-05.md ludus_npcs.rs), DM1 (ai_builds_arena.rs),
-// PF4 (arena+workloads), PF6 (rust-lld receipt 121s->79s), PF7 (archive.rs),
-// PF8 (server_budget.rs). Extended 2026-10-12 (verified archive tick in
-// docs/archive/SPRINT-done-2026-10-10.md each): A1 (glTF import), A2
-// (texture cook), A3 (skinned import), AS1 (bundle v1), AS2 (streaming),
-// CT7 (hero+fighters), CT8 (arena kit). The live board no longer carries
-// these rows, so score them from the archive ticks instead of printing them
-// open. Membership here is the landed-code check; the archive tick must still
-// be present. GX5 stays dropped (never resurrected).
-// Extended 2026-10-12 (verified archive tick in docs/archive/SPRINT-done-2026-10-10.md each):
-// E1 (dock shell), E2 (viewport pick+gizmo), E3 (save/reopen+play+journal),
-// ED1 (editor exe), ED2 (inspector), ED3 (browser),
-// ED4 (play-in-editor), ED5 (onboarding), SU1 (selective undo).
-// Extended 2026-10-12 FS1 packet (verified archive tick + landed code + green lib test each):
-// AM2 (SPRINT-done-2026-10-10.md:1057 space.rs, engine-anim interrupt_has_no_pop_then_settles+replay_is_identical_bytes_twice),
-// AM3 (SPRINT-done-2026-10-10.md:1060 layers.rs, engine-anim am16_layers_replay_x2_and_restore_equal),
-// AM5 (SPRINT-2026-10-05.md:897 pack.rs, engine-anim ct3_bake_replays_through_pack+unpack_returns_source_bit_exact),
-// AM9 (SPRINT-done-2026-10-10.md:1536 fbik.rs, engine-anim reach_lands_inside_1cm_analytic_first+fixed_cost_and_64_fighter_scale),
-// LW1 (SPRINT-done-2026-10-10.md:1791 mind.rs, engine-ai conformance_green_mock_local_remote+providers_off_replay_reproduces_checkpoints_x2),
-// LW2 (SPRINT-done-2026-10-10.md:1797 memory.rs, engine-ai same_log_same_bytes_x2+soak_10k_holds_cap),
-// GP2 (SPRINT-done-2026-10-10.md:1186 sweep.rs, engine-combat thin_fast_rapier_never_tunnels+replay_exact_twice_over_sweep_tape),
-// GP3 (SPRINT-done-2026-10-10.md:1190 camera.rs, engine-game scripted_orbit_keeps_both_fighters_framed_600_ticks+gp19_trauma_replays_exactly_twice),
-// PX4 (SPRINT-done-2026-10-10.md:1584 balance.rs, engine-physics balance_stagger_threshold_orders_five_strengths+balance_stagger_hash_stable_x2),
-// HR3 (SPRINT-done-2026-10-10.md:208 tables.rs, engine-combat replacement_tables_validate_and_change_outcomes),
-// HR4 (SPRINT-done-2026-10-10.md:211 curves/gladiator.rs, engine-ai replacement_curves_validate_and_change_decisions),
-// SL2 (SPRINT-2026-10-05.md:1425 world+nav, engine-world 25 passed + engine-nav 93 passed),
-// UIX2 (SPRINT-done-2026-10-10.md:153 settings.rs, engine-ui replay_reads_the_same_settings_on_the_same_tick_twice),
-// FS1 (SPRINT-2026-10-05.md:449 tools/finish.mjs, node --test tools/finish.test.mjs hand-checked sample).
-// Extended 2026-10-17 (owner-verified green; each archive tick checked in the
-// file named): AM4, AM6, AH1, AH2, EA1a-e, FK1, BR2, PV3, QA1, CR1, GP1, GP4 in
-// docs/archive/SPRINT-done-2026-10-10.md; SL1 in docs/archive/SPRINT-2026-10-05.md.
-// PF7 and PF8 ticks sit in docs/SPRINT-ARCHIVE.md (board diet), which
-// ticksFromArchive reads. finish.test.mjs fails a member with no archive tick.
-export const ARCHIVE_TICKED_ROWS = new Set(["OB3", "DOC1", "FX3", "LW3", "DM1", "PF4", "PF6", "PF7", "PF8", "A1", "A2", "A3", "AS1", "AS2", "CT7", "CT8", "E1", "E2", "E3", "ED1", "ED2", "ED3", "SU1", "ED4", "ED5", "AM2", "AM3", "AM5", "AM9", "LW1", "LW2", "GP2", "GP3", "PX4", "HR3", "HR4", "SL2", "UIX2", "FS1", "AM4", "AM6", "AH1", "AH2", "EA1a", "EA1b", "EA1c", "EA1d", "EA1e", "FK1", "BR2", "PV3", "QA1", "CR1", "GP1", "GP4", "SL1"]);
+// The board prune moved finished rows out of docs/SPRINT.md and into
+// docs/archive/ (SPRINT-done-*.md, the older SPRINT-2026-10-05.md snapshot
+// and docs/SPRINT-ARCHIVE.md). A row the archive ticks is done, so the
+// gates score it from the archive tick instead of printing it open: the
+// prune must not drop a met gate.
+//
+// The live board wins when it still carries the row. An id the board
+// reopened (or reuses for new work) is scored from the board, never from
+// the older archive tick: the board is the newer record.
+//
+// The landed-code check that a hand-kept allowlist used to carry is the
+// row audit (ticked-rows-audit): a ticked row whose code is gone is a
+// suspect, and a gate with a suspect row never prints met.
 
 const ARCHIVE_DONE = /^SPRINT-done-.*\.md$/;
 
@@ -146,6 +124,30 @@ export function readArchive(archiveDir) {
 // Kept for finish.test.mjs and any other existing caller.
 export function ticksFromArchive(archiveDir) {
   return readArchive(archiveDir).ticks;
+}
+
+// The 2026-10-22 board cut moved 437 open rows off the board into
+// docs/plan/parked-2026-10-22.md. They are known rows that are not done:
+// the owner parked them, so the gates still count them open, but the
+// scoreboard must not call them unresolved (a row on neither the board
+// nor the archive is a stale-alarm). The file lists a row as
+// "- ID title:" with no checkbox, so it needs its own reader.
+export const PARKED_FILE = "parked-2026-10-22.md";
+
+// The parked ids: the row id and its text, from the parked file.
+export function readParked(parkedPath) {
+  let md;
+  try {
+    md = readFileSync(parkedPath, "utf8").replace(/\r\n/g, "\n");
+  } catch {
+    return new Map();
+  }
+  const out = new Map();
+  for (const line of md.split("\n")) {
+    const m = /^- ([A-Z][A-Z0-9]*\d[a-z]?)\b(.*)$/.exec(line);
+    if (m && !out.has(m[1])) out.set(m[1], line.slice(2).trim());
+  }
+  return out;
 }
 
 // Suspects among the gate rows this tree can read: id -> { reasons, evidence }.
@@ -478,7 +480,7 @@ function probesFor(argv) {
 
 function main() {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    console.log("Usage: node tools/finish.mjs [--finish <path>] [--sprint <path>] [--archive <dir>] [--json] [--no-suspects] [--probe] [--probes <path>] [--check]");
+    console.log("Usage: node tools/finish.mjs [--finish <path>] [--sprint <path>] [--archive <dir>] [--parked <path>] [--json] [--no-suspects] [--probe] [--probes <path>] [--check]");
     process.exit(0);
   }
   const cwd = process.cwd();
@@ -513,11 +515,19 @@ function main() {
   const ticks = new Map(liveTicks);
   const archiveDir = argPath("--archive", join(cwd, "docs", "archive"));
   const archive = readArchive(archiveDir);
-  for (const id of ARCHIVE_TICKED_ROWS) if (archive.ticks.get(id)) ticks.set(id, true);
+  // The prune moved finished rows into the archive, so the archive tick is
+  // the row's real state. The live board wins when it still carries the id:
+  // a row the board reopened (or reuses for new work) is scored from the
+  // board, never from the older archive tick.
+  for (const [id, done] of archive.ticks) {
+    if (done && !liveTicks.has(id)) ticks.set(id, true);
+  }
   // A dropped row leaves the gates only while the live board does not reopen it.
   const liveOpen = (id) => liveTicks.get(id) === false;
+  const parked = readParked(argPath("--parked", join(cwd, "docs", "plan", PARKED_FILE)));
   const texts = new Map([...board.tasks].map(([id, row]) => [id, row.lines.join(" ")]));
   for (const [id, text] of archive.texts) if (!texts.has(id)) texts.set(id, text);
+  for (const [id, text] of parked) if (!texts.has(id)) texts.set(id, text);
 
   const unresolved = new Set();
   const droppedOpen = [];
@@ -539,7 +549,11 @@ function main() {
     for (const r of rows) if (DROPPED_ROWS.has(r) && liveOpen(r)) droppedOpen.push(`${gate}:${r}`);
     rows = rows.filter((r) => !DROPPED_ROWS.has(r) || liveOpen(r));
     // A row on neither the board nor the archive is counted open, and named.
-    for (const r of rows) if (!liveTicks.has(r) && !archive.ticks.get(r)) unresolved.add(r);
+    // A parked row is known: the owner took it off the board, so it counts
+    // open without the stale-alarm warning.
+    for (const r of rows) {
+      if (!liveTicks.has(r) && !archive.ticks.get(r) && !parked.has(r)) unresolved.add(r);
+    }
     return { gate, statusText, rows };
   });
 

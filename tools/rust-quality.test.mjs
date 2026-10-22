@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveFixedApi } from "./sim-source-scan.mjs";
 import * as rq from "./rust-quality.mjs";
-import { HELP, analyzeFile, cfgTestModPaths, cfgTestMods, cloneKey, compare, compareCloneMembers, functions, hitIsOwned, isPassthrough, lex, measure, onlyBase, packages, scopeRatchetToOwned, score, testLines, testOnlyFile, testPath } from "./rust-quality.mjs";
+import { HELP, analyzeFile, cfgTestModPaths, cfgTestMods, cloneKey, compare, compareCloneMembers, compareFiles, fileLineCount, filePins, functions, hitIsOwned, isPassthrough, lex, measure, onlyBase, packages, scopeRatchetToOwned, score, testLines, testOnlyFile, testPath } from "./rust-quality.mjs";
 
 const lib = { crate: "engine-x", lib: true, bin: false, sim: false, hot: false, core: false, testFile: false };
 const sim = { ...lib, crate: "engine-physics", sim: true, hot: true };
@@ -416,6 +416,67 @@ test("every rule id names its fix on the seeded fixture", () => {
       assert.ok(tail.trim().length > 0, `printed FAIL line must end with a fix tail: ${l}`);
     }
     assert.ok(seeded.metrics.hot_alloc > 0, "the fixture allocates in a hot function");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// CX2: a file over 3000 lines cannot grow. The seeded fixture writes a
+// 3,001-line file, pins it in the baseline, then grows it by one line: the
+// tool must FAIL and name the path and both counts.
+test("a file over the 3000-line cap cannot grow, and a file under it that crosses fails too", () => {
+  const root = mkdtempSync(join(tmpdir(), "rq-cap-"));
+  try {
+    mkdirSync(join(root, "crates", "physics", "src"), { recursive: true });
+    mkdirSync(join(root, "tools"), { recursive: true });
+    writeFileSync(join(root, "crates", "physics", "Cargo.toml"), '[package]\nname = "engine-physics"\n');
+    // 3,001 lines: one over the cap.
+    const body = Array.from({ length: 3001 }, (_, i) => `pub fn f${i}() -> u32 { ${i} }`).join("\n");
+    const src = join(root, "crates", "physics", "src", "big.rs");
+    writeFileSync(src, `${body}\n`);
+    const zero = Object.fromEntries(Object.keys(rq.METRICS).map((k) => [k, 0]));
+    const baselinePath = join(root, "tools", "rust-quality.baseline.json");
+    const writeBaseline = (files) => {
+      const baseline = { version: 1, crates: { "engine-physics": { ...zero, tests: 0 } }, files, accepted: [] };
+      writeFileSync(baselinePath, `${JSON.stringify(baseline, null, 1)}\n`);
+    };
+    writeBaseline({ "crates/physics/src/big.rs": 3001 });
+
+    // The measured file is 3,001 lines: it sits on its pin, so it passes.
+    const { fileLines } = measure(root, null, false);
+    assert.equal(fileLines.get("crates/physics/src/big.rs"), 3001);
+    assert.equal(fileLineCount(`${body}\n`), 3001, "the line count is the physical line count");
+    assert.deepEqual(Object.keys(filePins(fileLines)), ["crates/physics/src/big.rs"], "only the over-cap file holds a pin");
+    assert.deepEqual(compareFiles({ "crates/physics/src/big.rs": 3001 }, fileLines).regressions, []);
+
+    // Grow it by one line: the tool FAILs and names the path and both counts.
+    writeFileSync(src, `${body}\npub fn grown() -> u32 { 7 }\n`);
+    const grown = measure(root, null, false).fileLines;
+    assert.equal(grown.get("crates/physics/src/big.rs"), 3002);
+    const { regressions } = compareFiles({ "crates/physics/src/big.rs": 3001 }, grown);
+    assert.equal(regressions.length, 1, "the grown file is the one regression");
+    assert.match(regressions[0], /crates\/physics\/src\/big\.rs/, "the line names the path");
+    assert.match(regressions[0], /3001/, "the line names the count before");
+    assert.match(regressions[0], /3002/, "the line names the count after");
+    assert.ok(regressions[0].endsWith(` fix: ${rq.FILE_LINE_FIX}`), "the line names the edit that clears it");
+
+    // A file that was under the cap and crosses it fails too.
+    const under = compareFiles({}, new Map([["crates/physics/src/new.rs", 3001]]));
+    assert.equal(under.regressions.length, 1, "crossing the cap fails");
+    assert.match(under.regressions[0], /crossed the 3000-line cap/);
+    assert.match(under.regressions[0], /crates\/physics\/src\/new\.rs/);
+
+    // A file under the cap may grow freely.
+    const under2 = compareFiles({}, new Map([["crates/physics/src/small.rs", 2999]]));
+    assert.deepEqual(under2.regressions, [], "a file under the cap is not pinned");
+
+    // The tool itself reports the regression and exits 1.
+    const tool = join(dirname(fileURLToPath(import.meta.url)), "rust-quality.mjs");
+    const run = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
+    const printed = `${run.stdout ?? ""}${run.stderr ?? ""}`;
+    assert.equal(run.status, 1, `the grown file must fail the gate: ${printed}`);
+    assert.match(printed, /\[FAIL\] ratchet crates\/physics\/src\/big\.rs: file lines 3001 -> 3002/);
+    assert.match(printed, /RESULT FAIL: /);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

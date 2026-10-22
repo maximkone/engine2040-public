@@ -10,7 +10,6 @@
 //! Determinism: no clock, no RNG, no image. Presentation only: nothing
 //! here feeds the tick or the hash.
 
-use crate::arena_kit::{kit_actors, KitActor};
 /// The shader's torch falloff, mirrored: the inverse-square term with the
 /// edge fade of `eg12_torch_falloff`.
 #[must_use]
@@ -131,7 +130,7 @@ pub fn night_ratio(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arena_kit::KitAsset;
+    use crate::arena_kit::{kit_actors, KitActor, KitAsset};
 
     fn torch_actor(id: u32, x: f32, z: f32) -> KitActor {
         KitActor {

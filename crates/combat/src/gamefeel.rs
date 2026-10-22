@@ -224,7 +224,14 @@ impl TimeScale {
     /// `stopFrame()`: hold the presented clock at [`STOP_SCALE_PERMILLE`] for
     /// [`STOP_FRAME_TICKS`] steps. A second call restarts the hold.
     pub fn stop_frame(&mut self) {
-        self.stop_left = STOP_FRAME_TICKS;
+        self.stop_frame_for(STOP_FRAME_TICKS);
+    }
+
+    /// Hold the presented clock at [`STOP_SCALE_PERMILLE`] for `ticks` steps:
+    /// the live fight's hit-stop count for the strike that landed (FEEL3).
+    /// A second call restarts the hold; zero ticks holds nothing.
+    pub fn stop_frame_for(&mut self, ticks: u32) {
+        self.stop_left = ticks;
     }
 
     /// `addSlowMo(id, sec, factor)`: a repeated id takes the new factor and

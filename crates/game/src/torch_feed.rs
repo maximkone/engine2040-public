@@ -60,10 +60,7 @@ pub fn torch_lights(actors: &[KitActor]) -> Result<Vec<TorchLight>, TorchError> 
 /// tick: each light keeps its own phase from its actor id, so the two
 /// torches do not pulse together. The scale stays inside the flicker
 /// band, so the frame never pulses to black.
-pub fn torch_lights_at(
-    actors: &[KitActor],
-    tick: u32,
-) -> Result<Vec<TorchLight>, TorchError> {
+pub fn torch_lights_at(actors: &[KitActor], tick: u32) -> Result<Vec<TorchLight>, TorchError> {
     let lights = torch_lights(actors)?;
     let mut flickering = Vec::with_capacity(lights.len());
     for (i, light) in lights.iter().enumerate() {
@@ -72,6 +69,33 @@ pub fn torch_lights_at(
     }
     engine_render::torch_light::check_torch_list(&flickering)?;
     Ok(flickering)
+}
+
+/// The sun's share of the light under the night preset: the moon is a
+/// fraction of the noon sun, so the torches carry the picture.
+pub const NIGHT_SUN_SCALE: f32 = 0.12;
+
+/// The night preset's sun strength: the frame's sun scaled to a moonlit
+/// fraction. Pure: the same sun gives the same night sun.
+#[must_use]
+pub fn night_sun_intensity(sun_intensity: f32) -> f32 {
+    if !sun_intensity.is_finite() {
+        return 0.0;
+    }
+    sun_intensity * NIGHT_SUN_SCALE
+}
+
+/// The night preset's sun for one draw list: the sun drops to a moonlit
+/// fraction, so the placement's torches carry the picture. Pure: the same
+/// list gives the same night list. Presentation only, never hashed.
+///
+/// Gated on `app`: the draw list lives behind the render crate's `v1`
+/// feature, and only the window leg (`app`, which turns on
+/// `engine-render/window`) has one. The headless default has no draw list,
+/// so it has no night sun to apply.
+#[cfg(feature = "app")]
+pub fn apply_night_sun(list: &mut engine_render::present::DrawList) {
+    list.light.intensity = night_sun_intensity(list.light.intensity);
 }
 
 #[cfg(test)]
@@ -131,5 +155,24 @@ mod tests {
             lights[0].intensity, lights[1].intensity,
             "the two torches keep their own phase"
         );
+    }
+
+    #[test]
+    fn the_night_preset_drops_the_sun_to_a_moonlit_fraction() {
+        // The scale is a constant, so these two checks are compile-time ones:
+        // a const block keeps them as asserts without a runtime assert on a
+        // value the compiler already knows.
+        const { assert!(NIGHT_SUN_SCALE < 1.0, "the night sun is a fraction of noon") };
+        const { assert!(NIGHT_SUN_SCALE > 0.0, "the night sun is a moon, not black") };
+        assert_eq!(night_sun_intensity(3.0), 3.0 * NIGHT_SUN_SCALE);
+        assert_eq!(night_sun_intensity(f32::NAN), 0.0, "a broken sun is dark");
+    }
+
+    #[test]
+    fn the_night_preset_keeps_the_torches_reachable() {
+        let actors = kit_actors().expect("embedded placement parses");
+        let lights = torch_lights(&actors).expect("valid");
+        let ratio = crate::arena_kit::torch_acceptance::night_ratio(&lights, 0);
+        assert!(ratio >= 2.0, "the near sand is at least twice the far sand");
     }
 }

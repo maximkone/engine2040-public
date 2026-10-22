@@ -772,9 +772,10 @@ pub struct App {
     retired_steps: u64,
     checkpoints: Vec<Checkpoint>,
     hp: [u16; MAX_PARTICIPANTS as usize],
-    /// Sim hitstop ticks left, mirrored from the live tick events (Hit or
-    /// Parried sets 4, anything else counts down). Presentation only, never
-    /// hashed; the look holds clip clocks while it is above zero.
+    /// Sim hitstop ticks left, read from the live fight after each step (the
+    /// count the impact set: 3 light, 6 heavy, 8 parry under v2, 4 under v1).
+    /// Presentation only, never hashed; the look and the feel hold while it is
+    /// above zero.
     hitstop_remaining: u32,
     /// Best-of-5 fold over closed rounds; pure, never hashed.
     rounds: crate::rounds::MatchState,
@@ -1156,13 +1157,14 @@ impl App {
         &self.hp
     }
 
-    /// Sim hitstop ticks left, mirrored from the live tick events. Equals 4
-    /// right after a Hit or Parried tick, then drops by one per quiet tick.
-    /// Read-only visibility for the look (it holds clip clocks while this is
-    /// above zero); presentation only, never hashed. Units: fixed ticks.
+    /// Sim hitstop ticks left, read from the live fight after each step: the
+    /// count the impact set for the strike that landed (3 light, 6 heavy, 8
+    /// parry under v2; 4 under v1), then one less per frozen tick. Read-only
+    /// visibility for the look and the feel (both hold while this is above
+    /// zero); presentation only, never hashed. Units: fixed ticks.
     ///
-    /// Caller: `crates/game/src/fighter_look.rs` (`FighterLook::view_run`
-    /// polls the mirrored count each tick; the window twin polls the same).
+    /// Caller: `crates/game/src/bin/arena_frame/mod.rs` feeds it to the look
+    /// and the feel each tick; `fighter_look_proofs.rs` polls it the same way.
     #[must_use]
     pub fn hitstop_remaining(&self) -> u32 {
         self.hitstop_remaining
@@ -1385,7 +1387,6 @@ impl App {
             self.rebuild_live(tick)?;
         }
         let fighters = self.config.fighters;
-        let current = self.hitstop_remaining;
         let inputs = tick_inputs(&self.tape, tick);
         let stepped = self.live.step(inputs)?;
         let checkpoint = stepped.checkpoint;
@@ -1394,7 +1395,6 @@ impl App {
         self.tick_cues.clear();
         self.tick_cues
             .extend(stepped.events.events.iter().map(map_cue));
-        let next_hitstop = hitstop::next(current, &stepped.events.events);
         if self.presentation_extras {
             // Only the spectator cut camera reads laterals; the lean session
             // skips the scan and keeps the views the page draws from.
@@ -1404,6 +1404,8 @@ impl App {
         // The authority's break events for this tick, kept for `observe_into` to hand out.
         self.tick_breaks.clear();
         self.tick_breaks.extend_from_slice(&stepped.breaks.events);
+        // The live fight's freeze after this tick (FEEL3): the sim's own count.
+        let next_hitstop = self.live.hitstop();
         // First production read of the press-tick tell (EG19b): one starter
         // slot per fresh v2 attack, in fighter-ID order; empty under v1 rows
         // and on quiet ticks. Both borrows are shared, so the live match
@@ -1435,11 +1437,10 @@ impl App {
     /// the tape no longer replays.
     fn rebuild_live(&mut self, ticks: u32) -> Option<()> {
         let mut live = self.spec().live()?;
-        let mut hitstop = 0u32;
         for tick in 0..ticks {
-            let stepped = live.step(tick_inputs(&self.tape, tick))?;
-            hitstop = hitstop::next(hitstop, &stepped.events.events);
+            live.step(tick_inputs(&self.tape, tick))?;
         }
+        let hitstop = live.hitstop();
         // The fresh match counts its own replay steps; bill the old one here.
         self.retired_steps = self.retired_steps.saturating_add(self.live.steps());
         self.live = live;
@@ -2628,6 +2629,25 @@ mod tests {
         assert!(App::hitstop_holds(4));
         assert!(App::hitstop_holds(1));
         assert!(!App::hitstop_holds(0));
+    }
+
+    #[test]
+    fn hitstop_mirror_is_the_live_count_under_v2() {
+        // FEEL3: under v2 rows the App mirror is the sim's own freeze, read from
+        // the live fight after each step, never a second count. The per-kind
+        // freeze values (light 3, heavy 6, parry 8) are pinned against the sim's
+        // rows by the look and feel tests, which feed those counts directly.
+        let mut app = App::new(small_config()).unwrap().into_duel().unwrap();
+        let ticks = small_config().ticks;
+        for tick in 0..ticks {
+            let outcome = app.tick(script(tick));
+            assert!(outcome.input_accepted, "tick {tick}");
+            assert_eq!(
+                app.hitstop_remaining(),
+                app.live_match().hitstop(),
+                "tick {tick}: the mirror is the live count"
+            );
+        }
     }
 
     #[test]

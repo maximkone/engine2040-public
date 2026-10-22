@@ -690,6 +690,92 @@ pub(crate) mod capture {
         }
     }
 
+    /// One captured twin frame's inputs: the frame's own camera, the kit
+    /// draws it binds, the night preset and the placement's torch actors.
+    /// One struct, so the frame helper stays a short call.
+    struct FrameInputs<'a> {
+        /// The camera path the capture flies (None keeps the establishing view).
+        camera_path: Option<engine_game::windowed::CameraPath>,
+        /// The staged kit draws the frame binds.
+        kit_draws: &'a [(
+            engine_render::present::MeshKey,
+            engine_render::v1::PbrMaterial,
+            Option<TextureKey>,
+        )],
+        /// The night preset: the sun drops and the torches carry the picture.
+        night: bool,
+        /// The placement's torch actors, when the placement parsed.
+        torch_actors: Option<&'a [engine_game::arena_kit::KitActor]>,
+        /// The capture's frame index (the orbit eye) and the sim tick.
+        frame: u32,
+        /// The sim tick the flame flickers on.
+        tick: u32,
+    }
+
+    /// One captured twin frame: the draw list, the kit bind, the HUD bars,
+    /// the crate and the night lights, then the offscreen render. The PNG
+    /// bytes come back; the sink writes them. A frame that fails validation
+    /// or carries no bytes is refused loudly.
+    fn capture_frame(
+        presenter: &mut Presenter,
+        app: &App,
+        crate_scene: &mut Option<BreakScene>,
+        inputs: &FrameInputs<'_>,
+    ) -> Result<Vec<u8>, WinError> {
+        let mut list = frame_list(
+            presenter,
+            SMOKE_FRAME_SIZE.0,
+            SMOKE_FRAME_SIZE.1,
+            inputs.camera_path,
+            inputs.frame,
+        )?;
+        // Arena kit bind: cube leaves when a kit draw is resident.
+        // Textured cutover keeps `base_color` on every triple.
+        engine_render::twin_arena::push_twin_arena_textured(
+            &mut list,
+            &presenter.mesh_keys(),
+            inputs.kit_draws,
+        )
+        .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
+        let overlay = engine_game::windowed::duel_overlay_for_app(app)
+            .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
+        engine_game::windowed::stage_hp_bars(presenter, &overlay);
+        push_crate(crate_scene, presenter, &mut list);
+        // VS7: the night preset drops the sun and the placement's torch
+        // actors burn, so the torches carry the picture. Off by default: the
+        // day capture keeps the built-in light pair and stays byte-equal.
+        if inputs.night {
+            feed_night_lights(presenter, &mut list, inputs.torch_actors, inputs.tick);
+        }
+        let out = presenter.render_offscreen(&list)?;
+        if !out.manifest.is_clean() {
+            return Err(WinError::Render("twin frame failed validation".to_string()));
+        }
+        match out.png {
+            Some(png) => Ok(png),
+            None => Err(WinError::Render("twin frame carried no bytes".to_string())),
+        }
+    }
+
+    /// The night preset's light for one captured frame (VS7): the placement's
+    /// torch actors burn and the sun drops to a moonlit fraction, so the
+    /// torches carry the picture. A refused light set keeps the built-in
+    /// pair and never fails the frame. Off by default, so every existing
+    /// capture stays byte-equal.
+    fn feed_night_lights(
+        presenter: &mut Presenter,
+        list: &mut DrawList,
+        actors: Option<&[engine_game::arena_kit::KitActor]>,
+        tick: u32,
+    ) {
+        if let Some(actors) = actors {
+            if let Ok(lights) = engine_game::arena_kit::torch_feed::torch_lights_at(actors, tick) {
+                presenter.set_torch_lights(lights);
+            }
+        }
+        engine_game::arena_kit::torch_feed::apply_night_sun(list);
+    }
+
     /// Headless twin capture: the same session over the tape with every due tick
     /// rendered through the offscreen twin under `camera_path` (the orbit eye is
     /// the captured-frame count, so the flags run moves while the baseline stays
@@ -731,6 +817,15 @@ pub(crate) mod capture {
         let human = FighterId::new(HUMAN_SLOT).ok_or(WinError::BadConfig("fighters"))?;
         let mut cursor = TapeInputs::new(tape.map(|loaded| loaded.inputs).unwrap_or_default());
         let mut presented = 0u32;
+        // VS7: the night preset drops the sun and the placement's torch
+        // actors burn, so the torches carry the picture. Off by default: the
+        // day capture keeps the built-in light pair and stays byte-equal.
+        let night = engine_game::windowed::night_enabled(
+            std::env::var(engine_game::windowed::NIGHT_ENV)
+                .ok()
+                .as_deref(),
+        );
+        let torch_actors = engine_game::arena_kit::kit_actors().ok();
         for tick in 0..ticks {
             let live = engine_input::FighterInput {
                 tick,
@@ -748,39 +843,22 @@ pub(crate) mod capture {
             observe_crate(&mut crate_scene, &outcome);
             if sink.should_capture(tick + 1) {
                 let hash = outcome.checkpoint.map(|point| point.hash).unwrap_or(0);
-                let mut list = frame_list(
-                    &presenter,
-                    SMOKE_FRAME_SIZE.0,
-                    SMOKE_FRAME_SIZE.1,
-                    camera_path,
-                    presented,
+                let png = capture_frame(
+                    &mut presenter,
+                    &app,
+                    &mut crate_scene,
+                    &FrameInputs {
+                        camera_path,
+                        kit_draws: &kit_draws,
+                        night,
+                        torch_actors: torch_actors.as_deref(),
+                        frame: presented,
+                        tick,
+                    },
                 )?;
-                // Arena kit bind: cube leaves when a kit draw is resident.
-                // Textured cutover keeps `base_color` on every triple.
-                engine_render::twin_arena::push_twin_arena_textured(
-                    &mut list,
-                    &presenter.mesh_keys(),
-                    &kit_draws,
-                )
-                .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
-                let overlay = engine_game::windowed::duel_overlay_for_app(&app)
-                    .map_err(|err| WinError::Render(capped(&format!("{err}"))))?;
-                engine_game::windowed::stage_hp_bars(&mut presenter, &overlay);
-                push_crate(&mut crate_scene, &mut presenter, &mut list);
-                let out = presenter.render_offscreen(&list)?;
-                if !out.manifest.is_clean() {
-                    return Err(WinError::Render("twin frame failed validation".to_string()));
-                }
-                match out.png {
-                    Some(png) => {
-                        sink.write_frame(tick, hash, &png)
-                            .map_err(|err| WinError::Render(capped(&err.to_string())))?;
-                        presented += 1;
-                    }
-                    None => {
-                        return Err(WinError::Render("twin frame carried no bytes".to_string()));
-                    }
-                }
+                sink.write_frame(tick, hash, &png)
+                    .map_err(|err| WinError::Render(capped(&err.to_string())))?;
+                presented += 1;
             }
         }
         if let Some(scene) = crate_scene.as_ref() {

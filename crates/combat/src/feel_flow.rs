@@ -14,7 +14,7 @@
 //! never allocates. Presentation only: the fight state is never read back.
 
 use crate::fight::FightEvent;
-use crate::gamefeel::{FeelFrame, GameFeel, GameFeelError};
+use crate::gamefeel::{FeelFrame, GameFeel, GameFeelError, STOP_FRAME_TICKS};
 
 /// Registered effects a flow holds (stack only).
 pub const MAX_EFFECTS: usize = 16;
@@ -65,7 +65,8 @@ pub enum Effect {
         /// Distance in milli pixels.
         dist_milli: i32,
     },
-    /// Four-tick hit-stop.
+    /// Hit-stop for the flow's stop length: the live fight's count
+    /// ([`FeelFlow::set_stop_ticks`]), four ticks until one is set.
     StopFrame,
     /// Slow-mo under an id (a repeated id extends instead of stacking).
     SlowMo {
@@ -135,17 +136,37 @@ pub enum FlowError {
 }
 
 /// The registered effects plus the feel state they drive.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FeelFlow {
     effects: [Option<(Trigger, Effect)>; MAX_EFFECTS],
     feel: GameFeel,
+    /// Hit-stop ticks every [`Effect::StopFrame`] holds (FEEL3): the live fight's
+    /// count for the strike that landed. Four until a count is set.
+    stop_ticks: u32,
+}
+
+impl Default for FeelFlow {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FeelFlow {
-    /// Empty flow: nothing registered, every frame quiet.
+    /// Empty flow: nothing registered, every frame quiet, a four-tick stop.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            effects: [None; MAX_EFFECTS],
+            feel: GameFeel::default(),
+            stop_ticks: STOP_FRAME_TICKS,
+        }
+    }
+
+    /// Set the hit-stop length the next [`Self::step`] fires for a
+    /// [`Effect::StopFrame`]. The window feeds the live fight's count, so the
+    /// feel freezes exactly as long as the sim (FEEL3).
+    pub fn set_stop_ticks(&mut self, ticks: u32) {
+        self.stop_ticks = ticks;
     }
 
     /// The shipped flow: a hit shakes and freezes, a parry shakes less and
@@ -206,7 +227,7 @@ impl FeelFlow {
                 power_permille,
             } => self.feel.shake.start(ticks, power_permille),
             Effect::Bump { angle, dist_milli } => self.feel.bump.add_angle(angle, dist_milli),
-            Effect::StopFrame => self.feel.time.stop_frame(),
+            Effect::StopFrame => self.feel.time.stop_frame_for(self.stop_ticks),
             Effect::SlowMo {
                 id,
                 ticks,
@@ -301,6 +322,27 @@ mod tests {
         let mut flow = FeelFlow::v1();
         let slow = flow.step(&[knockdown()], 0).0.time_permille;
         assert!(slow < 1000, "{slow}");
+    }
+
+    #[test]
+    fn stop_length_follows_the_live_count() {
+        // FEEL3: a light (3), a heavy (6) and a parry (8) freeze the presented
+        // clock for exactly the count the sim set, then the clock runs free.
+        use crate::gamefeel::STOP_SCALE_PERMILLE;
+        for count in [3_u32, 6, 8] {
+            let mut flow = FeelFlow::v1();
+            flow.set_stop_ticks(count);
+            let events = [hit()];
+            let frozen = (0..count + 2)
+                .map(|t| {
+                    flow.step(if t == 0 { &events } else { &[] }, t)
+                        .0
+                        .time_permille
+                })
+                .take_while(|permille| *permille == STOP_SCALE_PERMILLE)
+                .count();
+            assert_eq!(frozen, usize::try_from(count).unwrap_or(0), "count {count}");
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@
 use engine_arena::spear::{EndWhy, SpearEvent};
 use engine_audio::FightCue;
 use engine_combat::feel_flow::{FeelFlow, Trigger};
-use engine_combat::gamefeel::{FeelFrame, STOP_SCALE_PERMILLE};
+use engine_combat::gamefeel::{FeelFrame, STOP_FRAME_TICKS, STOP_SCALE_PERMILLE};
 use engine_combat::FightEvent;
 use engine_render::v1::Camera;
 
@@ -110,6 +110,19 @@ impl FeelView {
     /// Queue one sim tick's cues for the next [`Self::step`].
     pub fn observe(&mut self, cues: &[FightCue]) {
         self.pending.extend(cues.iter().copied().map(event_of));
+    }
+
+    /// The live fight's hit-stop count for the tick just queued (FEEL3, read from
+    /// `App::hitstop_remaining` after the tick ran): a Hit or Parried stop holds the
+    /// clock this many frames, the same as the sim freezes. A spear stick never
+    /// freezes the sim (no count), so a zero count keeps the four-frame stick.
+    pub fn observe_hitstop(&mut self, remaining: u32) {
+        let ticks = if remaining == 0 {
+            STOP_FRAME_TICKS
+        } else {
+            remaining
+        };
+        self.flow.set_stop_ticks(ticks);
     }
 
     /// Queue one sim tick's spear events: a throw nudges the camera, a spear that sticks hits
@@ -319,6 +332,38 @@ mod tests {
         let stats = view.stats();
         assert!(stats.slowed > 0 && stats.stopped == 0, "{stats:?}");
         assert!(view.scale_elapsed_ms(1000.0) < 1000.0);
+    }
+
+    #[test]
+    fn the_live_count_sets_the_freeze_frames() {
+        // FEEL3: a light, a heavy and a parry freeze the clock for the sim's 3, 6
+        // and 8 frames; the clock runs free on the frame after the count.
+        for count in [3_u32, 6, 8] {
+            let mut view = FeelView::new();
+            view.observe(&[hit()]);
+            view.observe_hitstop(count);
+            for _ in 0..count {
+                view.step();
+            }
+            assert_eq!(view.stats().stopped, count, "count {count} frozen");
+            view.step();
+            assert_eq!(view.stats().stopped, count, "count {count} then free");
+        }
+    }
+
+    #[test]
+    fn a_zero_live_count_keeps_the_four_frame_stop() {
+        // A spear stick never freezes the sim, so it has no count and keeps the
+        // four-frame stick it always had.
+        let mut view = FeelView::new();
+        view.observe_hitstop(0);
+        view.observe(&[hit()]);
+        for _ in 0..4 {
+            view.step();
+        }
+        assert_eq!(view.stats().stopped, 4);
+        view.step();
+        assert_eq!(view.stats().stopped, 4, "time resumes after four");
     }
 
     #[test]

@@ -8,6 +8,7 @@ else. Loop work reads NOW files only. Core proofs: Look, Bodies, AI door,
 Multiplayer. Format: file — tag — proof it feeds — scope. A new plan file gets
 one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 
+- `agent-fleet.md` — NOW — all four — how the AI fleet works on one tree: one lead, one level of helpers (depth 1), gates that judge, commit as you go, the 2026-10-22 tree-wipe guards and recovery; rows AGT01-AGT19
 - `melee-feel.md` — NOW — Look, Bodies, AI door — the owner's 2026-10-21 order: melee with weight (weapon mass, momentum knockback, one hitstop truth, armour, hit particles, clash recoil, landing, impact audio, hit reactions, contact forces) and the game-building door for weak models (game object kinds, persistence, play the authored scene, refusals that name the fix); rows FEEL1-FEEL11 and DOOR1-DOOR5
 - `finish-line.md` — NOW — all four — the finish line as numbers the loop prints itself (gates G1-G8, product check), the order of the LF steal rows, research in `docs/research/steals-2026-10-11/`
 - `kam2-rust.md` — NOW — Look — the owner's 2026-10-20 order: a KaM-economy RTS in Rust with a RA2-look 2.5D renderer, its crates KAM2-SIM/DATA/RENDER/UI/AI/GAME, milestones KAM0-KAM5 and the free-art legal line
@@ -58,6 +59,7 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `ryl1.md` — LATER — none — the RYL1 soul as a faction-war game: two asymmetric races, aimed combat, three capture points, 6v6 with AI seats (rows RY1-RY10, not on the board yet; owner door 2026-10-20)
 - `road-war.md` — LATER — none — the Auto Assault soul as a vehicle territory war: one chassis, mounted guns, capture nodes on a highway (rows RW1-RW8, not on the board yet; owner 2026-10-20; shares RY3 and RY4)
 - `os-game.md` — LATER — none — the headless "You're the OS" game (`crates/ossim`: 4 CPUs, RAM and swap, one I/O queue, starvation, 12 stages), the window and web shells still to build, and the GPL idea-only note (rows OS1..OS5, not on the board yet)
+- `parked-2026-10-22.md` — LATER — none — 437 open rows taken off the board on 2026-10-22 (owner: "cut the too heavy stuff, I want it finished"): urban war, the 2040 tier, Empire, platform, north star, engine edge, agent seats, Tier A/B future rows, the 10-21 powerups and hunt waves; each block names why; a row returns by moving it into a shard
 - `parked.md` — LATER — none — parked areas (world, audio, editor, shipping UI) stay small; each names the Core proof that un-parks it
 - `forge-adoption.md` — NEXT — AI door, Bodies, Look — what the engine takes from Forge and the old Flax plugin: 34 board rows (AD1..AD29, PX40, AX23, EA6, PF24, SP66), 30 next items, 26 engine defects, 14 owner decisions, a 90-line ranked second-pass catalog
 - `steals.md` — LATER — none — open donor steals per bar, at most 3 per bar (data, not a plan)
@@ -189,6 +191,7 @@ FAILs on a plan missing there); a new plan adds its row there in the same commit
 | — | `rome.md` | ROM, LEG, MK, KIT |
 | — | `rome-codex.md` | CDX |
 | — | `build-cpu.md` | OPT (OPT37-OPT44; the rest are `quality.md`'s) |
+| — | `agent-fleet.md` | AGT (SPRINT-31) |
 
 ## Facts to start from
 

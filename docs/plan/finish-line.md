@@ -41,6 +41,24 @@ Open owner decisions that touch the gates (2026-10-17): (1) `tinted_share` in `t
 
 The finish line for a game engine that runs the same game on Windows and in a browser, is AI-native in its core, and makes the hard systems one call. Sources, with evidence per line: `docs/research/finish-line-2026-10-17/` (`01-books.md`: Gregory, Lengyel, Game Engine Gems, Rust and WebAssembly, Modern Game Testing and the agent-patterns book, checked against today's code, with the earlier BOOK-GAPS rows marked closed or open; `02-github.md`: 25 ranked repo steals; `03-arxiv.md`: 20 ranked papers). Today in one line (verified 2026-10-20 at 51c9ac52): deep libraries, one played arena duel, and a browser page that plays the match it draws with stand-in bodies; the real cooked fight (WEB17), the exchange cues (WEB16) and the browser frame gate (WEB5) remain open.
 
+### The cut (owner 2026-10-22, "ye")
+
+Research 2026-10-22 (`docs/research/finish-line-2026-10-22/00-verdict.md`): the bet is right (no engine read claims one bit-identical sim on native and web plus an AI door), but 23 gaps is too wide to finish. The owner approved the must list.
+
+- **Must, in this order:** A1, B7, B8 first; then A2, A4, A5, B9, C10, C13, D16, D17, D19, E21, E22, and the two new ones below (F24, F25).
+- **Deferred until G7 and G8 are green:** A3 browser multiplayer, C11 rules layer, C14 quaternion lanes, C15 physics oracle spike, E23 netcode decision. Rows for them stay open but leave FOCUS "Now".
+- **Non-goals:** no human editor until G7 is green (the door is the editor; `crates/editor` stays a headless dock); no mobile or console targets (the bar is Windows, the browser and the potato tier).
+- **Simpler, same result (the lead's call, 2026-10-22):** E21 (sim job pool and a `loom` model) waits until G2 fails, since the sim runs at 342 fps p50 today; B8 keeps FLIP and SSIMULACRA2 and drops the VLM calibration on VideoGameQA-Bench and RefGlitch (the VLM stays advisory); B9 keeps the TAA registration test and drops the CGVQM+D video metric; C13 reuses the puffin profiler instead of a new Perfetto trace path and ships the console, pause, step and debug draw.
+- **The board was cut too:** 437 open rows outside this finish line (urban war, the 2040 tier, Empire, platform, north star, engine edge, agent seats, the Tier A/B future rows, the 2026-10-21 powerups and hunt waves) moved to `docs/plan/parked-2026-10-22.md`; open rows went from 775 to about 345. Rows that FOCUS or this plan names stayed.
+- **Already shipped (not gaps; each has a passing test):** input rebinding (`crates/input/src/bindings.rs`, 14 tests), the settings screen (`crates/ui/src/settings.rs`, 22), save slots with a versioned envelope and atomic write (`crates/save/src/lib.rs`, 15), menus and the lobby UI (`crates/ui/src/menus.rs`, 36), en/de locale with plurals (`crates/ui/src/locale.rs`, `locale_two_languages_plurals_pseudo`), accessibility with captions and the contrast gate (`crates/ui/src/access.rs`, 12), the puffin profiler (`crates/perf/src/profiler.rs`, 13), the cpal audio device (`crates/audio`, feature `device`, `device_errors_are_typed_and_printable`). GitHub 2026-10-22: engine-ui lib 173 passed (run 39705575402), engine-save lib 33 (39705584211), engine-input bindings 14 (39705647157), engine-perf profiler 13 (39705673644), engine-audio device 4 (39705644734).
+
+### F. Shipped-engine staples the list missed (2026-10-22)
+
+24. **Patch delivery by blob hash:** a manifest of content hashes; the game fetches only changed blobs and refuses a mismatched patch (Defold Live Update, Godot patch PCK). Row ENG9. Size M.
+25. **A receipt on every run, a crash too:** a panic hook writes tick, hash, the last door call and the backtrace; the next start prints it once. Row ENG16. Size S.
+
+Door additions from the same research (beside D16-D19): a `doctor` verb (ENG5), a web backend probe before the first frame (ENG1, part of A4), and `net.shape` for latency and loss (ENG6, with G8). Rows in `docs/SPRINT-31-research.md`.
+
 ### A. One game, two targets
 
 1. **The page draws the real fight, not stand-ins (remaining work).** WEB15 already shares the app loop and prints tick and hash on the page. WEB17 cooks the bodies and clips into a bundle and stages `FighterLook::load_from`; WEB16 passes the parry, block and dodge cues; WEB5 reads the canvas back and compares it with the native twin. Proof: a capture pair (boxes vs real bodies), a parry flash and a hit flash that differ, and an SSIM score against the native frame. Size M (remaining).
@@ -99,6 +117,7 @@ Order: A1, B7 and B8 first (the browser plays, the arena is lit, and a number sa
 ## Sources
 
 `docs/research/finish-line-2026-10-17/` (books, GitHub, arXiv: the gap list above).
+`docs/research/finish-line-2026-10-22/` (15 engines compared, feel donors, arXiv for the engine and for agent fleets; `00-verdict.md` is the judged summary and the cut above).
 `docs/research/steals-2026-10-11/`: `render-steals.md` (shader files to port, build order),
 `anim-feel-steals.md` (springs, inertialization, IK, shake, spring bones),
 `arxiv-neural.md` (FLIP for the judge; offline motion models; what to skip),

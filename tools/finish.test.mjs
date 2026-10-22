@@ -9,16 +9,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadBoardText, parseBoard, ticksOf } from "./board-slice.mjs";
 import {
-  ARCHIVE_TICKED_ROWS,
   DROPPED_ROWS,
   FALLBACK_ROWS,
   GATES,
+  PARKED_FILE,
   checkVerdict,
   expandIds,
   loadSuspects,
   parseProbes,
   parseProvenBy,
   readArchive,
+  readParked,
   runProbe,
   scoreGate,
   ticksFromArchive,
@@ -212,6 +213,141 @@ test("archive ticks close pruned rows (E7: OB3/DOC1/FX3), GX5 stays dropped", ()
   }
 });
 
+test("the archive tick closes a pruned row the live board dropped (E7)", () => {
+  const dir = join(tmpdir(), `finish-archive-read-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    const f = join(dir, "FINISH-RICH.md");
+    const s = join(dir, "SPRINT.md");
+    const a = join(dir, "archive");
+    mkdirSync(a, { recursive: true });
+    writeFileSync(f, `# FINISH-RICH — archive-read fixture
+## Finish-line status
+| Gate | Status 2026-10-05 (from the board) |
+|---|---|
+| A9 | Met: recorded chaos + fuzz run seed 9, log digest landed over observe events |
+`);
+    // The live board carries AH1 and AH2 ticked; AH3 was pruned into the
+    // archive with its tick. No allowlist names AH3.
+    writeFileSync(s, `# SPRINT — fixture board, AH3 pruned into the archive
+- [x] AH1 observe: supervisor and fault catalog.
+- [x] AH2 observe: more.
+- [x] AH4 observe: more.
+- [x] AH5 observe: more.
+- [x] HL2 observe: more.
+- [x] FZ1 observe: more.
+`);
+    writeFileSync(join(a, "SPRINT-done-2026-10-10.md"), `# SPRINT archive — fixture
+- [x] AH3 audio: default-device change or loss reopens with backoff.
+- [x] OB3 mcp: \`log.digest\` and cursor-paged \`log.query\` tools.
+`);
+    const rows = run(f, s, ["--archive", a]);
+    const a9 = rows.find((r) => r.gate === "A9");
+    assert.equal(a9.status, "met", "A9 met from the archive tick of the pruned AH3");
+    assert.deepEqual(a9.openRows, [], "the pruned row is not open");
+    assert.ok(a9.rows.includes("AH3"), "A9 still names AH3 as one of its rows");
+    // No archive: the pruned row reads open again (partial, never silently met).
+    const empty = join(dir, "empty-archive");
+    mkdirSync(empty, { recursive: true });
+    const open = run(f, s, ["--archive", empty]);
+    const a9open = open.find((r) => r.gate === "A9");
+    assert.equal(a9open.status, "partial", "A9 partial without the archive tick");
+    assert.deepEqual(a9open.openRows, ["OB3", "AH3"], "both pruned rows read open");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the live board wins over an older archive tick for the same id", () => {
+  const dir = join(tmpdir(), `finish-archive-reopen-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    const f = join(dir, "FINISH-RICH.md");
+    const s = join(dir, "SPRINT.md");
+    const a = join(dir, "archive");
+    mkdirSync(a, { recursive: true });
+    writeFileSync(f, `# FINISH-RICH — reopen fixture
+## Finish-line status
+| Gate | Status 2026-10-05 (from the board) |
+|---|---|
+| A9 | Met: recorded chaos + fuzz run seed 9, log digest landed over observe events |
+`);
+    // The board reopened AH3 as open work; the older archive still ticks it.
+    writeFileSync(s, `# SPRINT — fixture board, AH3 reopened
+- [x] AH1 observe: supervisor and fault catalog.
+- [x] AH2 observe: more.
+- [ ] AH3 observe: reopened for new work.
+- [x] AH4 observe: more.
+- [x] AH5 observe: more.
+- [x] HL2 observe: more.
+- [x] FZ1 observe: more.
+`);
+    writeFileSync(join(a, "SPRINT-done-2026-10-10.md"), `# SPRINT archive — fixture
+- [x] AH3 audio: the old, finished row.
+`);
+    const rows = run(f, s, ["--archive", a]);
+    const a9 = rows.find((r) => r.gate === "A9");
+    assert.equal(a9.status, "partial", "a reopened row is never met from an old archive tick");
+    assert.deepEqual(a9.openRows, ["OB3", "AH3"], "the reopened row reads open");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a parked row counts open and is not called unresolved", () => {
+  const dir = join(tmpdir(), `finish-parked-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+  mkdirSync(dir, { recursive: true });
+  try {
+    const f = join(dir, "FINISH-RICH.md");
+    const s = join(dir, "SPRINT.md");
+    const a = join(dir, "archive");
+    const p = join(dir, "parked.md");
+    mkdirSync(a, { recursive: true });
+    writeFileSync(f, `# FINISH-RICH — parked fixture
+## Finish-line status
+| Gate | Status 2026-10-22 (from the board) |
+|---|---|
+| C2 | Open: see their tables; FS1 prints the live status every wave |
+`);
+    // The board cut took RT2 off the board; it is parked, not done.
+    writeFileSync(s, `# SPRINT — fixture board, RT2 parked
+- [x] RT0 render: the base tier.
+- [x] RT1 render: the ray-traced path.
+- [x] RT3 render: many-light direct light.
+- [x] RT4 render: the denoiser.
+- [x] RT5 render: the temporal filter.
+- [x] RT6 render: the bounce pass.
+- [x] RT7 render: the reference path tracer.
+- [x] RT8 render: the fallback.
+`);
+    writeFileSync(p, `# Parked rows
+- RT2 render: ray-traced shadows - parked by the 2026-10-22 cut.
+`);
+    const empty = join(dir, "empty-archive");
+    mkdirSync(empty, { recursive: true });
+    // Parked: RT2 counts open, and no warning names it.
+    const r = spawnSync(process.execPath, [FINISH, "--finish", f, "--sprint", s, "--archive", empty, "--parked", p, "--json"], {
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 0, `finish.mjs failed: ${r.stderr}${r.stdout}`);
+    const c2 = JSON.parse(r.stdout).find((g) => g.gate === "C2");
+    assert.deepEqual(c2.openRows, ["RT2"], "the parked row counts open");
+    assert.doesNotMatch(r.stderr, /RT2/, "a parked row is not called unresolved");
+    // The stale-alarm still names the rows that are on neither board, archive
+    // nor parked file (the fixture leaves the other gates' rows out).
+    assert.match(r.stderr, /neither the live board nor the archive/, "the other missing rows are still named");
+    // Not parked and nowhere else: the row is named on stderr.
+    const missing = join(dir, "missing-parked.md");
+    const r2 = spawnSync(process.execPath, [FINISH, "--finish", f, "--sprint", s, "--archive", empty, "--parked", missing, "--json"], {
+      encoding: "utf8",
+    });
+    assert.equal(r2.status, 0);
+    assert.match(r2.stderr, /RT2/, "a row on neither the board, the archive nor the parked file is named");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a row on neither the board nor the archive counts open and is named on stderr", () => {
   const dir = join(tmpdir(), `finish-missing-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
   mkdirSync(dir, { recursive: true });
@@ -280,13 +416,31 @@ test("live tree: the scoreboard prints no warning", () => {
   assert.equal(stderr, "", `unexpected warning on the live tree: ${stderr}`);
 });
 
-test("live tree: every gate row is on the live board or in the archive", () => {
+test("live tree: every gate row is on the live board, in the archive or parked", () => {
   const { rows } = liveScoreboard();
   const live = liveBoard();
   const archive = ticksFromArchive(join(REPO, "docs", "archive"));
+  const parked = readParked(join(REPO, "docs", "plan", PARKED_FILE));
   for (const g of rows) {
     for (const r of g.rows) {
-      assert.ok(live.has(r) || archive.get(r), `${g.gate} row ${r} is on neither the board nor the archive`);
+      assert.ok(
+        live.has(r) || archive.get(r) || parked.has(r),
+        `${g.gate} row ${r} is on neither the board nor the archive, and is not parked`,
+      );
+    }
+  }
+});
+
+test("live tree: a parked row counts open and never ticks", () => {
+  const { rows } = liveScoreboard();
+  const live = liveBoard();
+  const parked = readParked(join(REPO, "docs", "plan", PARKED_FILE));
+  assert.ok(parked.size > 0, "the parked file holds the rows the 2026-10-22 cut took off the board");
+  for (const g of rows) {
+    for (const r of g.rows) {
+      if (!parked.has(r)) continue;
+      assert.notEqual(live.get(r), true, `${g.gate} parks ${r} but the board ticks it`);
+      assert.ok(g.openRows.includes(r), `${g.gate} parks ${r} but does not count it open`);
     }
   }
 });
@@ -301,12 +455,39 @@ test("live tree: a row the live board ticks never prints open", () => {
   }
 });
 
-test("live tree: every ARCHIVE_TICKED_ROWS member has an archive tick and is not open on the board", () => {
+test("live tree: a row the archive ticks and the board dropped never prints open", () => {
+  const { rows } = liveScoreboard();
   const live = liveBoard();
   const archive = ticksFromArchive(join(REPO, "docs", "archive"));
-  for (const id of ARCHIVE_TICKED_ROWS) {
-    assert.ok(archive.get(id), `${id} is in ARCHIVE_TICKED_ROWS but no archive tick names it`);
-    assert.notEqual(live.get(id), false, `${id} is in ARCHIVE_TICKED_ROWS but open on the live board`);
+  let honoured = 0;
+  for (const g of rows) {
+    for (const r of g.openRows) {
+      if (live.has(r)) continue;
+      assert.notEqual(archive.get(r), true, `${g.gate} prints ${r} open but the archive ticks it`);
+    }
+  }
+  // The prune moved the A6/A9/A10/P3 rows out of the board: the archive
+  // tick is what closes them, so the scoreboard must honour it.
+  for (const id of ["MCP5", "EV1", "AH3", "AH4", "HR1", "HR2", "GP5", "OB3", "FS1"]) {
+    assert.equal(archive.get(id), true, `${id} has no archive tick`);
+    assert.notEqual(live.has(id), true, `${id} is still on the live board`);
+    honoured += 1;
+  }
+  assert.equal(honoured, 9);
+});
+
+test("live tree: the live board wins over an older archive tick for the same id", () => {
+  const { rows } = liveScoreboard();
+  const live = liveBoard();
+  const archive = ticksFromArchive(join(REPO, "docs", "archive"));
+  for (const g of rows) {
+    for (const r of g.openRows) {
+      // A row the board reopened is scored from the board, never from the
+      // older archive tick that shares its id.
+      if (live.get(r) === false && archive.get(r) === true) {
+        assert.fail(`${g.gate} prints ${r} open although the board reopened it`);
+      }
+    }
   }
 });
 

@@ -336,6 +336,18 @@ impl LiveMatch {
         self.sim.balance(slot)
     }
 
+    /// Hit-stop ticks left in the live fight after the last stepped tick: the
+    /// count the impact set for the strike that landed. Forwards to
+    /// [`Sim::hitstop`](crate::Sim::hitstop), which owns the fight state.
+    /// Presentation only; never hashed here.
+    ///
+    /// Caller: `crates/game/src/lib.rs` (`App::simulate_tick` and
+    /// `App::rebuild_live`) mirror it after each step. Units: fixed ticks.
+    #[must_use]
+    pub fn hitstop(&self) -> u32 {
+        self.sim.hitstop()
+    }
+
     /// Read-only press-tick attack cues from the last stepped tick (EG19b):
     /// one `AttackStarted` per fresh attack start in fighter-ID order under
     /// tables v2; empty under v1 rows, on quiet ticks and past the press

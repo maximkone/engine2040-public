@@ -16,7 +16,7 @@ registry = ["engine-scene"]
 # Import lane: real glTF + texture decoding, opt-in so headless stays std-only.
 # It also covers skinned/skeleton/clip import into the anim contract
 # (assets -> anim; anim never imports assets back).
-import = ["dep:gltf", "dep:image", "dep:engine-anim"]
+import = ["dep:gltf", "dep:image", "dep:engine-anim", "dep:serde_json"]
 
 [dependencies]
 engine-core.workspace = true
@@ -26,9 +26,18 @@ engine-anim = { workspace = true, optional = true }
 # `extras`: morph target names ride in `mesh.extras.targetNames` (morph_import).
 gltf = { workspace = true, optional = true, features = ["extras"] }
 image = { workspace = true, optional = true }
+# The rig cook writes the document's JSON back, so the cooked body keeps the
+# rig it came from.
+serde_json = { workspace = true, optional = true }
 
 [[example]]
 name = "ct35_lod_bake"
+required-features = ["import"]
+
+# The compact fighter rig: the atlas becomes KTX2 block maps and the body
+# drops its images, so the page can hold the rig it fetches.
+[[bin]]
+name = "rig_cook"
 required-features = ["import"]
 
 # The arena kit bundle: reads the kit glTFs (gltf) and the CC0 JPG sets

@@ -302,16 +302,38 @@ impl FighterLook {
             }
         }
         // LF10 hitstop hold: the impact pair's clip clocks freeze while the
-        // sim holds. Record the pair's hold expiry on the bridge (exclusive
-        // end, impact tick plus three quiet ticks for four held ticks);
-        // `fold_acts` freezes exactly that pair. Presentation only; the sim
-        // hash never reads this.
+        // sim holds. The live count (`observe_hitstop`, FEEL3) has already
+        // recorded the pair's expiry for this tick; without one, the V1 freeze
+        // holds (exclusive end, impact tick plus four). `fold_acts` freezes
+        // exactly that pair. Presentation only; the sim hash never reads this.
         if let Some((attacker, victim)) = cue_impact_slots(cues) {
             let until = tick.saturating_add(HITSTOP_TICKS);
-            if let Some(slot) = self.bridge.get_mut(usize::from(attacker)) {
-                slot.hold_through(until);
+            for index in [attacker, victim] {
+                if let Some(slot) = self.bridge.get_mut(usize::from(index)) {
+                    if slot.hold_until() <= tick {
+                        slot.hold_through(until);
+                    }
+                }
             }
-            if let Some(slot) = self.bridge.get_mut(usize::from(victim)) {
+        }
+    }
+
+    /// Record the live fight's freeze for this tick's impact pair (FEEL3): the
+    /// sim's hit-stop count for the strike that landed, read from the App
+    /// (`App::hitstop_remaining`) after the tick ran. Call it before
+    /// [`observe_tick`](Self::observe_tick) for the same tick, so the pair holds
+    /// exactly `remaining` ticks (3 light, 6 heavy, 8 parry under v2). A tick
+    /// with no impact pair, or a zero count, records nothing. Presentation only.
+    pub fn observe_hitstop(&mut self, tick: u32, cues: &[FightCue], remaining: u32) {
+        if remaining == 0 {
+            return;
+        }
+        let Some((attacker, victim)) = cue_impact_slots(cues) else {
+            return;
+        };
+        let until = tick.saturating_add(remaining);
+        for index in [attacker, victim] {
+            if let Some(slot) = self.bridge.get_mut(usize::from(index)) {
                 slot.hold_through(until);
             }
         }
@@ -596,6 +618,56 @@ mod tests {
         assert!(
             !free[0] && !free[1],
             "tick 14 runs free when the sim count hits 0"
+        );
+    }
+
+    #[test]
+    fn hitstop_hold_follows_the_live_count() {
+        // FEEL3: the look holds the freeze of the strike that landed, the sim's
+        // own count: a light 3, a heavy 6 and a parry 8 (v2 rows). The live
+        // count is fed for the tick before the cue fold, as the window does.
+        use engine_combat::depth::{INPUT_HEAVY, INPUT_LIGHT};
+        use engine_combat::fight::{hitstop_for_impact, TABLES_V2};
+        let light = hitstop_for_impact(&TABLES_V2, INPUT_LIGHT, false);
+        let heavy = hitstop_for_impact(&TABLES_V2, INPUT_HEAVY, false);
+        let parry = hitstop_for_impact(&TABLES_V2, INPUT_LIGHT, true);
+        assert_eq!([light, heavy, parry], [3, 6, 8], "the sim's v2 rows");
+        let parried = FightCue::Parried {
+            attacker: 0,
+            victim: 1,
+        };
+        let views = pair_views();
+        for (cue, count) in [(hit(0, 1), light), (hit(0, 1), heavy), (parried, parry)] {
+            let mut look = bare_look();
+            look.observe_hitstop(10, &[cue], count);
+            look.fold_cues(10, &[cue]);
+            let held: Vec<u32> = (10..30)
+                .filter(|tick| {
+                    let frozen = hold_frozen(&look.bridge, *tick, &views);
+                    frozen[0] && frozen[1]
+                })
+                .collect();
+            assert_eq!(
+                held,
+                (10..10 + count).collect::<Vec<u32>>(),
+                "a count of {count} holds exactly {count} ticks"
+            );
+        }
+    }
+
+    #[test]
+    fn hitstop_hold_without_a_live_count_keeps_the_v1_freeze() {
+        // No live count fed (the old callers): the impact pair holds the V1 four.
+        let mut look = bare_look();
+        look.fold_cues(10, &[hit(0, 1)]);
+        assert_eq!(look.bridge[0].hold_until(), 10 + HITSTOP_TICKS);
+        // A zero live count records nothing, so the fold falls back to the V1 freeze.
+        let mut zero = bare_look();
+        zero.observe_hitstop(10, &[hit(0, 1)], 0);
+        assert_eq!(
+            zero.bridge[0].hold_until(),
+            0,
+            "a zero count records nothing"
         );
     }
 }

@@ -357,7 +357,24 @@
   Tier B. Size M. Owns the light feed in `crates/game/src/arena_kit.rs`.
   Accept: F2P the frame light list holds every torch actor; at night the mean
   luminance within 2 m of a torch is at least 2 times the far sand; P2P
-  golden unchanged, 0 validation errors. needs: VS1, GX2.
+  golden unchanged, 0 validation errors. needs: VS1, GX2. Progress
+  2026-10-22: the feed landed (`ffc7dce26`, the duplicate module declaration
+  fixed in `b5ba1ddf5`). `crates/render/src/torch_light.rs` owns the light
+  type (position, warm color, reach, intensity, a bounded flicker), the
+  presenter takes the scene's list (`set_torch_lights`), and the frame packs
+  it into the shader's torch block. `crates/game/src/torch_feed.rs` turns the
+  placement's torch actors into lights (the flame sits at the head of the
+  stand) and `torch_acceptance.rs` mirrors the shader's falloff as the
+  oracle. Proof: `cargo test -p engine-game --lib torch` -> 12 passed, 0
+  failed (run 39704085075), including the two Accept arms - the frame light
+  list holds every torch actor, and the sand within 2 m of a torch is at
+  least twice the far sand across the flicker. The night preset landed
+  (`37c0c79f0`, the `app` gate in `31b601ba3`): `E2040_NIGHT=1` drops the
+  sun to a moonlit fraction (`NIGHT_SUN_SCALE`, 0.12) and the placement's
+  torches carry the picture; unset keeps the shipped daylight look, so
+  every existing capture stays byte-equal. Golden leg PASS
+  (`cargo test -p engine2040 --release --test proof_cli default_and_max_seed`,
+  run 39704439941). Left: a captured night arena on the reference GPU.
 - [x] VS9 proof: daily arena shot — one command runs the arena capture
   (`--scene arena --fighters 2 --camera-path arena600 --frames 120 --exit`),
   writes 3 PNGs, their manifests and silhouette masks under `target/vs9/`, and

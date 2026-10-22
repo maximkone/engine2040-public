@@ -883,6 +883,28 @@
    "tests": 18
   }
  },
+ "files": {
+  "crates/ai/src/depth.rs": 3145,
+  "crates/arena/src/lib.rs": 5390,
+  "crates/combat/src/fight.rs": 4137,
+  "crates/editor/src/commands.rs": 3441,
+  "crates/endpoint/src/mcp.rs": 3071,
+  "crates/endpoint/src/scene_tools.rs": 3422,
+  "crates/game/src/bin/arena.rs": 5101,
+  "crates/game/src/camera.rs": 3459,
+  "crates/game/src/fighter_look.rs": 6599,
+  "crates/game/src/lib.rs": 4004,
+  "crates/game/src/windowed.rs": 3585,
+  "crates/net/src/interest.rs": 3076,
+  "crates/physics/src/ragdoll.rs": 3376,
+  "crates/render/src/gtao.rs": 3486,
+  "crates/render/src/ibl.rs": 4409,
+  "crates/render/src/present/gpu_present/live.rs": 3328,
+  "crates/render/src/present/gpu_present/presenter.rs": 3489,
+  "crates/render/src/present/gpu_present/submit.rs": 3249,
+  "crates/spatial/src/relation.rs": 3250,
+  "crates/ui/src/lib.rs": 3907
+ },
  "accepted": [
   {
    "date": "2026-09-26",

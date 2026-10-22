@@ -5,6 +5,8 @@
 // the top-tier bar in docs/RUST-QUALITY.md, and fails when any crate's debt
 // count rises above tools/rust-quality.baseline.json. The baseline only goes
 // down (--tighten); raising it needs --accept with a reason, which is logged.
+// The per-file line cap rides the same baseline: a crates/*/src file over
+// FILE_CAP_LINES is pinned at its line count and may not grow.
 //   node tools/rust-quality.mjs                 scorecard + ratchet, exit 1 on regression
 //   node tools/rust-quality.mjs --crate ecs     one crate (repeatable)
 //   node tools/rust-quality.mjs --list dup_fns --crate anim [--limit 40]
@@ -32,6 +34,9 @@ const SIM_CLIPPY = "tools/sim-clippy.toml";
 const SIM_CLIPPY_PENDING = [];
 export const LONG_FN_LINES = 100;
 export const BIG_FILE_LINES = 1500;
+// A file under crates/*/src that is over this many lines is pinned in the
+// baseline: it may shrink (the pin follows it down) but it may not grow.
+export const FILE_CAP_LINES = 3000;
 const DUP_MIN_TOKENS = 30;
 
 // Per-file result cache under target/: warm reruns reuse metrics/hits/clones
@@ -154,6 +159,21 @@ export function fixTail(ruleId) {
   return ` fix: ${fixFor(ruleId)}`;
 }
 
+// The per-file line cap is not a crate metric: it has no weight in the score
+// and no per-crate count, only a per-file pin in the baseline. Its fix text
+// stands next to the metric fixes.
+export const FILE_LINE_FIX = "move a section of the file into its own module (`mod name;` in lib.rs) and shrink the file under 3000 lines";
+
+// The baseline's per-file pins: every crates/*/src file over FILE_CAP_LINES,
+// at its current line count. A file under the cap holds no pin.
+export function filePins(fileLines) {
+  const pins = {};
+  for (const [path, lines] of [...fileLines].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    if (lines > FILE_CAP_LINES) pins[path] = lines;
+  }
+  return pins;
+}
+
 export const HELP = `rust-quality.mjs - Rust quality scorecard and ratchet for every workspace crate
 
 Usage:
@@ -174,6 +194,10 @@ Options:
   --json           machine-readable scorecard
   --no-cache       bypass per-file cache under target/rust-quality-cache
   -h, --help       print this help and exit 0
+
+The per-file line cap: a crates/*/src file over 3000 lines is pinned in
+tools/rust-quality.baseline.json and may not grow; a file under 3000 that
+crosses it fails too. Shrinking a pinned file lowers its pin (--tighten).
 
 Exit codes: 0 ok - 1 ratchet regression - 2 usage.
 `;
@@ -535,6 +559,16 @@ function walk(dir) {
   });
 }
 
+// Physical lines of a file: a trailing newline ends the last line, a file
+// without one still counts that last line. The count is the whole file, not
+// its production part: the cap is about how big a file is to read.
+export function fileLineCount(text) {
+  if (!text) return 0;
+  const t = text.replace(/\r\n/g, "\n");
+  const n = (t.match(/\n/g) ?? []).length;
+  return t.endsWith("\n") ? n : n + 1;
+}
+
 export function packages(root = ".") {
   const cached = packageCache.get(root);
   if (cached) return cached;
@@ -592,6 +626,7 @@ export function measure(root = ".", filter = null, useCache = true) {
   const ids = boardIds(root);
   const crates = new Map();
   const cloneIndex = new Map();
+  const fileLines = new Map();
   const cacheRoot = useCache ? join(root, CACHE_DIR) : null;
   const fixedPath = join(root, "crates", "core", "src", "fixed.rs");
   const fixedApi = deriveFixedApi(existsSync(fixedPath) ? readFileSync(fixedPath, "utf8") : "");
@@ -614,6 +649,9 @@ export function measure(root = ".", filter = null, useCache = true) {
       const rel = relative(root, file).split("\\").join("/");
       const inPkg = relative(pkg.dir, file).split("\\").join("/");
       const text = texts.get(file);
+      // The per-file line cap covers every crates/*/src file (production and
+      // test code alike): the cap is about how big a file is to read.
+      if (/^crates\/[^/]+\/src\//.test(rel)) fileLines.set(rel, fileLineCount(text));
       const declaredTest = [...testMods].some((p) => inPkg === `${p}.rs` || inPkg.startsWith(`${p}/`));
       const kind = {
         crate: pkg.name,
@@ -682,7 +720,7 @@ export function measure(root = ".", filter = null, useCache = true) {
       (c.hits.dup_fns ??= []).push(`${member.at}: fn ${member.name} duplicates ${g[0].at} (fn ${g[0].name})${fixTail("dup_fns")}`);
     }
   }
-  return { crates, groups };
+  return { crates, groups, fileLines };
 }
 
 export function score(m) {
@@ -741,6 +779,37 @@ export function compare(baseline, crates) {
 // in the baseline that no workspace package carries.
 export function onlyBase(baseline, names) {
   return Object.keys(baseline.crates ?? {}).filter((name) => !names.has(name));
+}
+
+// Per-file line cap: a file under crates/*/src that is over FILE_CAP_LINES
+// lines is pinned in the baseline at its line count and may not grow. A file
+// that is under the cap and crosses it fails too. The pin only goes down:
+// --tighten lowers it when the file shrinks.
+// `fileLines` maps a repo-relative path to its line count; `pins` is the
+// baseline's per-file section (path -> pinned line count). `inScope` keeps a
+// --crate run from judging the other crates' files.
+export function compareFiles(pins, fileLines, inScope = () => true) {
+  const regressions = [];
+  const improvements = [];
+  const tail = ` fix: ${FILE_LINE_FIX}`;
+  for (const [path, now] of fileLines) {
+    if (!inScope(path)) continue;
+    const was = pins?.[path];
+    if (was === undefined) {
+      // Not in the baseline: it was under the cap when the baseline was
+      // written, so crossing the cap now is the regression.
+      if (now > FILE_CAP_LINES) regressions.push(`${path}: file lines ${now} (crossed the ${FILE_CAP_LINES}-line cap)${tail}`);
+      continue;
+    }
+    if (now > was) regressions.push(`${path}: file lines ${was} -> ${now} (a file over ${FILE_CAP_LINES} lines cannot grow)${tail}`);
+    else if (now < was) improvements.push({ path, was, now });
+  }
+  // A pinned file that is gone loses its pin: the file it named is not there.
+  for (const path of Object.keys(pins ?? {})) {
+    if (!inScope(path)) continue;
+    if (!fileLines.has(path)) improvements.push({ path, was: pins[path], now: 0 });
+  }
+  return { regressions, improvements };
 }
 
 // Land scope: foreign staged debt never refuses an owned-clean packet.
@@ -851,21 +920,23 @@ function main(argv) {
     else if (a === "--no-cache") opts.noCache = true;
     else throw new Error(`unknown argument: ${a}`);
   }
-  if (opts.list && !METRICS[opts.list]) throw new Error(`unknown metric ${opts.list}; one of ${Object.keys(METRICS).join(", ")}`);
+  if (opts.list && opts.list !== "file_lines" && !METRICS[opts.list]) throw new Error(`unknown metric ${opts.list}; one of ${Object.keys(METRICS).join(", ")}`);
   if (opts.limitSet && !opts.list) throw new Error("--limit needs --list (it caps listed hits)");
   if (opts.accept && opts.reason.trim().length < 10) throw new Error("--accept needs --reason with a real explanation");
   const want = (name) => !opts.crates.length || opts.crates.some((c) => c === name || `engine-${c}` === name);
-  const { crates, groups } = measure(".", opts.crates.length ? want : null, !opts.noCache);
+  const { crates, groups, fileLines } = measure(".", opts.crates.length ? want : null, !opts.noCache);
   const shown = new Map([...crates].filter(([name]) => want(name)));
   if (opts.crates.length && !shown.size) throw new Error(`no crate matches ${opts.crates.join(", ")}`);
 
   if (opts.init) {
     if (existsSync(BASELINE)) throw new Error(`${BASELINE} exists; use --tighten or --accept`);
-    writeFileSync(BASELINE, `${JSON.stringify({ version: 1, note: "Ratchet for tools/rust-quality.mjs: counts only go down (--tighten); --accept logs every raise.", crates: snapshot(crates), accepted: [] }, null, 1)}\n`);
-    console.log(`WROTE ${BASELINE} (${crates.size} crates)`);
+    const pins = filePins(fileLines);
+    writeFileSync(BASELINE, `${JSON.stringify({ version: 1, note: "Ratchet for tools/rust-quality.mjs: counts only go down (--tighten); --accept logs every raise.", crates: snapshot(crates), files: pins, accepted: [] }, null, 1)}\n`);
+    console.log(`WROTE ${BASELINE} (${crates.size} crates, ${Object.keys(pins).length} pinned file(s))`);
     return 0;
   }
   const baseline = existsSync(BASELINE) ? JSON.parse(readFileSync(BASELINE, "utf8")) : { crates: {} };
+  baseline.files ??= {};
   if (opts.accept) {
     const name = [...crates.keys()].find((n) => n === opts.accept || n === `engine-${opts.accept}`);
     if (!name) throw new Error(`no crate ${opts.accept}`);
@@ -878,14 +949,28 @@ function main(argv) {
   }
 
   let { regressions, improvements } = compare(baseline, shown);
+  // The per-file line cap: a file over FILE_CAP_LINES may not grow, and a
+  // file under it that crosses fails too. The pins live in the baseline's
+  // "files" section (path -> line count). A --crate run judges only that
+  // crate's files, so the other crates' pins stay out of the way.
+  const scope = opts.crates.length
+    ? packages(".").filter((p) => want(p.name)).map((p) => relative(".", p.dir).split("\\").join("/")).filter((d) => d.startsWith("crates/"))
+    : null;
+  const inScope = (path) => !scope || scope.some((d) => path.startsWith(`${d}/src/`));
+  const fileResult = compareFiles(baseline.files, fileLines, inScope);
   const orphans = onlyBase(baseline, new Set(packages(".").map((p) => p.name)));
   if (!opts.crates.length) regressions.push(...simClippyFindings(".", crates).map((f) => `sim config ${f}`));
-  // Land scope: foreign staged debt warns, owned debt still fails.
+  // Land scope: foreign staged debt warns, owned debt still fails. A file
+  // regression names its path, so it is owned by the path it names.
   let foreign = [];
+  let fileRegressions = fileResult.regressions;
   if (opts.owned.length) {
     const scoped = scopeRatchetToOwned(regressions, shown, opts.owned);
     regressions = scoped.blockers;
-    foreign = scoped.foreign;
+    foreign = [...scoped.foreign];
+    const owned = [];
+    for (const r of fileRegressions) (hitIsOwned(r, opts.owned) ? owned : foreign).push(r);
+    fileRegressions = owned;
   }
   if (opts.tighten) {
     let n = 0;
@@ -893,6 +978,22 @@ function main(argv) {
       if (!METRICS[k].bad) continue;
       baseline.crates[name][k] = now;
       console.log(`TIGHTEN ${name} ${k} ${was} -> ${now}`);
+      n++;
+    }
+    // A shrunk file lowers its pin; a file that fell under the cap (or is
+    // gone) loses the pin, because the baseline holds only the files that
+    // are over the cap.
+    for (const { path, was, now } of fileResult.improvements) {
+      if (now === 0) {
+        delete baseline.files[path];
+        console.log(`TIGHTEN ${path} file lines ${was} -> gone`);
+      } else if (now <= FILE_CAP_LINES) {
+        delete baseline.files[path];
+        console.log(`TIGHTEN ${path} file lines ${was} -> ${now} (under the ${FILE_CAP_LINES}-line cap)`);
+      } else {
+        baseline.files[path] = now;
+        console.log(`TIGHTEN ${path} file lines ${was} -> ${now}`);
+      }
       n++;
     }
     for (const [name, c] of shown) {
@@ -906,7 +1007,16 @@ function main(argv) {
     }
     writeFileSync(BASELINE, `${JSON.stringify(baseline, null, 1)}\n`);
     console.log(`RESULT tightened ${n} entr${n === 1 ? "y" : "ies"}`);
-    return regressions.length ? 1 : 0;
+    return regressions.length || fileRegressions.length ? 1 : 0;
+  }
+  const allRegressions = [...regressions, ...fileRegressions];
+  if (opts.list === "file_lines") {
+    const pins = Object.entries(baseline.files ?? {}).filter(([path]) => inScope(path)).map(([path, n]) => `${path}: ${n} lines (pinned, may not grow)`);
+    const lines = opts.owned.length ? pins.filter((h) => hitIsOwned(h, opts.owned)) : pins;
+    for (const l of lines.slice(0, opts.limit)) console.log(l);
+    for (const r of foreign) console.log(`[WARN] foreign ratchet ${r}`);
+    console.log(`RESULT ${lines.length} file_lines hit(s)${lines.length > opts.limit ? ` (first ${opts.limit} shown)` : ""}`);
+    return (allRegressions.length || lines.length) ? 1 : 0;
   }
   if (opts.list) {
     const all = [...shown.values()].flatMap((c) => c.hits[opts.list] ?? []);
@@ -914,26 +1024,28 @@ function main(argv) {
     for (const l of lines.slice(0, opts.limit)) console.log(l);
     for (const r of foreign) console.log(`[WARN] foreign ratchet ${r}`);
     console.log(`RESULT ${lines.length} ${opts.list} hit(s)${lines.length > opts.limit ? ` (first ${opts.limit} shown)` : ""}`);
-    return (regressions.length || lines.length) ? 1 : 0;
+    return (allRegressions.length || lines.length) ? 1 : 0;
   }
   if (opts.json) {
     const out = {};
     for (const [name, c] of shown) out[name] = { ...c.metrics, ...score(c.metrics), grade: grade(score(c.metrics).score) };
-    console.log(JSON.stringify({ crates: out, cloneGroups: groups.length, regressions, foreign, onlyBase: orphans, improvements: improvements.length }, null, 1));
-    return regressions.length ? 1 : 0;
+    console.log(JSON.stringify({ crates: out, cloneGroups: groups.length, regressions: allRegressions, foreign, onlyBase: orphans, improvements: improvements.length, fileImprovements: fileResult.improvements.length, filePins: Object.keys(baseline.files ?? {}).length }, null, 1));
+    return allRegressions.length ? 1 : 0;
   }
   const t = table(shown);
   console.log("Rust quality scorecard: production code per crate, score 0-100 against docs/RUST-QUALITY.md");
   console.log(t.text);
   console.log(`clone groups (duplicated fn bodies, workspace): ${groups.length}`);
-  for (const r of regressions) console.log(`[FAIL] ratchet ${r}`);
+  console.log(`files over ${FILE_CAP_LINES} lines (pinned, may not grow): ${Object.keys(baseline.files ?? {}).filter(inScope).length}`);
+  for (const r of allRegressions) console.log(`[FAIL] ratchet ${r}`);
   for (const r of foreign) console.log(`[WARN] foreign ratchet ${r}`);
   for (const name of orphans) console.log(`[WARN] baseline row for a crate that does not exist: ${name}`);
   // Only lower-is-better counts lock in; a rising test density stays informational.
   const lockable = improvements.filter(({ k }) => METRICS[k].bad).length;
   if (lockable) console.log(`[INFO] ${lockable} metric(s) improved below baseline: run --tighten with the landing`);
-  console.log(regressions.length ? `RESULT FAIL: ${regressions.length} ratchet regression(s) fix: every [FAIL] line above names the edit that clears its rule` : `RESULT PASS: score ${t.workspace} (${grade(t.workspace)}), 0 ratchet regressions over ${shown.size} crate(s)`);
-  return regressions.length ? 1 : 0;
+  if (fileResult.improvements.length) console.log(`[INFO] ${fileResult.improvements.length} pinned file(s) shrank: run --tighten with the landing`);
+  console.log(allRegressions.length ? `RESULT FAIL: ${allRegressions.length} ratchet regression(s) fix: every [FAIL] line above names the edit that clears its rule` : `RESULT PASS: score ${t.workspace} (${grade(t.workspace)}), 0 ratchet regressions over ${shown.size} crate(s)`);
+  return allRegressions.length ? 1 : 0;
 }
 
 if (import.meta.main) {

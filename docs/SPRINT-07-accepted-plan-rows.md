@@ -131,18 +131,6 @@
   39485820656, Linux x86-64 runner; the same pinned literals are the
   Windows bar, not executed here per the no-local-cargo rule); clippy
   -p engine-core --all-targets -D warnings green (run 39486316459).
-- [ ] RC26 core: deterministic tick recording and replay — copper-rs
-  recording shape reimplemented (Apache-2.0, PORT cite + EVIDENCE
-  row). Tier A. Size M. Owns `crates/core/src/tick_record.rs`.
-  Accept: 1,000 ticks recorded and replayed with 100% fidelity;
-  overhead ≤ 0.2ms/tick. needs: RC7, ARC13. (RES-STEAL wave 37 Dive
-  01, reviewed 2026-09-26; remapped from colliding RC12.)
-- [ ] RC27 core: deterministic ECS schedule verification — orga
-  schedule shape reimplemented (Apache-2.0, PORT cite + EVIDENCE
-  row). Tier A. Size S. Owns `crates/ecs/src/sched_verify.rs`.
-  Accept: 50+ systems in verified order; validation ≤ 0.1ms; zero
-  divergence. needs: ARC13, RC7. (RES-STEAL wave 37 Dive 01, reviewed
-  2026-09-26; remapped from colliding open RC13.)
 - [x] RC28 core: counter-based PRNG quality upgrade — wyhash-rs shape Landed
   a4e9f82. engine-core lib 131 passed 0 failed 2 ignored (run 39225916780):
   upstream wyrand vectors pinned twice over (seeds 0 and 3 and the byte seed
@@ -197,14 +185,6 @@
   posted on the reference machine. Tier A. Size S. Owns test hunks in
   `crates/app/src/app.rs` plus the RC4 prefab fixture. Accept:
   numbers posted x2; a regression fails the gate. needs: RC1, RC4. Landed fca6fe7c. App cold startup under 1 ms and RC4 museum kit 3-4 us, asserted twice in one test (budgets 2 s, 1 ms), GitHub run 39064540714, 4 passed; the old budget tests were ignored or checked nothing.
-- [ ] RC34 runtime: second-game boot receipt — urban war boots on the
-  same runtime with zero engine forks: stock config loads, menu renders
-  through the same extraction, a headless match replays to identical
-  checkpoints, saves migrate through the same schemas, packaging ships
-  without engine edits (companion to UW39, which owns the game side).
-  Tier B. Size M. Owns glue/tests only, no engine edits. Accept:
-  checklist green x2; any engine fork fails the tier by definition.
-  needs: RC1. Skipped 2026-10-17: blocked on UW0 (urban war, later game).
 - [x] RC35 ecs+app: 1,000-agent and 64-slot runtime soak — archetype
   World 1,000-agent tick p99 ≤ 2 ms (P6) and app extraction at 64-slot
   siege load; a 10-minute 64-slot siege replays exactly (the runtime
@@ -226,8 +206,6 @@
   Accept: three-state extraction test green on spine bytes; one
   Xvfb inspector smoke. needs: ARC4, RC2. Progress 2026-10-18: ExtractionView pub (6206fe07), Bridge::ingest_spine refuses bad hash/short buffer/bad version/tick skew (ecs bridge run 39066510052, 10 passed), editor spine_inspect renders the four spine columns through RC4 schemas (2 passed); left: nothing in the editor produces a live spine, ShellUi::set_spine is only called from tests. Progress 2026-10-20: the editor produces a live arena spine (LiveSpine in play_in.rs, attach_spine in app.rs) and paints it through the RC4 registry; 3 tests pass with --features ui (the_live_spine_steps_one_tick_per_round_tick, the_live_spine_restarts_at_its_tick_cap, the_live_spine_inspects_through_the_rc4_registry), cargo check --all-targets green; left: Xvfb inspector smoke. Landed bbb1878d. extraction_reads_all_three_states_from_spine_bytes green over spine bytes (gh run 39464077292, cargo test -p engine-ecs --lib bridge, 10 passed); Xvfb-style inspector smoke inspector_paints_the_live_play_in_spine paints the live arena spine through the RC2 bridge and the RC4 schemas (and inspector_paints_spine_components_from_a_snapshot still refuses a forged hash): cargo test -p engine-editor --features ui --lib inspector_paints, 2 passed x2 on the PC (ui needs a window build, so gh-check runs it locally; the frame is one headless egui run_ui pass, the Xvfb path).
 - [x] ARC7a arena: the spine flag is a default feature — `spine` ships on by default so every consumer compiles the spine step; the build graph is the only change (`run`, `run_controlled` and `LiveMatch` still step legacy `Sim`). Tier A. Size S. Owns `crates/arena/Cargo.toml`. Accept: `spine` is in the default features; golden d57b5c8ae3096614 x2 unchanged; arena lib green. F2P: `spine` was opt-in. P2P: golden d57b5c8ae3096614 and arena lib. needs: ARC4, ARC5. Landed 1ae3eb42. golden old == new d57b5c8ae3096614 x2 (gh run 39509470629); arena lib 241 passed (gh run 39509189839); `config_ranges_rejected` now checks the 32-slot boundary. Split 2026-10-21: legacy removal is ARC7b/ARC7c.
-- [ ] ARC7b arena: v2 rules and logs on the spine — the spine step learns the v2 `ArenaRules` track (cuts/limbs, balance/stagger, spear, match track and `sim` controllers) so it can stand in for the legacy `Sim`; no deletion yet. Tier A. Size L (landings: v2 rules; cuts/limbs; balance/stagger; spear; match track and controllers). Owns `crates/arena/src/spine_step.rs`, `crates/arena/src/lib.rs`, `crates/arena/src/world.rs`. Accept: `cargo test -p engine-arena --lib spine_` green; the same tape on spine and legacy prints identical cuts/balance/spear/match events; arena digest `2fbd56040fd091a7` x2 after the switch; golden d57b5c8ae3096614 unchanged. F2P: the spine step covers only the kinematic default track. P2P: arena lib green; legacy `Sim` untouched. needs: ARC7a.
-- [ ] ARC7c arena: delete the legacy `Sim` — remove `Sim` and route every runner through `spine_step`; move the arena digest with a HASH-LAW receipt (fixture version, reason, old/new digests, both outputs). Tier A. Size L (landings: runners and live; fork and snapshots; digest receipt). Owns `crates/arena/src/lib.rs`, `crates/arena/src/fork.rs`, `docs/HASH-LAW.md`. Accept: `git grep` finds no legacy `Sim` step; proof `arena=2fbd56040fd091a7` -> new digest x2; receipt committed with the row; golden d57b5c8ae3096614 unchanged. F2P: `run`/`run_controlled`/`LiveMatch` still build `Sim`. P2P: golden unchanged; arena lib green. needs: ARC7b.
 - [x] ARC8 playtest: spine keypoint fixtures — 10 gameplay claims
   as VK1 specs over spine state (parry window, hit-stop, get-up,
   bounds), run by the ticked VK1 30-spec harness (no isolated specs).
@@ -282,16 +260,6 @@
   Door note: the door's staged spatial gate reads unit cubes
   (`capability::snapshot_hierarchy`), so a prop taller than 1 m is refused as
   floating (pre-existing, not this row); the door accept rides a 1 m brazier.
-- [ ] ARC13 ops: parity-gated retro — ARC10 column + revert rule: a spine
-  edit that breaks 600-tick parity is reverted with its first-divergence
-  receipt; regressions kept as fixtures (Darwin Gödel Machine
-  2505.22954v3, idea only; no self-rewriting agent). Tier A. Size S.
-  Owns `tools/` glue (orchestrator lands). Accept: seeded divergence
-  fails gate + reverts; sample matches hand-check. needs: ARC3.
-  Progress 2026-10-19: owner: report-only receipt instead of auto-revert?
-  Answer in `docs/plan/2026-10-19-owner-queue.md`.
-  Owner chat 2026-10-19 (delegated): the report is report-only: a seeded divergence fails the gate and writes its first-divergence receipt, and no auto-revert is wired.
-  Correction 2026-10-21: the Accept asks that a seeded divergence "fails gate + reverts", but the owner refused the revert (Owner chat 2026-10-19: report-only, no auto-revert is wired); the report half exists (`tools/tape-checksum.mjs:56-59` prints `first-divergence: <tick>`), so the Accept needs re-aiming to the owner's report-only answer.
 - [x] ARC14 ecs: spine float quarantine — the spine takes integer-ns
   dt (RC6 shape), never `schedule::Ctx.dt: f32`, and a quarantine test
   fails on any float inside the spine module. Tier A. Size S. Owns
@@ -557,12 +525,6 @@
   playtester confirmation missing — wave-47 blind review on captures,
   then tick. GP26 supplies the paired A-B captures + manifest numbers +
   blind call this row's tick requires (PLN49). Progress 2026-10-17: 535b1590 combat shake_stage.rs squared trauma curve (jab at 180 is at most a quarter of a big hit at 700, exact restore at zero trauma); left: the camera.rs hook (shake_offset line 848, call site 1032) and the GP26 capture pair. Progress 2026-10-18: caller wired 40119424 (shake_offset uses engine_combat::shake_stage::sample, x/y only; test shake_rides_the_gp21_stage_sample); live receipt on the RTX 3050 arena window printed shaken=126 peak_shake_milli=4966; left: playtester confirmation of small/big separation. Landed eac417f8 (GP21 code 40119424). The Accept's playtester leg is charter C2 PASS per docs/plan/gameplay.md:401: cargo test -p engine-playtest --lib charter -> charter_c2_parses_and_prints_pass (8 passed, run 39481809048). cargo test -p engine-game --lib gp21 -> camera_feed gp21_jab_quarter_super_with_numbers, gp21_restore_holds_every_tick_at_feed, gp21_sim_bytes_replay_x2, gp21_feed_stage_matches_rig_and_separates_jab_super plus camera gp21_jab_is_at_most_quarter_super, gp21_restore_holds_every_tick (8 passed, run 39489531168); win1_ -> win1_trauma_replays_exactly_twice, win1_feed_leaves_sim_checkpoints_untouched (4 passed, run 39489538738).
-- [ ] GP22 game: unified impact fan-out. Tier B. Size M. Owns wiring
-  beside `crates/combat/src/feel.rs` + presentation. Accept: one event
-  gives 5 layers; per-layer toggles keep sim bytes x2; p95 <= 50 ms;
-  0 allocs; captures show all layers. needs: GP11, GP16, GP21.
-  (PLN45 gameplay, verdict TAKE.) CB4 supplies the four contact-frame
-  data layers this row fans out — data before wiring (PLN49).
 - [x] GP8 game: camera feel cores — flax-mcp camera rig, damping, impulse Progress 2026-10-17: not restored: camera_rig.rs, follow_pose, shake_offset and add_trauma already cover the old camera_feel.rs; only a pose transition would be new.
   dispatch and transition cores rewritten in Rust as `crates/game`
   camera modules (MIT, PORT cite + EVIDENCE row; clean-room, no vendor).
@@ -589,14 +551,6 @@
   frame; effects deterministic. Kill: Unity/Godot dependency;
   per-tick allocation. needs: GF1. (RES-STEAL wave 35 Dive 11,
   reviewed 2026-09-26.) Landed 535b1590. crates/combat/src/feel_flow.rs registers effects against fight triggers in one slot store, live on the next step (run 39070109022).
-- [ ] GP6 game: feel quantification — Pichlmair & Johansen 2011.09201v1 Progress 2026-10-17: crates/perf/src/feel.rs scorer with 8 unit tests (50 ms bar, win 400-600 permille, rubric 900 permille); test-only, counts are plain numbers; left: fixtures/feel-gold/ missing, no feed from real PQ1/PQ2/VK1 runs.
-  three-domain framework operationalized into PQ1 latency bands plus a
-  VK1 keypoint rubric (ideas only, license UNVERIFIED). Tier A. Size M.
-  Owns `crates/perf/src/feel.rs` + `fixtures/feel-gold/`. Accept: PQ1
-  p95 ≤ 50ms across tuning/juicing/streamlining; PQ2 win-rate 40–60%;
-  VK1 pass ≥ 90%. Kill: p95 rise > 10ms or win-rate outside band.
-  needs: PQ1, VK1, HR3. (RES-ARXIV wave 32, reviewed 2026-09-26;
-  remapped from colliding GP2.) Progress 2026-10-17: 535b1590 perf check_gold and perf --feel-gold with fixtures/feel-gold (perf run 39068134586, 11 passed); left: no live PQ1 run from a game session feeds it. Progress 2026-10-18: 55482b86 fixes the red gold_goes_red_when_an_input_or_the_verdict_moves (it edited tuning 500 and juicing 500 5 5 but the fixture rows read 510, so check_gold returned Ok and unwrap_err panicked); engine-perf --no-fail-fast green run 39105354580. Still open: no live PQ1 run from a game session feeds fixtures/feel-gold.
 - [x] GP7 game: feel keypoint extension — VK1 extended with feel specs
   (hit-stop, shake amplitude, cancel tightness, readability); 4/5
   seeded feel bugs fail exactly their keypoint. Tier A. Size S. Owns
@@ -604,13 +558,6 @@
   `fixtures/keypoints/feel/`. Accept: 4/5 seeded bugs caught; PQ1 p95
   ≤ 50ms; no float in tick. needs: VK1, PQ1, HR3.
   (RES-ARXIV wave 32, reviewed 2026-09-26; remapped from colliding GP3.) Landed 535b1590. crates/playtest/src/feel_keypoints.rs + fixtures/keypoints/feel (5 claims): 5 of 5 seeded feel bugs each fail exactly their own keypoint (run 39070573526, 4 passed; clippy 39070809701).
-- [ ] GP14 game: camera framing for third-person melee — principle
-  transfers, UNVERIFIED for 3D until playtest (ideas only, license
-  UNVERIFIED). Tier A. Size M. Owns
-  `crates/anim/src/camera_framing.rs`. Accept: PQ1 latency ≤ 50ms;
-  silhouette readability ≥ 80% in playtest. Kill: float math in tick.
-  needs: PQ1, GP13. (RES-ARXIV wave 35 Dive 11, reviewed 2026-09-26.) Progress 2026-10-17: 535b1590 combat camera_framing.rs integer shoulder-cam framing with a silhouette readability score (>=80% of poses read, both fighters in frame); left: the camera.rs hook (frame_pair 585, frame_group 643) and the human playtest. Progress 2026-10-18: frame_pair and the two-fighter frame_group call frame_melee 40119424 (test two_fighter_group_is_the_gp14_shoulder_shot_for_either_order); left: the live arena camera still comes from fighter_look::fight_camera, so the shoulder shot reaches only the discarded feed in windowed.rs; PQ1 latency and playtest readability.
-  Correction 2026-10-21: the module lives in `crates/combat/src/camera_framing.rs`, not `crates/anim/src/camera_framing.rs` (`Test-Path`: anim False, combat True); the only work left is the live-camera hook (the arena camera still comes from `fighter_look::fight_camera`).
 - [x] ED14 editor: browser real-edge wiring - AS1 `bundle::EntryKind` + Progress 2026-10-17: kind_wire_bytes_match_as1_entrykind, full_bundle_search_stays_under_50ms and the bad-drop conflict-set tests exist in crates/editor/src/browser.rs; left: the local EntryKind / GRID_CM / YAW_STEPS mirror copies are not deleted. Landed 4bd06b85. Mirrors deleted, solver is engine_spatial::place::solve; 4096-entry archive search 1.6 ms; run 39058437704.
   SP5 `place` vocabulary replace the mirrors (ED3 file frozen; lands
   after ED3). Tier B. Size M. Owns `crates/editor/src/browser.rs`
@@ -634,12 +581,6 @@
   (reference-GPU session run by the AI here (O5)). Tier B. Size S. Owns
   `crates/editor/benches/panels.rs`. Accept: per-panel ms table posted;
   an over-budget panel fails the row. needs: ED1, PF2. Landed 202ad257. crates/editor/benches/panels.rs: every dock panel median under 1 ms on a 2,000-node scene (Hierarchy 0.18, Inspector 0.13, Viewport 0.09, Findings 0.05, Tuning 0.21, Templates 0.07, Log 0.28 ms p50); PC run without a GPU, not a PF2 reference-GPU capture; editor --features ui --lib shell_ui 15 passed.
-- [ ] ED18 editor: newcomer re-measure with live play-in-editor -
-  first-run checklist to first fight ≤ 15 min on a real newcomer clock,
-  hints only (ED5's 600/900 s predates ED4 integration). Tier B.
-  Size S. Owns `crates/editor/src/onboard.rs` timing hunks. Accept:
-  measured time posted; every blocker fixed in the flow, not coached
-  around. needs: ED5, ED4. Progress 2026-10-18: skipped, needs a real newcomer on a clock.
 - [x] ED19 editor: outliner at siege scale - 2,000-row scene (64-player Landed 71c3f0fb. siege_scene_search_stays_under_50_ms (worst 344.9us), quiet_panel_frame_stays_under_one_millisecond_at_siege_scale (15.4us quiet, 2.8ms after an edit), selection_sets_over_hundreds_of_siege_rows (1.06ms); 19 outline tests, local PC run 2026-10-17.
   + 500-AI shape): search ≤ 50 ms, panel frame ≤ 1 ms, selection sets
   over hundreds (Godot rename-proof shape stands, MIT). Tier C.
@@ -672,18 +613,6 @@
   coin flip, not the manager's work; the budget, eviction order and refusal
   asserts stay in the default suite. `cargo test -p engine-assets --lib` 225
   passed 0 failed 3 ignored (gh 39690470476).
-- [ ] AS6 assets: USD subset import — read USD text and binary for meshes,
-  transforms, UsdPreviewSurface materials and variants (OpenUSD Apache-2.0 as
-  the spec; no C++ dependency), so DCC pipelines and AI tools can hand scenes
-  over as well as glTF. Tier C. Size L. Owns `crates/assets/src/usd.rs`,
-  `crates/scene/src/usd_codec.rs`. Accept: a set of reference USD files
-  import, place, save, reopen and play; unsupported features refuse with
-  their name. needs: CT10.
-- [ ] SN4 audio: HRTF via Steam Audio behind `device` wall. Tier B.
-  Size L. Owns `crates/audio/src/hrtf.rs`. Accept: front/back resolved
-  on headphones; LICENSE verified first with evidence row.
-  needs: AU1.
-  LATER: parked 2026-10-03 (circus verdict: audio parked by FOCUS.md (owner 2026-09-30)); unpark by deleting this line.
 - [x] SN5 audio: headphone 3D — an HRTF path for headphones (HRIR sphere, Landed 52538adf. orbit_blind_naming_7_of_8 + steady_state_process_allocates_nothing, hrtf:: 14 passed run 39056954000 (row stays FOCUS-parked by its LATER line).
   overlap-save convolution, geometry-aware interpolation as fixed tables;
   `hrtf` crate MIT as a pattern or a dependency with a DEPENDENCIES row;
@@ -692,13 +621,6 @@
   octants front/back or better (2 more than pan only); zero audio-thread
   allocations. needs: AU1.
   LATER: parked 2026-10-03 (circus verdict: audio parked by FOCUS.md (owner 2026-09-30)); unpark by deleting this line.
-- [ ] SN9 audio: voice-bake vs voice-net boundary — typed tests proving
-  `voice.rs` bake-only refusal holds and ON8/ON12 net voice never
-  touches the tick, checkpoints or golden. Tier B. Size S. Owns
-  boundary test hunks in `crates/audio` (no new file). Accept:
-  live-synth call refuses with its typed error; voice on/off golden
-  identical x2; transport stays ON-owned, bake stays audio-owned.
-  needs: ON8, AU1. (PLN audio, reviewed 2026-09-26; waits ON8.)
 - [x] UIX6 ui: settings persistence — versioned settings file with Landed bc203f6f.
   first-run adapter defaults; unknown fields refused loudly,
   migrations staged at boundaries. Tier A. Size S. Owns persistence
@@ -751,15 +673,6 @@
   console; lesson replays exactly x2; skip leaves a clean menu. Proof:
   `cargo test -p engine-ui --lib tutorial` green. needs: UIX5, GP1.
   (PLN shipping.md EXTEND, proposed 2026-09-29.)
-- [ ] HR6 combat: generated moves into move tables — a CT14 clip becomes a
-  proposed HR3 move: startup, active and recovery windows detected from the
-  weapon bone's speed, a hit volume swept along the weapon path, damage and
-  stamina from the family it joins. VK1 keypoints (the hit lands inside its
-  window) and the PQ2 tournament (no move above 35% of kills) decide; a move
-  that breaks balance is refused with the numbers. Tier B. Size M. Owns
-  `crates/combat/src/move_intake.rs`. Accept: 5 generated moves either land
-  as valid HR3 entries or are refused with a reason; replay x2. needs: CT14,
-  HR3, VK1, PQ2.
 - [x] EV15 research: the research ladder. Tier A. Size S. Owns Progress 2026-10-17: 20aea8ee tools/ladder-counts.mjs; left: the LADDER rule in the research skill.
   `docs/research/LADDER.md` and the LADDER line rule in
   `skills/research/SKILL.md`. Accept: every research return adds
@@ -805,12 +718,6 @@
   and reachability. Tier A. Size M. Owns `crates/spatial/src/index3.rs`.
   Accept: an edit updates the field in under 1 ms on the arena fixture;
   SP16 stacking reads it. needs: SP16. (PLN48 frontier.md.)
-- [ ] BET-SP27 spatial (MOONSHOT, HELD): baked probe-field affordances —
-  offline interaction probes baked to tags, never in tick, never weights
-  in git. Tier C. Size M. Accept: +10% tag accuracy with byte-identical
-  replays, else stays held. Kill: tick touch, unlicensed data/weights, or
-  no measured lift. needs: SP22. (PLN48 reader P1 moonshot; 2026-10-18:
-  SP24 landed, dropped from needs.)
 - [x] AX11 mcp/playtest: EV1 efficiency-utility report column —
   success-gated, turn-vs-tool split, reference floors in fixture; reported,
   never gated. Tier B. Size S. Owns eval-report hunks only (EV1 frozen).
@@ -888,19 +795,6 @@
   Accept: 20 adversarial briefs ≥ 80% refused by capability check with
    the policy file versioned; 0 legit FP on 20 legit briefs; p95 ≤ +10%.
    needs: MCP9, MCP10. (PLN20 ai-native.)
-- [ ] BET-AX13 playtest (MOONSHOT, HELD): offline efficiency-penalty refit
-  from versioned traces, advisory only. Tier C. Size M. Accept: advisory
-  report only; two-green-exports rule to graduate. needs: EV1,
-  AX11. (PLN48 reader P2 moonshot; PLN20: AX5 never boarded, corrected
-  from EV1, AX5, AX11; 2026-10-18: AX16 landed, dropped from needs.)
-- [ ] BET-AX14 playtest (MOONSHOT, HELD): offline GEPA-style prompt
-  evolution from versioned traces, advisory only. Tier C. Size M. Owns
-  advisory-diff hunks beside `crates/playtest` (trace format frozen;
-  no tuner in the repo). Accept: advisory report only; +pass with 0
-  success loss to graduate; two-green-exports rule (AX17) to graduate
-  or stays held. Kill: auto-apply, any success loss, format drift,
-  weights in git. needs: none. (PLN20 ai-native; 2026-10-18: AX16, AX17
-  landed, dropped from needs.)
 - [x] API6 mcp: protocol-pinned collapse guardrail — retain-list + Landed 1b1c2ab. 76 tools/164,676 chars -> 24 tools/41,220 (75% fewer tokens), 20/20 answers, per-fixture median p95 3,231 us vs 3,247 flat, guard plan 2,039 us once per session; 4 collapse unit tests; runs 39538109120, 39537204415, post-merge 07f84179 run 39539186773. Clippy and workspace-check still red only outside this hunk (packs/play.rs, world_query.rs, ai/plan_trace.rs at HEAD).
   Progress 2026-10-22 (aec1213e1): the +10% p95 bar moved to the house's timing leg. The bar is a clock reading and a loaded box moves it: the same code measured flat p95 12092 us against guarded p95 14124 us on a busy PC (+17%) and cleared the bar on the quiet runner. `guarded_p95_holds_the_ten_percent_bar` asserts the same +10% comparison on the same 20 fixtures and same wide session, and runs `#[ignore = "timing: ..."]` under `node tools/proof.mjs --perf` (release, one thread, quiet box), like `session_chaos::p95_within_ten_percent_of_single_client`. The bar is not widened and not dropped. The default-gate test keeps every deterministic assertion (tokens halved, retain list, ledger, 20/20 answers) and drops only the clock. `cargo test -p engine-endpoint --test it --features mcp collapse_fixtures` -> 2 passed, 0 failed, 1 ignored (run 39678794056); the whole crate -> lib 740 passed / 0 failed / 1 ignored, it binary 59 passed / 0 failed / 2 ignored (run 39685460659); clippy `-D warnings` clean (run 39680836849).
   adaptive budget beside the API4 collapse (protocol-aware trimming
@@ -915,38 +809,6 @@
   tags (tools frozen). Accept: 20/20 adversarial tagged >= 80% correctly;
   p95 <= +10%; 0 legit FP. needs: MCP9, MCP10, MCP11. (PLN48 reader P2
   Card 3.)
-- [ ] PF19 perf: quiesced reference-GPU fill of the PF13 GPU/VRAM rows —
-  pilot-only, no lane, no code. Tier A. Size S. Owns
-  `tools/perf-baseline.json` GPU/VRAM hunks only (consumer RT14/VG12 GPU
-  comparison; budget one quiesced session on the RTX 3050 laptop, release
-  profile, high-performance power, CPU load <10%, 3 runs within +/-10%,
-  21 samples with per-sample hash assert, adapter + driver MAJOR.MINOR +
-  power line per row). Accept: `node tools/perf-baseline.mjs --check`
-  PASS with all 11 rows `status: baseline` carrying ordered p50/p95/p99
-  quantiles + golden `d57b5c8ae3096614` x2 unchanged; a loaded-box run
-  still lands observed-only and never overwrites a baseline row. needs:
-  PF13. (Deep-dive 2026-09-30.) Progress 2026-10-18: 4e51bd7a observed only: the box cannot be quiesced (GPU p50 0.52-0.83 ms over 5 runs), arena adds about 0.45-0.65 GiB VRAM; tools/perf-baseline.mjs from the accept line does not exist.
-  Correction 2026-10-21: `Test-Path tools/perf-baseline.mjs` = False, so the Accept `node tools/perf-baseline.mjs --check` cannot run; the row needs the real baseline tool path or closes as an unprovable Accept.
-  rot: tools/perf-baseline.mjs was cut on purpose in c1c426d7 (dead-tool sweep, zero callers verified); only the data file tools/perf-baseline.json survives and no perf script remains, so the Accept must name the JSON or a new tool.
-- [ ] RT14 render: many-light spike — ReSTIR DI vs clustered forward on
-  250 torches on the reference GPU. Tier C spike. Size M. Owns a spike
-  folder under `examples/`. Accept: ms and noise per method in LADDER;
-  RT2-RT8 order follows it. needs: PF13. (PLN48 frontier.md.)
-  LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
-- [ ] RT15 render: cluster-occupancy audit + range-cut culling for the
-  250-torch arena — occupancy histogram + range-cut on torch-grid
-  2/25/250 fixtures. Tier B. Size S. Owns audit hunks beside
-  `crates/render/src/shadow_cluster.rs` + `graph.rs` (cluster shape
-  frozen). Accept: overflow cut ≥50% at identical pixels, ms +≤5%,
-  LADDER SPIKE line with overflow count + p95 lights/cell + ms, or
-  REJECT with numbers. needs: GX2, RT14. (P4 verdict wave 57 TAKE;
-  LADDER P4 CANDIDATE; RT14 stays boarded.)
-  LATER: sprint-2026-10-04 frozen by owner decision D7 (docs/FOCUS.md) until the first real Bevy frame lands; the loop skips it; unpark by deleting this line.
-- [ ] VG12 render: meshlet build spike with meshoptimizer ideas on the arena
-  mesh set: meshlets, culling rate, indirect draw count. Tier C spike.
-  Size M. Accept: numbers in LADDER; VG1 starts from the winner. needs:
-  PF13. (PLN48 frontier.md.)
-  LATER: parked 2026-10-03 (circus verdict: spike rejected on LADDER); unpark by deleting this line.
 - [x] CT21 content: hero weapons-graft fix + re-cook — fix `tools/weapons.py` Landed ad451d33. fighter_bind 3 passed run 39058324156 (pin moved); cook x2 identical + eyes recorded in content/fighters/CT21-RECOOK-RECEIPT.md.
   graft transform so sword/shield land in the hands (Q2 bbox back to body
   scale), re-cook hero, eyes with weapons visible + in-hand, cook x2
@@ -957,32 +819,6 @@
   Wave 54: TICK (graft fixed, cook x2 identical 4bdc600a, eyes PASS
   in-hand per orchestrator Read, fighter_bind 3/3 on moved pin;
   opponents byte-identical, refused[] clean).
-- [ ] CT23 content: combat + traversal clip expansion (80-clip Tier A,
-  deduped by digest). Size L. Owns `content/fighters/incoming/` +
-  sidecars + receipt. Accept: 80 clips retargeted, cook x2
-  (`cargo test --locked -p engine-assets retarget`), budgets +
-  provenance. needs: CT1, CT7. (Plan extender wave 56; plan CT22.)
-- [ ] CT24 content: clip fight-data audit (loop/root/contacts + hit
-  windows + traversal edges, bind-pose-verified). Size M. Owns
-  `content/fighters/sidecars/`. Accept:
-  `cargo test --locked -p engine-assets sidecar`, CB4/LM2 fixtures
-  read windows/contacts, bytes x2. needs: CT1, CT23. (Plan extender
-  wave 56; plan CT23.)
-- [ ] CT25 content: crowd impostor kit (`content/crowd/` new) for
-  8-fighter soak + C3 20k path. Size M. Accept: soak captures
-  populated, 0 findings, cook x2
-  (`cargo test --locked -p engine-assets mesh_cook`). needs: CT2, CT8.
-  (Plan extender wave 56; plan CT24.) Progress 2026-10-17: 3d997539 gen.mjs deterministic and matches manifest SHAs; left: content/crowd/proof/Cargo.lock is stale (gh cargo check failed, run 39064515835) and the cook proof needs cargo run. Progress 2026-10-18: cb822736 crates/assets/tests/it/crowd_cook.rs cooks both specimens twice (budgets, 4 falling LODs, hulls, digests and tris equal report-split1.json), cargo test --locked -p engine-assets --features import,registry --test it -- crowd_cook PASS run 39105798540; left: soak captures populated with 0 findings (reference GPU) and the stale content/crowd/proof Cargo.lock.
-- [ ] CT27 content: 64-player + 1,000-agent soak on RTX 3050 6 GB
-  (dedupe + compression/BC/LOD/stream proof, cold ≤5 s, VRAM capped).
-  Size M. Accept: soak report + adapter/driver/ms/VRAM
-  (`cargo test --locked -p engine-assets lod_swap`), 0 tick allocs,
-  golden x2. needs: CT5, CT23, CT25. (Plan extender wave 56; plan
-  CT26.)
-- [ ] CT31 content: motion-DB style bake (100STYLE motions-only + CMU,
-  credited) into LM1. Tier A. Size M. Owns `content/locomotion/` expansion.
-  Accept: bake x2 + typed refusals. needs: CT1, CT3. (PLAN-CONTENT wave 58;
-  plan §7 CT30 boarded as CT31.)
 - [x] CT32 content: 14-canonical-clip dedupe manifest + before/after MB Landed b5cdaf64. 14 clips share one cook digest across 56 slots.
   through AS1 bundles. Tier A. Size S. Owns the dedupe manifest. Accept:
   bundle loads, `fighter_bind` green, bytes x2. needs: CT7.
@@ -992,35 +828,6 @@
   Size S. Owns the sidecar schema. Accept: `cargo test --locked
   -p engine-assets sidecar`. needs: CT1, CT7. (PLAN-CONTENT wave 58;
   plan §7 CT32 boarded as CT33.)
-- [ ] CT34 content: crowd 20k C3 scale card with P6 numbers on the RTX 3050.
-  Tier A. Size M. Owns `content/crowd/scale/` + report. Accept: `cargo test
-  --locked -p engine-assets lod_swap` + soak, 0 tick allocs. needs: CT2,
-  CT25. (PLAN-CONTENT wave 58; plan §7 CT33 boarded as CT34.)
-- [ ] CT36 content: sidecar consumer wiring (CB4 + LM2 read audited
-  sidecars). Tier A. Size S. Owns consumer hunks beside
-  `crates/combat/` (hit windows) + `crates/anim/` (contacts) with
-  fixtures (no new types). Accept: `cargo test --locked
-  -p engine-assets sidecar` + consumer tests green; fixtures read the
-  CT24-audited 14 canonical sidecars; bytes x2; tick untouched. needs:
-  CT24, CT33. (EXTEND wave 85.)
-- [ ] CT37 content: real-bytes locomotion intake (100STYLE + CMU,
-  motions only, credited). Tier A. Size M. Owns
-  `content/locomotion/real/` + bake glue. Accept: first 16 real clips
-  retarget via CT1 with bind pose verified; bake x2 identical; EVIDENCE
-  rows per file; Geno/LAFAN1 refusal tests green; LM1 reads the bake.
-  needs: CT1, CT3. (EXTEND wave 85.)
-- [ ] CT38 content: crowd variety via the CT4 loop (armor/helmet
-  variants, Tier C path). Tier B. Size M. Owns
-  `content/crowd/variants/` + 4 variant sets. Accept: cook x2
-  identical; budgets hold; provenance per file names generator, model
-  and prompt digest; 8-fighter soak capture shows populated stands
-  with 0 findings. needs: CT4, CT25. (EXTEND wave 85.)
-- [ ] CT39 content: bundle dedupe + compression audit on the pin
-  bundle. Tier B. Size S. Owns `content/fighters/BUNDLE-AUDIT.md` +
-  report numbers. Accept: CT32 manifest + CT11-shaped compression +
-  BC encode measured MB before/after; bundle loads via AS1;
-  `cargo test --locked -p engine-game fighter_bind` green; bytes x2.
-  needs: CT11, CT32. (EXTEND wave 85.)
 - [x] CT40 content: AI prop intake (TRELLIS/TripoSR rough mesh to
   game prop via the CT4 loop). Tier B. Size S. Owns
   `content/props/ai/` + 3 props. Accept: decimate/unwrap/bake path
@@ -1028,13 +835,6 @@
   provenance per file names generator, model and prompt digest;
   license gate refuses unreadable model terms. needs: CT4. (EXTEND
   wave 85.) Landed cb822736. content/props/ai: 3 props (1126, 2432, 1094 tris, no maps); node --test tools/ai-props.test.mjs (GLB triangle list under 5k, no image, game_tris real, prompt digest, sidecar pins the bytes, no shared bytes); cargo test --locked -p engine-assets --features import,registry --test it -- ai_props PASS run 39105798540 (each prop runs gen_intake::intake with its own provenance, under PROP_MAX_TRIS, cook x2 byte-identical; prose, empty and CC-BY-NC model licences refused before any cook).
-- [ ] CT41 content: LOD ms/VRAM table over the CT35 bake. Tier A. Progress 2026-10-17: b5cdaf64 LOD table from hero.json with tris and VRAM; left: GPU ms and the PF13 join.
-  Size S. Owns `content/fighters/LOD-REPORT.md` (CT35 `lod/` frozen).
-  Accept: `cargo test --locked -p engine-assets lod_swap` + `mesh_cook`
-  green; per-LOD tris/ms/VRAM posted on the reference GPU with
-  adapter+driver lines; cook x2 identical; 0 tick allocs; numbers join
-  the PF13 baseline. Consumer: PF13, CT27 soak, CT34 card. needs:
-  CT35, CT5. (EXTEND wave 86.)
 - [x] CT42 content: combat clip batch-a (16 clips toward the CT23 80).
   Tier A. Size M. Owns `content/fighters/incoming/batch-a/` + sidecars.
   Accept: 16 clips retarget via CT1 with bind pose verified, digest
@@ -1042,17 +842,6 @@
   retarget` green; budgets + provenance per file; cook x2 identical;
   counts toward CT23. Consumer: CT23 receipt, CT24 audit. needs:
   CT1, CT7. (EXTEND wave 86.) Landed 769737c9 (budget assert 32e07432). 16 batch-a clips vendored (.gitignore carve-out, auto backup 2f039f8e); crates/assets/tests/it/retarget_batch_a.rs: hero bind validate_bind, each clip retarget_cook_with_sidecar x2 identical, digests refused against the 14 canonical and each other, keys and seconds under the clip_receipt budget, rows equal BATCH-A-RECEIPT.md (digest column on Windows only: 2 of 16 digests differ on a Linux runner; PASS on this PC with all 16 equal); cargo test --locked -p engine-assets --features import retarget PASS run 39109839692 (needs the feature: without it the filter matches 0 tests); node --test tools/batch-a.test.mjs pins each GLB sha16 and one sidecar per clip.
-- [ ] CT43 content: sidecar audit report for the canonical 14 + batch-a.
-  Tier A. Size S. Owns `content/fighters/sidecars/AUDIT.md` (sidecar
-  JSONs frozen). Accept: `cargo test --locked -p engine-assets sidecar`
-  green; every window/contact bind-pose-verified; CB4/LM2 fixtures read
-  the audited windows/contacts; bytes x2. Consumer: CT36 wiring.
-  needs: CT24, CT33. (EXTEND wave 86.)
-- [ ] CT44 content: crowd eyes + soak staging over the CT25 kit. Tier A.
-  Size S. Owns `content/crowd/EYES.md` (CT25 kit frozen). Accept: cook x2
-  identical; budgets hold; front/side/top previews against the 1.8 m
-  figure; 8-fighter soak capture shows populated stands with 0 findings.
-  Consumer: CT27 soak, CT34 card. needs: CT25, CT8. (EXTEND wave 86.)
 - [x] CT45 content: PBR 2k + HDRI provenance report with VRAM caps. Landed 6e7149ff. Progress 2026-10-17: f2effc78 per-map table generated, bound set 213 MiB under the 256 MiB cap; left: measured VRAM on the reference GPU.
   Tier B. Size M. Owns `content/arena/pbr/REPORT.md` (CT26 pass frozen;
   `content/arena/hdri/` untouched). Accept: 0 findings; Q1/RA14 read PBR
@@ -1076,51 +865,12 @@
   every gap; `cargo test --locked -p engine-assets provenance` green;
   bytes x2. Consumer: CT28 lock, PR1 chains. needs: CT28, CT7, CT8.
   (EXTEND wave 86.)
-- [ ] CT47 content: combat clip batch-b (16 more toward the CT23 80).
-  Tier A. Size M. Owns `content/fighters/incoming/batch-b/` + sidecars.
-  Accept: 16 clips retarget via CT1 with bind pose verified, digest
-  deduped against the 30 before it (14 canonical + batch-a);
-  `cargo test --locked -p engine-assets retarget` green; budgets +
-  provenance per file; cook x2 identical; counts toward CT23. Consumer:
-  CT23 receipt, CT24 audit. needs: CT1, CT42. (EXTEND wave 87.)
-- [ ] CT48 content: locomotion real second slice (16 more, 32 with CT37).
-  Tier A. Size M. Owns `content/locomotion/real-batch-b/` + bake glue
-  (`content/locomotion/real/` frozen). Accept: 16 real clips retarget
-  via CT1 with bind pose verified; bake x2 identical; EVIDENCE rows per
-  file; Geno/LAFAN1 refusal tests green; LM1 reads the bake. needs:
-  CT1, CT37. (EXTEND wave 87.)
-- [ ] CT49 content: traversal edge markers (vault/hurdle/mantle/climb/drop).
-  Tier A. Size S. Owns `content/fighters/sidecars/TRAVERSAL.md` (sidecar
-  JSONs frozen). Accept: `cargo test --locked -p engine-assets sidecar`
-  green; every traversal edge bind-pose-verified; TV fixtures read the
-  markers; bytes x2. Consumer: TV link, CT36 wiring. needs:
-  CT24, CT33. (EXTEND wave 87.)
-- [ ] CT50 content: crowd soak staging report over CT25 + CT44. Tier A.
-  Size S. Owns `content/crowd/SOAK-REPORT.md` (CT25 kit + EYES.md frozen).
-  Accept: 8-fighter soak capture shows populated stands with 0 findings;
-  CPU/GPU ms + VRAM posted on the reference GPU with adapter+driver
-  lines; cook x2 identical. Consumer: CT27 soak, CT34 card. needs:
-  CT25, CT44. (EXTEND wave 87.)
 - [x] CT52 content: provenance enforce rehearsal before the CT28 lock.
   Tier A. Size S. Owns `content/PROVENANCE-ENFORCE.md` (gate code stays
   CT28, matrix stays CT46). Accept: seeded missing-provenance bundle
   refused with the named gap; 50-asset matrix re-checked;
   `cargo test --locked -p engine-assets provenance` green; bytes x2.
   Consumer: CT28 lock, PR1 chains. needs: CT28, CT46. (EXTEND wave 87.) Progress 2026-10-17: 3d997539 rehearsal on a seeded 50-record bundle names all three gaps, 58-record matrix still 7 refusals, output identical x2, provenance tests green (run 39064454169); left: CT28 lock. Landed 1c2e0ed3. The seeded 50-record rehearsal is now a test (CT52 test in tools/provenance-audit.test.mjs: slots 7, 19, 33 name missing_url, missing_author, bad_sha and nothing else, same twice); matrix re-checked: 75 records, 3 refusals (bad_name on over-long fighter names, open for CT28), 0 sha_drift after CT82; cargo test --locked -p engine-assets provenance PASS run 39101397483.
-- [ ] CT54 content: combat clip batch-c (16 more toward the CT23 80).
-  Tier A. Size M. Owns `content/fighters/incoming/batch-c/` + sidecars.
-  Accept: 16 clips retarget via CT1 with bind pose verified, digest
-  deduped against the 46 before it (14 canonical + batch-a + batch-b);
-  `cargo test --locked -p engine-assets retarget` green; budgets +
-  provenance per file; cook x2 identical; counts toward CT23. Consumer:
-  CT23 receipt, CT24 audit. needs: CT1, CT47. (EXTEND wave 88.)
-- [ ] CT55 content: finisher-pair + death/reaction closure for Tier A.
-  Tier A. Size S. Owns `content/fighters/incoming/finisher/` + sidecars
-  (batch dirs frozen). Accept: finisher pair + death/reaction clips
-  retarget via CT1 with bind pose verified; sidecars carry hit windows;
-  `cargo test --locked -p engine-assets sidecar` green; provenance per
-  file; cook x2 identical; counted by CT58. Consumer: CT23 receipt,
-  CB4/LM2 fixtures. needs: CT24, CT33. (EXTEND wave 88.)
 - [x] CT56 content: urban-war pilot corner through the same pipeline.
   Tier B. Size M. Owns `content/maps/urban-war-pilot/` (1 variant +
   1 corner; `content/maps/` kits frozen). Accept: variant + corner cook
@@ -1128,88 +878,12 @@
   the pilot; provenance per file; cook x2 identical; bundle loads via
   AS1. Consumer: UW39 receipt, Finish B second-game bar. needs:
   CT1, CT2. (EXTEND wave 88.) Landed 769737c9. SP5: SPF1 known-good gate pins corner actors=3 verdict=clean (cargo test --locked -p engine-playtest --lib known_good PASS run 39104843792); CT2 cook + AS1: cargo test --locked -p engine-assets --features import,registry --test it -- pilot_corner PASS run 39107410598 (3 actors cook via cook_gltf_bytes, LOD0 tris equal corner-cook.json, one bundle finishes to the same bytes twice, loads through verify_bundle_bytes with every LOD, a flipped byte is refused; whole suite PASS run 39107761835); no engine code added (one test file); provenance per file in PROVENANCE.md and COOK-RECEIPT.md; corner-cook.json x2 identical. Finding: frozen CT9 report digests no longer equal today's CT2 cook (insula 9c78cdae8762922a vs 09461689054e6bb4), not re-baselined.
-- [ ] CT57 content: night-HDRI torch staging with VRAM report. Tier A.
-  Size S. Owns `content/arena/NIGHT-REPORT.md` (CT53 dressing + day HDRI
-  frozen; no pass code). Accept: night-HDRI + torch staging readable by
-  Q1/RA14; per-map bytes + VRAM posted on the reference GPU with the
-  adapter line; cook x2 identical; golden unchanged. Consumer: Q1
-  captures, RA14 presenter. needs: CT8, CT53. (EXTEND wave 88.)
-- [ ] CT58 content: 80-clip Tier A receipt + set lock. Tier A. Size S.
-  Owns `content/fighters/CLIP-80-RECEIPT.md` (all batch dirs + sidecars
-  frozen). Accept: receipt names 14 canonical + batch-a/b/c + finisher
-  counts against CT23 with digests; CT24/CT43 audits green; CT36
-  consumer fixtures read the counted windows/contacts;
-  `cargo test --locked -p engine-game fighter_bind` green; bytes x2.
-  Consumer: Tier A set lock, CT36 wiring. needs: CT42, CT47, CT54, CT55.
-  (EXTEND wave 88.)
-- [ ] CT59 content: counted-clip consumer proof on the staged fight.
-  Tier A. Size S. Owns `content/fighters/CONSUMER-PROOF.md` (batch dirs +
-  sidecars frozen). Accept: staged 600-tick re-run fires the CT58-counted
-  windows/contacts via CT36; `sidecar` + `fighter_bind` tests green; x2.
-  Consumer CB4/LM2. needs: CT36, CT58. (EXTEND wave 89.)
-- [ ] CT60 content: joint establishing + window-bind capture proof.
-  Tier A. Size S. Owns `content/arena/STAGED-PROOF.md` (CT22 + CT29 JSONs
-  frozen; no pass code). Accept: RA14/WIN6 shows sand, stands, fighters,
-  0 findings, log==pixels (UI4 pattern); `fighter_bind` green; golden
-  unchanged. Consumer RA14/Q1. needs: CT22, CT29. (EXTEND wave 89.)
-- [ ] CT61 content: empty-stands P6 baseline for the CT27 soak. Progress 2026-10-17: f2effc78 SOAK-BASELINE.md payload estimate 236 MiB; left: 8-fighter day capture ms on the GPU.
-  Tier A. Size S. Owns `content/arena/SOAK-BASELINE.md` (CT7 + CT8 bundles
-  frozen). Accept: 8-fighter day capture, 0 findings; CPU/GPU ms + VRAM
-  posted on the reference GPU with adapter+driver lines; cook x2
-  identical. Consumer CT27/CT34/PF13. needs: CT7, CT8, CT51.
-  (EXTEND wave 89.)
-- [ ] CT62 content: district + siege stream staging for the C5 corner.
-  Tier B. Size M. Owns `content/maps/STREAM-REPORT.md` (CT9 kit frozen).
-  Accept: ludus/district/siege probe walks with 0 findings; per-map
-  bytes + VRAM + hitch count on the reference GPU with the adapter
-  line; cook x2 identical; golden unchanged. Consumer C5/WD. needs:
-  CT9. (EXTEND wave 90.)
-- [ ] CT63 content: combat sound list with provenance (Tier A sound list). Progress 2026-10-17: b29e14b0 content/sound/HIT-LIST.md maps every FightCue to a CC0 file or silent; left: the SN10 bridge (parked).
-  Tier A. Size S. Owns `content/sound/HIT-LIST.md` + per-file rows
-  (new dir; no audio code). Accept: every hit/knockdown in the staged
-  fight names a CC0 source with URL+SPDX+author+SHA; SN10 log bridge
-  reads the list; cook x2 identical. Consumer SN10/AU3. needs: CT7.
-  (EXTEND wave 90.)
-- [ ] CT64 content: reacting-crowd staging toward the C3 20k card.
-  Tier C. Size M. Owns `content/crowd/REACT-REPORT.md` (CT25 kit frozen).
-  Accept: staged knockdowns fire crowd reactions (clips + CT63 hooks);
-  20k-impostor P6 numbers on the reference GPU with the adapter line,
-  or the approach is killed with numbers. Consumer C3/CT34. needs:
-  CT25, CT44. (EXTEND wave 90.)
-- [ ] CT65 content: own-capture signature-move pilot (offline only).
-  Tier B. Size S. Owns `content/capture/PILOT-REPORT.md` (new dir;
-  landmark shape parked, never in tick). Accept: 2 phone-video moves
-  baked via CT1 (1e-4/1e-5) with sidecars + EVIDENCE rows; bake x2
-  identical; non-consented sources refused. Consumer CT23/CT31.
-  needs: CT1, CT37. (EXTEND wave 90.)
-- [ ] CT66 content: urban-war full kit after the CT56 pilot proves no fork.
-  Tier B. Size M. Owns `content/maps/urban-war/` (pilot dir frozen).
-  Accept: full corner kit via CT1/CT2 with SP5 placement 0 findings;
-  row fails when CT56 found any engine fork; provenance per file; cook
-  x2 identical; bundle loads via AS1. Consumer UW39/Finish B. needs:
-  CT1, CT2, CT56. (EXTEND wave 90.)
-- [ ] CT67 content: bounded splat-cook spike pilot (spike-first).
-  Tier C. Size S. Owns `content/props/splat/PILOT-RECEIPT.md` (CT40
-  `ai/` frozen). Accept: density-pruned splat set under a per-capture
-  count/byte cap with license + blake3 receipt; bake x2 identical;
-  VX7 reads it or kills it; no tick bytes. Consumer VX7/C3. needs:
-  CT40. (EXTEND wave 90.)
 - [x] CT74 content: PBR/HDRI intake commit-gate for the untracked bytes.
   Tier A. Size S. Owns `content/arena/PBR-INTAKE.md` (intake bytes
   frozen). Accept: every untracked file carries URL+SPDX+author+SHA or
   refusal; committed set cooks x2; `cargo test --locked -p engine-assets
   provenance` green. Consumer CT45/CT57. needs: CT8, CT46.
   (EXTEND wave 92.) Progress 2026-10-17: 3d997539 all 16 untracked content/arena files refused (no provenance row), provenance tests green (run 39064454169); left: committed-set cook x2 once arena_cook.rs is tracked. Landed 1c2e0ed3. The 16 files untracked on 2026-10-17 are committed (fa1f2ff6); the 15 cooked KTX2 maps now carry matrix rows (ambientCG set page, CC0-1.0, author ambientCG, SHA), cook.json and sources/ are listed outside the matrix (content/arena/PBR-INTAKE.md); node --test tools/provenance-audit.test.mjs 9/9 incl. the CT74 test; committed set cooks x2: arena_cook PASS run 39102340252; provenance PASS run 39101397483.
-- [ ] CT75 content: staged-dir triage into the batch digest queue.
-  Tier A. Size S. Owns `content/fighters/incoming/STAGED-TRIAGE.md`
-  (staged dir frozen). Accept: every `staged/` file named keep/refused;
-  kept files deduped against canonical 14; bytes x2. Consumer CT42/CT47.
-  needs: CT1, CT32. (EXTEND wave 92.)
-- [ ] CT76 content: 100STYLE scout spike before the CT37 intake.
-  Tier A. Size S. Owns `content/locomotion/SCOUT-REPORT.md` (scout bake
-  frozen). Accept: 2 motions-only clips via CT1 with sidecars +
-  EVIDENCE; Geno/LAFAN1/QAL refusals green; LM1 reads scout bake; x2.
-  Consumer CT37/CT31. needs: CT1. (EXTEND wave 92.)
 - [x] CT77 content: arena src commit-gate (crate + torch pair). Landed f2effc78. SRC-RECEIPT.md gate.
   Tier A. Size S. Owns `content/arena/SRC-RECEIPT.md` (pair frozen).
   Accept: pair committed only with cook x2 + SP5 0 findings; SHAs +
@@ -1220,12 +894,6 @@
   Accept: names the 1 variant + 1 corner with 0-finding probes +
   bytes/VRAM guess; bytes x2. Consumer CT56/UW39. needs: CT9.
   (EXTEND wave 92.) Landed 90377223. content/maps/PILOT-SCOUT.md names variant district-corner and corner district-corner-01; 0-finding probe = SPF1 known-good gate (cargo test --locked -p engine-playtest --lib known_good PASS run 39104843792, corner actors=3 verdict=clean); 384147 source bytes, 5376 LOD0 tris, VRAM guess 4893353 bytes; cook-corner.mjs x2 leaves corner-cook.json identical; node --test tools/pilot-scout.test.mjs 4/4.
-- [ ] CT79 content: digest-dedupe tool for every intake batch.
-  Tier A. Size S. Owns `content/fighters/tools/dedupe.py` +
-  `DEDUPE-RECEIPT.md` (canonical 14 + batch dirs frozen). Accept:
-  deterministic walk over canonical 14 + batch dirs refuses dupes with
-  names; receipt x2; CT58 counts tool output. Consumer CT58/CT24.
-  needs: CT32, CT42. (EXTEND wave 92.)
 - [x] CT80 content: studio HDRI vendoring for the Q1/WIN9 bin proof.
   Tier A. Size S. Owns `content/incoming/studio_small_09_1k.hdr` +
   provenance row (CT8 kit + `content/arena/hdri/` frozen; no new
@@ -1240,7 +908,7 @@
   ORMs + SHAs; committed set cooks x2 identical; `cargo test --locked
   -p engine-assets provenance` green. Consumer CT45 report, CT74 gate.
   needs: CT26. (Boarded wave 93 from `docs/plan/content.md:281-285`.) Landed 1c2e0ed3. manifest.json re-pinned (4 drifted rows), real-tree test asserts checkManifest clean (node --test tools/arena-report.test.mjs 12/12; --refresh keeps the format); cook x2: cargo test --locked -p engine-assets --features import --test it arena_cook PASS run 39102340252 (two cooks and the committed content/arena/cooked agree byte for byte); cargo test --locked -p engine-assets provenance PASS run 39101397483.
-- [ ] SP33 spatial: fuzzy referring-expression grounding over the
+- [x] SP33 spatial: fuzzy referring-expression grounding over the Landed 9fd5f02. crates/spatial/src/grounding.rs lands the module: a phrase is parsed into terms, every node of the SP3/SP7 graph is scored, and the answer is a ranked list of candidates. Advisory only: ground() reads &[Actor] and returns names, so auto_applied stays 0 and the scene is never written. Numbers on the runner: recall@3=100% recall@1=100% corpus=60 seeded descriptions (bar >= 90%); p95_us=153 worst_us=162 queries=60 (bar <= 1000 us); the bytes of the same actors are equal twice, and equal again when the actor list is reversed, so no map order reaches the answer. Proofs: cargo test -p engine-spatial --lib grounding PASS 5/5 run 39701312459; cargo test -p engine-spatial --lib PASS 418 passed 0 failed 22 ignored run 39702107522; cargo clippy -p engine-spatial --all-targets -- -D warnings PASS run 39701087389; cargo test -p engine2040 --release --test proof_cli default_and_max_seed PASS, golden d57b5c8ae3096614 unchanged, run 39702450642; rustfmt --edition 2021 --check crates/spatial/src/grounding.rs clean; node tools/rust-quality.mjs --owned crates/spatial/src/grounding.rs PASS score 97 (A) 0 regressions; node tools/workspace-check.mjs PASS. Donor: hovsg/HOV-SG, MIT, https://raw.githubusercontent.com/hovsg/HOV-SG/main/LICENSE, LICENSE SHA 7d5b877, read 2026-10-21, ideas-only reimplemented std-only integer-cm, zero bytes vendored.
   SP3/SP7 graph — ranked node candidates, advisory, never auto-apply
   (HOV-SG MIT). Tier A. Size S. Accept: recall@3 >= 90% on 60 seeded
   descriptions, <= 1 ms/query, bytes x2. needs: SP19, SP20.
@@ -1288,12 +956,6 @@
   `crates/spatial/src/place.rs` + `repair.rs`. Accept: `cargo test -p
   engine-spatial --lib conflict_audit` green; digest x2 integer-only;
   golden unchanged. needs: SP38. (PLN future-spatial 2026-09-30.)
-- [ ] BET-SP57 spatial (MOONSHOT, HELD): offline learned conflict
-  predictor, advisory only, never in tick. Tier B. Size S. Owns offline
-  preset only. Accept: `cargo test -p engine-spatial --lib
-  conflict_predictor_agreement` green; 60/60 + 10/10 at identical
-  bytes, else stays held. needs: SP38. (PLN future-spatial
-  2026-09-30; 2026-10-18: SP12 landed, dropped from needs.)
 - [x] SP60 spatial: frame-aware verb baseline tape — 50 seeded Qs Landed ea34de95. digest c65a8802bf9e5249, run 39054437372.
   measured read-only on the frozen v2 substrate. Tier B. Size S. Owns
   fixture hunks beside `crates/spatial/src/relation.rs`. Accept:
@@ -1301,20 +963,6 @@
   per-frame-family counts + digest x2 + step us posted; golden
   unchanged. needs: SP7, SP10. (PLN future-spatial 2026-09-30, HOV-SG
   MIT frame shape.)
-- [ ] SP58 spatial (held on SP20): Subject+World+Viewer cone verb +
-  endpoint answer verb, 50/50 + digest `4802dac9` x2 (boards as SP58
-  once SP20 lands, else SP20 detail, no second row). Tier B. Size S.
-  Owns verb hunks in `relation.rs` + `crates/endpoint`. Accept:
-  `cargo test -p engine-spatial --lib frame_verb` green + endpoint
-  verb test green x2; timing at/under 1 ms; golden unchanged. Kill:
-  gain <10pp, any drift, any float/model in verb. needs: SP20.
-  (PLN future-spatial 2026-09-30, LADDER L426 ACCEPTED.)
-- [ ] BET-SP59 spatial (MOONSHOT, HELD): offline distilled answer
-  policy, advisory only, never a dep, never in tick. Tier B. Size S.
-  Owns offline preset only. Accept: `cargo test -p engine-spatial
-  --lib spatial_answer_agreement` green; 50/50 at identical bytes + 0
-  drift + panel win, else stays held. needs: SP58, SP20.
-  (PLN future-spatial 2026-09-30; 2026-10-18: SP12 landed, dropped.)
 - [x] RA16 render: belt + cache pressure drill — 64-player storm with
   64 MiB live and eviction telemetry. Size S. Owns
   `crates/render/src/uploads.rs`. Accept: `cargo test -p
@@ -1330,26 +978,6 @@
   `crates/render/src/heal.rs`. Accept: `cargo test -p engine-render
   --lib heal` green. needs: RA1, AH2.
   (PLN render-frame.md EXTEND, proposed 2026-09-29.) Verified 2026-10-17: heal tests 57 passed with tier and cache on the runner (run 39072048539).
-- [ ] RA19 render: tier gate at 6 GB — forced-tier refusals, VRAM
-  high-water read, Base/Rt/Ultra intact. Size S. Owns
-  `crates/render/src/tier.rs`. Accept: `cargo test -p engine-render
-  --lib tier` green + reference-GPU stamp. needs: RA8, RT0.
-  (PLN render-frame.md EXTEND, proposed 2026-09-29.)
-- [ ] WIN6b game: staged fight to the presenter — the WIN6a receipt
-  drives arena fight frames with bodies visible and hits readable
-  instead of noise tiles. Tier A. Size S. Owns capture-path
-  hunks beside `crates/game/src/windowed.rs` (WIN1 loop frozen).
-  Accept: one staged 600-tick run emits 4+ frames with fighters
-  visible; RA1 presents with 0 validation errors. needs: WIN6a,
-  RA1. (A7, 2026-10-02.)
-  LATER: parked 2026-10-03 (circus verdict 2: duplicate of WIN6 (same title and accept; WIN6 holds the judge-PASS lane win6-top)); unpark by deleting this line.
-  Correction 2026-10-21: duplicate of WIN6 (SPRINT-01), which is ticked and holds the judge-PASS win6-top work; both own `crates/game/src/windowed.rs`, so nothing is left to build here.
-- [ ] WIN7 game: pad edge hardening — hot-plug pause/resume proof,
-  non-finite deflection rest, 256-code table fuzz over IN1. Tier A.
-  Size S. Owns edge hunks in `crates/game/src/pad.rs`. Accept:
-  `cargo test -p engine-game --lib pad` green. needs: WIN3.
-  (PLN shipping.md EXTEND, proposed 2026-09-29.)
-  LATER: parked 2026-10-03 (circus verdict 2: docs/plan/shipping.md parks shipping (rows stay, no writers unless a bar needs them) and only WIN9 is the bar's exception; this window polish changes no pixel, hash or timing); unpark by deleting this line.
 - [x] WIN8 game: mode-switch last-good drill at lobby load — swaps
   during a 16-slot MP3 lobby keep last-good within one frame.
   Tier A. Size S. Owns drill hunks in `crates/game/src/modes.rs`.
@@ -1384,22 +1012,7 @@
   and the live echo. clippy `--all-targets -- -D warnings` PASS (run
   39214156767); rust-quality engine-game PASS 96 (A), long_fns back at 3 (the
   string rows share `take_string`); golden unchanged (run 39214082788).
-- [ ] GP25 game: play-step follow camera — the endpoint top-down view
-  keeps both fighters framed with the 20 m bounds drawn, fixing the t60
-  edge-clip and t120 opposite-corner splits. Tier B. Size S. Owns
-  follow/bounds hunks beside `crates/game/src/camera.rs` +
-  `camera_feed.rs` (GP24 wiring first). Accept: scripted 600-tick
-  2-fighter tape keeps both in frame 600/600 with no edge clip; bounds
-  visible; sim bytes x2. needs: GP24. (PLN49 R3 reshape; R3 fixtures
-  join GP24's framing proof.)
 - [x] SN11 audio: repeat-last concealment over silent XRUN gaps — heal renders last frame instead of silence. Tier B. Size S. Owns `crates/audio/src/heal.rs` render_silent_frames hunks (mixer frozen). Accept: S1 8kHz 3x4-gap silent edge 0.3387 -> repeat-last 0.0000 (100pc cut, bar 50pc); 0 per-callback allocs; digest x2 identical; consumer render_stereo_into. needs: CQ13. Landed 1a454c22. HoldLastMixer (heal.rs) repeats the last frame over a contended shared-mixer chunk; open_audio opens the device on it. Own 8 kHz tone, three 4-frame gaps: silent edge 0.4619 -> repeat-last 0.0000 (100pc cut, bar 50pc; the spike's 0.3387 is its own tone). Tests repeat_last_removes_the_silent_edge_of_xrun_gaps, repeat_last_run_twice_gives_identical_bits, hold_last_callback_allocates_nothing_on_live_or_gap_chunks, a_gap_before_any_frame_holds_silence_and_odd_tails_stay_zero: engine-audio --lib heal run 39101938469, full engine-audio --no-fail-fast 264+22 passed run 39104877397, clippy -D warnings run 39102103944.
-- [ ] GP26 game: shake A-B bundle — paired jab-vs-super captures on one
-  camera with per-frame shake_offset + trauma in the manifest, closing
-  GP21's missing blind review. Tier B. Size S. Owns manifest/test hunks
-  beside the `crates/game/src/camera.rs` shake stage + `camera_feed.rs`
-  (GP21 stage frozen). Accept: jab <= 1/4 super displacement measured;
-  restore <= 1e-5 every tick; sim x2; playtester small/big call
-  recorded. needs: GP21, GP11. (PLN49 R8 reshape.)
 - [x] EA4 endpoint: bound the door audit — rotation cap + anchor (EA3's Landed 15d91eb2. audit keeps 1024 records plus anchor digest; 100/100 tamper test.
   256 pattern) or budgeted unbounded justification; 100-session tamper
   stays 100/100. Tier A. Size S. Owns `crates/endpoint/src/audit/`
@@ -1426,12 +1039,6 @@
   >= 90% inconsistent caught, 0% FP, brief p95 <= 5 ms; bytes x2.
   Kill: any FP or float in the check. needs: SP3, SP5. (PLN50 wave-49
   WILD card 1; gtsam ideas-only, Eigen never ported.)
-- [ ] BET-SP31 spatial (MOONSHOT, HELD): postings-ledger free-space —
-  O(1) trial-balance re-checks over the SP21 field for SP16 stacking.
-  Tier C. Size M. Accept: 10x re-check speedup with byte-identical
-  replays, else stays held. Kill: no measured lift or replay drift.
-  needs: SP21, SP16. (PLN50 wave-49 WILD moonshot; LMAX ideas-only,
-  UNVERIFIED.)
 - [x] SP49 spatial: smallest-cycle refusal + repair receipt over the SP3 Progress 2026-10-17: relation.rs smallest_cycle + cycle_residuals_cm and the checks.rs relationCycle finding exist (SP28); left: repair.rs has no cycle repair or re-check receipt and no 30 clean / 30 one-cycle corpus.
   graph — explain+repair beside SP28 detect (SayPlan simulator-repair
   shape, datafrog NOT taken). Tier A. Size S. Owns repair hunks beside
@@ -1570,14 +1177,6 @@
   -p engine-playtest --lib spatial_llm_replay` x2 prints one table; verb arm beats raw arm by >= 20 points or
   the row records the kill; a do-nothing arm scores 0. F2P: no LLM figure exists anywhere. P2P: golden
   d57b5c8ae3096614 unchanged. needs: SPR1. Progress 2026-10-18: harness landed 390d65c2 (spatial_eval/llm.rs: 50 seeded questions, raw-brief and door-verb arms, cassette format, KEEP/KILL at 20 points; echo gold 50/50, do-nothing 0, table prints NO MODEL FIGURE); left: record a real model (docs/plan/spatial-llm-ab.md) after SPR1 lands, no model figure exists yet.
-- [ ] SPR5 spatial: footprint-aware placement options - `scene.place` gains `dry_run`; new query kind
-  `place_options` takes the object (real size, yaw) plus the same wants and returns up to k poses with
-  clearance cm, move cm and the wants each satisfies, no write; wall or region filter. Diff: good. Tier A.
-  Size M. Owns `crates/spatial/src/place.rs` (enumerate beside `solve`), `crates/endpoint/src/scene_query.rs`,
-  `crates/endpoint/src/scene_tools.rs`. Accept: `cargo test -p engine-spatial --lib place_options` and `cargo
-  test -p engine-endpoint --features mcp --lib place_dry_run` x2: a 2.0 x 0.9 m couch gets only poses that
-  verify clean, the fixed 0.8 m footprint is gone, dry_run moves neither revision nor digest. F2P:
-  PLACED_SX_M fixed, scene.place always commits. P2P: golden d57b5c8ae3096614 unchanged. needs: AD7.
 - [x] SPR6 spatial: say why a placement failed - each unmet want in a ConflictSet names the blocking object
   ids, the cm it misses by and the nearest near-miss pose (additive fields); the door prints them beside the
   hints. Diff: good. Tier A. Size M. Owns `crates/spatial/src/place.rs`,
@@ -1585,43 +1184,12 @@
   seeded over-constrained intents each list a blocker or wall and a miss in cm per unmet want; the minimal
   subset and the SP56 audit digest are unchanged. F2P: reason is one fixed sentence with counts only. P2P:
   golden d57b5c8ae3096614 unchanged. needs: none. Landed 54bc068f. engine-spatial --lib conflict_blockers 6 passed x2 (runs 39082607426, 39082631778): 20 seeded conflicts each name a wall or the target object and a miss in cm per unmet want (closed-form 960 - hi_n - hi_s and far_lo - near_hi), a taken spot names the object, its plan overlap and the shortest push; engine-spatial --lib 364 passed (run 39082652058), clippy -D warnings (run 39082679548). Door: scene.place `blocked_by` beside the hints; endpoint place_conflict_blockers x2 in --lib 590 passed (run 39084144955), clippy run 39083786193, --test it 57 passed (run 39084304899). ConflictSet.blocks is additive (place/blocker.rs); reason stays one counts-only sentence, the minimal subset, hints and audit digest are unchanged (conflict_audit_baseline, sp38_audit_hunks, canonical_audit_digest_repeats_x2, audit_digest_ignores_blocks); golden d57b5c8ae3096614 untouched (no sim crate calls solve). Left: object wider than the room returns no blocks (the shrink drops every want).
-- [ ] SPR7 spatial: pair sight with the occluder - `scene.query kind=sees anchor=A other=B` answers yes/no,
-  first blocker id and entry point (`ray_first_hit`), a visible fraction from a 5-ray fan (center, head, four
-  corners), and `relation visible_from` delegates to it (one definition). Diff: good. Tier A. Size M. Owns
-  `crates/spatial/src/sight.rs`, `crates/spatial/src/relation.rs`, `crates/endpoint/src/scene_query.rs`.
-  Accept: `cargo test -p engine-spatial --lib sees_pair` x2: 50 seeded pairs match a brute-force oracle, a
-  pillar case names the pillar, half-hidden gives a fraction strictly between 0 and 100, relation and sees
-  never disagree, <= 0.2 ms per pair. F2P: visible returns a row per actor with no blocker; two definitions.
-  P2P: golden d57b5c8ae3096614 unchanged. needs: AD7. Progress 2026-10-18: spatial half landed a2dba030 (engine-spatial --lib 327 passed run 39077306002, clippy run 39077630760); sees::sees_pair (blocker id, entry point, 5-ray fraction) vs an independent oracle, replay x2; left: relation visible_from still does not delegate to sees_pair (two definitions), and the endpoint arm. Progress 2026-10-18 (2): relation visible_from now delegates to sees::sees_pair (755cd907), one visibility definition; relation_visible_from_and_sees_never_disagree over 50 seeded scenes. Endpoint 2026-10-18 (lane A, 5cc241ed): scene.query kind=sees (anchor, other) answers percent seen, rays and a blocker row; query_space_sees_names_the_blocker passed. Progress 2026-10-18 (wave 2): the Accept is met, the tick waits for AD7 (needs). a2dba030 sees.rs, 755cd907 visible_from delegates, 5cc241ed door kind=sees, 9b68ba9f timing. sees_pair_matches_the_oracle_on_50_seeded_pairs (50/50), sees_pair_names_the_pillar_and_half_hidden_reads_strictly_between, relation_visible_from_and_sees_never_disagree (50 seeded scenes) in engine-spatial run 39106576997; 0.319 us per pair (sees_pair_budget_under_a_fifth_of_a_ms --ignored, release, run 39108300340); query_space_sees_names_the_blocker in engine-endpoint --lib 607 passed run 39107175761.
-  Correction 2026-10-21: the Accept passed on the runner (engine-spatial --lib sees_pair: 2 passed, 0 failed, 1 ignored, run 39515251019) and the landing is a2dba030 (sees.rs), with 755cd907 (visible_from delegates) and 5cc241ed (door kind=sees); not ticked because needs AD7 is still open and `node tools/workspace-check.mjs` refuses a ticked row that needs an open one.
-- [ ] SPR8 endpoint: compact answers - `scene.query` and `scene.spatial` accept `format` rows|ids|count and
-  `matched_only`; labels go out once in a legend; `visible` stops returning blocked rows unless asked. Diff:
-  regular. Tier A. Size S. Owns `crates/endpoint/src/scene_query.rs`, `crates/endpoint/src/watch_ledger.rs`.
-  Accept: `cargo test -p engine-endpoint --features mcp --lib query_compact` x2: the same 64-hit `visible`
-  answer shrinks >= 60% in chars with identical digest and ids; the ledger prints chars before and after.
-  F2P: each hit repeats a 52-char label and a reason. P2P: golden d57b5c8ae3096614 unchanged. needs: SPR1. Progress 2026-10-18 (lane A, fc0babc8): query_compact 3 passed: format rows|ids|count and matched_only on scene.query and scene.spatial, visible drops blocked rows by default, the 64-hit visible answer is 8436 chars full, 317 as ids, 586 default, same digest and ids; the ledger posts ans_chars and wire_chars. Left: no separate legend block (the ids format is the label-once form).
-- [ ] SPR9 spatial: rooms and regions as query targets - flood-fill wall boxes into `room_1..n` (door = gap
-  wider than the capsule) with center, area, exits; kinds `in_room`, `room_of`, `exits_of`; wants `inside
-  room:<n>`; brief groups by room. Reuses isovist/navcheck code that has no caller. Diff: hard. Tier B. Size
-  M. Owns `crates/spatial/src/rooms.rs` (new), `crates/spatial/src/lib.rs`,
-  `crates/endpoint/src/scene_query.rs`. Accept: `cargo test -p engine-spatial --lib rooms` x2: a two-room
-  house gives 2 rooms and 1 exit, 50 seeded scenes match hand labels 50/50, digest stable under input order.
-  F2P: no room concept; groups are arena/zone/object. P2P: golden d57b5c8ae3096614 unchanged. needs: AD7. Landed 2026-10-18 755cd907 (engine-spatial --lib 354 passed run 39079745728, clippy -D warnings run 39080141395): rooms.rs find_rooms flood-fills wall boxes into room_1..n with doorway exits (width, neighbours, outside = 0), room_of, exits_of, members; two-room house = 2 rooms 1 exit, 50 seeded scenes match hand labels, order-invariant; left: scene.query kinds in_room/room_of/exits_of, wants inside room:<n>, brief grouping by room (lane A). Progress 2026-10-18 (wave 2): the Accept is met, the tick waits for AD7 (needs). 755cd907 rooms.rs; 39b0e28a door kinds room_of, in_room, exits_of. rooms tests (a_two_room_house_has_two_rooms_and_one_exit, members_are_listed_per_room_and_a_pillar_does_not_split_a_room, fifty_seeded_scenes_match_their_hand_labels) in engine-spatial run 39106576997; query_rooms_name_the_room_its_members_and_its_exit (engine-endpoint --lib 607 passed run 39107175761). Left: wants inside room:<n> and brief grouping by room.
-  Correction 2026-10-21: the Accept passed on the runner (engine-spatial --lib rooms: 7 passed, 0 failed, run 39513546216) and the landing is 755cd907 (rooms.rs), with 39b0e28a (door kinds room_of, in_room, exits_of); not ticked because needs AD7 is still open and `node tools/workspace-check.mjs` refuses a ticked row that needs an open one.
-- [ ] SPR10 spatial: camera framing verb - `scene.frame target=<id> shot=wide|medium|close` returns eye, yaw,
-  pitch, fov that keep the target centered, unoccluded (SPR7 fan) and inside the room, ranked by
-  `compose::score_shot`. Diff: hard. Tier B. Size M. Owns `crates/spatial/src/compose.rs`,
-  `crates/endpoint/src/scene_query.rs`. Accept: `cargo test -p engine-spatial --lib frame_target` x2: 20
-  seeded targets get full-visibility poses with no camera-in-body, ranking agrees with the hand slate
-  (spearman >= 0.7), same bytes twice. F2P: compose scores a shot but never proposes one; no door verb. P2P:
-  golden d57b5c8ae3096614 unchanged. needs: SPR7. Progress 2026-10-18: shot ranking by coverage landed d8f483de (spatial_frame.rs), compose::score_shot not applied yet; left: the endpoint verb (lane A).
 - [x] SPF1 spatial: known-good scene gate with controls - run the full check catalog over every shipped scene (`content/arena/placement.json` + `dressing.json`, `fixtures/games/*`) and pin zero red findings plus the exact list of true yellow ones; each check gets a one-edit mutant of the same scene that must make it fire (a non-physical box under a crate gives no sunken, flipped to physical it does; 52 props x100 give one unit finding). Source: Forge `SpatialRomeLiveTests.cs`, `spatial-train.mjs`. Diff: regular. Tier A. Size S. Owns `crates/playtest/src/spatial_eval/known_good.rs` (the gate landed in `engine-playtest`, not `engine-spatial`). Accept: `node tools/gh-check.mjs cargo test -p engine-playtest --lib known_good` x2 green with identical finding lists; each mutant fires its check and the clean scene does not. F2P: no test runs the catalog over a shipped scene or proves a check still fires on a real one. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 85e29752. spatial_eval/known_good.rs runs all 18 checks over 6 shipped scenes at zero findings, each check fires on a one-edit mutant of the dressed arena scene, boundary near-misses stay silent; runs 39073877167, 39075958087, clippy 39074196530 green. Tick audit 2026-10-19: path/command updated to the `engine-playtest` home; `cargo test -p engine-playtest --lib known_good` 4 passed, run 39232887107.
 - [x] SPF2 spatial: closed-form frame fit - `frame_fit(box_cm, view, fov_deg, aspect_pct, fill_pct, yaw_deg, pitch_deg)` returns eye, look_at, distance, yaw, pitch for seven named views (three_quarter, front, back, side, top_down, third_person, orbit) with integer degree tables and no libm; SPR10's verb will call it. Source: Forge `CaptureFraming.cs` CameraShot. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/frame.rs` (new), one `lib.rs` export line. Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib frame_fit` x2: for 7 views x fov 55/60/65 x aspect 16:9 and 4:3 all 8 corners project inside the frame and the larger axis use is within 1 percent of fill; look_at is the box centre; top_down eye is above and pitch 89; third_person eye sits behind the target yaw; same bytes twice. F2P: nothing proposes a camera pose (`compose.rs` only scores one). P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: frame fit for seven views landed d8f483de (playtest spatial_frame.rs, 6 tests run 39077256919); left: the endpoint verb (lane A). Progress 2026-10-18 (wave 2): frame_fit still lives in playtest spatial_frame.rs in f64; moving it into engine-spatial breaks the sim-crate float ratchet and the Accept names -p engine-spatial --lib frame_fit, so what is left is an integer frame_fit in crates/spatial/src/frame.rs (sin_1k and cos_1k tables, no libm) with the same 7 views x fov x aspect corner test. Landed 3f1a2695. frame_fit 3 passed x2 (gh runs 39142666564, 39142828318); clippy green 39142840019; engine-spatial --lib 387 passed 39142846862.
 - [x] SPF3 spatial: facing-relative wants - `scene.place` accepts `in_front`, `behind`, `left`, `right` with a `[lo,hi]` edge gap in cm against an object's own facing, plus `against_wall` and `on_ground`, solved on the existing 10 cm x 8 yaw grid and checked by the same relation predicate the query uses. Source: Forge `SceneOps.Geometry.cs` PlaceBox. Diff: good. Tier A. Size M. Owns `crates/spatial/src/place.rs`, `crates/endpoint/src/scene_tools.rs` (want grammar). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib place_facing` x2: for 8 anchor yaw octants x 4 words the solved box sits in the named half-plane with edge gap inside the range and `holds(mover, word, anchor)` is true; an impossible gap returns a conflict set; endpoint test places a crate `in_front` of a fixture player in one call. F2P: wants cover supports/on_top_of/inside/next_to/facing only, so "in front of" needs a multi-call guess. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 2026-10-18 755cd907 (engine-spatial --lib 354 passed run 39079745728, clippy -D warnings run 39080141395): place/dir.rs place_dir (named place_ not solve_ for the hot-alloc ratchet) for in_front_of/behind/left_of/right_of with an edge gap range, confirmed by relation::holds, 8 octants x 4 words and an exhaustive scan on 20 seeded rooms; left: scene.place want grammar (lane A); against_wall is the existing NextTo wall want, on_ground not added. Landed 39b0e28a. place_facing_* x3 (8 yaw octants x 4 words land in the named half-plane with the gap in range and holds true, an impossible gap returns a conflict set, exhaustive scan on 20 seeded rooms) in engine-spatial run 39106576997; door scene.place in_front_of|behind|left_of|right_of object:<uuid> [lo,hi] places a crate in front of a fixture player in one call: place_facing_puts_a_crate_in_front_of_the_player_in_one_call (engine-endpoint --lib 607 passed run 39107175761). Left: an on_ground want (against_wall is the existing next_to wall).
 - [x] SPF4 spatial: clearance probe with push gradient - `scene.query kind=clearance anchor=<id> need_cm=<n>` returns the nearest surface gap in cm (negative when boxes overlap), the neighbour id, the unit push direction that opens it, the axis and a kind of exact, upper_bound or narrow, with a holds or fails verdict against need_cm (default 90). Source: Forge `SceneClearanceOps.cs` SurfaceGapDetail. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/index.rs` (surface_gap), `crates/endpoint/src/scene_query.rs` (kind). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib surface_gap` and `-p engine-endpoint --features mcp --lib query_clearance` x2: apart 30 cm on x gives gap 30 push +x; touching gives 0 exact; 12 cm overlap on the shallowest axis gives -12 with push toward the anchor's side; a 30/40 cm corner gap gives 50; moving the anchor by push x (need - gap) makes the same query hold. F2P: `near` returns centre distance only, so a long wall reads far while touching. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: spatial half landed a2dba030 (engine-spatial --lib 327 passed run 39077306002, clippy run 39077630760); measure.rs surface_gap/clearance/measure vs a brute-force oracle on 40 seeded pairs; left: the scene.query kind=clearance arm in scene_query.rs. Endpoint 2026-10-18 (lane A, 5cc241ed): scene.query kind=clearance (anchor, radius_cm as the width needed) answers kind, gap cm and push_pm; query_space_clearance_slide_ground_and_why_hidden passed. Landed a2dba030 (surface_gap, clearance), 5cc241ed (door kind=clearance), 39b0e28a (door proof). surface_gap_pins_the_four_forge_cases and surface_gap_push_makes_the_clearance_hold in engine-spatial run 39106576997; query_clearance_reads_the_gap_the_push_and_holds_after_the_move (30 cm apart gap 30 push +x, touching 0 exact, 12 cm overlap -12, 30/40 corner 50, moved by the push holds; engine-endpoint --lib 607 passed run 39107175761).
 - [x] SPF5 spatial: giantObject relative to the layout - replace the fixed 50 m test with size over the span of the other solid boxes (ground plates and non-physical boxes exempt, fewer than 2 solids silent), keeping the check name and the frozen catalog length 18. Source: Forge `Verbs.Spatial.cs` SpatialRunGiantObject, `SpatialRomeLiveTests.cs`. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/checks.rs` (giantObject block). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib giant_layout` x2: four 2060 cm boundary walls around two props give none; a 50x crate in a 4 m room gives one; a 60 m wall in a 100 m arena gives none; digests of fixtures that held giantObject re-pin with a named receipt. F2P: any element over 50 m is red and an oversized prop under 50 m is never red. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: spatial half landed a2dba030 (engine-spatial --lib 327 passed run 39077306002, clippy run 39077630760); giantObject is relative to the layout (giant_layout_* tests, plus an enclosure exemption beyond the row); left: endpoint check wiring if any. Landed a2dba030. giant_layout_reads_the_layout_not_a_fixed_line and giant_layout_matches_brute_force_on_seeded_scenes in engine-spatial run 39106576997 (four 2060 cm walls around two props none, a 50x crate in a 4 m room one, a 60 m wall in a 100 m arena none); SPATIAL_CHECKS stays 18.
 - [x] SPF6 spatial: slide sweep - `scene.query kind=slide anchor=<id> dir=<+x|-x|+z|-z|up|down|octant> max_range_cm=<n>` returns free_cm, the first blocker id, capped and already_blocked flags, with touching counted as clear and the anchor skipped. Source: Forge `SpatialSweep.cs`, `SceneSolverOps.cs` MeasureSafeMovement. Diff: regular. Tier A. Size S. Owns `crates/spatial/src/slide.rs` (new), `crates/endpoint/src/scene_query.rs` (kind). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib slide` x2: result equals a brute-force 1 cm march on 200 seeded box sets; a face touch is clear; an overlapping start gives 0 and already_blocked; no obstacle gives max_range and capped; shuffling obstacle order gives identical bytes. F2P: the only motion check is the velocity `sweep`; an agent must trial-move to learn the room. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Progress 2026-10-18: spatial half landed a2dba030 (engine-spatial --lib 327 passed run 39077306002, clippy run 39077630760); slide.rs slide and ground_below vs a half-cm march on 200 seeded box sets; left: the scene.query kind=slide arm. Endpoint 2026-10-18 (lane A, 5cc241ed): scene.query kind=slide (anchor, dir, radius_cm as range) answers free cm and the blocker row; bad dir refuses bad_dir with the legal words. Landed a2dba030. slide tests (slide_equals_a_one_cm_march_on_200_seeded_box_sets, touch_is_clear_overlap_is_blocked_and_empty_is_capped, ground_below_matches_a_one_cm_descent) in engine-spatial run 39106576997; door kind=slide landed 5cc241ed (query_space_clearance_slide_ground_and_why_hidden).
-- [ ] SPF7 playtest: Scene IQ collateral and budget bars - add to AD25's eight tasks a collateral bar (no unrelated node moves more than 1 cm on fix_floating, nothing moves more than 200 cm on separate_overlap, zero new overlap pairs), an undo bar (target seen at least 150 cm away, ends within 1 cm), and per-task limits of 20 agent calls and 150000 tokens that exclude harness calls. Source: Forge `eval/scene-iq-checks.mjs`, `scene_iq_*.json`. Diff: regular. Tier A. Size S. Owns `fixtures/scene-iq/` bars and the `crates/playtest/src/spatial_eval.rs` scene-IQ section AD25 creates. Accept: `node tools/gh-check.mjs cargo test -p engine-playtest --lib scene_iq_bars` x2: a fixture fix that also nudges an unrelated node 2 cm FAILs fix_floating; a do-nothing agent FAILs all eight; the reference agent passes all eight; the report prints calls and tokens per task. F2P: no collateral or budget bar exists. P2P: golden d57b5c8ae3096614 unchanged. needs: AD25. Progress 2026-10-18: skipped by lane C, AD25 and its needs (AD7 AD23 AD24 AD28 SP66) are still open.
 - [x] SPF8 spatial: overlap triage by component role - tag each overlap finding intentional (collider with its mesh), deferred (effect markers) or error by `ComponentKind`, never by name; add a z_fight rank (coplanar pairs within 1 cm on one axis, score area over gap, optional frustum filter; Forge uses 0.2 cm but our boxes are integer cm) and sort unplayable kinds (overlap, sunken, burial) first. Source: Forge `SceneSpatialTriage.cs`, `Verbs.SpatialSeated.cs`. Diff: good. Tier A. Size M. Owns `crates/spatial/src/triage.rs` (new), `crates/spatial/src/checks.rs` (tag hunk only). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib triage` x2: a collider co-located with its mesh is intentional and not red; two meshes with the same footprint 0 cm apart give one z_fight ranked above a 1 cm pair, and a 3 cm pair gives none; unplayable findings precede others; a part resting 3 cm in its supporter reads info; input order does not change bytes. F2P: every overlap is red, a collider on its mesh included. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 2026-10-18 755cd907 (engine-spatial --lib 354 passed run 39079745728, clippy -D warnings run 39080141395): triage.rs triage by caller-mapped Role (collider on its mesh intentional, bone pair false positive, marker deferred, seated joint info, unplayable first) and z_fights ranked area/(gap+1) with a frustum id filter, checked against a plane-list oracle; left: endpoint maps ComponentKind to Role and calls them in scene.spatial. Landed 39b0e28a. triage tests (collider_on_its_mesh_is_intentional_and_everything_else_is_judged_by_role, z_fight_ranks_zero_gap_above_one_and_ignores_three, z_fights_match_the_plane_list_oracle_on_seeded_scenes, triage_ignores_input_order) in run 39106576997; door scene.spatial triage=true maps ComponentKind to Role: spatial_triage_reads_a_collider_on_its_mesh_as_intentional (engine-endpoint --lib 607 passed run 39107175761).
 - [x] SPF9 spatial: verdict allow-list - `scene.spatial` takes `allow` rows (finding key, closed verdict, reason required 1..200 chars, rev, expiry), keeps matched findings visible as `suppressed` with the reason and excludes them from the red count; a family learner relaxes one check x family cell after 3 intentional or false_positive verdicts up to level 3 and never relaxes red errors. Source: Forge `SceneSpatialRepair.cs`, `FamilyThresholds.cs`. Diff: good. Tier A. Size M. Owns `crates/spatial/src/verdict.rs` (new), `crates/endpoint/src/scene_tools.rs` (arg). Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib verdict` and `-p engine-endpoint --features mcp --lib spatial_allow` x2: an expired entry stops suppressing; a missing reason refuses naming the field; a fixed verdict never suppresses; 3 verdicts relax level 1 and 12 cap at 3; same rows in any order give one table. F2P: no way to mark a finding intentional, so a deliberate overlap stays red forever. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 39b0e28a. verdict tests x6 in engine-spatial run 39106576997 (expired and fixed never suppress, 3 verdicts relax level 1 and 12 cap at 3, red never relaxes, same rows in any order one table, a missing reason refuses naming the field); door scene.spatial allow rows (check a b|- verdict rev expiry reason): spatial_allow_* x4 in engine-endpoint --lib 607 passed run 39107175761, clippy 39107463215.
 - [x] SPF10 spatial: brief hygiene - fold look-alike objects (same mesh, parent and size) into one counted row, drop colliders that wrap their own mesh into that row, exclude strays and backdrops from the stated extent while listing them with a reason and an inflation ratio, and print the top five problems in plain words. Source: Forge `SceneLook.cs`, `SceneLook.Layout.cs`. Diff: regular. Tier A. Size M. Owns `crates/spatial/src/brief.rs`. Accept: `node tools/gh-check.mjs cargo test -p engine-spatial --lib brief_fold` x2: 40 identical crates give one row with count 40; a 500 m stray crate is excluded with why=stray and the inflation ratio; the 115-object fixture stays inside the byte budget; same bytes in any input order. F2P: every object gets its own row and one stray stretches the extent. P2P: golden d57b5c8ae3096614 unchanged. needs: none. Landed 2026-10-18 755cd907 (engine-spatial --lib 354 passed run 39079745728, clippy -D warnings run 39080141395): fold.rs fold_lookalikes, fold_text, extent_text, problems_in_words as pure functions (brief_fold tests: 40 crates fold to one row, 500 m stray excluded with its inflation, colliders folded into their mesh, same bytes in any order); left: wiring into brief_text and a real 115-object fixture byte check (brief.rs untouched to avoid colliding with SPR1). Landed 39b0e28a. brief_fold x2 in engine-spatial run 39106576997: brief_fold_115_objects_fit_the_default_budget_in_any_order (116 objects, 2 object rows, within 4096 bytes, same bytes reversed), forty_identical_crates_fold_to_one_row, a_500_m_stray_is_excluded_with_its_inflation, a_collider_wrapping_its_mesh_folds_into_the_mesh_row, brief_fold_cuts_whole_rows_and_always_keeps_the_digest, brief_fold_names_the_problems_before_the_rows. Door: scene.brief text is brief_folded (engine-endpoint --lib 607 passed run 39107175761); assistant observe golden re-pinned 45 -> 55 tokens.
@@ -1701,9 +1269,3 @@
   engine-spatial --lib measure_pair` x2: 40 fixtures match a brute-force oracle 40/40, touching within
   tolerance is contact, a poking crate reports the axis and shortfall. F2P: `near` gives distance only. P2P:
   golden d57b5c8ae3096614 unchanged. needs: none. Same lane as SPF4: one clearance/measure verb. Progress 2026-10-18: spatial half landed a2dba030 (engine-spatial --lib 327 passed run 39077306002, clippy run 39077630760); measure.rs measure_pair tests (see SPF4); left: the scene.query measure arm. Endpoint 2026-10-18 (lane A): measure kind not added yet (clearance covers the nearest-gap part). Landed a2dba030 (measure.rs), 39b0e28a (door). measure_pair_matches_brute_force_on_40_seeded_pairs, measure_pair_contact_align_and_contain_read_the_poking_crate, measure_pair_by_id_reads_the_same_boxes_and_refuses_unknown_ids in engine-spatial run 39106576997; door scene.query kind=measure (what=gap|overlap|align|contain, radius_cm is the gap or margin): query_measure_reads_the_gap_and_the_shortfall (engine-endpoint --lib 607 passed run 39107175761). The door fixes tolerance 1 cm, all axes and centers; typed tolerance_cm, axes and reference stay in MeasureArgs.
-- [ ] SPX12 endpoint: egress - `scene.query kind=egress` with start, exits[], capsule_radius_cm returns
-  `all_reachable`, `worst_route_cm`, per-exit route and `bottlenecks[{door_id,width_cm}]` narrowest first.
-  Diff: hard. Tier B. Size M. Owns `crates/endpoint/src/scene_query.rs`, `crates/spatial/src/navcheck.rs`.
-  Accept: `cargo test -p engine-endpoint --lib egress_door` x2: two rooms and one 80 cm door give the door as
-  bottleneck, 20 seeded layouts match a brute-force BFS route within 5 cm, an unreachable exit is listed. F2P:
-  no route length at the door. P2P: golden d57b5c8ae3096614 unchanged. needs: AD20.

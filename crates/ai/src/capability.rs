@@ -16,6 +16,10 @@
 //! The whole view ([`CapabilityView::WHOLE`]) plans [`Choice::PressOn`] with
 //! the two-hand set, so a brain that lost nothing decides as it did before
 //! this module existed.
+//!
+//! The proof reads two one-armed populations: an exhaustive grid over every
+//! reading, and a seeded set drawn from the keyed counter stream, so the same
+//! seeds give the same fixtures on every platform.
 
 use engine_core::Fnv64;
 
@@ -382,6 +386,84 @@ fn move_set_for(view: &CapabilityView) -> MoveSet {
 mod tests {
     use super::*;
     use engine_core::alloc_probe::measure;
+    use engine_core::{CounterCursor, CounterRng};
+
+    /// Seeds of the seeded one-armed fixture sweep.
+    const FIXTURE_SEEDS: [u64; 4] = [2040, 2041, 2042, 2043];
+    /// One-armed readings drawn per seed.
+    const FIXTURES_PER_SEED: usize = 512;
+    /// Lane the witnessed-cut severities come from, so the tape stream never
+    /// shadows the fixture stream.
+    const TAPE_LANE: u64 = 1;
+    /// Cuts in the witnessed-cut tape.
+    const TAPE_CUTS: usize = 16;
+
+    /// One seeded one-armed reading: what a brain sees after it lost a hand.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Fixture {
+        legs: u8,
+        blood_permille: u16,
+        morale_permille: u16,
+        weapon_hands: u8,
+    }
+
+    impl Fixture {
+        /// The capability view this reading is.
+        fn view(self) -> CapabilityView {
+            CapabilityView::quantize(
+                1,
+                self.legs,
+                self.blood_permille,
+                self.morale_permille,
+                self.weapon_hands,
+            )
+        }
+    }
+
+    /// The seeded one-armed readings of one seed, in draw order.
+    fn one_armed_fixtures(seed: u64) -> Vec<Fixture> {
+        let mut cursor = CounterCursor::new(seed);
+        (0..FIXTURES_PER_SEED)
+            .map(|_| {
+                let word = cursor.next_u64();
+                Fixture {
+                    legs: limb_count(word & 0xff),
+                    blood_permille: permille((word >> 8) & 0xffff),
+                    morale_permille: permille((word >> 24) & 0xffff),
+                    weapon_hands: 1 + u8::try_from((word >> 40) & 1).expect("one bit fits in u8"),
+                }
+            })
+            .collect()
+    }
+
+    /// The seeded severities of one witnessed-cut tape, in draw order.
+    fn severity_tape(seed: u64) -> Vec<u16> {
+        let mut cursor = CounterCursor::from_rng(CounterRng::new(seed).fork(TAPE_LANE), 0);
+        (0..TAPE_CUTS)
+            .map(|_| permille((cursor.next_u64() >> 8) & 0xffff))
+            .collect()
+    }
+
+    /// Legs that still stand from a drawn byte: 0, 1 or 2.
+    fn limb_count(byte: u64) -> u8 {
+        u8::try_from(byte % 3).expect("a byte under three fits in u8")
+    }
+
+    /// A permille reading from a drawn word: 0..=1000.
+    fn permille(word: u64) -> u16 {
+        u16::try_from(word % 1_001).expect("a word under 1001 fits in u16")
+    }
+
+    /// The reasons each verb may carry; a plan outside the table is a bug.
+    fn legal_reasons(choice: Choice) -> &'static [Reason] {
+        match choice {
+            Choice::PressOn => &[Reason::Whole, Reason::OneLeg],
+            Choice::DropWeapon => &[Reason::LostHand],
+            Choice::OneHand => &[Reason::LostHand],
+            Choice::Retreat => &[Reason::NoLegs, Reason::Bleeding],
+            Choice::Yield => &[Reason::NoHands, Reason::MoraleBroken],
+        }
+    }
 
     #[test]
     fn shipped_table_validates_and_digests_stably() {
@@ -513,6 +595,157 @@ mod tests {
         assert!(fighting > 0, "some one-armed fixtures still fight");
     }
 
+    /// Accept, seeded: the same 99% bar over a seeded one-armed population,
+    /// drawn from the keyed counter stream so the set is reproducible.
+    #[test]
+    fn seeded_one_armed_fixtures_switch_to_one_hand_moves() {
+        let table = CapabilityTable::v1();
+        let mut armed = 0u32;
+        let mut one_hand = 0u32;
+        let mut fighting = 0u32;
+        let mut drop = 0u32;
+        let mut yielded = 0u32;
+        let mut retreated = 0u32;
+        let mut digest = Fnv64::new();
+        for seed in FIXTURE_SEEDS {
+            for fixture in one_armed_fixtures(seed) {
+                let view = fixture.view();
+                let plan = react(&table, &view);
+                armed += 1;
+                // The reading itself, in draw order: same set, same digest.
+                digest.write_u8(1);
+                digest.write_u8(fixture.legs);
+                digest.write_u16(fixture.blood_permille);
+                digest.write_u16(fixture.morale_permille);
+                digest.write_u8(fixture.weapon_hands);
+                // The accept: a one-armed body moves to the one-hand set.
+                if plan.move_set == MoveSet::OneHand {
+                    one_hand += 1;
+                }
+                match plan.choice {
+                    Choice::DropWeapon | Choice::OneHand => {
+                        fighting += 1;
+                        if plan.drop_weapon {
+                            drop += 1;
+                        }
+                    }
+                    Choice::Yield => yielded += 1,
+                    Choice::Retreat => retreated += 1,
+                    Choice::PressOn => panic!("a one-armed body pressed on with both hands"),
+                }
+                assert!(
+                    legal_reasons(plan.choice).contains(&plan.reason),
+                    "{view:?} planned {:?} with the reason {:?}",
+                    plan.choice,
+                    plan.reason
+                );
+            }
+        }
+        let permille = one_hand * 1_000 / armed;
+        println!(
+            "seeded one-armed fixtures={armed} one-hand move set={one_hand} \
+             ratio={permille} permille fighting={fighting} drop={drop} \
+             yielded={yielded} retreated={retreated} digest={:016x}",
+            digest.finish()
+        );
+        assert!(
+            permille >= 990,
+            "one-hand move set ratio {permille} permille is under 99%"
+        );
+        assert_eq!(
+            one_hand, armed,
+            "every one-armed body moves to the one-hand set"
+        );
+        assert!(fighting > 0, "some seeded one-armed fixtures still fight");
+        assert!(
+            yielded > 0,
+            "the seeded set reaches the broken-morale yield"
+        );
+        assert!(retreated > 0, "the seeded set reaches the wounded retreat");
+    }
+
+    /// The second arm of the accept: among the one-armed fixtures still in
+    /// the fight, every one fights the one-hand set.
+    #[test]
+    fn seeded_one_armed_fixtures_still_fighting_use_the_one_hand_set() {
+        let table = CapabilityTable::v1();
+        let mut in_fight = 0u32;
+        let mut one_hand = 0u32;
+        let mut drop = 0u32;
+        for seed in FIXTURE_SEEDS {
+            for fixture in one_armed_fixtures(seed) {
+                let view = fixture.view();
+                let plan = react(&table, &view);
+                // "Still in the fight": the body can stand, still has blood
+                // and its morale is not broken, so the switch is the live
+                // question for the planner.
+                if fixture.morale_permille <= table.morale_break
+                    || fixture.legs == 0
+                    || fixture.blood_permille <= table.blood_retreat
+                {
+                    continue;
+                }
+                in_fight += 1;
+                assert_eq!(
+                    plan.move_set,
+                    MoveSet::OneHand,
+                    "{view:?} kept the two-hand set"
+                );
+                assert_eq!(plan.reason, Reason::LostHand);
+                assert!(
+                    matches!(plan.choice, Choice::DropWeapon | Choice::OneHand),
+                    "{view:?} planned {:?} instead of a one-hand move",
+                    plan.choice
+                );
+                one_hand += 1;
+                if plan.drop_weapon {
+                    drop += 1;
+                }
+            }
+        }
+        let permille = one_hand * 1_000 / in_fight;
+        println!(
+            "seeded one-armed still fighting={in_fight} one-hand={one_hand} \
+             ratio={permille} permille drop={drop}"
+        );
+        assert!(
+            in_fight > 0,
+            "the seeded set has no fighter still in the fight"
+        );
+        assert!(
+            permille >= 990,
+            "one-hand ratio {permille} permille is under 99%"
+        );
+        assert_eq!(one_hand, in_fight);
+        assert!(
+            drop > 0,
+            "some still-fighting fixtures drop the two-hand weapon"
+        );
+    }
+
+    /// The seeded set is the same set on every run, and a different seed
+    /// gives a different set.
+    #[test]
+    fn seeded_fixtures_replay_identically() {
+        for seed in FIXTURE_SEEDS {
+            let first = one_armed_fixtures(seed);
+            let second = one_armed_fixtures(seed);
+            assert_eq!(first, second, "seed {seed} drew two different sets");
+        }
+        let a = one_armed_fixtures(FIXTURE_SEEDS[0]);
+        let b = one_armed_fixtures(FIXTURE_SEEDS[1]);
+        assert_ne!(a, b, "two seeds drew the same set");
+        // The plan over a set is the same plan on every run.
+        let table = CapabilityTable::v1();
+        let plans = |fixtures: &[Fixture]| {
+            fixtures
+                .iter()
+                .map(|fixture| react(&table, &fixture.view()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(plans(&a), plans(&one_armed_fixtures(FIXTURE_SEEDS[0])));
+    }
+
     /// Accept: the morale rule replays x2 and a witnessed cut can break it.
     #[test]
     fn morale_rule_replays_exactly() {
@@ -546,6 +779,51 @@ mod tests {
         assert_eq!(witness_cut(&table, 0, 1_000), 0);
     }
 
+    /// Accept, seeded: the morale rule over a seeded witnessed-cut tape
+    /// replays x2 to the same hash, and a witnessed cut can break it.
+    #[test]
+    fn seeded_morale_tape_replays_exactly() {
+        let table = CapabilityTable::v1();
+        let tape = severity_tape(FIXTURE_SEEDS[0]);
+        let run = || {
+            let mut morale = 600u16;
+            let mut h = Fnv64::new();
+            for severity in &tape {
+                morale = witness_cut(&table, morale, *severity);
+                h.write_u16(morale);
+            }
+            (
+                morale,
+                h.finish(),
+                react(&table, &CapabilityView::quantize(2, 2, 1_000, morale, 2)),
+            )
+        };
+        let (morale_a, digest_a, plan_a) = run();
+        let (morale_b, digest_b, plan_b) = run();
+        assert_eq!((morale_a, digest_a, plan_a), (morale_b, digest_b, plan_b));
+        println!(
+            "seeded morale tape cuts={} end={morale_a} digest={digest_a:016x}",
+            tape.len()
+        );
+        // The tape breaks the will: the fighter yields at the end.
+        assert_eq!(morale_a, 0, "the seeded tape empties neutral morale");
+        assert_eq!(plan_a.choice, Choice::Yield);
+        assert_eq!(plan_a.reason, Reason::MoraleBroken);
+        // The tape is the same tape on every run.
+        assert_eq!(tape, severity_tape(FIXTURE_SEEDS[0]));
+        assert_ne!(tape, severity_tape(FIXTURE_SEEDS[1]));
+        // A witnessed cut at the break line breaks it outright.
+        let broken = witness_cut(&table, table.morale_break + 100, 1_000);
+        assert!(
+            broken <= table.morale_break,
+            "a full witnessed cut must break the morale"
+        );
+        assert_eq!(
+            react(&table, &CapabilityView::quantize(2, 2, 1_000, broken, 2)).reason,
+            Reason::MoraleBroken
+        );
+    }
+
     /// Accept: every choice carries a debug reason, and each verb is reachable.
     #[test]
     fn every_choice_carries_a_debug_reason() {
@@ -562,6 +840,13 @@ mod tests {
                             let plan = react(&table, &view);
                             let text = plan.reason.as_str();
                             assert!(!text.is_empty(), "{view:?} planned without a reason");
+                            assert!(text.len() <= 32, "{view:?} carries a long reason: {text}");
+                            assert!(
+                                legal_reasons(plan.choice).contains(&plan.reason),
+                                "{view:?} planned {:?} with the reason {:?}",
+                                plan.choice,
+                                plan.reason
+                            );
                             seen[choice_slot(plan.choice)] = true;
                             if !reasons.contains(&text) {
                                 reasons.push(text);

@@ -1080,7 +1080,7 @@ mod tests {
             0.6,
             1.8,
             0.4,
-            3.1415927,
+            std::f32::consts::PI,
             None,
         );
         add(21, "iron_spear", 8.0, 2.0, 2.0, 0.1, 0.4, 0.1, 0.0, None);
@@ -1323,8 +1323,10 @@ mod tests {
     /// True when the class tags of the node name the word, or share one.
     fn tag_says(actor: &Actor, word: &str) -> bool {
         let tags = tag_lift::lift_label(&actor.name);
-        if tags.iter().any(|tag| *tag == word) {
-            return true;
+        for tag in &tags {
+            if *tag == word {
+                return true;
+            }
         }
         tag_lift::lift_label(word)
             .iter()
