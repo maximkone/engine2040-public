@@ -46,6 +46,8 @@ pub mod m1;
 /// Cross-architecture golden matrix: one digest row per machine (HS2).
 pub mod matrix;
 pub mod museum;
+/// Anti-vacuity control on the digest gates: refuse digests that never read the sim.
+pub mod not_vacuous;
 pub mod online_soak;
 /// Rapier ragdoll fall tape for the golden matrix: per-tick body digests (WEB3).
 #[cfg(feature = "ragdoll")]

@@ -12,6 +12,7 @@ mod materials;
 mod receipt;
 mod sever;
 mod tether;
+mod tunnel;
 mod verbs;
 
 use super::*;
@@ -104,6 +105,7 @@ fn generous() -> Caps {
         statics: 16,
         solver_iterations: 4,
         ccd_substeps: 1,
+        soft_ccd_mm: 0,
         blast_bodies: 4096,
         impact_bodies: 4096,
         tethers: 64,

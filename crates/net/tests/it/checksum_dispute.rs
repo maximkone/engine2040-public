@@ -61,7 +61,9 @@ impl DisputeQueue {
     fn observe<S: SimTick>(&mut self, session: &P2pSession<S>, frame: u32, peer: u64) {
         match session.check_desync(frame, peer) {
             Ok(()) => {}
-            Err(RollbackError::Desync { frame, local, peer }) => {
+            Err(RollbackError::Desync {
+                frame, local, peer, ..
+            }) => {
                 self.push(ChecksumEvent { frame, local, peer });
             }
             Err(other) => panic!("unexpected checksum probe refusal: {other}"),

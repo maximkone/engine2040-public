@@ -352,6 +352,13 @@ pub fn render_report() -> String {
     } else {
         format!("golden {golden:016x}: MISMATCH want {GOLDEN_600:016x}\n")
     };
+    // Anti-vacuity control on the scope the golden compares: if a stub ever
+    // replaces the digest, this line says VACUOUS instead of the report
+    // silently claiming match.
+    let gate_line = match crate::not_vacuous::control(crate::not_vacuous::legacy_scope) {
+        Ok(()) => "digest gate: control passed (the digest moves with the sim)\n".to_string(),
+        Err(vacuity) => format!("digest gate: VACUOUS ({vacuity})\n"),
+    };
     let proof_first = proof_corpus_digest();
     let proof_second = proof_corpus_digest();
     let proof_line = format!(
@@ -387,7 +394,7 @@ pub fn render_report() -> String {
         }
     );
     format!(
-        "A9 recorded chaos + fuzz run\nseed: {A9_SEED}\n{golden_line}\
+        "A9 recorded chaos + fuzz run\nseed: {A9_SEED}\n{golden_line}{gate_line}\
          chaos: {} faults (healed {healed}, quarantined {quarantined}, \
          unsupported {unsupported}, injection-failed {broken})\n\
          record calls: {} (bounded retry over load-hit wall-clock bars)\n\

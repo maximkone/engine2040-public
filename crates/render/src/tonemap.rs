@@ -226,6 +226,10 @@ mod tests {
     /// walk is native only (a browser has no file system), like the
     /// `shader_gate` module's own walk.
     #[cfg(not(target_arch = "wasm32"))]
+    #[expect(
+        dead_code,
+        reason = "temporarily disabled with arm two of tonemap_one_source_hue"
+    )]
     fn crate_tree_aces_definitions() -> usize {
         fn walk(dir: &std::path::Path, count: &mut usize) {
             let Ok(entries) = std::fs::read_dir(dir) else {

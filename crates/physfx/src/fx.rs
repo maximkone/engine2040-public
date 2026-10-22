@@ -545,6 +545,12 @@ impl PhysFx {
             .angular_damping(material.angular_damping())
             .user_data(u128::from(index))
             .build();
+        // Soft CCD (rapier 0.36): the narrow phase looks this far ahead of the body, so a fast
+        // limb stops at another body instead of passing through it. Zero on the tier without it.
+        let soft_ccd = self.caps.soft_ccd_m();
+        if soft_ccd > 0.0 {
+            body.set_soft_ccd_prediction(soft_ccd);
+        }
         body.set_rotation(
             Rotation::from_xyzw(at.rot[0], at.rot[1], at.rot[2], at.rot[3]),
             false,

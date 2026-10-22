@@ -50,6 +50,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use engine_core::Fnv64;
 
+use crate::desync::DesyncReport;
+
 /// Maximum P2P rollback depth (predict repeat-last, resim on mispredict).
 /// 128 slots: the GGRS input-queue school length, reimplemented std-only.
 pub const MAX_P2P_ROLLBACK: usize = 128;
@@ -729,6 +731,10 @@ pub enum RollbackError {
         local: u64,
         /// Peer-claimed hash.
         peer: u64,
+        /// What this session held at that tick: per-side digests plus the
+        /// one-bit [`DesyncReport::inputs_agree`] that says whether the
+        /// wire is exonerated or the sim is named.
+        report: DesyncReport,
     },
     /// Seat token mismatch on a guarded confirm; state unchanged.
     BadSeat { frame: u32, want: u64, got: u64 },
@@ -749,9 +755,14 @@ impl std::fmt::Display for RollbackError {
                 write!(f, "future frame: frame {frame}, current {current}")
             }
             Self::UnknownFrame(frame) => write!(f, "unknown frame {frame}"),
-            Self::Desync { frame, local, peer } => write!(
+            Self::Desync {
+                frame,
+                local,
+                peer,
+                report,
+            } => write!(
                 f,
-                "desync at frame {frame}: local {local:#016x} != peer {peer:#016x}"
+                "desync at frame {frame}: local {local:#016x} != peer {peer:#016x}; {report}"
             ),
             Self::BadSeat { frame, want, got } => {
                 write!(f, "bad seat {frame}: want {want:#x} got {got:#x}")
@@ -791,7 +802,8 @@ struct FrameRecord<S> {
 /// (missing remote repeats the last confirmed remote input), and
 /// `confirm_frame` applies the late true remote input with rollback plus
 /// resimulation on mispredict. `check_desync` compares one peer hash against
-/// the tape and refuses loudly on mismatch.
+/// the tape and refuses loudly on mismatch, carrying a
+/// [`crate::desync::DesyncReport`] that names the guilty side.
 pub struct P2pSession<S: SimTick> {
     sim: S,
     frame: u32,
@@ -806,6 +818,7 @@ pub struct P2pSession<S: SimTick> {
     mispredicted: u64,
     max_rollback: usize,
     last_mismatch: Cell<Option<u32>>,
+    last_agreed: Cell<Option<u32>>,
     frontier: u32,
     settled: u32,
     log: VecDeque<[u32; PLAYERS]>,
@@ -836,6 +849,7 @@ impl<S: SimTick> P2pSession<S> {
             mispredicted: 0,
             max_rollback: 0,
             last_mismatch: Cell::new(None),
+            last_agreed: Cell::new(None),
             frontier: 0,
             settled: 0,
             log: VecDeque::new(),
@@ -1327,22 +1341,56 @@ impl<S: SimTick> P2pSession<S> {
         n
     }
 
-    /// Compare one peer hash against the tape. Matches answer `Ok(())`;
-    /// mismatches and unknown frames refuse loudly and change nothing,
-    /// except a mismatch records [`Self::last_mismatch`].
+    /// Compare one peer hash against the tape. Matches answer `Ok(())` and
+    /// move the agreed watermark; mismatches and unknown frames refuse
+    /// loudly and change nothing, except a mismatch records
+    /// [`Self::last_mismatch`] and carries a [`DesyncReport`] built from
+    /// the digests this session already holds (no wire change).
     pub fn check_desync(&self, frame: u32, peer_hash: u64) -> Result<(), RollbackError> {
         match self.spectator_hash_at(frame) {
             None => Err(RollbackError::UnknownFrame(frame)),
-            Some(&local) if local == peer_hash => Ok(()),
+            Some(&local) if local == peer_hash => {
+                self.last_agreed.set(Some(frame));
+                Ok(())
+            }
             Some(&local) => {
                 self.last_mismatch.set(Some(frame));
                 Err(RollbackError::Desync {
                     frame,
                     local,
                     peer: peer_hash,
+                    report: self.desync_report(frame, local, peer_hash),
                 })
             }
         }
+    }
+
+    /// One desync report from data this session already holds: the state
+    /// digests both sides claimed, this side's input digest for the frame,
+    /// the remote input digest only when its true input is settled
+    /// (confirmed, no repeat-last prediction standing), and the last probe
+    /// that agreed strictly below `frame` (`None` otherwise: a later
+    /// agreement is not a watermark below the divergence).
+    fn desync_report(&self, frame: u32, local: u64, peer: u64) -> DesyncReport {
+        // The hash ring and the input ring push and evict together, so a
+        // frame with a tape hash always has its input row.
+        let inputs = self
+            .input_at(frame)
+            .map(|row| DesyncReport::digest_inputs(&row));
+        let settled = match self.was_predicted(frame) {
+            Some(predicted) => !predicted,
+            None => self.queues[1]
+                .get(frame)
+                .is_some_and(|(_, confirmed)| confirmed),
+        };
+        DesyncReport::from_probe(
+            frame,
+            local,
+            peer,
+            inputs,
+            if settled { inputs } else { None },
+            self.last_agreed.get().filter(|&agreed| agreed < frame),
+        )
     }
 }
 
@@ -1589,13 +1637,20 @@ mod tests {
         let err = session
             .check_desync(7, good.wrapping_add(1))
             .expect_err("mismatched peer hash must refuse");
-        assert_eq!(
-            err,
-            RollbackError::Desync {
-                frame: 7,
-                local: good,
-                peer: good.wrapping_add(1),
-            }
+        let RollbackError::Desync {
+            frame,
+            local,
+            peer,
+            report,
+        } = err
+        else {
+            panic!("a mismatched peer hash must refuse with Desync");
+        };
+        assert_eq!((frame, local, peer), (7, good, good.wrapping_add(1)));
+        assert_eq!(report.tick, 7, "the report names the divergent tick");
+        assert!(
+            report.inputs_agree(),
+            "run_tape drained every prediction: the wire is exonerated"
         );
         assert_eq!(session.stream(), before, "failed check must change nothing");
         assert_eq!(

@@ -1,10 +1,12 @@
 //! delay: input-delay helpers driven by frame advantage.
 //!
-//! Owner: `engine-net`; consumer: `snapshot.rs`, which pins its hold-back
-//! through [`clamp_delay`] and [`DEFAULT_DELAY`]. Units: frames (`u32`), delay ticks (`u32`), signed frame
-//! advantage (`i32`). Determinism: integer-only stepping (`+ -`, compares,
-//! clamps); no float, no wall clock, no hashing. Errors: inputs clamp
-//! loudly in range (never panic), out-of-range delays pin to
+//! Owner: `engine-net`; consumers: `snapshot.rs`, which pins its hold-back
+//! through [`clamp_delay`] and [`DEFAULT_DELAY`], and `played.rs`, which
+//! paces the client clock through [`ClockPacer`]. Units: frames (`u32`),
+//! delay ticks (`u32`), signed frame advantage (`i32`), slew in permille of
+//! the tick rate (`i32`). Determinism: integer-only stepping (`+ -`,
+//! compares, clamps); no float, no wall clock, no hashing. Errors: inputs
+//! clamp loudly in range (never panic), out-of-range delays pin to
 //! `MIN_DELAY..=MAX_DELAY`.
 //!
 //! Frame advantage is `local_frame - remote_frame`: positive means the
@@ -12,6 +14,19 @@
 //! should drop delay. [`delay_for_advantage`] steps the knob by at most one
 //! tick per call toward the target, so callers drive it once per frame with
 //! the latest advantage.
+//!
+//! Two knobs, two speeds. The input delay is the slow knob: it moves one
+//! tick at a time and only on the *averaged* advantage, never on one
+//! sample. [`AdvantageWindow`] keeps the last [`WINDOW_FRAMES`] samples of
+//! the two peers' confirmed frames and averages them; the average is the
+//! ggrs frame advantage over a 30-frame window.
+//!
+//! [`ClockSlew`] turns that average into a bounded clock slew of at most
+//! [`MAX_SLEW_PERMILLE`] permille (5 percent of the tick rate), and
+//! [`ClockPacer`] applies it: a frame runs 0, 1 or 2 client ticks, always
+//! the next ticks in sequence, so the predicted tick stream never has a
+//! hole and no frame is skipped. The slew is the fast knob; the delay
+//! stays the slow one.
 
 /// Smallest input delay in ticks (render immediately).
 pub const MIN_DELAY: u32 = 0;
@@ -45,6 +60,10 @@ pub fn frame_advantage(local_frame: u32, remote_frame: u32) -> i32 {
 ///
 /// Returns `current` pinned to range when `advantage == target`, `+1` when
 /// ahead, `-1` when behind, then pinned to `MIN_DELAY..=MAX_DELAY`.
+///
+/// The knob is the slow one: it moves one tick per call, and the caller
+/// drives it with the *averaged* advantage ([`AdvantageWindow`]), never with
+/// a single noisy sample.
 #[must_use]
 pub fn delay_for_advantage(current: u32, advantage: i32, target: i32) -> u32 {
     let cur = clamp_delay(current);
@@ -54,6 +73,211 @@ pub fn delay_for_advantage(current: u32, advantage: i32, target: i32) -> u32 {
         cur.saturating_sub(1)
     } else {
         cur
+    }
+}
+
+/// Frames in the advantage window (the ggrs `time_sync.rs` window size).
+pub const WINDOW_FRAMES: usize = 30;
+
+/// Largest clock slew in permille of the tick rate: 5 percent. A slew above
+/// this shows as an animation speed-up, so the cap is the row's kill bar.
+pub const MAX_SLEW_PERMILLE: i32 = 50;
+
+/// Permille of a tick the slew asks for per tick of averaged advantage: one
+/// percent of the tick rate per tick of averaged frame advantage.
+pub const SLEW_PER_ADVANTAGE_PERMILLE: i32 = 10;
+
+/// The averaged advantage inside this many ticks counts as no advantage at
+/// all (the lightyear `sync.rs` error margin): the clock holds its rate
+/// instead of chasing noise.
+pub const SLEW_DEAD_ZONE_TICKS: i32 = 1;
+
+/// The 30-frame advantage window: the confirmed frame of each peer, sampled
+/// once per frame, averaged over the window.
+///
+/// Shape: the ggrs `time_sync.rs` window, reimplemented std-only and
+/// integer-only. The two confirmed frames meet in the middle, so the result
+/// is the signed frame gap between the peers (positive means the local side
+/// is ahead). A partial window counts the zeroed slots, exactly like the
+/// donor, so the average grows smoothly from zero.
+///
+/// Determinism: the same sample sequence gives the same average on every
+/// peer, because the arithmetic is integer-only and the window is a plain
+/// ring. The window is *not* hashed and never touches the sim.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AdvantageWindow {
+    local: [i32; WINDOW_FRAMES],
+    remote: [i32; WINDOW_FRAMES],
+    at: usize,
+    filled: usize,
+}
+
+impl Default for AdvantageWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AdvantageWindow {
+    /// An empty window: every slot reads zero.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            local: [0; WINDOW_FRAMES],
+            remote: [0; WINDOW_FRAMES],
+            at: 0,
+            filled: 0,
+        }
+    }
+
+    /// Sample one frame: the confirmed frame of the local peer and of the
+    /// remote one.
+    pub fn advance(&mut self, local_frame: i32, remote_frame: i32) {
+        self.local[self.at] = local_frame;
+        self.remote[self.at] = remote_frame;
+        self.at = (self.at + 1) % WINDOW_FRAMES;
+        if self.filled < WINDOW_FRAMES {
+            self.filled += 1;
+        }
+    }
+
+    /// Frames sampled so far (never more than [`WINDOW_FRAMES`]).
+    #[must_use]
+    pub fn filled(&self) -> usize {
+        self.filled
+    }
+
+    /// The averaged frame advantage over the window: positive means the
+    /// local side is ahead of the remote one.
+    ///
+    /// The donor averages each side over the whole window and then takes
+    /// the difference; the difference of the sums is the same number without
+    /// the float, and it keeps the sign. The donor halves the difference
+    /// because the two peers share one correction; here each peer runs its
+    /// own clock, so the local side takes the whole difference and the two
+    /// windows stay exact mirrors: the peers' averages are equal and
+    /// opposite, and so are their slews.
+    #[must_use]
+    pub fn average_frame_advantage(&self) -> i32 {
+        let local: i64 = self.local.iter().map(|value| i64::from(*value)).sum();
+        let remote: i64 = self.remote.iter().map(|value| i64::from(*value)).sum();
+        let gap = local - remote;
+        let scaled = gap / i64::try_from(WINDOW_FRAMES).unwrap_or(i64::MAX);
+        i32::try_from(scaled.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
+    }
+}
+
+/// The clock slew: the local tick rate is stretched or squeezed by at most
+/// [`MAX_SLEW_PERMILLE`] permille to close the averaged frame advantage.
+///
+/// Shape: the lightyear `sync.rs` speed controller, reimplemented std-only.
+/// The error (the averaged advantage) is the input; the output is a bounded
+/// relative speed. A positive error (the local side is ahead) slows the
+/// local clock down, so the remote side catches up; a negative error speeds
+/// it up. The error inside [`SLEW_DEAD_ZONE_TICKS`] counts as no error at
+/// all, so the clock holds its rate instead of chasing noise.
+///
+/// The slew is applied as pacing, never as a skip: a frame runs 0, 1 or 2
+/// local ticks, and the tick sequence stays contiguous.
+///
+/// Determinism: integer-only, no float, no wall clock. The same averaged
+/// advantage gives the same slew on every peer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ClockSlew {
+    permille: i32,
+}
+
+impl ClockSlew {
+    /// A slew that holds the clock at its nominal rate.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { permille: 0 }
+    }
+
+    /// The slew that closes `advantage`: positive means the local side is
+    /// ahead, so the clock slows down.
+    #[must_use]
+    pub fn for_advantage(advantage: i32) -> Self {
+        let dead = if advantage.saturating_abs() <= SLEW_DEAD_ZONE_TICKS {
+            0
+        } else {
+            advantage
+        };
+        let permille = dead
+            .saturating_mul(SLEW_PER_ADVANTAGE_PERMILLE)
+            .clamp(-MAX_SLEW_PERMILLE, MAX_SLEW_PERMILLE);
+        Self {
+            permille: -permille,
+        }
+    }
+
+    /// The slew in permille of the tick rate: positive runs the clock
+    /// faster, negative slower, zero holds it.
+    #[must_use]
+    pub const fn permille(&self) -> i32 {
+        self.permille
+    }
+
+    /// The largest slew magnitude this controller can ask for, in permille.
+    #[must_use]
+    pub const fn cap_permille(&self) -> i32 {
+        MAX_SLEW_PERMILLE
+    }
+}
+
+/// The clock pacer: the client tick clock runs at `1 + permille / 1000`
+/// ticks per frame, so a frame runs 0, 1 or 2 client ticks.
+///
+/// The pacer is a permille accumulator, so the rate is exact over a long
+/// run and the remainder never grows. Every tick it hands out is the next
+/// tick in sequence: the predicted stream stays contiguous and no frame is
+/// skipped. The counters are the posted evidence: the largest slew the
+/// pacer ran with and the frames that ran off the nominal rate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ClockPacer {
+    accumulator: i32,
+    max_permille: i32,
+    slewed: u32,
+}
+
+impl ClockPacer {
+    /// A pacer at the nominal rate with no history.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            accumulator: 0,
+            max_permille: 0,
+            slewed: 0,
+        }
+    }
+
+    /// The ticks this frame should run: 0, 1 or 2.
+    ///
+    /// The accumulator keeps the fraction of a tick, so the long-run rate is
+    /// exactly `1 + permille / 1000` ticks per frame. The caller runs the
+    /// ticks in order; the pacer never skips one.
+    pub fn pace(&mut self, slew: &ClockSlew) -> u32 {
+        let total = self.accumulator + 1000 + slew.permille();
+        let ticks = total.div_euclid(1000);
+        self.accumulator = total.rem_euclid(1000);
+        let magnitude = slew.permille().saturating_abs();
+        self.max_permille = self.max_permille.max(magnitude);
+        if ticks != 1 {
+            self.slewed = self.slewed.saturating_add(1);
+        }
+        u32::try_from(ticks).unwrap_or(0)
+    }
+
+    /// The largest slew magnitude the pacer ran with, in permille.
+    #[must_use]
+    pub const fn max_permille(&self) -> i32 {
+        self.max_permille
+    }
+
+    /// The frames that ran off the nominal one-tick rate.
+    #[must_use]
+    pub const fn slewed_frames(&self) -> u32 {
+        self.slewed
     }
 }
 
@@ -110,6 +334,120 @@ mod tests {
     fn default_delay_matches_session_ticks() {
         assert_eq!(DEFAULT_DELAY, crate::session::INPUT_DELAY_TICKS);
         assert_eq!(DEFAULT_DELAY, 2);
+    }
+
+    #[test]
+    fn window_averages_thirty_frames_and_ignores_one_spike() {
+        // The window is the donor's: 30 samples, one per frame. A single
+        // spike moves the average by one part in thirty, so the knob never
+        // steps on one noisy sample.
+        let mut window = AdvantageWindow::new();
+        assert_eq!(window.filled(), 0);
+        assert_eq!(window.average_frame_advantage(), 0);
+        for _ in 0..WINDOW_FRAMES {
+            window.advance(100, 100);
+        }
+        assert_eq!(window.filled(), WINDOW_FRAMES);
+        assert_eq!(window.average_frame_advantage(), 0);
+        // One spike of ten ticks: the average moves by ten parts in thirty.
+        window.advance(110, 100);
+        assert_eq!(window.average_frame_advantage(), 0);
+        // Thirty spikes: the average reads the whole gap.
+        for _ in 0..WINDOW_FRAMES {
+            window.advance(110, 100);
+        }
+        assert_eq!(window.average_frame_advantage(), 10);
+    }
+
+    #[test]
+    fn window_ring_keeps_the_last_thirty_samples() {
+        let mut window = AdvantageWindow::new();
+        for _ in 0..(WINDOW_FRAMES * 2) {
+            window.advance(50, 40);
+        }
+        assert_eq!(window.filled(), WINDOW_FRAMES);
+        assert_eq!(window.average_frame_advantage(), 10);
+    }
+
+    #[test]
+    fn mirrored_windows_give_opposite_slews() {
+        // The symmetry the row asks for: both peers sample the same frames,
+        // so their windows are exact mirrors and their slews are equal and
+        // opposite. The local side ahead slows its clock down; the remote
+        // side, behind, speeds its clock up.
+        let mut local = AdvantageWindow::new();
+        let mut remote = AdvantageWindow::new();
+        for step in 0..WINDOW_FRAMES {
+            let mine = 100 + i32::try_from(step).unwrap_or(0);
+            let theirs = 96 + i32::try_from(step).unwrap_or(0);
+            local.advance(mine, theirs);
+            remote.advance(theirs, mine);
+        }
+        assert_eq!(local.average_frame_advantage(), 4);
+        assert_eq!(remote.average_frame_advantage(), -4);
+        let mine = ClockSlew::for_advantage(local.average_frame_advantage());
+        let theirs = ClockSlew::for_advantage(remote.average_frame_advantage());
+        assert_eq!(mine.permille(), -40);
+        assert_eq!(theirs.permille(), 40);
+        assert_eq!(mine.permille(), -theirs.permille());
+    }
+
+    #[test]
+    fn slew_holds_inside_the_dead_zone_and_stops_at_the_cap() {
+        // The lightyear error margin: one tick of error is no error.
+        assert_eq!(ClockSlew::for_advantage(0).permille(), 0);
+        assert_eq!(ClockSlew::for_advantage(1).permille(), 0);
+        assert_eq!(ClockSlew::for_advantage(-1).permille(), 0);
+        // Ahead means slow down; behind means speed up.
+        assert_eq!(ClockSlew::for_advantage(2).permille(), -20);
+        assert_eq!(ClockSlew::for_advantage(-2).permille(), 20);
+        // The cap is 5 percent, both ways.
+        assert_eq!(ClockSlew::for_advantage(9).permille(), -MAX_SLEW_PERMILLE);
+        assert_eq!(ClockSlew::for_advantage(-9).permille(), MAX_SLEW_PERMILLE);
+        assert_eq!(
+            ClockSlew::for_advantage(i32::MAX).permille(),
+            -MAX_SLEW_PERMILLE
+        );
+        assert_eq!(
+            ClockSlew::for_advantage(i32::MIN).permille(),
+            MAX_SLEW_PERMILLE
+        );
+        assert_eq!(ClockSlew::new().permille(), 0);
+        assert_eq!(ClockSlew::new().cap_permille(), MAX_SLEW_PERMILLE);
+    }
+
+    #[test]
+    fn pacer_runs_the_nominal_rate_and_never_skips_a_tick() {
+        // At the nominal rate the pacer runs exactly one tick per frame.
+        let mut pacer = ClockPacer::new();
+        let hold = ClockSlew::new();
+        for _ in 0..100 {
+            assert_eq!(pacer.pace(&hold), 1);
+        }
+        assert_eq!(pacer.slewed_frames(), 0);
+        assert_eq!(pacer.max_permille(), 0);
+
+        // A fast clock runs two ticks in one frame and none in the next:
+        // the tick count over the run is exact, and no tick is missing.
+        let mut fast = ClockPacer::new();
+        let speed = ClockSlew::for_advantage(-5);
+        let mut ticks = 0u32;
+        for _ in 0..100 {
+            ticks += fast.pace(&speed);
+        }
+        assert_eq!(ticks, (100 + 100 * speed.permille() / 1000) as u32);
+        assert_eq!(fast.max_permille(), 50);
+        assert!(fast.slewed_frames() > 0);
+
+        // A slow clock runs one tick and holds one frame: the tick count
+        // over the run is exact too, and the stream never has a hole.
+        let mut slow = ClockPacer::new();
+        let drag = ClockSlew::for_advantage(5);
+        let mut ticks = 0u32;
+        for _ in 0..100 {
+            ticks += slow.pace(&drag);
+        }
+        assert_eq!(ticks, (100 + 100 * drag.permille() / 1000) as u32);
     }
 
     #[test]

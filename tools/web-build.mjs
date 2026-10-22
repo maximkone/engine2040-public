@@ -46,9 +46,12 @@ export const DIST_FILES = ["index.html", "loader.js", COI_WORKER, "engine.js", "
 // WEB17: the cooked arena kit the played page fetches and stages (`?fight`); cooked offline by
 // `cargo run -p engine-assets --features import --bin arena_bundle`.
 export const KIT_BUNDLE = "assets/arena.e2bundle";
+// WEB6: the cooked fighter rig, the file the page fetches for `?fight`. The
+// entries keep their `cooked/` prefix, so they match `rig_cook::cooked_names`.
+export const RIG_BUNDLE = "assets/fighters.e2bundle";
 // What a published bundle may hold: the files above, the kit bundle and wasm-bindgen's snippets/ folder.
 // The Pages workflow adds the handbook (docs/) and llms.txt for the assembled site.
-export const PUBLIC_FILES = [...DIST_FILES, KIT_BUNDLE];
+export const PUBLIC_FILES = [...DIST_FILES, KIT_BUNDLE, RIG_BUNDLE];
 export const PUBLIC_DIRS = ["snippets/"];
 
 export class BuildError extends Error {}
@@ -239,6 +242,21 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
     const stray = nonPublicFiles(shipped);
     if (stray.length) throw new BuildError(`the build holds ${stray.length} file(s) outside the public list: ${stray.join(", ")}`);
 
+    // WEB17 and WEB6: both content bundles are checked before outDir is touched,
+    // so a missing one leaves the last build standing instead of half writing a
+    // new one. Each is cooked offline; this step ships what the tree holds.
+    const kitSource = join(rootDir, "content", "arena", "kit.e2bundle");
+    if (!existsSync(kitSource)) {
+      throw new BuildError(`missing ${kitSource}: cook it with cargo run -p engine-assets --features import --bin arena_bundle`);
+    }
+    const rigSource = join(rootDir, "content", "fighters", "rig.e2bundle");
+    if (!existsSync(rigSource)) {
+      throw new BuildError(
+        `missing ${rigSource}: cook it with cargo run -p engine-assets --features import --bin rig_cook -- --root content/fighters --out content/fighters, ` +
+          `then pack it with cargo run -p engine-assets --bin e2bundle -- pack content/fighters content/fighters/rig.e2bundle --include cooked/`,
+      );
+    }
+
     // Everything is ready: only now touch outDir.
     rmSync(outDir, { recursive: true, force: true });
     mkdirSync(outDir, { recursive: true });
@@ -251,14 +269,9 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
     writeFileSync(join(outDir, "index.html"), page);
     writeFileSync(join(outDir, "loader.js"), deps.readText(join(rootDir, "crates", "web", "loader.js"))); // QW3/QW12: the page imports it
     writeFileSync(join(outDir, COI_WORKER), worker); // WEB14: the page registers it; 200 on the site is one more deploy check
-    // WEB17: the cooked arena kit, copied whole so the page has one file to fetch. The cook is
-    // offline (`arena_bundle`); this step only ships what the tree holds.
-    const kitSource = join(rootDir, "content", "arena", "kit.e2bundle");
-    if (!existsSync(kitSource)) {
-      throw new BuildError(`missing ${kitSource}: cook it with cargo run -p engine-assets --features import --bin arena_bundle`);
-    }
     mkdirSync(join(outDir, "assets"), { recursive: true });
-    cpSync(kitSource, join(outDir, KIT_BUNDLE));
+    cpSync(kitSource, join(outDir, KIT_BUNDLE)); // WEB17: the cooked arena kit, whole
+    cpSync(rigSource, join(outDir, RIG_BUNDLE)); // WEB6: the cooked rig, its entries under `cooked/`
 
     const files = {};
     let totalBytes = 0;

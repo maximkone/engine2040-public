@@ -437,6 +437,11 @@ pub mod ibl_arena_env;
 /// and staged as a vert strip; consumer is the `crates/game` trail feed.
 pub mod trail;
 
+/// Sword ribbon GPU draw (RL53 slice 2): the staged uniform and strip buffer
+/// the window presenter binds. Window build only; the CPU ring stays std-only.
+#[cfg(feature = "window")]
+pub mod trail_draw_gpu;
+
 /// CPU naga gate over the shipped WGSL (CQ23): every file under `src/shaders`
 /// validates without a GPU, and the window's hot-reload cook refuses an edit
 /// that does not. Needs `shader-validate`; the default graph stays std-only.

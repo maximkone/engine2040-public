@@ -212,13 +212,24 @@ fn chaos_refusals_hold() {
     let err = session
         .check_desync(oldest, good.wrapping_add(1))
         .expect_err("forged peer hash must refuse");
+    let RollbackError::Desync {
+        frame,
+        local,
+        peer,
+        report,
+    } = err
+    else {
+        panic!("a forged peer hash must refuse with Desync");
+    };
     assert_eq!(
-        err,
-        RollbackError::Desync {
-            frame: oldest,
-            local: good,
-            peer: good.wrapping_add(1),
-        }
+        (frame, local, peer),
+        (oldest, good, good.wrapping_add(1)),
+        "desync context stays exact"
+    );
+    assert_eq!(report.tick, oldest, "the report names the divergent tick");
+    assert!(
+        report.inputs_agree(),
+        "every frame here was authored with the true remote input: the wire is exonerated"
     );
     assert_eq!(session.stream(), before, "failed check changes nothing");
     assert_eq!(

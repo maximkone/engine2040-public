@@ -101,3 +101,14 @@ Check before you say it is wired: `camera_arm.rs` says `camera.rs` calls `arm_le
 Do: rest the down pose on the one plane by its lowest vertex and show the `sunk_cm_max` number. Don't: snap bodies to zero, move the sim, or land a sunk fix with no receipt number.
 
 Sources: Gregory, Game Engine Architecture 2nd ed. ch. 11.4, 11.6, 11.10, 11.11, 12.3-12.5; Game Engine Gems 1 ch. 19; Game Engine Gems 3 ch. 10; Lengyel, Foundations of Game Engine Development 1 ch. 3.4; Wolverson, Hands-on Rust ch. 15; game-feel-hitstop-juice v1.0.0.
+
+## Real mocap: Mixamo packs onto our rigs (2026-10-22)
+
+Packs live outside the repo in `C:\forge-media\mixamo\<pack>\` (FBX, T-pose with skin, 60 fps).
+
+- Bake a whole pack for the engine (SOMA-77 NPZ, then the same `motion_bake` as Kimodo clips):
+  `node tools/motion/mixamo.mjs --pack-dir C:\forge-media\mixamo\sword_and_shield --prefix ss [--only slash,block] [--install]`
+  (`MOTION_BAKE_BIN` points at a built `motion_bake` to skip `cargo run`.)
+- Put one clip on a Rocketbox body as a GLB (offline, exact world-rotation transfer, A-pose vs T-pose aligned per bone):
+  `blender -b --factory-startup -P tools/blender/retarget_mixamo.py -- --target <rocketbox.fbx> --textures <dir> --source <clip.fbx> --out <clip.glb> [--in-place] [--render strip.png]`
+- Proof of the transfer: bone directions match Mixamo's own to 0.01 deg on the arms, ~2 deg legs (rest splay), ~7 deg spine (SOMA's curve).

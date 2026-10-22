@@ -1,5 +1,5 @@
 //! clip: baked quantized clips + SoA sampler, tick-fixed. Clamp + cursor + lerp, FNV traj hash.
-use engine_core::Fnv64;
+use engine_core::{quat_mul, Fnv64};
 /// Fixed tick step in seconds. Single owner of the value is `engine_core::DT`.
 pub const TICK_DT: f32 = engine_core::DT;
 #[derive(Clone, Debug)]
@@ -228,6 +228,71 @@ pub fn avg_slip(c: &QClip, foot: usize, ticks: u32) -> f32 {
     }
     acc / (ticks - 1) as f32
 }
+
+/// The average horizontal speed of a foot over the ground, in meters a
+/// second, read from the foot's **world** position.
+///
+/// [`avg_slip`] reads the foot's own track, which is its offset from its
+/// parent: the foot's motion inside the leg, not its motion over the sand.
+/// A foot slides when the whole body travels over a planted foot, so the
+/// slip meter wants the world position. And the world position of a local
+/// clip is the offsets composed down the chain with the joint rotations,
+/// exactly the skinning convention: every joint's offset is turned by its
+/// parent's world rotation before it is added.
+///
+/// `rotations` carries one track per joint; a clip with no rotation lanes
+/// (a version-1 wire) reads as if every rotation were the identity. An
+/// empty skeleton or an out-of-range foot reads 0.0.
+pub fn avg_world_slip(
+    c: &QClip,
+    rotations: &[crate::pose::QuatTrack],
+    skeleton: &crate::contract::Skeleton,
+    foot: usize,
+    ticks: u32,
+) -> f32 {
+    if ticks < 2 || foot >= c.tracks.len() {
+        return 0.0;
+    }
+    // The chain from the root down to the foot, in parent order.
+    let mut chain = Vec::new();
+    let mut at = Some(foot);
+    while let Some(joint) = at {
+        if joint >= skeleton.joints.len() {
+            return 0.0;
+        }
+        chain.push(joint);
+        at = skeleton.joints[joint].parent;
+    }
+    chain.reverse();
+    let world = |time: f32, hint: &mut Cursor| -> [f32; 3] {
+        let mut pos = [0.0f32; 3];
+        let mut rot = [0.0, 0.0, 0.0, 1.0];
+        for joint in &chain {
+            let local = sample_track(&c.tracks[*joint], time, &mut hint.pos[*joint]);
+            let turned = crate::contract::rotate(&local, &rot);
+            pos = [pos[0] + turned[0], pos[1] + turned[1], pos[2] + turned[2]];
+            let local_rot = rotations
+                .get(*joint)
+                .and_then(|track| crate::pose::sample_quat_track(track, time))
+                .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            rot = quat_mul(rot, local_rot);
+        }
+        pos
+    };
+    let mut cur = Cursor::new(c.tracks.len());
+    let mut p = world(0.0, &mut cur);
+    let mut acc = 0.0f32;
+    for k in 1..ticks {
+        let mut t = k as f32 * TICK_DT;
+        if t > c.dur {
+            t = c.dur;
+        }
+        let q = world(t, &mut cur);
+        acc += slip(p, q, TICK_DT);
+        p = q;
+    }
+    acc / (ticks - 1) as f32
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +351,45 @@ mod tests {
         for i in 0..3 {
             assert!((m[i] - [1.0, 2.0, 3.0][i]).abs() < 2e-3, "{m:?}");
         }
+    }
+    #[test]
+    fn world_slip_reads_the_body_travelling_over_a_planted_foot() {
+        // The AM24 residual: a foot slides when the whole body travels over
+        // a planted foot, so the meter wants the foot's world position. The
+        // root track carries a 2 m/s travel, the foot's own track never
+        // moves: avg_slip reads 0, avg_world_slip reads the 2 m/s.
+        let skeleton = crate::contract::Skeleton {
+            joints: vec![
+                crate::contract::Joint {
+                    name: "root".to_string(),
+                    parent: None,
+                },
+                crate::contract::Joint {
+                    name: "foot".to_string(),
+                    parent: Some(0),
+                },
+            ],
+        };
+        let c = bake_clip(vec![
+            bake_track(vec![0.0, 1.0], vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+            bake_track(vec![0.0, 1.0], vec![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+        ]);
+        assert_eq!(avg_slip(&c, 1, 60), 0.0, "the foot's own track never moves");
+        let world = avg_world_slip(&c, &[], &skeleton, 1, 60);
+        assert!(
+            (world - 2.0).abs() < 0.05,
+            "world slip reads the 2 m/s travel, got {world}"
+        );
+        assert_eq!(
+            avg_world_slip(&c, &[], &skeleton, 9, 60),
+            0.0,
+            "a bad foot reads zero"
+        );
+        assert_eq!(
+            avg_world_slip(&c, &[], &skeleton, 1, 1),
+            0.0,
+            "a one-tick window reads zero"
+        );
     }
     #[test]
     fn cursor_eq_seek() {

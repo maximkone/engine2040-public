@@ -245,7 +245,11 @@ the file sizes. Not read: sources.
   rate in prose cannot.
 - `tools/clippy-determinism.toml` (9.7 kB) plus an 8.7 kB `clippy.toml` in each of `amoris-sim`,
   `-script`, `-persist`, `-interface`: one dedicated lint profile for the determinism-critical
-  crates, and the same profile file shipped per crate.
+  crates, and the same profile file shipped per crate. **Correction, checked after I wrote this:**
+  we already have a determinism leg — `node tools/workspace-check.mjs` prints
+  `PASS determinism: no platform float math in simulation code`. So the lint-profile half of this
+  steal is a nicety (per-crate clippy flags beside the leg), and the live half is the committed
+  bench artifact: our build-task pass rate lives in prose, `result.json` makes it diffable.
 
 Lands in: gap D18 (the 10-task suite scored by programmatic referees, pass rate per model — this is
 the artifact format for it), and `tools/rust-quality.mjs` / `.cargo/config.toml` (we cap jobs and

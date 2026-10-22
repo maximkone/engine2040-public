@@ -1,5 +1,5 @@
 # modmap: engine2040
-_43 crates, 1462 Rust files. One line per file: `crate/path` · lines · the file's own leading `//!` line. Read it with Grep (a crate name or a word), never whole. Generated from tracked files by `node tools/modmap.mjs --write`; do not edit by hand._
+_43 crates, 1468 Rust files. One line per file: `crate/path` · lines · the file's own leading `//!` line. Read it with Grep (a crate name or a word), never whole. Generated from tracked files by `node tools/modmap.mjs --write`; do not edit by hand._
 
 ## ai (engine-ai, 40 files, 27992 lines)
 - `ai/src/lib.rs` · 363 · ai: embedded seam (brief -> patch -> run). Typed, no strings; AI never touches sim memory.
@@ -847,8 +847,8 @@ _43 crates, 1462 Rust files. One line per file: `crate/path` · lines · the fil
 - `nav/src/tiles.rs` · 2381 · tiles: versioned dynamic tiles plus flow fields over the grid.
 - `nav/tests/tiles.rs` · 522 · tiles acceptance: breach-to-path, identical bytes, legion steering.
 
-## net (engine-net, 83 files, 58748 lines)
-- `net/src/lib.rs` · 238 · net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta over UDP/QUIC/relay transports (UdpTransport/RelayTransport/SimQuicNet/QuinnEndpoint).
+## net (engine-net, 84 files, 59287 lines)
+- `net/src/lib.rs` · 244 · net: rollback ring + repeat-last predict + input-delay buffer + snapshot delta over UDP/QUIC/relay transports (UdpTransport/RelayTransport/SimQuicNet/QuinnEndpoint).
 - `net/src/ack.rs` · 370 · ack: packet delivery tracking with a 32-bit ack bitfield and a loss rate.
 - `net/src/ack/bout_tests.rs` · 150 · The tracker on the real played-bout path: seats send input ticks, the host
 - `net/src/ack/input.rs` · 153 · Delivery tracking for one client's input stream, built from the bytes the
@@ -870,6 +870,7 @@ _43 crates, 1462 Rust files. One line per file: `crate/path` · lines · the fil
 - `net/src/dedicated.rs` · 2084 · dedicated: headless server with LAN discovery, slot reclaim and AI fill.
 - `net/src/delay.rs` · 228 · delay: input-delay helpers driven by frame advantage.
 - `net/src/delta.rs` · 964 · delta: snapshot deltas and remote interpolation.
+- `net/src/desync.rs` · 465 · desync: a report that names the guilty side of a divergent tick.
 - `net/src/guard.rs` · 604 · guard: input admission screen of the dedicated server.
 - `net/src/handshake.rs` · 1137 · handshake: the session connect handshake, modeled on the netcode 1.02
 - `net/src/heal.rs` · 958 · heal: disconnect/reconnect plus desync resync through the supervisor.
@@ -891,7 +892,7 @@ _43 crates, 1462 Rust files. One line per file: `crate/path` · lines · the fil
 - `net/src/relay_turn.rs` · 301 · TURN allocation discipline: Allocate/Refresh lifetimes, CreatePermission
 - `net/src/replay.rs` · 1498 · Replays: record input tapes with keyframes, theater playback
 - `net/src/replicate.rs` · 1680 · replicate: server-authoritative component replication (2-64 entities).
-- `net/src/rollback.rs` · 2553 · rollback: P2P rollback tape over the sim tick (2 players, 128 slots).
+- `net/src/rollback.rs` · 2608 · rollback: P2P rollback tape over the sim tick (2 players, 128 slots).
 - `net/src/scale.rs` · 2239 · scale: 8-32 fighter hardening (bandwidth caps, priority deltas, soak).
 - `net/src/session.rs` · 2827 · session: LAN session over UDP (server-authoritative arena match).
 - `net/src/session/spear_tests.rs` · 174 · Spear grapple over the session: the button and the spec flag ride the
@@ -915,8 +916,8 @@ _43 crates, 1462 Rust files. One line per file: `crate/path` · lines · the fil
 - `net/src/webtransport/frame.rs` · 97 · frame: the reliable-stream framing both ends of a session share.
 - `net/src/webtransport/server.rs` · 447 · server: WebTransport sessions behind the [`Transport`] trait.
 - `net/src/webtransport/tests.rs` · 575 · In-process WebTransport proofs: a real `wtransport` client pinned to the
-- `net/tests/it/chaos.rs` · 245 · Rollback chaos harness: seeded loss, delay and duplication over the P2P tape.
-- `net/tests/it/checksum_dispute.rs` · 185 · (no //! line)
+- `net/tests/it/chaos.rs` · 256 · Rollback chaos harness: seeded loss, delay and duplication over the P2P tape.
+- `net/tests/it/checksum_dispute.rs` · 187 · (no //! line)
 - `net/tests/it/fork_varying_input.rs` · 172 · Fork-fix: varying-size input encode (length-prefixed, 20/20 decode, 0 desync).
 - `net/tests/it/g20_backroll_diff.rs` · 149 · G-20 backroll 500-tick diff test: rollback tape must equal truth.
 - `net/tests/it/ggrs_loss.rs` · 105 · ggrs loss tape over the netcode session: every 5th remote lost then late-confirmed.
@@ -1158,9 +1159,9 @@ _43 crates, 1462 Rust files. One line per file: `crate/path` · lines · the fil
 - `playtest/tests/family_table_wrap_vectors.rs` · 374 · Family table preset-wrap vectors for readable playtest output.
 - `playtest/tests/spatial_steer_compare.rs` · 17 · E42b comparison run: steered-vs-random tapes to the planted divert.
 
-## proof (engine-proof, 35 files, 19777 lines)
-- `proof/src/lib.rs` · 1162 · Bounded input-tape replay of the archetype ECS/physics fixture.
-- `proof/src/a9.rs` · 1160 · Recorded A9 chaos + fuzz run: HL2 suite plus FZ1 harness, one seed.
+## proof (engine-proof, 36 files, 20107 lines)
+- `proof/src/lib.rs` · 1164 · Bounded input-tape replay of the archetype ECS/physics fixture.
+- `proof/src/a9.rs` · 1167 · Recorded A9 chaos + fuzz run: HL2 suite plus FZ1 harness, one seed.
 - `proof/src/arena_matrix.rs` · 373 · Arena tape of the golden matrix (DSN2): one fixed 8-fighter rules-v2 duel
 - `proof/src/bin/arena_line.rs` · 59 · Print this machine's arena tape rows for the golden matrix (DSN2): the
 - `proof/src/bin/differential.rs` · 30 · differential: the ship differential tool.
@@ -1184,6 +1185,7 @@ _43 crates, 1462 Rust files. One line per file: `crate/path` · lines · the fil
 - `proof/src/m1.rs` · 240 · MV1 workflow receipt: the M1 harness record, std-only.
 - `proof/src/matrix.rs` · 1017 · Cross-architecture golden matrix for HS2.
 - `proof/src/museum.rs` · 758 · Format museum: stored v1 fixtures still load, migrate and replay.
+- `proof/src/not_vacuous.rs` · 321 · Anti-vacuity control for digest gates: refuse a digest that never read
 - `proof/src/online_soak.rs` · 1117 · Hour-long online soak over the siege harness (ON11).
 - `proof/src/ragdoll_matrix.rs` · 306 · Ragdoll tape of the golden matrix (WEB3): one fixed fall of a 17-bone
 - `proof/src/soak.rs` · 293 · Memory leak onset for soak runs: a least-squares slope with a 95 percent

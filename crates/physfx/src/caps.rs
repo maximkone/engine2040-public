@@ -34,6 +34,10 @@ pub struct Caps {
     pub solver_iterations: usize,
     /// Continuous-collision substeps per step; `0` turns CCD off.
     pub ccd_substeps: usize,
+    /// Soft-CCD look-ahead in millimeters: how far ahead of a fast body the narrow phase looks
+    /// for another body, so the fast one stops at it instead of passing through. `0` turns soft
+    /// CCD off. Only the tier with headroom pays for it.
+    pub soft_ccd_mm: u16,
     /// Bodies one blast may shove: the nearest to its center, the rest stay put.
     pub blast_bodies: usize,
     /// Bodies one projectile impact may shove: the nearest to the hit point.
@@ -59,6 +63,7 @@ impl Tier {
                 statics: 64,
                 solver_iterations: 2,
                 ccd_substeps: 0,
+                soft_ccd_mm: 0,
                 blast_bodies: 24,
                 impact_bodies: 3,
                 tethers: 2,
@@ -71,6 +76,7 @@ impl Tier {
                 statics: 128,
                 solver_iterations: 3,
                 ccd_substeps: 1,
+                soft_ccd_mm: 0,
                 blast_bodies: 48,
                 impact_bodies: 4,
                 tethers: 3,
@@ -83,6 +89,7 @@ impl Tier {
                 statics: 256,
                 solver_iterations: 4,
                 ccd_substeps: 1,
+                soft_ccd_mm: 0,
                 blast_bodies: 96,
                 impact_bodies: 6,
                 tethers: 6,
@@ -95,6 +102,7 @@ impl Tier {
                 statics: 512,
                 solver_iterations: 6,
                 ccd_substeps: 2,
+                soft_ccd_mm: 300,
                 blast_bodies: 192,
                 impact_bodies: 8,
                 tethers: 12,
@@ -121,6 +129,12 @@ impl Tier {
 }
 
 impl Caps {
+    /// The soft-CCD look-ahead in meters, the unit Rapier takes: `0.0` when the tier has soft
+    /// CCD off.
+    pub(crate) fn soft_ccd_m(&self) -> f32 {
+        f32::from(self.soft_ccd_mm) / 1_000.0
+    }
+
     /// A cap table is usable when every limit but the CCD substeps is above zero (a rope needs two
     /// nodes at least).
     pub(crate) fn validate(&self) -> Result<(), Error> {

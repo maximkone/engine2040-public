@@ -236,7 +236,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   gpu_draw_changes_pixels: torch-region mask differs on vs off with 4096 live,
   particle_ms <= 1.0, ghost metric (`post.rs:60`) not worse. F2P: on and off frames
   are byte-equal. P2P: golden unchanged. needs: none.
-- [ ] RL53 render: sword ribbon trail from the integer sweep — no trail code; the Progress 2026-10-17: crates/render/src/trail.rs slice 1 (16-sample TrailRing, trail_ring_bytes_x2_and_tip_matches_sweep_p1, smoothing under 8 cm, modeled trail_ms_budget); left: no draw pass or windup-to-impact window wiring, trail_ms is modeled not measured.
+- [x] RL53 render: sword ribbon trail from the integer sweep — no trail code; the Progress 2026-10-17: crates/render/src/trail.rs slice 1 (16-sample TrailRing, trail_ring_bytes_x2_and_tip_matches_sweep_p1, smoothing under 8 cm, modeled trail_ms_budget); left: no draw pass or windup-to-impact window wiring, trail_ms is modeled not measured. Landed 2296ebf44 (slice 2: GPU draw pass).
   sim yields blade segments (`crates/combat/src/sweep.rs:197-206`). A 16-sample
   ring, Catmull-Rom between ticks, width curve and alpha ramp (Hanabi ribbon,
   GPUTrail), drawn only from windup peak to impact plus 4 ticks; one draw. Diff:
@@ -245,6 +245,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   -p engine-render --lib trail`: ring bytes x2, tip within 1 cm of sweep p1 on a
   staged slash, no segment over 8 cm after smoothing, trail_ms <= 0.15. F2P: no
   trail module. P2P: golden unchanged. needs: none.
+  Evidence: 6 trail tests pass (ring bytes x2, tip within 1 cm, smoothing under 8 cm, trail_ms <= 0.15); 2 trail_draw_gpu tests pass (uniform and strip packing deterministic); cargo check -p engine-render --features window PASS.
 - [ ] RL54 render: the crowd draws 20k spectators in seat sectors with VAT states
   — nothing draws a spectator, and the per-instance CPU cull is budgeted 1 ms per
   1000 (`draw.rs:1384`), 5-50 ms at 50k. Seats never move: cook them into about

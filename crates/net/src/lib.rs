@@ -40,6 +40,12 @@ pub mod courier;
 pub mod dedicated;
 pub mod delay;
 pub mod delta;
+/// Desync reports: when a peer hash refuses at a tick, the report carries
+/// the per-side state and input digests plus the last-agreed watermark, and
+/// one bit (`inputs_agree`) says whether the wire is exonerated or the sim
+/// is named. An unreported tick is never agreement. Report-only: no wire,
+/// tape or golden change. Std-only, integer-only.
+pub mod desync;
 /// Input admission screen of the dedicated server: per-slot refusal
 /// receipts, sanitized admission, lag receipts of attack presses.
 pub mod guard;

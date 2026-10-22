@@ -27,7 +27,7 @@
   "engine-anim": {
    "unwrap": 1,
    "panic_sites": 2,
-   "casts": 109,
+   "casts": 111,
    "allow_no_reason": 0,
    "dead_code_allows": 0,
    "print_in_lib": 0,
@@ -44,7 +44,7 @@
    "waivers": 0,
    "undoc_pub": 27,
    "unsafe": 0,
-   "tests": 230
+   "tests": 508
   },
   "engine-app": {
    "unwrap": 0,
@@ -533,7 +533,7 @@
   "engine-render": {
    "unwrap": 1,
    "panic_sites": 25,
-   "casts": 1042,
+   "casts": 1044,
    "allow_no_reason": 0,
    "dead_code_allows": 0,
    "print_in_lib": 4,
@@ -548,9 +548,9 @@
    "nondet": 0,
    "float_math": 0,
    "waivers": 116,
-   "undoc_pub": 51,
+   "undoc_pub": 50,
    "unsafe": 1,
-   "tests": 1340
+   "tests": 1403
   },
   "engine-save": {
    "unwrap": 0,
@@ -4312,6 +4312,104 @@
    "from": 3422,
    "to": 3453,
    "reason": "OPT35: added uncapped parameter to pick_present_mode and attach_surface methods, plus new test (31 lines)"
+  },
+  {
+   "date": "2026-10-22",
+   "crate": "engine-anim",
+   "from": {
+    "unwrap": 1,
+    "panic_sites": 2,
+    "casts": 109,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 0,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 0,
+    "dup_fns": 0,
+    "passthrough": 5,
+    "long_fns": 0,
+    "big_files": 0,
+    "hot_alloc": 0,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 0,
+    "undoc_pub": 27,
+    "unsafe": 0,
+    "tests": 230
+   },
+   "to": {
+    "unwrap": 1,
+    "panic_sites": 2,
+    "casts": 111,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 0,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 0,
+    "dup_fns": 0,
+    "passthrough": 5,
+    "long_fns": 0,
+    "big_files": 0,
+    "hot_alloc": 0,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 0,
+    "undoc_pub": 27,
+    "unsafe": 0,
+    "tests": 508
+   },
+   "reason": "RL53: fixed f32::from(u32) errors by using as f32 casts (no From impl exists)"
+  },
+  {
+   "date": "2026-10-22",
+   "crate": "engine-render",
+   "from": {
+    "unwrap": 1,
+    "panic_sites": 25,
+    "casts": 1042,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 4,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 12,
+    "dup_fns": 15,
+    "passthrough": 1,
+    "long_fns": 32,
+    "big_files": 6,
+    "hot_alloc": 2,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 116,
+    "undoc_pub": 51,
+    "unsafe": 1,
+    "tests": 1340
+   },
+   "to": {
+    "unwrap": 1,
+    "panic_sites": 25,
+    "casts": 1044,
+    "allow_no_reason": 0,
+    "dead_code_allows": 0,
+    "print_in_lib": 4,
+    "string_errors": 0,
+    "board_ids": 0,
+    "hash_reimpl": 12,
+    "dup_fns": 15,
+    "passthrough": 1,
+    "long_fns": 32,
+    "big_files": 6,
+    "hot_alloc": 2,
+    "nondet": 0,
+    "float_math": 0,
+    "waivers": 116,
+    "undoc_pub": 50,
+    "unsafe": 1,
+    "tests": 1403
+   },
+   "reason": "RL53: trail_draw_gpu module adds packing helpers with as f32 casts (no From impl exists for u32 to f32)"
   }
  ]
 }

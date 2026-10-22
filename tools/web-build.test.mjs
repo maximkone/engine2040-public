@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  BuildError, COI_WORKER, DIST_FILES, KIT_BUNDLE, PUBLIC_DIRS, PUBLIC_FILES, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
+  BuildError, COI_WORKER, DIST_FILES, KIT_BUNDLE, PUBLIC_DIRS, PUBLIC_FILES, RIG_BUNDLE, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
   checkPublic, listFiles, lockedVersion, nonPublicFiles, parseArgs, readCoiWorker, realDeps, renderHtml, sizeSweep,
 } from "./web-build.mjs";
 
@@ -21,6 +21,7 @@ const LOADER = readFileSync(join(REPO, "crates", "web", "loader.js"), "utf8");
 const WORKER = readFileSync(join(REPO, "crates", "web", COI_WORKER), "utf8");
 const LOCK = 'name = "wasm-bindgen"\nversion = "0.2.128"\nsource = "registry+x"\n\nname = "wgpu"\nversion = "30.0.1"\n';
 const KIT = Buffer.from("kit.e2bundle fixture\n"); // WEB17: the cooked arena kit build() copies whole
+const RIG = Buffer.from("rig.e2bundle fixture\n"); // WEB6: the cooked fighter rig, same shape
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 
 // A scratch repo root with the inputs build() reads, and a scratch output directory.
@@ -28,11 +29,13 @@ function scratch(lock = LOCK) {
   const dir = mkdtempSync(join(tmpdir(), "web-build-test-"));
   mkdirSync(join(dir, "crates", "web"), { recursive: true });
   mkdirSync(join(dir, "content", "arena"), { recursive: true });
+  mkdirSync(join(dir, "content", "fighters"), { recursive: true });
   writeFileSync(join(dir, "Cargo.lock"), lock);
   writeFileSync(join(dir, "crates", "web", "index.html"), TEMPLATE);
   writeFileSync(join(dir, "crates", "web", "loader.js"), LOADER);
   writeFileSync(join(dir, "crates", "web", COI_WORKER), WORKER);
   writeFileSync(join(dir, "content", "arena", "kit.e2bundle"), KIT);
+  writeFileSync(join(dir, "content", "fighters", "rig.e2bundle"), RIG);
   return { dir, out: join(dir, "dist", "web"), done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
@@ -97,16 +100,17 @@ test("build writes exactly the dist/web files, with real sizes and hashes in bui
   try {
     const t = toolchain(s.dir, { wasmBytes: 4000 });
     const info = build({ rootDir: s.dir, outDir: s.out, commit: "abc123def456" }, quiet(t.run));
-    assert.deepEqual(listFiles(s.out), [...DIST_FILES, KIT_BUNDLE].sort());
+    assert.deepEqual(listFiles(s.out), [...DIST_FILES, KIT_BUNDLE, RIG_BUNDLE].sort());
     const onDisk = JSON.parse(readFileSync(join(s.out, "build.json"), "utf8"));
     assert.deepEqual(onDisk, info);
-    for (const name of ["index.html", "loader.js", COI_WORKER, "engine.js", "engine_bg.wasm", KIT_BUNDLE]) {
+    for (const name of ["index.html", "loader.js", COI_WORKER, "engine.js", "engine_bg.wasm", KIT_BUNDLE, RIG_BUNDLE]) {
       const bytes = readFileSync(join(s.out, name));
       assert.equal(info.files[name].bytes, bytes.length, name);
       assert.equal(info.files[name].sha256, sha(bytes), name);
       assert.ok(info.files[name].gzipBytes > 0, name);
     }
     assert.ok(readFileSync(join(s.out, KIT_BUNDLE)).equals(KIT), "the kit ships byte for byte");
+    assert.ok(readFileSync(join(s.out, RIG_BUNDLE)).equals(RIG), "the rig ships byte for byte");
     assert.ok(!("build.json" in info.files));
     assert.equal(info.totalBytes, Object.values(info.files).reduce((n, f) => n + f.bytes, 0));
     assert.equal(info.rawWasmBytes, 4000);
@@ -115,6 +119,32 @@ test("build writes exactly the dist/web files, with real sizes and hashes in bui
     assert.equal(info.limitBytes, SIZE_LIMIT_BYTES);
     assert.equal(info.commit, "abc123def456");
     assert.deepEqual(info.tools, { rustc: "rustc 1.97.1 (fake)", wasmBindgen: "0.2.128", wasmOpt: "wasm-opt version 119" });
+  } finally {
+    s.done();
+  }
+});
+
+test("WEB6 and WEB17: a missing content bundle is a named refusal, and the last build stands", () => {
+  const s = scratch();
+  try {
+    const t = toolchain(s.dir);
+    build({ rootDir: s.dir, outDir: s.out, commit: "abc123def456" }, quiet(t.run));
+    const rig = readFileSync(join(s.out, RIG_BUNDLE));
+    // The rig lane is not in the tree: the refusal names both steps to run.
+    rmSync(join(s.dir, "content", "fighters", "rig.e2bundle"), { force: true });
+    assert.throws(
+      () => build({ rootDir: s.dir, outDir: s.out, commit: "abc123def456" }, quiet(t.run)),
+      (e) => e instanceof BuildError && /rig\.e2bundle/.test(e.message) && /bin rig_cook/.test(e.message) && /e2bundle -- pack/.test(e.message),
+      "the message gives the cook and the pack command",
+    );
+    assert.ok(readFileSync(join(s.out, RIG_BUNDLE)).equals(rig), "outDir keeps the build that worked");
+    assert.ok(readFileSync(join(s.out, "index.html"), "utf8").includes('data-commit="abc123def456"'));
+    // The kit is the same shape: a named refusal, not a page without an arena.
+    rmSync(join(s.dir, "content", "arena", "kit.e2bundle"), { force: true });
+    assert.throws(
+      () => build({ rootDir: s.dir, outDir: s.out, commit: "abc123def456" }, quiet(t.run)),
+      (e) => e instanceof BuildError && /bin arena_bundle/.test(e.message),
+    );
   } finally {
     s.done();
   }
@@ -194,7 +224,7 @@ test("QW2: --opt-ab runs -Oz, -Os and -O3 on the same module, ships the smallest
     assert.equal(info.files["engine_bg.wasm"].bytes, 500, "the smallest raw module ships");
     assert.deepEqual(info.wasmOptFlags, ["-Os", ...WASM_OPT_FEATURES]);
     assert.ok(lines.some((l) => /^\[wasm-opt-ab\] -Os raw=500 gzip=\d+$/.test(l)));
-    assert.deepEqual(listFiles(s.out), [...DIST_FILES, KIT_BUNDLE].sort(), "no candidate file leaks into dist/web");
+    assert.deepEqual(listFiles(s.out), [...DIST_FILES, KIT_BUNDLE, RIG_BUNDLE].sort(), "no candidate file leaks into dist/web");
     assert.equal(build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(toolchain(s.dir).run)).wasmOptAb, null, "off by default");
   } finally {
     s.done();

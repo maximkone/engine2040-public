@@ -17,20 +17,26 @@ Board load: 180 ready rows. The open pools: `SPRINT-18-gaps.md` 54, `SPRINT-21-l
 Test depth is not the weak point: every crate above 50 KB has at least 31 unit tests
 (`render` 1403, `net` 570, `assets` 562, `anim` 507, `playtest` 497, `spatial` 445).
 
-## W1 — The picture is not lit, and nothing scores it (pillar 1)
+## W1 — The picture is not lit, and its score does not see it (pillar 1)
 
-- `content/reference/` holds 2 files: `index.json` and `README.md`. Zero reference captures.
-- The machine score exists and has nothing to compare to: `crates/endpoint/src/packs/view.rs:77`
-  (`view.compare`) and `crates/playtest/src/look/ssim2.rs` (SSIMULACRA2, whose header names the verb
-  as its consumer).
+- `content/reference/` is not empty and I was wrong to read it that way. It holds a real reference
+  set: `index.json` with three rows (`native` 1280x720, `web` 640x360, `potato` 320x180), each with a
+  `pixel_fnv` digest, no PNG bytes in git by design, painted by a recipe in
+  `crates/playtest/src/look/reference.rs`. **The problem is the recipe**: its own `source` string
+  says "the stands band over textured sand and two staged fighters". That is a hand-painted stand-in,
+  not a frame any renderer produced. So `view.compare` (`crates/endpoint/src/packs/view.rs:77`) and
+  SSIMULACRA2 (`crates/playtest/src/look/ssim2.rs`) score real captures against a made-up picture,
+  and the look gate can go green without the renderer ever running. Same family as W3, and the fix is
+  the same shape: the reference must be the cooked frame (WEB17 already aims at that).
 - Still open: LF2 (the window lights with IBL), EG12 (ambient, torches, normal and ORM maps),
   FC1 (frame and look), FEEL5 (sparks, blood and dust on a hit).
 - The lit-frame build (gap B7, size L) has no depth and normal prepass, no GTAO, no real post
   chain (bloom, grade, TAA), no particles or decals in the scene.
 
-Cost of fixing: the verb and the metric are done; captures are the missing half. Reference
-captures per tier are hours, not weeks. The denoise and post chain is the big one — see
-`01-big-steals.md` S1 and S2 for a donor that already solved it in WGSL.
+Cost of fixing: the verb and the metric are done; the reference content is the missing half, and it
+is WEB17's job (the page and the window drawing the real cooked fight, not stand-ins). The denoise
+and post chain is the big one — see `01-big-steals.md` S1 and S2 for a donor that already solved it
+in WGSL.
 
 ## W2 — Impact and weight are unimplemented (pillar 1, feel)
 
@@ -39,16 +45,21 @@ FEEL6 (a clash binds and recoils), FEEL4 (armour deflects), FEEL9, FEEL10 (close
 back), FEEL11 (pad rumble) — all open. AM24 still owns the 258-264 pops residual
 (attack 62 / idle 68 / run 128 per 300 frames). The duel reads as two boxes exchanging numbers.
 
-## W3 — A gate can pass by doing nothing (trust)
+## W3 — A gate can pass by doing nothing (trust) — CLOSED 2026-10-22
 
-- `Select-String 'not_vacuous'` over `crates/`: no hit. `crates/proof` has 269 unit tests and no
-  anti-vacuity helper, and no perturbation control (nudge one input, require the digest to move).
+- `Select-String 'not_vacuous'` over `crates/`: no hit (2026-10-22 morning). **Closed the same day**:
+  `crates/proof/src/not_vacuous.rs` (commit `39267b928`) refuses zero steps, a digest at 0, a digest
+  at the FNV-1a offset basis, and a digest that does not move when one velocity bit (1 ULP) changes
+  or the run takes one more tick; proven falsifiable against four fake producers, and the 600-tick
+  golden tape clears the guard. `proof --lib` 193 passed on GitHub.
 - `crates/arena/src/sync.rs:46` names the first diverging *system* out of five fixed ones
   (`world`, `space`, `combat`, `rng`, `ai`). It cannot name the fighter or the component.
-- The golden is the engine's whole claim. A golden that stopped reading the sim would stay green.
+- Was: the golden is the engine's whole claim, and a golden that stopped reading the sim would stay
+  green. It no longer can; what remains is the entity-level name.
 
-This is the cheapest high-value fix in the list (size S) and it is a donor pattern, not a new
-idea: see S4 and the 2026-10-22 survey (`renew`'s `assert_not_vacuous`).
+What is left here: the per-entity slices (the labelled-digest steal from `balaur`, booked today by
+the survey) and a consumer that prints the new verdict. The gate itself now fails if it stops
+reading the sim.
 
 ## W4 — The net layer cannot say whose fault (pillar 4)
 
@@ -57,7 +68,12 @@ idea: see S4 and the 2026-10-22 survey (`renew`'s `assert_not_vacuous`).
   (the only `input_digest` in the tree is the door's brief-stage record,
   `crates/endpoint/src/build_game/replay.rs:92`).
 - ON30 (internet play) and the browser client (gap A3) are open. `crates/net` is the third
-  biggest crate (2.1 MB, 570 tests), so the code is there; the *report* is missing.
+  biggest crate (2.1 MB, 570 tests), so the code is there; the *report* was missing. **Closed the
+  same day**: `crates/net/src/desync.rs` (commit `8369761c4`) carries tick, local peer, per-peer
+  state and input digests, `last_agreed_tick`, `inputs_agree()`, `witnessed()` and a `DesyncVerdict`
+  (sim side / inputs differ / inputs unsettled / unwitnessed), folded locally from the confirmed
+  rows — no wire, codec, snapshot or golden change. Proofs: `net --lib desync` 14 passed,
+  `net --test it` 44 passed. Still open: a consumer that prints it, and the browser transport.
 
 ## W5 — The door budgets in characters, not tokens (pillar 3)
 
@@ -107,10 +123,18 @@ machine's settings is how a rebound key silently changes what a recording reprod
 `crates/audio` (363 tests) and the GPU crowd are parked by owner decision, so they are not
 weaknesses; they are deferred. Listed so a reader does not count them as gaps.
 
-## What I would close first
+## Order of attack, and what actually happened (updated the same day)
 
-1. Reference captures per tier into `content/reference/` (W1): the verb already scores them. Hours.
-2. Anti-vacuity helper plus a one-input perturbation control in `crates/proof` (W3). Size S.
-3. `input_digest` beside the state digest in `crates/net`, one bit `inputs_agree()` (W4). Size S.
-4. The hit-buffer-plus-denoise post chain (W1) from the donors in S1 and S2. Size M-L, in slices.
-5. Re-verify the 23 gap rows against the tree (W8) so the next wave does not re-build them.
+1. **W3 anti-vacuity control — LANDED** `39267b928` (`crates/proof/src/not_vacuous.rs`, 7 tests,
+   `proof --lib` 193 passed on the runner).
+2. **W4 input digest + `inputs_agree()` — LANDED** `8369761c4` (`crates/net/src/desync.rs`, 6 tests,
+   `net --lib desync` 14 passed, `net --test it` 44 passed). No wire, codec or golden change.
+3. **W1 — the reference must be the cooked frame, not a painted stand-in** (WEB17's job). Size M.
+   Blocked today on `crates/render`, which another session has dirty across the post chain
+   (`post_chain.wgsl`, `composite_compute.wgsl`, `tonemap.wgsl`, `forward.wgsl`, `sky.rs`, `fog_fwd.rs`).
+4. **W8 — re-verify the 23 gap rows against the tree** before anyone is sent to build a shipped
+   thing. Size S (a read pass, no code).
+5. **S1 slice one** (hit buffer + à-trous in `crates/render`), **S2** (the wgpu denoiser), **S3/S4**
+   (the door's checks and its generated guide), **S5** (a replay corpus per system), **S6** (the
+   wasm transport): all real, all M or L, and none of them is a day's work. They are not landed, and
+   writing them badly today would cost more than waiting.
