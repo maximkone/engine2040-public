@@ -17,7 +17,9 @@ import {
   childEnv,
   GOLDEN_HASH,
   main,
+  noAdapter,
   parseSmoke,
+  runArena,
   runProof,
 } from "./ship-run.mjs";
 
@@ -36,6 +38,14 @@ const HEADLESS_SMOKE = `arena headless smoke: ticks=30 frames=30 hud_cells=5 hud
 const WINDOW_SMOKE = `arena smoke: ticks=30 frames=30 alpha=1.000 hud_cells=5 hud_quads=3 fight_draws=9 audio="audio muted: no device opened; mixer voices render offline" presenter="presenter surface: Microsoft Basic Render Driver (10.0.1)"`;
 const REAL_GPU_SMOKE = `arena headless smoke: ticks=30 frames=30 hud_cells=5 hud_quads=3 mixed_frames=0 audio="audio muted" presenter="presenter twin: NVIDIA GeForce RTX 3050 (537.13)" display="none"`;
 
+// What a hosted runner with no GPU writes: the window opens, the presenter
+// finds no adapter and the binary exits 1 before any smoke line.
+const NO_ADAPTER_BOOT = `arena backend=auto fallback=dx12 reason=compiled-in default; no pilot report yet
+arena vram budget_mb=7523 usage_mb=0 headroom_mb=7523 dedicated_mb=0
+arena notice: audio muted: no device opened; mixer voices render offline
+arena: presenter error (no wgpu adapter available)
+`;
+
 // A temp folder that goes away with the test.
 function tempDir(t) {
   const dir = mkdtempSync(join(tmpdir(), "ship-run-"));
@@ -49,6 +59,14 @@ const fixedSpawn = (stdout, status = 0) => () => ({ status, stdout, stderr: "" }
 // Two runs in one main() call: the proof answers --verify, the arena plays.
 const twoRuns = (proofOut, arenaOut) => (command, args) => ({
   status: 0,
+  stdout: args.includes("--verify") ? proofOut : arenaOut,
+  stderr: "",
+});
+
+// The same two runs when the arena exits nonzero (a presenter that cannot
+// paint) while the proof stays green.
+const twoRunsStatus = (proofOut, arenaOut, arenaStatus) => (command, args) => ({
+  status: args.includes("--verify") ? 0 : arenaStatus,
   stdout: args.includes("--verify") ? proofOut : arenaOut,
   stderr: "",
 });
@@ -205,6 +223,65 @@ test("a game run with no smoke line makes the CLI red", (t) => {
     io.lines.some((line) => line.startsWith("SHIP-GAME FAIL [GAME_NO_RECEIPT]")),
     io.lines.join("\n"),
   );
+});
+
+// The mirror runner has no wgpu adapter: the arena window opens, the presenter
+// finds no adapter and the binary exits 1 before the smoke line. The row says
+// to name the adapter when the runner cannot present, so this one case is a
+// skip. The proof receipt above still gates the job.
+test("a runner with no adapter names the skip instead of failing the job", (t) => {
+  const dir = tempDir(t);
+  const proof = join(dir, "engine2040.exe");
+  const arena = join(dir, "arena.exe");
+  writeFileSync(proof, "not a real build");
+  writeFileSync(arena, "not a real build");
+  const io = collect();
+  const code = main(
+    ["--proof", proof, "--arena", arena],
+    { ...io, spawn: twoRunsStatus(GOOD, NO_ADAPTER_BOOT, 1) },
+  );
+  assert.equal(code, 0, io.lines.join("\n"));
+  assert.ok(io.lines.includes(`SHIP-RUN tick=600 hash=${GOLDEN_HASH}`), io.lines.join("\n"));
+  assert.ok(
+    io.lines.some((line) => line.startsWith("SHIP-GAME skipped adapter=none reason=no-wgpu-adapter")),
+    io.lines.join("\n"),
+  );
+  assert.ok(
+    io.lines.includes("SHIP-FRAME skipped adapter=none reason=no-wgpu-adapter"),
+    io.lines.join("\n"),
+  );
+  assert.ok(io.lines.some((line) => line.startsWith("SHIP-RUN PASS")), io.lines.join("\n"));
+});
+
+test("the no-adapter skip is narrow: any other arena failure stays red", (t) => {
+  const dir = tempDir(t);
+  const proof = join(dir, "engine2040.exe");
+  const arena = join(dir, "arena.exe");
+  writeFileSync(proof, "not a real build");
+  writeFileSync(arena, "not a real build");
+  const io = collect();
+  const code = main(
+    ["--proof", proof, "--arena", arena],
+    { ...io, spawn: twoRunsStatus(GOOD, "arena: presenter error (surface lost)\n", 1) },
+  );
+  assert.equal(code, 1);
+  assert.ok(
+    io.lines.some((line) => line.startsWith("SHIP-GAME FAIL [GAME_NO_RECEIPT]")),
+    io.lines.join("\n"),
+  );
+  assert.equal(noAdapter("arena: presenter error (surface lost)"), false);
+  assert.equal(noAdapter(NO_ADAPTER_BOOT), true);
+});
+
+test("runArena names a no-adapter boot by reason", () => {
+  const result = runArena("C:\\ship\\arena.exe", {
+    spawn: () => ({ status: 1, stdout: NO_ADAPTER_BOOT, stderr: "" }),
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "GAME_NO_ADAPTER");
+  assert.match(result.detail, /no wgpu adapter on this machine/);
+  assert.equal(checkSmoke(NO_ADAPTER_BOOT).reason, "GAME_NO_RECEIPT");
 });
 
 test("the child environment keeps the system paths and drops the dev tools", () => {

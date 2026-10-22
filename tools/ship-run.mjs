@@ -12,6 +12,10 @@
 // must carry the golden hash and a positive tick. The arena run prints its own
 // smoke receipt; its sim hash is the arena's own, never the golden.
 //
+// A hosted runner may expose no wgpu adapter: the arena presenter then exits
+// before the smoke line. That one case is a named skip that says
+// `adapter=none`; every other arena failure stays red.
+//
 // The frame score against content/reference/ is not built here: the reference
 // set is a Rust recipe and no PNG rides in git, so the tool names the adapter
 // and prints frame=skipped instead of inventing a score.
@@ -107,6 +111,13 @@ export function adapterName(presenter) {
   if (named) return named[1].trim();
   if (/presenter skipped/i.test(text)) return "none";
   return "unknown";
+}
+
+// A boot that never reaches the arena smoke line because the machine has no
+// wgpu adapter. The presenter prints exactly this before it exits, and the
+// row says to name the adapter when the runner cannot present.
+export function noAdapter(text) {
+  return /no wgpu adapter available/i.test(String(text ?? ""));
 }
 
 // The label the job prints for the frame leg. A software rasterizer is not a
@@ -241,6 +252,13 @@ export function runArena(exe, options = {}) {
     };
   }
   const check = checkSmoke(run.out);
+  if (!check.ok && noAdapter(run.out)) {
+    return {
+      ...refuse("GAME_NO_ADAPTER", `no wgpu adapter on this machine; the arena binary exited ${run.status}`),
+      out: run.out,
+      status: run.status,
+    };
+  }
   if (run.status !== 0) {
     return {
       ...refuse(check.ok ? "GAME_EXIT" : check.reason, `the arena binary exited ${run.status}; ${check.detail}`),
@@ -273,10 +291,12 @@ itself; the tool then prints \`SHIP-RUN tick=<n> hash=<h>\`.
 
 --arena adds the game boot proof: the arena binary plays N frames (default 30)
 headless and must print its smoke receipt with a positive tick count. Its sim
-hash is the arena's own, so it is quoted, never compared with the golden. The
-frame score against content/reference/ is not available here (the reference set
-is a Rust recipe, no PNG in git), so the tool prints the adapter and
-\`frame=skipped\` instead of a score.
+hash is the arena's own, so it is quoted, never compared with the golden. A
+machine with no wgpu adapter reaches no smoke line: that one case prints
+\`SHIP-GAME skipped adapter=none reason=no-wgpu-adapter\` and does not fail the
+job. The frame score against content/reference/ is not available here (the
+reference set is a Rust recipe, no PNG in git), so the tool prints the adapter
+and \`frame=skipped\` instead of a score.
 
 Named refusals print as \`SHIP-RUN FAIL [REASON] <detail>\`.
 Exit codes: 0 pass - 1 the build did not prove itself - 2 usage.
@@ -405,6 +425,11 @@ export function main(
         );
         const reason = label === "none" || label === "warp" ? "no-hardware-adapter" : "reference-png-not-on-disk";
         say(`SHIP-FRAME skipped adapter=${label} reason=${reason}`);
+      } else if (arena.reason === "GAME_NO_ADAPTER") {
+        // The runner cannot present, so the game boot is named, not scored.
+        // The proof receipt above still gates the job.
+        say(`SHIP-GAME skipped adapter=none reason=no-wgpu-adapter (${arena.detail})`);
+        say("SHIP-FRAME skipped adapter=none reason=no-wgpu-adapter");
       } else {
         failed = true;
         say(`SHIP-GAME FAIL [${arena.reason}] ${arena.detail}`);

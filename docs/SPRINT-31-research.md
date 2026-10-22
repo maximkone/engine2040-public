@@ -17,14 +17,24 @@ report section has the mechanism. Feel donors live in `02-feel.md` beside the FE
   fallback, the choice and the limits that forced it in the page receipt. Donors: quench3d
   `web_probe.rs`, PlayCanvas device split. Files: `crates/web/src/shell.rs`, `limits.rs`.
   Accept: headless Chrome with WebGPU off loads the fallback and prints why.
-- [ ] ENG9 assets: a content patch ships by blob hash. A manifest of content hashes; the game
+- [x] ENG9 assets: a content patch ships by blob hash. A manifest of content hashes; the game
   fetches only changed blobs and refuses a patch whose hash does not match. Donors: Defold Live
   Update, Godot patch PCK. Files: `crates/assets`, `tools/`. Accept: change one texture, build a
-  patch, the patched game loads it and the rest are untouched (byte compare).
-- [ ] ENG16 game: every run ends in a receipt, a crash too. A panic hook writes the tick, the
+  patch, the patched game loads it and the rest are untouched (byte compare). Landed 0a6e86fe8.
+  Proof: 7 lib tests + 1 bin test green (`a_patch_carries_only_the_changed_blob_and_applies_byte_for_byte`,
+  `a_patch_blob_that_does_not_hash_is_refused_by_name`, stale base refused, empty tree, bundle base,
+  byte-identical patch x2), scoped clippy green, `e2patch diff|verify` round-trips (runs
+  39864469448/519/593). Open leg, named: the shipped run does not call `PatchedSource` yet; the
+  row's file list stops at `crates/assets`/`tools`, so the game wiring is a follow-on, not claimed here.
+- [x] ENG16 game: every run ends in a receipt, a crash too. A panic hook writes the tick, the
   hash, the last door call and the backtrace to `target/reports/crash/`, and the next start
   prints it once. Files: `crates/game/src/windowed.rs`, `crates/perf`. Accept: a forced panic in
-  a test run leaves one receipt with the tick and the hash.
+  a test run leaves one receipt with the tick and the hash. Landed f27f6f9c8.
+  Proof: `cargo test -p engine-perf --lib crash_receipt` 6 passed (forced panic: one file, tick
+  600, hash d57b5c8ae3096614; second read empty), clippy and `cargo check -p engine-game
+  --features app` green. Open leg, named: the receipt is installed at the three `windowed.rs`
+  entry points; the shipped `arena.rs` bin still installs only `crash::install_run_hook`, so wire
+  the receipt there when `arena.rs` is free (it is FEEL7's file today).
 - [ ] ENG6 endpoint: latency and loss are a door verb. `net.shape` sets delay, jitter and loss on
   the duel link so a model can test its netcode. Donor: Open-Godot-MCP `network.py`. Files:
   `crates/endpoint/src/packs/net.rs`, `crates/proof/src/chaos.rs`. Accept: 120 ms and 5% loss end
@@ -57,6 +67,18 @@ report section has the mechanism. Feel donors live in `02-feel.md` beside the FE
   `tick=... hash=d57b5c8ae3096614`; a deliberately broken receipt turns it red. Size M. Tier B.
   F2P: G1 "never broken" is unmeasured - the job compares two builds and never a run. P2P: no
   sim change. needs: none.
+- [ ] ENG20 render: temporal artifacts get a gate (finish-line B9, gate O5). A TAA registration
+  test proves the history is registered where the frame moves (a frozen or mis-registered history
+  shows as ghosting over the bar and the test names it) and that a cut or resize resets it; a
+  deterministic ghosting metric over a captured sequence scores a TAA-on run and a TAA-off run
+  apart, so the offline gate is a number, not an opinion.
+  Files: `crates/render/src/post/taa.rs` tests, `tools/temporal-gate.mjs` (new) + test.
+  Accept: the registration test fails on a deliberately frozen history and passes on the real
+  one; the metric separates the two captures; render lib green; golden unchanged.
+  Open leg, named in the row and never claimed: the CGVQM+D model itself needs its published
+  weights, so this row lands the registration test and the ghosting metric, not CGVQM+D.
+  Size S-M. Tier A. Owns `crates/render/src/post/taa.rs` tests and `tools/temporal-gate.mjs`.
+  needs: CQ25.
 - [ ] AGT01 tools: OpenCode helpers do not spawn helpers. `experimental.subagent_depth` 1 and
   `permission.task: deny` for helper agents (2512.08296: central verification spreads fewer
   errors; depth beyond one helper level is unmeasured). Owner decision (2026-10-04 chose 2).

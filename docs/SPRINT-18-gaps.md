@@ -11,9 +11,10 @@ FC3 (at 3.29 fps the 18,000-frame run takes 91 min against a 45 min slot).
   no presenter, so it is not the target (render review 2026-10-10). Tier A.
   Size S. Owns `target/reports/perf-*.csv` and one packet (no code). Accept:
   `node tools/bins.mjs` shows arena FRESH (else run its rebuild line);
-  `node tools/quiet.mjs --times 3 --out target/reports/perf-<date>-{n}.txt --
+  `node tools/quiet-run.mjs --times 3 --out target/reports/perf-<date>-{n}.txt --
   target/release/arena.exe --scene arena --fighters 8 --frames 300 --exit`
-  prints QUIET; the `arena frame-split` lines give sim, present and fighters
+  prints QUIET (the old `tools/quiet.mjs` was deleted in e5457d6; `quiet-run.mjs`
+  is its surviving runner, so the Accept names it); the `arena frame-split` lines give sim, present and fighters
   ms; spread over the 3 runs under 10%; top 3 costs named with file paths in
   `target/reports/perf-<date>.md`. Run it again after EG1 and EG2 land.
   F2P: no arena frame table under target/reports today. P2P: no source
@@ -983,7 +984,9 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   (b41a59b20 plus the reader-exempt follow-up; runner run 39858166402, 10/10).
   The `door.status` verb half is open: adding it pushed the `view` pack over
   the tool-list budget (`tool_budget_exceeded`, 67578 > 64452 chars) and was
-  reverted.
+  reverted. 2026-10-23: the ceiling rose to 73000 (max advertised 70952) after
+  the default list measured 58112 and `gym` 70454 (716c1c2ea), so the 67578
+  list now fits with 3374 chars to spare and the verb half can land.
 - [ ] AD10 editor: gate undo by capability and group undo by AI session —
   `undo_gated` checks the inverse ops against mask, scope and budget; human
   undo with no token is unchanged; receipts group by capability session.
@@ -1338,7 +1341,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   advertises the resources capability and serves `resources/list` and
   `resources/read` for the scene brief, the spatial check list, the verb and
   pack map and the budgets. Snapshots cost nothing from the tool-list budget
-  (`TOOL_LIST_BUDGET_CHARS` is 43,514 at `mcp.rs:149`); tools stay for
+  (`TOOL_LIST_BUDGET_CHARS` in `mcp.rs` is the number); tools stay for
   actions. A read of an unknown uri refuses with a live next call (the AD26
   shape). Source: C61 (MCP resources spec; Forge `forge://map`). Diff: good.
   Tier A. Size M. Owns `crates/endpoint/src/resources.rs` (new) and hunks in
@@ -1504,7 +1507,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   x2 equal; `arena per-pass` sky above 0 ms on live frames. F2P: a live-sky
   test fails before (`fs_sky` reads no texture). P2P: `cargo test -p
   engine-render --lib` green; golden unchanged. needs: EG9.
-- [ ] LF2 render: the window lights with `ibl.rs` - `fs` adds a constant Landed so far (2026-10-17): 1bb6097 (ibl LIVE: armor 1074/1074 and sand 36511/36511 pixels change, capture equal twice). Remaining: a separate ibl ms in arena per-pass (it runs inside forward). Progress 2026-10-20: the prefilter is a 256-tap GGX lobe (dc01adcb), within 5% per channel of a 4096-sample reference at roughness 0.6.
+- [x] LF2 render: the window lights with `ibl.rs` - `fs` adds a constant Landed so far (2026-10-17): 1bb6097 (ibl LIVE: armor 1074/1074 and sand 36511/36511 pixels change, capture equal twice). Remaining: a separate ibl ms in arena per-pass (it runs inside forward). Progress 2026-10-20: the prefilter is a 256-tap GGX lobe (dc01adcb), within 5% per channel of a 4096-sample reference at roughness 0.6. The remaining leg landed with f737386e7: `ibl_submit_us` is its own per-pass field at HEAD. Proof 2026-10-23: a 300-frame window run posts `ibl=10.656ms` on the RTX 3050 with `validation_errors=0` (`target/logs/arena-20261022T221843Z.log`), and a 24-frame capture posts `ibl=11.368ms`; the armor/sand on-vs-off counts and the capture x2 equal stand from 1bb6097. Landed f737386e7.
   `AMBIENT_FLOOR`; `ibl.rs` bakes a prefiltered cubemap and BRDF LUT on the
   CPU at presenter start from the embedded
   `content/incoming/studio_small_09_1k.hdr` (`gpu_present.rs:15`,

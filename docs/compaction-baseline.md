@@ -10,7 +10,7 @@ reads these four lines. Update them in the commit that lands the size change:
 
 ```
 - crates: 43
-- src lines: 908418
+- src lines: 909287
 - multi-version lock names: 80
 - dead feature flags: 0
 ```

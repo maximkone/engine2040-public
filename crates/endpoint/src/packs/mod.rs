@@ -19,7 +19,7 @@
 //!
 //! Features: `mcp` opt-in; `geo`, `intake`, `rules` off by default so the
 //! default build carries no donor libs or scripting engine. Budget: tool-list
-//! [`TOOL_LIST_BUDGET_CHARS`] (51_000 chars). Entry points: [`PACK_NAMES`],
+//! [`TOOL_LIST_BUDGET_CHARS`]. Entry points: [`PACK_NAMES`],
 //! [`PackRegistry::shipped`], `pack`/`verb` lookups.
 //!
 //! Adding a verb (any pack owner): write a `SyncTool<McpServer>` (the

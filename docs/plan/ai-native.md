@@ -201,7 +201,7 @@ by design — parity pins task rows, previews, forks and effects, never
 source names. Unknown costs stay unknown, never zero.
 
 Budgets: per-request ms + spend caps; per-session edit budget (CAP1);
-tool-list under 38944 chars with the AX15 ledger (measured size + reason
+tool-list under `TOOL_LIST_BUDGET_CHARS` chars (read the constant in `mcp.rs`) with the AX15 ledger (measured size + reason
 per raise, 2048 headroom floor, +500 bloat refuses); one loop under
 `ASSISTANT_BUDGET_DEFAULT`; streams capped at 64 chunks / 64 KiB; watch
 queues bounded; eval rows carry latency and cost; overflow is Unavailable,

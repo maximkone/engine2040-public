@@ -1503,6 +1503,27 @@ fn windowed_tick_input(
         .map_err(|_| GameError::BadConfig("fps-map idle input"))
 }
 
+/// ENG16 crash receipt: one hook per process records the latest completed
+/// (tick, hash) pair and the last windowed step; the next start prints a
+/// pending receipt once and marks it seen. This file holds no door handle, so
+/// the recorded call is the windowed loop's last step, not a door call.
+fn crash_receipt_watch() -> Arc<engine_perf::crash_receipt::CrashWatch> {
+    let dir = engine_perf::crash_receipt::default_dir();
+    let watch = engine_perf::crash_receipt::CrashWatch::new(dir.clone());
+    let _ = watch.install();
+    let _ = engine_perf::crash_receipt::print_pending(&dir);
+    watch
+}
+
+/// Fold one completed tick into the crash snapshot: the replay pair plus the
+/// step that produced it. Presentation only; no sim state moves here.
+fn note_crash_tick(watch: &engine_perf::crash_receipt::CrashWatch, outcome: &TickOutcome) {
+    if let Some(checkpoint) = outcome.checkpoint {
+        watch.note_tick(checkpoint.tick, checkpoint.hash);
+    }
+    watch.note_call("windowed: app.tick");
+}
+
 /// Run windowed play headless-safe: open the render window shell, feed one
 /// idle human input per fixed tick through the FPS input map (AI
 /// brains fill every other slot, same as the headless leg), play each tick's
@@ -1511,6 +1532,7 @@ fn windowed_tick_input(
 /// skipped with a reason. Never panics on missing display/audio hardware:
 /// there is none to miss yet (see the module docs).
 pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, GameError> {
+    let crash_watch = crash_receipt_watch();
     // The live session plays the arena kit's physical placement, so the kit
     // walls stop being pictures; a bad placement falls back to the empty
     // world (open sand) instead of failing the session.
@@ -1566,6 +1588,7 @@ pub fn run_windowed(config: GameConfig, ticks: u32) -> Result<WindowedReport, Ga
         )?;
         let outcome = super::fps_view::pad_rumble::pulse(app.tick(input), pad_backend.as_mut());
         debug_assert!(outcome.input_accepted);
+        note_crash_tick(&crash_watch, &outcome);
         // Frame stamped beside the tick for the practice swap, read-only:
         // the swap needs the presented-frame index, the tick never moves here.
         let frame = practice_frame_index(shell.draw_count());
@@ -1819,6 +1842,7 @@ pub fn run_headless_smoke_with_options(
     if frames == 0 || frames > super::MAX_TICKS {
         return Err(WinError::BadArgs(format!("--frames {frames}")));
     }
+    let crash_watch = crash_receipt_watch();
     let started = std::time::Instant::now();
     let mut app = App::new(config)?.into_duel()?;
     let bindings = Bindings::new();
@@ -1862,6 +1886,7 @@ pub fn run_headless_smoke_with_options(
         let input = fighter_input_from_pressed(tick, human, &[], &bindings);
         let outcome = app.tick(input);
         debug_assert!(outcome.input_accepted);
+        note_crash_tick(&crash_watch, &outcome);
         super::balance_verdict::fold_verdict_gaits(&mut verdict_gaits, &outcome.cues);
         let _ = feed.win_frame(&outcome);
         let stats = mix_tick_audio(&mut mixer, &bank, &mut bridge, &walls, &outcome);
@@ -1921,6 +1946,7 @@ pub fn run_headless_smoke(
     if frames == 0 || frames > super::MAX_TICKS {
         return Err(WinError::BadArgs(format!("--frames {frames}")));
     }
+    let crash_watch = crash_receipt_watch();
     let mut app = App::new(config)?.into_duel()?;
     let bindings = Bindings::new();
     let bank = Bank::placeholder(WINDOWED_SAMPLE_RATE);
@@ -1960,6 +1986,7 @@ pub fn run_headless_smoke(
         let input = fighter_input_from_pressed(tick, human, &[], &bindings);
         let outcome = app.tick(input);
         debug_assert!(outcome.input_accepted);
+        note_crash_tick(&crash_watch, &outcome);
         super::balance_verdict::fold_verdict_gaits(&mut verdict_gaits, &outcome.cues);
         let _ = feed.win_frame(&outcome);
         let stats = mix_tick_audio(&mut mixer, &bank, &mut bridge, &walls, &outcome);

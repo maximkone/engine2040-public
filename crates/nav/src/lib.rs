@@ -10,6 +10,8 @@ pub mod layers;
 pub mod links;
 pub mod mesh;
 pub mod orca;
+/// Platoon-led legion march: one nav plan per leader, followers hold slots.
+pub mod platoon;
 /// Quantized nav runtime over one packed occupancy mask and direction field.
 pub mod quant;
 pub mod reach;

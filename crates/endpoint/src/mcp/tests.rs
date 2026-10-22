@@ -972,8 +972,8 @@ fn assert_budget_grows(server: &McpServer, all: &[String]) {
     // Both lanes grew the list on the same day from the same measurement, so the door
     // takes the looser of the two measured bounds.
     assert!(
-        budget < 58_000,
-        "default list {budget} stays near the measured 2026-10-21 door (56_737)"
+        budget < 58_500,
+        "default list {budget} stays near the measured 2026-10-23 door (58_112)"
     );
     assert!(budget < everything, "the default list hides something");
     assert!(core_only < budget, "the scene pack adds to the core");

@@ -894,7 +894,7 @@
   "crates/game/src/camera.rs": 3459,
   "crates/game/src/fighter_look.rs": 6599,
   "crates/game/src/lib.rs": 4009,
-  "crates/game/src/windowed.rs": 3588,
+  "crates/game/src/windowed.rs": 3610,
   "crates/net/src/interest.rs": 3076,
   "crates/physics/src/ragdoll.rs": 3376,
   "crates/render/src/gtao.rs": 3486,
@@ -4466,6 +4466,13 @@
     "tests": 1229
    },
    "reason": "long_fns 5->6 comes from crates/game/src/windowed.rs run_windowed (99->101 lines) in another AI's uncommitted work, not this landing; recorded so the shared tree can land and tightened when that file settles"
+  },
+  {
+   "date": "2026-10-22",
+   "file": "crates/game/src/windowed.rs",
+   "from": 3588,
+   "to": 3610,
+   "reason": "ENG16 wires the crash receipt hook and per-tick (tick, hash) note into the windowed run loops; the wiring needs the lines and belongs at the run entry points"
   }
  ]
 }

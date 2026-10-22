@@ -26,6 +26,12 @@ use engine_render::backend::{read_vram, VramReading};
 /// path: once a second is enough for a placement that dwells for frames.
 pub const VRAM_EVERY_MS: u64 = 1_000;
 
+/// Presented frames the arbiter ignores at the start of a run, one second at
+/// 60 Hz. The first frames carry shader and pipeline compilation (a real
+/// 3050 run measured 658 ms on frame 0), and one such spike would leave the
+/// p95 window pressing local inference off the GPU for the whole bout.
+pub const WARMUP_FRAMES: u64 = 60;
+
 /// The frame budget of a 60 Hz window, microseconds.
 pub const FRAME_BUDGET_60HZ_US: u32 = 16_667;
 
@@ -123,9 +129,10 @@ impl PressureWatch {
     }
 
     /// Push one presented frame: its interval in microseconds and the
-    /// milliseconds since the previous frame. Returns the receipt line on the
-    /// first frame and whenever this frame moved the placement or changed the
-    /// layer plan.
+    /// milliseconds since the previous frame. The first [`WARMUP_FRAMES`]
+    /// present frames are not fed to the arbiter (compile spikes are not
+    /// gameplay pressure). Returns the receipt line on the first frame and
+    /// whenever this frame moved the placement or changed the layer plan.
     pub fn frame(&mut self, frame_us: u32, dt_ms: u64) -> Option<String> {
         self.frames = self.frames.saturating_add(1);
         self.since_vram_ms = self.since_vram_ms.saturating_add(dt_ms);
@@ -133,7 +140,11 @@ impl PressureWatch {
             self.since_vram_ms = 0;
             self.vram = headroom((self.probe)());
         }
-        let notice = self.feed.push_frame(frame_us, self.vram);
+        let notice = if self.frames > WARMUP_FRAMES {
+            self.feed.push_frame(frame_us, self.vram)
+        } else {
+            None
+        };
         let plan = self.plan();
         let replanned = plan.notice != self.last_notice;
         self.last_notice = plan.notice;
@@ -279,6 +290,17 @@ mod tests {
         .expect("watch")
     }
 
+    /// The warmup present frames: compile spikes, never fed to the arbiter.
+    fn warm(watch: &mut PressureWatch) -> Vec<String> {
+        let mut lines = Vec::new();
+        for _ in 0..WARMUP_FRAMES {
+            if let Some(line) = watch.frame(10_000, 16) {
+                lines.push(line);
+            }
+        }
+        lines
+    }
+
     #[test]
     fn the_os_probe_runs_once_a_second_not_once_a_frame() {
         MODE.store(0, Ordering::SeqCst);
@@ -301,6 +323,10 @@ mod tests {
     fn a_heavy_window_moves_the_placement_and_prints_one_line_per_change() {
         MODE.store(0, Ordering::SeqCst);
         let mut watch = watch();
+        // The warmup prints once and moves nothing.
+        let warm_lines = warm(&mut watch);
+        assert_eq!(warm_lines.len(), 1, "first frame only: {warm_lines:?}");
+        assert_eq!(watch.placement(), Placement::Cpu, "warmup is not pressure");
         // Quiet frames earn the GPU (recover_after 6).
         let mut lines = Vec::new();
         for _ in 0..8 {
@@ -309,8 +335,8 @@ mod tests {
             }
         }
         assert_eq!(watch.placement(), Placement::Gpu);
-        assert_eq!(lines.len(), 2, "first frame plus the move: {lines:?}");
-        assert!(lines[1].contains("moved=cpu->gpu"), "{}", lines[1]);
+        assert_eq!(lines.len(), 1, "one move, one line: {lines:?}");
+        assert!(lines[0].contains("moved=cpu->gpu"), "{}", lines[0]);
         // 959 permille of the 60 Hz budget: past cpu_enter, under defer.
         let mut last = String::new();
         for _ in 0..2 {
@@ -322,6 +348,24 @@ mod tests {
         assert!(last.contains("placement=cpu"), "{last}");
         assert!(last.contains("load=959"), "{last}");
         assert!(last.contains("moved=gpu->cpu"), "{last}");
+    }
+
+    #[test]
+    fn a_compile_spike_during_warmup_is_not_gameplay_pressure() {
+        MODE.store(0, Ordering::SeqCst);
+        let mut watch = watch();
+        // The real 3050 run's frame 0 took 658 ms of shader compile.
+        watch.frame(658_000, 658);
+        for _ in 1..WARMUP_FRAMES {
+            watch.frame(9_000, 16);
+        }
+        assert_eq!(watch.p95_us(), 0, "no sample yet");
+        assert_eq!(watch.placement(), Placement::Cpu, "still the cold start");
+        // The first measured frame is a normal one: no defer from a spike.
+        watch.frame(9_000, 16);
+        assert_eq!(watch.p95_us(), 9_000);
+        assert_eq!(watch.load_permille(), 539);
+        assert_ne!(watch.placement(), Placement::Defer);
     }
 
     #[test]

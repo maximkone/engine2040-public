@@ -20,10 +20,14 @@
 //! directly, and the roots stay four short lines instead of a fan-out.
 //!
 //! Units: chars for the text, counts for the rows. Determinism: the same
-//! build always produces the same bytes; no clock, no network, no float.
+//! build always produces the same bytes; no clock, no network, no float. The
+//! door reference carries a pin line (tool count and the FNV-64 of the rows
+//! below it) computed at render time, so a reader can see the surface moved
+//! without a version number to trust.
 //! Errors: [`ResourceError`], one named variant per refusal, every message
 //! naming the legal URIs.
 
+use engine_core::hash::hash_hex;
 use rmcp::model::{Resource, ResourceContents, ResourceTemplate};
 
 /// Root URI of the crate map: one row per engine crate and what it owns.
@@ -152,7 +156,8 @@ pub fn is_known_uri(uri: &str) -> bool {
 /// Read one resource body as text.
 ///
 /// The `tool_rows` are the door's own advertised rows: name, pack and
-/// capability card, one per verb.
+/// capability card, one per verb. The door reference pins the rows it
+/// rendered, so a reader can tell two surfaces apart by the fingerprint.
 pub fn read_resource_text(
     uri: &str,
     tool_rows: &[(String, String, String)],
@@ -204,10 +209,17 @@ fn crate_map_text() -> String {
     out
 }
 
-/// The door reference: one line per advertised tool, with its pack and card.
+/// The door reference: one line per advertised tool, with its pack and card,
+/// under a pin line that names the tool count and the schema fingerprint.
 fn door_reference_text(tool_rows: &[(String, String, String)]) -> String {
-    let mut out = String::from("# door reference\n\n");
-    out.push_str("tool | pack | card\n");
+    let body = door_reference_body(tool_rows);
+    let pin = door_reference_pin(tool_rows.len(), &body);
+    format!("# door reference\n\n{pin}\n\n{body}")
+}
+
+/// The table body of the door reference: every row, sorted by tool name.
+fn door_reference_body(tool_rows: &[(String, String, String)]) -> String {
+    let mut out = String::from("tool | pack | card\n");
     let mut rows: Vec<&(String, String, String)> = tool_rows.iter().collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     let empty = rows.is_empty();
@@ -218,6 +230,20 @@ fn door_reference_text(tool_rows: &[(String, String, String)]) -> String {
         out.push_str("(the door advertises no tool yet)\n");
     }
     out
+}
+
+/// The pin line: the tool count and the fingerprint of the body it names.
+///
+/// The fingerprint is FNV-1a 64 over the rendered body's exact bytes, so one
+/// changed byte in any row moves it. It is computed here, never written down:
+/// a constant would say nothing about the surface a reader holds. There is no
+/// clock, address or hash map in the input, so the same rows always pin the
+/// same way.
+fn door_reference_pin(tools: usize, body: &str) -> String {
+    format!(
+        "pin: {tools} tools, schema {} (fnv64 of the rows below)",
+        hash_hex(body.as_bytes())
+    )
 }
 
 /// The error catalog: every typed refusal the door answers, with its recovery.
@@ -918,6 +944,98 @@ mod tests {
         let scene = text.find("scene.read").expect("scene row");
         let tx = text.find("tx.apply").expect("tx row");
         assert!(scene < tx, "the reference is sorted by name: {text}");
+    }
+
+    /// The fingerprint a rendered reference pins: the 16-char hex after
+    /// `schema ` on the pin line.
+    fn pinned_schema(text: &str) -> &str {
+        let marker = "schema ";
+        let start = text.find(marker).expect("the pin names a schema") + marker.len();
+        let rest = &text[start..];
+        &rest[..rest.find(' ').expect("the fingerprint ends at a space")]
+    }
+
+    /// Two rows the pin tests share: a core verb and a pack verb.
+    fn two_rows() -> Vec<(String, String, String)> {
+        vec![
+            (
+                "scene.read".to_owned(),
+                "core".to_owned(),
+                "observe".to_owned(),
+            ),
+            (
+                "tx.apply".to_owned(),
+                "core".to_owned(),
+                "commit".to_owned(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn door_reference_pins_the_tool_count_and_the_schema() {
+        let rows = two_rows();
+        let text = read_resource_text(DOOR_REFERENCE_URI, &rows).expect("reference reads");
+        let pin = text
+            .lines()
+            .find(|line| line.starts_with("pin: "))
+            .unwrap_or_else(|| panic!("the reference carries a pin line: {text}"));
+        assert!(pin.contains("2 tools"), "the pin counts the rows: {pin}");
+        let schema = pinned_schema(&text);
+        assert_eq!(schema.len(), 16, "a 16-char hex fingerprint: {pin}");
+        assert!(
+            schema.chars().all(|c| c.is_ascii_hexdigit()),
+            "the fingerprint is hex: {pin}"
+        );
+        let body = door_reference_body(&rows);
+        assert_eq!(
+            schema,
+            hash_hex(body.as_bytes()),
+            "the pin is the fingerprint of the body it names: {pin}"
+        );
+        let empty = read_resource_text(DOOR_REFERENCE_URI, &[]).expect("empty reference reads");
+        assert!(
+            empty.contains("pin: 0 tools"),
+            "an empty surface pins its zero count: {empty}"
+        );
+    }
+
+    #[test]
+    fn one_changed_schema_byte_moves_the_fingerprint() {
+        let rows = two_rows();
+        let first = read_resource_text(DOOR_REFERENCE_URI, &rows).expect("reference reads");
+        let mut edited = rows.clone();
+        edited[0].2 = "obserwe".to_owned();
+        let second = read_resource_text(DOOR_REFERENCE_URI, &edited).expect("edited reads");
+        assert_ne!(first, second, "a changed row moves the rendered text");
+        assert_ne!(
+            pinned_schema(&first),
+            pinned_schema(&second),
+            "one changed byte moves the pinned fingerprint"
+        );
+        assert_eq!(
+            pinned_schema(&second),
+            hash_hex(door_reference_body(&edited).as_bytes()),
+            "the edited pin covers the edited body"
+        );
+    }
+
+    #[test]
+    fn the_same_schema_pins_the_same_text_twice() {
+        // No clock, no address, no hash map order: the same rows render the
+        // same bytes on every call and in every process.
+        let rows = two_rows();
+        let first = read_resource_text(DOOR_REFERENCE_URI, &rows).expect("reference reads");
+        let second = read_resource_text(DOOR_REFERENCE_URI, &rows).expect("reference reads");
+        assert_eq!(first, second, "the same schema pins the same text");
+        let pin = first
+            .lines()
+            .find(|line| line.starts_with("pin: "))
+            .expect("a pin line");
+        assert_eq!(
+            pin,
+            door_reference_pin(rows.len(), &door_reference_body(&rows)),
+            "the pin reads no clock and holds no per-call state"
+        );
     }
 
     #[test]

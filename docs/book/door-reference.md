@@ -27,7 +27,7 @@ From the pack dispatch (`packs/mod.rs`):
 | `bad_output` | `{name}` produced output outside its schema ({error}); re-run and report the verb |
 | `unknown_verb` | verb `{verb}` is served by no pack ({}); re-run api.search for the verb, then api.describe `pack:<name>` for its exact names |
 | `unknown_pack` | pack `{pack}` is unknown; the door serves packs [{}]; re-run with one of those names |
-| `tool_budget_exceeded` | api.load refused: loading pack `{}` would advertise {reach} tool chars; the tool budget is 66500 chars with 2048 kept as headroom, so a list may cost at most {MAX_ADVERTISED_CHARS}; unload a pack first (api.load unload:true) or load a smaller one |
+| `tool_budget_exceeded` | api.load refused: loading pack `{}` would advertise {reach} tool chars; the tool budget is 73000 chars with 2048 kept as headroom, so a list may cost at most 70952; unload a pack first (api.load unload:true) or load a smaller one |
 
 From the capability gate (`tool_capabilities.rs`, the refused cases of its adversarial briefs), seen on the `commit` and `propose` verbs:
 
@@ -360,7 +360,7 @@ These are always advertised.
 
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
-| `pack` | `String` | yes |  | Pack name (`scene`, `break`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`). |
+| `pack` | `String` | yes |  | `at most 70952`; Pack name (`scene`, `break`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`). |
 | `unload` | `Option<bool>` | no |  | True hides the pack from tools/list again (verbs stay callable). |
 
 **Typed refusals:**
@@ -368,7 +368,7 @@ These are always advertised.
 | Code | Message |
 |---|---|
 | `unknown_pack` | pack `{pack}` is unknown; the door serves packs [{}]; re-run with one of those names |
-| `tool_budget_exceeded` | api.load refused: loading pack `{}` would advertise {reach} tool chars; the tool budget is 66500 chars with 2048 kept as headroom, so a list may cost at most {MAX_ADVERTISED_CHARS}; unload a pack first (api.load unload:true) or load a smaller one |
+| `tool_budget_exceeded` | api.load refused: loading pack `{}` would advertise {reach} tool chars; the tool budget is 73000 chars with 2048 kept as headroom, so a list may cost at most 70952; unload a pack first (api.load unload:true) or load a smaller one |
 
 ### `test.run`
 
@@ -391,7 +391,7 @@ These are always advertised.
 | Code | Message |
 |---|---|
 | `unknown_check` | check `{name}` is unknown; legal checks: [{}] |
-| `over_budget` | list costs {chars} chars, budget is 66500 |
+| `over_budget` | list costs {chars} chars, budget is 73000 |
 | `empty_checks` | checks holds 0 entries; submit 1..=16 of [{}] |
 | `too_many_checks` | checks holds {} entries; at most 16 per run |
 | `bad_budget` | budget_bytes {budget} is outside 1..=16384 (default 4096) |
@@ -2548,26 +2548,31 @@ Listed in a fresh session: no, call `api.load` with `verify`. Source: `crates/en
 
 ### `verify.proof`
 
-> Run the verifier proof through the door: bisect the A7 seeded bug tape to its seeded tick and digest every mirror task outcome, so a parity run compares this door with the playtest drive. Read-only.
+> Run the verifier proof through the door: bisect the A7 seeded bug tape to its seeded tick and digest every mirror task outcome, so a parity run compares this door with the playtest drive. With checks (`hits.max <= 4`, `base:damage.final >= 0`, `no_divergence_before 8`) it also reports both runs' metric rows and one pass/FAIL per rule. Read-only.
 
 - **Scope:** `observe` · read-only · pack `verify` is listed after `api.load`
 - **Undo:** none: read-only
 - **Source:** `crates/endpoint/src/packs/verify.rs`
-- **Returns:** `VerifyProofOutput` with `seeded_bug`, `seeded_tick`, `seeded_expected_tick`, `seeded_clean`, `tasks`, `mirror`
+- **Returns:** `VerifyProofOutput` with `seeded_bug`, `seeded_tick`, `seeded_expected_tick`, `seeded_clean`, `tasks`, `mirror`, `verdict`, `checks`, `checks_passed`, `checks_total`, `base`, `candidate`, `transitions`
 
 **Arguments** (`VerifyProofArgs`):
 
 | Name | Type | Required | Default | Range quoted from the source |
 |---|---|---|---|---|
 | `tasks` | `Option<u32>` | no |  |  |
+| `checks` | `Option<Vec<String>>` | no |  | `<= 4`, `>= 0` |
 
 **Typed refusals:**
 
 | Code | Message |
 |---|---|
+| `corrupt_tape` | the tape bytes do not replay ({detail}); re-record the tape, then re-run |
 | `seeded_bug` | the A7 seeded run filed no bug ({error}); re-run on a build with the seeded probe intact |
 | `seeded_bug` | the A7 filed tape did not bisect ({error}); re-run on a build with the seeded probe intact |
 | `bad_args` | tasks {tasks} is outside 1..={limit}; re-run in range or omit it for all |
+| `bad_rule` | check rule {line:?} is malformed ({why}); submit `metric.stat cmp number`, `no_divergence` or `no_divergence_before tick`, then re-run |
+| `bad_metric` | metric {metric:?} is not one of events, hits, damage; re-run with one of those |
+| `bad_stat` | stat {stat:?} is not one of start, final, min, max, delta; re-run with one of those |
 
 ## Pack `physics`
 
@@ -2980,7 +2985,7 @@ Listed in a fresh session: no, call `api.load` with `codex`. Source: `crates/end
 
 ## Coverage
 
-91 tools parsed, 659 refusal rows printed, 0 declarations the parser could not read.
+91 tools parsed, 663 refusal rows printed, 0 declarations the parser could not read.
 A verb whose handler converts a typed error defined in another file (the log tools, the level builder) shows fewer refusals than it can return; the tests next to its source are the full list.
 
 Tools with no refusal site found: `capture`, `wound.table.get`, `material.list`, `asset.generate`, `sim.plan_goals`, `log.digest`, `log.query`, `rpc.discover`, `settings.get`, `session.activity`, `codex.search`.

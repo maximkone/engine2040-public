@@ -20,6 +20,8 @@ pub mod baselines;
 pub mod budget;
 /// Core tick, hash and RNG baseline kernels.
 pub mod core_bench;
+/// Crash receipts: one file per crashed run, printed once by the next start.
+pub mod crash_receipt;
 /// Named perf series: bounded history, O(1) mean, time-aware smoothing.
 pub mod diagnostics;
 /// Feel quantification: three-domain runs against the latency bar.

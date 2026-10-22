@@ -5,7 +5,9 @@
 //! Data owner: this module owns the feed (director plus the per-tick trauma
 //! and frame receipts); match authority stays in `engine-arena`, tuning in
 //! [`DirectorParams`](super::camera::DirectorParams). Units: meters, radians,
-//! fixed ticks; trauma in permille (`0..=1000`). Determinism: same cue script
+//! fixed ticks; trauma in permille (`0..=1000`). QL8 feel camera: decaying
+//! trauma drives a rotation-only, hard-capped offset, and the rotation-only
+//! mode never translates the presented eye. Determinism: same cue script
 //! plus same ticks gives identical frame bytes twice; shake never feeds sim
 //! state (the golden `d57b5c8ae3096614` stands). Errors:
 //! [`CameraError`](super::camera::CameraError) from the frozen director API.
@@ -122,6 +124,7 @@ pub struct PresentationFeed {
     rig: StagedRig,
     frames: Vec<CameraFrame>,
     trauma: Vec<u32>,
+    rotations: Vec<RotationShake>,
 }
 
 impl PresentationFeed {
@@ -135,6 +138,7 @@ impl PresentationFeed {
             rig: StagedRig::new(focus, params)?,
             frames: Vec::with_capacity(capacity),
             trauma: Vec::with_capacity(capacity),
+            rotations: Vec::with_capacity(capacity),
         })
     }
 
@@ -157,6 +161,7 @@ impl PresentationFeed {
         if self.frames.len() > FEED_WINDOW {
             self.frames.remove(0);
             self.trauma.remove(0);
+            self.rotations.remove(0);
         }
     }
 
@@ -164,6 +169,30 @@ impl PresentationFeed {
     #[must_use]
     pub fn trauma_log(&self) -> &[u32] {
         &self.trauma
+    }
+
+    /// Rotation-only feel shake per presented tick, in tick order, already
+    /// capped and already [`RotationShake::NONE`] for a tick whose whole
+    /// shake stage was bypassed. Same tick script gives the same log twice.
+    #[must_use]
+    pub fn rotation_log(&self) -> &[RotationShake] {
+        &self.rotations
+    }
+
+    /// Record one presented frame with its in-sim trauma and the tick's
+    /// rotation-only offset. `shake_bypassed` is that tick's effective
+    /// [`BYPASS_SHAKE`] bit: a bypassed tick logs [`RotationShake::NONE`].
+    /// Pre-sized pushes plus one head-drop, no heap at steady state.
+    fn push_receipts(&mut self, frame: CameraFrame, shake_bypassed: bool) {
+        let rotation = if shake_bypassed {
+            RotationShake::NONE
+        } else {
+            shake_rotation_offset(frame.trauma_permille, frame.tick)
+        };
+        self.frames.push(frame);
+        self.trauma.push(frame.trauma_permille);
+        self.rotations.push(rotation);
+        self.trim_receipts();
     }
 
     /// Frames presented so far.
@@ -213,9 +242,7 @@ impl PresentationFeed {
             unshaken_eye(&frame),
             "feed restore matches rig"
         );
-        self.frames.push(frame);
-        self.trauma.push(frame.trauma_permille);
-        self.trim_receipts();
+        self.push_receipts(frame, false);
         Ok(frame)
     }
 
@@ -250,6 +277,7 @@ impl PresentationFeed {
         self.rig.set_bypass(bypass & (BYPASS_LOCK | BYPASS_SHAKE));
         self.rig.add_trauma(trauma_for_cues(cues));
         let mut frame = self.rig.update(views, tick)?;
+        let shake_bypassed = bypass & BYPASS_SHAKE != 0;
         // QL8 rotation-only feel: the translation shake never reaches the
         // presented pose, so the trauma rides [`Self::rotation_shake`]
         // instead and `shake_m` stays exactly zero (the F2P bar).
@@ -272,9 +300,7 @@ impl PresentationFeed {
             unshaken_eye(&frame),
             "feed restore matches rig"
         );
-        self.frames.push(frame);
-        self.trauma.push(frame.trauma_permille);
-        self.trim_receipts();
+        self.push_receipts(frame, shake_bypassed);
         Ok(frame)
     }
 
@@ -330,20 +356,19 @@ impl PresentationFeed {
     }
 
     /// Rotation-only feel shake for the last presented frame, in radians:
-    /// zeros while the whole shake stage is bypassed ([`BYPASS_SHAKE`], the
-    /// shake-off proof capture), else the capped rotation for the frame's
-    /// decaying trauma ([`shake_rotation_offset`]). Rotation only, so a
-    /// caller can turn the view without moving the presented pose; with
-    /// [`BYPASS_TRANSLATION`] the frame's `shake_m` is already exactly zero.
+    /// exactly [`RotationShake::NONE`] with no frame, with zero trauma, or
+    /// on a tick whose whole shake stage was bypassed ([`BYPASS_SHAKE`], the
+    /// shake-off proof capture); else the capped rotation for that tick's
+    /// decaying trauma ([`shake_rotation_offset`]), recorded when the tick
+    /// presented. Rotation only, so a caller can turn the view without
+    /// moving the presented pose; with [`BYPASS_TRANSLATION`] the frame's
+    /// `shake_m` is already exactly zero.
     #[must_use]
     pub fn rotation_shake(&self) -> RotationShake {
-        if self.rig.bypass() & BYPASS_SHAKE != 0 {
-            return RotationShake::NONE;
-        }
-        match self.frames.last() {
-            Some(frame) => shake_rotation_offset(frame.trauma_permille, frame.tick),
-            None => RotationShake::NONE,
-        }
+        self.rotations
+            .last()
+            .copied()
+            .unwrap_or(RotationShake::NONE)
     }
 }
 
@@ -540,6 +565,12 @@ pub fn feed_restored_eye(frame: &CameraFrame) -> Vec3 {
 /// the trauma rides [`PresentationFeed::rotation_shake`] instead. Setting it
 /// together with [`BYPASS_SHAKE`] drops the whole shake stage.
 pub const BYPASS_TRANSLATION: u8 = 0x04;
+
+/// Bypass mask the proof capture runs under: the whole shake stage off, so
+/// the sha-pinned capture set never carries shake (the row's "shake off in
+/// the proof capture"). Trauma still records and decays in the receipt; only
+/// the presented translation and rotation offsets drop to exactly zero.
+pub const PROOF_CAPTURE_BYPASS: u8 = BYPASS_SHAKE;
 
 /// Hard cap for the feel-camera rotation shake, in degrees: the camera's one
 /// owned rotation rail, a tenth of a radian
@@ -1925,6 +1956,193 @@ mod tests {
             Err(CameraError::BadPosition(9))
         );
     }
+
+    // QL8 feel camera: decaying trauma drives a rotation-only, hard-capped
+    // offset, and the rotation-only mode never translates the eye.
+    #[test]
+    fn ql8_rotation_cap_prints_in_degrees_and_bounds_the_burst() {
+        // Receipt line: the one owned degree rail for the feel camera.
+        eprintln!(
+            "camera shake: cap={:.2} deg rotation-only",
+            SHAKE_ROTATION_CAP_DEG
+        );
+        let cap_rad = SHAKE_ROTATION_CAP_DEG.to_radians();
+        assert!(
+            (SHAKE_ROTATION_CAP_DEG - EYE_ROLL_MAX_RAD.to_degrees()).abs() < 1e-4,
+            "one degree rail, the eye-roll cap"
+        );
+        // Zero trauma is exactly calm, on every tick.
+        for tick in [0u32, 1, 41, 600] {
+            assert_eq!(shake_rotation_offset(0, tick), RotationShake::NONE);
+        }
+        // A saturated or over-range burst never passes the cap on a channel.
+        for trauma in [1u32, TRAUMA_HIT, 500, 1000, 4000] {
+            for tick in [0u32, 1, 7, 40, 41, 600, 60_000] {
+                let shake = shake_rotation_offset(trauma, tick);
+                for (channel, value) in [
+                    ("yaw", shake.yaw_rad),
+                    ("pitch", shake.pitch_rad),
+                    ("roll", shake.roll_rad),
+                ] {
+                    assert!(value.is_finite(), "{channel} finite at {trauma}/{tick}");
+                    assert!(
+                        value.abs() <= cap_rad,
+                        "{channel} {value} over cap {cap_rad} at {trauma}/{tick}"
+                    );
+                }
+                assert!(shake.peak_deg() <= SHAKE_ROTATION_CAP_DEG + 1e-4);
+            }
+        }
+        // The clip scale never lifts past the rail: 1000 and 4000 agree.
+        assert_eq!(
+            shake_rotation_offset(4000, 40),
+            shake_rotation_offset(1000, 40),
+            "over-range trauma clamps to the same capped rotation"
+        );
+        assert!(
+            (0..64).any(|tick| shake_rotation_offset(1000, tick).peak_rad() > 0.0),
+            "saturated trauma turns the view"
+        );
+        assert_eq!(RotationShake::NONE.peak_deg(), 0.0, "calm prints zero");
+    }
+
+    #[test]
+    fn ql8_translation_offset_is_zero_with_loud_cues() {
+        let mut loud = PresentationFeed::new(0, DirectorParams::default()).unwrap();
+        let mut calm = PresentationFeed::new(0, DirectorParams::default()).unwrap();
+        let knock = FightCue::Knockdown {
+            attacker: 0,
+            victim: 1,
+        };
+        let mut rotated = 0u32;
+        for tick in 0..TICKS {
+            let cues = [knock, knock];
+            let frame = loud
+                .orbit_tick_with_bypass(tick, &cues, BYPASS_TRANSLATION)
+                .expect("loud frame");
+            let still = calm
+                .orbit_tick_with_bypass(tick, &[], BYPASS_TRANSLATION)
+                .expect("calm frame");
+            assert_eq!(frame.shake_m, Vec3::ZERO, "F2P zero translation at {tick}");
+            assert!(
+                (frame.eye_m - still.eye_m).len() <= 1e-5,
+                "shake never moves the eye at {tick}"
+            );
+            assert_eq!(frame.look_m, still.look_m, "shake never moves the look");
+            assert!(frame.trauma_permille > 0, "loud cues bank trauma");
+            if loud.rotation_shake().peak_rad() > 0.0 {
+                rotated += 1;
+            }
+            assert_eq!(loud.rotation_shake(), *loud.rotation_log().last().unwrap());
+            assert!(loud.rotation_shake().peak_deg() <= SHAKE_ROTATION_CAP_DEG);
+        }
+        assert_eq!(loud.len(), TICKS as usize);
+        assert_eq!(loud.rotation_log().len(), TICKS as usize);
+        assert!(rotated > 0, "the rotation offset actually turns the view");
+    }
+
+    #[test]
+    fn ql8_trauma_decays_to_exact_calm_rotation() {
+        let mut feed = PresentationFeed::new(0, DirectorParams::default()).unwrap();
+        let hit = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 50,
+        };
+        let first = feed
+            .orbit_tick_with_bypass(0, &[], BYPASS_TRANSLATION)
+            .expect("calm frame");
+        assert_eq!(first.trauma_permille, 0);
+        assert_eq!(feed.rotation_shake(), RotationShake::NONE, "calm is exact");
+        let bumped = feed
+            .orbit_tick_with_bypass(1, &[hit], BYPASS_TRANSLATION)
+            .expect("hit frame");
+        assert!(bumped.trauma_permille > 0, "the hit banks trauma");
+        assert!(
+            feed.rotation_shake().peak_rad() > 0.0,
+            "the hit turns the view"
+        );
+        let mut last_trauma = bumped.trauma_permille;
+        let mut tick = 1u32;
+        // The director decays 60 permille per tick by default: the 180 hit
+        // banked before tick 1's own decay reads 120, then 60, then exactly 0.
+        while last_trauma > 0 {
+            tick += 1;
+            let frame = feed
+                .orbit_tick_with_bypass(tick, &[], BYPASS_TRANSLATION)
+                .expect("decay frame");
+            assert!(
+                frame.trauma_permille < last_trauma,
+                "trauma decays at {tick}"
+            );
+            last_trauma = frame.trauma_permille;
+            if last_trauma == 0 {
+                assert_eq!(
+                    feed.rotation_shake(),
+                    RotationShake::NONE,
+                    "zero trauma at {tick} means exactly zero rotation"
+                );
+            }
+        }
+        assert_eq!(tick, 3, "180 permille decays to zero in three frames");
+        assert_eq!(last_trauma, 0, "trauma reaches exact zero");
+        assert_eq!(
+            feed.rotation_shake(),
+            RotationShake::NONE,
+            "zero trauma means exactly zero rotation"
+        );
+        let last = feed.last_frame().expect("frames presented");
+        assert_eq!(last.shake_m, Vec3::ZERO, "decay never restores translation");
+    }
+
+    #[test]
+    fn ql8_rotation_replays_exactly_twice() {
+        fn run() -> (
+            Vec<RotationShake>,
+            Vec<u32>,
+            Vec<[u8; super::super::camera::FRAME_BYTES]>,
+        ) {
+            let mut feed = PresentationFeed::new(0, DirectorParams::default()).unwrap();
+            let hit = FightCue::Hit {
+                attacker: 0,
+                victim: 1,
+                damage: 50,
+            };
+            let knock = FightCue::Knockdown {
+                attacker: 0,
+                victim: 1,
+            };
+            for tick in 0..TICKS {
+                let cues: Vec<FightCue> = match tick % 90 {
+                    0 => vec![knock, knock],
+                    45 => vec![hit],
+                    _ => vec![],
+                };
+                feed.orbit_tick_with_bypass(tick, &cues, BYPASS_TRANSLATION)
+                    .expect("frame");
+            }
+            let bytes = feed.frames().iter().map(CameraFrame::to_bytes).collect();
+            (
+                feed.rotation_log().to_vec(),
+                feed.trauma_log().to_vec(),
+                bytes,
+            )
+        }
+        let (first_rot, first_trauma, first_bytes) = run();
+        let (second_rot, second_trauma, second_bytes) = run();
+        assert_eq!(first_rot, second_rot, "rotation offsets replay exactly");
+        assert_eq!(first_trauma, second_trauma, "trauma track replays exactly");
+        assert_eq!(first_bytes, second_bytes, "frame bytes replay exactly");
+        assert!(
+            first_rot.iter().any(|r| r.peak_rad() > 0.0),
+            "the script actually shook the view"
+        );
+        assert_eq!(
+            first_rot.len(),
+            TICKS as usize,
+            "one rotation per presented tick"
+        );
+    }
 }
 
 // EV20 wired capture: behavior plus failure tests over the single game
@@ -2159,6 +2377,50 @@ mod capture_tests {
         );
     }
 
+    /// QL8 proof capture: the pin set runs with the whole shake stage off, so
+    /// a captured frame never carries a translation or rotation offset while
+    /// trauma still records and decays for the receipt.
+    #[test]
+    fn ql8_proof_capture_runs_with_shake_off() {
+        eprintln!(
+            "camera shake: cap={:.2} deg rotation-only; proof capture bypass={PROOF_CAPTURE_BYPASS:#04x} (shake off)",
+            SHAKE_ROTATION_CAP_DEG
+        );
+        let mut feed =
+            PresentationFeed::new(HUMAN_SLOT, DirectorParams::default()).expect("feed builds");
+        let hit = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 50,
+        };
+        for tick in 0..120 {
+            let frame = feed
+                .orbit_tick_with_bypass(tick, &[hit, hit], PROOF_CAPTURE_BYPASS)
+                .expect("proof frame");
+            assert_eq!(
+                frame.shake_m,
+                Vec3::ZERO,
+                "proof capture translation off at {tick}"
+            );
+            assert_eq!(
+                feed.rotation_shake(),
+                RotationShake::NONE,
+                "proof capture rotation off at {tick}"
+            );
+        }
+        assert_eq!(feed.len(), 120);
+        assert!(
+            feed.trauma_log().iter().any(|t| *t > 0),
+            "trauma still records with shake off"
+        );
+        assert!(
+            feed.rotation_log()
+                .iter()
+                .all(|r| *r == RotationShake::NONE),
+            "every proof tick stays calm"
+        );
+    }
+
     /// Gold task: materialize the 15-frame sha-pinned set. The directory
     /// comes from `E2040_EV20_SET` (the judge's set path) or the temp dir
     /// by default, so plain `cargo test` stays hermetic. Every 40th orbit
@@ -2187,9 +2449,19 @@ mod capture_tests {
             } else {
                 vec![]
             };
-            // Ticks ascend, so one feed serves the whole set in order.
-            let frame = feed.orbit_tick(tick, &cues).expect("orbit presents");
+            // Ticks ascend, so one feed serves the whole set in order. The
+            // proof capture runs with the whole shake stage off, so a
+            // sha-pinned frame never carries shake.
+            let frame = feed
+                .orbit_tick_with_bypass(tick, &cues, PROOF_CAPTURE_BYPASS)
+                .expect("orbit presents");
             assert_eq!(frame.tick, tick, "set covers every 40th orbit tick");
+            assert_eq!(frame.shake_m, Vec3::ZERO, "proof capture has no shake");
+            assert_eq!(
+                feed.rotation_shake(),
+                RotationShake::NONE,
+                "proof capture rotation is off"
+            );
             let digest = hash_bytes(&frame.to_bytes());
             let png =
                 game_capture_png(&frame, tick, digest, SET_SEED, SET_W, SET_H).expect("set frame");

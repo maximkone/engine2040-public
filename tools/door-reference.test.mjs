@@ -1,7 +1,8 @@
 // Run: node --test tools/door-reference.test.mjs
 // DOC3: the door reference page is printed from the endpoint source, so it cannot drift from the verbs.
 //  - a fixture crate with one pack, two verbs and one core tool: the verb, its argument range, its default, its scope, its
-//    refusal text and its feature gate all reach the page; a changed range changes the page;
+//    refusal text and its feature gate all reach the page; a changed range changes the page; a refusal
+//    whose limit is the difference of two integer constants shows the number, never the placeholder;
 //  - the real crates/endpoint/src: every `pack.add(VerbSpec::of::<..>)` is on the page, nothing is left unparsed, and the
 //    checked-in docs/book/door-reference.md equals what the tool prints now (regenerate with --write).
 import assert from "node:assert/strict";
@@ -29,6 +30,11 @@ pub const TOOL_CRATE_STACK: &str = "crate.stack";
 pub const TOOL_CRATE_WEIGH: &str = "crate.weigh";
 /// Most crates one stack may hold.
 pub const MAX_CRATES: u32 = 12;
+/// Label budget and the room it keeps back: the limit is their difference, so
+/// the page proves a derived constant is evaluated, not quoted as {LABEL_LIMIT}.
+pub const LABEL_BYTES: usize = 12;
+pub const LABEL_HEADROOM: usize = 3;
+pub const LABEL_LIMIT: usize = LABEL_BYTES - LABEL_HEADROOM;
 
 /// Stack request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -51,8 +57,8 @@ fn crate_stack(_server: &McpServer, args: &StackArgs) -> Result<StackOutput, Mcp
     if args.height == 0 || args.height > MAX_CRATES {
         return Err(bad(format!("height {} must be 1..={MAX_CRATES} crates; split the stack", args.height)));
     }
-    if args.label.len() > 9 {
-        return Err(McpToolError::new("label_too_long", "label holds more than 9 bytes; shorten it, then re-run"));
+    if args.label.len() > LABEL_LIMIT {
+        return Err(McpToolError::new("label_too_long", format!("label holds more than {LABEL_LIMIT} bytes; shorten it, then re-run")));
     }
     Ok(StackOutput { stacked: args.height, digest: String::new() })
 }

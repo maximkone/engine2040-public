@@ -89,7 +89,8 @@ const squash = (s) => s.replace(/\s+/g, " ").trim();
 function indexCrate(files) {
   const srcs = [...files.keys()].sort().map((rel) => new Src(rel, files.get(rel)));
   const byRel = new Map(srcs.map((s) => [s.rel, s]));
-  // consts: NAME -> [{ src, value }] (integer or string literal, or a path to another const)
+  // consts: NAME -> [{ src, value }] (integer or string literal, a path to another
+  // const, or the sum/difference of two integer consts)
   const consts = new Map();
   for (const src of srcs) {
     for (const m of src.code.matchAll(/\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*[^=;]+=\s*([^;]+);/g)) {
@@ -101,6 +102,10 @@ function indexCrate(files) {
       if (/^"\s*"$/.test(rhs) && lit.length === 1) value = { kind: "str", v: lit[0].value };
       else if (/^-?\d[\d_]*(?:_?[iu](?:8|16|32|64|128|size))?$/.test(rhs)) value = { kind: "int", v: rhs.replace(/_?[iu](?:8|16|32|64|128|size)$/, "").replace(/_/g, "") };
       else if (/^(?:[a-z_]\w*::)*[A-Z][A-Z0-9_]*$/.test(rhs)) value = { kind: "path", v: rhs };
+      else {
+        const arith = /^((?:[a-z_]\w*::)*[A-Z][A-Z0-9_]*)\s*([+-])\s*((?:[a-z_]\w*::)*[A-Z][A-Z0-9_]*)$/.exec(rhs);
+        if (arith) value = { kind: "arith", op: arith[2], lhs: arith[1], rhs: arith[3] };
+      }
       if (value) { if (!consts.has(m[1])) consts.set(m[1], []); consts.get(m[1]).push({ src, ...value }); }
     }
   }
@@ -117,6 +122,14 @@ function constValue(idx, name, fromSrc, depth = 0) {
   if (hit.length !== 1) return null;
   const c = hit[0];
   if (c.kind === "path") return depth < 4 ? constValue(idx, c.v, c.src, depth + 1) : null;
+  if (c.kind === "arith") {
+    if (depth >= 4) return null;
+    const a = constValue(idx, c.lhs, c.src, depth + 1);
+    const b = constValue(idx, c.rhs, c.src, depth + 1);
+    if (!a || !b || a.kind !== "int" || b.kind !== "int") return null;
+    const n = c.op === "+" ? BigInt(a.v) + BigInt(b.v) : BigInt(a.v) - BigInt(b.v);
+    return { kind: "int", v: n.toString() };
+  }
   return { kind: c.kind, v: c.v };
 }
 

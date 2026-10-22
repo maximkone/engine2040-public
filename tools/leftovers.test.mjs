@@ -82,7 +82,9 @@ test("a path matches at a boundary and picks the row that names it", () => {
 test("a saved patch carries its row and applies on a clean tree", () => {
   const dir = mkdtempSync(join(tmpdir(), "leftovers-save-"));
   try {
-    const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+    // Every call pins the line-ending policy: a machine whose global config says autocrlf=true
+    // must not turn the patch round-trip into a CRLF check.
+    const git = (...args) => execFileSync("git", ["-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" });
     git("init", "-q");
     git("config", "core.autocrlf", "false");
     writeFileSync(join(dir, "a.txt"), "one\n");
@@ -105,8 +107,8 @@ test("a saved patch carries its row and applies on a clean tree", () => {
 
     git("checkout", "--", ".");
     rmSync(join(dir, "b.txt"));
-    execFileSync("git", ["apply", "--check", written[0].file], { cwd: dir });
-    execFileSync("git", ["apply", written[0].file], { cwd: dir });
+    execFileSync("git", ["-c", "core.autocrlf=false", "apply", "--check", written[0].file], { cwd: dir });
+    execFileSync("git", ["-c", "core.autocrlf=false", "apply", written[0].file], { cwd: dir });
     assert.equal(readFileSync(join(dir, "a.txt"), "utf8"), "one\ntwo\n");
     assert.equal(readFileSync(join(dir, "b.txt"), "utf8"), "new\n");
     assert.equal(readFileSync(join(dir, "keep.txt"), "utf8"), "same\n");

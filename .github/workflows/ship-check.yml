@@ -9,8 +9,9 @@ name: ship-check
 # environment and checks the run receipt: a missing line, a zero tick or a hash
 # that is not the golden fails the job (tools/ship-run.mjs). The shipped arena
 # binary also plays a short headless run, so the job proves the game boots, not
-# only that it links. The public mirror is the build farm; the private dev repo
-# never runs this job.
+# only that it links. A runner with no wgpu adapter names the adapter and skips
+# that leg instead of failing the job. The public mirror is the build farm; the
+# private dev repo never runs this job.
 #
 # A Windows PE image carries two fields the linker writes fresh in every
 # build: the COFF time stamp and the CodeView debug record (the PDB GUID and
@@ -134,7 +135,9 @@ jobs:
         # requires `ticks=<n> final_hash=d57b5c8ae3096614` with n > 0, prints
         # `SHIP-RUN tick=<n> hash=<h>`, then plays the shipped arena binary
         # headless and quotes its boot receipt. A missing receipt, a zero tick
-        # or a non-golden hash exits 1 and turns the job red.
+        # or a non-golden hash exits 1 and turns the job red. A runner with no
+        # wgpu adapter reaches no game receipt: that one case prints
+        # `SHIP-GAME skipped adapter=none` and leaves the job green.
         run: |
           $ErrorActionPreference = 'Stop'
           $target = Join-Path $env:RUNNER_TEMP 'ship-target'

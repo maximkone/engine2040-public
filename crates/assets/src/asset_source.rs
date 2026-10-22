@@ -20,10 +20,15 @@ use std::fmt;
 
 pub mod bundle;
 pub mod fetch;
+pub mod patch;
 #[cfg(not(target_arch = "wasm32"))]
 pub use bundle::bundle_pack;
 pub use bundle::{pack_to, BundleSource, EntryInfo, PackReport, PackRules};
 pub use fetch::FetchSource;
+pub use patch::{
+    Manifest, ManifestRow, PatchError, PatchSet, PatchStats, PatchedSource, MAX_PATCH_BYTES,
+    MAX_PATCH_ENTRIES, PATCH_MAGIC, PATCH_VERSION,
+};
 
 /// Longest logical path in bytes; longer names are refused, never cut.
 pub const MAX_SOURCE_PATH_BYTES: usize = 512;
