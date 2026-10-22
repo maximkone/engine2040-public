@@ -481,3 +481,89 @@ test("a file over the 3000-line cap cannot grow, and a file under it that crosse
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// CX2 escape hatch: a file pin can be raised with a reason, the way a crate
+// baseline can. The refusal names the escape hatch, and the bump is logged in
+// the baseline's "accepted" list.
+test("a file pin can be raised with a reason, and the refusal names the escape hatch", () => {
+  const root = mkdtempSync(join(tmpdir(), "rq-accept-file-"));
+  try {
+    mkdirSync(join(root, "crates", "geo", "src"), { recursive: true });
+    mkdirSync(join(root, "tools"), { recursive: true });
+    writeFileSync(join(root, "crates", "geo", "Cargo.toml"), '[package]\nname = "engine-geo"\n');
+    // The sim-config gate reads the canonical copy: the fixture carries one.
+    writeFileSync(join(root, "tools", "sim-clippy.toml"), "disallowed-types = []\n");
+    // 3,001 lines of private helpers: a file over the cap that trips no rule.
+    const body = Array.from({ length: 3001 }, (_, i) => `fn helper_${i}() -> u32 { ${i} }`).join("\n");
+    const src = join(root, "crates", "geo", "src", "big.rs");
+    writeFileSync(src, `${body}\n`);
+    const zero = Object.fromEntries(Object.keys(rq.METRICS).map((k) => [k, 0]));
+    const baselinePath = join(root, "tools", "rust-quality.baseline.json");
+    const writeBaseline = (files) => {
+      // The fixture file is over the 1500-line production bar too, so the
+      // baseline already holds that count: only the file pin is the subject.
+      const baseline = { version: 1, crates: { "engine-geo": { ...zero, big_files: 1, tests: 0 } }, files, accepted: [] };
+      writeFileSync(baselinePath, `${JSON.stringify(baseline, null, 1)}\n`);
+    };
+    writeBaseline({ "crates/geo/src/big.rs": 3001 });
+
+    const tool = join(dirname(fileURLToPath(import.meta.url)), "rust-quality.mjs");
+
+    // Grow the file by one line: the gate refuses and names the escape hatch.
+    const grown = `${body}\nfn helper_grown() -> u32 { 7 }\n`;
+    writeFileSync(src, grown);
+    const failed = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
+    const failedOut = `${failed.stdout ?? ""}${failed.stderr ?? ""}`;
+    assert.equal(failed.status, 1, `the grown file must fail the gate: ${failedOut}`);
+    assert.match(failedOut, /\[FAIL\] ratchet crates\/geo\/src\/big\.rs: file lines 3001 -> 3002/, "the refusal names the path and both counts");
+    assert.match(failedOut, /--accept-file crates\/geo\/src\/big\.rs/, "the refusal names the escape hatch command");
+    assert.match(failedOut, /--reason/, "the refusal names the reason flag");
+
+    // A bump without a reason is refused: the reason is what makes it honest.
+    const noReason = spawnSync(process.execPath, [tool, "--accept-file", "crates/geo/src/big.rs"], { cwd: root, encoding: "utf8" });
+    assert.equal(noReason.status, 2, "a bump without a reason is a usage error");
+    assert.match(`${noReason.stdout ?? ""}${noReason.stderr ?? ""}`, /--reason/);
+
+    // The bump raises the pin to the file's real line count and logs the reason.
+    const accepted = spawnSync(process.execPath, [tool, "--no-cache", "--accept-file", "crates/geo/src/big.rs", "--reason", "the generated table must hold its rows until the split lands"], { cwd: root, encoding: "utf8" });
+    const acceptedOut = `${accepted.stdout ?? ""}${accepted.stderr ?? ""}`;
+    assert.equal(accepted.status, 0, `the bump must land: ${acceptedOut}`);
+    assert.match(acceptedOut, /ACCEPTED crates\/geo\/src\/big\.rs/);
+
+    const after = JSON.parse(readFileSync(baselinePath, "utf8"));
+    assert.equal(after.files["crates/geo/src/big.rs"], 3002, "the pin holds the file's real line count");
+    const log = (after.accepted ?? []).filter((a) => a.file === "crates/geo/src/big.rs");
+    assert.equal(log.length, 1, "the bump is logged once");
+    assert.equal(log[0].from, 3001, "the log names the old count");
+    assert.equal(log[0].to, 3002, "the log names the new count");
+    assert.match(log[0].reason, /the generated table/, "the log keeps the reason");
+
+    // The tree run is green again: the pin matches the file.
+    const green = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
+    const greenOut = `${green.stdout ?? ""}${green.stderr ?? ""}`;
+    assert.equal(green.status, 0, `the bumped tree must pass: ${greenOut}`);
+    assert.match(greenOut, /RESULT PASS/);
+
+    // A file that is not in the tree cannot be bumped.
+    const missing = spawnSync(process.execPath, [tool, "--no-cache", "--accept-file", "crates/geo/src/gone.rs", "--reason", "the file does not exist here"], { cwd: root, encoding: "utf8" });
+    assert.equal(missing.status, 2, "a bump for a file that is not there is a usage error");
+    assert.match(`${missing.stdout ?? ""}${missing.stderr ?? ""}`, /not a file in the tree/);
+
+    // A file that crossed the cap (it had no pin) can be pinned with a reason.
+    writeBaseline({});
+    const crossed = spawnSync(process.execPath, [tool, "--no-cache"], { cwd: root, encoding: "utf8" });
+    const crossedOut = `${crossed.stdout ?? ""}${crossed.stderr ?? ""}`;
+    assert.equal(crossed.status, 1, "a file that crossed the cap fails");
+    assert.match(crossedOut, /crates\/geo\/src\/big\.rs: file lines 3002 \(crossed the 3000-line cap\)/);
+    assert.match(crossedOut, /--accept-file crates\/geo\/src\/big\.rs/, "the crossing refusal names the escape hatch too");
+    const pinned = spawnSync(process.execPath, [tool, "--no-cache", "--accept-file", "crates/geo/src/big.rs", "--reason", "the new file lands over the cap on purpose"], { cwd: root, encoding: "utf8" });
+    assert.equal(pinned.status, 0, `the crossing bump must land: ${pinned.stdout ?? ""}${pinned.stderr ?? ""}`);
+    const afterPin = JSON.parse(readFileSync(baselinePath, "utf8"));
+    assert.equal(afterPin.files["crates/geo/src/big.rs"], 3002, "the new file holds a pin at its real count");
+    const pinLog = (afterPin.accepted ?? []).filter((a) => a.file === "crates/geo/src/big.rs").at(-1);
+    assert.equal(pinLog.from, null, "the log names that the file had no pin before");
+    assert.equal(pinLog.to, 3002, "the log names the new count");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

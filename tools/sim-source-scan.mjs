@@ -81,6 +81,88 @@ export function productionCode(src) {
   return maskRust(src).split("#[cfg(test)]")[0];
 }
 
+// ------------------------------------------------------ PW52 layer rules
+
+// The three layer rules (docs/ARCHITECTURE.md "The layer map"):
+// 1. a simulation crate takes no presentation or platform edge,
+// 2. the GPU is touched only under crates/render/src/present/**,
+// 3. a simulation crate does no IO outside its tests.
+// Rule 3 needs every production line, and the split-at-the-first-cfg(test)
+// convention above is too coarse: a file may carry production code after a
+// `#[cfg(test)]` attribute that is not a module boundary. These helpers
+// remove the test module blocks themselves and keep the rest.
+
+const TEST_ATTR = /#\s*\[\s*cfg\s*\(/g;
+// The attribute tail: the closing bracket, then any further attributes, then
+// the module head the attribute gates.
+const MOD_TAIL = /^\s*\]\s*(?:#\s*\[[^\]]*\]\s*)*mod\s+[A-Za-z_]\w*\s*\{/;
+
+/** Masked source without the `#[cfg(test)] mod NAME { .. }` blocks. The code
+ * inside them is test code; everything else stays, including production code
+ * that sits after a test module. */
+export function stripTestModules(src) {
+  const code = maskRust(src);
+  const kept = [];
+  let at = 0;
+  let cursor = 0;
+  for (;;) {
+    TEST_ATTR.lastIndex = cursor;
+    const hit = TEST_ATTR.exec(code);
+    if (!hit) break;
+    // The cfg contents: balanced parens, so `cfg(all(test, feature = "x"))` reads.
+    let depth = 0;
+    let end = hit.index + hit[0].length - 1;
+    for (; end < code.length; end++) {
+      if (code[end] === "(") depth++;
+      else if (code[end] === ")") { depth--; if (depth === 0) break; }
+    }
+    const contents = code.slice(hit.index + hit[0].length, end);
+    if (!/\btest\b/.test(contents)) { cursor = end + 1; continue; }
+    // The attribute must sit on the module head it gates.
+    const head = MOD_TAIL.exec(code.slice(end + 1));
+    if (!head) { cursor = end + 1; continue; }
+    kept.push(code.slice(at, hit.index));
+    const open = end + 1 + head[0].length - 1;
+    let depth2 = 0;
+    let stop = open;
+    for (; stop < code.length; stop++) {
+      const c = code[stop];
+      if (c === "{") depth2++;
+      else if (c === "}") { depth2--; if (depth2 === 0) break; }
+    }
+    at = stop + 1;
+    cursor = at;
+  }
+  kept.push(code.slice(at));
+  return kept.join("");
+}
+
+/** Every production line of a file: masked, without the test module blocks. */
+export function productionSource(src) {
+  return stripTestModules(src);
+}
+
+// IO a simulation crate must not do: files, processes and sockets.
+const IO_PATTERNS = [
+  ["fs", /\b(?:std::)?fs::(read|write|read_to_string|read_dir|create_dir|create_dir_all|remove_dir|remove_file|rename|copy|metadata|OpenOptions)\b/g],
+  ["File", /\bFile::(open|create)\b/g],
+  ["process", /\bstd::process::Command\b/g],
+  ["net", /\bstd::net::(TcpStream|TcpListener|UdpSocket)\b/g],
+];
+
+/** IO calls in production code, each with its line. Comments and string
+ * literals never count, and a test module never counts. */
+export function ioHits(src) {
+  const code = productionSource(src);
+  const hits = [];
+  for (const [kind, re] of IO_PATTERNS) {
+    for (const m of code.matchAll(re)) {
+      hits.push({ kind, line: code.slice(0, m.index).split("\n").length });
+    }
+  }
+  return hits.sort((a, b) => a.line - b.line || a.kind.localeCompare(b.kind));
+}
+
 // ---------------------------------------------------------------- GE2 genre
 
 const GENRE_RAW = /Fighter|Gladiator|gladiator|FIGHTER|GLADIATOR/;

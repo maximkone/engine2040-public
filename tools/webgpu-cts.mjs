@@ -79,6 +79,10 @@ WebGPU instance of the render stack.
 The run needs a GPU and the strict switch:
   E2040_STRICT_WEBGPU=1 node tools/webgpu-cts.mjs
 
+The last two lines are the count line and the expected-case count:
+  webgpu_cts: pass=N fail=0 crash=0
+  expected_cases: N
+
 Exit: 0 the slice ran, 1 a case failed or crashed or the instance was not
 strict, 2 the tool could not run.`;
 
@@ -229,9 +233,20 @@ export function runCase(runner, wgsl, env, args = ["--wgsl-stdin"]) {
   return caseState(child.status ?? -1, child.stdout ?? "");
 }
 
-/** The count line the gate prints. */
+/**
+ * The count line the gate prints. The shape is fixed: `pass`, `fail` and
+ * `crash`, so a reader can match it exactly.
+ */
 export function summaryLine(counts) {
-  return `webgpu_cts: pass=${counts.pass} fail=${counts.fail} crash=${counts.crash} expected=${counts.expected}`;
+  return `webgpu_cts: pass=${counts.pass} fail=${counts.fail} crash=${counts.crash}`;
+}
+
+/**
+ * The expected cases get their own line: a case the expectations file names
+ * is neither a pass nor a failure, and the count line keeps its fixed shape.
+ */
+export function expectedLine(counts) {
+  return `expected_cases: ${counts.expected}`;
 }
 
 /**
@@ -336,6 +351,7 @@ function main(argv) {
       console.log(`${row.state} ${row.id}${why}`);
     }
     console.log(summaryLine(counts));
+    console.log(expectedLine(counts));
   }
   // A failed case, a crash or a stale expectation line all fail the gate.
   const stale = rows.filter((row) => row.why.startsWith("the expectations file"));

@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, sourceFilesUnder, romeSourceAudit, romeSourceViolations, romeContentFiles, codexRefsNamed, codexRefList, unwiredModulesLine } from "./workspace-check.mjs";
+import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, parseTestModules, sourceFilesUnder, romeSourceAudit, romeSourceViolations, romeContentFiles, codexRefsNamed, codexRefList, unwiredModulesLine, LAYERS, SIMULATION_CRATES, PRESENTATION_CRATES, PLATFORM_CRATES, GPU_BOUNDARY_LEGACY, layerEdgeViolations, gpuBoundaryFindings, ioBoundaryFindings } from "./workspace-check.mjs";
 import { mentions, pathTokens, tokensMention, rowsWithReason, summaryLine, scan as scanUnwired } from "./unwired-code-gate.mjs";
 import { parseBoard, needsOf } from "./board-slice.mjs";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deriveFixedApi, genreHits, maskRust, platformMathHits, productionCode } from "./sim-source-scan.mjs";
+import { deriveFixedApi, genreHits, ioHits, maskRust, platformMathHits, productionCode, productionSource } from "./sim-source-scan.mjs";
 import { scanIslandsFrom } from "./wiring-scan.mjs";
 
 const board = (lines) => lines.join("\n");
@@ -637,4 +637,165 @@ test("workspace-check runs the Rome source lint", () => {
   assert.match(gate, /romeSourceAudit\(repoDir\)/);
   assert.match(gate, /SKIP rome codex refs/);
   assert.match(gate, /PASS rome sources/);
+});
+
+// ---- PW52: the layer rules ------------------------------------------------
+
+test("layer rules: the layer map covers every crate of the workspace (PW52)", () => {
+  const crates = fileURLToPath(new URL("../crates/", import.meta.url));
+  if (!existsSync(crates)) return;
+  const dirs = readdirSync(crates, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && existsSync(join(crates, e.name, "Cargo.toml")))
+    .map((e) => e.name);
+  const placed = new Set(Object.values(LAYERS).flat());
+  for (const dir of dirs) {
+    // The crate name is in the manifest, not in the folder name.
+    const manifest = readFileSync(join(crates, dir, "Cargo.toml"), "utf8");
+    const found = /^name\s*=\s*"([^"]+)"/m.exec(manifest);
+    assert.ok(found, `${dir} has no crate name`);
+    if (!placed.has(found[1])) assert.fail(`${found[1]} is in no layer of the layer map`);
+  }
+});
+
+test("layer rules: a simulation crate on a presentation or platform edge is named (PW52)", () => {
+  const pkg = (name, deps) => ({ name, dependencies: deps.map((d) => (typeof d === "string" ? { name: d, kind: "normal" } : d)) });
+  const found = layerEdgeViolations([
+    pkg("engine-arena", ["engine-core", "engine-render"]),
+    pkg("engine-combat", [{ name: "engine-provider", kind: "normal" }]),
+    pkg("engine-ecs", ["engine-core"]),
+  ]);
+  assert.deepEqual(found, ["engine-arena -> engine-render", "engine-combat -> engine-provider"]);
+});
+
+test("layer rules: a dev edge is a test edge and stays legal (PW52)", () => {
+  const found = layerEdgeViolations([
+    { name: "engine-arena", dependencies: [{ name: "engine-provider", kind: "dev" }] },
+    { name: "engine-combat", dependencies: [{ name: "engine-audio", kind: "normal" }] },
+  ]);
+  assert.deepEqual(found, ["engine-combat -> engine-audio"]);
+});
+
+test("layer rules: the live tree has no simulation crate on a presentation edge (PW52)", () => {
+  const meta = spawnSync("cargo", ["metadata", "--locked", "--format-version", "1"], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  if (meta.status !== 0) return;
+  const packages = JSON.parse(meta.stdout).packages.map((p) => ({
+    name: p.name,
+    dependencies: p.dependencies.filter((d) => d.path).map((d) => ({ name: d.name, kind: d.kind ?? "normal" })),
+  }));
+  const found = layerEdgeViolations(packages);
+  assert.deepEqual(found, [], "a simulation crate may not import a presentation or a platform crate");
+});
+
+test("gpu boundary: a new file outside present/ that names wgpu:: fails (PW52)", () => {
+  const files = [
+    { rel: "render/src/present/gpu_present/frame.rs", src: "let d: wgpu::Device;" },
+    { rel: "render/src/gpu.rs", src: "let d: wgpu::Device;" },
+  ];
+  const found = gpuBoundaryFindings(files, []);
+  assert.deepEqual(found.added, ["render/src/gpu.rs"]);
+  assert.deepEqual(found.offenders, ["render/src/gpu.rs"]);
+  assert.deepEqual(found.stale, []);
+});
+
+test("gpu boundary: a file under present/ that names wgpu:: is legal (PW52)", () => {
+  const files = [{ rel: "render/src/present/gpu_present/frame.rs", src: "let d: wgpu::Device;" }];
+  const found = gpuBoundaryFindings(files, []);
+  assert.deepEqual(found.added, []);
+  assert.deepEqual(found.offenders, []);
+});
+
+test("gpu boundary: a known file that stops naming wgpu:: is stale, not new (PW52)", () => {
+  const files = [{ rel: "render/src/gpu.rs", src: "let d: wgpu::Device;" }];
+  const found = gpuBoundaryFindings(files, ["render/src/gpu.rs", "render/src/old.rs"]);
+  assert.deepEqual(found.added, []);
+  assert.deepEqual(found.stale, ["render/src/old.rs"]);
+});
+
+test("gpu boundary: the live tree names no new file outside present/ (PW52)", () => {
+  const root = fileURLToPath(new URL("../crates/", import.meta.url));
+  if (!existsSync(root)) return;
+  const dir = join(root, "render", "src");
+  const files = [];
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith(".rs") ? [join(d, e.name)] : []);
+  for (const file of walk(dir)) {
+    files.push({ rel: `render/src/${file.slice(dir.length + 1).split("\\").join("/")}`, src: readFileSync(file, "utf8") });
+  }
+  const found = gpuBoundaryFindings(files);
+  assert.deepEqual(found.added, [], "no new file outside present/ may name wgpu::");
+  assert.equal(found.offenders.length, GPU_BOUNDARY_LEGACY.length, "the live count is the known count");
+});
+
+test("io boundary: a simulation crate that reads a file in production code is named (PW52)", () => {
+  const files = [{
+    rel: "arena/src/lib.rs",
+    crate: "engine-arena",
+    src: "fn load() { let t = std::fs::read_to_string(\"a\"); }\n",
+  }];
+  const found = ioBoundaryFindings(files);
+  assert.equal(found.length, 1);
+  assert.match(found[0], /arena\/src\/lib\.rs/);
+  assert.match(found[0], /fs at line 1/);
+});
+
+test("io boundary: IO inside a test module does not count (PW52)", () => {
+  const src = `fn load() { let t = std::fs::read_to_string("a"); }
+#[cfg(test)]
+mod tests {
+  fn t() { let t = std::fs::read_to_string("b"); }
+}
+`;
+  assert.equal(ioHits(src).length, 1, "only the production read counts");
+  assert.equal(ioHits(src)[0].line, 1);
+  assert.equal(ioHits(src)[0].kind, "fs");
+});
+
+test("io boundary: a crate outside the simulation set may do IO (PW52)", () => {
+  const files = [{
+    rel: "assets/src/archive.rs",
+    crate: "engine-assets",
+    src: "fn load() { let t = std::fs::read_to_string(\"a\"); }\n",
+  }];
+  assert.deepEqual(ioBoundaryFindings(files), []);
+});
+
+test("io boundary: the live tree has no IO in a simulation crate outside its tests (PW52)", () => {
+  const root = fileURLToPath(new URL("../crates/", import.meta.url));
+  if (!existsSync(root)) return;
+  const files = [];
+  for (const dir of readdirSync(root, { withFileTypes: true })) {
+    if (!dir.isDirectory()) continue;
+    const crate = `engine-${dir.name}`;
+    if (!SIMULATION_CRATES.has(crate)) continue;
+    const src = join(root, dir.name, "src");
+    if (!existsSync(src)) continue;
+    const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith(".rs") ? [join(d, e.name)] : []);
+    for (const file of walk(src)) {
+      const rel = `${dir.name}/src/${file.slice(src.length + 1).split("\\").join("/")}`;
+      if (rel.includes("/bin/")) continue;
+      files.push({ rel, crate, src: readFileSync(file, "utf8") });
+    }
+  }
+  const isTestModule = (rel) => {
+    const name = rel.split("/").pop().replace(/\.rs$/, "");
+    const parts = rel.split("/");
+    const parent = parts.slice(0, -1).join("/");
+    const lib = join(root, parent, "lib.rs");
+    if (!existsSync(lib)) return false;
+    return parseTestModules(readFileSync(lib, "utf8")).has(name);
+  };
+  const found = ioBoundaryFindings(files, SIMULATION_CRATES, isTestModule);
+  assert.deepEqual(found, [], "a simulation crate does no IO outside its tests");
+});
+
+test("the layer map and the audit agree on the crates (PW52)", () => {
+  const gate = readFileSync(new URL("./workspace-check.mjs", import.meta.url), "utf8");
+  assert.match(gate, /layerEdgeViolations\(/);
+  assert.match(gate, /gpuBoundaryFindings\(/);
+  assert.match(gate, /ioBoundaryFindings\(/);
+  assert.match(gate, /PASS layer rules: no simulation crate imports a presentation crate/);
+  assert.match(gate, /WARN gpu boundary: \$\{gpu\.offenders\.length\} files outside present\/ name wgpu:: \(report-only\)/);
+  assert.match(gate, /PASS gpu boundary: no new file outside present\/ names wgpu::/);
+  assert.match(gate, /PASS io boundary: no simulation crate does IO outside its tests/);
 });

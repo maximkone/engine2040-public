@@ -74,6 +74,45 @@ runs the state machine door state (`anim.graph.set`, `anim.graph.undo`, `anim.pr
 `kam2-game` is the KAM3 window shell (first playable window): it composes `kam2-sim` (std-only, IO-free, no engine crate), the `engine-render` window leg (the fixed 2.5D projection, the procedural sprite atlas and the HUD pass), `engine-ui` HUD data, `engine-assets` palette conversion and `engine-clock` for the 10 Hz shell tick. Render never imports the game crate, and no frame, camera or clock reading enters the sim; the crate map and `tools/workspace-check.mjs` carry the same edge.
 `engine-rome` depends on `engine-core` only: it embeds the Rome tables (`content/rome/camp.toml`, `content/rome/line.toml`) with `include_str!` and reads them into typed integer values (lengths in millimetres), so no tick, frame or file read is involved. Every number carries the `ref` from `docs/plan/rome.md` section 5 and the one shared table reader refuses an entry with a number and no `ref`; `engine-core` owns the hasher, and `game` and `render` read the typed values instead of parsing a table of their own.
 
+### The layer map
+
+The dependency direction above is a set of layers. Every crate sits in one
+layer, and `tools/workspace-check.mjs` reads the same table, so the doc and
+the check cannot drift apart.
+
+| Layer | Crates | What lives here |
+|---|---|---|
+| foundation | `core` | Tick, seed streams, hash primitives; std-only |
+| simulation | `ecs`, `physics`, `combat`, `ai`, `nav`, `destruction`, `arena`, `spatial`, `scene`, `rules`, `world`, `ossim`, `kam2-sim` | The tick and its algorithms; no IO, no GPU, no clock |
+| data | `anim`, `assets`, `save`, `material`, `nn`, `input`, `rome`, `geo`, `observe`, `workspace-hack` | Contracts, cooked data and identity; IO and import live here |
+| presentation | `render`, `audio`, `ui`, `physfx` | Snapshots, resources and the frame; nothing here enters a hash |
+| platform | `provider`, `clock`, `net` | Adapters to the outside: models, time, transport |
+| application | `app`, `game`, `editor`, `endpoint`, `playtest`, `perf`, `proof`, `distill`, `web`, `chaos`, `engine2040`, `kam2-game`, `kam2-web` | Programs that compose the layers above |
+
+`anim` sits in the data row because it owns data contracts (skeleton, clip,
+pose, root motion, mask tables) and the authoritative sim reads them:
+`engine-arena` takes the root motion the tick hash folds, and `engine-physics`
+and `engine-physfx` take the ragdoll and pose types.
+
+Three rules follow from the table, and `node tools/workspace-check.mjs` checks
+all three:
+
+1. **Layer edges.** A simulation crate takes no presentation or platform
+   edge. A dev-dependency is a test edge, not a layer edge, so a test may use
+   any crate. The audit prints `PASS layer rules: no simulation crate imports
+   a presentation crate`.
+2. **The GPU boundary.** The GPU is touched only under
+   `crates/render/src/present/**`. The files outside that folder that name
+   `wgpu::` today are a known list of 31; the audit reports the count
+   (`WARN gpu boundary: 31 files outside present/ name wgpu:: (report-only)`)
+   and a new one fails (`PASS gpu boundary: no new file outside present/ names
+   wgpu::`). The list only shrinks: a known file that stops naming `wgpu::` is
+   reported stale and pruned.
+3. **The IO boundary.** A simulation crate does no IO outside its tests: no
+   file read, no process, no socket in production code. A file that is a module
+   declared under `#[cfg(test)]` is test code as a whole. The audit prints
+   `PASS io boundary: no simulation crate does IO outside its tests`.
+
 ### Crate integration status (2026-10-01)
 
 Measured by who calls each crate outside its own tests. Unit tests prove an

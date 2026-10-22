@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { SIM_CRATES } from "./rust-quality.mjs";
 import { archivedDoneRows, needsOf } from "./board-slice.mjs";
 import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
-import { OWN_MATH_FILES, deriveFixedApi, genreFindings, platformMathHits } from "./sim-source-scan.mjs";
+import { OWN_MATH_FILES, deriveFixedApi, genreFindings, ioHits, platformMathHits, productionCode } from "./sim-source-scan.mjs";
 import { runWithVerdictCache, scanIslandsFrom } from "./wiring-scan.mjs";
 import { rowsWithReason, scan as scanUnwired, summaryLine as unwiredSummaryLine } from "./unwired-code-gate.mjs";
 
@@ -104,6 +104,130 @@ export const allowedEdges = new Map([
   ["engine-world", []],
 ]);
 
+// PW52: the layer map. The crate layers live in docs/ARCHITECTURE.md "The
+// layer map"; this is the same table the audit reads, so the doc and the
+// check cannot drift apart.
+// - a simulation crate takes no presentation or platform edge,
+// - a simulation crate does no IO outside its tests,
+// - the GPU is touched only under crates/render/src/present/**.
+// The edges are production edges: a dev-dependency is a test edge, not a
+// layer edge, so it is exempt from the first rule.
+export const LAYERS = {
+  foundation: ["engine-core"],
+  simulation: [
+    "engine-ecs", "engine-physics", "engine-combat", "engine-ai", "engine-nav",
+    "engine-destruction", "engine-arena", "engine-spatial", "engine-scene",
+    "engine-rules", "engine-world", "engine-ossim", "kam2-sim",
+  ],
+  data: [
+    "engine-anim", "engine-assets", "engine-save", "engine-material", "engine-nn",
+    "engine-input", "engine-rome", "engine-geo", "engine-observe", "engine-workspace-hack",
+  ],
+  presentation: ["engine-render", "engine-audio", "engine-ui", "engine-physfx"],
+  platform: ["engine-provider", "engine-clock", "engine-net"],
+  application: [
+    "engine-app", "engine-game", "engine-editor", "engine-endpoint", "engine-playtest",
+    "engine-perf", "engine-proof", "engine-distill", "engine-web", "engine-chaos",
+    "engine2040", "kam2-game", "kam2-web",
+  ],
+};
+export const SIMULATION_CRATES = new Set(LAYERS.simulation);
+export const PRESENTATION_CRATES = new Set(LAYERS.presentation);
+export const PLATFORM_CRATES = new Set(LAYERS.platform);
+
+// Rule 1: a simulation crate takes no presentation or platform edge.
+// Pure (exported for tests); the audit feeds it the workspace packages.
+export function layerEdgeViolations(packages, {
+  simulation = SIMULATION_CRATES,
+  presentation = PRESENTATION_CRATES,
+  platform = PLATFORM_CRATES,
+} = {}) {
+  const forbidden = new Set([...presentation, ...platform]);
+  const found = [];
+  for (const pkg of packages) {
+    if (!simulation.has(pkg.name)) continue;
+    for (const dep of pkg.dependencies ?? []) {
+      // A dev-dependency is a test edge: the test may use any crate.
+      if (dep.kind === "dev") continue;
+      if (forbidden.has(dep.name)) found.push(`${pkg.name} -> ${dep.name}`);
+    }
+  }
+  return found.sort();
+}
+
+// Rule 2: the GPU is touched only under crates/render/src/present/**.
+// The files outside that folder that name wgpu:: today are the known list:
+// the count is reported, a NEW one fails. The list only shrinks.
+export const GPU_BOUNDARY_LEGACY = [
+  "render/src/aa_scale/gpu.rs",
+  "render/src/accel.rs",
+  "render/src/backend.rs",
+  "render/src/bin/webgpu_cts.rs",
+  "render/src/decals.rs",
+  "render/src/executor.rs",
+  "render/src/fog.rs",
+  "render/src/gpu.rs",
+  "render/src/gpu_cull.rs",
+  "render/src/graph.rs",
+  "render/src/gtao.rs",
+  "render/src/kam2_iso_proof.rs",
+  "render/src/kam2_sprite_proof.rs",
+  "render/src/lens.rs",
+  "render/src/material_layer.rs",
+  "render/src/material_pipeline.rs",
+  "render/src/material_pipeline/gpu.rs",
+  "render/src/particle_draw_gpu.rs",
+  "render/src/particles_gpu.rs",
+  "render/src/pipeline_warmup.rs",
+  "render/src/post/gpu.rs",
+  "render/src/presenter_pick.rs",
+  "render/src/shadow_cluster.rs",
+  "render/src/sky.rs",
+  "render/src/spot.rs",
+  "render/src/spot/encode.rs",
+  "render/src/twin_shadow.rs",
+  "render/src/v1_gpu.rs",
+  "render/src/v1_skin.rs",
+  "render/src/viewmodel/gpu.rs",
+  "render/src/viewmodel/tests.rs",
+];
+export const GPU_PRESENT_PREFIX = "render/src/present/";
+
+/** The GPU boundary findings for the render crate: the files outside
+ * `present/` that name `wgpu::` in production code (`added` is a new
+ * offender and fails, `stale` is a known file that no longer names it and is
+ * pruned from the list). Pure (exported for tests). */
+export function gpuBoundaryFindings(files, known = GPU_BOUNDARY_LEGACY, presentPrefix = GPU_PRESENT_PREFIX) {
+  const offenders = files
+    .filter((f) => !f.rel.startsWith(presentPrefix) && productionCode(f.src).includes("wgpu::"))
+    .map((f) => f.rel)
+    .sort();
+  const knownSet = new Set(known);
+  const offenderSet = new Set(offenders);
+  return {
+    offenders,
+    added: offenders.filter((f) => !knownSet.has(f)),
+    stale: known.filter((f) => !offenderSet.has(f)).sort(),
+  };
+}
+
+// Rule 3: a simulation crate does no IO outside its tests. `files` carry the
+// crate name and the path relative to crates/; `isTestModule` says whether a
+// file is a module declared under #[cfg(test)] (the whole file is test code).
+// Pure (exported for tests).
+export function ioBoundaryFindings(files, simulation = SIMULATION_CRATES, isTestModule = () => false) {
+  const found = [];
+  for (const file of files) {
+    if (!simulation.has(file.crate)) continue;
+    if (isTestModule(file.rel)) continue;
+    const hits = ioHits(file.src);
+    if (hits.length) {
+      found.push(`${file.rel} (${hits.map((h) => `${h.kind} at line ${h.line}`).join(", ")})`);
+    }
+  }
+  return found.sort();
+}
+
 // B3 LFS size guard (2026-10-02): after the history slim, a NEWLY tracked
 // non-LFS blob over 5 MB fails. Pure helper (exported for tests); main()
 // feeds it the staged-but-not-in-HEAD set, so the pre-slim regular blobs
@@ -180,6 +304,16 @@ export function parseIncludedFiles(text) {
     const path = m[1].split(/[\\/]/).pop() ?? "";
     names.add(path.replace(/\.rs$/, ""));
   }
+  return names;
+}
+
+// Modules declared under #[cfg(test)]: the whole file is test code. The
+// attribute may sit on its own line or share the line with the module head.
+export function parseTestModules(text) {
+  const names = new Set();
+  const re = /#\s*\[\s*cfg\s*\((?:[^()]*\btest\b[^()]*)\)\s*\]\s*(?:#\s*\[[^\]]*\]\s*)*mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/g;
+  let m;
+  while ((m = re.exec(text)) !== null) names.add(m[1]);
   return names;
 }
 
@@ -786,9 +920,11 @@ function audit(repoDir) {
   const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory() ? walk(join(dir, entry.name)) : entry.name.endsWith(".rs") ? [join(dir, entry.name)] : []);
   const crateFilesByPkg = new Map();
+  const crateNameByDir = new Map();
   for (const pkg of workspacePackages) {
     const src = join(dirname(pkg.manifest_path), "src");
     crateFilesByPkg.set(pkg.name, existsSync(src) ? walk(src) : []);
+    crateNameByDir.set(basename(dirname(pkg.manifest_path)), pkg.name);
   }
   for (const pkg of workspacePackages) {
     const src = join(dirname(pkg.manifest_path), "src");
@@ -826,6 +962,76 @@ function audit(repoDir) {
     }
   }
 
+  // PW52: the three layer rules. They read the same source bytes the audit
+  // already loaded, so the tree is walked once.
+  const crates = cratesDir;
+  // 1. A simulation crate takes no presentation or platform edge. A
+  //    dev-dependency is a test edge and stays legal.
+  const layerEdges = layerEdgeViolations(workspacePackages.map((pkg) => ({
+    name: pkg.name,
+    dependencies: pkg.dependencies.filter((dep) => dep.path).map((dep) => ({ name: dep.name, kind: dep.kind ?? "normal" })),
+  })));
+  if (layerEdges.length) {
+    errors.push(`simulation crate takes a presentation or platform edge (a simulation crate may not import a presentation or a platform crate): ${layerEdges.join(", ")}`);
+  }
+
+  // 2. The GPU is touched only under crates/render/src/present/**. The files
+  //    outside that folder that name wgpu:: today are the known list: the
+  //    count is reported and a NEW one fails.
+  const renderFiles = (crateFilesByPkg.get("engine-render") ?? []).map((file) => ({
+    rel: relative(crates, file).split("\\").join("/"),
+    src: cachedRead(file),
+  }));
+  const gpu = gpuBoundaryFindings(renderFiles);
+  if (gpu.added.length) {
+    errors.push(`GPU boundary: a new file outside crates/render/src/present/** names wgpu:: (move the GPU code under present/): ${gpu.added.join(", ")}`);
+  }
+
+  // 3. A simulation crate does no IO outside its tests. A file that is a
+  //    module declared under #[cfg(test)] is test code as a whole.
+  const testModuleCache = new Map();
+  const testModuleNames = (file) => {
+    let names = testModuleCache.get(file);
+    if (names === undefined) {
+      names = existsSync(file) ? parseTestModules(cachedRead(file)) : new Set();
+      testModuleCache.set(file, names);
+    }
+    return names;
+  };
+  const isTestModule = (rel, crateSrc) => {
+    const file = join(crates, rel);
+    const dir = dirname(file);
+    const isModRs = basename(rel) === "mod.rs";
+    const name = basename(isModRs ? dir : file, ".rs");
+    const parentDir = isModRs ? dirname(dir) : dir;
+    // The same parent rule the module-reachability check uses: a file in the
+    // crate root is declared by lib.rs or main.rs, a file in a folder by
+    // folder.rs or folder/mod.rs.
+    const parents = parentDir === crateSrc
+      ? [join(crateSrc, "lib.rs"), join(crateSrc, "main.rs")]
+      : [`${parentDir}.rs`, join(parentDir, "mod.rs")];
+    return parents.some((parent) => existsSync(parent) && testModuleNames(parent).has(name));
+  };
+  const ioFiles = [];
+  for (const pkg of workspacePackages) {
+    const crateSrc = join(dirname(pkg.manifest_path), "src");
+    for (const file of crateFilesByPkg.get(pkg.name) ?? []) {
+      const rel = relative(crates, file).split("\\").join("/");
+      // A binary is an application, not the crate's library: it may read files.
+      if (rel.includes("/bin/")) continue;
+      ioFiles.push({ rel, crate: pkg.name, src: cachedRead(file) });
+    }
+  }
+  const ioFindings = ioBoundaryFindings(ioFiles, SIMULATION_CRATES, (rel) => {
+    const crate = rel.split("/")[0];
+    const pkg = workspacePackages.find((p) => p.name === crateNameByDir.get(crate));
+    if (!pkg) return false;
+    return isTestModule(rel, join(dirname(pkg.manifest_path), "src"));
+  });
+  if (ioFindings.length) {
+    errors.push(`IO boundary: a simulation crate does IO outside its tests (a file read or a process spawn in a simulation crate): ${ioFindings.join("; ")}`);
+  }
+
   // Rollback multiplayer needs bit-identical simulation on every player's PC.
   // Platform float transcendentals (sin, exp, powf...) may round differently
   // across CPUs and C runtimes, so simulation code must use deterministic math.
@@ -837,7 +1043,6 @@ function audit(repoDir) {
   const DETERMINISM_STRICT = true;
   const simCrates = new Set(SIM_CRATES);
   const ownMath = new Set(OWN_MATH_FILES); // Fixed-point type with its own integer sin/cos.
-  const crates = join(dirname(root.manifest_path), "crates");
   const fixedPath = join(crates, "core", "src", "fixed.rs");
   // Without the Fixed source nothing is proven Fixed, so every call counts.
   const fixedApi = deriveFixedApi(existsSync(fixedPath) ? cachedRead(fixedPath) : "");
@@ -1135,6 +1340,13 @@ function audit(repoDir) {
   console.log("PASS lfs guard: no newly tracked non-LFS blob over 5 MB");
   console.log(`PASS test layout: ${layoutCrates} crates keep one integration-test binary (tests/it)`);
   console.log(`PASS maps: ${mapCrates} crates, ${mapPaths} paths match the tree`);
+  console.log("PASS layer rules: no simulation crate imports a presentation crate");
+  console.log(`WARN gpu boundary: ${gpu.offenders.length} files outside present/ name wgpu:: (report-only)`);
+  if (gpu.stale.length) {
+    console.log(`WARN gpu boundary (report-only): stale entries name no wgpu:: any more, prune them: ${gpu.stale.join(", ")}`);
+  }
+  console.log("PASS gpu boundary: no new file outside present/ names wgpu::");
+  console.log("PASS io boundary: no simulation crate does IO outside its tests");
   console.log(genre.stale.length
     ? `WARN genre ledger (report-only): stale entries name no genre word any more, prune them: ${genre.stale.join(", ")}`
     : `PASS genre ledger: ${genreLedger.size} files, none unlisted, none stale`);

@@ -6,7 +6,9 @@
 // count rises above tools/rust-quality.baseline.json. The baseline only goes
 // down (--tighten); raising it needs --accept with a reason, which is logged.
 // The per-file line cap rides the same baseline: a crates/*/src file over
-// FILE_CAP_LINES is pinned at its line count and may not grow.
+// FILE_CAP_LINES is pinned at its line count and may not grow. A pinned file
+// that must grow is bumped with --accept-file and a reason, which the
+// baseline's "accepted" list keeps.
 //   node tools/rust-quality.mjs                 scorecard + ratchet, exit 1 on regression
 //   node tools/rust-quality.mjs --crate ecs     one crate (repeatable)
 //   node tools/rust-quality.mjs --list dup_fns --crate anim [--limit 40]
@@ -164,6 +166,13 @@ export function fixTail(ruleId) {
 // stands next to the metric fixes.
 export const FILE_LINE_FIX = "move a section of the file into its own module (`mod name;` in lib.rs) and shrink the file under 3000 lines";
 
+// The escape hatch of the per-file cap: raise one file's pin with a reason,
+// the way --accept raises a crate's baseline with a reason. The refusal names
+// it, so a stuck agent sees the way out of the red gate in the line itself.
+export function fileEscapeHatch(path) {
+  return `escape hatch: node tools/rust-quality.mjs --accept-file ${path} --reason "<why>"`;
+}
+
 // The baseline's per-file pins: every crates/*/src file over FILE_CAP_LINES,
 // at its current line count. A file under the cap holds no pin.
 export function filePins(fileLines) {
@@ -184,11 +193,13 @@ Usage:
   node tools/rust-quality.mjs --init          write the baseline once (refuses when it exists)
   node tools/rust-quality.mjs --tighten       lower improved baseline counts (orchestrator)
   node tools/rust-quality.mjs --accept <crate> --reason "<why>"   (orchestrator)
+  node tools/rust-quality.mjs --accept-file <path> --reason "<why>"   raise one file's line pin
   node tools/rust-quality.mjs --owned <path>  ratchet only regressions touching owned paths (land)
 
 Options:
   --crate <name>   score one crate (repeatable, also matches engine-<name>)
   --owned <path>   scope the ratchet to owned repo paths (repeatable, comma ok; foreign debt warns, owned debt still fails)
+  --accept-file <path>  raise one file's line pin to its real count, with a reason (the escape hatch of the line cap)
   --list <metric>  list hits for one metric (needs --limit to cap output)
   --limit <n>      cap listed hits (only with --list)
   --json           machine-readable scorecard
@@ -198,6 +209,8 @@ Options:
 The per-file line cap: a crates/*/src file over 3000 lines is pinned in
 tools/rust-quality.baseline.json and may not grow; a file under 3000 that
 crosses it fails too. Shrinking a pinned file lowers its pin (--tighten).
+The escape hatch: --accept-file <path> --reason "<why>" raises one pin and
+logs the reason in the baseline's "accepted" list.
 
 Exit codes: 0 ok - 1 ratchet regression - 2 usage.
 `;
@@ -791,17 +804,18 @@ export function onlyBase(baseline, names) {
 export function compareFiles(pins, fileLines, inScope = () => true) {
   const regressions = [];
   const improvements = [];
-  const tail = ` fix: ${FILE_LINE_FIX}`;
   for (const [path, now] of fileLines) {
     if (!inScope(path)) continue;
     const was = pins?.[path];
+    const tail = ` fix: ${FILE_LINE_FIX}`;
+    const hatch = ` (${fileEscapeHatch(path)})`;
     if (was === undefined) {
       // Not in the baseline: it was under the cap when the baseline was
       // written, so crossing the cap now is the regression.
-      if (now > FILE_CAP_LINES) regressions.push(`${path}: file lines ${now} (crossed the ${FILE_CAP_LINES}-line cap)${tail}`);
+      if (now > FILE_CAP_LINES) regressions.push(`${path}: file lines ${now} (crossed the ${FILE_CAP_LINES}-line cap)${hatch}${tail}`);
       continue;
     }
-    if (now > was) regressions.push(`${path}: file lines ${was} -> ${now} (a file over ${FILE_CAP_LINES} lines cannot grow)${tail}`);
+    if (now > was) regressions.push(`${path}: file lines ${was} -> ${now} (a file over ${FILE_CAP_LINES} lines cannot grow)${hatch}${tail}`);
     else if (now < was) improvements.push({ path, was, now });
   }
   // A pinned file that is gone loses its pin: the file it named is not there.
@@ -905,7 +919,7 @@ function main(argv) {
     process.stdout.write(HELP);
     return 0;
   }
-  const opts = { crates: [], owned: [], list: "", limit: 40, limitSet: false, json: false, tighten: false, accept: "", reason: "", init: false, noCache: false };
+  const opts = { crates: [], owned: [], list: "", limit: 40, limitSet: false, json: false, tighten: false, accept: "", acceptFile: "", reason: "", init: false, noCache: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--crate") opts.crates.push(argv[++i] ?? "");
@@ -915,6 +929,7 @@ function main(argv) {
     else if (a === "--json") opts.json = true;
     else if (a === "--tighten") opts.tighten = true;
     else if (a === "--accept") opts.accept = argv[++i] ?? "";
+    else if (a === "--accept-file") opts.acceptFile = argv[++i] ?? "";
     else if (a === "--reason") opts.reason = argv[++i] ?? "";
     else if (a === "--init") opts.init = true;
     else if (a === "--no-cache") opts.noCache = true;
@@ -923,8 +938,12 @@ function main(argv) {
   if (opts.list && opts.list !== "file_lines" && !METRICS[opts.list]) throw new Error(`unknown metric ${opts.list}; one of ${Object.keys(METRICS).join(", ")}`);
   if (opts.limitSet && !opts.list) throw new Error("--limit needs --list (it caps listed hits)");
   if (opts.accept && opts.reason.trim().length < 10) throw new Error("--accept needs --reason with a real explanation");
+  if (opts.acceptFile && opts.reason.trim().length < 10) throw new Error("--accept-file needs --reason with a real explanation");
+  if (opts.accept && opts.acceptFile) throw new Error("--accept and --accept-file are two separate bumps; use one at a time");
   const want = (name) => !opts.crates.length || opts.crates.some((c) => c === name || `engine-${c}` === name);
-  const { crates, groups, fileLines } = measure(".", opts.crates.length ? want : null, !opts.noCache);
+  // A file bump names one path, so it measures the whole tree: a --crate run
+  // would not see the file when it lives in another crate.
+  const { crates, groups, fileLines } = measure(".", opts.crates.length && !opts.acceptFile ? want : null, !opts.noCache);
   const shown = new Map([...crates].filter(([name]) => want(name)));
   if (opts.crates.length && !shown.size) throw new Error(`no crate matches ${opts.crates.join(", ")}`);
 
@@ -945,6 +964,24 @@ function main(argv) {
     baseline.crates[name] = now;
     writeFileSync(BASELINE, `${JSON.stringify(baseline, null, 1)}\n`);
     console.log(`ACCEPTED ${name} into ${BASELINE}: ${opts.reason.trim()}`);
+    return 0;
+  }
+  if (opts.acceptFile) {
+    // The per-file escape hatch: raise one file's pin to its real line count.
+    // The reason is the price: it lands in the baseline's "accepted" list.
+    const path = normalizeRepoPath(opts.acceptFile);
+    const now = fileLines.get(path);
+    if (now === undefined) throw new Error(`${opts.acceptFile} is not a file in the tree; --accept-file names a repo-relative path under crates/*/src`);
+    const was = baseline.files[path] ?? null;
+    if (was !== null && now <= was) {
+      // A shrink is not a bump: --tighten lowers the pin.
+      console.log(`TIGHTEN ${path} file lines ${was} -> ${now}: the file shrank, run --tighten to lock it in`);
+      return 0;
+    }
+    (baseline.accepted ??= []).push({ date: new Date().toISOString().slice(0, 10), file: path, from: was, to: now, reason: opts.reason.trim() });
+    baseline.files[path] = now;
+    writeFileSync(BASELINE, `${JSON.stringify(baseline, null, 1)}\n`);
+    console.log(`ACCEPTED ${path} into ${BASELINE}: file lines ${was ?? "none"} -> ${now}: ${opts.reason.trim()}`);
     return 0;
   }
 

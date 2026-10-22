@@ -18,6 +18,7 @@ import {
   PASS,
   REJECTED,
   caseState,
+  expectedLine,
   judgeCase,
   listLines,
   loadCases,
@@ -194,8 +195,9 @@ test("a case that passes while the expectations file names it is a stale line, a
   assert.match(rows[0].why, /stale/);
 });
 
-test("the count line carries pass, fail, crash and expected", () => {
-  assert.equal(summaryLine({ pass: 3, fail: 0, crash: 0, expected: 1 }), "webgpu_cts: pass=3 fail=0 crash=0 expected=1");
+test("the count line carries pass, fail and crash, and the expected cases get their own line", () => {
+  assert.equal(summaryLine({ pass: 3, fail: 0, crash: 0, expected: 1 }), "webgpu_cts: pass=3 fail=0 crash=0");
+  assert.equal(expectedLine({ pass: 3, fail: 0, crash: 0, expected: 1 }), "expected_cases: 1");
 });
 
 test("--list prints the chosen cases and their expectations", () => {
@@ -239,7 +241,8 @@ test("the tool runs the slice over a fake runner and prints the count line", () 
   });
   assert.equal(code, 0);
   assert.match(out, /^pass webgpu:shader,validation,decl,const:case$/m);
-  assert.match(out, /^webgpu_cts: pass=1 fail=0 crash=0 expected=0$/m);
+  assert.match(out, /^webgpu_cts: pass=1 fail=0 crash=0$/m);
+  assert.match(out, /^expected_cases: 0$/m);
 });
 
 test("the tool fails when a case does not match the suite's expectation", () => {
@@ -255,7 +258,8 @@ test("the tool fails when a case does not match the suite's expectation", () => 
     env: { FAKE_TABLE: table, E2040_STRICT_WEBGPU: "1" },
   });
   assert.equal(code, 1);
-  assert.match(out, /^webgpu_cts: pass=0 fail=1 crash=0 expected=0$/m);
+  assert.match(out, /^webgpu_cts: pass=0 fail=1 crash=0$/m);
+  assert.match(out, /^expected_cases: 0$/m);
 });
 
 test("the tool fails when the device compiles a program the suite expects to be refused", () => {
@@ -271,7 +275,8 @@ test("the tool fails when the device compiles a program the suite expects to be 
     env: { FAKE_TABLE: table, E2040_STRICT_WEBGPU: "1" },
   });
   assert.equal(code, 1);
-  assert.match(out, /^webgpu_cts: pass=0 fail=1 crash=0 expected=0$/m);
+  assert.match(out, /^webgpu_cts: pass=0 fail=1 crash=0$/m);
+  assert.match(out, /^expected_cases: 0$/m);
 });
 
 test("the tool fails when the runner is missing", () => {
