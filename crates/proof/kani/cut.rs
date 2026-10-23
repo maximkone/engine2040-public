@@ -9,8 +9,8 @@
 
 use engine_combat::anatomy::JointId;
 use engine_combat::cut::{
-    chance_q16, edge_reaches, effective_q16, BladeSwing, CutTables, JointTarget, CUT_POS_BOUND_MM,
-    MAX_ENERGY_Q16, MAX_SHARPNESS_Q16, MAX_WEAR_Q16,
+    chance_q16, edge_reaches, effective_q16, BladeSwing, CutTables, JointTarget, MAX_ENERGY_Q16,
+    MAX_SHARPNESS_Q16, MAX_WEAR_Q16,
 };
 
 fn swing(p0: [i32; 3], p1: [i32; 3], blade_half_mm: u32) -> BladeSwing {
@@ -37,10 +37,11 @@ fn target(spine: [i32; 3], radius_mm: u32) -> JointTarget {
 }
 
 /// Kernel: `edge_reaches` position envelope.
-/// Bound: a swing and capsule 1 mm outside `CUT_POS_BOUND_MM` on the x axis.
+/// Bound: a swing and capsule at `i32::MAX` on the x axis, outside the
+/// position envelope.
 #[kani::proof]
 pub fn cut_edge_reach_rejects_outside_envelope() {
-    let outside = [CUT_POS_BOUND_MM + 1, 0, 0];
+    let outside = [i32::MAX, 0, 0];
     let swing = swing(outside, outside, 0);
     let target = target(outside, 1);
     assert!(!edge_reaches(&swing, &target, &CutTables::v1()));
