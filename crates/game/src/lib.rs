@@ -77,6 +77,11 @@ pub mod crash;
 /// Reacting crowd sim: 20k-seat integer state feeding the instanced
 /// stands through the render staging. Std-only; consumer is [`App`].
 pub mod crowd_gpu;
+/// Debug draw for the live fighters (C13): hurt-capsule wireframe plus a
+/// facing line, off at the `debug-draw` knob. Needs the render camera, so it
+/// rides `app`; presentation only, never hashed.
+#[cfg(feature = "app")]
+pub mod debug_lines;
 /// Dev-only hot-patch seam for one gameplay point (practice tuning).
 /// Std-only; consumer is the window `arena.rs::poll_hot_reload`.
 pub mod dev_hotpatch;

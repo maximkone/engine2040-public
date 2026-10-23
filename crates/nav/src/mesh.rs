@@ -10,6 +10,7 @@ use std::fmt;
 
 use crate::cursor::{Cursor, Truncated};
 
+#[path = "mesh/tiled.rs"]
 mod tiled;
 pub use tiled::{TiledBake, TILE_BORDER};
 /// Largest absolute vertex coordinate in meters; beyond it refuses.

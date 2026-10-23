@@ -69,6 +69,7 @@ use engine_game::windowed::{
 };
 use engine_game::{App, GameConfig, TickOutcome};
 use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
+use engine_perf::profiler::{begin_frame, span, Phase};
 use engine_render::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter, WaitStats};
 
 use winit::application::ApplicationHandler;
@@ -1650,7 +1651,11 @@ impl ArenaApp {
             Err(err) => return self.fail(event_loop, err, 2),
         };
         self.pad.poll();
-        self.run_sim_ticks(steps, human);
+        {
+            // C13 tick phase: the fixed simulation steps owed this frame.
+            let _span = span(Phase::Tick);
+            self.run_sim_ticks(steps, human);
+        }
         if let Some(err) = self.net_fatal() {
             return self.fail(event_loop, err, 2);
         }
@@ -1996,6 +2001,10 @@ impl ArenaApp {
                 }
             }
         };
+        // C13: one profiler frame per presented frame. A suspended window
+        // returned above, so an idle frame never advances the puffin stream;
+        // an acquire skip below still counts as one attempted frame.
+        begin_frame();
         // Kit draws ride the same list as the surface and the offscreen
         // capture, so the window and its PNGs frame the same arena. Missing
         // keys draw nothing, so an unstaged kit keeps the cube frame. The
@@ -2024,11 +2033,16 @@ impl ArenaApp {
             }
         }
         let fighters_started = Instant::now();
-        if let Err(err) = self.push_fighters(&mut list) {
-            return self.fail(event_loop, err, 1);
+        {
+            // C13 look phase: the fighter draw list and its break/spear
+            // overlays under the camera finalized above.
+            let _span = span(Phase::Look);
+            if let Err(err) = self.push_fighters(&mut list) {
+                return self.fail(event_loop, err, 1);
+            }
+            self.push_break(&mut list);
+            self.push_spear(&mut list);
         }
-        self.push_break(&mut list);
-        self.push_spear(&mut list);
         self.fighters_us = self
             .fighters_us
             .saturating_add(duration_us(fighters_started.elapsed()));
@@ -2053,6 +2067,11 @@ impl ArenaApp {
             self.aim_free_cam(&mut list);
         }
         self.push_speed_demo(&mut list);
+        // The debug-draw knob (C13): the live fighters' hurt capsules plus a
+        // facing line under the final camera. Off stages nothing, so the
+        // frame stays bit-identical; the same presenter serves the window and
+        // the offscreen capture below.
+        self.push_debug_lines(&list);
         // The ears sit where the camera does (EG21w): the next tick's
         // listener, so a blow on the left of the picture sounds on the left.
         self.audio_space
@@ -2075,13 +2094,20 @@ impl ArenaApp {
                 }
             };
             let bars = self.speed.is_none();
-            engine_game::console::overlay::stage_hud(presenter, &overlay, &self.console, bars);
+            {
+                // C13 hud phase: overlay rows and HP bars staged before submit.
+                let _span = span(Phase::Hud);
+                engine_game::console::overlay::stage_hud(presenter, &overlay, &self.console, bars);
+            }
             // PQ18 stage three: the frame submits its present call now. Only a
             // frame with an accepted tick stamps, so an idle frame never reads
             // as a stray event.
             if self.latency.is_waiting() {
                 self.latency.note_present_submitted(Instant::now());
             }
+            // C13 present phase: the submit and the present call for this
+            // frame, through the receipt handling below.
+            let _present_span = span(Phase::Present);
             match presenter.render_surface(&list) {
                 Ok(receipt) => {
                     if receipt.total_validation_errors() > 0 {
@@ -2145,6 +2171,25 @@ impl ArenaApp {
         self.poll_hot_reload();
         self.note_receipt(&receipt);
         self.capture_offscreen(event_loop, &list);
+    }
+
+    /// Debug draw (C13): while the `debug-draw` knob is on, stage the live
+    /// fighters' hurt capsules plus a facing line under the frame's final
+    /// camera. The presenter draws them after the blit, so the window and the
+    /// offscreen capture show the same lines. Off stages nothing: the batch
+    /// from a previous frame is never drawn while the switch is off.
+    fn push_debug_lines(&mut self, list: &DrawList) {
+        let Some(presenter) = self.presenter.as_mut() else {
+            return;
+        };
+        let Some(batch) = engine_game::debug_lines::fighter_lines(
+            self.app.fighter_views(),
+            &list.camera,
+            presenter.debug_lines_enabled(),
+        ) else {
+            return;
+        };
+        presenter.push_debug_lines(&batch);
     }
 
     /// Fighters over the frame list: the skinned CT7 look in its pit when
@@ -2714,8 +2759,7 @@ impl ArenaApp {
                 // Arena kit over the placement boxes; a refused stage keeps
                 // the cube/dressing frame (the cube is the visible error
                 // mesh), never fails the window.
-                self.kit = stage_kit_or_default(&mut presenter);
-                tell!("arena: {}", live_kit_notice(&self.kit));
+                self.stage_kit(&mut presenter);
                 // CT7 fighters (bodies re-hashed against their pins); a
                 // refusal is loud and keeps the staged boxes.
                 match FighterLook::load_and_stage(&mut presenter, self.config.half_extent_m) {
@@ -2755,6 +2799,14 @@ impl ArenaApp {
             }
             Err(err) => self.fail(event_loop, WinError::Present(err), 1),
         }
+    }
+
+    /// Stage the content kit and report it: the draw notice, then the measured
+    /// budget beside the potato line (the G9 asset leg).
+    fn stage_kit(&mut self, presenter: &mut Presenter) {
+        self.kit = stage_kit_or_default(presenter);
+        tell!("arena: {}", live_kit_notice(&self.kit));
+        tell!("kit budget: {}", self.kit.budget.line());
     }
 }
 

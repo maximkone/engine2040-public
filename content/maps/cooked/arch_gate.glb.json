@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "a15fbdf576838eccd8ae72a93571a43ff4b2b14163a7d7ae9df09940b1321b45",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "c1a59902ce1eb57dbbfdc4027eb200c1b30141c44b1785ae0d44ec45cee98c15",
+  "bytes": 238280,
+  "bake": {
+    "src": "content/maps/src/arch_gate.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\arch_gate_ao.png",
+      "bytes": 15990,
+      "sha256": "a2e1f9915eb1a8c6875acb1f77e7163fe692ba4ca889049a47a07d8a8c831f64"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\arch_gate_grime.png",
+      "bytes": 21647,
+      "sha256": "f6f133741d39acbdfdade5c7482976f61f1d980ad9f39ec287fe575ac5de6b5d"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\arch_gate_orm.png",
+      "bytes": 28599,
+      "sha256": "39613a750c68459b83a4b8d7fdac7d2487c2a14cdae94413aac14f8fc852fa98",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\arch_gate_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "57d25a45a19b7f6d414816b07605f2e9055b5155d463cdde19035ddfbb564bab"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\arch_gate_normal.png",
+      "bytes": 8062,
+      "sha256": "1dd221030d9937fa57a2567e652b59839b8864e2842955b32e3cff65b6ebc75d",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\arch_gate_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "25c1e7139f807391ec6301cfd834c80bac759b202450f3f5f6639fd586f562b6"
+    }
+  },
+  "ktx2_set": "9202c95c36a8faa524f0d9655ad9ccf6bbe69704ba2f516a560557b3ca560b3d"
+}

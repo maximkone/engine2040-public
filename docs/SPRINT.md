@@ -80,6 +80,7 @@ tools still read it for `needs:`.
 - [`SPRINT-33-speed-demo.md`](SPRINT-33-speed-demo.md) — Speed demo
 - [`SPRINT-34-hero-city.md`](SPRINT-34-hero-city.md) — Hero city
 - [`SPRINT-35-book-gaps-4.md`](SPRINT-35-book-gaps-4.md) — Book gaps 4
+- [`SPRINT-36-gap-audits.md`](SPRINT-36-gap-audits.md) — Gap audits: workspace, tools, LLM
 
 Done shards (`06 07 09 10 11 14 26-steals 28-powerups 29`) sit in
 `archive/SPRINT-done-*.md`. They keep their text and their ticks.

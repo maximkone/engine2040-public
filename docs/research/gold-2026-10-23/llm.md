@@ -61,6 +61,26 @@ adapter per row.
 rename the labels `mock-a/b/c`, strike the per-backend claims, and re-run AX10 as unmeasured. That
 is a doc fix, and this card dies as engineering.
 
+**Landed 2026-10-23** (`6f03245f3`). The door now picks `MockAdapter`, `LocalAdapter` or
+`RemoteAdapter` from the backend label; `E2040_LOCAL_URL` and `E2040_REMOTE_URL` name the endpoints,
+and an unset endpoint keeps the offline default. Every row detail ends `adapter=<mock/local/remote/none>`,
+so a mock answering a Local row says `mock`; the cassette label names the adapter that answered. A
+std-only fake server proves one `/v1/chat/completions` exchange for `Backend::Local` (the row says
+`local`, the server body decides the proposal), and a record then replay test proves the same
+proposal and row served from the cassette while the record server keeps its one hit (replay points
+at a dead loopback port). Parity strips the suffix before comparing outcomes, so the label alone never
+reports a divergence. Runs 40023723287 (playtest eval 82/0) and 40021762470 (door 17/0), clippy
+40023745145 (`--only crates/playtest/src/eval.rs`; the full tree was red in
+`crates/playtest/src/material_gallery.rs`, another lane's unused import); rust-quality playtest 100 A;
+no golden move. Plan lines 45, 48, 50 and 67 are corrected:
+the 60 authoring rows answer with the mock by default and say so, the 15 play rows say `none`, and
+AX10's 0.0pp reading is struck until a
+real model answers. Open: re-record the 75 rows against a llama.cpp sidecar
+(`E2040_LOCAL_URL=http://127.0.0.1:8080/v1/chat/completions`, `E2040_CASSETTE=record`,
+`E2040_CASSETTE_DIR=fixtures/cassettes/ev1-live`) with
+`node tools/gh-check.mjs --local cargo test -p engine-playtest --lib report_text_reproduces_the_shape -- --nocapture`,
+which needs the operator's model; replay the same line with `E2040_CASSETTE=replay` and a dead URL.
+
 **Why we missed it:** determinism hides it. A mock replays byte-identically, which reads as a
 stable backend, and the receipt only compared outcome vectors, which a mock guarantees.
 

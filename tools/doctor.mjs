@@ -206,5 +206,18 @@ const status = run("git", ["status", "--porcelain"]);
 const dirty = status.out ? status.out.split("\n").length : 0;
 say(dirty ? "INFO" : "OK", dirty ? `${dirty} uncommitted paths (commit your own paths)` : "working tree clean");
 
+// 8. Git hooks: core.hooksPath must point at the tracked tools/hooks, else a
+// clone silently skips the rust-quality ratchet and the secret scan. Warn only:
+// a fresh clone is healthy enough to fix itself, so this never fails the doctor.
+const hooks = spawnSync(process.execPath, [at("tools/hooks-install.mjs"), "--check"], {
+  encoding: "utf8",
+  timeout: 60_000,
+  cwd: ROOT,
+  env: { ...process.env, E2040_HOOKS_ROOT: ROOT },
+  maxBuffer: 8 * 1024 * 1024,
+});
+if (hooks.status === 0) say("OK", "hooks: installed");
+else say("WARN", "hooks: not installed (run node tools/hooks-install.mjs)");
+
 console.log(needsYou ? `RESULT ${needsYou} item(s) need you` : "RESULT healthy");
 process.exitCode = needsYou ? 1 : 0;

@@ -1,0 +1,140 @@
+name: coverage
+
+# Coverage of the sim lane, weekly on the public mirror (the build farm, same rule as ci.yml).
+# It is not on push: the mirror already runs 10+ jobs per export and coverage is a trend, not a
+# per-commit gate (docs/research/tools-gaps-2026-10-23/README.md, gap 3).
+#
+# REPORT-ONLY, first leg: no --fail-under-*, no committed baseline, no floor. A low number stays
+# green and this file claims no percentage of its own; the numbers it prints are the run's own.
+# Only a broken tool run is red. Follow-up, not in this file: a per-crate floor ratchet, with the
+# floors committed as a baseline and each run compared against it.
+#
+# Packages, from `cargo metadata` (2026-10-23): engine-core, engine-physics, engine-spatial,
+# engine-ai, engine-arena. The gap note's fifth name, engine-sim, is not a package in this
+# workspace; engine-arena is the deterministic match spine, so it takes that leg.
+#
+# One instrumented test run. cargo-llvm-cov exports one format per invocation, so the same
+# profdata is exported three times: summary JSON, the per-file table (the job log) and lcov.
+# The first real run is on the mirror; this PC proved the command's shape with cargo-llvm-cov
+# 0.9.1, not the workflow.
+on:
+  schedule:
+    # Mondays, 05:00 UTC.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sim:
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: install repository toolchain (rust-toolchain.toml) and llvm-tools-preview
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools-preview
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+      - name: install cargo-llvm-cov (cached, the version proven on the PC)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      # The one real run: build the five packages with instrumentation and run their tests. The
+      # JSON is summary-only (per-file line/region/function totals, no segment arrays).
+      - name: coverage run (the one instrumented test run)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/coverage
+          cargo llvm-cov --locked \
+            -p engine-core \
+            -p engine-physics \
+            -p engine-spatial \
+            -p engine-ai \
+            -p engine-arena \
+            --summary-only --json --output-path target/coverage/summary.json
+      # Same profdata, human-readable per-file table into the job log.
+      - name: per-file summary (job log)
+        shell: bash
+        run: cargo llvm-cov report
+      # Same profdata, lcov for the artifact. A later floor ratchet reads the JSON, not this file.
+      - name: lcov export (artifact)
+        shell: bash
+        run: cargo llvm-cov report --lcov --output-path target/coverage/lcov.info
+      # Roll the per-file lines up to the five packages. Print-only: a parse problem says so and
+      # leaves the job green, because this leg gates nothing.
+      - name: per-crate rollup (job log and step summary)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+
+          const PACKAGES = new Map([
+            ['crates/core', 'engine-core'],
+            ['crates/physics', 'engine-physics'],
+            ['crates/spatial', 'engine-spatial'],
+            ['crates/ai', 'engine-ai'],
+            ['crates/arena', 'engine-arena'],
+          ]);
+          const totals = new Map([...PACKAGES.values()].map((name) => [name, { covered: 0, count: 0 }]));
+
+          try {
+            const json = JSON.parse(fs.readFileSync('target/coverage/summary.json', 'utf8'));
+            for (const file of json.data?.[0]?.files ?? []) {
+              for (const [dir, name] of PACKAGES) {
+                if (file.filename.includes(`/${dir}/`)) {
+                  const row = totals.get(name);
+                  row.covered += file.summary?.lines?.covered ?? 0;
+                  row.count += file.summary?.lines?.count ?? 0;
+                  break;
+                }
+              }
+            }
+          } catch (err) {
+            console.log(`no per-crate rollup: ${err.message}`);
+            process.exit(0);
+          }
+
+          const rows = ['| package | lines covered | lines | cover |', '|---|---:|---:|---:|'];
+          const sum = { covered: 0, count: 0 };
+          for (const [name, row] of totals) {
+            const pct = row.count === 0 ? 'n/a' : `${((100 * row.covered) / row.count).toFixed(1)}%`;
+            rows.push(`| ${name} | ${row.covered} | ${row.count} | ${pct} |`);
+            sum.covered += row.covered;
+            sum.count += row.count;
+          }
+          const total = sum.count === 0 ? 'n/a' : `${((100 * sum.covered) / sum.count).toFixed(1)}%`;
+          rows.push(`| **total** | **${sum.covered}** | **${sum.count}** | **${total}** |`);
+          const text = ['### coverage, sim crates (report-only, no floor)', ...rows].join('\n');
+          console.log(text);
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
+          }
+          NODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-sim
+          path: |
+            target/coverage/summary.json
+            target/coverage/lcov.info
+          if-no-files-found: warn

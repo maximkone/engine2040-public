@@ -555,8 +555,9 @@ pub fn map_status(status: u16) -> AiError {
 
 /// Build the OpenAI-compatible chat request body for one engine request under
 /// `pins`: system and user messages, token bound, temperature, seed and any
-/// tools. The prompt carries the task kind, revision and context digests
-/// only: context references are digests, never raw prompts or assets, and no
+/// tools. The prompt carries the task kind, revision, context digests and,
+/// when the caller set one, the bounded scene brief between its fences. The
+/// context references themselves stay digests, never raw assets, and no
 /// secret ever enters the body.
 pub fn chat_body(request: &AiRequest, pins: &RequestPins) -> String {
     // Manual object framing over the pinned fields: same keys, same order,

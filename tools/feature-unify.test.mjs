@@ -19,3 +19,15 @@ test("subset passes", () => {
   const member = parseDeps('[dependencies]\nimage = { version = "0.25", features = ["png"] }');
   assert.deepEqual(findViolations("seed", member, union), []);
 });
+test("workspace-inherited no-defaults follows the workspace root", () => {
+  const union = parseDeps('[dependencies]\nimage = { version = "0.25", default-features = false, features = ["png", "hdr"] }');
+  const member = parseDeps('[dependencies]\nimage = { workspace = true, features = ["png"] }');
+  const root = parseDeps('[workspace.dependencies]\nimage = { version = "0.25", default-features = false }', "workspace.dependencies");
+  assert.deepEqual(findViolations("seed", member, union, root), []);
+});
+test("a workspace member that re-enables defaults still fails", () => {
+  const union = parseDeps('[dependencies]\nimage = { version = "0.25", default-features = false, features = ["png"] }');
+  const member = parseDeps('[dependencies]\nimage = { workspace = true, features = ["png"] }');
+  const root = parseDeps('[workspace.dependencies]\nimage = { version = "0.25" }', "workspace.dependencies");
+  assert.deepEqual(findViolations("seed", member, union, root), ["seed: image needs default-features = false"]);
+});

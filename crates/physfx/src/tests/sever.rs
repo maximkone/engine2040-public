@@ -24,7 +24,7 @@ const CT7: [BoneRow; 15] = [
     ("palm_r", Some(13), [0.0, -0.2, 0.0], (0.03, 0.02)),
 ];
 
-fn ct7() -> (Rig, LocalPose) {
+pub(super) fn ct7() -> (Rig, LocalPose) {
     let skeleton = Skeleton {
         joints: CT7
             .iter()
@@ -49,8 +49,13 @@ fn ct7() -> (Rig, LocalPose) {
 }
 
 /// The index of the CT7 bone called `name`.
-fn ct7_bone(name: &str) -> usize {
+pub(super) fn ct7_bone(name: &str) -> usize {
     CT7.iter().position(|row| row.0 == name).expect("bone")
+}
+
+/// The name of the CT7 bone at `bone`.
+pub(super) fn ct7_name(bone: u16) -> &'static str {
+    CT7.get(usize::from(bone)).expect("bone").0
 }
 
 /// The transform of one body this tick.

@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "6790619aebaebe91cad10a4ee5f52456cd046e2e93bf55e7aa6580d951da2ba8",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "83318f67585582cb9e2230b6d5db669c78b50c3ccbb230d55c3936fff04ba570",
+  "bytes": 104580,
+  "bake": {
+    "src": "content/maps/src/training_post.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\training_post_ao.png",
+      "bytes": 17763,
+      "sha256": "b94b217eed6ac623868d10d744f54e58a8dbad515eb90e61b9a32dd97525a7a4"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\training_post_grime.png",
+      "bytes": 19151,
+      "sha256": "cf031f4c708ef16cb1592af3d70f8d0d85c23460f7bb075473ae4fe8e6ca2744"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\training_post_orm.png",
+      "bytes": 27380,
+      "sha256": "47ff2273cff1b8f9c3c9a225a152c344f5934e8707131d44d8f6206cdbb39101",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\training_post_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "998c5d7c13847d10e60166b43d2d0bcf2e09c8011466af2ddc3102da033859e0"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\training_post_normal.png",
+      "bytes": 15225,
+      "sha256": "9a8ef0e290b040412a523a27b64c72a202528800ccd19d57e15bb08bffee18cb",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\training_post_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "7ecf84037844307f955a228323e07f3349b2920315d2e52737f8498c32b1dec3"
+    }
+  },
+  "ktx2_set": "a8ad0baf81be365312133694b67e738698a5a6d86dca6de3b4bd3dd1d6ba92a9"
+}

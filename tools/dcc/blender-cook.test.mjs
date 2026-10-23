@@ -3,7 +3,7 @@
 // the pinned install; the other two never start it.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -137,3 +137,82 @@ test("a python key is refused the same way", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// GEO14: the bake op. The determinism test cooks one piece twice (pinned
+// Blender) and skips without it; the three refusal tests never start Blender.
+const BAKE_RECIPE = join(here, "recipes", "maps", "training_post.json");
+
+test("two cooks of the training_post bake give one glb sha and one ktx2 set", { skip: !existsSync(pin.exe) && "pinned Blender not installed" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-bake-"));
+  try {
+    const a = join(dir, "a", "training_post.glb");
+    const b = join(dir, "b", "training_post.glb");
+    mkdirSync(dirname(a), { recursive: true });
+    mkdirSync(dirname(b), { recursive: true });
+    const ra = cook("--recipe", BAKE_RECIPE, "--out", a);
+    assert.equal(ra.code, 0, ra.out);
+    const rb = cook("--recipe", BAKE_RECIPE, "--out", b);
+    assert.equal(rb.code, 0, rb.out);
+    const sideA = JSON.parse(readFileSync(`${a}.json`, "utf8"));
+    const sideB = JSON.parse(readFileSync(`${b}.json`, "utf8"));
+    assert.equal(sideA.output, sideB.output, "two cooks, one glb digest");
+    assert.match(sideA.output, /^[0-9a-f]{64}$/);
+    assert.equal(sideA.ktx2_set, sideB.ktx2_set, "two cooks, one ktx2 set digest");
+    assert.match(sideA.ktx2_set, /^[0-9a-f]{64}$/);
+    assert.equal(sideA.ktx2_set, sha256Text("orm " + sideA.maps.orm.ktx2_sha256 + "\nnormal " + sideA.maps.normal.ktx2_sha256 + "\n"));
+    for (const name of ["ao", "grime", "normal", "orm"]) {
+      assert.ok(sideA.maps[name], `the sidecar names the ${name} map`);
+      assert.ok(sideA.maps[name].bytes > 0, `the ${name} png has bytes`);
+      assert.match(sideA.maps[name].sha256, /^[0-9a-f]{64}$/);
+    }
+    for (const name of ["normal", "orm"]) {
+      assert.ok(sideA.maps[name].ktx2_bytes > 0, `the ${name} ktx2 has bytes`);
+      assert.match(sideA.maps[name].ktx2_sha256, /^[0-9a-f]{64}$/);
+    }
+    assert.equal(sideA.bake.src, "content/maps/src/training_post.gltf");
+    assert.deepEqual(sideA.bake.maps, ["ao", "grime", "normal"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a piece with no UV refuses before Blender starts and names the object", () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-bake-"));
+  try {
+    const recipe = join(dir, "no_uv.json");
+    writeFileSync(recipe, JSON.stringify({ ops: [{
+      op: "bake",
+      src: "tools/dcc/fixtures/no_uv.gltf",
+      size: 32,
+      ao: true,
+    }] }));
+    // A missing exe proves nothing launches: a start would exit 3 blender.missing.
+    const r = cook("--recipe", recipe, "--out", join(dir, "x.glb"), "--exe", join(dir, "no", "blender.exe"));
+    assert.equal(r.code, 4, r.out);
+    assert.ok(r.out.includes('recipe.no_uv: object "BoxNoUv" has no TEXCOORD_0'), r.out);
+    assert.ok(!r.out.includes("blender."), r.out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a bake op with no map flag is refused recipe.no_maps", () => {
+  const dir = mkdtempSync(join(tmpdir(), "recipe-bake-"));
+  try {
+    const recipe = join(dir, "no_maps.json");
+    writeFileSync(recipe, JSON.stringify({ ops: [{
+      op: "bake",
+      src: "content/maps/src/training_post.gltf",
+      size: 32,
+    }] }));
+    const r = cook("--recipe", recipe, "--out", join(dir, "x.glb"));
+    assert.equal(r.code, 4, r.out);
+    assert.ok(r.out.includes("recipe.no_maps: name ao, grime or normal"), r.out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function sha256Text(text) {
+  return createHash("sha256").update(text).digest("hex");
+}

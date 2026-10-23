@@ -24,7 +24,10 @@ use super::ladder::{
 use super::mock::ProviderAdapter;
 use super::pins::RequestPins;
 use super::policy::{AiSessionPolicy, JobState, ProviderCapabilities};
-use super::protocol::{AiError, AiRequest, PrivacyMode, Proposal, ProposalAction, Usage};
+use super::protocol::{
+    AiError, AiRequest, PrivacyMode, Proposal, ProposalAction, Usage, BODY_FENCE_CLOSE,
+    BODY_FENCE_OPEN,
+};
 use super::retry;
 use super::stream::{
     parse_sse_stream, SourceLabel, SseFrame, StreamConfig, StreamError, StreamJob,
@@ -436,9 +439,11 @@ impl<'a> JCur<'a> {
     }
 }
 
-/// Prompt text for one engine request. Carries the task kind, revision and
-/// context digests only: references are digests, never raw prompts, assets
-/// or secrets.
+/// Prompt text for one engine request. The header carries the task kind,
+/// revision, budget and context digests. A request with a scene brief appends
+/// it after the header between the two fence lines, with its byte count, as
+/// data the model may read: references stay digests, and the brief itself is
+/// already bounded by `check_body`, so nothing here truncates it.
 pub(crate) fn prompt_text(request: &AiRequest) -> String {
     let mut prompt = format!(
         "task={:?} revision={} contexts={} budget_ms={}",
@@ -455,6 +460,14 @@ pub(crate) fn prompt_text(request: &AiRequest) -> String {
     }
     if prompt.len() > MAX_TEXT_LEN {
         prompt.truncate(MAX_TEXT_LEN);
+    }
+    if let Some(body) = &request.body {
+        prompt.push('\n');
+        prompt.push_str(BODY_FENCE_OPEN);
+        prompt.push_str(&format!(" body_bytes={}\n", body.len()));
+        prompt.push_str(body);
+        prompt.push('\n');
+        prompt.push_str(BODY_FENCE_CLOSE);
     }
     prompt
 }
@@ -1319,6 +1332,40 @@ mod tests {
 
     fn request() -> AiRequest {
         crate::mock::fixtures::request(7, 3)
+    }
+
+    #[test]
+    fn digest_only_prompt_is_byte_for_byte_unchanged() {
+        let want = format!(
+            "task=Diagnose revision=3 contexts=1 budget_ms=5000 digest={}",
+            "03".repeat(32)
+        );
+        let prompt = prompt_text(&request());
+        assert_eq!(prompt, want);
+        assert!(!prompt.contains(BODY_FENCE_OPEN), "no body, no fence");
+    }
+
+    #[test]
+    fn scene_brief_is_fenced_data_after_the_digest_header() {
+        let mut ask = request();
+        let brief = "object 7: crate, 120x40 cm, sits on object 9\nobject 8: ramp";
+        ask.body = Some(String::from(brief));
+        let prompt = prompt_text(&ask);
+        assert!(
+            prompt.starts_with(&format!(
+                "task=Diagnose revision=3 contexts=1 budget_ms=5000 digest={}",
+                "03".repeat(32)
+            )),
+            "digest header first: {prompt}"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "{BODY_FENCE_OPEN} body_bytes={}\n{brief}\n{BODY_FENCE_CLOSE}",
+                brief.len()
+            )),
+            "brief sits between its fences with its byte count: {prompt}"
+        );
+        assert!(prompt.ends_with(BODY_FENCE_CLOSE));
     }
 
     #[test]

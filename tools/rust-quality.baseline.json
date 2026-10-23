@@ -893,7 +893,7 @@
   "crates/game/src/bin/arena.rs": 5101,
   "crates/game/src/camera.rs": 3459,
   "crates/game/src/fighter_look.rs": 6747,
-  "crates/game/src/lib.rs": 4030,
+  "crates/game/src/lib.rs": 4035,
   "crates/game/src/windowed.rs": 3629,
   "crates/net/src/interest.rs": 3076,
   "crates/physics/src/ragdoll.rs": 3376,
@@ -4571,6 +4571,13 @@
    "from": 4026,
    "to": 4030,
    "reason": "LEG17: the roster module declaration and its doc sit in the crate root; the roster's code lives in crates/game/src/roster.rs. lib.rs is already pinned over 3000 lines, so the mod line cannot land without this pin."
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/game/src/lib.rs",
+   "from": 4030,
+   "to": 4035,
+   "reason": "C13: debug_lines module declaration in the crate root (one doc block, one cfg line, one mod line); the builder lives in crates/game/src/debug_lines.rs"
   }
  ]
 }

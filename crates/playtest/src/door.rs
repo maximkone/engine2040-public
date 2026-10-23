@@ -287,6 +287,7 @@ pub(crate) fn door_call_with_targets(
         deadline_ms: 60_000,
         privacy,
         base_revision: call.base_revision,
+        body: None,
     };
     let refuse = |adapter: &'static str, error: AiError, miss: Option<CassetteError>| DoorRefusal {
         error,

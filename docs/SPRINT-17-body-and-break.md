@@ -314,13 +314,19 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   refusal tests) green with these new tests: `array_then_mirror_numbers` (cube `[2,2,2]`, ops array count 2 offset `[3,0,0]`
   then mirror `x`: faces 48, vertices 32, bounds_min `[-4,-1,-1]`, bounds_max `[4,1,1]`), `weld_after_array_keeps_distinct_corners` (array count 3 offset `[3,0,0]` then weld 0.001: vertices 24), `flip_moves_the_digest_and_twice_restores_it`, `bad_numbers_name_the_legal_values` (count 0 and 65, epsilon 0 and 0.5, axis `w`), JSON parse of the 4 ops; clippy with
   `--features geo` clean; golden unchanged. needs: GEO12, GEO11. Landed 52f66252. cargo test -p engine-endpoint --features geo --lib packs::geo 17 passed incl. array_then_mirror_numbers, weld_after_array_keeps_distinct_corners, flip_moves_the_digest_and_twice_restores_it, bad_numbers_name_the_legal_values (gh run 39107853193); the mcp suite holds json_parses_mirror_array_weld_and_flip and modeling_ops_refuse_typed_without_the_geo_feature green (run 39109659487); clippy --features geo --all-targets -D warnings clean (run 39108371106).
-- [ ] GEO14 dcc: the bake op, the maps the map kit never had. Steal: measured headless - Cycles AO
+- [x] GEO14 dcc: the bake op, the maps the map kit never had. Steal: measured headless - Cycles AO
   at 256x256 costs 0.38 s on the pinned 5.2, and AO, curvature grime and a bevel normal are what
   the 15 map-kit pieces are missing. Add `bake` to the `run_recipe.py` allow-list (three maps,
   one flag each) and run the KTX2 cook that already exists. Files: `tools/dcc/blender/run_recipe.py`,
   `tools/dcc/blender-cook.mjs`, `content/`.
   Accept: two cooks of one recipe give one GLB sha and one KTX2 sha x2; the 15 pieces carry the
   maps in their sidecars; a piece with no UV refuses before Blender starts and names the object.
+  Landed aaf42e0. Two cooks of tools/dcc/recipes/maps/training_post.json gave one glb sha 2d89d36259a5 and one
+  ktx2 set sha 89d8e670990f6ed8 twice (node --test tools/dcc/blender-cook.test.mjs tools/dcc/blender/verify_op.test.mjs:
+  18 passed, incl. the bake sha test, the no-UV refusal and recipe.no_maps); all 15 pieces cooked twice with the same
+  shas; content/maps/cooked holds 15 glb, 15 sidecars naming ao grime normal orm plus the orm and normal ktx2, 30 ktx2
+  and 60 png, 7.1 MB; the no-UV fixture exits 4 with recipe.no_uv: object "BoxNoUv" has no TEXCOORD_0 while a missing
+  --exe proves Blender never starts; node tools/workspace-check.mjs passes; git diff --check clean.
 - [ ] GEO15 dcc: one warm Blender per batch. Steal: `mcp-for-blender` (MIT) socket plus
   main-thread queue - keep one 5.2 process alive across a batch instead of paying 5.48-18.07 s of
   startup per recipe. The gate is digest equality, not speed: every GLB must equal the

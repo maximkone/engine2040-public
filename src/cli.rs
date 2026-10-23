@@ -56,7 +56,8 @@ Game projects (a directory with a game.toml; templates: arena-duel, siege):
                              Run the project's seeded proof headless and print its receipt
   build --target <windows|web> [--manifest <path>]
                              Build the game for one target and print where it is
---manifest defaults to ./game.toml.";
+game = \"crate:bin\" in game.toml picks the game to build and run (default engine-game:arena);
+`run` without it plays the proof fixture. --manifest defaults to ./game.toml.";
 
 #[derive(Debug)]
 pub enum Error {

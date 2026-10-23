@@ -517,6 +517,30 @@ golden `d57b5c8ae3096614` is untouched by this window.
   tests pass. Open: the same line inside a clean-folder ship receipt (needs a
   fresh arena.exe after C13) and GM3's 5-minute quiet-box run.
 
+## Mirror and tools (2026-10-24)
+
+- The public mirror is the build farm: export snapshot `451069da` of
+  `c87357ddd` (2026-10-23T20:52Z) is its first with the standing `web-gates` and
+  `perf-check` workflows. Runs: ci 40022549786, web-gates 40022549687,
+  perf-check 40022549806 (success), plus kani/loom/miri/differential/
+  ship-check/wasm-check/pages. At filing, loom and miri passed, web-gates and
+  ci were still running; ci's clippy and window-compile jobs had already
+  failed, logs pending. The export reads `HEAD` only, so uncommitted lanes
+  never reach the mirror.
+- Tool inventory (`f257dccb5`, docs `881f27ae7`): 128 live tools, 128 named,
+  13 without a test mate each with a reason; `tools-index --check` OK. The
+  `quick` job runs the gate (`fb00742f3`).
+- Hooks (`30dfc4da2`, `67be825b1`): tracked `pre-push` (LFS, cargo-deny,
+  licence gate), `hooks-install.mjs` with `--check`, a doctor warning, and 3
+  tests (11 with the tool test); this PC is deliberately not installed.
+- Coverage (`53f16429a`): weekly `coverage.yml` for engine-core, engine-physics,
+  engine-spatial, engine-ai, engine-arena; report-only, first run pending the
+  next export.
+- PX9 rest landed (`20bef9e19`); PX44b's exact line runs x2 now. C13 landed
+  its debug-line/phase-label commit (`3882a0cf9`); the arena still has dirty
+  files, so the fresh binary and E22/G2 wait.
+- `AGENTS.md` (`280a35919`): a proven step commits and pushes in the same step.
+
 ## Re-run
 
 ```

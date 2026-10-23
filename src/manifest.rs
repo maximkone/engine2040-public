@@ -17,7 +17,7 @@ const MAX_LIST: usize = 16;
 const ECHO_CHARS: usize = 40;
 
 /// Every key `game.toml` knows; any other key is refused.
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 8] = [
     "name",
     "targets",
     "quality",
@@ -25,7 +25,34 @@ const KEYS: [&str; 7] = [
     "gore",
     "content",
     "seed_file",
+    "game",
 ];
+
+/// Keys that parse (so a bad value is still named with its line) but reach no build or run:
+/// `build` and `run` refuse a file that sets one, rather than show a setting that does nothing.
+const UNWIRED: [(&str, &str); 4] = [
+    (
+        "quality",
+        "the build and the run use the engine's own tier (medium)",
+    ),
+    ("gore", "the run uses the engine's own gore setting (full)"),
+    (
+        "physics_layers",
+        "the run always uses the authority and physical layers",
+    ),
+    (
+        "content",
+        "the run reads the engine's own content/ tree, not project content roots",
+    ),
+];
+
+/// What the engine does instead of the key's value, when the key is not wired.
+pub fn unwired_note(key: &str) -> Option<&'static str> {
+    UNWIRED
+        .iter()
+        .find(|(known, _)| *known == key)
+        .map(|(_, note)| *note)
+}
 
 /// A closed set of words a key may take; the error for a bad word lists them all.
 pub trait Choice: Copy + PartialEq + 'static {
@@ -122,6 +149,29 @@ impl Choice for Layer {
     }
 }
 
+/// The game a project builds and runs: one bin of one workspace package.
+///
+/// `game.toml` writes it as `game = "<package>:<bin>"`. The shape is checked here; that the
+/// package is a workspace member and that the bin is one of its bins is checked by
+/// `project::Project::load_in`, the one place that reads the workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Game {
+    /// Workspace package name, e.g. `engine-game`.
+    pub package: String,
+    /// A bin that package declares, e.g. `arena`.
+    pub bin: String,
+}
+
+impl Default for Game {
+    /// The engine's own arena: what every project built before `game` existed.
+    fn default() -> Self {
+        Self {
+            package: "engine-game".to_owned(),
+            bin: "arena".to_owned(),
+        }
+    }
+}
+
 /// A parsed `game.toml`. Every field passed its check: names are plain, paths are relative
 /// and stay inside the project, lists have no repeats.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +190,10 @@ pub struct Manifest {
     pub content: Vec<String>,
     /// File holding the run seed, relative to the manifest; the default seed when absent.
     pub seed_file: Option<String>,
+    /// The game this project builds and runs; the engine's arena when the file names none.
+    pub game: Game,
+    /// Every key the file set, with its line, in file order; the rest took their defaults.
+    keys: Vec<(&'static str, usize)>,
 }
 
 /// A refused manifest: which key, on which line, and why.
@@ -404,6 +458,30 @@ pub fn check_name(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The `game` value: `"<package>:<bin>"`, both halves a [`check_name`] name. Whether the
+/// package and bin exist is the workspace check in `project::Project::load_in`.
+fn parse_game(row: &Row) -> Result<Game, ManifestError> {
+    let word = row.text()?;
+    if word.matches(':').count() != 1 {
+        return Err(row.err(format!(
+            "expected one \"workspace-package:bin\", got `{}`; for example \"engine-game:arena\"",
+            echo(word)
+        )));
+    }
+    let (package, bin) = word.split_once(':').ok_or_else(|| {
+        row.err(format!(
+            "expected one \"workspace-package:bin\", got `{}`; for example \"engine-game:arena\"",
+            echo(word)
+        ))
+    })?;
+    check_name(package).map_err(|why| row.err(format!("package `{}`: {why}", echo(package))))?;
+    check_name(bin).map_err(|why| row.err(format!("bin `{}`: {why}", echo(bin))))?;
+    Ok(Game {
+        package: package.to_owned(),
+        bin: bin.to_owned(),
+    })
+}
+
 /// A path inside the project: forward slashes, no `..`, no drive, no leading `./` or `/`.
 fn check_relative(path: &str) -> Result<(), &'static str> {
     if path.is_empty() {
@@ -426,6 +504,7 @@ impl Manifest {
     pub fn parse(text: &str) -> Result<Self, ManifestError> {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut rows = read_rows(text)?;
+        let keys: Vec<(&'static str, usize)> = rows.iter().map(|row| (row.key, row.line)).collect();
 
         let row = require(&mut rows, "name")?;
         let name = row.text()?.to_owned();
@@ -471,6 +550,11 @@ impl Manifest {
             None => None,
         };
 
+        let game = match take(&mut rows, "game") {
+            Some(row) => parse_game(&row)?,
+            None => Game::default(),
+        };
+
         Ok(Self {
             name,
             targets,
@@ -479,7 +563,23 @@ impl Manifest {
             gore,
             content,
             seed_file,
+            game,
+            keys,
         })
+    }
+
+    /// Whether the file set `key`; the others took their defaults.
+    pub fn sets(&self, key: &str) -> bool {
+        self.keys.iter().any(|(set, _)| *set == key)
+    }
+
+    /// Every key the file sets that no build or run reads yet, with its line, in file order.
+    pub fn unwired(&self) -> Vec<(&'static str, usize)> {
+        self.keys
+            .iter()
+            .copied()
+            .filter(|(key, _)| unwired_note(key).is_some())
+            .collect()
     }
 
     /// One line naming what the project is, for the run receipt.
@@ -539,6 +639,73 @@ seed_file = \"content/seed.txt\"
         assert_eq!(manifest.physics_layers, [Layer::Authority, Layer::Physical]);
         assert!(manifest.content.is_empty());
         assert_eq!(manifest.seed_file, None);
+    }
+
+    #[test]
+    fn game_key_names_a_package_and_bin_and_defaults_to_the_arena() {
+        let manifest = Manifest::parse(FULL).unwrap();
+        assert_eq!(manifest.game, Game::default());
+        assert!(!manifest.sets("game"));
+        assert!(manifest.sets("content"));
+
+        let text = "name = \"a\"\ntargets = [\"web\"]\ngame = \"engine-endpoint:e2040-mcp\"\n";
+        let manifest = Manifest::parse(text).unwrap();
+        assert_eq!(
+            manifest.game,
+            Game {
+                package: "engine-endpoint".to_owned(),
+                bin: "e2040-mcp".to_owned(),
+            }
+        );
+        assert!(manifest.sets("game"));
+    }
+
+    #[test]
+    fn bad_game_shape_names_the_line_and_the_form() {
+        let cases: [(&str, &str); 7] = [
+            (
+                "game = \"arena\"\n",
+                "expected one \"workspace-package:bin\"",
+            ),
+            (
+                "game = \"a:b:c\"\n",
+                "expected one \"workspace-package:bin\"",
+            ),
+            ("game = \"engine-game:\"\n", "bin ``: a name is 1 to 64"),
+            ("game = \":arena\"\n", "package ``: a name is 1 to 64"),
+            ("game = \"Engine-Game:arena\"\n", "package `Engine-Game`"),
+            ("game = \"engine-game:arena \"\n", "bin `arena `"),
+            (
+                "game = [\"engine-game:arena\"]\n",
+                "expected one \"quoted string\"",
+            ),
+        ];
+        for (row, reason) in cases {
+            let text = format!("name = \"a\"\ntargets = [\"web\"]\n{row}");
+            let error = refused(&text);
+            assert_eq!(
+                (error.line, error.key.as_str()),
+                (3, "game"),
+                "{row}: {error}"
+            );
+            assert!(error.reason.contains(reason), "{row}: {error}");
+        }
+    }
+
+    #[test]
+    fn unwired_keys_keep_file_order_with_their_lines() {
+        let text = "name = \"a\"\ntargets = [\"web\"]\ncontent = [\"content\"]\ngore = \"off\"\n";
+        let manifest = Manifest::parse(text).unwrap();
+        assert_eq!(manifest.unwired(), [("content", 3), ("gore", 4)]);
+        assert!(Manifest::parse("name = \"a\"\ntargets = [\"web\"]\n")
+            .unwrap()
+            .unwired()
+            .is_empty());
+        for key in ["quality", "gore", "physics_layers", "content"] {
+            assert!(unwired_note(key).is_some(), "{key}");
+        }
+        assert!(unwired_note("name").is_none());
+        assert!(unwired_note("game").is_none());
     }
 
     #[test]

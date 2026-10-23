@@ -4,7 +4,7 @@
 //! canonical little-endian bytes (no serde dependency); strings are
 //! `u16`-length-prefixed and bound-checked, never echoed unbounded.
 
-use super::{MAX_CONTEXT_REFS, MAX_TEXT_LEN, PROTOCOL_VERSION};
+use super::{MAX_BODY_BYTES, MAX_CONTEXT_REFS, MAX_TEXT_LEN, PROTOCOL_VERSION};
 
 /// Request identity, echoed by every event for the request.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -102,7 +102,13 @@ pub struct Budget {
     pub spend_limit: Option<u64>,
 }
 
-/// One provider request: identity, task, model, bounded context, budget.
+/// Opening fence line before a scene brief in the rendered prompt.
+pub const BODY_FENCE_OPEN: &str = "[scene brief follows]";
+/// Closing fence line after a scene brief in the rendered prompt.
+pub const BODY_FENCE_CLOSE: &str = "[end scene brief]";
+
+/// One provider request: identity, task, model, bounded context, budget and,
+/// optionally, one bounded plain-text scene brief.
 #[derive(Clone, PartialEq, Debug)]
 pub struct AiRequest {
     /// Request identity.
@@ -123,6 +129,10 @@ pub struct AiRequest {
     pub privacy: PrivacyMode,
     /// Base document/world revision the request was built against.
     pub base_revision: u64,
+    /// Bounded plain-text scene brief for the model, or `None` for a
+    /// digest-only request. This is data the model may read; it is never a
+    /// second instruction channel. [`check_body`] owns the bounds.
+    pub body: Option<String>,
 }
 
 /// Token usage; `None` fields mean usage is unknown, never zero-claimed.
@@ -271,6 +281,42 @@ impl AiError {
     }
 }
 
+/// Why a scene brief body was refused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BodyError {
+    /// The body is empty; wire length 0 already means "no body".
+    Empty,
+    /// The body is over [`MAX_BODY_BYTES`].
+    TooLong,
+    /// The body holds a NUL or a control character other than `\n` and `\t`.
+    Control,
+    /// The body holds a prompt fence marker, which would break the delimiter.
+    Fence,
+}
+
+/// Check one scene brief against the body bounds: non-empty, at most
+/// [`MAX_BODY_BYTES`], no control characters except `\n` and `\t`, and no
+/// fence marker that could close the prompt delimiter early. Never truncates:
+/// an out-of-bounds body is refused whole.
+pub fn check_body(body: &str) -> Result<(), BodyError> {
+    if body.is_empty() {
+        return Err(BodyError::Empty);
+    }
+    if body.len() > MAX_BODY_BYTES {
+        return Err(BodyError::TooLong);
+    }
+    if body
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(BodyError::Control);
+    }
+    if body.contains(BODY_FENCE_OPEN) || body.contains(BODY_FENCE_CLOSE) {
+        return Err(BodyError::Fence);
+    }
+    Ok(())
+}
+
 /// Contract failures for malformed bytes or violated bounds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProtocolError {
@@ -282,9 +328,15 @@ pub enum ProtocolError {
     TooLong,
     /// String is not valid UTF-8.
     BadUtf8,
+    /// The scene brief failed [`check_body`].
+    BadBody(BodyError),
 }
 
 fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -310,6 +362,9 @@ pub fn encode_request(request: &AiRequest) -> Result<Vec<u8>, ProtocolError> {
         return Err(ProtocolError::TooLong);
     }
     check_text(&request.model.model, 128)?;
+    if let Some(body) = &request.body {
+        check_body(body).map_err(ProtocolError::BadBody)?;
+    }
     let mut bytes = Vec::new();
     push_u16(&mut bytes, PROTOCOL_VERSION);
     push_u64(&mut bytes, request.id.0);
@@ -335,6 +390,15 @@ pub fn encode_request(request: &AiRequest) -> Result<Vec<u8>, ProtocolError> {
     push_u64(&mut bytes, request.deadline_ms);
     bytes.push(request.privacy as u8);
     push_u64(&mut bytes, request.base_revision);
+    match &request.body {
+        Some(body) => {
+            let len = u32::try_from(body.len()).map_err(|_| ProtocolError::TooLong)?;
+            push_u32(&mut bytes, len);
+            bytes.extend_from_slice(body.as_bytes());
+        }
+        // Wire length 0 is "no body"; `check_body` keeps `Some("")` out.
+        None => push_u32(&mut bytes, 0),
+    }
     Ok(bytes)
 }
 
@@ -367,6 +431,10 @@ impl<'a> Reader<'a> {
 
     fn u16(&mut self) -> Result<u16, ProtocolError> {
         Ok(u16::from_le_bytes(self.array()?))
+    }
+
+    fn u32(&mut self) -> Result<u32, ProtocolError> {
+        Ok(u32::from_le_bytes(self.array()?))
     }
 
     fn u64(&mut self) -> Result<u64, ProtocolError> {
@@ -447,6 +515,17 @@ pub fn decode_request(bytes: &[u8]) -> Result<AiRequest, ProtocolError> {
         _ => return Err(ProtocolError::Truncated),
     };
     let base_revision = reader.u64()?;
+    let body_len = usize::try_from(reader.u32()?).map_err(|_| ProtocolError::TooLong)?;
+    let body = match body_len {
+        0 => None,
+        len if len > MAX_BODY_BYTES => return Err(ProtocolError::TooLong),
+        len => {
+            let raw = reader.take(len)?;
+            let text = core::str::from_utf8(raw).map_err(|_| ProtocolError::BadUtf8)?;
+            check_body(text).map_err(ProtocolError::BadBody)?;
+            Some(text.to_owned())
+        }
+    };
     if reader.pos != bytes.len() {
         return Err(ProtocolError::Truncated);
     }
@@ -460,6 +539,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<AiRequest, ProtocolError> {
         deadline_ms,
         privacy,
         base_revision,
+        body,
     })
 }
 
@@ -478,6 +558,13 @@ pub fn validate_request(
         return Err(AiError::MalformedOutput);
     }
     if request.model.model.is_empty() || request.model.model.len() > 128 {
+        return Err(AiError::MalformedOutput);
+    }
+    if request
+        .body
+        .as_deref()
+        .is_some_and(|body| check_body(body).is_err())
+    {
         return Err(AiError::MalformedOutput);
     }
     if !policy.adapters.contains(&request.model.adapter) {
@@ -531,6 +618,7 @@ mod tests {
             deadline_ms: 60_000,
             privacy: PrivacyMode::LocalOnly,
             base_revision: 12,
+            body: None,
         }
     }
 
@@ -544,6 +632,79 @@ mod tests {
         assert_eq!(again, request());
         assert_eq!(encode_request(&again).unwrap(), bytes);
         assert_eq!(again, twice);
+    }
+
+    #[test]
+    fn scene_brief_roundtrips_and_stays_bounded() {
+        let mut briefed = request();
+        briefed.body = Some(String::from(
+            "scene brief: object 7 crate at (120, 0, 40) cm\nobject 8 ramp\tobject 9 torch",
+        ));
+        let bytes = encode_request(&briefed).expect("brief in bounds");
+        assert_eq!(decode_request(&bytes).expect("brief decodes"), briefed);
+
+        // Exactly the cap is accepted; one byte over is refused whole.
+        let mut full = request();
+        full.body = Some("a".repeat(MAX_BODY_BYTES));
+        assert!(encode_request(&full).is_ok());
+        full.body = Some(format!("{}a", "a".repeat(MAX_BODY_BYTES)));
+        assert_eq!(
+            encode_request(&full),
+            Err(ProtocolError::BadBody(BodyError::TooLong))
+        );
+
+        for bad in ["nul\0byte", "carriage\rreturn", "bell\u{7}"] {
+            let mut ask = request();
+            ask.body = Some(String::from(bad));
+            assert_eq!(
+                encode_request(&ask),
+                Err(ProtocolError::BadBody(BodyError::Control)),
+                "{bad:?}"
+            );
+        }
+        let mut empty = request();
+        empty.body = Some(String::new());
+        assert_eq!(
+            encode_request(&empty),
+            Err(ProtocolError::BadBody(BodyError::Empty))
+        );
+        for fence in [BODY_FENCE_OPEN, BODY_FENCE_CLOSE] {
+            let mut ask = request();
+            ask.body = Some(format!("before {fence} after"));
+            assert_eq!(
+                encode_request(&ask),
+                Err(ProtocolError::BadBody(BodyError::Fence))
+            );
+        }
+    }
+
+    #[test]
+    fn wire_body_refusals_never_panic() {
+        let encoded = encode_request(&request()).expect("digest-only encodes");
+        // A digest-only wire ends with the 4-byte "no body" length.
+        let head = &encoded[..encoded.len() - 4];
+        assert_eq!(&encoded[encoded.len() - 4..], &[0, 0, 0, 0]);
+
+        let mut control = head.to_vec();
+        control.extend_from_slice(&3u32.to_le_bytes());
+        control.extend_from_slice(b"a\0b");
+        assert_eq!(
+            decode_request(&control),
+            Err(ProtocolError::BadBody(BodyError::Control))
+        );
+
+        let mut oversize = head.to_vec();
+        oversize.extend_from_slice(&(MAX_BODY_BYTES as u32 + 1).to_le_bytes());
+        assert_eq!(decode_request(&oversize), Err(ProtocolError::TooLong));
+
+        let mut truncated = head.to_vec();
+        truncated.extend_from_slice(&5u32.to_le_bytes());
+        truncated.extend_from_slice(b"abc");
+        assert_eq!(decode_request(&truncated), Err(ProtocolError::Truncated));
+
+        let mut old = encoded;
+        old[0] = 1;
+        assert_eq!(decode_request(&old), Err(ProtocolError::BadVersion(1)));
     }
 
     #[test]

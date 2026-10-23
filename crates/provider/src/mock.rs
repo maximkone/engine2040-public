@@ -196,6 +196,7 @@ pub mod fixtures {
             deadline_ms: 60_000,
             privacy: PrivacyMode::LocalOnly,
             base_revision,
+            body: None,
         }
     }
 
@@ -568,6 +569,6 @@ mod tests {
         let policy = AiSessionPolicy::local_default(8);
         assert!(!policy.mode.allows_remote());
         assert!(!policy.adapters.contains(&AdapterKind::Remote));
-        assert_eq!(super::super::PROTOCOL_VERSION, 1);
+        assert_eq!(super::super::PROTOCOL_VERSION, 2);
     }
 }

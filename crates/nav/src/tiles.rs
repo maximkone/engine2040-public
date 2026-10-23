@@ -17,6 +17,7 @@ use std::fmt;
 use crate::cursor::{Cursor, Truncated};
 use crate::flow::{bake_flow, follow};
 
+#[path = "tiles/rebake_path.rs"]
 mod rebake_path;
 
 /// Largest tile registry; bounds memory up front.

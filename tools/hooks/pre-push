@@ -1,0 +1,37 @@
+#!/bin/sh
+# engine2040 pre-push: the licence verdict and the LFS upload run before a push.
+# deny.toml is the verdict; cargo deny and tools/license-gate.mjs surface it
+# here, so a bad licence never reaches the public mirror.
+# Fails closed: a missing tool is a refusal, never a silent skip. Git for
+# Windows runs this through sh, so keep the file POSIX and LF.
+# Install: node tools/hooks-install.mjs (sets core.hooksPath=tools/hooks, so git
+# runs this tracked file in place). Never copy it into .git/hooks: that folder
+# is untracked, so a fresh clone would silently miss the gate.
+# Put Git's own tools first for the same reason as pre-commit: a PATH with
+# C:\Windows\system32 ahead of Git's usr/bin can shadow POSIX tools.
+PATH="/usr/bin:$PATH"
+if ! repo=$(git rev-parse --show-toplevel 2>/dev/null); then
+  echo "refused: pre-push cannot find the repo root, so the licence gate cannot run." >&2
+  exit 1
+fi
+cd "$repo" || exit 1
+if ! command -v git-lfs >/dev/null 2>&1; then
+  printf >&2 "\n%s\n\n" "This repository is configured for Git LFS but 'git-lfs' was not found on your path."
+  exit 2
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "refused: cargo is not on PATH, so the licence gate cannot run (rust-toolchain.toml pins the channel)." >&2
+  exit 1
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "refused: node is not on PATH, so tools/license-gate.mjs cannot run (install Node 20 or newer)." >&2
+  exit 1
+fi
+if ! cargo deny --version >/dev/null 2>&1; then
+  echo "refused: cargo-deny is missing, so the licence gate cannot run." >&2
+  echo "run: node tools/doctor.mjs --fix --consent=deny" >&2
+  exit 1
+fi
+git lfs pre-push "$@" || { echo "refused: git lfs pre-push failed." >&2; exit 1; }
+cargo deny check licenses || { echo "refused: cargo deny check licenses failed; deny.toml is the verdict." >&2; exit 1; }
+node tools/license-gate.mjs || { echo "refused: tools/license-gate.mjs failed." >&2; exit 1; }

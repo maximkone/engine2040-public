@@ -5,7 +5,9 @@
 //! One command writes the card and prints it:
 //! `SCORECARD_DATE=2026-10-18 cargo test -p engine-playtest --lib scorecard_command -- --ignored --nocapture`.
 //! The card goes to `target/reports/scorecard-<date>.md`; the last card is the
-//! newest earlier file in that folder.
+//! newest earlier file in that folder. A plain cargo line with no
+//! `SCORECARD_DATE` dates the card `1970-01-01`: the scorecard CI leg then needs
+//! no environment, and the date only names the heading and the file.
 //!
 //! Suites today: EV1 (the 75-row eval), the 30-task public-benchmark mirrors
 //! (HS29-HS32) and the 100-task spatial gold eval. BreakBench (BX25) is not
@@ -475,12 +477,24 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "the operator command: writes target/reports/scorecard-<date>.md, set SCORECARD_DATE"]
+    #[ignore = "the operator command: writes target/reports/scorecard-<date>.md, set SCORECARD_DATE (default 1970-01-01)"]
     fn scorecard_command() {
-        let date = std::env::var("SCORECARD_DATE").expect("SCORECARD_DATE=YYYY-MM-DD");
+        // CI runs this as one plain cargo line, so an unset date falls back to a
+        // fixed one; the date never reads the clock either way.
+        let date = std::env::var("SCORECARD_DATE").unwrap_or_else(|_| "1970-01-01".to_owned());
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/reports");
         let (card, reds, path) = run_scorecard(&dir, &date).expect("command runs");
         println!("{}", std::fs::read_to_string(&path).expect("card"));
+        let rows = card.lines.len();
+        let green: usize = card
+            .lines
+            .iter()
+            .filter(|line| line.rate_permille() == Some(1000))
+            .count();
+        println!(
+            "scorecard rows: {rows}, at 100%: {green}, red: {}",
+            reds.len()
+        );
         assert_eq!(card.date, date);
         assert!(reds.is_empty(), "red lines against the last card: {reds:?}");
     }

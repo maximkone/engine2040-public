@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "7595a53c74d8f27edad5aa8774572bbd1d219129d1594db148f66b768c4684ba",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "5eb4cc1b651107e19b7c21295a9d74c3104a979e70da767404738071615f4946",
+  "bytes": 271368,
+  "bake": {
+    "src": "content/maps/src/weapon_rack.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\weapon_rack_ao.png",
+      "bytes": 27685,
+      "sha256": "9ae43dc7d5630eecc247780b7ade4431c55c4dc1562b1583931dce89363700cb"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\weapon_rack_grime.png",
+      "bytes": 27262,
+      "sha256": "d22436984b0b1e482ae761c5266992948fc9395c8eed69223d8147923d9662d9"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\weapon_rack_orm.png",
+      "bytes": 42927,
+      "sha256": "6af0a7028c90a1c57959ed9465e4aea3fa9d32320bfe105cd653871ba0a218a1",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\weapon_rack_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "f435a12983a20e1f41ce34c34e0532c58f264659877dd6a65aa4027957b4cd89"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\weapon_rack_normal.png",
+      "bytes": 23802,
+      "sha256": "98d3114f00d4d4d6524aab6f17a8b71043e26fd1837115442501a13daf12742b",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\weapon_rack_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "8d4c92dd1572e4cf2a7872946860187a2529c10bacf478cf49bcf81bd46471d2"
+    }
+  },
+  "ktx2_set": "906adb6df4fd102542aa4942a5622e4e125918ce5985c757e4b1c012e2397b73"
+}

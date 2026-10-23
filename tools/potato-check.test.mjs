@@ -12,6 +12,8 @@ import {
   classifyAdapterKind,
   decideExit,
   findIntegratedAdapter,
+  formatAssetFinding,
+  formatAssetsLine,
   formatBarLine,
   formatLoadLine,
   formatLoadText,
@@ -22,6 +24,7 @@ import {
   parseAdapterTypeWord,
   parseBuildLoad,
   parseFrameTimes,
+  parseKitBudget,
   parsePerPassAdapter,
   parseTasklistPeakMb,
   sampleTasklist,
@@ -36,9 +39,16 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 
+const KIT_PASS =
+  "kit budget: meshes=38 max_tris=512 max_bones=0 max_influences=0 max_materials=1 max_tex_px=1048576 caps=POTATO budget=PASS";
+const KIT_FAIL =
+  "kit budget: meshes=38 max_tris=512 max_bones=0 max_influences=0 max_materials=1 max_tex_px=4036608 caps=POTATO budget=FAIL banner.gltf mesh=2 tex_px 4036608>1048576";
+const PASS_ASSETS = { status: "PASS" };
+
 const CANNED_ARENA = [
   "adapter: Intel-UHD Dx12 integrated vendor=0x8086",
   "arena frame-split: sim=1.200ms present=2.300ms fighters=0.400ms per frame (mean over 600 frames) cpu_ms p50=8.125 p99=12.500 interval_ms p50=42.125 p99=67.500 gpu_ms=unsupported acquire=0.100ms present_mode=vsync",
+  KIT_PASS,
 ].join("\n");
 
 // Real bytes from this PC's Intel UHD, 2026-10-17: arena prints no
@@ -89,7 +99,7 @@ test("potato: kind comes from the name, and a software adapter never passes", ()
   assert.equal(arenaAdapterName(software), "Microsoft_Basic_Render_Driver");
   assert.equal(findIntegratedAdapter(software), null);
   assert.equal(
-    decideExit({ hasIntegrated: false, verdicts: checkBars({ p50_ms: 16, p99_ms: 20, peak_ws_mb: 1000 }, loadBar()), floor: false }),
+    decideExit({ hasIntegrated: false, verdicts: checkBars({ p50_ms: 16, p99_ms: 20, peak_ws_mb: 1000 }, loadBar()), floor: false, assets: PASS_ASSETS }),
     2,
   );
 });
@@ -140,8 +150,8 @@ test("potato: no integrated adapter reads NO_IGPU with exit 2", () => {
   assert.equal(findIntegratedAdapter("no adapter line at all"), null);
   assert.equal(parseAdapterName(discrete), "RTX-3050_Dx12_discrete");
   const verdicts = checkBars({ p50_ms: 16, p99_ms: 20, peak_ws_mb: 1000 }, loadBar());
-  assert.equal(decideExit({ hasIntegrated: false, verdicts, floor: false }), 2);
-  assert.equal(decideExit({ hasIntegrated: false, verdicts, floor: true }), 2);
+  assert.equal(decideExit({ hasIntegrated: false, verdicts, floor: false, assets: PASS_ASSETS }), 2);
+  assert.equal(decideExit({ hasIntegrated: false, verdicts, floor: true, assets: PASS_ASSETS }), 2);
   assert.equal("NO_IGPU", "NO_IGPU");
 });
 
@@ -150,12 +160,12 @@ test("potato: --floor exits 1 when p50 is over, else 0 without --floor", () => {
   assert.deepEqual([bar.p50_ms, bar.p99_ms, bar.working_set_mb], [50, 80, 3072]);
   const over = checkBars({ p50_ms: 60, p99_ms: 70, peak_ws_mb: 1000 }, bar);
   assert.equal(over[0].status, "FAIL");
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: true }), 1);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: false }), 0);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: true, assets: PASS_ASSETS }), 1);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: false, assets: PASS_ASSETS }), 0);
   const pass = checkBars({ p50_ms: 42.125, p99_ms: 67.5, peak_ws_mb: 1280 }, bar);
   assert.ok(pass.every((v) => v.status === "PASS"));
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true }), 0);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: false }), 0);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, assets: PASS_ASSETS }), 0);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: false, assets: PASS_ASSETS }), 0);
 });
 
 test("potato: unmeasured numbers read UNKNOWN and fail --floor", () => {
@@ -163,8 +173,8 @@ test("potato: unmeasured numbers read UNKNOWN and fail --floor", () => {
   assert.equal(line, "potato: adapter=Intel-UHD p50_ms=UNKNOWN p99_ms=UNKNOWN peak_ws_mb=UNKNOWN");
   const verdicts = checkBars({ p50_ms: null, p99_ms: null, peak_ws_mb: null }, loadBar());
   assert.ok(verdicts.every((v) => v.status === "UNKNOWN"));
-  assert.equal(decideExit({ hasIntegrated: true, verdicts, floor: true }), 1);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts, floor: false }), 0);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts, floor: true, assets: PASS_ASSETS }), 1);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts, floor: false, assets: PASS_ASSETS }), 0);
 });
 
 test("potato: tasklist peak keeps arena lines only and reads null when empty", () => {
@@ -202,7 +212,71 @@ test("potato: summarize gives the exact potato line x2 and exit 0", () => {
   assert.equal(first.line, "potato: adapter=Intel-UHD_Dx12_integrated p50_ms=42.125 p99_ms=67.500 peak_ws_mb=1280");
   assert.equal(first.line, second.line);
   assert.equal(first.hasIntegrated, true);
+  assert.equal(first.assets.status, "PASS");
   assert.equal(first.exit, 0);
+});
+
+// GS15 asset leg: the arena's `kit budget:` line names the measured kit cost
+// against the potato caps. The status is the gate's verdict; the maxima and
+// the shown findings go to the report. A line with no mesh count never reads
+// PASS, so a broken import fails --floor closed.
+test("potato: the kit budget line gives the asset status, maxima and findings", () => {
+  const pass = parseKitBudget(KIT_PASS);
+  assert.equal(pass.status, "PASS");
+  assert.equal(pass.meshes, 38);
+  assert.equal(pass.max_tris, 512);
+  assert.equal(pass.max_bones, 0);
+  assert.equal(pass.max_influences, 0);
+  assert.equal(pass.max_materials, 1);
+  assert.equal(pass.max_tex_px, 1_048_576);
+  assert.deepEqual(pass.findings, []);
+  assert.equal(pass.more, 0);
+  assert.equal(
+    formatAssetsLine(pass),
+    "assets: PASS meshes=38 max_tris=512 max_bones=0 max_influences=0 max_materials=1 max_tex_px=1048576 caps=POTATO",
+  );
+
+  const fail = parseKitBudget(KIT_FAIL);
+  assert.equal(fail.status, "FAIL");
+  assert.equal(fail.max_tex_px, 4_036_608);
+  assert.deepEqual(fail.findings, [
+    { file: "banner.gltf", mesh: 2, kind: "tex_px", actual: 4_036_608, allowed: 1_048_576 },
+  ]);
+  assert.equal(formatAssetFinding(fail.findings[0]), "asset: banner.gltf mesh=2 tex_px 4036608 > 1048576");
+  assert.ok(formatAssetsLine(fail).startsWith("assets: FAIL "), formatAssetsLine(fail));
+
+  const none = parseKitBudget("adapter: Intel-UHD Dx12 integrated vendor=0x8086");
+  assert.equal(none.status, "UNKNOWN");
+  assert.equal(formatAssetsLine(none), "assets: UNKNOWN (no kit budget line)");
+  assert.equal(parseKitBudget(`${KIT_PASS}\n${KIT_FAIL}`).status, "FAIL", "the last line wins");
+  assert.equal(
+    parseKitBudget(
+      "kit budget: meshes=0 max_tris=0 max_bones=0 max_influences=0 max_materials=0 max_tex_px=0 caps=POTATO budget=PASS",
+    ).status,
+    "UNKNOWN",
+    "PASS without a mesh count fails closed",
+  );
+});
+
+// The asset red is real at any load: an over-cap mesh does not get smaller on
+// a quiet box. Bars keep their rules (loaded non-pass withheld, loaded pass
+// conservative) once the asset leg passes.
+test("potato: the asset leg fails --floor whatever the load", () => {
+  const bar = loadBar();
+  const pass = checkBars({ p50_ms: 42.125, p99_ms: 67.5, peak_ws_mb: 1280 }, bar);
+  const failAssets = {
+    status: "FAIL",
+    findings: [{ file: "banner.gltf", mesh: 2, kind: "tex_px", actual: 4_036_608, allowed: 1_048_576 }],
+    more: 0,
+  };
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, assets: PASS_ASSETS }), 0);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, loaded: true, assets: failAssets }), 1);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, assets: { status: "UNKNOWN" } }), 1);
+  assert.equal(
+    decideExit({ hasIntegrated: true, verdicts: pass, floor: false, assets: failAssets }),
+    0,
+    "no --floor, no verdict",
+  );
 });
 
 test("potato: summarize reports NO_IGPU exit 2 and the report carries the line", () => {
@@ -280,9 +354,11 @@ test("potato: the report carries the load stamp, and UNKNOWN when it never sampl
     hasIntegrated: true,
     missing: false,
     timedOut: false,
+    assets: parseKitBudget(KIT_PASS),
   };
   const quiet = formatReport({ ...base, load: { cargo: 0, rustc: 0, loaded: false } });
   assert.ok(quiet.includes("load: QUIET"), quiet);
+  assert.ok(quiet.includes("assets: PASS meshes=38"), quiet);
   const loaded = formatReport({ ...base, load: { cargo: 3, rustc: 1, loaded: true } });
   assert.ok(
     loaded.includes("load: LOADED 3 cargo + 1 rustc running (filed numbers, not a speed claim)"),
@@ -304,6 +380,7 @@ const DISCRETE_ARENA = [
 const OVER_ARENA = [
   "adapter: Intel-UHD Dx12 integrated vendor=0x8086",
   "arena frame-split: sim=1ms present=2ms fighters=0ms per frame (mean over 300 frames) cpu_ms p50=40.000 p99=50.000 interval_ms p50=60.000 p99=90.000 gpu_ms=unsupported acquire=0ms present_mode=vsync",
+  KIT_PASS,
 ].join("\n");
 
 function fakeLive(output, tasklistText = CANNED_TASKLIST) {
@@ -357,6 +434,33 @@ test("potato: the tool returns 1 with --floor when p50 is over, else 0", async (
     const soft = await drive([], fakeLive(OVER_ARENA), dir);
     assert.equal(soft.code, 0, "without --floor a FAIL only prints");
     assert.ok(soft.lines.some((line) => line.endsWith("FAIL")), soft.lines.join("\n"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The asset leg is a real red: a kit mesh over a potato cap fails --floor even
+// when every frame bar passes, and even when a build loaded the box. The
+// report names the file, the mesh and both numbers so the next action is clear.
+test("potato: the tool exits 1 on a kit over the potato cap and files the finding", async () => {
+  const dir = tempReportDir();
+  try {
+    const output = CANNED_ARENA.replace(KIT_PASS, KIT_FAIL);
+    const loaded = { ...fakeLive(output), load: { cargo: 2, rustc: 0, loaded: true } };
+    const { code, lines } = await drive(["--floor"], loaded, dir);
+    assert.equal(code, 1, "a real asset red is not withheld by load");
+    assert.ok(
+      lines.includes("asset: banner.gltf mesh=2 tex_px 4036608 > 1048576"),
+      lines.join("\n"),
+    );
+    assert.ok(
+      lines.some((line) => line.startsWith("potato floor: FAIL on the asset leg")),
+      lines.join("\n"),
+    );
+    const report = readFileSync(joinPath(dir, "potato-2026-10-17.md"), "utf8");
+    assert.ok(report.includes("floor: FAIL on the asset leg (kit budget FAIL)"), report);
+    assert.ok(report.includes("assets: FAIL meshes=38"), report);
+    assert.ok(report.includes("asset: banner.gltf mesh=2 tex_px 4036608 > 1048576"), report);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -466,14 +570,14 @@ test("potato: decideExit withholds a loaded non-pass and accepts a loaded pass",
   const over = checkBars({ p50_ms: 60, p99_ms: 70, peak_ws_mb: 1000 }, bar);
   const pass = checkBars({ p50_ms: 42.125, p99_ms: 67.5, peak_ws_mb: 1280 }, bar);
   const unknown = checkBars({ p50_ms: null, p99_ms: null, peak_ws_mb: null }, bar);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: true, loaded: true }), 3);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: unknown, floor: true, loaded: true }), 3);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, loaded: true }), 0);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: true, loaded: false }), 1);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, loaded: false }), 0);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: false, loaded: true }), 0);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: true, loaded: true, assets: PASS_ASSETS }), 3);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: unknown, floor: true, loaded: true, assets: PASS_ASSETS }), 3);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, loaded: true, assets: PASS_ASSETS }), 0);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: true, loaded: false, assets: PASS_ASSETS }), 1);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, loaded: false, assets: PASS_ASSETS }), 0);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: false, loaded: true, assets: PASS_ASSETS }), 0);
   assert.equal(
-    decideExit({ hasIntegrated: false, verdicts: over, floor: true, loaded: true }),
+    decideExit({ hasIntegrated: false, verdicts: over, floor: true, loaded: true, assets: PASS_ASSETS }),
     2,
     "no integrated adapter still wins",
   );

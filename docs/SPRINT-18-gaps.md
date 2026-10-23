@@ -2065,7 +2065,8 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   expected tables are written out in the test (rows ordered by damage, ties broken by fighter id), a
   fold-twice-equal test, and a capture of the result overlay at `target/showcase/` that draws the table.
   F2P: the result screen has no line of numbers.
-- [ ] OPT56 assets: BC7 picks its mode, not just mode 6. `crates/assets/src/bc.rs::encode_bc7_block` takes a
+- [x] OPT56 assets: BC7 picks its mode, not just mode 6. Landed 46d31ebd.
+  `crates/assets/src/bc.rs::encode_bc7_block` takes a
   slot and ignores it, so every block is one-subset mode 6 with 7-bit endpoints. Modes 1, 5 and 7 keep the
   same 16 bytes per block and can hold a block that mode 6 cannot, so the cook can pick the best of four by
   measured error and never do worse than today. Tier A. Size M. Owns `crates/assets/src/bc.rs`.
@@ -2074,6 +2075,9 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   quarter of the blocks improve, the encoder is byte-identical twice, and the decoder accepts every mode it
   emits (a mode-6-only decoder must refuse the new ones by name). Cook cost posted as ms per megapixel.
   F2P: one BC7 mode for every block, whatever the block looks like.
+  Proof: 10 passed (gh run 40022638848), mean mse 6.970651 -> 1.254803 with 1733/2170 blocks (79.9%)
+  improved, bytes identical twice, modes 1/5/6/7 won 313/16011/60/0, cook 1499.2 ms/MP mode 6 only vs
+  4693.9 ms/MP search (3.13x).
 - [ ] OPT57 render: wire the GPU cull the crates already hold. `crates/assets/src/meshlet_cull.rs` and
   `crates/render/src/gpu_cull.rs` exist with tests and no caller: `lib.rs` declares both modules and nothing
   uses them, while the live path still culls per draw on the CPU. Wire one indirect-draw path behind a flag,

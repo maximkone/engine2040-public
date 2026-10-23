@@ -86,6 +86,7 @@ impl PhysFx {
             drive: None,
             parents: Vec::new(),
             muscle_permille: 0,
+            quiet: 0,
         });
         Ok(Some(Severed {
             bone,

@@ -1,0 +1,18 @@
+{
+  "note": "The agent eval bar: the rows one AG1 scorecard run printed, read by tools/eval-bar.mjs. It adds no threshold of its own: a card line below a row here is red and a lost row is red, the same rule `Scorecard::reds` applies to the last card. A row with total 0 (BreakBench today) is unbuilt and skipped. Re-measure by running the command below and copying the card rows into `rows`.",
+  "command": "node tools/gh-check.mjs cargo test -p engine-playtest --lib scorecard_command -- --ignored --nocapture",
+  "ci_command": "cargo test --locked -p engine-playtest --lib scorecard_command -- --ignored --nocapture",
+  "measured": "2026-10-23",
+  "run": "https://github.com/maximkone/engine2040-public/actions/runs/40024485987",
+  "backend": "mock only: every suite replays a recorded tape through the provider contract, no network and no API key",
+  "rows": [
+    { "suite": "BreakBench", "tier": "replay", "passed": 0, "total": 0 },
+    { "suite": "EV1", "tier": "free", "passed": 25, "total": 25 },
+    { "suite": "EV1", "tier": "strong", "passed": 25, "total": 25 },
+    { "suite": "EV1", "tier": "replay", "passed": 25, "total": 25 },
+    { "suite": "mirror", "tier": "free", "passed": 30, "total": 30 },
+    { "suite": "mirror", "tier": "strong", "passed": 30, "total": 30 },
+    { "suite": "mirror", "tier": "replay", "passed": 30, "total": 30 },
+    { "suite": "spatial_eval", "tier": "replay", "passed": 100, "total": 100 }
+  ]
+}

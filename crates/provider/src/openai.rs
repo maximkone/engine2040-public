@@ -30,8 +30,8 @@ const ENVELOPE: Envelope = Envelope {
     native_tool: false,
 };
 
-/// Single-shot wire: the chat-completions body (digests only, no secret),
-/// remote dispatch, strict proposal parse.
+/// Single-shot wire: the chat-completions body (digest header plus any
+/// bounded scene brief, no secret), remote dispatch, strict proposal parse.
 const WIRE: Wire = Wire {
     label: "openai",
     body: transport::chat_body,
@@ -233,6 +233,58 @@ mod tests {
                 .any(|line| line == "openai:127.0.0.1"),
             "receipt labels the vendor plus host: {proposal:?}"
         );
+    }
+
+    #[test]
+    fn scene_brief_enters_the_vendor_payload() {
+        let brief = "scene brief: object 7 is a crate at (120, 0, 40) cm.\nobject 9 is the floor.";
+        let mut ask = request(1, 3);
+        ask.body = Some(String::from(brief));
+        let body = transport::chat_body(&ask, &RequestPins::default());
+        assert!(body.contains("[scene brief follows] body_bytes="), "{body}");
+        assert!(body.contains("object 7 is a crate"), "{body}");
+        assert!(body.contains("[end scene brief]"), "{body}");
+        let sent: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+        let user = sent["messages"][1]["content"]
+            .as_str()
+            .expect("user prompt");
+        assert!(user.contains(brief), "the brief stays one string: {user}");
+    }
+
+    #[test]
+    fn scene_brief_reaches_the_socket_body() {
+        let stub = StubServer::spawn_completion(crate::stub::chat_ok(
+            r#"{"actions": [{"noop": true}], "diagnostics": ["stub:brief"]}"#,
+            None,
+        ));
+        let url = stub.url();
+        let caps = ProviderCapabilities::remote_http();
+        let brief = "scene brief: object 7 is a crate at (120, 0, 40) cm.\nobject 9 is the floor.";
+        let mut ask = request(1, 3);
+        ask.body = Some(String::from(brief));
+        let (outcome, _) = crate::stub::settle(
+            |n| {
+                let mut adapter = adapter_for(&url, vec![MockStep::Succeed]);
+                let mut attempt = ask.clone();
+                attempt.id = crate::protocol::RequestId(40 + u64::from(n));
+                let outcome = adapter.call(&attempt, &policy_for(&url), &caps);
+                (outcome, adapter)
+            },
+            |(outcome, _)| outcome.result.is_ok(),
+        );
+        assert!(outcome.result.is_ok(), "stub roundtrip succeeds");
+        let bodies = stub.bodies();
+        let sent: serde_json::Value =
+            serde_json::from_str(bodies.last().expect("one body was sent")).expect("body is JSON");
+        let user = sent["messages"][1]["content"]
+            .as_str()
+            .expect("user prompt");
+        assert!(
+            user.contains(brief),
+            "brief crossed the socket whole: {user}"
+        );
+        assert!(user.contains("[scene brief follows] body_bytes="), "{user}");
+        assert!(user.ends_with("[end scene brief]"), "{user}");
     }
 
     #[test]

@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "92c62aaf1660780610dbe5369a060199448b60e29d00452d09a63d094de3406f",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "d42a296bbf0e6c26afb180a016633db8e732584ca60bf472e506e14cdd5b2dc3",
+  "bytes": 250608,
+  "bake": {
+    "src": "content/maps/src/market_stall.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\market_stall_ao.png",
+      "bytes": 30783,
+      "sha256": "bdfd466b5a41eb1c2730c0f6c525b38843c1978144ae4386f513eda0c5ab41c7"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\market_stall_grime.png",
+      "bytes": 31557,
+      "sha256": "9883444e07614bdd300a36c31388f33bbe6ee5ccd810dc14ab9f52239039f178"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\market_stall_orm.png",
+      "bytes": 47159,
+      "sha256": "9ec0b28a88214a2d9a3d0cd39ebd29b44117779e1e4f5fe814376155627f760e",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\market_stall_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "6503891bb2ec2e8f130d3b67cdc9ed9bf2480f31bb2e916841bc7e68a37fc250"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\market_stall_normal.png",
+      "bytes": 19305,
+      "sha256": "5e6f1559d1bc8ab0e80d5aa71ba803ca49818322640705f3f29383bdd919043b",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\market_stall_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "08f62d240685d8693a564d8e580a67305d957aa95d4320188947450d052f05c5"
+    }
+  },
+  "ktx2_set": "93c8586b3aeb15f35377ee46d3147eb5d4a7f7d8795b0e6e7a62bd1a81bf90e7"
+}

@@ -465,6 +465,7 @@ pub fn announce_request(
         deadline_ms: 60_000,
         privacy: PrivacyMode::LocalOnly,
         base_revision: obs.tick,
+        body: None,
     }
 }
 

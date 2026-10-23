@@ -185,6 +185,17 @@ pub fn load_cooked_set(source: &dyn AssetSource, set: usize) -> Option<CookedSet
     load_cooked_set_shape(source, set, CookedShape::Block)
 }
 
+/// Base-map pixels of the cooked set `file` wears (its whole base level): the
+/// map the tier draws in place of the file's glTF image. `None` when the file
+/// wears no set or the set's base does not read and parse; the import budget
+/// then measures the glTF image instead.
+pub fn cooked_base_px(source: &dyn AssetSource, file: &str) -> Option<u32> {
+    let name = COOKED_SETS.get(pbr_for_file(file)?.set)?;
+    let bytes = source.read(&format!("cooked/{name}_base.ktx2")).ok()?;
+    let tex = parse_ktx2(&bytes).ok()?;
+    Some(tex.width.saturating_mul(tex.height))
+}
+
 /// [`load_cooked_set`] in a chosen shape: the frame test loads the same set as
 /// RGBA8 to measure what the block upload changed.
 pub fn load_cooked_set_shape(
@@ -292,21 +303,26 @@ impl KitMaps {
     }
 
     /// Stage the maps of one kit file: its cooked CC0 set when `cooked/` has
-    /// it, else the glTF's own base, normal and ORM images. Returns the base
-    /// key, the set it wears and its normal-map set key. A named base-color
-    /// image that is missing refuses before any map stages.
+    /// it, else the glTF's own base, normal and ORM images. `base` is the
+    /// file's decoded base image (validated and budgeted by the caller, and
+    /// borrowed here so one decode serves both). Returns the base key, the
+    /// set it wears and its normal-map set key.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the file's stage inputs travel together: source, import, the shared base and two knobs"
+    )]
     pub(crate) fn stage(
         &mut self,
         source: &dyn AssetSource,
         file: &'static str,
         import: &engine_assets::mesh_import::GltfImport,
         file_index: usize,
+        base: Option<(TextureKey, TextureSource)>,
         textures_on: bool,
         shape: CookedShape,
     ) -> Result<KitFileMaps, super::KitError> {
-        let base = super::kit_texture(import, file, file_index)?;
         // The capture probe drops every map at import, so the staged report
-        // and the window twin list draw flat; the image is validated above,
+        // and the window twin list draw flat; the caller validated the image,
         // so a named image still refuses under the probe.
         if !textures_on {
             return Ok((None, None, None));

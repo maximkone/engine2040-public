@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "a2f53d64e79ce1b574000190cc4a3ca38e9ea0c81670b63c8ac7818f354ca4ae",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "d976ae3890cb833ff4efb8adf0aac89860cc0bf75fa2d51048a4a71dfe4af54f",
+  "bytes": 202620,
+  "bake": {
+    "src": "content/maps/src/notice_board.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\notice_board_ao.png",
+      "bytes": 20816,
+      "sha256": "21b8705274e63180c1ea5280414a8491e65d4801ba824b1c42e21e8dfeb47e0e"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\notice_board_grime.png",
+      "bytes": 26410,
+      "sha256": "249546db6710aa1044a0836ba88d03b5eb15cbede69672f7f75b72f1569d7923"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\notice_board_orm.png",
+      "bytes": 36439,
+      "sha256": "4dd9fe12623e31e8e3b2504cd8ab8e018a68408d47c4b25ee998a58876896ecb",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\notice_board_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "eb65b21350c3b861e4b9324c43735185ec21f046830c8e9f27e1c67f44e82a77"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\notice_board_normal.png",
+      "bytes": 22610,
+      "sha256": "78ba91459ce09646f468da6397dd2118eca306c3e65fa9e6c06163600c738e46",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\notice_board_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "25db26466277599dc211393568863f8c72d7e2f10033c817f6e2a661c434f48f"
+    }
+  },
+  "ktx2_set": "844581201d87783adeacc449136f849ca6c3fa73603ca34327a4a392a717afbc"
+}

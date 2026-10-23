@@ -48,6 +48,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/docs-coverage.mjs` (+ `tools/docs-coverage.test.mjs`): ratchet per-crate missing-docs.
 - `tools/doctor.mjs` (+ `tools/doctor.test.mjs`): repo health first.
 - `tools/duration-fmt.mjs` (+ `tools/duration-fmt.test.mjs`): node script; see its header.
+- `tools/eval-bar.mjs` (+ `tools/eval-bar.test.mjs`): compare an agent scorecard card with `tools/eval-bar.json` by the scorecard's own rule (a lower pass rate or a lost line is red).
 - `tools/faction-war-map.mjs`: read the contested map and the war rules, print the three statue points and fail when the two disagree (RY1).
 - `tools/faction-war-report.mjs`: run the class validator, block out every archetype, write `docs/research/faction-war-2026-10-21/art-report.md`.
 - `tools/farm.mjs` (+ `tools/farm.test.mjs`): run heavy checks on the build farm.
@@ -72,6 +73,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/gpu-farm.mjs` (+ `tools/gpu-farm.test.mjs`): run one cargo line on a Kaggle GPU kernel (T4) when the PC's GPU legs are queued.
 - `tools/hash-util.mjs` (+ `tools/hash-util.test.mjs`): hash helpers.
 - `tools/hit-list.mjs` (+ `tools/hit-list.test.mjs`): check every fight cue has a CC0 sound with provenance.
+- `tools/hooks-install.mjs` (+ `tools/hooks-install.test.mjs`): point git at the tracked `tools/hooks` via `core.hooksPath` (`--check` reports, exit 1); never copies into `.git/hooks`.
 - `tools/iqa-gate.mjs` (+ `tools/iqa-gate.test.mjs`): gate capture-pair image similarity.
 - `tools/jobserver.mjs` (+ `tools/jobserver.test.mjs`): the Node side of the shared compile-slot pool: cargo joins `tools/jobserver.ps1`'s semaphore and runs below the desktop.
 - `tools/kam2-host.mjs`: serve `target/kam2web` on loopback and open a Cloudflare quick tunnel; `--check` proves local + public + 60 frames.
@@ -143,7 +145,10 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 
 Test-only mates with no live script (audit pins kept on purpose):
 
+- `tools/ai-door-book.test.mjs`
+- `tools/ai-props.test.mjs`
 - `tools/argv-contract.test.mjs`
+- `tools/batch-a.test.mjs`
 - `tools/board-slice-cases.test.mjs`
 - `tools/book-commands.test.mjs` (runs the dry commands of `tools/book-commands.json`)
 - `tools/for-ai.test.mjs`
@@ -152,6 +157,7 @@ Test-only mates with no live script (audit pins kept on purpose):
 - `tools/ci.test.mjs`
 - `tools/compare-split.test.mjs`
 - `tools/cover-gap.test.mjs`
+- `tools/differential.test.mjs`
 - `tools/float-gate.test.mjs`
 - `tools/frame-check.test.mjs`
 - `tools/ibl-presets.test.mjs`
@@ -159,7 +165,10 @@ Test-only mates with no live script (audit pins kept on purpose):
 - `tools/index-check.test.mjs`
 - `tools/knobs-check.test.mjs`
 - `tools/ladder-split.test.mjs`
+- `tools/pilot-scout.test.mjs`
+- `tools/plan-atlas-cache.test.mjs`
 - `tools/plan-index.test.mjs`
+- `tools/pre-commit.test.mjs`
 - `tools/rng-vectors.test.mjs`
 - `tools/rollback-vectors.test.mjs`
 - `tools/ship-dupe-gap.test.mjs`
@@ -172,3 +181,4 @@ Test-only mates with no live script (audit pins kept on purpose):
 - `tools/stale-refs.test.mjs`
 - `tools/toolchain-pin.test.mjs`
 - `tools/w4-compile-cache-plan.test.mjs`
+- `tools/web-loader.test.mjs`

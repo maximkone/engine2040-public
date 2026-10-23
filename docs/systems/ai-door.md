@@ -6,6 +6,7 @@ Lanes: provider (`crates/provider`, new), mcp (`crates/endpoint`), playtest
 QA1, QA2, CR1, VF1, LG1, EV1, RV1, WS1, OB3, CAP1.
 
 Status: landed in part. The provider crate ships mock, local, and remote adapters (`crates/provider/src/`), and the MCP door serves tools from `crates/endpoint/src/`. Open rows: MCP16 manifests, PV6 cancel timing, PV7 tool-loop harness.
+Status 2026-10-24: MCP16, PV6 and PV7 are ticked; this spec's open list is empty.
 EA1 is the built-in editor consumer; internal calls use engine services directly,
 not an external coding assistant or an MCP roundtrip. Source review:
 `../EVIDENCE.md` (2026-09-23 reference-only rows).

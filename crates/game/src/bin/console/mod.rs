@@ -153,6 +153,9 @@ impl ArenaApp {
                 presenter.set_contact_shadow_strength(f32::from(permille) / 1000.0);
             }
             ConsoleKnob::AutoExposure => presenter.set_auto_exposure_enabled(value != 0),
+            ConsoleKnob::DebugDraw => {
+                presenter.debug_line_enable(value != 0);
+            }
         }
     }
 }

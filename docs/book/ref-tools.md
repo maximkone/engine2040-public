@@ -551,7 +551,7 @@ No entry point: `sim-source-scan.mjs`, `board-slice.mjs`, `board-memo.mjs`, `arg
 
 These `tools/*.test.mjs` files have no same-name module. Some import a module under another name, some test a deleted tool. Running `node --test tools/` includes them. Check each before relying on it.
 
-`ai-door-book`, `ai-props`, `argv-contract`, `batch-a`, `board-slice-cases`, `book-commands`, `ci`, `compare-split`, `cover-gap`, `differential`, `float-gate`, `for-ai`, `frame-check`, `ibl-presets`, `ibl-vectors`, `index-check`, `inventory`, `knobs-check`, `ladder-split`, `license-gate-py`, `pages-workflow`, `pilot-scout`, `plan-atlas-cache`, `plan-index`, `pre-commit`, `rng-vectors`, `rollback-vectors`, `ship-dupe-gap`, `skills-index`, `skin-vectors`, `sky-preset`, `sky-presets`, `sky-presets3`, `spawn-check`, `stale-refs`, `toolchain-pin`, `w4-compile-cache-plan`, `web-loader`.
+`ai-door-book`, `ai-props`, `argv-contract`, `batch-a`, `board-slice-cases`, `book-commands`, `ci`, `compare-split`, `cover-gap`, `differential`, `float-gate`, `for-ai`, `frame-check`, `ibl-presets`, `ibl-vectors`, `index-check`, `knobs-check`, `ladder-split`, `license-gate-py`, `pages-workflow`, `pilot-scout`, `plan-atlas-cache`, `plan-index`, `pre-commit`, `rng-vectors`, `rollback-vectors`, `ship-dupe-gap`, `skills-index`, `skin-vectors`, `sky-preset`, `sky-presets`, `sky-presets3`, `spawn-check`, `stale-refs`, `toolchain-pin`, `w4-compile-cache-plan`, `web-loader`.
 
 ## 14. Suspicious items
 
@@ -561,4 +561,4 @@ These `tools/*.test.mjs` files have no same-name module. Some import a module un
 - Several tools name lane machinery that the standalone repo cut: `clean.mjs` (`lanes-worktrees.json`, `target/lanes`), `doctor.mjs` (`target/lanes/*.patch`), `mutants.mjs` (`target/lanes/<id>.patch`, `.lanes/<id>`). `books.mjs` and `ship.mjs` use paths outside the repo (`C:/empire/...`, `C:/e2040-clean/`).
 - `docs/WORKFLOW.md` names `tools/sprint-lock.mjs`, `tools/sprint-loop.mjs`, `builder` and `planner` agents. None exists in `tools/`.
 - `docs/FOCUS.md` names `tools/drift-check.mjs` and `tools/steal-next.mjs`. Neither exists in `tools/`.
-- `proof.mjs` with no flags runs cargo locally; AGENTS says cargo proofs go to `gh-check.mjs`. Mirror pushes go to `main`; this repo is `master`. 38 test files have no module (section 13). "see code" rows in the table are unverified.
+- `proof.mjs` with no flags runs cargo locally; AGENTS says cargo proofs go to `gh-check.mjs`. Mirror pushes go to `main`; this repo is `master`. 37 test files have no module (section 13). "see code" rows in the table are unverified.

@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "003d94bcab26ef3806e3e1dc2b0171702c5da2f9a8e81867414e90af63557b6c",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "5aad6ecc59d18d8b8e9d481da681080f3ff99b83e01db977b2d21ab805365b22",
+  "bytes": 398436,
+  "bake": {
+    "src": "content/maps/src/palisade.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\palisade_ao.png",
+      "bytes": 17913,
+      "sha256": "3e83c9b4c86c376a011bbe039cefe0e682e0380b88e081b66cde4a71ba7af6ac"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\palisade_grime.png",
+      "bytes": 24487,
+      "sha256": "49e4b945263d3245fb5b211ddd3c04e0937ac0c8bb6e43b8befbbd41ef019b9b"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\palisade_orm.png",
+      "bytes": 33857,
+      "sha256": "cab9a3eefca156c68e679e561a7cc56a5c092fdbdf3cebb091c6f197faf5f056",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\palisade_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "fc9a66e997eb6359e9fd48427b049042e1541e14aff0ba8325dde2427ad027d1"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\palisade_normal.png",
+      "bytes": 19683,
+      "sha256": "6396d2f94c42185739ce5d2a4aa78283958e3b01e03b475381ae22203537dd5e",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\palisade_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "cb02c8819a0ed17437f973c0c7bb3b7d4ecc4f3b9e988f10febc4e2f29f95b8f"
+    }
+  },
+  "ktx2_set": "798833217b5e1f376682e5bf7c45063553f8aeffdbc14bf17527d977ea6af860"
+}

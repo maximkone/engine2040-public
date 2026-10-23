@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "1d9101c52b57c892021f730141a427aec2837ad13abbd89a83ea398d408bf079",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "caa35322604ba35b4048de6010536affa2bcd413134acd6f6175a172a10295d9",
+  "bytes": 131304,
+  "bake": {
+    "src": "content/maps/src/yard_floor.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\yard_floor_ao.png",
+      "bytes": 13710,
+      "sha256": "6bad6f8c9e606b16368eb31fb521d5047812ffacc5649ed12a2e5e1914469f14"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\yard_floor_grime.png",
+      "bytes": 18662,
+      "sha256": "6d3106078fcd6a646782da5c340496c843aec31089579bbba8740b1ce0e801de"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\yard_floor_orm.png",
+      "bytes": 17141,
+      "sha256": "4b0ba198ba81e4da445d2ef49096205284869a43700089460d32fbdd6f249ff7",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\yard_floor_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "090cf3d0c31e9d149a8771fd667650f705dbceb310ec650b2c019d3ef25f200b"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\yard_floor_normal.png",
+      "bytes": 6621,
+      "sha256": "eb046d177ad3fc81aa2cb0cf89fcd163471f53f92c9be7c85135b3c14e766b7f",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\yard_floor_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "6990deb7b37ca045de0957544bef096c96b8f1cbecb80f5694b6929859419d3a"
+    }
+  },
+  "ktx2_set": "da5443c0f15438fe03f360801d5bd4ba609bc65f82ef753da009b12b22ad92e2"
+}

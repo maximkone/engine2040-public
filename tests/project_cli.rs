@@ -109,6 +109,31 @@ fn bad_manifest_exits_1_naming_the_key_and_the_line() {
 }
 
 #[test]
+fn a_key_that_no_build_or_run_reads_is_refused_by_name() {
+    let temp = Temp::new();
+    stdout(&engine2040(&temp.0, &["new", "arena-duel", "duel-2"]));
+    let project = temp.0.join("duel-2");
+    let path = project.join("game.toml");
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("quality = \"high\"\n");
+    fs::write(&path, &text).unwrap();
+    let line = text.lines().count();
+    for args in [
+        &["run", "--headless"][..],
+        &["build", "--target", "windows"],
+    ] {
+        let output = engine2040(&project, args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let shown = stderr(&output);
+        assert!(
+            shown.contains(&format!("line {line}, key `quality`")),
+            "{shown}"
+        );
+        assert!(shown.contains("not wired yet: quality"), "{shown}");
+    }
+}
+
+#[test]
 fn new_refuses_a_non_empty_directory_and_unknown_template() {
     let temp = Temp::new();
     fs::create_dir(temp.0.join("taken")).unwrap();

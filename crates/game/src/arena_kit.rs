@@ -47,139 +47,19 @@ pub mod torch_feed;
 #[path = "kit_pbr.rs"]
 pub mod kit_pbr;
 
-/// Hand-placed zone table (`content/design/arena-zones.rows`): the one file
-/// the design gate (`tools/level-check.mjs`) and this reader both read.
-pub const KIT_ZONE_ROWS: &str = include_str!("../../../content/design/arena-zones.rows");
-/// Row id of the entrance tunnel: the gate anchor owner.
-pub const KIT_ZONE_GATE_ID: &str = "gate_tunnel";
-/// Rows the shipped table holds: one per placement actor plus `centre`.
-const KIT_ZONE_COUNT: usize = KIT_ACTOR_COUNT + 1;
+/// GS15: the imported kit's measured mesh cost against the potato caps, with
+/// the files and meshes over one. A child module, `app` leg only.
+#[cfg(feature = "app")]
+#[path = "kit_budget.rs"]
+pub mod kit_budget;
+#[cfg(feature = "app")]
+pub use kit_budget::{KitBudget, KitBudgetFinding};
 
-/// One row of the hand-placed zone table.
-///
-/// Units: whole centimeters; `class` is 0 none, 1 magnet, 2 curtain, 3
-/// generator, 4 bumper, and `advantage`/`dominance`/`risk` are the row's
-/// `0|1` flags. Fields: `id` actor or zone name, `cx_cm`/`cz_cm` the centre,
-/// `radius_cm` the mouth or hold radius (above zero), `height_cm` the height.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct KitZoneRow {
-    pub id: &'static str,
-    pub class: u8,
-    pub cx_cm: i16,
-    pub cz_cm: i16,
-    pub radius_cm: i16,
-    pub height_cm: i16,
-    pub advantage: bool,
-    pub dominance: bool,
-    pub risk: bool,
-}
-
-/// Row error carrying the 1-based line, like `tools/level-check.mjs`.
-fn zone_err(line: usize, detail: &str) -> KitError {
-    parse_err(&format!("zones line {line}: {detail}"))
-}
-
-/// Parse the zone table text (`table arena-zones version 1`, then one
-/// `<id> class=<0..4> cx_cm=<int> cz_cm=<int> radius_cm=<int> height_cm=<int>
-/// advantage=<0|1> dominance=<0|1> risk=<0|1>` row; `#` comments and blank
-/// lines skipped). Every rule mirrors `tools/level-check.mjs` `parseZones`.
-fn kit_zone_rows_from_text(text: &'static str) -> Result<Vec<KitZoneRow>, KitError> {
-    const KEYS: [&str; 8] = [
-        "class",
-        "cx_cm",
-        "cz_cm",
-        "radius_cm",
-        "height_cm",
-        "advantage",
-        "dominance",
-        "risk",
-    ];
-    let mut header = false;
-    let mut rows: Vec<KitZoneRow> = Vec::with_capacity(KIT_ZONE_COUNT);
-    for (index, raw) in text.lines().enumerate() {
-        let line = index + 1;
-        let body = raw.split('#').next().unwrap_or("").trim();
-        if body.is_empty() {
-            continue;
-        }
-        if !header {
-            if body != "table arena-zones version 1" {
-                return Err(zone_err(line, "first row must be the header"));
-            }
-            header = true;
-            continue;
-        }
-        let mut cells = body.split_whitespace();
-        let Some(id) = cells.next().filter(|id| !id.contains('=')) else {
-            return Err(zone_err(line, "misses actor id"));
-        };
-        let mut values = [0i16; KEYS.len()];
-        let mut mask = 0u8;
-        for cell in cells {
-            let Some((key, value)) = cell.split_once('=') else {
-                return Err(zone_err(line, "bad cell"));
-            };
-            let Some(slot) = KEYS.iter().position(|known| *known == key) else {
-                return Err(zone_err(line, "unknown key"));
-            };
-            let digits = value.strip_prefix('-').unwrap_or(value);
-            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(zone_err(line, "whole number only"));
-            }
-            mask |= 1 << slot;
-            values[slot] = value
-                .parse::<i16>()
-                .map_err(|_| zone_err(line, "out of range"))?;
-        }
-        if mask != u8::MAX {
-            return Err(zone_err(line, "missing or duplicate key"));
-        }
-        if !(0..=4).contains(&values[0]) {
-            return Err(zone_err(line, "class must be 0..4"));
-        }
-        if values[3] <= 0 {
-            return Err(zone_err(line, "radius_cm must be above 0"));
-        }
-        for (slot, key) in [(5usize, "advantage"), (6, "dominance"), (7, "risk")] {
-            if values[slot] != 0 && values[slot] != 1 {
-                return Err(zone_err(line, &format!("{key} must be 0|1")));
-            }
-        }
-        rows.push(KitZoneRow {
-            id,
-            class: u8::try_from(values[0]).unwrap_or(0),
-            cx_cm: values[1],
-            cz_cm: values[2],
-            radius_cm: values[3],
-            height_cm: values[4],
-            advantage: values[5] == 1,
-            dominance: values[6] == 1,
-            risk: values[7] == 1,
-        });
-    }
-    if !header {
-        return Err(parse_err("zones: misses the table header"));
-    }
-    if rows.len() != KIT_ZONE_COUNT {
-        return Err(parse_err(&format!(
-            "zones: {KIT_ZONE_COUNT} rows, saw {}",
-            rows.len()
-        )));
-    }
-    Ok(rows)
-}
-
-/// The hand-placed zone rows, in file order.
-///
-/// Consumer: the twin's zone report (`crates/game/src/bin/arena.rs`) and the
-/// ring's gate anchor (`crates/game/src/fight_ring.rs`), both reading the file
-/// `tools/level-check.mjs` gates. Units: whole centimeters, flags `0|1`.
-/// Determinism: same bytes give the same rows in file order (no map). Errors:
-/// [`KitError::Parse`] with the 1-based line of a bad row, or the row count
-/// from a missing actor row. Budget: 12 rows once at init, zero per tick.
-pub fn kit_zone_rows() -> Result<Vec<KitZoneRow>, KitError> {
-    kit_zone_rows_from_text(KIT_ZONE_ROWS)
-}
+/// Hand-placed zone table parsing (the design gate's rows): the `kit_zones`
+/// child module, re-exported so callers keep `arena_kit::` paths.
+#[path = "kit_zones.rs"]
+mod kit_zones;
+pub use kit_zones::{kit_zone_rows, KitZoneRow, KIT_ZONE_GATE_ID, KIT_ZONE_ROWS};
 
 /// Distinct kit files staged (one import per file).
 pub const KIT_ASSET_COUNT: usize = 8;
@@ -674,6 +554,9 @@ pub struct ImportedKit {
     /// Cooked sets loaded from `cooked/` (5 on the shipping content). A
     /// source without `cooked/` stages the glTF textures and reports fewer.
     pub cooked_sets: usize,
+    /// Measured mesh cost of the imported source files against the potato
+    /// caps, with the files and meshes that exceed one.
+    pub budget: KitBudget,
 }
 
 /// Neutral-gray fallback factors when a source material is invalid.
@@ -1045,21 +928,54 @@ fn load_kit_sources(
     maps: &mut kit_pbr::KitMaps,
     textures_on: bool,
     shape: kit_pbr::CookedShape,
-) -> Result<(Vec<KitSource>, u64), KitError> {
+) -> Result<(Vec<KitSource>, u64, KitBudget), KitError> {
     let mut sources: Vec<KitSource> = Vec::with_capacity(files.len());
     let mut triangles: u64 = 0;
+    let mut budget = KitBudget::default();
     for (file_index, file) in files.iter().enumerate() {
         let bytes = assets.bytes(&kit_logical_path(file))?;
         let import = engine_assets::mesh_import::import_gltf_path(file, bytes)
             .map_err(|err| KitError::Import(bound_diag(&format!("{file}: {err}"))))?;
+        // The base image decodes once here: the budget reads its pixels and
+        // the stage uploads the same upload. The cooked set's base, when the
+        // file wears one, is the map the tier draws instead.
+        let base = kit_texture(&import, file, file_index)?;
+        let cooked_px = kit_pbr::cooked_base_px(source, file);
+        let gltf_px = base
+            .as_ref()
+            .map(|(_, texture)| texture.width().saturating_mul(texture.height()));
+        for (mesh, cooked) in import.meshes.iter().enumerate() {
+            let names_base = import.materials.get(mesh).is_some_and(|material| {
+                material
+                    .textures
+                    .iter()
+                    .any(|slot| slot.slot == engine_assets::cooked::TextureSlot::BaseColor)
+            });
+            let tex_px = match cooked_px {
+                Some(px) => px,
+                None if names_base => gltf_px.unwrap_or(0),
+                None => 0,
+            };
+            budget.add(
+                file,
+                mesh,
+                engine_assets::budget::MeshStats {
+                    tris: u32::try_from(cooked.indices.len() / 3).unwrap_or(u32::MAX),
+                    bones: 0,
+                    influences: 0,
+                    materials_per_skin: u32::from(import.materials.get(mesh).is_some()),
+                    tex_px,
+                },
+            );
+        }
         let (pos, nor, uv, idx, tris) = merge_import(file, &import)?;
         triangles += tris;
         let material = import.materials.first().cloned().unwrap_or_default();
         let (texture, pbr, normal_key) =
-            maps.stage(source, file, &import, file_index, textures_on, shape)?;
+            maps.stage(source, file, &import, file_index, base, textures_on, shape)?;
         sources.push((file, pos, nor, uv, idx, material, texture, pbr, normal_key));
     }
-    Ok((sources, triangles))
+    Ok((sources, triangles, budget))
 }
 
 /// [`import_kit`] over any content source: the files are read as
@@ -1086,7 +1002,7 @@ pub fn import_kit_from_shape(
     let mut assets = KitAssets::load(source, &files)?;
     let mut maps = kit_pbr::KitMaps::default();
     let textures_on = kit_textures_enabled(std::env::var(KIT_TEXTURES_ENV).ok().as_deref());
-    let (sources, triangles) =
+    let (sources, triangles, budget) =
         load_kit_sources(source, &assets, &files, &mut maps, textures_on, shape)?;
     let mut baked = Vec::with_capacity(actors.len());
     let mut skipped = Vec::new();
@@ -1124,15 +1040,7 @@ pub fn import_kit_from_shape(
             }
         };
         // First material of the file dresses all its actors.
-        let source_material = sources
-            .iter()
-            .find(|entry| entry.0 == actor.asset.file_name())
-            .map(|entry| entry.5.clone());
-        let Some(source_material) = source_material else {
-            skipped.push((actor.id, "import"));
-            continue;
-        };
-        let (mut material, fallback) = kit_material(&source_material);
+        let (mut material, fallback) = kit_material(&source.5);
         if fallback {
             material_fallbacks += 1;
         }
@@ -1175,6 +1083,7 @@ pub fn import_kit_from_shape(
         textures,
         sets,
         cooked_sets,
+        budget,
     })
 }
 
@@ -1208,6 +1117,8 @@ pub struct KitReport {
     pub skipped: usize,
     /// Draws on fallback (neutral gray) materials.
     pub material_fallbacks: usize,
+    /// Measured mesh cost of the imported kit against the potato caps.
+    pub budget: KitBudget,
 }
 
 #[cfg(feature = "app")]
@@ -1269,6 +1180,7 @@ pub fn upload_kit(
         triangles: kit.triangles,
         skipped: kit.skipped.len() + refused,
         material_fallbacks: kit.material_fallbacks,
+        budget: kit.budget.clone(),
     }
 }
 
@@ -1797,6 +1709,7 @@ mod tests {
             triangles: 5_001,
             skipped: 2,
             material_fallbacks: 0,
+            ..KitReport::default()
         };
         assert_eq!(
             live_kit_notice(&report),
@@ -1820,6 +1733,39 @@ mod tests {
             kit.skipped
         );
         assert_eq!(kit.material_fallbacks, 0);
+    }
+
+    // The import gate reads the real kit: every mesh is measured, and the
+    // banner cloth base is the one asset over a potato cap.
+    #[cfg(feature = "app")]
+    #[test]
+    fn the_shipping_kit_measures_meshes_against_the_potato_caps() {
+        let kit = import_kit(&kit_content_dir()).expect("kit imports from content");
+        let budget = &kit.budget;
+        assert_eq!(budget.meshes, 38, "one measured mesh per primitive");
+        assert_eq!(budget.max_tris, 512, "the floor is the largest mesh");
+        assert_eq!(budget.max_bones, 0, "the kit is static");
+        assert_eq!(budget.max_influences, 0, "no mesh is skinned");
+        assert_eq!(budget.max_materials, 1, "one material per mesh");
+        assert_eq!(budget.max_tex_px, 4_036_608, "banner cloth base");
+        assert_eq!(budget.status(), "FAIL");
+        assert_eq!(
+            budget.findings,
+            vec![KitBudgetFinding {
+                file: "banner.gltf",
+                mesh: 2,
+                kind: "tex_px",
+                actual: 4_036_608,
+                allowed: 1_048_576,
+            }]
+        );
+        let line = budget.line();
+        assert!(line.contains("meshes=38"), "{line}");
+        assert!(line.contains("caps=POTATO budget=FAIL"), "{line}");
+        assert!(
+            line.contains("banner.gltf mesh=2 tex_px 4036608>1048576"),
+            "{line}"
+        );
     }
 
     // Same bytes give the same meshes: one import per run, keys stable x2.
@@ -2382,7 +2328,11 @@ mod tests {
     #[test]
     fn kit_zone_rows_reads_the_hand_placed_layout() {
         let rows = kit_zone_rows().expect("embedded zone rows parse");
-        assert_eq!(rows.len(), KIT_ZONE_COUNT, "11 actor rows plus centre");
+        assert_eq!(
+            rows.len(),
+            kit_zones::KIT_ZONE_COUNT,
+            "11 actor rows plus centre"
+        );
         let gate = rows
             .iter()
             .find(|row| row.id == KIT_ZONE_GATE_ID)
@@ -2404,13 +2354,14 @@ mod tests {
     #[test]
     fn kit_zone_rows_refuse_bad_rows_by_line_and_count() {
         let float = "table arena-zones version 1\nsand_floor class=0 cx_cm=1.5 cz_cm=0 radius_cm=100 height_cm=20 advantage=0 dominance=0 risk=0\n";
-        let err = kit_zone_rows_from_text(float).expect_err("a float cx_cm refuses");
+        let err = kit_zones::kit_zone_rows_from_text(float).expect_err("a float cx_cm refuses");
         assert!(err.to_string().contains("line 2"), "{err}");
         let class = "table arena-zones version 1\nsand_floor class=9 cx_cm=0 cz_cm=0 radius_cm=100 height_cm=20 advantage=0 dominance=0 risk=0\n";
-        let err = kit_zone_rows_from_text(class).expect_err("class 9 refuses");
+        let err = kit_zones::kit_zone_rows_from_text(class).expect_err("class 9 refuses");
         assert!(err.to_string().contains("line 2"), "{err}");
         let short = "table arena-zones version 1\nsand_floor class=0 cx_cm=-6000 cz_cm=0 radius_cm=1500 height_cm=20 advantage=0 dominance=0 risk=0\n";
-        let err = kit_zone_rows_from_text(short).expect_err("a missing actor row refuses");
+        let err =
+            kit_zones::kit_zone_rows_from_text(short).expect_err("a missing actor row refuses");
         assert!(err.to_string().contains("12 rows, saw 1"), "{err}");
     }
 

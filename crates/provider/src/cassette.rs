@@ -1714,12 +1714,12 @@ mod tests {
         assert_eq!(store.load(&key, ask.id, &image), Ok(Answer::Malformed));
 
         let mut newer = ask.clone();
-        newer.schema_version = 2;
+        newer.schema_version = 3;
         let newer_key = CassetteKey::new("openai", &newer, &image).expect("key");
         assert_eq!(
             store.load(&newer_key, newer.id, &image),
             Err(CassetteError::Miss(MissReason::SchemaVersion {
-                recorded: 1
+                recorded: 2
             })),
             "same request under a newer schema is stale, not reused"
         );
@@ -1834,7 +1834,7 @@ mod tests {
             CassetteAdapter::new(openai(&url), dir.store(), CassetteMode::Record, "openai")
                 .expect("label");
         let mut bad = remote_request(2);
-        bad.schema_version = 2;
+        bad.schema_version = 3;
         let out = ask_via(&mut rec, &bad, &url);
         assert_eq!(out.result, Err(AiError::MalformedOutput));
         assert!(matches!(
@@ -1877,7 +1877,7 @@ mod tests {
         assert_eq!(out.result, Err(AiError::UnsupportedCapability));
         assert!(w.log().is_empty(), "refused before any lookup");
         let mut stale = remote_request(2);
-        stale.schema_version = 2;
+        stale.schema_version = 3;
         let out = w.call(&stale, &remote_policy(&dead), &caps);
         assert_eq!(out.result, Err(AiError::MalformedOutput));
     }
@@ -2157,12 +2157,12 @@ mod tests {
             "changed prompt misses and says why"
         );
         let mut stale = ask.clone();
-        stale.schema_version = 2;
+        stale.schema_version = 3;
         let stale_key = CassetteKey::new("mock", &stale, &image).expect("key");
         assert_eq!(
             store.load(&stale_key, stale.id, &image),
             Err(CassetteError::Miss(MissReason::SchemaVersion {
-                recorded: 1
+                recorded: 2
             })),
             "stale schema refuses, never reused"
         );

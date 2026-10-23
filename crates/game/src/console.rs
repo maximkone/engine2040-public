@@ -14,8 +14,8 @@
 //! half speed or one stepped tick at a time.
 //!
 //! `set-knob` returns typed presentation effects (`msaa`, `contact-shadow`,
-//! `auto-exposure`). The window applies them to the presenter; none of them
-//! reach the sim.
+//! `auto-exposure`, `debug-draw`). The window applies them to the presenter;
+//! none of them reach the sim.
 //!
 //! Errors: [`ConsoleError`] for every refused line, never a panic. Units:
 //! time speed in permille of real time (1000 = real time), contact-shadow in
@@ -74,7 +74,7 @@ const HELP_LINES: [&str; 9] = [
     "resume               same as `pause off`",
     "step                 pause and run exactly one tick",
     "slow <scale>         time scale 0.01..4.0; 0.5 is half speed",
-    "set-knob <name> <v>  msaa 0|1, contact-shadow 0..1000, auto-exposure 0|1",
+    "set-knob <name> <v>  msaa 0|1, contact-shadow 0..1000, auto-exposure 0|1, debug-draw 0|1",
     "help                 this list",
 ];
 
@@ -100,11 +100,18 @@ pub enum ConsoleKnob {
     ContactShadow,
     /// Auto-exposure meter (`0` or `1`).
     AutoExposure,
+    /// After-blit fighter debug lines (`0` or `1`); off draws nothing.
+    DebugDraw,
 }
 
 impl ConsoleKnob {
     /// Every knob the console knows, for help and tests.
-    pub const ALL: [Self; 3] = [Self::Msaa, Self::ContactShadow, Self::AutoExposure];
+    pub const ALL: [Self; 4] = [
+        Self::Msaa,
+        Self::ContactShadow,
+        Self::AutoExposure,
+        Self::DebugDraw,
+    ];
 
     /// Stable name typed on the console line.
     #[must_use]
@@ -113,6 +120,7 @@ impl ConsoleKnob {
             Self::Msaa => "msaa",
             Self::ContactShadow => "contact-shadow",
             Self::AutoExposure => "auto-exposure",
+            Self::DebugDraw => "debug-draw",
         }
     }
 
@@ -123,6 +131,7 @@ impl ConsoleKnob {
             "msaa" => Some(Self::Msaa),
             "contact-shadow" => Some(Self::ContactShadow),
             "auto-exposure" => Some(Self::AutoExposure),
+            "debug-draw" => Some(Self::DebugDraw),
             _ => None,
         }
     }
@@ -131,7 +140,7 @@ impl ConsoleKnob {
     #[must_use]
     pub const fn range(self) -> (i64, i64) {
         match self {
-            Self::Msaa | Self::AutoExposure => (0, 1),
+            Self::Msaa | Self::AutoExposure | Self::DebugDraw => (0, 1),
             Self::ContactShadow => (0, 1000),
         }
     }
@@ -247,7 +256,7 @@ impl fmt::Display for ConsoleError {
             ),
             Self::UnknownKnob(name) => write!(
                 f,
-                "set-knob: unknown knob `{name}` (msaa, contact-shadow, auto-exposure)"
+                "set-knob: unknown knob `{name}` (msaa, contact-shadow, auto-exposure, debug-draw)"
             ),
             Self::KnobOutOfRange {
                 knob,
@@ -905,6 +914,61 @@ mod tests {
                 value: 250
             }]
         );
+    }
+
+    #[test]
+    fn console_debug_draw_knob_sets_and_refuses() {
+        // The C13 knob: one typed presenter effect, value 0 or 1, a bad value
+        // or a near-miss name refused without touching the transcript state.
+        let app = authority_app(2);
+        let door = AppDoor(&app);
+        let mut console = DevConsole::new();
+        let reply = console
+            .execute("set-knob debug-draw 1", &door)
+            .expect("debug draw on");
+        assert_eq!(
+            reply.effects,
+            vec![ConsoleEffect::SetKnob {
+                knob: ConsoleKnob::DebugDraw,
+                value: 1
+            }]
+        );
+        assert_eq!(reply.lines, vec!["set-knob debug-draw 1".to_string()]);
+        let reply = console
+            .execute("set-knob debug-draw 0", &door)
+            .expect("debug draw off");
+        assert_eq!(
+            reply.effects,
+            vec![ConsoleEffect::SetKnob {
+                knob: ConsoleKnob::DebugDraw,
+                value: 0
+            }]
+        );
+        assert_eq!(
+            console.execute("set-knob debug-draw 2", &door),
+            Err(ConsoleError::KnobOutOfRange {
+                knob: ConsoleKnob::DebugDraw,
+                value: 2,
+                min: 0,
+                max: 1
+            })
+        );
+        assert_eq!(
+            console.execute("set-knob debug-draws 1", &door),
+            Err(ConsoleError::UnknownKnob("debug-draws".to_string()))
+        );
+        // Every knob name round-trips, so help and parse cannot drift.
+        for knob in ConsoleKnob::ALL {
+            assert_eq!(ConsoleKnob::parse(knob.name()), Some(knob));
+            assert!(!knob.name().is_empty());
+        }
+        assert_eq!(ConsoleKnob::ALL.len(), 4);
+        assert!(console
+            .execute("help", &door)
+            .expect("help")
+            .lines
+            .iter()
+            .any(|line| line.contains("debug-draw")));
     }
 
     #[test]

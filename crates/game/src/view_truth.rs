@@ -261,6 +261,26 @@ struct Track {
     air_since: f64,
     /// Clip the body played at this frame, so a pop can name the clip it rode.
     clip: u8,
+    /// True while the body was a ragdoll at this frame: physics posed it, so
+    /// the step to the first clip frame is not motion, it is a re-seed.
+    ragdoll: bool,
+}
+
+impl Track {
+    /// This frame's pose with no velocity: a fresh seed, a ragdoll frame, or
+    /// the first clip frame after a ragdoll. One snap counts once.
+    fn seed(t: f64, body: &BodyTruth, airborne: bool) -> Self {
+        Self {
+            t,
+            joints: body.joints.clone(),
+            vel: None,
+            root_y: body.root[1],
+            airborne,
+            air_since: if airborne { t } else { 0.0 },
+            clip: body.clip,
+            ragdoll: body.ragdolled,
+        }
+    }
 }
 
 /// The worst pop of a run: which slot, which joint, when, how far the joint
@@ -502,15 +522,7 @@ impl ViewLaws {
         let prev = match self.tracks[index].take() {
             Some(prev) if prev.joints.len() == body.joints.len() => prev,
             _ => {
-                self.tracks[index] = Some(Track {
-                    t,
-                    joints: body.joints.clone(),
-                    vel: None,
-                    root_y: body.root[1],
-                    airborne,
-                    air_since: if airborne { t } else { 0.0 },
-                    clip: body.clip,
-                });
+                self.tracks[index] = Some(Track::seed(t, body, airborne));
                 return;
             }
         };
@@ -522,17 +534,12 @@ impl ViewLaws {
             self.tracks[index] = Some(prev);
             return;
         }
-        if body.ragdolled {
-            // Physics moves these joints, not a clip: nothing to predict, nothing to snap.
-            self.tracks[index] = Some(Track {
-                t,
-                joints: body.joints.clone(),
-                vel: None,
-                root_y: body.root[1],
-                airborne,
-                air_since: if airborne { t } else { 0.0 },
-                clip: body.clip,
-            });
+        if body.ragdolled || prev.ragdoll {
+            // Physics moves ragdoll joints, not a clip: nothing to predict.
+            // The first clip frame after a ragdoll re-seeds too: the clip pose
+            // can sit far from where the ragdoll lay, and reading that step as
+            // a velocity pops the next frame.
+            self.tracks[index] = Some(Track::seed(t, body, airborne));
             return;
         }
         let mut popped = false;
@@ -602,6 +609,7 @@ impl ViewLaws {
                 0.0
             },
             clip: body.clip,
+            ragdoll: body.ragdolled,
         });
     }
 
@@ -1173,6 +1181,52 @@ mod tests {
         assert_eq!(
             laws.pops, 0,
             "a cached frame must not zero the tick velocity"
+        );
+    }
+
+    #[test]
+    fn the_first_clip_frame_after_a_ragdoll_re_seeds_instead_of_popping() {
+        let cam = camera();
+        let mut laws = ViewLaws::default();
+        // A ragdoll lies on the sand, its joints nowhere near a clip pose.
+        for frame in 0..4u8 {
+            let t = f64::from(frame) * 0.5;
+            let mut lying = body(0, "down", [0.0; 3], vec![[0.0, 0.2, 0.0], [0.4, 0.2, 0.1]]);
+            lying.ragdolled = true;
+            laws.note(&cam, t, &[lying]);
+        }
+        // The first clip frame of the get-up is a meter up: a re-seed, not a pop.
+        laws.note(
+            &cam,
+            2.0,
+            &[body(
+                0,
+                "rise",
+                [0.0; 3],
+                vec![[0.0, 1.2, 0.0], [0.4, 1.7, 0.1]],
+            )],
+        );
+        // The rise then moves smoothly; the step from the ragdoll pose is not
+        // read as a velocity, so the next frame does not pop.
+        for frame in 5..8u8 {
+            let t = f64::from(frame) * 0.5;
+            let y = 1.2 + f32::from(frame - 4) * 0.06;
+            laws.note(
+                &cam,
+                t,
+                &[body(
+                    0,
+                    "rise",
+                    [0.0; 3],
+                    vec![[0.0, y, 0.0], [0.4, y + 0.5, 0.1]],
+                )],
+            );
+        }
+        assert_eq!(
+            laws.pops,
+            0,
+            "a rise re-seeds the pop law: {:?}",
+            laws.pop_detail()
         );
     }
 

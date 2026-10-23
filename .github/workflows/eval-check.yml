@@ -1,0 +1,76 @@
+name: eval-check
+
+# The agent eval gate: one leg, one number, mock only.
+#
+# The number is the AG1 scorecard (`crates/playtest/src/eval/scorecard.rs`, `collect`): pass rate per suite and tier for
+# EV1 (75 rows), the 30-task benchmark mirrors and the 100-task spatial gold eval. `scorecard_command` is the harness's
+# own operator command, `#[ignore]`d only because it writes `target/reports/scorecard-<date>.md`; here the date falls back
+# to 1970-01-01, so the leg is one plain cargo line with no environment and no clock.
+#
+# Mock only, on purpose. Every suite replays a recorded tape through the real provider contract, so a free or strong row is
+# that tier's contract path, never a live model: no API key, no network call, nothing to leak. A live-model number would
+# need OPENROUTER_API_KEY and the internet, neither of which belongs in CI; `spatial_eval::llm_live` keeps those tests
+# `#[ignore]`d behind its own key check.
+#
+# No threshold is invented here. `tools/eval-bar.json` holds the numbers one run printed, and `tools/eval-bar.mjs` applies
+# the scorecard's own rule (`Scorecard::reds`): a line whose pass rate drops below the bar is red, and so is a bar line the
+# card lost. A new line is never red.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/provider/**"
+      - "crates/playtest/**"
+      - "crates/endpoint/**"
+      - "tools/eval-bar.json"
+      - "tools/eval-bar.mjs"
+      - ".github/workflows/eval-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scorecard:
+    # The public mirror is the build farm; the private dev repo has no minutes for it (same rule as ci.yml).
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: eval-check
+      - name: the scorecard leg (mock backend, no network, no key)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p engine-playtest --lib scorecard_command -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/scorecard.log"
+      - name: compare the card with tools/eval-bar.json (the scorecard's own drop rule)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/eval-bar.mjs | tee "$RUNNER_TEMP/eval-bar.log"
+      - name: put the card and the bar on the run
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### agent scorecard (mock backend)'
+            echo '```'
+            cat "$RUNNER_TEMP/scorecard.log" 2>/dev/null | tail -40 || true
+            echo '```'
+            echo '```'
+            cat "$RUNNER_TEMP/eval-bar.log" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

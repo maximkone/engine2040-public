@@ -1,0 +1,13 @@
+{
+  "seed": 0,
+  "ops": [
+    {
+      "op": "bake",
+      "src": "content/maps/src/street_wall.gltf",
+      "size": 256,
+      "ao": true,
+      "grime": true,
+      "normal": true
+    }
+  ]
+}

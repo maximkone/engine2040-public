@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "e923a08aaaf1508761c8583c2a89264c7c1d559605d815eba21c71336a445959",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "6cab5277118632f74faf22c66aab1c8b40e260699f0ccfb81a4f351abaa90974",
+  "bytes": 220176,
+  "bake": {
+    "src": "content/maps/src/siege_wall.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\siege_wall_ao.png",
+      "bytes": 8010,
+      "sha256": "f78a4d2e79de08e10e97298af30ef0919ff86e7fb86264b23e2a197f1c151e20"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\siege_wall_grime.png",
+      "bytes": 16702,
+      "sha256": "cc40aec3b9d94b8a89b2518ff690747bafe3cbe080601af3689e5ea83dae3df7"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\siege_wall_orm.png",
+      "bytes": 17611,
+      "sha256": "683cc13def5030019ad8be04790a3e76b5b0f2d2792c62c741b3327480acac95",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\siege_wall_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "5d36c1b1c06bf3168c735a36b8c3a9fb5dc36ad094a60ad54868ab351d011fc9"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\siege_wall_normal.png",
+      "bytes": 5882,
+      "sha256": "9dab741856e2e40504259f91850d673813934389dd06fd2e988dcd0d16b362f2",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\siege_wall_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "c0e340c404f071c26ea57259be1d9f8bbbf046e1d88324f7404b5be9792fb97e"
+    }
+  },
+  "ktx2_set": "2cfdebd5a9b5f592a4ce89fef182d5c6232c8f1a4c31491fad5358059fe5c988"
+}

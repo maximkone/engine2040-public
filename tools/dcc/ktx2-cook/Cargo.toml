@@ -1,0 +1,14 @@
+[package]
+name = "e2040-ktx2-cook"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "GEO14: cook one PNG map through the existing engine-assets ktx2_cook lane."
+
+# Its own workspace: a tool crate under tools/, not a crates/ member.
+[workspace]
+
+[dependencies]
+engine-assets = { path = "../../../crates/assets" }
+image = { version = "0.25", default-features = false, features = ["png"] }

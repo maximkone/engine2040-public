@@ -1,9 +1,13 @@
 //! The game-project verbs of the `engine2040` bin: `new` makes a project directory from a
-//! template, `run --headless` plays its seeded proof and prints the receipt. (`build` is in
-//! `build.rs`.) A project is a directory with a `game.toml` (see `manifest.rs`).
+//! template, `run --headless` plays its seeded proof or runs the game it names, and `build`
+//! (in `build.rs`) makes that game. A project is a directory with a `game.toml` (see
+//! `manifest.rs`); the game it builds and runs is one bin of the engine workspace
+//! (`workspace.rs`), `engine-game:arena` unless the file says otherwise.
 
 use crate::cli::{usage, write_text_receipt, Error};
-use crate::manifest::{check_name, lookup, valid_words, Manifest, Target};
+use crate::manifest::{check_name, lookup, unwired_note, valid_words, Manifest, Target};
+use crate::process::{self, Checkout, Runner, Step};
+use crate::workspace::{self, GameBin};
 use engine_proof::{record, replay, Config, MAX_TICKS};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -297,16 +301,23 @@ fn require_empty(dir: &Path) -> Result<(), Error> {
 }
 
 /// A project on disk: its parsed manifest and the directory it sits in.
+#[derive(Debug)]
 pub struct Project {
     /// The parsed `game.toml`.
     pub manifest: Manifest,
     dir: PathBuf,
     manifest_path: PathBuf,
+    /// The declared game bin; `None` means the file names no game, so the engine's arena (for
+    /// `build`) and the proof fixture (for `run`) apply.
+    game: Option<GameBin>,
 }
 
 impl Project {
-    /// Read `game.toml` and check that every content root is a directory.
-    pub fn load(manifest_path: &Path) -> Result<Self, Error> {
+    /// Read `game.toml`, resolve the game it names against a chosen engine checkout (`root`
+    /// holds the workspace `Cargo.toml`), and refuse a key that no build or run reads yet. A
+    /// project that names no game never reads the workspace, so an old project loads as it
+    /// always did.
+    pub fn load_in(manifest_path: &Path, root: &Path) -> Result<Self, Error> {
         let text = fs::read_to_string(manifest_path).map_err(|error| {
             Error::Project(format!(
                 "cannot read {}: {error}; make a project with `engine2040 new arena-duel <dir>` or pass --manifest <path>",
@@ -319,20 +330,46 @@ impl Project {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        for root in &manifest.content {
-            if !dir.join(root).is_dir() {
+        let game = if manifest.sets("game") {
+            Some(
+                workspace::resolve(root, &manifest.game.package, &manifest.game.bin).map_err(
+                    |why| {
+                        Error::Project(format!(
+                            "{}: key `game`: {why}; write game = \"<package>:<bin>\"",
+                            manifest_path.display()
+                        ))
+                    },
+                )?,
+            )
+        } else {
+            None
+        };
+        for content_root in &manifest.content {
+            if !dir.join(content_root).is_dir() {
                 return Err(Error::Project(format!(
-                    "{}: key `content`: root `{root}` is not a directory (looked for {})",
+                    "{}: key `content`: root `{content_root}` is not a directory (looked for {})",
                     manifest_path.display(),
-                    dir.join(root).display()
+                    dir.join(content_root).display()
                 )));
             }
         }
+        refuse_unwired(manifest_path, &manifest)?;
         Ok(Self {
             manifest,
             dir,
             manifest_path: manifest_path.to_path_buf(),
+            game,
         })
+    }
+
+    /// The bin this project builds and runs: the game it names, else the engine's arena.
+    pub fn game(&self) -> GameBin {
+        self.game.clone().unwrap_or_else(workspace::default_game)
+    }
+
+    /// Whether `game.toml` names a game, so `run` runs that bin instead of the proof fixture.
+    pub fn names_game(&self) -> bool {
+        self.game.is_some()
     }
 
     /// The run seed: the number in `seed_file`, or the engine default without one.
@@ -350,6 +387,26 @@ impl Project {
         })?;
         parse_seed(&path, &text)
     }
+}
+
+/// Refuse a key that parses but reaches no build or run, naming it, its line and what the
+/// engine does instead, so a setting never looks applied when it is not.
+fn refuse_unwired(manifest_path: &Path, manifest: &Manifest) -> Result<(), Error> {
+    let unwired = manifest.unwired();
+    let Some(&(key, line)) = unwired.first() else {
+        return Ok(());
+    };
+    let note = unwired_note(key).unwrap_or("nothing reads it yet");
+    let also: Vec<&str> = unwired.iter().skip(1).map(|(other, _)| *other).collect();
+    let also = if also.is_empty() {
+        String::new()
+    } else {
+        format!(" Also not wired yet: {}.", also.join(", "))
+    };
+    Err(Error::Project(format!(
+        "{}: line {line}, key `{key}`: not wired yet: {key}; {note}.{also} Remove the line to use the engine's default.",
+        manifest_path.display()
+    )))
 }
 
 /// The one unsigned number of the seed file at `path`; blank lines and `#` comments are
@@ -390,6 +447,18 @@ fn parse_seed(path: &Path, text: &str) -> Result<u64, Error> {
 }
 
 fn run_verb(args: impl Iterator<Item = OsString>, out: &mut dyn Write) -> Result<(), Error> {
+    let checkout = Checkout::host();
+    let mut run = process::run_process;
+    run_verb_with(args, &checkout, &mut run, out)
+}
+
+/// The `run` verb against a chosen checkout and runner, so tests drive it without a game build.
+fn run_verb_with(
+    args: impl Iterator<Item = OsString>,
+    checkout: &Checkout,
+    run: &mut Runner<'_>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let flags = Flags::parse(args, &["--headless"], &["--ticks", "--manifest"])?;
     flags.no_positional("run")?;
     if !flags.switch("--headless") {
@@ -401,7 +470,85 @@ fn run_verb(args: impl Iterator<Item = OsString>, out: &mut dyn Write) -> Result
         Some(text) => parse_ticks(text)?,
         None => Config::default().ticks,
     };
-    run_headless(&Project::load(&flags.manifest())?, ticks, out)
+    let project = Project::load_in(&flags.manifest(), &checkout.root)?;
+    run_project(&project, checkout, ticks, run, out)
+}
+
+/// The project's own game when `game.toml` names one; else the seeded proof fixture, which is
+/// what every project ran before `game` existed, so its receipt does not move.
+fn run_project(
+    project: &Project,
+    checkout: &Checkout,
+    ticks: u32,
+    run: &mut Runner<'_>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    if project.names_game() {
+        run_game(project, checkout, ticks, run, out)
+    } else {
+        run_headless(project, ticks, out)
+    }
+}
+
+/// Run the built bin of the game the project names: `--headless --ticks <n>` in the project
+/// directory, plus `--seed <n>` when a seed file is set. The bin is not built here; `build`
+/// does that and this names the missing exe when it has not run.
+fn run_game(
+    project: &Project,
+    checkout: &Checkout,
+    ticks: u32,
+    run: &mut Runner<'_>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    let game = project.game();
+    let exe = checkout.exe("release", &game.bin);
+    if !exe.is_file() {
+        return Err(Error::Project(format!(
+            "the game `{}` is not built: {} is missing; build it first: engine2040 build --target windows",
+            game.spec(),
+            exe.display()
+        )));
+    }
+    let mut args = vec![
+        "--headless".to_owned(),
+        "--ticks".to_owned(),
+        ticks.to_string(),
+    ];
+    if project.manifest.seed_file.is_some() {
+        args.push("--seed".to_owned());
+        args.push(project.seed()?.to_string());
+    }
+    writeln!(out, "engine2040 project: {}", project.manifest.summary())?;
+    writeln!(
+        out,
+        "running {} {} in {}",
+        game.spec(),
+        args.join(" "),
+        project.dir.display()
+    )?;
+    out.flush()?;
+    let step = Step {
+        program: exe,
+        args,
+        dir: project.dir.clone(),
+        capture: false,
+        fix: "build it: engine2040 build --target windows",
+    };
+    let outcome = process::start(run, &step)?;
+    if outcome.code != Some(0) {
+        return Err(Error::Project(format!(
+            "the game `{}` failed ({}); its output above says why",
+            game.spec(),
+            process::exit_text(outcome.code)
+        )));
+    }
+    writeln!(
+        out,
+        "ran {} ({})",
+        game.spec(),
+        process::exit_text(outcome.code)
+    )?;
+    Ok(())
 }
 
 fn parse_ticks(text: &str) -> Result<u32, Error> {
@@ -503,11 +650,16 @@ mod tests {
         error.to_string()
     }
 
+    /// A project loaded against the checkout this test binary was built from.
+    fn load_here(path: &Path) -> Result<Project, Error> {
+        Project::load_in(path, Path::new(env!("CARGO_MANIFEST_DIR")))
+    }
+
     #[test]
     fn new_template_arena_duel_parses_and_runs_600_ticks_to_one_hash_twice() {
         let temp = TempDir::new();
         let dir = new_project(&temp, "arena-duel", "duel-1");
-        let manifest = Project::load(&dir.join("game.toml")).unwrap().manifest;
+        let manifest = load_here(&dir.join("game.toml")).unwrap().manifest;
         assert_eq!(manifest.name, "duel-1");
         let first = run_in(&dir, &["--ticks", "600"]).unwrap();
         let second = run_in(&dir, &["--ticks", "600"]).unwrap();
@@ -546,7 +698,7 @@ mod tests {
     fn new_template_siege_generates_a_valid_project_that_runs() {
         let temp = TempDir::new();
         let dir = new_project(&temp, "siege", "siege-1");
-        let project = Project::load(&dir.join("game.toml")).unwrap();
+        let project = load_here(&dir.join("game.toml")).unwrap();
         assert_eq!(project.manifest.targets, [Target::Windows, Target::Web]);
         let receipt = run_in(&dir, &["--ticks", "20"]).unwrap();
         assert!(receipt.contains("seed=64 "), "{receipt}");
@@ -561,12 +713,8 @@ mod tests {
         let dir = new_project(&temp, "arena-duel", "duel-3");
         let path = dir.join("game.toml");
         let text = fs::read_to_string(&path).unwrap();
-        let broken = text.replace("quality = \"medium\"", "quality = \"ultrahigh\"");
-        let line = broken
-            .lines()
-            .position(|l| l.starts_with("quality"))
-            .unwrap()
-            + 1;
+        let broken = format!("{text}quality = \"ultrahigh\"\n");
+        let line = broken.lines().count();
         fs::write(&path, broken).unwrap();
         let shown = message(&run_in(&dir, &[]).unwrap_err());
         assert!(shown.contains(&format!("line {line}")), "{shown}");
@@ -590,6 +738,10 @@ mod tests {
         assert!(message(&run_in(&dir, &[]).unwrap_err()).contains("line 1"));
         fs::write(dir.join("content/seed.txt"), "# nothing\n").unwrap();
         assert!(message(&run_in(&dir, &[]).unwrap_err()).contains("no seed number"));
+        // The template names no content root; a project that names one gets its roots checked.
+        let path = dir.join("game.toml");
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("{text}content = [\"content\"]\n")).unwrap();
         fs::remove_dir_all(dir.join("content")).unwrap();
         let shown = message(&run_in(&dir, &[]).unwrap_err());
         assert!(shown.contains("key `content`"), "{shown}");
@@ -597,6 +749,238 @@ mod tests {
             shown.contains("root `content` is not a directory"),
             "{shown}"
         );
+    }
+
+    /// The refusal a project gets when its manifest sets `extra` on line 3.
+    fn refused_extra(temp: &TempDir, name: &str, extra: &str) -> String {
+        let dir = temp.0.join(name);
+        fs::create_dir_all(dir.join("content")).unwrap();
+        let path = dir.join("game.toml");
+        fs::write(
+            &path,
+            format!("name = \"a\"\ntargets = [\"web\"]\n{extra}\n"),
+        )
+        .unwrap();
+        message(&Project::load_in(&path, Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_err())
+    }
+
+    #[test]
+    fn quality_is_refused_by_name() {
+        let temp = TempDir::new();
+        let shown = refused_extra(&temp, "quality-game", "quality = \"high\"");
+        assert!(shown.contains("line 3, key `quality`"), "{shown}");
+        assert!(shown.contains("not wired yet: quality"), "{shown}");
+        assert!(shown.contains("engine's own tier"), "{shown}");
+        assert!(shown.contains("Remove the line"), "{shown}");
+    }
+
+    #[test]
+    fn gore_is_refused_by_name() {
+        let temp = TempDir::new();
+        let shown = refused_extra(&temp, "gore-game", "gore = \"off\"");
+        assert!(shown.contains("line 3, key `gore`"), "{shown}");
+        assert!(shown.contains("not wired yet: gore"), "{shown}");
+        assert!(shown.contains("engine's own gore setting"), "{shown}");
+    }
+
+    #[test]
+    fn physics_layers_is_refused_by_name() {
+        let temp = TempDir::new();
+        let shown = refused_extra(
+            &temp,
+            "layers-game",
+            "physics_layers = [\"authority\", \"physical\"]",
+        );
+        assert!(shown.contains("line 3, key `physics_layers`"), "{shown}");
+        assert!(shown.contains("not wired yet: physics_layers"), "{shown}");
+        assert!(shown.contains("authority and physical"), "{shown}");
+    }
+
+    #[test]
+    fn content_is_refused_by_name() {
+        let temp = TempDir::new();
+        let shown = refused_extra(&temp, "content-game", "content = [\"content\"]");
+        assert!(shown.contains("line 3, key `content`"), "{shown}");
+        assert!(shown.contains("not wired yet: content"), "{shown}");
+        assert!(shown.contains("own content/ tree"), "{shown}");
+    }
+
+    #[test]
+    fn two_unwired_keys_name_the_first_and_list_the_rest() {
+        let temp = TempDir::new();
+        let shown = refused_extra(&temp, "two-keys", "content = [\"content\"]\ngore = \"off\"");
+        assert!(
+            shown.contains("line 3, key `content`: not wired yet: content"),
+            "{shown}"
+        );
+        assert!(shown.contains("Also not wired yet: gore."), "{shown}");
+    }
+
+    #[test]
+    fn a_game_the_workspace_lacks_is_refused_with_the_names_it_has() {
+        let temp = TempDir::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = temp.0.join("bad-game");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.toml");
+        fs::write(
+            &path,
+            "name = \"a\"\ntargets = [\"windows\"]\ngame = \"engine-nope:arena\"\n",
+        )
+        .unwrap();
+        let shown = message(&Project::load_in(&path, root).unwrap_err());
+        assert!(shown.contains("key `game`"), "{shown}");
+        assert!(shown.contains("has no package `engine-nope`"), "{shown}");
+        assert!(shown.contains("engine-game"), "{shown}");
+        fs::write(
+            &path,
+            "name = \"a\"\ntargets = [\"windows\"]\ngame = \"engine-game:nope\"\n",
+        )
+        .unwrap();
+        let shown = message(&Project::load_in(&path, root).unwrap_err());
+        assert!(shown.contains("has no bin `nope`"), "{shown}");
+        assert!(shown.contains("staged_fight"), "{shown}");
+    }
+
+    #[test]
+    fn two_projects_that_name_different_games_resolve_different_bins() {
+        let temp = TempDir::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let load = |name: &str, game: &str| {
+            let dir = temp.0.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("game.toml");
+            fs::write(
+                &path,
+                format!("name = \"a\"\ntargets = [\"windows\"]\ngame = \"{game}\"\n"),
+            )
+            .unwrap();
+            Project::load_in(&path, root).unwrap().game()
+        };
+        let arena = load("arena-project", "engine-game:arena");
+        let mcp = load("mcp-project", "engine-endpoint:e2040-mcp");
+        assert_eq!(arena.spec(), "engine-game:arena");
+        assert_eq!(mcp.spec(), "engine-endpoint:e2040-mcp");
+        assert_eq!(arena.features, ["app"]);
+        assert_eq!(mcp.features, ["mcp"], "the bin's required-features");
+    }
+
+    /// A fake engine checkout with one package, one declared bin and no built output.
+    fn fake_checkout(temp: &TempDir, package: &str, bin: &str) -> Checkout {
+        let root = temp.0.join("engine");
+        let member = root.join("crates").join(package);
+        fs::create_dir_all(member.join("src/bin")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"engine2040\"\n\n[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            member.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{package}\"\nautobins = false\n\n\
+                 [[bin]]\nname = \"{bin}\"\npath = \"src/bin/{bin}.rs\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            member.join("src/bin").join(format!("{bin}.rs")),
+            "fn main() {}\n",
+        )
+        .unwrap();
+        Checkout {
+            target_dir: root.join("target"),
+            root,
+            os: std::env::consts::OS,
+            exe_suffix: std::env::consts::EXE_SUFFIX,
+        }
+    }
+
+    #[test]
+    fn run_of_a_declared_game_runs_the_built_bin_with_ticks_and_seed() {
+        let temp = TempDir::new();
+        let checkout = fake_checkout(&temp, "demo", "play");
+        let dir = temp.0.join("project");
+        fs::create_dir_all(dir.join("content")).unwrap();
+        fs::write(dir.join("content/seed.txt"), "77\n").unwrap();
+        let path = dir.join("game.toml");
+        fs::write(
+            &path,
+            "name = \"demo\"\ntargets = [\"windows\"]\ngame = \"demo:play\"\nseed_file = \"content/seed.txt\"\n",
+        )
+        .unwrap();
+        let exe = checkout.exe("release", "play");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, "").unwrap();
+        let manifest = path.to_str().unwrap();
+        let mut seen: Vec<String> = Vec::new();
+        let mut out = Vec::new();
+        let mut run = |step: &Step| {
+            seen.push(format!(
+                "{} {}",
+                step.program.display(),
+                step.args.join(" ")
+            ));
+            assert_eq!(step.dir, dir, "the game runs in the project directory");
+            Ok(process::Outcome {
+                code: Some(0),
+                output: String::new(),
+            })
+        };
+        run_verb_with(
+            words(&["--headless", "--ticks", "30", "--manifest", manifest]),
+            &checkout,
+            &mut run,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            seen,
+            [format!("{} --headless --ticks 30 --seed 77", exe.display())]
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("engine2040 project: demo "), "{text}");
+        assert!(
+            text.contains("running demo:play --headless --ticks 30 --seed 77"),
+            "{text}"
+        );
+        assert!(text.contains("ran demo:play (exit code 0)"), "{text}");
+    }
+
+    #[test]
+    fn run_of_a_declared_game_that_is_not_built_names_the_build() {
+        let temp = TempDir::new();
+        let checkout = fake_checkout(&temp, "demo", "play");
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.toml");
+        fs::write(
+            &path,
+            "name = \"demo\"\ntargets = [\"windows\"]\ngame = \"demo:play\"\n",
+        )
+        .unwrap();
+        let mut ran = false;
+        let mut run = |_: &Step| {
+            ran = true;
+            Ok(process::Outcome {
+                code: Some(0),
+                output: String::new(),
+            })
+        };
+        let error = run_verb_with(
+            words(&["--headless", "--manifest", path.to_str().unwrap()]),
+            &checkout,
+            &mut run,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        let shown = message(&error);
+        assert!(
+            shown.contains("the game `demo:play` is not built"),
+            "{shown}"
+        );
+        assert!(shown.contains("build --target windows"), "{shown}");
+        assert!(!ran, "nothing runs when the exe is missing");
     }
 
     #[test]

@@ -27,6 +27,10 @@ app = ["engine-render/window", "engine-audio/device", "dep:winit", "engine-asset
 # line:col and the live generation keeps last-good. Rides `app`; the headless
 # default graph stays std-only (no naga in it).
 shader-validate = ["engine-render/shader-validate"]
+# C13: tick-phase profiler scopes. Keeps the whole `app` leg and turns puffin
+# on inside engine-perf; a plain `app` build still links engine-perf (latency)
+# but carries no puffin code, and every span off the switch is one atomic load.
+profile = ["app", "engine-perf/profile"]
 
 # WIN1: the `arena` window binary, gated on `app` so the headless default
 # stays std-only. winit is already wired (MIT/Apache, window stack).

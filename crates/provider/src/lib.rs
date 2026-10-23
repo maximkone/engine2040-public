@@ -109,9 +109,9 @@ pub use prompt::{
     PromptEval, BUILTIN_KINDS, MAX_EVALS,
 };
 pub use protocol::{
-    AdapterKind, AiError, AiEvent, AiRequest, AiResult, Budget, ContextRef, DataClass, EventKind,
-    FinishReason, JobId, ModelSelector, PrivacyMode, Proposal, ProposalAction, ProtocolError,
-    RequestId, TaskKind, Usage,
+    check_body, AdapterKind, AiError, AiEvent, AiRequest, AiResult, BodyError, Budget, ContextRef,
+    DataClass, EventKind, FinishReason, JobId, ModelSelector, PrivacyMode, Proposal,
+    ProposalAction, ProtocolError, RequestId, TaskKind, Usage, BODY_FENCE_CLOSE, BODY_FENCE_OPEN,
 };
 pub use quota::{
     resolve_key, scan_package, KeyFinding, KeyKind, KeyRoute, KeySafetyError, KeyScanReport,
@@ -129,9 +129,11 @@ pub use router::{
 };
 
 /// Contract version every type in this crate speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// Maximum context references per request.
 pub const MAX_CONTEXT_REFS: usize = 16;
+/// Maximum bytes of plain-text scene brief one request may carry.
+pub const MAX_BODY_BYTES: usize = 8192;
 /// Maximum actions per proposal.
 pub const MAX_ACTIONS: usize = 64;
 /// Maximum preview/diagnostic/label text length.
@@ -141,6 +143,6 @@ pub const MAX_TEXT_LEN: usize = 4096;
 mod tests {
     #[test]
     fn protocol_version_is_pinned() {
-        assert_eq!(super::PROTOCOL_VERSION, 1);
+        assert_eq!(super::PROTOCOL_VERSION, 2);
     }
 }

@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "0e6938774a6f8f10d303507611fc20e62557370584af4f45661a94784e446fea",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "3f7f6b3209a4456c8039aa0f485a0cc527a0189297e6f3c74e6fdfce3057fc76",
+  "bytes": 266536,
+  "bake": {
+    "src": "content/maps/src/insula.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\insula_ao.png",
+      "bytes": 21423,
+      "sha256": "a227db8fdd448572d7b997f126dc09711b9bb9d3bbdbbf3e30ef9d6ca5523814"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\insula_grime.png",
+      "bytes": 26470,
+      "sha256": "241a5331c916017f7fa1647388ba48c544451a447665e2d18be7f05df06f698d"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\insula_orm.png",
+      "bytes": 32570,
+      "sha256": "d798ccbe4fbd404f564b4da897f0edce338514f97f2c1ac545d42f4051679165",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\insula_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "8d0f33b13ffdefc5cead5c285815b38efca6bd3b7153ab0437fe72a45f474977"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\insula_normal.png",
+      "bytes": 9233,
+      "sha256": "91dfd2f1504433edbb90451cc109cac9089742a06ad38a03d12ea6ef4adeac37",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\insula_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "2c4f69c9312a743b0bc1cdb85065c5fff8b831eb97ad461888994d6c5e28eb93"
+    }
+  },
+  "ktx2_set": "4d965b7dcff73244521ee47d06edb31383a9ea221c995441b8ea07f61003469e"
+}

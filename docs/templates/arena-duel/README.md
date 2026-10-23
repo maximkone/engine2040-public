@@ -18,7 +18,9 @@ engine2040 build --target web
 
 ## Files
 
-- `game.toml`: the manifest. Every key has a comment and a bad value is refused with its key and line.
+- `game.toml`: the manifest. Every key has a comment and a bad value is refused with its key
+  and line. Keys no build or run reads yet (`quality`, `gore`, `physics_layers`, `content`)
+  are refused by name; `game = "package:bin"` picks the game to build and run.
 - `content/seed.txt`: the seed of the headless run.
 
 ## Not done yet

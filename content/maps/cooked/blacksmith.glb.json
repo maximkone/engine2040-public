@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "19118db4e78e89c2c537fd527315ba6d26fdbbc175d29fd636577ffa63c27214",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "a7bc7e202545b0e1ed65a9719c7490e97c61d026956d7de5f5f5d6abaf58fc76",
+  "bytes": 174112,
+  "bake": {
+    "src": "content/maps/src/blacksmith.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\blacksmith_ao.png",
+      "bytes": 8798,
+      "sha256": "a3ced3e90808eeb05d178d1c8090d589224c63e098f0c08f224d213c9ab13e3d"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\blacksmith_grime.png",
+      "bytes": 19009,
+      "sha256": "686078f8845469df40ae5e15254f77171d6e770f840a0c6c6eabddfe0d1bb775"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\blacksmith_orm.png",
+      "bytes": 21753,
+      "sha256": "b313f5189a790a713ea125fd30621c869703d3d660638fdd83369809f60a79c4",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\blacksmith_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "bc3019b50dc81df6b46ff6058d02d495053e3f7a743b1a019263ab68af089401"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\blacksmith_normal.png",
+      "bytes": 10384,
+      "sha256": "1da6bd743d3aaa789849dcb78ebb918cb53cc1ac662787696c9e7380ad0f8528",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\blacksmith_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "847a4059b45cfc68e2e45c67f1d8259eabc4464ff2211612a9cc16a590ec9fbf"
+    }
+  },
+  "ktx2_set": "28c27a55e997195bb0af68330e6627b31535889a4d5877cfecbf8acf1cac08c3"
+}

@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "98d119a254c1aba52ba1c58621ccef70af142c72fded1f9c5ad0af99bee92719",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "b76b5c90cfeb167c43e537febb946613d94a267239c300ae8df98e07dfdb5c3f",
+  "bytes": 280176,
+  "bake": {
+    "src": "content/maps/src/ballista.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\ballista_ao.png",
+      "bytes": 5341,
+      "sha256": "ee6535a9067320c708b8363272c6f1bb705ee1dcb12723f53fab89753b689acd"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\ballista_grime.png",
+      "bytes": 18457,
+      "sha256": "70625a0dca7af919ff81631b75397dbfca94af92f32d53596ca325daacbba0ed"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\ballista_orm.png",
+      "bytes": 20835,
+      "sha256": "80cf5401781e7c7cd517350ec6041013ab1a6100317bf700433dd21e30d9d52e",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\ballista_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "80286865729a3ebc0e655492a7e2c13f0fb5ed6439f3577f96152ffbf2cc02a6"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\ballista_normal.png",
+      "bytes": 16417,
+      "sha256": "23f3671db740a1a9a1b986b7a675403e0418dca804cba3215acf8eb75d3c5d76",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\ballista_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "a0c2c1a966b5116864f51f0b5685df28a6b2aea53e2d4111c9b24c4c99d858f1"
+    }
+  },
+  "ktx2_set": "2b0adf7a1cfa27061bcf86358f26e867f5df367f8eb80f27fd5382b3a24662aa"
+}

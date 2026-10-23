@@ -4,14 +4,16 @@
 Miri/loom/Kani, golden matrix, ship reproducibility, mdBook plus a book link gate — all wired and running.
 The weak half is everything that measures quality *over time* and everything that *ships*: coverage, perf regression,
 fuzz/mutation campaigns, browser/pixel gates in standing CI, release/version/changelog, hook install, SBOM.
-**And the tool layer is not kept as an inventory:** its own index misses 30 of 127 live tools, 4 tools are named
-nowhere, one 78 KB near-copy of the workspace gate sits beside it, and 5 gates only run on a throwaway branch.
+**And the tool layer was not kept as an inventory:** its own index missed 29 of 126 live tools, 3 tools were named
+nowhere, one 78 KB untracked near-copy of the workspace gate sat beside it, and 5 gates only run on a throwaway branch.
+The inventory gate (`tools/tools-index.mjs --check`) and the README/book fixes landed 2026-10-23.
 
-Counts (measured today, `tools/` top level): **297 files** = 127 live `.mjs` (40,705 lines) + 151 `*.test.mjs`
-(24,787 lines) + 15 `.json` + 1 `.ps1` + 1 `.py` + 17 subdirs. **22 tools are named in `.github/workflows`,
-21 of them executed by a workflow step** (gh-check is the dispatcher client, not a step). **Orphans: 4 named nowhere;
-5 with no runner and no test mate; 14 with no test mate; 30 missing from `tools/README.md`; 47 missing from
-`docs/book/ref-tools.md`.** **8 duplicate clusters cover 73 of the 127 live tools (57%)**, plus one exact duplicate.
+Counts (re-measured 2026-10-23, `tools/` top level, before the fix): **126 live `.mjs` + 151 `*.test.mjs`**
+(now 127 + 151), plus the JSON data, the `.ps1` pool script, the `.py` helper and the subdirs. **22 tools are named in
+`.github/workflows`, 21 of them executed by a workflow step** (gh-check is the dispatcher client, not a step).
+**Orphans then: 3 named nowhere; 13 with no test mate; 29 missing from `tools/README.md`; 48 missing from
+`docs/book/ref-tools.md`.** The gate and the two indexes now hold the README, book and stale-entry counts at 0; the 13
+no-mate tools are listed with a reason each. **8 duplicate clusters cover 73 of the 126 live tools**, plus one exact duplicate.
 
 ## What is already better than most peers
 
@@ -31,8 +33,8 @@ Counts (measured today, `tools/` top level): **297 files** = 127 live `.mjs` (40
 | 1 | Browser gates not in standing CI | Godot/Unity/Flutter run web E2E per PR; standard practice | `web-build.yml` runs only on `web-build-*` / dispatch; `pages.yml` only builds. The 6 web gates (`web-browse`, `web-perf`, `web-input-check`, `web-budget`, `web-headers`, `webgpu-cts`) never run on a PR | Wired but never run | Add `browser` job to `ci.yml` (build wasm + `web-browse.mjs` + `web-input-check.mjs` on headless Chrome) | Slow (~6 min), flaky software adapter |
 | 2 | No perf/instruction regression leg | UE/Godot/Flax ship perf CI; Rust peers use `iai-callgrind`/gungraun | `crates/perf/benches/instructions.rs` (gungraun), `bench-compare.mjs`, `proof --perf`, `tools/perf-baseline.json` all exist; **no workflow runs `cargo bench` or `--perf`** | Half-done | `perf` job on main: `cargo bench -p engine-perf --bench instructions` then `node tools/bench-compare.mjs` vs `perf-baseline.json` | Noisy unless instruction counts only; needs gungraun-runner |
 | 3 | No coverage gate | cargo-llvm-cov/tarpaulin are standard; consoles measure hot-path coverage | `wiring-cov.mjs` needs `cargo llvm-cov`, is NOOP without it, manual only (`SPRINT-18-steals.md` GS2). No `llvm-cov` string in `.github` | Totally missing | `coverage` job: `cargo llvm-cov --workspace --lcov -p engine-core -p engine-physics -p engine-arena`, upload artifact, ratchet a floor per crate | Coverage chasing; cost ~15 min |
-| 4 | Tool inventory is unmaintained | Engines keep a tool index that a gate enforces | 30/127 live tools missing from `tools/README.md`; 47 from `docs/book/ref-tools.md`; README claims "each script has a `*.test.mjs` mate" but 14 do not; README lists 30 mate-only files while 38 exist | Half-done | `tools/tools-index.mjs --check` in the `ci.yml` quick job: every live tool named in README + a test, no stale entry | None; pure text |
-| 5 | Dead and duplicate tools | CI rejects an orphaned entry | 4 named nowhere; 5 with no runner/test; `tools/.qw4-check.mjs` is a 1,480-line copy of `workspace-check.mjs` (1,381), 92 unique lines, no test, committed today | Totally missing | Delete/fold the 5 dead tools, keep one workspace audit, add the index gate from #4 | Someone's in-flight copy: coordinate, never delete in a hurry |
+| 4 | Tool inventory is unmaintained | Engines keep a tool index that a gate enforces | 29/126 live tools were missing from `tools/README.md`; 48 from `docs/book/ref-tools.md`; the README claimed "each script has a `*.test.mjs` mate" but 13 did not; the test-only list named 29 of 37. Fixed 2026-10-23: `tools/tools-index.mjs --check` runs in the `ci.yml` quick job, both indexes name every live tool, and the 13 no-mate tools carry a reason each | Half-done | `tools/tools-index.mjs --check` in the `ci.yml` quick job: every live tool named in README + a test, no stale entry | None; pure text |
+| 5 | Dead and duplicate tools | CI rejects an orphaned entry | 3 named nowhere (`content-cross`, `faction-war-map`, `starter-classes`: zero refs, no test mate); `tools/.qw4-check.mjs` is an untracked 78 KB near-copy of `workspace-check.mjs`, idle 9.5 h, an older pre-deletion snapshot of the removed PW51 baseline gate (exits 0 on errors, stale edge maps), not pending work | Totally missing | Owner call: wire the 3 content-gate orphans into a content runner or delete them; restore PW51 or drop the `.qw4` copy; keep one workspace audit | Someone's in-flight copy: coordinate, never delete in a hurry |
 | 6 | API-break gate not in CI | `cargo-semver-checks` in CI for any published crate | `api-break.mjs` + a committed `tools/api-break.baseline.json` (36k lines of pinned item hashes) exist; no workflow names it | Half-done | Add `node tools/api-break.mjs` to `release-proof` (build already done) | rustdoc JSON cost; baseline bless discipline |
 | 7 | Hooks are not shipped or installable | Most engines commit `.githooks/` + `core.hooksPath` | `tools/hooks/pre-commit` exists; the **pre-push** hook (git-lfs + `cargo deny` + `license-gate.mjs`) lives only in this PC's `.git/hooks`; `core.hooksPath` unset; no installer | Half-done | Commit `tools/hooks/pre-push`, add `tools/hooks-install.mjs` (sets `core.hooksPath`), `doctor.mjs` checks it | A fresh clone silently skips the ratchet and secret scan |
 | 8 | No release/version/changelog plumbing | `release-please`, `git-cliff`, `cargo-dist`, `cargo-cyclonedx` | No `CHANGELOG.md`, no tag workflow, no version bump tool, no SBOM; `api-break` says "bless after the version bump" but nothing checks it; ship-check builds but publishes nothing | Totally missing | `tools/release.mjs`: bump `[workspace.package] version`, generate CHANGELOG from board rows since last tag, tag, write an SBOM, attach `ship-check` artifacts | Version drift vs baseline; needs an owner call on versioning policy |
@@ -53,10 +55,10 @@ Counts (measured today, `tools/` top level): **297 files** = 127 live `.mjs` (40
 
 | Path | Last referenced where | Verdict |
 |---|---|---|
-| `tools/.qw4-check.mjs` | git commit `19cf49444` only; no doc, no test, no runner | Dead duplicate of `workspace-check.mjs` (92 unique lines); delete or fold, do not keep two workspace audits |
-| `tools/content-cross.mjs` | nowhere | Orphan; faction-war id cross-check with no content runner |
-| `tools/faction-war-map.mjs` | nowhere | Orphan; the faction-war content set has no gate |
-| `tools/starter-classes.mjs` | nowhere | Orphan; one-shot writer of `content/classes`, unrepeatable by anyone |
+| `tools/.qw4-check.mjs` | untracked; idle 9.5 h (mtime 2026-10-23T11:04Z); no doc, no test, no runner | Older pre-deletion snapshot of the removed PW51 baseline gate, a near-copy of `workspace-check.mjs`: it exits 0 on errors and has stale edge maps. Not pending work. Owner decision: restore PW51 or drop the copy; this seat left it untouched |
+| `tools/content-cross.mjs` | nowhere | Zero refs, no mate. It gates the live `content/systems` ids and `content/classes` files; owner call to wire it into a content runner or delete it. Left in place 2026-10-23 |
+| `tools/faction-war-map.mjs` | nowhere | Zero refs, no mate. It reads the live `content/maps/contested_middle.json` and `content/systems/war.json`; same owner call. Left in place |
+| `tools/starter-classes.mjs` | nowhere | Zero refs, no mate. One-shot writer for the live `content/classes` starters; same owner call. Left in place |
 | `tools/fk1_determinism.mjs` | `tools/README.md` only | No test, no runner; manual FK1 double-run |
 | `tools/unwired-code-gate.mjs` | `docs/plan/parked-2026-10-22.md` + comments in `workspace-check.mjs` | No test, no runner; overlaps `wiring-scan` + `workspace-check` |
 | `tools/gate-silhouette.mjs` | `docs/research/powerups-2026-10-21/BOARD-MERGE.md` | No test, no runner; needs a PNG pair nobody publishes |
@@ -70,7 +72,7 @@ Counts (measured today, `tools/` top level): **297 files** = 127 live `.mjs` (40
 | `tools/cargo-guard.mjs` | `tools/README.md` + `docs/book/ref-tools.md` only | Index-only; no runner, no spawn anywhere |
 
 Index-only set also includes `rdc-diff`, `rerun-timeline`, `seal-keys`, `p4-netsim`, `hit-list` (README/ref-tools
-only, no runner). `tools/README.md` lists 30 of the 38 test-only mates, so that section is stale too.
+only, no runner). `tools/README.md` now lists all 37 test-only mates; the inventory gate checks live tools only.
 
 ## Duplicate clusters (one job, several scripts)
 
@@ -95,8 +97,9 @@ only, no runner). `tools/README.md` lists 30 of the 38 test-only mates, so that 
 3. **Coverage leg on the sim crates** (#3). One `cargo llvm-cov` job plus a per-crate floor ratchet. It is the only
    way to see that "2,000 tests" actually reach the tick, and `wiring-cov.mjs` already proves the tool works on the PC.
 4. **Tool inventory + orphan cleanup** (#4, #5). One `--check` gate over `tools/README.md` (every live tool named,
-   every tool has a test), then delete/fold 5 dead tools and the `.qw4-check` copy. Small, mechanical, and it stops
-   the slow rot that produced 30 undocumented tools.
+   every tool has a test) landed 2026-10-23 with the gate in the mirror's quick job. Left: the owner call on the 3
+   zero-ref content gates and the `.qw4-check` copy. Small, mechanical, and it stops the slow rot that produced 30
+   undocumented tools.
 5. **Release and hook plumbing** (#7, #8). One commit: ship `tools/hooks/pre-push`, add `hooks-install.mjs` (so a
    fresh clone cannot skip the ratchet/secret gate) and `tools/release.mjs` (version bump, CHANGELOG from board rows,
    tag, attach ship artifacts). This is what makes `api-break` and `ship-check` mean something.

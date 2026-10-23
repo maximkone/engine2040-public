@@ -1,17 +1,17 @@
 //! The `build` verb of the `engine2040` bin: build one target of a project's game and print
-//! where the result is. `windows` runs the cargo release build of the `arena` game bin; `web`
-//! runs `node tools/web-build.mjs` and, when that fails, adds what `node tools/web-doctor.mjs`
-//! says is missing, so the fix is one copy away. Both builds run in the engine checkout this
-//! exe was built from. Every command goes through a runner, so tests drive the steps with a
-//! script instead of a toolchain.
+//! where the result is. `windows` runs the cargo release build of the bin `game.toml` names
+//! (the engine's `arena` when it names none); `web` runs `node tools/web-build.mjs` and, when
+//! that fails, adds what `node tools/web-doctor.mjs` says is missing, so the fix is one copy
+//! away. Both builds run in the engine checkout this exe was built from. Every command goes
+//! through a runner, so tests drive the steps with a script instead of a toolchain.
 
 use crate::cli::Error;
 use crate::manifest::{joined, Choice, Target};
+use crate::process::{self, Checkout, Runner, Step};
 use crate::project::{parse_target, Flags, Project};
+use crate::workspace::GameBin;
 use std::ffi::OsString;
-use std::io::{self, ErrorKind, Write};
-use std::path::PathBuf;
-use std::process::Command;
+use std::io::Write;
 
 /// The web build tool, relative to the engine checkout.
 const WEB_BUILD: &str = "tools/web-build.mjs";
@@ -21,74 +21,11 @@ const WEB_DOCTOR: &str = "tools/web-doctor.mjs";
 const NODE_FIX: &str = "winget install --id OpenJS.NodeJS.LTS -e (Node 24 or newer)";
 const CARGO_FIX: &str = "winget install --id Rustlang.Rustup -e";
 
-/// One command a build runs.
-struct Step {
-    program: &'static str,
-    args: Vec<&'static str>,
-    dir: PathBuf,
-    /// Hold stdout for the caller instead of showing it live.
-    capture: bool,
-    /// What to run when the program is not installed.
-    fix: &'static str,
-}
-
-/// How a step ended: its exit code (none when a signal killed it) and, when captured, stdout.
-struct Outcome {
-    code: Option<i32>,
-    output: String,
-}
-
-type Runner<'a> = dyn FnMut(&Step) -> io::Result<Outcome> + 'a;
-
-/// Where the builds run and where their results land.
-struct BuildEnv {
-    /// The engine checkout: holds `tools/` and the workspace `Cargo.toml`.
-    root: PathBuf,
-    /// Cargo's target directory.
-    target_dir: PathBuf,
-    /// `std::env::consts::OS` of the machine.
-    os: &'static str,
-    /// `std::env::consts::EXE_SUFFIX` of the machine.
-    exe_suffix: &'static str,
-}
-
-impl BuildEnv {
-    fn host() -> Self {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-            .map_or_else(|| root.join("target"), |dir| root.join(dir));
-        Self {
-            root,
-            target_dir,
-            os: std::env::consts::OS,
-            exe_suffix: std::env::consts::EXE_SUFFIX,
-        }
-    }
-}
-
-/// Start the process; a build step's output is shown live, a captured one is returned.
-fn run_process(step: &Step) -> io::Result<Outcome> {
-    let mut command = Command::new(step.program);
-    command.args(&step.args).current_dir(&step.dir);
-    if step.capture {
-        let output = command.output()?;
-        Ok(Outcome {
-            code: output.status.code(),
-            output: String::from_utf8_lossy(&output.stdout).into_owned(),
-        })
-    } else {
-        Ok(Outcome {
-            code: command.status()?.code(),
-            output: String::new(),
-        })
-    }
-}
-
 /// `build --target <windows|web> [--manifest <path>]`.
 pub fn build_verb(args: impl Iterator<Item = OsString>, out: &mut dyn Write) -> Result<(), Error> {
-    let env = BuildEnv::host();
-    let mut run = run_process;
-    build_verb_with(args, &env, &mut run, out)
+    let checkout = Checkout::host();
+    let mut run = process::run_process;
+    build_verb_with(args, &checkout, &mut run, out)
 }
 
 /// The `build` verb against a chosen checkout and runner: the manifest check and the target
@@ -96,7 +33,7 @@ pub fn build_verb(args: impl Iterator<Item = OsString>, out: &mut dyn Write) -> 
 /// toolchain, so a generated project's manifest and both target command lines are checked.
 fn build_verb_with(
     args: impl Iterator<Item = OsString>,
-    env: &BuildEnv,
+    checkout: &Checkout,
     run: &mut Runner<'_>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
@@ -104,7 +41,7 @@ fn build_verb_with(
     flags.no_positional("build")?;
     let target = parse_target(flags.text("--target")?)?;
     let manifest_path = flags.manifest();
-    let project = Project::load(&manifest_path)?;
+    let project = Project::load_in(&manifest_path, &checkout.root)?;
     if !project.manifest.targets.contains(&target) {
         return Err(Error::Project(format!(
             "{}: key `targets` does not list `{}` (it lists: {}); add it there to build for it",
@@ -113,83 +50,77 @@ fn build_verb_with(
             joined(&project.manifest.targets, ", ")
         )));
     }
-    build(env, target, run, out)
+    build(checkout, target, &project.game(), run, out)
 }
 
 fn build(
-    env: &BuildEnv,
+    checkout: &Checkout,
     target: Target,
+    game: &GameBin,
     run: &mut Runner<'_>,
     out: &mut dyn Write,
 ) -> Result<(), Error> {
-    if !env.root.is_dir() {
+    if !checkout.root.is_dir() {
         return Err(Error::Project(format!(
             "the engine checkout {} is missing: build runs in the checkout this exe was built from",
-            env.root.display()
+            checkout.root.display()
         )));
     }
     match target {
-        Target::Windows => build_windows(env, run, out),
-        Target::Web => build_web(env, run, out),
+        Target::Windows => build_windows(checkout, game, run, out),
+        Target::Web => {
+            if game.spec() != crate::workspace::default_game().spec() {
+                return Err(Error::Project(format!(
+                    "{WEB_BUILD} builds the engine's own arena page, not `{}`: web export of another game is not wired yet: {}. Build --target windows instead, or remove the `game` line",
+                    game.spec(),
+                    game.spec()
+                )));
+            }
+            build_web(checkout, run, out)
+        }
     }
 }
 
-/// Start `step`; a program that is not installed is reported with its install command.
-fn start(run: &mut Runner<'_>, step: &Step) -> Result<Outcome, Error> {
-    run(step).map_err(|error| {
-        if error.kind() == ErrorKind::NotFound {
-            Error::Project(format!(
-                "`{}` was not found on PATH; install it: {}",
-                step.program, step.fix
-            ))
-        } else {
-            Error::Project(format!("cannot start `{}`: {error}", step.program))
-        }
-    })
-}
-
-fn exit_text(code: Option<i32>) -> String {
-    code.map_or_else(
-        || "ended by a signal".to_owned(),
-        |code| format!("exit code {code}"),
-    )
-}
-
-fn build_windows(env: &BuildEnv, run: &mut Runner<'_>, out: &mut dyn Write) -> Result<(), Error> {
-    if env.os != "windows" {
+fn build_windows(
+    checkout: &Checkout,
+    game: &GameBin,
+    run: &mut Runner<'_>,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
+    if checkout.os != "windows" {
         return Err(Error::Project(format!(
             "target windows builds on a Windows machine; this one is {}",
-            env.os
+            checkout.os
         )));
     }
+    // The command follows the bin the workspace declares: its package, the features its
+    // `[[bin]]` block requires, and its name.
+    let mut args: Vec<String> = ["build", "--locked", "--release", "-p"]
+        .iter()
+        .map(|word| (*word).to_owned())
+        .collect();
+    args.push(game.package.clone());
+    if !game.features.is_empty() {
+        args.push("--features".to_owned());
+        args.push(game.features.join(","));
+    }
+    args.push("--bin".to_owned());
+    args.push(game.bin.clone());
     let step = Step {
-        program: "cargo",
-        args: vec![
-            "build",
-            "--locked",
-            "--release",
-            "-p",
-            "engine-game",
-            "--features",
-            "app",
-            "--bin",
-            "arena",
-        ],
-        dir: env.root.clone(),
+        program: "cargo".into(),
+        args,
+        dir: checkout.root.clone(),
         capture: false,
         fix: CARGO_FIX,
     };
-    let outcome = start(run, &step)?;
+    let outcome = process::start(run, &step)?;
     if outcome.code != Some(0) {
         return Err(Error::Project(format!(
             "cargo build failed ({}); the compiler output above says why",
-            exit_text(outcome.code)
+            process::exit_text(outcome.code)
         )));
     }
-    let exe = env
-        .target_dir
-        .join("release")
-        .join(format!("arena{}", env.exe_suffix));
+    let exe = checkout.exe("release", &game.bin);
     if !exe.is_file() {
         return Err(Error::Project(format!(
             "cargo finished but {} is missing; if the target directory moved, set CARGO_TARGET_DIR",
@@ -200,22 +131,25 @@ fn build_windows(env: &BuildEnv, run: &mut Runner<'_>, out: &mut dyn Write) -> R
     Ok(())
 }
 
-fn build_web(env: &BuildEnv, run: &mut Runner<'_>, out: &mut dyn Write) -> Result<(), Error> {
-    if !env.root.join(WEB_BUILD).is_file() {
+fn build_web(checkout: &Checkout, run: &mut Runner<'_>, out: &mut dyn Write) -> Result<(), Error> {
+    if !checkout.root.join(WEB_BUILD).is_file() {
         return Err(Error::Project(format!(
             "{WEB_BUILD} is missing from the engine checkout {}",
-            env.root.display()
+            checkout.root.display()
         )));
     }
-    let outcome = start(run, &node_step(env, WEB_BUILD, false))?;
+    let outcome = process::start(run, &node_step(checkout, WEB_BUILD, false))?;
     if outcome.code != Some(0) {
         let head = format!(
             "node {WEB_BUILD} failed ({}); its output above names the step",
-            exit_text(outcome.code)
+            process::exit_text(outcome.code)
         );
-        return Err(Error::Project(format!("{head}{}", doctor_report(env, run))));
+        return Err(Error::Project(format!(
+            "{head}{}",
+            doctor_report(checkout, run)
+        )));
     }
-    let dist = env.root.join("dist").join("web");
+    let dist = checkout.root.join("dist").join("web");
     if !dist.join("index.html").is_file() {
         return Err(Error::Project(format!(
             "{WEB_BUILD} finished but {} has no index.html",
@@ -226,11 +160,11 @@ fn build_web(env: &BuildEnv, run: &mut Runner<'_>, out: &mut dyn Write) -> Resul
     Ok(())
 }
 
-fn node_step(env: &BuildEnv, script: &'static str, capture: bool) -> Step {
+fn node_step(checkout: &Checkout, script: &'static str, capture: bool) -> Step {
     Step {
-        program: "node",
-        args: vec![script],
-        dir: env.root.clone(),
+        program: "node".into(),
+        args: vec![script.to_owned()],
+        dir: checkout.root.clone(),
         capture,
         fix: NODE_FIX,
     }
@@ -239,8 +173,8 @@ fn node_step(env: &BuildEnv, script: &'static str, capture: bool) -> Step {
 /// What the web doctor says is missing: its MISSING and `fix:` lines and the verdict line, so a
 /// failed web build ends with the commands that repair the machine. Empty text when nothing is
 /// missing.
-fn doctor_report(env: &BuildEnv, run: &mut Runner<'_>) -> String {
-    let report = match run(&node_step(env, WEB_DOCTOR, true)) {
+fn doctor_report(checkout: &Checkout, run: &mut Runner<'_>) -> String {
+    let report = match run(&node_step(checkout, WEB_DOCTOR, true)) {
         Ok(outcome) => outcome.output,
         Err(error) => return format!("; node {WEB_DOCTOR} could not run: {error}"),
     };
@@ -266,17 +200,20 @@ fn doctor_report(env: &BuildEnv, run: &mut Runner<'_>) -> String {
 mod tests {
     use super::*;
     use crate::project::{execute, TempDir, Verb};
+    use crate::workspace;
     use std::fs;
+    use std::io;
     use std::io::Error as IoError;
+    use std::io::ErrorKind;
 
     const DOCTOR_SAYS: &str = "OK node 24.1.0\nOK rust-target wasm32-unknown-unknown 1.97.1\nMISSING wasm-bindgen (Cargo.lock needs 0.2.100)\n  fix: cargo install wasm-bindgen-cli --version 0.2.100 --locked\nweb target: NOT READY 1 missing\n";
 
     /// A fake engine checkout with the web tools in place.
-    fn checkout(temp: &TempDir, os: &'static str) -> BuildEnv {
+    fn checkout(temp: &TempDir, os: &'static str) -> Checkout {
         let root = temp.0.join("engine");
         fs::create_dir_all(root.join("tools")).unwrap();
         fs::write(root.join(WEB_BUILD), "").unwrap();
-        BuildEnv {
+        Checkout {
             target_dir: root.join("target"),
             root,
             os,
@@ -284,8 +221,8 @@ mod tests {
         }
     }
 
-    fn reply(code: i32, output: &str) -> io::Result<Outcome> {
-        Ok(Outcome {
+    fn reply(code: i32, output: &str) -> io::Result<process::Outcome> {
+        Ok(process::Outcome {
             code: Some(code),
             output: output.to_owned(),
         })
@@ -293,6 +230,16 @@ mod tests {
 
     fn text(out: Vec<u8>) -> String {
         String::from_utf8(out).unwrap()
+    }
+
+    /// `build` for a project that names no game: the engine's own arena.
+    fn build_arena(
+        checkout: &Checkout,
+        target: Target,
+        run: &mut Runner<'_>,
+        out: &mut dyn Write,
+    ) -> Result<(), Error> {
+        build(checkout, target, &workspace::default_game(), run, out)
     }
 
     #[test]
@@ -306,10 +253,14 @@ mod tests {
         let mut run = |step: &Step| {
             assert_eq!(step.dir, env.root);
             assert!(!step.capture);
-            seen.push(format!("{} {}", step.program, step.args.join(" ")));
+            seen.push(format!(
+                "{} {}",
+                step.program.display(),
+                step.args.join(" ")
+            ));
             reply(0, "")
         };
-        build(&env, Target::Windows, &mut run, &mut out).unwrap();
+        build_arena(&env, Target::Windows, &mut run, &mut out).unwrap();
         assert_eq!(
             seen,
             ["cargo build --locked --release -p engine-game --features app --bin arena"]
@@ -327,7 +278,7 @@ mod tests {
             ran = true;
             reply(0, "")
         };
-        let error = build(&env, Target::Windows, &mut run, &mut Vec::new()).unwrap_err();
+        let error = build_arena(&env, Target::Windows, &mut run, &mut Vec::new()).unwrap_err();
         assert!(error.to_string().contains("this one is linux"), "{error}");
         assert!(!ran);
     }
@@ -337,15 +288,15 @@ mod tests {
         let temp = TempDir::new();
         let env = checkout(&temp, "windows");
         let mut failing = |_: &Step| reply(101, "");
-        let error = build(&env, Target::Windows, &mut failing, &mut Vec::new()).unwrap_err();
+        let error = build_arena(&env, Target::Windows, &mut failing, &mut Vec::new()).unwrap_err();
         assert!(error.to_string().contains("exit code 101"), "{error}");
         let mut lying = |_: &Step| reply(0, "");
-        let error = build(&env, Target::Windows, &mut lying, &mut Vec::new()).unwrap_err();
+        let error = build_arena(&env, Target::Windows, &mut lying, &mut Vec::new()).unwrap_err();
         let shown = error.to_string();
         assert!(shown.contains("arena.exe is missing"), "{shown}");
         assert!(shown.contains("CARGO_TARGET_DIR"), "{shown}");
         let mut gone = |_: &Step| Err(IoError::from(ErrorKind::NotFound));
-        let error = build(&env, Target::Windows, &mut gone, &mut Vec::new()).unwrap_err();
+        let error = build_arena(&env, Target::Windows, &mut gone, &mut Vec::new()).unwrap_err();
         assert!(
             error.to_string().contains("`cargo` was not found"),
             "{error}"
@@ -360,12 +311,16 @@ mod tests {
         let mut seen: Vec<String> = Vec::new();
         let mut out = Vec::new();
         let mut run = |step: &Step| {
-            seen.push(format!("{} {}", step.program, step.args.join(" ")));
+            seen.push(format!(
+                "{} {}",
+                step.program.display(),
+                step.args.join(" ")
+            ));
             fs::create_dir_all(&dist).unwrap();
             fs::write(dist.join("index.html"), "<!doctype html>").unwrap();
             reply(0, "")
         };
-        build(&env, Target::Web, &mut run, &mut out).unwrap();
+        build_arena(&env, Target::Web, &mut run, &mut out).unwrap();
         assert_eq!(
             seen,
             ["node tools/web-build.mjs"],
@@ -380,14 +335,18 @@ mod tests {
         let env = checkout(&temp, "windows");
         let mut seen: Vec<String> = Vec::new();
         let mut run = |step: &Step| {
-            seen.push(format!("{} {}", step.program, step.args.join(" ")));
+            seen.push(format!(
+                "{} {}",
+                step.program.display(),
+                step.args.join(" ")
+            ));
             if step.capture {
                 reply(1, DOCTOR_SAYS)
             } else {
                 reply(1, "")
             }
         };
-        let error = build(&env, Target::Web, &mut run, &mut Vec::new()).unwrap_err();
+        let error = build_arena(&env, Target::Web, &mut run, &mut Vec::new()).unwrap_err();
         let shown = error.to_string();
         assert!(shown.contains("exit code 1"), "{shown}");
         assert!(
@@ -420,7 +379,7 @@ mod tests {
                 reply(1, "")
             }
         };
-        let error = build(&env, Target::Web, &mut run, &mut Vec::new()).unwrap_err();
+        let error = build_arena(&env, Target::Web, &mut run, &mut Vec::new()).unwrap_err();
         assert!(
             error.to_string().contains("reports nothing missing"),
             "{error}"
@@ -432,15 +391,15 @@ mod tests {
         let temp = TempDir::new();
         let env = checkout(&temp, "windows");
         let mut gone = |_: &Step| Err(IoError::from(ErrorKind::NotFound));
-        let error = build(&env, Target::Web, &mut gone, &mut Vec::new()).unwrap_err();
+        let error = build_arena(&env, Target::Web, &mut gone, &mut Vec::new()).unwrap_err();
         let shown = error.to_string();
         assert!(shown.contains("`node` was not found on PATH"), "{shown}");
         assert!(shown.contains("OpenJS.NodeJS.LTS"), "{shown}");
         let mut empty = |_: &Step| reply(0, "");
-        let error = build(&env, Target::Web, &mut empty, &mut Vec::new()).unwrap_err();
+        let error = build_arena(&env, Target::Web, &mut empty, &mut Vec::new()).unwrap_err();
         assert!(error.to_string().contains("has no index.html"), "{error}");
         fs::remove_file(env.root.join(WEB_BUILD)).unwrap();
-        let error = build(&env, Target::Web, &mut empty, &mut Vec::new()).unwrap_err();
+        let error = build_arena(&env, Target::Web, &mut empty, &mut Vec::new()).unwrap_err();
         assert!(
             error.to_string().contains("tools/web-build.mjs is missing"),
             "{error}"
@@ -474,7 +433,11 @@ mod tests {
         let mut seen: Vec<String> = Vec::new();
         let mut out = Vec::new();
         let mut run = |step: &Step| {
-            seen.push(format!("{} {}", step.program, step.args.join(" ")));
+            seen.push(format!(
+                "{} {}",
+                step.program.display(),
+                step.args.join(" ")
+            ));
             fs::create_dir_all(env.target_dir.join("release")).unwrap();
             fs::write(&exe, "").unwrap();
             fs::create_dir_all(&dist).unwrap();
@@ -543,5 +506,90 @@ mod tests {
         );
         assert!(shown.contains("it lists: web"), "{shown}");
         assert_eq!(error.exit_code(), 1);
+    }
+
+    /// A checkout whose root is the real workspace (so a declared `game` resolves) and whose
+    /// target directory is fresh, so nothing is built.
+    fn real_workspace_checkout(temp: &TempDir) -> Checkout {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+        Checkout {
+            target_dir: temp.0.join("target"),
+            root,
+            os: "windows",
+            exe_suffix: ".exe",
+        }
+    }
+
+    fn project_with(temp: &TempDir, name: &str, manifest: &str) -> std::path::PathBuf {
+        let dir = temp.0.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.toml");
+        fs::write(&path, manifest).unwrap();
+        path
+    }
+
+    #[test]
+    fn windows_build_uses_the_package_and_bin_the_manifest_names() {
+        let temp = TempDir::new();
+        let checkout = real_workspace_checkout(&temp);
+        let path = project_with(
+            &temp,
+            "mcp-game",
+            "name = \"a\"\ntargets = [\"windows\"]\ngame = \"engine-endpoint:e2040-mcp\"\n",
+        );
+        let exe = checkout.exe("release", "e2040-mcp");
+        let mut seen: Vec<String> = Vec::new();
+        let mut run = |step: &Step| {
+            seen.push(format!(
+                "{} {}",
+                step.program.display(),
+                step.args.join(" ")
+            ));
+            fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            fs::write(&exe, "").unwrap();
+            reply(0, "")
+        };
+        build_verb_with(
+            words(&["--target", "windows", "--manifest", path.to_str().unwrap()]),
+            &checkout,
+            &mut run,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            seen,
+            ["cargo build --locked --release -p engine-endpoint --features mcp --bin e2040-mcp"],
+            "the bin's own package, required features and name"
+        );
+    }
+
+    #[test]
+    fn web_build_refuses_a_game_that_is_not_the_arena_page() {
+        let temp = TempDir::new();
+        let checkout = real_workspace_checkout(&temp);
+        let path = project_with(
+            &temp,
+            "mcp-web",
+            "name = \"a\"\ntargets = [\"web\"]\ngame = \"engine-endpoint:e2040-mcp\"\n",
+        );
+        let mut ran = false;
+        let mut run = |_: &Step| {
+            ran = true;
+            reply(0, "")
+        };
+        let error = build_verb_with(
+            words(&["--target", "web", "--manifest", path.to_str().unwrap()]),
+            &checkout,
+            &mut run,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        let shown = error.to_string();
+        assert!(
+            shown.contains("not wired yet: engine-endpoint:e2040-mcp"),
+            "{shown}"
+        );
+        assert!(shown.contains(WEB_BUILD), "{shown}");
+        assert!(!ran, "nothing is built once the game cannot be exported");
     }
 }

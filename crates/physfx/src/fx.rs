@@ -5,6 +5,7 @@ mod cloth;
 mod hit;
 mod joints;
 mod receipt;
+mod rest;
 mod sever;
 mod tether;
 
@@ -51,6 +52,8 @@ struct Record {
     prev: Transform,
     /// Pose after the last step.
     curr: Transform,
+    /// Pose at the start of the current still run: the settle assist measures drift from it.
+    settle: Transform,
     /// The step that last read this body while it was awake.
     stamp: u64,
 }
@@ -93,6 +96,9 @@ struct Group {
     /// How hard the joints of a ragdoll brace, permille of the whole; zero for
     /// every other group.
     muscle_permille: u16,
+    /// Ticks every bone stood at rest in a row: the sand takes a ragdoll or limb that held
+    /// still this long (see `rest`). Zero for every other group.
+    quiet: u32,
 }
 
 /// A clock that always reads zero: the default, so the crate never touches `Instant`.
@@ -301,6 +307,7 @@ impl PhysFx {
             drive: Some(drive),
             parents,
             muscle_permille: rig.muscle_permille(),
+            quiet: 0,
         });
         Ok(())
     }
@@ -400,6 +407,7 @@ impl PhysFx {
                 drive: None,
                 parents: Vec::new(),
                 muscle_permille: 0,
+                quiet: 0,
             });
         }
         Ok(Batch { id, admitted })
@@ -410,6 +418,7 @@ impl PhysFx {
         let started = (self.clock)();
         self.fade_drives();
         self.world.step();
+        self.settle_resting_bodies();
         self.step_tethers();
         self.soft.step();
         self.steps += 1;
@@ -474,6 +483,27 @@ impl PhysFx {
             .map(|collider| collider.collision_groups())
     }
 
+    /// The key, linear speed, angular speed and sleep flag of every body the last step read as
+    /// awake, so a test can name the one that never settles.
+    #[cfg(test)]
+    pub(crate) fn awake_state(&self) -> Vec<(Key, f32, f32, bool)> {
+        self.awake
+            .iter()
+            .filter_map(|index| self.records.get(*index as usize)?.as_ref())
+            .filter_map(|rec| {
+                let body = self.world.bodies.get(rec.handle)?;
+                let (v, w) = (body.linvel(), body.angvel());
+                let speed = |x: f32, y: f32, z: f32| (x * x + y * y + z * z).sqrt();
+                Some((
+                    rec.key,
+                    speed(v.x, v.y, v.z),
+                    speed(w.x, w.y, w.z),
+                    body.is_sleeping(),
+                ))
+            })
+            .collect()
+    }
+
     /// The number of contact pairs the body named by `key` holds with anything.
     #[cfg(test)]
     pub(crate) fn contact_count(&self, key: Key) -> usize {
@@ -522,6 +552,7 @@ impl PhysFx {
             drive: None,
             parents: Vec::new(),
             muscle_permille: 0,
+            quiet: 0,
         });
         handle
     }
@@ -578,6 +609,7 @@ impl PhysFx {
             key,
             prev: at,
             curr: at,
+            settle: at,
             stamp: 0,
         });
         self.live += 1;

@@ -13,6 +13,7 @@ mod as2;
 
 #[expect(
     dead_code,
+    unused_imports,
     reason = "whole nav source compiled by path; this test uses a slice"
 )]
 #[path = "../../nav/src/mesh.rs"]

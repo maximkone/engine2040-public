@@ -17,6 +17,9 @@
 // Adapter evidence, in order: the GS6 `adapter: <name> <backend> <kind>
 // vendor=0x<id>` line, else arena's live `arena per-pass: adapter="<name>"`
 // cell (kind then comes from the name). No evidence reads NO_IGPU, exit 2.
+// The asset leg (GS15) reads the arena's `kit budget:` line: a non-PASS
+// status (over a potato cap, or UNKNOWN with no measurement) fails --floor
+// whatever the load, because asset size does not move with contention.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -91,6 +94,79 @@ export function findIntegratedAdapter(output) {
   if (name === null) return null;
   const kind = parseAdapterTypeWord(text) ?? classifyAdapterKind(name);
   return kind === "integrated" ? name : null;
+}
+
+// Mesh budget the arena import measured (GS15) from its `kit budget:` line.
+// The status is the engine's own token; the maxima and the shown findings are
+// informational. A missing line, a missing token, or a PASS without a mesh
+// count reads UNKNOWN, so --floor fails closed instead of passing by default.
+export function parseKitBudget(output) {
+  const empty = {
+    status: "UNKNOWN",
+    meshes: null,
+    max_tris: null,
+    max_bones: null,
+    max_influences: null,
+    max_materials: null,
+    max_tex_px: null,
+    findings: [],
+    more: 0,
+    line: null,
+  };
+  const lines = String(output ?? "")
+    .split(/\r?\n/)
+    .filter((l) => l.includes("kit budget:"));
+  if (lines.length === 0) return empty;
+  const raw = lines[lines.length - 1].trim();
+  const field = (name) => {
+    const m = new RegExp(`\\b${name}=(\\d+)`).exec(raw);
+    if (!m) return null;
+    const n = Number(m[1]);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const token = /\bbudget=(PASS|FAIL|UNKNOWN)\b/.exec(raw)?.[1] ?? "UNKNOWN";
+  const meshes = field("meshes");
+  const status = token === "PASS" && !(meshes > 0) ? "UNKNOWN" : token;
+  const findings = [];
+  for (const m of raw.matchAll(/\b(\S+\.gltf) mesh=(\d+) (tris|bones|influences|materials|tex_px) (\d+)>(\d+)/g)) {
+    findings.push({
+      file: m[1],
+      mesh: Number(m[2]),
+      kind: m[3],
+      actual: Number(m[4]),
+      allowed: Number(m[5]),
+    });
+  }
+  const more = Number(/\+(\d+) more\b/.exec(raw)?.[1] ?? 0) || 0;
+  return {
+    status,
+    meshes,
+    max_tris: field("max_tris"),
+    max_bones: field("max_bones"),
+    max_influences: field("max_influences"),
+    max_materials: field("max_materials"),
+    max_tex_px: field("max_tex_px"),
+    findings,
+    more,
+    line: raw,
+  };
+}
+
+// One asset-leg line beside the potato line: the budget status and the
+// measured maxima. A run with no kit line reads UNKNOWN, never PASS.
+export function formatAssetsLine(kit) {
+  if (!kit || ((kit.status ?? "UNKNOWN") === "UNKNOWN" && (kit.line === null || kit.line === undefined))) {
+    return "assets: UNKNOWN (no kit budget line)";
+  }
+  const num = (v) => (v === null || v === undefined ? "UNKNOWN" : String(v));
+  return `assets: ${kit.status ?? "UNKNOWN"} meshes=${num(kit.meshes)} max_tris=${num(kit.max_tris)} max_bones=${num(kit.max_bones)} max_influences=${num(kit.max_influences)} max_materials=${num(kit.max_materials)} max_tex_px=${num(kit.max_tex_px)} caps=POTATO`;
+}
+
+// One finding as one line: the file, the mesh inside it, the cap and both
+// numbers, so the report names the asset that has to change.
+export function formatAssetFinding(finding) {
+  const f = finding ?? {};
+  return `asset: ${f.file ?? "UNKNOWN"} mesh=${f.mesh ?? "UNKNOWN"} ${f.kind ?? "UNKNOWN"} ${f.actual ?? "UNKNOWN"} > ${f.allowed ?? "UNKNOWN"}`;
 }
 
 // Frame p50/p99 from the last `arena frame-split:` line. Prefers
@@ -191,18 +267,21 @@ export function checkBars(measured, bar) {
   ];
 }
 
-// Exit for the gate: 2 when no integrated adapter; 3 when `--floor` runs on a
-// box a build stamped LOADED and any bar is not PASS (the numbers are filed,
-// so the gate withholds a red the owner would read as a product verdict - a
-// run at 26 cargo/rustc read p99 557 ms against the 14 ms steady state on
-// 2026-10-17); 1 when `--floor` runs on a quiet box and any bar is not PASS;
-// else 0. A loaded run where every bar PASSes keeps its pass: load can only
-// slow frames, so the bars are still met and the report names the pass
-// conservative. Without `--floor` a FAIL still exits 0, and every bar line
-// prints its PASS/FAIL whatever the load: nothing is hidden.
-export function decideExit({ hasIntegrated, verdicts, floor, loaded }) {
+// Exit for the gate: 2 when no integrated adapter; 1 when `--floor` finds the
+// asset leg not PASS (an over-cap mesh or no kit measurement: load cannot move
+// those numbers, so the red is real); 3 when `--floor` runs on a box a build
+// stamped LOADED and any bar is not PASS (the numbers are filed, so the gate
+// withholds a red the owner would read as a product verdict - a run at 26
+// cargo/rustc read p99 557 ms against the 14 ms steady state on 2026-10-17);
+// 1 when `--floor` runs on a quiet box and any bar is not PASS; else 0. A
+// loaded run where every bar PASSes keeps its pass: load can only slow frames,
+// so the bars are still met and the report names the pass conservative.
+// Without `--floor` a FAIL still exits 0, and every bar line prints its
+// PASS/FAIL whatever the load: nothing is hidden.
+export function decideExit({ hasIntegrated, verdicts, floor, loaded, assets }) {
   if (!hasIntegrated) return 2;
   if (!floor) return 0;
+  if ((assets?.status ?? "UNKNOWN") !== "PASS") return 1;
   const allPass = verdicts.every((v) => v.status === "PASS");
   if (loaded && !allPass) return 3;
   if (!allPass) return 1;
@@ -244,15 +323,22 @@ export function formatBarLine(v) {
 // The load line says whether the numbers came from a quiet box or a loaded
 // one, so a filed number never reads as a quiet one; `withheld` records that
 // `--floor` refused a verdict on a loaded run with a non-PASS bar (exit 3).
-export function formatReport({ at, cmd, env, adapter, line, verdicts, hasIntegrated, missing, timedOut, load, withheld }) {
+// The asset lines carry the kit budget: a non-PASS budget makes the floor
+// read FAIL on the asset leg, findings included.
+export function formatReport({ at, cmd, env, adapter, line, verdicts, hasIntegrated, missing, timedOut, load, withheld, assets }) {
   const bars = (verdicts ?? []).map(formatBarLine).join("\n");
   const loaded = load?.loaded === true;
   const allPass = (verdicts ?? []).every((v) => v.status === "PASS");
-  const floor = withheld
-    ? "WITHHELD (box was loaded; numbers are filed, no verdict)"
-    : loaded && allPass
-      ? "PASS under load (conservative; contention can only slow frames)"
-      : "judged";
+  const assetsOk = (assets?.status ?? "UNKNOWN") === "PASS";
+  const floor = !assetsOk
+    ? `FAIL on the asset leg (kit budget ${assets?.status ?? "UNKNOWN"})`
+    : withheld
+      ? "WITHHELD (box was loaded; numbers are filed, no verdict)"
+      : loaded && allPass
+        ? "PASS under load (conservative; contention can only slow frames)"
+        : "judged";
+  const findings = (assets?.findings ?? []).map(formatAssetFinding);
+  if (assets?.more > 0) findings.push(`asset: +${assets.more} more`);
   return [
     `# Potato check ${at ?? "UNKNOWN"}`,
     "",
@@ -266,6 +352,8 @@ export function formatReport({ at, cmd, env, adapter, line, verdicts, hasIntegra
     "",
     line ?? "potato: adapter=UNKNOWN p50_ms=UNKNOWN p99_ms=UNKNOWN peak_ws_mb=UNKNOWN",
     bars,
+    formatAssetsLine(assets),
+    ...findings,
     "",
   ].join("\n");
 }
@@ -273,7 +361,8 @@ export function formatReport({ at, cmd, env, adapter, line, verdicts, hasIntegra
 // Pure summary over canned or live inputs; same inputs give same summary.
 // `loaded` is the run's own load stamp (see `parseBuildLoad`): a loaded run
 // with a non-PASS bar is withheld by `decideExit`; a loaded run that passes
-// every bar keeps its conservative pass.
+// every bar keeps its conservative pass. The asset leg is read from the same
+// output and gates independently of the load.
 export function summarize({ output, tasklistText, bar, floor, loaded }) {
   const text = String(output ?? "");
   const adapter = arenaAdapterName(text) ?? "UNKNOWN";
@@ -283,6 +372,7 @@ export function summarize({ output, tasklistText, bar, floor, loaded }) {
   const measured = { p50_ms, p99_ms, peak_ws_mb };
   const line = formatPotatoLine({ adapter, p50_ms, p99_ms, peak_ws_mb });
   const verdicts = checkBars(measured, bar);
+  const assets = parseKitBudget(text);
   const wasLoaded = loaded === true;
   return {
     adapter,
@@ -290,8 +380,9 @@ export function summarize({ output, tasklistText, bar, floor, loaded }) {
     measured,
     line,
     verdicts,
+    assets,
     loaded: wasLoaded,
-    exit: decideExit({ hasIntegrated, verdicts, floor: !!floor, loaded: wasLoaded }),
+    exit: decideExit({ hasIntegrated, verdicts, floor: !!floor, loaded: wasLoaded, assets }),
   };
 }
 
@@ -476,10 +567,10 @@ async function runLive({ sampler: makeSampler = startSampler, spawnArena = spawn
 // temp report dir, so the Accept's "prints NO_IGPU and exits 2" / "--floor
 // exits 1" are proven on the tool, not only on the pure helpers. Returns the
 // exit code: 2 when no integrated adapter shows or the bar file is unreadable,
-// 3 when `--floor` runs on a loaded box and a bar is not PASS (no verdict on
-// filed numbers), 1 when `--floor` runs on a quiet box and a bar is not PASS,
-// else 0. Defaults are the live implementations, so production behaviour is
-// unchanged except for the loaded-pass rule above.
+// 1 when `--floor` finds the asset leg not PASS or a quiet bar is not PASS, 3
+// when `--floor` runs on a loaded box and a bar is not PASS (no verdict on
+// filed numbers), else 0. The asset red is real under any load, so it exits 1
+// before the loaded-bar withhold.
 // Caller: `main` (same file) passes `process.argv` and the live defaults.
 export async function run(argv = [], deps = {}) {
   const log = deps.log ?? ((line) => console.log(line));
@@ -510,10 +601,14 @@ export async function run(argv = [], deps = {}) {
   });
   log(s.line);
   for (const v of s.verdicts) log(formatBarLine(v));
+  log(formatAssetsLine(s.assets));
+  for (const finding of s.assets.findings) log(formatAssetFinding(finding));
+  if (s.assets.more > 0) log(`asset: +${s.assets.more} more`);
   log(formatLoadLine(live.load));
   if (live.tasklistFailures > 0) {
     logError(`potato-check: working-set sampler failed ${live.tasklistFailures}x, peak may read UNKNOWN (last: ${live.tasklistError})`);
   }
+  if (floor && s.assets.status !== "PASS") log("potato floor: FAIL on the asset leg - the kit's measured stats are not inside the potato caps");
   if (s.exit === 3) log("potato floor: WITHHELD - a build ran during this run and a bar is not PASS, so the bars are filed numbers, not a verdict (rerun on a quiet box)");
   if (s.exit === 0 && floor && live.load?.loaded === true) log("potato floor: PASS under load - every bar passed while a build ran; contention can only slow frames, so the pass is conservative");
   if (!s.hasIntegrated) log("NO_IGPU");
@@ -537,6 +632,7 @@ export async function run(argv = [], deps = {}) {
         timedOut: live.timedOut,
         load: live.load,
         withheld: s.exit === 3,
+        assets: s.assets,
       }),
     );
     log(`report: ${file}`);

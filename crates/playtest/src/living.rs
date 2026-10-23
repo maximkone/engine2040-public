@@ -925,6 +925,7 @@ fn request_wiring(
         deadline_ms: 60_000,
         privacy,
         base_revision: index,
+        body: None,
     };
     let policy = AiSessionPolicy {
         adapters: vec![adapter],

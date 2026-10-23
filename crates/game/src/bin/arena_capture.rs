@@ -1646,6 +1646,7 @@ pub(crate) mod capture {
                 triangles: 100,
                 skipped: 0,
                 material_fallbacks: 0,
+                ..KitReport::default()
             };
             let triples = kit_triples(&report);
             assert_eq!(triples.len(), 3, "one triple per draw");

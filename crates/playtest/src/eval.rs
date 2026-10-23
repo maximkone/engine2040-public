@@ -556,10 +556,12 @@ impl EvalReport {
         (green, total)
     }
 
-    /// Tasks whose completion, rejection and detail are identical on every
-    /// backend, plus the divergent ids. Privacy probes diverge on remote by
-    /// design (mock and local agree, remote refuses for privacy); any other
-    /// divergent id is an unexpected parity break and is named loudly.
+    /// Tasks whose completion, rejection and outcome detail are identical on
+    /// every backend, plus the divergent ids. The trailing ` adapter=<label>`
+    /// names provenance, not the outcome, so parity ignores it. Privacy probes
+    /// diverge on remote by design (mock and local agree, remote refuses for
+    /// privacy); any other divergent id is an unexpected parity break and is
+    /// named loudly.
     pub fn parity(&self) -> (usize, Vec<&'static str>) {
         let mut identical = 0;
         let mut divergent = Vec::new();
@@ -571,7 +573,11 @@ impl EvalReport {
                     .iter()
                     .find(|row| row.task == task.id && row.backend == backend)
                 {
-                    verdicts.push((row.completed, row.rejected, row.detail.as_str()));
+                    verdicts.push((
+                        row.completed,
+                        row.rejected,
+                        outcome_detail(row.detail.as_str()),
+                    ));
                 }
             }
             if verdicts.len() == 3 && verdicts[0] == verdicts[1] && verdicts[1] == verdicts[2] {
@@ -695,6 +701,14 @@ fn with_adapter(mut row: EvalRow, adapter: &str) -> EvalRow {
     detail.push_str(&suffix);
     row.detail = detail;
     row
+}
+
+/// The outcome part of a row detail; the trailing ` adapter=<label>` is
+/// provenance, so parity compares what happened, not who answered.
+fn outcome_detail(detail: &str) -> &str {
+    detail
+        .rsplit_once(" adapter=")
+        .map_or(detail, |(outcome, _)| outcome)
 }
 
 /// Adapter, model name, privacy and session for one backend row.
@@ -1711,6 +1725,24 @@ mod tests {
     }
 
     #[test]
+    fn parity_ignores_the_provenance_label() {
+        let report = run_eval();
+        let (identical, divergent) = report.parity();
+        assert_eq!(identical + divergent.len(), AUTHORING_COUNT + PLAY_COUNT);
+        let mut relabeled = report.clone();
+        for row in &mut relabeled.rows {
+            if row.backend == "local" {
+                row.detail = row.detail.replace("adapter=mock", "adapter=local");
+            }
+        }
+        assert_eq!(
+            relabeled.parity(),
+            (identical, divergent),
+            "who answered is not an outcome"
+        );
+    }
+
+    #[test]
     fn unknown_cost_is_never_zero_claimed() {
         assert_eq!(Cost::Unknown.text(), "unknown");
         assert!(Cost::Unknown.is_unknown());
@@ -2215,6 +2247,11 @@ mod tests {
         let replayed = replay_answer.expect("replay answers from the store");
         assert_eq!(replayed, recorded_answer, "replay bytes match the record");
         assert_eq!(replay_row, recorded_row, "the whole row matches the record");
+        assert_eq!(
+            format!("{replay_row:?}\n{replayed:?}").as_bytes(),
+            format!("{recorded_row:?}\n{recorded_answer:?}").as_bytes(),
+            "the replayed row and answer render byte-identically"
+        );
         assert_eq!(
             server.hits(),
             1,

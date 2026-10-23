@@ -1,0 +1,48 @@
+{
+  "blender_version": "8982c15c888de5c928ee7a5ef11ee927df85f57adc25e94f3d17022534fb3ad4",
+  "recipe": "3757001c7e3eb193048e793bfc4b14d9d8707f967ad94a014734805e8be997dd",
+  "script": "e0f3504f3947129917c967e12544cad136094442b22557f7b5e8fca353aea00f",
+  "output": "57284d3b8b052d23999d6d7e203225ed4fb266a2332f181b869b01f0e7cb9ec4",
+  "bytes": 203580,
+  "bake": {
+    "src": "content/maps/src/street_wall.gltf",
+    "size": 256,
+    "bevel": 0.01,
+    "maps": [
+      "ao",
+      "grime",
+      "normal"
+    ]
+  },
+  "maps": {
+    "ao": {
+      "png": "content\\maps\\cooked\\street_wall_ao.png",
+      "bytes": 16426,
+      "sha256": "f5cc3f9cad520b9d1fff9516707263c76c3c8ba483d8e1aa9b40be85a78669b0"
+    },
+    "grime": {
+      "png": "content\\maps\\cooked\\street_wall_grime.png",
+      "bytes": 25056,
+      "sha256": "7052b23137d57df271a4774701ebac270e641fa4d8d7a4dc74d80f71de01d74c"
+    },
+    "orm": {
+      "png": "content\\maps\\cooked\\street_wall_orm.png",
+      "bytes": 31226,
+      "sha256": "70bc58c316318f88d295fafd677c9608cded82d565a1f24f5c31a5a1abaaf180",
+      "kind": "orm",
+      "ktx2": "content\\maps\\cooked\\street_wall_orm.ktx2",
+      "ktx2_bytes": 87760,
+      "ktx2_sha256": "2ace299838f4565cc01a648750ee122b443dd4a301a0c32bfc67c6f46998338e"
+    },
+    "normal": {
+      "png": "content\\maps\\cooked\\street_wall_normal.png",
+      "bytes": 11005,
+      "sha256": "a7dee11ba79c76122203184d86a553e3c52c537a0a6571c386a212684e0e3b37",
+      "kind": "normal",
+      "ktx2": "content\\maps\\cooked\\street_wall_normal.ktx2",
+      "ktx2_bytes": 87776,
+      "ktx2_sha256": "f308a7e559c479ddc8b9c092282c781deb21071d2ebc3197c9a86ec10d416dd6"
+    }
+  },
+  "ktx2_set": "1302bc8b6f393cef8dd526aced417f0e672bcdb812179643ac3164b25d15c571"
+}
