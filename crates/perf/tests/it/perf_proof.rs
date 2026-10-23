@@ -6,7 +6,7 @@
 use engine_perf::baselines::time_budget_ms;
 use engine_perf::budget::check_time_ms;
 use engine_perf::workloads::{
-    AiDecide, ArenaTick, CrowdScale, DestructionStep, PhysicsStep, SpineFullTick,
+    AiDecide, ArenaTick, CrowdScale, DestructionStep, MotionSearch, PhysicsStep, SpineFullTick,
     SpineTransformBody,
 };
 use std::time::Instant;
@@ -44,6 +44,12 @@ fn crowd_hash() -> u64 {
     CrowdScale::canonical().run_hash()
 }
 
+// The motion bar times the whole canonical run, bake included: the row bills
+// the database build once, so the millisecond half names that same cost.
+fn motion_hash() -> u64 {
+    MotionSearch::canonical().run_hash()
+}
+
 // The spine bars time the passes alone (`run_steps`); `run_hash` digests
 // every pass, which is the equality proof and not the cost the bars name.
 fn spine_body_steps() -> u64 {
@@ -74,6 +80,10 @@ const WORKLOADS: &[Workload] = &[
     Workload {
         name: CrowdScale::NAME,
         run: crowd_hash,
+    },
+    Workload {
+        name: MotionSearch::NAME,
+        run: motion_hash,
     },
     Workload {
         name: SpineTransformBody::NAME,

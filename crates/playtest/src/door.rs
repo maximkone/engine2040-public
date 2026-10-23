@@ -30,7 +30,7 @@ use engine_provider::{
     fallback_for, parse_endpoint, validate_proposal, AdapterOutcome, AiSessionPolicy,
     CassetteAdapter, CassetteError, CassetteMode, CassetteStore, LocalAdapter, MockAdapter,
     MockStep, ProviderAdapter, ProviderCapabilities, RemoteAdapter, RequestPins, ScriptedFallback,
-    SecretRef, PROTOCOL_VERSION,
+    SecretRef, MAX_BODY_BYTES, PROTOCOL_VERSION,
 };
 use engine_spatial::Actor;
 
@@ -237,6 +237,9 @@ pub(crate) struct DoorCall<'a> {
     pub live_revision: Option<u64>,
     /// Replayed content; `None` keeps the mock's no-op proposal.
     pub recorded: Option<Recorded<'a>>,
+    /// Bounded scene brief the model may read (see [`scene_brief`]); `None`
+    /// keeps the digest-only request.
+    pub body: Option<&'a str>,
 }
 
 /// Why the door produced no proposal, plus the scripted path when one exists.
@@ -253,17 +256,10 @@ pub(crate) struct DoorRefusal {
     pub adapter: &'static str,
 }
 
-/// Run one call with explicit cassette and endpoint wiring. The adapter that
-/// answers is named by the request policy and the labels in the result.
-#[expect(
-    clippy::result_large_err,
-    reason = "a refusal is built once per door call and returned by value"
-)]
-pub(crate) fn door_call_with_targets(
-    call: &DoorCall<'_>,
-    cassette: Option<&CassetteSetup>,
-    targets: &BackendTargets,
-) -> Result<DoorAnswer, DoorRefusal> {
+/// The request one door call sends: backend wiring plus its scene brief, when
+/// the caller built one. `body` is the only part that varies by scene; a call
+/// with no scene keeps the digest-only request byte for byte.
+fn door_request(call: &DoorCall<'_>) -> (AiRequest, AiSessionPolicy, ProviderCapabilities) {
     let probe = matches!(call.script, TaskScript::PrivacyProbe);
     let (adapter_kind, model, privacy, policy, caps) = backend_wiring(call.backend, probe);
     let request = AiRequest {
@@ -287,8 +283,23 @@ pub(crate) fn door_call_with_targets(
         deadline_ms: 60_000,
         privacy,
         base_revision: call.base_revision,
-        body: None,
+        body: call.body.map(str::to_owned),
     };
+    (request, policy, caps)
+}
+
+/// Run one call with explicit cassette and endpoint wiring. The adapter that
+/// answers is named by the request policy and the labels in the result.
+#[expect(
+    clippy::result_large_err,
+    reason = "a refusal is built once per door call and returned by value"
+)]
+pub(crate) fn door_call_with_targets(
+    call: &DoorCall<'_>,
+    cassette: Option<&CassetteSetup>,
+    targets: &BackendTargets,
+) -> Result<DoorAnswer, DoorRefusal> {
+    let (request, policy, caps) = door_request(call);
     let refuse = |adapter: &'static str, error: AiError, miss: Option<CassetteError>| DoorRefusal {
         error,
         scripted: fallback_for(error, &request, &policy).ok(),
@@ -523,6 +534,91 @@ impl Scene {
     }
 }
 
+/// Longest prop name one brief line carries, in bytes; ASCII only, so bytes
+/// and characters count the same.
+const OBJECT_NAME_BYTES: usize = 24;
+
+/// Marker that opens the tail line of a cut brief: `... 12 more`.
+const BRIEF_TAIL_MARKER: &str = "...";
+
+/// One-line task sentence that opens a scene brief. It states the job in
+/// plain words; the object lines under it are the data the model may read.
+pub(crate) const fn task_sentence(kind: TaskKind) -> &'static str {
+    match kind {
+        TaskKind::Inspect => "Task: read this arena and answer with the ids listed below.",
+        TaskKind::Propose => "Task: move or rename one object below and answer with its id.",
+        TaskKind::Diagnose => "Task: diagnose this arena by naming the object ids involved.",
+        TaskKind::Repair => "Task: repair this arena by naming the object ids to move.",
+        TaskKind::Announce => "Task: announce one change to this arena by naming its object id.",
+        TaskKind::Taunt => "Task: answer with one short taunt line about this arena.",
+    }
+}
+
+/// Prop name reduced to one line of ASCII letters, digits, `_` and `-`: no
+/// whitespace, no control byte and no fence marker can enter the brief. An
+/// empty or foreign name becomes `prop`.
+fn object_name(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if out.len() >= OBJECT_NAME_BYTES {
+            break;
+        }
+        out.push(if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            c
+        } else {
+            '_'
+        });
+    }
+    if out.is_empty() {
+        out.push_str("prop");
+    }
+    out
+}
+
+/// One object line: `<name> <id> at <x>,<y>,<z>` in meters, two decimals. The
+/// id is the scene's own, so a model answering with it names a real prop.
+fn object_line(prop: &Prop) -> String {
+    format!(
+        "{} {} at {:.2},{:.2},{:.2}",
+        object_name(&prop.name),
+        prop.id,
+        prop.x,
+        prop.y,
+        prop.z
+    )
+}
+
+/// Bounded scene brief for the model: the task sentence, then one line per
+/// prop. Whole lines only; when the props do not all fit, the last line says
+/// how many were left out, and the text never passes `MAX_BODY_BYTES`.
+pub(crate) fn scene_brief(scene: &Scene, kind: TaskKind) -> String {
+    let lines: Vec<String> = scene.variant.props.iter().map(object_line).collect();
+    let head = task_sentence(kind);
+    // Reserve the longest tail this scene can print, so the cut is exact and
+    // the finished text fits without a second pass.
+    let longest_tail = format!("\n{BRIEF_TAIL_MARKER} {} more", lines.len());
+    let budget = MAX_BODY_BYTES.saturating_sub(longest_tail.len());
+    let mut text = head.to_owned();
+    let mut kept = 0;
+    for line in &lines {
+        // One newline plus the line; a line that does not fit is not cut in
+        // half, it ends the list.
+        if text.len() + 1 + line.len() > budget {
+            break;
+        }
+        text.push('\n');
+        text.push_str(line);
+        kept += 1;
+    }
+    if kept < lines.len() {
+        text.push_str(&format!(
+            "\n{BRIEF_TAIL_MARKER} {} more",
+            lines.len() - kept
+        ));
+    }
+    text
+}
+
 /// Reference arena with a fast balance config (two 60-tick matches, open
 /// win band) so a full verify stays cheap.
 pub(crate) fn fixture_scene() -> Scene {
@@ -728,6 +824,9 @@ impl Door {
             })
             .collect();
         self.log.push(Call::Write { ids });
+        // The door holds the scene, so the model gets the object list it may
+        // answer with; the eval rows that carry no scene stay digest-only.
+        let brief = scene_brief(scene, TaskKind::Propose);
         let call = DoorCall {
             backend: self.backend,
             index: self.index,
@@ -740,6 +839,7 @@ impl Door {
                 actions: submit.actions,
                 diagnostics: submit.diagnostics,
             }),
+            body: Some(brief.as_str()),
         };
         match door_call_with_targets(&call, cassette_from_env().as_ref(), &self.targets) {
             Ok(answer) => match scene.apply(&answer.proposal) {
@@ -781,6 +881,8 @@ mod tests {
     use super::*;
     use crate::eval::BACKENDS;
     use crate::reference_arena;
+    use engine_provider::protocol::{check_body, BODY_FENCE_CLOSE, BODY_FENCE_OPEN};
+    use engine_provider::transport::{chat_body, parse_chat_body};
 
     fn move_prop(object: u64, xyz_cm: [i32; 3]) -> ProposalAction {
         ProposalAction::SetPosition { object, xyz_cm }
@@ -974,6 +1076,7 @@ mod tests {
             base_revision: base,
             live_revision: None,
             recorded: None,
+            body: None,
         }
     }
 
@@ -1085,5 +1188,172 @@ mod tests {
         assert_eq!(explicit, without, "None equals the off path");
         assert!(!dir.exists(), "explicit off still touches no file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A door call that carries `body`, with the fixed shape the digest-only
+    /// renders below.
+    fn brief_call(body: Option<&str>) -> DoorCall<'_> {
+        DoorCall {
+            backend: Backend::Mock,
+            index: 1,
+            request_id: 777,
+            kind: TaskKind::Propose,
+            script: TaskScript::Clean,
+            base_revision: 1,
+            live_revision: None,
+            recorded: None,
+            body,
+        }
+    }
+
+    /// A 500-prop arena: more object lines than the brief can carry. Prop 100
+    /// carries a hostile name: a line break and the fence marker itself.
+    fn crowded_scene() -> Scene {
+        let mut variant = reference_arena();
+        variant.props = (0..500u32)
+            .map(|i| Prop {
+                id: 100 + i,
+                name: if i == 0 {
+                    String::from("brazier\n[scene brief follows]0")
+                } else {
+                    format!("brazier_{i}")
+                },
+                x: -9.0 + (i % 20) as f32 * 0.9,
+                y: 0.5,
+                z: -9.0 + (i / 20) as f32 * 0.9,
+                sx: 1.0,
+                sy: 1.0,
+                sz: 1.0,
+                physical: false,
+                triangles: 12,
+                memory_bytes: 480,
+            })
+            .collect();
+        Scene::new(variant)
+    }
+
+    #[test]
+    fn the_scene_brief_reaches_the_rendered_prompt_with_a_real_id() {
+        let scene = Scene::new(reference_arena());
+        let brief = scene_brief(&scene, TaskKind::Propose);
+        let call = brief_call(Some(&brief));
+        let (request, _, _) = door_request(&call);
+        assert_eq!(
+            request.body.as_deref(),
+            Some(brief.as_str()),
+            "the door sends the brief as the request body"
+        );
+        let prompt = chat_body(&request, &RequestPins::default());
+        assert!(
+            prompt.contains(BODY_FENCE_OPEN),
+            "the brief is fenced: {prompt}"
+        );
+        assert!(
+            prompt.contains(BODY_FENCE_CLOSE),
+            "the brief closes its fence: {prompt}"
+        );
+        assert!(
+            prompt.contains("brazier_nw 20 at -8.00,0.50,-8.00"),
+            "a real scene id is readable: {prompt}"
+        );
+    }
+
+    #[test]
+    fn an_answer_that_names_the_brief_id_round_trips_into_the_scene() {
+        let mut scene = Scene::new(reference_arena());
+        let brief = scene_brief(&scene, TaskKind::Propose);
+        // The first object line is the one the model is told to answer with.
+        let id: u64 = brief
+            .lines()
+            .find_map(|line| {
+                let mut words = line.split_whitespace();
+                words.next()?;
+                let id = words.next()?.parse::<u64>().ok()?;
+                Some(id)
+            })
+            .expect("the brief names an object id");
+        let inner = format!(
+            "{{\"actions\":[{{\"set_position\":{{\"object\":{id},\"xyz_cm\":[-1930,50,700]}}}}],\"diagnostics\":[\"moved {id}\"]}}"
+        );
+        let escaped = inner.replace('"', "\\\"");
+        let envelope = format!(
+            "{{\"id\":\"stub-1\",\"object\":\"chat.completion\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{escaped}\"}},\"finish_reason\":\"stop\"}}]}}"
+        );
+        let (request, _, _) = door_request(&brief_call(Some(&brief)));
+        let (proposal, _) =
+            parse_chat_body(&envelope, &request, "mock:ok").expect("the reply parses strictly");
+        validate_proposal(&proposal).expect("the reply is a valid proposal");
+        assert_eq!(
+            proposal.actions,
+            vec![ProposalAction::SetPosition {
+                object: id,
+                xyz_cm: [-1930, 50, 700],
+            }],
+            "the reply names the id the brief showed"
+        );
+        assert!(
+            proposal
+                .diagnostics
+                .iter()
+                .any(|line| line.contains("mock:ok")),
+            "the receipt names where it ran"
+        );
+        assert!(
+            scene.apply(&proposal).expect("the reply applies"),
+            "the id in the brief is a real prop"
+        );
+        assert_eq!(scene.revision, 2, "one applied change bumps the revision");
+    }
+
+    #[test]
+    fn a_door_with_no_scene_still_sends_the_digest_only_line() {
+        let call = brief_call(None);
+        let (request, _, _) = door_request(&call);
+        assert_eq!(request.body, None, "no scene, no body");
+        let prompt = chat_body(&request, &RequestPins::default());
+        let expected = format!(
+            "task=Propose revision=1 contexts=1 budget_ms=5000 digest={}",
+            "03".repeat(32)
+        );
+        assert!(
+            prompt.contains(&expected),
+            "the digest-only line is unchanged: {prompt}"
+        );
+        assert!(
+            !prompt.contains(BODY_FENCE_OPEN),
+            "no fence without a body: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_five_hundred_object_scene_never_passes_the_body_cap() {
+        let scene = crowded_scene();
+        let brief = scene_brief(&scene, TaskKind::Propose);
+        assert!(
+            brief.len() <= MAX_BODY_BYTES,
+            "brief is {} bytes, cap is {MAX_BODY_BYTES}",
+            brief.len()
+        );
+        check_body(&brief).expect("the brief passes the provider's body check");
+        let lines: Vec<&str> = brief.lines().collect();
+        assert!(lines.len() > 2, "the brief keeps whole object lines");
+        let tail = lines.last().expect("a tail line");
+        let cut: usize = tail
+            .strip_prefix("... ")
+            .and_then(|rest| rest.strip_suffix(" more"))
+            .expect("the last line counts the props left out")
+            .parse()
+            .expect("the tail count is a number");
+        assert!(cut > 0, "500 props do not fit, so the brief cuts: {tail}");
+        assert_eq!(
+            lines.len() - 2 + cut,
+            500,
+            "kept object lines plus the cut make the whole scene"
+        );
+        assert!(
+            lines[1].starts_with("brazier__scene_brief_fol 100 at "),
+            "a hostile name is one whole line with no fence: {}",
+            lines[1]
+        );
     }
 }

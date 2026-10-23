@@ -6,7 +6,8 @@ the owner's mobile tier, BG10-BG13 are the optimization holes, BG14-BG16 are
 disk-only residuals. Rules v1 golden `d57b5c8ae3096614` stays on every row;
 BG6 and BG15 move rules v2 only and need a rules receipt.
 
-- [ ] BG1 endpoint: the door advertises a push channel — `mcp.rs:1507-1516`
+- [x] BG1 endpoint: the door advertises a push channel — Landed 58c213bf3.
+  `mcp.rs:1507-1516`
   returns the default `ServerCapabilities`; `rg "list_changed|resources/updated"
   crates` is 0, so a client polls. Advertise `tools.listChanged` and
   `resources.subscribe`, send one `tools/list_changed` when the tool set moves

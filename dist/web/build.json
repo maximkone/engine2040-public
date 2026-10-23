@@ -1,10 +1,41 @@
 {
-  "schema": 1,
-  "commit": "28807636d",
+  "schema": 2,
+  "build": "62fcece2d1b7",
+  "commit": "81f32f3e9dd9",
   "target": "wasm32-unknown-unknown",
   "profile": "web",
-  "files": {
+  "pin": {
     "assets/arena.e2bundle": {
+      "name": "assets/arena.f9a5cd281742.e2bundle",
+      "sha256": "f9a5cd2817425a24923fc79878268e7421c70e6cfabfd9db69892c21ffbc0f94"
+    },
+    "assets/fighters.e2bundle": {
+      "name": "assets/fighters.8a1a6e3a049c.e2bundle",
+      "sha256": "8a1a6e3a049c2ef168b86a12ce0c9f10728759a9a3c92913f695659239a20127"
+    },
+    "coi-serviceworker.js": {
+      "name": "coi-serviceworker.js",
+      "sha256": "dabf39855d892809e852eeda7712bec2bb55d8fdff19a8bebdea316355549d48"
+    },
+    "engine.js": {
+      "name": "engine.aadd9dd3d72f.js",
+      "sha256": "aadd9dd3d72fad3c49706af97885ce062999c9c6dbbdc31ce263a06d62565584"
+    },
+    "engine_bg.wasm": {
+      "name": "engine_bg.c0d8c51aa0f1.wasm",
+      "sha256": "c0d8c51aa0f11d02e3af250e1f7c843ea411d4941b99be00518b398cd88d6a1d"
+    },
+    "index.html": {
+      "name": "index.html",
+      "sha256": "fdf40271319f1105f94c44cfce17e95cc5d236f6250db6d82e99d43f31d855f6"
+    },
+    "loader.js": {
+      "name": "loader.b384f1a1ed23.js",
+      "sha256": "b384f1a1ed23313186e9c2262accc03b31adb2269604788f2469e6ad00ea4a16"
+    }
+  },
+  "files": {
+    "assets/arena.f9a5cd281742.e2bundle": {
       "bytes": 1923527,
       "rawBytes": 2976130,
       "firstBytes": 1360882,
@@ -12,7 +43,7 @@
       "brotliBytes": 1914328,
       "sha256": "f9a5cd2817425a24923fc79878268e7421c70e6cfabfd9db69892c21ffbc0f94"
     },
-    "assets/fighters.e2bundle": {
+    "assets/fighters.8a1a6e3a049c.e2bundle": {
       "bytes": 644268,
       "rawBytes": 1833595,
       "firstBytes": 1833595,
@@ -21,50 +52,50 @@
       "sha256": "8a1a6e3a049c2ef168b86a12ce0c9f10728759a9a3c92913f695659239a20127"
     },
     "coi-serviceworker.js": {
-      "bytes": 1690,
-      "firstBytes": 1690,
-      "gzipBytes": 828,
-      "brotliBytes": 708,
-      "sha256": "884d5829f2e6d22540d53de394de8bb7e24ed66c3c9321231665b4bd2c225a04"
+      "bytes": 1656,
+      "firstBytes": 1656,
+      "gzipBytes": 822,
+      "brotliBytes": 678,
+      "sha256": "dabf39855d892809e852eeda7712bec2bb55d8fdff19a8bebdea316355549d48"
     },
-    "engine.js": {
+    "engine.aadd9dd3d72f.js": {
       "bytes": 108540,
       "firstBytes": 108540,
       "gzipBytes": 18016,
-      "brotliBytes": 15282,
-      "sha256": "bdbfb37a47b3de8c88194c89f300cd29355ff3c5766de97750aefaf34a2f82a0"
+      "brotliBytes": 15285,
+      "sha256": "aadd9dd3d72fad3c49706af97885ce062999c9c6dbbdc31ce263a06d62565584"
     },
-    "engine_bg.wasm": {
-      "bytes": 4545212,
-      "firstBytes": 4545212,
-      "gzipBytes": 1868424,
-      "brotliBytes": 1373126,
-      "sha256": "848974d4593a9cafaef77cdc5c76e31657530ad95e90262adedd3fce308dbfac"
+    "engine_bg.c0d8c51aa0f1.wasm": {
+      "bytes": 4538609,
+      "firstBytes": 4538609,
+      "gzipBytes": 1870817,
+      "brotliBytes": 1375895,
+      "sha256": "c0d8c51aa0f11d02e3af250e1f7c843ea411d4941b99be00518b398cd88d6a1d"
     },
     "index.html": {
-      "bytes": 21798,
-      "firstBytes": 21798,
-      "gzipBytes": 6986,
-      "brotliBytes": 5976,
-      "sha256": "6ec445e2adff26320384587f69a62a902f2d144c22c3502231dc7da28bd23a08"
+      "bytes": 24568,
+      "firstBytes": 24568,
+      "gzipBytes": 7994,
+      "brotliBytes": 6781,
+      "sha256": "1233fb463ca595c01f291106cd88e5da339f1a1e0062d7c73bff82f1609c2c76"
     },
-    "loader.js": {
-      "bytes": 19767,
-      "firstBytes": 19767,
-      "gzipBytes": 6794,
-      "brotliBytes": 5961,
-      "sha256": "feae0cc20c30a6dd47c82bc4bb159ed23b3003b834d02d1c79e232813facdfd8"
+    "loader.b384f1a1ed23.js": {
+      "bytes": 25588,
+      "firstBytes": 25588,
+      "gzipBytes": 8409,
+      "brotliBytes": 7396,
+      "sha256": "b384f1a1ed23313186e9c2262accc03b31adb2269604788f2469e6ad00ea4a16"
     }
   },
-  "firstBundleBytes": 2781281,
-  "totalBytes": 7264802,
+  "firstBundleBytes": 2786263,
+  "totalBytes": 7266756,
   "limitBytes": 8388608,
   "underLimit": true,
-  "rawWasmBytes": 5873319,
+  "rawWasmBytes": 5916671,
   "tools": {
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
     "wasmBindgen": "0.2.128",
-    "wasmOpt": "wasm-opt version 117"
+    "wasmOpt": "wasm-opt version 133 (version_133)"
   },
   "wasmOptFlags": [
     "-Oz",

@@ -23,7 +23,7 @@
     "fps_p50": "60 at 1080p on the RTX 3050 (FC3 asks 30 first)",
     "live_passes": "sky, IBL, sun shadow, GTAO, bloom, TAA, particles, decals (each changes pixels when on, EG8; rows LF1-LF7, EG11)",
     "look_score": "machine look score vs references (LJ1, EG30) at or above the bar Q1 sets",
-    "strobe": "tinted_share under 0.10 in an 8-fighter brawl",
+    "strobe": "tinted_share 0.10-0.25 in an 8-fighter brawl (red above 0.25 strobe; below 0.10 hits stop reading; decided 2026-10-24)",
     "pops": "0 joint pops per 300 frames (view line `pops`; LF9 took the attack and idle clip switches to 0; 20-37 remain in a 4-fighter duel, all in the run act, from the run clip speed scale jumping the clip phase)",
     "sunk_cm": "under 2 cm (every body rests on the sand since 01572b00: dead bodies sit both ways at 0 cm, and a living body's dip is lifted out of the sand and never pushed down, so a run's flight phase stays up; the product check read 0 cm on run 82402dd2)"
   }

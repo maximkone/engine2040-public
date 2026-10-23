@@ -9,6 +9,7 @@
 //! non-empty `ref` string naming its source. No number enters the game unsourced.
 
 use core::fmt;
+use engine_core::text::is_identifier;
 
 /// One value written in a table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,16 +293,6 @@ fn parse_integer(text: &str) -> Option<u64> {
         return None;
     }
     text.parse().ok()
-}
-
-/// A lowercase identifier: a letter or `_`, then letters, digits and `_`.
-fn is_identifier(text: &str) -> bool {
-    let mut bytes = text.bytes();
-    let Some(first) = bytes.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first == b'_')
-        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 /// Refuse any section that carries a number and no `ref` text.

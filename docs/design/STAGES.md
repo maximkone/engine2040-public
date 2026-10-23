@@ -437,7 +437,9 @@ every one declares at least one path a running packet also declares.
 
 No owner decision was filed this run, so `## Open` in `docs/EMPIRE-INBOX.md` is
 unchanged (read first: `node tools/inbox-open.mjs` prints `open 12 item(s)` at
-05:10Z, and the file's own cap at line 12 is 10). Reasons: the inbox is 2 over its
+05:10Z, and the file's own cap at line 12 is 10; status 2026-10-24: that tool no
+longer exists and the inbox is empty - all three 2026-10-21 items are closed in
+its `## Done`). Reasons: the inbox is 2 over its
 cap, so a new PROD line would break it further; the owner choices that do block
 stage rows are already open there - EB-2026-10-16-S16 (EG11 sun depth 1024 vs 2048
 and the live-receipt gate; EG11 is a Vertical Slice FOCUS row, and its close packet

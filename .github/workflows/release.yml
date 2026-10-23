@@ -1,0 +1,46 @@
+name: release
+
+# TG5 (2026-10-24): a `v*` tag runs the version check and writes the SBOM beside it.
+# No publishing and no secrets: the artifact is the whole output. The tag itself is
+# made locally by `node tools/release.mjs --tag`; pushing it is a person's call.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    # Same mirror rule as every other workflow here: the private dev repo runs nothing.
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      # `cargo metadata` is a lock read, so no crate is compiled here; the pinned
+      # toolchain still has to be present.
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      # The three version files agree: Cargo.toml, CHANGELOG.md's newest heading, Cargo.lock.
+      - name: version check (Cargo.toml, CHANGELOG.md, Cargo.lock)
+        run: node tools/release.mjs --check
+      # CycloneDX 1.5, one component per package, written to target/reports/sbom.cdx.json.
+      - name: SBOM (CycloneDX 1.5)
+        run: node tools/sbom.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: target/reports/sbom.cdx.json
+          if-no-files-found: error

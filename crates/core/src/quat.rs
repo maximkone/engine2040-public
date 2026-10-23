@@ -16,6 +16,26 @@ pub fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// Conjugate `[x, y, z, w] -> [-x, -y, -z, w]`: the inverse of a unit
+/// quaternion, so `rotate_vec` can undo its own rotation to the same bits.
+#[must_use]
+pub fn quat_conj(q: &[f32; 4]) -> [f32; 4] {
+    [-q[0], -q[1], -q[2], q[3]]
+}
+
+/// Rotate a point by a unit quaternion: `q * [v, 0] * conj(q)`.
+///
+/// Determinism: two [`quat_mul`] calls in a fixed order, so the same input
+/// gives the same bits on every platform. Assumes a unit quaternion; a
+/// non-unit one scales the point, exactly like the two inline copies this
+/// replaces.
+#[must_use]
+pub fn rotate_vec(v: &[f32; 3], q: &[f32; 4]) -> [f32; 3] {
+    let turned = quat_mul(*q, [v[0], v[1], v[2], 0.0]);
+    let back = quat_mul(turned, quat_conj(q));
+    [back[0], back[1], back[2]]
+}
+
 /// Hamilton product `a * b` of two `[x, y, z, w]` quaternions in Q47.16
 /// fixed point: the result rotates by `b` first, then by `a`.
 ///
@@ -36,7 +56,7 @@ pub fn quat_mul_fixed(a: [Fixed; 4], b: [Fixed; 4]) -> [Fixed; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{quat_mul, quat_mul_fixed};
+    use super::{quat_conj, quat_mul, quat_mul_fixed, rotate_vec};
     use crate::fixed::Fixed;
 
     const I: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
@@ -59,6 +79,33 @@ mod tests {
         // f32 rounding after every multiply, add and subtract.
         let got = quat_mul([0.1, -0.2, 0.3, 0.9], [-0.4, 0.5, 0.25, 0.7]).map(f32::to_bits);
         assert_eq!(got, [0xbefa_e148, 0x3e28_f5c0, 0x3ecf_5c29, 0x3f31_eb86]);
+    }
+
+    #[test]
+    fn identity_rotates_no_point() {
+        assert_eq!(rotate_vec(&[1.5, -2.0, 0.25], &ONE), [1.5, -2.0, 0.25]);
+    }
+
+    #[test]
+    fn a_quarter_turn_moves_x_to_y_and_the_conjugate_brings_it_back() {
+        // A 90 degree turn about z: sin and cos of 45 degrees, written as the
+        // constant because core's lint rules refuse `f32::sin` in tests too.
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let quarter = [0.0, 0.0, half, half];
+        let turned = rotate_vec(&[1.0, 0.0, 0.0], &quarter);
+        let back = rotate_vec(&turned, &quat_conj(&quarter));
+        for (lane, want) in [0.0f32, 1.0, 0.0].iter().enumerate() {
+            assert!(
+                (turned[lane] - want).abs() < 1e-6,
+                "x to y lane {lane}: {turned:?}"
+            );
+        }
+        for (lane, want) in [1.0f32, 0.0, 0.0].iter().enumerate() {
+            assert!(
+                (back[lane] - want).abs() < 1e-6,
+                "back lane {lane}: {back:?}"
+            );
+        }
     }
 
     fn fx(raw: [i64; 4]) -> [Fixed; 4] {

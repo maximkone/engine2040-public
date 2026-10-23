@@ -1,13 +1,13 @@
-//! D16: the four door resources, served over `resources/list` and
-//! `resources/read`.
+//! D16: the four static door resources plus the live scene view, served over
+//! `resources/list` and `resources/read`.
 //!
 //! Consumer: an MCP client that wants the crate map, the door reference, the
-//! error catalog or the `game.toml` schema. Data owner stays the crate it
-//! names: the crate map is the engine's own crate list, the door reference
-//! is the tool router plus the pack registry, the error catalog is the typed
-//! refusal list, and the `game.toml` schema is the project manifest
-//! contract. This module owns only the four URIs, the root pointers and the
-//! text each one carries.
+//! error catalog, the `game.toml` schema or the live scene. Data owner stays
+//! the crate it names: the crate map is the engine's own crate list, the door
+//! reference is the tool router plus the pack registry, the error catalog is
+//! the typed refusal list, the `game.toml` schema is the project manifest
+//! contract, and the scene view is the session document. This module owns only
+//! the URIs, the root pointers and the text each one carries.
 //!
 //! Why resources and not tools: a read-only view does not need a tool
 //! definition in every `tools/list`. Serving it here keeps the advertised tool
@@ -42,6 +42,10 @@ pub const DOOR_REFERENCE_URI: &str = "e2040://door-reference";
 pub const ERROR_CATALOG_URI: &str = "e2040://error-catalog";
 /// Root URI of the `game.toml` schema: the project manifest contract.
 pub const GAME_TOML_SCHEMA_URI: &str = "e2040://game-toml-schema";
+/// URI of the live scene view: the session document's revision, object count
+/// and content digest. Unlike the four static families this body is read from
+/// the session, so it is served beside them, not through [`ROOT_URIS`].
+pub const SCENE_URI: &str = "e2040://scene";
 
 /// Every root URI this door serves, in contract order.
 pub const ROOT_URIS: [&str; 4] = [
@@ -153,6 +157,36 @@ pub fn resource_description(uri: &str) -> &'static str {
 #[must_use]
 pub fn is_known_uri(uri: &str) -> bool {
     ROOT_URIS.contains(&uri)
+}
+
+/// The live scene view, listed beside the four static families. It has no
+/// child URIs and no template: its body is the session document itself.
+#[must_use]
+pub fn scene_resource() -> Resource {
+    let mut resource = Resource::new(SCENE_URI, "scene");
+    resource.description = Some(
+        "The live scene: its revision, object count and the content digest a `scene.save` \
+         would print; a subscribed client gets one update when the digest moves."
+            .to_owned(),
+    );
+    resource.mime_type = Some(RESOURCE_MIME.to_owned());
+    resource
+}
+
+/// Render the live scene view.
+///
+/// The same revision, object count and digest always render the same bytes, so
+/// a reader can compare two views and the push channel can tell when the
+/// document moved without a clock.
+#[must_use]
+pub fn scene_text(revision: u64, objects: usize, digest: &str) -> String {
+    format!("# scene\n\nrevision: {revision}\nobjects: {objects}\ndigest: {digest}\n")
+}
+
+/// The wire contents of the live scene view.
+#[must_use]
+pub fn scene_contents(text: String) -> ResourceContents {
+    ResourceContents::text(text, SCENE_URI).with_mime_type(RESOURCE_MIME)
 }
 
 /// Read one resource body as text.
@@ -540,11 +574,6 @@ pub const ERROR_CATALOG: &[(&str, &str, &str)] = &[
         "the message names the field; fix that field",
     ),
     (
-        "bad_payload",
-        "the payload does not match the shape the call takes",
-        "the message names the field; fix that field",
-    ),
-    (
         "bad_receipt",
         "the receipt does not match the change it names",
         "re-run the call that mints the receipt",
@@ -819,6 +848,70 @@ mod tests {
             assert!(!text.is_empty(), "{uri} carries text");
         }
         println!("door_resource: 4 resources, 0 tool-budget chars PASS");
+    }
+
+    #[test]
+    fn scene_view_carries_revision_count_and_digest() {
+        let resource = scene_resource();
+        assert_eq!(resource.uri, SCENE_URI);
+        assert_eq!(resource.name, "scene");
+        assert_eq!(
+            resource.mime_type.as_deref(),
+            Some(RESOURCE_MIME),
+            "the scene view is plain text"
+        );
+        assert!(
+            resource
+                .description
+                .as_deref()
+                .is_some_and(|text| !text.is_empty()),
+            "the scene view explains what it carries"
+        );
+        let first = scene_text(3, 7, "abc123");
+        assert_eq!(
+            first, "# scene\n\nrevision: 3\nobjects: 7\ndigest: abc123\n",
+            "the view names the revision, the object count and the digest"
+        );
+        assert_eq!(
+            first,
+            scene_text(3, 7, "abc123"),
+            "no clock, no per-call state"
+        );
+        assert_ne!(
+            first,
+            scene_text(4, 7, "abc123"),
+            "a moved revision moves the view"
+        );
+        assert_ne!(
+            first,
+            scene_text(3, 8, "abc123"),
+            "a moved count moves the view"
+        );
+        assert_ne!(
+            first,
+            scene_text(3, 7, "def456"),
+            "a moved digest moves the view"
+        );
+        let contents = scene_contents(first.clone());
+        match &contents {
+            ResourceContents::TextResourceContents { uri, text, .. } => {
+                assert_eq!(uri, SCENE_URI, "the contents name the scene URI");
+                assert_eq!(text, &first, "the contents carry the rendered view");
+            }
+            other => panic!("the scene view is text: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scene_uri_is_not_one_of_the_static_families() {
+        assert!(
+            !ROOT_URIS.contains(&SCENE_URI),
+            "the live view is served beside the four static families"
+        );
+        assert!(
+            read_resource_text(SCENE_URI, &[]).is_err(),
+            "the live view needs a document; it is read through the door, not this table"
+        );
     }
 
     #[test]

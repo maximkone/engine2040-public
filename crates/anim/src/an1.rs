@@ -6,6 +6,7 @@
 use crate::contract::{
     skinning_matrices, validate_pose, validate_skeleton, AnimError, LocalPose, Skeleton,
 };
+use engine_core::mat4;
 
 /// One source-pose row per AN1 joint; `None` is a body node the clip rig does
 /// not have and that takes the bind local.
@@ -161,19 +162,8 @@ pub fn an1_skinning_matrices(
     Ok(inverse_binds
         .iter()
         .zip(world.iter())
-        .map(|(inverse, joint)| mul(inverse, joint))
+        .map(|(inverse, joint)| mat4::mul(inverse, joint))
         .collect())
-}
-
-/// Multiply two AN1 row-vector matrices: `p * a * b`.
-fn mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut out = [[0.0f32; 4]; 4];
-    for (row_index, row) in out.iter_mut().enumerate() {
-        for (cell_index, cell) in row.iter_mut().enumerate() {
-            *cell = (0..4).map(|j| a[row_index][j] * b[j][cell_index]).sum();
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -239,7 +229,7 @@ mod tests {
     /// The bone a branch hangs on: a three-joint spine, then four-way forks.
     fn origin_of(bone: usize) -> usize {
         match bone {
-            0 | 1 | 2 => bone.saturating_sub(1),
+            0..=2 => bone.saturating_sub(1),
             _ => 2 + (bone - 3) / 4,
         }
     }

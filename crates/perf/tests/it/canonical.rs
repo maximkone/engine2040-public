@@ -5,7 +5,7 @@
 use engine_perf::baselines::{arena_baseline, baseline};
 use engine_perf::budget::check_report;
 use engine_perf::workloads::{
-    AiDecide, ArenaTick, CrowdScale, DestructionStep, PhysicsStep, SpineFullTick,
+    AiDecide, ArenaTick, CrowdScale, DestructionStep, MotionSearch, PhysicsStep, SpineFullTick,
     SpineTransformBody,
 };
 
@@ -64,6 +64,34 @@ fn crowd_scale_matches_baseline() {
         CrowdScale::canonical().with_seed(1).run_hash(),
         report.hash,
         "a reseeded crowd hashes differently"
+    );
+}
+
+#[test]
+fn motion_search_matches_baseline() {
+    // LM4: the per-character search plus its exertion warp, digested and
+    // billed against the recorded row. The database is built inside the run,
+    // so its bake is the only allocation the row bills.
+    let workload = MotionSearch::canonical();
+    std::hint::black_box(workload.run_hash());
+    let report = workload.run_report();
+    let recorded = baseline(MotionSearch::NAME).expect("motion_search_8 baseline recorded");
+    check_report(&report, &recorded).expect("motion_search_8 matches its baseline");
+    let repeat = workload.run_report();
+    assert_eq!(report, repeat, "the motion run repeats identically");
+    // A reseeded database moves the digest: the fold covers the picks, not
+    // only the tick count.
+    assert_ne!(
+        workload.with_seed(1).run_hash(),
+        report.hash,
+        "a reseeded database hashes differently"
+    );
+    // The warp is observable: spent characters pick from warped weights, so
+    // the digest carries the exertion half and not only the search.
+    assert_ne!(
+        workload.run_lane_ops(),
+        0,
+        "every character-tick bills lane ops"
     );
 }
 

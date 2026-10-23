@@ -321,11 +321,11 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   `tools/dcc/blender-cook.mjs`, `content/`.
   Accept: two cooks of one recipe give one GLB sha and one KTX2 sha x2; the 15 pieces carry the
   maps in their sidecars; a piece with no UV refuses before Blender starts and names the object.
-  Landed aaf42e0. Two cooks of tools/dcc/recipes/maps/training_post.json gave one glb sha 2d89d36259a5 and one
-  ktx2 set sha 89d8e670990f6ed8 twice (node --test tools/dcc/blender-cook.test.mjs tools/dcc/blender/verify_op.test.mjs:
+  Landed aaf42e0 + 0d74fa0. Two cooks of tools/dcc/recipes/maps/training_post.json gave one glb sha 83318f675855 and one
+  ktx2 set sha a8ad0baf81be twice (node --test tools/dcc/blender-cook.test.mjs tools/dcc/blender/verify_op.test.mjs:
   18 passed, incl. the bake sha test, the no-UV refusal and recipe.no_maps); all 15 pieces cooked twice with the same
   shas; content/maps/cooked holds 15 glb, 15 sidecars naming ao grime normal orm plus the orm and normal ktx2, 30 ktx2
-  and 60 png, 7.1 MB; the no-UV fixture exits 4 with recipe.no_uv: object "BoxNoUv" has no TEXCOORD_0 while a missing
+  and 60 png, 7.1 MB (the ORM keeps each piece's authored roughness floor and metal); the no-UV fixture exits 4 with recipe.no_uv: object "BoxNoUv" has no TEXCOORD_0 while a missing
   --exe proves Blender never starts; node tools/workspace-check.mjs passes; git diff --check clean.
 - [ ] GEO15 dcc: one warm Blender per batch. Steal: `mcp-for-blender` (MIT) socket plus
   main-thread queue - keep one 5.2 process alive across a batch instead of paying 5.48-18.07 s of

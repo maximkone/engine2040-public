@@ -25,7 +25,7 @@ Order of work: `FOCUS.md` "## Now". Rules for AIs: root `../AGENTS.md` (wins) an
 - A new plan file gets one line in `plan/README.md` in the same commit (`tools/plan-index.test.mjs` checks it).
 - Generated files are never hand-edited: `CRATE-MAP.md` (`node tools/crate-map.mjs`), `plan/ATLAS.md` (`node tools/plan-atlas.mjs --write`).
 - Retire a doc with `git mv` into `archive/<date>/`, fix every inbound link, add one line to `archive/INDEX.md`.
-- After board or doc edits: `node tools/workspace-check.mjs`. Pinned docs: `node --test docs/INDEX.test.mjs tools/index-check.test.mjs tools/plan-index.test.mjs`.
+- After board or doc edits: `node tools/workspace-check.mjs` and `node tools/docs-links.mjs`. Pinned docs: `node --test docs/INDEX.test.mjs tools/index-check.test.mjs tools/plan-index.test.mjs`.
 
 ## Known leftovers of the retired loop (owner 2026-10-17: no sprints, locks, claims, queue, keeper)
 

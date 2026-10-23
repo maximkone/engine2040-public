@@ -27,6 +27,7 @@ pub mod json;
 /// proves in a test. Test-only, like `alloc_probe`.
 #[cfg(any(test, feature = "test-util"))]
 pub mod laws;
+pub mod mat4;
 /// The off-tick job pump: one slice per frame, with the tick of every
 /// arrival recorded.
 pub mod pump;
@@ -62,7 +63,7 @@ pub use hash::{hash_bytes, hash_hex, hash_u64s, mix64, splitmix64, Fnv64};
 // Id-key tables get the fixed-seed Fx shape, never std's per-process seed.
 pub use det_hash::{hash_entity_id, hash_id, DetHashBuilder, DetHasher};
 // One quaternion product: every crate composes rotations to the same bits.
-pub use quat::{quat_mul, quat_mul_fixed};
+pub use quat::{quat_conj, quat_mul, quat_mul_fixed, rotate_vec};
 pub use rng::Rng;
 pub use rng_wyhash::WyRng;
 pub use seal_key::{

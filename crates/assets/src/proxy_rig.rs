@@ -27,7 +27,7 @@
 //! `+ - * /` plus `sqrt`; the same rig bakes the same bytes twice.
 
 use engine_anim::contract::{validate_skeleton, Joint, LocalPose, Skeleton};
-use engine_core::{quat_mul, Fnv64};
+use engine_core::{quat_conj, quat_mul, rotate_vec, Fnv64};
 use std::fmt;
 
 /// Most bones a proxy rig carries: the low tier's skinning budget.
@@ -282,18 +282,6 @@ fn pack_parent(parent: Option<usize>) -> [u8; 2] {
         Some(parent) => u16::try_from(parent).unwrap_or(NO_PARENT).to_le_bytes(),
         None => NO_PARENT.to_le_bytes(),
     }
-}
-
-/// Conjugate of a unit quaternion.
-fn quat_conj(quat: &[f32; 4]) -> [f32; 4] {
-    [-quat[0], -quat[1], -quat[2], quat[3]]
-}
-
-/// Rotate a point by a unit quaternion (`q * p * conj(q)`).
-fn rotate_vec(point: &[f32; 3], quat: &[f32; 4]) -> [f32; 3] {
-    let turned = quat_mul(*quat, [point[0], point[1], point[2], 0.0]);
-    let back = quat_mul(turned, quat_conj(quat));
-    [back[0], back[1], back[2]]
 }
 
 /// World transform per joint: position plus rotation, parents first.

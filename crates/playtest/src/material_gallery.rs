@@ -148,6 +148,7 @@ impl core::fmt::Display for PairReport {
 #[cfg(feature = "window")]
 mod gpu {
     use super::{Capture, LightPreset, MaterialSet};
+    use engine_core::mat4;
     use engine_core::Fnv64;
     use engine_material::compile::{compile, Compiled};
     use engine_render::material_pipeline::{pipeline_for, COLOR_FORMAT, DEPTH_FORMAT};
@@ -735,7 +736,7 @@ mod gpu {
 
     /// The fixed camera: 16 view-projection columns, the eye, one pad float.
     fn camera_bytes() -> Vec<u8> {
-        let view_proj = multiply(perspective(FOV_Y, 1.0, NEAR, FAR), look_at());
+        let view_proj = mat4::mul(&perspective(FOV_Y, 1.0, NEAR, FAR), &look_at());
         let columns = to_columns(view_proj);
         let mut floats = Vec::with_capacity(20);
         for column in columns {
@@ -794,17 +795,6 @@ mod gpu {
             [0.0, 0.0, far / (near - far), near * far / (near - far)],
             [0.0, 0.0, -1.0, 0.0],
         ]
-    }
-
-    /// Row-major product of two 4x4 matrices.
-    fn multiply(a: Mat4, b: Mat4) -> Mat4 {
-        let mut out = [[0.0f32; 4]; 4];
-        for (row, line) in out.iter_mut().enumerate() {
-            for (column, cell) in line.iter_mut().enumerate() {
-                *cell = (0..4).map(|k| a[row][k] * b[k][column]).sum();
-            }
-        }
-        out
     }
 
     /// The same matrix as the 16 columns the shader's `mat4x4` reads.

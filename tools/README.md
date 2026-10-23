@@ -46,6 +46,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/desync-diff.mjs` (+ `tools/desync-diff.test.mjs`): diff a desync to the first bad tick.
 - `tools/door-reference.mjs` (+ `tools/door-reference.test.mjs`): print every door tool and verb pack from the endpoint source into `docs/book/door-reference.md` (`--write`, `--check`).
 - `tools/docs-coverage.mjs` (+ `tools/docs-coverage.test.mjs`): ratchet per-crate missing-docs.
+- `tools/docs-links.mjs` (+ `tools/docs-links.test.mjs`): every relative link in tracked markdown outside `docs/archive/` resolves (`--json`); the CI gate.
 - `tools/doctor.mjs` (+ `tools/doctor.test.mjs`): repo health first.
 - `tools/duration-fmt.mjs` (+ `tools/duration-fmt.test.mjs`): node script; see its header.
 - `tools/eval-bar.mjs` (+ `tools/eval-bar.test.mjs`): compare an agent scorecard card with `tools/eval-bar.json` by the scorecard's own rule (a lower pass rate or a lost line is red).
@@ -108,10 +109,12 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/rdc-diff.mjs` (+ `tools/rdc-diff.test.mjs`): pixel-diff a RenderDoc replay.
 - `tools/reference-captures.mjs`: verify one tier's reference PNGs and merge them into `content/reference/index.json`.
 - `tools/reference-web.mjs` (+ `tools/reference-web.test.mjs`): capture the web tier's ten reference shots from the real page, driving its animation clock.
+- `tools/release.mjs` (+ `tools/release.test.mjs`): version plumbing: `--check` holds Cargo.toml, CHANGELOG.md's newest heading and Cargo.lock together; `--tag` makes the annotated local `v<version>` tag only when the check passes and the tree is clean (never pushes).
 - `tools/replay-to-mp4.mjs` (+ `tools/replay-to-mp4.test.mjs`): render a replay tape to video.
 - `tools/rerun-timeline.mjs` (+ `tools/rerun-timeline.test.mjs`): scrub a per-tick timeline.
 - `tools/review-gate.mjs` (+ `tools/review-gate.test.mjs`): the AGENTS.md review rules R1-R6 as one gate over one commit; a WARN never fails.
 - `tools/rust-quality.mjs` (+ `tools/rust-quality.test.mjs`): score Rust quality.
+- `tools/sbom.mjs` (+ `tools/sbom.test.mjs`): write a CycloneDX 1.5 SBOM from `cargo metadata` (one component per package, license and `pkg:cargo` purl) to `target/reports/sbom.cdx.json`; dependency-free and byte-equal for one lock.
 - `tools/seal-keys.mjs` (+ `tools/seal-keys.test.mjs`): run cargo legs with seal keys.
 - `tools/secret-gate.mjs` (+ `tools/secret-gate.test.mjs`): block secret leaks.
 - `tools/ship-check.mjs` (+ `tools/ship-check.test.mjs`): name a ship folder's file tree by content hash (`--print`/`--hash`) so two builds compare equal.

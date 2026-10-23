@@ -424,9 +424,8 @@ fn phase_spans_open_only_while_enabled_and_frames_advance() {
     let before = profiler::frames_begun();
     profiler::begin_frame();
     for phase in profiler::Phase::ALL {
-        let span = profiler::span(*phase).expect("enabled phase hands out a guard");
+        let _span = profiler::span(*phase).expect("enabled phase hands out a guard");
         assert_eq!(profiler::Phase::from_name(phase.name()), Ok(*phase));
-        drop(span);
     }
     let after = profiler::frames_begun();
     profiler::set_enabled(false);

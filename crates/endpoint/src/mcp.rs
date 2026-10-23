@@ -53,7 +53,6 @@
 //! (`approvals_bind_the_engine_session_not_the_protocol_session`).
 
 use crate::startup::StartupError;
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard};
 
@@ -71,19 +70,13 @@ use engine_scene::transform::Transform;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResponse,
-    GetPromptResult, InitializeResult, JsonObject, ListPromptsResult, ListResourceTemplatesResult,
-    ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt, PromptMessage,
-    PromptsCapability, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
-    ReadResourceResult, ResourcesCapability, ResultType, Role, ServerCapabilities, ServerConfig,
-    ToolAnnotations, ToolsCapability,
+    CallToolRequestParams, CallToolResponse, InitializeResult, JsonObject, Prompt, ProtocolVersion,
 };
 use rmcp::serde_json::Value;
-use rmcp::service::RequestContext;
+use rmcp::service::{RequestContext, SubscriptionSink};
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 
 use super::audit::DoorAudit;
-use super::build_level::TOOL_BUILD_LEVEL;
 use super::insight::mcp_tools::{
     ApiDescribeTool, ApiSearchTool, TOOL_API_DESCRIBE, TOOL_API_SEARCH,
 };
@@ -97,6 +90,16 @@ use super::play::{
 };
 use super::tool_macro::{TestRunTool, TOOL_TEST_RUN};
 use super::witness::EvidenceReceipt;
+
+mod handler;
+mod notes;
+
+pub(crate) use self::handler::{read_only_annotations, write_annotations};
+use self::notes::ProgressNote;
+#[cfg(test)]
+pub(crate) use self::notes::{is_long_call, progress_note_params};
+#[cfg(test)]
+use super::build_level::TOOL_BUILD_LEVEL;
 
 /// Tool: bounded scene snapshot (read-only).
 pub const TOOL_SCENE_READ: &str = "scene.read";
@@ -532,13 +535,17 @@ fn component_kind(index: usize, name: &str) -> Result<ComponentKind, McpToolErro
 }
 
 /// Build the command batch both preview and apply construct identically, so
-/// their canonical hashes match. MCP batches always stamp `mcp` script
-/// source (the server holds no provider credentials to stamp more).
-/// Crate-visible: the `scene.spatial` staging path builds the same batch.
+/// their canonical hashes match. An explicit origin names the writer:
+/// `model:<provider>/<model>` carries the provider plus model and a nonzero
+/// request digest over the canonical action hash, `script:<name>` carries its
+/// own name, and no origin keeps the door's own `mcp` script stamp every
+/// pre-provenance call meant. Crate-visible: the `scene.spatial` staging path
+/// builds the same batch.
 pub(crate) fn build_batch(
     expected_revision: u64,
     idempotency_key: u64,
     ops: &[OpDto],
+    origin: Option<&str>,
 ) -> Result<Batch, McpToolError> {
     if ops.is_empty() {
         return Err(McpToolError::new(
@@ -559,12 +566,88 @@ pub(crate) fn build_batch(
     for (index, dto) in ops.iter().enumerate() {
         converted.push(op_from_dto(index, dto)?);
     }
-    Ok(Batch {
+    let mut batch = Batch {
         ops: converted,
         base_revision: expected_revision,
         idempotency_key,
-        provenance: Some(ProvenanceStamp::script("mcp")),
+        provenance: None,
+    };
+    batch.provenance = Some(stamp_for(origin, &batch)?);
+    Ok(batch)
+}
+
+/// The writer a wire origin names.
+enum OriginWriter {
+    /// A model proposal: provider and model ids, never a prompt.
+    Model { provider: String, model: String },
+    /// Script or automation, named.
+    Script(String),
+}
+
+/// Parse one wire origin. The two forms are `model:<provider>/<model>` and
+/// `script:<name>`; a model id may itself carry `/` (`vendor/model`), so only
+/// the first slash splits. Both names are bounded by the provenance codec, and
+/// no other prefix is accepted, so a caller never stamps a source the journal
+/// cannot store.
+fn parse_origin(text: &str) -> Result<OriginWriter, McpToolError> {
+    use engine_scene::provenance::MAX_TEXT_LEN;
+    let refuse = || {
+        McpToolError::new(
+            "bad_origin",
+            "origin must be `model:<provider>/<model>` or `script:<name>`, with both names \
+             1..=256 bytes; omit it to stamp the door's own `script:mcp`",
+        )
+    };
+    if text.len() > MAX_TEXT_LEN.saturating_mul(2) + "model:/".len() {
+        return Err(refuse());
+    }
+    if let Some(rest) = text.strip_prefix("model:") {
+        let (provider, model) = rest.split_once('/').ok_or_else(refuse)?;
+        if provider.is_empty()
+            || model.is_empty()
+            || provider.len() > MAX_TEXT_LEN
+            || model.len() > MAX_TEXT_LEN
+        {
+            return Err(refuse());
+        }
+        return Ok(OriginWriter::Model {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+        });
+    }
+    if let Some(name) = text.strip_prefix("script:") {
+        if name.is_empty() || name.len() > MAX_TEXT_LEN {
+            return Err(refuse());
+        }
+        return Ok(OriginWriter::Script(name.to_owned()));
+    }
+    Err(refuse())
+}
+
+/// One batch's provenance stamp: the source the caller named plus, for a
+/// model, a request digest over the canonical action hash. The digest names
+/// the batch bytes only: never a prompt, credential or session secret.
+fn stamp_for(origin: Option<&str>, batch: &Batch) -> Result<ProvenanceStamp, McpToolError> {
+    Ok(match origin {
+        Some(text) => match parse_origin(text)? {
+            OriginWriter::Model { provider, model } => {
+                let action = format!("{:016x}", canonical_action_hash(batch));
+                ProvenanceStamp::model(provider, model, super::assistant::request_digest(&action))
+            }
+            OriginWriter::Script(name) => ProvenanceStamp::script(name),
+        },
+        None => ProvenanceStamp::script("mcp"),
     })
+}
+
+/// Compact read-side label for one stored provenance source.
+fn origin_label(source: &engine_scene::provenance::Source) -> String {
+    use engine_scene::provenance::Source;
+    match source {
+        Source::Human => "human".to_owned(),
+        Source::Script(name) => format!("script:{name}"),
+        Source::Model { provider, model } => format!("model:{provider}/{model}"),
+    }
 }
 
 #[path = "mcp_refusal.rs"]
@@ -641,6 +724,21 @@ pub struct ServerState {
     /// guardrail spends its budget on the newest load first, so the pack a
     /// client just asked for is the one it sees advertised.
     pub(crate) load_order: Vec<&'static str>,
+    /// BG1: the advertised pack set of the last answered call, so a call that
+    /// moved it (`api.load`) carries one `tools/list_changed` and a call that
+    /// did not stays silent.
+    pub(crate) packs_pushed: BTreeSet<&'static str>,
+    /// BG1: live `subscriptions/listen` streams that accepted the tool list,
+    /// one per stream, so a load reaches a client on the stream it opened.
+    pub(crate) list_subscribers: Vec<SubscriptionSink>,
+    /// BG1: live streams that accepted the scene resource.
+    pub(crate) scene_subscribers: Vec<SubscriptionSink>,
+    /// BG1: the legacy `resources/subscribe` flag (protocols before
+    /// 2026-07-28 have no listen stream); the note goes on the session peer.
+    pub(crate) scene_subscribed: bool,
+    /// BG1: the scene view last read or announced, so a scene update is sent
+    /// only when the document actually moved.
+    pub(crate) scene_pushed: Option<String>,
     /// The session's thread-confined rules worker (feature `rules`, off by default).
     #[cfg(feature = "rules")]
     pub(crate) rules: super::packs::rules::RulesSlot,
@@ -704,6 +802,11 @@ impl ServerState {
             watch_digest: None,
             loaded_packs: registry.default_loaded(),
             load_order: Vec::new(),
+            packs_pushed: registry.default_loaded(),
+            list_subscribers: Vec::new(),
+            scene_subscribers: Vec::new(),
+            scene_subscribed: false,
+            scene_pushed: None,
             #[cfg(feature = "rules")]
             rules: super::packs::rules::RulesSlot::default(),
             web: super::packs::web::WebSlot::default(),
@@ -825,6 +928,9 @@ impl ServerState {
                     rot: local.rotation,
                     scale: local.scale,
                 },
+                origin: commands::chain_for(&self.journal, *id)
+                    .last()
+                    .map(|record| origin_label(&record.source)),
             });
         }
         Ok(SceneReadOutput {
@@ -843,7 +949,12 @@ impl ServerState {
     /// every preview runs under the capability taxonomy while staying
     /// scope-free and budget-free by door contract.
     pub fn tx_preview(&self, args: &TxPreviewArgs) -> Result<TxPreviewOutput, McpToolError> {
-        let batch = build_batch(args.expected_revision, args.idempotency_key, &args.ops)?;
+        let batch = build_batch(
+            args.expected_revision,
+            args.idempotency_key,
+            &args.ops,
+            None,
+        )?;
         let caps = super::explain::ExplainCaps::default_caps();
         if let Some(refusal) = super::tool_capabilities::refuse_preview(&self.doc, &batch, &caps) {
             return Err(refusal);
@@ -871,7 +982,12 @@ impl ServerState {
     /// capability refusal (mask, scope, budget) wins over a stale or forged
     /// approval with the same code the gated apply already seals.
     pub fn tx_apply(&mut self, args: &TxApplyArgs) -> Result<TxApplyOutput, McpToolError> {
-        let batch = build_batch(args.expected_revision, args.idempotency_key, &args.ops)?;
+        let batch = build_batch(
+            args.expected_revision,
+            args.idempotency_key,
+            &args.ops,
+            args.origin.as_deref(),
+        )?;
         let caps = super::explain::ExplainCaps::default_caps();
         if let Some(refusal) =
             super::tool_capabilities::refuse_write(&self.doc, &batch, &self.cap, &caps)
@@ -928,6 +1044,9 @@ impl ServerState {
         let spatial_delta = (args.delta != Some(false)).then(|| {
             super::scene_tools::spatial_delta(&before, &after, &super::scene_tools::op_ids(&batch))
         });
+        // Echo the stored stamp, not the request: a call that sent no origin
+        // answers `script:mcp`, the source the journal actually holds.
+        let origin = origin_label(&applied.provenance.source);
         Ok(TxApplyOutput {
             revision: applied.revision,
             effects: applied.effects,
@@ -939,6 +1058,7 @@ impl ServerState {
             undo_token: applied.key,
             changes,
             spatial_delta,
+            origin,
         })
     }
 
@@ -1217,7 +1337,11 @@ impl McpServer {
         if let Some(note) = &note {
             note.send(0.0, &format!("{call_name}: started")).await;
         }
+        // BG1: the dispatch queues its change notes; they leave before the
+        // answer, so a client that re-lists on the note sees the new surface.
+        let notices = context.clone();
         let answer = self.dispatch_call(request, context).await;
+        self.flush_notices(&notices).await;
         if let Some(note) = &note {
             note.send(1.0, &format!("{call_name}: done")).await;
         }
@@ -1366,222 +1490,6 @@ impl McpServer {
     }
 }
 
-/// D16: the progress notes one call sends.
-///
-/// A client that sent a progress token gets one note before a long call and
-/// one after it. A client that sent no token gets nothing: the notes cost
-/// nothing when nobody asked for them.
-///
-/// The note is a notification, never a second answer: the call still answers
-/// once, with its own result.
-struct ProgressNote {
-    peer: rmcp::service::Peer<RoleServer>,
-    token: rmcp::model::ProgressToken,
-}
-
-impl ProgressNote {
-    /// The note for this call, when the client asked for one and the call
-    /// is one of the long ones.
-    fn for_call(name: &str, context: &RequestContext<RoleServer>) -> Option<Self> {
-        if !is_long_call(name) {
-            return None;
-        }
-        let token = context.meta.get_progress_token()?;
-        Some(Self {
-            peer: context.peer.clone(),
-            token,
-        })
-    }
-
-    /// Send one note.
-    async fn send(&self, progress: f64, message: &str) {
-        let param = progress_note_params(&self.token, progress, message);
-        let _ = self
-            .peer
-            .send_notification(rmcp::model::ServerNotification::ProgressNotification(
-                rmcp::model::Notification::new(param),
-            ))
-            .await;
-    }
-}
-
-/// D16: the payload of one progress note.
-///
-/// The builder is pure: the same token, progress and message always make the
-/// same payload, so a test can read what the client would have received
-/// without a transport. The note is a notification, never a second answer:
-/// the call still answers once, with its own result.
-fn progress_note_params(
-    token: &rmcp::model::ProgressToken,
-    progress: f64,
-    message: &str,
-) -> rmcp::model::ProgressNotificationParam {
-    rmcp::model::ProgressNotificationParam::new(token.clone(), progress)
-        .with_message(message.to_owned())
-}
-
-/// The calls that are worth a progress note: the builds and the long runs.
-///
-/// D16: a note costs the client one message, so it is worth it only where
-/// the call can take more than a heartbeat.
-fn is_long_call(name: &str) -> bool {
-    matches!(
-        name,
-        TOOL_BUILD_LEVEL
-            | TOOL_GAME_BUILD
-            | TOOL_SIM_BUILD_ENCOUNTER
-            | TOOL_PLAY_RUN
-            | TOOL_CAPTURE
-            | "play.step_until"
-            | "build.web"
-            | "serve.web"
-            | "browser.capture"
-            | "sim.step"
-    )
-}
-
-impl ServerHandler for McpServer {
-    fn get_info(&self) -> ServerConfig {
-        let mut capabilities = ServerCapabilities::default();
-        capabilities.tools = Some(ToolsCapability::default());
-        // D16: the door serves four resources (crate map, door reference,
-        // error catalog, game.toml schema). Resources cost no tool-list
-        // budget: they are a read side, not verbs.
-        capabilities.resources = Some(ResourcesCapability::default());
-        // The door always publishes prompts: the shipped skills plus the five
-        // D16 scenarios, so the capability does not depend on the skills
-        // registry being non-empty.
-        capabilities.prompts = Some(PromptsCapability::default());
-        let mut info = InitializeResult::new(capabilities);
-        info.protocol_version = ProtocolVersion::V_2026_07_28;
-        "engine-endpoint".clone_into(&mut info.server_info.name);
-        env!("CARGO_PKG_VERSION").clone_into(&mut info.server_info.version);
-        info.instructions = Some(
-            "Scene authoring door: scene.read for the revision, tx.preview for the diff \
-             plus a single-use approval, tx.apply with that approval, tx.undo to revert. \
-             More verbs live in packs: api.search \"pack\" lists them, api.load advertises \
-             one, api.call runs any verb by name. No shell, code execution or file writes."
-                .to_owned(),
-        );
-        info
-    }
-
-    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Borrowed(SUPPORTED_PROTOCOL_VERSIONS)
-    }
-
-    async fn initialize(
-        &self,
-        request: rmcp::model::InitializeRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<InitializeResult, ErrorData> {
-        self.initialize_result(&request.protocol_version)
-    }
-
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, ErrorData> {
-        self.call_by_name(request, context).await
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, ErrorData> {
-        // The list moves with `api.load`, so 2026-07-28 clients get a zero
-        // cache hint: re-list after loading a pack.
-        let supports_cache_hints = context
-            .protocol_version()
-            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
-        Ok(ListToolsResult {
-            result_type: Some(ResultType::COMPLETE),
-            tools: self.tools(),
-            meta: None,
-            next_cursor: None,
-            ttl_ms: supports_cache_hints.then_some(0),
-            cache_scope: supports_cache_hints.then_some(CacheScope::Public),
-        })
-    }
-
-    async fn list_prompts(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListPromptsResult, ErrorData> {
-        Ok(ListPromptsResult {
-            prompts: self.prompt_list(),
-            ..Default::default()
-        })
-    }
-
-    /// D16: the four resources the door serves, in contract order.
-    async fn list_resources(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListResourcesResult, ErrorData> {
-        Ok(ListResourcesResult {
-            resources: crate::resources::resource_list(),
-            ..Default::default()
-        })
-    }
-
-    /// D16: one template per resource family, so a client can learn the
-    /// child URI shape before it reads the root.
-    async fn list_resource_templates(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListResourceTemplatesResult, ErrorData> {
-        Ok(ListResourceTemplatesResult {
-            resource_templates: crate::resources::resource_templates(),
-            ..Default::default()
-        })
-    }
-
-    /// D16: read one resource body as text.
-    ///
-    /// The door reference row list is built from the live advertised tools,
-    /// so the resource never drifts from the router.
-    async fn read_resource(
-        &self,
-        request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResponse, ErrorData> {
-        let uri = request.uri.as_ref();
-        match crate::resources::read_resource(uri, &self.tool_reference_rows()) {
-            Ok(contents) => Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
-                vec![contents],
-            ))),
-            Err(error) => Err(ErrorData::invalid_params(error.to_string(), None)),
-        }
-    }
-
-    async fn get_prompt(
-        &self,
-        request: GetPromptRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<GetPromptResponse, ErrorData> {
-        let Some(body) = self.prompt_text(&request.name) else {
-            return Err(ErrorData::invalid_params("prompt not found", None));
-        };
-        Ok(GetPromptResponse::Complete(GetPromptResult::new(vec![
-            PromptMessage::new_text(Role::User, body),
-        ])))
-    }
-
-    fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
-        self.tool_router.get(name).cloned().or_else(|| {
-            PackRegistry::shipped()
-                .verb(name)
-                .map(super::packs::VerbSpec::model)
-        })
-    }
-}
-
 impl McpServer {
     /// Synchronous handshake core: echo exact matches, answer mismatches
     /// with a supported version. [`ServerHandler::initialize`] routes
@@ -1594,25 +1502,6 @@ impl McpServer {
         info.protocol_version = negotiate_version(requested)?;
         Ok(info)
     }
-}
-
-/// Annotations for read-only MCP tools: read-only on, open world off.
-/// Owner of the pair every read-only tool's `annotations()` returns.
-pub(crate) fn read_only_annotations() -> Option<ToolAnnotations> {
-    let mut annotations = ToolAnnotations::default();
-    annotations.read_only_hint = Some(true);
-    annotations.open_world_hint = Some(false);
-    Some(annotations)
-}
-
-/// Annotations for state-changing MCP tools: read-only off, open world off,
-/// idempotent hint set only when a repeated call is a no-op.
-pub(crate) fn write_annotations(idempotent: bool) -> Option<ToolAnnotations> {
-    let mut annotations = ToolAnnotations::default();
-    annotations.read_only_hint = Some(false);
-    annotations.idempotent_hint = idempotent.then_some(true);
-    annotations.open_world_hint = Some(false);
-    Some(annotations)
 }
 
 #[cfg(test)]

@@ -4,7 +4,9 @@
 use engine_perf::alloc::measure;
 use engine_perf::baselines::{arena_baseline, baseline};
 use engine_perf::budget::{check_report, BudgetError};
-use engine_perf::workloads::{AiDecide, ArenaTick, DestructionStep, PhysicsStep, WorkloadReport};
+use engine_perf::workloads::{
+    AiDecide, ArenaTick, DestructionStep, MotionSearch, PhysicsStep, WorkloadReport,
+};
 
 const SEED_TWEAK: u64 = 0x9E37_79B9;
 
@@ -33,6 +35,12 @@ fn seeded_hash_regression_trips_the_gate() {
             DestructionStep::NAME,
             DestructionStep::canonical()
                 .with_seed(5_150 ^ SEED_TWEAK)
+                .run_report(),
+        ),
+        (
+            MotionSearch::NAME,
+            MotionSearch::canonical()
+                .with_seed(20_401 ^ SEED_TWEAK)
                 .run_report(),
         ),
     ];

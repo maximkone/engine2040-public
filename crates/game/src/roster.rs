@@ -24,6 +24,7 @@
 
 use core::fmt;
 
+use engine_core::text::is_identifier;
 use engine_core::Fnv64;
 
 use crate::ladder::{Ladder, GLORY_PER_WIN, GLORY_RANKS};
@@ -369,7 +370,7 @@ fn read_drafts(text: &str) -> Result<Vec<Draft>, RosterError> {
         {
             let id = key
                 .strip_prefix("man.")
-                .filter(|id| is_man_id(id))
+                .filter(|id| is_identifier(id))
                 .ok_or_else(|| syntax(line, body))?;
             if drafts.iter().any(|draft| draft.id == id) {
                 return Err(RosterError::DuplicateMan {
@@ -428,16 +429,6 @@ fn trait_is_plain(trait_name: &str) -> bool {
         .all(|byte| byte.is_ascii_lowercase() || byte == b' ')
         && !trait_name.starts_with(' ')
         && !trait_name.ends_with(' ')
-}
-
-/// A lowercase identifier: a letter or `_`, then letters, digits and `_`.
-fn is_man_id(text: &str) -> bool {
-    let mut bytes = text.bytes();
-    let Some(head) = bytes.next() else {
-        return false;
-    };
-    (head.is_ascii_lowercase() || head == b'_')
-        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 /// One quoted string value without its quotes; an empty or escaped one refuses.

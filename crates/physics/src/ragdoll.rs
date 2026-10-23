@@ -1411,15 +1411,7 @@ pub(crate) fn to_local(center: &[f32; 3], quat: &[f32; 4], point: &[f32; 3]) -> 
     rotate_vec(&d, &quat_conj(quat))
 }
 
-pub(crate) fn quat_conj(q: &[f32; 4]) -> [f32; 4] {
-    [-q[0], -q[1], -q[2], q[3]]
-}
-
-pub(crate) fn rotate_vec(v: &[f32; 3], q: &[f32; 4]) -> [f32; 3] {
-    let t = quat_mul(*q, [v[0], v[1], v[2], 0.0]);
-    let r = quat_mul(t, quat_conj(q));
-    [r[0], r[1], r[2]]
-}
+pub(crate) use engine_core::{quat_conj, rotate_vec};
 
 /// Normalize a quaternion (one `sqrt`, allowed sim math); zero or non-finite
 /// input falls back to identity so bad data never injects NaN.

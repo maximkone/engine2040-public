@@ -208,7 +208,7 @@ fn project(view_proj: &[f32; 16], aspect: f32, p: [f32; 3]) -> Option<[f32; 3]> 
     let x = view_proj[0] * p[0] + view_proj[4] * p[1] + view_proj[8] * p[2] + view_proj[12];
     let y = view_proj[1] * p[0] + view_proj[5] * p[1] + view_proj[9] * p[2] + view_proj[13];
     let w = view_proj[3] * p[0] + view_proj[7] * p[1] + view_proj[11] * p[2] + view_proj[15];
-    if !(w > MIN_W) {
+    if w.is_nan() || w <= MIN_W {
         return None;
     }
     let inv = 1.0 / w;

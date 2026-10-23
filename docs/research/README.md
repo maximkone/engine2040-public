@@ -12,6 +12,12 @@ read it as history, do not cite it in a new row.
 A new folder gets one line here in the same commit. Never move a folder without
 fixing the lines below and adding one line to `../archive/INDEX.md`.
 
+## 2026-10-24
+
+| Folder | Status | What it answers |
+|---|---|---|
+| `editor-art-gaps-2026-10-24/` | LIVE | editor UI, art-side and artist-side gaps; six ranked steals from arXiv and GitHub |
+
 ## 2026-10-23 (current gap waves)
 
 | Folder | Status | What it answers |

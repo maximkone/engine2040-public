@@ -20,6 +20,9 @@ pub mod coherence;
 pub mod combat_cues;
 pub mod crowd;
 pub mod cue;
+/// Authored cue rows: lanes, gains, duck, loops, the pick order and the gap
+/// report. Refuses overlapping loops on one lane.
+pub mod cue_sheet;
 /// Click-free gain ramps that reverse from the gain reached. Integer only.
 mod declick;
 #[cfg(feature = "device")]

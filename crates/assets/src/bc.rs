@@ -944,6 +944,10 @@ fn bc7_gather(
 }
 
 /// Fit both subsets of one partition, then fix up each subset's anchor index.
+#[expect(
+    clippy::needless_range_loop,
+    reason = "the index names a BC7 subset and is read as that same index into the mask, ends and anchor tables"
+)]
 fn bc7_fit_two_subset(
     texels: &[[u8; 4]; BLOCK_TEXELS],
     part: usize,
@@ -1283,6 +1287,10 @@ fn decode_bc7_mode6(bits: u128) -> [[u8; 4]; BLOCK_TEXELS] {
 /// Decode a mode 1 or mode 7 block: two subsets over the block's partition. Mode 1 is RGB
 /// with 6-bit endpoints and a shared p-bit per subset, mode 7 is RGBA with 5-bit endpoints and
 /// a p-bit each.
+#[expect(
+    clippy::needless_range_loop,
+    reason = "the index names a BC7 endpoint or channel and is read as that same index into raw, pbit and endpoints"
+)]
 fn decode_bc7_two_subset(mode: u8, bits: u128) -> [[u8; 4]; BLOCK_TEXELS] {
     let channels: &[usize] = if mode == 7 { &BC7_RGBA } else { &BC7_RGB };
     let (field_bits, index_bits) = if mode == 7 { (5usize, 2usize) } else { (6, 3) };
@@ -1341,6 +1349,10 @@ fn decode_bc7_two_subset(mode: u8, bits: u128) -> [[u8; 4]; BLOCK_TEXELS] {
 
 /// Decode a mode 5 block: one subset with a 7-bit colour plane and an 8-bit alpha plane, each
 /// with its own 2-bit indices; the rotation names the colour channel the alpha plane holds.
+#[expect(
+    clippy::needless_range_loop,
+    reason = "the index names a BC7 channel or endpoint and is read as that same index into raw and endpoints"
+)]
 fn decode_bc7_mode5(bits: u128) -> [[u8; 4]; BLOCK_TEXELS] {
     let mut at = 6;
     let rotation = usize::try_from(bc7_read(bits, &mut at, 2)).unwrap_or(0);

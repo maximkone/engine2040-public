@@ -19,6 +19,20 @@ pub fn clip_bytes(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
+/// A lowercase identifier: a letter or `_` first, then letters, digits or `_`.
+///
+/// One predicate for cooked names (the roster's man ids, the Rome tables'
+/// keys), so a manifest and the code that reads it agree on what a key is.
+#[must_use]
+pub fn is_identifier(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    let Some(head) = bytes.next() else {
+        return false;
+    };
+    (head.is_ascii_lowercase() || head == b'_')
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::clip_bytes;

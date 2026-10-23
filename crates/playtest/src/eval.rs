@@ -887,6 +887,8 @@ fn authoring_row(
         base_revision: index,
         live_revision: None,
         recorded: None,
+        // The eval rows carry no scene: the contract call stays digest-only.
+        body: None,
     };
     let refused = |mut row: EvalRow, error: AiError| -> EvalRow {
         let privacy_failure = error == AiError::UnsupportedCapability && privacy_probe;

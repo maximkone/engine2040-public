@@ -1,7 +1,8 @@
 name: web-build
 
 # WEB4: the browser shell. `build` compiles crates/web for wasm32-unknown-unknown, runs the wasm-bindgen CLI at the
-# version Cargo.lock locks and wasm-opt, and uploads dist/web (index.html, engine.js, engine_bg.wasm, build.json).
+# version Cargo.lock locks and wasm-opt, and uploads dist/web: index.html, build.json and the hashed files the
+# build pin names.
 # `browser` loads that artifact in headless Chrome served from 127.0.0.1 and reads back the JSON line, a screenshot
 # and the no-WebGPU page (tools/web-browse.mjs); it tries software-adapter flag sets until one gives an adapter and
 # writes down the exact reason for every one that does not (attempts.json).

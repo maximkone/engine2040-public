@@ -12,8 +12,8 @@ use engine_core::Fnv64;
 use engine_input::{Buttons, FighterId, MAX_PARTICIPANTS};
 
 pub mod access;
-/// Main/pause menu state machine: pure transitions, fn-pointer mode hooks.
-/// Std-only; the windowed loop drives it.
+/// Integer-pixel panel layout: constraints, gaps and margins to exact rects.
+pub mod layout;
 /// LAN lobby screen model: host list, join, ready, start, no typed address.
 pub mod lobby_ui;
 pub mod menus;

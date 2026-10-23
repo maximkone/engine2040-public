@@ -33,7 +33,7 @@
 //! No `arena_tick_32_sim` row: the `sim` track does not build in this
 //! workspace, so no sim number was invented. See the table comment.
 
-use crate::workloads::{CrowdScale, ScaledArenaTick};
+use crate::workloads::{CrowdScale, MotionSearch, ScaledArenaTick};
 use engine_arena::MAX_PARTICIPANTS;
 use engine_core::seal_key::{self, SealKeyError, MIN_SEAL_KEY_BYTES};
 use engine_core::Fnv64;
@@ -203,6 +203,21 @@ pub const BASELINES: &[Baseline] = &[
         hash: 11495894263503076227,
         alloc_bytes: 0,
         alloc_count: 0,
+    },
+    // 2026-10-23 (LM4): eight characters searching a seeded 1024-frame
+    // database for 600 ticks, each tick warped by its own exertion state. The
+    // database and its buckets are built inside the run, so the row bills them
+    // once (143296 bytes over 32 allocations); the character-ticks themselves
+    // allocate nothing. The query is fixed-point end to end, so no float can
+    // move a pick: the digest is machine-free, proven by the same row verifying
+    // on the Linux runner and on this Windows PC. Recorded from the live
+    // canonical run, never guessed.
+    Baseline {
+        workload: MotionSearch::NAME,
+        ticks: 600,
+        hash: 460254279363671632,
+        alloc_bytes: 143296,
+        alloc_count: 32,
     },
 ];
 
@@ -454,6 +469,20 @@ pub fn verify_seal_against(row: &Baseline, presented: u64, key: &[u8]) -> Result
 /// 2026-10-23 (AM18): the crowd row is the row's own bar scaled by the run
 /// length, 600 ticks x 2.0 ms per thousand-agent tick = 1200 ms per run.
 /// Presentation only: the crowd digest never enters the legacy golden.
+///
+/// 2026-10-23 (LM4): the motion row posts the per-character search plus its
+/// exertion warp as one kill bar (`motion_search_8`): eight characters asking
+/// a 1024-frame database 600 times, the same shape a crowd pays each tick. The
+/// exact integer bar lives with the frozen feature schema in `engine-anim`
+/// (`SearchReceipt::lane_ops`); this row is the millisecond half, so a wider
+/// scan or a heavier warp trips a named gate. Measured on the GitHub runner
+/// release build (2026-10-24, `--ignored perf_time_budgets`): p50 24.781 ms,
+/// max 27.825 ms, so the posted bar holds four times the p50 and 3.6 times
+/// the worst sample. The crowd row pays 24.369 ms for 600k agent-ticks, so one
+/// motion search costs about what a hundred and twenty-five crowd agents
+/// cost: the harness bills the scan, not the tick. Presentation only: the pick
+/// digest never enters the legacy golden, and the row's own scan cost is
+/// billed to the harness, not to the tick.
 pub const TIME_BUDGETS_MS: &[(&str, f64)] = &[
     ("arena_tick", 50.0),
     ("physics_step", 120.0),
@@ -462,6 +491,7 @@ pub const TIME_BUDGETS_MS: &[(&str, f64)] = &[
     ("spine_transform_body", 1.0),
     ("spine_full_tick", 4.0),
     ("crowd_scale_1000", 1200.0),
+    ("motion_search_8", 100.0),
     ("audio_reverb", 0.4),
     ("audio_occlusion_per_voice", 0.1),
     ("audio_director", 0.05),
@@ -1212,6 +1242,139 @@ mod cloth_grapple_budget_tests {
         );
         check_time_ms("cloth_step", cloth, cloth * 0.5).expect("cloth headroom passes");
         check_time_ms("grapple_servo_per_pair", servo, servo * 0.5).expect("servo headroom passes");
+    }
+}
+
+/// Motion-match budget lock: the LM1 per-character search and its AM8
+/// exertion warp posted as one kill bar (`motion_search_8`) plus the exact
+/// integer rate the bar names. Pattern: [`audio_budget_tests`] above — a seeded
+/// over-budget sample trips `check_time_ms`, a widened row hides that sample
+/// from the ceiling gate but never from the exact pin, and the eight-fighter
+/// arena row proves the lock moved no simulation cost. Presentation only: the
+/// pick digest is the harness's own, never the legacy golden
+/// `d57b5c8ae3096614`.
+#[cfg(test)]
+mod motion_budget_tests {
+    use super::*;
+    use crate::budget::{check_time_ms, BudgetError};
+    use crate::workloads::MotionSearch;
+
+    /// Posted motion kill bars: (workload, budget ms, regression seed).
+    const MOTION_BARS: &[(&str, f64, u64)] = &[("motion_search_8", 100.0, 0x4072)];
+
+    /// Seeded over-budget sample: half a bar of headroom plus a fixed sliver,
+    /// so the trip never depends on float edge rounding.
+    fn regressed_ms(budget_ms: f64, seed: u64) -> f64 {
+        let sliver = f64::from(u32::try_from(seed % 7).unwrap_or(0)) * 0.001;
+        budget_ms + budget_ms * 0.5 + sliver + 0.001
+    }
+
+    /// Character-ticks one canonical run bills: the search count behind both
+    /// the millisecond bar and the integer ceiling.
+    fn character_ticks(workload: &MotionSearch) -> u32 {
+        u32::try_from(MotionSearch::CHARACTERS)
+            .unwrap_or(0)
+            .saturating_mul(workload.ticks)
+    }
+
+    #[test]
+    fn motion_bars_are_posted_exact() {
+        for (workload, budget_ms, _) in MOTION_BARS {
+            let posted = time_budget_ms(workload).expect("LM4 bar recorded");
+            assert_eq!(
+                posted, *budget_ms,
+                "{workload} kill bar moved: posted {posted}, row {budget_ms}"
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_motion_regression_trips_the_kill_bar() {
+        for (workload, _, seed) in MOTION_BARS {
+            let posted = time_budget_ms(workload).expect("LM4 bar recorded");
+            check_time_ms(workload, posted, posted * 0.5).expect("headroom passes");
+            let over = regressed_ms(posted, *seed);
+            assert!(over > posted, "{workload} regression exceeds the bar");
+            let error = check_time_ms(workload, posted, over).expect_err("motion gate must trip");
+            assert!(
+                matches!(
+                    error,
+                    BudgetError::TimeMs {
+                        workload: got,
+                        budget_ms: budget,
+                        actual_ms: actual,
+                    } if got == *workload && budget == posted && actual == over
+                ),
+                "{workload} trips TimeMs, got {error}"
+            );
+            assert!(
+                error.to_string().contains("time budget"),
+                "{workload} names the blown budget: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn widened_motion_row_hides_regression_but_exact_pin_trips() {
+        for (workload, budget_ms, seed) in MOTION_BARS {
+            let posted = time_budget_ms(workload).expect("LM4 bar recorded");
+            let over = regressed_ms(posted, *seed);
+            check_time_ms(workload, posted, over).expect_err("posted bar kills the regression");
+            check_time_ms(workload, over, over).expect("widened row hides the regression");
+            assert_ne!(
+                over, *budget_ms,
+                "{workload} widened row differs from the posted bar"
+            );
+        }
+    }
+
+    #[test]
+    fn motion_search_bills_the_schema_ceiling_and_repeats() {
+        // The integer half of the lock: every character-tick searches, and no
+        // search may cost more than one full eval of the database. The count
+        // is machine-free, so it holds beside the millisecond bar.
+        let workload = MotionSearch::canonical();
+        let first = workload.run_lane_ops();
+        let again = workload.run_lane_ops();
+        assert_eq!(first, again, "the lane-op count repeats exactly");
+        let billed = character_ticks(&workload);
+        assert!(
+            first >= u64::from(billed),
+            "every character-tick bills at least one lane op, got {first} of {billed}"
+        );
+        let ceiling = u64::try_from(MotionSearch::ENTRIES * engine_anim::motion_match::FEAT_N)
+            .unwrap_or(0)
+            .saturating_mul(u64::from(billed));
+        assert!(
+            first <= ceiling,
+            "the run never bills more than a full eval per search: {first} over {ceiling}"
+        );
+    }
+
+    #[test]
+    fn eight_fighter_tick_holds_motion_share() {
+        // The arena's eight-fighter run keeps its recorded hash: this lock
+        // posts harness time bars and touches no simulation code, so the golden
+        // and every sim row stand.
+        let workload = crate::workloads::ScaledArenaTick::canonical_for(8).expect("8 listed");
+        let report = workload.run_report();
+        let recorded = scaled_arena_baseline(8).expect("8-fighter row recorded");
+        assert_eq!(report.workload, recorded.workload, "8 names its row");
+        assert_eq!(report.ticks, recorded.ticks, "8 keeps its tick count");
+        assert_eq!(
+            report.hash, recorded.hash,
+            "eight-fighter sim hash unchanged by the motion lock"
+        );
+        // One character-tick's share of the posted bar stays under 50 us, so a
+        // crowd of searchers cannot quietly become the frame's main cost.
+        let posted = time_budget_ms("motion_search_8").expect("LM4 bar recorded");
+        let billed = character_ticks(&MotionSearch::canonical());
+        let share = posted / f64::from(billed);
+        assert!(
+            share < 0.05,
+            "per-character-tick share is {share} ms, bar 0.05 ms"
+        );
+        check_time_ms("motion_search_8", posted, posted * 0.5).expect("motion headroom passes");
     }
 }
 

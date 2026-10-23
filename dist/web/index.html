@@ -86,7 +86,7 @@
   @keyframes duel-pop { from { transform: translate(-50%, -50%) scale(1.45); opacity: 0; } to { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
 </style>
 </head>
-<body data-state="starting" data-commit="28807636d">
+<body data-state="starting" data-commit="81f32f3e9dd9" data-build="62fcece2d1b7">
 <canvas id="canvas"></canvas>
 <div id="duel" aria-hidden="true">
   <div class="duel-side">
@@ -122,7 +122,7 @@
 <pre id="load">load: fetching the engine</pre>
 <pre id="memory">memory: no reading yet</pre>
 <div id="fetch"><progress id="fetch-bar" max="1" value="0"></progress><span id="fetch-text">arena bundle: waiting</span></div>
-<pre id="build">build: commit 28807636d</pre>
+<pre id="build">build: 62fcece2d1b7 commit 81f32f3e9dd9</pre>
 <pre id="coi">coi: isolated=false reloads=0</pre>
 <pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
 <pre id="report">starting</pre>
@@ -150,9 +150,42 @@
 <noscript>
   <div style="position:fixed;inset:0;z-index:11;padding:5vmin;background:#b00020;color:#fff;font:600 20px system-ui,sans-serif">This page needs JavaScript, WebAssembly and WebGPU (Chrome or Edge 113+, Safari 26+, Firefox 141+ on Windows).</div>
 </noscript>
+<script type="application/json" id="build-pin">{"schema":2,"build":"62fcece2d1b7","files":{"assets/arena.e2bundle":{"name":"assets/arena.f9a5cd281742.e2bundle","sha256":"f9a5cd2817425a24923fc79878268e7421c70e6cfabfd9db69892c21ffbc0f94"},"assets/fighters.e2bundle":{"name":"assets/fighters.8a1a6e3a049c.e2bundle","sha256":"8a1a6e3a049c2ef168b86a12ce0c9f10728759a9a3c92913f695659239a20127"},"coi-serviceworker.js":{"name":"coi-serviceworker.js","sha256":"dabf39855d892809e852eeda7712bec2bb55d8fdff19a8bebdea316355549d48"},"engine.js":{"name":"engine.aadd9dd3d72f.js","sha256":"aadd9dd3d72fad3c49706af97885ce062999c9c6dbbdc31ce263a06d62565584"},"engine_bg.wasm":{"name":"engine_bg.c0d8c51aa0f1.wasm","sha256":"c0d8c51aa0f11d02e3af250e1f7c843ea411d4941b99be00518b398cd88d6a1d"},"index.html":{"name":"index.html","sha256":"fdf40271319f1105f94c44cfce17e95cc5d236f6250db6d82e99d43f31d855f6"},"loader.js":{"name":"loader.b384f1a1ed23.js","sha256":"b384f1a1ed23313186e9c2262accc03b31adb2269604788f2469e6ad00ea4a16"}}}</script>
 <script type="module">
-import init, { run, run_arena, lose_device, destroy_device, input_sample, audio_cue_check, request_arena_capture, run_net } from "./engine.js";
-import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory, pageFetcher, pageFetcherPrefix } from "./loader.js";
+// PIN: this page names exactly one build. The pin above is written by tools/web-build.mjs; loader.js compares it with the
+// deployed build.json before importing engine.js, and verifies the wasm and glue bytes against their sha256. A page cached
+// across a deploy is therefore a named refusal (fallback=build-mismatch), never one build's page with another's engine.
+const pin = JSON.parse(document.getElementById("build-pin").textContent);
+const pinned = (logical) => pin.files[logical]?.name ?? logical;
+window.buildPin = pin;
+{
+  const line = document.getElementById("build");
+  if (line) line.textContent = `build: ${pin.build} commit ${document.body.dataset.commit} wasm=${pinned("engine_bg.wasm")} kit=${pinned("assets/arena.e2bundle")} rig=${pinned("assets/fighters.e2bundle")}`;
+}
+let loader, engine;
+try {
+  loader = await import(new URL(pinned("loader.js"), import.meta.url));
+  await loader.checkBuild(pin, import.meta.url);
+  engine = await loader.importEngine(pin, import.meta.url);
+} catch (e) {
+  console.error(e);
+  const fallback = e?.fallback ?? "load-failed";
+  document.getElementById("fatal-reason").textContent = "The engine did not start: " + e + " (fallback=" + fallback + ")";
+  document.getElementById("report").textContent = JSON.stringify({
+    ok: false,
+    reason: fallback,
+    fallback,
+    detail: String(e),
+    commit: document.body.dataset.commit,
+    build: pin.build,
+  });
+  document.body.dataset.fallback = fallback;
+  document.body.dataset.state = "fatal";
+  await new Promise(() => {}); // the refusal is the page: never reach the engine, never ask for a GPU
+}
+const { run, run_arena, lose_device, destroy_device, input_sample, audio_cue_check, request_arena_capture, run_net } = engine;
+const { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory, pageFetcher, pageFetcherPrefix } = loader;
+const init = engine.default;
 
 // QW4: the arena bundle streams in with a byte bar. It stays hidden until the first
 // chunk and hides again when the body is whole or the fetch refuses.
@@ -171,7 +204,7 @@ function showFetch({ received, total, done, error }) {
 // WEB6: the page owns the network. The engine asks for a gameplay asset by URL and this
 // function fetches it; the bytes come back through the asset seam (engine-assets). A failure
 // here is a typed refusal the engine names, never an empty arena.
-const fetchBundle = pageFetcher(import.meta.url, showFetch);
+const fetchBundle = pageFetcher(pin, import.meta.url, showFetch);
 window.engine2040FetchAsset = (url) => {
   const pending = fetchBundle(url);
   pending.catch(() => { delete document.body.dataset.fetch; });
@@ -180,7 +213,7 @@ window.engine2040FetchAsset = (url) => {
 
 // QW4: the arena bundle answers with its tier-0 prefix, so the first frame does not
 // wait for the HDRI tier; the same response keeps the bar moving behind it.
-const fetchBundlePrefix = pageFetcherPrefix(import.meta.url, showFetch);
+const fetchBundlePrefix = pageFetcherPrefix(pin, import.meta.url, showFetch);
 window.engine2040FetchAssetPrefix = (url) => {
   const pending = fetchBundlePrefix(url);
   pending.catch(() => { delete document.body.dataset.fetch; });
@@ -269,7 +302,7 @@ if (query.has("debug")) document.body.dataset.debug = "1";
 try {
   // QW3/QW12: loader.js fetches and compiles the module (streaming, cached by hash) and times it; a wrong MIME type or a
   // missing file throws here and lands in the fatal page below with its reason.
-  const loaded = await loadEngine(import.meta.url);
+  const loaded = await loadEngine(pin, import.meta.url);
   const stats = (window.loadStats = loaded.stats); // live: initMs, firstFrameMs and the final cache outcome are added as they happen
   window.loadSettled = loaded.settled;
   const show = () => { document.getElementById("load").textContent = loadLine(stats, stats.initMs, stats.firstFrameMs); };
@@ -299,15 +332,17 @@ try {
   // The wasm module did not load or start (no WebAssembly, a missing file, a crash).
   // A missing WebGPU is not this path: `run` and `run_arena` report that themselves.
   console.error(e);
-  document.getElementById("fatal-reason").textContent = "The engine did not start: " + e + " (fallback=load-failed)";
+  const fallback = e?.fallback ?? "load-failed";
+  document.getElementById("fatal-reason").textContent = "The engine did not start: " + e + " (fallback=" + fallback + ")";
   document.getElementById("report").textContent = JSON.stringify({
     ok: false,
-    reason: "load-failed",
-    fallback: "load-failed",
+    reason: fallback,
+    fallback,
     detail: String(e),
     commit: document.body.dataset.commit,
+    build: pin.build,
   });
-  document.body.dataset.fallback = "load-failed";
+  document.body.dataset.fallback = fallback;
   document.body.dataset.state = "fatal";
 }
 </script>

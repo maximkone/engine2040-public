@@ -7,7 +7,12 @@ use crate::alloc::{self, AllocSnapshot};
 use crate::arena::{FrameArena, FrameError, CULL_KEYS, FRAME_BYTES};
 use engine_ai::{Brain, Percept};
 use engine_anim::crowd_scale::{self, CrowdTape};
+use engine_anim::exert::{self, ExertState, ExertTable};
 use engine_anim::lod::Tier;
+use engine_anim::motion_match::{
+    bake, db_hash, default_weights, search, Entry, MotionDb, Query, FEAT_N, NO_HIST, POSE_LANES,
+    Q_MAX,
+};
 use engine_arena::{ArenaConfig, FighterId, FighterTape, AI_PERIOD_TICKS, MAX_PARTICIPANTS};
 use engine_core::fixed::Fixed;
 use engine_core::hash::FNV64_OFFSET;
@@ -1202,6 +1207,184 @@ impl CrowdScale {
             mix(&mut hash, digest);
         }
         hash
+    }
+
+    /// Canonical run plus its allocation totals.
+    pub fn run_report(&self) -> WorkloadReport {
+        measured_report(Self::NAME, self.ticks, || self.run_hash())
+    }
+}
+
+/// The per-character motion-match search plus the exertion-weight warp: one
+/// match of eight fighters asking a seeded database for a frame every tick.
+/// The integer lane-ops kill bar lives with the frozen feature schema in
+/// `engine-anim` (`motion_schema_test`); this workload posts the milliseconds
+/// and the run digest beside it, so a search or warp regression trips a named
+/// gate instead of quietly changing what a crowd costs.
+/// Consumer: the `perf` proof's timed table, the canonical row test and the
+/// motion kill bars in `baselines`.
+/// Data owner: the database, the eight exertion states and the query scratch
+/// are built inside the run, so two concurrent runs hash identically.
+/// Units: ticks, characters, fixed-point lanes in `Q` steps, fatigue ticks.
+/// Determinism: integer search over a seeded database, each query the
+/// character's own frame with one lane moved by a seeded delta; no float
+/// enters the run, so no machine can round a pick differently.
+/// Errors: a refused advance or search folds zero and the cursor holds, so a
+/// bad seed trips the recorded baseline instead of panicking mid-profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MotionSearch {
+    /// Database and delta seed (`MOTION_SEED` for the canonical run).
+    pub seed: u64,
+    /// Fixed ticks per run.
+    pub ticks: u32,
+}
+
+impl MotionSearch {
+    /// Workload name used in baselines and budget errors.
+    pub const NAME: &'static str = "motion_search_8";
+    /// Characters per tick: the eight-fighter match the bar is posted for.
+    pub const CHARACTERS: usize = 8;
+    /// Frames per clip in the canonical database.
+    pub const FRAMES_PER_CLIP: usize = 256;
+    /// Database entries: four clips of 256 frames, inside the anim cap.
+    pub const ENTRIES: usize = 4 * Self::FRAMES_PER_CLIP;
+    /// Canonical database seed.
+    pub const MOTION_SEED: u64 = 20_401;
+    /// Jump penalty for a break in the clip sequence, in cost units.
+    pub const JUMP_COST: i64 = 4_194_304;
+    /// Contact-mismatch penalty: the anti-slide gate.
+    pub const CONTACT_COST: i64 = 8_388_608;
+    /// Fixed-feature modulus: lanes stay in `0..=Q_MAX`.
+    const FEATURE_MODULUS: u32 = 8_388_609;
+    /// Effort modulus: `0..=256` covers rest through full work.
+    const EFFORT_MODULUS: u32 = 257;
+    /// Delta modulus: a query lane moves by `-32_768..=32_767` fixed steps.
+    const DELTA_MODULUS: u32 = 65_536;
+
+    /// Canonical workload: eight characters, 600 ticks, seeded database.
+    pub const fn canonical() -> Self {
+        Self {
+            seed: Self::MOTION_SEED,
+            ticks: 600,
+        }
+    }
+
+    /// Same shape with a different seed (regression proofs).
+    pub const fn with_seed(self, seed: u64) -> Self {
+        Self { seed, ..self }
+    }
+
+    /// The seeded database: `ENTRIES` frames of fixed features laid out in
+    /// clip order, so the continuity penalty has a sequence to keep. Refuses
+    /// nothing here: an empty bake falls through to the empty-database fold.
+    pub fn database(&self) -> MotionDb {
+        let mut rng = Rng::new(self.seed);
+        let mut entries = Vec::with_capacity(Self::ENTRIES);
+        for index in 0..Self::ENTRIES {
+            let feat = core::array::from_fn(|_| {
+                i32::try_from(rng.next_u32() % Self::FEATURE_MODULUS).unwrap_or(0)
+            });
+            entries.push(Entry {
+                feat,
+                clip: u16::try_from(index / Self::FRAMES_PER_CLIP).unwrap_or(0),
+                tick: u16::try_from(index % Self::FRAMES_PER_CLIP).unwrap_or(0),
+                contact: u8::try_from(rng.next_u32() & 3).unwrap_or(0),
+            });
+        }
+        bake(entries).unwrap_or_default()
+    }
+
+    /// One walk over the run: the canonical digest and the total lane ops it
+    /// billed. `run_hash` and `run_lane_ops` both read this, so the cost the
+    /// hash proves and the cost the bar names come from the same walk.
+    fn walk(&self) -> (u64, u64) {
+        let db = self.database();
+        let mut hash = FNV64_OFFSET;
+        mix(&mut hash, u64::from(self.ticks));
+        mix(&mut hash, u64::try_from(Self::CHARACTERS).unwrap_or(0));
+        mix(&mut hash, db_hash(&db));
+        let Some(head) = db.entries.first() else {
+            // An empty database has no run to bill: fold the refusal and stop,
+            // so the row trips instead of a panic inside a profiled run.
+            mix(&mut hash, 0);
+            return (hash, 0);
+        };
+        let table = ExertTable::default();
+        let base = default_weights();
+        let mut rng = Rng::new(self.seed ^ 0x9E37_79B9);
+        let mut states: [ExertState; Self::CHARACTERS] =
+            core::array::from_fn(|who| ExertState::new(u64::try_from(who).unwrap_or(0) + 1));
+        let mut cursors = [NO_HIST; Self::CHARACTERS];
+        let mut warped = [0i32; FEAT_N];
+        let mut ops = 0u64;
+        for _ in 0..self.ticks {
+            for who in 0..Self::CHARACTERS {
+                let state = &mut states[who];
+                let effort = u16::try_from(rng.next_u32() % Self::EFFORT_MODULUS).unwrap_or(0);
+                if state.advance(&table, effort, 1).is_err() {
+                    mix(&mut hash, 0);
+                    continue;
+                }
+                if exert::warp_weights(&base, &mut warped, POSE_LANES, state, &table).is_err() {
+                    mix(&mut hash, 0);
+                    continue;
+                }
+                let cursor = cursors[who];
+                let anchor = db
+                    .entries
+                    .get(usize::try_from(cursor).unwrap_or(usize::MAX))
+                    .unwrap_or(head);
+                let mut feat = anchor.feat;
+                let step =
+                    i32::try_from(rng.next_u32() % Self::DELTA_MODULUS).unwrap_or(0) - 32_768;
+                feat[0] = feat[0].wrapping_add(step).clamp(-Q_MAX, Q_MAX);
+                let query = Query {
+                    feat,
+                    contact: u8::try_from(rng.next_u32() & 3).unwrap_or(0),
+                    curr: cursor,
+                    weights: warped,
+                    jump_cost: Self::JUMP_COST,
+                    contact_cost: Self::CONTACT_COST,
+                };
+                match search(&db, &query) {
+                    Ok((won, receipt)) => {
+                        let index = u64::try_from(won.index).unwrap_or(u64::MAX);
+                        cursors[who] = u32::try_from(won.index).unwrap_or(NO_HIST);
+                        ops = ops.saturating_add(receipt.lane_ops);
+                        mix(&mut hash, u64::from(state.fatigue_ticks));
+                        mix(
+                            &mut hash,
+                            u64::from(warped.iter().sum::<i32>().cast_unsigned()),
+                        );
+                        mix(&mut hash, index);
+                        mix(&mut hash, won.cost.cast_unsigned());
+                        mix(&mut hash, receipt.lane_ops);
+                        mix(
+                            &mut hash,
+                            u64::try_from(receipt.full_evals).unwrap_or(u64::MAX),
+                        );
+                    }
+                    Err(_) => mix(&mut hash, 0),
+                }
+            }
+        }
+        (hash, ops)
+    }
+
+    /// Canonical hash of the run.
+    #[must_use]
+    pub fn run_hash(&self) -> u64 {
+        self.walk().0
+    }
+
+    /// Integer lane ops the run billed, summed over every character-tick: the
+    /// same unit the anim schema gate holds, so the millisecond bar has an
+    /// exact machine-free rate beside it.
+    /// Consumer: the motion kill-bar test in `baselines`.
+    /// Determinism: a count of executed lane multiply-accumulates, no clock.
+    #[must_use]
+    pub fn run_lane_ops(&self) -> u64 {
+        self.walk().1
     }
 
     /// Canonical run plus its allocation totals.

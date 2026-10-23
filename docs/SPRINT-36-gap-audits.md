@@ -106,25 +106,27 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   exist, no workflow runs either. Tier C. Size S. Owns `.github/workflows/`.
   F2P: no `schedule:` names the tools (grep). P2P: existing CI stays green.
   Accept: a nightly run writes its report artifact.
-- [ ] TG7 docs: a link check outside the book - broken relative links are only checked in
-  `docs/book/`. Tier A. Size S. Owns `tools/`. F2P: a new `tools/docs-links.mjs --check`
-  reports the current 3 real breaks (`docs/library/index.md` was one, fixed 2026-10-23).
-  P2P: book links stay green. Accept: zero broken links in `docs/**` in CI.
+- [x] TG7 docs: a link check outside the book - `tools/docs-links.mjs` reads every tracked
+  markdown page outside `docs/archive/` (660 pages, 0 broken) and `ci.yml` runs it beside the
+  tool inventory. It found and fixed one real break (`docs/library/index.md` -> `../EMPIRE.md`,
+  archived 2026-10-17). Landed `c03ad5037`.
 - [ ] TG8 ci: a macOS leg - the golden matrix covers linux x86, windows, wasm, not macOS.
   Tier B. Size M. Owns `.github/workflows/golden-matrix.yml`. F2P: no `macos` runner in
   the matrix (grep). P2P: the four current targets stay green. Accept: a fifth row, same
   golden and corpus digests.
-- [ ] TG9 tools: the pre-commit hook installs from the repo - it exists only in this PC's
-  `.git/hooks` and `core.hooksPath` is unset. Tier A. Size S. Owns `tools/hooks/`,
-  `tools/doctor.mjs`. F2P: `doctor` reports a missing hook on a fresh clone. P2P: the
-  hook itself is unchanged. Accept: `tools/hooks/install.mjs` sets `core.hooksPath`.
+- [ ] TG9 tools: a fresh clone installs the hooks - the tool exists and works:
+  `node tools/hooks-install.mjs` sets `core.hooksPath=tools/hooks` (pre-commit, pre-push;
+  installed on this box 2026-10-24). Nothing runs it automatically and `doctor` only warns.
+  Tier A. Size S. Owns `tools/doctor.mjs`, `CONTRIBUTING.md`. F2P: `doctor --strict` exits 1
+  when the hooks are unset (new test). P2P: `doctor` stays healthy. Accept: a fresh clone's
+  first `doctor` names the one command, and `--strict` fails until it runs.
 - [ ] TG10 ci: rustdoc warnings fail the docs job - warnings are counted, not gated.
   Tier C. Size S. Owns `.github/workflows/`. F2P: a workflow step with `-D warnings`
   fails on today's warnings. P2P: the docs build stays green. Accept: warnings zero.
 
 ## LLM and agent side
 
-- [ ] LG1 provider: a model request carries content - `AiRequest` holds digest refs and
+- [x] LG1 provider: a model request carries content - `AiRequest` holds digest refs and
   `provider/vendor.rs:442` renders `task/revision/digest`; `playtest/src/door.rs:276`
   passes `[3u8; 32]`, and `pins.rs:55` tells the model not to invent ids. No engine path
   can ask a real model about a real scene. Tier A. Size M. Owns
@@ -132,8 +134,13 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   `crates/endpoint/src/`. F2P: a bounded `body` (text + an id allowlist) reaches the
   vendor line and a live-shaped mock answers with a real id (new test). P2P: the privacy
   envelope test stays green. Accept: one 1,000-token scene brief round-trips, and the
-  digest-only path is byte-identical. Blocked 2026-10-23: a seat holds
-  `crates/provider/src/*` dirty; take it when that lands.
+  digest-only path is byte-identical. Landed `a80ba3b`.
+  Progress 2026-10-24: `crates/playtest/src/door.rs` `scene_brief` sends one
+  `name id at x,y,z` line per prop through `Door::submit` (`body: Some(brief)`), whole
+  lines only with a `... N more` tail past `MAX_BODY_BYTES`; a door with no scene keeps
+  the digest-only line. Runs 40027542502 (playtest door, 21 tests) and 40026984777
+  (provider body, 17 tests) pass; the brief test was seen red with `body` forced to
+  `None`.
 - [x] LG2 playtest: the eval scorecard is a standing CI gate with a measured bar -
   `tools/eval-bar.json` + `eval-check.yml` (mock only): `rows 8, at 100%: 7, red: 0`.
   Landed `1873f4d59`.

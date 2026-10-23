@@ -824,7 +824,8 @@ struct SlotAnim {
     /// stumbling leans, fallen lies flat, catching kneels. Presentation
     /// only; the sim digest never reads this.
     balance: GaitPhase,
-    /// First tick the additive flinch shows on (`u32::MAX` reads as none).
+    /// First tick of the additive flinch window; that tick reads zero weight
+    /// and the lean rises on the ticks after it (`u32::MAX` reads as none).
     /// Presentation only; the sim hash never reads it.
     hit_start: u32,
     /// World-space planar push away from the attacker at `hit_start`,
@@ -2332,7 +2333,7 @@ impl FighterLook {
     /// and leans the torso plus head over about 450 ms: blend in, hold, fade.
     fn slot_pose(&self, rig: &Rig, slot: &SlotAnim, alpha: f32) -> Result<LocalPose, LookError> {
         let mut pose = self.slot_pose_base(rig, slot, alpha)?;
-        self.apply_hit_flinch(rig, &mut pose, slot, alpha)?;
+        self.apply_hit_flinch(rig, &mut pose, slot)?;
         Ok(pose)
     }
 
@@ -2361,17 +2362,16 @@ impl FighterLook {
         Ok(pose)
     }
 
-    /// Presentation flinch weight for this slot at `alpha`; no hit reads zero.
-    /// A held slot samples the end of its tick, like its clip, so the impact
-    /// pose stays one pose at every sub-tick frame of the freeze (LF10).
-    fn hit_weight(&self, slot: &SlotAnim, alpha: f32) -> f32 {
+    /// Presentation flinch weight for this slot; no hit reads zero. The onset
+    /// is tick-aligned: the hit tick and every held tick read zero, so the
+    /// impact pose is one pose at every sub-tick frame of the freeze (LF10)
+    /// and the lean never lands as a one-frame step. It then rises one tick at
+    /// a time over six ticks, holds three, and fades out at the window's end.
+    fn hit_weight(&self, slot: &SlotAnim) -> f32 {
         if slot.hit_start == u32::MAX {
             return 0.0;
         }
-        view_envelope(
-            self.tick.wrapping_sub(slot.hit_start),
-            clip_alpha(slot, alpha),
-        )
+        view_envelope(self.tick.wrapping_sub(slot.hit_start), 0.0)
     }
 
     /// Add the hit flinch to `pose`: pelvis push plus dip, then the
@@ -2382,9 +2382,8 @@ impl FighterLook {
         rig: &Rig,
         pose: &mut LocalPose,
         slot: &SlotAnim,
-        alpha: f32,
     ) -> Result<f32, LookError> {
-        let weight = self.hit_weight(slot, alpha);
+        let weight = self.hit_weight(slot);
         if weight <= 0.0 || (slot.hit_push[0] == 0.0 && slot.hit_push[1] == 0.0) {
             return Ok(0.0);
         }
@@ -2410,14 +2409,13 @@ impl FighterLook {
     /// the same lean [`slot_pose`](Self::slot_pose) applies. A missing pose
     /// reads 0 instead of failing the frame.
     fn react_head_m(&self, rig: &Rig, slot: &SlotAnim, alpha: f32) -> f32 {
-        if self.hit_weight(slot, alpha) <= 0.0 {
+        if self.hit_weight(slot) <= 0.0 {
             return 0.0;
         }
         let Ok(mut pose) = self.slot_pose_base(rig, slot, alpha) else {
             return 0.0;
         };
-        self.apply_hit_flinch(rig, &mut pose, slot, alpha)
-            .unwrap_or(0.0)
+        self.apply_hit_flinch(rig, &mut pose, slot).unwrap_or(0.0)
     }
 
     /// Create every slot's body-part vertex buffers once, from the bind
@@ -5215,18 +5213,39 @@ mod tests {
         };
         // Same hitstop hold on both sides (LF10): `Parried` freezes the same
         // impact pair without a flinch, so past-window poses compare hold to
-        // hold and only the flinch can differ; its ramp peaks one tick in.
+        // hold and only the flinch can differ; its ramp peaks six ticks in.
         let calm_hold = FightCue::Parried {
             attacker: 0,
             victim: 1,
         };
         hit.observe_tick(20, &views, &hp, &[cue]);
         calm.observe_tick(20, &views, &hp, &[calm_hold]);
-        // Hitstop freezes the flinch four ticks; sample its full lean after
-        // the three-tick rise.
-        for tick in 21..=27u32 {
+        // LF10: through the four held ticks the victim shows the calm hold
+        // pose itself at every sub-tick alpha. The flinch opens at zero weight
+        // on the impact tick and reads the same zero while held, so nothing
+        // steps mid-freeze and no alpha sample brings the onset in early.
+        fn assert_freeze_shows_the_calm_pose(tick: u32, hit: &FighterLook, calm: &FighterLook) {
+            let slot_h = hit.slots[1];
+            let rig_h = &hit.rigs[hit.rig_for_slot(1)];
+            let slot_c = calm.slots[1];
+            let rig_c = &calm.rigs[calm.rig_for_slot(1)];
+            for alpha in [0.0, 0.5, 0.9] {
+                assert_eq!(
+                    hit.slot_pose(rig_h, &slot_h, alpha).expect("pose samples"),
+                    calm.slot_pose(rig_c, &slot_c, alpha).expect("pose samples"),
+                    "tick {tick} alpha {alpha}: the freeze shows one pose"
+                );
+            }
+        }
+        assert_freeze_shows_the_calm_pose(20, &hit, &calm);
+        // Hitstop freezes the flinch four ticks; the six-tick rise starts on
+        // the first free tick, so tick 29 carries its full lean.
+        for tick in 21..=29u32 {
             hit.observe_tick(tick, &views, &hp, &[]);
             calm.observe_tick(tick, &views, &hp, &[]);
+            if tick <= 23 {
+                assert_freeze_shows_the_calm_pose(tick, &hit, &calm);
+            }
         }
         let slot_h = hit.slots[1];
         let rig_h = &hit.rigs[hit.rig_for_slot(1)];
@@ -5254,7 +5273,7 @@ mod tests {
             "the torso leans off its base"
         );
         // Mid-window the flinch has decayed but still reads.
-        for tick in 28..=40u32 {
+        for tick in 30..=40u32 {
             hit.observe_tick(tick, &views, &hp, &[]);
             calm.observe_tick(tick, &views, &hp, &[]);
         }
@@ -5301,6 +5320,65 @@ mod tests {
             look.slot_pose(rig, &slot, 0.5).expect("pose samples")
         };
         assert_eq!(run(), run(), "same Hit tick gives the same flinch twice");
+    }
+
+    #[test]
+    fn hit_flinch_onset_is_tick_aligned_across_the_freeze() {
+        // LF10: the flinch window opens on the impact tick at zero weight and
+        // reads the same zero on every held tick of the four-tick freeze, so
+        // the freeze shows one pose and no step lands mid-freeze. The first
+        // free tick starts a six-tick rise of one step per tick, then three
+        // ticks hold at full weight and the window fades to zero at its end.
+        let mut look = balance_look_two();
+        let views = [view(0, -1.0, 0.0), view(1, 1.0, 0.0)];
+        let hp = [1000u16, 1000u16];
+        for tick in 0..20u32 {
+            look.observe_tick(tick, &views, &hp, &[]);
+        }
+        let hit = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 100,
+        };
+        look.observe_tick(20, &views, &hp, &[hit]);
+        let weight = |look: &FighterLook| look.hit_weight(&look.slots[1]);
+        assert_eq!(weight(&look), 0.0, "the impact tick reads zero weight");
+        // Held ticks 21..=23 ride the same flinch clock as the impact tick.
+        for tick in 21..=23u32 {
+            look.observe_tick(tick, &views, &hp, &[]);
+            assert!(look.slots[1].held, "the victim is held at tick {tick}");
+            assert_eq!(weight(&look), 0.0, "held tick {tick} reads zero");
+        }
+        // Free again at 24: one 1/6 step per tick over the six-tick rise.
+        for step in 1u32..=6 {
+            let tick = 23 + step;
+            look.observe_tick(tick, &views, &hp, &[]);
+            assert!(!look.slots[1].held, "the victim is free at tick {tick}");
+            let want = f32::from(u16::try_from(step).unwrap_or(u16::MAX)) / 6.0;
+            let got = weight(&look);
+            assert!(
+                (got - want).abs() <= 1e-6,
+                "rise step {step} at tick {tick}: got {got}, want {want}"
+            );
+        }
+        // Three ticks at full weight after the rise.
+        for tick in 30..=32u32 {
+            look.observe_tick(tick, &views, &hp, &[]);
+            assert_eq!(weight(&look), 1.0, "hold tick {tick} reads full");
+        }
+        // The fade falls every tick and reaches zero at the window's end.
+        let mut last = weight(&look);
+        for tick in 33..=49u32 {
+            look.observe_tick(tick, &views, &hp, &[]);
+            let got = weight(&look);
+            assert!(got < last, "fade tick {tick}: {got} is not under {last}");
+            last = got;
+        }
+        assert!(last > 0.0, "the fade still reads before the window ends");
+        look.observe_tick(50, &views, &hp, &[]);
+        assert_eq!(weight(&look), 0.0, "the window ends after 27 flinch ticks");
+        look.observe_tick(51, &views, &hp, &[]);
+        assert_eq!(weight(&look), 0.0, "past the window reads zero");
     }
 
     #[test]
@@ -6085,7 +6163,7 @@ mod tests {
 
     #[test]
     fn view_run_2040_300_eight_fighters_has_no_joint_pops() {
-        // AM24 accept: the flinch rises over three ticks, so the seeded
+        // AM24 accept: the flinch rises over six ticks, so the seeded
         // 8-fighter 300-tick line reads no joint pops (was 2 at 13.1 cm,
         // both on `index_lower_r` under `act=attack`).
         let line = FighterLook::view_run(2040, 300, 8).expect("headless view runs");

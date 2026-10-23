@@ -73,6 +73,9 @@ jobs:
       - name: tool inventory (tools/README.md and test mates)
         if: ${{ !cancelled() }}
         run: node tools/tools-index.mjs --check
+      - name: doc links (every relative link outside docs/archive)
+        if: ${{ !cancelled() }}
+        run: node tools/docs-links.mjs
       - name: rust quality ratchet (docs/RUST-QUALITY.md)
         if: ${{ !cancelled() }}
         run: node tools/rust-quality.mjs

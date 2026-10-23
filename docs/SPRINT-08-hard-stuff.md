@@ -124,13 +124,39 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   traversal_rubble_var_test.rs: rubble_var_scramble_holds_across_seeded_height_and_noise_sweeps,
   rubble_var_bands_sit_exactly_on_the_chooser_gates, rubble_var_breach_rebake_is_exact_x2;
   engine-anim --lib 449 passed + full --no-fail-fast, clippy clean (runs 39217218591, 39216661948, 39216657052).
-- [ ] LM4 anim: motion-search cost + schema lock — post the LM1
+- [x] LM4 anim: motion-search cost + schema lock — post the LM1 Landed a12f39e.
+  PF1 gained the `motion_search_8` workload (`crates/perf/src/workloads.rs`):
+  eight characters search a seeded 1024-frame database 600 times, every pick
+  warped by its own `ExertState`, so one digest covers the LM1 scan and the AM8
+  warp. The query is fixed-point end to end, so the row is machine-free: the
+  recorded values (hash 460254279363671632, 143296 bytes over 32 allocations,
+  the bake only — a character-tick allocates nothing) verify on the Linux
+  runner and on this Windows PC. Kill bar 100 ms posted against the measured
+  release p50 24.781 ms / max 27.825 ms (`--ignored perf_time_budgets`, run
+  40027025256), plus the exact integer half: no run may bill more than one full
+  database eval per search. Proof: `--lib motion` 5 passed twice (40024472894,
+  40027332237); `--test it canonical::motion_search_matches_baseline` 1 passed
+  (40026396085) and the same line on this PC; `--test it regression::` 2 passed
+  (40026658836), which now holds the seeded motion perturbation in
+  `seeded_hash_regression_trips_the_gate`, so the gate fails on a motion
+  regression; `--lib motion_schema_test` 4 passed (40028251540), so the schema
+  half still refuses a change with a diff and the eight-fighter search stays
+  under its bar; clippy `-p engine-perf --all-targets -D warnings` PASS fresh
+  (40027804547); rust-quality score 99, casts 54 and panic sites 5 unmoved;
+  rustfmt clean. Golden d57b5c8ae3096614 unchanged — no sim crate touched.
+  One extra commit b3512d35a clears the last clippy red on HEAD
+  (`crates/perf/tests/profiler.rs` `drop(span)`). Two reds stay outside this
+  row and are not caused by it: at clean HEAD `arena_tick` and
+  `arena_tick_32` report 106996 bytes against their recorded 106740
+  (`--test it` run 40023790565, HEAD-only proof 40024128889), so some landed
+  arena change grew the canonical run by 256 bytes and its owner must re-record
+  or explain that row; no bytes were re-recorded here.
   per-character search cost plus AM8 exertion-warp cost into PF1
   workloads with kill bars; freeze the LM1 feature schema. Tier A.
   Size S. Owns baseline hunks + schema-freeze test. Accept: PF1 gate
   fails on seeded regression; 8-fighter tick in budget; schema change
   refuses with diff; golden unchanged. needs: LM1, AM8, PF1.
-  (PLN28 animation.md, reviewed 2026-09-25.) Progress 2026-10-17: 4fa1246f motion_schema_test.rs freezes the LM1 feature schema and gates search cost in lane ops; left: PF1 ms workloads in crates/perf and recorded baselines (needs a perf-to-anim edge).
+  (PLN28 animation.md, reviewed 2026-09-25.) Progress 2026-10-17: 4fa1246f motion_schema_test.rs freezes the LM1 feature schema and gates search cost in lane ops; left: PF1 ms workloads in crates/perf and recorded baselines (needs a perf-to-anim edge). Closed 2026-10-24: the perf-to-anim edge already exists (engine-anim is a declared engine-perf dependency since AM18), so the ms leg needed no new edge.
 - [x] TV2 anim: traversal-to-nav link contract proof — every TV1 edge Progress 2026-10-17: crates/nav/src/links.rs has the traversal link registry with rebake_links and rebake_for_set tests (nav suite green, run 39057395844); left: no contract test ties each anim TV1 edge to its NV2 link entry on the five fixtures.
   names exactly its NV2 link-registry entry and rebakes exactly those
   links, proven x2 on vault/hurdle/mantle/climb/drop fixtures. Tier A.
@@ -161,7 +187,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Tier B. Size S. Owns the chunked split+merge hunks beside
   `crates/physics/src/islands.rs:57`. Accept: identical hash at 1/2/4/8
   threads + ≥2x wall on 64-fighter scene. needs: PX6. (SPEED53.) Landed e8d2fb8. par_64_fighter_scene_hash_is_identical_under_1_2_4_8_threads and par_step_matches_the_serial_step_under_1_2_4_8_threads 8 passed (gh run 39489741989); par_speedup_64_fighters 2.30x wall on 4 threads, runner available_parallelism 4 (gh run 39488071406); whole crate 282 passed (run 39489768592), clippy green (run 39489293024), golden d57b5c8ae3096614 unchanged (run 39490319645).
-- [ ] PX9 physics: ragdoll contacts and joint tables — self-collision between
+- [x] PX9 physics: ragdoll contacts and joint tables — self-collision between
   non-adjacent bones (collision groups filter parent and child), ragdoll
   against ragdoll for clinches and falls, per-joint swing/twist limit tables
   from the skeleton instead of depth, and torque motors with per-joint limits
@@ -169,7 +195,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Tier A. Size M. Owns `crates/physics/src/ragdoll.rs`,
   `crates/physics/src/joint_limits.rs`. Accept: no bone interpenetration over
   1 cm in 50 seeded falls; two ragdolls landing on each other separate; hash
-  x2; settles within the PX1 bound; zero per-tick allocations. needs: PX1, PX10. Progress 2026-10-17: b61738a5 physfx tests: two ragdolls landing on each other separate with no unjoined overlap over 1 cm and replay exactly (4 passed); the 50-seeded-falls bar fails (seed 44 overlaps lower_arm_r/shin_r by 8 cm at tick 40, run 39068262860), committed as an ignored repro; left: more solver iterations or bone CCD, spawn reading the joint tables. Progress 2026-10-19: `joint_limits.rs` lands (named degree rows spine 20/35, head 35/45, arm 85/70, hip 40/30, knee/elbow hinge 145; friction-spring motor numbers; collision groups that keep parent and child apart but let the same bone of two ragdolls meet) and `Ragdoll::spawn` reads it through `insert_table_joints`. Runner green: 256 lib + 18 it + 3 balance + 5 stagger tests, clippy -D warnings, golden d57b5c8ae3096614 x2, float world unchanged. Two-ragdoll separation still proves through `ragdoll_tape::clinch_fighters_part_under_a_centimeter_x2_shuffled`. The 1 cm bar is still open: the joint table moved the worst 50-fall overlap to 4.53 cm (fall 46, elbow_r/ankle_r) at Rapier's four solver iterations, 2.9 cm at six and 9.2 cm at twelve in engine-physfx, so the 50-fall test stays ignored with those numbers; left: a contact model the joints cannot overrun (AD17 bones plus a stiffer solver, or contacts between grandparents).
+  x2; settles within the PX1 bound; zero per-tick allocations. needs: PX1, PX10. Landed 20bef9e19. Progress 2026-10-17: b61738a5 physfx tests: two ragdolls landing on each other separate with no unjoined overlap over 1 cm and replay exactly (4 passed); the 50-seeded-falls bar fails (seed 44 overlaps lower_arm_r/shin_r by 8 cm at tick 40, run 39068262860), committed as an ignored repro; left: more solver iterations or bone CCD, spawn reading the joint tables. Progress 2026-10-19: `joint_limits.rs` lands (named degree rows spine 20/35, head 35/45, arm 85/70, hip 40/30, knee/elbow hinge 145; friction-spring motor numbers; collision groups that keep parent and child apart but let the same bone of two ragdolls meet) and `Ragdoll::spawn` reads it through `insert_table_joints`. Runner green: 256 lib + 18 it + 3 balance + 5 stagger tests, clippy -D warnings, golden d57b5c8ae3096614 x2, float world unchanged. Two-ragdoll separation still proves through `ragdoll_tape::clinch_fighters_part_under_a_centimeter_x2_shuffled`. The 1 cm bar is still open: the joint table moved the worst 50-fall overlap to 4.53 cm (fall 46, elbow_r/ankle_r) at Rapier's four solver iterations, 2.9 cm at six and 9.2 cm at twelve in engine-physfx, so the 50-fall test stays ignored with those numbers; left: a contact model the joints cannot overrun (AD17 bones plus a stiffer solver, or contacts between grandparents). Progress 2026-10-24: the 1 cm bar closes. Commit 20bef9e19's capsule contact resolution and rest damp un-ignored the acceptance test, and it passes: `cargo test -p engine-physics --lib --features rapier ragdoll`, run 40029103391, 41 passed, prints `PX9_FALLS falls=50 digest=b0f2a3c31b2e3a1a peak=0.0080 m settled=0.0080 m worst_speed=0.8751`; the same run has `ragdoll_tape::tests::clinch_fighters_part_under_a_centimeter_x2_shuffled` (overlap 0.0020 m parted against 0.1557 m unparted) and `step_allocations_audited_and_pinned` (our tick glue and hash allocate zero; Rapier's own pipeline keeps a bounded per-step local list, pinned at ≤600 calls and 52,000 bytes per 60 steps). Golden `d57b5c8ae3096614` is asserted by `cargo test -p engine2040 --release --test proof_cli default_and_max_seed`, run 40028765712. The look's settle guard reads rest after the float assist 6ce03c077 (runs 40023435417, 40025202151). Ticked.
   Correction 2026-10-21: duplicate of PW16 (SPRINT-28), which asks this row's failing 50-seeded-falls 1 cm bar and names it as the close (seed 44 overlaps `lower_arm_r`/`shin_r` by 8 cm); do not work both.
 - [x] PX44 physics: a body file the four fx calls share - finish-line C10's
   body half. `crates/physfx/src/body.rs` reads a strict body file (name, gore,
