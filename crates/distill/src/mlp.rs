@@ -167,25 +167,36 @@ pub(crate) fn first_max_f32(v: &[f32]) -> usize {
 
 /// Count as a float for averages and init limits. Counts here are row and
 /// unit totals far below 2^24, so the conversion is exact.
-fn count_f32(n: usize) -> f32 {
+pub(crate) fn count_f32(n: usize) -> f32 {
     n as f32
 }
 
 /// Uniform `[-limit, limit)` from the engine rng (24-bit mantissa draw).
-fn uniform(rng: &mut Rng, limit: f32) -> f32 {
+pub(crate) fn uniform(rng: &mut Rng, limit: f32) -> f32 {
     let bits = usize::try_from(rng.next_u64() >> 40).unwrap_or(0);
     let unit = count_f32(bits) / count_f32(1 << 24);
     (unit * 2.0 - 1.0) * limit
 }
 
+/// Fisher-Yates a batch order with the seeded engine rng: same seed, same
+/// order. Shared by the one-hot and the continuous fit, so both draw their
+/// epoch shuffle from the spec seed in the same way.
+pub(crate) fn shuffle_order(rng: &mut Rng, order: &mut [usize]) {
+    for i in (1..order.len()).rev() {
+        let bound = u64::try_from(i).unwrap_or(u64::MAX).saturating_add(1);
+        let j = usize::try_from(rng.next_range(0, bound)).unwrap_or(0);
+        order.swap(i, j);
+    }
+}
+
 /// Adam moment buffers for one param tensor.
-struct Adam {
+pub(crate) struct Adam {
     m: Vec<f32>,
     v: Vec<f32>,
 }
 
 impl Adam {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Self {
             m: vec![0.0; n],
             v: vec![0.0; n],
@@ -193,7 +204,7 @@ impl Adam {
     }
 
     /// One Adam update with bias correction `c1 = 1 - b1^t`, `c2 = 1 - b2^t`.
-    fn step(&mut self, params: &mut [f32], grads: &[f32], lr: f32, c1: f32, c2: f32) {
+    pub(crate) fn step(&mut self, params: &mut [f32], grads: &[f32], lr: f32, c1: f32, c2: f32) {
         const B1: f32 = 0.9;
         const B2: f32 = 0.999;
         const EPS: f32 = 1e-8;
@@ -211,8 +222,10 @@ impl Adam {
     }
 }
 
-/// Gradient accumulators plus per-row work buffers for one batch.
-struct Grads {
+/// Gradient accumulators plus per-row work buffers for one batch. Shared by
+/// both fits on this net shape: the one-hot softmax row and the continuous
+/// squared-error row accumulate into the same tables.
+pub(crate) struct Grads {
     w1: Vec<f32>,
     b1: Vec<f32>,
     w2: Vec<f32>,
@@ -223,7 +236,7 @@ struct Grads {
 }
 
 impl Grads {
-    fn new(inp: usize, hid: usize, out: usize) -> Self {
+    pub(crate) fn new(inp: usize, hid: usize, out: usize) -> Self {
         Self {
             w1: vec![0.0; hid * inp],
             b1: vec![0.0; hid],
@@ -235,10 +248,16 @@ impl Grads {
         }
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         for t in [&mut self.w1, &mut self.b1, &mut self.w2, &mut self.b2] {
             t.fill(0.0);
         }
+    }
+
+    /// The four gradient tables in param order, so a fit can hand each one to
+    /// its own Adam pass without reaching into the accumulator's fields.
+    pub(crate) fn tables(&self) -> (&Vec<f32>, &Vec<f32>, &Vec<f32>, &Vec<f32>) {
+        (&self.w1, &self.b1, &self.w2, &self.b2)
     }
 
     /// Add one row's softmax cross-entropy gradient, weighted by `scale`.
@@ -255,6 +274,48 @@ impl Grads {
         self.d_hidden.fill(0.0);
         for (o, l) in self.logits.iter().enumerate() {
             let d = (l / sum - if o == target { 1.0 } else { 0.0 }) * scale;
+            self.b2[o] += d;
+            let row = o * hid..(o + 1) * hid;
+            for ((g, w), (h, dh)) in self.w2[row.clone()]
+                .iter_mut()
+                .zip(&mlp.w2[row])
+                .zip(self.hidden.iter().zip(self.d_hidden.iter_mut()))
+            {
+                *g += d * h;
+                *dh += d * w;
+            }
+        }
+        for (h, (act, d)) in self.hidden.iter().zip(&self.d_hidden).enumerate() {
+            if *act <= 0.0 {
+                continue;
+            }
+            self.b1[h] += d;
+            for (g, v) in self.w1[h * inp..(h + 1) * inp].iter_mut().zip(x) {
+                *g += d * v;
+            }
+        }
+        Some(())
+    }
+
+    /// Add one row's squared-error gradient, weighted by `scale`. The output
+    /// layer is linear, so its lane derivative is just `pred - target`; the
+    /// ReLU gate below it drops every hidden unit that did not fire.
+    /// `None` when the row's lengths do not fit the net.
+    pub(crate) fn add_mse_row(
+        &mut self,
+        mlp: &Mlp,
+        x: &[f32],
+        target: &[f32],
+        scale: f32,
+    ) -> Option<()> {
+        let (inp, hid, out) = mlp.dims();
+        mlp.forward(x, &mut self.hidden, &mut self.logits)?;
+        if target.len() != out {
+            return None;
+        }
+        self.d_hidden.fill(0.0);
+        for (o, (pred, want)) in self.logits.iter().zip(target).enumerate() {
+            let d = (pred - want) * scale;
             self.b2[o] += d;
             let row = o * hid..(o + 1) * hid;
             for ((g, w), (h, dh)) in self.w2[row.clone()]
@@ -352,12 +413,7 @@ pub fn fit_mlp(
     let mut order: Vec<usize> = (0..dataset.len()).collect();
     let (mut pow1, mut pow2) = (1.0f32, 1.0f32);
     for _ in 0..spec.epochs {
-        // Fisher-Yates with the seeded engine rng: same seed, same order.
-        for i in (1..order.len()).rev() {
-            let bound = u64::try_from(i).unwrap_or(u64::MAX).saturating_add(1);
-            let j = usize::try_from(rng.next_range(0, bound)).unwrap_or(0);
-            order.swap(i, j);
-        }
+        shuffle_order(&mut rng, &mut order);
         for batch in order.chunks(spec.batch) {
             grads.clear();
             let scale = 1.0 / count_f32(batch.len());

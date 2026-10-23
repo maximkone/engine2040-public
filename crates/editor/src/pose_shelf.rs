@@ -62,6 +62,47 @@ impl PoseShelf {
         self.entries.iter().find(|entry| entry.name == name)
     }
 
+    /// Every pose sorted by name (the panel's display order).
+    pub fn sorted(&self) -> Vec<&ShelfEntry> {
+        let mut rows: Vec<&ShelfEntry> = self.entries.iter().collect();
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        rows
+    }
+
+    /// One panel line per pose, name order: `crouch  joints=24 frames=8
+    /// thumb=yes`.
+    pub fn rows(&self) -> Vec<String> {
+        self.sorted()
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}  joints={} frames={} thumb={}",
+                    entry.name,
+                    entry.joints,
+                    entry.frames,
+                    if entry.thumb.is_some() { "yes" } else { "no" }
+                )
+            })
+            .collect()
+    }
+
+    /// Save one recorded tape as a pose, refusing a tape that recorded no
+    /// frames.
+    ///
+    /// This is the convenient door for the pose button: the tape recorder
+    /// hands its finished tape straight here, and the row keeps the digest.
+    pub fn save_from_tape(
+        &mut self,
+        name: &str,
+        tape: &PoseTape,
+        thumb: Option<[u8; 4]>,
+    ) -> Result<(), ShelfError> {
+        if tape.frames() == 0 {
+            return Err(ShelfError::EmptyTape);
+        }
+        self.save(name, tape, thumb)
+    }
+
     /// Save one recorded tape under `name`.
     ///
     /// An empty or over-long name, a name already on the shelf and the
@@ -111,6 +152,8 @@ impl PoseShelf {
 pub enum ShelfError {
     /// The name held no text.
     EmptyName,
+    /// The tape recorded no frame, so it holds no pose.
+    EmptyTape,
     /// The name went over the char bound.
     NameTooLong {
         /// Chars given.
@@ -136,6 +179,9 @@ impl std::fmt::Display for ShelfError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyName => f.write_str("pose name holds no text; pass 1 to 64 chars"),
+            Self::EmptyTape => {
+                f.write_str("the tape recorded no frame; record one frame before saving a pose")
+            }
             Self::NameTooLong { len, max } => write!(
                 f,
                 "pose name holds {len} chars over the {max} bound; shorten it to {max} chars"
@@ -212,5 +258,38 @@ mod tests {
             })
         );
         assert_eq!(shelf.len(), MAX_POSES);
+    }
+
+    #[test]
+    fn rows_sort_by_name_and_the_tape_door_refuses_an_empty_tape() {
+        let mut shelf = PoseShelf::new();
+        shelf
+            .save_from_tape("thrust", &tape(&[1_000]), Some([1, 2, 3, 255]))
+            .unwrap();
+        shelf
+            .save_from_tape("block", &tape(&[2_000]), None)
+            .unwrap();
+        assert_eq!(
+            shelf.rows(),
+            vec![
+                "block  joints=1 frames=1 thumb=no".to_string(),
+                "thrust  joints=1 frames=1 thumb=yes".to_string(),
+            ]
+        );
+        assert_eq!(
+            shelf
+                .sorted()
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["block", "thrust"]
+        );
+        let empty = PoseTape::new(1).unwrap();
+        assert_eq!(
+            shelf.save_from_tape("nothing", &empty, None),
+            Err(ShelfError::EmptyTape)
+        );
+        assert_eq!(shelf.len(), 2, "a refused save keeps the shelf");
+        assert!(ShelfError::EmptyTape.to_string().contains("record"));
     }
 }

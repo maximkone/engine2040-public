@@ -109,18 +109,18 @@ pub const SMOKE_WALL_LIMIT_MS: u32 = 300_000;
 /// is a stalled window, not a harness, and fails loudly at the CLI.
 pub const FIXED_DT_MAX_MS: u32 = 1_000;
 
-/// Window-leg 4x MSAA setting (EG13): `1` turns the 4x HDR/depth pair plus
-/// its resolve on; unset, `0` or any other word keeps the default 1x path
-/// the look captures were taken with. Same shape as `E2040_STEAM_RUNNING`.
+/// Window-leg 4x MSAA setting (EG13): unset builds the 4x HDR/depth pair,
+/// the shipped default (`0` opts out to 1x; LF5d measured 4x calmer than TAA
+/// on the sand edge, 0.00 vs 10.60 levels; TAA jitter and resolve stay off).
 pub const MSAA_ENV: &str = "E2040_MSAA";
 
-/// Whether this run builds the 4x MSAA targets: true only for `1`, so a
-/// typo never silently antialiases or silently drops it. Owner: this
-/// module. Caller: the `arena` window leg and the offscreen smoke twin at
-/// presenter init, both through `Presenter::set_msaa_enabled`. Pure string
-/// compare, no clock; the returned boolean is the setting's only effect.
+/// Whether this run builds the 4x MSAA targets: true unless the value is
+/// `0` after trim, so unset and `1` keep the shipped 4x default and only a
+/// word-free `0` opts out. Owner: this module; pure string compare, no clock.
+/// Caller: the `arena` window leg and the offscreen smoke twin at presenter
+/// init, both through `Presenter::set_msaa_enabled`; it is its only effect.
 pub fn msaa_setting(value: Option<&str>) -> bool {
-    value.is_some_and(|value| value == "1")
+    !matches!(value.map(str::trim), Some("0"))
 }
 
 /// Contact-shadow strength (GS43): `0` turns the pass off (the kernel copies
@@ -2041,14 +2041,14 @@ mod tests {
         }
     }
 
-    /// EG13: the window leg turns 4x MSAA on only for `E2040_MSAA=1`; an
-    /// unset value, `0` or any other word keeps the default 1x path.
+    /// EG13/LF5d: 4x MSAA ships on (LF5d measured it calmer than TAA on the
+    /// sand edge); `E2040_MSAA=0` is the explicit 1x opt-out and `1` repeats it.
     #[test]
-    fn msaa_setting_is_on_only_for_one() {
-        assert!(msaa_setting(Some("1")), "1 turns the 4x pair on");
-        assert!(!msaa_setting(None), "unset keeps the 1x path");
-        assert!(!msaa_setting(Some("0")), "0 keeps the 1x path");
-        assert!(!msaa_setting(Some("true")), "a word is not the setting");
+    fn msaa_setting_defaults_to_four_x_and_zero_opts_out() {
+        assert!(msaa_setting(None), "unset ships the 4x pair");
+        assert!(msaa_setting(Some("1")), "1 keeps the 4x pair on");
+        assert!(!msaa_setting(Some("0")), "0 is the explicit 1x opt-out");
+        assert!(msaa_setting(Some("true")), "a word keeps the 4x default");
         assert_eq!(MSAA_ENV, "E2040_MSAA", "the setting name is pinned");
     }
 

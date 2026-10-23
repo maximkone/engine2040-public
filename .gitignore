@@ -53,3 +53,6 @@ tools/vendor/
 # LLVM coverage droppings (instrumented test runs write them to the cwd): never track.
 *.profraw
 *.profdata
+# Build exports: `build` writes dist/<name>/ and dist/<name>.zip under the project,
+# and tools/ship.mjs stages the engine's own dist/: build artifacts, never tracked.
+dist/

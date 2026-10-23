@@ -140,6 +140,12 @@ jobs:
           sed -E 's#\]\(([^):]+)\)#](https://github.com/maximkone/engine2040-public/blob/main/\1)#g' llms.txt > site/llms.txt
       # The crates a game author touches (tools/book-links.mjs DOC_CRATES, listed on docs/book/api.md). The features
       # are the ones that show the public API: Rapier in physics and physfx, the MCP door in endpoint.
+      # TG10 (2026-10-23): `RUSTDOCFLAGS: ""` is deliberate until the count below is zero, so `-D warnings` cannot
+      # be turned on yet. Measured on run 40006304627 (success): 781 rustdoc warnings over these 12 crates —
+      # engine-render 149, engine-anim 131, engine-game 112, engine-net 108, engine-physics 86, engine-endpoint 75,
+      # engine-combat 48, engine-assets 43, engine-arena 21, engine-physfx 4, engine-core 2, engine-input 2.
+      # Re-measure the total with this exact step and the `rustdoc warnings:` line it prints; turn the flag on the
+      # day that line reads 0.
       - name: rustdoc for the crates a game author touches
         shell: bash
         env:

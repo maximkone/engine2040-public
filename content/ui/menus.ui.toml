@@ -1,0 +1,14 @@
+# The menu screens as data: the same rows, in the same order, as the Rust builders in
+# crates/ui/src/menus.rs. Row keys are the locale keys; the label comes from locale.rs,
+# so this file carries order and nothing else.
+#
+# engine-ui's `menu_layout` tests read this file and compare it to `main_items_locale`
+# and `pause_items_locale`, so an edit here that the Rust path does not make fails.
+
+[[screen]]
+name = "main"
+rows = ["start-fight", "settings", "quit"]
+
+[[screen]]
+name = "pause"
+rows = ["resume", "settings", "quit-to-main"]

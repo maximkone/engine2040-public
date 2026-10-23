@@ -25,6 +25,9 @@ pub mod browser;
 pub mod browser_tab;
 pub mod capability;
 pub mod commands;
+/// E9 console panel: one input line over a [`console::ConsoleDoor`], a bounded
+/// transcript ring and typed refusal rows. Std-only; the host supplies the door.
+pub mod console;
 pub mod durable;
 /// Findings panel: spatial findings on a staged AI proposal, fixes via commands.
 #[cfg(feature = "ui")]
@@ -38,6 +41,9 @@ mod geometry;
 pub mod gizmo;
 /// Data-only node graph for material and VFX graphs; wired to Document.
 pub mod graph;
+/// History panel: a cursor over [`History::rows_newest_first`] with the jump
+/// returned as data. Std-only; the dock paints its rows.
+pub mod history_panel;
 /// Schema inspector over registry descriptors: override badging, batched
 /// command edits. Std-only; consumed by the dock panel (`shell_ui.rs`
 /// renders [`inspector::build_grid`]).
@@ -103,6 +109,10 @@ pub mod theme;
 /// at a caller byte cap, with the requested-but-absent list. Std-only; the
 /// caller supplies the pixels from the capture path.
 pub mod thumbnail;
+/// Animation timeline (E6): a sheet of joint tracks with thousandth values,
+/// integer sampling and localized `region` edits. Plain data; the host is the
+/// seam to `engine_anim` clips.
+pub mod timeline;
 /// Live tuning panel: combat/AI drafts as previewed batches,
 /// applied at tick boundaries through the practice child seam, journaled in a tape.
 #[cfg(feature = "ui")]

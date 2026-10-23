@@ -21,8 +21,11 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
 use engine_anim::clip::{bake_clip, bake_track, qclip_hash, QClip, TICK_DT};
+use engine_anim::clip_rot::{bake_rot_blob, rot_blob_hash, sample_rot_blob};
 use engine_anim::edit;
+use engine_anim::pose::QuatTrack;
 use engine_anim::state_machine::anim_door::{AnimDoor, DoorRefusal};
+use engine_core::checked::f32_from_u64;
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::de::DeserializeOwned;
 use rmcp::serde::{Deserialize, Serialize};
@@ -50,6 +53,8 @@ pub const TOOL_ANIM_CLIP_RETIME: &str = "anim.clip.retime";
 pub const TOOL_ANIM_CLIP_MIRROR: &str = "anim.clip.mirror";
 /// Verb: undo the last session clip edit.
 pub const TOOL_ANIM_CLIP_UNDO: &str = "anim.clip.undo";
+/// Verb: bake and sample a joint's rotation sidecar from a clip JSON.
+pub const TOOL_ANIM_ROT_PREVIEW: &str = "anim.rot.preview";
 
 /// Args for `anim.graph.set`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
@@ -594,12 +599,159 @@ crate::e2_tool!(
     invoke = clip_undo
 );
 
+/// Args for `anim.rot.preview`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RotPreviewArgs {
+    /// Path to a QClip JSON: `{"tracks":[{"times":[..]}, ..],"dur":1.0}`.
+    pub clip_path: String,
+    /// Joint whose rotation lane is sampled; out of range is refused.
+    pub joint: u16,
+    /// Tick span the eight samples spread over; default 60.
+    pub ticks: Option<u32>,
+}
+
+/// Result of `anim.rot.preview`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RotPreviewOutput {
+    /// Sample times in seconds, 8 entries.
+    pub times: Vec<f32>,
+    /// Sampled joint rotations, one per time.
+    pub rot: Vec<[f32; 4]>,
+    /// Socket offset turned by each sampled rotation; zero for a plain joint.
+    pub socket_offset: Vec<[f32; 3]>,
+    /// Digest (16 hex digits) of the serialized rotation blob.
+    pub digest: String,
+}
+
+/// Samples one `anim.rot.preview` call returns.
+const ROT_PREVIEW_SAMPLES: u32 = 8;
+/// Tick span when the caller names none.
+const ROT_PREVIEW_DEFAULT_TICKS: u32 = 60;
+
+/// The clip JSON this verb reads: a QClip's `tracks` (only `times` is used)
+/// and `dur`. Unknown clip keys such as `keys`, `min` and `max` are ignored,
+/// so a full QClip document reads too.
+#[derive(Debug, Deserialize)]
+#[serde(crate = "rmcp::serde")]
+struct ClipDoc {
+    tracks: Vec<ClipTrackDoc>,
+    dur: f32,
+}
+
+/// One clip track in the JSON; only its sample times feed the rotation bake.
+#[derive(Debug, Deserialize)]
+#[serde(crate = "rmcp::serde")]
+struct ClipTrackDoc {
+    times: Vec<f32>,
+}
+
+/// `anim.rot.preview`: bake the rotation sidecar for a clip JSON and sample one
+/// joint over 8 evenly spaced ticks. Read-only; the clip file is only read.
+fn rot_preview(
+    _server: &McpServer,
+    args: &RotPreviewArgs,
+) -> Result<RotPreviewOutput, McpToolError> {
+    let text = std::fs::read_to_string(&args.clip_path).map_err(|error| {
+        McpToolError::new(
+            "missing_clip",
+            format!(
+                "{} could not be read ({error}); recovery: create it with a `tracks` array, \
+                 one entry per joint carrying `times`, and a `dur` in seconds",
+                args.clip_path
+            ),
+        )
+    })?;
+    let doc: ClipDoc = rmcp::serde_json::from_str(&text).map_err(|error| {
+        McpToolError::new(
+            "bad_clip",
+            format!(
+                "{} is not a QClip JSON ({error}); recovery: keep the `tracks` key as an array \
+                 of objects with a `times` array, plus `dur`",
+                args.clip_path
+            ),
+        )
+    })?;
+    let mut tracks = Vec::with_capacity(doc.tracks.len());
+    for track in &doc.tracks {
+        tracks.push(bake_track(
+            track.times.clone(),
+            vec![[0.0; 3]; track.times.len()],
+        ));
+    }
+    let clip = QClip {
+        tracks,
+        dur: doc.dur,
+    };
+    let rotations: Vec<QuatTrack> = clip
+        .tracks
+        .iter()
+        .map(|track| QuatTrack {
+            times: track.times.clone(),
+            values: vec![[0.0, 0.0, 0.0, 1.0]; track.times.len()],
+        })
+        .collect();
+    let blob = bake_rot_blob(&clip, &rotations, &[]);
+    if usize::from(args.joint) >= blob.lanes.len() {
+        return Err(McpToolError::new(
+            "bad_joint",
+            format!(
+                "joint {} is outside 0..{} in {}; recovery: pass a joint index below {}",
+                args.joint,
+                blob.lanes.len(),
+                args.clip_path,
+                blob.lanes.len()
+            ),
+        ));
+    }
+    let ticks = args.ticks.unwrap_or(ROT_PREVIEW_DEFAULT_TICKS).max(1);
+    let mut hint = 0usize;
+    let mut times = Vec::new();
+    let mut rot = Vec::new();
+    let mut socket_offset = Vec::new();
+    for i in 0..ROT_PREVIEW_SAMPLES {
+        let tick = i * ticks / ROT_PREVIEW_SAMPLES;
+        let t = f32_from_u64(u64::from(tick)) * TICK_DT;
+        let Some((offset, q)) = sample_rot_blob(&blob, t, usize::from(args.joint), &mut hint)
+        else {
+            return Err(McpToolError::new(
+                "bad_joint",
+                "joint left the blob while sampling; recovery: pass a joint index below the clip's track count",
+            ));
+        };
+        times.push(t);
+        rot.push(q);
+        socket_offset.push(offset);
+    }
+    Ok(RotPreviewOutput {
+        times,
+        rot,
+        socket_offset,
+        digest: format!("{:016x}", rot_blob_hash(&blob)),
+    })
+}
+
+crate::e2_tool!(
+    /// `anim.rot.preview`: sample a joint's rotation sidecar over 8 ticks.
+    RotPreviewTool,
+    name = TOOL_ANIM_ROT_PREVIEW,
+    description = "Bake the rotation sidecar for a QClip JSON at clip_path and sample one joint over 8 evenly spaced ticks; returns the times, the joint rotation, the socket offset and the blob digest. Read-only, no file writes; a missing or malformed clip names the key to fix.",
+    readonly = true,
+    args = RotPreviewArgs,
+    output = RotPreviewOutput,
+    invoke = rot_preview
+);
+
 /// The anim pack: state machine and clip verbs, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
-        "animation: the state machine as versioned data (set, undo, get, preview on a tape) \
-         and clip edits (trim, retime, mirror, undo) over the session clip",
+        "animation: the state machine as versioned data (set, undo, get, preview on a tape), \
+         clip edits (trim, retime, mirror, undo) over the session clip, and a read-only \
+         rotation sidecar preview per joint",
         false,
     );
     pack.add(VerbSpec::of::<GraphSetTool>(
@@ -642,6 +794,11 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         CapabilityCard::Revert,
     )?);
+    pack.add(VerbSpec::of::<RotPreviewTool>(
+        TOOL_ANIM_ROT_PREVIEW,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
     Ok(pack)
 }
 
@@ -672,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_registers_eight_annotated_verbs() {
+    fn pack_registers_nine_annotated_verbs() {
         let pack = pack().expect("registers");
         assert_eq!(
             pack.verb_names(),
@@ -684,7 +841,8 @@ mod tests {
                 TOOL_ANIM_CLIP_TRIM,
                 TOOL_ANIM_CLIP_RETIME,
                 TOOL_ANIM_CLIP_MIRROR,
-                TOOL_ANIM_CLIP_UNDO
+                TOOL_ANIM_CLIP_UNDO,
+                TOOL_ANIM_ROT_PREVIEW
             ]
         );
         for verb in pack.verbs() {
@@ -752,6 +910,43 @@ mod tests {
                 .code,
             "nothing_to_undo"
         );
+    }
+
+    #[test]
+    fn rot_preview_is_repeatable_and_names_a_missing_clip() {
+        let server = server(61);
+        let path =
+            std::env::temp_dir().join(format!("e2040_rot_preview_{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"tracks":[{"times":[0.0,0.5,1.0],"keys":[[0,0,0]]},{"times":[0.0,1.0]}],"dur":1.0}"#,
+        )
+        .expect("clip writes");
+        let args = RotPreviewArgs {
+            clip_path: path.display().to_string(),
+            joint: 1,
+            ticks: Some(60),
+        };
+        let first = RotPreviewTool::invoke(&server, args.clone()).expect("first preview");
+        let second = RotPreviewTool::invoke(&server, args).expect("second preview");
+        assert_eq!(first, second, "same input, same samples");
+        assert_eq!(first.digest, second.digest, "same input, same digest");
+        assert_eq!(first.times.len(), 8);
+        assert_eq!(first.rot.len(), 8);
+        assert_eq!(first.socket_offset.len(), 8);
+
+        let missing = RotPreviewTool::invoke(
+            &server,
+            RotPreviewArgs {
+                clip_path: path.with_extension("absent.json").display().to_string(),
+                joint: 0,
+                ticks: None,
+            },
+        )
+        .expect_err("missing file");
+        assert_eq!(missing.code, "missing_clip");
+        assert!(missing.message.contains("tracks"), "{}", missing.message);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

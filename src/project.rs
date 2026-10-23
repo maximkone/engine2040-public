@@ -367,6 +367,11 @@ impl Project {
         self.game.clone().unwrap_or_else(workspace::default_game)
     }
 
+    /// The project directory: where `dist/` and the content roots live.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Whether `game.toml` names a game, so `run` runs that bin instead of the proof fixture.
     pub fn names_game(&self) -> bool {
         self.game.is_some()

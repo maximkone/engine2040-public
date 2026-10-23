@@ -3,7 +3,9 @@
 //! Owner: game crate; consumer is the windowed binary, which writes one
 //! report then exits loudly (wiring: `pub mod crash;` in `lib.rs`). Units:
 //! bytes for every size bound. Std-only with zero crate imports, so the
-//! crash path never depends on the subsystem that just failed. Determinism:
+//! crash path never depends on the subsystem that just failed; the one
+//! outside crate (the `minidump` feature's real dump writer) is off by
+//! default. Determinism:
 //! formatting is pure over the report bytes; no wall clock, no RNG. Errors:
 //! [`CrashError`] at every boundary; the writer never panics and the exit
 //! code is never silent (0 is never emitted).
@@ -730,26 +732,50 @@ pub fn write_warning_bundle(
     Ok(bundle)
 }
 
-// PORT(EmbarkStudios/crash-handling@e7d5067:crash-handler, minidumper): fault
-// hook writes one stub below; the monitor owns the real minidump (`std` only).
+// WG13: the dump is a real minidump when the `minidump` feature is on and the
+// target is Windows (rust-minidump/minidump-writer calls MiniDumpWriteDump).
+// Off the feature the fault path stays std-only and writes a stub that keeps
+// the magic, so the shipping binary and the golden tape do not change.
 
 /// Sibling `.dmp` path for a `.toml` report path. Pure.
 fn minidump_path(report_path: &Path) -> PathBuf {
     report_path.with_extension("dmp")
 }
 
-/// Write the fault-path stub dump beside the report (magic, tick, version
-/// length) in one write call; a bad bundle leaves neither file.
-fn write_minidump_stub(path: &Path, report: &CrashReport) -> Result<PathBuf, CrashError> {
+/// Write the fault-path dump beside the report. A bad bundle leaves neither
+/// file: `validate` runs before the first byte is written.
+fn write_minidump(path: &Path, report: &CrashReport) -> Result<PathBuf, CrashError> {
     report.validate()?;
     let dump = minidump_path(path);
+    #[cfg(all(feature = "minidump", windows))]
+    write_minidump_real(&dump)?;
+    #[cfg(not(all(feature = "minidump", windows)))]
+    write_minidump_stub(&dump, report)?;
+    Ok(dump)
+}
+
+/// Real minidump of this process at the panicking thread, via the donor writer
+/// (MIT, `minidump-writer` 0.13). Best effort: the report is the acceptance.
+#[cfg(all(feature = "minidump", windows))]
+fn write_minidump_real(dump: &Path) -> Result<(), CrashError> {
+    let mut file = std::fs::File::create(dump).map_err(|err| CrashError::Io(err.kind()))?;
+    minidump_writer::minidump_writer::MinidumpWriter::dump_local_context(
+        None, None, None, &mut file,
+    )
+    .map_err(|_| CrashError::Io(std::io::ErrorKind::Other))
+}
+
+/// Stub dump (magic, tick, version length) in one write call, for builds off
+/// the `minidump` feature. It carries no stream directory, so it is a marker,
+/// not a debuggable dump.
+#[cfg(not(all(feature = "minidump", windows)))]
+fn write_minidump_stub(dump: &Path, report: &CrashReport) -> Result<(), CrashError> {
     let mut header = Vec::with_capacity(16);
     header.extend_from_slice(b"MDMP");
     header.extend_from_slice(&report.tick.to_le_bytes());
     let version_len = u32::try_from(report.version.len()).unwrap_or(u32::MAX);
     header.extend_from_slice(&version_len.to_le_bytes());
-    write_file(&dump, &header)?;
-    Ok(dump)
+    write_file(dump, &header)
 }
 
 /// Char-boundary-safe byte prefix of `text` capped at `max` bytes.
@@ -1086,7 +1112,7 @@ fn write_crash_report() -> Result<PathBuf, CrashError> {
         )?,
     };
     write_report(&path, &report)?;
-    write_minidump_stub(&path, &report).ok(); // best-effort stub; the report is the acceptance.
+    write_minidump(&path, &report).ok(); // best effort; the report is the acceptance.
     Ok(path)
 }
 
@@ -1179,6 +1205,56 @@ mod tests {
         drill_report(VERSION, ADAPTER, mode, 12_345).expect("drill bundle valid")
     }
 
+    /// Stream type code of the system-info stream (MSVC's `SystemInfoStream`).
+    #[cfg(all(feature = "minidump", windows))]
+    const SYSTEM_INFO_STREAM: u32 = 7;
+    /// Bytes of the minidump header up to and including `StreamDirectoryRva`.
+    #[cfg(all(feature = "minidump", windows))]
+    const HEADER_BYTES: usize = 16;
+    /// Bytes of one stream-directory entry: type, data size, rva.
+    #[cfg(all(feature = "minidump", windows))]
+    const DIR_ENTRY_BYTES: usize = 12;
+
+    /// Read a little-endian u32 at `at`, or `None` when the file is short.
+    #[cfg(all(feature = "minidump", windows))]
+    fn le_u32(bytes: &[u8], at: usize) -> Option<u32> {
+        let row = bytes.get(at..at + 4)?;
+        let mut word = [0u8; 4];
+        word.copy_from_slice(row);
+        Some(u32::from_le_bytes(word))
+    }
+
+    /// Parse the minidump header and stream directory (std only). Returns the
+    /// stream type codes, or `None` when a row points outside the file: the
+    /// stub (12 bytes, no directory) fails here.
+    #[cfg(all(feature = "minidump", windows))]
+    fn parse_stream_directory(bytes: &[u8]) -> Option<Vec<u32>> {
+        if bytes.len() < HEADER_BYTES || &bytes[..4] != b"MDMP" {
+            return None;
+        }
+        let count = usize::try_from(le_u32(bytes, 8)?).ok()?;
+        let dir = usize::try_from(le_u32(bytes, 12)?).ok()?;
+        if count == 0 || count > 4096 {
+            return None;
+        }
+        let dir_end = dir.checked_add(count.checked_mul(DIR_ENTRY_BYTES)?)?;
+        if dir_end > bytes.len() {
+            return None;
+        }
+        let mut kinds = Vec::with_capacity(count);
+        for index in 0..count {
+            let base = dir + index * DIR_ENTRY_BYTES;
+            let kind = le_u32(bytes, base)?;
+            let size = usize::try_from(le_u32(bytes, base + 4)?).ok()?;
+            let rva = usize::try_from(le_u32(bytes, base + 8)?).ok()?;
+            if rva.checked_add(size)? > bytes.len() {
+                return None;
+            }
+            kinds.push(kind);
+        }
+        Some(kinds)
+    }
+
     #[test]
     fn forced_crash_drill_leaves_readable_reports() {
         let dir = drill_dir("drill");
@@ -1208,7 +1284,7 @@ mod tests {
         let report = sample(CrashMode::Fight);
         let toml = dir.join("crash-dump-pair.toml");
         write_report(&toml, &report).expect("report writes");
-        let dump = write_minidump_stub(&toml, &report).expect("dump writes");
+        let dump = write_minidump(&toml, &report).expect("dump writes");
         assert!(toml.is_file() && dump.is_file(), "need 1 dump + 1 report");
         let bytes = std::fs::read(&dump).expect("dump readable");
         assert!(bytes.starts_with(b"MDMP"), "dump lacks magic");
@@ -1223,8 +1299,38 @@ mod tests {
             tape_tail: Vec::new(),
             checkpoint: vec![0u8; MAX_CHECKPOINT_BYTES + 1],
         };
-        assert!(write_minidump_stub(&bad_toml, &bad).is_err());
+        assert!(write_minidump(&bad_toml, &bad).is_err());
         assert!(!bad_toml.exists() && !minidump_path(&bad_toml).exists());
+        std::fs::remove_dir_all(&dir).expect("drill temp cleaned");
+    }
+
+    /// WG13: the fault-path dump must be a real minidump, not the 12-byte
+    /// stub: `MDMP`, a stream directory that lies inside the file, and the
+    /// system-info stream every debugger reads first.
+    #[test]
+    #[cfg(all(feature = "minidump", windows))]
+    fn forced_panic_dump_parses_its_stream_directory() {
+        // The real hook ends the process, so force the panic in a caught
+        // scope and then run the writer the hook runs.
+        let caught = std::panic::catch_unwind(|| panic!("wg13 forced panic drill"));
+        assert!(caught.is_err(), "the drill panic must unwind");
+        let dir = drill_dir("real-dump");
+        let report = sample(CrashMode::Fight);
+        let toml = dir.join("crash-real-dump.toml");
+        write_report(&toml, &report).expect("report writes");
+        let dump = write_minidump(&toml, &report).expect("real dump writes");
+        let bytes = std::fs::read(&dump).expect("dump readable");
+        let streams = parse_stream_directory(&bytes).expect("stream directory parses");
+        assert!(streams.len() >= 3, "too few streams: {streams:?}");
+        assert!(
+            streams.contains(&SYSTEM_INFO_STREAM),
+            "no system info stream: {streams:?}"
+        );
+        assert!(
+            bytes.len() > 1024,
+            "dump is a stub-sized {} bytes",
+            bytes.len()
+        );
         std::fs::remove_dir_all(&dir).expect("drill temp cleaned");
     }
 

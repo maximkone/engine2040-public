@@ -17,7 +17,7 @@ mcp = ["dep:rmcp", "dep:engine-editor", "dep:engine-scene", "engine-scene/json",
 
 # The geo pack's modeling ops (boolean, unwrap, lod, collision) run on the cook-time engine-geo crate:
 # off by default so the default build has neither the donor libraries nor the xatlas C++ step.
-geo = ["mcp", "dep:engine-geo", "engine-geo/boolean", "engine-geo/uv", "engine-geo/lod", "engine-geo/collision"]
+geo = ["mcp", "dep:engine-geo", "engine-geo/boolean", "engine-geo/uv", "engine-geo/lod", "engine-geo/collision", "engine-geo/bake"]
 # Generated-prop intake: `asset.intake` cooks a generated GLB through engine-assets
 # (glTF import, repair, prop cook, bundle). Off by default; no tick crate depends on it.
 intake = ["mcp", "dep:engine-assets"]

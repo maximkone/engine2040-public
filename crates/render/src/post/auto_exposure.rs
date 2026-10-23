@@ -451,7 +451,7 @@ pub fn run_chain_auto(
     let adapt_ms = adapt_started.elapsed().as_secs_f64() * 1000.0;
     let adapted = chain.with_exposure_ev(ev)?;
     adapted.validate()?;
-    let mut out = run_chain_core(hdr, width, height, &adapted, lights)?;
+    let mut out = run_chain_core(hdr, width, height, &adapted, None, lights)?;
     out.receipt.exposure.ms += adapt_ms;
     Ok(out)
 }

@@ -8,6 +8,9 @@
 //! multiplier plus a `0..=31` shift, mirroring the ONNX converter's
 //! single-dense-layer shape; [`export_mlp`] folds a two-layer student
 //! (dense + ReLU, dense) with calibrated hidden and output scales.
+//! [`export_regression`] folds the same two-layer shape for continuous
+//! targets and hands back the output scale with the bytes, because a
+//! correction is read as a value rather than an argmax.
 //! Determinism: pure function of the student plus the dataset list (and the
 //! calibration rows for [`export_mlp`]). Errors: every bad param maps to [`ExportError`];
 //! [`export`] also reloads the bytes through the runtime and fails when they
@@ -20,6 +23,7 @@ use crate::data::{
 };
 use crate::mlp::Mlp;
 use crate::student::Student;
+use crate::train::RegressionRow;
 use engine_nn::{NnErr, ACT_NONE, ACT_RELU, MAGIC, MAX_DIM, TAG_DENSE, VERSION};
 
 /// Exported `.e2nn` file bytes, loadable by `engine_nn::load`.
@@ -177,24 +181,54 @@ pub fn export(student: &Student, manifests: &[DatasetManifest]) -> Result<E2nnBy
     emit_dense_net(student.spec.dims.input_dim, &[layer])
 }
 
-/// Largest absolute hidden activation and logit over the calibration rows
-/// (float forward on the runtime-quantized features).
-fn calibrate(mlp: &Mlp, calib: &[Sample]) -> (f32, f32) {
+/// Largest absolute hidden activation and output over the forward of each
+/// feature row: the post-training calibration peaks. One fold serves both
+/// calibration shapes, the one-hot rows and the continuous rows.
+fn peak_over(mlp: &Mlp, feats: &[Vec<f32>]) -> (f32, f32) {
     let (_, hid, out) = mlp.dims();
     let mut hidden = vec![0.0f32; hid];
-    let mut logits = vec![0.0f32; out];
+    let mut pred = vec![0.0f32; out];
     let (mut peak_h, mut peak_o) = (0.0f32, 0.0f32);
-    for row in calib {
-        if mlp
-            .forward(&row.quantized_features(), &mut hidden, &mut logits)
-            .is_none()
-        {
+    for x in feats {
+        if mlp.forward(x, &mut hidden, &mut pred).is_none() {
             continue;
         }
         peak_h = hidden.iter().fold(peak_h, |a, v| a.max(*v));
-        peak_o = logits.iter().fold(peak_o, |a, v| a.max(v.abs()));
+        peak_o = pred.iter().fold(peak_o, |a, v| a.max(v.abs()));
     }
     (peak_h, peak_o)
+}
+
+/// Peaks over one-hot calibration rows, requantized as the runtime sees them.
+fn calibrate(mlp: &Mlp, calib: &[Sample]) -> (f32, f32) {
+    peak_over(
+        mlp,
+        &calib
+            .iter()
+            .map(|row| row.quantized_features())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Peaks over continuous calibration rows, requantized by the same edge.
+fn calibrate_rows(mlp: &Mlp, calib: &[RegressionRow]) -> (f32, f32) {
+    peak_over(
+        mlp,
+        &calib
+            .iter()
+            .map(|row| row.quantized_inputs())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Integer steps per real unit: a peak activation in `127` parts, and a unit
+/// step when a calibration left the lane dead, so no divide opens.
+fn scale_of(peak: f32) -> f64 {
+    if peak > 0.0 {
+        f64::from(peak) / 127.0
+    } else {
+        1.0
+    }
 }
 
 /// Export a two-layer student as `.e2nn` bytes: dense + ReLU, then dense
@@ -216,28 +250,64 @@ pub fn export_mlp(
         return Err(ExportError::NonFiniteParam);
     }
     let (peak_h, peak_o) = calibrate(mlp, calib);
-    // An all-dead calibration keeps a unit scale instead of dividing by zero.
-    let h_scale = if peak_h > 0.0 {
-        f64::from(peak_h) / 127.0
-    } else {
-        1.0
-    };
-    let o_scale = if peak_o > 0.0 {
-        f64::from(peak_o) / 127.0
-    } else {
-        1.0
-    };
+    let h_scale = scale_of(peak_h);
+    let o_scale = scale_of(peak_o);
     let in_scale = f64::from(1.0f32 / INPUT_QUANT_SCALE);
     let hidden = fold_dense(&mlp.w1, &mlp.b1, in_scale, h_scale, ACT_RELU)?;
     let output = fold_dense(&mlp.w2, &mlp.b2, h_scale, o_scale, ACT_NONE)?;
     emit_dense_net(mlp.spec.student.dims.input_dim, &[hidden, output])
 }
 
+/// A folded continuous-output student: loadable `.e2nn` bytes plus the scale
+/// a runtime needs to turn one integer output lane back into a correction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegressionNet {
+    /// `.e2nn` bytes, proven to load in the NN1 runtime before this returns.
+    pub bytes: E2nnBytes,
+    /// Real units per integer output step: the calibration peak over the rows,
+    /// in `127` parts. A caller reads lane `v` as `v * out_scale`.
+    pub out_scale: f64,
+}
+
+/// Export a continuous-target student as `.e2nn` bytes: dense + ReLU, then
+/// dense with identity output. Hidden and output requant scales come from the
+/// largest float activation over `calib` (post-training calibration), so no
+/// recorded row saturates a lane, and the output scale travels with the bytes
+/// because a correction is a value, not a class id. Same provenance gate and
+/// load proof as [`export_mlp`]. Pure function of the student, the
+/// calibration rows and the list.
+pub fn export_regression(
+    mlp: &Mlp,
+    calib: &[RegressionRow],
+    manifests: &[DatasetManifest],
+) -> Result<RegressionNet, ExportError> {
+    check_manifests_for_export(manifests).map_err(ExportError::Provenance)?;
+    let finite = [&mlp.w1, &mlp.b1, &mlp.w2, &mlp.b2]
+        .iter()
+        .all(|t| t.iter().all(|v| v.is_finite()));
+    if !finite {
+        return Err(ExportError::NonFiniteParam);
+    }
+    let (peak_h, peak_o) = calibrate_rows(mlp, calib);
+    let h_scale = scale_of(peak_h);
+    let o_scale = scale_of(peak_o);
+    let in_scale = f64::from(1.0f32 / INPUT_QUANT_SCALE);
+    let hidden = fold_dense(&mlp.w1, &mlp.b1, in_scale, h_scale, ACT_RELU)?;
+    let output = fold_dense(&mlp.w2, &mlp.b2, h_scale, o_scale, ACT_NONE)?;
+    let bytes = emit_dense_net(mlp.spec.student.dims.input_dim, &[hidden, output])?;
+    Ok(RegressionNet {
+        bytes,
+        out_scale: o_scale,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::data::Sample;
+    use crate::mlp::MlpSpec;
     use crate::spec::StudentSpec;
+    use engine_core::Fnv64;
 
     fn golden() -> Student {
         let spec = StudentSpec::new(2, 2, 0).expect("test spec is legal");
@@ -457,5 +527,129 @@ mod tests {
         // No calibration rows: unit scales, still a loadable net.
         let bytes = export_mlp(&hand_mlp(), &[], &[DatasetManifest::fixture()]).expect("exports");
         engine_nn::load(&bytes).expect("loads");
+    }
+
+    /// The 15x15 feature grid above as continuous-target rows: lane 0 is the
+    /// fold `|x0| - |x1|`, lane 1 is `max(x0, x1)`.
+    fn reg_grid(spec: &StudentSpec) -> Vec<RegressionRow> {
+        let mut rows = Vec::new();
+        for a in (-112..=112).step_by(16) {
+            for b in (-112..=112).step_by(16) {
+                let x = vec![a as f32 / 16.0, b as f32 / 16.0];
+                let target = vec![x[0].abs() - x[1].abs(), x[0].max(x[1])];
+                rows.push(RegressionRow::new(x, target, spec).expect("legal row"));
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn regression_export_lanes_track_the_float_net() {
+        let spec = MlpSpec {
+            student: StudentSpec::new(2, 2, 5).expect("legal spec"),
+            hidden: 8,
+            epochs: 400,
+            batch: 16,
+            learning_rate: 0.05,
+        };
+        let rows = reg_grid(&spec.student);
+        let mlp = crate::train::fit_regression(&rows, &spec, Some(&DatasetManifest::fixture()))
+            .expect("the grid fits");
+        let net = export_regression(&mlp, &rows, &[DatasetManifest::fixture()]).expect("exports");
+        assert!(
+            net.out_scale > 0.0 && net.out_scale.is_finite(),
+            "bad output step {}",
+            net.out_scale
+        );
+        let model = engine_nn::load(&net.bytes).expect("loads");
+        assert_eq!(model.layers().len(), 2);
+        assert_eq!((model.input_dim(), model.output_dim()), (2, 2));
+        let step = net.out_scale as f32;
+        let mut hidden = [0.0f32; 8];
+        let mut logits = [0.0f32; 2];
+        let mut worst = 0.0f32;
+        for row in &rows {
+            mlp.forward(&row.quantized_inputs(), &mut hidden, &mut logits)
+                .expect("row fits the net");
+            for (got, want) in engine_nn::infer(&model, &quantize_input(&row.inputs))
+                .iter()
+                .zip(&logits)
+            {
+                // No calibration row saturates a lane, so every lane is a
+                // value, not a clipped rail.
+                assert!(
+                    (-127..=127).contains(got),
+                    "lane {got} outside the i8 range"
+                );
+                let err = (*got as f32 * step - want).abs() / step;
+                worst = worst.max(err);
+            }
+        }
+        // The int8 fold tracks the float net within a few output steps.
+        assert!(worst < 4.0, "worst lane error {worst} output steps");
+        // Pure function: same params, same calibration, same bytes.
+        assert_eq!(
+            export_regression(&mlp, &rows, &[DatasetManifest::fixture()])
+                .expect("exports")
+                .bytes,
+            net.bytes
+        );
+    }
+
+    #[test]
+    fn regression_export_refuses_bad_lists_and_params() {
+        let spec = MlpSpec {
+            student: StudentSpec::new(2, 2, 5).expect("legal spec"),
+            hidden: 4,
+            epochs: 1,
+            batch: 8,
+            learning_rate: 0.05,
+        };
+        let rows = reg_grid(&spec.student);
+        let mlp = crate::train::fit_regression(&rows, &spec, Some(&DatasetManifest::fixture()))
+            .expect("one epoch still returns params");
+        assert_eq!(
+            export_regression(&mlp, &rows, &[]),
+            Err(ExportError::Provenance(ProvenanceError::MissingManifest))
+        );
+        let mut dead = mlp.clone();
+        dead.w2[0] = f32::NAN;
+        assert_eq!(
+            export_regression(&dead, &rows, &[DatasetManifest::fixture()]),
+            Err(ExportError::NonFiniteParam)
+        );
+        // Uncalibrated: unit scales, and the bytes still load.
+        let net = export_regression(&mlp, &[], &[DatasetManifest::fixture()]).expect("exports");
+        engine_nn::load(&net.bytes).expect("loads");
+        assert_eq!(net.out_scale, 1.0);
+    }
+
+    /// The fold refactor (`peak_over` / `scale_of`) may not move a byte of the
+    /// one-hot exports: frozen digests for both shapes.
+    #[test]
+    fn regression_leaves_the_one_hot_export_unchanged() {
+        fn digest(bytes: &[u8]) -> u64 {
+            let mut hash = Fnv64::new();
+            hash.write(bytes);
+            hash.finish()
+        }
+        const ONE_HOT_DENSE: u64 = 17363512958048873684;
+        const TWO_LAYER_DENSE: u64 = 8978096580016090174;
+        let flat = export(&golden(), &[DatasetManifest::fixture()]).expect("golden exports");
+        let two = export_mlp(
+            &hand_mlp(),
+            &grid(&hand_mlp().spec.student),
+            &[DatasetManifest::fixture()],
+        )
+        .expect("two-layer exports");
+        assert_eq!(digest(&flat), ONE_HOT_DENSE, "one-hot dense digest moved");
+        assert_eq!(
+            digest(&two),
+            TWO_LAYER_DENSE,
+            "two-layer student digest moved"
+        );
+        // Both still load and run the way the runtime expects.
+        assert_eq!(engine_nn::load(&flat).expect("loads").layers().len(), 1);
+        assert_eq!(engine_nn::load(&two).expect("loads").layers().len(), 2);
     }
 }

@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 /// Magic for graph bytes.
 pub const GRAPH_MAGIC: [u8; 4] = *b"GRPH";
-/// Newest graph version written and read.
-pub const GRAPH_VERSION: u32 = 1;
+/// Newest graph version written and read. Version 2 adds the rule node tag (`4`), whose
+/// payload is a rule slot; version 1 files still open and simply never carry one.
+pub const GRAPH_VERSION: u32 = 2;
 /// Oldest graph version still opened.
 pub const GRAPH_MIN_VERSION: u32 = 1;
 /// Largest accepted node count.
@@ -28,6 +29,9 @@ pub enum NodeKind {
     Op(u8),
     Material(u8),
     Vfx(u8),
+    /// A rule node: its payload is the slot of the Rhai text this node stands for, and
+    /// [`Graph::compile_rules`] turns the graph into that text.
+    Rule(u16),
 }
 /// One node: payload plus pos plus open flag.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,12 +51,26 @@ pub struct Wire {
 /// What refused a graph edit or decode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphError {
-    Dangling { node: u32 },
-    Cycle { node: u32 },
-    NonFinite { node: u32 },
-    Duplicate { id: u32 },
+    Dangling {
+        node: u32,
+    },
+    Cycle {
+        node: u32,
+    },
+    NonFinite {
+        node: u32,
+    },
+    Duplicate {
+        id: u32,
+    },
+    /// A rule node names a slot whose text the caller did not supply.
+    MissingRule {
+        slot: u16,
+    },
     BadMagic,
-    UnsupportedVersion { got: u32 },
+    UnsupportedVersion {
+        got: u32,
+    },
     Truncated,
     CrcMismatch,
     TooLarge,
@@ -118,6 +136,32 @@ impl Graph {
         }
         Ok(())
     }
+    /// The Rhai source this graph stands for: every [`NodeKind::Rule`] node's slot text, in
+    /// node-id order, one blank line between two rules.
+    ///
+    /// The text is not generated: a rule node names the script the rules crate already runs,
+    /// so the compiled bytes are the exact text the text path hashes and a rule hash cannot
+    /// drift between the two. A slot with no text is refused, never skipped.
+    pub fn compile_rules(&self, texts: &[&str]) -> Result<String, GraphError> {
+        let mut out = String::new();
+        for node in self.nodes.values() {
+            let NodeKind::Rule(slot) = node.kind else {
+                continue;
+            };
+            let text = texts
+                .get(usize::from(slot))
+                .ok_or(GraphError::MissingRule { slot })?;
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+            if out.len() > MAX_GRAPH_BYTES {
+                return Err(GraphError::TooLarge);
+            }
+        }
+        Ok(out)
+    }
+
     /// Canonical bytes: sorted ids and wires, sealed end, CRC32.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -134,6 +178,7 @@ impl Graph {
                 NodeKind::Op(c) => (1u8, u32::from(c)),
                 NodeKind::Material(c) => (2u8, u32::from(c)),
                 NodeKind::Vfx(c) => (3u8, u32::from(c)),
+                NodeKind::Rule(slot) => (4u8, u32::from(slot)),
             };
             out.extend_from_slice(&id.to_le_bytes());
             out.push(tag);
@@ -169,7 +214,7 @@ impl Graph {
             return Err(GraphError::BadMagic);
         }
         let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        if version < GRAPH_MIN_VERSION || version > GRAPH_VERSION {
+        if !(GRAPH_MIN_VERSION..=GRAPH_VERSION).contains(&version) {
             return Err(GraphError::UnsupportedVersion { got: version });
         }
         let count = usize::try_from(u32::from_le_bytes([
@@ -197,6 +242,7 @@ impl Graph {
                 1 => NodeKind::Op(u8::try_from(payload).map_err(|_| GraphError::Truncated)?),
                 2 => NodeKind::Material(u8::try_from(payload).map_err(|_| GraphError::Truncated)?),
                 3 => NodeKind::Vfx(u8::try_from(payload).map_err(|_| GraphError::Truncated)?),
+                4 => NodeKind::Rule(u16::try_from(payload).map_err(|_| GraphError::Truncated)?),
                 _ => return Err(GraphError::Truncated),
             };
             if nodes
@@ -350,6 +396,47 @@ mod tests {
         let back = Graph::decode(&first).expect("re-decode works");
         assert_eq!(back, graph);
         assert_eq!(back.encode(), first);
+    }
+
+    #[test]
+    fn a_rule_node_compiles_to_the_exact_rhai_text() {
+        // WG6: the graph compiles to the text the rules crate already runs, so the rule
+        // hash matches the text path by construction (the same bytes, not a rewrite).
+        let text = "fn on_tick(me) {\n    damage(me, 1);\n}\n";
+        let other = "fn on_hit(me, by) {\n    say(\"hit\");\n}\n";
+        let graph = Graph::decode(&seal(
+            &[
+                (1, 4, 1, 0.0, 0.0, true),
+                (2, 4, 0, 1.0, 0.0, true),
+                (3, 0, 1.5f32.to_bits(), 2.0, 0.0, true),
+            ],
+            &[],
+        ))
+        .expect("a graph with rule nodes decodes");
+        assert_eq!(
+            graph.encode(),
+            seal(
+                &[
+                    (1, 4, 1, 0.0, 0.0, true),
+                    (2, 4, 0, 1.0, 0.0, true),
+                    (3, 0, 1.5f32.to_bits(), 2.0, 0.0, true),
+                ],
+                &[]
+            ),
+            "a rule node round-trips through the bytes"
+        );
+        assert_eq!(
+            graph.compile_rules(&[other, text]).unwrap(),
+            format!("{text}\n{other}"),
+            "node-id order, one blank line between rules, text unchanged"
+        );
+        let refused = graph.compile_rules(&[other]).unwrap_err();
+        assert_eq!(refused, GraphError::MissingRule { slot: 1 });
+        assert!(refused.to_string().contains("MissingRule"));
+        // A graph with no rule node compiles to nothing, never to a stub script.
+        let constants =
+            Graph::decode(&seal(&[(1, 0, 1.0f32.to_bits(), 0.0, 0.0, true)], &[])).unwrap();
+        assert_eq!(constants.compile_rules(&[text]).unwrap(), "");
     }
 
     #[test]

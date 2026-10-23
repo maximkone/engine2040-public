@@ -94,11 +94,7 @@ impl Constraint {
             Self::Fixed { px } => px,
             Self::MinMax { min_px, .. } => min_px,
             Self::Fraction { num, den } => {
-                if den == 0 {
-                    0
-                } else {
-                    total_px.saturating_mul(num) / den
-                }
+                total_px.saturating_mul(num).checked_div(den).unwrap_or(0)
             }
             // Aspect tracks are refused on the row axis before this is read.
             Self::Aspect { .. } => 0,
@@ -632,8 +628,7 @@ impl LayoutDoc {
                 row,
                 y,
                 *height,
-                inner_w,
-                self.margins.left,
+                inner,
                 self.whitespace,
                 shrink_order,
                 &self.pins,
@@ -824,13 +819,10 @@ impl LayoutDoc {
         let mut heights: Vec<u32> = Vec::with_capacity(count);
         for row in &self.rows {
             let height = match row.height {
-                Constraint::Fraction { num, .. } => {
-                    if fraction_sum == 0 {
-                        0
-                    } else {
-                        remaining.saturating_mul(num) / fraction_sum
-                    }
-                }
+                Constraint::Fraction { num, .. } => remaining
+                    .saturating_mul(num)
+                    .checked_div(fraction_sum)
+                    .unwrap_or(0),
                 other => other.base_px(inner_h),
             };
             heights.push(height);
@@ -918,17 +910,18 @@ fn effective_width(panel: &PanelSpec, pins: &[PanelPin]) -> Constraint {
         .map_or(panel.width, |pin| pin.width)
 }
 
-/// Solve one row band: panel widths, positions and the width it consumed.
+/// Solve one row band inside `inner`: panel widths, positions and the width it
+/// consumed.
 fn solve_row(
     row: &RowSpec,
     top: u32,
     height: u32,
-    inner_w: u32,
-    left: u32,
+    inner: Rect,
     whitespace: Whitespace,
     shrink_order: &[PanelId],
     pins: &[PanelPin],
 ) -> Result<(Vec<PanelRect>, u32), LayoutError> {
+    let inner_w = inner.w;
     let count = row.panels.len();
     let gaps = gap_total(row.gap, count);
     let widths_rules: Vec<Constraint> = row
@@ -954,13 +947,10 @@ fn solve_row(
     let mut widths: Vec<u32> = Vec::with_capacity(count);
     for rule in &widths_rules {
         let width = match *rule {
-            Constraint::Fraction { num, .. } => {
-                if fraction_sum == 0 {
-                    0
-                } else {
-                    remaining.saturating_mul(num) / fraction_sum
-                }
-            }
+            Constraint::Fraction { num, .. } => remaining
+                .saturating_mul(num)
+                .checked_div(fraction_sum)
+                .unwrap_or(0),
             Constraint::Aspect { w, h } => height.saturating_mul(w) / h,
             other => other.base_px(inner_w),
         };
@@ -990,7 +980,7 @@ fn solve_row(
         .collect();
     distribute_even(&mut widths, slack, &eligible);
     let mut rects = Vec::with_capacity(count);
-    let mut x = left;
+    let mut x = inner.x;
     for (panel, width) in row.panels.iter().zip(&widths) {
         rects.push(PanelRect {
             id: panel.id,

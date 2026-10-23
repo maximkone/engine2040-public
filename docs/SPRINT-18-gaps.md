@@ -1758,6 +1758,25 @@ Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this
   LPIPS side by side**, because the donor's negative result is that PSNR alone
   draws the wrong conclusion. Golden: does not threaten — the render crate is
   presentation, and the row's own P2P says the golden is unchanged.
+  Proof 2026-10-24 (GPU, this PC, RTX 3050):
+  `node tools/gh-check.mjs --local cargo test -p engine-render --features window
+  --lib taa_ -- --nocapture` = 18 passed, 0 failed. The three Accept numbers,
+  all from `present/tests_motion.rs` (`#[cfg(feature = "gpu")]`), printed:
+  flicker `off 32.24 levels, on 10.60 levels, drop 67.1%` (bar >= 50 %, frame 0
+  vs 1, static camera, jittered, sky off, analytic sand edge, device pixels);
+  `taa_resolve_keeps_a_running_fighter_ghost_under_three_px` green (body runs
+  >= 8 px, ghost band width <= 3 px, bar is the row's own 3 px);
+  `validation_errors 0` and `deferred_validation_errors() 0` asserted on every
+  frame of both tests plus the cut/resize test. `--features gpu` alone does not
+  compile the test harness (v1_skin and present test code want `window`); use
+  `window`. Left open on purpose: the hunt2 addition above (one printed dB per
+  cause, sum within 1 dB, PSNR and LPIPS side by side) is not written — the
+  resolve has no jitter-aware history gather to price, so that is its own step;
+  the YCoCg clamp is no longer open (landed `ee3f74070`, test
+  `taa_neighbourhood_clamp_runs_in_ycocg_at_a_saturated_edge`, 19 taa tests,
+  flicker unchanged 67.1%); and the `post::GHOST_MAX_TRAIL` gate in
+  `clip_hold.rs` is a luma gap (0.25
+  luma), not the 3 px proof, so it does not stand in for the ghost bar.
 - [ ] LF5d render: TAA slice 4, sharpen and choose — an RCAS pass after the
   resolve (Bevy `robust_contrast_adaptive_sharpening.wesl`, `render-steals.md`
   item 11), then keep TAA or EG13's MSAA by the calmer capture (sand-edge
@@ -1766,7 +1785,45 @@ Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this
   edge's contrast with no pixel above the input's max; the chosen mode's
   flicker number in latest.md is the lower of the two. F2P: no sharpen pass.
   P2P: render lib green. needs: LF5c, EG13.
-- [x] LF6 render: dust and sparks from `particles_gpu.rs` — the seeded pool
+  Progress 2026-10-24: the sharpen half landed `3fd240f20`. `PostChain`
+  carries `sharpen` (`0..=1`, `DEFAULT_CHAIN_SHARPEN` = 0 so the default
+  bytes and the GPU parity frame stay unchanged) and `run_chain_core` runs
+  `fsr_rcas_sharpen` as the last stage, after the resolve, the upsample and
+  the grade (display values, lobe clamp to the four taps); its ms rides the
+  `grade` receipt. `PostChain::with_sharpen` validates, `ChainConfig::digest`
+  covers the knob. Accept leg 1 green: `rcas_finish_raises_edge_contrast_without_new_peaks`
+  reads edge contrast 0.449333 -> 0.463248 (+3.1%) at the 0.4 default with
+  every output channel inside the input range [0.0443, 0.8038]; `chain_sharpen_zero_keeps_the_default_bytes`
+  and `chain_sharpen_out_of_range_fails_loudly` green beside it (`post::chain`
+  8 passed, gh-check runs 40036369929; rust-quality render PASS 89).
+  Left (the AA default): measure TAA vs EG13's 4x MSAA by the same sand-edge
+  frame-to-frame diff LF5c uses and keep the calmer one; the GPU twin of the
+  sharpen (submit encode + `rp1-sharpen` in the graph) is what lets the
+  shipped frame turn it on. Next seat, one line on the PC: add
+  `sand_edge_aa_default` to `crates/render/src/present/tests_motion.rs`
+  (LF5c's `read_twin`, `edge_band`, `mean_change`; one presenter with
+  `set_taa_resolve_enabled(true)`, one with `set_msaa_enabled(true)`, two
+  jittered frames each) and read the two numbers, then run
+  `node tools/gh-check.mjs --local "cargo test -p engine-render --features window --lib sand_edge_aa_default -- --nocapture"`.
+  `latest.md` (the product report) has no flicker field today, so the row and
+  the test's own line carry the number until that check prints it.
+  Progress 2026-10-24 (AA default, measured on the RTX 3050): TAA 10.60 levels
+  vs 4x MSAA 0.00 levels on LF5c's sand-edge frame-to-frame diff (mean luma
+  change over the six border columns, two frames per mode, same edge fixture
+  and sky-off toggles; TAA frames take the Halton jitter, MSAA frames do not,
+  and both twins carry the 201.68-level edge step, so neither reading comes
+  from a blank frame). 4x MSAA is the calmer mode. Its zero is structural: no
+  per-frame jitter on a still scene leaves the two frames identical, while
+  TAA's residual is its jitter after the resolve. New
+  test `sand_edge_aa_default` prints both numbers and asserts the calmer one,
+  green by `node tools/gh-check.mjs --local "cargo test -p engine-render
+  --features window --lib sand_edge_aa_default -- --nocapture"`. Recommended
+  shipped default (not this seat's path, `crates/game/src/windowed.rs`): 4x
+  MSAA on when `E2040_MSAA` is unset, TAA jitter and resolve left off. The row
+  stays open on that one-line default flip; the accept's `latest.md` flicker
+  field still does not exist, so the test's printed line and this row carry the
+  number.
+- [x] LF6 render: dust and sparks from `particles_gpu.rs` - the seeded pool
   exists; the window never spawns. Dust at footfalls and knockdowns, sparks
   on `Blocked` and `Parried` cues (seeded from the cue tick, view only), drawn
   after forward. Diff: good. Tier A. Size M. Owns `crates/game/src/fighter_look.rs`

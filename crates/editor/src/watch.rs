@@ -185,6 +185,59 @@ impl Watch {
     }
 }
 
+/// The drop handler's answer: poll the watch once at a tick boundary and label
+/// every reported change with a receipt row.
+///
+/// `accepted` is the intake's own verdict per path (the caller runs the intake
+/// outside this crate); no intake call happens here and the change list is
+/// returned untouched, so the host can hand it straight to the importer.
+pub fn drop_report(
+    watch: &mut Watch,
+    now_ticks: u64,
+    accepted: impl Fn(&Path) -> bool,
+) -> (Vec<Changed>, Vec<ReimportReceipt>) {
+    let changes = watch.poll(now_ticks);
+    let receipts = changes
+        .iter()
+        .map(|change| ReimportReceipt::from_change(change, now_ticks, accepted(&change.path)))
+        .collect();
+    (changes, receipts)
+}
+
+/// One reimport receipt row: the file, the tick it was reported on and whether
+/// the intake took it. The panel draws one line per row via
+/// [`ReimportReceipt::text`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReimportReceipt {
+    /// File the receipt names.
+    pub path: PathBuf,
+    /// Tick the change was reported on.
+    pub at_tick: u64,
+    /// True when the intake accepted the reimport.
+    pub accepted: bool,
+}
+
+impl ReimportReceipt {
+    /// Build a receipt for one reported change.
+    pub fn from_change(change: &Changed, at_tick: u64, accepted: bool) -> Self {
+        Self {
+            path: change.path.clone(),
+            at_tick,
+            accepted,
+        }
+    }
+
+    /// One row line: `reimport art/crate.glb at t0042 accepted`.
+    pub fn text(&self) -> String {
+        let verdict = if self.accepted { "accepted" } else { "refused" };
+        format!(
+            "reimport {} at t{:04} {verdict}",
+            self.path.display(),
+            self.at_tick
+        )
+    }
+}
+
 /// What refused a watch. Nothing was watched on error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WatchError {
@@ -276,5 +329,27 @@ mod tests {
                 max: MAX_WATCHED
             })
         );
+    }
+
+    #[test]
+    fn a_receipt_row_names_the_file_tick_and_verdict() {
+        let change = Changed {
+            path: PathBuf::from("content/arena/crate.glb"),
+            first_tick: 40,
+            mtime_changed: true,
+            size_changed: false,
+        };
+        let accepted = ReimportReceipt::from_change(&change, 42, true);
+        assert_eq!(
+            accepted.text(),
+            "reimport content/arena/crate.glb at t0042 accepted"
+        );
+        let refused = ReimportReceipt::from_change(&change, 42, false);
+        assert_eq!(
+            refused.text(),
+            "reimport content/arena/crate.glb at t0042 refused"
+        );
+        assert_ne!(accepted, refused, "the verdict is part of the row");
+        assert_eq!(refused.at_tick, 42);
     }
 }

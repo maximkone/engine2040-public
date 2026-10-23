@@ -29,6 +29,8 @@ use crate::outline::{
     self, OutlinerHandles, OutlinerRow, OutlinerView, Selection as SharedSelection, SelectionBank,
 };
 use crate::shell::{Panel, Shell, ShellError};
+
+mod overlay;
 use crate::spine_inspect::{inspect_spine, SpineInspectError};
 use crate::templates::TemplateKind;
 use crate::tuning::CombatField;
@@ -85,6 +87,20 @@ pub struct ShellUi {
     spine: Option<SpineShown>,
     /// Browser tab state (W5): folder, rows and last notice.
     browser: BrowserTab,
+    /// Visible undo history the History tab lists; the host records steps.
+    history: crate::History,
+    /// Cursor over the history rows.
+    history_panel: crate::history_panel::HistoryPanel,
+    /// Last jump the History tab asked for, taken by the host.
+    history_jump: Option<crate::HistoryJump>,
+    /// Palette overlay state (query, cursor, recent ids).
+    palette: crate::palette::PaletteState,
+    /// Palette index over the dock panels plus the host's verbs and assets.
+    palette_index: crate::palette::CommandIndex,
+    /// Last palette action the overlay dispatched, taken by the host.
+    palette_action: Option<crate::palette::PaletteAction>,
+    /// Last palette refusal drawn under the query line.
+    palette_error: Option<String>,
 }
 
 /// One attached spine frame: the extraction tick and digest plus a node per
@@ -122,7 +138,47 @@ impl ShellUi {
             inspector_key: 1,
             spine: None,
             browser: BrowserTab::new(),
+            history: crate::History::new(crate::HISTORY_CAP),
+            history_panel: crate::history_panel::HistoryPanel::new(),
+            history_jump: None,
+            palette: crate::palette::PaletteState::new(),
+            palette_index: crate::palette::CommandIndex::default(),
+            palette_action: None,
+            palette_error: None,
         }
+    }
+
+    /// Record one step in the visible undo history (the host calls this after
+    /// an acknowledged apply), so the History tab lists it.
+    pub fn note_history(&mut self, entry: crate::HistoryEntry) {
+        self.history.push(entry);
+    }
+
+    /// The visible undo history the History tab lists.
+    pub fn history(&self) -> &crate::History {
+        &self.history
+    }
+
+    /// Take the last jump the History tab asked for. The host applies it.
+    pub fn take_history_jump(&mut self) -> Option<crate::HistoryJump> {
+        self.history_jump.take()
+    }
+
+    /// Replace the palette index: the dock panels are built in, the host adds
+    /// its door verbs and listed assets.
+    pub fn set_palette_index(&mut self, index: crate::palette::CommandIndex) {
+        self.palette_index = index;
+    }
+
+    /// The palette overlay state (open, query, cursor, recent ids).
+    pub fn palette(&self) -> &crate::palette::PaletteState {
+        &self.palette
+    }
+
+    /// Take the last palette action the overlay dispatched. The host runs it;
+    /// the overlay never calls the command service itself.
+    pub fn take_palette_action(&mut self) -> Option<crate::palette::PaletteAction> {
+        self.palette_action.take()
     }
 
     /// Show a spine snapshot at the top of the Inspector tab, read-only. The
@@ -194,6 +250,7 @@ impl ShellUi {
     }
 
     fn show_inner(&mut self, shell: &mut Shell, ui: &mut egui::Ui) {
+        self.palette_frame(ui);
         // Borrow the open list: the loop only reads it while the dock takes
         // the missing tabs, so no per-frame Vec clone. A closed tab stays
         // closed (its id leaves `shell.open_panels`); `ensure_builtin_panels`
@@ -234,6 +291,11 @@ impl ShellUi {
         let (inspector_panel, inspector_key) = (&mut self.inspector_panel, &mut self.inspector_key);
         let spine = &self.spine;
         let browser = &mut self.browser;
+        let (history, history_panel, history_jump) = (
+            &mut self.history,
+            &mut self.history_panel,
+            &mut self.history_jump,
+        );
         let mut viewer = Viewer {
             shell,
             gizmo,
@@ -254,6 +316,9 @@ impl ShellUi {
             inspector_key,
             spine,
             browser,
+            history,
+            history_panel,
+            history_jump,
         };
         DockArea::new(dock).show_inside(ui, &mut viewer);
     }
@@ -280,6 +345,9 @@ struct Viewer<'a> {
     inspector_key: &'a mut u64,
     spine: &'a Option<SpineShown>,
     browser: &'a mut BrowserTab,
+    history: &'a mut crate::History,
+    history_panel: &'a mut crate::history_panel::HistoryPanel,
+    history_jump: &'a mut Option<crate::HistoryJump>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -304,6 +372,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Browser => self.browser.show(ui, self.shell),
             Panel::Activity => self.activity(ui),
             Panel::Log => self.log(ui),
+            Panel::History => self.history_tab(ui),
         }
     }
 

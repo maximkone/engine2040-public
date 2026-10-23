@@ -82,6 +82,9 @@ pub enum Panel {
     /// Activity feed tagged human or agent, plus the scene diff, so a person
     /// and an AI on the same scene see each other's edits.
     Activity,
+    /// Visible undo history: every kept step newest first, with named versions
+    /// and a jump back to any kept step.
+    History,
 }
 
 impl Panel {
@@ -97,6 +100,7 @@ impl Panel {
             Self::Templates => "Templates",
             Self::Browser => "Browser",
             Self::Activity => "activity",
+            Self::History => "History",
         }
     }
 

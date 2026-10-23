@@ -25,6 +25,11 @@ use engine_input::MAX_PARTICIPANTS;
 /// Locale tables for menu labels (static en/de, integer plurals, test pseudo).
 pub mod locale;
 
+/// Menu screens as data: a `.ui.toml` names the same rows this module names, in the
+/// same order, and draws the same [`MenuItem`] values.
+#[path = "menu_layout.rs"]
+pub mod menu_layout;
+
 /// Most fighters a menu-started fight may request: the canonical match-slot
 /// cap from `engine-input` (one cap everywhere; legal range `1..=MAX_PARTICIPANTS`).
 pub const MAX_MENU_FIGHTERS: u8 = MAX_PARTICIPANTS;
@@ -163,6 +168,27 @@ impl MenuItemId {
             Self::Back => locale::KEY_BACK,
             Self::Setting(row) => row.locale_key(),
         }
+    }
+
+    /// The row a layout key names, when a `.ui.toml` may name it. The inverse of
+    /// [`Self::locale_key`], so a file names the same row the Rust path builds.
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        Some(match key {
+            locale::KEY_START_FIGHT => Self::StartFight,
+            locale::KEY_SETTINGS => Self::OpenSettings,
+            locale::KEY_QUIT => Self::QuitApp,
+            locale::KEY_RESUME => Self::Resume,
+            locale::KEY_QUIT_TO_MAIN => Self::QuitToMain,
+            locale::KEY_BACK => Self::Back,
+            locale::KEY_VOLUME_MASTER => Self::Setting(SettingRow::Volume(VolumeBus::Master)),
+            locale::KEY_VOLUME_MUSIC => Self::Setting(SettingRow::Volume(VolumeBus::Music)),
+            locale::KEY_VOLUME_EFFECTS => Self::Setting(SettingRow::Volume(VolumeBus::Effects)),
+            locale::KEY_QUALITY => Self::Setting(SettingRow::Quality),
+            locale::KEY_RENDER_SCALE => Self::Setting(SettingRow::RenderScale),
+            locale::KEY_VSYNC => Self::Setting(SettingRow::Vsync),
+            _ => return None,
+        })
     }
 }
 

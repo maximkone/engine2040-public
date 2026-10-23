@@ -238,6 +238,10 @@ engine-proof.workspace = true
 # dev-dep adds an edge, not a crate or a feature.
 [dev-dependencies]
 engine-arena.workspace = true
+# Tests read the export's `build.json` and check its sha256 against the staged bytes.
+# A dev edge only: the headless default graph stays std-only (tools/workspace-check.mjs),
+# so the build tool hashes through the tool Windows ships instead.
+sha2 = "0.10"
 
 # Release profile: thin LTO + 16 codegen units. The fat-LTO one-unit shape
 # moved to [profile.ship] (the packaged artifact and the CI release-proof leg),

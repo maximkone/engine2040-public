@@ -37,13 +37,21 @@
 //! whole chain and writes `fixtures/nets/depth_student.e2nn`.
 //!
 //! Generic pipeline: any teacher (provider, script, recorded human play)
-//! records decision rows; the caller maps them to [`Sample`]s. [`train`]
+//! records decision rows; the caller maps them to [`Sample`]s. `train`
 //! fits one dense layer, [`export`]
 //! quantizes it into the converter's single-layer `.e2nn` shape, and the
 //! `engine_nn` runtime runs it in the tick. [`tournament`] then plays the
 //! exported bytes against a scripted stand-in over seeded fork scripts and
 //! reports the neural-policy evidence: the student wins at least as often as
 //! scripted, inside the balance verifier's mirrored bounds.
+//!
+//! Continuous pipeline (the PX5b residual-corrector line): a teacher that
+//! emits a value per lane, not a class, records [`RegressionRow`]s;
+//! [`fit_regression`] fits the same two-layer [`Mlp`] on mean squared error
+//! and [`export_regression`] folds it to `.e2nn` with the calibration peak of
+//! its own output step, so the runtime lane decodes back to the teacher's
+//! units. This half is std-only and always builds; the burn one-hot half
+//! needs the `train` feature.
 
 mod data;
 pub mod duel;
@@ -57,7 +65,6 @@ mod replay;
 mod spec;
 mod student;
 mod tournament;
-#[cfg(feature = "train")]
 mod train;
 
 pub use data::{
@@ -69,7 +76,9 @@ pub use duel::{
     play_bout, teacher_episode, teacher_rows_per_episode, BoutOutcome, DuelError, Opponent,
     StudentController, TeacherDriver, DUEL_CLASSES, DUEL_LANES, DUEL_LANE_STEPS,
 };
-pub use export::{export, export_mlp, quantize_input, E2nnBytes, ExportError};
+pub use export::{
+    export, export_mlp, export_regression, quantize_input, E2nnBytes, ExportError, RegressionNet,
+};
 pub use fps::{
     check_fps, mlp_tick_ops, FpsError, FpsReport, FPS_CLASSES, FPS_LANES, MAX_FPS_BYTES,
     MAX_FPS_TICK_OPS,
@@ -87,6 +96,9 @@ pub use tournament::{
     TournamentReport, BALANCE_MAX_PERMILLE, BALANCE_MIN_PERMILLE, DEFAULT_BOUTS,
     DEFAULT_BOUT_TICKS, DEFAULT_MATCHES, MAX_BOUTS, MAX_CLASSES, MAX_MATCHES,
     MAX_OBSERVATIONS_PER_MATCH,
+};
+pub use train::{
+    fit_regression, regression_loss, RegressionError, RegressionRow, RowCause, MAX_TARGET_ABS,
 };
 #[cfg(feature = "train")]
 pub use train::{train, TrainError, TRAIN_LR};
@@ -110,13 +122,14 @@ pub use train::{train, TrainError, TRAIN_LR};
 #[cfg(test)]
 mod root_wiring_tests {
     use crate::{
-        argmax, binomial_two_sided_p, check_dataset, check_fps, mlp_tick_ops, mse_loss,
-        quantize_input, score_against_teacher, scripted_decide, wilson95, DataError, FpsReport,
-        Sample, Student, StudentSpec, BALANCE_MAX_PERMILLE, BALANCE_MIN_PERMILLE, DEFAULT_BOUTS,
-        DEFAULT_BOUT_TICKS, DEFAULT_MATCHES, DUEL_CLASSES, DUEL_LANES, DUEL_LANE_STEPS,
-        FPS_CLASSES, FPS_LANES, INPUT_QUANT_SCALE, MAX_BOUTS, MAX_CLASSES, MAX_EPOCHS,
-        MAX_FEATURE_ABS, MAX_FPS_BYTES, MAX_FPS_TICK_OPS, MAX_HIDDEN, MAX_MATCHES,
-        MAX_OBSERVATIONS_PER_MATCH, MAX_SAMPLES, MAX_SPEC_DIM,
+        argmax, binomial_two_sided_p, check_dataset, check_fps, export_regression, fit_regression,
+        mlp_tick_ops, mse_loss, quantize_input, regression_loss, score_against_teacher,
+        scripted_decide, wilson95, DataError, DatasetManifest, FpsReport, MlpSpec, RegressionError,
+        RegressionNet, RegressionRow, RowCause, Sample, Student, StudentSpec, BALANCE_MAX_PERMILLE,
+        BALANCE_MIN_PERMILLE, DEFAULT_BOUTS, DEFAULT_BOUT_TICKS, DEFAULT_MATCHES, DUEL_CLASSES,
+        DUEL_LANES, DUEL_LANE_STEPS, FPS_CLASSES, FPS_LANES, INPUT_QUANT_SCALE, MAX_BOUTS,
+        MAX_CLASSES, MAX_EPOCHS, MAX_FEATURE_ABS, MAX_FPS_BYTES, MAX_FPS_TICK_OPS, MAX_HIDDEN,
+        MAX_MATCHES, MAX_OBSERVATIONS_PER_MATCH, MAX_SAMPLES, MAX_SPEC_DIM, MAX_TARGET_ABS,
     };
 
     /// Every re-exported module stays reachable with its headline numbers
@@ -187,6 +200,40 @@ mod root_wiring_tests {
         };
         let at = check_dataset(&[good, bad], &spec).expect_err("bad row trips");
         assert_eq!(at.index, 1, "first bad row is second");
+    }
+
+    /// The continuous half reaches the root end to end: a row, a fit, a loss
+    /// and loadable int8 bytes, every step through the crate root.
+    #[test]
+    fn regression_row_fit_and_net_reach_via_root() {
+        let spec = StudentSpec::new(2, 1, 3).expect("test spec is legal");
+        let net_spec = MlpSpec {
+            student: spec,
+            hidden: 4,
+            epochs: 1,
+            batch: 2,
+            learning_rate: 0.05,
+        };
+        let row = RegressionRow::new(vec![0.5, -0.25], vec![1.0], &spec).expect("row admits");
+        assert_eq!(row.quantized_inputs(), vec![0.5, -0.25]);
+        assert_eq!(
+            RegressionRow::new(vec![0.0], vec![1.0], &spec),
+            Err(RowCause::BadInputLen { got: 1, want: 2 })
+        );
+        assert_eq!(
+            RegressionRow::new(vec![0.0, 0.0], vec![MAX_TARGET_ABS + 1.0], &spec),
+            Err(RowCause::BadTarget)
+        );
+        let rows = core::slice::from_ref(&row);
+        let mlp = fit_regression(rows, &net_spec, Some(&DatasetManifest::fixture()))
+            .expect("one epoch fits via root");
+        assert!(regression_loss(&mlp, rows)
+            .expect("loss over root params")
+            .is_finite());
+        let net: RegressionNet =
+            export_regression(&mlp, rows, &[DatasetManifest::fixture()]).expect("exports");
+        engine_nn::load(&net.bytes).expect("root bytes load in NN1");
+        assert_eq!(RegressionError::BadBatch.to_string(), "batch of zero rows");
     }
 
     /// The no-knowledge baseline runs through the root: zero params, exact

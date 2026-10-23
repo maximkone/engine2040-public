@@ -19,13 +19,14 @@
 //! `DOMAIN_MIN`/`DOMAIN_MAX` instead, so one code path owns the mapping).
 //!
 //! Plug-in point: the table samples after `apply_grade` and before the
-//! display write, so a look sits on graded display values, and the loaded
-//! [`Lut3d`] lives beside the chain config. That stage is not wired here
-//! because `post::chain` is another owner's file this slice; the render
-//! change that adds it holds the table, and the future `view.look` door verb
-//! names the `.cube` file to load (today the view pack has `look.judge` and
-//! `look.propose` only). Until then this module is the GPU-free half: parse
-//! and sample, no device.
+//! display write, so a look sits on graded display values. [`ChainConfig`]
+//! beside this module holds the loaded table plus the look file name, and
+//! `chain::run_chain_look` samples it (the LUT-free `run_chain` keeps today's
+//! bytes). The future `view.look` door verb names the `.cube` file to load
+//! (today the view pack has `look.judge` and `look.propose` only); this
+//! module stays the GPU-free half: parse and sample, no device, no IO.
+//!
+//! [`ChainConfig`]: super::ChainConfig
 
 use std::fmt;
 

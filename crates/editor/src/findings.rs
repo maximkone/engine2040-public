@@ -359,7 +359,9 @@ impl FindingsPanel {
                 id: repair.target_id,
             },
         )?;
-        let tree = stage_tree(&doc.hierarchy, &staged.batch.ops)?;
+        // Stage pose and component ops on a private copy so a new collider is
+        // measured too; the tree only answers world/parent lookups here.
+        let (tree, _staged_components) = crate::geometry::stage(doc, &staged.batch.ops)?;
         let world = tree
             .world(target)
             .ok_or(FindingsError::UnknownNode(target))?;

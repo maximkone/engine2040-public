@@ -813,6 +813,84 @@ mod taa_tests {
         assert!(receipt.history_valid, "two resolved frames leave a history");
     }
 
+    /// LF5d's AA default: both modes render the same sand-edge fixture, two
+    /// frames each, and the calmer frame-to-frame edge diff is the one the
+    /// presenter ships. TAA runs as shipped (Halton jitter plus the resolve);
+    /// 4x MSAA is coverage, so it carries no jitter. Measured on the RTX 3050:
+    /// TAA 10.60 levels, 4x MSAA 0.00 levels, so 4x MSAA is the calmer default.
+    #[test]
+    fn sand_edge_aa_default() {
+        let Some(mut taa) = init_or_skip("sand_edge_aa_default_taa") else {
+            return;
+        };
+        let Some(mut msaa) = init_or_skip("sand_edge_aa_default_msaa") else {
+            return;
+        };
+        msaa.set_msaa_enabled(true);
+        if !msaa.msaa_enabled() {
+            crate::test_gpu::note_skip("sand_edge_aa_default", "adapter cannot build the 4x pair");
+            return;
+        }
+        let mut toggles = crate::pass_truth::LookToggles::all_on();
+        toggles.disable("sky");
+        let list = list_for(camera(0.0), plane_item());
+        for presenter in [&mut taa, &mut msaa] {
+            presenter
+                .upload_mesh(plane_key(), &edge_plane())
+                .expect("fixture plane uploads");
+            presenter.resize(SIZE, SIZE).expect("valid size applies");
+        }
+        taa.set_taa_jitter_enabled(true);
+        taa.set_taa_resolve_enabled(true);
+        let mut frames = Vec::new();
+        for presenter in [&mut taa, &mut msaa] {
+            let mut twins = Vec::new();
+            for step in 0..2 {
+                let receipt = presenter
+                    .render_live_offscreen_with_toggles(&list, &toggles)
+                    .expect("aa frame renders");
+                assert!(receipt.is_clean(), "frame {step} validation errors 0");
+                assert_eq!(
+                    presenter.deferred_validation_errors(),
+                    0,
+                    "frame {step} has no late validation error"
+                );
+                twins.push(read_twin(presenter));
+            }
+            frames.push(twins);
+        }
+        let band = edge_band(SIZE, SIZE);
+        // A blank twin would read a 0.00 diff as well, so each mode's first
+        // frame must carry the fixture's edge step in the band.
+        let mut steps = Vec::new();
+        for (mode, twins) in [("taa", &frames[0]), ("msaa", &frames[1])] {
+            let (mut low, mut high) = (f32::MAX, f32::MIN);
+            for &pixel in &band {
+                let value = luma(&twins[0], pixel);
+                low = low.min(value);
+                high = high.max(value);
+            }
+            assert!(
+                high - low >= 5.0,
+                "{mode} twin shows the sand edge, band step {:.2} levels",
+                high - low
+            );
+            steps.push(high - low);
+        }
+        let taa_flicker = mean_change(&frames[0][0], &frames[0][1], &band);
+        let msaa_flicker = mean_change(&frames[1][0], &frames[1][1], &band);
+        eprintln!(
+            "sand edge aa default: taa (jitter+resolve) {taa_flicker:.2} levels \
+             (edge step {:.2}), msaa 4x {msaa_flicker:.2} levels (edge step {:.2})",
+            steps[0], steps[1]
+        );
+        assert!(
+            msaa_flicker <= taa_flicker,
+            "the presenter default is the calmer mode: 4x msaa \
+             {msaa_flicker:.2} vs taa (jitter+resolve) {taa_flicker:.2} levels"
+        );
+    }
+
     #[test]
     fn taa_resolve_keeps_a_running_fighter_ghost_under_three_px() {
         let Some(mut truth) = init_or_skip("taa_ghost_truth") else {

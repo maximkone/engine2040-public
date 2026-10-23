@@ -7,6 +7,11 @@
 //! prop: licence gate, repair, at most 5,000 triangles, LOD chain, collision hull,
 //! one E204BNDL bundle, a provenance row and a cache, through
 //! `engine_assets::gen_intake`. `import.fbx` lands here as its row closes.
+//! The artist loop rides the same crates: `asset.cook` runs one GLB through the
+//! mesh chains (unwrap, LOD, hull, normal bake) and reports the budget rows,
+//! `asset.lint` is the strict import check with one fix per finding, and
+//! `asset.budget` reports one asset's cost row or a level total over a
+//! placement JSON.
 //! Errors: [`McpToolError`] with the intake's own code (`license_refused`,
 //! `model_restricted`, `conditions_unaccepted`, `bad_provenance`, `import_failed`,
 //! `cook_failed`, `over_budget`, ...), the cause and one next step.
@@ -26,6 +31,12 @@ pub const PACK: &str = "asset";
 pub const TOOL_ASSET_GENERATE: &str = "asset.generate";
 /// Verb: cook a generated GLB into a game-ready prop with provenance.
 pub const TOOL_ASSET_INTAKE: &str = "asset.intake";
+/// Verb: cook one GLB through the whole mesh chain and report a budget table.
+pub const TOOL_ASSET_COOK: &str = "asset.cook";
+/// Verb: strict import check with codes and one fix per finding.
+pub const TOOL_ASSET_LINT: &str = "asset.lint";
+/// Verb: per-asset cost row, and a level total over a placement JSON.
+pub const TOOL_ASSET_BUDGET: &str = "asset.budget";
 
 /// The center command that runs the generator on the free GPU lane.
 pub const GENERATE_COMMAND: &str =
@@ -96,6 +107,20 @@ mod intake_verb;
 #[cfg(feature = "intake")]
 pub use intake_verb::{IntakeArgs, IntakeOutputDoc, IntakeTool, ModelArg};
 
+/// The artist's import loop over a GLB (card S3, W1, W6): `asset.cook` runs the whole mesh
+/// chain and reports a budget table, `asset.lint` checks an import, `asset.budget` prices a
+/// cooked asset or a whole placement. Built only with both `intake` (glTF) and `geo` (mesh
+/// tools).
+#[cfg(all(feature = "intake", feature = "geo"))]
+mod cook_verbs;
+#[cfg(all(feature = "intake", feature = "geo"))]
+pub use cook_verbs::{
+    AssetCost, BakeMode, BudgetArgs, BudgetOutput, BudgetTool, CollisionMode, CookArgs,
+    CookOptions, CookOutput, CookTool, LevelTotal, LintArgs, LintFinding, LintOutput, LintTool,
+    LodBudgetRow, UvMode, ATLAS_EDGES, DEFAULT_ATLAS, MAX_BAKE_SAMPLES, MAX_CONVEX_HULLS,
+    MAX_MATERIALS, MAX_SIZE_DEVIATION, PIVOT_EPS_M,
+};
+
 /// The asset pack: callers, references, the generate explainer and (feature
 /// `intake`) the intake, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
@@ -103,7 +128,10 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         "code and content references: reverse callers, which code and scenes touch one \
          asset; generated props: asset.generate explains the free GPU command, asset.intake \
-         cooks its GLB to at most 5,000 triangles with a hull, provenance and a cache",
+         cooks its GLB to at most 5,000 triangles with a hull, provenance and a cache; the \
+         artist loop (with features intake and geo): asset.cook chains unwrap, seam-locked \
+         LODs, hulls, a normal bake and the bundle cook into a budget table, asset.lint checks \
+         an import, asset.budget prices an asset or a level",
         false,
     );
     pack.add(VerbSpec::of::<CodeCallersTool>(
@@ -127,6 +155,24 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         CapabilityCard::Commit,
     )?);
+    #[cfg(all(feature = "intake", feature = "geo"))]
+    {
+        pack.add(VerbSpec::of::<cook_verbs::CookTool>(
+            TOOL_ASSET_COOK,
+            PACK,
+            CapabilityCard::Commit,
+        )?);
+        pack.add(VerbSpec::of::<cook_verbs::LintTool>(
+            TOOL_ASSET_LINT,
+            PACK,
+            CapabilityCard::Observe,
+        )?);
+        pack.add(VerbSpec::of::<cook_verbs::BudgetTool>(
+            TOOL_ASSET_BUDGET,
+            PACK,
+            CapabilityCard::Observe,
+        )?);
+    }
     Ok(pack)
 }
 

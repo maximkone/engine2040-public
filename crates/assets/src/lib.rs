@@ -178,6 +178,9 @@ pub use residency::{
     Admitted, Eviction, ResClass, Residency, ResidencyError, BUDGET_BYTES_RTX_3050, JOBS_RTX_3050,
     MAX_EVICTIONS_PER_CALL,
 };
+/// PNG encode of raw texels (the door's bake verbs write their map here).
+#[cfg(feature = "import")]
+pub mod png_out;
 #[cfg(feature = "import")]
 pub mod texture;
 /// Traversal and finisher intake: edge markers plus sidecar audit over retarget cooks.
@@ -213,6 +216,8 @@ pub use mesh_import::{
     import_gltf_bytes, import_gltf_path, texture_asset_id, GltfImport, MeshImportError, MAX_BYTES,
     MAX_DIAGNOSTIC_CHARS, MAX_PATH_CHARS, MAX_PRIMITIVES, MAX_VERTICES,
 };
+#[cfg(feature = "import")]
+pub use png_out::{encode_png_rgb8, PngError, MAX_EDGE};
 #[cfg(feature = "import")]
 pub use retarget::{
     is_traversal_edge, parse_sidecar, parse_sidecar_bytes, retarget_clip, retarget_cook,

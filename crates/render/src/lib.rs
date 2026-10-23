@@ -66,7 +66,9 @@ pub mod quality;
 pub mod material_kind;
 
 /// LF8: the CPU twin of `forward.wgsl` `direct_light`'s per-kind branches,
-/// called by `v1::shade_pbr`.
+/// called by `v1::shade_pbr`. It imports `crate::v1`, so it rides the same
+/// feature: the headless default stays std-only.
+#[cfg(feature = "v1")]
 mod v1_kind;
 
 /// WEB13: a ledger of every pipeline build, so a build after the loader is a loud `late_compile`.

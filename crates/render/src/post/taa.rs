@@ -105,7 +105,28 @@ pub(super) fn sample_bilinear(
     mix(mix(a, b, tx), mix(c, d, tx), ty)
 }
 
-/// 3x3 neighborhood min/max around `(x, y)` in the current frame.
+/// YCoCg working space for the neighbourhood clamp, byte-identical in
+/// convention to `shaders/taa_present.wgsl`: `Y = 0.25r + 0.5g + 0.25b`,
+/// `Co = 0.5(r - b)`, `Cg = 0.5g - 0.25(r + b)`. Luma and both chroma axes
+/// get their own box, so clipping cannot walk one channel of a saturated
+/// edge away from the neighbourhood's hue the way a per-channel RGB clamp
+/// does.
+pub(super) fn to_ycocg(rgb: [f32; 3]) -> [f32; 3] {
+    [
+        0.25 * rgb[0] + 0.5 * rgb[1] + 0.25 * rgb[2],
+        0.5 * rgb[0] - 0.5 * rgb[2],
+        -0.25 * rgb[0] + 0.5 * rgb[1] - 0.25 * rgb[2],
+    ]
+}
+
+/// Inverse of [`to_ycocg`]: `r = Y + Co - Cg`, `g = Y + Cg`, `b = Y - Co - Cg`.
+pub(super) fn from_ycocg(ycocg: [f32; 3]) -> [f32; 3] {
+    let [y, co, cg] = ycocg;
+    [y + co - cg, y + cg, y - co - cg]
+}
+
+/// 3x3 neighborhood min/max around `(x, y)` in the current frame, in YCoCg
+/// (see [`to_ycocg`]). The returned `lo`/`hi` are YCoCg bounds, not RGB.
 pub(super) fn neighborhood_minmax(
     current: &[[f32; 3]],
     width: u32,
@@ -121,7 +142,7 @@ pub(super) fn neighborhood_minmax(
         for dx in -1..=1 {
             let sx = (x as i32 + dx).clamp(0, w - 1) as usize;
             let sy = (y as i32 + dy).clamp(0, h - 1) as usize;
-            let p = current[sy * width as usize + sx];
+            let p = to_ycocg(current[sy * width as usize + sx]);
             for c in 0..3 {
                 lo[c] = lo[c].min(p[c]);
                 hi[c] = hi[c].max(p[c]);
@@ -131,17 +152,27 @@ pub(super) fn neighborhood_minmax(
     (lo, hi)
 }
 
+/// Clamp a history sample to YCoCg bounds, then convert back.
+///
+/// A sample already inside the box is returned untouched: the YCoCg round
+/// trip is not bit exact, and a no-op clamp must stay the exact identity so
+/// a static scene resolves to its own pixels.
 pub(super) fn clamp_history(sample: [f32; 3], lo: [f32; 3], hi: [f32; 3]) -> [f32; 3] {
-    [
-        sample[0].clamp(lo[0], hi[0]),
-        sample[1].clamp(lo[1], hi[1]),
-        sample[2].clamp(lo[2], hi[2]),
-    ]
+    let ycocg = to_ycocg(sample);
+    let clamped = [
+        ycocg[0].clamp(lo[0], hi[0]),
+        ycocg[1].clamp(lo[1], hi[1]),
+        ycocg[2].clamp(lo[2], hi[2]),
+    ];
+    if clamped == ycocg {
+        return sample;
+    }
+    from_ycocg(clamped)
 }
 
 /// TAA resolve: reproject history along the motion field, box-clamp it to
-/// the current 3x3 neighborhood (Karis-style ghosting guard), then blend.
-/// Same complete inputs give bit-identical outputs.
+/// the current 3x3 neighborhood in YCoCg (Karis-style ghosting guard), then
+/// blend. Same complete inputs give bit-identical outputs.
 pub fn taa_resolve(
     current: &[[f32; 3]],
     history: &[[f32; 3]],
@@ -554,6 +585,117 @@ mod tests {
         assert_ne!(
             smeared, current,
             "stale history with a valid flag must smear, or this test cannot fail"
+        );
+    }
+
+    /// The clamp box is built and applied in YCoCg, not RGB. A red/green
+    /// saturated edge separates the two: a per-channel RGB clamp lets a white
+    /// history sample through as (1, 1, 0), while YCoCg clamps luma to the
+    /// edge's 0.5 ceiling and both chroma axes to zero, giving (0.5, 0.5, 0.5).
+    #[test]
+    fn taa_neighbourhood_clamp_runs_in_ycocg_at_a_saturated_edge() {
+        // Working-space constants, the same convention as
+        // `shaders/taa_present.wgsl`.
+        assert_eq!(to_ycocg([1.0, 0.0, 0.0]), [0.25, 0.5, -0.25]);
+        assert_eq!(to_ycocg([0.0, 1.0, 0.0]), [0.5, 0.0, 0.5]);
+        let grey = [0.3, 0.8, 0.1];
+        let back = from_ycocg(to_ycocg(grey));
+        for c in 0..3 {
+            assert!(
+                (back[c] - grey[c]).abs() < 1e-6,
+                "conversion round trip {back:?} drifts from {grey:?}"
+            );
+        }
+
+        let (w, h) = (3u32, 3u32);
+        let red = [1.0, 0.0, 0.0];
+        let green = [0.0, 1.0, 0.0];
+        let current: Vec<[f32; 3]> = (0..9)
+            .map(|i| if i % 2 == 0 { red } else { green })
+            .collect();
+        let history = vec![[1.0, 1.0, 1.0]; 9];
+        let motion = MotionField::zero(w, h).expect("zero motion builds");
+        let params = TaaParams {
+            history_blend: 1.0,
+            ..TaaParams::default()
+        };
+        let out = taa_resolve(&current, &history, &motion, w, h, &params).expect("resolve runs");
+
+        // The box the sample is clamped to is the YCoCg one.
+        let (lo, hi) = neighborhood_minmax(&current, w, h, 1, 1);
+        assert_eq!(lo, [0.25, 0.0, -0.25], "lo is not the YCoCg box");
+        assert_eq!(hi, [0.5, 0.5, 0.5], "hi is not the YCoCg box");
+
+        // What the old per-channel RGB box would have returned, computed here
+        // so the difference is not just a hardcoded claim.
+        let mut rgb_lo = [f32::INFINITY; 3];
+        let mut rgb_hi = [f32::NEG_INFINITY; 3];
+        for p in &current {
+            for c in 0..3 {
+                rgb_lo[c] = rgb_lo[c].min(p[c]);
+                rgb_hi[c] = rgb_hi[c].max(p[c]);
+            }
+        }
+        let rgb_clamped = [
+            1.0f32.clamp(rgb_lo[0], rgb_hi[0]),
+            1.0f32.clamp(rgb_lo[1], rgb_hi[1]),
+            1.0f32.clamp(rgb_lo[2], rgb_hi[2]),
+        ];
+        assert_eq!(rgb_clamped, [1.0, 1.0, 0.0], "RGB box expectation");
+
+        // Full history weight and zero motion: the resolve is the clamped
+        // sample, so every pixel shows the space the clamp ran in.
+        let ycocg_clamp = [0.5, 0.5, 0.5];
+        for (i, p) in out.iter().enumerate() {
+            for c in 0..3 {
+                assert!(
+                    (p[c] - ycocg_clamp[c]).abs() < 1e-6,
+                    "pixel {i} is {p:?}, not the YCoCg clamp {ycocg_clamp:?}"
+                );
+            }
+        }
+        assert_ne!(
+            out[4], rgb_clamped,
+            "the clamp returned the RGB box value {rgb_clamped:?}: it is not YCoCg"
+        );
+
+        // Without the clamp the white history comes through, so the clamp is
+        // what moved this pixel.
+        let raw = taa_resolve(
+            &current,
+            &history,
+            &motion,
+            w,
+            h,
+            &TaaParams {
+                use_clamp: false,
+                ..params
+            },
+        )
+        .expect("unclamped resolve runs");
+        assert_eq!(raw[4], [1.0, 1.0, 1.0], "no clamp keeps the raw sample");
+
+        // A hot red sample separates the two halves of the clamp: in YCoCg it
+        // keeps its luma and lands on the chroma box edge as (1.25, 0.25,
+        // 0.25), while per-channel clamping against the same numbers gives the
+        // flat (0.5, 0, 0). The white sample above reads the same either way,
+        // so this one catches a YCoCg min/max with an RGB clamp.
+        let hot = vec![[2.0, 0.0, 0.0]; 9];
+        let hot_out =
+            taa_resolve(&current, &hot, &motion, w, h, &params).expect("hot history resolves");
+        let ycocg_hot = [1.25, 0.25, 0.25];
+        for (i, p) in hot_out.iter().enumerate() {
+            for c in 0..3 {
+                assert!(
+                    (p[c] - ycocg_hot[c]).abs() < 1e-6,
+                    "pixel {i} is {p:?}, not the YCoCg clamp of the hot sample {ycocg_hot:?}"
+                );
+            }
+        }
+        assert_ne!(
+            hot_out[4],
+            [0.5, 0.0, 0.0],
+            "the hot sample was clamped per channel: the clamp is not YCoCg"
         );
     }
 

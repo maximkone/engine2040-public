@@ -185,6 +185,7 @@ pub use auto_exposure::*;
 mod graph;
 pub use graph::*;
 pub mod lut;
+pub mod preset;
 
 /// Pinned 720p-to-1080p spatial upscale (FC3): EASU-shape lobe plus gradient reject.
 #[path = "upscale_easu.rs"]

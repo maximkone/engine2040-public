@@ -29,6 +29,8 @@ pub const FRECENCY_STEP_PERMILLE: u32 = 60;
 pub const FRECENCY_CAP_PERMILLE: u32 = 600;
 /// Most recent ids one overlay keeps.
 pub const RECENT_CAP: usize = 16;
+/// Most rows the overlay draws at once.
+pub const OVERLAY_ROWS: usize = 10;
 /// Widest score span one match tier owns, so frecency never crosses a tier.
 const TIER_BAND: u32 = 999;
 
@@ -67,6 +69,17 @@ impl MatchTier {
             Self::WordStart => 2_000,
             Self::Prefix => 3_000,
             Self::Exact => 4_000,
+        }
+    }
+
+    /// Short tag the overlay draws beside a row.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Recent => "recent",
+            Self::Subsequence => "fuzzy",
+            Self::WordStart => "word",
+            Self::Prefix => "prefix",
+            Self::Exact => "exact",
         }
     }
 }
@@ -306,6 +319,23 @@ impl CommandIndex {
     }
 }
 
+/// One overlay row: what to draw, its tier tag, its highlight ranges and
+/// whether the cursor sits on it. The dock paints labels and ranges and never
+/// re-ranks, so the draw list is testable without a window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteRow {
+    /// Row label to draw.
+    pub label: String,
+    /// Row id, drawn dim beside the label.
+    pub detail: String,
+    /// Match tier, drawn as [`MatchTier::label`].
+    pub tier: MatchTier,
+    /// Ranges to highlight in `label`.
+    pub ranges: Vec<(usize, usize)>,
+    /// True when the cursor is on this row.
+    pub selected: bool,
+}
+
 /// Keys the palette overlay handles; the dock maps egui keys onto these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaletteKey {
@@ -372,6 +402,22 @@ impl PaletteState {
     /// The ranked rows for the current query.
     pub fn hits(&self, index: &CommandIndex) -> Result<Vec<CommandHit>, PaletteError> {
         index.search(&self.query, &self.recent, DEFAULT_LIMIT)
+    }
+
+    /// Rows the overlay draws for the current query, cursor included.
+    pub fn draw_rows(&self, index: &CommandIndex) -> Result<Vec<PaletteRow>, PaletteError> {
+        let hits = index.search(&self.query, &self.recent, OVERLAY_ROWS)?;
+        Ok(hits
+            .iter()
+            .enumerate()
+            .map(|(row, hit)| PaletteRow {
+                label: hit.command.label.clone(),
+                detail: hit.command.id.clone(),
+                tier: hit.tier,
+                ranges: hit.ranges.clone(),
+                selected: row == self.cursor,
+            })
+            .collect())
     }
 
     /// Replace the query (one keystroke); the cursor returns to the top row.
@@ -775,6 +821,32 @@ mod tests {
         let mut bare = PaletteState::new();
         bare.set_query("zzz");
         assert_eq!(bare.key(PaletteKey::Enter, &mut empty).unwrap(), None);
+    }
+
+    #[test]
+    fn overlay_draw_rows_marks_the_cursor_and_carries_highlights() {
+        let mut index = index();
+        let mut state = PaletteState::new();
+        state.key(PaletteKey::Toggle, &mut index).unwrap();
+        state.set_query("insp");
+        let rows = state.draw_rows(&index).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Inspector");
+        assert_eq!(rows[0].tier, MatchTier::Prefix);
+        assert_eq!(rows[0].tier.label(), "prefix");
+        assert_eq!(rows[0].ranges, vec![(0, 4)]);
+        assert!(rows[0].selected);
+        assert_eq!(rows[0].detail, "panel.inspector");
+
+        // Empty query: at most OVERLAY_ROWS rows, exactly one selected.
+        state.set_query("");
+        let rows = state.draw_rows(&index).unwrap();
+        assert!(rows.len() <= OVERLAY_ROWS);
+        assert_eq!(rows.iter().filter(|row| row.selected).count(), 1);
+        assert_eq!(rows[0].tier, MatchTier::Recent);
+        // No hit: no row, so nothing is selected.
+        state.set_query("zzzz");
+        assert!(state.draw_rows(&index).unwrap().is_empty());
     }
 
     #[test]

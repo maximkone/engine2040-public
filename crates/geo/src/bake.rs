@@ -130,6 +130,11 @@ fn dilate_cover(
         }
     }
 }
+/// Largest bake edge accepted, texels. The cost is one barycentric test per
+/// texel per low triangle, so callers budget the product themselves; this cap
+/// only keeps one map under 1 Mi texels.
+pub const MAX_BAKE_EDGE: u32 = 1024;
+
 /// Bake `high` normals into `low` UV space, then dilate covered texels 4px.
 pub fn bake_normals(
     low: &GeoMesh,
@@ -145,7 +150,7 @@ pub fn bake_normals(
     if low.uvs.len() != low.positions.len() {
         return Err(GeoError::Malformed("uvs missing"));
     }
-    if size == 0 || size > 256 {
+    if size == 0 || size > MAX_BAKE_EDGE {
         return Err(GeoError::Malformed("size out of range"));
     }
     if !cage.is_finite() || cage <= 0.0 {

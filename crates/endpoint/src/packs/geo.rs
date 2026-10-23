@@ -24,6 +24,11 @@
 //! the legal values. Bounds: at most [`MAX_RECIPE_OPS`] ops, names up to
 //! [`MAX_SELECTION_NAME`] bytes, [`MAX_SELECTIONS`] selections, and indices
 //! echoed up to [`MAX_ECHOED_FACES`] per selection.
+//!
+//! The file verbs (`geo.uv`, `geo.lod`, `geo.hull`, `geo.bake`, each a preview/apply pair) run
+//! the same modules over a `.glb`/`.gltf` instead of a recipe, so an artist can unwrap,
+//! reduce, collide and bake a mesh that already exists. They need both the `geo` feature
+//! (the tools) and the `intake` feature (the glTF reader); see `meshfile`.
 
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
@@ -371,6 +376,22 @@ struct Mesh {
 
 #[cfg(feature = "geo")]
 mod kernel;
+
+/// The file verbs (`geo.uv|geo.lod|geo.hull|geo.bake`): the same four `engine-geo` modules run
+/// over a `.glb`/`.gltf` instead of a recipe. Reading a glTF needs the `intake` feature, so the
+/// module exists only with both features.
+#[cfg(all(feature = "geo", feature = "intake"))]
+mod meshfile;
+#[cfg(all(feature = "geo", feature = "intake"))]
+pub use meshfile::{
+    BakeApplyArgs, BakeApplyOutput, BakeApplyTool, BakeMapOut, BakeMeshOut, BakePreviewArgs,
+    BakePreviewOutput, BakePreviewTool, HullApplyArgs, HullApplyOutput, HullApplyTool, HullMeshOut,
+    HullPreviewArgs, HullPreviewOutput, HullPreviewTool, LodApplyArgs, LodApplyOutput,
+    LodApplyTool, LodLevelOut, LodPreviewArgs, LodPreviewOutput, LodPreviewTool, UvApplyArgs,
+    UvApplyOutput, UvApplyTool, UvMeshOut, UvPreviewArgs, UvPreviewOutput, UvPreviewTool,
+    DEFAULT_OUT_DIR as FILE_PAYLOAD_DIR, MAX_ATLAS, MAX_BAKE_SAMPLES as FILE_MAX_BAKE_SAMPLES,
+    MAX_FILE_TRIANGLES, MAX_HULLS, MIN_ATLAS,
+};
 
 /// Stand-in for `kernel` in a build without the `geo` feature: every modeling op refuses with
 /// the typed code `feature_off`.
@@ -823,6 +844,7 @@ fn geo_apply(
             ops,
             approval: preview.approval,
             delta: Some(false),
+            origin: None,
         })
     })?;
     Ok(GeoApplyOutput {
@@ -874,6 +896,49 @@ pub fn pack() -> Result<PackDef, PackError> {
         PACK,
         CapabilityCard::Commit,
     )?);
+    #[cfg(all(feature = "geo", feature = "intake"))]
+    {
+        pack.add(VerbSpec::of::<meshfile::UvPreviewTool>(
+            meshfile::TOOL_GEO_UV_PREVIEW,
+            PACK,
+            CapabilityCard::Observe,
+        )?);
+        pack.add(VerbSpec::of::<meshfile::UvApplyTool>(
+            meshfile::TOOL_GEO_UV_APPLY,
+            PACK,
+            CapabilityCard::Commit,
+        )?);
+        pack.add(VerbSpec::of::<meshfile::LodPreviewTool>(
+            meshfile::TOOL_GEO_LOD_PREVIEW,
+            PACK,
+            CapabilityCard::Observe,
+        )?);
+        pack.add(VerbSpec::of::<meshfile::LodApplyTool>(
+            meshfile::TOOL_GEO_LOD_APPLY,
+            PACK,
+            CapabilityCard::Commit,
+        )?);
+        pack.add(VerbSpec::of::<meshfile::HullPreviewTool>(
+            meshfile::TOOL_GEO_HULL_PREVIEW,
+            PACK,
+            CapabilityCard::Observe,
+        )?);
+        pack.add(VerbSpec::of::<meshfile::HullApplyTool>(
+            meshfile::TOOL_GEO_HULL_APPLY,
+            PACK,
+            CapabilityCard::Commit,
+        )?);
+        pack.add(VerbSpec::of::<meshfile::BakePreviewTool>(
+            meshfile::TOOL_GEO_BAKE_PREVIEW,
+            PACK,
+            CapabilityCard::Observe,
+        )?);
+        pack.add(VerbSpec::of::<meshfile::BakeApplyTool>(
+            meshfile::TOOL_GEO_BAKE_APPLY,
+            PACK,
+            CapabilityCard::Commit,
+        )?);
+    }
     Ok(pack)
 }
 
@@ -1122,6 +1187,7 @@ mod tests {
                 ops,
                 approval: drafted.approval,
                 delta: None,
+                origin: None,
             },
         )
         .expect("insert lands");
@@ -1501,5 +1567,256 @@ mod tests {
         assert_eq!(applied.digest, previewed.digest);
         TxUndoTool::invoke(&server, TxUndoArgs { undo_token: None }).expect("undo");
         assert!(server.lock().expect("lock").doc.components.is_empty());
+    }
+
+    /// The file verbs: a real GLB through `geo.uv|geo.lod|geo.hull|geo.bake`.
+    #[cfg(all(feature = "geo", feature = "intake"))]
+    mod file_verbs {
+        use super::super::meshfile;
+        use super::*;
+
+        /// A committed GLB fixture with UVs and three primitives.
+        fn crate_glb() -> String {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../content/generated/props/world_crate.glb")
+                .display()
+                .to_string()
+        }
+
+        /// A payload folder under the workspace `target/`.
+        fn out(name: &str) -> String {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/geo-test")
+                .join(name)
+                .display()
+                .to_string()
+        }
+
+        fn server() -> McpServer {
+            McpServer::new(7, Capability::unrestricted(7))
+        }
+
+        #[test]
+        fn uv_preview_is_deterministic_and_apply_commits_a_mesh_that_undoes() {
+            let (server, id) = server_with_node();
+            let args = meshfile::UvPreviewArgs {
+                path: crate_glb(),
+                atlas: Some(512),
+            };
+            let preview = meshfile::UvPreviewTool::invoke(&server, args.clone()).expect("previews");
+            assert!(preview.charts >= 1, "charts {}", preview.charts);
+            assert_eq!(
+                preview.overlapping_chart_pairs, 0,
+                "the packer leaves no chart sharing atlas area"
+            );
+            assert_eq!(preview.digest.len(), 16);
+            assert!(preview.texels_per_unit > 0.0);
+            // Same file, same numbers twice; a preview writes nothing.
+            assert_eq!(
+                preview,
+                meshfile::UvPreviewTool::invoke(&server, args).expect("again")
+            );
+            assert_eq!(server.lock().expect("lock").doc.revision, 1);
+            let applied = meshfile::UvApplyTool::invoke(
+                &server,
+                meshfile::UvApplyArgs {
+                    path: crate_glb(),
+                    atlas: Some(512),
+                    node: id,
+                    expected_revision: 1,
+                    idempotency_key: 9,
+                    out_dir: Some(out("uv")),
+                },
+            )
+            .expect("applies");
+            assert_eq!(applied.preview.digest, preview.digest);
+            assert!(applied.payload_bytes > 0);
+            assert!(std::path::Path::new(&applied.payload_path).exists());
+            assert_eq!(applied.revision, 2);
+            TxUndoTool::invoke(&server, TxUndoArgs { undo_token: None }).expect("undo");
+            assert!(server.lock().expect("lock").doc.components.is_empty());
+        }
+
+        #[test]
+        fn lod_rows_name_every_level_over_its_budget() {
+            let server = server();
+            let preview = meshfile::LodPreviewTool::invoke(
+                &server,
+                meshfile::LodPreviewArgs {
+                    path: crate_glb(),
+                    ratios: vec![1.0, 0.5],
+                    // A one-triangle budget every level misses: the warning row is the point.
+                    tri_budget: Some(1),
+                },
+            )
+            .expect("previews");
+            assert_eq!(preview.levels.len(), 2);
+            assert!(preview.levels[0].triangles > 0);
+            assert!(
+                preview.levels[0].over_budget,
+                "LOD0 misses a 1-triangle budget"
+            );
+            assert!(preview.levels[1].over_budget);
+            assert_eq!(preview.over_budget_levels, vec![0, 1]);
+            // Without a budget the levels still report, judged against LOD0 times the ratio.
+            let loose = meshfile::LodPreviewTool::invoke(
+                &server,
+                meshfile::LodPreviewArgs {
+                    path: crate_glb(),
+                    ratios: vec![1.0, 0.5, 0.25],
+                    tri_budget: None,
+                },
+            )
+            .expect("previews");
+            assert_eq!(loose.levels.len(), 3);
+            assert_eq!(loose.levels[0].budget, loose.base_triangles);
+            let applied = meshfile::LodApplyTool::invoke(
+                &server,
+                meshfile::LodApplyArgs {
+                    path: crate_glb(),
+                    ratios: vec![1.0, 0.5],
+                    tri_budget: None,
+                    out_dir: Some(out("lod")),
+                },
+            )
+            .expect("applies");
+            assert_eq!(applied.files.len(), 2);
+            assert_eq!(applied.digests.len(), 2);
+            for file in &applied.files {
+                assert!(std::path::Path::new(file).exists(), "{file} written");
+            }
+            assert!(applied.bytes > 0);
+        }
+
+        #[test]
+        fn hull_preview_counts_parts_and_refuses_an_unknown_mode() {
+            let server = server();
+            let hull = meshfile::HullPreviewTool::invoke(
+                &server,
+                meshfile::HullPreviewArgs {
+                    path: crate_glb(),
+                    mode: Some("hull".to_owned()),
+                    max_hulls: None,
+                },
+            )
+            .expect("previews");
+            assert_eq!(hull.mode, "hull");
+            assert!(hull.hulls >= 1);
+            for row in &hull.meshes {
+                assert_eq!(row.parts, 1, "one hull per primitive");
+                assert!(row.contained_vertices <= row.vertices);
+                assert_eq!(row.containment_ok, row.contained_vertices == row.vertices);
+            }
+            let convex = meshfile::HullPreviewTool::invoke(
+                &server,
+                meshfile::HullPreviewArgs {
+                    path: crate_glb(),
+                    mode: Some("convex".to_owned()),
+                    max_hulls: Some(4),
+                },
+            )
+            .expect("previews");
+            assert!(convex.hulls >= 1);
+            assert!(convex
+                .meshes
+                .iter()
+                .all(|row| row.parts >= 1 && row.parts <= 4));
+            let refused = meshfile::HullPreviewTool::invoke(
+                &server,
+                meshfile::HullPreviewArgs {
+                    path: crate_glb(),
+                    mode: Some("box".to_owned()),
+                    max_hulls: None,
+                },
+            )
+            .expect_err("refused");
+            assert_eq!(refused.code, "bad_input");
+            assert!(
+                refused.message.contains("`hull` or `convex`"),
+                "{}",
+                refused.message
+            );
+            let applied = meshfile::HullApplyTool::invoke(
+                &server,
+                meshfile::HullApplyArgs {
+                    path: crate_glb(),
+                    mode: Some("hull".to_owned()),
+                    max_hulls: None,
+                    out_dir: Some(out("hull")),
+                },
+            )
+            .expect("applies");
+            assert!(std::path::Path::new(&applied.payload_path).exists());
+            assert_eq!(applied.preview.hulls, hull.hulls);
+        }
+
+        #[test]
+        fn bake_preview_reports_samples_and_apply_writes_a_png_that_repeats() {
+            let server = server();
+            let preview = meshfile::BakePreviewTool::invoke(
+                &server,
+                meshfile::BakePreviewArgs {
+                    path: crate_glb(),
+                    resolution: Some(256),
+                    kind: None,
+                },
+            )
+            .expect("previews");
+            assert_eq!(preview.resolution, 256);
+            assert_eq!(preview.kind, "normal");
+            assert!(preview.samples > 0);
+            assert!(!preview.over_cap);
+            assert!(preview.chart_coverage > 0.0);
+            let apply = |folder: &str| {
+                meshfile::BakeApplyTool::invoke(
+                    &server,
+                    meshfile::BakeApplyArgs {
+                        path: crate_glb(),
+                        resolution: Some(256),
+                        kind: None,
+                        out_dir: Some(out(folder)),
+                    },
+                )
+                .expect("applies")
+            };
+            let first = apply("bake-a");
+            let second = apply("bake-b");
+            assert!(!first.maps.is_empty());
+            for map in &first.maps {
+                let png = std::fs::read(&map.path).expect("png written");
+                assert_eq!(&png[1..4], b"PNG", "a PNG signature");
+                assert!(map.covered_texels > 0, "the bake covered texels");
+                assert!(map.covered_fraction > 0.0 && map.covered_fraction <= 1.0);
+            }
+            assert_eq!(
+                first
+                    .maps
+                    .iter()
+                    .map(|m| m.digest.clone())
+                    .collect::<Vec<_>>(),
+                second
+                    .maps
+                    .iter()
+                    .map(|m| m.digest.clone())
+                    .collect::<Vec<_>>(),
+                "same mesh, same PNG bytes"
+            );
+            let refused = meshfile::BakeApplyTool::invoke(
+                &server,
+                meshfile::BakeApplyArgs {
+                    path: crate_glb(),
+                    resolution: Some(100),
+                    kind: None,
+                    out_dir: None,
+                },
+            )
+            .expect_err("refused");
+            assert_eq!(refused.code, "bad_input");
+            assert!(
+                refused.message.contains("256, 512 or 1024"),
+                "{}",
+                refused.message
+            );
+        }
     }
 }

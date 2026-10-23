@@ -124,6 +124,36 @@ unchanged revision. Then a 20-case write-then-read suite with 0 successes and on
 **Kill:** if no `OpDto` variant can carry free text (all values numeric or closed enums), the write
 half dies and the card shrinks to read-path provenance, which is XS.
 
+**Landed 2026-10-24** (`6260a659b`, `cd0030898`, `721aac5d1`). Every manifest name reaches the
+pre-run screen. The seam has one screened entry, `dispatch_screened`: it turns the call args into the
+untrusted-text view (every string value plus each distinct key, one per line), hands that to the
+manifest cap and hostile scan, then runs the op. Plain `dispatch` refuses a listed name as
+`unscreened_call`, so a manifest tool cannot reach the lock with its payload unseen. The routing test
+loops `manifest::scanned_tools()` and asserts it covers `tools::TOOLS` one for one, so the list and
+the routing cannot drift; `api.call` screens the verb name plus every string in its args before the
+verb stages anything, and `test.run` screens its own args in `run_checks` because it reads through
+other tools and seals no record of its own.
+
+`tx.apply` carries `origin`: `model:<provider>/<model>`, `script:<name>`, or omitted for the door's
+own `script:mcp`. Anything else refuses `bad_origin` before the batch builds and writes nothing. A
+model stamp carries `assistant::request_digest` over the canonical action hash, a script stamp the
+zero digest. `scene.read` rows and the apply receipt echo the stored writer, so a model batch reads
+back as model and a script batch as script. `tx.preview` passes no origin, and the canonical action
+hash ignores provenance, so preview and apply still bind.
+
+Proof: run 40031974000, endpoint lib with `--features mcp`, 843 passed / 0 failed, including
+`every_manifest_name_runs_the_pre_run_screen`,
+`twenty_hostile_writes_never_land_and_one_clean_control_does` (20 hostile writes refused
+`hostile_text`; revision, count and every row unchanged; one clean control lands),
+`model_and_script_origins_read_back_from_scene_rows` and
+`unparsable_origins_refuse_bad_origin_and_write_nothing` (7 malformed forms, nothing written).
+`tool_schema_drift_matches_command_shapes` counts discriminator branches instead of every `oneOf`, so
+the op count stays 7. The default list measures under the 62,400 guard; `TOOL_LIST_BUDGET_CHARS` and
+`MAX_ADVERTISED_CHARS` are untouched. rust-quality `--owned` PASS; no golden move (no sim code).
+Open: `docs/book/door-reference.md` needs a regenerate once the in-flight packs land (its `--check`
+reads the whole tree), and HEAD went red in `engine-render` (`v1_kind.rs` uses `crate::v1` without
+the feature) after this pass, so later reruns of the same line could not compile.
+
 **Why we missed it:** the screen was built for brief import (`scene.place`, AB1) and tested there;
 the manifest then grew as a list, and no test asserts that every listed tool actually routes
 through the seam.

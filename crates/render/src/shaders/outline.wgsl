@@ -2,10 +2,10 @@
 /// Outline = view normal / viewport × clip.w (constant width in pixels)
 /// Donor: https://github.com/togechiyo/MMD_modoki/blob/main/src/scene/shaders/builtin-toon/full_shadow.wgsl
 
-/// @group 0 @binding 4
+@group(0) @binding(4)
 var<uniform> outline_color: vec4f;
 
-/// @group 0 @binding 5
+@group(0) @binding(5)
 var<uniform> outline_width: f32;
 
 /// Inverted hull outline: constant pixel width at any distance
