@@ -1524,7 +1524,10 @@ mod tests {
             .collect();
         ms.sort_by(|a, b| a.partial_cmp(b).expect("bake ms is finite"));
         let median = ms[ms.len() / 2];
-        println!("sky bake {SKY_CAPTURE_W}x{SKY_CAPTURE_H}: median {median:.3} ms, best {:.3} ms", ms[0]);
+        println!(
+            "sky bake {SKY_CAPTURE_W}x{SKY_CAPTURE_H}: median {median:.3} ms, best {:.3} ms",
+            ms[0]
+        );
         assert!(
             median < 0.4,
             "median {SKY_CAPTURE_W}x{SKY_CAPTURE_H} day bake costs {median:.3} ms, the bar is 0.4"

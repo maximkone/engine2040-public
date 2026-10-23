@@ -31,6 +31,8 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   F2P: the two verbs are absent from `tools/list` and the new pack test fails.
   P2P: `cargo test -p engine-endpoint --features mcp --lib` stays green.
   Accept: save a subtree, place it twice, undo both, same digest.
+  Blocked 2026-10-24: 34 files under `crates/endpoint/src/` are held dirty by
+  another seat; take it when they land.
 - [ ] WG5 world/render: 3D terrain and foliage - `crates/assets/src/collider_cook.rs:17`
   says heightfields are not cooked; no terrain hits in render, nav, assets, spatial.
   Tier B. Size L. Owns `crates/world/src/`, `crates/assets/src/`, `crates/render/src/`.
@@ -83,6 +85,7 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   no `project.*`; only `game.build` (`crates/endpoint/src/build_game.rs:24`). Tier A.
   Size S. Owns `crates/endpoint/src/packs/`. F2P: the three verbs are absent (new test).
   P2P: `game.build` stays green. Accept: new -> build -> run from one session.
+  Blocked 2026-10-24: the same 34-file endpoint dirty set as WG4.
 
 ## Tools and dev loop
 

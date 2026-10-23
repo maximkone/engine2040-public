@@ -1514,7 +1514,7 @@ impl ToolBase for SceneBriefTool {
 
 impl SyncTool<McpServer> for SceneBriefTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_SCENE_BRIEF, |state| {
+        service.dispatch_screened(TOOL_SCENE_BRIEF, &param, |state| {
             let repeat = state.note_read(TOOL_SCENE_BRIEF, &param)?;
             let mut out = state.scene_brief(&param)?;
             out.repeat_count = repeat;
@@ -1546,7 +1546,7 @@ impl ToolBase for SceneSpatialTool {
 
 impl SyncTool<McpServer> for SceneSpatialTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_SCENE_SPATIAL, |state| {
+        service.dispatch_screened(TOOL_SCENE_SPATIAL, &param, |state| {
             let repeat = state.note_read(TOOL_SCENE_SPATIAL, &param)?;
             let mut out = state.scene_spatial(&param)?;
             out.repeat_count = repeat;
@@ -1658,10 +1658,9 @@ mod tests {
     #[test]
     fn place_payload_serializes_valid_args_and_refuses_failures_audited() {
         use super::super::audit::{code_hash, AuditOutcome};
-        use super::super::door_dispatch::audit_payload_text;
+        use super::super::door_dispatch::untrusted_text;
 
-        // Valid args serialize to a payload that carries the call's own
-        // fields into the hostile-text screen.
+        // Valid args yield the call's own text for the hostile-text screen.
         let args = ScenePlaceArgs {
             expected_revision: 3,
             idempotency_key: 77,
@@ -1669,13 +1668,13 @@ mod tests {
             wants: vec!["next_to wall:north [0,60]".to_owned()],
             delta: None,
         };
-        let payload = audit_payload_text(TOOL_SCENE_PLACE, &args).expect("valid args serialize");
+        let payload = untrusted_text(TOOL_SCENE_PLACE, &args).expect("valid args serialize");
         assert!(payload.contains("brazier"), "got: {payload}");
         assert!(payload.contains("next_to"), "got: {payload}");
 
         // A serialization failure refuses `bad_args` and names the tool plus
         // the recovery, never an empty screened string.
-        let refused = audit_payload_text(TOOL_SCENE_PLACE, &Unserializable)
+        let refused = untrusted_text(TOOL_SCENE_PLACE, &Unserializable)
             .expect_err("unserializable args must refuse fail-closed");
         assert_eq!(refused.code, "bad_args");
         assert!(
@@ -1696,7 +1695,9 @@ mod tests {
         let server = McpServer::new(7, Capability::unrestricted(7));
         let before = server.lock().expect("test lock holds").doc.revision;
         let sealed = server
-            .dispatch(TOOL_SCENE_PLACE, |_| Err::<ScenePlaceOutput, _>(refused))
+            .dispatch_with_payload(TOOL_SCENE_PLACE, "", |_| {
+                Err::<ScenePlaceOutput, _>(refused)
+            })
             .expect_err("sealed refusal still refuses");
         assert_eq!(sealed.code, "bad_args");
         assert_eq!(

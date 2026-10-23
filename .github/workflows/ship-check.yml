@@ -173,3 +173,10 @@ jobs:
           name: ship-run-receipt
           path: target/ship-check/ship-run.txt
           if-no-files-found: ignore
+      - name: upload the shipped arena binary
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: ship-arena
+          path: target/ship-check/ship-a/arena.exe
+          if-no-files-found: warn

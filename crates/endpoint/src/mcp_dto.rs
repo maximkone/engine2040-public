@@ -244,6 +244,10 @@ pub struct TxApplyArgs {
     /// `false` skips the spatial delta (default true).
     #[serde(default)]
     pub delta: Option<bool>,
+    /// Writer: `model:<provider>/<model>` or `script:<name>`; omitted stamps
+    /// the door's own `script:mcp` (a bad prefix refuses `bad_origin`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// Args for `tx.undo`.
@@ -257,7 +261,8 @@ pub struct TxUndoArgs {
     pub undo_token: Option<u64>,
 }
 
-/// One snapshot row: stable id, parent link (null for roots), local pose.
+/// One snapshot row: stable id, parent link (null for roots), local pose and
+/// the newest provenance stamp that wrote it.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -268,6 +273,9 @@ pub struct SceneObjectDto {
     pub parent: Option<String>,
     /// Local pose in meters.
     pub local: PoseDto,
+    /// Newest writer: `model:<provider>/<model>`, `script:<name>` or `human`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// `scene.read` result: revision plus one bounded page.
@@ -354,6 +362,8 @@ pub struct TxApplyOutput {
     /// Bounded "what changed" summary: revisions, counts and clipped rows.
     #[serde(default)]
     pub changes: ChangeListDto,
+    /// Stored writer: `model:<provider>/<model>`, `script:<name>` or `human`.
+    pub origin: String,
     /// Spatial findings this write changed; absent with `delta: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial_delta: Option<SpatialDeltaDto>,
@@ -552,6 +562,7 @@ mod tests {
             undo_token: BIG,
             changes: ChangeListDto::default(),
             spatial_delta: None,
+            origin: "script:mcp".to_owned(),
         };
         let value = rmcp::serde_json::to_value(&applied).expect("receipt serializes");
         assert_eq!(

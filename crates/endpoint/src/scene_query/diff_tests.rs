@@ -85,6 +85,7 @@ fn apply_ops(server: &McpServer, revision: u64, key: u64, ops: Vec<OpDto>) -> Tx
             ops,
             approval: drafted.approval,
             delta: Some(false),
+            origin: None,
         },
     )
     .expect("apply lands")
@@ -349,6 +350,7 @@ fn scene_diff_replayed_apply_lists_the_same_changes() {
             ops: ops.clone(),
             approval: drafted.approval.clone(),
             delta: Some(false),
+            origin: None,
         },
     )
     .expect("apply lands");
@@ -360,6 +362,7 @@ fn scene_diff_replayed_apply_lists_the_same_changes() {
             ops,
             approval: drafted.approval,
             delta: Some(false),
+            origin: None,
         },
     )
     .expect("replay answers");

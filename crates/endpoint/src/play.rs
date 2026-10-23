@@ -1552,7 +1552,7 @@ impl ToolBase for PlayRunTool {
 
 impl SyncTool<McpServer> for PlayRunTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_PLAY_RUN, |state| state.play_run(&param))
+        service.dispatch_screened(TOOL_PLAY_RUN, &param, |state| state.play_run(&param))
     }
 }
 
@@ -1583,7 +1583,7 @@ impl ToolBase for CaptureTool {
 
 impl SyncTool<McpServer> for CaptureTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_CAPTURE, |state| state.capture(&param))
+        service.dispatch_screened(TOOL_CAPTURE, &param, |state| state.capture(&param))
     }
 }
 

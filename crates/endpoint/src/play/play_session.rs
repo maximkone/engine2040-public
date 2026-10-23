@@ -1010,7 +1010,7 @@ impl ToolBase for PlayStepTool {
 
 impl SyncTool<McpServer> for PlayStepTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_PLAY_STEP, |state| state.play_step(&param))
+        service.dispatch_screened(TOOL_PLAY_STEP, &param, |state| state.play_step(&param))
     }
 }
 

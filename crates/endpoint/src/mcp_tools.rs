@@ -52,7 +52,7 @@ impl ToolBase for SceneReadTool {
 
 impl SyncTool<McpServer> for SceneReadTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_SCENE_READ, |state| state.scene_read(&param))
+        service.dispatch_screened(TOOL_SCENE_READ, &param, |state| state.scene_read(&param))
     }
 }
 
@@ -83,7 +83,7 @@ impl ToolBase for TxPreviewTool {
 
 impl SyncTool<McpServer> for TxPreviewTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_TX_PREVIEW, |state| state.tx_preview(&param))
+        service.dispatch_screened(TOOL_TX_PREVIEW, &param, |state| state.tx_preview(&param))
     }
 }
 
@@ -115,7 +115,7 @@ impl ToolBase for TxApplyTool {
 
 impl SyncTool<McpServer> for TxApplyTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_TX_APPLY, |state| state.tx_apply(&param))
+        service.dispatch_screened(TOOL_TX_APPLY, &param, |state| state.tx_apply(&param))
     }
 }
 
@@ -146,7 +146,7 @@ impl ToolBase for TxUndoTool {
 
 impl SyncTool<McpServer> for TxUndoTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_TX_UNDO, |state| state.tx_undo(&param))
+        service.dispatch_screened(TOOL_TX_UNDO, &param, |state| state.tx_undo(&param))
     }
 }
 
@@ -185,7 +185,7 @@ fn sim_build_encounter(
     service: &McpServer,
     args: &SimBuildEncounterArgs,
 ) -> Result<SimBuildEncounterOutput, McpToolError> {
-    service.dispatch(TOOL_SIM_BUILD_ENCOUNTER, |_| {
+    service.dispatch_screened(TOOL_SIM_BUILD_ENCOUNTER, args, |_| {
         let brief = crate::build_encounter::EncounterBrief::new(&args.brief, args.seed).map_err(
             |error| {
                 McpToolError::new(
@@ -304,7 +304,7 @@ pub struct GameBuildOutput {
 /// read-only: a refusal rides the output (`solved: false`), only a malformed
 /// brief or unknown variant errors.
 fn game_build(service: &McpServer, args: &GameBuildArgs) -> Result<GameBuildOutput, McpToolError> {
-    service.dispatch(TOOL_GAME_BUILD, |_| {
+    service.dispatch_screened(TOOL_GAME_BUILD, args, |_| {
         let variant_name = args.variant.as_deref().unwrap_or("hero");
         let variant = crate::build_character::VariantId::parse(variant_name).map_err(|error| {
             McpToolError::new(

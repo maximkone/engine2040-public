@@ -86,6 +86,7 @@ fn insert_wall(server: &McpServer, key: u64) -> u64 {
             ops,
             approval,
             delta: Some(false),
+            origin: None,
         },
     )
     .expect("wall applies")

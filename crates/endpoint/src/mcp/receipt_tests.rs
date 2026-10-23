@@ -54,6 +54,7 @@ fn receipt_digests_survive_a_replay() {
             ops: ops.clone(),
             approval: drafted.approval.clone(),
             delta: None,
+            origin: None,
         },
     )
     .expect("apply inserts");
@@ -81,6 +82,7 @@ fn receipt_digests_survive_a_replay() {
             ops,
             approval: drafted.approval,
             delta: None,
+            origin: None,
         },
     )
     .expect("same key and payload replay");

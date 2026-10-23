@@ -86,7 +86,10 @@ pub const VERIFIER_FORK: &str = "fork-balance";
 /// fill 32 bytes, mirroring the command-service artifact digest. Same
 /// proposal text, same digest on every machine; carries no prompt, secret or
 /// session data, only the recorded summary plus wants.
-fn request_digest(text: &str) -> [u8; 32] {
+///
+/// Crate-visible: `tx.apply` uses it for a model stamp's request digest over
+/// the canonical action hash, so every model batch carries a nonzero digest.
+pub(crate) fn request_digest(text: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
     for (pass, slot) in out.chunks_mut(8).enumerate() {
         let mut hasher =

@@ -333,7 +333,7 @@ impl SyncTool<McpServer> for DiscoverTool {
         // lock), so it builds before the audited dispatch takes that lock.
         let manifest =
             DiscoverManifest::from_server(service, param.include_hidden.unwrap_or(false));
-        service.dispatch(TOOL_RPC_DISCOVER, |_| Ok(manifest))
+        service.dispatch_screened(TOOL_RPC_DISCOVER, &param, |_| Ok(manifest))
     }
 }
 
@@ -874,7 +874,7 @@ impl ToolBase for WatchTool {
 
 impl SyncTool<McpServer> for WatchTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_SCENE_WATCH, |state| {
+        service.dispatch_screened(TOOL_SCENE_WATCH, &param, |state| {
             let hub = global_hub();
             let subscription = hub
                 .subscribe(param.session, watch_config_of(&param))
@@ -1336,6 +1336,7 @@ fn apply_chained(server: &McpServer, items: &[PreviewItem], base: u64) -> BatchE
                 ops: item.ops.clone(),
                 approval,
                 delta: Some(false),
+                origin: None,
             },
         ) {
             Ok(_) => {
@@ -2189,6 +2190,7 @@ mod tests {
                 ops: seed_ops,
                 approval: drafted.approval,
                 delta: None,
+                origin: None,
             },
         )
         .expect("seed apply");
@@ -2418,6 +2420,7 @@ mod tests {
                     ops,
                     approval: drafted.approval,
                     delta: None,
+                    origin: None,
                 },
             )
             .expect("insert applies");
@@ -2664,6 +2667,7 @@ mod tests {
                 ops,
                 approval: drafted.approval,
                 delta: None,
+                origin: None,
             },
         )
         .expect("insert applies");
@@ -2931,6 +2935,7 @@ mod tests {
                 ops: seed,
                 approval: draft.approval,
                 delta: None,
+                origin: None,
             },
         )
         .expect("seed apply");

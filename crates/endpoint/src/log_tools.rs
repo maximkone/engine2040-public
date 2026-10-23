@@ -374,7 +374,7 @@ impl ToolBase for LogDigestTool {
 
 impl SyncTool<McpServer> for LogDigestTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_LOG_DIGEST, |state| state.log_digest(&param))
+        service.dispatch_screened(TOOL_LOG_DIGEST, &param, |state| state.log_digest(&param))
     }
 }
 
@@ -403,7 +403,7 @@ impl ToolBase for LogQueryTool {
 
 impl SyncTool<McpServer> for LogQueryTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_LOG_QUERY, |state| state.log_query(&param))
+        service.dispatch_screened(TOOL_LOG_QUERY, &param, |state| state.log_query(&param))
     }
 }
 
@@ -682,7 +682,7 @@ mod tests {
 
         // A refusal, through the same seam every tool call uses.
         let audit_before = server.lock().expect("lock holds").audit_total_appended();
-        let refused = server.dispatch("tx.apply", |_state| {
+        let refused = server.dispatch_with_payload("tx.apply", "", |_state| {
             Err::<(), McpToolError>(McpToolError::new("stale_revision", "seeded"))
         });
         assert!(refused.is_err(), "the path under test refuses");
@@ -711,7 +711,7 @@ mod tests {
         );
         // A success writes no refusal row: the ring records failures only.
         server
-            .dispatch("scene.read", |_state| Ok(()))
+            .dispatch_with_payload("scene.read", "", |_state| Ok(()))
             .expect("a clean call answers");
         let after = LogQueryTool::invoke(
             &server,

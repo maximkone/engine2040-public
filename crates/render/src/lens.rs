@@ -1349,19 +1349,11 @@ mod tests {
             vignette: 0.0,
             grain: 0.1, // enable grain
         };
-        let lensed_bw = apply_bytes(&grain_profile, 0, &black_white, 2, 1)
-            .expect("the grain profile runs");
+        let lensed_bw =
+            apply_bytes(&grain_profile, 0, &black_white, 2, 1).expect("the grain profile runs");
         // Black should stay black (grain 0 at luma 0).
-        assert_eq!(
-            lensed_bw[0..3],
-            [0, 0, 0],
-            "grain is 0 at pure black"
-        );
+        assert_eq!(lensed_bw[0..3], [0, 0, 0], "grain is 0 at pure black");
         // White should stay white (grain 0 at luma 1).
-        assert_eq!(
-            lensed_bw[4..7],
-            [255, 255, 255],
-            "grain is 0 at pure white"
-        );
+        assert_eq!(lensed_bw[4..7], [255, 255, 255], "grain is 0 at pure white");
     }
 }

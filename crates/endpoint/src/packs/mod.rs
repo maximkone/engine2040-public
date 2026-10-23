@@ -853,7 +853,7 @@ fn api_call(service: &McpServer, param: &ApiCallArgs) -> Result<ApiCallOutput, M
     let registry = PackRegistry::shipped();
     let Some(verb) = registry.verb(&param.verb) else {
         let refusal = registry.unknown_verb(&param.verb);
-        return service.dispatch(TOOL_API_CALL, |_| Err(refusal));
+        return service.dispatch_screened(TOOL_API_CALL, param, |_| Err(refusal));
     };
     // The verb runs on its own tool path first (its lock, gate and audit
     // record), then this call seals one `api.call` record of its own.
@@ -861,12 +861,14 @@ fn api_call(service: &McpServer, param: &ApiCallArgs) -> Result<ApiCallOutput, M
         .args
         .clone()
         .unwrap_or_else(|| Value::Object(JsonObject::new()));
-    // Screen the args before the verb stages anything: a verb reached through
-    // the router meets the same hostile-text gate as a direct call.
-    service.screen_payload(TOOL_API_CALL, &args.to_string())?;
+    // Screen the whole call before the verb stages anything: the verb name and
+    // every string in its args meet the same hostile-text gate as a direct
+    // call. The final record re-runs the pure screen and seals one Ok.
+    let text = crate::door_dispatch::untrusted_text(TOOL_API_CALL, param)?;
+    service.screen_payload(TOOL_API_CALL, &text)?;
     let outcome = verb.invoke(service, args);
     let pack = verb.pack().to_owned();
-    service.dispatch(TOOL_API_CALL, |_| {
+    service.dispatch_screened(TOOL_API_CALL, param, |_| {
         outcome.map(|result| ApiCallOutput {
             verb: param.verb.clone(),
             pack,
@@ -962,7 +964,7 @@ fn refuse_over_budget(
 /// `api.load` handler: advertise or hide one verb pack for this session.
 fn api_load(service: &McpServer, param: &ApiLoadArgs) -> Result<ApiLoadOutput, McpToolError> {
     let unload = param.unload.unwrap_or(false);
-    let (verbs, loaded_packs) = service.dispatch(TOOL_API_LOAD, |state| {
+    let (verbs, loaded_packs) = service.dispatch_screened(TOOL_API_LOAD, param, |state| {
         if !unload {
             refuse_over_budget(service, state, &param.pack)?;
         }
@@ -1363,7 +1365,7 @@ mod tests {
         let refused = ApiCallTool::invoke(
             &server,
             ApiCallArgs {
-                verb: "shell.exec".to_owned(),
+                verb: "nope.verb".to_owned(),
                 args: None,
             },
         )

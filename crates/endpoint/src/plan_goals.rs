@@ -888,7 +888,7 @@ impl SyncTool<super::mcp::McpServer> for PlanGoalsTool {
         service: &super::mcp::McpServer,
         param: Self::Parameter,
     ) -> Result<Self::Output, Self::Error> {
-        service.dispatch(MCP_TOOL_NAME, |state| state.plan_goals(&param))
+        service.dispatch_screened(MCP_TOOL_NAME, &param, |state| state.plan_goals(&param))
     }
 }
 

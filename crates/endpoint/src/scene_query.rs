@@ -1562,7 +1562,7 @@ impl ToolBase for SceneQueryTool {
 
 impl SyncTool<McpServer> for SceneQueryTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_SCENE_QUERY, |state| {
+        service.dispatch_screened(TOOL_SCENE_QUERY, &param, |state| {
             let repeat = state.note_read(TOOL_SCENE_QUERY, &param)?;
             let mut out = state.scene_query(&param)?;
             out.repeat_count = repeat;

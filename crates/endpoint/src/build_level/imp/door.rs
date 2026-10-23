@@ -290,7 +290,7 @@ impl ToolBase for BuildLevelTool {
 
 impl SyncTool<McpServer> for BuildLevelTool {
     fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        service.dispatch(TOOL_BUILD_LEVEL, |state| {
+        service.dispatch_screened(TOOL_BUILD_LEVEL, &param, |state| {
             build_level_on_state(state, &param)
         })
     }

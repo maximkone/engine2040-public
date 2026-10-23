@@ -328,6 +328,11 @@ fn resolve_checks(args: &TestRunArgs) -> Result<Vec<String>, McpToolError> {
 /// set `truncated`. Writes nothing: every case is a pure read or a dry-run
 /// preview.
 pub fn run_checks(server: &McpServer, args: &TestRunArgs) -> Result<TestRunOutput, McpToolError> {
+    // `test.run` reads through other tools and seals no record of its own, so
+    // it screens here: the same manifest cap plus hostile scan, one `Refused`
+    // record on a hit, before any check reads the session.
+    let text = crate::door_dispatch::untrusted_text(TOOL_TEST_RUN, args)?;
+    server.screen_payload(TOOL_TEST_RUN, &text)?;
     let budget = args.budget_bytes.unwrap_or(TEST_RUN_DEFAULT_BUDGET);
     if budget == 0 || budget > TEST_RUN_MAX_BUDGET {
         return Err(McpToolError::new(
