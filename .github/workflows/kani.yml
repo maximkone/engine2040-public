@@ -2,9 +2,9 @@ name: kani
 
 # HS23: 20 Kani harnesses over four integer kernels. Kani is not installed on
 # the shared PC, so this job is the Accept's CI leg: install Kani 0.68.0 on a
-# hosted Linux runner, run each kernel set by harness name, and print one
-# count line. A dispatch on the private repo is explicit; the public mirror
-# also runs it on main and on a kani-* branch.
+# hosted Linux runner, verify one harness per matrix row, and print the count.
+# A dispatch on the private repo is explicit; the public mirror also runs it on
+# main and on a kani-* branch.
 on:
   workflow_dispatch:
   push:
@@ -23,13 +23,73 @@ env:
 
 jobs:
   verify:
-    name: kani-${{ matrix.kernel }}
+    name: kani-${{ matrix.kernel }}-${{ matrix.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        kernel: [q16, cut, bond, tape]
+        include:
+          - kernel: q16
+            name: checked-mul
+            harness: q16::q16_checked_mul_matches_i128
+          - kernel: q16
+            name: checked-div
+            harness: q16::q16_checked_div_is_total_and_truncates
+          - kernel: q16
+            name: sqrt
+            harness: q16::q16_sqrt_is_floor_square_root
+          - kernel: q16
+            name: lerp
+            harness: q16::q16_lerp_returns_exact_endpoints
+          - kernel: q16
+            name: cmp
+            harness: q16::q16_reference_cmp_scalar_orders_like_i128
+          - kernel: cut
+            name: reach-det
+            harness: cut::cut_edge_reach_is_deterministic
+          - kernel: cut
+            name: travel
+            harness: cut::cut_edge_reach_rejects_travel_past_bound
+          - kernel: cut
+            name: coincident
+            harness: cut::cut_edge_reach_finds_coincident_geometry
+          - kernel: cut
+            name: energy
+            harness: cut::cut_effective_energy_stays_in_table_bound
+          - kernel: cut
+            name: chance
+            harness: cut::cut_chance_odds_stay_in_q16_range
+          - kernel: bond
+            name: load
+            harness: bond::bond_load_covers_own_mass
+          - kernel: bond
+            name: weakest
+            harness: bond::bond_weakest_link_is_max_ratio
+          - kernel: bond
+            name: zero
+            harness: bond::bond_capacity_zero_never_overloads
+          - kernel: bond
+            name: threshold
+            harness: bond::bond_capacity_threshold_is_strict
+          - kernel: bond
+            name: capacity
+            harness: bond::bond_set_capacity_returns_previous
+          - kernel: tape
+            name: short
+            harness: tape::tape_decode_rejects_short_buffer
+          - kernel: tape
+            name: magic
+            harness: tape::tape_decode_rejects_bad_magic_and_version
+          - kernel: tape
+            name: count
+            harness: tape::tape_decode_rejects_count_length_mismatch
+          - kernel: tape
+            name: two-ckpt
+            harness: tape::tape_decode_two_checkpoints_roundtrips
+          - kernel: tape
+            name: one-tick
+            harness: tape::tape_encode_one_tick_roundtrips
     steps:
       - uses: actions/checkout@v5
       - name: install the repository toolchain (rust-toolchain.toml)
@@ -49,17 +109,16 @@ jobs:
             cargo kani setup
           fi
           cargo kani --version
-      - name: verify the ${{ matrix.kernel }} kernel set
+      - name: verify ${{ matrix.harness }}
         shell: bash
         run: |
           set -uo pipefail
-          kernel="${{ matrix.kernel }}"
-          log="kani-${kernel}.log"
-          cargo kani -p engine-proof --lib --default-unwind 64 --harness "${kernel}::" 2>&1 | tee "$log"
+          log="kani-${{ matrix.kernel }}-${{ matrix.name }}.log"
+          cargo kani -p engine-proof --lib --default-unwind 64 --harness "${{ matrix.harness }}" 2>&1 | tee "$log"
           code=${PIPESTATUS[0]}
           passed=$(grep -c 'VERIFICATION:- SUCCESSFUL' "$log" || true)
-          echo "KANI ${kernel}: ${passed}/5 harnesses passed"
-          if [ "$code" -ne 0 ] || [ "$passed" -ne 5 ]; then
+          echo "KANI ${{ matrix.harness }}: ${passed}/1 harnesses passed"
+          if [ "$code" -ne 0 ] || [ "$passed" -ne 1 ]; then
             exit 1
           fi
 
