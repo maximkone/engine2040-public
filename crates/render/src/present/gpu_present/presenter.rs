@@ -107,6 +107,8 @@ pub struct Presenter {
     /// vertices and draws through `forward_skinned`; every other key holds
     /// the 48-byte static vertex.
     pub(crate) skin_blocks: BTreeMap<MeshKey, u8>,
+    /// LF8 shading family per mesh; an absent key is stone.
+    pub(crate) material_kinds: BTreeMap<MeshKey, crate::material_kind::MaterialKind>,
     pub(crate) blit_layout: wgpu::BindGroupLayout,
     pub(crate) blit_shader: wgpu::ShaderModule,
     pub(crate) blit_sampler: wgpu::Sampler,
@@ -1277,6 +1279,7 @@ impl Presenter {
             skin_prev: vec![[[0.0f32; 4]; 4]; SKIN_BLOCKS * SKIN_BLOCK_JOINTS],
             skin_prev_seen: [false; SKIN_BLOCKS],
             skin_blocks: BTreeMap::new(),
+            material_kinds: BTreeMap::new(),
             blit_layout,
             blit_shader,
             blit_sampler,

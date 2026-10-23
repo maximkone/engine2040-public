@@ -247,11 +247,18 @@ fn buffer_views(out: &mut String, blob: &Blob) {
 /// embedded maps) for the banner.
 fn material(out: &mut String, piece: &KitPiece, embedded: &[Embedded]) {
     let factors = &piece.material;
+    // LF8: keep the kind byte across the compact round trip by naming the
+    // family in the material name the importer reads back.
+    let name = format!(
+        "{}_{}",
+        super::kit_import::kit_stem(&piece.file),
+        crate::cooked::material_kind_token(factors.kind)
+    );
     let _ = write!(
         out,
         "{{\"name\":{},\"pbrMetallicRoughness\":{{\"baseColorFactor\":[{},{},{},{}],\
 \"metallicFactor\":{},\"roughnessFactor\":{}",
-        quoted(super::kit_import::kit_stem(&piece.file)),
+        quoted(&name),
         number(factors.base_color_factor[0]),
         number(factors.base_color_factor[1]),
         number(factors.base_color_factor[2]),

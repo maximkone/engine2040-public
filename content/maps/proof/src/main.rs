@@ -275,6 +275,7 @@ fn main() {
                     TextureRef { asset: texture_asset_id(&albedo), slot: TextureSlot::BaseColor },
                     TextureRef { asset: texture_asset_id(&flat), slot: TextureSlot::Normal },
                 ],
+                kind: engine_assets::cooked::MATERIAL_KIND_STONE,
             };
             w.add_material(&format!("maps/mat_{asset}"), &mat)
                 .unwrap_or_else(|e| fail(&format!("bundle mat: {e}")));

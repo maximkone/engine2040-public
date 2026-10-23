@@ -17,6 +17,7 @@ pub mod additive;
 pub mod an1;
 pub mod blend;
 pub mod clip;
+pub mod clip_rot;
 pub mod contract;
 /// Per-slot clip crossfade over integer ticks: the fade count plus the
 /// new-clip weight over the leaving pose. Std-only; the game bridge drives it.

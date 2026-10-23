@@ -177,6 +177,9 @@ pub(crate) fn map_cook_error(error: &CookError) -> MeshCookError {
         CookError::BadTextureDimensions { width, height } => MeshCookError::Degenerate {
             detail: format!("bad texture dimensions {width}x{height}"),
         },
+        CookError::BadKind(kind) => MeshCookError::Degenerate {
+            detail: format!("bad material kind {kind}"),
+        },
     }
 }
 

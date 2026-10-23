@@ -1,4 +1,7 @@
 //! terrain: heightmap + hole bitmask + splat weights, seeded. Layout: MAGIC(4) TVER(1) seed(8LE) size(2LE) + heights + holebits + splat.
+//! The bake, its writer ([`write_terrain`]), its parser and its bounded
+//! painter ([`paint_terrain`]) share one layout owner, so a writer after a
+//! parser is byte-identical.
 use crate::{height, lattice, world_hash, BakeErr, MAGIC, MAX_BAKE_SIZE};
 use engine_core::hash::GOLDEN_GAMMA;
 pub const TVERSION: u8 = 1;
@@ -160,6 +163,11 @@ pub fn bake_terrain(seed: u64, size: u16) -> Result<Vec<u8>, BakeErr> {
     if size > MAX_BAKE_SIZE {
         return Err(BakeErr::TooLarge);
     }
+    Ok(pack_terrain(&bake_data(seed, size)))
+}
+
+// Bake the height grid, its holes and its splat; the packer owns the bytes.
+fn bake_data(seed: u64, size: u16) -> Terrain {
     let n = usize::from(size);
     let mut h = vec![0u8; n * n];
     for y in 0..n {
@@ -175,27 +183,275 @@ pub fn bake_terrain(seed: u64, size: u16) -> Result<Vec<u8>, BakeErr> {
             spl[y * n + x] = splat_for(h[y * n + x], slope_of(&h, n, x, y));
         }
     }
-    let hb = (n * n).div_ceil(8);
-    let mut out = Vec::with_capacity(15 + n * n + hb + n * n * SPLAT_N);
+    Terrain {
+        seed,
+        size,
+        heights: h,
+        holes,
+        splat: spl,
+    }
+}
+
+// Canonical TVER bytes: zero hole padding, every vector read by index so a
+// short hand-built terrain still packs to bytes the parser accepts.
+fn pack_terrain(t: &Terrain) -> Vec<u8> {
+    let n = usize::from(t.size);
+    let cells = n * n;
+    let hb = cells.div_ceil(8);
+    let mut out = Vec::with_capacity(15 + cells + hb + cells * SPLAT_N);
     out.extend_from_slice(&MAGIC);
     out.push(TVERSION);
-    out.extend_from_slice(&seed.to_le_bytes());
-    out.extend_from_slice(&size.to_le_bytes());
-    out.extend_from_slice(&h);
+    out.extend_from_slice(&t.seed.to_le_bytes());
+    out.extend_from_slice(&t.size.to_le_bytes());
+    out.extend((0..cells).map(|i| t.heights.get(i).copied().unwrap_or(0)));
     for i in 0..hb {
         let mut b = 0u8;
         for k in 0..8 {
             let idx = i * 8 + k;
-            if idx < n * n && holes[idx] {
+            if idx < cells && t.holes.get(idx).copied().unwrap_or(false) {
                 b |= 1 << k;
             }
         }
         out.push(b);
     }
-    for w in &spl {
-        out.extend_from_slice(w);
+    for i in 0..cells {
+        out.extend_from_slice(&t.splat.get(i).copied().unwrap_or([0; 3]));
     }
-    Ok(out)
+    out
+}
+
+/// Writes the canonical TVER bytes for one terrain: exactly the layout
+/// [`parse_terrain`] accepts, so a write after a parse is byte-identical to
+/// the bytes parsed. Units: texels in, bytes out. A heights, holes or splat
+/// vector shorter than `size * size` reads as `0`, `false` or `[0, 0, 0]`; a
+/// longer one is cut, so even a hand-built terrain writes parseable bytes.
+/// Errors: [`BakeErr::TooLarge`] past [`MAX_BAKE_SIZE`], checked before any
+/// allocation.
+pub fn write_terrain(t: &Terrain) -> Result<Vec<u8>, BakeErr> {
+    if t.size > MAX_BAKE_SIZE {
+        return Err(BakeErr::TooLarge);
+    }
+    Ok(pack_terrain(t))
+}
+
+/// One bounded terrain edit for [`paint_terrain`]: a texel rect, a height
+/// delta, and optional hole and splat writes. Edits apply in the order given,
+/// so two edits over one cell see each other's result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edit {
+    /// Rect as `[x, y, w, h]` in texels, with `w` and `h` at least 1 and the
+    /// whole rect inside the map. A rect outside the map is refused, never
+    /// clamped.
+    pub rect: [u16; 4],
+    /// Added to every height in the rect, then clamped to `0..=255`. `0`
+    /// leaves heights alone.
+    pub height_delta: i16,
+    /// `Some` sets or clears every hole bit in the rect; `None` leaves them.
+    pub hole: Option<bool>,
+    /// `Some` sets the three splat weights in the rect. Weights must sum to
+    /// exactly 255 (the bake's own sum rule); `None` leaves splat alone.
+    pub splat: Option<[u8; 3]>,
+}
+
+/// Why [`paint_terrain`] refused. Every variant carries the edit index and
+/// nothing changes on refusal, so the caller keeps a pristine terrain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaintErr {
+    /// The edit's rect falls outside the map or has a zero side.
+    Rect {
+        /// Index of the refused edit in the request slice.
+        edit: usize,
+        /// The refused rect as given.
+        rect: [u16; 4],
+        /// The map side the rect must fit in.
+        size: u16,
+    },
+    /// The edit's splat weights do not sum to 255.
+    Splat {
+        /// Index of the refused edit in the request slice.
+        edit: usize,
+        /// The refused weights as given.
+        weights: [u8; 3],
+    },
+    /// The terrain's vectors are shorter than `size * size`.
+    Shape,
+}
+
+impl std::fmt::Display for PaintErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rect { edit, rect, size } => write!(
+                f,
+                "edit {edit} rect [{}, {}, {}, {}] is outside the {size} x {size} map (each \
+                 coordinate 0..={}); keep x + w <= {size} and y + h <= {size}",
+                rect[0],
+                rect[1],
+                rect[2],
+                rect[3],
+                size.saturating_sub(1)
+            ),
+            Self::Splat { edit, weights } => {
+                let total: u32 = weights.iter().map(|w| u32::from(*w)).sum();
+                write!(
+                    f,
+                    "edit {edit} splat weights [{}, {}, {}] sum to {total}; the three weights must \
+                     sum to exactly 255",
+                    weights[0], weights[1], weights[2]
+                )
+            }
+            Self::Shape => write!(
+                f,
+                "terrain vectors are shorter than size * size; parse or bake the terrain first"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PaintErr {}
+
+// Every edit must be legal before the first cell moves.
+fn check_edits(size: u16, edits: &[Edit]) -> Result<(), PaintErr> {
+    for (edit, item) in edits.iter().enumerate() {
+        let [x, y, w, h] = item.rect;
+        let fits = |at: u16, len: u16| u32::from(at) + u32::from(len) <= u32::from(size);
+        if w == 0 || h == 0 || !fits(x, w) || !fits(y, h) {
+            return Err(PaintErr::Rect {
+                edit,
+                rect: item.rect,
+                size,
+            });
+        }
+        if let Some(weights) = item.splat {
+            let total: u32 = weights.iter().map(|w| u32::from(*w)).sum();
+            if total != 255 {
+                return Err(PaintErr::Splat { edit, weights });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Applies bounded edits to a parsed or baked terrain and answers how many
+/// distinct cells changed. Edits apply in the order given; a height delta is
+/// clamped to `0..=255`; a cell counts once however many edits touch it.
+/// Units: texels in, changed cell count out. Errors: [`PaintErr::Rect`],
+/// [`PaintErr::Splat`] or [`PaintErr::Shape`], each checked before the first
+/// cell moves, so a refused request leaves the terrain untouched.
+pub fn paint_terrain(t: &mut Terrain, edits: &[Edit]) -> Result<usize, PaintErr> {
+    let n = usize::from(t.size);
+    let cells = n * n;
+    if t.heights.len() < cells || t.holes.len() < cells || t.splat.len() < cells {
+        return Err(PaintErr::Shape);
+    }
+    check_edits(t.size, edits)?;
+    let mut changed = vec![false; cells];
+    for item in edits {
+        let [x, y, w, h] = item.rect;
+        for cy in usize::from(y)..usize::from(y) + usize::from(h) {
+            for cx in usize::from(x)..usize::from(x) + usize::from(w) {
+                let i = cy * n + cx;
+                let mut moved = false;
+                if item.height_delta != 0 {
+                    // The clamp proves the range, so the narrowing never fails.
+                    let clamped = (i16::from(t.heights[i]) + item.height_delta).clamp(0, 255);
+                    let next = u8::try_from(clamped).unwrap_or(0);
+                    if next != t.heights[i] {
+                        t.heights[i] = next;
+                        moved = true;
+                    }
+                }
+                if let Some(hole) = item.hole {
+                    if t.holes[i] != hole {
+                        t.holes[i] = hole;
+                        moved = true;
+                    }
+                }
+                if let Some(weights) = item.splat {
+                    if t.splat[i] != weights {
+                        t.splat[i] = weights;
+                        moved = true;
+                    }
+                }
+                if moved {
+                    changed[i] = true;
+                }
+            }
+        }
+    }
+    Ok(changed.iter().filter(|seen| **seen).count())
+}
+
+/// Integer summary of one terrain, as the door reports it. Units: heights are
+/// texel steps `0..=255`, `height_mean_x100` is hundredths of a height step
+/// (truncated), `splat_coverage` is permille of texels per layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerrainStats {
+    /// Lowest height in the map.
+    pub height_min: u8,
+    /// Highest height in the map.
+    pub height_max: u8,
+    /// Mean height times 100, truncated.
+    pub height_mean_x100: u32,
+    /// Texels with their hole bit set.
+    pub holes: u32,
+    /// Per-layer permille of texels where that layer carries the largest
+    /// weight; a tie goes to the lower layer, and truncation keeps the three
+    /// at or under 1000.
+    pub splat_coverage: [u32; 3],
+    /// Cells [`blocked`] refuses at [`SLOPE_DEFAULT`].
+    pub blocked_cells: u32,
+}
+
+/// Summarises one terrain over its `size * size` cells. An empty map reports
+/// zeros. Units and rules ride on [`TerrainStats`]; no clock, no RNG, so the
+/// same terrain always answers the same numbers.
+pub fn terrain_stats(t: &Terrain) -> TerrainStats {
+    let n = usize::from(t.size);
+    let cells = n * n;
+    let (mut min, mut max, mut sum) = (u8::MAX, 0u8, 0u64);
+    let (mut holes, mut coverage) = (0u32, [0u32; 3]);
+    for i in 0..cells {
+        let h = t.heights.get(i).copied().unwrap_or(0);
+        min = min.min(h);
+        max = max.max(h);
+        sum += u64::from(h);
+        if t.holes.get(i).copied().unwrap_or(false) {
+            holes += 1;
+        }
+        let weights = t.splat.get(i).copied().unwrap_or([0; 3]);
+        let mut best = 0usize;
+        for (layer, weight) in weights.iter().enumerate().skip(1) {
+            if *weight > weights[best] {
+                best = layer;
+            }
+        }
+        coverage[best] += 1;
+    }
+    let mean = if cells == 0 {
+        0
+    } else {
+        let count = u64::try_from(cells).unwrap_or(u64::MAX);
+        u32::try_from(sum * 100 / count).unwrap_or(u32::MAX)
+    };
+    let covered = u64::try_from(cells).unwrap_or(u64::MAX);
+    let mut permille = [0u32; 3];
+    if cells > 0 {
+        for (out, count) in permille.iter_mut().zip(coverage) {
+            *out = u32::try_from(u64::from(count) * 1000 / covered).unwrap_or(u32::MAX);
+        }
+    }
+    let blocked_cells = blocked(t, SLOPE_DEFAULT)
+        .iter()
+        .filter(|cell| **cell)
+        .count();
+    TerrainStats {
+        height_min: if cells == 0 { 0 } else { min },
+        height_max: max,
+        height_mean_x100: mean,
+        holes,
+        splat_coverage: permille,
+        blocked_cells: u32::try_from(blocked_cells).unwrap_or(u32::MAX),
+    }
 }
 /// Parses baked terrain bytes. `None` for a wrong header, a side past
 /// `MAX_BAKE_SIZE`, a length that does not match the header, or non-zero
@@ -378,5 +634,225 @@ mod tests {
                 "hole bytes differ for size {size}"
             );
         }
+    }
+
+    #[test]
+    fn writer_rebakes_byte_equal_for_two_seeds() {
+        // The writer and the parser share one packer: bytes parsed and
+        // written again equal the bake for more than one seed.
+        for seed in [7u64, 2040] {
+            let baked = bake_terrain(seed, 17).expect("bakes");
+            let parsed = parse_terrain(&baked).expect("baked parses");
+            let written = write_terrain(&parsed).expect("writes");
+            assert_eq!(written, baked, "seed {seed} writes the baked bytes");
+            let reparsed = parse_terrain(&written).expect("written parses");
+            assert_eq!(reparsed, parsed, "seed {seed} round-trips");
+        }
+        // A short hand-built terrain still writes bytes the parser accepts.
+        let short = Terrain {
+            seed: 7,
+            size: 4,
+            heights: vec![9, 9],
+            holes: Vec::new(),
+            splat: Vec::new(),
+        };
+        let bytes = write_terrain(&short).expect("writes");
+        let parsed = parse_terrain(&bytes).expect("short terrain parses");
+        assert_eq!(parsed.heights[..2], [9, 9]);
+        assert_eq!(parsed.heights[2], 0);
+        assert!(!parsed.holes[0]);
+        assert_eq!(parsed.splat[0], [0, 0, 0]);
+        // The writer refuses a side it could never make parseable.
+        let huge = Terrain {
+            seed: 7,
+            size: MAX_BAKE_SIZE + 1,
+            heights: Vec::new(),
+            holes: Vec::new(),
+            splat: Vec::new(),
+        };
+        assert_eq!(write_terrain(&huge), Err(BakeErr::TooLarge));
+    }
+
+    fn baked_terrain(seed: u64, size: u16) -> Terrain {
+        parse_terrain(&bake_terrain(seed, size).expect("bakes")).expect("baked parses")
+    }
+
+    #[test]
+    fn paint_moves_heights_holes_and_splat_and_counts_cells() {
+        let mut t = baked_terrain(7, 16);
+        let before = t.clone();
+        let edits = [
+            Edit {
+                rect: [0, 0, 4, 4],
+                height_delta: 1000,
+                hole: Some(true),
+                splat: Some([255, 0, 0]),
+            },
+            // The second edit sees the first one's result and wins on the
+            // overlapping cell.
+            Edit {
+                rect: [3, 3, 1, 1],
+                height_delta: -1000,
+                hole: None,
+                splat: None,
+            },
+        ];
+        let changed = paint_terrain(&mut t, &edits).expect("edits apply");
+        assert_eq!(changed, 16, "16 distinct cells moved");
+        for y in 0..4 {
+            for x in 0..4 {
+                let i = y * 16 + x;
+                assert!(t.holes[i], "cell {x},{y} is a hole");
+                assert_eq!(t.splat[i], [255, 0, 0], "cell {x},{y} is sand");
+                let expected = if (x, y) == (3, 3) { 0 } else { 255 };
+                assert_eq!(t.heights[i], expected, "cell {x},{y} clamps");
+            }
+        }
+        assert_eq!(
+            t.heights[16 * 4],
+            before.heights[16 * 4],
+            "outside the rect"
+        );
+        // Nothing else moved.
+        for i in 16..16 * 16 {
+            if i / 16 >= 4 || i % 16 >= 4 {
+                assert_eq!(t.heights[i], before.heights[i]);
+                assert_eq!(t.holes[i], before.holes[i]);
+                assert_eq!(t.splat[i], before.splat[i]);
+            }
+        }
+        // The same edits on a fresh bake give byte-equal terrain, twice.
+        let mut again = baked_terrain(7, 16);
+        paint_terrain(&mut again, &edits).expect("edits apply");
+        assert_eq!(
+            write_terrain(&again).expect("writes"),
+            write_terrain(&t).expect("writes")
+        );
+        // An edit that changes nothing counts no cell.
+        assert_eq!(
+            paint_terrain(
+                &mut t,
+                &[Edit {
+                    rect: [0, 0, 1, 1],
+                    height_delta: 0,
+                    hole: None,
+                    splat: None,
+                }]
+            )
+            .expect("no-op applies"),
+            0
+        );
+    }
+
+    #[test]
+    fn paint_refuses_bad_edits_before_any_cell_moves() {
+        let mut t = baked_terrain(7, 8);
+        let before = t.clone();
+        let cases = [
+            (
+                Edit {
+                    rect: [7, 7, 2, 2],
+                    height_delta: 1,
+                    hole: None,
+                    splat: None,
+                },
+                "off the map",
+            ),
+            (
+                Edit {
+                    rect: [0, 0, 0, 4],
+                    height_delta: 1,
+                    hole: None,
+                    splat: None,
+                },
+                "zero width",
+            ),
+            (
+                Edit {
+                    rect: [0, 0, 2, 2],
+                    height_delta: 1,
+                    hole: None,
+                    splat: Some([1, 1, 1]),
+                },
+                "weights that miss 255",
+            ),
+        ];
+        for (edit, why) in cases {
+            let refused = paint_terrain(&mut t, &[edit]).expect_err(why);
+            assert!(refused.to_string().contains("edit 0"), "{refused}");
+            assert_eq!(t, before, "a refused {why} moves nothing");
+        }
+        // The messages name the legal range and the one recovery.
+        let off = paint_terrain(
+            &mut t,
+            &[Edit {
+                rect: [7, 7, 2, 2],
+                height_delta: 1,
+                hole: None,
+                splat: None,
+            }],
+        )
+        .expect_err("refuses");
+        assert!(off.to_string().contains("0..=7"), "{off}");
+        assert!(off.to_string().contains("x + w <= 8"), "{off}");
+        let sum = paint_terrain(
+            &mut t,
+            &[Edit {
+                rect: [0, 0, 1, 1],
+                height_delta: 0,
+                hole: None,
+                splat: Some([1, 1, 1]),
+            }],
+        )
+        .expect_err("refuses");
+        assert!(sum.to_string().contains("sum to 3"), "{sum}");
+        assert!(sum.to_string().contains("exactly 255"), "{sum}");
+        // A terrain whose vectors do not match its side refuses too.
+        let mut short = t.clone();
+        short.heights.truncate(3);
+        assert_eq!(
+            paint_terrain(
+                &mut short,
+                &[Edit {
+                    rect: [0, 0, 1, 1],
+                    height_delta: 1,
+                    hole: None,
+                    splat: None,
+                }]
+            ),
+            Err(PaintErr::Shape)
+        );
+    }
+
+    #[test]
+    fn terrain_stats_are_integer_and_bounded() {
+        let t = baked_terrain(2040, 32);
+        let stats = terrain_stats(&t);
+        assert!(stats.height_min <= stats.height_max);
+        assert!(u32::from(stats.height_max) <= 255);
+        assert!(stats.height_mean_x100 <= 255 * 100);
+        let holes = t.holes.iter().filter(|hole| **hole).count();
+        assert_eq!(stats.holes, u32::try_from(holes).expect("count fits"));
+        let coverage: u32 = stats.splat_coverage.iter().sum();
+        assert!(coverage <= 1000, "coverage permille: {coverage}");
+        let blocked_cells = blocked(&t, SLOPE_DEFAULT).iter().filter(|b| **b).count();
+        assert_eq!(
+            stats.blocked_cells,
+            u32::try_from(blocked_cells).expect("count fits")
+        );
+        // Deterministic: the same terrain answers the same numbers.
+        assert_eq!(terrain_stats(&t), stats);
+        // An empty map reports zeros instead of a wrapped minimum.
+        let empty = Terrain {
+            seed: 1,
+            size: 0,
+            heights: Vec::new(),
+            holes: Vec::new(),
+            splat: Vec::new(),
+        };
+        let none = terrain_stats(&empty);
+        assert_eq!(none.height_min, 0);
+        assert_eq!(none.height_max, 0);
+        assert_eq!(none.splat_coverage, [0, 0, 0]);
     }
 }

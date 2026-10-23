@@ -1272,6 +1272,7 @@ fn stage_bundle(name: &str, cooked: &MeshCookOutput) -> Result<Vec<u8>, IntakeEr
             metallic_factor: 0.0,
             roughness_factor: 0.8,
             textures: Vec::new(),
+            kind: crate::cooked::MATERIAL_KIND_STONE,
         },
     ));
     cook_bundle_bytes(&staged).map_err(IntakeError::from)

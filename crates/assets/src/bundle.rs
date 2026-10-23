@@ -11,7 +11,7 @@
 
 use super::cooked::{
     validate_material, validate_mesh, CookedMaterial, CookedMesh, CookedTexture, Mip,
-    TextureEncoding, TextureRef, TextureSlot,
+    TextureEncoding, TextureRef, TextureSlot, MATERIAL_KIND_STONE,
 };
 use super::mesh_import::MAX_VERTICES;
 use super::skin_import::{ImportedClip, Skin, MAX_CLIP_NAME_CHARS, MAX_TRACK_KEYS};
@@ -520,6 +520,12 @@ impl<'a> Payload<'a> {
         self.take(left)
     }
 
+    /// True when every payload byte was consumed, so an optional trailing
+    /// field is absent rather than short.
+    fn at_end(&self) -> bool {
+        self.cursor.pos() == self.len
+    }
+
     /// Refuse before allocating for `bytes` more bytes the payload cannot hold.
     fn need(&self, bytes: usize) -> Result<(), BundleError> {
         if self.len.saturating_sub(self.cursor.pos()) < bytes {
@@ -725,6 +731,7 @@ fn encode_material(material: &CookedMaterial) -> Vec<u8> {
         push_u64(&mut out, reference.asset);
         out.push(slot_byte(reference.slot));
     }
+    out.push(material.kind);
     out
 }
 
@@ -748,12 +755,20 @@ fn decode_material(bytes: &[u8], entry: &str) -> Result<CookedMaterial, BundleEr
         let slot = slot_of(payload.u8()?).ok_or_else(|| invalid(entry, "bad texture slot"))?;
         textures.push(TextureRef { asset, slot });
     }
+    // LF8: the kind byte grew after the texture list. A payload cooked
+    // before it ends here and loads as stone, so old bundles need no re-cook.
+    let kind = if payload.at_end() {
+        MATERIAL_KIND_STONE
+    } else {
+        payload.u8()?
+    };
     payload.finish()?;
     let material = CookedMaterial {
         base_color_factor,
         metallic_factor,
         roughness_factor,
         textures,
+        kind,
     };
     validate_material(&material).map_err(|e| invalid(entry, &format!("{e:?}")))?;
     Ok(material)
@@ -1116,6 +1131,7 @@ mod tests {
                     slot: TextureSlot::Normal,
                 },
             ],
+            kind: MATERIAL_KIND_STONE,
         }
     }
 
@@ -1224,6 +1240,26 @@ mod tests {
     #[test]
     fn finish_is_deterministic() {
         assert_eq!(full_writer().finish(), full_writer().finish());
+    }
+
+    #[test]
+    fn material_kind_round_trips_and_an_old_payload_loads_stone() {
+        let mut cloth = textured_material();
+        cloth.kind = crate::cooked::MATERIAL_KIND_CLOTH;
+        assert_eq!(
+            decode_material(&encode_material(&cloth), "mat").unwrap(),
+            cloth,
+            "the kind byte survives the payload"
+        );
+        // A payload cooked before the kind byte ends after the texture list.
+        let mut old = encode_material(&textured_material());
+        assert_eq!(old.pop(), Some(MATERIAL_KIND_STONE), "the byte is last");
+        let back = decode_material(&old, "mat").unwrap();
+        assert_eq!(back, textured_material(), "an old payload loads as stone");
+        assert_eq!(back.kind, MATERIAL_KIND_STONE);
+        // A payload cut inside the kind byte is short, never silently stone.
+        old.pop();
+        assert!(decode_material(&old, "mat").is_err());
     }
 
     #[test]

@@ -468,7 +468,9 @@ pub fn decode_blocks_rgba(
             BcFormat::Bc7 => {
                 let mut b = [0u8; 16];
                 b.copy_from_slice(chunk);
-                bc::decode_bc7_block(&b).ok_or(Ktx2Error::Malformed("bc7 block is not mode 6"))?
+                bc::decode_bc7_block(&b).ok_or(Ktx2Error::Malformed(
+                    "bc7 block uses a mode this decoder skips",
+                ))?
             }
             BcFormat::Bc5 => {
                 let mut b = [0u8; 16];

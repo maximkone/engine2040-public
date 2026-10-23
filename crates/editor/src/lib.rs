@@ -55,6 +55,10 @@ pub mod onboard;
 /// inspector selection. Std-only; consumed by the editor hierarchy tab
 /// (`shell_ui.rs`).
 pub mod outline;
+/// Command palette: one fuzzy index over the dock panels, door verbs and
+/// listed assets, ranked with highlight ranges for the palette panel.
+/// Std-only.
+pub mod palette;
 pub mod play;
 /// Play-in-editor: game-window-equivalent fixed-tick loop in the viewport,
 /// pause/step/restart over play snapshots. Behind `ui` with the engine-app
@@ -72,6 +76,10 @@ pub mod pose_tape;
 /// Std-only; the shell owns the command batch and undo.
 pub mod prefab;
 pub mod save;
+/// Multi-select set over scene objects plus the object clipboard: copy, paste
+/// with an offset and duplicate with caller-minted ids. Std-only; the gizmo
+/// reads the set through [`gizmo::drag_set`].
+pub mod select;
 pub mod shell;
 #[cfg(feature = "ui")]
 pub mod shell_ui;
@@ -88,6 +96,10 @@ pub mod templates;
 /// Behind `ui` with egui; headless builds stay std-only.
 #[cfg(feature = "ui")]
 pub mod theme;
+/// Asset thumbnails: 256x256 RGBA8 images keyed by content digest, LRU-bounded
+/// at a caller byte cap, with the requested-but-absent list. Std-only; the
+/// caller supplies the pixels from the capture path.
+pub mod thumbnail;
 /// Live tuning panel: combat/AI drafts as previewed batches,
 /// applied at tick boundaries through the practice child seam, journaled in a tape.
 #[cfg(feature = "ui")]
@@ -99,6 +111,10 @@ pub mod viewport;
 pub mod viewport_image;
 /// Crash-safe journal: write-ahead log over the command service.
 pub mod wal;
+
+use std::collections::VecDeque;
+
+use crate::activity::Author;
 
 /// Why [`Tree::decode`] refused a layout text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,41 +205,195 @@ impl Default for Tree {
     }
 }
 
-/// Bounded undo history of layout strings (cap-100 gate seed).
+/// Bounded, visible undo history: layout snapshots with their scene position.
+///
+/// The scene undo itself stays the command journal's
+/// ([`commands::undo`](crate::commands::undo)); this ring is what the history
+/// panel shows and what [`History::jump`] reads when a person clicks an older
+/// row. The ring cap style follows [`ActivityRing`](crate::activity::ActivityRing):
+/// the oldest entry leaves first and [`History::dropped`] counts it.
 pub struct History {
-    stack: Vec<String>,
-    /// Max kept entries.
-    pub cap: usize,
+    entries: VecDeque<HistoryEntry>,
+    dropped: u64,
+    cap: usize,
 }
 
 impl History {
-    /// Construct with cap (use 100 per gate).
+    /// Construct with a cap (use [`HISTORY_CAP`] for the dock).
     pub fn new(cap: usize) -> Self {
         Self {
-            stack: vec![],
+            entries: VecDeque::new(),
+            dropped: 0,
             cap: cap.max(1),
         }
     }
-    /// Push a layout snapshot, evicting oldest past cap.
-    pub fn push(&mut self, layout: String) {
-        self.stack.push(layout);
-        if self.stack.len() > self.cap {
-            self.stack.remove(0);
+
+    /// Max kept entries.
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
+    /// Push one step, evicting the oldest past the cap.
+    pub fn push(&mut self, entry: HistoryEntry) {
+        self.entries.push_back(entry);
+        if self.entries.len() > self.cap {
+            self.entries.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
         }
     }
-    /// Pop the latest snapshot (undo). None when empty.
-    pub fn undo(&mut self) -> Option<String> {
-        self.stack.pop()
-    }
+
     /// Depth.
     pub fn len(&self) -> usize {
-        self.stack.len()
+        self.entries.len()
     }
+
     /// True when empty.
     pub fn is_empty(&self) -> bool {
-        self.stack.is_empty()
+        self.entries.is_empty()
+    }
+
+    /// How many entries the ring dropped so far.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// One kept entry by index, oldest first.
+    pub fn entry(&self, index: usize) -> Option<&HistoryEntry> {
+        self.entries.get(index)
+    }
+
+    /// Kept entries oldest first (panel render order).
+    pub fn entries(&self) -> impl Iterator<Item = &HistoryEntry> + '_ {
+        self.entries.iter()
+    }
+
+    /// The newest kept entry.
+    pub fn latest(&self) -> Option<&HistoryEntry> {
+        self.entries.back()
+    }
+
+    /// Jump to one kept entry: restore its layout and report the scene move.
+    ///
+    /// The layout comes back byte-for-byte. `ops` is the journal distance from
+    /// the newest entry to the target, and `backward` says which way the scene
+    /// owner walks it (`true` = undo that many journal entries, `false` = redo).
+    /// A jump does not mutate the ring: the caller applies the scene move
+    /// first, then its own layout restore decides what the next push records.
+    pub fn jump(&self, index: usize) -> Result<HistoryJump, HistoryError> {
+        let target = self.entries.get(index).ok_or(HistoryError::OutOfRange {
+            index,
+            len: self.entries.len(),
+        })?;
+        let newest = self.entries.back().ok_or(HistoryError::OutOfRange {
+            index,
+            len: self.entries.len(),
+        })?;
+        Ok(HistoryJump {
+            label: target.label.clone(),
+            layout: target.layout.clone(),
+            revision: target.revision,
+            undo_depth: target.undo_depth,
+            ops: newest.undo_depth.abs_diff(target.undo_depth),
+            backward: index + 1 < self.entries.len(),
+        })
     }
 }
+
+/// Most undo steps one dock [`History`] keeps; the oldest is evicted first.
+pub const HISTORY_CAP: usize = 100;
+
+/// One visible undo step: its label, the layout it left and the scene position
+/// it ended at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryEntry {
+    /// Short action name shown in the panel, e.g. `scene.move`.
+    pub label: String,
+    /// Layout text current when the step was recorded.
+    pub layout: String,
+    /// Scene revision the step ended at.
+    pub revision: u64,
+    /// Fixed tick the step happened on.
+    pub tick: u64,
+    /// Who did it (a person at the dock or an AI through the door).
+    pub author: Author,
+    /// Journal undo depth after the step; a jump applies the difference.
+    pub undo_depth: usize,
+}
+
+impl HistoryEntry {
+    /// Build one entry without validation; [`History::push`] keeps it.
+    pub fn new(
+        label: &str,
+        layout: &str,
+        revision: u64,
+        tick: u64,
+        author: Author,
+        undo_depth: usize,
+    ) -> Self {
+        Self {
+            label: label.to_string(),
+            layout: layout.to_string(),
+            revision,
+            tick,
+            author,
+            undo_depth,
+        }
+    }
+
+    /// One panel row: `t0042 human scene.move rev=3 depth=2`.
+    pub fn text(&self) -> String {
+        format!(
+            "t{:04} {} {} rev={} depth={}",
+            self.tick,
+            self.author.name(),
+            self.label,
+            self.revision,
+            self.undo_depth
+        )
+    }
+}
+
+/// What a [`History::jump`] asks the scene owner to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryJump {
+    /// Label of the target step.
+    pub label: String,
+    /// Layout string to restore byte-for-byte.
+    pub layout: String,
+    /// Scene revision recorded at the target step.
+    pub revision: u64,
+    /// Journal undo depth recorded at the target step.
+    pub undo_depth: usize,
+    /// Journal entries to walk between the newest step and the target.
+    pub ops: usize,
+    /// True when the target is older than the newest step.
+    pub backward: bool,
+}
+
+/// Why [`History::jump`] refused an index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryError {
+    /// The index is past the kept entries.
+    OutOfRange {
+        /// Index asked for.
+        index: usize,
+        /// Kept entries.
+        len: usize,
+    },
+}
+
+impl std::fmt::Display for HistoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutOfRange { index, len } => write!(
+                f,
+                "history has no entry {index}: it keeps {len} entries (index 0..{len}); jump to a kept index"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HistoryError {}
 
 #[cfg(test)]
 mod tests {
@@ -253,14 +423,86 @@ mod tests {
         assert_eq!(Tree::decode("x\na").err(), Some(TreeError::BadActive));
     }
 
+    fn entry(label: &str, layout: &str, revision: u64, tick: u64, depth: usize) -> HistoryEntry {
+        HistoryEntry::new(label, layout, revision, tick, Author::Human, depth)
+    }
+
     #[test]
-    fn history_cap_100() {
-        let mut h = History::new(100);
-        for i in 0..120 {
-            h.push(format!("L{i}"));
+    fn history_records_three_labelled_edits() {
+        let mut h = History::new(HISTORY_CAP);
+        assert!(h.is_empty());
+        h.push(entry("scene.place", "0\nhierarchy", 1, 10, 1));
+        h.push(entry("scene.move", "1\nhierarchy\ninspector", 2, 20, 2));
+        h.push(entry("scene.rename", "1\nhierarchy\nbrowser", 3, 30, 3));
+        assert_eq!(h.len(), 3);
+        assert_eq!(h.dropped(), 0);
+        let labels: Vec<&str> = h.entries().map(|row| row.label.as_str()).collect();
+        assert_eq!(labels, vec!["scene.place", "scene.move", "scene.rename"]);
+        assert_eq!(h.entry(1).unwrap().revision, 2);
+        assert_eq!(h.entry(3), None);
+        assert_eq!(
+            h.latest().unwrap().text(),
+            "t0030 human scene.rename rev=3 depth=3"
+        );
+    }
+
+    #[test]
+    fn jump_restores_the_first_layout_byte_for_byte() {
+        let mut h = History::new(HISTORY_CAP);
+        let first = "0\nhierarchy\ninspector\nviewport";
+        h.push(entry("scene.place", first, 1, 10, 1));
+        h.push(entry("scene.move", "1\nhierarchy", 2, 20, 2));
+        h.push(entry("scene.move", "2\nhierarchy\nbrowser", 3, 30, 3));
+
+        let jump = h.jump(0).unwrap();
+        assert_eq!(jump.layout, first);
+        assert_eq!(jump.layout.as_bytes(), first.as_bytes());
+        assert_eq!(jump.revision, 1);
+        assert_eq!(jump.undo_depth, 1);
+        assert_eq!(jump.ops, 2);
+        assert!(jump.backward);
+        assert_eq!(jump.label, "scene.place");
+        // A jump is a report: the ring keeps every entry and its order.
+        assert_eq!(h.len(), 3);
+        assert_eq!(h.entry(0).unwrap().layout, first);
+        // Jumping to the newest step walks nothing.
+        let newest = h.jump(2).unwrap();
+        assert_eq!(newest.ops, 0);
+        assert!(!newest.backward);
+
+        assert_eq!(
+            h.jump(3),
+            Err(HistoryError::OutOfRange { index: 3, len: 3 })
+        );
+        let text = HistoryError::OutOfRange { index: 9, len: 3 }.to_string();
+        assert!(text.contains("jump to a kept index"), "{text}");
+    }
+
+    #[test]
+    fn history_ring_drops_the_oldest_and_counts_it() {
+        let mut h = History::new(HISTORY_CAP);
+        for i in 0..120u64 {
+            h.push(entry(
+                "scene.move",
+                &format!("L{i}"),
+                i,
+                i,
+                usize::try_from(i).unwrap(),
+            ));
         }
-        assert_eq!(h.len(), 100);
-        assert_eq!(h.undo().unwrap(), "L119");
-        assert_eq!(h.len(), 99);
+        assert_eq!(h.len(), HISTORY_CAP);
+        assert_eq!(h.dropped(), 20);
+        // Entry 0 is the 21st push; the first 20 left.
+        assert_eq!(h.entry(0).unwrap().layout, "L20");
+        assert_eq!(h.latest().unwrap().layout, "L119");
+        // A cap-3 ring drops from the front and keeps render order.
+        let mut small = History::new(3);
+        for label in ["a", "b", "c", "d", "e"] {
+            small.push(entry(label, label, 1, 1, 1));
+        }
+        assert_eq!(small.len(), 3);
+        assert_eq!(small.dropped(), 2);
+        let kept: Vec<&str> = small.entries().map(|row| row.label.as_str()).collect();
+        assert_eq!(kept, vec!["c", "d", "e"]);
     }
 }

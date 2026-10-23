@@ -58,6 +58,7 @@ mod forward_group;
 mod frame;
 mod gate;
 mod gtao_live;
+mod kind_table;
 mod live;
 mod motion;
 mod msaa;

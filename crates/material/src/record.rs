@@ -262,7 +262,7 @@ impl LayerKind {
 
 /// Per-object coverage channel a layer reads (`0..=1`, published by the
 /// presentation side from sim events; never read back into the tick).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Channel {
     /// Water coverage.
     Wetness,

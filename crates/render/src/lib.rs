@@ -58,6 +58,17 @@ pub mod temporal;
 
 pub mod quality;
 
+/// Which shading family one draw takes (stone, skin, metal, cloth), stored as
+/// the material uniform's kind word and the cook's kind byte. Stone is word 0
+/// and every earlier frame's path; the shader branch lives in
+/// `shaders/forward.wgsl` `direct_light`. Consumers: `v1::MaterialUniform`,
+/// `Presenter::set_material_kind`, the game's per-part table.
+pub mod material_kind;
+
+/// LF8: the CPU twin of `forward.wgsl` `direct_light`'s per-kind branches,
+/// called by `v1::shade_pbr`.
+mod v1_kind;
+
 /// WEB13: a ledger of every pipeline build, so a build after the loader is a loud `late_compile`.
 pub mod pipeline_warmup;
 

@@ -95,16 +95,24 @@ with the code. Rows marked `[x]` landed the same day the audit ran.
   runs the Callgrind bench and keeps `target/gungraun`. Landed `7d247261f`.
 - [x] TG3 tools: one inventory gate names every live tool - `tools/tools-index.mjs --check`
   (127 live, 13 without a test mate, each explained). Landed `352feb286` + `2e96a0ca4`.
+  The untracked `tools/.qw4-check.mjs` near-copy (78 KB, idle 11 h) was moved out of the
+  tree to the session temp on 2026-10-24 (bytes kept, not deleted).
 - [ ] TG4 ci: a coverage floor - `tools/wiring-cov.mjs` needs `cargo llvm-cov` and is a
   manual NOOP; zero `llvm-cov` hits in `.github`. Tier B. Size M. Owns
   `.github/workflows/`, `tools/wiring-cov.mjs`. F2P: a workflow step runs `llvm-cov` and
   fails under the floor (new job). P2P: the mirror suite stays green. Accept: one number
   per PR for `crates/core`, `crates/proof`, `crates/endpoint`.
-- [ ] TG5 release: version, changelog, tag and SBOM - no CHANGELOG, no tag step, no
+  Part 2026-10-24 (`0d68b49f4`): the `floor` job in `coverage.yml` runs `cargo llvm-cov`
+  for the three crates and `tools/coverage-gate.mjs` holds `tools/coverage-bar.json`.
+  Measured on this PC: engine-core 92.9% (4363/4696 lines, floor 91.9), engine-proof 81.1%
+  (7235/8915, floor 80.1). Still open: the engine-endpoint `--features mcp` leg did not
+  build while `crates/editor/src/lib.rs` and then `crates/render/src/lib.rs` were dirty in
+  other seats, so its floor is pending; the job measures and prints it with no floor.
+- [x] TG5 release: version, changelog, tag and SBOM - no CHANGELOG, no tag step, no
   version bump; `tools/ship.mjs` stages files only. Tier B. Size M. Owns `tools/`,
   `.github/workflows/`, `Cargo.toml`. F2P: `node tools/release.mjs --check` fails on HEAD
   (no file). P2P: workspace version check stays green. Accept: one tag from one command,
-  changelog section and SBOM beside it.
+  changelog section and SBOM beside it. Landed `94a7df02e`.
 - [ ] TG6 ci: mutation and fuzz on a schedule - `tools/mutants.mjs` and the fuzz targets
   exist, no workflow runs either. Tier C. Size S. Owns `.github/workflows/`.
   F2P: no `schedule:` names the tools (grep). P2P: existing CI stays green.

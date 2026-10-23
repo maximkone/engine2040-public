@@ -329,27 +329,38 @@ impl RequestImage {
     }
 }
 
-pub(crate) fn kind_name(kind: TaskKind) -> &'static str {
+/// One row per task kind with the wire slug, so the name and the parse cannot
+/// drift apart: [`kind_name`] and [`kind_from_name`] read the same table.
+const KIND_NAMES: [(TaskKind, &str); 6] = [
+    (TaskKind::Inspect, "inspect"),
+    (TaskKind::Propose, "propose"),
+    (TaskKind::Diagnose, "diagnose"),
+    (TaskKind::Repair, "repair"),
+    (TaskKind::Announce, "announce"),
+    (TaskKind::Taunt, "taunt"),
+];
+
+/// Row of `kind` in [`KIND_NAMES`]. The match is the table's exhaustiveness
+/// check: a new [`TaskKind`] variant fails to compile until it gets a slug.
+const fn kind_slot(kind: TaskKind) -> usize {
     match kind {
-        TaskKind::Inspect => "inspect",
-        TaskKind::Propose => "propose",
-        TaskKind::Diagnose => "diagnose",
-        TaskKind::Repair => "repair",
-        TaskKind::Announce => "announce",
-        TaskKind::Taunt => "taunt",
+        TaskKind::Inspect => 0,
+        TaskKind::Propose => 1,
+        TaskKind::Diagnose => 2,
+        TaskKind::Repair => 3,
+        TaskKind::Announce => 4,
+        TaskKind::Taunt => 5,
     }
 }
 
+pub(crate) fn kind_name(kind: TaskKind) -> &'static str {
+    KIND_NAMES[kind_slot(kind)].1
+}
+
 fn kind_from_name(name: &str) -> Option<TaskKind> {
-    Some(match name {
-        "inspect" => TaskKind::Inspect,
-        "propose" => TaskKind::Propose,
-        "diagnose" => TaskKind::Diagnose,
-        "repair" => TaskKind::Repair,
-        "announce" => TaskKind::Announce,
-        "taunt" => TaskKind::Taunt,
-        _ => return None,
-    })
+    KIND_NAMES
+        .iter()
+        .find_map(|(kind, slug)| (*slug == name).then_some(*kind))
 }
 
 fn field_str<'a>(value: &'a JVal, key: &str) -> Option<&'a str> {
@@ -1310,6 +1321,18 @@ mod tests {
     use crate::{MockStep, OpenAiAdapter};
 
     const NOOP: &str = r#"{"actions": [{"noop": true}], "diagnostics": ["cassette:stub"]}"#;
+
+    #[test]
+    fn every_task_kind_round_trips_through_its_wire_name() {
+        // `kind_slot` is an exhaustive match, so a new variant cannot reach the
+        // table without a row; this loop proves each row's pair agrees.
+        for (slot, (kind, name)) in KIND_NAMES.into_iter().enumerate() {
+            assert_eq!(kind_slot(kind), slot, "slot of {kind:?}");
+            assert_eq!(kind_name(kind), name);
+            assert_eq!(kind_from_name(name), Some(kind));
+        }
+        assert_eq!(kind_from_name("inspect_extra"), None);
+    }
 
     /// A fresh directory under the OS temp dir, removed on drop.
     struct TempDir(PathBuf);

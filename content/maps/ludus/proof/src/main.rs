@@ -175,6 +175,7 @@ fn main() {
                         slot: TextureSlot::Normal,
                     },
                 ],
+                kind: engine_assets::cooked::MATERIAL_KIND_STONE,
             };
             w.add_material(&format!("ludus/mat_{asset}"), &mat)
                 .unwrap_or_else(|e| fail(&format!("bundle mat: {e}")));

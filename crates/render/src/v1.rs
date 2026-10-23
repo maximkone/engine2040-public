@@ -31,6 +31,8 @@ use std::cmp::Ordering;
 use std::f32::consts::PI;
 use std::fmt;
 
+use crate::material_kind::MaterialKind;
+
 // ---------------------------------------------------------------------------
 // Bounds: every external size is validated before allocation.
 // ---------------------------------------------------------------------------
@@ -742,7 +744,11 @@ impl LightUniform {
     }
 }
 
-/// Material uniform: base rgb + metallic + roughness + exposure + pad = 32 B.
+/// Material uniform: base rgb, metallic, roughness, exposure, kind word and
+/// parameter word = 32 B. The Rust struct stays 24 B: the two trailing words
+/// are written by [`MaterialUniform::to_array_with_kind`] from the presenter's
+/// kind table, so an unchanged 24-byte struct still packs the 32-byte shader
+/// image.
 #[derive(Clone, PartialEq, Debug)]
 pub struct MaterialUniform {
     /// Linear base color.
@@ -762,7 +768,14 @@ impl MaterialUniform {
     }
 
     /// Stack image of the same 32 bytes, reused per draw with no heap.
+    /// The kind and parameter words stay zero: stone's exact old image.
     pub(crate) fn to_array(&self) -> [u8; 32] {
+        self.to_array_with_kind(MaterialKind::Stone, 0.0)
+    }
+
+    /// Stack image with the kind word at 24..28 and its parameter at
+    /// 28..32. Kind 0 with parameter 0 is byte-identical to [`Self::to_array`].
+    pub(crate) fn to_array_with_kind(&self, kind: MaterialKind, param: f32) -> [u8; 32] {
         let mut out = [0u8; 32];
         for (i, c) in self.base_color.iter().enumerate() {
             let at = i * 4;
@@ -771,8 +784,8 @@ impl MaterialUniform {
         out[12..16].copy_from_slice(&self.metallic.to_le_bytes());
         out[16..20].copy_from_slice(&self.roughness.to_le_bytes());
         out[20..24].copy_from_slice(&self.exposure.to_le_bytes());
-        out[24..28].copy_from_slice(&0f32.to_le_bytes());
-        out[28..32].copy_from_slice(&0f32.to_le_bytes());
+        out[24..28].copy_from_slice(&kind.word().to_le_bytes());
+        out[28..32].copy_from_slice(&param.to_le_bytes());
         out
     }
 }
@@ -872,28 +885,28 @@ pub(crate) fn build_material(material: &PbrMaterial) -> Result<MaterialUniform, 
 // software receipt rasterizer and by behavior tests of the port.
 // ---------------------------------------------------------------------------
 
-fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+pub(crate) fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-fn mul3(a: [f32; 3], s: f32) -> [f32; 3] {
+pub(crate) fn mul3(a: [f32; 3], s: f32) -> [f32; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 
-fn mul3v(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn mul3v(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] * b[0], a[1] * b[1], a[2] * b[2]]
 }
 
-fn norm3(v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn norm3(v: [f32; 3]) -> [f32; 3] {
     let l = dot3(v, v).sqrt().max(1e-12);
     [v[0] / l, v[1] / l, v[2] / l]
 }
 
-fn saturate(x: f32) -> f32 {
+pub(crate) fn saturate(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
 }
 
@@ -1042,6 +1055,12 @@ pub struct ShadePoint {
     pub radiance: [f32; 3],
     /// Pre-tonemap exposure.
     pub exposure: f32,
+    /// Shading family: picks the lobe branch below. Stone is today's path.
+    pub kind: MaterialKind,
+    /// Kind parameter in `0..=1`: skin thickness or metal anisotropy.
+    pub kind_param: f32,
+    /// Unit surface tangent; `w` is the handedness. Metal reads it.
+    pub tangent: [f32; 4],
 }
 
 /// Shade one surface point with the single directional light: Burley diffuse
@@ -1050,26 +1069,11 @@ pub struct ShadePoint {
 /// `color = (diffuse + specular) * NdotL * light_color`), then exposure,
 /// the crate's one hue-keeping tone map and the sRGB encode. Output: sRGB
 /// in `0..=1`.
+/// The CPU twin of `shaders/forward.wgsl` `direct_light`: [`MaterialKind`]
+/// picks the lobe family, and stone keeps the frame every earlier run drew.
 /// No ambient/IBL yet: that is R2.
 pub fn shade_pbr(p: &ShadePoint) -> [f32; 3] {
-    let roughness = perceptual_to_roughness(p.perceptual_roughness);
-    let h = norm3(add3(p.light_dir, p.view));
-    let ndot_l = saturate(dot3(p.normal, p.light_dir));
-    let ndot_v = dot3(p.normal, p.view).max(0.0001);
-    let ndot_h = saturate(dot3(p.normal, h));
-    let ldot_h = saturate(dot3(p.light_dir, h));
-    let diffuse = mul3(
-        diffuse_color(p.base_color, p.metallic),
-        fd_burley(roughness, ndot_v, ndot_l, ldot_h),
-    );
-    let f0 = reflectance_f0(p.base_color, p.metallic);
-    let f = fresnel(f0, ldot_h);
-    let d = d_ggx(roughness, ndot_h);
-    let vv = v_smith_ggx_correlated(roughness, ndot_v, ndot_l);
-    let fab = f_ab(p.perceptual_roughness, ndot_v);
-    let spec = specular_light(d, vv, f, f0, fab, 1.0);
-    let lit = mul3v(add3(diffuse, spec), p.radiance);
-    let lit = mul3(lit, ndot_l);
+    let lit = crate::v1_kind::kind_lit(p);
     let exposed = mul3(lit, p.exposure.max(0.0));
     let clamped = [
         exposed[0].max(0.0),
@@ -1527,6 +1531,9 @@ pub fn capture_scene(
                     light_dir,
                     radiance,
                     exposure: scene.material.exposure,
+                    kind: MaterialKind::Stone,
+                    kind_param: 0.0,
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                 });
                 depth[idx] = z;
                 let o = idx * 4;
@@ -1582,6 +1589,42 @@ mod tests {
         let mut b = [0u8; 4];
         b.copy_from_slice(&bytes[off..off + 4]);
         f32::from_le_bytes(b)
+    }
+
+    fn sample_material() -> MaterialUniform {
+        MaterialUniform {
+            base_color: [0.25, 0.5, 0.75],
+            metallic: 0.5,
+            roughness: 0.4,
+            exposure: 1.5,
+        }
+    }
+
+    #[test]
+    fn stone_material_image_keeps_the_old_zero_words() {
+        let mat = sample_material();
+        let plain = mat.to_array();
+        assert_eq!(plain.len(), 32, "the image stays 32 bytes");
+        assert_eq!(
+            mat.to_array_with_kind(MaterialKind::Stone, 0.0),
+            plain,
+            "stone with a zero parameter is the same image"
+        );
+        assert_eq!(&plain[24..32], &[0u8; 8], "stone keeps both pad words zero");
+        for (kind, word) in [
+            (MaterialKind::Skin, 1u32),
+            (MaterialKind::Metal, 2),
+            (MaterialKind::Cloth, 3),
+        ] {
+            let bytes = mat.to_array_with_kind(kind, kind.default_param());
+            assert_eq!(&bytes[0..24], &plain[0..24], "{kind:?} keeps the factors");
+            assert_eq!(&bytes[24..28], &word.to_le_bytes(), "{kind:?} kind word");
+            assert_eq!(
+                get_f32(&bytes, 28),
+                kind.default_param(),
+                "{kind:?} parameter word"
+            );
+        }
     }
 
     #[test]
@@ -2018,11 +2061,55 @@ mod tests {
                 light_dir: [0.0, 0.0, 1.0],
                 radiance: [3.0, 3.0, 3.0],
                 exposure: 1.0,
+                kind: MaterialKind::Stone,
+                kind_param: 0.0,
+                tangent: [1.0, 0.0, 0.0, 1.0],
             })
         };
         let facing = lit([0.0, 0.0, 1.0]);
         let edge_on = lit([1.0, 0.0, 0.0]);
         assert!(facing[0] + facing[1] + facing[2] > edge_on[0] + edge_on[1] + edge_on[2]);
+    }
+
+    #[test]
+    fn kind_lobes_shade_apart_and_stone_ignores_them() {
+        let point = |kind: MaterialKind, kind_param: f32, tangent: [f32; 4]| ShadePoint {
+            base_color: [0.7, 0.6, 0.55],
+            metallic: 0.2,
+            perceptual_roughness: 0.45,
+            normal: [0.0, 0.0, 1.0],
+            view: [0.0, 0.0, 1.0],
+            light_dir: [0.0, 0.6, 0.8],
+            radiance: [3.0, 3.0, 3.0],
+            exposure: 1.0,
+            kind,
+            kind_param,
+            tangent,
+        };
+        let stone = shade_pbr(&point(MaterialKind::Stone, 0.0, [1.0, 0.0, 0.0, 1.0]));
+        // Stone reads neither word: its frame is the one every earlier run drew.
+        let stone_other = shade_pbr(&point(MaterialKind::Stone, 0.9, [0.0, 1.0, 0.0, -1.0]));
+        assert_eq!(
+            stone, stone_other,
+            "stone keeps one frame whatever the words say"
+        );
+        let delta =
+            |a: [f32; 3], b: [f32; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, f32::max);
+        for kind in [MaterialKind::Skin, MaterialKind::Metal, MaterialKind::Cloth] {
+            let shaded = shade_pbr(&point(kind, kind.default_param(), [1.0, 0.0, 0.0, 1.0]));
+            let d = delta(stone, shaded);
+            assert!(d > 1e-3, "{kind:?} shades apart from stone, delta {d}");
+        }
+        // Metal follows the tangent frame; skin and cloth ignore it.
+        let metal_x = shade_pbr(&point(MaterialKind::Metal, 0.6, [1.0, 0.0, 0.0, 1.0]));
+        let metal_y = shade_pbr(&point(MaterialKind::Metal, 0.6, [0.0, 1.0, 0.0, 1.0]));
+        assert!(
+            delta(metal_x, metal_y) > 1e-4,
+            "metal follows the tangent frame"
+        );
+        let skin_x = shade_pbr(&point(MaterialKind::Skin, 0.35, [1.0, 0.0, 0.0, 1.0]));
+        let skin_y = shade_pbr(&point(MaterialKind::Skin, 0.35, [0.0, 1.0, 0.0, -1.0]));
+        assert_eq!(skin_x, skin_y, "skin ignores the tangent");
     }
 
     #[test]
@@ -2171,5 +2258,17 @@ mod tests {
             let dot = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
             assert!(dot.abs() < 1e-5, "fallback stays orthogonal, dot {dot}");
         }
+    }
+}
+
+#[cfg(all(test, feature = "shader-validate"))]
+mod shader_gate {
+    //! LF8: the kind branches in `direct_light` must compile on their own,
+    //! even when the crate-wide walk stops at another committed file.
+
+    #[test]
+    fn forward_with_the_kind_branches_validates() {
+        crate::shader_gate::validate_source("forward.wgsl", include_str!("shaders/forward.wgsl"))
+            .unwrap_or_else(|err| panic!("{err}"));
     }
 }

@@ -1199,3 +1199,362 @@ mod tests {
         assert_eq!(out.rotations, dst.rotations);
     }
 }
+
+/// LM7: the fatigue-soak lock. One character holds one fixed target for 600
+/// ticks at full effort, so AM8 fatigue charges four ticks per tick and walks
+/// the gait through winded (tick 149) and tired (tick 374) inside the run. The
+/// soak pays the LM4 lane-op kill bar (half a full scan per search, the
+/// `motion_schema_test` shape) and writes no perf file: PF1 posts the
+/// milliseconds. Integer end to end, so the tape replays identically on every
+/// machine.
+///
+/// The library is one 600-frame clip the character keeps re-finding, a 64-frame
+/// rival clip and 1,600 seeded frames of unrelated content, because the lock
+/// has to be read against a real scan: pose lanes come first, so a clip whose
+/// frames all answer the target pose cannot be pruned inside those lanes and
+/// the bound only bites on the frames that miss it. That is what the cost leg
+/// below measures, and it is why the soak db is a library, not a pair of tied
+/// clips.
+#[cfg(test)]
+mod search_soak {
+    use super::{
+        bake, default_weights, search, Entry, MotionDb, Query, FEAT_N, NO_HIST, POSE_LANES, Q,
+        Q_MAX,
+    };
+    use crate::exert::{self, ExertState, ExertTable, Gait, EFFORT_MAX};
+    use engine_core::CounterCursor;
+
+    /// Soak length: the LM4 run's tick count.
+    const TICKS: usize = 600;
+    /// Frames in the pose-matched clip: one per soak tick, so a tape that keeps
+    /// its run never runs off the end of its clip.
+    const HELD_FRAMES: usize = 600;
+    /// Frames in the trajectory-matched rival clip: one 64-frame run.
+    const RIVAL_FRAMES: usize = 64;
+    /// Unrelated library frames, seeded: the bulk a real search prunes past.
+    const FILLER_FRAMES: usize = 1_600;
+    /// Library frames per filler clip.
+    const FILLER_CLIP_FRAMES: usize = 64;
+    /// Continuity penalty for a jump that is not the next frame of the same
+    /// clip: the dial every arena tape pays.
+    const JUMP_COST: i64 = 4_194_304;
+    /// Contact-mismatch penalty: the anti-slide gate.
+    const CONTACT_COST: i64 = 8_388_608;
+    /// Pose-lane offset of the rival clip, in fixed units.
+    const POSE_OFFSET: i32 = 500;
+    /// Trajectory-lane offset of the held clip.
+    const TRAJ_OFFSET: i32 = 300;
+    /// The only two gait crossings the soak reaches: fatigue charges
+    /// `work_per_tick` (4) per tick, so `winded_at_ticks` (600) lands on tick
+    /// 149 and `tired_at_ticks` (1500) on tick 374, while `spent_at_ticks`
+    /// (2700) stays out of reach.
+    const GATE_TICKS: [usize; 2] = [149, 374];
+
+    /// One soak tick: the band it ran in, its pick and what it billed.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct Row {
+        gait: Gait,
+        index: usize,
+        clip: u16,
+        cost: i64,
+        lane_ops: u64,
+    }
+
+    /// The soak's fixed target: pose lanes the held clip answers, trajectory
+    /// lanes the rival answers.
+    fn target() -> [i32; FEAT_N] {
+        let mut feat = [0i32; FEAT_N];
+        for (lane, value) in feat.iter_mut().enumerate() {
+            *value = if lane < POSE_LANES { Q } else { 2 * Q };
+        }
+        feat
+    }
+
+    /// The fixed target with one half of its lanes moved out by `delta`.
+    fn offset(half_is_pose: bool, delta: i32) -> [i32; FEAT_N] {
+        let mut feat = target();
+        for (lane, value) in feat.iter_mut().enumerate() {
+            if (lane < POSE_LANES) == half_is_pose {
+                *value = value.saturating_add(delta).clamp(-Q_MAX, Q_MAX);
+            }
+        }
+        feat
+    }
+
+    /// 600 held frames in clip 0 (pose exact, trajectory off by
+    /// [`TRAJ_OFFSET`]), 64 rival frames in clip 1 (trajectory exact, pose off
+    /// by [`POSE_OFFSET`]) and [`FILLER_FRAMES`] seeded library frames past
+    /// them. Under the fresh weights the held clip wins 1,080,000 to
+    /// 2,000,000; once fatigue damps the pose lanes the rival wins outright, so
+    /// the gait band is the only thing that can re-pick.
+    fn soak_db() -> MotionDb {
+        let held = offset(false, TRAJ_OFFSET);
+        let rival = offset(true, POSE_OFFSET);
+        let mut entries = Vec::with_capacity(HELD_FRAMES + RIVAL_FRAMES + FILLER_FRAMES);
+        for (clip, (feat, frames)) in [(0usize, (held, HELD_FRAMES)), (1, (rival, RIVAL_FRAMES))] {
+            for tick in 0..frames {
+                entries.push(Entry {
+                    feat,
+                    clip: u16::try_from(clip).unwrap_or(0),
+                    tick: u16::try_from(tick).unwrap_or(0),
+                    contact: 0,
+                });
+            }
+        }
+        let mut cursor = CounterCursor::new(2040);
+        let span = u64::try_from(i64::from(Q) * 8).unwrap_or(0);
+        for index in 0..FILLER_FRAMES {
+            let mut feat = [0i32; FEAT_N];
+            for lane in feat.iter_mut() {
+                let drawn = i32::try_from(cursor.next_range(0, span)).unwrap_or(0);
+                *lane = drawn - 4 * Q;
+            }
+            entries.push(Entry {
+                feat,
+                clip: u16::try_from(2 + index / FILLER_CLIP_FRAMES).unwrap_or(0),
+                tick: u16::try_from(index % FILLER_CLIP_FRAMES).unwrap_or(0),
+                contact: 0,
+            });
+        }
+        bake(entries).expect("the soak database bakes")
+    }
+
+    /// Run the soak. `jump_cost` is the continuity dial: the authority run pays
+    /// it, and the probe sets it to zero so the warp's own re-pick shows.
+    fn soak(db: &MotionDb, jump_cost: i64) -> Vec<Row> {
+        let table = ExertTable::default();
+        let base = default_weights();
+        let mut state = ExertState::new(1);
+        let mut warped = [0i32; FEAT_N];
+        let mut curr = NO_HIST;
+        let mut rows = Vec::with_capacity(TICKS);
+        for _ in 0..TICKS {
+            state
+                .advance(&table, EFFORT_MAX, 1)
+                .expect("full effort is in range");
+            let gait = state.gait(&table).expect("the default table validates");
+            exert::warp_weights(&base, &mut warped, POSE_LANES, &state, &table)
+                .expect("the default weights warp");
+            let query = Query {
+                feat: target(),
+                contact: 0,
+                curr,
+                weights: warped,
+                jump_cost,
+                contact_cost: CONTACT_COST,
+            };
+            let (hit, receipt) = search(db, &query).expect("the soak query is in range");
+            rows.push(Row {
+                gait,
+                index: hit.index,
+                clip: hit.clip,
+                cost: hit.cost,
+                lane_ops: receipt.cost_per_character(),
+            });
+            curr = u32::try_from(hit.index).unwrap_or(NO_HIST);
+        }
+        rows
+    }
+
+    /// LM4 kill bar for one search: half a full scan in integer lane ops.
+    fn lane_op_bar(db: &MotionDb) -> u64 {
+        u64::try_from(db.entries.len() / 2)
+            .unwrap_or(0)
+            .saturating_mul(u64::try_from(FEAT_N).unwrap_or(0))
+    }
+
+    /// A pick moves when it neither holds the frame it came from nor steps to
+    /// the next frame of the same clip: the freedom a re-pick takes.
+    fn churn_move(rows: &[Row], tick: usize) -> bool {
+        let (prev, now) = (rows[tick - 1], rows[tick]);
+        now.index != prev.index && !(now.clip == prev.clip && now.index == prev.index + 1)
+    }
+
+    /// Ticks whose pick moved.
+    fn churn_moves(rows: &[Row]) -> Vec<usize> {
+        (1..rows.len()).filter(|t| churn_move(rows, *t)).collect()
+    }
+
+    /// The lock: a pick that moves while its band holds is churn.
+    fn churn_fault(rows: &[Row]) -> Option<usize> {
+        churn_moves(rows)
+            .into_iter()
+            .find(|t| rows[*t].gait == rows[*t - 1].gait)
+    }
+
+    /// Ticks where the gait band changed.
+    fn band_moves(rows: &[Row]) -> Vec<usize> {
+        (1..rows.len())
+            .filter(|t| rows[*t].gait != rows[*t - 1].gait)
+            .collect()
+    }
+
+    /// Ticks where the pick left the clip it was running in.
+    fn clip_moves(rows: &[Row]) -> Vec<usize> {
+        (1..rows.len())
+            .filter(|t| rows[*t].clip != rows[*t - 1].clip)
+            .collect()
+    }
+
+    /// Ticks where the pick stopped being the next frame of the same clip.
+    fn broken_runs(rows: &[Row]) -> Vec<usize> {
+        (1..rows.len())
+            .filter(|&t| rows[t].clip != rows[t - 1].clip || rows[t].index != rows[t - 1].index + 1)
+            .collect()
+    }
+
+    #[test]
+    fn soak_bands_cross_only_at_the_default_gates() {
+        let rows = soak(&soak_db(), JUMP_COST);
+        assert_eq!(
+            band_moves(&rows),
+            GATE_TICKS.to_vec(),
+            "the soak crosses winded and tired and nothing else"
+        );
+        assert_eq!(rows[0].gait, Gait::Fresh, "the soak starts rested");
+        assert_eq!(
+            rows[TICKS - 1].gait,
+            Gait::Tired,
+            "600 full-effort ticks never reach spent"
+        );
+    }
+
+    #[test]
+    fn soak_tape_holds_its_run_across_both_gates() {
+        let rows = soak(&soak_db(), JUMP_COST);
+        assert!(clip_moves(&rows).is_empty(), "the tape left its clip");
+        assert!(broken_runs(&rows).is_empty(), "the tape broke its run");
+        assert!(churn_fault(&rows).is_none(), "churn off a gate");
+        // Tick zero takes the lowest-index tie and every later tick steps to
+        // `prev + 1` for free, so 600 ticks of fatigue walk clip 0 frame by
+        // frame and never pay the jump penalty.
+        for (tick, row) in rows.iter().enumerate() {
+            assert_eq!(row.index, tick, "tick {tick} runs frame {tick}");
+        }
+        // The held frames differ from the target only in the trajectory lanes,
+        // and fatigue leaves those weights where they are, so the run's cost
+        // never moves: no tick pays for the soak.
+        for (tick, row) in rows.iter().enumerate().skip(1) {
+            assert_eq!(
+                row.cost,
+                rows[tick - 1].cost,
+                "tick {tick} cost moved to {} with the band",
+                row.cost
+            );
+        }
+    }
+
+    #[test]
+    fn fatigue_alone_repicks_at_the_winded_gate() {
+        // Continuity free, so only the warp can move the pick: it moves once,
+        // on the winded gate, and then holds the rival clip to the end.
+        let rows = soak(&soak_db(), 0);
+        assert_eq!(
+            churn_moves(&rows),
+            vec![GATE_TICKS[0]],
+            "one re-pick, and it sits on the winded gate"
+        );
+        assert_eq!(churn_fault(&rows), None, "no churn off a gate");
+        assert_eq!(rows[0].clip, 0, "the fresh pick answers pose");
+        assert_eq!(rows[TICKS - 1].clip, 1, "the tired pick answers trajectory");
+        // The re-pick is not a drift: fatigue bought a strictly better match,
+        // so the tired tape costs less than the rested one.
+        assert!(
+            rows[TICKS - 1].cost < rows[0].cost,
+            "the tired pick did not get cheaper: {} against {}",
+            rows[TICKS - 1].cost,
+            rows[0].cost
+        );
+    }
+
+    #[test]
+    fn soak_cost_stays_inside_the_lm4_bars() {
+        let db = soak_db();
+        assert_eq!(
+            db.entries.len(),
+            HELD_FRAMES + RIVAL_FRAMES + FILLER_FRAMES,
+            "the soak library holds its clip, its rival and its filler"
+        );
+        let bar = lane_op_bar(&db);
+        let run_bar = u64::try_from(TICKS).unwrap_or(0).saturating_mul(bar);
+        for jump_cost in [JUMP_COST, 0] {
+            let rows = soak(&db, jump_cost);
+            let mut total = 0u64;
+            for row in &rows {
+                assert!(
+                    row.lane_ops <= bar,
+                    "a search billed {} lane ops past the LM4 bar {bar}",
+                    row.lane_ops
+                );
+                total = total.saturating_add(row.lane_ops);
+            }
+            assert!(
+                total <= run_bar,
+                "a 600-tick soak billed {total} past {run_bar}"
+            );
+        }
+    }
+
+    #[test]
+    fn soak_replays_x2() {
+        let db = soak_db();
+        assert_eq!(
+            soak(&db, JUMP_COST),
+            soak(&db, JUMP_COST),
+            "the authority tape replays bit-identical"
+        );
+        assert_eq!(
+            soak(&db, 0),
+            soak(&db, 0),
+            "the no-continuity tape replays bit-identical"
+        );
+    }
+
+    #[test]
+    fn churn_off_a_gate_refuses_the_lock() {
+        // The band is live: the same pick move fails mid-band and passes on a
+        // gate tick, and neither a hold nor a next-frame step counts as churn.
+        let rested = Row {
+            gait: Gait::Fresh,
+            index: 0,
+            clip: 0,
+            cost: 1_080_000,
+            lane_ops: 1,
+        };
+        for (rows, want, why) in [
+            (
+                [
+                    rested,
+                    Row {
+                        index: 7,
+                        clip: 1,
+                        ..rested
+                    },
+                ],
+                Some(1),
+                "a mid-band re-pick is churn",
+            ),
+            (
+                [
+                    rested,
+                    Row {
+                        gait: Gait::Tired,
+                        index: 7,
+                        clip: 1,
+                        ..rested
+                    },
+                ],
+                None,
+                "the same move on a band change is not",
+            ),
+            ([rested, rested], None, "holding the pick is not churn"),
+            (
+                [rested, Row { index: 1, ..rested }],
+                None,
+                "walking the run is not churn",
+            ),
+        ] {
+            assert_eq!(churn_fault(&rows), want, "{why}");
+        }
+    }
+}

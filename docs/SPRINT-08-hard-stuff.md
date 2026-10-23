@@ -99,7 +99,35 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   landings; replay seed 2040 0xc1fed095b504a5ad twice, seed 2041 differs;
   lod_warp 2/2 (39902908210), lod 11/12, golden 13/13 d57b5c8ae3096614
   (39902345065), clippy PASS (39902499110).
-- [ ] LM7 anim: motion-search fatigue-soak lock — seeded 600-tick fatigue
+- [x] LM7 anim: motion-search fatigue-soak lock — seeded 600-tick fatigue Landed 3eac94ba5.
+  `crates/anim/src/motion_match.rs` gained `mod search_soak`: one character
+  holds one fixed target for 600 ticks at full effort, so AM8 fatigue charges
+  four ticks per tick and crosses winded on tick 149 and tired on tick 374
+  inside the run (`soak_bands_cross_only_at_the_default_gates` pins those two
+  ticks and says spent never arrives). Two locks read the sweep: the authority
+  tape walks clip 0 frame by frame for all 600 ticks, never leaving its clip,
+  never breaking its run and never moving its cost across either gate
+  (`soak_tape_holds_its_run_across_both_gates`); and with the continuity dial
+  at zero the warp alone re-picks exactly once, on the winded gate, onto the
+  clip that answers trajectory instead of pose, and that pick comes out
+  cheaper, not noisier (`fatigue_alone_repicks_at_the_winded_gate`). The band
+  is live: `churn_off_a_gate_refuses_the_lock` feeds the checker a mid-band
+  re-pick and takes the fault, then passes the same move on a band tick.
+  Cost: `soak_cost_stays_inside_the_lm4_bars` bills every search against the
+  LM4 half-scan bar for the soak library (2,264 frames, so 15,848 lane ops per
+  search and 600 x that per run) and both soaks replay bit-identical
+  (`soak_replays_x2`). What the bar taught: a running-best bound cannot prune
+  frames that match the target pose, because the pose lanes come first, so a
+  pose-matched clip is the expensive part of any scan — a 1,024-frame library
+  of nothing but tied held plus rival frames billed 10,520 ops against its
+  7,168 bar (run 40030088514), and the soak library only clears the bar once
+  unrelated content is in it. Reads the LM4 bars, writes no perf file.
+  Proof: `cargo test -p engine-anim --lib search_soak` 6 passed
+  (40030659329); `--lib` whole crate 539 passed, 6 ignored (40031021779);
+  clippy `-p engine-anim --all-targets -- -D warnings` PASS (40031307780);
+  rust-quality `--crate anim` score 99 with casts 111, panic sites 2 and
+  unwraps 1 unmoved and tests 548 -> 565; rustfmt clean. Test-only hunks, so
+  no production line moved and golden d57b5c8ae3096614 stands.
   sweep proves LM1 picks stay stable inside the LM4 cost bars. Tier A.
   Size S. Owns soak-test hunks in `crates/anim/src/motion_match.rs` (LM1
   shape frozen; reads LM4 bars, writes no perf file). Accept: `cargo test

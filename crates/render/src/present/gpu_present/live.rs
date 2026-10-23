@@ -487,6 +487,7 @@ impl Presenter {
         for (slot, item) in list.items.iter().enumerate() {
             // Material-only pack: the camera plus light uniforms above already
             // carry this frame's matrix, so no per-draw view math runs here.
+            let kind = self.material_kind(item.mesh);
             let mat_u = crate::v1::build_material(&item.material).map_err(|e| {
                 PresentError::InvalidDraw {
                     index: slot,
@@ -504,7 +505,8 @@ impl Presenter {
             self.require_draw_textures(item, slot)?;
             // Stack image, not `to_bytes()`: the per-draw byte image would
             // build one `Vec` per draw, which the ALLOC ratchet cannot see.
-            self.material_scratch.extend_from_slice(&mat_u.to_array());
+            self.material_scratch
+                .extend_from_slice(&mat_u.to_array_with_kind(kind, kind.default_param()));
             self.material_scratch
                 .resize((slot + 1) * MATERIAL_STRIDE, 0);
         }

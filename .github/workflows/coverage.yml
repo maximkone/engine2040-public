@@ -1,13 +1,15 @@
 name: coverage
 
-# Coverage of the sim lane, weekly on the public mirror (the build farm, same rule as ci.yml).
-# It is not on push: the mirror already runs 10+ jobs per export and coverage is a trend, not a
-# per-commit gate (docs/research/tools-gaps-2026-10-23/README.md, gap 3).
+# Two legs, one file. The `sim` job is the weekly report-only trend run (the build farm, same
+# mirror rule as ci.yml; docs/research/tools-gaps-2026-10-23/README.md, gap 3). The `floor` job is
+# the graded per-push/per-PR leg added for TG4 (2026-10-24).
 #
-# REPORT-ONLY, first leg: no --fail-under-*, no committed baseline, no floor. A low number stays
-# green and this file claims no percentage of its own; the numbers it prints are the run's own.
-# Only a broken tool run is red. Follow-up, not in this file: a per-crate floor ratchet, with the
-# floors committed as a baseline and each run compared against it.
+# REPORT-ONLY for the sim lane: no --fail-under-*, no committed baseline, no floor. A low number
+# stays green and this file claims no percentage of its own; the numbers it prints are the run's own.
+# The `floor` job below is the graded leg (TG4, 2026-10-24): it covers the three crates the gap row
+# names (core, proof, endpoint), compares one llvm-cov summary with the committed
+# tools/coverage-bar.json through tools/coverage-gate.mjs, and fails under a floor. The floors are
+# measured numbers: `_how` in the bar names the command that printed them.
 #
 # Packages, from `cargo metadata` (2026-10-23): engine-core, engine-physics, engine-spatial,
 # engine-ai, engine-arena. The gap note's fifth name, engine-sim, is not a package in this
@@ -22,6 +24,21 @@ on:
     # Mondays, 05:00 UTC.
     - cron: "0 5 * * 1"
   workflow_dispatch:
+  # The graded leg runs where a change can move coverage: a push to main/master and a PR that
+  # touches the crates, the bar, the gate or this file. The weekly sim leg keeps the schedule only.
+  push:
+    branches: [main, master]
+    paths:
+      - "crates/**"
+      - "tools/coverage-bar.json"
+      - "tools/coverage-gate.mjs"
+      - ".github/workflows/coverage.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "tools/coverage-bar.json"
+      - "tools/coverage-gate.mjs"
+      - ".github/workflows/coverage.yml"
 
 permissions:
   contents: read
@@ -32,7 +49,7 @@ concurrency:
 
 jobs:
   sim:
-    if: github.repository == 'maximkone/engine2040-public'
+    if: github.repository == 'maximkone/engine2040-public' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -137,4 +154,59 @@ jobs:
           path: |
             target/coverage/summary.json
             target/coverage/lcov.info
+          if-no-files-found: warn
+
+  # TG4: the graded leg. One instrumented test run of the three crates the gap row names, then
+  # tools/coverage-gate.mjs rolls the files up per package and fails under the committed floor.
+  # Thin LTO and release flags stay off: this measures lines a test executes, not speed.
+  floor:
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - name: free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: install repository toolchain (rust-toolchain.toml) and llvm-tools-preview
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools-preview
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage-floor
+      # Pinned to the version the bar was measured with (tools/coverage-bar.json `_how`).
+      - name: install cargo-llvm-cov (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      # engine-endpoint's tests need the `mcp` feature (the door pack); core and proof are plain.
+      # `--lib` keeps this one crate at a time: integration targets have their own lanes. The
+      # `--skip` names are the long soak/hour probes with their own lanes: they add minutes, not
+      # lines, and the floors in tools/coverage-bar.json were measured with the same filter.
+      - name: coverage run (core, proof, endpoint with mcp)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/reports
+          cargo llvm-cov --locked \
+            -p engine-core -p engine-proof -p engine-endpoint \
+            --features engine-endpoint/mcp \
+            --lib \
+            --json --summary-only \
+            --output-path target/reports/coverage.json \
+            -- --skip online_soak --skip chaos --skip hour_ --skip crowd_20k --skip overhead_probe
+      - name: per-crate floor (tools/coverage-bar.json)
+        run: node tools/coverage-gate.mjs --summary target/reports/coverage.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-floor
+          path: target/reports/coverage.json
           if-no-files-found: warn

@@ -32,7 +32,8 @@ use engine_core::quat_mul;
 use engine_scene::ids::ObjectId;
 use engine_scene::transform::{quat_normalized, Transform, MIN_INVERTIBLE_SCALE};
 
-use crate::commands::Batch;
+use crate::commands::{Batch, Op};
+use crate::select::Selection;
 
 /// Snap step for translation drags, in meters (one quarter meter).
 pub const SNAP_DISTANCE_M: f32 = 0.25;
@@ -106,6 +107,8 @@ pub enum GizmoError {
     NonPositiveScale,
     /// A world-to-local conversion crossed a near-zero scale.
     DegenerateTransform,
+    /// A selected object had no staged pose for the group drag.
+    MissingPose,
 }
 
 impl std::fmt::Display for GizmoError {
@@ -115,6 +118,9 @@ impl std::fmt::Display for GizmoError {
             Self::DegenerateAxis => f.write_str("gizmo spin axis is degenerate"),
             Self::NonPositiveScale => f.write_str("gizmo scale factor must be positive"),
             Self::DegenerateTransform => f.write_str("gizmo pose sits across a degenerate scale"),
+            Self::MissingPose => {
+                f.write_str("a selected object has no staged pose; stage one pose per selected id")
+            }
         }
     }
 }
@@ -273,6 +279,43 @@ pub fn drag_batch(
         idempotency_key,
         provenance: None,
     }
+}
+
+/// Group drag: one `SetLocal` op per selected object, in ascending id order.
+///
+/// `staged` carries the new local pose per object (the caller ran
+/// [`drag_to_local`] in each object's own parent frame and collected the
+/// results). Every op sits under `base_revision` and the one
+/// `idempotency_key`, so a group drag is one validated apply and one undo
+/// step. Rows for ids outside the selection are ignored; a selected id with
+/// no staged pose refuses the whole batch ([`GizmoError::MissingPose`]) and a
+/// non-finite pose refuses it a second way ([`GizmoError::NonFinite`]). An
+/// empty selection gives an empty batch, which the command service refuses:
+/// check [`Selection::is_empty`] first.
+pub fn drag_set(
+    selection: &Selection,
+    staged: &[(ObjectId, Transform)],
+    base_revision: u64,
+    idempotency_key: u64,
+) -> Result<Batch, GizmoError> {
+    let mut ops = Vec::with_capacity(selection.len());
+    for id in selection.ids() {
+        let local = staged
+            .iter()
+            .find(|(known, _)| *known == id)
+            .map(|(_, local)| *local)
+            .ok_or(GizmoError::MissingPose)?;
+        if !local.is_finite() {
+            return Err(GizmoError::NonFinite);
+        }
+        ops.push(Op::SetLocal { id, local });
+    }
+    Ok(Batch {
+        ops,
+        base_revision,
+        idempotency_key,
+        provenance: None,
+    })
 }
 
 /// Normalized parent rotation plus the pieces [`world_to_local`] needs.
@@ -754,6 +797,71 @@ mod tests {
             batch.ops[0],
             crate::commands::Op::SetLocal { id, local: l } if id == target && l == local
         ));
+    }
+
+    #[test]
+    fn drag_set_carries_one_op_per_object_in_id_order() {
+        let mut selection = Selection::new();
+        // Unsorted input order proves the batch follows the id order.
+        selection
+            .add(ObjectId::parse("00000000-0000-0000-0000-000000000003").unwrap())
+            .unwrap();
+        selection
+            .add(ObjectId::parse("00000000-0000-0000-0000-000000000001").unwrap())
+            .unwrap();
+        selection
+            .add(ObjectId::parse("00000000-0000-0000-0000-000000000002").unwrap())
+            .unwrap();
+        let staged = [
+            (
+                ObjectId::parse("00000000-0000-0000-0000-000000000003").unwrap(),
+                Transform::new([3.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+            ),
+            (
+                ObjectId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+                Transform::new([1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+            ),
+            (
+                ObjectId::parse("00000000-0000-0000-0000-000000000002").unwrap(),
+                Transform::new([2.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+            ),
+        ];
+        let batch = drag_set(&selection, &staged, 9, 4242).unwrap();
+        assert_eq!(batch.ops.len(), 3);
+        assert_eq!(batch.base_revision, 9, "one revision for the whole group");
+        assert_eq!(batch.idempotency_key, 4242);
+        let positions: Vec<f32> = batch
+            .ops
+            .iter()
+            .map(|op| match op {
+                Op::SetLocal { local, .. } => local.position[0],
+                other => panic!("unexpected op {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            positions,
+            vec![1.0, 2.0, 3.0],
+            "ops follow ascending id order"
+        );
+        // A selected object with no staged pose refuses the whole batch.
+        assert_eq!(
+            drag_set(&selection, &staged[..2], 9, 4242).unwrap_err(),
+            GizmoError::MissingPose
+        );
+        // A non-finite pose refuses it too.
+        let nan = [(
+            ObjectId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            Transform::new([f32::NAN, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+        )];
+        assert_eq!(
+            drag_set(&selection, &nan, 9, 4242).unwrap_err(),
+            GizmoError::NonFinite
+        );
+        // An empty selection yields no op, never a fake one.
+        assert!(drag_set(&Selection::new(), &staged, 9, 4242)
+            .unwrap()
+            .ops
+            .is_empty());
     }
 
     #[test]

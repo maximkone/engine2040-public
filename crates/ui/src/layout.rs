@@ -250,6 +250,9 @@ pub struct LayoutDoc {
     pub whitespace: Whitespace,
     /// Row bands top to bottom.
     pub rows: Vec<RowSpec>,
+    /// Caller drag overrides, at most one per panel; applied by [`Self::solve`]
+    /// in place of the authored width. Empty after a release.
+    pub pins: Vec<PanelPin>,
 }
 
 /// One panel's solved place.
@@ -259,6 +262,28 @@ pub struct PanelRect {
     pub id: PanelId,
     /// Exact pixel rect.
     pub rect: Rect,
+}
+
+/// One pinned width override: a caller drag stored beside the authored
+/// document, never inside it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct PanelPin {
+    /// Panel the override names.
+    pub id: PanelId,
+    /// Width rule used instead of the authored `PanelSpec::width`.
+    pub width: Constraint,
+}
+
+/// Solved layout plus the edit receipt: which panels moved versus the
+/// previous solve, in authored order. A solve with no previous result lists
+/// every panel.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct EditedLayout {
+    /// The solve itself.
+    pub solved: SolvedLayout,
+    /// Panel ids whose rect differs from the previous solve, authored order.
+    /// Empty when the edit changed nothing.
+    pub moved: Vec<PanelId>,
 }
 
 /// Solved layout: one rect per panel, the inner box, the slack it left and a
@@ -409,6 +434,10 @@ pub enum LayoutError {
     },
     /// Palette id outside the four [`hud_palettes`] sets, culprit carried.
     BadPalette(u8),
+    /// A pin names a panel the document does not hold, culprit carried.
+    UnknownPanel(PanelId),
+    /// A drag asked for a vertical resize; panels carry only a width rule.
+    UnsupportedResizeAxis(Axis),
 }
 
 impl core::fmt::Display for LayoutError {
@@ -454,6 +483,15 @@ impl core::fmt::Display for LayoutError {
             Self::BadPalette(id) => {
                 write!(f, "unknown palette {id}; legal ids are 0..=3")
             }
+            Self::UnknownPanel(id) => write!(
+                f,
+                "pin names panel {} which this document does not hold; recovery: pin an authored panel id",
+                id.0
+            ),
+            Self::UnsupportedResizeAxis(axis) => write!(
+                f,
+                "a {axis} drag is not a panel rule; recovery: resize the row height through its RowSpec"
+            ),
         }
     }
 }
@@ -471,7 +509,101 @@ impl LayoutDoc {
             row_gap: 0,
             whitespace: Whitespace::Compact,
             rows,
+            pins: Vec::new(),
         }
+    }
+
+    /// Pin panel `id` to `width`, replacing its authored width rule until
+    /// [`Self::unpin`]. One override per panel; pinning again replaces it.
+    /// The authored spec is untouched, so a release restores the old rects
+    /// exactly. Pure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LayoutError::UnknownPanel`] when no panel carries `id`.
+    pub fn pin(&mut self, id: PanelId, width: Constraint) -> Result<(), LayoutError> {
+        if !self.has_panel(id) {
+            return Err(LayoutError::UnknownPanel(id));
+        }
+        if let Some(slot) = self.pins.iter_mut().find(|pin| pin.id == id) {
+            slot.width = width;
+        } else {
+            self.pins.push(PanelPin { id, width });
+        }
+        Ok(())
+    }
+
+    /// Release the pin on `id`; true when one was held. The next solve uses
+    /// the authored width again. Pure.
+    pub fn unpin(&mut self, id: PanelId) -> bool {
+        let before = self.pins.len();
+        self.pins.retain(|pin| pin.id != id);
+        self.pins.len() != before
+    }
+
+    /// Active pins in pin order.
+    #[must_use]
+    pub fn pins(&self) -> &[PanelPin] {
+        &self.pins
+    }
+
+    /// Store a caller drag on panel `id` as a `min_px == max_px` min/max
+    /// override, so the panel keeps exactly the width the drag left it at
+    /// (`px` is the drag's target width in pixels). Pure.
+    ///
+    /// # Errors
+    ///
+    /// [`LayoutError::UnsupportedResizeAxis`] for a vertical drag (a panel
+    /// owns a width rule, not a height), [`LayoutError::UnknownPanel`] for an
+    /// id the document does not hold.
+    pub fn resize(&mut self, id: PanelId, axis: Axis, px: u32) -> Result<(), LayoutError> {
+        if axis == Axis::Vertical {
+            return Err(LayoutError::UnsupportedResizeAxis(axis));
+        }
+        self.pin(
+            id,
+            Constraint::MinMax {
+                min_px: px,
+                max_px: px,
+            },
+        )
+    }
+
+    /// Solve, then report which panels moved versus `previous`, in authored
+    /// order. `None` means there is no previous solve, so every panel is new.
+    /// The receipt never carries a panel that sat still, and two identical
+    /// drag sequences give the same `moved` and digest. Pure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LayoutError`] exactly as [`Self::solve`] does.
+    pub fn fetch_changes(
+        &self,
+        viewport: Viewport,
+        shrink_order: &[PanelId],
+        previous: Option<&SolvedLayout>,
+    ) -> Result<EditedLayout, LayoutError> {
+        let solved = self.solve(viewport, shrink_order)?;
+        let moved = solved
+            .panels
+            .iter()
+            .filter(|panel| previous.and_then(|prev| prev.rect(panel.id)) != Some(panel.rect))
+            .map(|panel| panel.id)
+            .collect();
+        Ok(EditedLayout { solved, moved })
+    }
+
+    /// True when an authored panel carries `id`.
+    fn has_panel(&self, id: PanelId) -> bool {
+        self.row_of(id).is_some()
+    }
+
+    /// Row index of the panel that carries `id`, if any.
+    fn row_of(&self, id: PanelId) -> Option<u16> {
+        self.rows
+            .iter()
+            .position(|row| row.panels.iter().any(|panel| panel.id == id))
+            .map(row_index)
     }
 
     /// Solve the document against `viewport`, naming the caller's shrink
@@ -504,6 +636,7 @@ impl LayoutDoc {
                 self.margins.left,
                 self.whitespace,
                 shrink_order,
+                &self.pins,
             )?;
             used_w = used_w.max(row_used);
             panels.extend(rects);
@@ -607,35 +740,49 @@ impl LayoutDoc {
                     return Err(LayoutError::DuplicatePanel(panel.id));
                 }
                 seen.push(panel.id);
-                match panel.width {
-                    Constraint::Fraction { num, den } => {
-                        if num == 0 || den == 0 {
-                            return Err(LayoutError::BadFraction { row: row_index });
+                self.check_width(panel.width, row_index)?;
+                if let Constraint::Fraction { den, .. } = panel.width {
+                    if let Some(first) = row_den {
+                        if first != den {
+                            return Err(LayoutError::MixedFractionDen {
+                                row: row_index,
+                                den,
+                            });
                         }
-                        if let Some(first) = row_den {
-                            if first != den {
-                                return Err(LayoutError::MixedFractionDen {
-                                    row: row_index,
-                                    den,
-                                });
-                            }
-                        } else {
-                            row_den = Some(den);
-                        }
+                    } else {
+                        row_den = Some(den);
                     }
-                    Constraint::Aspect { w, h } => {
-                        if w == 0 || h == 0 {
-                            return Err(LayoutError::BadAspect { row: row_index });
-                        }
-                    }
-                    Constraint::MinMax { min_px, max_px } => {
-                        if min_px > max_px {
-                            return Err(LayoutError::BadMinMax { row: row_index });
-                        }
-                    }
-                    Constraint::Fixed { .. } => {}
                 }
             }
+        }
+        for pin in &self.pins {
+            let row = self
+                .row_of(pin.id)
+                .ok_or(LayoutError::UnknownPanel(pin.id))?;
+            self.check_width(pin.width, row)?;
+        }
+        Ok(())
+    }
+
+    /// Check one panel width rule; the row index only names the culprit.
+    fn check_width(&self, width: Constraint, row: u16) -> Result<(), LayoutError> {
+        match width {
+            Constraint::Fraction { num, den } => {
+                if num == 0 || den == 0 {
+                    return Err(LayoutError::BadFraction { row });
+                }
+            }
+            Constraint::Aspect { w, h } => {
+                if w == 0 || h == 0 {
+                    return Err(LayoutError::BadAspect { row });
+                }
+            }
+            Constraint::MinMax { min_px, max_px } => {
+                if min_px > max_px {
+                    return Err(LayoutError::BadMinMax { row });
+                }
+            }
+            Constraint::Fixed { .. } => {}
         }
         Ok(())
     }
@@ -763,6 +910,14 @@ fn distribute_even(sizes: &mut [u32], slack: u32, eligible: &[bool]) {
     }
 }
 
+/// Effective width rule for one panel: the pin when held, else the authored
+/// rule. Pure.
+fn effective_width(panel: &PanelSpec, pins: &[PanelPin]) -> Constraint {
+    pins.iter()
+        .find(|pin| pin.id == panel.id)
+        .map_or(panel.width, |pin| pin.width)
+}
+
 /// Solve one row band: panel widths, positions and the width it consumed.
 fn solve_row(
     row: &RowSpec,
@@ -772,13 +927,19 @@ fn solve_row(
     left: u32,
     whitespace: Whitespace,
     shrink_order: &[PanelId],
+    pins: &[PanelPin],
 ) -> Result<(Vec<PanelRect>, u32), LayoutError> {
     let count = row.panels.len();
     let gaps = gap_total(row.gap, count);
+    let widths_rules: Vec<Constraint> = row
+        .panels
+        .iter()
+        .map(|panel| effective_width(panel, pins))
+        .collect();
     let mut remaining = inner_w.saturating_sub(gaps);
     let mut fraction_sum = 0u32;
-    for panel in &row.panels {
-        match panel.width {
+    for rule in &widths_rules {
+        match *rule {
             Constraint::Fraction { num, .. } => {
                 fraction_sum = fraction_sum.saturating_add(num);
             }
@@ -791,8 +952,8 @@ fn solve_row(
         }
     }
     let mut widths: Vec<u32> = Vec::with_capacity(count);
-    for panel in &row.panels {
-        let width = match panel.width {
+    for rule in &widths_rules {
+        let width = match *rule {
             Constraint::Fraction { num, .. } => {
                 if fraction_sum == 0 {
                     0
@@ -818,13 +979,12 @@ fn solve_row(
             shrink_first,
         });
     }
-    let slack = grow_row_panels(&mut widths, row, inner_w - used);
-    let eligible: Vec<bool> = row
-        .panels
+    let slack = grow_row_panels(&mut widths, &widths_rules, inner_w - used);
+    let eligible: Vec<bool> = widths_rules
         .iter()
-        .map(|panel| match whitespace {
+        .map(|rule| match whitespace {
             Whitespace::Compact => false,
-            Whitespace::Balanced => matches!(panel.width, Constraint::Fraction { .. }),
+            Whitespace::Balanced => matches!(rule, Constraint::Fraction { .. }),
             Whitespace::Spacious => true,
         })
         .collect();
@@ -843,10 +1003,10 @@ fn solve_row(
 }
 
 /// Grow min/max panels in one row up to their max; returns the slack left.
-fn grow_row_panels(widths: &mut [u32], row: &RowSpec, slack: u32) -> u32 {
+fn grow_row_panels(widths: &mut [u32], rules: &[Constraint], slack: u32) -> u32 {
     let mut slack = slack;
-    for (width, panel) in widths.iter_mut().zip(&row.panels) {
-        if let Constraint::MinMax { max_px, .. } = panel.width {
+    for (width, rule) in widths.iter_mut().zip(rules) {
+        if let Constraint::MinMax { max_px, .. } = *rule {
             let grow = max_px.saturating_sub(*width).min(slack);
             *width = width.saturating_add(grow);
             slack -= grow;
@@ -1222,6 +1382,116 @@ mod tests {
         assert!(!report.roles[0].passes);
         assert!(!report.roles[1].passes);
         assert_eq!(doc.palette_report(4), Err(LayoutError::BadPalette(4)));
+    }
+
+    /// Fixed 300 px, then two flex panels sharing the rest (490 each at 1280).
+    fn three_panel_row() -> LayoutDoc {
+        LayoutDoc::new(vec![RowSpec {
+            height: fraction(1, 1),
+            gap: 0,
+            panels: vec![
+                panel(0, Constraint::Fixed { px: 300 }),
+                panel(1, fraction(1, 1)),
+                panel(2, fraction(1, 1)),
+            ],
+        }])
+    }
+
+    #[test]
+    fn a_drag_moves_the_pinned_panel_and_its_flex_neighbour_only() {
+        let mut doc = three_panel_row();
+        let viewport = Viewport::new(1280, 720);
+        let before = doc.solve(viewport, &[]).expect("three panels fit");
+        assert_eq!(rect_of(&before, 0), Rect::new(0, 0, 300, 720));
+        assert_eq!(rect_of(&before, 1), Rect::new(300, 0, 490, 720));
+        assert_eq!(rect_of(&before, 2), Rect::new(790, 0, 490, 720));
+
+        // Drag the middle panel 40 px wider: 490 -> 530.
+        doc.resize(PanelId(1), Axis::Horizontal, 530)
+            .expect("a horizontal drag on a pinned panel");
+        let drag = doc
+            .fetch_changes(viewport, &[], Some(&before))
+            .expect("three panels fit");
+        assert_eq!(drag.moved, vec![PanelId(1), PanelId(2)]);
+        assert_eq!(rect_of(&drag.solved, 0), Rect::new(0, 0, 300, 720));
+        assert_eq!(rect_of(&drag.solved, 1), Rect::new(300, 0, 530, 720));
+        assert_eq!(rect_of(&drag.solved, 2), Rect::new(830, 0, 450, 720));
+
+        // The same drag again changes nothing: no moved ids, same digest.
+        doc.resize(PanelId(1), Axis::Horizontal, 530)
+            .expect("a horizontal drag on a pinned panel");
+        let again = doc
+            .fetch_changes(viewport, &[], Some(&drag.solved))
+            .expect("three panels fit");
+        assert!(again.moved.is_empty(), "a repeated drag is a no-op");
+        assert_eq!(again.solved.digest, drag.solved.digest);
+
+        // Release restores the authored rects byte for byte.
+        assert!(doc.unpin(PanelId(1)));
+        assert!(doc.pins().is_empty());
+        let released = doc.solve(viewport, &[]).expect("three panels fit");
+        assert_eq!(released, before);
+        assert_eq!(released.digest, before.digest);
+    }
+
+    #[test]
+    fn two_identical_drag_sequences_agree_on_moved_and_digest() {
+        let viewport = Viewport::new(1280, 720);
+        let mut first = three_panel_row();
+        let mut second = three_panel_row();
+        let mut first_moved = Vec::new();
+        let mut second_moved = Vec::new();
+        for (doc, moved) in [
+            (&mut first, &mut first_moved),
+            (&mut second, &mut second_moved),
+        ] {
+            let mut previous = doc.solve(viewport, &[]).expect("three panels fit");
+            for px in [530u32, 500, 560] {
+                doc.resize(PanelId(1), Axis::Horizontal, px)
+                    .expect("a horizontal drag on a pinned panel");
+                let edit = doc
+                    .fetch_changes(viewport, &[], Some(&previous))
+                    .expect("three panels fit");
+                moved.push(edit.moved);
+                previous = edit.solved;
+            }
+        }
+        assert_eq!(first_moved, second_moved);
+        assert_eq!(
+            first.solve(viewport, &[]).expect("three panels fit").digest,
+            second
+                .solve(viewport, &[])
+                .expect("three panels fit")
+                .digest
+        );
+        assert_eq!(first.pins(), second.pins());
+    }
+
+    #[test]
+    fn a_vertical_drag_and_an_unknown_pin_are_refused() {
+        let mut doc = three_panel_row();
+        assert_eq!(
+            doc.resize(PanelId(1), Axis::Vertical, 200),
+            Err(LayoutError::UnsupportedResizeAxis(Axis::Vertical))
+        );
+        assert_eq!(
+            doc.pin(PanelId(9), Constraint::Fixed { px: 10 }),
+            Err(LayoutError::UnknownPanel(PanelId(9)))
+        );
+        assert!(doc.pins().is_empty());
+        // A bad pinned rule is caught by the solve, not stored as a panic.
+        doc.pin(
+            PanelId(1),
+            Constraint::MinMax {
+                min_px: 20,
+                max_px: 10,
+            },
+        )
+        .expect("the id exists");
+        assert_eq!(
+            doc.solve(Viewport::new(1280, 720), &[]),
+            Err(LayoutError::BadMinMax { row: 0 })
+        );
     }
 
     #[test]

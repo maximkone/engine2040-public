@@ -3912,7 +3912,7 @@ mod tests {
             .split("fn fs_skinned")
             .next()
             .expect("display close");
-        assert!(body.contains("direct_light(in.world_pos, in.world_n, albedo, 1.0)"));
+        assert!(body.contains("direct_light(in.world_pos, in.world_n, in.tangent, albedo, 1.0)"));
         assert!(!body.contains("AMBIENT_FLOOR"));
         assert!(body.contains("ibl_diffuse") || body.contains("ibl_irradiance"));
         assert!(body.contains("* occlusion") || body.contains("*occlusion"));

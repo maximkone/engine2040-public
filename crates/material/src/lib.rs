@@ -5,7 +5,7 @@
 //! `engine-core` digests and `engine-destruction` (the sim half is its
 //! `MaterialRow`, composed never mirrored, `crates/material/src/record.rs:22-24`).
 //! Readers are the door `material` pack
-//! (`crates/endpoint/src/packs/material.rs:38-39`, seven verbs). In
+//! (`crates/endpoint/src/packs/material.rs:38-39`, ten verbs). In
 //! `default-members` (root `Cargo.toml`).
 //!
 //! Invariants: no GPU, file or clock in the default build; sim numbers go
@@ -18,7 +18,8 @@
 //! (`json.rs:15-17`). Entry points: [`MaterialRecord`],
 //! [`MaterialSet::set_param`] and its inverse, [`MaterialSet::shipped`],
 //! sim/look digests, [`SCHEMA`], [`record`], [`set`], [`json`], [`fixed`],
-//! [`twin`].
+//! [`twin`], [`graph::Graph`] (a typed node graph folded into a record,
+//! `graph::Graph::bake`) and [`png::encode_rgba`].
 //!
 //! ```rust
 //! use engine_material::{MaterialRecord, MaterialSet};
@@ -40,8 +41,10 @@ pub mod fixed;
 #[cfg(test)]
 mod furnace;
 pub mod gltf_import;
+pub mod graph;
 pub mod json;
 pub mod mtlx_import;
+pub mod png;
 pub mod record;
 pub mod reload;
 pub mod schema;

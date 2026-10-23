@@ -1,0 +1,166 @@
+name: nightly
+
+# TG6: mutation testing and the fuzz corpora on a clock. tools/mutants.mjs and
+# the fuzz targets exist, but nothing scheduled ran either: the per-push suites
+# skip them (mutation testing rebuilds the crate once per mutant; the fuzz
+# harnesses are seeded corpora, not a changed-line gate). This file runs them
+# weekly and on demand, and uploads what they wrote.
+#
+# Report-only: every leg sets `continue-on-error: true`, so a surviving mutant
+# or a fuzz regression turns its step red on the run page and lands in the
+# artifact, but the workflow stays green and nobody's pull request is blocked.
+# Read the artifact, then file the row.
+#
+# Mirror-only, like ci.yml: the free public runners are the build farm, so both
+# jobs skip on the private repo.
+#
+# Legs here, and why a GitHub runner can run them:
+#   - mutation: `tools/mutants.mjs` over the last seven days of changes to the
+#     crate those seven days changed most. cargo-mutants builds a scratch copy
+#     on disk and needs no GPU, window or sound device.
+#   - fuzz: four deterministic corpora, all hardware-free: engine-proof's arena
+#     fuzz and tape decode fuzz (`fuzz` feature), engine-spatial's relation-op
+#     streams, and engine-net's wire boundary corpus.
+#
+# Kept out on purpose, never faked green:
+#   - a window/GPU fuzz or a render soak: a hosted runner has no reference GPU,
+#     so the result says nothing (same reason as the E12 quarantine rows).
+#   - the gungraun instruction gate: needs valgrind plus a saved perf_gate
+#     baseline on the runner; the perf lane owns it.
+#   - live provider and live-server fuzz: needs tokens or a remote peer.
+on:
+  schedule:
+    # Mondays 04:17 UTC: after the weekend's merges, before the working week.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  mutation:
+    if: github.repository == 'maximkone/engine2040-public'
+    name: mutation (cargo-mutants)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The window diff needs history older than the last commit.
+          fetch-depth: 0
+      - name: free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: actions/setup-node@v5
+        with:
+          # tools/mutants.mjs reads `import.meta.main`, which needs Node 22+.
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-mutants
+          # cargo-mutants builds its own scratch tree, so only the registry and
+          # the installed tool benefit from the cache.
+          workspaces: "."
+      - name: install cargo-mutants
+        run: cargo install --locked cargo-mutants
+      - name: pick the crate the window changed most
+        run: |
+          set -euo pipefail
+          mkdir -p target/mutants
+          base="$(git rev-list -1 --before='7 days ago' HEAD)"
+          if [ -z "$base" ]; then base="$(git rev-parse HEAD~1)"; fi
+          git diff --numstat "$base" HEAD -- ':(glob)crates/*/src/**' > target/mutants/window.numstat
+          cat target/mutants/window.numstat
+          # The crate whose Rust lines moved most in the window (ties: any).
+          dir="$(awk '$3 ~ /^crates\/.*\.rs$/ { split($3, p, "/"); added[p[2]] += $1 } END { best = ""; for (d in added) if (best == "" || added[d] > added[best]) best = d; print best }' target/mutants/window.numstat)"
+          # An empty window is reported as such by the tool, never as a green run.
+          if [ -z "$dir" ]; then dir=core; fi
+          crate="$(sed -n 's/^name = "\(.*\)"$/\1/p' "crates/$dir/Cargo.toml" | head -n 1)"
+          echo "window base $base, crate crates/$dir ($crate)"
+          git diff "$base" HEAD -- "crates/$dir" > target/mutants/window.patch
+          echo "CRATE=$crate" >> "$GITHUB_ENV"
+      - name: mutation test the window (tools/mutants.mjs)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          node tools/mutants.mjs --patch target/mutants/window.patch -p "$CRATE" \
+            --jobs 2 --timeout-min 60 --max-missed 0 \
+            --report target/mutants/mutation.txt | tee target/mutants/mutation.log
+      - name: print the mutation report on the run page
+        if: always()
+        run: |
+          if [ -f target/mutants/mutation.txt ]; then
+            { echo '```'; cat target/mutants/mutation.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no report written: tools/mutants.mjs did not finish" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: nightly-mutation
+          path: |
+            target/mutants/mutation.txt
+            target/mutants/mutation.log
+            target/mutants/window.patch
+            target/mutants/window.numstat
+            target/mutants/mutants.out/
+          if-no-files-found: warn
+
+  fuzz:
+    if: github.repository == 'maximkone/engine2040-public'
+    name: fuzz corpora
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-fuzz
+      # One filter, both corpora: `fuzz::` also matches `tape_fuzz::` (12 tests).
+      - name: arena and tape fuzz corpora (engine-proof)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p target/nightly
+          cargo test --locked -p engine-proof --features fuzz --lib 'fuzz::' 2>&1 \
+            | tee target/nightly/proof-fuzz.log
+      - name: relation op stream fuzz (engine-spatial)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p target/nightly
+          cargo test --locked -p engine-spatial --lib 'fuzz::' 2>&1 \
+            | tee target/nightly/spatial-fuzz.log
+      - name: wire boundary fuzz (engine-net)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p target/nightly
+          cargo test --locked -p engine-net --test it packet_boundary_fuzz 2>&1 \
+            | tee target/nightly/net-boundary-fuzz.log
+      - name: print the corpus results on the run page
+        if: always()
+        run: |
+          for log in target/nightly/*.log; do
+            [ -f "$log" ] || continue
+            { echo "### $log"; echo '```'; grep -E '^(test result|error|FAILED|failures)' "$log" | tail -n 20; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: nightly-fuzz
+          path: target/nightly/*.log
+          if-no-files-found: error

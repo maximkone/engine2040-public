@@ -87,7 +87,8 @@ pub struct CookedMesh {
     pub indices: Vec<u32>,
 }
 
-/// Cooked PBR material: factors plus texture references.
+/// Cooked PBR material: factors plus texture references plus the shading
+/// family byte.
 #[derive(Clone, PartialEq, Debug)]
 pub struct CookedMaterial {
     /// sRGB base-color factor, components in `0..=1`.
@@ -98,6 +99,54 @@ pub struct CookedMaterial {
     pub roughness_factor: f32,
     /// Optional texture references by slot.
     pub textures: Vec<TextureRef>,
+    /// Shading family: [`MATERIAL_KIND_STONE`] and up. Imported from the
+    /// source material name, never guessed from factors, because factors
+    /// cannot tell cloth from skin.
+    pub kind: u8,
+}
+
+/// Kind byte for today's single-BRDF path; every older cook without the byte
+/// loads as this, so stone stays the default everywhere.
+pub const MATERIAL_KIND_STONE: u8 = 0;
+/// Kind byte for the skin lobe (wrap plus thickness transmittance).
+pub const MATERIAL_KIND_SKIN: u8 = 1;
+/// Kind byte for the anisotropic metal lobe.
+pub const MATERIAL_KIND_METAL: u8 = 2;
+/// Kind byte for the Charlie sheen cloth lobe.
+pub const MATERIAL_KIND_CLOTH: u8 = 3;
+/// Highest kind byte a cook writes; a higher one is a refused payload.
+pub const MATERIAL_KIND_MAX: u8 = MATERIAL_KIND_CLOTH;
+
+/// Classify a source material name into a kind byte. Names split on every
+/// byte outside `0-9 A-Z a-z` and compare lowercase, so `MAT_banner_cloth`
+/// carries `cloth` and `MAT_sword_steel` carries `steel`. A name with no
+/// family token stays stone: a body whose parts are named `MAT_hero_q0` keeps
+/// today's path until its owner maps kinds per part.
+pub fn material_kind_from_name(name: &str) -> u8 {
+    for token in name.split(|c: char| !c.is_ascii_alphanumeric()) {
+        // Cold import path only: one lowercase buffer per token.
+        match token.to_ascii_lowercase().as_str() {
+            "skin" | "flesh" => return MATERIAL_KIND_SKIN,
+            "metal" | "steel" | "iron" | "bronze" | "brass" | "copper" | "gold" | "silver"
+            | "mail" | "blade" => return MATERIAL_KIND_METAL,
+            "cloth" | "fabric" | "wool" | "linen" | "silk" | "leather" => {
+                return MATERIAL_KIND_CLOTH
+            }
+            _ => {}
+        }
+    }
+    MATERIAL_KIND_STONE
+}
+
+/// The family token a compact glTF appends to a material name, so a compact
+/// file re-imports with the kind byte its source carried.
+pub const fn material_kind_token(kind: u8) -> &'static str {
+    match kind {
+        MATERIAL_KIND_SKIN => "skin",
+        MATERIAL_KIND_METAL => "metal",
+        MATERIAL_KIND_CLOTH => "cloth",
+        _ => "stone",
+    }
 }
 
 impl Default for CookedMaterial {
@@ -107,6 +156,7 @@ impl Default for CookedMaterial {
             metallic_factor: 0.0,
             roughness_factor: 1.0,
             textures: Vec::new(),
+            kind: MATERIAL_KIND_STONE,
         }
     }
 }
@@ -138,6 +188,8 @@ pub enum CookError {
     },
     /// Two references fill the same texture slot.
     DuplicateSlot(TextureSlot),
+    /// Kind byte outside the four this cook writes.
+    BadKind(u8),
     /// Texture bytes failed to decode; bounded decoder detail.
     TextureDecode(String),
     /// Texture input or pixel count exceeds the cook budget; count carried.
@@ -253,6 +305,9 @@ pub fn validate_material(material: &CookedMaterial) -> Result<(), CookError> {
         }
         seen |= bit;
     }
+    if material.kind > MATERIAL_KIND_MAX {
+        return Err(CookError::BadKind(material.kind));
+    }
     Ok(())
 }
 
@@ -315,6 +370,34 @@ mod tests {
         validate_mesh(&keep).expect("w -1.0 stays valid");
         keep.tangents[0][3] = 0.0;
         assert_eq!(validate_mesh(&keep), Err(CookError::NonFinite("tangents")));
+    }
+
+    #[test]
+    fn material_kind_names() {
+        for (name, want) in [
+            ("MAT_banner_cloth", MATERIAL_KIND_CLOTH),
+            ("MAT_sword_steel", MATERIAL_KIND_METAL),
+            ("Skin_torso", MATERIAL_KIND_SKIN),
+            ("LEATHER-strap", MATERIAL_KIND_CLOTH),
+            ("MAT_hero_q0", MATERIAL_KIND_STONE),
+            ("", MATERIAL_KIND_STONE),
+            ("castle wall", MATERIAL_KIND_STONE),
+        ] {
+            assert_eq!(material_kind_from_name(name), want, "name {name:?}");
+        }
+        assert_eq!(
+            CookedMaterial::default().kind,
+            MATERIAL_KIND_STONE,
+            "the default material is stone"
+        );
+        let bad = CookedMaterial {
+            kind: MATERIAL_KIND_MAX + 1,
+            ..CookedMaterial::default()
+        };
+        assert_eq!(
+            validate_material(&bad),
+            Err(CookError::BadKind(MATERIAL_KIND_MAX + 1))
+        );
     }
 
     #[test]

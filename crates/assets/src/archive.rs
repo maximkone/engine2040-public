@@ -1253,7 +1253,7 @@ mod bridge_tests {
 
     use super::super::bundle::{BundleLoader, BundleWriter as As1Writer};
     use super::super::cooked::{CookedMaterial, CookedMesh, CookedTexture, Mip};
-    use super::super::cooked::{TextureEncoding, TextureRef, TextureSlot};
+    use super::super::cooked::{TextureEncoding, TextureRef, TextureSlot, MATERIAL_KIND_STONE};
     use super::super::skin_import::Skin;
     use super::*;
     use engine_anim::pose::QuatTrack;
@@ -1283,6 +1283,7 @@ mod bridge_tests {
                 asset: 11,
                 slot: TextureSlot::BaseColor,
             }],
+            kind: MATERIAL_KIND_STONE,
         }
     }
 

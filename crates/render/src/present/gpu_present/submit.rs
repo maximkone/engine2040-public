@@ -960,6 +960,7 @@ impl Presenter {
         })?;
         self.material_scratch.clear();
         for (index, item) in list.items.iter().enumerate() {
+            let kind = self.material_kind(item.mesh);
             let mat_u =
                 v1::build_material(&item.material).map_err(|e| PresentError::InvalidDraw {
                     index,
@@ -975,7 +976,8 @@ impl Presenter {
             // their draw index, mirroring meshes, before any GPU work is
             // encoded.
             self.require_draw_textures(item, index)?;
-            self.material_scratch.extend_from_slice(&mat_u.to_array());
+            self.material_scratch
+                .extend_from_slice(&mat_u.to_array_with_kind(kind, kind.default_param()));
             self.material_scratch
                 .resize((index + 1) * MATERIAL_STRIDE, 0);
         }

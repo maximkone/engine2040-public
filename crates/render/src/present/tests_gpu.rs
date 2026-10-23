@@ -114,6 +114,62 @@ mod gpu_tests {
     }
 
     #[test]
+    fn material_kinds_shade_apart_and_stone_stays_equal() {
+        use crate::material_kind::MaterialKind;
+        // One fresh presenter per frame: consecutive frames step particles
+        // and jitter, so only fresh presenters compare byte for byte.
+        let frame = |kind: MaterialKind| -> Option<image::RgbaImage> {
+            let mut presenter = init_or_skip("material_kinds_shade_apart_and_stone_stays_equal")?;
+            let key = MeshKey::new(0x1F8, [0x8F; 32]);
+            presenter
+                .upload_mesh(key, &crate::v1::cube())
+                .expect("cube uploads");
+            presenter.set_material_kind(key, kind);
+            presenter.resize(160, 120).expect("valid size applies");
+            let out = presenter
+                .render_offscreen(&cube_list(key, 160, 120))
+                .expect("kind frame renders");
+            assert!(
+                out.manifest.is_clean(),
+                "{kind:?} frame validation errors: {:?}",
+                out.manifest
+            );
+            let png = out.png.expect("frame has pixels");
+            Some(
+                image::load_from_memory(&png)
+                    .expect("capture is a valid PNG")
+                    .to_rgba8(),
+            )
+        };
+        let Some(stone) = frame(MaterialKind::Stone) else {
+            return;
+        };
+        let stone_again = frame(MaterialKind::Stone).expect("second stone frame");
+        assert_eq!(
+            stone.as_raw(),
+            stone_again.as_raw(),
+            "stone renders byte-equal twice"
+        );
+        // A background pixel carries no draw and no kind, so every differing
+        // pixel sits in the cube's covered region.
+        let differing = |a: &image::RgbaImage, b: &image::RgbaImage| {
+            a.pixels()
+                .zip(b.pixels())
+                .filter(|(p, q)| p.0 != q.0)
+                .count()
+        };
+        for kind in [MaterialKind::Skin, MaterialKind::Metal, MaterialKind::Cloth] {
+            let shaded = frame(kind).expect("kind frame");
+            let diff = differing(&stone, &shaded);
+            println!("LF8 {kind:?}: {diff} covered pixels differ from stone");
+            assert!(
+                diff > 25,
+                "{kind:?} must shade apart from stone, only {diff} pixels differ"
+            );
+        }
+    }
+
+    #[test]
     fn multi_draw_two_materials_cover_more() {
         let Some(mut presenter) = init_or_skip("multi_draw_two_materials_cover_more") else {
             return;

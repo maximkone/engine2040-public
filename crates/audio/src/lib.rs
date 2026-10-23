@@ -20,6 +20,8 @@ pub mod coherence;
 pub mod combat_cues;
 pub mod crowd;
 pub mod cue;
+/// Cue anchors plus offsets resolved to a tick, and a forward-only cue clock.
+pub mod cue_anchor;
 /// Authored cue rows: lanes, gains, duck, loops, the pick order and the gap
 /// report. Refuses overlapping loops on one lane.
 pub mod cue_sheet;

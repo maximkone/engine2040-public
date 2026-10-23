@@ -40,6 +40,7 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/content-lib.mjs`: shared digest, image-size and generated-block helpers for the content report tools.
 - `tools/content-cross.mjs`: cross-file id checks over the faction-war content set, where each file is authored by a different agent.
 - `tools/cook-char.mjs` (+ `tools/cook-char.test.mjs`): check the character intake manifest.
+- `tools/coverage-gate.mjs` (+ `tools/coverage-gate.test.mjs`): hold the committed per-crate line-coverage floor in `tools/coverage-bar.json` against one `cargo llvm-cov --json --summary-only` export; exits 1 under a floor (the `floor` job in `coverage.yml` calls it).
 - `tools/crate-map.mjs` (+ `tools/crate-map.test.mjs`): map each crate to its package, dir and job.
 - `tools/ctrf-report.mjs` (+ `tools/ctrf-report.test.mjs`): turn a nextest JUnit receipt into the CTRF report CI uploads; a pure function of the receipt bytes.
 - `tools/dep-rebuild-count.mjs` (+ `tools/dep-rebuild-count.test.mjs`): count the dependency units five lane builds rebuild (OPT8 bar) from `Compiling` lines in one target dir.

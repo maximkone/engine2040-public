@@ -65,8 +65,12 @@ struct MaterialU {
     metallic: f32,
     roughness: f32, // perceptual (authored) roughness
     exposure: f32,
-    _pad0: f32,
-    _pad1: f32,
+    // LF8 shading family (bytes 24..28): 0 stone, 1 skin, 2 metal, 3 cloth.
+    // The Rust owner is `crate::material_kind::MaterialKind`.
+    kind: u32,
+    // LF8 parameter (bytes 28..32): skin thickness or metal anisotropy, both
+    // in 0..=1. Stone and cloth read none, so their draws keep both words 0.
+    param: f32,
 };
 struct ShadowU {
     splits: vec4<f32>,
@@ -697,11 +701,61 @@ fn specular_term(d: f32, v: f32, f: vec3<f32>, f0: vec3<f32>, fab: vec2<f32>) ->
     return fr;
 }
 
+// LF8 kind words: the Rust owner is `crate::material_kind::MaterialKind`.
+const KIND_SKIN: u32 = 1u;
+const KIND_METAL: u32 = 2u;
+const KIND_CLOTH: u32 = 3u;
+// LF8 skin: a game subsurface lobe, not a physically accurate skin model.
+// The power shapes the forward-scatter falloff; the tint reddens the
+// transmitted term so skin reads apart from stone under the same light.
+const SKIN_SUBSURFACE_POWER: f32 = 12.0;
+const SKIN_SUBSURFACE_TINT: vec3<f32> = vec3<f32>(1.0, 0.55, 0.45);
+// LF8 metal: anisotropic roughness floor, the alpha twin of
+// LOOK_ROUGHNESS_FLOOR (Filament's MIN_ROUGHNESS role).
+const LOOK_ANISO_MIN_ROUGHNESS: f32 = 0.089 * 0.089;
+
+// LF8 metal: anisotropic GGX (Burley 2012 via Filament `D_GGX_Anisotropic`).
+// `at`/`ab` are the alpha roughness along the tangent and bitangent.
+fn d_ggx_anisotropic(at: f32, ab: f32, toh: f32, boh: f32, noh: f32) -> f32 {
+    let a2 = at * ab;
+    let d = vec3<f32>(ab * toh, at * boh, a2 * noh);
+    let d2 = dot(d, d);
+    let b2 = a2 / max(d2, 1e-12);
+    return a2 * b2 * b2 * (1.0 / 3.141592653589793);
+}
+
+// LF8 metal: anisotropic Smith-GGX correlated visibility (Heitz 2014 via
+// Filament `V_SmithGGXCorrelated_Anisotropic`).
+fn v_smith_ggx_correlated_anisotropic(
+    at: f32, ab: f32, tov: f32, bov: f32, tol: f32, bol: f32, nov: f32, nol: f32,
+) -> f32 {
+    let lambda_v = nol * length(vec3<f32>(at * tov, ab * bov, nov));
+    let lambda_l = nov * length(vec3<f32>(at * tol, ab * bol, nol));
+    return 0.5 / max(lambda_v + lambda_l, 0.0000077);
+}
+
+// LF8 cloth: Charlie sheen NDF (Estevez and Kulla 2017 via Filament
+// `D_Charlie`).
+fn d_charlie(roughness: f32, noh: f32) -> f32 {
+    let inv_alpha = 1.0 / max(roughness, 0.0001);
+    let sin2h = max(1.0 - noh * noh, 0.0078125);
+    return (2.0 + inv_alpha) * pow(sin2h, inv_alpha * 0.5) / (2.0 * 3.141592653589793);
+}
+
+// LF8 cloth: Neubelt visibility (Neubelt and Pettineo 2013 via Filament
+// `V_Neubelt`).
+fn v_neubelt(nov: f32, nol: f32) -> f32 {
+    return 1.0 / max(4.0 * (nol + nov - nol * nov), 0.00001532);
+}
+
 // The one directional light: linear radiance reflected toward the eye,
 // before exposure and before any shading factor.
 // PORT(bevyengine/bevy@v0.15.0:crates/bevy_pbr/src/render/pbr_lighting.wgsl): directional_light combine:
 // color = (diffuse + specular) * NdotL * light_color.
-fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, albedo: vec3<f32>, sun_vis: f32) -> vec3<f32> {
+// LF8: `mat.kind` picks the lobe family. Kind 0 is the stone path every
+// earlier frame took, byte for byte; the others keep the same diffuse and
+// sun factor and swap the specular (skin also adds transmitted scatter).
+fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, tangent: vec4<f32>, albedo: vec3<f32>, sun_vis: f32) -> vec3<f32> {
     let n = normalize(world_n);
     let v = normalize(cam.camera_pos - world_pos);
     let l = normalize(light.dir_to_light);
@@ -717,12 +771,69 @@ fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, albedo: vec3<f32>, sun
     let diffuse = diffuse_color_term(albedo, metallic)
         * fd_burley(roughness, ndot_v, ndot_l, ldot_h);
     let f0 = f0_term(albedo, metallic);
+    let sun_shadow = sun_contact_factor(world_pos) * sun_vis;
+
+    if (mat.kind == KIND_CLOTH) {
+        // Cloth: Charlie sheen specular with F fixed at the dielectric 0.04;
+        // the diffuse lobe keeps Burley and is not Fresnel-multiplied.
+        let d = d_charlie(roughness, ndot_h);
+        let vv = v_neubelt(ndot_v, ndot_l);
+        let spec = vec3<f32>(0.04) * d * vv;
+        return (diffuse + spec) * ndot_l * light.light_color * sun_shadow;
+    }
     let f = fresnel_term(f0, ldot_h);
+    let fab = f_ab_term(perceptual, ndot_v);
+    if (mat.kind == KIND_SKIN) {
+        // Skin: wrap plus thickness transmittance on the diffuse lobe.
+        // Transmitted scatter needs no NoL, so the dark side of a body keeps
+        // a warm glow; the specular lobe stays today's isotropic GGX.
+        let thickness = clamp(mat.param, 0.0, 1.0);
+        let scatter_voh = clamp(dot(v, -l), 0.0, 1.0);
+        let forward_scatter = exp2((scatter_voh - 1.0) * SKIN_SUBSURFACE_POWER);
+        let back_scatter = (ndot_l * thickness + (1.0 - thickness)) * 0.5;
+        let subsurface = mix(back_scatter, 1.0, forward_scatter) * (1.0 - thickness);
+        let scatter = albedo * SKIN_SUBSURFACE_TINT
+            * (subsurface * (1.0 / 3.141592653589793));
+        let d = d_ggx(roughness, ndot_h);
+        let vv = v_smith_ggx_correlated(roughness, ndot_v, ndot_l);
+        let spec = specular_term(d, vv, f, f0, fab);
+        return (scatter + (diffuse + spec) * ndot_l) * light.light_color * sun_shadow;
+    }
+    if (mat.kind == KIND_METAL) {
+        // Metal: anisotropic GGX over the mesh tangent frame. The tangent is
+        // orthogonalized against the shading normal, handedness is tangent.w
+        // and bitangent = w * (n x t), the same frame `eg12_world_normal`
+        // builds. A degenerate tangent picks a stable axis, so a mesh with no
+        // tangent still shades.
+        let aniso = clamp(mat.param, 0.0, 0.95);
+        let at = max(roughness * (1.0 + aniso), LOOK_ANISO_MIN_ROUGHNESS);
+        let ab = max(roughness * (1.0 - aniso), LOOK_ANISO_MIN_ROUGHNESS);
+        let tx = tangent.xyz - n * dot(tangent.xyz, n);
+        let tl2 = dot(tx, tx);
+        var t = vec3<f32>(1.0, 0.0, 0.0);
+        if (tl2 >= 1e-12) {
+            t = tx / sqrt(tl2);
+        } else {
+            let axis = select(
+                vec3<f32>(1.0, 0.0, 0.0),
+                vec3<f32>(0.0, 1.0, 0.0),
+                abs(n.x) > abs(n.y),
+            );
+            t = normalize(cross(axis, n));
+        }
+        let w = select(-1.0, 1.0, tangent.w >= 0.0);
+        let b = w * cross(n, t);
+        let d = d_ggx_anisotropic(at, ab, dot(t, h), dot(b, h), ndot_h);
+        let vv = v_smith_ggx_correlated_anisotropic(
+            at, ab, dot(t, v), dot(b, v), dot(t, l), dot(b, l), ndot_v, ndot_l,
+        );
+        let spec = specular_term(d, vv, f, f0, fab);
+        return (diffuse + spec) * ndot_l * light.light_color * sun_shadow;
+    }
+    // Stone (kind 0): the isotropic Burley plus GGX path, unchanged.
     let d = d_ggx(roughness, ndot_h);
     let vv = v_smith_ggx_correlated(roughness, ndot_v, ndot_l);
-    let fab = f_ab_term(perceptual, ndot_v);
     let spec = specular_term(d, vv, f, f0, fab);
-    let sun_shadow = sun_contact_factor(world_pos) * sun_vis;
     return (diffuse + spec) * ndot_l * light.light_color * sun_shadow;
 }
 
@@ -888,7 +999,7 @@ fn fs(in: VOut) -> FsOut {
     // direct sun and the torches keep their own light, so a sunlit open
     // texel does not move when the field comes on.
     let ao = ao_at(in.clip.xy);
-    let lit = direct_light(in.world_pos, mapped_n, albedo, sun_vis) + ibl_diffuse_term * ao * occlusion * orm.x + ibl_spec_term + torch_frame_sum(in.world_pos, mapped_n, albedo);
+    let lit = direct_light(in.world_pos, mapped_n, in.tangent, albedo, sun_vis) + ibl_diffuse_term * ao * occlusion * orm.x + ibl_spec_term + torch_frame_sum(in.world_pos, mapped_n, albedo);
     let radiance = max(lit * mat.exposure, vec3<f32>(0.0));
     let fog_f = fog_factor_finite(fog_fwd, cam.camera_pos, in.world_pos);
     var out: FsOut;
@@ -942,7 +1053,7 @@ fn fs_display(in: VOut) -> @location(0) vec4<f32> {
     let ibl_diffuse_term = ibl_diffuse(n_ibl, albedo, mat.metallic);
     let ibl_spec_term = ibl_specular(n_ibl, v_ibl, f0_ibl, mat.roughness);
     let occlusion: f32 = sun_contact_factor(in.world_pos);
-    let lit = direct_light(in.world_pos, in.world_n, albedo, 1.0) + ibl_diffuse_term * occlusion + ibl_spec_term;
+    let lit = direct_light(in.world_pos, in.world_n, in.tangent, albedo, 1.0) + ibl_diffuse_term * occlusion + ibl_spec_term;
     let mapped = aces_tonemap(max(lit * mat.exposure, vec3<f32>(0.0)), 1.0, DISPLAY_WHITE);
     // The shared dither: one fixed 4x4 pattern, one 8-bit step, so the
     // 8-bit capture breaks the bands the tone map leaves behind.
@@ -980,7 +1091,7 @@ fn fs_skinned(in: VOut) -> @location(0) vec4<f32> {
     let occlusion: f32 = sun_contact_factor(in.world_pos) * orm.x;
     // EG11b: the v1 skinned layouts carry no sun map bindings, so this entry
     // stays lit; the window parities compare two draws of one path.
-    let lit = direct_light(in.world_pos, mapped_n, albedo, 1.0) + ibl_diffuse_term * occlusion + ibl_spec_term;
+    let lit = direct_light(in.world_pos, mapped_n, in.tangent, albedo, 1.0) + ibl_diffuse_term * occlusion + ibl_spec_term;
     let mapped = aces_tonemap(max(lit * mat.exposure, vec3<f32>(0.0)), 1.0, DISPLAY_WHITE);
     // The shared dither, the same fixed 4x4 pattern the display capture
     // and the live blit use.

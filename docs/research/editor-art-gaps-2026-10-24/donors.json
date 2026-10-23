@@ -1,0 +1,103 @@
+[
+  {
+    "repo": "cachevector/image-diff",
+    "commit": "f23a2be8519bff4c3c831840775d95d4627bf3e4",
+    "stars": 2,
+    "licence": "MIT",
+    "gap": "gap 2: region-limited image diff with SSIM and DeltaE",
+    "files": ["src/compare.rs", "Cargo.toml"],
+    "take": "Region rect plus PNG mask gate one per-pixel CIEDE2000 pass over Lab, with an AA guard, an optional diff PNG and score = 1 - diff/total; MS-SSIM is full-frame, so region-gating SSIM is the remaining step. Unit tests cover rect ignore and mask ignore."
+  },
+  {
+    "repo": "ratatui/kasuari",
+    "commit": "4d1f3b2540fa8b50b1651fe1509b5976d5c82cac",
+    "stars": 56,
+    "licence": "Apache-2.0",
+    "gap": "gap 8: constraint UI layout solver",
+    "files": ["README.md", "src/solver.rs"],
+    "take": "Incremental Cassowary simplex: add/remove constraint, add_edit_variable plus suggest_value for drag-resize, fetch_changes returns only moved variables, strengths and tags. Tests in tests/quadrilateral.rs, tests/removal.rs, tests/traits.rs."
+  },
+  {
+    "repo": "lburdier/EasyUV",
+    "commit": "e4619716eb92af54bb913467437c2a01ef5a83b5",
+    "stars": 0,
+    "licence": "GPL-3.0",
+    "gap": "gap 6: UV unwrap and texel density CLI",
+    "files": ["README.md", "crates/easyuv-core/src/unwrap.rs", "crates/easyuv-core/src/metrics.rs"],
+    "take": "Self-contained core: LSCM with two pinned verts then ARAP relaxation, disk-chart segmentation, and a UV score whose weighted parts are distortion, overlap, flipped, fill, outside, texel-density spread and seam length, with a worst-part advice string. Rust CLI plus OBJ and GLB import/export; metric test present."
+  },
+  {
+    "repo": "SighFyi/kibaudio",
+    "commit": "691980f1a12d6c3191f1cb63116f513413ab8ae6",
+    "stars": 0,
+    "licence": "Apache-2.0",
+    "gap": "gap 7: tick-driven audio cue sheet with ducking",
+    "files": ["src/music/cues.rs", "src/music/clock.rs", "src/mixer/config.rs", "src/mixer/systems.rs"],
+    "take": "Cue = anchor (beat, downbeat, named marker, segment start or end) plus a beat or ms offset plus parameter-range, segment and mode filters. One tick = one beat on a Kira clock, stems pre-armed with start_time, and a forward-only ClockSmoother so beat time never steps backwards. Ducking is data: DuckDef target, amount and fade per bus."
+  },
+  {
+    "repo": "Skyfish1/lut-utility",
+    "commit": "1ef4ca05b5f39e18a5bec74b65079188f4894f37",
+    "stars": 6,
+    "licence": "MIT",
+    "gap": "gap 5: .cube LUT parse and apply",
+    "files": ["src/main.rs"],
+    "take": "Single file: parses LUT_3D_SIZE plus R G B triples, rejects a value count that is not N cubed, samples with trilinear interpolation after clamping input to 0..1, and writes valid .cube headers. No tests; the parse and sample pair is the portable part."
+  },
+  {
+    "repo": "avinkrisv/egui-xyflow",
+    "commit": "8532bcda2ef6e2506bdaf48e903c655055bc5071",
+    "stars": 19,
+    "licence": "MIT",
+    "gap": "gap 4: multi-select and marquee in an egui viewport",
+    "files": ["src/interaction/selection.rs", "src/types/viewport.rs", "src/render/selection_renderer.rs"],
+    "take": "Marquee rect transformed screen to flow space, then overlap-area test with SelectionMode Partial or Full (full needs overlap within 0.1 of node area); hidden and non-selectable nodes are skipped. Multi-select set and selection renderer exist; copy/paste is not present."
+  },
+  {
+    "repo": "nochinator/open_desktop",
+    "commit": "915216cd8b90120c8662ac78579eb01cd0b9756e",
+    "stars": 1,
+    "licence": "MIT",
+    "gap": "gap 3: command palette with fuzzy ranking",
+    "files": ["launcher-rs/src/fuzzy.rs"],
+    "take": "Two-tier ranking: queries of two chars or fewer use exact word-prefix order, three or more use SkimMatcherV2 fuzzy score, then a saturating frecency boost of at most 60 percent (pivot 2.0) so usage breaks ties but never beats a clearly better text match. Tests assert both paths."
+  },
+  {
+    "repo": "FrankelJb/vcsr",
+    "commit": "61ad7995af23bf4b2490699aff52ae66d65b015f",
+    "stars": 11,
+    "licence": "MIT",
+    "gap": "gap 1: contact sheet with a per-tile score",
+    "files": ["src/operations.rs", "src/models.rs"],
+    "take": "Grid sheet: grid_desired_size divides the target width by columns, frames land in parallel, the compositor draws timestamp and caption text per tile with a shadow pass then a colour pass. Each frame carries an FFT blurriness score plus average colour; selection sorts by score and drops near-duplicate colours. ffmpeg is only the frame source."
+  },
+  {
+    "repo": "rdeioris/shadewire",
+    "commit": "31242c2b9ff050056e9b99488f818b7fe0f88d9a",
+    "stars": 0,
+    "licence": "MIT",
+    "gap": "gap 9: typed-port material node graph evaluator",
+    "files": ["crates/shadewire-nodes/src/document/port_type.rs", "crates/shadewire-nodes/src/document/nodegraph.rs"],
+    "take": "PortType covers value, string, filename, surface and displacement shader, material, closure by name, multi-output and other, with parse and mtlx_name round-trip plus has_colorspace. NodeGraph is interface ports plus nodes plus named outputs pinned to a nodedef; lowering and evaluation live in shadewire-mdl/src/eval and shadewire/src/interpret/eval.rs. Emits shaders, does not bake to maps."
+  },
+  {
+    "repo": "xKrvZ/Terra",
+    "commit": "63e822ad5ad5953ee6b8002a18af4bdbedb08c57",
+    "stars": 9,
+    "licence": "MIT",
+    "gap": "gap 10: editable layered height field",
+    "files": ["README.md", "crates/terra-core/src/landscape_blueprint.rs"],
+    "take": "Layer stack rather than a node graph: layers, groups, biomes and masks with blend modes over a progressive heightfield. EvalStage fixes the evaluation ladder (blueprint, pre-biome fields, climate, field blend, shared hydrology, materials, vegetation). wgpu compute in terra-gpu, viewport in terra-render, CPU and GPU parity workflow. Early WIP and terra-app path-depends on a sibling Lamina."
+  },
+  {
+    "repo": "BadMachine/egui-marquee",
+    "commit": "874fe8dc13e7b7fc02828c817af9139544fb6c21",
+    "stars": 0,
+    "licence": null,
+    "gap": "gap 4: multi-select and marquee in an egui viewport",
+    "files": ["src/state.rs"],
+    "take": "Clean Active/Finished/Inactive marquee state with a HashSet of egui Ids, but the repository declares no licence, so it is not taken.",
+    "taken": false,
+    "reason": "No licence declared in the repository; nothing can be ported without a grant."
+  }
+]

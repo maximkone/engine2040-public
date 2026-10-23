@@ -26,8 +26,8 @@
 //! (absent `POSITION`, missing `min`/`max`, dangling indices) surface as
 //! [`MeshImportError::Parse`]: still typed, bounded and panic-free.
 
+use super::cooked::{material_kind_from_name, CookError, TextureSlot};
 use super::cooked::{validate_material, validate_mesh, CookedMaterial, CookedMesh, TextureRef};
-use super::cooked::{CookError, TextureSlot};
 use super::registry::content_hash;
 use super::wire::bound_chars;
 use std::collections::BTreeMap;
@@ -474,6 +474,7 @@ fn cook_to_invalid(error: &CookError) -> MeshImportError {
         CookError::BadTextureDimensions { width, height } => {
             invalid("texture", &format!("bad dimensions {width}x{height}"))
         }
+        CookError::BadKind(kind) => invalid("material", &format!("bad kind {kind}")),
     }
 }
 
@@ -538,6 +539,7 @@ fn import_material(
         metallic_factor,
         roughness_factor,
         textures,
+        kind: material_kind_from_name(material.name().unwrap_or("")),
     };
     validate_material(&cooked).map_err(|e| cook_to_invalid(&e))?;
     Ok(cooked)
