@@ -23,9 +23,13 @@ env:
 
 jobs:
   verify:
-    name: kani-hs23
+    name: kani-${{ matrix.kernel }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: [q16, cut, bond, tape]
     steps:
       - uses: actions/checkout@v5
       - name: install the repository toolchain (rust-toolchain.toml)
@@ -45,26 +49,32 @@ jobs:
             cargo kani setup
           fi
           cargo kani --version
-      - name: verify the four kernel sets
+      - name: verify the ${{ matrix.kernel }} kernel set
         shell: bash
         run: |
           set -uo pipefail
-          total=0
-          failed=0
-          for kernel in q16 cut bond tape; do
-            log="kani-${kernel}.log"
-            echo "::group::Kani ${kernel}"
-            cargo kani -p engine-proof --lib --default-unwind 64 --harness "${kernel}::" 2>&1 | tee "$log"
-            code=${PIPESTATUS[0]}
-            passed=$(grep -c 'VERIFICATION:- SUCCESSFUL' "$log" || true)
-            total=$((total + passed))
-            echo "KANI ${kernel}: ${passed}/5 harnesses passed"
-            if [ "$code" -ne 0 ] || [ "$passed" -ne 5 ]; then
-              failed=1
-            fi
-            echo "::endgroup::"
-          done
-          echo "KANI TOTAL: ${total}/20 harnesses passed"
-          if [ "$failed" -ne 0 ] || [ "$total" -ne 20 ]; then
+          kernel="${{ matrix.kernel }}"
+          log="kani-${kernel}.log"
+          cargo kani -p engine-proof --lib --default-unwind 64 --harness "${kernel}::" 2>&1 | tee "$log"
+          code=${PIPESTATUS[0]}
+          passed=$(grep -c 'VERIFICATION:- SUCCESSFUL' "$log" || true)
+          echo "KANI ${kernel}: ${passed}/5 harnesses passed"
+          if [ "$code" -ne 0 ] || [ "$passed" -ne 5 ]; then
             exit 1
           fi
+
+  total:
+    name: kani-total
+    needs: verify
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: print the harness count
+        shell: bash
+        run: |
+          if [ "${{ needs.verify.result }}" != "success" ]; then
+            echo "KANI TOTAL: not all 20 harnesses passed"
+            exit 1
+          fi
+          echo "KANI TOTAL: 20/20 harnesses passed"
