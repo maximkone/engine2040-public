@@ -1,0 +1,70 @@
+name: kani
+
+# HS23: 20 Kani harnesses over four integer kernels. Kani is not installed on
+# the shared PC, so this job is the Accept's CI leg: install Kani 0.68.0 on a
+# hosted Linux runner, run each kernel set by harness name, and print one
+# count line. A dispatch on the private repo is explicit; the public mirror
+# also runs it on main and on a kani-* branch.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "kani-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kani-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  verify:
+    name: kani-hs23
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - name: install the repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - name: cache Kani 0.68.0
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
+            ~/.kani
+          key: kani-0.68.0-${{ runner.os }}
+      - name: install Kani 0.68.0
+        run: |
+          if [ ! -x "$HOME/.cargo/bin/cargo-kani" ] || [ ! -d "$HOME/.kani" ]; then
+            cargo install --locked kani-verifier --version 0.68.0
+            cargo kani setup
+          fi
+          cargo kani --version
+      - name: verify the four kernel sets
+        shell: bash
+        run: |
+          set -uo pipefail
+          total=0
+          failed=0
+          for kernel in q16 cut bond tape; do
+            log="kani-${kernel}.log"
+            echo "::group::Kani ${kernel}"
+            cargo kani -p engine-proof --lib --default-unwind 64 --harness "${kernel}::" 2>&1 | tee "$log"
+            code=${PIPESTATUS[0]}
+            passed=$(grep -c 'VERIFICATION:- SUCCESSFUL' "$log" || true)
+            total=$((total + passed))
+            echo "KANI ${kernel}: ${passed}/5 harnesses passed"
+            if [ "$code" -ne 0 ] || [ "$passed" -ne 5 ]; then
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          echo "KANI TOTAL: ${total}/20 harnesses passed"
+          if [ "$failed" -ne 0 ] || [ "$total" -ne 20 ]; then
+            exit 1
+          fi

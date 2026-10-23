@@ -49,7 +49,7 @@ rust-version = "1.97.1"
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 # `loom` is set by `RUSTFLAGS="--cfg loom"` for the job-pool model in engine-ecs.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(kani)"] }
 rust_2018_idioms = { level = "warn", priority = -1 }
 trivial_numeric_casts = "warn"
 unused_lifetimes = "warn"

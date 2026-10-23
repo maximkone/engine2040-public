@@ -3318,6 +3318,7 @@ dependencies = [
  "engine-assets",
  "engine-combat",
  "engine-core",
+ "engine-destruction",
  "engine-ecs",
  "engine-editor",
  "engine-input",
