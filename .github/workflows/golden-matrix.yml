@@ -4,15 +4,15 @@ name: golden-matrix
 # BX28 cut corpus must give the same digests on every architecture. Each runner records the tape
 # with `engine2040 --record` and its corpus rows with `matrix_line`, uploads both, and the last job
 # runs tools/golden-matrix.mjs over all of them: equal, or the first divergent tick (tape) or case
-# block (corpus) named with its likely cause. Three rows are native (x86-64 Linux, x86-64 Windows,
-# aarch64 Linux); two are wasm32-wasip1 run under wasmtime, plain and with simd128 on
+# block (corpus) named with its likely cause. Four rows are native (x86-64 Linux, x86-64 Windows,
+# aarch64 Linux, aarch64 macOS); two are wasm32-wasip1 run under wasmtime, plain and with simd128 on
 # (wasm32-wasip1-simd128).
 # WEB3 adds the Rapier claim: a ragdoll fall (`ragdoll_line`, 300 ticks, a digest of every body
-# transform per tick) is recorded on the same five machines and compared with `--ragdoll`, which
+# transform per tick) is recorded on the same six machines and compared with `--ragdoll`, which
 # names the first tick and body that differ; and the lib tests of engine-physics (feature rapier)
 # run natively and as wasm32-wasip1 under wasmtime, where the same tests must pass.
 # DSN2 adds the arena claim: the rules-v2 kit match the window and the net server play (8 fighters,
-# 1200 ticks, `arena_line`, the checkpoint hash of every tick) is recorded on the same five machines
+# 1200 ticks, `arena_line`, the checkpoint hash of every tick) is recorded on the same six machines
 # and compared with `--arena`, which names the first tick that differs. The legacy tape above never
 # runs arena code; this row does.
 # Start it from the Actions tab (workflow_dispatch) or by pushing a throwaway branch named
@@ -40,9 +40,9 @@ env:
 
 jobs:
   record:
-    # One row per architecture: x86-64 Linux, x86-64 Windows, aarch64 Linux. `host` is the label
-    # matrix_line must print (std::env::consts OS-ARCH): a runner that is not what its label claims
-    # fails here instead of filling a matrix slot with the wrong machine.
+    # One row per architecture: x86-64 Linux, x86-64 Windows, aarch64 Linux, aarch64 macOS. `host` is
+    # the label matrix_line must print (std::env::consts OS-ARCH): a runner that is not what its label
+    # claims fails here instead of filling a matrix slot with the wrong machine.
     if: github.repository == 'maximkone/engine2040-public'
     strategy:
       fail-fast: false
@@ -54,6 +54,10 @@ jobs:
             host: windows-x86_64
           - os: ubuntu-24.04-arm
             host: linux-aarch64
+          # Apple silicon: the only macOS image GitHub runs these days. The `host` assertion below
+          # is what proves the runner really is aarch64 and not an Intel slot.
+          - os: macos-latest
+            host: macos-aarch64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -330,7 +334,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for host in linux-x86_64 windows-x86_64 linux-aarch64 wasm32-wasip1 wasm32-wasip1-simd128; do
+          for host in linux-x86_64 windows-x86_64 linux-aarch64 macos-aarch64 wasm32-wasip1 wasm32-wasip1-simd128; do
             for file in golden.e2040 matrix-row.txt ragdoll-row.txt arena-row.txt; do
               if [ ! -f "matrix/golden-$host/$file" ]; then
                 echo "MISSING matrix/golden-$host/$file: that runner recorded nothing, so the matrix is incomplete"
@@ -345,10 +349,10 @@ jobs:
           # before the step fails.
           status=0
           node tools/golden-matrix.mjs \
-            $m/golden-linux-x86_64/golden.e2040 $m/golden-windows-x86_64/golden.e2040 $m/golden-linux-aarch64/golden.e2040 $m/golden-wasm32-wasip1/golden.e2040 $m/golden-wasm32-wasip1-simd128/golden.e2040 \
-            --rows $m/golden-linux-x86_64/matrix-row.txt $m/golden-windows-x86_64/matrix-row.txt $m/golden-linux-aarch64/matrix-row.txt $m/golden-wasm32-wasip1/matrix-row.txt $m/golden-wasm32-wasip1-simd128/matrix-row.txt \
-            --ragdoll $m/golden-linux-x86_64/ragdoll-row.txt $m/golden-windows-x86_64/ragdoll-row.txt $m/golden-linux-aarch64/ragdoll-row.txt $m/golden-wasm32-wasip1/ragdoll-row.txt $m/golden-wasm32-wasip1-simd128/ragdoll-row.txt \
-            --arena $m/golden-linux-x86_64/arena-row.txt $m/golden-windows-x86_64/arena-row.txt $m/golden-linux-aarch64/arena-row.txt $m/golden-wasm32-wasip1/arena-row.txt $m/golden-wasm32-wasip1-simd128/arena-row.txt \
+            $m/golden-linux-x86_64/golden.e2040 $m/golden-windows-x86_64/golden.e2040 $m/golden-linux-aarch64/golden.e2040 $m/golden-macos-aarch64/golden.e2040 $m/golden-wasm32-wasip1/golden.e2040 $m/golden-wasm32-wasip1-simd128/golden.e2040 \
+            --rows $m/golden-linux-x86_64/matrix-row.txt $m/golden-windows-x86_64/matrix-row.txt $m/golden-linux-aarch64/matrix-row.txt $m/golden-macos-aarch64/matrix-row.txt $m/golden-wasm32-wasip1/matrix-row.txt $m/golden-wasm32-wasip1-simd128/matrix-row.txt \
+            --ragdoll $m/golden-linux-x86_64/ragdoll-row.txt $m/golden-windows-x86_64/ragdoll-row.txt $m/golden-linux-aarch64/ragdoll-row.txt $m/golden-macos-aarch64/ragdoll-row.txt $m/golden-wasm32-wasip1/ragdoll-row.txt $m/golden-wasm32-wasip1-simd128/ragdoll-row.txt \
+            --arena $m/golden-linux-x86_64/arena-row.txt $m/golden-windows-x86_64/arena-row.txt $m/golden-linux-aarch64/arena-row.txt $m/golden-macos-aarch64/arena-row.txt $m/golden-wasm32-wasip1/arena-row.txt $m/golden-wasm32-wasip1-simd128/arena-row.txt \
             > verdict.txt || status=$?
           # The physics lib tests, native against wasm32-wasip1: the same tests must pass, by name.
           p=physics/physics-tests

@@ -156,7 +156,9 @@ export function readParked(parkedPath) {
 // it imports the same auditRows instead of spawning that CLI. That audit also
 // reads each suspect row's own closure note: a note that names a real commit, a
 // run id, a path that exists or a ticked replacement row drops the finding; a
-// note with no such evidence keeps it. `tickedIds` is the whole ticked board,
+// note with no such evidence keeps it. An unticked row's owned path may not
+// exist yet: that is the row's work, so a missing-path-only finding on an open
+// row is dropped here. `tickedIds` is the whole ticked board,
 // because a gate set alone is too narrow to tell whether a replacement row is
 // ticked. ok=false means the repo context could not be built (no git); the
 // caller decides whether that is a warning (default) or a failure (--check).
@@ -167,8 +169,16 @@ export function loadSuspects(root, texts, ids, tickedIds = null) {
     .filter((id) => texts.has(id))
     .map((id) => ({ id, source: "gate", text: texts.get(id) }));
   const report = auditRows(rows, ctx, tickedIds ? { tickedIds } : {});
+  // An unticked row's owned path may not exist yet: that is the row's work, not
+  // rot. Only a TICKED row can lose the code it was ticked for, so a
+  // path-missing-only finding on an open row is dropped here. Anything else
+  // (a duplicate, a test that no longer exists) still counts on either side.
+  const keepsFinding = (s) =>
+    tickedIds === null ||
+    tickedIds.has(s.id) ||
+    s.findings.some((f) => f.reason !== "path-missing");
   const suspects = new Map(
-    report.suspects.map((s) => [
+    report.suspects.filter(keepsFinding).map((s) => [
       s.id,
       {
         reasons: [...new Set(s.findings.map((f) => f.reason))],

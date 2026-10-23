@@ -87,10 +87,20 @@ test("a suspect row blocks met and names the reason", () => {
 
 test("loadSuspects reads the in-process audit for the gate rows", () => {
   const texts = new Map([["ZZ1", "owns `crates/zz-fixture/src/gone.rs`"]]);
-  const report = loadSuspects(process.cwd(), texts, ["ZZ1"]);
+  const report = loadSuspects(process.cwd(), texts, ["ZZ1"], new Set(["ZZ1"]));
   assert.equal(report.ok, true);
-  assert.ok(report.suspects.has("ZZ1"), "a missing path is a suspect");
+  assert.ok(report.suspects.has("ZZ1"), "a ticked row's missing path is a suspect");
   assert.match(report.suspects.get("ZZ1").reasons.join(","), /path-missing/);
+});
+
+test("an open row's missing path is its work, not rot", () => {
+  // RT7 and PQ4 name a path the tree does not have yet: they are open, so the
+  // file is the row's job. The same row ticked is rot and stays a suspect.
+  const texts = new Map([["ZZ2", "owns `crates/zz-fixture/src/gone.rs`"]]);
+  const open = loadSuspects(process.cwd(), texts, ["ZZ2"], new Set(["ZZ1"]));
+  assert.equal(open.suspects.has("ZZ2"), false, "open row: no suspect");
+  const ticked = loadSuspects(process.cwd(), texts, ["ZZ2"], new Set(["ZZ1", "ZZ2"]));
+  assert.equal(ticked.suspects.has("ZZ2"), true, "ticked row: still rot");
 });
 
 test("loadSuspects drops a gate row only when its closure note names evidence", () => {

@@ -1,16 +1,20 @@
 //! `view` pack: what the door sees about itself and the run.
 //!
 //! Holds the observe-log digest and pages, the self-describing manifest,
-//! `view.observe` and `view.laws` (the live view as numbers) and
-//! `look.judge`, which scores a capture set by machine so a Look row accepts
-//! on a number instead of an opened PNG.
+//! `view.observe` and `view.laws` (the live view as numbers), `view.compare`
+//! (two captures over the whole frame or one rectangle) and `look.judge`,
+//! which scores a capture set by machine so a Look row accepts on a number
+//! instead of an opened PNG.
 //!
 //! `view.observe` and `view.laws` read the live bout of the session's play
 //! slot exactly as `sim.observe` reads it (seed, headcount and tick count):
 //! no bout answers `no_live_bout` first. The door owns no view and links no
 //! renderer: a host that links the SP61 view truth registers it once with
 //! [`register_view_source`], and the door passes back its camera, bodies and
-//! `arena view:` line unchanged. The door checks the host's answer against
+//! `arena view:` line unchanged. `view.observe` also numbers the bodies it can
+//! point at: one [`ViewMark`] per body with a screen rect, id = the body slot,
+//! so a sentence about "body 1" is an id and not a paragraph. The door checks
+//! the host's answer against
 //! the contract (one body per live fighter, finite rect or null, ordered
 //! bounds, a camera inside its ranges) and refuses `bad_view` otherwise,
 //! never a partial success. Until a host registers, both verbs refuse
@@ -361,10 +365,52 @@ impl SyncTool<McpServer> for LookJudgeTool {
 // view.compare: two PNGs, one machine score, one optional diff image
 // ---------------------------------------------------------------------------
 
-/// Two relative PNG paths and an optional third to write. Units are path
-/// chars; errors are typed `bad_args` for an absolute path, `..`, a non-PNG
-/// name or an unreadable input. `diff` is written under the project root,
-/// never read, and need not exist; a write failure is `write_failed`.
+/// The picture area one verb scores: the whole frame or one rectangle.
+///
+/// The rectangle is in pixels with the origin at the top-left, the same space
+/// as a capture PNG. `{"kind":"full"}` is the default and scores every pixel;
+/// `{"kind":"rect","x":..,"y":..,"w":..,"h":..}` scores pixels inside it only.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde", tag = "kind", rename_all = "snake_case")]
+#[schemars(crate = "rmcp::schemars")]
+pub enum CompareRegion {
+    /// Every pixel of the frame.
+    Full,
+    /// Pixels inside the rectangle only.
+    Rect {
+        /// Left edge in pixels.
+        x: u32,
+        /// Top edge in pixels.
+        y: u32,
+        /// Width in pixels, at least 1.
+        w: u32,
+        /// Height in pixels, at least 1.
+        h: u32,
+    },
+}
+
+impl CompareRegion {
+    /// Whether the region is the whole frame.
+    fn is_full(self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// The rectangle, when the region is one.
+    fn rect(self) -> Option<metric::Rect> {
+        match self {
+            Self::Full => None,
+            Self::Rect { x, y, w, h } => Some(metric::Rect { x, y, w, h }),
+        }
+    }
+}
+
+/// Two relative PNG paths and an optional third to write, plus the region to
+/// score. Units are path chars and pixels; errors are typed `bad_args` for an
+/// absolute path, `..`, a non-PNG name, an unreadable input or a rectangle
+/// with no area or one outside the frame. `diff` is written under the project
+/// root, never read, and need not exist; a write failure is `write_failed`.
+/// Without `region` the whole frame scores, exactly as before the field
+/// existed.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -372,15 +418,19 @@ pub struct ViewCompareArgs {
     pub left: String,
     pub right: String,
     pub diff: Option<String>,
+    pub region: Option<CompareRegion>,
 }
 
-/// Whole-frame machine score. All scores are fixed point; 10000 is identical
-/// for SSIM and 0 is identical for FLIP and deltaE. `ssimulacra2_x10000` is
-/// SSIMULACRA2 v2.1 in hundredths of a donor point: 10000 is identical, 0 is
-/// worst and higher is better, the same direction as SSIM. It is `None` when
-/// the donor refused the pair (mismatched sizes, or a side under 8x8).
-/// `diff_png` is the relative path the diff image was written to, or `None`
-/// when the request named no diff path.
+/// Machine score over the resolved region. All scores are fixed point; 10000
+/// is identical for SSIM and 0 is identical for FLIP and deltaE.
+/// `ssimulacra2_x10000` is SSIMULACRA2 v2.1 in hundredths of a donor point:
+/// 10000 is identical, 0 is worst and higher is better, the same direction as
+/// SSIM. It is `None` when the donor refused the pair (mismatched sizes, or a
+/// side under 8x8). `region` is `full` or `rect` and `rect` is the resolved
+/// `[x, y, w, h]` in pixels, `None` for a full-frame score. `width` and
+/// `height` stay the frame size, so a region score still names the picture it
+/// came from. `diff_png` is the relative path the diff image was written to,
+/// or `None` when the request named no diff path.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -394,6 +444,8 @@ pub struct ViewCompareOutput {
     pub hist_emd_x10000: u32,
     pub ssimulacra2_x10000: Option<u32>,
     pub diff_png: Option<String>,
+    pub region: String,
+    pub rect: Option<[u32; 4]>,
 }
 
 /// A PNG path must be a non-empty relative path of plain names ending in
@@ -427,18 +479,83 @@ fn read_frame(field: &str, root: &Path, rel: &str) -> Result<Frame, McpToolError
     })
 }
 
-/// Score two decoded frames over the whole frame.
+/// Resolve the request's region against the decoded frame, with the error a
+/// caller can act on. Nothing is scored before this passes.
+fn resolve_region(
+    arg: Option<CompareRegion>,
+    frame: &Frame,
+) -> Result<(CompareRegion, Region<'static>), McpToolError> {
+    let region = arg.unwrap_or(CompareRegion::Full);
+    let Some(rect) = region.rect() else {
+        return Ok((region, Region::Full));
+    };
+    let inside = u64::from(rect.x) + u64::from(rect.w) <= u64::from(frame.width())
+        && u64::from(rect.y) + u64::from(rect.h) <= u64::from(frame.height());
+    if rect.w == 0 || rect.h == 0 || !inside {
+        return Err(McpToolError::new(
+            "bad_args",
+            format!(
+                "region {}x{} at ({},{}) scores no pixel of the {}x{} frame; legal kinds are \
+                 {{\"kind\":\"full\"}} or {{\"kind\":\"rect\",\"x\":0,\"y\":0,\"w\":{},\"h\":{}}} \
+                 with w and h at least 1 and the rect inside the frame: re-run with a rect \
+                 inside the capture",
+                rect.w,
+                rect.h,
+                rect.x,
+                rect.y,
+                frame.width(),
+                frame.height(),
+                frame.width(),
+                frame.height()
+            ),
+        ));
+    }
+    Ok((region, Region::Rect(rect)))
+}
+
+/// One frame cut to `rect`, as a fresh frame. Used so the second metric scores
+/// the same pixels as the first.
+fn crop(frame: &Frame, rect: metric::Rect) -> Result<Frame, McpToolError> {
+    let to_usize = |v: u32| usize::try_from(v).unwrap_or(0);
+    let (w, h) = (to_usize(rect.w), to_usize(rect.h));
+    let width = to_usize(frame.width());
+    let (left, top) = (to_usize(rect.x), to_usize(rect.y));
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let at = (top + y) * width + left + x;
+            rgba.extend_from_slice(&frame.rgb_at(at));
+            rgba.push(255);
+        }
+    }
+    Frame::from_rgba(rect.w, rect.h, rgba)
+        .map_err(|error| McpToolError::new("bad_image", format!("region does not crop: {error}")))
+}
+
+/// Score two decoded frames over `region`.
 ///
 /// The second metric reads `left` as the source (the pristine reference)
 /// and `right` as the distorted one (the capture), so its score says how
 /// far the capture moved from the reference. The donor is float, so the
 /// score is published as a coarse fixed point: 10000 is identical, 0 is
-/// worst.
-fn compare_frames(left: &Frame, right: &Frame) -> Result<ViewCompareOutput, McpToolError> {
-    let compared = metric::compare(left, right, Region::Full).map_err(|error| {
+/// worst. A rectangle is cropped for the second metric, which scores one
+/// whole picture and has no region argument.
+fn compare_frames_in(
+    left: &Frame,
+    right: &Frame,
+    region: CompareRegion,
+    scoring: Region<'_>,
+) -> Result<ViewCompareOutput, McpToolError> {
+    let compared = metric::compare(left, right, scoring).map_err(|error| {
         McpToolError::new("bad_image", format!("frames do not compare: {error}"))
     })?;
-    let second = ssim2::score_x10000(left, right).ok();
+    let second = match region.rect() {
+        Some(rect) => match (crop(left, rect), crop(right, rect)) {
+            (Ok(left), Ok(right)) => ssim2::score_x10000(&left, &right).ok(),
+            _ => None,
+        },
+        None => ssim2::score_x10000(left, right).ok(),
+    };
     Ok(ViewCompareOutput {
         width: left.width(),
         height: left.height(),
@@ -449,7 +566,15 @@ fn compare_frames(left: &Frame, right: &Frame) -> Result<ViewCompareOutput, McpT
         hist_emd_x10000: compared.hist_emd_x10000,
         ssimulacra2_x10000: second,
         diff_png: None,
+        region: if region.is_full() { "full" } else { "rect" }.to_owned(),
+        rect: region.rect().map(|rect| [rect.x, rect.y, rect.w, rect.h]),
     })
+}
+
+/// Whole-frame score: [`compare_frames_in`] over every pixel, the answer a
+/// caller that names no region gets.
+fn compare_frames(left: &Frame, right: &Frame) -> Result<ViewCompareOutput, McpToolError> {
+    compare_frames_in(left, right, CompareRegion::Full, Region::Full)
 }
 
 /// Amplification of the per-channel gap in the diff image: a gap of 1 reads 8,
@@ -487,7 +612,8 @@ fn write_diff_png(root: &Path, rel: &str, left: &Frame, right: &Frame) -> Result
     std::fs::write(&path, encode_png_rgb(left.width(), left.height(), &rgb)).map_err(failed)
 }
 
-/// Score one pair, then write the diff image when the request named one.
+/// Score one pair over the requested region, then write the diff image when
+/// the request named one.
 fn run_view_compare(
     root: &Path,
     args: &ViewCompareArgs,
@@ -499,7 +625,8 @@ fn run_view_compare(
     }
     let left = read_frame("left", root, &args.left)?;
     let right = read_frame("right", root, &args.right)?;
-    let mut out = compare_frames(&left, &right)?;
+    let (region, scoring) = resolve_region(args.region, &left)?;
+    let mut out = compare_frames_in(&left, &right, region, scoring)?;
     if let Some(diff) = &args.diff {
         write_diff_png(root, diff, &left, &right)?;
         out.diff_png = Some(diff.clone());
@@ -676,6 +803,22 @@ pub fn arena_exe_path() -> PathBuf {
 )]
 pub struct ViewObserveArgs {}
 
+/// One numbered region over a body, the Set-of-Mark shape: an id a person and
+/// a client can both name, a short label and the picture rect in `-1..=1`
+/// picture share, the same space as [`ViewBody::screen`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ViewMark {
+    /// Stable mark id: the body's slot, so the mark, the body and a later
+    /// `scene.pick` on the same fighter name one thing.
+    pub id: u64,
+    /// Short label, `body_<slot>`.
+    pub label: String,
+    /// Picture rect `[x0, y0, x1, y1]` in `-1..=1` share of the frame.
+    pub rect: [f32; 4],
+}
+
 /// `view.observe` result: the live view after the bout's last tick.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(crate = "rmcp::serde")]
@@ -688,6 +831,7 @@ pub struct ViewObserveOutput {
     pub bodies: Vec<ViewBody>,
     pub laws: String,
     pub check: String,
+    pub marks: Vec<ViewMark>,
 }
 
 /// Args for `view.laws`.
@@ -892,12 +1036,29 @@ fn live_frame(
     Ok((seed, participants, ticks, frame))
 }
 
+/// The marks of one frame: one per body that has a screen rect, in body order.
+/// Pure over the bodies, so two identical calls report the same ids. A body
+/// behind the camera has no rect and so no mark: a mark always names pixels.
+fn marks_of(bodies: &[ViewBody]) -> Vec<ViewMark> {
+    bodies
+        .iter()
+        .filter_map(|body| {
+            body.screen.map(|rect| ViewMark {
+                id: u64::from(body.slot),
+                label: format!("body_{}", body.slot),
+                rect,
+            })
+        })
+        .collect()
+}
+
 /// Pure observe core: the live bout's view. Steps nothing and writes nothing.
 fn observe_core(
     slot: &PlaySlot,
     source: Option<ViewSourceFn>,
 ) -> Result<ViewObserveOutput, McpToolError> {
     let (seed, participants, ticks, frame) = live_frame(slot, source)?;
+    let marks = marks_of(&frame.bodies);
     Ok(ViewObserveOutput {
         tick: ticks,
         seed: seed.to_string(),
@@ -906,6 +1067,7 @@ fn observe_core(
         bodies: frame.bodies,
         laws: frame.laws,
         check: CheckKind::ReadOnly.name().to_owned(),
+        marks,
     })
 }
 
@@ -2027,6 +2189,7 @@ mod tests {
                 left: "both.png".to_owned(),
                 right: "both.png".to_owned(),
                 diff: None,
+                region: None,
             },
         )
         .expect("a pair without a diff compares");
@@ -2041,6 +2204,7 @@ mod tests {
                 left: "both.png".to_owned(),
                 right: "both.png".to_owned(),
                 diff: Some("reports/zero.png".to_owned()),
+                region: None,
             },
         )
         .expect("an identical pair compares");
@@ -2073,6 +2237,7 @@ mod tests {
                 left: "small.png".to_owned(),
                 right: "large.png".to_owned(),
                 diff: Some("reports/none.png".to_owned()),
+                region: None,
             },
         )
         .expect_err("a mismatched pair refuses");
@@ -2116,6 +2281,7 @@ mod tests {
                     left: "a.png".to_owned(),
                     right: "a.png".to_owned(),
                     diff: Some(bad.to_owned()),
+                    region: None,
                 },
             )
             .expect_err(bad);
@@ -2144,6 +2310,7 @@ mod tests {
                 left: "a.png".to_owned(),
                 right: "a.png".to_owned(),
                 diff: Some("blocked/diff.png".to_owned()),
+                region: None,
             },
         )
         .expect_err("a file blocks the diff folder");
@@ -2237,5 +2404,125 @@ mod tests {
             status.budget_chars
         );
         assert!(status.headroom_chars > 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // region compare and the observe marks
+    // -----------------------------------------------------------------------
+
+    /// Sand over the whole frame, then a darker band below `split`.
+    fn banded(split: usize, band: [u8; 4]) -> Frame {
+        frame_of(|at| {
+            if at / 16 >= split {
+                band
+            } else {
+                [194, 160, 104, 255]
+            }
+        })
+    }
+
+    #[test]
+    fn view_compare_rect_scores_only_the_pixels_inside_it() {
+        let reference = banded(8, [194, 160, 104, 255]);
+        let capture = banded(8, [60, 50, 30, 255]);
+        let rect = CompareRegion::Rect {
+            x: 0,
+            y: 0,
+            w: 16,
+            h: 8,
+        };
+        let (region, scoring) = resolve_region(Some(rect), &reference).expect("rect resolves");
+        let inside =
+            compare_frames_in(&reference, &capture, region, scoring).expect("inside scores");
+        assert_eq!(
+            (inside.region.as_str(), inside.rect),
+            ("rect", Some([0, 0, 16, 8]))
+        );
+        // The band starts at row 8, so the scored rows are identical.
+        assert_eq!(inside.ssim_x10000, metric::SSIM_ONE);
+        assert_eq!(inside.mean_de_x100, 0);
+        let (region, scoring) = resolve_region(None, &reference).expect("full resolves");
+        let full = compare_frames_in(&reference, &capture, region, scoring).expect("full scores");
+        assert_eq!((full.region.as_str(), full.rect), ("full", None));
+        assert!(full.ssim_x10000 < metric::SSIM_ONE);
+        assert!(full.mean_de_x100 > 0);
+    }
+
+    #[test]
+    fn view_compare_bad_rect_names_the_legal_kinds_and_a_recovery() {
+        let frame = frame_of(|_| [10, 20, 30, 255]);
+        for bad in [
+            CompareRegion::Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 8,
+            },
+            CompareRegion::Rect {
+                x: 8,
+                y: 0,
+                w: 16,
+                h: 8,
+            },
+            CompareRegion::Rect {
+                x: 0,
+                y: 9,
+                w: 16,
+                h: 8,
+            },
+        ] {
+            let error = resolve_region(Some(bad), &frame).expect_err("bad rect");
+            assert_eq!(error.code, "bad_args");
+            assert!(
+                error.message.contains("\"kind\":\"full\""),
+                "{}",
+                error.message
+            );
+            assert!(
+                error.message.contains("\"kind\":\"rect\""),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains("re-run"), "{}", error.message);
+        }
+        // A legal rect reaches the frame's last pixel.
+        assert!(resolve_region(
+            Some(CompareRegion::Rect {
+                x: 8,
+                y: 8,
+                w: 8,
+                h: 8
+            }),
+            &frame
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn view_observe_marks_are_one_per_visible_body_and_stable() {
+        let body = |slot: u8, screen: Option<[f32; 4]>| ViewBody {
+            slot,
+            act: "idle".to_owned(),
+            clip: 0,
+            tint: false,
+            root: [0.0, 0.0, 0.0],
+            min: None,
+            max: None,
+            screen,
+            cover: 0.5,
+        };
+        let bodies = vec![
+            body(0, Some([-0.5, -0.5, 0.0, 0.0])),
+            body(1, Some([0.0, 0.0, 0.5, 0.5])),
+            body(2, None),
+        ];
+        let first = marks_of(&bodies);
+        let second = marks_of(&bodies);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].id, 0);
+        assert_eq!(first[1].id, 1);
+        assert_eq!(first[1].label, "body_1");
+        assert_eq!(first[1].rect, [0.0, 0.0, 0.5, 0.5]);
     }
 }

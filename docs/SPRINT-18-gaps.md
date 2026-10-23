@@ -2077,7 +2077,9 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   F2P: one BC7 mode for every block, whatever the block looks like.
   Proof: 10 passed (gh run 40022638848), mean mse 6.970651 -> 1.254803 with 1733/2170 blocks (79.9%)
   improved, bytes identical twice, modes 1/5/6/7 won 313/16011/60/0, cook 1499.2 ms/MP mode 6 only vs
-  4693.9 ms/MP search (3.13x).
+  4693.9 ms/MP search (3.13x). Recook of the committed set landed f1d61fb0d (13 files: the KTX2 maps and
+  their psnr receipt follow the search; `cargo test -p engine-assets --features import --test it arena_cook`
+  2 passed, run 40031686952).
 - [ ] OPT57 render: wire the GPU cull the crates already hold. `crates/assets/src/meshlet_cull.rs` and
   `crates/render/src/gpu_cull.rs` exist with tests and no caller: `lib.rs` declares both modules and nothing
   uses them, while the live path still culls per draw on the CPU. Wire one indirect-draw path behind a flag,

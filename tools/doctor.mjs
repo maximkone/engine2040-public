@@ -1,5 +1,7 @@
 // Project doctor: finds what breaks development and repairs the safe parts.
 //   node tools/doctor.mjs                 report only, never mutates
+//   node tools/doctor.mjs --strict        the same report, but a warning counts
+//       as something that needs you (today: unset git hooks)
 //   node tools/doctor.mjs --fix           report what --fix WOULD do, change nothing
 //   node tools/doctor.mjs --fix --consent <csv>
 //       apply only the consented scopes: toolchain, deny, cache
@@ -17,6 +19,10 @@ import { join } from "node:path";
 
 const argv = process.argv.slice(2);
 const fix = argv.includes("--fix");
+// --strict promotes the warning-only checks (git hooks) to needs-you, so a
+// fresh clone's first run is allowed to be green while a gate that reads the
+// hooks may ask for them to be installed.
+const strict = argv.includes("--strict");
 const consentArg = argv.find((a) => a.startsWith("--consent="));
 const consent = new Set(
   (consentArg ? consentArg.slice("--consent=".length) : "").split(",").map((s) => s.trim()).filter(Boolean),
@@ -25,12 +31,12 @@ const consent = new Set(
 const ROOT = process.env.E2040_DOCTOR_ROOT ?? process.cwd();
 const at = (p) => join(ROOT, p);
 if (argv.includes("--help") || argv.includes("-h")) {
-  console.log("Usage: node tools/doctor.mjs [--fix] [--consent=toolchain,deny,cache]");
+  console.log("Usage: node tools/doctor.mjs [--fix] [--consent=toolchain,deny,cache] [--strict]");
   process.exit(0);
 }
-const UNKNOWN = new Set(argv.filter((a) => a !== "--fix" && !a.startsWith("--consent=")));
+const UNKNOWN = new Set(argv.filter((a) => a !== "--fix" && a !== "--strict" && !a.startsWith("--consent=")));
 if (UNKNOWN.size) {
-  console.error("Usage: node tools/doctor.mjs [--fix] [--consent=toolchain,deny,cache]");
+  console.error("Usage: node tools/doctor.mjs [--fix] [--consent=toolchain,deny,cache] [--strict]");
   process.exit(2);
 }
 const KNOWN_SCOPES = new Set(["toolchain", "deny", "cache"]);
@@ -207,8 +213,9 @@ const dirty = status.out ? status.out.split("\n").length : 0;
 say(dirty ? "INFO" : "OK", dirty ? `${dirty} uncommitted paths (commit your own paths)` : "working tree clean");
 
 // 8. Git hooks: core.hooksPath must point at the tracked tools/hooks, else a
-// clone silently skips the rust-quality ratchet and the secret scan. Warn only:
-// a fresh clone is healthy enough to fix itself, so this never fails the doctor.
+// clone silently skips the rust-quality ratchet and the secret scan. Plain run:
+// warn only, because a fresh clone is healthy enough to fix itself. --strict:
+// this is the one warning that becomes needs-you, so a gate may require it.
 const hooks = spawnSync(process.execPath, [at("tools/hooks-install.mjs"), "--check"], {
   encoding: "utf8",
   timeout: 60_000,
@@ -216,8 +223,10 @@ const hooks = spawnSync(process.execPath, [at("tools/hooks-install.mjs"), "--che
   env: { ...process.env, E2040_HOOKS_ROOT: ROOT },
   maxBuffer: 8 * 1024 * 1024,
 });
+const hooksRemedy = "run node tools/hooks-install.mjs";
 if (hooks.status === 0) say("OK", "hooks: installed");
-else say("WARN", "hooks: not installed (run node tools/hooks-install.mjs)");
+else if (strict) problem("hooks: not installed, so the pre-commit ratchet and pre-push gate are skipped", hooksRemedy);
+else say("WARN", `hooks: not installed (${hooksRemedy})`);
 
 console.log(needsYou ? `RESULT ${needsYou} item(s) need you` : "RESULT healthy");
 process.exitCode = needsYou ? 1 : 0;

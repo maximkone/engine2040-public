@@ -69,3 +69,40 @@ test("unknown consent scope fails honestly and changes nothing", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A fresh clone: a git work tree with the tracked hooks on disk and
+// core.hooksPath unset, so hooks-install --check reports the gap.
+const cloneFixture = () => {
+  const dir = fixture({});
+  mkdirSync(join(dir, "tools", "hooks"), { recursive: true });
+  for (const hook of ["pre-commit", "pre-push"]) writeFileSync(join(dir, "tools", "hooks", hook), "#!/bin/sh\n");
+  spawnSync("git", ["-C", dir, "init", "--quiet"], { encoding: "utf8" });
+  return dir;
+};
+
+const needsYouCount = (out) => Number(/RESULT (\d+) item\(s\) need you/.exec(out)?.[1] ?? "0");
+
+test("fresh clone: doctor warns and names the one command; --strict counts it and exits 1", () => {
+  const dir = cloneFixture();
+  try {
+    const plain = doctor(dir, []);
+    assert.match(plain.out, /\[WARN\] hooks: not installed \(run node tools\/hooks-install\.mjs\)/, "plain run names the command once");
+    const strict = doctor(dir, ["--strict"]);
+    assert.match(strict.out, /\[NEEDS YOU\] hooks: not installed.*run node tools\/hooks-install\.mjs/, "--strict makes the gap a red item");
+    assert.equal(strict.status, 1, "--strict fails while the hooks are unset");
+    assert.equal(needsYouCount(strict.out), needsYouCount(plain.out) + 1, "exactly the hooks gap is added");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--strict is a plain flag: it takes no value and never repairs anything", () => {
+  const dir = cloneFixture();
+  try {
+    const r = doctor(dir, ["--strict=yes"], 2);
+    assert.equal(r.status, 2, "a value is a usage error, like every other flag");
+    assert.match(r.out, /Usage: node tools\/doctor\.mjs/, "the usage line names --strict");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

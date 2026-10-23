@@ -162,6 +162,129 @@ impl std::fmt::Display for SelectError {
 
 impl std::error::Error for SelectError {}
 
+/// One axis-aligned rect in screen or content space.
+///
+/// `min` and `max` are per-axis corners with `min <= max`. The caller builds
+/// it from the viewport projection; this module does no projection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    /// Top-left corner.
+    pub min: [f32; 2],
+    /// Bottom-right corner.
+    pub max: [f32; 2],
+}
+
+impl Rect {
+    /// Build a rect, `None` when a corner is not finite or `max` is below
+    /// `min` on an axis.
+    pub fn new(min: [f32; 2], max: [f32; 2]) -> Option<Self> {
+        if !min.iter().chain(max.iter()).all(|axis| axis.is_finite()) {
+            return None;
+        }
+        if max[0] < min[0] || max[1] < min[1] {
+            return None;
+        }
+        Some(Self { min, max })
+    }
+
+    /// Build a rect from one corner plus a size, normalizing a negative size.
+    pub fn from_corner_size(corner: [f32; 2], size: [f32; 2]) -> Option<Self> {
+        if !corner
+            .iter()
+            .chain(size.iter())
+            .all(|axis| axis.is_finite())
+        {
+            return None;
+        }
+        let other = [corner[0] + size[0], corner[1] + size[1]];
+        Self::new(
+            [corner[0].min(other[0]), corner[1].min(other[1])],
+            [corner[0].max(other[0]), corner[1].max(other[1])],
+        )
+    }
+
+    /// Width on x.
+    pub fn width(self) -> f32 {
+        self.max[0] - self.min[0]
+    }
+
+    /// Height on y.
+    pub fn height(self) -> f32 {
+        self.max[1] - self.min[1]
+    }
+
+    /// Area in square units.
+    pub fn area(self) -> f32 {
+        self.width() * self.height()
+    }
+
+    /// Overlapping rect, `None` when the two only touch or miss.
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        let min = [self.min[0].max(other.min[0]), self.min[1].max(other.min[1])];
+        let max = [self.max[0].min(other.max[0]), self.max[1].min(other.max[1])];
+        if max[0] <= min[0] || max[1] <= min[1] {
+            return None;
+        }
+        Self::new(min, max)
+    }
+
+    /// Overlap area in square units; zero when the rects miss.
+    pub fn overlap_area(self, other: Self) -> f32 {
+        self.intersection(other).map_or(0.0, Rect::area)
+    }
+}
+
+/// Which objects a marquee takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectMode {
+    /// Any overlap with the marquee selects the object.
+    Partial,
+    /// The object must be covered by the marquee within [`FULL_TOLERANCE_PX2`].
+    Full,
+}
+
+/// Square units a full-mode marquee may miss and still count as covering.
+pub const FULL_TOLERANCE_PX2: f32 = 0.1;
+
+/// Marquee selection: the objects under `rect`, added to `base`.
+///
+/// `projected` holds one row per candidate: its id, its screen rect from the
+/// caller's projection, and whether it may be selected (a hidden or locked node
+/// passes `false` and is skipped). [`SelectMode::Partial`] takes any overlap;
+/// [`SelectMode::Full`] takes a node whose covered area reaches its own area
+/// minus [`FULL_TOLERANCE_PX2`]. Hits join `base`, so the caller passes the live
+/// selection for a shift-drag and [`Selection::new`] for a fresh drag. The
+/// result is in id order with no duplicates and never passes
+/// [`MAX_SELECTION`] ([`SelectError::Full`]).
+pub fn marquee(
+    rect: Rect,
+    projected: &[(ObjectId, Rect, bool)],
+    mode: SelectMode,
+    base: &Selection,
+) -> Result<Selection, SelectError> {
+    let mut ids = base.to_vec();
+    for (id, node, selectable) in projected {
+        if !*selectable || id.is_nil() {
+            continue;
+        }
+        let takes = match mode {
+            SelectMode::Partial => rect.overlap_area(*node) > 0.0,
+            SelectMode::Full => {
+                let covered = rect.overlap_area(*node);
+                covered >= node.area() - FULL_TOLERANCE_PX2
+            }
+        };
+        if takes {
+            ids.push(*id);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    let mut selection = Selection::new();
+    selection.replace(ids)?;
+    Ok(selection)
+}
+
 /// One captured object: its source id, pose and display name at copy time.
 ///
 /// The caller builds these rows from the live document; the clipboard never
@@ -500,6 +623,88 @@ mod tests {
             })
         );
         assert_eq!(set.len(), MAX_SELECTION, "a refused replace keeps the set");
+    }
+
+    #[test]
+    fn marquee_takes_partial_full_and_skips_hidden() {
+        let marquee_rect = Rect::new([0.0, 0.0], [100.0, 100.0]).unwrap();
+        let inside = Rect::new([10.0, 10.0], [20.0, 20.0]).unwrap();
+        let straddle = Rect::new([90.0, 10.0], [130.0, 20.0]).unwrap();
+        let outside = Rect::new([200.0, 200.0], [220.0, 220.0]).unwrap();
+        let hidden = Rect::new([15.0, 15.0], [25.0, 25.0]).unwrap();
+        let projected = |hidden_selectable: bool| {
+            vec![
+                (id(3), straddle, true),
+                (id(1), inside, true),
+                (id(2), outside, true),
+                (id(4), hidden, hidden_selectable),
+            ]
+        };
+        let partial = marquee(
+            marquee_rect,
+            &projected(false),
+            SelectMode::Partial,
+            &Selection::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            partial.to_vec(),
+            vec![id(1), id(3)],
+            "any overlap, id order"
+        );
+        let full = marquee(
+            marquee_rect,
+            &projected(false),
+            SelectMode::Full,
+            &Selection::new(),
+        )
+        .unwrap();
+        assert_eq!(full.to_vec(), vec![id(1)], "only the covered node");
+        // A selectable hidden node does join when the caller says it may.
+        let shown = marquee(
+            marquee_rect,
+            &projected(true),
+            SelectMode::Partial,
+            &Selection::new(),
+        )
+        .unwrap();
+        assert_eq!(shown.to_vec(), vec![id(1), id(3), id(4)]);
+
+        // Base rows stay and duplicates collapse.
+        let mut base = Selection::new();
+        base.add(id(9)).unwrap();
+        base.add(id(1)).unwrap();
+        let union = marquee(marquee_rect, &projected(false), SelectMode::Partial, &base).unwrap();
+        assert_eq!(union.to_vec(), vec![id(1), id(3), id(9)]);
+
+        // The bound is the selection cap, with the typed error.
+        let many: Vec<(ObjectId, Rect, bool)> = (0..=MAX_SELECTION)
+            .map(|n| (id(u16::try_from(n + 1).unwrap()), inside, true))
+            .collect();
+        assert_eq!(
+            marquee(marquee_rect, &many, SelectMode::Partial, &Selection::new()),
+            Err(SelectError::Full {
+                len: MAX_SELECTION + 1,
+                max: MAX_SELECTION
+            })
+        );
+    }
+
+    #[test]
+    fn rect_refuses_garbage_and_measures_overlap() {
+        assert_eq!(Rect::new([1.0, 0.0], [0.0, 1.0]), None);
+        assert_eq!(Rect::new([f32::NAN, 0.0], [1.0, 1.0]), None);
+        let rect = Rect::from_corner_size([10.0, 10.0], [-4.0, 3.0]).unwrap();
+        assert_eq!(rect, Rect::new([6.0, 10.0], [10.0, 13.0]).unwrap());
+        assert_eq!(rect.area(), 12.0);
+        assert_eq!(
+            rect.overlap_area(Rect::new([8.0, 11.0], [20.0, 20.0]).unwrap()),
+            4.0
+        );
+        assert_eq!(
+            rect.overlap_area(Rect::new([10.0, 10.0], [20.0, 20.0]).unwrap()),
+            0.0
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! `material` pack: the one material record an AI writes as text.
 //!
-//! Seven verbs over the shipped records (`MaterialSet::shipped`: the fourteen
+//! Ten verbs over the shipped records (`MaterialSet::shipped`: the fourteen
 //! siege materials and the reference set):
 //!
 //! - `material.list` (observe): every record with its wire id, digests and
@@ -25,15 +25,27 @@
 //!   the node has a `destructible` component, its physical material follows,
 //!   in one previewed, capability-gated batch (the same path as `tx.apply`), so
 //!   one undo restores both.
+//! - `material.graph.set` (commit): store a typed procedural graph (nodes:
+//!   noise, tile, gradient, curve, warp, blend) and fold it into the record:
+//!   base color, roughness, metalness, the five coverage channels, a height
+//!   field and four texture refs. It returns the graph id (the digest of the
+//!   canonical text) and the folded record's look digest, so the same graph
+//!   twice is a no-op with the same digest.
+//! - `material.graph.get` (observe): one stored graph back as canonical text.
+//! - `material.bake` (commit): sample a graph at 512 or 1024 into four PNGs
+//!   (base_color, orm, normal, emissive) in `out_dir`, with each map's digest,
+//!   bytes and per-channel min/max; a map flat on every channel is refused.
 //!
 //! The record table has no document of its own yet, so an edit lives in the
 //! text the caller holds; `material.set` is the one verb that writes the
-//! scene. Units: unit-range factors, meters, nits (see `material.schema`).
+//! scene, and a graph lives in this session's table until the door restarts.
+//! Units: unit-range factors, meters, nits (see `material.schema`).
 //! Determinism: the same text gives the same digests on every machine (the
 //! record codec is integer-exact for sim fields and canonical for look
-//! fields). Errors: [`McpToolError`] codes `bad_record` (the message starts
-//! with the field path), `unknown_material` and `bad_edit`, each naming the
-//! legal values.
+//! fields; a bake is integer-hash noise plus stored-block PNG, so the same
+//! graph gives the same bytes). Errors: [`McpToolError`] codes `bad_record`
+//! (the message starts with the field path), `unknown_material`, `bad_edit`,
+//! `bad_graph` and `unknown_graph`, each naming the legal values.
 
 use engine_material::compile::{compile, lobe, slot, wgsl_digest, Structure};
 use engine_material::{MaterialRecord, MaterialSet, SCHEMA};
@@ -62,6 +74,12 @@ pub const TOOL_MATERIAL_PARAM: &str = "material.param";
 pub const TOOL_MATERIAL_COMPARE: &str = "material.compare";
 /// Verb: make a node use a shipped record (look and physics).
 pub const TOOL_MATERIAL_SET: &str = "material.set";
+/// Verb: store a typed procedural graph and report the record it folds into.
+pub const TOOL_MATERIAL_GRAPH_SET: &str = "material.graph.set";
+/// Verb: read a stored graph back as canonical text.
+pub const TOOL_MATERIAL_GRAPH_GET: &str = "material.graph.get";
+/// Verb: bake a graph into four PNG maps.
+pub const TOOL_MATERIAL_BAKE: &str = "material.bake";
 
 /// Longest record text accepted by `material.preview`, bytes.
 pub const MAX_RECORD_TEXT: usize = 16 * 1024;
@@ -301,6 +319,340 @@ pub struct MaterialSetOutput {
     pub revision: u64,
     /// The batch effect lines.
     pub effects: Vec<String>,
+}
+
+/// Longest graph text the graph verbs accept, bytes.
+pub const MAX_GRAPH_TEXT: usize = engine_material::graph::MAX_GRAPH_BYTES;
+
+/// Args for `material.graph.set`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MaterialGraphSetArgs {
+    /// Graph JSON text (at most 16 KB): nodes, output fields and layers.
+    pub graph: String,
+}
+
+/// Result of `material.graph.set`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MaterialGraphSetOutput {
+    /// Graph id: the digest of the canonical graph text.
+    pub id: String,
+    /// Material name the folded record takes.
+    pub material: String,
+    /// Shipped record the folded record extends.
+    pub base: String,
+    /// Canonical graph text (what `material.graph.get` returns).
+    pub canonical: String,
+    /// Node count.
+    pub nodes: u32,
+    /// Layer count the record carries.
+    pub layers: u32,
+    /// Coverage channels the graph drives, by name.
+    pub channels: Vec<String>,
+    /// Texture slots the folded record fills.
+    pub textures: Vec<String>,
+    /// Look digest of the folded record (hex).
+    pub record_digest: String,
+    /// Sim digest of the folded record (hex): the parent's, never moved.
+    pub sim_digest: String,
+    /// False when the same graph was already set: the second call is a no-op.
+    pub applied: bool,
+}
+
+/// Args for `material.graph.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MaterialGraphGetArgs {
+    /// Graph id from `material.graph.set`.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Graph JSON text, instead of an id.
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+/// Result of `material.graph.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MaterialGraphGetOutput {
+    /// Graph id: the digest of the canonical text.
+    pub id: String,
+    /// Material name the folded record takes.
+    pub material: String,
+    /// Shipped record the folded record extends.
+    pub base: String,
+    /// Node count.
+    pub nodes: u32,
+    /// Canonical graph text, to edit and set again.
+    pub canonical: String,
+    /// Look digest of the folded record (hex).
+    pub record_digest: String,
+}
+
+/// Args for `material.bake`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MaterialBakeArgs {
+    /// Graph id from `material.graph.set`.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Graph JSON text, instead of an id.
+    #[serde(default)]
+    pub graph: Option<String>,
+    /// Map side in pixels: 512 or 1024; default 512.
+    #[serde(default)]
+    pub resolution: Option<u32>,
+    /// Folder the four PNGs are written into (created when absent).
+    pub out_dir: String,
+}
+
+/// One baked map in a bake receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MaterialBakeMap {
+    /// Map name: `base_color`, `orm`, `normal` or `emissive`.
+    pub name: String,
+    /// Written file path.
+    pub path: String,
+    /// Digest of the raw samples (hex): equal graphs give equal digests.
+    pub digest: String,
+    /// File size, bytes.
+    pub bytes: u64,
+    /// Smallest value per channel (R, G, B, A) in 0..=1.
+    pub min: [f32; 4],
+    /// Largest value per channel (R, G, B, A) in 0..=1.
+    pub max: [f32; 4],
+}
+
+/// Result of `material.bake`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct MaterialBakeOutput {
+    /// Graph id.
+    pub graph: String,
+    /// Material name the graph folds into.
+    pub material: String,
+    /// Map side in pixels.
+    pub resolution: u32,
+    /// The four maps in write order.
+    pub maps: Vec<MaterialBakeMap>,
+    /// Look digest of the folded record (hex).
+    pub record_digest: String,
+    /// Texture references the folded record now names.
+    pub textures: Vec<String>,
+}
+
+/// This session's graphs by id, so `graph.get` and `bake` can name one.
+fn graphs() -> &'static std::sync::Mutex<
+    std::collections::BTreeMap<u64, std::collections::BTreeMap<u64, engine_material::graph::Graph>>,
+> {
+    static GRAPHS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::BTreeMap<
+                u64,
+                std::collections::BTreeMap<u64, engine_material::graph::Graph>,
+            >,
+        >,
+    > = std::sync::OnceLock::new();
+    GRAPHS.get_or_init(std::sync::Mutex::default)
+}
+
+fn lock_graphs() -> Result<
+    std::sync::MutexGuard<
+        'static,
+        std::collections::BTreeMap<
+            u64,
+            std::collections::BTreeMap<u64, engine_material::graph::Graph>,
+        >,
+    >,
+    McpToolError,
+> {
+    graphs().lock().map_err(|_| {
+        McpToolError::new(
+            "lock_poisoned",
+            "material graph table is poisoned; restart the door",
+        )
+    })
+}
+
+/// A graph refusal names the path, the typed kind and one recovery step.
+fn bad_graph(error: engine_material::graph::GraphError) -> McpToolError {
+    McpToolError::new("bad_graph", error.to_string()).with_data(json!({ "path": error.path }))
+}
+
+fn parse_graph(text: &str) -> Result<engine_material::graph::Graph, McpToolError> {
+    engine_material::graph::Graph::parse(text).map_err(bad_graph)
+}
+
+/// Fold a graph against the shipped record its `base` names.
+fn fold_graph(graph: &engine_material::graph::Graph) -> Result<MaterialRecord, McpToolError> {
+    let set = MaterialSet::shipped();
+    let parent = set
+        .get(&graph.base)
+        .ok_or_else(|| unknown(&graph.base, &set))?;
+    graph.to_record(parent).map_err(bad_graph)
+}
+
+fn material_graph_set(
+    server: &crate::mcp::McpServer,
+    args: &MaterialGraphSetArgs,
+) -> Result<MaterialGraphSetOutput, McpToolError> {
+    let graph = parse_graph(&args.graph)?;
+    let record = fold_graph(&graph)?;
+    let id = format!("{:016x}", graph.digest());
+    let session = server.dispatch(TOOL_MATERIAL_GRAPH_SET, |state| Ok(state.session()))?;
+    let applied = {
+        let mut table = lock_graphs()?;
+        let entry = table.entry(session).or_default();
+        let key = graph.digest();
+        let first = !entry.contains_key(&key);
+        entry.insert(key, graph.clone());
+        first
+    };
+    Ok(MaterialGraphSetOutput {
+        id,
+        material: graph.material.clone(),
+        base: graph.base.clone(),
+        canonical: graph.canonical(),
+        nodes: u32::try_from(graph.nodes.len()).unwrap_or(u32::MAX),
+        layers: u32::try_from(record.layers.len()).unwrap_or(u32::MAX),
+        channels: graph
+            .output
+            .channels
+            .keys()
+            .map(|channel| channel.name().to_owned())
+            .collect(),
+        textures: [
+            record.look.textures.base_color.clone(),
+            record.look.textures.orm.clone(),
+            record.look.textures.normal.clone(),
+            record.look.textures.emissive.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        record_digest: format!("{:016x}", record.look_digest()),
+        sim_digest: format!("{:016x}", record.sim_digest()),
+        applied,
+    })
+}
+
+fn material_graph_get(
+    server: &crate::mcp::McpServer,
+    args: &MaterialGraphGetArgs,
+) -> Result<MaterialGraphGetOutput, McpToolError> {
+    let graph = resolve_graph(server, TOOL_MATERIAL_GRAPH_GET, &args.id, &args.graph)?;
+    let record = fold_graph(&graph)?;
+    Ok(MaterialGraphGetOutput {
+        id: format!("{:016x}", graph.digest()),
+        material: graph.material.clone(),
+        base: graph.base.clone(),
+        nodes: u32::try_from(graph.nodes.len()).unwrap_or(u32::MAX),
+        canonical: graph.canonical(),
+        record_digest: format!("{:016x}", record.look_digest()),
+    })
+}
+
+/// A stored graph by id, or the graph text the caller sent.
+fn resolve_graph(
+    server: &crate::mcp::McpServer,
+    tool: &str,
+    id: &Option<String>,
+    text: &Option<String>,
+) -> Result<engine_material::graph::Graph, McpToolError> {
+    if let Some(text) = text {
+        return parse_graph(text);
+    }
+    let Some(id) = id else {
+        return Err(McpToolError::new(
+            "bad_graph",
+            "name a graph with `id` from material.graph.set, or pass `graph` text",
+        ));
+    };
+    let key = u64::from_str_radix(id.trim(), 16).map_err(|_| {
+        McpToolError::new(
+            "unknown_graph",
+            format!("`{id}` is not a graph id; the ids are hex digests from material.graph.set"),
+        )
+    })?;
+    let session = server.dispatch(tool, |state| Ok(state.session()))?;
+    let table = lock_graphs()?;
+    table
+        .get(&session)
+        .and_then(|graphs| graphs.get(&key))
+        .cloned()
+        .ok_or_else(|| {
+            McpToolError::new(
+                "unknown_graph",
+                format!("no graph `{id}` in this session; set it with material.graph.set first"),
+            )
+        })
+}
+
+fn material_bake(
+    server: &crate::mcp::McpServer,
+    args: &MaterialBakeArgs,
+) -> Result<MaterialBakeOutput, McpToolError> {
+    let graph = resolve_graph(server, TOOL_MATERIAL_BAKE, &args.id, &args.graph)?;
+    let record = fold_graph(&graph)?;
+    let resolution = args.resolution.unwrap_or(512);
+    let baked = graph.bake(resolution).map_err(bad_graph)?;
+    let dir = std::path::Path::new(&args.out_dir);
+    std::fs::create_dir_all(dir).map_err(|error| {
+        McpToolError::new(
+            "bake_io",
+            format!(
+                "cannot make `{}`: {error}; next: name an out_dir this process may write",
+                dir.display()
+            ),
+        )
+    })?;
+    let mut maps = Vec::with_capacity(baked.maps.len());
+    for map in &baked.maps {
+        let path = dir.join(format!("{}_{}.png", graph.material, map.name));
+        std::fs::write(&path, &map.png).map_err(|error| {
+            McpToolError::new(
+                "bake_io",
+                format!(
+                    "cannot write `{}`: {error}; next: name a writable out_dir",
+                    path.display()
+                ),
+            )
+        })?;
+        maps.push(MaterialBakeMap {
+            name: map.name.to_owned(),
+            path: path.to_string_lossy().into_owned(),
+            digest: format!("{:016x}", map.digest),
+            bytes: u64::try_from(map.png.len()).unwrap_or(u64::MAX),
+            min: map.min,
+            max: map.max,
+        });
+    }
+    let textures: Vec<String> = [
+        record.look.textures.base_color.clone(),
+        record.look.textures.orm.clone(),
+        record.look.textures.normal.clone(),
+        record.look.textures.emissive.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    Ok(MaterialBakeOutput {
+        graph: format!("{:016x}", baked.graph),
+        material: graph.material.clone(),
+        resolution,
+        maps,
+        record_digest: format!("{:016x}", record.look_digest()),
+        textures,
+    })
 }
 
 fn info_of(set: &MaterialSet, record: &MaterialRecord) -> MaterialInfo {
@@ -599,6 +951,7 @@ fn material_set(
             ops,
             approval: preview.approval,
             delta: Some(false),
+            origin: None,
         })
     })?;
     Ok(MaterialSetOutput {
@@ -686,12 +1039,46 @@ crate::e2_tool!(
     invoke = material_set
 );
 
-/// The material pack: seven verbs, loaded on demand.
+crate::e2_tool!(
+    /// `material.graph.set`: store a procedural graph and fold it into a record.
+    MaterialGraphSetTool,
+    name = TOOL_MATERIAL_GRAPH_SET,
+    description = "Store a typed procedural material graph (nodes: noise, tile, gradient, curve, warp, blend) as JSON text and fold it into the existing material record: base color, roughness, metalness, the five coverage channels, a height field and four texture refs. Returns the graph id, the canonical text and the record digest; the same graph twice is a no-op with the same id. Graph refusals name the path, the typed kind and one recovery step.",
+    readonly = false,
+    args = MaterialGraphSetArgs,
+    output = MaterialGraphSetOutput,
+    invoke = material_graph_set
+);
+
+crate::e2_tool!(
+    /// `material.graph.get`: one stored graph as canonical text.
+    MaterialGraphGetTool,
+    name = TOOL_MATERIAL_GRAPH_GET,
+    description = "Read a stored material graph back as canonical JSON text (by id from material.graph.set, or by passing graph text), with its id, node count and the digest of the record it folds into. No side effects.",
+    readonly = true,
+    args = MaterialGraphGetArgs,
+    output = MaterialGraphGetOutput,
+    invoke = material_graph_get
+);
+
+crate::e2_tool!(
+    /// `material.bake`: write the four maps of a graph.
+    MaterialBakeTool,
+    name = TOOL_MATERIAL_BAKE,
+    description = "Bake a material graph (by id or inline text) at 512 or 1024 into four PNGs: base_color, orm, normal, emissive, written into out_dir. Returns each map's path, digest, bytes and per-channel min/max, plus the record digest. The same graph twice gives equal digests and equal bytes; a map that is flat on every channel is refused.",
+    readonly = false,
+    args = MaterialBakeArgs,
+    output = MaterialBakeOutput,
+    invoke = material_bake
+);
+
+/// The material pack: ten verbs, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
         "materials: one record for look, physics, sound and damage layers, written as text; \
-         list, read, schema, validate-and-describe, what-if edits, compare and setting a record on a node",
+         list, read, schema, validate-and-describe, what-if edits, compare, setting a record on a \
+         node, and a typed procedural graph with a bake to four maps",
         false,
     );
     pack.add(VerbSpec::of::<MaterialListTool>(
@@ -726,6 +1113,21 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<MaterialSetTool>(
         TOOL_MATERIAL_SET,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<MaterialGraphSetTool>(
+        TOOL_MATERIAL_GRAPH_SET,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<MaterialGraphGetTool>(
+        TOOL_MATERIAL_GRAPH_GET,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<MaterialBakeTool>(
+        TOOL_MATERIAL_BAKE,
         PACK,
         CapabilityCard::Commit,
     )?);
@@ -925,6 +1327,7 @@ mod tests {
                 ops,
                 approval: drafted.approval,
                 delta: None,
+                origin: None,
             },
         )
         .expect("insert lands");
@@ -958,6 +1361,7 @@ mod tests {
                 ops: seed_ops,
                 approval: drafted.approval,
                 delta: None,
+                origin: None,
             },
         )
         .expect("destructible lands");
@@ -1042,8 +1446,177 @@ mod tests {
         );
     }
 
+    const BRICK: &str = r#"{
+      "material": "brick_wall",
+      "base": "stone",
+      "nodes": [
+        {"id": 1, "kind": "gradient", "params": {"axis": "y", "from": 0.2, "to": 1.0}},
+        {"id": 2, "kind": "tile", "inputs": {"a": 1}, "params": {"rows": 8, "cols": 3, "mortar": 0.08}},
+        {"id": 3, "kind": "noise", "params": {"scale": 24, "seed": 1}},
+        {"id": 4, "kind": "blend", "inputs": {"a": 2, "b": 3, "mask": 3}, "params": {"mode": "multiply"}},
+        {"id": 5, "kind": "curve", "inputs": {"a": 2}, "params": {"exponent": 2}}
+      ],
+      "output": {
+        "color": 2, "color_low": [0.45, 0.33, 0.28], "color_high": [0.72, 0.6, 0.48],
+        "roughness": 4, "metalness": 3, "height": 2,
+        "channels": {"wetness": 3, "dirt": 2, "heat": 5},
+        "emissive": 5
+      },
+      "layers": [{"kind": "wet", "driver": "wetness", "strength": 0.6}]
+    }"#;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("e2040-material-{tag}-{}", std::process::id()))
+    }
+
     #[test]
-    fn the_pack_registers_seven_verbs_with_their_cards() {
+    fn graph_set_folds_the_brick_graph_and_a_second_set_is_a_no_op() {
+        let server = server();
+        let first = MaterialGraphSetTool::invoke(
+            &server,
+            MaterialGraphSetArgs {
+                graph: BRICK.to_owned(),
+            },
+        )
+        .expect("graph sets");
+        assert_eq!(first.material, "brick_wall");
+        assert_eq!(first.base, "stone");
+        assert_eq!(first.nodes, 5);
+        assert_eq!(first.layers, 1);
+        assert!(first.applied);
+        assert!(first.channels.contains(&"wetness".to_owned()));
+        assert_eq!(first.textures.len(), 4);
+        // The sim half never moves: the graph is a look document.
+        let stone = MaterialSet::shipped().get("stone").cloned().expect("stone");
+        assert_eq!(first.sim_digest, format!("{:016x}", stone.sim_digest()));
+        let second = MaterialGraphSetTool::invoke(
+            &server,
+            MaterialGraphSetArgs {
+                graph: BRICK.to_owned(),
+            },
+        )
+        .expect("graph sets twice");
+        assert!(!second.applied, "the second set is a no-op");
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.record_digest, first.record_digest);
+        assert_eq!(second.canonical, first.canonical);
+    }
+
+    #[test]
+    fn graph_get_reads_a_stored_graph_back_as_canonical_text() {
+        let server = server();
+        let set = MaterialGraphSetTool::invoke(
+            &server,
+            MaterialGraphSetArgs {
+                graph: BRICK.to_owned(),
+            },
+        )
+        .expect("graph sets");
+        let got = MaterialGraphGetTool::invoke(
+            &server,
+            MaterialGraphGetArgs {
+                id: Some(set.id.clone()),
+                graph: None,
+            },
+        )
+        .expect("graph gets");
+        assert_eq!(got.id, set.id);
+        assert_eq!(got.canonical, set.canonical);
+        assert_eq!(got.record_digest, set.record_digest);
+        // The canonical text sets again to the same id.
+        let again = MaterialGraphSetTool::invoke(
+            &server,
+            MaterialGraphSetArgs {
+                graph: got.canonical.clone(),
+            },
+        )
+        .expect("canonical sets");
+        assert_eq!(again.id, set.id);
+        let missing = MaterialGraphGetTool::invoke(
+            &server,
+            MaterialGraphGetArgs {
+                id: Some("0123456789abcdef".to_owned()),
+                graph: None,
+            },
+        )
+        .expect_err("unknown id");
+        assert_eq!(missing.code, "unknown_graph");
+        let none = MaterialGraphGetTool::invoke(&server, MaterialGraphGetArgs::default())
+            .expect_err("nothing named");
+        assert_eq!(none.code, "bad_graph");
+    }
+
+    #[test]
+    fn a_bad_graph_names_the_legal_kinds_and_one_recovery() {
+        let broken = BRICK.replace(r#""kind": "tile""#, r#""kind": "voronoi""#);
+        let err = MaterialGraphSetTool::invoke(&server(), MaterialGraphSetArgs { graph: broken })
+            .expect_err("unknown kind");
+        assert_eq!(err.code, "bad_graph");
+        assert!(err
+            .message
+            .contains("noise, tile, gradient, curve, warp, blend"));
+        assert!(err.message.contains("next:"));
+    }
+
+    #[test]
+    fn bake_writes_four_pngs_and_two_runs_are_byte_equal() {
+        let server = server();
+        let set = MaterialGraphSetTool::invoke(
+            &server,
+            MaterialGraphSetArgs {
+                graph: BRICK.to_owned(),
+            },
+        )
+        .expect("graph sets");
+        let out = scratch("bake");
+        let ask = || {
+            MaterialBakeTool::invoke(
+                &server,
+                MaterialBakeArgs {
+                    id: Some(set.id.clone()),
+                    graph: None,
+                    resolution: Some(512),
+                    out_dir: out.to_string_lossy().into_owned(),
+                },
+            )
+        };
+        let first = ask().expect("bakes");
+        assert_eq!(first.resolution, 512);
+        let names: Vec<&str> = first.maps.iter().map(|map| map.name.as_str()).collect();
+        assert_eq!(names, ["base_color", "orm", "normal", "emissive"]);
+        assert_eq!(first.textures.len(), 4);
+        for map in &first.maps {
+            assert!(map.bytes > 0, "{} bytes", map.name);
+            let path = std::path::Path::new(&map.path);
+            assert!(path.exists(), "{} written", map.name);
+            let bytes = std::fs::read(path).expect("map reads back");
+            assert_eq!(u64::try_from(bytes.len()).unwrap_or(0), map.bytes);
+            assert!(map.max.iter().zip(&map.min).any(|(high, low)| high > low));
+        }
+        let second = ask().expect("bakes twice");
+        assert_eq!(second.maps, first.maps);
+        let flat = MaterialBakeTool::invoke(
+            &server,
+            MaterialBakeArgs {
+                id: None,
+                graph: Some(
+                    r#"{"material": "flat", "nodes": [{"id": 1, "kind": "gradient"},
+                      {"id": 2, "kind": "gradient", "params": {"from": 0.5, "to": 0.5}}],
+                      "output": {"color": 1, "roughness": 2, "metalness": 2, "height": 2}}"#
+                        .to_owned(),
+                ),
+                resolution: Some(512),
+                out_dir: out.to_string_lossy().into_owned(),
+            },
+        )
+        .expect_err("a flat bake is refused");
+        assert_eq!(flat.code, "bad_graph");
+        assert!(flat.message.contains("flat"), "{}", flat.message);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn the_pack_registers_ten_verbs_with_their_cards() {
         let registry = super::super::PackRegistry::shipped();
         assert!(registry.errors().is_empty(), "{:?}", registry.errors());
         for name in [
@@ -1053,13 +1626,21 @@ mod tests {
             TOOL_MATERIAL_PREVIEW,
             TOOL_MATERIAL_PARAM,
             TOOL_MATERIAL_COMPARE,
+            TOOL_MATERIAL_GRAPH_GET,
         ] {
             let verb = registry.verb(name).expect("registered");
             assert_eq!(verb.card(), CapabilityCard::Observe, "{name}");
             assert!(verb.readonly(), "{name}");
         }
-        let set = registry.verb(TOOL_MATERIAL_SET).expect("set");
-        assert_eq!(set.card(), CapabilityCard::Commit);
-        assert!(!set.readonly());
+        for name in [
+            TOOL_MATERIAL_SET,
+            TOOL_MATERIAL_GRAPH_SET,
+            TOOL_MATERIAL_BAKE,
+        ] {
+            let verb = registry.verb(name).expect("registered");
+            let verb = registry.verb(name).expect("registered");
+            assert_eq!(verb.card(), CapabilityCard::Commit, "{name}");
+            assert!(!verb.readonly(), "{name}");
+        }
     }
 }

@@ -67,6 +67,9 @@ pub mod play;
 /// facade was cut 2026-10-16 (recover via `git log --follow -- crates/editor/src/app.rs`).
 #[cfg(feature = "ui")]
 pub mod play_in;
+/// Pose shelf (W4): named poses over recorded [`pose_tape::PoseTape`]s, with a
+/// caller-rendered swatch. Std-only; the shelf never records or replays.
+pub mod pose_shelf;
 /// Mouse-to-joint pose recorder: quantized joint targets as a bounded integer
 /// tape, validated and replayed deterministically. The UI layer solves IK in
 /// floats and hands the milli-turn angles here; this core carries no float and
@@ -111,6 +114,9 @@ pub mod viewport;
 pub mod viewport_image;
 /// Crash-safe journal: write-ahead log over the command service.
 pub mod wal;
+/// Reimport watch (E10): file snapshots polled at tick boundaries with a
+/// coalescing window, so a DCC save costs one reimport. Std-only, no threads.
+pub mod watch;
 
 use std::collections::VecDeque;
 
@@ -216,6 +222,8 @@ pub struct History {
     entries: VecDeque<HistoryEntry>,
     dropped: u64,
     cap: usize,
+    /// Named versions: name plus entry index, oldest name first.
+    names: Vec<(String, usize)>,
 }
 
 impl History {
@@ -225,6 +233,7 @@ impl History {
             entries: VecDeque::new(),
             dropped: 0,
             cap: cap.max(1),
+            names: Vec::new(),
         }
     }
 
@@ -233,13 +242,93 @@ impl History {
         self.cap
     }
 
-    /// Push one step, evicting the oldest past the cap.
+    /// Push one step, evicting the oldest past the cap. Named versions follow
+    /// their entry: a name on the evicted step is dropped and every kept name
+    /// shifts down by one index.
     pub fn push(&mut self, entry: HistoryEntry) {
         self.entries.push_back(entry);
         if self.entries.len() > self.cap {
             self.entries.pop_front();
             self.dropped = self.dropped.saturating_add(1);
+            self.names.retain(|(_, at)| *at > 0);
+            for (_, at) in &mut self.names {
+                *at = at.saturating_sub(1);
+            }
         }
+    }
+
+    /// Give one kept entry a name (`W7` named versions).
+    ///
+    /// The newest [`MAX_NAMES`] names stay; naming past that drops the oldest
+    /// name. An empty or duplicate name and an index past the ring refuse,
+    /// changing nothing.
+    pub fn name(&mut self, index: usize, name: &str) -> Result<(), NameError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(NameError::Empty);
+        }
+        if self.entries.get(index).is_none() {
+            return Err(NameError::OutOfRange {
+                index,
+                len: self.entries.len(),
+            });
+        }
+        if self.names.iter().any(|(known, _)| known == name) {
+            return Err(NameError::Duplicate {
+                name: name.to_string(),
+            });
+        }
+        self.names.push((name.to_string(), index));
+        if self.names.len() > MAX_NAMES {
+            self.names.remove(0);
+        }
+        Ok(())
+    }
+
+    /// The entry a name points at, when the name is still kept.
+    pub fn version(&self, name: &str) -> Option<&HistoryEntry> {
+        let (_, index) = self.names.iter().find(|(known, _)| known == name)?;
+        self.entries.get(*index)
+    }
+
+    /// Kept names oldest first, with the entry index each points at.
+    pub fn names(&self) -> Vec<(&str, usize)> {
+        self.names
+            .iter()
+            .map(|(name, index)| (name.as_str(), *index))
+            .collect()
+    }
+
+    /// One panel row per kept entry, newest first.
+    pub fn rows_newest_first(&self) -> Vec<HistoryRow> {
+        let mut rows: Vec<HistoryRow> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| HistoryRow {
+                index,
+                label: entry.label.clone(),
+                revision: entry.revision,
+                tick: entry.tick,
+                name: self
+                    .names
+                    .iter()
+                    .find(|(_, at)| *at == index)
+                    .map(|(name, _)| name.clone()),
+            })
+            .collect();
+        rows.reverse();
+        rows
+    }
+
+    /// Activate one history-panel row (newest first): the jump the panel hands
+    /// the scene owner. Row `0` is the newest step.
+    pub fn activate(&self, row: usize) -> Result<HistoryJump, HistoryError> {
+        let len = self.entries.len();
+        let index = len
+            .checked_sub(row.saturating_add(1))
+            .ok_or(HistoryError::OutOfRange { index: row, len })?;
+        self.jump(index)
     }
 
     /// Depth.
@@ -301,6 +390,73 @@ impl History {
 
 /// Most undo steps one dock [`History`] keeps; the oldest is evicted first.
 pub const HISTORY_CAP: usize = 100;
+
+/// Most named versions one [`History`] keeps; the oldest name leaves first.
+pub const MAX_NAMES: usize = 32;
+
+/// One history-panel row: a kept step in display order (newest first).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryRow {
+    /// Ring index of the entry, oldest first (`0` = oldest kept).
+    pub index: usize,
+    /// Step label, e.g. `scene.move`.
+    pub label: String,
+    /// Scene revision the step ended at.
+    pub revision: u64,
+    /// Fixed tick the step happened on.
+    pub tick: u64,
+    /// Named version pointing at this entry, when it has one.
+    pub name: Option<String>,
+}
+
+impl HistoryRow {
+    /// One panel line: `scene.move rev=3 t0042` plus ` name=approved` when the
+    /// step carries a named version.
+    pub fn text(&self) -> String {
+        let base = format!("{} rev={} t{:04}", self.label, self.revision, self.tick);
+        match &self.name {
+            Some(name) => format!("{base} name={name}"),
+            None => base,
+        }
+    }
+}
+
+/// Why [`History::name`] refused a named version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameError {
+    /// The name held no text.
+    Empty,
+    /// The name already points at a step.
+    Duplicate {
+        /// The repeated name.
+        name: String,
+    },
+    /// The index is past the kept entries.
+    OutOfRange {
+        /// Index asked for.
+        index: usize,
+        /// Kept entries.
+        len: usize,
+    },
+}
+
+impl std::fmt::Display for NameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("version name holds no text; pass 1 to 64 chars"),
+            Self::Duplicate { name } => write!(
+                f,
+                "version name `{name}` is taken; pick a new name or jump to that version"
+            ),
+            Self::OutOfRange { index, len } => write!(
+                f,
+                "history has no entry {index}: it keeps {len} entries (index 0..{len}); name a kept index"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NameError {}
 
 /// One visible undo step: its label, the layout it left and the scene position
 /// it ended at.
@@ -504,5 +660,83 @@ mod tests {
         assert_eq!(small.dropped(), 2);
         let kept: Vec<&str> = small.entries().map(|row| row.label.as_str()).collect();
         assert_eq!(kept, vec!["c", "d", "e"]);
+    }
+
+    #[test]
+    fn named_versions_roundtrip_and_refuse_three_ways() {
+        let mut h = History::new(HISTORY_CAP);
+        h.push(entry("scene.place", "0\nhierarchy", 1, 10, 1));
+        h.push(entry("scene.move", "1\nhierarchy", 2, 20, 2));
+        assert_eq!(h.name(0, "approved"), Ok(()));
+        assert_eq!(h.version("approved").unwrap().layout, "0\nhierarchy");
+        assert_eq!(h.names(), vec![("approved", 0)]);
+        assert_eq!(h.name(1, "  "), Err(NameError::Empty));
+        assert_eq!(
+            h.name(1, "approved"),
+            Err(NameError::Duplicate {
+                name: "approved".to_string()
+            })
+        );
+        assert_eq!(
+            h.name(9, "later"),
+            Err(NameError::OutOfRange { index: 9, len: 2 })
+        );
+        assert!(h.version("later").is_none());
+        // Newest names stay: name 33 entries and the first one leaves.
+        for i in 0..MAX_NAMES + 1 {
+            h.push(entry("scene.move", "x", 3, 30, 3));
+            let at = h.len() - 1;
+            let _ = h.name(at, &format!("v{i}"));
+        }
+        assert!(h.version("approved").is_none(), "the oldest name left");
+        assert_eq!(h.names().len(), MAX_NAMES);
+        assert!(h.version(&format!("v{MAX_NAMES}")).is_some());
+    }
+
+    #[test]
+    fn history_rows_run_newest_first_and_activate_returns_the_jump() {
+        let mut h = History::new(HISTORY_CAP);
+        let first = "0\nhierarchy\ninspector";
+        h.push(entry("scene.place", first, 1, 10, 1));
+        h.push(entry("scene.move", "1\nhierarchy", 2, 20, 2));
+        h.push(entry("scene.move", "2\nhierarchy\nbrowser", 3, 30, 3));
+        h.name(1, "wip").unwrap();
+
+        let rows = h.rows_newest_first();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].label, "scene.move");
+        assert_eq!(rows[0].revision, 3);
+        assert_eq!(rows[0].tick, 30);
+        assert_eq!(rows[0].index, 2);
+        assert_eq!(rows[1].name.as_deref(), Some("wip"));
+        assert_eq!(rows[2].text(), "scene.place rev=1 t0010");
+
+        let jump = h.activate(2).unwrap();
+        assert_eq!(jump.layout, first);
+        assert_eq!(jump.layout.as_bytes(), first.as_bytes());
+        assert_eq!(jump.ops, 2);
+        assert!(jump.backward);
+        assert_eq!(h.activate(0).unwrap().ops, 0);
+        assert_eq!(
+            h.activate(3),
+            Err(HistoryError::OutOfRange { index: 3, len: 3 })
+        );
+    }
+
+    #[test]
+    fn named_versions_follow_entries_when_the_ring_drops() {
+        let mut h = History::new(2);
+        h.push(entry("a", "A", 1, 1, 1));
+        h.push(entry("b", "B", 2, 2, 2));
+        h.name(1, "keep-b").unwrap();
+        h.push(entry("c", "C", 3, 3, 3));
+        // Entry `a` left; the name shifted down and still points at `b`.
+        assert_eq!(h.version("keep-b").unwrap().layout, "B");
+        h.name(1, "keep-c").unwrap();
+        h.push(entry("d", "D", 4, 4, 4));
+        // `b` left with `keep-b`; the newer name shifted down and survived.
+        assert!(h.version("keep-b").is_none());
+        assert_eq!(h.version("keep-c").unwrap().layout, "C");
+        assert_eq!(h.names(), vec![("keep-c", 0)]);
     }
 }

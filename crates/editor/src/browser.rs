@@ -237,6 +237,65 @@ impl BundleView {
     }
 }
 
+/// Placeholder a browser row shows when the cache holds no pixels for it.
+pub const MISSING_THUMB: &str = "—";
+
+/// Thumbnail state of one browser row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowThumb {
+    /// The cache holds pixels for this asset; the panel draws them.
+    Ready {
+        /// Content digest of the pixels.
+        digest: u64,
+    },
+    /// No pixels yet: the panel draws [`MISSING_THUMB`], never a fake image.
+    Missing,
+}
+
+impl RowThumb {
+    /// Text a text-only surface draws: the digest in hex, or the placeholder.
+    pub fn text(self) -> String {
+        match self {
+            Self::Ready { digest } => format!("{digest:016x}"),
+            Self::Missing => MISSING_THUMB.to_string(),
+        }
+    }
+}
+
+/// One browser panel row: the listed entry plus its thumbnail state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserRow {
+    /// The listed asset.
+    pub entry: BundleEntry,
+    /// Thumbnail the cache holds for it at row build time.
+    pub thumb: RowThumb,
+}
+
+/// Build the browser panel rows, one per listed entry in listing order.
+///
+/// Each row asks the thumbnail cache for the entry name, so a name with no
+/// pixels is recorded in [`ThumbnailCache::missing`] and drawn as
+/// [`MISSING_THUMB`]. Nothing is rendered here: the caller supplies the pixels.
+pub fn rows_with_thumbs(
+    view: &BundleView,
+    cache: &mut crate::thumbnail::ThumbnailCache,
+    now: u64,
+) -> Vec<BrowserRow> {
+    view.entries()
+        .iter()
+        .map(|entry| {
+            let thumb = match cache.get(&entry.name, now) {
+                Some(row) => RowThumb::Ready { digest: row.digest },
+                None => RowThumb::Missing,
+            };
+            BrowserRow {
+                entry: entry.clone(),
+                thumb,
+            }
+        })
+        .collect()
+}
+
 /// One search query: substring over names plus optional kind and tag.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchQuery {
@@ -953,6 +1012,31 @@ mod tests {
 
     fn entry(kind: AssetKind, name: &str, tags: &[&str]) -> BundleEntry {
         BundleEntry::new(kind, name, tags)
+    }
+
+    #[test]
+    fn rows_carry_a_thumbnail_or_the_placeholder() {
+        let mut bundle = BundleView::new();
+        bundle
+            .push(entry(AssetKind::Mesh, "crate", &["prop"]))
+            .unwrap();
+        bundle
+            .push(entry(AssetKind::Mesh, "wall", &["prop"]))
+            .unwrap();
+        let mut cache = crate::thumbnail::ThumbnailCache::default();
+        let pixels = vec![7u8; crate::thumbnail::THUMB_BYTES];
+        let digest = cache.insert("crate", &pixels, 1).unwrap();
+
+        let rows = rows_with_thumbs(&bundle, &mut cache, 2);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].entry.name, "crate");
+        assert_eq!(rows[0].thumb, RowThumb::Ready { digest });
+        assert_eq!(rows[0].thumb.text(), format!("{digest:016x}"));
+        assert_eq!(rows[1].thumb, RowThumb::Missing);
+        assert_eq!(rows[1].thumb.text(), MISSING_THUMB);
+        assert_eq!(cache.missing(), vec!["wall"], "the miss is recorded once");
+        // Two runs are identical: the row builder reads, never invents.
+        assert_eq!(rows_with_thumbs(&bundle, &mut cache, 3), rows);
     }
 
     fn small_bundle() -> BundleView {

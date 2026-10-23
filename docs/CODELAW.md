@@ -41,6 +41,7 @@ Every packet and review checks these. A packet that breaks one is rejected.
     features only for real optional dependencies.
 15. **Import, never re-derive.** Shared primitives have one owner in
     `engine-core` (`Fnv64`/`hash_bytes`, `splitmix64`, `Rng`, `Fixed`,
+    `quat_mul`/`quat_conj`/`rotate_vec`, `mat4::mul`, `text::is_identifier`,
     `alloc_probe`) and every crate may depend on it. Frozen means frozen
     behavior pinned by a golden test, never a reason to copy code.
 16. **Measured, not claimed.** `node tools/rust-quality.mjs` scores every

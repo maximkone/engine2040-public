@@ -15,6 +15,11 @@ checks install `cargo-deny@0.18.7`, the version CI uses.
 `Cargo.lock`, never commit `target/`. `.gitattributes` keeps text LF in every
 checkout so digests of text files match across Windows and Linux.
 
+A fresh clone does not run the tracked git hooks until it points git at them.
+`node tools/doctor.mjs` names the one command that fixes it
+(`node tools/hooks-install.mjs`); add `--strict` when a gate needs the hooks in
+place, because `--strict` fails while they are unset.
+
 ## Local gates
 
 One command runs every local gate from the repository root:

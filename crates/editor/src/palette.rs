@@ -20,6 +20,17 @@ use crate::shell::Panel;
 pub const DEFAULT_LIMIT: usize = 20;
 /// Longest verb name the index accepts, in chars.
 pub const MAX_VERB_CHARS: usize = 64;
+/// Queries this short rank only exact, prefix and word-start hits: a
+/// one-or-two-letter subsequence would match almost every row.
+pub const SHORT_QUERY_CHARS: usize = 2;
+/// Frecency a single use adds, in permille of the text score.
+pub const FRECENCY_STEP_PERMILLE: u32 = 60;
+/// Frecency cap, in permille (+60%): a well-used row lifts inside its tier.
+pub const FRECENCY_CAP_PERMILLE: u32 = 600;
+/// Most recent ids one overlay keeps.
+pub const RECENT_CAP: usize = 16;
+/// Widest score span one match tier owns, so frecency never crosses a tier.
+const TIER_BAND: u32 = 999;
 
 /// Where a palette row came from; the ranking also breaks score ties by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -69,6 +80,10 @@ pub struct Command {
     pub label: String,
     /// Source the row came from.
     pub kind: CommandKind,
+    /// How often the caller picked this row; a bump is one use. Frecency
+    /// scales the score inside its tier ([`FRECENCY_STEP_PERMILLE`] a use,
+    /// capped at [`FRECENCY_CAP_PERMILLE`]) and never crosses tiers.
+    pub frecency: u16,
 }
 
 impl Command {
@@ -79,6 +94,7 @@ impl Command {
             id: format!("panel.{}", title.to_ascii_lowercase()),
             label: title.to_string(),
             kind: CommandKind::Panel,
+            frecency: 0,
         }
     }
 
@@ -90,6 +106,7 @@ impl Command {
             id: format!("verb.{name}"),
             label: name.to_string(),
             kind: CommandKind::Verb,
+            frecency: 0,
         })
     }
 
@@ -101,7 +118,29 @@ impl Command {
             id: format!("asset.{}.{name}", kind.label()),
             label: name.to_string(),
             kind: CommandKind::Asset,
+            frecency: 0,
         })
+    }
+
+    /// The panel this row focuses, when it is a panel row.
+    pub fn panel_target(&self) -> Option<Panel> {
+        let id = self.id.strip_prefix("panel.")?;
+        Panel::all()
+            .into_iter()
+            .find(|panel| panel.title().to_ascii_lowercase() == id)
+    }
+
+    /// The verb name this row runs, when it is a verb row.
+    pub fn verb_name(&self) -> Option<&str> {
+        self.id.strip_prefix("verb.")
+    }
+
+    /// The asset name this row selects, when it is an asset row.
+    pub fn asset_name(&self) -> Option<&str> {
+        self.id
+            .strip_prefix("asset.")
+            .and_then(|rest| rest.split_once('.'))
+            .map(|(_, name)| name)
     }
 }
 
@@ -165,6 +204,16 @@ impl CommandIndex {
         &self.commands
     }
 
+    /// Count one use of `id`: its frecency rises by one, saturating. False
+    /// when the index holds no such row.
+    pub fn bump(&mut self, id: &str) -> bool {
+        let Some(command) = self.commands.iter_mut().find(|row| row.id == id) else {
+            return false;
+        };
+        command.frecency = command.frecency.saturating_add(1);
+        true
+    }
+
     /// Rank the index against `query`, returning at most `limit` hits.
     ///
     /// `recent` is the caller's most-recently-used id order; it only shapes an
@@ -197,12 +246,12 @@ impl CommandIndex {
             .iter()
             .filter_map(|command| {
                 let (tier, ranges) = match_label(&command.label, &needle)?;
-                let penalty = u32::try_from(command.label.chars().count())
-                    .unwrap_or(u32::MAX)
-                    .min(999);
+                if needle.len() <= SHORT_QUERY_CHARS && tier == MatchTier::Subsequence {
+                    return None;
+                }
                 Some(CommandHit {
                     command: command.clone(),
-                    score: tier.base().saturating_sub(penalty),
+                    score: scaled_score(tier, command.label.chars().count(), command.frecency),
                     tier,
                     ranges,
                 })
@@ -257,6 +306,149 @@ impl CommandIndex {
     }
 }
 
+/// Keys the palette overlay handles; the dock maps egui keys onto these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteKey {
+    /// Ctrl+K or Ctrl+P: toggle the overlay.
+    Toggle,
+    /// Up arrow: move the cursor one row up.
+    MoveUp,
+    /// Down arrow: move the cursor one row down.
+    MoveDown,
+    /// Enter: dispatch the row under the cursor.
+    Enter,
+    /// Escape: close the overlay.
+    Escape,
+}
+
+/// What a dispatched row asks the shell to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaletteAction {
+    /// Focus that dock panel (the panel row).
+    FocusPanel(Panel),
+    /// Run that door verb through the command service.
+    RunVerb(String),
+    /// Select that asset in the browser.
+    SelectAsset(String),
+}
+
+/// Palette overlay state: open flag, query, cursor and the caller's recent
+/// ids. The dock owns one; every key goes through [`PaletteState::key`], so
+/// the whole overlay is testable without a window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaletteState {
+    open: bool,
+    query: String,
+    cursor: usize,
+    recent: Vec<String>,
+}
+
+impl PaletteState {
+    /// Closed overlay with an empty query and an empty recent list.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True while the overlay is shown.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Current query text.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Row the cursor sits on, `0` when the query is empty.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// The caller's recent ids, newest first.
+    pub fn recent(&self) -> &[String] {
+        &self.recent
+    }
+
+    /// The ranked rows for the current query.
+    pub fn hits(&self, index: &CommandIndex) -> Result<Vec<CommandHit>, PaletteError> {
+        index.search(&self.query, &self.recent, DEFAULT_LIMIT)
+    }
+
+    /// Replace the query (one keystroke); the cursor returns to the top row.
+    pub fn set_query(&mut self, query: &str) {
+        self.query.clear();
+        self.query.push_str(query);
+        self.cursor = 0;
+    }
+
+    /// Run one key. `Ok(Some(action))` when the shell must act on it (Enter),
+    /// `Ok(None)` when the key only changed overlay state, and `Err` when the
+    /// query refused ([`PaletteError`]).
+    ///
+    /// Enter bumps the chosen row's frecency and records its id as newest in
+    /// the recent list, then closes the overlay.
+    pub fn key(
+        &mut self,
+        key: PaletteKey,
+        index: &mut CommandIndex,
+    ) -> Result<Option<PaletteAction>, PaletteError> {
+        match key {
+            PaletteKey::Toggle => {
+                self.open = !self.open;
+                if self.open {
+                    self.cursor = 0;
+                } else {
+                    self.query.clear();
+                }
+            }
+            PaletteKey::Escape => {
+                self.open = false;
+                self.query.clear();
+                self.cursor = 0;
+            }
+            PaletteKey::MoveUp => self.cursor = self.cursor.saturating_sub(1),
+            PaletteKey::MoveDown => {
+                let len = self.hits(index)?.len();
+                if self.cursor + 1 < len {
+                    self.cursor += 1;
+                }
+            }
+            PaletteKey::Enter => {
+                let hits = self.hits(index)?;
+                let Some(hit) = hits.get(self.cursor) else {
+                    return Ok(None);
+                };
+                let Some(action) = dispatch(&hit.command) else {
+                    return Ok(None);
+                };
+                index.bump(&hit.command.id);
+                self.recent.retain(|id| id != &hit.command.id);
+                self.recent.insert(0, hit.command.id.clone());
+                self.recent.truncate(RECENT_CAP);
+                self.open = false;
+                self.query.clear();
+                self.cursor = 0;
+                return Ok(Some(action));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Map one row onto the shell action its kind names, `None` for a row whose id
+/// does not carry its kind (a caller-built row).
+fn dispatch(command: &Command) -> Option<PaletteAction> {
+    match command.kind {
+        CommandKind::Panel => command.panel_target().map(PaletteAction::FocusPanel),
+        CommandKind::Verb => command
+            .verb_name()
+            .map(|name| PaletteAction::RunVerb(name.to_string())),
+        CommandKind::Asset => command
+            .asset_name()
+            .map(|name| PaletteAction::SelectAsset(name.to_string())),
+    }
+}
+
 /// Refuse a text field that is empty or past its char bound.
 fn check_len(field: &'static str, len: usize, max: usize) -> Result<(), PaletteError> {
     if len == 0 {
@@ -266,6 +458,25 @@ fn check_len(field: &'static str, len: usize, max: usize) -> Result<(), PaletteE
         return Err(PaletteError::TooLong { field, len, max });
     }
     Ok(())
+}
+
+/// Score one matched row: the tier's band, the text gap inside it, then the
+/// frecency multiplier capped by [`FRECENCY_CAP_PERMILLE`].
+///
+/// The band keeps `[base - 999, base]` and the next tier starts at
+/// `base + 1` once its own text gap is subtracted, so a fully used lower-tier
+/// row can never pass a higher-tier row.
+fn scaled_score(tier: MatchTier, label_len: usize, frecency: u16) -> u32 {
+    if tier == MatchTier::Recent {
+        return 0;
+    }
+    let penalty = u32::try_from(label_len).unwrap_or(u32::MAX).min(TIER_BAND);
+    let inner = TIER_BAND - penalty;
+    let boost = u32::from(frecency)
+        .saturating_mul(FRECENCY_STEP_PERMILLE)
+        .min(FRECENCY_CAP_PERMILLE);
+    let scaled = inner.saturating_mul(1000 + boost) / 1000;
+    tier.base() - TIER_BAND + scaled.min(TIER_BAND)
 }
 
 /// True for the characters that start a new word in a label.
@@ -451,6 +662,122 @@ mod tests {
     }
 
     #[test]
+    fn frecency_lifts_inside_a_tier_but_never_crosses_one() {
+        let mut index = CommandIndex::build(
+            &[],
+            &[
+                (AssetKind::Mesh, "wall"),
+                (AssetKind::Mesh, "wall_a"),
+                (AssetKind::Mesh, "wall_b"),
+            ],
+        )
+        .unwrap();
+        for _ in 0..20 {
+            assert!(index.bump("asset.mesh.wall_b"));
+        }
+        let hits = index.search("wall", &[], 10).unwrap();
+        assert_eq!(hits[0].command.label, "wall", "the exact row still leads");
+        assert_eq!(hits[0].tier, MatchTier::Exact);
+        assert_eq!(hits[1].command.label, "wall_b", "usage breaks the text tie");
+        assert_eq!(hits[2].command.label, "wall_a");
+        assert!(!index.bump("verb.gone"), "an unknown id is not counted");
+
+        // A lower tier at the frecency cap never passes the exact row.
+        for _ in 0..100 {
+            index.bump("asset.mesh.wall_a");
+        }
+        let capped = index.search("wall", &[], 10).unwrap();
+        assert_eq!(capped[0].command.label, "wall");
+        assert_eq!(capped[0].tier, MatchTier::Exact);
+        assert!(
+            capped[0].score > 3000,
+            "exact band sits above every prefix score: {}",
+            capped[0].score
+        );
+        // Two runs over the bumped index are equal.
+        assert_eq!(index.search("wall", &[], 10).unwrap(), capped);
+    }
+
+    #[test]
+    fn short_queries_skip_subsequence_noise() {
+        let index = CommandIndex::build(&[], &[(AssetKind::Mesh, "brazier")]).unwrap();
+        assert!(index.search("z", &[], 10).unwrap().is_empty(), "one letter");
+        assert!(
+            index.search("ra", &[], 10).unwrap().is_empty(),
+            "two letters"
+        );
+        let long = CommandIndex::build(&["view.capture"], &[]).unwrap();
+        let hits = long.search("vcap", &[], 10).unwrap();
+        assert_eq!(hits[0].tier, MatchTier::Subsequence);
+    }
+
+    #[test]
+    fn overlay_state_machine_dispatches_by_kind() {
+        let mut index = index();
+        let mut state = PaletteState::new();
+        assert!(!state.is_open());
+        assert_eq!(state.key(PaletteKey::Toggle, &mut index).unwrap(), None);
+        assert!(state.is_open());
+        state.set_query("insp");
+        assert_eq!(
+            state.key(PaletteKey::Enter, &mut index).unwrap(),
+            Some(PaletteAction::FocusPanel(Panel::Inspector))
+        );
+        assert!(!state.is_open(), "Enter closes the overlay");
+        assert_eq!(state.recent()[0], "panel.inspector");
+
+        state.key(PaletteKey::Toggle, &mut index).unwrap();
+        state.set_query("scene.place");
+        assert_eq!(
+            state.key(PaletteKey::Enter, &mut index).unwrap(),
+            Some(PaletteAction::RunVerb("scene.place".to_string()))
+        );
+        let verb = index
+            .commands()
+            .iter()
+            .find(|row| row.id == "verb.scene.place")
+            .unwrap();
+        assert_eq!(verb.frecency, 1, "a dispatch counts one use");
+
+        state.key(PaletteKey::Toggle, &mut index).unwrap();
+        state.set_query("crate");
+        assert_eq!(
+            state.key(PaletteKey::Enter, &mut index).unwrap(),
+            Some(PaletteAction::SelectAsset("crate".to_string()))
+        );
+        assert_eq!(
+            state.recent()[..3],
+            [
+                "asset.mesh.crate".to_string(),
+                "verb.scene.place".to_string(),
+                "panel.inspector".to_string()
+            ],
+            "newest first"
+        );
+
+        // Cursor clamps at both ends of the current row list.
+        state.key(PaletteKey::Toggle, &mut index).unwrap();
+        state.set_query("");
+        let rows = state.hits(&index).unwrap().len();
+        state.key(PaletteKey::MoveUp, &mut index).unwrap();
+        assert_eq!(state.cursor(), 0);
+        state.key(PaletteKey::MoveDown, &mut index).unwrap();
+        assert_eq!(state.cursor(), 1);
+        for _ in 0..(rows + 10) {
+            state.key(PaletteKey::MoveDown, &mut index).unwrap();
+        }
+        assert_eq!(state.cursor(), rows - 1);
+        assert_eq!(state.key(PaletteKey::Escape, &mut index).unwrap(), None);
+        assert!(!state.is_open());
+        assert_eq!(state.query(), "");
+        // An empty row list makes Enter a no-op, never a panic.
+        let mut empty = CommandIndex::default();
+        let mut bare = PaletteState::new();
+        bare.set_query("zzz");
+        assert_eq!(bare.key(PaletteKey::Enter, &mut empty).unwrap(), None);
+    }
+
+    #[test]
     fn empty_query_returns_the_caller_recent_order() {
         let recent = vec![
             "verb.scene.pick".to_string(),
@@ -482,7 +809,7 @@ mod tests {
     fn limit_bounds_the_result_and_bad_rows_refuse() {
         let index = index();
         assert!(index.search("", &[], 0).unwrap().is_empty());
-        assert_eq!(index.search("e", &[], 2).unwrap().len(), 2);
+        assert_eq!(index.search("wall", &[], 2).unwrap().len(), 2);
         assert_eq!(index.search("zzzz", &[], 10).unwrap().len(), 0);
         assert_eq!(
             CommandIndex::build(&["scene.place", "scene.place"], &[]),
