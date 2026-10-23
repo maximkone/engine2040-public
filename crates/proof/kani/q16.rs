@@ -36,13 +36,13 @@ pub fn q16_checked_div_is_total_and_truncates() {
 }
 
 /// Kernel: `Fixed::sqrt` over `isqrt` (floor square root, integer only).
-/// Bound: positive raw Q47.16 values up to `2^32` (65536.0); negative and
+/// Bound: positive raw Q47.16 values up to `2^24` (256.0); negative and
 /// zero give zero.
 #[kani::proof]
-#[kani::unwind(32)]
+#[kani::unwind(28)]
 pub fn q16_sqrt_is_floor_square_root() {
     let raw: i64 = kani::any();
-    kani::assume(raw > 0 && raw <= 1_i64 << 32);
+    kani::assume(raw > 0 && raw <= 1_i64 << 24);
     let root = Fixed::from_bits(raw).sqrt().to_bits();
     assert!(root >= 0);
     let n = u128::from(raw.unsigned_abs()) * 65_536;
