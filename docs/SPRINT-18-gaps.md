@@ -1817,12 +1817,14 @@ Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this
   TAA's residual is its jitter after the resolve. New
   test `sand_edge_aa_default` prints both numbers and asserts the calmer one,
   green by `node tools/gh-check.mjs --local "cargo test -p engine-render
-  --features window --lib sand_edge_aa_default -- --nocapture"`. Recommended
-  shipped default (not this seat's path, `crates/game/src/windowed.rs`): 4x
-  MSAA on when `E2040_MSAA` is unset, TAA jitter and resolve left off. The row
-  stays open on that one-line default flip; the accept's `latest.md` flicker
-  field still does not exist, so the test's printed line and this row carry the
-  number.
+  --features window --lib sand_edge_aa_default -- --nocapture"`. Landed
+  `ad0e573bf`: `crates/game/src/windowed.rs` now ships 4x MSAA when
+  `E2040_MSAA` is unset (`0` is the explicit 1x opt-out, `1` repeats the
+  default; TAA jitter and resolve stay off), with
+  `msaa_setting_defaults_to_four_x_and_zero_opts_out` green and the windowed
+  filter at 68 passed. The accept's `latest.md` flicker field still does not
+  exist, so the test's printed line and this row carry the number; the row
+  stays open on that report field.
 - [x] LF6 render: dust and sparks from `particles_gpu.rs` - the seeded pool
   exists; the window never spawns. Dust at footfalls and knockdowns, sparks
   on `Blocked` and `Parried` cues (seeded from the cue tick, view only), drawn

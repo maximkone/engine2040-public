@@ -27,6 +27,8 @@ use engine_scene::component::ComponentKind;
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
+mod prefab;
+use prefab::{PrefabPlaceTool, PrefabSaveTool, TOOL_PREFAB_PLACE, TOOL_PREFAB_SAVE};
 mod save;
 use save::{SceneLoadTool, SceneSaveTool, TOOL_SCENE_LOAD, TOOL_SCENE_SAVE};
 
@@ -155,6 +157,16 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<SceneLoadTool>(
         TOOL_SCENE_LOAD,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<PrefabSaveTool>(
+        TOOL_PREFAB_SAVE,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<PrefabPlaceTool>(
+        TOOL_PREFAB_PLACE,
         PACK,
         CapabilityCard::Commit,
     )?);

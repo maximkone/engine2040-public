@@ -153,7 +153,3 @@ fn stock_hud(width: u32, height: u32) -> HudFrame {
     });
     HudFrame::from_commands(width, height, px, commands)
 }
-
-/// The proof writes a PNG and blocks on the GPU adapter: native only.
-#[cfg(target_arch = "wasm32")]
-fn main() {}

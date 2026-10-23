@@ -1006,13 +1006,13 @@ pub(super) fn run_chain_core(
     // channel to the four neighbour taps, so a sharpened edge cannot
     // invent a level past the input image's own range. Sharpness 0 keeps
     // the pixel vector as it is (no copy, no pass).
-    let started = Instant::now();
+    let started = engine_clock::now();
     let ldr = if chain.sharpen > FSR_SHARPEN_MIN {
         fsr_rcas_sharpen(&ldr, width, height, chain.sharpen)?
     } else {
         ldr
     };
-    let sharpen_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let sharpen_ms = engine_clock::since(started).as_secs_f64() * 1000.0;
 
     Ok(PostOutput {
         ldr,
