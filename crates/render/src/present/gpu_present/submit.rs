@@ -605,6 +605,18 @@ impl Presenter {
                 resource: wgpu::BindingResource::TextureView(&ao_view),
             }],
         });
+        // RL36: the dual-filter bloom mips over the HDR view, sized with the
+        // targets (one texture per rung, one uniform per dispatch). The blit's
+        // halo slot samples rung 0; a frame whose bloom gate is closed never
+        // reads it.
+        let bloom = self.bloom_gpu.sized(
+            &self.device,
+            &self.queue,
+            &hdr_view,
+            width,
+            height,
+            &self.bloom.config,
+        );
         // The blit bind group is rebuilt with the targets (not per frame),
         // so steady-state frames allocate no bind groups or pipelines.
         let blit_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -630,6 +642,10 @@ impl Presenter {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: fog_col_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&bloom.halo_view),
                 },
             ],
         });
@@ -736,6 +752,7 @@ impl Presenter {
                 sampler: &self.blit_sampler,
                 fog: &fog_view,
                 ao: &ao_view,
+                bloom: &bloom.halo_view,
                 fog_col: &fog_col_buf,
             },
         );
@@ -791,6 +808,7 @@ impl Presenter {
             ao_texture,
             ao_bind,
             gtao,
+            bloom,
             id_texture,
             id_view,
             id_clear,

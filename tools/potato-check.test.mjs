@@ -423,18 +423,18 @@ test("potato: an unreadable bar file exits 2 with the cause", async () => {
   }
 });
 
-// A frame number sampled while 26 builds run is a filed number, not a
-// measurement (quiet.mjs rule; the tool's own header says so). So `--floor`
-// refuses to judge such a run (exit 3) instead of printing a false FAIL the
-// owner would read as a product verdict. Every bar line still prints its
-// PASS/FAIL: nothing is hidden, only the verdict is withheld. A quiet box
-// keeps the row's exit 1 / 0 byte for byte.
-test("potato: the --floor verdict is withheld on a LOADED box, exit 3", async () => {
+// A frame number sampled while 26 builds run is a filed number, not a clean
+// measurement, and a loaded FAIL is withheld (exit 3) instead of printing a
+// false red the owner would read as a product verdict. A loaded PASS is the
+// other case: contention can only slow frames, so a run that passes every bar
+// while builds run is a conservative pass (exit 0) and the report says so.
+// Every bar line still prints its PASS/FAIL: nothing is hidden.
+test("potato: a LOADED non-pass is withheld, a LOADED pass is conservative", async () => {
   const dir = tempReportDir();
   try {
     const loaded = { ...fakeLive(OVER_ARENA), load: { cargo: 3, rustc: 1, loaded: true } };
     const held = await drive(["--floor"], loaded, dir);
-    assert.equal(held.code, 3, "--floor refuses to judge while builds run");
+    assert.equal(held.code, 3, "--floor refuses a loaded non-pass");
     assert.ok(
       held.lines.some((line) => line.startsWith("potato floor: WITHHELD")),
       held.lines.join("\n"),
@@ -446,17 +446,29 @@ test("potato: the --floor verdict is withheld on a LOADED box, exit 3", async ()
     assert.ok(report.includes("floor: WITHHELD"), report);
     const quiet = await drive(["--floor"], fakeLive(OVER_ARENA), dir);
     assert.equal(quiet.code, 1, "a quiet box still exits 1 on an over-bar p50");
+
+    const loadedPass = { ...fakeLive(CANNED_ARENA), load: { cargo: 3, rustc: 1, loaded: true } };
+    const conservative = await drive(["--floor"], loadedPass, dir);
+    assert.equal(conservative.code, 0, "a loaded pass keeps its verdict");
+    assert.ok(
+      conservative.lines.some((line) => line.startsWith("potato floor: PASS under load")),
+      conservative.lines.join("\n"),
+    );
+    const passReport = readFileSync(joinPath(dir, "potato-2026-10-17.md"), "utf8");
+    assert.ok(passReport.includes("floor: PASS under load"), passReport);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("potato: decideExit withholds a floor verdict only when the box was loaded", () => {
+test("potato: decideExit withholds a loaded non-pass and accepts a loaded pass", () => {
   const bar = loadBar();
   const over = checkBars({ p50_ms: 60, p99_ms: 70, peak_ws_mb: 1000 }, bar);
   const pass = checkBars({ p50_ms: 42.125, p99_ms: 67.5, peak_ws_mb: 1280 }, bar);
+  const unknown = checkBars({ p50_ms: null, p99_ms: null, peak_ws_mb: null }, bar);
   assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: true, loaded: true }), 3);
-  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, loaded: true }), 3);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: unknown, floor: true, loaded: true }), 3);
+  assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, loaded: true }), 0);
   assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: true, loaded: false }), 1);
   assert.equal(decideExit({ hasIntegrated: true, verdicts: pass, floor: true, loaded: false }), 0);
   assert.equal(decideExit({ hasIntegrated: true, verdicts: over, floor: false, loaded: true }), 0);

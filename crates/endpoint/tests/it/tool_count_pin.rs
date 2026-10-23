@@ -17,8 +17,9 @@ use engine_endpoint::{
 /// `build.web`, `serve.web`, `browser.capture` and `browser.input`; the physics
 /// pack adds `physics.read`, `physics.raycast` and `physics.shapecast`; the play
 /// pack adds `play.step_until`, `input.inject`, `state.digest`, `seat.open`,
-/// `seat.step` and `seat.close`). The `rules` feature adds 3 (`rules.set`,
-/// `rules.test`, `rules.explain`), the `intake` feature adds 1 (`asset.intake`),
+/// `seat.step` and `seat.close`). The `rules` feature adds 5 (`rules.set`,
+/// `rules.test`, `rules.explain`, `rules.get` and `rules.undo`), the `intake`
+/// feature adds 1 (`asset.intake`),
 /// and the `verify` feature adds 3 (`bug.replay`, `trace.summary`,
 /// `verify.proof`; it also moves `replay.verify`/`replay.bisect` into the
 /// verify pack, so the count itself does not move for those two). One arm per
@@ -50,9 +51,11 @@ use engine_endpoint::{
 /// (`6330e67ba`) and `door.status` (`e8dcf966e`); the live count was 86, three
 /// over the DOOR2 arm, so every arm moved up by three. The fx pack adds
 /// `fx.ragdoll`, `fx.limb`, `fx.break`, `fx.blast` and `fx.undo` on demand
-/// (AD30), so every arm moves up by five more.
-const EXPECTED_ROUTER: usize = 91
-    + if cfg!(feature = "rules") { 3 } else { 0 }
+/// (AD30), so every arm moves up by five more. BG4 (2026-10-23) adds the four
+/// clip verbs (`anim.clip.trim`, `anim.clip.retime`, `anim.clip.mirror`,
+/// `anim.clip.undo`), so every arm moves up by four more.
+const EXPECTED_ROUTER: usize = 95
+    + if cfg!(feature = "rules") { 5 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };
 

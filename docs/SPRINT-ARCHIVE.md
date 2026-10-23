@@ -415,9 +415,9 @@ Move ledger: 49 rows on 2026-10-02 (F06).
   Size L. Owns `crates/game/src/siege.rs`. Accept: a bot-filled 64-slot
   siege plays 10 minutes on a dedicated server and replays exactly.
   needs: WD1, ON3, DX4.
-- [x] WD10 game: siege engines and ballistics — deterministic
+- [ ] WD10 game: siege engines and ballistics — deterministic
   projectile sim (fixed-point, sorted impacts) firing siege engines
   at walls through DX1–DX3 breaks under ON3 interest. Tier C.
   Size M. Owns `crates/game/src/ballistics.rs`. Accept: a scripted
   bombardment breaks the same chunks twice; wall break converges
-  on all clients; replay exact. needs: WD4, DX4. Tick audit 2026-10-19: LATER per docs/plan/2026-10-19-owner-queue.md; the named game `ballistics.rs` is gone.
+  on all clients; replay exact. needs: WD4, DX4. Tick audit 2026-10-19: LATER per docs/plan/2026-10-19-owner-queue.md; the named game `ballistics.rs` is gone. Correction 2026-10-23: unticked, not done. The removal commit d89bd98e0 deleted `crates/game/src/ballistics.rs`, so the Accept (a scripted bombardment breaks the same chunks twice; replay exact) cannot run. PX41 records the same removal as an obsolete close.

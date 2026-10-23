@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { auditRows, cargoTestCommands, filterMatches, sourcePaths, tickedRows } from "./ticked-rows-audit.mjs";
+import { auditRows, cargoTestCommands, closureEvidence, closureNotes, filterMatches, sourcePaths, tickedRows } from "./ticked-rows-audit.mjs";
 
 const TOOL = join(dirname(fileURLToPath(import.meta.url)), "ticked-rows-audit.mjs");
 
@@ -210,6 +210,53 @@ test("auditRows: rows naming nothing checkable are counted, not flagged", () => 
   assert.deepEqual([r.suspects.length, r.unchecked], [0, 2]);
 });
 
+// ---- closure notes ----------------------------------------------------------------------
+
+test("closureNotes: only a closure marker starts a note, and the next marker ends it", () => {
+  const text = "Owns `crates/net/src/gone.rs`. Progress 2026-10-19: the new home is `crates/net/src/lib.rs`. Tick audit 2026-10-19: closed by 3ba9bfd. Landed 1d9e19f76.";
+  const notes = closureNotes(text);
+  assert.equal(notes.length, 3);
+  assert.match(notes[0], /^Tick audit 2026-10-19:$/);
+  assert.match(notes[1], /^closed by 3ba9bfd\.$/);
+  assert.match(notes[2], /^Landed 1d9e19f76\.$/);
+  assert.ok(!notes.some((n) => n.includes("Progress")), "the running record is not a closure note");
+  assert.deepEqual(closureNotes("no marker here, just `crates/net/src/lib.rs`"), []);
+});
+
+test("closureEvidence: a real commit, a path, a run and a ticked row clear; no evidence does not", () => {
+  const ctx = {
+    files: new Set(["crates/net/src/lib.rs", "docs/plan/q.md"]),
+    commitExists: (sha) => sha === "3ba9bfd",
+  };
+  const tickedIds = new Set(["OK2"]);
+  const ev = (note) => closureEvidence(note, ctx, { crateDirs: ["crates/net"], tickedIds });
+  assert.deepEqual(ev("Tick audit 2026-10-19: closed by 3ba9bfd.").map((e) => [e.kind, e.value]), [["commit", "3ba9bfd"]]);
+  assert.deepEqual(ev("Tick audit 2026-10-19: closed by deadbee."), [], "a bogus sha is not a close");
+  assert.deepEqual(ev("Tick audit 2026-10-19: the old file is gone."), [], "a note with no evidence keeps flagging");
+  assert.deepEqual(ev("Tick audit 2026-10-19: LATER per docs/plan/q.md."), [], "LATER is a park, not a close");
+  assert.deepEqual(ev("Tick audit 2026-10-19: replaced by OK2.").map((e) => e.value), ["OK2"]);
+  assert.deepEqual(ev("Tick audit 2026-10-19: replaced by OPEN2."), [], "the replacement must be ticked");
+  assert.deepEqual(ev("Tick audit 2026-10-19: the new home is `crates/net/src/lib.rs`.").map((e) => e.value), ["crates/net/src/lib.rs"]);
+  assert.deepEqual(ev("Tick audit 2026-10-19: `crates/net/src/missing.rs` is gone."), [], "a gone path is not proof");
+  assert.deepEqual(ev("Landed 39057462548."), [], "a bare number is not a run id");
+  assert.deepEqual(ev("Landed run 39057462548.").map((e) => e.kind), ["run"]);
+});
+
+test("auditRows: a closure note drops the finding; a note with no evidence keeps it", () => {
+  const ctx = memoryCtx(SOURCES, { commitExists: (sha) => sha === "3ba9bfd" });
+  const text = "Owns `crates/net/src/gone.rs`. Accept: `cargo test -p engine-net --lib snapshot`.";
+  const r = auditRows([
+    row("CL1", `${text} Tick audit 2026-10-19: the old path went in 3ba9bfd.`),
+    row("CL2", `${text} Tick audit 2026-10-19: the old path is gone.`),
+    row("CL3", `${text} Tick audit 2026-10-19: replaced by CL5.`),
+    row("CL4", `${text} Tick audit 2026-10-19: replaced by CL9.`),
+    row("CL5", "net: the replacement. Accept: `cargo test -p engine-net --lib snapshot`."),
+    row("CL6", `${text} The new home is \`crates/net/src/lib.rs\`.`),
+  ], ctx);
+  assert.deepEqual(r.suspects.map((s) => s.id), ["CL2", "CL4", "CL6"]);
+  assert.deepEqual(r.closures.map((c) => [c.id, c.evidence[0].kind]), [["CL1", "commit"], ["CL3", "row"]]);
+});
+
 // ---- rows from the board ----------------------------------------------------------------
 
 function tempDir(name) {
@@ -296,6 +343,22 @@ function makeRepo() {
   return dir;
 }
 
+// A repo whose row names crates/net/src/old.rs, a file that was committed and then deleted.
+function makeClosureRepo() {
+  const dir = tempDir("closure");
+  put(dir, "docs/SPRINT.md", "# Board\n");
+  put(dir, "crates/net/Cargo.toml", "[package]\nname = \"engine-net\"\n");
+  put(dir, "crates/net/src/lib.rs", "#[cfg(test)]\nmod tests {\n    #[test]\n    fn snapshot_roundtrip() {}\n}\n");
+  put(dir, "crates/net/src/old.rs", "pub fn old() {}\n");
+  git(dir, "init", "-q");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "net: the old seam");
+  rmSync(join(dir, "crates/net/src/old.rs"));
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "rot: drop the old seam");
+  return dir;
+}
+
 test("CLI: a clean repo exits 0; an untracked file that is on disk counts as there", () => {
   const dir = makeRepo();
   try {
@@ -358,6 +421,48 @@ test("CLI: --json carries the same suspects; one run is read-only", () => {
     assert.equal(j.suspects[0].findings[0].reason, "crate-missing");
     assert.equal(j.suspects[0].source, "board");
     assert.equal(git(dir, "status", "--porcelain"), before, "the audit edits nothing");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI: a closure note clears only evidence that exists", () => {
+  const dir = makeClosureRepo();
+  try {
+    const sha = git(dir, "rev-parse", "--short", "HEAD");
+    const run = (note, ...flags) => {
+      put(dir, "docs/SPRINT.md", `# Board\n\n- [x] LOST1 net: the old seam. Owns \`crates/net/src/old.rs\`. ${note}\n- [x] OK2 net: the replacement. Accept: \`cargo test -p engine-net --lib snapshot\`.\n- [ ] OPEN2 net: not done.\n`);
+      return audit(dir, "--no-history", ...flags);
+    };
+
+    // A commit git knows clears the row; the JSON names the evidence.
+    const real = run(`Tick audit 2026-10-19: the seam went in ${sha}.`, "--json");
+    assert.equal(real.code, 0, real.out + real.err);
+    const j = JSON.parse(real.out);
+    assert.deepEqual(j.suspects, []);
+    assert.equal(j.closures.length, 1);
+    assert.deepEqual(j.closures[0].evidence, [{ kind: "commit", value: sha }]);
+    assert.deepEqual(j.closures[0].reasons, ["path-missing"]);
+
+    // The same note with a bogus sha keeps the row flagged.
+    const bogus = run("Tick audit 2026-10-19: the seam went in deadbee.");
+    assert.equal(bogus.code, 1, bogus.out + bogus.err);
+    assert.match(bogus.out, /^LOST1 +path-missing +crates\/net\/src\/old\.rs/m);
+    assert.doesNotMatch(bogus.out, /^OK2/m);
+
+    // A note that names no evidence keeps flagging; so does a LATER park note.
+    assert.equal(run("Tick audit 2026-10-19: the old seam is gone.").code, 1);
+    assert.equal(run("Tick audit 2026-10-19: LATER per docs/plan/q.md.").code, 1);
+
+    // A replacement row clears only when it exists and is ticked.
+    assert.equal(run("Tick audit 2026-10-19: replaced by OK2.").code, 0);
+    assert.equal(run("Tick audit 2026-10-19: replaced by OPEN2.").code, 1, "the open row is not a ticked replacement");
+    assert.equal(run("Tick audit 2026-10-19: replaced by NOPE2.").code, 1, "an absent row is no replacement");
+
+    // A path in the row body is not a closure note: the note has to say it closed the row.
+    const body = run("The new home is `crates/net/src/lib.rs`.");
+    assert.equal(body.code, 1);
+    assert.match(body.out, /^LOST1 +path-missing/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

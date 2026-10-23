@@ -66,8 +66,9 @@ const TAPE_MAGIC: [u8; 4] = [0x50, 0x54, 0x41, 0x31];
 /// One canonical input is 10 bytes (see [`FighterInput::append_bytes`]).
 const INPUT_BYTES: usize = 10;
 
-/// Which backend the [`Driver`] stands in for. Labels only: the agent runs
-/// the same pipeline for every backend; swapping backends swaps the driver.
+/// Which backend a [`Driver`] or an eval door stands in for. The agent runs
+/// the same pipeline for every backend; the eval door picks the provider
+/// adapter from this label, so a row's label names the code that answered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Backend {
     /// In-process deterministic stand-in.

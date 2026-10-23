@@ -239,6 +239,9 @@ pub struct Presenter {
     /// Live GTAO on the forward-stored depth (LF3): both compute kernels
     /// plus the neutral-reset flag; the frame-size resources ride the targets.
     pub(crate) gtao_gpu: super::gtao_live::GtaoGpu,
+    /// Dual-filter bloom (RL36): the three compute kernels; the mip textures
+    /// and uniforms ride the targets, built once per frame size.
+    pub(crate) bloom_gpu: super::bloom_dual::BloomDualGpu,
     /// GS43: contact-shadow strength (1 on, 0 off). Strength 0 copies the
     /// GTAO field through, so an off capture is byte-equal to no pass.
     pub(crate) contact_strength: f32,
@@ -888,6 +891,18 @@ impl Presenter {
                     },
                     count: None,
                 },
+                // RL36: the dual-filter bloom halo, half the frame size and
+                // sampled at the pixel centre by the one linear blit sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1198,6 +1213,7 @@ impl Presenter {
             fog_sub: fog::FogSubmitter::new(&device),
             gtao_sub: gtao::GtaoSubmitter::new(&device),
             gtao_gpu: super::gtao_live::GtaoGpu::new(&device),
+            bloom_gpu: super::bloom_dual::BloomDualGpu::new(&device),
             contact_strength: 1.0,
             auto_exp_gpu: super::auto_exposure_gpu::AutoExposureGpu::new(&device, &queue),
             auto_exp_state: crate::post::AutoExposure::default(),

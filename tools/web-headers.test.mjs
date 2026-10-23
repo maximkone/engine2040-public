@@ -2,7 +2,7 @@
 //   node --test tools/web-headers.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { FILES, WASM_FILE, parseArgs, probeAll, probeFile, summaryLine, verdict } from "./web-headers.mjs";
+import { FILES, MANIFEST, WASM_FILE, fetchManifest, filesFrom, isWasm, parseArgs, probeAll, probeFile, probeSite, summaryLine, verdict } from "./web-headers.mjs";
 
 // A site: path -> [status, headers]. Records the Accept-Encoding it was asked with.
 function site(table) {
@@ -51,6 +51,44 @@ test("a deploy that reaches the edge late is retried; one that never does is rep
   assert.equal(calls, 3);
   const never = await probeAll("https://h.example/", { fetchFn: site({}).fetchFn, retries: 2, waitMs: 1 });
   assert.equal(verdict(never).ok, false);
+});
+
+test("PIN: build.json names the files to probe, and the hashed wasm is the one checked for application/wasm", async () => {
+  const manifest = {
+    schema: 2,
+    build: "0123456789ab",
+    pin: {
+      "engine.js": { name: "engine.0123456789ab.js", sha256: "a".repeat(64) },
+      "engine_bg.wasm": { name: "engine_bg.0123456789ab.wasm", sha256: "b".repeat(64) },
+      "loader.js": { name: "loader.0123456789ab.js", sha256: "c".repeat(64) },
+      "assets/arena.e2bundle": { name: "assets/arena.0123456789ab.e2bundle", sha256: "d".repeat(64) },
+      "index.html": { name: "index.html", sha256: "e".repeat(64) },
+      "coi-serviceworker.js": { name: "coi-serviceworker.js", sha256: "f".repeat(64) },
+    },
+  };
+  const expected = ["assets/arena.0123456789ab.e2bundle", "build.json", "coi-serviceworker.js", "engine.0123456789ab.js", "engine_bg.0123456789ab.wasm", "index.html", "loader.0123456789ab.js"];
+  assert.deepEqual(filesFrom(manifest).sort(), expected);
+  assert.deepEqual(filesFrom({ pin: null }), FILES, "an old dist keeps the fixed names");
+  assert.equal(isWasm("engine_bg.0123456789ab.wasm"), true);
+  assert.equal(isWasm("engine_bg.wasm"), true);
+  assert.equal(isWasm("engine_bg.wasm.map"), false);
+
+  const asked = [];
+  const fetchFn = async (url, init) => {
+    const path = new URL(url).pathname.replace(/^\/p\//, "");
+    asked.push({ path, method: init.method ?? "GET" });
+    if (path === MANIFEST && (init.method ?? "GET") === "GET") return new Response(JSON.stringify(manifest), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(null, { status: 200, headers: { "content-type": path.endsWith(".wasm") ? "application/wasm" : "text/plain" } });
+  };
+  assert.deepEqual((await fetchManifest("https://h.example/p/", fetchFn)).pin, manifest.pin);
+  asked.length = 0;
+  const rows = await probeSite("https://h.example/p/", { fetchFn });
+  assert.deepEqual(rows.map((r) => r.file).sort(), expected);
+  assert.equal(verdict(rows).ok, true, verdict(rows).problems.join("; "));
+  assert.match(summaryLine(rows), /^web-headers: wasm type=application\/wasm /);
+  assert.deepEqual(asked.slice(0, 3), [{ path: MANIFEST, method: "GET" }, { path: MANIFEST, method: "HEAD" }, { path: "engine.0123456789ab.js", method: "HEAD" }], "the pin is read first, then the files are asked like a browser");
+  const wrong = rows.map((r) => (r.file === "engine_bg.0123456789ab.wasm" ? { ...r, contentType: "text/plain" } : r));
+  assert.match(verdict(wrong).problems[0], /engine_bg\.0123456789ab\.wasm is typed "text\/plain", not application\/wasm/);
 });
 
 test("parseArgs", () => {

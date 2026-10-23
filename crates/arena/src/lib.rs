@@ -157,7 +157,7 @@ pub use match_observer::{
     run_match_bytes, run_match_bytes_v1, run_match_bytes_versioned, run_match_events,
     run_match_events_v1, run_match_events_versioned, TickMatchEvents,
 };
-pub use match_wire::{MATCH_WIRE_VERSION_V0, MATCH_WIRE_VERSION_V1};
+pub use match_wire::{HURT_HALF_MM, HURT_RADIUS_MM, MATCH_WIRE_VERSION_V0, MATCH_WIRE_VERSION_V1};
 use recorder::{Dataset, DATASET_VERSION};
 use world::MatchWorld;
 

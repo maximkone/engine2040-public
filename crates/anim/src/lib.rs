@@ -12,6 +12,9 @@ use engine_core::Fnv64;
 /// Additive spine: locomotion base, masked upper-body override and flinch
 /// additive through one inertializer, planted feet pinned by two-bone IK.
 pub mod additive;
+/// AN1 skinning: a glTF clip pose remapped onto the 45-node body rig and
+/// composed into one row-vector skin matrix per joint.
+pub mod an1;
 pub mod blend;
 pub mod clip;
 pub mod contract;

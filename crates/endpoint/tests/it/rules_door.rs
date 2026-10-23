@@ -15,7 +15,8 @@ use engine_editor::capability::Capability;
 use engine_editor::commands::{self, Batch, Document, Journal, Op};
 use engine_endpoint::mcp::McpServer;
 use engine_endpoint::packs::rules::{
-    RulesExplainArgs, RulesExplainTool, RulesSetArgs, RulesSetTool, RulesTestArgs, RulesTestTool,
+    RulesExplainArgs, RulesExplainTool, RulesGetArgs, RulesGetTool, RulesSetArgs, RulesSetTool,
+    RulesTestArgs, RulesTestTool, RulesUndoArgs, RulesUndoTool,
 };
 use engine_endpoint::play::world_load;
 use engine_endpoint::play::{CheckpointDto, PlayRunArgs, PlayRunTool};
@@ -282,4 +283,35 @@ fn rules_drive_on_a_walled_scene() {
         clean >= 18,
         "{clean} of 20 scripted fights kept every fighter out of the wall"
     );
+}
+
+#[test]
+fn rules_undo_reads_back_and_walks_the_installs() {
+    const A: &str = "if stamina > 500 { press(1); }";
+    const B: &str = "if stamina <= 500 { press(2); }";
+    let server = server();
+
+    // Nothing installed: the read-back names the next step, undo has nothing to walk.
+    let none = RulesGetTool::invoke(&server, RulesGetArgs {}).expect_err("nothing installed");
+    assert_eq!(none.code, "no_script");
+    let empty = RulesUndoTool::invoke(&server, RulesUndoArgs {}).expect_err("one install only");
+    assert_eq!(empty.code, "nothing_to_undo");
+
+    let hash_a = set(&server, A, Some(vec![0])).expect("A installs");
+    let hash_b = set(&server, B, Some(vec![1])).expect("B installs");
+    let read = RulesGetTool::invoke(&server, RulesGetArgs {}).expect("B reads back");
+    assert_eq!(read.hash, hash_b, "the read-back is the installed script");
+    assert!(read.source.contains("stamina <= 500"), "{read:?}");
+    assert_eq!(read.slots, vec![1]);
+
+    let back = RulesUndoTool::invoke(&server, RulesUndoArgs {}).expect("A comes back");
+    assert_eq!(back.hash, hash_a, "undo reinstalls A");
+    assert!(back.source.contains("stamina > 500"), "{back:?}");
+    assert_eq!(back.slots, vec![0], "A brings its slots back");
+    let read = RulesGetTool::invoke(&server, RulesGetArgs {}).expect("A reads back");
+    assert_eq!(read.hash, hash_a);
+
+    let forward = RulesUndoTool::invoke(&server, RulesUndoArgs {}).expect("B comes back");
+    assert_eq!(forward.hash, hash_b, "a second undo walks forward again");
+    assert_eq!(forward.slots, vec![1]);
 }

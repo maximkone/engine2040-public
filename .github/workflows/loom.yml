@@ -1,0 +1,47 @@
+name: loom
+
+# BG12: the job-pool concurrency model in `crates/ecs/src/pool.rs` (`loom_pool`)
+# runs under `--cfg loom` in the `engine-ecs` lib tests. The crate already
+# carries loom 0.7 as a `cfg(loom)` dev-dependency; until now no CI leg set the
+# cfg, so the model only ran by hand. The module holds two models: the real
+# pool (scope returns after every job, dropping the pool joins the worker) and
+# a planted missing wait, which the same leg must catch. Runs on the mirror's
+# main, on pull requests, and on a throwaway `loom-*` branch.
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, "loom-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: loom-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  model:
+    if: github.repository == 'maximkone/engine2040-public'
+    name: loom-pool
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: loom
+      - name: model the job pool
+        run: |
+          cargo test --locked -p engine-ecs --lib loom_pool --config .cargo/loom.toml
+          echo "PASS loom: engine-ecs job pool"

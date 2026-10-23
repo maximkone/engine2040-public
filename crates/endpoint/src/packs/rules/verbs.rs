@@ -1,4 +1,5 @@
-//! `rules.set`, `rules.test`, `rules.explain`: scripted game rules through the door.
+//! `rules.set`, `rules.test`, `rules.explain`, `rules.get`, `rules.undo`: scripted game
+//! rules through the door.
 //!
 //! Consumer: an MCP client (an AI writing rules). Data owner: the session's rules worker
 //! (`super::worker`), one thread that owns the `!Send` Rhai engine. A script is Rhai text over
@@ -27,6 +28,10 @@ pub const TOOL_RULES_SET: &str = "rules.set";
 pub const TOOL_RULES_TEST: &str = "rules.test";
 /// Tool: explain the installed script at one tick of a match.
 pub const TOOL_RULES_EXPLAIN: &str = "rules.explain";
+/// Tool: read back the installed script and its slots.
+pub const TOOL_RULES_GET: &str = "rules.get";
+/// Tool: reinstall the script installed before the current one.
+pub const TOOL_RULES_UNDO: &str = "rules.undo";
 
 /// Most host calls one fighter's explanation lists.
 const MAX_EXPLAIN_CALLS: usize = 64;
@@ -415,4 +420,97 @@ crate::e2_tool!(
     args = RulesExplainArgs,
     output = RulesExplainOutput,
     invoke = rules_explain
+);
+
+// ---------------------------------------------------------------------------
+// rules.get and rules.undo
+// ---------------------------------------------------------------------------
+
+/// Args for `rules.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RulesGetArgs {}
+
+/// Args for `rules.undo`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RulesUndoArgs {}
+
+/// Result of `rules.get` and `rules.undo`: the script now installed.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct RulesScriptOutput {
+    /// Revision of the installed script, from 1.
+    pub rev: u32,
+    /// Script hash (16 hex digits).
+    pub hash: String,
+    /// The installed text, as `rules.set` normalized it.
+    pub source: String,
+    /// Slots it drives.
+    pub slots: Vec<u8>,
+}
+
+impl From<super::worker::ScriptInfo> for RulesScriptOutput {
+    fn from(info: super::worker::ScriptInfo) -> Self {
+        Self {
+            rev: info.rev,
+            hash: format!("{:016x}", info.hash),
+            source: info.source,
+            slots: info.slots,
+        }
+    }
+}
+
+fn rules_get(server: &McpServer, _args: &RulesGetArgs) -> Result<RulesScriptOutput, McpToolError> {
+    server.dispatch(TOOL_RULES_GET, |state| {
+        let worker = state.rules.worker.as_ref().ok_or_else(no_script)?;
+        Ok(worker.get()?.into())
+    })
+}
+
+fn no_script() -> McpToolError {
+    McpToolError::new(
+        "no_script",
+        "no rule script is installed; call rules.set first",
+    )
+}
+
+fn rules_undo(
+    server: &McpServer,
+    _args: &RulesUndoArgs,
+) -> Result<RulesScriptOutput, McpToolError> {
+    server.dispatch(TOOL_RULES_UNDO, |state| {
+        let worker = state.rules.worker.as_mut().ok_or_else(|| {
+            McpToolError::new(
+                "nothing_to_undo",
+                "one script is installed and none came before it; call rules.set first",
+            )
+        })?;
+        Ok(worker.undo()?.into())
+    })
+}
+
+crate::e2_tool!(
+    /// `rules.get`: read back the installed rule script.
+    RulesGetTool,
+    name = TOOL_RULES_GET,
+    description = "Read back the installed rule script: its revision, hash, normalized text and the fighter slots it drives. Changes nothing.",
+    readonly = true,
+    args = RulesGetArgs,
+    output = RulesScriptOutput,
+    invoke = rules_get
+);
+
+crate::e2_tool!(
+    /// `rules.undo`: reinstall the script installed before the current one.
+    RulesUndoTool,
+    name = TOOL_RULES_UNDO,
+    description = "Reinstall the rule script installed before the current one, with its slots and a fresh revision. A second undo walks forward again. With one install only it refuses nothing_to_undo.",
+    readonly = false,
+    args = RulesUndoArgs,
+    output = RulesScriptOutput,
+    invoke = rules_undo
 );

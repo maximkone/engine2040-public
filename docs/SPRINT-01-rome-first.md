@@ -357,12 +357,19 @@
   Accept: F2P for a 2-fighter 120-tick run every frame's fighter positions
   equal `fighter_views` (test) and at least 2 meshes of over 5,000 triangles
   are drawn; P2P golden unchanged. needs: VS1. Landed c8bed518b. fighter_draw:: 3 passed (39919063323) and the moved default test 1 passed (39918750341); the capture test checks every frame's drawn feet equal [view.x, 0, view.z] and each body clears 5,000 tris, the window test poses roots within 1e-5 and two slot bodies clear 5,000 tris; lib.rs 4011 -> 3985 so the over-3000 cap is gone; golden d57b5c8ae3096614 and both arena pins re-proven at HEAD (39920678515, 39920678454).
-- [ ] VS5a anim: fighter pose to joint matrices — LOC2 `LocalPose` to the 45
+- [x] VS5a anim: fighter pose to joint matrices — LOC2 `LocalPose` to the 45
   AN1 skinning matrices through the glTF-to-AN1 joint remap (43-bone
   bijection, 2 identity nodes). Tier A. Size M. Owns the remap and matrix
   builder in `crates/anim` plus its tests. Accept: F2P matrices for tick t are
   byte-identical x2 and the bind pose gives identity-times-inverse-bind within
-  1e-5; P2P `cargo test -p engine-anim --lib` green. needs: VS4.
+  1e-5; P2P `cargo test -p engine-anim --lib` green. needs: VS4. Landed 1266f629a.
+  `crates/anim/src/an1.rs` — `JointRemap::by_name`, `remap_pose` and
+  `an1_skinning_matrices`; 6 an1 tests green (40007008375, re-run on this PC)
+  cover the 43-bone bijection with 2 identity nodes, bind pose within 1e-5 per
+  cell, byte-identical matrices x2 for one tick and the typed refusals; `cargo
+  test -p engine-anim --lib` 526 passed 0 failed (40012328612); clippy
+  `--all-targets -- -D warnings` PASS (40010908096); rust-quality --crate anim
+  score 99. No sim crate touched, golden d57b5c8ae3096614 unchanged.
 - [ ] VS5b game: skinned, animated fighters — `PoseSource::ImportedFighter`
   returns the live pose instead of `ArtDeferred`; VS5a matrices feed
   `v1_skin::GpuSkinned`; clips from `content/locomotion`. Tier A. Size M. Owns

@@ -6,12 +6,13 @@
 // 14.715 ms without one, 2026-10-17), prints the potato line plus one line per
 // bar, and writes target/reports/potato-<date>.md. Bars in tools/potato-bar.json.
 // The same samples stamp the run's load (`potato load: QUIET` or `LOADED n
-// cargo + m rustc running`), because a number read while a build runs is a
-// filed number, never a claim of speed (quiet.mjs rule). The bar lines and
-// their PASS/FAIL do not change with the load; the `--floor` verdict does:
-// on a LOADED box it is withheld (exit 3) instead of printing a red the owner
-// would read as a product verdict (26 builds made one run read p99 557 ms
-// against a 14 ms steady state, 2026-10-17).
+// cargo + m rustc running`). The bar lines and their PASS/FAIL do not change
+// with the load. A LOADED run with any non-PASS bar is withheld (exit 3)
+// instead of printing a red the owner would read as a product verdict (26
+// builds made one run read p99 557 ms against a 14 ms steady state,
+// 2026-10-17). A LOADED run that PASSES every bar is a conservative pass:
+// contention can only slow frames, so the bars are still met; the report says
+// PASS under load and keeps the load stamp.
 // Owner 2026-10-11. Units: ms, MB. Pure parsers give the same line x2.
 // Adapter evidence, in order: the GS6 `adapter: <name> <backend> <kind>
 // vendor=0x<id>` line, else arena's live `arena per-pass: adapter="<name>"`
@@ -190,17 +191,21 @@ export function checkBars(measured, bar) {
   ];
 }
 
-// Exit for the gate: 2 when no integrated adapter, 3 when `--floor` runs on a
-// box a build stamped LOADED (the numbers are filed, so the gate withholds the
-// verdict instead of printing a false FAIL - a run at 26 cargo/rustc read p99
-// 557 ms against the 14 ms steady state on 2026-10-17), 1 when `--floor` runs
-// and any bar is not PASS, else 0. Without `--floor` a FAIL still exits 0, and
-// every bar line still prints its PASS/FAIL whatever the load: nothing is
-// hidden, only the verdict is withheld.
+// Exit for the gate: 2 when no integrated adapter; 3 when `--floor` runs on a
+// box a build stamped LOADED and any bar is not PASS (the numbers are filed,
+// so the gate withholds a red the owner would read as a product verdict - a
+// run at 26 cargo/rustc read p99 557 ms against the 14 ms steady state on
+// 2026-10-17); 1 when `--floor` runs on a quiet box and any bar is not PASS;
+// else 0. A loaded run where every bar PASSes keeps its pass: load can only
+// slow frames, so the bars are still met and the report names the pass
+// conservative. Without `--floor` a FAIL still exits 0, and every bar line
+// prints its PASS/FAIL whatever the load: nothing is hidden.
 export function decideExit({ hasIntegrated, verdicts, floor, loaded }) {
   if (!hasIntegrated) return 2;
-  if (floor && loaded) return 3;
-  if (floor && verdicts.some((v) => v.status !== "PASS")) return 1;
+  if (!floor) return 0;
+  const allPass = verdicts.every((v) => v.status === "PASS");
+  if (loaded && !allPass) return 3;
+  if (!allPass) return 1;
   return 0;
 }
 
@@ -238,16 +243,23 @@ export function formatBarLine(v) {
 // Markdown report for `target/reports/potato-<date>.md`. Pure over inputs.
 // The load line says whether the numbers came from a quiet box or a loaded
 // one, so a filed number never reads as a quiet one; `withheld` records that
-// `--floor` refused a verdict on that loaded run (exit 3).
+// `--floor` refused a verdict on a loaded run with a non-PASS bar (exit 3).
 export function formatReport({ at, cmd, env, adapter, line, verdicts, hasIntegrated, missing, timedOut, load, withheld }) {
   const bars = (verdicts ?? []).map(formatBarLine).join("\n");
+  const loaded = load?.loaded === true;
+  const allPass = (verdicts ?? []).every((v) => v.status === "PASS");
+  const floor = withheld
+    ? "WITHHELD (box was loaded; numbers are filed, no verdict)"
+    : loaded && allPass
+      ? "PASS under load (conservative; contention can only slow frames)"
+      : "judged";
   return [
     `# Potato check ${at ?? "UNKNOWN"}`,
     "",
     `cmd: ${cmd ?? "UNKNOWN"}`,
     `env: ${env ?? "UNKNOWN"}`,
     `load: ${load ? formatLoadText(load) : "UNKNOWN"}`,
-    `floor: ${withheld ? "WITHHELD (box was loaded; numbers are filed, no verdict)" : "judged"}`,
+    `floor: ${floor}`,
     `adapter: ${adapter ?? "UNKNOWN"}${hasIntegrated ? "" : " (NO_IGPU)"}`,
     missing ? "arena: MISSING (no run; numbers are UNKNOWN)" : "arena: ran",
     timedOut ? "arena: TIMED OUT (numbers may be partial)" : "arena: exited",
@@ -259,8 +271,9 @@ export function formatReport({ at, cmd, env, adapter, line, verdicts, hasIntegra
 }
 
 // Pure summary over canned or live inputs; same inputs give same summary.
-// `loaded` is the run's own load stamp (see `parseBuildLoad`): a verdict on a
-// box that was building is withheld by `decideExit`.
+// `loaded` is the run's own load stamp (see `parseBuildLoad`): a loaded run
+// with a non-PASS bar is withheld by `decideExit`; a loaded run that passes
+// every bar keeps its conservative pass.
 export function summarize({ output, tasklistText, bar, floor, loaded }) {
   const text = String(output ?? "");
   const adapter = arenaAdapterName(text) ?? "UNKNOWN";
@@ -463,9 +476,10 @@ async function runLive({ sampler: makeSampler = startSampler, spawnArena = spawn
 // temp report dir, so the Accept's "prints NO_IGPU and exits 2" / "--floor
 // exits 1" are proven on the tool, not only on the pure helpers. Returns the
 // exit code: 2 when no integrated adapter shows or the bar file is unreadable,
-// 3 when `--floor` runs on a box a build stamped LOADED (no verdict on filed
-// numbers), 1 when `--floor` runs and a bar is not PASS, else 0. Defaults are
-// the live implementations, so production behaviour is unchanged.
+// 3 when `--floor` runs on a loaded box and a bar is not PASS (no verdict on
+// filed numbers), 1 when `--floor` runs on a quiet box and a bar is not PASS,
+// else 0. Defaults are the live implementations, so production behaviour is
+// unchanged except for the loaded-pass rule above.
 // Caller: `main` (same file) passes `process.argv` and the live defaults.
 export async function run(argv = [], deps = {}) {
   const log = deps.log ?? ((line) => console.log(line));
@@ -500,7 +514,8 @@ export async function run(argv = [], deps = {}) {
   if (live.tasklistFailures > 0) {
     logError(`potato-check: working-set sampler failed ${live.tasklistFailures}x, peak may read UNKNOWN (last: ${live.tasklistError})`);
   }
-  if (s.exit === 3) log("potato floor: WITHHELD - a build ran during this run, so the bars are filed numbers, not a verdict (rerun on a quiet box)");
+  if (s.exit === 3) log("potato floor: WITHHELD - a build ran during this run and a bar is not PASS, so the bars are filed numbers, not a verdict (rerun on a quiet box)");
+  if (s.exit === 0 && floor && live.load?.loaded === true) log("potato floor: PASS under load - every bar passed while a build ran; contention can only slow frames, so the pass is conservative");
   if (!s.hasIntegrated) log("NO_IGPU");
   if (live.missing) logError(`potato-check: missing ${ARENA_EXE}`);
   if (live.timedOut) logError("potato-check: arena run timed out");

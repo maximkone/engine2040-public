@@ -388,6 +388,135 @@ golden `d57b5c8ae3096614` is untouched by this window.
   `d57b5c8ae3096614` PASS (run 39988122554). CGVQM+D stays dropped by the
   lead's 2026-10-22 call.
 
+### Later window, 2026-10-23 evening (B7 lights, C10 audit, must-list truth)
+
+- EG11c sun shadow `a1fd53661`, ticked `86cf392e2`: bias 2^-19 plus a slope
+  term and a one-texel normal offset. A 1 cm camera move leaves 0 shadow-map
+  texels different; a sun-facing plane has 0 of 74,554 sampled pixels shadowed
+  (constant-only bias leaves 73,897, so the slope term is load-bearing); the
+  foot contact gap is 0.125 texel against the bar of 2. `steady_tests` 4 passed
+  x2 (runs 39995189648, 39996774401), render lib 1357 passed (39996571901),
+  golden `d57b5c8ae3096614` PASS (39997711390), and the pixel run used the real
+  RTX 3050 adapter.
+- Forward shader repair `8dabbe5e6`: `a1fd53661` left the call site on the old
+  local (`sun_bias(n)` where the parameter is `normal`), so every real frame
+  failed to create its forward pipeline. The pass-truth live gate on this PC
+  proves the repair (below).
+- B7 evidence, pass-truth live gate 2026-10-23 (`target/reports/
+  pass-truth-2026-10-23.md`, test 1 passed on the software adapter): 10 rows,
+  **5 LIVE / 5 PROBE**. LIVE: graph (93,485 px), shadow_cluster (3,374), ibl
+  (93,739), gtao (1,672) and sky (102,869 of 102,869 sky pixels) - sky is LIVE
+  now, so the old "sky and decals are PROBE" line is stale. PROBE in the
+  establishing frame: post (nothing over the bloom threshold; the harness has
+  a bright-sun test that reads it LIVE), material_layer, particles_gpu, decals
+  and spot (no such draws in this frame).
+- RL58 `2c532bf9a`, capture `b892fa4c7`, tick `3c297d41c`: the staged line
+  batch becomes thin HUD quads in the overlay's after-blit pass, one draw, no
+  new target; the capture test shows four groups differing from the beauty
+  frame by 3,591 pixels against the 1,000 floor. `debug_draw` 17 passed x2
+  (runs 39992171484, 39993507849), golden PASS (39994817325). The game caller
+  stays open (C13).
+- AD30 (C10 audit) ticked `26a0eaec5`, pack `ded08d051`: `fx.ragdoll`,
+  `fx.limb`, `fx.break` and `fx.blast` are on the live list with the `physfx:`
+  receipt; `fx_verbs` 7 passed x2 (39988504473, 39989446470), budget 3
+  (39990857804), door pin 91 (39990756475), list 61,742 of 75,000.
+- Wasm seams and console gating `acff994a3`: F24's kit patch read and physfx
+  `body::load` are native-only with wasm stubs; the console overlay constants,
+  row and clip are `any(app, test)` so endpoint's no-app build has no dead
+  code. `node tools/wasm-gate.mjs` PASS (0 regressions, its 20 tests pass),
+  `cargo check -p engine-physfx --target wasm32-unknown-unknown` clean,
+  endpoint clippy PASS (39996510575), console 6 (39993773592), kit_source 2
+  (39996456565), physfx body 30 (39995126963).
+- Plan truth `356e2d09b`: A5 is ENG17 (`f858555f2`, worklet path, 23 tests)
+  and F25 is ENG16 (`f27f6f9c8`, crash receipt, 6 tests); C10 names its open
+  look leg (PX44b waits on the physics file, soft bodies not started).
+- Render clippy repairs `2175ca364`: the debug pass's 30 KB stack array is a
+  heap `Vec` and EG11c's `steady_tests` lost an argument, a constant assert
+  and eight needless borrows. `cargo clippy -p engine-render --features
+  window --all-targets -D warnings` PASS (40000491595), `steady_tests` 4
+  passed (40000477773), `debug_draw` 17 passed (39998083684).
+- EG38 code `07ed0b1c6`: the live submit list now calls the tested sphere
+  test before sorting (its proofs and tick were in flight at write time);
+  RL36 (dual-filter bloom on the live frame) was dispatched next.
+- B8 ticked at `c640061`: the full 10-per-tier reference set is real. Ten
+  web 640x360 frames from `dist/web` in headless Chrome 155.0.8059.85 on the
+  RTX 3050 (driver 32.0.16.1062), ten native 1280x720 and ten potato 320x180
+  frames beside the earlier tiers; `content/reference/index.json` holds 30
+  real rows plus the 3 recipe rows, each naming its binary or browser,
+  adapter and command line. Two passes gave equal `pixel_fnv` per shot and
+  `reference_set` PASS x2 (runs 40003695793, 40004194203). The opened
+  `content/reference/web/web-t300.png` shows eight colored fighters in the
+  lit ring, not boxes. The page capture handshake fix rides the same commit.
+- Headless ship proof: `15df03b7b` plays the shipped session with no window
+  and `88095e1f4` runs the shipped binary twice from fresh state, requiring
+  ticks=600 and one 16-hex hash (`SHIP-GAME ... headless=forced runs=2`);
+  `node --test tools/ship-run.test.mjs` 20 passed and the mirror ship-check
+  run 40006304672 is green: `SHIP-RUN tick=600 hash=d57b5c8ae3096614` (the
+  shipped binary proves the golden), `SHIP-GAME tick=600
+  hash=7842af9a79d7bd11 frames=0 seconds=10.000 adapter=none
+  headless=forced runs=2`, frame leg skipped by name. The frame-score scorer
+  is not wired; that half stays open (finish-line E22 names it).
+- EG38 ticked at `07ed0b1c6` (board `9212783fe`): `stage_frame` and
+  `stage_frame_with_camera` build the order in `submit_cull.rs` -
+  `rl32_submit_order` then the tested `draw::sphere_visible_cpu` per draw -
+  so the forward and depth passes draw the culled list; `GpuMesh.bounds`
+  carries each mesh's world sphere and skinned draws are never culled.
+  `live_draw_sort_culls_an_outside_mesh_and_keeps_a_visible_one` reads 0 for
+  a cube behind the eye and 1 twice for a visible one (a >100 px difference),
+  the filtered suite is green x2 (runs 40005768704, 40006940498) and the
+  render lib 1362 passed (40005875196). B7's cull leg is closed; the window
+  capture (4 frames, validation 0, pops 0) opened its centre crate and read
+  the lit near face, not the far wall.
+- The B8 web captures also serve as the browser proof of the sidebar's clock
+  fix (`311fbe86b`): the page draws the real fighters at ticks 0..540 with no
+  clock panic, and the wasm gate's `fighter_look` clock hazard is at 0.
+- PX44b's code landed at `43f00f159`: the ragdoll shape table is built from
+  `content/bodies/fighter.toml` at load, the look keeps only its joint/tip
+  name chain, and a missing file or a renamed joint is a typed refusal that
+  names the path or both names. Its three table tests pass x2 (runs
+  40001839217, 40004112869) and the cape suite 5 passed (40005801723), but
+  the guard clause is red from PX9's partial rest pass: the scripted
+  knockout never sleeps in 240 ticks, the on/off pop delta is 40 against 5
+  (bar off+8) and the get-up pop is 1 (bar 0). The row stays open, recorded
+  as `px44b-guard-px9-x2`; a PX9 seat is dispatched to restore the rest and
+  then tick PX44b at `43f00f159`. No threshold was lowered.
+- RL36 ticked at `b9ae53e` (board `caf0a4611`): dual-filter bloom on the live
+  frame in a new texture chain (13-tap down, tent up, Karis on mip 0) rather
+  than RP1's storage-buffer path, so RP1's CPU oracle keeps its parity. Proof:
+  `gpu_bloom_dual_filter_parity` max |gpu - cpu| 1.01e-4 under the 5e-3 bar;
+  one 10,000-nit texel moves the frame mean +0.0084% under 1%; the 720p chain
+  costs 0.148 ms over 7 dispatches under 0.5 ms; F2P
+  `bloom_on_off_halo_differs_dark_unchanged_live` moves the torch frame and
+  leaves a dark frame byte-equal; pass truth reads `post` LIVE (41663 diff
+  px). Clippy `--features window --all-targets -D warnings` PASS on the 17
+  paths (40016824975), three kernels naga-validate (40015470993), pipeline
+  warmup 4 (40014926230), bloom lib 5 (40010523880). B7's bloom leg is
+  closed; its TAA resolve bar and sharpen (LF5c/LF5d) stay open, and the LF8
+  BRDF split was dispatched next.
+- G2 1080p (`f1267fe1e` plan cell; report `target/reports/g2-1080p-2026-10-23.md`):
+  1920x1080, 8 fighters, 300 frames, twice on a quiet box: 60.5 fps p50
+  (16.532-16.537 ms), CPU work 7.4-8.7 ms, GPU 1.6-2.0 ms. The product check
+  now times 1080p and gates player latency on the timing run (`668aa4756`):
+  GREEN at `input_p95=6.737 present_p95=10.585`. The audit's 114.9 ms was the
+  capture run's `present_p95` (its input leg 4.380 ms); the 80 slow frames are
+  the armed look probes, not player frames; the 6.354 ms "ibl" was CPU submit
+  over three probe frames, live 0.045-0.110 ms. Open: a product check on a
+  binary built from this tree (the run used a 37-commit-old binary; the dirty
+  `arena_frame/mod.rs` blocks a fresh build), the eight look floors, and a
+  1080p look reference.
+- Net decoders fuzzed (`75629a723`): five newer wire decoders, 28,052 seeded
+  sweep cases twice plus 962 strict-prefix cases, every refusal a typed error,
+  0.01 s per test; runs 40018879101 and 40019186297, clippy 40018723612, golden
+  40019482337 unchanged. No panic, missing cap or wrong error found. The
+  nightly coverage-guided cargo-fuzz job remains the open leg.
+- E22 frame score (`fbb0df931`, plan `abd15596c`): the frame leg draws the ten
+  native shots offscreen and scores `native/arena600-t000.png` with the look
+  gate's own bar (SSIM 9800 or FLIP <= 1200); a real RTX 3050 reading is
+  `SHIP-FRAME adapter="NVIDIA GeForce RTX 3050 6GB Laptop GPU" ... score=9998
+  flip=1 verdict=pass`, software is labelled and never a pass, and 32 tool
+  tests pass. Open: the same line inside a clean-folder ship receipt (needs a
+  fresh arena.exe after C13) and GM3's 5-minute quiet-box run.
+
 ## Re-run
 
 ```

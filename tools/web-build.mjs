@@ -31,6 +31,15 @@ export const TARGET = "wasm32-unknown-unknown";
 export const PROFILE = "web";
 export const PACKAGE = "engine-web";
 export const OUT_NAME = "engine";
+export const ENGINE_JS = "engine.js";
+export const WASM_FILE = "engine_bg.wasm";
+export const LOADER = "loader.js";
+export const INDEX_FILE = "index.html";
+export const BUILD_FILE = "build.json";
+// PIN: the number of hex digits of a content hash in a file name and in a build id. 12 hex = 48 bits, far more than the
+// handful of files a build ships; the full SHA-256 stays in the pin for the byte check.
+export const HASH_HEX = 12;
+export const PIN_SCHEMA = 2;
 export const SIZE_LIMIT_BYTES = 8 * 1024 * 1024; // dist/web, before game content
 // Rust 1.97 emits bulk-memory, nontrapping float-to-int and sign-extension instructions (and, since 1.82, multivalue and
 // reference types); wasm-opt rejects a module that uses a feature it was not told about. All six ship in every browser
@@ -40,20 +49,30 @@ export const WASM_OPT_FLAGS = ["-Oz", ...WASM_OPT_FEATURES];
 export const WASM_OPT_AB = ["-Oz", "-Os", "-O3"]; // the levels --opt-ab compares; the first wins a tie
 export const SWEEP_LEVELS = ["z", "s", "3"]; // the opt-levels --size-sweep builds; the first wins a tie
 export const TWIGGY_ITEMS = 20;
-// The files the page needs, in the order build.json lists them. Anything else wasm-bindgen writes (snippets/) is copied too.
+// Fixed names: the entry page, the manifest and the isolation worker (a service worker's registration name cannot be
+// hashed without breaking that registration). Everything the page runs carries its content hash.
 // WEB14: coi-serviceworker.js is the cross-origin-isolation worker the page registers; without it the page is single-threaded.
 export const COI_WORKER = "coi-serviceworker.js";
-export const DIST_FILES = ["index.html", "loader.js", COI_WORKER, "engine.js", "engine_bg.wasm", "build.json"];
+export const DIST_FILES = [INDEX_FILE, COI_WORKER, BUILD_FILE];
+// The hashed names the build writes: one build is the only set a page can name.
+export const DIST_PATTERNS = [
+  new RegExp(`^loader\\.[0-9a-f]{${HASH_HEX}}\\.js$`),
+  new RegExp(`^engine\\.[0-9a-f]{${HASH_HEX}}\\.js$`),
+  new RegExp(`^engine_bg\\.[0-9a-f]{${HASH_HEX}}\\.wasm$`),
+  new RegExp(`^assets/arena\\.[0-9a-f]{${HASH_HEX}}\\.e2bundle$`),
+  new RegExp(`^assets/fighters\\.[0-9a-f]{${HASH_HEX}}\\.e2bundle$`),
+];
 // WEB17: the cooked arena kit the played page fetches and stages (`?fight`); cooked offline by
 // `cargo run -p engine-assets --features import --bin arena_bundle`.
 export const KIT_BUNDLE = ARENA_BUNDLE;
 // WEB6: the cooked fighter rig, the file the page fetches for `?fight`. The
 // entries keep their `cooked/` prefix, so they match `rig_cook::cooked_names`.
 export const RIG_BUNDLE = "assets/fighters.e2bundle";
-// What a published bundle may hold: the files above, the kit bundle and wasm-bindgen's snippets/ folder.
+// What a published bundle may hold: the fixed files, the hashed names above and wasm-bindgen's snippets/ folder.
 // The Pages workflow adds the handbook (docs/) and llms.txt for the assembled site.
-export const PUBLIC_FILES = [...DIST_FILES, KIT_BUNDLE, RIG_BUNDLE];
-export const PUBLIC_DIRS = ["snippets/"];
+export const PUBLIC_FILES = [...DIST_FILES];
+export const PUBLIC_PATTERNS = [...DIST_PATTERNS];
+export const PUBLIC_DIRS = [];
 
 export class BuildError extends Error {}
 
@@ -76,9 +95,27 @@ export const builtWasmPath = (rootDir) => join(rootDir, "target", TARGET, PROFIL
 export const bindgenArgs = (wasmIn, outDir) => ["--target", "web", "--no-typescript", "--out-dir", outDir, "--out-name", OUT_NAME, wasmIn];
 export const bindgenFix = (version) => `cargo install wasm-bindgen-cli --version ${version} --locked`;
 
-export function renderHtml(template, commit) {
-  if (!template.includes("{{COMMIT}}")) throw new BuildError("crates/web/index.html lost its {{COMMIT}} placeholder");
-  return template.replaceAll("{{COMMIT}}", commit);
+// The hashed file name of a logical build file: `engine_bg.wasm` -> `engine_bg.<12 hex>.wasm`.
+export function hashedName(name, sha256hex) {
+  const at = name.lastIndexOf(".");
+  if (at <= 0) throw new BuildError(`${name} has no extension to put the content hash before`);
+  return `${name.slice(0, at)}.${sha256hex.slice(0, HASH_HEX)}${name.slice(at)}`;
+}
+
+// The build id: the pin's logical names, hashed names and full hashes, sorted, hashed once. Two builds of the same tree
+// get the same id and the same names; any changed input changes the id (and the changed file's name).
+export function pinId(files) {
+  const canonical = Object.keys(files).sort().map((logical) => `${logical} ${files[logical].name} ${files[logical].sha256}`).join("\n");
+  return createHash("sha256").update(canonical).digest("hex").slice(0, HASH_HEX);
+}
+
+export function renderHtml(template, { commit, build, pin } = {}) {
+  for (const hole of ["{{COMMIT}}", "{{BUILD}}", "{{PIN}}"]) {
+    if (!template.includes(hole)) throw new BuildError(`crates/web/index.html lost its ${hole} placeholder`);
+  }
+  // A `<` inside the JSON would close the script element early; names hold none, but escape it anyway.
+  const json = JSON.stringify(pin).replace(/</g, "\\u003c");
+  return template.replaceAll("{{COMMIT}}", String(commit)).replaceAll("{{BUILD}}", String(build)).replaceAll("{{PIN}}", json);
 }
 
 // WEB14: the text of the cross-origin-isolation worker the page registers. A missing file is refused here,
@@ -97,12 +134,13 @@ const gzipBytes = (buf) => gzipSync(buf, { level: 9 }).length;
 
 const tail = (text, n = 25) => String(text).trimEnd().split(/\r?\n/).slice(-n).join("\n");
 
-// The files of `files` (relative, forward slashes) that are not on the public list: not a listed file and not under a listed folder.
-// `allow` adds files and folders for one check.
-export function nonPublicFiles(files, { files: more = [], dirs = [] } = {}) {
+// The files of `files` (relative, forward slashes) that are not on the public list: not a listed file, not a hashed name
+// pattern and not under a listed folder. `allow` adds files, patterns and folders for one check.
+export function nonPublicFiles(files, { files: more = [], dirs = [], patterns = [] } = {}) {
   const names = new Set([...PUBLIC_FILES, ...more]);
   const folders = [...PUBLIC_DIRS, ...dirs];
-  return files.filter((f) => !names.has(f) && !folders.some((d) => f.startsWith(d)));
+  const shapes = [...PUBLIC_PATTERNS, ...patterns];
+  return files.filter((f) => !names.has(f) && !folders.some((d) => f.startsWith(d)) && !shapes.some((re) => re.test(f)));
 }
 
 // Throws a BuildError naming the files of `dir` that are not public.
@@ -235,13 +273,9 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
       for (const l of twiggy) say(`[twiggy] ${l}`);
     }
 
-    const page = renderHtml(deps.readText(join(rootDir, "crates", "web", "index.html")), hash);
+    const template = deps.readText(join(rootDir, "crates", "web", INDEX_FILE));
     const worker = readCoiWorker(deps, rootDir);
-
-    // WEB10: a file nobody listed is refused before outDir is touched.
-    const shipped = [...listFiles(work).filter((rel) => !rel.endsWith(".d.ts")), "index.html", "loader.js", COI_WORKER, "build.json"];
-    const stray = nonPublicFiles(shipped);
-    if (stray.length) throw new BuildError(`the build holds ${stray.length} file(s) outside the public list: ${stray.join(", ")}`);
+    const loaderText = deps.readText(join(rootDir, "crates", "web", LOADER));
 
     // WEB17 and WEB6: both content bundles are checked before outDir is touched,
     // so a missing one leaves the last build standing instead of half writing a
@@ -258,37 +292,71 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
       );
     }
 
+    // PIN: wasm-bindgen may write engine.js, engine_bg.wasm and type declarations. Any other file would be one the pin
+    // cannot name (engine.js imports a JS snippet by a fixed relative path), so the build refuses it by name instead of
+    // shipping a file no page can verify. No build has written one yet.
+    const workFiles = listFiles(work).filter((rel) => !rel.endsWith(".d.ts"));
+    const unexpected = workFiles.filter((rel) => rel !== ENGINE_JS && rel !== WASM_FILE);
+    if (unexpected.length) {
+      throw new BuildError(`wasm-bindgen wrote ${unexpected.join(", ")}; the build pin names ${ENGINE_JS} and ${WASM_FILE} only (a file the pin does not name cannot be verified)`);
+    }
+    const kitRaw = deps.readBytes(kitSource);
+    const rigRaw = deps.readBytes(rigSource);
+    // The bytes each pinned logical name ships as. The page template is pinned by its own bytes: the rendered page embeds
+    // the pin, so it cannot hash itself; the template hash still catches a page cached across a deploy. The isolation
+    // worker keeps its fixed name (a service worker is registered by name) and its bytes are pinned.
+    const shipped = new Map([
+      [ENGINE_JS, deps.readBytes(join(work, ENGINE_JS))],
+      [WASM_FILE, deps.readBytes(join(work, WASM_FILE))],
+      [LOADER, Buffer.from(loaderText, "utf8")],
+      [KIT_BUNDLE, gzipSync(kitRaw, { level: 9 })], // WEB17: the cooked arena kit, whole, gzip
+      [RIG_BUNDLE, gzipSync(rigRaw, { level: 9 })], // WEB6: the cooked rig, its entries under `cooked/`, gzip
+      [INDEX_FILE, Buffer.from(template, "utf8")],
+      [COI_WORKER, Buffer.from(worker, "utf8")],
+    ]);
+    const pinFiles = {};
+    for (const logical of [...shipped.keys()].sort()) {
+      const sum = sha256(shipped.get(logical));
+      const fixed = logical === INDEX_FILE || logical === COI_WORKER;
+      pinFiles[logical] = { name: fixed ? logical : hashedName(logical, sum), sha256: sum };
+    }
+    const build = pinId(pinFiles);
+    const pin = { schema: PIN_SCHEMA, build, files: pinFiles };
+    const page = renderHtml(template, { commit: hash, build, pin });
+
+    // WEB10: every name the build writes is on the public list before outDir is touched.
+    const planned = [INDEX_FILE, COI_WORKER, BUILD_FILE, ...Object.values(pinFiles).map((f) => f.name)];
+    const stray = nonPublicFiles(planned);
+    if (stray.length) throw new BuildError(`the build holds ${stray.length} file(s) outside the public list: ${stray.join(", ")}`);
+
     // Everything is ready: only now touch outDir.
     rmSync(outDir, { recursive: true, force: true });
     mkdirSync(outDir, { recursive: true });
-    for (const rel of listFiles(work)) {
-      if (rel.endsWith(".d.ts")) continue;
-      const to = join(outDir, rel);
+    for (const [logical, bytes] of shipped) {
+      if (logical === INDEX_FILE || logical === COI_WORKER) continue; // written under their fixed names below
+      const to = join(outDir, pinFiles[logical].name);
       mkdirSync(dirname(to), { recursive: true });
-      cpSync(join(work, rel), to);
+      writeFileSync(to, bytes);
     }
-    writeFileSync(join(outDir, "index.html"), page);
-    writeFileSync(join(outDir, "loader.js"), deps.readText(join(rootDir, "crates", "web", "loader.js"))); // QW3/QW12: the page imports it
+    writeFileSync(join(outDir, INDEX_FILE), page);
     writeFileSync(join(outDir, COI_WORKER), worker); // WEB14: the page registers it; 200 on the site is one more deploy check
-    mkdirSync(join(outDir, "assets"), { recursive: true });
+
     // QW10: both cooked bundles ship gzip-compressed. dist/web has a hard 8 MiB build limit
     // and a static host will not compress a binary type it does not know, so the compression
     // happens at build time and crates/web/loader.js undoes it while the body streams. The
-    // file names stay the same, so a page and a dist always agree.
-    const kitRaw = deps.readBytes(kitSource);
-    const rigRaw = deps.readBytes(rigSource);
-    writeFileSync(join(outDir, KIT_BUNDLE), gzipSync(kitRaw, { level: 9 })); // WEB17: the cooked arena kit, whole
-    writeFileSync(join(outDir, RIG_BUNDLE), gzipSync(rigRaw, { level: 9 })); // WEB6: the cooked rig, its entries under `cooked/`
-
-    const rawBundle = new Map([[KIT_BUNDLE, kitRaw], [RIG_BUNDLE, rigRaw]]);
+    // hashed names carry those bytes' hashes, so a page and a dist always agree.
+    const kitName = pinFiles[KIT_BUNDLE].name;
+    const rigName = pinFiles[RIG_BUNDLE].name;
+    const wasmName = pinFiles[WASM_FILE].name;
+    const rawBundle = new Map([[kitName, kitRaw], [rigName, rigRaw]]);
     const files = {};
     let totalBytes = 0;
     let firstBundleBytes = 0;
     for (const rel of listFiles(outDir)) {
-      if (rel === "build.json") continue;
+      if (rel === BUILD_FILE) continue;
       const bytes = deps.readBytes(join(outDir, rel));
       const raw = rawBundle.get(rel) ?? bytes;
-      const first = rel === KIT_BUNDLE ? firstTierBytes(raw) : raw;
+      const first = rel === kitName ? firstTierBytes(raw) : raw;
       files[rel] = {
         bytes: bytes.length,
         ...(raw === bytes ? {} : { rawBytes: raw.length }),
@@ -300,13 +368,22 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
       totalBytes += bytes.length;
       // QW4: the page's first load, in the same words as web-budget.mjs: the shipped form of
       // every file except build.json, and of the arena bundle only to its tier-0 prefix.
-      firstBundleBytes += firstLoadBytes(rel, bytes);
+      firstBundleBytes += firstLoadBytes(rel, bytes, kitName);
+    }
+    // The page names these bytes; the receipt above must hash to the same sums or the pin would lie. The page itself is
+    // pinned by its template bytes: the rendered page embeds the pin, so it cannot be hashed into it.
+    for (const [logical, entry] of Object.entries(pinFiles)) {
+      if (logical === INDEX_FILE) continue;
+      const receipt = files[entry.name];
+      if (!receipt || receipt.sha256 !== entry.sha256) throw new BuildError(`the written ${entry.name} does not hash to the pin's ${entry.sha256}`);
     }
     const info = {
-      schema: 1,
+      schema: PIN_SCHEMA,
+      build,
       commit: hash,
       target: TARGET,
       profile: PROFILE,
+      pin: pinFiles,
       files,
       firstBundleBytes,
       totalBytes,
@@ -318,13 +395,14 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
       wasmOptAb: c.ab,
       twiggy,
     };
-    // build.json lists the other files; it cannot hold its own hash.
-    writeFileSync(join(outDir, "build.json"), `${JSON.stringify(info, null, 2)}\n`);
+    // build.json lists the other files; it cannot hold its own hash. The page embeds `pin`, so the loader can compare
+    // the two before it imports anything.
+    writeFileSync(join(outDir, BUILD_FILE), `${JSON.stringify(info, null, 2)}\n`);
     // The numbers print before the gate, so an over-limit build still says how far over it is.
     say(
-      `[web-build] dist/web ${totalBytes} bytes (limit ${SIZE_LIMIT_BYTES}); wasm ${files["engine_bg.wasm"].bytes} bytes, ${files["engine_bg.wasm"].gzipBytes} gzip; ` +
-        `arena bundle ${files[KIT_BUNDLE].bytes} gzip (${files[KIT_BUNDLE].rawBytes} raw, tier 0 at ${files[KIT_BUNDLE].firstBytes}); ` +
-        `rig ${files[RIG_BUNDLE].bytes} gzip (${files[RIG_BUNDLE].rawBytes} raw); first_bundle ${firstBundleBytes} bytes`,
+      `[web-build] dist/web ${totalBytes} bytes (limit ${SIZE_LIMIT_BYTES}); pin ${build}; wasm ${wasmName} ${files[wasmName].bytes} bytes, ${files[wasmName].gzipBytes} gzip; ` +
+        `arena bundle ${kitName} ${files[kitName].bytes} gzip (${files[kitName].rawBytes} raw, tier 0 at ${files[kitName].firstBytes}); ` +
+        `rig ${rigName} ${files[rigName].bytes} gzip (${files[rigName].rawBytes} raw); first_bundle ${firstBundleBytes} bytes`,
     );
     if (!info.underLimit) {
       rmSync(outDir, { recursive: true, force: true }); // no half-shipped build over the limit

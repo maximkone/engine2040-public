@@ -1,11 +1,13 @@
 //! pool: one persistent job pool with scoped jobs and index-ordered merges.
 //!
 //! Owner: engine-ecs. [`JobPool::new`] starts its workers once; every
-//! [`JobPool::scope`] after that queues boxed jobs on them and spawns no
-//! thread. A scope counts its open jobs (the wait counter); the caller helps
-//! run queued jobs while the counter is above zero, so a pool of zero
-//! workers runs everything inline on the caller and a job may open a nested
-//! scope without starving the pool.
+//! [`JobPool::scope`] after that queues erased jobs on them and spawns no
+//! thread. A job small enough for inline storage costs no heap call, so a
+//! warmed pool runs a tick without per-job allocation. A scope counts its
+//! open jobs (the wait counter); the caller helps run queued jobs while the
+//! counter is above zero, so a pool of zero workers runs everything inline
+//! on the caller and a job may open a nested scope without starving the
+//! pool.
 //!
 //! Determinism: the pool decides only where a job runs, never what it
 //! returns. [`JobPool::par_chunks_map`] gives each chunk its own output slot
@@ -54,8 +56,111 @@ pub const MAX_WORKERS: usize = 256;
 /// count, so a bulk helper never floods a big machine.
 const SHARED_MAX_WORKERS: usize = 15;
 
-/// A queued job; [`Scope::spawn`] erases its borrow lifetime.
-type Job = Box<dyn FnOnce() + Send + 'static>;
+/// Erased storage for one queued job.
+mod erased {
+    use core::cell::Cell;
+    use core::marker::PhantomData;
+    use core::mem::{align_of, size_of, MaybeUninit};
+
+    /// Bytes a job carries inline. A larger or over-aligned closure spills to
+    /// one heap box and stores the same way.
+    const INLINE_JOB_BYTES: usize = 128;
+
+    /// Storage aligned like a `u128`, which covers ordinary closures.
+    #[repr(align(16))]
+    struct Buf([MaybeUninit<u8>; INLINE_JOB_BYTES]);
+
+    /// One step over a stored closure: the store that creates it, then either
+    /// the run that consumes it or the drop that discards it.
+    enum Step<S> {
+        Store(S),
+        Run,
+        Drop,
+    }
+
+    /// Apply `step` to the closure at `ptr`: the one place erased storage is
+    /// touched. Each job gets one store, then at most one run or one drop.
+    #[expect(
+        unsafe_code,
+        reason = "a job's closure type is erased into fixed storage; this one \
+                  match writes, calls or drops the stored value"
+    )]
+    fn apply<S: FnOnce()>(ptr: *mut u8, step: Step<S>) {
+        // SAFETY: `ptr` is the start of one job buffer. Store runs on empty
+        // storage and initializes exactly one `S`; Run and Drop run only
+        // after that Store, never together, and consume what they read. The
+        // closure may borrow its scope: `Scope::spawn` counts the job open
+        // before queueing it and the scope waits for every job before its
+        // borrows end, so Run never calls a dead borrow.
+        unsafe {
+            match step {
+                Step::Store(value) => ptr.cast::<S>().write(value),
+                Step::Run => ptr.cast::<S>().read()(),
+                Step::Drop => ptr.cast::<S>().drop_in_place(),
+            }
+        }
+    }
+
+    /// Run (`true`) or drop (`false`) the closure at `ptr`: the erased half
+    /// a job stores as a plain `fn` pointer.
+    fn walk<S: FnOnce()>(ptr: *mut u8, run: bool) {
+        apply::<S>(ptr, if run { Step::Run } else { Step::Drop });
+    }
+
+    /// One queued job with its closure type erased.
+    ///
+    /// A closure that fits the buffer is stored inline, so queueing it costs
+    /// no heap call; a larger or over-aligned one is boxed first. `walk` is
+    /// the monomorphized run/drop pair for the stored type. Only `new`
+    /// builds a job, and it takes only `Send` closures, so moving the job
+    /// moves the closure. The stored closure need not be `Sync`, which the
+    /// marker keeps off this type.
+    pub(super) struct Job {
+        buf: Buf,
+        walk: fn(*mut u8, bool),
+        /// Cleared by `run`, so a consumed job drops nothing.
+        armed: bool,
+        not_sync: PhantomData<Cell<()>>,
+    }
+
+    impl Job {
+        /// Store `f` inline when its size and alignment fit, else in a box.
+        pub(super) fn new<F: FnOnce() + Send>(f: F) -> Self {
+            let mut buf = Buf([MaybeUninit::uninit(); INLINE_JOB_BYTES]);
+            let walk: fn(*mut u8, bool) =
+                if size_of::<F>() <= INLINE_JOB_BYTES && align_of::<F>() <= align_of::<Buf>() {
+                    apply::<F>(buf.0.as_mut_ptr().cast(), Step::Store(f));
+                    walk::<F>
+                } else {
+                    apply::<Box<F>>(buf.0.as_mut_ptr().cast(), Step::Store(Box::new(f)));
+                    walk::<Box<F>>
+                };
+            Self {
+                buf,
+                walk,
+                armed: true,
+                not_sync: PhantomData,
+            }
+        }
+
+        /// Run and consume the job. The scope runs each job once.
+        pub(super) fn run(mut self) {
+            self.armed = false;
+            (self.walk)(self.buf.0.as_mut_ptr().cast(), true);
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            if self.armed {
+                (self.walk)(self.buf.0.as_mut_ptr().cast(), false);
+            }
+        }
+    }
+}
+
+use erased::Job;
+
 /// A caught panic payload.
 type Payload = Box<dyn Any + Send + 'static>;
 
@@ -139,7 +244,7 @@ fn worker(shared: &Shared) {
             }
         };
         match job {
-            Some(job) => job(),
+            Some(job) => job.run(),
             None => return,
         }
     }
@@ -263,7 +368,7 @@ impl JobPool {
                 return;
             }
             if let Some(job) = self.shared.try_pop() {
-                job();
+                job.run();
                 continue;
             }
             // The queue is empty, so every open job of this scope is running
@@ -457,13 +562,16 @@ pub struct Scope<'scope, 'env: 'scope> {
 }
 
 impl<'scope, 'env> Scope<'scope, 'env> {
-    #[expect(
-        unsafe_code,
-        reason = "scoped jobs on persistent workers need their borrow lifetime erased; \
-                  the scope waits for every job before the borrow ends"
-    )]
     /// Queue `f` on the pool. Jobs are numbered in spawn order; the number
     /// only picks which panic re-raises when several jobs panic.
+    ///
+    /// Safety of the erased borrow lifetime rests on the scope: a `Scope`
+    /// exists only inside [`JobPool::scope`], and only by reference. The job
+    /// was counted open above, before it is queued; that call does not
+    /// return or unwind until the counter is zero again
+    /// (`help_until_done`, guarded by [`AbortOnUnwind`]), and the counter
+    /// drops only after the job has consumed `f` and its borrows. So the job
+    /// never runs or holds a borrow past `'scope`.
     pub fn spawn<F>(&'scope self, f: F)
     where
         F: FnOnce() + Send + 'scope,
@@ -472,22 +580,12 @@ impl<'scope, 'env> Scope<'scope, 'env> {
         self.next.set(index.saturating_add(1));
         lock(&self.state.tally).pending += 1;
         let state = Arc::clone(&self.state);
-        let job: Box<dyn FnOnce() + Send + 'scope> = Box::new(move || {
+        self.pool.shared.push(Job::new(move || {
             // `f` and everything it borrows is consumed inside
             // `catch_unwind`; after it only the `'static` state is touched.
             let outcome = catch_unwind(AssertUnwindSafe(f));
             state.finish(index, outcome);
-        });
-        // SAFETY: a `Scope` exists only inside `JobPool::scope`, and only by
-        // reference. The job was counted open above, before it is queued;
-        // that call does not return or unwind until the counter is zero
-        // again (`help_until_done`, guarded by `AbortOnUnwind`), and the
-        // counter drops only after the job has consumed `f` and its borrows.
-        // So the job never runs or holds a borrow past `'scope`. The two box
-        // types differ only in that lifetime and share one layout.
-        let job: Job =
-            unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'scope>, Job>(job) };
-        self.pool.shared.push(job);
+        }));
     }
 }
 
@@ -609,6 +707,38 @@ mod tests {
         assert_eq!(out, want);
         // The scope's return value passes through.
         assert_eq!(pool.scope(|_| 41) + 1, 42);
+    }
+
+    #[test]
+    fn job_pool_threads_spawn_allocates_nothing_once_the_queue_is_warm() {
+        let pool = JobPool::new(0).expect("inline pool starts");
+        let ran = AtomicUsize::new(0);
+        // Warm the shared queue to its steady size: growing it is the one
+        // allocation a spawn may still trigger. Boxed jobs used to count one
+        // heap call per spawn here; inline storage counts none.
+        pool.scope(|s| {
+            for _ in 0..64 {
+                let ran = &ran;
+                s.spawn(move || {
+                    ran.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+        });
+        assert_eq!(ran.load(Ordering::Relaxed), 64);
+        ran.store(0, Ordering::Relaxed);
+        let count = pool.scope(|s| {
+            let ((), count) = engine_core::alloc_probe::measure(|| {
+                for _ in 0..64 {
+                    let ran = &ran;
+                    s.spawn(move || {
+                        ran.fetch_add(1, Ordering::Relaxed);
+                    });
+                }
+            });
+            count
+        });
+        assert_eq!(ran.load(Ordering::Relaxed), 64, "every spawned job ran");
+        assert_eq!(count.calls, 0, "spawn after warmup allocated: {count:?}");
     }
 
     #[test]

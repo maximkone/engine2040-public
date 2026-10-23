@@ -649,8 +649,9 @@ pub fn sense_ahead(
     }
 }
 
-/// Carry a grounded rider by its platform delta; names the ridden platform.
-fn ride_platform(walker: &mut Walker, world: &StepWorld<'_>) -> Option<u32> {
+/// Carry a grounded rider by its platform delta; names the ridden platform and the travel it
+/// applied this tick.
+fn ride_platform(walker: &mut Walker, world: &StepWorld<'_>) -> Option<(u32, [i32; 3])> {
     if !walker.grounded {
         return None;
     }
@@ -660,10 +661,19 @@ fn ride_platform(walker: &mut Walker, world: &StepWorld<'_>) -> Option<u32> {
             walker.pos_mm[0] = narrow(walker.pos_mm[0], i64::from(platform.delta_mm[0]));
             walker.pos_mm[1] = narrow(walker.pos_mm[1], i64::from(platform.delta_mm[1]));
             walker.pos_mm[2] = narrow(walker.pos_mm[2], i64::from(platform.delta_mm[2]));
-            return Some(id);
+            return Some((id, platform.delta_mm));
         }
     }
     None
+}
+
+/// One-shot step-off carry: a rider that left its deck this tick keeps the deck's travel as
+/// velocity, so the flight keeps the platform's motion. Integer mm/s, saturating; a rider on a
+/// deck that has stopped inherits zero and simply drops.
+fn inherit_ride(walker: &mut Walker, delta_mm: [i32; 3]) {
+    for (lane, delta) in walker.vel_mm_s.iter_mut().zip(delta_mm) {
+        *lane = narrow(*lane, i64::from(delta) * i64::from(TICKS_PER_S));
+    }
 }
 
 /// Steer horizontal velocity toward the clamped wish.
@@ -863,6 +873,11 @@ pub fn step_walker(
     jump_and_gravity(walker, input.jump_pressed, cfg);
     let (stepped, wall_normal) = move_horizontal(walker, world, cfg);
     let slipped = resolve_vertical(walker, world, cfg);
+    if let Some((_, ride_mm)) = rode {
+        if !walker.grounded {
+            inherit_ride(walker, ride_mm);
+        }
+    }
     walker.buffer_ticks = walker.buffer_ticks.saturating_sub(1);
     if !walker.grounded {
         walker.coyote_ticks = walker.coyote_ticks.saturating_sub(1);
@@ -874,7 +889,7 @@ pub fn step_walker(
         wall_normal,
         stepped,
         slipped,
-        rode_platform: rode,
+        rode_platform: rode.map(|(id, _)| id),
     }
 }
 
@@ -1266,6 +1281,145 @@ mod tests {
         assert_eq!(w.pos_mm[0] - platform.min_mm[0], offset);
         assert_eq!(w.pos_mm[1], 0);
         assert!(w.grounded);
+    }
+
+    /// Independent f64 prediction of a step-off flight: air steer toward the wish, gravity
+    /// per tick, then travel. Returns the landing x and the flight tick. It reads the
+    /// documented tick law, never the stepper, so a drift on either side shows up.
+    fn ballistic_landing(cfg: &Config, launch: &Walker, wish_x_mm_s: i32) -> (f64, u32) {
+        let dt = 1.0 / f64::from(TICKS_PER_S);
+        let steer_max = f64::from(cfg.accel_air_mm_s2.max(0) / TICKS_PER_S);
+        let gravity = f64::from(GRAVITY_MM_S2 / TICKS_PER_S);
+        let wish = wish_x_mm_s.clamp(-cfg.max_wish_mm_s, cfg.max_wish_mm_s);
+        let mut x = f64::from(launch.pos_mm[0]);
+        let mut y = f64::from(launch.pos_mm[1]);
+        let mut vx = f64::from(launch.vel_mm_s[0]);
+        let mut vy = f64::from(launch.vel_mm_s[1]);
+        for tick in 1..=600u32 {
+            vx += (f64::from(wish) - vx).clamp(-steer_max, steer_max);
+            vy -= gravity;
+            x += vx * dt;
+            y += vy * dt;
+            if y <= 0.0 {
+                return (x, tick);
+            }
+        }
+        (x, 0)
+    }
+
+    #[test]
+    fn platform_ride_matrix() {
+        let cfg = Config::default();
+        let blocks = slab();
+
+        // Ride, then stop the deck: the rider keeps station through both, and a stopped
+        // deck never throws it.
+        let mut stop_hashes = [0u64; 2];
+        for (rep, hash) in stop_hashes.iter_mut().enumerate() {
+            let mut platform = Platform {
+                id: 3,
+                min_mm: [-1_000, -200, -1_000],
+                max_mm: [1_000, 0, 1_000],
+                delta_mm: [5, 0, 0],
+            };
+            let mut w = Walker::spawn(5, [0, 0, 0]);
+            let input = TickInput::idle();
+            {
+                let world = world_with(&blocks, &[], core::slice::from_ref(&platform));
+                step_walker(&mut w, &input, &world, &cfg);
+            }
+            platform.min_mm[0] += platform.delta_mm[0];
+            platform.max_mm[0] += platform.delta_mm[0];
+            assert!(w.grounded && w.ground_platform == Some(3), "rep {rep}");
+            let station = w.pos_mm[0] - platform.min_mm[0];
+            for tick in 0..660 {
+                platform.delta_mm = if tick < 600 { [5, 0, 0] } else { [0, 0, 0] };
+                let world = world_with(&blocks, &[], core::slice::from_ref(&platform));
+                let r = step_walker(&mut w, &input, &world, &cfg);
+                assert_eq!(r.rode_platform, Some(3), "rep {rep} tick {tick}");
+                platform.min_mm[0] += platform.delta_mm[0];
+                platform.max_mm[0] += platform.delta_mm[0];
+                assert_eq!(
+                    w.pos_mm[0] - platform.min_mm[0],
+                    station,
+                    "rep {rep} tick {tick} left station"
+                );
+            }
+            assert!(w.grounded);
+            assert_eq!(w.vel_mm_s, [0, 0, 0], "a stopped deck must not throw");
+            *hash = state_hash(&w);
+        }
+        assert_eq!(stop_hashes[0], stop_hashes[1], "platform stop x2");
+
+        // Step-off: a rider walks off a deck moving 1200 mm/s toward it. It inherits the
+        // deck speed once, then flies and lands where the f64 prediction says. The same
+        // flight without the carry must fall more than 1 cm short.
+        let delta_mm = [20, 0, 0];
+        let deck_top = 1_500;
+        let wish = 3_000;
+        let input = TickInput {
+            wish_mm_s: [wish, 0],
+            jump_pressed: false,
+        };
+        let mut off_hashes = [0u64; 2];
+        for (rep, hash) in off_hashes.iter_mut().enumerate() {
+            let mut platform = Platform {
+                id: 7,
+                min_mm: [-2_000, deck_top - 200, -1_000],
+                max_mm: [2_000, deck_top, 1_000],
+                delta_mm,
+            };
+            let mut w = Walker::spawn(9, [0, deck_top, 0]);
+            w.grounded = true;
+            let mut launch: Option<Walker> = None;
+            let mut landed: Option<(u32, i32)> = None;
+            let mut flight = 0u32;
+            for _ in 0..600 {
+                let world = world_with(&blocks, &[], core::slice::from_ref(&platform));
+                let r = step_walker(&mut w, &input, &world, &cfg);
+                platform.min_mm[0] += delta_mm[0];
+                platform.max_mm[0] += delta_mm[0];
+                if launch.is_none() {
+                    if !w.grounded {
+                        assert_eq!(r.rode_platform, Some(7), "rep {rep} left the deck");
+                        assert_eq!(
+                            w.vel_mm_s[0],
+                            wish + delta_mm[0] * TICKS_PER_S,
+                            "rep {rep} step-off must carry the deck speed"
+                        );
+                        launch = Some(w);
+                    }
+                } else {
+                    flight += 1;
+                    if w.grounded {
+                        landed = Some((flight, w.pos_mm[0]));
+                        break;
+                    }
+                }
+            }
+            let launch = launch.expect("rider never left the deck");
+            let (landed_ticks, landed_x) = landed.expect("rider never landed");
+            let (want_x, want_ticks) = ballistic_landing(&cfg, &launch, wish);
+            assert_eq!(landed_ticks, want_ticks, "rep {rep} landing tick");
+            // Positions are integer millimetres; the row's bar is one centimetre.
+            let one_cm_mm = 10.0;
+            let miss = (f64::from(landed_x) - want_x).abs();
+            assert!(
+                miss <= one_cm_mm,
+                "rep {rep} lands {miss} mm from the ballistic target"
+            );
+            let mut bare = launch;
+            bare.vel_mm_s[0] -= delta_mm[0] * TICKS_PER_S;
+            let (bare_x, _) = ballistic_landing(&cfg, &bare, wish);
+            assert!(
+                f64::from(landed_x) - bare_x > one_cm_mm,
+                "rep {rep} carry moved the landing {} mm, under the 1 cm bar",
+                f64::from(landed_x) - bare_x
+            );
+            assert_eq!(w.pos_mm[1], 0, "rep {rep} landed on the slab");
+            *hash = state_hash(&w);
+        }
+        assert_eq!(off_hashes[0], off_hashes[1], "step-off x2");
     }
 
     #[test]

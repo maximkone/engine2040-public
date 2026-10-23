@@ -12,19 +12,39 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import {
-  BuildError, COI_WORKER, DIST_FILES, KIT_BUNDLE, PUBLIC_DIRS, PUBLIC_FILES, RIG_BUNDLE, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
-  checkPublic, listFiles, lockedVersion, nonPublicFiles, parseArgs, readCoiWorker, realDeps, renderHtml, sizeSweep,
+  BuildError, BUILD_FILE, COI_WORKER, DIST_FILES, DIST_PATTERNS, ENGINE_JS, HASH_HEX, INDEX_FILE, KIT_BUNDLE, LOADER, PIN_SCHEMA, PUBLIC_DIRS, PUBLIC_FILES, PUBLIC_PATTERNS, RIG_BUNDLE, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_FILE, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
+  checkPublic, hashedName, listFiles, lockedVersion, nonPublicFiles, parseArgs, pinId, readCoiWorker, realDeps, renderHtml, sizeSweep,
 } from "./web-build.mjs";
 import { brotliSize, firstLoadBytes, firstTierBytes, gzipSize } from "./web-budget.mjs";
+import { BuildMismatchError, browserEnv, checkBuild, loadEngine } from "../crates/web/loader.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TEMPLATE = readFileSync(join(REPO, "crates", "web", "index.html"), "utf8");
-const LOADER = readFileSync(join(REPO, "crates", "web", "loader.js"), "utf8");
+const LOADER_TEXT = readFileSync(join(REPO, "crates", "web", "loader.js"), "utf8");
 const WORKER = readFileSync(join(REPO, "crates", "web", COI_WORKER), "utf8");
 const LOCK = 'name = "wasm-bindgen"\nversion = "0.2.128"\nsource = "registry+x"\n\nname = "wgpu"\nversion = "30.0.1"\n';
 const KIT = Buffer.from("kit.e2bundle fixture\n"); // WEB17: the cooked arena kit build() copies whole
 const RIG = Buffer.from("rig.e2bundle fixture\n"); // WEB6: the cooked fighter rig, same shape
 const sha = (b) => createHash("sha256").update(b).digest("hex");
+
+// PIN: a page pin of the shape build() embeds, for the tests that only render or read the page.
+const FIXTURE_PIN = {
+  schema: 2,
+  build: "0123456789ab",
+  files: {
+    "engine.js": { name: "engine.aaaaaaaaaaaa.js", sha256: "a".repeat(64) },
+    "engine_bg.wasm": { name: "engine_bg.bbbbbbbbbbbb.wasm", sha256: "b".repeat(64) },
+    "loader.js": { name: "loader.cccccccccccc.js", sha256: "c".repeat(64) },
+    "assets/arena.e2bundle": { name: "assets/arena.dddddddddddd.e2bundle", sha256: "d".repeat(64) },
+    "assets/fighters.e2bundle": { name: "assets/fighters.eeeeeeeeeeee.e2bundle", sha256: "e".repeat(64) },
+    "index.html": { name: "index.html", sha256: "f".repeat(64) },
+    "coi-serviceworker.js": { name: "coi-serviceworker.js", sha256: "0".repeat(64) },
+  },
+};
+const page = (commit = "abc") => renderHtml(TEMPLATE, { commit, build: FIXTURE_PIN.build, pin: FIXTURE_PIN });
+// The files a pinned dist holds: the fixed names plus every hashed name the pin lists.
+const pinnedDist = (info) => [...new Set([INDEX_FILE, COI_WORKER, BUILD_FILE, ...Object.values(info.pin).map((f) => f.name)])].sort();
+const pinned = (info, logical) => info.files[info.pin[logical].name];
 
 // QW4: a two-tier E2BUNDLE, so the first-fetch measure has a coarse prefix to stop at.
 function miniBundle(firstLen, restLen) {
@@ -61,7 +81,7 @@ function scratch(lock = LOCK) {
   mkdirSync(join(dir, "content", "fighters"), { recursive: true });
   writeFileSync(join(dir, "Cargo.lock"), lock);
   writeFileSync(join(dir, "crates", "web", "index.html"), TEMPLATE);
-  writeFileSync(join(dir, "crates", "web", "loader.js"), LOADER);
+  writeFileSync(join(dir, "crates", "web", "loader.js"), LOADER_TEXT);
   writeFileSync(join(dir, "crates", "web", COI_WORKER), WORKER);
   writeFileSync(join(dir, "content", "arena", "kit.e2bundle"), KIT);
   writeFileSync(join(dir, "content", "fighters", "rig.e2bundle"), RIG);
@@ -124,38 +144,140 @@ test("wasm-bindgen is asked for the web target with fixed output names", () => {
   assert.deepEqual(bindgenArgs("in.wasm", "out"), ["--target", "web", "--no-typescript", "--out-dir", "out", "--out-name", "engine", "in.wasm"]);
 });
 
-test("build writes exactly the dist/web files, with real sizes and hashes in build.json", () => {
+test("build writes exactly the pinned dist, with real sizes and hashes in build.json", () => {
   const s = scratch();
   try {
     const t = toolchain(s.dir, { wasmBytes: 4000 });
     const info = build({ rootDir: s.dir, outDir: s.out, commit: "abc123def456" }, quiet(t.run));
-    assert.deepEqual(listFiles(s.out), [...DIST_FILES, KIT_BUNDLE, RIG_BUNDLE].sort());
-    const onDisk = JSON.parse(readFileSync(join(s.out, "build.json"), "utf8"));
+    assert.deepEqual(listFiles(s.out), pinnedDist(info));
+    const onDisk = JSON.parse(readFileSync(join(s.out, BUILD_FILE), "utf8"));
     assert.deepEqual(onDisk, info);
-    for (const name of ["index.html", "loader.js", COI_WORKER, "engine.js", "engine_bg.wasm", KIT_BUNDLE, RIG_BUNDLE]) {
-      const bytes = readFileSync(join(s.out, name));
-      assert.equal(info.files[name].bytes, bytes.length, name);
-      assert.equal(info.files[name].sha256, sha(bytes), name);
-      assert.ok(info.files[name].gzipBytes > 0, name);
-      assert.ok(info.files[name].brotliBytes > 0, name);
+    assert.equal(info.schema, PIN_SCHEMA);
+    assert.equal(info.build, pinId(info.pin), "the build id is the pin, hashed once");
+    assert.equal(info.pin[INDEX_FILE].name, INDEX_FILE, "the page keeps its fixed name");
+    assert.equal(info.pin[COI_WORKER].name, COI_WORKER, "the worker keeps the name it registers with");
+    assert.equal(info.pin[INDEX_FILE].sha256, sha(Buffer.from(TEMPLATE)), "the page is pinned by its template bytes");
+    assert.equal(info.pin[COI_WORKER].sha256, sha(Buffer.from(WORKER)));
+    for (const [logical, entry] of Object.entries(info.pin)) {
+      if (logical === INDEX_FILE || logical === COI_WORKER) assert.equal(entry.name, logical, logical);
+      else {
+        assert.ok(DIST_PATTERNS.some((re) => re.test(entry.name)), `${logical} -> ${entry.name} is not a hashed name`);
+        assert.ok(entry.name.includes(entry.sha256.slice(0, HASH_HEX)), `${entry.name} carries its hash`);
+      }
+      const bytes = readFileSync(join(s.out, entry.name));
+      assert.equal(info.files[entry.name].bytes, bytes.length, logical);
+      assert.equal(info.files[entry.name].sha256, sha(bytes), logical);
+      if (logical === INDEX_FILE) assert.equal(entry.sha256, sha(Buffer.from(TEMPLATE)), "the page is pinned by its template bytes");
+      else assert.equal(sha(bytes), entry.sha256, logical);
+      assert.ok(info.files[entry.name].gzipBytes > 0, logical);
+      assert.ok(info.files[entry.name].brotliBytes > 0, logical);
     }
-    assert.ok(gunzipSync(readFileSync(join(s.out, KIT_BUNDLE))).equals(KIT), "the kit ships gzip and unzips to the cooked bytes");
-    assert.ok(gunzipSync(readFileSync(join(s.out, RIG_BUNDLE))).equals(RIG), "the rig ships gzip and unzips to the cooked bytes");
-    assert.ok(!("build.json" in info.files));
+    assert.equal(info.pin[WASM_FILE].name, `engine_bg.${info.pin[WASM_FILE].sha256.slice(0, HASH_HEX)}.wasm`);
+    assert.equal(info.pin[ENGINE_JS].name, `engine.${info.pin[ENGINE_JS].sha256.slice(0, HASH_HEX)}.js`);
+    assert.equal(info.pin[LOADER].name, `loader.${info.pin[LOADER].sha256.slice(0, HASH_HEX)}.js`);
+    assert.ok(gunzipSync(readFileSync(join(s.out, info.pin[KIT_BUNDLE].name))).equals(KIT), "the kit ships gzip and unzips to the cooked bytes");
+    assert.ok(gunzipSync(readFileSync(join(s.out, info.pin[RIG_BUNDLE].name))).equals(RIG), "the rig ships gzip and unzips to the cooked bytes");
+    assert.ok(!(BUILD_FILE in info.files));
     assert.equal(info.totalBytes, Object.values(info.files).reduce((n, f) => n + f.bytes, 0));
     assert.equal(
       info.firstBundleBytes,
-      Object.keys(info.files).reduce((n, rel) => n + firstLoadBytes(rel, readFileSync(join(s.out, rel))), 0),
+      Object.keys(info.files).reduce((n, rel) => n + firstLoadBytes(rel, readFileSync(join(s.out, rel)), info.pin[KIT_BUNDLE].name), 0),
       "first_bundle is every shipped file in its shipped form",
     );
     assert.equal(info.rawWasmBytes, 4000);
-    assert.equal(info.files["engine_bg.wasm"].bytes, 2000, "wasm-opt output is what ships");
+    assert.equal(pinned(info, WASM_FILE).bytes, 2000, "wasm-opt output is what ships");
     assert.equal(info.underLimit, true);
     assert.equal(info.limitBytes, SIZE_LIMIT_BYTES);
     assert.equal(info.commit, "abc123def456");
     assert.deepEqual(info.tools, { rustc: "rustc 1.97.1 (fake)", wasmBindgen: "0.2.128", wasmOpt: "wasm-opt version 119" });
+    const html = readFileSync(join(s.out, INDEX_FILE), "utf8");
+    assert.ok(html.includes(`data-build="${info.build}"`), "the page names the build id");
+    assert.ok(html.includes(`build: ${info.build} commit abc123def456`), "the build line names both");
+    const pinJson = /<script type="application\/json" id="build-pin">([^<]+)<\/script>/.exec(html);
+    assert.ok(pinJson, "the page embeds the pin");
+    assert.deepEqual(JSON.parse(pinJson[1]).files, info.pin, "the embedded pin is the build's pin");
+    assert.equal(JSON.parse(pinJson[1]).build, info.build);
+    assert.match(html, /wasm=\$\{pinned\("engine_bg\.wasm"\)\}/, "the build line shows the pinned wasm name at load");
+    assert.ok(!html.includes("{{"), "a placeholder survived");
   } finally {
     s.done();
+  }
+});
+
+test("PIN: hashedName puts 12 hex before the extension and pinId is stable over key order", () => {
+  assert.equal(hashedName("engine_bg.wasm", "a".repeat(64)), "engine_bg.aaaaaaaaaaaa.wasm");
+  assert.equal(hashedName("assets/arena.e2bundle", "b".repeat(64)), "assets/arena.bbbbbbbbbbbb.e2bundle");
+  const files = FIXTURE_PIN.files;
+  const reversed = Object.fromEntries(Object.entries(files).reverse());
+  assert.equal(pinId(files), pinId(reversed), "the build id does not depend on key order");
+  assert.match(pinId(files), /^[0-9a-f]{12}$/);
+  assert.throws(() => hashedName("noext", "a".repeat(64)), BuildError);
+});
+
+test("PIN: two builds of the same tree name the same files; a changed wasm changes its name and the build id", () => {
+  const s = scratch();
+  try {
+    const a = build({ rootDir: s.dir, outDir: join(s.dir, "a"), commit: "c" }, quiet(toolchain(s.dir).run));
+    const b = build({ rootDir: s.dir, outDir: join(s.dir, "b"), commit: "c" }, quiet(toolchain(s.dir).run));
+    assert.deepEqual(a.pin, b.pin, "the same tree names the same bytes");
+    assert.equal(a.build, b.build, "and the same build id");
+    assert.deepEqual(listFiles(join(s.dir, "a")), listFiles(join(s.dir, "b")));
+    const c = build({ rootDir: s.dir, outDir: join(s.dir, "c"), commit: "c" }, quiet(toolchain(s.dir, { wasmBytes: 1200 }).run));
+    assert.notEqual(c.build, a.build, "one changed input changes the build id");
+    assert.notEqual(c.pin[WASM_FILE].name, a.pin[WASM_FILE].name, "and the changed file's name");
+    assert.notEqual(c.pin[WASM_FILE].sha256, a.pin[WASM_FILE].sha256);
+    assert.equal(c.pin[LOADER].name, a.pin[LOADER].name, "the files that did not change keep their names");
+    assert.equal(c.pin[INDEX_FILE].sha256, a.pin[INDEX_FILE].sha256);
+  } finally {
+    s.done();
+  }
+});
+
+test("PIN: a page from one build with another deploy's build.json is refused by name before any module runs", async () => {
+  const s = scratch();
+  try {
+    const old = build({ rootDir: s.dir, outDir: join(s.dir, "old"), commit: "c" }, quiet(toolchain(s.dir).run));
+    const newer = build({ rootDir: s.dir, outDir: join(s.dir, "new"), commit: "c" }, quiet(toolchain(s.dir, { wasmBytes: 1200 }).run));
+    const manifest = (info) => ({ schema: PIN_SCHEMA, build: info.build, pin: info.pin });
+    const answer = (body) => ({ fetch: async () => new Response(JSON.stringify(body), { status: 200 }) });
+    // The old page (its pin) is served beside the new deploy's build.json.
+    await assert.rejects(checkBuild({ schema: 2, build: old.build, files: old.pin }, "http://127.0.0.1:9/", answer(manifest(newer))), (e) => {
+      assert.ok(e instanceof BuildMismatchError);
+      assert.equal(e.fallback, "build-mismatch");
+      assert.match(e.message, new RegExp(`the page names build ${old.build} but build\\.json lists build ${newer.build}`));
+      return true;
+    });
+    // The new page and the old deploy's build.json: the same refusal, the other way round.
+    await assert.rejects(checkBuild({ schema: 2, build: newer.build, files: newer.pin }, "http://127.0.0.1:9/", answer(manifest(old))), new RegExp(`the page names build ${newer.build} but build\\.json lists build ${old.build}`));
+  } finally {
+    s.done();
+  }
+});
+
+test("PIN: a pinned wasm name that serves another build's bytes is refused before init, by name", async () => {
+  const { serve } = await import("./web-browse.mjs");
+  const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "web-pin-mix-"));
+  // Two modules that both compile: an empty one and one with an empty memory.
+  const wanted = Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+  const stale = Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01]);
+  const name = `engine_bg.${sha(wanted).slice(0, HASH_HEX)}.wasm`;
+  writeFileSync(join(dir, name), stale);
+  const pin = { schema: 2, build: sha(wanted).slice(0, HASH_HEX), files: { "engine_bg.wasm": { name, sha256: sha(wanted) } } };
+  try {
+    const server = await serve(dir);
+    try {
+      await assert.rejects(loadEngine(pin, `http://127.0.0.1:${server.port}/index.html`, { ...browserEnv(), caches: null }), (e) => {
+        assert.equal(e.fallback, "build-mismatch");
+        assert.match(e.message, new RegExp(`${name.replaceAll(".", "\\.")} does not match the build pin`));
+        return true;
+      });
+      assert.equal(server.log.at(-1).path, `/${name}`, "the file was fetched under the pinned name");
+    } finally {
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -168,10 +290,11 @@ test("QW4: firstBundleBytes counts the arena bundle only to its tier-0 prefix", 
     const info = build({ rootDir: s.dir, outDir: s.out, commit: "abc123def456" }, quiet(t.run));
     const prefix = firstTierBytes(kit);
     assert.ok(prefix.length < kit.length, "the fixture has a later tier");
-    assert.equal(info.files[KIT_BUNDLE].firstBytes, prefix.length);
+    assert.equal(pinned(info, KIT_BUNDLE).firstBytes, prefix.length);
+    const kitName = info.pin[KIT_BUNDLE].name;
     const others = Object.entries(info.files)
-      .filter(([rel]) => rel !== KIT_BUNDLE && rel !== "build.json")
-      .reduce((n, [rel]) => n + firstLoadBytes(rel, readFileSync(join(s.out, rel))), 0);
+      .filter(([rel]) => rel !== kitName && rel !== BUILD_FILE)
+      .reduce((n, [rel]) => n + firstLoadBytes(rel, readFileSync(join(s.out, rel)), kitName), 0);
     assert.equal(info.firstBundleBytes, others + gzipSize(prefix), "the shipped bundle counts gzip up to tier 0");
   } finally {
     s.done();
@@ -182,8 +305,9 @@ test("WEB6 and WEB17: a missing content bundle is a named refusal, and the last 
   const s = scratch();
   try {
     const t = toolchain(s.dir);
-    build({ rootDir: s.dir, outDir: s.out, commit: "abc123def456" }, quiet(t.run));
-    const rig = readFileSync(join(s.out, RIG_BUNDLE));
+    const first = build({ rootDir: s.dir, outDir: s.out, commit: "abc123def456" }, quiet(t.run));
+    const rigName = first.pin[RIG_BUNDLE].name;
+    const rig = readFileSync(join(s.out, rigName));
     // The rig lane is not in the tree: the refusal names both steps to run.
     rmSync(join(s.dir, "content", "fighters", "rig.e2bundle"), { force: true });
     assert.throws(
@@ -191,8 +315,8 @@ test("WEB6 and WEB17: a missing content bundle is a named refusal, and the last 
       (e) => e instanceof BuildError && /rig\.e2bundle/.test(e.message) && /bin rig_cook/.test(e.message) && /e2bundle -- pack/.test(e.message),
       "the message gives the cook and the pack command",
     );
-    assert.ok(readFileSync(join(s.out, RIG_BUNDLE)).equals(rig), "outDir keeps the build that worked");
-    assert.ok(readFileSync(join(s.out, "index.html"), "utf8").includes('data-commit="abc123def456"'));
+    assert.ok(readFileSync(join(s.out, rigName)).equals(rig), "outDir keeps the build that worked");
+    assert.ok(readFileSync(join(s.out, INDEX_FILE), "utf8").includes('data-commit="abc123def456"'));
     // The kit is the same shape: a named refusal, not a page without an arena.
     rmSync(join(s.dir, "content", "arena", "kit.e2bundle"), { force: true });
     assert.throws(
@@ -241,7 +365,7 @@ test("without wasm-opt the build still ships and says so in build.json", () => {
     const info = build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(t.run));
     assert.equal(info.tools.wasmOpt, null);
     assert.equal(info.wasmOptFlags, null);
-    assert.equal(info.files["engine_bg.wasm"].bytes, 3000);
+    assert.equal(pinned(info, WASM_FILE).bytes, 3000);
     assert.ok(!t.calls.some((c) => c.cmd === "wasm-opt" && c.args[0] !== "--version"));
     const skipped = toolchain(s.dir, { wasmBytes: 3000 });
     const info2 = build({ rootDir: s.dir, outDir: s.out, commit: "c", optimize: false }, quiet(skipped.run));
@@ -275,10 +399,10 @@ test("QW2: --opt-ab runs -Oz, -Os and -O3 on the same module, ships the smallest
     for (const o of opts) for (const f of WASM_OPT_FEATURES) assert.ok(o.args.includes(f), f);
     assert.deepEqual(info.wasmOptAb.map((r) => [r.flag, r.bytes]), [["-Oz", 700], ["-Os", 500], ["-O3", 900]]);
     assert.ok(info.wasmOptAb.every((r) => r.gzipBytes > 0));
-    assert.equal(info.files["engine_bg.wasm"].bytes, 500, "the smallest raw module ships");
+    assert.equal(info.files[info.pin[WASM_FILE].name].bytes, 500, "the smallest raw module ships");
     assert.deepEqual(info.wasmOptFlags, ["-Os", ...WASM_OPT_FEATURES]);
     assert.ok(lines.some((l) => /^\[wasm-opt-ab\] -Os raw=500 gzip=\d+$/.test(l)));
-    assert.deepEqual(listFiles(s.out), [...DIST_FILES, KIT_BUNDLE, RIG_BUNDLE].sort(), "no candidate file leaks into dist/web");
+    assert.deepEqual(listFiles(s.out), pinnedDist(info), "no candidate file leaks into dist/web");
     assert.equal(build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(toolchain(s.dir).run)).wasmOptAb, null, "off by default");
   } finally {
     s.done();
@@ -371,13 +495,21 @@ test("a wasm-bindgen run that writes the wrong files is caught", () => {
 
 // ---- WEB10: nothing outside the public list ships ----
 
-test("nonPublicFiles: the app files and wasm-bindgen's snippets are public, anything else is not", () => {
-  assert.deepEqual(nonPublicFiles([...DIST_FILES, "snippets/engine-1/inline0.js"]), []);
-  assert.deepEqual(nonPublicFiles(["index.html", ".env", "notes/private.md", "engine_bg.wasm.map", "snippets/a.js"]), [".env", "notes/private.md", "engine_bg.wasm.map"]);
+test("nonPublicFiles: the fixed files and every hashed name are public, anything else is not", () => {
+  assert.deepEqual(nonPublicFiles(DIST_FILES), []);
+  assert.deepEqual(nonPublicFiles([...DIST_FILES, "snippets/engine-1/inline0.js"]), ["snippets/engine-1/inline0.js"], "wasm-bindgen JS snippets are refused: the pin names one self-contained glue file");
+  const hashed = [
+    "loader.0123456789ab.js", "engine.0123456789ab.js", "engine_bg.0123456789ab.wasm",
+    "assets/arena.0123456789ab.e2bundle", "assets/fighters.0123456789ab.e2bundle",
+  ];
+  assert.deepEqual(nonPublicFiles(hashed), [], "the hashed names ship");
+  assert.deepEqual(nonPublicFiles(["index.html", ".env", "notes/private.md", "engine.js", "engine_bg.wasm", "engine_bg.wasm.map"]), [".env", "notes/private.md", "engine.js", "engine_bg.wasm", "engine_bg.wasm.map"], "a fixed or unhashed engine name is not one build's file");
   // The assembled site adds the handbook and llms.txt for its own check only.
   assert.deepEqual(nonPublicFiles(["index.html", "docs/api/x.html", "llms.txt", "docs-private.txt"], { files: ["llms.txt"], dirs: ["docs/"] }), ["docs-private.txt"]);
   assert.deepEqual(nonPublicFiles(["llms.txt"]), ["llms.txt"], "the extras are not public by default");
-  assert.ok(PUBLIC_FILES.includes("engine_bg.wasm") && PUBLIC_DIRS.includes("snippets/"));
+  assert.deepEqual(PUBLIC_FILES, DIST_FILES);
+  assert.equal(PUBLIC_PATTERNS.length, DIST_PATTERNS.length);
+  assert.deepEqual(PUBLIC_DIRS, []);
 });
 
 test("a fixture bundle with a non-public file is refused, and a clean one passes", () => {
@@ -407,7 +539,7 @@ test("build() refuses a file nobody listed before it touches dist/web", () => {
     };
     mkdirSync(s.out, { recursive: true });
     writeFileSync(join(s.out, "previous.txt"), "the last build");
-    assert.throws(() => build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(run)), /outside the public list: engine_bg\.wasm\.map/);
+    assert.throws(() => build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(run)), /wasm-bindgen wrote engine_bg\.wasm\.map/);
     assert.ok(existsSync(join(s.out, "previous.txt")), "the last build is untouched");
     // And the same toolchain without the stray file builds.
     assert.doesNotThrow(() => build({ rootDir: s.dir, outDir: s.out, commit: "c" }, quiet(t.run)));
@@ -439,7 +571,7 @@ test("WEB14: the isolation worker ships into dist/web and is listed in build.jso
 });
 
 test("WEB14: the page registers the worker only when it is not isolated, reloads at most once, and says so on #coi", () => {
-  const html = renderHtml(TEMPLATE, "abc");
+  const html = page("abc");
   assert.ok(html.includes('<pre id="coi">coi: isolated=false reloads=0</pre>'), "the coi line exists before any script runs, so the page is never blank");
   assert.match(html, /window\.crossOriginIsolated/);
   assert.match(html, /navigator\.serviceWorker\.register\("\.\/coi-serviceworker\.js"\)/);
@@ -472,24 +604,30 @@ test("the Pages workflow checks the assembled site for non-public files before i
   assert.ok(yml.indexOf("--check-public site") < yml.indexOf("upload-pages-artifact"), "the check runs before the upload");
 });
 
-test("the page contract: canvas, hud, report, fatal message with the browser versions, module import", () => {
-  const html = renderHtml(TEMPLATE, "abc");
+test("the page contract: canvas, hud, report, fatal message with the browser versions, pinned module import", () => {
+  const html = page("abc");
   assert.match(html, /<canvas id="canvas"/);
   assert.match(html, /id="hud"/);
   assert.match(html, /<pre id="golden"/);
   assert.match(html, /body\[data-golden="mismatch"\] #golden/);
   assert.match(html, /<pre id="report"/);
-  // WEB10: the commit the page was built from is on the page, beside the golden line.
-  assert.ok(html.includes('<pre id="build">build: commit abc</pre>'));
+  // WEB10: the commit the page was built from is on the page, beside the build id.
+  assert.ok(html.includes('<pre id="build">build: 0123456789ab commit abc</pre>'));
   assert.match(html, /id="fatal"[^>]*role="alert"/);
   assert.match(html, /id="fatal-reason"/);
   assert.ok(html.includes('<pre id="input">input: kb=0 mouse=0 pad=0</pre>'));
   assert.ok(html.includes('<pre id="audio">audio: state=suspended</pre>'));
   assert.match(html, /<script type="module">/);
-  assert.match(html, /from "\.\/engine\.js"/);
-  // QW3/QW12: the module is fetched by loader.js, not by init's own fetch; its failure reaches the fatal reason.
-  assert.match(html, /from "\.\/loader\.js"/);
-  assert.match(html, /await loadEngine\(import\.meta\.url\)/);
+  // PIN: the page names one build, checks the deployed manifest, imports the verified glue, then compiles the pinned wasm.
+  assert.match(html, /JSON\.parse\(document\.getElementById\("build-pin"\)\.textContent\)/);
+  assert.match(html, /await import\(new URL\(pinned\("loader\.js"\), import\.meta\.url\)\)/);
+  assert.ok(!/from "\.\/engine\.js"/.test(html), "the glue is imported from verified bytes, not by a static path");
+  assert.ok(!/from "\.\/loader\.js"/.test(html), "the loader is imported by its pinned name");
+  const order = (a, b) => html.indexOf(a) >= 0 && html.indexOf(a) < html.indexOf(b);
+  assert.ok(order("await loader.checkBuild(pin, import.meta.url)", "await loader.importEngine(pin, import.meta.url)"), "the manifest check comes before the glue is imported");
+  assert.ok(order("await loader.importEngine(pin, import.meta.url)", "await loadEngine(pin, import.meta.url)"), "the glue is imported before the wasm is compiled");
+  assert.ok(order("await loadEngine(pin, import.meta.url)", 'run_arena("canvas")'), "every pin check comes before any GPU work");
+  assert.match(html, /await loadEngine\(pin, import\.meta\.url\)/);
   assert.match(html, /init\(\{ module_or_path: loaded\.module \}\)/);
   assert.ok(!/await init\(\);/.test(html), "init must not fetch the wasm itself");
   assert.match(html, /<pre id="load">/);
@@ -497,18 +635,17 @@ test("the page contract: canvas, hud, report, fatal message with the browser ver
   assert.match(html, /run\("canvas"\)/);
   // WEB6: the page installs the asset fetcher the engine asks for, so a gameplay asset can be
   // fetched at runtime instead of only the wasm and build.json.
-  assert.match(html, /import \{[^}]*pageFetcher[^}]*\} from "\.\/loader\.js"/);
   assert.match(html, /window\.engine2040FetchAsset = \(url\) =>/);
-  assert.match(html, /pageFetcher\(import\.meta\.url, showFetch\)/);
+  assert.match(html, /pageFetcher\(pin, import\.meta\.url, showFetch\)/);
   // QW4: the arena fetch answers at the tier-0 boundary and draws the same bar.
-  assert.match(html, /pageFetcherPrefix\(import\.meta\.url, showFetch\)/);
+  assert.match(html, /pageFetcherPrefix\(pin, import\.meta\.url, showFetch\)/);
   assert.match(html, /window\.engine2040FetchAssetPrefix = \(url\) =>/);
   for (const v of ["Chrome 113", "Edge 113", "Safari 26", "Firefox 141"]) assert.ok(html.includes(v), `fatal message lost ${v}`);
   assert.match(html, /body\[data-state="fatal"\] #fatal \{ display: block/);
   assert.match(html, /<body data-state="starting"/);
   // Nothing is fetched from another host: the page works from a file server alone.
   assert.ok(!/(?:src|href)="https?:/.test(html));
-  assert.throws(() => renderHtml("<html></html>", "abc"), /lost its \{\{COMMIT\}\} placeholder/);
+  assert.throws(() => renderHtml("<html></html>", {}), /lost its \{\{COMMIT\}\} placeholder/);
 });
 
 test("the real inputs build() reads exist: lock, template, crate manifest, web profile", () => {

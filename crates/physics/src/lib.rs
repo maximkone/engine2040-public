@@ -24,6 +24,11 @@ pub mod controller2;
 /// broken): an outcome table for push, peek, kick, ram, shotgun and charge, nav-link and audio
 /// events, and the collision layer a broken door drops to. Integer, std-only.
 pub mod door;
+/// The procedural walk cycle: phase, stand blend and planted-foot pose that
+/// drives the powered ragdoll servo, with the balance bias and a shove step.
+/// Integer phase maths, no libm; the pose rides `engine-anim` (rapier feature).
+#[cfg(feature = "rapier")]
+pub mod gait;
 /// Canonical island topology plus snapshot bytes the Rapier world checkpoints
 /// through, and the chunked split plus sorted merge that steps one unit per
 /// island on lanes of a caller pool. Std-only.
@@ -45,6 +50,12 @@ pub mod lod;
 /// One table of density, friction, bounce and damping per material (wood, stone,
 /// flesh, metal, sand, cloth). Integer rows, std-only.
 pub mod material;
+/// The published Half-Life movement model as an offline f64 reference for the
+/// FEEL12 tape (accelerate, friction, air accelerate, jump, bunnyhop crop).
+/// Test-only: no caller in the sim, and the default std-only build never
+/// compiles it.
+#[cfg(feature = "rapier")]
+pub mod oracle;
 pub mod overlap;
 /// PD velocity-servo drive law for the powered ragdoll: D-damped servo
 /// axes, magnitude clamp, dt fallback to P-only. Std-only.

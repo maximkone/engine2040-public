@@ -15,12 +15,31 @@
 // cannot be served stale bytes. A copy is stored only when its hash matches. QuotaExceededError (or any cache failure) is
 // reported in stats.cache and the page loads anyway from the network bytes. navigator.storage.persist() is asked once
 // the copy is stored so the browser does not evict it under pressure.
+//
+// PIN: one build, one set of names. tools/web-build.mjs content-hashes engine.js, engine_bg.wasm, loader.js and both
+// cooked bundles, and index.html embeds the pin: { schema, build, files: { <logical name>: { name, sha256 } } }.
+// checkBuild compares that pin with build.json (same origin, revalidated) before anything runs, so a page cached across a
+// deploy refuses by name instead of mixing a page, a loader, a wasm and two bundles from two builds. importEngine and
+// loadEngine verify the bytes they fetch against the pin's sha256, so a file served under the wrong hashed name is a
+// named refusal before init() (and therefore before any GPU work).
 
 export const CACHE_NAME = "engine2040-wasm";
 export const WASM_FILE = "engine_bg.wasm";
+export const ENGINE_JS = "engine.js";
+export const BUILD_FILE = "build.json";
 
 /** The wasm could not be fetched or is served wrongly; the message is the reason the page shows. */
 export class LoadError extends Error {}
+
+/** The page and the deployed build.json name different builds. The page shows this as fallback=build-mismatch. */
+export class BuildMismatchError extends LoadError {
+  constructor(message, detail = {}) {
+    super(message);
+    this.name = "BuildMismatchError";
+    this.fallback = "build-mismatch";
+    Object.assign(this, detail);
+  }
+}
 
 // WEB6: gameplay content is fetched at runtime, not read from a file system (the browser has
 // none). The page owns the network: the engine asks for an asset by URL through the page's own
@@ -40,6 +59,8 @@ export class AssetError extends Error {
 
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
+const dynamicImport = (url) => import(url);
+
 /** The browser's own fetch, caches, storage, WebAssembly, clock and SHA-256; tests pass fakes instead. */
 export const browserEnv = () => ({
   fetch: (...a) => fetch(...a),
@@ -48,26 +69,80 @@ export const browserEnv = () => ({
   wasm: WebAssembly,
   now: () => performance.now(),
   sha256: async (bytes) => hex(await crypto.subtle.digest("SHA-256", bytes)),
+  importModule: dynamicImport,
 });
 
+// The pin's entry for one logical file, or a named refusal: a page without a hashed name cannot prove what it runs.
+export function pinEntry(pin, logical) {
+  const entry = pin?.files?.[logical];
+  if (!entry || typeof entry.name !== "string" || !entry.name || !/^[0-9a-f]{64}$/.test(entry.sha256 ?? "")) {
+    throw new LoadError(`the build pin names no hashed ${logical}; the page cannot prove it runs one build`);
+  }
+  return entry;
+}
+
+// A LoadError the page reports as fallback=build-mismatch: the bytes served are not the bytes its hashed name promises.
+const pinMismatch = (message) => Object.assign(new LoadError(message), { fallback: "build-mismatch" });
+
 // The response is usable when it is a 200 typed application/wasm; otherwise the LoadError says what the server sent.
-function checkResponse(res) {
-  if (!res.ok) throw new LoadError(`${WASM_FILE} could not be fetched: HTTP ${res.status}`);
+function checkResponse(res, name = WASM_FILE) {
+  if (!res.ok) throw new LoadError(`${name} could not be fetched: HTTP ${res.status}`);
   const type = res.headers.get("content-type") ?? "";
   if (!/^application\/wasm\s*(;|$)/i.test(type)) {
-    throw new LoadError(`${WASM_FILE} is served as "${type || "no content-type"}", not application/wasm, so the browser will not compile it while it downloads; the server must type .wasm files as application/wasm`);
+    throw new LoadError(`${name} is served as "${type || "no content-type"}", not application/wasm, so the browser will not compile it while it downloads; the server must type .wasm files as application/wasm`);
   }
 }
 
-// The SHA-256 build.json lists for the wasm, or null (no build.json, or not the shape): then nothing is cached.
-async function wantedHash(env, base) {
-  try {
-    const res = await env.fetch(new URL("build.json", base), { cache: "no-cache" });
-    const hash = (await res.json()).files?.[WASM_FILE]?.sha256;
-    return /^[0-9a-f]{64}$/.test(hash) ? hash : null;
-  } catch {
-    return null;
+// PIN: the page's embedded pin against the deployed build.json. Both name one build or the page refuses by name, before
+// it imports engine.js and before any wasm is compiled or a GPU device is asked for.
+export async function checkBuild(pin, base, env = browserEnv()) {
+  const page = pin?.build ?? "no build id";
+  if (!pin || typeof pin !== "object" || !pin.files || typeof pin.files !== "object") {
+    throw new BuildMismatchError(`the page carries no build pin; it cannot prove it runs one build`, { pageBuild: null });
   }
+  const url = new URL(BUILD_FILE, base);
+  let res;
+  try {
+    res = await env.fetch(url, { cache: "no-cache" });
+  } catch (e) {
+    throw new BuildMismatchError(`${BUILD_FILE} could not be fetched: ${reason(e)}; the page cannot prove it runs one build`, { pageBuild: page });
+  }
+  if (!res.ok) throw new BuildMismatchError(`${BUILD_FILE} could not be fetched: HTTP ${res.status}; the page cannot prove it runs one build`, { pageBuild: page });
+  let manifest;
+  try {
+    manifest = await res.json();
+  } catch (e) {
+    throw new BuildMismatchError(`${BUILD_FILE} is not JSON: ${reason(e)}`, { pageBuild: page });
+  }
+  if (!manifest || typeof manifest !== "object" || !manifest.pin) {
+    throw new BuildMismatchError(`${BUILD_FILE} lists no build pin; the page cannot prove it runs one build`, { pageBuild: page });
+  }
+  if (manifest.build !== pin.build) {
+    throw new BuildMismatchError(`build mismatch: the page names build ${page} but ${BUILD_FILE} lists build ${manifest.build}; reload to fetch one build`, { pageBuild: page, deployedBuild: manifest.build });
+  }
+  for (const logical of Object.keys(pin.files).sort()) {
+    const mine = pin.files[logical];
+    const theirs = manifest.pin?.[logical];
+    if (!theirs || theirs.name !== mine.name || theirs.sha256 !== mine.sha256) {
+      throw new BuildMismatchError(
+        `build mismatch: the page names ${logical} as ${mine.name} (sha256 ${String(mine.sha256).slice(0, 12)}) but ${BUILD_FILE} lists ${theirs?.name ?? "no such file"} (sha256 ${String(theirs?.sha256 ?? "none").slice(0, 12)}); reload to fetch one build`,
+        { pageBuild: page, deployedBuild: manifest.build, file: logical },
+      );
+    }
+  }
+  return manifest;
+}
+
+// The hashed URL to fetch for an asset the engine asks for by its logical name ("assets/arena.e2bundle"). A name the pin
+// does not list is fetched as asked, so a caller that already holds a full URL still works.
+export function pinUrl(pin, url, base) {
+  const target = new URL(url, base);
+  const basePath = new URL(base).pathname;
+  const dir = basePath.endsWith("/") ? basePath : basePath.slice(0, basePath.lastIndexOf("/") + 1);
+  let logical = target.pathname.startsWith(dir) ? target.pathname.slice(dir.length) : target.pathname.replace(/^\/+/, "");
+  try { logical = decodeURIComponent(logical); } catch { /* a name that is not percent-encoded */ }
+  const entry = pin?.files?.[logical];
+  return entry?.name ? new URL(entry.name, base) : target;
 }
 
 // Store the verified bytes. Returns what stats.cache and stats.persisted should say.
@@ -84,16 +159,19 @@ async function remember(env, cache, key, bytes, want) {
 }
 
 /**
- * Fetch and compile the engine module. Resolves { module, stats, settled }: `module` goes to init({ module_or_path }),
- * `stats` is { bundle: "network"|"cache", bytesFetched, downloadMs, compileMs, cache, persisted } and `settled` resolves
- * (never rejects) once the cache copy is written and stats.cache is final. Rejects with a LoadError for a bad response.
+ * Fetch and compile the engine module the pin names. Resolves { module, stats, settled }: `module` goes to
+ * init({ module_or_path }), `stats` is { bundle: "network"|"cache", bytesFetched, downloadMs, compileMs, cache, persisted }
+ * and `settled` resolves (never rejects) once the cache copy is written and stats.cache is final. Rejects with a LoadError
+ * for a bad response or bytes that are not the pin's sha256, before the caller can start the engine.
  */
-export async function loadEngine(base, env = browserEnv()) {
+export async function loadEngine(pin, base, env = browserEnv()) {
+  const entry = pinEntry(pin, WASM_FILE);
+  const name = entry.name;
+  const want = entry.sha256;
   const stats = { bundle: "network", bytesFetched: 0, downloadMs: 0, compileMs: 0, cache: "off", persisted: null };
-  const url = new URL(WASM_FILE, base);
-  const want = env.caches ? await wantedHash(env, base) : null;
+  const url = new URL(name, base);
   let cache = null, key = null, res = null;
-  if (want) {
+  if (env.caches) {
     try {
       cache = await env.caches.open(CACHE_NAME);
       key = `${url.href}?sha256=${want}`;
@@ -102,14 +180,14 @@ export async function loadEngine(base, env = browserEnv()) {
       cache = null;
     }
   }
-  stats.cache = cache ? "miss" : want ? "unavailable" : "off";
+  stats.cache = cache ? "miss" : "off";
   if (res) {
     stats.bundle = "cache";
     stats.cache = "hit";
   }
   const t0 = env.now();
   res ??= await env.fetch(url);
-  checkResponse(res);
+  checkResponse(res, name);
   const bodyBytes = res.clone().arrayBuffer().then((b) => { stats.downloadMs = env.now() - t0; return b; });
   bodyBytes.catch(() => {}); // a failed compile throws below; this copy of the failure is not a second report
   const module = await env.wasm.compileStreaming(res);
@@ -117,11 +195,42 @@ export async function loadEngine(base, env = browserEnv()) {
   const bytes = await bodyBytes;
   stats.compileMs = Math.max(0, Math.round(compiled - t0 - stats.downloadMs));
   stats.downloadMs = Math.round(stats.downloadMs);
+  const got = await env.sha256(bytes);
+  if (got !== want) throw pinMismatch(`${name} does not match the build pin: sha256 ${got}, the pin says ${want}; reload to fetch one build`);
   if (stats.bundle === "network") stats.bytesFetched = bytes.byteLength;
   const settled = stats.bundle === "network" && cache
     ? remember(env, cache, key, bytes, want).then((r) => Object.assign(stats, r), () => { stats.cache = "error"; return stats; }).then(() => stats)
     : Promise.resolve(stats);
   return { module, stats, settled };
+}
+
+/**
+ * Fetch the engine glue the pin names, check its sha256 and import it. The bytes are imported from a blob URL, so the
+ * module that runs is exactly the bytes that were verified (a static `import` would run whatever the host served). The
+ * blobs hold no imports of their own: wasm-bindgen --target web writes one self-contained module, and web-build.mjs
+ * refuses a JS snippet for that reason. Rejects with a LoadError naming the file when its bytes are not the pin's.
+ */
+export async function importEngine(pin, base, env = browserEnv()) {
+  const entry = pinEntry(pin, ENGINE_JS);
+  const url = new URL(entry.name, base);
+  let res;
+  try {
+    res = await env.fetch(url);
+  } catch (e) {
+    throw new LoadError(`${entry.name} could not be fetched: ${reason(e)}`);
+  }
+  if (!res.ok) throw new LoadError(`${entry.name} could not be fetched: HTTP ${res.status}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const got = await env.sha256(bytes);
+  if (got !== entry.sha256) throw pinMismatch(`${entry.name} does not match the build pin: sha256 ${got}, the pin says ${entry.sha256}; reload to fetch one build`);
+  const href = URL.createObjectURL(new Blob([bytes], { type: "text/javascript" }));
+  try {
+    return await env.importModule(href);
+  } catch (e) {
+    throw new LoadError(`${entry.name} did not start: ${reason(e)}`);
+  } finally {
+    URL.revokeObjectURL(href);
+  }
 }
 
 // The path part of an asset URL, so an error names the asset and not a whole URL.
@@ -389,21 +498,21 @@ export async function fetchAssetPrefix(url, env = browserEnv(), onProgress = nul
 }
 
 /**
- * The fetcher the page hands the engine (WEB6): the engine asks for an asset by
- * URL and gets the asset's bytes as a Uint8Array, or a rejection it turns into a
- * typed refusal. `base` is the page's own URL, so a relative asset name lands in
- * the same folder as the page. QW4: `onProgress` draws the page's fetch bar.
+ * The fetcher the page hands the engine (WEB6): the engine asks for an asset by its logical name and gets the asset's
+ * bytes as a Uint8Array, or a rejection it turns into a typed refusal. The pin turns that name into the hashed file of
+ * the one build the page names, so a stale engine can never read a bundle from another deploy. `base` is the page's own
+ * URL. QW4: `onProgress` draws the page's fetch bar.
  */
-export const pageFetcher = (base, onProgress = null) => (url) =>
-  fetchAsset(new URL(url, base), browserEnv(), onProgress).then((r) => r.bytes);
+export const pageFetcher = (pin, base, onProgress = null) => (url) =>
+  fetchAsset(pinUrl(pin, url, base), browserEnv(), onProgress).then((r) => r.bytes);
 
 /**
  * The QW4 fetcher for the arena bundle: it answers with the tier-0 prefix as
  * soon as that arrives, not with the whole body. The page's progress bar still
- * follows the rest of the response in the background.
+ * follows the rest of the response in the background. The pin picks the file.
  */
-export const pageFetcherPrefix = (base, onProgress = null) => (url) =>
-  fetchAssetPrefix(new URL(url, base), browserEnv(), onProgress).then((r) => r.bytes);
+export const pageFetcherPrefix = (pin, base, onProgress = null) => (url) =>
+  fetchAssetPrefix(pinUrl(pin, url, base), browserEnv(), onProgress).then((r) => r.bytes);
 
 /** Resolves with env.now() when `body` (the page's <body>) first carries data-state running or fatal: the first frame, or the reason there is none. */
 export function watchFirstFrame(body, now = () => performance.now()) {

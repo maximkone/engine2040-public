@@ -10,6 +10,13 @@
 //                        (cargo filters are substring matches; `a::b` needs every segment)
 //   path-missing         a `crates/<c>/src/<file>.rs` path in the row is not in git any more
 //   path-moved           the same, but a file of that name lives elsewhere in the crate: stale path
+//
+// A ticked row with a finding is not a suspect when its own closure note explains the gap and
+// names evidence that exists: a commit git knows (`git cat-file -e`), a run id, a file or path
+// that still exists, or a replacement row that is ticked. A closure note starts at a Tick
+// audit, Owner chat, Correction, rot, Landed or closed/replaced marker; a note with none of
+// that evidence keeps the row flagged. The note is the evidence, not the row body: an older
+// landing sha in the description cannot excuse a stale path.
 // Evidence names the commit that removed the file or last changed the filter, when git knows it.
 // It never runs cargo and never edits a row. Commands without -p are skipped.
 //
@@ -44,11 +51,16 @@ For every "- [x] ID" row (board, shards, docs/archive/SPRINT-done-*.md, older sn
   filter-missing       cargo test ... <filter>: no fn / mod / file name holds the filter
   path-missing         crates/<c>/src/<file>.rs named in the row is not in git
   path-moved           same, but a file of that name lives elsewhere in the crate (stale path)
+A finding is dropped when the row's own closure note (Tick audit / Owner chat / Correction /
+rot / Landed / closed / replaced) names evidence that exists: a commit git knows, a run id,
+a file or path that exists, or a replacement row that is ticked. A note with no such
+evidence keeps the row flagged.
 Output: one line per suspect row "ID  reasons  evidence", then a SUMMARY line.
 
 Options:
   --json         machine output: { root, archived, ticked, commands, paths, unchecked,
-                 suspects: [{ id, source, findings: [{ reason, evidence }] }] }
+                 suspects: [{ id, source, findings: [{ reason, evidence }] }],
+                 closures: [{ id, source, reasons, evidence, note }] }
   --no-history   skip docs/archive/SPRINT-2026-10-05.md and docs/SPRINT-ARCHIVE.md (older moved
                  rows that board-slice does not read; read by default)
   --root <dir>   audit another checkout (default: this repo)
@@ -159,6 +171,91 @@ export function sourcePaths(text) {
   return [...new Set([...text.matchAll(PATH_RE)].map((m) => m[0]))];
 }
 
+// ---- closure notes ----------------------------------------------------------------------
+//
+// A closure note says why the row's named code is gone. It starts at one of the markers
+// below and runs to the next marker (or the row end). The marker set is closure language
+// only: a plain "Landed <sha>" is a landing note, but so is "Landed obsolete"; "rot:" and
+// "Correction" are the 2026-10-19 rot sweeps; "Tick audit" and "Owner chat" are the audits
+// and the owner's delegated closes. Prose such as "Progress 2026-10-19:" is not a closure:
+// it is the row's running record, and an existing path named there must not excuse a gap.
+const CLOSURE_MARKER = /(?:\bTick audit\b[^.:]{0,32}:|\bOwner chat\b[^.:]{0,48}:|\bCorrection\b[^.:]{0,32}:|\bDone \d{4}-\d{2}-\d{2}\b[^.:]{0,48}:|\bdone \d{4}-\d{2}-\d{2}\b[^.:]{0,48}:|\bLanded\b\s+(?:[0-9a-f]{7,40}\b|obsolete\b|\.)|[Cc]losed (?:as|by)\b|[Rr]eplaced by\b|[Ss]uperseded by\b|\bREPLACED:|\brot:)/g;
+
+// The closure notes inside one row, in order. Overlapping markers split into separate notes.
+export function closureNotes(text) {
+  const at = [...text.matchAll(CLOSURE_MARKER)].map((m) => m.index);
+  const notes = [];
+  for (let i = 0; i < at.length; i += 1) {
+    const end = i + 1 < at.length ? at[i + 1] : text.length;
+    const note = text.slice(at[i], end).trim();
+    if (note && !notes.includes(note)) notes.push(note);
+  }
+  return notes;
+}
+
+// A commit id, a `run <id>` / `runs <ids>` reference, a file-like token, or a row id in a
+// "replaced by" note. A bare hex word is tried as a commit and fails when git has no such
+// object; a date is never a run id because a run id needs the `run`/`runs` word and 9+ digits.
+const NOTE_SHA_RE = /\b[0-9a-f]{7,40}\b/g;
+const NOTE_RUN_RE = /\bruns?\s+([\d,\s]+)/gi;
+const NOTE_FILE_RE = /(?<![\w./\\-])[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:rs|mjs|cjs|js|md|toml|json|wgsl|glsl|gltf|glb|png|jpe?g|webp|txt|ya?ml|ps1)(?![\w])/g;
+const NOTE_ROW_RE = /\b(?:replaced|superseded) by\s+`?([A-Z][A-Z0-9]*\d[a-z]?)`?\b/gi;
+
+// Resolve a file token the note names. Exact repo paths first; then the `nav/orca.rs`
+// crate-relative form; then a bare file name inside the crate that holds the row's gone
+// path. Nothing else: a name with no location is not proof, and a `crates/game` directory
+// is not a file.
+export function notePath(token, ctx, crateDirs = []) {
+  const t = token.replace(/^\.\//, "");
+  if (t.includes("://") || /[*?[\]]/.test(t)) return null;
+  const candidates = [t];
+  const parts = t.split("/");
+  if (parts.length > 1) {
+    const [head, ...rest] = parts;
+    const tail = rest.join("/");
+    candidates.push(`crates/${t}`, `crates/${head}/src/${tail}`, `crates/${head}/${tail}`);
+  }
+  for (const dir of crateDirs) candidates.push(`${dir}/src/${t}`, `${dir}/${t}`);
+  // A named `cloth.rs` is the module `cloth/mod.rs` when the tree is split, the same way
+  // auditRows reads a named path against `<stem>/mod.rs`.
+  const hit = (p) => {
+    if (ctx.files.has(p)) return p;
+    const mod = p.endsWith(".rs") ? `${p.slice(0, -3)}/mod.rs` : null;
+    return mod && ctx.files.has(mod) ? mod : null;
+  };
+  for (const path of candidates) {
+    const found = hit(path);
+    if (found) return found;
+  }
+  return null;
+}
+
+// The evidence one closure note names, each item verified: commits through ctx.commitExists
+// (git cat-file), run ids only in the `run <id>` shape (GitHub is not reachable offline),
+// files and paths in ctx.files, replacement rows in opts.tickedIds. A note that says LATER
+// is a park, not a close: its doc citation proves a decision was written, not that the work
+// is done, so it never clears a row.
+export function closureEvidence(note, ctx, { crateDirs = [], tickedIds = new Set() } = {}) {
+  if (/\bLATER\b/.test(note)) return [];
+  const found = [];
+  if (ctx.commitExists) {
+    for (const m of note.matchAll(NOTE_SHA_RE)) {
+      if (ctx.commitExists(m[0])) found.push({ kind: "commit", value: m[0] });
+    }
+  }
+  for (const m of note.matchAll(NOTE_RUN_RE)) {
+    for (const n of m[1].matchAll(/\d{9,12}/g)) found.push({ kind: "run", value: n[0] });
+  }
+  for (const m of note.matchAll(NOTE_FILE_RE)) {
+    const hit = notePath(m[0], ctx, crateDirs);
+    if (hit) found.push({ kind: "file", value: hit });
+  }
+  for (const m of note.matchAll(NOTE_ROW_RE)) {
+    if (tickedIds.has(m[1])) found.push({ kind: "row", value: m[1] });
+  }
+  return found;
+}
+
 // ---- name pools -------------------------------------------------------------------------
 
 const stripLineComments = (src) => src.replace(/^[ \t]*\/\/.*$/gm, "");
@@ -203,9 +300,15 @@ const SCOPE_DIRS = ["src", "tests", "examples", "benches"];
 
 // ctx: { files: Set<string> (repo-relative, forward slashes), packages: Map<name, dir>,
 //        read(path) -> string|null, deleted: Set<string> (tracked, gone from disk; optional),
-//        removedBy(path) / lastTouch(needle, dir) -> {sha, subject} | false (no such commit) | null (unknown) }
-//        (the last two are optional history hints)
-export function auditRows(rows, ctx) {
+//        removedBy(path) / lastTouch(needle, dir) -> {sha, subject} | false (no such commit) | null (unknown),
+//        commitExists(sha) -> boolean }
+//        (the history hints and commitExists are optional; without them a closure note cannot
+//        prove a commit and the row stays flagged)
+// opts.tickedIds: every ticked row id (the CLI's rows, or the caller's full board). A
+// "replaced by <row>" closure clears only when its row is in this set. It defaults to the
+// rows passed in, which are ticked by contract; finish.mjs passes its whole board because it
+// audits only the gate rows.
+export function auditRows(rows, ctx, { tickedIds = new Set(rows.map((r) => r.id)) } = {}) {
   const rs = [...ctx.files].filter((f) => f.endsWith(".rs"));
   const hint = (h) => (h ? ` ${h.sha} "${h.subject}"` : "");
   const under = (dir, sub) => (dir === "." ? `${sub}/` : `${dir}/${sub}/`);
@@ -317,6 +420,7 @@ export function auditRows(rows, ctx) {
   };
 
   const suspects = [];
+  const closures = [];
   let commands = 0;
   let paths = 0;
   let unchecked = 0;
@@ -328,9 +432,33 @@ export function auditRows(rows, ctx) {
     if (!cmds.length && !named.length) unchecked += 1; // names nothing this tool can look up
     const all = [...cmds.flatMap(crateFindings), ...pathFindings(row.text)];
     const findings = all.filter((f, k) => all.findIndex((o) => o.evidence === f.evidence) === k);
-    if (findings.length) suspects.push({ id: row.id, source: row.source, findings });
+    if (!findings.length) continue;
+    // A closure note is read only for a row that has a finding, and only the note text counts:
+    // the crate dirs of the row's gone paths let a bare `camera_rig.rs` resolve inside the
+    // crate that lost `camera_feel.rs`, never in some other crate that happens to share a name.
+    const crateDirs = [
+      ...new Set(
+        named
+          .filter((p) => !ctx.files.has(p) && !ctx.files.has(`${p.slice(0, -3)}/mod.rs`))
+          .map((p) => p.split("/").slice(0, 2).join("/")),
+      ),
+    ];
+    const closed = closureNotes(row.text)
+      .map((note) => ({ note, evidence: closureEvidence(note, ctx, { crateDirs, tickedIds }) }))
+      .find((c) => c.evidence.length);
+    if (closed) {
+      closures.push({
+        id: row.id,
+        source: row.source,
+        reasons: [...new Set(findings.map((f) => f.reason))],
+        evidence: closed.evidence,
+        note: closed.note.length > 220 ? `${closed.note.slice(0, 219)}…` : closed.note,
+      });
+      continue;
+    }
+    suspects.push({ id: row.id, source: row.source, findings });
   }
-  return { ticked: rows.length, commands, paths, unchecked, suspects };
+  return { ticked: rows.length, commands, paths, unchecked, suspects, closures };
 }
 
 // ---- git and disk -----------------------------------------------------------------------
@@ -388,6 +516,9 @@ export function buildContext(root = ROOT) {
     },
     removedBy: memo((path) => firstCommit(git(root, ["log", "-1", "--diff-filter=D", "--format=%h%x09%s", "--", path]))),
     lastTouch: memo((needle, dir) => firstCommit(git(root, ["log", "-1", `-S${needle}`, "--format=%h%x09%s", "--", dir]))),
+    // A closure note's commit is real only when git can read it as a commit object: a file
+    // digest, a golden hash or a mistyped sha all fail here and leave the row flagged.
+    commitExists: memo((sha) => git(root, ["cat-file", "-e", `${sha}^{commit}`]) !== null),
   };
 }
 

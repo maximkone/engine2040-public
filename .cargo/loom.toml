@@ -1,0 +1,5 @@
+# BG12: `cargo test -p engine-ecs --lib loom_pool --config .cargo/loom.toml`
+# builds the job-pool concurrency model (`crates/ecs/src/pool.rs`). Cargo reads
+# `cfg(loom)` from the rustflags, which also turns on the loom dev-dependency.
+[build]
+rustflags = ["--cfg", "loom"]

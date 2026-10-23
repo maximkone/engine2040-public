@@ -23,7 +23,7 @@ re-pointable, not dead. `C:\empire\center\make.mjs` (center repo, commit
 `node make.mjs run <kind> --spec <file>` starts a job and prints
 `started run <id>`, `node make.mjs job <id>` polls it, `node make.mjs selftest`
 is the no-network check. Each of the four board rows now carries this
-correction (GN4, GN5, GN7, GN8 in `docs/SPRINT-11-north-star.md`).
+correction (GN4, GN5, GN7, GN8 in `docs/archive/SPRINT-done-11-north-star.md`).
 
 ## Speed: GitHub yes, Kaggle no
 

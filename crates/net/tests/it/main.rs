@@ -11,6 +11,7 @@ mod fork_varying_input;
 mod g20_backroll_diff;
 mod ggrs_loss;
 mod mug_session_vectors;
+mod packet_boundary_fuzz;
 mod packet_corpus;
 mod pred_window;
 mod quic_parity;

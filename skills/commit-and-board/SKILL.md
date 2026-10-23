@@ -22,9 +22,10 @@ One branch `master`, one tree `C:\engine2040`, several AIs editing at once. You 
 
 1. New files: `git add -N <path> ...` (intent to add). Without it `git commit -- <path>` says the path is unknown.
 2. Check nobody else is in them: `git diff --numstat -- <paths>`. Unexpected numbers are foreign hunks: use case B.
-3. Write the message to a scratch file outside the repo, ending with the attribution line the session gives. Then `git commit -F <msgfile> -- <path1> <path2>`. `--` plus paths commits only those, whatever else is staged.
-4. One row's files go in one commit together (the `mod x;` line and `x.rs`), or the mirror export and the Pages build break.
-5. `git pull --no-rebase --no-edit origin master`, then `git push origin master`. Rejected: pull again, push again. Never force.
+3. Run `git diff --check -- <paths>` and read `git diff -- <paths>`. Confirm every hunk is yours and serves the request.
+4. Write the message to a scratch file outside the repo, ending with the attribution line the session gives. Then `git commit -F <msgfile> -- <path1> <path2>`. `--` plus paths commits only those, whatever else is staged.
+5. One row's files go in one commit together (the `mod x;` line and `x.rs`), or the mirror export and the Pages build break.
+6. `git pull --no-rebase --no-edit origin master`, then `git push origin master`. Rejected: pull again, push again. Never force.
 
 ## Case B: someone else has hunks in your file
 

@@ -3458,6 +3458,7 @@ name = "engine2040"
 version = "0.1.0"
 dependencies = [
  "engine-ai",
+ "engine-arena",
  "engine-assets",
  "engine-audio",
  "engine-core",

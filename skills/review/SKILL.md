@@ -5,7 +5,7 @@ description: "Use when you review a diff or audit an area: depth 0-5 score, rust
 
 # Review
 
-Review a diff you did not write. For your own diff, run sections 1 and 3 as a self-check.
+Review a diff you did not write. For your own diff, run section 1; add section 3 for Rust. For docs or agent instructions, run the checks named in `AGENTS.md` instead of the Rust bar.
 Verdict form: `PASS | FAIL - <reason> | BLOCKED - <reason>`. Every FAIL carries its reason on the same line. A bare FAIL is rejected.
 Rules: `AGENTS.md`, `docs/CODELAW.md`, `docs/HASH-LAW.md`, `docs/ARCHITECTURE.md`.
 

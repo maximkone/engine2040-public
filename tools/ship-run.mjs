@@ -23,14 +23,29 @@
 // skipped). The sim still plays, so that case is read as `adapter=none`, not
 // skipped.
 //
-// The frame score against content/reference/ is not built here: it needs a
-// hardware adapter to draw a tier and a scorer to compare it, so the tool
-// names the adapter and prints frame=skipped instead of inventing a score.
+// When the game leg names a real adapter, the shipped binary also draws the
+// native reference tier offscreen into a temp folder. One shot is scored
+// against content/reference/native/arena600-t000.png with the existing
+// iqa-gate scorer, and the tool prints one `SHIP-FRAME` receipt. The bar is
+// the look gate's own: SSIM at the scorer's threshold or FLIP under
+// `look_flip_max` in tools/product-bar.json. A software adapter is skipped
+// unless E2040_ALLOW_SOFTWARE=1, and then it is labelled and never reads as a
+// hardware pass.
 //
 // Exit codes: 0 pass - 1 the build did not prove itself - 2 usage.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { DEFAULT_THRESHOLD, decodePng, scorePair } from "./iqa-gate.mjs";
 
 // The golden hash of the root proof fixture: seed 2040, 600 ticks, no inputs.
 export const GOLDEN_HASH = "d57b5c8ae3096614";
@@ -44,6 +59,18 @@ export const ARENA_FRAMES_PER_SECOND = 60;
 export const ARENA_DEADLINE_MS = 120_000;
 export const ARENA_TIMEOUT_MS = 150_000;
 export const PROOF_TIMEOUT_MS = 120_000;
+
+// The frame leg scores the native reference tier the arena's
+// `--reference-set` draws: 1280x720, ten shots on the seed-2040 arena600
+// orbit. Only the first shot is scored; the rest are the tier's own shape.
+export const FRAME_TIER = "native";
+export const FRAME_SHOT = "arena600-t000";
+export const FRAME_SHOTS = 10;
+export const FRAME_RESOLUTION = "1280x720";
+export const FRAME_REFERENCE_PNG = "content/reference/native/arena600-t000.png";
+export const FRAME_TIMEOUT_MS = 180_000;
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // One named refusal. `detail` says what was read and what was wanted, so the
 // red line is enough to fix the run without opening the log.
@@ -326,6 +353,235 @@ export function runArena(exe, options = {}) {
   return { ...first, runs };
 }
 
+// The software opt-in is E2040_ALLOW_SOFTWARE=1, the renderer's own switch.
+// The child environment is sanitized, so the tool hands the flag over only
+// when it means it; a hardware leg strips it.
+export function allowSoftware(source = {}) {
+  return String(source?.E2040_ALLOW_SOFTWARE ?? "") === "1";
+}
+
+export function withSoftware(env, allowed) {
+  const out = { ...env };
+  if (allowed) out.E2040_ALLOW_SOFTWARE = "1";
+  else delete out.E2040_ALLOW_SOFTWARE;
+  return out;
+}
+
+// The reference run's summary line:
+//   arena reference: tier=native shots=10 camera=arena600 seed=2040
+//     size=1280x720 adapter="NVIDIA ..." driver="..." fragment="..."
+// One `arena reference: ... shot=arena600-t000 ... png="..." bytes=<n>`
+// line per shot names the file the mode wrote. The scorer reads the PNG
+// itself; these lines are the receipt, never the score.
+export function parseReference(text) {
+  const lines = String(text ?? "").split(/\r?\n/);
+  const summary = lines.find((line) => /^arena reference: tier=\S+ shots=\d+/.test(line));
+  if (!summary) return null;
+  const shots = Number((summary.match(/(?:^|\s)shots=(\d+)/) ?? [])[1]);
+  const size = summary.match(/(?:^|\s)size=(\d+)x(\d+)/);
+  const adapter = (summary.match(/(?:^|\s)adapter="([^"]*)"/) ?? [])[1];
+  if (!Number.isInteger(shots) || !size || adapter === undefined) return null;
+  return {
+    tier: (summary.match(/(?:^|\s)tier=(\S+)/) ?? [])[1] ?? "",
+    shots,
+    width: Number(size[1]),
+    height: Number(size[2]),
+    adapter: adapter.trim(),
+    driver: ((summary.match(/(?:^|\s)driver="([^"]*)"/) ?? [])[1] ?? "").trim(),
+    summary,
+  };
+}
+
+// One shot line of the same run, for the shot the score reads.
+export function parseReferenceShot(text, shot = FRAME_SHOT) {
+  const escaped = String(shot).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const line = String(text ?? "")
+    .split(/\r?\n/)
+    .find((row) => new RegExp(`^arena reference: tier=\\S+ shot=${escaped}(?:\\s|$)`).test(row));
+  if (!line) return null;
+  const bytes = (line.match(/(?:^|\s)bytes=(\d+)/) ?? [])[1];
+  const png = (line.match(/(?:^|\s)png="([^"]*)"/) ?? [])[1];
+  if (!bytes || png === undefined) return null;
+  return { png, bytes: Number(bytes) };
+}
+
+// The look gate's own bar: iqa-gate's SSIM threshold and product-bar's FLIP
+// floor. Neither number is invented here, and a missing floor is loud.
+export function lookBar(root = ROOT) {
+  const path = join(root, "tools", "product-bar.json");
+  const bar = JSON.parse(readFileSync(path, "utf8"));
+  const flipMax = bar?.floors?.look_flip_max;
+  if (!Number.isFinite(flipMax)) throw new Error(`${path} has no floors.look_flip_max`);
+  return { ssimMin: DEFAULT_THRESHOLD, flipMax };
+}
+
+export function frameVerdict(score, flip, bar = lookBar()) {
+  return Number(score) >= bar.ssimMin || Number(flip) <= bar.flipMax ? "pass" : "fail";
+}
+
+function parseFrameSize(size) {
+  const match = String(size ?? "").match(/^(\d+)x(\d+)$/);
+  if (!match) throw new Error(`bad frame size ${size}; want <w>x<h>`);
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+// The one SHIP-FRAME receipt. A hardware capture names the adapter that drew
+// the pixels; a software capture says so and never carries `verdict=pass`.
+export function frameLine(frame) {
+  const resolution = frame.resolution ?? FRAME_RESOLUTION;
+  if (frame.software) {
+    return `SHIP-FRAME adapter=warp reason=software-adapter resolution=${resolution} score=${frame.score} flip=${frame.flip} verdict=software`;
+  }
+  return `SHIP-FRAME adapter="${frame.adapter}" resolution=${resolution} score=${frame.score} flip=${frame.flip} verdict=${frame.verdict}`;
+}
+
+// Score one committed reference shot against a fresh shipped capture. The
+// capture draws the native tier offscreen into `captureDir`; the score reads
+// that PNG and the reference PNG with the same decoder iqa-gate uses. A short
+// run, a missing capture, a size mismatch or an unreadable pair is refused by
+// name; a low score is the caller's `verdict=fail`.
+export function runFrameLeg(exe, options = {}) {
+  const path = resolve(exe);
+  const {
+    spawn = spawnSync,
+    env = childEnv(),
+    software = false,
+    captureDir = mkdtempSync(join(tmpdir(), "ship-frame-")),
+    referencePng = join(ROOT, FRAME_REFERENCE_PNG),
+    size = FRAME_RESOLUTION,
+    timeoutMs = FRAME_TIMEOUT_MS,
+    bar = null,
+  } = options;
+  const base = { out: "", status: null, captureDir };
+  let want;
+  let gate;
+  try {
+    want = parseFrameSize(size);
+    gate = bar ?? lookBar();
+  } catch (error) {
+    return { ...refuse("FRAME_BAR_UNREADABLE", error.message), ...base };
+  }
+  const args = ["--reference-set", "--reference-tier", FRAME_TIER, "--reference-dir", captureDir];
+  const run = runProcess(path, args, {
+    cwd: dirname(path),
+    env: withSoftware(env, software),
+    timeoutMs,
+    spawn,
+  });
+  base.out = run.out;
+  base.status = run.status;
+  if (run.error) {
+    return {
+      ...refuse("FRAME_FAILED", `cannot start the reference capture: ${run.error.message}`),
+      ...base,
+    };
+  }
+  if (run.status !== 0) {
+    const why = /no wgpu adapter/i.test(run.out)
+      ? "the reference capture found no wgpu adapter"
+      : `the reference capture exited ${run.status}`;
+    return { ...refuse("FRAME_CAPTURE_EXIT", why), ...base };
+  }
+  const reference = parseReference(run.out);
+  if (!reference) {
+    return {
+      ...refuse("FRAME_NO_RECEIPT", "no 'arena reference: tier=native shots=<n>' line in the capture output"),
+      ...base,
+    };
+  }
+  if (reference.tier !== FRAME_TIER) {
+    return {
+      ...refuse("FRAME_TIER", `the capture drew tier=${reference.tier}; the frame leg scores ${FRAME_TIER}`),
+      ...base,
+    };
+  }
+  if (reference.width !== want.width || reference.height !== want.height) {
+    return {
+      ...refuse(
+        "FRAME_SIZE",
+        `the capture drew ${reference.width}x${reference.height}; the frame leg wants ${size}`,
+      ),
+      ...base,
+    };
+  }
+  if (reference.shots !== FRAME_SHOTS) {
+    return {
+      ...refuse(
+        "FRAME_SHORT_RUN",
+        `the capture filed ${reference.shots} shots; the ${FRAME_TIER} tier files ${FRAME_SHOTS}`,
+      ),
+      ...base,
+    };
+  }
+  if (!reference.adapter) {
+    return { ...refuse("FRAME_NO_ADAPTER", "the capture line names no adapter"), ...base };
+  }
+  const shot = parseReferenceShot(run.out);
+  if (!shot) {
+    return { ...refuse("FRAME_NO_SHOT", `no 'arena reference: ... shot=${FRAME_SHOT}' line`), ...base };
+  }
+  if (!(shot.bytes > 0)) {
+    return { ...refuse("FRAME_EMPTY_SHOT", `shot ${FRAME_SHOT} filed ${shot.bytes} bytes`), ...base };
+  }
+  const capturePath = join(captureDir, FRAME_TIER, `${FRAME_SHOT}.png`);
+  if (!existsSync(capturePath)) {
+    return { ...refuse("FRAME_NO_CAPTURE", `the capture did not write ${capturePath}`), ...base };
+  }
+  if (!existsSync(referencePng)) {
+    return { ...refuse("FRAME_NO_REFERENCE", `no committed reference shot at ${referencePng}`), ...base };
+  }
+  let expected;
+  let actual;
+  try {
+    expected = decodePng(readFileSync(referencePng), referencePng);
+    actual = decodePng(readFileSync(capturePath), capturePath);
+  } catch (error) {
+    return { ...refuse("FRAME_UNREADABLE", `cannot decode the pair: ${error.message}`), ...base };
+  }
+  if (expected.w !== actual.w || expected.h !== actual.h) {
+    return {
+      ...refuse(
+        "FRAME_SIZE_MISMATCH",
+        `reference is ${expected.w}x${expected.h}; capture is ${actual.w}x${actual.h}`,
+      ),
+      ...base,
+    };
+  }
+  if (expected.w !== want.width || expected.h !== want.height) {
+    return {
+      ...refuse(
+        "FRAME_SIZE",
+        `the scored pair is ${expected.w}x${expected.h}; the frame leg wants ${size}`,
+      ),
+      ...base,
+    };
+  }
+  let score;
+  try {
+    score = scorePair(expected.data, actual.data, expected.w, expected.h, gate.ssimMin);
+  } catch (error) {
+    return { ...refuse("FRAME_UNREADABLE", `cannot score the pair: ${error.message}`), ...base };
+  }
+  const verdict = frameVerdict(score.ssim_x10000, score.flip_x10000, gate);
+  const adapterClass = adapterLabel(reference.adapter);
+  return {
+    ok: true,
+    reason: "PASS",
+    detail: `shots=${reference.shots} adapter="${reference.adapter}" score=${score.ssim_x10000} flip=${score.flip_x10000} verdict=${verdict}`,
+    adapter: reference.adapter,
+    adapterLabel: adapterClass,
+    software: adapterClass === "warp" || adapterClass === "none",
+    resolution: `${expected.w}x${expected.h}`,
+    score: score.ssim_x10000,
+    flip: score.flip_x10000,
+    verdict,
+    bar: gate,
+    referencePng,
+    capturePath,
+    ...base,
+  };
+}
+
 // The last non-empty lines of one run: a red names the end of the output, not
 // the whole boot log.
 export function tail(text, count = 20) {
@@ -354,9 +610,17 @@ be equal, so the game's own fixture is verified without pretending it is the
 legacy golden (docs/HASH-LAW.md: the golden never runs arena). A missing
 receipt, a short run, a missing hash or a hash that moved turns the job red. On
 a machine with no adapter the run presents no frame (\`frames=0\`) and the tool
-names \`adapter=none\`; with hardware it names the adapter. The frame score
-against content/reference/ needs a scorer that is not wired here, so the tool
-prints \`frame=skipped\` instead of inventing a score.
+names \`adapter=none\`.
+
+With a real adapter the tool scores the packed frame: the binary draws the ten
+native reference shots (1280x720) offscreen into a temp folder, one shot is
+compared with content/reference/native/arena600-t000.png, and the tool prints
+\`SHIP-FRAME adapter="<name>" resolution=1280x720 score=<ssim_x10000>
+flip=<flip_x10000> verdict=pass|fail\`. The bar is the look gate's own: SSIM at
+tools/iqa-gate.mjs's threshold or FLIP under product-bar.json's
+\`look_flip_max\`. A software adapter is skipped; set E2040_ALLOW_SOFTWARE=1 to
+score it as \`adapter=warp reason=software-adapter ... verdict=software\`, which
+never reads as a hardware pass.
 
 Named refusals print as \`SHIP-RUN FAIL [REASON] <detail>\`.
 Exit codes: 0 pass - 1 the build did not prove itself - 2 usage.
@@ -427,7 +691,13 @@ function writeLog(path, lines, sections) {
 
 export function main(
   argv,
-  { out = console.log, err = console.error, spawn = spawnSync, env = childEnv() } = {},
+  {
+    out = console.log,
+    err = console.error,
+    spawn = spawnSync,
+    env = withSoftware(childEnv(process.env), allowSoftware(process.env)),
+    frame: frameOptions = {},
+  } = {},
 ) {
   let args;
   try {
@@ -457,8 +727,12 @@ export function main(
   };
   const sections = [];
   let failed = false;
+  // The sanitized environment carries the renderer's software opt-in only
+  // when the caller set it; the frame leg uses the same env as the game leg.
+  const software = allowSoftware(env);
+  const legEnv = withSoftware(env, software);
 
-  const proof = runProof(proofPath, { spawn, env, golden: args.golden });
+  const proof = runProof(proofPath, { spawn, env: legEnv, golden: args.golden });
   sections.push(["proof", proof.out]);
   if (proof.ok) {
     say(`SHIP-RUN tick=${proof.ticks} hash=${proof.hash}`);
@@ -475,7 +749,7 @@ export function main(
       failed = true;
       say(`SHIP-RUN FAIL [MISSING_ARENA] no such file: ${arenaPath}`);
     } else {
-      const arena = runArena(arenaPath, { spawn, env, ticks: args.ticks });
+      const arena = runArena(arenaPath, { spawn, env: legEnv, ticks: args.ticks });
       sections.push(["arena", arena.out]);
       if (arena.ok) {
         const smoke = arena.smoke;
@@ -485,11 +759,29 @@ export function main(
           `SHIP-GAME tick=${smoke.ticks} hash=${smoke.hash} frames=${smoke.frames} seconds=${seconds} adapter=${label} headless=${smoke.headless ?? "unknown"} runs=${arena.runs}`,
         );
         say(`SHIP-GAME presenter="${smoke.presenter}"`);
-        // A no-adapter run presents nothing; a real adapter could draw a tier
-        // of content/reference/, but the scorer is not wired in this row, so
-        // the leg is named rather than scored.
-        const reason = label === "none" || label === "warp" ? "no-hardware-adapter" : "frame-score-not-wired";
-        say(`SHIP-FRAME skipped adapter=${label} reason=${reason}`);
+        // A no-adapter run presents nothing, so the frame leg is named, not
+        // scored. A real adapter draws the native reference tier and the
+        // scorer reads one committed shot. A software adapter runs only when
+        // E2040_ALLOW_SOFTWARE=1 asks for it, and then it is labelled.
+        if (label === "none" || (label === "warp" && !software)) {
+          say(`SHIP-FRAME skipped adapter=${label} reason=no-hardware-adapter`);
+        } else {
+          const frame = runFrameLeg(arenaPath, {
+            ...frameOptions,
+            spawn,
+            env: legEnv,
+            software: label === "warp",
+          });
+          sections.push(["frame", frame.out ?? ""]);
+          if (frame.ok) {
+            say(frameLine(frame));
+            if (!frame.software && frame.verdict !== "pass") failed = true;
+          } else {
+            failed = true;
+            say(`SHIP-FRAME FAIL [${frame.reason}] ${frame.detail}`);
+            for (const line of tail(frame.out)) say(line);
+          }
+        }
       } else {
         failed = true;
         say(`SHIP-GAME FAIL [${arena.reason}] ${arena.detail}`);

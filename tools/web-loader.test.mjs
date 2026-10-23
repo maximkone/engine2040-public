@@ -1,4 +1,4 @@
-// crates/web/loader.js drills (QW3, QW12): fake fetch, cache and compiler, so the numbers and the failure reasons are exact.
+// crates/web/loader.js drills (QW3, QW12, PIN): fake fetch, cache and compiler, so the numbers and the failure reasons are exact.
 //   node --test tools/web-loader.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -7,12 +7,31 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
-import { CACHE_NAME, LoadError, AssetError, browserEnv, fetchAsset, fetchAssetPrefix, pageFetcher, loadEngine, loadLine, watchFirstFrame } from "../crates/web/loader.js";
+import {
+  BUILD_FILE, BuildMismatchError, CACHE_NAME, LoadError, AssetError, browserEnv, checkBuild, fetchAsset, fetchAssetPrefix, importEngine, loadEngine, loadLine, pageFetcher, pinUrl, watchFirstFrame,
+} from "../crates/web/loader.js";
 
 const WASM = Buffer.from("fake wasm bytes".repeat(100));
 const SHA = createHash("sha256").update(WASM).digest("hex");
 const BASE = "http://127.0.0.1:9/";
-const KEY = `${BASE}engine_bg.wasm?sha256=${SHA}`;
+const hash = (text) => createHash("sha256").update(text).digest("hex");
+// PIN: the shape tools/web-build.mjs writes: logical name -> hashed file name and full sha256.
+const PIN = {
+  schema: 2,
+  build: "0123456789ab",
+  files: {
+    "engine.js": { name: "engine.aaaaaaaaaaaa.js", sha256: hash("engine glue") },
+    "engine_bg.wasm": { name: `engine_bg.${SHA.slice(0, 12)}.wasm`, sha256: SHA },
+    "loader.js": { name: "loader.bbbbbbbbbbbb.js", sha256: hash("loader") },
+    "assets/arena.e2bundle": { name: "assets/arena.cccccccccccc.e2bundle", sha256: hash("arena") },
+    "assets/fighters.e2bundle": { name: "assets/fighters.dddddddddddd.e2bundle", sha256: hash("rig") },
+    "index.html": { name: "index.html", sha256: hash("template") },
+    "coi-serviceworker.js": { name: "coi-serviceworker.js", sha256: hash("worker") },
+  },
+};
+const WASM_NAME = PIN.files["engine_bg.wasm"].name;
+const KEY = `${BASE}${WASM_NAME}?sha256=${SHA}`;
+const buildJson = () => ({ schema: 2, build: PIN.build, pin: structuredClone(PIN.files) });
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
 // QW4: a two-tier E2BUNDLE, so the loader has a coarse boundary to stop at.
@@ -45,8 +64,8 @@ function miniBundle() {
 }
 
 // A page's world: a server (what each path answers), a Cache API that survives between loads, a clock the fakes advance.
-function world({ type = "application/wasm", status = 200, buildJson = { files: { "engine_bg.wasm": { sha256: SHA } } }, putThrows = null, persist = true } = {}) {
-  const w = { clock: 0, fetched: [], store: new Map(), persistCalls: 0 };
+function world({ type = "application/wasm", status = 200, build = buildJson(), putThrows = null, persist = true } = {}) {
+  const w = { clock: 0, fetched: [], store: new Map(), persistCalls: 0, imported: [] };
   const cache = {
     match: async (k) => w.store.get(k)?.clone(),
     put: async (k, res) => { if (putThrows) throw putThrows; w.store.set(k, res); },
@@ -55,7 +74,7 @@ function world({ type = "application/wasm", status = 200, buildJson = { files: {
     fetch: async (url) => {
       const path = new URL(url).pathname.slice(1);
       w.fetched.push(path);
-      if (path === "build.json") return buildJson ? new Response(JSON.stringify(buildJson)) : new Response("nope", { status: 404 });
+      if (path === BUILD_FILE) return build ? new Response(JSON.stringify(build)) : new Response("nope", { status: 404 });
       w.clock += 300; // the download
       return new Response(WASM, { status, headers: { "content-type": type } });
     },
@@ -64,63 +83,73 @@ function world({ type = "application/wasm", status = 200, buildJson = { files: {
     wasm: { compileStreaming: async (res) => { await res.arrayBuffer(); await tick(); w.clock += 120; return { module: true }; } },
     now: () => w.clock,
     sha256: async (bytes) => createHash("sha256").update(Buffer.from(bytes)).digest("hex"),
+    importModule: async (url) => { w.imported.push(url); return { default: () => ({ url }) }; },
   };
   return w;
 }
 
 test("first load: bytes fetched, download and compile split, copy stored under its hash, persistence asked", async () => {
   const w = world();
-  const { module, stats, settled } = await loadEngine(BASE, w.env);
+  const { module, stats, settled } = await loadEngine(PIN, BASE, w.env);
   assert.deepEqual(module, { module: true });
   await settled;
   assert.deepEqual(stats, { bundle: "network", bytesFetched: WASM.length, downloadMs: 300, compileMs: 120, cache: "stored", persisted: true });
-  assert.deepEqual(w.fetched, ["build.json", "engine_bg.wasm"]);
-  assert.ok(w.store.has(KEY), "keyed by the SHA-256 from build.json");
+  assert.deepEqual(w.fetched, [WASM_NAME], "the pin's hashed name is the only wasm request");
+  assert.ok(w.store.has(KEY), "keyed by the pinned name and the SHA-256");
   assert.equal(w.persistCalls, 1);
 });
 
 test("second load in the same profile reads the cache: bundle=cache, bytes fetched 0, no wasm request", async () => {
   const w = world();
-  await (await loadEngine(BASE, w.env)).settled;
+  await (await loadEngine(PIN, BASE, w.env)).settled;
   w.fetched.length = 0;
-  const { stats } = await loadEngine(BASE, w.env);
+  const { stats } = await loadEngine(PIN, BASE, w.env);
   assert.equal(stats.bundle, "cache");
   assert.equal(stats.bytesFetched, 0);
   assert.equal(stats.cache, "hit");
-  assert.deepEqual(w.fetched, ["build.json"], "only build.json (revalidated) goes to the network");
+  assert.deepEqual(w.fetched, [], "a cache hit fetches nothing");
 });
 
-test("a new build misses the old copy: another hash is another key", async () => {
+test("a new build misses the old copy: another hash is another name and key", async () => {
   const w = world();
-  await (await loadEngine(BASE, w.env)).settled;
-  w.fetched.length = 0;
-  const other = "1".repeat(64);
-  const w2 = world({ buildJson: { files: { "engine_bg.wasm": { sha256: other } } } });
+  await (await loadEngine(PIN, BASE, w.env)).settled;
+  const otherBytes = Buffer.from("other wasm bytes".repeat(100));
+  const other = createHash("sha256").update(otherBytes).digest("hex");
+  const pin2 = { ...PIN, build: other.slice(0, 12), files: { ...PIN.files, "engine_bg.wasm": { name: `engine_bg.${other.slice(0, 12)}.wasm`, sha256: other } } };
+  const w2 = world();
   w2.store = w.store;
-  const { stats, settled } = await loadEngine(BASE, w2.env);
-  assert.equal(stats.bundle, "network");
-  assert.equal((await settled).cache, "hash-mismatch", "bytes that do not hash to build.json are never stored");
+  w2.env.fetch = async (url) => {
+    w2.fetched.push(new URL(url).pathname.slice(1));
+    w2.clock += 300;
+    return new Response(otherBytes, { status: 200, headers: { "content-type": "application/wasm" } });
+  };
+  const { stats, settled } = await loadEngine(pin2, BASE, w2.env);
+  assert.equal(stats.bundle, "network", "the old copy under the old key is not a hit");
+  assert.equal((await settled).cache, "stored", "the new build's bytes are stored");
+  assert.deepEqual(w2.fetched, [pin2.files["engine_bg.wasm"].name]);
+  assert.ok(w.store.has(`${BASE}${pin2.files["engine_bg.wasm"].name}?sha256=${other}`), "a new name and a new key");
+  assert.ok(w.store.has(KEY), "the old copy stays under its own key");
 });
 
 test("QW3: a server that types the wasm text/plain gives a LoadError that names the type and the fix", async () => {
   const w = world({ type: "text/plain" });
-  await assert.rejects(loadEngine(BASE, w.env), (e) => {
+  await assert.rejects(loadEngine(PIN, BASE, w.env), (e) => {
     assert.ok(e instanceof LoadError);
-    assert.match(e.message, /served as "text\/plain", not application\/wasm/);
+    assert.match(e.message, new RegExp(`${WASM_NAME.replaceAll(".", "\\.")} is served as "text/plain"`));
     assert.match(e.message, /must type \.wasm files as application\/wasm/);
     return true;
   });
-  await assert.rejects(loadEngine(BASE, world({ type: "" }).env), /no content-type/);
-  assert.equal((await loadEngine(BASE, world({ type: "application/wasm; charset=binary" }).env)).stats.bundle, "network", "parameters after the type are fine");
+  await assert.rejects(loadEngine(PIN, BASE, world({ type: "" }).env), /no content-type/);
+  assert.equal((await loadEngine(PIN, BASE, world({ type: "application/wasm; charset=binary" }).env)).stats.bundle, "network", "parameters after the type are fine");
 });
 
 test("a missing file is a LoadError with the status", async () => {
-  await assert.rejects(loadEngine(BASE, world({ status: 404 }).env), /could not be fetched: HTTP 404/);
+  await assert.rejects(loadEngine(PIN, BASE, world({ status: 404 }).env), /could not be fetched: HTTP 404/);
 });
 
 test("QW12: QuotaExceededError on the cache write is reported and the page still gets its module", async () => {
   const w = world({ putThrows: Object.assign(new Error("full"), { name: "QuotaExceededError" }) });
-  const { module, stats, settled } = await loadEngine(BASE, w.env);
+  const { module, stats, settled } = await loadEngine(PIN, BASE, w.env);
   assert.deepEqual(module, { module: true });
   await settled;
   assert.equal(stats.cache, "quota");
@@ -128,16 +157,102 @@ test("QW12: QuotaExceededError on the cache write is reported and the page still
   assert.equal(w.persistCalls, 0, "no persistence request for a copy that was not stored");
 });
 
-test("no Cache API (plain http) or no build.json: the page streams without a cache and says so", async () => {
+test("no Cache API (plain http): the page streams without a cache and says so", async () => {
   const none = world();
   none.env.caches = null;
-  const a = await loadEngine(BASE, none.env);
+  const a = await loadEngine(PIN, BASE, none.env);
   assert.equal((await a.settled).cache, "off");
   assert.equal(a.stats.bundle, "network");
-  const noJson = world({ buildJson: null });
-  const b = await loadEngine(BASE, noJson.env);
-  assert.equal((await b.settled).cache, "off");
-  assert.equal(noJson.store.size, 0);
+  assert.equal(none.store.size, 0);
+});
+
+test("PIN: a wasm whose bytes are not the pin's is refused by name before the caller can start it", async () => {
+  const w = world();
+  // The host answers with other bytes under the pinned name: the classic half-copied deploy.
+  w.env.fetch = async () => new Response(Buffer.from("not the pinned wasm"), { status: 200, headers: { "content-type": "application/wasm" } });
+  w.env.caches = null;
+  await assert.rejects(loadEngine(PIN, BASE, w.env), (e) => {
+    assert.ok(e instanceof LoadError);
+    assert.equal(e.fallback, "build-mismatch");
+    assert.match(e.message, new RegExp(`${WASM_NAME.replaceAll(".", "\\.")} does not match the build pin: sha256 [0-9a-f]{64}, the pin says ${SHA}`));
+    return true;
+  });
+});
+
+test("PIN: importEngine checks engine.js bytes and imports them from a blob URL", async () => {
+  const glue = "export default function init() {}\n";
+  const pin = { ...PIN, files: { ...PIN.files, "engine.js": { name: "engine.eeeeeeeeeeee.js", sha256: hash(glue) } } };
+  const asked = [];
+  const urls = [];
+  const env = {
+    fetch: async (url) => { asked.push(String(url)); return new Response(glue, { status: 200 }); },
+    sha256: async (bytes) => createHash("sha256").update(Buffer.from(bytes)).digest("hex"),
+    importModule: async (url) => { urls.push(url); return { default: () => 1 }; },
+  };
+  const mod = await importEngine(pin, BASE, env);
+  assert.equal(mod.default(), 1);
+  assert.deepEqual(asked, [`${BASE}engine.eeeeeeeeeeee.js`], "only the pinned glue is fetched");
+  assert.equal(urls.length, 1);
+  assert.match(urls[0], /^blob:/, "the verified bytes are imported, not whatever the host would serve at the named URL");
+});
+
+test("PIN: a tampered engine.js is refused by name before any module runs", async () => {
+  const glue = "export default function init() {}\n";
+  const pin = { ...PIN, files: { ...PIN.files, "engine.js": { name: "engine.eeeeeeeeeeee.js", sha256: hash(glue) } } };
+  let imported = false;
+  const env = {
+    fetch: async () => new Response(glue.replace("init", "Init"), { status: 200 }),
+    sha256: async (bytes) => createHash("sha256").update(Buffer.from(bytes)).digest("hex"),
+    importModule: async () => { imported = true; return {}; },
+  };
+  await assert.rejects(importEngine(pin, BASE, env), (e) => {
+    assert.ok(e instanceof LoadError);
+    assert.equal(e.fallback, "build-mismatch");
+    assert.match(e.message, /engine\.eeeeeeeeeeee\.js does not match the build pin/);
+    return true;
+  });
+  assert.equal(imported, false, "no module runs when its bytes do not match");
+});
+
+test("PIN: checkBuild accepts one build and refuses a page paired with another deploy's build.json", async () => {
+  const w = world();
+  const manifest = await checkBuild(PIN, BASE, w.env);
+  assert.equal(manifest.build, PIN.build);
+  assert.deepEqual(w.fetched, [BUILD_FILE], "the manifest is fetched once, same origin");
+
+  const newer = buildJson();
+  newer.build = "999999999999";
+  newer.pin = { ...newer.pin, "engine_bg.wasm": { name: "engine_bg.999999999999.wasm", sha256: "9".repeat(64) } };
+  await assert.rejects(checkBuild(PIN, BASE, world({ build: newer }).env), (e) => {
+    assert.ok(e instanceof BuildMismatchError, "a named mismatch, not a generic load failure");
+    assert.equal(e.fallback, "build-mismatch");
+    assert.match(e.message, new RegExp(`the page names build ${PIN.build} but build\\.json lists build 999999999999`));
+    return true;
+  });
+
+  // Same build id but a file entry changed: the file is named, with both hashes.
+  const sameId = buildJson();
+  sameId.pin["engine.js"] = { name: "engine.999999999999.js", sha256: "9".repeat(64) };
+  await assert.rejects(checkBuild(PIN, BASE, world({ build: sameId }).env), (e) => {
+    assert.ok(e instanceof BuildMismatchError);
+    assert.match(e.message, /engine\.js as engine\.aaaaaaaaaaaa\.js/);
+    assert.match(e.message, /build\.json lists engine\.999999999999\.js/);
+    return true;
+  });
+});
+
+test("PIN: checkBuild refuses a missing or unreadable build.json", async () => {
+  await assert.rejects(checkBuild(PIN, BASE, world({ build: null }).env), (e) => e instanceof BuildMismatchError && /build\.json could not be fetched: HTTP 404/.test(e.message));
+  const bad = world();
+  bad.env.fetch = async () => new Response("not json", { status: 200 });
+  await assert.rejects(checkBuild(PIN, BASE, bad.env), (e) => e instanceof BuildMismatchError && /build\.json is not JSON/.test(e.message));
+});
+
+test("PIN: pinUrl maps the engine's logical bundle names to the pinned files", () => {
+  assert.equal(pinUrl(PIN, "assets/arena.e2bundle", BASE).href, `${BASE}${PIN.files["assets/arena.e2bundle"].name}`);
+  assert.equal(pinUrl(PIN, "assets/fighters.e2bundle", BASE).href, `${BASE}${PIN.files["assets/fighters.e2bundle"].name}`);
+  assert.equal(pinUrl(PIN, "https://elsewhere.example/asset.bin", BASE).href, "https://elsewhere.example/asset.bin", "a name the pin does not list is fetched as asked");
+  assert.equal(pinUrl(PIN, "assets/arena.e2bundle", `${BASE}pages/index.html`).href, `${BASE}pages/${PIN.files["assets/arena.e2bundle"].name}`, "a page under a path keeps that path");
 });
 
 test("watchFirstFrame resolves at once when the body already says running", async () => {
@@ -306,8 +421,8 @@ test("QW4: the page draws the arena bundle fetch bar from loader progress", () =
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const html = readFileSync(join(root, "crates", "web", "index.html"), "utf8");
   assert.match(html, /<progress id="fetch-bar"/, "the page has the bar");
-  assert.match(html, /pageFetcher\(import\.meta\.url, showFetch\)/, "the rig fetch reports its progress");
-  assert.match(html, /pageFetcherPrefix\(import\.meta\.url, showFetch\)/, "the arena fetch reports the streamed progress");
+  assert.match(html, /pageFetcher\(pin, import\.meta\.url, showFetch\)/, "the rig fetch reports its progress through the build pin");
+  assert.match(html, /pageFetcherPrefix\(pin, import\.meta\.url, showFetch\)/, "the arena fetch reports the streamed progress through the build pin");
   assert.match(html, /window\.engine2040FetchAssetPrefix = /, "the prefix fetcher is installed for the engine");
   assert.match(html, /delete document\.body\.dataset\.fetch/, "the bar hides when the fetch ends or refuses");
 });
@@ -322,24 +437,25 @@ test("WEB6: the fetcher the engine asks for is the one the page installs", () =>
   assert.match(html, /window\.engine2040FetchAssetPrefix = /, "the page installs the prefix fetcher");
 });
 
-test("WEB6: the fetcher the page installs answers with the asset's bytes", async () => {
+test("WEB6: the fetcher the page installs answers with the pinned asset's bytes", async () => {
   const { serve } = await import("./web-browse.mjs");
   const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const dir = mkdtempSync(join(tmpdir(), "web-fetcher-"));
   const body = Buffer.from("e2bundle bytes", "utf8");
-  mkdirSync(join(dir, "assets"));
-  writeFileSync(join(dir, "assets", "arena.e2bundle"), body);
+  const arena = PIN.files["assets/arena.e2bundle"].name;
+  mkdirSync(join(dir, "assets"), { recursive: true });
+  writeFileSync(join(dir, arena), body);
   try {
     const server = await serve(dir);
     try {
-      // The page's own fetcher, the one it installs for the engine: a relative asset
-      // name against the page's URL, answered with the asset's bytes.
-      const fetcher = pageFetcher(`http://127.0.0.1:${server.port}/index.html`);
+      // The page's own fetcher, the one it installs for the engine: the engine's logical name
+      // lands on the pinned file, and the bytes are the ones the page named.
+      const fetcher = pageFetcher(PIN, `http://127.0.0.1:${server.port}/index.html`);
       const bytes = await fetcher("assets/arena.e2bundle");
       assert.ok(bytes instanceof Uint8Array, "the engine is handed a Uint8Array");
       assert.deepEqual([...bytes], [...body]);
-      assert.equal(server.log.at(-1).path, "/assets/arena.e2bundle", "the server saw the asset request");
+      assert.equal(server.log.at(-1).path, `/${arena}`, "the server saw the pinned asset request");
       await assert.rejects(fetcher("assets/missing.e2bundle"), /assets\/missing\.e2bundle could not be fetched: HTTP 404/);
     } finally {
       await server.close();
@@ -378,20 +494,25 @@ test("end to end: a real server and a real streaming compile; text/plain on .was
   const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const dir = mkdtempSync(join(tmpdir(), "web-loader-"));
-  writeFileSync(join(dir, "engine_bg.wasm"), Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])); // an empty module
+  const wasm = Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]); // an empty module
+  const sha = createHash("sha256").update(wasm).digest("hex");
+  const name = `engine_bg.${sha.slice(0, 12)}.wasm`;
+  const pin = { schema: 2, build: sha.slice(0, 12), files: { "engine_bg.wasm": { name, sha256: sha } } };
+  writeFileSync(join(dir, name), wasm);
   try {
     const good = await serve(dir);
     try {
-      const { module, stats } = await loadEngine(`http://127.0.0.1:${good.port}/index.html`, { ...browserEnv(), caches: null });
+      const { module, stats } = await loadEngine(pin, `http://127.0.0.1:${good.port}/index.html`, { ...browserEnv(), caches: null });
       assert.ok(module instanceof WebAssembly.Module);
       assert.equal(stats.bytesFetched, 8);
       assert.equal(stats.cache, "off");
+      assert.equal(good.log.at(-1).path, `/${name}`, "the server saw the pinned hashed name");
     } finally {
       await good.close();
     }
     const bad = await serve(dir, { wasmType: "text/plain" });
     try {
-      await assert.rejects(loadEngine(`http://127.0.0.1:${bad.port}/index.html`, { ...browserEnv(), caches: null }), (e) => e instanceof LoadError && /served as "text\/plain", not application\/wasm/.test(e.message));
+      await assert.rejects(loadEngine(pin, `http://127.0.0.1:${bad.port}/index.html`, { ...browserEnv(), caches: null }), (e) => e instanceof LoadError && new RegExp(`${name.replaceAll(".", "\\.")} is served as "text/plain", not application/wasm`).test(e.message));
     } finally {
       await bad.close();
     }

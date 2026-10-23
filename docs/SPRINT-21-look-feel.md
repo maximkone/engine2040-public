@@ -58,7 +58,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   per 600 frames; shadow passes <= 1.0 ms in `arena per-pass`. F2P: every item is
   redrawn into one 256 map each frame. P2P: golden unchanged. needs: EG11, RL60.
   Correction 2026-10-21: duplicate of PW06 (`render: the sun shadow the frame samples, 2 cascades`, which closes RL35 and QA4); do not run both - PW06 is the owning row.
-- [ ] RL36 render: dual-filter bloom on the live frame — the window blit runs no
+- [x] RL36 render: dual-filter bloom on the live frame — the window blit runs no
   bloom (`blit.wgsl:55`); RP1 is test-only, a hard threshold over box levels on
   storage buffers capped at 2048 (`post.rs:967,1266,53`). 13-tap downsample,
   Karis weight on the first mip, 3x3 tent upsample (Bevy `bloom.wesl`). Diff:
@@ -68,7 +68,21 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   test -p engine-render --lib gpu_bloom_dual_filter_parity`: GPU vs CPU within
   GPU_PARITY_TOL_POST, one 10000-nit pixel moves the frame mean <= 1 percent,
   bloom <= 0.5 ms. F2P: torch fixture frame is bit-equal with bloom on and off.
-  P2P: golden unchanged. needs: RL34.
+  P2P: golden unchanged. needs: RL34. Landed b9ae53e.
+  Evidence: `gpu_bloom_dual_filter_parity` on the RTX 3050 (local GPU leg):
+  32x32 halo, max |gpu - cpu| 1.01e-4 < 5e-3; one 10000-nit texel moves the
+  frame mean +0.0084% < 1%; the 720p chain 0.148 ms over 7 dispatches < 0.5
+  (pass timestamps after a sustained-clock warm-up; an idle GPU reads 0.75-1.47
+  ms at 315 MHz). F2P `bloom_on_off_halo_differs_dark_unchanged_live` PASS:
+  torch frame moves on vs off, dark frame byte-equal. P2P: presentation only,
+  golden untouched (`d57b5c8ae3096614`). Pass truth `post` LIVE (41663 diff
+  px). Unit `--lib bloom_dual` 5 passed (run 40010523880); `pipeline_warmup` 4
+  passed (run 40014926230); the three kernels naga-validate (run 40015470993);
+  clippy `--features window --all-targets -D warnings` PASS with `--only` my
+  paths (run 40016824975; an untracked `crates/assets/src/proxy_rig.rs` from
+  another lane breaks the full line). Shape note: a new texture chain
+  (`bloom_dual.rs`, `shaders/post/bloom_dual_*.wgsl`) rather than RP1's
+  storage-buffer shaders, so the RP1 CPU oracle keeps its parity.
 - [ ] RL37 render: fighter motion vectors from the previous skin palette — no
   previous transform exists (`present.rs:375-387`), depth is not sampleable
   (`submit.rs:154-156`). Skin twice in the vertex stage, write the unjittered
@@ -604,7 +618,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   scores p99 <= 0.10, three seeded breaks (clamp off, jitter x2, motion zeroed)
   each > 0.5, JSON bytes equal. F2P: no flicker function; SSIM cannot tell the
   breaks apart. P2P: golden unchanged. needs: none. Landed dcfadef. look_flicker 4 passed.
-- [ ] PQ22 playtest: a golden bless flow with two tiers and a known-failure ratchet
+- [x] PQ22 playtest: a golden bless flow with two tiers and a known-failure ratchet
   — `tools/q1-check.mjs:9` counts PNGs and compares none. Bless writes `.new`,
   `.diff` and keeps `.old` (egui kittest); tier 1 bit-exact on the software
   adapter, tier 2 FLIP pooled p95/p99 with a per-adapter threshold table
@@ -614,7 +628,15 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   and its test. Accept: `cargo test -p engine-playtest --lib golden_bless` x2: 34
   stills compared, a blessed change keeps `.old`, a missing golden fails, a stale
   known-failure fails. F2P: 0 pixel compares. P2P: golden unchanged. needs:
-  none.
+  none. Landed 5756c2a0b. Both tiers exist: the Rust module scores FLIP p95/p99
+  against a per-adapter bar, the node tool holds the bit-exact sha256 ratchet.
+  Proof: `cargo test -p engine-playtest --lib golden_bless` 11 passed, twice (local,
+  then runner 40019215258); `--lib` whole crate 497 passed 4 ignored (40017298468);
+  clippy `--all-targets -D warnings` PASS fresh (40019029815); rust-quality
+  `--crate playtest` score 100; `node --test tools/q1-check.test.mjs` 11 passed;
+  rustfmt clean. No sim crate touched, so golden d57b5c8ae3096614 is unchanged.
+  The tool leg is proven on fixtures only: this PC's `target/q1` holds no captures,
+  so no golden is filed on disk yet. Tool and test commit 1ce66d667.
   Correction 2026-10-21: the Accept filter `golden_bless` matches no test (`Grep golden_bless` over crates/playtest is empty) and `crates/playtest/src/look/golden.rs` does not exist (`Test-Path` false; `tools/q1-check.mjs` does exist), so the command exits 0 with 0 passed. The module, its mod line, the bless flow and the test are the work; Accept is `--lib golden_bless` printing a nonzero passed count, and the row may not be ticked until it does.
 - [x] PF26 observe: replay export as MCAP — `replay_verbose` emits sim.tick only
   (`crates/proof/src/trace.rs:34-35`) and the sink is a 120-row (tick, hash) ring

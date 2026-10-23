@@ -403,11 +403,12 @@ pub(super) fn kino_karis_weight(brightness: f32) -> f32 {
     1.0 / (brightness + 1.0)
 }
 
-/// Kino soft-knee bloom weight: brightness-response curve through
-/// [`kino_curve`] plus [`kino_prefilter_weight`]. Below the knee foot
-/// nothing passes, far above everything passes, smooth between. Linear
-/// HDR only.
-pub(super) fn bloom_weight(luma: f32, threshold: f32, soft_knee: f32) -> f32 {
+/// The Kino soft-knee weight for one texel luma, `0..=1`: [`kino_curve`]
+/// plus [`kino_prefilter_weight`]. Below the knee foot nothing passes, far
+/// above everything passes, smooth between. Linear HDR only. One owner for
+/// the curve: the CPU pyramid ([`apply_bloom`]) and the live dual-filter
+/// chain ([`crate::bloom_dual`]) both call it.
+pub fn bloom_weight(luma: f32, threshold: f32, soft_knee: f32) -> f32 {
     let curve = kino_curve(threshold, soft_knee);
     kino_prefilter_weight(luma, threshold, curve)
 }

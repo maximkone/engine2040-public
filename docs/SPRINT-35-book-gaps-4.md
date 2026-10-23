@@ -18,7 +18,8 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   `tools/list_changed`; a subscribed session gets one `resources/updated` for
   `e2040://scene`, an unsubscribed one gets none. F2P: no notification is ever
   sent. P2P: golden and the 75/75 door parity tapes unchanged. needs: none.
-- [ ] BG2 endpoint: resource templates have no child URI — `resources.rs:109-122`
+- [x] BG2 endpoint: resource templates have no child URI — Landed dfab6a88c.
+  `resources.rs:109-122`
   advertises four `{uri}/{id}` templates and `:161-175` accepts only the four
   roots. Accept `e2040://door-reference/scene.read`,
   `e2040://error-catalog/bad_args` and `e2040://game-toml-schema/name` by
@@ -29,7 +30,7 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   resource_template_reads_one_child` green; `tool_count_pin` unchanged. F2P:
   today the child URI is `unknown_uri`. P2P: the four root reads unchanged.
   needs: none.
-- [ ] BG3 endpoint: `rules.set` has no read-back and no undo —
+- [x] BG3 endpoint: `rules.set` has no read-back and no undo — Landed d9d9ca525.
   `packs/rules/verbs.rs:113-126` returns hashes only; `Rules::source/history`
   (`crates/rules/src/rules.rs:279,285`) have no door caller. Add `rules.get`
   (the installed text and its hash) and `rules.undo` (reinstall the previous
@@ -39,7 +40,7 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   returns B's text, `rules.undo` reinstalls A (hash equal), a second undo
   restores B, undo with one install refuses `nothing_to_undo`. F2P: no undo, no
   read-back. P2P: `rules.set` output unchanged, v1 golden unchanged. needs: none.
-- [ ] BG4 endpoint: clip edit functions are not door verbs —
+- [x] BG4 endpoint: clip edit functions are not door verbs — Landed cf8969aa2.
   `anim/src/edit.rs:77-217` holds trim, retime, cleanup, strip and mirror;
   `packs/anim.rs:11-13` says they "join here later" and only `anim.graph.*`
   verbs exist. Add `anim.clip.trim|retime|mirror` over the same library calls,
@@ -104,7 +105,8 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   build, and no p50 regression. F2P: the flag is never passed. P2P: the scalar
   build and the dist layout unchanged. needs: `dist/web` must not be dirty by
   another seat at the time of the build.
-- [ ] BG11 ecs: every job allocates — `ecs/src/pool.rs:58` boxes the closure and
+- [x] BG11 ecs: every job allocates — Landed 541a1fe5. `ecs/src/pool.rs:58`
+  boxes the closure and
   `:475` boxes each job; `par_chunks_map` builds slots and a result `Vec`. Add
   a probe that counts job allocations and remove the per-job box (an enum job
   or a stack slot), with an arena that survives warmup. Diff: regular. Tier A.
@@ -121,7 +123,7 @@ BG6 and BG15 move rules v2 only and need a rules receipt.
   (read only). Accept: the leg is green on a planted model with a missing wait
   red and the real model green. F2P: the model is only compiled by hand. P2P:
   the five matrix legs unchanged. needs: none.
-- [ ] BG13 arena: the bare build is claimed but not gated —
+- [x] BG13 arena: the bare build is claimed but not gated — Landed e310aa24e.
   `crates/arena/Cargo.toml:33-36` says `--no-default-features` builds;
   `authority.rs:275` is then unused (a bare-build warning). Make that clippy
   line exit 0 and print one PASS line per featureless crate in the check tool.

@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 // product-check: the loop's own eyes on the built game. Builds arena.exe when
 // it is older than the code (one cargo slot), runs it twice (a look run with
-// captures, a timing run), reads its receipt lines, scores them against
+// captures at the reference capture size, a timing run at the finish size
+// 1920x1080), reads its receipt lines, scores them against
 // tools/product-bar.json and, for every floor a run breaks, prints a
 // `FAIL <floor>: ...` line and records it in target/reports/product/latest.md.
+// The two runs are kept apart on purpose: the look run arms the blocking look
+// probes (its own capture needs measured per-pass ms), so its input-to-frame
+// legs price a GPU readback no player frame pays, while the timing run is the
+// path a player runs. Only the timing run's latency legs are gated.
 // An OpenChamber scheduled task starts it every four hours with --if-new; it
 // returns at once while the crates tree is the one it last checked.
 // Owner 2026-10-11, after the fighters strobed red at every start and no seat
@@ -32,6 +37,14 @@ const ARENA = join(ROOT, "target", "release", "arena.exe");
 const RUN_MS = 6 * 60_000;
 const BUILD_MS = 45 * 60_000;
 const KEEP_RUNS = 6;
+// G2's target is 60 fps at 1920x1080 on the RTX 3050 (docs/plan/finish-line.md),
+// so the timing run measures that size. The look run keeps the reference
+// capture size: its PNGs are scored against the stored look-score reference,
+// and two capture sizes cannot be compared.
+const TIMING_SIZE = "1920x1080";
+const LOOK_SIZE = "1280x720";
+// The player latency bar (crates/perf/src/latency.rs): p95 input to frame, ms.
+const LATENCY_P95_MAX_MS = 50;
 
 const num = (s) => (s === undefined || s === "-" ? null : Number(s));
 const field = (line, key) => num(line?.match(new RegExp(`\\b${key}=([-\\d.]+)`))?.[1]);
@@ -54,6 +67,11 @@ export const parseReceipt = (text) => {
   const interval = split?.match(/interval_ms p50=([\d.]+) p99=([\d.]+)/);
   const passes = {};
   for (const m of String(pass ?? "").matchAll(/\b(sky|layers|particles|decals|ibl|fog|gtao|shadow\w*|taa|bloom|ao)=([\d.]+)ms/g)) passes[m[1]] = Number(m[2]);
+  // The player latency receipt (crates/game/src/bin/arena_frame/latency.rs):
+  // `input_latency` carries the verdict and the input-to-frame-end leg,
+  // `PQ18 OK` the input-to-present-submission leg of the final window.
+  const latency = lineOf(text, "input_latency ");
+  const pq18 = lineOf(text, "PQ18 OK ");
   return {
     split: !!split,
     interval_p50_ms: interval ? Number(interval[1]) : null,
@@ -61,6 +79,9 @@ export const parseReceipt = (text) => {
     // The present mode sets the floor of the frame interval: a Fifo run cannot
     // beat the display period, so the slower gate may only compare like modes.
     vsync: split?.match(/\bpresent_mode=(\w+)/)?.[1] ?? null,
+    // The drawable size the means were taken at (the per-pass line names it):
+    // a 1080p interval may only be compared with another 1080p interval.
+    size: pass?.match(/\bresolution=(\d+x\d+)/)?.[1] ?? null,
     gpu_p50_ms: num(split?.match(/gpu_ms p50=([\d.]+)/)?.[1]),
     cpu_p50_ms: num(split?.match(/cpu_ms p50=([\d.]+)/)?.[1]),
     framing: !!framing,
@@ -72,6 +93,14 @@ export const parseReceipt = (text) => {
     validation_errors: field(pass, "validation_errors"),
     view: parseView(lineOf(text, "arena view:")),
     passes,
+    latency: latency ? {
+      input_p50_ms: field(pq18, "input_p50"),
+      input_p95_ms: field(pq18, "input_p95"),
+      present_p50_ms: field(latency, "present_p50"),
+      present_p95_ms: field(latency, "present_p95"),
+      budget_ms: field(latency, "p95_budget"),
+      verdict: latency.match(/verdict=(\w+)/)?.[1] ?? null,
+    } : null,
     panics: (String(text).match(/panicked at/g) ?? []).length,
   };
 };
@@ -125,10 +154,11 @@ export const lookScore = (priorDir, curDir) => {
 };
 
 // Reference fps: the median p50 interval of the last unloaded timing runs in
-// the same present mode. An Immediate run at 8 ms and a Fifo run at the 16.7 ms
-// display period measure different caps, so mixing them reports a false drop.
-export const referenceInterval = (history, vsync = null) => {
-  const xs = history.filter((h) => h.timing && !h.timing.loaded && h.timing.interval_p50_ms > 0 && (vsync === null || h.timing.vsync === vsync)).slice(-5).map((h) => h.timing.interval_p50_ms).sort((a, b) => a - b);
+// the same present mode and at the same drawable size. An Immediate run at
+// 8 ms and a Fifo run at the 16.7 ms display period measure different caps,
+// and 1080p work is not 720p work, so mixing either reports a false drop.
+export const referenceInterval = (history, vsync = null, size = null) => {
+  const xs = history.filter((h) => h.timing && !h.timing.loaded && h.timing.interval_p50_ms > 0 && (vsync === null || h.timing.vsync === vsync) && (size === null || h.timing.size === size)).slice(-5).map((h) => h.timing.interval_p50_ms).sort((a, b) => a - b);
   return xs.length ? xs[Math.floor(xs.length / 2)] : null;
 };
 
@@ -206,6 +236,17 @@ export const redFloors = ({ look, timing, caps, ref }, bar, passBar = null) => {
   if (timing && !timing.loaded && ref && timing.interval_p50_ms > ref / (1 - (f.fps_drop_max ?? 0.3))) {
     red.slower = `frame interval p50 ${timing.interval_p50_ms} ms vs ${ref} ms reference (${Math.round(1000 / timing.interval_p50_ms)} vs ${Math.round(1000 / ref)} fps)`;
   }
+  // The player latency floors read the timing run only. The look run arms the
+  // blocking look probes for its capture sidecar, so its input-to-frame legs
+  // price a GPU readback no player frame pays; gating those would gate the
+  // harness, not the game. A loaded box is not gated either, like fps.
+  const lat = timing?.latency;
+  if (timing && !timing.loaded && lat) {
+    const inputMax = f.input_p95_ms_max ?? LATENCY_P95_MAX_MS;
+    const presentMax = f.present_p95_ms_max ?? LATENCY_P95_MAX_MS;
+    if (lat.input_p95_ms > inputMax) red.input_latency = `input to present submit p95 ${lat.input_p95_ms} ms (floor ${inputMax} ms)`;
+    if (lat.present_p95_ms > presentMax) red.present_latency = `input to frame end p95 ${lat.present_p95_ms} ms (floor ${presentMax} ms)`;
+  }
   for (const [k, v] of Object.entries(passFloors(look.passes, passBar ?? bar.passBar ?? bar))) red[k] = v;
   return red;
 };
@@ -262,7 +303,9 @@ export const summary = (c) => {
     `Verdict: ${reds.length ? `RED (${reds.map(([k]) => k).join(", ")})` : "GREEN"}; build: ${c.build}`,
     `Look run: exit ${c.look.exit}, framing empty ${c.look.empty}/${c.look.frames}, fewest in view ${c.look.fewest_in_view}, steepest down ${c.look.steepest_down_deg} deg, tinted share ${c.look.tinted_share}, validation errors ${c.look.validation_errors}, captures ${c.caps.captures} (blank ${c.caps.blank}, frozen pairs ${c.caps.frozen}) in ${c.runDir}`,
     `Look score (FLIP x10000 of the middle capture against the last green run): ${c.look.flip === null || c.look.flip === undefined ? `none (${c.look.flip_why ?? "no comparison"})` : `${c.look.flip} (max ${c.look.flip_max}) against ${c.look.flip_vs}`}`,
-    `Timing run: ${fps(c.timing?.interval_p50_ms)}, p99 ${c.timing?.interval_p99_ms} ms, gpu p50 ${c.timing?.gpu_p50_ms} ms, cpu p50 ${c.timing?.cpu_p50_ms} ms, ${c.timing?.loaded ? `LOADED (${c.timing.loaded} cargo/rustc running: fps not gated)` : "quiet"}; reference ${c.ref ? fps(c.ref) : "none yet"}`,
+    `Timing run (${c.timing?.size ?? "-"}): ${fps(c.timing?.interval_p50_ms)}, p99 ${c.timing?.interval_p99_ms} ms, gpu p50 ${c.timing?.gpu_p50_ms} ms, cpu p50 ${c.timing?.cpu_p50_ms} ms, ${c.timing?.loaded ? `LOADED (${c.timing.loaded} cargo/rustc running: fps and latency not gated)` : "quiet"}; reference ${c.ref ? fps(c.ref) : "none yet"}`,
+    `Player latency (timing run only; floor ${c.bar?.floors?.present_p95_ms_max ?? LATENCY_P95_MAX_MS} ms p95): input to present submit p50 ${c.timing?.latency?.input_p50_ms ?? "-"} p95 ${c.timing?.latency?.input_p95_ms ?? "-"} ms, input to frame end p50 ${c.timing?.latency?.present_p50_ms ?? "-"} p95 ${c.timing?.latency?.present_p95_ms ?? "-"} ms, verdict ${c.timing?.latency?.verdict ?? "none"}`,
+    `Look run latency (a capture run: its armed look probes block, never gated): input to frame end p95 ${c.look?.latency?.present_p95_ms ?? "-"} ms`,
     `View truth (no image; per frame in ${c.runDir}/view.jsonl): ${c.look.view ? Object.entries(c.look.view).map(([k, x]) => `${k} ${x}`).join(", ") : "none"}`,
     `Live GPU passes (ms > 0): ${Object.entries(c.look.passes ?? {}).filter(([, v]) => v > 0).map(([k]) => k).join(", ") || "none"}`,
     `Pass floors (tools/pass-bar.json): ${Object.entries(c.passBar?.passes ?? c.bar.passBar?.passes ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "none (no pass-bar)"}`,
@@ -302,16 +345,16 @@ const main = async () => {
     const runs = join(OUT, "runs");
     const runDir = join(runs, `${sha}-${utc()}`);
     mkdirSync(runDir, { recursive: true });
-    const look = run(["--scene", "arena", "--fighters", "8", "--frames", "300", "--exit", "--require-framing", "--capture-dir", runDir, "--capture-every", "60", "--sha", sha, "--view-brief", join(runDir, "view.jsonl")]);
+    const look = run(["--scene", "arena", "--fighters", "8", "--frames", "300", "--exit", "--require-framing", "--size", LOOK_SIZE, "--capture-dir", runDir, "--capture-every", "60", "--sha", sha, "--view-brief", join(runDir, "view.jsonl")]);
     writeFileSync(join(runDir, "look.txt"), look.text);
     const loaded = buildsRunning();
-    const timing = { ...run(["--scene", "arena", "--fighters", "8", "--frames", "300", "--exit"]), loaded };
+    const timing = { ...run(["--scene", "arena", "--fighters", "8", "--frames", "300", "--exit", "--size", TIMING_SIZE]), loaded };
     writeFileSync(join(runDir, "timing.txt"), timing.text);
     const pngs = existsSync(runDir) ? readdirSync(runDir).filter((n) => /^frame_\d+\.png$/.test(n)).sort().map((n) => join(runDir, n)) : [];
     const caps = scoreCaptures(pngs);
     const historyFile = join(OUT, "history.jsonl");
     const history = existsSync(historyFile) ? readFileSync(historyFile, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : [];
-    const ref = referenceInterval(history, timing.vsync);
+    const ref = referenceInterval(history, timing.vsync, timing.size);
     const runDirs = existsSync(runs) ? readdirSync(runs).filter((d) => statSync(join(runs, d)).isDirectory()).sort() : [];
     const prior = lastGreenRun(history, runDirs);
     const score = lookScore(prior ? join(runs, prior.dir) : null, runDir);
@@ -320,13 +363,13 @@ const main = async () => {
     const strip = ({ text, ...rest }) => rest;
     const check = { sha, tree, at: new Date().toISOString(), build: built.why.split("\n")[0], verdict: Object.keys(red).length ? "RED" : "GREEN", red, ref, caps, look: strip(scored), timing: strip(timing), runDir: runDir.replace(/\\/g, "/"), bar, passBar };
     writeFileSync(latestFile, `${JSON.stringify(check, null, 2)}\n`);
-    appendFileSync(historyFile, `${JSON.stringify({ sha, tree, at: check.at, verdict: check.verdict, red, timing: { interval_p50_ms: timing.interval_p50_ms, interval_p99_ms: timing.interval_p99_ms, vsync: timing.vsync, loaded }, look: { empty: look.empty, tinted_share: look.tinted_share, view: look.view, flip: scored.flip, flip_vs: scored.flip_vs } })}\n`);
+    appendFileSync(historyFile, `${JSON.stringify({ sha, tree, at: check.at, verdict: check.verdict, red, timing: { interval_p50_ms: timing.interval_p50_ms, interval_p99_ms: timing.interval_p99_ms, vsync: timing.vsync, size: timing.size, loaded, latency: timing.latency }, look: { empty: look.empty, tinted_share: look.tinted_share, view: look.view, flip: scored.flip, flip_vs: scored.flip_vs } })}\n`);
     writeFileSync(join(OUT, "latest.md"), summary(check));
     pruneRuns(runs, prior?.dir ?? null);
     if (has("--json")) process.stdout.write(`${JSON.stringify(check, null, 2)}\n`);
     const fps = timing.interval_p50_ms ? (1000 / timing.interval_p50_ms).toFixed(1) : "-";
     for (const line of failLines(red)) console.log(line);
-    console.log(`product-check: ${check.verdict} ${sha} fps=${fps}${loaded ? "(loaded)" : ""} empty=${look.empty} tinted=${look.tinted_share} pops=${look.view?.pops ?? "-"} sunk=${look.view?.sunk_cm_max ?? "-"} ticks=${look.view ? `${look.view.sim_first}..${look.view.sim_last}` : "-"} flip=${scored.flip ?? "-"} blank=${caps.blank} frozen=${caps.frozen} val=${look.validation_errors}${Object.keys(red).length ? ` red=${Object.keys(red).join(",")}` : ""}`);
+    console.log(`product-check: ${check.verdict} ${sha} size=${timing.size ?? "-"} fps=${fps}${loaded ? "(loaded)" : ""} input_p95=${timing.latency?.input_p95_ms ?? "-"} present_p95=${timing.latency?.present_p95_ms ?? "-"} empty=${look.empty} tinted=${look.tinted_share} pops=${look.view?.pops ?? "-"} sunk=${look.view?.sunk_cm_max ?? "-"} ticks=${look.view ? `${look.view.sim_first}..${look.view.sim_last}` : "-"} flip=${scored.flip ?? "-"} blank=${caps.blank} frozen=${caps.frozen} val=${look.validation_errors}${Object.keys(red).length ? ` red=${Object.keys(red).join(",")}` : ""}`);
     process.exitCode = Object.keys(red).length ? 1 : 0;
   } finally {
     rmSync(lockFile, { force: true });

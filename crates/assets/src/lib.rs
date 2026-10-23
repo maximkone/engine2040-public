@@ -153,6 +153,9 @@ pub mod fighter;
 /// needs to make a teacher's clip move.
 #[cfg(feature = "import")]
 pub mod pack_clip;
+/// The potato tier's rig: the shipped fighter's 43 joints fold into at most 16
+/// proxy bones at cook time, and a kept bone keeps its bind transform. Std-only.
+pub mod proxy_rig;
 pub mod recook;
 /// One residency manager over the stream queue: textures, meshes, meshlets
 /// and acceleration structures share one priority-driven byte budget.

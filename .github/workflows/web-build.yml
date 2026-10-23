@@ -112,7 +112,9 @@ jobs:
           set -euo pipefail
           node tools/web-build.mjs --commit "${GITHUB_SHA::12}" --opt-ab
           ls -l dist/web
-          node tools/wasm-info.mjs dist/web/engine_bg.wasm
+          wasm="$(node -p "require('./dist/web/build.json').pin['engine_bg.wasm'].name")"
+          echo "pinned wasm: $wasm"
+          node tools/wasm-info.mjs "dist/web/$wasm"
           {
             echo '### dist/web'
             echo '```json'
@@ -129,12 +131,13 @@ jobs:
           bytes="$(du -sb dist/web | cut -f1)"
           echo "dist/web is $bytes bytes"
           test "$bytes" -lt 8388608
+          wasm="$(node -p "require('./dist/web/build.json').pin['engine_bg.wasm'].name")"
           python3 -m http.server 8099 --bind 127.0.0.1 -d dist/web >/dev/null 2>&1 &
           server=$!
           sleep 2
-          type="$(curl -sI http://127.0.0.1:8099/engine_bg.wasm | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" { print $2 }')"
+          type="$(curl -sI "http://127.0.0.1:8099/$wasm" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" { print $2 }')"
           kill "$server"
-          echo "engine_bg.wasm is served as: $type"
+          echo "$wasm is served as: $type"
           test "$type" = "application/wasm"
       - uses: actions/upload-artifact@v5
         with:

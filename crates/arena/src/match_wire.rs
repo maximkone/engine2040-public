@@ -21,10 +21,12 @@ use engine_input::{FighterInput, MAX_PARTICIPANTS};
 
 use crate::FighterState;
 
-/// Hurt-capsule half-height for every arena pose, in mm.
-pub(crate) const HURT_HALF_MM: u32 = 800;
-/// Hurt-capsule radius for every arena pose, in mm.
-pub(crate) const HURT_RADIUS_MM: u32 = 150;
+/// Hurt-capsule half-height for every arena pose, in mm. One owner: the
+/// sweep rows built here and the game's debug draw both read this value.
+pub const HURT_HALF_MM: u32 = 800;
+/// Hurt-capsule radius for every arena pose, in mm. One owner: the sweep
+/// rows built here and the game's debug draw both read this value.
+pub const HURT_RADIUS_MM: u32 = 150;
 /// Shield-cone half-angle for every arena pose, in degrees.
 pub(crate) const SHIELD_HALF_DEG: u8 = 60;
 /// Blade half-thickness for every arena sweep, in mm.

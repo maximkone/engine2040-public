@@ -56,10 +56,11 @@ pub const ROT_PEAK_RAD: f32 = 0.15;
 pub const HIT_TOL: f32 = 1e-5;
 /// Presentation flinch window: 27 ticks at 60 Hz is about 450 ms (AM23).
 pub const VIEW_FLINCH_TICKS: u32 = 27;
-/// Ticks the presentation flinch blends in over.
-pub const VIEW_FLINCH_RISE_TICKS: f32 = 3.0;
+/// Ticks the presentation flinch blends in over. Six tick-aligned steps keep
+/// the first frame's pose jump small (AM23 pop check); the hit tick reads 0.
+pub const VIEW_FLINCH_RISE_TICKS: f32 = 6.0;
 /// Ticks the presentation flinch holds at full weight after the rise.
-pub const VIEW_FLINCH_HOLD_TICKS: f32 = 6.0;
+pub const VIEW_FLINCH_HOLD_TICKS: f32 = 3.0;
 /// Peak lean of the real skeleton's upper chain at unit weight, radians
 /// (~11.5 degrees); the head moves about 10 cm at this lean.
 pub const UPPER_LEAN_RAD: f32 = 0.20;
@@ -328,7 +329,7 @@ fn lean_delta(push: [f32; 2], angle: f32) -> [f32; 4] {
 }
 
 /// Presentation flinch weight at `elapsed` ticks plus sub-tick `alpha`:
-/// blend in over three ticks, hold six, then blend out to zero at
+/// blend in over six ticks, hold three, then blend out to zero at
 /// [`VIEW_FLINCH_TICKS`] (about 450 ms). Silent at and past the window.
 pub fn view_envelope(elapsed: u32, alpha: f32) -> f32 {
     // u16 reaches every tick in the window; wider input clamps past it.
@@ -662,8 +663,9 @@ mod tests {
     #[test]
     fn hit_react_rot_view_envelope_rises_holds_and_fades() {
         assert_eq!(view_envelope(0, 0.0), 0.0);
-        assert!((view_envelope(1, 0.5) - 0.5).abs() <= HIT_TOL);
-        assert_eq!(view_envelope(3, 0.0), 1.0);
+        assert!((view_envelope(1, 0.5) - 0.25).abs() <= HIT_TOL);
+        assert!((view_envelope(3, 0.0) - 0.5).abs() <= HIT_TOL);
+        assert_eq!(view_envelope(6, 0.0), 1.0);
         assert_eq!(view_envelope(8, 0.9), 1.0);
         assert!((view_envelope(18, 0.0) - 0.5).abs() <= HIT_TOL);
         assert!(view_envelope(26, 0.9) > 0.0);

@@ -400,72 +400,10 @@ pub use self::mcp_dto::{
 // Errors: machine code plus a message that always names the legal values.
 // ---------------------------------------------------------------------------
 
-/// Tool failure: a machine `code`, a message naming the allowed values and
-/// optional `data` for the offending payload. This is the canonical door
-/// error shape `{code, message, data}`, shared with
-/// [`super::discover::RpcError`]: codes are always `&'static str` constants
-/// and every conversion preserves `data`, so a refusal crosses the wire
-/// with its culprit attached.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpToolError {
-    /// Machine code (`stale_revision`, `forged_approval`, ...).
-    pub code: &'static str,
-    /// Human detail with the legal values embedded.
-    pub message: String,
-    /// Offending payload (item index, method name, ...), when it fits.
-    pub data: Option<rmcp::serde_json::Value>,
-}
-
-impl McpToolError {
-    /// New tool error with a static code and no data.
-    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            data: None,
-        }
-    }
-
-    /// Attach a JSON payload to this error.
-    pub fn with_data(mut self, data: rmcp::serde_json::Value) -> Self {
-        self.data = Some(data);
-        self
-    }
-
-    /// Machine code.
-    pub fn code(&self) -> &'static str {
-        self.code
-    }
-
-    /// Offending payload, when one fits.
-    pub fn data(&self) -> Option<&rmcp::serde_json::Value> {
-        self.data.as_ref()
-    }
-
-    /// Re-code a wire refusal under a new static code, keeping its message
-    /// and data: layering a code never silently drops the culprit.
-    pub fn wrap(code: &'static str, error: super::discover::RpcError) -> Self {
-        Self {
-            code,
-            message: error.message,
-            data: error.data,
-        }
-    }
-}
-
-impl std::fmt::Display for McpToolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for McpToolError {}
-
-impl From<McpToolError> for ErrorData {
-    fn from(error: McpToolError) -> Self {
-        Self::from(super::discover::RpcError::from(error))
-    }
-}
+// The refusal record - the type, its code tables and its wire payload - lives
+// in `mcp_refusal`, so the advice contract has one owner. `McpToolError` keeps
+// this path for every caller.
+pub use self::mcp_refusal::{Kind, McpToolError, NextCall};
 
 /// Parse UUID text for one op field.
 fn parse_id(index: usize, field: &str, text: &str) -> Result<ObjectId, McpToolError> {

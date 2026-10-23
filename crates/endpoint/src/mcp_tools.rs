@@ -425,6 +425,7 @@ pub(super) fn sanitize_tool_schema(tool: &mut rmcp::model::Tool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::Kind;
     use engine_editor::capability::Capability;
 
     #[test]
@@ -472,5 +473,33 @@ mod tests {
             game.verify
         );
         assert!(game.verify.contains("buckets:"), "{}", game.verify);
+    }
+
+    #[test]
+    fn a_refused_tool_call_reaches_the_client_as_a_record() {
+        // DOOR6: a real tools/call refusal crosses the boundary as the typed
+        // record, not only a sentence: kind, retryable, suggestions and next
+        // ride the payload beside the code, message and data.
+        let server = McpServer::new(97, Capability::unrestricted(97));
+        let refused = server
+            .dispatch("no.such_verb", |_| Ok::<(), McpToolError>(()))
+            .expect_err("an unknown verb refuses");
+        assert_eq!(refused.code, "unknown_tool");
+        assert_eq!(refused.kind(), Kind::Input);
+        assert!(!refused.retryable());
+        let envelope = rmcp::ErrorData::from(refused);
+        let payload = envelope
+            .data
+            .as_ref()
+            .and_then(Value::as_object)
+            .expect("the refusal payload is an object");
+        assert_eq!(payload["code"], "unknown_tool");
+        assert_eq!(payload["kind"], "input");
+        assert_eq!(payload["retryable"], false);
+        assert_eq!(
+            payload["suggestions"][0],
+            "api.search the name you meant; every reachable verb is indexed by name"
+        );
+        assert_eq!(payload["next"]["verb"], "api.search");
     }
 }

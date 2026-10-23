@@ -111,7 +111,7 @@ Status 2026-10-16: disk shows `docs/plan/ATLAS.md` (142 lines) has headings only
    visually verified. A CPU reference is not a GPU feature; a stub is a stub.
 2. Plain language first: each section opens with one or two sentences a
    newcomer understands, then the precise detail for coders.
-3. Depth over breadth (`../FOCUS.md`, `../EMPIRE.md`): engine systems are
+3. Depth over breadth (`../FOCUS.md`, `../archive/2026-10-17-standalone/EMPIRE.md`): engine systems are
    general (any genre could be built; headless fixture games prove it), the
    game we ship is Rome at war. CUT items get no Rome content, never a
    genre assumption baked into an engine crate.

@@ -369,6 +369,9 @@ pub(crate) struct Targets {
     /// cannot size the frame): the half-res buffer, the uniform and the two
     /// bind groups over this target's depth and `ao_texture`.
     pub(crate) gtao: Option<super::gtao_live::GtaoSized>,
+    /// Dual-filter bloom mips over this frame size: the chain the blit's halo
+    /// slot samples. Sized with the targets, never per frame.
+    pub(crate) bloom: super::bloom_dual::BloomDualSized,
     /// Draw-id attachment (`R32Uint`): cleared to [`ID_CLEAR`] at target
     /// build; the forward pass loads it and writes each covered pixel's draw
     /// id. The pass-truth gate reads it back for its sky and geometry

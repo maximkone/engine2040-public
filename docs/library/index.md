@@ -93,6 +93,6 @@ the file that owns this page: `<path>`.
 
 - [SPRINT.md](../SPRINT.md) — the lane board; LIB1 owns this index
 - [CODELAW.md](../CODELAW.md) — the slim law; §9 covers free copying
-- [EMPIRE.md](../EMPIRE.md) — level-4 changes; this index is a level-4 asset
+- [EMPIRE.md](../archive/2026-10-17-standalone/EMPIRE.md) — level-4 changes (archived 2026-10-17); this index is a level-4 asset
 - [plan/quality.md](./../plan/quality.md) — indexes the counting-allocator and buffer-reuse rows
 - [book/verifiers.md](../book/verifiers.md) — indexes the proof harness wiring

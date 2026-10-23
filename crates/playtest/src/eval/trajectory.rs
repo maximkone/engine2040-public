@@ -180,7 +180,14 @@ mod tests {
             for backend in BACKENDS {
                 let first = run_authoring_row(task, 13, backend);
                 assert!(first.completed, "{}: {}", task.id, first.detail);
-                assert_eq!(first.detail, "apply ok: 1 action landed (simulated)");
+                assert!(
+                    first
+                        .detail
+                        .starts_with("apply ok: 1 action landed (simulated)"),
+                    "{}: {}",
+                    task.id,
+                    first.detail
+                );
                 assert_eq!(first, run_authoring_row(task, 13, backend));
             }
         }

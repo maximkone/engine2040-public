@@ -51,6 +51,17 @@ FC3 (at 3.29 fps the 18,000-frame run takes 91 min against a 45 min slot).
   frames give byte-identical JSON twice; the verb is listed by api.describe.
   F2P: no look.judge verb today. P2P: `cargo test -p engine-endpoint --lib`
   green; golden unchanged. Tick audit 2026-10-19: the judge bundle is at `crates/playtest/src/look/judge.rs` behind `pub mod look` (034b30aa).
+- [ ] SL3 ops: CPU-only render references — once each GPU pass is live,
+  its CPU twin (`v1_ibl_shadow`, `v1_lighting`, `v1_vfx`, `gi`, `shadow_post`)
+  moves under `#[cfg(test)]` as the parity oracle or is deleted; the parked
+  R6 FSR stub (`v1_temporal`) goes. Tier A. Size M. Owns those files.
+  Accept: no CPU reference reachable from the window build; parity tests
+  still run; render tests green. needs: GX2, GX3, GX4.
+  Restored 2026-10-23: the 2026-10-22 board cut parked this row and the
+  2026-10-23 Empire trim dropped it from `docs/plan/parked-2026-10-22.md`, but
+  P8 in `docs/FINISH-RICH.md` still names SL3 and `docs/plan/render-look.md`
+  still lists it open: `v1_ibl_shadow`, `v1_lighting`, `gi`, `shadow_post` and
+  `v1_temporal` are in the tree, only `v1_vfx` went (f737386e).
 
 ### Multiplayer decisions (owner 2026-10-10, `docs/plan/multiplayer.md`)
 
@@ -345,7 +356,7 @@ seat guard refuses their edits, so take the next row. Search the books first:
   channel; CPU skin stays under 1 ms for 8 fighters. F2P: no palette buffer
   today. P2P: `cargo test -p engine-render --lib` green; golden unchanged.
   Review: render.md G4 step 2, bodies.md G11 (geaen 11.10.5). needs: EG9, EG10.
-- [ ] EG38 render: submission discipline — the opaque pass has no back-face Progress 2026-10-17: back-face cull (`cull_mode: Some(Back)` in submit.rs), bind-group memo (`bind_memo.rs`) and a live pipeline-grouped sort (`rl32_order_is_stable_and_groups_pipeline_adjacent`) are in; `draw_sort_submit_order_is_stable_and_culls_outside_sphere` green on the RTX 3050 (engine-render --features window --lib, local PC run). Left: the sphere-outside-frustum test runs through `eg38_submit_order`, which is tests-only; the live list never calls the sphere test. Progress 2026-10-23 (found while proving EG12's torch pixel test): the cull landed, but `crates/render/src/v1.rs::cube()` winds every face clockwise seen from outside, so a back-culled forward pass drops the camera-facing face and draws the far interior wall, whose outward normal points away from the viewer. Measured in a 96x96 offscreen capture: a 1 m cube shifted to x 18.7..19.7 seen from [22,1,-3] covers a 36 px square (3.3 m away, the x = 18.7 wall) and a shader probe of the centre fragment reads `world_pos.x <= 19.0` and `world_n.x <= 0.5` while the face's stored normal is +x; by hand, face 0 corners p0 = (0.5,-0.5,-0.5), p1 = (0.5,-0.5,0.5), p2 = (0.5,0.5,0.5) give `cross(p1 - p0, p2 - p0) = (-1,0,0)`, inward for a face whose vertex normals are +x. Nothing looks broken because a convex cube keeps its silhouette either way, but the frame is lit as the interior. Remedy: reverse the six index pairs in `v1::cube` (`[base, base + 2, base + 1, base, base + 3, base + 2]`), or set `front_face: Cw` in the forward pipeline, then re-read every cube capture. EG12's torch test builds its own counter-clockwise quad, so it does not depend on the fix. No `front_face` is set anywhere in `crates/render` today, so both pipelines take wgpu's `Ccw` default. Progress 2026-10-23 (winding half landed): `v1::cube` faces 0 and 1 (the +x and -x sides) now wind counter-clockwise seen from outside, the remaining four already did; the corners follow the arena box rule `(p1 - p0) x (p2 - p0) = outward normal` for all six. The remedy above ("reverse the six index pairs") was wrong for four of them: `cross` reads outward on faces 2-5 at the same table, so reversing all twelve triangles would have broken the ones that were right. CPU guard `cube_face_triangles_wind_outward` (v1.rs) fails on any inward triangle; device guard `a_cube_draws_its_near_face_not_the_far_wall` (present/tests_gpu.rs) puts a 1 m cube at x 18.5..19.5 seen from [22,1,-3] and lights it with a torch 0.3 m in front (+x): near-face red 196 against 152 with the torch behind, and the F2P run on the old table read 180 against 208 (the far torch brighter, the interior wall drawn). engine-render `--features window --lib` 1318 passed / 0 failed on the Windows runner with only this file and tests_gpu.rs over HEAD; captures at `%TEMP%\opencode\eg38\cube-winding-pair.png` show the near face lit. Landed 3253dbcbd. Left: (a) the sphere-outside-frustum cull still has no live caller, since the live submit sorts with `rl32_submit_order` and culls nothing while `eg38_submit_order` stays tests-only; the seam is `stage_frame`/`stage_frame_with_camera` plus mesh bounds in `GpuMesh`, both files held by the EG11b sun work, so wire it when those land; (b) the window cube captures (arena props, twin fighters) are blocked because `engine-arena` in the shared tree does not link (`FallLanding` names) — retry `node tools/bins.mjs` and the arena capture once that lands. Progress 2026-10-23 (window captures read): the arena links again, and `arena --frames 120 --fighters 4 --capture-dir target/clips/eg38-cube --capture-every 30 --sha f210be23c --exit` wrote 4 frames at 1280x720 with `validation_errors=0`, `arena view: pops=0 pops=none sunk_cm_max=0.0 nonfinite=0` and 4 of 4 fighters in view. All four frames and a 10x crop of each centre crate were opened: the crate shows its lit front face and a darker right face with the cast shadow falling away from the sun, and no far interior wall (the pre-fix table lit the far wall instead, which is what the 96x96 probe above measured). Left: only (a).
+- [x] EG38 render: submission discipline — the opaque pass has no back-face Progress 2026-10-17: back-face cull (`cull_mode: Some(Back)` in submit.rs), bind-group memo (`bind_memo.rs`) and a live pipeline-grouped sort (`rl32_order_is_stable_and_groups_pipeline_adjacent`) are in; `draw_sort_submit_order_is_stable_and_culls_outside_sphere` green on the RTX 3050 (engine-render --features window --lib, local PC run). Left: the sphere-outside-frustum test runs through `eg38_submit_order`, which is tests-only; the live list never calls the sphere test. Progress 2026-10-23 (found while proving EG12's torch pixel test): the cull landed, but `crates/render/src/v1.rs::cube()` winds every face clockwise seen from outside, so a back-culled forward pass drops the camera-facing face and draws the far interior wall, whose outward normal points away from the viewer. Measured in a 96x96 offscreen capture: a 1 m cube shifted to x 18.7..19.7 seen from [22,1,-3] covers a 36 px square (3.3 m away, the x = 18.7 wall) and a shader probe of the centre fragment reads `world_pos.x <= 19.0` and `world_n.x <= 0.5` while the face's stored normal is +x; by hand, face 0 corners p0 = (0.5,-0.5,-0.5), p1 = (0.5,-0.5,0.5), p2 = (0.5,0.5,0.5) give `cross(p1 - p0, p2 - p0) = (-1,0,0)`, inward for a face whose vertex normals are +x. Nothing looks broken because a convex cube keeps its silhouette either way, but the frame is lit as the interior. Remedy: reverse the six index pairs in `v1::cube` (`[base, base + 2, base + 1, base, base + 3, base + 2]`), or set `front_face: Cw` in the forward pipeline, then re-read every cube capture. EG12's torch test builds its own counter-clockwise quad, so it does not depend on the fix. No `front_face` is set anywhere in `crates/render` today, so both pipelines take wgpu's `Ccw` default. Progress 2026-10-23 (winding half landed): `v1::cube` faces 0 and 1 (the +x and -x sides) now wind counter-clockwise seen from outside, the remaining four already did; the corners follow the arena box rule `(p1 - p0) x (p2 - p0) = outward normal` for all six. The remedy above ("reverse the six index pairs") was wrong for four of them: `cross` reads outward on faces 2-5 at the same table, so reversing all twelve triangles would have broken the ones that were right. CPU guard `cube_face_triangles_wind_outward` (v1.rs) fails on any inward triangle; device guard `a_cube_draws_its_near_face_not_the_far_wall` (present/tests_gpu.rs) puts a 1 m cube at x 18.5..19.5 seen from [22,1,-3] and lights it with a torch 0.3 m in front (+x): near-face red 196 against 152 with the torch behind, and the F2P run on the old table read 180 against 208 (the far torch brighter, the interior wall drawn). engine-render `--features window --lib` 1318 passed / 0 failed on the Windows runner with only this file and tests_gpu.rs over HEAD; captures at `%TEMP%\opencode\eg38\cube-winding-pair.png` show the near face lit. Landed 3253dbcbd. Left: (a) the sphere-outside-frustum cull still has no live caller, since the live submit sorts with `rl32_submit_order` and culls nothing while `eg38_submit_order` stays tests-only; the seam is `stage_frame`/`stage_frame_with_camera` plus mesh bounds in `GpuMesh`, both files held by the EG11b sun work, so wire it when those land; (b) the window cube captures (arena props, twin fighters) are blocked because `engine-arena` in the shared tree does not link (`FallLanding` names) — retry `node tools/bins.mjs` and the arena capture once that lands. Progress 2026-10-23 (window captures read): the arena links again, and `arena --frames 120 --fighters 4 --capture-dir target/clips/eg38-cube --capture-every 30 --sha f210be23c --exit` wrote 4 frames at 1280x720 with `validation_errors=0`, `arena view: pops=0 pops=none sunk_cm_max=0.0 nonfinite=0` and 4 of 4 fighters in view. All four frames and a 10x crop of each centre crate were opened: the crate shows its lit front face and a darker right face with the cast shadow falling away from the sun, and no far interior wall (the pre-fix table lit the far wall instead, which is what the 96x96 probe above measured). Left: only (a). Progress 2026-10-23 (landing a wired): `stage_frame` and `stage_frame_with_camera` now build the frame order in `submit_cull.rs` - `rl32_submit_order` then the tested `draw::sphere_visible_cpu` per draw - so the forward and depth passes draw the culled list; `GpuMesh.bounds` carries the mesh's world sphere from `draw::bound_sphere` (refreshed with in-place positions), skinned draws are never culled, and `Presenter::submitted_draws()` reports the count. Proof: `live_draw_sort_culls_an_outside_mesh_and_keeps_a_visible_one` on the software adapter reads 0 for a cube behind the eye and 1 twice for a visible cube, which differs from an empty frame in >100 px; the filtered suite is green on the Windows runner twice (runs 40005768704, 40006940498) and `engine-render --features window --lib` green (run 40005875196, 1362 passed). Landed 07ed0b1c6.
   cull, bind groups are rebuilt every frame, the draw list is unsorted, and the
   sphere test in `crates/render/src/draw.rs` has no caller (the arena has 34
   draws). Do the cheap parts only: `cull_mode: Some(Back)`; cached bind groups
@@ -405,6 +416,7 @@ Same source and routing as the frame section above.
   them today. P2P: `cargo test -p engine-physics --lib` green. Review:
   testing.md G3.
   Owner chat 2026-10-19 (delegated): accepted as closed by its replacement — REPLACED: physics now runs on Rapier. Tick audit 2026-10-19: the dead `solver.rs` path above is the replaced physics module.
+  Correction 2026-10-23: the landing commits f3b574e1, 53132b34, c292cb9a and 85c768d74 moved the solver, query, LOD and id-map wall-clock gates into ignored timing tests; the marks are live in `crates/physics/src/lod.rs` and `crates/physics/src/islands.rs`, and `crates/physics/src/query.rs` keeps its alloc and hit asserts in the default test. One wall-clock assert still runs outside the marks: `eight_capes_step_under_half_a_millisecond_in_release` in `crates/physics/src/cloth/tests.rs` checks its 500 us budget only under `!cfg!(debug_assertions)`, so the default debug suite cannot flake but a release `cargo test` can. The default-suite Accept holds; the release-only site is the open question the 2026-10-23 receipt lists. `cargo test -p engine-physics --lib` green on the runner (run https://github.com/maximkone/engine2040-public/actions/runs/40020218295).
 - [x] EG7 tools: frame gates read pixels — `tools/frame-triage.mjs` passes on Landed 7fdc4ca6.
   a self-reported manifest count (`gatePass = totalFighters > 0`). Count
   fighter pixels with `isFighterPixel` from `tools/fighter-count.mjs` above a
@@ -625,6 +637,7 @@ Same source and routing as the frame section above.
   engine-nav --lib try_from_ids` returns Err for id 2^32 and for NaN. F2P: the
   fsync order test fails before. P2P: `cargo test -p engine-save --lib` and `-p
   engine-nav --lib` green; golden unchanged. Review: rust-craft.md G7, G9. Tick audit 2026-10-19: the `fsync_order` and `try_from_ids` filters are gone; durable writes are covered by `save_generation_reloads_identical_bytes` / `failed_write_preserves_prior_valid_generation` and the nav bound by `tile_ids_stay_exact_at_the_registry_bound` / `nan_inputs_never_round_to_zero`, so the tick stands and the old filter names do not.
+  Correction 2026-10-23: the two landings are db6696a1 (save: `write_all`, then `sync_all`, then the rename, then the directory sync in `write_atomic`, `crates/save/src/lib.rs`) and 03324cf1 (nav: `u32::try_from` and `is_finite` in `crates/nav/src/mesh.rs` and `crates/nav/src/tiles.rs`). The order itself is the three calls read in `write_atomic`; the landed tests `save_generation_reloads_identical_bytes` and `failed_write_preserves_prior_valid_generation` (`crates/save/src/lib.rs`, `crates/editor/src/durable.rs`) pin the atomic replace and the failed-write keep, and `tile_ids_stay_exact_at_the_registry_bound` (`crates/nav/src/tiles.rs`) plus `nan_inputs_never_round_to_zero` (`crates/nav/src/mesh.rs`) pin the checked nav bounds. The Accept's `fsync_order` fake sink was never written and `try_from_ids` never existed in git; the tick stands on the code and the landed tests. `cargo test -p engine-save --lib` green (run https://github.com/maximkone/engine2040-public/actions/runs/40020202285) and `cargo test -p engine-nav --lib` green (run https://github.com/maximkone/engine2040-public/actions/runs/40020217501).
 - [x] EG33 ai: melee brains — `Percept` (`crates/ai/src/gladiator.rs:35`)
   carries one foe and a bool attack, with no own hp, stamina, attack phase or
   other fighters, so eight fighters all rush the nearest one. Extend `Percept`
@@ -1405,6 +1418,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   hash unchanged. UNVERIFIED: whether a client shows RPC error text to the
   model; record what the stdio client shows for both shapes first. Plan:
   `docs/plan/forge-adoption.md` section J (A25, B43, B44, C62). needs: AD2.
+  Progress 2026-10-23 (DOOR6, 5babbaef0): the code table half landed in `crates/endpoint/src/mcp_refusal.rs` - every scanned code carries `kind`, `retryable`, `suggestions` (up to three) and one `next` call, the twelve most-hit codes are hand-pinned, a payload test shows the fields crossing the door, and 39 `--features mcp` refusal tests pass. Still open here: the closed advice-code enum (we ship a kind, not a small fixed list), `isError` true on the tool result with `unknown_tool` staying an RPC error, the multi-field JSON-pointer reply with redacted hints, and `advice.rs` as the one file. Nothing in this row is blocked on DOOR6 now; the pointers and the result shape are the next slice.
 - [ ] AD27 endpoint: playbook prompts — the door advertises the MCP prompts
   capability and serves up to ten recipes over `prompts/list` and
   `prompts/get`. Each recipe is a numbered list of real verbs with a
@@ -1995,13 +2009,14 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   Accept: `cargo test -p engine-provider --lib memory` green - one layer switches off in one test, a memory
   carries its tape hash, and the same run twice gives the same memory set.
   F2P: the agent remembers everything and retrieves nothing.
-- [ ] OPT50 assets: BVH motion intake as a std-only parser. Unparked 2026-10-23; PW33's parked text is the
+- [x] OPT50 assets: BVH motion intake as a std-only parser. Unparked 2026-10-23; PW33's parked text is the
   spec. Nothing in `crates/` reads BVH (the only hits are the audio ray-tracing BVH and vendored xatlas), so
   free mocap and text-to-motion cannot land a clip. Tier B. Size M. Owns a new `crates/assets/src/bvh.rs`,
   its retarget seam in `crates/anim`, test data under `fixtures/`.
   Accept: `cargo test -p engine-assets --lib bvh` prints `bvh_intake_clip_retargets_and_plays_x2_hashed`
   green and ends `test result: ok. 5 passed; 0 failed`.
   F2P: a mocap file has no way in.
+  Landed 4dc3c09eb. `crates/assets/src/bvh.rs` (1187 lines, std-only) parses HIERARCHY/MOTION and retargets onto a target `Skeleton` through `bone_role_for_name`; the shipped fixture `fixtures/bvh/walk_seed.bvh` covers 17/17 roles, 1000 per-mille. Proof: `cargo test -p engine-assets --lib bvh` 5 passed, 0 failed; clippy `-D warnings` green; `workspace-check` PASS and the headless graph stays 22 std-only packages.
 - [ ] OPT51 assets: the part set cooks into destruction chunks. Unparked 2026-10-23; PW57's parked text is
   the spec. The geometry half landed (`crates/geo/src/parts.rs`); the intake half is missing: N part GLBs
   plus one `Provenance` must become one bundle with one `FRAC_` set. Tier B. Size M. Owns the intake half
@@ -2010,7 +2025,7 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   `four_parts_cook_to_frac_chunks_that_fit_together` - 4-part fixture at most 5,000 triangles, union hull
   contains every part, cook x2 byte-identical.
   F2P: a wall cannot break into the pieces it was built from.
-- [ ] OPT52 world: the WFC node-constraint solver and the staged bake proof legs. Unparked 2026-10-23;
+- [x] OPT52 world: the WFC node-constraint solver and the staged bake proof legs. Unparked 2026-10-23;
   PW55's parked text is the spec. `crates/world/src/wfc.rs` has `Adjacency`, `bake`, `next_cell`,
   `propagate` and `is_connected`, but `bake` takes no authored constraints and has no proof leg. This is
   also the engine under DOOR8 (`level.paint`). Tier B. Size M. Owns `crates/world/src/wfc.rs`.
@@ -2018,3 +2033,93 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
   `twenty_seeds_solve_at_least_eighteen_within_the_backtrack_cap` (solve count and p50 bake time posted,
   bytes identical x2), and `cargo test -p engine-world --lib ground` green.
   F2P: a layout is a hand-placed grid or nothing.
+  Landed 6958545cc. `wfc.rs` gains `Rect`, `Constraints` (pinned, forbidden, connect, open mask) and `bake_constrained`, with backtracking capped at 512 failed branches and typed refusals (`BacktrackCap`, `UnsatisfiableCell`) instead of partial grids; `bake` is the empty-constraint case. Proof: `cargo test -p engine-world --lib wfc` 12 passed, 0 failed (20/20 seeds solve inside the cap, p50 63.706 us, bytes identical x2); `cargo test -p engine-world --lib ground` 9 passed, 1 ignored; clippy `--lib -D warnings` green. Open: `clippy --all-targets` is red at HEAD in the nav/world `#[path]` tiles include, owned by that row, not this one.
+- [x] OPT53 skin: a proxy rig for the potato tier. Every fighter draws the full 43-joint, 4-influence
+  skin, so the low tier has no cheaper path to the same silhouette. Merge leaf bones into proxy bones at
+  cook time (thumbs into hand, toes into foot, spine tips into chest) and keep the pose readable. Tier B.
+  Size M. Owns a new `crates/assets/src/proxy_rig.rs` plus its seam in `crates/anim`.
+  Accept: `cargo test -p engine-assets --lib proxy_rig` green with one test that folds a real fighter rig
+  into at most 16 proxy bones, posts both joint counts, and proves on a mid-swing pose that a vertex moves
+  at most 2 cm mean and 5 cm worst against the full rig; a second test bakes the proxy rig twice to equal
+  bytes.
+  F2P: one skin cost for every tier. Landed b53e480, 399bd3c1: `crates/assets/src/proxy_rig.rs` folds
+  the 43-joint fixture (read off `content/fighters/glb/hero_body.glb`, 43 skin joints) into 15 proxy
+  bones, receipt `proxy_rig: source_joints=43 proxy_bones=15 vertices=424 mean_error_cm=0.349
+  worst_error_cm=1.838 worst_bone=torso`, 3 lib tests green (run 40017878902), clippy clean (run
+  40018120924). No `crates/anim` edit: the seam is the existing `Skeleton`/`LocalPose` contract.
+- [ ] OPT54 render: cluster cull vectors. A drawn mesh is all or nothing, so off-screen and backfacing
+  clusters still cost vertex work. Bake each cluster's bounds plus a normal cone (axis and cos half-angle)
+  once, then reject a cluster outside the view frustum or whose cone faces away. This is the small slice
+  of virtual geometry: no new file format, no cluster streaming. Tier B. Size M. Owns a new
+  `crates/render/src/cluster_cull.rs` and its bake in `crates/assets`.
+  Accept: `cargo test -p engine-render --lib cluster_cull` green with an oracle test - for 64 random
+  cameras and one cluster set, every cluster the cone rejects has no triangle facing the camera, checked
+  against a brute-force per-triangle pass - plus a test that an off-screen camera keeps 0 clusters and a
+  backfacing camera keeps at most a quarter of them, and the surviving list is byte-identical twice.
+  F2P: no cluster is ever rejected.
+- [ ] OPT55 game: the fight scoreboard. A fight ends and nothing says who did what: hits, wounds, kills,
+  longest chain. Roster rows hold campaign state (LEG17) but no fight line reads it. Fold the fight's
+  recorded events into one ranked table and show it on the result screen. Tier A. Size S. Owns a new
+  `crates/game/src/scoreboard.rs` and the result overlay that draws it.
+  Accept: `cargo test -p engine-game --lib scoreboard` green with three hand-written event tapes whose
+  expected tables are written out in the test (rows ordered by damage, ties broken by fighter id), a
+  fold-twice-equal test, and a capture of the result overlay at `target/showcase/` that draws the table.
+  F2P: the result screen has no line of numbers.
+- [ ] OPT56 assets: BC7 picks its mode, not just mode 6. `crates/assets/src/bc.rs::encode_bc7_block` takes a
+  slot and ignores it, so every block is one-subset mode 6 with 7-bit endpoints. Modes 1, 5 and 7 keep the
+  same 16 bytes per block and can hold a block that mode 6 cannot, so the cook can pick the best of four by
+  measured error and never do worse than today. Tier A. Size M. Owns `crates/assets/src/bc.rs`.
+  Accept: `cargo test -p engine-assets --lib bc7` green with an oracle test that encodes a set of real and
+  synthetic 4x4 blocks and compares each against mode 6 alone: mean squared error never rises, at least a
+  quarter of the blocks improve, the encoder is byte-identical twice, and the decoder accepts every mode it
+  emits (a mode-6-only decoder must refuse the new ones by name). Cook cost posted as ms per megapixel.
+  F2P: one BC7 mode for every block, whatever the block looks like.
+- [ ] OPT57 render: wire the GPU cull the crates already hold. `crates/assets/src/meshlet_cull.rs` and
+  `crates/render/src/gpu_cull.rs` exist with tests and no caller: `lib.rs` declares both modules and nothing
+  uses them, while the live path still culls per draw on the CPU. Wire one indirect-draw path behind a flag,
+  keep the CPU path as the fallback, and prove the two agree. Tier B. Size M. Owns
+  `crates/render/src/present/gpu_present/submit_cull.rs` and the call site in the submit pass.
+  Accept: `cargo test -p engine-render --lib gpu_cull` green with a test that the GPU plan and the CPU plan
+  reject the same draws on a fixture camera set (same survivor ids, same order), the pixels of a captured
+  frame are equal to the CPU path within the existing frame-diff epsilon, and the plan is byte-identical
+  twice. F2P: two finished cull modules nobody calls.
+- [ ] OPT58 endpoint: a long receipt travels by reference, not cut. No verb in the door ever returns a
+  `resource_link` (grep finds none in `crates/endpoint`), so a caller that needs more than the inline text
+  must re-call with narrower arguments; some verbs carry an honest `truncated` flag (`log_tools.rs`) and the
+  rest simply report what fits, so a model cannot fetch the whole artifact. Serve the full receipt as a
+  resource row, keep a short summary inline with the byte count behind it, and keep the `truncated` flag
+  honest. Tier B. Size S. Owns `crates/endpoint/src/resources.rs` and one producing verb.
+  Accept: `cargo test -p engine-endpoint --features mcp --lib receipt_link` green with a test that a
+  receipt over the inline budget returns a `resource_link` whose fetch returns the full bytes twice, a short
+  receipt stays inline with no link, and the summary names the byte count it left behind.
+  F2P: the door never offers a fetchable artifact.
+- [ ] OPT59 combat: the player can read a tell. `crates/ai/src/depth.rs` and `crates/combat/src/design.rs` ship
+  `tell_ticks`/`startup_ticks` 15 ticks = 250 ms. The one measured readability study (theseus 900621, n=30
+  players: median 800 ms, IQR 525-900, heuristic floor 500 ms) says the window is too short to read. Raise
+  the floor to 30 ticks, re-tune the follow-up so the fight does not only get slower (shorter recovery, not
+  longer recovery), and prove the arena still resolves. Tier A. Size S. Owns `crates/combat/src/design.rs`,
+  `crates/ai/src/depth.rs` and their tables.
+  Accept: `cargo test -p engine-combat --lib design` green with a test that every attack's startup is at
+  least 30 ticks and every wind-up still lands inside its own window; `cargo test -p engine-playtest --lib
+  sweep` or the arena headless run posts the bout outcome over 600 ticks before and after (hits, rounds,
+  time), so a slower tell does not become a stalemate; the golden moves once, with a receipt that names the
+  old and new hash and why. needs: a decision to move the golden.
+  F2P: a tell a player cannot see.
+- [ ] OPT60 build: PGO for the shipped binary. `llvm-profdata` 22.1.6 is already installed on this PC
+  (`llvm-tools`), so the first feedback lever needs no install and no nightly; `-Cprofile-generate`/
+  `-Cprofile-use` on the `ship` profile, with the profraw directory kept out of the build script. BOLT is
+  out: it reads ELF only and we ship PE/COFF (the donor's own documentation). Tier B. Size S. Owns the
+  `profile.ship` section of the root `Cargo.toml` and one script under `tools/`.
+  Accept: the arena's 600-tick run and the golden test run twice, once on the plain `ship` build and once on
+  the PGO build, posting frame p50/p99 and the build wall time for each; the golden prints
+  `d57b5c8ae3096614` on both. Keep it only if the frame time drops and the build stays inside the nightly
+  budget. F2P: no profile-guided build exists.
+- [ ] OPT61 web: SIMD128 in the shipped wasm. `docs/HASH-LAW.md` already records `wasm32-wasip1-simd128` as
+  MATCH, so the risk question is answered; the change is `--enable-simd` in
+  `tools/web-build.mjs::WASM_OPT_FEATURES` plus `-C target-feature=+simd128` on the cargo build line. Threads
+  and memory64 stay rejected (threads need cross-origin isolation everywhere; memory64 peaks past the soak
+  budget). Tier B. Size S. Owns `tools/web-build.mjs` and its test.
+  Accept: `node --test tools/web-build.test.mjs` green with the feature in the passed list; one `dist/web`
+  build posts wasm bytes against the size budget and the page's hash line still reads
+  `d57b5c8ae3096614`; a browser frame is captured beside the native frame. F2P: the web build ships scalar
+  wasm while the hash law already proves the SIMD path clean.

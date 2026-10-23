@@ -73,7 +73,7 @@ Plain version: agents read small, exact slices; tools do the fragile shell work;
 Books: 14 titles in `C:/Users/me/Downloads/BOOKS` feed the miner seats; the title-to-skill map is in the pre-merge text.
 
 Land audit (2026-10-13, `tools/land.mjs` + `tools/hooks/pre-commit` + `tools/land.test.mjs`): three land REFUSED fingerprints repeat on the board (`docs/BLOCKERS.md`: cut-relay-testpin x7 ratchet-baseline-unstaged, smith-janitor-r3 x3 staged-deletion pathspec, loop-sp63-a2-repair x10 ratchet-baseline-unstaged), and the BOOK-GAPS 2026-10-14 note says the quality.md:38 landing-gate sentence no longer matches the land.mjs workspace audit. Technique: port the failure-body shape (refusal prints `fingerprint:` + `remedy:` cells) and the stage-before-commit shape (foreign staged hunks under the packet's paths refuse by name). Donors (pinned, paths verified live via the GitHub contents API at the commit, no bytes vendored): `nodejs/node@c96226ecf1a1f1f5161732ccdd35cdb5826f30ec` `tools/actions/commit-queue.sh` (commit_queue_failed posts the failure body and labels the PR, AW28 takes the shape); `bors-ng/bors-ng@ca725797e53a88e954998de0bbb14a8a5acb13ab` `FLOW_EXAMPLE.md` (Batcher merges to `staging`, waits for CI, then fast-forwards master, AW29 takes the shape). Porting policy is AGENTS rule 4.
-Status 2026-10-21: this whole plan is history, not a worklist - the loop it plans for was removed on 2026-10-17 (commit `6bdf32bf` "cut the center link, the keeper, the queue tools and 13 of 14 agents"). `tools/land.mjs`, `tools/land.test.mjs`, `tools/queue-cap.mjs`, `tools/seat-ledger.mjs` and `tools/packet-gate.mjs` no longer exist in this repo (only `tools/hooks/pre-commit` does), and `docs/README.md:31` lists this file as a known leftover to "read as history". The AW24-AW29 land-audit rows are on the board in `docs/SPRINT-14-agent-workspace.md`; nothing here is runnable.
+Status 2026-10-21: this whole plan is history, not a worklist - the loop it plans for was removed on 2026-10-17 (commit `6bdf32bf` "cut the center link, the keeper, the queue tools and 13 of 14 agents"). `tools/land.mjs`, `tools/land.test.mjs`, `tools/queue-cap.mjs`, `tools/seat-ledger.mjs` and `tools/packet-gate.mjs` no longer exist in this repo (only `tools/hooks/pre-commit` does), and `docs/README.md:31` lists this file as a known leftover to "read as history". The AW24-AW29 land-audit rows are on the board in `docs/archive/SPRINT-done-14-agent-workspace.md` (moved 2026-10-23); nothing here is runnable.
 
 ## 5. Donors
 
@@ -85,7 +85,7 @@ Write seats (smith, miner, skill-hunter, planner) never commit (only the lead co
 
 ## 7. Board tasks
 
-Rows live in `docs/SPRINT-14-agent-workspace.md`; ticked rows are dropped. `node tools/board-slice.mjs --ready --open` lists them. Full text of the archived plan: `docs/archive/2026-10-10/plans/agent-workspace.md`.
+Rows live in `docs/archive/SPRINT-done-14-agent-workspace.md` (moved 2026-10-23); ticked rows are dropped. `node tools/board-slice.mjs --ready --open` lists them. Full text of the archived plan: `docs/archive/2026-10-10/plans/agent-workspace.md`.
 
 ### agent-workspace (AW)
 

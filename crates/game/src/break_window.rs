@@ -578,7 +578,7 @@ mod tests {
             let stepped = oracle
                 .step(std::slice::from_ref(input))
                 .expect("oracle tick");
-            rows.push(stepped.cuts.cuts.to_vec());
+            rows.push(stepped.cuts.cuts.clone());
         }
         assert_eq!(
             app.live_match().config().table_version,

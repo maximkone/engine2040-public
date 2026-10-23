@@ -43,9 +43,9 @@ rust-version = "1.97.1"
 # Six scoped, reasoned `#[expect(unsafe_code)]` sites exist: engine-core's
 # counting allocators (the unit `CountingAlloc` over `System` and the generic
 # `CountingAllocator<A>` a candidate-backend harness installs), engine-provider's
-# test-only environment writer, engine-ecs's `Scope::spawn` (lifetime erase for
-# scoped jobs on the persistent pool), engine-geo's xatlas FFI wrapper, and
-# engine-render's Windows DXGI VRAM read (`backend.rs`).
+# test-only environment writer, engine-ecs's `pool::erased::apply` (writes,
+# runs or drops one type-erased job closure in its job buffer), engine-geo's
+# xatlas FFI wrapper, and engine-render's Windows DXGI VRAM read (`backend.rs`).
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 # `loom` is set by `RUSTFLAGS="--cfg loom"` for the job-pool model in engine-ecs.
@@ -231,6 +231,13 @@ engine-net.workspace = true
 engine-assets.workspace = true
 engine-ai.workspace = true
 engine-proof.workspace = true
+
+# The demo-length gate (`tests/proof_cli.rs::demo_100k`) plays the shipped
+# arena match in-process. Test-only: the proof binary itself never links the
+# arena, and arena already sits in this graph through engine-net, so the
+# dev-dep adds an edge, not a crate or a feature.
+[dev-dependencies]
+engine-arena.workspace = true
 
 # Release profile: thin LTO + 16 codegen units. The fat-LTO one-unit shape
 # moved to [profile.ship] (the packaged artifact and the CI release-proof leg),

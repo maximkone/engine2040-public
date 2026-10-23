@@ -32,7 +32,7 @@ second pair after the storm grew to 17-23 cargo/rustc at 99.9% CPU read 51.9 and
 (23 cargo/rustc at 99.1%); under that load the arena prints its receipt but hangs
 on teardown, so the keeper reads the receipt and stops the process.
 
-- ON30 (docs/SPRINT-11-north-star.md): two humans + 6 AI over two real
+- ON30 (docs/archive/SPRINT-done-11-north-star.md): two humans + 6 AI over two real
   networks. Host: `target\release\net_relay.exe` on a reachable host, then
   `target\release\arena.exe --scene arena --fighters 8 --spear --host`; guest:
   `target\release\arena.exe --scene arena --join HOST:7043 CODE`. Paste the
@@ -47,7 +47,7 @@ on teardown, so the keeper reads the receipt and stops the process.
 - OPT33 (docs/SPRINT-12-tier-2040.md): DX12 vs Vulkan A/B on the reference GPU
   with the OPT2 harness, 600 frames, x2 within 5%; paste both reports under
   `target/evidence/backend/` and say which backend becomes the default.
-- CT45 (docs/SPRINT-07-accepted-plan-rows.md): measured VRAM of the 213 MiB
+- CT45 (docs/archive/SPRINT-done-07-accepted-plan-rows.md): measured VRAM of the 213 MiB
   bound set on the reference GPU. The report table is already generated
   (f2effc78); only the measured VRAM column and the reference adapter name are
   missing.
@@ -93,7 +93,7 @@ on teardown, so the keeper reads the receipt and stops the process.
   `cargo test -p engine-game --lib ballistics`, but `crates/game/src/ballistics.rs`
   was deleted and `combat::projectile::step_round` still has no game caller. Close
   it as obsolete, or re-scope it to a new caller row?
-- E38 (docs/SPRINT-10-empire-inbox-drain.md): the WGSL split landed (eb440e64);
+- E38 (docs/archive/SPRINT-done-10-empire-inbox-drain.md): the WGSL split landed (eb440e64);
   the remaining gi_dyn leg names `crates/render/src/gi_dyn.rs`, which was deleted
   as a dead spike. Drop the gi_dyn leg and tick, or keep the row open?
 ## Found 2026-10-19 (third pass)
@@ -120,7 +120,7 @@ on teardown, so the keeper reads the receipt and stops the process.
   the numbers. Fix the kit meshes, or change the bars, or close the rows as
   measured-and-filed. GEO5c (the extra bake beside V-HACD) is separate agent
   work and is not affected.
-- GP18 (docs/SPRINT-07-accepted-plan-rows.md): the baselines are pinned and the
+- GP18 (docs/archive/SPRINT-done-07-accepted-plan-rows.md): the baselines are pinned and the
   enforcing tests are green (`cargo test -p engine-game --lib pq2` plus
   `kill_share_bar_is_one_number_across_crates`), but the Accept's "no move above
   35% of kills" has two readings: the bar in the code is the per-move share
@@ -153,12 +153,12 @@ on teardown, so the keeper reads the receipt and stops the process.
   `crates/destruction/src/bond_grade.rs`. Parked on the board with an operator
   note; the caller half is agent work that stays undone until the review says
   keep.
-- RC15 (docs/SPRINT-07-accepted-plan-rows.md): the netcode.io connect token
+- RC15 (docs/archive/SPRINT-done-07-accepted-plan-rows.md): the netcode.io connect token
   needs authenticated encryption. `engine-net` is std-only and has no crypto
   dependency, and hand-rolling crypto is against the rules. Add a feature-gated
   `hmac` + `sha2` (already in the tree, pure Rust, as the proof pack does) and
   build the token on HMAC-SHA256, or kill the row?
-- RC28 (docs/SPRINT-07-accepted-plan-rows.md): the Accept wants a TestU01
+- RC28 (docs/archive/SPRINT-done-07-accepted-plan-rows.md): the Accept wants a TestU01
   SmallCrush pass, which needs the external C suite (not in the repo, no
   runner leg). The earlier attempt was judged FAIL (WyRng unwired, a custom
   schedule instead of the wyrand vectors) and reverted. Run SmallCrush on the
@@ -168,7 +168,7 @@ on teardown, so the keeper reads the receipt and stops the process.
   reference-GPU run, not a test: `node tools/gh-check.mjs` will not measure it.
   Run the PF1 gate on the PC with nothing else compiling and paste both
   numbers. (The missing production caller for `event_queue.rs` is agent work.)
-- RC20 (docs/SPRINT-07-accepted-plan-rows.md): `collect_indexed_on` landed
+- RC20 (docs/archive/SPRINT-done-07-accepted-plan-rows.md): `collect_indexed_on` landed
   (bit-identical for 0/1/2/4/8 workers, 2.86x on a synthetic 200k bake, run
   39066665851). The remaining "at least 2x on the CT2 bake workload or killed
   with numbers" needs a quiesced cook measurement on the PC: name the command

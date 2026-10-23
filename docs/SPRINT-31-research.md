@@ -88,18 +88,22 @@ report section has the mechanism. Feel donors live in `02-feel.md` beside the FE
   `tools/ship*.mjs`, `crates/proof`. Accept: the job is green on the mirror and its log quotes
   `tick=... hash=d57b5c8ae3096614`; a deliberately broken receipt turns it red. Size M. Tier B.
   F2P: G1 "never broken" is unmeasured - the job compares two builds and never a run. P2P: no
-  sim change. needs: none. Landed 85d5d5d26 + 88ca9b8dc. Proof: mirror run 39865729635 (snapshot
-  of 88ca9b8dc) is green; its log quotes `SHIP-RUN tick=600 hash=d57b5c8ae3096614`, names the
-  no-adapter case exactly (`SHIP-GAME skipped adapter=none reason=no-wgpu-adapter`;
-  `SHIP-FRAME skipped adapter=none reason=no-wgpu-adapter`), and prints `SHIP-RUN PASS` plus
-  `SHIP-CHECK PASS: the two ship builds have the same tree hash 4fac0e68...`; the checker step
-  runs 30 tests, 30 pass, including the deliberately broken receipt that turns red. The first run
-  39863411687 failed on `arena: presenter error (no wgpu adapter available)`; 88ca9b8dc turns that
-  into a narrow named skip (`GAME_NO_ADAPTER`) and every other arena failure stays red. Open legs,
-  named: `crates/game` has no `--headless` route (headless_fallback runs only when the window
-  cannot be created), so on a no-adapter runner the game smoke is skipped by name, not played;
-  and the frame score still needs reference PNGs on disk plus a scorer (`SHIP-FRAME skipped ...
-  reason=reference-png-not-on-disk` on a GPU machine).
+  sim change. needs: none. Landed 85d5d5d26 + 88ca9b8dc + 15df03b7b + 88095e1f4. Proof: mirror
+  run 39865729635 (snapshot of 88ca9b8dc) quotes `SHIP-RUN tick=600 hash=d57b5c8ae3096614` and the
+  old named skip.
+  Mirror run 40006304672 (snapshot of e058bba7f, with 15df03b7b and 88095e1f4) is green and its log
+  quotes `SHIP-GAME tick=600 hash=7842af9a79d7bd11 frames=0 seconds=10.000 adapter=none
+  headless=forced runs=2`, `SHIP-GAME presenter="presenter skipped: no wgpu adapter on this
+  machine"`, `SHIP-FRAME skipped adapter=none reason=no-hardware-adapter`, and `SHIP-RUN PASS: the
+  proof receipt is the golden and the shipped game played headless twice to one hash`; the checker
+  step runs 32 tests, 32 pass, including the deliberately broken receipt that turns red. The first
+  run 39863411687 failed on `arena: presenter error (no wgpu adapter available)`; 88ca9b8dc turns
+  that into a narrow named skip. 15df03b7b adds the plain `--headless` route: 600 ticks, no window,
+  no adapter, two fresh runs to one hash, gated on ticks, a 16-hex hash and the same hash twice; a
+  no-adapter boot without the receipt is now red, not skipped. 88095e1f4 adds that gate to
+  `tools/ship-run.mjs`. Open leg, named: the frame score still needs a scorer wired to
+  `content/reference/` (the PNGs are on disk now); a runner with no adapter prints `SHIP-FRAME
+  skipped adapter=none reason=no-hardware-adapter`.
 - [x] ENG20 render: temporal artifacts get a gate (finish-line B9, gate O5). A TAA registration
   test proves the history is registered where the frame moves (a frozen or mis-registered history
   shows as ghosting over the bar and the test names it) and that a cut or resize resets it; a

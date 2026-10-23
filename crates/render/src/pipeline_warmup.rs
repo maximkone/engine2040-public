@@ -219,7 +219,7 @@ mod tests {
     /// ledger, so it fails here.
     #[test]
     fn pipeline_warmup_every_live_path_build_goes_through_the_ledger() {
-        let files: [(&str, &str); 12] = [
+        let files: [(&str, &str); 13] = [
             ("fog.rs", include_str!("fog.rs")),
             ("decals.rs", include_str!("decals.rs")),
             ("gtao.rs", include_str!("gtao.rs")),
@@ -236,6 +236,10 @@ mod tests {
             (
                 "gtao_live.rs",
                 include_str!("present/gpu_present/gtao_live.rs"),
+            ),
+            (
+                "bloom_dual.rs",
+                include_str!("present/gpu_present/bloom_dual.rs"),
             ),
             (
                 "presenter.rs",

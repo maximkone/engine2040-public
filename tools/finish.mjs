@@ -153,16 +153,20 @@ export function readParked(parkedPath) {
 // Suspects among the gate rows this tree can read: id -> { reasons, evidence }.
 // The full ticked-rows-audit CLI reads every ticked row and walks git history
 // (about 12 s); the scoreboard needs only the ~125 gate rows (about 0.3 s), so
-// it imports the same auditRows instead of spawning that CLI. ok=false means
-// the repo context could not be built (no git); the caller decides whether
-// that is a warning (default) or a failure (--check).
-export function loadSuspects(root, texts, ids) {
+// it imports the same auditRows instead of spawning that CLI. That audit also
+// reads each suspect row's own closure note: a note that names a real commit, a
+// run id, a path that exists or a ticked replacement row drops the finding; a
+// note with no such evidence keeps it. `tickedIds` is the whole ticked board,
+// because a gate set alone is too narrow to tell whether a replacement row is
+// ticked. ok=false means the repo context could not be built (no git); the
+// caller decides whether that is a warning (default) or a failure (--check).
+export function loadSuspects(root, texts, ids, tickedIds = null) {
   const ctx = buildContext(root);
   if (!ctx) return { ok: false, suspects: new Map(), audited: 0, unchecked: 0 };
   const rows = [...new Set(ids)]
     .filter((id) => texts.has(id))
     .map((id) => ({ id, source: "gate", text: texts.get(id) }));
-  const report = auditRows(rows, ctx);
+  const report = auditRows(rows, ctx, tickedIds ? { tickedIds } : {});
   const suspects = new Map(
     report.suspects.map((s) => [
       s.id,
@@ -559,7 +563,12 @@ function main() {
 
   const audit = process.argv.includes("--no-suspects")
     ? { ok: true, suspects: new Map(), audited: 0, unchecked: 0, skipped: true }
-    : loadSuspects(cwd, texts, resolved.flatMap((r) => r.rows));
+    : loadSuspects(
+        cwd,
+        texts,
+        resolved.flatMap((r) => r.rows),
+        new Set([...ticks].filter(([, done]) => done).map(([id]) => id)),
+      );
   if (!audit.ok) {
     console.error("finish: warning: row audit unavailable (git ls-files failed); gates score ticks only");
   }

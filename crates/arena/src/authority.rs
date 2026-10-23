@@ -272,6 +272,7 @@ fn direction_q10(from: [i32; 3], to: [i32; 3]) -> [i32; 2] {
 
 /// Cut resolve for a track that wears no armour (the spine step): the same
 /// cuts as [`resolve_cuts`], with the plate cues dropped.
+#[cfg(feature = "spine")]
 pub(crate) fn resolve_cuts_bare(
     states: &[FighterState],
     tick: u32,

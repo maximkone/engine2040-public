@@ -8,6 +8,8 @@
 //! `#[global_allocator]` to count allocations, and one binary allows one.
 
 mod break_slice_vectors;
+mod gait_walk;
+mod hl_tape;
 mod idmap_fxbench;
 mod oracle;
 mod pd_drive;

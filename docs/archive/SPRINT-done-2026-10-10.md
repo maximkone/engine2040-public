@@ -1997,7 +1997,7 @@ tools/board-slice.mjs reads these ids as ticked (for needs: and the ticked count
   500 MB. F2P: `git lfs ls-files` before (2 tracked non-LFS blobs over
   5 MB); after (0). P2P: `node tools/workspace-check.mjs` stays green.
   needs: none. (EB-AP-DG-repo-bloat-2026-10-02.)
-- [x] E52 assets: schema_compile wire or delete (EB-2026-10-09-S1). Size S. Owns `crates/assets/src/schema_compile.rs` + lib.rs mod row only. F2P `node tools/workspace-check.mjs` prints no schema_compile line; P2P assets lib green. needs: none. (done 2026-10-09: file deleted at HEAD, workspace modules PASS 580, assets lib 128+201 green.) Tick audit 2026-10-19: the row's own purpose was to delete the named assets `schema_compile.rs`; the path is the target, not a loss.
+- [x] E52 assets: schema_compile wire or delete (EB-2026-10-09-S1). Size S. Owns `crates/assets/src/schema_compile.rs` + lib.rs mod row only. F2P `node tools/workspace-check.mjs` prints no schema_compile line; P2P assets lib green. needs: none. (done 2026-10-09: file deleted at HEAD, workspace modules PASS 580, assets lib 128+201 green.) Tick audit 2026-10-19: the row's own purpose was to delete the named assets `schema_compile.rs`; the path is the target, not a loss. Correction 2026-10-23: the removal commit 2f02202fb deleted `crates/assets/src/schema_compile.rs` (1270 lines); `crates/assets/src/lib.rs` carries no `schema_compile` mod row, and the Accept (`node tools/workspace-check.mjs` prints no schema_compile line) holds. `cargo test -p engine-assets --lib` green (run https://github.com/maximkone/engine2040-public/actions/runs/40020841165).
 
 ## SPRINT-11-north-star.md
 

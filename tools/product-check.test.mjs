@@ -11,8 +11,11 @@ const RECEIPT = `arena smoke: ticks=300 frames=300
 arena frame-split: sim=0.085ms present=117.519ms fighters=2.932ms per frame (mean over 300 frames) cpu_ms p50=7.501 p99=407.215 interval_ms p50=59.597 p99=407.881 gpu_ms p50=0.244 p99=4.156 (forward p50=0.135 blit p50=0.109; 299 frames) acquire=0.068ms present_mode=Fifo
 arena framing: frames=300 empty=0 first_empty=- fewest_in_view=2 steepest_down_deg=21.1 tinted_share=0.83
 arena view: frames=300 sim_ticks=2.1..153.8 bodies=2400 offscreen_share=0.70 nonfinite=0 error_parts=0 sunk_cm_max=12.0 idle_float_cm_max=0.4 pops=35 pop_acts=attack:11/idle:24 pop_cm_max=102.7 eye_in_body=0 eye_below_ground=0 closest_cm=107 cover_max=0.03
-arena per-pass: adapter="RTX" frames=300 sky=0.000ms layers=0.000ms ibl=0.412ms fog=0.000ms gtao=0.000ms validation_errors=0`;
-const BAR = { floors: { framing_empty: 0, tinted_share_max: 0.25, stall_p99_ms_max: 1500, fps_drop_max: 0.3 } };
+arena per-pass: adapter="RTX" resolution=1280x720 frames=300 sky=0.000ms layers=0.000ms ibl=0.412ms fog=0.000ms gtao=0.000ms validation_errors=0
+PQ18 window=0 events=120 input_p50=2.757ms input_p95=3.425ms sim_p50=0.041ms sim_p95=0.062ms present_p50=4.295ms present_p95=5.509ms dropped=0
+input_latency events=90 sim_p50=0.041ms sim_p95=0.071ms present_p50=4.364ms present_p95=5.286ms p95_budget=50.0ms verdict=pass
+PQ18 OK window=1 input_p50=2.842ms input_p95=3.655ms sim_p50=0.041ms present_p50=4.364ms gpu=reported`;
+const BAR = { floors: { framing_empty: 0, tinted_share_max: 0.25, stall_p99_ms_max: 1500, fps_drop_max: 0.3, input_p95_ms_max: 50, present_p95_ms_max: 50 } };
 const quietCaps = { captures: 5, blank: 0, frozen: 0 };
 
 test("the receipt lines parse into numbers", () => {
@@ -25,6 +28,10 @@ test("the receipt lines parse into numbers", () => {
   assert.equal(r.tinted_share, 0.83);
   assert.equal(r.validation_errors, 0);
   assert.equal(r.passes.ibl, 0.412);
+  assert.equal(r.size, "1280x720", "the per-pass line names the drawable size the means were taken at");
+  assert.deepEqual(r.latency, { input_p50_ms: 2.842, input_p95_ms: 3.655, present_p50_ms: 4.364, present_p95_ms: 5.286, budget_ms: 50, verdict: "pass" }, "the player latency receipt keeps its two legs apart");
+  assert.equal(parseReceipt("nothing").latency, null);
+  assert.equal(parseReceipt("nothing").size, null);
   assert.equal(r.panics, 0);
   assert.equal(parseReceipt("nothing").framing, false);
   assert.equal(r.view.sim_first, 2.1);
@@ -88,11 +95,41 @@ test("fps is gated only on a quiet run, against the median of recent quiet runs"
   assert.equal(referenceInterval(mixed, "Immediate"), 8.3);
   assert.equal(referenceInterval(mixed, "Mailbox"), null);
   assert.equal(referenceInterval([{ timing: { interval_p50_ms: 8.3, loaded: 0, vsync: "Immediate" } }], "Fifo"), null);
+  // 1080p work is not 720p work: a stored 720p row never sets the 1080p reference.
+  const sized = [
+    { timing: { interval_p50_ms: 16.6, loaded: 0, vsync: "Fifo", size: "1280x720" } },
+    { timing: { interval_p50_ms: 16.8, loaded: 0, vsync: "Fifo", size: "1920x1080" } },
+    { timing: { interval_p50_ms: 16.9, loaded: 0, vsync: "Fifo", size: "1920x1080" } },
+    { timing: { interval_p50_ms: 33.3, loaded: 0, vsync: "Fifo" } },
+  ];
+  assert.equal(referenceInterval(sized, "Fifo", "1920x1080"), 16.9);
+  assert.equal(referenceInterval(sized, "Fifo", "1280x720"), 16.6);
+  assert.equal(referenceInterval(sized, "Fifo", "2560x1440"), null, "an unmeasured size has no reference yet");
   assert.equal(redFloors({ look, timing: { interval_p50_ms: 16.7, interval_p99_ms: 26, loaded: 0, vsync: "Fifo" }, caps: quietCaps, ref: null }, BAR).slower, undefined);
   const slow = { interval_p50_ms: 100, interval_p99_ms: 300, loaded: 0 };
   assert.ok(redFloors({ look, timing: slow, caps: quietCaps, ref: 58 }, BAR).slower);
   assert.equal(redFloors({ look, timing: { ...slow, loaded: 3 }, caps: quietCaps, ref: 58 }, BAR).slower, undefined);
   assert.equal(redFloors({ look, timing: { ...slow, interval_p50_ms: 70 }, caps: quietCaps, ref: 58 }, BAR).slower, undefined);
+});
+
+test("player latency is gated on the timing run and never on the capture run", () => {
+  const receipt = parseReceipt(RECEIPT);
+  const look = { ...receipt, tinted_share: 0, exit: 0, timedOut: false };
+  const quiet = { ...receipt, loaded: 0, interval_p50_ms: 16.7, interval_p99_ms: 26, vsync: "Fifo" };
+  assert.deepEqual(redFloors({ look, timing: quiet, caps: quietCaps, ref: null }, BAR), {}, "3.655 and 5.286 ms are under the 50 ms floor");
+  // A capture run arms the blocking look probes, so its input-to-frame leg is a
+  // GPU readback the player never pays: the look run is scored for pixels only.
+  const captureLook = { ...look, latency: { ...receipt.latency, input_p95_ms: 9.4, present_p95_ms: 114.867 } };
+  assert.deepEqual(redFloors({ look: captureLook, timing: quiet, caps: quietCaps, ref: null }, BAR), {}, "a capture run's blocking probes are not the player's latency");
+  const slow = { ...quiet, latency: { ...receipt.latency, input_p95_ms: 61, present_p95_ms: 114.9 } };
+  const red = redFloors({ look, timing: slow, caps: quietCaps, ref: null }, BAR);
+  assert.deepEqual(Object.keys(red).sort(), ["input_latency", "present_latency"]);
+  assert.match(red.present_latency, /input to frame end p95 114\.9 ms \(floor 50 ms\)/);
+  assert.match(red.input_latency, /input to present submit p95 61 ms \(floor 50 ms\)/);
+  // A box with a build running is not gated, like fps: contention only slows frames.
+  assert.deepEqual(redFloors({ look, timing: { ...slow, loaded: 2 }, caps: quietCaps, ref: null }, BAR), {});
+  // A receipt with no latency block (an older build) is not a silent pass claim.
+  assert.deepEqual(redFloors({ look, timing: { ...quiet, latency: null }, caps: quietCaps, ref: null }, BAR), {});
 });
 
 test("a run that scored no captures is RED, not a silent green", () => {

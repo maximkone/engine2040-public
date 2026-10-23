@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use engine_arena::{ArenaConfig, BodyId, BodyInput, MatchSpec};
+
 mod common;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -317,4 +319,116 @@ fn journal_run_matches_the_tape_and_a_torn_or_damaged_journal_refuses_by_name() 
     );
     let escape = run(&["--ticks", "3", "--journal", "../escape.e2040j"]);
     assert!(String::from_utf8_lossy(&escape.stderr).contains("unsafe tape path"));
+}
+
+/// Fixed steps of the shipped demo bout (`docs/DEMO.md`): 100,000 at 60 Hz.
+const DEMO_TICKS: u32 = 100_000;
+/// The duel's gladius row (`engine_game::DUEL_KIT_WEAPON`): the demo window
+/// arms one per slot before the first tick.
+const DEMO_WEAPON: &str = "gladius";
+
+/// One tick of the demo's human seat: the fixed stand-in for the keyboard.
+/// Slot 0 swings every 30 ticks, guards for a window and dodges once per 120,
+/// and faces a slow sweep; slot 1 is an arena brain, as in the demo.
+fn demo_input(tick: u32) -> BodyInput {
+    let phase = tick % 120;
+    let mut bits = 0u8;
+    if phase.is_multiple_of(30) {
+        bits |= 0x01;
+    }
+    if (84..96).contains(&phase) {
+        bits |= 0x02;
+    }
+    if phase == 108 {
+        bits |= 0x04;
+    }
+    let sweep = i32::try_from((tick * 5) % 36_000).unwrap_or(0) - 18_000;
+    let mut input = BodyInput {
+        tick,
+        fighter: BodyId(0),
+        mx: if (phase / 30).is_multiple_of(2) {
+            100
+        } else {
+            -60
+        },
+        mz: 30,
+        facing: i16::try_from(sweep).unwrap_or(0),
+        buttons: Default::default(),
+    };
+    input.buttons.0 = bits;
+    input
+}
+
+/// Play the demo bout once from a fresh match: the window's spec
+/// (`App::with_world(..).into_duel().into_spear()`) at the demo's shipped
+/// seed, length, fighter count and arena size. Returns the checkpoint hash at
+/// tick 0 and the final checkpoint hash.
+fn play_demo_bout() -> (u64, u64) {
+    let config = ArenaConfig {
+        seed: 2040,
+        ticks: DEMO_TICKS,
+        fighters: 2,
+        half_extent_m: 20.0,
+        table_version: 2,
+    };
+    let spec = MatchSpec::kit_duel(config)
+        .expect("the demo kit world builds")
+        .with_spear()
+        .with_weapons(&[DEMO_WEAPON, DEMO_WEAPON]);
+    let mut live = spec.live().expect("the demo match builds");
+    let mut first = 0u64;
+    let mut last = 0u64;
+    for tick in 0..DEMO_TICKS {
+        let stepped = live
+            .step(&[demo_input(tick)])
+            .unwrap_or_else(|| panic!("the demo match refused tick {tick}"));
+        assert_eq!(stepped.checkpoint.tick, tick, "checkpoint names its tick");
+        if tick == 0 {
+            first = stepped.checkpoint.hash;
+        }
+        last = stepped.checkpoint.hash;
+    }
+    assert_eq!(live.tick(), DEMO_TICKS, "the bout ends at the demo length");
+    (first, last)
+}
+
+/// The shipped demo length, proven: the arena bout `play-arena.bat` plays is
+/// 100,000 fixed ticks (`docs/DEMO.md`), while the golden gate proves 600 and
+/// the HS2 arena matrix 1,200. This plays the demo's own match — rules v2 on
+/// the arena kit walls, one gladius per slot, spear on, seed 2040, two
+/// fighters with a scripted human seat — twice from fresh state and requires
+/// the same 16-hex final checkpoint hash. A drift that only shows after the
+/// 1,200-tick matrix stops passing here.
+///
+/// Ignored so ordinary CI stays fast; run it explicitly:
+/// `node tools/gh-check.mjs --budget 1700 cargo test -p engine2040 --release --test proof_cli demo_100k -- --ignored --exact --nocapture`
+///
+/// Resume gap, measured 2026-10-23 (findings only, no fix here):
+/// `App::save_progress` seals the 25-byte `GameProgress` (three counters plus
+/// seed and tick) through `engine_save::save_generation`; it never writes the
+/// match. `App` already holds the full human input tape and can rebuild by
+/// `spec().live()` plus replay, and `engine_net::replay::ReplayTape` already
+/// carries a spec identity, per-tick checkpoints and a 600-tick keyframe grid.
+/// What is missing is persistence: the payload has no fighter count, arena
+/// size, table/rules version, spear/height/weapon flags, world digest or
+/// inputs, and the 1 MiB payload cap is close to a 100k one-slot tape. A
+/// `MatchSnapshot` cannot fill that hole: `LiveMatch::snapshot` returns `None`
+/// for the demo match because the snapshot carries no obstacle world, no v2
+/// balance/stagger/limb state and no spear slots.
+#[test]
+#[ignore = "the 100k demo-length gate; run explicitly"]
+fn demo_100k() {
+    let started = std::time::Instant::now();
+    let (first, hash_a) = play_demo_bout();
+    let (_, hash_b) = play_demo_bout();
+    let wall_s = started.elapsed().as_secs_f64();
+    println!(
+        "demo_100k: ticks={DEMO_TICKS} hash_a={hash_a:016x} hash_b={hash_b:016x} wall_s={wall_s:.3}"
+    );
+    assert_ne!(
+        hash_a, 0,
+        "an all-zero checkpoint hash is not a played bout"
+    );
+    assert_ne!(hash_a, first, "the bout never left its first tick");
+    assert_eq!(hash_a, hash_b, "two fresh 100k demo bouts diverged");
 }

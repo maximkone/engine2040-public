@@ -93,6 +93,23 @@ test("loadSuspects reads the in-process audit for the gate rows", () => {
   assert.match(report.suspects.get("ZZ1").reasons.join(","), /path-missing/);
 });
 
+test("loadSuspects drops a gate row only when its closure note names evidence", () => {
+  const head = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: REPO, encoding: "utf8" }).stdout.trim();
+  assert.match(head, /^[0-9a-f]{7,40}$/, "the fixture needs a real HEAD commit");
+  const text = "owns `crates/zz-fixture/src/gone.rs`";
+  const texts = new Map([
+    ["ZZ1", `${text}. Tick audit 2026-10-19: the seam landed in ${head}.`],
+    ["ZZ2", `${text}. Tick audit 2026-10-19: the seam landed in deadbee.`],
+    ["ZZ3", `${text}. Tick audit 2026-10-19: closed by crates/render/src/lib.rs.`],
+  ]);
+  const ids = ["ZZ1", "ZZ2", "ZZ3"];
+  const report = loadSuspects(REPO, texts, ids, new Set(ids));
+  assert.equal(report.ok, true);
+  assert.equal(report.suspects.has("ZZ1"), false, "a real commit clears the gate row");
+  assert.equal(report.suspects.has("ZZ2"), true, "a bogus sha keeps it a suspect");
+  assert.equal(report.suspects.has("ZZ3"), false, "an existing path clears it");
+});
+
 test("hand-checked sample: 5/5 gates correct", () => {
   const dir = join(tmpdir(), `finish-sample-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
   mkdirSync(dir, { recursive: true });

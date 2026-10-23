@@ -6,7 +6,7 @@ Stranger picks (all take --help, exit 0):
 - `node tools/workspace-check.mjs --help` to audit after board edits.
 - `node tools/crate-map.mjs --help` to map crates to dirs.
 - `node tools/gh-check.mjs --help` to run a cargo test or clippy line on GitHub.
-Each script has a `*.test.mjs` mate next to it; a few audit `*.test.mjs` files have no live script (listed below).
+Most scripts have a `*.test.mjs` mate next to it; a live entry without a `(+ test)` marker has none, and a few audit `*.test.mjs` files have no live script (listed below).
 Helpers live in `tools/vendor/`. Retired tools are deleted; `git log --all -- tools/<name>.mjs` finds them.
 Keep scripts small and portable; docs stay in `docs/`. The full per-tool reference is `docs/book/ref-tools.md`.
 
@@ -17,7 +17,9 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/affected.mjs` (+ `tools/affected.test.mjs`): node script; see its header.
 - `tools/api-break.mjs` (+ `tools/api-break.test.mjs`): gate the public API of every engine crate against a committed baseline (rustdoc JSON); `--write` blesses a break.
 - `tools/arch-fitness.mjs` (+ `tools/arch-fitness.test.mjs`): check the crate graph stays acyclic.
+- `tools/arena-net.mjs` (+ `tools/arena-net.test.mjs`): two-process loopback proof of `arena --host`/`--join`: four scenarios twice, one final hash.
 - `tools/arena-report.mjs` (+ `tools/arena-report.test.mjs`): gate the arena manifest, PBR/HDRI VRAM caps, crate+torch receipt and soak baseline.
+- `tools/arena-shot.mjs`: the daily arena shot gate: runs the pinned capture and refuses placeholder frames; `--self-check` needs no GPU.
 - `tools/arena-sources.mjs` (+ `tools/arena-sources.test.mjs`): check the raw CC0 PBR sets in `content/arena/sources` and their PROVENANCE rows.
 - `tools/argv.mjs` (+ `tools/argv.test.mjs`): node script; see its header.
 - `tools/beat-lint.mjs` (+ `tools/beat-lint.test.mjs`): gate the ladder beat chart.
@@ -30,19 +32,26 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/cargo-guard.mjs` (+ `tools/cargo-guard.test.mjs`): cap cargo time and messages.
 - `tools/cast-safe.mjs` (+ `tools/cast-safe.test.mjs`): node script; see its header.
 - `tools/city-osm.mjs` (+ `tools/city-osm.test.mjs`): convert an offline OSM slice to glTF.
+- `tools/class-validate.mjs`: gate `content/classes/*.json` against `schema.json` plus the cross-file rules (branches, ability ids, growth sums); read-only.
 - `tools/clean.mjs` (+ `tools/clean.test.mjs`): move trash under `target/` to `C:\_quarantine\<date>\` with a `MOVES.tsv` row; never deletes, and refuses while a cargo build runs.
 - `tools/codex-check.mjs` (+ `tools/codex-check.test.mjs`): check every Rome table number against the source passage it names.
 - `tools/compile-cache.mjs` (+ `tools/compile-cache.test.mjs`): node script; see its header.
 - `tools/compile-cache-spike.mjs` (+ `tools/compile-cache-spike.test.mjs`): time one lane build cold, then with a warm sccache in fresh target dirs; prints KEEP/DROP, never edits a tracked file.
 - `tools/content-lib.mjs`: shared digest, image-size and generated-block helpers for the content report tools.
+- `tools/content-cross.mjs`: cross-file id checks over the faction-war content set, where each file is authored by a different agent.
 - `tools/cook-char.mjs` (+ `tools/cook-char.test.mjs`): check the character intake manifest.
 - `tools/crate-map.mjs` (+ `tools/crate-map.test.mjs`): map each crate to its package, dir and job.
+- `tools/ctrf-report.mjs` (+ `tools/ctrf-report.test.mjs`): turn a nextest JUnit receipt into the CTRF report CI uploads; a pure function of the receipt bytes.
+- `tools/dep-rebuild-count.mjs` (+ `tools/dep-rebuild-count.test.mjs`): count the dependency units five lane builds rebuild (OPT8 bar) from `Compiling` lines in one target dir.
 - `tools/desync-diff.mjs` (+ `tools/desync-diff.test.mjs`): diff a desync to the first bad tick.
 - `tools/door-reference.mjs` (+ `tools/door-reference.test.mjs`): print every door tool and verb pack from the endpoint source into `docs/book/door-reference.md` (`--write`, `--check`).
 - `tools/docs-coverage.mjs` (+ `tools/docs-coverage.test.mjs`): ratchet per-crate missing-docs.
 - `tools/doctor.mjs` (+ `tools/doctor.test.mjs`): repo health first.
 - `tools/duration-fmt.mjs` (+ `tools/duration-fmt.test.mjs`): node script; see its header.
+- `tools/faction-war-map.mjs`: read the contested map and the war rules, print the three statue points and fail when the two disagree (RY1).
+- `tools/faction-war-report.mjs`: run the class validator, block out every archetype, write `docs/research/faction-war-2026-10-21/art-report.md`.
 - `tools/farm.mjs` (+ `tools/farm.test.mjs`): run heavy checks on the build farm.
+- `tools/feature-scan.mjs` (+ `tools/feature-scan.test.mjs`): report every crate feature nobody enables and no `cfg` reads (PW49); exit 1 while a dead flag is left.
 - `tools/feature-unify.mjs` (+ `tools/feature-unify.test.mjs`): check the workspace feature union.
 - `tools/fetch-content.mjs` (+ `tools/fetch-content.test.mjs`): download listed content files.
 - `tools/fighter-count.mjs` (+ `tools/fighter-count.test.mjs`): node script; see its header.
@@ -55,14 +64,20 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/frame-moved.mjs` (+ `tools/frame-moved.test.mjs`): node script; see its header.
 - `tools/frame-triage.mjs` (+ `tools/frame-triage.test.mjs`): triage frame captures.
 - `tools/frame-v2v3.mjs` (+ `tools/frame-v2v3.test.mjs`): node script; see its header.
+- `tools/gate-silhouette.mjs`: compare a cooked silhouette against a golden PNG (pixelmatch/blockhash); exit 0 pass, 1 fail, 2 usage.
 - `tools/gh-check.mjs` (+ `tools/gh-check.test.mjs`): run one narrow cargo command on GitHub; returns at 100 s (exit 3, then `--wait`), sends GPU/window/Windows-only lines and failed runs to the PC by itself.
 - `tools/gh-search.mjs` (+ `tools/gh-search.test.mjs`): search GitHub code.
 - `tools/gltf-intake.mjs` (+ `tools/gltf-intake.test.mjs`): check a glTF file on intake.
 - `tools/golden-matrix.mjs` (+ `tools/golden-matrix.test.mjs`): compare tapes across machines.
+- `tools/gpu-farm.mjs` (+ `tools/gpu-farm.test.mjs`): run one cargo line on a Kaggle GPU kernel (T4) when the PC's GPU legs are queued.
 - `tools/hash-util.mjs` (+ `tools/hash-util.test.mjs`): hash helpers.
 - `tools/hit-list.mjs` (+ `tools/hit-list.test.mjs`): check every fight cue has a CC0 sound with provenance.
 - `tools/iqa-gate.mjs` (+ `tools/iqa-gate.test.mjs`): gate capture-pair image similarity.
+- `tools/jobserver.mjs` (+ `tools/jobserver.test.mjs`): the Node side of the shared compile-slot pool: cargo joins `tools/jobserver.ps1`'s semaphore and runs below the desktop.
+- `tools/kam2-host.mjs`: serve `target/kam2web` on loopback and open a Cloudflare quick tunnel; `--check` proves local + public + 60 frames.
+- `tools/kam2-web.mjs`: build the kam2-web wasm, serve it and prove the KAM2 village draws in headless Chrome.
 - `tools/ladder-counts.mjs` (+ `tools/ladder-counts.test.mjs`): count research-ladder rows per rung.
+- `tools/leftovers.mjs` (+ `tools/leftovers.test.mjs`): list dirty paths nobody touched for N hours, grouped for one free seat; never commits, deletes or reverts.
 - `tools/level-check.mjs` (+ `tools/level-check.test.mjs`): gate the hand-placed arena layout.
 - `tools/license-gate.mjs` (+ `tools/license-gate.test.mjs`): gate Cargo licenses.
 - `tools/miri-gate.mjs` (+ `tools/miri-gate.test.mjs`): keep the unsafe sites, `tools/miri-sites.json` and `.github/workflows/miri.yml` in step; zero Miri suppressions; prints the forbid-rollout list.
@@ -71,11 +86,13 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/mp-evidence.mjs` (+ `tools/mp-evidence.test.mjs`): node script; see its header.
 - `tools/mp6-check.mjs` (+ `tools/mp6-check.test.mjs`): multiplayer check.
 - `tools/mutants.mjs` (+ `tools/mutants.test.mjs`): node script; see its header.
+- `tools/nextest-spike.mjs` (+ `tools/nextest-spike.test.mjs`): one proof lane under cargo-nextest against cargo test; NOOP exit 2 without nextest (row OPT6 parked).
 - `tools/nonstop.mjs` (+ `tools/nonstop.test.mjs`): run a weak OpenCode model over the ready board rows, one fresh session per row, until none is left (stops on a red tree).
 - `tools/p4-netsim.mjs` (+ `tools/p4-netsim.test.mjs`): model 64 clients online.
 - `tools/part-score.mjs` (+ `tools/part-score.test.mjs`): score board parts.
 - `tools/pe-exports.mjs` (+ `tools/pe-exports.test.mjs`): read a Windows PE export table.
 - `tools/physfx-backends.mjs` (+ `tools/physfx-backends.test.mjs`): soak the RZ1 scene on Rapier wasm and Jolt wasm as one table.
+- `tools/pick-gold.mjs` (+ `tools/pick-gold.test.mjs`): write or check `fixtures/pick/gold.txt`, 100 pixel tasks answered by this file's own ray maths (EV21).
 - `tools/plan-atlas.mjs` (+ `tools/plan-atlas.test.mjs`): read the plan atlas.
 - `tools/playtest-log.mjs` (+ `tools/playtest-log.test.mjs`): check a playtest CSV log.
 - `tools/potato-check.mjs` (+ `tools/potato-check.test.mjs`): run the potato gate.
@@ -83,27 +100,40 @@ Short lines; the script header is the full doc. Keep one line here per live `too
 - `tools/proof.mjs` (+ `tools/proof.test.mjs`): golden hash check.
 - `tools/provenance-audit.mjs` (+ `tools/provenance-audit.test.mjs`): dry-run the release provenance gate over every shipped asset.
 - `tools/q1-check.mjs` (+ `tools/q1-check.test.mjs`): node script; see its header.
+- `tools/quiet-run.mjs` (+ `tools/quiet-run.test.mjs`): hold nonstop, wait for the box to go quiet, then run one timing command; exit 3 when no window comes.
 - `tools/ra8-check.mjs` (+ `tools/ra8-check.test.mjs`): node script; see its header.
 - `tools/ra8-manifest.mjs` (+ `tools/ra8-manifest.test.mjs`): node script; see its header.
 - `tools/rdc-diff.mjs` (+ `tools/rdc-diff.test.mjs`): pixel-diff a RenderDoc replay.
+- `tools/reference-captures.mjs`: verify one tier's reference PNGs and merge them into `content/reference/index.json`.
+- `tools/reference-web.mjs` (+ `tools/reference-web.test.mjs`): capture the web tier's ten reference shots from the real page, driving its animation clock.
 - `tools/replay-to-mp4.mjs` (+ `tools/replay-to-mp4.test.mjs`): render a replay tape to video.
 - `tools/rerun-timeline.mjs` (+ `tools/rerun-timeline.test.mjs`): scrub a per-tick timeline.
+- `tools/review-gate.mjs` (+ `tools/review-gate.test.mjs`): the AGENTS.md review rules R1-R6 as one gate over one commit; a WARN never fails.
 - `tools/rust-quality.mjs` (+ `tools/rust-quality.test.mjs`): score Rust quality.
 - `tools/seal-keys.mjs` (+ `tools/seal-keys.test.mjs`): run cargo legs with seal keys.
 - `tools/secret-gate.mjs` (+ `tools/secret-gate.test.mjs`): block secret leaks.
+- `tools/ship-check.mjs` (+ `tools/ship-check.test.mjs`): name a ship folder's file tree by content hash (`--print`/`--hash`) so two builds compare equal.
+- `tools/ship-run.mjs` (+ `tools/ship-run.test.mjs`): run the shipped proof and arena binaries from a clean folder with a sanitized env and refuse a bad receipt.
 - `tools/ship.mjs` (+ `tools/ship.test.mjs`): node script; see its header.
 - `tools/showcase.mjs` (+ `tools/showcase.test.mjs`): node script; see its header.
 - `tools/sim-source-scan.mjs` (+ `tools/sim-source-scan.test.mjs`): scan sim sources for banned calls.
+- `tools/skills-lint.mjs` (+ `tools/skills-lint.test.mjs`): the repo-side skill gate: loadable front matter, a `skills/SKILLS.md` row, references on disk, size under the pinned baseline.
 - `tools/sort-once.mjs` (+ `tools/sort-once.test.mjs`): node script; see its header.
+- `tools/starter-classes.mjs`: write the six starter class files under `content/classes`; the advanced classes are hand-authored.
 - `tools/tape-checksum.mjs` (+ `tools/tape-checksum.test.mjs`): checksum a tape plus divergence.
+- `tools/temporal-gate.mjs` (+ `tools/temporal-gate.test.mjs`): deterministic ghosting score over `frame_*.png` sequences off vs on; `--selfcheck` needs no files.
 - `tools/ticked-rows-audit.mjs` (+ `tools/ticked-rows-audit.test.mjs`): list ticked board rows whose files are gone.
+- `tools/tools-index.mjs` (+ `tools/tools-index.test.mjs`): inventory gate: every live tool named in this README and every live tool with a test mate or a named exception; `--check` exits 1 on a gap.
+- `tools/unwired-code-gate.mjs`: print every public module of a crate no other crate calls (the module island `wiring-scan` cannot see).
 - `tools/wasm-gate.mjs` (+ `tools/wasm-gate.test.mjs`): ratchet the calls that type-check for wasm32 but break in a browser.
 - `tools/wasm-info.mjs` (+ `tools/wasm-info.test.mjs`): print what a `.wasm` module declares (sections, imports, exports) as JSON.
 - `tools/web-browse.mjs` (+ `tools/web-browse.test.mjs`): open the web build in headless Chrome and read its golden line.
 - `tools/web-budget.mjs` (+ `tools/web-budget.test.mjs`): gate the browser build's size and speed budgets.
 - `tools/web-build.mjs` (+ `tools/web-build.test.mjs`): build `dist/web` (wasm, bindgen, opt).
 - `tools/web-doctor.mjs` (+ `tools/web-doctor.test.mjs`): check the web toolchain (target, wasm-bindgen, wasm-opt, Chrome).
+- `tools/web-headers.mjs` (+ `tools/web-headers.test.mjs`): what the deployed server really sends (type, encoding, bytes) asked as a browser; `--url <site>`.
 - `tools/web-input-check.mjs` (+ `tools/web-input-check.test.mjs`): send real key and mouse events to the web page in headless Chrome and check input and audio.
+- `tools/web-perf.mjs` (+ `tools/web-perf.test.mjs`): the web frame's draw calls and CPU ms off vs on from one page run; fails when the arms drew different pictures.
 - `tools/web-run.mjs` (+ `tools/web-run.test.mjs`): run the web-build workflow (build, clippy, tests, headless Chrome) on an isolated snapshot.
 - `tools/web-search.mjs` (+ `tools/web-search.test.mjs`): web search.
 - `tools/webgpu-cts.mjs` (+ `tools/webgpu-cts.test.mjs`): run a slice of the official WebGPU conformance suite (gpuweb/cts) against the strict instance, one case per process, with an expectations file.
@@ -140,6 +170,5 @@ Test-only mates with no live script (audit pins kept on purpose):
 - `tools/sky-presets3.test.mjs`
 - `tools/spawn-check.test.mjs`
 - `tools/stale-refs.test.mjs`
-- `tools/stale-targets.test.mjs`
 - `tools/toolchain-pin.test.mjs`
 - `tools/w4-compile-cache-plan.test.mjs`

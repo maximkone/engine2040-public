@@ -1,0 +1,86 @@
+name: perf-check
+
+# One perf leg on the runner, report-only until it has a green history. What can run here and what cannot, measured on
+# 2026-10-23 (docs/research/tools-gaps-2026-10-23/README.md, gap 2):
+#
+#   * tools/bench-compare.mjs measures whichever commands it is given and writes a ledger; it reads no baseline file
+#     (0 hits for perf-baseline in tools/bench-compare.mjs; tools/part-score.mjs is the only reader), so there is no
+#     bar in it to compare against. Its own pure checks already run in ci.yml's `node --test "tools/**/*.test.mjs"`.
+#   * tools/proof.mjs --perf runs `cargo test --workspace --release --all-features -- --ignored --test-threads=1`:
+#     that set is every #[ignore]d budget test in the tree, which is wall-clock (p50/p95 walls named *_wall_budget)
+#     and assumes a quiet box, plus the GPU submit and window execution tests that are #[ignore]d because a runner has
+#     no adapter and no display. On a shared runner it is red for reasons that are not a regression, so it is skipped.
+#   * The one former of those that repeats exactly from run to run is the Callgrind instruction count in
+#     crates/perf/benches/instructions.rs: retired instructions do not depend on runner load. That bench runs here.
+#
+# The bench's own 2% bar is a SOFT limit in gungraun (soft_limits in instructions.rs), so this job cannot fail on it:
+# it prints `Ir: now | was (+x%)` and the run stays green. The hard 2% verdict is `irGateVerdict` inside
+# tools/proof.mjs --perf, which needs the rest of that leg to be usable first. Until then this job keeps the numbers on
+# the record (artifact + step summary) so a regression shows up as a trend, and never as a fake pass.
+# Gungraun stores its baseline under target/gungraun; restoring it lets this run compare against the previous one.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  instructions:
+    if: github.repository == 'maximkone/engine2040-public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: install repository toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf-ir
+      - uses: actions/cache@v4
+        with:
+          path: target/gungraun
+          key: gungraun-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            gungraun-${{ runner.os }}-
+      - name: valgrind and the gungraun runner (versions the crate pins)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq valgrind
+          valgrind --version
+          if ! command -v gungraun-runner >/dev/null; then
+            cargo install --locked --version 0.20.0 gungraun-runner
+          fi
+          gungraun-runner --version
+      - name: instruction counts for the three hot loops (soft 2% bar, never fails this job)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo bench --locked -p engine-perf --bench instructions 2>&1 | tee "$RUNNER_TEMP/instructions.log"
+      - name: put the numbers on the run
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### instruction counts (Callgrind, retired instructions)'
+            echo 'Report-only: the gungraun limit is soft here, the hard 2% verdict lives in `node tools/proof.mjs --perf`.'
+            echo '```'
+            grep -E '^\s*(Instructions|Benchmark|simulation::)' "$RUNNER_TEMP/instructions.log" | tail -40 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: instruction-counts
+          path: ${{ runner.temp }}/instructions.log
+          if-no-files-found: warn

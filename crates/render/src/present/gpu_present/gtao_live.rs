@@ -508,6 +508,10 @@ impl Presenter {
     /// `run` is false when the field must stay open: the row is off, or the
     /// 4x path where the depth is not resolved.
     /// Caller: the live, probe and capture frames, before `encode_forward`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one call carries the encoder, targets, list, camera, solve switch, timestamps and submit order"
+    )]
     pub(super) fn encode_ao_field(
         &self,
         enc: &mut wgpu::CommandEncoder,

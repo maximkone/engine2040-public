@@ -12,6 +12,28 @@ import { dirname, resolve } from "node:path";
 
 export const FILES = ["index.html", "loader.js", "coi-serviceworker.js", "engine.js", "engine_bg.wasm", "build.json"];
 export const WASM_FILE = "engine_bg.wasm";
+export const MANIFEST = "build.json";
+
+/** The wasm is the fixed name in an old dist, or its content-hashed name in a pinned one. */
+export const isWasm = (file) => file === WASM_FILE || new RegExp(`^engine_bg\\.[0-9a-f]{12}\\.wasm$`).test(file);
+
+/** The files a pinned build.json names (the fixed files keep their names and are in the pin too), or the fixed list for an old dist. */
+export function filesFrom(manifest) {
+  const pin = manifest?.pin;
+  if (!pin || typeof pin !== "object" || Array.isArray(pin) || !Object.keys(pin).length) return FILES;
+  const names = new Set([MANIFEST]);
+  for (const entry of Object.values(pin)) if (typeof entry?.name === "string" && entry.name) names.add(entry.name);
+  return [...names];
+}
+
+/** GET build.json and read its pin. Throws when the manifest itself is missing or not JSON. */
+export async function fetchManifest(base, fetchFn = fetch) {
+  const res = await fetchFn(new URL(MANIFEST, base), { cache: "no-cache" });
+  if (!res.ok) throw new Error(`${MANIFEST} could not be fetched: HTTP ${res.status}`);
+  const manifest = await res.json();
+  if (!manifest?.pin) throw new Error(`${MANIFEST} names no build pin`);
+  return manifest;
+}
 
 /** Ask for `file` under `base` with a HEAD request that offers br and gzip; returns the facts of the answer. */
 export async function probeFile(base, file, fetchFn = fetch) {
@@ -24,15 +46,15 @@ export async function probeFile(base, file, fetchFn = fetch) {
 export function verdict(rows) {
   const problems = [];
   for (const r of rows) if (r.status !== 200) problems.push(`${r.file}: HTTP ${r.status}`);
-  const wasm = rows.find((r) => r.file === WASM_FILE);
+  const wasm = rows.find((r) => isWasm(r.file));
   if (!wasm) problems.push(`${WASM_FILE} was not probed`);
-  else if (!/^application\/wasm\s*(;|$)/i.test(wasm.contentType ?? "")) problems.push(`${WASM_FILE} is typed "${wasm.contentType}", not application/wasm`);
+  else if (!/^application\/wasm\s*(;|$)/i.test(wasm.contentType ?? "")) problems.push(`${wasm.file} is typed "${wasm.contentType}", not application/wasm`);
   return { ok: problems.length === 0, problems, brotliServed: rows.some((r) => r.contentEncoding === "br") };
 }
 
 /** The summary line for the job log. */
 export function summaryLine(rows) {
-  const wasm = rows.find((r) => r.file === WASM_FILE);
+  const wasm = rows.find((r) => isWasm(r.file));
   const v = verdict(rows);
   return `web-headers: wasm type=${wasm?.contentType ?? "?"} encoding=${wasm?.contentEncoding ?? "?"} bytes=${wasm?.contentLength ?? "?"} brotli=${v.brotliServed ? "served" : "not-served"}`;
 }
@@ -47,6 +69,38 @@ export async function probeAll(base, { files = FILES, fetchFn = fetch, retries =
     rows = [];
     for (const f of files) rows.push(await probeFile(base, f, fetchFn));
     if (verdict(rows).ok) break;
+  }
+  return rows;
+}
+
+/**
+ * Probe a whole site: read build.json's pin first, then HEAD each file it names. A manifest that is not there yet (a
+ * deploy still reaching the edge) is retried with the rest; after the last try the fixed names are probed so the
+ * failure still names the files it asked for.
+ */
+export async function probeSite(base, { fetchFn = fetch, retries = 1, waitMs = 0 } = {}) {
+  let rows = [];
+  let manifestError = null;
+  for (let i = 0; i < retries; i++) {
+    if (i) await sleep(waitMs);
+    manifestError = null;
+    let files = FILES;
+    try {
+      files = filesFrom(await fetchManifest(base, fetchFn));
+    } catch (e) {
+      manifestError = String(e?.message ?? e);
+    }
+    rows = [];
+    for (const f of files) {
+      try {
+        rows.push(await probeFile(base, f, fetchFn));
+      } catch (e) {
+        rows.push({ file: f, status: 0, error: String(e?.message ?? e) });
+      }
+    }
+    if (verdict(rows).ok) break;
+    // The last try keeps why the pin could not be read, so the failure names it.
+    if (manifestError && i === retries - 1) rows.unshift({ file: MANIFEST, status: 0, error: manifestError });
   }
   return rows;
 }
@@ -75,7 +129,7 @@ if (import.meta.main) {
   }
   let rows;
   try {
-    rows = await probeAll(a.url, { retries: a.retries, waitMs: a.wait * 1000 });
+    rows = await probeSite(a.url, { retries: a.retries, waitMs: a.wait * 1000 });
   } catch (e) {
     console.error(`web-headers: ${e.message ?? e}`);
     process.exit(2);

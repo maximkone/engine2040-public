@@ -149,7 +149,7 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
 - [x] DOOR5 tools: the installed bridge is never stale. `tools/mcp-install.mjs --check` fails Landed da72ff8.
   when `.opencode/bin/e2040-mcp.exe` is older than `target/release/e2040-mcp.exe`, and the
   install renames a locked copy aside instead of failing. Accept: node tests for both cases.
-- [ ] FEEL12 feel: the walk answers to a known game, not to our taste. A fixture runs one
+- [x] FEEL12 feel: the walk answers to a known game, not to our taste. A fixture runs one Landed 8bb4eec.
   input tape through our integer controller and through the published Half-Life movement
   model, then prints both speed curves per tick. Source: `ValveSoftware/halflife`
   `pm_shared/pm_shared.c` (`PM_Accelerate` :990, `PM_Friction` :1202, `PM_AirAccelerate`
@@ -163,7 +163,7 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   Kill: if our curve cannot be brought inside the band without importing the engine cvars
   (`maxspeed`, `accelerate`, `airaccelerate`, `friction`, `stopspeed`, `edgefriction`) as
   sim constants, the oracle is not usable - record it and drop the row.
-- [ ] DOOR6 endpoint: a refusal is a record, not a sentence. Steal: `ChiR24/Unreal_mcp@8d7e1495`
+- [x] DOOR6 endpoint: a refusal is a record, not a sentence. Steal: `ChiR24/Unreal_mcp@8d7e1495`
   `semantic/errors.ts` - every code carries `kind`, `retryable`, `suggestions[]`, the revision
   pair and a `next` call. We have 348 refusal sites and 177 codes, none with a machine-readable
   advice field; the 12 most used codes cover 133 sites, so those go first. Files:
@@ -171,6 +171,7 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   Accept: a test walks every code in the table and asserts the four fields, and each suggestion
   parses back as a valid verb call in dry run; one test per top-12 code pins its suggestion text.
   F2P: a refusal is a string with no fields.
+  Landed 5babbaef0. `mcp_refusal.rs` owns the `McpToolError` record (`code`, `message`, `data`, `kind`, `retryable`, `suggestions`, `next`) and fills the four advice fields from the code tables inside `McpToolError::new`, so all 348 refusal sites gained them without an edit; `Kind` is input, state, permission, budget, feature or internal, and the twelve most-hit codes carry hand-pinned suggestions plus the one next call. Proof: `cargo test -p engine-endpoint --features mcp --lib refusal` 39 passed, 0 failed - a scan of the crate's own literals finds 150+ codes and none unclassified, a payload test shows the four fields crossing the door, and twelve `refusal_pinned_*` tests pin each suggestion. rust-quality PASS, rustfmt clean, `git diff --check` clean. `--tighten` deferred: `tools/rust-quality.baseline.json` carries another session's edits.
 - [ ] DOOR7 proof: the ladder measures the model, not our mood. Steal: `SummerEngine/summer@88d0a5b6`
   `evals/end-to-end/README.md` - six fixed prompts, all-or-nothing gates, wall clock, tool calls
   and cost printed per rung. Rungs: E0 door alive, E1 player walks, E2 two fighters trade, E3 parry

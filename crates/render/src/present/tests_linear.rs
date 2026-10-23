@@ -880,18 +880,26 @@ mod device {
     }
 }
 
-/// LF4 slice 2: the live blit blooms linear HDR before the one tone map.
-/// No adapter needed: reads `blit.wgsl` text. Fails before the bloom lands.
+/// RL36: the live blit adds the dual-filter chain's halo before the one tone
+/// map. No adapter needed: reads `blit.wgsl` text.
 #[test]
 fn the_blit_blooms_before_the_one_tone_map() {
     let blit = include_str!("../shaders/blit.wgsl");
     assert!(
-        blit.contains("fn blit_bloom("),
-        "live blit holds the LF4 bloom"
+        blit.contains("@binding(5) var bloom_tex: texture_2d<f32>"),
+        "the blit binds the chain's half-res halo"
     );
     assert!(
-        blit.contains("BLIT_BLOOM_THRESHOLD"),
-        "bloom threshold is named"
+        blit.contains("fn blit_bloom("),
+        "live blit holds the bloom add"
+    );
+    assert!(
+        blit.contains("BLIT_BLOOM_INTENSITY"),
+        "bloom intensity is named"
+    );
+    assert!(
+        blit.contains("textureSampleLevel(bloom_tex, hdr_smp, uv, 0.0)"),
+        "the halo is rung 0 of the tent ladder"
     );
     assert!(
         blit.contains("blit_bloom(lit.rgb"),

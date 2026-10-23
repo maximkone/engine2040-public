@@ -36,6 +36,8 @@ touched. Every path below was checked with `Test-Path`.
   (`docs/research/HARD-SYSTEMS-CARDS.md` ×4, `docs/research/DISCOVERED.md` ×2).
   The test header says the fix was denied and the lead applies the one-liners;
   its pin asserts `EXPECT-STALE 6`. Editing them would move a deliberate pin.
+  Resolved 2026-10-23: the pin is a live scan now (no live doc may name either
+  file) and `tools/stale-targets.test.mjs` is deleted.
 - `EMPIRE.md` / `EMPIRE-INBOX.md` refs: `docs/plan/README.md:83`,
   `docs/library/index.md:96`, `docs/plan/2026-10-18-handoff.md:16`,
   `docs/plan/gameplay.md:409`, `docs/design/STAGES.md:435`. The owner retired

@@ -17,7 +17,9 @@
 //!
 //! Shape: one `Resource` per family, one root pointer each. `resources/list`
 //! names the roots; a client that learned a child URI from a root can read it
-//! directly, and the roots stay four short lines instead of a fan-out.
+//! directly, and the roots stay four short lines instead of a fan-out. A
+//! child URI (`<root>/<id>`) reads the one row its id names, so a template a
+//! client learned from `resources/templates/list` is never a dead end.
 //!
 //! Units: chars for the text, counts for the rows. Determinism: the same
 //! build always produces the same bytes; no clock, no network, no float. The
@@ -162,15 +164,21 @@ pub fn read_resource_text(
     uri: &str,
     tool_rows: &[(String, String, String)],
 ) -> Result<String, ResourceError> {
-    let body = match uri {
-        CRATE_MAP_URI => crate_map_text(),
-        DOOR_REFERENCE_URI => door_reference_text(tool_rows),
-        ERROR_CATALOG_URI => error_catalog_text(),
-        GAME_TOML_SCHEMA_URI => game_toml_schema_text(),
-        other => {
-            return Err(ResourceError::UnknownUri {
-                uri: other.to_owned(),
-            })
+    let body = if let Some((root, id)) = split_child(uri) {
+        child_text(root, id, tool_rows).ok_or_else(|| ResourceError::UnknownUri {
+            uri: uri.to_owned(),
+        })?
+    } else {
+        match uri {
+            CRATE_MAP_URI => crate_map_text(),
+            DOOR_REFERENCE_URI => door_reference_text(tool_rows),
+            ERROR_CATALOG_URI => error_catalog_text(),
+            GAME_TOML_SCHEMA_URI => game_toml_schema_text(),
+            other => {
+                return Err(ResourceError::UnknownUri {
+                    uri: other.to_owned(),
+                })
+            }
         }
     };
     if body.chars().count() > MAX_RESOURCE_CHARS {
@@ -183,6 +191,54 @@ pub fn read_resource_text(
         });
     }
     Ok(body)
+}
+
+/// Split `<root>/<id>` into the root it belongs to and the child id.
+///
+/// Returns `None` for a root URI itself and for any URI no root prefixes.
+fn split_child(uri: &str) -> Option<(&'static str, &str)> {
+    ROOT_URIS.iter().find_map(|root| {
+        uri.strip_prefix(*root)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .filter(|id| !id.is_empty())
+            .map(|id| (*root, id))
+    })
+}
+
+/// One child row of one family, under the same header its root carries.
+///
+/// `None` means the id names no row in that family; the caller turns that
+/// into the same `UnknownUri` a bad root gets.
+fn child_text(root: &str, id: &str, tool_rows: &[(String, String, String)]) -> Option<String> {
+    match root {
+        CRATE_MAP_URI => {
+            let (crate_dir, job) = CRATE_MAP.iter().find(|(name, _)| *name == id)?;
+            Some(format!(
+                "# crate map: {crate_dir}\n\ncrate | what it owns\n{crate_dir} | {job}\n"
+            ))
+        }
+        DOOR_REFERENCE_URI => {
+            let (name, pack, card) = tool_rows.iter().find(|(name, _, _)| name == id)?;
+            Some(format!(
+                "# door reference: {name}\n\ntool | pack | card\n{name} | {pack} | {card}\n"
+            ))
+        }
+        ERROR_CATALOG_URI => {
+            let (code, meaning, recovery) =
+                ERROR_CATALOG.iter().find(|(code, _, _)| *code == id)?;
+            Some(format!(
+                "# error catalog: {code}\n\ncode | meaning | recovery\n{code} | {meaning} | {recovery}\n"
+            ))
+        }
+        GAME_TOML_SCHEMA_URI => {
+            let (key, kind, legal, meaning) =
+                GAME_TOML_SCHEMA.iter().find(|(key, _, _, _)| *key == id)?;
+            Some(format!(
+                "# game.toml schema: {key}\n\nkey | type | legal values | meaning\n{key} | {kind} | {legal} | {meaning}\n"
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// Read one resource as the MCP wire contents.
@@ -775,6 +831,45 @@ mod tests {
         for uri in ROOT_URIS {
             let text = read_resource_text(uri, &rows).expect("root reads");
             assert!(!text.is_empty(), "{uri} carries text");
+        }
+    }
+
+    #[test]
+    fn resource_template_reads_one_child() {
+        let rows = vec![(
+            "scene.read".to_owned(),
+            "core".to_owned(),
+            "observe".to_owned(),
+        )];
+        let cases = [
+            ("e2040://door-reference/scene.read", "scene.read"),
+            ("e2040://error-catalog/bad_args", "bad_args"),
+            ("e2040://game-toml-schema/name", "name"),
+            ("e2040://crate-map/core", "core"),
+        ];
+        for (uri, id) in cases {
+            let text = read_resource_text(uri, &rows).expect("the child reads");
+            let body: Vec<&str> = text
+                .lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect();
+            assert_eq!(body.len(), 2, "one header and one row at {uri}: {text}");
+            assert!(
+                body[1].starts_with(&format!("{id} |")),
+                "the child carries its own row at {uri}: {text}"
+            );
+        }
+        for uri in [
+            "e2040://door-reference/no.such",
+            "e2040://error-catalog/no_such",
+            "e2040://game-toml-schema/nope",
+            "e2040://crate-map/nope",
+        ] {
+            let error = read_resource_text(uri, &rows).expect_err("an unknown child refuses");
+            assert!(
+                matches!(error, ResourceError::UnknownUri { .. }),
+                "{uri} refuses as unknown_uri"
+            );
         }
     }
 

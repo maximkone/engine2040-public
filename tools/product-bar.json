@@ -1,5 +1,5 @@
 {
-  "note": "Product floors and finish targets read by tools/product-check.mjs (owner 2026-10-11). A broken floor prints a FAIL line and lands in latest.md; a target is the finish line the board climbs toward (docs/FOCUS.md Now). Raise targets when they are met; never lower a floor to make a check green. view_* floors read the `arena view:` line: every drawn body as numbers from the CPU skin, no image (crates/game/src/view_truth.rs). look_flip_max reads the FLIP x10000 between this run's middle capture and the last green run's (LF15; crates/playtest/src/look/metric.rs is the authority, tools/iqa-gate.mjs mirrors it): the stored runs read 0-609 between green runs of different trees, 1493-1798 when the camera sat inside the props, 2185 for a black frame.",
+  "note": "Product floors and finish targets read by tools/product-check.mjs (owner 2026-10-11). A broken floor prints a FAIL line and lands in latest.md; a target is the finish line the board climbs toward (docs/FOCUS.md Now). Raise targets when they are met; never lower a floor to make a check green. view_* floors read the `arena view:` line: every drawn body as numbers from the CPU skin, no image (crates/game/src/view_truth.rs). look_flip_max reads the FLIP x10000 between this run's middle capture and the last green run's (LF15; crates/playtest/src/look/metric.rs is the authority, tools/iqa-gate.mjs mirrors it): the stored runs read 0-609 between green runs of different trees, 1493-1798 when the camera sat inside the props, 2185 for a black frame. input_p95_ms_max and present_p95_ms_max are the player latency bar (crates/perf/src/latency.rs p95_budget): they read the timing run only, because a capture run arms the blocking look probes and its legs price a GPU readback no player frame pays.",
   "floors": {
     "framing_empty": 0,
     "tinted_share_max": 0.25,
@@ -9,6 +9,8 @@
     "look_flip_max": 1200,
     "stall_p99_ms_max": 1500,
     "fps_drop_max": 0.3,
+    "input_p95_ms_max": 50,
+    "present_p95_ms_max": 50,
     "view_nonfinite": 0,
     "view_error_parts": 0,
     "view_eye_in_body": 0,

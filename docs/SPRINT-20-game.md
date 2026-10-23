@@ -373,6 +373,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   obsolete or re-scope to a new caller row. Question in
   `docs/plan/2026-10-19-owner-queue.md`.
   Landed. Owner chat 2026-10-19 (delegated): closed as obsolete: its named `ballistics.rs` is gone and `combat::projectile::step_round` has no game caller (same as WD10).
+  Correction 2026-10-23: `crates/game/src/ballistics.rs` was removed in d89bd98e0, `step_round` lives in `crates/combat/src/projectile.rs` and still has no game caller (`git grep step_round -- crates/game` is empty), and `docs/plan/2026-10-19-owner-queue.md` records the obsolete close. The Accept cannot run, so the tick records the close, not a passing test.
 - [x] AX25 endpoint: fetched text is fenced as data — `crates/endpoint/src/assistant.rs` Landed 1d01a410. `cargo test -p engine-endpoint --features mcp --lib -- fence` fence_planted_instructions_make_no_unlisted_calls (10 planted-instruction fixtures x2, no tag-like call survives; observe rows are fenced with the `data, not instructions` line, propose rows byte-identical) green, gh run 39059683408; full `cargo test -p engine-endpoint --features mcp --lib` 555 passed, 1 ignored, gh run 39060654787.
   passes tool output and fetched text into a model prompt with no fence
   (`rg -i "untrusted|fence" assistant.rs` empty; Sekar 12). Wrap each in

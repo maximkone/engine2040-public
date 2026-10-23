@@ -1360,6 +1360,12 @@ impl Presenter {
                         LIVE_BLOOM_KNEE,
                     )
                 });
+            // RL36: the dual-filter chain runs only when the gate opened. A
+            // closed gate records no dispatch, so the halo texture is never
+            // read and stays off this frame's cost.
+            if bloom_on {
+                self.bloom_gpu.encode(&mut enc, &targets.bloom, None);
+            }
             let bloom_flag: f32 = if bloom_on { 1.0 } else { 0.0 };
             self.queue.write_buffer(
                 &targets.fog_col_buf,
@@ -1653,6 +1659,14 @@ impl Presenter {
             });
         {
             let targets = self.targets.as_ref().expect("ensured above");
+            // RL36: the probe path keeps no bloom. The halo texture belongs to
+            // the live frame, so the shared flag goes back to 0 before this
+            // blit: a probe frame is the same picture it was before the chain.
+            self.queue.write_buffer(
+                &targets.fog_col_buf,
+                LIVE_BLOOM_FLAG_OFFSET,
+                &0.0f32.to_le_bytes(),
+            );
             // Cached at attach: no per-frame pipeline build, and a failed
             // attach never replaced the last-good one.
             let (blit_view, blit_pipeline) = self.sink_target(sink)?;

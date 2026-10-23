@@ -20,19 +20,29 @@ use std::time::{Duration, Instant};
 
 use engine_arena::fork::{Fork, ForkMetrics, ForkProposal};
 use engine_arena::{run_prefix, ArenaConfig, FighterTape};
-use engine_core::{decode_seal_hex, hash_hex, Fnv64, SealKeyError};
+use engine_core::{hash_hex, Fnv64};
 use engine_provider::protocol::{AdapterKind, AiError, PrivacyMode, TaskKind};
 use engine_provider::{AiSessionPolicy, Fallback, FallbackCause, MockStep, ProviderCapabilities};
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 
 use crate::agent::Backend;
-use crate::door::{door_call, DoorCall};
+use crate::door::{
+    cassette_from_env, door_call_with_targets, BackendTargets, CassetteSetup, DoorAnswer, DoorCall,
+};
 use crate::frame_check::{check_scripted, Script as FrameScript, Thresholds};
 
+mod evidence;
 pub mod scorecard;
 mod trajectory;
 mod utility;
+
+pub use engine_core::MIN_SEAL_KEY_BYTES;
+#[cfg(test)]
+use evidence::seal_key_from_env;
+pub use evidence::{
+    evidence_dir, operator_seal_key, parse_seal_key, EVIDENCE_MANIFEST, EVIDENCE_REPORT,
+    EVIDENCE_SEAL, EVIDENCE_TAPE, OPERATOR_KEY_ENV, SEAL_SCHEME,
+};
+use evidence::{seal_manifest, verify_manifest_seal};
 
 /// Backends every task executes against, in report order.
 pub const BACKENDS: [Backend; 3] = [Backend::Mock, Backend::Local, Backend::Remote];
@@ -52,6 +62,16 @@ pub const LOCAL_COST_ANCHOR: u64 = 40;
 pub const MAX_DETAIL_CHARS: usize = 256;
 /// Opt-in env for live network; default runs fixtures only.
 pub const LIVE_ENV: &str = "E2040_EVAL_LIVE";
+/// Env naming the local sidecar endpoint, e.g.
+/// `http://127.0.0.1:8080/v1/chat/completions`. Unset keeps local rows on the
+/// in-process mock (the offline default); set routes them through
+/// [`LocalAdapter`](engine_provider::LocalAdapter) behind the cassette layer.
+pub const LOCAL_URL_ENV: &str = "E2040_LOCAL_URL";
+/// Env naming the configured remote endpoint. Unset keeps remote rows on the
+/// mock; set routes them through [`RemoteAdapter`](engine_provider::RemoteAdapter).
+pub const REMOTE_URL_ENV: &str = "E2040_REMOTE_URL";
+/// Env holding the remote bearer token, read at call time and never logged.
+pub const REMOTE_TOKEN_ENV: &str = "E2040_REMOTE_TOKEN";
 /// Env override for the `e2040-mcp` binary path.
 pub const MCP_BIN_ENV: &str = "E2040_MCP_BIN";
 /// Binary name served over MCP stdio.
@@ -665,6 +685,18 @@ pub(crate) fn bound_detail(text: String) -> String {
     }
 }
 
+/// Name the adapter that answered in the row detail, trimming the base text
+/// so the label always survives the bound. A row can never lose the one field
+/// that says whether a model or the mock produced it.
+fn with_adapter(mut row: EvalRow, adapter: &str) -> EvalRow {
+    let suffix = format!(" adapter={adapter}");
+    let room = MAX_DETAIL_CHARS.saturating_sub(suffix.chars().count());
+    let mut detail: String = row.detail.chars().take(room).collect();
+    detail.push_str(&suffix);
+    row.detail = detail;
+    row
+}
+
 /// Adapter, model name, privacy and session for one backend row.
 pub(crate) fn backend_wiring(
     backend: Backend,
@@ -792,6 +824,29 @@ fn fork_window(seed: u64, proposals: &[ForkProposal], ticks: u32) -> Option<Fork
 
 /// Execute one authoring task against one backend on fixtures.
 fn run_authoring_row(task: &EvalTask, index: u64, backend: Backend) -> EvalRow {
+    let cassette = cassette_from_env();
+    authoring_row(
+        task,
+        index,
+        backend,
+        &BackendTargets::from_env(),
+        cassette.as_ref(),
+    )
+    .0
+}
+
+/// One authoring row with explicit endpoint and cassette wiring. The row
+/// detail ends with `adapter=<label>` naming the adapter that answered (the
+/// offline default records `mock`), so a mock-labeled run can never be read
+/// as a model run. Returns the answered call too, so a test can check the
+/// proposal that came back without calling the provider twice.
+fn authoring_row(
+    task: &EvalTask,
+    index: u64,
+    backend: Backend,
+    targets: &BackendTargets,
+    cassette: Option<&CassetteSetup>,
+) -> (EvalRow, Option<DoorAnswer>) {
     let base = EvalRow {
         task: task.id,
         flow: task.flow.as_str(),
@@ -830,10 +885,17 @@ fn run_authoring_row(task: &EvalTask, index: u64, backend: Backend) -> EvalRow {
         row.detail = bound_detail(detail);
         row
     };
-    if let Err(refusal) = door_call(&call) {
-        return refused(base, refusal.error);
-    }
-    match task.script {
+    let answer = match door_call_with_targets(&call, cassette, targets) {
+        Ok(answer) => answer,
+        Err(refusal) => {
+            return (
+                with_adapter(refused(base, refusal.error), refusal.adapter),
+                None,
+            )
+        }
+    };
+    let adapter = answer.adapter;
+    let row = match task.script {
         TaskScript::ForkNeutral => {
             let ticks = 120;
             let first = fork_window(2040 + index, &[], ticks);
@@ -897,22 +959,29 @@ fn run_authoring_row(task: &EvalTask, index: u64, backend: Backend) -> EvalRow {
             }
         }
         TaskScript::Clean | TaskScript::PrivacyProbe => {
-            let mut row = base;
-            if let Err(fault) = trajectory::task_trajectory(task, index, backend) {
-                row.rejected = true;
-                row.detail = bound_detail(format!("trajectory refused: {fault}"));
-                return row;
+            match trajectory::task_trajectory(task, index, backend) {
+                Err(fault) => {
+                    let mut row = base;
+                    row.rejected = true;
+                    row.detail = bound_detail(format!("trajectory refused: {fault}"));
+                    row
+                }
+                Ok(()) => {
+                    let mut row = base;
+                    row.completed = true;
+                    row.detail = bound_detail(match task.flow {
+                        Flow::Brief => "brief ok: bounded summary recorded".to_owned(),
+                        Flow::Place => "place ok: intent proposal validates".to_owned(),
+                        Flow::Preview => "preview ok: dry-run effects recorded".to_owned(),
+                        Flow::Apply => "apply ok: 1 action landed (simulated)".to_owned(),
+                        Flow::Undo => "undo ok: batch reverted (simulated)".to_owned(),
+                        Flow::Fork | Flow::Run | Flow::Capture | Flow::Verify => {
+                            "proposal ok".to_owned()
+                        }
+                    });
+                    row
+                }
             }
-            row.completed = true;
-            row.detail = bound_detail(match task.flow {
-                Flow::Brief => "brief ok: bounded summary recorded".to_owned(),
-                Flow::Place => "place ok: intent proposal validates".to_owned(),
-                Flow::Preview => "preview ok: dry-run effects recorded".to_owned(),
-                Flow::Apply => "apply ok: 1 action landed (simulated)".to_owned(),
-                Flow::Undo => "undo ok: batch reverted (simulated)".to_owned(),
-                Flow::Fork | Flow::Run | Flow::Capture | Flow::Verify => "proposal ok".to_owned(),
-            });
-            row
         }
         TaskScript::Malformed | TaskScript::Stale | TaskScript::Timeout | TaskScript::Quota => {
             refused(base, AiError::MalformedOutput)
@@ -927,7 +996,8 @@ fn run_authoring_row(task: &EvalTask, index: u64, backend: Backend) -> EvalRow {
             row.detail = bound_detail("refused: play script on an authoring row".to_owned());
             row
         }
-    }
+    };
+    (with_adapter(row, adapter), Some(answer))
 }
 
 /// Final checkpoint hash of a small headless match, if it builds.
@@ -1039,7 +1109,9 @@ fn run_play_row(task: &EvalTask, index: u64, backend: Backend) -> EvalRow {
             row.detail = bound_detail("play refused: authoring script on a play row".to_owned());
         }
     }
-    row
+    // Play rows call no provider: `none` says so instead of leaving the
+    // adapter unknown.
+    with_adapter(row, "none")
 }
 
 /// One row by task id, for callers that address tasks by name.
@@ -1306,107 +1378,11 @@ pub fn run_distractor_stress(distractors: usize) -> (Vec<EvalRow>, Vec<EvalRow>)
     (clean_rows, stress_rows)
 }
 
-/// Evidence report file name under `target/evidence/a6/`.
-pub const EVIDENCE_REPORT: &str = "report.txt";
-/// Evidence tape file name under `target/evidence/a6/`: one line per row.
-pub const EVIDENCE_TAPE: &str = "tape.log";
-/// Digest manifest beside the A6 evidence files.
-pub const EVIDENCE_MANIFEST: &str = "digests.txt";
-/// Seal over the manifest bytes; the manifest is never trusted bare.
-pub const EVIDENCE_SEAL: &str = "digests.sha";
-
-/// Directory holding the A6 evidence, resolved from the crate location so
-/// the proof runs from any working directory.
-pub fn evidence_dir() -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/evidence/a6")
-}
-
-/// Keyed-seal scheme for `digests.sha`: HMAC-SHA256 over the manifest bytes
-/// under the operator key. Seals without this prefix are rejected outright.
-pub const SEAL_SCHEME: &str = "hmac-sha256";
-/// Environment holding the operator seal key as hex (64+ chars for 32+
-/// bytes). The key lives with the operator, never in the repo.
-pub const OPERATOR_KEY_ENV: &str = "E2040_EVIDENCE_KEY";
-/// Minimum operator key length in bytes; short keys fail loudly at parse.
-pub use engine_core::MIN_SEAL_KEY_BYTES;
-
 /// Fold `text` behind its byte length so adjacent texts cannot collide.
 /// Shared by the living-world and spatial eval digests.
 pub(crate) fn mix_text(hash: &mut Fnv64, text: &str) {
     hash.write_len(text.len());
     hash.write_str(text);
-}
-
-/// A refused operator key with the remediation attached.
-fn seal_key_error(detail: &str) -> EvalError {
-    let reason = format!("{detail}; set {OPERATOR_KEY_ENV} to {MIN_SEAL_KEY_BYTES}+ bytes as hex");
-    EvalError::SealKey { reason }
-}
-
-/// The eval error for a key the shared parser refused.
-fn key_refusal(error: SealKeyError) -> EvalError {
-    seal_key_error(match error {
-        SealKeyError::NotHex => "key must be hex",
-        SealKeyError::TooShort => "key is too short",
-        SealKeyError::Missing => "operator key is missing",
-    })
-}
-
-/// Parse an operator seal key from hex text (even-length hex decoding to at
-/// least [`MIN_SEAL_KEY_BYTES`] bytes). Malformed keys fail loudly.
-pub fn parse_seal_key(text: &str) -> Result<Vec<u8>, EvalError> {
-    engine_core::parse_seal_key(text).map_err(key_refusal)
-}
-
-/// Read the operator seal key from [`OPERATOR_KEY_ENV`]; verify fails closed
-/// on a missing key, never open.
-pub fn operator_seal_key() -> Result<Vec<u8>, EvalError> {
-    seal_key_from_env(OPERATOR_KEY_ENV)
-}
-
-/// Named-variable read for [`operator_seal_key`]; testable without mutation.
-fn seal_key_from_env(var: &str) -> Result<Vec<u8>, EvalError> {
-    engine_core::seal_key_from_env(var).map_err(key_refusal)
-}
-
-/// Seal manifest bytes with the operator key: HMAC-SHA256 from the `hmac`
-/// crate (never hand-rolled), rendered as `hmac-sha256:<64 hex>\n`.
-fn seal_manifest(manifest: &[u8], key: &[u8]) -> Result<String, EvalError> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key)
-        .map_err(|_| seal_key_error("key was rejected by the HMAC backend"))?;
-    mac.update(manifest);
-    let tag = mac.finalize().into_bytes();
-    let hex: String = tag.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok(format!("{SEAL_SCHEME}:{hex}\n"))
-}
-
-/// Check a seal against manifest bytes under the operator key. Unkeyed,
-/// malformed or mismatched seals fail typed [`EvalError::DigestMismatch`]
-/// naming [`EVIDENCE_SEAL`]; comparison runs in constant time.
-fn verify_manifest_seal(manifest: &[u8], seal: &str, key: &[u8]) -> Result<(), EvalError> {
-    let scheme = format!("{SEAL_SCHEME}:<64 hex>");
-    let mismatch = |want: &str, got: &str| EvalError::DigestMismatch {
-        file: EVIDENCE_SEAL.to_owned(),
-        want: want.to_owned(),
-        got: got.to_owned(),
-    };
-    let Some(tag_hex) = seal
-        .trim()
-        .strip_prefix(SEAL_SCHEME)
-        .and_then(|rest| rest.strip_prefix(':'))
-    else {
-        return Err(mismatch(&scheme, "unkeyed-seal"));
-    };
-    let Some(tag) = decode_seal_hex(tag_hex).filter(|tag| tag.len() == 32) else {
-        return Err(mismatch(&scheme, "malformed-seal"));
-    };
-    let mut mac = Hmac::<Sha256>::new_from_slice(key)
-        .map_err(|_| seal_key_error("key was rejected by the HMAC backend"))?;
-    mac.update(manifest);
-    if mac.verify_slice(&tag).is_err() {
-        return Err(mismatch("valid-hmac-sha256-tag", tag_hex));
-    }
-    Ok(())
 }
 
 /// True when the text is a 16-char lowercase hex digest.
@@ -1564,6 +1540,116 @@ pub use trace_export::{export_trace, import_trace, TRACE_MAGIC, TRACE_VERSION};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A loopback OpenAI-compatible endpoint for adapter tests: it counts
+    /// connections, reports each request path before writing the response,
+    /// and answers `body`. The accept thread runs for the test process; a
+    /// leaked blocked accept is harmless next to a failing assertion.
+    struct FakeServer {
+        url: String,
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        paths: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl FakeServer {
+        fn spawn(body: String) -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::{Arc, Mutex};
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("fake server binds loopback");
+            let port = listener.local_addr().expect("fake server addr").port();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let (seen_hits, seen_paths) = (Arc::clone(&hits), Arc::clone(&paths));
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { break };
+                    seen_hits.fetch_add(1, Ordering::SeqCst);
+                    serve_http_once(stream, &body, &mut |path| {
+                        seen_paths
+                            .lock()
+                            .expect("fake server paths")
+                            .push(path.to_owned());
+                    });
+                }
+            });
+            Self {
+                url: format!("http://127.0.0.1:{port}/v1/chat/completions"),
+                hits,
+                paths,
+            }
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn paths(&self) -> Vec<String> {
+            self.paths.lock().expect("fake server paths").clone()
+        }
+    }
+
+    /// One canned chat-completions envelope whose content is `proposal`.
+    fn chat_completion(proposal: &str) -> String {
+        let escaped = proposal.replace('"', "\\\"");
+        format!(
+            "{{\"id\":\"stub-1\",\"object\":\"chat.completion\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{escaped}\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":5}}}}"
+        )
+    }
+
+    /// Serve one HTTP/1.1 exchange and read the whole request before
+    /// answering. `on_path` sees the request path before the response bytes,
+    /// so a test that gets an answer also knows the path that asked.
+    fn serve_http_once(stream: std::net::TcpStream, body: &str, on_path: &mut dyn FnMut(&str)) {
+        use std::io::{Read, Write};
+        let mut stream = stream;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let header_end = loop {
+            if raw.len() > 16_384 {
+                return;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(count) => {
+                    raw.extend_from_slice(&chunk[..count]);
+                    if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break index;
+                    }
+                }
+                Err(_) => return,
+            }
+        };
+        let head = String::from_utf8_lossy(&raw[..header_end]).into_owned();
+        if let Some(path) = head
+            .split("\r\n")
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+        {
+            on_path(path);
+        }
+        let mut length = 0usize;
+        for line in head.split("\r\n").skip(1) {
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+        let mut pending = raw.split_off(header_end + 4);
+        while pending.len() < length {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => pending.extend_from_slice(&chunk[..count]),
+                Err(_) => break,
+            }
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    }
 
     #[test]
     fn task_counts_cover_every_flow() {
@@ -2022,6 +2108,121 @@ mod tests {
         println!("{count} retrieval_dilution");
     }
 
+    /// The `Local` label must reach the real sidecar adapter, not the mock:
+    /// one exchange on `/v1/chat/completions`, and the answer body decides
+    /// the proposal.
+    #[test]
+    fn ev1_local_row_answers_through_the_local_adapter() {
+        let body = chat_completion(
+            "{\"actions\": [{\"noop\": true}], \"diagnostics\": [\"server:local-body\"]}",
+        );
+        let server = FakeServer::spawn(body);
+        let targets = BackendTargets {
+            local_url: Some(server.url.clone()),
+            remote_url: None,
+            remote_token_env: None,
+        };
+        let task = AUTHORING_TASKS
+            .iter()
+            .find(|task| task.id == "a01")
+            .expect("a01 exists");
+        let (row, answer) = authoring_row(task, 0, Backend::Local, &targets, None);
+        let answer = answer.expect("the fake server answers");
+        assert!(row.completed, "row completes: {row:?}");
+        assert_eq!(row.backend, "local", "the row keeps its backend label");
+        assert!(
+            row.detail.ends_with("adapter=local"),
+            "the row names the adapter that answered: {}",
+            row.detail
+        );
+        assert!(
+            !row.detail.contains("adapter=mock"),
+            "a live row never reports the mock: {}",
+            row.detail
+        );
+        assert_eq!(answer.adapter, "local");
+        assert!(
+            answer
+                .proposal
+                .diagnostics
+                .iter()
+                .any(|line| line == "server:local-body"),
+            "the answer came from the server body: {:?}",
+            answer.proposal.diagnostics
+        );
+        assert_eq!(server.hits(), 1, "exactly one exchange, no retry");
+        assert_eq!(
+            server.paths(),
+            vec![String::from("/v1/chat/completions")],
+            "the local adapter asks the sidecar route"
+        );
+    }
+
+    /// The same local exchange records to a cassette and replays with zero
+    /// sockets: a replay hit never dials, and the row matches the record.
+    #[test]
+    fn ev1_local_row_records_and_replays_from_a_cassette() {
+        use engine_provider::cassette::CassetteMode;
+
+        let body = chat_completion(
+            "{\"actions\": [{\"noop\": true}], \"diagnostics\": [\"server:cassette\"]}",
+        );
+        let server = FakeServer::spawn(body);
+        let dir =
+            std::env::temp_dir().join(format!("e2040-ev1-local-cassette-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let task = AUTHORING_TASKS
+            .iter()
+            .find(|task| task.id == "a04")
+            .expect("a04 exists");
+        let live = BackendTargets {
+            local_url: Some(server.url.clone()),
+            remote_url: None,
+            remote_token_env: None,
+        };
+        let record = CassetteSetup {
+            mode: CassetteMode::Record,
+            dir: dir.clone(),
+        };
+        let (recorded_row, recorded_answer) =
+            authoring_row(task, 3, Backend::Local, &live, Some(&record));
+        let recorded_answer = recorded_answer.expect("record answers live");
+        assert!(recorded_row.completed, "record row: {recorded_row:?}");
+        assert_eq!(server.hits(), 1, "one live exchange recorded");
+        let entries = std::fs::read_dir(&dir)
+            .expect("the record created the store")
+            .count();
+        assert_eq!(entries, 1, "one cassette entry written");
+
+        // A dead loopback URL can never answer, so a replay hit proves the
+        // store served the call without a socket.
+        let dead_port = {
+            let probe =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("dead port binds loopback");
+            probe.local_addr().expect("dead port addr").port()
+        };
+        let dead = BackendTargets {
+            local_url: Some(format!("http://127.0.0.1:{dead_port}/v1/chat/completions")),
+            remote_url: None,
+            remote_token_env: None,
+        };
+        let replay = CassetteSetup {
+            mode: CassetteMode::Replay,
+            dir: dir.clone(),
+        };
+        let (replay_row, replay_answer) =
+            authoring_row(task, 3, Backend::Local, &dead, Some(&replay));
+        let replayed = replay_answer.expect("replay answers from the store");
+        assert_eq!(replayed, recorded_answer, "replay bytes match the record");
+        assert_eq!(replay_row, recorded_row, "the whole row matches the record");
+        assert_eq!(
+            server.hits(),
+            1,
+            "a replay hit makes no exchange on the record server"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn ev1_cassette_replay_is_byte_identical_offline() {
         use engine_provider::cassette::{
@@ -2035,55 +2236,8 @@ mod tests {
         // One canned chat-completions envelope. The strict proposal grammar
         // parses its content at the first rung, so the record pass costs
         // exactly one exchange; a ladder drop would fail loudly below.
-        fn serve_one(stream: std::net::TcpStream, body: &str) {
-            use std::io::{Read, Write};
-            let mut stream = stream;
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-            let mut raw = Vec::new();
-            let mut chunk = [0u8; 1024];
-            let header_end = loop {
-                if raw.len() > 16_384 {
-                    return;
-                }
-                match stream.read(&mut chunk) {
-                    Ok(0) => return,
-                    Ok(count) => {
-                        raw.extend_from_slice(&chunk[..count]);
-                        if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n")
-                        {
-                            break index;
-                        }
-                    }
-                    Err(_) => return,
-                }
-            };
-            let head = String::from_utf8_lossy(&raw[..header_end]).into_owned();
-            let mut length = 0usize;
-            for line in head.split("\r\n").skip(1) {
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse::<usize>().unwrap_or(0);
-                }
-            }
-            let mut pending = raw.split_off(header_end + 4);
-            while pending.len() < length {
-                match stream.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(count) => pending.extend_from_slice(&chunk[..count]),
-                    Err(_) => break,
-                }
-            }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
-        }
-
-        let proposal = "{\"actions\": [{\"noop\": true}], \"diagnostics\": [\"cassette:suite\"]}";
-        let escaped = proposal.replace('"', "\\\"");
-        let body = format!(
-            "{{\"id\":\"stub-1\",\"object\":\"chat.completion\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{escaped}\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":5}}}}"
+        let body = chat_completion(
+            "{\"actions\": [{\"noop\": true}], \"diagnostics\": [\"cassette:suite\"]}",
         );
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("suite stub binds loopback");
@@ -2094,7 +2248,7 @@ mod tests {
             // record never connects, and a leaked blocked accept is harmless
             // next to the failing assertion it accompanies.
             if let Ok((stream, _)) = listener.accept() {
-                serve_one(stream, &body);
+                serve_http_once(stream, &body, &mut |_| {});
             }
         });
         // Bind-and-drop a loopback port so replay dials deterministically

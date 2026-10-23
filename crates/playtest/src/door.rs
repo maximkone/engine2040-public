@@ -1,14 +1,21 @@
 //! Eval door driver: one provider-contract call, then an atomic scene apply.
 //!
 //! Consumer: the eval authoring rows and the public-benchmark mirror suites.
-//! Owner: this module owns the request shape and the scene executor; the
-//! provider crate owns the contract and the playtest `Backend` labels pick
-//! the policy. Recorded content (a proposal replayed from a tape) replaces
-//! the mock's no-op; admission, revision freshness, validation and fallback
-//! stay the real contract, so a recorded run needs no model.
+//! Owner: this module owns the request shape, the adapter choice and the
+//! scene executor; the provider crate owns the contract and the playtest
+//! `Backend` labels pick the policy. Each backend names the adapter that
+//! answers: `Mock` always builds [`MockAdapter`], `Local` builds
+//! [`LocalAdapter`] and `Remote` builds [`RemoteAdapter`] when its endpoint env
+//! is set (`E2040_LOCAL_URL`, `E2040_REMOTE_URL`), and each falls back to the
+//! in-process mock when that env is unset so the default matrix stays offline.
+//! Every answer names the adapter that produced it, so a mock answering a
+//! `Local` row is reported as `mock`, never as a model. Recorded content (a
+//! proposal replayed from a tape) replaces the answered no-op; admission,
+//! revision freshness, validation and fallback stay the real contract, so a
+//! recorded run needs no model.
 //! Units: centimeters on the wire, meters in the scene, integer revisions.
 //! Determinism: the same call sequence gives the same outcomes and scene
-//! hash on every backend; no wall clock or map order is read.
+//! hash; no wall clock or map order is read.
 //! Errors: [`DoorRefusal`] for the contract, [`ApplyError`] for the scene;
 //! a refused or invalid proposal writes nothing.
 
@@ -20,13 +27,17 @@ use engine_provider::protocol::{
     RequestId, TaskKind,
 };
 use engine_provider::{
-    fallback_for, validate_proposal, CassetteAdapter, CassetteError, CassetteMode, CassetteStore,
-    MockAdapter, ProviderAdapter, ScriptedFallback, PROTOCOL_VERSION,
+    fallback_for, parse_endpoint, validate_proposal, AdapterOutcome, AiSessionPolicy,
+    CassetteAdapter, CassetteError, CassetteMode, CassetteStore, LocalAdapter, MockAdapter,
+    MockStep, ProviderAdapter, ProviderCapabilities, RemoteAdapter, RequestPins, ScriptedFallback,
+    SecretRef, PROTOCOL_VERSION,
 };
 use engine_spatial::Actor;
 
 use crate::agent::Backend;
-use crate::eval::{backend_wiring, script_steps, TaskScript};
+use crate::eval::{
+    backend_wiring, script_steps, TaskScript, LOCAL_URL_ENV, REMOTE_TOKEN_ENV, REMOTE_URL_ENV,
+};
 use crate::{reachability, reference_arena, verify, ArenaVariant, Prop};
 
 /// Cassette wiring for one door call: replay mode plus its store directory.
@@ -53,10 +64,145 @@ pub(crate) fn cassette_setup(mode: Option<&str>, dir: Option<PathBuf>) -> Option
 }
 
 /// Env cassette wiring; the only place the cassette env is read.
-fn cassette_from_env() -> Option<CassetteSetup> {
+pub(crate) fn cassette_from_env() -> Option<CassetteSetup> {
     let mode = std::env::var("E2040_CASSETTE").ok();
     let dir = std::env::var("E2040_CASSETTE_DIR").ok().map(PathBuf::from);
     cassette_setup(mode.as_deref(), dir)
+}
+
+/// Where the local and remote adapters dial. An unset endpoint keeps that
+/// backend on the in-process mock, so the default matrix stays offline and
+/// the row says `adapter=mock`. Empty env values count as unset.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub(crate) struct BackendTargets {
+    /// Loopback sidecar URL for [`Backend::Local`].
+    pub(crate) local_url: Option<String>,
+    /// Configured host URL for [`Backend::Remote`].
+    pub(crate) remote_url: Option<String>,
+    /// Env variable holding the remote bearer token; `None` uses
+    /// [`REMOTE_TOKEN_ENV`].
+    pub(crate) remote_token_env: Option<String>,
+}
+
+impl BackendTargets {
+    /// Targets from the operator env; unset or empty endpoints stay mock.
+    pub(crate) fn from_env() -> Self {
+        Self {
+            local_url: non_empty_env(LOCAL_URL_ENV),
+            remote_url: non_empty_env(REMOTE_URL_ENV),
+            remote_token_env: None,
+        }
+    }
+}
+
+/// One env value, treating an empty string as unset.
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// The adapter a door call sends to: one variant per backend, so the label
+/// in the report names the code that produced the answer.
+#[derive(Debug)]
+enum DoorAdapter {
+    /// In-process deterministic stand-in (also the offline default).
+    Mock(MockAdapter),
+    /// Loopback llama.cpp-style sidecar over `/v1/chat/completions`.
+    Local(LocalAdapter),
+    /// Configured remote host, authenticated per call.
+    Remote(RemoteAdapter),
+}
+
+impl DoorAdapter {
+    /// Build the adapter for `backend`. A configured endpoint that does not
+    /// parse or is not loopback-local refuses instead of silently falling
+    /// back, so a typo cannot turn a live leg into a mock run.
+    fn build(
+        backend: Backend,
+        script: Vec<MockStep>,
+        targets: &BackendTargets,
+    ) -> Result<Self, AiError> {
+        match backend {
+            Backend::Mock => Ok(Self::Mock(MockAdapter::new(script))),
+            Backend::Local => match targets.local_url.as_deref() {
+                None => Ok(Self::Mock(MockAdapter::new(script))),
+                Some(url) => {
+                    let endpoint =
+                        parse_endpoint(url).map_err(|_| AiError::UnsupportedCapability)?;
+                    LocalAdapter::new(script, endpoint)
+                        .map(Self::Local)
+                        .map_err(|_| AiError::UnsupportedCapability)
+                }
+            },
+            Backend::Remote => match targets.remote_url.as_deref() {
+                None => Ok(Self::Mock(MockAdapter::new(script))),
+                Some(url) => {
+                    let endpoint =
+                        parse_endpoint(url).map_err(|_| AiError::UnsupportedCapability)?;
+                    let token_env = targets
+                        .remote_token_env
+                        .clone()
+                        .unwrap_or_else(|| REMOTE_TOKEN_ENV.to_owned());
+                    Ok(Self::Remote(RemoteAdapter::new(
+                        script,
+                        endpoint,
+                        SecretRef::EnvVar(token_env),
+                    )))
+                }
+            },
+        }
+    }
+
+    /// Label of the adapter that answers: `mock`, `local` or `remote`.
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Mock(_) => "mock",
+            Self::Local(_) => "local",
+            Self::Remote(_) => "remote",
+        }
+    }
+
+    /// Pin the live revision for the shared freshness check.
+    fn set_revision(&mut self, revision: u64) {
+        match self {
+            Self::Mock(adapter) => adapter.set_revision(revision),
+            Self::Local(adapter) => adapter.set_revision(revision),
+            Self::Remote(adapter) => adapter.set_revision(revision),
+        }
+    }
+}
+
+impl ProviderAdapter for DoorAdapter {
+    fn call(
+        &mut self,
+        request: &AiRequest,
+        policy: &AiSessionPolicy,
+        capabilities: &ProviderCapabilities,
+    ) -> AdapterOutcome {
+        match self {
+            Self::Mock(adapter) => adapter.call(request, policy, capabilities),
+            Self::Local(adapter) => adapter.call(request, policy, capabilities),
+            Self::Remote(adapter) => adapter.call(request, policy, capabilities),
+        }
+    }
+
+    fn request_pins(&self) -> Option<&RequestPins> {
+        match self {
+            Self::Mock(adapter) => adapter.request_pins(),
+            Self::Local(adapter) => adapter.request_pins(),
+            Self::Remote(adapter) => adapter.request_pins(),
+        }
+    }
+}
+
+/// One answered call: the validated proposal plus the adapter that answered
+/// it. A cassette hit names the adapter that recorded the answer, so replay
+/// never claims a model that did not run.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct DoorAnswer {
+    /// Validated proposal the door may apply.
+    pub(crate) proposal: Proposal,
+    /// Adapter label that produced the answer.
+    pub(crate) adapter: &'static str,
 }
 
 /// Id of the floor actor that stands in for the arena in spatial reports.
@@ -102,26 +248,22 @@ pub(crate) struct DoorRefusal {
     pub scripted: Option<ScriptedFallback>,
     /// Typed cassette miss that caused the refusal, if any.
     pub miss: Option<CassetteError>,
+    /// Adapter the call was wired to (the one that answered, or the one that
+    /// could not be built).
+    pub adapter: &'static str,
 }
 
-/// Run one call through the provider contract and validate the proposal.
+/// Run one call with explicit cassette and endpoint wiring. The adapter that
+/// answers is named by the request policy and the labels in the result.
 #[expect(
     clippy::result_large_err,
     reason = "a refusal is built once per door call and returned by value"
 )]
-pub(crate) fn door_call(call: &DoorCall<'_>) -> Result<Proposal, DoorRefusal> {
-    door_call_with(call, cassette_from_env().as_ref())
-}
-
-/// Run one call with explicit cassette wiring; `None` is the off path.
-#[expect(
-    clippy::result_large_err,
-    reason = "a refusal is built once per door call and returned by value"
-)]
-pub(crate) fn door_call_with(
+pub(crate) fn door_call_with_targets(
     call: &DoorCall<'_>,
     cassette: Option<&CassetteSetup>,
-) -> Result<Proposal, DoorRefusal> {
+    targets: &BackendTargets,
+) -> Result<DoorAnswer, DoorRefusal> {
     let probe = matches!(call.script, TaskScript::PrivacyProbe);
     let (adapter_kind, model, privacy, policy, caps) = backend_wiring(call.backend, probe);
     let request = AiRequest {
@@ -146,40 +288,43 @@ pub(crate) fn door_call_with(
         privacy,
         base_revision: call.base_revision,
     };
-    let refuse = |error: AiError, miss: Option<CassetteError>| DoorRefusal {
+    let refuse = |adapter: &'static str, error: AiError, miss: Option<CassetteError>| DoorRefusal {
         error,
         scripted: fallback_for(error, &request, &policy).ok(),
         miss,
+        adapter,
     };
     let (mode, dir) = match cassette {
         Some(setup) => (setup.mode, setup.dir.clone()),
         None => (CassetteMode::Off, CassetteStore::default_dir()),
     };
-    let label = backend_label(call.backend);
-    let mut adapter = match CassetteAdapter::new(
-        MockAdapter::new(script_steps(call.script)),
-        CassetteStore::new(dir),
-        mode,
-        label,
-    ) {
+    let adapter = match DoorAdapter::build(call.backend, script_steps(call.script), targets) {
         Ok(adapter) => adapter,
-        Err(_) => return Err(refuse(AiError::UnsupportedCapability, None)),
+        Err(error) => return Err(refuse(backend_label(call.backend), error, None)),
+    };
+    let label = adapter.label();
+    let mut adapter = match CassetteAdapter::new(adapter, CassetteStore::new(dir), mode, label) {
+        Ok(adapter) => adapter,
+        Err(_) => return Err(refuse(label, AiError::UnsupportedCapability, None)),
     };
     if let Some(live) = call.live_revision {
         adapter.inner_mut().set_revision(live);
     }
     let outcome = adapter.call(&request, &policy, &caps);
     let miss = adapter.last_miss();
-    let result = outcome.result.map_err(|error| refuse(error, miss))?;
+    let result = outcome.result.map_err(|error| refuse(label, error, miss))?;
     let mut proposal = result
         .proposal
-        .ok_or_else(|| refuse(AiError::MalformedOutput, None))?;
+        .ok_or_else(|| refuse(label, AiError::MalformedOutput, None))?;
     if let Some(recorded) = call.recorded {
         proposal.actions = recorded.actions.to_vec();
         proposal.diagnostics = recorded.diagnostics.to_vec();
     }
-    validate_proposal(&proposal).map_err(|_| refuse(AiError::MalformedOutput, None))?;
-    Ok(proposal)
+    validate_proposal(&proposal).map_err(|_| refuse(label, AiError::MalformedOutput, None))?;
+    Ok(DoorAnswer {
+        proposal,
+        adapter: label,
+    })
 }
 
 /// Why the scene refused a contract-valid proposal. Nothing is written.
@@ -519,23 +664,35 @@ impl Call {
 }
 
 /// A door bound to one backend and task slot, issuing unique request ids and
-/// logging every call with the object ids it returned or named.
+/// logging every call with the object ids it returned or named. The door owns
+/// offline targets by default; [`Door::with_targets`] names live endpoints.
 pub(crate) struct Door {
     backend: Backend,
     index: u64,
     calls: u64,
     log: Vec<Call>,
+    targets: BackendTargets,
 }
 
 impl Door {
-    /// Door for one task slot on one backend.
+    /// Door for one task slot on one backend, offline by default: the mock
+    /// answers unless test wiring names endpoints.
     pub(crate) fn new(backend: Backend, index: u64) -> Self {
         Self {
             backend,
             index,
             calls: 0,
             log: Vec::new(),
+            targets: BackendTargets::default(),
         }
+    }
+
+    /// Route this door's local and remote rows at `targets`. Test-only today:
+    /// the eval rows call [`door_call_with_targets`] directly.
+    #[cfg(test)]
+    pub(crate) fn with_targets(mut self, targets: BackendTargets) -> Self {
+        self.targets = targets;
+        self
     }
 
     /// Read the scene: the id of every prop, logged as one read call.
@@ -583,8 +740,8 @@ impl Door {
                 diagnostics: submit.diagnostics,
             }),
         };
-        match door_call(&call) {
-            Ok(proposal) => match scene.apply(&proposal) {
+        match door_call_with_targets(&call, cassette_from_env().as_ref(), &self.targets) {
+            Ok(answer) => match scene.apply(&answer.proposal) {
                 Ok(changed) => Delivery::Applied(changed),
                 Err(error) => Delivery::Rejected(error),
             },
@@ -647,6 +804,26 @@ mod tests {
         let prop = scene.prop(20).expect("prop 20 exists");
         assert!((prop.x + 19.3).abs() < 1e-4 && (prop.z - 7.0).abs() < 1e-4);
         assert_eq!(scene.revision, 2, "one applied change bumps once");
+    }
+
+    #[test]
+    fn with_targets_routes_the_door_to_the_named_adapter() {
+        let mut scene = Scene::new(reference_arena());
+        // A non-loopback sidecar is refused at build time, so this proves the
+        // builder choice reached the call without dialing anything.
+        let targets = BackendTargets {
+            local_url: Some(String::from("http://203.0.113.7:8080/v1/chat/completions")),
+            remote_url: None,
+            remote_token_env: None,
+        };
+        let mut door = Door::new(Backend::Local, 5).with_targets(targets);
+        let actions = [move_prop(20, [0, 50, 0])];
+        assert_eq!(
+            door.submit(&mut scene, &submit(1, &actions)),
+            Delivery::Fallback("refused"),
+            "a refused local route serves the scripted path"
+        );
+        assert_eq!(scene.revision, 1, "a refused route writes nothing");
     }
 
     #[test]
@@ -808,18 +985,29 @@ mod tests {
         let base = 7u64;
         let record_setup =
             cassette_setup(Some("record"), Some(dir.clone())).expect("record setup parses");
-        let recorded = door_call_with(
+        let recorded = door_call_with_targets(
             &cassette_call(request_id, index, base, TaskScript::Clean),
             Some(&record_setup),
+            &BackendTargets::default(),
         )
         .expect("record answers live");
         let replay_setup =
             cassette_setup(Some("replay"), Some(dir.clone())).expect("replay setup parses");
         // Timeout would fail live; replay must still serve the record.
         let replay_call = cassette_call(request_id, index, base, TaskScript::Timeout);
-        let first = door_call_with(&replay_call, Some(&replay_setup)).expect("replay answers");
+        let first = door_call_with_targets(
+            &replay_call,
+            Some(&replay_setup),
+            &BackendTargets::default(),
+        )
+        .expect("replay answers");
         assert_eq!(first, recorded, "replay serves the recorded proposal");
-        let second = door_call_with(&replay_call, Some(&replay_setup)).expect("second replay");
+        let second = door_call_with_targets(
+            &replay_call,
+            Some(&replay_setup),
+            &BackendTargets::default(),
+        )
+        .expect("second replay");
         assert_eq!(second, recorded, "second replay stays identical");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -830,25 +1018,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let empty_setup =
             cassette_setup(Some("replay"), Some(dir.clone())).expect("replay setup parses");
-        let absent = door_call_with(
+        let absent = door_call_with_targets(
             &cassette_call(4343, 43, 9, TaskScript::Clean),
             Some(&empty_setup),
+            &BackendTargets::default(),
         )
         .expect_err("empty store must miss");
         assert_eq!(absent.error, AiError::UnsupportedCapability);
         assert!(absent.miss.is_some(), "empty replay names the miss");
         let record_setup =
             cassette_setup(Some("record"), Some(dir.clone())).expect("record setup parses");
-        let _ = door_call_with(
+        let _ = door_call_with_targets(
             &cassette_call(4343, 43, 9, TaskScript::Clean),
             Some(&record_setup),
+            &BackendTargets::default(),
         )
         .expect("record answers live");
         let replay_setup =
             cassette_setup(Some("replay"), Some(dir.clone())).expect("replay setup parses");
-        let changed = door_call_with(
+        let changed = door_call_with_targets(
             &cassette_call(4343, 44, 10, TaskScript::Clean),
             Some(&replay_setup),
+            &BackendTargets::default(),
         )
         .expect_err("changed index must miss");
         assert_eq!(changed.error, AiError::UnsupportedCapability);
@@ -881,13 +1072,15 @@ mod tests {
         let dir = cassette_temp_dir("off");
         let _ = std::fs::remove_dir_all(&dir);
         let call = cassette_call(4444, 45, 11, TaskScript::Clean);
-        let without = door_call_with(&call, None).expect("off answers");
+        let without =
+            door_call_with_targets(&call, None, &BackendTargets::default()).expect("off answers");
         assert!(!dir.exists(), "off touches no file");
         let off = CassetteSetup {
             mode: CassetteMode::Off,
             dir: dir.clone(),
         };
-        let explicit = door_call_with(&call, Some(&off)).expect("explicit off answers");
+        let explicit = door_call_with_targets(&call, Some(&off), &BackendTargets::default())
+            .expect("explicit off answers");
         assert_eq!(explicit, without, "None equals the off path");
         assert!(!dir.exists(), "explicit off still touches no file");
         let _ = std::fs::remove_dir_all(&dir);

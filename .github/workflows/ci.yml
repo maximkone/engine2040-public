@@ -67,6 +67,12 @@ jobs:
       - name: workspace and dependency boundaries
         if: ${{ !cancelled() }}
         run: node tools/workspace-check.mjs
+      # Standing run: the public mirror's quick job only (the private dev repo
+      # skips every job). Locally the proof is the same --check line; this step
+      # first runs at the next `node tools/public-export.mjs --commit --push`.
+      - name: tool inventory (tools/README.md and test mates)
+        if: ${{ !cancelled() }}
+        run: node tools/tools-index.mjs --check
       - name: rust quality ratchet (docs/RUST-QUALITY.md)
         if: ${{ !cancelled() }}
         run: node tools/rust-quality.mjs
@@ -210,6 +216,10 @@ jobs:
           shared-key: clippy
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: featureless build (engine-arena --no-default-features)
+        run: |
+          cargo clippy --locked -p engine-arena --no-default-features --all-targets -- -D warnings
+          echo "PASS featureless: engine-arena"
 
   release-proof:
     # The shipped shape (the `ship` profile: fat LTO, one codegen unit), the

@@ -30,6 +30,31 @@ pub(crate) struct RunReply {
     pub stats: DriveStats,
 }
 
+/// One installed script as `rules.get` and `rules.undo` report it.
+pub(crate) struct ScriptInfo {
+    pub rev: u32,
+    pub hash: u64,
+    pub source: String,
+    pub slots: Vec<u8>,
+}
+
+/// Why a read-back or undo refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptRefusal {
+    /// Nothing installed yet.
+    NoScript,
+    /// One install, so there is nothing before it.
+    NothingToUndo,
+    /// The previous script no longer compiles.
+    RulesRefused,
+}
+
+/// A read-back or undo reply: the installed script, or the refusal.
+type ScriptReply = Result<ScriptInfo, ScriptRefusal>;
+
+/// Most previous scripts one session can walk back through.
+const MAX_UNDO: usize = 16;
+
 enum Request {
     Set {
         source: String,
@@ -39,6 +64,12 @@ enum Request {
     Test {
         source: String,
         reply: Sender<TestReport>,
+    },
+    Get {
+        reply: Sender<ScriptReply>,
+    },
+    Undo {
+        reply: Sender<ScriptReply>,
     },
     Run {
         config: ArenaConfig,
@@ -93,6 +124,23 @@ impl Worker {
         Ok(result)
     }
 
+    /// The installed script, its revision and its slots.
+    pub(crate) fn get(&self) -> Result<ScriptInfo, McpToolError> {
+        let (reply, answer) = channel();
+        self.send(Request::Get { reply })?;
+        script_reply(answer.recv().map_err(|_| down())?)
+    }
+
+    /// Reinstall the script installed before the current one, and keep the
+    /// current one so a second undo walks forward again.
+    pub(crate) fn undo(&mut self) -> Result<ScriptInfo, McpToolError> {
+        let (reply, answer) = channel();
+        self.send(Request::Undo { reply })?;
+        let info = script_reply(answer.recv().map_err(|_| down())?)?;
+        self.installed = Some((info.hash, info.slots.clone()));
+        Ok(info)
+    }
+
     /// Dry-run `source` over the fixture worlds; installs nothing.
     pub(crate) fn test(&self, source: &str) -> Result<TestReport, McpToolError> {
         let (reply, answer) = channel();
@@ -135,10 +183,30 @@ fn down() -> McpToolError {
     )
 }
 
+/// Turn a worker script reply into the door's answer.
+fn script_reply(reply: ScriptReply) -> Result<ScriptInfo, McpToolError> {
+    match reply {
+        Ok(info) => Ok(info),
+        Err(ScriptRefusal::NoScript) => Err(McpToolError::new(
+            "no_script",
+            "no rule script is installed; call rules.set first",
+        )),
+        Err(ScriptRefusal::NothingToUndo) => Err(McpToolError::new(
+            "nothing_to_undo",
+            "one script is installed and none came before it; call rules.set first",
+        )),
+        Err(ScriptRefusal::RulesRefused) => Err(McpToolError::new(
+            "rules_refused",
+            "the previous script no longer compiles under this engine; the last good script stays",
+        )),
+    }
+}
+
 /// The worker loop. Everything `!Send` lives and dies in here.
 fn serve(rx: &std::sync::mpsc::Receiver<Request>) {
     let rules = Rc::new(RefCell::new(Rules::default()));
     let mut slots: Vec<u8> = Vec::new();
+    let mut undo: Vec<(String, Vec<u8>)> = Vec::new();
     while let Ok(request) = rx.recv() {
         match request {
             Request::Set {
@@ -146,11 +214,55 @@ fn serve(rx: &std::sync::mpsc::Receiver<Request>) {
                 slots: wanted,
                 reply,
             } => {
+                let previous = rules
+                    .borrow()
+                    .source()
+                    .map(|text| (text.to_owned(), slots.clone()));
                 let result = rules.borrow_mut().set(&source, 0);
                 if result.is_ok() {
+                    if let Some(previous) = previous {
+                        if undo.len() == MAX_UNDO {
+                            undo.remove(0);
+                        }
+                        undo.push(previous);
+                    }
                     slots = wanted;
                 }
                 let _ = reply.send(result);
+            }
+            Request::Get { reply } => {
+                let _ = reply.send(installed_script(&rules.borrow(), &slots));
+            }
+            Request::Undo { reply } => {
+                let Some((source, previous_slots)) = undo.pop() else {
+                    let _ = reply.send(Err(ScriptRefusal::NothingToUndo));
+                    continue;
+                };
+                let current = rules
+                    .borrow()
+                    .source()
+                    .map(|text| (text.to_owned(), slots.clone()));
+                match rules.borrow_mut().set(&source, 0) {
+                    Ok(receipt) => {
+                        slots = previous_slots;
+                        if let Some(current) = current {
+                            if undo.len() == MAX_UNDO {
+                                undo.remove(0);
+                            }
+                            undo.push(current);
+                        }
+                        let _ = reply.send(Ok(ScriptInfo {
+                            rev: receipt.rev,
+                            hash: receipt.hash,
+                            source,
+                            slots: slots.clone(),
+                        }));
+                    }
+                    Err(_) => {
+                        undo.push((source, previous_slots));
+                        let _ = reply.send(Err(ScriptRefusal::RulesRefused));
+                    }
+                }
             }
             Request::Test { source, reply } => {
                 let worlds = engine_rules::fixtures::smoke_worlds();
@@ -167,6 +279,16 @@ fn serve(rx: &std::sync::mpsc::Receiver<Request>) {
             }
         }
     }
+}
+
+fn installed_script(rules: &Rules, slots: &[u8]) -> ScriptReply {
+    let source = rules.source().ok_or(ScriptRefusal::NoScript)?;
+    Ok(ScriptInfo {
+        rev: rules.history().last().map_or(0, |installed| installed.rev),
+        hash: rules.script_hash().unwrap_or(0),
+        source: source.to_owned(),
+        slots: slots.to_vec(),
+    })
 }
 
 fn play(

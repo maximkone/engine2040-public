@@ -1,6 +1,6 @@
 # Tools reference: tools/*.mjs
 
-Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, or from a git hook, plus the JSON data files they read. Facts come from each file's header, argv handling and exit paths, read on 2026-10-17. Run every command from the repo root `C:\engine2040` as `node tools/<name>.mjs`. CI runs Node 24. Tests: `node --test tools/<name>.test.mjs`.
+Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, or from a git hook, plus the JSON data files they read. Facts come from each file's header, argv handling and exit paths, read on 2026-10-17; the rows in section 1b were read on 2026-10-23. Run every command from the repo root `C:\engine2040` as `node tools/<name>.mjs`. CI runs Node 24. Tests: `node --test tools/<name>.test.mjs`.
 
 "see code" in the table means the header and a quick read did not state the exit path. Read `main()` before relying on it.
 
@@ -53,7 +53,6 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 | `gltf-intake.mjs` | glTF intake with CC0 licence gate | `gltf-intake.test.mjs` | 0 ok, 2 named refusal, 1 crash |
 | `fetch-content.mjs` | Downloads listed content with md5 | `fetch-content.test.mjs` | 0 ok, 1 md5 mismatch, 2 usage |
 | `city-osm.mjs` | OSM slice to glTF | `city-osm.test.mjs` | 2 on error, else see code |
-| `steal-land.mjs` | Next steal line, donor fetch, gate | `steal-land.test.mjs` | 1 gate FAIL, 2 usage, else see code |
 | `mcp-install.mjs` | Copies `e2040-mcp` to `.opencode/bin/` | `mcp-install.test.mjs` | 0 help, 1 failed, 2 bad arguments |
 | `level-check.mjs` | Rome arena layout gate | `level-check.test.mjs` | 0 ok, 1 FAIL, 2 usage or missing input |
 | `beat-lint.mjs` | Ladder beat chart gate | `beat-lint.test.mjs` | 0 pass, 1 fail, 2 usage |
@@ -68,7 +67,7 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 | `frame-triage.mjs` | Fighter-pixel triage of showcase frames | `frame-triage.test.mjs` | 1 triage fail, else see code |
 | `frame-v2v3.mjs` | Sky and motion heuristics on orbit captures | `frame-v2v3.test.mjs` | see code |
 | `fighter-count.mjs` | Fighter-vs-box pixel counter | `fighter-count.test.mjs` | 0 ok, 1 failure, 2 bad arguments |
-| `q1-check.mjs` | Read-only check of `target/q1` | `q1-check.test.mjs` | 0, 1 when gaps exist |
+| `q1-check.mjs` | `target/q1` still counts plus the bit-exact golden bless flow | `q1-check.test.mjs` | 0, 1 when gaps exist |
 | `ra8-check.mjs` | Read-only RA8 manifest presence check | `ra8-check.test.mjs` | see code |
 | `ra8-manifest.mjs` | RA8 look manifest from real PNGs | `ra8-manifest.test.mjs` | 0 ok, 1 error, 2 bad arguments |
 | `iqa-gate.mjs` | SSIM gate for a reference and a capture PNG | `iqa-gate.test.mjs` | 0 pass, 1 not pass or selfcheck fail, 2 error |
@@ -82,6 +81,62 @@ Scope: the scripts in `tools/` that a developer or an AI runs by hand, from CI, 
 | `duration-fmt.mjs` | Duration formatter CLI | `duration-fmt.test.mjs` | 0 pass, 1 fail, 2 usage |
 | `argv.mjs` | Library: shell-safe spawn and CLI failure helpers | `argv.test.mjs` | not a CLI |
 | `sim-source-scan.mjs` | Library: Rust source scans for `workspace-check` | `sim-source-scan.test.mjs` | not a CLI |
+
+### 1b. Live tools missing from the 2026-10-17 pass
+
+The 49 rows below are live `tools/*.mjs` files the first pass did not list. Purpose is from each header; `see code` in the exit column means the header does not state the exit path. `tools/tools-index.mjs` keeps this table honest.
+
+| Tool | Purpose | Test file | Exit codes |
+|---|---|---|---|
+| `api-break.mjs` | Gate the public API of every engine crate against a committed rustdoc-JSON baseline; `--write` blesses a break | `api-break.test.mjs` | 0 pass, 1 a removed or changed public item, 2 could not run |
+| `arena-net.mjs` | Two-process loopback proof of `arena --host` / `--join`: four scenarios twice, one final hash | `arena-net.test.mjs` | 0 all hold, 1 a check failed, 2 could not run |
+| `arena-report.mjs` | Gate the arena manifest, PBR/HDRI VRAM caps, crate+torch receipt and soak baseline | `arena-report.test.mjs` | 0 check, 1 a gate or generated block is stale |
+| `arena-shot.mjs` | Daily arena shot gate: the pinned capture, then refuse placeholder frames; `--self-check` needs no GPU | none | 0 pass, 1 refused, 2 usage or tool failure |
+| `arena-sources.mjs` | Check the raw CC0 PBR sets in `content/arena/sources` and their PROVENANCE rows | `arena-sources.test.mjs` | 0 pass, 1 a problem |
+| `book-links.mjs` | Fail on a broken internal link in `docs/book` or the assembled Pages site | `book-links.test.mjs` | 0 clean, 1 a problem, 2 bad arguments |
+| `class-validate.mjs` | Gate `content/classes/*.json` against `schema.json` plus the cross-file rules | none | 0 clean, 1 any error |
+| `codex-check.mjs` | Check every Rome table number against the source passage it names | `codex-check.test.mjs` | 0 ok, 1 a number or passage drifted, 2 bad CLI or missing corpus |
+| `content-cross.mjs` | Cross-file id checks over the faction-war content set | none | 0 clean, 1 a disagreement |
+| `content-lib.mjs` | Library: digest, image-size and generated-block helpers for the content report tools | none | not a CLI |
+| `ctrf-report.mjs` | Turn a nextest JUnit receipt into the CTRF report CI uploads | `ctrf-report.test.mjs` | 0 written, 1 not a test run or bad counts, 2 usage |
+| `dep-rebuild-count.mjs` | Count the dependency units five lane builds rebuild (OPT8 bar) | `dep-rebuild-count.test.mjs` | 0 every lane built, 1 a lane build failed, 2 no free compile slot |
+| `door-reference.mjs` | Print every door tool and verb pack into `docs/book/door-reference.md` (`--write`, `--check`) | `door-reference.test.mjs` | 0 ok, 1 stale with `--check`, 2 usage |
+| `faction-war-map.mjs` | Load the contested map and war rules headless, print the three statue points | none | 0 agree, 1 map and rules disagree |
+| `faction-war-report.mjs` | Run the class validator and the Blender archetype blockout, write the art report | none | see code |
+| `feature-scan.mjs` | Report every crate feature nobody enables and no `cfg` reads (PW49) | `feature-scan.test.mjs` | 0 clean, 1 a dead flag is left |
+| `fighter-report.mjs` | Fighter content gates: LOD table, clip dedupe set, clip sidecars | `fighter-report.test.mjs` | 0 check, 1 a gate or generated block is stale |
+| `fix.mjs` | Apply the toolchain's mechanical fixes to the paths an agent owns | `fix.test.mjs` | 0 every step ran, 1 a fixer failed, 2 usage |
+| `fk1_determinism.mjs` | Run one scripted 6k-tick headless match twice and compare the per-tick hash chains | none | 0 match, 1 divergence, 2 could not run |
+| `gate-silhouette.mjs` | Compare a cooked silhouette against a golden PNG (pixelmatch/blockhash) | none | 0 pass, 1 fail, 2 usage or a missing file |
+| `gpu-farm.mjs` | Run one cargo line on a Kaggle GPU kernel (T4) | `gpu-farm.test.mjs` | see code (a kernel exit; 1 a failed run) |
+| `hit-list.mjs` | Check every fight cue has a CC0 sound with provenance (CT63) | `hit-list.test.mjs` | 0 check, 1 a pick is unsound or the list is stale |
+| `jobserver.mjs` | The Node side of the shared compile-slot pool: cargo joins the semaphore, below the desktop | `jobserver.test.mjs` | see code |
+| `kam2-host.mjs` | Serve `target/kam2web` on loopback and open a Cloudflare quick tunnel; `--check` proves local, public and 60 frames | none | 0 proof holds, 1 a proof failed, 2 cannot run |
+| `kam2-web.mjs` | Build the kam2-web wasm, serve it and prove the KAM2 village draws in headless Chrome | none | 0 ok, 1 proof failed, 2 could not run |
+| `ladder-counts.mjs` | Count research-ladder rows per rung (EV15) | `ladder-counts.test.mjs` | see code |
+| `leftovers.mjs` | List dirty paths nobody touched for N hours, grouped for one free seat | `leftovers.test.mjs` | 0 ok, 2 usage or git failed |
+| `miri-gate.mjs` | Keep unsafe sites, `tools/miri-sites.json` and the miri workflow in step | `miri-gate.test.mjs` | 0 clean, 1 a problem |
+| `modmap.mjs` | Regenerate `.opencode/modmap.md` from tracked Rust files (`--write`, `--check`) | `modmap.test.mjs` | 0 ok, 1 stale or over budget, 2 usage |
+| `nextest-spike.mjs` | One proof lane under cargo-nextest against cargo test (OPT6, parked) | `nextest-spike.test.mjs` | 0 measured, 1 fail, 2 could not run (no nextest) |
+| `nonstop.mjs` | Run a weak OpenCode model over the ready board rows, one fresh session per row | `nonstop.test.mjs` | 0 finished or a guard stopped it, 2 usage |
+| `pick-gold.mjs` | Write or check `fixtures/pick/gold.txt`, 100 pixel tasks answered by this file's own ray maths (EV21) | `pick-gold.test.mjs` | 0 written or equal, 1 differs |
+| `provenance-audit.mjs` | Dry-run the release provenance gate over every shipped asset | `provenance-audit.test.mjs` | 0 clean, 1 the doc block is stale or `--strict` refuses a row |
+| `quiet-run.mjs` | Hold nonstop, wait for the box to go quiet, then run one timing command | `quiet-run.test.mjs` | command exit; 2 busy probe, 3 no quiet window, 4 STOP or lock |
+| `reference-captures.mjs` | Verify one tier's reference PNGs and merge them into `content/reference/index.json` | none | 0 verified, 1 failed, 2 usage or the capture run failed |
+| `reference-web.mjs` | Capture the web tier's ten reference shots from the real page, driving its animation clock | `reference-web.test.mjs` | 0 verified and written, 1 a capture or PNG failed, 2 usage |
+| `review-gate.mjs` | The AGENTS.md review rules R1-R6 as one gate over one commit | `review-gate.test.mjs` | 0 pass, 1 a rule broke, 2 usage or git error |
+| `ship-check.mjs` | Name a ship folder's file tree by content hash (HX10) | `ship-check.test.mjs` | 0 ok, 2 usage |
+| `ship-run.mjs` | Run the shipped proof and arena binaries from a clean folder and refuse a bad receipt (ENG19) | `ship-run.test.mjs` | 0 pass, 1 the build did not prove itself, 2 usage |
+| `skills-lint.mjs` | Repo-side skill gate: front matter, a `skills/SKILLS.md` row, references on disk, size baseline | `skills-lint.test.mjs` | 0 pass, 1 fail |
+| `starter-classes.mjs` | Write the six starter class files under `content/classes` | none | see code |
+| `temporal-gate.mjs` | Deterministic ghosting score over `frame_*.png` sequences off vs on | `temporal-gate.test.mjs` | 0 at or below the bar, 1 above it, 2 usage or decode error |
+| `tools-index.mjs` | Inventory gate: every live tool named in `tools/README.md`, every test mate or a named exception | `tools-index.test.mjs` | 0 clean or report, 1 a gap under `--check`, 2 bad arguments |
+| `unwired-code-gate.mjs` | Print every public module of a crate no other crate calls (the island `wiring-scan` cannot see) | none | 0 report, 1 with `--fail` or a self-test failure |
+| `web-budget.mjs` | Gate the browser build's size and speed budgets (WEB11) | `web-budget.test.mjs` | 0 inside every budget, 1 a number over budget or missing, 2 could not run |
+| `web-headers.mjs` | What the deployed server really sends (type, encoding, bytes), asked as a browser | `web-headers.test.mjs` | 0 every file 200 and the wasm typed, 1 it is not, 2 could not run |
+| `web-input-check.mjs` | Send real key and mouse events to the web page in headless Chrome and check input and audio | `web-input-check.test.mjs` | 0 proven, 1 a proof failed, 2 could not run |
+| `web-perf.mjs` | The web frame's draw calls and CPU ms off vs on from one page run (QW10) | `web-perf.test.mjs` | 0 measured and the CPU fell, 1 a failed check, 2 could not run |
+| `web-run.mjs` | Run the web-build workflow (build, clippy, tests, headless Chrome) on an isolated snapshot | `web-run.test.mjs` | 0 succeeded, 1 failed, 2 could not run, 3 still running |
 
 Library modules without a CLI are in section 11.
 
@@ -287,9 +342,8 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 - `level-check [--placement P] [--zones Z] [--levels L] [--arena-kit K]`: Rome arena layout gate; exit 0 ok, 1 FAIL, 2 usage.
 - `beat-lint [--ladder PATH]`: ladder beat chart gate (GP40) over `content/design/ladder.rows`; exit 0 pass, 1 fail, 2 usage.
 
-### steal-land.mjs, mcp-install.mjs
+### mcp-install.mjs
 
-- `steal-land --next <part>` / `--fetch <id>` / `--gate` (FAIL on rules, else PASS). Works on `docs/plan/steals.md`; fetches into `target/steals/<id>/`.
 - `mcp-install [--project-dir DIR] [--remote-url URL] [--bin PATH] [--check]`: copies the release `e2040-mcp` binary to `.opencode/bin/`. `--check` changes nothing.
 
 ## 7. Captures and visual checks
@@ -331,7 +385,7 @@ Conventions: run from the repo root; named refusals (`E_LICENCE`, `E_INPUT_ABSEN
 
 - `frame-v2v3 <frameA.png> <frameB.png> [--json]`: sky and motion heuristics.
 - `fighter-count [--dir <frames-dir>] [--json]`: exit 0 ok, 1 failure, 2 bad arguments.
-- `q1-check`: read-only check of `target/q1`; exit 1 when `gaps` is not empty.
+- `q1-check`: counts `target/q1` stills and compares each against its filed golden under `target/q1/golden` (sha256, the bit-exact tier); a changed still writes `.new.png`, `.old.png`, `.diff.json` and nothing is edited in place unless `--bless`; exit 1 when `gaps` is not empty. The FLIP tier lives in `crates/playtest/src/look/golden.rs`.
 - `ra8-check`: read-only; reports missing PNGs, never builds.
 - `ra8-manifest --src <dir> --out <file> [--renderer R] [--device D] [--seed N]`: writes the look manifest from real PNG bytes; refuses to write into `target/`.
 
@@ -478,7 +532,7 @@ Mirror workflows (`.github/workflows/`): `check.yml` (dispatch, one cargo line),
 
 ## 11. Library modules
 
-No entry point: `sim-source-scan.mjs`, `board-slice.mjs`, `board-memo.mjs`, `argv.mjs`, `fnv1a64.mjs` (mirrors `crates/core/src/hash.rs`), `hash-util.mjs`, `cast-safe.mjs`, `sort-once.mjs`, `pool-queue.mjs`. `drr-queue.mjs` is imported and also has a CLI guard. Each has a same-name `.test.mjs`.
+No entry point: `sim-source-scan.mjs`, `board-slice.mjs`, `board-memo.mjs`, `argv.mjs`, `fnv1a64.mjs` (mirrors `crates/core/src/hash.rs`), `hash-util.mjs`, `cast-safe.mjs`, `sort-once.mjs`, `content-lib.mjs`. Each has a same-name `.test.mjs` except `content-lib.mjs`, whose tests ride with the content tools that import it. The queue modules (`pool-queue.mjs`, `drr-queue.mjs`) went with the queue cut.
 
 ## 12. Data files
 
@@ -497,7 +551,7 @@ No entry point: `sim-source-scan.mjs`, `board-slice.mjs`, `board-memo.mjs`, `arg
 
 These `tools/*.test.mjs` files have no same-name module. Some import a module under another name, some test a deleted tool. Running `node --test tools/` includes them. Check each before relying on it.
 
-`argv-contract`, `board-slice-cases`, `ci`, `compare-split`, `cover-gap`, `float-gate`, `frame-check`, `ibl-presets`, `ibl-vectors`, `index-check`, `knobs-check`, `ladder-split`, `plan-index`, `pool-queue-batch`, `rng-vectors`, `rollback-vectors`, `ship-dupe-gap`, `skills-index`, `skin-vectors`, `sky-preset`, `sky-presets`, `sky-presets3`, `spawn-check`, `stale-refs`, `stale-targets`, `toolchain-pin`, `w4-compile-cache-plan`.
+`ai-door-book`, `ai-props`, `argv-contract`, `batch-a`, `board-slice-cases`, `book-commands`, `ci`, `compare-split`, `cover-gap`, `differential`, `float-gate`, `for-ai`, `frame-check`, `ibl-presets`, `ibl-vectors`, `index-check`, `inventory`, `knobs-check`, `ladder-split`, `license-gate-py`, `pages-workflow`, `pilot-scout`, `plan-atlas-cache`, `plan-index`, `pre-commit`, `rng-vectors`, `rollback-vectors`, `ship-dupe-gap`, `skills-index`, `skin-vectors`, `sky-preset`, `sky-presets`, `sky-presets3`, `spawn-check`, `stale-refs`, `toolchain-pin`, `w4-compile-cache-plan`, `web-loader`.
 
 ## 14. Suspicious items
 
@@ -507,4 +561,4 @@ These `tools/*.test.mjs` files have no same-name module. Some import a module un
 - Several tools name lane machinery that the standalone repo cut: `clean.mjs` (`lanes-worktrees.json`, `target/lanes`), `doctor.mjs` (`target/lanes/*.patch`), `mutants.mjs` (`target/lanes/<id>.patch`, `.lanes/<id>`). `books.mjs` and `ship.mjs` use paths outside the repo (`C:/empire/...`, `C:/e2040-clean/`).
 - `docs/WORKFLOW.md` names `tools/sprint-lock.mjs`, `tools/sprint-loop.mjs`, `builder` and `planner` agents. None exists in `tools/`.
 - `docs/FOCUS.md` names `tools/drift-check.mjs` and `tools/steal-next.mjs`. Neither exists in `tools/`.
-- `proof.mjs` with no flags runs cargo locally; AGENTS says cargo proofs go to `gh-check.mjs`. Mirror pushes go to `main`; this repo is `master`. 28 test files have no module (section 13). "see code" rows in the table are unverified.
+- `proof.mjs` with no flags runs cargo locally; AGENTS says cargo proofs go to `gh-check.mjs`. Mirror pushes go to `main`; this repo is `master`. 38 test files have no module (section 13). "see code" rows in the table are unverified.

@@ -45,6 +45,7 @@ pub(super) const BLIT_WGSL: &str = concat!(
 
 mod auto_exposure_gpu;
 mod bind_memo;
+mod bloom_dual;
 mod capture;
 mod compressed;
 mod contact_live;

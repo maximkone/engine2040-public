@@ -29,7 +29,11 @@ export const allowedEdges = new Map([
   // same fixed camera the window uses. No clock, IO or GPU edge: the page hands in
   // its own time deltas and draws the flat frame with Canvas2D.
   ["kam2-web", ["kam2-sim", "kam2-game", "engine-render"]],
-  ["engine2040", ["engine-core", "engine-ecs", "engine-render", "engine-physics", "engine-nav", "engine-audio", "engine-script", "engine-net", "engine-assets", "engine-destruction", "engine-ai", "engine-ponytail", "engine-proof"]],
+  // DEMO100K: dev-only edge (tests/proof_cli.rs::demo_100k). The proof
+  // harness plays the shipped arena match at the demo's 100,000-tick length;
+  // the proof binary itself never links the arena, and arena is already in
+  // the graph through engine-net.
+  ["engine2040", ["engine-core", "engine-ecs", "engine-render", "engine-physics", "engine-nav", "engine-audio", "engine-script", "engine-net", "engine-assets", "engine-destruction", "engine-ai", "engine-ponytail", "engine-proof", "engine-arena"]],
   // GA9: dev-only edge. The 500-vs-500 legion battle fixture holds NV3 stamped
   // rout walks and seals a gap mid-rout, so routers repath on the rebaked tile
   // version. The crate itself stays nav-free; nav takes core and spatial only.

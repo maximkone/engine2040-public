@@ -99,12 +99,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          wasm="$(node -p "require('./dist/web/build.json').pin['engine_bg.wasm'].name")"
           python3 -m http.server 8099 --bind 127.0.0.1 -d dist/web >/dev/null 2>&1 &
           server=$!
           sleep 2
-          type="$(curl -sI http://127.0.0.1:8099/engine_bg.wasm | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" { print $2 }')"
+          type="$(curl -sI "http://127.0.0.1:8099/$wasm" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" { print $2 }')"
           kill "$server"
-          echo "engine_bg.wasm is served as: $type"
+          echo "$wasm is served as: $type"
           test "$type" = "application/wasm"
       # DOC1: mdBook, pinned to one release and checked against the digest GitHub lists for the asset.
       - name: mdBook (pinned release binary)

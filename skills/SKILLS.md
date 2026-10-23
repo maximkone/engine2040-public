@@ -1,6 +1,6 @@
 # Skills - 30 skills in skills/ (none in .opencode/skills/)
 
-New here? Read `skills/START-HERE.md` first (the 8 skills to read once, then a task-to-skill table).
+New here? Read `skills/START-HERE.md` first (the core map and task-to-skill router).
 
 Any AI (Claude Code, OpenCode, anything) loads a skill by its trigger. `AGENTS.md` wins over every skill. One skill per job you are about to do; read the trigger, open the one that matches, and follow links between skills instead of loading many.
 

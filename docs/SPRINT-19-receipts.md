@@ -6,6 +6,14 @@ Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 <!-- 2026-10-21: the `node tools/land.mjs <packet> --dry` half of this template was removed with the loop tools on 2026-10-17 (commit 6bdf32bf; `tools/land.mjs` does not exist). Land by path and paste the proof output. -->
 > Golden `d57b5c8ae3096614` holds for every landing below unless the block names a move; new blocks paste the land+proof output, not hand-typed hashes.
 
+### 2026-10-23, book gaps 4: door children, rules undo, clip verbs, inline jobs, bare arena
+
+- dfab6a88c BG2: `read_resource_text` splits a child id off the four template roots and reads the same backing source the root prints; unknown children still refuse `unknown_uri`. Proof: `cargo test -p engine-endpoint --features mcp --lib resource_template_reads_one_child` PASS (run 40003227287), `tool_count_pin` unchanged.
+- d9d9ca525 BG3: `rules.get` reads the installed text and hash back, `rules.undo` reinstalls the previous install from a 16-deep stack (undo toggles A/B) and refuses `no_script`/`nothing_to_undo`; both Observe. Proof: `cargo test -p engine-endpoint --features rules --test it rules_door::rules_undo` PASS (run 40007290879).
+- cf8969aa2 BG4: `anim.clip.trim|retime|mirror|undo` over the `engine_anim::edit` library calls with a session clip store; a bad window or ratio refuses `bad_clip` and every edit is undoable. Proof: `cargo test -p engine-endpoint --features mcp --lib packs::anim` 5 passed (run 40010394143).
+- 541a1fe5 BG11: the job pool stores closures up to 128 bytes inline with one run/drop fn pointer and boxes only larger ones; spawn after a warm queue counts 0 heap calls (was one per job). Proof: `cargo test -p engine-ecs --lib` 140 passed (run 40015906494), clippy PASS (40015783204), loom model PASS (40016048480), golden `d57b5c8ae3096614` unchanged (40016275699).
+- e310aa24e BG13: `resolve_cuts_bare` is gated on the `spine` feature and CI runs `cargo clippy -p engine-arena --no-default-features --all-targets -- -D warnings`, printing one PASS line. Proof: bare clippy PASS (run 40011338278); default build and golden unchanged.
+
 ### 2026-10-23, EG42 baked per-move hit tracks
 
 - bbc0881 EG42: `engine-anim::hit_track` bakes the three 1H attack clips into integer-mm `HitTrack` rows (blade p0/p1 plus sixteen bone capsules per tick, `HIT_TRACK_VERSION_V1`); `engine-combat::cut` reads `(move, tick)` and `StrikePose::from_hit_row` feeds the rules-v2 sweep. Proof: `cargo test -p engine-anim --lib hit_track_bake` 2 passed x2 (fresh run 39967558330); `cargo test -p engine2040 --release --test proof_cli default_and_max_seed` PASS (run 39966912408), golden `d57b5c8ae3096614` unchanged; clippy anim+combat PASS (run 39966833946); rustfmt clean. HASH-LAW note added for the HitTrack wire version.

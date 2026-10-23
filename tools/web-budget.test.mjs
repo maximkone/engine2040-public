@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { ARENA_BUNDLE, BUDGET_KEYS, BudgetError, brotliSize, check, firstLoadBytes, firstTierBytes, formatLine, gzipSize, isGzip, main, measureDist, parseArgs, readBudgets, readReceipt } from "./web-budget.mjs";
+import { ARENA_BUNDLE, BUDGET_KEYS, BudgetError, brotliSize, check, distNames, firstLoadBytes, firstTierBytes, formatLine, gzipSize, isGzip, main, measureDist, parseArgs, readBudgets, readReceipt } from "./web-budget.mjs";
 
 const BUDGETS = { wasm: 5000, gzip: 4000, brotli: 3900, first_bundle: 6000, mem: 2_000_000, ttff_ms: 8000 };
 
@@ -114,6 +114,36 @@ test("QW10: firstTierBytes sees through a gzip bundle and firstLoadBytes counts 
 test("measureDist says what to run when the wasm is missing", () => {
   const dir = mkdtempSync(join(tmpdir(), "web-budget-"));
   try { assert.throws(() => measureDist(dir), /web-build\.mjs/); } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("PIN: measureDist follows build.json's pin for the wasm and the arena bundle", () => {
+  const f = fixture();
+  try {
+    const wasm = readFileSync(join(f.dist, "engine_bg.wasm"));
+    const wasmName = "engine_bg.abcdefabcdef.wasm";
+    writeFileSync(join(f.dist, wasmName), wasm);
+    rmSync(join(f.dist, "engine_bg.wasm"));
+    const kit = miniBundle(120, 300);
+    const prefix = firstTierBytes(kit);
+    const gz = gzipSync(kit, { level: 9 });
+    const arenaName = "assets/arena.abcdefabcdef.e2bundle";
+    mkdirSync(join(f.dist, "assets"));
+    writeFileSync(join(f.dist, arenaName), gz);
+    writeFileSync(join(f.dist, "build.json"), JSON.stringify({
+      schema: 2,
+      build: "abcdefabcdef",
+      pin: {
+        "engine_bg.wasm": { name: wasmName, sha256: "a".repeat(64) },
+        "assets/arena.e2bundle": { name: arenaName, sha256: "b".repeat(64) },
+      },
+    }));
+    assert.deepEqual(distNames(f.dist), { wasm: wasmName, arena: arenaName });
+    const m = measureDist(f.dist);
+    assert.equal(m.wasm, wasm.length, "the pinned wasm is the one measured");
+    assert.equal(m.gzip, gzipSize(wasm));
+    const parts = ["engine.js", "index.html", "snippets/a.js"].map((p) => brotliSize(readFileSync(join(f.dist, p))));
+    assert.equal(m.first_bundle, parts.reduce((a, b) => a + b, 0) + brotliSize(wasm) + gzipSize(prefix), "the fixed wasm is not counted and the pinned arena bundle is cut at tier 0");
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
 test("readReceipt takes memory and ttff, null for anything missing or not a number", () => {

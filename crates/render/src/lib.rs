@@ -351,6 +351,12 @@ pub mod post;
 /// the `post` facade so `post::` callers keep their path.
 pub mod post_jitter_motion;
 
+/// RL36: the live frame's dual-filter bloom. A Karis-weighted bright mip,
+/// a 13-tap downsample ladder and a 3x3 tent upsample ladder, plus the CPU
+/// oracle the device chain is proven against. Consumers: the window frame's
+/// blit (the halo it adds before the one tone map), the capture tests.
+pub mod bloom_dual;
+
 /// The bodycam lens: barrel distortion, chromatic aberration, vignette and
 /// film grain in one post pass, with the eye, helmet and chest presets.
 /// The eye is the identity and the default. Std-only oracle plus the WGSL;

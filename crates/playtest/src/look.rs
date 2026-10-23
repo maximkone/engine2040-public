@@ -8,6 +8,7 @@
 
 use engine_spatial::compose::{rank_order, spearman_permille, ComposeError};
 
+pub mod golden;
 pub mod judge;
 pub mod manifest;
 pub mod metric;

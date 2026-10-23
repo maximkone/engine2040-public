@@ -8,9 +8,11 @@
 //! per door session in a side table keyed by the session id, so the core door
 //! state is untouched; a refused set keeps the last good graph.
 //!
-//! The clip edit verbs (`anim.trim`, `anim.loop`, `anim.retime`, `anim.mirror`,
-//! `anim.cleanup`) and the strip verbs join here later as `SyncTool<McpServer>`
-//! types plus one `pack.add(VerbSpec::of::<Tool>(NAME, PACK, card)?)` line each.
+//! The clip verbs (`anim.clip.trim`, `anim.clip.retime`, `anim.clip.mirror`,
+//! `anim.clip.undo`) wrap `engine_anim::edit` over a per-session clip seeded
+//! from a fixture ramp: each verb returns the same `qclip_hash` the library
+//! call gives on the same fixture, keeps the last good clip on a refusal, and
+//! is undoable.
 //! Errors: [`McpToolError`] with the machine's own code (`bad_document`,
 //! `invalid_machine`, `no_graph`, `bad_script`, `preview_failed`,
 //! `nothing_to_undo`), the document path and one recovery step.
@@ -18,6 +20,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
+use engine_anim::clip::{bake_clip, bake_track, qclip_hash, QClip, TICK_DT};
+use engine_anim::edit;
 use engine_anim::state_machine::anim_door::{AnimDoor, DoorRefusal};
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::de::DeserializeOwned;
@@ -38,6 +42,14 @@ pub const TOOL_ANIM_GRAPH_UNDO: &str = "anim.graph.undo";
 pub const TOOL_ANIM_GRAPH_GET: &str = "anim.graph.get";
 /// Verb: run a scripted tape on a graph without applying it.
 pub const TOOL_ANIM_PREVIEW: &str = "anim.preview";
+/// Verb: trim the session clip to a tick window.
+pub const TOOL_ANIM_CLIP_TRIM: &str = "anim.clip.trim";
+/// Verb: scale the session clip's key times by a ratio.
+pub const TOOL_ANIM_CLIP_RETIME: &str = "anim.clip.retime";
+/// Verb: mirror the session clip left to right.
+pub const TOOL_ANIM_CLIP_MIRROR: &str = "anim.clip.mirror";
+/// Verb: undo the last session clip edit.
+pub const TOOL_ANIM_CLIP_UNDO: &str = "anim.clip.undo";
 
 /// Args for `anim.graph.set`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
@@ -359,12 +371,235 @@ crate::e2_tool!(
     invoke = preview
 );
 
-/// The anim pack: state machine verbs, loaded on demand.
+// ---------------------------------------------------------------------------
+// anim.clip.*: the clip edit verbs
+// ---------------------------------------------------------------------------
+
+/// The session's clip and the edits still undoable.
+struct ClipDoor {
+    clip: QClip,
+    undo: Vec<QClip>,
+    rev: u32,
+}
+
+impl Default for ClipDoor {
+    fn default() -> Self {
+        Self {
+            clip: clip_fixture(),
+            undo: Vec::new(),
+            rev: 0,
+        }
+    }
+}
+
+impl ClipDoor {
+    /// Replace the clip with `next`, keeping the old one so undo can restore it.
+    fn install(&mut self, next: QClip) -> ClipEditOutput {
+        let before = clip_digest(&self.clip);
+        let after = clip_digest(&next);
+        if before != after {
+            if self.undo.len() == MAX_CLIP_UNDO {
+                self.undo.remove(0);
+            }
+            self.undo.push(self.clip.clone());
+            self.rev = self.rev.saturating_add(1);
+            self.clip = next;
+        }
+        self.output(before, after)
+    }
+
+    fn undo(&mut self) -> Option<ClipEditOutput> {
+        let before = clip_digest(&self.clip);
+        let previous = self.undo.pop()?;
+        let after = clip_digest(&previous);
+        self.clip = previous;
+        self.rev = self.rev.saturating_add(1);
+        Some(self.output(before, after))
+    }
+
+    fn output(&self, before: String, after: String) -> ClipEditOutput {
+        ClipEditOutput {
+            before,
+            after,
+            rev: self.rev,
+            tracks: u32::try_from(self.clip.tracks.len()).unwrap_or(u32::MAX),
+            undo_depth: u32::try_from(self.undo.len()).unwrap_or(u32::MAX),
+        }
+    }
+}
+
+/// Most clip edits one session can undo.
+const MAX_CLIP_UNDO: usize = 16;
+
+/// The clip every session starts with: one track, 0..=60 ticks, a straight ramp.
+fn clip_fixture() -> QClip {
+    let mut times = Vec::with_capacity(61);
+    let mut values = Vec::with_capacity(61);
+    let mut t = 0.0;
+    for _ in 0..=60 {
+        times.push(t);
+        values.push([t * 0.1, t * 0.2, t * 0.3]);
+        t += TICK_DT;
+    }
+    bake_clip(vec![bake_track(times, values)])
+}
+
+fn clip_digest(clip: &QClip) -> String {
+    format!("{:016x}", qclip_hash(clip))
+}
+
+/// Run `f` on this session's clip under the audited dispatch seam.
+fn with_clip_door<R>(
+    server: &McpServer,
+    tool: &str,
+    f: impl FnOnce(&mut ClipDoor) -> Result<R, McpToolError>,
+) -> Result<R, McpToolError> {
+    static CLIPS: OnceLock<Mutex<BTreeMap<u64, ClipDoor>>> = OnceLock::new();
+    server.dispatch(tool, |state| {
+        let mut clips = CLIPS.get_or_init(Mutex::default).lock().map_err(|_| {
+            McpToolError::new(
+                "lock_poisoned",
+                "anim clip table is poisoned; restart the door",
+            )
+        })?;
+        f(clips.entry(state.session()).or_default())
+    })
+}
+
+/// Args for `anim.clip.trim`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ClipTrimArgs {
+    /// First tick kept; keys shift to 0.
+    pub start_tick: u32,
+    /// Last tick kept; must be above `start_tick`.
+    pub end_tick: u32,
+}
+
+/// Args for `anim.clip.retime`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ClipRetimeArgs {
+    /// Time scale numerator, from 1.
+    pub num: u32,
+    /// Time scale denominator, from 1; the ratio must stay inside 1/8..=8.
+    pub den: u32,
+}
+
+/// Result of one clip edit or undo.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ClipEditOutput {
+    /// Digest (16 hex digits) before the edit.
+    pub before: String,
+    /// Digest (16 hex digits) after the edit.
+    pub after: String,
+    /// Edits installed on this session's clip, from 0.
+    pub rev: u32,
+    /// Tracks in the clip now.
+    pub tracks: u32,
+    /// Edits still undoable.
+    pub undo_depth: u32,
+}
+
+fn clip_trim(server: &McpServer, args: &ClipTrimArgs) -> Result<ClipEditOutput, McpToolError> {
+    let (start, end) = (args.start_tick, args.end_tick);
+    with_clip_door(server, TOOL_ANIM_CLIP_TRIM, |door| {
+        let next = edit::trim(&door.clip, start, end).ok_or_else(|| {
+            McpToolError::new(
+                "bad_clip",
+                format!(
+                    "trim window {start}..{end} is empty or reversed; pass start_tick < end_tick; the clip is kept"
+                ),
+            )
+        })?;
+        Ok(door.install(next))
+    })
+}
+
+fn clip_retime(server: &McpServer, args: &ClipRetimeArgs) -> Result<ClipEditOutput, McpToolError> {
+    let (num, den) = (args.num, args.den);
+    with_clip_door(server, TOOL_ANIM_CLIP_RETIME, |door| {
+        let next = edit::retime(&door.clip, num, den).ok_or_else(|| {
+            McpToolError::new(
+                "bad_clip",
+                format!("retime ratio {num}/{den} is zero or outside 1/8..=8; the clip is kept"),
+            )
+        })?;
+        Ok(door.install(next))
+    })
+}
+
+fn clip_mirror(server: &McpServer, _args: &NoArgs) -> Result<ClipEditOutput, McpToolError> {
+    with_clip_door(server, TOOL_ANIM_CLIP_MIRROR, |door| {
+        Ok(door.install(edit::mirror(&door.clip)))
+    })
+}
+
+fn clip_undo(server: &McpServer, _args: &NoArgs) -> Result<ClipEditOutput, McpToolError> {
+    with_clip_door(server, TOOL_ANIM_CLIP_UNDO, |door| {
+        door.undo().ok_or_else(|| {
+            McpToolError::new(
+                "nothing_to_undo",
+                "no clip edit is undoable on this session; call anim.clip.trim, anim.clip.retime or anim.clip.mirror first",
+            )
+        })
+    })
+}
+
+crate::e2_tool!(
+    /// `anim.clip.trim`: keep one tick window of the session clip.
+    ClipTrimTool,
+    name = TOOL_ANIM_CLIP_TRIM,
+    description = "Trim the session clip to ticks start_tick..end_tick, shifting keys to zero and sampling both ends. Returns the digest before and after. A reversed or empty window refuses bad_clip and keeps the clip; undoable.",
+    readonly = false,
+    args = ClipTrimArgs,
+    output = ClipEditOutput,
+    invoke = clip_trim
+);
+
+crate::e2_tool!(
+    /// `anim.clip.retime`: scale every key time by a ratio.
+    ClipRetimeTool,
+    name = TOOL_ANIM_CLIP_RETIME,
+    description = "Scale every key time of the session clip by num/den rounded to the nearest tick, inside the ratio 1/8..=8. Returns the digest before and after. A zero or out-of-range ratio refuses bad_clip and keeps the clip; undoable.",
+    readonly = false,
+    args = ClipRetimeArgs,
+    output = ClipEditOutput,
+    invoke = clip_retime
+);
+
+crate::e2_tool!(
+    /// `anim.clip.mirror`: mirror the session clip left to right.
+    ClipMirrorTool,
+    name = TOOL_ANIM_CLIP_MIRROR,
+    description = "Mirror the session clip left to right (x and y swap sign and track order reverses). Returns the digest before and after; undoable.",
+    readonly = false,
+    args = NoArgs,
+    output = ClipEditOutput,
+    invoke = clip_mirror
+);
+
+crate::e2_tool!(
+    /// `anim.clip.undo`: undo the last session clip edit.
+    ClipUndoTool,
+    name = TOOL_ANIM_CLIP_UNDO,
+    description = "Undo the last clip edit on this session's clip; the digest returns to its value before that edit. Refuses nothing_to_undo when no edit is undoable.",
+    readonly = false,
+    args = NoArgs,
+    output = ClipEditOutput,
+    invoke = clip_undo
+);
+
+/// The anim pack: state machine and clip verbs, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
-        "animation: the state machine as versioned data (set, undo, get, preview on a tape); \
-         clip edits (trim, loop, retime, mirror, cleanup) and strips join later",
+        "animation: the state machine as versioned data (set, undo, get, preview on a tape) \
+         and clip edits (trim, retime, mirror, undo) over the session clip",
         false,
     );
     pack.add(VerbSpec::of::<GraphSetTool>(
@@ -386,6 +621,26 @@ pub fn pack() -> Result<PackDef, PackError> {
         TOOL_ANIM_PREVIEW,
         PACK,
         CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<ClipTrimTool>(
+        TOOL_ANIM_CLIP_TRIM,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<ClipRetimeTool>(
+        TOOL_ANIM_CLIP_RETIME,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<ClipMirrorTool>(
+        TOOL_ANIM_CLIP_MIRROR,
+        PACK,
+        CapabilityCard::Commit,
+    )?);
+    pack.add(VerbSpec::of::<ClipUndoTool>(
+        TOOL_ANIM_CLIP_UNDO,
+        PACK,
+        CapabilityCard::Revert,
     )?);
     Ok(pack)
 }
@@ -417,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_registers_four_annotated_verbs() {
+    fn pack_registers_eight_annotated_verbs() {
         let pack = pack().expect("registers");
         assert_eq!(
             pack.verb_names(),
@@ -425,7 +680,11 @@ mod tests {
                 TOOL_ANIM_GRAPH_SET,
                 TOOL_ANIM_GRAPH_UNDO,
                 TOOL_ANIM_GRAPH_GET,
-                TOOL_ANIM_PREVIEW
+                TOOL_ANIM_PREVIEW,
+                TOOL_ANIM_CLIP_TRIM,
+                TOOL_ANIM_CLIP_RETIME,
+                TOOL_ANIM_CLIP_MIRROR,
+                TOOL_ANIM_CLIP_UNDO
             ]
         );
         for verb in pack.verbs() {
@@ -706,5 +965,76 @@ mod tests {
             kept["states"].as_array().map_or(0, Vec::len) <= 4,
             "legal graphs stay small"
         );
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+    use engine_editor::capability::Capability;
+    use rmcp::handler::server::router::tool::SyncTool;
+
+    fn server() -> McpServer {
+        McpServer::new(77, Capability::unrestricted(77))
+    }
+
+    fn trimmed() -> QClip {
+        edit::trim(&clip_fixture(), 10, 40).expect("library trim")
+    }
+
+    #[test]
+    fn anim_clip_edits_match_the_library_and_undo() {
+        let server = server();
+        let fixture = clip_fixture();
+
+        let trim = ClipTrimTool::invoke(
+            &server,
+            ClipTrimArgs {
+                start_tick: 10,
+                end_tick: 40,
+            },
+        )
+        .expect("trim runs");
+        assert_eq!(trim.before, clip_digest(&fixture));
+        assert_eq!(trim.after, clip_digest(&trimmed()));
+        assert_eq!(trim.rev, 1);
+
+        for refused in [
+            ClipRetimeTool::invoke(&server, ClipRetimeArgs { num: 0, den: 1 }).map(|out| out.after),
+            ClipTrimTool::invoke(
+                &server,
+                ClipTrimArgs {
+                    start_tick: 30,
+                    end_tick: 30,
+                },
+            )
+            .map(|out| out.after),
+        ] {
+            let error = refused.expect_err("the library refuses this edit");
+            assert_eq!(error.code, "bad_clip");
+        }
+
+        let retime = ClipRetimeTool::invoke(&server, ClipRetimeArgs { num: 2, den: 1 })
+            .expect("retime runs");
+        let expected = edit::retime(&trimmed(), 2, 1).expect("library retime");
+        assert_eq!(retime.after, clip_digest(&expected));
+
+        let mirror = ClipMirrorTool::invoke(&server, NoArgs {}).expect("mirror runs");
+        let expected = edit::mirror(&expected);
+        assert_eq!(mirror.after, clip_digest(&expected));
+        assert_eq!(mirror.undo_depth, 3);
+
+        // Undo walks back through mirror, retime and trim, then refuses.
+        let back = ClipUndoTool::invoke(&server, NoArgs {}).expect("undo mirror");
+        assert_eq!(
+            back.after,
+            clip_digest(&edit::retime(&trimmed(), 2, 1).unwrap())
+        );
+        let back = ClipUndoTool::invoke(&server, NoArgs {}).expect("undo retime");
+        assert_eq!(back.after, clip_digest(&trimmed()));
+        let back = ClipUndoTool::invoke(&server, NoArgs {}).expect("undo trim");
+        assert_eq!(back.after, clip_digest(&fixture));
+        let empty = ClipUndoTool::invoke(&server, NoArgs {}).expect_err("nothing left");
+        assert_eq!(empty.code, "nothing_to_undo");
     }
 }

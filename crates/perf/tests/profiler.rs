@@ -410,3 +410,29 @@ fn tick_frame_600_capture_reads_clean() {
     assert!(plot.contains("bucket 59"));
     println!("{summary}{plot}marks={}\n", capture.marks.len());
 }
+
+#[test]
+fn phase_spans_open_only_while_enabled_and_frames_advance() {
+    // Flag test: lives in this binary under the shared mutex. Off hands out
+    // no guard; on hands one out per phase; off again closes the door. The
+    // frame counter moves on every begin_frame call, so the game can prove
+    // one call per presented frame without reading puffin.
+    let _guard = lock();
+    profiler::set_enabled(false);
+    assert!(profiler::span(profiler::Phase::Tick).is_none());
+    profiler::set_enabled(true);
+    let before = profiler::frames_begun();
+    profiler::begin_frame();
+    for phase in profiler::Phase::ALL {
+        let span = profiler::span(*phase).expect("enabled phase hands out a guard");
+        assert_eq!(profiler::Phase::from_name(phase.name()), Ok(*phase));
+        drop(span);
+    }
+    let after = profiler::frames_begun();
+    profiler::set_enabled(false);
+    assert!(after > before, "begin_frame advances the frame count");
+    assert!(
+        profiler::span(profiler::Phase::Present).is_none(),
+        "off again hands out no guard"
+    );
+}

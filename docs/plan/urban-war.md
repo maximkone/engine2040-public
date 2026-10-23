@@ -42,7 +42,7 @@ multi-storey navigation and modern content do not.
 | Deterministic tick, forks, replay | integrated (arena); golden `d57b5c8ae3096614` |
 | Window, game exe, editor exe | integrated |
 | ECS spine for a second game | not started (ARC1–ARC7 open) |
-| Second-game boot receipt (RC34, runtime-owned) | open, blocked on UW0; companion to UW39 (game side) | board `docs/SPRINT-07-accepted-plan-rows.md:118-125`, runtime plan `docs/plan/runtime.md:270` |
+| Second-game boot receipt (RC34, runtime-owned) | open, blocked on UW0; companion to UW39 (game side) | board `docs/archive/SPRINT-done-07-accepted-plan-rows.md:118-125` (moved 2026-10-23; the archive keeps the same lines), runtime plan `docs/plan/runtime.md:270` |
 | Urban game crate (UW27) | pilot only: `games/urban/src/boot.rs` headless corner boot lives on disk, but no Cargo package and not in workspace members | `games/urban/src/boot.rs:1-8`, `Cargo.toml:13`, board `docs/SPRINT-16-urban-war.md:159` |
 | Slice evidence (UW39) | not started: no `crates/proof/src/uw.rs` (Glob 2026-10-14) | board `docs/SPRINT-16-urban-war.md:225` |
 | Projectile flight (UW2) | partial: Fixed Q16 flight tables landed, no weapon emission or range-hash harness | `crates/combat/src/projectile.rs:15-56`, board `docs/SPRINT-16-urban-war.md:17` |
@@ -276,7 +276,7 @@ per Acceptance 3.
 ### Row changes (2026-10-13, RC34 packet)
 
 - RC34 stays runtime-owned (`docs/plan/runtime.md:270`, board
-  `docs/SPRINT-07-accepted-plan-rows.md:118-125`); this plan adds no
+  `docs/archive/SPRINT-done-07-accepted-plan-rows.md:118-125`); this plan adds no
   duplicate. UW39 stays the game-side receipt.
 - No new UW/UC rows this packet: the boot path is already covered by
   UW0 → UW27 → UW39 plus RC34, and UW0 is WAITING on GM3/Q1

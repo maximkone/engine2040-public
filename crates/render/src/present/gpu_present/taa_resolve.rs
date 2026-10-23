@@ -68,6 +68,8 @@ pub(crate) struct BlitFeed<'a> {
     pub(crate) fog: &'a wgpu::TextureView,
     /// This target's contact-AO view.
     pub(crate) ao: &'a wgpu::TextureView,
+    /// This target's bloom halo view (half-res, rung 0).
+    pub(crate) bloom: &'a wgpu::TextureView,
     /// This target's fog color plus size uniform.
     pub(crate) fog_col: &'a wgpu::Buffer,
 }
@@ -509,7 +511,7 @@ fn resolve_bind(
 }
 
 /// The blit bind over one resolved image: HDR slot 0 plus the target's fog
-/// pair, exactly the layout the HDR blit bind uses.
+/// pair and bloom halo, exactly the layout the HDR blit bind uses.
 fn target_blit_bind(
     device: &wgpu::Device,
     feed: &BlitFeed<'_>,
@@ -527,6 +529,7 @@ fn target_blit_bind(
                 binding: 4,
                 resource: feed.fog_col.as_entire_binding(),
             },
+            texture_bind(5, feed.bloom),
         ],
     })
 }
@@ -562,13 +565,7 @@ fn sampler_bind<'a>(binding: u32, sampler: &'a wgpu::Sampler) -> wgpu::BindGroup
 
 /// The 32-byte resolve uniform: size, history weight, velocity reject in
 /// pixels, validity and three pad words.
-fn uniform_bytes(
-    width: u32,
-    height: u32,
-    blend: f32,
-    threshold: f32,
-    valid: bool,
-) -> [u8; 32] {
+fn uniform_bytes(width: u32, height: u32, blend: f32, threshold: f32, valid: bool) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     bytes[0..4].copy_from_slice(&width.to_le_bytes());
     bytes[4..8].copy_from_slice(&height.to_le_bytes());

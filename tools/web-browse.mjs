@@ -385,8 +385,9 @@ export async function launchChrome(chrome, flags, logFile) {
 // `arena` is readArena's result: its receipt is the page's own final count, newer than the ready line.
 // QW3/QW12: `load` is the page's window.loadStats of the first load, `reload` the same page loaded again in the same profile;
 // the receipt keeps the three timings (download, compile, first frame) apart from the harness's own ttff, and the cache facts.
-export const receiptOf = (report, firstFrameMs, set, arena = null, load = null, reload = null) => ({
+export const receiptOf = (report, firstFrameMs, set, arena = null, load = null, reload = null, pin = null) => ({
   schema: 1, set, wasmMemoryBytes: report?.wasmMemoryBytes ?? null, ttffMs: firstFrameMs ?? null, commit: report?.commit ?? null,
+  build: pin?.build ?? null, pin: pin?.files ?? null,
   load: load && { bundle: load.bundle, bytesFetched: load.bytesFetched, downloadMs: load.downloadMs, compileMs: load.compileMs, initMs: Math.round(load.initMs), firstFrameMs: Math.round(load.firstFrameMs), cache: load.cache, persisted: load.persisted },
   reload: reload && { bundle: reload.bundle, bytesFetched: reload.bytesFetched },
   tier: arena?.receipt?.tier ?? report?.tier ?? null,
@@ -520,6 +521,7 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
     const timedOut = state !== "running" && state !== "fatal";
     const read = () => evalJs(`(() => { const $ = (id) => document.getElementById(id); const c = $('canvas'); return {
       state: document.body.dataset.state, generation: document.body.dataset.generation ?? null,
+      build: document.body.dataset.build ?? null, pin: window.buildPin ?? null,
       hud: $('hud').textContent, reportText: $('report').textContent,
       golden: $('golden').textContent, goldenState: document.body.dataset.golden ?? null,
       fatalDisplay: getComputedStyle($('fatal')).display, fatalText: $('fatal').innerText,
@@ -531,7 +533,7 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
         const i = a.info ?? (a.requestAdapterInfo ? await a.requestAdapterInfo() : {});
         return { gpu: true, adapter: { vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description, isFallback: a.isFallbackAdapter ?? null, features: [...a.features].length } };
       } catch (e) { return { gpu: true, error: String(e) }; } })()`);
-    const out = { waitedMs: Date.now() - t0, firstFrameMs, timedOut, state: first.state, generation: first.generation, hud: first.hud, reportText: first.reportText, report: parseLine(first.reportText), golden: first.golden, goldenState: first.goldenState, fatalDisplay: first.fatalDisplay, fatalText: first.fatalText, hasGpu: first.hasGpu, canvas: first.canvas, ua: first.ua, load, probe, console: consoleLines, exceptions, screenshot: null, stats: null, framesAdvanced: null, recovered: null };
+    const out = { waitedMs: Date.now() - t0, firstFrameMs, timedOut, state: first.state, generation: first.generation, build: first.build, pin: first.pin, hud: first.hud, reportText: first.reportText, report: parseLine(first.reportText), golden: first.golden, goldenState: first.goldenState, fatalDisplay: first.fatalDisplay, fatalText: first.fatalText, hasGpu: first.hasGpu, canvas: first.canvas, ua: first.ua, load, probe, console: consoleLines, exceptions, screenshot: null, stats: null, framesAdvanced: null, recovered: null };
     if (!timedOut) {
       out.screenshot = Buffer.from((await cdp.send("Page.captureScreenshot", { format: "png" })).data, "base64");
       if (state === "running") {
@@ -951,12 +953,12 @@ export async function main(argv) {
         for (const l of entry.chromeLog.split("\n").filter((x) => /gpu|vulkan|webgpu|swiftshader|dawn|angle|adapter/i.test(x)).slice(-6)) console.log(`    chrome ${l.slice(0, 300)}`);
       }
       if (v.ok && !winner) {
-        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, stats: r.stats, golden: r.golden, goldenState: r.goldenState, firstFrameMs: r.firstFrameMs, arena: r.arena, load: r.load, reload: r.reload, memory: r.memory, loss: r.loss, destroyed: r.destroyed, visibility: r.visibility };
+        winner = { set, flags: flags.join(" "), report: r.report, reportText: r.reportText, build: r.build, pin: r.pin, stats: r.stats, golden: r.golden, goldenState: r.goldenState, firstFrameMs: r.firstFrameMs, arena: r.arena, load: r.load, reload: r.reload, memory: r.memory, loss: r.loss, destroyed: r.destroyed, visibility: r.visibility };
         writeFileSync(join(out, "ready.png"), r.screenshot);
         writeFileSync(join(out, "report.json"), `${r.reportText}\n`);
         writeArena(out, "arena-capture", r.arena);
         // The numbers tools/web-budget.mjs gates on (WEB11).
-        writeFileSync(join(out, "receipt.json"), `${JSON.stringify({ ...receiptOf(r.report, r.firstFrameMs, set.name, r.arena, r.load, r.reload), inputEvents: r.inputCount ?? 0 }, null, 2)}\n`);
+        writeFileSync(join(out, "receipt.json"), `${JSON.stringify({ ...receiptOf(r.report, r.firstFrameMs, set.name, r.arena, r.load, r.reload, r.pin), inputEvents: r.inputCount ?? 0 }, null, 2)}\n`);
         if (r.inputScreenshot) writeFileSync(join(out, "input.png"), r.inputScreenshot);
         writeFileSync(join(out, "flag-line.txt"), `${a.chrome} ${flags.join(" ")}\n`);
       }
@@ -968,6 +970,8 @@ export async function main(argv) {
     if (winner) {
       console.log(`FLAG LINE ${a.chrome} ${winner.flags}`);
       console.log(`READY LINE ${winner.reportText}`);
+      const pinName = (logical) => winner.pin?.files?.[logical]?.name ?? "?";
+      console.log(`PIN LINE build=${winner.pin?.build ?? "?"} wasm=${pinName("engine_bg.wasm")} kit=${pinName("assets/arena.e2bundle")} rig=${pinName("assets/fighters.e2bundle")}`);
       console.log(`CANVAS ${JSON.stringify(winner.stats)}`);
       if (winner.arena) {
         console.log(`ARENA CAPTURE ${winner.arena.captureText}`);

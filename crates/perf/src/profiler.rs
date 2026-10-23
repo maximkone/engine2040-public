@@ -22,6 +22,11 @@
 //! enabled; serving or saving the puffin stream stays operator-side
 //! (puffin viewer/HTTP), this crate only plants the scope points.
 //!
+//! Live frame: [`begin_frame`] once per presented frame, then one [`Span`]
+//! guard per [`Phase`] (`game.tick`, `game.look`, `game.hud`, `game.present`).
+//! The guards exist only while the master switch is on and carry no code
+//! without the `profile` feature, so the default game build is unchanged.
+//!
 //! Donor: EmbarkStudios/puffin@c81e9bb (MIT) `puffin/src/lib.rs`: the
 //! off-by-default gate shape (`MACROS_ON: AtomicBool = false`, relaxed
 //! load/store, off path one atomic plus a branch at 1-2 ns with no clock,
@@ -29,7 +34,7 @@
 //! `gate_on` below; no donor bytes vendored, puffin stays an opt-in dep.
 
 use std::fmt::{self, Display, Formatter};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::diagnostics::{DiagnosticsError, DiagnosticsStore};
@@ -225,6 +230,19 @@ macro_rules! scope_if {
     };
 }
 
+/// Frames advanced through [`begin_frame`] since process start. Counted
+/// whether or not profiling is on: the count is how a caller proves the game
+/// begins one frame per presented frame, and puffin offers no public frame
+/// index. One relaxed add; no clock, no lock, no puffin code.
+static FRAMES_BEGUN: AtomicU64 = AtomicU64::new(0);
+
+/// Frames begun so far through [`begin_frame`].
+#[inline]
+#[must_use]
+pub fn frames_begun() -> u64 {
+    FRAMES_BEGUN.load(Ordering::Relaxed)
+}
+
 /// Advance the puffin frame: call once per captured frame so the puffin
 /// stream closes the current frame and per-frame CPU time reads measured
 /// instead of UNKNOWN.
@@ -232,15 +250,131 @@ macro_rules! scope_if {
 /// Port of the puffin game-loop shape (donor: EmbarkStudios/puffin@c81e9bb,
 /// MIT, puffin/src/lib.rs docs plus global_profiler.rs::new_frame):
 /// GlobalProfiler::lock().new_frame() once per frame around
-/// profile_scope! spans. Off path is one relaxed atomic load plus a
-/// branch with no lock and no clock; without the profile feature this
-/// is an empty no-op, so default builds carry no puffin code at all.
+/// profile_scope! spans. Off path is one relaxed atomic add plus a load plus
+/// a branch, with no lock and no clock; without the profile feature this
+/// carries no puffin code at all.
 #[inline]
 pub fn begin_frame() {
+    FRAMES_BEGUN.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "profile")]
     if is_enabled() {
         puffin::GlobalProfiler::lock().new_frame();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Live phase spans: one named guard per game frame phase.
+// ---------------------------------------------------------------------------
+
+/// One phase of a presented game frame, in the order the game runs them.
+/// Consumer: the arena window plants one [`Span`] per phase per frame.
+/// Units: none (a label). Determinism: a name only, never hashed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Phase {
+    /// Fixed simulation ticks for this frame.
+    Tick,
+    /// View transforms and the fighter draw list.
+    Look,
+    /// HUD rows and overlays staged for the frame.
+    Hud,
+    /// The frame submit and present call.
+    Present,
+}
+
+impl Phase {
+    /// Every phase in game order; doubles as the report order.
+    pub const ALL: &'static [Self] = &[Self::Tick, Self::Look, Self::Hud, Self::Present];
+
+    /// Stable span key, ASCII with no spaces (puffin's naming rule).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Tick => "game.tick",
+            Self::Look => "game.look",
+            Self::Hud => "game.hud",
+            Self::Present => "game.present",
+        }
+    }
+
+    /// Look up a phase by its [`Self::name`], failing on anything else.
+    pub fn from_name(name: &str) -> Result<Self, ProfileError> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|phase| phase.name() == name)
+            .ok_or_else(|| ProfileError::UnknownSpan {
+                span: name.to_owned(),
+            })
+    }
+
+    /// Index in [`Self::ALL`]; one static scope-id slot per phase. A plain
+    /// match keeps the slot table panic-free; the tests pin the order.
+    #[cfg(feature = "profile")]
+    fn index(self) -> usize {
+        match self {
+            Self::Tick => 0,
+            Self::Look => 1,
+            Self::Hud => 2,
+            Self::Present => 3,
+        }
+    }
+}
+
+/// A live profiling span; dropping it ends the span. [`span`] hands one out
+/// only while the master switch is on, so a caller binds it for the phase:
+/// `let _span = span(Phase::Tick);`.
+///
+/// With the `profile` feature this holds one puffin scope; without it the
+/// guard is a zero-sized token, so default builds carry no puffin code.
+pub struct Span {
+    /// The puffin scope, closed on drop. Present only with `profile`.
+    #[cfg(feature = "profile")]
+    _scope: puffin::ProfilerScope,
+    /// Zero-sized token for builds without the `profile` feature.
+    #[cfg(not(feature = "profile"))]
+    _unit: (),
+}
+
+/// Open one phase span, or `None` while the profiler is off. The off path is
+/// one relaxed atomic load plus a branch; with `profile` on, the first call
+/// for a phase registers its name with puffin's thread profiler (a `OnceLock`
+/// per phase, the same shape the puffin scope macros use). Without the
+/// `profile` feature a returned guard does nothing.
+#[inline]
+#[must_use]
+pub fn span(phase: Phase) -> Option<Span> {
+    if !is_enabled() {
+        return None;
+    }
+    #[cfg(feature = "profile")]
+    {
+        Some(Span {
+            _scope: puffin::ProfilerScope::new(scope_id(phase), ""),
+        })
+    }
+    #[cfg(not(feature = "profile"))]
+    {
+        let _ = phase;
+        Some(Span { _unit: () })
+    }
+}
+
+/// Puffin scope id for one phase, registered once per process like the
+/// per-call-site `static SCOPE_ID` inside puffin's own scope macros.
+#[cfg(feature = "profile")]
+fn scope_id(phase: Phase) -> puffin::ScopeId {
+    use std::sync::OnceLock;
+    static IDS: [OnceLock<puffin::ScopeId>; 4] = [
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+    ];
+    *IDS[phase.index()].get_or_init(|| {
+        puffin::ThreadProfiler::call(|tp| {
+            tp.register_named_scope(phase.name(), "phase", file!(), line!())
+        })
+    })
 }
 
 /// Canonical physics-step hash through the conditional gate.
@@ -1529,6 +1663,62 @@ mod tests {
         // above); enabled frames ride the integration suite.
         assert!(!is_enabled());
         begin_frame();
+        assert!(!is_enabled());
+    }
+
+    #[test]
+    fn phase_names_are_stable_and_validate() {
+        // Every phase names itself in puffin's ASCII-no-space shape, the
+        // lookup round-trips and a foreign name is refused with its text.
+        assert_eq!(Phase::ALL.len(), 4);
+        let mut names = Vec::new();
+        for phase in Phase::ALL {
+            let name = phase.name();
+            assert_eq!(Phase::from_name(name), Ok(*phase), "round trip {name}");
+            assert!(name.is_ascii() && !name.contains(' '), "bad name {name}");
+            assert!(name.starts_with("game."), "phase key {name}");
+            names.push(name);
+        }
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), Phase::ALL.len(), "names are distinct");
+        assert_eq!(
+            Phase::from_name("gen_ai.request"),
+            Err(ProfileError::UnknownSpan {
+                span: "gen_ai.request".to_owned(),
+            })
+        );
+        assert_eq!(Phase::Tick.name(), "game.tick");
+        assert_eq!(Phase::Present.name(), "game.present");
+    }
+
+    /// The scope-id slot table must follow [`Phase::ALL`]: one static slot
+    /// per phase, in the same order the report lists them.
+    #[cfg(feature = "profile")]
+    #[test]
+    fn phase_indices_follow_the_all_order() {
+        for (slot, phase) in Phase::ALL.iter().enumerate() {
+            assert_eq!(phase.index(), slot, "slot for {}", phase.name());
+        }
+    }
+
+    #[test]
+    fn phase_guards_stay_closed_while_off_and_frames_count() {
+        // Off profiler: every phase hands out no guard (one load plus a
+        // branch). The frame counter still advances, so a caller can prove
+        // begin_frame runs once per presented frame without flipping the
+        // switch. This test never flips the flag (see the mutex rule above).
+        assert!(!is_enabled());
+        for phase in Phase::ALL {
+            assert!(span(*phase).is_none(), "off span for {}", phase.name());
+        }
+        let before = frames_begun();
+        begin_frame();
+        begin_frame();
+        assert!(
+            frames_begun() >= before + 2,
+            "two begin_frame calls advance the frame count"
+        );
         assert!(!is_enabled());
     }
 

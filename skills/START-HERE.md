@@ -1,10 +1,10 @@
-# START HERE: the 8 skills to read first
+# START HERE: route to one skill
 
-New session, any model. `AGENTS.md` wins over every skill. Read these eight once (about 15 minutes), then use the task table below. The full map is `skills/SKILLS.md`. Open a skill as `skills/<name>/SKILL.md`.
+New session, any model. `AGENTS.md` wins over every skill. Read this router, then open one skill that matches the task. The core map below explains common choices; it is not a mandatory reading list. The full map is `skills/SKILLS.md`. Open a skill as `skills/<name>/SKILL.md`.
 
-## The eight
+## Core map
 
-| # | skill | why first |
+| # | skill | why useful |
 |---|---|---|
 | 1 | `repo-orientation` | where things are; the narrow search that does not die on the glTF |
 | 2 | `commit-and-board` | one shared tree: commit by path, never `git add -A`; how a row is written and closed (`Landed <sha7>`, evidence) |
@@ -43,15 +43,15 @@ New session, any model. `AGENTS.md` wins over every skill. Read these eight once
 ## Five rules that apply to every task
 
 1. Start: `git pull --no-rebase --no-edit origin master`, then `git status --short`. Lines you did not make are another session's: never revert them.
-2. Take work from the plan: `node tools/board-slice.mjs --focus`, then `node tools/board-slice.mjs <ID>`. Never read the board whole.
+2. Board work: `node tools/board-slice.mjs --focus`, then `node tools/board-slice.mjs <ID>`. A direct user request needs no new board row. Never read the board whole.
 3. Iterate with `cargo check -p <crate>` only. Every test and clippy proof goes through `node tools/gh-check.mjs cargo ...`.
 4. The golden hash is `d57b5c8ae3096614`. If it moves you have a bug or a receipt to write; never re-pin it.
-5. Commit only your paths: `git commit -F <msgfile> -- <paths>` (`git add -N` for a new file). Pull, then push `master`. No rebase, amend or force-push.
+5. Review `git diff --check -- <paths>` and `git diff -- <paths>`. Commit only your paths: `git commit -F <msgfile> -- <paths>` (`git add -N` for a new file). Pull, then push `master`. No rebase, amend or force-push.
 
 ## Docs tasks
 
 - A new doc gets one line in the index that lists it, in the same commit: `docs/README.md` map, `docs/INDEX.md` contracts, `docs/plan/README.md` for a plan, `skills/SKILLS.md` for a skill.
-- After a board or doc edit run `node tools/workspace-check.mjs`. For skills: `node --test tools/skills-index.test.mjs`.
+- After a board or doc edit run `node tools/workspace-check.mjs`. For agent instructions or skills: `node --test AGENTS.test.mjs tools/skills-index.test.mjs`.
 - Retire a doc with `git mv` into `docs/archive/<date>/` and fix every link to it.
 - Generated files (`docs/CRATE-MAP.md`, `docs/plan/ATLAS.md`) are never hand-edited.
 - A skill: folder `skills/<name>/SKILL.md`, `name` equals the folder, `description` starts "Use when" and is a task you can match, under 300 characters, file under 250 lines, no `file:line` cites.

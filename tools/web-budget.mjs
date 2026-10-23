@@ -4,7 +4,7 @@
 // time to the first frame), prints one line
 //   web-budget: wasm=<bytes> gzip=<bytes> brotli=<bytes> first_bundle=<bytes> mem=<bytes> ttff=<ms>
 // and fails when a number is over its budget in tools/web-budget.json. Units: bytes, ms.
-//   wasm          engine_bg.wasm as shipped
+//   wasm          the pinned wasm (engine_bg.<hash>.wasm) as shipped
 //   gzip, brotli  that file gzip level 9 / brotli quality 11 (Unity advises brotli; the host may serve either)
 //   first_bundle  the bytes the page loads first, each file in the form the host sends it (QW10: the two
 //                 cooked bundles ship gzip), with the arena bundle counted only to its tier-0 prefix
@@ -24,6 +24,7 @@ import { brotliCompressSync, constants, gunzipSync, gzipSync } from "node:zlib";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const BUDGET_KEYS = ["wasm", "gzip", "brotli", "first_bundle", "mem", "ttff_ms"];
 export const WASM_FILE = "engine_bg.wasm";
+export const BUILD_FILE = "build.json";
 // QW4: the one file the page opens at its tier-0 boundary; every other file is
 // loaded whole before the first frame.
 export const ARENA_BUNDLE = "assets/arena.e2bundle";
@@ -40,12 +41,27 @@ export const gzipSize = (buf) => gzipSync(buf, { level: 9 }).length;
 export const isGzip = (buf) => buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b;
 export const unzipped = (buf) => (isGzip(buf) ? gunzipSync(buf) : buf);
 
+// PIN: the names a dist's build.json pins for the wasm and the arena bundle. A dist without a pin (an older build or a
+// fixture) keeps the fixed names, so the gate still measures it.
+export function distNames(dir) {
+  try {
+    const info = JSON.parse(readFileSync(join(dir, BUILD_FILE), "utf8"));
+    return {
+      wasm: info?.pin?.[WASM_FILE]?.name ?? WASM_FILE,
+      arena: info?.pin?.[ARENA_BUNDLE]?.name ?? ARENA_BUNDLE,
+    };
+  } catch {
+    return { wasm: WASM_FILE, arena: ARENA_BUNDLE };
+  }
+}
+
 // WEB11 + QW4 + QW10: the bytes the page must receive before its first frame, each file in
 // the form the host sends it. A file that already ships compressed counts as it stands, a
 // plain one as its brotli size (the host may compress it), and the arena bundle only to its
 // tier-0 prefix, which costs the gzip of those raw bytes while the stream decompresses.
-export function firstLoadBytes(rel, shipped) {
-  if (rel === ARENA_BUNDLE) {
+// `arenaName` is the pinned file name; the fixed name is the default for a dist without a pin.
+export function firstLoadBytes(rel, shipped, arenaName = ARENA_BUNDLE) {
+  if (rel === arenaName) {
     const prefix = firstTierBytes(shipped);
     return isGzip(shipped) ? gzipSize(prefix) : brotliSize(prefix);
   }
@@ -93,13 +109,14 @@ function listFiles(dir, base = dir) {
 
 // The four size numbers of a dist/web directory.
 export function measureDist(dir) {
-  const wasmPath = join(dir, WASM_FILE);
+  const names = distNames(dir);
+  const wasmPath = join(dir, names.wasm);
   if (!existsSync(wasmPath)) throw new BudgetError(`${wasmPath} does not exist (run node tools/web-build.mjs first)`);
   const wasm = readFileSync(wasmPath);
   let firstBundle = 0;
   for (const rel of listFiles(dir)) {
-    if (rel === "build.json") continue;
-    firstBundle += firstLoadBytes(rel, rel === WASM_FILE ? wasm : readFileSync(join(dir, rel)));
+    if (rel === BUILD_FILE) continue;
+    firstBundle += firstLoadBytes(rel, rel === names.wasm ? wasm : readFileSync(join(dir, rel)), names.arena);
   }
   return { wasm: wasm.length, gzip: gzipSize(wasm), brotli: brotliSize(wasm), first_bundle: firstBundle };
 }
