@@ -46,8 +46,8 @@ jobs:
             name: cmp
             harness: q16::q16_reference_cmp_scalar_orders_like_i128
           - kernel: cut
-            name: reach-det
-            harness: cut::cut_edge_reach_is_deterministic
+            name: envelope
+            harness: cut::cut_edge_reach_rejects_outside_envelope
           - kernel: cut
             name: travel
             harness: cut::cut_edge_reach_rejects_travel_past_bound

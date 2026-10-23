@@ -9,13 +9,9 @@
 
 use engine_combat::anatomy::JointId;
 use engine_combat::cut::{
-    chance_q16, edge_reaches, effective_q16, BladeSwing, CutTables, JointTarget, MAX_ENERGY_Q16,
-    MAX_SHARPNESS_Q16, MAX_WEAR_Q16,
+    chance_q16, edge_reaches, effective_q16, BladeSwing, CutTables, JointTarget, CUT_POS_BOUND_MM,
+    MAX_ENERGY_Q16, MAX_SHARPNESS_Q16, MAX_WEAR_Q16,
 };
-
-fn any_i32x3() -> [i32; 3] {
-    [kani::any(), kani::any(), kani::any()]
-}
 
 fn swing(p0: [i32; 3], p1: [i32; 3], blade_half_mm: u32) -> BladeSwing {
     BladeSwing {
@@ -40,40 +36,14 @@ fn target(spine: [i32; 3], radius_mm: u32) -> JointTarget {
     }
 }
 
-/// Kernel: `edge_reaches` contact gate (envelope, travel, capsule).
-/// Bound: both points and both capsule ends inside `+/-12_000` mm (wider
-/// than the 6_000 mm travel bound), blade half and capsule radius inside
-/// `0..=500` mm.
+/// Kernel: `edge_reaches` position envelope.
+/// Bound: a swing and capsule 1 mm outside `CUT_POS_BOUND_MM` on the x axis.
 #[kani::proof]
-#[kani::unwind(4)]
-pub fn cut_edge_reach_is_deterministic() {
-    const COORD: i32 = 12_000;
-    let p0 = any_i32x3();
-    let p1 = any_i32x3();
-    let q0 = any_i32x3();
-    let q1 = any_i32x3();
-    let blade_half: u32 = kani::any();
-    let radius: u32 = kani::any();
-    for axis in 0..3 {
-        kani::assume((-COORD..=COORD).contains(&p0[axis]));
-        kani::assume((-COORD..=COORD).contains(&p1[axis]));
-        kani::assume((-COORD..=COORD).contains(&q0[axis]));
-        kani::assume((-COORD..=COORD).contains(&q1[axis]));
-    }
-    kani::assume(blade_half <= 500);
-    kani::assume(radius <= 500);
-    let swing = swing(p0, p1, blade_half);
-    let target = JointTarget {
-        joint: JointId::ElbowR,
-        q0_mm: q0,
-        q1_mm: q1,
-        radius_mm: radius,
-    };
-    let tables = CutTables::v1();
-    assert_eq!(
-        edge_reaches(&swing, &target, &tables),
-        edge_reaches(&swing, &target, &tables)
-    );
+pub fn cut_edge_reach_rejects_outside_envelope() {
+    let outside = [CUT_POS_BOUND_MM + 1, 0, 0];
+    let swing = swing(outside, outside, 0);
+    let target = target(outside, 1);
+    assert!(!edge_reaches(&swing, &target, &CutTables::v1()));
 }
 
 /// Kernel: `edge_reaches` single-swing travel bound.

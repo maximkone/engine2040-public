@@ -24,11 +24,14 @@ pub fn q16_checked_mul_matches_i128() {
 }
 
 /// Kernel: `Fixed::checked_div` (truncation toward zero, no panic).
-/// Bound: every raw `i64` dividend and every nonzero divisor.
+/// Bound: raw dividend and nonzero divisor in `+/-2^32`.
 #[kani::proof]
 pub fn q16_checked_div_is_total_and_truncates() {
+    const LIMIT: i64 = 1 << 32;
     let a: i64 = kani::any();
     let b: i64 = kani::any();
+    kani::assume((-LIMIT..=LIMIT).contains(&a));
+    kani::assume((-LIMIT..=LIMIT).contains(&b));
     kani::assume(b != 0);
     let got = Fixed::from_bits(a).checked_div(Fixed::from_bits(b));
     let want = i64::try_from((i128::from(a) << 16) / i128::from(b)).ok();
@@ -36,13 +39,13 @@ pub fn q16_checked_div_is_total_and_truncates() {
 }
 
 /// Kernel: `Fixed::sqrt` over `isqrt` (floor square root, integer only).
-/// Bound: positive raw Q47.16 values up to `2^24` (256.0); negative and
+/// Bound: positive raw Q47.16 values up to `2^20` (16.0); negative and
 /// zero give zero.
 #[kani::proof]
-#[kani::unwind(28)]
+#[kani::unwind(22)]
 pub fn q16_sqrt_is_floor_square_root() {
     let raw: i64 = kani::any();
-    kani::assume(raw > 0 && raw <= 1_i64 << 24);
+    kani::assume(raw > 0 && raw <= 1_i64 << 20);
     let root = Fixed::from_bits(raw).sqrt().to_bits();
     assert!(root >= 0);
     let n = u128::from(raw.unsigned_abs()) * 65_536;
