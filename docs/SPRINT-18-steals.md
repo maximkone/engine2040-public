@@ -24,7 +24,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   `target/reports/wiring-scan.json`; the first run writes `tools/wiring-baseline.json`
   and `--baseline` exits 1 when any crate's island count rises. F2P: no
   wiring-scan tool. P2P: `node --test tools/wiring-scan.test.mjs`;
-  `node tools/workspace-check.mjs` PASS. Landed so far (2026-10-12 check): ec5d0f45 (scanner and fixtures). Progress 2026-10-23: every Accept part checks green — 18 tests (`node --test tools/wiring-scan.test.mjs`: `--json` byte-equal x2, top ten by count, a baseline rise detected, the committed pin), the report written to `target/reports/wiring-scan.json`, the pin refreshed to `total: 6935` over 41 crates, and a root that is not a directory now exits 2 instead of passing on zero islands (HEAD exited 0 on `tools/wiring-baseline.json`, which is what `docs/plan/potato.md` had been reading as a green gate).
+  `node tools/workspace-check.mjs` PASS. Landed so far (2026-10-12 check): ec5d0f45 (scanner and fixtures). Progress 2026-10-23: every Accept part checks green — 18 tests (`node --test tools/wiring-scan.test.mjs`: `--json` byte-equal x2, top ten by count, a baseline rise detected, the committed pin), the report written to `target/reports/wiring-scan.json`, the pin refreshed to `total: 6934` over 41 crates, and a root that is not a directory now exits 2 instead of passing on zero islands (HEAD exited 0 on `tools/wiring-baseline.json`, which is what `docs/plan/potato.md` had been reading as a green gate). Recheck later on 2026-10-23, after the night's landings: `--check` reads 6984 against that pin, and the rise is committed code rather than a stale number - perf +14, nav +11, game +9, endpoint +9, world +3, render +3, web +3, proof +2, assets +2, destruction +2, anim +2, arena +1, material +1. Two lanes were mid-edit when it ran (nav's platoon and twelve endpoint files), so the pin stays at 6934: the seat that lands one of those crates refreshes it in its own commit, the way the tool's header asks.
 - [x] GS2 tools: wiring coverage, nightly and report only — which functions does the Progress 2026-10-17: tool and 15 tests green (node --test tools/wiring-cov.test.mjs, NOOP exit 2 without llvm-cov, canned fixture grouped list x2, fake-cargo plan); f1456ff. Left: the real run, `cargo llvm-cov` is not installed on this PC so target/reports/wiring-cov.json is still the canned fixture.
   real arena never run? `cargo llvm-cov run` on the arena binary for a short
   scripted run (same flags as FC1: `--scene arena --fighters 8 --frames 300 --exit`),
@@ -109,7 +109,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   adapter is `Err(OnlySoftware)` naming it; `presenter.rs` has no
   `PowerPreference::HighPerformance` left. F2P: presenter hardcodes it. P2P: `cargo
   test -p engine-render --lib` green; golden unchanged.
-- [ ] GS7 game: pick the dGPU on hybrid laptops — export `NvOptimusEnablement = 1` and Progress 2026-10-17: the two statics exist (`NvOptimusEnablement`, `AmdPowerXpressRequestHighPerformance` in crates/game/src/crash.rs, 1d01a41) but there is no crates/game/build.rs /EXPORT link arg and `node tools/pe-exports.mjs target/release/arena.exe` prints nothing (exit 0), so neither name is exported yet. needs GS8 is landed.
+- [x] GS7 game: pick the dGPU on hybrid laptops — export `NvOptimusEnablement = 1` and Progress 2026-10-17: the two statics exist (`NvOptimusEnablement`, `AmdPowerXpressRequestHighPerformance` in crates/game/src/crash.rs, 1d01a41) but there is no crates/game/build.rs /EXPORT link arg and `node tools/pe-exports.mjs target/release/arena.exe` prints nothing (exit 0), so neither name is exported yet. needs GS8 is landed. Landed c9115185.
   `AmdPowerXpressRequestHighPerformance = 1` from `arena.exe` (donor: GLFW
   `src/win32_init.c`; the exe, not a DLL, must export them). A `static` marked
   `#[no_mangle]` plus `crates/game/build.rs` printing
@@ -119,6 +119,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   Accept: after a release build `node tools/pe-exports.mjs target/release/arena.exe`
   lists both names. F2P: arena exports neither. P2P: `cargo check -p engine-game
   --features app` green. needs: GS8. Progress 2026-10-18: landed c9115185 (build.rs /EXPORT link args for the arena bin on windows-msvc, the two statics moved from crash.rs to bin/arena.rs). node tools/pe-exports.mjs target/debug/arena.exe built from this tree lists AmdPowerXpressRequestHighPerformance and NvOptimusEnablement; the same statics plus build.rs in a scratch package listed both on a release build. Left: the literal release arena.exe proof (a release build of the whole arena was still compiling on the loaded PC); tick it with node tools/pe-exports.mjs target/release/arena.exe.
+  Proof 2026-10-23: `cargo build --release -p engine-game --features app --bin arena` finished on this PC (1m28s) and `node tools/pe-exports.mjs target/release/arena.exe` printed both names, in this order: `AmdPowerXpressRequestHighPerformance`, `NvOptimusEnablement`. The row's accept is met by that release binary from this tree; no source change was needed for the proof.
 - [x] GS8 tools: read a PE export table — `tools/pe-exports.mjs <exe|dll>` parses the Landed 2746b129.
   export directory (about 80 lines, no dependency) and prints one name per line.
   Diff: regular. Tier A. Size S. Owns `tools/pe-exports.mjs`,
@@ -269,14 +270,14 @@ Every row is one crate, small, with a named donor and a test that fails before.
   and a second run downloads nothing; a wrong md5 deletes the file and exits 1;
   `--dry-run` prints total bytes and every license. F2P: no tool. P2P: `node --test
   tools/fetch-content.test.mjs` green.
-- [ ] GS22 content: fetch list v1 — `content/fetch.list` with 3 outdoor or Italian-style
+- [x] GS22 content: fetch list v1 — `content/fetch.list` with 3 outdoor or Italian-style
   HDRIs (2k), 8 PBR sets (1k: sand, marble, travertine, brick, mosaic, bronze, leather,
-  cloth) and 6 props, all CC0, chosen by querying the APIs. Progress 2026-10-22 (v1, 06124ea96): the list exists and its Accept passes live — `node tools/fetch-content.mjs --list content/fetch.list --dry-run` prints `total_bytes=218288 files=9`, nine `LICENSE CC0` lines and no duplicate ids. Landed: 3 Rome HDRIs at 2k (colosseum, borghese_gardens, castel_st_angelo_roof) and 6 PBR sets at 1k (aerial_sand, brick_4, blue_metal_plate, corrugated_iron, brown_leather, cotton_jersey), every row scouted live from the Poly Haven files API with its real md5. Owed for the tick (v2): marble and travertine (ambientCG serves the zips but its API no longer serves the licence or md5, and a url row needs the md5 before the licence column), mosaic (no CC0 mosaic on either API: ambientCG Mosaic002 answers 404, Poly Haven has no mosaic category), and the 6 props (Poly Haven models are per-file trees with no zip URL; ambientCG's model listing does not filter by type any more). P2P: `node --test tools/` is red tonight on the foreign board-cut fallout (finish.test.mjs names rows the 2026-10-22 cut moved off the shards), not on this row.
+  cloth) and 6 props, all CC0, chosen by querying the APIs. Progress 2026-10-22 (v1, 06124ea96): the list exists and its Accept passes live — `node tools/fetch-content.mjs --list content/fetch.list --dry-run` prints `total_bytes=218288 files=9`, nine `LICENSE CC0` lines and no duplicate ids. Landed: 3 Rome HDRIs at 2k (colosseum, borghese_gardens, castel_st_angelo_roof) and 6 PBR sets at 1k (aerial_sand, brick_4, blue_metal_plate, corrugated_iron, brown_leather, cotton_jersey), every row scouted live from the Poly Haven files API with its real md5. Owed for the tick (v2): marble and travertine (ambientCG serves the zips but its API no longer serves the licence or md5, and a url row needs the md5 before the licence column), mosaic (no CC0 mosaic on either API: ambientCG Mosaic002 answers 404, Poly Haven has no mosaic category), and the 6 props (Poly Haven models are per-file trees with no zip URL; ambientCG's model listing does not filter by type any more). P2P: `node --test tools/` is red tonight on the foreign board-cut fallout (finish.test.mjs names rows the 2026-10-22 cut moved off the shards), not on this row. Landed 0962defb7. v2: 42 rows, dry-run `total_bytes=38562005 files=42`, 42 CC0 rows, 42 unique ids, 0 rows without md5; real fetch 42 OK / 84 files with every md5 checked; `node --test "tools/*.test.mjs"` 1506 tests, 1491 pass, 0 fail, 15 skipped.
   Diff: regular. Tier A. Size
   S. Owns `content/fetch.list`. Accept: `node tools/fetch-content.mjs --dry-run
   content/fetch.list` prints at most 250 MB, every row CC0, no duplicate ids (needs
   network once). F2P: no list. P2P: `node --test tools/` green. needs: GS21.
-- [ ] GS23 content: fetch list v2, Roman and sound — scout-verified metadata only, open
+- [x] GS23 content: fetch list v2, Roman and sound — scout-verified metadata only, open
   each page before use. Poly Pizza (CC-BY 3.0: Coliseum `4raJTBfhAfc`, Centurion
   `g2ckFsGszB`, legionnaire `czyveAaJ0hd`, Roman Arch `agiRDMN0VR`). Sketchfab CC-BY
   with `SKETCHFAB_TOKEN`, skipped silently without it: gladius `b123c4388a6f4307aff353c165c94f92`,
@@ -288,7 +289,14 @@ Every row is one crate, small, with a named donor and a test that fails before.
   carry the required attribution text in the sidecar; no NC and no ND rows. Diff:
   regular. Tier A. Size S. Owns `content/fetch-roman.list`. Accept: `--dry-run` lists
   at least 12 rows, each CC0 or CC-BY, each CC-BY row with attribution text. F2P: no
-  list. P2P: `node --test tools/` green. needs: GS21.
+  list. P2P: `node --test tools/` green. needs: GS21. Landed 22b7766ee. `content/fetch-roman.list`
+  12 rows 24,945,995 bytes, 12 unique ids, every row CC-BY-3.0 (4, attribution text in the row
+  and sidecar) or CC0 (8: 4 Freesound crowd/ambience previews + 2 OpenGameArt StarNinjas sword
+  zips), no NC/ND row; `--dry-run` prints DRY total_bytes=24945995 files=12 and 4 ATTRIBUTION
+  lines; real fetch to temp: 12 OK 24 files, all CC-BY sidecars carry the text; the tool now
+  refuses a CC-BY row with no attribution and stays backwards compatible with the 42-row CC0
+  list; `node --test tools/` green. Caveat: the Freesound rows fetch the preview mp3 URL (the
+  licence text is on the page, not in the file).
 - [x] GS24 tools: headless Blender cook — `tools/cook-char.mjs` runs `blender -b -P Landed f5bf4f7.
   tools/blender/cook_char.py -- <in> <out.glb>` (import BVH, FBX or glTF, export glTF),
   samples peak working set, prints `cook: peak_ws_mb=..`. Blender is heavy on RAM, so
@@ -434,7 +442,7 @@ Every row is one crate, small, with a named donor and a test that fails before.
   `High`; battery 25 percent gives `Comfort`; saver on at 80 percent gives `Comfort`;
   `Potato` stays `Potato`; `Unknown` keeps the tier; golden unchanged. F2P: no `power`
   module. P2P: `cargo test -p engine-render --lib quality` green. needs: none.
-- [ ] GS41 game: raw mouse turns the free camera — the arena window reads keys and
+- [x] GS41 game: raw mouse turns the free camera - the arena window reads keys and Landed 51f7687ec.
   buttons only, and `fps_view::LookState::apply_mouse` has no mouse source. Add
   `MouseRaw` (new `crates/game/src/mouse_raw.rs`): `push(dx, dy)` sums winit
   `DeviceEvent::MouseMotion` deltas only while the cursor is grabbed and drops
@@ -449,7 +457,8 @@ Every row is one crate, small, with a named donor and a test that fails before.
   take gives (0, 0); a push while not grabbed, NaN or infinity changes nothing; a 9,000
   px spike takes 2,000; golden unchanged. F2P: no `mouse_raw` module. P2P: `cargo test
   -p engine-game --lib fps_view` green. needs: none.
-- [ ] GS42 game: announcer lines as data with a last-played throttle — the crowd has
+  Progress 2026-10-23: `mouse_raw` 5 passed x2 (runs 39954193832, 39954853032); `fps_view` 16 (39954885446); clippy all-targets PASS (39954206438); golden PASS (39954842478). Landed 51f7687ec; the free-camera math moved to `crates/game/src/bin/cursor/mod.rs` so the pinned `arena.rs` held at 5,101 lines, and `f32_from_f64` owns the winit f64 boundary.
+- [x] GS42 game: announcer lines as data with a last-played throttle - the crowd has
   per-reaction cooldowns (`audio/src/crowd.rs`) but the bout has no voice. Add
   `crates/game/src/announcer.rs`: a rule table `(FightCue, line name, min_gap_ticks)`
   in list order; `Announcer::on_cue(tick, cue) -> Option<&'static str>` returns the
@@ -464,3 +473,12 @@ Every row is one crate, small, with a named donor and a test that fails before.
   and then `None`; after the gap it speaks again; two matching rules give the first
   listed; the same cue script gives the same lines; golden unchanged. F2P: no
   `announcer` module. P2P: `cargo test -p engine-game --lib audio_mix` green. needs: none.
+  Landed b66e8c878. `crates/game/src/announcer.rs` (415 lines: fixed rule table in
+  list order, per-rule `min_gap_ticks`, first match wins, at most one line per call,
+  distinct voice keys) plus the one queue call in `audio_mix.rs` and the `lib.rs`
+  line. `cargo test -p engine-game --lib announcer` PASS: 10 passed, 0 failed
+  (8 announcer + 2 audio_mix `announcer_line_*`), 586 filtered, run 39940798965;
+  covers hold-inside-gap then None, speak-again-after-gap, per-rule gaps,
+  first-listed-wins, same script same lines, rewind never refires early,
+  default table answers every cue kind. Presentation only (names, never the sim);
+  golden `d57b5c8ae3096614` re-proven at d10b1c007 (run 39939140557).

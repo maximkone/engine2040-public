@@ -303,28 +303,24 @@ mod tests {
     /// The live-frame fixture size in pixels.
     const SIDE: u32 = 128;
 
-    /// The device the meter runs on, `None` without an adapter.
-    fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    /// The device the meter runs on; no adapter maps to a routed skip.
+    fn test_device() -> Result<(wgpu::Device, wgpu::Queue), crate::test_gpu::NoAdapter> {
         crate::test_gpu::hold_gpu_slot();
         let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
-        let adapter =
-            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })) {
-                Ok(adapter) => adapter,
-                Err(_) => {
-                    eprintln!("SKIPPED auto exposure gpu test: no wgpu adapter on this machine");
-                    return None;
-                }
-            };
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|error| {
+            crate::test_gpu::NoAdapter(format!("no wgpu adapter on this machine: {error}"))
+        })?;
         match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("auto-exposure-test"),
             ..Default::default()
         })) {
-            Ok((device, queue)) => Some((device, queue)),
+            Ok(pair) => Ok(pair),
             Err(error) => panic!("test device requests succeed when the adapter exists: {error}"),
         }
     }
@@ -354,7 +350,10 @@ mod tests {
     /// trimmed mean.
     #[test]
     fn auto_exposure_gpu_histogram_matches_the_cpu_oracle() {
-        let Some((device, queue)) = test_device() else {
+        let Some((device, queue)) = crate::test_gpu::require_or_skip(
+            "auto_exposure_gpu_histogram_matches_the_cpu_oracle",
+            test_device(),
+        ) else {
             return;
         };
         let (frame, width, height) = fixture();
@@ -440,7 +439,10 @@ mod tests {
     /// map of the first one is still open.
     #[test]
     fn auto_exposure_meter_waits_for_its_map_instead_of_guessing() {
-        let Some((device, queue)) = test_device() else {
+        let Some((device, queue)) = crate::test_gpu::require_or_skip(
+            "auto_exposure_meter_waits_for_its_map_instead_of_guessing",
+            test_device(),
+        ) else {
             return;
         };
         let (frame, width, height) = fixture();

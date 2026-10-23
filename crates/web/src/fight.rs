@@ -23,12 +23,14 @@ use std::fmt;
 use engine_assets::AssetSource;
 use engine_audio::FightCue;
 use engine_game::arena_kit::{kit_match_world_or_empty, push_kit_draws, stage_kit_from, KitReport};
+use engine_game::fighter_look::BodyLook;
 use engine_game::rounds::{RoundWinner, WINS_FOR_MATCH};
 use engine_game::windowed::{live_fight_dots, push_fight_draws, stage_fight_bodies, BodyDot};
 use engine_game::{App, GameConfig};
 use engine_net::session::BodyInput;
 use engine_render::present::{DrawList, Presenter};
 use engine_render::procedural_arena::{ProceduralArena, ShoulderView};
+use wasm_bindgen::JsValue;
 
 use crate::exchange::{self, Exchange, Flash};
 use crate::input::Facing;
@@ -245,20 +247,29 @@ pub struct Match {
     kit: Option<KitReport>,
     /// Kit draws resident on the last frame.
     kit_drawn: usize,
+    /// The staged CT7 rig (WEB6): `None` keeps the page's stand-in bodies. The look owns the
+    /// pose, textures and draws; the page only feeds it each tick's views, hp and cues.
+    look: Option<BodyLook>,
 }
 
 impl Match {
     /// Build the session, or say why the world or the rules refused it. When `kit` is `Some`,
     /// the arena kit is imported and staged once here (cold init); a refused import leaves the
-    /// match playable over the procedural ring instead of failing the page.
+    /// match playable over the procedural ring instead of failing the page. `look` is already
+    /// staged by the caller; it seeds tick 0 here so the first frame has bodies.
     ///
     /// # Errors
     /// [`MatchError::Session`] or [`MatchError::Scenery`] when the session or the ring refuse.
     pub fn new(
         kit: Option<&dyn AssetSource>,
+        mut look: Option<BodyLook>,
         presenter: &mut Presenter,
     ) -> Result<Self, MatchError> {
         let app = Self::session()?;
+        if let Some(look) = look.as_mut() {
+            look.observe_tick(0, app.fighter_views(), app.hp(), &[]);
+            look.observe_live_balances(app.live_match(), usize::from(SEATS));
+        }
         let arena = ProceduralArena::build().map_err(|e| MatchError::Scenery(e.to_string()))?;
         let kit = kit.and_then(|source| stage_kit_from(presenter, source).ok());
         Ok(Self {
@@ -284,6 +295,7 @@ impl Match {
             cam: [0.0; 6],
             kit,
             kit_drawn: 0,
+            look,
         })
     }
 
@@ -383,8 +395,20 @@ impl Match {
             self.restart();
             return;
         }
+        // The outcome just folded is the tick that ran before this next cursor: the native
+        // window observes the look under the same tick, so a swing's first frame lands there.
+        let look_tick = self.tick;
         self.tick = self.tick.saturating_add(1);
         self.cues = outcome.cues;
+        if let Some(look) = self.look.as_mut() {
+            look.observe_tick(
+                look_tick,
+                self.app.fighter_views(),
+                self.app.hp(),
+                &self.cues,
+            );
+            look.observe_live_balances(self.app.live_match(), usize::from(SEATS));
+        }
         self.latch_flash();
         self.latch_call();
         let hp = self.app.hp();
@@ -643,8 +667,28 @@ impl Match {
             self.held_t = drawn_t;
         }
         let dots = self.dots();
-        self.staged =
-            stage_fight_bodies(presenter, &dots).map_err(|e| MatchError::Stage(e.to_string()))?;
+        let look_frame = self
+            .look
+            .as_mut()
+            .map(|look| look.stage_frame(presenter, usize::from(SEATS), 1.0));
+        let look_active = match look_frame {
+            Some(Ok(staged)) => {
+                self.staged = staged;
+                true
+            }
+            Some(Err(err)) => {
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "fighters: stage refused: {err}; stand-in bodies"
+                )));
+                self.look = None;
+                false
+            }
+            None => false,
+        };
+        if !look_active {
+            self.staged = stage_fight_bodies(presenter, &dots)
+                .map_err(|e| MatchError::Stage(e.to_string()))?;
+        }
         let resident = presenter.mesh_keys();
         let mut list = self
             .arena
@@ -683,9 +727,15 @@ impl Match {
             list.camera.target.z,
         ];
         let bodies_at = list.items.len();
-        self.drawn = push_fight_draws(&mut list, &resident, &dots)
-            .map_err(|e| MatchError::Bodies(e.to_string()))?;
-        self.paint_flash_materials(&mut list, &dots, bodies_at);
+        if look_active {
+            if let Some(look) = self.look.as_ref() {
+                self.drawn = look.push_draws(&mut list, &resident, usize::from(SEATS));
+            }
+        } else {
+            self.drawn = push_fight_draws(&mut list, &resident, &dots)
+                .map_err(|e| MatchError::Bodies(e.to_string()))?;
+            self.paint_flash_materials(&mut list, &dots, bodies_at);
+        }
         Ok(list)
     }
 

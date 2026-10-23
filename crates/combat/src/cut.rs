@@ -17,8 +17,8 @@
 //! Presentation (stump caps, blood) never reads this module: the [`Cut`]
 //! event carries the joint, so a slow GPU cannot change an outcome.
 
-use crate::anatomy::{AnatomyTable, JointId, ARMOR_ALL};
-use crate::sweep::{dot3, sub3};
+use crate::anatomy::{AnatomyTable, JointId, ARMOR_ALL, JOINT_TOTAL};
+use crate::sweep::{dot3, sub3, validate_sweep, WeaponSweep, SWEEP_V1};
 use engine_core::{splitmix64, Fnv64};
 
 /// Version tag of the shipped cut rows.
@@ -833,6 +833,198 @@ fn edge_touches_capsule(
         probe += 1;
     }
     false
+}
+
+// ---- baked per-move hit tracks (EG42) --------------------------------------
+
+/// Wire version of the baked hit track: version 1 is the first three-move
+/// set. A reader refuses any other tag.
+pub const HIT_TRACK_VERSION_V1: u32 = 1;
+/// Most moves one baked track may carry.
+pub const MAX_HIT_TRACK_MOVES: usize = 8;
+/// Longest move baked, in 60 Hz ticks (60 s).
+pub const MAX_HIT_TRACK_TICKS: usize = 60;
+
+/// One baked tick of one attack move: the blade edge segment plus every bone
+/// capsule, in integer millimetres.
+///
+/// `bones` is in [`JointId`] wire order, one capsule per joint
+/// ([`JOINT_TOTAL`]). Rows are in the attacker's local frame at the clip
+/// root; the caller adds the root pose. The bake lives in
+/// `engine_anim::hit_track`; this crate reads `(move, tick)`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct HitTrackRow {
+    /// Tick inside the move, `0` at the press.
+    pub tick: u16,
+    /// Blade edge start of this tick, mm.
+    pub p0_mm: [i32; 3],
+    /// Blade edge end of this tick, mm.
+    pub p1_mm: [i32; 3],
+    /// Blade half-thickness, mm.
+    pub blade_half_mm: u32,
+    /// Bone capsules in [`JointId`] wire order.
+    pub bones: [JointTarget; JOINT_TOTAL],
+}
+
+impl HitTrackRow {
+    /// The row's blade edge as a rules-v2 sweep for `attacker`.
+    #[must_use]
+    pub fn blade(&self, attacker: u8) -> WeaponSweep {
+        WeaponSweep {
+            attacker,
+            p0_mm: self.p0_mm,
+            p1_mm: self.p1_mm,
+            blade_half_mm: self.blade_half_mm,
+        }
+    }
+}
+
+/// One baked attack move: its stable id, clip short name and tick rows.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct HitMove {
+    /// Stable move id used by the `(move, tick)` lookup.
+    pub id: u16,
+    /// Clip short name for receipts (`attack_1h_1`).
+    pub name: &'static str,
+    /// One row per tick, `rows[i].tick == i`.
+    pub rows: Vec<HitTrackRow>,
+}
+
+/// Baked per-move hit tracks: the authoritative integer-mm blade path and
+/// bone capsules the fight step and cut resolver read by `(move, tick)`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct HitTrack {
+    /// Wire version; [`HIT_TRACK_VERSION_V1`] is the shipped set.
+    pub version: u32,
+    /// Moves in id order; each owns its tick rows.
+    pub moves: Vec<HitMove>,
+}
+
+impl HitTrack {
+    /// One move's row at `tick`, or `None` when either is off the track.
+    #[must_use]
+    pub fn row(&self, move_id: u16, tick: u16) -> Option<&HitTrackRow> {
+        self.moves
+            .iter()
+            .find(|mv| mv.id == move_id)?
+            .rows
+            .get(usize::from(tick))
+    }
+
+    /// Range-check the wire: version, move ids, tick order, blade geometry
+    /// and every capsule. Reads only; the same bytes give the same result.
+    ///
+    /// # Errors
+    /// [`CutError::BadVersion`] for another wire tag; [`CutError::BadValue`]
+    /// for the first shape or geometry failure.
+    pub fn validate(&self) -> Result<(), CutError> {
+        if self.version != HIT_TRACK_VERSION_V1 {
+            return Err(CutError::BadVersion(self.version));
+        }
+        let count = self.moves.len();
+        if count == 0 || count > MAX_HIT_TRACK_MOVES {
+            return Err(CutError::BadValue {
+                field: "hit_track_moves",
+                value: u32::try_from(count).unwrap_or(u32::MAX),
+            });
+        }
+        let mut previous: Option<u16> = None;
+        for mv in &self.moves {
+            if let Some(last) = previous {
+                if mv.id <= last {
+                    return Err(CutError::BadValue {
+                        field: "hit_track_move",
+                        value: u32::from(mv.id),
+                    });
+                }
+            }
+            previous = Some(mv.id);
+            if mv.name.is_empty() {
+                return Err(CutError::BadValue {
+                    field: "hit_track_name",
+                    value: 0,
+                });
+            }
+            let rows = mv.rows.len();
+            if rows == 0 || rows > MAX_HIT_TRACK_TICKS {
+                return Err(CutError::BadValue {
+                    field: "hit_track_ticks",
+                    value: u32::try_from(rows).unwrap_or(u32::MAX),
+                });
+            }
+            for (tick, row) in mv.rows.iter().enumerate() {
+                if usize::from(row.tick) != tick {
+                    return Err(CutError::BadValue {
+                        field: "hit_track_tick",
+                        value: u32::from(row.tick),
+                    });
+                }
+                if validate_sweep(&row.blade(0), 1, &SWEEP_V1).is_err() {
+                    return Err(CutError::BadValue {
+                        field: "hit_track_blade",
+                        value: 0,
+                    });
+                }
+                for (index, bone) in row.bones.iter().enumerate() {
+                    if usize::from(bone.joint.as_u8()) != index {
+                        return Err(CutError::BadValue {
+                            field: "hit_track_bones",
+                            value: u32::try_from(index).unwrap_or(u32::MAX),
+                        });
+                    }
+                    validate_capsule(bone)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Stable digest over the wire: same rows give the same digest on every
+    /// PC. Nothing hashes it in the golden today; see `docs/HASH-LAW.md`.
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        let mut hash = Fnv64::new();
+        hash.write_u32(self.version);
+        hash.write_len(self.moves.len());
+        for mv in &self.moves {
+            hash.write_u16(mv.id);
+            hash.write_str(mv.name);
+            hash.write_len(mv.rows.len());
+            for row in &mv.rows {
+                hash.write_u16(row.tick);
+                for value in row.p0_mm.iter().chain(row.p1_mm.iter()) {
+                    hash.write_i32(*value);
+                }
+                hash.write_u32(row.blade_half_mm);
+                for bone in &row.bones {
+                    hash.write_u8(bone.joint.as_u8());
+                    for value in bone.q0_mm.iter().chain(bone.q1_mm.iter()) {
+                        hash.write_i32(*value);
+                    }
+                    hash.write_u32(bone.radius_mm);
+                }
+            }
+        }
+        hash.finish()
+    }
+}
+
+/// Range-check one baked capsule, including the non-severable pelvis root.
+fn validate_capsule(capsule: &JointTarget) -> Result<(), CutError> {
+    for value in capsule.q0_mm.iter().chain(capsule.q1_mm.iter()) {
+        if !(-CUT_POS_BOUND_MM..=CUT_POS_BOUND_MM).contains(value) {
+            return Err(CutError::BadValue {
+                field: "hit_track_q_mm",
+                value: value.unsigned_abs(),
+            });
+        }
+    }
+    check_range(
+        "hit_track_radius_mm",
+        capsule.radius_mm,
+        1,
+        CUT_JOINT_RADIUS_MAX_MM,
+    )
 }
 
 #[cfg(test)]

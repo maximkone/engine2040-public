@@ -14,6 +14,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use engine_game::fighter_look::BodyLook;
 use engine_render::pipeline_warmup;
 use engine_render::present::{
     last_live_wall_split, DrawList, PresentError, Presenter, MAX_FRAME_DIM,
@@ -25,10 +26,11 @@ use web_sys::HtmlCanvasElement;
 
 use crate::anim::{FrameStats, StepClock, MAX_STEPS_PER_FRAME};
 use crate::arena_view::{
-    has_flag, scaled_frame_size, CaptureFacts, Counters, CAPTURE_AFTER_FRAMES,
+    flag_value, has_flag, scaled_frame_size, CaptureFacts, Counters, CAPTURE_AFTER_FRAMES,
 };
 use crate::fight::MatchError;
 use crate::limits::{adapter_hint, feature_names, limit_rows};
+use crate::perf_window;
 use crate::recovery::{reason_word, Cause, LostBox};
 use crate::report::{AdapterFacts, ArenaFacts, Failure, Ready};
 use crate::shell::{
@@ -63,9 +65,15 @@ const PROBE_MIN_FRAMES: usize = 8;
 const PROBE_HIDDEN_WAITS: u32 = 40;
 /// Longest the loader waits for the GPU to finish the warm-up frames, milliseconds.
 const WARM_WAIT_MS: f64 = 60_000.0;
+/// QW10: the frames a `?bundle=ab` page captures, one inside the first rebuild block and one
+/// inside the first replay block. On a frozen page both draw the same picture, so the two
+/// hashes the receipt prints must agree.
+const PERF_CAPTURE_OFF: u64 = perf_window::WARMUP_FRAMES + 2;
+const PERF_CAPTURE_ON: u64 = perf_window::WARMUP_FRAMES + perf_window::BLOCK_FRAMES + 2;
 
 thread_local! {
-    /// Set by [`request_arena_capture`]: the next frame asks the GPU for a canvas copy.
+    /// Set by [`request_arena_capture`]: the next frame that can arm a capture takes it. A frame
+    /// that finds a copy already waiting or in flight keeps it set, so an ask is never dropped.
     static CAPTURE_WANTED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -124,6 +132,14 @@ struct ArenaLoop {
     named_cues: Vec<engine_audio::FightCue>,
     /// What the frame gate measured against the reference capture, once a frame was captured.
     gate_result: Option<crate::arena_view::Gate>,
+    /// QW10: the measured frames, the two arms and the captures.
+    perf: perf_window::Run,
+    /// QW10: the stand-in list recorded once; a replay frame swaps in this frame's camera only.
+    static_list: Option<DrawList>,
+    /// QW10: how long the frame spent building the draw list.
+    last_list_ms: f64,
+    /// QW10: the arm that asked for the capture in flight.
+    capture_arm: Option<perf_window::Arm>,
 }
 
 impl ArenaLoop {
@@ -193,6 +209,7 @@ impl ArenaLoop {
         self.fit_canvas();
         self.drive_capture();
         let t_s = self.frozen_s.unwrap_or_else(|| self.clock.time_s() as f32);
+        let frame = self.counters.frames;
         let cpu_started = now_ms();
         let (w, h) = self.presenter.size();
         if self.fight.is_none() {
@@ -200,38 +217,45 @@ impl ArenaLoop {
                 self.note_error(&format!("pose: {e}"));
             }
         }
+        // QW10: a replay frame swaps the clock's camera into the stand-in list recorded once;
+        // the A/B's rebuild arm builds every item again, as the page did before.
+        let replay = self.perf.replay(frame);
+        let list_started = now_ms();
         let listed = if let Some(mut fight) = self.fight.take() {
             let listed = self.step_fight(&mut fight, t_s);
             self.fight = Some(fight);
-            listed
+            Some(listed)
         } else {
-            self.arena
-                .list_at(w, h, t_s)
-                .map_err(|e| MatchError::Scenery(e.to_string()))
+            None
         };
+        if listed.is_none() {
+            if let Err(e) = self.fill_stand_in_list(w, h, t_s, replay) {
+                self.note_error(&format!("list: {e}"));
+            }
+        }
+        self.last_list_ms = now_ms() - list_started;
         self.sim_ms = now_ms() - cpu_started;
-        match listed {
-            Ok(list) => match self.presenter.render_surface(&list) {
-                Ok(receipt) => {
-                    self.last_draws = receipt.draws;
-                    self.counters.validation_errors += u64::from(receipt.total_validation_errors());
-                    if self.counters.frames.is_multiple_of(15) {
-                        set_text("passes", &receipt.per_pass_summary());
-                    }
-                }
-                // The presenter reconfigured the surface or the browser has no image for us
-                // this frame: skip it, the next animation frame tries again.
-                Err(
-                    PresentError::SurfaceOutdated { .. }
-                    | PresentError::SurfaceLost { .. }
-                    | PresentError::SurfaceTimeout
-                    | PresentError::SurfaceOccluded,
-                ) => {}
-                Err(e) => self.note_error(&format!("frame: {e}")),
-            },
-            Err(e) => self.note_error(&format!("list: {e}")),
+        if let Some(listed) = listed {
+            match listed {
+                Ok(list) => self.draw_list(&list),
+                Err(e) => self.note_error(&format!("list: {e}")),
+            }
+        } else if let Some(list) = self.static_list.take() {
+            // Taken for the call and put straight back: the list is the record, not a copy.
+            self.draw_list(&list);
+            self.static_list = Some(list);
+        } else {
+            self.note_error("list: the stand-in list is missing");
         }
         self.last_cpu_ms = now_ms() - cpu_started;
+        self.perf.note(
+            frame,
+            perf_window::Sample {
+                cpu_ms: self.last_cpu_ms,
+                list_ms: self.last_list_ms,
+                draws: self.last_draws,
+            },
+        );
         self.counters.frames += 1;
         self.counters.deferred_validation_errors = self.presenter.deferred_validation_errors();
         self.counters.uncaptured_errors = self.uncaptured.count.load(Ordering::Relaxed);
@@ -250,6 +274,55 @@ impl ArenaLoop {
             self.publish_receipt();
         }
         self.tick_split(frame_ms, resumed);
+    }
+
+    /// Draw one list through the presenter's own frame path, with the counters and the typed
+    /// surface errors the next animation frame retries.
+    fn draw_list(&mut self, list: &DrawList) {
+        match self.presenter.render_surface(list) {
+            Ok(receipt) => {
+                self.last_draws = receipt.draws;
+                self.counters.validation_errors += u64::from(receipt.total_validation_errors());
+                if self.counters.frames.is_multiple_of(15) {
+                    set_text("passes", &receipt.per_pass_summary());
+                }
+            }
+            // The presenter reconfigured the surface or the browser has no image for us this
+            // frame: skip it, the next animation frame tries again.
+            Err(
+                PresentError::SurfaceOutdated { .. }
+                | PresentError::SurfaceLost { .. }
+                | PresentError::SurfaceTimeout
+                | PresentError::SurfaceOccluded,
+            ) => {}
+            Err(e) => self.note_error(&format!("frame: {e}")),
+        }
+    }
+
+    /// QW10: put the stand-in ring's draw list in `static_list`. `replay` keeps the items recorded
+    /// on the first frame and swaps in this frame's camera: the parts, their materials and their
+    /// meshes do not change with the clock or the canvas, only the camera does. The rebuild arm
+    /// builds every item again, which is what the page did before QW10 and what `?bundle=ab`
+    /// measures against.
+    fn fill_stand_in_list(
+        &mut self,
+        w: u32,
+        h: u32,
+        t_s: f32,
+        replay: bool,
+    ) -> Result<(), MatchError> {
+        let scenery =
+            |e: engine_render::procedural_arena::ArenaError| MatchError::Scenery(e.to_string());
+        if !replay || self.static_list.is_none() {
+            let fresh = self.arena.list_at(w, h, t_s).map_err(scenery)?;
+            self.static_list = Some(fresh);
+            return Ok(());
+        }
+        let camera = self.arena.camera(w, h, t_s).map_err(scenery)?;
+        if let Some(list) = self.static_list.as_mut() {
+            list.camera = camera;
+        }
+        Ok(())
     }
 
     /// WEB15: the page plays the match it draws. One step per fixed tick the clock took, the
@@ -287,6 +360,7 @@ impl ArenaLoop {
             let cues = fight.cues();
             if cues != self.named_cues.as_slice() {
                 self.named_cues = cues.to_vec();
+                crate::browser::queue_fight_cues(cues);
                 if let Some(word) = crate::arena_view::cue_word(cues) {
                     self.say_cue(word);
                 }
@@ -406,6 +480,8 @@ impl ArenaLoop {
     fn publish_receipt(&self) {
         let (waiting, dropped) = self.presenter.deferred_validation_waiting();
         let last_loss = LOSSES.with(|losses| losses.borrow().last().cloned());
+        // QW10: the measured frames, as JSON; absent until the window has enough samples.
+        let perf = self.perf.json();
         let receipt = crate::arena_view::Receipt {
             tier: self.tier.name(),
             counters: self.counters,
@@ -417,6 +493,7 @@ impl ArenaLoop {
             scene: self.scene(),
             cue: self.cue,
             gate: self.gate_result,
+            perf: perf.as_deref(),
         };
         let line = crate::arena_view::receipt_line(&receipt);
         set_text("receipt", &line);
@@ -429,16 +506,39 @@ impl ArenaLoop {
     }
 
     /// Ask for the GPU copy of the canvas once the first frames have settled (or when the page
-    /// asks), and publish it once its map has finished.
+    /// asks), and publish it once its map has finished. An ask outlives a busy presenter: a
+    /// finished copy is read first, and a request that cannot arm yet stays set for the next
+    /// frame, so one ask answers with one line. Dropping it would leave a headless driver
+    /// waiting for a line the page never asked the GPU for.
     fn drive_capture(&mut self) {
-        let wanted = CAPTURE_WANTED.with(Cell::take)
-            || (!self.capture_asked && self.counters.frames == CAPTURE_AFTER_FRAMES);
+        self.read_capture();
+        let wanted = CAPTURE_WANTED.with(Cell::get)
+            || (!self.capture_asked && self.counters.frames == CAPTURE_AFTER_FRAMES)
+            // QW10: a `?bundle=ab` page captures one frame per arm, inside the first rebuild
+            // block and the first replay block, so both hashes come from the same run.
+            || (self.perf.mode() == perf_window::Mode::Ab
+                && matches!(self.counters.frames, PERF_CAPTURE_OFF | PERF_CAPTURE_ON));
         if wanted {
             self.capture_asked = true;
-            if let Err(e) = self.presenter.request_capture() {
-                self.note_error(&format!("capture: {e}"));
+            match self.presenter.request_capture() {
+                Ok(true) => {
+                    CAPTURE_WANTED.with(|c| c.set(false));
+                    self.capture_arm = self.perf.arm_at(self.counters.frames);
+                }
+                // A copy is still waiting for its frame or its map: keep the ask for the next frame.
+                Ok(false) => {}
+                Err(e) => {
+                    CAPTURE_WANTED.with(|c| c.set(false));
+                    self.note_error(&format!("capture: {e}"));
+                }
             }
         }
+        publish_capture_state(self.presenter.capture_busy(), self.presenter.suspended());
+    }
+
+    /// Publish the copy whose map has finished, if one arrived. The numbers are the render
+    /// crate's own; the pixels go to the page as `window.arenaCapture`.
+    fn read_capture(&mut self) {
         match self.presenter.take_capture() {
             Ok(Some(frame)) => {
                 let stats = frame.stats();
@@ -451,6 +551,16 @@ impl ArenaLoop {
                     mean_luma: stats.mean_luma,
                     blank: stats.is_blank(),
                 };
+                // QW10: the arm that asked for this capture keeps its hash, so the receipt can
+                // say whether the two ways of building the list drew the same picture.
+                if let Some(arm) = self.capture_arm.take() {
+                    self.perf.note_capture(arm, &format!("{:016x}", facts.hash));
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "qw10 capture {} {:016x}",
+                        arm.word(),
+                        facts.hash
+                    )));
+                }
                 let line = facts.line(self.counters.frames, &self.surface_format);
                 publish_capture(&frame.rgba, &line);
                 set_text("capture", &line);
@@ -533,6 +643,27 @@ fn set_style(id: &str, style: &str) {
     if let Some(el) = document().and_then(|d| d.get_element_by_id(id)) {
         let _ = el.set_attribute("style", style);
     }
+}
+
+/// Publish what the capture handshake waits on for the headless driver's failure line: `idle`,
+/// `busy` (a copy is armed or in flight) or `suspended` (a zero-area frame never presents, so no
+/// copy can start). The page itself never reads it.
+fn publish_capture_state(busy: bool, suspended: bool) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let state = if suspended {
+        "suspended"
+    } else if busy {
+        "busy"
+    } else {
+        "idle"
+    };
+    let _ = js_sys::Reflect::set(
+        &window,
+        &"arenaCaptureState".into(),
+        &JsValue::from_str(state),
+    );
 }
 
 /// Hand the captured pixels to the page: `window.arenaCapture = { line, rgba }` where `rgba` is
@@ -716,8 +847,14 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
     presenter.apply_quality(&quality::knobs(tier));
     let arena = ProceduralArena::build().map_err(|e| (Failure::NoDevice, e.to_string()))?;
     let kit_source = fetch_kit(&search).await;
+    let fighter_source = fetch_fighters(&search).await;
     // WEB15: `?fight` plays a real match over the same scenery; nothing else changes.
-    let fight = open_fight(&search, kit_source.as_ref(), &mut presenter)?;
+    let fight = open_fight(
+        &search,
+        kit_source.as_ref(),
+        fighter_source.as_ref(),
+        &mut presenter,
+    )?;
     let mut frame = arena_loop(LoopParts {
         presenter,
         arena,
@@ -794,6 +931,8 @@ fn arena_loop(parts: LoopParts) -> ArenaLoop {
         software,
     } = parts;
     let gate = has_flag(&search, "gate");
+    // QW10: `?bundle=off|on|ab`; a page without the flag rebuilds the list as it always did.
+    let bundle = perf_window::Mode::parse(flag_value(&search, "bundle"));
     ArenaLoop {
         presenter,
         arena,
@@ -828,6 +967,10 @@ fn arena_loop(parts: LoopParts) -> ArenaLoop {
         cue: None,
         named_cues: Vec::new(),
         gate_result: None,
+        perf: perf_window::Run::new(bundle),
+        static_list: None,
+        last_list_ms: 0.0,
+        capture_arm: None,
     }
 }
 
@@ -914,12 +1057,14 @@ async fn fetch_kit(search: &str) -> Option<engine_assets::asset_source::BundleSo
         return None;
     }
     set_text("hud", "loading the arena kit...");
-    match crate::content::fetch_bundle(crate::content::ARENA_BUNDLE_URL).await {
+    // QW4: the page answers at the tier-0 boundary, so the first frame starts on
+    // the coarse level while the HDRI tier streams behind the progress bar.
+    match crate::content::fetch_bundle_prefix(crate::content::ARENA_BUNDLE_URL).await {
         Ok(source) => {
             // WEB6: the receipt says the asset really arrived and how big it was.
             let entries = source.entries_in_file_order().count();
             web_sys::console::log_1(&JsValue::from_str(&format!(
-                "content: arena kit bytes={} entries={entries}",
+                "content: arena kit prefix bytes={} entries={entries}",
                 source.byte_len()
             )));
             Some(source)
@@ -933,17 +1078,69 @@ async fn fetch_kit(search: &str) -> Option<engine_assets::asset_source::BundleSo
     }
 }
 
+/// Fetch the cooked fighter rig for `?fight`: `Some` when the bundle downloaded and opened,
+/// `None` for every other query or a refused fetch (the HUD says why and the stand-in bodies
+/// stay). The fetch is awaited once, before the first frame, like the arena kit.
+async fn fetch_fighters(search: &str) -> Option<engine_assets::asset_source::BundleSource> {
+    if !has_flag(search, "fight") || has_flag(search, "nofighters") {
+        return None;
+    }
+    set_text("hud", "loading the fighters...");
+    match crate::content::fetch_bundle(crate::content::RIG_BUNDLE_URL).await {
+        Ok(source) => {
+            let entries = source.entries_in_file_order().count();
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "content: fighters bytes={} entries={entries}",
+                source.byte_len()
+            )));
+            Some(source)
+        }
+        Err(err) => {
+            set_text("hud", &format!("fighters: {err} (stand-in bodies)"));
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "content: fighters refused: {err}"
+            )));
+            None
+        }
+    }
+}
+
+/// Load, texture and stage the cooked rig once, on the cold path. A refusal is named and
+/// leaves the caller on the stand-in bodies; it never blocks the match.
+fn stage_fighters(
+    source: &dyn engine_assets::AssetSource,
+    presenter: &mut Presenter,
+) -> Result<BodyLook, engine_game::fighter_look::LookError> {
+    let look = BodyLook::load_cooked_from(source)?;
+    look.stage_textures(presenter)?;
+    look.stage_meshes(presenter)?;
+    Ok(look)
+}
+
 /// Build the played match when the query asks for it (`?fight`); `None` keeps the stand-in.
 fn open_fight(
     search: &str,
     kit: Option<&engine_assets::asset_source::BundleSource>,
+    fighters: Option<&engine_assets::asset_source::BundleSource>,
     presenter: &mut Presenter,
 ) -> Result<Option<crate::fight::Match>, (Failure, String)> {
     if !has_flag(search, "fight") {
         return Ok(None);
     }
+    let look = fighters.and_then(|source| match stage_fighters(source, presenter) {
+        Ok(look) => {
+            web_sys::console::log_1(&JsValue::from_str("fighters: rig staged"));
+            Some(look)
+        }
+        Err(err) => {
+            set_text("hud", &format!("fighters: {err} (stand-in bodies)"));
+            web_sys::console::log_1(&JsValue::from_str(&format!("fighters: refused: {err}")));
+            None
+        }
+    });
     crate::fight::Match::new(
         kit.map(|source| source as &dyn engine_assets::AssetSource),
+        look,
         presenter,
     )
     .map(Some)

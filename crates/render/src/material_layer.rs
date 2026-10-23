@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 use crate::decals::{compute_storage_entry, compute_uniform_entry};
 
 // ---------------------------------------------------------------------------
@@ -486,7 +486,7 @@ pub struct LayerReceipt {
 /// count, then names the missing window device bind on the headless twin
 /// (never silent success). The CPU layer evaluation above is the reference
 /// here; the `window` build below records the live pass instead.
-#[cfg(not(feature = "window"))]
+#[cfg(not(feature = "gpu"))]
 pub fn submit_gpu(rows: u32) -> Result<LayerReceipt, MaterialError> {
     if rows == 0 || rows > MAX_SUBMIT_ROWS {
         let reason = format!("material-layer submit rows {rows} outside 1..={MAX_SUBMIT_ROWS}"); // alloc-ok: cold refusal, never a steady frame
@@ -504,7 +504,7 @@ pub fn submit_gpu(rows: u32) -> Result<LayerReceipt, MaterialError> {
 
 /// Bind probe over the evaluated chart rows: copies the bound totals to
 /// prove the forward bind-group path validates. Look uniform bound and live.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const LAYER_BIND_WGSL: &str = r#"
 struct LookU {
     frame_idx: u32,
@@ -527,7 +527,7 @@ fn bind_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// One window submit over the material chart: row count, the worst CPU/GPU
 /// absolute difference and the validation outcome plus wall-clock ms.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct LayerGpuReceipt {
     /// Chart rows bound.
@@ -540,7 +540,7 @@ pub struct LayerGpuReceipt {
     pub submit_ms: f64,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl LayerGpuReceipt {
     /// True when the submit observed zero validation errors.
     pub fn is_clean(&self) -> bool {
@@ -558,7 +558,7 @@ impl LayerGpuReceipt {
 /// bind group. Built once per frame loop (WIN1 and ED1 each own one);
 /// steady-state submits create no buffers or bind groups (the reuse test
 /// proves the count stays flat).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct LayerSubmitter {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -570,7 +570,7 @@ pub struct LayerSubmitter {
     created_buffers: u64,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl LayerSubmitter {
     /// Compile the bind-probe pipeline and the look bind layout; allocate
     /// the 32-byte look uniform buffer. Chart storage sizes on the first
@@ -634,7 +634,7 @@ impl LayerSubmitter {
 /// errors and the device image matches the chart within
 /// [`CHART_TOLERANCE`]. Fails loudly (never silent, never the twin
 /// refusal) on bad frames or any device fault.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn submit_chart_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -770,7 +770,7 @@ pub fn submit_chart_gpu(
 
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// Shared [`crate::accel`] core with the `layer` error prefix kept.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn layer_map_and_wait(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,
@@ -778,7 +778,7 @@ fn layer_map_and_wait(
     crate::accel::map_readback(device, buffer, "layer")
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl From<crate::accel::ReadbackError> for MaterialError {
     fn from(error: crate::accel::ReadbackError) -> Self {
         Self::Device(error.to_string())
@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     fn submit_gpu_twin_and_bounds() {
         assert!(matches!(submit_gpu(3), Err(MaterialError::NoDevice(_))));
         assert!(matches!(submit_gpu(0), Err(MaterialError::Invalid(_))));
@@ -1070,20 +1070,24 @@ mod tests {
 
     /// Device shared with the GX1 suite: one device for the run, so parallel
     /// tests never exhaust adapters. `None` is skip-not-green, never a pass.
-    #[cfg(feature = "window")]
-    fn layer_device() -> Option<(
-        &'static wgpu::Device,
-        &'static wgpu::Queue,
-        &'static wgpu::AdapterInfo,
-    )> {
-        crate::graph::gx1_test_device()
+    #[cfg(feature = "gpu")]
+    fn layer_device() -> Result<
+        (
+            &'static wgpu::Device,
+            &'static wgpu::Queue,
+            &'static wgpu::AdapterInfo,
+        ),
+        crate::test_gpu::NoAdapter,
+    > {
+        crate::graph::gx1_probe()
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_chart_binds_within_tolerance() {
-        let Some((device, queue, info)) = layer_device() else {
-            eprintln!("SKIPPED layer bind: no wgpu adapter on this machine");
+        let Some((device, queue, info)) =
+            crate::test_gpu::require_or_skip("gpu_chart_binds_within_tolerance", layer_device())
+        else {
             return;
         };
         let frame = crate::gtao::LookFrame {
@@ -1120,10 +1124,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_refuses_bad_frame_before_sizing() {
-        let Some((device, queue, _)) = layer_device() else {
-            eprintln!("SKIPPED layer refusals: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("gpu_refuses_bad_frame_before_sizing", layer_device())
+        else {
             return;
         };
         let frame = crate::gtao::LookFrame {

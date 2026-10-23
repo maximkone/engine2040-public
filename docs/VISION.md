@@ -280,8 +280,10 @@ Moved to `VISION-TABLES.md`, same headings, text unchanged: Delivery evidence, R
 
 ## Plans: which plan serves which part of the vision
 
-Every plan in this repo has one row here with the Scorecard rows it serves;
-`node C:/empire/center/vision-check.mjs engine2040` FAILs on a plan that is not in this map, a row whose file is
+Every plan in this repo has one row here with the Scorecard rows it serves.
+No script enforces this map any more: `center/vision-check.mjs` was removed with
+the loop machinery on 2026-10-17 (fixed 2026-10-23). Until one exists, the lead
+keeps it by reading, and a plan that is not in this map, a row whose file is
 gone, and a Scorecard row no plan serves (the planner writes that plan). Where
 several plans serve one part, the order in the last column is the reading order.
 
@@ -322,7 +324,7 @@ several plans serve one part, the order in the last column is the reading order.
 | `docs/plan/urban-war.md` | The three games | UW, UC (urban-city merged in); frozen by FOCUS D7 |
 | `docs/plan/silicon-city.md` | none: a future game (LATER), no Core proof | SIL (CPU-as-city builder with a hashed truth sim, skyline, bot ladder and reference-sim gate); rows not on the board yet |
 | `docs/plan/silicon-world.md` | none: a future game (LATER), no Core proof | SIL46-SIL59 (the chip as a GTA-style city: districts, zoom chain, time dial, sound, missions, meltdown mode); read after `silicon-city.md`; rows not on the board yet |
-| `docs/plan/ryl1.md` | none: a future game (LATER), no Core proof | RY1-RY10 (the RYL1 soul: two factions, aimed combat, three capture points, 6v6 with AI seats); owner 2026-10-20; rows not on the board yet |
+| `docs/plan/ryl1.md` | none: a future game (LATER), no Core proof | RY1-RY10 (the RYL1 soul: two factions, aimed combat, three capture points, 6v6 with AI seats); RY2-RY5 landed in code; owner 2026-10-20; rows not on the board yet |
 | `docs/plan/road-war.md` | none: a future game (LATER), no Core proof | RW1-RW8 (the Auto Assault soul: one chassis, mounted guns, capture nodes on a highway; shares RY3 and RY4); owner 2026-10-20; rows not on the board yet |
 | `docs/plan/rome-spec.md` | The three games; Determinism and exact replay; AI in gameplay | Rome arena duel merge point with forge (map, bouts, tick rate, seed rule, AI fill); machine truth in `rome-spec.json`; open parity gaps digest |
 | `docs/plan/finish-line.md` | Look on the RTX 3050; Sim speed; Determinism and exact replay; AI builds the game; Online, 64 players; Shipping a clean build; Headless proofs and tests | gates G1-G9 product check |
@@ -334,7 +336,9 @@ several plans serve one part, the order in the last column is the reading order.
 
 The engine's steal seats and the vision researcher take the row read longest
 ago (`never` first), one deep read per run, and write its date back. At least
-10 competitors and 10 adjacent sources; `node C:/empire/center/vision-check.mjs engine2040` counts them. No
+10 competitors and 10 adjacent sources; no script counts them since
+`center/vision-check.mjs` was removed on 2026-10-17 (fixed 2026-10-23), so the
+lead counts them by reading. No
 crate work before its consumer exists: every accepted steal names the consumer
 that wires it.
 

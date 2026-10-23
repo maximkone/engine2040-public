@@ -1222,7 +1222,7 @@ pub fn compile_taa_off_for_scale(
 
 /// SMAA fallback descriptors plus the compute chunk the RA1 presenter
 /// consumes. Engine-owned code (no port markers).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod gpu;
 
 // ---------------------------------------------------------------------------
@@ -1886,41 +1886,41 @@ mod tests {
         .contains('9'));
     }
 
-    #[cfg(feature = "window")]
-    fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    #[cfg(feature = "gpu")]
+    fn test_device() -> Result<(wgpu::Device, wgpu::Queue), crate::test_gpu::NoAdapter> {
         crate::test_gpu::hold_gpu_slot();
         let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
-        let adapter =
-            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|error| {
+            crate::test_gpu::NoAdapter(format!("no wgpu adapter on this machine: {error}"))
+        })?;
+        Ok(
+            match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("rp4-test"),
+                ..Default::default()
             })) {
-                Ok(a) => a,
-                Err(_) => {
-                    eprintln!("SKIPPED rp4 gpu test: no wgpu adapter on this machine");
-                    return None;
-                }
-            };
-        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("rp4-test"),
-            ..Default::default()
-        })) {
-            Ok((d, q)) => Some((d, q)),
-            Err(e) => panic!("test device requests succeed when the adapter exists: {e}"),
-        }
+                Ok((d, q)) => (d, q),
+                Err(e) => panic!("test device requests succeed when the adapter exists: {e}"),
+            },
+        )
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn gpu_smaa_matches_cpu_and_settles_shimmer() {
         // Device SMAA over the shimmer pair: parity against the CPU oracle
         // within tolerance, settled variance under the posted gate, 0
         // validation errors.
-        let (device, queue) = match test_device() {
-            Some(d) => d,
-            None => return,
+        let Some((device, queue)) = crate::test_gpu::require_or_skip(
+            "gpu_smaa_matches_cpu_and_settles_shimmer",
+            test_device(),
+        ) else {
+            return;
         };
         let sub = gpu::SmaaSubmitter::new(&device);
         assert!(!gpu::SMAA_COMPUTE_WGSL.is_empty());
@@ -1965,16 +1965,17 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn gpu_taa_off_frame_reuses_rp1_submit() {
         // Full TAA-off frame on the device: CPU SMAA, then the live
         // `Rp1Submitter` over smaa-equals-history (its TAA resolve is the
         // identity there), matching the CPU TAA-off oracle within the RP1
         // post tolerance with 0 validation errors. No second post chain.
-        let (device, queue) = match test_device() {
-            Some(d) => d,
-            None => return,
+        let Some((device, queue)) =
+            crate::test_gpu::require_or_skip("gpu_taa_off_frame_reuses_rp1_submit", test_device())
+        else {
+            return;
         };
         let scene = ShimmerScene::checkerboard().expect("scene builds");
         let params = SmaaParams::default();
@@ -2328,16 +2329,18 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn gpu_predicated_matches_cpu_and_settles_shimmer() {
         // Device predicated SMAA over the shimmer pair with flat depth:
         // parity against the CPU oracle within tolerance, settled variance
         // under the posted gate, 0 validation errors; plus one depth-step
         // frame proving the depth gate runs on the device too.
-        let (device, queue) = match test_device() {
-            Some(d) => d,
-            None => return,
+        let Some((device, queue)) = crate::test_gpu::require_or_skip(
+            "gpu_predicated_matches_cpu_and_settles_shimmer",
+            test_device(),
+        ) else {
+            return;
         };
         let sub = gpu::SmaaPredicatedSubmitter::new(&device);
         assert!(!gpu::SMAA_PREDICATED_COMPUTE_WGSL.is_empty());

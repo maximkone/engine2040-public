@@ -20,10 +20,11 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use engine_core::text::clip_bytes;
+
 use super::fallback::{fallback_for, FallbackErr, ScriptedFallback, MAX_NOTICE_LEN};
 use super::policy::AiSessionPolicy;
 use super::protocol::{AiError, AiRequest};
-use super::stream::truncate_str;
 use super::transport::{is_loopback, parse_endpoint, EndpointError};
 
 /// Largest number of players one book tracks before refusing new ones.
@@ -266,7 +267,7 @@ impl QuotaRefusal {
             request.budget.max_ms,
             self.message()
         );
-        truncate_str(&message, MAX_NOTICE_LEN).clone_into(&mut served.notice.message);
+        clip_bytes(&message, MAX_NOTICE_LEN).clone_into(&mut served.notice.message);
         served
             .proposal
             .diagnostics

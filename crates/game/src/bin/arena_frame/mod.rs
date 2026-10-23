@@ -4,6 +4,7 @@
 //! `ArenaApp` (defined in the crate root); this module only moves them out.
 use engine_audio::device::{AudioSink, DeviceOutput};
 use engine_audio::CueBank;
+use engine_render::particles_gpu::EmitterKind;
 
 use super::*;
 
@@ -449,53 +450,65 @@ impl ArenaApp {
                 }
             }
             // Presentation reads the tick after it ran; never writes back.
-            if let Some(tally) = self.staged.as_mut() {
-                tally.observe(&self.tick_scratch.cues);
-            }
-            self.feel.observe(&self.tick_scratch.cues);
-            // FEEL5: sparks, blood and dust where the blow lands.
-            self.throw_fight_fx();
-            self.step_speed_demo();
-            // FEEL3: the feel and the look freeze for the live fight's count, read after the tick.
-            self.feel.observe_hitstop(self.app.hitstop_remaining());
-            self.observe_spear_events(tick);
-            if let Some(look) = self.look.as_mut() {
-                let (views, hp) = (self.app.fighter_views(), self.app.hp());
-                look.observe_hitstop(tick, &self.tick_scratch.cues, self.app.hitstop_remaining());
-                observe_tick_with_sim(look, tick, views, hp, &self.tick_scratch.cues, None);
-                if let Some(scene) = self.spear.scene.as_mut() {
-                    scene.observe_tick(look, self.app.live_match(), views);
-                }
-                // EG45: poll authoritative balance gaits into the pose (presentation only).
-                look.observe_live_balances(
-                    self.app.live_match(),
-                    usize::from(self.config.fighters),
-                );
-            }
-            self.note_pop_tick(tick);
-            // The crate's break picture takes the tick's authority break events (an empty
-            // slice on quiet ticks) and steps its debris once; presentation only (RZ4w).
-            let break_cue = match self.break_scene.as_mut() {
-                Some(scene) => match scene.observe_outcome(&self.tick_scratch) {
-                    Ok(()) => scene.take_cue(),
-                    Err(err) => {
-                        tell!("arena notice: break picture dropped: {err}");
-                        self.break_scene = None;
-                        None
-                    }
-                },
-                None => None,
-            };
-            // The break sounds where the blow struck: presentation only (RZ4).
-            if let (Some(cue), Some(tx)) = (break_cue, self.feed_tx.as_mut()) {
-                self.audio_space
-                    .feed_break(tx, tick, cue.name, cue.gain, cue.at_m);
-            }
+            self.note_tick_after_sim(tick);
             self.record_crash_tick(input);
             self.ticks_done += 1;
         }
         if let Err(err) = self.net_end() {
             self.net_fail(err);
+        }
+    }
+
+    /// Presentation after one sim tick: the staged tally, feel and fight fx,
+    /// the look and the break picture with its sound. Reads the tick's
+    /// outcome and writes no sim field, so a capture repeats.
+    fn note_tick_after_sim(&mut self, tick: u32) {
+        if let Some(tally) = self.staged.as_mut() {
+            tally.observe(&self.tick_scratch.cues);
+        }
+        self.feel.observe(&self.tick_scratch.cues);
+        // FEEL5: sparks, blood and dust where the blow lands.
+        self.throw_fight_fx();
+        self.step_speed_demo();
+        // FEEL3: the feel and the look freeze for the live fight's count, read after the tick.
+        self.feel.observe_hitstop(self.app.hitstop_remaining());
+        self.observe_spear_events(tick);
+        if let Some(look) = self.look.as_mut() {
+            let (views, hp) = (self.app.fighter_views(), self.app.hp());
+            look.observe_hitstop(tick, &self.tick_scratch.cues, self.app.hitstop_remaining());
+            observe_tick_with_sim(
+                look,
+                tick,
+                views,
+                hp,
+                &self.tick_scratch.cues,
+                &self.tick_scratch.lands,
+                None,
+            );
+            if let Some(scene) = self.spear.scene.as_mut() {
+                scene.observe_tick(look, self.app.live_match(), views);
+            }
+            // EG45: poll authoritative balance gaits into the pose (presentation only).
+            look.observe_live_balances(self.app.live_match(), usize::from(self.config.fighters));
+        }
+        self.note_pop_tick(tick);
+        // The crate's break picture takes the tick's authority break events (an empty
+        // slice on quiet ticks) and steps its debris once; presentation only (RZ4w).
+        let break_cue = match self.break_scene.as_mut() {
+            Some(scene) => match scene.observe_outcome(&self.tick_scratch) {
+                Ok(()) => scene.take_cue(),
+                Err(err) => {
+                    tell!("arena notice: break picture dropped: {err}");
+                    self.break_scene = None;
+                    None
+                }
+            },
+            None => None,
+        };
+        // The break sounds where the blow struck: presentation only (RZ4).
+        if let (Some(cue), Some(tx)) = (break_cue, self.feed_tx.as_mut()) {
+            self.audio_space
+                .feed_break(tx, tick, cue.name, cue.gain, cue.at_m);
         }
     }
 
@@ -807,8 +820,10 @@ impl ArenaApp {
     }
 
     /// One row of the per-frame trace: the frame's wall split and the
-    /// present path's own split. Nothing is written unless
-    /// `E2040_FRAME_TRACE` named a path, so the default run pays nothing.
+    /// present path's own split. The fx columns let a capture run prove what
+    /// the picture held on each frame (sparks after a block, splats after a
+    /// hit). Nothing is written unless `E2040_FRAME_TRACE` named a path, so
+    /// the default run pays nothing.
     pub(super) fn note_frame_trace(
         &mut self,
         work_us: u64,
@@ -820,6 +835,33 @@ impl ArenaApp {
         if self.frame_trace_path.is_none() {
             return;
         }
+        let (
+            fx_alive,
+            fx_spawned,
+            fx_blood,
+            fx_sparks,
+            fx_dust,
+            fx_flame,
+            fx_splats,
+            fx_splats_placed,
+        ) = match self.presenter.as_ref() {
+            Some(presenter) => {
+                let (alive, spawned) = presenter.fight_fx_counts();
+                let by_kind = presenter.fight_fx_by_kind();
+                let (splats, placed, _, _) = presenter.fight_splat_counts();
+                (
+                    trace::fx_count(alive),
+                    trace::fx_count(spawned),
+                    trace::fx_count(by_kind[EmitterKind::Blood.index()]),
+                    trace::fx_count(by_kind[EmitterKind::Sparks.index()]),
+                    trace::fx_count(by_kind[EmitterKind::Dust.index()]),
+                    trace::fx_count(by_kind[EmitterKind::Flame.index()]),
+                    trace::fx_count(splats),
+                    trace::fx_count(placed),
+                )
+            }
+            None => (0, 0, 0, 0, 0, 0, 0, 0),
+        };
         self.frame_trace.push(arena_frame::FrameTrace {
             index: self.frames_presented.saturating_sub(1),
             wall_us: duration_us(self.started.elapsed()),
@@ -832,6 +874,14 @@ impl ArenaApp {
             ticks: self.ticks_done,
             focused: self.window_focused,
             occluded: self.window_occluded,
+            fx_alive,
+            fx_spawned,
+            fx_blood,
+            fx_sparks,
+            fx_dust,
+            fx_flame,
+            fx_splats,
+            fx_splats_placed,
         });
     }
 

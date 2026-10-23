@@ -25,16 +25,16 @@ pub mod vfx_hanabi;
 #[path = "particle_events.rs"]
 mod particle_events;
 pub use particle_events::{BURST_EXTENT_M, MAX_BURST};
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[path = "particle_draw_gpu.rs"]
 mod particle_draw_gpu;
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 use particle_draw_gpu::{
     particle_draw_atlas, particle_draw_buffer, particle_draw_layout, particle_draw_pipeline,
     particle_pack_instance, particle_pack_uniform, PARTICLE_DRAW_MAX_INSTANCES,
     PARTICLE_DRAW_SCENE_DEPTH_BYTES,
 };
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub use particle_draw_gpu::{PARTICLE_DRAW_INSTANCE_BYTES, PARTICLE_DRAW_UNIFORM_BYTES};
 
 // ---------------------------------------------------------------------------
@@ -539,6 +539,9 @@ pub struct ParticlePool {
     time_s: f32,
     ticks: u64,
     spawned: u64,
+    /// Spawns per emitter slot since build (FEEL5: the receipt counts a fight's
+    /// sparks, blood and dust apart).
+    spawned_kind: [u64; EMITTER_COUNT],
     dropped_total: u64,
     capped: bool,
     cap: usize,
@@ -566,6 +569,7 @@ impl ParticlePool {
             time_s: 0.0,
             ticks: 0,
             spawned: 0,
+            spawned_kind: [0; EMITTER_COUNT],
             dropped_total: 0,
             capped: false,
             cap: POOL_CAP,
@@ -732,6 +736,11 @@ impl ParticlePool {
         self.spawned
     }
 
+    /// Spawns since build per emitter kind, in [`EmitterKind::ALL`] order.
+    pub fn spawned_by_kind(&self) -> [u64; EMITTER_COUNT] {
+        self.spawned_kind
+    }
+
     /// Total spawns refused by the cap since build.
     pub fn dropped_total(&self) -> u64 {
         self.dropped_total
@@ -836,7 +845,7 @@ impl ParticlePool {
     /// names the missing window device bind on the headless twin (never
     /// silent success). The CPU sim above is the authority here; the
     /// `window` build below stages the live draw instead.
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     pub fn submit_gpu(&self, viewport_px: [u32; 2]) -> Result<ParticleReceipt, ParticleError> {
         self.validate()?;
         if viewport_px[0] == 0 || viewport_px[1] == 0 {
@@ -940,6 +949,7 @@ impl ParticlePool {
             kind: e.kind.index() as u8,
         });
         self.spawned += 1;
+        self.spawned_kind[slot] += 1;
         self.live_kind[slot] += 1;
         Ok(())
     }
@@ -1210,7 +1220,7 @@ pub const PARTICLE_DRAW_WGSL: &str = include_str!("shaders/particle.wgsl");
 
 /// One window submit over the live pool: tick cursor, live count, the
 /// per-kind counts, the staged instance count and the wall-clock stage ms.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ParticleGpuReceipt {
     /// Ticks simulated when the receipt was taken.
@@ -1229,7 +1239,7 @@ pub struct ParticleGpuReceipt {
     pub submit_ms: f64,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl ParticleGpuReceipt {
     /// Posted GPU budget this submit is charged against.
     pub fn budget_ms(&self) -> f64 {
@@ -1249,7 +1259,7 @@ impl ParticleGpuReceipt {
 /// once per frame loop (WIN1 and ED1 each own one); steady-state stages on
 /// a matching shape create no buffers or bind groups (the reuse test proves
 /// the count stays flat) and never map or wait on the device.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct ParticleSubmitter {
     created_buffers: u64,
     draw_view: [u8; PARTICLE_DRAW_UNIFORM_BYTES],
@@ -1263,7 +1273,7 @@ pub struct ParticleSubmitter {
 /// buffer, the one-texel atlas stand-in and the bind group that ties them
 /// together under the shader's group 0. Built once, on the first non-empty
 /// batch; every later batch rewrites the same buffers.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 struct ParticleDrawState {
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
@@ -1278,7 +1288,7 @@ struct ParticleDrawState {
     staged: u32,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl ParticleSubmitter {
     /// Build the submitter: the draw camera starts at identity (right +X,
     /// up +Y) until a frame binds one, and no device state exists until the
@@ -1460,7 +1470,7 @@ impl ParticleSubmitter {
     }
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl ParticleDrawState {
     /// Build the draw state once: the pipeline plus its layout, the view
     /// uniform, the max-size instance buffer (sized for the pool cap, so no
@@ -2114,7 +2124,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     fn gpu_submit_without_device_names_the_window_build() {
         let pool = settled(21, 10);
         match pool.submit_gpu([1280, 720]) {
@@ -2124,7 +2134,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     fn gpu_submit_rejects_bad_viewport() {
         let pool = settled(21, 2);
         match pool.submit_gpu([0, 720]) {
@@ -2263,20 +2273,25 @@ mod tests {
 
     /// Device shared with the GX1 suite: one device for the run, so parallel
     /// tests never exhaust adapters. `None` is skip-not-green, never a pass.
-    #[cfg(feature = "window")]
-    fn particle_device() -> Option<(
-        &'static wgpu::Device,
-        &'static wgpu::Queue,
-        &'static wgpu::AdapterInfo,
-    )> {
-        crate::graph::gx1_test_device()
+    #[cfg(feature = "gpu")]
+    fn particle_device() -> Result<
+        (
+            &'static wgpu::Device,
+            &'static wgpu::Queue,
+            &'static wgpu::AdapterInfo,
+        ),
+        crate::test_gpu::NoAdapter,
+    > {
+        crate::graph::gx1_probe()
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_pool_stages_the_live_batch_and_binds_the_frame() {
-        let Some((device, queue, info)) = particle_device() else {
-            eprintln!("SKIPPED particle stage: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "gpu_pool_stages_the_live_batch_and_binds_the_frame",
+            particle_device(),
+        ) else {
             return;
         };
         let mut pool = ParticlePool::new(2040);
@@ -2339,10 +2354,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_calm_pool_stages_nothing() {
-        let Some((device, queue, _)) = particle_device() else {
-            eprintln!("SKIPPED particle calm stage: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("gpu_calm_pool_stages_nothing", particle_device())
+        else {
             return;
         };
         // Zero ticks: a calm pool stages no instance and sizes no buffer.
@@ -2369,10 +2385,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_refuses_a_nonfinite_view_before_sizing() {
-        let Some((device, queue, _)) = particle_device() else {
-            eprintln!("SKIPPED particle view refusals: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "gpu_refuses_a_nonfinite_view_before_sizing",
+            particle_device(),
+        ) else {
             return;
         };
         let pool = settled(21, 10);
@@ -2395,7 +2413,7 @@ mod tests {
 
     /// Saturated pool the draw tests share: every emitter at its rate cap, so
     /// a frame stages the pool cap exactly.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn saturated_pool() -> ParticlePool {
         let mut pool = ParticlePool::new(2040);
         for kind in EmitterKind::ALL {
@@ -2409,14 +2427,16 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn particles_draw_stages_one_instance_per_live_particle() {
         // Behavior: the staged feed draws one instance per live particle. A
         // saturated frame stages alive() records and `draw_staged` reports
         // that count; an empty batch reports 0, sizes no buffer and is never
         // an error; a same-shape batch creates nothing.
-        let Some((device, queue, _)) = particle_device() else {
-            eprintln!("SKIPPED particle draw staging: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "particles_draw_stages_one_instance_per_live_particle",
+            particle_device(),
+        ) else {
             return;
         };
         let pool = saturated_pool();
@@ -2465,15 +2485,17 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn particles_draw_pipeline_matches_the_staged_record() {
         // Behavior: the draw pipeline is the staged-record draw. It is built
         // from PARTICLE_DRAW_WGSL (the same needles the CPU test pins), the
         // draw side builds one render pipeline and never maps or waits on
         // the device, and one encoded pass over a staged batch validates
         // clean against the HDR target it declares.
-        let Some((device, queue, _)) = particle_device() else {
-            eprintln!("SKIPPED particle draw pipeline: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "particles_draw_pipeline_matches_the_staged_record",
+            particle_device(),
+        ) else {
             return;
         };
         for needle in [
@@ -2579,13 +2601,15 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn particles_draw_batch_is_deterministic_twice() {
         // Behavior: the batch is a pure function of the pool. Two pools on
         // one seed stage identical records, identical packed instance bytes
         // and identical instance counts, so the draw replays byte for byte.
-        let Some((device, queue, _)) = particle_device() else {
-            eprintln!("SKIPPED particle draw determinism: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "particles_draw_batch_is_deterministic_twice",
+            particle_device(),
+        ) else {
             return;
         };
         let mut a = ParticlePool::new(2040);

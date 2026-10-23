@@ -300,8 +300,41 @@ pub fn bake_unpack_rots(bytes: &[u8]) -> Result<Vec<super::pose::QuatTrack>, Bak
 
 #[cfg(test)]
 mod tests {
-    use super::super::clip::{avg_slip, bake_clip, bake_track, TICK_DT};
+    use super::super::clip::{avg_world_slip, bake_clip, bake_track, TICK_DT};
     use super::*;
+
+    /// The fighter rig's leg chains, in the joint order the pack carries (the
+    /// receipt lists it): hips 0, leftupleg 55, leftleg 56, leftfoot 57, and
+    /// the right side at 60/61/62. Every other joint hangs off the hips; the
+    /// world-slip meter walks only the chain up from the foot, so only these
+    /// parents matter. `engine-assets` owns the real table and `anim` cannot
+    /// depend on it (assets depends on anim), so this test mirrors the four
+    /// links it reads.
+    fn fighter_legs() -> crate::contract::Skeleton {
+        use crate::contract::Joint;
+        let mut joints: Vec<Joint> = (0..65)
+            .map(|index| Joint {
+                name: format!("joint{index}"),
+                parent: Some(0),
+            })
+            .collect();
+        let links = [
+            (0usize, None, "hips"),
+            (55, Some(0), "leftupleg"),
+            (56, Some(55), "leftleg"),
+            (57, Some(56), "leftfoot"),
+            (60, Some(0), "rightupleg"),
+            (61, Some(60), "rightleg"),
+            (62, Some(61), "rightfoot"),
+        ];
+        for (index, parent, name) in links {
+            joints[index] = Joint {
+                name: name.to_string(),
+                parent,
+            };
+        }
+        crate::contract::Skeleton { joints }
+    }
 
     /// One 60 Hz two-track clip: the fixture shape the tool writes.
     fn tick_clip(ticks: u32) -> QClip {
@@ -436,16 +469,23 @@ mod tests {
         assert_eq!(clip.tracks[0].times.len(), 61, "one second at 60 Hz");
         assert_eq!(
             qclip_hash(&clip),
-            0xbc8c_1300_6a5a_ad0a,
+            0xf5f4_de57_dd5a_7280,
             "the seed-7 receipt's qclip_hash"
         );
-        // The left foot is the planted one; it is the 58th track of the fighter
-        // rig, and the gate's slip reads that track.
-        let slip = avg_slip(&clip, 57, 61);
+        // The pack carries local offsets, so the foot's own track is its
+        // offset inside the leg, not its motion over the sand. The left foot
+        // is the planted one (track 57), and the slip meter wants its world
+        // position: the offsets composed down the leg with the rotations, the
+        // same meter the receipt's `avg_slip` line prints.
+        let rots = bake_unpack_rots(bytes).expect("the rotations read back");
+        let slip = avg_world_slip(&clip, &rots, &fighter_legs(), 57, 61);
+        assert!(
+            (slip - 0.024264).abs() < 5e-6,
+            "the receipt's planted-foot slip is 0.024264 m/s, got {slip}"
+        );
         assert!(slip < 0.08, "the planted foot slips {slip}");
         // The committed pack carries the rotations too, so the fixed point is
         // checked on the whole pack, not only on its positions.
-        let rots = bake_unpack_rots(bytes).expect("the rotations read back");
         assert_eq!(rots.len(), 65, "one rotation track per joint");
         let mut rebuilt = pack_qclip(&clip).expect("packs");
         let mut rot_tracks = Vec::with_capacity(rots.len());

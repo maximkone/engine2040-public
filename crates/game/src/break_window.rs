@@ -21,7 +21,7 @@
 //! tier's debris cap in bodies, 16 draws for the eight-chunk crate, no work per frame after
 //! the pile sleeps.
 
-use crate::break_look::{BreakCue, BreakLook, BreakProp, LookError, BREAK_MESH_ID_BASE};
+use crate::break_look::{BreakCue, BreakDust, BreakLook, BreakProp, LookError, BREAK_MESH_ID_BASE};
 use crate::camera::to_mm;
 use crate::TickOutcome;
 use engine_arena::{crate_rest, ArenaConfig};
@@ -30,7 +30,7 @@ use engine_destruction::budget::{
     MAX_POS_MM,
 };
 use engine_destruction::debris_lod::{plan_lod, LodConfig, LodError, Tier as LodTier};
-use engine_physfx::{Material, Stats, Tier};
+use engine_physfx::{Blast, Material, Stats, Tier};
 use engine_render::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter};
 use engine_render::v1::{cube, upload_mesh, MeshData, MeshError, PbrMaterial};
 
@@ -269,6 +269,25 @@ impl BreakScene {
         self.cue.take()
     }
 
+    /// Applies one authority blast to the crate's debris and raises its sound and dust: call it
+    /// on the tick a weapon lands, after [`BreakScene::observe_outcome`], so the blast's cue and
+    /// cloud replace that tick's break ones (the louder event wins). The shove is the same as
+    /// [`crate::break_look::BreakLook::apply_blast`]; the sound hands out through
+    /// [`BreakScene::take_cue`] and the cloud through [`BreakScene::take_dust`]. A blast before
+    /// the break moves no body but still sounds and puffs. Presentation only.
+    pub fn observe_blast(&mut self, blast: Blast) -> Result<usize, LookError> {
+        let pushed = self.look.observe_blast(blast)?;
+        if let Some(cue) = self.look.take_cue() {
+            self.cue = Some(cue);
+        }
+        Ok(pushed)
+    }
+
+    /// The blast dust of the last [`BreakScene::observe_blast`], once.
+    pub fn take_dust(&mut self) -> Option<BreakDust> {
+        self.look.take_dust()
+    }
+
     /// Counters of the physical layer.
     #[must_use]
     pub fn stats(&self) -> Stats {
@@ -451,6 +470,29 @@ mod tests {
         BreakScene::new(&app.live_match().config()).expect("the crate bakes")
     }
 
+    /// Full-speed walk at the other fighter in world axes, facing it: the wish
+    /// pair is world planar (`mx` x, `mz` z), the facing looks at the target.
+    fn chase(app: &App) -> (i8, i8, i16) {
+        let views = app.fighter_views();
+        let (me, them) = match views {
+            [me, them, ..] => (me.pos_m, them.pos_m),
+            _ => return (0, 0, 0),
+        };
+        let dx = them[0] - me[0];
+        let dz = them[2] - me[2];
+        let facing = (dx.atan2(dz) * 10_000.0 / std::f32::consts::PI) as i16;
+        let axis = |d: f32| {
+            if d > 0.2 {
+                100
+            } else if d < -0.2 {
+                -100
+            } else {
+                0
+            }
+        };
+        (axis(dx), axis(dz), facing)
+    }
+
     /// F2P: the window's tick outcome carries the authority's break events, tick for tick the
     /// same as the arena's own break log.
     #[test]
@@ -484,6 +526,111 @@ mod tests {
             seen.iter().any(|events| !events.is_empty()),
             "the script breaks the crate"
         );
+    }
+
+    /// F2P: the window's tick outcome carries the authority's cut events, tick for tick the same
+    /// as the arena's own cut log under the v2 duel.
+    #[test]
+    fn break_wire_tick_outcome_carries_the_authority_cuts() {
+        let cfg = GameConfig {
+            ticks: 240,
+            fighters: 8,
+            half_extent_m: 5.0,
+            ..config()
+        };
+        let mut app = App::new(cfg).expect("app").into_duel().expect("duel");
+        let mut taped = Vec::new();
+        let mut seen = Vec::new();
+        let mut hits = 0usize;
+        for tick in 0..cfg.ticks {
+            // Walk at the second fighter and hold attack: the swing resolves in
+            // reach, and a landed hit severs the first joint it meets.
+            let (mx, mz, facing) = chase(&app);
+            let input = FighterInput {
+                tick,
+                fighter: FighterId::new(HUMAN_SLOT).expect("slot"),
+                mx,
+                mz,
+                facing,
+                buttons: Buttons(engine_input::fighter::ATTACK),
+            };
+            taped.push(input);
+            let out = app.tick(input);
+            assert!(out.input_accepted);
+            hits += out
+                .cues
+                .iter()
+                .filter(|cue| matches!(cue, crate::FightCue::Hit { .. }))
+                .count();
+            seen.push(out.cuts);
+        }
+        // The oracle: an independent live match armed exactly like the app's,
+        // stepped with the same tape and never through `App`'s forwarding.
+        let mut oracle = engine_arena::MatchSpec::duel(
+            app.live_match().config(),
+            engine_arena::world::MatchWorld::empty(),
+        )
+        .with_weapons(&vec![crate::DUEL_KIT_WEAPON; usize::from(cfg.fighters)])
+        .live()
+        .expect("the oracle duel builds");
+        let mut rows = Vec::new();
+        for input in &taped {
+            let stepped = oracle
+                .step(std::slice::from_ref(input))
+                .expect("oracle tick");
+            rows.push(stepped.cuts.cuts.to_vec());
+        }
+        assert_eq!(
+            app.live_match().config().table_version,
+            engine_combat::tables::TABLES_VERSION_V2,
+            "the duel runs the cutting tables"
+        );
+        assert_eq!(rows.len(), seen.len());
+        for (tick, (row, got)) in rows.iter().zip(&seen).enumerate() {
+            assert_eq!(row, got, "tick {tick}");
+        }
+        assert!(hits > 0, "the brawl lands hits");
+        assert!(
+            seen.iter().any(|cuts| !cuts.is_empty()),
+            "the duel severs a joint"
+        );
+    }
+
+    /// F2P: one blast on the crate's debris shoves the float bodies and raises its sound and
+    /// dust; the blast's cue replaces the tick's break cue and the cloud hands out once.
+    #[test]
+    fn break_wire_blast_shoves_the_debris_and_raises_its_sound_and_dust() {
+        let cfg = config();
+        let mut app = App::new(cfg).expect("app");
+        let mut scene = scene_for(&app);
+        for tick in 0..cfg.ticks {
+            let out = app.tick(script(tick));
+            scene.observe_outcome(&out).expect("tick");
+            if scene.broke_at().is_some() {
+                break;
+            }
+        }
+        assert!(scene.broke_at().is_some(), "the script breaks the crate");
+        // The break's own sound and cloud hand out first; the blast replaces both.
+        assert!(scene.take_cue().is_some(), "the break sounds");
+        assert!(scene.take_dust().is_some(), "the break raises dust");
+        let blast = Blast {
+            center_mm: scene.center_m.map(to_mm),
+            radius_mm: 5_000,
+            impulse_ns: 400,
+        };
+        let pushed = scene.observe_blast(blast).expect("the blast applies");
+        assert!(pushed > 0, "the blast shoves the flying debris");
+        assert_eq!(
+            scene.take_cue(),
+            Some(crate::break_look::blast_cue(blast)),
+            "the blast's cue wins the tick"
+        );
+        let dust = scene.take_dust().expect("the blast raises dust");
+        assert_eq!(dust, crate::break_look::blast_dust(blast));
+        assert!(dust.puffs >= 24, "a blast never whispers: {}", dust.puffs);
+        assert_eq!(scene.take_dust(), None, "one cloud per call");
+        assert_eq!(scene.take_cue(), None, "one sound per call");
     }
 
     /// F2P: the hook's call order. One `observe` per accepted tick, ascending, an empty slice on

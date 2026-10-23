@@ -691,7 +691,7 @@ fn about_pivot(rotation: Mat3, pivot: Vec3) -> JointMatrix {
     ]
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl ProceduralArena {
     /// Upload every mesh into `presenter`: statics as plain meshes, fighters as skinned meshes
     /// in their own skin block. Cold path, once per presenter.
@@ -1205,29 +1205,33 @@ mod tests {
 }
 
 /// The native twin: the same list through the headless presenter, on the live frame path.
-#[cfg(all(test, feature = "window"))]
+#[cfg(all(test, feature = "gpu"))]
 mod gpu_tests {
     use super::*;
     use crate::pass_truth::LookToggles;
     use crate::present::{PresentError, Presenter};
 
-    fn presenter(width: u32, height: u32) -> Option<Presenter> {
-        match Presenter::init_offscreen() {
+    fn presenter(test: &str, width: u32, height: u32) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
             Ok(mut presenter) => {
                 presenter.resize(width, height).expect("valid size applies");
-                Some(presenter)
+                Ok(presenter)
             }
-            Err(PresentError::NoAdapter) => {
-                eprintln!("SKIPPED procedural arena: no wgpu adapter on this machine");
-                None
-            }
+            Err(PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
-        }
+        };
+        crate::test_gpu::require_or_skip(test, probe)
     }
 
     #[test]
     fn the_live_frame_of_the_stand_in_draws_a_lit_arena_with_no_validation_error() {
-        let Some(mut presenter) = presenter(640, 360) else {
+        let Some(mut presenter) = presenter(
+            "the_live_frame_of_the_stand_in_draws_a_lit_arena_with_no_validation_error",
+            640,
+            360,
+        ) else {
             return;
         };
         let arena = ProceduralArena::build().expect("builds");

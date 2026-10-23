@@ -9,7 +9,7 @@
 // target/proof/<gate>-latest.json; --drift FAILs a record that is 25 h old or
 // whose sha is not HEAD or an ancestor.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ROOT, pickReceipt, stripAnsi } from "./ctrf-report.mjs";
@@ -425,16 +425,172 @@ export function recordGreen(gate, { failed, sha, now = new Date(), dir = GREEN_D
   return path;
 }
 
+// Freshness shared by `--drift` and the playable verdict: a record's own stamp
+// (`time`, else `started`, else the file mtime the reader attached) must be a
+// past time. Returns { hours } or { reason }.
+export function greenRecordAge(record, now = new Date()) {
+  const stamp = record?.time ?? record?.started ?? record?.mtime;
+  if (stamp === undefined || stamp === null) return { reason: "record has no time" };
+  const hours = (now.getTime() - Date.parse(stamp)) / 3_600_000;
+  if (!Number.isFinite(hours) || hours < 0) return { reason: `record time ${stamp} is not a past time` };
+  return { hours };
+}
+
 // `record` is the parsed record or null (missing, unreadable). `isAncestor`
 // says whether record.sha is an ancestor of `head`.
 export function driftVerdict(gate, record, { head, isAncestor, now = new Date() }) {
   const fail = (why) => ({ ok: false, line: `[FAIL] drift ${gate}: ${why}` });
   if (!record) return fail(`no green record in ${GREEN_DIR}/${gate}${GREEN_SUFFIX}`);
-  const hours = (now.getTime() - Date.parse(record.time)) / 3_600_000;
-  if (!Number.isFinite(hours) || hours < 0) return fail(`record time ${record.time} is not a past time`);
-  if (hours >= GREEN_MAX_AGE_HOURS) return fail(`green record is ${hours.toFixed(1)} h old (limit ${GREEN_MAX_AGE_HOURS} h), run the gate again`);
+  const age = greenRecordAge(record, now);
+  if (age.reason) return fail(age.reason);
+  if (age.hours >= GREEN_MAX_AGE_HOURS) return fail(`green record is ${age.hours.toFixed(1)} h old (limit ${GREEN_MAX_AGE_HOURS} h), run the gate again`);
   if (record.sha !== head && !isAncestor) return fail(`green sha ${String(record.sha).slice(0, 7)} is neither HEAD nor an ancestor of it`);
-  return { ok: true, line: `[PASS] drift ${gate}: green ${String(record.sha).slice(0, 7)} ${hours.toFixed(1)} h ago` };
+  return { ok: true, line: `[PASS] drift ${gate}: green ${String(record.sha).slice(0, 7)} ${age.hours.toFixed(1)} h ago` };
+}
+
+// AD22 playable verdict: six named gates, each reading one record that a
+// producer wrote. compile, play and save-reopen read an AD4 green record;
+// package reads the pack stage receipt; packaged launch and packaged smoke read
+// the clean-run receipt. A gate with no usable record prints `not_wired` and
+// FAILs, a gate the caller did not supply is a missing gate and FAILs too, and
+// every line names the gate. The verdict is a report: it never changes a leg's
+// own exit code.
+export const PLAYABLE_GATES = ["compile", "play", "save-reopen", "package", "packaged-launch", "packaged-smoke"];
+
+// The row's own words, printed beside each gate id.
+export const PLAYABLE_LABELS = {
+  compile: "compile",
+  play: "play with 0 errors",
+  "save-reopen": "save then reopen",
+  package: "package",
+  "packaged-launch": "packaged launch",
+  "packaged-smoke": "packaged smoke",
+};
+
+// Default producers. The green records sit in the repo's target/proof; the pack
+// receipt in dist; the clean-run receipt under the default clean target. A
+// caller (tools/ship.mjs) overrides the last three with its own --dist, --target
+// and --receipt paths.
+export const PLAYABLE_RECORD_PATHS = {
+  compile: join(GREEN_DIR, `compile${GREEN_SUFFIX}`),
+  play: join(GREEN_DIR, `play${GREEN_SUFFIX}`),
+  "save-reopen": join(GREEN_DIR, `save-reopen${GREEN_SUFFIX}`),
+  package: join("dist", "stage-receipt.json"),
+  "packaged-launch": "C:/e2040-clean/clean-run-receipt.json",
+  "packaged-smoke": "C:/e2040-clean/clean-run-receipt.json",
+};
+
+const GREEN_PLAYABLE_GATES = ["compile", "play", "save-reopen"];
+const PLAYABLE_FNV = /^[0-9a-f]{16}$/i;
+const PLAYABLE_SMOKE = /arena (?:headless )?smoke:[^\n]*\bticks=(\d+)/;
+
+// One gate's verdict. `record` is the parsed record, null when unreadable or
+// absent, or undefined when the caller supplied no slot at all. For the green
+// gates `opts` mirrors driftVerdict ({ head, isAncestor, now }); isAncestor is
+// a function of the record sha, so each record is judged on its own.
+export function playableGateVerdict(gate, record, { head, isAncestor = () => false, now = new Date(), path } = {}) {
+  const label = PLAYABLE_LABELS[gate] ?? gate;
+  const fail = (why) => ({ gate, ok: false, line: `[FAIL] playable ${gate} (${label}): ${why}` });
+  const pass = (why) => ({ gate, ok: true, line: `[PASS] playable ${gate} (${label}): ${why}` });
+  if (!PLAYABLE_GATES.includes(gate)) return fail("not a playable gate");
+  if (record === undefined) return fail("missing gate, no record slot was supplied");
+  if (record === null || typeof record !== "object" || Array.isArray(record)) {
+    return fail(`not_wired, no readable record${path ? ` at ${path}` : ""}`);
+  }
+
+  if (GREEN_PLAYABLE_GATES.includes(gate)) {
+    if (record.gate !== gate) return fail(`record is for gate ${record.gate ?? "(none)"}, not ${gate}`);
+    if (record.pass === false || record.ok === false) return fail("record is red (pass/ok is false)");
+    const age = greenRecordAge(record, now);
+    if (age.reason) return fail(age.reason);
+    if (age.hours >= GREEN_MAX_AGE_HOURS) return fail(`record is ${age.hours.toFixed(1)} h old (limit ${GREEN_MAX_AGE_HOURS} h), run the gate again`);
+    if (!record.sha) return fail("record has no sha");
+    const ancestor = typeof isAncestor === "function" ? isAncestor(record.sha) : isAncestor === true;
+    if (record.sha !== head && !ancestor) return fail(`sha ${String(record.sha).slice(0, 7)} is neither HEAD nor an ancestor of it`);
+    return pass(`green ${String(record.sha).slice(0, 7)} ${age.hours.toFixed(1)} h ago`);
+  }
+
+  if (gate === "package") {
+    const files = record.files;
+    if (!Array.isArray(files) || files.length === 0) return fail("receipt stages no files");
+    const bad = files.find((row) => !row || !(Number(row.bytes) > 0) || !PLAYABLE_FNV.test(String(row.fnv ?? "")));
+    if (bad) return fail(`file ${bad?.rel ?? "(unnamed)"} has no bytes or no 16-hex fnv`);
+    if (!files.some((row) => row.rel === "bin/arena.exe")) return fail("receipt stages no bin/arena.exe");
+    const age = greenRecordAge(record, now);
+    if (age.reason) return fail(age.reason);
+    if (age.hours >= GREEN_MAX_AGE_HOURS) return fail(`receipt is ${age.hours.toFixed(1)} h old (limit ${GREEN_MAX_AGE_HOURS} h), run pack again`);
+    return pass(`${files.length} staged files, pack ${age.hours.toFixed(1)} h ago`);
+  }
+
+  if (record.dry_run === true) return fail("receipt is a dry run, it launched no packaged binary");
+  if (record.exit !== 0) return fail(`receipt exit is ${record.exit ?? "(none)"}, not 0`);
+  const age = greenRecordAge(record, now);
+  if (age.reason) return fail(age.reason);
+  if (age.hours >= GREEN_MAX_AGE_HOURS) return fail(`receipt is ${age.hours.toFixed(1)} h old (limit ${GREEN_MAX_AGE_HOURS} h), run the clean run again`);
+
+  if (gate === "packaged-launch") {
+    if (!(Number(record.ticks) > 0)) return fail(`ticks ${record.ticks ?? "(none)"} is not more than 0`);
+    if (!(Number(record.frames) > 0)) return fail(`frames ${record.frames ?? "(none)"} is not more than 0`);
+    return pass(`packaged run exited 0 with ${record.ticks} ticks over ${record.frames} frames`);
+  }
+
+  const smoke = String(record.smoke ?? "");
+  const ticks = smoke.match(PLAYABLE_SMOKE);
+  if (!ticks) return fail("receipt carries no arena smoke line");
+  if (!(Number(ticks[1]) > 0)) return fail(`smoke line ticks=${ticks[1]} is not more than 0`);
+  if (record.proof_matches !== true) return fail(`proof_matches is ${record.proof_matches ?? "(none)"}, not true`);
+  return pass(`smoke ran ${ticks[1]} ticks and the proof hash matches`);
+}
+
+// All six gates in row order. `records` is keyed by gate id: a key that is not
+// there is a missing gate, a null value is a record nobody wrote. `opts.paths`
+// only labels the lines with where each record was expected.
+export function playableVerdict(records = {}, { paths = {}, ...opts } = {}) {
+  const gates = PLAYABLE_GATES.map((gate) => {
+    const supplied = Object.prototype.hasOwnProperty.call(records, gate);
+    return playableGateVerdict(gate, supplied ? records[gate] : undefined, { ...opts, path: paths[gate] });
+  });
+  const ok = gates.every((gate) => gate.ok);
+  const lines = [...gates.map((gate) => gate.line), ok ? "RESULT PASS (playable, six gates)" : "RESULT FAIL (playable)"];
+  return { ok, gates, lines };
+}
+
+// Reads each record; a missing or unparseable file reads as null (not_wired). A
+// record with no stamp of its own gets the file mtime, so a producer that writes
+// no time still has a bounded age.
+export function readPlayableRecords({ root = ROOT, paths = PLAYABLE_RECORD_PATHS } = {}) {
+  const records = {};
+  for (const gate of PLAYABLE_GATES) {
+    const rel = paths[gate];
+    if (!rel) continue;
+    const path = resolve(root, rel);
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not a record object");
+      if (parsed.time === undefined && parsed.started === undefined) parsed.mtime = statSync(path).mtime.toISOString();
+      records[gate] = parsed;
+    } catch {
+      records[gate] = null;
+    }
+  }
+  return records;
+}
+
+// Head plus a per-sha ancestor test, for the green gates.
+export function playableGitContext() {
+  const git = (gitArgs) => spawnSync("git", gitArgs, { encoding: "utf8" });
+  const head = (git(["rev-parse", "HEAD"]).stdout ?? "").trim();
+  const isAncestor = (sha) => !!sha && git(["merge-base", "--is-ancestor", sha, head]).status === 0;
+  return { head, isAncestor };
+}
+
+// Read, judge and print: the one call tools/ship.mjs makes at the end of its
+// pack and run legs. Returns the verdict; the caller keeps its own exit code.
+export function playableReport({ root = ROOT, paths = PLAYABLE_RECORD_PATHS, head, isAncestor, now } = {}) {
+  const context = head ? { head, isAncestor: isAncestor ?? (() => false) } : playableGitContext();
+  const verdict = playableVerdict(readPlayableRecords({ root, paths }), { ...context, now, paths });
+  for (const line of verdict.lines) console.log(line);
+  return verdict;
 }
 
 // Device evidence for the gpu-live gate: the render window's live-frame leg

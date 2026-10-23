@@ -1,0 +1,48 @@
+# The contubernium: the seven named men who stand beside the player (slot 0)
+# in the legionary mode on rules v2. This file is the content seat: it names
+# the men and their traits, and nothing else. The state each man carries
+# (fights, kills, wounds, rank and one diary line per fight) lives in
+# `crates/game/src/roster.rs` and never enters the proof scene or the arena
+# tick; a camp opens the roster, a fight folds into it.
+#
+# The shape is OpenXcom's `Soldier` and `SoldierDiary` (read 2026-10-23, GPL
+# game code: ideas only, no line copied): a man has a name, a rank, a mission
+# count, a kill count and a wound count, and his diary keeps one record per
+# fight. The rank words are the career ranks of `crates/game/src/ladder.rs`.
+#
+# Order: the sections sit in slot order, slot 1 first and slot 7 last, beside
+# the player in slot 0 (`docs/plan/rome.md` section 0, decision 5: a tent
+# group of eight). The ids are the state keys and are never shown; the names
+# are invented but shaped as a Roman name of the late Republic.
+#
+# No entry here holds a number, so no entry needs a `ref`: the only sourced
+# facts (the ranks, the tent-group size) live in code and in the plan, and the
+# names are ours. A man holds two traits, one comma between them.
+
+[man.vitus]
+name = "Vitus Atilius"
+traits = "steady, blunt"
+
+[man.gaius]
+name = "Gaius Petronius"
+traits = "quick, watchful"
+
+[man.marcus]
+name = "Marcus Rutilius"
+traits = "pious, sings"
+
+[man.lucius]
+name = "Lucius Fabius"
+traits = "scarred, quiet"
+
+[man.titus]
+name = "Titus Hortensius"
+traits = "lucky, sharp"
+
+[man.quintus]
+name = "Quintus Marcius"
+traits = "stubborn, kind"
+
+[man.aulus]
+name = "Aulus Servilius"
+traits = "young, eager"

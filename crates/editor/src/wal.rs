@@ -22,8 +22,8 @@ use engine_scene::provenance::Provenance;
 
 use crate::commands::{
     apply_named, begin_group, cancel_group, end_group, open_group_depth, open_group_id,
-    open_group_key, redo, undo, Batch, CommandMeta, Document, Journal, JournalEntry, MaterialName,
-    Op, ReceiptSource, MAX_COMMAND_NAME_LEN,
+    open_group_key, redo, undo, Batch, BondStrength, CommandMeta, Document, Journal, JournalEntry,
+    MaterialName, Op, ReceiptSource, MAX_COMMAND_NAME_LEN,
 };
 use crate::durable::TMP_SUFFIX;
 use crate::save::{
@@ -39,8 +39,13 @@ pub const SNAP_FILE_NAME: &str = "snapshot.wal";
 pub const WAL_MAGIC: [u8; 4] = *b"EEDW";
 /// Snapshot magic (`EESP`: editor snapshot).
 pub const SNAP_MAGIC: [u8; 4] = *b"EESP";
-/// Newest log/snapshot layout this module writes and reads.
-pub const WAL_VERSION: u32 = 1;
+/// Newest log/snapshot layout this module writes and reads. Version 2 appends
+/// the three content digests to every snapshot journal entry; version 1
+/// snapshots still open with zero digests (unknown, not invented). Log frames
+/// are unchanged between the two.
+pub const WAL_VERSION: u32 = 2;
+/// Oldest log/snapshot layout this module still opens.
+pub const MIN_WAL_VERSION: u32 = 1;
 /// Largest accepted frame payload: one 1 MiB batch (~7k single ops) is far
 /// past any real edit; bigger batches refuse before touching the document.
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
@@ -334,6 +339,19 @@ fn push_op(out: &mut Vec<u8>, op: &Op) {
             push_text(out, value);
         }
         Op::RemoveLastMaterial => push_u8(out, 9),
+        Op::SetBond { id, a, b, strength } => {
+            push_u8(out, 10);
+            push_id(out, *id);
+            push_u32(out, *a);
+            push_u32(out, *b);
+            match strength {
+                Some(value) => {
+                    push_u8(out, 1);
+                    push_u32(out, u32::from(value.permille()));
+                }
+                None => push_u8(out, 0),
+            }
+        }
     }
 }
 
@@ -392,6 +410,17 @@ fn read_op(cursor: &mut Cursor<'_>) -> Result<Op, WalError> {
             value: cursor.effect_text()?,
         }),
         9 => Ok(Op::RemoveLastMaterial),
+        10 => {
+            let id = cursor.id()?;
+            let a = cursor.u32()?;
+            let b = cursor.u32()?;
+            let strength = match cursor.u8()? {
+                0 => None,
+                1 => Some(BondStrength::new(cursor.u32()?).map_err(|_| WalError::Corrupt)?),
+                _ => return Err(WalError::Corrupt),
+            };
+            Ok(Op::SetBond { id, a, b, strength })
+        }
         _ => Err(WalError::Corrupt),
     }
 }
@@ -447,7 +476,7 @@ fn read_stamp(
     }
 }
 
-fn push_entry(out: &mut Vec<u8>, entry: &JournalEntry) -> Result<(), WalError> {
+fn push_entry(out: &mut Vec<u8>, entry: &JournalEntry, with_digests: bool) -> Result<(), WalError> {
     push_u64(out, entry.key);
     push_u64(out, entry.base_revision);
     push_u64(out, entry.result_revision);
@@ -494,10 +523,15 @@ fn push_entry(out: &mut Vec<u8>, entry: &JournalEntry) -> Result<(), WalError> {
     }
     push_u32(out, provenance.len() as u32);
     out.extend_from_slice(&provenance);
+    if with_digests {
+        out.extend_from_slice(&entry.before_digest);
+        out.extend_from_slice(&entry.staged_digest);
+        out.extend_from_slice(&entry.after_digest);
+    }
     Ok(())
 }
 
-fn read_entry(cursor: &mut Cursor<'_>) -> Result<JournalEntry, WalError> {
+fn read_entry(cursor: &mut Cursor<'_>, with_digests: bool) -> Result<JournalEntry, WalError> {
     let key = cursor.u64()?;
     let base_revision = cursor.u64()?;
     let result_revision = cursor.u64()?;
@@ -563,6 +597,15 @@ fn read_entry(cursor: &mut Cursor<'_>) -> Result<JournalEntry, WalError> {
     if keys.is_empty() || keys[0] != key {
         return Err(WalError::Corrupt);
     }
+    let (before_digest, staged_digest, after_digest) = if with_digests {
+        (
+            cursor.array::<32>()?,
+            cursor.array::<32>()?,
+            cursor.array::<32>()?,
+        )
+    } else {
+        ([0u8; 32], [0u8; 32], [0u8; 32])
+    };
     Ok(JournalEntry {
         key,
         forward,
@@ -570,6 +613,9 @@ fn read_entry(cursor: &mut Cursor<'_>) -> Result<JournalEntry, WalError> {
         inverse_groups,
         base_revision,
         result_revision,
+        before_digest,
+        staged_digest,
+        after_digest,
         effects,
         provenance,
         name,
@@ -649,12 +695,9 @@ fn parse_header(bytes: &[u8]) -> Result<(u64, u64), WalError> {
     }
     let mut version = [0u8; 4];
     version.copy_from_slice(&bytes[4..8]);
-    if u32::from_le_bytes(version) != WAL_VERSION {
-        let mut got = [0u8; 4];
-        got.copy_from_slice(&bytes[4..8]);
-        return Err(WalError::UnsupportedVersion {
-            got: u32::from_le_bytes(got),
-        });
+    let version = u32::from_le_bytes(version);
+    if !(MIN_WAL_VERSION..=WAL_VERSION).contains(&version) {
+        return Err(WalError::UnsupportedVersion { got: version });
     }
     let mut revision = [0u8; 8];
     revision.copy_from_slice(&bytes[8..16]);
@@ -1021,6 +1064,18 @@ fn push_frame(file: &mut std::fs::File, payload: &[u8]) -> std::io::Result<()> {
 }
 
 fn encode_snapshot(doc: &Document, journal: &Journal) -> Result<Vec<u8>, WalError> {
+    encode_snapshot_at(doc, journal, WAL_VERSION)
+}
+
+/// Snapshot bytes at an explicit layout version. The writer always calls this
+/// with [`WAL_VERSION`]; the older version is for the reopen test that proves
+/// a version 1 snapshot still loads with zero digests.
+fn encode_snapshot_at(
+    doc: &Document,
+    journal: &Journal,
+    version: u32,
+) -> Result<Vec<u8>, WalError> {
+    let with_digests = version >= 2;
     let save = save_to_bytes(doc);
     if save.len() > MAX_SAVE_BYTES {
         return Err(WalError::TooLarge);
@@ -1031,15 +1086,15 @@ fn encode_snapshot(doc: &Document, journal: &Journal) -> Result<Vec<u8>, WalErro
     let mut entries = Vec::new();
     push_u32(&mut entries, journal.past.len() as u32);
     for entry in &journal.past {
-        push_entry(&mut entries, entry)?;
+        push_entry(&mut entries, entry, with_digests)?;
     }
     push_u32(&mut entries, journal.future.len() as u32);
     for entry in &journal.future {
-        push_entry(&mut entries, entry)?;
+        push_entry(&mut entries, entry, with_digests)?;
     }
     let mut out = Vec::with_capacity(32 + save.len() + entries.len());
     out.extend_from_slice(&SNAP_MAGIC);
-    out.extend_from_slice(&WAL_VERSION.to_le_bytes());
+    out.extend_from_slice(&version.to_le_bytes());
     push_u64(&mut out, doc.revision);
     push_u32(&mut out, save.len() as u32);
     out.extend_from_slice(&save);
@@ -1056,9 +1111,10 @@ fn decode_snapshot(bytes: &[u8]) -> Result<(Document, Journal), WalError> {
         return Err(WalError::Corrupt);
     }
     let version = cursor.u32()?;
-    if version != WAL_VERSION {
+    if !(MIN_WAL_VERSION..=WAL_VERSION).contains(&version) {
         return Err(WalError::UnsupportedVersion { got: version });
     }
+    let with_digests = version >= 2;
     let revision = cursor.u64()?;
     let save_len = cursor.u32()? as usize;
     if save_len > MAX_SAVE_BYTES {
@@ -1081,7 +1137,7 @@ fn decode_snapshot(bytes: &[u8]) -> Result<(Document, Journal), WalError> {
     }
     let mut past = Vec::with_capacity(past_len.min(128));
     for _ in 0..past_len {
-        past.push(read_entry(&mut cursor)?);
+        past.push(read_entry(&mut cursor, with_digests)?);
     }
     let future_len = cursor.u32()? as usize;
     if future_len > MAX_SNAP_ENTRIES {
@@ -1089,7 +1145,7 @@ fn decode_snapshot(bytes: &[u8]) -> Result<(Document, Journal), WalError> {
     }
     let mut future = Vec::with_capacity(future_len.min(128));
     for _ in 0..future_len {
-        future.push(read_entry(&mut cursor)?);
+        future.push(read_entry(&mut cursor, with_digests)?);
     }
     let entries_bytes = &bytes[entries_start..cursor.pos];
     let crc_raw = cursor.take(4)?;
@@ -1448,6 +1504,36 @@ mod tests {
             idempotency_key: key,
             provenance: stamp,
         }
+    }
+
+    #[test]
+    fn landed_digest_v1_snapshot_opens_with_zero_digests() {
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        crate::commands::apply_named(
+            &mut doc,
+            &mut journal,
+            &insert_batch(id(1), ObjectId::NIL, 1.0, 0, 1, None),
+            &CommandMeta::default(),
+        )
+        .expect("insert lands");
+
+        let v1 = encode_snapshot_at(&doc, &journal, 1).expect("v1 snapshot encodes");
+        let (doc1, journal1) = decode_snapshot(&v1).expect("v1 snapshot opens");
+        assert_eq!(doc1.revision, doc.revision);
+        let entry = journal1.past.last().expect("v1 entry survives");
+        assert_eq!(entry.key, 1);
+        assert_eq!(entry.before_digest, [0u8; 32]);
+        assert_eq!(entry.staged_digest, [0u8; 32]);
+        assert_eq!(entry.after_digest, [0u8; 32]);
+
+        let v2 = encode_snapshot(&doc, &journal).expect("v2 snapshot encodes");
+        let (_, journal2) = decode_snapshot(&v2).expect("v2 snapshot opens");
+        let seen = journal2.past.last().expect("v2 entry survives");
+        assert_eq!(seen.before_digest, journal.past[0].before_digest);
+        assert_eq!(seen.staged_digest, journal.past[0].staged_digest);
+        assert_eq!(seen.after_digest, journal.past[0].after_digest);
+        assert_ne!(seen.after_digest, [0u8; 32]);
     }
 
     struct State {

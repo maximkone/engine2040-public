@@ -1,52 +1,15 @@
 use super::*;
 
-/// Sorted-id snapshot of the live document as fixed solver actors: every
-/// node with a finite world position becomes one unit cube, like the
-/// `scene.place` mapping. Live actors constrain the solve but are never
-/// moved and never culprits.
+/// Sorted-id snapshot of the live document as fixed solver actors, from the
+/// one scene adapter ([`engine_editor::spatial_view`]): real collider extents,
+/// the labelled default for a bare node. Live actors constrain the solve but
+/// are never moved and never culprits.
 pub(super) fn snapshot_live(doc: &engine_editor::commands::Document) -> Vec<Actor> {
-    let mut order: Vec<ObjectId> = Vec::new();
-    let mut stack = doc.hierarchy.roots();
-    while let Some(id) = stack.pop() {
-        order.push(id);
-        stack.extend(doc.hierarchy.children(id));
-    }
-    order.sort_by_key(|id| id.to_string());
-    let mut actors = Vec::new();
-    let mut next_id = LIVE_BASE;
-    for id in order {
-        if next_id >= SHELL_BASE {
-            break;
-        }
-        let Some(world) = doc.hierarchy.world(id) else {
-            continue;
-        };
-        if !world.position.iter().all(|lane| lane.is_finite()) {
-            continue;
-        }
-        let yaw = if world.rotation.iter().all(|lane| lane.is_finite()) {
-            yaw_of_quat(world.rotation)
-        } else {
-            0.0
-        };
-        actors.push(Actor {
-            id: next_id,
-            name: format!("live_{next_id:06}"),
-            x: world.position[0],
-            y: world.position[1],
-            z: world.position[2],
-            sx: 1.0,
-            sy: 1.0,
-            sz: 1.0,
-            parent: None,
-            physical: true,
-            vx: 0.0,
-            vz: 0.0,
-            yaw,
-        });
-        next_id += 1;
-    }
-    actors
+    let rows = engine_editor::spatial_view::rows_of(doc).rows;
+    (LIVE_BASE..SHELL_BASE)
+        .zip(rows)
+        .map(|(id, row)| engine_editor::spatial_view::actor(&row, id, format!("live_{id:06}")))
+        .collect()
 }
 
 pub(super) fn bad_brief(error: LevelError) -> McpToolError {
@@ -197,7 +160,8 @@ pub(super) fn build_level_on_state(
                 undo_token: 0,
                 record_line: env.record_line(),
                 relation_diff: Vec::new(),
-                verify: crate::verify_tasks::VerifyBlock::of(TOOL_BUILD_LEVEL, &checks).wire(),
+                verify: crate::verify_tasks::VerifyBlock::of(TOOL_BUILD_LEVEL, &checks)
+                    .wire_report(),
             })
         }
         EditOutcome::Edited(edit) => {
@@ -285,7 +249,8 @@ pub(super) fn build_level_on_state(
                 undo_token: applied.key,
                 record_line: env.record_line(),
                 relation_diff: edit.changes,
-                verify: crate::verify_tasks::VerifyBlock::of(TOOL_BUILD_LEVEL, &checks).wire(),
+                verify: crate::verify_tasks::VerifyBlock::of(TOOL_BUILD_LEVEL, &checks)
+                    .wire_report(),
             })
         }
     }

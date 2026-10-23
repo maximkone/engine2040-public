@@ -303,7 +303,9 @@ impl JointTable {
         for (i, joint) in skeleton.joints.iter().enumerate() {
             let depth = depths.get(i).copied().unwrap_or(0);
             let fallback = swing_limit(depth);
-            rows.push(named_row(&joint.name, fallback).unwrap_or(JointSpec::fallback(fallback)));
+            rows.push(
+                named_row(&joint.name, fallback).unwrap_or_else(|_| JointSpec::fallback(fallback)),
+            );
         }
         Self { rows }
     }

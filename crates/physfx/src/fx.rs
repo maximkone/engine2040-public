@@ -1,6 +1,7 @@
 //! fx: the Rapier world, its spawn order, the caps and the transform read-back.
 
 mod blast;
+mod cloth;
 mod hit;
 mod joints;
 mod receipt;
@@ -17,6 +18,7 @@ use crate::check::{self, MAX_IMPULSE, MAX_SPEED};
 use crate::error::{Error, Field};
 use crate::groups;
 use crate::rig::Rig;
+use crate::soft::SoftWorld;
 use crate::tether::Tether;
 use crate::types::{Batch, Key, Placed, Shard, Stats, Transform};
 use engine_anim::contract::{validate_pose, LocalPose};
@@ -113,6 +115,8 @@ pub struct PhysFx {
     scratch: Vec<u32>,
     /// Ropes, oldest first.
     tethers: Vec<Tether>,
+    /// Capes and banners in their own Rapier soft-body world.
+    soft: SoftWorld,
     live: usize,
     statics: usize,
     next_batch: u32,
@@ -160,6 +164,7 @@ impl PhysFx {
             awake: Vec::with_capacity(caps.bodies),
             scratch: Vec::with_capacity(caps.bodies),
             tethers: Vec::new(),
+            soft: SoftWorld::new(),
             live: 0,
             statics: 0,
             next_batch: 0,
@@ -406,6 +411,7 @@ impl PhysFx {
         self.fade_drives();
         self.world.step();
         self.step_tethers();
+        self.soft.step();
         self.steps += 1;
         self.capture();
         self.shed_contacts();

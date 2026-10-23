@@ -1,0 +1,50 @@
+[workspace]
+members = ["."]
+
+[package]
+name = "box3d-rust"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.77"
+authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
+description = "Pure Rust port of the Box3D 3D physics engine"
+license = "MIT"
+repository = "https://github.com/larsbrubaker/box3d-rust"
+homepage = "https://larsbrubaker.github.io/box3d-rust/"
+documentation = "https://docs.rs/box3d-rust"
+readme = "VENDORED.md"
+keywords = ["physics", "box3d", "3d", "simulation", "game-development", "algorithms"]
+categories = ["simulation", "game-development", "algorithms"]
+autobenches = false
+exclude = ["demo/", "docs/", "Tests/", ".github/"]
+
+[lib]
+name = "box3d_rust"
+path = "src/lib.rs"
+
+[features]
+# Mirrors BOX3D_DOUBLE_PRECISION: double precision world positions for large worlds.
+double-precision = []
+
+[dependencies]
+
+# Port-idiomatic style: allow Clippy lints that conflict with faithful C-shaped code.
+[workspace.lints.clippy]
+needless_range_loop = "allow"
+int_plus_one = "allow"
+excessive_precision = "allow"
+approx_constant = "allow"
+too_many_arguments = "allow"
+manual_range_contains = "allow"
+field_reassign_with_default = "allow"
+needless_late_init = "allow"
+if_same_then_else = "allow"
+collapsible_if = "allow"
+assertions_on_constants = "allow"
+reserve_after_initialization = "allow"
+unnecessary_unwrap = "allow"
+mem_replace_with_default = "allow"
+len_zero = "allow"
+
+[lints]
+workspace = true

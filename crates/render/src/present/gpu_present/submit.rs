@@ -4,16 +4,18 @@
 //! split are `pub(super)`, everything else keeps its exact shape.
 use super::super::*;
 use super::frame::{
-    decal_err, ibl_err, layer_err, particle_err, sky_err, FrameOutput, FrameReceipt,
+    decal_err, ibl_err, layer_err, particle_err, sky_err, trail_err, FrameOutput, FrameReceipt,
     LookPassReceipt, Targets,
 };
 use super::gate::LiveLook;
 use super::live::FogRows;
 use super::presenter::Presenter;
+use super::submit_cull::{live_submit_order, StagedFrame};
 use super::timing::GpuTimer;
 use super::{DEPTH_FORMAT, HDR_CLEAR, HDR_FORMAT, OUTPUT_FORMAT, ROW_ALIGN};
 use crate::v1::{self, Manifest};
 use crate::{material_layer, particles_gpu, sky};
+#[cfg(feature = "window")]
 use std::sync::Arc;
 
 /// Last sun depth submit wall time in us (receipt evidence slot).
@@ -261,20 +263,24 @@ fn set_capture_sky(decision: Option<bool>) -> Option<bool> {
     capture_sky_from_state(CAPTURE_SKY.with(|cell| cell.replace(capture_sky_state(decision))))
 }
 
-/// Forward color target count: HDR plus the R32Uint id target.
-/// Units count out. Determinism fixed layout, never hashed.
+/// Forward color target count: HDR, the R32Uint id target, and the LF5
+/// motion target. Units count out. Determinism fixed layout, never hashed.
 /// Caller: `ensure_targets` below plus `forward_id_attachment_tests`.
 #[must_use]
 pub(super) fn forward_color_target_count() -> u32 {
-    2
+    3
 }
 
-/// Forward color target formats in attachment order: HDR then id.
+/// Forward color target formats in attachment order: HDR, id, motion.
 /// Units formats out. Determinism fixed layout, never hashed.
 /// Caller: `ensure_targets` below plus `forward_id_attachment_tests`.
 #[must_use]
-pub(super) fn forward_color_target_formats() -> [wgpu::TextureFormat; 2] {
-    [HDR_FORMAT, super::frame::ID_TARGET_FORMAT]
+pub(super) fn forward_color_target_formats() -> [wgpu::TextureFormat; 3] {
+    [
+        HDR_FORMAT,
+        super::frame::ID_TARGET_FORMAT,
+        super::MOTION_FORMAT,
+    ]
 }
 
 impl Presenter {
@@ -374,6 +380,20 @@ impl Presenter {
                 frame.camera_up(),
             )
             .map_err(particle_err)?;
+        // LF14: the frame's sword ribbon. The game replaces it on every staged
+        // frame; an empty list clears the last batch, so an idle frame stages
+        // no strip. The camera is the same one the forward draws with.
+        self.trail_sub
+            .stage(
+                &self.device,
+                &self.queue,
+                &self.trail_verts,
+                &self.trail_lens,
+                frame.built_view_proj.to_cols_array_2d(),
+                frame.camera_right(),
+                frame.camera_up(),
+            )
+            .map_err(trail_err)?;
         let decal_pool = &self.decal_pool;
         let decal_receipt = decal_pool
             .submit_gpu(
@@ -484,12 +504,13 @@ impl Presenter {
             return;
         }
         // SP63 id slice stays byte-identical: HDR plus id pair the
-        // forward pass carries; cold path only, never per frame.
+        // forward pass carries; cold path only, never per frame. LF5 adds
+        // the motion target as attachment 2.
         let target_formats = forward_color_target_formats();
         debug_assert_eq!(
             forward_color_target_count(),
-            2,
-            "forward carries HDR plus id"
+            3,
+            "forward carries HDR, id and motion"
         );
         let size = wgpu::Extent3d {
             width,
@@ -682,6 +703,42 @@ impl Presenter {
             super::msaa::msaa_transient_within_cap(width, height, &self.msaa),
             "MSAA transient over budget"
         );
+        // LF5 motion: one 1x Rg16Float target, cleared by the forward pass
+        // every frame. COPY_SRC lets a test read the field back; TEXTURE_BINDING
+        // lets the LF5c resolve reproject with it. No 4x twin exists (that
+        // would push the 4x transient over its cap), so the MSAA path clears
+        // this one instead of writing it.
+        let motion_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ra1-motion"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: target_formats[2],
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let motion_view = motion_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // LF5c: the resolve's history pair, its two resolve binds and the two
+        // blit binds over the resolved views ride the targets. Cold path only
+        // (target rebuild): the stale history is dropped here, so the first
+        // frame after a resize follows the current image.
+        self.taa.ensure(
+            &self.device,
+            &hdr_view,
+            &motion_view,
+            width,
+            height,
+            super::taa_resolve::BlitFeed {
+                layout: &self.blit_layout,
+                sampler: &self.blit_sampler,
+                fog: &fog_view,
+                ao: &ao_view,
+                fog_col: &fog_col_buf,
+            },
+        );
         let msaa = if super::msaa::msaa_enabled(&self.msaa) {
             let plan = super::msaa::attachment_plan(&self.msaa);
             let msaa_color = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -737,6 +794,8 @@ impl Presenter {
             id_texture,
             id_view,
             id_clear,
+            motion_view,
+            motion_texture,
             fog_col_buf,
             blit_bind,
             msaa,
@@ -839,16 +898,18 @@ impl Presenter {
     }
 
     /// Stage one frame from the shared frame camera: validate the list and
-    /// light, resolve every mesh key, and pack the uniform byte images from
-    /// the frame's built view-projection. Returns stack camera (80 B) plus
-    /// light (32 B) arrays; the per-draw materials land in
-    /// `material_scratch`, one 256-byte stride each, ready for the ring
-    /// write. Steady frames allocate nothing. Fails before any GPU work.
+    /// light, resolve every mesh key, build the culled submit order, and pack
+    /// the uniform byte images from the frame's built view-projection.
+    /// Returns the order (pipeline-grouped, outside-frustum draws dropped)
+    /// plus stack camera (80 B) and light (32 B) arrays; the per-draw
+    /// materials land in `material_scratch`, one 256-byte stride each, ready
+    /// for the ring write. Steady frames allocate nothing. Fails before any
+    /// GPU work.
     pub(super) fn stage_frame(
         &mut self,
         list: &DrawList,
         frame: &FrameCamera,
-    ) -> Result<([u8; 80], [u8; 32]), PresentError> {
+    ) -> Result<StagedFrame, PresentError> {
         list.validate()?;
         list.light
             .validate()
@@ -856,6 +917,11 @@ impl Presenter {
                 index: 0,
                 reason: format!("light: {e}"), // alloc-ok: cold validation failure, never steady-state
             })?;
+        // EG38: the live list is built here, so the tested sphere cull runs
+        // here too; the forward and depth passes draw this order.
+        let bounds = self.frame_draw_bounds(list);
+        let (order, submitted) = live_submit_order(list, &bounds, frame.built_view_proj);
+        self.submitted_draws = submitted;
         // Camera plus light bytes come from a fixed valid material: the
         // packer ignores it for those uniforms, and every real material
         // already passed `DrawList::validate` above.
@@ -900,7 +966,12 @@ impl Presenter {
         // scene's torch list (VS7) rides here when the scene feeds one.
         let torch = self.torch_bytes_from_scene(list)?;
         self.queue.write_buffer(&self.torch_buf, 0, &torch);
-        Ok((cam_u.to_array(), light_u.to_array()))
+        Ok(StagedFrame {
+            cam_bytes: cam_u.to_array(),
+            light_bytes: light_u.to_array(),
+            order,
+            submitted,
+        })
     }
 
     /// Twin sun-shadow bind: resolve the frame focus depth into the
@@ -939,16 +1010,17 @@ impl Presenter {
         (list.camera.eye - list.camera.target).length()
     }
 
-    /// LF3 landing 2: the depth prepass. It draws the list's depth with the
-    /// depth-only pipelines so the GTAO kernel can read the frame's depth
-    /// before the forward pass shades it. The forward pass then clears the
-    /// depth and writes it again, so the frame's final depth is the one the
-    /// forward pass wrote, exactly as before this landing.
+    /// LF3 landing 2: the depth prepass. It draws the frame's submitted order
+    /// with the depth-only pipelines so the GTAO kernel can read the frame's
+    /// depth before the forward pass shades it. The forward pass then clears
+    /// the depth and writes it again, so the frame's final depth is the one
+    /// the forward pass wrote, exactly as before this landing.
     pub(super) fn encode_depth_prepass(
         &self,
         enc: &mut wgpu::CommandEncoder,
         targets: &Targets,
         list: &DrawList,
+        order: &[usize],
     ) {
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ra1-depth-prepass"),
@@ -965,8 +1037,6 @@ impl Presenter {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
-        let order = rl32_submit_order(list, &mut order_buf);
         for &draw in order {
             let item = &list.items[draw];
             let (Some(mesh), Some(bind)) = (self.meshes.get(&item.mesh), self.draw_bind(draw))
@@ -981,38 +1051,31 @@ impl Presenter {
             });
             let offset = u32::try_from(draw * MATERIAL_STRIDE).unwrap_or(0);
             let joints = skin_block.map_or(0, skin_block_offset);
-            rp.set_bind_group(0, bind, &[offset, joints]);
+            rp.set_bind_group(0, bind, &[offset, joints, joints]);
             rp.set_vertex_buffer(0, mesh.vertex.slice(..));
             rp.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
             rp.draw_indexed(0..mesh.count, 0, 0..1);
         }
     }
 
-    /// Forward pass: clear, draw the list, then the sky at the far plane so
-    /// the depth test rejects every covered pixel, inside the pass or in its
-    /// own pass per the [`SkyPlan`]. `look` carries the frame's pass switches
-    /// and the device timestamps. Returns true when the sky ran in its own
-    /// timed pass, so the caller resolves the sky timestamps.
+    /// Forward pass: clear, draw the frame's submitted order, then the sky at
+    /// the far plane so the depth test rejects every covered pixel, inside the
+    /// pass or in its own pass per the [`SkyPlan`]. `look` carries the frame's
+    /// pass switches and the device timestamps; `order` is the culled,
+    /// pipeline-grouped list the stage step built. Returns true when the sky
+    /// ran in its own timed pass, so the caller resolves the sky timestamps.
     pub(super) fn encode_forward(
         &self,
         enc: &mut wgpu::CommandEncoder,
         targets: &Targets,
         list: &DrawList,
         look: ForwardLook<'_>,
+        order: &[usize],
     ) -> bool {
-        // EG11: the live frame records the sun depth map from the cached
-        // `sun_sub` map plus pipeline before the forward draws, so the
-        // per-pass shadow column measures the pass instead of a constant
-        // zero. Nothing samples the map yet (forward bindings 13/14 wait on
-        // slice 2), so HDR pixels stay bit-identical.
-        if look.sun_depth && forward_sun_enabled() {
-            let shadow_us = self.sun_sub.encode(self, enc, list).unwrap_or(0);
-            sun_last_us_store(shadow_us);
-        } else {
-            sun_last_us_store(0);
-        }
-        // EG13 on-path choice: on plus built resolves 4x into 1x HDR, else
-        // today's 1x path. Names the helper in production (not test-only).
+        // EG11b: the live sun map runs here; a skipped pass writes `enabled` 0.
+        let wanted = look.sun_depth && forward_sun_enabled();
+        sun_last_us_store(self.sun_sub.record(self, enc, list, wanted));
+        // EG13: on plus built resolves 4x into 1x HDR, else today's 1x path.
         let (_, should_resolve) =
             super::msaa::msaa_forward_choice(&self.msaa, targets.msaa.is_some());
         let msaa_pair = targets.msaa.as_ref().filter(|_| should_resolve);
@@ -1032,21 +1095,41 @@ impl Presenter {
                 None,
             ),
         };
-        // Depth is stored only while something reads it after the pass: the
-        // own-pass sky, or the RL9 fog feed copy on capture and probe frames.
+        // LF5: the MSAA pass keeps its single HDR attachment, so it cannot
+        // write motion (a 4x twin would break the transient cap). Clear the
+        // 1x target once per MSAA frame so a reader sees zero, never the
+        // last 1x frame's field.
+        if msaa_pair.is_some() {
+            let _clear = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ra1-motion-clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &targets.motion_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        // Depth is stored while something reads it after the pass: the
+        // own-pass sky, the fog feed copy, or a staged splat field (FEEL5).
         // HDR pixels stay bit-identical either way.
         let sky_plan = resolve_sky_plan(capture_sky_decision(), look.sky, msaa_pair.is_some());
-        let depth_store = if forward_depth_should_store(look.keep_depth, sky_plan) {
+        let keep_depth =
+            look.keep_depth || (self.decal_sub.has_splat_draw() && msaa_pair.is_none());
+        let depth_store = if forward_depth_should_store(keep_depth, sky_plan) {
             wgpu::StoreOp::Store
         } else {
             wgpu::StoreOp::Discard
         };
-        // SP63: the 1x forward pass writes the id attachment beside HDR.
-        // The id texture is pre-filled with ID_CLEAR bytes at target build
-        // (an integer target cannot take a float clear), so untouched
-        // pixels keep clear and only covered pixels carry a draw id. The
-        // MSAA path keeps its single resolved HDR attachment: the 1x id
-        // texture cannot pair with its 4x targets.
+        // SP63: the 1x pass writes the id attachment beside HDR; the MSAA path
+        // keeps its single resolved HDR attachment (a 1x id cannot pair).
         let hdr_attachment = wgpu::RenderPassColorAttachment {
             view: color_view,
             depth_slice: None,
@@ -1065,12 +1148,27 @@ impl Presenter {
                 store: wgpu::StoreOp::Store,
             },
         };
-        let color_attachments = [Some(hdr_attachment), Some(id_attachment)];
+        // LF5: the motion target clears every frame on the 1x path; the sky
+        // pass below loads it, so geometry keeps its move under the sky.
+        let motion_attachment = wgpu::RenderPassColorAttachment {
+            view: &targets.motion_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        };
+        let color_attachments = [
+            Some(hdr_attachment),
+            Some(id_attachment),
+            Some(motion_attachment),
+        ];
         let color_attachments: &[Option<wgpu::RenderPassColorAttachment<'_>>] =
             if msaa_pair.is_some() {
                 &color_attachments[..1]
             } else {
-                &color_attachments[..2]
+                &color_attachments[..3]
             };
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ra1-forward"),
@@ -1096,20 +1194,15 @@ impl Presenter {
         // mesh uploaded with a skin block carries 80-byte vertices and reads
         // its joint block through the dynamic offset at binding 7.
         let mut skinned_bound = false;
-        // RL32: sorted groups over the borrowed index list; one bind plus
+        // RL32: sorted groups over the staged index list; one bind plus
         // one draw serves each distinct (pipeline, material, mesh) group.
         // Duplicates share buffers plus material bytes, so one draw is
         // byte-equal to N (depth Less drops exact overdraw, blend REPLACE
         // is opaque); distinct meshes stay one draw each until RL60
         // instancing lands.
-        let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
         // The `graph` row off draws nothing: the pass still clears, so the
         // frame is the empty arena the sky and the post chain show.
-        let order: &[usize] = if look.draws {
-            rl32_submit_order(list, &mut order_buf)
-        } else {
-            &[]
-        };
+        let order: &[usize] = if look.draws { order } else { &[] };
         let mut i = 0;
         while i < order.len() {
             let draw = order[i];
@@ -1137,8 +1230,16 @@ impl Presenter {
                 });
             }
             let joints = skin_block.map_or(0, skin_block_offset);
-            rp.set_bind_group(0, bind, &[offset, joints]);
+            // LF5: binding 22 is the previous joint palette, at the same
+            // block offset as binding 7.
+            rp.set_bind_group(0, bind, &[offset, joints, joints]);
             rp.set_vertex_buffer(0, mesh.vertex.slice(..));
+            // LF5: the static 1x pipeline reads the previous positions from
+            // a compact stream; a skinned mesh has no such stream and takes
+            // its previous pose from the palette above.
+            if let Some(prev) = &mesh.prev_vertex {
+                rp.set_vertex_buffer(1, prev.slice(..));
+            }
             rp.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
             // SP63: the fragment `id` output is the vertex stage's flat
             // `draw_id`, which reads `instance_index`; one instance
@@ -1160,7 +1261,7 @@ impl Presenter {
                 &self.sky_pipeline
             };
             rp.set_pipeline(sky_pipeline);
-            rp.set_bind_group(0, &self.fallback_bind, &[0, 0]);
+            rp.set_bind_group(0, &self.fallback_bind, &[0, 0, 0]);
             rp.draw(0..3, 0..1);
         }
         drop(rp);
@@ -1169,14 +1270,47 @@ impl Presenter {
         } else {
             false
         };
-        // QL12: the staged particle batch composites over the lit frame
-        // inside the same encoder, one HDR load pass after the sky, so the
-        // quads land in the picture the blit and the capture read. A frame
-        // that staged no batch records nothing.
+        // FEEL5: the floor blood, over the lit frame and under the sparks.
+        if msaa_pair.is_none() {
+            self.decal_sub
+                .encode_splat_pass(enc, &targets.hdr_view, &targets.depth_view);
+        }
+        // QL12: the staged particle batch composites over the lit frame in one
+        // HDR load pass, so the quads land in the picture the blit and the
+        // capture read. A frame that staged no batch records nothing.
         if look.particles && self.particle_sub.staged_count() > 0 {
             self.encode_particle_pass(enc, targets, look.particle_timestamps);
         }
+        // LF14: the sword ribbon composites in its own HDR load pass after the
+        // sparks; a frame that staged no strip records nothing.
+        if self.trail_sub.has_draw() {
+            self.encode_trail_pass(enc, targets);
+        }
         sky_timed
+    }
+
+    /// The staged sword ribbon as its own render pass after forward: loads the
+    /// HDR target and draws one triangle strip per busy slot, with no depth
+    /// attachment (the pipeline's declared shape) and no timer slot of its
+    /// own. Caller: `encode_forward` above.
+    fn encode_trail_pass(&self, enc: &mut wgpu::CommandEncoder, targets: &Targets) {
+        let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lf14-trail"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &targets.hdr_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.trail_sub.encode_draw(&mut rp);
     }
 
     /// The staged particle batch as its own render pass after forward: loads
@@ -1234,7 +1368,12 @@ impl Presenter {
         let timed = timestamps.is_some();
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ra1-sky"),
-            color_attachments: &[keep(&targets.hdr_view), keep(&targets.id_view)],
+            color_attachments: &[
+                keep(&targets.hdr_view),
+                keep(&targets.id_view),
+                // LF5: load the geometry's move; sky pixels write zero.
+                keep(&targets.motion_view),
+            ],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &targets.depth_view,
                 depth_ops: None,
@@ -1245,7 +1384,7 @@ impl Presenter {
             multiview_mask: None,
         });
         rp.set_pipeline(&self.sky_pipeline);
-        rp.set_bind_group(0, &self.fallback_bind, &[0, 0]);
+        rp.set_bind_group(0, &self.fallback_bind, &[0, 0, 0]);
         rp.draw(0..3, 0..1);
         timed
     }
@@ -1418,7 +1557,8 @@ impl Presenter {
         // forward uniform and the RL9 fog inverse all read its built
         // view-projection instead of building the matrix again.
         let frame = effective_camera(list, width, height)?;
-        let (cam_bytes, light_bytes) = self.stage_frame(list, &frame)?;
+        let staged = self.stage_frame(list, &frame)?;
+        let (cam_bytes, light_bytes) = (staged.cam_bytes, staged.light_bytes);
         self.frame_waits = FrameWaits::default();
         let look = self.encode_look_passes(&frame)?;
         self.ensure_targets(width, height);
@@ -1454,11 +1594,26 @@ impl Presenter {
         // the live frame, so the capture and the window agree.
         let gtao_run = self.gtao_live_plan(true, width, height);
         let particles = self.stage_fight_fx(&frame)?; // FEEL5: the capture shows them too
+        self.stage_fight_splats(&frame)?; // FEEL5: and the blood on the floor
         {
             let targets = self.targets.as_ref().expect("ensured above");
             let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
-            self.encode_ao_field(&mut enc, targets, list, &frame, gtao_run, None)?;
-            self.encode_forward(&mut enc, targets, list, ForwardLook::blocking(particles));
+            self.encode_ao_field(
+                &mut enc,
+                targets,
+                list,
+                &frame,
+                gtao_run,
+                None,
+                staged.order(),
+            )?;
+            self.encode_forward(
+                &mut enc,
+                targets,
+                list,
+                ForwardLook::blocking(particles),
+                staged.order(),
+            );
             // RL9 depth-readback seam: this frame's depth feeds the fog
             // tranche below (same queue order, so the copy sees the
             // forward pass writes).
@@ -1537,9 +1692,12 @@ impl Presenter {
             });
         {
             let targets = self.targets.as_ref().expect("ensured above");
+            // LF5c: resolve the frame the forward submit wrote, before the
+            // blit composites it; off records nothing and reads `hdr_view`.
+            self.taa.encode(&self.queue, &mut blit_enc, width, height);
             self.encode_blit(
                 &mut blit_enc,
-                &targets.blit_bind,
+                self.blit_bind_for(targets),
                 &targets.out_view,
                 &self.twin_pipeline,
                 None,
@@ -1575,6 +1733,14 @@ impl Presenter {
                     );
                 }
             }
+            // The debug line pass rides the same after-blit view, one draw and
+            // no depth; the off switch or an empty batch keeps the frame equal.
+            self.encode_debug_lines(
+                &mut blit_enc,
+                frame.aspect,
+                OUTPUT_FORMAT,
+                &targets.out_view,
+            );
             blit_enc.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
                     texture: &targets.out_texture,
@@ -1801,46 +1967,6 @@ pub(super) fn skin_block_offset(block: u8) -> u32 {
     u32::from(block) * SKIN_BLOCK_STRIDE
 }
 
-/// EG38 sorted submits plus CPU sphere cull over cached groups and the ring.
-/// Caller: `eg38_submit_order` below (tests only).
-#[cfg(test)]
-pub(super) fn eg38_sort_key(item: &DrawItem) -> (u64, u64, u64) {
-    let tex = item.base_color.map(|k| k.id).unwrap_or(u64::MAX);
-    (item.material_id(), tex, item.mesh.id)
-}
-
-/// Sorted order over `buf` (same twice; pipeline-adjacent), culled with spheres.
-/// Caller: tests only; they pass spheres to prove the cull.
-#[cfg(test)]
-pub(super) fn eg38_submit_order<'a>(
-    list: &DrawList,
-    spheres: Option<&[[f32; 4]]>,
-    planes: Option<&[[f32; 4]; 6]>,
-    buf: &'a mut [usize; MAX_DRAWS_PER_FRAME],
-) -> &'a [usize] {
-    let n = list.items.len().min(MAX_DRAWS_PER_FRAME);
-    for (i, s) in buf[..n].iter_mut().enumerate() {
-        *s = i;
-    }
-    buf[..n].sort_by_key(|&d| eg38_sort_key(&list.items[d]));
-    if let (Some(sp), Some(pl)) = (spheres, planes) {
-        let mut w = 0;
-        for r in 0..n {
-            let d = buf[r];
-            let keep = sp
-                .get(d)
-                .is_some_and(|s| crate::draw::sphere_visible_cpu([s[0], s[1], s[2]], s[3], pl));
-            if keep {
-                buf[w] = d;
-                w += 1;
-            }
-        }
-        &buf[..w]
-    } else {
-        &buf[..n]
-    }
-}
-
 /// RL32 sort key over one draw: (pipeline, material, mesh, depth, stable).
 /// Pipeline is the shared compiled-structure key (lobes 0 plus slot mask);
 /// depth is 0 for opaque today (no per-draw depth until RL60 carries a
@@ -1877,41 +2003,6 @@ pub(super) fn rl32_submit_order<'a>(
         rl32_sort_key(&list.items[d], u64::try_from(d).unwrap_or(u64::MAX))
     });
     &buf[..n]
-}
-
-/// Inward frustum planes from a v1 camera via clip-row extraction.
-/// None on a bad camera. Caller: tests only.
-#[cfg(test)]
-pub(super) fn eg38_frustum_planes(cam: &v1::Camera) -> Option<[[f32; 4]; 6]> {
-    let c = cam.view_proj().ok()?.to_cols_array();
-    let row = |i: usize| [c[i], c[4 + i], c[8 + i], c[12 + i]];
-    let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
-    let comb = |a: [f32; 4], b: [f32; 4], s: f32| {
-        [
-            a[0] + b[0] * s,
-            a[1] + b[1] * s,
-            a[2] + b[2] * s,
-            a[3] + b[3] * s,
-        ]
-    };
-    // DirectX 0..1 depth: near is row 2, far is row 3 minus row 2.
-    let raw = [
-        comb(r3, r0, 1.0),
-        comb(r3, r0, -1.0),
-        comb(r3, r1, 1.0),
-        comb(r3, r1, -1.0),
-        r2,
-        comb(r3, r2, -1.0),
-    ];
-    let mut out = [[0.0f32; 4]; 6];
-    for (i, p) in raw.iter().enumerate() {
-        let l = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-        if l < 1e-9 || !l.is_finite() {
-            return None;
-        }
-        out[i] = [p[0] / l, p[1] / l, p[2] / l, p[3] / l];
-    }
-    Some(out)
 }
 
 pub(super) fn uniform_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
@@ -2119,6 +2210,17 @@ pub(super) const FORWARD_VERTEX_STRIDE: u64 = 48;
 /// Units bytes from vertex start. Determinism: fixed layout, never hashed.
 /// Caller: `forward_pipeline` below.
 pub(super) const FORWARD_TANGENT_OFFSET: u64 = 32;
+/// LF5 previous-position stride in bytes: one compact `vec3` (location 6),
+/// a stream apart from the lighting vertex. Units bytes per vertex.
+/// Determinism fixed layout, never hashed.
+/// Caller: `forward_pipeline` below plus `Presenter::pack_mesh`.
+pub(super) const PREV_POSITION_STRIDE: u64 = 12;
+/// Vertex attribute of the LF5 previous-position stream: `VPrev` location 6.
+const PREV_POSITION_ATTRIBUTES: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+    format: wgpu::VertexFormat::Float32x3,
+    offset: 0,
+    shader_location: 6,
+}];
 /// Group 0 binding of the tangent-space normal map sampled by `fs`/`fs_skinned`.
 /// Matches `shaders/forward.wgsl` `normal_map` at 17.
 /// Units binding index. Determinism: fixed layout, never hashed.
@@ -2302,15 +2404,48 @@ fn forward_pipeline_for(
         immediate_size: 0,
     });
     let targets = color_target_states(formats);
-    let (entry, stride, attributes): (&str, u64, &[wgpu::VertexAttribute]) = if skinned {
-        (
+    // LF5: the 1x forward carries the motion target as its third
+    // attachment, so only that shape reads the previous position stream.
+    // The MSAA twin keeps HDR alone and its old vertex entries.
+    let motion = formats.len() > 2;
+    let (entry, stride, attributes): (&str, u64, &[wgpu::VertexAttribute]) = match (skinned, motion)
+    {
+        (false, true) => (
+            "vs_motion",
+            FORWARD_VERTEX_STRIDE,
+            &STATIC_VERTEX_ATTRIBUTES,
+        ),
+        (true, true) => (
+            "vs_skinned_motion",
+            SKINNED_VERTEX_STRIDE,
+            &SKINNED_VERTEX_ATTRIBUTES,
+        ),
+        (true, false) => (
             "vs_skinned",
             SKINNED_VERTEX_STRIDE,
             &SKINNED_VERTEX_ATTRIBUTES,
-        )
-    } else {
+        ),
         // Stride matches `MeshData::vertex_bytes`: pos + normal + uv + tangent.
-        ("vs", FORWARD_VERTEX_STRIDE, &STATIC_VERTEX_ATTRIBUTES)
+        (false, false) => ("vs", FORWARD_VERTEX_STRIDE, &STATIC_VERTEX_ATTRIBUTES),
+    };
+    let vertex_buffers = [
+        Some(wgpu::VertexBufferLayout {
+            array_stride: stride,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes,
+        }),
+        // LF5: the previous positions ride a compact vec3 stream of their
+        // own, never a second copy of the lighting vertex.
+        Some(wgpu::VertexBufferLayout {
+            array_stride: PREV_POSITION_STRIDE,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &PREV_POSITION_ATTRIBUTES,
+        }),
+    ];
+    let buffers = if motion && !skinned {
+        &vertex_buffers[..2]
+    } else {
+        &vertex_buffers[..1]
     };
     device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
         label: Some(if skinned {
@@ -2322,11 +2457,7 @@ fn forward_pipeline_for(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some(entry),
-            buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: stride,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes,
-            })],
+            buffers,
             compilation_options: guard_options(constants),
         },
         fragment: Some(wgpu::FragmentState {
@@ -2556,6 +2687,7 @@ pub(super) fn map_readback(
 
 /// WIN1 helper: build a `'static` surface from an owned window. The
 /// surface keeps the window alive.
+#[cfg(feature = "window")]
 pub fn create_surface(
     instance: &wgpu::Instance,
     window: Arc<winit::window::Window>,
@@ -2602,12 +2734,18 @@ mod cq7_present_alloc_tests {
         };
         let mut scratch = vec![0; 256];
         let warmed_cap = scratch.capacity();
+        // Every draw's bound covers the scene target, so the cull keeps the
+        // whole list and the measured slice is the same 120 frames.
+        let target = scene.camera.target;
+        let bounds = crate::present::gpu_present::submit_cull::DrawBounds {
+            spheres: [[target.x, target.y, target.z, 2.0]; MAX_DRAWS_PER_FRAME],
+            cullable: [true; MAX_DRAWS_PER_FRAME],
+        };
         let ((), count) = measure(|| {
             for _ in 0..120u32 {
                 let frame = effective_camera(&list, 160, 120).expect("camera builds");
-                let mut buf = [0usize; MAX_DRAWS_PER_FRAME];
-                let order = eg38_submit_order(&list, None, None, &mut buf);
-                assert_eq!(order.len(), list.items.len());
+                let (_, submitted) = live_submit_order(&list, &bounds, frame.built_view_proj);
+                assert_eq!(submitted, list.items.len());
                 let (cam_u, light_u, _) = crate::v1::build_uniforms_with_view_proj(
                     &frame,
                     frame.built_view_proj,
@@ -2634,66 +2772,6 @@ mod cq7_present_alloc_tests {
             count.calls, 0,
             "steady present-submit slice must not allocate"
         );
-    }
-}
-
-#[cfg(test)]
-mod eg38_tests {
-    use super::*;
-
-    fn eg38_item(mesh: u64, tex: Option<u64>, rough: f32) -> DrawItem {
-        DrawItem {
-            mesh: MeshKey::new(mesh, [0x11; 32]),
-            material: crate::v1::PbrMaterial {
-                base_color: [0.5, 0.5, 0.5],
-                metallic: 0.0,
-                roughness: rough,
-                exposure: 1.0,
-            },
-            base_color: tex.map(|t| TextureKey::new(t, [0x77; 32])),
-            normal_map: None,
-            orm: None,
-            emissive: None,
-        }
-    }
-
-    #[test]
-    fn draw_sort_submit_order_is_stable_and_culls_outside_sphere() {
-        let scene = crate::v1::default_scene(160, 120).expect("scene valid");
-        let list = DrawList {
-            camera: scene.camera.clone(),
-            light: scene.light.clone(),
-            items: vec![
-                eg38_item(3, Some(7), 0.5),
-                eg38_item(1, None, 0.9),
-                eg38_item(2, Some(7), 0.5),
-                eg38_item(4, Some(9), 0.5),
-            ],
-        };
-        let mut a = [0usize; MAX_DRAWS_PER_FRAME];
-        let mut b = [0usize; MAX_DRAWS_PER_FRAME];
-        let first = eg38_submit_order(&list, None, None, &mut a).to_vec();
-        let second = eg38_submit_order(&list, None, None, &mut b).to_vec();
-        assert_eq!(first, second, "same order twice");
-        let i0 = first.iter().position(|&d| d == 0).expect("draw 0 submits");
-        let i2 = first.iter().position(|&d| d == 2).expect("draw 2 submits");
-        assert_eq!(i0.abs_diff(i2), 1, "same pipeline adjacent: {first:?}");
-        let planes = eg38_frustum_planes(&scene.camera).expect("planes valid");
-        let fwd = (scene.camera.target - scene.camera.eye).normalize();
-        let mid = (scene.camera.eye + scene.camera.target) * 0.5;
-        let behind = scene.camera.eye - fwd * 5.0;
-        let pair = DrawList {
-            camera: scene.camera.clone(),
-            light: scene.light.clone(),
-            items: vec![eg38_item(1, Some(7), 0.5), eg38_item(2, Some(7), 0.5)],
-        };
-        let spheres = [
-            [mid.x, mid.y, mid.z, 0.1],
-            [behind.x, behind.y, behind.z, 0.1],
-        ];
-        let mut c = [0usize; MAX_DRAWS_PER_FRAME];
-        let kept = eg38_submit_order(&pair, Some(&spheres), Some(&planes), &mut c).to_vec();
-        assert_eq!(kept, vec![0], "outside sphere is not submitted");
     }
 }
 
@@ -2853,16 +2931,17 @@ mod forward_id_attachment_tests {
     fn forward_id_attachment_count_is_two() {
         assert_eq!(
             super::forward_color_target_count(),
-            2,
-            "forward pass carries HDR plus the R32Uint id target"
+            3,
+            "forward pass carries HDR, the R32Uint id target and the motion target"
         );
         assert_eq!(
             super::forward_color_target_formats(),
             [
                 crate::present::gpu_present::HDR_FORMAT,
-                crate::present::gpu_present::frame::ID_TARGET_FORMAT
+                crate::present::gpu_present::frame::ID_TARGET_FORMAT,
+                crate::present::gpu_present::MOTION_FORMAT
             ],
-            "attachment order is HDR then id"
+            "attachment order is HDR, id, then motion"
         );
         assert_eq!(
             crate::present::gpu_present::frame::ID_TARGET_FORMAT,
@@ -2878,198 +2957,7 @@ mod forward_id_attachment_tests {
 }
 
 #[cfg(test)]
-mod eg11_live_sun_tests {
-    use super::*;
-
-    fn set_sun(on: bool) {
-        super::FORWARD_SUN_ENABLED.store(on, core::sync::atomic::Ordering::Relaxed);
-    }
-
-    #[test]
-    fn sun_depth_switch_defaults_on_and_off_restores() {
-        // Caller: `encode_forward` above (the EG11 sun depth map).
-        // Behavior: the switch defaults on, so live frames record the map
-        // the row Accept measures; off reads back off and on restores it.
-        set_sun(true);
-        assert!(forward_sun_enabled(), "switch defaults on");
-        set_sun(false);
-        assert!(!forward_sun_enabled(), "off reads back off");
-        set_sun(true);
-        assert!(forward_sun_enabled(), "switch restores on");
-    }
-
-    #[test]
-    fn encode_forward_consults_the_switch_before_the_cached_sun_encode() {
-        // Caller: `encode_forward` above.
-        // Behavior: the live forward submit reads the switch and then
-        // records the cached EG11 map (`sun_sub`), while the skip branch
-        // stores zero. Fails if the live call site is gated off or the
-        // encode is dropped, which is exactly the blocker EG11 was stuck on
-        // (an unwired sun API and a constant-zero `arena per-pass shadow`).
-        let src = include_str!("submit.rs");
-        let at = src
-            .find("fn encode_forward")
-            .expect("forward submit exists");
-        let body = &src[at..];
-        let gate = body
-            .find("forward_sun_enabled()")
-            .expect("live path consults the switch");
-        let encode = body
-            .find("self.sun_sub.encode(")
-            .expect("EG11 cached encode on the live path");
-        assert!(gate < encode, "switch runs before the depth encode");
-        assert!(
-            body.contains("sun_last_us_store(0)"),
-            "skip records zero shadow time"
-        );
-    }
-
-    #[test]
-    fn live_frame_encodes_the_sun_depth_map() {
-        // Caller: `encode_forward` above; EG11 Accept, "`arena per-pass`
-        // shadow above 0 ms on live frames".
-        // Behavior: one offscreen live frame (the same encode path the
-        // windowed arena runs) records the row's 2048 sun depth map from the
-        // live `sun_sub` pair (the half arm can run it at 1024), so the receipt
-        // carries a real cost and 0 validation errors. Before the live call was
-        // wired the slot stayed a constant zero (newest capture:
-        // `shadow=0.000ms`).
-        let Ok(mut presenter) = Presenter::init_offscreen() else {
-            eprintln!("SKIPPED live sun depth map: no wgpu adapter");
-            return;
-        };
-        let key = MeshKey::new(1, [0xB7; 32]);
-        presenter
-            .upload_mesh(key, &v1::cube())
-            .expect("cube uploads");
-        presenter.resize(160, 120).expect("valid size applies");
-        let scene = v1::default_scene(160, 120).expect("default scene is valid");
-        let list = DrawList {
-            camera: scene.camera,
-            light: scene.light,
-            items: vec![DrawItem {
-                mesh: key,
-                material: scene.material,
-                base_color: None,
-                normal_map: None,
-                orm: None,
-                emissive: None,
-            }],
-        };
-        let out = presenter
-            .render_offscreen(&list)
-            .expect("live frame renders");
-        assert!(
-            out.receipt.is_clean(),
-            "validation errors must be 0, got {:?}",
-            out.receipt
-        );
-        let us = out.receipt.shadow_submit_us;
-        eprintln!("live sun depth map: shadow_submit_us={us}");
-        assert!(
-            us > 0,
-            "live frame records the EG11 sun depth map, shadow_submit_us={us}"
-        );
-        // P2P: the sample is a measurement, not a constant. A second frame
-        // keeps the map (no per-frame texture plus pipeline build) and stays
-        // inside the same order of magnitude.
-        assert!(
-            out.receipt.presented,
-            "the frame presented with the sun depth map recorded"
-        );
-        assert!(
-            presenter.frames_presented() >= 1,
-            "the cached map did not block the frame"
-        );
-    }
-
-    /// A live window receipt shape: every row 0 except the shadow slot, the
-    /// value `live_shadow_row` is handed.
-    fn live_receipt(shadow_submit_us: u64) -> FrameReceipt {
-        FrameReceipt {
-            width: 160,
-            height: 120,
-            draws: 1,
-            validation_errors: 0,
-            generation: 0,
-            presented: true,
-            adapter: String::new(),
-            driver: String::new(),
-            mesh_count: 1,
-            texture_count: 0,
-            mesh_high_water: 1,
-            texture_high_water: 0,
-            mesh_evicted: 0,
-            texture_evicted: 0,
-            evicted_mesh_id: None,
-            evicted_texture_id: None,
-            look_passes: 0,
-            look_validation_errors: 0,
-            ibl_passes: 0,
-            ibl_validation_errors: 0,
-            fog_passes: 0,
-            fog_validation_errors: 0,
-            fog_submit_us: 0,
-            gtao_passes: 0,
-            gtao_validation_errors: 0,
-            gtao_submit_us: 0,
-            sky_submit_us: 0,
-            layer_submit_us: 0,
-            particle_submit_us: 0,
-            decal_submit_us: 0,
-            ibl_submit_us: 0,
-            shadow_submit_us,
-        }
-    }
-
-    #[test]
-    fn window_receipt_posts_the_live_sun_depth_row() {
-        // Caller: `render_surface` above through `live_shadow_row`.
-        // Behavior: the live frame's receipt carries the us the sun depth pass
-        // recorded, so `arena per-pass shadow` reads above 0 ms on live frames
-        // (EG11 Accept) instead of the receipt builder's constant 0; a frame
-        // whose encode skipped (switch off or a bad sun direction) posts 0 and
-        // never the reading from the frame before.
-        let hit = live_shadow_row(live_receipt(0), 1_500);
-        assert_eq!(hit.shadow_submit_us, 1_500, "live frame posts the pass");
-        assert_eq!(
-            hit.per_pass_us()[7],
-            ("shadow", 1_500),
-            "the per-pass table's shadow row"
-        );
-        assert_eq!(hit.draws, 1, "the other rows ride through untouched");
-        let skip = live_shadow_row(live_receipt(1_500), 0);
-        assert_eq!(skip.shadow_submit_us, 0, "a skip overwrites, never stale");
-        assert_eq!(skip.per_pass_us()[7], ("shadow", 0), "a skip posts 0 ms");
-    }
-
-    #[test]
-    fn render_surface_posts_the_live_sun_row_on_every_presenting_arm() {
-        // Caller: `render_surface` above. Wiring check over the shipped
-        // source: the window's two presenting arms (Success and Suboptimal)
-        // both hand the live receipt through the helper and read the store
-        // `encode_forward` writes, so a window frame cannot keep the builder's
-        // 0 shadow row. The pixel leg is the window run (no adapter here).
-        let src = include_str!("submit.rs");
-        let at = src
-            .find("pub fn render_surface")
-            .expect("surface submit exists");
-        let end = at
-            + src[at..]
-                .find("\n    fn reconfigure_surface")
-                .expect("surface body ends");
-        let body = &src[at..end];
-        assert_eq!(
-            body.matches("live_shadow_row(").count(),
-            2,
-            "both presenting arms post the live sun row"
-        );
-        assert!(
-            body.contains("sun_last_us()"),
-            "the row reads the live store"
-        );
-    }
-}
+mod sun_live_tests;
 
 #[cfg(test)]
 mod eg8_capture_sky_tests {
@@ -3125,8 +3013,15 @@ mod eg8_capture_sky_tests {
         // differ (a pixel change, never the row name), while the off frame x2
         // is byte-identical. Before this landing the twin passed `false` to
         // `encode_forward` for every frame, so the pair was identical.
-        let Ok(mut presenter) = Presenter::init_offscreen() else {
-            eprintln!("SKIPPED capture sky pair: no wgpu adapter");
+        let probe = Presenter::init_offscreen().map_err(|error| match error {
+            crate::present::PresentError::NoAdapter => {
+                crate::test_gpu::NoAdapter("no wgpu adapter on this machine".into())
+            }
+            other => panic!("presenter init failed (must fail loudly): {other}"),
+        });
+        let Some(mut presenter) =
+            crate::test_gpu::require_or_skip("capture_twin_sky_pair_differs_and_repeats", probe)
+        else {
             return;
         };
         let key = MeshKey::new(3, [0xE8; 32]);

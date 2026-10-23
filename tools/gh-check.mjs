@@ -66,6 +66,27 @@ export const okCmd = (cmd) => /^cargo (check|test|clippy) /.test(cmd) && !/[&;|`
 export const words = (s) => (String(s).match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((w) => w.replace(/^(["'])(.*)\1$/, "$2"));
 
 export const DEFAULT_BUDGET_S = 100;
+// Printed by --help: every helper asks for the flags, so they are one command
+// away instead of a read of this file.
+export const USAGE = [
+  "gh-check: run ONE cargo check|test|clippy line on a GitHub runner (or this PC) against your working tree.",
+  "",
+  "  node tools/gh-check.mjs [flags] cargo <check|test|clippy> <a cargo line>",
+  "  node tools/gh-check.mjs --wait wip-xxxx [--budget <s>]   pick up a check that was still running",
+  "",
+  "Flags (all before the cargo word):",
+  "  --budget <s>     how long one call waits (default 100, max 1740). A short call returns exit 3 and a --wait line.",
+  "  --only <paths>   build HEAD plus just these comma-separated paths; other writers' dirty files stay out",
+  "  --fresh          run again instead of returning the kept result",
+  "  --remote-only    never fall back to this PC (exit 2 instead)",
+  "  --local          run on this PC in the shared compile pool, no GitHub",
+  "  --wait <job>     read the result of a check an earlier call left running",
+  "",
+  "Exit: 0 pass, 1 fail, 2 could not run, 3 still running (not a failure). OpenCode shows every",
+  "non-zero as 'Exited with code 1', so read the last line, not the number.",
+  "",
+  "Heavy work belongs on the runner; --local is the override for a line that needs this PC.",
+].join("\n");
 // node tools/gh-check.mjs [--budget <s>] [--remote-only | --local] [--fresh] [--only <path,path>] cargo <check|test|clippy> ...   |   --wait <job> [--budget <s>]
 export const parseArgs = (argv, env = {}) => {
   const out = { cmd: "", wait: null, mode: "auto", fresh: false, only: null, budget: Number(env.GH_CHECK_BUDGET) >= 1 ? Math.min(Number(env.GH_CHECK_BUDGET), 1740) : DEFAULT_BUDGET_S, error: null };
@@ -92,7 +113,7 @@ export const parseArgs = (argv, env = {}) => {
 // Cargo features that need a GPU, a window, a sound device or Windows itself (render `window`, game `app`, editor `ui`, audio
 // `device`): the Linux runner cannot build them, the Windows runner can. tools/gh-check.test.mjs checks this list against every
 // Cargo.toml.
-export const LOCAL_FEATURES = new Set(["window", "app", "ui", "device"]);
+export const LOCAL_FEATURES = new Set(["window", "app", "ui", "device", "gpu"]);
 // A test filter or target naming one of these is a GPU or window test: only the PC has an adapter and a desktop (runners skip
 // such tests and still "pass").
 const GPU_WORD = /gpu|window|wgpu|winit|swapchain|adapter|vulkan|dx12/i;
@@ -618,6 +639,12 @@ const mirrorParent = () => {
 // HTTP 408). With HAVE the next push sends only what changed since. One local pusher moves it at a time (a lock); ci.yml runs on main only.
 const HAVE = "refs/gh-check/have";
 export const transient = (why) => /RPC failed|HTTP [45]\d\d|returned error: [45]\d\d|Could not (?:connect|resolve)|timed out|reset by peer|connection reset|hung up|early EOF|unexpected disconnect|cannot lock ref|failed to update ref|remote unpack|unable to write file|could not write pack|index-pack|pack-objects/i.test(String(why));
+// A lost pack race prints a 150-character GitHub object path that reads like a
+// failure and fills the caller's context; the retry line says what happened,
+// and only the last attempt (which throws) keeps git's own words.
+export const pushNote = (why) => /unable to write file|could not write pack|index-pack|pack-objects|remote unpack/i.test(String(why))
+  ? "the mirror lost the pack race (GitHub side); trying again"
+  : `the push failed (${why}); trying again`;
 // Pushes the wip commit; a transient network or ref-lock error is tried again (3 pushes, 2 s and 4 s apart).
 const pushWip = async (commit, id) => {
   const lock = join(WORK, "have.lock"), off = join(WORK, "have.off"); let mine = false;
@@ -634,7 +661,7 @@ const pushWip = async (commit, id) => {
         const rows = String(e.stdout ?? "").split("\n").filter((l) => l.includes("\t")); const bad = (ref) => rows.some((l) => l.startsWith("!") && l.includes(`:${ref}\t`));
         if (rows.some((l) => !l.startsWith("!") && l.includes(`:${wip}\t`))) { if (bad(HAVE)) writeFileSync(off, ""); return; } // the wip branch is there; a refused HAVE is switched off for an hour
         const why = whyLine(e); if (attempt >= 3 || !transient(why)) throw e;
-        console.log(`the push failed (${why}), again in ${2 * attempt} s`); await sleep(2000 * attempt);
+        console.log(`${pushNote(why)} in ${2 * attempt} s`); await sleep(2000 * attempt);
       }
     }
   } finally { if (mine) rmSync(lock, { force: true }); }
@@ -702,15 +729,16 @@ const waitRemote = async (id, budgetMs) => {
 };
 
 export const main = async (argv, env = process.env) => {
+  if (argv.length === 1 && ["--help", "-h", "help"].includes(argv[0])) { console.log(USAGE); return 0; }
   const a = parseArgs(argv, env);
-  if (a.error) { console.log(`refused: ${a.error}`); return 2; }
+  if (a.error) { console.log(`refused: ${a.error}\nnode tools/gh-check.mjs --help lists the flags`); return 2; }
   const budgetMs = a.budget * 1000;
   if (a.wait) {
     const job = loadJob(a.wait);
     const res = await waitRemote(a.wait, budgetMs);
     return job ? afterRemote({ res, cmd: job.cmd, mode: "auto", local: (c) => runLocal(c, console.log, { fresh: a.fresh }), say: console.log }) : res.code;
   }
-  if (!okCmd(a.cmd)) { console.log("refused: give one plain `cargo check|test|clippy ...` command"); return 2; }
+  if (!okCmd(a.cmd)) { console.log("refused: give one plain `cargo check|test|clippy ...` command, such as `node tools/gh-check.mjs cargo test -p engine-net --lib one_filter` (`node tools/gh-check.mjs --help` lists the flags)"); return 2; }
   return route({ cmd: a.cmd, mode: a.only || env.GH_CHECK_DRY ? "remote" : a.mode, remote: (c, os) => startRemote(c, os, budgetMs, a.fresh, a.only), local: (c) => runLocal(c, console.log, { fresh: a.fresh }) });
 };
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main(process.argv.slice(2)).then((c) => process.exit(c));

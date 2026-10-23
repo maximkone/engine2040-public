@@ -426,6 +426,7 @@ impl Default for NetHeal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::TabWatch;
     use crate::dedicated::HeadlessServer;
     use crate::session::{
         decode_input, decode_state, encode_input, encode_state, redundancy_window, send_packet,
@@ -704,6 +705,192 @@ mod tests {
              hash={:016x}",
             ms_to_ticks(100),
             server.checkpoints().last().expect("checkpoint").hash,
+        );
+    }
+
+    /// QN9: a tab hidden for six seconds gets zero page frames. The page's
+    /// prediction is stale by the whole stall, so the first frame back drops the
+    /// session through the supervisor and rejoins it on the same token; the tape
+    /// records the drop and the rejoin, the checkpoints equal authority twice,
+    /// and the receipt names the hidden duration.
+    #[test]
+    fn hidden_tab_stall_drops_and_rejoins_with_equal_checkpoints_x2() {
+        const HZ: u32 = 60;
+        const DROP_AT: u32 = 12;
+        const HIDDEN_MS: u64 = 6_000;
+        const HIDDEN_TICKS: u32 = 360;
+        const RESUME_AT: u32 = DROP_AT + HIDDEN_TICKS;
+        const END: u32 = RESUME_AT + 20;
+        const TOKEN: u64 = 0xB4B;
+
+        // The page's frame clock at session tick `tick`: 60 frames a second.
+        fn frame_ms(tick: u32) -> u64 {
+            u64::from(tick) * 1_000 / u64::from(HZ)
+        }
+
+        let cfg = ArenaConfig {
+            ticks: END + 8,
+            ..config()
+        };
+        let server_sock = crate::session::bind_loopback().expect("server socket");
+        let client_sock = crate::session::bind_loopback().expect("client socket");
+        server_sock.set_nonblocking(true).expect("nonblocking");
+        client_sock.set_nonblocking(true).expect("nonblocking");
+        let server_addr = server_sock.local_addr().expect("server addr");
+        let client_addr = client_sock.local_addr().expect("client addr");
+
+        let mut server = HeadlessServer::new(cfg).expect("server");
+        let mut client = Client::new(cfg, FighterId::new(0).expect("slot 0")).expect("client");
+        let mut tab = TabWatch::new(HZ);
+        let home = server.reclaim_slot(TOKEN).expect("supervised join");
+        assert_eq!(home, 0);
+        let mut predicted: Vec<FighterInput> = Vec::new();
+        let mut seen: Vec<FighterInput> = Vec::new();
+        let mut states_applied = 0u32;
+
+        // Phase 1: a visible tab plays live over loopback, one frame per tick.
+        for step in 0..DROP_AT {
+            assert_eq!(
+                tab.on_frame(frame_ms(step)),
+                None,
+                "a visible tab never stalls"
+            );
+            live_tick(
+                &server_sock,
+                &client_sock,
+                server_addr,
+                client_addr,
+                &mut server,
+                &mut client,
+                &mut seen,
+                &mut states_applied,
+                step,
+                TOKEN,
+                &mut predicted,
+            );
+        }
+        assert!(states_applied > 0, "client must track server truth");
+        assert_eq!(client.checkpoints(), server.checkpoints());
+
+        // Phase 2: the tab hides. Zero page frames for six seconds; the page
+        // cannot report anything, so the server drops the silent seat and the
+        // AI holds it for the whole stall.
+        let plan = server
+            .disconnect_via_supervisor(TOKEN)
+            .expect("hidden stall drop");
+        tab.record_drop();
+        assert_eq!(plan.slot, 0);
+        assert_eq!(plan.token, TOKEN);
+        assert_eq!(plan.attempt, 1);
+        assert_eq!(plan.kind, HealKind::AiTakeover);
+        assert!(!plan.quarantined);
+        assert_eq!(plan.backoff_ms, 100);
+        let mut peak_ai = 0usize;
+        for _ in DROP_AT..RESUME_AT {
+            let (_, _) = server.tick().expect("ai tick");
+            peak_ai = peak_ai.max(server.ai_filled_last_tick());
+        }
+        assert!(
+            peak_ai >= 1,
+            "the hidden seat must AI-fill (peak {peak_ai})"
+        );
+        let applied = server.apply_heal_boundary(u64::from(RESUME_AT));
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].fault_tick, u64::from(DROP_AT));
+        assert_eq!(applied[0].applied_tick, u64::from(RESUME_AT));
+
+        // Phase 3: the tab is visible again. The first frame back is the whole
+        // stall long, and that is what forces the drop and rejoin.
+        let stall_start_ms = frame_ms(DROP_AT - 1);
+        let gap = tab
+            .on_frame(stall_start_ms + HIDDEN_MS)
+            .expect("a hidden stall");
+        assert_eq!(gap.hidden_ms, HIDDEN_MS);
+        assert_eq!(gap.ticks, u64::from(HIDDEN_TICKS));
+        let reclaimed = server.reclaim_slot(TOKEN).expect("rejoin reclaim");
+        assert_eq!(reclaimed, home, "rejoin must reclaim the same seat");
+        tab.record_rejoin();
+        let snapshot = server.resync_via_supervisor(TOKEN).expect("resync");
+        assert_eq!(snapshot.tick, RESUME_AT - 1);
+        let mispredicts = client
+            .resync_from_authority(&snapshot)
+            .expect("resync applies");
+        assert!(
+            mispredicts.is_empty(),
+            "the client predicted no tick the server did not author"
+        );
+        // Checkpoint equality, first proof.
+        assert_eq!(
+            client.checkpoints(),
+            server.checkpoints(),
+            "first equality: the rejoined client holds server truth"
+        );
+
+        // The tape holds the drop and the rejoin: fault, applied boundary and
+        // the recovered digest the resync produced.
+        let healed = client.checkpoints().last().expect("tick").hash;
+        let last_good = server.checkpoints().last().expect("tick").hash;
+        assert_eq!(
+            server.heal_verify_recovery(plan.attempt, last_good, healed),
+            Ok(HealValidation::Recovered)
+        );
+        let tape = server.heal().tape();
+        assert_eq!(tape.len(), 1, "one hidden stall is one tape row");
+        let row = &tape[0];
+        assert_eq!(row.fault_tick, u64::from(DROP_AT));
+        assert_eq!(row.applied_tick, Some(u64::from(RESUME_AT)));
+        assert_eq!(row.kind, HealKind::AiTakeover);
+        assert!(!row.quarantined);
+        assert_eq!(row.before_digest, Some(last_good));
+        assert_eq!(row.after_digest, Some(healed), "the rejoin is on the tape");
+        assert_eq!(row.validation, HealValidation::Recovered);
+
+        // Phase 4: live play resumes on the reclaimed seat to the final tick.
+        predicted.retain(|input| input.tick < RESUME_AT);
+        seen = snapshot.tape.clone();
+        for step in RESUME_AT..END {
+            assert_eq!(tab.on_frame(frame_ms(step)), None, "the tab stays visible");
+            live_tick(
+                &server_sock,
+                &client_sock,
+                server_addr,
+                client_addr,
+                &mut server,
+                &mut client,
+                &mut seen,
+                &mut states_applied,
+                step,
+                TOKEN,
+                &mut predicted,
+            );
+        }
+        client.resimulate();
+        assert_eq!(
+            server.checkpoints().len(),
+            usize::try_from(END).expect("tick count fits")
+        );
+        // Checkpoint equality, second proof.
+        assert_eq!(
+            client.checkpoints(),
+            server.checkpoints(),
+            "second equality: live play after the rejoin still agrees"
+        );
+
+        // The receipt names how long the tab was hidden, which no packet does.
+        let receipt = tab.receipt();
+        assert_eq!(receipt.hidden_total_ms, HIDDEN_MS);
+        assert_eq!(receipt.stalls, 1);
+        assert_eq!(receipt.drops, 1);
+        assert_eq!(receipt.rejoins, 1);
+        assert!(
+            receipt.line().contains("hidden-ms=6000"),
+            "receipt names the hidden duration: {}",
+            receipt.line()
+        );
+        println!(
+            "QN9 hidden stall {} drop_at={DROP_AT} resume_at={RESUME_AT} end={END} \
+             ai_peak={peak_ai} states_applied={states_applied} hash={healed:016x}",
+            receipt.line(),
         );
     }
 

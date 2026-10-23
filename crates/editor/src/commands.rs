@@ -25,11 +25,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use engine_core::Fnv64;
-use engine_material::{MaterialSet, RecordError};
+use engine_material::MaterialSet;
 use engine_scene::component::{Component, ComponentKind};
 use engine_scene::ids::ObjectId;
 use engine_scene::provenance::{Provenance, Source, MAX_PARENTS, MAX_TEXT_LEN, PROVENANCE_VERSION};
-use engine_scene::transform::{Hierarchy, HierarchyError, Transform};
+use engine_scene::transform::{Hierarchy, Transform};
+
+use crate::audit::digest_parts;
+use crate::save::save_to_bytes_at_revision;
 
 /// Kept journal entries per stack; the oldest entry is forgotten first.
 pub const JOURNAL_CAP: usize = 100;
@@ -63,6 +66,11 @@ pub struct Document {
     /// hierarchy may carry entries, remove drops them, undo restores them,
     /// and the save codec writes them in key order so bytes are stable.
     pub components: ComponentTable,
+    /// Painted fracture bonds per node and canonical chunk pair, see
+    /// [`BondTable`]. Same ownership rules as the bindings: a remove drops the
+    /// node's paint and undo restores it. The editor records intent only; the
+    /// destruction owner bakes it through [`bake_bonds`].
+    pub bonds: BondTable,
     /// Node graph for material and VFX authoring; saved in the v4 section.
     pub graph: crate::graph::Graph,
     /// The material table: records in wire order, edited by
@@ -85,6 +93,7 @@ impl Default for Document {
             revision: 0,
             materials: BTreeMap::new(),
             components: ComponentTable::new(),
+            bonds: BondTable::new(),
             graph: crate::graph::Graph::default(),
             material_set: MaterialSet::siege_kit(),
         }
@@ -96,9 +105,13 @@ pub type ComponentTable = BTreeMap<String, BTreeMap<ComponentKind, Component>>;
 
 mod component;
 pub(crate) mod digest;
+pub mod fracture;
 mod selective;
-use component::{stage_remove_component, stage_set_component};
 use digest::artifact_digest;
+pub use fracture::{
+    bake_bonds, bond_pair, BondError, BondPair, BondStrength, BondTable, MAX_BOND_PERMILLE,
+    MIN_BOND_PERMILLE,
+};
 pub use selective::{
     apply_selective_undo, apply_selective_undo_with_meta, undo_select, Conflict, ConflictReason,
     UndoError, UndoPreview,
@@ -176,6 +189,24 @@ pub enum Op {
         /// Kind to remove.
         kind: ComponentKind,
     },
+    /// Paint one fracture bond of a node: the strength as permille of the
+    /// strain the bake chose (`None` clears the paint).
+    ///
+    /// The pair is canonical (`a < b`, both under `MAX_BONDED_CHUNKS`); a bad
+    /// pair is refused with the field named and the document untouched. The
+    /// inverse restores the previous paint, so undo returns the table to its
+    /// exact pre-op bytes. The editor stores intent only: the destruction
+    /// owner bakes it through [`bake_bonds`].
+    SetBond {
+        /// Node carrying the painted bonds.
+        id: ObjectId,
+        /// One chunk of the bond.
+        a: u32,
+        /// The other chunk of the bond; `a != b`.
+        b: u32,
+        /// Painted strength, or [`None`] to clear the paint.
+        strength: Option<BondStrength>,
+    },
     /// Add or replace one material record in [`Document::material_set`] from
     /// its JSON text (see `engine_material::MaterialRecord`).
     ///
@@ -216,6 +247,7 @@ impl Op {
             | Op::SetMaterial { id, .. }
             | Op::SetComponent { id, .. }
             | Op::RemoveComponent { id, .. }
+            | Op::SetBond { id, .. }
             | Op::Reparent { id, .. } => *id,
             // The material-table ops touch no node.
             Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {
@@ -234,6 +266,7 @@ impl Op {
             | Op::SetMaterial { .. }
             | Op::SetComponent { .. }
             | Op::RemoveComponent { .. }
+            | Op::SetBond { .. }
             | Op::PutMaterial { .. }
             | Op::SetMaterialParam { .. }
             | Op::RemoveLastMaterial => ObjectId::NIL,
@@ -371,6 +404,18 @@ pub struct Applied {
     pub effects: Vec<String>,
     /// Document revision after the apply.
     pub revision: u64,
+    /// Content digest of the document before the batch. The monotonic revision
+    /// is excluded, so a counter move alone never reads as a change.
+    pub before_digest: [u8; 32],
+    /// Content digest of the applied state as staged, before any store wrote
+    /// it. Equal to [`after_digest`](Self::after_digest) on every in-memory
+    /// path; the durable path reads the sealed generation back.
+    pub staged_digest: [u8; 32],
+    /// Content digest read back after the write landed: the sealed generation
+    /// on the durable path, the committed document otherwise. A store that
+    /// acked without the staged bytes makes this differ from
+    /// [`staged_digest`](Self::staged_digest).
+    pub after_digest: [u8; 32],
     /// The batch key this receipt answers.
     pub key: u64,
     /// Provenance record: source, provider/model IDs, request and
@@ -450,6 +495,14 @@ pub enum BatchError {
         /// The kind it does not carry.
         kind: ComponentKind,
     },
+    /// A bond paint was refused: bad strength, same chunk twice, a chunk past
+    /// the bake limit, or no such node. Nothing ran.
+    BadBond {
+        /// The node the paint was aimed at.
+        id: ObjectId,
+        /// Why the paint was refused.
+        error: BondError,
+    },
     /// The batch base does not match the document revision; nothing ran.
     StaleRevision {
         /// Current document revision.
@@ -511,6 +564,9 @@ impl fmt::Display for BatchError {
             Self::MissingComponent { id, kind } => {
                 write!(f, "node {id} carries no {kind} component to remove")
             }
+            Self::BadBond { id, error } => {
+                write!(f, "bond paint on {id} refused: {error}")
+            }
             Self::StaleRevision { expected, got } => write!(
                 f,
                 "stale revision: document is at {expected}, batch expects {got}"
@@ -552,6 +608,12 @@ pub struct JournalEntry {
     pub base_revision: u64,
     /// Document revision after the batch.
     pub result_revision: u64,
+    /// Content digest before the batch (see [`Applied::before_digest`]).
+    pub before_digest: [u8; 32],
+    /// Content digest of the applied state as staged.
+    pub staged_digest: [u8; 32],
+    /// Content digest read back after the write landed.
+    pub after_digest: [u8; 32],
     /// Preview lines recorded at apply time.
     pub effects: Vec<String>,
     /// Provenance record, stored as the decoded form of its own encoding
@@ -571,6 +633,28 @@ pub struct JournalEntry {
     /// Every idempotency key folded into this entry (merged groups keep
     /// their members' keys); `keys[0]` repeats the entry [`key`](Self::key).
     pub keys: Vec<u64>,
+}
+
+/// Content digest of a whole document: save bytes at revision zero plus every
+/// material record's canonical text.
+///
+/// The save bytes carry nodes, bindings, components, the graph and the bond
+/// paint but not the material table; without the texts a table-only edit would
+/// digest equal and read back as no effect. Revision zero keeps the monotonic
+/// counter out, so a content-identical batch is still `no_effect` on the next
+/// revision.
+pub fn document_digest(doc: &Document) -> [u8; 32] {
+    let save = save_to_bytes_at_revision(doc, 0);
+    // Length-prefix each record so the save bytes and the table cannot be
+    // confused at their boundary; order is the set's wire order.
+    let mut table = Vec::new();
+    for record in doc.material_set.records() {
+        let text = record.to_text();
+        let len = u64::try_from(text.len()).unwrap_or(u64::MAX);
+        table.extend_from_slice(&len.to_le_bytes());
+        table.extend_from_slice(text.as_bytes());
+    }
+    digest_parts(&[&save, &table])
 }
 
 /// Bounded undo/redo stacks plus the idempotency record.
@@ -791,8 +875,10 @@ pub fn end_group(journal: &mut Journal) -> Option<Applied> {
         inverse.extend(member.inverse.iter().cloned());
     }
     let base_revision = members[0].base_revision;
+    let before_digest = members[0].before_digest;
     let last = &members[members.len() - 1];
     let result_revision = last.result_revision;
+    let after_digest = last.after_digest;
     let provenance = last.provenance.clone();
     let group = journal
         .groups
@@ -806,6 +892,9 @@ pub fn end_group(journal: &mut Journal) -> Option<Applied> {
         inverse_groups,
         base_revision,
         result_revision,
+        before_digest,
+        staged_digest: after_digest,
+        after_digest,
         effects: effects.clone(),
         provenance: provenance.clone(),
         name: frame.name.clone(),
@@ -823,6 +912,9 @@ pub fn end_group(journal: &mut Journal) -> Option<Applied> {
     Some(Applied {
         effects,
         revision: result_revision,
+        before_digest,
+        staged_digest: after_digest,
+        after_digest,
         key: frame.key,
         provenance,
         journal_index: index,
@@ -936,12 +1028,21 @@ pub fn apply_named(
     // (staged inspector commits, inspector auto-edits) always start fresh.
     // Replays above return early and leave the gesture alone.
     seal_coalescing(journal);
+    let before_digest = document_digest(doc);
     let staged = stage(doc, batch)?;
     let result_revision = doc.revision + 1;
     // Parents name earlier receipts before this entry lands, so the new
     // record links onto every touched object's chain.
     let provenance = build_record(batch, result_revision, journal);
-    Ok(commit_staged(doc, journal, batch, meta, staged, provenance))
+    Ok(commit_staged(
+        doc,
+        journal,
+        batch,
+        meta,
+        staged,
+        provenance,
+        before_digest,
+    ))
 }
 
 /// Undo the newest applied batch as a new revision and queue the entry for
@@ -950,14 +1051,17 @@ pub fn apply_named(
 pub fn undo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
     seal_coalescing(journal);
     let entry = journal.past.pop()?;
+    let before_digest = document_digest(doc);
     let mut tree = doc.hierarchy.clone();
     let mut materials = doc.materials.clone();
     let mut components = doc.components.clone();
+    let mut bonds = doc.bonds.clone();
     let mut material_set = doc.material_set.clone();
     if apply_ops(
         &mut tree,
         &mut materials,
         &mut components,
+        &mut bonds,
         &mut material_set,
         &entry.inverse,
     )
@@ -969,6 +1073,7 @@ pub fn undo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
     doc.hierarchy = tree;
     doc.materials = materials;
     doc.components = components;
+    doc.bonds = bonds;
     doc.material_set = material_set;
     doc.revision += 1;
     journal.future.push(entry);
@@ -977,8 +1082,12 @@ pub fn undo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
     }
     let index = journal.future.len() - 1;
     let entry = &journal.future[index];
+    let after_digest = document_digest(doc);
     let receipt = Applied {
         revision: doc.revision,
+        before_digest,
+        staged_digest: after_digest,
+        after_digest,
         effects: vec![format!(
             "undo batch key {} ({} inverse ops)",
             entry.key,
@@ -997,14 +1106,17 @@ pub fn undo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
 pub fn redo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
     seal_coalescing(journal);
     let entry = journal.future.pop()?;
+    let before_digest = document_digest(doc);
     let mut tree = doc.hierarchy.clone();
     let mut materials = doc.materials.clone();
     let mut components = doc.components.clone();
+    let mut bonds = doc.bonds.clone();
     let mut material_set = doc.material_set.clone();
     if apply_ops(
         &mut tree,
         &mut materials,
         &mut components,
+        &mut bonds,
         &mut material_set,
         &entry.forward,
     )
@@ -1016,6 +1128,7 @@ pub fn redo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
     doc.hierarchy = tree;
     doc.materials = materials;
     doc.components = components;
+    doc.bonds = bonds;
     doc.material_set = material_set;
     doc.revision += 1;
     journal.past.push(entry);
@@ -1024,8 +1137,12 @@ pub fn redo(doc: &mut Document, journal: &mut Journal) -> Option<Applied> {
     }
     let index = journal.past.len() - 1;
     let entry = &journal.past[index];
+    let after_digest = document_digest(doc);
     let receipt = Applied {
         revision: doc.revision,
+        before_digest,
+        staged_digest: after_digest,
+        after_digest,
         effects: entry.effects.clone(),
         key: entry.key,
         provenance: entry.provenance.clone(),
@@ -1132,372 +1249,8 @@ pub(crate) fn bound_to(text: &str, max: usize) -> String {
     text[..end].to_owned()
 }
 
-/// Staged batch: the resulting tree, its inverse ops and its preview lines.
-struct Staged {
-    tree: Hierarchy,
-    /// Resulting material bindings (staged beside the tree, committed with it).
-    materials: BTreeMap<String, MaterialName>,
-    /// Resulting components (staged beside the tree, committed with it).
-    components: ComponentTable,
-    /// Resulting material table (staged beside the tree, committed with it).
-    material_set: MaterialSet,
-    inverse: Vec<Op>,
-    /// Per-forward-op inverse groups in forward order; flattened (reversed)
-    /// into `inverse` above. Stored on the journal entry for selective undo.
-    per_op: Vec<Vec<Op>>,
-    effects: Vec<String>,
-}
-
-/// Revision gate plus per-op staging on a private copy. The caller commits
-/// the tree only after every op succeeds, which keeps batches all-or-nothing.
-fn stage(doc: &Document, batch: &Batch) -> Result<Staged, BatchError> {
-    if batch.base_revision != doc.revision {
-        return Err(BatchError::StaleRevision {
-            expected: doc.revision,
-            got: batch.base_revision,
-        });
-    }
-    let mut tree = doc.hierarchy.clone();
-    let mut materials = doc.materials.clone();
-    let mut components = doc.components.clone();
-    let mut material_set = doc.material_set.clone();
-    let mut per_op_inverse = Vec::with_capacity(batch.ops.len());
-    let mut effects = Vec::with_capacity(batch.ops.len());
-    for op in &batch.ops {
-        let (inverse, line) = apply_one(
-            &mut tree,
-            &mut materials,
-            &mut components,
-            &mut material_set,
-            op,
-        )?;
-        per_op_inverse.push(inverse);
-        effects.push(line);
-    }
-    // Undo runs last op first, so reverse the per-op inverses.
-    let inverse = per_op_inverse.iter().rev().flatten().cloned().collect();
-    Ok(Staged {
-        tree,
-        materials,
-        components,
-        material_set,
-        inverse,
-        per_op: per_op_inverse,
-        effects,
-    })
-}
-
-/// Run staged ops without recording (undo/redo internals). Atomic by the
-/// same rule: the caller swaps the tree in only on full success.
-pub(crate) fn apply_ops(
-    tree: &mut Hierarchy,
-    materials: &mut BTreeMap<String, MaterialName>,
-    components: &mut ComponentTable,
-    material_set: &mut MaterialSet,
-    ops: &[Op],
-) -> Result<(), BatchError> {
-    for op in ops {
-        apply_one(tree, materials, components, material_set, op).map(|_| ())?;
-    }
-    Ok(())
-}
-
-/// Stage one op, returning its inverse ops plus its preview line.
-///
-/// Inverses capture pre-op state so undo restores parents, locals, material
-/// bindings and material records exactly (bit-for-bit), even though
-/// reparent/remove recompute poses in flight.
-fn apply_one(
-    tree: &mut Hierarchy,
-    materials: &mut BTreeMap<String, MaterialName>,
-    components: &mut ComponentTable,
-    material_set: &mut MaterialSet,
-    op: &Op,
-) -> Result<(Vec<Op>, String), BatchError> {
-    match op {
-        Op::Insert { id, parent, local } => stage_insert(tree, op, *id, *parent, *local),
-        Op::Remove { id } => stage_remove(tree, materials, components, op, *id),
-        Op::SetComponent { id, component } => {
-            stage_set_component(tree, components, *id, *component)
-        }
-        Op::RemoveComponent { id, kind } => stage_remove_component(tree, components, *id, *kind),
-        Op::SetLocal { id, local } => stage_set_local(tree, op, *id, *local),
-        Op::Reparent { id, new_parent } => stage_reparent(tree, op, *id, *new_parent),
-        Op::SetMaterial { id, material } => stage_set_material(tree, materials, *id, *material),
-        Op::PutMaterial { text } => stage_put_material(material_set, text),
-        Op::SetMaterialParam {
-            material,
-            path,
-            value,
-        } => stage_set_material_param(material_set, material, path, value),
-        Op::RemoveLastMaterial => stage_remove_last_material(material_set),
-    }
-}
-
-/// Stage an insert. Fresh ids have no children yet, so a plain remove inverts.
-fn stage_insert(
-    tree: &mut Hierarchy,
-    op: &Op,
-    id: ObjectId,
-    parent: ObjectId,
-    local: Transform,
-) -> Result<(Vec<Op>, String), BatchError> {
-    tree.insert(id, parent, local)
-        .map_err(|error| map_error(error, op))?;
-    let line = format!("insert {id} under {parent} local {}", fmt_local(&local));
-    Ok((vec![Op::Remove { id }], line))
-}
-
-/// Stage a remove. Children relink to the grandparent, so their locals are
-/// captured first and the inverse pins each one back exactly.
-fn stage_remove(
-    tree: &mut Hierarchy,
-    materials: &mut BTreeMap<String, MaterialName>,
-    components: &mut ComponentTable,
-    op: &Op,
-    id: ObjectId,
-) -> Result<(Vec<Op>, String), BatchError> {
-    let parent = tree.parent(id).ok_or(BatchError::UnknownNode { id })?;
-    let local = tree.local(id).ok_or(BatchError::UnknownNode { id })?;
-    // Children relink to the grandparent on remove; capture their
-    // locals now so undo can pin each one back exactly.
-    let mut kids = Vec::new();
-    for child in tree.children(id) {
-        let child_local = tree
-            .local(child)
-            .ok_or(BatchError::UnknownNode { id: child })?;
-        kids.push((child, child_local));
-    }
-    tree.remove(id).map_err(|error| map_error(error, op))?;
-    let mut inverse = Vec::with_capacity(1 + 2 * kids.len());
-    inverse.push(Op::Insert { id, parent, local });
-    for (child, child_local) in &kids {
-        inverse.push(Op::Reparent {
-            id: *child,
-            new_parent: id,
-        });
-        inverse.push(Op::SetLocal {
-            id: *child,
-            local: *child_local,
-        });
-    }
-    // Bindings die with their node; undo re-binds after the re-insert
-    // so the restore order stays valid (insert first, then bind).
-    let old_material = materials.remove(&id.to_string());
-    if let Some(material) = old_material {
-        inverse.push(Op::SetMaterial {
-            id,
-            material: Some(material),
-        });
-    }
-    // Components die with their node the same way; undo re-sets each kind
-    // (kind order) after the re-insert.
-    if let Some(own) = components.remove(&id.to_string()) {
-        for component in own.into_values() {
-            inverse.push(Op::SetComponent { id, component });
-        }
-    }
-    let line = format!("remove {id} (relinked {} children to {parent})", kids.len());
-    Ok((inverse, line))
-}
-
-/// Stage a pose replacement; the inverse restores the captured pose.
-fn stage_set_local(
-    tree: &mut Hierarchy,
-    op: &Op,
-    id: ObjectId,
-    local: Transform,
-) -> Result<(Vec<Op>, String), BatchError> {
-    let old = tree.local(id).ok_or(BatchError::UnknownNode { id })?;
-    tree.set_local(id, local)
-        .map_err(|error| map_error(error, op))?;
-    let line = format!(
-        "set-local {id} from {} to {}",
-        fmt_local(&old),
-        fmt_local(&local)
-    );
-    Ok((vec![Op::SetLocal { id, local: old }], line))
-}
-
-/// Stage a reparent; a move to the current parent is a no-op with no inverse.
-fn stage_reparent(
-    tree: &mut Hierarchy,
-    op: &Op,
-    id: ObjectId,
-    new_parent: ObjectId,
-) -> Result<(Vec<Op>, String), BatchError> {
-    let old_parent = tree.parent(id).ok_or(BatchError::UnknownNode { id })?;
-    let old_local = tree.local(id).ok_or(BatchError::UnknownNode { id })?;
-    tree.reparent(id, new_parent)
-        .map_err(|error| map_error(error, op))?;
-    if new_parent == old_parent {
-        let line = format!("reparent {id} to {new_parent} (no-op, already there)");
-        return Ok((Vec::new(), line));
-    }
-    // The move kept the world pose; overwrite with the captured local
-    // on undo so the restore is bit-exact, not just close.
-    let new_local = tree.local(id).ok_or(BatchError::UnknownNode { id })?;
-    let inverse = vec![
-        Op::Reparent {
-            id,
-            new_parent: old_parent,
-        },
-        Op::SetLocal {
-            id,
-            local: old_local,
-        },
-    ];
-    let line = format!(
-        "reparent {id} from {old_parent} to {new_parent} local {}",
-        fmt_local(&new_local)
-    );
-    Ok((inverse, line))
-}
-
-/// Stage a material bind or clear; the inverse restores the old binding.
-fn stage_set_material(
-    tree: &Hierarchy,
-    materials: &mut BTreeMap<String, MaterialName>,
-    id: ObjectId,
-    material: Option<MaterialName>,
-) -> Result<(Vec<Op>, String), BatchError> {
-    if !tree.contains(id) {
-        return Err(BatchError::UnknownNode { id });
-    }
-    let key = id.to_string();
-    let old = materials.get(&key).copied();
-    match material {
-        Some(name) => {
-            materials.insert(key, name);
-        }
-        None => {
-            materials.remove(&key);
-        }
-    }
-    let line = match (old, material) {
-        (Some(from), Some(to)) => {
-            format!("set-material {id} from `{from}` to `{to}`")
-        }
-        (None, Some(to)) => format!("set-material {id} to `{to}`"),
-        (Some(from), None) => format!("set-material {id} cleared (was `{from}`)"),
-        (None, None) => format!("set-material {id} already clear"),
-    };
-    Ok((vec![Op::SetMaterial { id, material: old }], line))
-}
-
-/// Stage a material record put: replace the record of the same name, or
-/// append a fresh one.
-///
-/// A replaced record inverts to a `put` of the previous text; an appended
-/// one inverts to [`Op::RemoveLastMaterial`]. The text parses against the
-/// live table, so `extends` resolves exactly as the door's push does.
-fn stage_put_material(
-    material_set: &mut MaterialSet,
-    text: &str,
-) -> Result<(Vec<Op>, String), BatchError> {
-    let record = material_set.parse_against(text).map_err(map_record_error)?;
-    let name = record.name.clone();
-    match material_set.put(record).map_err(map_record_error)? {
-        Some(previous) => {
-            let line = format!("put-material `{name}` (replaced)");
-            Ok((
-                vec![Op::PutMaterial {
-                    text: previous.to_text(),
-                }],
-                line,
-            ))
-        }
-        None => {
-            let line = format!("put-material `{name}` (added)");
-            Ok((vec![Op::RemoveLastMaterial], line))
-        }
-    }
-}
-
-/// Stage one parameter edit; the inverse carries the old value text, so undo
-/// restores the pre-edit value exactly.
-fn stage_set_material_param(
-    material_set: &mut MaterialSet,
-    material: &str,
-    path: &str,
-    value: &str,
-) -> Result<(Vec<Op>, String), BatchError> {
-    let edit = material_set
-        .set_param(material, path, value)
-        .map_err(map_record_error)?;
-    let line = format!(
-        "set-material-param `{material}` {path} from {} to {}",
-        edit.before, edit.after
-    );
-    let inverse = vec![Op::SetMaterialParam {
-        material: edit.material,
-        path: edit.path,
-        value: edit.before,
-    }];
-    Ok((inverse, line))
-}
-
-/// Stage a drop of the newest material record; the inverse re-puts it.
-fn stage_remove_last_material(
-    material_set: &mut MaterialSet,
-) -> Result<(Vec<Op>, String), BatchError> {
-    let removed = material_set
-        .remove_last()
-        .ok_or_else(|| BatchError::BadMaterialRecord {
-            path: "$".to_string(),
-            detail: "material table is empty; nothing to remove".to_string(),
-        })?;
-    let line = format!("remove-last-material `{}`", removed.name);
-    let inverse = vec![Op::PutMaterial {
-        text: removed.to_text(),
-    }];
-    Ok((inverse, line))
-}
-
-/// Translate a record refusal into the matching batch error, keeping the
-/// record path the caller asked about and the reason under it.
-fn map_record_error(error: RecordError) -> BatchError {
-    BatchError::BadMaterialRecord {
-        path: error.path,
-        detail: error.kind.to_string(),
-    }
-}
-
-/// Translate a hierarchy failure into the matching batch error, naming the
-/// op's node (and linked parent where the op carries one).
-fn map_error(error: HierarchyError, op: &Op) -> BatchError {
-    let id = op.id();
-    let parent = op.linked_parent();
-    match error {
-        HierarchyError::UnknownNode => BatchError::UnknownNode { id },
-        HierarchyError::UnknownParent => BatchError::UnknownParent { id, parent },
-        HierarchyError::Duplicate => BatchError::Duplicate { id },
-        HierarchyError::Cycle => BatchError::Cycle {
-            id,
-            new_parent: parent,
-        },
-        HierarchyError::NonFinite => BatchError::NonFinite { id },
-        HierarchyError::DegenerateScale => BatchError::DegenerateScale { id },
-        HierarchyError::NilId => BatchError::NilId,
-    }
-}
-
-/// Short deterministic pose rendering for previews (meters, radians).
-fn fmt_local(local: &Transform) -> String {
-    format!(
-        "pos=[{:.3},{:.3},{:.3}] rot=[{:.3},{:.3},{:.3},{:.3}] scale=[{:.3},{:.3},{:.3}]",
-        local.position[0],
-        local.position[1],
-        local.position[2],
-        local.rotation[0],
-        local.rotation[1],
-        local.rotation[2],
-        local.rotation[3],
-        local.scale[0],
-        local.scale[1],
-        local.scale[2],
-    )
-}
+mod stage;
+pub(crate) use stage::{apply_ops, stage, Staged};
 
 #[cfg(test)]
 mod tests {

@@ -24,15 +24,28 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   `crates/assets/src/sever_cook.rs`. Accept: cook fails loudly on a non-watertight
   or flipped-normal segment; digest x2; Rome gladiator and urban officer rigs
   both cook. needs: AS1.
-- [ ] BX9 net: `Cut` on the wire and the tape — 16-byte event in the input log,
+- [x] BX9 net: `Cut` on the wire and the tape — 16-byte event in the input log,
   interest managed, clients settle limbs within 5 cm in 10 ticks. Tier A. Size
   M. Owns hunks beside `crates/net/src/server.rs`. Accept: 64-client soak with 8
   cuts per second for 1 h, zero desync (ON4 pattern). needs: BX4, ON4.
+  Landed 1d9e19f76. 64-client soak `clients=64 ticks=216000 cuts=28800 desyncs=0
+  worst_lag=8`; golden PASS run 39926267175; `Cut` is a 16-byte input-log event,
+  interest-managed, and the settle bar is asserted in the net IT.
   rot: crates/net/src/server.rs was deleted outright in 3151bd46 (no rename, its symbols appear nowhere else); the net crate's server now lives in crates/net/src/dedicated.rs (HeadlessServer) with the wire types in crates/net/src/session.rs, so re-home Owns to those two.
-- [ ] BX11 audio: material and tissue sound — blade on bone, flesh, wood,
+- [x] BX11 audio: material and tissue sound — blade on bone, flesh, wood,
   stone and armor; stump, limb landing, structure groan before collapse. Tier
   A. Size S. Owns hunks beside `crates/audio`. Accept: event-to-sound table
   covers every material pair; no sound without an event. needs: BX2, BX12, SN1.
+  Landed by the audio lane earlier but never ticked; proven by the lead at HEAD: `IMPACT_CUES` in
+  `crates/audio/src/cue.rs` is a dense 8-kind x 6-surface table and `impact_matrix` passes 2/2 (run
+  39879135878); `strike_sound.rs` holds `SEVER_TABLE` / `LANDING_TABLE` / `GROAN_TABLE` (stump, limb
+  landing, structure groan before collapse) and its 6 tests pass — every cell a real play, every event
+  kind reads its own row, the 14 world materials resolve by name (run 39879426724); `every_event_maps`
+  1/1 (run 39879305423) proves each fight event maps to its own cue, and `silent_event` 1/1 (run
+  39879119898) proves an event with no take queues nothing, so no impact sound plays without its event.
+  The bank bakes the stump and groan takes (`bank.rs`). clippy `-p engine-audio --all-targets -D
+  warnings` PASS (run 39879306285); golden unchanged (audio is not sim, and the routing commit
+  9d003eaef is an ancestor of the golden-proof HEAD, proof_cli 13/13 run 39870971670).
 - [x] BX36 destruction: fracture event at 32 cells under 1 ms — `crates/destruction/src/fracture.rs` (fn `clip_cells`) and Landed 79913e64. `cargo test --release -p engine-destruction --lib fracture_event_budget_one_millisecond -- --ignored --nocapture` prints cells=32 p50 239 us p99 288 us (cells=16 p99 111 us, 24 p99 202 us, 64 p99 763 us) and the test asserts the 32-cell row, gh run 39058844125; `--lib fracture` 15 passed, gh run 39058643179. The two digests quoted in the row are not pinned by any test; golden d57b5c8ae3096614 unchanged per golden-matrix run 39054403838.
   `crates/destruction/src/csg.rs` (fns `clip_back`, `split_back`). Tier B. Size S. Owns those two files only. Today (release, loaded box)
   16 cells p99 727 us, 24 cells 995 us, 32 cells 1.4 ms, 64 cells 2.7 ms. Idea: while clipping one cell, stop at the first neighbor whose
@@ -50,7 +63,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   --precise 0.31.1 --offline`. Tier B. Size S. Owns `crates/geo/Cargo.toml` and `Cargo.lock` (the parry3d entries). Rapier 0.36 (landed 2026-10-04) pulls parry3d
   0.31.1, so the lock holds two parry3d versions today. Accept: `cargo tree -d --manifest-path Cargo.toml` lists no `parry3d`; `cargo test -p engine-geo
   --features collision --lib` green; the V-HACD calls compile unchanged or the renamed parry3d 0.31 calls are fixed in `crates/geo/src`; golden unchanged. Landed 187f3d93. crates/geo/Cargo.toml parry3d 0.31.1, Cargo.lock holds one parry3d (cargo tree -d --offline --locked lists none, cargo metadata --locked --offline passes); the V-HACD, convex hull and ray cast calls compiled unchanged; cargo test -p engine-geo --features collision --lib PASS run 39111161217, --features all --no-fail-fast PASS run 39111188497 (lib 66, kit 9, bake numbers unchanged), clippy -D warnings run 39111232660. Cargo.lock edited by hand to the three parry3d hunks because cargo update also moved wgpu-hal to ordered-float 4.6.0.
-- [ ] BX25 proof: Blender-bpy fracture column for BreakBench (G6 vision
+- [x] BX25 proof: Blender-bpy fracture column for BreakBench (G6 vision
   2026-09-29: only Blender `--background --python` +
   `bpy.ops.object.add_fracture_cell_objects` and Houdini HDA are
   headless-scriptable; Chaos editor-only, RayFire/Godot/unity-fracture
@@ -58,7 +71,11 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   beside `crates/proof/src/break_corpus.rs` (fixture: 1 wall +
   Voronoi sites from scipy seed vs BX12 energy table). Accept:
   cell-count match + bake bytes x2; metric posted with kill rule.
-  needs: BX12. (G6 Proposed, vision-r4 2026-09-29.)
+  needs: BX12. (G6 Proposed, vision-r4 2026-09-29.) Landed c47927b4b. Blender
+  5.2.0 + Cell Fracture 0.2.1: 24 cells = engine spec 24, Blender bake 11,737
+  canonical bytes SHA d79c07f1 x2, engine 24 chunks digest e8370912b2c4e50a x2,
+  verify.py PASS, kill rule posted in the README. Caveat: BX14's energy->count
+  table is not landed, so the count is pinned to the fixture spec, not energy.
 - [x] HS2 proof: cross-architecture golden matrix — the golden and the BX28 corpus Landed 0636f00.
   on Windows x86-64, Linux x86-64 and, if a runner exists, aarch64. Tier A. Size
   M. Owns hunks in `crates/proof` and CI files. Accept: digests equal or the
@@ -107,10 +124,11 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   plugin has no auth layer). Tier A. Size M. Owns hunks in
   `crates/endpoint/src`. Accept: an unscoped call is refused with a typed
   reason; 20 adversarial briefs, 0 legitimate false refusals. needs: MCP11.
-- [ ] HS23 proof: Kani harnesses on the integer kernels — Q16 math, cut plane
+- [x] HS23 proof: Kani harnesses on the integer kernels — Q16 math, cut plane Landed 103a782.
   quantization, bond arithmetic, tape decode. Tier A. Size M. Owns
   `crates/proof/kani/`. Accept: 20 harnesses pass in CI; each names its kernel
   and bound; a found bug becomes a test row. needs: BX1.
+  CI: public mirror run 39972807647, 20 matrix rows, KANI TOTAL 20/20.
 - [x] GEO1a dcc: Blender pin and version gate (center note `engine-steal-blender-2026-10-04.md` section 3, rules for B 1
   and 6; this is the first leg of the note's GEO1) — new folder `tools/dcc/` with `blender.pin.json`
   (`{"version_prefix":"5.2","exe":"C:/Program Files/Blender Foundation/Blender 5.2/blender.exe","exe_sha256":"<value of
@@ -238,7 +256,7 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   `tolerance`), `edits_repeat` (`qclip_hash` equal x2 for each verb); `cargo test -p engine-anim` green; golden unchanged.
   needs: none.
 - [x] GEO8b anim: clip edit verbs strip and mirror (second leg of GEO8; GEO8a did trim, retime, cleanup). Tier A. Size S. Owns `crates/anim/src/edit.rs`. Accept: `cargo test -p engine-anim --lib edit` — `strip_keeps_used_keys`, `mirror_swaps_left_right`, `edits_repeat` (`qclip_hash` equal x2); `cargo test -p engine-anim` green; golden unchanged. needs: GEO8a. Landed 562bf43. `strip` (keep the listed track indices, timing kept) and `mirror` (sagittal x flip, rebaked min/max) in `crates/anim/src/edit.rs`; `cargo test -p engine-anim --lib edit` 10 passed (strip_keeps_used_keys, mirror_swaps_left_right, edits_repeat, trim/retime/cleanup, u32_to_f32) on this PC (runner setup failed, local run), and full `cargo test -p engine-anim` PASS on the runner, run 39175084786 (445 lib + 8 anim_lod_pin, 0 failed, doctests 8); golden d57b5c8ae3096614 unchanged (run 39175013886).
-- [ ] GEO9a geo: FBX import with ufbx (center note GEO9, first leg) — `crates/geo/Cargo.toml` feature `fbx = ["dep:ufbx"]`
+- [x] GEO9a geo: FBX import with ufbx (center note GEO9, first leg) — `crates/geo/Cargo.toml` feature `fbx = ["dep:ufbx"]`
   with `ufbx = "0.11.5"` (MIT OR Unlicense, read its LICENSE first; `cargo deny --manifest-path crates/geo/Cargo.toml
   --features fbx check licenses` must stay ok), new `crates/geo/src/fbx.rs`: `pub fn import_fbx(bytes: &[u8]) ->
   Result<Vec<GeoMesh>, GeoError>` (one `GeoMesh` per mesh node, triangulated by ufbx, meters, +Y up, positions, normals, uv0;
@@ -250,6 +268,13 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   imported, triangle counts equal to the JSON on both, bounds of the cube within 1e-4 of 1 m, digest equal x2; 1,000
   seeded mutations of the fixture (`Rng::new(2040)`, flip 1 to 8 random bytes) give 0 panics and 0 results above 20 s in
   total, every failure a typed `GeoError`; clippy clean; golden unchanged. needs: GEO1a (only to run the fixture script once).
+  Landed 4eab39f9a (2026-10-20) but never ticked; proven 2026-10-23 by the lead: `cargo test -p engine-geo
+  --features fbx --test fbx` 4 passed (run 39877431720) — the fixture gives 2 meshes at Blender's own triangle
+  counts from `two_solids.json`, the cube bounds are within 1e-4 of 1 m, the same bytes give the same digests
+  twice, and 1,000 seeded byte mutations (`Rng::new(2040)`, 1..8 flips) gave 949 typed refusals, 0 panics and
+  88.4 ms total against the 20 s bar; clippy `-p engine-geo --features fbx --all-targets -- -D warnings` PASS
+  (run 39877785835); fixture 31,468 B FBX + 318 B JSON, under the 200 KB bar; golden unchanged (geo is not sim,
+  and 4eab39f9a is an ancestor of the golden-proof HEAD, proof_cli 13/13 run 39870971670).
 - [x] GEO10a assets: morph target import (center note GEO10, first leg; skin import keeps rejecting morph channels) — new
   `crates/assets/src/morph_import.rs` (under the existing `import` feature) plus one `pub mod morph_import;` line in
   `crates/assets/src/lib.rs`: `pub struct MorphTarget { pub name: String, pub position_deltas: Vec<[f32; 3]> }`, `pub struct
@@ -289,3 +314,16 @@ HS22, HS24-HS28) stay in their plan files and are boarded when these land.
   refusal tests) green with these new tests: `array_then_mirror_numbers` (cube `[2,2,2]`, ops array count 2 offset `[3,0,0]`
   then mirror `x`: faces 48, vertices 32, bounds_min `[-4,-1,-1]`, bounds_max `[4,1,1]`), `weld_after_array_keeps_distinct_corners` (array count 3 offset `[3,0,0]` then weld 0.001: vertices 24), `flip_moves_the_digest_and_twice_restores_it`, `bad_numbers_name_the_legal_values` (count 0 and 65, epsilon 0 and 0.5, axis `w`), JSON parse of the 4 ops; clippy with
   `--features geo` clean; golden unchanged. needs: GEO12, GEO11. Landed 52f66252. cargo test -p engine-endpoint --features geo --lib packs::geo 17 passed incl. array_then_mirror_numbers, weld_after_array_keeps_distinct_corners, flip_moves_the_digest_and_twice_restores_it, bad_numbers_name_the_legal_values (gh run 39107853193); the mcp suite holds json_parses_mirror_array_weld_and_flip and modeling_ops_refuse_typed_without_the_geo_feature green (run 39109659487); clippy --features geo --all-targets -D warnings clean (run 39108371106).
+- [ ] GEO14 dcc: the bake op, the maps the map kit never had. Steal: measured headless - Cycles AO
+  at 256x256 costs 0.38 s on the pinned 5.2, and AO, curvature grime and a bevel normal are what
+  the 15 map-kit pieces are missing. Add `bake` to the `run_recipe.py` allow-list (three maps,
+  one flag each) and run the KTX2 cook that already exists. Files: `tools/dcc/blender/run_recipe.py`,
+  `tools/dcc/blender-cook.mjs`, `content/`.
+  Accept: two cooks of one recipe give one GLB sha and one KTX2 sha x2; the 15 pieces carry the
+  maps in their sidecars; a piece with no UV refuses before Blender starts and names the object.
+- [ ] GEO15 dcc: one warm Blender per batch. Steal: `mcp-for-blender` (MIT) socket plus
+  main-thread queue - keep one 5.2 process alive across a batch instead of paying 5.48-18.07 s of
+  startup per recipe. The gate is digest equality, not speed: every GLB must equal the
+  fresh-process cook. Files: `tools/dcc/blender-cook.mjs`, `tools/dcc/blender/` (the bridge).
+  Accept: 8 recipes in one batch take under 8 x the cold single-recipe time, every GLB sha equals
+  the fresh-process sha for the same recipe, and a crash mid-batch restarts once and reports it.

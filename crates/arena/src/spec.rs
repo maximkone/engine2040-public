@@ -55,6 +55,11 @@ pub struct MatchSpec {
     /// local choice: [`MatchSpec::identity`] folds it when it differs from
     /// the default, so a peer on another delay is refused before tick 0.
     pub input_delay_ticks: u32,
+    /// Per-slot weapon row ids to arm before tick 0 (FEEL1b), in slot order.
+    /// Empty means bare, and a bare spec keeps its identity byte for byte.
+    /// A refused id or a rules v1 match makes [`MatchSpec::live`] `None`, so
+    /// a match is never half armed.
+    pub weapons: Vec<&'static str>,
 }
 
 /// Default local input delay in ticks: two ticks (33 ms at 60 Hz), the
@@ -75,6 +80,7 @@ impl MatchSpec {
             spear: false,
             height: false,
             input_delay_ticks: DEFAULT_INPUT_DELAY_TICKS,
+            weapons: Vec::new(),
         }
     }
 
@@ -89,6 +95,18 @@ impl MatchSpec {
     #[must_use]
     pub fn with_spear(mut self) -> Self {
         self.spear = true;
+        self
+    }
+
+    /// This spec armed with one weapon row per slot, in slot order
+    /// (FEEL1b): `["pugio", "clava"]` gives slot 0 the dagger and slot 1 the
+    /// club. Only rules v2 can arm; [`MatchSpec::live`] is `None` for a
+    /// refused id, so no match plays half armed. The ids ride
+    /// [`MatchSpec::identity`] when set, so a peer on another list is refused
+    /// before tick 0.
+    #[must_use]
+    pub fn with_weapons(mut self, weapons: &[&'static str]) -> Self {
+        self.weapons = weapons.to_vec();
         self
     }
 
@@ -152,9 +170,9 @@ impl MatchSpec {
     /// One digest over config, rules and world: two peers with equal
     /// identities play the same match from the same tape. The lobby build id
     /// carries it, so a peer on other rules or another world is refused
-    /// before tick 0. The spear flag and a non-default input delay are mixed
-    /// in only when set, so every spec on the shipped defaults digests
-    /// exactly as it did before those fields existed.
+    /// before tick 0. The spear flag, a non-default input delay and armed
+    /// weapons are mixed in only when set, so every spec on the shipped
+    /// defaults digests exactly as it did before those fields existed.
     #[must_use]
     pub fn identity(&self) -> u64 {
         let config = &self.config;
@@ -180,11 +198,23 @@ impl MatchSpec {
             hash.write_u8(0xD1);
             hash.write_u32(self.input_delay_ticks);
         }
+        // Armed weapons are match property too (FEEL1b): mixed in only when
+        // set, so every bare spec keeps its identity byte for byte.
+        if !self.weapons.is_empty() {
+            hash.write_u8(0x57);
+            hash.write_len(self.weapons.len());
+            for id in &self.weapons {
+                hash.write_len(id.len());
+                hash.write_str(id);
+            }
+        }
         hash.finish()
     }
 
     /// Fresh live match at tick 0 under this spec; `None` when the config is
-    /// invalid, the rules version is unknown or the world blocks a spawn.
+    /// invalid, the rules version is unknown, the world blocks a spawn or an
+    /// armed weapon row is refused (rules v1, an unknown id, a count that
+    /// does not match the slots).
     #[must_use]
     pub fn live(&self) -> Option<LiveMatch> {
         LiveMatch::from_spec(self)
@@ -314,6 +344,60 @@ mod tests {
         old.write_u64(base.rules_digest());
         old.write_u64(base.world_digest());
         assert_eq!(base.identity(), old.finish());
+    }
+
+    #[test]
+    fn weapons_identity_moves_only_when_armed_and_arm_the_live_match() {
+        let base = MatchSpec::duel(config(), MatchWorld::empty());
+        let armed = base
+            .clone()
+            .with_weapons(&["pugio", "clava", "gladius", "gladius"]);
+        assert!(base.weapons.is_empty() && armed.weapons.len() == 4);
+        assert_ne!(
+            base.identity(),
+            armed.identity(),
+            "another weapon list is another match"
+        );
+        assert_eq!(armed.identity(), armed.clone().identity(), "stable");
+        // A bare spec digests exactly as it did before the field existed.
+        let c = base.config;
+        let mut old = Fnv64::new();
+        old.write_u64(c.seed);
+        old.write_u32(c.ticks);
+        old.write_u8(c.fighters);
+        old.write_u32(c.half_extent_m.to_bits());
+        old.write_u32(c.table_version);
+        old.write_u64(base.rules_digest());
+        old.write_u64(base.world_digest());
+        assert_eq!(base.identity(), old.finish());
+        // The ids reach the sim: each slot swings its own row.
+        let live = armed.live().expect("armed duel");
+        assert_eq!(live.weapon(0).map(|w| w.startup_ticks), Some(12), "pugio");
+        assert_eq!(live.weapon(1).map(|w| w.startup_ticks), Some(21), "clava");
+        assert!(base.live().expect("bare duel").weapon(0).is_none());
+    }
+
+    #[test]
+    fn a_refused_weapon_list_builds_no_match() {
+        let base = MatchSpec::duel(config(), MatchWorld::empty());
+        assert!(
+            base.clone().with_weapons(&["pugio"]).live().is_none(),
+            "a short list"
+        );
+        assert!(
+            base.clone()
+                .with_weapons(&["no-such-row"; 4])
+                .live()
+                .is_none(),
+            "an unknown row"
+        );
+        assert!(
+            MatchSpec::v1(config())
+                .with_weapons(&["pugio"; 4])
+                .live()
+                .is_none(),
+            "rules v1 cannot arm"
+        );
     }
 
     #[test]

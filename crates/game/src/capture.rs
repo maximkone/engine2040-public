@@ -341,8 +341,8 @@ pub fn encode_tape_bytes(inputs: &[FighterInput]) -> Vec<u8> {
     bytes.extend_from_slice(TAPE_MAGIC);
     bytes.extend_from_slice(&CAPTURE_VERSION.to_le_bytes());
     bytes.extend_from_slice(
-        &u32::try_from(inputs.len() & 0xffff_ffff)
-            .unwrap_or(0)
+        &u32::try_from(inputs.len())
+            .unwrap_or(u32::MAX)
             .to_le_bytes(),
     );
     for input in inputs {
@@ -593,7 +593,7 @@ fn crc32_table() -> &'static [u32; 256] {
     TABLE.get_or_init(|| {
         let mut table = [0u32; 256];
         for (index, cell) in table.iter_mut().enumerate() {
-            let mut c = u32::try_from(index & 0xffff_ffff).unwrap_or(0);
+            let mut c = u32::try_from(index).unwrap_or(0);
             for _ in 0..8 {
                 c = if c & 1 == 1 {
                     0xEDB88320 ^ (c >> 1)
@@ -616,11 +616,7 @@ fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
 }
 
 fn write_chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(
-        &u32::try_from(data.len() & 0xffff_ffff)
-            .unwrap_or(0)
-            .to_be_bytes(),
-    );
+    out.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes());
     out.extend_from_slice(tag);
     out.extend_from_slice(data);
     let mut crc = crc32_update(0xFFFF_FFFF, tag);

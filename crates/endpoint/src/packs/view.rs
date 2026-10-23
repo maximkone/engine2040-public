@@ -46,6 +46,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use engine_core::hash::hex16;
+use engine_core::Fnv64;
 use engine_playtest::look::metric::{self, Frame, Region};
 use engine_playtest::look::ssim2;
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
@@ -55,10 +57,11 @@ use rmcp::serde_json::{self, Value};
 
 use super::bad_args;
 use super::{PackDef, PackError, VerbSpec};
+use crate::collapse::MAX_ADVERTISED_CHARS;
 use crate::discover::{DiscoverTool, TOOL_RPC_DISCOVER};
 use crate::log_tools::{LogDigestTool, LogQueryTool, TOOL_LOG_DIGEST, TOOL_LOG_QUERY};
-use crate::mcp::{McpServer, McpToolError};
-use crate::play::play_session::PlaySlot;
+use crate::mcp::{McpServer, McpToolError, ServerState};
+use crate::play::play_session::{encode_png_rgb, PlaySlot};
 use crate::tool_capabilities::{CapabilityCard, CheckKind};
 
 /// Pack name.
@@ -75,6 +78,9 @@ pub const TOOL_VIEW_LAWS: &str = "view.laws";
 
 /// Verb: compare two PNG captures with the machine metrics.
 pub const TOOL_VIEW_COMPARE: &str = "view.compare";
+
+/// Verb: the door's own health (session, revision, packs, budget, audit head).
+pub const TOOL_DOOR_STATUS: &str = "door.status";
 
 /// Rubric ids a judge answer must carry, in order.
 pub const LOOK_RUBRIC_IDS: [&str; 9] = ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"];
@@ -100,6 +106,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     )?);
     pack.add(VerbSpec::of::<ViewLawsTool>(
         TOOL_VIEW_LAWS,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<DoorStatusTool>(
+        TOOL_DOOR_STATUS,
         PACK,
         CapabilityCard::Observe,
     )?);
@@ -347,17 +358,20 @@ impl SyncTool<McpServer> for LookJudgeTool {
 }
 
 // ---------------------------------------------------------------------------
-// view.compare: two PNGs, one machine score
+// view.compare: two PNGs, one machine score, one optional diff image
 // ---------------------------------------------------------------------------
 
-/// Two relative PNG paths. Units are path chars; errors are typed `bad_args`
-/// for an absolute path, `..`, a non-PNG name or an unreadable file.
+/// Two relative PNG paths and an optional third to write. Units are path
+/// chars; errors are typed `bad_args` for an absolute path, `..`, a non-PNG
+/// name or an unreadable input. `diff` is written under the project root,
+/// never read, and need not exist; a write failure is `write_failed`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ViewCompareArgs {
     pub left: String,
     pub right: String,
+    pub diff: Option<String>,
 }
 
 /// Whole-frame machine score. All scores are fixed point; 10000 is identical
@@ -365,6 +379,8 @@ pub struct ViewCompareArgs {
 /// SSIMULACRA2 v2.1 in hundredths of a donor point: 10000 is identical, 0 is
 /// worst and higher is better, the same direction as SSIM. It is `None` when
 /// the donor refused the pair (mismatched sizes, or a side under 8x8).
+/// `diff_png` is the relative path the diff image was written to, or `None`
+/// when the request named no diff path.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
@@ -377,10 +393,12 @@ pub struct ViewCompareOutput {
     pub hist_tv_x10000: u32,
     pub hist_emd_x10000: u32,
     pub ssimulacra2_x10000: Option<u32>,
+    pub diff_png: Option<String>,
 }
 
 /// A PNG path must be a non-empty relative path of plain names ending in
-/// `.png`. It is read, never written.
+/// `.png`. The two inputs are read; a diff path is written and never read, so
+/// it need not exist yet.
 fn check_png(field: &str, raw: &str) -> Result<(), McpToolError> {
     check_dir(field, raw)?;
     if raw.to_ascii_lowercase().ends_with(".png") {
@@ -393,18 +411,18 @@ fn check_png(field: &str, raw: &str) -> Result<(), McpToolError> {
     )))
 }
 
-/// Decode one bounded PNG; the error names the side and the path.
-fn read_frame(field: &str, path: &str) -> Result<Frame, McpToolError> {
-    let bytes = std::fs::read(path).map_err(|error| {
+/// Decode one bounded PNG under `root`; the error names the side and the path.
+fn read_frame(field: &str, root: &Path, rel: &str) -> Result<Frame, McpToolError> {
+    let bytes = std::fs::read(root.join(rel)).map_err(|error| {
         McpToolError::new(
             "bad_args",
-            format!("{field} `{path}` could not be read: {error}"),
+            format!("{field} `{rel}` could not be read: {error}"),
         )
     })?;
     Frame::decode_png(&bytes).map_err(|error| {
         McpToolError::new(
             "bad_image",
-            format!("{field} `{path}` is not a decodable PNG: {error}"),
+            format!("{field} `{rel}` is not a decodable PNG: {error}"),
         )
     })
 }
@@ -430,18 +448,67 @@ fn compare_frames(left: &Frame, right: &Frame) -> Result<ViewCompareOutput, McpT
         hist_tv_x10000: compared.hist_tv_x10000,
         hist_emd_x10000: compared.hist_emd_x10000,
         ssimulacra2_x10000: second,
+        diff_png: None,
     })
 }
 
-fn run_view_compare(args: &ViewCompareArgs) -> Result<ViewCompareOutput, McpToolError> {
-    check_png("left", &args.left)?;
-    check_png("right", &args.right)?;
-    let left = read_frame("left", &args.left)?;
-    let right = read_frame("right", &args.right)?;
-    compare_frames(&left, &right)
+/// Amplification of the per-channel gap in the diff image: a gap of 1 reads 8,
+/// so a near-match still shows where the unaided eye would miss it.
+const DIFF_AMPLIFY: u32 = 8;
+
+/// One diff channel: `min(255, |a - b| * DIFF_AMPLIFY)`.
+fn diff_channel(a: u8, b: u8) -> u8 {
+    u8::try_from(u32::from(a.abs_diff(b)) * DIFF_AMPLIFY).unwrap_or(u8::MAX)
 }
 
-/// `view.compare` tool: two PNG captures scored by machine, read-only.
+/// Write the amplified per-pixel RGB difference of two same-size frames at
+/// `root/rel`. The caller scores the pair first, so a refused pair writes
+/// nothing and the image always matches the size the output reports.
+fn write_diff_png(root: &Path, rel: &str, left: &Frame, right: &Frame) -> Result<(), McpToolError> {
+    let mut rgb = Vec::with_capacity(left.pixels() * 3);
+    for at in 0..left.pixels() {
+        for (a, b) in left.rgb_at(at).into_iter().zip(right.rgb_at(at)) {
+            rgb.push(diff_channel(a, b));
+        }
+    }
+    let failed = |why: std::io::Error| {
+        McpToolError::new(
+            "write_failed",
+            format!(
+                "could not write diff `{rel}` under the project root ({why}); re-run with a \
+                 writable path such as target/reports/diff.png"
+            ),
+        )
+    };
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(failed)?;
+    }
+    std::fs::write(&path, encode_png_rgb(left.width(), left.height(), &rgb)).map_err(failed)
+}
+
+/// Score one pair, then write the diff image when the request named one.
+fn run_view_compare(
+    root: &Path,
+    args: &ViewCompareArgs,
+) -> Result<ViewCompareOutput, McpToolError> {
+    check_png("left", &args.left)?;
+    check_png("right", &args.right)?;
+    if let Some(diff) = &args.diff {
+        check_png("diff", diff)?;
+    }
+    let left = read_frame("left", root, &args.left)?;
+    let right = read_frame("right", root, &args.right)?;
+    let mut out = compare_frames(&left, &right)?;
+    if let Some(diff) = &args.diff {
+        write_diff_png(root, diff, &left, &right)?;
+        out.diff_png = Some(diff.clone());
+    }
+    Ok(out)
+}
+
+/// `view.compare` tool: two PNG captures scored by machine, plus the optional
+/// amplified diff image; read-only on the captures.
 pub struct ViewCompareTool;
 
 impl ToolBase for ViewCompareTool {
@@ -457,7 +524,11 @@ impl ToolBase for ViewCompareTool {
         Some(
             "Compare two relative PNG captures over the whole frame: SSIM, FLIP, \
              deltaE, histogram distances and SSIMULACRA2 v2.1 as fixed-point \
-             integers. Read-only; SSIMULACRA2 reads 10000 for identical frames."
+             integers. An optional `diff` names a relative .png that is written \
+             under the project root as the per-pixel channel gap times 8 \
+             (amplified, 255 saturates) and returned as `diff_png`; with no \
+             `diff` nothing is written. SSIMULACRA2 reads 10000 for identical \
+             frames. Read-only on the captures."
                 .into(),
         )
     }
@@ -469,7 +540,7 @@ impl ToolBase for ViewCompareTool {
 
 impl SyncTool<McpServer> for ViewCompareTool {
     fn invoke(_service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
-        run_view_compare(&param)
+        run_view_compare(&super::codex::project_root(None), &param)
     }
 }
 
@@ -636,6 +707,42 @@ pub struct ViewLawsArgs {}
 pub struct ViewLawsOutput {
     pub tick: u32,
     pub laws: String,
+}
+
+/// Args for `door.status`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "serde reads the wire shape `{}`; a unit struct reads null"
+)]
+pub struct DoorStatusArgs {}
+
+/// `door.status` result: the door's own health. Read-only.
+///
+/// `digest` covers the fields that do not move when the door is read (session,
+/// revision, packs, tool count, surface and budget); the audit head and count
+/// are the values this call saw before its own record, so an unchanged session
+/// reports the same digest twice. `durable_generation` and `build_sha` are
+/// `None` when the host holds no durable store or build stamp: unknown stays
+/// unknown, never a guessed zero.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DoorStatusOutput {
+    pub session: u64,
+    pub revision: u64,
+    pub packs: Vec<String>,
+    pub tools: u64,
+    pub surface_chars: u64,
+    pub budget_chars: u64,
+    pub headroom_chars: u64,
+    pub audit_head: Option<String>,
+    pub audit_total: u64,
+    pub durable_generation: Option<u64>,
+    pub build_sha: Option<String>,
+    pub digest: String,
 }
 
 /// No bout: the refusal `sim.observe` gives, same code and same recovery.
@@ -969,6 +1076,79 @@ fn view_observe(
     })
 }
 
+/// The status payload. The audit fields are read inside the dispatch, before
+/// the door seals this call's own record, so a reader reports the chain it saw.
+fn status_core(service: &McpServer, state: &ServerState) -> DoorStatusOutput {
+    let session = state.session;
+    let revision = state.doc.revision;
+    let packs: Vec<String> = state.loaded_packs.iter().map(|p| (*p).to_owned()).collect();
+    let tools = u64::try_from(service.tool_count_with(&state.loaded_packs)).unwrap_or(u64::MAX);
+    let surface_chars =
+        u64::try_from(service.surface_chars_with(&state.loaded_packs)).unwrap_or(u64::MAX);
+    let budget_chars = u64::try_from(MAX_ADVERTISED_CHARS).unwrap_or(u64::MAX);
+    let headroom_chars = budget_chars.saturating_sub(surface_chars);
+    let audit_head = state.audit_head().map(|head| crate::play::hex_bytes(&head));
+    let audit_total = state.audit_total_appended();
+    let durable_generation = None;
+    let build_sha = option_env!("E2040_BUILD_SHA").map(str::to_owned);
+    let digest = status_digest(
+        session,
+        revision,
+        &packs,
+        tools,
+        surface_chars,
+        budget_chars,
+    );
+    DoorStatusOutput {
+        session,
+        revision,
+        packs,
+        tools,
+        surface_chars,
+        budget_chars,
+        headroom_chars,
+        audit_head,
+        audit_total,
+        durable_generation,
+        build_sha,
+        digest,
+    }
+}
+
+/// Domain tag so a status digest cannot collide with another FNV lane.
+const STATUS_DOMAIN: u64 = 0x646f_6f72_7374_6174;
+
+/// Digest of the stable fields: two calls on an unchanged session report the
+/// same digest even though each call appends its own audit record.
+fn status_digest(
+    session: u64,
+    revision: u64,
+    packs: &[String],
+    tools: u64,
+    surface_chars: u64,
+    budget_chars: u64,
+) -> String {
+    let mut lane = Fnv64::with_state(STATUS_DOMAIN);
+    lane.write_u64(session);
+    lane.write_u64(revision);
+    lane.write_u64(tools);
+    lane.write_u64(surface_chars);
+    lane.write_u64(budget_chars);
+    lane.write_len(packs.len());
+    for pack in packs {
+        lane.write_len(pack.len());
+        lane.write_str(pack);
+    }
+    hex16(lane.finish())
+}
+
+fn door_status(
+    service: &McpServer,
+    _args: &DoorStatusArgs,
+) -> Result<DoorStatusOutput, McpToolError> {
+    service.dispatch(TOOL_DOOR_STATUS, |state| Ok(status_core(service, state)))
+}
+
 crate::e2_tool!(
     /// `view.observe` tool: the live view's camera, drawn bodies and laws. Read-only.
     ViewObserveTool,
@@ -991,11 +1171,22 @@ crate::e2_tool!(
     invoke = view_laws
 );
 
+crate::e2_tool!(
+    /// `door.status` tool: the door's own health. Read-only.
+    DoorStatusTool,
+    name = TOOL_DOOR_STATUS,
+    description = "The door's own health as numbers: session, scene revision, loaded packs, advertised tools and chars, the budget ceiling and its headroom, the audit chain head and count, a build stamp. Unknown stays null. This call's own audit record lands after the answer. Read-only.",
+    readonly = true,
+    args = DoorStatusArgs,
+    output = DoorStatusOutput,
+    invoke = door_status
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::insight::mcp_tools::{ApiDescribeArgs, ApiDescribeTool};
-    use crate::packs::PackRegistry;
+    use crate::packs::{ApiLoadArgs, ApiLoadTool, PackRegistry};
     use engine_editor::capability::Capability;
 
     fn server() -> McpServer {
@@ -1756,5 +1947,295 @@ mod tests {
             .expect("view pack")
             .verb_names()
             .contains(&TOOL_VIEW_COMPARE));
+    }
+
+    /// A project root of this test: both inputs and the diff image live under
+    /// it, so the verb never touches the repo tree.
+    fn compare_root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("e2040-view-compare-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("compare root creates");
+        root
+    }
+
+    /// Write an RGB8 PNG under `root`.
+    fn write_png(root: &Path, name: &str, width: u32, height: u32, rgb: &[u8]) {
+        std::fs::write(root.join(name), encode_png_rgb(width, height, rgb)).expect("png writes");
+    }
+
+    /// A 4x4 RGB pair with known gaps: red rises by one, green falls by two
+    /// and blue rises by five per pixel, so the amplified blue saturates.
+    fn known_rgb_pair() -> (Vec<u8>, Vec<u8>) {
+        let mut left = Vec::with_capacity(4 * 4 * 3);
+        let mut right = Vec::with_capacity(4 * 4 * 3);
+        for i in 0..16u8 {
+            left.extend_from_slice(&[i * 10, 60, 0]);
+            right.extend_from_slice(&[i * 10 + 1, 60 - i * 2, i * 5]);
+        }
+        (left, right)
+    }
+
+    #[test]
+    fn view_compare_writes_the_exact_amplified_diff() {
+        let root = compare_root("exact");
+        let (left_rgb, right_rgb) = known_rgb_pair();
+        write_png(&root, "left.png", 4, 4, &left_rgb);
+        write_png(&root, "right.png", 4, 4, &right_rgb);
+        // The scores need one whole 8x8 SSIM window, so the 4x4 pixel oracle
+        // runs on the decoded frames and the diff writer.
+        let left = read_frame("left", &root, "left.png").expect("left decodes");
+        let right = read_frame("right", &root, "right.png").expect("right decodes");
+        write_diff_png(&root, "reports/diff.png", &left, &right).expect("diff writes");
+        let bytes = std::fs::read(root.join("reports/diff.png")).expect("diff reads back");
+        let diff = Frame::decode_png(&bytes).expect("diff decodes");
+        assert_eq!(
+            (diff.width(), diff.height()),
+            (4, 4),
+            "the diff keeps the pair's size"
+        );
+        // min(255, gap * 8): red 1 -> 8, green 2i -> 16i, blue 5i -> 40i.
+        for i in 0..16usize {
+            let at = u8::try_from(i).expect("pixel index");
+            let blue = u8::try_from(u32::from(at) * 40).unwrap_or(u8::MAX);
+            assert_eq!(
+                diff.rgb_at(i),
+                [8, at * 16, blue],
+                "diff pixel {i} of the known 4x4 pair"
+            );
+        }
+        assert_eq!(diff.rgb_at(0), [8, 0, 0], "a one-step red gap reads 8");
+        assert_eq!(diff.rgb_at(6), [8, 96, 240], "a 30-step blue gap reads 240");
+        assert_eq!(
+            diff.rgb_at(7),
+            [8, 112, 255],
+            "a 35-step blue gap saturates"
+        );
+    }
+
+    #[test]
+    fn view_compare_identical_frames_write_an_all_zero_diff() {
+        let root = compare_root("identical");
+        let mut rgb = Vec::with_capacity(8 * 8 * 3);
+        for i in 0..64u8 {
+            rgb.extend_from_slice(&[i, 255 - i, 128]);
+        }
+        write_png(&root, "both.png", 8, 8, &rgb);
+        let plain = run_view_compare(
+            &root,
+            &ViewCompareArgs {
+                left: "both.png".to_owned(),
+                right: "both.png".to_owned(),
+                diff: None,
+            },
+        )
+        .expect("a pair without a diff compares");
+        assert_eq!(plain.diff_png, None, "no diff path, no written path");
+        assert!(
+            !root.join("reports").exists(),
+            "no diff path writes nothing"
+        );
+        let out = run_view_compare(
+            &root,
+            &ViewCompareArgs {
+                left: "both.png".to_owned(),
+                right: "both.png".to_owned(),
+                diff: Some("reports/zero.png".to_owned()),
+            },
+        )
+        .expect("an identical pair compares");
+        assert_eq!(out.diff_png.as_deref(), Some("reports/zero.png"));
+        assert_eq!(out.width, 8);
+        assert_eq!(out.height, 8);
+        assert_eq!(out.ssim_x10000, 10000);
+        assert_eq!(out.flip_x10000, 0);
+        let bytes = std::fs::read(root.join("reports/zero.png")).expect("zero diff reads");
+        let diff = Frame::decode_png(&bytes).expect("zero diff decodes");
+        assert_eq!(
+            (diff.width(), diff.height()),
+            (8, 8),
+            "the diff keeps the pair's size"
+        );
+        for at in 0..diff.pixels() {
+            assert_eq!(diff.rgb_at(at), [0, 0, 0], "identical pixel {at}");
+        }
+    }
+
+    #[test]
+    fn view_compare_mismatched_sizes_keep_the_error_and_write_no_diff() {
+        let root = compare_root("mismatch");
+        let (left_rgb, _) = known_rgb_pair();
+        write_png(&root, "small.png", 4, 4, &left_rgb);
+        write_png(&root, "large.png", 8, 8, &[127u8; 8 * 8 * 3]);
+        let error = run_view_compare(
+            &root,
+            &ViewCompareArgs {
+                left: "small.png".to_owned(),
+                right: "large.png".to_owned(),
+                diff: Some("reports/none.png".to_owned()),
+            },
+        )
+        .expect_err("a mismatched pair refuses");
+        assert_eq!(error.code, "bad_image", "{}", error.message);
+        assert!(
+            error.message.contains("do not compare"),
+            "{}",
+            error.message
+        );
+        assert!(
+            !root.join("reports/none.png").exists(),
+            "a refused pair writes no diff"
+        );
+        assert!(
+            !root.join("reports").exists(),
+            "a refused pair creates no diff folder"
+        );
+    }
+
+    #[test]
+    fn view_compare_refuses_bad_diff_paths_and_writes_nothing() {
+        let root = compare_root("bad-diff");
+        write_png(&root, "a.png", 8, 8, &[200u8; 8 * 8 * 3]);
+        let escape_name = format!("../e2040-view-compare-{}-escape.png", std::process::id());
+        let escape = std::env::temp_dir().join(format!(
+            "e2040-view-compare-{}-escape.png",
+            std::process::id()
+        ));
+        for bad in [
+            escape_name.as_str(),
+            "/abs.png",
+            "C:\\x.png",
+            "a\\b.png",
+            "a/../../b.png",
+            "reports/frame.jpg",
+            "",
+        ] {
+            let error = run_view_compare(
+                &root,
+                &ViewCompareArgs {
+                    left: "a.png".to_owned(),
+                    right: "a.png".to_owned(),
+                    diff: Some(bad.to_owned()),
+                },
+            )
+            .expect_err(bad);
+            assert_eq!(error.code, "bad_args", "{bad}: {}", error.message);
+            assert!(error.message.contains("diff"), "{bad}: {}", error.message);
+        }
+        assert!(!escape.exists(), "an escaping diff path writes nothing");
+        assert!(
+            !root.join("reports").exists(),
+            "a refused diff path writes nothing"
+        );
+    }
+
+    #[test]
+    fn view_compare_names_the_path_when_the_diff_cannot_be_written() {
+        let root = compare_root("write-fail");
+        let mut rgb = Vec::with_capacity(8 * 8 * 3);
+        for i in 0..64u8 {
+            rgb.extend_from_slice(&[i, 60, 200]);
+        }
+        write_png(&root, "a.png", 8, 8, &rgb);
+        std::fs::write(root.join("blocked"), b"a file, not a folder").expect("blocker writes");
+        let error = run_view_compare(
+            &root,
+            &ViewCompareArgs {
+                left: "a.png".to_owned(),
+                right: "a.png".to_owned(),
+                diff: Some("blocked/diff.png".to_owned()),
+            },
+        )
+        .expect_err("a file blocks the diff folder");
+        assert_eq!(error.code, "write_failed", "{}", error.message);
+        assert!(
+            error.message.contains("blocked/diff.png"),
+            "the refusal names the path: {}",
+            error.message
+        );
+        assert!(error.message.contains("re-run"), "{}", error.message);
+    }
+
+    #[test]
+    fn door_status_reports_the_session_and_a_digest_that_repeats() {
+        let server = server();
+        let first = DoorStatusTool::invoke(&server, DoorStatusArgs {}).expect("first status");
+        assert_eq!(first.session, 7);
+        assert_eq!(first.revision, 0);
+        assert!(
+            first.packs.iter().any(|p| p == "scene"),
+            "{:?}",
+            first.packs
+        );
+        assert!(!first.packs.iter().any(|p| p == "view"));
+        assert_eq!(
+            first.budget_chars,
+            u64::try_from(MAX_ADVERTISED_CHARS).unwrap()
+        );
+        assert_eq!(
+            first.headroom_chars,
+            first.budget_chars - first.surface_chars
+        );
+        assert!(first.surface_chars > 0);
+        assert!(first.tools > 0);
+        assert_eq!(first.audit_head, None, "the first call sees an empty chain");
+        assert_eq!(first.audit_total, 0);
+        assert_eq!(first.durable_generation, None, "unknown stays unknown");
+        assert_eq!(first.build_sha, None, "no build stamp in a library test");
+        let second = DoorStatusTool::invoke(&server, DoorStatusArgs {}).expect("second status");
+        assert_eq!(
+            second.digest, first.digest,
+            "the stable fields digest the same twice"
+        );
+        assert_eq!(second.surface_chars, first.surface_chars);
+        assert!(
+            second.audit_head.is_some(),
+            "the first call's record is visible"
+        );
+        assert_eq!(second.audit_total, 1);
+    }
+
+    #[test]
+    fn door_status_registers_read_only_and_the_view_pack_fits_the_budget() {
+        let registry = PackRegistry::shipped();
+        let verb = registry
+            .verb(TOOL_DOOR_STATUS)
+            .expect("door.status registers");
+        assert_eq!(verb.pack(), PACK);
+        assert_eq!(verb.card(), CapabilityCard::Observe);
+        assert!(verb.readonly());
+        assert!(registry
+            .pack(PACK)
+            .expect("view pack")
+            .verb_names()
+            .contains(&TOOL_DOOR_STATUS));
+        let described = ApiDescribeTool::invoke(
+            &server(),
+            ApiDescribeArgs {
+                path: TOOL_DOOR_STATUS.to_owned(),
+            },
+        )
+        .expect("api.describe reads door.status");
+        assert_eq!(described.path, TOOL_DOOR_STATUS);
+        assert!(described.docs.contains("audit"));
+
+        let server = server();
+        ApiLoadTool::invoke(
+            &server,
+            ApiLoadArgs {
+                pack: PACK.to_owned(),
+                unload: None,
+            },
+        )
+        .expect("the view pack fits under the budget");
+        let status = DoorStatusTool::invoke(&server, DoorStatusArgs {}).expect("status after load");
+        assert!(status.packs.iter().any(|p| p == PACK));
+        assert!(
+            status.surface_chars <= status.budget_chars,
+            "surface {} exceeds budget {}",
+            status.surface_chars,
+            status.budget_chars
+        );
+        assert!(status.headroom_chars > 0);
     }
 }

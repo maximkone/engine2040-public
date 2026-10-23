@@ -101,36 +101,82 @@ function indexCrate(files) {
       const lit = literals(src, rhsStart, m.index + m[0].length - 1);
       if (/^"\s*"$/.test(rhs) && lit.length === 1) value = { kind: "str", v: lit[0].value };
       else if (/^-?\d[\d_]*(?:_?[iu](?:8|16|32|64|128|size))?$/.test(rhs)) value = { kind: "int", v: rhs.replace(/_?[iu](?:8|16|32|64|128|size)$/, "").replace(/_/g, "") };
+      else if (/^-?\d[\d_]*\.\d[\d_]*(?:[fF](?:32|64))?$/.test(rhs)) value = { kind: "num", v: rhs.replace(/[fF](?:32|64)$/, "").replace(/_/g, "") };
       else if (/^(?:[a-z_]\w*::)*[A-Z][A-Z0-9_]*$/.test(rhs)) value = { kind: "path", v: rhs };
-      else {
-        const arith = /^((?:[a-z_]\w*::)*[A-Z][A-Z0-9_]*)\s*([+-])\s*((?:[a-z_]\w*::)*[A-Z][A-Z0-9_]*)$/.exec(rhs);
-        if (arith) value = { kind: "arith", op: arith[2], lhs: arith[1], rhs: arith[3] };
-      }
+      else if (/^[\w:+\-*/<>() ]+$/.test(rhs) && /[+\-*/<>]/.test(rhs)) value = { kind: "expr", v: rhs };
       if (value) { if (!consts.has(m[1])) consts.set(m[1], []); consts.get(m[1]).push({ src, ...value }); }
     }
   }
   return { srcs, byRel, consts };
 }
 
+// One indexed const as { kind, v }, following paths and evaluating integer expressions.
+function entryValue(idx, c, depth) {
+  if (c.kind === "path") return depth < 6 ? constValue(idx, c.v, c.src, depth + 1) : null;
+  if (c.kind === "expr") return evalConstExpr(idx, c, depth + 1);
+  return { kind: c.kind, v: c.v };
+}
+
 // A const's value as { kind, v }, following `a::b::NAME` aliases; null when unknown or ambiguous.
+// The same name in several crates resolves only when every definition agrees, so a shared number
+// prints and a conflicting one stays a placeholder.
 function constValue(idx, name, fromSrc, depth = 0) {
+  if (depth >= 6) return null;
   const last = name.split("::").pop();
   const all = idx.consts.get(last) ?? [];
   let hit = all.filter((c) => c.src === fromSrc);
   if (hit.length !== 1) hit = name.includes("::") ? all.filter((c) => c.src.rel.replace(/\.rs$/, "").endsWith(name.split("::").slice(-2, -1)[0] ?? "\0")) : [];
-  if (hit.length !== 1) hit = all.length === 1 ? all : [];
-  if (hit.length !== 1) return null;
-  const c = hit[0];
-  if (c.kind === "path") return depth < 4 ? constValue(idx, c.v, c.src, depth + 1) : null;
-  if (c.kind === "arith") {
-    if (depth >= 4) return null;
-    const a = constValue(idx, c.lhs, c.src, depth + 1);
-    const b = constValue(idx, c.rhs, c.src, depth + 1);
-    if (!a || !b || a.kind !== "int" || b.kind !== "int") return null;
-    const n = c.op === "+" ? BigInt(a.v) + BigInt(b.v) : BigInt(a.v) - BigInt(b.v);
-    return { kind: "int", v: n.toString() };
+  if (hit.length === 1) return entryValue(idx, hit[0], depth);
+  if (!all.length) return null;
+  const vals = all.map((c) => entryValue(idx, c, depth + 1));
+  const first = vals[0];
+  return first && vals.every((v) => v && v.kind === first.kind && v.v === first.v) ? first : null;
+}
+
+// An integer expression (`4 * 1024`, `1 << 20`, `2 * (4 + MAX_ROWS * 26)`) over numbers and
+// consts; anything else is null, so an unresolved value stays a placeholder.
+function evalConstExpr(idx, c, depth) {
+  if (depth >= 6) return null;
+  const toks = c.v.match(/<<|>>|[()+\-*/]|\d[\d_]*|[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*/g);
+  if (!toks) return null;
+  let i = 0;
+  const apply = (op, a, b) => {
+    const x = BigInt(a), y = BigInt(b);
+    switch (op) {
+      case "+": return (x + y).toString();
+      case "-": return (x - y).toString();
+      case "*": return (x * y).toString();
+      case "<<": return (x << y).toString();
+      case ">>": return (x >> y).toString();
+      case "/": return y === 0n ? null : (x / y).toString();
+    }
+    return null;
+  };
+  const atom = () => {
+    const t = toks[i++];
+    if (t === undefined) throw new Error("end");
+    if (t === "(") { const v = expr(); if (toks[i++] !== ")") throw new Error(")"); return v; }
+    if (/^\d/.test(t)) return t.replace(/_/g, "");
+    const v = constValue(idx, t, c.src, depth + 1);
+    if (!v || (v.kind !== "int" && v.kind !== "num")) throw new Error("name");
+    return v.v;
+  };
+  const term = () => {
+    let v = atom();
+    while (["*", "/", "<<", ">>"].includes(toks[i])) { const op = toks[i++]; v = apply(op, v, atom()); }
+    return v;
+  };
+  const expr = () => {
+    let v = term();
+    while (toks[i] === "+" || toks[i] === "-") { const op = toks[i++]; v = apply(op, v, term()); }
+    return v;
+  };
+  try {
+    const v = expr();
+    return i === toks.length && v !== null ? { kind: "int", v } : null;
+  } catch {
+    return null;
   }
-  return { kind: c.kind, v: c.v };
 }
 
 // A name expression (`"x.y"`, `TOOL_X`, `super::TOOL_X`, `a::MCP_TOOL_NAME`) as its string value, or null.
@@ -182,6 +228,13 @@ function fnIndex(src) {
 }
 
 const NOT_CALLS = new Set(["if", "while", "for", "match", "loop", "return", "fn", "let", "in", "as", "move", "dispatch", "invoke", "new", "default", "from", "into", "map_err", "ok_or", "ok_or_else", "unwrap_or", "unwrap_or_else", "map", "and_then", "iter", "collect", "len", "push", "get", "insert", "contains", "clone", "to_owned", "to_string", "format", "write", "lock"]);
+
+// Functions followed from one handler before the walk stops. The visited set
+// already makes a cycle terminate; this bounds a call graph that fans out over
+// a whole file. 60 cut real verbs mid-graph (scene.place lost its bad_want
+// helper, tx.apply lost the spatial delta checks), so the cap sits above every
+// handler in the crate; a graph that ever passes it is named in Coverage.
+const MAX_REACHED_FNS = 500;
 
 // Names called as `name(` or `.name(` inside code[from, to).
 function calledNames(src, from, to) {
@@ -381,8 +434,9 @@ function parseRegistrations(idx) {
 }
 
 // ---- model ----
-export function buildModel(files) {
+export function buildModel(files, root = null) {
   const idx = indexCrate(files);
+  if (root) mergeWorkspaceConsts(idx, root);
   const defs = toolDefs(idx);
   const regs = parseRegistrations(idx);
   const model = { cards: {}, core: [], packs: [], counts: {}, gateCodes: [], unparsed: [] };
@@ -449,7 +503,7 @@ export function buildModel(files) {
     const seenFns = new Set();
     const queue = [...entryFns];
     const reached = [];
-    while (queue.length && reached.length < 60) {
+    while (queue.length && reached.length < MAX_REACHED_FNS) {
       const [s, f] = queue.shift();
       const key = `${s.rel}:${f.at}`;
       if (seenFns.has(key)) continue;
@@ -645,11 +699,11 @@ export function renderPage(model) {
   L.push("<!-- Generated by `node tools/door-reference.mjs --write` from crates/endpoint/src. Do not edit by hand: CI fails when this page differs from the generated one. -->", "");
   L.push(`This page lists every tool the AI door answers: ${model.counts.core} core tools and ${model.counts.verbs} verbs in ${model.counts.packs} packs. It is printed from the Rust source by \`tools/door-reference.mjs\`, so a renamed argument, a new refusal or a new verb changes the page; \`node tools/door-reference.mjs --check\` fails when the checked-in file is stale. Start with the [AI door page](ai-door.md) for how a session works.`, "");
   L.push("## How the page is made", "");
-  L.push("The generator is a small text parser, not a running server. It reads the `e2_tool!` macros and `impl ToolBase` blocks, the `VerbSpec::of` registrations, the argument structs and the refusal sites in the handler of each verb and in the same-file functions that handler calls. What it quotes is what the source says:", "");
+  L.push("The generator is a small text parser, not a running server. It reads the `e2_tool!` macros and `impl ToolBase` blocks, the `VerbSpec::of` registrations, the argument structs and the refusal sites in the handler of each verb and in the same-crate functions that handler calls (up to 500, with the visited set stopping a cycle). What it quotes is what the source says:", "");
   L.push("- **Scope** is the capability card the verb registers with, plus the read-only hint of its annotations.");
   for (const [k, text] of Object.entries(model.cards)) if (k !== "deny") L.push(`  - \`${k}\`: ${esc(text)}`);
   L.push("- **Ranges** are quoted from the description and from the refusal messages that name the argument. The handler's validation is the authority; a range the source never writes in text does not appear here.");
-  L.push("- **Typed refusals** are the `code` plus the message template of each refusal site. A `{NAME}` that is a constant in the crate is filled in; other placeholders stay as written.");
+  L.push("- **Typed refusals** are the `code` plus the message template of each refusal site. A `{NAME}` that is a constant in the endpoint crate or a workspace crate it names is filled in, and an integer expression over constants is evaluated; other placeholders stay as written.");
   L.push("- **Undo** is `none` for a read-only verb and `this verb is the undo` for a `revert` verb. Otherwise it quotes the description sentence that says undo, or says `journaled` when the handler calls `apply_gated` (the path of `tx.apply`, which `tx.undo` reverts), or says `not stated in the source`.", "");
   L.push("## Refusals every call can get", "");
   if (model.doorWide.length) { L.push("From the pack dispatch (`packs/mod.rs`):", "", "| Code | Message |", "|---|---|", ...model.doorWide.map((r) => `| ${code(r.code)} | ${esc(r.message)} |`), ""); }
@@ -672,7 +726,7 @@ export function renderPage(model) {
   const thin = all.filter((v) => !v.refusals.length).map((v) => v.name);
   L.push("## Coverage", "");
   L.push(`${all.length} tools parsed, ${all.reduce((n, v) => n + v.refusals.length, 0)} refusal rows printed, ${model.unparsed.length} declarations the parser could not read.`);
-  L.push("A verb whose handler converts a typed error defined in another file (the log tools, the level builder) shows fewer refusals than it can return; the tests next to its source are the full list.");
+  L.push("A verb whose handler converts a typed error defined in another file (the log tools, the level builder) shows fewer refusals than it can return, and a handler whose call graph passes the 500-function walk stops there; the tests next to its source are the full list.");
   if (thin.length) L.push("", `Tools with no refusal site found: ${thin.map((n) => code(n)).join(", ")}.`);
   if (model.unparsed.length) L.push("", "Not parsed:", ...model.unparsed.map((u) => `- ${esc(u)}`));
   L.push("");
@@ -705,7 +759,33 @@ export function readCrate(root = ROOT) {
   return files;
 }
 
-export const generate = (root = ROOT) => renderPage(buildModel(readCrate(root)));
+// A refusal can quote a value imported from another crate (`WISH_RANGE`, `MAX_MATCH_TICKS`).
+// Index the other crates' consts so the page prints the number; a name that conflicts across
+// crates stays a placeholder. The endpoint crate is already indexed, so it is skipped.
+function mergeWorkspaceConsts(idx, root) {
+  const crates = join(root, "crates");
+  if (!existsSync(crates)) return;
+  const endpointSrc = resolve(root, SRC_DIR);
+  const files = new Map();
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith(".rs")) files.set(relative(root, p).split(sep).join("/"), readFileSync(p, "utf8"));
+    }
+  };
+  for (const e of readdirSync(crates, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    const src = join(crates, e.name, "src");
+    if (existsSync(src) && resolve(src) !== endpointSrc) walk(src);
+  }
+  for (const [name, rows] of indexCrate(files).consts) {
+    if (!idx.consts.has(name)) idx.consts.set(name, []);
+    idx.consts.get(name).push(...rows);
+  }
+}
+
+export const generate = (root = ROOT) => renderPage(buildModel(readCrate(root), root));
 
 function main(argv) {
   const write = argv.includes("--write");

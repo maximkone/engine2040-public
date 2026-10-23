@@ -19,6 +19,9 @@ pub mod canon;
 /// adaptive char budget, deterministic and never a model call.
 #[cfg(feature = "mcp")]
 pub mod collapse;
+/// EG26: the dev console's read-only door over the session's live play slot.
+#[cfg(feature = "mcp")]
+pub mod console_bridge;
 #[cfg(feature = "mcp")]
 pub mod discover;
 /// Audited dispatch seam: one audit record per door call, pinned by holders.

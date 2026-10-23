@@ -43,16 +43,24 @@
 
 use super::cooked::len_word;
 use super::skin_import::{
-    bound_clip_name, cook_clip_tables, CookConfig, ImportedClip, SkinImportError, QUAT_NORM_EPS,
+    bound_clip_name, cook_clip_tables, cook_tick_count, sample_track3, CookConfig, ImportedClip,
+    SkinImportError, QUAT_NORM_EPS,
 };
 use super::wire::bound_chars;
+use engine_anim::clip::TICK_DT;
 use engine_anim::contract::{
     validate_skeleton, AnimError, ContactTable, RootTable, Skeleton, NAME_MAX_LEN,
 };
+use engine_anim::feet::slide_mm;
 use engine_anim::pose::QuatTrack;
 use engine_anim::{Clip, Track};
 use engine_core::{quat_mul, Fnv64};
 use std::fmt;
+
+mod coverage;
+mod gate;
+pub use coverage::{BoneCoverage, BoneSet, MAX_COVERAGE_NAMES};
+pub use gate::{clip_foot_slide, FootSlide, MAX_PLANTED_SLIDE_MM, RIG_PREFIXES};
 
 /// Max sidecar JSON bytes accepted; larger files are refused, never truncated.
 pub const MAX_SIDECAR_BYTES: usize = 65_536;
@@ -142,10 +150,30 @@ pub enum RetargetError {
         /// Sample index.
         index: usize,
     },
+    /// A planted foot stepped farther than [`MAX_PLANTED_SLIDE_MM`] in one
+    /// tick; the clip name, the foot and the step are carried.
+    FootSlide {
+        /// Truncated clip name.
+        clip: String,
+        /// Foot index: `0` left, `1` right.
+        foot: u8,
+        /// Absolute tick of the later sample.
+        tick: u32,
+        /// Step distance in millimeters.
+        mm: u32,
+    },
     /// A cook config names a joint past the target skeleton.
     UnknownJoint {
         /// Offending joint index.
         joint: usize,
+    },
+    /// The bone map leaves a required rig set unmapped; the set names and the
+    /// nearest known target joints (capped) are carried.
+    BoneCoverage {
+        /// Missing set names, in [`BoneSet::ALL`] order, at most six.
+        sets: Vec<String>,
+        /// Target joints that would fix them, at most [`MAX_COVERAGE_NAMES`].
+        joints: Vec<String>,
     },
     /// An input exceeds a budget (sidecar bytes, tags, windows, markers).
     TooLarge {
@@ -187,7 +215,23 @@ impl fmt::Display for RetargetError {
             }
             Self::BadRoot { index } => write!(f, "retarget bad root delta {index}"),
             Self::BadContact { index } => write!(f, "retarget bad contact {index}"),
+            Self::FootSlide {
+                clip,
+                foot,
+                tick,
+                mm,
+            } => write!(
+                f,
+                "retarget clip {} foot {foot} slides {mm} mm at tick {tick} (budget {MAX_PLANTED_SLIDE_MM} mm/tick)",
+                bound_detail(clip)
+            ),
             Self::UnknownJoint { joint } => write!(f, "retarget unknown joint {joint}"),
+            Self::BoneCoverage { sets, joints } => write!(
+                f,
+                "retarget coverage misses {} (unmapped joints: {})",
+                sets.join(", "),
+                joints.join(", ")
+            ),
             Self::TooLarge { count } => write!(f, "retarget too large: {count}"),
             Self::NonFinite(field) => write!(f, "retarget non-finite {field}"),
         }
@@ -301,6 +345,29 @@ impl BoneMap {
         })
     }
 
+    /// [`build`](Self::build) plus the required-set coverage: refuses with
+    /// [`RetargetError::BoneCoverage`] when the target rig cannot drive the
+    /// root, hips, spine, arms, legs or head. Callers that cook a playable rig
+    /// use this gate; a diagnostic or partial map stays on [`Self::build`].
+    pub fn build_checked<'a>(
+        source: &Skeleton,
+        target: &'a Skeleton,
+        pairs: &[(&str, &str)],
+    ) -> Result<(Self, BoneCoverage<'a>), RetargetError> {
+        let map = Self::build(source, target, pairs)?;
+        let coverage = map.coverage(target);
+        if !coverage.is_complete() {
+            return Err(coverage::refusal(&coverage));
+        }
+        Ok((map, coverage))
+    }
+
+    /// Required-set coverage of this map over `target`: which sets it drives
+    /// and, per missing set, the target joints that would fix it.
+    pub fn coverage<'a>(&self, target: &'a Skeleton) -> BoneCoverage<'a> {
+        coverage::measure(target, |joint| self.source_of(joint).is_some())
+    }
+
     /// Row count; always the target joint count for built maps.
     pub fn len(&self) -> usize {
         self.target_to_source.len()
@@ -318,9 +385,23 @@ impl BoneMap {
     }
 }
 
-/// Joint index by name, `None` when the skeleton has no such joint.
+/// Joint index by name, `None` when the skeleton has no such joint. Imported
+/// rig prefixes are stripped on both sides, so a pair name `Hips` finds a
+/// `mixamorig:Hips` joint and the other way round.
 fn joint_index(skeleton: &Skeleton, name: &str) -> Option<usize> {
-    skeleton.joints.iter().position(|joint| joint.name == name)
+    let wanted = strip_rig_prefix(name);
+    skeleton
+        .joints
+        .iter()
+        .position(|joint| strip_rig_prefix(&joint.name) == wanted)
+}
+
+/// The name without one [`RIG_PREFIXES`] prefix; other names pass through.
+fn strip_rig_prefix(name: &str) -> &str {
+    RIG_PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+        .unwrap_or(name)
 }
 
 /// Quaternion conjugate: the inverse rotation for unit quaternions.
@@ -1267,6 +1348,20 @@ pub fn retarget_cook(
     }
     let (root, contacts) =
         cook_clip_tables(&clip, plan.target, plan.config).map_err(map_cook_error)?;
+    if let Some(slide) = clip_foot_slide(
+        &clip,
+        plan.target,
+        &contacts,
+        plan.config.left_foot,
+        plan.config.right_foot,
+    )? {
+        return Err(RetargetError::FootSlide {
+            clip: bound_clip_name(&clip.name),
+            foot: slide.foot,
+            tick: slide.tick,
+            mm: slide.mm,
+        });
+    }
     Ok(RetargetedClip {
         clip,
         root,
@@ -1589,6 +1684,35 @@ mod tests {
         .expect("synthetic skeleton must import")
     }
 
+    /// The SOMA-77 table as a skeleton: the source side of `soma_pairs`.
+    fn soma_source() -> Skeleton {
+        let joints: Vec<JointDoc> = crate::soma::SOMA77
+            .iter()
+            .map(|(name, parent)| {
+                let at = parent.and_then(|p| crate::soma::SOMA77.iter().position(|(n, _)| *n == p));
+                JointDoc {
+                    name: (*name).to_string(),
+                    parent: at,
+                }
+            })
+            .collect();
+        import_skeleton_doc(&SkeletonDoc { joints }).expect("the SOMA-77 table must import")
+    }
+
+    /// The fixture rig with one imported prefix on every joint name.
+    fn prefixed_skeleton(names: [&str; JOINTS]) -> Skeleton {
+        let parents = parents();
+        let joints: Vec<JointDoc> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| JointDoc {
+                name: format!("mixamorig_{name}"),
+                parent: parents[index],
+            })
+            .collect();
+        import_skeleton_doc(&SkeletonDoc { joints }).expect("prefixed skeleton must import")
+    }
+
     fn bind_fixture(offsets: [[f32; 3]; JOINTS], rotations: [[f32; 4]; JOINTS]) -> BindPose {
         BindPose {
             positions: offsets.to_vec(),
@@ -1713,9 +1837,10 @@ mod tests {
         }
     }
 
-    fn cook_fixture(name: &str) -> RetargetedClip {
+    /// Cook one hand-built source clip through the fixture rig.
+    fn cook_doc(doc: &ClipDoc) -> Result<RetargetedClip, RetargetError> {
         let (source, target, source_bind, target_bind, map) = rig();
-        let clip = import_clip_doc(&clip_doc(name), &source).expect("fixture clip must import");
+        let clip = import_clip_doc(doc, &source).expect("fixture clip must import");
         let config = cook_config();
         let plan = RetargetPlan {
             source_clip: &clip,
@@ -1726,7 +1851,11 @@ mod tests {
             map: &map,
             config: &config,
         };
-        retarget_cook(&plan, ClipTags::default()).expect("fixture cook must pass")
+        retarget_cook(&plan, ClipTags::default())
+    }
+
+    fn cook_fixture(name: &str) -> RetargetedClip {
+        cook_doc(&clip_doc(name)).expect("fixture cook must pass")
     }
 
     /// Bind-relative rotation delta of one key, for tolerance comparison.
@@ -2545,6 +2674,12 @@ mod tests {
             },
             RetargetError::BadRoot { index: 4 },
             RetargetError::BadContact { index: 4 },
+            RetargetError::FootSlide {
+                clip: "walk".to_string(),
+                foot: 1,
+                tick: 104,
+                mm: 31,
+            },
             RetargetError::UnknownJoint { joint: 99 },
             RetargetError::TooLarge { count: 1 },
             RetargetError::NonFinite("clip.values"),
@@ -2558,5 +2693,227 @@ mod tests {
         assert!(format!("{error}").chars().count() <= MAX_SIDECAR_DETAIL_CHARS + 64);
         let error = RetargetError::MissingBone { name: long };
         assert!(format!("{error}").chars().count() <= MAX_SIDECAR_DETAIL_CHARS + 64);
+    }
+
+    // AD15: cook-time clip gates. A planted foot may not skate, a lifted foot
+    // may travel, and an imported rig prefix never hides a bone.
+
+    #[test]
+    fn clip_gates_refuse_a_planted_three_centimeter_slide() {
+        let offsets = source_offsets();
+        let foot = offsets[FOOT_L];
+        let mut doc = blank_doc("skate", &offsets);
+        // Two ticks of the same planted height; the foot jumps 3 cm in x
+        // between them, the edge map a broken plant would ship.
+        doc.translations[SPINE] = vec![
+            key3(0.0, offsets[SPINE]),
+            key3(2.0 * TICK_DT, offsets[SPINE]),
+        ];
+        doc.translations[FOOT_L] = vec![
+            key3(0.0, foot),
+            key3(TICK_DT, [foot[0] + 0.03, foot[1], foot[2]]),
+        ];
+        let error = cook_doc(&doc).expect_err("a planted 3 cm step must refuse");
+        match error {
+            RetargetError::FootSlide {
+                clip,
+                foot,
+                tick,
+                mm,
+            } => {
+                assert_eq!(clip, "skate");
+                assert_eq!(foot, 0, "the left foot skates");
+                // The target foot bone is 1.1x the source, so 3 cm raw cooks
+                // to 33 mm; the gate must carry the cooked step it measured.
+                assert!(mm >= 30, "a 3 cm raw slide must read at least 30 mm");
+                assert_eq!(tick, cook_config().start_tick + 1);
+            }
+            other => panic!("want FootSlide, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clip_gates_pass_a_still_foot() {
+        let (_, target, ..) = rig();
+        for name in ["idle", "walk", "run"] {
+            let cooked = cook_fixture(name);
+            let slide = clip_foot_slide(&cooked.clip, &target, &cooked.contacts, FOOT_L, FOOT_R)
+                .expect("slide probe must run");
+            assert!(
+                slide.is_none(),
+                "{name} plant drifts past the budget: {slide:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clip_gates_ignore_a_slide_while_the_foot_is_lifted() {
+        let offsets = source_offsets();
+        let foot = offsets[FOOT_L];
+        let lifted = [foot[0], foot[1] + 0.12, foot[2]];
+        let mut doc = blank_doc("hop", &offsets);
+        doc.translations[SPINE] = vec![
+            key3(0.0, offsets[SPINE]),
+            key3(2.0 * TICK_DT, offsets[SPINE]),
+        ];
+        // The same 3 cm jump, but the foot is 12 cm up: no contact, no gate.
+        doc.translations[FOOT_L] = vec![
+            key3(0.0, lifted),
+            key3(TICK_DT, [lifted[0] + 0.03, lifted[1], lifted[2]]),
+        ];
+        let cooked = cook_doc(&doc).expect("a lifted foot may travel");
+        let (_, target, ..) = rig();
+        let slide = clip_foot_slide(&cooked.clip, &target, &cooked.contacts, FOOT_L, FOOT_R)
+            .expect("slide probe must run");
+        assert!(
+            slide.is_none(),
+            "a lifted foot is not a planted step: {slide:?}"
+        );
+    }
+
+    #[test]
+    fn clip_gates_ignore_a_planted_foot_landing() {
+        let offsets = source_offsets();
+        let foot = offsets[FOOT_L];
+        let mut doc = blank_doc("stomp", &offsets);
+        doc.translations[SPINE] = vec![
+            key3(0.0, offsets[SPINE]),
+            key3(2.0 * TICK_DT, offsets[SPINE]),
+        ];
+        // Both ticks are planted, but the foot only drops 8 cm: a heel strike
+        // across the ground threshold. Skate is horizontal, so the cook passes.
+        doc.translations[FOOT_L] = vec![
+            key3(0.0, [foot[0], foot[1] + 0.02, foot[2]]),
+            key3(TICK_DT, [foot[0], foot[1] - 0.06, foot[2]]),
+        ];
+        let cooked = cook_doc(&doc).expect("a planted foot may land");
+        let (_, target, ..) = rig();
+        let slide = clip_foot_slide(&cooked.clip, &target, &cooked.contacts, FOOT_L, FOOT_R)
+            .expect("slide probe must run");
+        assert!(slide.is_none(), "a landing is not skate: {slide:?}");
+    }
+
+    #[test]
+    fn clip_gates_strip_an_imported_prefix_on_both_sides() {
+        let skeleton = |names: [&str; 2]| {
+            import_skeleton_doc(&SkeletonDoc {
+                joints: names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| JointDoc {
+                        name: (*name).to_string(),
+                        parent: if index == 0 { None } else { Some(0) },
+                    })
+                    .collect(),
+            })
+            .expect("two-joint skeleton must import")
+        };
+        let plain = skeleton(["hips", "foot_l"]);
+        let prefixed = skeleton(["mixamorig_hips", "mixamorig_foot_l"]);
+        let pairs = [("hips", "hips"), ("foot_l", "foot_l")];
+        let from_plain = BoneMap::build(&plain, &plain, &pairs).expect("plain map must build");
+        let from_prefixed =
+            BoneMap::build(&prefixed, &prefixed, &pairs).expect("prefixed map must build");
+        assert_eq!(
+            from_plain, from_prefixed,
+            "prefixes must not change one row"
+        );
+        assert_eq!(joint_index(&prefixed, "mixamorig_foot_l"), Some(1));
+        assert_eq!(joint_index(&prefixed, "foot_l"), Some(1));
+        assert_eq!(joint_index(&prefixed, "foot"), None);
+    }
+
+    #[test]
+    fn clip_gates_coverage_lists_the_three_unmapped_joints() {
+        let source = soma_source();
+        let target = crate::fighter::fighter_skeleton().expect("the fighter rig must build");
+        let left_out = ["hips", "neck", "head"];
+        let all = crate::soma::soma_pairs();
+        let pairs: Vec<(&str, &str)> = all
+            .iter()
+            .copied()
+            .filter(|(fighter, _)| !left_out.contains(fighter))
+            .collect();
+        let error = BoneMap::build_checked(&source, &target, &pairs)
+            .expect_err("a rig with no root, hips or head must refuse");
+        match error {
+            RetargetError::BoneCoverage { sets, joints } => {
+                assert_eq!(sets, ["root", "hips", "head"]);
+                assert_eq!(joints, ["hips", "neck", "head"]);
+            }
+            other => panic!("want BoneCoverage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clip_gates_coverage_accepts_the_fighter_rig() {
+        let source = soma_source();
+        let target = crate::fighter::fighter_skeleton().expect("the fighter rig must build");
+        let all = crate::soma::soma_pairs();
+        assert_eq!(target.len(), 65, "the fighter rig is 65 joints");
+        let (map, coverage) = BoneMap::build_checked(&source, &target, &all)
+            .expect("the fighter rig drives every required set");
+        assert!(coverage.is_complete());
+        assert!(coverage.unmapped.is_empty());
+        assert_eq!(map.len(), 65);
+    }
+
+    #[test]
+    fn clip_gates_coverage_names_come_from_a_real_rig() {
+        let fighter = crate::fighter::fighter_skeleton().expect("the fighter rig must build");
+        let mut known: Vec<&str> = fighter
+            .joints
+            .iter()
+            .map(|joint| joint.name.as_str())
+            .collect();
+        known.extend(crate::ct7_map::CT7_TO_BODY.iter().map(|(name, _)| *name));
+        for set in BoneSet::ALL {
+            for name in set.joints() {
+                assert!(
+                    known.contains(name),
+                    "{} names {name}, which no rig in this crate carries",
+                    set.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clip_gates_prefix_and_plain_names_cook_equal_bytes() {
+        let (source, target, source_bind, target_bind, map) = rig();
+        let clip = import_clip_doc(&clip_doc("walk"), &source).expect("fixture clip must import");
+        let config = cook_config();
+        let cook = |source: &Skeleton, target: &Skeleton, map: &BoneMap| {
+            let plan = RetargetPlan {
+                source_clip: &clip,
+                source,
+                source_bind: &source_bind,
+                target,
+                target_bind: &target_bind,
+                map,
+                config: &config,
+            };
+            retarget_cook(&plan, ClipTags::default()).expect("fixture cook must pass")
+        };
+        let plain = cook(&source, &target, &map);
+        let pairs: Vec<(String, String)> = target_names()
+            .iter()
+            .zip(source_names().iter())
+            .map(|(t, s)| ((*t).to_string(), (*s).to_string()))
+            .collect();
+        let refs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(t, s)| (t.as_str(), s.as_str()))
+            .collect();
+        let prefixed_source = prefixed_skeleton(source_names());
+        let prefixed_target = prefixed_skeleton(target_names());
+        let prefixed_map = BoneMap::build(&prefixed_source, &prefixed_target, &refs)
+            .expect("plain pair names find prefixed joints");
+        let prefixed = cook(&prefixed_source, &prefixed_target, &prefixed_map);
+        assert_eq!(
+            retarget_digest(&plain),
+            retarget_digest(&prefixed),
+            "an imported rig prefix must not change one cooked byte"
+        );
     }
 }

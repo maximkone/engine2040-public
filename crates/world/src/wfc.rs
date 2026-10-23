@@ -4,11 +4,17 @@
 //! Owner: engine-world, bake-time only, never the tick or the sim hash.
 //! Units: cells are `u16` grid steps, `x` fastest then `z`; kinds are indices
 //! `0..kinds`; direction 0 `+x`, 1 `-x`, 2 `+z`, 3 `-z`.
-//! Determinism: the same `(width, height, adjacency, seed)` always gives the
-//! same bytes; one collapse per step draws from `splitmix64(seed ^ step)`,
-//! integers only, so the collapse order never depends on a float entropy.
-//! Errors: [`WfcError`] refuses a bad table and an emptied wave; a contradiction
-//! is returned, never retried with another seed (the caller picks the seed).
+//! Determinism: the same `(width, height, adjacency, seed, constraints)` always
+//! gives the same bytes; one collapse per step draws from `splitmix64(seed ^ step)`,
+//! integers only, so the collapse order never depends on a float entropy, and
+//! cells are scanned in grid order, never through a map.
+//! Authored rules: [`Constraints`] pins a cell to a kind, forbids a kind in a
+//! block and joins two cells with a path; [`bake_constrained`] satisfies every
+//! rule or names the cell that cannot.
+//! Errors: [`WfcError`] refuses a bad table, a bad or impossible rule and an
+//! emptied wave; the solver backtracks within one seed up to [`MAX_BACKTRACKS`]
+//! failed branches, then refuses with a typed error, never a partial grid (the
+//! caller picks another seed).
 //! Budget: `width * height <= MAX_WFC_SIDE^2` masks of one `u16`, one `Vec<u8>`
 //! out, one `VecDeque` of cells; bake time, never the tick.
 //! Consumer: the `world.bake`-style door row and the nav bake. An AI authors a
@@ -32,6 +38,11 @@ pub const MAX_WFC_SIDE: u16 = 128;
 pub const MAX_KINDS: usize = 16;
 /// Direction count: 0 `+x`, 1 `-x`, 2 `+z`, 3 `-z`.
 pub const DIRECTIONS: usize = 4;
+/// Failed branches one constrained bake may try before it refuses.
+///
+/// The search is depth-first over grid order, so a cap makes the worst case
+/// finite: no seed can hang a bake, and a refusal is typed, never a partial grid.
+pub const MAX_BACKTRACKS: u32 = 512;
 
 /// Tile kinds plus, for each kind and direction, the bitmask of the neighbour
 /// kinds that may touch it.
@@ -149,6 +160,59 @@ pub enum WfcError {
         /// The refused version byte.
         version: u8,
     },
+    /// A authored rule names a cell this map does not hold.
+    CellOutOfBounds {
+        /// Cell x in grid steps.
+        x: u16,
+        /// Cell z in grid steps.
+        z: u16,
+    },
+    /// A rule names a kind at or above `adjacency.kinds()`.
+    KindOutOfRange {
+        /// Cell x the rule starts at.
+        x: u16,
+        /// Cell z the rule starts at.
+        z: u16,
+        /// The refused kind index.
+        kind: TileId,
+    },
+    /// A forbidden block ends before it starts, so it holds no cell.
+    RectInverted {
+        /// Block first column.
+        x: u16,
+        /// Block first row.
+        z: u16,
+    },
+    /// An `open` bit names a kind at or above `adjacency.kinds()`.
+    OpenMaskOutOfRange {
+        /// The refused kind index.
+        kind: TileId,
+    },
+    /// A connect rule needs an `open` mask, and the mask is zero.
+    OpenMaskEmpty,
+    /// Two or more rules left this cell with no possible kind.
+    UnsatisfiableCell {
+        /// Cell x in grid steps.
+        x: u16,
+        /// Cell z in grid steps.
+        z: u16,
+    },
+    /// The baked grid holds no `open` path between the two cells.
+    ConnectUnreachable {
+        /// Path start, grid steps.
+        from: (u16, u16),
+        /// Path end, grid steps.
+        to: (u16, u16),
+    },
+    /// The search used every failed branch the cap allows at this cell.
+    BacktrackCap {
+        /// Cell the search was retrying.
+        x: u16,
+        /// Cell z the search was retrying.
+        z: u16,
+        /// The cap that was hit.
+        cap: u32,
+    },
 }
 
 impl fmt::Display for WfcError {
@@ -179,21 +243,195 @@ impl fmt::Display for WfcError {
             WfcError::VersionUnknown { version } => {
                 write!(f, "wfc version {version} unknown")
             }
+            WfcError::CellOutOfBounds { x, z } => {
+                write!(f, "wfc rule names cell ({x}, {z}) outside the map")
+            }
+            WfcError::KindOutOfRange { x, z, kind } => {
+                write!(
+                    f,
+                    "wfc rule at cell ({x}, {z}) names kind {kind} above kinds-1"
+                )
+            }
+            WfcError::RectInverted { x, z } => {
+                write!(f, "wfc forbidden block at ({x}, {z}) ends before it starts")
+            }
+            WfcError::OpenMaskOutOfRange { kind } => {
+                write!(f, "wfc open mask names kind {kind} above kinds-1")
+            }
+            WfcError::OpenMaskEmpty => {
+                write!(f, "wfc connect rule needs a non-zero open mask")
+            }
+            WfcError::UnsatisfiableCell { x, z } => {
+                write!(f, "wfc rules leave cell ({x}, {z}) with no kind")
+            }
+            WfcError::ConnectUnreachable { from, to } => {
+                write!(
+                    f,
+                    "wfc baked no open path from ({}, {}) to ({}, {})",
+                    from.0, from.1, to.0, to.1
+                )
+            }
+            WfcError::BacktrackCap { x, z, cap } => {
+                write!(
+                    f,
+                    "wfc used {cap} failed branches at cell ({x}, {z}) without a grid"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for WfcError {}
 
+/// A tile kind index, `0..`[`Adjacency::kinds`]; the grid stores these bytes.
+pub type TileId = u8;
+
+/// Axis-aligned block of cells with inclusive corners, in grid steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    /// First column (west edge).
+    pub x0: u16,
+    /// First row (north edge).
+    pub z0: u16,
+    /// Last column, included.
+    pub x1: u16,
+    /// Last row, included.
+    pub z1: u16,
+}
+
+impl Rect {
+    /// A block from its two inclusive corners; [`Constraints::validate`] refuses
+    /// a block that is inverted or reaches past the map.
+    #[must_use]
+    pub const fn new(x0: u16, z0: u16, x1: u16, z1: u16) -> Self {
+        Self { x0, z0, x1, z1 }
+    }
+
+    /// A block of one cell.
+    #[must_use]
+    pub const fn cell(x: u16, z: u16) -> Self {
+        Self::new(x, z, x, z)
+    }
+
+    /// `true` when `(x, z)` lies inside, corners included.
+    #[must_use]
+    pub const fn holds(&self, x: u16, z: u16) -> bool {
+        x >= self.x0 && x <= self.x1 && z >= self.z0 && z <= self.z1
+    }
+}
+
+/// Authored rules a constrained bake must satisfy, in grid steps.
+///
+/// Every rule is read in list order and applied as a mask on cells, so the same
+/// lists always give the same masks. A rule that cannot hold is refused with the
+/// cell it names ([`WfcError::UnsatisfiableCell`]); nothing is ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Constraints {
+    /// Cell `(x, z)` and the kind it must hold. Pins of one cell intersect, so
+    /// two different pins on one cell are refused, not resolved.
+    pub pinned: Vec<(u16, u16, TileId)>,
+    /// A block that may never hold the kind.
+    pub forbidden: Vec<(Rect, TileId)>,
+    /// Two cells that must share a 4-way path of `open` kinds. The bake claims
+    /// the L corridor (x first, then z) for every pair, so the path exists.
+    pub connect: Vec<((u16, u16), (u16, u16))>,
+    /// Kinds a `connect` path may step on; `0` refuses every connect rule.
+    pub open: u16,
+}
+
+impl Constraints {
+    /// Check every rule against the map size and the table before any allocation.
+    /// Errors name the offending cell: [`WfcError::CellOutOfBounds`],
+    /// [`WfcError::KindOutOfRange`], [`WfcError::RectInverted`],
+    /// [`WfcError::OpenMaskOutOfRange`], [`WfcError::OpenMaskEmpty`].
+    pub fn validate(&self, width: u16, height: u16, adjacency: &Adjacency) -> Result<(), WfcError> {
+        let kinds = adjacency.kinds();
+        for &(x, z, kind) in &self.pinned {
+            cell_in_map(x, z, width, height)?;
+            kind_in_range(kind, x, z, kinds)?;
+        }
+        for &(rect, kind) in &self.forbidden {
+            if rect.x0 > rect.x1 || rect.z0 > rect.z1 {
+                return Err(WfcError::RectInverted {
+                    x: rect.x0,
+                    z: rect.z0,
+                });
+            }
+            cell_in_map(rect.x1, rect.z1, width, height)?;
+            kind_in_range(kind, rect.x0, rect.z0, kinds)?;
+        }
+        for &(from, to) in &self.connect {
+            cell_in_map(from.0, from.1, width, height)?;
+            cell_in_map(to.0, to.1, width, height)?;
+        }
+        if self.connect.is_empty() {
+            return Ok(());
+        }
+        self.validate_open(kinds)
+    }
+
+    /// Check the `open` mask alone: one bit per kind, at least one bit.
+    fn validate_open(&self, kinds: u8) -> Result<(), WfcError> {
+        if self.open == 0 {
+            return Err(WfcError::OpenMaskEmpty);
+        }
+        let over = self.open & !kind_bits(kinds);
+        if over == 0 {
+            return Ok(());
+        }
+        let kind = u8::try_from(over.trailing_zeros()).unwrap_or(0);
+        Err(WfcError::OpenMaskOutOfRange { kind })
+    }
+}
+
+/// Refuse a cell outside the map; names the cell.
+fn cell_in_map(x: u16, z: u16, width: u16, height: u16) -> Result<(), WfcError> {
+    if x >= width || z >= height {
+        return Err(WfcError::CellOutOfBounds { x, z });
+    }
+    Ok(())
+}
+
+/// Refuse a kind at or above `kinds`; names the cell the rule starts at.
+fn kind_in_range(kind: TileId, x: u16, z: u16, kinds: u8) -> Result<(), WfcError> {
+    if kind >= kinds {
+        return Err(WfcError::KindOutOfRange { x, z, kind });
+    }
+    Ok(())
+}
+
 /// Bake one map: `width * height` cells of kind indices, row-major, `x` fastest.
 ///
-/// A contradiction is refused, never retried. Errors: [`WfcError::TooLarge`],
-/// [`WfcError::Contradiction`].
+/// The same as [`bake_constrained`] with [`Constraints::default`]: no authored
+/// rule. Errors: [`WfcError::TooLarge`], [`WfcError::Contradiction`],
+/// [`WfcError::BacktrackCap`].
 pub fn bake(
     width: u16,
     height: u16,
     adjacency: &Adjacency,
     seed: u64,
+) -> Result<Vec<u8>, WfcError> {
+    bake_constrained(width, height, adjacency, seed, &Constraints::default())
+}
+
+/// Bake one map that satisfies every authored rule, or refuse with the reason.
+///
+/// Order: size, then rule validation, then masks, then arc consistency, then the
+/// seeded search, then the connect check. Errors: [`WfcError::TooLarge`],
+/// [`WfcError::CellOutOfBounds`], [`WfcError::KindOutOfRange`],
+/// [`WfcError::RectInverted`], [`WfcError::OpenMaskOutOfRange`],
+/// [`WfcError::OpenMaskEmpty`], [`WfcError::UnsatisfiableCell`],
+/// [`WfcError::Contradiction`], [`WfcError::BacktrackCap`],
+/// [`WfcError::ConnectUnreachable`].
+///
+/// Determinism: the same seed and rules give byte-identical grids. A refusal
+/// leaves no partial grid behind.
+pub fn bake_constrained(
+    width: u16,
+    height: u16,
+    adjacency: &Adjacency,
+    seed: u64,
+    constraints: &Constraints,
 ) -> Result<Vec<u8>, WfcError> {
     if width > MAX_WFC_SIDE {
         return Err(WfcError::TooLarge { side: width });
@@ -201,23 +439,268 @@ pub fn bake(
     if height > MAX_WFC_SIDE {
         return Err(WfcError::TooLarge { side: height });
     }
+    constraints.validate(width, height, adjacency)?;
     let kinds = adjacency.kinds();
     let cells = usize::from(width) * usize::from(height);
     let mut masks = vec![kind_bits(kinds); cells];
-    let mut step = 0u64;
-    while let Some((x, z)) = next_cell(&masks, width, height) {
-        let cell = index(x, z, width);
-        let want = engine_core::splitmix64(seed ^ step);
-        let kind = nth_kind(masks[cell], want, kinds).ok_or(WfcError::Contradiction { x, z })?;
-        masks[cell] = 1u16 << kind;
-        step = step.wrapping_add(1);
-        propagate(&mut masks, adjacency, width, height, (x, z))?;
+    if apply_constraints(&mut masks, width, height, constraints)? {
+        settle(&mut masks, adjacency, width, height)?;
     }
-    let mut out = Vec::with_capacity(cells);
-    for &mask in &masks {
+    let grid = search(&mut masks, adjacency, width, height, seed, MAX_BACKTRACKS)?;
+    check_connect(&grid, width, height, constraints)?;
+    Ok(grid)
+}
+
+/// Mask every rule onto the wave. `Ok(true)` when a mask shrank, `Ok(false)` for
+/// an empty rule list. Errors: [`WfcError::UnsatisfiableCell`] at the first cell
+/// left with no kind, in grid order.
+fn apply_constraints(
+    masks: &mut [u16],
+    width: u16,
+    height: u16,
+    constraints: &Constraints,
+) -> Result<bool, WfcError> {
+    let mut changed = false;
+    for &(x, z, kind) in &constraints.pinned {
+        let cell = index(x, z, width);
+        let pinned = masks[cell] & (1u16 << kind);
+        changed |= pinned != masks[cell];
+        masks[cell] = pinned;
+    }
+    for &(rect, kind) in &constraints.forbidden {
+        for z in rect.z0..=rect.z1 {
+            for x in rect.x0..=rect.x1 {
+                let cell = index(x, z, width);
+                let open = masks[cell] & !(1u16 << kind);
+                changed |= open != masks[cell];
+                masks[cell] = open;
+            }
+        }
+    }
+    for &(from, to) in &constraints.connect {
+        for (x, z) in corridor(from, to) {
+            let cell = index(x, z, width);
+            let open = masks[cell] & constraints.open;
+            changed |= open != masks[cell];
+            masks[cell] = open;
+        }
+    }
+    for z in 0..height {
+        for x in 0..width {
+            if masks[index(x, z, width)] == 0 {
+                return Err(WfcError::UnsatisfiableCell { x, z });
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// Cells of the L corridor from `from` to `to`: every x first, then every z.
+/// The last cell is `to`, so the corridor always joins the pair.
+fn corridor(from: (u16, u16), to: (u16, u16)) -> Vec<(u16, u16)> {
+    let (x1, z1) = to;
+    let mut out = Vec::new();
+    let mut x = from.0;
+    while x != x1 {
+        out.push((x, from.1));
+        x = if x < x1 {
+            x.saturating_add(1)
+        } else {
+            x.saturating_sub(1)
+        };
+    }
+    let mut z = from.1;
+    while z != z1 {
+        out.push((x1, z));
+        z = if z < z1 {
+            z.saturating_add(1)
+        } else {
+            z.saturating_sub(1)
+        };
+    }
+    out.push((x1, z1));
+    out
+}
+
+/// Run arc consistency from every cell, so a mask restricted by a rule reaches
+/// the whole map before the search starts.
+fn settle(
+    masks: &mut [u16],
+    adjacency: &Adjacency,
+    width: u16,
+    height: u16,
+) -> Result<(), WfcError> {
+    let mut trail = Trail::default();
+    for z in 0..height {
+        for x in 0..width {
+            propagate(masks, &mut trail, adjacency, width, height, (x, z))?;
+        }
+    }
+    Ok(())
+}
+
+/// Byte grid of the wave; a settled cell holds exactly one kind.
+fn settled(masks: &[u16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(masks.len());
+    for &mask in masks {
         out.push(lowest_bit(mask));
     }
-    Ok(out)
+    out
+}
+
+/// One collapse decision still open to other kinds.
+#[derive(Clone, Copy)]
+struct Frame {
+    /// Cell this decision sits on, row-major.
+    cell: usize,
+    /// Cell x in grid steps, kept for refusal messages.
+    x: u16,
+    /// Cell z in grid steps, kept for refusal messages.
+    z: u16,
+    /// Kinds not yet tried here, as a mask.
+    candidates: u16,
+    /// Seed draw that orders the kinds of this cell.
+    want: u64,
+    /// Trail length before this decision's own commit, so a retry undoes it.
+    trail: usize,
+}
+
+impl Frame {
+    /// Take the next kind to try: the `want % count_ones`-th of `candidates`,
+    /// in bit order. `None` when every kind of this cell was tried.
+    fn take_kind(&mut self, kinds: u8) -> Option<TileId> {
+        let kind = nth_kind(self.candidates, self.want, kinds)?;
+        self.candidates &= !(1u16 << kind);
+        Some(kind)
+    }
+}
+
+/// Cells changed since a checkpoint with their old mask, so a failed branch
+/// restores the wave exactly. Never a map: the trail is an ordered `Vec`.
+#[derive(Default)]
+struct Trail {
+    /// `(cell, old mask)`, oldest first.
+    edits: Vec<(usize, u16)>,
+}
+
+impl Trail {
+    /// Set one cell and remember its old mask.
+    fn set(&mut self, masks: &mut [u16], cell: usize, mask: u16) {
+        self.edits.push((cell, masks[cell]));
+        masks[cell] = mask;
+    }
+
+    /// Length to remember before a branch and pass back to [`Trail::rollback`].
+    fn mark(&self) -> usize {
+        self.edits.len()
+    }
+
+    /// Undo every edit above `keep`, newest first.
+    fn rollback(&mut self, masks: &mut [u16], keep: usize) {
+        while self.edits.len() > keep {
+            if let Some((cell, mask)) = self.edits.pop() {
+                masks[cell] = mask;
+            }
+        }
+    }
+}
+
+/// Seeded collapse with depth-first backtracking: collapse the fewest-kind cell,
+/// propagate, and on a contradiction try the next kind of the nearest open
+/// decision. At most `cap` failed branches; past it, a typed refusal.
+///
+/// Errors: [`WfcError::Contradiction`] when the root decision has no kind left,
+/// [`WfcError::BacktrackCap`] when `cap` branches failed.
+fn search(
+    masks: &mut [u16],
+    adjacency: &Adjacency,
+    width: u16,
+    height: u16,
+    seed: u64,
+    cap: u32,
+) -> Result<Vec<u8>, WfcError> {
+    let kinds = adjacency.kinds();
+    let mut trail = Trail::default();
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut step = 0u64;
+    let mut failed = 0u32;
+    let mut retry = false;
+    loop {
+        if !retry {
+            let Some((x, z)) = next_cell(masks, width, height) else {
+                break;
+            };
+            let cell = index(x, z, width);
+            let want = engine_core::splitmix64(seed ^ step);
+            step = step.wrapping_add(1);
+            frames.push(Frame {
+                cell,
+                x,
+                z,
+                candidates: masks[cell],
+                want,
+                trail: trail.mark(),
+            });
+        }
+        retry = false;
+        let Some(frame) = frames.last_mut() else {
+            break;
+        };
+        let Some(kind) = frame.take_kind(kinds) else {
+            // Every kind failed here, so the decision before it was wrong.
+            let Some(spent) = frames.pop() else {
+                break;
+            };
+            let Some(parent) = frames.last() else {
+                return Err(WfcError::Contradiction {
+                    x: spent.x,
+                    z: spent.z,
+                });
+            };
+            let keep = parent.trail;
+            trail.rollback(masks, keep);
+            failed = failed.saturating_add(1);
+            if failed > cap {
+                return Err(WfcError::BacktrackCap {
+                    x: spent.x,
+                    z: spent.z,
+                    cap,
+                });
+            }
+            retry = true;
+            continue;
+        };
+        let Some(frame) = frames.last() else {
+            break;
+        };
+        let (cell, x, z, keep) = (frame.cell, frame.x, frame.z, frame.trail);
+        trail.set(masks, cell, 1u16 << kind);
+        if propagate(masks, &mut trail, adjacency, width, height, (x, z)).is_err() {
+            trail.rollback(masks, keep);
+            failed = failed.saturating_add(1);
+            if failed > cap {
+                return Err(WfcError::BacktrackCap { x, z, cap });
+            }
+            retry = true;
+        }
+    }
+    Ok(settled(masks))
+}
+
+/// Every connect rule on the baked grid: both cells reachable over `open` kinds.
+/// Errors: [`WfcError::ConnectUnreachable`] names the pair that lost its path.
+fn check_connect(
+    cells: &[u8],
+    width: u16,
+    height: u16,
+    constraints: &Constraints,
+) -> Result<(), WfcError> {
+    for &(from, to) in &constraints.connect {
+        if !path_holds(cells, width, height, constraints.open, from, to) {
+            return Err(WfcError::ConnectUnreachable { from, to });
+        }
+    }
+    Ok(())
 }
 
 /// Flood fill over passable kinds (a bitmask of kind indices): true when every
@@ -236,8 +719,28 @@ pub fn is_connected(cells: &[u8], width: u16, height: u16, passable: u16) -> boo
     let (total, first) = passable_scan(cells, width, height, passable);
     match first {
         None => true,
-        Some(start) => flood(cells, width, height, passable, start) == total,
+        Some(start) => flood(cells, width, height, passable, start, None).0 == total,
     }
+}
+
+/// `true` when the grid holds a 4-way path of `passable` kinds from `from` to
+/// `to`, both cells included. The connect rule's own check, never a rewrite.
+#[must_use]
+fn path_holds(
+    cells: &[u8],
+    width: u16,
+    height: u16,
+    passable: u16,
+    from: (u16, u16),
+    to: (u16, u16),
+) -> bool {
+    if cells.len() != usize::from(width) * usize::from(height) {
+        return false;
+    }
+    if !in_set(passable, cells[index(from.0, from.1, width)]) {
+        return false;
+    }
+    flood(cells, width, height, passable, from, Some(to)).1
 }
 
 /// Mask holding one bit per kind below `kinds` (kind 0 is bit 0).
@@ -339,10 +842,13 @@ fn lowest_bit(mask: u16) -> u8 {
     u8::try_from(mask.trailing_zeros()).unwrap_or(0)
 }
 
-/// Shrink neighbour masks from `start` until the grid is arc-consistent.
-/// Errors: [`WfcError::Contradiction`] at the cell that lost every kind.
+/// Shrink neighbour masks from `start` until the grid is arc-consistent, and
+/// record every shrink on `trail` so a failed branch can undo it.
+/// Errors: [`WfcError::Contradiction`] at the cell that lost every kind; the
+/// caller rolls `trail` back to its own checkpoint.
 fn propagate(
     masks: &mut [u16],
+    trail: &mut Trail,
     adjacency: &Adjacency,
     width: u16,
     height: u16,
@@ -363,7 +869,7 @@ fn propagate(
             if shrunk == 0 {
                 return Err(WfcError::Contradiction { x: nx, z: nz });
             }
-            masks[cell] = shrunk;
+            trail.set(masks, cell, shrunk);
             queue.push_back((nx, nz));
         }
     }
@@ -393,15 +899,25 @@ fn passable_scan(
     (total, first)
 }
 
-/// Passable cells reachable from `start` by 4-way steps, `start` included.
+/// Passable cells reachable from `start` by 4-way steps, `start` included, and
+/// whether `stop` was among them.
 /// Units: cell steps in, cell count out.
-fn flood(cells: &[u8], width: u16, height: u16, passable: u16, start: (u16, u16)) -> usize {
+fn flood(
+    cells: &[u8],
+    width: u16,
+    height: u16,
+    passable: u16,
+    start: (u16, u16),
+    stop: Option<(u16, u16)>,
+) -> (usize, bool) {
     let mut seen = vec![false; cells.len()];
     seen[index(start.0, start.1, width)] = true;
     let mut stack = vec![start];
     let mut reached = 0usize;
+    let mut touches = false;
     while let Some((x, z)) = stack.pop() {
         reached += 1;
+        touches |= stop == Some((x, z));
         for dir in 0..DIRECTIONS {
             let Some((nx, nz)) = step(x, z, dir, width, height) else {
                 continue;
@@ -414,7 +930,7 @@ fn flood(cells: &[u8], width: u16, height: u16, passable: u16, start: (u16, u16)
             stack.push((nx, nz));
         }
     }
-    reached
+    (reached, touches)
 }
 
 #[cfg(test)]
@@ -442,6 +958,79 @@ mod tests {
         Adjacency::new(2, &rows).expect("self-only table is valid")
     }
 
+    /// Tight table: a 2 needs a 1 above and below, while 0 and 1 are free. A
+    /// greedy bake can still strand a 2 beside a settled 0, so it must backtrack.
+    fn trap() -> Adjacency {
+        let rows = [
+            [0b111, 0b111, 0b111, 0b111],
+            [0b111, 0b111, 0b111, 0b111],
+            [0b010, 0b010, 0b111, 0b111],
+        ];
+        Adjacency::new(3, &rows).expect("trap table is valid")
+    }
+
+    /// The authored rules the seed sweep bakes: two pins, one block that may
+    /// never hold a 2, and a path from (2, 8) to (13, 8) over kinds 0 and 1.
+    fn authored() -> Constraints {
+        Constraints {
+            pinned: vec![(0, 0, 0), (15, 15, 1)],
+            forbidden: vec![(Rect::new(4, 4, 7, 7), 2)],
+            connect: vec![((2, 8), (13, 8))],
+            open: 0b0011,
+        }
+    }
+
+    /// Every adjacency of the baked grid agrees with the table.
+    fn assert_neighbours_agree(cells: &[u8], width: u16, height: u16, adjacency: &Adjacency) {
+        for z in 0..height {
+            for x in 0..width {
+                let kind = cells[index(x, z, width)];
+                for dir in 0..DIRECTIONS {
+                    let Some((nx, nz)) = step(x, z, dir, width, height) else {
+                        continue;
+                    };
+                    let other = cells[index(nx, nz, width)];
+                    assert_ne!(
+                        adjacency.allows(kind, dir) & (1u16 << other),
+                        0,
+                        "cell ({x},{z}) kind {kind} refuses kind {other} toward dir {dir}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every authored rule holds on the baked grid.
+    fn assert_rules_hold(
+        cells: &[u8],
+        width: u16,
+        height: u16,
+        adjacency: &Adjacency,
+        rules: &Constraints,
+    ) {
+        for &(x, z, kind) in &rules.pinned {
+            assert_eq!(cells[index(x, z, width)], kind, "pin ({x}, {z}) holds");
+        }
+        for &(rect, kind) in &rules.forbidden {
+            for z in rect.z0..=rect.z1 {
+                for x in rect.x0..=rect.x1 {
+                    assert_ne!(
+                        cells[index(x, z, width)],
+                        kind,
+                        "block ({x}, {z}) stays clear of kind {kind}"
+                    );
+                }
+            }
+        }
+        for &(from, to) in &rules.connect {
+            assert!(
+                path_holds(cells, width, height, rules.open, from, to),
+                "path {from:?} to {to:?} joins over open kinds"
+            );
+        }
+        assert_neighbours_agree(cells, width, height, adjacency);
+    }
+
     #[test]
     fn bake_is_deterministic_and_seed_sensitive() {
         let adj = generous();
@@ -459,22 +1048,7 @@ mod tests {
         for adj in [generous(), structured()] {
             let cells = bake(16, 16, &adj, 11).expect("table bakes a full map");
             assert_eq!(cells.len(), 256);
-            for z in 0..16u16 {
-                for x in 0..16u16 {
-                    let kind = cells[index(x, z, 16)];
-                    for dir in 0..DIRECTIONS {
-                        let Some((nx, nz)) = step(x, z, dir, 16, 16) else {
-                            continue;
-                        };
-                        let other = cells[index(nx, nz, 16)];
-                        assert_ne!(
-                            adj.allows(kind, dir) & (1u16 << other),
-                            0,
-                            "cell ({x},{z}) kind {kind} refuses kind {other} toward dir {dir}"
-                        );
-                    }
-                }
-            }
+            assert_neighbours_agree(&cells, 16, 16, &adj);
         }
     }
 
@@ -569,5 +1143,208 @@ mod tests {
         // digest: equal slices hash equal, different bytes differ.
         assert_eq!(digest(&solid), digest(&[0u8; 64]));
         assert_ne!(digest(&solid), digest(&split));
+    }
+
+    #[test]
+    fn constraints_are_checked_before_any_bake() {
+        let adj = trap();
+        let empty = Constraints::default();
+        assert_eq!(empty.validate(16, 16, &adj), Ok(()));
+        let check = |rules: &Constraints| rules.validate(16, 16, &adj);
+        // A rule that names a cell outside the map names that cell.
+        let outside = Constraints {
+            pinned: vec![(16, 0, 0)],
+            ..Constraints::default()
+        };
+        assert_eq!(
+            check(&outside),
+            Err(WfcError::CellOutOfBounds { x: 16, z: 0 })
+        );
+        // A kind above kinds-1 names the cell the rule starts at.
+        let too_high = Constraints {
+            pinned: vec![(3, 4, 3)],
+            ..Constraints::default()
+        };
+        assert_eq!(
+            check(&too_high),
+            Err(WfcError::KindOutOfRange {
+                x: 3,
+                z: 4,
+                kind: 3
+            })
+        );
+        // A block that ends before it starts holds no cell, so it is refused.
+        let inverted = Constraints {
+            forbidden: vec![(Rect::new(5, 5, 4, 9), 0)],
+            ..Constraints::default()
+        };
+        assert_eq!(check(&inverted), Err(WfcError::RectInverted { x: 5, z: 5 }));
+        let past_edge = Constraints {
+            forbidden: vec![(Rect::new(5, 5, 16, 9), 0)],
+            ..Constraints::default()
+        };
+        assert_eq!(
+            check(&past_edge),
+            Err(WfcError::CellOutOfBounds { x: 16, z: 9 })
+        );
+        // Connect needs two cells in the map and a non-zero in-range open mask.
+        let reach = Constraints {
+            connect: vec![((0, 0), (16, 0))],
+            open: 0b1,
+            ..Constraints::default()
+        };
+        assert_eq!(
+            check(&reach),
+            Err(WfcError::CellOutOfBounds { x: 16, z: 0 })
+        );
+        let closed = Constraints {
+            connect: vec![((0, 0), (1, 0))],
+            open: 0,
+            ..Constraints::default()
+        };
+        assert_eq!(check(&closed), Err(WfcError::OpenMaskEmpty));
+        let wide = Constraints {
+            connect: vec![((0, 0), (1, 0))],
+            open: 0b1000,
+            ..Constraints::default()
+        };
+        assert_eq!(check(&wide), Err(WfcError::OpenMaskOutOfRange { kind: 3 }));
+        // The bake runs the same checks before it allocates a wave.
+        assert_eq!(
+            bake_constrained(16, 16, &adj, 7, &outside),
+            Err(WfcError::CellOutOfBounds { x: 16, z: 0 })
+        );
+        let over = MAX_WFC_SIDE + 1;
+        assert_eq!(
+            bake_constrained(over, 1, &adj, 7, &outside),
+            Err(WfcError::TooLarge { side: over })
+        );
+    }
+
+    #[test]
+    fn a_rule_conflict_names_the_cell() {
+        let adj = trap();
+        // Two pins of different kinds on one cell intersect to nothing.
+        let twice = Constraints {
+            pinned: vec![(2, 3, 0), (2, 3, 1)],
+            ..Constraints::default()
+        };
+        assert_eq!(
+            bake_constrained(16, 16, &adj, 7, &twice),
+            Err(WfcError::UnsatisfiableCell { x: 2, z: 3 })
+        );
+        // A pin inside a block that forbids the same kind is the same conflict.
+        let blocked = Constraints {
+            pinned: vec![(2, 3, 0)],
+            forbidden: vec![(Rect::cell(2, 3), 0)],
+            ..Constraints::default()
+        };
+        assert_eq!(
+            bake_constrained(16, 16, &adj, 7, &blocked),
+            Err(WfcError::UnsatisfiableCell { x: 2, z: 3 })
+        );
+        // A pin on the claimed path that is not an open kind names the path cell.
+        let off_path = Constraints {
+            pinned: vec![(5, 8, 2)],
+            connect: vec![((2, 8), (13, 8))],
+            open: 0b0011,
+            ..Constraints::default()
+        };
+        assert_eq!(
+            bake_constrained(16, 16, &adj, 7, &off_path),
+            Err(WfcError::UnsatisfiableCell { x: 5, z: 8 })
+        );
+    }
+
+    #[test]
+    fn a_pin_the_table_refuses_is_a_contradiction_at_the_neighbour() {
+        // Self-only kinds never touch each other, so these two pins cannot meet.
+        let adj = self_only();
+        let rules = Constraints {
+            pinned: vec![(0, 0, 0), (1, 0, 1)],
+            ..Constraints::default()
+        };
+        assert_eq!(
+            bake_constrained(2, 1, &adj, 7, &rules),
+            Err(WfcError::Contradiction { x: 1, z: 0 })
+        );
+    }
+
+    #[test]
+    fn pins_hold_and_a_block_never_holds_its_kind() {
+        let adj = generous();
+        let rules = Constraints {
+            pinned: vec![(0, 0, 2), (7, 7, 0)],
+            forbidden: vec![(Rect::new(2, 2, 5, 5), 1)],
+            ..Constraints::default()
+        };
+        let cells = bake_constrained(8, 8, &adj, 21, &rules).expect("rules fit a generous table");
+        assert_eq!(cells[index(0, 0, 8)], 2);
+        assert_eq!(cells[index(7, 7, 8)], 0);
+        for z in 2..=5u16 {
+            for x in 2..=5u16 {
+                assert_ne!(cells[index(x, z, 8)], 1, "block ({x}, {z}) stays clear");
+            }
+        }
+        assert_neighbours_agree(&cells, 8, 8, &adj);
+    }
+
+    #[test]
+    fn twenty_seeds_solve_at_least_eighteen_within_the_backtrack_cap() {
+        let adjacency = trap();
+        let rules = authored();
+        let (width, height) = (16u16, 16u16);
+        let mut solved = 0u32;
+        let mut refused = Vec::new();
+        let mut times = Vec::with_capacity(20);
+        for seed in 0..20u64 {
+            let start = std::time::Instant::now();
+            let grid = bake_constrained(width, height, &adjacency, seed, &rules);
+            times.push(start.elapsed());
+            match grid {
+                Ok(cells) => {
+                    assert_rules_hold(&cells, width, height, &adjacency, &rules);
+                    let again = bake_constrained(width, height, &adjacency, seed, &rules)
+                        .expect("a solved seed solves again");
+                    assert_eq!(cells, again, "seed {seed} bakes identical bytes x2");
+                    assert_eq!(digest(&cells), digest(&again));
+                    solved = solved.saturating_add(1);
+                }
+                Err(err) => refused.push((seed, err)),
+            }
+        }
+        times.sort_unstable();
+        let p50 = times.get(times.len() / 2).copied().unwrap_or_default();
+        println!(
+            "wfc: solved {solved}/20 within cap {MAX_BACKTRACKS}, p50 bake {p50:?}, refused {refused:?}"
+        );
+        assert!(
+            solved >= 18,
+            "solved {solved}/20 within the backtrack cap, p50 {p50:?}, refused {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_seed_past_the_cap_is_a_typed_refusal_not_a_partial_grid() {
+        let adjacency = trap();
+        let rules = authored();
+        let (width, height) = (16u16, 16u16);
+        let cells = usize::from(width) * usize::from(height);
+        // The same seed solves under the real cap.
+        assert!(bake_constrained(width, height, &adjacency, 0, &rules).is_ok());
+        let mut masks = vec![kind_bits(adjacency.kinds()); cells];
+        assert!(apply_constraints(&mut masks, width, height, &rules).expect("rules fit the map"));
+        settle(&mut masks, &adjacency, width, height).expect("rules leave a live wave");
+        // Under a tight cap the same seed refuses, and names the cap it hit.
+        assert!(
+            matches!(
+                search(&mut masks, &adjacency, width, height, 0, 8),
+                Err(WfcError::BacktrackCap { cap: 8, .. })
+            ),
+            "a cap of 8 branches refuses with the cap named"
+        );
+        // A refused search leaves no grid; the real cap returns a full one.
+        let grid = bake_constrained(width, height, &adjacency, 0, &rules).expect("the cap solves");
+        assert_eq!(grid.len(), cells);
     }
 }

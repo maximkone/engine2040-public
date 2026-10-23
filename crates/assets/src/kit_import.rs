@@ -45,6 +45,11 @@ pub const KIT_FILES: [&str; 8] = [
     "debris.gltf",
 ];
 
+/// The studio HDRI the offscreen forward and skinned captures bake:
+/// `content/arena/<name>` on disk, `<name>` inside the arena bundle. Tier 1
+/// of the bundle, so the first-frame kit prefix never carries it.
+pub const STUDIO_HDRI: &str = "hdri/polyhaven-studio-small-09-1k.hdr";
+
 /// One cooked CC0 material set the kit wears. The names match
 /// `content/arena/cooked/<name>_{base,normal,orm}.ktx2` and the native
 /// `kit_pbr::COOKED_SETS` table.

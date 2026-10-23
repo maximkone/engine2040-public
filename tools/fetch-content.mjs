@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // fetch-content.mjs - download listed content files with md5 + license sidecars.
 // Use: node tools/fetch-content.mjs --help
-//      node tools/fetch-content.mjs --list <file> [--out <dir>] [--dry-run]
+//      node tools/fetch-content.mjs [--list] <file> [--out <dir>] [--dry-run]
 // List file: one row per asset: `<source> <id> <url> [md5] [license] [author]`.
 // Blank lines and `#` comments are skipped. source is polyhaven, ambientcg or
 // url. A `-` url resolves to the source API root (polyhaven
@@ -23,15 +23,18 @@ export const DEFAULT_OUT = join(REPO, "content", "_incoming");
 export const RATE_MS = 1000;
 export const UA = "engine2040-fetch-content/1.0 (+https://github.com/engine2040)";
 
-export const HELP = `Usage: node tools/fetch-content.mjs --list <file> [--out <dir>] [--dry-run] [--rate-ms N]
+export const HELP = `Usage: node tools/fetch-content.mjs [--list] <file> [--out <dir>] [--dry-run] [--rate-ms N]
 
-Reads a list file of \`<source> <id> <url> [md5] [license] [author]\` lines and
+Reads a list file of \`<source> <id> <url> [md5] [license] [author] [attribution]\` lines and
 downloads into \`<out>/<source>/<id>/\`, each with a \`<id>.license.json\`
-sidecar (url, author, license, retrieved date). Sources: polyhaven
-(api.polyhaven.com/files/{id}, User-Agent set, never scrape pages), ambientcg
-(ambientCG.com/api/v2/full_json), plain urls with md5. One request per second
-(--rate-ms, default 1000), skip files whose md5 matches. A wrong md5 deletes
-the file and exits 1. --dry-run prints total bytes and every license.
+sidecar (url, author, license, retrieved date, plus attribution when given).
+Sources: polyhaven (api.polyhaven.com/files/{id}, User-Agent set, never scrape
+pages), ambientcg (ambientCG.com/api/v2/full_json), plain urls with md5. One
+request per second (--rate-ms, default 1000), skip files whose md5 matches. A
+wrong md5 deletes the file and exits 1. A CC-BY row must end with the
+attribution text (everything after the author); a CC-BY row without it is
+refused. --dry-run prints total bytes, every license and every attribution. The
+list path may be bare: \`--dry-run content/fetch.list\` reads that file.
 `;
 
 export function md5Of(bytes) {
@@ -54,13 +57,17 @@ export function parseList(text) {
     if (!raw || raw.startsWith("#")) continue;
     const parts = raw.split(/\s+/);
     if (parts.length < 3) throw new Error(`list line ${i + 1}: want "<source> <id> <url> [md5] [license] [author]"`);
-    const [source, id, url, md5 = "", license = "", author = ""] = parts;
+    const [source, id, url, md5 = "", license = "", author = "", ...rest] = parts;
+    const attribution = rest.join(" ");
     if (!["polyhaven", "ambientcg", "url"].includes(source)) {
       throw new Error(`list line ${i + 1}: bad source ${JSON.stringify(source)}`);
     }
     if (!id || !url) throw new Error(`list line ${i + 1}: id and url are required`);
     if (md5 && !/^[0-9a-f]{32}$/i.test(md5)) throw new Error(`list line ${i + 1}: bad md5 ${JSON.stringify(md5)}`);
-    rows.push({ source, id, url, md5: md5.toLowerCase(), license, author, line: i + 1 });
+    if (/^CC-?BY/i.test(license) && !attribution) {
+      throw new Error(`list line ${i + 1}: ${license} row needs attribution text after the author`);
+    }
+    rows.push({ source, id, url, md5: md5.toLowerCase(), license, author, attribution, line: i + 1 });
   }
   return rows;
 }
@@ -74,12 +81,14 @@ async function fetchBytes(url) {
 }
 
 export function sidecarFor(entry, url) {
-  return {
+  const sidecar = {
     url,
     author: entry.author || "unknown",
     license: entry.license || "unknown",
     retrieved: new Date().toISOString().slice(0, 10),
   };
+  if (entry.attribution) sidecar.attribution = entry.attribution;
+  return sidecar;
 }
 
 export async function run({ listFile, outDir = DEFAULT_OUT, dryRun = false, rateMs = RATE_MS }) {
@@ -96,6 +105,7 @@ export async function run({ listFile, outDir = DEFAULT_OUT, dryRun = false, rate
   let skipped = 0;
   let bad = 0;
   const licenses = [];
+  const attributions = [];
   let fetched = false;
   for (let i = 0; i < rows.length; i++) {
     const entry = rows[i];
@@ -105,6 +115,7 @@ export async function run({ listFile, outDir = DEFAULT_OUT, dryRun = false, rate
     const dest = join(dir, name);
     const sidecar = join(dir, `${entry.id}.license.json`);
     licenses.push(entry.license || "unknown");
+    if (entry.attribution) attributions.push(`${entry.source} ${entry.id} ${entry.attribution}`);
     if (!dryRun && entry.md5 && existsSync(dest)) {
       const cur = md5Of(readFileSync(dest));
       if (cur === entry.md5) {
@@ -136,6 +147,7 @@ export async function run({ listFile, outDir = DEFAULT_OUT, dryRun = false, rate
   if (dryRun) {
     process.stdout.write(`DRY total_bytes=${totalBytes} files=${rows.length}\n`);
     for (const lic of licenses) process.stdout.write(`LICENSE ${lic || "unknown"}\n`);
+    for (const line of attributions) process.stdout.write(`ATTRIBUTION ${line}\n`);
     return { ok: true, totalBytes, downloaded: 0, skipped: 0, bad: 0 };
   }
   if (bad > 0) {
@@ -153,17 +165,32 @@ function opt(args, name) {
   return args[i + 1] ?? "";
 }
 
+const VALUE_FLAGS = ["--list", "--out", "--rate-ms"];
+
+// The list file may be the one bare argument: `--dry-run content/fetch.list`.
+function positionalList(args) {
+  let skip = false;
+  for (const a of args) {
+    if (skip) {
+      skip = false;
+      continue;
+    }
+    if (a.startsWith("-")) {
+      skip = !a.includes("=") && VALUE_FLAGS.includes(a);
+      continue;
+    }
+    return a;
+  }
+  return "";
+}
+
 const isMain = import.meta.main;
 if (isMain) {
   const args = process.argv.slice(2);
+  const listFile = opt(args, "--list") || positionalList(args);
   if (args.includes("--help") || args.includes("-h")) {
     process.stdout.write(HELP);
-  } else if (args.includes("--list") || args.some((a) => a.startsWith("--list="))) {
-    const listFile = opt(args, "--list");
-    if (!listFile) {
-      process.stderr.write("fetch-content: error: --list <file> is required\n");
-      process.exit(2);
-    }
+  } else if (listFile) {
     const outDir = opt(args, "--out") || DEFAULT_OUT;
     const rateMs = Number(opt(args, "--rate-ms") || RATE_MS);
     const r = await run({ listFile, outDir, dryRun: args.includes("--dry-run"), rateMs });

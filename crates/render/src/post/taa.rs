@@ -335,3 +335,263 @@ impl GhostingScene {
         max
     }
 }
+
+// ---------------------------------------------------------------------------
+// Registration tests (ENG20): a real history must land where the frame moved;
+// a frozen one must miss the bar, and a cut or resize must drop the history.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::temporal::{HistoryDesc, TemporalRegistry};
+
+    /// Frame width of the registration scene.
+    const W: u32 = 32;
+    /// Frame height of the registration scene.
+    const H: u32 = 8;
+    /// Pixels the bright block pans left per frame.
+    const PAN_PX: u32 = 4;
+    /// Block width in pixels.
+    const BLOCK_W: u32 = 20;
+    /// Block left edge at frame 0.
+    const BLOCK_START: u32 = 8;
+    /// Frames the pan loop runs: the block reaches the left border.
+    const FRAMES: u32 = 3;
+    /// Bright block value (HDR).
+    const BRIGHT: f32 = 0.8;
+    /// Dark field value (HDR).
+    const DARK: f32 = 0.02;
+    /// The resolved edge may sit at most this far from the current frame's
+    /// edge. The row's bar: one pixel.
+    const EDGE_BAR_PX: f32 = 1.0;
+
+    /// Frame `k` of the pan: a bright block sliding left by [`PAN_PX`] a
+    /// frame over a dark field.
+    fn block_frame(k: u32) -> Vec<[f32; 3]> {
+        let start = BLOCK_START as i32 - (PAN_PX * k) as i32;
+        let mut frame = vec![[DARK; 3]; (W * H) as usize];
+        for y in 0..H {
+            for x in 0..W {
+                let inside = (x as i32) >= start && (x as i32) < start + BLOCK_W as i32;
+                if inside {
+                    frame[(y * W + x) as usize] = [BRIGHT; 3];
+                }
+            }
+        }
+        frame
+    }
+
+    /// The real flow: current minus history is `-PAN_PX` on every pixel.
+    fn pan_motion() -> MotionField {
+        MotionField::build(W, H, vec![[-(PAN_PX as f32), 0.0]; (W * H) as usize])
+            .expect("pan motion builds")
+    }
+
+    /// The frozen history: the field is zero, so history samples its own
+    /// texel instead of the one the frame moved from.
+    fn frozen_motion() -> MotionField {
+        MotionField::zero(W, H).expect("zero motion builds")
+    }
+
+    /// Continuous x of the block's right edge on one row: the sub-pixel
+    /// crossing of the bright/dark midpoint, interpolated between the last
+    /// bright pixel and its successor.
+    fn right_edge_px(frame: &[[f32; 3]], row: u32) -> f32 {
+        let mid = (BRIGHT + DARK) * 0.5;
+        let at = |x: u32| luminance(frame[(row * W + x) as usize]);
+        let mut last = 0u32;
+        for x in 0..W {
+            if at(x) >= mid {
+                last = x;
+            }
+        }
+        if last + 1 >= W {
+            return last as f32;
+        }
+        let (a, b) = (at(last), at(last + 1));
+        if (a - b).abs() <= 1e-6 {
+            return last as f32;
+        }
+        last as f32 + (a - mid) / (a - b)
+    }
+
+    /// Max luma in the band the pan vacated at frame `k`.
+    fn vacated_luma(frame: &[[f32; 3]], k: u32) -> f32 {
+        let start = BLOCK_START as i32 - (PAN_PX * k) as i32;
+        let lo = (start + BLOCK_W as i32) as u32;
+        GhostingScene::trail_luma(frame, W, (lo, lo + PAN_PX))
+    }
+
+    /// Largest per-pixel luma error between a resolved frame and the frame
+    /// the scene actually holds.
+    fn max_luma_error(resolved: &[[f32; 3]], current: &[[f32; 3]]) -> f32 {
+        resolved
+            .iter()
+            .zip(current)
+            .map(|(a, b)| (luminance(*a) - luminance(*b)).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Run the TAA loop over the pan: the first frame starts with no history
+    /// (a first use), each later frame resolves against the previous result.
+    fn run_pan(motion: &MotionField, params: TaaParams) -> Vec<Vec<[f32; 3]>> {
+        let mut history = block_frame(0);
+        let mut out = Vec::new();
+        for k in 0..FRAMES {
+            let current = block_frame(k);
+            let frame_params = if k == 0 {
+                params.with_history(false)
+            } else {
+                params
+            };
+            let resolved = taa_resolve(&current, &history, motion, W, H, &frame_params)
+                .expect("pan resolve runs");
+            history = resolved.clone();
+            out.push(resolved);
+        }
+        out
+    }
+
+    #[test]
+    fn taa_registration_tracks_a_panning_edge_and_a_frozen_history_ghosts() {
+        // Same pan, same frames; only the flow field differs. A registered
+        // history reproduces each current frame, so the edge lands exactly
+        // where the frame moved it. A frozen history samples its own texel
+        // and leaves the old frame's pixels on screen instead.
+        let registered = run_pan(&pan_motion(), TaaParams::default());
+        for (k, frame) in registered.iter().enumerate() {
+            let current = block_frame(k as u32);
+            assert_eq!(
+                *frame, current,
+                "frame {k}: registered history must reproduce the current frame"
+            );
+            let truth = right_edge_px(&current, H / 2);
+            let got = right_edge_px(frame, H / 2);
+            assert!(
+                (got - truth).abs() <= EDGE_BAR_PX,
+                "frame {k}: edge at {got:.3} px, truth {truth:.3} px, bar {EDGE_BAR_PX} px"
+            );
+            let trail = vacated_luma(frame, k as u32);
+            assert!(
+                trail <= GHOST_MAX_TRAIL,
+                "frame {k}: registered history leaves vacated luma {trail:.3} over the gate"
+            );
+        }
+        // Frozen history without the clamp: the leak is raw, so the resolved
+        // edge sits behind the bar and the vacated band stays lit.
+        let frozen = run_pan(
+            &frozen_motion(),
+            TaaParams {
+                use_clamp: false,
+                ..TaaParams::default()
+            },
+        );
+        let last = (FRAMES - 1) as usize;
+        let truth = right_edge_px(&block_frame(FRAMES - 1), H / 2);
+        let ghost_edge = right_edge_px(&frozen[last], H / 2);
+        let lag = ghost_edge - truth;
+        assert!(
+            lag > EDGE_BAR_PX,
+            "frozen history: edge at {ghost_edge:.3} px lags {lag:.3} px past the bar \
+             {EDGE_BAR_PX} px (truth {truth:.3} px)"
+        );
+        let trail = vacated_luma(&frozen[last], FRAMES - 1);
+        assert!(
+            trail > GHOST_MAX_TRAIL,
+            "frozen history: vacated luma {trail:.3} must exceed the ghost gate \
+             {GHOST_MAX_TRAIL}"
+        );
+        // Frozen history with the default clamp: the box clamp trims the
+        // trail to one column at the old edge, and that column still misses
+        // the gate by the full block contrast.
+        let clamped = run_pan(&frozen_motion(), TaaParams::default());
+        let error = max_luma_error(&clamped[last], &block_frame(FRAMES - 1));
+        assert!(
+            error > GHOST_MAX_TRAIL,
+            "frozen history under the clamp: worst pixel misses the current frame by \
+             {error:.3}, over the ghost gate {GHOST_MAX_TRAIL}"
+        );
+        assert_ne!(
+            registered[last], clamped[last],
+            "the flow field must change the resolve, or this test cannot fail"
+        );
+    }
+
+    #[test]
+    fn taa_cut_resets_the_history_so_no_old_shot_smears() {
+        // A camera cut flips the registry flag; the resolve must then follow
+        // the new frame even with the old shot's pixels handed in.
+        let mut reg = TemporalRegistry::new();
+        let desc = HistoryDesc {
+            width: W,
+            height: H,
+            bytes_per_texel: 8,
+        };
+        let first = reg.take("taa", desc).expect("first take");
+        assert!(!first.history_valid, "a first take has no history");
+        reg.export("taa").expect("export");
+        reg.end_frame().expect("frame end");
+        assert!(
+            reg.history_valid("taa"),
+            "the export makes the history valid"
+        );
+        reg.camera_cut();
+        let cut = reg.take("taa", desc).expect("take after the cut");
+        assert!(
+            !cut.history_valid,
+            "a camera cut leaves the old pixels unregistered"
+        );
+        let current = block_frame(1);
+        let stale = block_frame(0);
+        let frozen = frozen_motion();
+        let params = TaaParams::default().with_history(cut.history_valid);
+        let out = taa_resolve(&current, &stale, &frozen, W, H, &params).expect("cut resolve runs");
+        assert_eq!(out, current, "the first frame after a cut keeps no history");
+        // The same pixels smear when the flag still says the history is valid.
+        let smeared = taa_resolve(&current, &stale, &frozen, W, H, &TaaParams::default())
+            .expect("valid resolve runs");
+        assert_ne!(
+            smeared, current,
+            "stale history with a valid flag must smear, or this test cannot fail"
+        );
+    }
+
+    #[test]
+    fn taa_resize_resets_the_history() {
+        // A new size is a new texture: its old-size pixels do not map onto
+        // the new frame, so the first resolve after it must read nothing.
+        let mut reg = TemporalRegistry::new();
+        let desc = HistoryDesc {
+            width: W,
+            height: H,
+            bytes_per_texel: 8,
+        };
+        reg.take("taa", desc).expect("take");
+        reg.export("taa").expect("export");
+        reg.end_frame().expect("frame end");
+        assert!(reg.history_valid("taa"));
+        let smaller = HistoryDesc {
+            width: W / 2,
+            height: H / 2,
+            ..desc
+        };
+        let resized = reg.take("taa", smaller).expect("take at the new size");
+        assert!(resized.recreated, "a new size is a new texture");
+        assert!(
+            !resized.history_valid,
+            "a resized history does not map onto the new pixels"
+        );
+        let side = (W / 2) * (H / 2);
+        let current = vec![[0.3, 0.4, 0.5]; side as usize];
+        let stale = vec![[9.0, 9.0, 9.0]; side as usize];
+        let motion = MotionField::zero(W / 2, H / 2).expect("zero motion builds");
+        let params = TaaParams::default().with_history(resized.history_valid);
+        let out = taa_resolve(&current, &stale, &motion, W / 2, H / 2, &params)
+            .expect("resize resolve runs");
+        assert_eq!(
+            out, current,
+            "no old-size content on the resized first frame"
+        );
+    }
+}

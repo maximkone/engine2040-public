@@ -2,6 +2,8 @@
 [Rr]elease/
 target/
 *.pdb
+# Runtime lease the door takes while a session holds the scene; never source.
+.e2040-door.lease
 # Lane worktrees from tools/lanes.mjs.
 .lanes/
 # Content track — all content is usable regardless of original license.

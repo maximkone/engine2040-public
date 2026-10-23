@@ -8,8 +8,16 @@
 //! `0..=1000` on the duelist stamina bounds. Determinism: soldier-id order, integer
 //! math only, no hash order, floats or wall clock. Errors: [`LegionError`]
 //! refuses bad input, never half-applies. Budget: one step is O(count)
-//! integer ops with zero steady-state allocation; far soldiers think
-//! every 8th tick so a 500-soldier legion stays under 1.5 ms of AI.
+//! integer ops with zero steady-state allocation; a 500-soldier legion
+//! stays under 1.5 ms of AI.
+//!
+//! Perception clock: every squad holds a stored interval (1, 2, 4 or 8
+//! ticks from its nearest soldier) and re-decides within it. A squad also
+//! re-decides at once on any shared input change (anchor, enemy, formation,
+//! spacing, order) or a stamina collapse flip. Its decided slots therefore
+//! equal the full-rate slots at every tick, so [`ThinkingLod::On`] never
+//! changes the outcome; stamina is paced once per tick for every soldier,
+//! not on decision, so On and Off see the same stamina too.
 
 use core::fmt;
 
@@ -42,6 +50,19 @@ pub const MAX_SPACING_CELLS: u32 = 8;
 pub const SQUAD_FAR_CELLS: u32 = 64;
 /// Ticks between squad-commander syncs for far Hold/Advance squads.
 pub const SQUAD_SYNC_PERIOD: u32 = 8;
+/// Longest gap in ticks between two perceptions of one squad: the clock
+/// never lets a squad hold its slots longer than this without a decision.
+pub const PERCEPTION_INTERVAL_TICKS: u32 = SQUAD_SYNC_PERIOD;
+
+/// Thinking-LOD mode: whether the squad perception clock may hold slots.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThinkingLod {
+    /// Squad perception clock (default): decide on input change, collapse
+    /// flip or the squad's perception wave.
+    On,
+    /// Full rate: every soldier decides every tick (the audit reference).
+    Off,
+}
 
 /// Legion shape: where each soldier stands around the anchor.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -414,6 +435,10 @@ pub struct Legion {
     squad_order: [Order; MAX_SQUADS],
     squad_spacing: [u32; MAX_SQUADS],
     squad_synced: [bool; MAX_SQUADS],
+    last_think: [u32; MAX_SQUADS],
+    refresh_period: [u32; MAX_SQUADS],
+    decided_collapsed: [bool; MAX_SOLDIERS],
+    thinking_lod: ThinkingLod,
 }
 
 impl Legion {
@@ -461,6 +486,10 @@ impl Legion {
             squad_order: [Order::Hold; MAX_SQUADS],
             squad_spacing: [1; MAX_SQUADS],
             squad_synced: [false; MAX_SQUADS],
+            last_think: [0; MAX_SQUADS],
+            refresh_period: [1; MAX_SQUADS],
+            decided_collapsed: [false; MAX_SOLDIERS],
+            thinking_lod: ThinkingLod::On,
         };
         for s in 0..squads {
             legion.roles[s] = if squads > 1 && (s == 0 || s + 1 == squads) {
@@ -474,9 +503,12 @@ impl Legion {
             let (slot, brace) = legion.decide_slot(i);
             legion.slots[i] = slot;
             legion.braced[i] = brace;
+            legion.decided_collapsed[i] = legion.collapsed(i);
         }
         // Seed the squad-commander cache to the opening inputs so a static
         // siege starts synced and holds between sync waves with zero decides.
+        // The opening slots stand in for the bodies when the first interval
+        // is read (the arena seats its bodies after construction).
         for s in 0..squads {
             legion.squad_anchor[s] = anchor;
             legion.squad_enemy[s] = enemy;
@@ -484,6 +516,10 @@ impl Legion {
             legion.squad_order[s] = Order::Hold;
             legion.squad_spacing[s] = 1;
             legion.squad_synced[s] = true;
+            let start = s * SQUAD_SIZE;
+            let end = (start + SQUAD_SIZE).min(count);
+            legion.refresh_period[s] =
+                legion.refresh_period_for(start, end, &legion.slots[..count]);
         }
         Ok(legion)
     }
@@ -516,6 +552,7 @@ impl Legion {
             let (slot, brace) = self.decide_slot(i);
             self.slots[i] = slot;
             self.braced[i] = brace;
+            self.decided_collapsed[i] = self.collapsed(i);
         }
         self.sync_all_squads();
     }
@@ -602,6 +639,7 @@ impl Legion {
             let (slot, brace) = self.decide_slot(i);
             self.slots[i] = slot;
             self.braced[i] = brace;
+            self.decided_collapsed[i] = self.collapsed(i);
         }
         self.sync_all_squads();
         Ok(self.spacing)
@@ -695,6 +733,46 @@ impl Legion {
         self.thinks_last
     }
 
+    /// Thinking-LOD mode of the squad perception clock.
+    pub const fn thinking_lod(&self) -> ThinkingLod {
+        self.thinking_lod
+    }
+
+    /// Switch the thinking LOD. [`ThinkingLod::Off`] makes every soldier
+    /// decide every tick; the decided state is the same either way.
+    pub fn set_thinking_lod(&mut self, mode: ThinkingLod) {
+        self.thinking_lod = mode;
+    }
+
+    /// Ticks since squad `squad` last perceived (decided) at `tick`.
+    /// Errors: [`LegionError::BadSquad`].
+    pub fn perception_lag(&self, tick: u32, squad: usize) -> Result<u32, LegionError> {
+        if squad >= self.squad_count() {
+            return Err(LegionError::BadSquad { index: squad });
+        }
+        Ok(tick.saturating_sub(self.last_think[squad]))
+    }
+
+    /// Documented interval in ticks between two perceptions of squad
+    /// `squad`: 1, 2, 4 or 8 from its nearest soldier at the last decision.
+    /// Errors: [`LegionError::BadSquad`].
+    pub fn perception_interval(&self, squad: usize) -> Result<u32, LegionError> {
+        if squad >= self.squad_count() {
+            return Err(LegionError::BadSquad { index: squad });
+        }
+        Ok(self.refresh_period[squad])
+    }
+
+    /// Longest gap since any squad's last perception at `tick`. The clock
+    /// keeps this at or under [`PERCEPTION_INTERVAL_TICKS`] after a step.
+    pub fn max_perception_lag(&self, tick: u32) -> u32 {
+        let mut worst = 0u32;
+        for s in 0..self.squad_count() {
+            worst = worst.max(tick.saturating_sub(self.last_think[s]));
+        }
+        worst
+    }
+
     /// Decided slots for `0..count` (recorded intents between thinks).
     pub fn slots(&self) -> &[(usize, usize)] {
         &self.slots[..self.count]
@@ -705,13 +783,14 @@ impl Legion {
         &self.braced[..self.count]
     }
 
-    /// Step one tick: squad-commander LOD plus the per-soldier path.
-    /// Far Hold/Advance squads with unchanged inputs hold recorded slots
-    /// between 8-tick squad syncs (one leader decide per sync, zero decides
-    /// and zero stamina pacing off-sync); any other squad keeps the exact
-    /// per-soldier LOD clock of today. Writers go to the caller lanes;
-    /// nothing allocates. Returns how many soldiers thought. Input order
-    /// decides output order, so the batch replays exactly. A bad batch writes nothing.
+    /// Step one tick: pace stamina, then run the squad perception clock.
+    /// Every squad re-decides at once when a shared input or a stamina
+    /// collapse changed; otherwise a far Hold/Advance squad re-decides its
+    /// leader and every other squad re-decides on its perception wave. The
+    /// decided slots match [`ThinkingLod::Off`] at every tick. Writers go
+    /// to the caller lanes; nothing allocates. Returns how many soldiers
+    /// thought. Input order decides output order, so the batch replays
+    /// exactly. A bad batch writes nothing.
     /// Errors: [`LegionError::MismatchedLanes`],
     /// [`LegionError::OutOfBounds`] (carries the soldier index as `value`
     /// on the failing axis... see `axis`/`value`: `value` is the bad
@@ -757,20 +836,32 @@ impl Legion {
         let current = self.alert_state();
         let next = self.alert_preview(&current, sense, tick);
         self.alert = next;
+        // Stamina paces once per tick for every soldier, whatever the LOD
+        // decides, so On and Off see the same stamina at every tick.
+        self.pace_stamina();
         let mut thinks = 0usize;
-        let squads = self.squad_count();
-        let sync_wave = tick.is_multiple_of(SQUAD_SYNC_PERIOD);
-        for squad in 0..squads {
-            thinks += self.step_squad(squad, tick, soldiers, slots_out, brace_out, sync_wave);
+        for squad in 0..self.squad_count() {
+            thinks += self.step_squad(squad, tick, soldiers, slots_out, brace_out);
         }
         self.thinks_last = thinks;
         Ok(thinks)
     }
 
-    /// Step one squad for [`Legion::step`]: far Hold/Advance squads with
-    /// unchanged inputs hold recorded slots between sync waves, changed far
-    /// squads re-decide fully, others keep the per-soldier LOD clock.
-    /// Integer-only, zero allocation; returns the squad think count.
+    /// Pace every soldier's stamina once for the current orders. Integer
+    /// saturating math over the fixed lane; zero allocation.
+    fn pace_stamina(&mut self) {
+        for i in 0..self.count {
+            let pace = stamina_pace(self.orders[Self::soldier_squad(i)]);
+            self.stamina[i] = self.stamina[i]
+                .saturating_add(pace)
+                .clamp(STAMINA_MIN, STAMINA_MAX);
+        }
+    }
+
+    /// Step one squad for [`Legion::step`]: a shared input or collapse
+    /// change re-decides the whole squad; otherwise the perception wave
+    /// decides one leader (far Hold/Advance) or the whole squad. Integer
+    /// only, zero allocation; returns the squad think count.
     fn step_squad(
         &mut self,
         squad: usize,
@@ -778,62 +869,68 @@ impl Legion {
         soldiers: &[(usize, usize)],
         slots_out: &mut [(usize, usize)],
         brace_out: &mut [bool],
-        sync_wave: bool,
     ) -> usize {
         let start = squad * SQUAD_SIZE;
-        let mut end = start + SQUAD_SIZE;
-        if end > self.count {
-            end = self.count;
-        }
-        let order = self.orders[squad];
+        let end = (start + SQUAD_SIZE).min(self.count);
+        let changed = !self.squad_inputs_equal(squad);
+        let collapsed = self.squad_collapse_changed(start, end);
+        let due = match self.thinking_lod {
+            ThinkingLod::Off => true,
+            ThinkingLod::On => {
+                tick.saturating_sub(self.last_think[squad]) >= self.refresh_period[squad]
+            }
+        };
         let mut thinks = 0usize;
-        if squad_is_far(order, &soldiers[start..end], self.enemy) {
-            if self.squad_inputs_equal(squad) {
-                if sync_wave {
-                    thinks += 1;
-                    let (slot, brace) = self.decide_slot(start);
-                    self.slots[start] = slot;
-                    self.braced[start] = brace;
-                    let pace = stamina_pace(order);
-                    self.stamina[start] = self.stamina[start]
-                        .saturating_add(pace)
-                        .clamp(STAMINA_MIN, STAMINA_MAX);
+        if changed || collapsed || due {
+            self.refresh_period[squad] = self.refresh_period_for(start, end, soldiers);
+            self.last_think[squad] = tick;
+            let leader_only = !changed
+                && !collapsed
+                && self.thinking_lod == ThinkingLod::On
+                && squad_is_far(self.orders[squad], &soldiers[start..end], self.enemy);
+            if leader_only {
+                thinks += 1;
+                let (slot, brace) = self.decide_slot(start);
+                self.slots[start] = slot;
+                self.braced[start] = brace;
+                self.decided_collapsed[start] = self.collapsed(start);
+            } else {
+                thinks += end - start;
+                for i in start..end {
+                    let (slot, brace) = self.decide_slot(i);
+                    self.slots[i] = slot;
+                    self.braced[i] = brace;
+                    self.decided_collapsed[i] = self.collapsed(i);
                 }
-                slots_out[start..end].copy_from_slice(&self.slots[start..end]);
-                brace_out[start..end].copy_from_slice(&self.braced[start..end]);
-                return thinks;
             }
-            for i in start..end {
-                thinks += 1;
-                let (slot, brace) = self.decide_slot(i);
-                self.slots[i] = slot;
-                self.braced[i] = brace;
-                let pace = stamina_pace(order);
-                self.stamina[i] = self.stamina[i]
-                    .saturating_add(pace)
-                    .clamp(STAMINA_MIN, STAMINA_MAX);
-                slots_out[i] = slot;
-                brace_out[i] = brace;
+            if changed || collapsed {
+                self.sync_one_squad(squad);
             }
-            self.sync_one_squad(squad);
-            return thinks;
         }
-        for i in start..end {
-            let period = think_period(chebyshev(soldiers[i], self.enemy));
-            if tick.wrapping_add(i as u32).is_multiple_of(period) {
-                thinks += 1;
-                let (slot, brace) = self.decide_slot(i);
-                self.slots[i] = slot;
-                self.braced[i] = brace;
-                let pace = stamina_pace(self.orders[squad]);
-                self.stamina[i] = self.stamina[i]
-                    .saturating_add(pace)
-                    .clamp(STAMINA_MIN, STAMINA_MAX);
-            }
-            slots_out[i] = self.slots[i];
-            brace_out[i] = self.braced[i];
-        }
+        slots_out[start..end].copy_from_slice(&self.slots[start..end]);
+        brace_out[start..end].copy_from_slice(&self.braced[start..end]);
         thinks
+    }
+
+    /// Perception interval for one squad: [`think_period`] of its nearest
+    /// soldier, capped at [`PERCEPTION_INTERVAL_TICKS`]. Integer only.
+    fn refresh_period_for(&self, start: usize, end: usize, soldiers: &[(usize, usize)]) -> u32 {
+        let mut nearest = u32::MAX;
+        for cell in &soldiers[start..end] {
+            nearest = nearest.min(chebyshev(*cell, self.enemy));
+        }
+        think_period(nearest).min(PERCEPTION_INTERVAL_TICKS)
+    }
+
+    /// True when soldier `index` is gassed (`Order::Charge` falls back).
+    fn collapsed(&self, index: usize) -> bool {
+        self.stamina[index] <= STAMINA_COLLAPSE_AT
+    }
+
+    /// True when a soldier of the squad changed its collapse flag since the
+    /// last decision, so a charge fallback would change the slot.
+    fn squad_collapse_changed(&self, start: usize, end: usize) -> bool {
+        (start..end).any(|i| self.collapsed(i) != self.decided_collapsed[i])
     }
 
     /// Decide one slot plus brace flag for soldier `i` from the current
@@ -851,7 +948,7 @@ impl Legion {
         } else {
             (sign(dx), sign(dy))
         };
-        let collapsed = self.stamina[i] <= STAMINA_COLLAPSE_AT;
+        let collapsed = self.collapsed(i);
         let (shift_x, shift_y) = match order {
             Order::Hold => (0, 0),
             Order::Advance => (4 * fx, 4 * fy),
@@ -1242,7 +1339,9 @@ mod tests {
         // Near the enemy anchor so every soldier thinks on tick 0.
         let mut near = soldiers.clone();
         near.fill((40, 12));
-        let thinks = legion.step(0, &near, &mut slots, &mut brace).unwrap();
+        // Tick 2: the two changed squads decide at once and the center
+        // squad's 2-tick perception wave is due, so all 24 think.
+        let thinks = legion.step(2, &near, &mut slots, &mut brace).unwrap();
         assert_eq!(thinks, 24);
         // Flank slots sit off the anchor axis, on opposite sides.
         let left: Vec<(usize, usize)> = slots[0..8].to_vec();
@@ -1265,9 +1364,10 @@ mod tests {
         assert_eq!(think_period(64), 4);
         assert_eq!(think_period(65), 8);
         assert_eq!(think_period(400), 8);
-        // Squad-commander LOD: a far Hold legion with static anchors pays
-        // one leader decide per squad per 8-tick sync wave (zero decides and
-        // zero stamina pacing off-sync). 63 squads x2 syncs = 126 decides.
+        // Perception clock: a far Hold legion with static anchors pays one
+        // leader decide per squad on each 8-tick wave. Ticks 0..15 hold one
+        // wave at tick 8, so 63 squads x1 wave = 63 decides and no tick
+        // sees more than one leader per squad.
         let grid = (400usize, 400usize);
         let run_static = || {
             let mut legion = Legion::new(
@@ -1293,8 +1393,8 @@ mod tests {
             (total, worst, legion.digest(), slots, brace)
         };
         let (total, worst, digest, slots, brace) = run_static();
-        assert!(total <= 128, "squad LOD total thinks: {total}");
-        assert!(worst <= 64, "far-band thinks per tick: {worst}");
+        assert_eq!(total, 63, "squad clock total thinks: {total}");
+        assert_eq!(worst, 63, "far-band thinks per tick: {worst}");
         assert!(
             total < CONTRACT_SOLDIERS,
             "must beat per-soldier 1000: {total}"
@@ -1305,22 +1405,18 @@ mod tests {
         assert_eq!(digest, digest2);
         assert_eq!(slots, slots2);
         assert_eq!(brace, brace2);
-        // A close legion thinks everybody, every tick.
-        let mut near = Legion::new(
-            CONTRACT_SOLDIERS,
-            Formation::Column,
-            (20, 20),
-            (22, 22),
-            grid,
-        )
-        .unwrap();
-        let close = vec![(20usize, 20usize); CONTRACT_SOLDIERS];
-        let mut near_slots = vec![(0usize, 0usize); CONTRACT_SOLDIERS];
-        let mut near_brace = vec![false; CONTRACT_SOLDIERS];
+        // A close eight-man squad perceives every tick: its nearest slot
+        // is two cells from the enemy, so its interval is one tick and the
+        // first step after the opening decision re-decides all eight.
+        let mut near = Legion::new(8, Formation::Line, (20, 10), (22, 12), small_grid()).unwrap();
+        assert_eq!(near.perception_interval(0).unwrap(), 1);
+        let close = vec![(20usize, 10usize); 8];
+        let mut near_slots = vec![(0usize, 0usize); 8];
+        let mut near_brace = vec![false; 8];
         let thinks = near
-            .step(0, &close, &mut near_slots, &mut near_brace)
+            .step(1, &close, &mut near_slots, &mut near_brace)
             .unwrap();
-        assert_eq!(thinks, CONTRACT_SOLDIERS);
+        assert_eq!(thinks, 8);
     }
 
     #[test]
@@ -1525,20 +1621,27 @@ mod tests {
         assert_eq!(track_cell(&cold), None);
     }
 
-    #[test]
-    #[ignore = "timing: 500-soldier AI budget, run under --perf in release"]
+    /// Median and p95 of a timing sample, in microseconds.
+    struct PerfStats {
+        median_us: f64,
+        p95_us: f64,
+    }
+
+    /// Time `samples` steps of a 500-soldier legion, discarding `warmup`.
+    /// `moving` drifts the anchor every measured tick, so every squad
+    /// re-decides at full rate: the worst case for the perception clock.
     #[expect(
         clippy::disallowed_types,
         clippy::disallowed_methods,
-        reason = "timing test reads the wall clock; it never enters the tick"
+        reason = "timing helper reads the wall clock; it never enters the tick"
     )]
-    fn perf_500_soldiers_under_budget() {
-        let grid = (400usize, 400usize);
+    fn measure_legion(moving: bool, warmup: u32, samples: u32) -> PerfStats {
+        let grid = (1024usize, 1024usize);
         let mut legion = Legion::new(
             CONTRACT_SOLDIERS,
             Formation::Column,
-            (20, 20),
-            (380, 380),
+            (128, 512),
+            (896, 512),
             grid,
         )
         .unwrap();
@@ -1552,31 +1655,65 @@ mod tests {
             };
             legion.set_order(s, order).unwrap();
         }
-        let soldiers = [(20usize, 20usize); CONTRACT_SOLDIERS];
+        let soldiers = [(128usize, 512usize); CONTRACT_SOLDIERS];
         let mut slots = [(0usize, 0usize); CONTRACT_SOLDIERS];
         let mut brace = [false; CONTRACT_SOLDIERS];
-        // Warm up, then time the steady state.
-        for tick in 0..8u32 {
+        let mut time_step = |legion: &mut Legion, tick: u32, micros: &mut Vec<f64>| {
+            if moving {
+                legion
+                    .set_anchor((128 + (tick % 512) as usize, 512))
+                    .unwrap();
+            }
+            let start = std::time::Instant::now();
             legion
                 .step(tick, &soldiers, &mut slots, &mut brace)
                 .unwrap();
+            micros.push(start.elapsed().as_nanos() as f64 / 1000.0);
+        };
+        for tick in 0..warmup {
+            let mut discarded = Vec::new();
+            time_step(&mut legion, tick, &mut discarded);
         }
-        let steps = 60u32;
-        let start = std::time::Instant::now();
-        for tick in 8..8 + steps {
-            legion
-                .step(tick, &soldiers, &mut slots, &mut brace)
-                .unwrap();
+        let mut micros = Vec::with_capacity(samples as usize);
+        for tick in warmup..warmup + samples {
+            time_step(&mut legion, tick, &mut micros);
         }
-        let elapsed = start.elapsed();
-        let per_step_us = elapsed.as_micros() as f64 / f64::from(steps);
-        eprintln!(
-            "legion perf: {CONTRACT_SOLDIERS} soldiers x{steps} steps in {elapsed:?} \
-             ({per_step_us:.1} us/step, budget 1500 us/step)"
-        );
-        assert!(
-            per_step_us < 1500.0,
-            "500-soldier AI over budget: {per_step_us:.1} us/step"
-        );
+        micros.sort_by(f64::total_cmp);
+        PerfStats {
+            median_us: micros[micros.len() / 2],
+            p95_us: micros[(micros.len() * 95 / 100).min(micros.len() - 1)],
+        }
+    }
+
+    #[test]
+    #[ignore = "timing: 500-soldier AI budget, run under --release -- --ignored"]
+    fn perf_500_soldiers_under_budget() {
+        const WARMUP: u32 = 64;
+        const SAMPLES: u32 = 600;
+        let idle = measure_legion(false, WARMUP, SAMPLES);
+        let moving = measure_legion(true, WARMUP, SAMPLES);
+        for (name, stats) in [("idle", &idle), ("moving", &moving)] {
+            eprintln!(
+                "legion perf ({name}): {CONTRACT_SOLDIERS} soldiers, {SAMPLES} steps \
+                 median {:.1} us, p95 {:.1} us (budget 1500 us/step)",
+                stats.median_us, stats.p95_us
+            );
+            assert!(
+                stats.median_us < 1500.0,
+                "500-soldier AI median over budget ({name}): {:.1} us/step",
+                stats.median_us
+            );
+            assert!(
+                stats.p95_us < 1500.0,
+                "500-soldier AI p95 over budget ({name}): {:.1} us/step",
+                stats.p95_us
+            );
+        }
     }
 }
+
+#[cfg(test)]
+mod audit;
+
+#[cfg(test)]
+mod battle;

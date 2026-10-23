@@ -80,16 +80,34 @@ pub(crate) struct FrameTrace {
     pub(crate) focused: bool,
     /// Whether the window was occluded at this frame.
     pub(crate) occluded: bool,
+    /// Fight particles alive in the pool at this frame.
+    pub(crate) fx_alive: u32,
+    /// Fight particles the run threw so far.
+    pub(crate) fx_spawned: u32,
+    /// Blood particles thrown so far.
+    pub(crate) fx_blood: u32,
+    /// Spark particles thrown so far (a block or a parry).
+    pub(crate) fx_sparks: u32,
+    /// Dust particles thrown so far (a knockdown).
+    pub(crate) fx_dust: u32,
+    /// Flame particles thrown so far.
+    pub(crate) fx_flame: u32,
+    /// Ground blood splats in the pool at this frame.
+    pub(crate) fx_splats: u32,
+    /// Ground blood splats placed so far.
+    pub(crate) fx_splats_placed: u32,
 }
 
 /// CSV header of the per-frame trace.
 pub(crate) const TRACE_HEADER: &str = "frame,wall_us,work_us,interval_us,sim_us,present_us,\
-fighters_us,acquire_us,stage_us,submit_us,present_call_us,ticks,focused,occluded";
+fighters_us,acquire_us,stage_us,submit_us,present_call_us,ticks,focused,occluded,\
+fx_alive,fx_spawned,fx_blood,fx_sparks,fx_dust,fx_flame,fx_splats,fx_splats_placed";
 
 /// One CSV row of the per-frame trace.
 pub(crate) fn trace_row(trace: &FrameTrace) -> String {
     format!(
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},\
+{},{},{},{},{},{},{},{}",
         trace.index,
         trace.wall_us,
         trace.work_us,
@@ -104,7 +122,21 @@ pub(crate) fn trace_row(trace: &FrameTrace) -> String {
         trace.ticks,
         u8::from(trace.focused),
         u8::from(trace.occluded),
+        trace.fx_alive,
+        trace.fx_spawned,
+        trace.fx_blood,
+        trace.fx_sparks,
+        trace.fx_dust,
+        trace.fx_flame,
+        trace.fx_splats,
+        trace.fx_splats_placed,
     )
+}
+
+/// A presenter counter as a `u32` trace column: a count past `u32::MAX`
+/// (four billion particles in one run) clamps, it never wraps.
+pub(crate) fn fx_count<T: TryInto<u32>>(value: T) -> u32 {
+    value.try_into().unwrap_or(u32::MAX)
 }
 
 /// Write the per-frame trace as CSV (header plus one row per frame).
@@ -211,6 +243,14 @@ mod tests {
             ticks: index,
             focused: true,
             occluded: false,
+            fx_alive: 0,
+            fx_spawned: 0,
+            fx_blood: 0,
+            fx_sparks: 0,
+            fx_dust: 0,
+            fx_flame: 0,
+            fx_splats: 0,
+            fx_splats_placed: 0,
         }
     }
 
@@ -218,8 +258,26 @@ mod tests {
     fn trace_row_names_every_span() {
         let text = trace_row(&row(7, 1_000));
         assert_eq!(
-            text, "7,14000,1000,2000,100,900,50,10,20,30,40,7,1,0",
+            text, "7,14000,1000,2000,100,900,50,10,20,30,40,7,1,0,0,0,0,0,0,0,0,0",
             "{text}"
+        );
+    }
+
+    #[test]
+    fn trace_row_ends_with_the_fight_fx_counts() {
+        let mut frame = row(2, 1_000);
+        frame.fx_alive = 11;
+        frame.fx_spawned = 144;
+        frame.fx_blood = 120;
+        frame.fx_sparks = 224;
+        frame.fx_dust = 24;
+        frame.fx_flame = 0;
+        frame.fx_splats = 10;
+        frame.fx_splats_placed = 10;
+        let text = trace_row(&frame);
+        assert!(
+            text.ends_with(",11,144,120,224,24,0,10,10"),
+            "the fx tail must read alive,spawned,blood,sparks,dust,flame,splats,placed: {text}"
         );
     }
 

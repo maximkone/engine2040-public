@@ -7,8 +7,14 @@
 //! its feet, the last ragdoll pose blends into the clip through the same [`Inertial`] offsets a
 //! clip switch uses (LF9), so the get-up has no pop.
 //!
+//! A standing fighter who takes a blow gets a hit reaction (FEEL9) from a second, smaller world in
+//! the [`hit`] module: a chain of the pelvis, torso, head and both arms seeded from the pose the
+//! viewer saw, its chest moved by the blow and blended back over the clip inside
+//! [`hit::REACT_TICKS`]. The sim never reads it and a fall wins over it on the same tick.
+//!
 //! The physical skeleton is a reduced one: 15 bones of the CT7 skeleton (pelvis, torso, head,
-//! two legs of three, two arms of three) each get a capsule from the one table [`BONES`]. Every
+//! two legs of three, two arms of three) each get a parent and a capsule from the one body file,
+//! `content/bodies/fighter.toml`, read once at load. Every
 //! other joint (shoulders, fingers, toes, heels, weapon sockets) rides rigidly on its nearest
 //! physical ancestor. A capsule sits along its bone, centered between the bone's joint and its
 //! tip. The skinned body takes the bone rotations of the ragdoll and the pelvis position; limb
@@ -22,7 +28,9 @@
 //! never reads a float from here and nothing here is hashed, so the checkpoint hashes are the
 //! same with the layer on or off (`ragdoll_look_hashes_equal_on_and_off`). The same ticks give the
 //! same bones twice on one machine. Errors: a refused spawn (`FxError`) leaves the slot on the
-//! flat death pose it had before and is counted in [`FighterLook::ragdoll_refused`]. Budget: no
+//! flat death pose it had before and is counted in [`FighterLook::ragdoll_refused`]; a body file
+//! that is missing or does not name the rig's joints refuses the look at load with
+//! [`BoneTableError`]. Budget: no
 //! allocation and no work before the first knockout; then at most the tier's ragdoll cap
 //! (Comfort 8, Potato 2) of 15 bodies each, one `PhysFx::step` per accepted tick.
 
@@ -31,10 +39,24 @@ use engine_anim::inertial::Inertial;
 use engine_arena::GaitPhase;
 use engine_audio::FightCue;
 use engine_core::quat_mul;
-use engine_physfx::{BoneShape, Error as FxError, Key, PhysFx, Rig as FxRig, Tier, Transform};
+#[cfg(not(target_arch = "wasm32"))]
+use engine_physfx::load_body;
+#[cfg(target_arch = "wasm32")]
+use engine_physfx::parse_body;
+use engine_physfx::{
+    BodyDesc, BodyFileError, BoneShape, Error as FxError, Key, PhysFx, Rig as FxRig, Tier,
+    Transform,
+};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use super::fighter_look_inertia::{apply_offsets, begin_switch, NO_OFFSET};
 use super::{rig_index, slot_root, Act, FighterLook, Rig, SlotAnim, MAX_LOOK_FIGHTERS, TICK_HZ};
+
+#[path = "ragdoll_look/hit.rs"]
+mod hit;
+
+use self::hit::{reaction_rig, Reaction};
 
 /// Tier a look starts on: the comfortable desktop tier (eight ragdolls fit).
 pub const DEFAULT_TIER: Tier = Tier::Comfort;
@@ -75,172 +97,309 @@ const LAND_CARRY_TICKS: u32 = 40;
 /// A body that was towed may get up once its root is slower than this, m/s.
 const LANDED_MS: f32 = 1.2;
 
-/// One physical bone: the CT7 joint it follows, its physical parent (an index of this table,
-/// parent first), the CT7 joint at its tip (the capsule centers halfway there) or a fixed length
-/// when it has none, and the capsule. The radii are kept under the clearance of the standing and
-/// guard poses so no two unjoined capsules start inside each other.
+/// One physical bone of the look rig: the CT7 joint it follows, the CT7 joint at its tip (the
+/// capsule centers halfway there) or a fixed length when it has none. The parent and the capsule
+/// are the body file's, read once into [`Table`]; the row order is the file's, parents first.
 struct Bone {
     joint: &'static str,
-    parent: Option<usize>,
     tip: Option<&'static str>,
     fixed_len_m: f32,
-    radius_m: f32,
-    half_height_m: f32,
 }
 
-/// The one bone-shape table of the CT7 skeleton. Lengths are the standing bone lengths of the
-/// hero body (the variants differ by millimeters): a capsule is `2 * (half_height + radius)` long.
+/// The look-only part of the shape table: the CT7 joint chain and the tip names, which are rig
+/// names and not in the body file. Lengths are the standing bone lengths of the hero body (the
+/// variants differ by millimeters): a capsule is `2 * (half_height + radius)` long.
 const BONES: [Bone; 15] = [
     Bone {
         joint: "pelvis",
-        parent: None,
         tip: Some("torso"),
         fixed_len_m: 0.17,
-        radius_m: 0.09,
-        half_height_m: 0.0,
     },
     Bone {
         joint: "torso",
-        parent: Some(0),
         tip: Some("head"),
         fixed_len_m: 0.50,
-        radius_m: 0.115,
-        half_height_m: 0.13,
     },
     Bone {
         joint: "head",
-        parent: Some(1),
         tip: None,
         fixed_len_m: 0.24,
-        radius_m: 0.09,
-        half_height_m: 0.03,
     },
     Bone {
         joint: "leg_upper_l",
-        parent: Some(0),
         tip: Some("leg_lower_l"),
         fixed_len_m: 0.44,
-        radius_m: 0.07,
-        half_height_m: 0.148,
     },
     Bone {
         joint: "leg_lower_l",
-        parent: Some(3),
         tip: Some("foot_l"),
         fixed_len_m: 0.44,
-        radius_m: 0.055,
-        half_height_m: 0.164,
     },
     Bone {
         joint: "foot_l",
-        parent: Some(4),
         tip: Some("toes_l"),
         fixed_len_m: 0.18,
-        radius_m: 0.04,
-        half_height_m: 0.05,
     },
     Bone {
         joint: "leg_upper_r",
-        parent: Some(0),
         tip: Some("leg_lower_r"),
         fixed_len_m: 0.44,
-        radius_m: 0.07,
-        half_height_m: 0.148,
     },
     Bone {
         joint: "leg_lower_r",
-        parent: Some(6),
         tip: Some("foot_r"),
         fixed_len_m: 0.44,
-        radius_m: 0.055,
-        half_height_m: 0.164,
     },
     Bone {
         joint: "foot_r",
-        parent: Some(7),
         tip: Some("toes_r"),
         fixed_len_m: 0.18,
-        radius_m: 0.04,
-        half_height_m: 0.05,
     },
     Bone {
         joint: "arm_upper_l",
-        parent: Some(1),
         tip: Some("arm_lower_l"),
         fixed_len_m: 0.25,
-        radius_m: 0.04,
-        half_height_m: 0.085,
     },
     Bone {
         joint: "arm_lower_l",
-        parent: Some(9),
         tip: Some("palm_l"),
         fixed_len_m: 0.20,
-        radius_m: 0.035,
-        half_height_m: 0.065,
     },
     Bone {
         joint: "palm_l",
-        parent: Some(10),
         tip: Some("middle_lower_l"),
         fixed_len_m: 0.10,
-        radius_m: 0.03,
-        half_height_m: 0.02,
     },
     Bone {
         joint: "arm_upper_r",
-        parent: Some(1),
         tip: Some("arm_lower_r"),
         fixed_len_m: 0.25,
-        radius_m: 0.04,
-        half_height_m: 0.085,
     },
     Bone {
         joint: "arm_lower_r",
-        parent: Some(12),
         tip: Some("palm_r"),
         fixed_len_m: 0.20,
-        radius_m: 0.035,
-        half_height_m: 0.065,
     },
     Bone {
         joint: "palm_r",
-        parent: Some(13),
         tip: Some("middle_lower_r"),
         fixed_len_m: 0.10,
-        radius_m: 0.03,
-        half_height_m: 0.02,
     },
 ];
+
+/// The body file the table is read from, under the tree root.
+const BODY_FILE: &str = "content/bodies/fighter.toml";
+
+/// The body file's text where there is no file system (the page reads the same committed file
+/// compiled in, so the window and the browser cannot drift).
+#[cfg(target_arch = "wasm32")]
+const BODY_FILE_TEXT: &str = include_str!("../../../content/bodies/fighter.toml");
+
+/// The shape table the body file gives: the parent and the capsule of each bone of [`BONES`],
+/// in the same row order.
+#[derive(Debug)]
+struct Table {
+    /// Parent of each bone as an index of this table, or `None` for the root.
+    parents: [Option<usize>; BONE_COUNT],
+    /// Capsule of each bone, meters.
+    shapes: [BoneShape; BONE_COUNT],
+}
+
+/// What the body file behind the shape table got wrong.
+#[derive(Debug)]
+pub(super) enum BoneTableError {
+    /// The file could not be read, or its text is not a body.
+    Body(BodyFileError),
+    /// The file's bones do not number the look rig's bones.
+    Count {
+        /// Bones the look rig has.
+        expected: usize,
+        /// Bones the file has.
+        found: usize,
+    },
+    /// The file's bone at `index` is not the look rig's joint there.
+    Joint {
+        /// Row of the file, from zero.
+        index: usize,
+        /// Joint the look rig has at that row.
+        expected: &'static str,
+        /// Name the file gives that row.
+        found: String,
+    },
+    /// A bone names a parent the body does not have.
+    Parent {
+        /// Bone that names the parent.
+        bone: String,
+        /// Parent name that is missing.
+        parent: String,
+    },
+}
+
+impl std::fmt::Display for BoneTableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Body(error) => write!(f, "the ragdoll shape table: {error}"),
+            Self::Count { expected, found } => write!(
+                f,
+                "the ragdoll shape table has {found} bones, the look rig has {expected}"
+            ),
+            Self::Joint {
+                index,
+                expected,
+                found,
+            } => write!(
+                f,
+                "the ragdoll shape table bone {index} is `{found}`, the look rig calls it `{expected}`"
+            ),
+            Self::Parent { bone, parent } => write!(
+                f,
+                "the ragdoll shape table bone `{bone}` names parent `{parent}`, which the body does not have"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BoneTableError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Body(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// The body file's path: the tree's `content/bodies/fighter.toml`, found by walking up from the
+/// executable (dev `target/...` or a deployed `bin/`), else the launch directory's.
+#[cfg(not(target_arch = "wasm32"))]
+fn body_file() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut anchor = exe.parent().map(Path::to_path_buf);
+        while let Some(dir) = anchor {
+            let candidate = dir.join(BODY_FILE);
+            if candidate.is_file() {
+                return candidate;
+            }
+            anchor = dir.parent().map(Path::to_path_buf);
+        }
+    }
+    PathBuf::from(BODY_FILE)
+}
+
+/// The body file's path on the page: a logical path for receipts; its text is compiled in.
+#[cfg(target_arch = "wasm32")]
+fn body_file() -> PathBuf {
+    PathBuf::from(BODY_FILE)
+}
+
+/// Builds the table from `body`, checking the file's rows against the look rig's joints.
+fn table_from(body: &BodyDesc) -> Result<Table, BoneTableError> {
+    if body.bones.len() != BONE_COUNT {
+        return Err(BoneTableError::Count {
+            expected: BONE_COUNT,
+            found: body.bones.len(),
+        });
+    }
+    let mut parents = [None; BONE_COUNT];
+    let mut shapes = [BoneShape {
+        radius: 0.0,
+        half_height: 0.0,
+    }; BONE_COUNT];
+    for (index, row) in body.bones.iter().enumerate() {
+        let rig = &BONES[index];
+        if row.name != rig.joint {
+            return Err(BoneTableError::Joint {
+                index,
+                expected: rig.joint,
+                found: row.name.clone(),
+            });
+        }
+        parents[index] = if row.parent.is_empty() {
+            None
+        } else {
+            let Some(parent) = body.bones.iter().position(|one| one.name == row.parent) else {
+                return Err(BoneTableError::Parent {
+                    bone: row.name.clone(),
+                    parent: row.parent.clone(),
+                });
+            };
+            Some(parent)
+        };
+        shapes[index] = BoneShape {
+            radius: row.radius,
+            half_height: row.half_height,
+        };
+    }
+    Ok(Table { parents, shapes })
+}
+
+/// Reads the shape table from `path`: one file read at load.
+fn load_table(path: &Path) -> Result<Table, BoneTableError> {
+    #[cfg(target_arch = "wasm32")]
+    let body = {
+        let _ = path;
+        parse_body(BODY_FILE_TEXT).map_err(|error| {
+            BoneTableError::Body(BodyFileError::Parse {
+                path: PathBuf::from(BODY_FILE),
+                error,
+            })
+        })?
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let body = load_body(path).map_err(BoneTableError::Body)?;
+    table_from(&body)
+}
+
+/// The shape table, read once: the first caller reads the body file and later callers reuse it.
+/// A missing file, or a row that is not the rig's joint, is kept as the typed error.
+fn table() -> Result<&'static Table, &'static BoneTableError> {
+    static TABLE: OnceLock<Result<Table, BoneTableError>> = OnceLock::new();
+    match TABLE.get_or_init(|| load_table(&body_file())) {
+        Ok(table) => Ok(table),
+        Err(error) => Err(error),
+    }
+}
 
 /// Every bone of [`BONES`] that ends at a tip joint, as `(joint, tip, radius_m)`: the capsules
 /// a cape meets are the ragdoll's own body shapes, read from the one table.
 pub(super) fn bone_capsules() -> impl Iterator<Item = (&'static str, &'static str, f32)> {
-    BONES
-        .iter()
-        .filter_map(|bone| bone.tip.map(|tip| (bone.joint, tip, bone.radius_m)))
+    let table = table().ok();
+    BONES.iter().enumerate().filter_map(move |(index, bone)| {
+        let tip = bone.tip?;
+        let radius = table?.shapes[index].radius;
+        Some((bone.joint, tip, radius))
+    })
 }
 
-/// The physical rig: the reduced skeleton and one capsule per bone, validated once. `None` only
-/// if the table above is wrong (a test pins that it is not).
-fn physical_rig() -> Option<FxRig> {
+/// Every bone of [`BONES`], parents first: the fall ragdoll.
+const ALL_BONES: [usize; BONE_COUNT] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+
+/// The physical rig of `bones` (indices of [`BONES`], parents first): the skeleton and one
+/// capsule per bone, validated once. `None` when the body file was refused (the look refuses the
+/// load before a rig is built).
+fn rig_of(bones: &[usize]) -> Option<FxRig> {
+    let table = table().ok()?;
     let skeleton = Skeleton {
-        joints: BONES
+        joints: bones
             .iter()
             .map(|bone| Joint {
-                name: bone.joint.to_string(),
-                parent: bone.parent,
+                name: BONES[*bone].joint.to_string(),
+                parent: bone_parent(bones, *bone),
             })
             .collect(),
     };
-    let shapes = BONES
-        .iter()
-        .map(|bone| BoneShape {
-            radius: bone.radius_m,
-            half_height: bone.half_height_m,
-        })
-        .collect();
+    let shapes = bones.iter().map(|bone| table.shapes[*bone]).collect();
     FxRig::new(skeleton, shapes).ok()
+}
+
+/// The parent of `bone` in `bones`, as an index of that list.
+fn bone_parent(bones: &[usize], bone: usize) -> Option<usize> {
+    let parent = table().ok()?.parents.get(bone).copied().flatten()?;
+    bones.iter().position(|one| *one == parent)
+}
+
+/// The fall ragdoll: all 15 bones.
+fn physical_rig() -> Option<FxRig> {
+    rig_of(&ALL_BONES)
 }
 
 /// How the physical bones sit in one CT7 skeleton, found by joint name once at load.
@@ -377,6 +536,15 @@ pub(super) struct RagdollLook {
     stepped: Option<u32>,
     spawned: u32,
     refused: u32,
+    /// The reaction world (FEEL9), built at the first standing hit.
+    react: Option<PhysFx>,
+    react_rig: Option<FxRig>,
+    /// One standing hit reaction per slot, blended over the clip and back.
+    reactions: [Option<Reaction>; MAX_LOOK_FIGHTERS],
+    /// Blows queued by this tick's cues, applied once the clips have folded.
+    react_pending: [Option<Kick>; MAX_LOOK_FIGHTERS],
+    /// Standing hit reactions spawned since the layer was built (tests and receipts).
+    reacted: u32,
 }
 
 impl RagdollLook {
@@ -404,6 +572,11 @@ impl RagdollLook {
             stepped: None,
             spawned: 0,
             refused: 0,
+            react: None,
+            react_rig: reaction_rig(),
+            reactions: std::array::from_fn(|_| None),
+            react_pending: [None; MAX_LOOK_FIGHTERS],
+            reacted: 0,
         }
     }
 
@@ -437,6 +610,10 @@ impl RagdollLook {
         self.arm_lost = [false; MAX_LOOK_FIGHTERS];
         self.next_part = 1;
         self.stepped = None;
+        self.react = None;
+        self.reactions = std::array::from_fn(|_| None);
+        self.react_pending = [None; MAX_LOOK_FIGHTERS];
+        self.reacted = 0;
     }
 
     /// True when the slot's body may stand up as far as a tether is concerned: no tether holds
@@ -593,12 +770,16 @@ impl RagdollLook {
         };
         // A capsule sits centered on its bone, so the cut end is half a capsule back along the
         // bone's own +Y. The cap then rides the parent, not the falling limb.
-        let half = BONES
-            .get(usize::from(bone))
-            .map_or(0.0, |row| row.half_height_m + row.radius_m);
+        let Ok(table) = table() else {
+            return Err(FxError::BadCaps);
+        };
+        let Some(shape) = table.shapes.get(usize::from(bone)) else {
+            return Ok(false);
+        };
+        let half = shape.half_height + shape.radius;
         let cut = sub(at.pos, rotate(at.rot, [0.0, half, 0.0]));
         let local = rotate(conj(above.rot), sub(cut, above.pos));
-        let radius_m = BONES.get(usize::from(bone)).map_or(0.0, |row| row.radius_m);
+        let radius_m = shape.radius;
         self.severed.push(SeveredBone {
             slot,
             bone,
@@ -684,8 +865,11 @@ impl RagdollLook {
             positions: vec![[0.0; 3]; BONE_COUNT],
             rotations: vec![[0.0, 0.0, 0.0, 1.0]; BONE_COUNT],
         };
-        for (index, bone) in BONES.iter().enumerate() {
-            match bone.parent {
+        let Ok(table) = table() else {
+            return Err(FxError::BadCaps);
+        };
+        for index in 0..BONE_COUNT {
+            match table.parents[index] {
                 Some(parent) => {
                     let up = conj(place[parent].rot);
                     local.positions[index] = rotate(up, sub(place[index].pos, place[parent].pos));
@@ -844,6 +1028,12 @@ impl FighterLook {
         self.ragdoll.spawned
     }
 
+    /// Standing hit reactions spawned since load (FEEL9).
+    #[must_use]
+    pub fn hit_reactions(&self) -> u32 {
+        self.ragdoll.reacted
+    }
+
     /// Spawns the physical layer refused since load (a cap too small for one body, bad numbers).
     #[must_use]
     pub fn ragdoll_refused(&self) -> u32 {
@@ -873,8 +1063,10 @@ impl FighterLook {
                 .is_some_and(|age| *age < GETUP_TICKS)
     }
 
-    /// The layouts of a freshly loaded look's rigs, in rig order.
-    pub(super) fn ragdoll_for_rigs(rigs: &[Rig]) -> RagdollLook {
+    /// The layouts of a freshly loaded look's rigs, in rig order. The body file is read here, so a
+    /// missing file or a row that is not the rig's joint refuses the look at load.
+    pub(super) fn ragdoll_for_rigs(rigs: &[Rig]) -> Result<RagdollLook, &'static BoneTableError> {
+        table()?;
         let layouts = rigs.iter().map(|rig| Layout::find(&rig.skeleton)).collect();
         let sets: Option<Vec<Inertial>> = (0..MAX_LOOK_FIGHTERS)
             .map(|slot| {
@@ -882,7 +1074,7 @@ impl FighterLook {
                 Inertial::new(2 * rig.skeleton.len(), GETUP_HALFLIFE_S).ok()
             })
             .collect();
-        RagdollLook::new(layouts, sets.unwrap_or_default())
+        Ok(RagdollLook::new(layouts, sets.unwrap_or_default()))
     }
 
     /// A `Knockdown` cue floors `victim`: queue its ragdoll with the blow of this tick's `Hit`
@@ -996,6 +1188,8 @@ impl FighterLook {
             self.ragdoll_spawn(index, kick);
         }
         if fresh {
+            // FEEL9: standing hit reactions spawn, follow their fighter and blend back.
+            self.ragdoll_reactions();
             // The get-up clock runs with the clip clock: a held slot's age stands still (LF10).
             for (age, slot) in self.ragdoll.getup_age.iter_mut().zip(&self.slots) {
                 if *age != NO_GETUP && !slot.held {
@@ -1058,6 +1252,8 @@ impl FighterLook {
     /// Hands the standing pose of `index` to the world and floors the slot: whatever the world
     /// answers, the slot lies down (on its ragdoll, or flat if it was refused).
     fn ragdoll_spawn(&mut self, index: usize, kick: Kick) {
+        // A fall replaces the standing reaction: the chain is gone before the body lies down.
+        self.ragdoll.reactions[index] = None;
         self.ragdoll_try_spawn(index, kick);
         self.floor_slot(u8::try_from(index).unwrap_or(u8::MAX));
     }
@@ -1312,6 +1508,9 @@ impl FighterLook {
 }
 #[cfg(test)]
 mod tests {
+    use super::hit::{
+        react_weight, REACT_FADE_TICKS, REACT_HOLD_TICKS, REACT_RISE_TICKS, REACT_TICKS,
+    };
     use super::*;
     use crate::view_truth::{BodyTruth, ViewLaws, GROUND_Y};
     use crate::FighterView;
@@ -1384,15 +1583,23 @@ mod tests {
             .fold(0.0, f32::max)
     }
 
+    /// The committed body file the shape table reads, by path so the test does not depend on
+    /// where the test binary sits.
+    fn fighter_body() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/bodies/fighter.toml")
+    }
+
     #[test]
     fn ragdoll_look_table_builds_and_fits_every_ct7_skeleton() {
         let rig = physical_rig().expect("the bone table builds a rig");
         assert_eq!(rig.bones(), BONE_COUNT);
+        let table = table().expect("the body file builds a table");
         for (index, bone) in BONES.iter().enumerate() {
-            if let Some(parent) = bone.parent {
+            if let Some(parent) = table.parents[index] {
                 assert!(parent < index, "{} lists its parent first", bone.joint);
             }
-            let capsule = 2.0 * (bone.half_height_m + bone.radius_m);
+            let shape = table.shapes[index];
+            let capsule = 2.0 * (shape.half_height + shape.radius);
             assert!(
                 (capsule - bone.fixed_len_m).abs() < 0.07,
                 "{}: capsule {capsule:.3} m against bone {:.3} m",
@@ -1408,7 +1615,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("rig {} lacks a table bone", rig.variant));
             assert_eq!(layout.joint_of.len(), BONE_COUNT);
             // The table's parent is the nearest physical ancestor in the CT7 chain.
-            for (bone, parent) in BONES.iter().map(|b| b.parent).enumerate() {
+            for (bone, parent) in table.parents.iter().copied().enumerate() {
                 let mut up = rig.skeleton.joints[layout.joint_of[bone]].parent;
                 let mut found = None;
                 while let Some(joint) = up {
@@ -1421,6 +1628,54 @@ mod tests {
                 assert_eq!(found, parent, "{} bone {bone}", rig.variant);
             }
         }
+    }
+
+    /// The table's 15 joints, parents, radii and half-heights are the body file's own rows: one
+    /// source for the sizes.
+    #[test]
+    fn ragdoll_look_table_reads_the_body_file() {
+        let body = load_body(&fighter_body()).expect("the fighter body reads");
+        let table = load_table(&fighter_body()).expect("the fighter body builds a table");
+        assert_eq!(body.bones.len(), BONE_COUNT);
+        for (index, row) in body.bones.iter().enumerate() {
+            assert_eq!(BONES[index].joint, row.name.as_str(), "row {index} joint");
+            let parent = if row.parent.is_empty() {
+                None
+            } else {
+                body.bones.iter().position(|one| one.name == row.parent)
+            };
+            assert_eq!(table.parents[index], parent, "{} parent", row.name);
+            assert_eq!(
+                table.shapes[index].radius, row.radius,
+                "{} radius",
+                row.name
+            );
+            assert_eq!(
+                table.shapes[index].half_height, row.half_height,
+                "{} half height",
+                row.name
+            );
+        }
+    }
+
+    /// A body file that is not there is a typed refusal that names its path.
+    #[test]
+    fn ragdoll_look_missing_body_file_names_its_path() {
+        let path = std::env::temp_dir().join("engine2040-no-fighter-body.toml");
+        let error = load_table(&path).expect_err("a missing body file is refused");
+        let text = error.to_string();
+        assert!(text.contains(&path.display().to_string()), "{text}");
+    }
+
+    /// A joint the file renamed is refused, and the message names both names.
+    #[test]
+    fn ragdoll_look_renamed_joint_names_both_names() {
+        let mut body = load_body(&fighter_body()).expect("the fighter body reads");
+        body.bones[2].name = "skull".to_string();
+        let error = table_from(&body).expect_err("a renamed joint is refused");
+        let text = error.to_string();
+        assert!(text.contains("head"), "{text}");
+        assert!(text.contains("skull"), "{text}");
     }
 
     /// What a scripted fall measured on slot 1.
@@ -2071,5 +2326,130 @@ mod tests {
         );
         assert_eq!(mesh, again_mesh, "the same cap mesh twice");
         assert_eq!(items, again_items, "the same cap draws twice");
+    }
+
+    /// The head joint of slot 1 in the model frame at `alpha`.
+    fn head_of(look: &FighterLook, alpha: f32) -> [f32; 3] {
+        let layout = look.ragdoll.layouts[rig_index(look.rigs.len(), 1)]
+            .as_ref()
+            .expect("the CT7 layout");
+        joints(look, 2, alpha)[1].joints[layout.joint_of[2]]
+    }
+
+    #[test]
+    fn the_reaction_window_is_the_brace_window() {
+        assert_eq!(
+            REACT_TICKS,
+            u32::from(REACT_HOLD_TICKS) + u32::from(REACT_FADE_TICKS),
+            "hold plus fade is the whole window"
+        );
+        assert_eq!(
+            react_weight(0, 0.0),
+            0.0,
+            "the impact frame is still the clip"
+        );
+        assert_eq!(
+            react_weight(u32::from(REACT_RISE_TICKS), 0.0),
+            1.0,
+            "full weight after the rise"
+        );
+        assert_eq!(
+            react_weight(REACT_TICKS, 0.0),
+            0.0,
+            "gone at the window end"
+        );
+        assert_eq!(react_weight(REACT_TICKS + 1, 0.0), 0.0);
+    }
+
+    #[test]
+    fn a_torso_hit_displaces_the_struck_chain_and_blends_back() {
+        // FEEL9: one Hit on a standing fighter turns the upper chain with the physical blow and
+        // returns it to the clip inside REACT_TICKS. The control is the same bout with the layer
+        // off, so the flinch, the stumble and the clips cancel out and only the chain is left.
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let mut plain = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        plain.set_ragdoll(false);
+        let views = ring(2);
+        let hp = [1000u16; 2];
+        let (mut worst, mut back) = (0.0f32, f32::MAX);
+        for t in 0..50u32 {
+            let cues = if t == 10 { vec![hit(0, 1)] } else { Vec::new() };
+            tick(&mut look, t, &views, &hp, &cues);
+            tick(&mut plain, t, &views, &hp, &cues);
+            let gap = length(sub(head_of(&look, 0.5), head_of(&plain, 0.5)));
+            if (10..10 + REACT_TICKS).contains(&t) {
+                worst = worst.max(gap);
+            }
+            if t == 10 + REACT_TICKS + 10 {
+                back = gap;
+            }
+        }
+        println!("torso hit: worst head gap {worst:.3} m, back after the window {back:.5} m");
+        assert_eq!(look.hit_reactions(), 1, "one chain for one blow");
+        assert_eq!(plain.hit_reactions(), 0, "the layer off spawns nothing");
+        assert!(
+            worst > 0.05,
+            "a torso hit moves the struck chain: worst {worst:.3} m"
+        );
+        assert!(
+            back < 0.005,
+            "the chain is back on the clip after the window: {back:.4} m"
+        );
+    }
+
+    #[test]
+    fn the_same_torso_hit_poses_the_same_chain_twice() {
+        let run = || {
+            let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+            let views = ring(2);
+            let hp = [1000u16; 2];
+            let mut head = Vec::new();
+            for t in 0..30u32 {
+                let cues = if t == 8 { vec![hit(0, 1)] } else { Vec::new() };
+                tick(&mut look, t, &views, &hp, &cues);
+                head.push(head_of(&look, 0.5));
+            }
+            head
+        };
+        let (first, second) = (run(), run());
+        assert_eq!(first, second, "the same blow poses the same head twice");
+    }
+
+    #[test]
+    fn a_knockdown_replaces_a_standing_reaction() {
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let views = ring(2);
+        let hp = [1000u16; 2];
+        for t in 0..20u32 {
+            let cues = match t {
+                5 => vec![hit(0, 1)],
+                8 => vec![knock(0, 1)],
+                _ => Vec::new(),
+            };
+            tick(&mut look, t, &views, &hp, &cues);
+        }
+        assert_eq!(look.hit_reactions(), 1, "the blow started one chain");
+        assert!(look.ragdoll.has(1), "the knockdown owns the slot now");
+        assert!(
+            look.ragdoll.reactions[1].is_none(),
+            "the fall replaced the standing chain"
+        );
+    }
+
+    #[test]
+    fn a_hit_on_a_floored_fighter_leaves_the_fall_alone() {
+        let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
+        let views = ring(2);
+        let hp = [1000u16; 2];
+        for t in 0..20u32 {
+            let cues = match t {
+                5 => vec![knock(0, 1)],
+                8 => vec![hit(0, 1)],
+                _ => Vec::new(),
+            };
+            tick(&mut look, t, &views, &hp, &cues);
+        }
+        assert_eq!(look.hit_reactions(), 0, "a floored slot gets no chain");
+        assert_eq!(look.ragdolls(), 1, "its fall is still the one body");
     }
 }

@@ -16,6 +16,9 @@ pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Depth target for the forward pass.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// LF5 motion target: screen-space move in uv units, red plus green, half
+/// float. The forward pass writes it beside HDR; TAA reprojects with it.
+pub const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 /// Forward pass clear, linear radiance. It tone-maps to the display color
 /// (7.65, 8.9, 15.3) of 255 that the display-space clear of the earlier
 /// frame had (solved through ACES plus sRGB), so an empty capture keeps its
@@ -43,15 +46,19 @@ pub(super) const BLIT_WGSL: &str = concat!(
 mod auto_exposure_gpu;
 mod bind_memo;
 mod capture;
+mod compressed;
 mod contact_live;
+mod debug_lines;
 mod device_init;
 mod fight_fx;
 mod fog_tranche;
 mod forward_bind;
+mod forward_group;
 mod frame;
 mod gate;
 mod gtao_live;
 mod live;
+mod motion;
 mod msaa;
 mod presenter;
 mod preset;
@@ -59,9 +66,17 @@ mod quality_apply;
 #[cfg(any(target_arch = "wasm32", test))]
 mod scope_ledger;
 mod submit;
+mod submit_cull;
 mod sun_shadow;
+mod taa_resolve;
 mod timing;
 mod warmup;
+
+/// The sun switch is one process-wide static, so a test that flips it and a
+/// test that renders a frame take this lock: a render never reads a value
+/// from the middle of the switch test. Owner: EG11 tests.
+#[cfg(test)]
+pub(crate) static SUN_SWITCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub use capture::{CaptureStats, FrameCapture, DISTINCT_CAP};
 pub use frame::{
@@ -72,7 +87,9 @@ pub use msaa::{
     MsaaTargetDesc, MSAA_SAMPLE_COUNT,
 };
 pub use presenter::Presenter;
+#[cfg(feature = "window")]
 pub use submit::create_surface;
+pub use taa_resolve::TaaResolveReceipt;
 
 #[cfg(test)]
 mod root_wiring_tests {

@@ -590,6 +590,28 @@ impl HeadlessServer {
         &self.checkpoints
     }
 
+    /// The input log's cut lane: every authored tick's severed joints (BX9).
+    pub fn cut_log(&self) -> &crate::cuts::CutLog {
+        self.inner.cut_log()
+    }
+
+    /// Frame one viewer's pending cuts: the rows of `first_tick..=now` whose
+    /// victim the viewer's selection holds, oldest first, capped at
+    /// [`crate::cuts::MAX_CUTS_PER_PACKET`].
+    pub fn cut_packet(
+        &self,
+        first_tick: u32,
+        now: u32,
+        selected: &[u32],
+    ) -> Result<Option<Vec<u8>>, crate::session::NetError> {
+        let authored = self.inner.tick_now();
+        if authored == 0 {
+            return Ok(None);
+        }
+        let last = now.min(authored.saturating_sub(1));
+        crate::cuts::frame_window(self.inner.cut_log(), first_tick, last, selected)
+    }
+
     /// The beacon that lists this server: its input `port`, the configured
     /// fighter slots, the next tick to author and the latest hash (`0` before
     /// the first tick). A master list ([`MasterList::register`]) and a LAN

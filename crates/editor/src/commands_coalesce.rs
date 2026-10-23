@@ -117,6 +117,9 @@ fn replay_known_key(journal: &Journal, batch: &Batch) -> Option<Result<Applied, 
         {
             return Some(Ok(Applied {
                 revision: seen.result_revision,
+                before_digest: seen.before_digest,
+                staged_digest: seen.staged_digest,
+                after_digest: seen.after_digest,
                 effects: seen.effects.clone(),
                 key,
                 provenance: seen.provenance.clone(),
@@ -161,8 +164,10 @@ fn fold_tick(
     doc.hierarchy = staged.tree;
     doc.materials = staged.materials;
     doc.components = staged.components;
+    doc.bonds = staged.bonds;
     doc.material_set = staged.material_set;
     doc.revision = result_revision;
+    let after_digest = document_digest(doc);
     let mut keys = top.keys;
     if !keys.contains(&batch.idempotency_key) {
         keys.push(batch.idempotency_key);
@@ -175,6 +180,9 @@ fn fold_tick(
         inverse_groups: top.inverse_groups,
         base_revision: top.base_revision,
         result_revision,
+        before_digest: top.before_digest,
+        staged_digest: after_digest,
+        after_digest,
         effects: staged.effects.clone(),
         provenance: provenance.clone(),
         name: top.name,
@@ -185,6 +193,9 @@ fn fold_tick(
     journal.future.clear();
     Some(Ok(Applied {
         revision: result_revision,
+        before_digest: top.before_digest,
+        staged_digest: after_digest,
+        after_digest,
         effects: staged.effects,
         key: gesture_key,
         provenance,
@@ -202,13 +213,16 @@ fn commit_staged(
     meta: &CommandMeta,
     staged: Staged,
     provenance: Provenance,
+    before_digest: [u8; 32],
 ) -> Applied {
     let result_revision = doc.revision + 1;
     doc.hierarchy = staged.tree;
     doc.materials = staged.materials;
     doc.components = staged.components;
+    doc.bonds = staged.bonds;
     doc.material_set = staged.material_set;
     doc.revision = result_revision;
+    let after_digest = document_digest(doc);
     let group = journal
         .groups
         .last()
@@ -221,6 +235,9 @@ fn commit_staged(
         inverse_groups: staged.per_op,
         base_revision: batch.base_revision,
         result_revision: doc.revision,
+        before_digest,
+        staged_digest: after_digest,
+        after_digest,
         effects: staged.effects.clone(),
         provenance: provenance.clone(),
         name: meta.name.clone(),
@@ -237,6 +254,9 @@ fn commit_staged(
     journal.future.clear();
     Applied {
         revision: doc.revision,
+        before_digest,
+        staged_digest: after_digest,
+        after_digest,
         effects: staged.effects,
         key: batch.idempotency_key,
         provenance,
@@ -288,15 +308,27 @@ pub fn apply_coalesced(
     }
     // Fresh gesture: the old one seals, then the tick commits like any apply.
     seal_coalescing(journal);
+    let before_digest = document_digest(doc);
     let staged = stage(doc, batch)?;
     if batch.ops == staged.inverse {
         seal_coalescing(journal);
-        #[rustfmt::skip]
-        return Ok(Applied { revision: doc.revision, effects: staged.effects, key: batch.idempotency_key, provenance: build_record(batch, doc.revision, journal), journal_index: journal.past.len().saturating_sub(1) });
+        // The tick is its own inverse: nothing lands, so all three digests
+        // describe the unchanged document.
+        let digest = before_digest;
+        return Ok(Applied {
+            revision: doc.revision,
+            before_digest: digest,
+            staged_digest: digest,
+            after_digest: digest,
+            effects: staged.effects,
+            key: batch.idempotency_key,
+            provenance: build_record(batch, doc.revision, journal),
+            journal_index: journal.past.len().saturating_sub(1),
+        });
     }
     let result_revision = doc.revision + 1;
     let provenance = build_record(batch, result_revision, journal);
-    let applied = commit_staged(doc, journal, batch, meta, staged, provenance);
+    let applied = commit_staged(doc, journal, batch, meta, staged, provenance, before_digest);
     // Only value writes arm the gesture, and only outside groups (group
     // steps merge through `end_group` instead).
     if journal.groups.is_empty()

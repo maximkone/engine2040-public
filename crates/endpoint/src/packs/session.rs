@@ -239,6 +239,7 @@ pub fn diff_from(snapshot: &Snapshot, journal: &Journal, revision: u64) -> Scene
                 | Op::Reparent { id, .. }
                 | Op::SetMaterial { id, .. }
                 | Op::SetComponent { id, .. }
+                | Op::SetBond { id, .. }
                 | Op::RemoveComponent { id, .. } => changed.push(DiffRow {
                     id: id.to_string(),
                     revision: entry.result_revision,
@@ -346,6 +347,7 @@ fn op_id(op: &Op) -> Option<String> {
         | Op::Reparent { id, .. }
         | Op::SetMaterial { id, .. }
         | Op::SetComponent { id, .. }
+        | Op::SetBond { id, .. }
         | Op::RemoveComponent { id, .. } => *id,
         _ => return None,
     };

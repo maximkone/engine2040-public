@@ -24,6 +24,11 @@
   /* QW3/QW12: how the module arrived (bundle, bytes fetched, download, compile, first frame). */
   #load, #memory { position: fixed; right: 8px; top: 86px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; max-width: 60vw; white-space: pre-wrap; word-break: break-all; }
   #memory { top: 112px; }
+  /* QW4: the arena bundle streams in with a byte bar; it hides when the body is whole or the fetch refuses. */
+  #fetch { display: none; position: fixed; right: 8px; top: 138px; z-index: 20; width: min(40vw, 280px); margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 11px; }
+  body[data-fetch] #fetch { display: block; }
+  #fetch progress { display: block; width: 100%; height: 6px; accent-color: #2fbf4a; }
+  #fetch span { display: block; margin-top: 2px; white-space: nowrap; }
   /* WEB9/WEB12: the net duel line, only when the address has ?server= or ?join=. #netstat is the detail under it. */
   #net { display: none; position: fixed; right: 8px; top: 60px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
   #netstat { display: none; position: fixed; left: 8px; top: 120px; z-index: 20; margin: 0; padding: 2px 8px; max-width: 60vw; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; white-space: pre-wrap; }
@@ -62,6 +67,18 @@
   .duel-bar i { display: block; height: 100%; width: 100%; background: linear-gradient(90deg, #d8452c, #f0a63a); }
   .duel-side.duel-flip .duel-bar i { margin-left: auto; background: linear-gradient(270deg, #2f6fd0, #45c6f0); }
   .duel-pips { letter-spacing: 0.22em; color: #ffd98a; }
+  /* WEB16: the stamina bar under the health bar, and the poise pips next to it. */
+  .duel-stam { display: block; width: 100%; height: 6px; margin-top: 3px; background: rgba(0, 0, 0, 0.6); border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 2px; overflow: hidden; }
+  .duel-stam i { display: block; height: 100%; width: 100%; background: linear-gradient(90deg, #2f8f4a, #7ad06a); transition: width 120ms linear; }
+  .duel-side.duel-flip .duel-stam i { margin-left: auto; background: linear-gradient(270deg, #2f8f4a, #7ad06a); }
+  .duel-gauge { display: flex; flex-direction: column; gap: 2px; min-width: 34px; }
+  .duel-poise { letter-spacing: 0.2em; color: #cfe4ff; font-size: 12px; }
+  body[data-poise="you"] .duel-side:not(.duel-flip) .duel-poise,
+  body[data-poise="rival"] .duel-side.duel-flip .duel-poise,
+  body[data-poise="both"] .duel-poise { color: #ff6a5a; }
+  /* WEB16: the one-word call, centred over the picture. */
+  #duel-call { display: none; position: fixed; left: 50%; top: 34vh; z-index: 21; transform: translate(-50%, -50%); pointer-events: none; font: 800 clamp(28px, 6vmin, 76px)/1 system-ui, sans-serif; color: #ffe9a8; letter-spacing: 0.08em; text-shadow: 0 0 20px rgba(0, 0, 0, 0.9), 0 3px 0 #6b4a14; }
+  body[data-duel="on"][data-call]:not([data-call=""]) #duel-call { display: block; animation: duel-pop 0.18s ease-out; }
   #duel-round { flex: 0 0 auto; padding: 2px 8px; background: rgba(0, 0, 0, 0.6); border-radius: 3px; color: #ffd98a; letter-spacing: 0.1em; text-transform: uppercase; }
   #duel-banner { display: none; position: fixed; left: 50%; top: 26vh; z-index: 22; transform: translate(-50%, -50%); pointer-events: none; font: 800 clamp(48px, 12vmin, 150px)/1 system-ui, sans-serif; color: #fff; letter-spacing: 0.06em; text-shadow: 0 0 24px rgba(0, 0, 0, 0.85), 0 4px 0 #7a1410; }
   body[data-banner="ko"] #duel-banner, body[data-banner="win"] #duel-banner { display: block; animation: duel-pop 0.35s ease-out; }
@@ -69,22 +86,31 @@
   @keyframes duel-pop { from { transform: translate(-50%, -50%) scale(1.45); opacity: 0; } to { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
 </style>
 </head>
-<body data-state="starting" data-commit="2e32ea6b27d2">
+<body data-state="starting" data-commit="28807636d">
 <canvas id="canvas"></canvas>
 <div id="duel" aria-hidden="true">
   <div class="duel-side">
     <span class="duel-name">you</span>
     <span class="duel-bar"><i id="duel-you-bar"></i></span>
     <span class="duel-pips" id="duel-you-pips">○○○</span>
+    <span class="duel-gauge">
+      <span class="duel-stam"><i id="duel-you-stam"></i></span>
+      <span class="duel-poise" id="duel-you-poise">●●●●</span>
+    </span>
   </div>
   <div id="duel-round">round 1</div>
   <div class="duel-side duel-flip">
     <span class="duel-name">rival</span>
     <span class="duel-bar"><i id="duel-rival-bar"></i></span>
     <span class="duel-pips" id="duel-rival-pips">○○○</span>
+    <span class="duel-gauge">
+      <span class="duel-stam"><i id="duel-rival-stam"></i></span>
+      <span class="duel-poise" id="duel-rival-poise">●●●●</span>
+    </span>
   </div>
 </div>
 <div id="duel-banner"></div>
+<div id="duel-call"></div>
 <div id="hud">frame 0 | -- ms</div>
 <pre id="input">input: kb=0 mouse=0 pad=0</pre>
 <pre id="audio">audio: state=suspended</pre>
@@ -95,7 +121,8 @@
 <pre id="keys">WASD move · mouse look · Q/E turn · F attack · Shift block · Space dodge</pre>
 <pre id="load">load: fetching the engine</pre>
 <pre id="memory">memory: no reading yet</pre>
-<pre id="build">build: commit 2e32ea6b27d2</pre>
+<div id="fetch"><progress id="fetch-bar" max="1" value="0"></progress><span id="fetch-text">arena bundle: waiting</span></div>
+<pre id="build">build: commit 28807636d</pre>
 <pre id="coi">coi: isolated=false reloads=0</pre>
 <pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
 <pre id="report">starting</pre>
@@ -124,13 +151,41 @@
   <div style="position:fixed;inset:0;z-index:11;padding:5vmin;background:#b00020;color:#fff;font:600 20px system-ui,sans-serif">This page needs JavaScript, WebAssembly and WebGPU (Chrome or Edge 113+, Safari 26+, Firefox 141+ on Windows).</div>
 </noscript>
 <script type="module">
-import init, { run, run_arena, lose_device, destroy_device, input_sample, request_arena_capture, run_net } from "./engine.js";
-import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory, pageFetcher } from "./loader.js";
+import init, { run, run_arena, lose_device, destroy_device, input_sample, audio_cue_check, request_arena_capture, run_net } from "./engine.js";
+import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory, pageFetcher, pageFetcherPrefix } from "./loader.js";
+
+// QW4: the arena bundle streams in with a byte bar. It stays hidden until the first
+// chunk and hides again when the body is whole or the fetch refuses.
+const fetchBar = document.getElementById("fetch-bar");
+const fetchText = document.getElementById("fetch-text");
+const size = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} kB`);
+function showFetch({ received, total, done, error }) {
+  if (done || error) { delete document.body.dataset.fetch; return; }
+  document.body.dataset.fetch = "1";
+  fetchBar.max = total || 1;
+  if (total > 0) fetchBar.value = Math.min(received, total);
+  else fetchBar.removeAttribute("value");
+  fetchText.textContent = total > 0 ? `arena bundle: ${size(received)} / ${size(total)}` : `arena bundle: ${size(received)}`;
+}
 
 // WEB6: the page owns the network. The engine asks for a gameplay asset by URL and this
 // function fetches it; the bytes come back through the asset seam (engine-assets). A failure
 // here is a typed refusal the engine names, never an empty arena.
-window.engine2040FetchAsset = pageFetcher(import.meta.url);
+const fetchBundle = pageFetcher(import.meta.url, showFetch);
+window.engine2040FetchAsset = (url) => {
+  const pending = fetchBundle(url);
+  pending.catch(() => { delete document.body.dataset.fetch; });
+  return pending;
+};
+
+// QW4: the arena bundle answers with its tier-0 prefix, so the first frame does not
+// wait for the HDRI tier; the same response keeps the bar moving behind it.
+const fetchBundlePrefix = pageFetcherPrefix(import.meta.url, showFetch);
+window.engine2040FetchAssetPrefix = (url) => {
+  const pending = fetchBundlePrefix(url);
+  pending.catch(() => { delete document.body.dataset.fetch; });
+  return pending;
+};
 
 // WEB14: cross-origin isolation. GitHub Pages cannot send COOP/COEP, so a small service worker
 // adds them. The page registers it only when it is not isolated, waits until the worker controls
@@ -181,12 +236,24 @@ try {
   showCoi(false, 0, "the isolation check failed");
 }
 
+// A first visit registers the isolation worker and reloads before the engine starts. Starting the engine here as
+// well would fetch the module twice: the store finishes before the reload commits, so the reloaded page reads its
+// own cache copy and reports a cache hit as the first load. Park this document; the reload starts the engine.
+if (window.coi?.note === "reloading for isolation") {
+  await new Promise((resolve) => {
+    addEventListener("pagehide", resolve, { once: true });
+    setTimeout(resolve, 5000);
+  });
+}
+
 // For the headless check: loseDevice destroys the device as a forced loss and the page starts over; destroyDevice is the
 // page ending its device on purpose (no retry, data-state=stopped); the check also asks for a fresh GPU copy of the canvas.
 window.loseDevice = lose_device;
 window.destroyDevice = destroy_device;
 // WEB7: the headless check calls this at the tick lines of an input script it replays as real key and mouse events.
 window.inputSample = input_sample;
+// A5: the cue proof - queue the scripted fight on the page's own mixer and read its counters.
+window.audioCueCheck = audio_cue_check;
 window.requestArenaCapture = request_arena_capture;
 // A page that is going away frees its device on purpose; a page that goes to the back/forward cache (persisted) keeps it.
 addEventListener("pagehide", (e) => { if (!e.persisted) destroy_device(); });
@@ -196,8 +263,6 @@ const square = query.has("square");
 // WEB15: a played page (?fight, or a joined duel with &play) keeps the arena, the frame line, the
 // match line and the controls; the proof chrome steps aside so the picture is not buried.
 if (query.has("fight") || (query.has("server") && query.has("play"))) document.body.dataset.play = "1";
-// ?debug keeps the frame and match dev lines on screen during play; a plain ?fight hides them.
-if (query.has("debug")) document.body.dataset.debug = "1";
 // ?debug keeps the frame and match dev lines on screen during play; a plain ?fight hides them.
 if (query.has("debug")) document.body.dataset.debug = "1";
 

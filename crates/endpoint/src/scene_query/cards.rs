@@ -5,6 +5,12 @@
 
 use super::QueryKind;
 
+/// Schema of `kind`: a string enum of the card words, in discriminant order.
+pub(super) fn kind_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    let words: Vec<&str> = KIND_CARDS.iter().map(|card| card.kind.name()).collect();
+    rmcp::schemars::json_schema!({ "type": "string", "enum": words })
+}
+
 /// One question kind as the door teaches it: the fields it needs (`a|b`
 /// means one of them) and a working call. The schema text, the `missing_arg`
 /// refusal and the `api.describe` entries all read this one table.
@@ -18,7 +24,7 @@ pub struct KindCard {
 }
 
 /// One card per kind, in discriminant order.
-pub const KIND_CARDS: [KindCard; 24] = [
+pub const KIND_CARDS: [KindCard; 25] = [
     KindCard {
         kind: QueryKind::Near,
         needs: "anchor",
@@ -138,6 +144,11 @@ pub const KIND_CARDS: [KindCard; 24] = [
         kind: QueryKind::Pixel,
         needs: "eye_m",
         example: r#"{"kind":"pixel","eye_m":[0.0,1.6,0.0],"yaw":0.0,"cells":[24,16,12,8]}"#,
+    },
+    KindCard {
+        kind: QueryKind::Diff,
+        needs: "revision_a, revision_b",
+        example: r#"{"kind":"diff","revision_a":0,"revision_b":1}"#,
     },
 ];
 

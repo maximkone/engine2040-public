@@ -6,7 +6,9 @@
 // and fails when a number is over its budget in tools/web-budget.json. Units: bytes, ms.
 //   wasm          engine_bg.wasm as shipped
 //   gzip, brotli  that file gzip level 9 / brotli quality 11 (Unity advises brotli; the host may serve either)
-//   first_bundle  brotli size of everything the page loads first: every file in dist/web except build.json
+//   first_bundle  the bytes the page loads first, each file in the form the host sends it (QW10: the two
+//                 cooked bundles ship gzip), with the arena bundle counted only to its tier-0 prefix
+//                 (QW4: the page starts there)
 //   mem           wasmMemoryBytes from the ready line
 //   ttff          ms from navigation to the first frame on the canvas (one 250 ms poll of resolution)
 // Without a receipt mem and ttff print `na` and are not gated, unless --require-receipt (then that fails).
@@ -17,16 +19,66 @@
 import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { brotliCompressSync, constants, gzipSync } from "node:zlib";
+import { brotliCompressSync, constants, gunzipSync, gzipSync } from "node:zlib";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const BUDGET_KEYS = ["wasm", "gzip", "brotli", "first_bundle", "mem", "ttff_ms"];
 export const WASM_FILE = "engine_bg.wasm";
+// QW4: the one file the page opens at its tier-0 boundary; every other file is
+// loaded whole before the first frame.
+export const ARENA_BUNDLE = "assets/arena.e2bundle";
 
 export class BudgetError extends Error {}
 
 export const brotliSize = (buf) => brotliCompressSync(buf, { params: { [constants.BROTLI_PARAM_QUALITY]: 11, [constants.BROTLI_PARAM_SIZE_HINT]: buf.length } }).length;
 export const gzipSize = (buf) => gzipSync(buf, { level: 9 }).length;
+
+// QW10: the two cooked bundles ship gzip-compressed (dist/web has a hard 8 MiB build
+// limit and a static host will not compress a binary it does not know), so every
+// measurement that looks inside a bundle unzips it first. The magic decides, exactly as it
+// does in crates/web/loader.js.
+export const isGzip = (buf) => buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+export const unzipped = (buf) => (isGzip(buf) ? gunzipSync(buf) : buf);
+
+// WEB11 + QW4 + QW10: the bytes the page must receive before its first frame, each file in
+// the form the host sends it. A file that already ships compressed counts as it stands, a
+// plain one as its brotli size (the host may compress it), and the arena bundle only to its
+// tier-0 prefix, which costs the gzip of those raw bytes while the stream decompresses.
+export function firstLoadBytes(rel, shipped) {
+  if (rel === ARENA_BUNDLE) {
+    const prefix = firstTierBytes(shipped);
+    return isGzip(shipped) ? gzipSize(prefix) : brotliSize(prefix);
+  }
+  return isGzip(shipped) ? shipped.length : brotliSize(shipped);
+}
+
+// QW4: the bytes of an E2BUNDLE up to the end of its tier-0 blobs. That is the
+// prefix the page opens before the first frame; the later tiers stream behind
+// it. A file that is not a readable bundle is measured whole, never guessed.
+export function firstTierBytes(buf) {
+  buf = unzipped(buf); // QW10: a shipped bundle is gzip
+  if (buf.length < 32 || buf.toString("latin1", 0, 8) !== "E2BUNDLE") return buf;
+  try {
+    const count = buf.readUInt32LE(12);
+    let at = 32;
+    let first = 0;
+    for (let i = 0; i < count; i++) {
+      const pathLen = buf.readUInt16LE(at);
+      at += 2 + pathLen;
+      const priority = buf[at];
+      at += 1;
+      const offset = Number(buf.readBigUInt64LE(at));
+      at += 8;
+      const len = Number(buf.readBigUInt64LE(at));
+      at += 8;
+      at += 8; // the blob's FNV-1a; the Rust reader verifies it on open
+      if (priority === 0) first = Math.max(first, offset + len);
+    }
+    return first > 0 && first <= buf.length ? buf.subarray(0, first) : buf;
+  } catch {
+    return buf;
+  }
+}
 
 // Every file under `dir`, relative with forward slashes.
 function listFiles(dir, base = dir) {
@@ -47,7 +99,7 @@ export function measureDist(dir) {
   let firstBundle = 0;
   for (const rel of listFiles(dir)) {
     if (rel === "build.json") continue;
-    firstBundle += rel === WASM_FILE ? brotliSize(wasm) : brotliSize(readFileSync(join(dir, rel)));
+    firstBundle += firstLoadBytes(rel, rel === WASM_FILE ? wasm : readFileSync(join(dir, rel)));
   }
   return { wasm: wasm.length, gzip: gzipSize(wasm), brotli: brotliSize(wasm), first_bundle: firstBundle };
 }

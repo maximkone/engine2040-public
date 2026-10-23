@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 use crate::decals::{compute_storage_entry, compute_uniform_entry};
 
 // ---------------------------------------------------------------------------
@@ -956,7 +956,7 @@ impl SkyReceipt {
 /// then names the missing window device bind on the headless twin (never
 /// silent success). The CPU bake above is the reference here; the `window`
 /// build below records the live pass instead.
-#[cfg(not(feature = "window"))]
+#[cfg(not(feature = "gpu"))]
 pub fn submit_gpu_sky(
     frame_index: u64,
     viewport_px: [u32; 2],
@@ -986,7 +986,7 @@ pub fn submit_gpu_sky(
 
 /// Bind probe over a baked sky capture: copies the bound texel buffer to
 /// prove the forward bind-group path validates. Look uniform bound and live.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const SKY_BIND_WGSL: &str = r#"
 struct LookU {
     frame_idx: u32,
@@ -1009,7 +1009,7 @@ fn bind_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// One window submit over the day capture: texel count, the validation
 /// outcome and the wall-clock encode + submit + readback ms (evidence only).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct SkyGpuReceipt {
     /// Frame index from the submitted [`crate::gtao::LookFrame`].
@@ -1022,7 +1022,7 @@ pub struct SkyGpuReceipt {
     pub submit_ms: f64,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl SkyGpuReceipt {
     /// Posted GPU budget this submit is charged against.
     pub fn budget_ms(&self) -> f64 {
@@ -1045,7 +1045,7 @@ impl SkyGpuReceipt {
 /// bind group. Built once per frame loop (WIN1 and ED1 each own one);
 /// steady-state submits on a matching shape create no buffers or bind
 /// groups (the reuse test proves the count stays flat).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct SkySubmitter {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -1058,7 +1058,7 @@ pub struct SkySubmitter {
     created_buffers: u64,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl SkySubmitter {
     /// Compile the bind-probe pipeline and the look bind layout; allocate
     /// the 32-byte look uniform buffer. No capture-size state yet: storage
@@ -1118,7 +1118,7 @@ impl SkySubmitter {
 
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// Shared [`crate::accel`] core with the `sky` error prefix kept.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn sky_map_and_wait(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,
@@ -1126,7 +1126,7 @@ fn sky_map_and_wait(
     crate::accel::map_readback(device, buffer, "sky")
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl From<crate::accel::ReadbackError> for SkyError {
     fn from(error: crate::accel::ReadbackError) -> Self {
         Self::Device(error.to_string())
@@ -1138,7 +1138,7 @@ impl From<crate::accel::ReadbackError> for SkyError {
 /// probe pass over them and read them back exactly, proving the forward
 /// bind validates with 0 errors. Fails loudly (never silent, never the twin
 /// refusal) on bad shapes or any device fault.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn submit_gpu_sky(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1510,6 +1510,28 @@ mod tests {
     }
 
     #[test]
+    fn the_live_day_bake_fits_the_frame_bar() {
+        // The arena rebuilds the sky capture at the live size on demand, so a
+        // single bake must stay inside a small slice of one frame. Median of
+        // nine, because this PC is shared.
+        let params = SkyParams::midday();
+        let mut ms: Vec<f64> = (0..9)
+            .map(|_| {
+                let (_cap, ms) =
+                    bake_sky(&params, SKY_CAPTURE_W, SKY_CAPTURE_H).expect("day bakes");
+                ms
+            })
+            .collect();
+        ms.sort_by(|a, b| a.partial_cmp(b).expect("bake ms is finite"));
+        let median = ms[ms.len() / 2];
+        println!("sky bake {SKY_CAPTURE_W}x{SKY_CAPTURE_H}: median {median:.3} ms, best {:.3} ms", ms[0]);
+        assert!(
+            median < 0.4,
+            "median {SKY_CAPTURE_W}x{SKY_CAPTURE_H} day bake costs {median:.3} ms, the bar is 0.4"
+        );
+    }
+
+    #[test]
     fn different_day_gives_different_bytes() {
         // The counter-test: golden bytes actually depend on the day param, so
         // the x2 proof above is not a constant fixture.
@@ -1660,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     fn gpu_submit_without_device_names_the_window_build() {
         let params = SkyParams::midday();
         let (cap, ms) = bake_sky(&params, 16, 8).expect("bakes");
@@ -1707,16 +1729,19 @@ mod tests {
 
     /// Device shared with the GX1 suite: one device for the run, so parallel
     /// tests never exhaust adapters. `None` is skip-not-green, never a pass.
-    #[cfg(feature = "window")]
-    fn sky_device() -> Option<(
-        &'static wgpu::Device,
-        &'static wgpu::Queue,
-        &'static wgpu::AdapterInfo,
-    )> {
-        crate::graph::gx1_test_device()
+    #[cfg(feature = "gpu")]
+    fn sky_device() -> Result<
+        (
+            &'static wgpu::Device,
+            &'static wgpu::Queue,
+            &'static wgpu::AdapterInfo,
+        ),
+        crate::test_gpu::NoAdapter,
+    > {
+        crate::graph::gx1_probe()
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn sky_frame() -> crate::gtao::LookFrame {
         crate::gtao::LookFrame {
             frame_index: 7,
@@ -1727,10 +1752,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_capture_binds_exact_with_look_frame() {
-        let Some((device, queue, info)) = sky_device() else {
-            eprintln!("SKIPPED sky bind: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "gpu_capture_binds_exact_with_look_frame",
+            sky_device(),
+        ) else {
             return;
         };
         let (cap, _) = bake_sky(&SkyParams::midday(), 16, 8).expect("day bakes");
@@ -1762,10 +1789,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_refuses_bad_input_before_sizing() {
-        let Some((device, queue, _)) = sky_device() else {
-            eprintln!("SKIPPED sky refusals: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("gpu_refuses_bad_input_before_sizing", sky_device())
+        else {
             return;
         };
         let (cap, _) = bake_sky(&SkyParams::midday(), 16, 8).expect("day bakes");

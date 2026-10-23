@@ -40,7 +40,7 @@ use engine_audio::combat_cues::{cue_for_event, footstep, Surface};
 use engine_audio::{cue_names, FeedError, FeedTx, FightCue, ImpactRouter, Tension, TensionTracker};
 use engine_spatial::to_cm;
 
-use crate::{FighterView, TickOutcome};
+use crate::{FallLanding, FighterView, TickOutcome};
 
 /// Slots tracked for footsteps (the canonical roster cap).
 pub const MAX_SLOTS: usize = 32;
@@ -116,6 +116,8 @@ pub struct SpaceStats {
     pub spear: u64,
     /// Break sounds played (one per break tick, RZ4).
     pub breaks: u64,
+    /// Landing sounds played (FEEL7), one per landed slot.
+    pub lands: u64,
 }
 
 /// Window-side audio presentation state: where the listener is, what the
@@ -249,6 +251,9 @@ impl AudioSpace {
         self.note(sent);
         if self.parts.events {
             self.feed_events(tx, tick, &outcome.cues, views);
+            // FEEL7: a landing is a fight event with weight; it rides the
+            // same part switch and lands on the fighter's feet.
+            self.feed_landings(tx, tick, &outcome.lands, views);
         }
         if self.parts.footsteps {
             self.feed_footsteps(tx, tick, views);
@@ -394,6 +399,37 @@ impl AudioSpace {
         }
     }
 
+    /// Plays one landing per slot (FEEL7), on the feet of the fighter: the
+    /// fall's height sets the gain, so a hop is a soft thud and a long fall
+    /// lands hard. A slot with no view plays flat, counted like an event.
+    fn feed_landings(
+        &mut self,
+        tx: &mut FeedTx,
+        tick: u32,
+        lands: &[FallLanding],
+        views: &[FighterView],
+    ) {
+        for land in lands {
+            let play = views
+                .iter()
+                .find(|view| view.slot == land.slot)
+                .map(feet_cm);
+            let sent = tx.play(
+                tick,
+                self.surface.footstep_cue(),
+                landing_gain(land.fall_mm),
+                play,
+            );
+            self.stats.lands += 1;
+            if play.is_some() {
+                self.stats.positioned += 1;
+            } else {
+                self.stats.flat += 1;
+            }
+            self.note(sent);
+        }
+    }
+
     fn feed_tension(&mut self, tx: &mut FeedTx, tick: u32, outcome: &TickOutcome) {
         // The bed is silent until asked: say the starting level once.
         let mut send = if self.tension_told {
@@ -468,6 +504,13 @@ fn feet_cm(view: &FighterView) -> [i32; 3] {
     ]
 }
 
+/// Gain of a landing from its fall height, `0.6..=1.0`: a jump is a soft
+/// thud, a 4 m fall or longer is full level.
+fn landing_gain(fall_mm: u32) -> f32 {
+    let permille = 600 + 400 * u32::min(fall_mm, 4_000) / 4_000;
+    f32::from(u16::try_from(permille).unwrap_or(u16::MAX)) / 1_000.0
+}
+
 /// The cue of the audio bank an authority event plays, its gain and the slot it sounds at.
 #[must_use]
 pub fn spear_cue(event: SpearEvent) -> Option<(&'static str, f32, u8)> {
@@ -533,3 +576,62 @@ fn event_slots(event: FightCue) -> (u8, u8) {
 #[cfg(test)]
 #[path = "window_audio_space_tests.rs"]
 mod window_audio_space_tests;
+
+#[cfg(test)]
+mod landing_tests {
+    use std::sync::Arc;
+
+    use engine_audio::feed::{feed, Command};
+    use engine_audio::CueBank;
+
+    use super::*;
+
+    const RATE: u32 = 8_000;
+
+    #[test]
+    fn feel7_a_landing_plays_on_the_feet_and_a_long_fall_is_louder() {
+        let bank = Arc::new(CueBank::placeholder(RATE).expect("shipped table"));
+        let footstep = bank.id(cue_names::FOOTSTEP).expect("the shipped cue");
+        let (mut tx, mut rx) = feed(16, bank);
+        let mut space = AudioSpace::with_parts(SpaceParts::EVENTS_ONLY);
+        let outcome = TickOutcome {
+            lands: vec![
+                FallLanding {
+                    slot: 0,
+                    fall_mm: 200,
+                    damage: 0,
+                },
+                FallLanding {
+                    slot: 1,
+                    fall_mm: 4_000,
+                    damage: 250,
+                },
+            ],
+            ..TickOutcome::default()
+        };
+        let views = [
+            FighterView {
+                slot: 0,
+                pos_m: [1.0, 0.0, 2.0],
+                yaw: 0.0,
+            },
+            FighterView {
+                slot: 1,
+                pos_m: [-1.0, 0.0, 0.0],
+                yaw: 0.0,
+            },
+        ];
+        space.feed(&mut tx, 3, &outcome, &views);
+        let mut plays = Vec::new();
+        while let Some(cmd) = rx.pop() {
+            if let Command::Play(play) = cmd {
+                plays.push(play);
+            }
+        }
+        assert_eq!(plays.len(), 2);
+        assert_eq!(plays[0].cue, footstep);
+        assert_eq!(plays[0].pos_cm, Some([100, 0, 200]));
+        assert!(plays[1].gain > plays[0].gain, "the long fall lands harder");
+        assert_eq!(space.stats().lands, 2);
+    }
+}

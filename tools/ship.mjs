@@ -38,6 +38,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fnv1a64Hex } from "./fnv1a64.mjs";
+import { PLAYABLE_RECORD_PATHS, playableReport } from "./proof.mjs";
 
 // A8 log_triage steal: every CLEAN-RUN FAIL carries a stable fingerprint,
 // and every clean-run log closes with exactly one single-line ledger row
@@ -415,6 +416,28 @@ export function writeStagedReceipt(distDir, staged) {
   mkdirSync(distDir, { recursive: true });
   writeFileSync(path, `${JSON.stringify({ files }, null, 2)}\n`, "utf8");
   return { path, files };
+}
+
+// AD22: a GM3 proof leg ends by printing the playable verdict over the records
+// its producers wrote. The leg keeps its own exit code; a gate whose producer
+// wrote nothing prints not_wired instead of a guessed pass.
+export function printPlayableVerdict({ dist, target, receiptPath, log } = {}) {
+  const runReceipt = receiptPath ?? (target ? join(target, "clean-run-receipt.json") : undefined);
+  const paths = {
+    ...PLAYABLE_RECORD_PATHS,
+    package: dist ? join(dist, STAGED_RECEIPT_REL) : undefined,
+    "packaged-launch": runReceipt,
+    "packaged-smoke": runReceipt,
+  };
+  let verdict;
+  try {
+    verdict = playableReport({ paths });
+  } catch (error) {
+    console.log(`[FAIL] playable: verdict threw (${error.message})`);
+    verdict = { ok: false, gates: [], lines: ["RESULT FAIL (playable)"] };
+  }
+  if (log) log.push(...verdict.lines);
+  return verdict;
 }
 
 // A8 nextest archive steal (nextest-rs/nextest@919b10c6, MIT,
@@ -1170,6 +1193,7 @@ function main() {
     return;
   }
   log.push(`$ clean-run ok: exit 0, ${frames} frames at C:/e2040-clean/`);
+  printPlayableVerdict({ dist, target, log });
   pass(logPath, log);
 }
 
@@ -2451,6 +2475,7 @@ function main() {
     done(true, "LOG_UNWRITABLE", `cannot write receipt ${receiptPath} (${error.message})`);
     return;
   }
+  printPlayableVerdict({ dist, target, receiptPath, log });
   done(false);
 }
 

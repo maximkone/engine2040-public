@@ -6,7 +6,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { BUDGET_KEYS, BudgetError, brotliSize, check, formatLine, gzipSize, main, measureDist, parseArgs, readBudgets, readReceipt } from "./web-budget.mjs";
+import { gzipSync } from "node:zlib";
+import { ARENA_BUNDLE, BUDGET_KEYS, BudgetError, brotliSize, check, firstLoadBytes, firstTierBytes, formatLine, gzipSize, isGzip, main, measureDist, parseArgs, readBudgets, readReceipt } from "./web-budget.mjs";
 
 const BUDGETS = { wasm: 5000, gzip: 4000, brotli: 3900, first_bundle: 6000, mem: 2_000_000, ttff_ms: 8000 };
 
@@ -40,6 +41,73 @@ test("measureDist counts wasm, gzip, brotli and the first bundle without build.j
     assert.equal(m.brotli, brotliSize(wasm));
     const parts = ["engine_bg.wasm", "engine.js", "index.html", "snippets/a.js"].map((p) => brotliSize(readFileSync(join(f.dist, p))));
     assert.equal(m.first_bundle, parts.reduce((a, b) => a + b, 0));
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+// QW4: a two-tier bundle; only the coarse tier is in the first load.
+function miniBundle(firstLen, restLen) {
+  const rows = [
+    { path: "cooked/coarse.bin", priority: 0, data: Buffer.alloc(firstLen, 1) },
+    { path: "hdri/studio.hdr", priority: 1, data: Buffer.alloc(restLen, 2) },
+  ];
+  const indexLen = rows.reduce((n, r) => n + 2 + r.path.length + 25, 0);
+  const head = Buffer.alloc(32 + indexLen);
+  head.write("E2BUNDLE", 0, "latin1");
+  head.writeUInt32LE(1, 8);
+  head.writeUInt32LE(rows.length, 12);
+  head.writeBigUInt64LE(BigInt(indexLen), 16);
+  head.writeBigUInt64LE(0n, 24);
+  let at = 32;
+  let offset = 32 + indexLen;
+  for (const r of rows) {
+    head.writeUInt16LE(r.path.length, at); at += 2;
+    head.write(r.path, at, "latin1"); at += r.path.length;
+    head[at] = r.priority; at += 1;
+    head.writeBigUInt64LE(BigInt(offset), at); at += 8;
+    head.writeBigUInt64LE(BigInt(r.data.length), at); at += 8;
+    head.writeBigUInt64LE(0n, at); at += 8;
+    offset += r.data.length;
+  }
+  return Buffer.concat([head, ...rows.map((r) => r.data)]);
+}
+
+test("QW4: firstTierBytes stops at the last coarse blob, and measureDist counts only that prefix", () => {
+  const kit = miniBundle(120, 300);
+  const prefix = firstTierBytes(kit);
+  assert.ok(prefix.length < kit.length, "the fixture has a later tier");
+  assert.equal(prefix.length, 32 + (2 + "cooked/coarse.bin".length + 25) + (2 + "hdri/studio.hdr".length + 25) + 120);
+  assert.equal(firstTierBytes(Buffer.from("not a bundle")).toString(), "not a bundle", "a plain file is measured whole");
+
+  const f = fixture();
+  try {
+    mkdirSync(join(f.dist, "assets"));
+    writeFileSync(join(f.dist, ARENA_BUNDLE), kit);
+    const m = measureDist(f.dist);
+    const parts = ["engine_bg.wasm", "engine.js", "index.html", "snippets/a.js"].map((p) => brotliSize(readFileSync(join(f.dist, p))));
+    assert.equal(m.first_bundle, parts.reduce((a, b) => a + b, 0) + brotliSize(prefix));
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+// QW10: the shipped bundles are gzip, so the tier-0 prefix is found through the gzip and
+// costs the gzip of those raw bytes: the later tier is never counted in the first load.
+test("QW10: firstTierBytes sees through a gzip bundle and firstLoadBytes counts the shipped form", () => {
+  const kit = miniBundle(120, 300);
+  const prefix = firstTierBytes(kit);
+  const gz = gzipSync(kit, { level: 9 });
+  assert.ok(isGzip(gz), "the fixture ships as gzip");
+  assert.deepEqual([...firstTierBytes(gz)], [...prefix], "the tier-0 boundary is read from the raw bundle");
+  assert.equal(firstLoadBytes(ARENA_BUNDLE, gz), gzipSize(prefix), "the arena bundle costs the gzip of its tier-0 prefix");
+  assert.ok(firstLoadBytes(ARENA_BUNDLE, gz) < gz.length, "the later tier is not in the first load");
+  assert.equal(firstLoadBytes("assets/fighters.e2bundle", gz), gz.length, "a compressed file counts as it ships");
+  assert.equal(firstLoadBytes("engine_bg.wasm", kit), brotliSize(kit), "a plain file counts as the host may compress it");
+
+  const f = fixture();
+  try {
+    mkdirSync(join(f.dist, "assets"));
+    writeFileSync(join(f.dist, ARENA_BUNDLE), gz);
+    const m = measureDist(f.dist);
+    const parts = ["engine_bg.wasm", "engine.js", "index.html", "snippets/a.js"].map((p) => brotliSize(readFileSync(join(f.dist, p))));
+    assert.equal(m.first_bundle, parts.reduce((a, b) => a + b, 0) + gzipSize(prefix));
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 

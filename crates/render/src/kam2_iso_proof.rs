@@ -16,6 +16,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
 
 use crate::kam2_iso::{IsoCamera, TILE_COUNT, TILE_WORLD};
+use crate::kam2_proof_util::{count_near, linear};
 
 /// Window width in logical pixels.
 const WINDOW_W: u32 = 1280;
@@ -647,24 +648,6 @@ impl IsoWindow {
             bytes: png.len(),
         }))
     }
-}
-
-fn linear(rgb: [u8; 3]) -> [f32; 3] {
-    [
-        engine_assets::bc::srgb_byte_to_linear(rgb[0]),
-        engine_assets::bc::srgb_byte_to_linear(rgb[1]),
-        engine_assets::bc::srgb_byte_to_linear(rgb[2]),
-    ]
-}
-
-fn count_near(rgba: &[u8], want: [u8; 3]) -> usize {
-    rgba.chunks_exact(4)
-        .filter(|pixel| {
-            pixel[0].abs_diff(want[0]) <= 3
-                && pixel[1].abs_diff(want[1]) <= 3
-                && pixel[2].abs_diff(want[2]) <= 3
-        })
-        .count()
 }
 
 fn expect_pixel(

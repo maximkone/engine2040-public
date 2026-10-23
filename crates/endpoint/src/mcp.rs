@@ -148,7 +148,18 @@ pub const SCENE_READ_MAX_ROWS: u32 = 128;
 /// ledger gate now measures whatever a session advertises. The frozen
 /// [`crate::tools::TOOLS`] registry now holds 26 tools.
 /// Per-tool descriptions stay one line. On 2026-10-18 the spatial lane's schema docs and `scene.next` took the default list to 44347 and the `view`-loaded one to 48205: 43514 → 51000. Same day the SPR6 `blocked_by` and SPX3 `spatial_delta` schemas (and two `delta` flags) took the default list to 47111 and the loaded one to 51276: 51000 → 54000. On 2026-10-18 (backlog wave 2) five query kinds, role triage and verdict rows took the default list to 48292 and the loaded one to 52457: 54000 → 55000. On 2026-10-18 (endpoint wave) `scene.pick` added 2562 to each (default 50854, loaded 55019): 55000 → 57500. On 2026-10-18 the AX24 `tx.apply` change list (`ChangeListDto`: revisions, counts and rows) took the default list to 52348 and the loaded one to 56513 (988 headroom): 57500 → 59000. On 2026-10-19 SP62's two view-truth verbs (`view.observe`, `view.laws`: camera, per-body act/clip/tint/root/bounds/rect/cover and the laws line) took the loaded list to 58703 (297 headroom): 59000 → 61500. On 2026-10-19 PF24's opt-in `timing` receipt (a flag on both play args, plus label/p50/p99/samples on both play outputs: 931 chars) took the default list to 53873 and the loaded one to 60228: 61500 → 62500. On 2026-10-20 GS46's `world.query` (nested data/filter, strict, limit) plus the day's other verbs took the default list to 56345 and the loaded one to 62869: 62500 → 65000. Same day GS48's `ai.decisions` (show/diff over hex tapes) took the loaded one to 63830 (1170 headroom): 65000 → 66500. On 2026-10-21 the AI-native MCP lane landed D19's `verify` string on the three build outputs (+160 chars) and D17's `scene.diff` and `session.activity` in a pack that is not default-loaded (0 chars of the default list; resources and prompts cost 0 chars too): the default list measures 56897 (was 56737 at HEAD 37c33077) and the `view`-loaded one 64382 (was 64222; the view pack is untouched by this lane, its 7485 chars measured on both trees). The budget stays at 66500 with 2118 chars of headroom over the 2048 floor. On 2026-10-23 the default list measured 58112 (was 56897 on 2026-10-21) and the loaded ones 65601 (`view`) and 70454 (`gym`); the floor binds on the largest loadable pack, so 66500 → 73000 keeps 498 chars over the 2048 floor on `gym`, 5351 on `view` and 12840 on the default list. The default list is unchanged: a session pays the raise only when it asks for a big pack.
-pub const TOOL_LIST_BUDGET_CHARS: usize = 73_000;
+/// 2026-10-23 (later window): the same growth the door test measures (AD2's
+/// apply receipt digests, SP66's dark/unknown rows, view.compare's diff image)
+/// took the default list to 60,036 and the gym-loaded one to 72,378, over the
+/// 70,952 ceiling the 73,000 budget leaves. 73,000 -> 75,000 keeps 2,622
+/// chars over the 2,048 floor on the largest loadable pack.
+/// 2026-10-23 (door budget): AX23's `ChangeListDto` was advertised twice, on
+/// `tx.apply` and on `scene.query`; `scene.query` now names the shape, so the
+/// default list measures 61,742 (view 70,653; gym 74,084). `api.load` admits a
+/// pack while the raw list fits the 75,000 hard budget; the guardrail trims the
+/// advertisement to 72,952, so a gym load advertises 68,506 with `sim.step`
+/// hidden and still callable by exact name. The budget stays 75,000.
+pub const TOOL_LIST_BUDGET_CHARS: usize = 75_000;
 
 /// The thirteen core tools, in contract order. The router holds exactly these;
 /// every other verb is a pack verb.
@@ -298,9 +309,9 @@ pub(crate) fn hidden_tool_names(server: &McpServer) -> BTreeSet<String> {
     // definition and stays callable by exact name, so a test that wants such a
     // verb asserts reachability instead of advertisement.
     let listed: BTreeSet<String> = server
-        .tool_cost_table()
+        .listed_tools()
         .into_iter()
-        .map(|row| row.name)
+        .map(|tool| tool.name.to_string())
         .collect();
     let advertised: BTreeSet<String> = server
         .tools()
@@ -622,6 +633,36 @@ pub(crate) fn build_batch(
 mod mcp_refusal;
 pub(crate) use self::mcp_refusal::{batch_error, cap_error, granted_ops};
 
+/// Map a gated-undo refusal to a tool error: the gate's own mapping for mask,
+/// scope, budget and command refusals, plus the journal-level refusals a
+/// grouped undo names (a pinned object, a receipt that left the journal).
+pub(crate) fn undo_gate_error(
+    error: &capability::UndoGateError,
+    granted: &[&str],
+    doc: &Document,
+) -> McpToolError {
+    match error {
+        capability::UndoGateError::Cap(inner) => cap_error(inner, granted, doc),
+        capability::UndoGateError::Pinned { id } => McpToolError::new(
+            "pinned_object",
+            format!(
+                "node {id} was written by later work, so undoing this batch would clobber it; \
+                 preview and apply a new batch instead"
+            ),
+        ),
+        capability::UndoGateError::UnknownReceipt { key } => McpToolError::new(
+            "unknown_receipt",
+            format!(
+                "no journaled batch carries session receipt {key}; \
+                 it was already undone or evicted from the journal"
+            ),
+        ),
+        capability::UndoGateError::NothingToUndo | capability::UndoGateError::InverseRefused => {
+            McpToolError::new("nothing_to_undo", error.to_string())
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Server state: thin sync core over the command service. The rmcp tools call
 // these; unit tests call them too, with no executor needed.
@@ -679,6 +720,8 @@ pub struct ServerState {
     /// DOOR2: the project folder `scene.save` seals into and `scene.load` reads
     /// from; `None` refuses both verbs as `no_project_dir`.
     pub(crate) project_dir: Option<std::path::PathBuf>,
+    /// AD12: the folder's single-writer lease, held while this server lives.
+    pub(crate) project_lease: Option<crate::startup::ProjectLease>,
     /// DOOR1: the game parts the newest `level.build` placed, so `game.play` plays the
     /// level a caller just built (the document holds poses, not role names).
     #[cfg(feature = "rules")]
@@ -731,6 +774,7 @@ impl ServerState {
             reads: super::guards::ReadClock::new(),
             nav: None,
             project_dir: None,
+            project_lease: None,
             #[cfg(feature = "rules")]
             game_parts: Vec::new(),
             #[cfg(feature = "rules")]
@@ -772,6 +816,10 @@ impl ServerState {
         self.doc = doc;
         self.journal = journal;
         self.ledger = ApprovalLedger::new();
+        // The grouped undo groups this session's own live receipts; a
+        // rehydrated journal holds work from before the restart, not this
+        // token's in-memory batches.
+        self.cap.clear_receipts();
         self.last_witness_receipt = None;
         self.watch_subscription = None;
         self.watch_digest = None;
@@ -909,23 +957,36 @@ impl ServerState {
             expiry_tick: args.approval.expiry_tick,
         };
         let granted = granted_ops(&self.cap);
-        let applied = capability::apply_gated(
-            &mut self.doc,
-            &mut self.journal,
-            &batch,
-            &mut self.cap,
-            &approval,
-            &mut self.ledger,
-        )
-        .map_err(|error| cap_error(&error, &granted, &self.doc))?;
+        let applied = match self.project_dir.clone() {
+            // AD12: a door with a project folder seals before it answers;
+            // the in-memory path stays for test doors.
+            Some(dir) => super::startup::apply_durable(self, &batch, &approval, &granted, &dir)?,
+            None => capability::apply_gated(
+                &mut self.doc,
+                &mut self.journal,
+                &batch,
+                &mut self.cap,
+                &approval,
+                &mut self.ledger,
+            )
+            .map_err(|error| cap_error(&error, &granted, &self.doc))?,
+        };
         // A landed write is a watch event: the digest cache moves, the hub fans it out.
         self.refresh_watch();
         // D17: the landed revision is a snapshot a diff can be taken against.
         self.take_snapshot();
         super::door_dispatch::witness_seal_apply(self, pre_revision, &proposal)?;
         let after = super::scene_tools::snapshot(&self.doc);
-        let changes =
-            super::scene_tools::change_list(&before, &after, pre_revision, applied.revision);
+        // What moved and which edges changed; a replayed key rebuilds its
+        // original pair from the journal instead of the unmoved live one.
+        let changes = super::scene_query::diff::applied_change(
+            &self.doc,
+            &self.journal,
+            &applied,
+            pre_revision,
+            &before,
+            &after,
+        );
         let spatial_delta = (args.delta != Some(false)).then(|| {
             super::scene_tools::spatial_delta(&before, &after, &super::scene_tools::op_ids(&batch))
         });
@@ -934,15 +995,21 @@ impl ServerState {
             effects: applied.effects,
             key: applied.key,
             journal_index: applied.journal_index as u64,
+            before_digest: crate::play::hex_bytes(&applied.before_digest),
+            staged_digest: crate::play::hex_bytes(&applied.staged_digest),
+            after_digest: crate::play::hex_bytes(&applied.after_digest),
             undo_token: applied.key,
-            changes: changes.into(),
+            changes,
             spatial_delta,
         })
     }
 
-    /// Undo the newest journaled batch as a new revision. A given token must
-    /// match the newest batch key, so a client cannot undo another writer's
-    /// edit by accident.
+    /// Undo the newest journaled batch as a new revision, through the gated
+    /// path: the session token must grant the op class of the action being
+    /// undone (an INSERT-only token cannot revert a DELETE), every touched
+    /// node must be in its scope, and its budget must cover the inverse ops.
+    /// A given token must match the newest batch key, so a client cannot undo
+    /// another writer's edit by accident. Refusals write nothing.
     pub fn tx_undo(&mut self, args: &TxUndoArgs) -> Result<TxUndoOutput, McpToolError> {
         let Some(newest) = self.journal.past.last() else {
             return Err(McpToolError::new(
@@ -962,9 +1029,13 @@ impl ServerState {
                 ));
             }
         }
-        let applied = commands::undo(&mut self.doc, &mut self.journal).ok_or_else(|| {
-            McpToolError::new("nothing_to_undo", "the journal holds no applied batches")
-        })?;
+        let granted = granted_ops(&self.cap);
+        let applied = match self.project_dir.clone() {
+            // AD12: a durable door seals the reverting state too.
+            Some(dir) => super::startup::undo_durable(self, &granted, &dir)?,
+            None => capability::undo_gated(&mut self.doc, &mut self.journal, &mut self.cap)
+                .map_err(|error| undo_gate_error(&error, &granted, &self.doc))?,
+        };
         // Undo publishes a new revision, so the watch cache moves with it.
         self.refresh_watch();
         // D17: the undone revision is a snapshot a diff can be taken against.
@@ -1279,6 +1350,13 @@ impl McpServer {
     /// may hold the session lock while it measures a load it has not made yet.
     pub(crate) fn surface_chars_with(&self, loaded: &BTreeSet<&'static str>) -> usize {
         self.tools_with(loaded).iter().map(tool_cost_chars).sum()
+    }
+
+    /// Advertised tool count for the given loaded packs, before the API6
+    /// guardrail trims. Takes no lock, like [`Self::surface_chars_with`], so
+    /// `door.status` can measure the session it already holds.
+    pub(crate) fn tool_count_with(&self, loaded: &BTreeSet<&'static str>) -> usize {
+        self.tools_with(loaded).len()
     }
 
     /// Per-tool discovery cost table, one row per advertised tool, in router
@@ -1599,5 +1677,7 @@ pub(crate) fn write_annotations(idempotent: bool) -> Option<ToolAnnotations> {
     Some(annotations)
 }
 
+#[cfg(test)]
+mod receipt_tests;
 #[cfg(test)]
 mod tests;

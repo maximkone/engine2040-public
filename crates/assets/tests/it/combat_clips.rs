@@ -23,6 +23,10 @@
 //! from the teacher's own SOMA BVH into the teacher's NPZ layout and baked
 //! here. The provenance sidecars sit next to the packs.
 
+// Like the other rig/pack modules: the import lane carries `engine-anim` and
+// `engine_assets::fighter`, so this file builds only with that feature.
+#![cfg(feature = "import")]
+
 use engine_anim::clip::{avg_world_slip, qclip_hash, TICK_DT};
 use engine_anim::motion_bake::{bake_unpack, bake_unpack_rots};
 use engine_anim::pack_file::{load_pack, rotations_of, sample_pose_named_with_rots};

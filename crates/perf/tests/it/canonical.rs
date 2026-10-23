@@ -5,7 +5,8 @@
 use engine_perf::baselines::{arena_baseline, baseline};
 use engine_perf::budget::check_report;
 use engine_perf::workloads::{
-    AiDecide, ArenaTick, DestructionStep, PhysicsStep, SpineFullTick, SpineTransformBody,
+    AiDecide, ArenaTick, CrowdScale, DestructionStep, PhysicsStep, SpineFullTick,
+    SpineTransformBody,
 };
 
 #[test]
@@ -49,6 +50,21 @@ fn spine_full_tick_matches_baseline() {
     let report = SpineFullTick::canonical().run_report();
     let recorded = baseline(SpineFullTick::NAME).expect("spine_full_tick baseline recorded");
     check_report(&report, &recorded).expect("spine_full_tick matches its baseline");
+}
+
+#[test]
+fn crowd_scale_matches_baseline() {
+    let report = CrowdScale::canonical().run_report();
+    let recorded = baseline(CrowdScale::NAME).expect("crowd_scale_1000 baseline recorded");
+    check_report(&report, &recorded).expect("crowd_scale_1000 matches its baseline");
+    assert_eq!(report.alloc_count, 0, "the crowd tick allocates nothing");
+    // Another seed must move the digest: the fold covers the tape, not only
+    // the tick count.
+    assert_ne!(
+        CrowdScale::canonical().with_seed(1).run_hash(),
+        report.hash,
+        "a reseeded crowd hashes differently"
+    );
 }
 
 #[test]

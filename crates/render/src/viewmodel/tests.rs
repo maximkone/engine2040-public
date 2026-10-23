@@ -353,7 +353,7 @@ fn viewmodel_shader_validates_under_the_naga_gate() {
 
 /// The capture pair: the helmet in view beside each reference
 /// picture, with the wall five centimetres in front of the eye.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[test]
 fn viewmodel_capture_pair_shows_the_helmet_in_view() {
     let Some((device, queue)) = device_or_skip("viewmodel_capture_pair_shows_the_helmet_in_view")
@@ -410,7 +410,7 @@ fn viewmodel_capture_pair_shows_the_helmet_in_view() {
 }
 
 /// A device for the GPU tests, or a skip when the machine has none.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn device_or_skip(test: &str) -> Option<(wgpu::Device, wgpu::Queue)> {
     use crate::test_gpu::{require_or_skip, NoAdapter};
     crate::test_gpu::hold_gpu_slot();

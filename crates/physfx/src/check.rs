@@ -16,6 +16,10 @@ const MAX_IMPACT_RADIUS_MM: u32 = 5_000;
 const MAX_IMPACT_NS: u32 = 1_000;
 /// The body a blast impulse is quoted for, kilograms.
 pub(crate) const BLAST_REFERENCE_KG: f32 = 70.0;
+/// Largest blast momentum accepted, newton-seconds: [`MAX_SPEED`] on the
+/// [`BLAST_REFERENCE_KG`] reference body. The picture's loudest blast cue is
+/// this same ceiling, so the two never drift.
+pub const MAX_BLAST_NS: u32 = 7_000;
 /// Longest flight accepted, ticks (20 s at 60 Hz): staying up longer needs a launch speed past
 /// [`MAX_SPEED`], so a longer one would be refused as too fast anyway.
 const MAX_FLIGHT_TICKS: u32 = 1_200;
@@ -94,7 +98,7 @@ pub(crate) fn velocity_gain(impulse: [f32; 3], mass: f32) -> Result<[f32; 3], Er
 }
 
 /// A blast with its center inside the world, a reach above zero and within [`MAX_BLAST_RADIUS_MM`],
-/// and an impulse that does not throw the reference body past [`MAX_SPEED`].
+/// and a momentum within [`MAX_BLAST_NS`], which is the speed cap on the reference body.
 pub(crate) fn blast(blast: Blast) -> Result<(), Error> {
     if blast
         .center_mm
@@ -106,7 +110,9 @@ pub(crate) fn blast(blast: Blast) -> Result<(), Error> {
     if blast.radius_mm == 0 || blast.radius_mm > MAX_BLAST_RADIUS_MM {
         return Err(Error::OutOfRange(Field::Extent));
     }
-    velocity_gain([blast.impulse_ns as f32, 0.0, 0.0], BLAST_REFERENCE_KG)?;
+    if blast.impulse_ns > MAX_BLAST_NS {
+        return Err(Error::OutOfRange(Field::Impulse));
+    }
     Ok(())
 }
 

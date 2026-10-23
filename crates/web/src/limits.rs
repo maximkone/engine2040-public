@@ -1,4 +1,5 @@
-//! What the shell asks the browser's GPU for, and how a device's answer is printed.
+//! What the shell asks the browser's GPU for, how a device's answer is printed, and which
+//! backend the page brings up when WebGPU is missing or too weak.
 
 use wgpu::{Features, Limits};
 
@@ -17,6 +18,201 @@ pub fn required_limits() -> Limits {
 #[must_use]
 pub fn wanted_features(adapter: Features) -> Features {
     adapter & Features::TIMESTAMP_QUERY
+}
+
+/// Which graphics backend the page runs on. A probe picks it before the first frame: WebGPU
+/// first, WebGL2 when the browser has no WebGPU or its adapter is below the required limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// `navigator.gpu` and an adapter that meets the WebGPU defaults.
+    WebGpu,
+    /// The canvas' WebGL2 context: the fallback that keeps the page running.
+    WebGl2,
+}
+
+impl Backend {
+    /// The word the page receipt prints.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::WebGpu => "webgpu",
+            Self::WebGl2 => "webgl2",
+        }
+    }
+}
+
+/// The adapter limits the probe reads: the few the renderer cannot run without. A browser
+/// may report more than these; a lower value is what forces the WebGL2 fallback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdapterLimits {
+    /// Storage buffers one shader stage may bind; the shadow cluster bind needs three.
+    pub max_storage_buffers_per_shader_stage: u32,
+    /// Storage textures one shader stage may bind.
+    pub max_storage_textures_per_shader_stage: u32,
+    /// Bind groups one pipeline layout may use.
+    pub max_bind_groups: u32,
+    /// Longest texture side, which caps the canvas backing store.
+    pub max_texture_dimension_2d: u32,
+    /// Compute invocations in one workgroup.
+    pub max_compute_invocations_per_workgroup: u32,
+}
+
+impl AdapterLimits {
+    /// The WebGPU defaults: the same numbers [`required_limits`] opens a device with. Every
+    /// browser adapter must meet them, so a lower one is not a full WebGPU adapter.
+    #[must_use]
+    pub fn webgpu_defaults() -> Self {
+        Self::from_limits(&Limits::defaults())
+    }
+
+    /// The probe's numbers out of a wgpu [`Limits`] (a device's answer, or a test's fixture).
+    #[must_use]
+    pub fn from_limits(l: &Limits) -> Self {
+        Self {
+            max_storage_buffers_per_shader_stage: l.max_storage_buffers_per_shader_stage,
+            max_storage_textures_per_shader_stage: l.max_storage_textures_per_shader_stage,
+            max_bind_groups: l.max_bind_groups,
+            max_texture_dimension_2d: l.max_texture_dimension_2d,
+            max_compute_invocations_per_workgroup: l.max_compute_invocations_per_workgroup,
+        }
+    }
+
+    /// The first limit below its WebGPU default, as `(WebGPU name, have, need)`. The order is
+    /// fixed, so one adapter always names the same limit in the page receipt.
+    #[must_use]
+    pub fn first_below(&self) -> Option<(&'static str, u32, u32)> {
+        let need = Self::webgpu_defaults();
+        [
+            (
+                "maxStorageBuffersPerShaderStage",
+                self.max_storage_buffers_per_shader_stage,
+                need.max_storage_buffers_per_shader_stage,
+            ),
+            (
+                "maxStorageTexturesPerShaderStage",
+                self.max_storage_textures_per_shader_stage,
+                need.max_storage_textures_per_shader_stage,
+            ),
+            ("maxBindGroups", self.max_bind_groups, need.max_bind_groups),
+            (
+                "maxTextureDimension2D",
+                self.max_texture_dimension_2d,
+                need.max_texture_dimension_2d,
+            ),
+            (
+                "maxComputeInvocationsPerWorkgroup",
+                self.max_compute_invocations_per_workgroup,
+                need.max_compute_invocations_per_workgroup,
+            ),
+        ]
+        .into_iter()
+        .find(|(_, have, need)| have < need)
+    }
+}
+
+/// What the page could see about WebGPU when the probe ran, before the first frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// `navigator.gpu` is missing: an old browser, or a page that is not https or localhost.
+    NoNavigatorGpu,
+    /// WebGPU is here and its adapter request failed. `name` is the browser's error name
+    /// (`OperationError`), or `null` when the browser answered with no adapter at all.
+    AdapterFailed {
+        /// The browser's own word for the failure.
+        name: String,
+    },
+    /// The browser answered with an adapter and these limits.
+    Adapter(AdapterLimits),
+    /// The adapter meets the limits but the canvas gave no `webgpu` context, so WebGPU cannot
+    /// draw: a browser with the API on and the canvas compositor off, as headless Chrome can be.
+    /// The probe asks this last and only when the limits are met: a canvas that holds a `webgpu`
+    /// context can never then give the `webgl2` one the fallback needs.
+    NoCanvasContext,
+}
+
+/// What the probe learned about the adapter's limits, as the receipt prints it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitState {
+    /// No adapter answered, so nothing is known.
+    Unknown,
+    /// The adapter met every WebGPU default.
+    Met,
+    /// The first default the adapter is below, by WebGPU name.
+    Below {
+        /// The WebGPU limit name.
+        name: &'static str,
+        /// What the adapter reports.
+        have: u32,
+        /// The WebGPU default the renderer needs.
+        need: u32,
+    },
+}
+
+/// The probe's answer: which backend to bring up, why, and what the limits were.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    /// The backend the page starts.
+    pub backend: Backend,
+    /// Why, in the words the page receipt prints.
+    pub reason: String,
+    /// The adapter's limits against the WebGPU defaults.
+    pub limits: LimitState,
+}
+
+impl Choice {
+    /// The page receipt line: one line, stable keys in this order, the reason quoted so a
+    /// value with spaces stays one field. `limits=ok` when the adapter met the defaults,
+    /// `limits=unknown` when no adapter answered, and `limits=<name>:<have><<need>` for the
+    /// limit that forced WebGL2.
+    #[must_use]
+    pub fn receipt_line(&self) -> String {
+        let limits = match self.limits {
+            LimitState::Unknown => "unknown".to_string(),
+            LimitState::Met => "ok".to_string(),
+            LimitState::Below { name, have, need } => format!("{name}:{have}<{need}"),
+        };
+        format!(
+            "backend={} reason=\"{}\" limits={limits}",
+            self.backend.name(),
+            self.reason
+        )
+    }
+}
+
+/// The backend decision: WebGPU when the page has it and its adapter meets the WebGPU
+/// defaults, WebGL2 otherwise, with the reason the page receipt prints.
+#[must_use]
+pub fn choose(probe: &Probe) -> Choice {
+    match probe {
+        Probe::NoNavigatorGpu => Choice {
+            backend: Backend::WebGl2,
+            reason: "no navigator.gpu".to_string(),
+            limits: LimitState::Unknown,
+        },
+        Probe::AdapterFailed { name } => Choice {
+            backend: Backend::WebGl2,
+            reason: format!("adapter request failed: {name}"),
+            limits: LimitState::Unknown,
+        },
+        Probe::NoCanvasContext => Choice {
+            backend: Backend::WebGl2,
+            reason: "the canvas gave no webgpu context".to_string(),
+            // The probe only gets here on an adapter that met the defaults.
+            limits: LimitState::Met,
+        },
+        Probe::Adapter(limits) => match limits.first_below() {
+            Some((name, have, need)) => Choice {
+                backend: Backend::WebGl2,
+                reason: format!("limit {name} below {need}"),
+                limits: LimitState::Below { name, have, need },
+            },
+            None => Choice {
+                backend: Backend::WebGpu,
+                reason: "navigator.gpu and an adapter that meets the required limits".to_string(),
+                limits: LimitState::Met,
+            },
+        },
+    }
 }
 
 /// Longest `adapter=` text the page prints.
@@ -265,5 +461,142 @@ mod tests {
         );
         assert_eq!(wanted_features(Features::SHADER_F16), Features::empty());
         assert_eq!(wanted_features(Features::empty()), Features::empty());
+    }
+
+    #[test]
+    fn the_probe_limits_are_the_webgpu_defaults_the_shell_asks_for() {
+        let defaults = AdapterLimits::webgpu_defaults();
+        assert_eq!(defaults, AdapterLimits::from_limits(&required_limits()));
+        assert_eq!(defaults.first_below(), None);
+        // A WebGL2-class adapter is below them: that is what forces the fallback.
+        let weak = AdapterLimits::from_limits(&Limits::downlevel_webgl2_defaults());
+        assert!(weak.first_below().is_some());
+    }
+
+    #[test]
+    fn webgpu_is_chosen_when_the_adapter_meets_the_limits() {
+        let choice = choose(&Probe::Adapter(AdapterLimits::webgpu_defaults()));
+        assert_eq!(choice.backend, Backend::WebGpu);
+        assert_eq!(
+            choice.reason,
+            "navigator.gpu and an adapter that meets the required limits"
+        );
+        assert_eq!(choice.limits, LimitState::Met);
+        assert_eq!(
+            choice.receipt_line(),
+            "backend=webgpu reason=\"navigator.gpu and an adapter that meets the required limits\" limits=ok"
+        );
+    }
+
+    #[test]
+    fn no_navigator_gpu_falls_back_to_webgl2_and_says_why() {
+        let choice = choose(&Probe::NoNavigatorGpu);
+        assert_eq!(choice.backend, Backend::WebGl2);
+        assert_eq!(choice.reason, "no navigator.gpu");
+        assert_eq!(
+            choice.receipt_line(),
+            "backend=webgl2 reason=\"no navigator.gpu\" limits=unknown"
+        );
+    }
+
+    #[test]
+    fn a_failed_adapter_request_falls_back_with_the_browsers_name() {
+        let choice = choose(&Probe::AdapterFailed {
+            name: "OperationError".to_string(),
+        });
+        assert_eq!(choice.backend, Backend::WebGl2);
+        assert_eq!(choice.reason, "adapter request failed: OperationError");
+        assert_eq!(
+            choice.receipt_line(),
+            "backend=webgl2 reason=\"adapter request failed: OperationError\" limits=unknown"
+        );
+        // A browser that answers with no adapter at all prints that word, never a blank.
+        let none = choose(&Probe::AdapterFailed {
+            name: "null".to_string(),
+        });
+        assert!(none.receipt_line().contains("adapter request failed: null"));
+    }
+
+    #[test]
+    fn a_low_limit_falls_back_and_the_line_quotes_it() {
+        let mut limits = AdapterLimits::webgpu_defaults();
+        limits.max_storage_buffers_per_shader_stage = 2;
+        let choice = choose(&Probe::Adapter(limits));
+        assert_eq!(choice.backend, Backend::WebGl2);
+        assert_eq!(
+            choice.reason,
+            "limit maxStorageBuffersPerShaderStage below 8"
+        );
+        assert_eq!(
+            choice.limits,
+            LimitState::Below {
+                name: "maxStorageBuffersPerShaderStage",
+                have: 2,
+                need: 8
+            }
+        );
+        assert_eq!(
+            choice.receipt_line(),
+            "backend=webgl2 reason=\"limit maxStorageBuffersPerShaderStage below 8\" limits=maxStorageBuffersPerShaderStage:2<8"
+        );
+    }
+
+    #[test]
+    fn the_first_low_limit_is_named_in_a_fixed_order() {
+        let mut limits = AdapterLimits::webgpu_defaults();
+        limits.max_texture_dimension_2d = 4096;
+        limits.max_bind_groups = 2;
+        assert_eq!(limits.first_below(), Some(("maxBindGroups", 2, 4)));
+        limits.max_bind_groups = 4;
+        assert_eq!(
+            limits.first_below(),
+            Some(("maxTextureDimension2D", 4096, 8192))
+        );
+        limits.max_texture_dimension_2d = 8192;
+        assert_eq!(limits.first_below(), None);
+    }
+
+    #[test]
+    fn a_canvas_without_a_webgpu_context_falls_back_and_says_so() {
+        let choice = choose(&Probe::NoCanvasContext);
+        assert_eq!(choice.backend, Backend::WebGl2);
+        assert_eq!(choice.reason, "the canvas gave no webgpu context");
+        // The adapter met the defaults; only the canvas refused.
+        assert_eq!(choice.limits, LimitState::Met);
+        assert_eq!(
+            choice.receipt_line(),
+            "backend=webgl2 reason=\"the canvas gave no webgpu context\" limits=ok"
+        );
+    }
+
+    #[test]
+    fn every_receipt_line_is_one_parseable_line() {
+        let mut low = AdapterLimits::webgpu_defaults();
+        low.max_compute_invocations_per_workgroup = 128;
+        for probe in [
+            Probe::NoNavigatorGpu,
+            Probe::AdapterFailed {
+                name: "OperationError".to_string(),
+            },
+            Probe::NoCanvasContext,
+            Probe::Adapter(low),
+            Probe::Adapter(AdapterLimits::webgpu_defaults()),
+        ] {
+            let choice = choose(&probe);
+            let line = choice.receipt_line();
+            assert!(!line.contains('\n') && !line.contains('\r'), "{line}");
+            assert!(line.starts_with("backend="), "{line}");
+            assert_eq!(line.matches("backend=").count(), 1, "{line}");
+            assert_eq!(line.matches(" reason=\"").count(), 1, "{line}");
+            assert_eq!(line.matches("\" limits=").count(), 1, "{line}");
+            assert!(
+                line.contains(&format!("backend={}", choice.backend.name())),
+                "{line}"
+            );
+            assert!(
+                line.contains(&format!("reason=\"{}\"", choice.reason)),
+                "{line}"
+            );
+        }
     }
 }

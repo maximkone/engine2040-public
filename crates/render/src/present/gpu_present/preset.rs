@@ -11,8 +11,10 @@
 //! its ambient and its fog), so the placement's torches are the light the
 //! frame reads.
 
+#[cfg(feature = "window")]
 use std::sync::Arc;
 
+#[cfg(feature = "window")]
 use winit::window::Window;
 
 use super::presenter::Presenter;
@@ -120,6 +122,7 @@ impl Presenter {
     /// the offscreen twin (`init_offscreen` plus `render_offscreen`)
     /// stays the explicit capture path. Zero area fails loudly (the
     /// caller suspends instead); `NoAdapter` is never a fake present.
+    #[cfg(feature = "window")]
     pub fn init_for_window(
         window: Arc<Window>,
         width: u32,
@@ -133,6 +136,7 @@ impl Presenter {
     /// placement's torches are the light the frame reads. The day rig is
     /// the default and keeps every existing capture byte-equal. `uncapped`
     /// picks Immediate or Mailbox present mode instead of Fifo (vsync).
+    #[cfg(feature = "window")]
     pub fn init_for_window_with_preset(
         window: Arc<Window>,
         width: u32,

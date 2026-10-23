@@ -534,7 +534,7 @@ pub fn mean_luma(rgba: &[u8]) -> f32 {
 
 /// The GPU lens pass: the WGSL over one frame, plus the capture helper.
 /// Native only: it blocks on the GPU and writes the capture PNG to disk.
-#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
 pub mod gpu {
     use super::{mean_luma, LensError, LensFrame, LensPreset, LensProfile, LENS_WGSL};
     use crate::aa_scale::gpu::pack_pixels;
@@ -1160,7 +1160,7 @@ mod tests {
     }
 
     /// The GPU pass and the CPU oracle give the same frame.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn lens_gpu_matches_the_cpu_oracle() {
         let Some((device, queue)) = device_or_skip("lens_gpu_matches_the_cpu_oracle") else {
@@ -1179,7 +1179,7 @@ mod tests {
     }
 
     /// The eye and the helmet capture sit side by side and are opened.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn lens_capture_pair_eye_and_helmet() {
         let Some((device, queue)) = device_or_skip("lens_capture_pair_eye_and_helmet") else {
@@ -1258,7 +1258,7 @@ mod tests {
     }
 
     /// A visible test frame: a warm gradient under a grid of lines.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn test_pattern(width: u32, height: u32) -> LensFrame {
         let mut pixels = Vec::with_capacity(
             usize::try_from(width).unwrap_or(0) * usize::try_from(height).unwrap_or(0),
@@ -1285,7 +1285,7 @@ mod tests {
     }
 
     /// A device for the GPU tests, or a skip when the machine has none.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn device_or_skip(test: &str) -> Option<(wgpu::Device, wgpu::Queue)> {
         use crate::test_gpu::{require_or_skip, NoAdapter};
         crate::test_gpu::hold_gpu_slot();

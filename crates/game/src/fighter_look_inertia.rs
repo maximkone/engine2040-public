@@ -236,7 +236,8 @@ impl FighterLook {
     }
 
     /// [`inertial_pose`](Self::inertial_pose) without the get-up layer: a floored slot's
-    /// ragdoll bones, or the clip pose plus the decaying offsets of its last switch.
+    /// ragdoll bones, or the clip pose plus the decaying offsets of its last switch and its
+    /// standing hit reaction (FEEL9).
     pub(super) fn inertial_pose_base(
         &self,
         rig: &Rig,
@@ -255,6 +256,8 @@ impl FighterLook {
                     .map_err(|err| LookError::Skin(err.to_string()))?;
             }
         }
+        // FEEL9: the struck upper chain rides over the clip and blends back.
+        self.reaction_offsets(index, &mut pose, alpha)?;
         Ok(pose)
     }
 

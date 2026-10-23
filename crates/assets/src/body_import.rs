@@ -333,7 +333,7 @@ mod tests {
         let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
         let json = std::str::from_utf8(&bytes[20..20 + json_len]).unwrap();
         let mut text = edit(json).into_bytes();
-        while text.len() % 4 != 0 {
+        while !text.len().is_multiple_of(4) {
             text.push(b' ');
         }
         let rest = &bytes[20 + json_len..];

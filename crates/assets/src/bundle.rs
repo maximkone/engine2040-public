@@ -37,6 +37,13 @@ pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_BUNDLE_BYTES: usize = 512 * 1024 * 1024;
 /// Most indices per mesh payload; the 16 MiB import budget holds at most ~8M.
 pub const MAX_BUNDLE_INDICES: usize = 8_000_000;
+/// High bit of the mesh index count: the block that follows is FIFO/delta
+/// coded ([`index_codec`]) rather than one raw `u32` per index. Counts stay
+/// under [`MAX_BUNDLE_INDICES`], so the bit is free and old raw payloads keep
+/// decoding with it clear.
+const INDEX_CODED_FLAG: u32 = 1 << 31;
+/// The index count inside a mesh payload, with the codec flag cleared.
+const INDEX_COUNT_MASK: u32 = INDEX_CODED_FLAG - 1;
 /// Most material texture refs per payload (three slots exist; headroom kept).
 pub const MAX_BUNDLE_REFS: usize = 8;
 /// Bound for echoed names and details carried in [`BundleError`].
@@ -182,7 +189,7 @@ impl BundleWriter {
     /// Pack a cooked mesh under `name`.
     pub fn add_mesh(&mut self, name: &str, mesh: &CookedMesh) -> Result<(), BundleError> {
         validate_mesh(mesh).map_err(|e| invalid(name, &format!("{e:?}")))?;
-        self.stage(EntryKind::Mesh, name, encode_mesh(mesh)?)
+        self.stage(EntryKind::Mesh, name, encode_mesh(name, mesh)?)
     }
 
     /// Pack a cooked material under `name`.
@@ -507,6 +514,12 @@ impl<'a> Payload<'a> {
         self.cursor.take(len).map_err(|_| self.short())
     }
 
+    /// Every byte left in the payload, consumed in one go.
+    fn rest(&mut self) -> Result<&'a [u8], BundleError> {
+        let left = self.len.saturating_sub(self.cursor.pos());
+        self.take(left)
+    }
+
     /// Refuse before allocating for `bytes` more bytes the payload cannot hold.
     fn need(&self, bytes: usize) -> Result<(), BundleError> {
         if self.len.saturating_sub(self.cursor.pos()) < bytes {
@@ -583,7 +596,11 @@ fn encoding_of(byte: u8) -> Option<TextureEncoding> {
     }
 }
 
-fn encode_mesh(mesh: &CookedMesh) -> Result<Vec<u8>, BundleError> {
+/// Encode one mesh payload. The index block is FIFO/delta coded when that is
+/// smaller than raw `u32`s (the count word carries [`INDEX_CODED_FLAG`]),
+/// otherwise raw, so a tiny mesh never grows. The whole block is
+/// deterministic: the same mesh gives the same bytes.
+fn encode_mesh(name: &str, mesh: &CookedMesh) -> Result<Vec<u8>, BundleError> {
     if mesh.positions.len() > MAX_VERTICES {
         return Err(BundleError::TooLarge {
             count: mesh.positions.len(),
@@ -616,9 +633,19 @@ fn encode_mesh(mesh: &CookedMesh) -> Result<Vec<u8>, BundleError> {
             push_f32(&mut out, *c);
         }
     }
-    push_u32(&mut out, mesh.indices.len() as u32);
-    for index in &mesh.indices {
-        push_u32(&mut out, *index);
+    let count = u32::try_from(mesh.indices.len()).map_err(|_| BundleError::TooLarge {
+        count: mesh.indices.len(),
+    })?;
+    let coded = super::index_codec::encode(&mesh.indices, mesh.positions.len())
+        .map_err(|e| invalid(name, &format!("index block: {e}")))?;
+    if coded.len() < mesh.indices.len().saturating_mul(4) {
+        push_u32(&mut out, INDEX_CODED_FLAG | count);
+        out.extend_from_slice(&coded);
+    } else {
+        push_u32(&mut out, count);
+        for index in &mesh.indices {
+            push_u32(&mut out, *index);
+        }
     }
     if out.len() > MAX_PAYLOAD_BYTES {
         return Err(BundleError::TooLarge { count: out.len() });
@@ -655,15 +682,25 @@ fn decode_mesh(bytes: &[u8], entry: &str) -> Result<CookedMesh, BundleError> {
             payload.f32()?,
         ]);
     }
-    let indices_len = payload.u32()? as usize;
+    let word = payload.u32()?;
+    let coded = word & INDEX_CODED_FLAG != 0;
+    let indices_len = usize::try_from(word & INDEX_COUNT_MASK)
+        .map_err(|_| invalid(entry, "mesh index count out of range"))?;
     if indices_len > MAX_BUNDLE_INDICES {
         return Err(invalid(entry, "mesh index count out of range"));
     }
-    payload.need(indices_len.saturating_mul(4))?;
-    let mut indices = Vec::with_capacity(indices_len);
-    for _ in 0..indices_len {
-        indices.push(payload.u32()?);
-    }
+    let indices = if coded {
+        let block = payload.rest()?;
+        super::index_codec::decode(block, indices_len, verts)
+            .map_err(|e| invalid(entry, &format!("index block: {e}")))?
+    } else {
+        payload.need(indices_len.saturating_mul(4))?;
+        let mut raw = Vec::with_capacity(indices_len);
+        for _ in 0..indices_len {
+            raw.push(payload.u32()?);
+        }
+        raw
+    };
     payload.finish()?;
     let mesh = CookedMesh {
         positions,
@@ -1355,6 +1392,110 @@ mod tests {
         let digest = content_digest(payload);
         let digest_at = at + payload_len;
         bytes[digest_at..digest_at + 64].copy_from_slice(digest.as_bytes());
+        let loaded = load_bundle(&bytes).unwrap();
+        let entry = loaded.find(EntryKind::Mesh, "hero").unwrap();
+        assert!(matches!(
+            entry.decode_mesh().unwrap_err(),
+            BundleError::InvalidData { .. }
+        ));
+    }
+
+    /// The pre-codec mesh payload: raw `f32` channels, then raw `u32` indices.
+    /// Kept in the test so the old layout stays provable, not assumed.
+    fn raw_mesh_payload(mesh: &CookedMesh) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_u32(&mut out, u32::try_from(mesh.positions.len()).unwrap());
+        for channel in [&mesh.positions, &mesh.normals] {
+            for vertex in channel {
+                for c in vertex {
+                    push_f32(&mut out, *c);
+                }
+            }
+        }
+        for vertex in &mesh.uv0 {
+            for c in vertex {
+                push_f32(&mut out, *c);
+            }
+        }
+        for vertex in &mesh.tangents {
+            for c in vertex {
+                push_f32(&mut out, *c);
+            }
+        }
+        push_u32(&mut out, u32::try_from(mesh.indices.len()).unwrap());
+        for index in &mesh.indices {
+            push_u32(&mut out, *index);
+        }
+        out
+    }
+
+    #[test]
+    fn the_real_kit_meshes_re_encode_smaller_and_decode_the_same() {
+        // Two real kit files cooked through the import lane: real geometry,
+        // real triangle counts, no synthetic stand-in.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/arena/src");
+        let mut meshes = 0usize;
+        let mut raw_index_bytes = 0usize;
+        let mut coded_index_bytes = 0usize;
+        let mut old_payloads = 0usize;
+        let mut new_payloads = 0usize;
+        for file in ["crate.gltf", "walls.gltf"] {
+            let path = root.join(file);
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("read the committed {}: {e}", path.display()));
+            let piece = crate::kit_import::import_kit_gltf(file, &bytes)
+                .unwrap_or_else(|e| panic!("{file} cooks: {e}"));
+            let mesh = piece.mesh;
+            assert!(mesh.indices.len() > 3, "{file} is a real mesh");
+            let old = raw_mesh_payload(&mesh);
+            let new = encode_mesh(file, &mesh).unwrap();
+            // Old raw payloads keep decoding (a bundle cooked before the
+            // codec still loads), and the new block decodes to the same mesh.
+            assert_eq!(decode_mesh(&old, file).unwrap(), mesh, "{file} raw decodes");
+            assert_eq!(
+                decode_mesh(&new, file).unwrap(),
+                mesh,
+                "{file} coded decodes the same"
+            );
+            let index_at = 4 + mesh.positions.len() * 48;
+            let new_word = u32::from_le_bytes(new[index_at..index_at + 4].try_into().unwrap());
+            assert_ne!(new_word & INDEX_CODED_FLAG, 0, "{file} chose the codec");
+            assert!(
+                new.len() < old.len(),
+                "{file} grew from {} to {} B",
+                old.len(),
+                new.len()
+            );
+            meshes += 1;
+            raw_index_bytes += mesh.indices.len() * 4;
+            coded_index_bytes += new.len() - index_at - 4;
+            old_payloads += old.len();
+            new_payloads += new.len();
+        }
+        assert_eq!(meshes, 2);
+        assert!(new_payloads < old_payloads);
+        println!(
+            "index_codec kit meshes:{meshes} raw_index:{raw_index_bytes} coded_index:{coded_index_bytes} payloads:{old_payloads}->{new_payloads}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_coded_index_block_is_refused() {
+        let mut writer = BundleWriter::new();
+        writer.add_mesh("hero", &triangle()).unwrap();
+        let mut bytes = writer.finish();
+        let at = 16 + 1 + 2 + "hero".len() + 4;
+        let payload_len =
+            usize::try_from(u32::from_le_bytes(bytes[at - 4..at].try_into().unwrap())).unwrap();
+        // Triangle: 3 vertices, then the flagged count word, then one token
+        // per index. Break the first token; re-stamp the digest so framing
+        // passes and the index block itself must refuse.
+        let first_token = at + 4 + 3 * 48 + 4;
+        assert!(first_token < at + payload_len);
+        bytes[first_token] = 0x7f;
+        let payload = &bytes[at..at + payload_len];
+        let digest = content_digest(payload);
+        bytes[at + payload_len..at + payload_len + 64].copy_from_slice(digest.as_bytes());
         let loaded = load_bundle(&bytes).unwrap();
         let entry = loaded.find(EntryKind::Mesh, "hero").unwrap();
         assert!(matches!(

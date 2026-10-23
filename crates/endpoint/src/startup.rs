@@ -10,11 +10,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use engine_editor::capability::Capability;
-use engine_editor::commands::{Document, Journal};
-use engine_editor::durable::{rehydrate, reopen_sealed};
+use engine_editor::capability::{self, Approval, Capability};
+use engine_editor::commands::{Applied, Batch, Document, Journal};
+use engine_editor::durable::{rehydrate, reopen_sealed, PersistError};
 
-use super::mcp::McpServer;
+use super::mcp::{cap_error, undo_gate_error, McpServer, McpToolError, ServerState};
 use super::packs::web::WebScope;
 
 /// Capability session the stdio door serves. One client, one session.
@@ -27,6 +27,8 @@ usage: e2040-mcp [--project-dir DIR] [--web-root DIR [--web-chrome PATH]] [DIR]\
 Serve the MCP authoring door on a project folder over stdio.\n\
 The folder holds the durable `gen-*.edoc` generations; a fresh folder\n\
 starts empty. With no DIR, the current directory is the project.\n\
+One door per folder: while a door runs it holds the folder's lease file\n\
+`.e2040-door.lease`, so a second door on the same folder is refused.\n\
 \n\
 --web-root DIR allows the web verbs (`build.web`, `serve.web`,\n\
 `browser.capture`, `browser.input`) over the repo root holding\n\
@@ -53,6 +55,8 @@ pub enum StartupError {
     Usage { message: String },
     /// The project directory is missing, not a directory or unreadable.
     BadDir { path: String, reason: String },
+    /// Another door holds the folder's single-writer lease.
+    Leased { path: String },
     /// The stdio transport failed to start or serve.
     Transport { detail: String },
 }
@@ -65,12 +69,12 @@ impl StartupError {
         }
     }
 
-    /// Process exit code: usage is 2 (CLI convention), bad dir and transport
-    /// failures are 1. All nonzero by contract.
+    /// Process exit code: usage is 2 (CLI convention), bad dir, lease and
+    /// transport failures are 1. All nonzero by contract.
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Usage { .. } => 2,
-            Self::BadDir { .. } | Self::Transport { .. } => 1,
+            Self::BadDir { .. } | Self::Leased { .. } | Self::Transport { .. } => 1,
         }
     }
 }
@@ -80,6 +84,11 @@ impl fmt::Display for StartupError {
         match self {
             Self::Usage { message } => write!(f, "usage error: {message}\n{USAGE}"),
             Self::BadDir { path, reason } => write!(f, "bad project dir `{path}`: {reason}"),
+            Self::Leased { path } => write!(
+                f,
+                "project `{path}` is already open in another door; close it first \
+                 (a door holds the folder's lease until its process exits)"
+            ),
             Self::Transport { detail } => write!(f, "transport failed: {detail}"),
         }
     }
@@ -237,20 +246,136 @@ pub fn open_project(dir: &Path) -> Result<(Document, Journal), StartupError> {
     }
 }
 
+/// Name of the single-writer lease file a door holds on its project folder.
+pub const LEASE_FILE: &str = ".e2040-door.lease";
+
+/// One door's exclusive lease on a project folder.
+///
+/// The file stays on disk so every door locks the same path; the advisory
+/// lock lives with this handle and the OS drops it on clean exit or process
+/// death, so a crashed door never leaves the folder locked. The file itself
+/// never refuses a door: only a live lock does.
+#[derive(Debug)]
+pub struct ProjectLease {
+    _file: std::fs::File,
+}
+
+impl ProjectLease {
+    /// Take the folder's lease, or refuse while another door holds it.
+    pub fn acquire(dir: &Path) -> Result<Self, StartupError> {
+        let path = dir.join(LEASE_FILE);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| StartupError::Transport {
+                detail: format!("cannot open the project lease {}: {error}", path.display()),
+            })?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(StartupError::Leased {
+                path: dir.display().to_string(),
+            }),
+            Err(std::fs::TryLockError::Error(error)) => Err(StartupError::Transport {
+                detail: format!("cannot lock the project lease {}: {error}", path.display()),
+            }),
+        }
+    }
+}
+
+/// Number the next sealed generation takes: one past the highest
+/// `gen-*.edoc` in `dir`, ignoring in-flight `.tmp` leftovers. The folder owns
+/// the number because `scene.save` seals there too, so it never tracks the
+/// document revision.
+pub(crate) fn next_generation(dir: &Path) -> std::io::Result<u64> {
+    let mut newest = 0u64;
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        let Some(stem) = name
+            .strip_prefix("gen-")
+            .and_then(|rest| rest.strip_suffix(".edoc"))
+        else {
+            continue;
+        };
+        if let Ok(number) = stem.parse::<u64>() {
+            newest = newest.max(number);
+        }
+    }
+    Ok(newest.saturating_add(1))
+}
+
+/// A failed seal is a refusal: the door answers the error and the live
+/// document keeps the state it had before the call.
+fn persist_refusal(dir: &Path, error: &PersistError) -> McpToolError {
+    McpToolError::new(
+        "persist_failed",
+        format!(
+            "the write did not reach the project folder {}: {error}; \
+             the document is unchanged, retry once the folder is writable",
+            dir.display()
+        ),
+    )
+}
+
+/// Land one gated batch durably through the door's project folder: number the
+/// generation, run the gate and seal on clones, and commit only a read-back
+/// match. Crate-visible so `ServerState::tx_apply` branches on one call.
+pub(crate) fn apply_durable(
+    state: &mut ServerState,
+    batch: &Batch,
+    approval: &Approval,
+    granted: &[&str],
+    dir: &Path,
+) -> Result<Applied, McpToolError> {
+    let generation =
+        next_generation(dir).map_err(|error| persist_refusal(dir, &PersistError::Io(error)))?;
+    capability::apply_gated_persisted(
+        &mut state.doc,
+        &mut state.journal,
+        batch,
+        &mut state.cap,
+        approval,
+        &mut state.ledger,
+        capability::SealTarget { dir, generation },
+    )
+    .map_err(|error| match error {
+        capability::GatedPersistError::Cap(cap) => cap_error(&cap, granted, &state.doc),
+        capability::GatedPersistError::Persist(persist) => persist_refusal(dir, &persist),
+    })
+}
+
+/// Undo the newest batch durably: same clone, seal and read-back rule as
+/// [`apply_durable`], so a revert the store did not land never reports.
+pub(crate) fn undo_durable(
+    state: &mut ServerState,
+    granted: &[&str],
+    dir: &Path,
+) -> Result<Applied, McpToolError> {
+    let generation =
+        next_generation(dir).map_err(|error| persist_refusal(dir, &PersistError::Io(error)))?;
+    capability::undo_gated_persisted(
+        &mut state.doc,
+        &mut state.journal,
+        &mut state.cap,
+        capability::SealTarget { dir, generation },
+    )
+    .map_err(|error| match error {
+        capability::GatedUndoPersistError::Gate(gate) => {
+            undo_gate_error(&gate, granted, &state.doc)
+        }
+        capability::GatedUndoPersistError::Persist(persist) => persist_refusal(dir, &persist),
+    })
+}
+
 /// Build the door server (core tools plus verb packs) over the opened
 /// project folder. A [`WebGrant`] is the one host call that allows the web
 /// verbs for this session; the verbs stay refused (`unscoped`) without it.
 pub fn build_server(config: &StartupConfig) -> Result<McpServer, StartupError> {
-    let (doc, journal) = open_project(&config.project_dir)?;
-    // DOOR2: scene.save and scene.load seal into and read from this folder.
-    let mut state = super::mcp::ServerState::with_document(
-        doc,
-        journal,
-        MCP_SESSION,
-        Capability::unrestricted(MCP_SESSION),
-    );
-    state.project_dir = Some(config.project_dir.clone());
-    let server = McpServer::with_state(state);
+    // Validate the one host grant that opens the web verbs before taking the
+    // folder lease, so a bad grant never leaves a lock behind.
     if let Some(grant) = &config.web {
         if !grant.root.is_dir() {
             return Err(StartupError::BadDir {
@@ -260,6 +385,22 @@ pub fn build_server(config: &StartupConfig) -> Result<McpServer, StartupError> {
                     .to_owned(),
             });
         }
+    }
+    let (doc, journal) = open_project(&config.project_dir)?;
+    // AD12: one writer per folder. The lease is taken after the store opens so
+    // a bad directory still fails as a bad directory.
+    let lease = ProjectLease::acquire(&config.project_dir)?;
+    // DOOR2: scene.save and scene.load seal into and read from this folder.
+    let mut state = super::mcp::ServerState::with_document(
+        doc,
+        journal,
+        MCP_SESSION,
+        Capability::unrestricted(MCP_SESSION),
+    );
+    state.project_dir = Some(config.project_dir.clone());
+    state.project_lease = Some(lease);
+    let server = McpServer::with_state(state);
+    if let Some(grant) = &config.web {
         let scope = match &grant.chrome {
             Some(chrome) => WebScope::new(grant.root.clone()).with_chrome(chrome.clone()),
             None => WebScope::new(grant.root.clone()),
@@ -276,10 +417,15 @@ pub fn build_server(config: &StartupConfig) -> Result<McpServer, StartupError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::{
+        ApprovalDto, McpToolError, OpDto, PoseDto, TxApplyArgs, TxApplyOutput, TxApplyTool,
+        TxPreviewArgs, TxPreviewOutput, TxPreviewTool, TxUndoArgs, TxUndoTool,
+    };
     use engine_editor::commands::{self, Batch, CommandMeta, Op};
-    use engine_editor::durable::{apply_persisted, persist_generation};
+    use engine_editor::durable::{apply_persisted, generation_file_name, persist_generation};
     use engine_scene::ids::ObjectId;
     use engine_scene::transform::Transform;
+    use rmcp::handler::server::router::tool::SyncTool;
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(ToString::to_string).collect()
@@ -435,6 +581,8 @@ mod tests {
         })
         .expect("server builds without a grant");
         assert_eq!(call(&closed).expect_err("refused").code, UNSCOPED);
+        // One door per folder: the grant rig reopens the same folder.
+        drop(closed);
         // Granted: the verb reaches its own gate and names the missing tool.
         let open = build_server(&StartupConfig {
             project_dir: project.clone(),
@@ -459,6 +607,7 @@ mod tests {
         .expect("bad grant root");
         assert!(matches!(error, StartupError::BadDir { .. }), "{error:?}");
         assert_ne!(error.exit_code(), 0);
+        drop(open);
         let _ = std::fs::remove_dir_all(&project);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -603,14 +752,264 @@ mod tests {
             path: "p".to_owned(),
             reason: "r".to_owned(),
         };
+        let leased = StartupError::Leased {
+            path: "p".to_owned(),
+        };
         let transport = StartupError::Transport {
             detail: "d".to_owned(),
         };
         assert_eq!(usage.exit_code(), 2);
         assert_eq!(bad.exit_code(), 1);
+        assert_eq!(leased.exit_code(), 1);
         assert_eq!(transport.exit_code(), 1);
         assert!(usage.to_string().starts_with("usage error: "));
         assert!(bad.to_string().contains("bad project dir `p`"));
+        assert!(leased.to_string().contains("already open in another door"));
         assert!(transport.to_string().contains("transport failed: d"));
+    }
+
+    fn pose_x(x: f32) -> PoseDto {
+        PoseDto {
+            pos: [x, 0.0, 0.0],
+            rot: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+        }
+    }
+
+    fn move_ops(id: ObjectId, x: f32) -> Vec<OpDto> {
+        vec![OpDto::SetLocal {
+            id: id.to_string(),
+            local: pose_x(x),
+        }]
+    }
+
+    fn preview(server: &McpServer, rev: u64, key: u64, ops: &[OpDto]) -> TxPreviewOutput {
+        TxPreviewTool::invoke(
+            server,
+            TxPreviewArgs {
+                expected_revision: rev,
+                idempotency_key: key,
+                ops: ops.to_vec(),
+            },
+        )
+        .expect("preview drafts")
+    }
+
+    fn apply(
+        server: &McpServer,
+        rev: u64,
+        key: u64,
+        ops: &[OpDto],
+        approval: ApprovalDto,
+    ) -> Result<TxApplyOutput, McpToolError> {
+        TxApplyTool::invoke(
+            server,
+            TxApplyArgs {
+                expected_revision: rev,
+                idempotency_key: key,
+                ops: ops.to_vec(),
+                approval,
+                delta: Some(false),
+            },
+        )
+    }
+
+    /// One crate at the origin, sealed as generation 1 (revision 1).
+    fn seed_crate(dir: &Path) -> ObjectId {
+        let id = ObjectId::new();
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        let batch = Batch {
+            ops: vec![Op::Insert {
+                id,
+                parent: ObjectId::NIL,
+                local: Transform::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+            }],
+            base_revision: 0,
+            idempotency_key: 41,
+            provenance: None,
+        };
+        let meta = CommandMeta::default();
+        apply_persisted(&mut doc, &mut journal, &batch, &meta, dir, 1).expect("seed seals");
+        id
+    }
+
+    fn crate_x(doc: &Document, id: ObjectId) -> Option<f32> {
+        doc.hierarchy.local(id).map(|local| local.position[0])
+    }
+
+    fn door(dir: &Path) -> McpServer {
+        build_server(&StartupConfig {
+            project_dir: dir.to_path_buf(),
+            web: None,
+        })
+        .expect("door builds")
+    }
+
+    #[test]
+    fn durable_door_kill_after_ack_reopens_with_the_edit() {
+        let dir = scratch("durable-after-ack");
+        let id = seed_crate(&dir);
+        let server = door(&dir);
+        let ops = move_ops(id, 5.0);
+        let drafted = preview(&server, 1, 71, &ops);
+        let landed = apply(&server, 1, 71, &ops, drafted.approval).expect("move lands");
+        assert_eq!(landed.revision, 2);
+        // Kill after the receipt: the process dies without any shutdown hook.
+        drop(server);
+        let (back, back_journal) = open_project(&dir).expect("restart opens the folder");
+        assert_eq!(back.revision, 2, "the acked revision is on disk");
+        assert_eq!(crate_x(&back, id), Some(5.0), "the edit survived");
+        assert_eq!(
+            back_journal.past_len(),
+            2,
+            "the sealed journal holds the seed and the move"
+        );
+        assert!(dir.join(generation_file_name(2)).is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_door_kill_before_ack_reopens_without_the_edit() {
+        let dir = scratch("durable-before-ack");
+        let id = seed_crate(&dir);
+        // A door killed mid-seal leaves the temp file, and one killed after
+        // the rename but before the bytes flush leaves a torn generation.
+        std::fs::write(dir.join("gen-00000002.edoc.tmp"), b"torn mid-write")
+            .expect("torn temp writes");
+        std::fs::write(dir.join(generation_file_name(2)), b"torn after rename")
+            .expect("torn generation writes");
+        let server = door(&dir);
+        let state = server.lock().expect("lock holds");
+        assert_eq!(state.doc.revision, 1, "the unacked revision never exists");
+        assert_eq!(crate_x(&state.doc, id), Some(0.0), "the edit is absent");
+        drop(state);
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_door_persist_failure_returns_an_error_and_changes_nothing() {
+        let dir = scratch("durable-failure");
+        let id = seed_crate(&dir);
+        let server = door(&dir);
+        // Block the writer's temp path with a directory: the seal fails after
+        // the gate already staged the write.
+        let blocker = dir.join("gen-00000002.edoc.tmp");
+        std::fs::create_dir(&blocker).expect("blocker creates");
+        let ops = move_ops(id, 4.0);
+        let drafted = preview(&server, 1, 73, &ops);
+        let error = apply(&server, 1, 73, &ops, drafted.approval).expect_err("the seal fails");
+        assert_eq!(error.code, "persist_failed", "{error}");
+        {
+            let state = server.lock().expect("lock holds");
+            assert_eq!(state.doc.revision, 1, "the live revision did not move");
+            assert_eq!(
+                crate_x(&state.doc, id),
+                Some(0.0),
+                "the live edit is absent"
+            );
+            assert_eq!(state.journal.past_len(), 1, "the live journal did not move");
+        }
+        // Kill the refused door, then reopen: nothing reached the folder.
+        drop(server);
+        std::fs::remove_dir(&blocker).expect("blocker clears");
+        let (back, back_journal) = open_project(&dir).expect("restart opens the folder");
+        assert_eq!(back.revision, 1);
+        assert_eq!(crate_x(&back, id), Some(0.0));
+        assert_eq!(back_journal.past_len(), 1);
+        assert!(!dir.join(generation_file_name(2)).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_door_replay_after_restart_returns_the_stored_receipt() {
+        let dir = scratch("durable-replay");
+        let id = seed_crate(&dir);
+        let ops = move_ops(id, 3.0);
+        let drafted;
+        let first;
+        {
+            let server = door(&dir);
+            drafted = preview(&server, 1, 72, &ops);
+            first = apply(&server, 1, 72, &ops, drafted.approval.clone()).expect("move lands");
+            assert_eq!(first.revision, 2);
+        }
+        // Restart, then resend the identical request: same key, ops and base
+        // revision, with the approval minted before the first apply.
+        let server = door(&dir);
+        let again = apply(&server, 1, 72, &ops, drafted.approval)
+            .expect("the stored key replays after a restart");
+        assert_eq!(again.revision, first.revision);
+        assert_eq!(again.key, first.key);
+        assert_eq!(again.journal_index, first.journal_index);
+        assert_eq!(again.before_digest, first.before_digest);
+        assert_eq!(again.staged_digest, first.staged_digest);
+        assert_eq!(again.after_digest, first.after_digest);
+        assert!(
+            !dir.join(generation_file_name(3)).exists(),
+            "a replay seals nothing new"
+        );
+        drop(server);
+        let (back, _) = open_project(&dir).expect("restart opens the folder");
+        assert_eq!(back.revision, 2, "the replay did not move the revision");
+        assert_eq!(crate_x(&back, id), Some(3.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_door_second_door_on_the_folder_is_refused() {
+        let dir = scratch("durable-lease");
+        let config = StartupConfig {
+            project_dir: dir.clone(),
+            web: None,
+        };
+        let first = build_server(&config).expect("first door opens");
+        let error = match build_server(&config) {
+            Ok(_) => panic!("a second door must refuse"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, StartupError::Leased { .. }), "{error:?}");
+        assert_ne!(error.exit_code(), 0);
+        assert!(error.to_string().contains("already open in another door"));
+        // The lock dies with the door; the file alone never refuses.
+        drop(first);
+        assert!(dir.join(LEASE_FILE).is_file());
+        let again = build_server(&config).expect("the lease releases with the door");
+        drop(again);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_door_undo_persists_across_a_restart() {
+        let dir = scratch("durable-undo");
+        let id = seed_crate(&dir);
+        let server = door(&dir);
+        let ops = move_ops(id, 7.0);
+        let drafted = preview(&server, 1, 75, &ops);
+        let landed = apply(&server, 1, 75, &ops, drafted.approval).expect("move lands");
+        let undone = TxUndoTool::invoke(
+            &server,
+            TxUndoArgs {
+                undo_token: Some(landed.key),
+            },
+        )
+        .expect("undo lands");
+        assert_eq!(undone.revision, 3);
+        drop(server);
+        let (back, back_journal) = open_project(&dir).expect("restart opens the folder");
+        assert_eq!(back.revision, 3, "the undo is a revision, not a rollback");
+        assert_eq!(
+            crate_x(&back, id),
+            Some(0.0),
+            "the restart opens on the undone scene"
+        );
+        assert_eq!(
+            back_journal.past_len(),
+            1,
+            "the undone move left the past stack"
+        );
+        assert!(dir.join(generation_file_name(3)).is_file());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

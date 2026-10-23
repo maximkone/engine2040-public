@@ -93,6 +93,19 @@ pub(super) fn artifact_digest(
                 push_text(&mut input, value);
             }
             Op::RemoveLastMaterial => input.push(9),
+            Op::SetBond { id, a, b, strength } => {
+                input.push(10);
+                push_id(&mut input, *id);
+                input.extend_from_slice(&a.to_le_bytes());
+                input.extend_from_slice(&b.to_le_bytes());
+                match strength {
+                    Some(value) => {
+                        input.push(1);
+                        input.extend_from_slice(&value.permille().to_le_bytes());
+                    }
+                    None => input.push(0),
+                }
+            }
         }
     }
     digest32(&[&input])

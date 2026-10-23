@@ -14,7 +14,7 @@ use engine_arena::world::{MatchWorld, Obstacle};
 use engine_core::hash::hash_bytes;
 use engine_render::present::MeshKey;
 #[cfg(feature = "app")]
-use engine_render::present::{TextureKey, TextureUpload};
+use engine_render::present::{TextureKey, TextureSource, TextureUpload};
 #[cfg(feature = "app")]
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -206,6 +206,20 @@ pub const KIT_MESH_ID_BASE: u64 = 0x4717_0000;
 /// texture per distinct kit file, clear of mesh ids and ring looks).
 #[cfg(feature = "app")]
 pub const KIT_TEXTURE_ID_BASE: u64 = 0x4717_1000;
+/// Look probe: `E2040_KIT_TEXTURES=off` stages every kit draw flat, so one
+/// capture pair can show the textures on and off. Read at import, so the
+/// staged report and the window twin list agree; any other value (unset
+/// included) keeps the shipped look.
+pub const KIT_TEXTURES_ENV: &str = "E2040_KIT_TEXTURES";
+
+/// Whether kit draws bind their textures: false only for `off` after
+/// trimming, so a typo never silently drops them.
+///
+/// Caller: `import_kit_from` reads it once per import, never per frame.
+#[must_use]
+pub fn kit_textures_enabled(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| value.trim().eq_ignore_ascii_case("off"))
+}
 /// Bound for diagnostic strings carried in errors.
 pub const MAX_KIT_DIAG: usize = 256;
 /// Largest placement half-size accepted in meters (the sand floor is 30 m).
@@ -222,8 +236,14 @@ pub enum KitError {
     Io(String),
     /// A kit file fails glTF import; file name plus bounded reason.
     Import(String),
+    /// A base-color image a file names is missing or does not decode; never
+    /// falls back to a white draw.
+    Texture(String),
     /// A mesh cannot be fitted to its placement box; bounded reason.
     Fit(String),
+    /// The content patch beside the kit root cannot be read, parsed or
+    /// matched against the directory; names the patch path and the reason.
+    Patch(String),
 }
 
 impl core::fmt::Display for KitError {
@@ -232,7 +252,9 @@ impl core::fmt::Display for KitError {
             Self::Parse(detail) => write!(f, "kit placement: {detail}"),
             Self::Io(detail) => write!(f, "kit file: {detail}"),
             Self::Import(detail) => write!(f, "kit import: {detail}"),
+            Self::Texture(detail) => write!(f, "kit texture: {detail}"),
             Self::Fit(detail) => write!(f, "kit fit: {detail}"),
+            Self::Patch(detail) => write!(f, "kit patch: {detail}"),
         }
     }
 }
@@ -253,6 +275,12 @@ fn import_err(text: &str) -> KitError {
     KitError::Import(bound_diag(text))
 }
 
+/// Base-color image failure with bounded detail, never a white draw.
+#[cfg(feature = "app")]
+fn texture_err(text: &str) -> KitError {
+    KitError::Texture(bound_diag(text))
+}
+
 /// Buffer length as `u64` without truncation; a merged kit mesh that would
 /// not fit in `u32` indices fails loudly instead of wrapping.
 #[cfg(feature = "app")]
@@ -267,9 +295,9 @@ fn len_u64(len: usize, file: &'static str) -> Result<u64, KitError> {
 type MergedBuffers = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, u64);
 
 /// One staged source file: name, merged buffers, first material, base-color
-/// texture key (`None` when the file has no base-color image bytes or they do
-/// not decode; the actors then stage untextured), the cooked set it wears
-/// (tiling UVs, metallic factor) and the key of its normal-map set.
+/// texture key (`None` only when the file names no image; a named image that
+/// is missing or does not decode refuses), the cooked set it wears and the
+/// key of its normal-map set.
 #[cfg(feature = "app")]
 type KitSource = (
     &'static str,
@@ -639,7 +667,7 @@ pub struct ImportedKit {
     /// One decoded base-color texture per distinct kit file that carries
     /// one, in first-seen file order; [`upload_kit`] uploads each once and
     /// the baked actors reference them by key.
-    pub textures: Vec<(TextureKey, TextureUpload)>,
+    pub textures: Vec<(TextureKey, TextureSource)>,
     /// Material sets (normal map, ORM, base they sit over): uploaded once by
     /// [`upload_kit`], named by the baked actors' `normal_map` key.
     pub sets: Vec<kit_pbr::KitMaterialSet>,
@@ -687,20 +715,19 @@ fn digest32(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-/// Base-color texture for one kit import: the first decodable base-color
-/// image over all materials (a file may dress parts in an untextured
-/// material first, like the banner cloth), keyed by file index. `None`
-/// when the file has no base-color image or the bytes do not decode; the
-/// caller stages those actors untextured instead of refusing the kit.
-/// Cold path only.
+/// Base-color image one kit import names: the first material slot with
+/// [`TextureSlot::BaseColor`](engine_assets::cooked::TextureSlot) over all
+/// materials (a file may dress parts in an untextured material first, like
+/// the banner cloth). `Ok(None)` when the file names no image. A named image
+/// the import does not carry, or bytes that do not decode, refuse by file
+/// name instead of staging a white draw. Cold path only.
 #[cfg(feature = "app")]
-fn kit_texture(
+pub(crate) fn kit_texture(
     import: &engine_assets::mesh_import::GltfImport,
+    file: &'static str,
     file_index: usize,
-) -> Option<(TextureKey, TextureUpload)> {
+) -> Result<Option<(TextureKey, TextureSource)>, KitError> {
     for material in &import.materials {
-        // One file may dress parts in an untextured material: skip those
-        // slots instead of bailing on the whole file.
         let Some(asset) = material
             .textures
             .iter()
@@ -709,15 +736,18 @@ fn kit_texture(
         else {
             continue;
         };
-        let Some(bytes) = import.images.get(&asset) else {
-            continue;
-        };
-        if let Ok(upload) = TextureUpload::from_encoded(bytes) {
-            let id = KIT_TEXTURE_ID_BASE + u64::try_from(file_index).unwrap_or(u64::MAX);
-            return Some((TextureKey::new(id, digest32(bytes)), upload));
-        }
+        let bytes = import.images.get(&asset).ok_or_else(|| {
+            texture_err(&format!("{file}: base-color image {asset:#018x} missing"))
+        })?;
+        let upload = TextureUpload::from_encoded(bytes)
+            .map_err(|err| texture_err(&format!("{file}: image does not decode: {err}")))?;
+        let id = KIT_TEXTURE_ID_BASE + u64::try_from(file_index).unwrap_or(u64::MAX);
+        return Ok(Some((
+            TextureKey::new(id, digest32(bytes)),
+            TextureSource::Rgba8(upload),
+        )));
     }
-    None
+    Ok(None)
 }
 
 /// Merge every triangle primitive of one import into parallel arrays with
@@ -987,84 +1017,6 @@ fn fitted_buffers(source: &KitSource, actor: &KitActor, params: &FitParams) -> F
     (pos, nor, uv, idx)
 }
 
-/// Decoded textures (once per distinct key), material sets (once per set key)
-/// and the cooked sets loaded so far: a cooked set loads once however many
-/// kit files wear it.
-#[cfg(feature = "app")]
-#[derive(Default)]
-struct KitMaps {
-    textures: Vec<(TextureKey, TextureUpload)>,
-    sets: Vec<kit_pbr::KitMaterialSet>,
-    cooked: Vec<(usize, Option<kit_pbr::CookedSet>)>,
-}
-
-#[cfg(feature = "app")]
-type KitFileMaps = (
-    Option<TextureKey>,
-    Option<kit_pbr::KitPbr>,
-    Option<TextureKey>,
-);
-
-#[cfg(feature = "app")]
-impl KitMaps {
-    /// Cooked sets that loaded (5 on the shipping content).
-    fn cooked_loaded(&self) -> usize {
-        self.cooked.iter().filter(|(_, set)| set.is_some()).count()
-    }
-
-    /// Stage the maps of one kit file: its cooked CC0 set when `cooked/` has
-    /// it, else the glTF's own base, normal and ORM images (the banner, or a
-    /// source without `cooked/`). Returns the base key, the set it wears and
-    /// the key of its normal-map set.
-    fn stage(
-        &mut self,
-        source: &dyn engine_assets::AssetSource,
-        file: &str,
-        import: &engine_assets::mesh_import::GltfImport,
-        file_index: usize,
-    ) -> KitFileMaps {
-        let pbr = kit_pbr::pbr_for_file(file);
-        let cooked_at = pbr.and_then(|wear| {
-            let at = self
-                .cooked
-                .iter()
-                .position(|(set, _)| *set == wear.set)
-                .unwrap_or_else(|| {
-                    self.cooked
-                        .push((wear.set, kit_pbr::load_cooked_set(source, wear.set)));
-                    self.cooked.len() - 1
-                });
-            self.cooked[at].1.as_ref().map(|_| at)
-        });
-        if let Some(set) = cooked_at.and_then(|at| self.cooked[at].1.as_ref()) {
-            let base_key = set.base.0;
-            if !self.textures.iter().any(|(key, _)| *key == base_key) {
-                self.textures.push(set.base.clone());
-                self.sets.push(kit_pbr::KitMaterialSet {
-                    key: set.normal.0,
-                    base: Some(base_key),
-                    normal: set.normal.1.clone(),
-                    orm: Some(set.orm.1.clone()),
-                });
-            }
-            return (Some(base_key), pbr, Some(set.normal.0));
-        }
-        let base = kit_texture(import, file_index);
-        let base_key = base.as_ref().map(|(key, _)| *key);
-        if let Some(entry) = base {
-            if !self.textures.iter().any(|(key, _)| *key == entry.0) {
-                self.textures.push(entry);
-            }
-        }
-        let gltf_set = kit_pbr::gltf_maps(import, file_index, base_key);
-        let normal_key = gltf_set.as_ref().map(|set| set.key);
-        if let Some(set) = gltf_set {
-            self.sets.push(set);
-        }
-        (base_key, None, normal_key)
-    }
-}
-
 /// Import plus fit every kit actor mesh from `root/src/<asset>.gltf` (CPU
 /// only, no GPU): one import per distinct file, one baked mesh per actor.
 /// A bad actor is skipped with its reason and counted; an empty result fails
@@ -1074,6 +1026,15 @@ pub fn import_kit(root: &Path) -> Result<ImportedKit, KitError> {
     import_kit_from(&engine_assets::FsSource::new(root))
 }
 
+/// [`import_kit`] in a chosen map shape: a frame test imports the same kit as
+/// RGBA8 to measure what the block upload changed. The shipping path is
+/// [`CookedShape::Block`](kit_pbr::CookedShape::Block), which [`import_kit`]
+/// uses.
+#[cfg(feature = "app")]
+pub fn import_kit_shape(root: &Path, shape: kit_pbr::CookedShape) -> Result<ImportedKit, KitError> {
+    import_kit_from_shape(&engine_assets::FsSource::new(root), shape)
+}
+
 /// One merged source mesh plus its first material and maps per distinct kit
 /// file, with the summed source triangles.
 #[cfg(feature = "app")]
@@ -1081,7 +1042,9 @@ fn load_kit_sources(
     source: &dyn engine_assets::AssetSource,
     assets: &KitAssets<'_>,
     files: &[&'static str],
-    maps: &mut KitMaps,
+    maps: &mut kit_pbr::KitMaps,
+    textures_on: bool,
+    shape: kit_pbr::CookedShape,
 ) -> Result<(Vec<KitSource>, u64), KitError> {
     let mut sources: Vec<KitSource> = Vec::with_capacity(files.len());
     let mut triangles: u64 = 0;
@@ -1092,7 +1055,8 @@ fn load_kit_sources(
         let (pos, nor, uv, idx, tris) = merge_import(file, &import)?;
         triangles += tris;
         let material = import.materials.first().cloned().unwrap_or_default();
-        let (texture, pbr, normal_key) = maps.stage(source, file, &import, file_index);
+        let (texture, pbr, normal_key) =
+            maps.stage(source, file, &import, file_index, textures_on, shape)?;
         sources.push((file, pos, nor, uv, idx, material, texture, pbr, normal_key));
     }
     Ok((sources, triangles))
@@ -1102,13 +1066,28 @@ fn load_kit_sources(
 /// `src/<asset>.gltf` by logical path, so a browser build hands in a fetched
 /// bundle and gets the same kit as the native directory read. The bytes are
 /// held by generational handles and unloaded when the import is done.
+///
+/// Cooked sets load in [`CookedShape::Block`](kit_pbr::CookedShape::Block): the
+/// presenter decides whether the GPU takes blocks or decodes to RGBA8.
 #[cfg(feature = "app")]
 pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<ImportedKit, KitError> {
+    import_kit_from_shape(source, kit_pbr::CookedShape::Block)
+}
+
+/// [`import_kit_from`] in a chosen map shape: a frame test imports the same kit
+/// as RGBA8 to measure what the block upload changed.
+#[cfg(feature = "app")]
+pub fn import_kit_from_shape(
+    source: &dyn engine_assets::AssetSource,
+    shape: kit_pbr::CookedShape,
+) -> Result<ImportedKit, KitError> {
     let actors = kit_actors()?;
     let files = kit_asset_files(&actors);
     let mut assets = KitAssets::load(source, &files)?;
-    let mut maps = KitMaps::default();
-    let (sources, triangles) = load_kit_sources(source, &assets, &files, &mut maps)?;
+    let mut maps = kit_pbr::KitMaps::default();
+    let textures_on = kit_textures_enabled(std::env::var(KIT_TEXTURES_ENV).ok().as_deref());
+    let (sources, triangles) =
+        load_kit_sources(source, &assets, &files, &mut maps, textures_on, shape)?;
     let mut baked = Vec::with_capacity(actors.len());
     let mut skipped = Vec::new();
     let mut material_fallbacks = 0usize;
@@ -1186,7 +1165,7 @@ pub fn import_kit_from(source: &dyn engine_assets::AssetSource) -> Result<Import
     // stale and the bytes go back to the queue's budget.
     assets.unload();
     let cooked_sets = maps.cooked_loaded();
-    let KitMaps { textures, sets, .. } = maps;
+    let kit_pbr::KitMaps { textures, sets, .. } = maps;
     Ok(ImportedKit {
         baked,
         triangles,
@@ -1254,7 +1233,7 @@ pub fn upload_kit(
     // actors back to untextured draws instead of failing the frame.
     let mut tex_ok: Vec<TextureKey> = Vec::with_capacity(kit.textures.len());
     for (key, upload) in &kit.textures {
-        if presenter.upload_texture(*key, upload).is_ok() {
+        if presenter.upload_texture_source(*key, upload).is_ok() {
             tex_ok.push(*key);
         }
     }
@@ -1264,7 +1243,7 @@ pub fn upload_kit(
     for set in &kit.sets {
         let base = set.base.filter(|key| tex_ok.contains(key));
         if presenter
-            .upload_material_set(set.key, base, &set.normal, set.orm.as_ref())
+            .upload_material_set_source(set.key, base, &set.normal, set.orm.as_ref())
             .is_ok()
         {
             sets_ok.push(set.key);
@@ -1293,14 +1272,70 @@ pub fn upload_kit(
     }
 }
 
+/// The patch file the shipped run applies when it sits beside the kit root:
+/// `content/arena` reads `content/patch.e2patch`, the file `e2patch diff`
+/// writes. A patch carries logical `src/...` paths, so it is built from the
+/// kit root and applied there, never from an absolute tree path.
+#[cfg(feature = "app")]
+pub const KIT_PATCH_FILE: &str = "patch.e2patch";
+
+/// Read the patch beside the kit root. Native only: the browser stages its kit
+/// from a fetched bundle ([`stage_kit_from`]), so no sibling file exists there.
+/// `Ok(None)` means no patch file; a read error keeps the path in the message.
+#[cfg(all(feature = "app", not(target_arch = "wasm32")))]
+fn read_kit_patch(path: &Path) -> Result<Option<Vec<u8>>, KitError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(KitError::Patch(bound_diag(&format!(
+            "{}: {error}",
+            path.display()
+        )))),
+    }
+}
+
+/// The browser has no filesystem; a patch path beside the root does not exist.
+#[cfg(all(feature = "app", target_arch = "wasm32"))]
+fn read_kit_patch(_path: &Path) -> Result<Option<Vec<u8>>, KitError> {
+    Ok(None)
+}
+
+/// Run `f` over the kit's content: the directory itself, or the directory
+/// under a verified patch when [`KIT_PATCH_FILE`] sits beside `root`. The
+/// patch's base hashes are checked first, so a patch for another build is
+/// refused by path instead of serving stale or mixed bytes. No patch file is
+/// the plain directory read, exactly as before.
+#[cfg(feature = "app")]
+fn with_kit_source<T>(
+    root: &Path,
+    f: impl FnOnce(&dyn engine_assets::AssetSource) -> Result<T, KitError>,
+) -> Result<T, KitError> {
+    let base = engine_assets::FsSource::new(root);
+    let patch_path = root.with_file_name(KIT_PATCH_FILE);
+    match read_kit_patch(&patch_path)? {
+        Some(bytes) => {
+            let patch = engine_assets::asset_source::PatchSet::parse(&bytes).map_err(|error| {
+                KitError::Patch(bound_diag(&format!("{}: {error}", patch_path.display())))
+            })?;
+            patch.verify_base(&base).map_err(|error| {
+                KitError::Patch(bound_diag(&format!("{}: {error}", patch_path.display())))
+            })?;
+            let patched: engine_assets::asset_source::PatchedSource<'_> = patch.apply(&base);
+            f(&patched)
+        }
+        None => f(&base),
+    }
+}
+
 /// Import from `root` and upload into the presenter in one call (the twin
-/// staging path).
+/// staging path). A content patch beside the root is applied first; see
+/// [`with_kit_source`].
 #[cfg(feature = "app")]
 pub fn stage_kit(
     presenter: &mut engine_render::present::Presenter,
     root: &Path,
 ) -> Result<KitReport, KitError> {
-    stage_kit_from(presenter, &engine_assets::FsSource::new(root))
+    with_kit_source(root, |source| stage_kit_from(presenter, source))
 }
 
 /// [`stage_kit`] over any content source (a fetched bundle in the browser).
@@ -1852,10 +1887,46 @@ mod tests {
         assert_eq!(keys.len(), materials, "texture keys distinct");
         for (key, upload) in &kit.textures {
             assert!(
-                upload.width >= 4 && upload.height >= 4,
+                upload.width() >= 4 && upload.height() >= 4,
                 "texture {key:?} is a real image, not a stub"
             );
         }
+    }
+
+    // A file that names a base-color image and does not carry it refuses by
+    // file name, never a white draw; bytes that are not an image refuse the
+    // same way.
+    #[cfg(feature = "app")]
+    #[test]
+    fn kit_refuses_a_missing_base_color_image() {
+        use engine_assets::cooked::{CookedMaterial, TextureRef, TextureSlot};
+        let mut import = engine_assets::mesh_import::GltfImport {
+            materials: vec![CookedMaterial {
+                textures: vec![TextureRef {
+                    asset: 0xDEAD_BEEF,
+                    slot: TextureSlot::BaseColor,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err =
+            kit_texture(&import, "gate_tunnel.gltf", 0).expect_err("a named image must be carried");
+        assert!(matches!(err, KitError::Texture(_)), "{err:?}");
+        assert!(err.to_string().contains("gate_tunnel.gltf"), "{err}");
+        import.images.insert(0xDEAD_BEEF, b"not an image".to_vec());
+        let err = kit_texture(&import, "gate_tunnel.gltf", 0).expect_err("garbage does not decode");
+        assert!(matches!(err, KitError::Texture(_)), "{err:?}");
+    }
+
+    // The capture probe turns textures off only on `off`, so a typo never
+    // silently changes the shipped look.
+    #[test]
+    fn kit_texture_switch_turns_off_only_on_off() {
+        assert!(kit_textures_enabled(None));
+        assert!(kit_textures_enabled(Some("1")));
+        assert!(!kit_textures_enabled(Some("off")));
+        assert!(!kit_textures_enabled(Some(" OFF ")));
     }
 
     // VR2: every arena-kit material has base, normal and ORM. The five cooked
@@ -1884,7 +1955,7 @@ mod tests {
             assert!(set.base.is_some(), "set {:?} sits over a base", set.key);
             assert!(set.orm.is_some(), "set {:?} carries an ORM map", set.key);
             assert!(
-                set.normal.width >= 512,
+                set.normal.width() >= 512,
                 "set {:?} normal is a real map",
                 set.key
             );
@@ -2341,5 +2412,106 @@ mod tests {
         let short = "table arena-zones version 1\nsand_floor class=0 cx_cm=-6000 cz_cm=0 radius_cm=1500 height_cm=20 advantage=0 dominance=0 risk=0\n";
         let err = kit_zone_rows_from_text(short).expect_err("a missing actor row refuses");
         assert!(err.to_string().contains("12 rows, saw 1"), "{err}");
+    }
+
+    /// F24 fixture: a kit root with two logical blobs and the tree one patch
+    /// ahead of it (only `a.txt` changes; `b.txt` rides the manifest as the
+    /// unchanged base row the verifier checks).
+    #[cfg(feature = "app")]
+    fn patch_fixture(tag: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("e2040_kit_patch_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("content").join("arena").join("src");
+        let new = root.join("new").join("arena").join("src");
+        std::fs::create_dir_all(&base).expect("base src");
+        std::fs::create_dir_all(&new).expect("new src");
+        std::fs::write(base.join("a.txt"), b"base-a").expect("base a");
+        std::fs::write(base.join("b.txt"), b"same-b").expect("base b");
+        std::fs::write(new.join("a.txt"), b"patch-a").expect("new a");
+        std::fs::write(new.join("b.txt"), b"same-b").expect("new b");
+        root
+    }
+
+    /// F24: the shipped stage wraps the content dir in a patch when
+    /// `patch.e2patch` sits beside it; the carried blob wins, every other
+    /// path still reads the directory, and removing the file is the plain
+    /// directory read again.
+    #[cfg(feature = "app")]
+    #[test]
+    fn kit_source_applies_a_patch_beside_the_root() {
+        let root = patch_fixture("applied");
+        let arena = root.join("content").join("arena");
+        let new = root.join("new").join("arena");
+        let base = engine_assets::asset_source::Manifest::from_source(
+            &engine_assets::FsSource::new(&arena),
+        )
+        .expect("base manifest");
+        let patch = engine_assets::asset_source::PatchSet::build(
+            &base,
+            &engine_assets::FsSource::new(&new),
+        )
+        .expect("patch builds")
+        .0;
+        let patch_path = arena.with_file_name(KIT_PATCH_FILE);
+        std::fs::write(&patch_path, patch.to_bytes().expect("patch bytes")).expect("patch writes");
+
+        with_kit_source(&arena, |source| {
+            assert_eq!(
+                source.read("src/a.txt").expect("patched reads").as_ref(),
+                b"patch-a"
+            );
+            assert_eq!(
+                source.read("src/b.txt").expect("kept reads").as_ref(),
+                b"same-b"
+            );
+            Ok(())
+        })
+        .expect("the patch applies");
+
+        std::fs::remove_file(&patch_path).expect("patch removed");
+        with_kit_source(&arena, |source| {
+            assert_eq!(
+                source.read("src/a.txt").expect("disk reads").as_ref(),
+                b"base-a"
+            );
+            Ok(())
+        })
+        .expect("the directory reads");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F24: a patch built for another base is refused by the path it names,
+    /// so a shipped run never mixes a stale blob with the new tree.
+    #[cfg(feature = "app")]
+    #[test]
+    fn kit_source_refuses_a_patch_for_another_base_by_path() {
+        let root = patch_fixture("refused");
+        let arena = root.join("content").join("arena");
+        let new = root.join("new").join("arena");
+        let base = engine_assets::asset_source::Manifest::from_source(
+            &engine_assets::FsSource::new(&arena),
+        )
+        .expect("base manifest");
+        let patch = engine_assets::asset_source::PatchSet::build(
+            &base,
+            &engine_assets::FsSource::new(&new),
+        )
+        .expect("patch builds")
+        .0;
+        std::fs::write(
+            arena.with_file_name(KIT_PATCH_FILE),
+            patch.to_bytes().expect("bytes"),
+        )
+        .expect("patch writes");
+        // The base moved under the patch: b.txt keeps its manifest row but
+        // not its bytes, so the verifier must name it.
+        std::fs::write(arena.join("src").join("b.txt"), b"changed-b").expect("base edit");
+
+        let err = with_kit_source(&arena, |_| Ok(())).expect_err("the base changed");
+        let text = err.to_string();
+        assert!(text.contains("src/b.txt"), "{text}");
+        assert!(text.contains("patch.e2patch"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -1,5 +1,5 @@
-//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, eighteen packs load on
-//! demand in contract order (`scene`, `break_`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `settings`, `web`, `session`, `codex` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
+//! Door v2 verb packs: a small core (`api.call`, `api.load`) stays advertised, nineteen packs load on
+//! demand in contract order (`scene`, `break_`, `fx`, `anim`, `material`, `asset`, `rules`, `geo`, `gym`, `view`, `net`, `perf`, `play`, `replay`, `physics`, `settings`, `web`, `session`, `codex` in [`PACK_NAMES`]; feature `verify` swaps `replay` for `verify`), and every verb registers through one typed API.
 //!
 //! Consumer: the MCP door (`super::mcp::McpServer`) lists its core tools plus
 //! the packs a session loaded (`api.load`), dispatches any verb by exact
@@ -52,6 +52,8 @@ pub mod break_;
 /// The Rome codex: search the passage index and cite a passage in a Rome
 /// table entry.
 pub mod codex;
+/// C10: one-call physical effects over a session's float physfx world.
+pub mod fx;
 pub mod geo;
 /// Door grammar gate (constrained decoding stays typed).
 pub mod grammar;
@@ -85,9 +87,10 @@ pub mod web;
 /// verifier verbs replace their replay-pack stand-ins in the same slot, so a
 /// build never serves one verb name twice.
 #[cfg(feature = "verify")]
-pub const PACK_NAMES: [&str; 18] = [
+pub const PACK_NAMES: [&str; 19] = [
     scene::PACK,
     break_::PACK,
+    fx::PACK,
     anim::PACK,
     material::PACK,
     asset::PACK,
@@ -108,9 +111,10 @@ pub const PACK_NAMES: [&str; 18] = [
 
 /// Every pack name, in contract order. Each name has one module below.
 #[cfg(not(feature = "verify"))]
-pub const PACK_NAMES: [&str; 18] = [
+pub const PACK_NAMES: [&str; 19] = [
     scene::PACK,
     break_::PACK,
+    fx::PACK,
     anim::PACK,
     material::PACK,
     asset::PACK,
@@ -554,7 +558,7 @@ impl PackRegistry {
         self.packs.push(pack);
     }
 
-    /// The shipped registry: the seventeen packs of [`PACK_NAMES`], built once.
+    /// The shipped registry: the packs of [`PACK_NAMES`], built once.
     /// Registration errors never panic here; the guard test asserts the
     /// shipped list is clean.
     pub fn shipped() -> &'static Self {
@@ -563,6 +567,7 @@ impl PackRegistry {
             let mut packs = vec![
                 scene::pack(),
                 break_::pack(),
+                fx::pack(),
                 anim::pack(),
                 material::pack(),
                 asset::pack(),
@@ -917,10 +922,13 @@ pub struct ApiLoadOutput {
     pub budget_chars: u64,
 }
 
-/// Refuse a load that would push the surface past the tool budget. Without
-/// this check the API6 guardrail trims the advertisement and the door still
-/// answers `loaded`, with verbs hidden. A load that changes nothing, or a name
-/// no pack carries (`load_pack` names that), passes through unchanged.
+/// Refuse a load that would take the session's listed surface past the hard
+/// tool budget. A pack may load while the raw list fits
+/// [`TOOL_LIST_BUDGET_CHARS`]; the API6 guardrail then trims the advertisement
+/// to [`MAX_ADVERTISED_CHARS`], spending the mandated headroom, and a verb it
+/// hides stays callable by exact name. A load that would break the hard cap is
+/// refused; a load that changes nothing, or a name no pack carries
+/// (`load_pack` names that), passes through unchanged.
 fn refuse_over_budget(
     service: &McpServer,
     state: &ServerState,
@@ -935,16 +943,17 @@ fn refuse_over_budget(
     let mut loaded = state.loaded_packs().clone();
     loaded.insert(def.name);
     let reach = service.surface_chars_with(&loaded);
-    if reach <= MAX_ADVERTISED_CHARS {
+    if reach <= TOOL_LIST_BUDGET_CHARS {
         return Ok(());
     }
     Err(McpToolError::new(
         "tool_budget_exceeded",
         format!(
-            "api.load refused: loading pack `{}` would advertise {reach} tool chars; the \
-             tool budget is {TOOL_LIST_BUDGET_CHARS} chars with {TOOL_LIST_MIN_HEADROOM_CHARS} \
-             kept as headroom, so a list may cost at most {MAX_ADVERTISED_CHARS}; unload a \
-             pack first (api.load unload:true) or load a smaller one",
+            "api.load refused: loading pack `{}` would advertise {reach} tool chars before the \
+             API6 guardrail; the hard tool budget is {TOOL_LIST_BUDGET_CHARS} chars with \
+             {TOOL_LIST_MIN_HEADROOM_CHARS} kept as headroom, so the largest list it may \
+             advertise is {MAX_ADVERTISED_CHARS} chars; unload a pack first \
+             (api.load unload:true) or load a smaller one",
             def.name
         ),
     ))

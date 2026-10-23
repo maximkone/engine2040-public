@@ -1,25 +1,33 @@
-//! `net` pack: loopback bout with injected loss, latency and burst drop as typed integers.
+//! `net` pack: loopback bout with injected loss, latency and burst drop, plus
+//! a seeded link shaper, as typed integers.
 //!
-//! One read-only verb `net.loopback` opens a loopback bout with injected
-//! loss, latency_ticks delay and burst drop and reports convergence plus the first
-//! divergent tick, so an agent reads the verdict through `api.call`
-//! instead of driving sockets.
+//! Two read-only verbs. `net.loopback` opens a loopback bout with injected
+//! loss, latency_ticks delay and burst drop and reports convergence plus the
+//! first divergent tick. `net.shape` replays the same duel over a seeded
+//! shape (delay_ms, jitter_ms, loss_permille) and reports the shape it
+//! applied, convergence, measured loss and a sim-only digest, so the same
+//! shape twice folds one digest; the isolated proof carries clean equality. An
+//! agent reads the verdict through `api.call` instead of driving sockets.
 //!
-//! Consumer: the MCP door (`super::mcp::McpServer`) lists the verb after
-//! `api.load` and dispatches it by exact name. Data owner for the bout is
+//! Consumer: the MCP door (`super::mcp::McpServer`) lists the verbs after
+//! `api.load` and dispatches them by exact name. Data owner for the bout is
 //! `engine-net`; this module owns only the verb DTOs, validation and the
-//! typed report. Units: whole percent for `loss_pct`, whole ticks for
-//! `latency_ticks`, `burst_at` and `burst_len_ticks`, ticks for
-//! `first_divergence`, unitless `u64` for `digest` and `seed`. Determinism:
-//! the same loss plus seed plus latency plus burst twice seals the same
-//! report; integer ops only, no clock, no float,
+//! typed reports. Units: whole percent for `loss_pct`, whole ticks for
+//! `latency_ticks`, `burst_at`, `burst_len_ticks`, `delay_ticks` and
+//! `jitter_ticks`, milliseconds for `delay_ms` and `jitter_ms`, permille for
+//! `loss_permille`, ticks for `first_divergence`, basis points for `loss_bp`,
+//! unitless `u64` for `digest` and `seed`. Determinism: the same loss plus
+//! seed plus latency plus burst twice seals the same report, and the same
+//! shape twice seals the same digest; integer ops only, no clock, no float,
 //! no socket. Errors: [`McpToolError`] with `bad_args` for loss outside
-//! `0..=100`, latency outside `0..=32` or burst outside `1..=600`
-//! and `bout_failed` when the bout refuses.
+//! `0..=100`, latency outside `0..=32`, burst outside `1..=600`, delay_ms
+//! outside `0..=2000`, jitter_ms outside `0..=1000` or loss_permille outside
+//! `0..=1000`, and `bout_failed` when the bout refuses.
 //!
 //! DTO structs carry no field docs on purpose: every doc line inflates the
 //! advertised schemas, and the discovery budget is a gate.
 
+use engine_core::Fnv64;
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
@@ -32,16 +40,23 @@ use crate::tool_capabilities::CapabilityCard;
 pub const PACK: &str = "net";
 /// Verb: loopback bout with injected loss, convergence and first tick.
 pub const TOOL_NET_LOOPBACK: &str = "net.loopback";
+/// Verb: seeded link shape over the same duel, convergence and digest.
+pub const TOOL_NET_SHAPE: &str = "net.shape";
 
-/// The net pack: loopback bout with injected loss, loaded on demand.
+/// The net pack: loopback bout and seeded link shaper, loaded on demand.
 pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(
         PACK,
-        "loopback bout with injected loss, convergence and first divergent tick",
+        "loopback bout with injected loss, convergence, first divergent tick and a seeded link shaper",
         false,
     );
     pack.add(VerbSpec::of::<NetLoopbackTool>(
         TOOL_NET_LOOPBACK,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<NetShapeTool>(
+        TOOL_NET_SHAPE,
         PACK,
         CapabilityCard::Observe,
     )?);
@@ -187,6 +202,153 @@ crate::e2_tool!(
     args = NetLoopbackArgs,
     output = LoopbackReport,
     invoke = net_loopback
+);
+
+// ---------------------------------------------------------------------------
+// Seeded link shaper: the same duel over delay, jitter and loss.
+// ---------------------------------------------------------------------------
+
+/// `net.shape` answer: the applied shape, convergence, measured loss, digest.
+///
+/// `delay_ticks` and `jitter_ticks` are the whole 60 Hz ticks the asked
+/// milliseconds became; `loss_pct` is the whole percent the asked permille
+/// became. `converged` is true when every seat holds the server truth and the
+/// dropped seat stalled, reclaimed and was granted. `first_divergence` is the
+/// smallest divergent tick, `None` when all agree. `loss_bp` is the measured
+/// random loss in basis points. `digest` folds the simulated outcome only
+/// (seed, tape, checkpoint chain), so the same shape twice seals the same
+/// digest, and a link that delivers the same input tape seals it too.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ShapeReport {
+    pub delay_ticks: u32,
+    pub jitter_ticks: u32,
+    pub loss_pct: u32,
+    pub converged: bool,
+    pub first_divergence: Option<u32>,
+    pub loss_bp: u32,
+    pub digest: u64,
+}
+
+/// Milliseconds to whole 60 Hz ticks, rounded up.
+fn ms_to_ticks(ms: u32) -> u32 {
+    ms.saturating_mul(60).saturating_add(999) / 1_000
+}
+
+/// Run the scripted duel under a seeded link shape and report its verdict.
+///
+/// `delay_ms` is the base one-way delay, `jitter_ms` the extra delay drawn
+/// from `0..=jitter`, `loss_permille` the datagram loss. Delay and jitter
+/// become ticks at 60 Hz (rounded up), loss becomes whole percent (rounded
+/// up). The server sizes its lag window for the slow link plus one tick, so
+/// the third redundancy copy is still admitted, and the scripted outage ends
+/// one one-way delay early, so the delayed rejoin request reaches the server
+/// on the clean run's rejoin step. Integer only, seeded, no clock, no float,
+/// no socket. Anything outside the ranges refuses with `bad_args`; a bout
+/// that refuses maps to `bout_failed`, never a panic.
+pub fn shape_report(
+    delay_ms: u32,
+    jitter_ms: u32,
+    loss_permille: u32,
+    seed: u64,
+) -> Result<ShapeReport, McpToolError> {
+    if delay_ms > 2_000 {
+        return Err(bad_args(format!(
+            "delay_ms {delay_ms} is outside 0..=2000; re-run with 0..=2000"
+        )));
+    }
+    if jitter_ms > 1_000 {
+        return Err(bad_args(format!(
+            "jitter_ms {jitter_ms} is outside 0..=1000; re-run with 0..=1000"
+        )));
+    }
+    if loss_permille > 1_000 {
+        return Err(bad_args(format!(
+            "loss_permille {loss_permille} is outside 0..=1000; re-run with 0..=1000"
+        )));
+    }
+    let delay_ticks = ms_to_ticks(delay_ms);
+    let jitter_ticks = ms_to_ticks(jitter_ms);
+    let loss_pct = loss_permille.div_ceil(10);
+    let profile = engine_net::link::LinkProfile {
+        latency: delay_ticks,
+        jitter: jitter_ticks,
+        loss_pct,
+        reorder_pct: 0,
+    };
+    let worst = profile.worst_delay();
+    let mut cfg = engine_net::played::BoutConfig::for_profile(seed, profile);
+    cfg.hold += 1;
+    let back = cfg.drop.back.saturating_sub(worst);
+    if back > cfg.drop.at {
+        cfg.drop.back = back;
+    }
+    let report = engine_net::played::run_loopback(&cfg, profile, profile).map_err(|error| {
+        McpToolError::new(
+            "bout_failed",
+            format!(
+                "shaped bout failed ({error}); re-run with delay_ms 0..=2000, \
+                 jitter_ms 0..=1000 and loss_permille 0..=1000"
+            ),
+        )
+    })?;
+    let first_divergence = report
+        .seats
+        .iter()
+        .filter_map(|seat| seat.first_divergence)
+        .min();
+    let (up, _) = report.totals();
+    // Sim-only fold: seed, tape and checkpoint chain. Wire counters stay out,
+    // so a shaped link that delivers the same inputs folds the clean digest.
+    let mut h = Fnv64::new();
+    h.write_u64(report.config.seed);
+    h.write_u32(report.config.ticks);
+    h.write_u64(report.tape_hash);
+    h.write_u64(u64::try_from(report.tape_len).unwrap_or(u64::MAX));
+    h.write_bool(report.replay_equal);
+    h.write_u64(report.server_tip.hash);
+    for checkpoint in &report.checkpoints {
+        h.write_u64(checkpoint.hash);
+    }
+    Ok(ShapeReport {
+        delay_ticks,
+        jitter_ticks,
+        loss_pct,
+        converged: report.converged(),
+        first_divergence,
+        loss_bp: up.loss_bp(),
+        digest: h.finish(),
+    })
+}
+
+/// `net.shape` request: delay and jitter in ms, loss in permille, seed.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct NetShapeArgs {
+    pub delay_ms: u32,
+    pub jitter_ms: u32,
+    pub loss_permille: u32,
+    pub seed: u64,
+}
+
+/// `net.shape` handler: the pure report under the audited dispatch seam.
+fn net_shape(service: &McpServer, args: &NetShapeArgs) -> Result<ShapeReport, McpToolError> {
+    service.dispatch(TOOL_NET_SHAPE, |_state| {
+        shape_report(args.delay_ms, args.jitter_ms, args.loss_permille, args.seed)
+    })
+}
+
+crate::e2_tool!(
+    /// `net.shape` tool: seeded link shaper over the scripted duel, read-only.
+    NetShapeTool,
+    name = TOOL_NET_SHAPE,
+    description = "Replay the scripted duel under a seeded link shape (delay_ms, jitter_ms, loss_permille) and report the applied ticks and percent, convergence, measured loss_bp and a sim-only digest. Read-only.",
+    readonly = true,
+    args = NetShapeArgs,
+    output = ShapeReport,
+    invoke = net_shape
 );
 
 #[cfg(test)]
@@ -352,6 +514,71 @@ mod tests {
             );
             let again = loopback_report(90, seed, 0, None, None).expect("repeats");
             assert_eq!(first, again, "seed {seed} reproduces its tick twice");
+        }
+    }
+
+    #[test]
+    fn net_shape_120ms_5pct_converges_and_seals_the_same_digest_twice() {
+        let first = shape_report(120, 0, 50, 2040).expect("120 ms plus 5 pct runs");
+        assert_eq!(first.delay_ticks, 8, "120 ms is 8 ticks at 60 Hz");
+        assert_eq!(first.jitter_ticks, 0);
+        assert_eq!(first.loss_pct, 5, "50 permille is 5 whole percent");
+        assert!(first.converged, "the shaped duel converges: {first:?}");
+        assert_eq!(first.first_divergence, None);
+        assert!(
+            (1..1_000).contains(&first.loss_bp),
+            "the shaped link really lost packets: {} bp",
+            first.loss_bp
+        );
+        let second = shape_report(120, 0, 50, 2040).expect("repeats");
+        assert_eq!(first, second, "same shape seals the same report twice");
+        // A clean link is a different wire, not a different sim: it converges
+        // with no loss, and the shaped digest is stable on its own.
+        let clean = shape_report(0, 0, 0, 2040).expect("the clean link runs");
+        assert!(clean.converged, "the clean duel converges: {clean:?}");
+        assert_eq!(clean.delay_ticks, 0);
+        assert_eq!(clean.loss_bp, 0);
+        let verb = PackRegistry::shipped()
+            .verb(TOOL_NET_SHAPE)
+            .expect("net.shape is a registered verb");
+        assert_eq!(verb.pack(), PACK);
+        assert_eq!(verb.card(), CapabilityCard::Observe);
+        assert!(verb.readonly());
+        let described = ApiDescribeTool::invoke(
+            &server(),
+            ApiDescribeArgs {
+                path: TOOL_NET_SHAPE.to_owned(),
+            },
+        )
+        .expect("api.describe lists net.shape");
+        assert_eq!(described.path, TOOL_NET_SHAPE);
+        assert!(described.docs.contains("delay"));
+        assert!(described.signature.contains(TOOL_NET_SHAPE));
+    }
+
+    #[test]
+    fn net_shape_zero_jitter_is_pure_delay() {
+        let pure = shape_report(120, 0, 0, 2040).expect("pure delay runs");
+        assert_eq!(pure.delay_ticks, 8);
+        assert_eq!(pure.jitter_ticks, 0);
+        assert_eq!(pure.loss_pct, 0);
+        assert_eq!(pure.loss_bp, 0, "zero loss drops no live datagram");
+        let jittered = shape_report(120, 20, 0, 2040).expect("jitter runs");
+        assert_eq!(jittered.delay_ticks, 8);
+        assert!(jittered.jitter_ticks > 0);
+    }
+
+    #[test]
+    fn net_shape_refuses_out_of_range_knobs() {
+        for (delay, jitter, loss, wanted) in [
+            (2_001, 0, 0, "0..=2000"),
+            (0, 1_001, 0, "0..=1000"),
+            (0, 0, 1_001, "0..=1000"),
+        ] {
+            let error = shape_report(delay, jitter, loss, 2040).expect_err("out of range refuses");
+            assert_eq!(error.code, "bad_args");
+            assert!(error.message.contains(wanted), "{}", error.message);
+            assert!(error.message.contains("re-run"));
         }
     }
 }

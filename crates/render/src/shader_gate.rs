@@ -145,7 +145,7 @@ mod tests {
             ("sky::FORWARD_SKYBOX_WGSL", crate::sky::FORWARD_SKYBOX_WGSL),
         ];
         // ... and the `window`-leg ones when that feature is on.
-        #[cfg(feature = "window")]
+        #[cfg(feature = "gpu")]
         let inline = {
             let mut all = inline;
             all.extend([

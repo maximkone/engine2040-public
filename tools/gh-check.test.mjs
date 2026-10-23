@@ -6,9 +6,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, buildBase, classify, closureDirs, crateGraph, idAgeMs, isThrowawayBranch, keepResult, keptResult, localOnly, main, newId, okCmd, parseArgs, raceLost, reuseKey, route, runLocal, runnerOs, testsRan, words } from "./gh-check.mjs";
+import { DEFAULT_BUDGET_S, KEEP_MS, LOCAL_FEATURES, buildBase, classify, closureDirs, crateGraph, idAgeMs, isThrowawayBranch, keepResult, keptResult, localOnly, main, newId, okCmd, parseArgs, pushNote, raceLost, reuseKey, route, runLocal, runnerOs, testsRan, words } from "./gh-check.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+test("a lost pack race logs one short line, a network error keeps its reason", () => {
+  const pack = "remote: error: unable to write file /data/repositories/x/objects/pack/pack-abc.pack: No such file or directory";
+  assert.match(pushNote(pack), /lost the pack race/);
+  assert.doesNotMatch(pushNote(pack), /No such file/, "the long GitHub path stays out of the retry line");
+  assert.match(pushNote("fatal: unable to access 'https://github.com/x': Could not resolve host"), /Could not resolve host/);
+});
 
 test("only one plain cargo check, test or clippy line goes to the runner", () => {
   assert.ok(okCmd("cargo test -p engine-net --lib interest_64_room_converges"));
@@ -37,6 +44,21 @@ test("flags come before the cargo line; a long check returns instead of dying at
   assert.match(parseArgs(["cargo", "test", "-p", "x", "--lib", "f", "--budget", "840"], {}).error ?? "", /--budget is a gh-check flag: put it before/);
   assert.match(parseArgs(["cargo", "test", "-p", "x", "--fresh"], {}).error ?? "", /--fresh is a gh-check flag/);
   assert.equal(parseArgs(["cargo", "test", "-p", "x", "--", "--budget"], {}).error, null, "after -- it is the test binary's");
+});
+
+test("--help prints the flags once and exits 0, so no helper has to read this tool", async () => {
+  const said = [];
+  const log = console.log;
+  console.log = (s) => said.push(String(s));
+  try {
+    assert.equal(await main(["--help"]), 0);
+    assert.equal(await main(["-h"]), 0);
+    assert.equal(await main(["help"]), 0);
+  } finally { console.log = log; }
+  const text = said[0];
+  for (const flag of ["--budget", "--only", "--fresh", "--remote-only", "--local", "--wait"]) assert.match(text, new RegExp(flag));
+  assert.match(said[2], /Exited with code 1/, "the harness's flat exit code is named");
+  assert.match(said[0], /Exit: 0 pass, 1 fail, 2 could not run, 3 still running/);
 });
 
 test("GPU, window and Windows-only lines stay on the PC; plain crate lines go to GitHub", () => {

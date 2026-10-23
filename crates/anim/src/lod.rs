@@ -11,12 +11,20 @@
 //! one tape shows the same pose twice. Errors: [`LodError`]. Budget: at
 //! most [`MAX_FIGHTERS`] lanes over stack indices, no heap per call in the
 //! table; a rebuild that still closes a gap blends one pose.
+//!
+//! A committed traversal warp owns its ticks: [`WarpWindow`] pins every one
+//! of them to [`Tier::Full`], because the landing tick must carry the warped
+//! root and a strobe hold would land it off the plan edge.
 
 use super::contract::LocalPose;
 use super::pose::blend_poses;
+use super::traversal::TraversalPlan;
 
 /// Largest fighter count in one LOD table; bounds the stack sort.
 pub const MAX_FIGHTERS: usize = 64;
+/// Neutral alias for the lane cap: new modules name this, while the genre
+/// ledger keeps the arena-sized name in this file (GE2).
+pub const MAX_ACTORS: usize = MAX_FIGHTERS;
 /// Nearest fighters kept at full rate whatever their distance reads.
 pub const FULL_RATE_NEAREST: usize = 8;
 /// Below this distance (m) a fighter stays full rate.
@@ -199,6 +207,65 @@ pub fn assign_tiers(
     Ok(())
 }
 
+/// Ticks one committed traversal warp owns: the plan's `duration_ticks` from
+/// the commit tick, landing on the last of them. During the window the warped
+/// root must be evaluated every tick, so [`tier_for`](Self::tier_for) answers
+/// [`Tier::Full`]: a strobe hold would leave an older root on the landing tick
+/// and miss the edge by the held ticks' travel. Empty for a
+/// [`TraverseAction::None`](super::traversal::TraverseAction::None) plan.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WarpWindow {
+    start_tick: u64,
+    end_tick: u64,
+}
+
+impl WarpWindow {
+    /// Window covering `plan`'s tick budget from `start_tick`, end exclusive.
+    /// Pure table read: the same plan and tick give the same window twice.
+    pub fn from_plan(plan: &TraversalPlan, start_tick: u64) -> Self {
+        Self {
+            start_tick,
+            end_tick: start_tick.saturating_add(u64::from(plan.duration_ticks)),
+        }
+    }
+
+    /// First tick the warp owns.
+    pub fn start_tick(&self) -> u64 {
+        self.start_tick
+    }
+
+    /// First tick after the warp (exclusive).
+    pub fn end_tick(&self) -> u64 {
+        self.end_tick
+    }
+
+    /// Landing tick: the last tick the warp owns, the root sample the edge
+    /// tolerance is measured on. `None` for an empty window.
+    pub fn landing_tick(&self) -> Option<u64> {
+        if self.end_tick > self.start_tick {
+            Some(self.end_tick - 1)
+        } else {
+            None
+        }
+    }
+
+    /// True while the warp owns `tick`; every such tick is a no-strobe tick.
+    pub fn contains(&self, tick: u64) -> bool {
+        tick >= self.start_tick && tick < self.end_tick
+    }
+
+    /// Tier to record on `tick`: [`Tier::Full`] inside the window, `tier`
+    /// outside it. A caller gates eval on the answer, so the window never
+    /// holds a pose.
+    pub fn tier_for(&self, tick: u64, tier: Tier) -> Tier {
+        if self.contains(tick) {
+            Tier::Full
+        } else {
+            tier
+        }
+    }
+}
+
 /// Nominal largest joint rotation one rebuild tick steps, in degrees. The
 /// blend weight comes from the quaternion chord of this angle, which lands
 /// the real step a hair past it (about 4.03 deg at a half-turn gap) and so
@@ -219,14 +286,18 @@ const PROMOTION_CHORD: f32 = 0.034_905;
 /// show the last full evaluation with [`rebuild`](Self::rebuild). The slot
 /// copies a full-rate target exactly, so the nearest eight stay bit-equal to
 /// full rate, and walks a wider gap at the step cap, so a promotion or a
-/// strobe hold never pops. [`take_reseed`](Self::take_reseed) asks the caller
-/// to re-seed spring bones at the shown pose once per promotion.
+/// strobe hold never pops. A warp-window tick goes in through
+/// [`begin_pinned`](Self::begin_pinned) instead: it records [`Tier::Full`] and
+/// shows that tick's evaluation exactly, so a traversal landing never reads a
+/// held pose. [`take_reseed`](Self::take_reseed) asks the caller to re-seed
+/// spring bones at the shown pose once per promotion.
 #[derive(Clone, Debug)]
 pub struct LodSlot {
     tier: Tier,
     shown: LocalPose,
     rebuilding: bool,
     reseed_springs: bool,
+    pinned: bool,
 }
 
 impl LodSlot {
@@ -240,6 +311,7 @@ impl LodSlot {
             },
             rebuilding: false,
             reseed_springs: false,
+            pinned: false,
         }
     }
 
@@ -264,11 +336,22 @@ impl LodSlot {
     /// the skipped ticks never advanced. A demotion or a hold leaves the
     /// shown pose alone; a slot with no shown pose has nothing to rebuild.
     pub fn begin(&mut self, tier: Tier) {
-        if tier.period_ticks() < self.tier.period_ticks() && !self.shown.positions.is_empty() {
+        self.begin_pinned(tier, false);
+    }
+
+    /// Record this tick's tier, with `pinned` marking a
+    /// [`WarpWindow`] tick. A pinned tick records [`Tier::Full`] whatever the
+    /// distance tier reads, and [`rebuild`](Self::rebuild) copies that tick's
+    /// evaluation exactly: an exact landing has no room for a strobe hold or
+    /// a rebuild step, and the warp itself places the root.
+    pub fn begin_pinned(&mut self, tier: Tier, pinned: bool) {
+        let effective = if pinned { Tier::Full } else { tier };
+        if effective.period_ticks() < self.tier.period_ticks() && !self.shown.positions.is_empty() {
             self.rebuilding = true;
             self.reseed_springs = true;
         }
-        self.tier = tier;
+        self.tier = effective;
+        self.pinned = pinned;
     }
 
     /// Take the spring re-seed request: true once after a promotion.
@@ -276,12 +359,20 @@ impl LodSlot {
         core::mem::take(&mut self.reseed_springs)
     }
 
-    /// Show `target`, the fighter's last full evaluation, this tick. A full
-    /// rate slot that is not rebuilding copies it exactly; every other slot
-    /// copies it when the gap fits in one step and otherwise walks at most
+    /// Show `target`, the fighter's last full evaluation, this tick. A pinned
+    /// warp-window tick copies it exactly. A full rate slot that is not
+    /// rebuilding copies it exactly; every other slot copies it when the gap
+    /// fits in one step and otherwise walks at most
     /// [`PROMOTION_STEP_DEG`] and [`PROMOTION_STEP_M`] per joint toward it.
     /// Returns true when the slot is settled on `target`.
     pub fn rebuild(&mut self, target: &LocalPose) -> bool {
+        if self.pinned {
+            // No strobe hold, no rebuild step: the landing root is this
+            // tick's evaluation.
+            self.shown = target.clone();
+            self.rebuilding = false;
+            return true;
+        }
         let same_shape = self.shown.positions.len() == target.positions.len()
             && self.shown.rotations.len() == target.rotations.len();
         if !same_shape {

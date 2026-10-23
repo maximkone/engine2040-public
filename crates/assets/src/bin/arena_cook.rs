@@ -2,8 +2,8 @@
 //! block-compressed KTX2 files (content/arena/cooked) with `ktx2_cook`.
 //!
 //! Usage: `cargo run -p engine-assets --features import --bin arena_cook -- [--root content/arena] [--max-dim 1024]`
-//! Output per set: `<name>_base.ktx2` (BC1 sRGB), `<name>_normal.ktx2` (BC5, GL), `<name>_orm.ktx2`
-//! (BC1: R occlusion, G roughness, B metallic) and one `cook.json` receipt with sizes and PSNR.
+//! Output per set: `<name>_base.ktx2` (BC7 sRGB), `<name>_normal.ktx2` (BC5, GL), `<name>_orm.ktx2`
+//! (BC7 linear: R occlusion, G roughness, B metallic) and one `cook.json` receipt with sizes and PSNR.
 //! The same sources and cap give the same bytes (run it twice and diff).
 
 #[cfg(feature = "import")]

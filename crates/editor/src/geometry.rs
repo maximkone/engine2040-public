@@ -22,11 +22,13 @@ pub(crate) fn stage(doc: &Document, ops: &[Op]) -> Result<(Hierarchy, ComponentT
     let mut tree = doc.hierarchy.clone();
     let mut materials = doc.materials.clone();
     let mut components = doc.components.clone();
+    let mut bonds = doc.bonds.clone();
     let mut material_set = doc.material_set.clone();
     apply_ops(
         &mut tree,
         &mut materials,
         &mut components,
+        &mut bonds,
         &mut material_set,
         ops,
     )?;

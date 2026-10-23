@@ -2416,6 +2416,105 @@ mod tests {
         assert_eq!(first.per_difficulty.len(), config.difficulties.len());
     }
 
+    /// One standard-shape curve point: the P3 proof fights (200 matches per
+    /// rung at 600 ticks) under the sweep's own knob value.
+    fn noise_sweep(error: HumanError) -> SweepConfig {
+        SweepConfig {
+            base: TournamentConfig::standard(),
+            values: vec![STANDARD_TICKS],
+            error,
+        }
+    }
+
+    /// Rung strength: the difficulty seat's share of the duel score in half
+    /// points (`2` a win, `1` a draw) out of `2 * trials`. This is the exact
+    /// complement of the player rate before its permille rounding, so a
+    /// strict rise is never blurred by two rows rounding to the same rate.
+    fn rung_strength(row: &SweepRow) -> u32 {
+        2 * row.losses + row.draws
+    }
+
+    /// GA14 Accept: the perfect player first (noise off keeps the P3 band and
+    /// replays byte-identically), then the seeded human tape (rung strength
+    /// rises strictly T1 < T2 < T3, and the curve replays). The noise is part
+    /// of the AI input tape, so both runs are replay-exact.
+    #[test]
+    fn sweep_noise() {
+        // The noise defaults off: the standard sweep is the perfect player.
+        assert_eq!(SweepConfig::standard().error, HumanError::off());
+
+        // Perfect player first.
+        let clean = noise_sweep(HumanError::off());
+        let perfect = sweep_difficulty_curve(&clean).expect("perfect sweep runs");
+        let perfect_again = sweep_difficulty_curve(&clean).expect("perfect sweep replays");
+        let perfect_csv = render_sweep_csv(&perfect);
+        assert_eq!(
+            perfect_csv,
+            render_sweep_csv(&perfect_again),
+            "noise off replays the curve byte-identically",
+        );
+        assert_eq!(perfect.rows.len(), clean.base.difficulties.len());
+        for (index, row) in perfect.rows.iter().enumerate() {
+            assert!(!row.human, "noise off has no human rows");
+            assert_eq!(row.trials, MATCHES_PER_DIFFICULTY);
+            assert!(
+                (WIN_MIN_PERMILLE..=WIN_MAX_PERMILLE).contains(&row.rate_permille),
+                "P3 band with noise off: T{} {} posts {} permille",
+                index + 1,
+                row.difficulty,
+                row.rate_permille,
+            );
+        }
+
+        // The seeded human tape.
+        let noisy = noise_sweep(HumanError::human(clean.base.base_seed));
+        let human = sweep_difficulty_curve(&noisy).expect("human sweep runs");
+        let human_again = sweep_difficulty_curve(&noisy).expect("human sweep replays");
+        let human_csv = render_sweep_csv(&human);
+        assert_eq!(
+            human_csv,
+            render_sweep_csv(&human_again),
+            "noise on replays the curve byte-identically",
+        );
+        assert_ne!(
+            human_csv, perfect_csv,
+            "the seeded tape changes the curve it plays",
+        );
+        let rungs: Vec<&SweepRow> = human.rows.iter().filter(|row| row.human).collect();
+        assert_eq!(
+            rungs.len(),
+            noisy.base.difficulties.len(),
+            "one human row per rung"
+        );
+        let strength: Vec<u32> = rungs.iter().map(|row| rung_strength(row)).collect();
+        assert!(
+            strength[0] < strength[1] && strength[1] < strength[2],
+            "noise on: rung strength rides strictly T1 {} < T2 {} < T3 {} (half points of 2 x {})",
+            strength[0],
+            strength[1],
+            strength[2],
+            rungs[0].trials,
+        );
+        for row in &rungs {
+            assert_eq!(
+                row.wins + row.draws + row.losses,
+                row.trials,
+                "the rung's tallies cover its trials: {row:?}",
+            );
+        }
+        println!(
+            "noise off: {:?} permille / noise on: rung strength {:?} of 2 x {} (player {:?} permille)",
+            perfect
+                .rows
+                .iter()
+                .map(|row| row.rate_permille)
+                .collect::<Vec<_>>(),
+            strength,
+            rungs[0].trials,
+            rungs.iter().map(|row| row.rate_permille).collect::<Vec<_>>(),
+        );
+    }
+
     #[test]
     fn sweep_stamp_pins_epoch_and_names_csv_files() {
         assert_eq!(stamp_from_unix(0), "19700101T0000Z");

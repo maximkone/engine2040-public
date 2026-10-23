@@ -14,9 +14,11 @@
 //! [`FIGHTER_JOINTS`] lanes, at most about 0.01 ms; the tick path writes
 //! caller-owned buffers and allocates nothing (mask built once at setup).
 
+use super::contract::{rotate, LocalPose, Skeleton};
 use super::graph::{GraphError, Pose};
 use super::layers::{self, MaskTable};
 use engine_combat::fight::HIT_REACT_TICKS;
+use engine_core::quat_mul;
 use std::f32::consts::FRAC_1_SQRT_2;
 
 /// Canonical fighter rig width: pelvis, two legs, two arms, spine.
@@ -47,14 +49,33 @@ pub const DIP_M: f32 = 0.03;
 /// Per-joint displacement ceiling per component, meters: no flinch in any
 /// direction may push a joint past this (no visual clip through the body).
 pub const CLIP_M: f32 = 0.35;
+/// Peak spin of the struck upper chain at 1x impulse, radians. The spine
+/// takes the full lean, arms half; legs never turn (planted feet).
+pub const ROT_PEAK_RAD: f32 = 0.15;
 /// Eval tolerance in meters against hand-rolled references.
 pub const HIT_TOL: f32 = 1e-5;
+/// Presentation flinch window: 27 ticks at 60 Hz is about 450 ms (AM23).
+pub const VIEW_FLINCH_TICKS: u32 = 27;
+/// Ticks the presentation flinch blends in over.
+pub const VIEW_FLINCH_RISE_TICKS: f32 = 3.0;
+/// Ticks the presentation flinch holds at full weight after the rise.
+pub const VIEW_FLINCH_HOLD_TICKS: f32 = 6.0;
+/// Peak lean of the real skeleton's upper chain at unit weight, radians
+/// (~11.5 degrees); the head moves about 10 cm at this lean.
+pub const UPPER_LEAN_RAD: f32 = 0.20;
+/// Torso share of [`UPPER_LEAN_RAD`]; the head takes the rest as a snap.
+pub const TORSO_LEAN_SHARE: f32 = 1.0;
+/// Head share of [`UPPER_LEAN_RAD`]; turns the head without moving its joint.
+pub const HEAD_LEAN_SHARE: f32 = 0.35;
 
 /// Planar share of the push per joint: pelvis rides half, legs stay planted,
 /// arms and spine take it whole. Index order is the rig order above.
 const PLANAR_SHARE: [f32; FIGHTER_JOINTS] = [0.5, 0.0, 0.0, 1.0, 1.0, 1.0];
 /// Dip share per joint: pelvis dips half, spine dips whole, limbs stay level.
 const DIP_SHARE: [f32; FIGHTER_JOINTS] = [0.5, 0.0, 0.0, 0.0, 0.0, 1.0];
+/// Rotation share per joint: pelvis and legs stay planted, arms take half the
+/// lean, the spine takes it whole. Index order is the rig order above.
+const ROT_SHARE: [f32; FIGHTER_JOINTS] = [0.0, 0.0, 0.0, 0.5, 0.5, 1.0];
 
 /// Where a hit comes from, as facing-relative octants clockwise from the
 /// front (0 = front, 2 = right, 4 = back, 6 = left). The flinch displaces
@@ -183,6 +204,8 @@ pub enum HitError {
     BadImpulse(u16),
     /// Pose width differs from [`FIGHTER_JOINTS`]; expected + got carried.
     LengthMismatch { expected: usize, got: usize },
+    /// A skeleton-relative call named a joint outside the rig; culprit carried.
+    BadJoint(usize),
     /// A layer blend failed (bad base lanes, bad mask width); source carried.
     Layer(GraphError),
 }
@@ -196,6 +219,9 @@ impl std::fmt::Display for HitError {
             }
             HitError::LengthMismatch { expected, got } => {
                 write!(f, "hit_react: joint count {got} differs from {expected}")
+            }
+            HitError::BadJoint(joint) => {
+                write!(f, "hit_react: joint {joint} is outside the skeleton")
             }
             HitError::Layer(e) => write!(f, "hit_react layer: {e}"),
         }
@@ -255,9 +281,10 @@ fn clip(v: f32) -> f32 {
     v.clamp(-CLIP_M, CLIP_M)
 }
 
-/// Write the scaled additive delta for `dir` at unitless `scale` into `out`.
-/// Shape is checked by the caller; rotations stay identity (rotational react
-/// rides the override path, same split as the layers additive blend).
+/// Write the scaled additive delta for `dir` at unitless `scale` into `out`:
+/// position offsets plus a short-arc lean around the horizontal axis
+/// perpendicular to the push. The spine takes the full lean, arms half,
+/// pelvis and legs stay identity.
 fn write_additive(dir: HitDir, scale: f32, out: &mut Pose) {
     const IDENTITY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
     let push = dir.push();
@@ -273,8 +300,126 @@ fn write_additive(dir: HitDir, scale: f32, out: &mut Pose) {
                 clip(push[1] * planar * PEAK_M * scale),
             ];
         }
-        out.rotations[joint] = IDENTITY;
+        out.rotations[joint] = if ROT_SHARE[joint] == 0.0 {
+            IDENTITY
+        } else {
+            lean_delta(push, ROT_PEAK_RAD * scale * ROT_SHARE[joint])
+        };
     }
+}
+
+/// Quat that leans `angle` radians around the horizontal axis perpendicular
+/// to `push`, so the up axis tips along the push. `push` is `[x, z]`; a zero
+/// or non-finite push reads identity. Axis hits use exact stored components.
+fn lean_delta(push: [f32; 2], angle: f32) -> [f32; 4] {
+    const IDENTITY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    let len2 = push[0] * push[0] + push[1] * push[1];
+    if !len2.is_finite() || len2 <= 0.0 || !angle.is_finite() {
+        return IDENTITY;
+    }
+    let inv = 1.0 / len2.sqrt();
+    let axis = [push[1] * inv, 0.0, -push[0] * inv];
+    let half = (angle * 0.5).clamp(0.0, std::f32::consts::FRAC_PI_2);
+    // Polynomial sin, then cos from the same value: sim code never calls a
+    // platform transcendental (workspace determinism gate; see `sin_unit`).
+    let s = super::inertialize::sin_unit(half);
+    let w = (1.0 - s * s).max(0.0).sqrt();
+    [axis[0] * s, axis[1] * s, axis[2] * s, w]
+}
+
+/// Presentation flinch weight at `elapsed` ticks plus sub-tick `alpha`:
+/// blend in over three ticks, hold six, then blend out to zero at
+/// [`VIEW_FLINCH_TICKS`] (about 450 ms). Silent at and past the window.
+pub fn view_envelope(elapsed: u32, alpha: f32) -> f32 {
+    // u16 reaches every tick in the window; wider input clamps past it.
+    let window = f32::from(u16::try_from(VIEW_FLINCH_TICKS).unwrap_or(u16::MAX));
+    let t = f32::from(u16::try_from(elapsed).unwrap_or(u16::MAX)) + alpha;
+    if !t.is_finite() || t < 0.0 || t >= window {
+        return 0.0;
+    }
+    let hold_end = VIEW_FLINCH_RISE_TICKS + VIEW_FLINCH_HOLD_TICKS;
+    if t < VIEW_FLINCH_RISE_TICKS {
+        t / VIEW_FLINCH_RISE_TICKS
+    } else if t < hold_end {
+        1.0
+    } else {
+        (window - t) / (window - hold_end)
+    }
+}
+
+/// Model-space position of one joint: walk its parent chain root first,
+/// rotating each local translation by the parent's world rotation. No heap;
+/// a chain deeper than 64 is refused rather than truncated.
+fn joint_model_position(
+    skeleton: &Skeleton,
+    pose: &LocalPose,
+    joint: usize,
+) -> Result<[f32; 3], HitError> {
+    const MAX_CHAIN: usize = 64;
+    let joints = skeleton.joints.len();
+    if pose.positions.len() != joints || pose.rotations.len() != joints {
+        return Err(HitError::LengthMismatch {
+            expected: joints,
+            got: pose.positions.len().min(pose.rotations.len()),
+        });
+    }
+    if joint >= joints {
+        return Err(HitError::BadJoint(joint));
+    }
+    let mut chain = [0usize; MAX_CHAIN];
+    let mut len = 0usize;
+    let mut next = Some(joint);
+    while let Some(index) = next {
+        if index >= joints || len == MAX_CHAIN {
+            return Err(HitError::BadJoint(index));
+        }
+        chain[len] = index;
+        len += 1;
+        next = skeleton.joints[index].parent;
+    }
+    let mut pos = [0.0f32; 3];
+    let mut rot = [0.0, 0.0, 0.0, 1.0];
+    for &index in chain[..len].iter().rev() {
+        let local = rotate(&pose.positions[index], &rot);
+        pos[0] += local[0];
+        pos[1] += local[1];
+        pos[2] += local[2];
+        rot = quat_mul(rot, pose.rotations[index]);
+    }
+    Ok(pos)
+}
+
+/// Apply the rotation half of the presentation flinch to a real skeleton:
+/// the torso takes [`UPPER_LEAN_RAD`], the head adds a smaller snap, both
+/// around the axis perpendicular to `push`. Returns the head joint's
+/// model-space travel in meters, the number `react_head_cm_max` meters.
+/// Legs and the pelvis stay untouched; the caller owns the pelvis offset.
+pub fn lean_upper(
+    skeleton: &Skeleton,
+    pose: &mut LocalPose,
+    torso: usize,
+    head: usize,
+    push: [f32; 2],
+    weight: f32,
+) -> Result<f32, HitError> {
+    if !weight.is_finite() || weight <= 0.0 || (push[0] == 0.0 && push[1] == 0.0) {
+        return Ok(0.0);
+    }
+    if torso >= skeleton.joints.len() {
+        return Err(HitError::BadJoint(torso));
+    }
+    let weight = weight.clamp(0.0, 1.0);
+    let before = joint_model_position(skeleton, pose, head)?;
+    let angle = UPPER_LEAN_RAD * weight;
+    let torso_delta = lean_delta(push, angle * TORSO_LEAN_SHARE);
+    pose.rotations[torso] = quat_mul(torso_delta, pose.rotations[torso]);
+    let head_delta = lean_delta(push, angle * HEAD_LEAN_SHARE);
+    pose.rotations[head] = quat_mul(head_delta, pose.rotations[head]);
+    let after = joint_model_position(skeleton, pose, head)?;
+    let dx = after[0] - before[0];
+    let dy = after[1] - before[1];
+    let dz = after[2] - before[2];
+    Ok((dx * dx + dy * dy + dz * dz).sqrt())
 }
 
 /// Full-attack additive pose for `dir` at `impulse_q8`: the delta that
@@ -379,8 +524,16 @@ mod tests {
             assert!(spine[1] < 0.0, "{dir:?} dips: {spine:?}");
             assert_eq!(out.positions[LEG_L], [0.0; 3], "{dir:?} left leg");
             assert_eq!(out.positions[LEG_R], [0.0; 3], "{dir:?} right leg");
-            // Additive deltas never bend rotations.
-            assert_eq!(out.rotations, vec![IDENTITY; FIGHTER_JOINTS]);
+            // The upper chain leans along the push; legs and pelvis never turn.
+            assert_eq!(out.rotations[PELVIS], IDENTITY, "{dir:?} pelvis");
+            assert_eq!(out.rotations[LEG_L], IDENTITY, "{dir:?} left leg rot");
+            assert_eq!(out.rotations[LEG_R], IDENTITY, "{dir:?} right leg rot");
+            assert_ne!(out.rotations[SPINE], IDENTITY, "{dir:?} spine lean");
+            for rot in &out.rotations {
+                let norm =
+                    (rot[0] * rot[0] + rot[1] * rot[1] + rot[2] * rot[2] + rot[3] * rot[3]).sqrt();
+                assert!((norm - 1.0).abs() <= HIT_TOL, "{dir:?} unit quat: {rot:?}");
+            }
         }
         // Axis hits travel one lane only; diagonals split evenly.
         let mut front = Pose::zero(FIGHTER_JOINTS);
@@ -411,6 +564,18 @@ mod tests {
                 assert_eq!(
                     pa.positions[joint][2], -pb.positions[joint][2],
                     "{a:?}/{b:?} z"
+                );
+                // Opposite sides lean the same amount the other way: the
+                // vector part flips, w stays.
+                for lane in 0..3 {
+                    assert!(
+                        (pa.rotations[joint][lane] + pb.rotations[joint][lane]).abs() <= HIT_TOL,
+                        "{a:?}/{b:?} rot lane {lane}"
+                    );
+                }
+                assert!(
+                    (pa.rotations[joint][3] - pb.rotations[joint][3]).abs() <= HIT_TOL,
+                    "{a:?}/{b:?} rot w"
                 );
             }
         }
@@ -495,6 +660,127 @@ mod tests {
     }
 
     #[test]
+    fn hit_react_rot_view_envelope_rises_holds_and_fades() {
+        assert_eq!(view_envelope(0, 0.0), 0.0);
+        assert!((view_envelope(1, 0.5) - 0.5).abs() <= HIT_TOL);
+        assert_eq!(view_envelope(3, 0.0), 1.0);
+        assert_eq!(view_envelope(8, 0.9), 1.0);
+        assert!((view_envelope(18, 0.0) - 0.5).abs() <= HIT_TOL);
+        assert!(view_envelope(26, 0.9) > 0.0);
+        assert_eq!(view_envelope(27, 0.0), 0.0);
+        assert_eq!(view_envelope(u32::MAX, 0.0), 0.0);
+        assert_eq!(VIEW_FLINCH_TICKS, 27, "27 ticks at 60 Hz is 450 ms");
+    }
+
+    #[test]
+    fn hit_react_rot_weight_zero_keeps_base_bytes() {
+        let base = base_pose();
+        let mut delta = Pose::zero(FIGHTER_JOINTS);
+        flinch(HitDir::FrontLeft, IMPULSE_Q8_ONE, &mut delta).expect("flinch");
+        assert_ne!(delta.rotations[SPINE], IDENTITY, "delta carries the lean");
+        let mut out = Pose::zero(FIGHTER_JOINTS);
+        let zero = MaskTable::from_vec(vec![0; FIGHTER_JOINTS]).expect("zero mask");
+        layers::apply_additive(&base, &delta, &zero, IMPULSE_Q8_ONE, &mut out).expect("zero mask");
+        assert_eq!(out, base, "mask 0 keeps base positions and rotation bytes");
+        let full = MaskTable::from_vec(vec![255; FIGHTER_JOINTS]).expect("full mask");
+        layers::apply_additive(&base, &delta, &full, 0, &mut out).expect("zero gain");
+        assert_eq!(out, base, "gain 0 keeps base positions and rotation bytes");
+    }
+
+    #[test]
+    fn hit_react_rot_two_strikes_sum() {
+        let base = base_pose();
+        let mask = hit_mask();
+        let (mut one, mut two) = (Pose::zero(FIGHTER_JOINTS), Pose::zero(FIGHTER_JOINTS));
+        flinch(HitDir::Front, IMPULSE_Q8_ONE, &mut one).expect("1x");
+        flinch(HitDir::Front, 2 * IMPULSE_Q8_ONE, &mut two).expect("2x");
+        let mut first = Pose::zero(FIGHTER_JOINTS);
+        layers::apply_additive(&base, &one, &mask, IMPULSE_Q8_ONE, &mut first)
+            .expect("first strike");
+        let mut sum = Pose::zero(FIGHTER_JOINTS);
+        layers::apply_additive(&first, &one, &mask, IMPULSE_Q8_ONE, &mut sum)
+            .expect("second strike");
+        let mut combined = Pose::zero(FIGHTER_JOINTS);
+        layers::apply_additive(&base, &two, &mask, IMPULSE_Q8_ONE, &mut combined)
+            .expect("combined strike");
+        for joint in 0..FIGHTER_JOINTS {
+            for lane in 0..3 {
+                assert!(
+                    (sum.positions[joint][lane] - combined.positions[joint][lane]).abs() <= HIT_TOL,
+                    "joint {joint} position lane {lane}: {:?} vs {:?}",
+                    sum.positions[joint],
+                    combined.positions[joint]
+                );
+            }
+            for lane in 0..4 {
+                assert!(
+                    (sum.rotations[joint][lane] - combined.rotations[joint][lane]).abs() <= HIT_TOL,
+                    "joint {joint} rotation lane {lane}: {:?} vs {:?}",
+                    sum.rotations[joint],
+                    combined.rotations[joint]
+                );
+            }
+        }
+        // The ordered-stack path composes the same two strikes in one call.
+        let stack = [
+            layers::Layer(
+                "first",
+                layers::LayerMode::Additive,
+                &one,
+                &mask,
+                IMPULSE_Q8_ONE,
+            ),
+            layers::Layer(
+                "second",
+                layers::LayerMode::Additive,
+                &one,
+                &mask,
+                IMPULSE_Q8_ONE,
+            ),
+        ];
+        let mut stacked = Pose::zero(FIGHTER_JOINTS);
+        layers::compose_stack(&base, &stack, &mut stacked).expect("stack");
+        assert_eq!(stacked, sum, "stack and sequential agree");
+    }
+
+    #[test]
+    fn hit_react_rot_upper_lean_moves_the_head() {
+        use crate::contract::Joint;
+        let skeleton = Skeleton {
+            joints: vec![
+                Joint {
+                    name: "root".to_string(),
+                    parent: None,
+                },
+                Joint {
+                    name: "torso".to_string(),
+                    parent: Some(0),
+                },
+                Joint {
+                    name: "head".to_string(),
+                    parent: Some(1),
+                },
+            ],
+        };
+        let mut pose = LocalPose {
+            positions: vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.5, 0.0]],
+            rotations: vec![IDENTITY; 3],
+        };
+        let head_m = lean_upper(&skeleton, &mut pose, 1, 2, [0.0, -1.0], 1.0).expect("lean");
+        // Chord travel on a 0.5 m arm over the torso lean: 2 r sin(angle/2).
+        // The half angle is 0.1 rad (not PI/4); the row's polynomial sin keeps
+        // the platform transcendental out of the test.
+        let chord = 2.0 * 0.5 * crate::inertialize::sin_unit(UPPER_LEAN_RAD * 0.5);
+        assert!(
+            (head_m - chord).abs() <= 1e-4,
+            "head travel {head_m} vs chord {chord}"
+        );
+        assert!(head_m > 0.08, "the rotation flinch clears 8 cm: {head_m}");
+        assert_ne!(pose.rotations[1], IDENTITY, "torso leans");
+        assert_ne!(pose.rotations[2], IDENTITY, "head snaps");
+    }
+
+    #[test]
     fn no_direction_clips_at_max_impulse() {
         for dir in all_dirs() {
             let mut out = Pose::zero(FIGHTER_JOINTS);
@@ -550,7 +836,10 @@ mod tests {
         );
         assert_eq!(out.positions[LEG_L], base.positions[LEG_L]);
         assert_eq!(out.positions[LEG_R], base.positions[LEG_R]);
-        assert_eq!(out.rotations, base.rotations);
+        // Additive rotations ride the same mask: upper body leans, legs stay.
+        assert_eq!(out.rotations[LEG_L], base.rotations[LEG_L]);
+        assert_eq!(out.rotations[LEG_R], base.rotations[LEG_R]);
+        assert_ne!(out.rotations[SPINE], base.rotations[SPINE]);
         // Mid-window the reaction has decayed but still reads.
         apply_hit_react(&base, &strike, 13, &mask, &mut out, &mut scratch).expect("mid window");
         assert!(out.positions[SPINE][2] > -PEAK_M && out.positions[SPINE][2] < 0.0);

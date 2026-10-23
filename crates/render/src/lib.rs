@@ -29,6 +29,10 @@ pub mod kam2_sprites;
 /// facing cells plus the team mask. Std-only.
 pub mod kam2_sprite_atlas;
 
+/// Helpers shared by the windowed KAM2 proofs; native only, like them.
+#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+mod kam2_proof_util;
+
 /// Windowed proof of the 2.5D ground field: real window, PNG receipt.
 /// Native only: it writes the PNG to disk and blocks on the GPU adapter.
 #[cfg(all(feature = "window", not(target_arch = "wasm32")))]
@@ -100,7 +104,7 @@ pub mod v1_lighting;
 pub mod v1_temporal;
 
 /// V1 forward-PBR on wgpu (R1): offscreen capture with zero validation errors.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod v1_gpu;
 
 /// Windowed presenter over a draw list (RA1): surface/swapchain plus HDR,
@@ -162,7 +166,7 @@ pub mod draw_id;
 /// CPU oracle. Needs the `window` feature; the GS18b
 /// `draw_indexed_indirect` hook is the caller (the row states no draw path
 /// uses the cull yet).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod gpu_cull;
 
 /// Reused per-frame draw list plus uniform and draw encode over one
@@ -231,7 +235,7 @@ pub mod decals;
 /// wgpu glue over the adapter choice (GS6): enumerate and pick. Behind
 /// `window` so the headless default stays std-only; consumer is the
 /// presenter request sites.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod presenter_pick;
 
 /// Height fog + contact shadows live on the GPU (RL7): fog ramps from the
@@ -447,9 +451,16 @@ pub mod trail;
 /// the window presenter binds. Window build only; the CPU ring stays std-only.
 /// Lives under `present/` with the crate's other window device code (the
 /// GPU boundary gate reads the path, not the module name).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[path = "present/trail_draw_gpu.rs"]
 pub mod trail_draw_gpu;
+
+/// Ground-splat blood draw (FEEL5): the world-space splat field a fight leaves
+/// on the floor, staged and recorded by the window presenter. Window build
+/// only; the CPU field stays in [`decals`].
+#[cfg(feature = "gpu")]
+#[path = "present/decal_draw_gpu.rs"]
+pub mod decal_draw_gpu;
 
 /// CPU naga gate over the shipped WGSL (CQ23): every file under `src/shaders`
 /// validates without a GPU, and the window's hot-reload cook refuses an edit

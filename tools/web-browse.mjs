@@ -438,7 +438,7 @@ export function inputCommands(events) {
 
 // The arena page's own proof, read after the first frames: wait for the page's GPU copy of the canvas, bring the bytes over,
 // check them against the page's hash and make the PNG. null on a page that is not the arena (no data-mode=arena).
-export async function readArena({ evalJs, sleep: nap }, waitMs = 150000) {
+export async function readArena({ evalJs, sleep: nap, now = Date.now }, waitMs = 150000, { waitForPerf = false } = {}) {
   if (!(await evalJs("document.body.dataset.mode === 'arena'"))) return null;
   const t0 = Date.now();
   let capture = null;
@@ -451,6 +451,21 @@ export async function readArena({ evalJs, sleep: nap }, waitMs = 150000) {
   const out = { capture, waitedMs: Date.now() - t0, receiptText: await text("receipt"), passes: await text("passes"), init: await text("init"), captureText: await text("capture"), tierText: await text("tier"), splitText: await text("split"), pipelinesText: await text("pipelines") };
   out.receipt = parseLine(out.receiptText);
   out.captureLine = parseLine(out.captureText);
+  // QW10: the A/B page prints its perf object only once both arms have run: a 45-frame warm-up and
+  // two arms of 3 x 20 frames. A software rasterizer draws the arena near 1 fps, so the whole
+  // schedule takes minutes and the receipt element is only rewritten when it is done (the text
+  // does not move in between), which is why this waits on the object itself with a minutes-long
+  // cap instead of a short one: 30 s ended before the first arm on every software run.
+  if (waitForPerf) {
+    const t1 = now();
+    for (;;) {
+      out.receiptText = await text("receipt");
+      out.receipt = parseLine(out.receiptText);
+      if (out.receipt?.perf?.on) break;
+      if (now() - t1 > 300000) break;
+      await nap(500);
+    }
+  }
   if (capture === "ready" || capture === "blank") {
     const packed = await evalJs(`(async () => { const c = window.arenaCapture; if (!c) return null;
       const url = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(new Blob([c.rgba])); });
@@ -525,7 +540,7 @@ export async function readPage({ chrome, flags, url, logFile, beforeLoad = null,
         const before = frames((await read()).hud);
         await sleep(1000);
         out.framesAdvanced = frames((await read()).hud) > before;
-        out.arena = await readArena({ evalJs, sleep });
+        out.arena = await readArena({ evalJs, sleep }, 150000, { waitForPerf: /[?&]bundle=ab(&|$)/.test(new URL(url).search) });
         if (inputEvents?.length) {
           // Scripted input replays from page load, in order, then one more screenshot shows what it did.
           for (const c of inputCommands(inputEvents)) {
@@ -669,7 +684,7 @@ export function writeArena(dir, prefix, arena) {
 }
 
 export function parseArgs(argv) {
-  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null, server: null, join: null, wt: null, cert: null, ticks: null, play: false, liveKeys: false, token: null, dropAtTick: null, expectHash: null, expectTransport: null, expectFailure: [], netTimeout: 90, badMime: false, soak: 0 };
+  const o = { input: null, dir: "dist/web", chrome: null, out: "out/web", requireAdapter: false, all: false, only: null, extra: process.env.WEB_CHROME_EXTRA ?? "", error: null, server: null, join: null, wt: null, cert: null, ticks: null, play: false, liveKeys: false, token: null, dropAtTick: null, expectHash: null, expectTransport: null, expectFailure: [], netTimeout: 90, badMime: false, soak: 0, pageQuery: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dir") o.dir = argv[++i];
@@ -694,9 +709,11 @@ export function parseArgs(argv) {
     else if (a === "--bad-mime") o.badMime = true;
     else if (a === "--soak") o.soak = Number(argv[++i]);
     else if (a === "--net-timeout") o.netTimeout = Number(argv[++i]);
+    else if (a === "--page-query") o.pageQuery = argv[++i] ?? "";
     else o.error = `unknown argument ${a}`;
   }
   if (!o.chrome) o.error ??= "--chrome <path to Chrome> is required";
+  if (o.pageQuery !== null && !o.pageQuery.replace(/^\?/, "").trim()) o.error ??= "--page-query needs a query, such as bundle=ab";
   if (o.only !== null && !(o.only >= 0)) o.error ??= "--only needs a flag set index";
   if (argv.includes("--input") && !o.input) o.error ??= "--input needs a JSON file of events";
   if (argv.includes("--server") && !/^wss?:\/\/[^/\s]+/.test(o.server ?? "")) o.error ??= "--server needs ws://host:port (or wss://host)";
@@ -900,7 +917,10 @@ export async function main(argv) {
     } catch (e) { console.error(`web-browse: --input ${a.input}: ${e.message}`); return 2; }
   }
   const server = await serve(dir);
-  const url = `http://127.0.0.1:${server.port}/index.html`;
+  // QW10: `--page-query bundle=ab` loads the page with that search, so a run can ask for the A/B
+  // arms instead of the default page.
+  const query = a.pageQuery ? `?${a.pageQuery.replace(/^\?/, "")}` : "";
+  const url = `http://127.0.0.1:${server.port}/index.html${query}`;
   const attempts = [];
   let winner = null;
   const extraFlags = a.extra.split(/\s+/).filter(Boolean);
@@ -970,7 +990,7 @@ export async function main(argv) {
     let frozenV = null;
     if (winner?.arena) {
       try {
-        const fr = await readPage({ chrome: a.chrome, flags: [...BASE_FLAGS, ...winner.set.flags], url: `${url}?freeze`, logFile: join(out, "chrome-frozen.log"), afterReady: frozenGrowProbe, waitMs: 120000 });
+        const fr = await readPage({ chrome: a.chrome, flags: [...BASE_FLAGS, ...winner.set.flags], url: query ? `${url}&freeze` : `${url}?freeze`, logFile: join(out, "chrome-frozen.log"), afterReady: frozenGrowProbe, waitMs: 120000 });
         frozenV = growHashVerdict(fr.frozen);
         console.log(`FROZEN GROW ${frozenV.ok ? "OK" : "FAILED"}: captures ${JSON.stringify((fr.frozen?.still ?? []).map((c) => c?.hash))} then ${fr.frozen?.afterGrow?.hash} after memory.grow to ${fr.frozen?.pages} pages${frozenV.ok ? "" : ` - ${frozenV.problems.join("; ")}`}`);
       } catch (e) {

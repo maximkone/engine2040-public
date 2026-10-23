@@ -88,7 +88,7 @@ jobs:
             cargo install twiggy --locked --root "$HOME/.local" >/dev/null 2>&1 || echo "twiggy not installed; build.json gets no top-size lines"
           fi
       - name: unit tests of the build and check tools
-        run: node --test tools/web-build.test.mjs tools/web-loader.test.mjs tools/web-browse.test.mjs tools/wasm-info.test.mjs tools/web-input-check.test.mjs tools/web-budget.test.mjs
+        run: node --test tools/web-build.test.mjs tools/web-loader.test.mjs tools/web-browse.test.mjs tools/wasm-info.test.mjs tools/web-input-check.test.mjs tools/web-budget.test.mjs tools/web-perf.test.mjs
       - name: "engine-web unit tests (native: limits, JSON line, animation)"
         run: cargo test --locked -p engine-web --lib
       - name: clippy for the browser target (the shell only exists on wasm32)
@@ -249,6 +249,22 @@ jobs:
       - name: web budgets (size, memory, first frame)
         shell: bash
         run: node tools/web-budget.mjs --dir dist/web --receipt out/web/receipt.json --require-receipt
+      # QW10: one frozen page runs the stand-in draw list both ways, a block that rebuilds it every frame and a
+      # block that replays the list recorded once. The receipt carries each arm's draw count and CPU median, and a
+      # capture from each of the first two blocks; the gate fails when the pictures differ or the CPU did not fall.
+      - name: static draws replayed versus rebuilt (QW10)
+        shell: bash
+        run: |
+          node tools/web-browse.mjs --dir dist/web --chrome "$(command -v google-chrome)" --out out/web-perf --require-adapter --page-query "bundle=ab&freeze"
+          node tools/web-perf.mjs --capture out/web-perf/arena-capture.json
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: web-perf
+          path: |
+            out/web-perf/arena-capture.json
+            out/web-perf/arena-capture.png
+          if-no-files-found: warn
       # WEB7: real key and mouse events over CDP. No audio context before a gesture, Escape is not a gesture, a key press
       # starts it, a click leaves it running; the page's input: and audio: lines carry the numbers. The scripted events then
       # give the same input tape as the native input_tape bin made in the build job.

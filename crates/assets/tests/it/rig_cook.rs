@@ -265,8 +265,8 @@ fn the_shipped_lane_file_is_the_cook() {
 
         let name = format!("{COOKED_DIR}/{variant}_body.glb");
         assert_eq!(
-            &bundle.read(&name).expect("the body is in the lane")[..],
-            &cooked.glb[..],
+            &*bundle.read(&name).expect("the body is in the lane"),
+            &*cooked.glb,
             "{name}"
         );
         want.push(name);
@@ -274,8 +274,8 @@ fn the_shipped_lane_file_is_the_cook() {
         for quadrant in 0..QUADRANTS {
             let name = format!("{COOKED_DIR}/{variant}_q{quadrant}.ktx2");
             assert_eq!(
-                &bundle.read(&name).expect("the atlas is in the lane")[..],
-                &cooked.textures[quadrant][..],
+                &*bundle.read(&name).expect("the atlas is in the lane"),
+                &*cooked.textures[quadrant],
                 "{name}"
             );
             want.push(name);

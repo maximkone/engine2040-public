@@ -42,7 +42,7 @@ export const parseView = (line) => {
   if (!line) return null;
   const span = line.match(/\bsim_ticks=([-\d.]+)\.\.([-\d.]+)/);
   const out = { sim_first: span ? Number(span[1]) : null, sim_last: span ? Number(span[2]) : null, pop_acts: line.match(/\bpop_acts=(\S+)/)?.[1] ?? null };
-  for (const k of ["frames", "bodies", "offscreen_share", "nonfinite", "error_parts", "sunk_cm_max", "idle_float_cm_max", "pops", "pop_cm_max", "eye_in_body", "eye_below_ground", "closest_cm", "cover_max"]) out[k] = field(line, k);
+  for (const k of ["frames", "bodies", "offscreen_share", "nonfinite", "error_parts", "sunk_cm_max", "idle_float_cm_max", "pops", "pop_cm_max", "react_head_cm_max", "eye_in_body", "eye_below_ground", "closest_cm", "cover_max"]) out[k] = field(line, k);
   return out;
 };
 
@@ -58,6 +58,9 @@ export const parseReceipt = (text) => {
     split: !!split,
     interval_p50_ms: interval ? Number(interval[1]) : null,
     interval_p99_ms: interval ? Number(interval[2]) : null,
+    // The present mode sets the floor of the frame interval: a Fifo run cannot
+    // beat the display period, so the slower gate may only compare like modes.
+    vsync: split?.match(/\bpresent_mode=(\w+)/)?.[1] ?? null,
     gpu_p50_ms: num(split?.match(/gpu_ms p50=([\d.]+)/)?.[1]),
     cpu_p50_ms: num(split?.match(/cpu_ms p50=([\d.]+)/)?.[1]),
     framing: !!framing,
@@ -121,9 +124,11 @@ export const lookScore = (priorDir, curDir) => {
   }
 };
 
-// Reference fps: the median p50 interval of the last unloaded timing runs.
-export const referenceInterval = (history) => {
-  const xs = history.filter((h) => h.timing && !h.timing.loaded && h.timing.interval_p50_ms > 0).slice(-5).map((h) => h.timing.interval_p50_ms).sort((a, b) => a - b);
+// Reference fps: the median p50 interval of the last unloaded timing runs in
+// the same present mode. An Immediate run at 8 ms and a Fifo run at the 16.7 ms
+// display period measure different caps, so mixing them reports a false drop.
+export const referenceInterval = (history, vsync = null) => {
+  const xs = history.filter((h) => h.timing && !h.timing.loaded && h.timing.interval_p50_ms > 0 && (vsync === null || h.timing.vsync === vsync)).slice(-5).map((h) => h.timing.interval_p50_ms).sort((a, b) => a - b);
   return xs.length ? xs[Math.floor(xs.length / 2)] : null;
 };
 
@@ -306,7 +311,7 @@ const main = async () => {
     const caps = scoreCaptures(pngs);
     const historyFile = join(OUT, "history.jsonl");
     const history = existsSync(historyFile) ? readFileSync(historyFile, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : [];
-    const ref = referenceInterval(history);
+    const ref = referenceInterval(history, timing.vsync);
     const runDirs = existsSync(runs) ? readdirSync(runs).filter((d) => statSync(join(runs, d)).isDirectory()).sort() : [];
     const prior = lastGreenRun(history, runDirs);
     const score = lookScore(prior ? join(runs, prior.dir) : null, runDir);
@@ -315,7 +320,7 @@ const main = async () => {
     const strip = ({ text, ...rest }) => rest;
     const check = { sha, tree, at: new Date().toISOString(), build: built.why.split("\n")[0], verdict: Object.keys(red).length ? "RED" : "GREEN", red, ref, caps, look: strip(scored), timing: strip(timing), runDir: runDir.replace(/\\/g, "/"), bar, passBar };
     writeFileSync(latestFile, `${JSON.stringify(check, null, 2)}\n`);
-    appendFileSync(historyFile, `${JSON.stringify({ sha, tree, at: check.at, verdict: check.verdict, red, timing: { interval_p50_ms: timing.interval_p50_ms, interval_p99_ms: timing.interval_p99_ms, loaded }, look: { empty: look.empty, tinted_share: look.tinted_share, view: look.view, flip: scored.flip, flip_vs: scored.flip_vs } })}\n`);
+    appendFileSync(historyFile, `${JSON.stringify({ sha, tree, at: check.at, verdict: check.verdict, red, timing: { interval_p50_ms: timing.interval_p50_ms, interval_p99_ms: timing.interval_p99_ms, vsync: timing.vsync, loaded }, look: { empty: look.empty, tinted_share: look.tinted_share, view: look.view, flip: scored.flip, flip_vs: scored.flip_vs } })}\n`);
     writeFileSync(join(OUT, "latest.md"), summary(check));
     pruneRuns(runs, prior?.dir ?? null);
     if (has("--json")) process.stdout.write(`${JSON.stringify(check, null, 2)}\n`);

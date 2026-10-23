@@ -15,6 +15,7 @@ use rmcp::serde::{self, Deserialize, Serialize};
 use rmcp::serde_json::Value;
 
 use crate::receipts::ChangeList;
+use crate::scene_query::diff::SemanticChange;
 
 /// `#[serde(with = "u64_text")]` for a `u64` hash, digest or id. JS and LLM
 /// clients parse JSON numbers as f64 and round anything above 2^53 (a real
@@ -335,6 +336,17 @@ pub struct TxApplyOutput {
     pub key: u64,
     /// Journal position hint (entries shift on eviction/undo/redo).
     pub journal_index: u64,
+    /// Document content digest before the write: 64 lowercase hex chars.
+    #[serde(default)]
+    pub before_digest: String,
+    /// Content digest of the applied state as staged, before it landed.
+    #[serde(default)]
+    pub staged_digest: String,
+    /// Content digest read back after landing. Equal to `staged_digest` unless
+    /// the store carried different bytes; the durable path refuses that with
+    /// `landed_mismatch` instead of returning a receipt.
+    #[serde(default)]
+    pub after_digest: String,
     /// Stable undo identity: pass back to `tx.undo`.
     #[serde(with = "u64_text")]
     #[schemars(with = "String")]
@@ -357,9 +369,9 @@ pub struct TxApplyOutput {
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct ChangeListDto {
-    /// Document revision before the write.
+    /// Document revision before the change.
     pub revision_before: u64,
-    /// Document revision after the write.
+    /// Document revision after the change.
     pub revision_after: u64,
     /// Objects present after only.
     pub added: u32,
@@ -371,6 +383,63 @@ pub struct ChangeListDto {
     pub rows: Vec<String>,
     /// True when `rows` dropped entries; counts stay the full totals.
     pub truncated: bool,
+    /// Document content digest on the before side: 64 lowercase hex chars.
+    #[serde(default)]
+    pub digest_before: String,
+    /// Document content digest on the after side.
+    #[serde(default)]
+    pub digest_after: String,
+    /// Touched object ids in id-text order, clipped to the cap.
+    #[serde(default)]
+    pub ids: Vec<String>,
+    /// Full count of `ids` before the cap.
+    #[serde(default)]
+    pub ids_total: u32,
+    /// Relation edges gained, a row per edge: `+ relation <a> <rel> <b>`.
+    #[serde(default)]
+    pub edges_added: Vec<String>,
+    /// Full count of relation edges gained.
+    #[serde(default)]
+    pub edges_added_total: u32,
+    /// Relation edges lost, a row per edge: `- relation <a> <rel> <b>`.
+    #[serde(default)]
+    pub edges_removed: Vec<String>,
+    /// Full count of relation edges lost.
+    #[serde(default)]
+    pub edges_removed_total: u32,
+}
+
+/// Most touched ids one change list names; the totals stay exact.
+pub const CHANGE_MAX_IDS: usize = 16;
+/// Most relation edges per direction one change list names.
+pub const CHANGE_MAX_EDGES: usize = 16;
+
+/// Count for a wire field: saturates instead of wrapping.
+fn clip_len(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+impl ChangeListDto {
+    /// Attach the semantic part of a change: touched object ids and the
+    /// relation edges gained or lost, each clipped to its cap. The totals keep
+    /// the full counts, so a clipped list never reads as complete.
+    pub(crate) fn with_semantics(mut self, change: SemanticChange) -> Self {
+        self.ids_total = clip_len(change.ids.len());
+        self.ids = change.ids.into_iter().take(CHANGE_MAX_IDS).collect();
+        self.edges_added_total = clip_len(change.edges_added.len());
+        self.edges_added = change
+            .edges_added
+            .into_iter()
+            .take(CHANGE_MAX_EDGES)
+            .collect();
+        self.edges_removed_total = clip_len(change.edges_removed.len());
+        self.edges_removed = change
+            .edges_removed
+            .into_iter()
+            .take(CHANGE_MAX_EDGES)
+            .collect();
+        self
+    }
 }
 
 impl From<ChangeList> for ChangeListDto {
@@ -383,6 +452,7 @@ impl From<ChangeList> for ChangeListDto {
             moved: list.moved,
             rows: list.rows,
             truncated: list.truncated,
+            ..Self::default()
         }
     }
 }
@@ -476,6 +546,9 @@ mod tests {
             effects: Vec::new(),
             key: BIG,
             journal_index: 0,
+            before_digest: "0".repeat(64),
+            staged_digest: "1".repeat(64),
+            after_digest: "1".repeat(64),
             undo_token: BIG,
             changes: ChangeListDto::default(),
             spatial_delta: None,

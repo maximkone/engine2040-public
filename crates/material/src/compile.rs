@@ -1042,13 +1042,25 @@ pub fn validate(wgsl: &str) -> Result<(), WgslError> {
 /// Byte size naga gives the `MaterialU` struct, for the layout test.
 #[cfg(feature = "validate")]
 pub fn material_uniform_size(wgsl: &str) -> Option<u32> {
+    uniform_struct_layout(wgsl, "MaterialU").map(|(span, _)| span)
+}
+
+/// Span and per-member byte offsets naga gives the struct called `name` in
+/// `wgsl`, for a packer layout test. Every field image a CPU packer writes
+/// must sit at the offset the shader reads, so the test compares them.
+#[cfg(feature = "validate")]
+pub fn uniform_struct_layout(wgsl: &str, name: &str) -> Option<(u32, Vec<(String, u32)>)> {
     let module = naga::front::wgsl::parse_str(wgsl).ok()?;
     for (_, ty) in module.types.iter() {
-        if ty.name.as_deref() != Some("MaterialU") {
+        if ty.name.as_deref() != Some(name) {
             continue;
         }
-        if let naga::TypeInner::Struct { span, .. } = &ty.inner {
-            return Some(*span);
+        if let naga::TypeInner::Struct { span, members } = &ty.inner {
+            let fields = members
+                .iter()
+                .map(|member| (member.name.clone().unwrap_or_default(), member.offset))
+                .collect();
+            return Some((*span, fields));
         }
     }
     None

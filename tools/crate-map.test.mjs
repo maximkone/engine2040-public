@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { crateRows, committedTree, deadFeatures, dependencyNames, instability, lockVersions, packageName, renderCrateMap, sourceLines } from "./crate-map.mjs";
+import { crateRows, committedTree, deadFeatures, dependencyNames, indexTree, instability, lockVersions, packageName, renderCrateMap, sourceLines, stagedTree } from "./crate-map.mjs";
 
 // alpha uses beta (dotted key), a non-engine crate, and a dev-dependency on gamma.
 // gamma uses beta through a renamed key. delta has no lib.rs.
@@ -166,4 +166,39 @@ test("committedTree reads the committed tree and leaves the working tree alone",
     if (tree) rmSync(tree, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("--with reads HEAD plus a lane's working paths, so the numbers are known before the commit", () => {
+  const root = mkdtempSync(join(tmpdir(), "crate-map-with-"));
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
+  git("init", "-q");
+  try {
+    mkdirSync(join(root, "crates", "a", "src"), { recursive: true });
+    writeFileSync(join(root, "crates", "a", "Cargo.toml"), '[package]\nname = "engine-a"\n');
+    writeFileSync(join(root, "crates", "a", "src", "lib.rs"), "fn one() {}\n");
+    writeFileSync(join(root, "Cargo.lock"), '[[package]]\nname = "a"\nversion = "1.0.0"\n');
+    git("-c", "user.email=t@t", "-c", "user.name=t", "add", "-A");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "one");
+    const before = crateRows(committedTree(root)).reduce((n, r) => n + r.srcLines, 0);
+    assert.equal(before, 1, "HEAD counts one line");
+
+    // The lane edits lib.rs and adds a new file, and nothing is staged yet.
+    writeFileSync(join(root, "crates", "a", "src", "lib.rs"), "fn one() {}\nfn two() {}\n");
+    writeFileSync(join(root, "crates", "a", "src", "new.rs"), "fn three() {}\n");
+    const withLib = committedTree(root, stagedTree(["crates/a/src/lib.rs"], root));
+    assert.equal(crateRows(withLib).reduce((n, r) => n + r.srcLines, 0), 2, "the edit is measured");
+    rmSync(withLib, { recursive: true, force: true });
+    const withBoth = committedTree(root, stagedTree("crates/a/src/lib.rs,crates/a/src/new.rs", root));
+    assert.equal(crateRows(withBoth).reduce((n, r) => n + r.srcLines, 0), 3, "a new file is measured too");
+    rmSync(withBoth, { recursive: true, force: true });
+    assert.equal(crateRows(committedTree(root)).reduce((n, r) => n + r.srcLines, 0), 1, "HEAD itself is untouched");
+
+    // --index reads exactly what the index stages, and a staged deletion is seen.
+    assert.equal(crateRows(committedTree(root, indexTree(root))).reduce((n, r) => n + r.srcLines, 0), 1, "nothing staged yet");
+    git("add", "crates/a/src/lib.rs");
+    const staged = committedTree(root, indexTree(root));
+    assert.equal(crateRows(staged).reduce((n, r) => n + r.srcLines, 0), 2, "the staged edit is measured");
+    rmSync(staged, { recursive: true, force: true });
+    assert.throws(() => stagedTree([], root), /--with needs paths/, "an empty --with is refused");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

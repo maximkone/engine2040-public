@@ -334,9 +334,15 @@ fn tool_list_headroom_holds_with_the_cone_op() {
     // 2_472 chars) and the AI-native MCP lane's D19 `verify` string on the
     // three build outputs (+160 chars) took the default list to 56_897:
     // bound 54_500 -> 57_500.
+    // 2026-10-23: the same growth the door test measures (AD2's receipt
+    // digests, SP66's dark/unknown rows and view.compare's diff image) took
+    // the default list to 60,036 at HEAD 5b29bac02, so this older bound moves
+    // to the same door bound: 57_500 -> 60_200.
+    // AX23 (`14fd8625c`) added the change-list schema, taking the default to
+    // 64,060, so this older bound moves with the door: 60_200 -> 64_400.
     assert!(
-        ledger.total_chars < 57_500,
-        "default list {} stays under the 2026-10-21 world-query bound",
+        ledger.total_chars < 64_400,
+        "default list {} stays under the 2026-10-23 door bound (64_060)",
         ledger.total_chars
     );
 }

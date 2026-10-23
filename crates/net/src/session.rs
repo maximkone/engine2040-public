@@ -74,6 +74,7 @@ use engine_input::{FighterId, FighterInput};
 /// genre ledger imports them from here instead of naming the genre types.
 pub use engine_input::{FighterId as BodyId, FighterInput as BodyInput, FighterTape as BodyTape};
 
+use crate::cuts::{CutLog, CutRow};
 pub use crate::delta::{
     decode_delta, encode_delta, Delta, FighterDelta, FighterSnap, FullSnap, InterpResult,
     Interpolator, DEFAULT_INTERP_DELAY_MS, MASK_ALL, MAX_INTERP_SAMPLES,
@@ -84,6 +85,7 @@ use crate::delta::{
 /// Remote presentation of the LAN path: the frozen [`Interpolator`] plus the
 /// Hermite/quaternion/guard modules, fed together from one snapshot stream.
 pub use crate::interp::{FrameHead, InterpFrame, QueryKind, RemoteView, SnapshotInterpolator};
+use crate::scale::SnapshotLane;
 use crate::validate::SortedUnique;
 
 /// Wire version accepted by [`decode_input`] and [`decode_state`].
@@ -98,6 +100,9 @@ pub const KIND_STATE: u8 = 1;
 /// Full-snapshot packet kind byte (quantized fighter states, the delta
 /// resync primitive). Full-only peers answer `BadKind` loudly.
 pub const KIND_SNAPSHOT: u8 = 2;
+/// Cut packet kind byte (BX9 severed-joint rows, see
+/// [`crate::cuts::encode_cuts`]).
+pub const KIND_CUTS: u8 = 3;
 /// Delta bit on the state count byte: set means the payload is a
 /// fighter-state [`Delta`] plus its baseline tick; clear means the full
 /// input-tape encoding. The version byte stays [`WIRE_VERSION`] either way.
@@ -132,126 +137,6 @@ const RLE_MAX_RUN: usize = 128;
 /// Largest decoded input payload in bytes (the flood-guard shape).
 const MAX_DECODED_INPUT_BYTES: usize = MAX_INPUTS_PER_PACKET * INPUT_BYTES;
 
-/// ioq3 netchan header beside the KIND path (pattern only, no version bump).
-pub const IOQ3_FRAGMENT_BIT: u32 = 1 << 31;
-/// ioq3 header bytes: sequence 4 + qport 2 + start 2 + length 2.
-pub const IOQ3_HEADER_LEN: usize = 10;
-/// ioq3 fragment payload cap (1400 minus 100, pattern only).
-pub const IOQ3_FRAGMENT_SIZE: usize = 1300;
-/// ioq3 OOB sequence (-1 as u32), never a data sequence.
-pub const IOQ3_OOB_SEQUENCE: u32 = u32::MAX;
-/// ioq3 fragment header: one sequence shared by every fragment.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Ioq3Header {
-    /// Sequence with FRAGMENT_BIT set when fragmented.
-    pub sequence: u32,
-    /// Port slot for remapped ports.
-    pub qport: u16,
-    /// Byte offset of this fragment.
-    pub start: u16,
-    /// Payload bytes in this fragment.
-    pub length: u16,
-}
-/// Encode one ioq3 header as 10 little-endian bytes.
-pub fn ioq3_encode_header(h: &Ioq3Header) -> [u8; IOQ3_HEADER_LEN] {
-    let mut out = [0u8; IOQ3_HEADER_LEN];
-    out[0..4].copy_from_slice(&h.sequence.to_le_bytes());
-    out[4..6].copy_from_slice(&h.qport.to_le_bytes());
-    out[6..8].copy_from_slice(&h.start.to_le_bytes());
-    out[8..10].copy_from_slice(&h.length.to_le_bytes());
-    out
-}
-/// Decode one ioq3 header; loud refuse on short, OOB, or length mismatch.
-pub fn ioq3_decode_header(bytes: &[u8]) -> Result<Ioq3Header, NetError> {
-    if bytes.len() < IOQ3_HEADER_LEN {
-        return Err(NetError::Truncated);
-    }
-    let sequence = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    let qport = u16::from_le_bytes([bytes[4], bytes[5]]);
-    let start = u16::from_le_bytes([bytes[6], bytes[7]]);
-    let length = u16::from_le_bytes([bytes[8], bytes[9]]);
-    if sequence == IOQ3_OOB_SEQUENCE {
-        return Err(NetError::BadState);
-    }
-    let start_us = usize::from(start);
-    let len_us = usize::from(length);
-    if len_us > bytes.len() - IOQ3_HEADER_LEN || start_us.checked_add(len_us).is_none() {
-        return Err(NetError::Truncated);
-    }
-    Ok(Ioq3Header {
-        sequence,
-        qport,
-        start,
-        length,
-    })
-}
-/// Split payload into same-sequence fragments (single keeps raw sequence).
-pub fn ioq3_fragment_message(sequence: u32, qport: u16, payload: &[u8]) -> Vec<Vec<u8>> {
-    if payload.is_empty() {
-        return Vec::new();
-    }
-    let count = payload.chunks(IOQ3_FRAGMENT_SIZE).len();
-    let sequence = if count > 1 {
-        sequence | IOQ3_FRAGMENT_BIT
-    } else {
-        sequence & !IOQ3_FRAGMENT_BIT
-    };
-    let mut out = Vec::with_capacity(count);
-    let mut offset = 0usize;
-    for chunk in payload.chunks(IOQ3_FRAGMENT_SIZE) {
-        let start = u16::try_from(offset).unwrap_or(u16::MAX);
-        let length = u16::try_from(chunk.len()).unwrap_or(u16::MAX);
-        let header = Ioq3Header {
-            sequence,
-            qport,
-            start,
-            length,
-        };
-        let mut datagram = Vec::with_capacity(IOQ3_HEADER_LEN + chunk.len());
-        datagram.extend_from_slice(&ioq3_encode_header(&header));
-        datagram.extend_from_slice(chunk);
-        out.push(datagram);
-        offset += chunk.len();
-    }
-    out
-}
-/// Reassemble same-sequence fragments byte-exact; dupes ignored, gaps loud.
-pub fn ioq3_reassemble(fragments: &[Vec<u8>]) -> Result<Vec<u8>, NetError> {
-    if fragments.is_empty() {
-        return Err(NetError::Truncated);
-    }
-    let first = ioq3_decode_header(&fragments[0])?;
-    let mut parts: Vec<(usize, Vec<u8>)> = Vec::with_capacity(fragments.len());
-    for datagram in fragments {
-        let header = ioq3_decode_header(datagram)?;
-        if header.sequence != first.sequence || header.qport != first.qport {
-            return Err(NetError::BadState);
-        }
-        let body = datagram[IOQ3_HEADER_LEN..].to_vec();
-        if body.len() != usize::from(header.length) {
-            return Err(NetError::Truncated);
-        }
-        parts.push((usize::from(header.start), body));
-    }
-    parts.sort_by_key(|(start, _)| *start);
-    let mut out = Vec::new();
-    let mut next = 0usize;
-    for (start, body) in &parts {
-        if *start == next {
-            out.extend_from_slice(body);
-            next += body.len();
-        } else if *start < next {
-            let end = start.saturating_add(body.len());
-            if end > next || out[*start..end] != body[..] {
-                return Err(NetError::BadState);
-            }
-        } else {
-            return Err(NetError::Truncated);
-        }
-    }
-    Ok(out)
-}
-
 /// Session failures: bounded diagnostics, never panics.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NetError {
@@ -273,7 +158,8 @@ pub enum NetError {
     },
     /// Magic bytes do not match [`WIRE_MAGIC`].
     BadMagic,
-    /// Kind byte is neither [`KIND_INPUT`] nor [`KIND_STATE`].
+    /// Kind byte is none of [`KIND_INPUT`], [`KIND_STATE`],
+    /// [`KIND_SNAPSHOT`] or [`KIND_CUTS`].
     BadKind(u8),
     /// Datagram ends mid-field.
     Truncated,
@@ -344,8 +230,8 @@ pub struct SnapshotDelta {
 }
 
 /// Server-authoritative arena match: owns the config, the authoritative input
-/// tape, the checkpoint history and one incremental live stepper. Data owner
-/// for authoritative inputs.
+/// tape, the checkpoint history, one incremental live stepper and the live
+/// snapshot interest lane. Data owner for authoritative inputs.
 pub struct Server {
     spec: MatchSpec,
     next_tick: u32,
@@ -355,6 +241,10 @@ pub struct Server {
     /// same shape as the arena's EG1 live match. The tape stays the data
     /// owner above; the stepper owns the running sim state.
     stepper: LiveMatch,
+    snapshots: SnapshotLane,
+    /// The input log's cut lane: every authored tick's severed joints, in
+    /// `(swing, victim, joint)` order (BX9).
+    cuts: CutLog,
 }
 
 impl Server {
@@ -372,13 +262,14 @@ impl Server {
         if spec.config.validate().is_err() || spec.input_delay_ticks > crate::delay::MAX_DELAY {
             return Err(NetError::BadConfig);
         }
-        let stepper = spec.live().ok_or(NetError::BadConfig)?;
         Ok(Self {
+            stepper: spec.live().ok_or(NetError::BadConfig)?,
+            snapshots: SnapshotLane::new(spec.config.fighters)?,
+            cuts: CutLog::new(),
             spec,
             next_tick: 0,
             tape: Vec::new(),
             checkpoints: Vec::new(),
-            stepper,
         })
     }
 
@@ -415,9 +306,10 @@ impl Server {
     /// Every input must be stamped for [`Self::tick_now`], name a fighter
     /// slot below the config count, and pass [`FighterInput::validate`];
     /// duplicates within the call fail. Slots without an input are AI-filled
-    /// by the arena. Any failure rejects the whole tick and changes nothing.
-    /// The held live match steps exactly once per call: the checkpoint equals
-    /// the last row of the arena prefix run over the whole tape (EG1 parity).
+    /// by the arena. Any input failure rejects the whole tick and changes nothing.
+    /// The held live match steps exactly once per call: the checkpoint equals the
+    /// last row of the arena prefix run over the whole tape (EG1 parity). The
+    /// entered state then selects due snapshots through [`SnapshotLane`].
     pub fn tick(
         &mut self,
         inputs: &[FighterInput],
@@ -437,10 +329,12 @@ impl Server {
                 return Err(NetError::BadInput);
             }
         }
-        let checkpoint = match self.stepper.step(&sorted) {
-            Some(stepped) => stepped.checkpoint,
-            None => return Err(NetError::SimRejected),
-        };
+        let stepped = self.stepper.step(&sorted).ok_or(NetError::SimRejected)?;
+        let checkpoint = stepped.checkpoint;
+        self.cuts
+            .record(checkpoint.tick, &crate::cuts::wire_cuts(stepped.cuts));
+        self.snapshots
+            .record(stepped.rows.first().ok_or(NetError::SimRejected)?)?;
         debug_assert_eq!(checkpoint.tick, self.next_tick);
         self.tape.extend_from_slice(&sorted);
         self.checkpoints.push(checkpoint);
@@ -454,6 +348,22 @@ impl Server {
                 tape: self.tape.clone(),
             },
         ))
+    }
+
+    /// Live snapshot lane: authority state, selections and owed packets.
+    #[cfg(test)]
+    pub(crate) fn snapshots(&self) -> &SnapshotLane {
+        &self.snapshots
+    }
+
+    /// The input log's cut lane: every authored tick's severed joints.
+    pub fn cut_log(&self) -> &CutLog {
+        &self.cuts
+    }
+
+    /// The rows of one authored tick; empty when nothing was severed.
+    pub fn cut_rows(&self, tick: u32) -> &[CutRow] {
+        self.cuts.window(tick, tick)
     }
 }
 
@@ -489,6 +399,9 @@ pub struct Client {
     /// incoming delta stages here, then swaps with `server_tape` on success,
     /// so the per-state merge allocates only while the tape grows.
     merge_scratch: Vec<FighterInput>,
+    /// The client's cut lane: severed joints the server routed to this
+    /// viewer, tick-indexed beside the input tape (BX9).
+    cuts: CutLog,
 }
 
 impl Client {
@@ -529,6 +442,7 @@ impl Client {
             agreed: 0,
             steps: 0,
             merge_scratch: Vec::new(),
+            cuts: CutLog::new(),
         })
     }
 
@@ -565,6 +479,21 @@ impl Client {
     /// Total mispredict ticks named over the session.
     pub fn total_mispredicts(&self) -> u64 {
         self.total_mispredicts
+    }
+
+    /// Apply one cut packet from the server: decode it, then record its rows
+    /// in the client's cut lane. Returns the packet's last tick. A stale
+    /// packet (every row at or below the lane tip) changes nothing; a row the
+    /// lane already holds is deduplicated, so the acked re-send is safe.
+    pub fn apply_cuts(&mut self, bytes: &[u8]) -> Result<u32, NetError> {
+        let (last, rows) = crate::cuts::decode_cuts(bytes)?;
+        self.cuts.record_rows(&rows);
+        Ok(last)
+    }
+
+    /// The client's cut lane: the severed joints the server routed here.
+    pub fn cut_log(&self) -> &CutLog {
+        &self.cuts
     }
 
     /// Decode one cell packet on the client path and hold its cell.
@@ -1485,7 +1414,7 @@ pub fn encode_state_delta(checkpoint: Checkpoint, delta: &Delta) -> Result<Vec<u
 /// as an input tape.
 pub fn encode_snapshot(full: &FullSnap) -> Result<Vec<u8>, NetError> {
     full.validate()?;
-    let _ = ioq3_fragment_message;
+    let _ = crate::ioq3::ioq3_fragment_message;
     let want = SNAPSHOT_HEADER_LEN + full.fighters.len() * SNAPSHOT_SLOT_LEN;
     if want > MAX_PACKET_BYTES {
         return Err(NetError::TooLarge);
@@ -1573,6 +1502,9 @@ mod spear_tests;
 
 #[cfg(test)]
 mod spec_tests;
+
+#[cfg(test)]
+mod duel_interest_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1861,45 +1793,6 @@ mod tests {
     }
 
     #[test]
-    fn ioq3_fragments_reassemble() {
-        let sent: Vec<u8> = (0..7000)
-            .map(|i| u8::try_from((i * 31 + 7) % 251).expect("pattern fits"))
-            .collect();
-        let fragments = ioq3_fragment_message(42, 7, &sent);
-        assert_eq!(fragments.len(), 6, "7000B needs 6 fragments at 1300B");
-        let headers: Vec<Ioq3Header> = fragments
-            .iter()
-            .map(|d| ioq3_decode_header(d).expect("header"))
-            .collect();
-        assert!(headers.iter().all(|h| h.sequence == headers[0].sequence));
-        assert_ne!(headers[0].sequence & IOQ3_FRAGMENT_BIT, 0);
-        // Seeded drop every 5th datagram leaves a gap the assembler names.
-        let mut delivered: Vec<Vec<u8>> = fragments
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| i % 5 != 4)
-            .map(|(_, d)| d.clone())
-            .collect();
-        assert_eq!(ioq3_reassemble(&delivered), Err(NetError::Truncated));
-        // Retransmit the dropped fragment, then tolerate one dupe plus reorder.
-        delivered.push(fragments[4].clone());
-        delivered.push(fragments[0].clone());
-        delivered.swap(0, 1);
-        let rebuilt = ioq3_reassemble(&delivered).expect("reassemble");
-        assert_eq!(rebuilt.len(), sent.len(), "reassembly diff must be 0 bytes");
-        assert_eq!(rebuilt, sent, "reassembly must be byte-exact");
-        // Bad headers refuse loud: short bytes and the OOB sequence.
-        assert!(ioq3_decode_header(&fragments[0][..3]).is_err());
-        let oob = ioq3_encode_header(&Ioq3Header {
-            sequence: IOQ3_OOB_SEQUENCE,
-            qport: 7,
-            start: 0,
-            length: 0,
-        });
-        assert_eq!(ioq3_decode_header(&oob), Err(NetError::BadState));
-    }
-
-    #[test]
     fn version_mismatch_rejected() {
         let config = test_config(8);
         let mut server = Server::new(config).expect("server");
@@ -2045,6 +1938,49 @@ mod tests {
         assert_eq!(server.tick(&[input]), Err(NetError::LateInput(0)));
         assert_eq!(server.tick_now(), 1);
         assert_eq!(server.checkpoints().len(), 1);
+    }
+
+    #[test]
+    fn live_snapshot_interest_keeps_two_fighters_and_matches_full_bytes() {
+        let mut server = Server::new(test_config(8)).expect("server");
+        assert!(
+            server.snapshots().state().is_none(),
+            "no authority state before tick 0"
+        );
+        // Tick 0 authors the state entering tick 0; viewer 0's lane is tick 0.
+        server.tick(&[]).expect("tick 0");
+        let state = server.snapshots().state().cloned().expect("state");
+        assert_eq!(state.tick, 0);
+        assert_eq!(state.fighters.len(), 2);
+        let (report, ids) = server.snapshots().selection(0).expect("viewer 0 due");
+        assert_eq!(report.tick, 0);
+        assert_eq!(ids, &[0, 1], "two fighters: interest keeps every slot");
+        let packet = server.snapshots().packet(0).expect("packet");
+        let full = encode_snapshot(&state).expect("full");
+        assert_eq!(
+            packet, full,
+            "2-fighter interest bytes must equal the no-interest encoding"
+        );
+        assert_eq!(
+            decode_snapshot(&packet).expect("decode").fighters,
+            state.fighters
+        );
+        // Viewer 1's lane is tick 1: it holds no selection at tick 0.
+        assert!(server.snapshots().selection(1).is_none());
+        assert_eq!(server.snapshots().packet(1), Err(NetError::BadState));
+        // Tick 1 selects the state entering tick 1 for viewer 1; viewer 0's
+        // tick-0 selection is stale against the newer state and is refused.
+        server.tick(&[]).expect("tick 1");
+        let state = server.snapshots().state().cloned().expect("state");
+        assert_eq!(state.tick, 1);
+        let (report, ids) = server.snapshots().selection(1).expect("viewer 1 due");
+        assert_eq!(report.tick, 1);
+        assert_eq!(ids, &[0, 1]);
+        assert_eq!(
+            server.snapshots().packet(1).expect("packet"),
+            encode_snapshot(&state).expect("full")
+        );
+        assert_eq!(server.snapshots().packet(0), Err(NetError::BadState));
     }
 
     #[test]

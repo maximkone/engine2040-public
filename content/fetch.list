@@ -1,45 +1,87 @@
-# GS22 v1: the content fetch list (2026-10-22). Every row is CC0 and was
-# scouted against the live Poly Haven files API on 2026-10-22 (real URL,
-# size and md5 per row). A `-` url resolves through the source's own files
-# API at fetch time, so one row carries the whole 1k set.
+# GS22 v2: the content fetch list (2026-10-23). Every row is CC0 and was
+# scouted against the live source on 2026-10-23: each row carries the real
+# file URL and the md5 of the bytes that URL serves (v1 pinned the files-API
+# JSON, so nothing was actually downloaded).
 #
 # Format: <source> <id> <url> [md5] [license] [author]
 # (tools/fetch-content.mjs). The author field is one token; the real
-# attributions are in the comments below.
+# attributions are in the comments.
 #
-# --- 3 outdoor / Italian-style HDRIs, 2k (Poly Haven) ---
-# colosseum 2k hdr: 6.09 MB, authors Greg Zaal (HDRI) and Rico Cilliers
-#   (backplates) - the Colosseum, Rome.
-# borghese_gardens 2k hdr: 6.92 MB, author Andreas Mischok - Villa Borghese,
-#   Rome.
-# castel_st_angelo_roof 2k hdr: 6.44 MB, author Andreas Mischok - the
-#   Castel Sant'Angelo roof, Rome.
-polyhaven colosseum - 660eb20813279a49ca70605e89f3a108 CC0
-polyhaven borghese_gardens - 164f424edf339fab46289c1d49b606e2 CC0
-polyhaven castel_st_angelo_roof - 564bd27feb8f81fa616f0bf1c19ae5f6 CC0
+# --- 3 outdoor / Italian-style HDRIs, 2k (Poly Haven, CC0) ---
+# colosseum_2k.hdr 6.09 MB: Greg Zaal (HDRI), Rico Cilliers (backplates) -
+#   the Colosseum, Rome.
+# borghese_gardens_2k.hdr 6.92 MB: Andreas Mischok - Villa Borghese, Rome.
+# castel_st_angelo_roof_2k.hdr 6.44 MB: Andreas Mischok - Castel
+#   Sant'Angelo roof, Rome.
+polyhaven colosseum_2k https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/colosseum_2k.hdr 660eb20813279a49ca70605e89f3a108 CC0 Greg_Zaal
+polyhaven borghese_gardens_2k https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/borghese_gardens_2k.hdr 164f424edf339fab46289c1d49b606e2 CC0 Andreas_Mischok
+polyhaven castel_st_angelo_roof_2k https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/castel_st_angelo_roof_2k.hdr 564bd27feb8f81fa616f0bf1c19ae5f6 CC0 Andreas_Mischok
 #
-# --- 6 PBR sets, 1k (Poly Haven; the diffuse map's md5 pins the row) ---
-# sand: aerial_sand (Andreas Mischok).
-# marble-family stone: blue_metal_plate and corrugated_iron carry bronze's
-#   place (the CC0 catalogue has no bronze-named set).
-# leather: brown_leather. cloth: cotton_jersey. brick: brick_4.
-polyhaven aerial_sand - 717c892f44895790e6a39ced994e1598 CC0
-polyhaven brick_4 - 17cc077fda6e2d7dd7a25a4f983d92d6 CC0
-polyhaven blue_metal_plate - a906d0e554596fb76c6969f2f644c5e6 CC0
-polyhaven corrugated_iron - fabb629c5ad6f427e6862bb4043564bd CC0
-polyhaven brown_leather - 080b3bf1372766ff2c7ff121ed07b5e8 CC0
-polyhaven cotton_jersey - d2f4493fdd48634b50d40f810ce9deb7 CC0
+# --- 8 PBR sets, 1k jpg (Poly Haven, CC0): diffuse, normal (gl), rough, ao ---
+# sand: aerial_sand (Rob Tuytel).
+polyhaven aerial_sand_diff_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/aerial_sand/aerial_sand_diff_1k.jpg 717c892f44895790e6a39ced994e1598 CC0 Rob_Tuytel
+polyhaven aerial_sand_nor_gl_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/aerial_sand/aerial_sand_nor_gl_1k.jpg 094ef18a596f9b1de34264cd21f8c9d2 CC0 Rob_Tuytel
+polyhaven aerial_sand_rough_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/aerial_sand/aerial_sand_rough_1k.jpg 2812f58e6f8b966d969bb2c2092c3484 CC0 Rob_Tuytel
+polyhaven aerial_sand_ao_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/aerial_sand/aerial_sand_ao_1k.jpg 5fd7816c7e11bb629b8da0b7359f038c CC0 Rob_Tuytel
+# brick: brick_4 (Rob Tuytel).
+polyhaven brick_4_diff_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brick_4/brick_4_diff_1k.jpg 17cc077fda6e2d7dd7a25a4f983d92d6 CC0 Rob_Tuytel
+polyhaven brick_4_nor_gl_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brick_4/brick_4_nor_gl_1k.jpg db5c953bc1ca96ea6861a0a354624a85 CC0 Rob_Tuytel
+polyhaven brick_4_rough_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brick_4/brick_4_rough_1k.jpg bcfc53932ebfbc2af3ea1c5ca8c0440d CC0 Rob_Tuytel
+polyhaven brick_4_ao_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brick_4/brick_4_ao_1k.jpg 70ab23f41917dd6ddc1e19c85209702b CC0 Rob_Tuytel
+# bronze: blue_metal_plate (Rob Tuytel) - the aged-metal set.
+polyhaven blue_metal_plate_diff_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/blue_metal_plate/blue_metal_plate_diff_1k.jpg a906d0e554596fb76c6969f2f644c5e6 CC0 Rob_Tuytel
+polyhaven blue_metal_plate_nor_gl_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/blue_metal_plate/blue_metal_plate_nor_gl_1k.jpg f14c0f01832f8b18c39f07e4b5d6f749 CC0 Rob_Tuytel
+polyhaven blue_metal_plate_rough_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/blue_metal_plate/blue_metal_plate_rough_1k.jpg 76c3911d8ad2416e4db3104a2ef831c7 CC0 Rob_Tuytel
+polyhaven blue_metal_plate_ao_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/blue_metal_plate/blue_metal_plate_ao_1k.jpg 1da8e0247e20de20e92c7cdfcfe7b190 CC0 Rob_Tuytel
+# iron: corrugated_iron (Jenelle van Heerden, Dimitrios Savva).
+polyhaven corrugated_iron_diff_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/corrugated_iron/corrugated_iron_diff_1k.jpg fabb629c5ad6f427e6862bb4043564bd CC0 Jenelle_van_Heerden
+polyhaven corrugated_iron_nor_gl_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/corrugated_iron/corrugated_iron_nor_gl_1k.jpg 02249d61a2b1839552938f35a20d075a CC0 Jenelle_van_Heerden
+polyhaven corrugated_iron_rough_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/corrugated_iron/corrugated_iron_rough_1k.jpg 7c14b728587586e74be45a67cfe44160 CC0 Jenelle_van_Heerden
+polyhaven corrugated_iron_ao_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/corrugated_iron/corrugated_iron_ao_1k.jpg b034a75196795149b42f9a709cc6dc4b CC0 Jenelle_van_Heerden
+# leather: brown_leather (Rob Tuytel); its diffuse map is named albedo.
+polyhaven brown_leather_albedo_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_leather/brown_leather_albedo_1k.jpg 080b3bf1372766ff2c7ff121ed07b5e8 CC0 Rob_Tuytel
+polyhaven brown_leather_nor_gl_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_leather/brown_leather_nor_gl_1k.jpg b63ae0121a415c23d74eed0b07fc6065 CC0 Rob_Tuytel
+polyhaven brown_leather_rough_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_leather/brown_leather_rough_1k.jpg 0f3a0148c8d2d25fbeca67e64e79bca0 CC0 Rob_Tuytel
+polyhaven brown_leather_ao_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_leather/brown_leather_ao_1k.jpg 1852002bfccee92642945b43f713fe54 CC0 Rob_Tuytel
+# cloth: cotton_jersey (colormass, Rico Cilliers).
+polyhaven cotton_jersey_diff_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/cotton_jersey/cotton_jersey_diff_1k.jpg d2f4493fdd48634b50d40f810ce9deb7 CC0 colormass
+polyhaven cotton_jersey_nor_gl_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/cotton_jersey/cotton_jersey_nor_gl_1k.jpg 2dcc9dda3b726477f607c808e52f1833 CC0 colormass
+polyhaven cotton_jersey_rough_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/cotton_jersey/cotton_jersey_rough_1k.jpg ac691d215d3aca34dcd6ea2d03937286 CC0 colormass
+polyhaven cotton_jersey_ao_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/cotton_jersey/cotton_jersey_ao_1k.jpg 8c8afb48d8cfc37ddf2d11486d99edb9 CC0 colormass
+# marble: marble_01 (Rob Tuytel).
+polyhaven marble_01_diff_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/marble_01/marble_01_diff_1k.jpg 04325ced5018eb8a2e598a4ef69cb176 CC0 Rob_Tuytel
+polyhaven marble_01_nor_gl_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/marble_01/marble_01_nor_gl_1k.jpg fa073d722cde733c1bd6cc6e8897c8e3 CC0 Rob_Tuytel
+polyhaven marble_01_rough_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/marble_01/marble_01_rough_1k.jpg 59cef1be1b7376c9d0dcc7a64adf7882 CC0 Rob_Tuytel
+polyhaven marble_01_ao_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/marble_01/marble_01_ao_1k.jpg 380e3cd3df21914dc17156d2b921277d CC0 Rob_Tuytel
+# mosaic: marble_mosaic_tiles (Amal Kumar).
+polyhaven marble_mosaic_tiles_diff_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/marble_mosaic_tiles/marble_mosaic_tiles_diff_1k.jpg 87d75615bfc7457462370045bfc946a7 CC0 Amal_Kumar
+polyhaven marble_mosaic_tiles_nor_gl_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/marble_mosaic_tiles/marble_mosaic_tiles_nor_gl_1k.jpg ee181f743b986c438726215c4c1e1bbd CC0 Amal_Kumar
+polyhaven marble_mosaic_tiles_rough_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/marble_mosaic_tiles/marble_mosaic_tiles_rough_1k.jpg c79c365d5589c322f805defb8f319a9d CC0 Amal_Kumar
+polyhaven marble_mosaic_tiles_ao_1k https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/marble_mosaic_tiles/marble_mosaic_tiles_ao_1k.jpg 620140b3c49e45961eaf3ad309447fcf CC0 Amal_Kumar
 #
-# --- not in v1 (named, with the reason; v2 retries) ---
-# marble + travertine: both live on ambientCG (Marble013, Travertine004),
-#   whose get endpoint answers 200 with a real size (5.27 MB / 3.49 MB) but
-#   whose API no longer serves the licence or the md5 - the list row for a
-#   url source needs the md5 in the column before the licence, so a
-#   licence-carrying row is impossible until that API comes back or the
-#   file is hashed at fetch time. Recorded, not guessed.
-# mosaic: no CC0 mosaic set answered on either API on 2026-10-22
-#   (ambientCG Mosaic002 answered 404; Poly Haven has no mosaic category).
-# 6 props: Poly Haven's models answer per-file trees (files/Barrel_01 is
-#   gltf/blend/fbx `include` maps of individual pngs and bins, no single
-#   zip URL), and ambientCG's model listing does not filter by type any
-#   more. Both need a source-side answer, not a scouting one.
+# --- travertine, 1k (ambientCG, CC0) ---
+# Poly Haven has no travertine asset (checked: no name matches trav* on
+# 2026-10-23). ambientCG Travertine004 1K-JPG.zip (3.49 MB) holds the whole
+# 1k JPG set; ambientCG's files API serves no licence or md5 field, so the
+# row carries the md5 of the zip bytes scouted on 2026-10-23 and the CC0
+# licence is stated on the asset page: "All assets are released under the
+# Creative Commons CC0 license" (ambientcg.com/view?id=Travertine004).
+url travertine004_1k https://ambientcg.com/get?file=Travertine004_1K-JPG.zip 14597a5c3b231d53b01b6cd711fc28d3 CC0 ambientCG
+#
+# --- 6 props, glb (Poly Pizza, CC0 1.0) ---
+# Poly Haven models are per-file glTF trees (gltf + bin + maps, relative
+# refs) with no zip, so one prop cannot be one fetch row; Poly Pizza serves
+# one self-contained .glb per model and labels each model's licence.
+# Each md5 is of the .glb bytes scouted on 2026-10-23:
+#   barrel   zjCQP1TAci (Quaternius)      poly.pizza/m/zjCQP1TAci
+#   crate    3VGWnZPXmG (Quaternius)      poly.pizza/m/3VGWnZPXmG
+#   column   n8ZvVFcJhl (Quaternius)      poly.pizza/m/n8ZvVFcJhl
+#   lantern  CtHBJ1ufeW (Kay Lousberg)    poly.pizza/m/CtHBJ1ufeW
+#   pot      fHMy0Xrb0V (MilkAndBanana)   poly.pizza/m/fHMy0Xrb0V
+#   pedestal wUeoDKnFBF (Quaternius)      poly.pizza/m/wUeoDKnFBF
+url pizza_barrel https://static.poly.pizza/df9e4b83-758a-4fc7-b311-70fc949ed7ff.glb 0e6c0e56c5af45253b4a4353903befca CC0 Quaternius
+url pizza_crate https://static.poly.pizza/720097e2-63ed-4e5f-9b66-eb416942eea0.glb 04d5faf44a8ab5a1e49dd858d512e2cb CC0 Quaternius
+url pizza_column https://static.poly.pizza/105dfd4b-6af3-4732-8c29-a89b15135b07.glb 7a95a57e4537b91da83744478ea08a09 CC0 Quaternius
+url pizza_lantern https://static.poly.pizza/ecbc7b04-09ca-4068-bb3c-4e5ce1163c9a.glb 9a74babc980188f75b2caf8ac0788867 CC0 Kay_Lousberg
+url pizza_pot https://static.poly.pizza/abd2a561-1d85-4ac7-b675-f495c68aaa3a.glb 9ea7d0984b114e631faea45a9c195b5b CC0 MilkAndBanana
+url pizza_pedestal https://static.poly.pizza/cc5afa7b-86ed-44d0-9521-709ade03fda3.glb d13a8e1253756619631ffd5ee82f15ee CC0 Quaternius

@@ -37,10 +37,10 @@ use crate::shadow_cluster::{LightError, ScreenLight};
 
 /// The encode-only arm of the bake: the live window frame records the spot
 /// pass in its own command buffer, so the frame never waits on the GPU.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 mod encode;
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub use encode::{encode_spot_atlas, SpotEncode};
 
 /// Most shadowed spots in one frame; the atlas has one tile per spot.
@@ -959,7 +959,7 @@ pub const UNIFORM_SLOT_BYTES: u64 = 256;
 pub const SLOT_MATRIX_BYTES: u64 = 64;
 
 /// Depth-only vertex shader over one spot's clip matrix. Engine-owned code.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const SPOT_DEPTH_WGSL: &str = r#"
 struct SlotU {
     clip: mat4x4<f32>,
@@ -974,7 +974,7 @@ fn vs(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {
 /// Device-bake receipt: one pass, its texels and the posted budget. Parity
 /// against the CPU reference is measured separately by [`atlas_parity`], so a
 /// steady frame never pays for a readback stall.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, PartialEq, Debug)]
 pub struct SpotGpuReceipt {
     /// Spots submitted.
@@ -996,7 +996,7 @@ pub struct SpotGpuReceipt {
     pub degraded: bool,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl SpotGpuReceipt {
     /// True while the submit stayed inside the posted budget.
     pub fn within_budget(&self) -> bool {
@@ -1053,7 +1053,7 @@ fn f32_from_u32(v: u32) -> f32 {
 /// Reusable device bake: pipeline, bind shape, uniform buffer, vertex buffer
 /// and the atlas texture. Built once per frame loop; a submit on a matching
 /// shape creates no pipeline, bind group or texture.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct SpotAtlasGpu {
     pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
@@ -1068,7 +1068,7 @@ pub struct SpotAtlasGpu {
     clips: Vec<[f32; 16]>,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl SpotAtlasGpu {
     /// Compile the depth pipeline and the dynamic-offset uniform bind, and
     /// allocate the fixed-size uniform and vertex scratch.
@@ -1219,7 +1219,7 @@ impl SpotAtlasGpu {
 }
 
 /// Uniform slots in the dynamic-offset buffer: one per atlas slot.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn uniform_slots() -> u64 {
     u64::try_from(MAX_SPOTS).unwrap_or(1)
 }
@@ -1230,7 +1230,7 @@ fn uniform_slots() -> u64 {
 /// Fails loudly with typed errors: bad frames or shapes are `Invalid`,
 /// adapter or map faults are `Device`, a validation scope hit is `Validation`.
 /// Native only: it waits on the device, and a browser tab may not block.
-#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
 pub fn submit_spot_atlas(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1269,7 +1269,7 @@ pub fn submit_spot_atlas(
 /// Gate arm: copy the resident atlas back and compare every texel with the
 /// CPU reference. Software-adapter parity is this row; it is not per frame.
 /// Native only: the readback waits on the device.
-#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
 pub fn atlas_parity(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1291,7 +1291,7 @@ pub fn atlas_parity(
 
 /// Validate the spots and build one clip matrix per atlas slot. Slots past
 /// the spot list hold the zero matrix and are never drawn.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn build_slot_clips(
     spots: &[SpotLight],
     slots: usize,
@@ -1324,7 +1324,7 @@ fn build_slot_clips(
 
 /// Write the per-slot matrices and the accepted vertices to their buffers,
 /// growing the vertex buffer only on a larger frame.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn upload_slots(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1348,7 +1348,7 @@ fn upload_slots(
 }
 
 /// Record the depth pass: one clear, then one viewport and draw per slot.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn encode_atlas_pass(
     submitter: &SpotAtlasGpu,
     config: SpotAtlasConfig,
@@ -1417,7 +1417,7 @@ fn encode_atlas_pass(
 
 /// Copy the atlas into a readback buffer, wait for the map, and compare the
 /// texels with the CPU reference. Native only: the map waits on the device.
-#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
 fn read_back_atlas(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1487,19 +1487,19 @@ fn read_back_atlas(
 
 /// Cold error path: a device fault with its context. Built here, outside the
 /// frame function, so the formatter is not charged to a steady frame.
-#[cfg(feature = "window")]
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
 fn device_err(context: &'static str, e: &dyn std::fmt::Display) -> LightError {
     LightError::Device(format!("{context}: {e}"))
 }
 
 /// Cold error path: a wgpu validation scope hit.
-#[cfg(feature = "window")]
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
 fn scope_err(e: &dyn std::fmt::Display) -> LightError {
     LightError::Validation(format!("spot atlas scope: {e}"))
 }
 
 /// Pack one slot's clip matrix into the 64 bytes the uniform holds (no pad).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn matrix_bytes(clip: &[f32; 16]) -> [u8; 64] {
     let mut out = [0u8; 64];
     for (i, v) in clip.iter().enumerate() {
@@ -1509,7 +1509,7 @@ fn matrix_bytes(clip: &[f32; 16]) -> [u8; 64] {
 }
 
 /// Tile or texel count as `f32`; atlas bounds keep every count within `u16`.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn tile_f32(v: usize) -> Result<f32, LightError> {
     u16::try_from(v)
         .map(f32::from)
@@ -1518,7 +1518,7 @@ fn tile_f32(v: usize) -> Result<f32, LightError> {
 
 /// Fill `scratch` with accepted vertices only, slot by slot, so the vertex
 /// buffer and the CPU reference raster the same triangles.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn pack_vertices(scratch: &mut Vec<u8>, verts: &[[f32; 3]]) -> Result<u64, LightError> {
     scratch.clear();
     scratch.reserve(verts.len() * 12);
@@ -1532,7 +1532,7 @@ fn pack_vertices(scratch: &mut Vec<u8>, verts: &[[f32; 3]]) -> Result<u64, Light
 }
 
 /// Compare the mapped device atlas with the CPU reference texel by texel.
-#[cfg(feature = "window")]
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
 fn compare_atlas(
     mapped: &[u8],
     padded: usize,
@@ -1832,17 +1832,20 @@ mod tests {
     // (skip, never fake, without an adapter).
     // ------------------------------------------------------------------
 
-    #[cfg(feature = "window")]
-    fn spot_device() -> Option<(
-        &'static wgpu::Device,
-        &'static wgpu::Queue,
-        &'static wgpu::AdapterInfo,
-    )> {
-        crate::graph::gx1_test_device()
+    #[cfg(feature = "gpu")]
+    fn spot_device() -> Result<
+        (
+            &'static wgpu::Device,
+            &'static wgpu::Queue,
+            &'static wgpu::AdapterInfo,
+        ),
+        crate::test_gpu::NoAdapter,
+    > {
+        crate::graph::gx1_probe()
     }
 
     /// The dark room's atlas shape: four tiles per side at 64 texels.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn dark_room_config() -> SpotAtlasConfig {
         SpotAtlasConfig {
             grid: ATLAS_GRID,
@@ -1850,14 +1853,16 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn the_device_bakes_sixteen_shadowed_spots_in_one_submit() {
         // Caller: `submit_spot_atlas` (the row's submit entry).
         // Behavior: the dark room's sixteen lamps each bake one shadow tile
         // on the device, in one submit, with no validation error.
-        let Some((device, queue, info)) = spot_device() else {
-            eprintln!("SKIPPED spot device bake: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "the_device_bakes_sixteen_shadowed_spots_in_one_submit",
+            spot_device(),
+        ) else {
             return;
         };
         let tris = dark_room();
@@ -1926,14 +1931,16 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn the_device_atlas_agrees_with_the_cpu_reference() {
         // Caller: `atlas_parity` (the gate's readback arm).
         // Behavior: the device atlas and the CPU reference agree on the
         // dark room's depth, texel for texel, inside the row's tolerance.
-        let Some((device, queue, info)) = spot_device() else {
-            eprintln!("SKIPPED spot parity: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "the_device_atlas_agrees_with_the_cpu_reference",
+            spot_device(),
+        ) else {
             return;
         };
         let tris = dark_room();
@@ -1967,7 +1974,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn the_encode_path_records_the_pass_without_submitting_it() {
         // Caller: `encode_spot_atlas` (the live frame's entry).
@@ -1975,8 +1982,10 @@ mod tests {
         // command buffer and submits nothing itself: before the caller's
         // submit the atlas still reads empty, after it the atlas matches the
         // CPU reference. The live frame keeps its no-wait shape.
-        let Some((device, queue, _info)) = spot_device() else {
-            eprintln!("SKIPPED spot encode: no wgpu adapter on this machine");
+        let Some((device, queue, _info)) = crate::test_gpu::require_or_skip(
+            "the_encode_path_records_the_pass_without_submitting_it",
+            spot_device(),
+        ) else {
             return;
         };
         let tris = dark_room();

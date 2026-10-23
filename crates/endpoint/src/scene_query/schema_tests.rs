@@ -19,7 +19,7 @@ fn schema() -> rmcp::serde_json::Value {
 fn query_schema_docs_cover_every_field_and_kind() {
     let value = schema();
     let props = value["properties"].as_object().expect("properties");
-    assert_eq!(props.len(), 23);
+    assert_eq!(props.len(), 25);
     for (name, prop) in props {
         let doc = prop["description"].as_str().unwrap_or("");
         assert!(!doc.is_empty(), "field `{name}` has no doc");

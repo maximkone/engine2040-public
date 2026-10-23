@@ -32,8 +32,24 @@ pub const WIRE_LEN: usize = 6;
 pub const TICKS_PER_SEC: u32 = engine_core::TICK_HZ as u32;
 /// Ticks of 150 ms round-trip at 60 Hz: the resim window the tests prove.
 pub const RTT_TICKS_150MS: u32 = 9;
+/// Ticks a visual correction takes to fade out at 60 Hz (200 ms). The look
+/// passes its `tick - correction_tick` here, so the LM3 tick lane is the
+/// clock for the correction offset and no wall clock enters the picture.
+pub const CORRECTION_FADE_TICKS: u32 = 12;
 /// Phase quantizer: full `[0, 1)` turn maps to `u16` steps.
 pub const PHASE_SCALE: f32 = 65535.0;
+
+/// Fade weight for a visual correction, in permille: `1000` on the correction
+/// tick, `0` at `duration_ticks`, linear between. Integer math only, so the
+/// same replicated tick indices give the same weight on every machine. The
+/// look feeds this from its slot tick and LM3's 60 Hz timeline.
+#[must_use]
+pub fn correction_fade_permille(ticks_since: u32, duration_ticks: u32) -> u32 {
+    if duration_ticks == 0 || ticks_since >= duration_ticks {
+        return 0;
+    }
+    1000u32.saturating_mul(duration_ticks - ticks_since) / duration_ticks
+}
 
 /// One replicated motion pick: the motion-match `(clip, tick)` frame plus
 /// the quantized gait phase. The remote peer re-derives the pose from these
@@ -404,5 +420,18 @@ mod tests {
         assert_ne!(pose.checkpoint(1), pose.checkpoint(2));
         // Zero tick rate costs nothing and never divides.
         assert_eq!(wire_kbps(WIRE_LEN, 0), 0.0);
+    }
+
+    /// EG39: the correction fade is tick-indexed and linear; the look's
+    /// offset is full on the correction tick and exactly zero after 12.
+    #[test]
+    fn correction_fade_permille_is_linear_and_lands_on_zero() {
+        assert_eq!(correction_fade_permille(0, CORRECTION_FADE_TICKS), 1000);
+        assert_eq!(correction_fade_permille(6, CORRECTION_FADE_TICKS), 500);
+        assert_eq!(correction_fade_permille(11, CORRECTION_FADE_TICKS), 83);
+        assert_eq!(correction_fade_permille(12, CORRECTION_FADE_TICKS), 0);
+        assert_eq!(correction_fade_permille(13, CORRECTION_FADE_TICKS), 0);
+        // A zero duration never divides and starts at zero.
+        assert_eq!(correction_fade_permille(0, 0), 0);
     }
 }

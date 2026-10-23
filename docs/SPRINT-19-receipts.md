@@ -6,6 +6,10 @@ Earlier receipt text lives in git history (`git log -p -- docs/SPRINT.md`).
 <!-- 2026-10-21: the `node tools/land.mjs <packet> --dry` half of this template was removed with the loop tools on 2026-10-17 (commit 6bdf32bf; `tools/land.mjs` does not exist). Land by path and paste the proof output. -->
 > Golden `d57b5c8ae3096614` holds for every landing below unless the block names a move; new blocks paste the land+proof output, not hand-typed hashes.
 
+### 2026-10-23, EG42 baked per-move hit tracks
+
+- bbc0881 EG42: `engine-anim::hit_track` bakes the three 1H attack clips into integer-mm `HitTrack` rows (blade p0/p1 plus sixteen bone capsules per tick, `HIT_TRACK_VERSION_V1`); `engine-combat::cut` reads `(move, tick)` and `StrikePose::from_hit_row` feeds the rules-v2 sweep. Proof: `cargo test -p engine-anim --lib hit_track_bake` 2 passed x2 (fresh run 39967558330); `cargo test -p engine2040 --release --test proof_cli default_and_max_seed` PASS (run 39966912408), golden `d57b5c8ae3096614` unchanged; clippy anim+combat PASS (run 39966833946); rustfmt clean. HASH-LAW note added for the HitTrack wire version.
+
 ### 2026-10-21, OPT43 and OPT44 reuse every check, feature builds on the Windows runner
 
 - 137b6c2d OPT43: gh-check keys each result by line, runner and inputs (crate closure, manifests, lock, content/, fixtures/, outside paths the code names) and answers an unchanged line from `target/gh-check/results/`. Proof: `node --test tools/gh-check.test.mjs` 18/18; live, the third `cargo check -p engine-audio --features device` printed `REUSED FAIL from 0 min ago (windows-latest, run .../39509451917)` in 0.4 s. Other sessions' calls kept results within minutes (engine-physics, engine-destruction).

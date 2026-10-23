@@ -18,7 +18,7 @@ import { parsePrefixTable, prefixOf } from "./plan-atlas.mjs";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MAP = join(ROOT, ".opencode", "modmap.md");
 
-// The house token rule (docs/compaction-baseline.md 1.9): tokens = bytes / 4.
+// The house token rule: tokens = bytes / 4, rounded.
 // The packet budget is the number that rule buys: 6,000 tokens.
 export const PACK_BUDGET_TOKENS = 6000;
 // Bytes kept free for the measure block and the row-id tail of the packet.
@@ -92,8 +92,7 @@ export function collect(root = ROOT) {
   });
 }
 
-// The house token rule: bytes / 4, rounded (docs/compaction-baseline.md 1.9
-// prints the same numbers: 144,615 bytes -> 36,154 tokens).
+// The house token rule: bytes / 4, rounded (144,615 bytes -> 36,154 tokens).
 export function tokenCount(bytes) {
   return Math.round(bytes / 4);
 }
@@ -227,7 +226,7 @@ export function buildPacket(dir, { root = ROOT, crates = null, budget = PACK_BUD
 
   const head = [
     `# packet: crates/${dir}`,
-    `_One crate for one agent: the map slice, the crate row, the plan line and the open board rows. Tokens = bytes / 4, rounded (docs/compaction-baseline.md 1.9)._`,
+    `_One crate for one agent: the map slice, the crate row, the plan line and the open board rows. Tokens = bytes / 4, rounded._`,
     "",
     "## Map slice (.opencode/modmap.md)",
     ...slice,

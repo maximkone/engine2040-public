@@ -1,0 +1,32 @@
+{
+  "format": "bx25-blender-column-v1",
+  "status": "PASS",
+  "blender": "5.2.0 LTS",
+  "addon": "bl_ext.user_default.cell_fracture",
+  "addon_version": "0.2.1",
+  "wall_m": {
+    "min": [
+      -2.0,
+      -0.2,
+      0.0
+    ],
+    "max": [
+      2.0,
+      0.2,
+      3.0
+    ]
+  },
+  "sites_file_sha256": "a3e4c5b6a750e5b3a53e56ca5ddb469f39d3879f5162e6626ed53cc5b9f5f652",
+  "site_count": 24,
+  "expected_cells": 24,
+  "cell_count": 24,
+  "cell_count_match": true,
+  "jitter_seed": 7,
+  "canonical_quantum_m": 1e-05,
+  "bake_bytes": 11737,
+  "bake_sha256": "d79c07f15ab880c860110e708aa3bf41d17442fc1682ccc2bcfae6ac3ef1a8c3",
+  "vertex_count": 421,
+  "face_count": 275,
+  "operator_ms": 71.255,
+  "total_ms": 228.745
+}

@@ -14,6 +14,13 @@ use engine_core::{Fnv64, Rng};
 pub const MAX_CROWD: usize = 1000;
 /// Canonical crowd seed; reseed paths derive from it by xor folds.
 pub const CROWD_SEED: u64 = 2040;
+/// Near end of a crowd lane in meters.
+pub const DIST_MIN_M: f32 = 2.0;
+/// Far end of a crowd lane in meters; a lane past it wraps back to near.
+pub const DIST_MAX_M: f32 = 122.0;
+/// Canonical per-tick crowd stride in meters: a live crowd strafes this far
+/// along its lane each tick, so the nearest set moves.
+pub const CROWD_STRIDE_M: f32 = 0.5;
 /// Modeled full-rate eval cost per agent per tick, in nanoseconds.
 pub const COST_FULL_NS: u64 = 1500;
 /// Amortized half-rate cost: one full eval every 2 ticks.
@@ -106,12 +113,29 @@ impl CrowdTape {
         let mut screens = [0.0f32; MAX_CROWD];
         for (d, s) in distances.iter_mut().zip(screens.iter_mut()) {
             let d16 = u16::try_from(rng.next_u32() % 12_000).unwrap_or(u16::MAX);
-            *d = 2.0 + f32::from(d16) / 100.0;
+            *d = DIST_MIN_M + f32::from(d16) / 100.0;
             let w16 = u16::try_from(rng.next_u32() % 10_000).unwrap_or(u16::MAX);
             let frac = f32::from(w16) / 10_000.0;
             *s = frac * frac * 0.03;
         }
         Self { distances, screens }
+    }
+
+    /// Move every agent `stride_m` along its lane; a distance that reaches
+    /// [`DIST_MAX_M`] wraps back by the lane length, so the nearest set
+    /// changes over time and a ranking run sees a moving crowd. Plain
+    /// arithmetic over the lane, no clock and no draw: the same tape and
+    /// stride give the same lanes twice. A non-finite stride poisons the
+    /// lanes, which [`assign_crowd_tiers`] then refuses as
+    /// [`CrowdError::NonFinite`].
+    pub fn advance(&mut self, stride_m: f32) {
+        let lane_m = DIST_MAX_M - DIST_MIN_M;
+        for d in self.distances.iter_mut() {
+            *d += stride_m;
+            if *d >= DIST_MAX_M {
+                *d -= lane_m;
+            }
+        }
     }
 }
 
@@ -223,6 +247,16 @@ pub struct TierCounts {
     pub quarter: u64,
     /// Agents at [`Tier::Far`].
     pub far: u64,
+}
+
+impl TierCounts {
+    /// No agent in any tier: the value a refused tick folds.
+    pub const EMPTY: Self = Self {
+        full: 0,
+        half: 0,
+        quarter: 0,
+        far: 0,
+    };
 }
 
 /// Count one tier per lane. Infallible by design: counts any lane slice.
@@ -392,6 +426,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn advance_strafes_every_lane_and_a_full_lap_returns() {
+        // Ticks for one full 120 m lane at the canonical stride.
+        const LAP_TICKS: u32 = 240;
+        assert_eq!(
+            CROWD_STRIDE_M * LAP_TICKS as f32,
+            DIST_MAX_M - DIST_MIN_M,
+            "one lap is the whole lane"
+        );
+        let mut tape = CrowdTape::seeded(CROWD_SEED);
+        let start = tape.distances;
+        let lane_m = DIST_MAX_M - DIST_MIN_M;
+        tape.advance(CROWD_STRIDE_M);
+        let mut wrapped = 0usize;
+        for (i, &d0) in start.iter().enumerate() {
+            let step = tape.distances[i] - d0;
+            if (step - CROWD_STRIDE_M).abs() < 1e-3 {
+                continue;
+            }
+            assert!(
+                (step + lane_m - CROWD_STRIDE_M).abs() < 1e-3,
+                "agent {i} moved {step} m, neither one stride nor a wrap"
+            );
+            wrapped += 1;
+        }
+        assert!(
+            wrapped > 0,
+            "a thousand-agent tape has lanes at the far end"
+        );
+        // A full lap leaves every lane where it started, wrapped exactly once.
+        // Additions round at f32, so the round trip is approximate.
+        let mut lap = tape.clone();
+        for _ in 1..LAP_TICKS {
+            lap.advance(CROWD_STRIDE_M);
+        }
+        let worst_drift = start
+            .iter()
+            .zip(lap.distances.iter())
+            .fold(0.0f32, |worst, (&d0, &d1)| worst.max((d1 - d0).abs()));
+        assert!(
+            worst_drift < 1e-3,
+            "a full lap returns every lane, worst drift {worst_drift} m"
+        );
+        // A non-finite stride poisons the lane, and the assign refuses it.
+        lap.advance(f32::NAN);
+        let mut out = [Tier::Far; MAX_CROWD];
+        assert_eq!(
+            assign_crowd_tiers(&lap.distances, &lap.screens, &mut out),
+            Err(CrowdError::NonFinite("distances_m")),
+            "a NaN stride is refused, not ranked"
+        );
+    }
+
     /// Recording sink: the impostor contract's test double.
     struct VecSink {
         seen: Vec<usize>,
@@ -557,24 +644,79 @@ mod tests {
         );
     }
 
+    /// Timed ticks in the p99 window: 2048 samples put the p99 at the 21st
+    /// worst tick (sorted index `2048 * 99 / 100`).
+    const P99_SAMPLES: usize = 2048;
+    /// Ticks run and discarded before the timed window (first-touch, branch
+    /// and cache warm).
+    const WARMUP_TICKS: usize = 256;
+
+    /// Reference-CPU p99 gate for the thousand-agent crowd tick, MEASURED
+    /// with the wall clock (test-only; the tick itself reads no clock).
+    ///
+    /// Machine: 13th Gen Intel Core i5-13420H (8 cores / 12 threads, 2.1 GHz
+    /// base), Windows 10 Home, this repo's PC.
+    /// Method: the canonical seeded tape `CrowdTape::seeded(CROWD_SEED)`
+    /// (seed `2040`, 1000 agents), advanced 0.5 m per tick and wrapped so the
+    /// near set moves; [`WARMUP_TICKS`] ticks are discarded, then
+    /// [`P99_SAMPLES`] ticks are timed one by one around
+    /// [`crowd_tick_report`] (tier assign, per-tier count, modeled cost post,
+    /// far handoff, tape digest). p99 is the 21st worst of the 2048 sorted
+    /// samples. Run release, one thread:
+    /// `cargo test -p engine-anim --lib crowd_scale --release -- --ignored
+    /// --nocapture`.
+    ///
+    /// Scope: the crowd LOD tick. Per-agent pose eval is not in this crate's
+    /// thousand-agent path (a pose table holds at most
+    /// [`MAX_FIGHTERS`](crate::lod::MAX_FIGHTERS) fighters), so the per-tier
+    /// eval constants stay modeled by
+    /// `modeled_tick_cost_posts_per_tier_within_budget`.
     #[test]
-    #[ignore = "timing: reference-CPU p99 gate; run with --ignored"]
+    #[ignore = "timing: reference-CPU p99 gate, run with --ignored --release"]
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "wall clock in a test-only timing report, never in the tick"
+    )]
     fn thousand_agent_tick_p99_within_budget() {
-        // No wall clock: the modeled cost pins the budget (see the test
-        // above); this gate replays the tick and checks the model still holds.
-        let tape = CrowdTape::seeded(CROWD_SEED);
+        let mut tape = CrowdTape::seeded(CROWD_SEED);
         let mut tiers = [Tier::Far; MAX_CROWD];
-        for _ in 0..201 {
-            assign_crowd_tiers(&tape.distances, &tape.screens, &mut tiers)
-                .expect("seeded tape assigns");
-            std::hint::black_box(&tiers[..]);
+        for _ in 0..WARMUP_TICKS {
+            tape.advance(CROWD_STRIDE_M);
+            std::hint::black_box(crowd_tick_report(&tape, &mut tiers).expect("warmup tick"));
         }
-        let report = seeded_report(CROWD_SEED).expect("seeded report holds");
+        let mut samples = [0u32; P99_SAMPLES];
+        for slot in samples.iter_mut() {
+            tape.advance(CROWD_STRIDE_M);
+            let start = std::time::Instant::now();
+            let report = crowd_tick_report(&tape, &mut tiers).expect("timed tick");
+            let ns = start.elapsed().as_nanos();
+            *slot = u32::try_from(ns).unwrap_or(u32::MAX);
+            std::hint::black_box(report);
+        }
+        samples.sort_unstable();
+        let p50 = samples[P99_SAMPLES / 2];
+        let p99 = samples[(P99_SAMPLES * 99) / 100];
+        let worst = samples[P99_SAMPLES - 1];
+        let report = crowd_tick_report(&tape, &mut tiers).expect("report holds");
+        let counts = report.counts;
+        println!(
+            "crowd_scale: seed {CROWD_SEED} agents {MAX_CROWD} warmup {WARMUP_TICKS} samples {P99_SAMPLES}"
+        );
+        println!(
+            "  tiers: full {} half {} quarter {} far {} (far handed {})",
+            counts.full, counts.half, counts.quarter, counts.far, report.far_handed
+        );
+        println!(
+            "  posted per-tier ns: full {COST_FULL_NS} half {COST_HALF_NS} quarter {COST_QUARTER_NS} far {COST_FAR_NS} -> modeled tick {} ns",
+            estimate_tick_cost_ns(&counts)
+        );
+        println!(
+            "  measured crowd tick: p50 {p50} ns p99 {p99} ns max {worst} ns (bar {BUDGET_P99_NS} ns)"
+        );
         assert!(
-            report.cost_ns <= BUDGET_P99_NS,
-            "modeled tick {} ns past {} ns",
-            report.cost_ns,
-            BUDGET_P99_NS
+            u64::from(p99) <= BUDGET_P99_NS,
+            "1,000-agent crowd tick p99 {p99} ns past the {BUDGET_P99_NS} ns bar"
         );
     }
 }

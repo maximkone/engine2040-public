@@ -8,10 +8,11 @@
 //! Errors: [`FallbackErr`]; cancelled or stale requests propagate and a
 //! policy without scripted fallback refuses loudly, never silently.
 
+use engine_core::text::clip_bytes;
+
 use super::core::validate_proposal;
 use super::policy::AiSessionPolicy;
 use super::protocol::{AiError, AiRequest, Proposal, ProposalAction};
-use super::stream::truncate_str;
 
 /// Longest fallback notice message, in bytes. The message fits an observe
 /// event verbatim (`MAX_MESSAGE_LEN` is 256 there; this crate stays std-only
@@ -96,7 +97,7 @@ impl FallbackNotice {
             cause,
             error,
             budget_ms,
-            message: truncate_str(&message, MAX_NOTICE_LEN).to_owned(),
+            message: clip_bytes(&message, MAX_NOTICE_LEN).to_owned(),
         }
     }
 }

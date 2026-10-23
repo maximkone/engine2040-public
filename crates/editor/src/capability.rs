@@ -35,15 +35,29 @@
 //! (spatial/command failure after the spend) needs a fresh approval to retry.
 //! Manual inspector/gizmo edits stay human-source direct; every token-bearing
 //! batch (MCP, assistant, scripts) shares this path.
+//!
+//! Undo rule: [`undo_gated`] reverts the newest journaled batch for a token
+//! and [`undo_gated_session`] reverts every receipt the token's session
+//! applied as one grouped revert. Both apply the same gate as [`authorize`]:
+//! the token must grant the op class of the action being undone (an
+//! INSERT-only token cannot undo a DELETE batch, though the delete's inverse
+//! is an insert), every touched node must be in scope, and the budget must
+//! cover the inverse ops. A grouped undo whose object a later batch wrote is
+//! refused by name. Human undo takes no token and stays [`commands::undo`].
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::Path;
 
 use engine_core::Fnv64;
 use engine_scene::ids::ObjectId;
 use engine_scene::transform::{Hierarchy, Transform};
 
-use crate::commands::{self, Applied, Batch, BatchError, ComponentTable, Document, Journal, Op};
+use crate::commands::{
+    self, Applied, Batch, BatchError, CommandMeta, ComponentTable, Document, Journal, JournalEntry,
+    Op, ProvenanceStamp,
+};
+use crate::durable::{persist_sealed, verify_landed, PersistError};
 
 /// Operation classes a token may grant, as bit flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +91,7 @@ impl OpMask {
             | Op::SetMaterial { .. }
             | Op::SetComponent { .. }
             | Op::RemoveComponent { .. }
+            | Op::SetBond { .. }
             | Op::PutMaterial { .. }
             | Op::SetMaterialParam { .. }
             | Op::RemoveLastMaterial => Self::EDIT,
@@ -95,6 +110,7 @@ impl OpMask {
             | Op::SetMaterialParam { .. }
             | Op::RemoveLastMaterial => "material",
             Op::SetComponent { .. } | Op::RemoveComponent { .. } => "component",
+            Op::SetBond { .. } => "bond",
             Op::Remove { .. } => "delete",
         }
     }
@@ -115,6 +131,12 @@ pub struct Capability {
     pub object_prefixes: Vec<String>,
     /// Remaining op budget; one unit per applied op.
     pub edit_budget: u32,
+    /// Applied receipt ids (`Provenance::receipt`) of the batches this
+    /// session landed through [`apply_gated`], oldest first, bounded to
+    /// `JOURNAL_CAP`. Runtime state only: a token is a live grant and never
+    /// persists, so a reopened door starts empty. [`undo_gated_session`]
+    /// groups exactly these receipts.
+    receipts: Vec<u64>,
 }
 
 impl Capability {
@@ -125,6 +147,7 @@ impl Capability {
             ops,
             object_prefixes,
             edit_budget,
+            receipts: Vec::new(),
         }
     }
 
@@ -136,12 +159,44 @@ impl Capability {
             ops: OpMask::ALL,
             object_prefixes: Vec::new(),
             edit_budget: u32::MAX,
+            receipts: Vec::new(),
         }
     }
 
     /// Remaining op budget.
     pub fn remaining(&self) -> u32 {
         self.edit_budget
+    }
+
+    /// Applied receipt ids (`Provenance::receipt`) this session landed
+    /// through the gate, oldest first. The grouped undo names these to the
+    /// command service and reverts nothing else.
+    pub fn receipts(&self) -> &[u64] {
+        &self.receipts
+    }
+
+    /// Record one landed receipt. Bounded like the journal, oldest first, so a
+    /// long session never grows the token without limit.
+    pub(crate) fn record_receipt(&mut self, receipt: u64) {
+        if self.receipts.contains(&receipt) {
+            return;
+        }
+        self.receipts.push(receipt);
+        if self.receipts.len() > commands::JOURNAL_CAP {
+            self.receipts.remove(0);
+        }
+    }
+
+    /// Forget one receipt: its batch was undone, or its work was already
+    /// reverted, so it can no longer join a grouped undo.
+    pub(crate) fn forget_receipt(&mut self, receipt: u64) {
+        self.receipts.retain(|held| *held != receipt);
+    }
+
+    /// Forget every receipt: a rehydrated journal holds none of the session's
+    /// in-memory work.
+    pub fn clear_receipts(&mut self) {
+        self.receipts.clear();
     }
 
     /// True when `id` is inside this token's object scope.
@@ -340,6 +395,19 @@ pub fn canonical_action_hash(batch: &Batch) -> u64 {
                 hash.write_str(value);
             }
             Op::RemoveLastMaterial => hash.write_u8(9),
+            Op::SetBond { id, a, b, strength } => {
+                hash.write_u8(10);
+                hash.write(id.as_uuid().as_bytes());
+                hash.write_u32(*a);
+                hash.write_u32(*b);
+                match strength {
+                    Some(value) => {
+                        hash.write_u8(1);
+                        hash.write_u16(value.permille());
+                    }
+                    None => hash.write_u8(0),
+                }
+            }
         }
     }
     hash.finish()
@@ -433,6 +501,7 @@ pub(crate) fn op_target(op: &Op) -> ObjectId {
         | Op::SetMaterial { id, .. }
         | Op::SetComponent { id, .. }
         | Op::RemoveComponent { id, .. }
+        | Op::SetBond { id, .. }
         | Op::Reparent { id, .. } => *id,
         // The material-table ops touch no node.
         Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {
@@ -648,6 +717,9 @@ pub fn apply_gated(
             return Ok(Applied {
                 effects: seen.effects.clone(),
                 revision: seen.result_revision,
+                before_digest: seen.before_digest,
+                staged_digest: seen.staged_digest,
+                after_digest: seen.after_digest,
                 key: seen.key,
                 provenance: seen.provenance.clone(),
                 journal_index: index,
@@ -666,6 +738,387 @@ pub fn apply_gated(
     // retry needs a fresh approval).
     ledger.authorize(batch, cap, approval, doc.revision)?;
     let applied = commands::apply(doc, journal, batch)?;
+    // The session owns this receipt: the grouped undo reverts exactly these.
+    cap.record_receipt(applied.provenance.receipt());
+    Ok(applied)
+}
+
+/// What refused a gated durable apply: the capability gate (including the
+/// command service) or the store. The document and journal are untouched
+/// either way; a command refusal still spends, as [`apply_gated_persisted`]
+/// explains.
+#[derive(Debug)]
+pub enum GatedPersistError {
+    /// The gate refused; nothing was sealed or committed.
+    Cap(CapError),
+    /// The seal or its read-back failed; nothing was committed.
+    Persist(PersistError),
+}
+
+impl fmt::Display for GatedPersistError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cap(error) => write!(f, "{error}"),
+            Self::Persist(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for GatedPersistError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cap(error) => Some(error),
+            Self::Persist(error) => Some(error),
+        }
+    }
+}
+
+impl From<PersistError> for GatedPersistError {
+    fn from(error: PersistError) -> Self {
+        Self::Persist(error)
+    }
+}
+
+/// The folder and generation a gated durable write seals into.
+///
+/// A caller numbers the generation from the folder (one past the newest
+/// `gen-*.edoc`), so the store stays the owner of its own file names.
+#[derive(Clone, Copy, Debug)]
+pub struct SealTarget<'a> {
+    /// Project folder the generation lands in.
+    pub dir: &'a Path,
+    /// Generation number one past the newest sealed one.
+    pub generation: u64,
+}
+
+/// [`apply_gated`] with a durable seal: the gate runs on private clones of the
+/// document, journal, token and ledger, the staged pair is sealed into `seal`,
+/// and only a read-back match commits it.
+///
+/// A gate refusal writes nothing. The one exception matches [`apply_gated`]: a
+/// command-service refusal still spends the approval and budget (the retry
+/// needs a fresh approval), so the staged spend is committed alone. A failed
+/// seal changes nothing at all, budget and ledger included, so the same
+/// approval can be retried once the store is fixed - never a memory-only
+/// success. A replayed key returns the recorded receipt and seals nothing new.
+pub fn apply_gated_persisted(
+    doc: &mut Document,
+    journal: &mut Journal,
+    batch: &Batch,
+    cap: &mut Capability,
+    approval: &Approval,
+    ledger: &mut ApprovalLedger,
+    seal: SealTarget<'_>,
+) -> Result<Applied, GatedPersistError> {
+    let before_revision = doc.revision;
+    let before_digest = commands::document_digest(doc);
+    let mut staged_doc = doc.clone();
+    let mut staged_journal = journal.clone();
+    let mut staged_cap = cap.clone();
+    let mut staged_ledger = ledger.clone();
+    let mut applied = match apply_gated(
+        &mut staged_doc,
+        &mut staged_journal,
+        batch,
+        &mut staged_cap,
+        approval,
+        &mut staged_ledger,
+    ) {
+        Ok(applied) => applied,
+        Err(error) => {
+            // Stage edits fail before authorization, so committing the staged
+            // spend here is exact either way: the command refusal spent, the
+            // staging refusal spent nothing.
+            if matches!(error, CapError::Command(_)) {
+                *cap = staged_cap;
+                *ledger = staged_ledger;
+            }
+            return Err(GatedPersistError::Cap(error));
+        }
+    };
+    if applied.revision == before_revision {
+        // Idempotent replay: the recorded receipt, nothing new to seal, and
+        // the gate returned before spending or writing.
+        return Ok(applied);
+    }
+    let staged_digest = commands::document_digest(&staged_doc);
+    debug_assert_eq!(applied.before_digest, before_digest);
+    debug_assert_eq!(applied.staged_digest, staged_digest);
+    if staged_digest == before_digest {
+        return Err(PersistError::NoEffect.into());
+    }
+    persist_sealed(seal.dir, seal.generation, &staged_doc, &staged_journal)
+        .map_err(|error| GatedPersistError::Persist(PersistError::Io(error)))?;
+    let landed = verify_landed(seal.dir, seal.generation, before_digest, staged_digest)
+        .map_err(GatedPersistError::Persist)?;
+    *doc = staged_doc;
+    *journal = staged_journal;
+    *cap = staged_cap;
+    *ledger = staged_ledger;
+    applied.after_digest = landed;
+    Ok(applied)
+}
+
+/// What refused a gated durable undo: the capability gate or the store. The
+/// live session is untouched either way.
+#[derive(Debug)]
+pub enum GatedUndoPersistError {
+    /// The gate refused the revert; nothing was sealed or committed.
+    Gate(UndoGateError),
+    /// The seal or its read-back failed; nothing was committed.
+    Persist(PersistError),
+}
+
+impl fmt::Display for GatedUndoPersistError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gate(error) => write!(f, "{error}"),
+            Self::Persist(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for GatedUndoPersistError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Gate(error) => Some(error),
+            Self::Persist(error) => Some(error),
+        }
+    }
+}
+
+impl From<PersistError> for GatedUndoPersistError {
+    fn from(error: PersistError) -> Self {
+        Self::Persist(error)
+    }
+}
+
+/// What refused a gated undo. Every refusal leaves the document, the journal
+/// and the token budget unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UndoGateError {
+    /// A capability gate refused the revert (op class, scope, budget or the
+    /// command service itself).
+    Cap(CapError),
+    /// A later batch wrote `id`, so reverting would clobber that newer work.
+    Pinned {
+        /// The pinned node, named by the refusal.
+        id: ObjectId,
+    },
+    /// The journaled stack no longer holds a receipt the session recorded
+    /// (already undone, or evicted from the bounded journal).
+    UnknownReceipt {
+        /// The receipt key with no applied batch.
+        key: u64,
+    },
+    /// The journal holds no batch to undo.
+    NothingToUndo,
+    /// The stored inverse ops no longer apply to the document.
+    InverseRefused,
+}
+
+impl fmt::Display for UndoGateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cap(error) => write!(f, "{error}"),
+            Self::Pinned { id } => write!(
+                f,
+                "node {id} was written by later work; undoing this batch would clobber it"
+            ),
+            Self::UnknownReceipt { key } => {
+                write!(f, "no journaled batch carries session receipt {key}")
+            }
+            Self::NothingToUndo => f.write_str("the journal holds no applied batches"),
+            Self::InverseRefused => f.write_str("the stored inverse ops no longer apply"),
+        }
+    }
+}
+
+impl std::error::Error for UndoGateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cap(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<CapError> for UndoGateError {
+    fn from(error: CapError) -> Self {
+        Self::Cap(error)
+    }
+}
+
+impl From<commands::UndoError> for UndoGateError {
+    fn from(error: commands::UndoError) -> Self {
+        match error {
+            commands::UndoError::UnknownReceipt { receipt } => {
+                Self::UnknownReceipt { key: receipt }
+            }
+            commands::UndoError::ApplyFailed { source } => Self::Cap(CapError::Command(source)),
+        }
+    }
+}
+
+/// Gate one batch's revert without moving anything: the token must grant the
+/// op class of every action being undone (not the class of the inverse op, so
+/// an INSERT-only token cannot undo a DELETE batch), every node the forward or
+/// inverse ops touch must be in scope, and the inverse op count is the budget
+/// the revert needs.
+fn gate_inverse(entry: &JournalEntry, cap: &Capability) -> Result<u32, CapError> {
+    for op in &entry.forward {
+        let bit = OpMask::for_op(op);
+        if !cap.ops.contains(bit) {
+            return Err(CapError::OpNotAllowed {
+                op: OpMask::op_name(op),
+            });
+        }
+    }
+    for op in entry.forward.iter().chain(entry.inverse.iter()) {
+        let id = op_target(op);
+        if !cap.object_in_scope(id) {
+            return Err(CapError::OutOfScope { id });
+        }
+    }
+    // An inverse longer than `u32::MAX` ops always exceeds the `u32` budget,
+    // so report over-budget instead of truncating.
+    u32::try_from(entry.inverse.len()).map_err(|_| CapError::OverBudget {
+        remaining: cap.edit_budget,
+        needed: u32::MAX,
+    })
+}
+
+/// Undo the newest journaled batch through a capability token.
+///
+/// Human undo takes no token and keeps calling [`commands::undo`]. This is
+/// the token-bearing path: the batch being reverted passes the same class,
+/// scope and budget rules as [`authorize`], so a token cannot undo work of an
+/// op class it does not grant. A refusal leaves the document, the journal and
+/// the budget unchanged; a landed undo spends one unit per inverse op and
+/// forgets the receipt, so a grouped undo never replays it.
+pub fn undo_gated(
+    doc: &mut Document,
+    journal: &mut Journal,
+    cap: &mut Capability,
+) -> Result<Applied, UndoGateError> {
+    let Some(entry) = journal.past.last() else {
+        return Err(UndoGateError::NothingToUndo);
+    };
+    let receipt = entry.provenance.receipt();
+    let needed = gate_inverse(entry, cap)?;
+    if u64::from(needed) > u64::from(cap.edit_budget) {
+        return Err(CapError::OverBudget {
+            remaining: cap.edit_budget,
+            needed,
+        }
+        .into());
+    }
+    let applied = commands::undo(doc, journal).ok_or(UndoGateError::InverseRefused)?;
+    cap.edit_budget -= needed;
+    cap.forget_receipt(receipt);
+    Ok(applied)
+}
+
+/// [`undo_gated`] with a durable seal: the gate runs on private clones, the
+/// staged pair is sealed into `seal`, and only a read-back match commits it. A
+/// refusal from the gate or a failed seal leaves the live document, journal and
+/// budget unchanged, so the door never reports a revert the store did not land.
+pub fn undo_gated_persisted(
+    doc: &mut Document,
+    journal: &mut Journal,
+    cap: &mut Capability,
+    seal: SealTarget<'_>,
+) -> Result<Applied, GatedUndoPersistError> {
+    let before_digest = commands::document_digest(doc);
+    let mut staged_doc = doc.clone();
+    let mut staged_journal = journal.clone();
+    let mut staged_cap = cap.clone();
+    let mut applied = undo_gated(&mut staged_doc, &mut staged_journal, &mut staged_cap)
+        .map_err(GatedUndoPersistError::Gate)?;
+    let staged_digest = commands::document_digest(&staged_doc);
+    debug_assert_eq!(applied.staged_digest, staged_digest);
+    if staged_digest == before_digest {
+        return Err(PersistError::NoEffect.into());
+    }
+    persist_sealed(seal.dir, seal.generation, &staged_doc, &staged_journal)
+        .map_err(|error| GatedUndoPersistError::Persist(PersistError::Io(error)))?;
+    let landed = verify_landed(seal.dir, seal.generation, before_digest, staged_digest)
+        .map_err(GatedUndoPersistError::Persist)?;
+    *doc = staged_doc;
+    *journal = staged_journal;
+    *cap = staged_cap;
+    applied.after_digest = landed;
+    Ok(applied)
+}
+
+/// Undo every batch one capability session applied, as one grouped revert.
+///
+/// The receipts [`apply_gated`] recorded on the token are reverted together
+/// through the command service: newest batch first, one new revision, one
+/// receipt, and the document returns to the bytes it had before the session's
+/// first batch. Later batches from other writers do not block the group while
+/// they touch other objects; an object one of them wrote pins its revert, and
+/// the refusal names that object. The whole group passes one gate: every
+/// undone op class must be granted, every touched node in scope, and the
+/// budget must cover the inverse ops. Any refusal writes nothing.
+pub fn undo_gated_session(
+    doc: &mut Document,
+    journal: &mut Journal,
+    cap: &mut Capability,
+    idempotency_key: u64,
+    stamp: Option<ProvenanceStamp>,
+) -> Result<Applied, UndoGateError> {
+    if cap.receipts().is_empty() {
+        return Err(UndoGateError::NothingToUndo);
+    }
+    // Every recorded receipt must still be journaled: a batch already undone
+    // or evicted cannot join the group, and a partial revert would not return
+    // the pre-session bytes.
+    for key in cap.receipts() {
+        if !journal
+            .past
+            .iter()
+            .any(|entry| entry.provenance.receipt() == *key)
+        {
+            return Err(UndoGateError::UnknownReceipt { key: *key });
+        }
+    }
+    // Gate the whole group before any write.
+    let mut needed: u32 = 0;
+    for entry in &journal.past {
+        if cap.receipts().contains(&entry.provenance.receipt()) {
+            needed = needed.saturating_add(gate_inverse(entry, cap)?);
+        }
+    }
+    if u64::from(needed) > u64::from(cap.edit_budget) {
+        return Err(CapError::OverBudget {
+            remaining: cap.edit_budget,
+            needed,
+        }
+        .into());
+    }
+    let receipts = cap.receipts().to_vec();
+    // Pinned: a later unselected batch wrote a node this session changed.
+    let preview = commands::undo_select(journal, &receipts)?;
+    if let Some(conflict) = preview.conflicts.first() {
+        return Err(UndoGateError::Pinned {
+            id: op_target(&conflict.op),
+        });
+    }
+    let applied = commands::apply_selective_undo_with_meta(
+        doc,
+        journal,
+        &receipts,
+        idempotency_key,
+        stamp,
+        &CommandMeta::significant("undo session"),
+    )?;
+    // Spend only on success and drop the answered receipts: a second grouped
+    // undo must not replay the same revert.
+    cap.edit_budget -= needed;
+    for key in receipts {
+        cap.forget_receipt(key);
+    }
     Ok(applied)
 }
 
@@ -712,6 +1165,25 @@ mod tests {
             commands::apply(&mut doc, &mut journal, &batch).unwrap();
         }
         (doc, journal, a, b)
+    }
+
+    /// Apply one batch through the gate under `cap` and return its receipt.
+    fn gate_batch(
+        doc: &mut Document,
+        journal: &mut Journal,
+        cap: &mut Capability,
+        ledger: &mut ApprovalLedger,
+        ops: Vec<Op>,
+        key: u64,
+    ) -> Applied {
+        let batch = Batch {
+            ops,
+            base_revision: doc.revision,
+            idempotency_key: key,
+            provenance: None,
+        };
+        let approval = approve(cap.session, &batch, doc.revision, doc.revision);
+        apply_gated(doc, journal, &batch, cap, &approval, ledger).expect("gated batch applies")
     }
 
     #[test]
@@ -1111,6 +1583,233 @@ mod tests {
         );
         assert_eq!(doc, before);
         assert_eq!(cap.remaining(), 5);
+    }
+
+    #[test]
+    fn undo_gated_insert_only_token_cannot_undo_delete_batch() {
+        let (mut doc, mut journal, a, _) = setup_two_roots();
+        let mut full = Capability::new(7, OpMask::ALL, Vec::new(), 10);
+        let mut ledger = ApprovalLedger::new();
+        gate_batch(
+            &mut doc,
+            &mut journal,
+            &mut full,
+            &mut ledger,
+            vec![Op::Remove { id: a }],
+            930,
+        );
+        assert_eq!(doc.hierarchy.local(a), None, "the delete landed");
+        let before = doc.clone();
+        let past = journal.past_len();
+        // An INSERT-only token cannot revert a delete: the reverted action is
+        // a delete, even though its inverse op is an insert.
+        let mut insert_only = Capability::new(7, OpMask::INSERT, Vec::new(), 10);
+        assert_eq!(
+            undo_gated(&mut doc, &mut journal, &mut insert_only),
+            Err(UndoGateError::Cap(CapError::OpNotAllowed { op: "delete" }))
+        );
+        assert_eq!(doc, before, "a refused undo writes nothing");
+        assert_eq!(journal.past_len(), past, "the journal keeps the batch");
+        assert_eq!(journal.future_len(), 0, "nothing moved to the redo stack");
+        assert_eq!(insert_only.remaining(), 10, "a refused undo spends nothing");
+        // The granting token reverts it: one revision, one inverse op spent.
+        let undone = undo_gated(&mut doc, &mut journal, &mut full).expect("full token undoes");
+        assert_eq!(undone.key, 930);
+        assert_eq!(doc.hierarchy.local(a), Some(pose_at(0.0, 0.0)));
+        assert_eq!(full.remaining(), 8, "apply spent one, undo spent one");
+        assert!(
+            full.receipts().is_empty(),
+            "the undone receipt is forgotten"
+        );
+    }
+
+    #[test]
+    fn undo_gated_session_restores_exact_pre_session_bytes() {
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        // Five human edits on their own objects land before the session.
+        let mut human = Vec::new();
+        for i in 0..5u64 {
+            let id = ObjectId::new();
+            let batch = insert_batch(
+                id,
+                ObjectId::NIL,
+                100.0 + 4.0 * i as f32,
+                doc.revision,
+                1 + i,
+            );
+            commands::apply(&mut doc, &mut journal, &batch).expect("human edit lands");
+            human.push(id);
+        }
+        let pre_session = commands::document_digest(&doc);
+        let mut cap = Capability::new(7, OpMask::ALL, Vec::new(), 100);
+        let mut ledger = ApprovalLedger::new();
+        let ai: Vec<ObjectId> = (0..4).map(|_| ObjectId::new()).collect();
+        let later: Vec<ObjectId> = (0..4).map(|_| ObjectId::new()).collect();
+        let mut key = 1000;
+        // 4 inserts: the session's own objects.
+        for (i, id) in ai.iter().enumerate() {
+            gate_batch(
+                &mut doc,
+                &mut journal,
+                &mut cap,
+                &mut ledger,
+                vec![Op::Insert {
+                    id: *id,
+                    parent: ObjectId::NIL,
+                    local: pose_at(4.0 * i as f32, 0.0),
+                }],
+                key,
+            );
+            key += 1;
+        }
+        // 8 pose edits: up half a meter and back down.
+        for height in [0.5f32, 0.0] {
+            for (i, id) in ai.iter().enumerate() {
+                gate_batch(
+                    &mut doc,
+                    &mut journal,
+                    &mut cap,
+                    &mut ledger,
+                    vec![Op::SetLocal {
+                        id: *id,
+                        local: pose_at(4.0 * i as f32, height),
+                    }],
+                    key,
+                );
+                key += 1;
+            }
+        }
+        // 4 more inserts, then 2 reparents and 2 deletes.
+        for (i, id) in later.iter().enumerate() {
+            gate_batch(
+                &mut doc,
+                &mut journal,
+                &mut cap,
+                &mut ledger,
+                vec![Op::Insert {
+                    id: *id,
+                    parent: ObjectId::NIL,
+                    local: pose_at(16.0 + 4.0 * i as f32, 0.0),
+                }],
+                key,
+            );
+            key += 1;
+        }
+        for (i, id) in later[..2].iter().enumerate() {
+            gate_batch(
+                &mut doc,
+                &mut journal,
+                &mut cap,
+                &mut ledger,
+                vec![Op::Reparent {
+                    id: *id,
+                    new_parent: ai[i],
+                }],
+                key,
+            );
+            key += 1;
+        }
+        for id in &later[2..] {
+            gate_batch(
+                &mut doc,
+                &mut journal,
+                &mut cap,
+                &mut ledger,
+                vec![Op::Remove { id: *id }],
+                key,
+            );
+            key += 1;
+        }
+        assert_eq!(cap.receipts().len(), 20, "the session groups 20 batches");
+        assert_ne!(
+            commands::document_digest(&doc),
+            pre_session,
+            "the session moved the document"
+        );
+        let undone = undo_gated_session(
+            &mut doc,
+            &mut journal,
+            &mut cap,
+            5000,
+            Some(ProvenanceStamp::script("undo session")),
+        )
+        .expect("session undo reverts the group");
+        assert_eq!(
+            commands::document_digest(&doc),
+            pre_session,
+            "the session's batches revert to the exact pre-session bytes"
+        );
+        assert_eq!(
+            undone.revision, doc.revision,
+            "the revert published one revision"
+        );
+        assert!(
+            cap.receipts().is_empty(),
+            "answered receipts leave the group"
+        );
+        // The human work on other objects stays byte for byte.
+        for (i, id) in human.iter().enumerate() {
+            assert_eq!(
+                doc.hierarchy.local(*id),
+                Some(pose_at(100.0 + 4.0 * i as f32, 0.0)),
+                "human edit {i} stays"
+            );
+        }
+        for id in ai.iter().chain(later.iter()) {
+            assert!(
+                doc.hierarchy.local(*id).is_none(),
+                "session node {id} is gone"
+            );
+        }
+    }
+
+    #[test]
+    fn undo_gated_session_refuses_pinned_object_by_name() {
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        let mut cap = Capability::new(7, OpMask::ALL, Vec::new(), 10);
+        let mut ledger = ApprovalLedger::new();
+        let pinned = ObjectId::new();
+        gate_batch(
+            &mut doc,
+            &mut journal,
+            &mut cap,
+            &mut ledger,
+            vec![Op::Insert {
+                id: pinned,
+                parent: ObjectId::NIL,
+                local: pose_at(0.0, 0.0),
+            }],
+            940,
+        );
+        let receipt = *cap.receipts().first().expect("the gate recorded a receipt");
+        // A human edit lands later on the same object: reverting the insert
+        // would pull the floor out from under it.
+        let human = Batch {
+            ops: vec![Op::SetLocal {
+                id: pinned,
+                local: pose_at(2.0, 0.0),
+            }],
+            base_revision: doc.revision,
+            idempotency_key: 941,
+            provenance: None,
+        };
+        commands::apply(&mut doc, &mut journal, &human).expect("human edit lands");
+        let before = doc.clone();
+        let past = journal.past_len();
+        let budget = cap.remaining();
+        let refused = undo_gated_session(&mut doc, &mut journal, &mut cap, 6000, None)
+            .expect_err("a pinned object refuses the group");
+        assert_eq!(refused, UndoGateError::Pinned { id: pinned });
+        assert!(
+            refused.to_string().contains(&pinned.to_string()),
+            "the refusal names the pinned object"
+        );
+        assert_eq!(doc, before, "a pinned refusal writes nothing");
+        assert_eq!(journal.past_len(), past, "the journal is unchanged");
+        assert_eq!(cap.remaining(), budget, "a pinned refusal spends nothing");
+        assert_eq!(cap.receipts().to_vec(), vec![receipt], "the receipt stays");
     }
 
     #[test]

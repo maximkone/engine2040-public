@@ -23,7 +23,7 @@ what is real, what is a stub and what is empty.
 | System | Status in code |
 | --- | --- |
 | Rigid physics, ragdoll, cloth (presentation) | unit-tested, integrated, ticked |
-| Learned locomotion pipeline | partial: net runtime and distill exist, adoption gated by blind A/B |
+| Learned locomotion pipeline | **not started, and the two halves do not meet**: `crates/nn` is a working i8 `.e2nn` runtime and `crates/distill` trains students, but it trains *one-hot action classes* (`train.rs`: "targets are one-hot class vectors"), on the burn NdArray CPU backend with no GPU runtime. There is no locomotion teacher (no RL policy, no gait), no `crates/physics/src/learned_ctrl.rs`, and no continuous-target path in the trainer. PX5 is open and unblocked; nothing has been trained for it. |
 | Behavior and planning | unit-tested, integrated |
 | Crowd and nav | unit-tested |
 | Netcode | unit-tested, loopback and seeded WAN soaks |

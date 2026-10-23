@@ -14,6 +14,11 @@
 //! part of this glue. Character controllers, arenas and network rollback
 //! consume this API;
 //! they own any further determinism claims.
+//!
+//! RL58 debug lines live beside the tick: [`World::collect_debug`] copies the
+//! collider and joint outlines after a step into [`RapierDebugLines`]. The
+//! copy reads the world and never steps, restores or hashes it. Callers push
+//! their own post-tick sweep, hurt and nav lines through the same groups.
 #![forbid(unsafe_code)]
 
 use super::ragdoll::{CouplingParams, CouplingStats};
@@ -27,7 +32,10 @@ use rapier3d::dynamics::{
 };
 use rapier3d::geometry::{BroadPhaseBvh, ColliderBuilder, ColliderSet, NarrowPhase};
 use rapier3d::math::{Rotation, Vector};
-use rapier3d::pipeline::PhysicsPipeline;
+use rapier3d::pipeline::{
+    DebugColor, DebugRenderBackend, DebugRenderMode, DebugRenderObject, DebugRenderPipeline,
+    DebugRenderStyle, PhysicsPipeline,
+};
 use std::fmt::{Display, Formatter};
 
 /// Fixed step, 60 Hz. Callers pass this to [`World::step`].
@@ -52,6 +60,218 @@ pub const RAGDOLL_SOLVER_PASSES: usize = 12;
 pub const RAGDOLL_MAX_SOLVER_PASSES: usize = 64;
 /// How far the bone masses may miss the total, as a fraction of it.
 pub const RAGDOLL_MASS_TOLERANCE: f32 = 0.01;
+
+/// One captured debug line: endpoints in meters plus a linear RGBA colour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebugLine {
+    /// Start point in meters.
+    pub a_m: [f32; 3],
+    /// End point in meters.
+    pub b_m: [f32; 3],
+    /// Linear RGBA, each channel 0..=1.
+    pub colour_rgba: [f32; 4],
+}
+
+/// The fixed groups the Rapier debug backend fills each frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DebugGroup {
+    /// Collider shapes and AABBs in the Rapier world.
+    Colliders,
+    /// Impulse and multibody joint frames.
+    Joints,
+    /// Combat sweep capsules, copied after the tick by the caller.
+    Sweeps,
+    /// Hurt capsules, copied after the tick by the caller.
+    Hurt,
+    /// Nav paths, copied after the tick by the caller.
+    Nav,
+}
+
+impl DebugGroup {
+    /// Every group in batch order.
+    pub const ALL: [Self; 5] = [
+        Self::Colliders,
+        Self::Joints,
+        Self::Sweeps,
+        Self::Hurt,
+        Self::Nav,
+    ];
+
+    /// Stable name the render recorder finds again.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Colliders => "colliders",
+            Self::Joints => "joints",
+            Self::Sweeps => "sweeps",
+            Self::Hurt => "hurt",
+            Self::Nav => "nav",
+        }
+    }
+
+    /// Depth bias in thousandths of the depth range; negative sits closer.
+    pub const fn depth_bias_permille(self) -> i32 {
+        match self {
+            Self::Colliders => -8,
+            Self::Joints => -4,
+            Self::Sweeps => 0,
+            Self::Hurt => 2,
+            Self::Nav => 4,
+        }
+    }
+
+    /// Linear RGBA every line of this group carries.
+    pub const fn colour_rgba(self) -> [f32; 4] {
+        match self {
+            Self::Colliders => [0.25, 0.85, 1.0, 1.0],
+            Self::Joints => [1.0, 0.82, 0.25, 1.0],
+            Self::Sweeps => [1.0, 0.50, 0.20, 1.0],
+            Self::Hurt => [1.0, 0.25, 0.55, 1.0],
+            Self::Nav => [0.40, 1.0, 0.45, 1.0],
+        }
+    }
+
+    /// Index into [`RapierDebugLines::groups`].
+    const fn index(self) -> usize {
+        match self {
+            Self::Colliders => 0,
+            Self::Joints => 1,
+            Self::Sweeps => 2,
+            Self::Hurt => 3,
+            Self::Nav => 4,
+        }
+    }
+}
+
+/// One captured group in batch order, with the bias and colour the live pass
+/// applies to every line inside it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RapierDebugGroup {
+    name: &'static str,
+    depth_bias_permille: i32,
+    colour_rgba: [f32; 4],
+    lines: Vec<DebugLine>,
+}
+
+impl RapierDebugGroup {
+    /// Stable group name.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Depth bias in thousandths of the depth range; negative sits closer.
+    pub fn depth_bias_permille(&self) -> i32 {
+        self.depth_bias_permille
+    }
+
+    /// Linear RGBA every line in the group carries.
+    pub fn colour_rgba(&self) -> [f32; 4] {
+        self.colour_rgba
+    }
+
+    /// The group's lines in capture order.
+    pub fn lines(&self) -> &[DebugLine] {
+        &self.lines
+    }
+}
+
+/// Post-tick debug line copies for the live line pass and the recorder. Debug
+/// only: the tick never reads this and it is never hashed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RapierDebugLines {
+    groups: [RapierDebugGroup; 5],
+}
+
+impl RapierDebugLines {
+    /// Five empty groups in [`DebugGroup::ALL`] order.
+    pub fn new() -> Self {
+        Self {
+            groups: DebugGroup::ALL.map(|group| RapierDebugGroup {
+                name: group.name(),
+                depth_bias_permille: group.depth_bias_permille(),
+                colour_rgba: group.colour_rgba(),
+                lines: Vec::new(),
+            }),
+        }
+    }
+
+    /// Drop every line but keep the five groups.
+    pub fn clear(&mut self) {
+        for group in &mut self.groups {
+            group.lines.clear();
+        }
+    }
+
+    /// Append one line to `group`, using the group's colour. False when an
+    /// endpoint is not finite; nothing is written then.
+    pub fn push(&mut self, group: DebugGroup, a_m: [f32; 3], b_m: [f32; 3]) -> bool {
+        if !a_m.iter().chain(b_m.iter()).all(|v| v.is_finite()) {
+            return false;
+        }
+        let g = &mut self.groups[group.index()];
+        let colour_rgba = g.colour_rgba;
+        g.lines.push(DebugLine {
+            a_m,
+            b_m,
+            colour_rgba,
+        });
+        true
+    }
+
+    /// Every group in batch order.
+    pub fn groups(&self) -> &[RapierDebugGroup] {
+        &self.groups
+    }
+
+    /// One group by name.
+    pub fn group(&self, group: DebugGroup) -> &RapierDebugGroup {
+        &self.groups[group.index()]
+    }
+
+    /// Total lines across all groups.
+    pub fn line_count(&self) -> usize {
+        self.groups.iter().map(|g| g.lines.len()).sum()
+    }
+}
+
+impl Default for RapierDebugLines {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Rapier calls this trait for every collider and joint line; the backend
+/// keeps only those two and drops the modes the pipeline was not asked for.
+impl DebugRenderBackend for RapierDebugLines {
+    fn draw_line(
+        &mut self,
+        object: DebugRenderObject<'_>,
+        a: Vector,
+        b: Vector,
+        _color: DebugColor,
+    ) {
+        let group = match object {
+            DebugRenderObject::Collider(..) | DebugRenderObject::ColliderAabb(..) => {
+                DebugGroup::Colliders
+            }
+            DebugRenderObject::ImpulseJoint(..) | DebugRenderObject::MultibodyJoint(..) => {
+                DebugGroup::Joints
+            }
+            DebugRenderObject::RigidBody(..)
+            | DebugRenderObject::ContactPair(..)
+            | DebugRenderObject::SoftBody(..) => return,
+        };
+        self.push(group, [a.x, a.y, a.z], [b.x, b.y, b.z]);
+    }
+}
+
+/// The pipeline the Rapier backend fills: collider shapes and joint frames
+/// only, so a caller never sees contact or soft-body noise.
+pub fn debug_render_pipeline() -> DebugRenderPipeline {
+    DebugRenderPipeline::new(
+        DebugRenderStyle::default(),
+        DebugRenderMode::COLLIDER_SHAPES | DebugRenderMode::JOINTS,
+    )
+}
 
 /// Typed errors for the Rapier adapter. User input never panics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -765,6 +985,27 @@ impl World {
         Ok(())
     }
 
+    /// Copy the collider and joint outlines into `out` after the tick. Reads
+    /// only: no body, collider or solver state changes, so the tick hash cannot
+    /// move. Clears `out` first and returns the lines captured.
+    pub fn collect_debug(
+        &self,
+        pipeline: &mut DebugRenderPipeline,
+        out: &mut RapierDebugLines,
+    ) -> usize {
+        out.clear();
+        pipeline.render(
+            out,
+            &self.bodies,
+            &self.colliders,
+            &self.impulse_joints,
+            &self.multibody_joints,
+            &self.narrow,
+            &self.soft_bodies,
+        );
+        out.line_count()
+    }
+
     /// Canonical hash over dynamic bodies in spawn order. Each float is
     /// scaled by [`HASH_SCALE`], rounded to `i64` and folded as little-endian
     /// bytes (FNV-1a). No float formatting, no transcendental calls.
@@ -1254,5 +1495,87 @@ mod tests {
         assert!(Error::SnapshotBytes(SnapshotError::Order)
             .to_string()
             .contains("refused"));
+    }
+
+    #[test]
+    fn debug_lines_draw_colliders_and_joints_as_named_groups() {
+        use rapier3d::dynamics::{GenericJoint, JointAxesMask};
+
+        let mut w = arena_with_capsule();
+        w.spawn_capsule([0.9, 3.5, 0.0], 0.35, 0.8)
+            .expect("second capsule");
+        let (first, second) = (w.order[0], w.order[1]);
+        w.impulse_joints.insert(
+            first,
+            second,
+            GenericJoint::new(JointAxesMask::empty()),
+            true,
+        );
+        step_n(&mut w, 10);
+
+        let mut pipeline = debug_render_pipeline();
+        let mut lines = RapierDebugLines::new();
+        let count = w.collect_debug(&mut pipeline, &mut lines);
+        assert!(count > 0, "the world draws lines");
+        assert_eq!(lines.groups().len(), 5, "five fixed groups");
+        let names: Vec<_> = lines.groups().iter().map(|g| g.name()).collect();
+        assert_eq!(names, vec!["colliders", "joints", "sweeps", "hurt", "nav"]);
+        let colliders = lines.group(DebugGroup::Colliders);
+        assert!(
+            colliders.lines().len() >= 12,
+            "the box and both capsules draw: {}",
+            colliders.lines().len()
+        );
+        assert!(
+            colliders.depth_bias_permille() < 0,
+            "colliders sit closer than the beauty frame"
+        );
+        let joints = lines.group(DebugGroup::Joints);
+        assert_eq!(joints.lines().len(), 3, "one joint draws three lines");
+        assert!(lines.group(DebugGroup::Sweeps).lines().is_empty());
+        assert!(
+            lines.groups().iter().flat_map(|g| g.lines()).all(|l| l
+                .a_m
+                .iter()
+                .chain(l.b_m.iter())
+                .all(|v| v.is_finite())),
+            "every captured coordinate is finite"
+        );
+    }
+
+    #[test]
+    fn debug_lines_leave_the_tick_hash_and_snapshot_unchanged() {
+        let mut w = arena_with_capsule();
+        step_n(&mut w, 30);
+        let (hash, snapshot) = (w.state_hash(), w.snapshot());
+        let mut pipeline = debug_render_pipeline();
+        let (mut first, mut second) = (RapierDebugLines::new(), RapierDebugLines::new());
+        w.collect_debug(&mut pipeline, &mut first);
+        w.collect_debug(&mut pipeline, &mut second);
+        assert_eq!(first, second, "the same world gives the same lines x2");
+        assert_eq!(w.state_hash(), hash, "the copy moves no body");
+        assert_eq!(w.snapshot(), snapshot, "the copy moves no snapshot");
+        step_n(&mut w, 1);
+        let mut after = RapierDebugLines::new();
+        w.collect_debug(&mut pipeline, &mut after);
+        assert_ne!(first, after, "the next copy is post-tick");
+    }
+
+    #[test]
+    fn debug_lines_take_post_tick_sweep_hurt_and_nav_copies() {
+        let mut lines = RapierDebugLines::new();
+        assert!(lines.push(DebugGroup::Sweeps, [0.0; 3], [1.0, 0.0, 0.0]));
+        assert!(lines.push(DebugGroup::Hurt, [0.0, 1.0, 0.0], [0.5, 1.0, 0.0]));
+        assert!(lines.push(DebugGroup::Nav, [0.0, 0.0, 1.0], [0.0, 0.0, 2.0]));
+        assert_eq!(lines.line_count(), 3);
+        let sweep = lines.group(DebugGroup::Sweeps);
+        assert_eq!(sweep.lines().len(), 1);
+        assert_eq!(sweep.colour_rgba(), DebugGroup::Sweeps.colour_rgba());
+        assert!(!lines.push(DebugGroup::Hurt, [f32::NAN, 0.0, 0.0], [0.0; 3]));
+        assert!(!lines.push(DebugGroup::Nav, [0.0; 3], [0.0, f32::INFINITY, 0.0]));
+        assert_eq!(lines.line_count(), 3, "refusals write nothing");
+        lines.clear();
+        assert_eq!(lines.line_count(), 0, "clear drops every line");
+        assert_eq!(lines.groups().len(), 5, "clear keeps the groups");
     }
 }

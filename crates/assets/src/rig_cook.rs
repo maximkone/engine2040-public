@@ -29,8 +29,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::bc::BcFormat;
 use crate::body_import::{import_skinned_body, BodyImportError};
-use crate::ktx2_cook::{cook_ktx2, Ktx2Error, MapKind};
+use crate::ktx2_cook::{cook_ktx2_as, Ktx2Error, MapKind};
 
 /// The cooked directory inside the rig tree: the cooked bodies and their
 /// KTX2 atlases live here, beside the manifest and the clips.
@@ -225,7 +226,9 @@ pub fn cook_body_at(
     })
 }
 
-/// Cook one atlas quadrant: decode the PNG, cook it to a KTX2 block map.
+/// Cook one atlas quadrant: decode the PNG, cook it to a KTX2 block map pinned
+/// to BC1. The fighter atlas ships inside the page's first bundle, so its wire
+/// budget wins over VRAM quality here; the arena lane takes BC7.
 fn cook_atlas(
     file: &str,
     quadrant: usize,
@@ -239,11 +242,12 @@ fn cook_atlas(
     })?;
     let rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
-    cook_ktx2(
+    cook_ktx2_as(
         rgba.as_raw(),
         width,
         height,
         MapKind::BaseColor,
+        BcFormat::Bc1,
         atlas_max_dim,
     )
     .map_err(|reason| RigCookError::Texture {

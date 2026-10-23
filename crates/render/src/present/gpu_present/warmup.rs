@@ -43,7 +43,7 @@ impl Presenter {
     }
 }
 
-#[cfg(all(test, feature = "window"))]
+#[cfg(all(test, feature = "gpu"))]
 mod tests {
     use super::*;
     use crate::pipeline_warmup as ledger;

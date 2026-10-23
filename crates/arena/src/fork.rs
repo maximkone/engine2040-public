@@ -716,14 +716,21 @@ impl ForkJob {
                 // The same holds for the manuballista: no bolt flies in a
                 // fork of a v1 prefix.
                 bolt: None,
+                // Forks come from v1 prefix snapshots only, so the ORCA
+                // crowd channel stays off.
+                steer: None,
                 rise: Vec::new(),
                 height: false,
+                landings: [None; MAX_SLOTS],
                 #[cfg(test)]
                 trace: None,
                 #[cfg(test)]
                 pairwise_plan: false,
                 #[cfg(test)]
                 full_collide_passes: false,
+                // RC36: a fork's legs run inline, so a fork's bytes never
+                // depend on how many pool threads the parent run had.
+                pool: None,
             },
             tape,
         ))

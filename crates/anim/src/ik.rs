@@ -216,6 +216,135 @@ pub fn turn_between(from: [f32; 3], to: [f32; 3]) -> [f32; 4] {
     unit([c[0], c[1], c[2], 1.0 + d])
 }
 
+/// Aim limits for one joint, radians: how far the joint may yaw to either
+/// side and pitch up or down (LF13).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AimLimits {
+    /// Yaw limit to either side, radians.
+    pub yaw: f32,
+    /// Pitch limit up and down, radians.
+    pub pitch: f32,
+}
+
+impl AimLimits {
+    /// The rival-tracking limits: 70 degrees of yaw each side, 30 of pitch.
+    #[must_use]
+    pub fn rival() -> Self {
+        Self {
+            yaw: 70.0_f32.to_radians(),
+            pitch: 30.0_f32.to_radians(),
+        }
+    }
+}
+
+/// The local rotation that aims a joint at `to`, clamped to `limits` and
+/// scaled by `weight` (LF13: head weight 1.0, chest 0.5).
+///
+/// `forward` and `up` are the joint's rest axes, `to` the target offset from
+/// the joint (its length is ignored). Yaw is read in the plane whose normal is
+/// `up`, positive toward the joint's right (`forward` cross `up`); pitch is
+/// the target's elevation above that plane minus the rest elevation. Both are
+/// clamped, then scaled by `weight` in `0..=1`, and applied yaw first about
+/// `up`, then pitch about the yawed right axis. A zero-length or non-finite
+/// input gives identity, so a joint with no target keeps its pose. Angles come
+/// from the crate's polynomial sine and arc cosine, never platform trig, so one
+/// scene aims the same on every host.
+#[must_use]
+pub fn look_at(
+    forward: [f32; 3],
+    up: [f32; 3],
+    to: [f32; 3],
+    limits: AimLimits,
+    weight: f32,
+) -> [f32; 4] {
+    let id = [0.0, 0.0, 0.0, 1.0];
+    if !finite3(forward) || !finite3(up) || !finite3(to) {
+        return id;
+    }
+    let (f, u, d) = (norm(forward), norm(up), norm(to));
+    if len(f) == 0.0 || len(u) == 0.0 || len(d) == 0.0 {
+        return id;
+    }
+    // Right = forward cross up in a right-handed frame (+X for forward -Z).
+    let right_raw = cross3(f, u);
+    let right = if len(right_raw) > 1e-9 {
+        norm(right_raw)
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    // Yaw: signed angle from the horizontal rest forward to the target's
+    // horizontal part, positive toward `right`.
+    let fh_raw = madd(f, u, -dot(f, u));
+    let fh = if len(fh_raw) > 0.0 {
+        norm(fh_raw)
+    } else {
+        right
+    };
+    let dh_raw = madd(d, u, -dot(d, u));
+    let yaw = if len(dh_raw) == 0.0 {
+        0.0
+    } else {
+        let dh = norm(dh_raw);
+        let off = crate::inertialize::acos_unit(dot(dh, fh).clamp(-1.0, 1.0));
+        if dot(dh, right) < 0.0 {
+            -off
+        } else {
+            off
+        }
+    };
+    // Pitch: how much higher the target sits than the rest forward.
+    let pitch = elev(d, u) - elev(f, u);
+    let limit_yaw = limits.yaw.abs();
+    let limit_pitch = limits.pitch.abs();
+    let w = if weight.is_finite() {
+        weight.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let yaw = yaw.clamp(-limit_yaw, limit_yaw) * w;
+    let pitch = pitch.clamp(-limit_pitch, limit_pitch) * w;
+    if yaw == 0.0 && pitch == 0.0 {
+        return id;
+    }
+    // A positive yaw turns right, which is a negative turn about `up`.
+    let (sy, cy) = half_sin_cos(yaw);
+    let q_yaw = [-u[0] * sy, -u[1] * sy, -u[2] * sy, cy];
+    let right_after = rotate(&right, &q_yaw);
+    let (sp, cp) = half_sin_cos(pitch);
+    let q_pitch = [
+        right_after[0] * sp,
+        right_after[1] * sp,
+        right_after[2] * sp,
+        cp,
+    ];
+    quat_mul(q_pitch, q_yaw)
+}
+
+/// Elevation of unit `v` above the plane whose unit normal is `u`, radians,
+/// over the whole -90..=90 range.
+fn elev(v: [f32; 3], u: [f32; 3]) -> f32 {
+    let s = dot(v, u).clamp(-1.0, 1.0);
+    let up = std::f32::consts::FRAC_PI_2 - crate::inertialize::acos_unit(s.abs());
+    if s < 0.0 {
+        -up
+    } else {
+        up
+    }
+}
+
+/// sine and cosine of half an angle up to 70 degrees, by the crate's
+/// polynomial sine: no platform trig, so one scene aims the same on every host.
+fn half_sin_cos(angle: f32) -> (f32, f32) {
+    let half = (angle * 0.5).abs();
+    let s = crate::inertialize::sin_unit(half);
+    let c = crate::inertialize::sin_unit(std::f32::consts::FRAC_PI_2 - half);
+    if angle < 0.0 {
+        (-s, c)
+    } else {
+        (s, c)
+    }
+}
+
 /// Three joints of one limb inside a skeleton: the root joint (hip,
 /// shoulder), the bending joint (knee, elbow) and the end joint (ankle,
 /// wrist), each the parent of the next.
@@ -827,5 +956,79 @@ mod tests {
             solve_limb(&skeleton, &mut b, limb, [0.1 + t, 0.4, 0.05], FORWARD).expect("solve");
         }
         assert_eq!(a, b, "the same inputs give the same bits");
+    }
+
+    const FWD: [f32; 3] = [0.0, 0.0, -1.0];
+    const UP: [f32; 3] = [0.0, 1.0, 0.0];
+
+    fn aimed(q: [f32; 4]) -> [f32; 3] {
+        rotate(&FWD, &q)
+    }
+
+    /// Every component within `tol` of `want` (literals from the closed-form
+    /// aim, so the test needs no trig of its own).
+    fn near(aim: [f32; 3], want: [f32; 3], tol: f32) {
+        for (got, want) in aim.iter().zip(want) {
+            assert!((got - want).abs() < tol, "{aim:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn look_at_a_target_ninety_degrees_right_turns_to_the_yaw_clamp() {
+        // sin 70 = 0.9396926, cos 70 = 0.3420201: a quarter turn right stops
+        // at the 70 degree yaw clamp with the aim level.
+        let aim = aimed(look_at(FWD, UP, [10.0, 0.0, 0.0], AimLimits::rival(), 1.0));
+        near(aim, [0.939_692_6, 0.0, -0.342_020_1], 1e-3);
+    }
+
+    #[test]
+    fn look_at_half_weight_halves_the_turn() {
+        let full = aimed(look_at(FWD, UP, [10.0, 0.0, 0.0], AimLimits::rival(), 1.0));
+        let half = aimed(look_at(FWD, UP, [10.0, 0.0, 0.0], AimLimits::rival(), 0.5));
+        near(full, [0.939_692_6, 0.0, -0.342_020_1], 1e-3);
+        // Half weight, half the angle: sin 35 = 0.5735764, cos 35 = 0.8191520.
+        near(half, [0.573_576_4, 0.0, -0.819_152], 1e-3);
+    }
+
+    #[test]
+    fn look_at_a_target_inside_the_limits_is_followed() {
+        // About 26.6 right and 15 up: both inside 70/30, so the aim lands on
+        // the target direction within the polynomial's 0.03 degree error bar.
+        let to = [0.5, 0.3, -1.0];
+        let aim = aimed(look_at(FWD, UP, to, AimLimits::rival(), 1.0));
+        near(aim, norm(to), 2e-3);
+    }
+
+    #[test]
+    fn look_at_pitch_clamps_at_thirty_degrees() {
+        // Straight up is past the 30 degree pitch limit: the aim stops there,
+        // so its height is sin 30 = 0.5 and it keeps no yaw.
+        let aim = aimed(look_at(FWD, UP, [0.0, 10.0, 0.0], AimLimits::rival(), 1.0));
+        near(aim, [0.0, 0.5, -0.866_025_4], 1e-3);
+    }
+
+    #[test]
+    fn look_at_unreadable_or_zero_weight_input_keeps_the_pose() {
+        let id = [0.0, 0.0, 0.0, 1.0];
+        let limits = AimLimits::rival();
+        assert_eq!(look_at(FWD, UP, [f32::NAN, 0.0, 0.0], limits, 1.0), id);
+        assert_eq!(look_at([0.0; 3], UP, [1.0, 0.0, 0.0], limits, 1.0), id);
+        assert_eq!(look_at(FWD, [0.0; 3], [1.0, 0.0, 0.0], limits, 1.0), id);
+        assert_eq!(look_at(FWD, UP, [1.0, 0.0, 0.0], limits, 0.0), id);
+    }
+
+    #[test]
+    fn look_at_touches_no_heap() {
+        let (sum, heap) = measure(|| {
+            let mut last = 0.0;
+            for k in 0..500u16 {
+                let t = f32::from(k) * 0.001;
+                let q = look_at(FWD, UP, [0.2 + t, 0.1, -1.0], AimLimits::rival(), 0.5);
+                last += q[3];
+            }
+            last
+        });
+        assert_eq!(heap.calls, 0, "500 aims touch no heap");
+        assert!(sum > 0.0);
     }
 }

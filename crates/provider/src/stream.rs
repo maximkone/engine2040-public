@@ -15,6 +15,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use engine_core::text::clip_bytes;
 use engine_core::Fnv64;
 
 use super::announce::{
@@ -277,7 +278,7 @@ pub fn collect_openai_text(sse: &str, max_bytes: usize) -> String {
             if room == 0 {
                 break;
             }
-            out.push_str(truncate_str(&delta, room));
+            out.push_str(clip_bytes(&delta, room));
         }
     }
     out
@@ -292,22 +293,10 @@ pub fn collect_anthropic_text(sse: &str, max_bytes: usize) -> String {
             if room == 0 {
                 break;
             }
-            out.push_str(truncate_str(&delta, room));
+            out.push_str(clip_bytes(&delta, room));
         }
     }
     out
-}
-
-/// Longest char-boundary prefix of `text` within `max` bytes.
-pub(crate) fn truncate_str(text: &str, max: usize) -> &str {
-    if text.len() <= max {
-        return text;
-    }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 /// Bounded tick-side staging queue: chunk-count plus byte caps with counted
@@ -687,7 +676,7 @@ impl StreamJob {
             if piece.len() <= room {
                 self.assembled.push_str(&piece);
             } else {
-                self.assembled.push_str(truncate_str(&piece, room));
+                self.assembled.push_str(clip_bytes(&piece, room));
                 self.truncated = true;
                 self.dropped_chunks += 1;
             }
@@ -776,7 +765,7 @@ impl StreamTape {
     pub fn push(&mut self, tick: u64, text: &str) {
         self.entries.push(TapeEntry {
             tick,
-            text: truncate_str(text, MAX_STREAM_BYTES).to_owned(),
+            text: clip_bytes(text, MAX_STREAM_BYTES).to_owned(),
         });
     }
 

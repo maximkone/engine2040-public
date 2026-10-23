@@ -111,6 +111,7 @@ pub(crate) fn op_ids(batch: &Batch) -> Vec<ObjectId> {
             | Op::Reparent { id, .. }
             | Op::SetMaterial { id, .. }
             | Op::SetComponent { id, .. }
+            | Op::SetBond { id, .. }
             | Op::RemoveComponent { id, .. } => *id,
             // The material-table ops name no node.
             Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {

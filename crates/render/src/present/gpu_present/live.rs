@@ -13,6 +13,7 @@ use super::submit::{
     effective_camera, inverse_view_proj_cols, map_readback_f32, padded_depth_row, ForwardLook,
     FrameCamera, MATERIAL_STRIDE,
 };
+use super::submit_cull::live_submit_order;
 use super::timing::PassesTimed;
 
 /// Fog tranche rows in receipt order: fog passes, fog validation errors,
@@ -442,47 +443,31 @@ impl Presenter {
         Ok(ms)
     }
 
-    /// Identity draw order for one frame: `0..n` into `buf`, so the live
-    /// path keeps list order without a scene graph. Units counts, no alloc.
-    /// Presentation only, never hashed. Caller live paths below.
-    fn frame_draw_order<'a>(
-        list: &DrawList,
-        buf: &'a mut [usize; MAX_DRAWS_PER_FRAME],
-    ) -> &'a [usize] {
-        let n = list.items.len().min(MAX_DRAWS_PER_FRAME);
-        for (i, slot) in buf[..n].iter_mut().enumerate() {
-            *slot = i;
-        }
-        &buf[..n]
-    }
-
     /// Stage one frame from the shared camera plus the frame's built
     /// view-projection: same validation and uniform packing as `stage_frame`
     /// but reuses the caller-built camera and matrix instead of rebuilding
-    /// either. Returns stack camera (80 B) plus light (32 B) images; every
-    /// draw's material lands in `material_scratch`, so a staged frame
-    /// allocates nothing. Units bytes out. Presentation only.
+    /// either. Returns the culled submit order plus stack camera (80 B) and
+    /// light (32 B) images; every draw's material lands in `material_scratch`,
+    /// so a staged frame allocates nothing. Units bytes out. Presentation only.
     /// Caller live paths below after `effective_camera`.
     fn stage_frame_with_camera(
         &mut self,
         list: &DrawList,
         camera: &crate::v1::Camera,
         view_proj: glam::Mat4,
-        order: &[usize],
-    ) -> Result<([u8; 80], [u8; 32]), PresentError> {
+    ) -> Result<super::submit_cull::StagedFrame, PresentError> {
         list.validate()?;
-        if order.len() != list.items.len() {
-            return Err(PresentError::InvalidDraw {
-                index: 0,
-                reason: "draw order length mismatches list".into(),
-            });
-        }
         list.light
             .validate()
             .map_err(|e| PresentError::InvalidDraw {
                 index: 0,
                 reason: format!("light: {e}"),
             })?;
+        // EG38: the live list is built here, so the tested sphere cull runs
+        // here too; the forward and depth passes draw this order.
+        let bounds = self.frame_draw_bounds(list);
+        let (order, submitted) = live_submit_order(list, &bounds, view_proj);
+        self.submitted_draws = submitted;
         let (cam_u, light_u, _) = crate::v1::build_uniforms_with_view_proj(
             camera,
             view_proj,
@@ -499,14 +484,7 @@ impl Presenter {
             reason: format!("frame: {e}"),
         })?;
         self.material_scratch.clear();
-        for (slot, draw) in order.iter().enumerate() {
-            let item = list
-                .items
-                .get(*draw)
-                .ok_or_else(|| PresentError::InvalidDraw {
-                    index: slot,
-                    reason: "draw order escapes list".into(),
-                })?;
+        for (slot, item) in list.items.iter().enumerate() {
             // Material-only pack: the camera plus light uniforms above already
             // carry this frame's matrix, so no per-draw view math runs here.
             let mat_u = crate::v1::build_material(&item.material).map_err(|e| {
@@ -530,7 +508,12 @@ impl Presenter {
             self.material_scratch
                 .resize((slot + 1) * MATERIAL_STRIDE, 0);
         }
-        Ok((cam_u.to_array(), light_u.to_array()))
+        Ok(super::submit_cull::StagedFrame {
+            cam_bytes: cam_u.to_array(),
+            light_bytes: light_u.to_array(),
+            order,
+            submitted,
+        })
     }
 
     /// The auto-exposure meter step of one frame: the histogram of the
@@ -560,11 +543,11 @@ impl Presenter {
         self.auto_exp_state.mult()
     }
 
-    /// After-blit overlay draw for staged HP bars: one textured-quad draw
-    /// over the blit view with no depth. Skips empty plans or verts so the
-    /// live frame stays bit-identical when no HUD is staged. Units quads.
-    /// Presentation only, never hashed. Callers `present_frame_live` and
-    /// `submit::render_offscreen` (the capture twin).
+    /// After-blit overlay draw for staged HUD quads and debug line quads: one
+    /// textured-quad draw over the blit view with no depth. Skips empty plans
+    /// or verts so the live frame stays bit-identical when nothing is staged.
+    /// Units quads. Presentation only, never hashed. Callers
+    /// `present_frame_live` and `submit::render_offscreen` (the capture twin).
     pub(super) fn encode_overlay(
         &self,
         enc: &mut wgpu::CommandEncoder,
@@ -644,14 +627,15 @@ impl Presenter {
                 contents: mvp_bytes.split_at(64).0,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
-        // Bitmap atlas for this slice: one white texel, so solid HP quads
-        // keep their exact color and glyph quads sample a real texture.
-        // The full font raster lands in a later slice without moving this draw.
+        // The O-023 5x7 atlas: cell 0 (space) is opaque white for solid HUD
+        // quads; printable cells carry glyph coverage. Built once, 96x48.
+        let atlas_w = crate::overlay::text::ATLAS_W;
+        let atlas_h = crate::overlay::text::ATLAS_H;
         let atlas = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ra1-overlay-atlas"),
             size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
+                width: atlas_w,
+                height: atlas_h,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -668,15 +652,15 @@ impl Presenter {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &[255u8, 255, 255, 255],
+            crate::overlay::text::atlas_rgba8(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: Some(1),
+                bytes_per_row: Some(atlas_w * 4),
+                rows_per_image: Some(atlas_h),
             },
             wgpu::Extent3d {
-                width: 1,
-                height: 1,
+                width: atlas_w,
+                height: atlas_h,
                 depth_or_array_layers: 1,
             },
         );
@@ -686,8 +670,9 @@ impl Presenter {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            // Pixel text: nearest keeps the 5x7 cells crisp, no cell bleed.
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
@@ -954,9 +939,10 @@ pub(super) fn live_overlay_pipeline(
 impl Presenter {
     /// Refresh the per-frame uniforms: camera, light and every draw's
     /// material in one write to the ring (`stage_frame` packed them).
-    /// Three buffer writes per frame, however many draws.
-    pub(super) fn write_frame_uniforms(&self, cam: &[u8], light: &[u8], ibl_on: bool) {
-        self.queue.write_buffer(&self.cam_buf, 0, cam);
+    /// One camera, one steady-camera, one previous-camera, one light, the
+    /// IBL cut and one material ring write per frame, however many draws.
+    pub(super) fn write_frame_uniforms(&mut self, cam: &[u8], light: &[u8], ibl_on: bool) {
+        super::motion::publish_camera(self, cam);
         self.queue.write_buffer(&self.light_buf, 0, light);
         // The IBL cut word rides every frame, so a frame that cuts the baked
         // ambient never leaks the cut into the next frame.
@@ -1228,20 +1214,19 @@ impl Presenter {
         let stage_started = engine_clock::now();
         let (render_w, render_h) = live_present_size(width, height, live_half_res_enabled());
         let frame = effective_camera(list, render_w, render_h)?;
-        let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
-        let order = Self::frame_draw_order(list, &mut order_buf);
         // The meter step runs before the frame is staged: the histogram
         // of the frame before this one lands here (the readback is one
         // frame late), and the stops it holds ride the blit exposure of
         // this frame.
         self.auto_exposure_meter_step()?;
-        let (cam_bytes, light_bytes) =
-            self.stage_frame_with_camera(list, &frame, frame.built_view_proj, order)?;
+        let staged = self.stage_frame_with_camera(list, &frame, frame.built_view_proj)?;
+        let (cam_bytes, light_bytes) = (staged.cam_bytes, staged.light_bytes);
         self.frame_waits = FrameWaits::default();
         self.ensure_targets(render_w, render_h);
         let mut look = LiveLook::from_toggles(toggles);
         look.gtao = crate::quality::gtao_runs(&self.quality, look.gtao);
         self.write_frame_uniforms(&cam_bytes, &light_bytes, look.ibl);
+        self.write_torch_block(list)?;
         let gtao_run = self.gtao_live_plan(look.gtao, render_w, render_h);
         self.bind_twin_shadow(Self::twin_focus_depth(list))?;
         self.write_fog_forward(&frame, true)?;
@@ -1262,7 +1247,7 @@ impl Presenter {
             live_current,
             live_bind_skip_enabled(),
             self.draw_binds.len(),
-            order.len(),
+            list.items.len(),
         ) {
             self.resolve_draw_binds(list)?;
             live_bind_last_store(live_current);
@@ -1279,15 +1264,15 @@ impl Presenter {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ra1-live-frame"),
             });
-        // The spot shadow atlas rides this frame's own command buffer: the
-        // pass runs before the forward draws and the frame never waits on
-        // the GPU. No spot feed means no pass and no row.
+        // The spot shadow atlas rides this frame's command buffer before the
+        // forward draws; no spot feed means no pass and no row, and never a wait.
         let _spot = self.encode_spot_live(&mut enc, &look);
         // EG8 sky row: consult the pure gate so the sky row disabled skips the
         // sky pass; all-on draws it (LF1: the live frame shows the sky bake).
         // Caller: `live_sky_should_draw` above over `submit_skips_for`.
         let sky_draw = live_sky_should_draw(toggles);
         let fight_fx = self.stage_fight_fx(&frame)?; // FEEL5: hit sparks, blood and dust
+        self.stage_fight_splats(&frame)?; // FEEL5: and the blood it leaves on the floor
         let stale_us: u64;
         let gtao_timed: bool;
         // The `ibl` cell is the forward IBL-bound encode and nothing else, as
@@ -1304,7 +1289,6 @@ impl Presenter {
                 .targets
                 .as_ref()
                 .ok_or_else(|| PresentError::Validation("live frame has no targets".into()))?;
-            let (blit_view, blit_pipeline) = self.sink_target(sink)?;
             let timer = self.gpu_timer.as_ref().zip(timer_slot);
             // LF1: re-read bake pair before forward; `None` keeps off identical.
             if let Some((sky_horizon, sky_exposure)) =
@@ -1327,12 +1311,16 @@ impl Presenter {
                 // nothing to occlude, so the field stays open.
                 gtao_run && look.forward,
                 timer.map(|(timer, _)| timer.gtao_writes()),
+                staged.order(),
             )?;
             let forward_ibl_started = engine_clock::now();
             let fwd_timer = timer.map(|(timer, _)| timer);
             let fwd = ForwardLook::live(&look, sky_draw, gtao_run, fight_fx, fwd_timer);
-            let sky_timed = self.encode_forward(&mut enc, targets, list, fwd);
+            let sky_timed = self.encode_forward(&mut enc, targets, list, fwd, staged.order());
             forward_ibl_ms = engine_clock::since(forward_ibl_started).as_secs_f64() * 1000.0;
+            self.taa
+                .encode(&self.queue, &mut enc, targets.width, targets.height);
+            let (blit_view, blit_pipeline) = self.sink_target(sink)?;
             // LF3 first landing: the CPU GTAO helper
             // (`live_ao_upload_for_frame`: bake via
             // `gtao_live_full_for_forward`, guard via `check_ao_full_for_blit`,
@@ -1388,45 +1376,32 @@ impl Presenter {
             );
             self.encode_blit(
                 &mut enc,
-                &targets.blit_bind,
+                self.blit_bind_for(targets),
                 blit_view,
                 blit_pipeline,
                 timer.map(|(timer, _)| timer.blit_writes()),
             );
-            let overlay_format = match sink {
-                LiveSink::Twin => super::OUTPUT_FORMAT,
-                LiveSink::Surface(_) => self
-                    .surface_config
-                    .as_ref()
-                    .map(|c| c.format)
-                    .unwrap_or(super::OUTPUT_FORMAT),
-            };
+            let overlay_format = self.live_overlay_format(sink);
             if let Some(plan) = self.overlay.hp_bars_plan(frame.aspect) {
                 let mut verts = [crate::overlay::QuadVertex::default();
                     crate::overlay::OVERLAY_MAX_QUADS * crate::overlay::VERTS_PER_QUAD];
                 let written = self.overlay.write_vertices(&mut verts);
                 let count = plan.verts.min(written);
                 if count > 0 {
-                    let mut mvp_bytes = [0u8; 64];
-                    let mut at = 0usize;
-                    for col in plan.mvp.iter() {
-                        for v in col.iter() {
-                            let bytes = v.to_le_bytes();
-                            mvp_bytes[at..at + 4].copy_from_slice(&bytes);
-                            at = at.saturating_add(4);
-                        }
-                    }
                     let overlay_pipeline = self.overlay_pipeline_for(overlay_format);
                     self.encode_overlay(
                         &mut enc,
                         Some(plan),
                         &verts[..count],
-                        &mvp_bytes,
+                        &super::debug_lines::mvp_bytes(plan.mvp),
                         blit_view,
                         &overlay_pipeline,
                     );
                 }
             }
+            // The debug line pass rides the same after-blit view, one draw and
+            // no depth; the off switch or an empty batch keeps the frame equal.
+            self.encode_debug_lines(&mut enc, frame.aspect, overlay_format, blit_view);
             if let Some((timer, slot)) = timer {
                 let timed = PassesTimed {
                     sky: sky_timed,
@@ -1445,10 +1420,7 @@ impl Presenter {
         // exposure, so the target still holds pre-exposure radiance:
         // the meter reads the scene, not the exposed frame.
         if self.auto_exp_enabled {
-            let hdr_view = self
-                .targets
-                .as_ref()
-                .map(|targets| targets.hdr_view.clone());
+            let hdr_view = self.meter_hdr_view();
             if let Some(hdr_view) = hdr_view {
                 histogram_dispatched = self
                     .auto_exp_gpu
@@ -1509,11 +1481,9 @@ impl Presenter {
         width: u32,
         height: u32,
     ) -> Result<FrameReceipt, PresentError> {
-        let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
-        let order = Self::frame_draw_order(list, &mut order_buf);
         let frame = effective_camera(list, width, height)?;
-        let (cam_bytes, light_bytes) =
-            self.stage_frame_with_camera(list, &frame, frame.built_view_proj, order)?;
+        let staged = self.stage_frame_with_camera(list, &frame, frame.built_view_proj)?;
+        let (cam_bytes, light_bytes) = (staged.cam_bytes, staged.light_bytes);
         self.frame_waits = FrameWaits::default();
         let probe = self
             .frames_presented
@@ -1539,6 +1509,7 @@ impl Presenter {
             .is_none_or(|t| t.width != width || t.height != height);
         self.ensure_targets(width, height);
         self.write_frame_uniforms(&cam_bytes, &light_bytes, true);
+        self.write_torch_block(list)?;
         // The surface twin samples the same cascaded sun as the
         // offscreen twin; the frame focus depth selects the band.
         self.bind_twin_shadow(Self::twin_focus_depth(list))?;
@@ -1562,6 +1533,7 @@ impl Presenter {
         // LF3 landing 2: the probe frame runs the same occlusion field as
         // the live frame, so the window and the capture agree.
         let gtao_run = self.gtao_live_plan(true, width, height);
+        self.stage_fight_splats(&frame)?; // FEEL5: a probed frame shows the floor blood too
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut enc = self
             .device
@@ -1575,12 +1547,21 @@ impl Presenter {
             let targets = self.targets.as_ref().expect("ensured above");
             let (_, _, depth_rb) = self.depth_rb.as_ref().expect("ensured above");
             let timer = self.gpu_timer.as_ref().zip(timer_slot);
-            self.encode_ao_field(&mut enc, targets, list, &frame, gtao_run, None)?;
+            self.encode_ao_field(
+                &mut enc,
+                targets,
+                list,
+                &frame,
+                gtao_run,
+                None,
+                staged.order(),
+            )?;
             self.encode_forward(
                 &mut enc,
                 targets,
                 list,
                 ForwardLook::probed(particle_timed, timer.map(|(timer, _)| timer)),
+                staged.order(),
             );
             if let (Some((timer, slot)), true) = (timer, probe) {
                 timer.encode_resolve(
@@ -3136,9 +3117,7 @@ mod live_overlay_capture_tests {
 #[cfg(test)]
 mod live_stage_alloc_tests {
     use super::super::submit::{effective_camera, MATERIAL_STRIDE};
-    use crate::present::{
-        DrawItem, DrawList, MeshKey, PresentError, Presenter, MAX_DRAWS_PER_FRAME,
-    };
+    use crate::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter};
     use crate::test_gpu::{require_or_skip, NoAdapter};
     use engine_core::alloc_probe::measure;
 
@@ -3154,20 +3133,15 @@ mod live_stage_alloc_tests {
     }
 
     /// One live stage, exactly as `present_frame_live` runs it: the frame
-    /// camera once, then the shared stager over the frame's draw order.
+    /// camera once, then the shared stager that builds the culled order.
     /// Returns the staged byte-image lengths (camera, light), so the image
     /// sizes are proven beside the allocation count.
     fn stage(presenter: &mut Presenter, list: &DrawList) -> (usize, usize) {
         let frame = effective_camera(list, 96, 96).expect("frame camera builds");
-        let mut order_buf = [0usize; MAX_DRAWS_PER_FRAME];
-        let draws = list.items.len().min(MAX_DRAWS_PER_FRAME);
-        for (slot, at) in order_buf[..draws].iter_mut().enumerate() {
-            *at = slot;
-        }
-        let (cam, light) = presenter
-            .stage_frame_with_camera(list, &frame, frame.built_view_proj, &order_buf[..draws])
+        let staged = presenter
+            .stage_frame_with_camera(list, &frame, frame.built_view_proj)
             .expect("live stage");
-        (cam.len(), light.len())
+        (staged.cam_bytes.len(), staged.light_bytes.len())
     }
 
     #[test]

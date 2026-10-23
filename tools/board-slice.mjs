@@ -185,6 +185,19 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+// A guessed row id is the common miss (a done row that moved to the archive, a
+// digit off). Name the nearest live ids so the next call is right, instead of
+// making the reader walk the board.
+export const nearRowIds = (id, tasks) => {
+  const head = /^([A-Za-z]+)(\d+)$/.exec(id)?.[1] ?? "";
+  const n = Number(id.slice(head.length));
+  if (!head || !Number.isFinite(n)) return [];
+  return [...tasks.keys()]
+    .filter((key) => key !== id && key.startsWith(head) && /^\d+$/.test(key.slice(head.length)))
+    .sort((a, b) => Math.abs(Number(a.slice(head.length)) - n) - Math.abs(Number(b.slice(head.length)) - n))
+    .slice(0, 4);
+};
+
 function usageFail(message) {
   process.stderr.write(`board-slice: error: ${message}\n\n${HELP}`);
   process.exit(2);
@@ -714,7 +727,10 @@ function main(argv) {
 
   if (!id) usageFail("need <ID> or --self-check");
   const task = tasks.get(id);
-  if (!task) fail(`unknown row ${id}`);
+  if (!task) {
+    const near = nearRowIds(id, tasks);
+    fail(`unknown row ${id}${near.length ? `; did you mean ${near.join(", ")}?` : ""}; node tools/board-slice.mjs --ready lists the open rows`);
+  }
   if (task.archived) fail(`row ${id} is done and archived in docs/archive/; it has no live slice`);
   const { slice, row, needs, plan3, plan7, owned, planFile } = buildSlice(boardText, tasks, task);
   if (json) {

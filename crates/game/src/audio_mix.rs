@@ -4,7 +4,8 @@
 //! this bridge before the headless mixer. Data owner: `engine-audio` owns the
 //! reverb tails and the muffle query; this module only holds the tunnel zone,
 //! one [`VoiceOcclusion`](engine_audio::occlude::VoiceOcclusion) slew per
-//! voice and the per-tick borrow of the wall slice. Units: integer cm for
+//! voice, the bout announcer's line queue and the per-tick borrow of the wall
+//! slice. Units: integer cm for
 //! positions, Q16 gains inside, `0.0..=1.0` floats at the mixer call.
 //! Determinism: same seeds plus same walls give the same gain curve twice
 //! (presentation only, never hashed; golden `d57b5c8ae3096614` stands).
@@ -19,6 +20,9 @@ use engine_audio::occlude::{
     VOICE_FLOOR_Q16,
 };
 use engine_audio::reverb::{ReverbError, ReverbParams, ReverbZone, TUNNEL_WET};
+use engine_audio::FightCue;
+
+use crate::announcer::Announcer;
 
 pub use engine_audio::occlude::{Material, Wall};
 pub use engine_audio::reverb::{TUNNEL_DAMPING, TUNNEL_PRE_DELAY_MS, TUNNEL_RT60_MS};
@@ -31,6 +35,9 @@ pub const TUNNEL_SEND_RADIUS_CM: i32 = 2000;
 /// Most voices mixed per tick (matches the audio 32-voice stealing cap the
 /// plan cites; head of the burst wins, same rule as the director bridge).
 pub const MAX_MIX_VOICES: usize = 32;
+/// Most announcer lines held for the mixer between drains (the mixer drains
+/// every tick, so a burst past this drops its tail, head first).
+pub const MAX_QUEUED_LINES: usize = 4;
 
 /// One voice to place in the mix: where it rings, which bus it rides and
 /// its pre-mix level. Positions are integer-cm floor plane `[x east, z south]`.
@@ -62,6 +69,9 @@ pub struct MixBridge {
     tunnel: ReverbZone,
     sample_rate_hz: u32,
     states: [VoiceOcclusion; MAX_MIX_VOICES],
+    announcer: Announcer,
+    lines: [&'static str; MAX_QUEUED_LINES],
+    line_count: usize,
 }
 
 impl MixBridge {
@@ -74,6 +84,9 @@ impl MixBridge {
             tunnel: ReverbZone::tunnel(TUNNEL_CENTER_CM),
             sample_rate_hz,
             states: [VoiceOcclusion::new_open(); MAX_MIX_VOICES],
+            announcer: Announcer::new(),
+            lines: [""; MAX_QUEUED_LINES],
+            line_count: 0,
         })
     }
 
@@ -122,6 +135,30 @@ impl MixBridge {
         for state in self.states.iter_mut() {
             state.reset_open();
         }
+    }
+
+    /// Speak one bout cue: the announcer's table picks at most one line for
+    /// this tick, and its name joins the queue the mixer drains. The clip
+    /// comes from a content row keyed by the name; a missing clip falls back
+    /// to the cue bank's synth take. Returns the queued name, or `None` while
+    /// the rule's own gap holds. Presentation only, never hashed.
+    pub fn on_fight_cue(&mut self, tick: u64, cue: FightCue) -> Option<&'static str> {
+        let line = self.announcer.on_cue(tick, cue)?;
+        if self.line_count < MAX_QUEUED_LINES {
+            self.lines[self.line_count] = line;
+            self.line_count += 1;
+        }
+        Some(line)
+    }
+
+    /// Hand the queued lines to the mixer and clear them: copies at most
+    /// `out.len()` names, oldest first, and returns how many. A queue longer
+    /// than `out` drops its tail, head first.
+    pub fn take_lines(&mut self, out: &mut [&'static str]) -> usize {
+        let n = self.line_count.min(out.len());
+        out[..n].copy_from_slice(&self.lines[..n]);
+        self.line_count = 0;
+        n
     }
 
     /// Mix one tick on the game thread: query the walls per voice, slew each
@@ -472,5 +509,58 @@ mod tests {
         assert_eq!(bridge.cutoff_hz(0), Some(OPEN_CUTOFF_HZ));
         let mixed = mix_one(&mut bridge, &sfx_at(500), &[]);
         assert_eq!(mixed.gain, 1.0);
+    }
+
+    #[test]
+    fn announcer_line_queues_once_per_gap() {
+        use crate::announcer::{lines, HIT_GAP_TICKS};
+
+        let mut bridge = MixBridge::new(RATE).unwrap();
+        let hit = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 90,
+        };
+        let mut out = [""; MAX_QUEUED_LINES];
+        // The bridge's one announcer call: the returned name lands in the
+        // queue the mixer drains.
+        assert_eq!(bridge.on_fight_cue(0, hit), Some(lines::HIT));
+        // Inside the gap the announcer holds: the queue keeps its one line.
+        assert_eq!(bridge.on_fight_cue(10, hit), None);
+        assert_eq!(bridge.take_lines(&mut out), 1, "one line, not two");
+        assert_eq!(out[0], lines::HIT);
+        // The mixer drained it; a second drain is empty.
+        assert_eq!(bridge.take_lines(&mut out), 0, "the queue is empty again");
+        // Past the gap the voice speaks again and queues again.
+        assert_eq!(bridge.on_fight_cue(HIT_GAP_TICKS, hit), Some(lines::HIT));
+        assert_eq!(bridge.take_lines(&mut out), 1, "speaks again after the gap");
+        assert_eq!(out[0], lines::HIT);
+    }
+
+    #[test]
+    fn announcer_queue_drains_head_first_past_the_out_length() {
+        let mut bridge = MixBridge::new(RATE).unwrap();
+        let hit = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 40,
+        };
+        let parried = FightCue::Parried {
+            attacker: 0,
+            victim: 1,
+        };
+        assert!(bridge.on_fight_cue(0, hit).is_some());
+        assert!(
+            bridge.on_fight_cue(1, parried).is_some(),
+            "another rule speaks inside the hit gap"
+        );
+        let mut one = [""; 1];
+        assert_eq!(bridge.take_lines(&mut one), 1);
+        assert_eq!(one[0], crate::announcer::lines::HIT, "head first");
+        assert_eq!(
+            bridge.take_lines(&mut one),
+            0,
+            "a short drain drops the tail"
+        );
     }
 }

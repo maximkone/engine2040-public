@@ -7,14 +7,14 @@
 //! partition), so a caller can tell a clean scene from a check that never ran.
 //! Owner: the 18-name catalog and every check body stay in `engine-spatial`;
 //! this module only decides which of those names the door's posting can give
-//! an input to: boxes named after their mesh asset (`lamp_2`), sized from a
-//! collider component or the 1 m default, with no velocity and no baked nav
-//! view.
+//! an input to: boxes named after their mesh asset (`lamp_2`), sized by the one
+//! scene adapter ([`engine_editor::spatial_view`]), with no velocity and no
+//! baked nav view.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use engine_editor::commands::Document;
-use engine_scene::component::{ColliderShape, Component, ComponentKind};
+use engine_scene::component::{Component, ComponentKind};
 use engine_scene::ids::ObjectId;
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
@@ -32,15 +32,16 @@ pub struct SkippedCheck {
     pub reason: String,
 }
 
-/// Where each staged node's box size came from: a scene collider component or
-/// the 1 m default cube the door posts until real extents are shared.
+/// Where each staged node's box size came from: a scene collider component
+/// (times world scale) or the labelled fallback ([`engine_editor::spatial_view`]
+/// sizes a bare node by its world scale, 1 m at unit scale).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SizeSource {
     /// Nodes sized from a collider component.
     pub collider: u64,
-    /// Nodes posted as the 1 m default cube.
+    /// Nodes posted as the fallback box (no collider; labelled `default size`).
     pub default: u64,
 }
 
@@ -154,60 +155,20 @@ fn name_base(doc: &Document, id: ObjectId) -> String {
     }
 }
 
-/// Box size in meters from the node's Collider component times the world
-/// scale, or `None` when it has no collider (the 1 m default cube stands in).
-/// Sphere and capsule collapse to their bounding box.
-fn collider_size(doc: &Document, id: ObjectId, scale: [f32; 3]) -> Option<[f32; 3]> {
-    let kinds = doc.components.get(&id.to_string())?;
-    let Some(Component::Collider(c)) = kinds.get(&ComponentKind::Collider) else {
-        return None;
-    };
-    let [a, b, d] = c.half;
-    let own = match c.shape {
-        ColliderShape::Box => [2.0 * a, 2.0 * b, 2.0 * d],
-        ColliderShape::Sphere => [2.0 * a, 2.0 * a, 2.0 * a],
-        ColliderShape::Capsule => [2.0 * a, 2.0 * (a + b), 2.0 * a],
-    };
-    Some([
-        own[0] * scale[0].abs(),
-        own[1] * scale[1].abs(),
-        own[2] * scale[2].abs(),
-    ])
-}
-
-/// Labels and sizes for the staged nodes, in the order given (id-text sort).
-/// Names are `<mesh asset>_<n>` with `n` counting 1.. per base name in that
-/// order, so a node's label moves only when a node of the SAME base name
-/// sorts before it; an unrelated insert never relabels anything. `scales`
-/// holds each node's world scale, index-aligned with `ids`. Returns the
-/// names, the box sizes (1 m default without a collider) and where the sizes
-/// came from.
-pub(crate) fn staged_names_sizes(
-    doc: &Document,
-    ids: &[ObjectId],
-    scales: &[[f32; 3]],
-) -> (Vec<String>, Vec<[f32; 3]>, SizeSource) {
+/// Labels for the staged nodes, in the order given (id-text sort). Names are
+/// `<mesh asset>_<n>` with `n` counting 1.. per base name in that order, so a
+/// node's label moves only when a node of the SAME base name sorts before it;
+/// an unrelated insert never relabels anything.
+pub(crate) fn staged_names(doc: &Document, ids: &[ObjectId]) -> Vec<String> {
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
     let mut names = Vec::with_capacity(ids.len());
-    let mut sizes = Vec::with_capacity(ids.len());
-    let mut source = SizeSource::default();
-    for (id, scale) in ids.iter().zip(scales) {
+    for id in ids {
         let base = name_base(doc, *id);
         let n = seen.entry(base.clone()).or_insert(0);
         *n += 1;
         names.push(format!("{base}_{n}"));
-        match collider_size(doc, *id, *scale).filter(|size| size.iter().all(|v| v.is_finite())) {
-            Some(size) => {
-                source.collider += 1;
-                sizes.push(size);
-            }
-            None => {
-                source.default += 1;
-                sizes.push([1.0; 3]);
-            }
-        }
     }
-    (names, sizes, source)
+    names
 }
 
 /// Why one catalog check has no input to fail on over this staging, or `None`
@@ -321,6 +282,168 @@ pub(crate) fn table_page(
         page.poses.push(pose);
     }
     page
+}
+
+/// Honesty rows for one page: every id with the labelled default box, worded
+/// by the one scene adapter ([`engine_editor::spatial_view::default_row`]).
+/// A caller reading an "does X overlap Y" answer learns which boxes were
+/// assumed, not measured. Index-aligned with `ids`/`labels`.
+pub(crate) fn default_sized(
+    ids: &[String],
+    labels: &[String],
+    defaults: &BTreeMap<String, [f32; 3]>,
+) -> Vec<String> {
+    ids.iter()
+        .zip(labels)
+        .filter_map(|(id, label)| {
+            defaults
+                .get(id)
+                .map(|size| engine_editor::spatial_view::default_row(label, *size))
+        })
+        .collect()
+}
+
+// Document snapshot: actors, the id table and the count of unresolved poses.
+pub(crate) struct Snapshot {
+    pub(crate) actors: Vec<engine_spatial::Actor>,
+    pub(crate) ids: Vec<ObjectId>,
+    pub(crate) missing_pose: u64,
+    pub(crate) sizes: SizeSource,
+    /// Default-sized nodes: id text -> the assumed box in meters. A report can
+    /// name them instead of letting a reader believe the box was measured.
+    pub(crate) defaults: BTreeMap<String, [f32; 3]>,
+}
+
+impl Snapshot {
+    /// True when the actor at `index` carries the labelled default box, not a
+    /// box measured from a collider component.
+    pub(crate) fn is_default(&self, index: usize) -> bool {
+        self.ids
+            .get(index)
+            .is_some_and(|id| self.defaults.contains_key(&id.to_string()))
+    }
+}
+
+/// SP66: the document's lights as the reach query reads them, joined with each
+/// carrying node's pose by the snapshot's id order. A light whose node has no
+/// finite pose is left out: it has no place to reach from, and the reach report
+/// names that node `unplaced`.
+///
+/// Units: the light's place in whole cm (the same rounding as every actor), its
+/// reach in whole cm; a point or spot light with an unreadable or non-positive
+/// range keeps `None`, so its points read `unknown`, never `dark`.
+pub(crate) fn reach_lights(
+    doc: &Document,
+    ids: &[ObjectId],
+    actors: &[engine_spatial::Actor],
+) -> Vec<engine_spatial::ReachLight> {
+    use engine_scene::component::LightKind;
+
+    let mut lights = Vec::new();
+    for (index, id) in ids.iter().enumerate() {
+        let Some(actor) = actors.get(index) else {
+            break;
+        };
+        let Some(table) = doc.components.get(&id.to_string()) else {
+            continue;
+        };
+        let Some(Component::Light(light)) = table.get(&ComponentKind::Light) else {
+            continue;
+        };
+        let (Some(x), Some(y), Some(z)) = (
+            engine_spatial::cm_of(actor.x),
+            engine_spatial::cm_of(actor.y),
+            engine_spatial::cm_of(actor.z),
+        ) else {
+            continue;
+        };
+        let family = match light.kind {
+            LightKind::Directional => engine_spatial::LightFamily::Directional,
+            LightKind::Point => engine_spatial::LightFamily::Point,
+            LightKind::Spot => engine_spatial::LightFamily::Spot,
+        };
+        lights.push(engine_spatial::ReachLight::new(
+            family,
+            [x, y, z],
+            light.range,
+        ));
+    }
+    lights
+}
+
+// Sorted-id snapshot of every reachable node, sized by the one scene adapter
+// ([`engine_editor::spatial_view`]): a collider component gives the real
+// extents, a bare node its world scale (the labelled default). Nodes whose
+// world pose is missing or non-finite post a NaN actor, never a drop, so
+// `unknown-position` fires with the id still in the table.
+pub(crate) fn snapshot(doc: &Document) -> Snapshot {
+    use engine_editor::spatial_view;
+
+    let scene = spatial_view::rows_of(doc);
+    // One slot per reachable node: finite rows plus the missing-pose ids,
+    // merged in id-text order so the table and the actor ids stay aligned.
+    let mut sized: BTreeMap<String, spatial_view::NodeRow> = scene
+        .rows
+        .iter()
+        .map(|row| (row.id.to_string(), *row))
+        .collect();
+    let mut order: Vec<ObjectId> = scene
+        .rows
+        .iter()
+        .map(|row| row.id)
+        .chain(scene.missing.iter().copied())
+        .collect();
+    order.sort_by_key(|id| id.to_string());
+    let names = staged_names(doc, &order);
+    let mut actors = Vec::with_capacity(order.len());
+    let mut ids = Vec::with_capacity(order.len());
+    let mut defaults = BTreeMap::new();
+    for (position, id) in order.iter().enumerate() {
+        let Ok(index) = u32::try_from(position) else {
+            break;
+        };
+        let name = names.get(position).cloned().unwrap_or_default();
+        ids.push(*id);
+        match sized.remove(&id.to_string()) {
+            Some(row) => {
+                if row.basis.is_default() {
+                    defaults.insert(id.to_string(), row.size);
+                }
+                actors.push(spatial_view::actor(&row, index, name));
+            }
+            None => {
+                // A missing or non-finite pose posts a NaN actor, never a drop.
+                defaults.insert(id.to_string(), [1.0; 3]);
+                actors.push(engine_spatial::Actor {
+                    id: index,
+                    name,
+                    x: f32::NAN,
+                    y: f32::NAN,
+                    z: f32::NAN,
+                    sx: 1.0,
+                    sy: 1.0,
+                    sz: 1.0,
+                    parent: None,
+                    physical: true,
+                    vx: 0.0,
+                    vz: 0.0,
+                    yaw: 0.0,
+                });
+            }
+        }
+    }
+    let counts = spatial_view::SizeCounts::of(&scene.rows);
+    let missing = wide(scene.missing.len());
+    Snapshot {
+        actors,
+        ids,
+        missing_pose: missing,
+        sizes: SizeSource {
+            collider: counts.collider,
+            default: counts.default + missing,
+        },
+        defaults,
+    }
 }
 
 /// Table byte allowance for a brief of `budget_bytes`: a quarter of it, so

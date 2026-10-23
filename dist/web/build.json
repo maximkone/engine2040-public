@@ -1,50 +1,80 @@
 {
   "schema": 1,
-  "commit": "2e32ea6b27d2",
+  "commit": "28807636d",
   "target": "wasm32-unknown-unknown",
   "profile": "web",
   "files": {
     "assets/arena.e2bundle": {
-      "bytes": 1360818,
-      "gzipBytes": 735831,
-      "sha256": "6c999d357ba67152a8e9063133d8d9b1b1c35a9c8580fea5130fb8f13cc615f9"
+      "bytes": 1923527,
+      "rawBytes": 2976130,
+      "firstBytes": 1360882,
+      "gzipBytes": 1916799,
+      "brotliBytes": 1914328,
+      "sha256": "f9a5cd2817425a24923fc79878268e7421c70e6cfabfd9db69892c21ffbc0f94"
+    },
+    "assets/fighters.e2bundle": {
+      "bytes": 644268,
+      "rawBytes": 1833595,
+      "firstBytes": 1833595,
+      "gzipBytes": 622825,
+      "brotliBytes": 612376,
+      "sha256": "8a1a6e3a049c2ef168b86a12ce0c9f10728759a9a3c92913f695659239a20127"
     },
     "coi-serviceworker.js": {
       "bytes": 1690,
+      "firstBytes": 1690,
       "gzipBytes": 828,
+      "brotliBytes": 708,
       "sha256": "884d5829f2e6d22540d53de394de8bb7e24ed66c3c9321231665b4bd2c225a04"
     },
     "engine.js": {
-      "bytes": 103070,
-      "gzipBytes": 17349,
-      "sha256": "0703cd2b9aa0b455630f1e79038c7277a26db7a1bc29be1aa41dbd3eab142794"
+      "bytes": 108540,
+      "firstBytes": 108540,
+      "gzipBytes": 18016,
+      "brotliBytes": 15282,
+      "sha256": "bdbfb37a47b3de8c88194c89f300cd29355ff3c5766de97750aefaf34a2f82a0"
     },
     "engine_bg.wasm": {
-      "bytes": 4150422,
-      "gzipBytes": 1319787,
-      "sha256": "cbdb9e0e23d091759a011e440965a2eac0462cab64ad362b51507e0e7bd53392"
+      "bytes": 4545212,
+      "firstBytes": 4545212,
+      "gzipBytes": 1868424,
+      "brotliBytes": 1373126,
+      "sha256": "848974d4593a9cafaef77cdc5c76e31657530ad95e90262adedd3fce308dbfac"
     },
     "index.html": {
-      "bytes": 17437,
-      "gzipBytes": 5847,
-      "sha256": "ed7397cc93a4551977f850ebb2af7eec7d7ad45de5daa7f57ae5f4f250123b53"
+      "bytes": 21798,
+      "firstBytes": 21798,
+      "gzipBytes": 6986,
+      "brotliBytes": 5976,
+      "sha256": "6ec445e2adff26320384587f69a62a902f2d144c22c3502231dc7da28bd23a08"
     },
     "loader.js": {
-      "bytes": 10824,
-      "gzipBytes": 4174,
-      "sha256": "0c63c3cef141655cf06162d7b586302cddfa62c2fd0b14d28c1bf9b2dae9e9e7"
+      "bytes": 19767,
+      "firstBytes": 19767,
+      "gzipBytes": 6794,
+      "brotliBytes": 5961,
+      "sha256": "feae0cc20c30a6dd47c82bc4bb159ed23b3003b834d02d1c79e232813facdfd8"
     }
   },
-  "totalBytes": 5644261,
+  "firstBundleBytes": 2781281,
+  "totalBytes": 7264802,
   "limitBytes": 8388608,
   "underLimit": true,
-  "rawWasmBytes": 4150422,
+  "rawWasmBytes": 5873319,
   "tools": {
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
     "wasmBindgen": "0.2.128",
-    "wasmOpt": null
+    "wasmOpt": "wasm-opt version 117"
   },
-  "wasmOptFlags": null,
+  "wasmOptFlags": [
+    "-Oz",
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+    "--enable-multivalue",
+    "--enable-reference-types",
+    "--enable-mutable-globals"
+  ],
   "wasmOptAb": null,
   "twiggy": []
 }

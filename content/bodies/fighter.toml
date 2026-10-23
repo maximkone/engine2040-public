@@ -1,0 +1,136 @@
+# The fighter body: the physical rig the look draws and the limb layer cuts.
+#
+# The fifteen bone rows are the CT7 rig the fight plays: the names, parents and
+# capsule sizes are the ones `crates/game/src/ragdoll_look.rs` builds and
+# `crates/game/src/limb_look.rs` maps a cut joint onto. Parents come first.
+#
+# A cut energy is newton-seconds. The arena lands a 40 N s blade, so a joint
+# under it gives way and a joint over it holds: a gladius takes a palm, a
+# forearm and a lower leg, while the head and the torso need a heavier blow.
+#
+# Units: meters for the capsules, permille for the muscle and the gore,
+# newton-seconds for a cut.
+
+name = "fighter"
+gore_permille = 1000
+muscle_permille = 900
+
+[bone.pelvis]
+parent = ""
+radius = 0.09
+half_height = 0.0
+
+[bone.torso]
+parent = "pelvis"
+radius = 0.115
+half_height = 0.13
+
+[bone.head]
+parent = "torso"
+radius = 0.09
+half_height = 0.03
+
+[bone.leg_upper_l]
+parent = "pelvis"
+radius = 0.07
+half_height = 0.148
+
+[bone.leg_lower_l]
+parent = "leg_upper_l"
+radius = 0.055
+half_height = 0.164
+
+[bone.foot_l]
+parent = "leg_lower_l"
+radius = 0.04
+half_height = 0.05
+
+[bone.leg_upper_r]
+parent = "pelvis"
+radius = 0.07
+half_height = 0.148
+
+[bone.leg_lower_r]
+parent = "leg_upper_r"
+radius = 0.055
+half_height = 0.164
+
+[bone.foot_r]
+parent = "leg_lower_r"
+radius = 0.04
+half_height = 0.05
+
+[bone.arm_upper_l]
+parent = "torso"
+radius = 0.04
+half_height = 0.085
+
+[bone.arm_lower_l]
+parent = "arm_upper_l"
+radius = 0.035
+half_height = 0.065
+
+[bone.palm_l]
+parent = "arm_lower_l"
+radius = 0.03
+half_height = 0.02
+
+[bone.arm_upper_r]
+parent = "torso"
+radius = 0.04
+half_height = 0.085
+
+[bone.arm_lower_r]
+parent = "arm_upper_r"
+radius = 0.035
+half_height = 0.065
+
+[bone.palm_r]
+parent = "arm_lower_r"
+radius = 0.03
+half_height = 0.02
+
+# The cuts a blade may take, one per joint of the physical rig but the root.
+# The torso carries the waist and the chest bisects; the head carries the neck.
+
+[cut.torso]
+energy = 90
+
+[cut.head]
+energy = 60
+
+[cut.leg_upper_l]
+energy = 45
+
+[cut.leg_lower_l]
+energy = 35
+
+[cut.foot_l]
+energy = 25
+
+[cut.leg_upper_r]
+energy = 45
+
+[cut.leg_lower_r]
+energy = 35
+
+[cut.foot_r]
+energy = 25
+
+[cut.arm_upper_l]
+energy = 35
+
+[cut.arm_lower_l]
+energy = 30
+
+[cut.palm_l]
+energy = 20
+
+[cut.arm_upper_r]
+energy = 35
+
+[cut.arm_lower_r]
+energy = 30
+
+[cut.palm_r]
+energy = 20

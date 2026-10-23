@@ -37,7 +37,7 @@ pub mod frame_tolerance;
 /// Device leg of the live-frame arm: renders a draw list through the window
 /// frame path with every look pass on and then with each pass off, reads the
 /// pixels back and gates them through [`live_gate`].
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod harness;
 
 /// Diff epsilon in 0..=255 levels: a pixel counts only above it.

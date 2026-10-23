@@ -516,11 +516,12 @@ impl Presenter {
         frame: &FrameCamera,
         run: bool,
         timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        order: &[usize],
     ) -> Result<bool, PresentError> {
         if !run {
             return Ok(false);
         }
-        self.encode_depth_prepass(enc, targets, list);
+        self.encode_depth_prepass(enc, targets, list, order);
         let sun = list.light.direction.to_array();
         self.encode_gtao(enc, targets, frame, sun, self.contact_strength, timestamps)
     }

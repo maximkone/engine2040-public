@@ -1078,7 +1078,11 @@ pub fn import_clip(
 
 /// Sample one position track with clamping and lerp; structural problems in
 /// hand-built tracks fail typed instead of panicking.
-fn sample_track3(track: &Track, joint: usize, time: f32) -> Result<[f32; 3], SkinImportError> {
+pub(crate) fn sample_track3(
+    track: &Track,
+    joint: usize,
+    time: f32,
+) -> Result<[f32; 3], SkinImportError> {
     if track.times.len() != track.values.len() || track.times.is_empty() {
         return Err(SkinImportError::BadClip { joint });
     }
@@ -1188,7 +1192,7 @@ fn quat_yaw(quaternion: &[f32; 4]) -> f32 {
 /// Tick count for a clip duration: at least one sample, bounded by
 /// [`MAX_COOK_TICKS`]. The duration comes from validated keys, but
 /// hand-built clips are rechecked here so no path can hang the cook.
-fn cook_tick_count(duration: f32) -> Result<u32, SkinImportError> {
+pub(crate) fn cook_tick_count(duration: f32) -> Result<u32, SkinImportError> {
     if !duration.is_finite() || duration < 0.0 {
         return Err(SkinImportError::NonFinite("clip.duration"));
     }

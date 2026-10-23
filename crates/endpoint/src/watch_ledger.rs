@@ -20,9 +20,11 @@ use engine_core::Fnv64;
 
 use super::scene_query::{QueryAnswer, QueryKind};
 
-/// Query verbs on the hardened surface: the twenty-four [`QueryKind`] words.
-/// Rows are indexed by the frozen discriminant through [`verb_index`], so an
-/// appended kind fails to compile here instead of aliasing a row.
+/// Query verbs on the hardened surface: one row per spatial [`QueryKind`]
+/// word. `diff` has no row: it reads the journal instead of the actor scan and
+/// never reaches [`WatchLedger::record_query`]. Rows are indexed by the frozen
+/// discriminant through [`verb_index`], so an appended kind says here whether
+/// it extends the table.
 pub const QUERY_VERB_COUNT: usize = 24;
 /// Estimated chars per model token on the door (Blender/Unity/Godot MCP
 /// comparison point: our ledger posts chars plus this estimate, never a
@@ -34,9 +36,9 @@ pub const MAX_TAPE_HISTORY: usize = 256;
 const TAPE_TAG: &[u8] = b"e2watchtape:1";
 
 /// Map a query kind onto its ledger row. Exhaustive on purpose: a new kind
-/// must extend the table, never silently share a row.
-fn verb_index(kind: QueryKind) -> usize {
-    match kind {
+/// must extend the table or say here why it has no row.
+fn verb_index(kind: QueryKind) -> Option<usize> {
+    Some(match kind {
         QueryKind::Near => 0,
         QueryKind::Between => 1,
         QueryKind::Visible => 2,
@@ -61,7 +63,10 @@ fn verb_index(kind: QueryKind) -> usize {
         QueryKind::Lidar => 21,
         QueryKind::Map => 22,
         QueryKind::Pixel => 23,
-    }
+        // `diff` reads the journal, not the actor scan; the door answers it
+        // before `note_door_answer`, so it costs no actor-query row.
+        QueryKind::Diff => return None,
+    })
 }
 
 /// Measured cost of one query verb: call count plus wire chars in both
@@ -244,7 +249,10 @@ impl WatchLedger {
         answer: &QueryAnswer,
         wire_chars: usize,
     ) {
-        let row = &mut self.verbs[verb_index(kind)];
+        let Some(index) = verb_index(kind) else {
+            return;
+        };
+        let row = &mut self.verbs[index];
         row.calls = row.calls.saturating_add(1);
         row.request_chars = row
             .request_chars
@@ -369,9 +377,9 @@ impl WatchLedger {
         Ok(report)
     }
 
-    /// Cost row for one verb.
+    /// Cost row for one verb; a kind with no row (`diff`) reads as zeroes.
     pub fn verb_row(&self, kind: QueryKind) -> VerbRow {
-        self.verbs[verb_index(kind)]
+        verb_index(kind).map_or_else(|| VerbRow::new(kind), |index| self.verbs[index])
     }
 
     /// Totals across verbs: `(calls, request_chars, answer_chars)`.

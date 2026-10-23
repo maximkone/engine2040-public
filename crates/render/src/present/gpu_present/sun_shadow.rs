@@ -23,8 +23,22 @@ pub const SUN_SHADOW_SIZE: u32 = 2048;
 /// Float edge matching [`SUN_SHADOW_SIZE`] for UV math (test oracle only).
 #[cfg(test)]
 pub const SUN_SHADOW_SIZE_F32: f32 = 2048.0;
-/// Depth bias: `frag - BIAS <= stored` is lit.
-pub const SUN_SHADOW_BIAS: f32 = 0.002;
+/// Constant depth-compare bias in normalized depth: 2^-19.
+/// The old flat 0.002 was 0.119 m of depth over the 59.5 m sun frustum, so a
+/// foot stood about 10 cm off its own contact shadow. This is the float-depth
+/// floor; [`SUN_SHADOW_SLOPE_SCALE`] covers grazing surfaces and
+/// [`SUN_SHADOW_NORMAL_OFFSET_TEXELS`] moves the sample off the surface.
+pub const SUN_SHADOW_BIAS: f32 = 1.0 / 524288.0;
+/// Slope-scaled compare bias in texels of the surface's depth slope: 2.0
+/// texels covers the 3x3 compare grid's footprint plus one texel of margin.
+pub const SUN_SHADOW_SLOPE_SCALE: f32 = 2.0;
+/// Normal offset in light-space texels: the forward compare moves its sample
+/// along the surface normal by this many texels before it projects, so a
+/// surface does not compare against its own texel.
+pub const SUN_SHADOW_NORMAL_OFFSET_TEXELS: f32 = 1.0;
+
+#[cfg(test)]
+mod steady_tests;
 /// Ortho box center in meters: the pit center.
 pub const SUN_SHADOW_CENTER_M: [f32; 3] = [0.0, 0.0, 0.0];
 /// Ortho half-extent in meters: 30 m span over the pit.
@@ -61,6 +75,25 @@ pub fn sun_shadow_size_for_half(half_res: bool) -> u32 {
 #[must_use]
 pub fn sun_snap_origin_for_size(origin_m: f32, size: u32) -> f32 {
     crate::shadow_cascade::snap_shadow_origin(origin_m, SUN_SHADOW_HALF_EXTENT_M, size)
+}
+/// One light-space texel in meters for a square `edge`: the 30 m pit span
+/// over the map edge. Units texels in, meters out. Determinism pure.
+#[must_use]
+pub fn sun_shadow_texel_m(edge: u32) -> f32 {
+    2.0 * SUN_SHADOW_HALF_EXTENT_M / edge_f32(edge)
+}
+/// The forward compare's normal-offset distance in meters for `edge`.
+/// Units texels in, meters out. Determinism pure.
+#[must_use]
+pub fn sun_shadow_normal_offset_m(edge: u32) -> f32 {
+    SUN_SHADOW_NORMAL_OFFSET_TEXELS * sun_shadow_texel_m(edge)
+}
+/// Slope-scaled compare bias per unit `tan(theta)` for `edge`, in normalized
+/// depth: [`SUN_SHADOW_SLOPE_SCALE`] texels of the surface's depth slope over
+/// the sun span. Units texels in, normalized depth out. Determinism pure.
+#[must_use]
+pub fn sun_shadow_slope_scale_for(edge: u32) -> f32 {
+    SUN_SHADOW_SLOPE_SCALE * sun_shadow_texel_m(edge) / (SUN_SHADOW_FAR_M - SUN_SHADOW_NEAR_M)
 }
 fn sun_light_basis(sun: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let fwd = [-sun[0], -sun[1], -sun[2]];
@@ -163,6 +196,50 @@ pub fn sun_shadow_uniform_bytes(vp: [[f32; 4]; 4], bias: f32, scale: f32) -> [u8
     out[68..72].copy_from_slice(&scale.to_le_bytes());
     out
 }
+/// Forward-group compare settings for one sun-map edge. Mirrors `SunFwdU` in
+/// `forward.wgsl` field for field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SunFwdSample {
+    /// Constant compare bias in normalized depth: [`SUN_SHADOW_BIAS`].
+    pub bias: f32,
+    /// 1 when the frame recorded the map, 0 when it skipped it.
+    pub enabled: f32,
+    /// One map texel in UV: `1/edge`.
+    pub texel: f32,
+    /// Normal-offset distance in meters: [`sun_shadow_normal_offset_m`].
+    pub normal_offset_m: f32,
+    /// Slope bias per unit `tan(theta)`: [`sun_shadow_slope_scale_for`].
+    pub slope_scale: f32,
+}
+/// The live compare settings for `edge`: on, 2^-19, one texel offset.
+/// Units texels in, settings out. Determinism pure, never hashed.
+#[must_use]
+pub fn sun_fwd_sample_for_edge(edge: u32) -> SunFwdSample {
+    SunFwdSample {
+        bias: SUN_SHADOW_BIAS,
+        enabled: 1.0,
+        texel: 1.0 / edge_f32(edge),
+        normal_offset_m: sun_shadow_normal_offset_m(edge),
+        slope_scale: sun_shadow_slope_scale_for(edge),
+    }
+}
+/// Forward-group bytes for the live sun compare: 96 bytes, the pass matrix
+/// first (64), then `bias`, `enabled`, `texel`, `normal_offset` and
+/// `slope_scale`, then three pads, in the `SunFwdU` order.
+pub fn sun_forward_uniform_bytes(vp: [[f32; 4]; 4], sample: SunFwdSample) -> [u8; 96] {
+    let mut out = [0u8; 96];
+    for (ci, col) in vp.iter().enumerate() {
+        for (ri, c) in col.iter().enumerate() {
+            out[ci * 16 + ri * 4..ci * 16 + ri * 4 + 4].copy_from_slice(&c.to_le_bytes());
+        }
+    }
+    out[64..68].copy_from_slice(&sample.bias.to_le_bytes());
+    out[68..72].copy_from_slice(&sample.enabled.to_le_bytes());
+    out[72..76].copy_from_slice(&sample.texel.to_le_bytes());
+    out[76..80].copy_from_slice(&sample.normal_offset_m.to_le_bytes());
+    out[80..84].copy_from_slice(&sample.slope_scale.to_le_bytes());
+    out
+}
 /// Depth-only vertex shader for the live sun map: sun matrix transform.
 /// Owner render lane; Caller `submit::encode_forward` live depth builds its pipeline from it.
 /// Units WGSL text. Determinism fixed bytes.
@@ -249,6 +326,10 @@ pub(crate) struct SunShadowSubmitter {
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
+    /// EG11b: the forward group's pass frame (matrix, bias, enabled, texel).
+    fwd_uniform: wgpu::Buffer,
+    /// EG11b: the comparison sampler the forward group binds at 14.
+    sampler: wgpu::Sampler,
 }
 
 impl SunShadowSubmitter {
@@ -298,6 +379,76 @@ impl SunShadowSubmitter {
             uniform,
             bind,
             pipeline,
+            fwd_uniform: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("eg11-sun-forward-uniform"),
+                size: 96,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            // LessEqual against `frag - bias` is lit when the fragment is in
+            // front of the stored nearest depth (the depth pass wrote `Less`).
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("eg11-sun-compare"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                compare: Some(wgpu::CompareFunction::LessEqual),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// The live depth map, bound in the forward group at 13.
+    pub(crate) fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+
+    /// The comparison sampler for the live depth map, bound at 14.
+    pub(crate) fn sampler(&self) -> &wgpu::Sampler {
+        &self.sampler
+    }
+
+    /// The forward group's pass frame, bound at 20.
+    pub(crate) fn fwd_uniform(&self) -> &wgpu::Buffer {
+        &self.fwd_uniform
+    }
+
+    /// Write the pass frame for a frame that skipped the depth pass: the
+    /// forward shader then reads fully lit, so a stale map never shadows.
+    /// Caller: `submit::encode_forward` when the switch is off or the sun
+    /// direction is invalid.
+    pub(crate) fn disable_forward(&self, queue: &wgpu::Queue) {
+        let off = SunFwdSample {
+            enabled: 0.0,
+            ..sun_fwd_sample_for_edge(self.edge)
+        };
+        let bytes = sun_forward_uniform_bytes([[0.0; 4]; 4], off);
+        queue.write_buffer(&self.fwd_uniform, 0, &bytes);
+    }
+
+    /// Record the forward frame's sun step: the map when the frame wants it
+    /// and the switch is on, else the lit uniform so a stale map never
+    /// shadows. Returns the pass time the receipt posts (0 when skipped).
+    /// Caller: `submit::encode_forward`.
+    pub(crate) fn record(
+        &self,
+        presenter: &super::presenter::Presenter,
+        enc: &mut wgpu::CommandEncoder,
+        list: &crate::present::DrawList,
+        wanted: bool,
+    ) -> u64 {
+        let us = match wanted {
+            true => self.encode(presenter, enc, list),
+            false => None,
+        };
+        match us {
+            Some(us) => us,
+            None => {
+                self.disable_forward(&presenter.queue);
+                0
+            }
         }
     }
 
@@ -332,10 +483,12 @@ impl SunShadowSubmitter {
     ) -> Option<u64> {
         let started = engine_clock::now();
         let dir = list.light.direction.to_array();
-        let (_, uniform_bytes) = live_sun_shadow_for_dir(dir).ok()?;
+        let (vp, uniform_bytes) = live_sun_shadow_for_dir(dir).ok()?;
         presenter
             .queue
             .write_buffer(&self.uniform, 0, &uniform_bytes);
+        let fwd = sun_forward_uniform_bytes(vp, sun_fwd_sample_for_edge(self.edge));
+        presenter.queue.write_buffer(&self.fwd_uniform, 0, &fwd);
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("eg11-sun-depth-pass"),
@@ -366,6 +519,12 @@ impl SunShadowSubmitter {
         u64::try_from(engine_clock::since(started).as_micros()).ok()
     }
 }
+/// Map edge as a float for the forward uniform's texel step, exact for every
+/// live edge (1024 or 2048) with no lossy cast on the per-frame path.
+fn edge_f32(edge: u32) -> f32 {
+    let e = u16::try_from(edge).unwrap_or(2048);
+    f32::from(e)
+}
 /// CPU oracle: sun-map UV and depth of a world point; test-only until the
 /// presenter reads the map back.
 #[cfg(test)]
@@ -390,7 +549,8 @@ fn sun_uv_depth(
         return Err(SunShadowError::Invalid("sun clip is not finite".into()));
     }
     let u = clip[0] * 0.5 + 0.5;
-    let v = clip[1] * 0.5 + 0.5;
+    // The depth pass drew through the standard viewport: v runs down.
+    let v = 0.5 - clip[1] * 0.5;
     let depth = clip[2];
     if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) || !(0.0..=1.0).contains(&depth) {
         return Ok(None);
@@ -516,6 +676,56 @@ mod tests {
         assert_eq!(live_edge, desc.size.width, "view and desc agree on 2048");
     }
     #[test]
+    fn forward_frame_carries_the_pass_matrix_and_a_3x3_pcf() {
+        // The forward group's pass frame is the depth pass matrix (64 B), then
+        // bias, enabled, texel, normal offset and slope scale, in the
+        // `SunFwdU` order, and the reader is a 3x3 compare instead of the old
+        // fixed 2x2 at 1/256.
+        let vp = arena_sun_view_proj().expect("arena sun view");
+        fn at(bytes: &[u8; 96], offset: usize) -> f32 {
+            f32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ])
+        }
+        let sample = sun_fwd_sample_for_edge(SUN_SHADOW_SIZE);
+        let bytes = sun_forward_uniform_bytes(vp, sample);
+        assert_eq!(bytes.len(), 96, "matrix plus two std140 rows");
+        assert_eq!(at(&bytes, 0), vp[0][0], "the matrix comes first");
+        assert_eq!(at(&bytes, 64), SUN_SHADOW_BIAS, "bias at 64");
+        assert_eq!(at(&bytes, 68), 1.0, "enabled at 68");
+        assert!((at(&bytes, 72) - 1.0 / 2048.0).abs() < 1e-9, "texel at 72");
+        assert!(
+            (at(&bytes, 76) - sun_shadow_normal_offset_m(SUN_SHADOW_SIZE)).abs() < 1e-9,
+            "normal offset in meters at 76"
+        );
+        assert!(
+            (at(&bytes, 80) - sun_shadow_slope_scale_for(SUN_SHADOW_SIZE)).abs() < 1e-9,
+            "slope scale at 80"
+        );
+        let off = SunFwdSample {
+            enabled: 0.0,
+            ..sample
+        };
+        assert_eq!(
+            at(&sun_forward_uniform_bytes(vp, off), 68),
+            0.0,
+            "a skipped pass writes enabled 0"
+        );
+        let wgsl = include_str!("../../shaders/forward.wgsl");
+        assert!(wgsl.contains("for (var y = -1; y <= 1; y++)"), "3x3 rows");
+        assert!(wgsl.contains("lit / 9.0"), "nine compares, not four");
+        assert!(!wgsl.contains("1.0 / 256.0"), "the fixed 2x2 texel is gone");
+        assert!(wgsl.contains("fn sun_shadow_at("), "the map reader exists");
+        assert!(
+            wgsl.contains("sun_shadow_at(in.world_pos, in.world_n)"),
+            "the reader takes the surface normal for the normal offset"
+        );
+        assert!(wgsl.contains("fn sun_bias("), "the slope term exists");
+    }
+    #[test]
     fn sun_single_box_is_nearer_than_plane() {
         let m = arena_sun_view_proj().expect("arena sun builds");
         let n = arena_sun_view_proj().expect("builds twice");
@@ -551,8 +761,10 @@ mod tests {
         // the box-on-plane quad pair renders into the LIVE map shape (the row's
         // 2048 `Depth32Float` desc) and is read back, so the nearer-texel claim
         // is measured on the map the live frame encodes, not a stand-in.
-        let Some((device, queue, _)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED sun single-map gpu: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "sun_single_box_is_nearer_than_plane",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let test_size = sun_shadow_size_for_half(SUN_SHADOW_HALF_RES);
@@ -875,8 +1087,10 @@ mod tests {
         // live shader, plane plus box draws, two submits, 0 validation
         // errors. Box-nearer texels follow from the CPU oracle above via
         // the asserted live matrix equality with the arena proof.
-        let Some((device, queue, _)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED sun live prepass gpu: no wgpu adapter");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "sun_prepass_box_nearer_than_plane_live",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let mut matrix_bytes = [0u8; 64];

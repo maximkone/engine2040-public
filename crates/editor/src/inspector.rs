@@ -1830,6 +1830,7 @@ mod tests {
             materials: BTreeMap::new(),
             components: BTreeMap::new(),
             graph: crate::graph::Graph::new(),
+            bonds: crate::commands::BondTable::new(),
             material_set: engine_material::MaterialSet::siege_kit(),
         };
         let nodes = vec![prop_node()];

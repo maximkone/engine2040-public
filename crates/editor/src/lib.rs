@@ -29,6 +29,9 @@ pub mod durable;
 /// Findings panel: spatial findings on a staged AI proposal, fixes via commands.
 #[cfg(feature = "ui")]
 pub mod findings;
+/// Fracture authoring: paint one bond through the command service, preview its
+/// strength and replay a break without touching the document. Std-only.
+pub mod fracture_tool;
 /// Geometry-only batch staging shared by the CAP1 spatial gate and the
 /// findings panel: same staged poses and components a commit would produce.
 mod geometry;

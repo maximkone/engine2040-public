@@ -1264,7 +1264,7 @@ fn push_chunk(out: &mut Vec<u8>, tag: &[u8; 4], body: &[u8]) {
 }
 
 /// Encode RGB8 rows as a PNG (filter 0, stored deflate, one IDAT).
-fn encode_png_rgb(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_png_rgb(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
     let mut raw = Vec::with_capacity(h * (1 + w * 3));

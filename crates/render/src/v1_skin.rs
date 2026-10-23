@@ -798,10 +798,22 @@ pub struct GpuSkinned {
 
 #[cfg(feature = "window")]
 impl GpuSkinned {
-    /// Bring up a high-performance adapter and compile the skinned pipeline.
+    /// Bring up the skinned pipeline with the studio HDRI from the native
+    /// content root. The browser reads the same bytes from the fetched arena
+    /// bundle and calls [`GpuSkinned::init_from_hdri`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn init() -> Result<Self, GpuSkinError> {
+        let hdri = crate::v1_gpu::studio_hdri_bytes()
+            .map_err(|err| GpuSkinError::Device(err.to_string()))?;
+        Self::init_from_hdri(&hdri)
+    }
+
+    /// Bring up a high-performance adapter and compile the skinned pipeline,
+    /// baking `hdri` for the capture's ambient. The caller owns where the
+    /// bytes came from: the native content root or a fetched bundle.
     /// Returns [`GpuSkinError::NoAdapter`] when no GPU is present; callers
     /// testing on headless machines treat that as skip, not failure.
-    pub fn init() -> Result<Self, GpuSkinError> {
+    pub fn init_from_hdri(hdri: &[u8]) -> Result<Self, GpuSkinError> {
         // Test builds only: cap the GPU tests that hold a device at once.
         #[cfg(test)]
         crate::test_gpu::hold_gpu_slot();
@@ -830,7 +842,7 @@ impl GpuSkinned {
         // Skinned capture samples the same studio bake as the live frame, so
         // the R3 fighter capture lifts with the live IBL instead of the flat
         // floor. A failed bake fails init loudly, never a silent dark frame.
-        let (ibl_bake, _) = crate::ibl::bake(crate::v1_gpu::STUDIO_HDRI_BYTES)
+        let (ibl_bake, _) = crate::ibl::bake(hdri)
             .map_err(|e| GpuSkinError::Device(format!("look ibl bake: {e}")))?;
         let (ibl_prefilter, ibl_brdf, ibl_sh_buf) =
             crate::ibl::gpu::upload_live_bake(&device, &queue, &ibl_bake)
@@ -1749,13 +1761,18 @@ mod tests {
         // occlusion of 0.25, the same geometry and pose must darken; before
         // the fix the map was never sampled and the frames were identical.
         use super::{GpuSkinError, GpuSkinned};
-        let gpu = match GpuSkinned::init() {
-            Ok(gpu) => gpu,
-            Err(GpuSkinError::NoAdapter) => {
-                eprintln!("SKIPPED skinned ORM capture: no wgpu adapter on this machine");
-                return;
-            }
+        let probe = match GpuSkinned::init() {
+            Ok(gpu) => Ok(gpu),
+            Err(GpuSkinError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(error) => panic!("gpu skin init failed (must fail loudly): {error}"),
+        };
+        let Some(gpu) = crate::test_gpu::require_or_skip(
+            "skinned_capture_darkens_when_orm_occlusion_drops",
+            probe,
+        ) else {
+            return;
         };
         let mesh = cube();
         let mut pipe = SkinPipeline::new();
@@ -1905,13 +1922,17 @@ mod tests {
     #[test]
     fn gpu_skinned_capture_is_validation_clean() {
         use super::{GpuSkinError, GpuSkinned};
-        let gpu = match GpuSkinned::init() {
-            Ok(g) => g,
-            Err(GpuSkinError::NoAdapter) => {
-                eprintln!("SKIPPED gpu_skinned_capture: no wgpu adapter on this machine");
-                return;
-            }
+        let probe = match GpuSkinned::init() {
+            Ok(g) => Ok(g),
+            Err(GpuSkinError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(e) => panic!("gpu skin init failed (must fail loudly, never fake green): {e}"),
+        };
+        let Some(gpu) =
+            crate::test_gpu::require_or_skip("gpu_skinned_capture_is_validation_clean", probe)
+        else {
+            return;
         };
         eprintln!(
             "R3 gpu: adapter '{}' driver '{}'",
@@ -2098,13 +2119,18 @@ mod tests {
         // The old dummy tangent (+X) gives another frame: the two device
         // captures must differ, with zero validation errors.
         use super::{GpuSkinError, GpuSkinned, DUMMY_TANGENT};
-        let gpu = match GpuSkinned::init() {
-            Ok(gpu) => gpu,
-            Err(GpuSkinError::NoAdapter) => {
-                eprintln!("SKIPPED skinned tangram capture: no wgpu adapter on this machine");
-                return;
-            }
+        let probe = match GpuSkinned::init() {
+            Ok(gpu) => Ok(gpu),
+            Err(GpuSkinError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(error) => panic!("gpu skin init failed (must fail loudly): {error}"),
+        };
+        let Some(gpu) = crate::test_gpu::require_or_skip(
+            "a_tangram_skinned_frame_differs_from_the_dummy_tangent_frame",
+            probe,
+        ) else {
+            return;
         };
         let mesh = cube();
         let rows = mesh.positions.len();

@@ -17,3 +17,4 @@ engine-physics.workspace = true
 
 [dev-dependencies]
 engine-core = { workspace = true, features = ["test-util"] }
+engine-nav.workspace = true

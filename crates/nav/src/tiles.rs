@@ -17,6 +17,8 @@ use std::fmt;
 use crate::cursor::{Cursor, Truncated};
 use crate::flow::{bake_flow, follow};
 
+mod rebake_path;
+
 /// Largest tile registry; bounds memory up front.
 pub const MAX_TILES: usize = 65_536;
 /// Largest break set; bounds one invalidation up front.
@@ -1182,38 +1184,6 @@ impl TiledNav {
             self.stale = true;
         }
         Ok(affected)
-    }
-
-    /// Rebakes the lowest dirty tile, if any, without allocating.
-    ///
-    /// Overflowed tiles keep their dirty flag and are skipped, so one
-    /// stuck counter never blocks the rest of the row.
-    pub fn rebake_one(&mut self) -> Option<TileId> {
-        for index in 0..self.registry.tile_count() {
-            let tile = tile_id_at(index);
-            if !matches!(self.registry.is_dirty(tile), Ok(true)) {
-                continue;
-            }
-            if self.registry.rebake(tile).is_ok() {
-                self.stale = true;
-                return Some(tile);
-            }
-        }
-        None
-    }
-
-    /// Rebakes up to `max_tiles` dirty tiles in ascending order without
-    /// allocating; returns how many rebaked. The tick calls this with its
-    /// per-tick tile budget, so a breach opens within its tick budget.
-    pub fn rebake_budget(&mut self, max_tiles: usize) -> usize {
-        let mut done = 0;
-        while done < max_tiles {
-            if self.rebake_one().is_none() {
-                break;
-            }
-            done += 1;
-        }
-        done
     }
 
     /// True when nothing is left to converge: no request waits in `cache` and

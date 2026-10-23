@@ -9,12 +9,12 @@
 
 use engine_core::Fnv64;
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 mod gpu;
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub use gpu::{pipeline_for, MaterialPipelineError, MaterialPipelines, COLOR_FORMAT, DEPTH_FORMAT};
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 use engine_material::reload::{Reload, ReloadError, Reloader};
 
 /// Most pipelines one frame may need: 21 records share at most 12.
@@ -147,7 +147,7 @@ pub fn pipeline_count(keys: &[MaterialBinKey]) -> usize {
 }
 
 /// What one live material edit did to the held state.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LiveEdit {
     /// The compile is byte-equal to the held one: nothing moved.
@@ -160,7 +160,7 @@ pub enum LiveEdit {
 
 /// Why a live material edit did not reach a drawing pipeline. The held
 /// state is exactly what it was before the call.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, PartialEq, Debug)]
 pub enum LiveError {
     /// The text did not parse or compile; the reloader kept its last good.
@@ -169,7 +169,7 @@ pub enum LiveError {
     Build(MaterialPipelineError),
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl core::fmt::Display for LiveError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -179,7 +179,7 @@ impl core::fmt::Display for LiveError {
     }
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl std::error::Error for LiveError {}
 
 /// The live half of one material slot: the last good
@@ -196,7 +196,7 @@ impl std::error::Error for LiveError {}
 /// Units: bytes for the buffer, none for the verdict. Determinism: none
 /// needed, this is presentation; a capture of the same frame hashes the same.
 /// Window feature only.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct MaterialLive {
     /// The device the pipeline and the uniform buffer live on.
     device: wgpu::Device,
@@ -210,7 +210,7 @@ pub struct MaterialLive {
     uniform: Option<wgpu::Buffer>,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl MaterialLive {
     /// An empty slot on `device`: nothing draws and no buffer exists until
     /// the first good edit.
@@ -292,7 +292,7 @@ impl MaterialLive {
 
 /// A uniform buffer of `uniform`'s bytes, sized to its structure so the
 /// group-0 binding's `min_binding_size` matches exactly. Window only.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn create_uniform_buffer(device: &wgpu::Device, uniform: &[f32]) -> wgpu::Buffer {
     use wgpu::util::DeviceExt;
     let mut bytes = Vec::with_capacity(uniform.len() * 4);
@@ -308,7 +308,7 @@ fn create_uniform_buffer(device: &wgpu::Device, uniform: &[f32]) -> wgpu::Buffer
 
 /// Rewrite `buffer` with `uniform`'s floats. The structure did not change,
 /// so the byte length is the buffer's own. Window only.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn write_floats(queue: &wgpu::Queue, buffer: &wgpu::Buffer, uniform: &[f32]) {
     let mut bytes = Vec::with_capacity(uniform.len() * 4);
     for value in uniform {
@@ -545,7 +545,7 @@ mod tests {
 /// NS31c3: the live swap gate. A real device draws one material frame per
 /// edit, so the bar is "the edit reached the presented pixels", not "the
 /// struct changed". Window feature only; no adapter skips.
-#[cfg(all(test, feature = "window"))]
+#[cfg(all(test, feature = "gpu"))]
 mod material_live_tests {
     use super::*;
     use crate::test_gpu::{hold_gpu_slot, require_or_skip, NoAdapter};

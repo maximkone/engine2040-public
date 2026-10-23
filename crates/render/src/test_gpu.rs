@@ -1,13 +1,15 @@
 //! Test GPU gate: a GPU test that finds no adapter says so, and
 //! `E2040_REQUIRE_GPU=1` turns that skip into a failure — but only for tests
-//! that call `require_or_skip`. Most GPU tests in this crate still skip
-//! ad-hoc (`eprintln!("SKIPPED ...")` plus return, ~59 sites), which bypasses
-//! the gate; converting them is a separate packet coordinated with
-//! `tools/proof.mjs`, which counts the `SKIPPED` lines.
+//! that call `require_or_skip`. The render crate routes its GPU probes here
+//! (`graph::gx1_probe` for the shared GX1 device, `init_or_skip` in
+//! `present/tests_gpu.rs`); a site that still prints its own `SKIPPED` line
+//! bypasses both the gate and `skip_count`, and `tools/proof.mjs` counts only
+//! the routed lines.
 //!
 //! Owner: render crate. Consumers: GPU-backed tests that call
-//! `require_or_skip` (`present/tests_gpu.rs` first) and `tools/proof.mjs`,
-//! which counts the `SKIPPED` lines of the render leg into its RESULT line.
+//! `require_or_skip` (`present/tests_gpu.rs`, `graph.rs`, `ibl.rs` first) and
+//! `tools/proof.mjs`, which counts the `SKIPPED` lines of the render leg into
+//! its RESULT line.
 //! Units: none. Determinism: none; a skip writes one line to stderr, which
 //! libtest output capture never swallows, and bumps the skip counter below.
 //! Errors: only a missing adapter is a skip; any other probe failure stays
@@ -214,7 +216,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn require_or_skip_probes_the_real_adapter() {
         // The real probe. A device runs the body; with no adapter this skips

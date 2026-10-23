@@ -2,7 +2,8 @@
 // DOC3: the door reference page is printed from the endpoint source, so it cannot drift from the verbs.
 //  - a fixture crate with one pack, two verbs and one core tool: the verb, its argument range, its default, its scope, its
 //    refusal text and its feature gate all reach the page; a changed range changes the page; a refusal
-//    whose limit is the difference of two integer constants shows the number, never the placeholder;
+//    whose limit is the difference of two integer constants shows the number, never the placeholder,
+//    and a product of two constants or a float literal prints too; a refusal 70 helpers deep is still followed;
 //  - the real crates/endpoint/src: every `pack.add(VerbSpec::of::<..>)` is on the page, nothing is left unparsed, and the
 //    checked-in docs/book/door-reference.md equals what the tool prints now (regenerate with --write).
 import assert from "node:assert/strict";
@@ -35,6 +36,12 @@ pub const MAX_CRATES: u32 = 12;
 pub const LABEL_BYTES: usize = 12;
 pub const LABEL_HEADROOM: usize = 3;
 pub const LABEL_LIMIT: usize = LABEL_BYTES - LABEL_HEADROOM;
+/// Label byte cap: a product, so the page proves a multiplied constant prints its number.
+pub const LABEL_CHUNK: usize = 512;
+pub const LABEL_CHUNKS: usize = 8;
+pub const MAX_BYTES: usize = LABEL_CHUNK * LABEL_CHUNKS;
+/// Stack height cap in meters: a float literal, printed as written.
+pub const MAX_HEIGHT_M: f32 = 1.8;
 
 /// Stack request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -59,6 +66,12 @@ fn crate_stack(_server: &McpServer, args: &StackArgs) -> Result<StackOutput, Mcp
     }
     if args.label.len() > LABEL_LIMIT {
         return Err(McpToolError::new("label_too_long", format!("label holds more than {LABEL_LIMIT} bytes; shorten it, then re-run")));
+    }
+    if args.label.len() > MAX_BYTES {
+        return Err(McpToolError::new("label_too_big", format!("label may hold at most {MAX_BYTES} bytes; shorten it, then re-run")));
+    }
+    if args.height > 3 {
+        return Err(McpToolError::new("stack_too_tall", format!("a stack above {MAX_HEIGHT_M} m tips; lower it")));
     }
     Ok(StackOutput { stacked: args.height, digest: String::new() })
 }
@@ -181,6 +194,8 @@ test("a fixture verb reaches the page with scope, arguments, range, default and 
   assert.match(page, /\| `height` \| `u32` \| no \| `3` \| `1\.\.=12`/, "the range is quoted from the description and the refusal");
   assert.match(page, /\| `bad_args` \| height \{\} must be 1\.\.=12 crates; split the stack \|/, "a const in a refusal is filled in");
   assert.match(page, /\| `label_too_long` \| label holds more than 9 bytes; shorten it, then re-run \|/);
+  assert.match(page, /\| `label_too_big` \| label may hold at most 4096 bytes; shorten it, then re-run \|/, "a multiplied const prints its number");
+  assert.match(page, /\| `stack_too_tall` \| a stack above 1\.8 m tips; lower it \|/, "a float const prints as written");
   assert.match(page, /\*\*Undo:\*\* description: "Undoable with crate\.unstack\."/);
   assert.match(page, /Listed in a fresh session: no, call `api\.load` with `demo`/);
   assert.match(page, /`observe`: Read\/compute tools: admitted, no capability spend/, "card meanings are read from the enum docs");
@@ -213,6 +228,23 @@ test("a helper that wraps the caller's message is a refusal at every call, and a
     { code: "bad_args", message: "(built at run time: e.to_string())" },
   ]);
   assert.deepEqual(rangesFor({ name: "grams" }, [weigh.refusals[0].message], []), ["at most 9000"]);
+});
+
+test("a refusal behind more than 60 helper functions is still followed", () => {
+  const chain = Array.from(
+    { length: 70 },
+    (_, i) =>
+      `fn step_${i}(n: u32) -> Result<u32, McpToolError> { if n == ${i} { return Ok(n); } step_${i + 1}(n) }`,
+  ).join("\n");
+  const end = `fn step_70(n: u32) -> Result<u32, McpToolError> { Err(McpToolError::new("too_deep", "the chain ends; stop at 60")) }`;
+  const demo = FIXTURE["packs/demo.rs"]
+    .replace("    Ok(StackOutput", "    let _ = step_0(args.height);\n    Ok(StackOutput")
+    + `\n${chain}\n${end}\n`;
+  const stack = verbOf(buildModel(files({ "packs/demo.rs": demo })), "crate.stack");
+  assert.ok(
+    stack.refusals.some((r) => r.code === "too_deep"),
+    "the 71st helper is inside the walk",
+  );
 });
 
 test("a changed argument range changes the page", () => {
@@ -252,7 +284,7 @@ test("rangesFor reads only the text after the name and stops at the next argumen
 });
 
 test("the real source: every registered verb is on the page and nothing is left unparsed", () => {
-  const model = buildModel(readCrate(ROOT));
+  const model = buildModel(readCrate(ROOT), ROOT);
   assert.deepEqual(model.unparsed, [], "the parser reads every declaration; teach it the new style or add a case here");
   const added = [];
   const walk = (dir) => {
@@ -284,6 +316,12 @@ test("the real source: every registered verb is on the page and nothing is left 
   assert.equal(verbOf(model, "tx.undo").card, "revert");
   assert.equal(verbOf(model, "scene.place").card, "commit");
   assert.ok(verbOf(model, "tx.apply").refusals.some((r) => r.code === "stale_revision"), "tx.apply names stale_revision");
+  const page = renderPage(model);
+  assert.doesNotMatch(
+    page,
+    /\{(?:WISH_RANGE|FACING_RANGE|MAX_PARTICIPANTS|MAX_MATCH_TICKS|MAX_IMPULSE_Q8|ZFIGHT_EPS_CM)\}/,
+    "constants imported from other workspace crates are filled in, not quoted as names",
+  );
 });
 
 test("the checked-in docs/book/door-reference.md equals the generated page", () => {

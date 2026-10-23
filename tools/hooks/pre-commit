@@ -14,6 +14,11 @@
 # rust-quality count (2026-10-12: a .wgsl and a heap_peak.txt in a backup made
 # the hook measure render and perf, whose HEAD debt then refused the backup).
 # AW9: staged added lines are scanned on every commit, crate files or not.
+# Git's sh can inherit a PATH with C:\Windows\system32 ahead of Git's usr/bin:
+# Windows sort then reads `-u` as a file name, prints nothing, and leaves
+# $crates empty, which skipped the ratchet below without a word (2026-10-23).
+# Put Git's own tools first so the hook behaves the same from every shell.
+PATH="/usr/bin:$PATH"
 repo=$(git rev-parse --show-toplevel)
 if ! gate_out=$(node "$repo/tools/secret-gate.mjs" 2>&1); then
   echo "$gate_out" >&2

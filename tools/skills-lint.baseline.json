@@ -1,0 +1,31 @@
+{
+  "note": "Pinned SKILL.md bytes above 4096; a pin only goes down. Lower them with `node tools/skills-lint.mjs --tighten` as skills are split.",
+  "bytes": {
+    "ai-door": 8056,
+    "anim-combat": 10976,
+    "assets-content": 16805,
+    "commit-and-board": 8556,
+    "debug-triage": 4483,
+    "design-and-playtest": 5486,
+    "determinism-debug": 8215,
+    "door-and-headless-runbook": 13785,
+    "game-shell-audio-ui": 7227,
+    "github-check": 10435,
+    "net-rollback": 6049,
+    "physics-bodies": 9493,
+    "recover-deleted-code": 4214,
+    "render-cull-vram": 6043,
+    "render-lighting": 4340,
+    "render-pipeline-math": 9307,
+    "research": 6005,
+    "review": 7712,
+    "rust-quality-ratchet": 5244,
+    "rust-safety": 6701,
+    "spatial-perception": 8276,
+    "test-and-proof": 6794,
+    "tick-and-runtime": 6018,
+    "web-wasm": 12100,
+    "wgpu-render": 14774,
+    "wiring-a-feature": 5216
+  }
+}

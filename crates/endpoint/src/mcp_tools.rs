@@ -221,7 +221,7 @@ fn sim_build_encounter(
                     reason: String::new(),
                     conflicts: Vec::new(),
                     verify: crate::verify_tasks::VerifyBlock::of(TOOL_SIM_BUILD_ENCOUNTER, &checks)
-                        .wire(),
+                        .wire_report(),
                 })
             }
             Err(refusal) => {
@@ -249,7 +249,7 @@ fn sim_build_encounter(
                     reason: refusal.to_string(),
                     conflicts: refusal.conflicts,
                     verify: crate::verify_tasks::VerifyBlock::of(TOOL_SIM_BUILD_ENCOUNTER, &checks)
-                        .wire(),
+                        .wire_report(),
                 })
             }
         }
@@ -351,7 +351,7 @@ fn game_build(service: &McpServer, args: &GameBuildArgs) -> Result<GameBuildOutp
             package_bytes: slice.eval.package_bytes,
             verdict: slice.eval.verdict.clone(),
             reason: String::new(),
-            verify: crate::verify_tasks::VerifyBlock::of(TOOL_GAME_BUILD, &checks).wire(),
+            verify: crate::verify_tasks::VerifyBlock::of(TOOL_GAME_BUILD, &checks).wire_report(),
         })
     })
 }
@@ -419,5 +419,58 @@ pub(super) fn sanitize_tool_schema(tool: &mut rmcp::model::Tool) {
         if let Value::Object(map) = replacement {
             *output = Arc::new(map);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_editor::capability::Capability;
+
+    #[test]
+    fn verify_task_the_mcp_build_verbs_answer_their_reports() {
+        let server = McpServer::new(97, Capability::unrestricted(97));
+        let encounter = SimBuildEncounterTool::invoke(
+            &server,
+            SimBuildEncounterArgs {
+                brief: "a training duel for the new recruits".to_owned(),
+                seed: 2040,
+            },
+        )
+        .expect("the encounter brief lands");
+        assert!(encounter.solved, "{}", encounter.reason);
+        assert!(
+            encounter
+                .verify
+                .starts_with("instance=sim.build_encounter\nbucket=resolved\n"),
+            "{}",
+            encounter.verify
+        );
+        assert!(
+            encounter.verify.contains("buckets:"),
+            "{}",
+            encounter.verify
+        );
+
+        let game = GameBuildTool::invoke(
+            &server,
+            GameBuildArgs {
+                brief: "prop brazier slice_01\nwant slice_01 next_to wall:north [0,80]\n\
+                        spawn slice_01\n# a quiet duel at dawn in the training yard"
+                    .to_owned(),
+                seed: 5000,
+                variant: None,
+                bloodied: None,
+            },
+        )
+        .expect("the slice brief lands");
+        assert!(game.solved, "{}", game.reason);
+        assert!(
+            game.verify
+                .starts_with("instance=game.build\nbucket=resolved\n"),
+            "{}",
+            game.verify
+        );
+        assert!(game.verify.contains("buckets:"), "{}", game.verify);
     }
 }

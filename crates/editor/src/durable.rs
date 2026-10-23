@@ -42,8 +42,8 @@ use engine_scene::provenance::{Provenance, MAX_PROVENANCE_BYTES};
 use engine_scene::transform::Transform;
 
 use crate::commands::{
-    apply_named, Applied, Batch, BatchError, CommandMeta, Document, Journal, JournalEntry,
-    MaterialName, Op, JOURNAL_CAP, MAX_MATERIAL_NAME_LEN,
+    apply_named, document_digest, Applied, Batch, BatchError, BondStrength, CommandMeta, Document,
+    Journal, JournalEntry, MaterialName, Op, JOURNAL_CAP, MAX_MATERIAL_NAME_LEN,
 };
 use crate::save::{crc32, load_from_bytes, push_id, push_transform, save_to_bytes, MAX_SAVE_BYTES};
 
@@ -57,9 +57,13 @@ pub const JOURNAL_VERSION: u8 = 2;
 /// hold the document bytes only and reopen with an empty journal.
 pub const MIN_JOURNAL_VERSION: u8 = 1;
 /// Layout version of the journal record section inside version 2 payloads (a
-/// `u32` head word before the undo/redo stacks). Bump when the entry layout
-/// below changes; readers refuse unknown records instead of guessing.
-const JOURNAL_RECORD_VERSION: u32 = 1;
+/// `u32` head word before the undo/redo stacks). Bumped when the entry layout
+/// below changes; readers accept the older layout and refuse unknown ones
+/// instead of guessing. Version 2 appends the three content digests to every
+/// entry; version 1 entries reopen with zero digests (unknown, not invented).
+const JOURNAL_RECORD_VERSION: u32 = 2;
+/// Oldest record layout this module still opens.
+const MIN_RECORD_VERSION: u32 = 1;
 /// Largest accepted encoded journal section: the capped live stacks (see
 /// [`JOURNAL_CAP`]) with provenance, effects and ops each land far below
 /// this; bigger seals refuse before touching the filesystem.
@@ -226,6 +230,65 @@ fn invalid(reason: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, reason)
 }
 
+/// Lowercase hex for one 32-byte digest (fixed 64 chars).
+fn digest_hex(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Read one exact sealed generation, without the highest-valid selection
+/// [`reopen_sealed`] makes. Used by the landed read-back: the generation the
+/// caller just sealed is the only one that answers for this write.
+fn read_generation(dir: &Path, generation: u64) -> std::io::Result<Option<(Document, Journal)>> {
+    let path = dir.join(generation_file_name(generation));
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if bytes.len() > MAX_GENERATION_BYTES {
+        return Err(invalid("sealed generation exceeds MAX_GENERATION_BYTES"));
+    }
+    let (sealed, doc, journal) = open_frame(&bytes).map_err(|error| invalid(&error.to_string()))?;
+    if sealed != generation {
+        return Err(invalid(
+            "sealed generation number does not match its file name",
+        ));
+    }
+    Ok(Some((doc, journal)))
+}
+
+/// Read the sealed generation back and compare its content digest with the
+/// staged one.
+///
+/// `before` is the digest the document had before the write. A generation
+/// that still holds it acked without landing the staged bytes (`no_effect`);
+/// any other difference is `landed_mismatch` and names both digests.
+pub(crate) fn verify_landed(
+    dir: &Path,
+    generation: u64,
+    before: [u8; 32],
+    staged: [u8; 32],
+) -> Result<[u8; 32], PersistError> {
+    let Some((landed_doc, _)) = read_generation(dir, generation).map_err(PersistError::Io)? else {
+        return Err(PersistError::Io(invalid(
+            "sealed generation is missing after a successful seal",
+        )));
+    };
+    let landed = document_digest(&landed_doc);
+    if landed == before {
+        return Err(PersistError::NoEffect);
+    }
+    if landed != staged {
+        return Err(PersistError::LandedMismatch { staged, landed });
+    }
+    Ok(landed)
+}
+
 /// Widen a decoded `u32` length to `usize` without a numeric cast, matching
 /// the crate's `TryFrom` conversion style: a `u32` always fits `usize` on
 /// every supported target, and the saturating fallback fails the caller's
@@ -244,6 +307,18 @@ pub enum PersistError {
     /// The seal failed after a successful in-memory stage; the live document
     /// and journal are unchanged, prior generations intact.
     Io(std::io::Error),
+    /// The staged content equals the document before the write: the store
+    /// acked a write that changed nothing. Nothing was sealed or committed.
+    NoEffect,
+    /// The sealed generation reopened with different content than was staged:
+    /// a store that acked without carrying the staged bytes. The live document
+    /// and journal are unchanged.
+    LandedMismatch {
+        /// Digest of the content that was staged.
+        staged: [u8; 32],
+        /// Digest of the content the generation actually holds.
+        landed: [u8; 32],
+    },
 }
 
 impl fmt::Display for PersistError {
@@ -251,6 +326,15 @@ impl fmt::Display for PersistError {
         match self {
             Self::Batch(error) => write!(f, "editor journal batch: {error}"),
             Self::Io(error) => write!(f, "editor journal io: {error}"),
+            Self::NoEffect => {
+                f.write_str("editor journal landed no change: the write acked the before state")
+            }
+            Self::LandedMismatch { staged, landed } => write!(
+                f,
+                "editor journal landed mismatch: staged {}, landed {}",
+                digest_hex(staged),
+                digest_hex(landed)
+            ),
         }
     }
 }
@@ -260,6 +344,7 @@ impl std::error::Error for PersistError {
         match self {
             Self::Batch(error) => Some(error),
             Self::Io(error) => Some(error),
+            Self::NoEffect | Self::LandedMismatch { .. } => None,
         }
     }
 }
@@ -278,8 +363,13 @@ impl From<BatchError> for PersistError {
 /// batch seal into the EEDJ journal. Stages on private clones first, so a
 /// refused batch or a failed seal changes neither the live document and
 /// journal nor the sealed generations — the host can retry with a fresh
-/// generation number. A replayed idempotency key returns the recorded receipt
-/// without sealing anything new (the recorded generation already holds it).
+/// generation number. The receipt's `after_digest` is the **read-back**: the
+/// generation is reopened after the seal and its content digest compared with
+/// the staged one. A batch that stages the before content is refused with
+/// [`PersistError::NoEffect`] before sealing; a store that lands other bytes is
+/// [`PersistError::LandedMismatch`] and the live state keeps the prior
+/// generation. A replayed idempotency key returns the recorded receipt
+/// (including its three digests) without sealing anything new.
 /// Seal under the resulting revision (`doc.revision + 1`) so generations
 /// track revisions one-to-one like the existing seal-every-edit flows; group
 /// merges re-seal under the merged revision when they commit.
@@ -291,17 +381,30 @@ pub fn apply_persisted(
     dir: &Path,
     generation: u64,
 ) -> Result<Applied, PersistError> {
-    let before = doc.revision;
+    let before_revision = doc.revision;
+    let before_digest = document_digest(doc);
     let mut staged_doc = doc.clone();
     let mut staged_journal = journal.clone();
-    let applied = apply_named(&mut staged_doc, &mut staged_journal, batch, meta)?;
-    if applied.revision != before + 1 {
+    let mut applied = apply_named(&mut staged_doc, &mut staged_journal, batch, meta)?;
+    if applied.revision != before_revision + 1 {
         // Idempotent replay: the recorded receipt, nothing new to seal.
         return Ok(applied);
     }
+    let staged_digest = document_digest(&staged_doc);
+    debug_assert_eq!(applied.before_digest, before_digest);
+    debug_assert_eq!(applied.staged_digest, staged_digest);
+    if staged_digest == before_digest {
+        // The batch committed a new revision with identical content: the
+        // store would ack a write that changed nothing. Refuse before sealing.
+        return Err(PersistError::NoEffect);
+    }
     persist_sealed(dir, generation, &staged_doc, &staged_journal).map_err(PersistError::Io)?;
+    // The read-back is the outcome, not the seal's return: reopen exactly the
+    // generation just written and compare its content with what was staged.
+    let landed_digest = verify_landed(dir, generation, before_digest, staged_digest)?;
     *doc = staged_doc;
     *journal = staged_journal;
+    applied.after_digest = landed_digest;
     Ok(applied)
 }
 
@@ -524,14 +627,14 @@ fn open_frame(bytes: &[u8]) -> Result<(u64, Document, Journal), FrameError> {
     Ok((generation, doc, journal))
 }
 
-/// Encode both journal stacks into a version 2 record section: a record
-/// version head word, then the past stack, then the future stack, each oldest
-/// entry first. Field order here and in [`Cursor::entry`] must match exactly.
+/// Encode both journal stacks into a record section: a record version head
+/// word, then the past stack, then the future stack, each oldest entry first.
+/// Field order here and in [`Cursor::entry`] must match exactly.
 fn encode_journal(journal: &Journal) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(&JOURNAL_RECORD_VERSION.to_le_bytes());
-    push_stack(&mut out, &journal.past)?;
-    push_stack(&mut out, &journal.future)?;
+    push_stack(&mut out, &journal.past, true)?;
+    push_stack(&mut out, &journal.future, true)?;
     Ok(out)
 }
 
@@ -539,11 +642,13 @@ fn encode_journal(journal: &Journal) -> std::io::Result<Vec<u8>> {
 /// exact consumption: trailing bytes are torn writes, never ours.
 fn decode_journal(bytes: &[u8]) -> Result<Journal, FrameError> {
     let mut cursor = Cursor { bytes, pos: 0 };
-    if u32::from_le_bytes(cursor.num::<4>()?) != JOURNAL_RECORD_VERSION {
+    let record_version = u32::from_le_bytes(cursor.num::<4>()?);
+    if !(MIN_RECORD_VERSION..=JOURNAL_RECORD_VERSION).contains(&record_version) {
         return Err(FrameError::BadRecord);
     }
-    let past = cursor.stack(MAX_SEALED_STACK)?;
-    let future = cursor.stack(MAX_SEALED_STACK)?;
+    let with_digests = record_version >= 2;
+    let past = cursor.stack(MAX_SEALED_STACK, with_digests)?;
+    let future = cursor.stack(MAX_SEALED_STACK, with_digests)?;
     if cursor.pos != bytes.len() {
         return Err(FrameError::BadJournal);
     }
@@ -554,14 +659,18 @@ fn decode_journal(bytes: &[u8]) -> Result<Journal, FrameError> {
 }
 
 /// Push one sealed stack: count plus entries in journal order (oldest first).
-fn push_stack(out: &mut Vec<u8>, stack: &[JournalEntry]) -> std::io::Result<()> {
+fn push_stack(
+    out: &mut Vec<u8>,
+    stack: &[JournalEntry],
+    with_digests: bool,
+) -> std::io::Result<()> {
     // A `u32` count needs 4B entries, far past any sealed stack: saturate to
     // a count the loader rejects instead of truncating silently.
     let count =
         u32::try_from(stack.len()).map_err(|_| invalid("journal stack exceeds its bound"))?;
     out.extend_from_slice(&count.to_le_bytes());
     for entry in stack {
-        push_entry(out, entry)?;
+        push_entry(out, entry, with_digests)?;
     }
     Ok(())
 }
@@ -569,8 +678,9 @@ fn push_stack(out: &mut Vec<u8>, stack: &[JournalEntry]) -> std::io::Result<()> 
 /// Push one journal entry: retry identity and revisions, the display name and
 /// flag, the forward and inverse ops, the per-op inverse groups, the recorded
 /// effects lines, every folded idempotency key, and the provenance record
-/// through its own codec roundtrip.
-fn push_entry(out: &mut Vec<u8>, entry: &JournalEntry) -> std::io::Result<()> {
+/// through its own codec roundtrip. Version 2 entries append the three content
+/// digests after the provenance record, so version 1 bytes still parse.
+fn push_entry(out: &mut Vec<u8>, entry: &JournalEntry, with_digests: bool) -> std::io::Result<()> {
     out.extend_from_slice(&entry.key.to_le_bytes());
     out.extend_from_slice(&entry.base_revision.to_le_bytes());
     out.extend_from_slice(&entry.result_revision.to_le_bytes());
@@ -605,6 +715,11 @@ fn push_entry(out: &mut Vec<u8>, entry: &JournalEntry) -> std::io::Result<()> {
         .map_err(|_| invalid("journal provenance record exceeds its bound"))?;
     out.extend_from_slice(&record_len.to_le_bytes());
     out.extend_from_slice(&record);
+    if with_digests {
+        out.extend_from_slice(&entry.before_digest);
+        out.extend_from_slice(&entry.staged_digest);
+        out.extend_from_slice(&entry.after_digest);
+    }
     Ok(())
 }
 
@@ -622,9 +737,9 @@ fn push_ops(out: &mut Vec<u8>, ops: &[Op]) -> std::io::Result<()> {
 /// Push one op with the same tags as the command-service artifact digest (0
 /// insert, 1 remove, 2 set-local, 3 reparent, 4 set-material, 5 set-component,
 /// 6 remove-component, 7 put-material, 8 set-material-param, 9
-/// remove-last-material): ids ride hyphenated (36 bytes, like the save codec,
-/// so no new id conversion), poses ride as ten little-endian f32 values and
-/// material record texts as length-prefixed bytes.
+/// remove-last-material, 10 set-bond): ids ride hyphenated (36 bytes, like the
+/// save codec, so no new id conversion), poses ride as ten little-endian f32
+/// values and material record texts as length-prefixed bytes.
 fn push_op(out: &mut Vec<u8>, op: &Op) {
     match op {
         Op::Insert { id, parent, local } => {
@@ -683,6 +798,19 @@ fn push_op(out: &mut Vec<u8>, op: &Op) {
             push_text(out, value.as_bytes());
         }
         Op::RemoveLastMaterial => out.push(9),
+        Op::SetBond { id, a, b, strength } => {
+            out.push(10);
+            push_id(out, *id);
+            out.extend_from_slice(&a.to_le_bytes());
+            out.extend_from_slice(&b.to_le_bytes());
+            match strength {
+                Some(value) => {
+                    out.push(1);
+                    out.extend_from_slice(&u32::from(value.permille()).to_le_bytes());
+                }
+                None => out.push(0),
+            }
+        }
     }
 }
 
@@ -824,6 +952,20 @@ impl<'a> Cursor<'a> {
                 value: self.op_text(MAX_SEALED_TEXT)?,
             }),
             9 => Ok(Op::RemoveLastMaterial),
+            10 => {
+                let id = self.id()?;
+                let a = u32::from_le_bytes(self.num::<4>()?);
+                let b = u32::from_le_bytes(self.num::<4>()?);
+                let strength = match self.u8()? {
+                    0 => None,
+                    1 => {
+                        let raw = u32::from_le_bytes(self.num::<4>()?);
+                        Some(BondStrength::new(raw).map_err(|_| FrameError::BadJournal)?)
+                    }
+                    _ => return Err(FrameError::BadJournal),
+                };
+                Ok(Op::SetBond { id, a, b, strength })
+            }
             _ => Err(FrameError::BadJournal),
         }
     }
@@ -851,7 +993,9 @@ impl<'a> Cursor<'a> {
     }
 
     /// One journal entry, in the exact field order [`push_entry`] writes.
-    fn entry(&mut self) -> Result<JournalEntry, FrameError> {
+    /// Version 2 records carry the three content digests after the provenance
+    /// record; version 1 records stop there and leave them zero (unknown).
+    fn entry(&mut self, with_digests: bool) -> Result<JournalEntry, FrameError> {
         let key = u64::from_le_bytes(self.num::<8>()?);
         let base_revision = u64::from_le_bytes(self.num::<8>()?);
         let result_revision = u64::from_le_bytes(self.num::<8>()?);
@@ -898,6 +1042,11 @@ impl<'a> Cursor<'a> {
         }
         let record_raw = self.text(MAX_PROVENANCE_BYTES)?;
         let provenance = Provenance::decode(record_raw).map_err(|_| FrameError::BadJournal)?;
+        let (before_digest, staged_digest, after_digest) = if with_digests {
+            (self.num::<32>()?, self.num::<32>()?, self.num::<32>()?)
+        } else {
+            ([0u8; 32], [0u8; 32], [0u8; 32])
+        };
         Ok(JournalEntry {
             key,
             forward,
@@ -905,6 +1054,9 @@ impl<'a> Cursor<'a> {
             inverse_groups,
             base_revision,
             result_revision,
+            before_digest,
+            staged_digest,
+            after_digest,
             effects,
             provenance,
             name,
@@ -915,14 +1067,14 @@ impl<'a> Cursor<'a> {
     }
 
     /// One sealed stack; over-cap counts fail bounded without pre-allocating.
-    fn stack(&mut self, cap: usize) -> Result<Vec<JournalEntry>, FrameError> {
+    fn stack(&mut self, cap: usize, with_digests: bool) -> Result<Vec<JournalEntry>, FrameError> {
         let count = wide_len(u32::from_le_bytes(self.num::<4>()?));
         if count > cap {
             return Err(FrameError::TooLarge);
         }
         let mut stack = Vec::new();
         for _ in 0..count {
-            stack.push(self.entry()?);
+            stack.push(self.entry(with_digests)?);
         }
         Ok(stack)
     }
@@ -932,7 +1084,7 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
     use crate::commands::{apply, redo, undo, Batch, BatchError, CommandMeta, Journal, Op};
-    use crate::save::save_to_bytes;
+    use crate::save::{load_from_bytes, save_to_bytes};
     use engine_scene::ids::ObjectId;
     use engine_scene::transform::Transform;
     use std::path::PathBuf;
@@ -977,6 +1129,215 @@ mod tests {
             parent = id;
         }
         (doc, journal)
+    }
+
+    #[test]
+    fn landed_digest_persisted_apply_reads_back_the_sealed_content() {
+        let dir = scratch("landed-digest");
+        let mut doc = Document::new();
+        let mut journal = Journal::new();
+        let id = ObjectId::new();
+        let batch = Batch {
+            ops: vec![Op::Insert {
+                id,
+                parent: ObjectId::NIL,
+                local: pose_at(1.0),
+            }],
+            base_revision: 0,
+            idempotency_key: 501,
+            provenance: None,
+        };
+        let before = document_digest(&doc);
+        let applied = apply_persisted(
+            &mut doc,
+            &mut journal,
+            &batch,
+            &CommandMeta::default(),
+            &dir,
+            1,
+        )
+        .expect("persisted apply lands");
+        assert_eq!(applied.before_digest, before);
+        assert_ne!(
+            applied.staged_digest, applied.before_digest,
+            "an insert changes the content digest"
+        );
+        assert_eq!(
+            applied.staged_digest, applied.after_digest,
+            "the read-back equals what was staged"
+        );
+
+        let (sealed_doc, sealed_journal) = read_generation(&dir, 1)
+            .expect("generation reads")
+            .expect("generation exists");
+        assert_eq!(document_digest(&sealed_doc), applied.after_digest);
+        assert_eq!(
+            sealed_journal
+                .past
+                .last()
+                .expect("entry landed")
+                .after_digest,
+            applied.after_digest,
+            "the sealed journal carries the same after digest"
+        );
+
+        // A replayed key answers from the journal entry, not a fresh digest.
+        let replay = apply_persisted(
+            &mut doc,
+            &mut journal,
+            &batch,
+            &CommandMeta::default(),
+            &dir,
+            1,
+        )
+        .expect("same key and payload replays");
+        assert_eq!(replay.revision, applied.revision);
+        assert_eq!(replay.before_digest, applied.before_digest);
+        assert_eq!(replay.staged_digest, applied.staged_digest);
+        assert_eq!(replay.after_digest, applied.after_digest);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn landed_digest_no_effect_batch_writes_no_generation() {
+        let dir = scratch("landed-no-effect");
+        let (mut doc, mut journal) = chained_doc(1, 6000);
+        let Some(id) = doc.hierarchy.propagation_order().first().copied() else {
+            panic!("chained doc holds one node");
+        };
+        let local = doc.hierarchy.local(id).expect("node has a local pose");
+        let batch = Batch {
+            ops: vec![Op::SetLocal { id, local }],
+            base_revision: doc.revision,
+            idempotency_key: 601,
+            provenance: None,
+        };
+        let error = apply_persisted(
+            &mut doc,
+            &mut journal,
+            &batch,
+            &CommandMeta::default(),
+            &dir,
+            1,
+        )
+        .expect_err("a write that changes nothing is refused");
+        assert!(
+            matches!(error, PersistError::NoEffect),
+            "expected no_effect, got {error:?}"
+        );
+        assert_eq!(doc.revision, 1, "the live document did not move");
+        assert!(
+            !dir.join(generation_file_name(1)).exists(),
+            "a refused no-effect write seals nothing"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn landed_digest_store_that_acks_without_the_staged_state_refuses() {
+        let dir = scratch("landed-fake-store");
+        let (doc, _) = chained_doc(1, 7000);
+        let before = document_digest(&doc);
+        let (changed, changed_journal) = chained_doc(2, 7100);
+        let staged = document_digest(&changed);
+        assert_ne!(before, staged);
+
+        // A store that acks but keeps the before state: no_effect, not a pass.
+        persist_sealed(&dir, 1, &doc, &Journal::new()).unwrap();
+        let error = verify_landed(&dir, 1, before, staged).expect_err("before state is no effect");
+        assert!(
+            matches!(error, PersistError::NoEffect),
+            "expected no_effect, got {error:?}"
+        );
+
+        // A store that lands some third state: landed_mismatch names both.
+        persist_sealed(&dir, 2, &changed, &changed_journal).unwrap();
+        let (other, other_journal) = chained_doc(3, 7200);
+        persist_sealed(&dir, 3, &other, &other_journal).unwrap();
+        let error = verify_landed(&dir, 3, before, staged).expect_err("other state is a mismatch");
+        match error {
+            PersistError::LandedMismatch {
+                staged: got_staged,
+                landed,
+            } => {
+                assert_eq!(got_staged, staged);
+                assert_ne!(landed, staged);
+                assert_eq!(landed, document_digest(&other));
+            }
+            other => panic!("expected landed_mismatch, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn landed_digest_save_reopen_diff_catches_one_nulled_ref() {
+        // Every reference that a save carries: nodes, material bindings and
+        // components. Two saves must keep all of them; one nulled binding must
+        // make the diff say so.
+        let (mut doc, mut journal) = chained_doc(2, 8000);
+        let id = doc.hierarchy.propagation_order()[1];
+        let record = doc
+            .material_set
+            .records()
+            .first()
+            .expect("the siege kit has records");
+        let material = MaterialName::try_from(record.name.as_str()).expect("valid material name");
+        let component = engine_scene::component::Component::Light(engine_scene::component::Light {
+            kind: engine_scene::component::LightKind::Point,
+            color: [1.0, 0.5, 0.0],
+            intensity: 2.0,
+            range: 5.0,
+        });
+        let batch = Batch {
+            ops: vec![
+                Op::SetMaterial {
+                    id,
+                    material: Some(material),
+                },
+                Op::SetComponent { id, component },
+            ],
+            base_revision: doc.revision,
+            idempotency_key: 801,
+            provenance: None,
+        };
+        apply(&mut doc, &mut journal, &batch).expect("binding and component land");
+
+        let first = load_from_bytes(&save_to_bytes(&doc)).expect("first save reopens");
+        let second = load_from_bytes(&save_to_bytes(&first)).expect("second save reopens");
+        assert_eq!(document_digest(&doc), document_digest(&first));
+        assert_eq!(
+            document_digest(&doc),
+            document_digest(&second),
+            "a second save must not drop a reference"
+        );
+
+        let mut nulled = second.clone();
+        nulled.materials.clear();
+        assert_ne!(
+            document_digest(&second),
+            document_digest(&nulled),
+            "one nulled binding must change the diff"
+        );
+    }
+
+    #[test]
+    fn landed_digest_v1_journal_record_opens_with_zero_digests() {
+        let (_, journal) = chained_doc(1, 9000);
+        let entry = journal.past.last().expect("one entry").clone();
+        let mut section = Vec::new();
+        section.extend_from_slice(&1u32.to_le_bytes());
+        push_stack(&mut section, &journal.past, false).expect("v1 entries encode");
+        push_stack(&mut section, &[], false).expect("empty future encodes");
+        let decoded = decode_journal(&section).expect("v1 record opens");
+        let seen = decoded.past.last().expect("entry survives");
+        assert_eq!(seen.key, entry.key);
+        assert_eq!(seen.result_revision, entry.result_revision);
+        assert_eq!(seen.before_digest, [0u8; 32]);
+        assert_eq!(seen.staged_digest, [0u8; 32]);
+        assert_eq!(seen.after_digest, [0u8; 32]);
     }
 
     #[test]

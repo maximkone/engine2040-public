@@ -44,6 +44,7 @@ engine-combat = { workspace = true, optional = true }
 # NS31a2: the document holds the material table and edits it with undo, so the
 # editor reads the record/set API (the three op encoders below stay in-crate).
 engine-material.workspace = true
+engine-destruction.workspace = true
 engine-ai = { workspace = true, optional = true }
 # ED4 play-in-editor hosts the tick driver through the RC1 lifecycle (one
 # direction only: editor -> app -> arena; headless default graph unchanged).
@@ -61,7 +62,7 @@ transform-gizmo = { workspace = true, optional = true }
 transform-gizmo-egui = { workspace = true, optional = true }
 # EI2: the live viewport decodes the presenter's offscreen PNG into an egui
 # texture. `image` is already in the workspace lock via RA1 (no new package).
-image = { workspace = true, optional = true }
+image = { workspace = true, optional = true, features = ["png"] }
 
 # PR1 tests only: the C5 JSON codec leg for receipts and chains. No new
 # dependency (serde_json is already approved under NJ1); test-only features

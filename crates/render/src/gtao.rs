@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use crate::fog::normalize3;
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 use crate::decals::{compute_storage_entry, compute_uniform_entry};
 
 // ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ impl LookFrame {
 /// headless twin then names the missing device bind (never silent); the
 /// window build accepts the frame here while the per-pass uniform write in
 /// the device submitter below is the bind.
-#[cfg(not(feature = "window"))]
+#[cfg(not(feature = "gpu"))]
 pub fn bind_look(frame: &LookFrame) -> Result<(), LookError> {
     frame.validate()?;
     Err(LookError::NoDevice(
@@ -239,7 +239,7 @@ pub fn bind_look(frame: &LookFrame) -> Result<(), LookError> {
 /// Shared bind shape for every look pass: validates the frame. The device
 /// submitter writes the packed look uniform and sets the bind group per
 /// pass, so validation here is the bind contract on this build.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn bind_look(frame: &LookFrame) -> Result<(), LookError> {
     frame.validate()
 }
@@ -385,7 +385,7 @@ impl GtaoAo {
     /// Bind seam for the RA1 forward AO bind on the headless twin: validates
     /// the frame and the half shape, then names the missing device bind.
     /// The window build next to it binds the baked buffer for real.
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     pub fn submit_gpu(&self, frame: &LookFrame) -> Result<AoReceipt, LookError> {
         frame.validate()?;
         let half = frame.half_size();
@@ -405,7 +405,7 @@ impl GtaoAo {
     /// one bind-group probe pass over it and reads it back exactly, proving
     /// the forward bind validates with 0 errors. Fails loudly (never silent,
     /// never the twin refusal) on bad shapes or any device fault.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     pub fn submit_gpu(
         &self,
         device: &wgpu::Device,
@@ -627,7 +627,7 @@ fn narrow(v: f64) -> f32 {
 }
 
 /// The occlusion normalizer as the f32 the live device uniform carries.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn gtao_weight_sum_f32() -> f32 {
     narrow(gtao_weight_sum())
 }
@@ -822,7 +822,7 @@ pub fn gtao_live_oracle(
 /// Device resources for the baked-AO bind probe: one compute pipeline plus
 /// its four buffers and bind group. Built per `submit_gpu` call; the caller
 /// owns the resources for exactly one probe dispatch.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 struct BindProbe {
     pipeline: wgpu::ComputePipeline,
     look_buf: wgpu::Buffer,
@@ -836,7 +836,7 @@ struct BindProbe {
 /// bytes of half AO. Same labels, layouts and usages the inline submitter
 /// used; extracted so `submit_gpu` stays under the line budget. No
 /// validation here; the caller validated shapes before sizing anything.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn build_bind_probe(device: &wgpu::Device, byte_len: u64) -> BindProbe {
     use crate::pipeline_warmup::CountedPipelines as _;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1186,13 +1186,13 @@ pub fn gtao_pass_plan(config: &GtaoConfig) -> Result<GtaoPassPlan, LookError> {
 
 /// Byte size of the packed GTAO kernel uniform (full/half sizes, tap step,
 /// falloff, intensity, occlusion normalizer, 16-byte aligned fields).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const GTAO_CFG_UNIFORM_BYTES: u64 = 40;
 
 /// Half-res GTAO compute: one thread per half texel, fixed slice taps in
 /// shader order mirroring the CPU oracle. The shared look uniform stays
 /// bound and live without touching AO math.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const GTAO_HALF_WGSL: &str = r#"
 struct GtaoCfg {
     full_wh: vec2<u32>,
@@ -1264,7 +1264,7 @@ fn half_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// Bilateral upsample compute: one thread per full pixel, 2x2 half
 /// neighbors with bilinear spatial weights times the depth-similarity
 /// range weight, mirroring the CPU oracle. Look uniform bound and live.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const GTAO_UPSAMPLE_WGSL: &str = r#"
 struct GtaoCfg {
     full_wh: vec2<u32>,
@@ -1328,7 +1328,7 @@ fn up_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// Bind probe over a baked half AO: copies the bound buffer to prove the
 /// forward bind-group path validates. Look uniform bound and live.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const GTAO_BIND_WGSL: &str = r#"
 struct LookU {
     frame_idx: u32,
@@ -1351,7 +1351,7 @@ fn bind_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// Pack the kernel uniform: full/half sizes, tap step, falloff, intensity
 /// and the occlusion normalizer. Pure bytes; validation stays on the caller.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn gtao_uniform_bytes(config: &GtaoConfig) -> [u8; 40] {
     let mut out = [0u8; 40];
     out[0..4].copy_from_slice(&config.width_px.to_le_bytes());
@@ -1366,7 +1366,7 @@ fn gtao_uniform_bytes(config: &GtaoConfig) -> [u8; 40] {
 }
 
 /// Map a readback buffer and wait for it. One poll covers every pending map.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), LookError> {
     let slice = buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1386,7 +1386,7 @@ fn map_and_wait(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<(), Look
 /// buffer into caller-owned storage. The submit path reuses its output
 /// buffers through this helper, so steady-state submits grow nothing; the
 /// one-shot bind probe keeps [`readback_f32`].
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn readback_f32_into(buffer: &wgpu::Buffer, out: &mut [f32]) -> Result<(), LookError> {
     let mapped = buffer
         .slice(..)
@@ -1409,7 +1409,7 @@ fn readback_f32_into(buffer: &wgpu::Buffer, out: &mut [f32]) -> Result<(), LookE
 /// Read `count` little-endian f32 values from a mapped readback buffer.
 /// One-shot path for the baked bind probe; the submit path reuses its
 /// outputs through [`readback_f32_into`] instead.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn readback_f32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<f32>, LookError> {
     let mut out = vec![0.0f32; count];
     readback_f32_into(buffer, &mut out)?;
@@ -1419,7 +1419,7 @@ fn readback_f32(buffer: &wgpu::Buffer, count: usize) -> Result<Vec<f32>, LookErr
 /// Validate config, frame and every input value before the submitter sizes
 /// anything, so a refusal sizes nothing. No allocation: values are checked
 /// in place; normalization stays in the fill step.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn check_submit_inputs(
     config: &GtaoConfig,
     frame: &LookFrame,
@@ -1438,7 +1438,7 @@ fn check_submit_inputs(
 }
 
 /// Refusal text for a frame/config viewport mismatch. Cold path only.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn frame_config_mismatch(frame: &LookFrame, config: &GtaoConfig) -> LookError {
     LookError::Invalid(format!(
         "gtao frame {}x{} mismatches config {}x{}",
@@ -1447,13 +1447,13 @@ fn frame_config_mismatch(frame: &LookFrame, config: &GtaoConfig) -> LookError {
 }
 
 /// Refusal for sized buffers that vanished mid-submit. Cold path only.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn lost_buffers() -> LookError {
     LookError::Device("gtao submitter lost its sized buffers".into())
 }
 
 /// Device refusal text for a validation-scope hit. Cold path only.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn validation_refusal(err: wgpu::Error) -> LookError {
     LookError::Device(format!("gtao submit validation: {err:?}"))
 }
@@ -1463,7 +1463,7 @@ fn validation_refusal(err: wgpu::Error) -> LookError {
 /// [`validate_normals`], so `None` is unreachable; it still fails loudly
 /// through a typed error instead of panicking. `pub(crate)` for the
 /// steady-state allocation probe.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn fill_normal_dirs(src: &[[f32; 3]], out: &mut Vec<[f32; 3]>) -> Result<(), LookError> {
     out.clear();
     if out.capacity() < src.len() {
@@ -1486,7 +1486,7 @@ pub(crate) fn fill_normal_dirs(src: &[[f32; 3]], out: &mut Vec<[f32; 3]>) -> Res
 /// which must hold `depth.len() * 4` bytes. The submitter sizes it on shape
 /// change, so steady-state packing grows nothing. `pub(crate)` for the
 /// steady-state allocation probe.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn pack_depth_bytes(depth: &[f32], out: &mut [u8]) {
     debug_assert_eq!(out.len(), depth.len() * 4);
     for (d, chunk) in depth.iter().zip(out.chunks_exact_mut(4)) {
@@ -1499,7 +1499,7 @@ pub(crate) fn pack_depth_bytes(depth: &[f32], out: &mut [u8]) {
 /// `normals.len() * 16` bytes. Same caller-owned reuse rule as
 /// [`pack_depth_bytes`]. `pub(crate)` for the steady-state allocation
 /// probe.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn pack_normal_bytes(normals: &[[f32; 3]], out: &mut [u8]) {
     debug_assert_eq!(out.len(), normals.len() * 16);
     let zero = 0f32.to_le_bytes();
@@ -1515,7 +1515,7 @@ pub(crate) fn pack_normal_bytes(normals: &[[f32; 3]], out: &mut [u8]) {
 /// wall-clock encode + submit + readback ms (evidence only, never hashed).
 /// `upload_ms` splits out the staging upload so the budget probe can tell
 /// host transfer from device execution.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct GtaoGpuReceipt {
     /// Half-res AO texels written.
@@ -1530,7 +1530,7 @@ pub struct GtaoGpuReceipt {
     pub submit_ms: f64,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl GtaoGpuReceipt {
     /// Posted GPU budget this submit is charged against.
     pub fn budget_ms(&self) -> f64 {
@@ -1558,7 +1558,7 @@ impl GtaoGpuReceipt {
 /// [`GtaoSubmitter::full_ao`] (the scratch test proves the capacities stay
 /// flat). Per-submit encoders and the uniform rewrites are driver work, same
 /// as the graph submitter.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct GtaoSubmitter {
     half_pipeline: wgpu::ComputePipeline,
     up_pipeline: wgpu::ComputePipeline,
@@ -1589,7 +1589,7 @@ pub struct GtaoSubmitter {
     full_out: Vec<f32>,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl GtaoSubmitter {
     /// Compile both compute pipelines and the kernel plus look bind layouts;
     /// allocate the two uniform buffers. No frame-size state yet: storage
@@ -2070,9 +2070,9 @@ mod tests {
             [8, 4],
             "odd dims round up so no pixel is dropped"
         );
-        #[cfg(not(feature = "window"))]
+        #[cfg(not(feature = "gpu"))]
         bind_look(&f).expect_err("headless twin names the missing device bind");
-        #[cfg(feature = "window")]
+        #[cfg(feature = "gpu")]
         bind_look(&f).expect("window build validates the look frame");
     }
 
@@ -2526,7 +2526,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     fn gpu_submit_without_device_refuses_loudly() {
         let (depth, normals) = flat_inputs(16, 12, 5.0);
         let config = GtaoConfig {
@@ -2566,16 +2566,19 @@ mod tests {
 
     /// Device shared with the GX1 suite: one device for the run, so parallel
     /// tests never exhaust adapters. `None` is skip-not-green, never a pass.
-    #[cfg(feature = "window")]
-    fn gtao_device() -> Option<(
-        &'static wgpu::Device,
-        &'static wgpu::Queue,
-        &'static wgpu::AdapterInfo,
-    )> {
-        crate::graph::gx1_test_device()
+    #[cfg(feature = "gpu")]
+    fn gtao_device() -> Result<
+        (
+            &'static wgpu::Device,
+            &'static wgpu::Queue,
+            &'static wgpu::AdapterInfo,
+        ),
+        crate::test_gpu::NoAdapter,
+    > {
+        crate::graph::gx1_probe()
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn worst_diff(a: &[f32], b: &[f32]) -> f32 {
         a.iter()
             .zip(b.iter())
@@ -2584,10 +2587,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_half_and_upsample_match_cpu_within_tolerance() {
-        let Some((device, queue, info)) = gtao_device() else {
-            eprintln!("SKIPPED gtao parity: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "gpu_half_and_upsample_match_cpu_within_tolerance",
+            gtao_device(),
+        ) else {
             return;
         };
         let config = GtaoConfig {
@@ -2636,10 +2641,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_baked_bind_roundtrip_is_exact() {
-        let Some((device, queue, _)) = gtao_device() else {
-            eprintln!("SKIPPED gtao bind: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("gpu_baked_bind_roundtrip_is_exact", gtao_device())
+        else {
             return;
         };
         let (depth, normals) = flat_inputs(16, 12, 5.0);
@@ -2671,10 +2677,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_refuses_bad_input_before_sizing() {
-        let Some((device, queue, _)) = gtao_device() else {
-            eprintln!("SKIPPED gtao refusals: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("gpu_refuses_bad_input_before_sizing", gtao_device())
+        else {
             return;
         };
         let config = GtaoConfig {
@@ -2743,10 +2750,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_reuses_buffers_on_matching_shape() {
-        let Some((device, queue, _)) = gtao_device() else {
-            eprintln!("SKIPPED gtao reuse: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("gpu_reuses_buffers_on_matching_shape", gtao_device())
+        else {
             return;
         };
         let config = GtaoConfig {
@@ -2795,15 +2803,17 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_steady_state_grows_no_host_scratch() {
         // Steady-state submits grow nothing on the host: every scratch
         // capacity stays flat across submits on a matching shape, and the
         // reused outputs still match the CPU oracle within the posted
         // parity tolerance. Sizing happens once, on the first submit;
         // refusals size nothing (see the refusal test).
-        let Some((device, queue, _)) = gtao_device() else {
-            eprintln!("SKIPPED gtao scratch: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "gpu_steady_state_grows_no_host_scratch",
+            gtao_device(),
+        ) else {
             return;
         };
         let config = GtaoConfig {
@@ -2870,7 +2880,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn look_uniform_matches_graph_packing() {
         // One writer for the 32-byte look image: the graph packer. The GTAO
         // passes bind the same bytes, so any drift fails here, not on device.
@@ -2883,7 +2893,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gpu_receipt_budget_accessors_are_exact() {
         // Deterministic budget logic (no wall clock): at, under and over
         // the posted budget plus the validation flag.
@@ -2907,11 +2917,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[ignore = "timing: 1080p gtao budget probe, run under --perf"]
     fn gpu_1080p_budget_probe_reports_ms() {
-        let Some((device, queue, info)) = gtao_device() else {
-            eprintln!("SKIPPED gtao 1080p probe: no wgpu adapter on this machine");
+        let Some((device, queue, info)) =
+            crate::test_gpu::require_or_skip("gpu_1080p_budget_probe_reports_ms", gtao_device())
+        else {
             return;
         };
         // Flat 1080p fixture: every tap agrees, so parity is exact 1.0 and

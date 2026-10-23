@@ -56,7 +56,7 @@ pub const TWIN_SUN_BIASES: [f32; 3] = [0.002, 0.004, 0.008];
 /// Units: texels. Determinism: fixed constant.
 /// Test-only oracle until the submit.rs live-feet feed wires it; the
 /// production owner is `present/gpu_present/sun_shadow.rs`.
-#[cfg(all(test, feature = "window"))]
+#[cfg(all(test, feature = "gpu"))]
 const SUN_SHADOW_SIZE: u32 = 256;
 
 /// Twin sun-shadow bind failures. Bad bind input fails loudly; device
@@ -132,10 +132,11 @@ pub fn twin_sun_pass() -> Result<SunShadowPass, TwinShadowError> {
         .map_err(|e| invalid(&format!("twin shadow sun pass: {e}")))
 }
 
-/// Cascade shade for `view_depth` in meters: CPU mirror of the
-/// `SHADOW_FORWARD_WGSL` cascade-to-shade ramp (`1.0 - 0.15 * band / 2`),
-/// so the headless twin quotes the same banding the window shader draws.
-/// Near band shades 1.0, middle 0.925, far 0.85.
+/// Cascade shade for `view_depth` in meters: the band ramp the window `fs`
+/// entry drew before EG11b (`1.0 - 0.15 * band / 2`: near 1.0, middle 0.925,
+/// far 0.85). The window now shadows from the live sun map (group 0 binding
+/// 13) and draws no distance dim, so this is the twin's own headless quote,
+/// not a mirror of the production pixels.
 /// Ownership: render lane; threading: pure read of the pass splits;
 /// determinism: same pass plus depth gives the identical factor twice;
 /// errors: [`TwinShadowError`] when `view_depth` is not finite.
@@ -248,18 +249,19 @@ pub fn twin_face_radiance(
 /// determinism: same pass plus band gives identical bytes twice; errors:
 /// none (the band clamps into range at this boundary, matching the
 /// frozen packer, so a wild band can never index past the last cascade).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn twin_shadow_uniform(pass: &SunShadowPass, active_cascade: usize) -> [u8; 32] {
     let band = active_cascade.min(crate::shadow_cluster::SUN_CASCADES - 1);
     crate::shadow_cluster::shadow_uniform_bytes(pass, band)
 }
 
-/// The window forward shader the twin binds: the frozen sun-shadow
-/// cascade shader (`SHADOW_FORWARD_WGSL`), shared so the twin can never
-/// drift from the production pixels.
+/// The cascade shader `shadow_cluster` owns: `SHADOW_FORWARD_WGSL`, the
+/// lane's own sample of the cascade ramp. It is not the window forward
+/// shader, which is `v1_gpu::FORWARD_PBR_WGSL` (`shaders/forward.wgsl`), so
+/// the twin's fixtures and the live pixels are separate sources.
 /// Ownership: render lane; threading: static text; determinism: fixed
 /// bytes; errors: none.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn twin_forward_wgsl() -> &'static str {
     crate::shadow_cluster::SHADOW_FORWARD_WGSL
 }
@@ -270,7 +272,7 @@ pub fn twin_forward_wgsl() -> &'static str {
 /// Units: texels. Ownership: render lane; threading: pure descriptor;
 /// determinism: same size gives the identical descriptor twice; errors:
 /// none (size is the fixed arena constant).
-#[cfg(all(test, feature = "window"))]
+#[cfg(all(test, feature = "gpu"))]
 fn sun_shadow_depth_desc() -> wgpu::TextureDescriptor<'static> {
     wgpu::TextureDescriptor {
         label: Some("sun-shadow-depth"),
@@ -291,7 +293,7 @@ fn sun_shadow_depth_desc() -> wgpu::TextureDescriptor<'static> {
 /// Depth-only encode from the single sun: the vertex stage transforms by the
 /// sun matrix, the depth attachment keeps the nearest fighter texel. No
 /// color, no fragment. Engine-owned code.
-#[cfg(all(test, feature = "window"))]
+#[cfg(all(test, feature = "gpu"))]
 const SUN_SHADOW_DEPTH_WGSL: &str = r#"
 struct SunU {
     view_proj: mat4x4<f32>,
@@ -516,7 +518,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn twin_uniform_clamps_wild_bands_like_the_frozen_packer() {
         // Byte-identity pin for the clamp move: wild bands resolve to the
@@ -537,7 +539,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn twin_uniform_entry_owns_its_band_clamp() {
         // Ratchet pin: `twin_shadow_uniform` used to relay both arguments
@@ -563,7 +565,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn twin_bind_drives_the_production_forward_submit() {
         // Repair proof for the review FAIL (unwired CPU twin): the twin
@@ -571,8 +573,10 @@ mod tests {
         // forward submitter, so twin inputs move real pixels instead of
         // stopping at CPU triples. Skips loudly without an adapter, like
         // the production window submit.
-        let Some((device, queue, _info)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED twin window submit: no wgpu adapter on this machine");
+        let Some((device, queue, _info)) = crate::test_gpu::require_or_skip(
+            "twin_bind_drives_the_production_forward_submit",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let pass = twin_sun_pass().expect("twin pass builds");
@@ -641,7 +645,7 @@ mod tests {
         assert!(receipt.torch_pixels <= receipt.covered_pixels);
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn window_uniform_matches_the_frozen_packer() {
         // The twin bind feeds the same 32-byte image the sun depth pass
@@ -660,31 +664,35 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn forward_shader_reads_the_shadow_bind_and_lifts_black() {
         // Repair proof for the pilot accept finding (uniform written but
         // never read): the one forward shader the presenter compiles must
-        // bind the shadow uniform, shade by cascade, and lift black through
-        // the baked IBL ambient (the old flat AMBIENT_FLOOR const is gone;
-        // `ibl.rs` pins the no-floor fs bodies).
+        // bind the shadow uniform, read its live feet block, and shadow the
+        // direct sun from the live map at 13/14 with the pass frame at 20.
+        // EG11b: the view-distance cascade dim is gone from the window entry.
         let wgsl = crate::v1_gpu::FORWARD_PBR_WGSL;
         assert!(
             wgsl.contains("@group(0) @binding(3) var<uniform> shadow: ShadowU;"),
             "forward shader binds the twin shadow uniform"
         );
         for probe in [
-            "shadow.splits.x",
-            "shadow.splits.y",
-            "shadow.splits.z",
-            "1.0 - 0.15 * f32(cascade) / 2.0",
+            "shadow.feet[i]",
+            "sun_shadow_at(",
+            "@group(0) @binding(13) var sun_shadow_map: texture_depth_2d;",
+            "@group(0) @binding(20) var<uniform> sun_fwd: SunFwdU;",
             "ibl_sample",
         ] {
             assert!(wgsl.contains(probe), "forward shader reads shadow: {probe}");
         }
+        assert!(
+            !wgsl.contains("1.0 - 0.15 * f32(cascade) / 2.0"),
+            "the window fs draws no view-distance cascade dim"
+        );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn shadow_map_depth_desc_is_square_and_bindable() {
         let desc = sun_shadow_depth_desc();

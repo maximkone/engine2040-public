@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { md5Of, parseList, run } from "./fetch-content.mjs";
+import { md5Of, parseList, run, sidecarFor } from "./fetch-content.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TOOL = resolve(HERE, "fetch-content.mjs");
@@ -70,6 +70,28 @@ test("parseList skips comments and checks md5 shape", () => {
   }
 });
 
+test("a CC-BY row keeps its attribution text and is refused without one", () => {
+  const text = 'url arch http://x/arch.glb d41d8cd98f00b204e9800998ecf8427e CC-BY-3.0 Icawfype "Roman Arch" by Icawfype, CC-BY 3.0, via Poly Pizza\n';
+  const [row] = parseList(text);
+  equal(row.license, "CC-BY-3.0");
+  equal(row.attribution, '"Roman Arch" by Icawfype, CC-BY 3.0, via Poly Pizza');
+  deepStrictEqual(sidecarFor(row, row.url), {
+    url: "http://x/arch.glb",
+    author: "Icawfype",
+    license: "CC-BY-3.0",
+    retrieved: new Date().toISOString().slice(0, 10),
+    attribution: '"Roman Arch" by Icawfype, CC-BY 3.0, via Poly Pizza',
+  });
+  try {
+    parseList("url arch http://x/arch.glb d41d8cd98f00b204e9800998ecf8427e CC-BY-3.0 Icawfype\n");
+    ok(false, "a CC-BY row without attribution must throw");
+  } catch (e) {
+    match(String(e), /needs attribution text/);
+  }
+  const cc0 = parseList("url crate http://x/c.glb d41d8cd98f00b204e9800998ecf8427e CC0-1.0 Quaternius\n");
+  equal(cc0[0].attribution, "", "CC0 rows need no attribution");
+});
+
 test("downloads two files, writes sidecars, second run skips", async () => {
   const a = "alpha-bytes-1";
   const b = "beta-bytes-22";
@@ -80,7 +102,7 @@ test("downloads two files, writes sidecars, second run skips", async () => {
     writeFileSync(
       list,
       `url filea http://127.0.0.1:${port}/a.bin ${md5(a)} CC0-1.0 alice\n` +
-        `url fileb http://127.0.0.1:${port}/b.bin ${md5(b)} CC-BY-4.0 bob\n`,
+        `url fileb http://127.0.0.1:${port}/b.bin ${md5(b)} CC-BY-4.0 bob "B" by Bob, CC-BY 4.0, http://example.test/b\n`,
     );
     const out = join(dir, "out");
     const r1 = await run({ listFile: list, outDir: out, rateMs: 0 });
@@ -91,6 +113,7 @@ test("downloads two files, writes sidecars, second run skips", async () => {
       equal(md5Of(readFileSync(dest)), md5(body));
       const side = JSON.parse(readFileSync(join(out, "url", id, `${id}.license.json`), "utf8"));
       equal(side.license, lic);
+      equal(side.attribution, lic.startsWith("CC-BY") ? '"B" by Bob, CC-BY 4.0, http://example.test/b' : undefined);
       ok(side.url.includes("127.0.0.1"), "sidecar keeps url");
       ok(/^\d{4}-\d{2}-\d{2}$/.test(side.retrieved), "sidecar has date");
     }
@@ -146,7 +169,7 @@ test("--dry-run prints total bytes and every license, writes nothing", async () 
     writeFileSync(
       list,
       `url filea http://127.0.0.1:${port}/a.bin ${md5(a)} CC0-1.0 alice\n` +
-        `url fileb http://127.0.0.1:${port}/b.bin ${md5(b)} CC-BY-4.0 bob\n`,
+        `url fileb http://127.0.0.1:${port}/b.bin ${md5(b)} CC-BY-4.0 bob "B" by Bob, CC-BY 4.0, http://example.test/b\n`,
     );
     const out = join(dir, "out");
     const r = await runTool([TOOL, "--list", list, "--out", out, "--dry-run", "--rate-ms", "0"]);
@@ -154,7 +177,29 @@ test("--dry-run prints total bytes and every license, writes nothing", async () 
     match(r.stdout, new RegExp(`total_bytes=${a.length + b.length}`));
     match(r.stdout, /CC0-1\.0/);
     match(r.stdout, /CC-BY-4\.0/);
+    match(r.stdout, /ATTRIBUTION url fileb "B" by Bob, CC-BY 4\.0, http:\/\/example\.test\/b/);
     ok(!existsSync(join(out, "url", "filea", "a.bin")), "dry-run writes nothing");
+  } finally {
+    shut(srv);
+  }
+});
+
+test("a bare list path works like --list, even after --out", async () => {
+  const a = "alpha-bytes-1";
+  const { srv, port } = await serve({ "/a.bin": a });
+  try {
+    const dir = mkdtempSync(join(tmpdir(), "gs22-bare-"));
+    const list = join(dir, "list.txt");
+    writeFileSync(list, `url filea http://127.0.0.1:${port}/a.bin ${md5(a)} CC0-1.0 alice\n`);
+    const out = join(dir, "out");
+    const r1 = await runTool([TOOL, "--dry-run", list, "--rate-ms", "0"]);
+    equal(r1.status, 0, r1.stderr);
+    match(r1.stdout, new RegExp(`total_bytes=${a.length}`));
+    const r2 = await runTool([TOOL, "--out", out, "--dry-run", list, "--rate-ms", "0"]);
+    equal(r2.status, 0, r2.stderr);
+    match(r2.stdout, new RegExp(`total_bytes=${a.length}`));
+    const r3 = await runTool([TOOL, "--dry-run"]);
+    equal(r3.status, 2, "no list path still exits 2");
   } finally {
     shut(srv);
   }

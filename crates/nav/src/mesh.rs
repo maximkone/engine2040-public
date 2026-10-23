@@ -9,6 +9,9 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use crate::cursor::{Cursor, Truncated};
+
+mod tiled;
+pub use tiled::{TiledBake, TILE_BORDER};
 /// Largest absolute vertex coordinate in meters; beyond it refuses.
 pub const MAX_COORD_M: f32 = 4096.0;
 
@@ -221,50 +224,85 @@ impl std::error::Error for NavError {}
 /// Steep triangles are skipped (walls split regions); degenerate,
 /// non-finite, or out-of-range triangles refuse with their caller index.
 pub fn bake(tris: &[[[f32; 3]; 3]], config: &BakeConfig) -> Result<NavMesh, NavError> {
-    check_config(config)?;
-    if tris.is_empty() {
-        return Err(NavError::EmptyInput);
-    }
-    if tris.len() > MAX_TRIS {
-        return Err(NavError::TooManyTriangles {
-            got: tris.len(),
-            max: MAX_TRIS,
-        });
-    }
-    // Quantize first so sort and bytes share one integer view.
-    let mut quant = Vec::with_capacity(tris.len());
-    for (index, tri) in tris.iter().enumerate() {
-        quant.push(quantize_tri(tri, index)?);
-    }
-    let mut order: Vec<usize> = (0..quant.len()).collect();
-    order.sort_by(|a, b| quant[*a].cmp(&quant[*b]));
-    order.dedup_by(|a, b| quant[*a] == quant[*b]);
-    // NaN would round to 0 mm under `as`. check_config already bounds the
-    // size, so this only guards the rounding itself.
-    let cell_mm = round_mm(f64::from(config.cell_size * MM_PER_M))
-        .and_then(|mm| u32::try_from(mm).ok())
-        .filter(|mm| *mm > 0)
-        .ok_or(NavError::BadCellSize {
-            got: config.cell_size,
-        })?;
-    let mut walkable: Vec<[i32; 9]> = Vec::with_capacity(order.len());
-    for index in &order {
-        let quant_tri = &quant[*index];
-        if tri_normal_y(quant_tri) >= config.walkable_normal_y {
-            walkable.push(*quant_tri);
-        }
-    }
-    if walkable.is_empty() {
-        return Err(NavError::NoWalkable);
-    }
-    let (origin_mm, width, height) = grid_span(&walkable, cell_mm)?;
-    let (cell_poly, cell_h_mm) = rasterize(&walkable, origin_mm, width, height, cell_mm);
+    let prepared = Prepared::new(tris, config)?;
+    let (cell_poly, cell_h_mm) = rasterize(
+        &prepared.walkable,
+        prepared.origin_mm,
+        prepared.width,
+        prepared.height,
+        prepared.cell_mm,
+    );
     if cell_poly.iter().all(|p| *p == NO_POLY) {
         return Err(NavError::NoWalkable);
     }
     Ok(assemble(
-        cell_mm, origin_mm, width, height, cell_poly, cell_h_mm,
+        prepared.cell_mm,
+        prepared.origin_mm,
+        prepared.width,
+        prepared.height,
+        cell_poly,
+        cell_h_mm,
     ))
+}
+
+/// Quantized walkable input plus the integer-mm grid it spans; the one view
+/// the whole-soup bake and the per-tile bake lane share.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Prepared {
+    walkable: Vec<[i32; 9]>,
+    cell_mm: u32,
+    origin_mm: [i32; 2],
+    width: u32,
+    height: u32,
+}
+
+impl Prepared {
+    fn new(tris: &[[[f32; 3]; 3]], config: &BakeConfig) -> Result<Self, NavError> {
+        check_config(config)?;
+        if tris.is_empty() {
+            return Err(NavError::EmptyInput);
+        }
+        if tris.len() > MAX_TRIS {
+            return Err(NavError::TooManyTriangles {
+                got: tris.len(),
+                max: MAX_TRIS,
+            });
+        }
+        // Quantize first so sort and bytes share one integer view.
+        let mut quant = Vec::with_capacity(tris.len());
+        for (index, tri) in tris.iter().enumerate() {
+            quant.push(quantize_tri(tri, index)?);
+        }
+        let mut order: Vec<usize> = (0..quant.len()).collect();
+        order.sort_by(|a, b| quant[*a].cmp(&quant[*b]));
+        order.dedup_by(|a, b| quant[*a] == quant[*b]);
+        // NaN would round to 0 mm under `as`. check_config already bounds the
+        // size, so this only guards the rounding itself.
+        let cell_mm = round_mm(f64::from(config.cell_size * MM_PER_M))
+            .and_then(|mm| u32::try_from(mm).ok())
+            .filter(|mm| *mm > 0)
+            .ok_or(NavError::BadCellSize {
+                got: config.cell_size,
+            })?;
+        let mut walkable: Vec<[i32; 9]> = Vec::with_capacity(order.len());
+        for index in &order {
+            let quant_tri = &quant[*index];
+            if tri_normal_y(quant_tri) >= config.walkable_normal_y {
+                walkable.push(*quant_tri);
+            }
+        }
+        if walkable.is_empty() {
+            return Err(NavError::NoWalkable);
+        }
+        let (origin_mm, width, height) = grid_span(&walkable, cell_mm)?;
+        Ok(Self {
+            walkable,
+            cell_mm,
+            origin_mm,
+            width,
+            height,
+        })
+    }
 }
 
 impl NavMesh {

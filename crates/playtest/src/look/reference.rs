@@ -43,8 +43,9 @@ use crate::parse::{Cursor, ParseError};
 pub const INDEX_NAME: &str = "index.json";
 /// Manifest schema this reader accepts.
 pub const SCHEMA: u64 = 1;
-/// Most reference rows in one set (the judge's own reference ceiling).
-pub const MAX_ROWS: usize = 32;
+/// Most reference rows in one set (three tiers of ten real captures plus the
+/// three recipe rows that stay as the second source).
+pub const MAX_ROWS: usize = 64;
 /// Largest index.json accepted, bytes.
 pub const MAX_INDEX_BYTES: usize = 1 << 20;
 /// Largest capture PNG accepted, bytes (the judge's capture ceiling).
@@ -116,6 +117,26 @@ pub enum ReferenceError {
         /// The encoder's own words.
         reason: String,
     },
+    /// A real row's capture PNG is not on disk under the set directory.
+    MissingCapture {
+        /// Row tier.
+        tier: String,
+        /// Row shot.
+        shot: String,
+        /// The path the row declares, relative to the set directory.
+        path: String,
+    },
+    /// A real row's capture PNG is not the size the row declares.
+    SizeMismatch {
+        /// Row tier.
+        tier: String,
+        /// Row shot.
+        shot: String,
+        /// Width and height the row declares.
+        declared: (u32, u32),
+        /// Width and height the PNG holds.
+        found: (u32, u32),
+    },
 }
 
 impl fmt::Display for ReferenceError {
@@ -158,6 +179,22 @@ impl fmt::Display for ReferenceError {
                 f,
                 "the reference frame {path} does not encode as PNG: {reason}"
             ),
+            Self::MissingCapture { tier, shot, path } => write!(
+                f,
+                "reference {tier}/{shot}: {path} is not on disk; run \
+                 tools/reference-captures.mjs to shoot the tier, or drop the row"
+            ),
+            Self::SizeMismatch {
+                tier,
+                shot,
+                declared,
+                found,
+            } => write!(
+                f,
+                "reference {tier}/{shot} is {}x{} but the row declares {}x{}; \
+                 re-shoot the tier at the declared canvas",
+                found.0, found.1, declared.0, declared.1
+            ),
         }
     }
 }
@@ -184,7 +221,10 @@ pub struct ReferenceRow {
     pub seed: u64,
     /// Camera the capture ran with.
     pub camera: String,
-    /// Where the capture came from (the recipe or the seat's command).
+    /// Sim tick the capture was taken on (0 for a recipe row).
+    pub tick: u64,
+    /// Where the capture came from: the binary or browser, the adapter and
+    /// the command line for a real row, or the recipe's own words.
     pub source: String,
 }
 
@@ -197,36 +237,43 @@ pub struct ReferenceTier {
     pub captures: Vec<(ReferenceRow, NamedPng)>,
 }
 
-/// A loaded reference set: every row rendered from the recipe and
-/// digest-checked against the manifest.
+/// A loaded reference set: every real row read back from its PNG on disk and
+/// digest-checked against the manifest, plus the recipe rows kept as the
+/// second source (painted and digest-checked the same way).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ReferenceSet {
     tiers: Vec<ReferenceTier>,
+    recipe: Vec<ReferenceRow>,
 }
 
 impl ReferenceSet {
     /// Load and verify the set in `dir`.
     ///
-    /// Reads `{dir}/{INDEX_NAME}`, renders every row's capture from the
-    /// recipe, and refuses by name when a digest disagrees.
+    /// Reads `{dir}/{INDEX_NAME}`. A row in `rows` is a real capture: its PNG
+    /// is read from `{dir}/{row.png}`, decoded, and refused by name when the
+    /// canvas or the pixel digest disagrees with the manifest. A row in the
+    /// optional `recipe` list is painted from the recipe and digest-checked,
+    /// so the stand-in source stays verifiable beside the real frames.
     ///
     /// # Errors
     ///
-    /// [`ReferenceError`] for a missing or unreadable index, a bad shape,
-    /// or a row whose rendered digest disagrees with the filed one.
+    /// [`ReferenceError`] for a missing or unreadable index, a bad shape, a
+    /// missing or wrongly sized capture PNG, or a row whose digest disagrees.
     pub fn load(dir: &Path) -> Result<Self, ReferenceError> {
         let index_path = dir.join(INDEX_NAME);
         let text = read_index(&index_path)?;
-        let rows = parse_index(&text).map_err(|error| ReferenceError::BadIndex {
+        let parsed = parse_index(&text).map_err(|error| ReferenceError::BadIndex {
             path: index_path.display().to_string(),
             reason: error.to_string(),
         })?;
-        if rows.len() > MAX_ROWS {
-            return Err(ReferenceError::TooManyRows { count: rows.len() });
+        let ParsedIndex { rows, recipe } = parsed;
+        let count = rows.len().saturating_add(recipe.len());
+        if count > MAX_ROWS {
+            return Err(ReferenceError::TooManyRows { count });
         }
         let mut tiers: Vec<ReferenceTier> = Vec::new();
         for row in rows {
-            let capture = render_capture(&row)?;
+            let capture = read_capture(dir, &row)?;
             let named = NamedPng {
                 name: format!("{}.png", row.shot),
                 png: capture,
@@ -240,7 +287,23 @@ impl ReferenceSet {
                 });
             }
         }
-        Ok(Self { tiers })
+        for row in &recipe {
+            render_capture(row)?;
+        }
+        Ok(Self { tiers, recipe })
+    }
+
+    /// Every real row the set holds, tier by tier, in manifest order.
+    pub fn rows(&self) -> impl Iterator<Item = &ReferenceRow> {
+        self.tiers
+            .iter()
+            .flat_map(|tier| tier.captures.iter().map(|(row, _)| row))
+    }
+
+    /// The recipe rows kept as the second source, in manifest order.
+    #[must_use]
+    pub fn recipe_rows(&self) -> &[ReferenceRow] {
+        &self.recipe
     }
 
     /// Every tier the set holds, in manifest order.
@@ -385,6 +448,62 @@ fn render_capture(row: &ReferenceRow) -> Result<Vec<u8>, ReferenceError> {
     Ok(png)
 }
 
+/// Read one real row's capture PNG from the set directory, decode it and
+/// check it against the row's declared canvas and digest.
+///
+/// A real frame is a file on disk, never a render: the manifest proves the
+/// pixels the shipped arena (or the page) actually drew.
+fn read_capture(dir: &Path, row: &ReferenceRow) -> Result<Vec<u8>, ReferenceError> {
+    let path = dir.join(&row.png);
+    let png = match std::fs::read(&path) {
+        Ok(png) => png,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ReferenceError::MissingCapture {
+                tier: row.tier.clone(),
+                shot: row.shot.clone(),
+                path: row.png.clone(),
+            });
+        }
+        Err(error) => {
+            return Err(ReferenceError::Io {
+                path: path.display().to_string(),
+                kind: error.kind(),
+            });
+        }
+    };
+    if png.len() > MAX_PNG_BYTES {
+        return Err(ReferenceError::TooLarge {
+            path: row.png.clone(),
+            bytes: png.len(),
+        });
+    }
+    let frame =
+        super::metric::Frame::decode_png(&png).map_err(|error| ReferenceError::BadIndex {
+            path: row.png.clone(),
+            reason: format!("the capture does not decode: {error}"),
+        })?;
+    let found = (frame.width(), frame.height());
+    let declared = (row.width, row.height);
+    if found != declared {
+        return Err(ReferenceError::SizeMismatch {
+            tier: row.tier.clone(),
+            shot: row.shot.clone(),
+            declared,
+            found,
+        });
+    }
+    let pixels = digest_hex(frame.rgba());
+    if pixels != row.pixel_fnv {
+        return Err(ReferenceError::DigestMismatch {
+            tier: row.tier.clone(),
+            shot: row.shot.clone(),
+            expected: row.pixel_fnv.clone(),
+            got: pixels,
+        });
+    }
+    Ok(png)
+}
+
 /// The reference capture for one row: the recipe's frame, PNG-encoded.
 /// The same row twice gives the same bytes, so the filed digest is
 /// reproducible offline.
@@ -504,8 +623,15 @@ enum Field {
     Object(Vec<(String, Field)>),
 }
 
+/// The manifest split into its two sources: the real captures in `rows` and
+/// the stand-in scene in the optional `recipe` list.
+struct ParsedIndex {
+    rows: Vec<ReferenceRow>,
+    recipe: Vec<ReferenceRow>,
+}
+
 /// Read the index text into its rows; unknown keys are skipped.
-fn parse_index(text: &str) -> Result<Vec<ReferenceRow>, ParseError> {
+fn parse_index(text: &str) -> Result<ParsedIndex, ParseError> {
     let mut cursor = Cursor::new(text.trim_start_matches('\u{feff}'));
     cursor.ws();
     let root = read_object(&mut cursor, 0)?;
@@ -518,9 +644,26 @@ fn parse_index(text: &str) -> Result<Vec<ReferenceRow>, ParseError> {
     if schema != Some(SCHEMA) {
         return Err(unexpected(&cursor));
     }
-    let rows = root.iter().find(|(key, _)| key == "rows");
-    let Some(Field::List(items)) = rows.map(|(_, value)| value) else {
-        return Err(unexpected(&cursor));
+    let rows = row_list(&root, "rows", &cursor)?;
+    let recipe = match root.iter().find(|(key, _)| key == "recipe") {
+        Some(_) => row_list(&root, "recipe", &cursor)?,
+        None => Vec::new(),
+    };
+    Ok(ParsedIndex { rows, recipe })
+}
+
+/// Read one named list of rows out of the manifest object.
+fn row_list(
+    root: &[(String, Field)],
+    name: &str,
+    cursor: &Cursor<'_>,
+) -> Result<Vec<ReferenceRow>, ParseError> {
+    let items = root
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value);
+    let Some(Field::List(items)) = items else {
+        return Err(unexpected(cursor));
     };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
@@ -561,6 +704,9 @@ fn row_of(entry: &Field) -> Result<ReferenceRow, ParseError> {
         height,
         seed: number("seed")?,
         camera: text("camera")?,
+        // A recipe row carries no tick; a real row files the sim tick it ran
+        // on, so ten shots of one path stay distinct rows.
+        tick: number("tick").unwrap_or(0),
         source: text("source").unwrap_or_default(),
     })
 }
@@ -718,8 +864,8 @@ mod tests {
     use super::*;
     use crate::frame_check::digest_hex;
 
-    /// One manifest row for the recipe, with the digest the recipe
-    /// produces: this is how the shipped index is written.
+    /// One real manifest row for the native tier: the digest its own PNG
+    /// bytes decode to, so the fixture exercises the file-reading path.
     fn row(tier: &str, width: u32, height: u32) -> ReferenceRow {
         let mut row = ReferenceRow {
             tier: tier.to_owned(),
@@ -730,7 +876,8 @@ mod tests {
             height,
             seed: SEED,
             camera: CAMERA.to_owned(),
-            source: format!("recipe {SCENE}"),
+            tick: 0,
+            source: "arena (engine-game bin) adapter=test cmd=arena --reference-set".to_owned(),
         };
         let png = capture_png(&row).expect("the capture encodes");
         let frame = super::super::metric::Frame::decode_png(&png).expect("the capture decodes");
@@ -738,7 +885,18 @@ mod tests {
         row
     }
 
-    fn index_of(rows: &[ReferenceRow]) -> String {
+    /// One stand-in row for the recipe block, with the digest the recipe
+    /// paints for it.
+    fn recipe_row(tier: &str, width: u32, height: u32) -> ReferenceRow {
+        let mut row = row(tier, width, height);
+        row.shot = "arena600-duel".to_owned();
+        row.png = format!("{tier}/arena600-duel.png");
+        row.tick = 0;
+        row.source = format!("recipe {SCENE}");
+        row
+    }
+
+    fn index_of(rows: &[ReferenceRow], recipe: &[ReferenceRow]) -> String {
         let mut out = String::from("{\"schema\":1,\"scene\":\"arena-duel\",\"rows\":[");
         for (at, row) in rows.iter().enumerate() {
             if at > 0 {
@@ -746,7 +904,8 @@ mod tests {
             }
             out.push_str(&format!(
                 "{{\"tier\":\"{}\",\"shot\":\"{}\",\"png\":\"{}\",\
-                 \"pixel_fnv\":\"{}\",\"width\":{},\"height\":{},\"seed\":{},\"camera\":\"{}\"}}",
+                 \"pixel_fnv\":\"{}\",\"width\":{},\"height\":{},\"seed\":{},\
+                 \"camera\":\"{}\",\"tick\":{},\"source\":\"{}\"}}",
                 row.tier,
                 row.shot,
                 row.png,
@@ -754,16 +913,57 @@ mod tests {
                 row.width,
                 row.height,
                 row.seed,
-                row.camera
+                row.camera,
+                row.tick,
+                row.source
             ));
         }
-        out.push_str("]}");
+        out.push(']');
+        if !recipe.is_empty() {
+            out.push_str(",\"recipe\":[");
+            for (at, row) in recipe.iter().enumerate() {
+                if at > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!(
+                    "{{\"tier\":\"{}\",\"shot\":\"{}\",\"png\":\"{}\",\
+                     \"pixel_fnv\":\"{}\",\"width\":{},\"height\":{},\"seed\":{},\
+                     \"camera\":\"{}\",\"source\":\"{}\"}}",
+                    row.tier,
+                    row.shot,
+                    row.png,
+                    row.pixel_fnv,
+                    row.width,
+                    row.height,
+                    row.seed,
+                    row.camera,
+                    row.source
+                ));
+            }
+            out.push(']');
+        }
+        out.push('}');
         out
     }
 
+    /// Write a set: the index plus every real row's PNG at its own path, the
+    /// way the capture tool files a tier.
     fn write_set(dir: &Path, rows: &[ReferenceRow]) {
+        write_set_with_recipe(dir, rows, &[]);
+    }
+
+    fn write_set_with_recipe(dir: &Path, rows: &[ReferenceRow], recipe: &[ReferenceRow]) {
         std::fs::create_dir_all(dir).expect("the set directory is writable");
-        std::fs::write(dir.join(INDEX_NAME), index_of(rows)).expect("the index is writable");
+        std::fs::write(dir.join(INDEX_NAME), index_of(rows, recipe))
+            .expect("the index is writable");
+        for row in rows {
+            let path = dir.join(&row.png);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the tier directory is writable");
+            }
+            std::fs::write(&path, capture_png(row).expect("the capture encodes"))
+                .expect("the capture is writable");
+        }
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -794,11 +994,70 @@ mod tests {
         let refs = set.references("native").expect("the native tier");
         assert_eq!(refs.q1.len(), 1);
         assert!(refs.fighters.is_empty());
-        // The row names the tier, the shot and the digests.
+        // The row names the tier, the shot, the tick and the digests.
         let row = set.row("native", "arena600-duel").expect("the row");
         assert_eq!(row.camera, CAMERA);
         assert_eq!(row.seed, SEED);
+        assert_eq!(row.tick, 0);
         assert_eq!(row.pixel_fnv.len(), 16);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_capture_refuses_by_name() {
+        let dir = temp_dir("no-png");
+        let rows = vec![row("native", 64, 48)];
+        write_set(&dir, &rows);
+        std::fs::remove_file(dir.join(&rows[0].png)).expect("the capture is removable");
+        let error = ReferenceSet::load(&dir).expect_err("a missing capture refuses");
+        assert!(
+            matches!(&error, ReferenceError::MissingCapture { tier, shot, .. }
+                if tier == "native" && shot == "arena600-duel"),
+            "{error}"
+        );
+        let words = error.to_string();
+        assert!(words.contains("native/arena600-duel.png"), "{words}");
+        assert!(words.contains("reference-captures.mjs"), "{words}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_wrong_size_capture_refuses_by_name() {
+        let dir = temp_dir("wrong-size");
+        let mut rows = vec![row("native", 64, 48)];
+        write_set(&dir, &rows);
+        // The row now declares a canvas the filed PNG does not hold.
+        rows[0].width = 128;
+        rows[0].height = 96;
+        std::fs::write(dir.join(INDEX_NAME), index_of(&rows, &[])).expect("the index is writable");
+        let error = ReferenceSet::load(&dir).expect_err("a wrong canvas refuses");
+        assert!(
+            matches!(&error, ReferenceError::SizeMismatch { declared, found, .. }
+                if *declared == (128, 96) && *found == (64, 48)),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_recipe_block_stays_a_second_source() {
+        let dir = temp_dir("recipe-block");
+        let rows = vec![row("native", 64, 48)];
+        let recipe = vec![recipe_row("native", 64, 48)];
+        write_set_with_recipe(&dir, &rows, &recipe);
+        let set = ReferenceSet::load(&dir).expect("the set loads");
+        assert_eq!(set.len(), 1, "only the real row joins a tier");
+        assert_eq!(set.recipe_rows().len(), 1);
+        assert_eq!(set.recipe_rows()[0].source, format!("recipe {SCENE}"));
+        // A drifted recipe digest refuses just like a drifted real one.
+        let mut drifted = vec![recipe_row("native", 64, 48)];
+        drifted[0].pixel_fnv = "0000000000000000".to_owned();
+        write_set_with_recipe(&dir, &rows, &drifted);
+        let error = ReferenceSet::load(&dir).expect_err("a drifted recipe refuses");
+        assert!(
+            matches!(&error, ReferenceError::DigestMismatch { tier, .. } if tier == "native"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -860,16 +1119,140 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_set_is_on_disk_and_matches_its_recipe() {
+    fn the_shipped_set_is_on_disk_and_matches_its_manifest() {
         let dir = shipped_dir();
         let set = ReferenceSet::load(&dir)
             .unwrap_or_else(|error| panic!("the shipped set loads at {dir:?}: {error}"));
         assert!(!set.is_empty(), "the shipped set holds captures");
-        // Every tier the set holds renders the same bytes the manifest
-        // filed: the digest is reproducible offline.
+        // Every tier the set holds reads back the PNGs the manifest filed.
         for tier in set.tiers() {
             let pool = set.pool(tier).expect("the tier holds captures");
             assert!(!pool.is_empty(), "{tier} holds a capture");
+        }
+        assert_eq!(set.recipe_rows().len(), 3, "three recipe rows stay filed");
+    }
+
+    /// The B8 gate: every tier in the shipped set is a complete set of ten
+    /// real frames - a PNG on disk at the declared canvas, a nonzero pixel
+    /// digest, the tick it ran on, and a source naming the binary or browser,
+    /// the adapter and the command line. No real row may name the recipe; the
+    /// recipe rows stay in their own block.
+    #[test]
+    fn reference_set_lands_ten_real_frames_per_tier() {
+        let dir = shipped_dir();
+        let set = ReferenceSet::load(&dir)
+            .unwrap_or_else(|error| panic!("the shipped set loads at {dir:?}: {error}"));
+        let tiers: Vec<&str> = set.tiers().collect();
+        assert!(
+            tiers.contains(&"native"),
+            "the native tier landed: {tiers:?}"
+        );
+        for tier in &tiers {
+            let pool = set.pool(tier).expect("the tier holds captures");
+            assert_eq!(
+                pool.len(),
+                10,
+                "{tier} holds ten real captures, found {}",
+                pool.len()
+            );
+        }
+        assert_eq!(
+            set.len(),
+            10 * tiers.len(),
+            "ten per tier and no stray row: {}",
+            set.len()
+        );
+        let mut ticks: std::collections::BTreeSet<(String, u64)> =
+            std::collections::BTreeSet::new();
+        for row in set.rows() {
+            let source = row.source.to_lowercase();
+            // Native frames ride the shipped arena600 orbit; the web page owns
+            // its own ring orbit and files that camera by name.
+            let camera = if row.tier == "web" {
+                "procedural-arena"
+            } else {
+                CAMERA
+            };
+            assert_ne!(
+                row.pixel_fnv, "0000000000000000",
+                "{}/{} files a zero digest",
+                row.tier, row.shot
+            );
+            assert_eq!(
+                row.pixel_fnv.len(),
+                16,
+                "{}/{} digest hex",
+                row.tier,
+                row.shot
+            );
+            assert!(
+                !source.contains("recipe"),
+                "{}/{} names the recipe: {}",
+                row.tier,
+                row.shot,
+                row.source
+            );
+            assert!(
+                source.contains("arena") || source.contains("chrome"),
+                "{}/{} names no binary or browser: {}",
+                row.tier,
+                row.shot,
+                row.source
+            );
+            assert!(
+                row.source.contains("cmd="),
+                "{}/{} names no command line: {}",
+                row.tier,
+                row.shot,
+                row.source
+            );
+            assert!(
+                row.tick < 600,
+                "{}/{} tick {} leaves the 600-frame path",
+                row.tier,
+                row.shot,
+                row.tick
+            );
+            assert_eq!(row.seed, SEED, "{}/{} seed", row.tier, row.shot);
+            assert_eq!(row.camera, camera, "{}/{} camera", row.tier, row.shot);
+            assert!(
+                ticks.insert((row.tier.clone(), row.tick)),
+                "{}/{} repeats tick {}",
+                row.tier,
+                row.shot,
+                row.tick
+            );
+            // The PNG is on disk at its declared canvas (the load above read
+            // and digest-checked it; this names the size the row declares).
+            let path = dir.join(&row.png);
+            let png = std::fs::read(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+            let frame = super::super::metric::Frame::decode_png(&png)
+                .unwrap_or_else(|error| panic!("{path:?} decodes: {error}"));
+            assert_eq!(
+                (frame.width(), frame.height()),
+                (row.width, row.height),
+                "{}/{} declared canvas",
+                row.tier,
+                row.shot
+            );
+            assert_eq!(
+                digest_hex(frame.rgba()),
+                row.pixel_fnv,
+                "{}/{} pixel digest",
+                row.tier,
+                row.shot
+            );
+        }
+        // The recipe scene stays filed as the second source, one painted row
+        // per tier, and it still paints.
+        assert_eq!(set.recipe_rows().len(), 3, "three recipe rows stay filed");
+        for row in set.recipe_rows() {
+            assert!(
+                row.source.starts_with("recipe "),
+                "a recipe row says so: {}",
+                row.source
+            );
+            assert_eq!(row.tick, 0, "a recipe row is not a capture tick");
         }
     }
 }

@@ -5,7 +5,7 @@
 // Skip (pass) with no adapter, exactly like the `v1_gpu` receipt test.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[cfg(test)]
 mod gpu_tests {
     use super::super::*;
@@ -367,8 +367,8 @@ mod gpu_tests {
     }
 
     /// Torch on versus off: same fixture stages count two versus zero with
-    /// different bytes, both frames stay clean with stable pixels. The masked
-    /// pixel lift awaits the forward group slot, so this lands bytes plus fixture.
+    /// different bytes, both frames stay clean with stable pixels. The pixel
+    /// lift inside a mask is [`a_torch_light_lifts_pixels_in_the_near_mask`].
     #[test]
     fn light_torch_on_vs_off_differs() {
         let Some(mut presenter) = init_or_skip("light_torch_on_vs_off_differs") else {
@@ -432,6 +432,399 @@ mod gpu_tests {
         let a = first.png.expect("first pixels");
         let b = second.png.expect("second pixels");
         assert_eq!(a, b, "same fixture replays byte-identical");
+    }
+
+    /// EG12 torch fixture: the mesh key both torch tests upload.
+    pub(super) fn eg12_face_key() -> MeshKey {
+        MeshKey::new(0x70C5, [0x7D; 32])
+    }
+
+    /// EG12 torch fixture: a 0.8 m square at x = 19.7 facing +x, 0.3 m in
+    /// front of the west head at x = 20. Built here instead of taken from
+    /// [`crate::v1::cube`]: the test needs one open square whose outside faces
+    /// the torch, not a closed box, so the torch-to-pixel falloff has no far
+    /// wall behind it. The winding follows the cube's (since EG38): the
+    /// triangle normal `(p1 - p0) x (p2 - p0)` points +x, the same way as the
+    /// stored vertex normals, so the back-face cull keeps the square.
+    pub(super) fn eg12_face() -> crate::v1::MeshData {
+        crate::v1::upload_mesh(
+            &[
+                [19.7, 0.6, -2.6],
+                [19.7, 0.6, -3.4],
+                [19.7, 1.4, -3.4],
+                [19.7, 1.4, -2.6],
+            ],
+            &[[1.0, 0.0, 0.0]; 4],
+            &[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            &[0, 1, 2, 0, 2, 3],
+        )
+        .expect("near face is a valid mesh")
+    }
+
+    /// EG12 torch fixture: the face's draw list plus the same camera with no
+    /// draws (the silhouette mask). The sun is struck (intensity zero) and
+    /// exposure stays at 1: the torch term is a diffuse light, and at the
+    /// arena's daylight scale it lands under one byte.
+    pub(super) fn eg12_lists() -> (DrawList, DrawList) {
+        let scene = crate::v1::default_scene(96, 96).expect("scene builds");
+        let mut camera = crate::v1::Camera::new(
+            [22.0, 1.0, -3.0],
+            [19.7, 1.0, -3.0],
+            [0.0, 1.0, 0.0],
+            45.0_f32.to_radians(),
+        );
+        camera.aspect = 1.0;
+        let light = crate::v1::DirectionalLight {
+            intensity: 0.0,
+            ..scene.light.clone()
+        };
+        let lit = DrawList {
+            camera: camera.clone(),
+            light: light.clone(),
+            items: vec![DrawItem {
+                mesh: eg12_face_key(),
+                material: crate::v1::PbrMaterial {
+                    base_color: [0.9, 0.9, 0.9],
+                    metallic: 0.0,
+                    roughness: 0.85,
+                    exposure: 1.0,
+                },
+                base_color: None,
+                normal_map: None,
+                orm: None,
+                emissive: None,
+            }],
+        };
+        let bare = DrawList {
+            camera,
+            light,
+            items: Vec::new(),
+        };
+        (lit, bare)
+    }
+
+    /// EG12 torch fixture: one torch 500 m away, so no light reaches the mask.
+    pub(super) fn eg12_far_torch() -> Vec<crate::torch_light::TorchLight> {
+        vec![crate::torch_light::TorchLight {
+            pos: [500.0, 1.0, 0.0],
+            color: crate::torch_light::ARENA_TORCH_COLOR,
+            range_m: crate::torch_light::ARENA_TORCH_RANGE_M,
+            intensity: crate::torch_light::ARENA_TORCH_INTENSITY,
+        }]
+    }
+
+    /// EG12 slice b: the forward fragment reads the torch block, so a face
+    /// standing at the west head lifts while the torches burn and falls back
+    /// when the scene feeds one torch 500 m away. The mask is the face's own
+    /// silhouette (the same camera with no draws), so a global exposure shift
+    /// cannot pass this test. Bloom is off, so the lift is read on the forward
+    /// pass itself.
+    #[test]
+    fn a_torch_light_lifts_pixels_in_the_near_mask() {
+        let Some(mut presenter) = init_or_skip("a_torch_light_lifts_pixels_in_the_near_mask")
+        else {
+            return;
+        };
+        presenter
+            .upload_mesh(eg12_face_key(), &eg12_face())
+            .expect("near face uploads");
+        presenter.resize(96, 96).expect("valid size applies");
+        presenter.set_bloom_enabled(false);
+        let (lit, bare) = eg12_lists();
+        // The built-in pair burns: feeding nothing keeps the arena's own heads.
+        let on = presenter
+            .render_offscreen(&lit)
+            .expect("torch frame renders");
+        assert!(on.manifest.is_clean(), "torch frame clean");
+        assert!(on.receipt.is_clean() && on.receipt.presented);
+        presenter.set_torch_lights(eg12_far_torch());
+        let off = presenter
+            .render_offscreen(&lit)
+            .expect("struck frame renders");
+        assert!(off.manifest.is_clean(), "struck frame clean");
+        presenter.set_torch_lights(Vec::new());
+        let background = presenter
+            .render_offscreen(&bare)
+            .expect("background renders");
+        assert!(background.manifest.is_clean(), "background clean");
+        let on_img = image::load_from_memory(&on.png.expect("on pixels"))
+            .expect("on png decodes")
+            .to_rgba8();
+        let off_img = image::load_from_memory(&off.png.expect("off pixels"))
+            .expect("off png decodes")
+            .to_rgba8();
+        let bg_img = image::load_from_memory(&background.png.expect("background pixels"))
+            .expect("background png decodes")
+            .to_rgba8();
+        let mut mask = 0usize;
+        let mut differing = 0usize;
+        let mut energy = 0u64;
+        let mut on_sum = 0u64;
+        let mut off_sum = 0u64;
+        for ((a, b), c) in on_img.pixels().zip(off_img.pixels()).zip(bg_img.pixels()) {
+            let silhouette = a[0]
+                .abs_diff(c[0])
+                .max(a[1].abs_diff(c[1]))
+                .max(a[2].abs_diff(c[2]));
+            if silhouette <= 4 {
+                continue;
+            }
+            mask += 1;
+            let d = a[0]
+                .abs_diff(b[0])
+                .max(a[1].abs_diff(b[1]))
+                .max(a[2].abs_diff(b[2]));
+            energy += u64::from(d);
+            if d > 2 {
+                differing += 1;
+            }
+            on_sum += u64::from(a[0]) + u64::from(a[1]) + u64::from(a[2]);
+            off_sum += u64::from(b[0]) + u64::from(b[1]) + u64::from(b[2]);
+        }
+        eprintln!(
+            "torch near mask: {mask} px, {differing} differ, energy {energy}, \
+             on {on_sum} vs off {off_sum}, center on {:?} off {:?}",
+            on_img.get_pixel(48, 48),
+            off_img.get_pixel(48, 48)
+        );
+        assert!(mask > 200, "the near cube covers a real mask: {mask} px");
+        assert!(
+            differing * 2 > mask,
+            "most masked pixels lift: {differing} of {mask}"
+        );
+        assert!(
+            energy > 4_000,
+            "the lift is visible, not noise: energy {energy}"
+        );
+        assert!(
+            on_sum > off_sum,
+            "the torch adds light: on {on_sum} vs off {off_sum}"
+        );
+    }
+
+    /// EG38: a cube of the procedural mesh draws the face that looks at the
+    /// camera. A 1 m cube centred at x = 19, seen from [22, 1, -3], must show
+    /// its +x face: a torch 0.3 m in front of that face lifts the centre
+    /// pixel, while a torch the same distance behind the cube cannot, because
+    /// the drawn normal points away from it. With the old clockwise winding
+    /// the near faces were culled and the far inside wall (normal -x) was
+    /// drawn, so the two frames swapped and the far torch read brighter.
+    #[test]
+    fn a_cube_draws_its_near_face_not_the_far_wall() {
+        let Some(mut presenter) = init_or_skip("a_cube_draws_its_near_face_not_the_far_wall")
+        else {
+            return;
+        };
+        let key = MeshKey::new(0x38C0, [0x38; 32]);
+        let mut mesh = crate::v1::cube();
+        for p in &mut mesh.positions {
+            p[0] += 19.0;
+            p[1] += 1.0;
+            p[2] += -3.0;
+        }
+        presenter.upload_mesh(key, &mesh).expect("cube uploads");
+        presenter.resize(96, 96).expect("valid size applies");
+        presenter.set_bloom_enabled(false);
+        let scene = crate::v1::default_scene(96, 96).expect("scene builds");
+        let mut camera = crate::v1::Camera::new(
+            [22.0, 1.0, -3.0],
+            [19.0, 1.0, -3.0],
+            [0.0, 1.0, 0.0],
+            45.0_f32.to_radians(),
+        );
+        camera.aspect = 1.0;
+        let light = crate::v1::DirectionalLight {
+            intensity: 0.0,
+            ..scene.light.clone()
+        };
+        let list = DrawList {
+            camera: camera.clone(),
+            light: light.clone(),
+            items: vec![DrawItem {
+                mesh: key,
+                material: crate::v1::PbrMaterial {
+                    base_color: [0.9, 0.9, 0.9],
+                    metallic: 0.0,
+                    roughness: 0.85,
+                    exposure: 1.0,
+                },
+                base_color: None,
+                normal_map: None,
+                orm: None,
+                emissive: None,
+            }],
+        };
+        let bare = DrawList {
+            camera,
+            light,
+            items: Vec::new(),
+        };
+        // The cube spans x 18.5..19.5, so 19.8 stands 0.3 m in front of the
+        // +x face and 18.2 the same distance behind the -x face.
+        let torch = |x: f32| {
+            vec![crate::torch_light::TorchLight {
+                pos: [x, 1.0, -3.0],
+                color: crate::torch_light::ARENA_TORCH_COLOR,
+                range_m: crate::torch_light::ARENA_TORCH_RANGE_M,
+                intensity: crate::torch_light::ARENA_TORCH_INTENSITY,
+            }]
+        };
+        presenter.set_torch_lights(torch(19.8));
+        let near = presenter
+            .render_offscreen(&list)
+            .expect("near torch renders");
+        assert!(near.manifest.is_clean(), "near frame clean");
+        presenter.set_torch_lights(torch(18.2));
+        let far = presenter
+            .render_offscreen(&list)
+            .expect("far torch renders");
+        assert!(far.manifest.is_clean(), "far frame clean");
+        presenter.set_torch_lights(Vec::new());
+        let background = presenter
+            .render_offscreen(&bare)
+            .expect("background renders");
+        assert!(background.manifest.is_clean(), "background clean");
+        let near_bytes = near.png.expect("near pixels");
+        let far_bytes = far.png.expect("far pixels");
+        let near_img = image::load_from_memory(&near_bytes)
+            .expect("near png decodes")
+            .to_rgba8();
+        let far_img = image::load_from_memory(&far_bytes)
+            .expect("far png decodes")
+            .to_rgba8();
+        let bg_img = image::load_from_memory(&background.png.expect("background pixels"))
+            .expect("background png decodes")
+            .to_rgba8();
+        let mask = near_img
+            .pixels()
+            .zip(bg_img.pixels())
+            .filter(|(a, c)| {
+                a[0].abs_diff(c[0])
+                    .max(a[1].abs_diff(c[1]))
+                    .max(a[2].abs_diff(c[2]))
+                    > 4
+            })
+            .count();
+        let near_center = near_img.get_pixel(48, 48);
+        let far_center = far_img.get_pixel(48, 48);
+        eprintln!("cube near face: {mask} px, center near {near_center:?} far {far_center:?}");
+        assert!(mask > 1_000, "the cube covers a real mask: {mask} px");
+        assert!(
+            near_center[0] > far_center[0] + 20,
+            "the camera-side torch lights the drawn face: near {near_center:?} vs far {far_center:?}"
+        );
+        // Captures outside the repo (temp dir, never git dirt) so the frames
+        // can be opened by eye, not just read as numbers.
+        let dir = std::env::temp_dir().join("opencode").join("eg38");
+        std::fs::create_dir_all(&dir).expect("capture dir");
+        std::fs::write(dir.join("cube-near-torch.png"), &near_bytes).expect("near png writes");
+        std::fs::write(dir.join("cube-far-torch.png"), &far_bytes).expect("far png writes");
+    }
+
+    /// EG38 (a): the live submit list calls the tested sphere test. A cube
+    /// behind the camera is not submitted (`submitted_draws` reads 0); a cube
+    /// in front plus that outside one submits exactly one, twice, and the
+    /// visible cube reaches the pixels.
+    #[test]
+    fn live_draw_sort_culls_an_outside_mesh_and_keeps_a_visible_one() {
+        let Some(mut presenter) =
+            init_or_skip("live_draw_sort_culls_an_outside_mesh_and_keeps_a_visible_one")
+        else {
+            return;
+        };
+        let visible_key = MeshKey::new(0x3801, [0x38; 32]);
+        let outside_key = MeshKey::new(0x3802, [0x39; 32]);
+        // 1 m cubes: one at x = 19 (in front of the eye at x = 22 looking
+        // toward -x), one at x = 30 (behind that eye, outside the frustum).
+        let place = |x: f32| {
+            let mut mesh = crate::v1::cube();
+            for p in &mut mesh.positions {
+                p[0] += x;
+                p[1] += 1.0;
+                p[2] += -3.0;
+            }
+            mesh
+        };
+        presenter
+            .upload_mesh(visible_key, &place(19.0))
+            .expect("visible cube uploads");
+        presenter
+            .upload_mesh(outside_key, &place(30.0))
+            .expect("outside cube uploads");
+        presenter.resize(96, 96).expect("valid size applies");
+        let scene = crate::v1::default_scene(96, 96).expect("scene builds");
+        let mut camera = crate::v1::Camera::new(
+            [22.0, 1.0, -3.0],
+            [19.0, 1.0, -3.0],
+            [0.0, 1.0, 0.0],
+            45.0_f32.to_radians(),
+        );
+        camera.aspect = 1.0;
+        let item = |mesh| DrawItem {
+            mesh,
+            material: scene.material.clone(),
+            base_color: None,
+            normal_map: None,
+            orm: None,
+            emissive: None,
+        };
+        let list = |items| DrawList {
+            camera: camera.clone(),
+            light: scene.light.clone(),
+            items,
+        };
+        let outside_only = list(vec![item(outside_key)]);
+        presenter
+            .render_offscreen(&outside_only)
+            .expect("outside frame renders");
+        assert_eq!(
+            presenter.submitted_draws(),
+            0,
+            "a mesh outside the frustum is not submitted"
+        );
+        let mixed = list(vec![item(outside_key), item(visible_key)]);
+        presenter
+            .render_offscreen(&mixed)
+            .expect("mixed frame renders");
+        let first = presenter.submitted_draws();
+        presenter
+            .render_offscreen(&mixed)
+            .expect("mixed frame renders twice");
+        let second = presenter.submitted_draws();
+        assert_eq!(first, 1, "only the visible mesh submits");
+        assert_eq!(second, first, "the submitted order is unchanged twice");
+        // The visible mesh really reaches the frame: its pixels differ from
+        // the same frame with no draws.
+        let visible_only = list(vec![item(visible_key)]);
+        let lit = presenter
+            .render_offscreen(&visible_only)
+            .expect("visible frame renders")
+            .png
+            .expect("visible pixels");
+        assert_eq!(presenter.submitted_draws(), 1, "the visible mesh submits");
+        let bare = presenter
+            .render_offscreen(&list(Vec::new()))
+            .expect("bare frame renders")
+            .png
+            .expect("bare pixels");
+        let lit_img = image::load_from_memory(&lit)
+            .expect("lit png decodes")
+            .to_rgba8();
+        let bare_img = image::load_from_memory(&bare)
+            .expect("bare png decodes")
+            .to_rgba8();
+        let changed = lit_img
+            .pixels()
+            .zip(bare_img.pixels())
+            .filter(|(a, c)| {
+                a[0].abs_diff(c[0])
+                    .max(a[1].abs_diff(c[1]))
+                    .max(a[2].abs_diff(c[2]))
+                    > 4
+            })
+            .count();
+        eprintln!("eg38 live cull: {changed} px differ from the bare frame");
+        assert!(changed > 100, "the submitted cube covers pixels: {changed}");
     }
 
     /// Pixels reading clearly red vs clearly green (margin over the other
@@ -744,7 +1137,7 @@ mod gpu_tests {
 // adapter, exactly like the RA1 twin tests.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[cfg(test)]
 mod rl9_gpu_tests {
     use super::super::*;
@@ -1038,7 +1431,6 @@ mod rl9_gpu_tests {
                 (64, 64, 8.0, 2.0, 1.0),
                 "presenter runs the arena kernel"
             );
-            eprintln!("SKIPPED gtao_live_ao_darkens_box_base: no adapter");
             return;
         };
         let key = cube_key();
@@ -1130,7 +1522,7 @@ mod rl9_gpu_tests {
 /// Headless SL21 gate: the RA1 submit decodes one depth feed per live frame
 /// (N/A for zero-alloc, 4-buffer floor), while the uniform pack plus contact
 /// config on the same path allocate nothing.
-#[cfg(all(test, not(feature = "window")))]
+#[cfg(all(test, not(feature = "gpu")))]
 mod sl21_submit_audit {
     use super::super::*;
 
@@ -1233,7 +1625,7 @@ mod sl21_submit_audit {
 // Skip (pass) with no adapter, like the RA1 twin tests.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[cfg(test)]
 mod live_frame_tests {
     use super::super::*;
@@ -1565,6 +1957,68 @@ mod live_frame_tests {
         }
     }
 
+    /// EG12 slice b, window leg: the live path stages the same torch block the
+    /// capture twin does, so a face at the west head lifts a live frame while
+    /// the torches burn and falls back when the scene feeds one torch 500 m
+    /// away. Reads the twin the live frame wrote; the patch is the face.
+    #[test]
+    fn a_torch_light_lifts_pixels_on_the_live_path() {
+        use super::gpu_tests::{eg12_face, eg12_face_key, eg12_far_torch, eg12_lists};
+        let Some(mut presenter) = init_or_skip("a_torch_light_lifts_pixels_on_the_live_path")
+        else {
+            return;
+        };
+        presenter
+            .upload_mesh(eg12_face_key(), &eg12_face())
+            .expect("near face uploads");
+        presenter.resize(96, 96).expect("valid size applies");
+        let (lit, _) = eg12_lists();
+        presenter.set_torch_lights(eg12_far_torch());
+        presenter
+            .render_live_offscreen(&lit)
+            .expect("struck frame renders");
+        let (off, width, height) = read_twin(&presenter);
+        assert_eq!((width, height), (96, 96), "twin size");
+        presenter.set_torch_lights(Vec::new());
+        presenter
+            .render_live_offscreen(&lit)
+            .expect("torch frame renders");
+        let (on, _, _) = read_twin(&presenter);
+        let mut lifted = 0usize;
+        let mut energy = 0u64;
+        for y in 32..64u32 {
+            for x in 32..64u32 {
+                let a = pixel(&on, width, x, y);
+                let b = pixel(&off, width, x, y);
+                let d = (0..3).map(|c| (a[c] - b[c]).abs()).fold(0.0, f32::max);
+                energy += d as u64;
+                if d > 2.0 {
+                    lifted += 1;
+                }
+            }
+        }
+        let centre_on = pixel(&on, width, 48, 48);
+        let centre_off = pixel(&off, width, 48, 48);
+        eprintln!(
+            "torch live face: {lifted} of 1024 lift, energy {energy}, \
+             centre on {centre_on:?} off {centre_off:?}"
+        );
+        assert!(
+            lifted > 400,
+            "most of the face lifts on the live path: {lifted} of 1024"
+        );
+        assert!(
+            energy > 4_000,
+            "the live lift is visible, not noise: energy {energy}"
+        );
+        for c in 0..3 {
+            assert!(
+                centre_on[c] > centre_off[c] + 2.0,
+                "the face centre is warmer with the torches burning: {centre_on:?} vs {centre_off:?}"
+            );
+        }
+    }
+
     #[test]
     fn refresh_rewrites_the_resident_buffer_and_refuses_bad_input() {
         let Some(mut presenter) =
@@ -1887,8 +2341,8 @@ mod live_frame_tests {
         presenter.render_live_offscreen(&list).expect("frame 13");
         assert_eq!(
             presenter.wait_stats().steady_buffers,
-            2,
-            "vertex plus index"
+            3,
+            "vertex, index and the LF5 previous positions"
         );
     }
 

@@ -12,7 +12,10 @@
 //! one [`BreakCue`] (the bank's impact sample, a gain that rises with the blow and the struck
 //! chunk's center) for the audio feed to play, and one dust cloud: [`BreakLook::take_dust`] hands
 //! the render's particle feed (NS11) one [`BreakDust`] (where the cloud sits, how many puffs and
-//! how wide) for every tick that frees pieces.
+//! how wide) for every tick that frees pieces. A blast maps the same way: [`blast_cue`] and
+//! [`blast_dust`] turn the authority's blast integers into the same two feed shapes (the bank has
+//! no explosion sample, so a blast plays the stone crash, loudest at the physical layer's own
+//! momentum cap).
 //!
 //! Caller: the window loop calls [`BreakLook::observe`] once per accepted sim tick with that
 //! tick's `TickBreaks` events and [`BreakLook::frame`] once per drawn frame with the sub-tick
@@ -28,7 +31,9 @@
 use engine_audio::cue_names;
 use engine_core::hash::hash_bytes;
 use engine_destruction::bonded::{Bond, BreakEvent, Chunk3, MAX_BONDED_CHUNKS};
-use engine_physfx::{Error as FxError, Key, Material, PhysFx, Shard, Stats, Tier, Transform};
+use engine_physfx::{
+    Blast, Error as FxError, Key, Material, PhysFx, Shard, Stats, Tier, Transform, MAX_BLAST_NS,
+};
 use engine_render::present::MeshKey;
 use std::collections::BTreeMap;
 
@@ -262,7 +267,7 @@ impl PieceDraw {
     }
 }
 
-/// The sound one break makes: which bank cue to play, how loud and where the blow landed.
+/// The sound one break or blast makes: which bank cue to play, how loud and where the blow landed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BreakCue {
     /// Bank cue name (`engine_audio::cue_names`). The bank ships one impact sample; a break
@@ -277,8 +282,8 @@ pub struct BreakCue {
 /// Quietest a break sounds: rubble is always a crash, a nudge at the gate still lands.
 const MIN_BREAK_GAIN: f32 = 0.3;
 
-/// The dust one break kicks up: how many puffs, where the cloud sits and how wide it is. The
-/// render's particle feed (NS11) turns this into emitters; this module only says what the blow
+/// The dust one break or blast kicks up: how many puffs, where the cloud sits and how wide it is.
+/// The render's particle feed (NS11) turns this into emitters; this module only says what the blow
 /// raised.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BreakDust {
@@ -384,6 +389,26 @@ impl BreakLook {
             last_tick: None,
             prop,
         })
+    }
+
+    /// Shoves this prop's flying debris with an authority blast and reports how many bodies the
+    /// physical layer moved. Standing chunks are the authority's, not bodies of this layer, so a
+    /// blast before the break moves nothing; a refused blast leaves the world unchanged.
+    pub fn apply_blast(&mut self, blast: Blast) -> Result<usize, LookError> {
+        self.fx.apply_blast(blast).map_err(LookError::Fx)
+    }
+
+    /// Applies one authority blast and raises its sound and dust in the same call: the integers
+    /// shove the flying debris exactly as [`BreakLook::apply_blast`], and [`BreakLook::take_cue`]
+    /// and [`BreakLook::take_dust`] then hand out the blast's cue and cloud. A blast before the
+    /// break moves no body but still sounds and puffs; a refused blast raises nothing. Call it
+    /// after [`BreakLook::observe`] for the same tick: the blast is the louder event and its cue
+    /// replaces that tick's break cue.
+    pub fn observe_blast(&mut self, blast: Blast) -> Result<usize, LookError> {
+        let pushed = self.apply_blast(blast)?;
+        self.cue = Some(blast_cue(blast));
+        self.dust = Some(blast_dust(blast));
+        Ok(pushed)
     }
 
     /// Takes one sim tick: spawns debris for the chunks the events free, then steps the physical
@@ -681,6 +706,79 @@ fn dust_puffs(freed: usize, kick_ms: f32) -> u32 {
     };
     base.saturating_add(base.saturating_mul(steps) / DUST_STEPS)
         .min(MAX_PUFFS_PER_BREAK)
+}
+
+/// Quietest a blast sounds: an explosion is never a rustle, however small.
+const MIN_BLAST_GAIN: f32 = 0.4;
+/// Puffs a blast raises before its momentum's share.
+const BASE_BLAST_PUFFS: u32 = 24;
+/// Ceiling of one blast's dust, well inside the particle feed's per-event budget.
+const MAX_BLAST_PUFFS: u32 = 192;
+/// Smallest blast cloud radius, meters: a point blast still puffs.
+const MIN_BLAST_DUST_RADIUS_M: f32 = 0.5;
+/// Largest blast cloud radius, meters: a 100 m blast never asks the feed for a fog bank.
+const MAX_BLAST_DUST_RADIUS_M: f32 = 8.0;
+
+/// The sound an authority blast makes: the bank's stone crash at the blast's center, its gain
+/// rising with the momentum it carries and full at the physical layer's [`MAX_BLAST_NS`] cap. A
+/// blast is never silent.
+#[must_use]
+pub fn blast_cue(blast: Blast) -> BreakCue {
+    BreakCue {
+        name: cue_names::IMPACT_STONE,
+        gain: blast_gain(blast.impulse_ns),
+        at_m: blast_center_m(blast),
+    }
+}
+
+/// The dust an authority blast throws: a cloud at its center as wide as the blast reaches, with
+/// puffs rising with the momentum up to [`MAX_BLAST_PUFFS`]. The render's particle feed (NS11)
+/// turns this into emitters; this module only says what the blast raised.
+#[must_use]
+pub fn blast_dust(blast: Blast) -> BreakDust {
+    let reach_m = millimeters_m(blast.radius_mm);
+    BreakDust {
+        at_m: blast_center_m(blast),
+        puffs: blast_puffs(blast.impulse_ns),
+        radius_m: reach_m.clamp(MIN_BLAST_DUST_RADIUS_M, MAX_BLAST_DUST_RADIUS_M),
+    }
+}
+
+/// The blast's center in meters.
+fn blast_center_m(blast: Blast) -> [f32; 3] {
+    blast.center_mm.map(|mm| {
+        let magnitude = millimeters_m(mm.unsigned_abs());
+        if mm < 0 {
+            -magnitude
+        } else {
+            magnitude
+        }
+    })
+}
+
+/// `mm` as meters without a numeric cast. A valid blast is under 100 m, so the whole-meter
+/// quotient fits the exact `u16` conversion; a wild value saturates and the caller clamps it.
+fn millimeters_m(mm: u32) -> f32 {
+    let whole = u16::try_from(mm / 1_000).unwrap_or(u16::MAX);
+    let part = u16::try_from(mm % 1_000).unwrap_or_default();
+    f32::from(whole) + f32::from(part) / 1_000.0
+}
+
+/// Gain of a blast carrying `impulse_ns`: half at a 3500 N s blast, full at [`MAX_BLAST_NS`],
+/// never silent.
+fn blast_gain(impulse_ns: u32) -> f32 {
+    let share = u64::from(impulse_ns).min(u64::from(MAX_BLAST_NS));
+    let permille = u32::try_from(share * 1_000 / u64::from(MAX_BLAST_NS)).unwrap_or(1_000);
+    let gain = f32::from(u16::try_from(permille).unwrap_or(1_000)) / 1_000.0;
+    gain.clamp(MIN_BLAST_GAIN, 1.0)
+}
+
+/// Puffs a blast carrying `impulse_ns` raises: [`BASE_BLAST_PUFFS`] plus a share of the rest that
+/// rises to [`MAX_BLAST_PUFFS`] at [`MAX_BLAST_NS`].
+fn blast_puffs(impulse_ns: u32) -> u32 {
+    let share = u64::from(impulse_ns).min(u64::from(MAX_BLAST_NS));
+    let extra = u64::from(MAX_BLAST_PUFFS - BASE_BLAST_PUFFS) * share / u64::from(MAX_BLAST_NS);
+    u32::try_from(u64::from(BASE_BLAST_PUFFS) + extra).unwrap_or(MAX_BLAST_PUFFS)
 }
 
 /// `value` as an index below `len`, when it is one.
@@ -1081,6 +1179,133 @@ mod tests {
             dust_puffs(many, MAX_KICK_MS),
             MAX_PUFFS_PER_BREAK,
             "the per-event budget holds"
+        );
+    }
+
+    /// The sound an authority blast makes: the stone crash at its center, half volume at half the
+    /// physical layer's momentum cap, full at it, and never silent.
+    #[test]
+    fn a_blast_sounds_at_its_center_and_rises_with_its_momentum() {
+        let blast = Blast {
+            center_mm: [1_500, 250, -2_000],
+            radius_mm: 5_000,
+            impulse_ns: MAX_BLAST_NS / 2,
+        };
+        let cue = blast_cue(blast);
+        assert_eq!(cue.name, cue_names::IMPACT_STONE, "the bank's stone crash");
+        assert_eq!(cue.at_m, [1.5, 0.25, -2.0], "the blast's center, in meters");
+        assert!((cue.gain - 0.5).abs() < f32::EPSILON, "{cue:?}");
+        assert_eq!(
+            blast_cue(Blast {
+                impulse_ns: 0,
+                ..blast
+            })
+            .gain,
+            MIN_BLAST_GAIN,
+            "a blast is never a rustle"
+        );
+        assert_eq!(
+            blast_cue(Blast {
+                impulse_ns: MAX_BLAST_NS,
+                ..blast
+            })
+            .gain,
+            1.0
+        );
+        assert_eq!(
+            blast_cue(Blast {
+                impulse_ns: u32::MAX,
+                ..blast
+            })
+            .gain,
+            1.0,
+            "past the cap, full and no louder"
+        );
+        assert!(
+            blast_cue(Blast {
+                impulse_ns: MAX_BLAST_NS * 3 / 4,
+                ..blast
+            })
+            .gain
+                >= cue.gain,
+            "a bigger blast never sounds quieter"
+        );
+    }
+
+    /// The dust a blast throws: a cloud at the center as wide as its reach, puffs rising with the
+    /// momentum and capped, and the same integers giving the same cloud twice.
+    #[test]
+    fn a_blast_throws_dust_as_wide_as_its_reach_and_thicker_with_its_momentum() {
+        let blast = Blast {
+            center_mm: [1_500, 250, -2_000],
+            radius_mm: 5_000,
+            impulse_ns: MAX_BLAST_NS,
+        };
+        let dust = blast_dust(blast);
+        assert_eq!(dust.at_m, [1.5, 0.25, -2.0]);
+        assert_eq!(dust.radius_m, 5.0, "the cloud is the blast's reach");
+        assert_eq!(dust.puffs, MAX_BLAST_PUFFS);
+
+        let small = blast_dust(Blast {
+            radius_mm: 1_000,
+            impulse_ns: 0,
+            ..blast
+        });
+        assert_eq!(small.puffs, BASE_BLAST_PUFFS, "a weak blast still puffs");
+        assert_eq!(small.radius_m, 1.0);
+        assert!(small.puffs < dust.puffs);
+        assert!(small.radius_m < dust.radius_m);
+
+        let point = blast_dust(Blast {
+            radius_mm: 0,
+            ..blast
+        });
+        assert_eq!(
+            point.radius_m, MIN_BLAST_DUST_RADIUS_M,
+            "a point blast keeps a cloud"
+        );
+        let huge = blast_dust(Blast {
+            radius_mm: 100_000,
+            impulse_ns: u32::MAX,
+            ..blast
+        });
+        assert_eq!(huge.radius_m, MAX_BLAST_DUST_RADIUS_M, "no fog bank");
+        assert_eq!(huge.puffs, MAX_BLAST_PUFFS);
+
+        assert_eq!(blast_dust(blast), dust, "same integers, same cloud");
+        assert_eq!(
+            blast_cue(blast),
+            blast_cue(blast),
+            "same integers, same sound"
+        );
+    }
+
+    /// A blast shoves the debris of a broken prop (never more bodies than it has) and moves
+    /// nothing before the break, when the chunks are still the authority's standing pieces.
+    #[test]
+    fn a_blast_shoves_debris_and_not_a_standing_prop() {
+        let wall = wall_break(6.0);
+        let blast = Blast {
+            center_mm: [0, 1_500, 0],
+            radius_mm: 50_000,
+            impulse_ns: MAX_BLAST_NS,
+        };
+        let mut whole = wall_look(Tier::Comfort, &wall);
+        assert_eq!(
+            whole.apply_blast(blast).expect("a blast on a whole prop"),
+            0,
+            "standing chunks are not bodies of the physical layer"
+        );
+
+        let mut look = wall_look(Tier::Comfort, &wall);
+        play(&mut look, &wall, BREAK_TICK);
+        let bodies = look.stats().bodies;
+        assert!(bodies > 0, "the break made debris");
+        let pushed = look.apply_blast(blast).expect("the blast shoves");
+        assert!(pushed > 0, "some debris is inside 50 m");
+        assert!(
+            pushed <= bodies,
+            "{pushed} pushed of {bodies} bodies, never more"
         );
     }
 

@@ -401,7 +401,7 @@ struct IndexPassage {
 
 /// The project root the codex lives under: the one the caller names, or the
 /// repo the door was built in.
-fn project_root(root: Option<&str>) -> PathBuf {
+pub(super) fn project_root(root: Option<&str>) -> PathBuf {
     match root {
         Some(name) if !name.trim().is_empty() => PathBuf::from(name),
         _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."),

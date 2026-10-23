@@ -18,12 +18,12 @@
 //! its last upload ([`upload_slot_parts`]).
 
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::time::Instant;
 
 use engine_anim::contract::{skinning_matrices, LocalPose, Skeleton};
-use engine_anim::hit_react::{envelope, DIP_M, PEAK_M};
+use engine_anim::hit_react::{lean_upper, view_envelope, DIP_M, PEAK_M};
 use engine_anim::inertial::Inertial;
-use engine_anim::inertialize::{AngularLimiter, DEFAULT_ANG_LIMIT_DEG_PER_SEC};
 use engine_anim::pose::sample_pose_with_rots;
 use engine_arena::cloth::{Cloth, ClothCollider, ClothGrid, ClothParams, ClothTier};
 use engine_arena::GaitPhase;
@@ -36,6 +36,7 @@ use engine_assets::skin_import::ImportedClip;
 use engine_core::vec3::cross3;
 use engine_core::Fnv64;
 use engine_render::contact_feet::{ContactFoot, CONTACT_FEET_MAX};
+use engine_render::draw::{trail_strip_verts, TrailStripVert};
 use engine_render::present::{DrawItem, DrawList, MeshKey, Presenter, TextureKey, TextureUpload};
 use engine_render::v1::{self, Camera, MeshData, PbrMaterial};
 use engine_render::v1_skin::{SkinPipeline, SkinWeights};
@@ -46,7 +47,7 @@ use crate::fight_ring::FightRing;
 use crate::fighter_bind::{self, FighterBinding};
 use crate::stage_bodies::place_joint;
 use crate::view_truth::BodyTruth;
-use crate::weapon_trail::{TrailPoint, TrailRing};
+use crate::weapon_trail::{TrailPoint, TrailRing, TRAIL_LEN};
 
 /// Fold plus bridge bulk, moved whole into the child module below so this
 /// file stays under the size cap: [`FighterLook::observe_tick`] and the act
@@ -55,6 +56,14 @@ use crate::weapon_trail::{TrailPoint, TrailRing};
 mod fighter_look_acts;
 
 use self::fighter_look_acts::{bridge_act, bridge_slots};
+
+/// Rollback rewind (EG39): one checkpoint per folded tick, the restore and
+/// the fading correction offset the frame adds to the drawn root.
+/// Presentation only.
+#[path = "fighter_look_rewind.rs"]
+mod fighter_look_rewind;
+
+use self::fighter_look_rewind::{empty_checkpoints, Correction, LookCheckpoint};
 
 /// Inertialized clip switches (LF9): the per-slot offset sets, the switch
 /// fold and the frame read. Presentation only.
@@ -67,6 +76,13 @@ mod fighter_look_inertia;
 mod fighter_look_feet;
 
 use self::fighter_look_feet::{foot_slides, Feet, Legs};
+
+/// Last-stage joint clamp (AM24): caps a presented joint's miss against the
+/// pop law's prediction. The angular limiter lanes live here too.
+#[path = "fighter_look_clamp.rs"]
+mod fighter_look_clamp;
+
+use self::fighter_look_clamp::LimitLane;
 
 /// The throwing arm of the spear grapple (SG3): the per-slot throw clock, the
 /// layer over the last pose and the palm positions a held spear ties to.
@@ -757,6 +773,10 @@ struct Rig {
     skeleton: Skeleton,
     inverse_binds: Vec<[[f32; 4]; 4]>,
     pelvis: usize,
+    /// Torso joint: the hit-react lean turns it about the push axis (AM23).
+    torso: usize,
+    /// Head joint: the lean adds a snap and the metric reads its travel.
+    head: usize,
     bind_pelvis: [f32; 3],
     /// Skin radius in meters: the farthest any bind-pose vertex sits from
     /// its nearest bind joint, plus a 10 cm margin. The joints-only pose
@@ -972,7 +992,7 @@ fn micros(elapsed: std::time::Duration) -> u64 {
 /// [`PresentReport`] and `crates/game/src/bin/arena.rs` folds both halves
 /// into the `arena frame-split` line beside the untouched `fighters` lump.
 /// Data owner: this module, read-only for its consumers. Units: parts,
-/// microseconds of wall clock sampled with [`Instant`] only (no map, poll or
+/// microseconds of wall clock sampled with [`engine_clock::now`] only (no map, poll or
 /// wait). Determinism: evidence only; the counters never enter a draw, the
 /// view truth or hashed state. A zero means no `SkinnedFrame`s reached the
 /// upload path this call, never a second timing law.
@@ -1050,14 +1070,14 @@ fn write_slot_skin(
     parts: usize,
     matrices: &[[[f32; 4]; 4]],
 ) -> Result<SkinSplit, LookError> {
-    let started = Instant::now();
+    let started = engine_clock::now();
     presenter
         .write_skin_block(slot_index, matrices)
         .map_err(|err| LookError::Upload(err.to_string()))?;
     Ok(SkinSplit {
         uploaded: parts,
         pose_us: 0,
-        upload_us: micros(started.elapsed()),
+        upload_us: micros(engine_clock::since(started)),
     })
 }
 
@@ -1091,7 +1111,7 @@ fn upload_slot_parts(
     let mut split = SkinSplit::default();
     for (part_index, posed) in frames.into_iter().enumerate() {
         let part = &rig.parts[part_index];
-        let lifted_started = Instant::now();
+        let lifted_started = engine_clock::now();
         // Digest the exact bytes the pair would upload: the lifted positions
         // and the skinned normals (uvs and indices belong to the rig and
         // never change). Hashing rides the lift pass, so a changed frame pays
@@ -1123,7 +1143,7 @@ fn upload_slot_parts(
         let digest = hasher.finish();
         split.pose_us = split
             .pose_us
-            .saturating_add(micros(lifted_started.elapsed()));
+            .saturating_add(micros(engine_clock::since(lifted_started)));
         let slot_part = slot_index * MAX_PARTS + part_index;
         if digests.get(slot_part) == Some(&Some(digest)) {
             // Resident bytes already are this frame's bytes: no upload.
@@ -1133,14 +1153,14 @@ fn upload_slot_parts(
         let key = look_mesh_key(slot_index, part_index);
         // 48 B stride fix: always re-upload with recomputed tangents; never
         // refresh 32 B in place (misaligned past vertex 0, streaks).
-        let upload_started = Instant::now();
+        let upload_started = engine_clock::now();
         let mesh = staged_part_mesh(lifted, posed.normals, &part.mesh);
         presenter
             .upload_mesh(key, &mesh)
             .map_err(|err| LookError::Upload(err.to_string()))?;
         split.upload_us = split
             .upload_us
-            .saturating_add(micros(upload_started.elapsed()));
+            .saturating_add(micros(engine_clock::since(upload_started)));
         if let Some(resident) = digests.get_mut(slot_part) {
             *resident = Some(digest);
         }
@@ -1487,7 +1507,20 @@ pub struct FighterLook {
     /// The slot the fight camera rides behind: the window's human (0, or 1 for
     /// a network guest). View only.
     hero: usize,
+    /// Rewind ring (EG39): the last 16 folded ticks, so a resim starts from
+    /// the state before its window and replays the cues once instead of
+    /// counting them twice. Presentation only.
+    checkpoints: Vec<LookCheckpoint>,
+    /// Next ring slot to overwrite when no entry already names the tick.
+    rewind_cursor: usize,
+    /// Fading visual correction from the last rewind; `None` at rest.
+    correction: Option<Correction>,
 }
+
+/// Neutral name for the presentation look, so crates below the viewer (the
+/// web shell) import the type without a genre word (GE2 ledger; see net's
+/// `BodySnap` for the same pattern).
+pub type BodyLook = FighterLook;
 
 /// One upload-digest slot per `slot * MAX_PARTS + part`, all empty: the
 /// [`FighterLook::uploaded_digest`] shape, one owner for the constructor and
@@ -1725,6 +1758,18 @@ fn load_rig(
         .iter()
         .position(|joint| joint.name == "pelvis")
         .ok_or_else(|| LookError::Import(format!("{}: no pelvis joint", binding.variant)))?;
+    let torso = body
+        .skeleton
+        .joints
+        .iter()
+        .position(|joint| joint.name == "torso")
+        .ok_or_else(|| LookError::Import(format!("{}: no torso joint", binding.variant)))?;
+    let head = body
+        .skeleton
+        .joints
+        .iter()
+        .position(|joint| joint.name == "head")
+        .ok_or_else(|| LookError::Import(format!("{}: no head joint", binding.variant)))?;
     let clips = retarget_clips(sources, &body)?;
     Ok(Rig {
         radius_m: skin_radius_m(&body),
@@ -1735,6 +1780,8 @@ fn load_rig(
         skeleton: body.skeleton,
         inverse_binds: body.inverse_binds,
         pelvis,
+        torso,
+        head,
         pipe,
         parts,
         clips,
@@ -1902,11 +1949,19 @@ fn flash_material(base: &PbrMaterial) -> PbrMaterial {
 /// render path. Errors: never fails; a missing adapter or a device refusal
 /// reads as `None` (headless skips, never fails). Budget: one adapter
 /// request per staged match, zero per tick or frame.
+#[cfg(not(target_arch = "wasm32"))]
 fn gpu_skin_adapter() -> Option<String> {
     match engine_render::v1_skin::GpuSkinned::init() {
         Ok(gpu) => Some(gpu.adapter_name().to_string()),
         Err(_) => None,
     }
+}
+
+/// The browser keeps no HDRI in the wasm and has no synchronous adapter
+/// request, so the probe reports none (QW4).
+#[cfg(target_arch = "wasm32")]
+fn gpu_skin_adapter() -> Option<String> {
+    None
 }
 
 /// One CPU-posed body with its skinned parts, before any GPU upload.
@@ -1954,36 +2009,8 @@ struct SlotSample {
     /// How far each fully planted foot is drawn from its held spot, in
     /// meters (LF12); `None` for a foot that is not at full plant.
     slides: [Option<f32>; 2],
-}
-
-/// One slot's angular-speed limiter lanes: the `engine-anim` limiter owns the
-/// cap and the last accepted rotation per bone; this struct keeps this tick's
-/// start and end rotations so a frame at any sub-tick `alpha` reads a pose
-/// between them. Built once per look slot at load; `observe_tick` advances it.
-/// Presentation only; never hashed.
-struct LimitLane {
-    /// Caps each bone's rotation change per tick at
-    /// [`DEFAULT_ANG_LIMIT_DEG_PER_SEC`].
-    limiter: AngularLimiter,
-    /// Rotations the previous tick's output held (this tick's start).
-    from: Vec<[f32; 4]>,
-    /// Rotations this tick's output holds (its end).
-    to: Vec<[f32; 4]>,
-    /// False until the slot's first pose: a first sight takes the pose whole
-    /// instead of ramping in from identity.
-    seeded: bool,
-}
-
-impl LimitLane {
-    /// A lane for `joints` bones at the look's fixed cap, unseeded.
-    fn new(joints: usize) -> Self {
-        Self {
-            limiter: AngularLimiter::new(joints, DEFAULT_ANG_LIMIT_DEG_PER_SEC),
-            from: vec![[0.0, 0.0, 0.0, 1.0]; joints],
-            to: vec![[0.0, 0.0, 0.0, 1.0]; joints],
-            seeded: false,
-        }
-    }
+    /// Head travel from the rotation flinch, meters (AM23); 0 when silent.
+    react_head_m: f32,
 }
 
 /// One lane per look slot, sized to that slot's rig, like the inertial sets.
@@ -1994,39 +2021,9 @@ fn limit_lanes(rigs: &[Rig]) -> Result<Vec<LimitLane>, LookError> {
             let rig = rigs
                 .get(rig_index(rigs.len(), slot))
                 .ok_or_else(|| LookError::Skin("limit lanes: no rig".to_string()))?;
-            Ok(LimitLane::new(rig.skeleton.len()))
+            Ok(LimitLane::new(&rig.skeleton))
         })
         .collect()
-}
-
-/// Shortest-arc normalized lerp between two unit quats by `t` in `0..=1`;
-/// `t >= 1` reads `b` whole. A degenerate sum reads `a`. Pure.
-fn rot_lerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-    let w = if t.is_finite() {
-        t.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    if w >= 1.0 {
-        return b;
-    }
-    let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
-    let sign = if dot < 0.0 { -1.0 } else { 1.0 };
-    let mut q = [
-        a[0] + (b[0] * sign - a[0]) * w,
-        a[1] + (b[1] * sign - a[1]) * w,
-        a[2] + (b[2] * sign - a[2]) * w,
-        a[3] + (b[3] * sign - a[3]) * w,
-    ];
-    let norm = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-    if norm.is_finite() && norm > 0.0 {
-        for lane in &mut q {
-            *lane /= norm;
-        }
-        q
-    } else {
-        a
-    }
 }
 
 impl FighterLook {
@@ -2226,10 +2223,44 @@ impl FighterLook {
     }
 
     /// Trail pairs for `slot`, oldest first; empty when idle. View only,
-    /// never hashed. Caller: the next slice's strip draw.
+    /// never hashed. Caller: [`Self::trail_strip`].
     #[must_use]
     pub fn trail_pairs(&self, slot: usize) -> &[TrailPoint] {
         self.trails.pairs(slot)
+    }
+
+    /// LF14: fold every busy slot's ring into the frame's sword ribbon: one
+    /// triangle-strip vertex list (`base`, `tip` per pair, oldest first, alpha
+    /// by age) plus the vert count of each slot's strip, so the draw never
+    /// bridges two fighters. An idle slot adds nothing, so a calm frame
+    /// returns two empty lists and stages no draw. View only, never hashed;
+    /// the only allocation is the returned pair of lists.
+    #[must_use]
+    pub fn trail_strip(&self) -> (Vec<TrailStripVert>, Vec<u32>) {
+        let mut verts = Vec::new();
+        let mut lens = Vec::new();
+        for slot in 0..MAX_LOOK_FIGHTERS {
+            let pairs = self.trails.pairs(slot);
+            if pairs.is_empty() {
+                continue;
+            }
+            let mut base = [[0.0f32; 3]; TRAIL_LEN];
+            let mut tip = [[0.0f32; 3]; TRAIL_LEN];
+            let mut age = [0u8; TRAIL_LEN];
+            let count = pairs.len().min(TRAIL_LEN);
+            for (index, point) in pairs.iter().take(count).enumerate() {
+                base[index] = point.base_m;
+                tip[index] = point.tip_m;
+                age[index] = point.age_ticks;
+            }
+            let strip = trail_strip_verts(&base[..count], &tip[..count], &age[..count]);
+            if strip.is_empty() {
+                continue;
+            }
+            lens.push(u32::try_from(strip.len()).unwrap_or(0));
+            verts.extend(strip);
+        }
+        (verts, lens)
     }
 
     /// Current act for a slot (receipts and tests): the bridge pick mapped
@@ -2297,10 +2328,23 @@ impl FighterLook {
     /// A `Down` pose starts here at [`BALANCE_FALLEN_PELVIS_M`]; the LF17
     /// sand rest ([`sand_rest_shift_m`]) only shifts the body after the CPU
     /// skin folds the posed bounds, never inside this pose. Last, the additive
-    /// flinch (EG18) pushes the pelvis away from the recorded attacker
-    /// side and dips it, scaled by the shared react-window
-    /// [`envelope`]: full at impact, silent past the window.
+    /// flinch (EG18/AM23) pushes the pelvis away from the recorded attacker
+    /// and leans the torso plus head over about 450 ms: blend in, hold, fade.
     fn slot_pose(&self, rig: &Rig, slot: &SlotAnim, alpha: f32) -> Result<LocalPose, LookError> {
+        let mut pose = self.slot_pose_base(rig, slot, alpha)?;
+        self.apply_hit_flinch(rig, &mut pose, slot, alpha)?;
+        Ok(pose)
+    }
+
+    /// [`slot_pose`](Self::slot_pose) before the flinch: the clip sample,
+    /// the in-place pelvis and the balance gait. The flinch reads this as its
+    /// base; the rotation metric measures only the head travel the lean adds.
+    fn slot_pose_base(
+        &self,
+        rig: &Rig,
+        slot: &SlotAnim,
+        alpha: f32,
+    ) -> Result<LocalPose, LookError> {
         let (clip_index, time) = self.clip_pick(rig, slot, alpha);
         let clip = rig
             .clips
@@ -2314,103 +2358,66 @@ impl FighterLook {
         pose.positions[rig.pelvis][2] = rig.bind_pelvis[2];
         pose.positions[rig.pelvis][1] =
             balance_pelvis_y_m(slot.balance, pose.positions[rig.pelvis][1]);
-        // Additive hit-react (EG18, view only): pelvis rides half the
-        // planar peak and half the dip at unit impulse, matching the
-        // `engine-anim` shares; the envelope owns the decay so pose and
-        // lockstep agree by construction. Zero envelope writes nothing,
-        // keeping the past-window pose bit-identical to its base.
-        let elapsed = self.tick.wrapping_sub(slot.hit_start);
-        let weight = envelope(elapsed);
-        if weight > 0.0 && (slot.hit_push[0] != 0.0 || slot.hit_push[1] != 0.0) {
-            let planar = 0.5 * PEAK_M * weight;
-            let dip = 0.5 * DIP_M * weight;
-            pose.positions[rig.pelvis][0] += slot.hit_push[0] * planar;
-            pose.positions[rig.pelvis][2] += slot.hit_push[1] * planar;
-            pose.positions[rig.pelvis][1] -= dip;
-        }
         Ok(pose)
     }
 
-    /// Advance every seen slot's angular limiter to this tick's end pose. The
-    /// wanted pose is the clip plus inertia pose at the tick's end (the very
-    /// pose [`slot_sample`](Self::slot_sample) samples before the feet plant
-    /// and the throw layer, which keep their own bounded motion); the limiter
-    /// caps each bone's change at [`DEFAULT_ANG_LIMIT_DEG_PER_SEC`] over
-    /// `elapsed` ticks. A slot first seen, unseen, ragdolled (physics owns its
-    /// bones), under a forced balance pose (a fall or a kneel lands whole) or
-    /// refused drops to unseeded, so its next pose lands whole instead of
-    /// ramping in from stale or identity rotations. Presentation only; the sim
-    /// hash never reads it. Caller: [`observe_tick`](Self::observe_tick) last.
-    pub(super) fn limit_tick(&mut self, elapsed: u32) {
-        let dt = f32::from(u16::try_from(elapsed).unwrap_or(u16::MAX)) / TICK_HZ;
-        for index in 0..MAX_LOOK_FIGHTERS {
-            let slot = self.slots[index];
-            // Read the tick a hair before its end, as the switch fold does: at
-            // exactly 1.0 a swing clip that runs out would sample the *next*
-            // clip a tick before the inertial offsets take over that cut.
-            let wanted = match (slot.seen, self.ragdolled(index)) {
-                (true, false) => self
-                    .rigs
-                    .get(self.rig_for_slot(index))
-                    .and_then(|rig| self.inertial_pose(rig, index, &slot, 1.0 - LAG_TICKS).ok()),
-                _ => None,
-            };
-            // A balance verdict (a fall or a kneel) is a forced pose the look
-            // lands at once, so it takes the whole cap budget instead of
-            // ramping: the limiter guards clip motion, never a floor verdict.
-            // A slot with nothing to pose drops to unseeded too.
-            let ramp = slot.seen
-                && !self.ragdolled(index)
-                && matches!(slot.balance, GaitPhase::Steady | GaitPhase::Stumbling);
-            if !ramp || wanted.is_none() {
-                if let Some(lane) = self.limit.get_mut(index) {
-                    lane.seeded = false;
-                }
-            }
-            if let Some(pose) = &wanted {
-                self.advance_limit(index, &pose.rotations, dt);
-            }
+    /// Presentation flinch weight for this slot at `alpha`; no hit reads zero.
+    /// A held slot samples the end of its tick, like its clip, so the impact
+    /// pose stays one pose at every sub-tick frame of the freeze (LF10).
+    fn hit_weight(&self, slot: &SlotAnim, alpha: f32) -> f32 {
+        if slot.hit_start == u32::MAX {
+            return 0.0;
         }
+        view_envelope(
+            self.tick.wrapping_sub(slot.hit_start),
+            clip_alpha(slot, alpha),
+        )
     }
 
-    /// Step one slot's limiter toward `wanted` and keep this tick's start and
-    /// end rotations. An unseeded lane takes `wanted` whole: a full second of
-    /// the cap accepts any angle, so the first frame shows the clip rather
-    /// than ramping in from identity. Steady state allocates nothing.
-    fn advance_limit(&mut self, index: usize, wanted: &[[f32; 4]], dt: f32) {
-        let Some(lane) = self.limit.get_mut(index) else {
-            return;
-        };
-        if lane.to.len() != wanted.len() {
-            return;
+    /// Add the hit flinch to `pose`: pelvis push plus dip, then the
+    /// real-skeleton upper-chain lean. Returns the head travel from the
+    /// rotation half in meters (AM23); 0 when the flinch is silent. View only.
+    fn apply_hit_flinch(
+        &self,
+        rig: &Rig,
+        pose: &mut LocalPose,
+        slot: &SlotAnim,
+        alpha: f32,
+    ) -> Result<f32, LookError> {
+        let weight = self.hit_weight(slot, alpha);
+        if weight <= 0.0 || (slot.hit_push[0] == 0.0 && slot.hit_push[1] == 0.0) {
+            return Ok(0.0);
         }
-        if !lane.seeded {
-            lane.from.copy_from_slice(wanted);
-            lane.limiter.step(wanted, SEED_S, &mut lane.to);
-            lane.seeded = true;
-            return;
-        }
-        lane.from.copy_from_slice(&lane.to);
-        lane.limiter.step(wanted, dt, &mut lane.to);
+        let planar = 0.5 * PEAK_M * weight;
+        let dip = 0.5 * DIP_M * weight;
+        pose.positions[rig.pelvis][0] += slot.hit_push[0] * planar;
+        pose.positions[rig.pelvis][2] += slot.hit_push[1] * planar;
+        pose.positions[rig.pelvis][1] -= dip;
+        let head_m = lean_upper(
+            &rig.skeleton,
+            pose,
+            rig.torso,
+            rig.head,
+            slot.hit_push,
+            weight,
+        )
+        .map_err(|err| LookError::Skin(err.to_string()))?;
+        Ok(head_m)
     }
 
-    /// Read the limiter on a frame at sub-tick `alpha`: each bone takes the
-    /// shortest-arc blend from this tick's start rotation to its capped end
-    /// rotation, so the drawn pose never moves faster than the cap and needs
-    /// no state of its own. A slot with no seeded lane, a ragdolled one, or
-    /// one under a forced balance pose (`ramp` false) keeps `rots` as the pose
-    /// gave it: a floor verdict lands whole, never masked by a stale lane.
-    /// Pure.
-    fn limit_pose(&self, index: usize, rots: &mut [[f32; 4]], alpha: f32, ramp: bool) {
-        let Some(lane) = self.limit.get(index) else {
-            return;
+    /// Head travel from the rotation flinch at this sample, meters (AM23).
+    /// Re-samples the base only while a flinch is live, so the metric reads
+    /// the same lean [`slot_pose`](Self::slot_pose) applies. A missing pose
+    /// reads 0 instead of failing the frame.
+    fn react_head_m(&self, rig: &Rig, slot: &SlotAnim, alpha: f32) -> f32 {
+        if self.hit_weight(slot, alpha) <= 0.0 {
+            return 0.0;
+        }
+        let Ok(mut pose) = self.slot_pose_base(rig, slot, alpha) else {
+            return 0.0;
         };
-        if !ramp || !lane.seeded || self.ragdolled(index) {
-            return;
-        }
-        for ((rot, from), to) in rots.iter_mut().zip(&lane.from).zip(&lane.to) {
-            *rot = rot_lerp(*from, *to, alpha);
-        }
+        self.apply_hit_flinch(rig, &mut pose, slot, alpha)
+            .unwrap_or(0.0)
     }
 
     /// Create every slot's body-part vertex buffers once, from the bind
@@ -2479,13 +2486,29 @@ impl FighterLook {
     /// gait forces the flat `Down` last frame (like [`slot_pose`](Self::slot_pose)),
     /// so the floored slot draws flat within one frame. The last-stage
     /// angular-speed cap ([`limit_pose`](Self::limit_pose)) guards the bone
-    /// rotations here, so both the full and the joints-only pose carry it.
+    /// rotations and [`clamp_sample_positions`](Self::clamp_sample_positions)
+    /// guards their presented positions, so both the full and the joints-only
+    /// pose carry both.
     fn slot_sample(
         &self,
         rig: &Rig,
         index: usize,
         slot: &SlotAnim,
         alpha: f32,
+    ) -> Result<SlotSample, LookError> {
+        self.slot_sample_raw(rig, index, slot, alpha, true)
+    }
+
+    /// [`slot_sample`](Self::slot_sample) with the final-pose position clamp
+    /// optional: `limit_tick` samples the raw pose first, then clamps it
+    /// against the previous tick's sample. Presentation only.
+    fn slot_sample_raw(
+        &self,
+        rig: &Rig,
+        index: usize,
+        slot: &SlotAnim,
+        alpha: f32,
+        clamp_positions: bool,
     ) -> Result<SlotSample, LookError> {
         let (clip, time) = self.clip_pick(rig, slot, alpha);
         let mut pose = self.inertial_pose(rig, index, slot, alpha)?;
@@ -2498,16 +2521,31 @@ impl FighterLook {
         let at = clip_alpha(slot, alpha);
         let ramp = matches!(slot.balance, GaitPhase::Steady | GaitPhase::Stumbling);
         self.limit_pose(index, &mut pose.rotations, at, ramp);
-        let (pos, yaw) = slot_root(slot, alpha);
+        let (mut pos, yaw) = slot_root(slot, alpha);
         // LF12: plant the feet last, on top of the inertial offsets, so a clip
         // switch stays continuous and the feet hold their spot on the sand.
         let contacts = self.plant_feet(rig, slot, &mut pose, yaw, alpha)?;
         // SG3: the spear throw is a masked override on the final pose, last of all.
         self.lay_throw(rig, index, slot, &mut pose, alpha)?;
-        let world = skinning_matrices(&rig.skeleton, &pose)
+        let mut world = skinning_matrices(&rig.skeleton, &pose)
             .map_err(|err| LookError::Skin(format!("{err:?}")))?;
+        // AM24: the final position clamp runs after every pose layer, so the
+        // drawn joints, their bounds and the foot-slide truth all read one
+        // pose that never jumps past the pop law's miss budget.
+        if clamp_positions {
+            self.clamp_sample_positions(index, &mut world, alpha);
+        }
+        // EG39: a rollback rewind adds its fading error vector to the drawn
+        // root after the pop clamp, so the clamp never eats the correction and
+        // the body eases from where the viewer last saw it to the confirmed
+        // root. The sim never reads this root.
+        let correction = self.correction_offset(index);
+        for (axis, offset) in correction.iter().enumerate() {
+            pos[axis] += *offset;
+        }
         let slides = foot_slides(rig.legs, &world, &contacts, (pos, yaw));
         let root = root_matrix(pos, yaw);
+        let react_head_m = self.react_head_m(rig, slot, alpha);
         Ok(SlotSample {
             clip,
             time,
@@ -2516,6 +2554,7 @@ impl FighterLook {
             yaw,
             root,
             slides,
+            react_head_m,
         })
     }
 
@@ -2568,6 +2607,7 @@ impl FighterLook {
             body.tinted = self.tick < slot.flash_until;
             body.foot_slide_m = sample.slides;
             body.ragdolled = self.ragdolled(slot_index);
+            body.react_head_m = sample.react_head_m;
             let mut frames = Vec::with_capacity(rig.parts.len());
             let owner = self.limb_owner(slot_index, rig);
             for part in rig.parts.iter() {
@@ -2670,6 +2710,7 @@ impl FighterLook {
             body.tinted = self.tick < slot.flash_until;
             body.foot_slide_m = sample.slides;
             body.ragdolled = self.ragdolled(slot_index);
+            body.react_head_m = sample.react_head_m;
             if let Some((lo, hi)) = crate::stage_bodies::joints_bounds(&placed, rig.radius_m) {
                 body.min = lo;
                 body.max = hi;
@@ -2770,7 +2811,7 @@ impl FighterLook {
     ) -> Result<(SkinSplit, Vec<BodyTruth>), LookError> {
         // Split: the CPU pose step lives in `pose_frame`; this keeps the
         // upload, so every existing caller poses and draws exactly as before.
-        let pose_started = Instant::now();
+        let pose_started = engine_clock::now();
         let posed = self.pose_frame(fighters, alpha)?;
         // RZ3: bake this frame's fallen limbs and stump caps into resident keys
         // before anything reads the resident list below.
@@ -2779,7 +2820,7 @@ impl FighterLook {
         self.publish_capes(presenter);
         let mut split = SkinSplit {
             uploaded: 0,
-            pose_us: micros(pose_started.elapsed()),
+            pose_us: micros(engine_clock::since(pose_started)),
             upload_us: 0,
         };
         let mut truth = Vec::with_capacity(posed.len());
@@ -2940,6 +2981,11 @@ impl FighterLook {
     ) -> Result<PresentReport, LookError> {
         let (skin, truth) = self.stage_bodies(presenter, frame.fighters, frame.alpha)?;
         self.truth = truth;
+        // LF14: the swing ribbon the ring collected, staged for the frame's HDR
+        // pass. A calm tick's ring is empty, so an idle slot draws no strip;
+        // the strip is view only and never enters the hash.
+        let (trail_verts, trail_lens) = self.trail_strip();
+        presenter.set_trail_strips(&trail_verts, &trail_lens);
         // The grounding shade follows the bodies: one blob under every seen fighter.
         presenter.set_contact_feet(&self.contact_feet(frame.fighters));
         let resident = presenter.mesh_keys();
@@ -3283,6 +3329,9 @@ mod tests {
             limbs: LimbLook::empty(),
             capes: Capes::empty(),
             hero: 0,
+            checkpoints: empty_checkpoints(),
+            rewind_cursor: 0,
+            correction: None,
         }
     }
 
@@ -3353,6 +3402,9 @@ mod tests {
             limbs: LimbLook::empty(),
             capes: Capes::empty(),
             hero: 0,
+            checkpoints: empty_checkpoints(),
+            rewind_cursor: 0,
+            correction: None,
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -3657,6 +3709,9 @@ mod tests {
             limbs: LimbLook::empty(),
             capes: Capes::empty(),
             hero: 0,
+            checkpoints: empty_checkpoints(),
+            rewind_cursor: 0,
+            correction: None,
         };
         let base = Camera::new(
             [0.0, 5.0, 12.0],
@@ -3908,6 +3963,9 @@ mod tests {
             limbs: LimbLook::empty(),
             capes: Capes::empty(),
             hero: 0,
+            checkpoints: empty_checkpoints(),
+            rewind_cursor: 0,
+            correction: None,
         }
     }
 
@@ -4476,18 +4534,25 @@ mod tests {
         }
     }
 
+    /// EG47: one routed skip for every GPU test here. No adapter maps to
+    /// `NoAdapter`, so the test prints one `SKIPPED <test>` line and
+    /// `E2040_REQUIRE_GPU=1` turns the skip into a failure.
+    fn presenter_or_skip(test: &str) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
+            Ok(presenter) => Ok(presenter),
+            Err(engine_render::present::PresentError::NoAdapter) => Err(
+                engine_render::test_gpu::NoAdapter("no wgpu adapter on this machine".into()),
+            ),
+            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        };
+        engine_render::test_gpu::require_or_skip(test, probe)
+    }
+
     /// A staged look on its own offscreen presenter: textures plus either
     /// the CPU-skinned or the GPU-skinned part buffers. `None` without an
     /// adapter (the test reports the skip).
     fn staged_look(test: &str, gpu_skin: bool) -> Option<(FighterLook, Presenter)> {
-        let mut presenter = match Presenter::init_offscreen() {
-            Ok(presenter) => presenter,
-            Err(engine_render::present::PresentError::NoAdapter) => {
-                eprintln!("SKIPPED {test}: no wgpu adapter on this machine");
-                return None;
-            }
-            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
-        };
+        let mut presenter = presenter_or_skip(test)?;
         presenter.resize(192, 108).expect("valid size applies");
         let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
         look.stage_textures(&mut presenter).expect("textures stage");
@@ -5129,7 +5194,7 @@ mod tests {
         let hp = [1000u16, 1000u16];
         let mut hit = FighterLook::load(&content_dir()).expect("CT7 bodies load");
         let mut calm = FighterLook::load(&content_dir()).expect("CT7 bodies load");
-        for tick in 0..=20u32 {
+        for tick in 0..=19u32 {
             hit.observe_tick(tick, &views, &hp, &[]);
             calm.observe_tick(tick, &views, &hp, &[]);
         }
@@ -5150,13 +5215,19 @@ mod tests {
         };
         // Same hitstop hold on both sides (LF10): `Parried` freezes the same
         // impact pair without a flinch, so past-window poses compare hold to
-        // hold and only the flinch can differ.
+        // hold and only the flinch can differ; its ramp peaks one tick in.
         let calm_hold = FightCue::Parried {
             attacker: 0,
             victim: 1,
         };
-        hit.observe_tick(21, &views, &hp, &[cue]);
-        calm.observe_tick(21, &views, &hp, &[calm_hold]);
+        hit.observe_tick(20, &views, &hp, &[cue]);
+        calm.observe_tick(20, &views, &hp, &[calm_hold]);
+        // Hitstop freezes the flinch four ticks; sample its full lean after
+        // the three-tick rise.
+        for tick in 21..=27u32 {
+            hit.observe_tick(tick, &views, &hp, &[]);
+            calm.observe_tick(tick, &views, &hp, &[]);
+        }
         let slot_h = hit.slots[1];
         let rig_h = &hit.rigs[hit.rig_for_slot(1)];
         let flinch = hit.slot_pose(rig_h, &slot_h, 0.5).expect("pose samples");
@@ -5174,8 +5245,16 @@ mod tests {
         assert!(dy < 0.0, "a Hit dips the victim pelvis: dy={dy}");
         // The push points away from the attacker (victim at +X of attacker).
         assert!(dx > 0.0, "flinch runs away from the attacker: dx={dx}");
+        // AM23: the rotation half leans the real skeleton and the head reads
+        // at least 8 cm of travel, the metric `react_head_cm_max` prints.
+        let head_m = hit.react_head_m(rig_h, &slot_h, 0.5);
+        assert!(head_m >= 0.08, "rotation flinch head travel: {head_m}");
+        assert_ne!(
+            flinch.rotations[rig_h.torso], base.rotations[rig_c.torso],
+            "the torso leans off its base"
+        );
         // Mid-window the flinch has decayed but still reads.
-        for tick in 22..=26u32 {
+        for tick in 28..=40u32 {
             hit.observe_tick(tick, &views, &hp, &[]);
             calm.observe_tick(tick, &views, &hp, &[]);
         }
@@ -5189,14 +5268,14 @@ mod tests {
         let mdz = mid.positions[pelvis][2] - base_mid.positions[pelvis][2];
         assert!(
             mdx * mdx + mdz * mdz < dx * dx + dz * dz,
-            "the flinch decays inside the window"
+            "the flinch decays inside the window: mid {mdx},{mdz} vs hit {dx},{dz}"
         );
         assert!(
             mdx * mdx + mdz * mdz > 1e-12,
             "the flinch still reads mid-window"
         );
-        // Past the window the base returns exactly.
-        for tick in 27..=30u32 {
+        // Past the 450 ms window the base returns exactly.
+        for tick in 41..=51u32 {
             hit.observe_tick(tick, &views, &hp, &[]);
             calm.observe_tick(tick, &views, &hp, &[]);
         }
@@ -5226,13 +5305,10 @@ mod tests {
 
     #[test]
     fn staged_bodies_rewrite_their_buffers_in_place_every_frame() {
-        let mut presenter = match Presenter::init_offscreen() {
-            Ok(presenter) => presenter,
-            Err(engine_render::present::PresentError::NoAdapter) => {
-                eprintln!("SKIPPED fighter buffer test: no wgpu adapter on this machine");
-                return;
-            }
-            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        let Some(mut presenter) =
+            presenter_or_skip("staged_bodies_rewrite_their_buffers_in_place_every_frame")
+        else {
+            return;
         };
         let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
         let staged = look.stage_meshes(&mut presenter).expect("bodies stage");
@@ -5349,13 +5425,10 @@ mod tests {
         // The staged value carries no tangents: the presenter must rebuild
         // them itself, so the picture must equal the one the validated pair
         // drew, and both must differ from the bind pose they replaced.
-        let mut presenter = match Presenter::init_offscreen() {
-            Ok(presenter) => presenter,
-            Err(engine_render::present::PresentError::NoAdapter) => {
-                eprintln!("SKIPPED fighter staged mesh pixels: no wgpu adapter on this machine");
-                return;
-            }
-            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        let Some(mut presenter) =
+            presenter_or_skip("skinned_upload_draws_the_same_pixels_without_the_caller_side_pass")
+        else {
+            return;
         };
         presenter.resize(160, 120).expect("valid size applies");
         let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
@@ -5417,13 +5490,10 @@ mod tests {
         // owns, so its best round costs the same as the reference arm (7589
         // us vs 7482 us measured) and the 92% bound below fails. With the cut
         // the best round costs 55-80% of the reference on a busy machine.
-        let mut presenter = match Presenter::init_offscreen() {
-            Ok(presenter) => presenter,
-            Err(engine_render::present::PresentError::NoAdapter) => {
-                eprintln!("SKIPPED fighter staged mesh cost: no wgpu adapter on this machine");
-                return;
-            }
-            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        let Some(mut presenter) =
+            presenter_or_skip("skinned_upload_spends_less_than_the_validated_first_pair")
+        else {
+            return;
         };
         let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
         look.stage_meshes(&mut presenter).expect("bodies stage");
@@ -5499,13 +5569,10 @@ mod tests {
         // identical second call while `uploaded` still reports the parts the
         // frame needs - and a moved pose must re-upload whole, never leaving
         // the resident bytes of a previous tick on screen.
-        let mut presenter = match Presenter::init_offscreen() {
-            Ok(presenter) => presenter,
-            Err(engine_render::present::PresentError::NoAdapter) => {
-                eprintln!("SKIPPED fighter skin split: no wgpu adapter on this machine");
-                return;
-            }
-            Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
+        let Some(mut presenter) =
+            presenter_or_skip("skinned_upload_skips_resident_parts_and_counts_both_halves")
+        else {
+            return;
         };
         let mut look = FighterLook::load(&content_dir()).expect("CT7 bodies load");
         look.stage_meshes(&mut presenter).expect("bodies stage");
@@ -6017,6 +6084,16 @@ mod tests {
     }
 
     #[test]
+    fn view_run_2040_300_eight_fighters_has_no_joint_pops() {
+        // AM24 accept: the flinch rises over three ticks, so the seeded
+        // 8-fighter 300-tick line reads no joint pops (was 2 at 13.1 cm,
+        // both on `index_lower_r` under `act=attack`).
+        let line = FighterLook::view_run(2040, 300, 8).expect("headless view runs");
+        println!("{line}");
+        assert!(line.contains(" pops=0 pop_acts=none "), "{line}");
+    }
+
+    #[test]
     fn view_run_repeats_its_arena_view_line_x2_with_no_gpu() {
         // SP61 accept: a seeded 600-tick 8-fighter run prints the same
         // `arena view:` line twice. No `Presenter` is built anywhere here,
@@ -6232,6 +6309,48 @@ mod tests {
     }
 
     #[test]
+    fn trail_strip_folds_the_swing_and_draws_none_when_idle() {
+        // LF14: the strip the draw reads. A calm look stages no vert and no
+        // strip count, so the frame issues no draw; a mid-swing look stages
+        // one strip for the attacker only, two verts a pair, fading by age.
+        use engine_audio::FightCue;
+        let mut look = balance_look_two();
+        look.swing_ticks = 30;
+        let (verts, lens) = look.trail_strip();
+        assert!(verts.is_empty(), "no swing stages no vert");
+        assert!(lens.is_empty(), "no swing stages no strip");
+        let hit = FightCue::Hit {
+            attacker: 0,
+            victim: 1,
+            damage: 100,
+        };
+        for tick in 0..6u32 {
+            let x = -1.0 + 0.05 * f32::from(u16::try_from(tick).unwrap_or(u16::MAX));
+            let views = [view(0, x, 0.0), view(1, 1.0, 0.0)];
+            let cues = if tick == 0 { vec![hit] } else { vec![] };
+            look.observe_tick(tick, &views, &[1000, 1000], &cues);
+        }
+        let pairs = look.trail_pairs(0).len();
+        assert!(pairs > 1, "the swing ring filled");
+        let (verts, lens) = look.trail_strip();
+        assert_eq!(lens.len(), 1, "one strip, the attacker's only");
+        assert_eq!(
+            u32::try_from(verts.len()).unwrap_or(0),
+            lens[0],
+            "the count is the flat list's length"
+        );
+        assert_eq!(verts.len(), pairs * 2, "one base plus one tip a pair");
+        assert!(
+            verts[0].alpha < verts[verts.len() - 1].alpha,
+            "oldest first, so alpha rises toward the newest pair"
+        );
+        assert!(
+            verts.iter().all(|vert| vert.alpha.is_finite()),
+            "the strip carries finite alpha"
+        );
+    }
+
+    #[test]
     fn view_run_pose_without_rigs_fails_loud_never_panics() {
         // Failure paths: a seen slot with no rig fails (never a panic), an
         // unseen bout poses nothing, and zero ticks folds no frame.
@@ -6262,6 +6381,9 @@ mod tests {
             limbs: LimbLook::empty(),
             capes: Capes::empty(),
             hero: 0,
+            checkpoints: empty_checkpoints(),
+            rewind_cursor: 0,
+            correction: None,
         };
         assert_eq!(
             empty

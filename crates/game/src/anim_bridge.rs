@@ -133,7 +133,9 @@ pub struct ClipPick {
 
 /// Presentation state for one fighter slot: the integer pick plus the fade
 /// driver. The float positions below feed speed only and never enter the
-/// pick digest.
+/// pick digest. `Clone` lets the look checkpoint one tick of bridge state for
+/// a rollback rewind (EG39).
+#[derive(Clone)]
 pub struct FighterSlot {
     slot: u8,
     pick: ClipPick,

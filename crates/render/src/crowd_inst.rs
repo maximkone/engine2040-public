@@ -788,7 +788,7 @@ pub fn unpack_instance(words: &[u32]) -> Option<UnpackedCell> {
 /// then names the window build that binds it (never silent success). The
 /// CPU staging above is the authority here; the window build records the
 /// live pass instead.
-#[cfg(not(feature = "window"))]
+#[cfg(not(feature = "gpu"))]
 pub fn submit_gpu(
     instances: &[CrowdInstance],
     viewport_px: [u32; 2],
@@ -1191,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     fn gpu_submit_without_device_names_the_window_build() {
         let layout = small_layout();
         let seats = layout.seat_count();

@@ -1,6 +1,9 @@
 //! world: deterministic bake. Seed N + size M -> versioned bytes, std-only.
 //! Pathfinding lives in engine-nav (single A* owner); world only emits cells.
 
+/// The territory state machine: owner, contest, progress and score for the
+/// faction war's capture points, integer ticks, no body scan (RY4).
+pub mod capture;
 pub mod cells;
 /// The dig layer: an integer height grid in millimetres where earth moves
 /// between cells and conserves its volume.

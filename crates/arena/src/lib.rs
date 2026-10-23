@@ -68,6 +68,8 @@ pub mod gym;
 /// Weapon weight in the live duel (FEEL1): one `weapons.rows` row per slot.
 pub mod heft;
 pub mod input_layers;
+/// RC36: the per-fighter step on the shared job pool (index-ordered join).
+mod leg_pool;
 pub mod legion_bind;
 pub mod limbs;
 pub mod live;
@@ -93,6 +95,9 @@ pub mod zones;
 static TEST_ALLOCATOR: engine_core::alloc_probe::CountingAlloc =
     engine_core::alloc_probe::CountingAlloc;
 
+/// The fall table (FEEL7) and one tick's landing: authority charges the
+/// health, presentation reads the same row for squash, camera dip and sound.
+pub use authority::{fall_damage_permille, FallLanding, FALL_DAMAGE_TABLE};
 pub use collide::{Pillar, COLLIDE_RADIUS_MM, MAX_PILLARS};
 pub use controller::{ControlView, ScriptEffect, SlotController, SlotView};
 pub use engine_combat::fight::{FIGHT_RULES_V1, FIGHT_RULES_V2};
@@ -949,12 +954,20 @@ pub struct Sim {
     /// armed ([`Sim::set_bolt`]); `None` leaves every tick and hash
     /// untouched.
     bolt: Option<bolt::BoltState>,
+    /// ORCA crowd channel (row TC4), `Some` only while armed
+    /// ([`Sim::set_steering`]); `None` leaves every tick and hash untouched.
+    steer: Option<live::Steering>,
     /// Height channel (row SG5): each slot's vertical speed in mm per tick.
     /// Empty while the channel is off, which is the golden and the floor
     /// plane: nothing writes `pos[1]` beyond placement and nothing folds.
     rise: Vec<i32>,
     /// True once the height channel is armed ([`Sim::set_height`]).
     height: bool,
+    /// Last tick's fall landings (FEEL7), slot order; `None` while the height
+    /// channel is off. Transient mirror of the fall table's charge for the
+    /// presentation and the game's health display, never hashed: the sim
+    /// write is the fight's own hp.
+    landings: [Option<FallLanding>; MAX_SLOTS],
     #[cfg(test)]
     trace: Option<Vec<Vec<TickMotion>>>,
     /// Test-only oracle switch: build the melee plan through the pre-hoist
@@ -968,6 +981,12 @@ pub struct Sim {
     /// events, poses and hashes.
     #[cfg(test)]
     full_collide_passes: bool,
+    /// RC36: the process job pool the per-fighter leg forks on. `None` keeps
+    /// it inline on the caller, which is the default: an authority tick must
+    /// not allocate a byte per tick. A recording build (the arena window) sets
+    /// the shared pool, sized by `E2040_THREADS`; tests pin their own to prove
+    /// equal bytes at 1, 2, 4 and 8 threads.
+    pool: Option<&'static engine_ecs::pool::JobPool>,
 }
 
 impl Sim {
@@ -1124,14 +1143,17 @@ impl Sim {
             spear: None,
             pilum: None,
             bolt: None,
+            steer: None,
             rise: Vec::new(),
             height: false,
+            landings: [None; MAX_SLOTS],
             #[cfg(test)]
             trace: None,
             #[cfg(test)]
             pairwise_plan: false,
             #[cfg(test)]
             full_collide_passes: false,
+            pool: None,
         };
         // Table version 2 runs under rules v2; version 1 pins the legacy rules.
         sim.set_rules(config.rules()).then_some(sim)
@@ -1208,20 +1230,6 @@ impl Sim {
         }
         self.bolt = Some(bolt::BoltState::new(self.fighters));
         true
-    }
-
-    /// One tick of the height channel: gravity on every slot that is off the
-    /// floor, a landing at floor height with the vertical speed cleared.
-    /// Integer mm, so a replay lands on the same height twice. Near the apex
-    /// (`AIR_APEX_MM_TICK`) a held jump halves gravity, the AIN6 table's
-    /// float-free copy; the spear swing keeps the plain arc.
-    fn fall(&mut self) {
-        authority::fall_states(
-            &mut self.states,
-            &mut self.rise,
-            self.fighters,
-            &self.last_inputs,
-        );
     }
 
     /// AIN7 live jump: arm the height channel from any tick (the `--height`
@@ -1463,137 +1471,25 @@ impl Sim {
         // never camera-relative) into LOC1, whose requested root delta
         // resolves through PH2 collision exactly once. Knocked-out fighters
         // hold pose (wishes still latch for the hash; locomotion frozen).
+        // RC36: the leg runs as an index-ordered fork-join on the process
+        // job pool and merges in slot order, so its bytes never depend on
+        // the thread count; one lane (or E2040_THREADS=1) is the loop
+        // that stood here, byte for byte.
         #[cfg(test)]
         let mut tick_trace = Vec::with_capacity(self.fighters);
-        for (slot, cell) in slots.iter().enumerate().take(self.fighters) {
-            let input = (*cell)?;
-            self.wishes[slot] = [input.mx, input.mz];
-            // The spear bit only exists in a spear match; elsewhere it is
-            // masked out so a stray press cannot reach the hash.
-            self.buttons[slot] = if self.spear.is_some() {
-                input.buttons.0
-            } else {
-                input.buttons.0 & !THROW_SPEAR
-            };
-            if self.fight.fighters[slot].hp_permille == 0 {
-                #[cfg(test)]
-                tick_trace.push(TickMotion {
-                    requested: [0.0, 0.0],
-                    resolved: [0.0, 0.0],
-                    blocked: false,
-                });
-                if let Some(history) = self.loco_history.as_mut() {
-                    if let Some(last) = history[slot].last().cloned() {
-                        history[slot].push(last);
-                    }
-                }
-                continue;
-            }
-            // Airborne follows the controller's grounded flag from the last
-            // tick (`sim` only); the default leg stays grounded on the flat
-            // floor. Facing stays the absolute IN1 intent so AI `face_toward`
-            // keeps working; locomotion turns its own gait facing toward the
-            // wish and reports the yaw it applied.
-            #[cfg(feature = "sim")]
-            self.locos[slot].set_airborne(!self.controllers[slot].grounded());
-            let (speed, dir) = loco_wish(&input);
-            // EG34: a fallen or catching fighter is down: its wish stops and
-            // its root holds (the locomotion machine still eases to idle).
-            let down = self.rules.balance
-                && self.balance.get(slot).is_some_and(|state| {
-                    matches!(state.gait(), GaitPhase::Fallen | GaitPhase::Catching)
-                });
-            let speed = if down { 0.0 } else { speed };
-            // AIN7 live jump: a fresh press on the floor takes off through the
-            // height channel; releasing early cuts the rise (the AIN6 hold
-            // cut). The first press arms the channel, so a default match and
-            // its hashes before the press stay floor-plane.
-            if jump_edges[slot] && !down && self.arm_jump() {
-                let grounded = self.rise[slot] == 0 && self.states[slot].pos[1] <= 0.0;
-                if grounded {
-                    self.rise[slot] = JUMP_RISE_MM_TICK;
-                }
-            }
-            if jump_releases[slot] && self.height && self.rise[slot] > 0 {
-                self.rise[slot] /= 2;
-            }
-            let interrupt = interrupt_for_slot(&tick_events, slot as u8);
-            // Authority ticks that record nothing take the root-only
-            // advance (0 heap allocs); presentation runs keep `update` so
-            // pose/contacts still land in history.
-            let requested = if self.loco_history.is_none() {
-                let root = self.locos[slot]
-                    .update_root(speed, dir, self.tick, interrupt)
-                    .ok()?;
-                root.dp
-            } else {
-                let mut out = self.locos[slot]
-                    .update(speed, dir, self.tick, interrupt)
-                    .ok()?;
-                // Ground feel rides the recorded pose only: the root delta
-                // below is authoritative and passes through bit-identical.
-                let dp = out.root.dp;
-                let capsule = (dp[0] * dp[0] + dp[1] * dp[1]).sqrt() / TICK_DT;
-                self.warps[slot]
-                    .warp_output(&mut out, capsule, dir, &LOCO_LEG_JOINTS)
-                    .ok()?;
-                if let Some(history) = self.loco_history.as_mut() {
-                    history[slot].push(out.pose.clone());
-                }
-                out.root.dp
-            };
-            let requested = if down { [0.0, 0.0] } else { requested };
-            self.states[slot].yaw = yaw_from_centideg(input.facing);
-            // Wall-inset bound shared by both legs: the default clamp below
-            // and the controller walls (faces one skin inside this limit).
-            let limit = wall_limit(self.config.half_extent_m);
-            #[cfg(feature = "sim")]
-            {
-                // Single resolution: the blocked remainder dies here and is
-                // never reapplied on a later tick.
-                let resolved = self.controllers[slot].move_and_slide(requested, FIXED_DT);
-                let (dx, dz) = (resolved.displacement[0], resolved.displacement[1]);
-                let state = &mut self.states[slot];
-                // Backstop clamp: controller walls sit one skin inside this
-                // limit, so it never fires; it keeps the shared wall inset
-                // live on both legs.
-                state.pos[0] = canon_zero(state.pos[0] + dx).clamp(-limit, limit);
-                state.pos[2] = canon_zero(state.pos[2] + dz).clamp(-limit, limit);
-                #[cfg(test)]
-                tick_trace.push(TickMotion {
-                    requested,
-                    resolved: [dx, dz],
-                    blocked: resolved.wall_normal.is_some(),
-                });
-            }
-            #[cfg(not(feature = "sim"))]
-            {
-                // Single resolution without physics: one clamp, then the
-                // static world push-out when a kit world is supplied (the
-                // spine step's rule). The blocked remainder is never
-                // reapplied on a later tick.
-                let state = &mut self.states[slot];
-                let from = [state.pos[0], state.pos[2]];
-                let raw = [state.pos[0] + requested[0], state.pos[2] + requested[1]];
-                let to = [raw[0].clamp(-limit, limit), raw[1].clamp(-limit, limit)];
-                let placed = if self.world.is_empty() {
-                    to
-                } else {
-                    self.world.resolve(from, to, FIGHTER_RADIUS_M, limit)
-                };
-                #[cfg(test)]
-                let clamped = placed != to || to != raw;
-                #[cfg(test)]
-                let (before_x, before_z) = (state.pos[0], state.pos[2]);
-                state.pos[0] = canon_zero(placed[0]);
-                state.pos[2] = canon_zero(placed[1]);
-                #[cfg(test)]
-                tick_trace.push(TickMotion {
-                    requested,
-                    resolved: [state.pos[0] - before_x, state.pos[2] - before_z],
-                    blocked: clamped,
-                });
-            }
+        leg_pool::step_legs(
+            self,
+            inputs,
+            &jump_edges,
+            &jump_releases,
+            &tick_events,
+            #[cfg(test)]
+            &mut tick_trace,
+        )?;
+        // ORCA crowd channel (row TC4): armed AI slots take a planar
+        // avoidance velocity before the collision pass; off leaves it unentered.
+        if self.steer.is_some() {
+            self.steer_crowd(&from_tape)?;
         }
         // Height channel (row SG5): gravity and the landing, after the walk
         // and before the spear, so a swing constrains a body that has already
@@ -2139,14 +2035,17 @@ impl Sim {
             spear: None,
             pilum: None,
             bolt: None,
+            steer: None,
             rise: snapshot.rise,
             height: snapshot.height,
+            landings: [None; MAX_SLOTS],
             #[cfg(test)]
             trace: None,
             #[cfg(test)]
             pairwise_plan: false,
             #[cfg(test)]
             full_collide_passes: false,
+            pool: None,
         })
     }
 }
@@ -2650,7 +2549,7 @@ fn final_states(config: &ArenaConfig, tape: &FighterTape) -> Vec<FighterState> {
 /// delta against the displacement collision actually applied. Test hook for
 /// the single-resolution invariant (blocked remainder never reapplied).
 #[cfg(test)]
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 struct TickMotion {
     /// Requested horizontal delta for this tick (x, z), meters.
     requested: [f32; 2],
@@ -2714,6 +2613,57 @@ mod tests {
     #[test]
     fn valid_config_passes() {
         config().validate().unwrap();
+    }
+
+    /// RC36 (decision D6): the per-fighter leg fans out over the shared job
+    /// pool on recording ticks, and its bytes may not depend on how many
+    /// threads run it. Inline, 1, 2, 4 and 8 threads step the same seed and
+    /// tape to the same checkpoint hashes, tick for tick.
+    #[test]
+    fn leg_pool_threads_step_equal_bytes_at_1_2_4_and_8() {
+        let config = ArenaConfig {
+            seed: 2040,
+            ticks: 240,
+            fighters: 8,
+            half_extent_m: 20.0,
+            table_version: TABLES_VERSION_V1,
+        };
+        let tape = FighterTape(Vec::new());
+        let mut expected: Option<Vec<u64>> = None;
+        for threads in [None, Some(1usize), Some(2), Some(4), Some(8)] {
+            let forks_before = leg_pool::forks();
+            let mut sim = Sim::build(&config, &tape, true, false).expect("valid sim");
+            sim.pool = threads.map(|threads| {
+                let pool = engine_ecs::pool::JobPool::for_threads(threads).expect("pool starts");
+                &*Box::leak(Box::new(pool))
+            });
+            let mut hashes = Vec::with_capacity(config.ticks as usize);
+            while sim.tick < config.ticks {
+                sim.step(&tape).expect("valid step");
+                hashes.push(sim.checkpoints.last().expect("a checkpoint").hash);
+            }
+            // The proof the pool path really ran, or really did not, on this
+            // test thread.
+            let forked = leg_pool::forks() - forks_before;
+            match threads {
+                Some(threads) if threads > 1 => assert!(
+                    forked > 0,
+                    "{threads} threads must fan the leg out over the pool"
+                ),
+                _ => assert_eq!(forked, 0, "{threads:?} must stay inline"),
+            }
+            match &expected {
+                None => expected = Some(hashes),
+                Some(first) => {
+                    assert_eq!(&hashes, first, "{threads:?} threads must not move a byte");
+                }
+            }
+        }
+        let hashes = expected.expect("one run");
+        assert!(
+            hashes.windows(2).any(|pair| pair[0] != pair[1]),
+            "the match has to move for the comparison to mean anything"
+        );
     }
 
     #[test]

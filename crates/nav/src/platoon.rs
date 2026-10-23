@@ -304,6 +304,10 @@ impl PlanSource for TiledPlanner<'_> {
         let goal = self.cell_of(goal_mm)?;
         match self.nav.direction(goal, from) {
             Ok(Some(next)) => Ok(Some(self.center_mm(next))),
+            // The field is spent once the leader stands in the goal cell, but
+            // that cell is fully walkable: finish the walk to the exact goal
+            // point rather than halting up to a cell short.
+            Ok(None) if from == goal => Ok((from_mm != goal_mm).then_some(goal_mm)),
             Ok(None) => Ok(None),
             Err(TileError::NoField) => Err(PlanRefusal::NoField),
             Err(TileError::OutOfBounds) => Err(PlanRefusal::Outside),

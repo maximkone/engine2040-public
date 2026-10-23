@@ -175,8 +175,11 @@ fn adapter_rows_match_the_play_blocks() {
     ]);
 
     let rows = rows_of(&doc).rows;
-    let play: Vec<([f32; 2], [f32; 2])> = rows.iter().filter_map(block_of).collect();
-    assert_eq!(play.len(), 2, "only the wall and the bare crate block");
+    assert_eq!(
+        rows.iter().filter_map(block_of).count(),
+        2,
+        "only the wall and the bare crate block"
+    );
     let wall_row = rows.iter().find(|row| row.id == wall).expect("wall row");
     assert_eq!(block_of(wall_row), Some(([4.0, 0.2], [1.0, 0.0])));
     let crate_row = rows.iter().find(|row| row.id == crate_).expect("crate row");
@@ -214,7 +217,7 @@ fn bare_node_is_default_sized_and_named() {
     assert_eq!(counts.default, 1, "the fallback is counted, not hidden");
     let line = default_row("wall_1 [00000000-0000-0000-0000-000000000007]", row.size);
     assert!(line.contains("no collider"), "{line}");
-    assert!(line.contains("default"), "{line}");
+    assert!(line.contains("default size"), "{line}");
     assert!(line.contains("2.00x2.00x0.40"), "{line}");
 }
 

@@ -561,8 +561,6 @@ const EXPECT_DEAD = [
   { crate: "ai", module: "goalstack", alias: "ai::goalstack" },
   { crate: "ai", module: "director", alias: "ai::director" },
   { crate: "ai", module: "opponent", alias: "ai::opponent" },
-  { crate: "nav", module: "orca", alias: "nav::crowd" },
-  { crate: "anim", module: "lod", alias: "anim::lod" },
   { crate: "observe", module: "rerun_sink", alias: "observe::rerun_sink" },
   { crate: "render", module: "heal", alias: "RenderHeal" },
   { crate: "assets", module: "import_repair", alias: "assets::import_repair" },
@@ -572,6 +570,8 @@ const EXPECT_DEAD = [
 const EXPECT_LIVE = [
   { crate: "ai", module: "melee", why: "crates/arena/src/engage.rs imports engine_ai::MeleeView" },
   { crate: "ai", module: "tier", why: "crates/arena/src/fork.rs uses engine_ai::tier" },
+  { crate: "nav", module: "orca", why: "crates/arena/src/live.rs drives engine_nav::orca in the armed channel" },
+  { crate: "anim", module: "lod", why: "crates/perf/src/workloads.rs imports engine_anim::lod::Tier (AM18, a6a2d197d)" },
 ];
 
 // A tiny tree: `demo::used` is called by another crate, `demo::unused` is not.

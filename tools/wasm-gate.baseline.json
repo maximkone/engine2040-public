@@ -33,7 +33,6 @@
    "fs": 1
   },
   "crates/game/src/fighter_look.rs": {
-   "clock": 4,
    "exe": 1
   },
   "crates/game/src/lib.rs": {

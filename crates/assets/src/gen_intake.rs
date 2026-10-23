@@ -389,7 +389,7 @@ fn looks_spdx(token: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | ':'))
 }
 
-fn non_commercial_hint(license: &str) -> bool {
+pub(crate) fn non_commercial_hint(license: &str) -> bool {
     let lower = license.to_ascii_lowercase();
     [
         "non-commercial",

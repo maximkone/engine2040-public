@@ -364,7 +364,7 @@
    "string_errors": 0,
    "board_ids": 0,
    "hash_reimpl": 0,
-   "dup_fns": 2,
+   "dup_fns": 1,
    "passthrough": 0,
    "long_fns": 3,
    "big_files": 0,
@@ -886,22 +886,22 @@
  "files": {
   "crates/ai/src/depth.rs": 3145,
   "crates/arena/src/lib.rs": 5390,
-  "crates/combat/src/fight.rs": 4137,
+  "crates/combat/src/fight.rs": 4150,
   "crates/editor/src/commands.rs": 3441,
   "crates/endpoint/src/mcp.rs": 3071,
   "crates/endpoint/src/scene_tools.rs": 3422,
   "crates/game/src/bin/arena.rs": 5101,
   "crates/game/src/camera.rs": 3459,
-  "crates/game/src/fighter_look.rs": 6599,
-  "crates/game/src/lib.rs": 4009,
-  "crates/game/src/windowed.rs": 3610,
+  "crates/game/src/fighter_look.rs": 6747,
+  "crates/game/src/lib.rs": 4030,
+  "crates/game/src/windowed.rs": 3629,
   "crates/net/src/interest.rs": 3076,
   "crates/physics/src/ragdoll.rs": 3376,
-  "crates/render/src/gtao.rs": 3486,
-  "crates/render/src/ibl.rs": 4409,
+  "crates/render/src/gtao.rs": 3497,
+  "crates/render/src/ibl.rs": 4420,
   "crates/render/src/present/gpu_present/live.rs": 3326,
-  "crates/render/src/present/gpu_present/presenter.rs": 3453,
-  "crates/render/src/present/gpu_present/submit.rs": 3249,
+  "crates/render/src/present/gpu_present/presenter.rs": 3617,
+  "crates/render/src/present/gpu_present/submit.rs": 3293,
   "crates/spatial/src/relation.rs": 3250,
   "crates/ui/src/lib.rs": 3907
  },
@@ -4473,6 +4473,104 @@
    "from": 3588,
    "to": 3610,
    "reason": "ENG16 wires the crash receipt hook and per-tick (tick, hash) note into the windowed run loops; the wiring needs the lines and belongs at the run entry points"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/game/src/lib.rs",
+   "from": 4009,
+   "to": 4011,
+   "reason": "the file is already 1000 lines over the 3000 cap and every neighbour entry carries a two-line doc; the faction_match module itself owns the code, this is only the mod line"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/render/src/present/gpu_present/presenter.rs",
+   "from": 3453,
+   "to": 3480,
+   "reason": "LF14 weapon-trail staging fields and receipt on Presenter; presenter split owed by CQ9"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/render/src/present/gpu_present/submit.rs",
+   "from": 3249,
+   "to": 3293,
+   "reason": "LF14 trail pass call and encode_trail_pass; submit split owed by CQ9"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/game/src/fighter_look.rs",
+   "from": 6599,
+   "to": 6624,
+   "reason": "LF14 trail_strip fold and idle-clear stage call; look split owed by CQ9"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/game/src/fighter_look.rs",
+   "from": 6624,
+   "to": 6642,
+   "reason": "AM24: the three-tick flinch ramp in slot_pose (3 lines) and its updated 8-fighter 300-tick pops=0 accept test (14 lines) sit beside the other view_run tests; a module split is outside this row."
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/render/src/gtao.rs",
+   "from": 3486,
+   "to": 3497,
+   "reason": "EG47 sweep: the six gtao GPU tests hand their probe to require_or_skip so a skip is one counted SKIPPED line and fails under E2040_REQUIRE_GPU=1; +11 lines, no logic change"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/render/src/ibl.rs",
+   "from": 4409,
+   "to": 4420,
+   "reason": "EG47: the six ibl GPU tests hand their probe to require_or_skip (one shared skip line each, no logic change, +11 lines); the file is still due its own split out of the 3000-line band"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/game/src/windowed.rs",
+   "from": 3610,
+   "to": 3629,
+   "reason": "EG47: the six twin GPU tests route smoke_presenter's None through require_or_skip with one local helper (dated 2026-10-23, +19 lines, no logic change); the file is still due its own split out of the 3000-line band"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/render/src/present/gpu_present/presenter.rs",
+   "from": 3480,
+   "to": 3545,
+   "reason": "LF5c adds the TAA resolve field and its ctor line; HEAD already sat 64 lines over this stale pin (LF5 slice 1 grew the file without a baseline bump)"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/combat/src/fight.rs",
+   "from": 4137,
+   "to": 4150,
+   "reason": "EG42 hit-track read bridge (StrikePose::from_hit_row)"
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/render/src/present/gpu_present/presenter.rs",
+   "from": 3545,
+   "to": 3617,
+   "reason": "EG26: Presenter::push_text is the shared text seam beside push_hp_bar; its CPU ring test and one GPU capture test live in this owner file, which is already pinned over 3000 lines."
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/game/src/fighter_look.rs",
+   "from": 6642,
+   "to": 6733,
+   "reason": "EG39 rewind ring fields and their five constructor literals live on FighterLook; the row owns this slot hunk and the shared tree also carries another writer's uncommitted flinch test hunk."
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/game/src/fighter_look.rs",
+   "from": 6733,
+   "to": 6747,
+   "reason": "EG39 rewind ring fields and their five constructor literals live on FighterLook; the shared tree also carries another writer's uncommitted flinch test hunk, now at this count."
+  },
+  {
+   "date": "2026-10-23",
+   "file": "crates/game/src/lib.rs",
+   "from": 4026,
+   "to": 4030,
+   "reason": "LEG17: the roster module declaration and its doc sit in the crate root; the roster's code lives in crates/game/src/roster.rs. lib.rs is already pinned over 3000 lines, so the mod line cannot land without this pin."
   }
  ]
 }

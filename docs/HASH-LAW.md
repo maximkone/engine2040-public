@@ -133,6 +133,14 @@ root motion, `net` state):
   `MatchSpec::duel`), so `GOLDEN_600` and the v1 arena checkpoints are
   unchanged. Proof:
   `cargo test -p engine-game --lib app_new_equals_new_for_slot_on_rules_v2`.
+- EG42 (HitTrack `HIT_TRACK_VERSION_V1`): `engine-anim::hit_track` bakes the
+  three 1H attack clips into integer-mm blade segments and sixteen bone
+  capsules per tick; `engine-combat::cut` owns the `(move, tick)` reader and
+  `StrikePose::from_hit_row` feeds the rules-v2 sweep. The bake is a read
+  contract only: nothing folds a hit row into the tick hash yet, so
+  `GOLDEN_600=d57b5c8ae3096614` and the v1/v2 checkpoints are unchanged.
+  Proof: `cargo test -p engine-anim --lib hit_track_bake` (equal rows twice,
+  one hit on the baked tick) and the `proof_cli --verify` receipt.
 - QN2 (2026-10-19, delay in the match): `MatchSpec::input_delay_ticks`
   (default `DEFAULT_INPUT_DELAY_TICKS` 2, the net send-queue hold
   `session::INPUT_DELAY_TICKS`) rides `MatchSpec::identity` only when it

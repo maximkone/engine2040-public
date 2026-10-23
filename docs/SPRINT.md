@@ -86,6 +86,7 @@ Rows live in one shard per section (byte-identical; each shard header is the can
 - [`SPRINT-31-research.md`](SPRINT-31-research.md) — Research 2026-10-22: engine, feel, arXiv and agent steals (verdict in docs/research/finish-line-2026-10-22/00-verdict.md)
 - [`SPRINT-32-real-chars.md`](SPRINT-32-real-chars.md) — Realistic characters 2026-10-22: Rocketbox bodies, Mixamo mocap, Kimodo prompt library, weapons in hand, no-pop attack clips
 - [`SPRINT-33-speed-demo.md`](SPRINT-33-speed-demo.md) — Speed demo 2026-10-22: fly and drive ever faster over generated terrain, a giant sword that cuts towers in half (`arena --demo speed`)
+- [`SPRINT-35-book-gaps-4.md`](SPRINT-35-book-gaps-4.md) — Book gaps 4, 2026-10-23: door push/resources/rules/anim surfaces, cover perception, the mobile tier (touch, quality, Android), the SIMD/job-pool/loom/featureless holes, and three disk residuals (BG1-BG16)
 
 ### Ready (live, never a snapshot)
 

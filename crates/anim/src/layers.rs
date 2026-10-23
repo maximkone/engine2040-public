@@ -209,9 +209,34 @@ pub fn apply_override(
     Ok(())
 }
 
-/// Additive blend: position offsets scaled by mask times Q8 gain; rotations
-/// stay on the base (rotational hit-react rides the override path until a
-/// dual-quat row layers quats). Mask 0 or gain 0 keeps the base exactly.
+/// One additive joint: offset the position, apply the delta quat on the
+/// base rotation (`base * delta`) and blend by `s`. A zero delta (or a zero
+/// mask/gain, handled by the caller) copies the base rotation bytes exactly;
+/// otherwise [`nlerp`] keeps the shortest arc, capped at the full delta.
+fn additive_joint(
+    base_pos: [f32; 3],
+    base_rot: [f32; 4],
+    add_pos: [f32; 3],
+    add_rot: [f32; 4],
+    s: f32,
+) -> ([f32; 3], [f32; 4]) {
+    const IDENTITY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    let pos = [
+        base_pos[0] + add_pos[0] * s,
+        base_pos[1] + add_pos[1] * s,
+        base_pos[2] + add_pos[2] * s,
+    ];
+    if add_rot == IDENTITY {
+        return (pos, base_rot);
+    }
+    let target = engine_core::quat_mul(base_rot, add_rot);
+    (pos, nlerp(base_rot, target, s.min(1.0)))
+}
+
+/// Additive blend: position offsets and per-joint deltas scaled by mask times
+/// Q8 gain; rotations compose as `base * delta` and blend through [`nlerp`],
+/// so a hit can lean the real skeleton. Mask 0 or gain 0 keeps the base
+/// exactly.
 pub fn apply_additive(
     base: &Pose,
     add: &Pose,
@@ -243,12 +268,15 @@ pub fn apply_additive(
             continue;
         }
         let s = f32::from(m) * f32::from(gain_q8) / 65280.0;
-        out.positions[joint] = [
-            base.positions[joint][0] + add.positions[joint][0] * s,
-            base.positions[joint][1] + add.positions[joint][1] * s,
-            base.positions[joint][2] + add.positions[joint][2] * s,
-        ];
-        out.rotations[joint] = base.rotations[joint];
+        let (pos, rot) = additive_joint(
+            base.positions[joint],
+            base.rotations[joint],
+            add.positions[joint],
+            add.rotations[joint],
+            s,
+        );
+        out.positions[joint] = pos;
+        out.rotations[joint] = rot;
     }
     Ok(())
 }
@@ -260,7 +288,7 @@ pub fn apply_additive(
 pub enum LayerMode {
     /// Masked override of positions plus shortest-arc quats.
     Override,
-    /// Masked additive offsets at Q8 gain; rotations stay base.
+    /// Masked additive offsets at Q8 gain; rotations compose as `base * delta`.
     Additive,
 }
 
@@ -321,11 +349,15 @@ pub fn compose_stack(base: &Pose, layers: &[Layer<'_>], out: &mut Pose) -> Resul
                         continue;
                     }
                     let s = f32::from(m) * f32::from(layer.4) / 65280.0;
-                    pos = [
-                        pos[0] + layer.2.positions[joint][0] * s,
-                        pos[1] + layer.2.positions[joint][1] * s,
-                        pos[2] + layer.2.positions[joint][2] * s,
-                    ];
+                    let (p, r) = additive_joint(
+                        pos,
+                        rot,
+                        layer.2.positions[joint],
+                        layer.2.rotations[joint],
+                        s,
+                    );
+                    pos = p;
+                    rot = r;
                 }
             }
         }
@@ -519,7 +551,7 @@ mod tests {
         // Double gain doubles the offset on joint 5.
         apply_additive(&base, &add, &full, 512, &mut out).expect("double gain");
         assert_near(out.positions[5], [-0.3, 1.3, -0.6], MASK_EVAL_TOL);
-        // Additive never bends rotations.
+        // An identity delta never bends rotations.
         assert_eq!(out.rotations, vec![IDENTITY; 6]);
     }
 

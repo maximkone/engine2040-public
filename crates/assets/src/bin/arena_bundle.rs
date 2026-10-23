@@ -11,10 +11,12 @@
 //! - `packed` (default): one `E2BUNDLE` file tree — `src/<file>` is a compact
 //!   glTF (the merged mesh, the kit material, the banner's own maps downscaled;
 //!   a set piece carries no image) and `cooked/<set>_<map>.ktx2` are the five
-//!   CC0 sets cooked down to `--max-dim`. This is what `BundleSource` reads and
-//!   `import_kit_from` imports, exactly like the shipped files. The 256-texel
-//!   step is 1.36 MB, 128 is 0.71 MB and 64 is 0.55 MB; the cook halves 1024, so
-//!   `--max-dim 192` lands on 128.
+//!   CC0 sets cooked down to `--max-dim`, all in tier 0 (the first frame needs
+//!   them). The studio HDRI is tier 1, after that prefix, for the offscreen
+//!   captures. This is what `BundleSource` reads and `import_kit_from` imports,
+//!   exactly like the shipped files. The 256-texel step is 1.36 MB, 128 is
+//!   0.71 MB and 64 is 0.55 MB; the cook halves 1024, so `--max-dim 192` lands
+//!   on 128. The HDRI adds about 1.6 MB to the total, never to the first tier.
 //! - `cooked`: one `E204BNDL` cooked-asset bundle (mesh, material and texture
 //!   entries) for a `BundleLoader` consumer. Its texture payload is decoded RGBA
 //!   mips, four times the KTX2 bytes, so only the 64 step (1.29 MB) fits.
@@ -23,12 +25,13 @@
 //! arena_bundle [--root content/arena] [--out <file>] [--format packed|cooked]
 //!              [--max-dim <n>]
 //! ```
-//! The receipt line names entries, bytes per kind, total, triangles, the cap,
-//! the dimensions it produced and the budget verdict. Same sources and cap give
-//! the same bytes (run it twice and diff the files).
+//! The receipt line names entries, bytes per kind, the first-tier prefix, the
+//! total, triangles, the cap, the dimensions it produced and the budget
+//! verdict. Same sources and cap give the same bytes (run it twice and diff the
+//! files).
 
 #[cfg(all(feature = "import", feature = "registry"))]
-use engine_assets::asset_source::{MemorySource, PackRules};
+use engine_assets::asset_source::{MemorySource, PackReport, PackRules};
 #[cfg(all(feature = "import", feature = "registry"))]
 use engine_assets::bundle_cook::{
     cook_bundle_bytes, load_bundle_file, write_bundle_file, StagedCooked,
@@ -36,14 +39,15 @@ use engine_assets::bundle_cook::{
 #[cfg(all(feature = "import", feature = "registry"))]
 use engine_assets::kit_import::{
     cook_kit_texture, import_kit_gltf, import_kit_gltf_full, is_lfs_pointer, kit_stem,
-    kit_texture_asset, kit_texture_name, KitMap, KitSet, KIT_FILES,
+    kit_texture_asset, kit_texture_name, KitMap, KitSet, KIT_FILES, STUDIO_HDRI,
 };
 #[cfg(all(feature = "import", feature = "registry"))]
 use engine_assets::{compact_gltf, AssetSource, BundleSource, EntryKind};
 #[cfg(all(feature = "import", feature = "registry"))]
 use image::RgbaImage;
 
-/// Byte bar the page's first fetch carries; a bigger bundle prints `over`.
+/// Byte bar the page's first fetch carries; a first-tier prefix bigger than
+/// this prints `over`. Later tiers are not in that fetch.
 pub const WEB_BUDGET_BYTES: usize = 2_000_000;
 /// Default output: the arena content dir, next to `src/` and `cooked/`.
 const DEFAULT_OUT: &str = "content/arena/kit.e2bundle";
@@ -167,10 +171,23 @@ fn run() -> Result<(), String> {
     }
 }
 
-/// The packed lane: compact glTF per kit file plus the cooked KTX2 sets, packed
-/// into one `E2BUNDLE` the page opens with `BundleSource`.
+/// What the tier-0 kit contributes to the receipt.
 #[cfg(all(feature = "import", feature = "registry"))]
-fn run_packed(config: &Config) -> Result<(), String> {
+struct PackedStats {
+    dims_lo: (u32, u32),
+    dims_hi: (u32, u32),
+    ktx2_bytes: usize,
+    gltf_bytes: usize,
+    image_bytes: usize,
+    images: usize,
+    triangles: u64,
+    texture_files: usize,
+}
+
+/// Cook every kit set and compact every kit glTF into `staged`, all tier 0:
+/// the first frame needs this prefix.
+#[cfg(all(feature = "import", feature = "registry"))]
+fn stage_packed_kit(config: &Config) -> Result<(MemorySource, PackedStats), String> {
     let mut staged = MemorySource::new();
     let (mut dims_lo, mut dims_hi) = ((u32::MAX, u32::MAX), (0u32, 0u32));
     let mut ktx2_bytes = 0usize;
@@ -206,11 +223,31 @@ fn run_packed(config: &Config) -> Result<(), String> {
             .insert(&format!("src/{file}"), compact.json.into_bytes())
             .map_err(|err| err.to_string())?;
     }
-    if staged.len() != KIT_FILES.len() + KitSet::ALL.len() * KitMap::ALL.len() {
-        return Err(format!("staged {} files, expected 23", staged.len()));
-    }
+    Ok((
+        staged,
+        PackedStats {
+            dims_lo,
+            dims_hi,
+            ktx2_bytes,
+            gltf_bytes,
+            image_bytes,
+            images,
+            triangles,
+            texture_files: KitSet::ALL.len() * KitMap::ALL.len(),
+        },
+    ))
+}
+
+/// Write the packed bundle, read it back through the page's reader, check the
+/// bytes and the digest, and return the report plus the tier-0 prefix length.
+#[cfg(all(feature = "import", feature = "registry"))]
+fn write_and_verify_packed(
+    config: &Config,
+    staged: &MemorySource,
+    rules: &PackRules,
+) -> Result<(PackReport, usize), String> {
     let mut bytes = Vec::new();
-    let report = engine_assets::asset_source::pack_to(&staged, &PackRules::new(), &mut bytes)
+    let report = engine_assets::asset_source::pack_to(staged, rules, &mut bytes)
         .map_err(|err| err.to_string())?;
     let parent = parent_of(&config.out);
     std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
@@ -236,30 +273,68 @@ fn run_packed(config: &Config) -> Result<(), String> {
             report.digest
         ));
     }
-    let bar = if usize::try_from(report.bytes).unwrap_or(usize::MAX) <= WEB_BUDGET_BYTES {
+    // The prefix a streaming page can stage the first frame from: every tier 0
+    // blob ends at `offset + len`; the header and index are in front of them.
+    let first_bytes = source
+        .entries_in_file_order()
+        .filter(|entry| entry.priority == 0)
+        .map(|entry| entry.offset + entry.len)
+        .max()
+        .unwrap_or(0);
+    Ok((report, first_bytes))
+}
+
+/// The packed lane: compact glTF per kit file plus the cooked KTX2 sets in
+/// tier 0, then the studio HDRI in tier 1, packed into one `E2BUNDLE` the page
+/// opens with `BundleSource`.
+#[cfg(all(feature = "import", feature = "registry"))]
+fn run_packed(config: &Config) -> Result<(), String> {
+    let (mut staged, kit) = stage_packed_kit(config)?;
+    // QW4: the HDRI leaves the wasm and rides the fetched bundle. It is tier 1:
+    // the first-frame kit prefix stays the whole tier 0.
+    let hdri = read_hdri(&config.root)?;
+    let hdri_bytes = hdri.len();
+    staged
+        .insert(STUDIO_HDRI, hdri)
+        .map_err(|err| err.to_string())?;
+    if staged.len() != KIT_FILES.len() + kit.texture_files + 1 {
+        return Err(format!(
+            "staged {} files, expected {}",
+            staged.len(),
+            KIT_FILES.len() + kit.texture_files + 1
+        ));
+    }
+    let rules = PackRules::new().priority(STUDIO_HDRI, 1);
+    let (report, first_bytes) = write_and_verify_packed(config, &staged, &rules)?;
+    let bar = if first_bytes <= WEB_BUDGET_BYTES {
         "ok"
     } else {
         "over"
     };
     println!(
-        "arena_bundle: format=packed entries={} gltf={} textures={} gltf_bytes={gltf_bytes} \
-image_bytes={image_bytes} images={images} ktx2_bytes={ktx2_bytes} total={} tris={triangles} \
-max_dim={} dims={}x{}..{}x{} digest={digest:016x} bar={WEB_BUDGET_BYTES} {bar}",
+        "arena_bundle: format=packed entries={} gltf={} textures={} hdri={hdri_bytes} \
+gltf_bytes={} image_bytes={} images={} ktx2_bytes={} first={first_bytes} total={} \
+tris={} max_dim={} dims={}x{}..{}x{} digest={:016x} bar={WEB_BUDGET_BYTES} {bar}",
         report.entries,
         KIT_FILES.len(),
-        staged.len() - KIT_FILES.len(),
+        kit.texture_files,
+        kit.gltf_bytes,
+        kit.image_bytes,
+        kit.images,
+        kit.ktx2_bytes,
         report.bytes,
+        kit.triangles,
         config.max_dim,
-        dims_lo.0,
-        dims_lo.1,
-        dims_hi.0,
-        dims_hi.1
+        kit.dims_lo.0,
+        kit.dims_lo.1,
+        kit.dims_hi.0,
+        kit.dims_hi.1,
+        report.digest
     );
     if bar == "over" {
         eprintln!(
-            "arena_bundle: {} B is over the {WEB_BUDGET_BYTES} B web bar; the cook halves \
-1024, so the next fitting step is --max-dim 64, then 32",
-            report.bytes
+            "arena_bundle: first tier {first_bytes} B is over the {WEB_BUDGET_BYTES} B web bar; \
+the cook halves 1024, so the next fitting step is --max-dim 64, then 32"
         );
     }
     Ok(())
@@ -357,6 +432,24 @@ fn read_kit(root: &std::path::Path, file: &str) -> Result<Vec<u8>, String> {
             "{}: git-lfs pointer, run git lfs pull",
             path.display()
         ));
+    }
+    Ok(bytes)
+}
+
+/// The studio HDRI, from the arena content root. A pointer or a file that is
+/// not Radiance HDR is refused before it reaches the bundle.
+#[cfg(all(feature = "import", feature = "registry"))]
+fn read_hdri(root: &std::path::Path) -> Result<Vec<u8>, String> {
+    let path = root.join(STUDIO_HDRI);
+    let bytes = std::fs::read(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    if is_lfs_pointer(&bytes) {
+        return Err(format!(
+            "{}: git-lfs pointer, run git lfs pull",
+            path.display()
+        ));
+    }
+    if !bytes.starts_with(b"#?RADIANCE") {
+        return Err(format!("{}: not a Radiance HDR file", path.display()));
     }
     Ok(bytes)
 }

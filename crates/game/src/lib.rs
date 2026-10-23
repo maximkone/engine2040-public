@@ -18,7 +18,6 @@
 //! window. The imported skinned fighter is deferred to the follow-up art
 //! hook ([`PoseSource::ImportedFighter`]): presentation poses come from the
 //! arena movement path ([`App::presentation`]); authored content is the visual gate.
-
 /// Agent seat: one loopback client plays the human slot of the live window
 /// and reads each fixed tick's hash back. Tool surface only, never hashed.
 /// App leg only (the window owns the socket).
@@ -27,6 +26,8 @@ pub mod agent_seat;
 /// Sim state to clip cues with a per-slot crossfade: the act pick plus the
 /// fade driver the fighter look samples. Std-only, presentation only.
 pub mod anim_bridge;
+/// Announcer: bout voice lines as data, throttled per rule; never hashed.
+pub mod announcer;
 /// Arena glTF kit: placement parse, AABB fit and presenter staging.
 /// Std-only parse plus fit on the default leg; file import plus upload join
 /// the `app` leg so headless builds pull no `gltf`.
@@ -68,6 +69,8 @@ pub mod capture;
 /// sheet, with the schema rules the loader refuses instead of patching.
 /// Std-only; setup IO, never on the tick.
 pub mod class_sheet;
+/// Dev console: read-only door verbs, pause/step/slow, set-knob; never hashed.
+pub mod console;
 /// Crash reports to a local file: version, adapter, tape tail,
 /// checkpoint, loud exit. Std-only.
 pub mod crash;
@@ -80,18 +83,26 @@ pub mod dev_hotpatch;
 /// Auto spectator camera (trailer cuts from fight beats): shot choice over
 /// fixed-tick cues with continuity rules, presentation only. Std-only.
 pub mod director;
+/// Duel weapon arming (FEEL1b), kept out of `lib.rs` to hold its line pin.
+mod duel_weapons;
+/// The 6v6 faction match loop and its seats (RY5 of `docs/plan/ryl1.md`.
+pub mod faction_match;
+/// Landing plumbing: the fall table's rows into the tick outcome and HUD.
+/// Std-only, presentation mirror, never hashed.
+mod feel_land;
 /// Feel flow view: hit-stop, slow-mo and camera shake from fight cues,
 /// applied by the window. Presentation only. App leg only.
 #[cfg(feature = "app")]
 pub mod feel_view;
-/// Fight ring: sand pit plus stone tiers under the fighter look. App leg.
+/// Fight ring: sand pit plus stone tiers under the look. App leg only.
 #[cfg(feature = "app")]
 pub mod fight_ring;
 /// Staged fight: binds the content bundles to fighters and runs the
 /// scripted bout headless (fighter_bind + staged_fight bin). Std-only.
 pub mod fighter_bind;
-/// Fighter look: CT7 bodies skinned and textured in the presenter, posed by
-/// presentation anim state read after each tick. App leg only.
+#[cfg(feature = "app")]
+pub mod fighter_bodies;
+/// Fighter look: skinned CT7 bodies posed after each tick. App leg only.
 #[cfg(feature = "app")]
 pub mod fighter_look;
 /// Window match shell: Title, Match, Paused, Result over the arena match.
@@ -130,6 +141,7 @@ pub mod modes;
 /// Mode framework: arena, siege and district free-roam over the
 /// ladder. Std-only.
 pub mod modes_world;
+pub mod mouse_raw;
 /// One seat of a two-human match over UDP (LAN or relay), driven per frame by
 /// the window or the headless proof loop. Std-only.
 pub mod net_seat;
@@ -156,6 +168,10 @@ pub mod progress;
 pub mod ragdoll_stump_draw;
 /// Hot-reload gate: staged generations applied at frame boundaries. Std-only.
 pub mod reload;
+/// The contubernium has names: seven named men with fights, kills, wounds,
+/// rank and one diary line per fight, over `content/rome/contubernium.toml`.
+/// The camp/roster view (rules v2) reads it; never hashed. Std-only.
+pub mod roster;
 /// Best-of-5 duel rounds over one-round arena sessions. Pure folds,
 /// no hash input. Std-only.
 pub mod rounds;
@@ -175,8 +191,7 @@ pub mod stage_bodies;
 /// Steamworks backend: achievements, stats, cloud generations and presence.
 /// Std-only until the orchestrator lands the `steam` feature.
 pub mod steam;
-/// View truth: every drawn body as numbers and a run's view laws, no image.
-/// `app` only, beside the look that fills it.
+/// View truth: every drawn body as numbers, never an image. App leg only.
 #[cfg(feature = "app")]
 pub mod view_truth;
 /// Virtual time: a speed that eases toward a target and scales the wall
@@ -195,6 +210,9 @@ pub mod window_audio_space;
 #[cfg(feature = "app")]
 pub mod windowed;
 
+#[cfg(test)]
+mod fighter_draw;
+
 use crate::audio_director::{drive, Director, DirectorError, DirectorState, Layers, TensionTable};
 use crate::crowd_gpu::CrowdGpuSim;
 use crate::director::{Director as CutDirector, DirectorConfig, FighterLateral, MIN_SHOT_TICKS};
@@ -202,12 +220,13 @@ use engine_anim::contract::{LocalPose, RootTable};
 use engine_arena::recorder::Row;
 use engine_arena::world::MatchWorld;
 use engine_arena::{
-    run_loco_poses, ArenaConfig, ArenaRules, Checkpoint, LiveMatch, LivePresentation, MatchSpec,
+    run_loco_poses, ArenaConfig, ArenaRules, Checkpoint, FallLanding, LiveMatch, LivePresentation,
+    MatchSpec,
 };
 use engine_audio::combat_cues::{strike_gain, HIT_FULL_PERMILLE, HIT_GAIN_FLOOR};
 use engine_audio::cue::{impact_cue, ImpactKind, ImpactSurface};
 use engine_audio::{BankSound, Crowd, FightCue, Reaction};
-use engine_combat::{fight::MAX_HP_PERMILLE, FightEvent};
+use engine_combat::{fight::MAX_HP_PERMILLE, Cut, FightEvent};
 use engine_destruction::bonded::BreakEvent;
 use engine_input::{FighterId, FighterInput, FighterTape, MAX_PARTICIPANTS};
 use engine_save::{migrate, open, save_generation, slot_name, SaveErr};
@@ -217,10 +236,13 @@ pub use netgame::{
     REMOTE_VIEW_DELAY_TICKS, SESSION_CODE_PREFIX,
 };
 pub use progress::{GameProgress, ProgressError};
-
 /// Human fighter slot: single player vs AI. The tape carries only this
 /// slot's inputs; the arena brains fill every other slot.
 pub const HUMAN_SLOT: u8 = 0;
+
+/// The window kit's weapon row (FEEL1b): the legionary gladius, equal to the
+/// shipped v2 table, so only the armed-weapon fold moves.
+pub const DUEL_KIT_WEAPON: &str = crate::fps_view::LegionaryKit::LEGIONARY.weapon;
 
 /// Session configuration: one human vs `fighters - 1` AI brains.
 /// The schemars derive is the one key list: `deny_unknown_fields` names the
@@ -237,7 +259,6 @@ pub struct GameConfig {
     /// Arena half-extent in meters, `5.0..=100.0`.
     pub half_extent_m: f32,
 }
-
 /// Bound replay work per session (mirrors the arena bound).
 pub const MAX_TICKS: u32 = 100_000;
 /// Default present cadence: every tick presents (today's behavior).
@@ -576,7 +597,8 @@ pub enum GameError {
     /// bad wire bytes, late input); nothing was applied.
     Net(engine_net::session::NetError),
     /// The host and the guest would play different matches (rules, spear,
-    /// world or config): both match identities carried, nothing was paired.
+    /// height, weapons, world, delay or config): both match identities
+    /// carried, nothing was paired.
     SpecMismatch {
         /// The host's match identity.
         host: u64,
@@ -663,8 +685,17 @@ pub struct TickOutcome {
     /// (`break_window`) reads them after the tick ran. Presentation only: the events are
     /// already hashed by the arena, nothing here is read back.
     pub breaks: Vec<BreakEvent>,
+    /// Severed-joint cuts the authority resolved this tick, in resolver order; empty on quiet
+    /// and rejected ticks. Presentation only: the arena already hashed them.
+    pub cuts: Vec<Cut>,
     /// Crowd reaction per cue, in the same order as [`TickOutcome::cues`].
     pub reactions: Vec<Reaction>,
+    /// Fall landings of the tick (FEEL7), slot order: the fall height the
+    /// height channel carried and the fall table's health cost. The sim
+    /// already charged the fight; this mirror lets the HUD show it and the
+    /// look, camera and audio share the same landing tick. Presentation
+    /// only: nothing here is hashed.
+    pub lands: Vec<FallLanding>,
     /// Crowd-bed gain multiplier `0.0..=1.0` after the tick.
     pub bed_gain: f32,
     /// Tension-director mix answer for the tick (intensity, music scalar,
@@ -694,7 +725,9 @@ impl Default for TickOutcome {
             cues: Vec::new(),
             started: Vec::new(),
             breaks: Vec::new(),
+            cuts: Vec::new(),
             reactions: Vec::new(),
+            lands: Vec::new(),
             bed_gain: 1.0,
             layers: Layers {
                 intensity: 0.0,
@@ -772,6 +805,9 @@ pub struct App {
     /// first tick. Every live sim of the session is built with it, so the wall
     /// tether swings instead of zipping.
     height: bool,
+    /// Per-slot weapon row ids armed in the duel (FEEL1b), in slot order;
+    /// empty when bare. They ride [`App::spec`] into rebuilds and peers.
+    weapons: Vec<&'static str>,
     /// Sim steps spent by retired live matches (rebuilds), so
     /// [`App::sim_steps`] counts every step the session ever paid.
     retired_steps: u64,
@@ -815,6 +851,13 @@ pub struct App {
     /// The tick's authority break events, filled by [`App::simulate_tick`] and moved into
     /// [`TickOutcome::breaks`] by [`App::observe_into`]; empty between ticks.
     tick_breaks: Vec<BreakEvent>,
+    /// The tick's authority cut events, filled by [`App::simulate_tick`] and moved into
+    /// [`TickOutcome::cuts`] by [`App::observe_into`]; empty between ticks.
+    tick_cuts: Vec<Cut>,
+    /// The tick's fall landings (FEEL7), filled by [`App::simulate_tick`]
+    /// and moved into [`TickOutcome::lands`] by [`App::observe_into`]; empty
+    /// between ticks.
+    tick_lands: Vec<FallLanding>,
     /// Last mix answer, served on every outcome (rejected ticks repeat it).
     director_layers: Layers,
     kills: Vec<KillEntry>,
@@ -881,23 +924,6 @@ impl App {
         Self::new_for_slot_world(config, HUMAN_SLOT, world)
     }
 
-    /// Move a fresh session to the live duel's combat: tables v2 under rules
-    /// v2 (GP32: 15-tick startups, input buffer, commit lock). Only before
-    /// the first tick; later calls refuse with `BadConfig("duel_tables")`.
-    /// The proof scene and LAN play never call this and stay on v1.
-    pub fn into_duel(mut self) -> Result<Self, GameError> {
-        if self.cursor != 0 || self.retired_steps != 0 || self.live.steps() != 0 {
-            return Err(GameError::BadConfig("duel_tables"));
-        }
-        let mut spec = MatchSpec::duel(self.arena, self.world.clone());
-        spec.spear = self.spear;
-        spec.height = self.height;
-        self.live = spec.live().ok_or(GameError::BadConfig("arena"))?;
-        self.arena = spec.config;
-        self.rules = spec.rules;
-        Ok(self)
-    }
-
     /// Turn the spear grapple on: the throw button throws a spear and tethers fighters (see
     /// `docs/plan/spear-grapple.md`). Only before the first tick; later calls refuse with
     /// `BadConfig("spear")`. The match identity changes, so a LAN peer must ask for it too.
@@ -938,10 +964,15 @@ impl App {
     pub fn spec(&self) -> MatchSpec {
         let spec = MatchSpec::new(self.arena, self.rules, self.world.clone());
         let spec = if self.spear { spec.with_spear() } else { spec };
-        if self.height {
+        let spec = if self.height {
             spec.with_height()
         } else {
             spec
+        };
+        if self.weapons.is_empty() {
+            spec
+        } else {
+            spec.with_weapons(&self.weapons)
         }
     }
 
@@ -992,6 +1023,7 @@ impl App {
             rules,
             spear: false,
             height: false,
+            weapons: Vec::new(),
             retired_steps: 0,
             checkpoints: Vec::new(),
             hp: [MAX_HP_PERMILLE; MAX_PARTICIPANTS as usize],
@@ -1013,6 +1045,8 @@ impl App {
             tick_cues: Vec::new(),
             tick_started: Vec::new(),
             tick_breaks: Vec::new(),
+            tick_cuts: Vec::new(),
+            tick_lands: Vec::new(),
             director_layers: Layers {
                 intensity: 0.0,
                 music: 0.0,
@@ -1375,6 +1409,8 @@ impl App {
         out.reactions.clear();
         out.started.clear();
         out.breaks.clear();
+        out.cuts.clear();
+        out.lands.clear();
         out.bed_gain = self.crowd.bed_gain();
         out.layers = self.director_layers;
     }
@@ -1409,6 +1445,8 @@ impl App {
         // The authority's break events for this tick, kept for `observe_into` to hand out.
         self.tick_breaks.clear();
         self.tick_breaks.extend_from_slice(&stepped.breaks.events);
+        self.tick_cuts.clear();
+        self.tick_cuts.extend_from_slice(&stepped.cuts.cuts);
         // The live fight's freeze after this tick (FEEL3): the sim's own count.
         let next_hitstop = self.live.hitstop();
         // First production read of the press-tick tell (EG19b): one starter
@@ -1419,6 +1457,7 @@ impl App {
         self.tick_started.clear();
         self.tick_started
             .extend(self.live.cues().iter().map(|cue| cue.attacker));
+        feel_land::fill_tick_lands(self);
         self.hitstop_remaining = next_hitstop;
         // Move the refilled scratch out for this tick only; both callers
         // restore the buffers below, so the next tick reuses the capacity.
@@ -1576,6 +1615,9 @@ impl App {
         // call that never simulated finds it empty, so nothing stale is ever replayed.
         out.breaks.clear();
         out.breaks.append(&mut self.tick_breaks);
+        out.cuts.clear();
+        out.cuts.append(&mut self.tick_cuts);
+        feel_land::apply_landings(self, out);
         out.audio.reserve(cues.len());
         out.reactions.reserve(cues.len());
         out.cues.reserve(cues.len());
@@ -2058,12 +2100,16 @@ fn fill_laterals_for_tick(
     true
 }
 
-// The unit-test binary's one counting allocator; the zero-allocation gates
-// in this crate measure through `engine_core::alloc_probe::measure`.
-#[cfg(test)]
+// The unit-test binary's one counting allocator (the gates measure through
+// `engine_core::alloc_probe::measure`); `app` links engine-perf's same one.
+#[cfg(all(test, not(feature = "app")))]
 #[global_allocator]
 static TEST_ALLOCATOR: engine_core::alloc_probe::CountingAlloc =
     engine_core::alloc_probe::CountingAlloc;
+
+#[cfg(test)]
+#[path = "feel7_tests.rs"]
+mod feel7_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2083,7 +2129,7 @@ mod tests {
         }
     }
 
-    fn small_config() -> GameConfig {
+    pub(super) fn small_config() -> GameConfig {
         GameConfig {
             seed: 7,
             ticks: 64,
@@ -2092,7 +2138,7 @@ mod tests {
         }
     }
 
-    fn human(tick: u32, mx: i8, mz: i8, buttons: Buttons) -> FighterInput {
+    pub(super) fn human(tick: u32, mx: i8, mz: i8, buttons: Buttons) -> FighterInput {
         FighterInput {
             tick,
             fighter: FighterId::new(HUMAN_SLOT).unwrap(),
@@ -2531,7 +2577,9 @@ mod tests {
             .unwrap()
             .into_duel()
             .unwrap();
-        let spec = MatchSpec::kit_duel(config.arena_config()).expect("kit duel");
+        let spec = MatchSpec::kit_duel(config.arena_config())
+            .expect("kit duel")
+            .with_weapons(&[DUEL_KIT_WEAPON; 4]);
         assert_eq!(
             window.spec().world_digest(),
             spec.world_digest(),
@@ -2970,12 +3018,14 @@ mod tests {
             // The twin never simulates, so it has no authority break events of its own: hand it
             // the fresh tick's, the way `simulate_tick` fills the scratch for `observe_into`.
             refill_app.tick_breaks.extend_from_slice(&fresh.breaks);
+            refill_app.tick_cuts.extend_from_slice(&fresh.cuts);
             refill_app.observe_into(fresh.tick, &cues, &started, checkpoint, &mut reused);
             assert_eq!(reused, fresh, "refilled outcome diverged at tick {tick}");
             assert!(
                 refill_app.tick_breaks.is_empty(),
                 "the refill moves the break scratch out, tick {tick}"
             );
+            assert!(refill_app.tick_cuts.is_empty(), "cut scratch at {tick}");
         }
         assert!(
             total_cues > 0,
@@ -3445,35 +3495,6 @@ mod tests {
             refused,
             ["seed", "ticks", "fighters", "half_extent_m", "unknown"]
         );
-    }
-
-    #[test]
-    fn fighter_views_match_sim_positions_every_tick() {
-        // VS4 F2P half: a 2-fighter 120-tick run serves one view per fighter
-        // after every tick, byte-equal to the dataset rows (slot, feet
-        // position, yaw). Empty before tick 0.
-        let config = GameConfig {
-            ticks: 120,
-            ..small_config()
-        };
-        let mut app = App::new(config).unwrap();
-        assert!(app.fighter_views().is_empty());
-        for tick in 0..config.ticks {
-            assert!(app.tick(idle(tick)).input_accepted);
-            let views = app.fighter_views();
-            assert_eq!(views.len(), 2, "one view per fighter at tick {tick}");
-            let short = ArenaConfig {
-                ticks: tick + 1,
-                ..app.arena
-            };
-            let dataset = run_dataset(&short, &app.tape).expect("dataset replays");
-            let row = &dataset.rows[usize::try_from(tick).unwrap() * 2];
-            for (view, entry) in views.iter().zip(row.observation.fighters.as_slice()) {
-                assert_eq!(view.slot, entry.id, "slot order at tick {tick}");
-                assert_eq!(view.pos_m, entry.pos, "position at tick {tick}");
-                assert_eq!(view.yaw, entry.yaw, "yaw at tick {tick}");
-            }
-        }
     }
 
     /// One oracle tick: checkpoint, cues, laterals and views.

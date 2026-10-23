@@ -2962,6 +2962,7 @@ dependencies = [
  "engine-core",
  "engine-ecs",
  "engine-input",
+ "engine-nav",
  "engine-nn",
  "engine-physics",
 ]
@@ -3059,6 +3060,7 @@ version = "0.1.0"
 name = "engine-destruction"
 version = "0.1.0"
 dependencies = [
+ "engine-assets",
  "engine-core",
 ]
 
@@ -3096,6 +3098,7 @@ dependencies = [
  "engine-assets",
  "engine-combat",
  "engine-core",
+ "engine-destruction",
  "engine-ecs",
  "engine-material",
  "engine-render",
@@ -3126,6 +3129,7 @@ dependencies = [
  "engine-nav",
  "engine-net",
  "engine-observe",
+ "engine-physfx",
  "engine-physics",
  "engine-playtest",
  "engine-proof",
@@ -3209,10 +3213,12 @@ name = "engine-net"
 version = "0.1.0"
 dependencies = [
  "engine-arena",
+ "engine-combat",
  "engine-core",
  "engine-ecs",
  "engine-input",
  "engine-observe",
+ "engine-physics",
  "engine-save",
  "futures-util",
  "hmac",
@@ -3253,6 +3259,7 @@ name = "engine-perf"
 version = "0.1.0"
 dependencies = [
  "engine-ai",
+ "engine-anim",
  "engine-arena",
  "engine-core",
  "engine-destruction",
@@ -3318,6 +3325,7 @@ dependencies = [
  "engine-assets",
  "engine-combat",
  "engine-core",
+ "engine-destruction",
  "engine-ecs",
  "engine-editor",
  "engine-input",

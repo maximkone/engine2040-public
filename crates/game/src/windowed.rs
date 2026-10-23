@@ -3182,12 +3182,25 @@ mod tests {
         assert_eq!(order, resident);
     }
 
+    /// EG47: the smoke twin as a routed skip. [`smoke_presenter`] keeps its
+    /// `None` for the production smoke notice; tests route that `None`
+    /// through `require_or_skip`, so `E2040_REQUIRE_GPU=1` fails a skip.
+    fn smoke_presenter_or_skip(test: &str) -> SmokePresenter {
+        let probe = smoke_presenter()
+            .expect("twin opens or skips")
+            .ok_or_else(|| {
+                engine_render::test_gpu::NoAdapter("no wgpu adapter on this machine".into())
+            });
+        engine_render::test_gpu::require_or_skip(test, probe)
+    }
+
     #[test]
     fn kit_twin_stages_11_draws_over_5000_tris() {
         // Twin staging path: cube plus dressing plus the 8-file kit. No
         // adapter on this machine skips (never fails): the smoke does the
         // same, so CI without a GPU stays green.
-        let Some((mut presenter, key, kit)) = smoke_presenter().expect("twin opens or skips")
+        let Some((mut presenter, key, kit)) =
+            smoke_presenter_or_skip("kit_twin_stages_11_draws_over_5000_tris")
         else {
             return;
         };
@@ -3252,7 +3265,8 @@ mod tests {
         // LIVE only from pixels in its own region. The dated artifact lists
         // every pass; no adapter skips, like the other twin tests.
         use engine_render::pass_truth::harness::gate_live_scene;
-        let Some((mut presenter, key, kit)) = smoke_presenter().expect("twin opens or skips")
+        let Some((mut presenter, key, kit)) =
+            smoke_presenter_or_skip("pass_truth_gates_the_real_arena_kit_frame")
         else {
             return;
         };
@@ -3290,7 +3304,8 @@ mod tests {
         // are printed, so what drawing the sky costs is a number. No adapter
         // or no timestamp queries skips.
         use engine_render::pass_truth::{harness::live_gpu_cost, LookToggles};
-        let Some((mut presenter, key, kit)) = smoke_presenter().expect("twin opens or skips")
+        let Some((mut presenter, key, kit)) =
+            smoke_presenter_or_skip("look_pass_cost_on_the_real_arena_kit_frame_is_measured")
         else {
             return;
         };
@@ -3331,7 +3346,9 @@ mod tests {
         assert_eq!(kit_kept_after_collision(10, 4, true), 10);
         // Live caller: the twin list builds through the lockstep and keeps
         // the kit draws when the world collides.
-        let Some((presenter, key, kit)) = smoke_presenter().expect("twin opens or skips") else {
+        let Some((presenter, key, kit)) =
+            smoke_presenter_or_skip("kit_collision_lockstep_keeps_draws_when_world_collides")
+        else {
             return;
         };
         let list = smoke_twin_list(&presenter, key, &kit, 0, None).expect("twin list builds");
@@ -3361,7 +3378,9 @@ mod tests {
         assert!(!kit_replaces_dressing(0, false));
         // Live caller: twin list with kept kit carries no dressing draws;
         // bare report keeps the six dressing draws. Skips with no adapter.
-        let Some((presenter, key, kit)) = smoke_presenter().expect("twin opens or skips") else {
+        let Some((presenter, key, kit)) =
+            smoke_presenter_or_skip("kit_replaces_dressing_when_kit_kept")
+        else {
             return;
         };
         let list = smoke_twin_list(&presenter, key, &kit, 0, None).expect("twin list builds");
@@ -3468,9 +3487,9 @@ mod tests {
         // Staging rides before the twin render: a fresh presenter holds the
         // live rows non-empty at render time, and the hp-bar rect differs
         // from the bare twin. Loud skip with no adapter.
-        let Some((mut presenter, key, kit)) = smoke_presenter().expect("twin opens or skips")
+        let Some((mut presenter, key, kit)) =
+            smoke_presenter_or_skip("hp_bars_for_overlay_pairs_rows_in_order")
         else {
-            eprintln!("SKIPPED hp_bars_for_overlay_pairs_rows_in_order: NoAdapter, no twin to stage bars on");
             return;
         };
         // Production path stages before render: one call presents and leaves

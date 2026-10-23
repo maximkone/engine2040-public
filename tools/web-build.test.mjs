@@ -10,10 +10,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import {
   BuildError, COI_WORKER, DIST_FILES, KIT_BUNDLE, PUBLIC_DIRS, PUBLIC_FILES, RIG_BUNDLE, SIZE_LIMIT_BYTES, SWEEP_LEVELS, TARGET, WASM_OPT_FEATURES, WASM_OPT_FLAGS, bindgenArgs, build, builtWasmPath, cargoArgs,
   checkPublic, listFiles, lockedVersion, nonPublicFiles, parseArgs, readCoiWorker, realDeps, renderHtml, sizeSweep,
 } from "./web-build.mjs";
+import { brotliSize, firstLoadBytes, firstTierBytes, gzipSize } from "./web-budget.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TEMPLATE = readFileSync(join(REPO, "crates", "web", "index.html"), "utf8");
@@ -23,6 +25,33 @@ const LOCK = 'name = "wasm-bindgen"\nversion = "0.2.128"\nsource = "registry+x"\
 const KIT = Buffer.from("kit.e2bundle fixture\n"); // WEB17: the cooked arena kit build() copies whole
 const RIG = Buffer.from("rig.e2bundle fixture\n"); // WEB6: the cooked fighter rig, same shape
 const sha = (b) => createHash("sha256").update(b).digest("hex");
+
+// QW4: a two-tier E2BUNDLE, so the first-fetch measure has a coarse prefix to stop at.
+function miniBundle(firstLen, restLen) {
+  const rows = [
+    { path: "cooked/coarse.bin", priority: 0, data: Buffer.alloc(firstLen, 1) },
+    { path: "hdri/studio.hdr", priority: 1, data: Buffer.alloc(restLen, 2) },
+  ];
+  const indexLen = rows.reduce((n, r) => n + 2 + r.path.length + 25, 0);
+  const head = Buffer.alloc(32 + indexLen);
+  head.write("E2BUNDLE", 0, "latin1");
+  head.writeUInt32LE(1, 8);
+  head.writeUInt32LE(rows.length, 12);
+  head.writeBigUInt64LE(BigInt(indexLen), 16);
+  head.writeBigUInt64LE(0n, 24);
+  let at = 32;
+  let offset = 32 + indexLen;
+  for (const r of rows) {
+    head.writeUInt16LE(r.path.length, at); at += 2;
+    head.write(r.path, at, "latin1"); at += r.path.length;
+    head[at] = r.priority; at += 1;
+    head.writeBigUInt64LE(BigInt(offset), at); at += 8;
+    head.writeBigUInt64LE(BigInt(r.data.length), at); at += 8;
+    head.writeBigUInt64LE(0n, at); at += 8;
+    offset += r.data.length;
+  }
+  return Buffer.concat([head, ...rows.map((r) => r.data)]);
+}
 
 // A scratch repo root with the inputs build() reads, and a scratch output directory.
 function scratch(lock = LOCK) {
@@ -108,17 +137,42 @@ test("build writes exactly the dist/web files, with real sizes and hashes in bui
       assert.equal(info.files[name].bytes, bytes.length, name);
       assert.equal(info.files[name].sha256, sha(bytes), name);
       assert.ok(info.files[name].gzipBytes > 0, name);
+      assert.ok(info.files[name].brotliBytes > 0, name);
     }
-    assert.ok(readFileSync(join(s.out, KIT_BUNDLE)).equals(KIT), "the kit ships byte for byte");
-    assert.ok(readFileSync(join(s.out, RIG_BUNDLE)).equals(RIG), "the rig ships byte for byte");
+    assert.ok(gunzipSync(readFileSync(join(s.out, KIT_BUNDLE))).equals(KIT), "the kit ships gzip and unzips to the cooked bytes");
+    assert.ok(gunzipSync(readFileSync(join(s.out, RIG_BUNDLE))).equals(RIG), "the rig ships gzip and unzips to the cooked bytes");
     assert.ok(!("build.json" in info.files));
     assert.equal(info.totalBytes, Object.values(info.files).reduce((n, f) => n + f.bytes, 0));
+    assert.equal(
+      info.firstBundleBytes,
+      Object.keys(info.files).reduce((n, rel) => n + firstLoadBytes(rel, readFileSync(join(s.out, rel))), 0),
+      "first_bundle is every shipped file in its shipped form",
+    );
     assert.equal(info.rawWasmBytes, 4000);
     assert.equal(info.files["engine_bg.wasm"].bytes, 2000, "wasm-opt output is what ships");
     assert.equal(info.underLimit, true);
     assert.equal(info.limitBytes, SIZE_LIMIT_BYTES);
     assert.equal(info.commit, "abc123def456");
     assert.deepEqual(info.tools, { rustc: "rustc 1.97.1 (fake)", wasmBindgen: "0.2.128", wasmOpt: "wasm-opt version 119" });
+  } finally {
+    s.done();
+  }
+});
+
+test("QW4: firstBundleBytes counts the arena bundle only to its tier-0 prefix", () => {
+  const s = scratch();
+  try {
+    const kit = miniBundle(120, 300);
+    writeFileSync(join(s.dir, "content", "arena", "kit.e2bundle"), kit);
+    const t = toolchain(s.dir, { wasmBytes: 4000 });
+    const info = build({ rootDir: s.dir, outDir: s.out, commit: "abc123def456" }, quiet(t.run));
+    const prefix = firstTierBytes(kit);
+    assert.ok(prefix.length < kit.length, "the fixture has a later tier");
+    assert.equal(info.files[KIT_BUNDLE].firstBytes, prefix.length);
+    const others = Object.entries(info.files)
+      .filter(([rel]) => rel !== KIT_BUNDLE && rel !== "build.json")
+      .reduce((n, [rel]) => n + firstLoadBytes(rel, readFileSync(join(s.out, rel))), 0);
+    assert.equal(info.firstBundleBytes, others + gzipSize(prefix), "the shipped bundle counts gzip up to tier 0");
   } finally {
     s.done();
   }
@@ -444,7 +498,11 @@ test("the page contract: canvas, hud, report, fatal message with the browser ver
   // WEB6: the page installs the asset fetcher the engine asks for, so a gameplay asset can be
   // fetched at runtime instead of only the wasm and build.json.
   assert.match(html, /import \{[^}]*pageFetcher[^}]*\} from "\.\/loader\.js"/);
-  assert.match(html, /window\.engine2040FetchAsset = pageFetcher\(import\.meta\.url\)/);
+  assert.match(html, /window\.engine2040FetchAsset = \(url\) =>/);
+  assert.match(html, /pageFetcher\(import\.meta\.url, showFetch\)/);
+  // QW4: the arena fetch answers at the tier-0 boundary and draws the same bar.
+  assert.match(html, /pageFetcherPrefix\(import\.meta\.url, showFetch\)/);
+  assert.match(html, /window\.engine2040FetchAssetPrefix = \(url\) =>/);
   for (const v of ["Chrome 113", "Edge 113", "Safari 26", "Firefox 141"]) assert.ok(html.includes(v), `fatal message lost ${v}`);
   assert.match(html, /body\[data-state="fatal"\] #fatal \{ display: block/);
   assert.match(html, /<body data-state="starting"/);

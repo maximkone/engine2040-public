@@ -73,8 +73,22 @@ test("a crashed run names the fault instead of showing a bare status code", () =
 
 test("fps is gated only on a quiet run, against the median of recent quiet runs", () => {
   const look = { ...parseReceipt(RECEIPT), tinted_share: 0, exit: 0 };
+  assert.equal(parseReceipt(RECEIPT).vsync, "Fifo");
   const history = [50, 60, 55, 400, 58].map((ms, i) => ({ timing: { interval_p50_ms: ms, loaded: i === 3 ? 2 : 0 } }));
   assert.equal(referenceInterval(history), 58);
+  // An Immediate run at 8.3 ms and a Fifo run at the 16.7 ms display period are
+  // different caps: the reference keeps to the run's own present mode.
+  const mixed = [
+    { timing: { interval_p50_ms: 8.3, loaded: 0, vsync: "Immediate" } },
+    { timing: { interval_p50_ms: 16.6, loaded: 0, vsync: "Fifo" } },
+    { timing: { interval_p50_ms: 16.8, loaded: 0, vsync: "Fifo" } },
+    { timing: { interval_p50_ms: 16.7, loaded: 0, vsync: "Fifo" } },
+  ];
+  assert.equal(referenceInterval(mixed, "Fifo"), 16.7);
+  assert.equal(referenceInterval(mixed, "Immediate"), 8.3);
+  assert.equal(referenceInterval(mixed, "Mailbox"), null);
+  assert.equal(referenceInterval([{ timing: { interval_p50_ms: 8.3, loaded: 0, vsync: "Immediate" } }], "Fifo"), null);
+  assert.equal(redFloors({ look, timing: { interval_p50_ms: 16.7, interval_p99_ms: 26, loaded: 0, vsync: "Fifo" }, caps: quietCaps, ref: null }, BAR).slower, undefined);
   const slow = { interval_p50_ms: 100, interval_p99_ms: 300, loaded: 0 };
   assert.ok(redFloors({ look, timing: slow, caps: quietCaps, ref: 58 }, BAR).slower);
   assert.equal(redFloors({ look, timing: { ...slow, loaded: 3 }, caps: quietCaps, ref: 58 }, BAR).slower, undefined);

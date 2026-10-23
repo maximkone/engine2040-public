@@ -24,6 +24,11 @@
   /* QW3/QW12: how the module arrived (bundle, bytes fetched, download, compile, first frame). */
   #load, #memory { position: fixed; right: 8px; top: 86px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; max-width: 60vw; white-space: pre-wrap; word-break: break-all; }
   #memory { top: 112px; }
+  /* QW4: the arena bundle streams in with a byte bar; it hides when the body is whole or the fetch refuses. */
+  #fetch { display: none; position: fixed; right: 8px; top: 138px; z-index: 20; width: min(40vw, 280px); margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 11px; }
+  body[data-fetch] #fetch { display: block; }
+  #fetch progress { display: block; width: 100%; height: 6px; accent-color: #2fbf4a; }
+  #fetch span { display: block; margin-top: 2px; white-space: nowrap; }
   /* WEB9/WEB12: the net duel line, only when the address has ?server= or ?join=. #netstat is the detail under it. */
   #net { display: none; position: fixed; right: 8px; top: 60px; margin: 0; padding: 2px 8px; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; }
   #netstat { display: none; position: fixed; left: 8px; top: 120px; z-index: 20; margin: 0; padding: 2px 8px; max-width: 60vw; background: rgba(0, 0, 0, 0.65); border-radius: 3px; font-size: 12px; white-space: pre-wrap; }
@@ -116,6 +121,7 @@
 <pre id="keys">WASD move · mouse look · Q/E turn · F attack · Shift block · Space dodge</pre>
 <pre id="load">load: fetching the engine</pre>
 <pre id="memory">memory: no reading yet</pre>
+<div id="fetch"><progress id="fetch-bar" max="1" value="0"></progress><span id="fetch-text">arena bundle: waiting</span></div>
 <pre id="build">build: commit {{COMMIT}}</pre>
 <pre id="coi">coi: isolated=false reloads=0</pre>
 <pre id="golden">golden: running the 600-tick tape and the cut corpus in wasm...</pre>
@@ -145,13 +151,41 @@
   <div style="position:fixed;inset:0;z-index:11;padding:5vmin;background:#b00020;color:#fff;font:600 20px system-ui,sans-serif">This page needs JavaScript, WebAssembly and WebGPU (Chrome or Edge 113+, Safari 26+, Firefox 141+ on Windows).</div>
 </noscript>
 <script type="module">
-import init, { run, run_arena, lose_device, destroy_device, input_sample, request_arena_capture, run_net } from "./engine.js";
-import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory, pageFetcher } from "./loader.js";
+import init, { run, run_arena, lose_device, destroy_device, input_sample, audio_cue_check, request_arena_capture, run_net } from "./engine.js";
+import { loadEngine, loadLine, memoryLine, watchFirstFrame, watchMemory, pageFetcher, pageFetcherPrefix } from "./loader.js";
+
+// QW4: the arena bundle streams in with a byte bar. It stays hidden until the first
+// chunk and hides again when the body is whole or the fetch refuses.
+const fetchBar = document.getElementById("fetch-bar");
+const fetchText = document.getElementById("fetch-text");
+const size = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} kB`);
+function showFetch({ received, total, done, error }) {
+  if (done || error) { delete document.body.dataset.fetch; return; }
+  document.body.dataset.fetch = "1";
+  fetchBar.max = total || 1;
+  if (total > 0) fetchBar.value = Math.min(received, total);
+  else fetchBar.removeAttribute("value");
+  fetchText.textContent = total > 0 ? `arena bundle: ${size(received)} / ${size(total)}` : `arena bundle: ${size(received)}`;
+}
 
 // WEB6: the page owns the network. The engine asks for a gameplay asset by URL and this
 // function fetches it; the bytes come back through the asset seam (engine-assets). A failure
 // here is a typed refusal the engine names, never an empty arena.
-window.engine2040FetchAsset = pageFetcher(import.meta.url);
+const fetchBundle = pageFetcher(import.meta.url, showFetch);
+window.engine2040FetchAsset = (url) => {
+  const pending = fetchBundle(url);
+  pending.catch(() => { delete document.body.dataset.fetch; });
+  return pending;
+};
+
+// QW4: the arena bundle answers with its tier-0 prefix, so the first frame does not
+// wait for the HDRI tier; the same response keeps the bar moving behind it.
+const fetchBundlePrefix = pageFetcherPrefix(import.meta.url, showFetch);
+window.engine2040FetchAssetPrefix = (url) => {
+  const pending = fetchBundlePrefix(url);
+  pending.catch(() => { delete document.body.dataset.fetch; });
+  return pending;
+};
 
 // WEB14: cross-origin isolation. GitHub Pages cannot send COOP/COEP, so a small service worker
 // adds them. The page registers it only when it is not isolated, waits until the worker controls
@@ -218,6 +252,8 @@ window.loseDevice = lose_device;
 window.destroyDevice = destroy_device;
 // WEB7: the headless check calls this at the tick lines of an input script it replays as real key and mouse events.
 window.inputSample = input_sample;
+// A5: the cue proof - queue the scripted fight on the page's own mixer and read its counters.
+window.audioCueCheck = audio_cue_check;
 window.requestArenaCapture = request_arena_capture;
 // A page that is going away frees its device on purpose; a page that goes to the back/forward cache (persisted) keeps it.
 addEventListener("pagehide", (e) => { if (!e.persisted) destroy_device(); });

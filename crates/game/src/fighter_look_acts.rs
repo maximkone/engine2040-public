@@ -9,7 +9,7 @@
 //! keeps the old act.
 
 use engine_anim::crossfade::SlotFade;
-use engine_arena::GaitPhase;
+use engine_arena::{GaitPhase, LiveMatch};
 use engine_audio::FightCue;
 use engine_combat::fight::HITSTOP_TICKS;
 
@@ -29,6 +29,13 @@ pub(crate) fn bridge_slots() -> Vec<FighterSlot> {
     (0..MAX_LOOK_FIGHTERS)
         .map(|index| FighterSlot::new(u8::try_from(index).unwrap_or(u8::MAX)))
         .collect()
+}
+
+/// The ticks slot `slot`'s swing clip plays (FEEL1b): its armed weapon's
+/// startup from the live match, or `default` when the slot is bare.
+fn swing_ticks_for(live: Option<&LiveMatch>, slot: u8, default: u32) -> u32 {
+    live.and_then(|live| live.weapon(slot))
+        .map_or(default, |weapon| weapon.startup_ticks)
 }
 
 /// The impact pair's per-slot freeze for a tick: whatever `fold_cues`
@@ -208,6 +215,49 @@ impl FighterLook {
         hp: &[u16],
         cues: &[FightCue],
     ) {
+        self.observe_tick_inner(tick, views, hp, cues, None);
+    }
+
+    /// [`FighterLook::observe_tick`] with the live match in hand (FEEL1b):
+    /// each slot's swing plays for its own armed weapon's startup
+    /// (`Sim::weapon`), so the pugio's clip ends nine ticks before the
+    /// clava's. A bare slot keeps the look's default clip length. The match
+    /// is read for numbers only; the look never writes it or its hash.
+    pub fn observe_tick_with_live(
+        &mut self,
+        tick: u32,
+        views: &[FighterView],
+        hp: &[u16],
+        cues: &[FightCue],
+        live: &LiveMatch,
+    ) {
+        self.observe_tick_inner(tick, views, hp, cues, Some(live));
+    }
+
+    fn observe_tick_inner(
+        &mut self,
+        tick: u32,
+        views: &[FighterView],
+        hp: &[u16],
+        cues: &[FightCue],
+        live: Option<&LiveMatch>,
+    ) {
+        // EG39: a tick at or below the last folded one is a rollback resim.
+        // Drop the fading correction if its window has passed, capture the
+        // roots the viewer last saw, then restore the checkpoint through the
+        // tick before the replay so the cues below fold exactly once. The
+        // rewind is presentation only; the sim never calls this path.
+        if let Some(correction) = self.correction {
+            if correction.age(tick) >= engine_anim::net_pose::CORRECTION_FADE_TICKS {
+                self.correction = None;
+            }
+        }
+        let high = self.tick;
+        let replaying = tick <= high && tick > 0 && self.checkpoint_through(tick - 1).is_some();
+        if replaying {
+            self.note_correction(high);
+            self.rewind_to(tick);
+        }
         // View-only shake decay (LF11): 1000 permille per second, integer
         // only, before the tick's impacts land. Same ticks give the same
         // trauma twice; presentation only, never the sim hash.
@@ -221,8 +271,8 @@ impl FighterLook {
             .saturating_sub(elapsed.saturating_mul(SHAKE_DECAY_PERMILLE_PER_TICK));
         self.tick = tick;
         self.fold_positions(views);
-        self.fold_cues(tick, cues);
-        self.fold_acts(tick, views, hp, cues, elapsed);
+        self.fold_cues(tick, cues, replaying);
+        self.fold_acts(tick, views, hp, cues, elapsed, live);
         self.fold_switches(&before, elapsed);
         // LF12: step each slot's planted feet from the clip's end-of-tick
         // ankles, after the switch offsets so a plant reads the shown pose.
@@ -230,13 +280,18 @@ impl FighterLook {
         // View-only trail feed (LF14): age once, push attacking slots and
         // clear the rest. Presentation only, never the sim hash.
         self.feed_trails();
-        // RZ7: lay and step each seen slot's cape on this tick's pose. Never
-        // hashed; the sim never reads a cape.
-        self.cape_tick();
-        // Last stage: advance each seen slot's angular-speed cap onto this
-        // tick's final pose, so no bone turns faster than 1080 deg/s on the
-        // frames that read it. Presentation only, never hashed.
-        self.limit_tick(elapsed);
+        if !replaying {
+            // RZ7: lay and step each seen slot's cape on this tick's pose.
+            // Never hashed; the sim never reads a cape. A resim holds the
+            // cape at the high tick instead of re-stepping its float state.
+            self.cape_tick();
+            // Last stage: advance each seen slot's angular-speed cap onto this
+            // tick's final pose, so no bone turns faster than 1080 deg/s on the
+            // frames that read it. The limiter owns float state of its own, so
+            // the resim holds it too. Presentation only, never hashed.
+            self.limit_tick(elapsed);
+        }
+        self.save_checkpoint(tick);
     }
 
     /// Shift each seen slot's position (previous, current) for the frame lerp.
@@ -265,11 +320,13 @@ impl FighterLook {
     /// A `Hit` also starts the victim's additive flinch (EG18): the push
     /// runs away from the attacker in world space, decayed by the shared
     /// react-window envelope in [`slot_pose`](Self::slot_pose).
-    fn fold_cues(&mut self, tick: u32, cues: &[FightCue]) {
+    fn fold_cues(&mut self, tick: u32, cues: &[FightCue], replaying: bool) {
         for cue in cues {
             match *cue {
                 FightCue::Hit {
-                    attacker, victim, ..
+                    attacker,
+                    victim,
+                    damage,
                 } => {
                     self.start_swing(attacker, tick);
                     let push = Self::push_away(&self.slots, attacker, victim);
@@ -281,6 +338,12 @@ impl FighterLook {
                     }
                     self.stumble_slot(victim);
                     self.remember_hit(victim, tick, push);
+                    // FEEL9: a standing victim's upper chain takes the blow.
+                    // A resim holds the ragdoll at the high tick, so re-noting
+                    // the same cue would apply the blow twice.
+                    if !replaying {
+                        self.ragdoll_note_hit(attacker, victim, damage, cues);
+                    }
                 }
                 FightCue::Knockdown { attacker, victim } => {
                     self.start_swing(attacker, tick);
@@ -292,7 +355,10 @@ impl FighterLook {
                     }
                     // RZ2w: the dead victim falls as a ragdoll, pushed along the blow. Noted
                     // before the floor verdict so it keeps the standing pose.
-                    self.ragdoll_note_knockdown(attacker, victim, cues);
+                    // The resim already holds that fall from the high tick.
+                    if !replaying {
+                        self.ragdoll_note_knockdown(attacker, victim, cues);
+                    }
                     self.floor_slot(victim);
                 }
                 FightCue::Blocked { attacker, .. }
@@ -443,6 +509,7 @@ impl FighterLook {
         hp: &[u16],
         cues: &[FightCue],
         elapsed: u32,
+        live: Option<&LiveMatch>,
     ) {
         let fades_before: [u32; MAX_LOOK_FIGHTERS] =
             std::array::from_fn(|index| self.slots.get(index).map_or(0, |slot| slot.fade_left));
@@ -469,7 +536,7 @@ impl FighterLook {
             // acts rather than picking from an unvalidated tuning.
             return;
         };
-        let swing_ticks = self.swing_ticks;
+        let default_swing = self.swing_ticks;
         for view in views {
             let index = usize::from(view.slot);
             let Some(old) = self.slots.get(index).copied() else {
@@ -492,6 +559,8 @@ impl FighterLook {
             let step = (old.pos[0] - old.prev_pos[0], old.pos[2] - old.prev_pos[2]);
             let speed = (step.0 * step.0 + step.1 * step.1).sqrt();
             let hp_permille = hp.get(index).copied().unwrap_or(1);
+            // FEEL1b: the armed startup times the swing; bare keeps the default.
+            let swing_ticks = swing_ticks_for(live, view.slot, default_swing);
             // Drive the bridge slot from the same tick inputs. A refused
             // tick (foreign slot, never here) keeps the old act.
             let (pick, fade) = match self.bridge.get_mut(index) {
@@ -537,10 +606,11 @@ impl FighterLook {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{FighterLook, SlotAnim, MAX_LOOK_FIGHTERS};
+    use super::super::{Act, FighterLook, SlotAnim, MAX_LOOK_FIGHTERS};
     use super::{bridge_slots, hold_frozen};
     use crate::weapon_trail::TrailRing;
     use crate::FighterView;
+    use engine_arena::LiveMatch;
     use engine_audio::FightCue;
     use engine_combat::fight::HITSTOP_TICKS;
 
@@ -571,6 +641,9 @@ mod tests {
             limbs: crate::fighter_look::limb_look::LimbLook::empty(),
             capes: crate::fighter_look::Capes::empty(),
             hero: 0,
+            checkpoints: super::super::empty_checkpoints(),
+            rewind_cursor: 0,
+            correction: None,
         }
     }
 
@@ -589,6 +662,150 @@ mod tests {
         ]
     }
 
+    /// EG39: a resim re-emits the same cue; the slot and the bridge must land
+    /// on the act and clip clock of the no-resim run, and the hop that caused
+    /// the correction must fade out instead of snapping. The F2P was the old
+    /// fold counting the replay as a new swing (variant 1 instead of 0) and
+    /// restarting the clock.
+    #[test]
+    fn resim_no_restart() {
+        let views_at = |x: f32| {
+            vec![
+                FighterView {
+                    slot: 0,
+                    pos_m: [x, 0.0, 0.0],
+                    yaw: 0.0,
+                },
+                FighterView {
+                    slot: 1,
+                    pos_m: [2.0, 0.0, 0.0],
+                    yaw: 0.0,
+                },
+            ]
+        };
+        let hp = [1000u16; 2];
+        let cues: &[FightCue] = &[hit(0, 1)];
+        let empty: &[FightCue] = &[];
+
+        // No-resim run: the corrected position from tick 4 on, one hit at 4.
+        let mut clean = bare_look();
+        for tick in 0..=8 {
+            let x = if tick >= 4 { 0.5 } else { 0.0 };
+            let cues = if tick == 4 { cues } else { empty };
+            clean.observe_tick(tick, &views_at(x), &hp, cues);
+        }
+
+        // The old run, then the same four ticks replayed on top of it with the
+        // corrected position.
+        let mut replay = bare_look();
+        for tick in 0..=8 {
+            let cues = if tick == 4 { cues } else { empty };
+            replay.observe_tick(tick, &views_at(0.0), &hp, cues);
+        }
+        for tick in 4..=8 {
+            let cues = if tick == 4 { cues } else { empty };
+            replay.observe_tick(tick, &views_at(0.5), &hp, cues);
+        }
+
+        assert_eq!(
+            replay.slots[0].act, clean.slots[0].act,
+            "the replayed swing keeps its variant"
+        );
+        assert_eq!(
+            replay.slots[0].act_start, clean.slots[0].act_start,
+            "the replayed slot keeps its clip clock"
+        );
+        assert_eq!(
+            replay.bridge[0].pick(),
+            clean.bridge[0].pick(),
+            "the bridge pick matches the no-resim run"
+        );
+
+        // The 0.5 m hop is the visual error: full on the correction tick,
+        // then linear to zero over CORRECTION_FADE_TICKS (12 ticks).
+        let offset = replay.correction_offset_m(0);
+        assert!(
+            offset > 0.0,
+            "the correction tick keeps a visual offset, got {offset}"
+        );
+        assert!(
+            (offset - 0.5).abs() < 1e-3,
+            "the offset is the hop the viewer saw, got {offset}"
+        );
+        assert_eq!(
+            clean.correction_offset_m(0),
+            0.0,
+            "a run with no rewind has no offset"
+        );
+
+        // A second resim of the same window is idempotent: the ring still
+        // holds the checkpoint before tick 4.
+        let replayed = replay.bridge[0].pick();
+        for tick in 4..=8 {
+            let cues = if tick == 4 { cues } else { empty };
+            replay.observe_tick(tick, &views_at(0.5), &hp, cues);
+        }
+        assert_eq!(
+            replay.bridge[0].pick(),
+            replayed,
+            "a second resim keeps the same phase"
+        );
+
+        for tick in 9..=20 {
+            replay.observe_tick(tick, &views_at(0.5), &hp, empty);
+        }
+        let offset = replay.correction_offset_m(0);
+        assert!(
+            offset < 0.01,
+            "the offset is under 1 cm after 12 ticks, got {offset}"
+        );
+    }
+
+    /// A rules v2 duel armed with `ids`, for the look's per-slot timing.
+    fn armed_live(ids: &[&'static str]) -> LiveMatch {
+        let config = engine_arena::ArenaConfig::try_new(11, 32, 2, 12.0).expect("config");
+        engine_arena::MatchSpec::duel(config, engine_arena::world::MatchWorld::empty())
+            .with_weapons(ids)
+            .live()
+            .expect("armed duel")
+    }
+
+    /// FEEL1b: each slot's swing plays for its own armed startup. The tick-0
+    /// hit holds both clips three ticks (the shipped light hit-stop), so the
+    /// pugio's 12-tick clip frees on tick 15 and the clava's 21-tick clip on
+    /// tick 24: the club ends nine ticks after the dagger, as the rows say.
+    #[test]
+    fn feel1b_look_times_each_swing_by_its_weapon_startup() {
+        let live = armed_live(&["pugio", "clava"]);
+        assert_eq!(live.weapon(0).map(|w| w.startup_ticks), Some(12));
+        assert_eq!(live.weapon(1).map(|w| w.startup_ticks), Some(21));
+        let views = pair_views();
+        let hp = [1000u16; 2];
+        let mut look = bare_look();
+        look.observe_tick_with_live(0, &views, &hp, &[hit(0, 1), hit(1, 0)], &live);
+        assert!(matches!(look.slots[0].act, Act::Attack(_)));
+        assert!(matches!(look.slots[1].act, Act::Attack(_)));
+        let mut ends = [None; 2];
+        for tick in 1..40 {
+            look.observe_tick_with_live(tick, &views, &hp, &[], &live);
+            for (slot, end) in ends.iter_mut().enumerate() {
+                if end.is_none() && !matches!(look.slots[slot].act, Act::Attack(_)) {
+                    *end = Some(tick);
+                }
+            }
+        }
+        assert_eq!(
+            ends,
+            [Some(15), Some(24)],
+            "each startup ends its own clip after the hold"
+        );
+        assert_eq!(
+            ends[1].unwrap() - ends[0].unwrap(),
+            9,
+            "the club lingers nine ticks"
+        );
+    }
+
     #[test]
     fn hitstop_hold_matches_sim_four_ticks() {
         // LF10: an impact at tick 10 must freeze exactly HITSTOP_TICKS (4)
@@ -596,7 +813,7 @@ mod tests {
         // extra tick. The bridge expiry is exclusive, so impact tick plus
         // three quiet ticks hold; tick 14 runs free.
         let mut look = bare_look();
-        look.fold_cues(10, &[hit(0, 1)]);
+        look.fold_cues(10, &[hit(0, 1)], false);
         let until = look.bridge[0].hold_until();
         assert_eq!(
             until,
@@ -640,7 +857,7 @@ mod tests {
         for (cue, count) in [(hit(0, 1), light), (hit(0, 1), heavy), (parried, parry)] {
             let mut look = bare_look();
             look.observe_hitstop(10, &[cue], count);
-            look.fold_cues(10, &[cue]);
+            look.fold_cues(10, &[cue], false);
             let held: Vec<u32> = (10..30)
                 .filter(|tick| {
                     let frozen = hold_frozen(&look.bridge, *tick, &views);
@@ -659,7 +876,7 @@ mod tests {
     fn hitstop_hold_without_a_live_count_keeps_the_v1_freeze() {
         // No live count fed (the old callers): the impact pair holds the V1 four.
         let mut look = bare_look();
-        look.fold_cues(10, &[hit(0, 1)]);
+        look.fold_cues(10, &[hit(0, 1)], false);
         assert_eq!(look.bridge[0].hold_until(), 10 + HITSTOP_TICKS);
         // A zero live count records nothing, so the fold falls back to the V1 freeze.
         let mut zero = bare_look();

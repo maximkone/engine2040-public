@@ -455,14 +455,14 @@ pub fn gpu_submit() -> Result<(), ExecError> {
 
 /// True while the device records per-pass GPU timestamps. Never fails:
 /// callers post `None` timings when false.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn timestamp_supported(device: &wgpu::Device) -> bool {
     device.features().contains(wgpu::Features::TIMESTAMP_QUERY)
 }
 
 /// Tick delta to ms via the queue period (ns per tick). Pure, no wgpu
 /// types, so it also compiles on the headless twin for its math tests.
-#[cfg(any(feature = "window", test))]
+#[cfg(any(feature = "gpu", test))]
 pub(crate) fn ticks_to_ms(delta_ticks: u64, period: f32) -> f64 {
     let hi = u32::try_from(delta_ticks >> 32).unwrap_or(u32::MAX);
     let lo = u32::try_from(delta_ticks & 0xffff_ffff).unwrap_or(u32::MAX);
@@ -470,26 +470,26 @@ pub(crate) fn ticks_to_ms(delta_ticks: u64, period: f32) -> f64 {
 }
 
 /// One pass ms from a begin/end tick pair; inverted pairs read zero. Pure.
-#[cfg(any(feature = "window", test))]
+#[cfg(any(feature = "gpu", test))]
 pub(crate) fn pass_ms_from_ticks(begin_ticks: u64, end_ticks: u64, period: f32) -> f64 {
     ticks_to_ms(end_ticks.saturating_sub(begin_ticks), period)
 }
 
 /// Query pair for one compiled-order position. Pure.
-#[cfg(any(feature = "window", test))]
+#[cfg(any(feature = "gpu", test))]
 pub(crate) fn query_pair(pos: usize) -> (u32, u32) {
     let begin = u32::try_from(pos.saturating_mul(2)).unwrap_or(u32::MAX);
     (begin, begin.saturating_add(1))
 }
 
 /// Query count for a submit: two timestamps per pass. Pure.
-#[cfg(any(feature = "window", test))]
+#[cfg(any(feature = "gpu", test))]
 pub(crate) fn timestamp_query_count(passes: usize) -> u32 {
     u32::try_from(passes.saturating_mul(2)).unwrap_or(u32::MAX)
 }
 
 /// All-`None` timings for a submit that skipped or lost its queries. Pure.
-#[cfg(any(feature = "window", test))]
+#[cfg(any(feature = "gpu", test))]
 pub(crate) fn none_gpu_timings(passes: usize) -> Vec<Option<f64>> {
     let mut rows = Vec::with_capacity(passes);
     for _ in 0..passes {
@@ -500,7 +500,7 @@ pub(crate) fn none_gpu_timings(passes: usize) -> Vec<Option<f64>> {
 
 /// Decode a resolved buffer (`2 * passes` little-endian u64) to per-pass
 /// ms; short tails and bad samples degrade to `None`. Pure.
-#[cfg(any(feature = "window", test))]
+#[cfg(any(feature = "gpu", test))]
 pub(crate) fn decode_pass_bytes(bytes: &[u8], passes: usize, period: f32) -> Vec<Option<f64>> {
     let mut rows = Vec::with_capacity(passes);
     for pos in 0..passes {
@@ -525,7 +525,7 @@ pub(crate) fn decode_pass_bytes(bytes: &[u8], passes: usize, period: f32) -> Vec
 /// staging buffer `MAP_READ | COPY_DST`: `MAP_READ` only combines with its
 /// opposite `COPY_DST`, so resolving straight into a mapped buffer is a
 /// validation error. Evidence only, never hashed.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) struct TimestampSetup {
     /// Pair set holding `2 * passes` timestamps.
     pub query_set: wgpu::QuerySet,
@@ -542,7 +542,7 @@ pub(crate) struct TimestampSetup {
 /// Size the per-submit timestamp state, or `None` when the device or period
 /// cannot record. `None` never fails startup: the submit records without
 /// queries and posts `None` per pass.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn timestamp_setup(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -583,7 +583,7 @@ pub(crate) fn timestamp_setup(
 
 /// Read back a resolved timestamp buffer into per-pass ms. Any map failure
 /// degrades to `None`: timestamps never fail the frame pixels already proved.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn read_pass_ms(
     ts_buf: Option<&wgpu::Buffer>,
     ts_slice: Option<&wgpu::BufferSlice<'_>>,
@@ -620,7 +620,7 @@ pub(crate) fn read_pass_ms(
 
 /// Cold refusal: every transient span must lie inside the compiled pass
 /// range and be ordered (its `first`/`last` index this list directly).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn check_transient_span(
     row: &TransientRow,
     count: usize,
@@ -635,7 +635,7 @@ fn check_transient_span(
 }
 
 /// Window submit over the executor pass list (GX1).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl CpuExecutor {
     /// Record one wgpu pass per executor pass in add order with the shared
     /// look bind group, aliasing `transients` by the RA2 plan through the
@@ -959,17 +959,21 @@ mod tests {
 
     /// Window device for the submit tests: shared with the graph submit
     /// tests (one device for the suite, so parallel tests never exhaust
-    /// adapters). `None` is skip-not-green, never a fake pass.
-    #[cfg(feature = "window")]
-    fn exec_device() -> Option<(
-        &'static wgpu::Device,
-        &'static wgpu::Queue,
-        &'static wgpu::AdapterInfo,
-    )> {
-        crate::graph::gx1_test_device()
+    /// adapters). `Err` is skip-not-green, never a fake pass: each test hands
+    /// it to `require_or_skip`, which names the test in its SKIPPED line.
+    #[cfg(feature = "gpu")]
+    fn exec_device() -> Result<
+        (
+            &'static wgpu::Device,
+            &'static wgpu::Queue,
+            &'static wgpu::AdapterInfo,
+        ),
+        crate::test_gpu::NoAdapter,
+    > {
+        crate::graph::gx1_probe()
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn exec_frame(index: u64) -> crate::gtao::LookFrame {
         crate::graph::gx1_test_frame(index)
     }
@@ -978,7 +982,7 @@ mod tests {
     /// overlapping at 1, scratch spanning 2..=3. Largest-first packs two
     /// backing slots ({hdr, cascade}, {depth, scratch}), so every byte is
     /// shared and the submit proves aliasing structurally.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn exec_four() -> (CpuExecutor, Vec<TransientRow>) {
         let mut exec = CpuExecutor::new();
         exec.add_pass(CpuPassDesc::new("shadow", 64, 500_000), None);
@@ -995,10 +999,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn exec_window_submit_runs_passes_with_aliasing_clean() {
-        let Some((device, queue, info)) = exec_device() else {
-            eprintln!("SKIPPED exec window submit: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "exec_window_submit_runs_passes_with_aliasing_clean",
+            exec_device(),
+        ) else {
             return;
         };
         let (exec, rows) = exec_four();
@@ -1042,10 +1048,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn exec_twin_matches_cpu_draws() {
-        let Some((device, queue, _)) = exec_device() else {
-            eprintln!("SKIPPED exec twin: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("exec_twin_matches_cpu_draws", exec_device())
+        else {
             return;
         };
         let (mut exec, rows) = exec_four();
@@ -1072,10 +1079,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn exec_window_rejects_bad_span_before_sizing() {
-        let Some((device, queue, _)) = exec_device() else {
-            eprintln!("SKIPPED exec bad span: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "exec_window_rejects_bad_span_before_sizing",
+            exec_device(),
+        ) else {
             return;
         };
         let (exec, _) = exec_four();
@@ -1097,10 +1106,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn exec_invalid_frame_never_reports_unsupported() {
-        let Some((device, queue, _)) = exec_device() else {
-            eprintln!("SKIPPED exec invalid frame: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "exec_invalid_frame_never_reports_unsupported",
+            exec_device(),
+        ) else {
             return;
         };
         let (exec, rows) = exec_four();
@@ -1122,10 +1133,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn exec_window_timings_resolve_from_query_receipt() {
-        let Some((device, queue, _)) = exec_device() else {
-            eprintln!("SKIPPED exec gpu timings: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "exec_window_timings_resolve_from_query_receipt",
+            exec_device(),
+        ) else {
             return;
         };
         let (mut exec, rows) = exec_four();
@@ -1217,7 +1230,7 @@ mod tests {
     }
 
     /// Nearest-rank percentile of already-sorted samples; 0.0 when empty.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn percentile(sorted: &[f64], rank: usize) -> f64 {
         if sorted.is_empty() {
             return 0.0;
@@ -1231,12 +1244,14 @@ mod tests {
     /// read the QuerySet back and print per-pass p50/p99 GPU ms plus the frame
     /// total, naming the slowest pass. Without `TIMESTAMP_QUERY` the samples
     /// stay `None` and the test says so instead of printing a fake number.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn pass_timing_gpu_per_pass_p50_over_120_frames() {
         const FRAMES: u64 = 120;
-        let Some((device, queue, info)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED pass_timing gpu: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "pass_timing_gpu_per_pass_p50_over_120_frames",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let supported = timestamp_supported(device);

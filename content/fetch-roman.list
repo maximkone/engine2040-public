@@ -1,0 +1,60 @@
+# GS23: Roman and sound content (2026-10-23). Metadata scouted live: every
+# page was opened and every file's md5 is of the bytes that URL served on
+# 2026-10-23. Rows are licence-checked: CC0, or CC-BY 3.0 with the required
+# attribution text at the end of the row (the tool refuses a CC-BY row that
+# has none, and writes the text into the license sidecar). No NC, no ND.
+#
+# Format: <source> <id> <url> [md5] [license] [author] [attribution text]
+# (tools/fetch-content.mjs).
+#
+# --- 4 Roman props, glb (Poly Pizza, CC-BY 3.0) ---
+# Each model page states "Licence: CC-BY 3.0" and names the creator:
+#   Coliseum        poly.pizza/m/4raJTBfhAfc  Poly by Google  24,153 tris
+#   Roman Centurion poly.pizza/m/g2ckFsGszB  blaeksprut       2,346 tris
+#   roman legionnaire grunt poly.pizza/m/czyveAaJ0hd Warren Blyth 1,064 tris
+#   Roman Arch      poly.pizza/m/agiRDMN0VR  Icawfype        5,198 tris
+#     (the page's Tris field reads 0; the glb holds one mesh, 5,198 tris,
+#     5,198 x 3 indices, one material, no images - checked in the bytes.)
+# CC-BY 3.0 needs credit: the attribution text is part of the row.
+url pizza_coliseum https://static.poly.pizza/39e5f465-248d-45af-80d4-b46e676224c5.glb a5225ae8c54aabb85cfbe23cbe0899a0 CC-BY-3.0 Poly_by_Google "Coliseum" by Poly by Google, CC-BY 3.0 (https://creativecommons.org/licenses/by/3.0/), via Poly Pizza (https://poly.pizza/m/4raJTBfhAfc)
+url pizza_roman_centurion https://static.poly.pizza/7eadddb7-782a-429a-913d-c7447a9a316b.glb 0477ac0e23c5d718987d8e191d2de007 CC-BY-3.0 blaeksprut "Roman Centurion" by blaeksprut, CC-BY 3.0 (https://creativecommons.org/licenses/by/3.0/), via Poly Pizza (https://poly.pizza/m/g2ckFsGszB)
+url pizza_roman_legionnaire https://static.poly.pizza/6b4c9d2f-62da-4e85-8aad-ee14f7b39755.glb ec744972b64ececeac909da6ce7d457a CC-BY-3.0 Warren_Blyth "roman legionnaire grunt" by Warren Blyth, CC-BY 3.0 (https://creativecommons.org/licenses/by/3.0/), via Poly Pizza (https://poly.pizza/m/czyveAaJ0hd)
+url pizza_roman_arch https://static.poly.pizza/700f21f9-ec1d-4ffa-a722-5c80e57c5e88.glb 55b1d20bb0aa61e7b67fab51e8f9102f CC-BY-3.0 Icawfype "Roman Arch" by Icawfype, CC-BY 3.0 (https://creativecommons.org/licenses/by/3.0/), via Poly Pizza (https://poly.pizza/m/agiRDMN0VR)
+#
+# --- 6 Roman and crowd sounds (Freesound, CC0) ---
+# Each page states "Creative Commons 0" and names its uploader; the files
+# below are the public hq preview mp3s the page serves (cdn.freesound.org).
+# The original wav the row asks for comes from the API with FREESOUND_TOKEN
+# (OAuth2), which this seat does not have:
+#   freesound.org/apiv2/sounds/264377/ -> 401
+#   {"detail":"Authentication credentials were not provided."}
+# Swap each URL for its original download when a token lands; ids stay.
+#   small crowd cheering  264377 HowardV          freesound.org/s/264377/
+#   Crowd Cheer           397434 FoolBoyMedia     freesound.org/s/397434/
+#   Crowd Cheering Yahoo  511788 Kinoton          freesound.org/s/511788/
+#   Crowd Cheering        365132 SoundsExciting   freesound.org/s/365132/
+#   01 Rome, Colosseum Labicana ... 341684 alesonica (ambience), freesound.org/s/341684/
+#   02 Rome, Colosseum Fori ...     341687 alesonica (ambience), freesound.org/s/341687/
+url fs_crowd_small_264377 https://cdn.freesound.org/previews/264/264377_1654262-hq.mp3 e421bb60e91538c19aa2f15a554fc42f CC0 HowardV
+url fs_crowd_cheer_397434 https://cdn.freesound.org/previews/397/397434_4019029-hq.mp3 be9ff60f1cf8f1c66b0211fe7f8e514f CC0 FoolBoyMedia
+url fs_crowd_yahoo_511788 https://cdn.freesound.org/previews/511/511788_2247456-hq.mp3 d246350f62e54da20ee72ee8cb0d953c CC0 Kinoton
+url fs_crowd_exciting_365132 https://cdn.freesound.org/previews/365/365132_3279490-hq.mp3 6c385dbeff9e357317680eb6a4190675 CC0 SoundsExciting
+url fs_rome_labicana_341684 https://cdn.freesound.org/previews/341/341684_5272893-hq.mp3 7bea50927c12d7359e850175b6c06b41 CC0 alesonica
+url fs_rome_fori_341687 https://cdn.freesound.org/previews/341/341687_5272893-hq.mp3 45a0cbe00dd31d9cf1507672857a6ac9 CC0 alesonica
+#
+# --- 2 sword sound packs, zip (OpenGameArt, CC0) ---
+# opengameart.org/content/20-sword-sound-effects-attacks-and-clashes states
+# CC0 ("creativecommons.org/publicdomain/zero/1.0/") and StarNinjas as the
+# uploader: ten sword attacks and ten sword clashes, one zip each. The pack's
+# notice asks for a link to the author's profile; that is a request, not a
+# CC-BY condition, so the rows stay CC0.
+url oga_sword_attacks https://opengameart.org/sites/default/files/sword_-_starninjas_1.zip df2bdfa83a1751ff02d6e90c774b0bd4 CC0 StarNinjas
+url oga_sword_clashes https://opengameart.org/sites/default/files/sword_clash_-_starninjas_0.zip 3b82c7072f96dcec53d24072bf74a7b9 CC0 StarNinjas
+#
+# --- Sketchfab rows: none, by the row's own rule ---
+# The 7 CC-BY Sketchfab models (gladius b123c4388a6f4307aff353c165c94f92,
+# 7261d334924f4a9b835ef4b15c1e16d0, eeae43c837484f1b8f98acc60a7b2597;
+# Colosseum f9b800d747034c2d9908696c30b2338e, d9a8a96e16534bdab76be23c1f2c45fc,
+# 6459307c93e54394bed44b2583701dc6, 39e39dba81354367af36a4b975dd06aa) are
+# skipped: no SKETCHFAB_TOKEN on this seat, and the download API answers 401
+# {"detail":"Authentication credentials were not provided."}

@@ -47,9 +47,9 @@ engine-clock = { version = "0.1.0", path = "../clock" }
 # wgpu's web backend already pulls (Cargo.lock); tools/web-build.mjs runs the wasm-bindgen CLI
 # at the locked wasm-bindgen version.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# WEB5: the render crate's presenter draws the arena frame. Browser build only, so the native
-# workspace still builds this crate as a library of pure modules with no GPU stack.
-engine-render = { workspace = true, features = ["window"] }
+# WEB5: the render crate's presenter draws the arena frame. The `gpu` lane builds for
+# wasm32 and keeps the native event loop (winit) out of the page graph.
+engine-render = { workspace = true, features = ["gpu"] }
 # WEB15: the page plays the same match the native window does (`App`, the fixed tick and the
 # fight draw helpers). Browser build only, so the native workspace keeps this crate free of
 # the game stack.
@@ -63,6 +63,12 @@ web-sys = { version = "0.3", features = [
     "AudioDestinationNode",
     "AudioNode",
     "AudioProcessingEvent",
+    "AudioWorklet",
+    "AudioWorkletNode",
+    "AudioWorkletNodeOptions",
+    "BaseAudioContext",
+    "Blob",
+    "BlobPropertyBag",
     "Document",
     "Element",
     "Event",
@@ -73,12 +79,16 @@ web-sys = { version = "0.3", features = [
     "HtmlElement",
     "KeyboardEvent",
     "Location",
+    "MessageEvent",
+    "MessagePort",
     "MouseEvent",
     "Navigator",
     "Performance",
     "Request",
     "Response",
     "ScriptProcessorNode",
+    "Url",
     "Window",
+    "Worklet",
     "console",
 ] }

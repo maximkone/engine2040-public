@@ -59,11 +59,20 @@ pub const STYLE100: SourceInfo = SourceInfo {
     note: "Motions only with credit; the Geno.fbx mesh is non-commercial and never ships.",
 };
 
+/// OGA "Modular RPG Characters" by System G6 (CC0): the CT7 fighter clips.
+pub const SYSTEM_G6: SourceInfo = SourceInfo {
+    id: "system_g6",
+    url: "https://opengameart.org/content/modular-rpg-characters",
+    license: "CC0-1.0",
+    note: "CT7 fighter body and clips; synthetic attack stand-ins here, no donor bytes.",
+};
+
 /// Look up a source by registry id; unknown ids are refused, never guessed.
 pub fn source_by_id(id: &str) -> Result<&'static SourceInfo, BakeError> {
     match id {
         "quaternius" => Ok(&QUATERNIUS),
         "100style" => Ok(&STYLE100),
+        "system_g6" => Ok(&SYSTEM_G6),
         _ => Err(BakeError::UnknownSource { name: bound(id) }),
     }
 }
@@ -132,7 +141,7 @@ impl From<MatchError> for BakeError {
 }
 
 /// Truncate a diagnostic to [`MAX_NAME_CHARS`] chars.
-fn bound(text: &str) -> String {
+pub(crate) fn bound(text: &str) -> String {
     if text.chars().count() <= MAX_NAME_CHARS {
         text.to_string()
     } else {
@@ -142,7 +151,7 @@ fn bound(text: &str) -> String {
 
 /// Token charset shared with the clip sidecar schema: ASCII alphanumerics
 /// plus `_`, no leading digit, within [`MAX_NAME_CHARS`].
-fn valid_token(text: &str) -> bool {
+pub(crate) fn valid_token(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= MAX_NAME_CHARS
         && !text.as_bytes()[0].is_ascii_digit()

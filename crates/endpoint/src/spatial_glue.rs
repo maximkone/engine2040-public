@@ -3,7 +3,10 @@
 
 /// Y yaw extracted from a world quaternion (`[x, y, z, w]` like Transform).
 /// Identity reads zero; pure-Y rotations read their angle exactly. The caller
-/// guarantees finite lanes.
+/// guarantees finite lanes. Test-only: the one scene adapter
+/// ([`engine_editor::spatial_view`]) carries yaw now, so production code never
+/// reads a quaternion back.
+#[cfg(test)]
 pub(crate) fn yaw_of_quat(q: [f32; 4]) -> f32 {
     let [x, y, z, w] = q;
     (2.0 * (w * y + x * z)).atan2(1.0 - 2.0 * (y * y + z * z))

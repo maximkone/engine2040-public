@@ -154,6 +154,12 @@ impl<K: Ord + Clone, V> CpuCache<K, V> {
         self.map.get(key)
     }
 
+    /// Look up a resident value for in-place update (the LF5 previous
+    /// position copy after a mesh refresh). Never inserts, never reorders.
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.map.get_mut(key)
+    }
+
     /// Drop one key; true when it was resident. Manual drops count toward
     /// the eviction telemetry so the receipt names the asset either way.
     pub fn evict(&mut self, key: &K) -> bool {

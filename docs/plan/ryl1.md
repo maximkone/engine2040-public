@@ -19,9 +19,10 @@ Status: plan only. Rows are not on the board. Tagged LATER in the index.
 | deterministic tick and replay | implemented, proven | golden `d57b5c8ae3096614`, `docs/HASH-LAW.md` |
 | server-authoritative net, rollback, snapshots | integrated for the duel | `crates/net`, `engine-net`; row ON30 open |
 | AI seats filling empty slots | implemented for the arena | `crates/game`, `crates/nn`; DP1/RB1 |
-| projectiles and thrown weapons in the tick | partial | physics and `physfx`; spear row, no generic bolt |
-| class data in a sandbox | partial | `crates/rules` Rhai, hashed; no class sheets |
-| territory or capture state | missing | no owner in the tree |
+| projectiles and thrown weapons in the tick | landed in the tick | `crates/combat` flight rows plus `projectile_hit` events; RY3 |
+| class data in a sandbox | landed in data | `content/classes/` 20 sheets, loader and gates; hashed into the match: RY2 |
+| territory or capture state | implemented, unit-tested | `crates/world` capture; RY4 |
+| 6v6 match loop, score and clock | implemented, unit-tested | `crates/game` `faction_match` fires the class volleys through `projectile_hit`; RY5 |
 | character persistence | partial | `crates/save`; no account model |
 | HUD for capture, cooldown, party | missing | UI parked |
 
@@ -54,8 +55,9 @@ different silhouettes.
 
 Three classes at Tier A: Knight (melee, gap closer), Archer (projectile,
 range band), Sorcerer (slow bolt, area denial). Class sheets are data in
-`crates/rules`, hashed with the match: cooldowns, damage, range bands, cast
-time. No class logic in Rust beyond the generic verb.
+`content/classes/`, loaded by `crates/game` `class_sheet` and hashed with the
+match: cooldowns, damage, range bands, cast time. No class logic in Rust
+beyond the generic verb.
 
 Combat stays inside the tick. A projectile is a sim entity with position,
 velocity and an owner; presentation interpolates, physics predicts, the tick
@@ -65,10 +67,10 @@ Capture is state, not UI. Each point has an owner, a contest count and a
 progress integer. The score tick reads points, never players. This keeps the
 hash small and the rule testable headless.
 
-Ownership: `crates/combat` owns the exchange, `crates/rules` owns the sheets,
-`crates/world` owns the point state, `crates/net` owns replication,
-`crates/game` owns the match loop and the seats. No new engine crate for the
-game itself; content and rules carry it.
+Ownership: `crates/combat` owns the exchange, `crates/game` owns the sheets
+and the match loop and the seats, `crates/world` owns the point state,
+`crates/net` owns replication. No new engine crate for the game itself;
+content carries it.
 
 Determinism: integers and fixed math only in the tick, stable iteration order,
 no float accumulation in capture progress.
@@ -78,7 +80,7 @@ no float accumulation in capture progress.
 | problem | technique | why | reference | donor |
 |---|---|---|---|---|
 | projectile hits agree in replay | fixed-step integration, hit as event | a render-time ray gives two answers on two PCs | `docs/HASH-LAW.md` | own |
-| class sheets stay data | Rhai tables, hashed into the match | lets an AI or a designer tune without a rebuild | `crates/rules` | own |
+| class sheets stay data | JSON class files, hashed into the match | lets an AI or a designer tune without a rebuild | `crates/game` `class_sheet` | own |
 | capture stays readable at 32v32 | one integer per point, score from points | player-count scans blow the snapshot budget | `crates/world` | own |
 | AI seats do not feel like bots | seat policy reads sim state, same verbs as a player | an AI that cheats breaks the proof | `crates/nn`, DP1 | own |
 | 12v12 snapshot cost | interest management by cell | the duel budget does not scale linearly | `crates/net` | lightyear |
@@ -109,23 +111,28 @@ the spec, not a queue.
   Size M. Owns `content/faction-war/`. Accept: the map loads headless, the
   three points report their positions and radii, and a screenshot shows the
   ring markers. needs: none.
-- [ ] RY2 rules: three class sheets in data (Knight, Archer, Sorcerer) with
+- [x] RY2 rules: three class sheets in data (Knight, Archer, Sorcerer) with Landed 1adb7366.
   cooldowns, damage, range bands and cast time, hashed into the match.
-  Size M. Owns `crates/rules` sheets and `content/faction-war/classes.rhai`.
+  Size M. Lands in `crates/game` `class_sheet` over `content/classes/` (the
+  plan named `crates/rules` sheets and a `.rhai`; the tree went to JSON class
+  files) and is hashed by `crates/game` `faction_match`.
   Accept: a headless test changes a sheet value and the match hash changes;
   the same sheet twice gives the same hash. needs: none.
-- [ ] RY3 combat: a projectile entity that flies in the tick and resolves a
+- [x] RY3 combat: a projectile entity that flies in the tick and resolves a Landed 114cd3ac.
   hit as an event. Size M. Owns `crates/combat` projectile module. Accept:
   a scripted shot at a moving target gives the same hit tick on two runs and
   on wasm; the render thread reads the event, never decides it. needs: RY2.
-- [ ] RY4 world: capture point state machine (owner, contest count, progress,
+- [x] RY4 world: capture point state machine (owner, contest count, progress, Landed 0d182bd9.
   score tick) with no player scan. Size S. Owns `crates/world` capture module.
   Accept: a headless 10-minute match with scripted occupancy ends with the
   expected score and the same hash twice. needs: RY1.
-- [ ] RY5 game: 6v6 match loop with two AI seats per side, faction asymmetry
-  and a win condition. Size L. Owns `crates/game` faction mode. Accept: a
-  played match ends by score or time; four AI seats act without a model in
-  replay; hash equal twice. needs: RY2, RY3, RY4.
+- [x] RY5 game: 6v6 match loop with two AI seats per side, faction asymmetry Landed 1adb7366.
+  and a win condition. Size L. Lands in `crates/game` `faction_match` (the
+  plan named a faction mode; the module is the match loop itself) and fires
+  each seat's class projectile through `crates/combat` `projectile_hit`: a hit
+  is an event and a faction count, not damage, and a class with no projectile
+  row never fires. Accept: a played match ends by score or time; four AI seats
+  act without a model in replay; hash equal twice. needs: RY2, RY3, RY4.
 - [ ] RY6 net: 6v6 snapshot budget with interest by cell. Size M. Owns
   `crates/net` scale path. Accept: six clients on one server, snapshot under
   900 bytes per player per second, no desync in a 10-minute soak. needs: RY5.

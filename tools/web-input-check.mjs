@@ -12,6 +12,11 @@
 //     `tick` line (window.inputSample), and the tape it gives must equal, byte for byte and in digest, the one the native
 //     `input_tape` bin printed for the same script (--native-tape names its output). Without --native-tape the browser tape is
 //     printed and the run says it was NOT COMPARED.
+//  6. The AudioWorklet sink (A5): the receipt is `audio: state=running underruns=<n>`, `#audioworklet` says path=worklet, the ring
+//     is primed with six blocks and keeps growing (the audio thread consumes), and the scripted fight's six cues start six
+//     voices in the page's own mixer (window.audioCueCheck).
+//  7. The forced fallback (A5): a second load at ?worklet=broken must print `worklet=fallen-back reason="<browser error>"`
+//     with the missing module's 404, take path=script, and play the same six cues there.
 // The pad count is not driven here (Chrome cannot fake a gamepad over CDP); crates/web/src/input.rs tests it.
 // Only loopback is served and visited. The Chrome process started here is ours and is closed here.
 // Exit: 0 proven, 1 a proof failed, 2 could not run (no Chrome, bad arguments, no page).
@@ -21,7 +26,11 @@ import { fnv1a64Hex } from "./fnv1a64.mjs";
 import { BASE_FLAGS, FLAG_SETS, launchChrome, serve } from "./web-browse.mjs";
 
 export const INPUT_LINE = /^input: kb=(\d+) mouse=(\d+) pad=(\d+)$/;
-export const AUDIO_LINE = /^audio: state=(suspended|running)$/;
+// A5: the receipt keeps `audio: state=<s> underruns=<n>`; a fallback adds `worklet=` and a quoted
+// `reason=`. Fields may follow in any order (the page writes them in a fixed one).
+export const AUDIO_LINE = /^audio: state=(suspended|running)((?: (?:worklet=[a-z-]+|reason="[^"]*"|underruns=\d+))*)$/;
+export const PATH_LINE = /^audio: path=(worklet|script|none)((?: (?:blocks=\d+|reason="[^"]*"|underruns=\d+))*)$/;
+export const CUE_LINE = /^audio: cues expected=(\d+) played=(\d+) culled=(\d+) rejected=(\d+)$/;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -30,9 +39,57 @@ export function parseInput(text) {
   const m = INPUT_LINE.exec(String(text ?? "").trim());
   return m ? { kb: Number(m[1]), mouse: Number(m[2]), pad: Number(m[3]) } : null;
 }
+
+// The fields of one `key=value` tail. `grammar` maps a field name to a pattern for its value;
+// a field outside the grammar makes the whole line null (a typo must never pass as proof).
+function parseFields(rest, grammar) {
+  const out = {};
+  let left = rest;
+  while (left) {
+    const m = /^ ([a-z]+)=("([^"]*)"|([^ ]+))/.exec(left);
+    if (!m || !Object.hasOwn(grammar, m[1])) return null;
+    const quoted = m[3] !== undefined;
+    // Only a reason carries quotes; every other field is a bare word.
+    if (quoted !== (m[1] === "reason")) return null;
+    const value = quoted ? m[3] : m[4];
+    if (!new RegExp(`^(?:${grammar[m[1]]})$`).test(value)) return null;
+    out[m[1]] = value;
+    left = left.slice(m[0].length);
+  }
+  return out;
+}
+
+// { state, worklet, reason, underruns } of the audio receipt, or null. `underruns` is null until
+// the sink exists (the bare `audio: state=suspended` before the first gesture).
 export function parseAudio(text) {
   const m = AUDIO_LINE.exec(String(text ?? "").trim());
-  return m ? m[1] : null;
+  const fields = m && parseFields(m[2] ?? "", { worklet: "[a-z-]+", reason: '[^"]*', underruns: "\\d+" });
+  if (!fields) return null;
+  return {
+    state: m[1],
+    worklet: fields.worklet ?? null,
+    reason: fields.reason ?? null,
+    underruns: fields.underruns === undefined ? null : Number(fields.underruns),
+  };
+}
+
+// { path, blocks, reason, underruns } of the `#audioworklet` line, or null.
+export function parsePath(text) {
+  const m = PATH_LINE.exec(String(text ?? "").trim());
+  const fields = m && parseFields(m[2] ?? "", { blocks: "\\d+", reason: '[^"]*', underruns: "\\d+" });
+  if (!fields) return null;
+  return {
+    path: m[1],
+    blocks: fields.blocks === undefined ? null : Number(fields.blocks),
+    reason: fields.reason ?? null,
+    underruns: fields.underruns === undefined ? null : Number(fields.underruns),
+  };
+}
+
+// { expected, played, culled, rejected } of the mixer's cue proof, or null.
+export function parseCues(text) {
+  const m = CUE_LINE.exec(String(text ?? "").trim());
+  return m ? { expected: Number(m[1]), played: Number(m[2]), culled: Number(m[3]), rejected: Number(m[4]) } : null;
 }
 
 // CDP commands for one key press (down then up). `vk` is the Windows virtual key code Chrome wants.
@@ -132,6 +189,14 @@ export const READ_JS = `(() => ({
   state: document.body.dataset.state ?? null,
 }))()`;
 
+// A5: the sink receipt, the ring line, the cue proof the page holds, and whether listeners are installed.
+export const AUDIO_JS = `(() => ({
+  audio: document.getElementById('audio')?.textContent ?? null,
+  path: document.getElementById('audioworklet')?.textContent ?? null,
+  cues: document.body.dataset.audioCues ?? null,
+  context: document.body.dataset.audioContext ?? null,
+}))()`;
+
 // The checks over the four reads (before, after Escape, after the key press, after the click). Returns the
 // problems found; an empty list is a pass.
 export function verdict({ before, escape, keys, click }) {
@@ -145,16 +210,74 @@ export function verdict({ before, escape, keys, click }) {
   }
   if (problems.length) return problems;
   const i = (r) => parseInput(r.input);
+  const a = (r) => parseAudio(r.audio).state;
   need(i(before).kb === 0 && i(before).mouse === 0 && i(before).pad === 0, `before any event the counts must be 0: ${before.input}`);
-  need(parseAudio(before.audio) === "suspended", `before a gesture the audio must be suspended: ${before.audio}`);
+  need(a(before) === "suspended", `before a gesture the audio must be suspended: ${before.audio}`);
   need(before.context === "none", `an AudioContext exists before any gesture (data-audio-context=${before.context})`);
   need(i(escape).kb === 2, `Escape down and up must count 2 key events: ${escape.input}`);
   need(escape.context === "none", `Escape started the audio context (data-audio-context=${escape.context}); it is not a user activation`);
-  need(parseAudio(escape.audio) === "suspended", `audio must still be suspended after Escape: ${escape.audio}`);
+  need(a(escape) === "suspended", `audio must still be suspended after Escape: ${escape.audio}`);
   need(i(keys).kb === 4, `W down and up must bring kb to 4: ${keys.input}`);
   need(keys.context === "created", `the key press did not create the audio context (data-audio-context=${keys.context})`);
   need(i(click).mouse >= 2, `a click must count at least 2 mouse events (press, release): ${click.input}`);
-  need(parseAudio(click.audio) === "running", `after a key press and a click the audio must be running: ${click.audio}`);
+  need(a(click) === "running", `after a key press and a click the audio must be running: ${click.audio}`);
+  return problems;
+}
+
+// A5: the worklet path. The receipt must be the exact `audio: state=running underruns=<n>`, the ring
+// line must name the worklet, the ring must be primed, and `later` (a second read about a second on)
+// must show more blocks: the audio thread consumed what the mixer rendered.
+export function workletVerdict({ receipt, later }) {
+  const problems = [];
+  const audio = parseAudio(receipt?.audio);
+  if (!audio) return [`the worklet receipt is not an audio line: ${JSON.stringify(receipt?.audio)}`];
+  if (audio.state !== "running") problems.push(`the worklet receipt is ${audio.state}, not running: ${receipt.audio}`);
+  if (audio.worklet !== null) problems.push(`the page fell back instead of running the worklet: ${receipt.audio}`);
+  if (audio.underruns === null) problems.push(`the worklet receipt has no counted underruns: ${receipt.audio}`);
+  const path = parsePath(receipt.path);
+  if (!path) return [...problems, `#audioworklet is not a path line: ${JSON.stringify(receipt?.path)}`];
+  if (path.path !== "worklet") problems.push(`#audioworklet says path=${path.path}, not worklet: ${receipt.path}`);
+  if (path.blocks === null || path.blocks < 6) problems.push(`the ring was not primed with the page's six blocks: ${receipt.path}`);
+  if (path.underruns !== null && audio.underruns !== null && path.underruns !== audio.underruns) {
+    problems.push(`the receipt and the path line disagree on underruns: ${audio.underruns} / ${path.underruns}`);
+  }
+  const grown = parsePath(later?.path);
+  if (!grown || grown.blocks === null || path.blocks === null || grown.blocks <= path.blocks) {
+    problems.push(`the worklet did not consume the ring: blocks ${path.blocks} -> ${grown?.blocks ?? "no later read"}`);
+  }
+  return problems;
+}
+
+// A5: the scripted fight through the page's own mixer: every queued cue started a voice, none was
+// culled or refused. The numbers are the mixer's own counters, not the page's.
+export function cueVerdict(line) {
+  const p = parseCues(line);
+  if (!p) return [`the cue check gave no counts: ${JSON.stringify(line)}`];
+  const problems = [];
+  if (p.expected !== 6) problems.push(`the script queues 6 cues, the mixer expected ${p.expected}: ${line}`);
+  if (p.played !== p.expected) problems.push(`the mixer started ${p.played} of ${p.expected} cues: ${line}`);
+  if (p.culled !== 0) problems.push(`${p.culled} scripted cues were culled: ${line}`);
+  if (p.rejected !== 0) problems.push(`${p.rejected} scripted cues were rejected: ${line}`);
+  return problems;
+}
+
+// A5: the forced fallback (`?worklet=broken`). The receipt keeps `state=running` and `underruns=`,
+// names `worklet=fallen-back`, and the reason is the browser's own refusal of the missing module.
+// The script node plays the same mixer, so the cue proof must pass there too.
+export function fallbackVerdict({ receipt, cues }) {
+  const problems = [];
+  const audio = parseAudio(receipt?.audio);
+  if (!audio) return [`the fallback receipt is not an audio line: ${JSON.stringify(receipt?.audio)}`];
+  if (audio.state !== "running") problems.push(`the fallback receipt is ${audio.state}, not running: ${receipt.audio}`);
+  if (audio.worklet !== "fallen-back") problems.push(`the page did not name the fallback: ${receipt.audio}`);
+  if (!audio.reason) problems.push(`the fallback printed no reason: ${receipt.audio}`);
+  else if (!/404/.test(audio.reason) || !/audio-worklet-missing\.js/.test(audio.reason)) {
+    problems.push(`the fallback reason is not the browser's 404 for the missing module: ${receipt.audio}`);
+  }
+  if (audio.underruns === null) problems.push(`the fallback receipt has no counted underruns: ${receipt.audio}`);
+  const path = parsePath(receipt.path);
+  if (path?.path !== "script") problems.push(`#audioworklet says ${path?.path ?? "nothing"}, not script: ${receipt.path}`);
+  problems.push(...cueVerdict(cues).map((p) => `the script path: ${p}`));
   return problems;
 }
 
@@ -240,20 +363,67 @@ export async function main(argv) {
     for (let t0 = Date.now(); Date.now() - t0 < 5000; ) {
       await sleep(250);
       click = await evalJs(READ_JS);
-      if (parseAudio(click.audio) === "running") break;
+      if (parseAudio(click.audio)?.state === "running") break;
     }
     const problems = verdict({ before, escape, keys, click });
+    // A5: the worklet receipt, the ring it pulls, and the scripted fight through the page's mixer.
+    let worklet = await evalJs(AUDIO_JS);
+    for (let t0 = Date.now(); parseAudio(worklet?.audio)?.underruns === null && Date.now() - t0 < 15000; ) {
+      await sleep(250);
+      worklet = await evalJs(AUDIO_JS);
+    }
+    let later = worklet;
+    const startBlocks = parsePath(worklet?.path)?.blocks ?? null;
+    for (let t0 = Date.now(); Date.now() - t0 < 5000; ) {
+      await sleep(500);
+      later = await evalJs(AUDIO_JS);
+      const blocks = parsePath(later?.path)?.blocks ?? null;
+      if (startBlocks !== null && blocks !== null && blocks > startBlocks) break;
+    }
+    problems.push(...workletVerdict({ receipt: worklet, later }));
+    const cueLine = await evalJs("window.audioCueCheck?.() ?? null").catch(() => null);
+    problems.push(...cueVerdict(cueLine));
     // WEB7: the input tape of the script, against the native one.
     const tape = await replayTape({ script: a.script, native: a.nativeTape, send, evalJs });
     problems.push(...tape.problems);
+    // A5: the forced worklet failure. A second load asks for a module that does not exist; the
+    // receipt must carry the browser's own reason and the script node must play the same mixer.
+    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${server.port}/index.html?worklet=broken` });
+    let forced = null;
+    for (let t0 = Date.now(); Date.now() - t0 < 60000; ) {
+      await sleep(250);
+      try { forced = await evalJs(AUDIO_JS); } catch { forced = null; }
+      if (forced?.context) break;
+    }
+    let fallback = null;
+    let fallbackCues = null;
+    if (!forced?.context) {
+      problems.push("the ?worklet=broken page never installed input and audio (no data-audio-context in 60 s)");
+    } else {
+      await send(clickCommands(640, 360));
+      for (let t0 = Date.now(); Date.now() - t0 < 15000; ) {
+        await sleep(250);
+        try { fallback = await evalJs(AUDIO_JS); } catch { fallback = null; }
+        if (parseAudio(fallback?.audio)?.worklet === "fallen-back") break;
+      }
+      fallbackCues = await evalJs("window.audioCueCheck?.() ?? null").catch(() => null);
+      problems.push(...fallbackVerdict({ receipt: fallback, cues: fallbackCues }));
+    }
     if (exceptions.length) problems.push(`uncaught exceptions: ${exceptions.join(" | ")}`);
-    const record = { before, escape, keys, click, tape: tape.record, exceptions, problems };
+    const record = {
+      before, escape, keys, click, worklet, later, cueLine, tape: tape.record,
+      forced, fallback, fallbackCues, exceptions, problems,
+    };
     writeFileSync(join(out, "input-audio.json"), `${JSON.stringify(record, null, 2)}\n`);
     for (const [name, x] of Object.entries({ before, escape, keys, click })) console.log(`${name.padEnd(7)} ${x.input} | ${x.audio} | context=${x.context} gestures=${x.gestures}`);
+    console.log(`worklet ${worklet?.audio ?? "none"} | ${worklet?.path ?? "none"}`);
+    console.log(`cues    ${cueLine ?? "none"}`);
+    console.log(`fallback ${fallback?.audio ?? "none"} | ${fallback?.path ?? "none"}`);
+    console.log(`cues    ${fallbackCues ?? "none"} (script path)`);
     console.log(tape.say);
-    const summary = problems.length ? `FAILED - ${problems.join("; ")}` : "OK (no context before a gesture, Escape is not one, a key press starts it, a click leaves it running)";
+    const summary = problems.length ? `FAILED - ${problems.join("; ")}` : "OK (no context before a gesture, Escape is not one, a key press starts it, the worklet pulls the mixer's ring, every scripted cue plays, the forced failure prints its reason)";
     console.log(`input and audio: ${summary}`);
-    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### web-input-check\n\`\`\`\n${click.input}\n${click.audio}\n\`\`\`\n${summary}\n`);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### web-input-check\n\`\`\`\n${click.input}\n${click.audio}\n${worklet?.audio}\n${worklet?.path}\n${cueLine}\n${fallback?.audio}\n\`\`\`\n${summary}\n`);
     return problems.length ? 1 : 0;
   } catch (e) {
     console.error(`web-input-check: ${e.message ?? e}`);

@@ -27,6 +27,8 @@ mod intmath;
 pub mod isovist;
 /// Integer-cm 3D k-d tree: median-split nearest and k-neighbor queries.
 pub mod kdtree;
+/// Light reach: is a point lit by any light, dark, or unknown (SP66).
+pub mod light;
 /// Surface gap, push direction and pairwise measure (SPF4, SPX11).
 pub mod measure;
 pub mod navcheck;
@@ -73,6 +75,9 @@ pub use frame::{frame_fit, FrameError, FrameFit, View, MIN_DISTANCE_CM};
 pub use index::{
     density_grid, nearest, overlap_pairs, pos_known, size_known, sweep_pairs, to_cm, xyz_pairs,
     CmRect,
+};
+pub use light::{
+    cm_of, distance_cm, point_lit, reach_report, LightFamily, Lit, Reach, ReachLight, ReachReport,
 };
 pub use navcheck::{Door, NavView, Tile};
 pub use place::{

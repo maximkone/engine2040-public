@@ -21,6 +21,9 @@
 //!   buckets up. The buckets are the eight names SWE-bench uses, kept as they
 //!   are so a reader can compare our numbers with theirs.
 //!
+//! A build that answers no check is `incomplete`, never `resolved`: the rule
+//! is that no check is not a pass.
+//!
 //! Errors: [`VerifyError`], one named variant per refusal. Budget: at most
 //! [`MAX_CHECK_ROWS`] rows per check and [`MAX_INSTANCES`] instances per
 //! report, so a report never grows without bound.
@@ -39,6 +42,10 @@ pub const MAX_INSTANCES: usize = 256;
 pub const VERDICT_PASS: &str = "pass";
 /// The verdict of one check that did not hold.
 pub const VERDICT_FAIL: &str = "fail";
+
+/// The rule a build with no checks answers with. A build that ran no check is
+/// not a pass, so it lands in the `incomplete` bucket and says why.
+pub const NO_CHECK: &str = "no check is not a pass";
 
 /// The eight per-instance buckets, in the order the SWE-bench report lists
 /// them. A bucket is the kind of outcome, not a score.
@@ -224,18 +231,36 @@ impl RunReport {
             .collect();
     }
 
-    /// The roll-up as text: one line per bucket with its count, then the
-    /// totals.
+    /// One summary line with every bucket count and the totals.
+    #[must_use]
+    pub fn summary_line(&self) -> String {
+        let mut text = String::from("buckets:");
+        for (bucket, count) in &self.bucket_counts {
+            text.push_str(&format!(" {bucket}={count}"));
+        }
+        text.push_str(&format!(" total={} resolved={}", self.total, self.resolved));
+        text
+    }
+
+    /// The report as text: one verdict line per instance, then the bucket
+    /// summary line.
     #[must_use]
     pub fn to_text(&self) -> String {
-        let mut out = String::from("instance buckets:\n");
-        for (bucket, count) in &self.bucket_counts {
-            out.push_str(&format!("{bucket}: {count}\n"));
+        let mut out = String::new();
+        for verdict in &self.instances {
+            out.push_str(&format!(
+                "instance={} bucket={} failed={}",
+                verdict.instance,
+                verdict.bucket,
+                verdict.failed_checks.len()
+            ));
+            if !verdict.detail.is_empty() {
+                out.push_str(&format!(" detail={}", verdict.detail));
+            }
+            out.push('\n');
         }
-        out.push_str(&format!(
-            "total: {}\nresolved: {}\n",
-            self.total, self.resolved
-        ));
+        out.push_str(&self.summary_line());
+        out.push('\n');
         out
     }
 }
@@ -248,6 +273,9 @@ impl RunReport {
 /// at all is `infra_failure`.
 #[must_use]
 pub fn grade(instance: &str, checks: &[CheckRow]) -> InstanceVerdict {
+    if checks.is_empty() {
+        return InstanceVerdict::in_bucket(instance, "incomplete", NO_CHECK);
+    }
     let failed: Vec<&CheckRow> = checks.iter().filter(|row| !row.passed()).collect();
     if failed.is_empty() {
         return InstanceVerdict::resolved(instance, checks);
@@ -280,12 +308,13 @@ pub struct Task {
     pub checks: Vec<CheckRow>,
 }
 
-/// The door's own build tasks, each with the checks its verb answers when the
-/// build lands.
+/// A three-task fixture for the report shape: the same ids and check names
+/// the door's build verbs use, with every check already held.
 ///
-/// Three tasks, one reward each: the shape is the donor's, the content is
-/// this engine's. A build that refused answers with its own failing rows
-/// instead, and the same grader reads both.
+/// The live checks come from the verbs themselves (`level.build`,
+/// `game.build`, `sim.build_encounter`), which answer their own rows. This
+/// fixture lets a unit test exercise the grader and the roll-up without
+/// running a build.
 #[must_use]
 pub fn engine_tasks() -> Vec<Task> {
     vec![
@@ -364,17 +393,21 @@ impl VerifyBlock {
     #[must_use]
     pub fn of(instance: &str, checks: &[CheckRow]) -> Self {
         let verdict = grade(instance, checks);
-        let rows: Vec<String> = checks
-            .iter()
-            .take(MAX_CHECK_ROWS)
-            .map(|row| {
-                if row.reason.is_empty() {
-                    format!("{}={}", row.name, row.verdict)
-                } else {
-                    format!("{}={}:{}", row.name, row.verdict, row.reason)
-                }
-            })
-            .collect();
+        let rows: Vec<String> = if checks.is_empty() {
+            vec![format!("checks=fail:{NO_CHECK}")]
+        } else {
+            checks
+                .iter()
+                .take(MAX_CHECK_ROWS)
+                .map(|row| {
+                    if row.reason.is_empty() {
+                        format!("{}={}", row.name, row.verdict)
+                    } else {
+                        format!("{}={}:{}", row.name, row.verdict, row.reason)
+                    }
+                })
+                .collect()
+        };
         Self {
             instance: instance.to_owned(),
             bucket: verdict.bucket,
@@ -396,6 +429,28 @@ impl VerifyBlock {
             text.push_str(line);
         }
         text
+    }
+
+    /// The full report a build verb carries: the instance verdict line, the
+    /// bucket line, one check per line and the bucket-count summary.
+    ///
+    /// The wire text stays one string field on the tool schema, so the door
+    /// pays for one string per build tool and not for a nested object.
+    #[must_use]
+    pub fn wire_report(&self) -> String {
+        let mut report = RunReport::new();
+        report.add(InstanceVerdict {
+            instance: self.instance.clone(),
+            bucket: self.bucket.clone(),
+            failed_checks: self.failed_checks(),
+            detail: String::new(),
+        });
+        format!(
+            "instance={}\n{}\n{}",
+            self.instance,
+            self.wire(),
+            report.summary_line()
+        )
     }
 
     /// True when every check held.
@@ -495,7 +550,7 @@ mod tests {
 
     #[test]
     fn verify_task_grades_every_task_once_without_a_judge() {
-        // The door's own build tasks, each judged by named checks.
+        // The three-task fixture, each judged by named checks.
         let tasks = engine_tasks();
         assert_eq!(tasks.len(), 3, "the door has three build tasks");
         let report = run_tasks(&tasks);
@@ -602,8 +657,22 @@ mod tests {
         assert_eq!(find("infra_failure"), 1);
         assert_eq!(find("error"), 0);
         let text = report.to_text();
-        assert!(text.contains("resolved: 1"), "{text}");
-        assert!(text.contains("total: 3"), "{text}");
+        assert!(text.contains("resolved=1"), "{text}");
+        assert!(text.contains("total=3"), "{text}");
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("instance="))
+                .count(),
+            3,
+            "one verdict line per instance: {text}"
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("buckets:"))
+                .count(),
+            1,
+            "one summary line: {text}"
+        );
     }
 
     #[test]
@@ -657,5 +726,93 @@ mod tests {
         assert_eq!(empty.code(), "bad_instance");
         let long = check_instance(&"x".repeat(MAX_INSTANCE_CHARS + 1)).expect_err("long refuses");
         assert_eq!(long.code(), "bad_instance");
+    }
+
+    #[test]
+    fn verify_task_zero_checks_is_not_a_pass() {
+        // The rule: a build that ran no check is incomplete, not resolved.
+        let verdict = grade("level.build", &[]);
+        assert_eq!(verdict.bucket, "incomplete");
+        assert!(!verdict.is_resolved());
+        assert_eq!(verdict.detail, NO_CHECK);
+        // The build verb's wire text says the rule to the agent.
+        let block = VerifyBlock::of("level.build", &[]);
+        assert_eq!(block.bucket, "incomplete");
+        assert!(!block.passed());
+        assert!(
+            block.wire().contains(NO_CHECK),
+            "the wire names the rule: {}",
+            block.wire()
+        );
+        let report = run_tasks(&[Task {
+            id: "level.build".to_owned(),
+            checks: Vec::new(),
+        }]);
+        assert_eq!(report.resolved, 0, "a no-check run did not resolve");
+        let incomplete = report
+            .bucket_counts
+            .iter()
+            .find(|(bucket, _)| bucket == "incomplete")
+            .map(|(_, count)| *count);
+        assert_eq!(incomplete, Some(1));
+    }
+
+    #[test]
+    fn verify_task_prints_one_verdict_per_instance_and_the_bucket_summary() {
+        // One landed task, one failing task and one that ran no check: the
+        // report prints one verdict line each and one bucket summary.
+        let tasks = vec![
+            Task {
+                id: "level.build".to_owned(),
+                checks: vec![CheckRow::pass("level.solved", "level.build")],
+            },
+            Task {
+                id: "game.build".to_owned(),
+                checks: checks(),
+            },
+            Task {
+                id: "sim.build.encounter".to_owned(),
+                checks: Vec::new(),
+            },
+        ];
+        let report = run_tasks(&tasks);
+        let text = report.to_text();
+        println!("verify_task report:\n{text}");
+        assert_eq!(report.total, 3);
+        assert_eq!(report.resolved, 1);
+        let verdicts: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("instance="))
+            .collect();
+        assert_eq!(verdicts.len(), 3, "one verdict line per instance");
+        assert!(verdicts[0].contains("bucket=resolved"), "{}", verdicts[0]);
+        assert!(verdicts[1].contains("bucket=unresolved"), "{}", verdicts[1]);
+        assert!(verdicts[2].contains("bucket=incomplete"), "{}", verdicts[2]);
+        let summaries: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("buckets:"))
+            .collect();
+        assert_eq!(summaries.len(), 1, "one summary line");
+        assert!(summaries[0].contains("resolved=1"), "{}", summaries[0]);
+        assert!(summaries[0].contains("unresolved=1"), "{}", summaries[0]);
+        assert!(summaries[0].contains("incomplete=1"), "{}", summaries[0]);
+        assert!(text.contains(NO_CHECK), "the zero-check reason is printed");
+    }
+
+    #[test]
+    fn verify_task_every_build_verb_carries_its_report() {
+        // The three door build verbs answer with the same report shape: the
+        // instance line, the bucket and the bucket summary.
+        for id in ["level.build", "game.build", "sim.build_encounter"] {
+            let block = VerifyBlock::of(id, &[CheckRow::pass("landed", id)]);
+            let report = block.wire_report();
+            assert!(
+                report.starts_with(&format!("instance={id}\n")),
+                "the report names its instance: {report}"
+            );
+            assert!(report.contains("bucket=resolved"), "{report}");
+            assert!(report.contains("buckets:"), "{report}");
+            assert!(report.contains("total=1 resolved=1"), "{report}");
+        }
     }
 }

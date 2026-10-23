@@ -24,6 +24,8 @@
 
 use crate::error::{Error, Field};
 use crate::rig::Rig;
+use std::io;
+use std::path::{Path, PathBuf};
 
 /// The most gore a body may shed, permille of the whole.
 pub const GORE_FULL: u16 = 1000;
@@ -162,6 +164,55 @@ impl std::fmt::Display for BodyError {
 
 impl std::error::Error for BodyError {}
 
+/// What a body file on disk got wrong.
+#[derive(Debug)]
+pub enum BodyFileError {
+    /// The file could not be read.
+    Read {
+        /// The path that was read.
+        path: PathBuf,
+        /// The reason the read failed.
+        error: io::Error,
+    },
+    /// The file's text is not a body.
+    Parse {
+        /// The path that was read.
+        path: PathBuf,
+        /// What the text got wrong, with the key and the line.
+        error: BodyError,
+    },
+}
+
+impl std::fmt::Display for BodyFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BodyFileError::Read { path, error } => {
+                write!(
+                    f,
+                    "the body file `{}` could not be read: {error}",
+                    path.display()
+                )
+            }
+            BodyFileError::Parse { path, error } => {
+                write!(
+                    f,
+                    "the body file `{}` is not a body: {error}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BodyFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            BodyFileError::Read { error, .. } => Some(error),
+            BodyFileError::Parse { error, .. } => Some(error),
+        }
+    }
+}
+
 /// One value of a body file: a quoted string or a number.
 enum Value {
     /// A quoted string.
@@ -215,6 +266,36 @@ pub fn parse(text: &str) -> Result<BodyDesc, BodyError> {
         }
     }
     file.finish()
+}
+
+/// Reads a body file from disk into a [`BodyDesc`].
+///
+/// Read once at load: keep the body and pass `&body` to the four fx calls, so
+/// no tick reads the disk. A file that cannot be read, or whose text is not a
+/// body, is refused with its path; a bad text keeps the key and the line it was
+/// found on.
+///
+/// Native only: the browser has no filesystem and parses fetched bytes with
+/// [`parse`] instead.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load(path: &Path) -> Result<BodyDesc, BodyFileError> {
+    let text = std::fs::read_to_string(path).map_err(|error| BodyFileError::Read {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    parse(&text).map_err(|error| BodyFileError::Parse {
+        path: path.to_path_buf(),
+        error,
+    })
+}
+
+/// The browser cannot read a path; a fetched body is parsed with [`parse`].
+#[cfg(target_arch = "wasm32")]
+pub fn load(path: &Path) -> Result<BodyDesc, BodyFileError> {
+    Err(BodyFileError::Read {
+        path: path.to_path_buf(),
+        error: std::io::Error::new(std::io::ErrorKind::NotFound, "no filesystem in the browser"),
+    })
 }
 
 /// The file as it is read: the top keys and the tables, before they are checked

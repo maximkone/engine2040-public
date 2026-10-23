@@ -39,6 +39,7 @@
 #![forbid(unsafe_code)]
 
 use super::joint_limits::bone_groups;
+use super::ragdoll_contacts::{damp_resting_crawl, resolve_capsule_contacts};
 use super::rapier::{
     ordered_linvel, ordered_translation, position_in_bounds, quantize, resolve_coupling, sanitize3,
     BodyState, ParamsError, RagdollParams, FIXED_DT, GRAVITY_Y, MAX_LEN,
@@ -751,6 +752,16 @@ impl Ragdoll {
             &self.coupling,
             &mut self.coupling_stats,
         );
+        resolve_capsule_contacts(
+            &mut self.bodies,
+            &self.order,
+            &self.radii,
+            &self.half_heights,
+            &self.skeleton,
+            &self.coupling,
+            &mut self.coupling_stats,
+        );
+        damp_resting_crawl(&mut self.bodies, &self.order);
         drain_narrow_contacts(
             &self.narrow,
             &self.colliders,
@@ -1441,6 +1452,7 @@ fn check_pos(pos: [f32; 3]) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ragdoll_contacts::{capsule_axis, closest_segments};
     use engine_anim::contract::Joint;
 
     /// Four-bone vertical chain floating above the floor: root at y=3, each
@@ -2823,77 +2835,19 @@ mod tests {
         closest_segments(a1, a2, b1, b2).2 - ra - rb
     }
 
-    /// The two ends of a capsule's axis, from its center, unit rotation and cylinder
-    /// half-height: `center -+ R * (0, half_height, 0)`. Test-side copy of the shape
-    /// math the physics measure reads off a Rapier capsule.
-    fn capsule_axis(center: [f32; 3], rot: [f32; 4], half_height: f32) -> ([f32; 3], [f32; 3]) {
-        let up = rotate_vec(&[0.0, half_height, 0.0], &normalize_quat(&rot));
-        (
-            [center[0] - up[0], center[1] - up[1], center[2] - up[2]],
-            [center[0] + up[0], center[1] + up[1], center[2] + up[2]],
-        )
-    }
-
-    /// Closest points of two segments `p1..q1` and `p2..q2` and their distance
-    /// (Ericson, Real-Time Collision Detection 5.1.9). One `sqrt`; no allocation.
-    fn closest_segments(
-        p1: [f32; 3],
-        q1: [f32; 3],
-        p2: [f32; 3],
-        q2: [f32; 3],
-    ) -> ([f32; 3], [f32; 3], f32) {
-        let d1 = [q1[0] - p1[0], q1[1] - p1[1], q1[2] - p1[2]];
-        let d2 = [q2[0] - p2[0], q2[1] - p2[1], q2[2] - p2[2]];
-        let r = [p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2]];
-        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-        let (a, e, f) = (dot(d1, d1), dot(d2, d2), dot(d2, r));
-        let c = dot(d1, r);
-        let b = dot(d1, d2);
-        let denom = a * e - b * b;
-        let mut s = if denom > 1e-9 {
-            ((b * f - c * e) / denom).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let mut t = if e > 1e-9 { (b * s + f) / e } else { 0.0 };
-        if t < 0.0 {
-            t = 0.0;
-            s = if a > 1e-9 {
-                (-c / a).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-        } else if t > 1.0 {
-            t = 1.0;
-            s = if a > 1e-9 {
-                ((b - c) / a).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-        }
-        let on1 = [p1[0] + d1[0] * s, p1[1] + d1[1] * s, p1[2] + d1[2] * s];
-        let on2 = [p2[0] + d2[0] * t, p2[1] + d2[1] * t, p2[2] + d2[2] * t];
-        let gap = [on1[0] - on2[0], on1[1] - on2[1], on1[2] - on2[2]];
-        (on1, on2, dot(gap, gap).sqrt())
-    }
-
     /// PX9 acceptance: fifty seeded falls of the joint-table humanoid keep every
     /// unjoined bone pair under 1 cm of overlap at every tick, settle under 1 cm,
     /// settle to rest inside the ragdoll speed bound, and repeat hash for hash.
     ///
-    /// Ignored: it does not hold yet. At the Rapier default four solver iterations
-    /// the deepest unjoined pair read 4.53 cm (fall 46, elbow_r/ankle_r); six
-    /// iterations read 2.9 cm in engine-physfx and twelve read 9.2 cm there, and
-    /// per-bone CCD reads 10.4 cm, so the contact budget is not the lever: the
-    /// joints drive the bones back through each other inside one tick. A capsule
-    /// depenetration seam was measured too (two to eight sweeps, alternating order,
-    /// deepest pair first, 32 fixes) and settled between 1.8 and 6.3 cm, never under
-    /// 1 cm, because every fix stretches a joint the next tick re-solves. Those
-    /// numbers were measured before AD17 shipped the 80 kg bone masses and twelve
-    /// solver passes, and this test has not been re-measured since. Left: a contact
-    /// model the joints cannot overrun (contacts between grandparents), then run
-    /// this test and replace the numbers.
-    #[ignore = "PX9 open: a jointed ragdoll still drives unjoined bones 4.5 cm through each other at 4 solver iterations"]
+    /// The step after Rapier's pipeline runs `resolve_capsule_contacts`: it
+    /// separates every non-parent/child pair along its closest capsule axis,
+    /// leaves at most `CAPSULE_CONTACT_SLOP_M` of overlap, and then
+    /// `project_capsule_velocities` removes the approaching normal velocity
+    /// with an inverse-mass split so a joint cannot drive the pair back through
+    /// the contact. `damp_resting_crawl` drains the slow crawl a long chain
+    /// can hold while every bone is under the rest speed. Measured 2040/50:
+    /// peak 0.0080 m, settled 0.0080 m, worst summed speed 0.8751, digest
+    /// b0f2a3c31b2e3a1a.
     #[test]
     fn fifty_seeded_falls_keep_unjoined_bones_under_a_centimeter() {
         let mut hashes = Vec::with_capacity(50);

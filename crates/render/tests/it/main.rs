@@ -11,6 +11,8 @@
 mod accel_golden;
 mod cluster_vectors;
 mod core_hash;
+#[cfg(feature = "gpu")]
+mod debug_lines;
 mod gi_bake;
 mod lod;
 mod material;
@@ -20,4 +22,5 @@ mod post_aa_parity;
 mod post_fsr1_parity;
 mod shadow_aces;
 mod shadow_post;
+mod taa_pair;
 mod torch_cluster_vectors;

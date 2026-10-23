@@ -1,56 +1,16 @@
 use super::*;
 
-/// Document snapshot as spatial actors plus the index-to-UUID table. Every
-/// node with a finite world position becomes one unit cube on its world
-/// position (the CAP1/SP1 convention); node order is the id-text sort, so
-/// the same scene always maps to the same actor ids.
+/// Document snapshot as spatial actors plus the index-to-UUID table, from the
+/// one scene adapter ([`engine_editor::spatial_view`]): real collider extents,
+/// the labelled default for a bare node, id-text order, so the same scene
+/// always maps to the same actor ids.
 pub(super) struct ActorSnapshot {
     pub(super) actors: Vec<engine_spatial::Actor>,
     pub(super) ids: Vec<ObjectId>,
 }
 
 pub(super) fn snapshot_actors(doc: &Document) -> ActorSnapshot {
-    let mut order: Vec<ObjectId> = Vec::new();
-    let mut stack = doc.hierarchy.roots();
-    while let Some(id) = stack.pop() {
-        order.push(id);
-        stack.extend(doc.hierarchy.children(id));
-    }
-    order.sort_by_key(|id| id.to_string());
-    let mut actors = Vec::new();
-    let mut ids = Vec::new();
-    for id in order {
-        let Some(world) = doc.hierarchy.world(id) else {
-            continue;
-        };
-        if !world.position.iter().all(|lane| lane.is_finite()) {
-            continue;
-        }
-        let yaw = if world.rotation.iter().all(|lane| lane.is_finite()) {
-            yaw_of_quat(world.rotation)
-        } else {
-            0.0
-        };
-        let Ok(index) = u32::try_from(actors.len()) else {
-            break;
-        };
-        ids.push(id);
-        actors.push(engine_spatial::Actor {
-            id: index,
-            name: format!("prop_{index:04}"),
-            x: world.position[0],
-            y: world.position[1],
-            z: world.position[2],
-            sx: 1.0,
-            sy: 1.0,
-            sz: 1.0,
-            parent: None,
-            physical: true,
-            vx: 0.0,
-            vz: 0.0,
-            yaw,
-        });
-    }
+    let (actors, ids) = engine_editor::spatial_view::actors(doc);
     ActorSnapshot { actors, ids }
 }
 

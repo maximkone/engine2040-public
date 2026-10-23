@@ -15,6 +15,22 @@ use std::fmt;
 
 use crate::torch_light::TorchError;
 
+impl crate::present::Presenter {
+    /// Stage the frame's torch block into the forward uniform array (EG12
+    /// slice b): the capture twin writes it inside `stage_frame`, the live and
+    /// probe frames write it here beside the other per-frame uniforms, so the
+    /// zero-allocation staging gate still measures the pack alone. One write,
+    /// no heap. Presentation only.
+    pub(super) fn write_torch_block(
+        &self,
+        list: &crate::present::DrawList,
+    ) -> Result<(), crate::present::PresentError> {
+        let torch = self.torch_bytes_from_scene(list)?;
+        self.queue.write_buffer(&self.torch_buf, 0, &torch);
+        Ok(())
+    }
+}
+
 /// Staged EG12 WGSL chunk: torch uniform array plus map hooks.
 #[cfg(test)]
 pub(crate) const FORWARD_MAPS_WGSL: &str = include_str!("../../shaders/forward_maps.wgsl");

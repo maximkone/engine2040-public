@@ -14,7 +14,7 @@
 
 use super::delta::{ioq3_encode_fields, ioq3_fields_wire_len, BodySnap, FullSnap, Ioq3SnapFields};
 use super::scale::{DELTA_HEADER_LEN, MAX_DATAGRAM_BYTES, TICK_HZ};
-use super::session::{ioq3_fragment_message, NetError};
+use super::session::NetError;
 use crate::validate::SortedUnique;
 use engine_core::hash::Fnv64;
 
@@ -102,6 +102,12 @@ const fn word_valid(index: usize, len: usize) -> u64 {
         return 0;
     }
     u64::MAX >> (SCOPE_WORD_BITS - (len - start))
+}
+
+/// True when `words` holds bit `id` of a mask spanning `len` ids.
+fn mask_has(words: &[u64], len: usize, id: u32) -> bool {
+    let at = usize::try_from(id).unwrap_or(len);
+    at < len && words[at / SCOPE_WORD_BITS] & (1u64 << (at % SCOPE_WORD_BITS)) != 0
 }
 
 /// The delta one [`ScopeView::update`] applied, as a Z-set: which room bits
@@ -241,10 +247,7 @@ impl ScopeView {
     /// True when `id` holds weight 1; ids outside the span hold weight 0.
     #[must_use]
     pub fn contains(&self, id: u32) -> bool {
-        let Ok(at) = usize::try_from(id) else {
-            return false;
-        };
-        at < self.len && self.words[at / SCOPE_WORD_BITS] & (1u64 << (at % SCOPE_WORD_BITS)) != 0
+        mask_has(&self.words, self.len, id)
     }
 
     /// Canonical digest of the view: mask, span, weight and every word, folded
@@ -533,10 +536,7 @@ impl PredicateView {
     /// True when `id` is in the set; ids outside the span are not.
     #[must_use]
     pub fn contains(&self, id: u32) -> bool {
-        let Ok(at) = usize::try_from(id) else {
-            return false;
-        };
-        at < self.len && self.words[at / SCOPE_WORD_BITS] & (1u64 << (at % SCOPE_WORD_BITS)) != 0
+        mask_has(&self.words, self.len, id)
     }
 
     /// Canonical digest of set plus subscription: the clauses, the span, the
@@ -1481,7 +1481,7 @@ pub fn ioq3_client_view(params: Ioq3ViewParams<'_>) -> Result<Ioq3ClientView, Ne
         image.extend_from_slice(cmd);
     }
     image.extend_from_slice(&params.area_bytes);
-    let datagrams = ioq3_fragment_message(params.sequence, params.qport, &image);
+    let datagrams = crate::ioq3::ioq3_fragment_message(params.sequence, params.qport, &image);
     Ok(Ioq3ClientView {
         lastframe: params.lastframe,
         server_time: params.server_time,
@@ -2742,7 +2742,7 @@ mod tests {
         }
         image.extend_from_slice(&[0xA5, 0x5A]);
         assert_eq!(
-            crate::session::ioq3_reassemble(&view.datagrams).expect("reassemble"),
+            crate::ioq3::ioq3_reassemble(&view.datagrams).expect("reassemble"),
             image,
             "reliable ahead of snapshot reassembles byte-exact"
         );

@@ -269,16 +269,79 @@ pub(crate) mod fixtures {
             items,
         }
     }
+
+    /// Draw indices of the EG11b sun fixture: the sand floor is draw 0 and
+    /// the one box is draw 1 (the ids the shadow proofs name).
+    pub(crate) const SUN_FLOOR_DRAW: u32 = 0;
+    pub(crate) const SUN_BOX_DRAW: u32 = 1;
+
+    /// EG11b fixture: one 1.6 m box standing on open sand under the arena
+    /// day sun, seen from high enough that its cast shadow lands in plain
+    /// view beside the box, so a pixel can be attributed to the shadow
+    /// without guessing.
+    pub(crate) fn sun_shadow_scene(presenter: &mut Presenter, width: u32, height: u32) -> DrawList {
+        let sun = crate::arena_day::ARENA_DAY_SUN_DIR;
+        let parts: [(u64, MeshData, [f32; 3], f32, f32); 2] = [
+            (0xEB01, floor_mesh(12.0), [0.42, 0.32, 0.20], 0.0, 0.9),
+            (
+                0xEB02,
+                box_mesh([0.0, 0.0, 0.0], [1.0, 1.6, 1.0]),
+                [0.78, 0.74, 0.70],
+                0.0,
+                0.5,
+            ),
+        ];
+        let mut items = Vec::with_capacity(parts.len());
+        for (id, mesh, base_color, metallic, roughness) in parts {
+            let key = MeshKey::new(id, [0xEB; 32]);
+            presenter
+                .upload_mesh(key, &mesh)
+                .expect("sun fixture mesh uploads");
+            items.push(DrawItem {
+                mesh: key,
+                material: PbrMaterial {
+                    base_color,
+                    metallic,
+                    roughness,
+                    exposure: 1.0,
+                },
+                base_color: None,
+                normal_map: None,
+                orm: None,
+                emissive: None,
+            });
+        }
+        // The sun throws the box shadow toward +x and -z by about 1.13 and
+        // 0.82 m per meter of height (`ARENA_DAY_SUN_DIR`), so the camera
+        // looks down at that side of the box.
+        let mut camera = Camera::new(
+            [-4.5, 5.5, -5.0],
+            [1.2, 0.2, -0.1],
+            [0.0, 1.0, 0.0],
+            50.0f32.to_radians(),
+        );
+        camera.aspect = width as f32 / height as f32;
+        DrawList {
+            camera,
+            light: DirectionalLight {
+                direction: glam::Vec3::from_array(sun),
+                color: glam::Vec3::new(1.0, 0.96, 0.90),
+                intensity: 3.0,
+            },
+            items,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pass_truth::harness::fixtures::{
-        arena_like_scene, init_or_skip, ARMOR_DRAW, FLOOR_DRAW, H, W, WALL_DRAW,
+        arena_like_scene, init_or_skip, sun_shadow_scene, ARMOR_DRAW, FLOOR_DRAW, H, SUN_BOX_DRAW,
+        SUN_FLOOR_DRAW, W, WALL_DRAW,
     };
     use crate::pass_truth::live_gate::{diff_in_draws, NO_DRAW_ID};
-    use crate::pass_truth::{LookToggles, PassRegion, PASS_EPSILON};
+    use crate::pass_truth::{LookToggles, PassRegion, PASS_EPSILON, PASS_LIVE_FLOOR};
 
     /// The row of one look pass by name.
     fn row<'a>(gate: &'a LiveGate, name: &str) -> &'a LiveRow {
@@ -329,19 +392,12 @@ mod tests {
         let second = gate_live_scene(&mut presenter, &list).expect("scene gates again");
         assert_eq!(first.rows, second.rows, "the gate run twice, same table");
         assert_eq!(first.noise_px, 0, "the all-on frame repeats exactly");
-        for name in ["graph", "ibl", "sky", "gtao"] {
+        for name in ["graph", "shadow_cluster", "ibl", "sky", "gtao"] {
             let r = row(&first, name);
             assert!(r.verdict.live, "{name} moves pixels in its region: {r:?}");
             assert!(r.verdict.diff_pixels > 0 && r.counted_px > 0);
         }
-        for name in [
-            "shadow_cluster",
-            "post",
-            "material_layer",
-            "particles_gpu",
-            "decals",
-            "spot",
-        ] {
+        for name in ["post", "material_layer", "particles_gpu", "decals", "spot"] {
             let r = row(&first, name);
             assert!(!r.verdict.live, "{name} paints nothing here: {r:?}");
             assert_eq!(r.verdict.diff_pixels, 0, "{name} frames are equal");
@@ -365,10 +421,11 @@ mod tests {
                 .as_bytes()
         );
         assert!(report.contains("| graph | LIVE |"));
+        assert!(report.contains("| shadow_cluster | LIVE |"));
         assert!(report.contains("| sky | LIVE |"));
         assert!(report.contains("| gtao | LIVE |"));
         assert!(report.contains("| decals | PROBE | 0 |"));
-        assert!(report.contains("10 rows, 4 LIVE, 6 PROBE"));
+        assert!(report.contains("10 rows, 5 LIVE, 5 PROBE"));
         // The artifact: dated by the caller (`PASS_TRUTH_DATE`), repo-rooted.
         let date = std::env::var("PASS_TRUTH_DATE").unwrap_or_else(|_| "arena-like".into());
         let path = super::super::live_gate::write_live_gate_report(&repo_root(), &date, &report)
@@ -668,5 +725,123 @@ mod tests {
             on.gtao.p50
         );
         assert!(on.gtao.p50 < on.total.p50, "the pass is part of the frame");
+    }
+
+    /// Relative luminance of one RGBA8 pixel, 0..=255 scale.
+    fn luma(px: &[u8]) -> f32 {
+        0.2126 * f32::from(px[0]) + 0.7152 * f32::from(px[1]) + 0.0722 * f32::from(px[2])
+    }
+
+    #[test]
+    fn eg11b_the_sun_map_shadows_the_sand_under_the_box_and_only_there() {
+        // Caller: EG11b accept, through the EG8 gate machinery (the window's
+        // live frame, pass on versus off). One 1.6 m box stands on open sand
+        // under the arena sun: with the sun pass on, the sand behind the box
+        // darkens past the luminance floor, every open-sand pixel stays
+        // within 1% (in fact byte-identical), and no pixel anywhere brightens
+        // -- the old view-distance cascade dim is gone, not merely hidden.
+        let Some(mut presenter) = init_or_skip("eg11b_the_sun_map_shadows_the_sand_under_the_box")
+        else {
+            return;
+        };
+        // The sun switch is one process-wide static: hold the EG11 test lock
+        // so the switch test cannot flip it in the middle of this frame.
+        let _held = crate::present::SUN_SWITCH_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        presenter.resize(W, H).expect("valid size applies");
+        let list = sun_shadow_scene(&mut presenter, W, H);
+        let on = capture(&mut presenter, &list, None);
+        let again = capture(&mut presenter, &list, None);
+        assert_eq!(
+            on.rgba, again.rgba,
+            "the shadowed frame repeats byte for byte"
+        );
+        assert_eq!(on.ids, again.ids, "and covers the same draws");
+        let off = capture(&mut presenter, &list, Some("shadow_cluster"));
+        assert_eq!(
+            off.rgba.len(),
+            on.rgba.len(),
+            "the off frame keeps its size"
+        );
+        let (w, h) = (W as usize, H as usize);
+        let pixels = w * h;
+        let mut floor_px = 0usize;
+        let mut shadowed = Vec::new();
+        let mut brightened = 0usize;
+        let mut darkest = 1.0f32;
+        for i in 0..pixels {
+            let (a, b) = (
+                luma(&on.rgba[i * 4..i * 4 + 4]),
+                luma(&off.rgba[i * 4..i * 4 + 4]),
+            );
+            if a > b + f32::from(PASS_EPSILON) {
+                brightened += 1;
+            }
+            if on.ids[i] != SUN_FLOOR_DRAW {
+                continue;
+            }
+            floor_px += 1;
+            if a < b - f32::from(PASS_EPSILON) {
+                shadowed.push(i);
+                darkest = darkest.min(a / b.max(0.001));
+            }
+        }
+        assert_eq!(brightened, 0, "the sun map only removes light");
+        assert!(
+            shadowed.len() > PASS_LIVE_FLOOR + 500,
+            "the shadow covers a region: {} px",
+            shadowed.len()
+        );
+        assert!(
+            shadowed.len() * 20 < floor_px,
+            "the shadow stays local: {} of {floor_px} sand px",
+            shadowed.len()
+        );
+        assert!(
+            darkest < 0.8,
+            "the shadowed sand drops past 20%: darkest ratio {darkest:.3}"
+        );
+        // Open sand is every floor pixel clear of the shadow's PCF penumbra
+        // (a 3x3 compare reaches three texels): it must sit within 1% of the
+        // off frame, which is where the old cascade dim would have leaked.
+        let mut near_shadow = vec![false; pixels];
+        for i in shadowed.iter().copied() {
+            let (x, y) = (i % w, i / w);
+            for ny in y.saturating_sub(3)..=(y + 3).min(h - 1) {
+                for nx in x.saturating_sub(3)..=(x + 3).min(w - 1) {
+                    near_shadow[ny * w + nx] = true;
+                }
+            }
+        }
+        let mut open_moved = 0usize;
+        let mut open_px = 0usize;
+        for (i, id) in on.ids.iter().enumerate() {
+            if *id != SUN_FLOOR_DRAW || near_shadow[i] {
+                continue;
+            }
+            open_px += 1;
+            let (a, b) = (
+                luma(&on.rgba[i * 4..i * 4 + 4]),
+                luma(&off.rgba[i * 4..i * 4 + 4]),
+            );
+            if (a - b).abs() > 0.01 * b.max(1.0) {
+                open_moved += 1;
+            }
+        }
+        assert!(open_px > floor_px / 2, "open sand is most of the floor");
+        assert_eq!(open_moved, 0, "open sand stays within 1% of the off frame");
+        // The shadow is the box's: a shadowed pixel touches the box's own
+        // screen footprint (the sun throws it within one box width).
+        let box_px: Vec<usize> = (0..pixels).filter(|i| on.ids[*i] == SUN_BOX_DRAW).collect();
+        assert!(!box_px.is_empty(), "the fixture box is drawn");
+        let touches_box = shadowed.iter().any(|i| {
+            let (x, y) = (i % w, i / w);
+            box_px.iter().any(|b| {
+                let (bx, by) = (b % w, b / w);
+                x.abs_diff(bx) <= 2 && y.abs_diff(by) <= 2
+            })
+        });
+        assert!(touches_box, "the shadow starts at the fixture box");
     }
 }

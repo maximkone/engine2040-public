@@ -29,6 +29,16 @@ finish scoreboard runs every wave.
   The P5 bar: none, within 5%, none, within budget. Tier A. Size M. Owns
   `crates/proof/src/soak.rs`. Accept: a seeded leak fails the soak; the
   report names the first bad minute. Deep sweep 2026-09-25: leaks found by slope with a confidence interval and a change point that names the first bad minute (Georges OOPSLA 2007, Mytkowicz ASPLOS 2009 method). needs: GM3, MP2, DX4.
+  Landed 2026-10-23 (Accept; the analysis landed earlier, present since the
+  2026-10-17 backup commit `66de6aa12`): `cargo test -p engine-proof --lib soak`
+  18 passed / 1 ignored (39911391845). `seeded_leak_fails_and_names_first_bad_minute`
+  (onset 24, 6 KiB/min) fails the run and names minute 24 within 2,
+  `clean_seeded_run_is_green` keeps the drift under the 5 percent bar, a
+  1 KiB/min leak stays inside it, a short series is refused with `TooFew`, and
+  the same seed gives the same verdict. The report prints
+  `first_bad_minute=<n>`. Not ticked: needs GM3, still open, and the board
+  audit refuses a tick over an open need. The real one-hour packaged soak
+  (8 fighters, AI fill, destruction on) is the remaining leg.
 - [ ] PQ11 proof: slope-with-CI plus changepoint soak-onset (READER-SPEED53
   card 1, quality §4 hardest-first). Tier B. Size S. Owns onset hunks in
   `crates/proof/src/online_soak.rs` (integer-only). Accept: seeded-leak

@@ -40,6 +40,7 @@ use engine_game::break_window::BreakScene;
 use engine_game::camera::{free_cam_step, CameraMode, DirectorParams};
 use engine_game::camera_wish::{ground_forward, world_wish};
 use engine_game::capture;
+use engine_game::console::DevConsole;
 use engine_game::crash;
 use engine_game::feel_view::FeelView;
 use engine_game::fight_ring::{ring_prop_row, ring_wall_row};
@@ -49,6 +50,7 @@ use engine_game::fps_view::{LegionaryKit, LegionaryView};
 use engine_game::input::{map_key, map_mouse};
 use engine_game::lock_on::nearest_rival_facing;
 use engine_game::modes::{rank_modes, validate_request, AdapterMode, DisplayMode, SwapRequest};
+use engine_game::mouse_raw::MouseRaw;
 use engine_game::practice::PracticeSwap;
 use engine_game::pressure_watch::PressureWatch;
 use engine_game::reload::{settle_paths, HotReload};
@@ -57,13 +59,12 @@ use engine_game::view_truth::{brief_line_with_props, FrameLight, PropTruth, View
 use engine_game::virt::{speed_label, step_speed, VirtualClock, KEY_RAMP_MS};
 use engine_game::window_audio_space::AudioSpace;
 use engine_game::windowed::{
-    apply_camera_orbit, cap_message as capped, check_exit_deadline_with_limit,
-    contact_shadow_strength, dressing_camera, feed_tick_audio, fighter_input_from_pressed,
-    format_timed_smoke, frame_times_csv_row, hud_cells_quads, hud_draw_list, live_fight_dots,
-    msaa_setting, push_fight_draws, smoke_muted, split_staged_flag, stage_arena_bank,
-    stage_dressing, stage_fight_bodies, staged_fight_input, staged_session_config,
-    surface_frame_action, StagedTally, SurfaceFrameAction, TickAccumulator, WinArgs, WinError,
-    WindowPad, CONTACT_SHADOW_ENV, FRAME_TIMES_CSV_HEADER, MSAA_ENV, WINDOWED_SAMPLE_RATE,
+    apply_camera_orbit, cap_message as capped, contact_shadow_strength, dressing_camera,
+    feed_tick_audio, fighter_input_from_pressed, format_timed_smoke, hud_cells_quads,
+    hud_draw_list, live_fight_dots, msaa_setting, push_fight_draws, smoke_muted, split_staged_flag,
+    stage_arena_bank, stage_dressing, stage_fight_bodies, staged_fight_input,
+    staged_session_config, surface_frame_action, StagedTally, SurfaceFrameAction, TickAccumulator,
+    WinArgs, WinError, WindowPad, CONTACT_SHADOW_ENV, MSAA_ENV, WINDOWED_SAMPLE_RATE,
     WIN_FIXED_DT_S,
 };
 use engine_game::{App, GameConfig, TickOutcome};
@@ -71,7 +72,7 @@ use engine_input::{Bindings, FighterId, FighterInput, PhysicalButton};
 use engine_render::present::{DrawItem, DrawList, MeshKey, PresentError, Presenter, WaitStats};
 
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{DeviceEvent, ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
@@ -92,6 +93,11 @@ macro_rules! tell {
         engine_game::crash::mirror_line(&line);
     }};
 }
+
+/// Window console wiring: Backquote, line routing, the live door and effects.
+mod console;
+
+mod cursor;
 
 /// GS7: the discrete-GPU hint of NVIDIA Optimus, read by the driver from the exe's export table
 /// (PORT(glfw/glfw@master:src/win32_init.c)). `build.rs` keeps the export; `tools/ship.mjs`
@@ -119,10 +125,17 @@ mod arena_capture;
 mod arena_frame;
 mod arena_net;
 mod arena_winit;
+mod frame_timing;
+mod headless;
 
 use arena_capture::capture::{
-    frame_list, headless_fallback, run_chart_mode, setup_capture, split_chart_args, CaptureSlot,
+    frame_list, headless_fallback, headless_gate, run_chart_mode, run_reference_mode,
+    setup_capture, split_chart_args, split_reference_args, CaptureSlot,
 };
+use frame_timing::{
+    check_exit_wall_deadline, duration_us, frame_pacer, frame_trace_path, write_frame_times_csv,
+};
+use headless::split_plain_headless;
 
 /// A fresh fight camera follower, snapping to the next shot (a new window or a new bout).
 /// AIN6 (owner 2026-10-20 "ARM GOO ALL"): the 0.5 s velocity lead is armed.
@@ -199,7 +212,7 @@ const LEGIONARY_EYE_NEAR_M: f32 = 0.30;
 /// `engine_endpoint`'s view host.
 const VIEW_LINE_PREFIX: &str = "arena view-line: ";
 /// Keys the window answers, shown in the window title and printed at boot.
-const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | [ ] slow-mo speed | R rematch | T title | C free cam | V first/third person (--legionary)";
+const CONTROLS_LINE: &str = "WASD move (camera-relative) | F attack | Q throw spear (--spear) | Shift block | Space dodge | Esc pause | ` console | [ ] slow-mo speed | R rematch | T title | C free cam | V first/third person (--legionary)";
 /// Surface frames between look-probe rounds under `--look-probes`.
 const LOOK_PROBE_EVERY: u32 = 120;
 /// Surface frames between fog plus contact refreshes under `--look-probes`.
@@ -479,8 +492,14 @@ fn observe_tick_with_sim(
     views: &[engine_game::FighterView],
     hp: &[u16],
     cues: &[FightCue],
+    lands: &[engine_arena::FallLanding],
     _sim: Option<&engine_arena::Sim>,
 ) {
+    // FEEL7: the views are the tick's pre-step positions, so the authority's
+    // landing row starts the squash on the very tick the fall table charged;
+    // the view tracking still catches any landing the row does not name.
+    look.observe_landings(tick, views);
+    look.observe_landing_rows(tick, lands);
     look.observe_tick(tick, views, hp, cues);
 }
 
@@ -713,6 +732,10 @@ fn run(raw: &[String]) -> i32 {
     // The legionary mode starts the duel too: the player is slot 0 and the
     // picture is the fighter's eye.
     let play = play || agent_seat.is_some() || legionary;
+    // `--headless`: a plain flag is the local no-window route (the shipped
+    // check); with a net seat it belongs to the net split, which keeps its
+    // meaning there.
+    let (headless, raw) = split_plain_headless(&raw);
     let (net, raw) = match arena_net::split_net_args(&raw) {
         Ok(split) => split,
         Err(err) => {
@@ -735,6 +758,13 @@ fn run(raw: &[String]) -> i32 {
         }
     };
     let (held_keys, raw) = match arena_args::split_hold(&raw) {
+        Ok(split) => split,
+        Err(err) => {
+            tell!("arena: {err}");
+            return 2;
+        }
+    };
+    let (reference_args, raw) = match split_reference_args(&raw) {
         Ok(split) => split,
         Err(err) => {
             tell!("arena: {err}");
@@ -810,6 +840,13 @@ fn run(raw: &[String]) -> i32 {
     if let Some(net) = net.as_ref().filter(|net| net.headless) {
         return arena_net::run_headless(config, spear, net);
     }
+    // `--headless`: play the plain session with no window, or refuse a flag
+    // whose promise needs the window (the helper owns the message).
+    let window_only =
+        play || staged || spear_demo || speed_demo || spear || height || view_brief.is_some();
+    if let Some(code) = headless_gate(headless, window_only, config, &args, &capture_flags) {
+        return code;
+    }
     // Backend pick is resolved (and the env override stuck) before any GPU
     // work on every path, so stdout always names the picked backend.
     let pick = engine_render::backend::apply_cli_override(args.backend);
@@ -823,6 +860,9 @@ fn run(raw: &[String]) -> i32 {
     }
     if chart_args.enabled {
         return run_chart_mode(&config, &args, &chart_args);
+    }
+    if reference_args.enabled {
+        return run_reference_mode(&config, &reference_args);
     }
     let loop_result = EventLoop::new();
     let event_loop = match loop_result {
@@ -945,94 +985,6 @@ fn run(raw: &[String]) -> i32 {
     app.failure.unwrap_or_default()
 }
 
-/// Exit-path deadline check with the `Timeout` receipt: the shared limit
-/// check reports a stall as `Render`, but the `--exit` watchdog names a
-/// `Timeout` carrying elapsed plus limit, so the binary refiles that message
-/// under `Timeout` (every other error passes through untouched). Pure over
-/// the same inputs, so the forced-stall drill pins it without waiting.
-fn check_exit_wall_deadline(elapsed_ms: f64, limit_ms: u32) -> Result<(), WinError> {
-    check_exit_deadline_with_limit(elapsed_ms, limit_ms).map_err(|err| match err {
-        WinError::Render(msg) => WinError::Timeout(msg),
-        other => other,
-    })
-}
-
-/// Write the timed-smoke frame-times CSV: header plus one row per presented
-/// frame, so the proof perf mode reads a real run. Wall time rides the
-/// between-frame interval with the frame-body cost as the input-to-present
-/// leg; missing samples fall back to the run average, so a short smoke still
-/// files one row per frame. Creates parent dirs. Presentation only, never
-/// hashed; IO failures fail loudly.
-fn write_frame_times_csv(
-    path: &std::path::Path,
-    frames: u32,
-    work_us: &[u64],
-    interval_us: &[u64],
-    elapsed_ms: f64,
-) -> Result<(), WinError> {
-    if !elapsed_ms.is_finite() || elapsed_ms < 0.0 {
-        return Err(WinError::BadArgs(format!(
-            "frame-times elapsed_ms {elapsed_ms} is not finite nonnegative"
-        )));
-    }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                WinError::Render(format!("frame-times dir {}: {err}", parent.display()))
-            })?;
-        }
-    }
-    let avg_ms = elapsed_ms / f64::from(frames.max(1));
-    let us_to_ms = |us: u64| {
-        let whole = u32::try_from(us / 1000).unwrap_or(u32::MAX);
-        let frac = u32::try_from(us % 1000).unwrap_or(999);
-        f64::from(whole) + f64::from(frac) / 1000.0
-    };
-    let mut text = String::from(FRAME_TIMES_CSV_HEADER);
-    text.push('\n');
-    for index in 0..frames {
-        let at = usize::try_from(index).unwrap_or(usize::MAX);
-        let wall_ms = interval_us.get(at).map_or(avg_ms, |us| us_to_ms(*us));
-        let present_ms = work_us.get(at).map_or(wall_ms, |us| us_to_ms(*us));
-        let row = frame_times_csv_row(index, wall_ms, present_ms)?;
-        text.push_str(&row);
-        text.push('\n');
-    }
-    std::fs::write(path, text)
-        .map_err(|err| WinError::Render(format!("frame-times {}: {err}", path.display())))?;
-    Ok(())
-}
-
-/// Whole microseconds of a wall duration, saturating (diagnostics only).
-fn duration_us(elapsed: std::time::Duration) -> u64 {
-    u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
-}
-
-/// Where the per-frame present-path trace is written, from
-/// `E2040_FRAME_TRACE` (a path). `None` when the variable is unset or
-/// empty, so the default run pays nothing and writes nothing.
-fn frame_trace_path() -> Option<PathBuf> {
-    let raw = std::env::var("E2040_FRAME_TRACE").ok()?;
-    let path = raw.trim();
-    if path.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(path))
-}
-
-/// The presentation pacer: one frame every `--fixed-dt <ms>` when the flag
-/// names a period, else one frame per fixed tick (the game's own rate).
-/// The window parks between slots instead of free-running: a free-running
-/// window outruns the display, and the compositor answers with ~80 ms
-/// swapchain acquire stalls (the 2026-10-20 perf lane).
-fn frame_pacer(period_ms: Option<u32>) -> arena_frame::FixedDtPacer {
-    let period = match period_ms {
-        Some(ms) => Duration::from_millis(u64::from(ms)),
-        None => Duration::from_secs_f64(WIN_FIXED_DT_S),
-    };
-    arena_frame::FixedDtPacer::new(period, Instant::now())
-}
-
 // Live fight bodies: one dot per simulated fighter from the rolling pose
 // cursor (planar position, feet on the floor), live hp, this tick's flash.
 
@@ -1097,6 +1049,9 @@ struct ArenaApp {
     acc: TickAccumulator,
     /// Virtual time (GP45): the slow-mo keys ease its speed, the accumulator sees its output.
     clock: VirtualClock,
+    /// EG26 dev console: Backquote toggles it; its pause/step gate runs before
+    /// the accumulator, so a stepped tick is the same fixed tick as real time.
+    console: DevConsole,
     /// Window shell state; Title, Paused and Result hold the accumulator
     /// at zero steps while Match runs the bout.
     flow: Flow,
@@ -1117,6 +1072,8 @@ struct ArenaApp {
     eye_trauma: engine_game::fps_view::EyeTrauma,
     /// Free-fly view pose (view code only: never hashed, never sim input).
     free_cam: DirectorParams,
+    /// Raw mouse deltas for the free camera: presentation only.
+    mouse_raw: MouseRaw,
     /// Whether the Result line already printed for this bout; cleared on
     /// rematch so the next finished bout announces once.
     result_announced: bool,
@@ -1353,6 +1310,7 @@ impl ArenaApp {
             pad: WindowPad::open(),
             acc: TickAccumulator::new(),
             clock: VirtualClock::new(),
+            console: DevConsole::new(),
             flow: boot,
             pause_at_tick: None,
             step_mode: false,
@@ -1362,6 +1320,7 @@ impl ArenaApp {
             legionary: None,
             eye_trauma: engine_game::fps_view::EyeTrauma::default(),
             free_cam: DirectorParams::arena(),
+            mouse_raw: MouseRaw::new(),
             result_announced: false,
             last: Instant::now(),
             latency: arena_frame::latency::LatencyMeter::new(),
@@ -1583,6 +1542,17 @@ impl ArenaApp {
     /// Presentation only: the sim's integer cursor stops, the frozen hash
     /// stands.
     fn pause_steps(&mut self, elapsed_ms: f64) -> u32 {
+        // EG26: the dev console's hold and one-tick step run before the
+        // wall-clock accumulator. A step owes the same fixed tick as real
+        // time, never a different dt inside the tick.
+        let shown = self.presenter.as_ref().is_some_and(|p| !p.suspended());
+        if matches!(self.flow, Flow::Match | Flow::Paused) && self.console.paused() {
+            if !shown {
+                return 0;
+            }
+            let steps = self.console.take_step();
+            return steps.min(self.config.ticks.saturating_sub(self.ticks_done));
+        }
         let stepped = std::mem::take(&mut self.step_requested);
         let decision = pause_decision(u64::from(self.ticks_done), self.pause_at_tick, stepped);
         match decision {
@@ -2079,6 +2049,7 @@ impl ArenaApp {
         // not steer).
         self.note_view_forward(list.camera.eye.to_array(), list.camera.target.to_array());
         if self.cam_mode == CameraMode::Free {
+            cursor::take_look(&mut self.mouse_raw, &mut self.free_cam);
             self.aim_free_cam(&mut list);
         }
         self.push_speed_demo(&mut list);
@@ -2103,9 +2074,8 @@ impl ArenaApp {
                     return;
                 }
             };
-            if self.speed.is_none() {
-                engine_game::windowed::stage_hp_bars(presenter, &overlay);
-            }
+            let bars = self.speed.is_none();
+            engine_game::console::overlay::stage_hud(presenter, &overlay, &self.console, bars);
             // PQ18 stage three: the frame submits its present call now. Only a
             // frame with an accepted tick stamps, so an idle frame never reads
             // as a stray event.
@@ -2479,6 +2449,9 @@ impl ArenaApp {
         if let Some(speed) = speed_label(self.clock.speed_permille()) {
             parts.push(speed);
         }
+        if self.console.paused() {
+            parts.push("console paused".to_string());
+        }
         if let Some(rival) = rival {
             parts.push(rival);
         }
@@ -2509,6 +2482,11 @@ impl ArenaApp {
             CameraMode::Director => CameraMode::Free,
             CameraMode::Free => CameraMode::Director,
         };
+        cursor::set_grabbed(
+            &mut self.mouse_raw,
+            self.window.as_deref(),
+            self.cam_mode == CameraMode::Free,
+        );
     }
 
     /// Turn the legionary mode on: the player is slot 0, seen in first person
@@ -2780,7 +2758,91 @@ impl ArenaApp {
     }
 }
 
+impl ArenaApp {
+    /// Fight and shell keys, routed only when the console is closed.
+    fn game_key(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
+        if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
+            // Escape pauses without repeat: holding the key never
+            // flickers the shell.
+            if code == winit::keyboard::KeyCode::Escape
+                && event.state == ElementState::Pressed
+                && !event.repeat
+            {
+                self.flow = self.flow.on(FlowEvent::TogglePause);
+            }
+            // Shell keys without repeat: Title starts on Enter/Space; Result
+            // rematches on R, titles on T (both clear the finished bout).
+            let struck = event.state == ElementState::Pressed && !event.repeat;
+            self.speed_demo_key(code, event.state == ElementState::Pressed);
+            // `--step`: one Space press advances exactly one held tick.
+            // A no-op outside the running bout, so Title/Space still
+            // only starts the bout (see `pause_decision`).
+            if struck
+                && self.step_mode
+                && self.flow == Flow::Match
+                && code == winit::keyboard::KeyCode::Space
+            {
+                self.step_requested = true;
+            }
+            // Slow-mo: [ and ] ease the virtual clock one preset slower or faster.
+            if struck
+                && matches!(
+                    code,
+                    winit::keyboard::KeyCode::BracketLeft | winit::keyboard::KeyCode::BracketRight
+                )
+            {
+                let faster = code == winit::keyboard::KeyCode::BracketRight;
+                let next = step_speed(self.clock.speed_permille(), faster);
+                if let Err(err) = self.clock.set_speed(next, KEY_RAMP_MS) {
+                    tell!("arena: speed {next}: {err}");
+                }
+            }
+            // Free-fly: C toggles the presentation camera (F is the
+            // attack key); while it is on, WASD/arrows fly the eye one
+            // step per press. Never touches the sim (presentation only).
+            if struck {
+                self.presentation_camera_key(code);
+            }
+            if struck && self.cam_mode == CameraMode::Free {
+                self.step_free_cam(code);
+            }
+            if struck
+                && self.flow == Flow::Title
+                && (code == winit::keyboard::KeyCode::Enter
+                    || code == winit::keyboard::KeyCode::Space)
+            {
+                self.flow = self.flow.on(FlowEvent::Start);
+            }
+            if struck && self.flow == Flow::Result && code == winit::keyboard::KeyCode::KeyR {
+                if let Err(err) = self.reset_bout() {
+                    return self.fail(event_loop, err, 2);
+                }
+                self.flow = self.flow.on(FlowEvent::Rematch);
+            }
+            if struck && self.flow == Flow::Result && code == winit::keyboard::KeyCode::KeyT {
+                if let Err(err) = self.reset_bout() {
+                    return self.fail(event_loop, err, 2);
+                }
+                self.flow = self.flow.on(FlowEvent::ToTitle);
+            }
+            if let Some(key) = arena_winit::from_winit_key(code) {
+                self.set_pressed(map_key(key), event.state == ElementState::Pressed);
+            }
+        }
+    }
+}
+
 impl ApplicationHandler for ArenaApp {
+    /// Raw motion feeds the free camera while it holds the cursor.
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        cursor::push_event(&mut self.mouse_raw, &event);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -2835,79 +2897,15 @@ impl ApplicationHandler for ArenaApp {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
-                    // Escape pauses without repeat: holding the key never
-                    // flickers the shell.
-                    if code == winit::keyboard::KeyCode::Escape
-                        && event.state == ElementState::Pressed
-                        && !event.repeat
-                    {
-                        self.flow = self.flow.on(FlowEvent::TogglePause);
-                    }
-                    // Shell keys without repeat: Title starts on Enter/Space; Result
-                    // rematches on R, titles on T (both clear the finished bout).
-                    let struck = event.state == ElementState::Pressed && !event.repeat;
-                    self.speed_demo_key(code, event.state == ElementState::Pressed);
-                    // `--step`: one Space press advances exactly one held tick.
-                    // A no-op outside the running bout, so Title/Space still
-                    // only starts the bout (see `pause_decision`).
-                    if struck
-                        && self.step_mode
-                        && self.flow == Flow::Match
-                        && code == winit::keyboard::KeyCode::Space
-                    {
-                        self.step_requested = true;
-                    }
-                    // Slow-mo: [ and ] ease the virtual clock one preset slower or faster.
-                    if struck
-                        && matches!(
-                            code,
-                            winit::keyboard::KeyCode::BracketLeft
-                                | winit::keyboard::KeyCode::BracketRight
-                        )
-                    {
-                        let faster = code == winit::keyboard::KeyCode::BracketRight;
-                        let next = step_speed(self.clock.speed_permille(), faster);
-                        if let Err(err) = self.clock.set_speed(next, KEY_RAMP_MS) {
-                            tell!("arena: speed {next}: {err}");
-                        }
-                    }
-                    // Free-fly: C toggles the presentation camera (F is the
-                    // attack key); while it is on, WASD/arrows fly the eye one
-                    // step per press. Never touches the sim (presentation only).
-                    if struck {
-                        self.presentation_camera_key(code);
-                    }
-                    if struck && self.cam_mode == CameraMode::Free {
-                        self.step_free_cam(code);
-                    }
-                    if struck
-                        && self.flow == Flow::Title
-                        && (code == winit::keyboard::KeyCode::Enter
-                            || code == winit::keyboard::KeyCode::Space)
-                    {
-                        self.flow = self.flow.on(FlowEvent::Start);
-                    }
-                    if struck && self.flow == Flow::Result && code == winit::keyboard::KeyCode::KeyR
-                    {
-                        if let Err(err) = self.reset_bout() {
-                            return self.fail(event_loop, err, 2);
-                        }
-                        self.flow = self.flow.on(FlowEvent::Rematch);
-                    }
-                    if struck && self.flow == Flow::Result && code == winit::keyboard::KeyCode::KeyT
-                    {
-                        if let Err(err) = self.reset_bout() {
-                            return self.fail(event_loop, err, 2);
-                        }
-                        self.flow = self.flow.on(FlowEvent::ToTitle);
-                    }
-                    if let Some(key) = arena_winit::from_winit_key(code) {
-                        self.set_pressed(map_key(key), event.state == ElementState::Pressed);
-                    }
+                if self.console_owns_key(&event) {
+                    return;
                 }
+                self.game_key(event_loop, &event);
             }
             WindowEvent::MouseInput { button, state, .. } => {
+                if self.console.is_open() {
+                    return;
+                }
                 let pressed = state == ElementState::Pressed;
                 self.speed_demo_click(pressed);
                 self.set_pressed(map_mouse(arena_winit::from_winit_mouse(button)), pressed);
@@ -2953,7 +2951,10 @@ mod tests {
     };
     use super::*;
     use engine_game::capture as cap;
-    use engine_game::windowed::{check_exit_deadline, fight_mesh_key, hud_draw_list, SceneSelect};
+    use engine_game::windowed::{
+        check_exit_deadline, check_exit_deadline_with_limit, fight_mesh_key, frame_times_csv_row,
+        hud_draw_list, SceneSelect, FRAME_TIMES_CSV_HEADER,
+    };
     use engine_game::HUMAN_SLOT;
     use engine_input::FighterInput;
 

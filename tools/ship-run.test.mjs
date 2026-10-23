@@ -33,13 +33,19 @@ const GOOD = `engine2040 headless proof:
 const BAD_HASH = GOOD.replace(GOLDEN_HASH, "0000000000000000");
 const ZERO_TICK = GOOD.replace("ticks=600", "ticks=0");
 
-// The arena's receipts, window and headless, with and without an adapter.
-const HEADLESS_SMOKE = `arena headless smoke: ticks=30 frames=30 hud_cells=5 hud_quads=3 mixed_frames=0 audio="audio muted: no device opened; mixer voices render offline" presenter="presenter skipped: no wgpu adapter on this machine" display="no display"`;
+// The arena's receipts, window and headless, with and without an adapter. The
+// headless one carries the final checkpoint hash and the forced route.
+const HEADLESS_SMOKE = `arena headless smoke: ticks=600 frames=0 hash=9f162a2fe205f0ff hud_cells=5 hud_quads=3 mixed_frames=0 headless=forced audio="audio muted: no device opened; mixer voices render offline" presenter="presenter skipped: no wgpu adapter on this machine" display="none requested"`;
 const WINDOW_SMOKE = `arena smoke: ticks=30 frames=30 alpha=1.000 hud_cells=5 hud_quads=3 fight_draws=9 audio="audio muted: no device opened; mixer voices render offline" presenter="presenter surface: Microsoft Basic Render Driver (10.0.1)"`;
-const REAL_GPU_SMOKE = `arena headless smoke: ticks=30 frames=30 hud_cells=5 hud_quads=3 mixed_frames=0 audio="audio muted" presenter="presenter twin: NVIDIA GeForce RTX 3050 (537.13)" display="none"`;
+const REAL_GPU_SMOKE = `arena headless smoke: ticks=600 frames=600 hash=9f162a2fe205f0ff hud_cells=5 hud_quads=3 mixed_frames=0 headless=forced audio="audio muted" presenter="presenter twin: NVIDIA GeForce RTX 3050 (537.13)" display="none requested"`;
+const SHORT_SMOKE = HEADLESS_SMOKE.replace("ticks=600", "ticks=30");
+const NO_HASH_SMOKE = HEADLESS_SMOKE.replace(" hash=9f162a2fe205f0ff", "");
+const MOVED_SMOKE = HEADLESS_SMOKE.replace("hash=9f162a2fe205f0ff", "hash=0000000000000000");
 
-// What a hosted runner with no GPU writes: the window opens, the presenter
-// finds no adapter and the binary exits 1 before any smoke line.
+// What a hosted runner with no GPU wrote before the `--headless` route: the
+// window opened, the presenter found no adapter and the binary exited before
+// any smoke line. The headless route must never need an adapter, so this text
+// beside no receipt is a red, not a skip.
 const NO_ADAPTER_BOOT = `arena backend=auto fallback=dx12 reason=compiled-in default; no pilot report yet
 arena vram budget_mb=7523 usage_mb=0 headroom_mb=7523 dedicated_mb=0
 arena notice: audio muted: no device opened; mixer voices render offline
@@ -168,13 +174,27 @@ test("a real child process with the golden receipt passes", (t) => {
   assert.equal(result.hash, GOLDEN_HASH);
 });
 
-test("the headless game line is read with its adapter", () => {
+test("the headless game line is read with its adapter and final hash", () => {
   const smoke = parseSmoke(HEADLESS_SMOKE);
   assert.equal(smoke.kind, "headless");
-  assert.equal(smoke.ticks, 30);
-  assert.equal(smoke.frames, 30);
+  assert.equal(smoke.ticks, 600);
+  assert.equal(smoke.frames, 0);
+  assert.equal(smoke.hash, "9f162a2fe205f0ff");
+  assert.equal(smoke.headless, "forced");
   assert.equal(smoke.adapter, "none");
   assert.equal(checkSmoke(HEADLESS_SMOKE).ok, true);
+});
+
+test("the game receipt must carry the requested ticks and a final hash", () => {
+  assert.equal(checkSmoke(SHORT_SMOKE, { expectTicks: 600 }).reason, "GAME_SHORT_RUN");
+  assert.equal(checkSmoke(NO_HASH_SMOKE).reason, "GAME_NO_HASH");
+  assert.equal(checkSmoke(HEADLESS_SMOKE, { expectTicks: 600 }).ok, true);
+  // A receipt that never ticked can never look like a hash.
+  const zero = HEADLESS_SMOKE.replace("ticks=600", "ticks=0").replace(
+    "hash=9f162a2fe205f0ff",
+    "hash=-",
+  );
+  assert.equal(checkSmoke(zero).reason, "GAME_ZERO_TICK");
 });
 
 test("a software presenter is named warp and a real adapter keeps its name", () => {
@@ -198,13 +218,41 @@ test("the arena leg quotes the game receipt and names the frame skip", (t) => {
     { ...io, spawn: twoRuns(GOOD, HEADLESS_SMOKE) },
   );
   assert.equal(code, 0, io.lines.join("\n"));
-  const game = io.lines.find((line) => line.startsWith("SHIP-GAME "));
-  assert.match(game, /^SHIP-GAME ticks=30 frames=30 kind=headless /);
-  assert.match(game, /presenter="presenter skipped: no wgpu adapter on this machine"/);
+  const game = io.lines.find((line) => line.startsWith("SHIP-GAME tick="));
+  assert.equal(
+    game,
+    "SHIP-GAME tick=600 hash=9f162a2fe205f0ff frames=0 seconds=10.000 adapter=none headless=forced runs=2",
+  );
+  assert.ok(
+    io.lines.includes('SHIP-GAME presenter="presenter skipped: no wgpu adapter on this machine"'),
+    io.lines.join("\n"),
+  );
   assert.ok(
     io.lines.includes("SHIP-FRAME skipped adapter=none reason=no-hardware-adapter"),
     io.lines.join("\n"),
   );
+});
+
+test("two game runs with different final hashes make the CLI red", (t) => {
+  const dir = tempDir(t);
+  const proof = join(dir, "engine2040.exe");
+  const arena = join(dir, "arena.exe");
+  writeFileSync(proof, "not a real build");
+  writeFileSync(arena, "not a real build");
+  let runs = 0;
+  const spawn = (command, args) => {
+    if (args.includes("--verify")) return { status: 0, stdout: GOOD, stderr: "" };
+    runs += 1;
+    return { status: 0, stdout: runs === 1 ? HEADLESS_SMOKE : MOVED_SMOKE, stderr: "" };
+  };
+  const io = collect();
+  const code = main(["--proof", proof, "--arena", arena], { ...io, spawn });
+  assert.equal(code, 1);
+  assert.ok(
+    io.lines.some((line) => line.startsWith("SHIP-GAME FAIL [GAME_HASH_MOVED]")),
+    io.lines.join("\n"),
+  );
+  assert.match(io.errors.join("\n"), /SHIP-RUN FAIL/);
 });
 
 test("a game run with no smoke line makes the CLI red", (t) => {
@@ -225,11 +273,11 @@ test("a game run with no smoke line makes the CLI red", (t) => {
   );
 });
 
-// The mirror runner has no wgpu adapter: the arena window opens, the presenter
-// finds no adapter and the binary exits 1 before the smoke line. The row says
-// to name the adapter when the runner cannot present, so this one case is a
-// skip. The proof receipt above still gates the job.
-test("a runner with no adapter names the skip instead of failing the job", (t) => {
+// The mirrored runner has no wgpu adapter, but the shipped check passes
+// `--headless`, so the game plays with no presenter instead of asking for one.
+// A boot that still dies on "no wgpu adapter" is the old window route: it
+// reaches no receipt and stays red, with the adapter named in the detail.
+test("a no-adapter boot without the headless receipt is red, not skipped", (t) => {
   const dir = tempDir(t);
   const proof = join(dir, "engine2040.exe");
   const arena = join(dir, "arena.exe");
@@ -240,20 +288,18 @@ test("a runner with no adapter names the skip instead of failing the job", (t) =
     ["--proof", proof, "--arena", arena],
     { ...io, spawn: twoRunsStatus(GOOD, NO_ADAPTER_BOOT, 1) },
   );
-  assert.equal(code, 0, io.lines.join("\n"));
+  assert.equal(code, 1);
   assert.ok(io.lines.includes(`SHIP-RUN tick=600 hash=${GOLDEN_HASH}`), io.lines.join("\n"));
   assert.ok(
-    io.lines.some((line) => line.startsWith("SHIP-GAME skipped adapter=none reason=no-wgpu-adapter")),
+    io.lines.some((line) =>
+      line.startsWith("SHIP-GAME FAIL [GAME_NO_RECEIPT] the arena binary exited 1; the headless route still asked for a wgpu adapter"),
+    ),
     io.lines.join("\n"),
   );
-  assert.ok(
-    io.lines.includes("SHIP-FRAME skipped adapter=none reason=no-wgpu-adapter"),
-    io.lines.join("\n"),
-  );
-  assert.ok(io.lines.some((line) => line.startsWith("SHIP-RUN PASS")), io.lines.join("\n"));
+  assert.match(io.errors.join("\n"), /SHIP-RUN FAIL/);
 });
 
-test("the no-adapter skip is narrow: any other arena failure stays red", (t) => {
+test("any other arena failure stays red", (t) => {
   const dir = tempDir(t);
   const proof = join(dir, "engine2040.exe");
   const arena = join(dir, "arena.exe");
@@ -275,12 +321,13 @@ test("the no-adapter skip is narrow: any other arena failure stays red", (t) => 
 
 test("runArena names a no-adapter boot by reason", () => {
   const result = runArena("C:\\ship\\arena.exe", {
+    ticks: 600,
     spawn: () => ({ status: 1, stdout: NO_ADAPTER_BOOT, stderr: "" }),
   });
   assert.equal(result.status, 1);
   assert.equal(result.ok, false);
-  assert.equal(result.reason, "GAME_NO_ADAPTER");
-  assert.match(result.detail, /no wgpu adapter on this machine/);
+  assert.equal(result.reason, "GAME_NO_RECEIPT");
+  assert.match(result.detail, /the headless route still asked for a wgpu adapter/);
   assert.equal(checkSmoke(NO_ADAPTER_BOOT).reason, "GAME_NO_RECEIPT");
 });
 

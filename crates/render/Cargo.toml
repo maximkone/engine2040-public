@@ -10,14 +10,21 @@ workspace = true
 
 [features]
 # Headless-first: default build pulls zero external deps. `v1` (glam camera
-# math + image PNG capture + manifest JSON) and `window` (GPU lane, implies
+# math + image PNG capture + manifest JSON) and `gpu` (the wgpu lane, implies
 # `v1` because `v1_gpu` renders the `v1` scene) are opt-in. image is
 # PNG-only (no defaults): the avif chain (ravif/rav1e/libfuzzer-sys, NCSA)
 # fails the license gate. serde_json rides `v1`, never dev-deps: the audit
 # traverses dev-deps of reachable crates, so no reachable crate takes an
 # external dev-dep.
 v1 = ["dep:glam", "dep:image", "dep:serde_json", "dep:engine-assets"]
-window = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:windows", "dep:engine-material", "v1"]
+# WEB5: the GPU lane builds for wasm32. pollster compiles there and every
+# sync adapter/device helper is native-only; the browser page opens its
+# device itself and hands it to `Presenter::init_from_device`, and the
+# async-init landing takes the last blocking waits out of that path.
+gpu = ["dep:wgpu", "dep:pollster", "dep:engine-material", "v1"]
+# The native window lane: the event loop (winit) plus the DXGI VRAM reader
+# (the Windows-only `windows` crate) on top of `gpu`.
+window = ["gpu", "dep:winit", "dep:windows"]
 # CQ23: CPU naga gate over every shipped WGSL, no GPU. Reuses the material
 # crate's one naga owner (`engine-material/validate`); the default graph stays
 # std-only. `engine-game`'s `app` leg turns this on, so a type-broken shader
@@ -84,3 +91,7 @@ windows = { version = "0.62", optional = true, default-features = false, feature
 
 [dev-dependencies]
 engine-core = { workspace = true, features = ["test-util"] }
+# ENG20 pair capture: writes the TAA-off reference and the TAA-on arms as
+# PNG sequences (png only, same crate as the optional `v1` dep). Files land
+# under target/captures/taa-pair, never in git.
+image = { version = "0.25", default-features = false, features = ["png"] }

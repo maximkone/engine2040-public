@@ -261,17 +261,8 @@ mod tests {
     const LAYERS: u32 = 32;
     const MIB: u64 = 1024 * 1024;
 
-    static PROBES: AtomicUsize = AtomicUsize::new(0);
-    /// 0 = roomy (5 GB free), 1 = short (1 GB free).
-    static MODE: AtomicUsize = AtomicUsize::new(0);
-
-    fn scripted_probe() -> VramReading {
-        PROBES.fetch_add(1, Ordering::SeqCst);
-        let used_mb = if MODE.load(Ordering::SeqCst) == 0 {
-            500
-        } else {
-            5_000
-        };
+    /// A 6 GB card using `used_mb`: the same budget every probe reports.
+    fn measured(used_mb: u64) -> VramReading {
         VramReading::Measured(VramMeasure {
             budget_bytes: 6_000 * MIB,
             usage_bytes: used_mb * MIB,
@@ -279,13 +270,22 @@ mod tests {
         })
     }
 
-    fn watch() -> PressureWatch {
-        PROBES.store(0, Ordering::SeqCst);
+    /// 5.5 GB free: the whole 4 GB model and the 512 MB reserve fit.
+    fn roomy() -> VramReading {
+        measured(500)
+    }
+
+    /// 1 GB free: only 3 of the 32 layers fit beside the reserve.
+    fn short() -> VramReading {
+        measured(5_000)
+    }
+
+    fn watch(probe: VramProbe) -> PressureWatch {
         PressureWatch::with_probe(
             ArbiterConfig::reference(MODEL_MB),
             LAYERS,
             FRAME_BUDGET_60HZ_US,
-            scripted_probe,
+            probe,
         )
         .expect("watch")
     }
@@ -303,26 +303,29 @@ mod tests {
 
     #[test]
     fn the_os_probe_runs_once_a_second_not_once_a_frame() {
-        MODE.store(0, Ordering::SeqCst);
-        let mut watch = watch();
-        assert_eq!(PROBES.load(Ordering::SeqCst), 1, "one probe at start");
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        fn counted() -> VramReading {
+            HITS.fetch_add(1, Ordering::SeqCst);
+            roomy()
+        }
+        let mut watch = watch(counted);
+        assert_eq!(HITS.load(Ordering::SeqCst), 1, "one probe at start");
         // 30 frames of 16 ms are 480 ms: no new reading.
         for _ in 0..30 {
             watch.frame(16_000, 16);
         }
-        assert_eq!(PROBES.load(Ordering::SeqCst), 1, "under a second: cached");
+        assert_eq!(HITS.load(Ordering::SeqCst), 1, "under a second: cached");
         // 40 more cross the second: exactly one more reading.
         for _ in 0..40 {
             watch.frame(16_000, 16);
         }
-        assert_eq!(PROBES.load(Ordering::SeqCst), 2, "one probe per second");
+        assert_eq!(HITS.load(Ordering::SeqCst), 2, "one probe per second");
         assert_eq!(watch.frames(), 70);
     }
 
     #[test]
     fn a_heavy_window_moves_the_placement_and_prints_one_line_per_change() {
-        MODE.store(0, Ordering::SeqCst);
-        let mut watch = watch();
+        let mut watch = watch(roomy);
         // The warmup prints once and moves nothing.
         let warm_lines = warm(&mut watch);
         assert_eq!(warm_lines.len(), 1, "first frame only: {warm_lines:?}");
@@ -352,8 +355,7 @@ mod tests {
 
     #[test]
     fn a_compile_spike_during_warmup_is_not_gameplay_pressure() {
-        MODE.store(0, Ordering::SeqCst);
-        let mut watch = watch();
+        let mut watch = watch(roomy);
         // The real 3050 run's frame 0 took 658 ms of shader compile.
         watch.frame(658_000, 658);
         for _ in 1..WARMUP_FRAMES {
@@ -370,8 +372,7 @@ mod tests {
 
     #[test]
     fn a_short_budget_reaches_the_line_as_a_layer_count() {
-        MODE.store(1, Ordering::SeqCst);
-        let mut watch = watch();
+        let mut watch = watch(short);
         // 1 GB free minus the 512 MB reserve: 488 usable, 3 layers of 125.
         assert_eq!(watch.vram().free_mb(), Some(1_000));
         assert_eq!(watch.plan().gpu_layers, 3);
@@ -384,13 +385,23 @@ mod tests {
 
     #[test]
     fn a_reading_change_prints_the_new_plan_once() {
-        MODE.store(0, Ordering::SeqCst);
-        let mut watch = watch();
+        static FLIPPED: AtomicUsize = AtomicUsize::new(0);
+        fn flipping() -> VramReading {
+            if FLIPPED.load(Ordering::SeqCst) == 0 {
+                roomy()
+            } else {
+                short()
+            }
+        }
+        let mut watch = watch(flipping);
         assert!(watch.plan().is_whole(), "5.5 GB free carries 4 GB");
-        watch.frame(16_000, 16);
-        MODE.store(1, Ordering::SeqCst);
+        // The first presented frame prints even with no change, so a quiet run
+        // still has its receipt line.
+        let mut lines = vec![watch
+            .frame(16_000, 16)
+            .expect("the first frame prints its receipt line")];
+        FLIPPED.store(1, Ordering::SeqCst);
         // Cross the probe second: the short reading arrives with its line.
-        let mut lines = Vec::new();
         for _ in 0..70 {
             if let Some(line) = watch.frame(16_000, 16) {
                 lines.push(line);
@@ -428,19 +439,14 @@ mod tests {
 
     #[test]
     fn a_zero_frame_budget_is_refused() {
-        let refused = PressureWatch::with_probe(
-            ArbiterConfig::reference(MODEL_MB),
-            LAYERS,
-            0,
-            scripted_probe,
-        );
+        let refused =
+            PressureWatch::with_probe(ArbiterConfig::reference(MODEL_MB), LAYERS, 0, roomy);
         assert!(matches!(refused, Err(WatchError::Feed(_))));
         let bad_cfg = ArbiterConfig {
             degrade_after: 0,
             ..ArbiterConfig::reference(MODEL_MB)
         };
-        let refused =
-            PressureWatch::with_probe(bad_cfg, LAYERS, FRAME_BUDGET_60HZ_US, scripted_probe);
+        let refused = PressureWatch::with_probe(bad_cfg, LAYERS, FRAME_BUDGET_60HZ_US, roomy);
         assert!(matches!(refused, Err(WatchError::Config(_))));
     }
 }

@@ -315,11 +315,23 @@ pub(crate) struct GpuMesh {
     /// Interleaved vertex buffer (`COPY_DST`: a dynamic mesh rewrites it
     /// in place every frame instead of making a new one).
     pub(crate) vertex: wgpu::Buffer,
+    /// LF5: previous-frame positions, compact `vec3` rows (stride 12), the
+    /// motion target's second vertex stream. `None` for a skinned mesh,
+    /// whose previous pose comes from the previous joint palette instead.
+    pub(crate) prev_vertex: Option<wgpu::Buffer>,
+    /// CPU copy of the positions `vertex` last held: the next refresh
+    /// publishes them into `prev_vertex`. Empty for a skinned mesh.
+    pub(crate) last_positions: Vec<[f32; 3]>,
     pub(crate) index: wgpu::Buffer,
     /// Index count.
     pub(crate) count: u32,
     /// Vertex count the buffer holds (fixed for the buffer's life).
     pub(crate) vertices: u32,
+    /// World-space bounding sphere `[x, y, z, radius]` of the positions the
+    /// vertex buffer holds, refreshed with them. The forward stage draws
+    /// positions verbatim, so this is the draw's world bound for the EG38
+    /// submit cull.
+    pub(crate) bounds: [f32; 4],
     /// CPU copy of the triangle list the index buffer holds: an in-place
     /// vertex refresh recomputes the tangents from it. Empty for a skinned
     /// mesh, which never refreshes in place.
@@ -367,6 +379,16 @@ pub(crate) struct Targets {
     /// CPU image of the id clear (`ID_CLEAR` bytes), written back into the
     /// target before a pass-truth capture so its ids describe one frame.
     pub(crate) id_clear: Vec<u8>,
+    /// LF5 uv-space motion (`Rg16Float`): the forward pass writes it beside
+    /// HDR and id on the 1x path; the MSAA path clears it (no 4x twin).
+    pub(crate) motion_view: wgpu::TextureView,
+    /// Texture behind `motion_view` (COPY_SRC: tests copy it back). Kept
+    /// beside the view so the pair dies together.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "owns the texture behind `motion_view`")
+    )]
+    pub(crate) motion_texture: wgpu::Texture,
     /// RL9 fog composite color (sRGB) plus frame size for texel lookup.
     pub(crate) fog_col_buf: wgpu::Buffer,
     /// Blit bind group over `hdr_view` plus the RL9 pair; rebuilt with
@@ -507,6 +529,14 @@ pub(super) fn particle_err(e: particles_gpu::ParticleError) -> PresentError {
     }
 }
 
+/// Map a weapon-trail stage failure into the presenter error (window build).
+pub(super) fn trail_err(e: crate::trail_draw_gpu::TrailDrawError) -> PresentError {
+    PresentError::InvalidDraw {
+        index: 0,
+        reason: format!("weapon trail: {e}"),
+    }
+}
+
 /// Map a decal failure into the presenter error (window build).
 pub(super) fn decal_err(e: decals::DecalError) -> PresentError {
     match e {
@@ -582,13 +612,17 @@ mod id_tests {
 
     #[test]
     fn id_target_stays_clear_on_offscreen() {
-        let mut presenter = match crate::present::Presenter::init_offscreen() {
-            Ok(p) => p,
-            Err(PresentError::NoAdapter) => {
-                eprintln!("SKIPPED id target readback: no adapter");
-                return;
-            }
+        let probe = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(e) => panic!("presenter init failed: {e}"),
+        };
+        let Some(mut presenter) =
+            crate::test_gpu::require_or_skip("id_target_stays_clear_on_offscreen", probe)
+        else {
+            return;
         };
         let key = crate::present::MeshKey::new(0x1D1D, [0x1D; 32]);
         presenter
@@ -624,13 +658,17 @@ mod id_tests {
 
     #[test]
     fn id_target_reports_box_id() {
-        let mut presenter = match crate::present::Presenter::init_offscreen() {
-            Ok(p) => p,
-            Err(PresentError::NoAdapter) => {
-                eprintln!("SKIPPED id target readback: no adapter");
-                return;
-            }
+        let probe = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(e) => panic!("presenter init failed: {e}"),
+        };
+        let Some(mut presenter) =
+            crate::test_gpu::require_or_skip("id_target_reports_box_id", probe)
+        else {
+            return;
         };
         let key = crate::present::MeshKey::new(0x1D1D, [0x1D; 32]);
         presenter
@@ -677,13 +715,18 @@ mod id_tests {
 
     #[test]
     fn id_target_box_readback_holds_box_id_and_clear() {
-        let mut presenter = match crate::present::Presenter::init_offscreen() {
-            Ok(p) => p,
-            Err(PresentError::NoAdapter) => {
-                eprintln!("SKIPPED id target readback: no adapter");
-                return;
-            }
+        let probe = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(e) => panic!("presenter init failed: {e}"),
+        };
+        let Some(mut presenter) = crate::test_gpu::require_or_skip(
+            "id_target_box_readback_holds_box_id_and_clear",
+            probe,
+        ) else {
+            return;
         };
         let box_key = crate::present::MeshKey::new(0xB0E1, [0xB0; 32]);
         let plane_key = crate::present::MeshKey::new(0x51A0, [0x51; 32]);
@@ -845,13 +888,17 @@ mod msaa_targets_tests {
             !edge_has_intermediate(&off_tex, &off_tex),
             "flat off-set stays stepped"
         );
-        let mut presenter = match crate::present::Presenter::init_offscreen() {
-            Ok(presenter) => presenter,
-            Err(crate::present::PresentError::NoAdapter) => {
-                eprintln!("SKIPPED msaa targets resolve: no adapter");
-                return;
-            }
+        let probe = match crate::present::Presenter::init_offscreen() {
+            Ok(presenter) => Ok(presenter),
+            Err(crate::present::PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(error) => panic!("presenter init failed: {error}"),
+        };
+        let Some(mut presenter) =
+            crate::test_gpu::require_or_skip("msaa_targets_resolve_only_when_on", probe)
+        else {
+            return;
         };
         presenter.resize(64, 64).expect("size applies");
         presenter.ensure_targets(64, 64);

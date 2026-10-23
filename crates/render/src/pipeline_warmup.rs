@@ -127,7 +127,7 @@ pub fn late_line(ledger: &Ledger) -> Option<String> {
 /// `Device::create_render_pipeline` and `create_compute_pipeline` with a ledger entry each.
 /// Import it with `use crate::pipeline_warmup::CountedPipelines as _;` and call the `_counted`
 /// twin where a pipeline is built: the call keeps the shape of the wgpu call it replaces.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub trait CountedPipelines {
     /// `create_render_pipeline`, counted.
     fn create_render_pipeline_counted(
@@ -141,7 +141,7 @@ pub trait CountedPipelines {
     ) -> wgpu::ComputePipeline;
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl CountedPipelines for wgpu::Device {
     fn create_render_pipeline_counted(
         &self,

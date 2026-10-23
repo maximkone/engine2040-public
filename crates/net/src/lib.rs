@@ -37,6 +37,8 @@ pub mod connect_race;
 /// Real-UDP link between the two machines of a split bout: lockstep slot
 /// exchange with resends, relay registration, STUN echo, hole punch, probes.
 pub mod courier;
+pub mod cut_soak;
+pub mod cuts;
 pub mod dedicated;
 pub mod delay;
 pub mod delta;
@@ -60,6 +62,8 @@ pub mod interest;
 /// Presentation snapshot interpolation: Hermite C1 positions, quaternion
 /// yaw dispatch, snapshot ring plus extrapolate guard. Render-time only.
 pub mod interp;
+/// ioq3 netchan header and fragment lane (pattern only, beside `KIND_*`).
+pub mod ioq3;
 /// Lag window of the dedicated server: how long a tick stays open for a
 /// remote player's input, sized from round trip, capped at 16 ticks, with a
 /// receipt per attack press that replays exactly.
@@ -152,6 +156,10 @@ pub mod webtransport;
 static TEST_ALLOCATOR: engine_core::alloc_probe::CountingAlloc =
     engine_core::alloc_probe::CountingAlloc;
 
+pub use cuts::{
+    decode_cuts, encode_cuts, CutLog, CutRow, WireCut, CUTS_HEADER_LEN, CUTS_ROW_BYTES, CUT_BYTES,
+    MAX_CUTS_PER_PACKET,
+};
 pub use dedicated::{
     ms_to_ticks, ticks_to_ms, Beacon, HeadlessServer, ServerError, BEACON_LEN, BEACON_MAGIC,
     BEACON_VERSION, MAX_LATENCY_MS,
@@ -161,7 +169,7 @@ pub use heal::{
 };
 pub use session::{
     decode_delta, encode_delta, Client, Delta, FighterDelta, FighterSnap, FullSnap, InterpResult,
-    Interpolator, NetError, Server, SnapshotDelta,
+    Interpolator, NetError, Server, SnapshotDelta, KIND_CUTS,
 };
 
 /// Owner-swap pins: every net fold routes through `engine-core` hashing, and

@@ -267,14 +267,19 @@ fn upload_mesh_checked(
 type CubeFace = ((f32, f32, f32), [[f32; 3]; 4]);
 
 /// Procedural unit cube (half-extent 0.5, 24 verts, 12 tris) standing in for
-/// A1's imported fixture. R1 disables face culling in both rasterizers and
-/// depth-tests only, so winding is informational until a culling pass lands.
+/// A1's imported fixture. Face culling is on in the forward pass
+/// (`cull_mode: Some(Back)`), so every face must wind counter-clockwise seen
+/// from outside: a clockwise face is dropped and the far inside wall, whose
+/// outward normal points away from the viewer, is drawn in its place.
 pub fn cube() -> MeshData {
-    // 6 faces x 4 corners: position, outward normal, uv.
+    // 6 faces x 4 corners: position, outward normal, uv. Corners run
+    // counter-clockwise seen from the side the normal points at, so for the
+    // triangle (p0, p1, p2) the cross product (p1 - p0) x (p2 - p0) is the
+    // outward normal. `cube_face_triangles_wind_outward` pins that rule.
     #[rustfmt::skip]
     const FACES: [CubeFace; 6] = [
-        ((1.0, 0.0, 0.0), [[0.5,-0.5,-0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5]]),
-        ((-1.0, 0.0, 0.0), [[-0.5,-0.5,0.5],[-0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[-0.5,0.5,0.5]]),
+        ((1.0, 0.0, 0.0), [[0.5,-0.5,-0.5],[0.5,0.5,-0.5],[0.5,0.5,0.5],[0.5,-0.5,0.5]]),
+        ((-1.0, 0.0, 0.0), [[-0.5,-0.5,-0.5],[-0.5,-0.5,0.5],[-0.5,0.5,0.5],[-0.5,0.5,-0.5]]),
         ((0.0, 1.0, 0.0), [[-0.5,0.5,-0.5],[-0.5,0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5]]),
         ((0.0, -1.0, 0.0), [[-0.5,-0.5,0.5],[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,-0.5,0.5]]),
         ((0.0, 0.0, 1.0), [[-0.5,-0.5,0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[-0.5,0.5,0.5]]),
@@ -1690,7 +1695,7 @@ mod tests {
     /// validation errors at a test size, and the warm submit stays inside
     /// `GPU_SUBMIT_BUDGET_MS`.
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn camera_eye_camera_window_submit_is_clean_and_inside_the_budget() {
         use crate::test_gpu::{require_or_skip, NoAdapter};
         // A standing eye three meters from the cube, looking down at it.
@@ -1932,6 +1937,46 @@ mod tests {
             upload_mesh(&good.positions, &good.normals, &bad_uv, &good.indices),
             Err(MeshError::UvOutOfRange(7))
         );
+    }
+
+    /// EG38: every cube triangle winds counter-clockwise seen from outside,
+    /// so the forward pass's back-face cull keeps the near face and drops the
+    /// far wall. Before the fix faces 0 and 1 (the +x and -x sides) wound the
+    /// other way, so a camera on either side drew the far inside wall.
+    #[test]
+    fn cube_face_triangles_wind_outward() {
+        let mesh = cube();
+        assert_eq!(mesh.indices.len(), 36, "twelve triangles");
+        let mut seen = [0u8; 6];
+        for tri in mesh.indices.chunks_exact(3) {
+            let p: Vec<[f32; 3]> = tri.iter().map(|i| mesh.positions[*i as usize]).collect();
+            let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+            let e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+            let cross = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            let len = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+            assert!(len > 0.0, "triangle {tri:?} is not degenerate");
+            let unit = [cross[0] / len, cross[1] / len, cross[2] / len];
+            let n = mesh.normals[tri[0] as usize];
+            let dot = unit[0] * n[0] + unit[1] * n[1] + unit[2] * n[2];
+            assert!(
+                dot > 0.999,
+                "triangle {tri:?} faces {unit:?}, its stored normal is {n:?}"
+            );
+            let axis = match n {
+                [1.0, 0.0, 0.0] => 0,
+                [-1.0, 0.0, 0.0] => 1,
+                [0.0, 1.0, 0.0] => 2,
+                [0.0, -1.0, 0.0] => 3,
+                [0.0, 0.0, 1.0] => 4,
+                _ => 5,
+            };
+            seen[axis] += 1;
+        }
+        assert_eq!(seen, [2, 2, 2, 2, 2, 2], "two triangles per face");
     }
 
     #[test]

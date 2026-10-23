@@ -1,0 +1,15 @@
+# Spike workspace for the box3d-rust determinism oracle (row PX45).
+#
+# Its own workspace on purpose: a tools/ spike must never become a member of
+# the engine2040 workspace and never sit in the fixed tick. Nothing in here is
+# linked by a crate under crates/.
+[workspace]
+resolver = "2"
+members = ["oracle"]
+exclude = ["vendor/box3d-rust"]
+
+# Same shape the donor ships for its demo builds: one binary, no debug asserts
+# in the measured runs.
+[profile.release]
+lto = "fat"
+codegen-units = 1

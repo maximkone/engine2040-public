@@ -56,7 +56,7 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `urban-war.md` — LATER — none — a second, different game proves the engine is general (frozen by FOCUS D7)
 - `silicon-city.md` — LATER — none — a future game: build a CPU like a city and a factory, ride one instruction in first person, compete on a performance/power/area skyline with humans and bots, and check the best designs in real open simulators (rows SIL1..SIL45, not on the board yet)
 - `silicon-world.md` — LATER — none — the look and world half of Silicon City: the chip as a walkable, drivable GTA-style city (RAM harbor, ghost town, subway), zoom with no load screen, time dial, radio stations as workloads, missions, every visual tied to a sim counter (rows SIL46..SIL59, not on the board yet)
-- `ryl1.md` — LATER — none — the RYL1 soul as a faction-war game: two asymmetric races, aimed combat, three capture points, 6v6 with AI seats (rows RY1-RY10, not on the board yet; owner door 2026-10-20)
+- `ryl1.md` — LATER — none — the RYL1 soul as a faction-war game: two asymmetric races, aimed combat, three capture points, 6v6 with AI seats (rows RY1-RY10, not on the board yet; RY2-RY5 landed in code; owner door 2026-10-20)
 - `road-war.md` — LATER — none — the Auto Assault soul as a vehicle territory war: one chassis, mounted guns, capture nodes on a highway (rows RW1-RW8, not on the board yet; owner 2026-10-20; shares RY3 and RY4)
 - `os-game.md` — LATER — none — the headless "You're the OS" game (`crates/ossim`: 4 CPUs, RAM and swap, one I/O queue, starvation, 12 stages), the window and web shells still to build, and the GPL idea-only note (rows OS1..OS5, not on the board yet)
 - `parked-2026-10-22.md` — LATER — none — 437 open rows taken off the board on 2026-10-22 (owner: "cut the too heavy stuff, I want it finished"): urban war, the 2040 tier, Empire, platform, north star, engine edge, agent seats, Tier A/B future rows, the 10-21 powerups and hunt waves; each block names why; a row returns by moving it into a shard
@@ -67,6 +67,7 @@ one line here in the same commit (`tools/plan-index.test.mjs` checks it).
 - `BOOK-GAPS-2026-10-12.md` — NEXT — all four — book review 1 (Gregory GEA, Lengyel, Modern Game Testing) vs code: wired-but-unused W1-W18, render order, decisions D1-D6 (a review, not rows)
 - `BOOK-GAPS-2-2026-10-12.md` — NOW — all four — book review 2 (30 books: engine, math, Rust, architecture, MCP, game design) rows N1-N40; boarded as GP27-GP42, GA13-GA15 and the engine rows in `../SPRINT-20-game.md`
 - `BOOK-GAPS-3-2026-10-19.md` — NOW — all four — book review 3 (Dunsky, Beuken, GPG8, Rust official docs, shelf) rows D1-D2 on AM14/AM15, G1-G4 as NB3-NB5/AM13, R1-R2 as NB1-NB2 in `../SPRINT-23-books.md`
+- `BOOK-GAPS-4-2026-10-23.md` — NEXT — all four — book review 4 over the whole Downloads shelf: door push/resources/rules/anim verbs, cover perception, optimization rows BG10-BG13, and the new mobile tier BG7-BG9 (owner override of the no-mobile non-goal)
 - `ATLAS.md` — LATER — none — generated plan map (`node tools/plan-atlas.mjs --write`); never hand-edited
 - `DP1-deepdive.md` — NOW — AI door — stuck-gate deep dive for DP1 endpoint door net plus perf packs
 - `EG8-deepdive.md` — NOW — Look — stuck-gate deep dive for EG8 live pass-truth leg

@@ -167,8 +167,8 @@ fn scripted_insert_preview_apply_undo_roundtrip() {
     assert_eq!(page.objects[0].parent, None);
     assert_eq!(page.objects[0].local, pose(1.0));
 
-    // Same key plus same payload replays the recorded receipt; the
-    // change list is honest that the replay moved no new revision.
+    // Same key plus same payload replays the recorded receipt; the change list
+    // rebuilds the landed pair from the journal, so the live revision stays 1.
     let replayed =
         apply(&server, 0, 1, ops.clone(), drafted.approval.clone()).expect("idempotent replay");
     assert_eq!(replayed.revision, landed.revision);
@@ -176,12 +176,9 @@ fn scripted_insert_preview_apply_undo_roundtrip() {
     assert_eq!(replayed.key, landed.key);
     assert_eq!(replayed.undo_token, landed.undo_token);
     assert_eq!(replayed.spatial_delta, landed.spatial_delta);
-    assert!(
-        replayed.changes.added == 0
-            && replayed.changes.removed == 0
-            && replayed.changes.moved == 0
-            && replayed.changes.rows.is_empty(),
-        "a replay moves no revision, got {replayed:?}"
+    assert_eq!(
+        replayed.changes, landed.changes,
+        "a replay rebuilds the original pair from the journal, got {replayed:?}"
     );
     assert_eq!(read(&server, None, None).revision, 1);
 
@@ -606,8 +603,9 @@ fn tool_schema_drift_matches_command_shapes() {
             Op::SetMaterial { .. } => "set_material",
             Op::SetComponent { .. } => "set_component",
             Op::RemoveComponent { .. } => "remove_component",
-            // The door's DTOs cover the node ops; the material-table ops
-            // are not on the wire yet.
+            Op::SetBond { .. } => "set_bond",
+            // The door's DTOs cover the node ops; the material-table and bond
+            // ops are not on the wire yet.
             Op::PutMaterial { .. } => "put_material",
             Op::SetMaterialParam { .. } => "set_material_param",
             Op::RemoveLastMaterial => "remove_last_material",
@@ -971,9 +969,22 @@ fn assert_budget_grows(server: &McpServer, all: &[String]) {
     // ledger ceiling, so this bound still guards a doubling contract.
     // Both lanes grew the list on the same day from the same measurement, so the door
     // takes the looser of the two measured bounds.
+    // 2026-10-23 (AD7): `scene.spatial` names default-sized nodes (`default_sized`,
+    // the labelled fallback box a bare node gets), taking the default list to 58,512:
+    // bound 58_500 -> 58_700.
+    // 2026-10-23 (later window): three landed schemas grew the same list — AD2's
+    // apply receipt digests (`a08254413`, `38dec9bb7`), SP66's dark/unknown node
+    // rows (`c2a2c6b4c`) and view.compare's amplified diff image (`912a44723`) —
+    // to 60,036, measured at HEAD 5b29bac02: bound 58_700 -> 60_200.
+    // 2026-10-23 (AX23, `14fd8625c`): the inlined ChangeListDto schema (2,388
+    // chars) plus its two args and the diff kind word took the default list to
+    // 64,060: bound 60_200 -> 64_400.
+    // 2026-10-23 (door budget): `scene.query` advertises the diff shape once
+    // (`tx.apply` owns the inlined `ChangeListDto`), taking the default list to
+    // 61,742: bound 64_400 -> 62_400.
     assert!(
-        budget < 58_500,
-        "default list {budget} stays near the measured 2026-10-23 door (58_112)"
+        budget < 62_400,
+        "default list {budget} stays near the measured 2026-10-23 door (61_742)"
     );
     assert!(budget < everything, "the default list hides something");
     assert!(core_only < budget, "the scene pack adds to the core");

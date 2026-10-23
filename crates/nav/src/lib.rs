@@ -3,6 +3,7 @@
 //! destruction break sets), mesh (ludus proof bake), flow (steals proof).
 
 pub mod bake;
+pub mod crowd_contact;
 mod cursor;
 pub mod flow;
 pub mod funnel;
@@ -18,6 +19,13 @@ pub mod reach;
 pub mod rebake;
 pub mod spline;
 pub mod tiles;
+
+/// Test-only counting allocator so a warm crowd-contact step can prove it
+/// allocates nothing through [`engine_core::alloc_probe::measure`].
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: engine_core::alloc_probe::CountingAlloc =
+    engine_core::alloc_probe::CountingAlloc;
 
 #[cfg(test)]
 mod wiring_tests {

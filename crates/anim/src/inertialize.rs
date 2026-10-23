@@ -123,7 +123,7 @@ fn qclean(q: [f32; 4]) -> [f32; 4] {
 /// Polynomial only: platform transcendentals round differently across
 /// CPUs, so sim code never calls them (workspace determinism gate; the
 /// same Taylor shape as the yaw step in `readable.rs`).
-fn asin_unit(y: f32) -> f32 {
+pub(crate) fn asin_unit(y: f32) -> f32 {
     let c = y.clamp(0.0, 0.75);
     let c2 = c * c;
     c * (1.0
@@ -132,12 +132,12 @@ fn asin_unit(y: f32) -> f32 {
 }
 
 /// acos(d) for d in 0..=1 via 2*asin(sqrt((1-d)/2)); same error bar.
-fn acos_unit(d: f32) -> f32 {
+pub(crate) fn acos_unit(d: f32) -> f32 {
     2.0 * asin_unit(((1.0 - d.clamp(0.0, 1.0)) * 0.5).sqrt())
 }
 
 /// sin(x) for x in 0..=PI: fold to [0, PI/2], Taylor to x^9; error ~1e-5.
-fn sin_unit(x: f32) -> f32 {
+pub(crate) fn sin_unit(x: f32) -> f32 {
     const HPI: f32 = std::f32::consts::FRAC_PI_2;
     const PI: f32 = std::f32::consts::PI;
     let c = x.clamp(0.0, PI);

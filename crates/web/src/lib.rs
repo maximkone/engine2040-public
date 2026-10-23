@@ -11,8 +11,10 @@
 //! prints one `golden ... OK` (or `MISMATCH`) line: the engine runs here, not only the GPU.
 //!
 //! Input and audio (WEB7): [`input`] maps keyboard, mouse with pointer lock and the Gamepad API onto
-//! `engine-input` records, [`audio`] decides when the WebAudio context may start; `browser` (wasm only)
-//! wires both to the page and prints `input: kb=.. mouse=.. pad=..` and `audio: state=..`.
+//! `engine-input` records, [`audio`] decides when the WebAudio context may start, and
+//! [`audio_worklet`] is the sink the engine's mixer writes (an `AudioWorklet` ring with the
+//! deprecated `ScriptProcessorNode` as the printed fallback); `browser` (wasm only) wires both to
+//! the page and prints `input: kb=.. mouse=.. pad=..` and `audio: state=.. underruns=..`.
 //!
 //! Net duel (WEB9, WEB12): `?server=ws://host:port` makes the page join a native dedicated server
 //! through the connect race (`netplay`, wasm only), play a scripted 600-tick duel and print
@@ -23,7 +25,7 @@
 //! turns the animation-frame timestamp into 60 fixed steps a second; [`tier_view`] holds the frame pacing
 //! (window, ladder, drift, hidden gaps) and the startup probe's bookkeeping, all as plain data.
 //!
-//! The pure parts ([`anim`], [`audio`], [`content`], [`golden`], [`input`], [`limits`], [`netquery`], [`recovery`], [`report`]) build and
+//! The pure parts ([`anim`], [`audio`], [`audio_worklet`], [`content`], [`golden`], [`input`], [`limits`], [`netquery`], [`recovery`], [`report`]) build and
 //! test on every target. The browser glue (`shell`) exists on `wasm32` only, so the native
 //! workspace builds this crate as a library with no web dependencies. It depends on
 //! `engine-proof` (std-only) for the golden check. On `wasm32` it also draws the arena frame
@@ -34,6 +36,7 @@
 pub mod anim;
 pub mod arena_view;
 pub mod audio;
+pub mod audio_worklet;
 pub mod content;
 pub mod exchange;
 pub mod frame_bus;
@@ -42,6 +45,7 @@ pub mod input;
 pub mod input_tape;
 pub mod limits;
 pub mod netquery;
+pub mod perf_window;
 pub mod recovery;
 pub mod report;
 pub mod tier_view;
@@ -75,7 +79,9 @@ mod tests {
     /// The page's per-seat arrays must be exactly as long as the match has seats. `SEATS_LEN`
     /// is written out because `usize::from` is not const-callable yet; this test is what keeps
     /// the two equal, so a seat added to `page_duel` fails here instead of silently dropping a
-    /// seat's HUD.
+    /// seat's HUD. Both constants sit behind the wasm target (`fight` and `engine-game`), so the
+    /// test compiles and runs on the wasm build only.
+    #[cfg(target_arch = "wasm32")]
     #[test]
     fn seats_len_matches_the_match_seats() {
         assert_eq!(
@@ -86,7 +92,8 @@ mod tests {
     }
 
     #[test]
-    fn shader_block_has_the_fields_square_to_bytes_writes_in_order() {        let at = |needle: &str| {
+    fn shader_block_has_the_fields_square_to_bytes_writes_in_order() {
+        let at = |needle: &str| {
             SHADER_WGSL
                 .find(needle)
                 .unwrap_or_else(|| panic!("shader.wgsl lost `{needle}`"))

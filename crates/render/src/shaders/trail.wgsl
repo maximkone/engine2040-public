@@ -1,14 +1,16 @@
-// trail.wgsl: sword ribbon from the sim's integer sweep ring (RL53 slice 2).
+// trail.wgsl: sword ribbon from the game's blade-pair ring (LF14).
 // One staged draw: read the base/tip strip the CPU ring built, expand the pair
 // across the camera basis at the width scale, and carry the age alpha ramp.
-// Engine-owned WGSL, fixed math only, no wall clock, no bind group and no
-// pipeline: the submit bind that fills `TrailU` and the strip storage is a later
-// slice of RL53, exactly as particle.wgsl stages its own draw.
+// Engine-owned WGSL, fixed math only, no wall clock. The bind that fills
+// `TrailU` and the strip storage lives in `present/trail_draw_gpu.rs`.
 struct TrailU {
     view_proj: mat4x4<f32>,
     cam_right: vec3<f32>,
     width_scale: f32,
     cam_up: vec3<f32>,
+    // Verts staged this frame: the storage buffer is fixed at the ring cap,
+    // so the sweep look-ahead must stop at the live count, not `arrayLength`.
+    vert_count: u32,
 };
 struct StripVert {
     pos: vec3<f32>,
@@ -30,7 +32,7 @@ fn trail_vs(@builtin(vertex_index) vi: u32) -> TrailOut {
     let tip = strip[point * 2u + 1u];
     var along = tip.pos - base.pos;
     let ahead = point * 2u + 2u;
-    if (ahead < arrayLength(&strip)) {
+    if (ahead < trail.vert_count) {
         along = strip[ahead].pos - base.pos;
     }
     // Camera-facing perpendicular: the ribbon turns to the viewer, never edge-on.

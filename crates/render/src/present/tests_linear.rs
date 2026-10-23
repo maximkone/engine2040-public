@@ -6,11 +6,11 @@
 
 #![cfg(test)]
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 use super::*;
 
 /// Sources that build WGSL: none of them may patch shader text.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const SHADER_BUILDERS: [(&str, &str); 7] = [
     ("present.rs", include_str!("../present.rs")),
     ("twin_shadow.rs", include_str!("../twin_shadow.rs")),
@@ -27,7 +27,7 @@ const SHADER_BUILDERS: [(&str, &str); 7] = [
 /// Body of the WGSL function `name`: from its signature to the closing brace
 /// at column 0. The brace is found without its line end, so a CRLF checkout
 /// closes the function the same way an LF one does.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn wgsl_fn_body<'a>(source: &'a str, name: &str) -> &'a str {
     let head = format!("fn {name}(");
     let start = source.find(&head).expect("function exists in the source");
@@ -36,7 +36,7 @@ fn wgsl_fn_body<'a>(source: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 mod shader_text {
     use super::*;
     use crate::v1_gpu::FORWARD_PBR_WGSL;
@@ -143,20 +143,23 @@ mod shader_text {
     }
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 mod device {
     use super::*;
     use crate::present::fog_fwd::FogFwd;
 
-    fn init_or_skip() -> Option<Presenter> {
-        match Presenter::init_offscreen() {
-            Ok(p) => Some(p),
-            Err(PresentError::NoAdapter) => {
-                eprintln!("SKIPPED linear frame gpu test: no wgpu adapter on this machine");
-                None
-            }
+    /// EG47: the no-adapter case routes through `require_or_skip`, so the
+    /// skipped test prints one `SKIPPED <test>` line and `E2040_REQUIRE_GPU=1`
+    /// turns the skip into a failure.
+    fn init_or_skip(test: &str) -> Option<Presenter> {
+        let probe = match Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(e) => panic!("presenter init failed (must fail loudly): {e}"),
-        }
+        };
+        crate::test_gpu::require_or_skip(test, probe)
     }
 
     fn cube_key() -> MeshKey {
@@ -345,7 +348,9 @@ mod device {
 
     #[test]
     fn forward_target_is_linear_hdr_with_exposure_as_the_only_scale() {
-        let Some(mut presenter) = init_or_skip() else {
+        let Some(mut presenter) =
+            init_or_skip("forward_target_is_linear_hdr_with_exposure_as_the_only_scale")
+        else {
             return;
         };
         presenter
@@ -398,7 +403,9 @@ mod device {
 
     #[test]
     fn sky_and_fog_mix_in_linear_radiance_before_the_tone_map() {
-        let Some(mut presenter) = init_or_skip() else {
+        let Some(mut presenter) =
+            init_or_skip("sky_and_fog_mix_in_linear_radiance_before_the_tone_map")
+        else {
             return;
         };
         presenter
@@ -496,7 +503,8 @@ mod device {
         // into an Rgba8UnormSrgb target must land on the same bytes as the
         // shader-encoded `fs` entry into the Rgba8Unorm twin (the earlier
         // blit encoded twice on such a surface and washed the frame out).
-        let Some(mut presenter) = init_or_skip() else {
+        let Some(mut presenter) = init_or_skip("srgb_surface_blit_matches_the_shader_encoded_twin")
+        else {
             return;
         };
         presenter
@@ -598,7 +606,8 @@ mod device {
 
     #[test]
     fn depth_only_entry_compiles_without_a_fragment_stage() {
-        let Some(presenter) = init_or_skip() else {
+        let Some(presenter) = init_or_skip("depth_only_entry_compiles_without_a_fragment_stage")
+        else {
             return;
         };
         let device = &presenter.device;
@@ -676,7 +685,9 @@ mod device {
     /// the composite.)
     #[test]
     fn capture_twin_fog_pair_composites_linear_before_the_tone_map() {
-        let Some(mut presenter) = init_or_skip() else {
+        let Some(mut presenter) =
+            init_or_skip("capture_twin_fog_pair_composites_linear_before_the_tone_map")
+        else {
             return;
         };
         presenter.resize(64, 64).expect("valid size applies");
@@ -815,7 +826,8 @@ mod device {
     /// inside a sub-pixel silhouette band).
     #[test]
     fn potato_look_guard_rebuilds_the_forward_pipelines() {
-        let Some(mut presenter) = init_or_skip() else {
+        let Some(mut presenter) = init_or_skip("potato_look_guard_rebuilds_the_forward_pipelines")
+        else {
             return;
         };
         presenter

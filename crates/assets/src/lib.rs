@@ -15,6 +15,9 @@ pub mod fighter_bundle;
 pub mod load_queue;
 pub use load_queue::{LoadError, LoadEvent, LoadQueue};
 pub mod budget;
+/// BVH motion intake: a hand-written text parser plus the retarget seam onto an
+/// engine skeleton. Std-only, no new dependency.
+pub mod bvh;
 pub mod datanode;
 /// The CT7 fighter rig as a body the page can hold: the atlas becomes KTX2
 /// block maps and the body drops its images, keeping the rig byte for byte.
@@ -47,6 +50,8 @@ pub mod bundle;
 #[cfg(feature = "import")]
 pub mod cooked;
 pub mod cooker;
+#[cfg(all(feature = "import", feature = "registry"))]
+mod index_codec;
 #[cfg(all(feature = "import", feature = "registry"))]
 pub use bundle::{
     load_bundle, BundleEntry, BundleError, BundleLoader, BundleWriter, EntryKind, LoadedBundle,
@@ -100,8 +105,8 @@ pub use kit_import::{
     kit_texture_asset, kit_texture_name, KitImage, KitImportError, KitMap, KitPiece, KitSet,
     KitTexture, KIT_FILES, MAX_KIT_DETAIL_CHARS,
 };
-/// Arena material maps cooked to block-compressed KTX2 with mips (BC1/BC5), plus the reader that
-/// decodes a cooked file to RGBA8. Std-only; no encoder dependency.
+/// Arena material maps cooked to block-compressed KTX2 with mips (BC7 colour, BC5 normal), plus
+/// the reader that decodes a cooked file to RGBA8. Std-only; no encoder dependency.
 pub mod ktx2_cook;
 #[cfg(feature = "import")]
 pub mod lod_swap;
@@ -140,10 +145,6 @@ pub use proxy::{
 /// rig: the bridge a baked combat pack needs to play on the game's body.
 #[cfg(feature = "import")]
 pub mod ct7_map;
-/// The Rocketbox body's Biped joint names and the map onto the engine's
-/// fighter rig: the realistic bodies play the same combat packs.
-#[cfg(feature = "import")]
-pub mod rocketbox_map;
 /// The fighter rig the teacher lane lands on, and the teacher's rest pose: the
 /// bake and the tick read the same joint order from here.
 #[cfg(feature = "import")]
@@ -158,6 +159,10 @@ pub mod recook;
 pub mod residency;
 #[cfg(feature = "import")]
 pub mod retarget;
+/// The Rocketbox body's Biped joint names and the map onto the engine's
+/// fighter rig: the realistic bodies play the same combat packs.
+#[cfg(feature = "import")]
+pub mod rocketbox_map;
 #[cfg(feature = "import")]
 pub mod skin_import;
 /// SOMA-77 joint table and its map onto the fighter-65 rig (bake-time names).
@@ -251,6 +256,25 @@ pub use registry::{
     content_hash, sha_hex, AssetId, AssetIdParseError, AssetRecord, AssetRegistry, BatchConflict,
     BatchOp, BatchOutcome, Guid, Handle, HandleError, ManifestRow, Registry, RegistryError,
     Reimport,
+};
+/// Seeded bake manifest: inputs, settings, versions and target profile to one
+/// artifact plus its blake3, so only what changed rebuilds.
+#[cfg(feature = "registry")]
+pub mod manifest;
+#[cfg(all(feature = "import", feature = "registry"))]
+pub use manifest::{cook_bundle_with_manifest, BakeError, BakedManifest};
+#[cfg(feature = "registry")]
+pub use manifest::{Manifest, ManifestError, Record};
+/// Provider-style text-to-motion source, the offline mock library and the bake
+/// that lands one clip on the fighter rig with a CT12 manifest.
+#[cfg(all(feature = "import", feature = "registry"))]
+pub mod motion_source;
+#[cfg(all(feature = "import", feature = "registry"))]
+pub use motion_source::{
+    bake_motion, hml22_bind, hml22_pairs, hml22_skeleton, BakeConfig, BakedMotion, BindReport,
+    CleanupReport, CompressionReport, LicenseMark, MockMotionSource, ModelCard, MotionClip,
+    MotionError, MotionRequest, MotionSource, PackagedMotion, PlayReport, TrainingData,
+    LOOPBACK_ENDPOINT, MAX_FOOT_SLIDE_MM,
 };
 #[cfg(not(feature = "registry"))]
 pub mod registry;

@@ -110,12 +110,12 @@ impl OverlayRing {
         let (ly0, ly1) = order_pair(y0c, y1c);
         let back = Quad {
             rect: [lx0, ly0, lx1, ly1],
-            uv: [0.0, 0.0, 1.0, 1.0],
+            uv: text::solid_uv(),
             col: [12, 12, 14, 255],
         };
         let fill = Quad {
             rect: [lx0, ly0, hp_fill_x1(lx0, lx1, fraction), ly1],
-            uv: [0.0, 0.0, 1.0, 1.0],
+            uv: text::solid_uv(),
             col: [196, 48, 44, 255],
         };
         let ok0 = self.push_quad(back);
@@ -125,14 +125,15 @@ impl OverlayRing {
 
     /// Stage one text line as glyph quads from the atlas; returns staged count.
     /// Origin is the top-left in 0..1 space; each cell is `height` tall and
-    /// `height * advance / 16` wide. Space advances with no quad; codes
-    /// outside 32..=127 are skipped with no advance. Stops when the ring is
-    /// full; the count tells the caller what reached the ring.
+    /// `height * advance_ratio()` wide (6 of the 8 atlas rows, so 0.75).
+    /// Space advances with no quad; codes outside 32..=126 are skipped with no
+    /// advance. Stops when the ring is full; the count tells the caller what
+    /// reached the ring.
     pub fn push_text(&mut self, x: f32, y: f32, height: f32, col: [u8; 4], line: &str) -> usize {
         if !height.is_finite() || height <= 0.0 {
             return 0;
         }
-        let w = height * text::advance_px() / 16.0;
+        let w = height * text::advance_ratio();
         let mut staged = 0usize;
         let mut cx = x;
         for byte in line.bytes() {
@@ -472,8 +473,8 @@ mod tests {
         let uv0 = atlas.glyph_uv(65).expect("code 65 is printable");
         let uv1 = atlas.glyph_uv(65).expect("code 65 is printable");
         assert_eq!(uv0, uv1);
-        assert_eq!(atlas.advance(), 8.0);
-        assert_eq!(atlas.baseline(), 13.0);
+        assert_eq!(atlas.advance(), 6.0);
+        assert_eq!(atlas.baseline(), 8.0);
         assert!(atlas.glyph_uv(31).is_none());
         let m0 = overlay_mvp(16.0 / 9.0);
         let m1 = overlay_mvp(16.0 / 9.0);
@@ -572,10 +573,11 @@ mod tests {
         assert_eq!(verts[1].pos2, [0.34, 0.05]);
         assert_eq!(verts[2].pos2, [0.04, 0.09]);
         assert_eq!(verts[3].pos2, [0.34, 0.09]);
-        assert_eq!(verts[0].uv2, [0.0, 0.0]);
-        assert_eq!(verts[1].uv2, [1.0, 0.0]);
-        assert_eq!(verts[2].uv2, [0.0, 1.0]);
-        assert_eq!(verts[3].uv2, [1.0, 1.0]);
+        let solid = text::solid_uv();
+        assert_eq!(verts[0].uv2, [solid[0], solid[1]]);
+        assert_eq!(verts[1].uv2, [solid[2], solid[1]]);
+        assert_eq!(verts[2].uv2, [solid[0], solid[3]]);
+        assert_eq!(verts[3].uv2, [solid[2], solid[3]]);
         for v in verts.iter().take(4) {
             assert_eq!(v.col4, [12, 12, 14, 255]);
         }

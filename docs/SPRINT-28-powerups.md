@@ -44,6 +44,12 @@ order is the lane's, not mine: cut 2 is the gate for cuts 3 and 5, and cut 4 nee
 Rows in this section come from lanes 04, 08 and 13, whose proposed-rows files are not written yet.
 Each one says so; the Accept may change when the lane lands.
 
+- [x] PW22 endpoint: verifier output in every build verb, per-instance grading (closes D19) — the door runs a build and returns text; it does not return a verdict, so an agent cannot tell which instance failed. The row gives every build verb a per-instance programmatic verdict and a run report with one bucket per failure kind (completed, resolved, error, unresolved, incomplete, infra_failure, ambiguous, empty_patch), and a no-check run counts as a failure, not a pass. Donor: GamePhanesStudio/GamePhanes `release/tasks/godot-replay-orbit-camera/rubric.yaml` and `tests/test.sh` (writes `reward.json`, no LLM judge in the scoring path), licence MIT (read live 2026-10-20), plus SWE-bench/SWE-bench `swebench/harness/reporting.py` (`make_run_report` bucket set) and `swebench/harness/grading.py`, licence MIT (read live 2026-10-20). Diff: regular. Tier A. Size M. Owns `crates/endpoint/src/verify_tasks.rs`, `crates/endpoint/src/mcp_tools.rs`, `crates/endpoint/src/build_level/imp/door.rs`. Landed 0face288.
+  Accept: `node tools/gh-check.mjs cargo test -p engine-endpoint --features mcp --lib verify_task` prints one verdict line per instance and one summary line with the bucket counts, and a build with zero checks prints `no check is not a pass`; every build verb (`level.build`, `game.build`, `sim.build.encounter`) answers its own report.
+  F2P: a build verb returns no verdict and names no failing instance.
+  P2P: golden d57b5c8ae3096614 x2; the door transcript tests stay green.
+  needs: none.
+
 
 ### The anim and the game (owner 2026-10-21)
 

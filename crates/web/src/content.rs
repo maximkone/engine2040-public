@@ -21,8 +21,16 @@ use std::future::Future;
 /// Where the packer puts the bundle inside `dist/web`.
 pub const ARENA_BUNDLE_URL: &str = "assets/arena.e2bundle";
 
+/// Where the packer puts the cooked rig inside `dist/web`: four bodies and
+/// their atlas quadrants, the lane `rig_cook` writes.
+pub const RIG_BUNDLE_URL: &str = "assets/fighters.e2bundle";
+
 /// The name the page gives its fetcher: `window.engine2040FetchAsset`.
 pub const PAGE_FETCHER: &str = "engine2040FetchAsset";
+
+/// The QW4 fetcher: it answers with the bundle's tier-0 prefix while the rest
+/// of the body keeps streaming for the page's progress bar.
+pub const PAGE_PREFIX_FETCHER: &str = "engine2040FetchAssetPrefix";
 
 /// Why the page has no cooked content: every failure is typed, none panics.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +89,20 @@ pub fn open_bundle(bytes: Vec<u8>) -> Result<BundleSource, ContentError> {
     Ok(BundleSource::open(bytes)?)
 }
 
+/// The fetched tier-0 prefix as an asset source (QW4). Every entry is named, but
+/// reading one from a later tier fails with its name, so the first frame can
+/// start on the coarse level while the HDRI tier is still in flight.
+///
+/// # Errors
+/// [`ContentError::Empty`] for a zero-length body, or the format's own refusal
+/// when the bytes stop inside a blob.
+pub fn open_bundle_prefix(bytes: Vec<u8>) -> Result<BundleSource, ContentError> {
+    if bytes.is_empty() {
+        return Err(ContentError::Empty);
+    }
+    Ok(BundleSource::open_prefix(bytes)?)
+}
+
 /// The bytes of `name` in `source`. A missing asset is a typed refusal that names
 /// it; a damaged blob is the format's own reason.
 ///
@@ -112,6 +134,24 @@ where
     open_bundle(fetch(url).await?)
 }
 
+/// Open the tier-0 prefix the host fetched for `url` (QW4). The fetch answers
+/// before the later tiers arrive; the source names every entry but reads only
+/// the bytes in hand.
+///
+/// # Errors
+/// The reason the host gave, [`ContentError::Empty`] for an empty body, or the
+/// format's refusal when the prefix stops inside a blob.
+pub async fn open_fetched_bundle_prefix<F, Fut>(
+    url: &str,
+    fetch: F,
+) -> Result<BundleSource, ContentError>
+where
+    F: FnOnce(&str) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, ContentError>>,
+{
+    open_bundle_prefix(fetch(url).await?)
+}
+
 /// Fetch the bundle at `url` through the page's own fetcher and open it.
 ///
 /// The page installs `window.engine2040FetchAsset` (see `crates/web/loader.js`);
@@ -127,21 +167,55 @@ pub async fn fetch_bundle(url: &str) -> Result<BundleSource, ContentError> {
     open_fetched_bundle(url, |url| page_fetch(url.to_string())).await
 }
 
+/// Fetch the arena bundle's tier-0 prefix through the page's QW4 fetcher and
+/// open it. The page resolves this call as soon as the coarse level is in hand;
+/// the rest of the bundle keeps streaming behind it.
+///
+/// # Errors
+/// The same refusals as [`fetch_bundle`], plus the format's refusal when the
+/// prefix stops inside a blob.
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_bundle_prefix(url: &str) -> Result<BundleSource, ContentError> {
+    open_fetched_bundle_prefix(url, |url| page_fetch_prefix(url.to_string())).await
+}
+
 /// The page's own fetch: it answers with the asset's bytes or throws. It takes
 /// the URL by value, so the future it returns does not borrow the caller's
 /// string.
 #[cfg(target_arch = "wasm32")]
 async fn page_fetch(url: String) -> Result<Vec<u8>, ContentError> {
+    use wasm_bindgen::JsValue;
+
+    page_call(PAGE_FETCHER, vec![JsValue::from_str(&url)]).await
+}
+
+/// The QW4 prefix fetch: the page answers at the tier-0 boundary, before the
+/// HDRI tier arrives.
+#[cfg(target_arch = "wasm32")]
+async fn page_fetch_prefix(url: String) -> Result<Vec<u8>, ContentError> {
+    use wasm_bindgen::JsValue;
+
+    page_call(PAGE_PREFIX_FETCHER, vec![JsValue::from_str(&url)]).await
+}
+
+/// Call one of the page's fetchers by name with `args` and read the bytes it
+/// answers. A missing function, a non-promise and a non-bytes answer are typed
+/// refusals; a thrown JS error keeps its HTTP status when it names one.
+#[cfg(target_arch = "wasm32")]
+async fn page_call(
+    fetcher_name: &str,
+    args: Vec<wasm_bindgen::JsValue>,
+) -> Result<Vec<u8>, ContentError> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
 
     let window = web_sys::window().ok_or_else(|| ContentError::Fetch("no window".into()))?;
-    let fetcher = js_sys::Reflect::get(&window, &JsValue::from_str(PAGE_FETCHER))
+    let fetcher = js_sys::Reflect::get(&window, &JsValue::from_str(fetcher_name))
         .ok()
         .and_then(|value| value.dyn_into::<js_sys::Function>().ok())
-        .ok_or_else(|| ContentError::Fetch("the page installed no asset fetcher".into()))?;
+        .ok_or_else(|| ContentError::Fetch(format!("the page installed no {fetcher_name}")))?;
     let promise = fetcher
-        .call1(&JsValue::NULL, &JsValue::from_str(&url))
+        .apply(&JsValue::NULL, &js_sys::Array::from_iter(args))
         .map_err(|err| ContentError::Fetch(describe(&err)))?;
     if !promise.is_instance_of::<js_sys::Promise>() {
         return Err(ContentError::Fetch(
@@ -199,6 +273,7 @@ mod tests {
     use super::*;
     use engine_assets::asset_source::{bundle_pack, PackRules};
     use std::cell::RefCell;
+    use std::rc::Rc;
     use std::task::{Context, Poll, Waker};
 
     /// Drive a future to its answer. The fakes below are ready at once, so
@@ -228,6 +303,82 @@ mod tests {
         let bytes = std::fs::read(&out).expect("read bundle");
         let _ = std::fs::remove_dir_all(&base);
         bytes
+    }
+
+    /// A bundle with a coarse tier and an HDRI tier: the QW4 prefix source
+    /// reads the coarse files and names the tier it does not hold yet.
+    fn packed_bundle_with_hdri(tag: &str) -> Vec<u8> {
+        let base = std::env::temp_dir().join(format!("e2040-web-content-tier-{tag}"));
+        let root = base.join("content");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(root.join("cooked")).expect("temp dir");
+        std::fs::create_dir_all(root.join("hdri")).expect("temp dir");
+        std::fs::write(root.join("cooked/sand_base.ktx2"), b"ktx2 bytes").expect("write");
+        std::fs::write(root.join("hdri/studio.hdr"), b"hdri bytes").expect("write");
+        let out = base.join("arena.e2bundle");
+        bundle_pack(
+            &root,
+            &out,
+            &PackRules::new().priority("hdri/studio.hdr", 1),
+        )
+        .expect("pack");
+        let bytes = std::fs::read(&out).expect("read bundle");
+        let _ = std::fs::remove_dir_all(&base);
+        bytes
+    }
+
+    /// The byte at which the coarse tier ends, from the full bundle's own index.
+    fn tier_zero_end(bytes: &[u8]) -> usize {
+        BundleSource::open(bytes.to_vec())
+            .expect("open")
+            .entries_in_file_order()
+            .filter(|entry| entry.priority == 0)
+            .map(|entry| entry.offset + entry.len)
+            .max()
+            .expect("tier 0")
+    }
+
+    /// QW4: a fetched prefix reads the coarse tier and refuses the HDRI tier by
+    /// name, so a torn first frame is impossible and the later tier is honest.
+    #[test]
+    fn a_tier_zero_prefix_reads_the_kit_and_names_the_hdri_tier() {
+        let bytes = packed_bundle_with_hdri("prefix");
+        let first = tier_zero_end(&bytes);
+        let source = open_bundle_prefix(bytes[..first].to_vec()).expect("prefix");
+        assert!(source.is_prefix());
+        assert_eq!(
+            &*source.read("cooked/sand_base.ktx2").expect("tier 0"),
+            b"ktx2 bytes"
+        );
+        let err = source
+            .read("hdri/studio.hdr")
+            .expect_err("tier 1 is not here");
+        assert!(
+            err.to_string().contains("not in the fetched prefix"),
+            "{err}"
+        );
+    }
+
+    /// QW4: the engine's prefix path asks the host and opens only what came.
+    #[test]
+    fn the_engine_prefix_path_opens_the_fetched_prefix() {
+        let bytes = packed_bundle_with_hdri("fetch-prefix");
+        let first = tier_zero_end(&bytes);
+        let prefix = bytes[..first].to_vec();
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let asked_in = Rc::clone(&asked);
+        let source = ready(open_fetched_bundle_prefix(ARENA_BUNDLE_URL, move |url| {
+            asked_in.borrow_mut().push(url.to_string());
+            let prefix = prefix.clone();
+            async move { Ok(prefix) }
+        }))
+        .expect("the prefix opens");
+        assert_eq!(*asked.borrow(), [ARENA_BUNDLE_URL.to_string()]);
+        assert_eq!(
+            &*source.read("cooked/sand_base.ktx2").expect("tier 0"),
+            b"ktx2 bytes"
+        );
+        assert!(source.read("hdri/studio.hdr").is_err());
     }
 
     /// A directory with one file, packed and read back through [`open_bundle`].

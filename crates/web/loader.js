@@ -136,15 +136,171 @@ const assetName = (url) => {
 // The message of a thrown value, bounded to one line.
 const reason = (err) => String(err?.message ?? err ?? "unknown").slice(0, 120);
 
+// QW10: the build ships the two cooked bundles gzip-compressed. dist/web must stay under
+// its 8 MiB limit, and a static host does not compress a binary type it does not know, so
+// the gzip lives on disk and the page undoes it while the body streams. The magic decides:
+// a dist that still holds a raw bundle loads exactly as before, so the two forms never
+// disagree about what a bundle is.
+const GZ_BYTES = [0x1f, 0x8b];
+
+// Read the body until its first two bytes are known, then hand the whole body on from byte
+// zero. `gzip` says which form arrived; nothing is buffered beyond two bytes, so the
+// tier-0 prefix still reaches the page while the rest of the bundle is in flight.
+async function sniffGzip(body) {
+  const reader = body.getReader();
+  let head = new Uint8Array(0);
+  while (head.length < 2) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value?.byteLength) head = concatBytes(head, value);
+  }
+  const gzip = head.length >= 2 && head[0] === GZ_BYTES[0] && head[1] === GZ_BYTES[1];
+  const stream = new ReadableStream({
+    start(controller) {
+      if (head.byteLength) controller.enqueue(head);
+    },
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      if (value?.byteLength) controller.enqueue(value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+  return { gzip, stream };
+}
+
+// Two byte runs, joined. `head` stays small: the sniff never reads past two bytes.
+function concatBytes(a, b) {
+  const out = new Uint8Array(a.byteLength + b.byteLength);
+  out.set(a, 0);
+  out.set(b, a.byteLength);
+  return out;
+}
+
+// The page's fetch bar follows the wire, so a compressed body reports the bytes the network
+// sent (its content-length), not the larger bytes it decodes to.
+function countWire(stream, total, onProgress) {
+  if (!onProgress) return stream;
+  let received = 0;
+  return stream.pipeThrough(
+    new TransformStream({
+      transform(chunk, controller) {
+        received += chunk.byteLength;
+        onProgress({ received, total: total || received, done: false });
+        controller.enqueue(chunk);
+      },
+      flush() {
+        onProgress({ received, total: total || received, done: true });
+      },
+    }),
+  );
+}
+
+// The first `n` bytes of the chunks read so far. The caller has checked that
+// they are present; a short result means the body ended early.
+function takeBytes(chunks, n) {
+  const bytes = new Uint8Array(n);
+  let at = 0;
+  for (const chunk of chunks) {
+    if (at >= n) break;
+    const part = chunk.subarray(0, Math.min(chunk.byteLength, n - at));
+    bytes.set(part, at);
+    at += part.byteLength;
+  }
+  return bytes.subarray(0, at);
+}
+
+// The end of the tier-0 blobs in an E2BUNDLE header and index (QW4). The page
+// resolves the kit fetch at this byte, so the first frame starts on the coarse
+// level while the HDRI tier streams behind it. 0 means no tier-0 blob.
+function firstTierEnd(head) {
+  if (head.length < 32) return 0;
+  let magic = "";
+  for (let i = 0; i < 8; i++) magic += String.fromCharCode(head[i]);
+  if (magic !== "E2BUNDLE") throw new Error("not an E2BUNDLE (bad magic)");
+  const view = new DataView(head.buffer, head.byteOffset, head.byteLength);
+  const count = view.getUint32(12, true);
+  let at = 32;
+  let first = 0;
+  for (let i = 0; i < count; i++) {
+    if (at + 2 > head.length) throw new Error("the bundle index is torn");
+    const pathLen = view.getUint16(at, true);
+    at += 2;
+    if (at + pathLen + 25 > head.length) throw new Error("the bundle index is torn");
+    at += pathLen;
+    const priority = head[at];
+    at += 1;
+    const offset = Number(view.getBigUint64(at, true));
+    at += 8;
+    const len = Number(view.getBigUint64(at, true));
+    at += 8;
+    at += 8; // the blob's FNV-1a; the Rust reader verifies it on open
+    if (priority === 0) first = Math.max(first, offset + len);
+  }
+  return first;
+}
+
+/**
+ * Read a response body chunk by chunk so the page can show fetch progress
+ * (QW4). Returns the whole body as a Uint8Array. `total` is 0 when the server
+ * sent no content-length; the last callback then names the size it did read.
+ * `onPrefix` gets the tier-0 prefix as soon as those bytes arrive, while the
+ * reader keeps going for the rest of the bundle.
+ */
+async function readBody(stream, total, onProgress, onPrefix) {
+  const reader = stream.getReader();
+  const chunks = [];
+  let received = 0;
+  let indexEnd = 0;
+  let first = 0;
+  let sent = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      chunks.push(value);
+      received += value.byteLength;
+      if (onPrefix && !sent) {
+        if (!indexEnd && received >= 32) {
+          const head = takeBytes(chunks, 32);
+          const view = new DataView(head.buffer, head.byteOffset, head.byteLength);
+          indexEnd = 32 + Number(view.getBigUint64(16, true));
+        }
+        if (indexEnd && received >= indexEnd) {
+          first = firstTierEnd(takeBytes(chunks, indexEnd));
+          if (first === 0) first = received; // no tier 0: the whole body is the prefix
+        }
+        if (first && received >= first) {
+          onPrefix(takeBytes(chunks, first));
+          sent = true;
+        }
+      }
+      onProgress?.({ received, total: total || received, done: false });
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  if (onPrefix && !sent) onPrefix(takeBytes(chunks, received));
+  onProgress?.({ received, total: total || received, done: true });
+  return takeBytes(chunks, received);
+}
+
 /**
  * Fetch one gameplay asset at runtime (WEB6).
  *
  * Resolves { bytes, stats }: `bytes` is a Uint8Array of the whole body and `stats` is
  * { bytesFetched, downloadMs }. Rejects with an `AssetError` when the request itself fails, when
  * the server answers with a status other than 200, or when the body is empty. The caller never
- * gets an empty asset and never a silent failure.
+ * gets an empty asset and never a silent failure. QW4: `onProgress` receives
+ * { received, total, done } as the body streams in; `total` is 0 without a content-length.
  */
-export async function fetchAsset(url, env = browserEnv()) {
+export async function fetchAsset(url, env = browserEnv(), onProgress = null, onPrefix = null) {
   const name = assetName(url);
   const t0 = env.now();
   let res;
@@ -156,11 +312,29 @@ export async function fetchAsset(url, env = browserEnv()) {
   if (!res.ok) throw new AssetError(`${name} could not be fetched: HTTP ${res.status}`, res.status);
   let body;
   try {
-    body = await res.arrayBuffer();
+    const total = Number(res.headers?.get?.("content-length")) || 0;
+    if (res.body && typeof res.body.getReader === "function") {
+      const { gzip, stream } = await sniffGzip(res.body);
+      if (!gzip) {
+        body = await readBody(stream, total, onProgress, onPrefix);
+      } else {
+        if (typeof DecompressionStream !== "function") {
+          throw new AssetError(`${name} is gzip and this browser cannot decompress a stream (DecompressionStream is missing)`);
+        }
+        // The bar follows the compressed bytes; the prefix callback still sees the bundle.
+        body = await readBody(countWire(stream, total, onProgress).pipeThrough(new DecompressionStream("gzip")), 0, null, onPrefix);
+      }
+    } else {
+      body = new Uint8Array(await res.arrayBuffer());
+    }
   } catch (e) {
+    if (e instanceof AssetError) throw e;
     throw new AssetError(`${name} could not be read: ${reason(e)}`);
   }
   if (!body || body.byteLength === 0) throw new AssetError(`${name} is empty`);
+  // A body with no stream (a test fake or an old browser) has no earlier
+  // boundary to report, so the whole body is the prefix.
+  if (onPrefix) onPrefix(new Uint8Array(body));
   return {
     bytes: new Uint8Array(body),
     stats: { bytesFetched: body.byteLength, downloadMs: Math.round(env.now() - t0) },
@@ -168,12 +342,68 @@ export async function fetchAsset(url, env = browserEnv()) {
 }
 
 /**
+ * Fetch only the first tier of a bundle (QW4): the promise resolves as soon as
+ * the header, the index and the tier-0 blobs have arrived, while the same
+ * response keeps streaming for the progress bar. The bytes are a prefix the
+ * Rust reader opens with `BundleSource::open_prefix`; the HDRI tier is not in
+ * them, so the first frame does not wait for it.
+ */
+export async function fetchAssetPrefix(url, env = browserEnv(), onProgress = null) {
+  const name = assetName(url);
+  const t0 = env.now();
+  let settle;
+  let fail;
+  let settled = false;
+  const prefix = new Promise((resolve, reject) => {
+    settle = resolve;
+    fail = reject;
+  });
+  const full = fetchAsset(url, env, onProgress, (bytes) => {
+    if (settled) return;
+    settled = true;
+    settle(bytes);
+  });
+  full.then(
+    () => {
+      if (!settled) {
+        settled = true;
+        fail(new AssetError(`${name} ended before its first tier`));
+      }
+    },
+    (err) => {
+      if (!settled) {
+        settled = true;
+        fail(err);
+      } else {
+        // The prefix is usable; the rest failed behind it. Hide the bar.
+        onProgress?.({ received: 0, total: 0, done: true, error: true });
+      }
+    },
+  );
+  const bytes = await prefix;
+  if (bytes.byteLength === 0) throw new AssetError(`${name} is empty`);
+  return {
+    bytes,
+    stats: { bytesFetched: bytes.byteLength, downloadMs: Math.round(env.now() - t0) },
+  };
+}
+
+/**
  * The fetcher the page hands the engine (WEB6): the engine asks for an asset by
  * URL and gets the asset's bytes as a Uint8Array, or a rejection it turns into a
  * typed refusal. `base` is the page's own URL, so a relative asset name lands in
- * the same folder as the page.
+ * the same folder as the page. QW4: `onProgress` draws the page's fetch bar.
  */
-export const pageFetcher = (base) => (url) => fetchAsset(new URL(url, base)).then((r) => r.bytes);
+export const pageFetcher = (base, onProgress = null) => (url) =>
+  fetchAsset(new URL(url, base), browserEnv(), onProgress).then((r) => r.bytes);
+
+/**
+ * The QW4 fetcher for the arena bundle: it answers with the tier-0 prefix as
+ * soon as that arrives, not with the whole body. The page's progress bar still
+ * follows the rest of the response in the background.
+ */
+export const pageFetcherPrefix = (base, onProgress = null) => (url) =>
+  fetchAssetPrefix(new URL(url, base), browserEnv(), onProgress).then((r) => r.bytes);
 
 /** Resolves with env.now() when `body` (the page's <body>) first carries data-state running or fatal: the first frame, or the reason there is none. */
 export function watchFirstFrame(body, now = () => performance.now()) {

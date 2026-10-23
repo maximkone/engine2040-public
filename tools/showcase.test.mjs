@@ -3,8 +3,9 @@
 // writes nothing, a tampered PNG fails the sha256 cross-check, a frameless
 // manifest fails by default but passes with --allow-unhashed, bad row IDs and
 // unsafe manifest.clip are refused, a faked-ffmpeg stitch writes mp4+gif
-// beside the PNGs, a 12-frame duel clip validates, and a showcase set with 0
-// PNGs fails closed naming the set.
+// beside the PNGs, a 12-frame duel clip validates, a showcase set with 0
+// PNGs fails closed naming the set, and a bare --check-only checks the newest
+// date set (exit 1 when no set exists).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -106,10 +107,11 @@ function fakeFfmpegDir() {
   return dir;
 }
 
-function runTool(args, env = {}) {
+function runTool(args, env = {}, cwd = undefined) {
   const r = spawnSync(process.execPath, [TOOL, ...args], {
     encoding: "utf8",
     env: { ...process.env, ...env },
+    cwd,
   });
   return { code: r.status, out: r.stdout ?? "", err: r.stderr ?? "" };
 }
@@ -213,6 +215,21 @@ test("a 12-frame hashed duel clip validates", () => {
   assert.equal(summary.ok, true);
   assert.equal(summary.frames, 12);
   assert.deepEqual(summary.rows, ["SHOW1"]);
+});
+
+test("a bare --check-only checks the newest date set and fails closed with none", () => {
+  // The gate leg: no --clip and no --set means "the newest capture set".
+  const root = mkdtempSync(join(tmpdir(), "showcase-gate-"));
+  const bare = runTool(["--check-only"], {}, root);
+  assert.equal(bare.code, 1, "no showcase root is exit 1, got " + bare.code + ": " + bare.err + bare.out);
+  assert.match(bare.err, /no showcase sets/);
+
+  fixtureClip(join(root, "target", "showcase", "2026-10-01", "duel"), [1, 2]);
+  fixtureClip(join(root, "target", "showcase", "2026-10-23", "orbit"), [3, 4, 5]);
+  const { code, out, err } = runTool(["--check-only"], {}, root);
+  assert.equal(code, 0, "newest set is exit 0, got " + code + ": " + err + out);
+  assert.match(out, /showcase set OK: 3 PNGs/);
+  assert.match(out, /2026-10-23/);
 });
 
 test("a showcase set with 0 PNGs fails closed naming the set", () => {

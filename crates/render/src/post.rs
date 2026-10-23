@@ -198,7 +198,7 @@ pub mod upscale_easu;
 /// Post GPU descriptors and the TAA-resolve plus post sampling chunks for
 /// the RA1 presenter. Engine-owned code (no port markers); the presenter
 /// inlines these chunks when the post bind group lands.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod gpu;
 
 // ---------------------------------------------------------------------------
@@ -1003,7 +1003,7 @@ mod tests {
     // real history allocation that skips without an adapter (RA1 pattern).
     // ------------------------------------------------------------------
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn post_descriptors_are_sampler_readable() {
         let hist = gpu::history_desc(128, 72);
@@ -1026,24 +1026,25 @@ mod tests {
         gpu::check_history_dims(64, 64).expect("valid dims pass");
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn history_allocates_on_llvmpipe() {
         crate::test_gpu::hold_gpu_slot();
         let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
-        let adapter =
-            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        let Some(adapter) = crate::test_gpu::require_or_skip(
+            "history_allocates_on_llvmpipe",
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
                 apply_limit_buckets: false,
-            })) {
-                Ok(a) => a,
-                Err(_) => {
-                    eprintln!("SKIPPED post gpu test: no wgpu adapter on this machine");
-                    return;
-                }
-            };
+            }))
+            .map_err(|error| {
+                crate::test_gpu::NoAdapter(format!("no wgpu adapter on this machine: {error}"))
+            }),
+        ) else {
+            return;
+        };
         let (device, _queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("rp1-post-history"),
@@ -1204,41 +1205,38 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "window")]
-    fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    #[cfg(feature = "gpu")]
+    fn test_device() -> Result<(wgpu::Device, wgpu::Queue), crate::test_gpu::NoAdapter> {
         crate::test_gpu::hold_gpu_slot();
         let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
-        let adapter =
-            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })) {
-                Ok(a) => a,
-                Err(_) => {
-                    eprintln!("SKIPPED post gpu test: no wgpu adapter on this machine");
-                    return None;
-                }
-            };
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|error| {
+            crate::test_gpu::NoAdapter(format!("no wgpu adapter on this machine: {error}"))
+        })?;
         match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rp1-test"),
             ..Default::default()
         })) {
-            Ok((d, q)) => Some((d, q)),
+            Ok((d, q)) => Ok((d, q)),
             Err(e) => panic!("test device requests succeed when the adapter exists: {e}"),
         }
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn gpu_taa_kills_ghost_and_matches_cpu() {
         // Device TAA over the moving-bar scene: reprojection plus jitter
         // plus box clamp on the device, parity against the CPU jittered
         // oracle, trail under the posted gate, 0 validation errors.
-        let (device, queue) = match test_device() {
-            Some(d) => d,
-            None => return,
+        let Some((device, queue)) =
+            crate::test_gpu::require_or_skip("gpu_taa_kills_ghost_and_matches_cpu", test_device())
+        else {
+            return;
         };
         let sub = gpu::Rp1Submitter::new(&device);
         let scene = GhostingScene::moving_bar().expect("scene builds");
@@ -1301,15 +1299,16 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn gpu_shimmer_settles_and_matches_cpu() {
         // Alternating checkerboard through the device resolve with the
         // per-frame Halton jitter: the settled clip variance stays under
         // the posted gate and every GPU frame matches its CPU twin.
-        let (device, queue) = match test_device() {
-            Some(d) => d,
-            None => return,
+        let Some((device, queue)) =
+            crate::test_gpu::require_or_skip("gpu_shimmer_settles_and_matches_cpu", test_device())
+        else {
+            return;
         };
         let sub = gpu::Rp1Submitter::new(&device);
         let scene = ShimmerScene::checkerboard().expect("scene builds");
@@ -1364,16 +1363,17 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn gpu_full_frame_matches_cpu_chain() {
         // Whole RP1 frame on the device in graph order (TAA at 16x16,
         // TAAU to 32x32, bloom plus exposure plus ACES plus grade): pixels
         // match the CPU oracle within tolerance, every receipt slot is
         // filled, 0 validation errors.
-        let (device, queue) = match test_device() {
-            Some(d) => d,
-            None => return,
+        let Some((device, queue)) =
+            crate::test_gpu::require_or_skip("gpu_full_frame_matches_cpu_chain", test_device())
+        else {
+            return;
         };
         let sub = gpu::Rp1Submitter::new(&device);
         let scene = GhostingScene::moving_bar().expect("scene builds");
@@ -2305,16 +2305,17 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn gpu_auto_chain_matches_cpu_chain() {
         // Adapted exposure rides the existing exposure uniform: converge
         // the CPU state on the bright sweep frame, run the adapted chain
         // on the device and against the CPU oracle, parity within the
         // posted tolerance.
-        let (device, queue) = match test_device() {
-            Some(d) => d,
-            None => return,
+        let Some((device, queue)) =
+            crate::test_gpu::require_or_skip("gpu_auto_chain_matches_cpu_chain", test_device())
+        else {
+            return;
         };
         let sub = gpu::Rp1Submitter::new(&device);
         let scene = ExposureScene::day_sweep_torch().expect("scene builds");

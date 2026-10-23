@@ -212,11 +212,11 @@ pub enum IblError {
     Invalid(String),
     /// A device or queue call failed (map, poll, texture write); message
     /// carried. Only behind `window`, where a live device is in hand.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     Device(String),
     /// A wgpu validation error fired inside the submit scope; kept loud
     /// with the scope debug text. Only behind `window`.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     Validation(String),
 }
 
@@ -229,9 +229,9 @@ impl fmt::Display for IblError {
             #[cfg(feature = "v1")]
             Self::Sample(e) => write!(f, "ibl sample: {e}"),
             Self::Invalid(e) => write!(f, "ibl input: {e}"),
-            #[cfg(feature = "window")]
+            #[cfg(feature = "gpu")]
             Self::Device(e) => write!(f, "ibl device: {e}"),
-            #[cfg(feature = "window")]
+            #[cfg(feature = "gpu")]
             Self::Validation(e) => write!(f, "ibl validation: {e}"),
         }
     }
@@ -737,7 +737,7 @@ impl IblBake {
     /// [`crate::gtao::LookFrame`], then refuses loudly with the reason. The
     /// CPU bake above is the reference here; the `window` build below
     /// records the live pass instead. Never silent success.
-    #[cfg(all(feature = "v1", not(feature = "window")))]
+    #[cfg(all(feature = "v1", not(feature = "gpu")))]
     pub fn submit_gpu(&self, frame: &crate::gtao::LookFrame) -> Result<IblReceipt, IblError> {
         frame
             .validate()
@@ -1262,7 +1262,7 @@ pub fn compile_ibl_for_forward() -> Result<crate::graph::CompiledGraph, crate::g
 /// (level 0 resident; rougher levels follow as mips) plus the `Rg32Float`
 /// BRDF LUT. Cook bytes upload verbatim; the llvmpipe round-trip test pins
 /// byte parity.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod gpu {
     use super::IblError;
 
@@ -2233,7 +2233,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 /// anything, so a refusal sizes nothing. Returns the chart target size.
 /// Only the standard cook shape submits: the chart shader addresses those
 /// extents directly.
-#[cfg(all(feature = "v1", feature = "window"))]
+#[cfg(all(feature = "v1", feature = "gpu"))]
 fn check_chart_bake(
     frame: &crate::gtao::LookFrame,
     bake: &IblBake,
@@ -2265,19 +2265,19 @@ fn check_chart_bake(
 }
 
 /// Refusal text for an invalid look frame. Cold path only.
-#[cfg(all(feature = "v1", feature = "window"))]
+#[cfg(all(feature = "v1", feature = "gpu"))]
 fn chart_frame_error(e: crate::gtao::LookError) -> IblError {
     IblError::Invalid(format!("ibl look frame: {e}"))
 }
 
 /// Refusal text for a validation-scope hit. Cold path only.
-#[cfg(all(feature = "v1", feature = "window"))]
+#[cfg(all(feature = "v1", feature = "gpu"))]
 fn chart_validation(err: wgpu::Error) -> IblError {
     IblError::Validation(format!("{err:?}"))
 }
 
 /// Refusal text for a chart reference failure. Cold path only.
-#[cfg(all(feature = "v1", feature = "window"))]
+#[cfg(all(feature = "v1", feature = "gpu"))]
 fn chart_reference(e: IblError) -> IblError {
     IblError::Invalid(format!("ibl chart reference: {e}"))
 }
@@ -2285,7 +2285,7 @@ fn chart_reference(e: IblError) -> IblError {
 /// Record the chart pass and submit once, then hand back the readback
 /// buffer plus its padded row stride. Owns the validation scope for the
 /// encode, so the caller only maps and scores.
-#[cfg(all(feature = "v1", feature = "window"))]
+#[cfg(all(feature = "v1", feature = "gpu"))]
 fn run_chart_pass(
     submitter: &gpu::IblSubmitter,
     device: &wgpu::Device,
@@ -2378,7 +2378,7 @@ fn run_chart_pass(
 
 /// Map the chart readback and wait for it. Cold path helper: the device
 /// poll and the channel hop live here, not in the submit body.
-#[cfg(all(feature = "v1", feature = "window"))]
+#[cfg(all(feature = "v1", feature = "gpu"))]
 fn map_chart_readback(device: &wgpu::Device, readback: &wgpu::Buffer) -> Result<(), IblError> {
     let slice = readback.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -2397,7 +2397,7 @@ fn map_chart_readback(device: &wgpu::Device, readback: &wgpu::Buffer) -> Result<
 /// Score the mapped chart readback against the CPU [`shade_ibl`]
 /// reference: covered pixels plus the worst absolute and relative channel
 /// gaps. Pure pixel loop, no allocation; unmaps before returning.
-#[cfg(all(feature = "v1", feature = "window"))]
+#[cfg(all(feature = "v1", feature = "gpu"))]
 fn score_chart_pixels(
     readback: &wgpu::Buffer,
     padded: u32,
@@ -2472,7 +2472,7 @@ fn score_chart_pixels(
     Ok((covered, max_abs, max_rel))
 }
 
-#[cfg(all(feature = "v1", feature = "window"))]
+#[cfg(all(feature = "v1", feature = "gpu"))]
 impl IblBake {
     /// Record the chart pass on `device` and submit once. Consumes no
     /// `submitter` capacity on matching shape; fails loudly (never silent)
@@ -3493,7 +3493,7 @@ mod tests {
             a.source_average.iter().all(|c| c.is_finite() && *c >= 0.0),
             "source average is finite/nonnegative"
         );
-        #[cfg(not(feature = "window"))]
+        #[cfg(not(feature = "gpu"))]
         {
             // Headless build: no device in hand, so the submit seam refuses
             // loudly after validating the shared look frame.
@@ -3912,7 +3912,7 @@ mod tests {
             .split("fn fs_skinned")
             .next()
             .expect("display close");
-        assert!(body.contains("direct_light(in.world_pos, in.world_n, albedo)"));
+        assert!(body.contains("direct_light(in.world_pos, in.world_n, albedo, 1.0)"));
         assert!(!body.contains("AMBIENT_FLOOR"));
         assert!(body.contains("ibl_diffuse") || body.contains("ibl_irradiance"));
         assert!(body.contains("* occlusion") || body.contains("*occlusion"));
@@ -3952,7 +3952,7 @@ mod tests {
     // without an adapter (same skip rule as the RA1 presenter tests).
     // ------------------------------------------------------------------
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn ibl_descs_are_sampler_readable() {
         let cube = gpu::prefilter_cube_desc(IBL_CUBE_SIZE, IBL_LEVELS as u32);
@@ -4023,7 +4023,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn brdf_lut_upload_roundtrips_on_llvmpipe() {
         // Cook bytes upload verbatim and read back bit-identical: the GPU
@@ -4031,19 +4031,20 @@ mod tests {
         let lut = brdf_lut_build(16).expect("small lut builds");
         crate::test_gpu::hold_gpu_slot();
         let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
-        let adapter =
-            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })) {
-                Ok(a) => a,
-                Err(_) => {
-                    eprintln!("SKIPPED ibl gpu test: no wgpu adapter on this machine");
-                    return;
-                }
-            };
+        let probe = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|error| {
+            crate::test_gpu::NoAdapter(format!("no wgpu adapter on this machine: {error}"))
+        });
+        let Some(adapter) =
+            crate::test_gpu::require_or_skip("brdf_lut_upload_roundtrips_on_llvmpipe", probe)
+        else {
+            return;
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rl2-ibl-lut"),
             ..Default::default()
@@ -4117,15 +4118,17 @@ mod tests {
         eprintln!("RL2 GPU LUT round-trip: 16x16 texels, max diff {max_diff}");
     }
 
-    #[cfg(all(feature = "v1", feature = "window"))]
+    #[cfg(all(feature = "v1", feature = "gpu"))]
     #[test]
     fn ibl_chart_submits_with_look_binds_on_llvmpipe() {
         // RL2 live: the full bake binds (prefilter array, BRDF LUT, SH) next
         // to the shared look frame in one real wgpu pass, and the float
         // readback tracks the CPU `shade_ibl` reference inside the posted
         // chart tolerance with zero validation errors.
-        let Some((device, queue, info)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED rl2 chart submit: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "ibl_chart_submits_with_look_binds_on_llvmpipe",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let (bake, _) = bake(HDRI_BYTES).expect("studio HDRI bakes");
@@ -4186,14 +4189,16 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "v1", feature = "window"))]
+    #[cfg(all(feature = "v1", feature = "gpu"))]
     #[test]
     fn ibl_submit_reuses_backing_and_binds() {
         // Steady state creates nothing: the second submit on matching shape
         // reuses every texture and bind group, and both receipts agree
         // exactly (deterministic GPU bytes twice).
-        let Some((device, queue, _)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED rl2 reuse: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "ibl_submit_reuses_backing_and_binds",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let (bake, _) = bake(HDRI_BYTES).expect("studio HDRI bakes");
@@ -4238,14 +4243,16 @@ mod tests {
         // Wall-clock budget lives in ibl_chart_submit_wall_budget (--perf only).
     }
 
-    #[cfg(all(feature = "v1", feature = "window"))]
+    #[cfg(all(feature = "v1", feature = "gpu"))]
     #[test]
     fn ibl_submit_grows_no_host_scratch() {
         // Steady-state submits grow nothing on the host: both scratch
         // capacities stay flat across submits, and the chart still tracks
         // the CPU reference. Sizing happens once, on the first upload.
-        let Some((device, queue, _)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED rl2 scratch: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "ibl_submit_grows_no_host_scratch",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let (bake, _) = bake(HDRI_BYTES).expect("studio HDRI bakes");
@@ -4277,12 +4284,14 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "v1", feature = "window"))]
+    #[cfg(all(feature = "v1", feature = "gpu"))]
     #[test]
     #[ignore = "timing: chart submit wall-clock needs release --perf on the boosted reference GPU (cold/idle-clock submits miss the budget)"]
     fn ibl_chart_submit_wall_budget() {
-        let Some((device, queue, _)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED rl2 wall budget: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "ibl_chart_submit_wall_budget",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let (bake, _) = bake(HDRI_BYTES).expect("studio HDRI bakes");
@@ -4315,13 +4324,15 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "v1", feature = "window"))]
+    #[cfg(all(feature = "v1", feature = "gpu"))]
     #[test]
     fn ibl_submit_rejects_bad_inputs() {
         // Bad frames and non-standard bakes refuse before any target sizes;
         // device errors stay loud and typed.
-        let Some((device, queue, _)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED rl2 bad inputs: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "ibl_submit_rejects_bad_inputs",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let (bake, _) = bake(HDRI_BYTES).expect("studio HDRI bakes");

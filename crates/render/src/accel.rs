@@ -492,7 +492,7 @@ impl Blas {
     /// Bind seam for the headless twin: gates the tier, checks the shape,
     /// then names the missing device bind. The window build next to it
     /// uploads these same bytes for real.
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     pub fn submit_gpu(&self, tier: Tier) -> Result<RefitReceipt, AccelError> {
         require_rt(tier).map_err(|e| match e {
             AccelError::TierFallback {
@@ -872,20 +872,20 @@ fn proxy_blas_count(len: usize) -> usize {
 
 /// Byte size of the packed accel validation uniform: triangle count, tri
 /// stride, instance base in f32 words, instance count (16-byte aligned).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const ACCEL_UNIFORM_BYTES: u64 = 16;
 
 /// Words per triangle record: 3 verts plus the BLAS AABB corners.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const ACCEL_TRI_WORDS: usize = 15;
 /// Words per instance record: 12 transform words plus custom, mask, blas.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const ACCEL_INSTANCE_WORDS: usize = 16;
 
 /// Accel validation compute: one thread per record. Triangle threads check
 /// finite vertices inside the BLAS AABB; instance threads check a finite
 /// transform with a nonzero mask. Flag words read 1 on pass, 0 on fail.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const ACCEL_VALIDATE_WGSL: &str = r#"
 struct AccelU {
     tri_count: u32,
@@ -941,7 +941,7 @@ fn validate_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// Pack the device validation records: per-triangle verts plus BLAS AABB,
 /// then per-instance transform words plus fields. Deterministic per input;
 /// the CPU parity oracle ([`cpu_validate_records`]) reads this same image.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn device_record_words(blas: &[Blas], tlas: &Tlas) -> Vec<f32> {
     let mut out = Vec::new();
     for b in blas {
@@ -966,7 +966,7 @@ pub fn device_record_words(blas: &[Blas], tlas: &Tlas) -> Vec<f32> {
 
 /// CPU parity oracle over [`device_record_words`]: one flag per record, 1 on
 /// pass, 0 on fail. The device submit must return these exact flags.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn cpu_validate_records(words: &[f32], tri_count: usize, inst_count: usize) -> Vec<u32> {
     let mut flags = Vec::with_capacity(tri_count + inst_count);
     for t in 0..tri_count {
@@ -1002,7 +1002,7 @@ pub fn cpu_validate_records(words: &[f32], tri_count: usize, inst_count: usize) 
 /// Window submit failures. There is no `Unsupported` variant: the caller
 /// hands over a wgpu device, so every failure names the bad input, the
 /// device call or the validation scope outcome.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AccelSubmitError {
     /// Caller input is unusable (Base tier, empty scene, over-budget
@@ -1015,7 +1015,7 @@ pub enum AccelSubmitError {
     Validation(String),
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl fmt::Display for AccelSubmitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1026,19 +1026,19 @@ impl fmt::Display for AccelSubmitError {
     }
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl std::error::Error for AccelSubmitError {}
 
 /// Map the tier gate into the submit error: Base falls back loudly here too,
 /// never as a silent downgrade and never as `Unsupported`.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn gate_submit_tier(tier: Tier) -> Result<(), AccelSubmitError> {
     require_rt(tier).map_err(|e| AccelSubmitError::Invalid(e.to_string())) // alloc-ok: cold refusal, never a steady frame
 }
 
 /// One device accel submit: record counts, the validation outcome and the
 /// wall-clock encode plus submit plus readback ms (evidence only).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct AccelGpuReceipt {
     /// BLAS entries validated.
@@ -1053,7 +1053,7 @@ pub struct AccelGpuReceipt {
     pub submit_ms: f64,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl AccelGpuReceipt {
     /// Posted per-frame budget this submit is charged against.
     pub fn budget_ms(&self) -> f64 {
@@ -1077,14 +1077,14 @@ impl AccelGpuReceipt {
 /// pipelines (the reuse test proves the submit count stays serviced by the
 /// one pipeline). Per-submit record and flag buffers are driver work, same
 /// as the RA1 twin, and ride the RA2 aliasing pool once RT2 binds them.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct AccelSubmitter {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl AccelSubmitter {
     /// Compile the validation pipeline plus the bind layout; allocate the
     /// 16-byte uniform buffer. No scene-size state: record buffers size per
@@ -1296,7 +1296,7 @@ impl AccelSubmitter {
 
 /// Why a readback map or read failed. [`fmt::Display`] keeps the text each
 /// caller had as a `String`: `<prefix> poll: ...`, `<prefix> map: ...`.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Debug)]
 pub(crate) enum ReadbackError {
     /// `Device::poll` failed while waiting for the map.
@@ -1329,7 +1329,7 @@ pub(crate) enum ReadbackError {
     },
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl fmt::Display for ReadbackError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1351,7 +1351,7 @@ impl fmt::Display for ReadbackError {
     }
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl std::error::Error for ReadbackError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -1364,7 +1364,7 @@ impl std::error::Error for ReadbackError {
     }
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl From<crate::accel::ReadbackError> for AccelSubmitError {
     fn from(error: crate::accel::ReadbackError) -> Self {
         Self::Device(error.to_string())
@@ -1373,7 +1373,7 @@ impl From<crate::accel::ReadbackError> for AccelSubmitError {
 
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// `prefix` keeps each caller's error text identical (`accel`, `decal`, ...).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn map_readback(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,
@@ -1395,7 +1395,7 @@ pub(crate) fn map_readback(
 
 /// Decode the first `count` little-endian 4-byte words of a mapped readback
 /// buffer with `word`. `ty` and `unit` name the values in the error text.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn readback_words<T>(
     buffer: &wgpu::Buffer,
     count: usize,
@@ -1426,7 +1426,7 @@ fn readback_words<T>(
 /// Read `count` little-endian u32 values from a mapped readback buffer.
 /// `prefix` plus `unit` keep each caller's error text identical
 /// (`accel` plus `flags`, `decal` plus `words`, ...).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn readback_u32(
     buffer: &wgpu::Buffer,
     count: usize,
@@ -1438,7 +1438,7 @@ pub(crate) fn readback_u32(
 
 /// Read `count` little-endian f32 values from a mapped readback buffer.
 /// `prefix` keeps each caller's error text identical (`fog`, `layer`, `sky`).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub(crate) fn readback_f32(
     buffer: &wgpu::Buffer,
     count: usize,
@@ -1839,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     fn headless_twin_names_the_device_bind() {
         let positions = cube_positions();
         let indices = cube_indices();
@@ -2069,7 +2069,7 @@ mod tests {
 
     // ----- window device tests (behind `window`; skip loudly without one) -----
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn accel_window_scene() -> (Vec<Blas>, Tlas) {
         let positions = cube_positions();
         let indices = cube_indices();
@@ -2098,10 +2098,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn accel_window_submit_validates_clean() {
-        let Some((device, queue, info)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED accel window submit: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "accel_window_submit_validates_clean",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let (blas, tlas) = accel_window_scene();
@@ -2144,7 +2146,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn accel_receipt_budget_accessors_are_exact() {
         // Deterministic budget logic (no wall clock): at, under and over
         // the posted budget.
@@ -2171,10 +2173,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn accel_window_base_falls_back_loudly_never_unsupported() {
-        let Some((device, queue, _)) = crate::graph::gx1_test_device() else {
-            eprintln!("SKIPPED accel base fallback: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "accel_window_base_falls_back_loudly_never_unsupported",
+            crate::graph::gx1_probe(),
+        ) else {
             return;
         };
         let (blas, tlas) = accel_window_scene();
@@ -2200,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn accel_window_oracle_catches_a_broken_record() {
         // Tamper one vertex past its AABB: oracle flags it, so the submit
         // would too. Proves the oracle is not a constant pass.
@@ -2216,7 +2220,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn readback_error_keeps_the_old_text_and_chains_its_source() {
         use std::error::Error;

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { clickCommands, keyCommands, parseArgs, parseAudio, parseInput, parseScript, parseTape, stepCommands, tapeVerdict, verdict } from "./web-input-check.mjs";
+import { clickCommands, cueVerdict, fallbackVerdict, keyCommands, parseArgs, parseAudio, parseCues, parseInput, parsePath, parseScript, parseTape, stepCommands, tapeVerdict, verdict, workletVerdict } from "./web-input-check.mjs";
 
 const read = (kb, mouse, audio, context, gestures = 0) => ({ input: `input: kb=${kb} mouse=${mouse} pad=0`, audio: `audio: state=${audio}`, context, gestures });
 const good = () => ({
@@ -17,10 +17,18 @@ test("the two page lines parse only in their exact shape", () => {
   assert.equal(parseInput("input: kb=3 mouse=2"), null);
   assert.equal(parseInput("input: kb=x mouse=2 pad=0"), null);
   assert.equal(parseInput(null), null);
-  assert.equal(parseAudio("audio: state=running"), "running");
-  assert.equal(parseAudio("audio: state=suspended"), "suspended");
+  assert.deepEqual(parseAudio("audio: state=running"), { state: "running", worklet: null, reason: null, underruns: null });
+  assert.deepEqual(parseAudio("audio: state=suspended"), { state: "suspended", worklet: null, reason: null, underruns: null });
+  assert.deepEqual(parseAudio("audio: state=running underruns=3"), { state: "running", worklet: null, reason: null, underruns: 3 });
+  assert.deepEqual(
+    parseAudio('audio: state=running worklet=fallen-back reason="AbortError: 404 at ./audio-worklet-missing.js" underruns=0'),
+    { state: "running", worklet: "fallen-back", reason: "AbortError: 404 at ./audio-worklet-missing.js", underruns: 0 },
+  );
   assert.equal(parseAudio("audio: state=closed"), null);
   assert.equal(parseAudio("audio: running"), null);
+  assert.equal(parseAudio("audio: state=running underruns=three"), null);
+  assert.equal(parseAudio("audio: state=running reason=unquoted"), null, "a reason is always quoted");
+  assert.equal(parseAudio("audio: state=running blocks=1"), null, "blocks belong to the path line");
 });
 
 test("a run that follows the contract has no problems", () => {
@@ -58,6 +66,77 @@ test("audio that never runs is named", () => {
   const r = good();
   r.click.audio = "audio: state=suspended";
   assert.match(verdict(r).join(";"), /audio must be running/);
+});
+
+// ---- A5: the worklet sink, the cue proof and the forced fallback ----
+const workletReads = () => ({
+  receipt: { audio: "audio: state=running underruns=0", path: "audio: path=worklet blocks=6 underruns=0" },
+  later: { audio: "audio: state=running underruns=0", path: "audio: path=worklet blocks=42 underruns=0" },
+});
+const fallbackReads = () => ({
+  receipt: {
+    audio: 'audio: state=running worklet=fallen-back reason="AbortError: Failed to load worklet module script: http://127.0.0.1:9/audio-worklet-missing.js (HTTP status: 404)" underruns=0',
+    path: 'audio: path=script reason="AbortError: Failed to load worklet module script: http://127.0.0.1:9/audio-worklet-missing.js (HTTP status: 404)" underruns=0',
+  },
+  cues: "audio: cues expected=6 played=6 culled=0 rejected=0",
+});
+
+test("the path and cue lines parse with their counts", () => {
+  assert.deepEqual(parsePath("audio: path=worklet blocks=6 underruns=0"), { path: "worklet", blocks: 6, reason: null, underruns: 0 });
+  assert.deepEqual(parsePath("audio: path=script reason=\"x\" underruns=2"), { path: "script", blocks: null, reason: "x", underruns: 2 });
+  assert.deepEqual(parsePath("audio: path=none"), { path: "none", blocks: null, reason: null, underruns: null });
+  assert.equal(parsePath("audio: path=bogus"), null);
+  assert.equal(parsePath("audio: path=worklet blocks=x"), null);
+  assert.deepEqual(parseCues("audio: cues expected=6 played=6 culled=0 rejected=0"), { expected: 6, played: 6, culled: 0, rejected: 0 });
+  assert.equal(parseCues("audio: cues expected=6 played=5"), null);
+});
+
+test("a worklet run with a primed, growing ring passes; each lack is named", () => {
+  assert.deepEqual(workletVerdict(workletReads()), []);
+  let r = workletReads();
+  r.receipt.audio = "audio: state=running";
+  assert.match(workletVerdict(r).join(";"), /no counted underruns/);
+  r = workletReads();
+  r.receipt.audio = 'audio: state=running worklet=fallen-back reason="x" underruns=0';
+  assert.match(workletVerdict(r).join(";"), /fell back instead/);
+  r = workletReads();
+  r.receipt.path = "audio: path=script reason=\"x\" underruns=0";
+  assert.match(workletVerdict(r).join(";"), /not worklet/);
+  r = workletReads();
+  r.receipt.path = "audio: path=worklet blocks=2 underruns=0";
+  assert.match(workletVerdict(r).join(";"), /not primed/);
+  r = workletReads();
+  r.later.path = "audio: path=worklet blocks=6 underruns=0";
+  assert.match(workletVerdict(r).join(";"), /did not consume/);
+  r = workletReads();
+  r.receipt.path = "audio: path=worklet blocks=6 underruns=1";
+  assert.match(workletVerdict(r).join(";"), /disagree on underruns/);
+});
+
+test("the cue proof wants all six cues started and none culled or refused", () => {
+  assert.deepEqual(cueVerdict("audio: cues expected=6 played=6 culled=0 rejected=0"), []);
+  assert.match(cueVerdict("audio: cues expected=6 played=5 culled=0 rejected=0").join(";"), /started 5 of 6/);
+  assert.match(cueVerdict("audio: cues expected=5 played=5 culled=0 rejected=0").join(";"), /queues 6 cues/);
+  assert.match(cueVerdict("audio: cues expected=6 played=6 culled=1 rejected=0").join(";"), /culled/);
+  assert.match(cueVerdict("audio: cues expected=6 played=6 culled=0 rejected=1").join(";"), /rejected/);
+  assert.match(cueVerdict(null)[0], /no counts/);
+});
+
+test("the forced fallback must name the browser's 404 and still play every cue on the script path", () => {
+  assert.deepEqual(fallbackVerdict(fallbackReads()), []);
+  let r = fallbackReads();
+  r.receipt.audio = "audio: state=running underruns=0";
+  assert.match(fallbackVerdict(r).join(";"), /did not name the fallback/);
+  r = fallbackReads();
+  r.receipt.audio = 'audio: state=running worklet=fallen-back reason="AbortError: the module was refused" underruns=0';
+  assert.match(fallbackVerdict(r).join(";"), /not the browser's 404/);
+  r = fallbackReads();
+  r.receipt.path = "audio: path=worklet blocks=6 underruns=0";
+  assert.match(fallbackVerdict(r).join(";"), /not script/);
+  r = fallbackReads();
+  r.cues = "audio: cues expected=6 played=5 culled=0 rejected=0";
+  assert.match(fallbackVerdict(r).join(";"), /script path: the mixer started 5 of 6/);
+  assert.match(fallbackVerdict({ receipt: null, cues: null }).join(";"), /not an audio line/);
 });
 
 test("a malformed line or a missing read is reported before anything is compared", () => {

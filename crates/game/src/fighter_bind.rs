@@ -48,6 +48,17 @@ pub const EXPECTED_BODY_SHA256: [&str; 4] = [
     "08427dd6aaef4bdb9a317c023306778555503c1ea16d82747aaea9ef84cb6886",
     "ef908b0fa2b4af5e9880dc87ccbd77002178c64bae4dfebec06b78e5e6595bd2",
 ];
+/// Cooked body GLB SHAs in [`VARIANTS`] order, from
+/// `content/fighters/rig.e2bundle`: the 20-entry lane the page fetches
+/// (four bodies plus four atlas quadrants each). The bundle checks every
+/// entry's FNV on read; these pins make a re-cooked body with other bytes
+/// fail by name instead of drawing the wrong rig.
+pub const EXPECTED_COOKED_BODY_SHA256: [&str; 4] = [
+    "477230bdb2aadb6904689a7018a12ed5a5412cef045ca2051183176052ad3cc3",
+    "bbf88806b5f88305e286209a619dec026c825ac27bf4b41b53e7a6fd6683c032",
+    "48183e02cf693d25079a630ef4836fef1d56f8fd88322caba54e9587c8bf2f35",
+    "26ea7e8a16e6841a2de249aa4e646b3e6131d29cf861ebaa02a4e170b50dc52a",
+];
 /// One skeleton for all 4 bodies: the 45-joint rig (armature + meshes).
 pub const EXPECTED_JOINTS: u32 = 45;
 /// Baked FK clips per variant (idle, run, jump, death, combat set, taunt).

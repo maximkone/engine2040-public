@@ -1,16 +1,19 @@
 // crate-map: docs/CRATE-MAP.md, one row per crates/<dir>, from its Cargo.toml and lib.rs.
 //   node tools/crate-map.mjs          write docs/CRATE-MAP.md
 //   node tools/crate-map.mjs --check  exit 1 when docs/CRATE-MAP.md is not what the crates say
-//   node tools/crate-map.mjs --baseline  print the compaction baseline numbers of this tree
+//   node tools/crate-map.mjs --baseline [--index | --with <path,path>] [--verbose]
+//                                     print the size numbers of HEAD, of the staged
+//                                     commit (--index) or of HEAD plus a lane's paths
+//                                     (--with), so a lane can read the size it lands;
+//                                     --verbose adds the per-name lock listing
 // Job = the first `//!` line of src/lib.rs. Depends on = engine crates in [dependencies]
 // (dev-dependencies do not count). Used by = the reverse. Instability = Ce/(Ca+Ce). Exit 0 PASS/written, 1 STALE, 2 usage.
 // Weak features = the flags the feature scan finds thin (no other crate asks for them and
 // one place in their own crate reads them).
-// PW51: --baseline is the measured side of the compaction drift gate. It counts the
-// crates, the physical lines of Rust under crates/<dir>/src, the names that carry more
-// than one version in Cargo.lock and the dead feature flags. The recorded side lives in
-// docs/compaction-baseline.md, and tools/workspace-check.mjs fails when a number moves.
-// No number is written in this file: every one is measured from the tree.
+// --baseline measures the size of the engine: the crates, the physical lines of Rust
+// under crates/<dir>/src, the names that carry more than one version in Cargo.lock and
+// the dead feature flags. No number is written in this file: every one is measured
+// from the tree.
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -101,12 +104,17 @@ export const deadFeatures = (root = ROOT) => featureRows(root, { commands: false
 // tools/public-export.mjs reads a tree), and the same helpers measure it, so
 // there is one rule and not two. Null when git or tar is not there; the
 // caller then measures the working tree and says so.
-export const committedTree = (root = ROOT) => {
+// `rev` may be any tree-ish, so the same reader measures a tree built from the
+// index or from HEAD plus a lane's paths.
+export const committedTree = (root = ROOT, rev = "HEAD") => {
   const dir = mkdtempSync(join(tmpdir(), "crate-map-head-"));
   const tar = join(dir, "tree.tar");
   try {
-    execFileSync("git", ["-C", root, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive", "--format=tar", "-o", tar, "HEAD", "crates", "Cargo.lock"], { stdio: "ignore" });
-    execFileSync("tar", ["-xf", tar, "-C", dir], { stdio: "ignore" });
+    execFileSync("git", ["-C", root, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive", "--format=tar", "-o", tar, rev, "crates", "Cargo.lock"], { stdio: "ignore" });
+    // Relative names with cwd: GNU tar reads a drive letter in -f or -C as a
+    // remote host:path (C:\... -> host "C") and fails, while Windows bsdtar
+    // takes it. The archive is in the temp dir, so neither name needs a colon.
+    execFileSync("tar", ["-xf", "tree.tar", "-C", "."], { cwd: dir, stdio: "ignore" });
     rmSync(tar, { force: true });
     return dir;
   } catch {
@@ -114,6 +122,29 @@ export const committedTree = (root = ROOT) => {
     return null;
   }
 };
+
+// The tree the next commit lands: git runs a hook with GIT_INDEX_FILE on the
+// commit's own index, so `write-tree` answers exactly what will be committed.
+export const indexTree = (root = ROOT) =>
+  execFileSync("git", ["-C", root, "write-tree"], { encoding: "utf8" }).trim();
+
+// HEAD plus the working-tree state of `paths` (tracked, changed or new; a
+// deleted path drops out), in a throwaway index. This is what `git commit --
+// <paths>` would land, so a lane can read the size its commit will have before
+// it commits, which HEAD alone cannot answer.
+export const stagedTree = (paths, root = ROOT) => {
+  const listed = (Array.isArray(paths) ? paths : String(paths ?? "").split(",")).map((p) => p.trim()).filter(Boolean);
+  if (!listed.length) throw new Error("--with needs paths (comma-separated, repo-relative)");
+  const dir = mkdtempSync(join(tmpdir(), "crate-map-with-"));
+  const env = { ...process.env, GIT_INDEX_FILE: join(dir, "index") };
+  const git = (...args) => execFileSync("git", ["-C", root, ...args], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    git("read-tree", "HEAD");
+    git("add", "-A", "-f", "--", ...listed);
+    return git("write-tree").trim();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+};
+
 
 const clip = (s, max) => (s.length > max ? `${s.slice(0, max - 3)}...` : s);
 
@@ -177,28 +208,55 @@ export const generate = (root = ROOT) => renderCrateMap(crateRows(root), weakFea
 
 if (import.meta.main) {
   const args = process.argv.slice(2);
-  if (args.length > 1 || (args[0] && !["--check", "--baseline"].includes(args[0]))) { console.log("usage: node tools/crate-map.mjs [--check|--baseline]"); process.exit(2); }
-  // PW51: the measured side of the compaction drift gate. The four recorded
-  // numbers live in docs/compaction-baseline.md, each line prefixed with "- ",
-  // and they move only in the same commit as the size change itself.
-  // The counts come from the committed tree (HEAD), because the baseline is a
-  // snapshot of a commit: a dirty working tree must not move the baseline.
+  const usage = "usage: node tools/crate-map.mjs [--check | --baseline [--index | --with <path,path>] [--verbose]]";
   if (args[0] === "--baseline") {
-    const tree = committedTree() ?? ROOT;
-    const rows = crateRows(tree);
-    const lock = lockVersions(tree);
-    const dead = deadFeatures(tree);
+    const withAt = args.indexOf("--with");
+    const withValue = withAt < 0 ? null : args[withAt + 1];
+    const index = args.includes("--index");
+    const verbose = args.includes("--verbose");
+    const known = new Set(["--baseline", "--index", "--with", "--verbose", withValue]);
+    const bad = args.some((a) => !known.has(a))
+      || (withAt >= 0 && (!withValue || withValue.startsWith("--")))
+      || (index && withAt >= 0);
+    if (bad) {
+      console.log(usage);
+      process.exit(2);
+    }
+    // The size of the engine, measured. Three readings: the committed tree
+    // (HEAD), the index (the commit a hook is about to make) and HEAD plus a
+    // lane's paths (what `git commit -- <paths>` will land, known before the
+    // commit).
+    let tree;
+    try {
+      if (index) tree = committedTree(ROOT, indexTree());
+      else if (withValue) tree = committedTree(ROOT, stagedTree(withValue));
+      else tree = committedTree();
+    } catch (error) {
+      console.log(`could not read the tree: ${String(error?.message ?? error).split("\n")[0]}`);
+      process.exit(2);
+    }
+    const source = index ? "the staged commit" : withValue ? `HEAD plus ${withValue}` : "HEAD";
+    const rows = crateRows(tree ?? ROOT);
+    const lock = lockVersions(tree ?? ROOT);
+    const dead = deadFeatures(tree ?? ROOT);
+    console.log(`measured: ${source}${tree ? "" : " (working tree: the tree could not be read)"}`);
     console.log(`crates: ${rows.length}`);
     console.log(`src lines: ${rows.reduce((a, r) => a + r.srcLines, 0)}`);
     console.log(`lock packages: ${lock.packages}`);
     console.log(`multi-version lock names: ${lock.names}`);
     console.log(`extra version copies: ${lock.copies}`);
     console.log(`dead feature flags: ${dead.length}`);
-    for (const r of lock.byName) console.log(`  ${r.name} (${r.copies}): ${r.versions.join(" ")}`);
-    for (const f of dead) console.log(`  dead feature: ${f.key}`);
-    if (tree !== ROOT) rmSync(tree, { recursive: true, force: true });
+    // The four numbers are the answer; the per-name lock listing is ~90 lines
+    // and pushes the numbers out of a caller's context, so it waits for
+    // --verbose. The doc names the command for the numbers, not the listing.
+    if (verbose) {
+      for (const r of lock.byName) console.log(`  ${r.name} (${r.copies}): ${r.versions.join(" ")}`);
+      for (const f of dead) console.log(`  dead feature: ${f.key}`);
+    }
+    if (tree && tree !== ROOT) rmSync(tree, { recursive: true, force: true });
     process.exit(0);
   }
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--check")) { console.log(usage); process.exit(2); }
   const rows = crateRows();
   const text = renderCrateMap(rows, weakFeatures());
   const file = join(ROOT, OUT);

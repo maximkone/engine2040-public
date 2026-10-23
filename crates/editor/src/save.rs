@@ -17,7 +17,10 @@
 //! section follows it: a count (`u32`) plus entries sorted by node id text
 //! then component tag, each a hyphenated id (36 bytes) + length (`u16`) + the
 //! canonical component bytes ([`Component::to_bytes`]); v2 files open with no
-//! components. Nodes encode sorted
+//! components. The v4 graph section is the graph length (`u32`) plus its
+//! canonical bytes; v5 follows it with the painted bond section: a count
+//! (`u32`) plus per entry a hyphenated node id (36 bytes), the canonical chunk
+//! pair (`u16` each) and the strength (`u16` permille). Nodes encode sorted
 //! by id text, so the same document always saves to the same bytes. The CRC
 //! covers every byte before it.
 //!
@@ -35,6 +38,7 @@ use engine_scene::component::Component;
 use engine_scene::ids::ObjectId;
 use engine_scene::transform::Transform;
 
+use crate::commands::fracture::{push_bond_table, read_bond_fields, BondTable, BOND_FIELDS_BYTES};
 use crate::commands::{ComponentTable, Document};
 use crate::commands::{MaterialName, MAX_MATERIAL_NAME_LEN};
 
@@ -43,9 +47,10 @@ use crate::commands::{MaterialName, MAX_MATERIAL_NAME_LEN};
 pub const SAVE_MAGIC: [u8; 4] = *b"EDOC";
 /// Newest save version this module writes and reads. Version 2 adds the
 /// material section after the nodes, version 3 the component section after
-/// that, and version 4 the graph section after that; older files still open
-/// with empty bindings, components, and graphs.
-pub const SAVE_VERSION: u32 = 4;
+/// that, version 4 the graph section after that, and version 5 the painted
+/// bond section after the graph; older files still open with empty bindings,
+/// components, graphs and bonds.
+pub const SAVE_VERSION: u32 = 5;
 /// Oldest save version this module still opens. Older saves, and saves newer
 /// than [`SAVE_VERSION`], fail with [`SaveError::UnsupportedVersion`].
 pub const MIN_SAVE_VERSION: u32 = 1;
@@ -123,6 +128,12 @@ pub enum SaveError {
     },
     /// The v4 graph section failed its own checksum or structure gate.
     BadGraph,
+    /// A v5 bond entry is invalid: bad bytes, a non-canonical pair, an
+    /// out-of-range strength, a repeated pair or a node not in the same save.
+    BadBond {
+        /// The node the entry names.
+        id: ObjectId,
+    },
 }
 
 impl fmt::Display for SaveError {
@@ -165,6 +176,11 @@ impl fmt::Display for SaveError {
                 )
             }
             Self::BadGraph => f.write_str("document graph section is invalid"),
+            Self::BadBond { id } => write!(
+                f,
+                "document node {id} holds an invalid bond paint \
+                 (bad bytes, pair, strength or unknown node)"
+            ),
         }
     }
 }
@@ -185,6 +201,17 @@ pub(crate) use engine_core::crc32::crc32;
 /// so repeated saves of the same document are byte-identical. ObjectIds, the
 /// revision and every binding survive the round trip.
 pub fn save_to_bytes(doc: &Document) -> Vec<u8> {
+    save_to_bytes_at_revision(doc, doc.revision)
+}
+
+/// Save bytes with the revision field written as `revision` instead of
+/// `doc.revision`.
+///
+/// The command service's content digest uses revision zero so a counter-only
+/// move (the next apply always bumps it) does not read as a content change.
+/// The checksum covers the substituted field, so the bytes stay a valid save
+/// at that revision.
+pub(crate) fn save_to_bytes_at_revision(doc: &Document, revision: u64) -> Vec<u8> {
     // The command service keeps every stored id reachable with a parent and
     // a local pose, so these lookups resolve for a well-formed document. A
     // node that somehow lost its data is skipped rather than panicked on:
@@ -208,7 +235,7 @@ pub fn save_to_bytes(doc: &Document) -> Vec<u8> {
     );
     out.extend_from_slice(&SAVE_MAGIC);
     out.extend_from_slice(&SAVE_VERSION.to_le_bytes());
-    out.extend_from_slice(&doc.revision.to_le_bytes());
+    out.extend_from_slice(&revision.to_le_bytes());
     // A `u32` entry count needs 4B nodes, far past any in-memory document:
     // saturate to a count the loader rejects as truncated instead of
     // truncating silently or panicking the saver.
@@ -257,6 +284,7 @@ pub fn save_to_bytes(doc: &Document) -> Vec<u8> {
     let graph_len = u32::try_from(graph_bytes.len()).unwrap_or(u32::MAX);
     out.extend_from_slice(&graph_len.to_le_bytes());
     out.extend_from_slice(&graph_bytes);
+    push_bond_table(&mut out, &doc.bonds);
     let checksum = crc32(&out);
     out.extend_from_slice(&checksum.to_le_bytes());
     out
@@ -290,11 +318,21 @@ pub fn load_from_bytes(bytes: &[u8]) -> Result<Document, SaveError> {
     } else {
         crate::graph::Graph::default()
     };
+    let bonds = if version >= 5 {
+        read_bonds(bytes, &mut pos)?
+    } else {
+        BondTable::new()
+    };
     if version >= 2 {
         seal_check(bytes, pos)?;
     }
     let bound = check_structure(&mut nodes, &materials, &components)?;
     let tree = build_hierarchy(&nodes)?;
+    for id in bonds.keys() {
+        if !tree.contains(*id) {
+            return Err(SaveError::BadBond { id: *id });
+        }
+    }
     let mut table = ComponentTable::new();
     for (id, component) in components {
         table
@@ -310,6 +348,7 @@ pub fn load_from_bytes(bytes: &[u8]) -> Result<Document, SaveError> {
             .map(|(id, name)| (id.to_string(), name))
             .collect(),
         components: table,
+        bonds,
         graph,
         // The material table has no save section yet: a reopened document
         // starts from the shipped table again, which is what every existing
@@ -499,6 +538,41 @@ fn read_graph(bytes: &[u8], pos: &mut usize) -> Result<crate::graph::Graph, Save
     }
     let raw = take(bytes, pos, len)?;
     crate::graph::Graph::decode(raw).map_err(|_| SaveError::BadGraph)
+}
+
+/// Parse the v5 bond section: a count plus entries, each a node id text, the
+/// canonical chunk pair and its strength. Old saves carry no section and open
+/// with an empty table; a bad field, a repeated pair or a node outside the
+/// save fails as BadBond.
+fn read_bonds(bytes: &[u8], pos: &mut usize) -> Result<BondTable, SaveError> {
+    let raw_count = take(bytes, pos, 4)?;
+    let count = usize::try_from(u32::from_le_bytes([
+        raw_count[0],
+        raw_count[1],
+        raw_count[2],
+        raw_count[3],
+    ]))
+    .unwrap_or(usize::MAX);
+    // Every entry takes 42 bytes, so a count past the byte cap cannot fit:
+    // refuse before accepting a huge count.
+    if count > MAX_SAVE_BYTES / (36 + BOND_FIELDS_BYTES) {
+        return Err(SaveError::TooLarge);
+    }
+    let mut table = BondTable::new();
+    for _ in 0..count {
+        let id = parse_id(take(bytes, pos, 36)?)?;
+        let (pair, strength) =
+            read_bond_fields(bytes, pos).map_err(|_| SaveError::BadBond { id })?;
+        if table
+            .entry(id)
+            .or_default()
+            .insert(pair, strength)
+            .is_some()
+        {
+            return Err(SaveError::BadBond { id });
+        }
+    }
+    Ok(table)
 }
 
 /// Canonicalize a decoded graph to the document default when empty.

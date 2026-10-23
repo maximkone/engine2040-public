@@ -1,18 +1,32 @@
-//! `perf` pack: quiet perf runs as typed rows.
+//! `perf` pack: quiet perf runs as typed rows, plus the `doctor` preflight.
 //!
-//! One read-only verb `perf.table` returns the rows of the newest quiet perf
-//! csv as typed integer rows, so an agent reads p50 and p99 per scenario
-//! through `api.call` instead of opening a file.
+//! The first read-only verb, `perf.table`, returns the rows of the newest
+//! quiet perf csv as typed integer rows, so an agent reads p50 and p99 per
+//! scenario through `api.call` instead of opening a file.
 //!
-//! Units: integer microseconds for `p50_us` and `p99_us`, chars for paths.
-//! Determinism: the csv is read as bytes; the same file always parses to the
-//! same rows in file order, and the newest file is the lexicographically
-//! greatest `perf-*.csv` name. Errors: [`McpToolError`] with `bad_args` for a
-//! bad `csv` path, `bad_csv` for a missing or malformed csv, `no_perf_csv`
-//! when no csv exists.
+//! The second read-only verb, `doctor`, answers what is broken before a model
+//! starts: one line per check (GPU adapter, content root, bundle frames,
+//! installed bridge age, last proof per crate), each with a status, what was
+//! found and the fix. It never panics on a missing thing: a missing folder,
+//! report or proof log is a `broken` or `skip` line with its recovery. Probes
+//! stay cheap: no GPU device is opened, a bundle header and its frame are
+//! walked without hashing, and one small receipt file names the adapter.
+//!
+//! Units: integer microseconds for `p50_us` and `p99_us`, chars for paths,
+//! hours or minutes for ages. Determinism: the csv is read as bytes; the same
+//! file always parses to the same rows in file order, and the newest file is
+//! the lexicographically greatest `perf-*.csv` name. The doctor reads the tree
+//! only; the same tree and clock give the same receipt. Errors: [`McpToolError`]
+//! with `bad_args` for a bad `csv` path, `bad_csv` for a missing or malformed
+//! csv, `no_perf_csv` when no csv exists; `doctor` answers `broken` lines
+//! instead of errors.
 
 use std::borrow::Cow;
-use std::path::{Component, Path};
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rmcp::handler::server::router::tool::{SyncTool, ToolBase};
 use rmcp::schemars::JsonSchema;
@@ -27,6 +41,8 @@ use crate::tool_capabilities::CapabilityCard;
 pub const PACK: &str = "perf";
 /// Verb: quiet perf rows as typed integers.
 pub const TOOL_PERF_TABLE: &str = "perf.table";
+/// Verb: the preflight receipt, one line per check with its fix.
+pub const TOOL_DOCTOR: &str = "perf.doctor";
 
 /// Longest csv argument in chars.
 const MAX_CSV_CHARS: usize = 512;
@@ -40,6 +56,11 @@ pub fn pack() -> Result<PackDef, PackError> {
     let mut pack = PackDef::new(PACK, "quiet perf runs as typed rows", false);
     pack.add(VerbSpec::of::<PerfTableTool>(
         TOOL_PERF_TABLE,
+        PACK,
+        CapabilityCard::Observe,
+    )?);
+    pack.add(VerbSpec::of::<DoctorTool>(
+        TOOL_DOCTOR,
         PACK,
         CapabilityCard::Observe,
     )?);
@@ -338,12 +359,767 @@ impl SyncTool<McpServer> for PerfTableTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// doctor: what is broken before a model starts.
+// ---------------------------------------------------------------------------
+
+/// Installed door binary the OpenCode session spawns (DOOR5).
+const BRIDGE_INSTALLED: &str = ".opencode/bin/e2040-mcp.exe";
+/// Release build the installed copy is refreshed from (DOOR5).
+const BRIDGE_RELEASE: &str = "target/release/e2040-mcp.exe";
+/// Per-crate proof records `tools/gh-check.mjs` keeps.
+const PROOF_DIR: &str = "target/gh-check/results";
+/// Longest proof record read, in bytes.
+const MAX_PROOF_BYTES: u64 = 1024 * 1024;
+/// A proof older than this many hours is stale, in milliseconds.
+const PROOF_MAX_AGE_MS: u128 = 72 * 3_600_000;
+/// Folder the arena window writes its reports into.
+const REPORT_DIR: &str = "target/reports";
+/// Newest arena reports read for the adapter name.
+const MAX_ADAPTER_REPORTS: usize = 8;
+/// The render crate's adapter override (RL11): a name with no device opened.
+const GPU_ADAPTER_ENV: &str = "WGPU_ADAPTER_NAME";
+/// Folder roots a cooked bundle sits under, relative to the project root.
+const BUNDLE_ROOTS: [&str; 2] = ["content", "dist/web/assets"];
+/// Bundle file suffix.
+const BUNDLE_SUFFIX: &str = "e2bundle";
+/// Bundle magic, owned by `engine-assets` (`crates/assets/src/bundle.rs`).
+const BUNDLE_MAGIC: [u8; 8] = *b"E204BNDL";
+/// Bundle frame version the runtime reads, owned by `engine-assets`.
+const BUNDLE_VERSION: u32 = 1;
+/// Most entries a bundle may declare, owned by `engine-assets`.
+const MAX_BUNDLE_ENTRIES: u32 = 4096;
+/// Largest bundle the loader accepts, owned by `engine-assets`.
+const MAX_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
+/// Highest entry kind byte the loader knows (clip), owned by `engine-assets`.
+const MAX_BUNDLE_KIND: u8 = 5;
+/// Longest crate name kept from a proof command line.
+const MAX_CRATE_CHARS: usize = 64;
+/// Longest detail fragment echoed in a receipt line.
+const MAX_DETAIL_CHARS: usize = 160;
+
+/// One check's verdict in the preflight receipt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde", rename_all = "snake_case")]
+#[schemars(crate = "rmcp::schemars")]
+pub enum DoctorStatus {
+    /// The check passed.
+    Ok,
+    /// The check failed; the line carries the fix.
+    Broken,
+    /// Nothing to check in this tree; the line says what would create it.
+    Skip,
+}
+
+impl DoctorStatus {
+    /// Lowercase wire name, the tag a receipt line prints.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Broken => "broken",
+            Self::Skip => "skip",
+        }
+    }
+}
+
+/// One check of the preflight: status, what was found and the fix.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DoctorLine {
+    pub check: String,
+    pub status: DoctorStatus,
+    pub detail: String,
+    pub fix: String,
+}
+
+impl DoctorLine {
+    /// One receipt line: `[status] check: detail | fix: ...`.
+    pub fn line(&self) -> String {
+        if self.fix.is_empty() {
+            format!("[{}] {}: {}", self.status.name(), self.check, self.detail)
+        } else {
+            format!(
+                "[{}] {}: {} | fix: {}",
+                self.status.name(),
+                self.check,
+                self.detail,
+                self.fix
+            )
+        }
+    }
+
+    fn ok(check: &'static str, detail: String) -> Self {
+        Self {
+            check: check.to_owned(),
+            status: DoctorStatus::Ok,
+            detail,
+            fix: String::new(),
+        }
+    }
+
+    fn broken(check: &'static str, detail: String, fix: String) -> Self {
+        Self {
+            check: check.to_owned(),
+            status: DoctorStatus::Broken,
+            detail,
+            fix,
+        }
+    }
+
+    fn skip(check: &'static str, detail: String, fix: String) -> Self {
+        Self {
+            check: check.to_owned(),
+            status: DoctorStatus::Skip,
+            detail,
+            fix,
+        }
+    }
+}
+
+/// Answer to `doctor`: the root checked, the receipt text and its typed lines.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DoctorOutput {
+    pub root: String,
+    pub ok: bool,
+    pub broken: usize,
+    pub skipped: usize,
+    pub receipt: String,
+    pub lines: Vec<DoctorLine>,
+}
+
+/// Doctor request: the project root to check.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DoctorArgs {
+    #[serde(default)]
+    pub root: Option<String>,
+}
+
+/// Milliseconds since the Unix epoch; zero when the clock is before it.
+fn unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0)
+}
+
+/// Replace control chars with spaces and cap the echo, so one check stays one line.
+fn one_line(text: &str, max: usize) -> String {
+    let clean: String = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let trimmed = clean.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_owned();
+    }
+    let mut out: String = trimmed.chars().take(max.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
+/// A span as whole minutes under an hour and whole hours above it.
+fn span_ms(ms: u128) -> String {
+    let minutes = ms / 60_000;
+    if minutes < 60 {
+        format!("{minutes} min")
+    } else {
+        format!("{} h", minutes / 60)
+    }
+}
+
+/// Run every check, cheapest first, and fold the lines into one receipt.
+fn run_doctor(root: &Path, now_ms: u128, adapter: Option<&str>) -> DoctorOutput {
+    let lines = vec![
+        gpu_line(root, adapter),
+        content_line(root),
+        bundles_line(root),
+        bridge_line(root),
+        proof_line(root, now_ms),
+    ];
+    let broken = lines
+        .iter()
+        .filter(|line| line.status == DoctorStatus::Broken)
+        .count();
+    let skipped = lines
+        .iter()
+        .filter(|line| line.status == DoctorStatus::Skip)
+        .count();
+    let receipt = lines
+        .iter()
+        .map(DoctorLine::line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    DoctorOutput {
+        root: root.display().to_string(),
+        ok: broken == 0,
+        broken,
+        skipped,
+        receipt,
+        lines,
+    }
+}
+
+/// (a) The adapter a run would use: the RL11 override, else the newest arena report.
+fn gpu_line(root: &Path, adapter: Option<&str>) -> DoctorLine {
+    if let Some(name) = adapter.map(str::trim).filter(|name| !name.is_empty()) {
+        return DoctorLine::ok(
+            "gpu",
+            format!(
+                "adapter \"{}\" from {GPU_ADAPTER_ENV}",
+                one_line(name, MAX_DETAIL_CHARS)
+            ),
+        );
+    }
+    match report_adapter(root) {
+        Some((file, name)) => DoctorLine::ok(
+            "gpu",
+            format!(
+                "adapter \"{}\" from {file} (last arena run)",
+                one_line(&name, MAX_DETAIL_CHARS)
+            ),
+        ),
+        None => DoctorLine::broken(
+            "gpu",
+            format!(
+                "no adapter named: {GPU_ADAPTER_ENV} is unset and no {REPORT_DIR}/arena-*.txt \
+                 names `adapter=\"...\"`"
+            ),
+            "run the arena window once (cargo run -p engine-game --bin arena -- --frames 2 --exit) \
+             or set WGPU_ADAPTER_NAME"
+                .to_owned(),
+        ),
+    }
+}
+
+/// The adapter named by the newest arena report that carries one.
+fn report_adapter(root: &Path) -> Option<(String, String)> {
+    let mut names: Vec<String> = std::fs::read_dir(root.join(REPORT_DIR))
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("arena-") && name.ends_with(".txt"))
+        .collect();
+    names.sort_unstable();
+    for name in names.iter().rev().take(MAX_ADAPTER_REPORTS) {
+        let relative = format!("{REPORT_DIR}/{name}");
+        let Ok(text) = std::fs::read_to_string(root.join(&relative)) else {
+            continue;
+        };
+        if let Some(adapter) = adapter_in(&text) {
+            return Some((relative, adapter));
+        }
+    }
+    None
+}
+
+/// The text between `adapter="` and the next quote, when a report carries it.
+fn adapter_in(text: &str) -> Option<String> {
+    let start = text.find("adapter=\"")? + "adapter=\"".len();
+    let rest = text.get(start..)?;
+    let end = rest.find('"')?;
+    let name = rest.get(..end)?.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// (b) The content root exists and is readable.
+fn content_line(root: &Path) -> DoctorLine {
+    match std::fs::read_dir(root.join("content")) {
+        Ok(entries) => {
+            let folders = entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .count();
+            DoctorLine::ok(
+                "content",
+                format!("content/ is readable, {folders} folders"),
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DoctorLine::broken(
+            "content",
+            format!("content/ is missing under {}", root.display()),
+            "restore it: git checkout -- content".to_owned(),
+        ),
+        Err(error) => DoctorLine::broken(
+            "content",
+            format!("content/ is unreadable ({error})"),
+            "fix the folder permissions or restore it: git checkout -- content".to_owned(),
+        ),
+    }
+}
+
+/// (c) Every cooked bundle parses as a current frame with sane digests.
+fn bundles_line(root: &Path) -> DoctorLine {
+    let mut found: Vec<PathBuf> = Vec::new();
+    for relative in BUNDLE_ROOTS {
+        collect_bundles(&root.join(relative), 1, &mut found);
+    }
+    found.sort();
+    if found.is_empty() {
+        return DoctorLine::skip(
+            "bundles",
+            "no .e2bundle under content/ or dist/web/assets".to_owned(),
+            "cook one: cargo run -p engine-assets --bin e2bundle -- pack <dir> <out.e2bundle>"
+                .to_owned(),
+        );
+    }
+    let mut entries = 0u32;
+    for path in &found {
+        match bundle_entries(path) {
+            Ok(count) => entries = entries.saturating_add(count),
+            Err(fault) => {
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+                return DoctorLine::broken(
+                    "bundles",
+                    format!("{relative} {}", fault.detail()),
+                    format!(
+                        "re-cook it: cargo run -p engine-assets --bin e2bundle -- pack <its folder> \
+                         {relative}"
+                    ),
+                );
+            }
+        }
+    }
+    DoctorLine::ok(
+        "bundles",
+        format!(
+            "{} bundles parse as v{BUNDLE_VERSION}, {entries} entries",
+            found.len()
+        ),
+    )
+}
+
+/// Collect `*.e2bundle` files under `dir`, descending `depth` folders.
+fn collect_bundles(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if kind.is_dir() {
+            if depth > 0 {
+                collect_bundles(&path, depth - 1, out);
+            }
+        } else if kind.is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some(BUNDLE_SUFFIX)
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// Why one bundle frame refused, in the words the doctor's line prints.
+enum BundleFault {
+    Unreadable(std::io::Error),
+    Header(u64),
+    OverCap(u64),
+    Magic,
+    Stale(u32),
+    Empty,
+    Entries(u32),
+    Kind(u8),
+    Overflow,
+    Payload(u64),
+    Digest,
+    Past { at: u64, len: u64 },
+    Trailing(u64),
+    Truncated(u64),
+}
+
+impl BundleFault {
+    /// The detail printed after the bundle path.
+    fn detail(&self) -> String {
+        match self {
+            Self::Unreadable(error) => format!("is unreadable ({error})"),
+            Self::Header(len) => format!("is {len} bytes, under the 16-byte header"),
+            Self::OverCap(len) => {
+                format!("is {len} bytes, over the {MAX_BUNDLE_BYTES}-byte cap")
+            }
+            Self::Magic => "has magic other than E204BNDL".to_owned(),
+            Self::Stale(version) => {
+                format!("is a stale v{version} frame (the runtime reads v{BUNDLE_VERSION})")
+            }
+            Self::Empty => "holds no entries (a stub)".to_owned(),
+            Self::Entries(count) => {
+                format!("declares {count} entries, over the {MAX_BUNDLE_ENTRIES} cap")
+            }
+            Self::Kind(kind) => format!("has an unknown entry kind {kind}"),
+            Self::Overflow => "frame offsets overflow".to_owned(),
+            Self::Payload(payload) => {
+                format!("has a {payload}-byte entry, over the {MAX_BUNDLE_BYTES}-byte cap")
+            }
+            Self::Digest => "has an entry digest that is not 64 hex chars".to_owned(),
+            Self::Past { at, len } => format!("runs past its {len} bytes at offset {at}"),
+            Self::Trailing(extra) => format!("has {extra} trailing bytes after the frame"),
+            Self::Truncated(at) => format!("is truncated at offset {at}"),
+        }
+    }
+}
+
+/// Walk one bundle frame without hashing: header, entry framing and digest shape.
+///
+/// Returns the entry count. The runtime loader stays the authority on payload
+/// digests; this answers whether the file is a current, walkable frame.
+fn bundle_entries(path: &Path) -> Result<u32, BundleFault> {
+    let mut file = File::open(path).map_err(BundleFault::Unreadable)?;
+    let len = file.metadata().map_err(BundleFault::Unreadable)?.len();
+    if len < 16 {
+        return Err(BundleFault::Header(len));
+    }
+    if len > MAX_BUNDLE_BYTES {
+        return Err(BundleFault::OverCap(len));
+    }
+    let mut header = [0u8; 16];
+    file.read_exact(&mut header)
+        .map_err(BundleFault::Unreadable)?;
+    if header[..8] != BUNDLE_MAGIC {
+        return Err(BundleFault::Magic);
+    }
+    let version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    if version != BUNDLE_VERSION {
+        return Err(BundleFault::Stale(version));
+    }
+    let count = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
+    if count == 0 {
+        return Err(BundleFault::Empty);
+    }
+    if count > MAX_BUNDLE_ENTRIES {
+        return Err(BundleFault::Entries(count));
+    }
+    let mut at = 16u64;
+    for _ in 0..count {
+        let mut kind = [0u8; 1];
+        read_at(&mut file, at, &mut kind, len)?;
+        if !(1..=MAX_BUNDLE_KIND).contains(&kind[0]) {
+            return Err(BundleFault::Kind(kind[0]));
+        }
+        at = at.checked_add(1).ok_or(BundleFault::Overflow)?;
+        let mut name_len = [0u8; 2];
+        read_at(&mut file, at, &mut name_len, len)?;
+        at = at
+            .checked_add(2 + u64::from(u16::from_le_bytes(name_len)))
+            .ok_or(BundleFault::Overflow)?;
+        let mut payload_len = [0u8; 4];
+        read_at(&mut file, at, &mut payload_len, len)?;
+        at = at.checked_add(4).ok_or(BundleFault::Overflow)?;
+        let payload = u64::from(u32::from_le_bytes(payload_len));
+        if payload > MAX_BUNDLE_BYTES {
+            return Err(BundleFault::Payload(payload));
+        }
+        at = at.checked_add(payload).ok_or(BundleFault::Overflow)?;
+        let mut digest = [0u8; 64];
+        read_at(&mut file, at, &mut digest, len)?;
+        if !digest.iter().all(u8::is_ascii_hexdigit) {
+            return Err(BundleFault::Digest);
+        }
+        at = at.checked_add(64).ok_or(BundleFault::Overflow)?;
+        if at > len {
+            return Err(BundleFault::Past { at, len });
+        }
+    }
+    if at != len {
+        return Err(BundleFault::Trailing(len.saturating_sub(at)));
+    }
+    Ok(count)
+}
+
+/// Read exactly `buffer.len()` bytes at `at`, refusing a read past `len`.
+fn read_at(file: &mut File, at: u64, buffer: &mut [u8], len: u64) -> Result<(), BundleFault> {
+    let want = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
+    if at.checked_add(want).is_none_or(|end| end > len) {
+        return Err(BundleFault::Truncated(at));
+    }
+    file.seek(SeekFrom::Start(at))
+        .and_then(|_| file.read_exact(buffer))
+        .map_err(BundleFault::Unreadable)
+}
+
+/// (d) The installed bridge is as new as the release build (DOOR5).
+fn bridge_line(root: &Path) -> DoctorLine {
+    let installed_path = root.join(BRIDGE_INSTALLED);
+    let installed = match std::fs::metadata(&installed_path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return DoctorLine::skip(
+                "bridge",
+                format!("{BRIDGE_INSTALLED} is not installed"),
+                "install it: node tools/mcp-install.mjs".to_owned(),
+            );
+        }
+        Err(error) => {
+            return DoctorLine::broken(
+                "bridge",
+                format!("{BRIDGE_INSTALLED} is unreadable ({error})"),
+                "refresh it: node tools/mcp-install.mjs".to_owned(),
+            );
+        }
+    };
+    let release = match std::fs::metadata(root.join(BRIDGE_RELEASE)) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return DoctorLine::skip(
+                "bridge",
+                format!(
+                    "{BRIDGE_INSTALLED} is installed, but there is no {BRIDGE_RELEASE} to compare"
+                ),
+                "build it (cargo build --release -p engine-endpoint --bin e2040-mcp), then run \
+                 node tools/mcp-install.mjs"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            return DoctorLine::broken(
+                "bridge",
+                format!("{BRIDGE_RELEASE} is unreadable ({error})"),
+                "rebuild it (cargo build --release -p engine-endpoint --bin e2040-mcp)".to_owned(),
+            );
+        }
+    };
+    if installed.len() != release.len() {
+        return DoctorLine::broken(
+            "bridge",
+            format!(
+                "{BRIDGE_INSTALLED} is {} bytes, {BRIDGE_RELEASE} is {}",
+                installed.len(),
+                release.len()
+            ),
+            "refresh it: node tools/mcp-install.mjs".to_owned(),
+        );
+    }
+    match (installed.modified(), release.modified()) {
+        (Ok(installed_at), Ok(release_at)) => match installed_at.duration_since(release_at) {
+            Ok(_) => DoctorLine::ok(
+                "bridge",
+                format!("{BRIDGE_INSTALLED} is current, not older than {BRIDGE_RELEASE}"),
+            ),
+            Err(behind) => DoctorLine::broken(
+                "bridge",
+                format!(
+                    "{BRIDGE_INSTALLED} is older than {BRIDGE_RELEASE} by {}",
+                    span_ms(behind.duration().as_millis())
+                ),
+                "refresh it: node tools/mcp-install.mjs".to_owned(),
+            ),
+        },
+        _ => DoctorLine::skip(
+            "bridge",
+            format!("{BRIDGE_INSTALLED} or {BRIDGE_RELEASE} has no readable age"),
+            "refresh it: node tools/mcp-install.mjs".to_owned(),
+        ),
+    }
+}
+
+/// (e) The last proof per crate, read from the gh-check proof log.
+fn proof_line(root: &Path, now_ms: u128) -> DoctorLine {
+    let entries = match std::fs::read_dir(root.join(PROOF_DIR)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return DoctorLine::skip(
+                "proof",
+                format!("no proof log at {PROOF_DIR}"),
+                "record one: node tools/gh-check.mjs cargo test -p engine-endpoint --lib doctor"
+                    .to_owned(),
+            );
+        }
+        Err(error) => {
+            return DoctorLine::broken(
+                "proof",
+                format!("{PROOF_DIR} is unreadable ({error})"),
+                "fix the folder or delete it and record a proof again".to_owned(),
+            );
+        }
+    };
+    let mut newest: BTreeMap<String, ProofRecord> = BTreeMap::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Some(record) = read_proof(&entry.path()) else {
+            continue;
+        };
+        for name in &record.crates {
+            let stale = newest
+                .get(name)
+                .is_some_and(|seen| seen.at_ms >= record.at_ms);
+            if !stale {
+                newest.insert(name.clone(), record.clone());
+            }
+        }
+    }
+    if newest.is_empty() {
+        return DoctorLine::skip(
+            "proof",
+            format!("{PROOF_DIR} holds no cargo -p record"),
+            "record one: node tools/gh-check.mjs cargo test -p engine-endpoint --lib doctor"
+                .to_owned(),
+        );
+    }
+    let red = newest.iter().find(|(_, record)| record.code != 0);
+    if let Some((name, record)) = red {
+        return DoctorLine::broken(
+            "proof",
+            format!(
+                "{name} is red {} ago ({}); {} crates proven",
+                span_ms(now_ms.saturating_sub(record.at_ms)),
+                one_line(&record.cmd, MAX_DETAIL_CHARS),
+                newest.len()
+            ),
+            format!(
+                "re-run it: node tools/gh-check.mjs {}",
+                one_line(&record.cmd, MAX_DETAIL_CHARS)
+            ),
+        );
+    }
+    let stale = newest
+        .iter()
+        .find(|(_, record)| now_ms.saturating_sub(record.at_ms) > PROOF_MAX_AGE_MS);
+    if let Some((name, record)) = stale {
+        return DoctorLine::broken(
+            "proof",
+            format!(
+                "{name} has no proof newer than {} (last {} ago, {}); {} crates proven",
+                span_ms(PROOF_MAX_AGE_MS),
+                span_ms(now_ms.saturating_sub(record.at_ms)),
+                one_line(&record.cmd, MAX_DETAIL_CHARS),
+                newest.len()
+            ),
+            format!(
+                "re-run it: node tools/gh-check.mjs {}",
+                one_line(&record.cmd, MAX_DETAIL_CHARS)
+            ),
+        );
+    }
+    match newest.iter().max_by_key(|(_, record)| record.at_ms) {
+        Some((name, record)) => DoctorLine::ok(
+            "proof",
+            format!(
+                "{} crates proven, newest {name} {} ago, all green",
+                newest.len(),
+                span_ms(now_ms.saturating_sub(record.at_ms))
+            ),
+        ),
+        None => DoctorLine::skip(
+            "proof",
+            format!("{PROOF_DIR} holds no record"),
+            String::new(),
+        ),
+    }
+}
+
+/// One gh-check result: its command, exit code, age and the crates it proved.
+#[derive(Clone)]
+struct ProofRecord {
+    cmd: String,
+    code: i64,
+    at_ms: u128,
+    crates: Vec<String>,
+}
+
+/// Read one proof record; `None` for a non-record, an oversize file or a command with no `-p`.
+fn read_proof(path: &Path) -> Option<ProofRecord> {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        return None;
+    }
+    if std::fs::metadata(path).ok()?.len() > MAX_PROOF_BYTES {
+        return None;
+    }
+    let value: rmcp::serde_json::Value =
+        rmcp::serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let cmd = value.get("cmd")?.as_str()?.to_owned();
+    let code = value.get("code")?.as_i64()?;
+    let at_ms = u128::from(value.get("at")?.as_u64()?);
+    let crates = proof_crates(&cmd);
+    if crates.is_empty() {
+        return None;
+    }
+    Some(ProofRecord {
+        cmd,
+        code,
+        at_ms,
+        crates,
+    })
+}
+
+/// The crate names a `cargo ... -p <name>` line proves, in line order.
+fn proof_crates(cmd: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut parts = cmd.split_whitespace();
+    while let Some(part) = parts.next() {
+        let name = match part {
+            "-p" | "--package" => parts.next().map(|next| next.trim_matches('"')),
+            _ => part
+                .strip_prefix("--package=")
+                .or_else(|| part.strip_prefix("-p="))
+                .map(|next| next.trim_matches('"')),
+        };
+        let Some(name) = name else {
+            continue;
+        };
+        if name.is_empty()
+            || name.chars().count() > MAX_CRATE_CHARS
+            || out.iter().any(|seen| seen == name)
+        {
+            continue;
+        }
+        out.push(name.to_owned());
+    }
+    out
+}
+
+/// `doctor` tool: the preflight receipt, read-only.
+pub struct DoctorTool;
+
+impl ToolBase for DoctorTool {
+    type Parameter = DoctorArgs;
+    type Output = DoctorOutput;
+    type Error = McpToolError;
+
+    fn name() -> Cow<'static, str> {
+        TOOL_DOCTOR.into()
+    }
+
+    fn description() -> Option<Cow<'static, str>> {
+        Some(
+            "What is broken before a model starts: GPU adapter, content root, bundle frames, \
+             installed bridge age and the last proof per crate, one line per check with its fix. \
+             Read-only."
+                .into(),
+        )
+    }
+
+    fn annotations() -> Option<rmcp::model::ToolAnnotations> {
+        crate::mcp::read_only_annotations()
+    }
+}
+
+impl SyncTool<McpServer> for DoctorTool {
+    fn invoke(service: &McpServer, param: Self::Parameter) -> Result<Self::Output, Self::Error> {
+        service.dispatch(TOOL_DOCTOR, |_state| {
+            let root = super::codex::project_root(param.root.as_deref());
+            let adapter = std::env::var(GPU_ADAPTER_ENV).ok();
+            Ok(run_doctor(&root, unix_ms(), adapter.as_deref()))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::insight::mcp_tools::{ApiDescribeArgs, ApiDescribeTool};
     use crate::packs::PackRegistry;
     use engine_editor::capability::Capability;
+    use std::time::Duration;
 
     fn server() -> McpServer {
         McpServer::new(7, Capability::unrestricted(7))
@@ -451,6 +1227,284 @@ mod tests {
         .expect("api.describe lists perf.table");
         assert_eq!(described.path, TOOL_PERF_TABLE);
         assert!(described.docs.contains("p50"));
+        assert!(described.signature.contains("perf"));
+    }
+
+    // ---- doctor -----------------------------------------------------------
+
+    /// A valid one-entry bundle digest (64 lowercase hex chars).
+    const GOOD_DIGEST: &[u8; 64] =
+        b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("e2040-doctor-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("fixture root creates");
+        root
+    }
+
+    /// One bundle frame: magic, `version`, one entry per name with a good digest.
+    fn write_bundle(path: &Path, version: u32, names: &[&str]) {
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b"E204BNDL");
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(
+            &u32::try_from(names.len())
+                .expect("fixture count")
+                .to_le_bytes(),
+        );
+        for name in names {
+            bytes.push(1);
+            bytes.extend_from_slice(
+                &u16::try_from(name.len())
+                    .expect("fixture name")
+                    .to_le_bytes(),
+            );
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&7u32.to_le_bytes());
+            bytes.extend_from_slice(b"payload");
+            bytes.extend_from_slice(GOOD_DIGEST);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("bundle folder");
+        }
+        std::fs::write(path, bytes).expect("bundle writes");
+    }
+
+    /// Move a file's mtime to `minutes_ago` before `now_ms`.
+    fn set_age(path: &Path, now_ms: u128, minutes_ago: u64) {
+        let when = UNIX_EPOCH
+            + Duration::from_millis(u64::try_from(now_ms).expect("fixture clock"))
+            - Duration::from_secs(minutes_ago * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("fixture file opens")
+            .set_modified(when)
+            .expect("fixture mtime sets");
+    }
+
+    /// One gh-check proof record.
+    fn write_proof(path: &Path, code: i64, cmd: &str, at_ms: u128) {
+        let at = u64::try_from(at_ms).expect("fixture clock");
+        std::fs::write(
+            path,
+            format!("{{\"code\":{code},\"cmd\":\"{cmd}\",\"at\":{at}}}\n"),
+        )
+        .expect("proof writes");
+    }
+
+    /// A tree every doctor check passes on.
+    fn doctor_fixture(name: &str) -> (PathBuf, u128) {
+        let root = fixture(name);
+        let now_ms = unix_ms();
+        std::fs::create_dir_all(root.join("content/arena")).expect("content folder");
+        write_bundle(
+            &root.join("content/arena/kit.e2bundle"),
+            BUNDLE_VERSION,
+            &["kit"],
+        );
+        let reports = root.join(REPORT_DIR);
+        std::fs::create_dir_all(&reports).expect("reports folder");
+        std::fs::write(
+            reports.join("arena-20260101T0000Z-1.txt"),
+            "arena per-pass: adapter=\"Fixture GPU 9000\" driver=\"1.0\"\n",
+        )
+        .expect("report writes");
+        std::fs::create_dir_all(root.join(".opencode/bin")).expect("bridge folder");
+        std::fs::create_dir_all(root.join("target/release")).expect("release folder");
+        std::fs::write(root.join(BRIDGE_INSTALLED), b"bridge").expect("installed writes");
+        std::fs::write(root.join(BRIDGE_RELEASE), b"bridge").expect("release writes");
+        set_age(&root.join(BRIDGE_INSTALLED), now_ms, 60);
+        set_age(&root.join(BRIDGE_RELEASE), now_ms, 120);
+        let proofs = root.join(PROOF_DIR);
+        std::fs::create_dir_all(&proofs).expect("proof folder");
+        write_proof(
+            &proofs.join("green.json"),
+            0,
+            "cargo test -p engine-endpoint --lib doctor",
+            now_ms - 3_600_000,
+        );
+        (root, now_ms)
+    }
+
+    fn check_line<'a>(output: &'a DoctorOutput, check: &str) -> &'a DoctorLine {
+        output
+            .lines
+            .iter()
+            .find(|line| line.check == check)
+            .unwrap_or_else(|| panic!("no `{check}` line in {}", output.receipt))
+    }
+
+    #[test]
+    fn doctor_answers_five_ok_lines_and_reads_twice_equal() {
+        let (root, now_ms) = doctor_fixture("healthy");
+        let first = run_doctor(&root, now_ms, None);
+        assert!(first.ok, "healthy fixture:\n{}", first.receipt);
+        assert_eq!(first.lines.len(), 5, "one line per check");
+        assert_eq!(first.broken, 0);
+        assert_eq!(first.skipped, 0);
+        assert_eq!(first.receipt.lines().count(), 5, "one line per check");
+        for line in &first.lines {
+            assert_eq!(line.status, DoctorStatus::Ok, "{}", line.line());
+            assert!(!line.line().contains('\n'), "{}", line.line());
+        }
+        assert!(first.receipt.contains("adapter \"Fixture GPU 9000\""));
+        assert!(first.receipt.contains("bundles parse as v1"));
+        assert!(first.receipt.contains("is current"));
+        assert!(first.receipt.contains("all green"));
+        let second = run_doctor(&root, now_ms, None);
+        assert_eq!(first, second, "same tree and clock, same receipt");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Each check is read once as broken, with its fix on the same line.
+    #[test]
+    fn doctor_breaks_a_missing_content_root_with_its_fix() {
+        let (root, now_ms) = doctor_fixture("no-content");
+        let _ = std::fs::remove_dir_all(root.join("content"));
+        let output = run_doctor(&root, now_ms, None);
+        let line = check_line(&output, "content");
+        assert_eq!(line.status, DoctorStatus::Broken, "{}", line.line());
+        assert!(
+            line.detail.contains("content/ is missing"),
+            "{}",
+            line.line()
+        );
+        assert!(
+            line.fix.contains("git checkout -- content"),
+            "{}",
+            line.line()
+        );
+        assert!(!output.ok, "a broken check means not ok");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn doctor_breaks_a_stale_bundle_with_its_fix() {
+        let (root, now_ms) = doctor_fixture("stale-bundle");
+        write_bundle(&root.join("content/arena/kit.e2bundle"), 0, &["kit"]);
+        let output = run_doctor(&root, now_ms, None);
+        let line = check_line(&output, "bundles");
+        assert_eq!(line.status, DoctorStatus::Broken, "{}", line.line());
+        assert!(line.detail.contains("stale v0 frame"), "{}", line.line());
+        assert!(line.fix.contains("e2bundle -- pack"), "{}", line.line());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn doctor_breaks_an_absent_adapter_report_with_its_fix() {
+        let (root, now_ms) = doctor_fixture("no-adapter");
+        let _ = std::fs::remove_dir_all(root.join(REPORT_DIR));
+        let output = run_doctor(&root, now_ms, None);
+        let line = check_line(&output, "gpu");
+        assert_eq!(line.status, DoctorStatus::Broken, "{}", line.line());
+        assert!(line.detail.contains("no adapter named"), "{}", line.line());
+        assert!(line.fix.contains("--frames 2 --exit"), "{}", line.line());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn doctor_skips_a_missing_proof_log_and_breaks_a_red_or_stale_one() {
+        let (root, now_ms) = doctor_fixture("proof-missing");
+        let _ = std::fs::remove_dir_all(root.join(PROOF_DIR));
+        let output = run_doctor(&root, now_ms, None);
+        let line = check_line(&output, "proof");
+        assert_eq!(line.status, DoctorStatus::Skip, "{}", line.line());
+        assert!(line.fix.contains("gh-check.mjs"), "{}", line.line());
+        let _ = std::fs::remove_dir_all(&root);
+
+        let (root, now_ms) = doctor_fixture("proof-red");
+        write_proof(
+            &root.join(PROOF_DIR).join("red.json"),
+            1,
+            "cargo test -p engine-render --lib contact_shadow",
+            now_ms - 600_000,
+        );
+        let output = run_doctor(&root, now_ms, None);
+        let line = check_line(&output, "proof");
+        assert_eq!(line.status, DoctorStatus::Broken, "{}", line.line());
+        assert!(
+            line.detail.contains("engine-render is red"),
+            "{}",
+            line.line()
+        );
+        assert!(
+            line.fix
+                .contains("node tools/gh-check.mjs cargo test -p engine-render"),
+            "{}",
+            line.line()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        let (root, now_ms) = doctor_fixture("proof-stale");
+        let _ = std::fs::remove_dir_all(root.join(PROOF_DIR));
+        std::fs::create_dir_all(root.join(PROOF_DIR)).expect("proof folder");
+        write_proof(
+            &root.join(PROOF_DIR).join("old.json"),
+            0,
+            "cargo test -p engine-endpoint --lib doctor",
+            now_ms - 100 * 3_600_000,
+        );
+        let output = run_doctor(&root, now_ms, None);
+        let line = check_line(&output, "proof");
+        assert_eq!(line.status, DoctorStatus::Broken, "{}", line.line());
+        assert!(
+            line.detail.contains("no proof newer than"),
+            "{}",
+            line.line()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn doctor_breaks_a_stale_installed_bridge_and_skips_an_absent_one() {
+        let (root, now_ms) = doctor_fixture("stale-bridge");
+        set_age(&root.join(BRIDGE_INSTALLED), now_ms, 180);
+        set_age(&root.join(BRIDGE_RELEASE), now_ms, 60);
+        let output = run_doctor(&root, now_ms, None);
+        let line = check_line(&output, "bridge");
+        assert_eq!(line.status, DoctorStatus::Broken, "{}", line.line());
+        assert!(line.detail.contains("is older than"), "{}", line.line());
+        assert!(
+            line.fix.contains("node tools/mcp-install.mjs"),
+            "{}",
+            line.line()
+        );
+        let _ = std::fs::remove_file(root.join(BRIDGE_INSTALLED));
+        let output = run_doctor(&root, now_ms, None);
+        let line = check_line(&output, "bridge");
+        assert_eq!(line.status, DoctorStatus::Skip, "{}", line.line());
+        assert!(
+            line.fix.contains("node tools/mcp-install.mjs"),
+            "{}",
+            line.line()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn doctor_is_a_listed_read_only_verb_in_the_perf_pack() {
+        let verb = PackRegistry::shipped()
+            .verb(TOOL_DOCTOR)
+            .expect("doctor is a registered verb");
+        assert_eq!(verb.pack(), PACK);
+        assert_eq!(verb.card(), CapabilityCard::Observe);
+        assert!(verb.readonly());
+        assert!(PackRegistry::shipped()
+            .pack(PACK)
+            .expect("perf pack")
+            .verb_names()
+            .contains(&TOOL_DOCTOR));
+        let described = ApiDescribeTool::invoke(
+            &server(),
+            ApiDescribeArgs {
+                path: TOOL_DOCTOR.to_owned(),
+            },
+        )
+        .expect("api.describe lists doctor");
+        assert_eq!(described.path, TOOL_DOCTOR);
+        assert!(described.docs.contains("broken"));
         assert!(described.signature.contains("perf"));
     }
 }

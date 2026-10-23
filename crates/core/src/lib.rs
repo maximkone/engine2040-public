@@ -51,6 +51,7 @@ pub mod sim_verify;
     reason = "the owner of SoftFloat: the ban is for the sim crates that would import it"
 )]
 pub mod soft_float;
+pub mod text;
 pub mod tick;
 pub mod time;
 pub mod vec3;

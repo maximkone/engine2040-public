@@ -6,6 +6,8 @@
 use crate::alloc::{self, AllocSnapshot};
 use crate::arena::{FrameArena, FrameError, CULL_KEYS, FRAME_BYTES};
 use engine_ai::{Brain, Percept};
+use engine_anim::crowd_scale::{self, CrowdTape};
+use engine_anim::lod::Tier;
 use engine_arena::{ArenaConfig, FighterId, FighterTape, AI_PERIOD_TICKS, MAX_PARTICIPANTS};
 use engine_core::fixed::Fixed;
 use engine_core::hash::FNV64_OFFSET;
@@ -1139,6 +1141,73 @@ pub fn spatial_query_ab(
     }
     let simd_ms = start.elapsed().as_secs_f64() * 1000.0;
     (scalar_ms, simd_ms)
+}
+
+/// Seeded thousand-agent crowd tick: tier assign, per-tier count, modeled
+/// cost post, far-ring handoff and tape digest over
+/// `engine_anim::crowd_scale` (AM18).
+/// Consumer: the `perf` proof's timed table plus the canonical baseline test.
+/// Data owner: the tape and the tier lane live on this run's stack, so two
+/// concurrent runs hash identically. Units: ticks, meters for the stride.
+/// Determinism: the seeded tape plus index-order scans; wall clock never
+/// enters the hash. Errors: none (the canonical seed builds a valid tape).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrowdScale {
+    /// Crowd tape seed (`CROWD_SEED` for the canonical run).
+    pub seed: u64,
+    /// Fixed ticks per run.
+    pub ticks: u32,
+}
+
+impl CrowdScale {
+    /// Workload name used in baselines and budget errors.
+    pub const NAME: &'static str = "crowd_scale_1000";
+
+    /// Canonical workload: the AM18 thousand-agent tape
+    /// (`engine_anim::crowd_scale::CROWD_SEED`, 1000 agents), 600 ticks.
+    pub const fn canonical() -> Self {
+        Self {
+            seed: crowd_scale::CROWD_SEED,
+            ticks: 600,
+        }
+    }
+
+    /// Same shape with a different seed (regression proofs).
+    pub const fn with_seed(self, seed: u64) -> Self {
+        Self { seed, ..self }
+    }
+
+    /// Canonical hash: the tick count folds in first, then per tick the four
+    /// tier counts, the far handoff count and the tape digest, after the tape
+    /// advances one canonical stride so a run sees a moving crowd.
+    pub fn run_hash(&self) -> u64 {
+        let mut tape = CrowdTape::seeded(self.seed);
+        let mut tiers = [Tier::Far; crowd_scale::MAX_CROWD];
+        let mut hash = FNV64_OFFSET;
+        mix(&mut hash, u64::from(self.ticks));
+        for _ in 0..self.ticks {
+            tape.advance(crowd_scale::CROWD_STRIDE_M);
+            // A seeded tape is finite with screens in 0..=1, so the tick path
+            // cannot refuse it. A refusal folds a zero report, which trips the
+            // recorded baseline instead of panicking in a profiled run.
+            let (counts, handed, digest) = match crowd_scale::crowd_tick_report(&tape, &mut tiers) {
+                Ok(report) => (report.counts, report.far_handed, report.hash),
+                Err(_) => (crowd_scale::TierCounts::EMPTY, 0, 0),
+            };
+            mix(&mut hash, counts.full);
+            mix(&mut hash, counts.half);
+            mix(&mut hash, counts.quarter);
+            mix(&mut hash, counts.far);
+            mix(&mut hash, handed);
+            mix(&mut hash, digest);
+        }
+        hash
+    }
+
+    /// Canonical run plus its allocation totals.
+    pub fn run_report(&self) -> WorkloadReport {
+        measured_report(Self::NAME, self.ticks, || self.run_hash())
+    }
 }
 
 #[cfg(test)]

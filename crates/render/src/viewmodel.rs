@@ -909,7 +909,7 @@ impl std::error::Error for ViewmodelError {}
 /// The GPU pass: the rim on its own depth target, plus the capture helper.
 ///
 /// Native only: it blocks on the GPU and writes the capture PNG to disk.
-#[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "gpu", not(target_arch = "wasm32")))]
 pub mod gpu;
 
 /// The tests of the rim: the outline table, the closed mesh, the depth

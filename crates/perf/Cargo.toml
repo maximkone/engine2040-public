@@ -32,6 +32,9 @@ engine-arena.workspace = true
 engine-ai.workspace = true
 engine-destruction.workspace = true
 engine-net.workspace = true
+# AM18: the thousand-agent crowd workload drives the anim crowd tape and its
+# per-tier LOD tick without any window or GPU.
+engine-anim.workspace = true
 puffin = { workspace = true, optional = true }
 mimalloc = { workspace = true, optional = true }
 

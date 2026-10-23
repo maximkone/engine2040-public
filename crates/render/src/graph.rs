@@ -863,7 +863,7 @@ impl CompiledGraph {
     /// GPU submit (headless twin): typed refusal until a wgpu device plus
     /// bind groups exist. Never silent, never a pretend success. The window
     /// build gates this stub out and submits for real (GX1 below).
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     pub fn submit_gpu(&self) -> Result<(), GpuUnsupported> {
         use std::fmt::Write as _;
         let mut reason = String::with_capacity(96); // alloc-ok: cold refusal, never a steady frame
@@ -892,30 +892,30 @@ impl CompiledGraph {
 /// Posted encode + submit + readback budget at test sizes in ms (debug
 /// build on the reference GPU, evidence only, never hashed; arena-size
 /// timing belongs to PF2).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const GPU_SUBMIT_BUDGET_MS: f64 = 16.0;
 /// Largest transient backing the submit accepts in bytes. The arena fixture
 /// backs about 27 MB (HDR 16.6 + depth 8.3 + decal 2.1 + smallest bloom mip).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const GPU_SUBMIT_TRANSIENT_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
 /// Fewest compiled passes the acceptance submit runs: the forward pass plus
 /// at least 3 graph passes (the arena fixture runs 7).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const GPU_SUBMIT_MIN_PASSES: usize = 4;
 /// Byte size of the packed `gtao::LookFrame` uniform: frame index, viewport,
 /// exposure, sun direction plus pad, 16-byte aligned for the shader below.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const LOOK_UNIFORM_BYTES: u64 = 32;
 /// Most slot targets the submitter ever sizes (the `gtao::LookFrame` bound
 /// already enforces the per-dimension limit; this caps the slot fan-out).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const GPU_SUBMIT_MAX_SLOTS: usize = 64;
 
 /// Fullscreen-triangle pass shader over the shared look uniform: no vertex
 /// buffers, no depth, one `Rgba8Unorm` target per pass. Engine-owned code.
 /// The fragment taps `look.exposure` so the uniform stays live in every pass
 /// and the covered-pixel count in the receipt proves real writes.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const GX_PASS_WGSL: &str = r#"
 struct LookU {
     frame_idx: u32,
@@ -952,7 +952,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 /// Window submit failures. There is no `Unsupported` variant: the caller
 /// hands over a wgpu device, so every failure names the bad input, the
 /// device call or the validation scope outcome.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GpuSubmitError {
     /// Caller input is unusable (invalid frame, over-budget transients,
@@ -965,7 +965,7 @@ pub enum GpuSubmitError {
     Validation(String),
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl fmt::Display for GpuSubmitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -976,14 +976,14 @@ impl fmt::Display for GpuSubmitError {
     }
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl Error for GpuSubmitError {}
 
 /// One window submit: pass and draw totals from the compiled declarations,
 /// slot counts from the RA2 alias plan, the validation outcome plus the
 /// pixels the last target actually covered (proof the passes wrote pixels,
 /// not just validated). Units: counts, bytes, ms, integer percent.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Debug)]
 pub struct GpuFrameReceipt {
     /// Frame index from the submitted `gtao::LookFrame`.
@@ -1018,7 +1018,7 @@ pub struct GpuFrameReceipt {
     pub per_pass_gpu_ms: Vec<Option<f64>>,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl GpuFrameReceipt {
     /// Posted budget this submit is charged against.
     pub fn budget_ms(&self) -> f64 {
@@ -1042,7 +1042,7 @@ impl GpuFrameReceipt {
 /// reads. Reuses the RL3 bind shape (no mirror): field order matches
 /// `GX_PASS_WGSL` (`frame_idx`, viewport, exposure, sun dir, pad). Pure
 /// bytes, no allocation; validation stays on the caller.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn look_frame_uniform_bytes(frame: &crate::gtao::LookFrame) -> [u8; 32] {
     let mut out = [0u8; 32];
     let index = u32::try_from(frame.frame_index & 0xffff_ffff).unwrap_or(u32::MAX);
@@ -1066,7 +1066,7 @@ pub fn look_frame_uniform_bytes(frame: &crate::gtao::LookFrame) -> [u8; 32] {
 /// start clears, any later use loads. Position zero always clears so a
 /// leading pass with no transients never loads an uninitialized target.
 /// Pure scan over the alias plan, no allocation.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn slot_target_for_position(
     allocs: &[TransientAlloc],
     pos: usize,
@@ -1089,7 +1089,7 @@ fn slot_target_for_position(
 /// bind groups or targets (the reuse test proves the counts stay flat).
 /// Per-submit encoder and readback buffers are driver resources, same as the
 /// RA1 twin, and sit outside the reuse guarantee.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct GpuSubmitter {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
@@ -1101,7 +1101,7 @@ pub struct GpuSubmitter {
     cached_slots: usize,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl GpuSubmitter {
     /// Compile the pass pipeline and the look bind layout; allocate the
     /// 32-byte uniform buffer. No frame-size state yet: slot targets size on
@@ -1186,7 +1186,7 @@ impl GpuSubmitter {
 /// RA2-aliased slot targets; a single submit plus a last-target readback.
 /// `submitter` caches stay flat on matching shape (steady-state proof in the
 /// reuse test); the encoder and readback buffer are per-submit driver work.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl CompiledGraph {
     /// Record the compiled passes on `device` and submit once. Consumes no
     /// `submitter` capacity on matching shape; fails loudly (never silent,
@@ -1531,7 +1531,7 @@ pub fn arena_frame_graph() -> FrameGraph {
     graph
 }
 
-#[cfg(all(test, feature = "window"))]
+#[cfg(all(test, feature = "gpu"))]
 static GX1_DEVICE: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue, wgpu::AdapterInfo)>> =
     std::sync::OnceLock::new();
 
@@ -1540,7 +1540,7 @@ static GX1_DEVICE: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue, wgpu::
 /// (the llvmpipe twin). One device for the whole suite so parallel tests
 /// never exhaust adapters; `None` is skip-not-green, never a fake pass.
 /// Test-only owner for the graph and executor submit tests.
-#[cfg(all(test, feature = "window"))]
+#[cfg(all(test, feature = "gpu"))]
 pub(crate) fn gx1_test_device() -> Option<(
     &'static wgpu::Device,
     &'static wgpu::Queue,
@@ -1594,9 +1594,28 @@ pub(crate) fn gx1_test_device() -> Option<(
         .map(|(device, queue, info)| (device, queue, info))
 }
 
+/// EG47: [`gx1_test_device`] as a typed probe, so a GPU test that finds no
+/// adapter goes through `crate::test_gpu::require_or_skip` instead of its own
+/// early return: one `SKIPPED <test>` line that `tools/proof.mjs` counts, and
+/// a failure rather than a pass when `E2040_REQUIRE_GPU=1`. The `None` cases
+/// of [`gx1_test_device`] are the adapter and device requests only, so this
+/// mapping keeps today's skip semantics and adds the gate.
+#[cfg(all(test, feature = "gpu"))]
+pub(crate) fn gx1_probe() -> Result<
+    (
+        &'static wgpu::Device,
+        &'static wgpu::Queue,
+        &'static wgpu::AdapterInfo,
+    ),
+    crate::test_gpu::NoAdapter,
+> {
+    gx1_test_device()
+        .ok_or_else(|| crate::test_gpu::NoAdapter("no wgpu adapter on this machine".into()))
+}
+
 /// Shared 64x64 fixture frame for the GX1 submit tests (valid exposure and
 /// sun direction; the submit validates it again through `LookFrame`).
-#[cfg(all(test, feature = "window"))]
+#[cfg(all(test, feature = "gpu"))]
 pub(crate) fn gx1_test_frame(index: u64) -> crate::gtao::LookFrame {
     crate::gtao::LookFrame {
         frame_index: index,
@@ -1951,7 +1970,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     fn gpu_submit_refuses_with_typed_unsupported() {
         let compiled = arena_frame_graph().compile().expect("acyclic");
         let err = compiled
@@ -2003,10 +2022,12 @@ mod tests {
     // ----- GX1 window tests (behind `window`; skip loudly without a device) -----
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_window_submit_runs_forward_plus_three_clean() {
-        let Some((device, queue, info)) = gx1_test_device() else {
-            eprintln!("SKIPPED gx1 window submit: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "gx1_window_submit_runs_forward_plus_three_clean",
+            gx1_probe(),
+        ) else {
             return;
         };
         let compiled = arena_frame_graph()
@@ -2073,10 +2094,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_twin_runs_same_compiled_graph() {
-        let Some((device, queue, _)) = gx1_test_device() else {
-            eprintln!("SKIPPED gx1 twin: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("gx1_twin_runs_same_compiled_graph", gx1_probe())
+        else {
             return;
         };
         // CPU twin over the same declarations (no fns): sums match the GPU
@@ -2101,10 +2123,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_invalid_inputs_refuse_before_submit() {
-        let Some((device, queue, _)) = gx1_test_device() else {
-            eprintln!("SKIPPED gx1 invalid inputs: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "gx1_invalid_inputs_refuse_before_submit",
+            gx1_probe(),
+        ) else {
             return;
         };
         let compiled = arena_frame_graph().compile().expect("acyclic");
@@ -2139,7 +2163,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_cpu_planning_allocates_nothing() {
         let frame = gx1_test_frame(11);
         frame.validate().expect("fixture frame validates");
@@ -2167,10 +2191,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_submitter_reuses_targets_and_binds() {
-        let Some((device, queue, _)) = gx1_test_device() else {
-            eprintln!("SKIPPED gx1 reuse: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("gx1_submitter_reuses_targets_and_binds", gx1_probe())
+        else {
             return;
         };
         let compiled = arena_frame_graph().compile().expect("acyclic");
@@ -2200,10 +2225,11 @@ mod tests {
 
     #[test]
     #[ignore = "timing: GPU submit wall-clock needs --perf on the idle reference GPU"]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_submit_wall_budget() {
-        let Some((device, queue, _)) = gx1_test_device() else {
-            eprintln!("SKIPPED gx1 wall budget: no wgpu adapter on this machine");
+        let Some((device, queue, _)) =
+            crate::test_gpu::require_or_skip("gx1_submit_wall_budget", gx1_probe())
+        else {
             return;
         };
         let compiled = arena_frame_graph().compile().expect("acyclic");
@@ -2229,7 +2255,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_receipt_budget_accessors_are_exact() {
         // Deterministic budget logic (no wall clock): at, under and over
         // the posted budget plus the transient cap.
@@ -2265,7 +2291,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_timestamp_ticks_convert_by_period() {
         use crate::executor::{pass_ms_from_ticks, query_pair, ticks_to_ms, timestamp_query_count};
         assert_eq!(ticks_to_ms(0, 1.0), 0.0);
@@ -2280,7 +2306,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_timestamp_decode_needs_full_pairs() {
         use crate::executor::{decode_pass_bytes, none_gpu_timings};
         let period = 1.0;
@@ -2302,10 +2328,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_timestamps_resolve_per_pass_or_degrade_clean() {
-        let Some((device, queue, info)) = gx1_test_device() else {
-            eprintln!("SKIPPED gx1 timestamps: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "gx1_timestamps_resolve_per_pass_or_degrade_clean",
+            gx1_probe(),
+        ) else {
             return;
         };
         let compiled = arena_frame_graph().compile().expect("acyclic");
@@ -2341,7 +2369,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn gx1_error_names_cause_without_unsupported() {
         for err in [
             GpuSubmitError::Invalid("bad frame".to_string()),
@@ -2358,7 +2386,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn sl21_window_submit_alloc_audit_reports_na_floor() {
         // SL21 audit over the RA1 window submit slice, compiled with the
         // `window` feature: the same functions the offscreen/surface submits

@@ -122,14 +122,27 @@ golden unchanged; kill bars are gates.
   predicate_view_pushes_only_row_changes. cargo test -p engine-net --lib
   interest 27 passed, gh run 39494552479; full lib 430 passed, 39495016461;
   clippy 39495016264. Production call site stays ON29.
-- [ ] ON29 net: interest production wiring — `session.rs`/`scale.rs`
+- [x] ON29 net: interest production wiring — `session.rs`/`scale.rs`
   call `ConnectionInterest::select` on the live snapshot path with
   the ON3 budgets, keeping the in-test consumer as the oracle. Tier
   B. Size S. Owns call-site hunks in `crates/net/src/session.rs` +
   `scale.rs` (interest API frozen). Accept: 64-bot soak kbps and
   starve numbers equal the in-test oracle x2; no combat entity
   starved over 500ms; hash x2. needs: ON3, ON9. (PLN online,
-  reviewed 2026-09-26.)
+  reviewed 2026-09-26.) Landed b8876e998. Proof: `cargo test -p engine-net
+  --lib live_snapshot -- --nocapture` 2/2 (run 39869460572) — siege arm
+  `bytes=3377056 kbps_x100=4221 starve=24 combat_gap=6 digest=548745b1274c7acd`
+  equals its oracle, and the live ON3 default `kbps_x100=4703 starve=24
+  combat_gap=6 digest=6bac2a312aa41455` equals its oracle, both replay
+  bit-identically x2; worst starve 24 ticks = 400 ms (bar 500), combat gap
+  6 ticks = 100 ms; 47.03 kbps under the 256 bar, siege 42.21 under its 128;
+  `cargo test -p engine-net --lib` 462 passed, 0 failed, 4 ignored (run
+  39869186390); clippy all-targets `-D warnings` PASS (run 39869652778);
+  `rust-quality --owned` PASS; rustfmt clean. Golden untouched (net only).
+  Note: the 1500-production-line cap made `Server::state`/`snapshot_selection`/
+  `snapshot_packet` go; the lane's public `state`/`selection`/`packet` in
+  `scale.rs` are the consumer surface and session.rs sits at 1499/1500, so the
+  next production addition there needs a few lines of headroom first.
 - [ ] ON30 net: online two-machine played proof — 2 humans + 6 AI over
   QUIC through the ON2 relay converge mid-fight through a scripted
   drop+rejoin; measured loss/latency distributions posted. Tier A.

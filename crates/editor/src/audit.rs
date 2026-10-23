@@ -18,9 +18,10 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use engine_core::hash::{FNV64_OFFSET, GOLDEN_GAMMA};
+use engine_scene::ids::ObjectId;
 
 use crate::commands::digest::push_text;
-use crate::commands::{Applied, Batch, CommandMeta, Document, Journal, Op};
+use crate::commands::{Applied, Batch, BondStrength, CommandMeta, Document, Journal, Op};
 use crate::wal::{wal_apply, Wal, WalError};
 
 /// Bounded rotation cap: at most this many receipts are retained. Past the
@@ -257,12 +258,36 @@ fn encode_ops(ops: &[Op]) -> Result<Vec<u8>, AuditError> {
                 push_text(&mut out, value);
             }
             Op::RemoveLastMaterial => out.push(9),
+            Op::SetBond { id, a, b, strength } => {
+                encode_set_bond(&mut out, *id, *a, *b, *strength);
+            }
         }
         if out.len() > MAX_AUDIT_OP_BYTES {
             return Err(AuditError::TooLarge);
         }
     }
     Ok(out)
+}
+
+/// Tag 10: one bond paint, its canonical pair and optional strength.
+fn encode_set_bond(
+    out: &mut Vec<u8>,
+    id: ObjectId,
+    a: u32,
+    b: u32,
+    strength: Option<BondStrength>,
+) {
+    out.push(10);
+    out.extend_from_slice(id.as_uuid().as_bytes());
+    out.extend_from_slice(&a.to_le_bytes());
+    out.extend_from_slice(&b.to_le_bytes());
+    match strength {
+        Some(value) => {
+            out.push(1);
+            out.extend_from_slice(&value.permille().to_le_bytes());
+        }
+        None => out.push(0),
+    }
 }
 
 /// Link digest: `digest(prev || entry_digest || seq)`.

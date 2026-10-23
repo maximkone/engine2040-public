@@ -1426,7 +1426,7 @@ fn b64_encode(bytes: &[u8]) -> String {
 }
 
 /// Lowercase hex of a byte digest (64 chars for a SHA-256).
-fn hex_bytes(bytes: &[u8]) -> String {
+pub(crate) fn hex_bytes(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

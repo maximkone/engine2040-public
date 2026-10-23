@@ -6,13 +6,43 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CACHE_NAME, LoadError, AssetError, browserEnv, fetchAsset, pageFetcher, loadEngine, loadLine, watchFirstFrame } from "../crates/web/loader.js";
+import { gzipSync } from "node:zlib";
+import { CACHE_NAME, LoadError, AssetError, browserEnv, fetchAsset, fetchAssetPrefix, pageFetcher, loadEngine, loadLine, watchFirstFrame } from "../crates/web/loader.js";
 
 const WASM = Buffer.from("fake wasm bytes".repeat(100));
 const SHA = createHash("sha256").update(WASM).digest("hex");
 const BASE = "http://127.0.0.1:9/";
 const KEY = `${BASE}engine_bg.wasm?sha256=${SHA}`;
 const tick = () => new Promise((r) => setTimeout(r, 5));
+
+// QW4: a two-tier E2BUNDLE, so the loader has a coarse boundary to stop at.
+function miniBundle() {
+  const coarse = Buffer.from("coarse bytes");
+  const later = Buffer.from("hdri bytes");
+  const rows = [
+    { path: "cooked/a.bin", priority: 0, data: coarse },
+    { path: "hdri/studio.hdr", priority: 1, data: later },
+  ];
+  const indexLen = rows.reduce((n, r) => n + 2 + r.path.length + 25, 0);
+  const head = Buffer.alloc(32 + indexLen);
+  head.write("E2BUNDLE", 0, "latin1");
+  head.writeUInt32LE(1, 8);
+  head.writeUInt32LE(rows.length, 12);
+  head.writeBigUInt64LE(BigInt(indexLen), 16);
+  head.writeBigUInt64LE(0n, 24);
+  let at = 32;
+  let offset = 32 + indexLen;
+  for (const r of rows) {
+    head.writeUInt16LE(r.path.length, at); at += 2;
+    head.write(r.path, at, "latin1"); at += r.path.length;
+    head[at] = r.priority; at += 1;
+    head.writeBigUInt64LE(BigInt(offset), at); at += 8;
+    head.writeBigUInt64LE(BigInt(r.data.length), at); at += 8;
+    head.writeBigUInt64LE(0n, at); at += 8;
+    offset += r.data.length;
+  }
+  return { bytes: Buffer.concat([head, coarse, later]), first: 32 + indexLen + coarse.length };
+}
 
 // A page's world: a server (what each path answers), a Cache API that survives between loads, a clock the fakes advance.
 function world({ type = "application/wasm", status = 200, buildJson = { files: { "engine_bg.wasm": { sha256: SHA } } }, putThrows = null, persist = true } = {}) {
@@ -140,6 +170,120 @@ test("WEB6: the loader requests the gameplay asset and returns its bytes", async
   assert.equal(stats.bytesFetched, body.length);
 });
 
+// QW4: the page draws a fetch bar, so the loader reports bytes as they arrive and one final done.
+test("QW4: fetchAsset reports streamed progress and a final done", async () => {
+  const body = new TextEncoder().encode("hello world");
+  const parts = [body.subarray(0, 4), body.subarray(4, 8), body.subarray(8)];
+  let next = 0;
+  const stream = new ReadableStream({
+    async pull(controller) {
+      if (next >= parts.length) { controller.close(); return; }
+      controller.enqueue(parts[next++]);
+      await new Promise((r) => setTimeout(r, 1));
+    },
+  });
+  const events = [];
+  const env = {
+    fetch: async () => new Response(stream, { status: 200, headers: { "content-length": String(body.length) } }),
+    now: () => 0,
+  };
+  const { bytes } = await fetchAsset("http://127.0.0.1:9/assets/arena.e2bundle", env, (p) => events.push(p));
+  assert.deepEqual([...bytes], [...body], "the bytes come back whole");
+  assert.ok(events.some((e) => !e.done && e.received > 0 && e.received < body.length), "progress arrives before the end");
+  assert.deepEqual(events.at(-1), { received: body.length, total: body.length, done: true });
+  assert.ok(events.every((e) => e.total === body.length), "the content-length is the total");
+});
+
+// QW4: the first frame starts at the tier-0 boundary, not at the end of the HDRI.
+test("QW4: fetchAssetPrefix resolves at the tier-0 boundary while the rest streams", async () => {
+  const { bytes: full, first } = miniBundle();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let phase = 0;
+  const stream = new ReadableStream({
+    async pull(controller) {
+      if (phase === 0) {
+        controller.enqueue(full.subarray(0, first));
+        phase = 1;
+        await gate;
+      } else if (phase === 1) {
+        controller.enqueue(full.subarray(first));
+        phase = 2;
+      } else controller.close();
+    },
+  });
+  const events = [];
+  const env = {
+    fetch: async () => new Response(stream, { status: 200, headers: { "content-length": String(full.length) } }),
+    now: () => 0,
+  };
+  const { bytes } = await fetchAssetPrefix("http://127.0.0.1:9/assets/arena.e2bundle", env, (p) => events.push(p));
+  assert.deepEqual([...bytes], [...full.subarray(0, first)], "only the coarse tier is in the prefix");
+  assert.ok(!events.at(-1).done, "the bar is still moving when the first frame starts");
+  release();
+  for (let i = 0; i < 100 && !events.at(-1).done; i++) await tick();
+  assert.deepEqual(events.at(-1), { received: full.length, total: full.length, done: true });
+});
+
+// QW10: the two cooked bundles ship gzip. The page must get the same bytes back, the bar
+// must follow the wire, and the first frame must still start at the tier-0 boundary: the
+// stream decompresses while it arrives, so nothing waits for the whole file.
+test("QW10: a gzip bundle decodes to the cooked bytes and the bar follows the wire", async () => {
+  const body = Buffer.from("a cooked bundle, gzipped on disk\n".repeat(40));
+  const gz = gzipSync(body, { level: 9 });
+  const events = [];
+  const env = {
+    fetch: async () => new Response(gz, { status: 200, headers: { "content-length": String(gz.length) } }),
+    now: () => 0,
+  };
+  const { bytes, stats } = await fetchAsset("http://127.0.0.1:9/assets/arena.e2bundle", env, (p) => events.push(p));
+  assert.deepEqual([...bytes], [...body], "the engine reads the cooked bytes, never the gzip");
+  assert.equal(stats.bytesFetched, body.length, "bytesFetched is what the engine got");
+  assert.deepEqual(events.at(-1), { received: gz.length, total: gz.length, done: true }, "the bar counts the compressed bytes the network sent");
+});
+
+test("QW10: a gzip bundle still resolves the tier-0 prefix before the rest arrives", async () => {
+  const { bytes: full, first } = miniBundle();
+  const gz = gzipSync(full, { level: 9 });
+  const headEnd = Math.floor(gz.length * 0.9); // the last tenth waits behind the gate
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let phase = 0;
+  const stream = new ReadableStream({
+    async pull(controller) {
+      if (phase === 0) {
+        controller.enqueue(gz.subarray(0, headEnd));
+        phase = 1;
+        await gate;
+      } else if (phase === 1) {
+        controller.enqueue(gz.subarray(headEnd));
+        phase = 2;
+      } else controller.close();
+    },
+  });
+  const events = [];
+  const env = {
+    fetch: async () => new Response(stream, { status: 200, headers: { "content-length": String(gz.length) } }),
+    now: () => 0,
+  };
+  const { bytes } = await fetchAssetPrefix("http://127.0.0.1:9/assets/arena.e2bundle", env, (p) => events.push(p));
+  assert.deepEqual([...bytes], [...full.subarray(0, first)], "only the coarse tier is in the prefix");
+  assert.ok(!events.at(-1).done, "the bar is still moving when the first frame starts");
+  release();
+  for (let i = 0; i < 100 && !events.at(-1).done; i++) await tick();
+  assert.deepEqual(events.at(-1), { received: gz.length, total: gz.length, done: true });
+});
+
+test("QW10: bytes that start like gzip but are not are a typed refusal, never a blank arena", async () => {
+  const broken = Uint8Array.from([0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0, 0x03, 0xff, 0xff, 0xff, 0xff]);
+  const env = { fetch: async () => new Response(broken, { status: 200 }), now: () => 0 };
+  await assert.rejects(fetchAsset("http://127.0.0.1:9/assets/arena.e2bundle", env), (e) => {
+    assert.ok(e instanceof AssetError, "the failure is typed");
+    assert.match(e.message, /assets\/arena\.e2bundle could not be read/);
+    return true;
+  });
+});
+
 test("WEB6: a missing asset is a typed refusal that names it", async () => {
   const env = { fetch: async () => new Response("not found", { status: 404 }), now: () => 0 };
   await assert.rejects(fetchAsset("http://127.0.0.1:9/assets/arena.e2bundle", env), (e) => {
@@ -157,12 +301,25 @@ test("WEB6: an empty body and a failed request are typed refusals, not empty ass
   await assert.rejects(fetchAsset("http://127.0.0.1:9/assets/arena.e2bundle", offline), /could not be fetched: offline/);
 });
 
+// QW4: the page's progress bar is fed by the loader, not by a fake timer.
+test("QW4: the page draws the arena bundle fetch bar from loader progress", () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const html = readFileSync(join(root, "crates", "web", "index.html"), "utf8");
+  assert.match(html, /<progress id="fetch-bar"/, "the page has the bar");
+  assert.match(html, /pageFetcher\(import\.meta\.url, showFetch\)/, "the rig fetch reports its progress");
+  assert.match(html, /pageFetcherPrefix\(import\.meta\.url, showFetch\)/, "the arena fetch reports the streamed progress");
+  assert.match(html, /window\.engine2040FetchAssetPrefix = /, "the prefix fetcher is installed for the engine");
+  assert.match(html, /delete document\.body\.dataset\.fetch/, "the bar hides when the fetch ends or refuses");
+});
+
 test("WEB6: the fetcher the engine asks for is the one the page installs", () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const rust = readFileSync(join(root, "crates", "web", "src", "content.rs"), "utf8");
   assert.match(rust, /pub const PAGE_FETCHER: &str = "engine2040FetchAsset"/, "the engine asks for the page's fetcher by this name");
+  assert.match(rust, /pub const PAGE_PREFIX_FETCHER: &str = "engine2040FetchAssetPrefix"/, "QW4 names the prefix fetcher too");
   const html = readFileSync(join(root, "crates", "web", "index.html"), "utf8");
   assert.match(html, /window\.engine2040FetchAsset = /, "the page installs it under that name");
+  assert.match(html, /window\.engine2040FetchAssetPrefix = /, "the page installs the prefix fetcher");
 });
 
 test("WEB6: the fetcher the page installs answers with the asset's bytes", async () => {

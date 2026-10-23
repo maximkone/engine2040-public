@@ -418,6 +418,64 @@ test("readArena brings the pixels over the wire intact and makes the PNG (mock p
   void write;
 });
 
+test("readArena waits for the A/B page's on arm before it reads the receipt (mock page)", async () => {
+  const { readArena, fnv1a64 } = await import("./web-browse.mjs");
+  const w = 2, h = 2, rgba = Buffer.alloc(w * h * 4, 7);
+  const line = JSON.stringify({ ok: true, frame: 67, width: w, height: h, hash: fnv1a64(rgba), blank: false });
+  const warm = JSON.stringify({ ok: true, frames: 31 });
+  const done = JSON.stringify({ ok: true, frames: 151, perf: { mode: "ab", off: { frames: 60 }, on: { frames: 46 } } });
+  let reads = 0;
+  const nodes = { passes: "", init: "", capture: line };
+  const evalJs = async (expr) => {
+    if (expr.includes("dataset.mode")) return true;
+    if (expr.includes("dataset.capture")) return "ready";
+    if (expr.includes("FileReader")) return rgba.toString("base64");
+    if (expr.includes("getElementById('receipt')")) return reads++ === 0 ? warm : done;
+    const id = /getElementById\('(\w+)'\)/.exec(expr)?.[1];
+    return nodes[id] ?? "";
+  };
+  const a = await readArena({ evalJs, sleep: async () => {} }, 1000, { waitForPerf: true });
+  assert.equal(a.receipt.perf.mode, "ab");
+  assert.ok(reads >= 2, "it polled past the warm-up receipt");
+  // Without the flag it reports the first receipt it read (the plain page, which prints no A/B).
+  reads = 0;
+  const quick = await readArena({ evalJs, sleep: async () => {} }, 1000);
+  assert.equal(quick.receipt.perf, undefined);
+});
+
+test("QW10: readArena gives up on a page that never prints its perf, on a clock the test drives", async () => {
+  const { readArena } = await import("./web-browse.mjs");
+  const captured = JSON.stringify({ ok: true, frame: 5, width: 2, height: 2, hash: "0000000000000000", blank: false });
+  const stuck = JSON.stringify({ ok: true, frames: 5 });
+  let reads = 0;
+  let clock = 1_000;
+  const now = () => {
+    clock += 500;
+    return clock;
+  };
+  const evalJs = async (expr) => {
+    if (expr.includes("dataset.mode")) return true;
+    if (expr.includes("dataset.capture")) return "ready";
+    if (expr.includes("FileReader")) return Buffer.alloc(16, 7).toString("base64");
+    if (expr.includes("getElementById('receipt')")) {
+      reads += 1;
+      return stuck;
+    }
+    if (expr.includes("getElementById('capture')")) return captured;
+    return "";
+  };
+  const a = await readArena({ evalJs, sleep: async () => {}, now }, 1000, { waitForPerf: true });
+  assert.equal(a.receipt.perf, undefined, "no perf object ever arrives");
+  assert.ok(reads > 500 && reads < 700, `it stops on the five-minute cap, not on a frame counter (${reads} polls)`);
+});
+
+test("parseArgs takes --page-query and refuses an empty one", () => {
+  assert.equal(parseArgs(["--chrome", "c"]).pageQuery, null);
+  assert.equal(parseArgs(["--chrome", "c", "--page-query", "bundle=ab&freeze"]).pageQuery, "bundle=ab&freeze");
+  assert.match(parseArgs(["--chrome", "c", "--page-query", "?"]).error, /--page-query/);
+  assert.match(parseArgs(["--chrome", "c", "--page-query"]).error, /--page-query/);
+});
+
 test("writeArena leaves the PNG and the facts side by side, and nothing for a page without the arena", async () => {
   const { writeArena, encodePng: write } = await import("./web-browse.mjs");
   const dir = mkdtempSync(join(tmpdir(), "arena-out-"));

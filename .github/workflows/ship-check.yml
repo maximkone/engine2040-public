@@ -8,10 +8,12 @@ name: ship-check
 # profile, copies it into the clean folder, starts it there with a sanitized
 # environment and checks the run receipt: a missing line, a zero tick or a hash
 # that is not the golden fails the job (tools/ship-run.mjs). The shipped arena
-# binary also plays a short headless run, so the job proves the game boots, not
-# only that it links. A runner with no wgpu adapter names the adapter and skips
-# that leg instead of failing the job. The public mirror is the build farm; the
-# private dev repo never runs this job.
+# binary also plays ten seconds of game time with `--headless`: no window, no
+# event loop, no wgpu adapter, twice from fresh state, and the two final hashes
+# must agree. So the job proves the game boots and plays, not only that it
+# links. The headless route never asks for an adapter; the receipt names the
+# skipped presenter (`frames=0`) instead of skipping the leg. The public mirror
+# is the build farm; the private dev repo never runs this job.
 #
 # A Windows PE image carries two fields the linker writes fresh in every
 # build: the COFF time stamp and the CodeView debug record (the PDB GUID and
@@ -134,10 +136,11 @@ jobs:
         # tools/ship-run.mjs starts it there with a sanitized environment,
         # requires `ticks=<n> final_hash=d57b5c8ae3096614` with n > 0, prints
         # `SHIP-RUN tick=<n> hash=<h>`, then plays the shipped arena binary
-        # headless and quotes its boot receipt. A missing receipt, a zero tick
-        # or a non-golden hash exits 1 and turns the job red. A runner with no
-        # wgpu adapter reaches no game receipt: that one case prints
-        # `SHIP-GAME skipped adapter=none` and leaves the job green.
+        # with `--headless` (no window, no adapter) for 600 ticks, twice, and
+        # requires one final hash from both runs. A missing receipt, a short
+        # run, a missing hash or a moved hash exits the tool and turns the job
+        # red. The no-adapter runner presents no frame, so the receipt says
+        # `frames=0` and the tool names `adapter=none`; the game itself ran.
         run: |
           $ErrorActionPreference = 'Stop'
           $target = Join-Path $env:RUNNER_TEMP 'ship-target'

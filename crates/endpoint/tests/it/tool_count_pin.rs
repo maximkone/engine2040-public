@@ -45,8 +45,13 @@ use engine_endpoint::{
 /// `codex.search` and `codex.cite` (on-demand), so every arm moves up by two
 /// more. `tune.sweep` (HX35, the play pack's ninth verb) moved every arm up by
 /// one. DOOR2 (2026-10-22): `scene.save` and `scene.load` join the default
-/// scene pack, so every arm moves up by two.
-const EXPECTED_ROUTER: usize = 83
+/// scene pack, so every arm moves up by two. After DOOR2 the router gained
+/// `game.play` (DOOR1 step 2), `net.shape` (`325a54fa6`), `perf.doctor`
+/// (`6330e67ba`) and `door.status` (`e8dcf966e`); the live count was 86, three
+/// over the DOOR2 arm, so every arm moved up by three. The fx pack adds
+/// `fx.ragdoll`, `fx.limb`, `fx.break`, `fx.blast` and `fx.undo` on demand
+/// (AD30), so every arm moves up by five more.
+const EXPECTED_ROUTER: usize = 91
     + if cfg!(feature = "rules") { 3 } else { 0 }
     + if cfg!(feature = "intake") { 1 } else { 0 }
     + if cfg!(feature = "verify") { 3 } else { 0 };

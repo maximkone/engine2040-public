@@ -66,6 +66,9 @@ pub mod limbloss;
 /// Nerve meter beside the feel survey: u8 resolve/break/dread/anchor levels.
 pub mod nerve;
 pub mod projectile;
+/// One round against the bodies it can meet: the tick it is hit on, as an
+/// event the render thread only reads (RY3, beside the flight module).
+pub mod projectile_hit;
 pub mod reaction;
 /// Trauma-curve shake stage: squared-trauma magnitude on the gamefeel wave
 /// pair, as permille of the shake cap. Pure integers, presentation only.

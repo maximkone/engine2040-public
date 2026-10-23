@@ -6,7 +6,8 @@
 use engine_perf::baselines::time_budget_ms;
 use engine_perf::budget::check_time_ms;
 use engine_perf::workloads::{
-    AiDecide, ArenaTick, DestructionStep, PhysicsStep, SpineFullTick, SpineTransformBody,
+    AiDecide, ArenaTick, CrowdScale, DestructionStep, PhysicsStep, SpineFullTick,
+    SpineTransformBody,
 };
 use std::time::Instant;
 
@@ -39,6 +40,10 @@ fn destruction_hash() -> u64 {
     DestructionStep::canonical().run_hash()
 }
 
+fn crowd_hash() -> u64 {
+    CrowdScale::canonical().run_hash()
+}
+
 // The spine bars time the passes alone (`run_steps`); `run_hash` digests
 // every pass, which is the equality proof and not the cost the bars name.
 fn spine_body_steps() -> u64 {
@@ -65,6 +70,10 @@ const WORKLOADS: &[Workload] = &[
     Workload {
         name: DestructionStep::NAME,
         run: destruction_hash,
+    },
+    Workload {
+        name: CrowdScale::NAME,
+        run: crowd_hash,
     },
     Workload {
         name: SpineTransformBody::NAME,

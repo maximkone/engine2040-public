@@ -54,7 +54,7 @@ mod imp {
         batch_error, cap_error, granted_ops, McpServer, McpToolError, ServerState,
     };
     use crate::canon::valid_name;
-    use crate::spatial_glue::{conflict_texts, quat_of_yaw, yaw_of_quat, ParsedWant};
+    use crate::spatial_glue::{conflict_texts, quat_of_yaw, ParsedWant};
 
     mod build_level_session;
     pub use build_level_session::*;
@@ -2073,6 +2073,17 @@ mod imp {
                 assert!(out.solved, "round {round}: {}", out.reason);
                 assert_eq!(out.verdict, "pass", "round {round}");
                 assert!(
+                    out.verify
+                        .starts_with("instance=level.build\nbucket=resolved\n"),
+                    "round {round} answers its verdict report: {}",
+                    out.verify
+                );
+                assert!(
+                    out.verify.contains("buckets:"),
+                    "round {round} answers the bucket summary: {}",
+                    out.verify
+                );
+                assert!(
                     !out.relation_diff.is_empty(),
                     "round {round} reports its relation edit"
                 );
@@ -2706,6 +2717,13 @@ mod imp {
             .expect("door answers refusals");
             assert!(!stuck.solved);
             assert_eq!(stuck.verdict, "refused");
+            assert!(
+                stuck
+                    .verify
+                    .starts_with("instance=level.build\nbucket=unresolved\n"),
+                "the refusal answers its verdict report: {}",
+                stuck.verify
+            );
             assert!(!stuck.findings.is_empty());
             assert_eq!(stuck.revision, 2, "refusals write nothing");
             let stale = BuildLevelTool::invoke(

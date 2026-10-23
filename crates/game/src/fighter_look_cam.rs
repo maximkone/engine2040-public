@@ -18,6 +18,7 @@
 
 use engine_render::v1::Camera;
 
+use super::fighter_look_feet::ticks_f32;
 use super::{FighterLook, LookFrame, SHAKE_MAX_M};
 use crate::camera::camera_rig::{
     damper_step, halflife_to_damping, smooth_trauma_offset, trauma_gain, FightCamSpring,
@@ -62,6 +63,15 @@ const BOB_MAX_STEP_M: f32 = 0.35;
 /// Feet above this are off the floor (a jump, a fall, a swing), meters: no
 /// walk, no bob.
 const BOB_AIRBORNE_M: f32 = 0.05;
+/// FEEL7 landing dip: deepest eye drop, meters, on the landing tick.
+const LAND_DIP_MAX_M: f32 = 0.12;
+/// Fall height that earns the full landing dip, meters.
+const LAND_DIP_FULL_FALL_M: f32 = 4.0;
+/// Look ticks a landing dip eases out over.
+const LAND_DIP_TICKS: u32 = 12;
+/// Share of the dip a landing earns even from a small jump: the weight is
+/// felt on every landing, and a long fall adds the rest.
+const LAND_DIP_FLOOR: f32 = 0.3;
 
 /// The smoothed state of the window's fight camera: the spring lanes plus the
 /// eye height and lens damped beside them. One per window; a fresh one snaps
@@ -252,6 +262,19 @@ fn hold_in_pit(camera: &mut Camera, limit: f32) {
     camera.eye.z = camera.eye.z.clamp(-limit, limit);
 }
 
+/// FEEL7 landing dip, meters, at `age` look ticks after a fall of `fall_m`:
+/// full on the landing tick, eased to zero over [`LAND_DIP_TICKS`]. A jump
+/// earns [`LAND_DIP_FLOOR`] of the dip; a 4 m fall or longer earns it all.
+fn landing_dip_m(fall_m: f32, age: u32) -> f32 {
+    if age >= LAND_DIP_TICKS || !fall_m.is_finite() {
+        return 0.0;
+    }
+    let long_fall = (fall_m / LAND_DIP_FULL_FALL_M).clamp(0.0, 1.0);
+    let strength = LAND_DIP_FLOOR + (1.0 - LAND_DIP_FLOOR) * long_fall;
+    let decay = 1.0 - ticks_f32(age) / ticks_f32(LAND_DIP_TICKS);
+    LAND_DIP_MAX_M * strength * decay
+}
+
 impl FighterLook {
     /// The walking hero's root this frame, metres: slot 0 is the window's
     /// human, drawn at the frame's sub-tick `alpha`.
@@ -260,6 +283,18 @@ impl FighterLook {
             Some(slot) => super::slot_root(slot, alpha.clamp(0.0, 1.0)).0,
             None => [0.0; 3],
         }
+    }
+    /// The landing dip at `tick`, meters, when slot 0's feet hold a landing.
+    fn landing_dip_at(&self, tick: u32) -> Option<f32> {
+        self.slots
+            .first()
+            .and_then(|slot| slot.feet.land)
+            .map(|land| landing_dip_m(land.fall_m, tick.saturating_sub(land.tick)))
+    }
+    /// Test-only: the camera dip the last landing earns at `tick`, meters.
+    #[cfg(test)]
+    pub(crate) fn feel7_landing_dip_m(&self, tick: u32) -> Option<f32> {
+        self.landing_dip_at(tick)
     }
     /// The walking hero's floor speed, m/s: slot 0 is the window's human. A
     /// jump between ticks is clamped to the walk top speed, so a respawn or a
@@ -287,6 +322,13 @@ impl FighterLook {
             return self.fight_camera(base, frame.shot, frame.fighters, frame.frame);
         };
         hold_in_pit(&mut camera, self.pit_limit_m());
+        // FEEL7: a fresh landing drops the eye for a beat, and the look point
+        // follows a little, so the ground takes the weight the body does.
+        let dip = self.landing_dip_at(self.tick).unwrap_or(0.0);
+        if dip > 0.0 {
+            camera.eye.y -= dip;
+            camera.target.y -= dip * 0.35;
+        }
         let shake = self.fight_shake_vec();
         for point in [&mut camera.eye, &mut camera.target] {
             *point = [point.x + shake[0], point.y + shake[1], point.z + shake[2]].into();
@@ -382,6 +424,27 @@ mod tests {
                 look.aim_camera(&mut follow, &base(), &frame(), dt_s)
             })
             .collect()
+    }
+
+    #[test]
+    fn feel7_a_landing_dips_the_eye_on_its_own_tick() {
+        let mut look = super::super::tests::balance_look_two();
+        let mut calm_follow = follower();
+        let calm = look.aim_camera(&mut calm_follow, &base(), &frame(), FRAME_60_S);
+        let fall_m = 1.5;
+        look.tick = 10;
+        look.slots[0].feet.land = Some(super::super::fighter_look_feet::Land { tick: 10, fall_m });
+        let mut dipped_follow = follower();
+        let dipped = look.aim_camera(&mut dipped_follow, &base(), &frame(), FRAME_60_S);
+        assert!(
+            dipped.eye.y < calm.eye.y - 0.02,
+            "the landing dips the eye: {} vs {}",
+            dipped.eye.y,
+            calm.eye.y
+        );
+        assert!(landing_dip_m(0.4, 0) > 0.0, "a jump dips too");
+        assert!(landing_dip_m(4.0, 0) > landing_dip_m(0.4, 0));
+        assert_eq!(landing_dip_m(4.0, LAND_DIP_TICKS), 0.0);
     }
 
     #[test]

@@ -74,6 +74,19 @@ pub fn has_flag(search: &str, name: &str) -> bool {
         .any(|pair| pair.split('=').next() == Some(name))
 }
 
+/// The value of `name` in a `?name=value&other` search (`None` when the key is absent or bare).
+/// QW10 reads `?bundle=off|on|ab` this way.
+#[must_use]
+pub fn flag_value<'a>(search: &'a str, name: &str) -> Option<&'a str> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| match pair.split_once('=') {
+            Some((key, value)) if key == name => Some(value),
+            _ => None,
+        })
+}
+
 /// What a captured frame showed, in plain numbers (the render crate computes them).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaptureFacts {
@@ -156,6 +169,9 @@ pub struct Receipt<'a> {
     pub cue: Option<&'a str>,
     /// What the frame gate measured against the reference capture, once a frame was captured.
     pub gate: Option<Gate>,
+    /// QW10: draw calls and CPU milliseconds per frame, as [`crate::perf_window::Run::json`]
+    /// builds it. Already JSON, printed verbatim.
+    pub perf: Option<&'a str>,
 }
 
 /// The receipt JSON: the tier, counters, the frame time, the draw count, the last device loss
@@ -199,6 +215,9 @@ pub fn receipt_line(r: &Receipt<'_>) -> String {
             .raw("bar", &format!("{:.2}", gate.bar))
             .bool("pass", gate.pass);
         o.raw("gate", &g.finish());
+    }
+    if let Some(perf) = r.perf {
+        o.raw("perf", perf);
     }
     if let Some(loss) = r.last_loss {
         let mut note = Object::new();
@@ -501,7 +520,34 @@ mod tests {
             scene,
             cue: None,
             gate: None,
+            perf: None,
         }
+    }
+
+    #[test]
+    fn qw10_the_receipt_carries_the_perf_object_verbatim() {
+        let counters = Counters::default();
+        let mut r = receipt(&counters, "procedural-ring");
+        r.perf = Some("{\"mode\":\"on\",\"arm\":{\"draws\":14}}");
+        let line = receipt_line(&r);
+        assert!(
+            line.contains("\"perf\":{\"mode\":\"on\",\"arm\":{\"draws\":14}}"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_flag_value_reads_the_value_and_only_the_whole_key() {
+        assert_eq!(flag_value("?bundle=ab&freeze", "bundle"), Some("ab"));
+        assert_eq!(flag_value("bundle=off", "bundle"), Some("off"));
+        assert_eq!(
+            flag_value("?bundle", "bundle"),
+            None,
+            "a bare key has no value"
+        );
+        assert_eq!(flag_value("?bundles=ab", "bundle"), None);
+        assert_eq!(flag_value("?tier=web", "bundle"), None);
+        assert_eq!(flag_value("", "bundle"), None);
     }
 
     #[test]

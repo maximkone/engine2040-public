@@ -50,7 +50,7 @@ test("render output parses with the workspace-check map readers", () => {
 });
 
 test("tokenCount is the house rule: bytes / 4, rounded", () => {
-  assert.equal(tokenCount(144615), 36154); // docs/compaction-baseline.md 1.9
+  assert.equal(tokenCount(144615), 36154); // the house rule: bytes / 4, rounded
   assert.equal(tokenCount(3422), 856);
   assert.equal(tokenCount(0), 0);
 });

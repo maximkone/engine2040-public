@@ -43,6 +43,8 @@ pub enum VramUnknown {
     Headless,
     /// Not Windows: only the DXGI budget query is wired today.
     NotWindows,
+    /// Built with `gpu` but not `window`: no DXGI reader is linked.
+    NoWindowFeature,
     /// DXGI lists no hardware adapter (software rasterizer only).
     NoHardwareAdapter,
     /// A DXGI call failed; its HRESULT is carried.
@@ -116,9 +118,13 @@ pub fn read_vram() -> VramReading {
     {
         VramReading::Unknown(VramUnknown::NotWindows)
     }
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(any(feature = "window", feature = "gpu")))]
     {
         VramReading::Unknown(VramUnknown::Headless)
+    }
+    #[cfg(all(feature = "gpu", not(feature = "window")))]
+    {
+        VramReading::Unknown(VramUnknown::NoWindowFeature)
     }
 }
 
@@ -413,9 +419,9 @@ pub fn pilot_winner_from_json(body: &str) -> Option<BackendChoice> {
     }
 }
 
-/// Map a choice onto wgpu backends. Behind `window` so the headless default
+/// Map a choice onto wgpu backends. Behind `gpu` so the headless default
 /// stays std-only; test-only `Backends::all()` sites are untouched.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[must_use]
 pub fn wgpu_backends(choice: BackendChoice) -> wgpu::Backends {
     // wgpu yields no Metal adapter off Apple hardware, so the caller falls back there.
@@ -453,7 +459,7 @@ pub fn strict_webgpu_from_env() -> bool {
 /// The instance flags: wgpu's build-config default (debug and validation
 /// flags in a debug build), plus `STRICT_WEBGPU_COMPLIANCE` when `strict`.
 /// With `strict` false this is exactly what `InstanceDescriptor` defaults to.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[must_use]
 pub fn instance_flags(strict: bool) -> wgpu::InstanceFlags {
     let mut flags = wgpu::InstanceFlags::default();
@@ -466,7 +472,7 @@ pub fn instance_flags(strict: bool) -> wgpu::InstanceFlags {
 /// The instance descriptor of the render stack: `backends`, the
 /// [`instance_flags`] for `strict`, everything else wgpu's default and no
 /// display handle.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[must_use]
 pub fn instance_descriptor(backends: wgpu::Backends, strict: bool) -> wgpu::InstanceDescriptor {
     wgpu::InstanceDescriptor {
@@ -480,7 +486,7 @@ pub fn instance_descriptor(backends: wgpu::Backends, strict: bool) -> wgpu::Inst
 /// strict when `E2040_STRICT_WEBGPU=1` (see [`STRICT_WEBGPU_ENV`]). The one
 /// creation point: a new bring-up calls this instead of `Instance::new`, so
 /// the switch reaches it. Cold startup path only.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[must_use]
 pub fn new_instance(backends: wgpu::Backends) -> wgpu::Instance {
     wgpu::Instance::new(instance_descriptor(backends, strict_webgpu_from_env()))
@@ -1025,7 +1031,7 @@ mod tests {
             VramReading::Measured(m) => assert!(m.budget_bytes > 0),
             VramReading::Unknown(_) => {}
         }
-        #[cfg(not(feature = "window"))]
+        #[cfg(not(feature = "gpu"))]
         assert_eq!(read_vram(), VramReading::Unknown(VramUnknown::Headless));
     }
 
@@ -1056,12 +1062,16 @@ mod tests {
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         }));
-        match adapter {
-            Err(_) => eprintln!("backend adapter leg skipped: no wgpu adapter on this machine"),
-            Ok(found) => {
-                let info = found.get_info();
-                assert!(!info.name.is_empty(), "report names the adapter");
-            }
+        // The adapter leg is a GPU probe; the backend map asserts below run
+        // either way, so the skip is counted and gated, not silent.
+        let found = crate::test_gpu::require_or_skip(
+            "adapter_probe_skips_headless_never_fakes",
+            adapter
+                .map_err(|_| crate::test_gpu::NoAdapter("no wgpu adapter on this machine".into())),
+        );
+        if let Some(found) = found {
+            let info = found.get_info();
+            assert!(!info.name.is_empty(), "report names the adapter");
         }
         assert_eq!(wgpu_backends(BackendChoice::Dx12), wgpu::Backends::DX12);
         assert_eq!(wgpu_backends(BackendChoice::Vulkan), wgpu::Backends::VULKAN);

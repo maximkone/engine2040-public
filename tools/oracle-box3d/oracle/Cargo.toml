@@ -1,0 +1,9 @@
+[package]
+name = "box3d-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Vendored donor crate, pinned by tools/oracle-box3d/vendor/box3d-rust/VENDORED.md.
+[dependencies]
+box3d-rust = { path = "../vendor/box3d-rust" }

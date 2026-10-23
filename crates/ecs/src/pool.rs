@@ -189,6 +189,22 @@ impl JobPool {
         Ok(pool)
     }
 
+    /// Start a pool for `threads` total threads, caller included: `1` starts
+    /// none (every job runs inline), `8` starts seven workers.
+    ///
+    /// Errors: [`PoolError::TooManyWorkers`] past the cap, or
+    /// [`PoolError::Spawn`] when the OS refuses a thread.
+    pub fn for_threads(threads: usize) -> Result<Self, PoolError> {
+        Self::new(workers_for_threads(threads))
+    }
+
+    /// Workers this pool started. Zero means every job runs inline on the
+    /// caller of [`scope`](Self::scope).
+    #[must_use]
+    pub fn workers(&self) -> usize {
+        self.workers.len()
+    }
+
     /// A pool with no workers; it cannot fail to start.
     fn inline() -> Self {
         Self {
@@ -318,8 +334,28 @@ impl Drop for JobPool {
     }
 }
 
+/// Total thread count the shared pool may use, caller included: `1` runs
+/// every job inline on the caller, `8` starts seven workers. The sim reads it
+/// to prove its bytes do not depend on how many threads run it.
+pub const THREADS_ENV: &str = "E2040_THREADS";
+
+/// Workers a pool for `threads` total threads starts, capped at
+/// [`MAX_WORKERS`]. One thread means no worker: every job runs inline on the
+/// caller, so the whole run is single-threaded.
+#[must_use]
+pub fn workers_for_threads(threads: usize) -> usize {
+    threads.saturating_sub(1).min(MAX_WORKERS)
+}
+
+/// Parse a total thread count. Zero, an empty string and junk mean "unset",
+/// so a mistyped variable keeps the core-count default.
+fn parse_threads(text: &str) -> Option<usize> {
+    text.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
 /// The crate's shared pool for the bulk helpers in [`crate::jobs`] and
-/// [`crate::parallel`], sized to the core count minus the caller.
+/// [`crate::parallel`], sized to `E2040_THREADS` when it is set and to the
+/// core count minus the caller otherwise.
 ///
 /// Started on first use and never dropped: its idle workers sleep on the
 /// queue condvar until the process exits. It holds no session or match
@@ -328,7 +364,12 @@ pub fn shared() -> &'static JobPool {
     static SHARED: OnceLock<JobPool> = OnceLock::new();
     SHARED.get_or_init(|| {
         let cores = thread::available_parallelism().map_or(1, NonZeroUsize::get);
-        let workers = cores.saturating_sub(1).min(SHARED_MAX_WORKERS);
+        let asked = std::env::var(THREADS_ENV)
+            .ok()
+            .and_then(|text| parse_threads(&text));
+        let workers = asked
+            .map_or_else(|| cores.saturating_sub(1), workers_for_threads)
+            .min(SHARED_MAX_WORKERS);
         JobPool::new(workers).unwrap_or_else(|_| JobPool::inline())
     })
 }
@@ -511,6 +552,26 @@ mod tests {
 
     fn bytes(xs: &[u64]) -> Vec<u8> {
         xs.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn job_pool_threads_workers_follow_the_total_thread_count() {
+        assert_eq!(workers_for_threads(0), 0);
+        assert_eq!(workers_for_threads(1), 0);
+        assert_eq!(workers_for_threads(2), 1);
+        assert_eq!(workers_for_threads(4), 3);
+        assert_eq!(workers_for_threads(8), 7);
+        assert_eq!(workers_for_threads(usize::MAX), MAX_WORKERS);
+        // Junk keeps the core-count default; a real count is read.
+        assert_eq!(parse_threads("8"), Some(8));
+        assert_eq!(parse_threads(" 1 "), Some(1));
+        assert_eq!(parse_threads("0"), None);
+        assert_eq!(parse_threads(""), None);
+        assert_eq!(parse_threads("many"), None);
+        let inline = JobPool::for_threads(1).expect("inline pool starts");
+        assert_eq!(inline.workers(), 0);
+        let eight = JobPool::for_threads(8).expect("eight threads start");
+        assert_eq!(eight.workers(), 7);
     }
 
     #[test]

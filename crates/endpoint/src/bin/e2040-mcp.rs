@@ -17,7 +17,7 @@ async fn main() {
         println!("{}", usage());
         return;
     }
-    std::process::exit(run(&args).await);
+    std::process::exit(Box::pin(run(&args)).await);
 }
 
 /// Parse, open and serve: every failure maps to a typed exit code.
@@ -74,7 +74,7 @@ async fn run(args: &[String]) -> i32 {
             }
         );
     }
-    match server.run_stdio().await {
+    match Box::pin(server.run_stdio()).await {
         Ok(_) => 0,
         Err(error) => {
             eprintln!("e2040-mcp: {error}");

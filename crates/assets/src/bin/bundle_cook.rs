@@ -4,6 +4,8 @@
 //! (`--bundle`). Default cooks the deterministic demo staging (mesh shape +
 //! texture shape + material/skin/clip); `--texture-png name=path` cooks one
 //! more BaseColor texture per flag through the real `cook_texture` path.
+//! Every `--out` cook also writes `<out>.manifest` beside the bundle with the
+//! seed, thread count, profile and per-entry blake3 digests.
 //! The 16-byte stub writes/loads only with `--allow-stub`.
 
 #[cfg(all(feature = "import", feature = "registry"))]
@@ -140,8 +142,15 @@ fn run_cook(args: &[String]) -> Result<i32, String> {
             .map_err(|e| format!("cook_texture {name}: {e:?}"))?;
         staged.textures.push((name.clone(), cooked));
     }
-    let receipt = engine_assets::cook_and_write(&staged, &out, config.allow_stub)
-        .map_err(|e| e.to_string())?;
+    let receipt = engine_assets::cook_bundle_with_manifest(
+        &staged,
+        &out,
+        config.allow_stub,
+        engine_assets::manifest::DEFAULT_SEED,
+        engine_assets::manifest::DEFAULT_THREADS,
+        engine_assets::manifest::PROFILE_POTATO,
+    )
+    .map_err(|e| e.to_string())?;
     println!("{receipt}");
     Ok(0)
 }
@@ -162,6 +171,26 @@ mod tests {
         let config = parse_args(&args(&["--check", "a.bin", "--allow-stub"])).unwrap();
         assert_eq!(config.check.unwrap().to_string_lossy(), "a.bin");
         assert!(config.allow_stub);
+    }
+
+    #[test]
+    fn out_writes_manifest_beside_bundle() {
+        let dir = std::env::temp_dir().join(format!("bundle_cook_manifest_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let out = dir.join("demo.e2bundle");
+        let out_text = out.to_string_lossy().to_string();
+        let code = run_cook(&args(&["--out", &out_text])).expect("cook runs");
+        assert_eq!(code, 0);
+        let manifest_path = dir.join("demo.e2bundle.manifest");
+        let bytes = std::fs::read(&manifest_path).expect("manifest written");
+        let manifest = engine_assets::Manifest::parse(&bytes).expect("manifest parses");
+        assert_eq!(manifest.seed(), engine_assets::manifest::DEFAULT_SEED);
+        assert_eq!(manifest.threads(), engine_assets::manifest::DEFAULT_THREADS);
+        assert_eq!(manifest.profile(), engine_assets::manifest::PROFILE_POTATO);
+        assert_eq!(manifest.artifacts().count(), 1);
+        assert_eq!(manifest.sources().count(), 5);
+        manifest.verify_artifacts(&dir).expect("artifact verifies");
     }
 
     #[test]

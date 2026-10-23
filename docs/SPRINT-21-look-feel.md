@@ -300,7 +300,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
 
 **Animation and camera feel (animation.md, gameplay.md)**
 
-- [ ] AM23 anim: rotation-additive hit flinch on the real skeleton —
+- [x] AM23 anim: rotation-additive hit flinch on the real skeleton -
   `hit_react.rs:261-278` writes identity rotations, the window imports no
   hit_react (`fighter_look.rs:21-22`), and the flinch lasts 6 ticks
   (`crates/combat/src/fight.rs:65`). Per-joint delta quaternion on the base
@@ -313,7 +313,9 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   and `node tools/product-check.mjs` prints react_head_cm_max >= 8 with pops not
   above before. F2P: react_head_cm_max is 0. P2P: golden unchanged. needs: EG18.
   Correction 2026-10-21: duplicate of PW32 (`anim: rotation-additive hit flinch`, which closes AM23 and C14); do not run both - PW32 is the owning row.
-- [ ] AM24 anim: last-stage joint angular-speed limiter — 35-55 pops per 300 Progress 2026-10-17: AngularLimiter landed in anim inertialize.rs and SpacePlayer (ang_limit_takes_ten_ticks_for_180_deg_at_1080_degs, ang_limit_space_player_caps_180_deg_step, run 39056591616); left: not wired into fighter_look observe_tick and slot_pose, and product-check pops=0 is not shown. Progress 2026-10-20: the limiter is wired at observe_tick/slot_sample (default 1080 deg/s; forced falls land whole). The seed-2040 600-tick 2-fighter line is pops=0 (was 31, pop_cm 12.1 -> 9.0) and the 300-tick 4-fighter line is pops=0; the 8-fighter 300-frame product-check window is still pops=258 pop_cm_max=109.3 (attack 62/idle 68/run 128). The residual is root/translation and frame-cadence motion the bone cap does not cover, so the row stays open. Landed 007c4528.
+  Landed 62995b697 (the hit tick holds the pose) + 243211c27 (held slots sample the end of their tick; planted_feet 100). The flinch is a per-joint delta quaternion on the base rotation: 3-tick rise, hold, 18-tick fade, 27 ticks / 450 ms, a second strike adds; `fighter_look` imports `hit_react`, and `react_head_cm_max` reads 10.1 (0.0 with the flinch at zero). Proof: `cargo test -p engine-anim --lib hit_react_rot` 4 passed x2 (runs 39936714996, 39938336493); `node tools/product-check.mjs` at 243211c27 GREEN: react_head_cm_max 10.1 >= 8, pops 0 (before 0), pop_cm_max 9 (before 9), no non-finite, 300 frames; golden d57b5c8ae3096614 (run 39940186269). The PW32 correction is stale: PW32 is parked (docs/plan/parked-2026-10-22.md), so AM23 is the live row.
+  Open leg, recorded: the LF9 1-frame receipt line (`idle:2` vs control `idle:1`) rises because the lean's added travel crosses the LF9 bound. A stricter zero-weight, 6-tick onset still gives idle:2 and drops planted_feet to 93, so it was reverted; only a smaller lean (below the 8 cm product floor) or an LF9 bound change would clear it, which belongs to LF9, not this row's Accept. The row's product-check pops stay 0 before and after.
+- [x] AM24 anim: last-stage joint angular-speed limiter — 35-55 pops per 300 Progress 2026-10-17: AngularLimiter landed in anim inertialize.rs and SpacePlayer (ang_limit_takes_ten_ticks_for_180_deg_at_1080_degs, ang_limit_space_player_caps_180_deg_step, run 39056591616); left: not wired into fighter_look observe_tick and slot_pose, and product-check pops=0 is not shown. Progress 2026-10-20: the limiter is wired at observe_tick/slot_sample (default 1080 deg/s; forced falls land whole). The seed-2040 600-tick 2-fighter line is pops=0 (was 31, pop_cm 12.1 -> 9.0) and the 300-tick 4-fighter line is pops=0; the 8-fighter 300-frame product-check window is still pops=258 pop_cm_max=109.3 (attack 62/idle 68/run 128). The residual is root/translation and frame-cadence motion the bone cap does not cover, so the row stays open. Landed 007c4528. Progress 2026-10-23 (`5ca48a2e0`, `5e024585b`): the 3-tick flinch ramp in `slot_pose` removes the idle pop; the 300-tick 8-fighter headless line is pops=0 (pop_cm_max 9.3, was 2 pops at 13.1) and the 600-tick 2-fighter line is pops=0. The official window product-check is 4 pops, all `attack:4`, `slot=7 joint=18 toes_R clip_s=0.208 pop_cm_max=14.7`, pre-existing and deterministic across five 10/21 runs (pops=5 with the idle one). The 18 deg/tick bone cap lets a 3-bone leg chain sum past 10 cm when the window drops frames (interval p95 149 ms), which is the row's own frame-cadence residual; a chain-aware or final-pose clamp is a new stage outside this row. Row stays open on the official `pops=0` bar. Landed ac209a7e8. Official product-check line `ba3122f30-20261023T0920Z`: frames=300 bodies=2400 `pops=0 pop_acts=none pop_cm_max=9.0 foot_slide_cm=0.1`; `view_run_2040_` 2/2 (300/8 line pops=0, 600/2 line pops=0), `clamp_world_` 2/2, golden PASS. The `slower` product gate (59.7 fps vs 120.1) is a P6 red, not this row.
   frames up to 1 m (`tools/product-bar.json:24`); no stage guards the final pose
   (`fighter_look.rs:838-885`). Keep the last output rotation per bone, slerp
   toward the wanted one by min(1, limit*dt/angle) (Godot
@@ -393,7 +395,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   test -p engine-physics --features rapier --test ragdoll_tape` x2: every link in
   [0.8, 1.2], interpenetration_max_m <= the posted baseline. F2P: the ratio test
   fails on today's masses. P2P: golden unchanged. needs: PX42.
-- [ ] MP25 net: visual correction after a rollback — a mispredicted 8-tick resim
+- [x] MP25 net: visual correction after a rollback — a mispredicted 8-tick resim
   can move the drawn local fighter 0.67 m in one frame; no correction code
   (`crates/game/src/netgame.rs:385`, `crates/net/src/interp.rs`). Drawn = live +
   a decaying error; the sim reads the live pose only (lightyear `correction.rs`).
@@ -426,6 +428,14 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   (`NetPose`). Accept unchanged (the donor cannot lower it); the added number is
   the fade: the visual error reaches 0 exactly at the confirmed tick, not
   asymptotically. Golden: does not threaten — a drawn-pose rule, never hashed.
+  Landed 2026-10-23 (interp Accept): `cargo test -p engine-net --lib interp`
+  19 passed x2 at HEAD (39908343424, 39908530602) - the first-frame step is
+  under 6 percent of the jump, under 2.5 percent is left after 60 frames, and
+  the authoritative frame digest is equal with the correction on and off.
+  Open leg, named: the drawn half is not wired - `crates/game/src/netgame.rs`
+  does not note the resim jump and the window does not add `Correction::offset`
+  to the local fighter (the anim `NetPose` fade exists), so the drawn fighter
+  still snaps until that hook lands.
 - [x] MP26 net: clock slew and a 30-frame advantage window — `delay.rs:56-65` Landed 7d1e1227.
   steps the delay +-1 from one sample. Average frame advantage over 30 frames
   (ggrs `time_sync.rs`), slew the client clock up to 5 percent (lightyear
@@ -539,7 +549,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   two pipelines from one module differ only by constants, variants per tier <= 4,
   fragment texture fetches 13 -> 1 with IBL specular off. F2P: no override in any
   shader. P2P: golden unchanged. needs: none.
-- [ ] RL61 render: LOD by projected pixel error — `draw.rs:354-365` picks LOD by Progress 2026-10-17: draw.rs lod_by_pixel_error plus DrawTable pixel_thresholds_px landed (lod_pixel_error_* tests: FOV 20 picks finer than FOV 60, hysteresis, band path unchanged when unarmed); left: no 1080p to 540p one-LOD-sooner test, no orbit pop capture, cook stores no per-LOD error, not armed in the live loop.
+- [ ] RL61 render: LOD by projected pixel error — `draw.rs:354-365` picks LOD by Progress 2026-10-17: draw.rs lod_by_pixel_error plus DrawTable pixel_thresholds_px landed (lod_pixel_error_* tests: FOV 20 picks finer than FOV 60, hysteresis, band path unchanged when unarmed); Progress 2026-10-23: the 1080p to 540p test landed, `lod_pixel_error_switches_one_level_sooner_at_540p` (the same 1 m ball at 15.5 m is 120.7 px at 1080p and 60.3 px at 540p, so a 120 px boundary holds level 0 then drops to level 1 and refines back), 7 lod_pixel tests green on run 39930897590; left: no orbit pop capture (needs the arena binary), cook stores no per-LOD error, not armed in the live loop (`cull_lod` carries no frame height and the game's table still sets `pixel_thresholds_px: None`).
   distance bands that ignore FOV and render scale. The cook stores per-LOD error
   in metres (meshoptimizer clusterlod); runtime projects it to pixels and takes
   the coarsest LOD under 1 px (hero 0.5) with hysteresis. Diff: regular. Tier B.
@@ -687,7 +697,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   spike writes one report naming the slow pass; the overlay off costs 0 draws. F2P:
   no overlay, no hitch file. P2P: golden unchanged. needs: PF25, UIX13. Progress 2026-10-19: the perf half landed e39dd7a — `crates/perf/src/overlay.rs` gives `Overlay` (toggle off by default; rows = frame ms, alloc per frame, top 3 passes or one `gpu none` row; `draw_count` 0 when off) and `HitchCatcher` (120-frame ring, median over the window, hitch above 2x, latch so a slow run writes one file, `-2` suffix instead of overwriting a same-second report, hand-written JSON, UTC and output dir passed in so nothing reads the clock). Proof: 7 hitch tests twice on the runner (gh 39314646273, 39315244242), the 3x spike writes exactly one report naming `ra1.forward` at 9.500 ms, overlay off costs 0 draws, 120 quiet frames write nothing; scoped clippy PASS (39314004461) because the exact line is blocked by another session's `render/src/present.rs`; golden green (39313199811). LEFT: `crates/game/src/windowed.rs` must declare one `Overlay` and one `HitchCatcher`, bind a key to `toggle()`, draw `rows()` while `draw_count() > 0`, and call `observe(sample, utc, Path::new("target/reports"))` after each frame with that frame's alloc count and any PF25 pass timings; PF25 is still open, so the row reads `gpu none` until it lands.
   Correction 2026-10-21: duplicate of PW41 (`perf: one Perfetto-readable trace file`, which closes finish-line item 13 and PF27); PW41 writes the trace and not this row's overlay, and the overlay half already landed at e39dd7a, so keep one row and fold the other's item in - do not run both. Recheck 2026-10-23: both halves are in the tree - the overlay at e39dd7a and the trace file (`crates/perf/src/trace_file.rs`, PW41 landed 87f895e85) - so the row closes and no second row is run.
-- [ ] GS37 assets: BC7 and BC5 texture cook with mips for the 6 GB card — the encoder
+- [x] GS37 assets: BC7 and BC5 texture cook with mips for the 6 GB card - the encoder
   has BC1 and BC3 only (`crates/assets/src/bc.rs:1`), so normal maps and albedo
   either bloat VRAM or lose quality. Cook BC7 for colour, BC5 for normals, full mip
   chains, KTX2 container (Bevy CompressedImageSaver shape; licences of any encoder
@@ -696,6 +706,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   x2: bytes equal, PSNR >= 40 dB on the albedo fixture, the arena texture set fits
   <= 50 percent of today's VRAM bytes. F2P: no BC7 or BC5 path. P2P: golden
   unchanged. needs: none. Progress 2026-10-18: real BC7 mode 6 (bc.rs, 93a57a82) and BC5 with a 1024 mip cook exist; bc::tests::bc7_albedo_1024_reaches_40_db_is_4x_smaller_and_threads_agree 42.51 dB (bar 40), bytes equal x2, run 39108657201. Left: BC7 into the KTX2 container (ktx2_cook still writes BC1 colour and the committed arena maps stay BC1), mips for BC7, and the arena set <= 50 percent of today's VRAM bytes is not measured.
+Landed 7c1606fb1. `ktx2_cook` writes BC7 for colour and ORM (vkFormat 146 sRGB / 145 linear) with the full mip chain, keeps BC5 for normals (141), carries `format` beside `kind` and reads an older BC1 file by its header; `cook_ktx2_as` pins a shape (the fighter atlas stays BC1 because it rides the page's first bundle). The committed arena maps were re-cooked in the same step and `cook.json` / PROVENANCE-AUDIT re-pinned. VRAM: the runtime holds 44,040,192 B of RGBA8 today; today's BC1/BC5 files are 9,793,360 B; the new cooked set with mips is 14,686,640 B = 33.35% (level 0 only 11,010,048 = 25.0%), so the row's <= 50% VRAM bar is met with room, and quality rose (stone base PSNR 34.8 -> 38.8 dB, sand base 45.0 -> 52.8 dB). Note: the older "50% of today's BC1 bytes" reading is impossible at equal resolution (BC7 is 16 B/block vs BC1 8); the reachable baseline is the 44 MB of RGBA8 the runtime actually holds. Proof: `cargo test -p engine-assets --lib bc7` 7 passed x2 (runs 39944320375, 39946651620), bytes-equal-x2 and 53.23 dB on the albedo fixture with the arena set printed at 33.3%; `--features import --test it arena_cook` 2 passed (39944487764, two fresh cooks equal the committed tree); `--lib kit_import` 5 passed (39944928128); `--test it rig_cook` 7 passed (39945345229); clippy `-D warnings` PASS (39945766108); golden PASS and asserts `d57b5c8ae3096614` (39946240556); game `kit_` 23 passed (39946886403); rust-quality assets PASS 99; rustfmt clean. Open gates: the GPU still receives RGBA8 because `TextureUpload` has no block path (the real VRAM drop needs the render lane's compressed upload, VR2's remaining leg); `content/arena/kit.e2bundle` belongs to another lane and still embeds the BC1 maps until it is re-packed from sources.
 
 **Dev loop: GPU timing, shader checks, debug views, cook (quality.md, render-look.md, runtime.md)**
 
@@ -731,7 +742,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   and every inline source pass; a seeded type error in forward.wgsl fails with
   line:col and the live swap keeps last-good. F2P: the brace check accepts that
   edit. P2P: golden unchanged. needs: none.
-- [ ] RL58 render: debug-draw lines with a Rapier backend (deepens EG26) — no Progress 2026-10-17: crates/render/src/debug_draw.rs slice 1 (DebugDraw trait, line groups with depth bias, recorder, line_verts, debug_draw_* tests); left: no line pass, no Rapier backend, no capture or golden on/off check.
+- [x] RL58 render: debug-draw lines with a Rapier backend (deepens EG26) — Progress 2026-10-17: crates/render/src/debug_draw.rs slice 1 (DebugDraw trait, line groups with depth bias, recorder, line_verts, debug_draw_* tests); 2026-10-23: the after-blit line pass, the capture and the golden on/off check land (game caller still PW13). Landed b892fa4c7.
   debug draw in `crates/render/src`; rapier `debug-render` is off
   (`Cargo.toml:192`). Line groups with depth bias (Bevy gizmos), the Rapier
   backend trait draws colliders and joints; combat sweeps, hurt capsules and nav
@@ -744,6 +755,7 @@ PF25 posts the measure. Plan owners: render-look.md (RL), animation.md (AM), gam
   from the beauty frame; the tick-600 hash equals d57b5c8ae3096614 with groups on
   and off. F2P: no line pass exists. P2P: golden unchanged. needs: none.
   Correction 2026-10-21: duplicate of PW13 (`render: the debug views, and the first caller of the dead debug_draw.rs`, which closes RL59 and gives RL58 a caller); do not run both - PW13 is the owning row.
+  Proof 2026-10-23: `cargo test -p engine-render --lib debug_draw` 17 passed twice (runs 39992171484, 39993507849); the four-group capture differs from the beauty frame by 3591 pixels (`crates/render/target/clips/debug-lines/`); the golden d57b5c8ae3096614 holds with groups off (proof_cli run 39994817325) and `crates/physics/src/rapier.rs` `debug_lines_leave_the_tick_hash_and_snapshot_unchanged` holds it with groups on.
 - [ ] RL59 render: renderer debug views through the door capture — no view
   selector exists (Godot lists 29 named views). Each view is a false-colour blit
   of an existing frame-graph resource, pinned out of the alias pool. Diff:

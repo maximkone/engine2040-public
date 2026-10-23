@@ -52,6 +52,9 @@ pub const EXPLAIN_SET_MATERIAL_BYTES: u64 = 80;
 /// `SetComponent` / `RemoveComponent`: id (16) + kind tag (1) + worst-case
 /// canonical bytes (two 64-byte names plus a few fields, under 160).
 pub const EXPLAIN_COMPONENT_BYTES: u64 = 176;
+/// `SetBond`: id (36) + pair (8) + strength flag and value (3), padded to a
+/// journal-grade op; the paint moves no pose.
+pub const EXPLAIN_SET_BOND_BYTES: u64 = 48;
 /// `PutMaterial` / `SetMaterialParam` / `RemoveLastMaterial`: one record or
 /// value text, conservatively bounded by the record schema (a few KB). The
 /// material-table ops touch no object and move no pose.
@@ -324,6 +327,12 @@ fn scan_ops(batch: &Batch) -> OpScan {
                 scan.primary.push(*id);
                 scan.bytes = scan.bytes.saturating_add(EXPLAIN_COMPONENT_BYTES);
                 // Components move nothing in the nav grid at preview time.
+            }
+            Op::SetBond { id, .. } => {
+                scan.touched.insert(*id);
+                scan.primary.push(*id);
+                scan.bytes = scan.bytes.saturating_add(EXPLAIN_SET_BOND_BYTES);
+                // A bond paint changes no pose and dirties no nav tile.
             }
             // The material-table ops touch no object and move no pose: only
             // journal bytes, conservatively bounded per op.

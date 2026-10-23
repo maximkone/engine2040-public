@@ -74,15 +74,16 @@ mod spatial_delta;
 #[cfg(test)]
 pub(crate) mod spatial_verdict_tests;
 mod spatial_verdicts;
-use crate::spatial_glue::{conflict_texts, quat_of_yaw, yaw_of_quat, ParsedWant};
+use crate::spatial_glue::{conflict_texts, quat_of_yaw, ParsedWant};
 pub use labels::object_label;
 use place_blocks::block_output;
 pub use place_blocks::WantBlockDto;
 pub(crate) use read_guard::no_repeat;
 pub use read_guard::BriefSpatial;
-use spatial_checks::{
-    index_of, partition, staged_names_sizes, table_allowance, table_page, wide, worst_actors,
-};
+use spatial_checks::{index_of, partition, table_allowance, table_page, wide, worst_actors};
+/// Live document snapshot, sized by the one scene adapter
+/// ([`engine_editor::spatial_view`]); the body sits with the spatial read path.
+pub(crate) use spatial_checks::{snapshot, Snapshot};
 pub use spatial_checks::{SizeSource, SkippedCheck, SpatialCounts, WorstActor};
 pub(crate) use spatial_delta::{change_list, op_ids, spatial_delta};
 use spatial_verdicts::{check_epsilon, staged_roles, view, Asks};
@@ -233,6 +234,17 @@ fn check_batch_allowed(batch: &Batch) -> Result<(), McpToolError> {
                         "scene op `component` for node {id} is denied; allowed scene ops: [{}] \
                          (scene.place moves roots only and edits no components; \
                          edit components through tx.preview, then place again)",
+                        SCENE_ALLOWED_OPS.join(", ")
+                    ),
+                ));
+            }
+            Op::SetBond { id, .. } => {
+                return Err(McpToolError::new(
+                    "denied_op",
+                    format!(
+                        "scene op `bond` for node {id} is denied; allowed scene ops: [{}] \
+                         (scene.place moves roots only and paints no bonds; \
+                         author fracture bonds through tx.preview)",
                         SCENE_ALLOWED_OPS.join(", ")
                     ),
                 ));
@@ -458,9 +470,47 @@ pub struct SceneSpatialOutput {
     pub skipped: Vec<SkippedCheck>,
     /// Where each staged node's size came from.
     pub size_source: SizeSource,
+    /// One line per node on this page whose box is the fallback, not a
+    /// collider measurement: `label x.xx x.xx x.xx m: default size ...`.
+    /// Empty when every box on the page was measured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_sized: Vec<String>,
     /// Findings set aside by an allow row or the learner, with the reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suppressed: Vec<String>,
+    /// Light reach (SP66): nodes at least one light covers, counted, and the
+    /// indexes of the nodes no light reaches — `dark` and `unknown` apart.
+    /// Absent when the document carries no light.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<LightReachOut>,
+}
+
+/// `scene.spatial` light reach (SP66); indexes are into [`SceneSpatialOutput::ids`]
+/// (id-text order), ascending.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(crate = "rmcp::serde")]
+#[schemars(crate = "rmcp::schemars")]
+pub struct LightReachOut {
+    /// Nodes at least one light covers.
+    pub lit: u32,
+    /// Nodes judged (a node with no readable pose is not judged).
+    pub judged: u32,
+    /// Indexes no light reaches: dark.
+    pub dark: Vec<u32>,
+    /// Indexes no light reaches while a range was unreadable.
+    pub unknown: Vec<u32>,
+}
+
+impl LightReachOut {
+    /// The report as the wire DTO.
+    pub(crate) fn of(report: &engine_spatial::ReachReport) -> Self {
+        Self {
+            judged: report.judged,
+            lit: report.lit,
+            dark: report.dark.clone(),
+            unknown: report.unknown.clone(),
+        }
+    }
 }
 
 /// `scene.spatial` limit gate: `bad_limit` outside 1..=`SCENE_SPATIAL_MAX_FINDINGS`.
@@ -648,77 +698,6 @@ pub struct ScenePlaceOutput {
     /// Spatial findings this move changed (SPX3); absent with `delta: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial_delta: Option<SpatialDeltaDto>,
-}
-
-// Document snapshot: actors, the id table and the count of unresolved poses.
-pub(crate) struct Snapshot {
-    pub(crate) actors: Vec<engine_spatial::Actor>,
-    pub(crate) ids: Vec<ObjectId>,
-    missing_pose: u64,
-    sizes: SizeSource,
-}
-
-// Sorted-id snapshot of every reachable node plus the count of nodes whose
-// world pose (position or rotation) was missing or non-finite: those post a
-// NaN actor, never a drop and never a flattened yaw, so `unknown-position`
-// fires with the id still in the table.
-pub(crate) fn snapshot(doc: &Document) -> Snapshot {
-    let mut order: Vec<ObjectId> = Vec::new();
-    let mut stack = doc.hierarchy.roots();
-    while let Some(id) = stack.pop() {
-        order.push(id);
-        stack.extend(doc.hierarchy.children(id));
-    }
-    order.sort_by_key(|id| id.to_string());
-    let mut actors = Vec::new();
-    let mut ids = Vec::new();
-    let mut scales = Vec::new();
-    let mut missing_pose = 0u64;
-    for id in order {
-        let world = doc.hierarchy.world(id).filter(|w| {
-            w.position
-                .iter()
-                .chain(w.rotation.iter())
-                .all(|lane| lane.is_finite())
-        });
-        // A missing or non-finite pose posts a NaN actor, never a drop.
-        missing_pose += u64::from(world.is_none());
-        let world =
-            world.unwrap_or_else(|| Transform::new([f32::NAN; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3]));
-        let index = u32::try_from(actors.len()).unwrap_or(u32::MAX);
-        if index == u32::MAX {
-            break;
-        }
-        let yaw = yaw_of_quat(world.rotation);
-        ids.push(id);
-        scales.push(world.scale);
-        actors.push(engine_spatial::Actor {
-            id: index,
-            name: String::new(),
-            x: world.position[0],
-            y: world.position[1],
-            z: world.position[2],
-            sx: 1.0,
-            sy: 1.0,
-            sz: 1.0,
-            parent: None,
-            physical: true,
-            vx: 0.0,
-            vz: 0.0,
-            yaw,
-        });
-    }
-    let (names, sizes, source) = staged_names_sizes(doc, &ids, &scales);
-    for ((actor, name), size) in actors.iter_mut().zip(names).zip(sizes) {
-        actor.name = name;
-        [actor.sx, actor.sy, actor.sz] = size;
-    }
-    Snapshot {
-        actors,
-        ids,
-        missing_pose,
-        sizes: source,
-    }
 }
 
 fn parse_relation(text: &str) -> Result<Relation, McpToolError> {
@@ -1193,7 +1172,21 @@ impl ServerState {
                 break;
             }
         }
-        let truncated = kept.truncated || afford_dropped;
+        // SP66: one light-reach row rides along too, within the same budget: the
+        // nodes no light reaches and the ones no range could be read for stay
+        // apart. A document with no light gets no row.
+        let mut light_dropped = false;
+        let lights = spatial_checks::reach_lights(&self.doc, &snap.ids, &snap.actors);
+        if !lights.is_empty() {
+            let line = engine_spatial::reach_report(&snap.actors, &lights).line();
+            let row = format!("{line}\n");
+            if text.len() + row.len() <= budget_bytes {
+                text.push_str(&row);
+            } else {
+                light_dropped = true;
+            }
+        }
+        let truncated = kept.truncated || afford_dropped || light_dropped;
         let page = table_page(
             &snap.ids,
             &snap.actors,
@@ -1254,21 +1247,18 @@ impl ServerState {
         let (run, skipped) = partition(selected.as_deref(), snap.missing_pose > 0);
         let checks_run: Vec<String> = run.iter().map(|name| (*name).to_string()).collect();
         let epsilon_cm = check_epsilon(args.epsilon_cm)?;
-        let report =
-            engine_spatial::run_checks_eps(&snap.actors, &run, epsilon_cm).map_err(|legal| {
-                if legal == ["needs-nav-view"] {
-                    McpToolError::new(
-                        "needs_nav_view",
-                        "nav checks need a baked nav view which this tool has no access to; \
-                     submit offline checks only",
-                    )
-                } else {
-                    McpToolError::new(
-                        "bad_check",
-                        format!("check refused; submit any of {}", legal.join(", ")),
-                    )
-                }
-            })?;
+        let report = spatial_report(&snap.actors, &run, epsilon_cm)?;
+        // SP66: the lights the document carries, joined with the node poses, so
+        // the dark nodes and the ones no range could be read for stay apart.
+        let lights = spatial_checks::reach_lights(&self.doc, &snap.ids, &snap.actors);
+        let light = if lights.is_empty() {
+            None
+        } else {
+            Some(LightReachOut::of(&engine_spatial::reach_report(
+                &snap.actors,
+                &lights,
+            )))
+        };
         let format = QueryFormat::parse(args.format.as_deref())?;
         let asks = Asks {
             triage: args.triage.unwrap_or(false),
@@ -1284,7 +1274,8 @@ impl ServerState {
             .filter(|finding| !args.matched_only.unwrap_or(false) || finding.severity == "red")
             .collect();
         let total = wide(shown.len());
-        let end = if format == QueryFormat::Rows {
+        let rows = format == QueryFormat::Rows;
+        let end = if rows {
             index_of(limit).min(shown.len())
         } else {
             0
@@ -1314,6 +1305,9 @@ impl ServerState {
             ),
             QueryFormat::Count => table_page(&[], &[], 0, 0, None),
         };
+        // A box that was not measured is named: the page rows are the only
+        // nodes a caller can act on, so the note rides with them.
+        let default_sized = spatial_checks::default_sized(&page.ids, &page.objects, &snap.defaults);
         Ok(SceneSpatialOutput {
             revision: self.doc.revision,
             verdict: seen.verdict().to_string(),
@@ -1334,7 +1328,9 @@ impl ServerState {
             checks_run,
             skipped,
             size_source: snap.sizes,
+            default_sized,
             suppressed: seen.suppressed,
+            light,
         })
     }
 
@@ -1445,7 +1441,7 @@ impl ServerState {
             Err(conflict) => {
                 let (hints, dry_run) = hint_output(&snap, node, spatial_id, &parsed, &conflict)?;
                 let texts = conflict_texts(&parsed, &conflict.unmet);
-                let blocked_by = block_output(&snap, &conflict);
+                let blocked_by = block_output(&snap, &conflict, spatial_id);
                 let mut out =
                     conflict_output(self.doc.revision, texts, conflict.reason, hints, dry_run);
                 out.blocked_by = blocked_by;
@@ -1469,6 +1465,30 @@ impl ServerState {
         let before = (args.delta != Some(false)).then_some(&snap);
         apply_placement(self, node, placed, args.idempotency_key, before)
     }
+}
+
+/// Run the selected catalog checks over staged actors, mapping a refusal to
+/// the door's own codes: nav checks without a baked view refuse
+/// `needs_nav_view`, every other refusal is `bad_check` with the legal names.
+fn spatial_report(
+    actors: &[engine_spatial::Actor],
+    run: &[&str],
+    epsilon_cm: i32,
+) -> Result<engine_spatial::Report, McpToolError> {
+    engine_spatial::run_checks_eps(actors, run, epsilon_cm).map_err(|legal| {
+        if legal == ["needs-nav-view"] {
+            McpToolError::new(
+                "needs_nav_view",
+                "nav checks need a baked nav view which this tool has no access to; \
+                 submit offline checks only",
+            )
+        } else {
+            McpToolError::new(
+                "bad_check",
+                format!("check refused; submit any of {}", legal.join(", ")),
+            )
+        }
+    })
 }
 
 /// MCP tool registration for `scene.brief` (read-only brief page).
@@ -1572,6 +1592,7 @@ mod tests {
     use super::super::mcp::{SceneReadArgs, SceneReadTool};
     use super::super::play::{PlayRunArgs, PlayRunTool};
     use super::*;
+    use crate::spatial_glue::yaw_of_quat;
     use engine_editor::capability::{Capability, OpMask};
     use engine_editor::commands::Journal;
     use engine_scene::ids::ObjectId;
@@ -3087,169 +3108,6 @@ mod tests {
         assert_ne!(second.digest, first.digest);
     }
 
-    struct Yard {
-        server: McpServer,
-        wall: ObjectId,
-        crate_: ObjectId,
-        old_a: ObjectId,
-        old_b: ObjectId,
-        lamp: ObjectId,
-    }
-
-    // A 10 m x 2 m x 20 cm wall collider at the origin, a free crate south of
-    // it, two crates already stacked on one footprint far away (a pre-existing
-    // overlap), and a free lamp, seeded through the command service. The tx
-    // gate sees only 1 m cubes on poses, so a crate 3 m from the wall's center
-    // passes it while the collider-sized staged check finds the overlap.
-    fn yard() -> Yard {
-        use engine_scene::component::{Collider, ColliderShape, Component};
-        let mut doc = Document::new();
-        let mut journal = Journal::new();
-        let (wall, crate_, old_a, old_b, lamp) = (
-            ObjectId::new(),
-            ObjectId::new(),
-            ObjectId::new(),
-            ObjectId::new(),
-            ObjectId::new(),
-        );
-        let spots = [
-            (wall, [0.0, 0.0, 0.0]),
-            (crate_, [0.0, 0.0, 6.0]),
-            (old_a, [20.0, 0.0, 20.0]),
-            (old_b, [20.0, 0.0, 20.0]),
-            (lamp, [-20.0, 0.0, -20.0]),
-        ];
-        let mut ops = Vec::new();
-        for (id, pos) in spots {
-            ops.push(Op::Insert {
-                id,
-                parent: ObjectId::NIL,
-                local: Transform::new(pos, [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
-            });
-        }
-        ops.push(Op::SetComponent {
-            id: wall,
-            component: Component::Collider(Collider {
-                shape: ColliderShape::Box,
-                half: [5.0, 1.0, 0.1],
-                sensor: false,
-            }),
-        });
-        let batch = Batch {
-            ops,
-            base_revision: doc.revision,
-            idempotency_key: 700,
-            provenance: None,
-        };
-        commands::apply(&mut doc, &mut journal, &batch).expect("yard seed applies");
-        Yard {
-            server: McpServer::with_document(doc, journal, 7, Capability::unrestricted(7)),
-            wall,
-            crate_,
-            old_a,
-            old_b,
-            lamp,
-        }
-    }
-
-    // One root move through the tx door: preview, then apply with the approval.
-    fn tx_move(
-        server: &McpServer,
-        id: &ObjectId,
-        pos: [f32; 3],
-        key: u64,
-        delta: Option<bool>,
-    ) -> crate::mcp::TxApplyOutput {
-        use crate::mcp::{OpDto, PoseDto, TxApplyArgs, TxApplyTool, TxPreviewArgs, TxPreviewTool};
-        let rev = revision(server);
-        let ops = vec![OpDto::SetLocal {
-            id: id.to_string(),
-            local: PoseDto {
-                pos,
-                rot: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
-        }];
-        let preview = TxPreviewTool::invoke(
-            server,
-            TxPreviewArgs {
-                expected_revision: rev,
-                idempotency_key: key,
-                ops: ops.clone(),
-            },
-        )
-        .expect("move previews");
-        TxApplyTool::invoke(
-            server,
-            TxApplyArgs {
-                expected_revision: rev,
-                idempotency_key: key,
-                ops,
-                approval: preview.approval,
-                delta,
-            },
-        )
-        .expect("move applies")
-    }
-
-    #[test]
-    fn spatial_delta_names_both_ids_and_the_axis_fix() {
-        let yard = yard();
-        // The crate walks into the wall's collider; the 1 m cube gate lets it by.
-        let out = tx_move(&yard.server, &yard.crate_, [3.0, 0.0, 0.0], 810, None);
-        let delta = out.spatial_delta.expect("delta rides on the write");
-        assert_eq!(delta.ids, vec![yard.crate_.to_string()]);
-        assert_eq!(delta.new_findings.len(), 1, "{:?}", delta.new_findings);
-        assert_eq!(delta.more, 0);
-        let line = &delta.new_findings[0];
-        assert!(line.contains(&yard.crate_.to_string()), "mover id: {line}");
-        assert!(line.contains(&yard.wall.to_string()), "wall id: {line}");
-        // Crate z -50..50 against the wall's -10..10: 20 cm deep in plan; the
-        // short way out is 60 cm along -z (850 along -x, 250 along +x).
-        assert!(line.starts_with("overlap (red)"), "{line}");
-        assert!(line.contains("by 20 cm in plan"), "{line}");
-        assert!(line.contains("fix: move"), "{line}");
-        assert!(line.ends_with("60 cm -z"), "{line}");
-        assert!(delta.resolved.is_empty());
-    }
-
-    #[test]
-    fn spatial_delta_hides_old_overlaps_and_clean_moves_read_empty() {
-        let yard = yard();
-        let (server, lamp) = (&yard.server, &yard.lamp);
-        // A clean move of a free lamp: empty lists, touched ids only. The old
-        // stacked pair elsewhere stays out.
-        let clean = tx_move(server, lamp, [-22.0, 0.0, -20.0], 820, None)
-            .spatial_delta
-            .expect("delta rides on the write");
-        assert_eq!(clean.ids, vec![lamp.to_string()]);
-        assert!(clean.new_findings.is_empty() && clean.resolved.is_empty());
-        assert_eq!(clean.more, 0);
-        // Walking the crate into the wall: one new overlap; the old pair stays out.
-        let hit = tx_move(server, &yard.crate_, [3.0, 0.0, 0.0], 821, None)
-            .spatial_delta
-            .expect("delta rides on the write");
-        assert_eq!(hit.new_findings.len(), 1, "{:?}", hit.new_findings);
-        let line = &hit.new_findings[0];
-        assert!(
-            !line.contains(&yard.old_a.to_string()) && !line.contains(&yard.old_b.to_string()),
-            "old overlap stays out: {line}"
-        );
-        // Moving one stacked crate away clears the old overlap: one resolved line.
-        let freed = tx_move(server, &yard.old_a, [20.0, 0.0, 26.0], 822, None)
-            .spatial_delta
-            .expect("delta rides on the write");
-        assert!(freed.new_findings.is_empty());
-        assert_eq!(freed.resolved.len(), 1, "{:?}", freed.resolved);
-        assert!(
-            freed.resolved[0].contains(&yard.old_a.to_string())
-                && freed.resolved[0].contains(&yard.old_b.to_string())
-        );
-        // `delta: false` skips the check: no field at all.
-        let skipped = tx_move(server, lamp, [-24.0, 0.0, -20.0], 823, Some(false));
-        assert!(skipped.spatial_delta.is_none());
-    }
-
     #[test]
     fn spatial_delta_rides_on_scene_place_and_the_flag_skips_it() {
         let _serial = PLACE_TEST_SERIAL.lock().expect("place tests serialize");
@@ -3368,6 +3226,18 @@ mod tests {
         let [x, z] = block.near_miss_cm;
         assert_eq!((x - 400).pow(2) + (z + 400).pow(2), 100 * 100);
         assert!(block.fix.contains("100 cm -x"), "{}", block.fix);
+        // Both boxes here are bare nodes, so the figure rests on the labelled
+        // default and the fix says so instead of posing as a measurement.
+        assert!(
+            block.fix.contains("default size"),
+            "a default-sized pair is named: {}",
+            block.fix
+        );
+        assert!(
+            block.fix.contains("this node"),
+            "the mover is one of them: {}",
+            block.fix
+        );
         let again = ScenePlaceTool::invoke(&room.server, args).expect("conflicts answer again");
         assert_eq!(again.blocked_by, out.blocked_by, "x2 identical");
         assert_eq!(revision(&room.server), rev);

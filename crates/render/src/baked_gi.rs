@@ -589,7 +589,7 @@ pub fn compile_baked_gi_for_forward(
 /// Validate one headless bind request: frame args, bake backing and the
 /// recorded bake ms. Cold path only; the name stays off the hot list so its
 /// refusal strings never count as per-frame allocation.
-#[cfg(not(feature = "window"))]
+#[cfg(not(feature = "gpu"))]
 fn check_frame_backing(
     viewport_px: [u32; 2],
     exposure_ev100: f32,
@@ -611,7 +611,7 @@ fn check_frame_backing(
 /// backing like [`bind_gi`], then names the missing window device bind on
 /// the headless twin (never silent success). The CPU bake above is the
 /// reference here; the `window` build below records the live bind instead.
-#[cfg(not(feature = "window"))]
+#[cfg(not(feature = "gpu"))]
 pub fn submit_gpu(
     viewport_px: [u32; 2],
     exposure_ev100: f32,
@@ -636,7 +636,7 @@ pub fn submit_gpu(
 /// GI device bind for the forward presenter (window only): the lightmap
 /// texture plus the probe SH storage the [`FORWARD_GI_WGSL`] chunk samples.
 /// Cook bytes upload verbatim; the round-trip tests pin byte parity.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod gpu {
     use super::{ArenaBake, BakedGiError};
 
@@ -2029,7 +2029,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     #[test]
     fn headless_submit_names_the_window_device() {
         // The headless twin validates first, then refuses loudly with the
@@ -2051,24 +2051,22 @@ mod tests {
         assert!(submit_gpu([1280, 720], 12.0, [0.3, 1.0, 0.2], &bake, f64::NAN).is_err());
     }
 
-    #[cfg(feature = "window")]
-    fn window_device(label: &'static str) -> Option<(wgpu::Device, wgpu::Queue)> {
+    #[cfg(feature = "gpu")]
+    fn window_device(
+        label: &'static str,
+    ) -> Result<(wgpu::Device, wgpu::Queue), crate::test_gpu::NoAdapter> {
         crate::test_gpu::hold_gpu_slot();
         let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
-        let adapter =
-            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })) {
-                Ok(a) => a,
-                Err(_) => {
-                    eprintln!("SKIPPED baked-gi gpu test: no wgpu adapter on this machine");
-                    return None;
-                }
-            };
-        Some(
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|error| {
+            crate::test_gpu::NoAdapter(format!("no wgpu adapter on this machine: {error}"))
+        })?;
+        Ok(
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some(label),
                 ..Default::default()
@@ -2077,13 +2075,16 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn gi_lightmap_upload_roundtrips() {
         // Cook bytes upload verbatim and read back bit-identical: the GPU
         // lightmap matches the CPU bake texel-for-texel, mask included.
         let (bake, _) = bake_arena_fixture().expect("fixture bakes");
-        let Some((device, queue)) = window_device("rl5-gi-lightmap") else {
+        let Some((device, queue)) = crate::test_gpu::require_or_skip(
+            "gi_lightmap_upload_roundtrips",
+            window_device("rl5-gi-lightmap"),
+        ) else {
             return;
         };
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -2152,13 +2153,16 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn gi_probe_bind_validates_and_scores() {
         // The live bind: validation-clean, bit-exact against the cook, and
         // steady-state (the second bind reuses every buffer).
         let (bake, _) = bake_arena_fixture().expect("fixture bakes");
-        let Some((device, queue)) = window_device("rl5-gi-bind") else {
+        let Some((device, queue)) = crate::test_gpu::require_or_skip(
+            "gi_probe_bind_validates_and_scores",
+            window_device("rl5-gi-bind"),
+        ) else {
             return;
         };
         let mut submitter = gpu::GiSubmitter::new(&device);

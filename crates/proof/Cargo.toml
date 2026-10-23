@@ -15,6 +15,9 @@ engine-arena = { workspace = true, optional = true }
 engine-assets = { workspace = true, features = ["import", "registry"], optional = true }
 engine-combat.workspace = true
 engine-core.workspace = true
+# HS23 bond harnesses name this core-only crate; a normal dependency keeps
+# the `cfg(kani)` lib harness buildable without test targets.
+engine-destruction.workspace = true
 engine-ecs.workspace = true
 engine-editor = { workspace = true, optional = true }
 engine-input.workspace = true

@@ -281,8 +281,8 @@ pub fn yaw_of(rotation: [f32; 4]) -> f32 {
 /// an assumed size from a measured one.
 pub fn default_row(label: &str, size: [f32; 3]) -> String {
     format!(
-        "{label} {:.2}x{:.2}x{:.2} m: no collider, the box is the node scale \
-         ({})",
+        "{label} {:.2}x{:.2}x{:.2} m: default size, no collider, so the box is \
+         the node scale ({})",
         size[0],
         size[1],
         size[2],

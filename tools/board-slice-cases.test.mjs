@@ -112,5 +112,7 @@ test("plan §3 excerpt is capped with a pointer, the row stays byte-identical", 
     "slice within the 8192 byte budget",
   );
   assert.match(r.stdout, /excerpt truncated at \d+ bytes; the full text is in docs\/plan\//);
-  assert.match(r.stdout, /- \[ \] VS3 game: kit textures/);
+  // The checkbox tracks the live board (VS3 was ticked 2026-10-23); the row
+  // text after it is what stays byte-identical.
+  assert.match(r.stdout, /- \[[ x]\] VS3 game: kit textures/);
 });

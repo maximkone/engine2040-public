@@ -545,6 +545,19 @@ pub struct StrikePose {
     pub team: u8,
 }
 
+impl StrikePose {
+    /// The rules-v2 pose for one baked hit-track row: the caller's body
+    /// capsule and team, the row's integer blade path at `(move, tick)`.
+    #[must_use]
+    pub fn from_hit_row(body: SweepParticipant, row: &crate::cut::HitTrackRow, team: u8) -> Self {
+        Self {
+            body,
+            blade: row.blade(body.id),
+            team,
+        }
+    }
+}
+
 /// Range-check rules-v2 geometry: one pose per active slot in slot order,
 /// each pose and blade naming its own slot and inside the sweep bounds.
 pub fn validate_strike_poses(poses: &[StrikePose], fighter_count: u8) -> Result<(), CombatError> {

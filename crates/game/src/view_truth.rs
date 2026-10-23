@@ -72,6 +72,9 @@ pub struct BodyTruth {
     /// is planted on, in meters, while the foot is at full plant; `None` while
     /// the foot is free. The slide the `foot_slide_cm` receipt meters.
     pub foot_slide_m: [Option<f32>; 2],
+    /// Head travel from the rotation flinch this frame, meters (AM23); 0 when
+    /// no hit reaction is live. The max is the `react_head_cm_max` receipt.
+    pub react_head_m: f32,
     /// Drawn from its ragdoll bones this frame (RZ2w), not from a clip. A ragdoll falls and
     /// tumbles under physics, so the clip-snap law does not judge its joints.
     pub ragdolled: bool,
@@ -106,6 +109,7 @@ impl BodyTruth {
             nonfinite: u32::try_from(nonfinite).unwrap_or(u32::MAX),
             error_parts: 0,
             foot_slide_m: [None; 2],
+            react_head_m: 0.0,
             ragdolled: false,
         }
     }
@@ -313,6 +317,9 @@ pub struct ViewLaws {
     slide_bins: Vec<u32>,
     /// Most bodies drawn from a ragdoll in one folded frame.
     ragdolls_max: u32,
+    /// Furthest the rotation flinch moved a head in one folded frame, meters
+    /// (AM23); 0 when no reaction was live.
+    react_head_m: f32,
     /// Most spears alive at once in a folded frame (spear grapple).
     spears_max: u32,
     /// Most ropes alive at once in a folded frame (spear grapple).
@@ -387,6 +394,9 @@ impl ViewLaws {
             self.bodies = self.bodies.saturating_add(1);
             self.nonfinite = self.nonfinite.saturating_add(body.nonfinite);
             self.error_parts = self.error_parts.saturating_add(body.error_parts);
+            if body.react_head_m.is_finite() {
+                self.react_head_m = self.react_head_m.max(body.react_head_m.max(0.0));
+            }
             match screen_rect(camera, body.min, body.max) {
                 Some(rect) => self.cover_max = self.cover_max.max(cover(rect)),
                 None => self.offscreen = self.offscreen.saturating_add(1),
@@ -643,6 +653,14 @@ impl ViewLaws {
         self.ragdolls_max
     }
 
+    /// Furthest the rotation flinch moved a head in one folded frame, meters
+    /// (AM23); 0 when no reaction was live. `react_head_cm_max` prints this
+    /// times 100.
+    #[must_use]
+    pub fn react_head_m(&self) -> f32 {
+        self.react_head_m
+    }
+
     /// Folds the spear grapple's counts for the frame just drawn: spears and ropes alive.
     pub fn note_spear(&mut self, spears: usize, tethers: usize) {
         let clamp = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
@@ -682,7 +700,7 @@ impl ViewLaws {
             parts.join("/")
         };
         Some(format!(
-            "arena view: frames={} sim_ticks={:.1}..{:.1} bodies={} offscreen_share={:.2} nonfinite={} error_parts={} sunk_cm_max={:.1} idle_float_cm_max={:.1} pops={} pop_acts={acts} pop_cm_max={:.1} eye_in_body={} eye_below_ground={} closest_cm={closest} cover_max={:.2} foot_slide_cm={:.1} planted_feet={} ragdolls={} spear={} tether={}",
+            "arena view: frames={} sim_ticks={:.1}..{:.1} bodies={} offscreen_share={:.2} nonfinite={} error_parts={} sunk_cm_max={:.1} idle_float_cm_max={:.1} pops={} pop_acts={acts} pop_cm_max={:.1} react_head_cm_max={:.1} eye_in_body={} eye_below_ground={} closest_cm={closest} cover_max={:.2} foot_slide_cm={:.1} planted_feet={} ragdolls={} spear={} tether={}",
             self.frames,
             self.first_t.unwrap_or(0.0),
             self.last_t,
@@ -694,6 +712,7 @@ impl ViewLaws {
             self.idle_float_m * 100.0,
             self.pops,
             self.pop_m * 100.0,
+            self.react_head_m * 100.0,
             self.eye_in_body,
             self.eye_below_ground,
             self.cover_max,
@@ -1189,7 +1208,7 @@ mod tests {
         assert_eq!(
             laws.line().as_deref(),
             Some(
-                "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02 foot_slide_cm=0.0 planted_feet=0 ragdolls=0 spear=0 tether=0"
+                "arena view: frames=2 sim_ticks=1.0..2.0 bodies=3 offscreen_share=0.33 nonfinite=1 error_parts=1 sunk_cm_max=12.0 idle_float_cm_max=4.0 pops=0 pop_acts=none pop_cm_max=0.0 react_head_cm_max=0.0 eye_in_body=0 eye_below_ground=1 closest_cm=4100 cover_max=0.02 foot_slide_cm=0.0 planted_feet=0 ragdolls=0 spear=0 tether=0"
             )
         );
         // The run warns by itself, one line per broken floor, receipt order.
@@ -1207,6 +1226,24 @@ mod tests {
         assert_eq!(
             laws.verdict(),
             "FAIL(view_nonfinite,view_error_parts,view_eye_below_ground,view_sunk_cm_max)"
+        );
+    }
+
+    #[test]
+    fn react_head_metric_folds_the_max() {
+        let mut laws = ViewLaws::default();
+        let mut first = body(0, "idle", [-1.0, 0.0, 0.0], vec![[0.0, 1.0, 0.0]]);
+        first.react_head_m = 0.03;
+        let mut second = body(1, "idle", [1.0, 0.0, 0.0], vec![[0.0, 1.0, 0.0]]);
+        second.react_head_m = 0.11;
+        laws.note(&camera(), 1.0, &[first, second]);
+        assert_eq!(laws.react_head_m(), 0.11);
+        assert!(
+            laws.line()
+                .as_deref()
+                .is_some_and(|line| line.contains("react_head_cm_max=11.0")),
+            "the receipt prints the max in centimeters: {:?}",
+            laws.line()
         );
     }
 

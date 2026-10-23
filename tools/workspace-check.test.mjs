@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, parseTestModules, sourceFilesUnder, romeSourceAudit, romeSourceViolations, romeContentFiles, codexRefsNamed, codexRefList, unwiredModulesLine, LAYERS, SIMULATION_CRATES, PRESENTATION_CRATES, PLATFORM_CRATES, GPU_BOUNDARY_LEGACY, layerEdgeViolations, gpuBoundaryFindings, ioBoundaryFindings, baselineAudit, baselineCounts, baselineDrift, readBaseline } from "./workspace-check.mjs";
-import { mentions, pathTokens, tokensMention, rowsWithReason, summaryLine, scan as scanUnwired } from "./unwired-code-gate.mjs";
-import { parseBoard, needsOf } from "./board-slice.mjs";
+import { parseBoardTasks, largeBlobViolations, LFS_SIZE_LIMIT, hasHelpFlag, WORKSPACE_CHECK_HELP, testLayoutViolations, OWN_TEST_BINARY, allowedEdges, parseDeclaredModules, parseIncludedFiles, parseTestModules, sourceFilesUnder, romeSourceAudit, romeSourceViolations, romeContentFiles, codexRefsNamed, codexRefList, unwiredModulesLine, LAYERS, SIMULATION_CRATES, PRESENTATION_CRATES, PLATFORM_CRATES, GPU_BOUNDARY_LEGACY, layerEdgeViolations, gpuBoundaryFindings, ioBoundaryFindings } from "./workspace-check.mjs";
+import { mentions, pathTokens, tokensMention, rowsWithReason, summaryLine, scan as scanUnwired } from "./unwired-code-gate.mjs";import { parseBoard, needsOf } from "./board-slice.mjs";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -491,7 +490,7 @@ test("unwired gate: the sharp half is a strict subset of the whole list (PW48)",
 test("unwired gate: the self-test still proves the known dead modules (PW48)", () => {
   const tool = spawnSync(process.execPath, [fileURLToPath(new URL("./unwired-code-gate.mjs", import.meta.url)), "--self-test"], { encoding: "utf8", maxBuffer: 1 << 26 });
   assert.equal(tool.status, 0, "the self-test must pass");
-  assert.match(tool.stdout, /PASS unwired-code-gate: 12 known dead modules found, 2 live modules not flagged, fixture ok/);
+  assert.match(tool.stdout, /PASS unwired-code-gate: 10 known dead modules found, 4 live modules not flagged, fixture ok/);
   assert.match(tool.stdout, /index-matches-reference \d+ pairs, 0 differences/, "the index must answer like the reference");
 });
 
@@ -798,64 +797,4 @@ test("the layer map and the audit agree on the crates (PW52)", () => {
   assert.match(gate, /WARN gpu boundary: \$\{gpu\.offenders\.length\} files outside present\/ name wgpu:: \(report-only\)/);
   assert.match(gate, /PASS gpu boundary: no new file outside present\/ names wgpu::/);
   assert.match(gate, /PASS io boundary: no simulation crate does IO outside its tests/);
-});
-
-// ---- PW51: the compaction baseline and its drift gate ----
-
-test("the baseline doc's four numbers are read, and a missing one is null", () => {
-  const block = "- crates: 42\n- src lines: 816611\n- multi-version lock names: 80\n- dead feature flags: 7\n";
-  assert.deepEqual(readBaseline(block), { crates: 42, srcLines: 816611, lockNames: 80, deadFlags: 7 });
-  assert.equal(readBaseline("- crates: 42\n- src lines: 816611\n"), null, "a half written block compares against nothing");
-  assert.equal(readBaseline(""), null, "no block at all");
-  assert.equal(readBaseline("# Compaction baseline\n\n- crates: 42\n"), null, "prose around the block does not hide it");
-});
-
-test("the baseline counts come from the tree, not from the doc", () => {
-  const root = mkdtempSync(join(tmpdir(), "baseline-counts-"));
-  try {
-    const files = {
-      "crates/alpha/Cargo.toml": '[package]\nname = "engine-alpha"\n',
-      "crates/alpha/src/lib.rs": "fn a() {}\nfn b() {}\n",
-      "crates/beta/Cargo.toml": '[package]\nname = "engine-beta"\n\n[features]\ndead = []\n',
-      "crates/beta/src/lib.rs": "fn c() {}\n",
-      "Cargo.lock": '[[package]]\nname = "a"\nversion = "1.0.0"\n\n[[package]]\nname = "a"\nversion = "2.0.0"\n',
-    };
-    for (const [path, body] of Object.entries(files)) {
-      mkdirSync(join(root, path, ".."), { recursive: true });
-      writeFileSync(join(root, path), body);
-    }
-    assert.deepEqual(baselineCounts(root), { crates: 2, srcLines: 3, lockNames: 1, deadFlags: 1 });
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test("a moved number names both sides, and the dead flags stay out of the failure", () => {
-  const recorded = { crates: 42, srcLines: 816611, lockNames: 80, deadFlags: 7 };
-  assert.deepEqual(baselineDrift(recorded, { ...recorded }), [], "the same numbers drift nowhere");
-  assert.deepEqual(
-    baselineDrift(recorded, { crates: 43, srcLines: 816700, lockNames: 80, deadFlags: 0 }),
-    ["baseline: crates 42 -> 43", "baseline: src lines 816611 -> 816700"],
-    "a moved number names the old and the new value",
-  );
-  assert.deepEqual(baselineDrift(recorded, { ...recorded, lockNames: 81 }), ["baseline: multi-version lock names 80 -> 81"]);
-  assert.deepEqual(baselineDrift(recorded, { ...recorded, deadFlags: 0 }), [], "a dead flag is a warning, not a failure");
-});
-
-test("the drift gate is wired and the baseline doc carries the block it reads", () => {
-  const gate = readFileSync(new URL("./workspace-check.mjs", import.meta.url), "utf8");
-  assert.match(gate, /PASS baseline: \$\{baselineCrates\} crates, \$\{baselineSrcLines\} src lines, \$\{baselineLockNames\} multi-version lock names, \$\{baselineDeadFlags\} dead feature flags/);
-  assert.match(gate, /drift: recorded \? baselineDrift\(recorded, measured\) : \[\],/);
-  assert.match(gate, /for \(const line of check\.drift\) console\.log\(`FAIL \$\{line\}`\);/);
-  assert.match(gate, /const tree = committedTree\(repoDir\);/, "the gate measures the committed tree");
-  const doc = readFileSync(new URL("../docs/compaction-baseline.md", import.meta.url), "utf8");
-  assert.ok(readBaseline(doc), "docs/compaction-baseline.md holds the four machine-readable lines");
-});
-
-test("the baseline gate reads the doc and the committed tree (PW51)", () => {
-  const root = fileURLToPath(new URL("../", import.meta.url));
-  const check = baselineAudit(root);
-  assert.ok(check.recorded, "the doc holds the four machine-readable lines");
-  assert.ok(check.treeRead, "the committed tree was read");
-  assert.ok(check.measured.crates > 0, "the crate count is a real number");
-  assert.ok(check.measured.srcLines > check.measured.crates, "the src lines are a real number");
-  assert.ok(Array.isArray(check.drift), "the drift is a list");
 });

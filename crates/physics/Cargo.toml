@@ -19,7 +19,9 @@ rapier = ["dep:rapier3d", "dep:engine-anim"]
 engine-core = { workspace = true }
 # PX15: the persistent lane pool the parallel island step queues on.
 engine-ecs = { workspace = true }
-rapier3d = { workspace = true, optional = true }
+# RL58: the debug-render pipeline turns collider and joint outlines into lines;
+# a feature only, no solver change and no new dependency.
+rapier3d = { workspace = true, optional = true, features = ["debug-render"] }
 engine-anim = { workspace = true, optional = true }
 
 [dev-dependencies]

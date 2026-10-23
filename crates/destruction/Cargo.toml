@@ -14,3 +14,7 @@ engine-core.workspace = true
 [dev-dependencies]
 # Zero-allocation probe owner for tests.
 engine-core = { workspace = true, features = ["test-util"] }
+# DX6: the chunk chain proof cooks through the CT2 owner. Test-only: the
+# import lane (glTF, image) never reaches the tick path, and `mesh_cook` is
+# gated on that feature.
+engine-assets = { workspace = true, features = ["import"] }

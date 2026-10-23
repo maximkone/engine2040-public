@@ -23,8 +23,11 @@ engine-nav.workspace = true
 # `engine-physics/rapier` for gravity settling plus wall collision.
 engine-physics.workspace = true
 # ARC3/ARC4: the spine step and parity harness (`spine` flag, a default feature
-# since ARC7 so every consumer compiles the migration path).
-engine-ecs = { workspace = true, optional = true }
+# since ARC7 so every consumer compiles the migration path). Required, not
+# optional, since RC36: the per-fighter step runs on the crate's shared job
+# pool (`arena::leg_pool`), and the golden proves its bytes equal at every
+# thread count. The `spine` flag still gates the spine modules themselves.
+engine-ecs.workspace = true
 
 [features]
 # ARC7: the spine is the default build of the crate; the flag stays named so
@@ -32,7 +35,7 @@ engine-ecs = { workspace = true, optional = true }
 # modules: `run` and `LiveMatch` step the legacy `Sim` either way.
 default = ["spine"]
 sim = ["engine-physics/rapier"]
-spine = ["dep:engine-ecs"]
+spine = []
 
 [dev-dependencies]
 # Zero-allocation probe owner for tests (CODELAW 15); SL27R3 recorder:910.

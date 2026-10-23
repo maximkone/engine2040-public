@@ -25,6 +25,8 @@ use engine_anim::ik::{limb_positions, solve_limb, IkError, Limb};
 use engine_arena::GaitPhase;
 use engine_core::vec3::dist2;
 
+use crate::FighterView;
+
 use super::{clip_alpha, slot_root, Act, FighterLook, LookError, Rig, SlotAnim, TICK_HZ};
 
 /// Ankle speed against the body under which the clip has a foot planted, in
@@ -57,6 +59,21 @@ const KNEE_POLE: [f32; 3] = [0.0, 0.0, 1.0];
 /// Least bend of the clip's knee off the hip-to-ankle line, in meters, that
 /// still names a side to keep.
 const MIN_BEND_M: f32 = 0.005;
+/// Least fall, in meters, that counts as a landing worth squashing: a step
+/// off a ledge, not the millimetre bob of a walk.
+const LAND_MIN_FALL_M: f32 = 0.12;
+/// Feet height above the sand, in meters, that starts an airborne stretch.
+const LAND_AIR_MIN_M: f32 = 0.05;
+/// Feet height at or below which the body is back on the sand, in meters.
+const LAND_GROUND_M: f32 = 0.001;
+/// Fall height that earns the full squash, in meters: a 4 m fall and every
+/// longer one squash as deep as the pelvis drop allows.
+const SQUASH_FULL_FALL_M: f32 = 1.5;
+/// Deepest landing squash: extra pelvis drop in meters, on top of the plant
+/// gap, capped by [`MAX_DROP_M`].
+const SQUASH_DEPTH_M: f32 = 0.07;
+/// Ticks a landing squash takes to ease back to the standing pose.
+const SQUASH_TICKS: u32 = 8;
 
 /// Both legs of a rig: their joints and each ankle's standing height.
 #[derive(Clone, Copy, Debug)]
@@ -137,6 +154,37 @@ impl Plant {
     }
 }
 
+/// One landing the look saw (FEEL7): the look tick the feet reached the sand
+/// and the fall height that carried them there, in meters. The authority's
+/// height channel charges the health; this state drives the body squash on
+/// the same tick.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) struct Land {
+    pub(super) tick: u32,
+    pub(super) fall_m: f32,
+}
+
+/// A small tick count as a float for the decay curves; these counts stay
+/// under a byte, and `u8 -> f32` is a lossless `From`.
+pub(super) fn ticks_f32(ticks: u32) -> f32 {
+    f32::from(u8::try_from(ticks).unwrap_or(u8::MAX))
+}
+
+impl Land {
+    /// Extra pelvis drop for this landing at look `tick`, in meters: deepest
+    /// on the landing tick, easing to zero over [`SQUASH_TICKS`]. A longer
+    /// fall squashes deeper, up to [`SQUASH_FULL_FALL_M`].
+    fn squash_drop_m(self, tick: u32) -> f32 {
+        let age = tick.saturating_sub(self.tick);
+        if age >= SQUASH_TICKS || !self.fall_m.is_finite() {
+            return 0.0;
+        }
+        let strength = (self.fall_m / SQUASH_FULL_FALL_M).clamp(0.0, 1.0);
+        let decay = 1.0 - ticks_f32(age) / ticks_f32(SQUASH_TICKS);
+        SQUASH_DEPTH_M * strength * decay
+    }
+}
+
 /// A slot's feet: the left and right plant, plus whether the plant moves the
 /// pose. With `ik` off the plants are still tracked and metered, and the pose
 /// stays the clip's, which is how the proofs read the slide the plant removes.
@@ -144,6 +192,11 @@ impl Plant {
 pub(super) struct Feet {
     pub(super) plants: [Plant; 2],
     pub(super) ik: bool,
+    /// Highest feet height seen since takeoff, in meters; `None` while the
+    /// body is on the sand. Presentation only.
+    pub(super) air: Option<f32>,
+    /// Last landing the feet folded, kept so its squash decays by tick.
+    pub(super) land: Option<Land>,
 }
 
 impl Feet {
@@ -151,6 +204,8 @@ impl Feet {
         Self {
             plants: [Plant::NEW; 2],
             ik: true,
+            air: None,
+            land: None,
         }
     }
 }
@@ -317,6 +372,80 @@ fn skin_err(err: IkError) -> LookError {
 }
 
 impl FighterLook {
+    /// Fold one tick of fall landings into every seen slot's feet (FEEL7):
+    /// remember the highest feet height since takeoff and record a landing on
+    /// the tick the body reaches the sand. Called before
+    /// [`FighterLook::observe_tick`] so the squash starts on the same tick the
+    /// authority's fall table charged, and the held foot state carries it into
+    /// the pose. Presentation only; the sim hash never reads it.
+    pub fn observe_landings(&mut self, tick: u32, views: &[FighterView]) {
+        for view in views {
+            let Some(slot) = self.slots.get_mut(usize::from(view.slot)) else {
+                continue;
+            };
+            if slot.held {
+                continue;
+            }
+            let feet = &mut slot.feet;
+            let y = view.pos_m[1];
+            match feet.air {
+                None => {
+                    if y > LAND_AIR_MIN_M {
+                        feet.air = Some(y);
+                        feet.land = None;
+                    }
+                }
+                Some(top) => {
+                    let top = top.max(y);
+                    if y <= LAND_GROUND_M {
+                        feet.land = (top >= LAND_MIN_FALL_M).then_some(Land { tick, fall_m: top });
+                        feet.air = None;
+                    } else {
+                        feet.air = Some(top);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fold the authority's fall landings for `tick` into every slot's feet
+    /// (FEEL7): the height channel names the tick, so the squash starts on the
+    /// tick the fall table charged even though the frame's views are the
+    /// pre-step ones. Called after [`FighterLook::observe_landings`] so the
+    /// cleared air top keeps the next pre-step view from landing the same fall
+    /// twice. Presentation only; the sim hash never reads it.
+    pub fn observe_landing_rows(&mut self, tick: u32, landings: &[engine_arena::FallLanding]) {
+        for landing in landings {
+            let Some(slot) = self.slots.get_mut(usize::from(landing.slot)) else {
+                continue;
+            };
+            if slot.held {
+                continue;
+            }
+            let fall_m = f32::from(u16::try_from(landing.fall_mm).unwrap_or(u16::MAX)) / 1_000.0;
+            slot.feet.air = None;
+            slot.feet.land = Some(Land { tick, fall_m });
+        }
+    }
+
+    /// Test-only: the two-slot look fixture for tests outside the look's module
+    /// tree (FEEL7's one-tick landing proof).
+    #[cfg(test)]
+    pub(crate) fn feel7_look_two() -> Self {
+        super::tests::balance_look_two()
+    }
+
+    /// Test-only: the last landing's tick and its extra pelvis drop at `tick`,
+    /// in meters. This is the same curve [`plant_feet`](Self::plant_feet)
+    /// applies to the pose.
+    #[cfg(test)]
+    pub(crate) fn feel7_landing_squash(&self, tick: u32) -> Option<(u32, f32)> {
+        self.slots
+            .first()
+            .and_then(|slot| slot.feet.land)
+            .map(|land| (land.tick, land.squash_drop_m(tick)))
+    }
+
     /// Fold one tick into every seen, free slot's feet: read the clip's ankles
     /// at the end of the tick and step each plant. A held slot keeps its feet
     /// exactly (they stand still with its clip clock); a slot that no longer
@@ -384,6 +513,12 @@ impl FighterLook {
         let Some(legs) = rig.legs.filter(|_| plants_feet(slot)) else {
             return Ok([None; 2]);
         };
+        // FEEL7: a fresh landing drops the pelvis a little more, so the knees
+        // bend and the body reads its weight. It eases out over a few ticks.
+        let squash = slot
+            .feet
+            .land
+            .map_or(0.0, |land| land.squash_drop_m(self.tick));
         let at = clip_alpha(slot, alpha);
         let mut contacts: Contacts = [None; 2];
         let mut clip = [ClipLeg::NONE; 2];
@@ -408,14 +543,14 @@ impl FighterLook {
                 *contact = plant.planted.then_some(plant.contact);
             }
         }
-        if !slot.feet.ik || clip.iter().all(|leg| leg.aim.is_none()) {
+        if !slot.feet.ik || (squash <= 0.0 && clip.iter().all(|leg| leg.aim.is_none())) {
             return Ok(contacts);
         }
-        let drop = clip
+        let gap = clip
             .iter()
             .filter_map(|leg| leg.aim.map(|t| gap_m(leg.hip, leg.ankle, t, leg.reach)))
-            .fold(0.0f32, f32::max)
-            .min(MAX_DROP_M);
+            .fold(0.0f32, f32::max);
+        let drop = (gap + squash).min(MAX_DROP_M);
         if drop > 0.0 {
             pose.positions[rig.pelvis][1] -= drop;
             // The leg that has no plant keeps the clip's ankle where it was.
@@ -460,6 +595,41 @@ mod tests {
     use super::*;
 
     const REST: f32 = 0.075;
+
+    #[test]
+    fn feel7_a_fall_records_one_landing_and_its_squash_drop_curve() {
+        let mut look = super::super::tests::balance_look_two();
+        look.observe_landings(
+            10,
+            &[FighterView {
+                slot: 0,
+                pos_m: [0.0, 1.0, 0.0],
+                yaw: 0.0,
+            }],
+        );
+        look.observe_landings(
+            11,
+            &[FighterView {
+                slot: 0,
+                pos_m: [0.0, 1.5, 0.0],
+                yaw: 0.0,
+            }],
+        );
+        look.observe_landings(
+            12,
+            &[FighterView {
+                slot: 0,
+                pos_m: [0.0, 0.0, 0.0],
+                yaw: 0.0,
+            }],
+        );
+        let land = look.slots[0].feet.land.expect("the fall lands");
+        assert_eq!(land.tick, 12);
+        assert!((land.fall_m - 1.5).abs() < 1e-6);
+        assert!(land.squash_drop_m(12) > 0.05);
+        assert!(land.squash_drop_m(16) < land.squash_drop_m(12));
+        assert_eq!(land.squash_drop_m(12 + SQUASH_TICKS), 0.0);
+    }
 
     /// An ankle at standing height `0.075`, `x` meters along the body.
     fn ankle(x: f32) -> [f32; 3] {

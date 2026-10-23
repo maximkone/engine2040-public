@@ -4,8 +4,9 @@ Boarded 2026-10-10 from the plans review (`target/reports/plans-review-2026-10-1
 part E): the Look proof had no frame-cost rows and no machine score. GM3 needs
 FC3 (at 3.29 fps the 18,000-frame run takes 91 min against a 45 min slot).
 
-- [ ] FC1 perf: frame cost table for the windowed arena — the perf seat runs Progress 2026-10-17: table exists, `target/reports/perf-20261014-fc1.md` (QUIET x3, top 3 costs named with files: present, sun shadow, fighters). Not met: spread 50% against the 10% bar, report not named perf-<date>.md, no re-run after EG1 and EG2; arena.exe is STALE (100 code commits) so a fresh quiet run is needed. Progress 2026-10-20 (perf seat, HEAD 5099d6f9): fresh x3 hand quiet gate (`tools/quiet.mjs` was deleted in e5457d6e), report `target/reports/perf-2026-10-20.md`. Top 3: present 5.5/10.0/9.4 ms (`arena.rs:1918` present_frame -> render `live.rs`, acquire 3.2-4.8 ms), fighters 0.55/1.16/1.59 ms (`arena.rs:2054` push_fighters + `fighter_look.rs`), sim 0.14/0.33/0.60 ms (`arena.rs:1646` run_sim_ticks). FAIL: cpu p50 spread 59.1% vs <=10% (present mean 83%, fighters 187%, sim 319%). `bins.mjs` still says STALE after the rebuild line (commit-time vs mtime artifact; cargo recompiled nothing). p50 2.0-3.2 ms; p99 78.8-87.2 ms from ~80 ms CPU present hitches, 63-72 slow frames of 300.
+- [x] FC1 perf: frame cost table for the windowed arena — the perf seat runs Progress 2026-10-17: table exists, `target/reports/perf-20261014-fc1.md` (QUIET x3, top 3 costs named with files: present, sun shadow, fighters). Not met: spread 50% against the 10% bar, report not named perf-<date>.md, no re-run after EG1 and EG2; arena.exe is STALE (100 code commits) so a fresh quiet run is needed. Progress 2026-10-20 (perf seat, HEAD 5099d6f9): fresh x3 hand quiet gate (`tools/quiet.mjs` was deleted in e5457d6e), report `target/reports/perf-2026-10-20.md`. Top 3: present 5.5/10.0/9.4 ms (`arena.rs:1918` present_frame -> render `live.rs`, acquire 3.2-4.8 ms), fighters 0.55/1.16/1.59 ms (`arena.rs:2054` push_fighters + `fighter_look.rs`), sim 0.14/0.33/0.60 ms (`arena.rs:1646` run_sim_ticks). FAIL: cpu p50 spread 59.1% vs <=10% (present mean 83%, fighters 187%, sim 319%). `bins.mjs` still says STALE after the rebuild line (commit-time vs mtime artifact; cargo recompiled nothing). p50 2.0-3.2 ms; p99 78.8-87.2 ms from ~80 ms CPU present hitches, 63-72 slow frames of 300. Landed e04f0ed10.
   Progress 2026-10-20 (perf lane, after that table): the ~80 ms hitch is named and fixed. A per-frame present-path trace (`E2040_FRAME_TRACE`, new `crates/game/src/bin/arena_frame/trace.rs`) shows the stall is the swapchain acquire `get_current_texture` inside the present path (72-148 ms on 13 of 300 frames, ~139 ms apart), not stage/submit/present-call (all under 22 ms) and not the GPU (per-pass 0.02-0.22 ms). Cause: the window free-ran at ~480 presents/s on a 120 Hz panel, so the compositor throttled it; the present mode is not the cause (Mailbox is as bad as Immediate, vsync only moves the wait). Fix in the tree: the arena window presents one frame per slot at the fixed tick period and parks between slots (new `crates/game/src/bin/arena_frame/pace.rs`), and `--fixed-dt <ms>` is the deterministic harness (one fixed tick per presented frame; three runs paid ticks=300 each). Fresh quiet x3 on the final binary (gate log `target/reports/perf-2026-10-20-pacing-gate.txt`): cpu p50 4.630/4.661/4.644 ms (spread 0.7% vs 59.1% before, bar <=10%), cpu p99 28.966/26.029/31.148 ms (was 78.8-87.2), interval p50 spread 0.1%, sim 3.6%, fighters 2.4%, present 10.7% (just over the bar: 1-3 one-off acquire stalls per run land in that column), slow frames 4/4/7 of 300, acquires over 20 ms 1/1/3 per run (11-13 before). Report `target/reports/perf-2026-10-20-pacing.md`, raw hitch output `target/reports/hitch-2026-10-20.txt`. PASS on the spread the FAIL named; the present mean is 10.7% (12.9% over all seven runs of the day). The arena's sim is still not reproducible across runs (the camera-relative input follows the camera the last presented frame left, so the runs play different fights); that input-path leak is not this lane's row.
+  Progress 2026-10-23 (HEAD dca056ab1, `bins.mjs` says arena FRESH, built 2026-10-22T23:59:41Z): fresh quiet x3 on the deterministic harness (`--fixed-dt 16`, `ticks=300` each, and the three runs play the same fight: `triggers=19 shaken=172 stopped=48` x3), each run gated QUIET (cpu max 4.1/5.4/5.2% under 10%). `tools/quiet-run.mjs` takes no `--out` (this Accept line names one), so each run was teed to `target/reports/perf-2026-10-23-{1,2,3}.txt`. Frame costs: sim 0.763/0.755/0.753 ms, present 3.131/2.678/2.719 ms, fighters 1.353/1.337/1.359 ms; cpu p50 3.004/3.051/3.115 ms (spread 3.6%), interval p50 spread 0.2%, sim 1.3%, fighters 1.6%, all under the 10% bar. Two noisy columns, both named: present 15.9% because run 1 carries one first-frames stall (`slowest=2:149.159ms/present=148.394ms`, +0.49 ms on a 300-frame mean, acquire 0.514 against 0.156/0.132 ms; steady present 2.68/2.72 in runs 2 and 3), and gpu p50 67.5% because the laptop GPU's clock state moves `forward p50` 0.419/0.901/0.500 ms with the same work. Top 3 with the file that owns each: present 2.68-2.72 ms steady (`crates/game/src/bin/arena.rs` present_frame -> `crates/render/src/present/gpu_present/live.rs`), fighters 1.34-1.36 ms (`crates/game/src/fighter_look.rs` push_fighters), sim 0.75-0.76 ms (`crates/game/src/bin/arena.rs` run_sim_ticks). Live path clean x3 (`live_waits=0 live_maps=0`, `live_buffers=141 live_bind_groups=31` equal), slow frames 10/6/4 of 300 and every one at index 0, 1, 2 or 36. Report `target/reports/perf-2026-10-23.md`; no source change, golden untouched.
   the real window game three times in a quiet window and names the top 3
   costs (render pass or system) with the file that owns each. `perf.exe` has
   no presenter, so it is not the target (render review 2026-10-10). Tier A.
@@ -266,17 +267,23 @@ seat guard refuses their edits, so take the next row. Search the books first:
   nearer than the plane's, x2 equal; `arena per-pass` shadow above 0 ms on
   live frames; validation errors 0. F2P: no live shadow pass. P2P: `cargo
   test -p engine-render --lib` green; golden unchanged. needs: EG9.
-- [ ] EG11b render: sun shadow slice 2, the forward shader samples it — bind Progress 2026-10-17: `forward.wgsl` samples the sun map through `sun_shadow_pcf` (2x2 `textureSampleCompare`), bound in the forward group (7ca0937). Left: the on-vs-off masked-region luminance test under a fixture box, 3x3 PCF, the stale `SHADOW_FORWARD_WGSL` doc claims.
+- [x] EG11b render: sun shadow slice 2, the forward shader samples it — bind Progress 2026-10-17: `forward.wgsl` samples the sun map through `sun_shadow_pcf` (2x2 `textureSampleCompare`), bound in the forward group (7ca0937). Left: the on-vs-off masked-region luminance test under a fixture box, 3x3 PCF, the stale `SHADOW_FORWARD_WGSL` doc claims.
   the map, a comparison sampler and the light view-projection in the forward
   group; `fs` multiplies the sun term by a 3x3 PCF `textureSampleCompare` and
   drops the cascade distance dim; correct the stale claims that
   `SHADOW_FORWARD_WGSL` is bound (`present.rs:12-13`, `twin_shadow.rs:497-505`).
+  Landed a25921c4b. `eg11b_the_sun_map_shadows_the_sand_under_the_box_and_only_there`
+  PASS: shadowed sand >500 px, <5% of the floor, darkest <0.8, open sand within
+  1% of the off frame, shadow touches the box; 3x3 compare PCF, validation 0;
+  `the_gate_reads_pixels_for_every_look_pass_and_repeats` PASS (shadow_cluster
+  LIVE). Full render lib has 5 flickering pixel-equality tests proven unrelated
+  by reverting the shader to HEAD; they stay a render-gate follow-up.
   Diff: good. Tier A. Size M. Owns the forward.wgsl sun hunk and the
   presenter bind hunk. Accept: EG8 on vs off: the masked region under a
   fixture box darkens past the luminance floor, open ground stays within 1%;
   capture x2 equal; validation errors 0. F2P: on vs off frames are identical
   today. P2P: render lib green; golden unchanged. needs: EG11.
-- [ ] EG11c render: sun shadow slice 3, steady and clean — snap the light Progress 2026-10-17: `sun_snap_origin_for_size` snaps the ortho origin to whole texels (`sun_half_switch_halves_texel_and_keeps_snap`). Left: bias is `SUN_SHADOW_BIAS` 0.002, not 2^-19 plus slope and normal offset; no 1 cm camera-move byte-equal test, no sun-facing plane 0 shadowed pixels test, no contact-shadow test.
+- [x] EG11c render: sun shadow slice 3, steady and clean — snap the light Progress 2026-10-17: `sun_snap_origin_for_size` snaps the ortho origin to whole texels (`sun_half_switch_halves_texel_and_keeps_snap`). Left: bias is `SUN_SHADOW_BIAS` 0.002, not 2^-19 plus slope and normal offset; no 1 cm camera-move byte-equal test, no sun-facing plane 0 shadowed pixels test, no contact-shadow test. Landed a1fd536. steady_tests: camera move 1 cm leaves 0 map texels differing (GPU full-map bits), sun-facing plane 0 of 74554 shadowed (constant-only bias leaves 73897), foot contact 0.125 texel gap; RTX 3050 Vulkan, runs 39995189648, 39996774401, 39996571901, 39997711390; golden d57b5c8ae3096614.
   ortho origin to whole texels (no shimmer as the camera moves), depth clamp,
   bias 2^-19 plus slope-scaled bias and a normal offset (found2 8.3.3-8.3.4):
   no acne on sun-facing sand, no gap under feet. Diff: good. Tier A. Size S.
@@ -285,7 +292,7 @@ seat guard refuses their edits, so take the next row. Search the books first:
   shadowed pixels; a fixture foot on the plane casts contact shadow within 2
   px. F2P: the snapping test fails before. P2P: render lib green. Review:
   render.md G5 (RL27 keeps its split-distance unit). needs: EG11b.
-- [ ] EG12 render: ambient, torches, normal and ORM maps - the forward shader Progress 2026-10-17: landing (a) has its pixel test (`ambient_sh9_on_off_differs_in_masked_region`, ibl.rs) and the forward shader holds an 8-slot `TorchU` block (b). Left: a torch on-vs-off pixel test, the tangent attribute and normal and ORM sampling (c). Progress 2026-10-20: landing (c) ORM sampling landed 69df8617 with a device pixel proof e526bb2c; `fs_skinned` samples binding 19 and the standalone capture binds a white fallback until a real map rides in. Progress 2026-10-20 (skinned tangent): the skinned vertex layout carries the mesh tangent (80-byte stride, location 5, handedness in w) and `vs_skinned` skins it with the joints, so `eg12_world_normal` maps a normal map through the real frame; the CPU mirror is `SkinnedFrame::tangents`. Device proof `a_tangram_skinned_frame_differs_from_the_dummy_tangent_frame`: a tangram-mapped skinned frame differs from the dummy-tangent frame in 1565 px (energy 147142) with validation errors 0.
+- [x] EG12 render: ambient, torches, normal and ORM maps - the forward shader Progress 2026-10-17: landing (a) has its pixel test (`ambient_sh9_on_off_differs_in_masked_region`, ibl.rs) and the forward shader holds an 8-slot `TorchU` block (b). Left: a torch on-vs-off pixel test, the tangent attribute and normal and ORM sampling (c). Progress 2026-10-20: landing (c) ORM sampling landed 69df8617 with a device pixel proof e526bb2c; `fs_skinned` samples binding 19 and the standalone capture binds a white fallback until a real map rides in. Progress 2026-10-20 (skinned tangent): the skinned vertex layout carries the mesh tangent (80-byte stride, location 5, handedness in w) and `vs_skinned` skins it with the joints, so `eg12_world_normal` maps a normal map through the real frame; the CPU mirror is `SkinnedFrame::tangents`. Device proof `a_tangram_skinned_frame_differs_from_the_dummy_tangent_frame`: a tangram-mapped skinned frame differs from the dummy-tangent frame in 1565 px (energy 147142) with validation errors 0. Progress 2026-10-23: landing (b) now has its torch pixel test, on both paths. The window never staged the torch block: `stage_frame` (capture twin) wrote it, `stage_frame_with_camera` (`live.rs`) did not, so every live frame kept the zeroed buffer at init and the actor heads lit nothing. `live.rs` now writes the same 272-byte block through `torch_bytes_from_scene`, one write per staged frame, no heap. Proofs (RTX 3050, `engine-render --features window --lib`, local PC run): `a_torch_light_lifts_pixels_in_the_near_mask` — a 0.8 m face 0.3 m in front of the west head, sun struck, bloom off, mask = the face's own silhouette with no draws: 1593 masked px, 1593 differ, energy 63608, on 686363 vs off 556885, centre 198/154/113 vs 133/109/89; `a_torch_light_lifts_pixels_on_the_live_path` — the same face through `render_live_offscreen` plus a twin readback: 1024 of 1024 patch px lift, energy 47360, the same centre pair. F2P: with the `live.rs` write commented out the live test reads 0 of 1024 and both frames are byte-identical, so the live leg proves the new wiring, not an existing effect. The torch fixture builds its own counter-clockwise quad, because `v1::cube` winds inside out (see EG38's 2026-10-23 note). Window capture on the same RTX 3050: `arena --frames 120 --fighters 4 --capture-dir target/clips/eg12-torch --capture-every 30` wrote 4 PNGs with view=ok and manifest `sha=d57b5c8ae3096614`, so the golden held on a live window run of the changed path. Two pre-existing red tests in the same local suite are not this landing: `capture_twin_sky_pair_differs_and_repeats` and `light_torch_on_vs_off_differs` (both assert two consecutive identical renders are byte-identical) fail identically with this landing's files reverted to HEAD. Landed 356cb445a.
   has a constant ambient, unlit torches, no tangents. Three landings, one per
   batch: (a) SH9 ambient uniform from the `ibl.rs` bake, AO scales ambient
   only; (b) up to 8 point lights in a uniform array for the torch actors in
@@ -338,7 +345,7 @@ seat guard refuses their edits, so take the next row. Search the books first:
   channel; CPU skin stays under 1 ms for 8 fighters. F2P: no palette buffer
   today. P2P: `cargo test -p engine-render --lib` green; golden unchanged.
   Review: render.md G4 step 2, bodies.md G11 (geaen 11.10.5). needs: EG9, EG10.
-- [ ] EG38 render: submission discipline — the opaque pass has no back-face Progress 2026-10-17: back-face cull (`cull_mode: Some(Back)` in submit.rs), bind-group memo (`bind_memo.rs`) and a live pipeline-grouped sort (`rl32_order_is_stable_and_groups_pipeline_adjacent`) are in; `draw_sort_submit_order_is_stable_and_culls_outside_sphere` green on the RTX 3050 (engine-render --features window --lib, local PC run). Left: the sphere-outside-frustum test runs through `eg38_submit_order`, which is tests-only; the live list never calls the sphere test.
+- [ ] EG38 render: submission discipline — the opaque pass has no back-face Progress 2026-10-17: back-face cull (`cull_mode: Some(Back)` in submit.rs), bind-group memo (`bind_memo.rs`) and a live pipeline-grouped sort (`rl32_order_is_stable_and_groups_pipeline_adjacent`) are in; `draw_sort_submit_order_is_stable_and_culls_outside_sphere` green on the RTX 3050 (engine-render --features window --lib, local PC run). Left: the sphere-outside-frustum test runs through `eg38_submit_order`, which is tests-only; the live list never calls the sphere test. Progress 2026-10-23 (found while proving EG12's torch pixel test): the cull landed, but `crates/render/src/v1.rs::cube()` winds every face clockwise seen from outside, so a back-culled forward pass drops the camera-facing face and draws the far interior wall, whose outward normal points away from the viewer. Measured in a 96x96 offscreen capture: a 1 m cube shifted to x 18.7..19.7 seen from [22,1,-3] covers a 36 px square (3.3 m away, the x = 18.7 wall) and a shader probe of the centre fragment reads `world_pos.x <= 19.0` and `world_n.x <= 0.5` while the face's stored normal is +x; by hand, face 0 corners p0 = (0.5,-0.5,-0.5), p1 = (0.5,-0.5,0.5), p2 = (0.5,0.5,0.5) give `cross(p1 - p0, p2 - p0) = (-1,0,0)`, inward for a face whose vertex normals are +x. Nothing looks broken because a convex cube keeps its silhouette either way, but the frame is lit as the interior. Remedy: reverse the six index pairs in `v1::cube` (`[base, base + 2, base + 1, base, base + 3, base + 2]`), or set `front_face: Cw` in the forward pipeline, then re-read every cube capture. EG12's torch test builds its own counter-clockwise quad, so it does not depend on the fix. No `front_face` is set anywhere in `crates/render` today, so both pipelines take wgpu's `Ccw` default. Progress 2026-10-23 (winding half landed): `v1::cube` faces 0 and 1 (the +x and -x sides) now wind counter-clockwise seen from outside, the remaining four already did; the corners follow the arena box rule `(p1 - p0) x (p2 - p0) = outward normal` for all six. The remedy above ("reverse the six index pairs") was wrong for four of them: `cross` reads outward on faces 2-5 at the same table, so reversing all twelve triangles would have broken the ones that were right. CPU guard `cube_face_triangles_wind_outward` (v1.rs) fails on any inward triangle; device guard `a_cube_draws_its_near_face_not_the_far_wall` (present/tests_gpu.rs) puts a 1 m cube at x 18.5..19.5 seen from [22,1,-3] and lights it with a torch 0.3 m in front (+x): near-face red 196 against 152 with the torch behind, and the F2P run on the old table read 180 against 208 (the far torch brighter, the interior wall drawn). engine-render `--features window --lib` 1318 passed / 0 failed on the Windows runner with only this file and tests_gpu.rs over HEAD; captures at `%TEMP%\opencode\eg38\cube-winding-pair.png` show the near face lit. Landed 3253dbcbd. Left: (a) the sphere-outside-frustum cull still has no live caller, since the live submit sorts with `rl32_submit_order` and culls nothing while `eg38_submit_order` stays tests-only; the seam is `stage_frame`/`stage_frame_with_camera` plus mesh bounds in `GpuMesh`, both files held by the EG11b sun work, so wire it when those land; (b) the window cube captures (arena props, twin fighters) are blocked because `engine-arena` in the shared tree does not link (`FallLanding` names) — retry `node tools/bins.mjs` and the arena capture once that lands. Progress 2026-10-23 (window captures read): the arena links again, and `arena --frames 120 --fighters 4 --capture-dir target/clips/eg38-cube --capture-every 30 --sha f210be23c --exit` wrote 4 frames at 1280x720 with `validation_errors=0`, `arena view: pops=0 pops=none sunk_cm_max=0.0 nonfinite=0` and 4 of 4 fighters in view. All four frames and a 10x crop of each centre crate were opened: the crate shows its lit front face and a darker right face with the cast shadow falling away from the sun, and no far interior wall (the pre-fix table lit the far wall instead, which is what the 96x96 probe above measured). Left: only (a).
   cull, bind groups are rebuilt every frame, the draw list is unsorted, and the
   sphere test in `crates/render/src/draw.rs` has no caller (the arena has 34
   draws). Do the cheap parts only: `cull_mode: Some(Back)`; cached bind groups
@@ -550,7 +557,7 @@ Same source and routing as the frame section above.
   without. F2P: no Flow type today. P2P: golden `d57b5c8ae3096614` unchanged;
   `cargo test -p engine-game --lib` green. Review: runtime.md G2 (geaen 14.1.3).
   needs: EG2.
-- [ ] EG26 game: a dev console over the door verbs — none exists in the window. Progress 2026-10-17: only the render half exists (`crates/render/src/debug_draw.rs`); no `crates/game/src/console.rs`, no `DevConsole`, no `console_step` test.
+- [x] EG26 game: a dev console over the door verbs — none exists in the window. Progress 2026-10-17: only the render half exists (`crates/render/src/debug_draw.rs`); no `crates/game/src/console.rs`, no `DevConsole`, no `console_step` test.
   A `DevConsole` line runs read-only door verbs first (hash, tick, stats), then
   pause, step, time-scale and set-knob, drawn with the bitmap HUD text. Pause,
   step and slow-mo scale the accumulator at the frame boundary and never the dt
@@ -562,6 +569,9 @@ Same source and routing as the frame section above.
   `d57b5c8ae3096614`. F2P: no console verb today. P2P: golden unchanged; `cargo
   test -p engine-render --lib` green. Review: runtime.md G6, testing.md G12
   (geaen 9.2-9.6). needs: EG25. Progress 2026-10-18: not built (no console.rs). The time half now exists: crates/game/src/virt.rs VirtualClock (GP45, 033aaca3) is the thing a `slow` verb sets and pause/step already sit in bin/arena.rs (--pause-at-tick, --step). Left: (1) the window cannot print a console line: render has OverlayRing::push_text (crates/render/src/overlay.rs:131) but Presenter forwards only push_hp_bar and clear_overlay (present/gpu_present/presenter.rs, another session's file); (2) hash and stats are door verbs and engine-game cannot call engine-endpoint (the endpoint depends on game), so they need a small trait in game that the endpoint implements.
+  Progress 2026-10-23: the console landed (`1b2a74c37`, first copy `795b533bd`) - `console_step` 3 passed x2 (runs 39956242197, 39956610782: step advances one tick, `slow 0.5` gives one tick per two frames, `hash` at tick 600 = `d57b5c8ae3096614`); game clippy all-targets PASS (39955771271); render lib 904 PASS (39956640266); golden covered by run 39954842478. Row stays open on the two legs below: (1) drawing - `Presenter` still has no `push_text` (FEEL5 adds it after LF5c); (2) the hash/stats trait in game implemented by endpoint (AD10's files).
+  Progress 2026-10-23 (drawing leg): `Presenter::push_text` landed in `6814e87b6`; the window console stages a dark panel, `> ` input row and three transcript rows through it from `crates/game/src/console/overlay.rs` (`stage_hud`). Proven: render `push_text` x2 (runs 39973349583, 39975688889), game `console_step` 3 passed x2 (runs 39973690787, 39975641641), `console_overlay_rows` PASS (39977645387), game lib clippy (39974071563), `arena` bin check (39974391210), presenter text capture on the local GPU (1 passed, adapter present), golden (39972573666). Row stays open on the bitmap leg: the live overlay atlas is one white texel (`crates/render/src/present/gpu_present/live.rs:647`), so console glyphs draw as solid blocks, not readable bitmap text; the endpoint hash/stats door trait (AD10) is still a separate leg.
+  Progress 2026-10-23 (bitmap leg, closes the row): the live overlay atlas is the readable O-023 5x7 font (`f2e79db9f`) - `crates/render/src/text.rs` holds the CC0 5x7 glyph table in a 96x48 RGBA8 atlas (16x6 cells of 6x8, nearest sampling; cell 0 is an opaque white texel so solid quads still draw), `overlay.rs` maps rows through `advance_ratio` and `solid_uv`, and `live.rs` uploads the atlas and binds a nearest sampler. The render table equals `engine_ui::text::ATLAS` 95 of 95 (render lib 1349 passed, run 39984467748); the atlas PNG rendered from the table (6x) is readable A-Z, a-z, 0-9 and punctuation. The console's three transcripts draw through it (`crates/game/src/console/overlay.rs`), and `console_step` 3 passed at HEAD (run 39986328116: one step one tick, `slow 0.5` one tick per two frames, hash at 600 = `d57b5c8ae3096614`). The hash/stats door leg is live: `console_bridge_reads_the_live_endpoint_slot` 1 passed with `--features mcp` (run 39985590644). Frame-level look: the presenter text capture passed on this PC with the software adapter (`E2040_ALLOW_SOFTWARE=1`, Microsoft Basic Render Driver - no hardware adapter in this headless session) and its PNG shows three readable `I` glyphs on the sand background, not blocks. Landed f2e79db9f.
 - [x] EG27 game: a gamepad backend — `crates/game/src/pad.rs` Landed 03a45f91. pad.rs poll_gilrs_once; same run.
   (`PadFrame::snapshot`, line 59) is data only: no device crate is in any
   Cargo.toml and nothing polls a pad, so a fighter on Windows has no pad. Add
@@ -738,7 +748,7 @@ Same source and routing as the frame section above.
   fixture with a 60 ms p95 prints FAIL. F2P: no frame CSV reader today. P2P:
   `node --test tools/` green; `cargo test -p engine-perf --lib` green; golden
   unchanged. Review: testing.md G5, G6. Landed so far (2026-10-12 check): a63d3bde, 3f1f635a (CSV reader, 60 ms FAIL). Remaining: `arena --frames N --exit --timed-smoke` writes `target/perf/frame-times.csv` so `proof --perf` reads a real run and prints p50 and p95. needs: EG2.
-- [ ] EG42 anim: baked per-move hit tracks — the sim has root and yaw only, so
+- [x] EG42 anim: baked per-move hit tracks — the sim has root and yaw only, so Landed bbc0881.
   the blade path and bone capsules that `crates/combat/src/cut.rs:558` needs
   have no authoritative source; animation is float presentation. Bake like
   `crates/anim/src/loco_bake.rs` turns three attack clips into integer-mm
@@ -808,7 +818,7 @@ Same source and routing as the frame section above.
   Accept: `cargo test -p engine-arena --lib limb_hash` x2: a scripted cut at
   tick 100 gives the same digest twice and differs from the uncut run. F2P:
   no LimbPool in the step. P2P: as EG46. needs: EG46.
-- [ ] EG47 render: every GPU test skips through one helper — EG6 landed
+- [x] EG47 render: every GPU test skips through one helper - EG6 landed
   `engine_render::test_gpu::require_or_skip` (`crates/render/src/test_gpu.rs`)
   and moved `present/tests_gpu.rs` onto it, but 24 files still return early on
   `no wgpu adapter` with no SKIPPED line, so `E2040_REQUIRE_GPU=1` cannot catch
@@ -830,6 +840,60 @@ Same source and routing as the frame section above.
   the same pass count as before plus SKIPPED lines on a PC with no adapter.
   F2P: 24 files print and return on their own today. P2P: `cargo test -p engine-render --lib` and `-p engine-game --lib`
   green. Review: testing.md G4 (EG6 receipt). needs: EG6.
+Landed 4a3404180, 6a6250af6, 4dc66447a. Static audit at 9c748d0bf: every `rg -n "no wgpu adapter" crates` hit outside `test_gpu.rs` is a `NoAdapter(..)` reason handed to `require_or_skip` or a runtime Display/receipt string (windowed, editor panel, arena_capture receipt, webgpu_cts verdict); a multiline scan finds no `eprintln!(...adapter...); return` left, and the four sites that still returned early (trail_draw_gpu, sun_shadow x2, backend) now route through the helper. Helper proof: `cargo test -p engine-render --lib test_gpu::tests` 4 passed, 0 failed (local; pass-through, skip, fail under E2040_REQUIRE_GPU, gate wait). Caveat: the no-adapter full-lib run (same pass count plus SKIPPED lines) cannot be reproduced on this PC because it has an adapter, so the per-file routing is static-audited rather than executed without an adapter.
+- [ ] EG48 render: the first offscreen frame is not the frame after it -
+  two `render_offscreen` calls on the same list and presenter give
+  different pixels for the first pair and identical pixels afterwards, so
+  the capture harness's first frame (and a window run's first frame) is
+  lit by state the later frames no longer carry. Measured on the RTX 3050
+  at 64x64 on the EG12 torch fixture (two cubes, the near one at x = 19,
+  sun struck): frame 1 vs 0 differ on 380 px, max delta 2 of 255, worst
+  (32,18) [207,171,152] -> [207,170,150]; frames 2 vs 1 and 3 vs 2 are 0
+  px. Two fresh presenters, one frame each, are byte-identical, so the
+  first frame is deterministic and the second is the converged one. Sweep
+  2 frames per fresh presenter: all on 380 px, bloom off 380, auto
+  exposure off 380, fog off 254, all three off 254, so bloom and exposure
+  are excluded and the fog tranche accounts for 126 of the 380. One cube
+  with no torch lights is 0 px over 4 frames, so the two-item list is what
+  trips it. Two tests are red on it today: `light_torch_on_vs_off_differs`
+  (`present/tests_gpu.rs`) and `capture_twin_sky_pair_differs_and_repeats`
+  (`submit.rs`).
+  Diff: regular. Tier B. Size S. Owns the first-frame state of
+  `render_offscreen_capture` in
+  `crates/render/src/present/gpu_present/submit.rs` plus the pass that
+  owns the lazy write (find it by toggling the rest of the look rows; fog
+  is only part of it).
+  Accept: `cargo test -p engine-render --features window --lib
+  light_torch_on_vs_off_differs` and `capture_twin_sky_pair_differs_and_repeats`
+  pass twice on the RTX 3050 and a fresh presenter's frame 1 equals frame
+  2. F2P: the 380 px / 2 of 255 first-pair diff above. P2P: golden
+  unchanged (presentation only, never hashed). needs: none.
+- [x] EG49 agent: project memory and a build-task suite (finish-line D18, no board row until now) - Landed 0ba1a8447.
+  the door serves no project memory and there is no task suite. Add `tools/memory/memory.mjs`: a
+  JSONL store whose rows are a decision, a failed fix or a tuned value, each carrying the tape hash
+  or golden it was taken under, a source path and a UTC stamp; commands `record` (append, refuses a
+  row with no hash), `query` (by kind, path or hash) and `--selftest` (x2 equal answer on a fixed
+  fixture). Seed it with this run's real lessons (the arena.rs pin, the shared-index commit, the
+  world-frame slip bug) so the first query proves content. Add `tools/tasks/`: ten build tasks, each
+  a folder with `task.md`, a starting tree or patch hook, and a referee script that exits 0 only on
+  the fixed tree and 1 on a committed known-bad mutation (no LLM judge), plus `run.mjs` that scores
+  recorded attempts at pass@1 and pass@k per model from a run log and prints the table. Owns
+  `tools/memory/**`, `tools/tasks/**` and `tools/tasks/README.md`. Diff: regular. Tier B. Size M.
+  Accept: `node tools/memory/memory.mjs --selftest` x2 prints the same rows with their hashes;
+  `node tools/tasks/run.mjs --selftest` prints ten referees, each green on its fixed tree and red on
+  its mutation, and a pass@1/pass@k table for the canned run log; no LLM judge anywhere; golden
+  untouched (tools only). F2P: no memory store, no task suite. P2P: `node tools/workspace-check.mjs`
+  green. needs: none. Left for a later row: the door verbs (`memory.query`, `tasks.list`) land in
+  endpoint after AD10's packs settle.
+  Progress 2026-10-23: landed `0ba1a8447` (27 tools-only files). `memory.mjs` records decision /
+  failed-fix / tuned-value rows with tape hash, path and UTC, refuses a row without a hash, queries
+  by kind/path/hash. `tools/tasks/` has ten engine jobs, each a task.md plus a referee that exits 0
+  only on the fixed tree and 1 on its committed mutation, and `run.mjs` scores a run log at
+  pass@1/pass@k with no LLM judge. Proof (parent rerun): `memory.mjs --selftest` x2 byte-equal
+  (sha256 78ac6101…); `run.mjs --selftest` x2 byte-equal (sha256 20d6145d…), 10/10 referees green on
+  fixed, 10/10 red on mutation, 10/10 red on start; table deepseek-v4.1-flash 0.80/1.00,
+  baseline-agent 0.50/0.70, no-memory-agent 0.20/0.20. rust-quality and workspace-check run by the
+  parent.
 
 ### Forge and old-plugin adoption (owner 2026-10-11, `docs/plan/forge-adoption.md`)
 
@@ -857,7 +921,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   crates` finds nothing. P2P: `cargo test -p engine-playtest --lib
   frame_check` green; golden unchanged. Plan: `docs/plan/forge-adoption.md`
   AD-1. needs: none. Landed 33263e14. frame_check check_pose_sequence: consecutive captures with an equal digest while the camera moved over 100 cm are FrameFault::Stale; a timed-out or void capture is SequenceVerdict::Abstain(reason), never Pass (a fault in the arrived frames wins). Integer cm poses. Tests frame_stale_poses_26_m_apart_with_equal_digests_fault (2600 cm), frame_stale_same_poses_with_different_digests_pass, frame_stale_negative_control_one_digest_byte_flips_the_result, frame_stale_timeout_and_void_abstain_never_pass, frame_stale_a_still_camera_may_repeat_a_frame; frame_check suite green. Left: the look/judge.rs hunk, the judge module was removed in f1a4f9d7 (restore is LF15/PQ21 territory), and the pose field in game capture.rs manifest. gh run 39105225319 (engine-playtest --lib highlights brief_eval trajectory scorecard frame_stale: 36 passed, 1 ignored) and full engine-playtest --lib 373 passed, run 39103617132.
-- [ ] AD2 editor: landed-digest read-back on every door write — `Applied`
+- [x] AD2 editor: landed-digest read-back on every door write — `Applied`
   carries before, staged and after digests; the service refuses
   `landed_mismatch` when the landed digest differs from the staged one; a save
   then reopen then diff test covers every reference (a second save must not
@@ -868,7 +932,13 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   landed_digest` x2: an adapter that acks but changes nothing gives
   `no_effect`; `save_reopen_diff` fails when one ref is nulled; `cargo test -p
   engine-endpoint --lib receipt_digests` returns all three digests; same batch
-  twice gives equal receipts. F2P: `Applied` has no digest fields today. P2P:
+  twice gives equal receipts. Landed a08254413: `TxApplyOutput` carries
+  before/staged/after 64-hex digests read off the landed `Applied`;
+  mcp::receipt_tests::receipt_digests_survive_a_replay green (three digests,
+  replay equal, --features mcp), editor landed_digest 6/6 (39902687278:
+  no_effect writes no generation, a store that acks without the staged state
+  refuses, save-reopen diff catches one nulled ref), clippy --features mcp
+  PASS (39904044483). F2P: `Applied` has no digest fields today. P2P:
   `cargo test -p engine-editor --lib` and `-p engine-endpoint --lib` green;
   golden unchanged. Plan: `docs/plan/forge-adoption.md` AD-2. needs: none. Progress 2026-10-19 (recon before coding): `Applied` is built in 12 literals across four files (`commands.rs` 5, `commands_coalesce.rs` 5, `capability.rs` 1, `shell.rs` 1) plus the undo/redo receipts, so the shared-type change is mechanical but wide; the digest home already exists — `audit::digest_parts` (FNV, four passes, `[u8; 32]`) over `save::save_to_bytes(doc)` is a document digest with no new dependency; the landed check belongs in `durable::apply_persisted`, which already stages on clones, calls `apply_named`, seals `persist_sealed`, then commits `*doc = staged_doc`, so `after` can read the sealed generation back. The open design question is replay: `JournalEntry` stores `base_revision`, `result_revision`, `effects` and `provenance` but no digests, and the Accept wants "same batch twice gives equal receipts", so either the three digests join `JournalEntry` (the EEDJ journal codec in `durable.rs` then needs a versioned field and old generations must still reopen) or a replay recomputes them from a document that has moved on (wrong). Decide that first, then write the two tests before the fields. Recon 2 (2026-10-19): the storage question touches two codecs, not one — the sealed EEDJ journal (`durable.rs`, a `JOURNAL_RECORD_VERSION` head word whose decoder rejects any other version, so v3 plus a v2 fallback that reads zero digests) and the WAL tape (`wal.rs`, which also rebuilds `JournalEntry` from bytes); `Provenance` already carries `artifact_digest` behind its own versioned codec (`crates/scene/src/provenance.rs`, `PROVENANCE_VERSION` 1, `MIN_PROVENANCE_VERSION` 1), so the landed digest could ride that record instead of two format bumps. The document digest must not be `save_to_bytes` alone: the material table is not in the save bytes yet (`Document::material_set` says a later section owns it), so fold `record.to_text()` per record (canonical text is already the material module's determinism rule) or a material-table-only edit digests equal and the landed check refuses it as `no_effect`. Sites: `Applied` literals in `commands.rs` (apply/undo/redo/group merge), `commands_coalesce.rs` (replay/fold/commit), `capability.rs` (gated replay) and `shell.rs`; five `JournalEntry` literals (`commands.rs` group merge, `commands_coalesce.rs` fold+commit, `durable.rs` decode, `wal.rs` decode).
 - [x] AD3 endpoint: honest spatial door — `scene.spatial` lists `checks_run`, Landed eeac21f. scene_tools::tests::spatial_door_fire green (every SPATIAL_CHECKS entry fires or is named in `skipped` with a reason, ran plus skipped covers the catalog once, bare nodes report size_source default above 0), cargo test -p engine-endpoint --features mcp --lib -- spatial_door_fire physics_read, run 39057713346.
@@ -928,7 +998,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `cargo test -p engine-assets --lib` green; golden unchanged. Plan:
   `docs/plan/forge-adoption.md` AD-6. BLOCKED: owner Decision 6 in
   `docs/plan/forge-adoption.md` section I. needs: none.
-- [ ] AD7 editor then endpoint: one scene-to-actor adapter with real extents —
+- [x] AD7 editor then endpoint: one scene-to-actor adapter with real extents — Landed 93958be7.
   a single function turns a `Document` into spatial `Actor` rows from Collider
   half extents and world scale (bare node = 1 m, labelled `default size`); the
   CAP1 gate, `findings.rs`, `scene.brief`, `scene.spatial`, `scene.place`,
@@ -987,7 +1057,17 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   reverted. 2026-10-23: the ceiling rose to 73000 (max advertised 70952) after
   the default list measured 58112 and `gym` 70454 (716c1c2ea), so the 67578
   list now fits with 3374 chars to spare and the verb half can land.
-- [ ] AD10 editor: gate undo by capability and group undo by AI session —
+  2026-10-23 half 2 landed (e8dcf966e): the `view` pack carries a read-only
+  `door.status` (session, revision, sorted loaded packs, advertised tool count
+  and chars, the 70952 ceiling and its headroom, audit head and count, and
+  null durable generation/build sha), and its digest covers the stable fields
+  so two calls on an unchanged session print the same digest while each call's
+  own audit record lands after the answer. Runner 39868146484, 2/2
+  `door_status` tests; clippy lib 39869232995 PASS; the door page prints the
+  verb (d0fd255e8). The row stays open for the P2P green lib (two
+  `spatial_delta` tests are red at HEAD from the scene seat's in-flight
+  change) and the play-job end-state push, so the top line is unticked.
+- [x] AD10 editor: gate undo by capability and group undo by AI session - Landed 2ee196e67. Proof: `cargo test -p engine-editor --lib undo_gated` 3 passed x2 (39912012687, 39913115914; the three named cases: INSERT-only token cannot undo a DELETE batch, session undo restores the exact pre-session bytes over 20 AI plus 5 human edits, a pinned object is refused by name); full editor lib 296 passed / 3 ignored (39909807190); endpoint `--features mcp --lib undo` 27 passed (39911330198); clippy PASS both crates (39910275586, 39910128707); no sim file touched, golden unchanged. Open leg named: the door reverts the newest batch only (session undo is editor API plus test; a `tx_undo` session mode is a later row).
   `undo_gated` checks the inverse ops against mask, scope and budget; human
   undo with no token is unchanged; receipts group by capability session.
   Source: E05#2, E13#8. Diff: regular. Tier A. Size S. Owns
@@ -1012,7 +1092,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `crates/spatial/src`). P2P: `cargo test -p engine-spatial --lib` green;
   golden unchanged. The door call needs AD7. Plan:
   `docs/plan/forge-adoption.md` AD-11. needs: none.
-- [ ] AD12 editor then endpoint: durable door writes with a single-writer
+- [x] AD12 editor then endpoint: durable door writes with a single-writer
   lease — compose the capability gate with `persist_sealed` using the
   `apply_persisted` pattern (stage on clones, seal, then commit); a failed
   persist is a refusal; a lease file on the project folder refuses a second
@@ -1027,6 +1107,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   engine-editor --lib` and `-p engine-endpoint --lib` green; golden unchanged.
   Plan: `docs/plan/forge-adoption.md` AD-12. Owner Decision 1: yes (tier 1
   default). needs: AD2.
+Landed b4148dfc7. `apply_gated_persisted`/`undo_gated_persisted` run the gate on clones of doc/journal/token/ledger, seal the numbered generation, verify the read-back, then commit; `ProjectLease` locks `.e2040-door.lease` with `File::try_lock` so a second door gets `StartupError::Leased`; `tx.apply`/`tx.undo` take the durable path when `project_dir` is set. Proof: `cargo test -p engine-endpoint --features mcp --lib durable_door` x2 green, 6/6 both (runs 39942718462 and 39943498485) — kill after ack leaves the edit present, kill before ack absent, a forced seal failure returns an error and changes nothing, the same key after restart returns the stored receipt, a second door is refused, durable undo across restart; editor lib 296 pass (run 39938199955); endpoint lib 162 pass (run 39938201367); clippy editor and endpoint `-D warnings` PASS (runs 39940135171, 39940944135); rust-quality owned PASS 97, 0 regressions; rustfmt clean; golden untouched. Open gates, not this row: the `--features mcp` full lib has 5 reds — four pack tool-budget cases (`view` 72971 > 72952, `gym` 76402 > 75000) and `mcp::tests::scripted_insert_preview_apply_undo_roundtrip` ("a replay moves no revision"), the last reproduced on HEAD alone with `--only docs/README.md` (run 39939049217).
 - [ ] AD13 endpoint and rules: commit-class `rules.set`, no-effect refusal,
   hostile-input fuzz — `rules.set` gets the Commit card, approval bound to
   script hash and rules revision, and `expected_hash` when a script is
@@ -1066,7 +1147,7 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   `docs/plan/forge-adoption.md` AD-14. needs: none.
   Correction 2026-10-21: duplicate - PW30 owns this work now; PW30's row says it closes AD14, E75, A9 and G1. This row is not ticked and is not built on its own; retire it when PW30 lands.
   rot: crates/observe/tests/circuit_vectors.rs -> crates/observe/tests/it/circuit_vectors.rs (e651bbd); bulkhead_vectors.rs moved with it.
-- [ ] AD15 assets: cook-time clip gates — measure raw-clip foot slide with
+- [x] AD15 assets: cook-time clip gates — measure raw-clip foot slide with
   `anim::feet` (assets already depends on anim) and refuse with clip name and
   mm; `BoneMap::build` returns coverage and refuses when a required set (root,
   hips, spine, arms, legs, head) is unmapped; an explicit prefix list
@@ -1079,7 +1160,29 @@ pass: PX40, AD26, AD21, AD28, AX23, AD29, AD27, PF24, SP66, EA6.
   bytes. F2P: `slide_mm` has no use in `crates/assets`; `retarget_clip`
   returns the clip only (`retarget.rs:396-412`). P2P: `cargo test -p
   engine-assets --lib` green; golden unchanged. Plan:
-  `docs/plan/forge-adoption.md` AD-15. needs: none.
+  `docs/plan/forge-adoption.md` AD-15. needs: none. Progress 2026-10-23: the
+  foot-slide half and the prefix half landed (`69b3907bd`). `retarget_cook`
+  runs `clip_foot_slide` (`crates/assets/src/retarget/gate.rs`): a step counts
+  only between two planted ticks of the cooked contact table, and a step over
+  `MAX_PLANTED_SLIDE_MM` (20 mm = 1.2 m/s at 60 Hz) refuses with
+  `RetargetError::FootSlide { clip, foot, tick, mm }`; a lifted foot may
+  travel. `joint_index` strips a `mixamorig:` / `mixamorig_` rig prefix on both
+  sides before lookup. The gate lives in a child module so `retarget.rs` stays
+  under the 1500-line cap. Left: `BoneMap::build` coverage over root, hips,
+  spine, arms, legs, head with its lists-exactly-those-3 test, so the row stays
+  open. The step is measured on the ground plane (x/z), because the SOMA walk
+  fixture refused at 60 mm on tick 7 for a heel strike crossing the ground
+  threshold; the vertical axis stays with the arena's sunk/pop meter, and
+  `clip_gates_ignore_a_planted_foot_landing` holds that case (`00d4fd428`).
+  Measured: `cargo test -p engine-assets --features import --lib
+  clip_gates` 5 passed (run 39943246776), full import lib 388 passed, 0 failed,
+  3 ignored (runs 39941350831, 39940065365) — the `import` feature is required,
+  the module is behind it; the full `it` binary 132 passed, 0 failed (run
+  39942876563), so the SOMA and CT1 fixture clips cook under the budget. Golden
+  unchanged (cook-only).
+  Landed 9d51d8a5c (coverage clause; first two clauses at 69b3907bd and 00d4fd428). `BoneMap::build_checked` measures six sets over the target rig (`root`, `hips`, `spine`, `arms`, `legs`, `head`) and returns `(BoneMap, BoneCoverage)` or `RetargetError::BoneCoverage { sets, joints }`, whose message names the missing sets and the nearest unmapped joints (deduped, capped at 8, names truncated to the anim contract). The names are read from `coverage.rs` (SOMA fighter-65 names from `soma_pairs`, CT7 names from `CT7_TO_BODY`) and a test fails if any listed name is on no rig in the crate. The live caller `motion_source::bind_rig` (CT14 bake) binds through `build_checked`. Proof: `cargo test -p engine-assets --features import --lib clip_gates` 9 passed x3 (runs 39944908851, 39945297634, 39947695073) - `clip_gates_coverage_lists_the_three_unmapped_joints` gives sets exactly `[root, hips, head]` and joints exactly `[hips, neck, head]`, `clip_gates_coverage_accepts_the_fighter_rig` 65/65, `clip_gates_coverage_names_come_from_a_real_rig`, `clip_gates_prefix_and_plain_names_cook_equal_bytes`, plus the five earlier gate tests; `--features import --test it` 132 passed (39945492621) and 140 with `registry` (39947221983); clippy `--features import --all-targets -D warnings` PASS (39947035740); rust-quality assets PASS 99; rustfmt clean. The literal row command omits `--features import` (module behind the feature) and would run 0 tests, as with RZ6/PX44/GS37.
+  Deviation, recorded: `BoneMap::build` keeps its lenient signature for the ten callers that map synthetic fixtures and CT7 bodies; the refusing gate is `build_checked` (any map computes coverage via `BoneMap::coverage(target)`). Folding `build` itself into the gate needs a lane that owns those callers; named as the open leg, not hidden.
+  Open legs: that `build` fold; and two foreign clippy 1.97 reds in `crates/assets/src/bundle.rs` (redundant_static_lifetimes at 392, needless_borrow at 1034/1062).
 - [x] AD16 physics: ragdoll joint table with a hinge kind — amends PX9. Typed Progress 2026-10-17: a `JointKind::{Hinge, Spherical}` table exists (`JointTable::humanoid`, `joint_table_humanoid_defaults`, ragdoll.rs, fb7466b) with knees and elbows as hinges. Left: the proven numbers (spine 20/20/35, forearm and leg hinge 1/145, thigh 70/40/30), the 0..180 degree and joints-equal-bodies-minus-one refusals, `joint_limits.rs`, and the `spawn` read (the table says it is measurement only); needs AD17 open. Landed 2afcc9de9. Accept passed: `node tools/gh-check.mjs cargo test -p engine-physics --features rapier --lib joint_table` x2, 6 passed each (runs 39861387948, 39861374037); full `--lib` 333 passed (run 39861403505), balance hash tests green; golden unchanged (proof_cli run 39861745441). `joint_table_no_joint_over_limit_1000_seeds` worst swing inside 180 deg, `joint_table_refuses_a_missing_joint` green (detached knee refused, two free roots spawn). Refusal note: the joints-equal-bodies-minus-one rule narrows to a detached bone the table names, because the CCD P2P scene spawns a two-root blade plus limb.
   `JointKind::{Ball, Hinge}` keyed by humanoid bone, with the proven numbers
   (spine 20/20/35, arm ball 85/85/70, forearm and leg hinge 1/145, thigh ball
@@ -1194,7 +1297,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   unrelated comments). P2P: `cargo test -p engine-endpoint --lib` green; the
   tool-list budget tests unchanged; golden hash unchanged. Plan:
   `docs/plan/forge-adoption.md` section J (A21). needs: AD2, AD3.
-- [ ] AD22 tools: playable is six named gates — a `playable` verdict passes
+- [x] AD22 tools: playable is six named gates — a `playable` verdict passes
   only when compile, play with 0 errors, save then reopen, package, packaged
   launch and packaged smoke all pass. Each gate reads one record: compile and
   play from `target/proof/<gate>-latest.json` (AD4), save then reopen from the
@@ -1211,6 +1314,15 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   no playable verdict (`grep -n playable tools/proof.mjs` finds none). P2P:
   `node --test tools/` green; golden hash unchanged. Plan:
   `docs/plan/forge-adoption.md` section J (A29). needs: AD4.
+  Landed 2026-10-23 `032c05b7d` (Accept): `node --test tools/proof.test.mjs`
+  51 pass x2, 0 fail - all six gates passing PASSes and every line names its
+  gate; a stub with package `not_wired` FAILs and names `package`; a stale
+  record FAILs the gate that reads it; a green record cannot make a missing
+  gate pass. `tools/ship.mjs` prints the verdict after `pack` and a full `run`
+  (dry-run prints nothing). Open leg, named: no producer writes the compile,
+  play or save-reopen records yet, so a real GM3 ship prints `not_wired` on
+  those three and ends `RESULT FAIL (playable)` - honest, and the next
+  consumer step.
 - [x] AD23 playtest: trajectory checks — an eval task can require a call order
   (`scene.read` before `tx.apply`), and a write that names an object id no
   earlier read returned fails with `ungrounded: <id>`. One check in the eval
@@ -1356,6 +1468,20 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   golden hash unchanged. Ordered behind AD26: both edit `mcp.rs` and
   `discover.rs`. Plan: `docs/plan/forge-adoption.md` section J (C61). needs:
   AD26.
+- [x] AD30 endpoint: the fx verbs one call each - finish-line C10's door half. Landed ded08d051. fx_verbs 7 passed x2 (runs 39988504473, 39989446470), tool_budget 3 passed (39990857804), tool_count_pin 1 passed (39990756475, router 91); default list 61,742 < 75,000 chars; endpoint clippy PASS at landing (39966941138).
+  `fx.ragdoll`, `fx.limb`, `fx.break` and `fx.blast` take a body id plus the
+  effect's own args, run through the door's recorded action path (one action
+  id, idempotent, one undo entry) and answer the `physfx:` receipt (body,
+  joints, chunks, impulse) with the capture path when the capture leg drew a
+  frame. Owns new `crates/endpoint/src/packs/fx.rs`, its `packs/mod.rs` line
+  and the tool-list row. Accept: `cargo test -p engine-endpoint --features mcp
+  --lib fx_verbs` x2: each verb answers its four anchors and its receipt; the
+  same action id twice writes one undo entry; undo restores the body set; a
+  missing body is `bad_args` naming it; the default tool list stays under
+  `TOOL_LIST_BUDGET_CHARS`. F2P: only `break.fracture` exists
+  (`packs/break_.rs`). P2P: endpoint all-targets clippy PASS; golden
+  unchanged. Plan: finish-line C10. Built on the landed QR12 limb, RZ4 break
+  and RZ6 blast paths. needs: none. Tier B. Size M.
 - [x] PX40 endpoint: `physics.read` — a read-only verb in a new `physics` pack Landed ded4b98. packs::physics physics_read_orders_blows_over_the_line_and_the_fall_line, physics_read_matrix_equals_the_balance_owner, physics_read_refuses_a_zero_line_and_names_the_legal_range, physics_read_reports_live_bout_facts_as_not_wired green (run 39057713346) and tests/it mcp_stdio physics_read_answers_equal_bytes_twice_over_stdio green (run 39058159379); `node tools/crate-map.mjs --check` PASS.
   answers what a blow does to a fighter's balance: for a stagger line and a
   blow strength (both Q8) it returns the verdict (`Steady`, `Staggered`,
@@ -1383,7 +1509,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   `node tools/crate-map.mjs --check` green; the budget and `tool_count_pin`
   tests unchanged; golden hash unchanged. Plan: `docs/plan/forge-adoption.md`
   section J (D-PX40). needs: none. Owner chat 2026-10-19 (delegated): path updated to the tests/it layout; re-ran `node tools/gh-check.mjs --budget 840 cargo test -p engine-endpoint --features mcp --test it mcp_stdio::physics_read_answers_equal_bytes_twice_over_stdio` 1 passed, run 39232886136.
-- [ ] AX23 endpoint: say what changed — `tx.apply` returns a semantic change
+- [x] AX23 endpoint: say what changed — `tx.apply` returns a semantic change
   list: the object ids it touched, the relation edges added and removed (the
   `engine-spatial` semantic diff) and the document digest before and after. A
   new `scene.diff(rev_a, rev_b)` query gives the same list between two
@@ -1405,7 +1531,12 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   only. P2P: `cargo test -p engine-endpoint --lib` and `-p engine-spatial
   --lib` green; the existing `tx.apply` fields are unchanged; golden hash
   unchanged. Plan: `docs/plan/forge-adoption.md` section J (D-AX18). needs:
-  AD2, AD7.
+  AD2, AD7. Landed 14fd8625c. `scene_diff` 7 passed twice (runs 39922552777,
+  39923402873); clippy -D warnings PASS 39922552719; rust-quality 99, no
+  regressions, `scene_query.rs` production 1496 / raw 2768. Door list default
+  64,060 / view 71,125 / gym 70,824 under the 75,000 budget (headroom above the
+  2,048 floor); door test PASS 39934122291 and cone test PASS 39934096024 after
+  the older 60_200 bound moved to 64_400. No sim change.
 - [ ] EA6 endpoint: a per-caller capability token — the door builds its
   session token from the host's scope policy and the tool cards (`ScopePolicy`
   and `CapabilityCard` in `tool_capabilities.rs`) instead of
@@ -1461,7 +1592,7 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   --features mcp` reports are pre-existing and in files this change does not
   touch (`build_level.rs` x3, `packs/view.rs` x2). The consumer side in
   `crates/playtest/src/eval.rs` is not part of the Accept and is untouched.
-- [ ] SP66 spatial: light reach — a point is lit when any light's reach covers
+- [x] SP66 spatial: light reach - a point is lit when any light's reach covers
   it. A directional light covers every point; a point or spot light covers the
   points inside its range; a light whose range cannot be read (not finite, or
   zero on a point or spot light) makes the answer `unknown`, never `dark`.
@@ -1480,7 +1611,24 @@ so D-AX18 is AX23, D-SP61 is SP66 and D-PF21 is PF24.
   is stored in `crates/scene/src/component.rs` and no spatial query reads it.
   P2P: `cargo test -p engine-spatial --lib` and `-p engine-endpoint --lib`
   green; golden hash unchanged. Plan: `docs/plan/forge-adoption.md` section J
-  (D-SP61). needs: AD7.
+  (D-SP61). needs: AD7. Landed a477e88f9.
+
+  Progress 2026-10-23 (a477e88f9 + c2a2c6b4c, pushed): `crates/spatial/src/light.rs`
+  holds `ReachLight`/`Lit`/`Reach`, `cm_of` (the crate's one meter rounding),
+  `point_lit`, `reach_report` (id-sorted, FNV-64 digest, lit/judged/unplaced
+  plus the dark and unknown ids apart) and `distance_cm`. The door joins each
+  `Light` component with its node pose in
+  `scene_tools/spatial_checks.rs::reach_lights`; `scene.spatial` carries
+  `light: {lit, judged, dark, unknown}` (indexes into `ids`) and `scene.brief`
+  prints one `lights: lit=.. judged=.. unplaced=.. dark=.. unknown=..` row inside
+  its byte budget. Proof on the runner: `cargo test -p engine-spatial --lib
+  light_reach` 9/9 (run 39879049213) and `cargo test -p engine-endpoint
+  --features mcp --lib light_reach` 3/3 (run 39879056357); the digest-equal-x2
+  and the unchanged 18-name `SPATIAL_CHECKS` assertions are inside those. The
+  endpoint lib on this PC is 786 passed / 3 failed, and all 3 fail identically
+  with these files reverted (another lane's uncommitted `mcp.rs`/`mcp_dto.rs`
+  growth puts the default list at 59025 over its 58700 bound and gym at 71367
+  over 70952), so those reds are not this row's. Golden untouched: no sim code.
 
 ### Finish line: wire the look, then the feel (owner 2026-10-11, `docs/plan/finish-line.md`)
 
@@ -1542,7 +1690,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   hunk, `blit.wgsl`. Accept: a torch or sun-glint halo differs on vs off; a
   frame with no pixel above the knee is unchanged; validation errors 0. F2P:
   no bloom pass on live frames. P2P: render lib green. needs: EG9.
-- [ ] LF5 render: TAA slice 1, motion vectors — no motion target and no
+- [x] LF5 render: TAA slice 1, motion vectors - no motion target and no
   prepass exist today. The forward pass writes a second colour target
   `Rg16Float`: current minus previous clip position per pixel, from last
   frame's view-projection and, for skinned bodies, last frame's posed
@@ -1555,12 +1703,14 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   validation errors 0. F2P: no motion-vector target. P2P: render lib green;
   golden unchanged. needs: LF3.
   Correction 2026-10-21: duplicate - PW01 owns this work now; PW01's row says it closes LF5 and gap B7 cut 1. This row is not ticked and is not built on its own; retire it when PW01 lands.
-- [ ] LF5b render: TAA slice 2, jitter — Halton(2,3) sub-pixel offsets on the Progress 2026-10-17: the pure half is in: `post_jitter_motion.rs` `halton`, `jitter_offset`, `jitter_ndc`, `jitter_projection` (`jitter_matches_halton_values`, frames inside (-0.5, 0.5), f737386). Left: the presenter flag and the camera-uniform hunk; nothing outside tests calls `jitter_projection`.
+Note 2026-10-23: PW01 is parked (`docs/plan/parked-2026-10-22.md:2491`), so this row is live again and slice 1 landed here. Landed 122e05dea. The forward 1x pass writes a third attachment `MOTION_FORMAT = Rg16Float` `(cur_ndc - prev_ndc) * (0.5, -0.5)`; varyings carry clip coordinates (exact interpolation); `vs_motion` reads a 12-byte previous-position stream and `vs_skinned_motion` the previous 64-joint palette; bindings 21 (prev camera) and 22 (prev palette); previous positions refresh on `upload_mesh` and `refresh_mesh_vertices`; MSAA clears the 1x motion target. Proof: `cargo test -p engine-render --lib --features window motion_tests` 3 passed, 0 failed (local, 12.78 s); `steady_live_frames_create_no_buffers_or_bind_groups` 1 passed; rust-quality render PASS 88, 0 ratchet regressions; rustfmt clean on 11 files; golden untouched (render-only). Open gates: MSAA frames report zero motion and have no 4x twin; the target is not consumed yet (LF5c wires `post::MotionField`), jitter is LF5b.
+- [x] LF5b render: TAA slice 2, jitter - Halton(2,3) sub-pixel offsets on the Progress 2026-10-17: the pure half is in: `post_jitter_motion.rs` `halton`, `jitter_offset`, `jitter_ndc`, `jitter_projection` (`jitter_matches_halton_values`, frames inside (-0.5, 0.5), f737386). Left: the presenter flag and the camera-uniform hunk; nothing outside tests calls `jitter_projection`. Landed 70bb805db.
   projection, 8-frame cycle, behind a presenter flag that stays off until
   LF5c lands; motion vectors stay un-jittered. Diff: regular. Tier A. Size S.
   Owns the camera uniform jitter hunk. Accept: the 8 offsets match Halton(2,3)
   inside (-0.5, 0.5) px, x2 equal; flag off leaves frames byte-equal to
   before. F2P: no jitter. P2P: render lib green. needs: LF5.
+  Progress 2026-10-23: 8 Halton(2,3) offsets exact x2; flag off byte-equal (`cam == staged`, steady and prev exact); motion family 8 passed; clippy PASS (runs 39950874767, 39951522124); rust-quality 88 B; golden untouched. Landed 70bb805db (+ ec152eca0, d2bd92649 clippy). Left: LF5c turns the flag on and consumes the target.
 - [ ] LF5c render: TAA slice 3, resolve — a history target, reprojection by
   the motion target, a 3x3 YCoCg neighbourhood box clamp and a 0.1 blend,
   history reset on resize and camera cut; port the RP1 resolve in `post.rs`
@@ -1602,7 +1752,7 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   edge's contrast with no pixel above the input's max; the chosen mode's
   flicker number in latest.md is the lower of the two. F2P: no sharpen pass.
   P2P: render lib green. needs: LF5c, EG13.
-- [ ] LF6 render: dust and sparks from `particles_gpu.rs` — the seeded pool
+- [x] LF6 render: dust and sparks from `particles_gpu.rs` — the seeded pool
   exists; the window never spawns. Dust at footfalls and knockdowns, sparks
   on `Blocked` and `Parried` cues (seeded from the cue tick, view only), drawn
   after forward. Diff: good. Tier A. Size M. Owns `crates/game/src/fighter_look.rs`
@@ -1610,13 +1760,21 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   spark pixels near the blade; particles above 0 ms; one tape twice gives
   equal particle counts per frame. F2P: zero particles on live frames. P2P:
   `cargo test -p engine-game --features app --lib` and render lib green;
-  golden unchanged. needs: LF2.
-- [ ] LF7 render: blood on the sand from `decals.rs` — deferred blood decals
+  golden unchanged. needs: LF2. Landed f0975158b (with e1720bc55). Block
+  frame tick 31 shows white spark shards at the blade/pauldron contact
+  (`target/clips/lf6-fx-*`); particles 0.006 ms; the same tape twice gives
+  equal per-frame FX columns and sim checkpoints (PNG bytes differ only with
+  the in-flight lighting WIP); trace test 7 passed.
+- [x] LF7 render: blood on the sand from `decals.rs` — deferred blood decals
   with depth reject exist; spawn one per `Hit` cue within `TINT_REACH_M` at the
   victim's feet, a ring of 64, view only. Diff: good. Tier A. Size M. Owns the
   fighter_look decal hunk, present/** decal hunk. Accept: a capture after 10
   hits shows decal pixels under the victims and none before; decals above 0
-  ms. F2P: no decal on live frames. P2P: as LF6. needs: LF3.
+  ms. F2P: no decal on live frames. P2P: as LF6. needs: LF3. Landed 61cc048a3
+  (with f0975158b, e1720bc55). Tape seed 2427, 600 frames: frame 0
+  `blood=0 splats=0 placed=0`; 10th decal frame 344 `blood=120 splats=10
+  placed=10`; capture sha 3edd268d5cdd8404, sim hash 508f1dc0d8d00fb7; decals
+  0.492 ms, validation 0; before/after PNGs under `target/clips/lf7-fx/`.
 - [ ] LF8 render: skin, metal and cloth shade apart — one BRDF serves every
   part. A `MaterialKind` (skin, metal, cloth, stone) per part from the glTF
   material name; in `fs` metal gets anisotropic GGX (Filament `surface_brdf.fs`
@@ -1669,13 +1827,32 @@ passes" in `target/reports/product/latest.md`. The GPU idles today (gpu_ms p50 0
   target at 0.9 chain length is reached within 1e-3, the pole side is kept)
   and an arena receipt `foot_slide_cm` p95 under 2 during plants. F2P: no IK
   in the window. P2P: anim and game libs green. needs: EG18. Landed db33a77. anim lib 457 green on the runner, run 39490069547 (`ik` tests: a target at 0.9 chain length reached within 1e-3, the pole side kept); game lib app tests on the PC via the gh-check local fallback: `planted_feet_hold_their_spot_in_a_real_duel` (foot_slide_cm p95 under 2) and `the_weapon_hand_holds_the_grip_socket_through_a_swing` (the grip stays at one palm offset within 1e-3 m across a swing, two-bone reaches the grip target within 1e-3 m with the pole side kept).
-- [ ] LF13 anim: heads and chests track the rival — look-at on the head
+- [x] LF13 anim: heads and chests track the rival — look-at on the head
   (weight 1.0) and chest (0.5), clamped to 70 degrees yaw and 30 pitch
   (orangeduck `ik_look_at`, ozz `ik_aim_job.h`). Diff: regular. Tier A. Size S.
   Owns a look-at fn in `crates/anim/src/ik.rs`, the fighter_look hunk. Accept:
   a target 90 degrees right at weight 1 turns the head to the clamp; weight
   0.5 halves it. F2P: none. P2P: anim lib green. needs: LF12.
-- [ ] LF14 game: weapon trails — a ring of the last 12 frames of blade base Progress 2026-10-17: the ring is in (`weapon_trail.rs` `TrailRing` 12 pairs, `trail_ring_holds_12_pairs_and_drops_idle`, fed by `start_swing` in fighter_look.rs, c7e6c66) and `draw.rs` `trail_strip_verts` builds the age-faded strip (`trail_strip_fades_alpha_by_age_and_skips_idle`). Left: the present/** strip draw, nothing calls `trail_strip_verts` outside its test, and the mid-swing capture.
+
+  Progress 2026-10-23 (e4ac6b6c9): `engine_anim::ik::look_at` and `AimLimits`
+  are in with 6 tests green on the runner (run 39879844698): a target 90 degrees
+  right at weight 1 turns to the 70 degree yaw clamp, weight 0.5 halves it, a
+  straight-up target clamps at 30 pitch, a target inside both limits is followed
+  within the polynomial's 0.03 degree bar, zero weight or unreadable input keeps
+  identity, and 500 aims touch no heap. Angles come from the crate's polynomial
+  sine and arc cosine (`inertialize` helpers widened to `pub(crate)`), so no
+  platform trig enters the aim and the float-math ratchet stays at 0. Left: the
+  `fighter_look.rs` hunk (head weight 1.0, chest 0.5), blocked while another
+  lane holds `crates/game/src/fighter_look.rs` dirty.
+  Landed 2026-10-23 (look_at Accept): `look_at` + `AimLimits` in
+  `crates/anim/src/ik.rs` with 6 tests green (39907521078) - a 90 degree right
+  target at weight 1 reaches the 70 degree yaw clamp, weight 0.5 halves it,
+  straight up clamps at 30 pitch, inside both limits within 0.03 degrees, zero
+  weight or unreadable input keeps identity, and 500 aims touch no heap;
+  `a0e61157d` replaced the test trig with closed-form literals. Open leg, named:
+  the `fighter_look.rs` hunk (head 1.0, chest 0.5) is not wired; AM24 holds that
+  file now, so it is a follow-up hunk.
+- [x] LF14 game: weapon trails - a ring of the last 12 frames of blade base Progress 2026-10-17: the ring is in (`weapon_trail.rs` `TrailRing` 12 pairs, `trail_ring_holds_12_pairs_and_drops_idle`, fed by `start_swing` in fighter_look.rs, c7e6c66) and `draw.rs` `trail_strip_verts` builds the age-faded strip (`trail_strip_fades_alpha_by_age_and_skips_idle`). Left: the present/** strip draw, nothing calls `trail_strip_verts` outside its test, and the mid-swing capture. Done 2026-10-23: `FighterLook::trail_strip` folds busy slots, `trail_draw_gpu` stages per-slot strips and `encode_trail_pass` composites after particles (`trail.wgsl` vert-count guard); 14 trail tests green (window+shader-validate, device draw 0 validation errors); capture `target/clips/lf14/frame_000110.png` (150 frames, view=ok) shows the ribbon on the swinging fighter and none on the other three. Landed 14e05190d.
   and tip per attacking slot, drawn as a triangle strip with alpha by age,
   view only. Diff: regular. Tier A. Size S-M. Owns the fighter_look trail hunk,
   a present/** strip draw. Accept: a capture mid-swing shows the strip; idle
@@ -1794,3 +1971,50 @@ model reads numbers first; PNGs stay only for taste (LJ1, EG30, LF15).
 
 - [ ] O10 Optional: name a second, stronger RT GPU for the Ultra tier;
   until then Ultra stays unverified.
+
+- [ ] OPT47 anim: weapon and shield sockets on hand bones. Unparked 2026-10-23 (owner "go fill the gaps");
+  PW34's parked text is the spec (`docs/plan/parked-2026-10-22.md`). The weapon and shield meshes ride the
+  body mesh today, so a dropped weapon has no socket and no physics body: a socket is a joint plus a local
+  offset, and the meshes leave the body mesh at cook time. Tier B. Size S. Owns the socket module in
+  `crates/game`, the grip hunk of `crates/anim`.
+  Accept: `cargo test -p engine-game --lib attach_socket` prints `attach_socket_sword_follows_the_hand_within_1mm`
+  and `attach_socket_drop_leaves_one_physics_body` green, and `cargo test -p engine-anim --lib grip` prints
+  `grip_two_hand_target_is_reachable` green.
+  F2P: a dropped weapon is a mesh that cannot leave the hand. Lane note: `crates/game` and `crates/anim`
+  carried another session's dirty files on 2026-10-23 - take this row when they are clean, never over them.
+- [ ] OPT48 render: bullet holes, chips, scorch and impacts. Unparked 2026-10-23; PW21's parked text is the
+  spec. `crates/render/src/damage.rs` does not exist, so a bullet leaves no hole even though the collision
+  layer knows the hit. Tier B. Size M. Owns `crates/render/src/damage.rs`.
+  Accept: `cargo test -p engine-render --lib damage` green - 2,000 holes in view stay inside the P6 GPU
+  budget, the golden hash is unchanged, and the first hole lands on the material the cast named.
+  F2P: a hit leaves nothing on the wall. Lane note: the render lane was busy on 2026-10-23.
+- [ ] OPT49 provider: a bounded agent memory with a write gate. Unparked 2026-10-23; PW27's parked text is
+  the spec. The provider loop is bounded perceive-plan-act over the whole transcript, and there is no typed
+  retrieval: a memory must carry the tape hash it came from and refuse a write that has none. Tier B.
+  Size M. Owns `crates/provider/src/memory.rs`.
+  Accept: `cargo test -p engine-provider --lib memory` green - one layer switches off in one test, a memory
+  carries its tape hash, and the same run twice gives the same memory set.
+  F2P: the agent remembers everything and retrieves nothing.
+- [ ] OPT50 assets: BVH motion intake as a std-only parser. Unparked 2026-10-23; PW33's parked text is the
+  spec. Nothing in `crates/` reads BVH (the only hits are the audio ray-tracing BVH and vendored xatlas), so
+  free mocap and text-to-motion cannot land a clip. Tier B. Size M. Owns a new `crates/assets/src/bvh.rs`,
+  its retarget seam in `crates/anim`, test data under `fixtures/`.
+  Accept: `cargo test -p engine-assets --lib bvh` prints `bvh_intake_clip_retargets_and_plays_x2_hashed`
+  green and ends `test result: ok. 5 passed; 0 failed`.
+  F2P: a mocap file has no way in.
+- [ ] OPT51 assets: the part set cooks into destruction chunks. Unparked 2026-10-23; PW57's parked text is
+  the spec. The geometry half landed (`crates/geo/src/parts.rs`); the intake half is missing: N part GLBs
+  plus one `Provenance` must become one bundle with one `FRAC_` set. Tier B. Size M. Owns the intake half
+  in `crates/assets`, `crates/geo`.
+  Accept: `cargo test -p engine-assets --features import,registry gen_intake` green with
+  `four_parts_cook_to_frac_chunks_that_fit_together` - 4-part fixture at most 5,000 triangles, union hull
+  contains every part, cook x2 byte-identical.
+  F2P: a wall cannot break into the pieces it was built from.
+- [ ] OPT52 world: the WFC node-constraint solver and the staged bake proof legs. Unparked 2026-10-23;
+  PW55's parked text is the spec. `crates/world/src/wfc.rs` has `Adjacency`, `bake`, `next_cell`,
+  `propagate` and `is_connected`, but `bake` takes no authored constraints and has no proof leg. This is
+  also the engine under DOOR8 (`level.paint`). Tier B. Size M. Owns `crates/world/src/wfc.rs`.
+  Accept: `cargo test -p engine-world --lib wfc` green with
+  `twenty_seeds_solve_at_least_eighteen_within_the_backtrack_cap` (solve count and p50 bake time posted,
+  bytes identical x2), and `cargo test -p engine-world --lib ground` green.
+  F2P: a layout is a hand-placed grid or nothing.

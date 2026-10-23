@@ -12,9 +12,12 @@
 //! ORM is R occlusion, G roughness, B metallic, all linear; the draw's material
 //! factors multiply them in the forward shader.
 
-use engine_assets::ktx2_cook::{decode_level_rgba, parse_ktx2, MapKind};
+use engine_assets::bc::BcFormat;
+use engine_assets::ktx2_cook::{decode_level_rgba, level_dims, parse_ktx2, Ktx2Texture, MapKind};
 use engine_assets::AssetSource;
-use engine_render::present::{TextureKey, TextureUpload};
+use engine_render::present::{
+    BlockFormat, BlockLevel, BlockUpload, TextureKey, TextureSource, TextureUpload,
+};
 use sha2::{Digest, Sha256};
 
 /// Cooked set names in `content/arena/cooked/<name>_{base,normal,orm}.ktx2`.
@@ -57,19 +60,35 @@ pub fn pbr_for_file(file: &str) -> Option<KitPbr> {
     })
 }
 
-/// A cooked set decoded for upload.
+/// The shape one cooked map reaches the GPU in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CookedShape {
+    /// Hand the cook's own blocks over (the shipping path): BC7 colour and BC7
+    /// linear data upload as blocks with their full mip chain, no decode.
+    #[default]
+    Block,
+    /// Decode every map to RGBA8: the path before the block upload, and the
+    /// baseline a frame test compares the block look against.
+    Rgba8,
+}
+
+/// A cooked set loaded for upload.
 #[derive(Clone, PartialEq, Debug)]
 pub struct CookedSet {
     /// Base colour (sRGB).
-    pub base: (TextureKey, TextureUpload),
+    pub base: (TextureKey, TextureSource),
     /// Tangent-space normal, green already inverted for the engine frame.
-    pub normal: (TextureKey, TextureUpload),
+    ///
+    /// Always RGBA8: the forward shader normalizes the texel it samples, so a
+    /// normal map has to carry Z. The cooked normal file holds X and Y (BC5), so
+    /// a block upload of it would read Z at -1; the RGBA8 path rebuilds Z.
+    pub normal: (TextureKey, TextureSource),
     /// Occlusion, roughness, metallic.
-    pub orm: (TextureKey, TextureUpload),
+    pub orm: (TextureKey, TextureSource),
 }
 
-/// One material set ready for `Presenter::upload_material_set`: the key a draw
-/// names as its `normal_map`, the base it sits over and the two maps.
+/// One material set ready for `Presenter::upload_material_set_source`: the key
+/// a draw names as its `normal_map`, the base it sits over and the two maps.
 #[derive(Clone, PartialEq, Debug)]
 pub struct KitMaterialSet {
     /// Normal-map key (the set key a draw names).
@@ -77,9 +96,9 @@ pub struct KitMaterialSet {
     /// Base-color key the set binds over (`None` binds white).
     pub base: Option<TextureKey>,
     /// Engine-convention normal map.
-    pub normal: TextureUpload,
+    pub normal: TextureSource,
     /// ORM map (`None` leaves the material factors as they are).
-    pub orm: Option<TextureUpload>,
+    pub orm: Option<TextureSource>,
 }
 
 fn digest32(bytes: &[u8]) -> [u8; 32] {
@@ -93,16 +112,58 @@ pub fn to_engine_normal(upload: &mut TextureUpload) {
     }
 }
 
+/// The cooked file's whole mip chain as a block upload: every level already
+/// holds the blocks the cook wrote, so nothing is decoded or re-encoded.
+fn block_upload(tex: &Ktx2Texture, format: BlockFormat) -> Option<BlockUpload> {
+    let levels: Vec<BlockLevel> = tex
+        .levels
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            let (width, height) = level_dims(tex.width, tex.height, index);
+            BlockLevel {
+                width,
+                height,
+                bytes: bytes.clone(),
+            }
+        })
+        .collect();
+    let upload = BlockUpload {
+        width: tex.width,
+        height: tex.height,
+        format,
+        levels,
+    };
+    upload.validate().ok()?;
+    Some(upload)
+}
+
 fn cooked_upload(
     source: &dyn AssetSource,
     name: &str,
     id: u64,
     kind: MapKind,
-) -> Option<(TextureKey, TextureUpload)> {
+    shape: CookedShape,
+) -> Option<(TextureKey, TextureSource)> {
     let bytes = source.read(&format!("cooked/{name}.ktx2")).ok()?;
     let tex = parse_ktx2(&bytes).ok()?;
     if tex.kind != kind {
         return None;
+    }
+    let key = TextureKey::new(id, digest32(&bytes));
+    // Only the maps whose cooked format carries every channel the forward shader
+    // samples take the block path: BC7 colour, BC7 linear ORM.
+    let format = match (shape, kind) {
+        (CookedShape::Block, MapKind::BaseColor) => Some(BlockFormat::Bc7Srgb),
+        (CookedShape::Block, MapKind::Orm) => Some(BlockFormat::Bc7Linear),
+        _ => None,
+    };
+    if let Some(format) = format {
+        if tex.format == BcFormat::Bc7 {
+            if let Some(upload) = block_upload(&tex, format) {
+                return Some((key, TextureSource::Block(upload)));
+            }
+        }
     }
     let (width, height, rgba) = decode_level_rgba(&tex, 0).ok()?;
     let mut upload = TextureUpload {
@@ -114,19 +175,41 @@ fn cooked_upload(
         to_engine_normal(&mut upload);
     }
     upload.validate().ok()?;
-    Some((TextureKey::new(id, digest32(&bytes)), upload))
+    Some((key, TextureSource::Rgba8(upload)))
 }
 
 /// Load cooked set `set` (index into [`COOKED_SETS`]) from `cooked/` in the
 /// source. `None` when any of its three files is missing or does not parse, so
 /// the caller stages the glTF's own textures instead of a half set.
 pub fn load_cooked_set(source: &dyn AssetSource, set: usize) -> Option<CookedSet> {
+    load_cooked_set_shape(source, set, CookedShape::Block)
+}
+
+/// [`load_cooked_set`] in a chosen shape: the frame test loads the same set as
+/// RGBA8 to measure what the block upload changed.
+pub fn load_cooked_set_shape(
+    source: &dyn AssetSource,
+    set: usize,
+    shape: CookedShape,
+) -> Option<CookedSet> {
     let name = COOKED_SETS.get(set)?;
     let id = COOKED_ID_BASE + 3 * u64::try_from(set).ok()?;
     Some(CookedSet {
-        base: cooked_upload(source, &format!("{name}_base"), id, MapKind::BaseColor)?,
-        normal: cooked_upload(source, &format!("{name}_normal"), id + 1, MapKind::Normal)?,
-        orm: cooked_upload(source, &format!("{name}_orm"), id + 2, MapKind::Orm)?,
+        base: cooked_upload(
+            source,
+            &format!("{name}_base"),
+            id,
+            MapKind::BaseColor,
+            shape,
+        )?,
+        normal: cooked_upload(
+            source,
+            &format!("{name}_normal"),
+            id + 1,
+            MapKind::Normal,
+            shape,
+        )?,
+        orm: cooked_upload(source, &format!("{name}_orm"), id + 2, MapKind::Orm, shape)?,
     })
 }
 
@@ -160,8 +243,8 @@ pub fn gltf_maps(
         return Some(KitMaterialSet {
             key: TextureKey::new(GLTF_MAP_ID_BASE + 2 * index, digest32(normal_bytes)),
             base,
-            normal,
-            orm,
+            normal: TextureSource::Rgba8(normal),
+            orm: orm.map(TextureSource::Rgba8),
         });
     }
     None
@@ -186,6 +269,87 @@ pub fn box_uvs(positions: &[[f32; 3]], normals: &[[f32; 3]], tile_m: f32) -> Vec
             }
         })
         .collect()
+}
+
+/// Decoded textures (once per distinct key), material sets (once per set key)
+/// and the cooked sets loaded so far: a cooked set loads once however many
+/// kit files wear it. The staging half of [`super::import_kit_from`]: it lives
+/// here so the arena import stays under the file-size cap.
+#[derive(Default)]
+pub(crate) struct KitMaps {
+    pub(crate) textures: Vec<(TextureKey, TextureSource)>,
+    pub(crate) sets: Vec<KitMaterialSet>,
+    cooked: Vec<(usize, Option<CookedSet>)>,
+}
+
+/// Base key, the set the file wears and its normal-map set key.
+pub(crate) type KitFileMaps = (Option<TextureKey>, Option<KitPbr>, Option<TextureKey>);
+
+impl KitMaps {
+    /// Cooked sets that loaded (5 on the shipping content).
+    pub(crate) fn cooked_loaded(&self) -> usize {
+        self.cooked.iter().filter(|(_, set)| set.is_some()).count()
+    }
+
+    /// Stage the maps of one kit file: its cooked CC0 set when `cooked/` has
+    /// it, else the glTF's own base, normal and ORM images. Returns the base
+    /// key, the set it wears and its normal-map set key. A named base-color
+    /// image that is missing refuses before any map stages.
+    pub(crate) fn stage(
+        &mut self,
+        source: &dyn AssetSource,
+        file: &'static str,
+        import: &engine_assets::mesh_import::GltfImport,
+        file_index: usize,
+        textures_on: bool,
+        shape: CookedShape,
+    ) -> Result<KitFileMaps, super::KitError> {
+        let base = super::kit_texture(import, file, file_index)?;
+        // The capture probe drops every map at import, so the staged report
+        // and the window twin list draw flat; the image is validated above,
+        // so a named image still refuses under the probe.
+        if !textures_on {
+            return Ok((None, None, None));
+        }
+        let pbr = pbr_for_file(file);
+        let cooked_at = pbr.and_then(|wear| {
+            let at = self
+                .cooked
+                .iter()
+                .position(|(set, _)| *set == wear.set)
+                .unwrap_or_else(|| {
+                    self.cooked
+                        .push((wear.set, load_cooked_set_shape(source, wear.set, shape)));
+                    self.cooked.len() - 1
+                });
+            self.cooked[at].1.as_ref().map(|_| at)
+        });
+        if let Some(set) = cooked_at.and_then(|at| self.cooked[at].1.as_ref()) {
+            let base_key = set.base.0;
+            if !self.textures.iter().any(|(key, _)| *key == base_key) {
+                self.textures.push(set.base.clone());
+                self.sets.push(KitMaterialSet {
+                    key: set.normal.0,
+                    base: Some(base_key),
+                    normal: set.normal.1.clone(),
+                    orm: Some(set.orm.1.clone()),
+                });
+            }
+            return Ok((Some(base_key), pbr, Some(set.normal.0)));
+        }
+        let base_key = base.as_ref().map(|(key, _)| *key);
+        if let Some(entry) = base {
+            if !self.textures.iter().any(|(key, _)| *key == entry.0) {
+                self.textures.push(entry);
+            }
+        }
+        let gltf_set = gltf_maps(import, file_index, base_key);
+        let normal_key = gltf_set.as_ref().map(|set| set.key);
+        if let Some(set) = gltf_set {
+            self.sets.push(set);
+        }
+        Ok((base_key, None, normal_key))
+    }
 }
 
 #[cfg(test)]
@@ -296,11 +460,13 @@ mod tests {
                 return;
             };
             assert_eq!(
-                cooked.base.1.width, cooked.normal.1.width,
+                cooked.base.1.width(),
+                cooked.normal.1.width(),
                 "set {set} sizes agree"
             );
             assert_eq!(
-                cooked.normal.1.width, cooked.orm.1.width,
+                cooked.normal.1.width(),
+                cooked.orm.1.width(),
                 "set {set} sizes agree"
             );
             let mut keys = [cooked.base.0, cooked.normal.0, cooked.orm.0];
@@ -405,7 +571,12 @@ mod tests {
             rgba: [128u8, 128, 255, 255].repeat(16),
         };
         presenter
-            .upload_material_set(flat_key, set.base, &flat, set.orm.as_ref())
+            .upload_material_set_source(
+                flat_key,
+                set.base,
+                &TextureSource::Rgba8(flat),
+                set.orm.as_ref(),
+            )
             .expect("flat-normal twin of the wall set");
         let scene = engine_render::v1::default_scene(w, h).expect("scene");
         let mut camera = engine_render::v1::Camera::new(
@@ -520,5 +691,102 @@ mod tests {
             png_bytes(&after.rgba, w, h),
         )
         .expect("png");
+    }
+
+    /// VR2 block leg: the same arena frame drawn from the cooked BC7 blocks and
+    /// from the RGBA8 decode of the same files matches within a stated bar, and
+    /// each presenter's receipt prints what its GPU actually holds. Saves the
+    /// pair under `target/vr2/`. No adapter, or cooked files that are LFS
+    /// pointers here: skip.
+    #[test]
+    fn vr2_block_upload_matches_the_rgba8_frame() {
+        use engine_render::pass_truth::LookToggles;
+        use engine_render::present::{DrawList, PresentError, Presenter};
+        let root = super::super::kit_content_dir();
+        let block_kit =
+            super::super::import_kit_shape(&root, CookedShape::Block).expect("block kit imports");
+        let rgba_kit =
+            super::super::import_kit_shape(&root, CookedShape::Rgba8).expect("rgba8 kit imports");
+        if block_kit.cooked_sets != COOKED_SETS.len() || rgba_kit.cooked_sets != COOKED_SETS.len() {
+            return;
+        }
+        let (mut block, mut rgba) = match (Presenter::init_offscreen(), Presenter::init_offscreen())
+        {
+            (Ok(block), Ok(rgba)) => (block, rgba),
+            (Err(PresentError::NoAdapter), _) | (_, Err(PresentError::NoAdapter)) => return,
+            (Err(err), _) | (_, Err(err)) => panic!("presenter init failed: {err}"),
+        };
+        let (w, h) = (640u32, 480u32);
+        block.resize(w, h).expect("size applies");
+        rgba.resize(w, h).expect("size applies");
+        let block_report = super::super::upload_kit(&mut block, &block_kit);
+        let rgba_report = super::super::upload_kit(&mut rgba, &rgba_kit);
+        let scene = engine_render::v1::default_scene(w, h).expect("scene");
+        let mut camera = engine_render::v1::Camera::new(
+            [10.0, 4.5, 8.0],
+            [-6.0, 0.8, -3.0],
+            [0.0, 1.0, 0.0],
+            60.0f32.to_radians(),
+        );
+        camera.aspect = w as f32 / h as f32;
+        let shot = |presenter: &mut Presenter, report: &super::super::KitReport| {
+            let mut list = DrawList {
+                camera: camera.clone(),
+                light: scene.light.clone(),
+                items: Vec::new(),
+            };
+            let resident = presenter.mesh_keys();
+            super::super::push_kit_draws(&mut list, &resident, report);
+            presenter
+                .capture_live_pixels(&list, &LookToggles::all_on())
+                .expect("arena frame")
+        };
+        let block_px = shot(&mut block, &block_report);
+        let rgba_px = shot(&mut rgba, &rgba_report);
+        assert_eq!(block_px.ids, rgba_px.ids, "both kits cover the same pixels");
+        assert_eq!(block_px.rgba.len(), rgba_px.rgba.len());
+        let mut sum = 0u64;
+        let mut max = 0u32;
+        for (blocked, decoded) in block_px.rgba.iter().zip(&rgba_px.rgba) {
+            let diff = u32::from(blocked.abs_diff(*decoded));
+            sum += u64::from(diff);
+            max = max.max(diff);
+        }
+        let mean = sum as f64 / block_px.rgba.len() as f64;
+        let (block_receipt, rgba_receipt) = (block.texture_receipt(), rgba.texture_receipt());
+        eprintln!("VR2 block frame: mean abs {mean:.3}/255, max {max}/255");
+        eprintln!("VR2 block textures: {}", block_receipt.line());
+        eprintln!("VR2 rgba8 textures: {}", rgba_receipt.line());
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/vr2");
+        std::fs::create_dir_all(&dir).expect("target/vr2");
+        std::fs::write(
+            dir.join("arena_bc7_blocks.png"),
+            png_bytes(&block_px.rgba, w, h),
+        )
+        .expect("png");
+        std::fs::write(
+            dir.join("arena_rgba8_decoded.png"),
+            png_bytes(&rgba_px.rgba, w, h),
+        )
+        .expect("png");
+        // Bar: block and decoded pixels differ only where the two mip chains
+        // and the BC7 endpoint fit differ, never in what the frame shows.
+        assert!(
+            mean <= 1.5,
+            "BC7 blocks draw the RGBA8 arena frame: mean abs {mean:.3}/255 (max {max})"
+        );
+        if block.block_textures_supported() {
+            assert!(
+                block_receipt.block_maps() > 0,
+                "the cooked set reaches VRAM as blocks: {}",
+                block_receipt.line()
+            );
+            assert!(
+                block_receipt.bytes < rgba_receipt.bytes,
+                "blocks hold fewer bytes than RGBA8: {} vs {}",
+                block_receipt.bytes,
+                rgba_receipt.bytes
+            );
+        }
     }
 }

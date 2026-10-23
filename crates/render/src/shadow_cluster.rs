@@ -11,7 +11,7 @@
 //! `Unsupported`; the headless seams name that entry point instead.
 
 use std::fmt;
-#[cfg(any(feature = "v1", feature = "window"))]
+#[cfg(any(feature = "v1", feature = "gpu"))]
 use std::time::Instant;
 
 // ---------------------------------------------------------------------------
@@ -381,7 +381,7 @@ pub use torch_cluster::{
 
 /// Sun shadow depth-texture descriptors for the presenter: one
 /// `Depth32Float` map per cascade at the pass size.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod gpu {
     use super::LightError;
 
@@ -451,36 +451,36 @@ pub mod gpu {
 
 /// Posted encode plus submit plus readback budget for the window submit in
 /// ms at test sizes (debug build, evidence only, never hashed).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const SHADOW_CLUSTER_BUDGET_MS: f64 = 16.0;
 /// Real passes recorded per submit: one depth encode per sun cascade plus
 /// the clustered forward pass.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const SHADOW_CLUSTER_PASSES: usize = SUN_CASCADES + 1;
 /// Byte size of the packed shadow uniform: splits xyzw, active depth, near,
 /// far and map size, 16-byte aligned for the shaders below.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const SHADOW_UNIFORM_BYTES: u64 = 32;
 /// Byte size of the packed cluster uniform: tiles, slices, tile edge and
 /// cell count, 16-byte aligned for the shader below.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const CLUSTER_UNIFORM_BYTES: u64 = 32;
 /// Cluster tile edge in pixels used by the forward shader; identical to the
 /// CPU assign tile so lit tiles line up with assigned cells.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const FORWARD_TILE_PX: u32 = CLUSTER_TILE_PX;
 /// Red channel floor (0..=255) counting a readback pixel as written.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const COVERED_RED_MIN: u8 = 10;
 /// Red channel floor (0..=255) counting a readback pixel as torch-lit. The
 /// unlit base red sits near 38, a single torch pushes past 160.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const TORCH_RED_MIN: u8 = 120;
 
 /// Depth-only encode over the shadow uniform: the vertex stage writes the
 /// active cascade depth from `active_depth / far`, so each cascade pass
 /// stores its own split depth into its own map. Engine-owned code.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const SHADOW_DEPTH_WGSL: &str = r#"
 struct ShadowU {
     splits: vec4<f32>,
@@ -509,7 +509,7 @@ fn fs() {}
 /// selection shades the base, assigned torches add their glow, so both the
 /// cascade maps and the cluster buffers stay live in every pixel.
 /// Engine-owned code.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const SHADOW_FORWARD_WGSL: &str = r#"
 struct LookU {
     frame_idx: u32,
@@ -601,7 +601,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 /// Pack the sun splits plus the active cascade depth into the 32-byte shadow
 /// uniform image the depth and forward shaders read. Pure bytes, no
 /// allocation; `active_depth` selects the cascade the depth pass encodes.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn shadow_uniform_bytes(sun: &SunShadowPass, active_cascade: usize) -> [u8; 32] {
     let active = active_cascade.min(SUN_CASCADES - 1);
     let mut out = [0u8; 32];
@@ -619,7 +619,7 @@ pub fn shadow_uniform_bytes(sun: &SunShadowPass, active_cascade: usize) -> [u8; 
 /// Pack the cluster grid shape into the 32-byte cluster uniform image the
 /// forward shader reads: tiles, slices, tile edge and cell count. Pure
 /// bytes, no allocation.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn cluster_uniform_bytes(config: &ClusterConfig) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[0..4].copy_from_slice(&(config.tiles_x() as u32).to_le_bytes());
@@ -634,7 +634,7 @@ pub fn cluster_uniform_bytes(config: &ClusterConfig) -> [u8; 32] {
 /// pixels covered, validation outcome plus torch-lit pixels (proof the
 /// cluster buffers feed the frame, not just validate). Units: counts, texels
 /// and cells, ms.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Debug)]
 pub struct ShadowClusterReceipt {
     /// Frame index from the submitted `LookFrame`.
@@ -657,7 +657,7 @@ pub struct ShadowClusterReceipt {
     pub degraded: bool,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl ShadowClusterReceipt {
     /// Posted budget this submit is charged against.
     pub fn budget_ms(&self) -> f64 {
@@ -683,7 +683,7 @@ impl ShadowClusterReceipt {
 /// bind groups, textures or buffers (the reuse test proves the counts stay
 /// flat). The encoder, readback buffer and upload scratch are per-submit
 /// driver work, same as the presenter twin.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct ShadowClusterSubmitter {
     look_layout: wgpu::BindGroupLayout,
     shadow_layout: wgpu::BindGroupLayout,
@@ -709,7 +709,7 @@ pub struct ShadowClusterSubmitter {
     scratch: Vec<u8>,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl ShadowClusterSubmitter {
     /// Compile the depth plus forward pipelines and the three bind layouts;
     /// allocate the fixed-size uniform buffers. Maps, grid buffers and the
@@ -1062,7 +1062,7 @@ impl ShadowClusterSubmitter {
 /// and never `Unsupported`: bad frames or shapes are `Invalid`, adapter or
 /// map faults (including limits too small for the request) are `Device`, a
 /// validation scope hit is `Validation`.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn submit_shadow_cluster(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -2063,7 +2063,7 @@ mod tests {
     // depth allocation that skips without an adapter (presenter skip pattern).
     // ------------------------------------------------------------------
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn cascade_depth_desc_is_sampler_readable() {
         let desc = gpu::cascade_depth_desc(128);
@@ -2073,24 +2073,25 @@ mod tests {
         assert!(desc.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn cascade_depths_allocate_on_llvmpipe() {
         crate::test_gpu::hold_gpu_slot();
         let instance = crate::backend::new_instance(wgpu::Backends::PRIMARY);
-        let adapter =
-            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        let Some(adapter) = crate::test_gpu::require_or_skip(
+            "cascade_depths_allocate_on_llvmpipe",
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
                 apply_limit_buckets: false,
-            })) {
-                Ok(a) => a,
-                Err(_) => {
-                    eprintln!("SKIPPED shadow_cluster gpu test: no wgpu adapter on this machine");
-                    return;
-                }
-            };
+            }))
+            .map_err(|error| {
+                crate::test_gpu::NoAdapter(format!("no wgpu adapter on this machine: {error}"))
+            }),
+        ) else {
+            return;
+        };
         let (device, _queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("rl1-shadow-depth"),
@@ -2117,16 +2118,19 @@ mod tests {
     // fake, without an adapter).
     // ------------------------------------------------------------------
 
-    #[cfg(feature = "window")]
-    fn rl1_device() -> Option<(
-        &'static wgpu::Device,
-        &'static wgpu::Queue,
-        &'static wgpu::AdapterInfo,
-    )> {
-        crate::graph::gx1_test_device()
+    #[cfg(feature = "gpu")]
+    fn rl1_device() -> Result<
+        (
+            &'static wgpu::Device,
+            &'static wgpu::Queue,
+            &'static wgpu::AdapterInfo,
+        ),
+        crate::test_gpu::NoAdapter,
+    > {
+        crate::graph::gx1_probe()
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn rl1_frame(index: u64) -> crate::gtao::LookFrame {
         crate::gtao::LookFrame {
             frame_index: index,
@@ -2136,7 +2140,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn rl1_sun() -> SunShadowPass {
         let mut pass = SunShadowPass::build(SunShadowConfig {
             size: 64,
@@ -2148,7 +2152,7 @@ mod tests {
         pass
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn rl1_lit_cluster() -> ClusterPass {
         let config = ClusterConfig {
             width_px: 64,
@@ -2180,7 +2184,7 @@ mod tests {
         .expect("lit cluster builds")
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn shadow_uniform_bytes_match_pass_splits() {
         // The uniform image carries the pass splits plus the active cascade
@@ -2213,11 +2217,13 @@ mod tests {
         assert_ne!(packed[16..20], other[16..20]);
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn window_submit_records_cascades_and_cluster_clean() {
-        let Some((device, queue, info)) = rl1_device() else {
-            eprintln!("SKIPPED rl1 window submit: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "window_submit_records_cascades_and_cluster_clean",
+            rl1_device(),
+        ) else {
             return;
         };
         let sun = rl1_sun();
@@ -2318,14 +2324,16 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn window_submit_empty_cluster_has_no_torch() {
         // Behavioral negative: the same frame with an empty grid shades the
         // base but lights nothing, proving the cluster buffers feed pixels
         // instead of merely validating.
-        let Some((device, queue, _)) = rl1_device() else {
-            eprintln!("SKIPPED rl1 empty cluster: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "window_submit_empty_cluster_has_no_torch",
+            rl1_device(),
+        ) else {
             return;
         };
         let sun = rl1_sun();
@@ -2349,13 +2357,15 @@ mod tests {
         assert_eq!(receipt.torch_pixels, 0, "no lights means no torch pixels");
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn window_submit_reuses_targets_and_binds() {
         // Steady-state proof: matching-shape submits create no new depth
         // maps, grid buffers, targets or bind groups.
-        let Some((device, queue, _)) = rl1_device() else {
-            eprintln!("SKIPPED rl1 reuse: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "window_submit_reuses_targets_and_binds",
+            rl1_device(),
+        ) else {
             return;
         };
         let sun = rl1_sun();
@@ -2392,13 +2402,15 @@ mod tests {
         assert!(again.is_clean() && again.covered_pixels > 0);
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     #[test]
     fn window_submit_refuses_bad_frame_and_missing_binds_loudly() {
         // Forced missing bind group fails loudly: a fresh submitter holds no
         // forward binds, and the error names the rebuild entry point.
-        let Some((device, queue, _)) = rl1_device() else {
-            eprintln!("SKIPPED rl1 refusal: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "window_submit_refuses_bad_frame_and_missing_binds_loudly",
+            rl1_device(),
+        ) else {
             return;
         };
         let fresh = ShadowClusterSubmitter::new(device);

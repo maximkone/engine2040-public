@@ -82,6 +82,8 @@ mod groups;
 #[cfg(feature = "rapier")]
 mod rig;
 #[cfg(feature = "rapier")]
+mod soft;
+#[cfg(feature = "rapier")]
 mod tether;
 #[cfg(feature = "rapier")]
 mod types;
@@ -89,9 +91,16 @@ mod types;
 mod verbs;
 
 #[cfg(feature = "rapier")]
-pub use body::{parse as parse_body, BodyDesc, BodyError, BoneRow, CutRow, GORE_FULL, MUSCLE_FULL};
+pub use body::{
+    load as load_body, parse as parse_body, BodyDesc, BodyError, BodyFileError, BoneRow, CutRow,
+    GORE_FULL, MUSCLE_FULL,
+};
 #[cfg(feature = "rapier")]
 pub use caps::{Caps, Tier};
+/// Largest blast momentum the physical layer accepts, newton-seconds. The game's loudest blast
+/// cue is this same ceiling.
+#[cfg(feature = "rapier")]
+pub use check::MAX_BLAST_NS;
 /// The collision layer table every collider of this crate takes its group and mask from.
 #[cfg(feature = "rapier")]
 pub use engine_physics::layers;
@@ -106,13 +115,15 @@ pub use fx::{PhysFx, RagdollReceipt, Severed, TetherInfo, HIT_FADE_S};
 #[cfg(feature = "rapier")]
 pub use rig::{Hinge, Rig};
 #[cfg(feature = "rapier")]
+pub use soft::{ClothDesc, ClothError, SoftCloth, SoftReceipt, SoftWorld, MAX_CLOTHS};
+#[cfg(feature = "rapier")]
 pub use tether::TetherState;
 #[cfg(feature = "rapier")]
 pub use types::{Batch, Blast, Flight, Impact, Key, Placed, Shard, Stats, Transform};
 #[cfg(feature = "rapier")]
 pub use verbs::{
-    fx_blast, fx_break, fx_limb, fx_ragdoll, BlastEvent, BlastFx, BreakEvent, BreakFx, LimbEvent,
-    LimbFx, RagdollEvent, RagdollFx,
+    fx_blast, fx_break, fx_cloth, fx_limb, fx_ragdoll, BlastEvent, BlastFx, BreakEvent, BreakFx,
+    ClothEvent, ClothFx, LimbEvent, LimbFx, RagdollEvent, RagdollFx,
 };
 
 #[cfg(all(test, feature = "rapier"))]

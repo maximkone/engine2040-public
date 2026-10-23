@@ -444,7 +444,7 @@ mod headless_tests {
         assert_eq!((second.compiled, second.hits, second.failed), (0, 4, 0));
         assert!(cache.walk_ready(&keys));
         // Steady state allocates nothing on the walk path.
-        #[cfg(not(feature = "window"))]
+        #[cfg(not(feature = "gpu"))]
         {
             let (probe, heap) = engine_core::alloc_probe::measure(|| walk_pipelines(&cache, &keys));
             assert_eq!((probe.creations, heap.calls, heap.bytes), (0, 0, 0));

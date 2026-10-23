@@ -271,6 +271,39 @@ pub fn visible_count(flags: &[u8]) -> u32 {
     total
 }
 
+/// World-space bounding sphere `[x, y, z, radius]` of a mesh's positions:
+/// the AABB centre plus the farthest vertex distance, so every vertex sits
+/// inside it. The forward vertex stage draws positions verbatim (no model
+/// matrix), so this sphere is the draw's world bound. Empty input gives a
+/// zero-radius sphere at the origin; uploads reject empty meshes first.
+#[must_use]
+pub fn bound_sphere(positions: &[[f32; 3]]) -> [f32; 4] {
+    let Some(first) = positions.first() else {
+        return [0.0; 4];
+    };
+    let mut lo = *first;
+    let mut hi = *first;
+    for p in positions {
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(p[axis]);
+            hi[axis] = hi[axis].max(p[axis]);
+        }
+    }
+    let center = [
+        (lo[0] + hi[0]) * 0.5,
+        (lo[1] + hi[1]) * 0.5,
+        (lo[2] + hi[2]) * 0.5,
+    ];
+    let mut r2 = 0.0_f32;
+    for p in positions {
+        let dx = p[0] - center[0];
+        let dy = p[1] - center[1];
+        let dz = p[2] - center[2];
+        r2 = r2.max(dx * dx + dy * dy + dz * dz);
+    }
+    [center[0], center[1], center[2], r2.sqrt()]
+}
+
 /// Five-u32 indirect args for one instanced cube draw: 36 indices, one
 /// instance per visible sphere, then zeros. No `MULTI_DRAW_INDIRECT_COUNT`,
 /// so an iGPU without it still runs.
@@ -1071,6 +1104,36 @@ mod tests {
         let draws = list.build(&snapshot, &camera, &table).expect("builds");
         assert_eq!(draws.len(), 1);
         assert_eq!(draws[0].id, 3);
+    }
+
+    #[test]
+    fn bound_sphere_holds_every_vertex() {
+        // EG38: the per-draw cull trusts the mesh bound, so every vertex of a
+        // shifted box must sit inside it.
+        let mut positions = Vec::new();
+        for x in [18.5_f32, 19.5] {
+            for y in [0.5_f32, 1.5] {
+                for z in [-3.5_f32, -2.5] {
+                    positions.push([x, y, z]);
+                }
+            }
+        }
+        let bound = bound_sphere(&positions);
+        assert!((bound[0] - 19.0).abs() < 1e-6, "centre x: {bound:?}");
+        assert!((bound[1] - 1.0).abs() < 1e-6, "centre y: {bound:?}");
+        assert!((bound[2] + 3.0).abs() < 1e-6, "centre z: {bound:?}");
+        assert!(bound[3] > 0.5, "a unit cube spans a real radius: {bound:?}");
+        for p in &positions {
+            let dx = p[0] - bound[0];
+            let dy = p[1] - bound[1];
+            let dz = p[2] - bound[2];
+            let d2 = dx * dx + dy * dy + dz * dz;
+            assert!(
+                d2 <= bound[3] * bound[3] + 1e-4,
+                "vertex {p:?} outside {bound:?}"
+            );
+        }
+        assert_eq!(bound_sphere(&[]), [0.0; 4], "empty cloud reads zero");
     }
 
     #[test]
@@ -1915,6 +1978,23 @@ mod tests {
         assert_eq!(pick_px(15.5, FOV_60, 1, &t, 10.0), 1, "held");
         assert_eq!(pick_px(18.0, FOV_60, 0, &t, 10.0), 1, "103.9 px leaves");
         assert_eq!(pick_px(13.0, FOV_60, 1, &t, 10.0), 0, "143.9 px leaves");
+    }
+
+    /// RL61: one resolution step down coarsens the pick one level sooner.
+    /// The same 1 m ball at the same 15.5 m is 120.7 px in a 1080p frame and
+    /// 60.3 px in a 540p one, so a 120 px boundary holds level 0 at 1080p and
+    /// drops to level 1 at 540p; no distance changed.
+    #[test]
+    fn lod_pixel_error_switches_one_level_sooner_at_540p() {
+        let t = [120.0];
+        let op = tan_half_of(FOV_60);
+        let hd = lod_by_pixel_error(1.0, 15.5, 1080, op, 4, 0, &t, 0.0).expect("1080p picks");
+        let half = lod_by_pixel_error(1.0, 15.5, 540, op, 4, 0, &t, 0.0).expect("540p picks");
+        assert_eq!((hd, half), (0, 1), "120.7 px holds, 60.3 px coarsens");
+        assert_eq!(half, hd + 1, "the half-height frame takes one level more");
+        // The same step walks back when the frame grows again.
+        let back = lod_by_pixel_error(1.0, 15.5, 1080, op, 4, half, &t, 0.0).expect("1080p back");
+        assert_eq!(back, hd, "a bigger frame refines back to the held level");
     }
 
     #[test]

@@ -34,6 +34,7 @@ use engine_ai::orders::SquadOrder;
 use engine_anim::contract::{LocalPose, RootDelta, RootTable};
 use engine_anim::pose::extract_root;
 use engine_input::{FighterInput, FighterTape};
+use engine_nav::orca::{Agent, Orca, Params, Wall};
 
 use crate::legion_bind::{Contubernium, Facing, Line, CONTUBERNIUM};
 use crate::recorder::{on_fork_step, DamageLedger, Row, StepRecord};
@@ -45,6 +46,7 @@ use crate::{
     TickCuts, TickEvents, MAX_SLOTS,
 };
 use engine_combat::depth::PoiseMeter;
+use engine_combat::heft::Heft;
 
 /// Dataset recorder leg: pre-step poses, fight state and damage counters
 /// around one `Sim::step`, then one [`Row`] per fighter. Shared by
@@ -164,6 +166,214 @@ struct LateFallback {
     reason: &'static str,
 }
 
+/// ORCA look-around radius in mm: every ring neighbour inside 8 m constrains.
+const STEER_NEIGHBOR_MM: i32 = 8_000;
+/// Neighbours that may constrain one slot (the ORCA cap is 16).
+const STEER_NEIGHBORS: usize = 8;
+/// ORCA time horizon in ms: 1.5 s of closing speed is avoided.
+const STEER_HORIZON_MS: i32 = 1_500;
+/// ORCA step length in ms, the rate that resolves an overlapped pair.
+const STEER_DT_MS: i32 = 17;
+/// Planar radius of the near-field ring in mm: slots inside it steer with ORCA.
+const STEER_RING_MM: i32 = 15_000;
+/// Speed cap in mm/s: the walk top speed, with no headroom to waste.
+const STEER_MAX_SPEED_MM_S: i32 = 5_000;
+
+/// Armed ORCA crowd channel (row TC4): one planar avoidance velocity per
+/// AI-driven slot inside the 15 m ring, applied on top of the walk before the
+/// collision pass, so crossing bodies pass instead of shoving.
+///
+/// Data owner: this crate. Units: positions and velocities in whole
+/// millimetres and millimetres per second, the applied correction in whole
+/// millimetres per fixed tick, converted back to the arena's float metres.
+/// Determinism: the batch is slot ordered and ORCA is integer math, so the
+/// same state gives the same velocities; every lane is hoisted, so a warm
+/// tick allocates nothing. Consumer: [`Sim::set_steering`](crate::Sim).
+pub(crate) struct Steering {
+    orca: Orca,
+    params: Params,
+    /// Four arena boundary walls with inward normals.
+    walls: [Wall; 4],
+    /// Submitted batch, in slot order; only `..count` lanes are live.
+    agents: [Agent; MAX_SLOTS],
+    /// New velocity per submitted lane.
+    out: [[i32; 2]; MAX_SLOTS],
+    /// Slot behind each submitted lane.
+    lanes: [usize; MAX_SLOTS],
+    /// Last velocity each slot was given, in mm/s: the next tick's current
+    /// velocity, so ORCA sees the correction it handed out.
+    vel: [[i32; 2]; MAX_SLOTS],
+    /// Walk delta each slot asked for on the current tick, in metres.
+    pub(crate) requests: [[f32; 2]; MAX_SLOTS],
+    /// Test-only: correction applied to each slot on the last tick, in
+    /// millimetres, so a test can separate it from the collision push.
+    #[cfg(all(test, not(feature = "sim")))]
+    applied: [[i32; 2]; MAX_SLOTS],
+}
+
+impl Steering {
+    /// Channel for an arena of `half_extent_m` (the wall line ORCA keeps off).
+    pub(crate) fn armed(half_extent_m: f32) -> Self {
+        let edge = crate::match_wire::pos_mm([half_extent_m, 0.0, 0.0])[0];
+        Self {
+            orca: Orca::new(),
+            params: Params {
+                neighbor_mm: STEER_NEIGHBOR_MM,
+                max_neighbors: STEER_NEIGHBORS,
+                horizon_ms: STEER_HORIZON_MS,
+                dt_ms: STEER_DT_MS,
+                max_speed_mm_s: STEER_MAX_SPEED_MM_S,
+            },
+            walls: [
+                Wall::new([edge, 0], [-1, 0]),
+                Wall::new([-edge, 0], [1, 0]),
+                Wall::new([0, edge], [0, -1]),
+                Wall::new([0, -edge], [0, 1]),
+            ],
+            agents: [Agent {
+                pos: [0, 0],
+                vel: [0, 0],
+                pref: [0, 0],
+                radius_mm: crate::COLLIDE_RADIUS_MM,
+            }; MAX_SLOTS],
+            out: [[0; 2]; MAX_SLOTS],
+            lanes: [0; MAX_SLOTS],
+            vel: [[0; 2]; MAX_SLOTS],
+            requests: [[0.0; 2]; MAX_SLOTS],
+            #[cfg(all(test, not(feature = "sim")))]
+            applied: [[0; 2]; MAX_SLOTS],
+        }
+    }
+
+    /// One tick of the channel: submit every slot inside the ring, step ORCA,
+    /// then add each driven, living slot's correction to its position.
+    ///
+    /// `requested` is the tick's walk delta in metres; `driven` marks the
+    /// slots the arena's own AI (brain or controller) decided this tick, so a
+    /// tape human is steered around but never steered. `limit_m` is the wall
+    /// clamp the walk already honoured.
+    pub(crate) fn steer(
+        &mut self,
+        states: &mut [FighterState],
+        alive: &[bool; MAX_SLOTS],
+        driven: &[bool; MAX_SLOTS],
+        requested: &[[f32; 2]; MAX_SLOTS],
+        limit_m: f32,
+    ) -> Option<()> {
+        #[cfg(all(test, not(feature = "sim")))]
+        {
+            self.applied = [[0; 2]; MAX_SLOTS];
+        }
+        let tick_hz = i32::try_from(crate::TICK_HZ).ok()?;
+        let ring = i64::from(STEER_RING_MM);
+        let radius = crate::COLLIDE_RADIUS_MM;
+        let mut count = 0;
+        for (slot, state) in states.iter().enumerate() {
+            let pos = crate::match_wire::pos_mm(state.pos);
+            let (x, z) = (i64::from(pos[0]), i64::from(pos[2]));
+            if x * x + z * z > ring * ring {
+                self.vel[slot] = [0; 2];
+                continue;
+            }
+            let want = mm_pair(requested[slot]);
+            let pref = [want[0] * tick_hz, want[1] * tick_hz];
+            // A dead body stays put and is only an obstacle; a tape human
+            // walks its own path and is an obstacle that never yields.
+            let (vel, pref) = if !alive[slot] {
+                ([0; 2], [0; 2])
+            } else if driven[slot] {
+                (self.vel[slot], pref)
+            } else {
+                (pref, [0; 2])
+            };
+            self.agents[count] = Agent {
+                pos: [pos[0], pos[2]],
+                vel,
+                pref,
+                radius_mm: radius,
+            };
+            self.lanes[count] = slot;
+            count += 1;
+        }
+        self.orca
+            .step(
+                &self.agents[..count],
+                &self.walls,
+                &self.params,
+                &mut self.out[..count],
+            )
+            .ok()?;
+        for lane in 0..count {
+            let slot = self.lanes[lane];
+            let new = self.out[lane];
+            self.vel[slot] = new;
+            if !driven[slot] || !alive[slot] {
+                continue;
+            }
+            let want = mm_pair(requested[slot]);
+            let correction = [new[0] / tick_hz - want[0], new[1] / tick_hz - want[1]];
+            if correction == [0; 2] {
+                continue;
+            }
+            let state = &mut states[slot];
+            state.pos[0] = crate::canon_zero(state.pos[0] + correction[0] as f32 / 1000.0)
+                .clamp(-limit_m, limit_m);
+            state.pos[2] = crate::canon_zero(state.pos[2] + correction[1] as f32 / 1000.0)
+                .clamp(-limit_m, limit_m);
+            #[cfg(all(test, not(feature = "sim")))]
+            {
+                self.applied[slot] = correction;
+            }
+        }
+        Some(())
+    }
+}
+
+impl Sim {
+    /// Arm the ORCA crowd channel (row TC4) before the first tick: every
+    /// AI-driven slot inside the 15 m ring then takes a planar avoidance
+    /// velocity on top of its walk, before the collision pass. Off by
+    /// default, so the golden and the arena digest never move.
+    ///
+    /// The channel is a rules v2 crowd aid, so it refuses (`false`) under the
+    /// v1 rows. It also refuses past tick 0, on the Rapier `sim` leg (whose
+    /// controllers own the poses) and when already armed.
+    pub fn set_steering(&mut self) -> bool {
+        if cfg!(feature = "sim")
+            || self.tick != 0
+            || self.rules.version != crate::FIGHT_RULES_V2
+            || self.steer.is_some()
+        {
+            return false;
+        }
+        self.steer = Some(Steering::armed(self.config.half_extent_m));
+        true
+    }
+
+    /// One armed tick: hand every slot inside the ring to ORCA, then add each
+    /// driven, living slot's correction before the collision pass. A tape
+    /// human and a dead body are obstacles that never yield.
+    pub(crate) fn steer_crowd(&mut self, from_tape: &[bool; MAX_SLOTS]) -> Option<()> {
+        let mut driven = [false; MAX_SLOTS];
+        let mut alive = [false; MAX_SLOTS];
+        for slot in 0..self.fighters {
+            driven[slot] = !from_tape[slot];
+            alive[slot] = self.fight.fighters[slot].hp_permille != 0;
+        }
+        let limit = crate::wall_limit(self.config.half_extent_m);
+        let steering = self.steer.as_mut()?;
+        let requests = steering.requests;
+        steering.steer(&mut self.states, &alive, &driven, &requests, limit)
+    }
+}
+
+/// Planar metres to whole millimetres (truncated toward zero, like the wire
+/// poses, so a walk delta and its preferred speed agree exactly).
+fn mm_pair(meters: [f32; 2]) -> [i32; 2] {
+    let mm = crate::match_wire::pos_mm([meters[0], 0.0, meters[1]]);
+    [mm[0], mm[2]]
+}
+
 /// Incremental live match: one cold authority `Sim` stepped exactly once per
 /// [`LiveMatch::step`] call (see the module docs). The tick log stays one row
 /// deep, so memory is flat over any match length.
@@ -275,7 +485,33 @@ impl LiveMatch {
         if spec.height && !live.sim.set_height() {
             return None;
         }
+        // FEEL1b: the spec names one weapon row per slot; a refused list
+        // builds no match, so the window, the net server and the net client
+        // never play half armed.
+        if !spec.weapons.is_empty() && live.arm_weapons(&spec.weapons).is_err() {
+            return None;
+        }
         Some(live)
+    }
+
+    /// Arm one weapon row per fighter, in slot order, before the first tick
+    /// (FEEL1b): [`Sim::arm_weapons`] over the shipped rows. The rows ride
+    /// [`MatchSpec`](crate::MatchSpec), so every peer of one spec arms the
+    /// same list.
+    ///
+    /// # Errors
+    ///
+    /// As [`Sim::arm_weapons`]: rules v1, a started match, a count that is
+    /// not the slot count or an unknown row. Nothing is armed then.
+    pub fn arm_weapons(&mut self, ids: &[&str]) -> Result<(), crate::heft::ArmError> {
+        self.sim.arm_weapons(ids)
+    }
+
+    /// The weapon slot `slot` swings (FEEL1b), or `None` when it is bare.
+    /// Presentation reads the swing startup here; the look never hashes it.
+    #[must_use]
+    pub fn weapon(&self, slot: u8) -> Option<Heft> {
+        self.sim.weapon(slot)
     }
 
     /// Match configuration.
@@ -318,6 +554,14 @@ impl LiveMatch {
     #[must_use]
     pub fn contubernium(&self) -> Option<&Contubernium> {
         self.contubernium.as_ref()
+    }
+
+    /// Arm the ORCA crowd channel (row TC4) before the first tick: every
+    /// AI-driven slot inside the 15 m ring then takes a planar avoidance
+    /// velocity before the collision pass. Rules v2 only; off by default,
+    /// and off leaves every tick and checkpoint byte for byte.
+    pub fn arm_steering(&mut self) -> bool {
+        self.sim.set_steering()
     }
 
     /// Give the contubernium a squad order: `fall in` closes the line up,
@@ -406,6 +650,20 @@ impl LiveMatch {
     #[must_use]
     pub fn stamina(&self, slot: u8) -> Option<u16> {
         self.sim.stamina(slot)
+    }
+
+    /// Read-only fall landings from the last stepped tick (FEEL7), slot
+    /// order: each landed slot's fall height and the health the fall table
+    /// charged. Forwards to [`Sim::landings`](crate::Sim::landings); the
+    /// array is refreshed every step, so an entry lives one tick.
+    ///
+    /// Consumer: `crates/game/src/lib.rs::App::simulate_tick` copies them
+    /// into the tick outcome for the body squash, camera dip and land cue.
+    /// Data owner: this crate's height channel. Units: slot,
+    /// millimetres, permille. Determinism scope: read of tick output.
+    #[must_use]
+    pub fn landings(&self) -> &[Option<crate::FallLanding>; MAX_SLOTS] {
+        self.sim.landings()
     }
 
     /// Read-only press-tick attack cues from the last stepped tick (EG19b):
@@ -765,6 +1023,9 @@ impl LivePresentation {
         sim.breaks = Vec::with_capacity(1);
         sim.history = Some(Vec::with_capacity(1));
         sim.loco_history = Some((0..fighters).map(|_| Vec::with_capacity(2)).collect());
+        // RC36: recording ticks carry pose work, so they fork the per-fighter
+        // leg over the process pool; authority ticks stay inline and heap-free.
+        sim.pool = Some(engine_ecs::pool::shared());
         Some(Self {
             sim,
             tape: FighterTape(Vec::with_capacity(MAX_SLOTS)),
@@ -947,6 +1208,92 @@ mod tests {
         let start = tape.0.partition_point(|input| input.tick < tick);
         let end = tape.0.partition_point(|input| input.tick <= tick);
         &tape.0[start..end]
+    }
+
+    /// FEEL1b: the live match arms one row per slot before tick 0, and the
+    /// law of the sim holds through the wrapper: rules v2 only, a full list,
+    /// known rows, before the first step.
+    #[test]
+    fn live_match_arms_one_weapon_row_per_slot_before_tick_zero() {
+        let config = ArenaConfig::try_new(7, 60, 2, 20.0).expect("valid config");
+        let mut duel = MatchSpec::duel(config, MatchWorld::empty())
+            .live()
+            .expect("duel");
+        assert!(duel.weapon(0).is_none(), "bare until armed");
+        duel.arm_weapons(&["pugio", "clava"]).expect("the rows arm");
+        assert_eq!(duel.weapon(0).map(|w| w.startup_ticks), Some(12));
+        assert_eq!(duel.weapon(1).map(|w| w.startup_ticks), Some(21));
+        assert_eq!(duel.weapon(2), None, "off the match is bare");
+        duel.step(&[]).expect("the duel steps");
+        assert!(
+            duel.arm_weapons(&["pugio", "clava"]).is_err(),
+            "arming is before the first tick"
+        );
+        let mut v1 = MatchSpec::v1(config).live().expect("v1");
+        assert!(
+            v1.arm_weapons(&["pugio", "clava"]).is_err(),
+            "v1 cannot arm"
+        );
+        let mut short = MatchSpec::duel(config, MatchWorld::empty())
+            .live()
+            .expect("duel");
+        assert!(short.arm_weapons(&["pugio"]).is_err(), "one row per slot");
+        assert!(
+            short.arm_weapons(&["no-such-row", "clava"]).is_err(),
+            "unknown rows are refused"
+        );
+    }
+
+    /// FEEL1b: the same two armed slots swing their own startup. The pugio
+    /// hits on tick 12, the clava on tick 21; each bout presses once so the
+    /// first blow does not interrupt the other's swing.
+    #[test]
+    fn an_armed_duel_lands_the_clava_nine_ticks_after_the_pugio() {
+        let config = ArenaConfig::try_new(7, 60, 2, 20.0).expect("valid config");
+        let mut first = [0u32; 2];
+        for (attacker, slot) in [(0u8, 0usize), (1, 1)] {
+            let mut live = MatchSpec::duel(config, MatchWorld::empty())
+                .with_weapons(&["pugio", "clava"])
+                .live()
+                .expect("armed duel");
+            // Arm's length, the shipped duel's reach: the attacker stands at
+            // the origin facing +z, the victim 1 m ahead, so either slot can
+            // be the swinger without turning.
+            let (swinger, victim) = (usize::from(attacker), usize::from(attacker ^ 1));
+            live.sim.states[swinger].pos = [0.0, 0.0, 0.0];
+            live.sim.states[victim].pos = [0.0, 0.0, 1.0];
+            let mut hit = None;
+            for tick in 0..40 {
+                let inputs: Vec<FighterInput> = (0..2u8)
+                    .map(|fighter| FighterInput {
+                        tick,
+                        fighter: FighterId(fighter),
+                        mx: 0,
+                        mz: 0,
+                        facing: 0,
+                        buttons: if fighter == attacker && tick == 0 {
+                            Buttons(ATTACK)
+                        } else {
+                            Buttons::NONE
+                        },
+                    })
+                    .collect();
+                let stepped = live.step(&inputs).expect("the duel steps");
+                if stepped.events.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        crate::FightEvent::Hit { attacker: who, .. } if *who == attacker
+                    )
+                }) {
+                    hit = Some(stepped.events.tick);
+                    break;
+                }
+            }
+            first[slot] = hit.expect("the armed blow lands");
+        }
+        assert_eq!(first[0], 12, "the pugio lands on its startup");
+        assert_eq!(first[1], 21, "the clava lands on its startup");
+        assert_eq!(first[1] - first[0], 9, "the club lands nine ticks later");
     }
 
     #[test]
@@ -2090,5 +2437,141 @@ mod spear_tests {
         assert_eq!(live.spear_view().len(), 2);
         live.step(&[]).expect("step");
         assert!(live.spear_events().is_empty());
+    }
+
+    /// Walks slots 0..4 south and slots 4..8 north, so the two lines pass
+    /// straight through each other in four one-metre lanes.
+    #[cfg(not(feature = "sim"))]
+    struct Crossing;
+
+    #[cfg(not(feature = "sim"))]
+    impl crate::controller::SlotController for Crossing {
+        fn controls(&self, slot: u8) -> bool {
+            usize::from(slot) < 8
+        }
+
+        fn control(&mut self, _: &crate::controller::ControlView<'_>, row: &mut [FighterInput]) {
+            for (slot, input) in row.iter_mut().enumerate() {
+                input.mx = 0;
+                input.mz = if slot < 4 { -100 } else { 100 };
+                input.facing = 0;
+                input.buttons = Buttons::NONE;
+            }
+        }
+    }
+
+    /// Eight slots on two facing lines of four lanes, each walking straight
+    /// through the other line for the whole run; returns the checkpoints and
+    /// the summed collision push in millimetres (the displacement beyond the
+    /// walk and the ORCA correction).
+    #[cfg(not(feature = "sim"))]
+    fn orca_crossing(armed: bool) -> (Vec<Checkpoint>, f64) {
+        const TICKS: u32 = 120;
+        let config = ArenaConfig::try_new(2040, TICKS, 8, 20.0).expect("valid config");
+        let mut sim = Sim::build(&config, &FighterTape::default(), false, false).expect("build");
+        assert!(sim.set_rules(ArenaRules::v2_free_for_all()));
+        if armed {
+            assert!(sim.set_steering(), "v2 arms the ORCA channel");
+        }
+        for (slot, state) in sim.states.iter_mut().enumerate() {
+            let x = [-1.5, -0.5, 0.5, 1.5][slot % 4];
+            let z = if slot < 4 { 4.0 } else { -4.0 };
+            state.pos = [x, 0.0, z];
+        }
+        sim.trace = Some(Vec::new());
+        let mut push_mm = 0.0f64;
+        let mut checkpoints = Vec::with_capacity(TICKS as usize);
+        while sim.tick < config.ticks {
+            let before: Vec<[f32; 3]> = sim.states.iter().map(|state| state.pos).collect();
+            sim.step_with(&FighterTape::default(), Some(&mut Crossing))
+                .expect("crossing step");
+            let trace = sim
+                .trace
+                .as_ref()
+                .and_then(|rows| rows.last())
+                .expect("row");
+            let applied = sim
+                .steer
+                .as_ref()
+                .map(|steering| steering.applied)
+                .unwrap_or([[0; 2]; MAX_SLOTS]);
+            for (slot, state) in sim.states.iter().enumerate() {
+                let moved = [
+                    state.pos[0] - before[slot][0],
+                    state.pos[2] - before[slot][2],
+                ];
+                let push = [
+                    moved[0] - trace[slot].resolved[0] - applied[slot][0] as f32 / 1000.0,
+                    moved[1] - trace[slot].resolved[1] - applied[slot][1] as f32 / 1000.0,
+                ];
+                push_mm += f64::from((push[0] * push[0] + push[1] * push[1]).sqrt());
+            }
+            checkpoints.push(*sim.checkpoints.last().expect("checkpoint"));
+        }
+        (checkpoints, push_mm)
+    }
+
+    #[cfg(not(feature = "sim"))]
+    #[test]
+    fn orca_steering_halves_push_apart_for_eight_crossing_slots() {
+        let (first, armed_push) = orca_crossing(true);
+        let (again, _) = orca_crossing(true);
+        assert_eq!(first, again, "the armed run hashes twice the same");
+        let (_, plain_push) = orca_crossing(false);
+        assert!(plain_push > 0.0, "the unarmed crossing shoves bodies");
+        assert!(
+            armed_push <= 0.5 * plain_push,
+            "ORCA left {armed_push:.1} mm of push against {plain_push:.1} mm unarmed"
+        );
+        println!("orca crossing push: {armed_push:.1} mm armed vs {plain_push:.1} mm unarmed");
+    }
+
+    #[cfg(not(feature = "sim"))]
+    #[test]
+    fn orca_live_match_arms_the_same_step_as_the_whole_match() {
+        let config = ArenaConfig::try_new(2040, 240, 8, 20.0).expect("valid config");
+        let rules = ArenaRules::v2_free_for_all();
+        let tape = FighterTape::default();
+        // Every body overlaps every other one, so ORCA must change the very
+        // first tick; a loose spawn could keep the two hashes equal.
+        let cluster = |sim: &mut Sim| {
+            for (slot, state) in sim.states.iter_mut().enumerate() {
+                state.pos = [
+                    [-0.3, -0.1, 0.1, 0.3][slot % 4],
+                    0.0,
+                    if slot < 4 { -0.1 } else { 0.1 },
+                ];
+            }
+        };
+        let mut whole = Sim::build(&config, &tape, false, false).expect("build");
+        assert!(whole.set_rules(rules));
+        assert!(whole.set_steering(), "v2 arms it");
+        assert!(!whole.set_steering(), "arming once is enough");
+        cluster(&mut whole);
+        while whole.tick < config.ticks {
+            whole.step(&tape).expect("step");
+        }
+        let mut live = LiveMatch::with_rules(&config, rules).expect("live match");
+        assert!(live.arm_steering(), "the live match arms the sim channel");
+        assert!(!live.arm_steering(), "armed once");
+        cluster(&mut live.sim);
+        let mut live_checkpoints = Vec::new();
+        for _ in 0..config.ticks {
+            live_checkpoints.push(live.step(&[]).expect("live step").checkpoint);
+        }
+        assert_eq!(live_checkpoints, whole.checkpoints, "same step, same hash");
+        let mut plain = LiveMatch::with_rules(&config, rules).expect("live match");
+        cluster(&mut plain.sim);
+        let mut plain_checkpoints = Vec::new();
+        for _ in 0..config.ticks {
+            plain_checkpoints.push(plain.step(&[]).expect("live step").checkpoint);
+        }
+        assert_ne!(live_checkpoints, plain_checkpoints, "the channel folds in");
+        // v1 rows have no crowd channel, and arming is before the first tick.
+        let mut v1 = Sim::build(&config, &tape, false, false).expect("build");
+        assert!(!v1.set_steering(), "v1 rows refuse the channel");
+        let mut late = LiveMatch::with_rules(&config, rules).expect("live match");
+        late.step(&[]).expect("first tick");
+        assert!(!late.arm_steering(), "arming is before the first tick");
     }
 }

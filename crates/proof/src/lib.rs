@@ -62,6 +62,13 @@ pub mod tape;
 pub mod tape_fuzz;
 pub mod trace;
 
+#[cfg(kani)]
+#[path = "../kani/mod.rs"]
+mod kani_harness;
+
+#[cfg(test)]
+mod kani_kernels;
+
 /// Frozen no-input, seed-2040, 600-tick regression checksum.
 pub const GOLDEN_600: u64 = 0xd57b5c8ae3096614;
 /// Change when the fixture's initialization, rules or full-state encoding changes.

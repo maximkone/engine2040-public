@@ -35,20 +35,68 @@ use crate::{
     BALANCE_FALL_Q8, BALANCE_HIT_Q8, BALANCE_PARRY_Q8, FIGHTER_GRAVITY, FIGHT_RULES_V1, MAX_SLOTS,
 };
 
+/// One authoritative landing for a tick (FEEL7): the slot, the fall height
+/// estimated from the impact speed in mm, and the health the fall table
+/// charged in permille. Presentation reads it for the body squash, camera
+/// dip and land cue; the health is already off the fight by then.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FallLanding {
+    /// Fighter slot index, `0..fighters`.
+    pub slot: u8,
+    /// Fall height estimated from the impact speed: `v^2 / (2g)` in mm.
+    pub fall_mm: u32,
+    /// Health cost the fall table charged, in permille (`0` under rules v1).
+    pub damage: u16,
+}
+
+/// The fall table (FEEL7): at or above each height, the health it costs in
+/// permille. A jump apex is about 0.4 m and stays below the first row; a 4 m
+/// fall costs a quarter of the pool. Rules v1 never reads it, so the golden
+/// bytes stay frozen.
+pub const FALL_DAMAGE_TABLE: [(u32, u16); 5] = [
+    (2_000, 100),
+    (4_000, 250),
+    (6_000, 500),
+    (8_000, 750),
+    (10_000, 1_000),
+];
+
+/// The fall table's health cost for a fall of `fall_mm`: the highest row at
+/// or below it, `0` below the first row.
+#[must_use]
+pub fn fall_damage_permille(fall_mm: u32) -> u16 {
+    let mut damage = 0;
+    for (height, cost) in FALL_DAMAGE_TABLE {
+        if fall_mm >= height {
+            damage = cost;
+        }
+    }
+    damage
+}
+
 /// One tick of the height channel (row SG5): gravity on every slot that is
-/// off the floor, a landing at floor height with the vertical speed cleared.
-/// Integer mm, so a replay lands on the same height twice. Near the apex
+/// off the floor, a landing at floor height with the vertical speed cleared,
+/// and (FEEL7, rules v2 only) the fall table's health cost. Integer mm, so a
+/// replay lands on the same height twice. Near the apex
 /// (`AIR_APEX_MM_TICK`) a held jump halves gravity, the AIN6 table's
 /// float-free copy; the spear swing keeps the plain arc.
 ///
+/// The landing's height comes from the impact speed just before the floor
+/// snap: `v^2 / (2g)`. The floor snap discards the last few mm, so this is
+/// the fall the body actually carried, not the last tick's overshoot.
+///
 /// Shared by the legacy step and the spine step so both tracks land on the
-/// same millimetre.
+/// same millimetre and charge the same table row.
 pub(crate) fn fall_states(
     states: &mut [FighterState],
     rise: &mut [i32],
     fighters: usize,
     last_inputs: &[Option<FighterInput>; MAX_SLOTS],
-) {
+    fight: &mut FightState,
+    rules: &ArenaRules,
+) -> [Option<FallLanding>; MAX_SLOTS] {
+    let mut landings: [Option<FallLanding>; MAX_SLOTS] = [None; MAX_SLOTS];
+    let charge_falls = rules.version == crate::FIGHT_RULES_V2;
     for (slot, state) in states.iter_mut().enumerate().take(fighters) {
         let at_mm = match_wire::pos_mm(state.pos)[1];
         if rise[slot] == 0 && at_mm <= 0 {
@@ -68,11 +116,35 @@ pub(crate) fn fall_states(
         if next <= 0 {
             rise[slot] = 0;
             state.pos[1] = 0.0;
+            // The speed at the floor snap is the fall the body carried.
+            let impact = drop.unsigned_abs();
+            let fall_mm = impact
+                .saturating_mul(impact)
+                .saturating_add(u32::try_from(FIGHTER_GRAVITY).unwrap_or(0))
+                / u32::try_from(2 * FIGHTER_GRAVITY).unwrap_or(1);
+            let damage = if charge_falls {
+                fall_damage_permille(fall_mm)
+            } else {
+                0
+            };
+            if damage > 0 {
+                if let Some(fighter) = fight.fighters.get_mut(slot) {
+                    fighter.hp_permille = fighter.hp_permille.saturating_sub(damage);
+                }
+            }
+            if fall_mm > 0 {
+                landings[slot] = Some(FallLanding {
+                    slot: slot_id(slot),
+                    fall_mm,
+                    damage,
+                });
+            }
         } else {
             rise[slot] = drop;
             state.pos[1] = match_wire::metres(next);
         }
     }
+    landings
 }
 
 /// EG34: feed one tick's combat outcomes into the integer balance, in event
@@ -378,6 +450,30 @@ pub(crate) fn controller_hash(controllers: &[Controller]) -> u64 {
     hash
 }
 
+impl crate::Sim {
+    /// One tick of the height channel on `sim` (row SG5, FEEL7): gravity, the
+    /// landing and the fall table's charge. The landing rows move to
+    /// [`Sim::landings`](crate::Sim::landings) for the presentation.
+    pub(crate) fn fall(&mut self) {
+        self.landings = fall_states(
+            &mut self.states,
+            &mut self.rise,
+            self.fighters,
+            &self.last_inputs,
+            &mut self.fight,
+            &self.rules,
+        );
+    }
+
+    /// Read-only fall landings from the last stepped tick (FEEL7), slot
+    /// order: the fall height and the health the fall table charged. Cleared
+    /// each tick; presentation only.
+    #[must_use]
+    pub fn landings(&self) -> &[Option<FallLanding>; MAX_SLOTS] {
+        &self.landings
+    }
+}
+
 /// Fighter slot as the `u8` id the contracts carry (slots stay below 32).
 fn slot_id(slot: usize) -> u8 {
     u8::try_from(slot).unwrap_or(u8::MAX)
@@ -450,4 +546,50 @@ pub(crate) fn fold_rules(
         }
     }
     digest.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spawn_states;
+
+    /// Drop one fighter from `height_m` on the floor under `rules` and return
+    /// the landing tick's row plus the fight health left.
+    fn drop_from(height_m: f32, rules: ArenaRules) -> (FallLanding, u16) {
+        let mut states = spawn_states(2040, 2, 20.0);
+        let mut rise = vec![0; states.len()];
+        states[0].pos[1] = height_m;
+        let mut fight = FightState::new(2).expect("two fighters");
+        let inputs = [None; MAX_SLOTS];
+        let mut landed = None;
+        for _ in 0..120 {
+            let tick = fall_states(&mut states, &mut rise, 2, &inputs, &mut fight, &rules);
+            if let Some(landing) = tick[0] {
+                landed = Some(landing);
+                break;
+            }
+        }
+        (
+            landed.expect("the fighter reaches the floor"),
+            fight.fighters[0].hp_permille,
+        )
+    }
+
+    #[test]
+    fn feel7_a_four_metre_fall_charges_the_tables_quarter_and_v1_never_charges() {
+        assert_eq!(fall_damage_permille(1_999), 0);
+        assert_eq!(fall_damage_permille(4_000), 250);
+        assert_eq!(fall_damage_permille(10_000), 1_000);
+        let (landing, hp) = drop_from(4.0, ArenaRules::v2_free_for_all());
+        assert!(
+            (3_900..=4_100).contains(&landing.fall_mm),
+            "impact speed reads a 4 m fall, got {} mm",
+            landing.fall_mm
+        );
+        assert_eq!(landing.damage, 250);
+        assert_eq!(hp, 1_000 - 250, "rules v2 charges the fall table");
+        let (landing, hp) = drop_from(4.0, ArenaRules::V1);
+        assert_eq!(landing.damage, 0);
+        assert_eq!(hp, 1_000, "rules v1 and the golden stay untouched");
+    }
 }

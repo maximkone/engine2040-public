@@ -1,0 +1,30 @@
+engine=float rep=0 steps=500 cpu_ms=93.750 wall_ms=93.710 awake_at_create=112 awake_after=0
+engine=float rep=1 steps=500 cpu_ms=93.750 wall_ms=91.864 awake_at_create=112 awake_after=0
+engine=float rep=2 steps=500 cpu_ms=109.375 wall_ms=110.482 awake_at_create=112 awake_after=0
+engine=float rep=3 steps=500 cpu_ms=125.000 wall_ms=114.728 awake_at_create=112 awake_after=0
+engine=float probe sleep_step=308 awake_at_create=112
+engine=fixed rep=0 steps=500 cpu_ms=531.250 wall_ms=596.532 awake_at_create=112 awake_after=0
+engine=fixed rep=1 steps=500 cpu_ms=578.125 wall_ms=571.420 awake_at_create=112 awake_after=0
+engine=fixed rep=2 steps=500 cpu_ms=406.250 wall_ms=429.708 awake_at_create=112 awake_after=0
+engine=fixed rep=3 steps=500 cpu_ms=375.000 wall_ms=371.953 awake_at_create=112 awake_after=0
+engine=fixed probe sleep_step=404 awake_at_create=112
+engine=float rep=0 steps=500 cpu_ms=93.750 wall_ms=93.644 awake_at_create=112 awake_after=0
+engine=float rep=1 steps=500 cpu_ms=93.750 wall_ms=83.810 awake_at_create=112 awake_after=0
+engine=float rep=2 steps=500 cpu_ms=78.125 wall_ms=93.167 awake_at_create=112 awake_after=0
+engine=float rep=3 steps=500 cpu_ms=78.125 wall_ms=83.931 awake_at_create=112 awake_after=0
+engine=float probe sleep_step=308 awake_at_create=112
+engine=fixed rep=0 steps=500 cpu_ms=390.625 wall_ms=386.669 awake_at_create=112 awake_after=0
+engine=fixed rep=1 steps=500 cpu_ms=343.750 wall_ms=352.566 awake_at_create=112 awake_after=0
+engine=fixed rep=2 steps=500 cpu_ms=421.875 wall_ms=423.869 awake_at_create=112 awake_after=0
+engine=fixed rep=3 steps=500 cpu_ms=437.500 wall_ms=458.648 awake_at_create=112 awake_after=0
+engine=fixed probe sleep_step=404 awake_at_create=112
+engine=float rep=0 steps=500 cpu_ms=93.750 wall_ms=96.292 awake_at_create=112 awake_after=0
+engine=float rep=1 steps=500 cpu_ms=109.375 wall_ms=101.745 awake_at_create=112 awake_after=0
+engine=float rep=2 steps=500 cpu_ms=93.750 wall_ms=98.132 awake_at_create=112 awake_after=0
+engine=float rep=3 steps=500 cpu_ms=93.750 wall_ms=95.654 awake_at_create=112 awake_after=0
+engine=float probe sleep_step=308 awake_at_create=112
+engine=fixed rep=0 steps=500 cpu_ms=343.750 wall_ms=368.416 awake_at_create=112 awake_after=0
+engine=fixed rep=1 steps=500 cpu_ms=359.375 wall_ms=357.544 awake_at_create=112 awake_after=0
+engine=fixed rep=2 steps=500 cpu_ms=359.375 wall_ms=366.507 awake_at_create=112 awake_after=0
+engine=fixed rep=3 steps=500 cpu_ms=375.000 wall_ms=371.408 awake_at_create=112 awake_after=0
+engine=fixed probe sleep_step=404 awake_at_create=112

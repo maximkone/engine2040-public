@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::canon::valid_name;
-use crate::spatial_glue::{quat_of_yaw, yaw_of_quat};
+use crate::spatial_glue::quat_of_yaw;
 use engine_editor::commands::{self, Batch, CommandMeta, Document, Journal, Op, ProvenanceStamp};
 use engine_scene::ids::ObjectId;
 use engine_scene::transform::Transform;
@@ -385,66 +385,6 @@ fn want_text(want: &Want) -> String {
         None => format!("{} {target}", relation_word(want.relation)),
         Some((lo, hi)) => format!("{} {target} [{lo},{hi}]", relation_word(want.relation)),
     }
-}
-
-/// Sorted-id snapshot of every node with a finite world position. Sizes ride
-/// the node scale (sanitized to positive finite, else a unit cube); the wire
-/// order never moves, so the same document always maps to the same actors.
-fn snapshot(doc: &Document) -> (Vec<Actor>, Vec<ObjectId>) {
-    let mut order: Vec<ObjectId> = Vec::new();
-    let mut stack = doc.hierarchy.roots();
-    while let Some(id) = stack.pop() {
-        order.push(id);
-        stack.extend(doc.hierarchy.children(id));
-    }
-    order.sort_by_key(|id| id.to_string());
-    let mut actors = Vec::new();
-    let mut ids = Vec::new();
-    for id in order {
-        let Some(world) = doc.hierarchy.world(id) else {
-            continue;
-        };
-        if !world.position.iter().all(|lane| lane.is_finite()) {
-            continue;
-        }
-        let yaw = if world.rotation.iter().all(|lane| lane.is_finite()) {
-            yaw_of_quat(world.rotation)
-        } else {
-            0.0
-        };
-        let (sx, sy, sz) = doc
-            .hierarchy
-            .local(id)
-            .map(|pose| (pose.scale[0], pose.scale[1], pose.scale[2]))
-            .unwrap_or((1.0, 1.0, 1.0));
-        let sane = |v: f32| v.is_finite() && v > 0.0;
-        let (sx, sy, sz) = (
-            if sane(sx) { sx } else { 1.0 },
-            if sane(sy) { sy } else { 1.0 },
-            if sane(sz) { sz } else { 1.0 },
-        );
-        let index = u32::try_from(actors.len()).unwrap_or(u32::MAX);
-        if index == u32::MAX {
-            break;
-        }
-        ids.push(id);
-        actors.push(Actor {
-            id: index,
-            name: format!("prop_{index:04}"),
-            x: world.position[0],
-            y: world.position[1],
-            z: world.position[2],
-            sx,
-            sy,
-            sz,
-            parent: None,
-            physical: true,
-            vx: 0.0,
-            vz: 0.0,
-            yaw,
-        });
-    }
-    (actors, ids)
 }
 
 /// One solved placement in meters, yaw radians.
@@ -1009,7 +949,7 @@ pub fn apply_brief(
     seed: u64,
     key: u64,
 ) -> Result<IntentReceipt, IntentError> {
-    let (existing, _) = snapshot(doc);
+    let (existing, _) = engine_editor::spatial_view::actors(doc);
     let compiled = compile(ops, &existing, seed)?;
     let by_id: BTreeMap<u32, &Placement> = compiled.placements.iter().map(|p| (p.id, p)).collect();
     // Inserts in actor order (walls first, then brief order): deterministic.
@@ -1436,7 +1376,7 @@ mod tests {
     }
 
     fn staged_actors(doc: &Document) -> Vec<Actor> {
-        snapshot(doc).0
+        engine_editor::spatial_view::actors(doc).0
     }
 
     #[test]

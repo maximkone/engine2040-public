@@ -5,7 +5,9 @@ use super::super::mcp::{SceneReadArgs, SceneReadTool};
 use super::*;
 use engine_editor::capability::Capability;
 use engine_editor::commands::Journal;
-use engine_scene::component::{AssetName, Collider, ColliderShape, Component, Mesh};
+use engine_scene::component::{
+    AssetName, Collider, ColliderShape, Component, Light, LightKind, Mesh,
+};
 
 /// One staged node: where, and which components.
 #[derive(Clone, Copy, Default)]
@@ -14,6 +16,8 @@ pub(crate) struct Node {
     pub(crate) mesh: Option<&'static str>,
     /// Collider half extents in meters.
     pub(crate) collider: Option<[f32; 3]>,
+    /// Light family and reach in meters (SP66 fixtures).
+    pub(crate) light: Option<(LightKind, f32)>,
 }
 
 pub(crate) fn at(x: f32, z: f32) -> Node {
@@ -56,6 +60,17 @@ pub(crate) fn door(nodes: &[Node]) -> McpServer {
                     shape: ColliderShape::Box,
                     half,
                     sensor: false,
+                }),
+            });
+        }
+        if let Some((kind, range)) = node.light {
+            ops.push(Op::SetComponent {
+                id,
+                component: Component::Light(Light {
+                    kind,
+                    color: [1.0; 3],
+                    intensity: 1.0,
+                    range,
                 }),
             });
         }
@@ -389,4 +404,62 @@ fn spatial_brief_folds_forty_look_alikes_and_lists_the_stray() {
     )
     .expect("brief reads again");
     assert_eq!(again.text, brief.text);
+}
+
+// SP66: light reach through the door. The nodes no light reaches and the ones
+// no range could be read for stay apart, the digest repeats, and a scene with
+// no light reports nothing at all.
+#[test]
+fn light_reach_lists_dark_nodes_through_the_door() {
+    let server = door(&[
+        Node {
+            light: Some((LightKind::Point, 2.0)),
+            ..at(0.0, 0.0)
+        },
+        at(10.0, 0.0),
+        at(11.0, 0.0),
+    ]);
+    let out = spatial(&server, SceneSpatialArgs::default()).expect("spatial reads");
+    let light = out.light.expect("a light reports reach");
+    assert_eq!(light.judged, 3);
+    assert_eq!(light.lit, 1);
+    assert_eq!(light.dark, vec![1, 2]);
+    assert!(light.unknown.is_empty());
+    // Read twice: the same scene answers the same way, ids included.
+    let again = spatial(&server, SceneSpatialArgs::default()).expect("spatial reads again");
+    assert_eq!(again.light.expect("still a light"), light);
+    // The brief carries the same answer as one row, dark and unknown apart.
+    let brief = SceneBriefTool::invoke(&server, SceneBriefArgs::default()).expect("brief reads");
+    assert!(
+        brief
+            .text
+            .contains("lights: lit=1 judged=3 unplaced=0 dark=1,2 unknown=-"),
+        "{}",
+        brief.text
+    );
+}
+
+#[test]
+fn light_reach_reads_a_zero_range_as_unknown_not_dark() {
+    let server = door(&[
+        Node {
+            light: Some((LightKind::Spot, 0.0)),
+            ..at(0.0, 0.0)
+        },
+        at(10.0, 0.0),
+    ]);
+    let out = spatial(&server, SceneSpatialArgs::default()).expect("spatial reads");
+    let light = out.light.expect("a light reports reach");
+    assert!(light.dark.is_empty(), "unknown, never dark: {light:?}");
+    assert_eq!(light.unknown, vec![0, 1]);
+    assert_eq!(light.lit, 0);
+}
+
+#[test]
+fn light_reach_a_scene_with_no_light_reports_none() {
+    let server = door(&[at(0.0, 0.0)]);
+    let out = spatial(&server, SceneSpatialArgs::default()).expect("spatial reads");
+    assert!(out.light.is_none());
+    let brief = SceneBriefTool::invoke(&server, SceneBriefArgs::default()).expect("brief reads");
+    assert!(!brief.text.contains("lights: "), "{}", brief.text);
 }

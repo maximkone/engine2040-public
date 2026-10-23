@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { FRAME_P95_BAR_MS, GREEN_MAX_AGE_HOURS, bookBuildVerdict, driftVerdict, findPendingSnapshots, frameCsvVerdict, gpuLiveLine, gpuLiveReceipt, goldenBuildLine, goldenProfile, junitLabel, legVerdict, ranAtLeastOneTest, recordGreen, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, parityVerdict, parseParityLine, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestReceiptPath, nextestTestCommand, packageNameOf, parseProofArgs, PENDING_SNAPSHOT_SUFFIX, pendingSnapshotVerdict, runsToolTests, toolTestSummary } from "./proof.mjs";
+import { FRAME_P95_BAR_MS, GREEN_MAX_AGE_HOURS, PLAYABLE_GATES, PLAYABLE_LABELS, PLAYABLE_RECORD_PATHS, bookBuildVerdict, driftVerdict, findPendingSnapshots, frameCsvVerdict, gpuLiveLine, gpuLiveReceipt, goldenBuildLine, goldenProfile, junitLabel, legVerdict, playableGateVerdict, playableReport, playableVerdict, ranAtLeastOneTest, readPlayableRecords, recordGreen, GOLDEN_VERIFY_RUNS, changedCrateDirs, goldenVerdict, hasNextestProfile, irGateVerdict, parityVerdict, parseParityLine, NEXTEST_CONFIG, NEXTEST_PROFILE, nextestFlakeSummary, nextestReceiptPath, nextestTestCommand, packageNameOf, parseProofArgs, PENDING_SNAPSHOT_SUFFIX, pendingSnapshotVerdict, runsToolTests, toolTestSummary } from "./proof.mjs";
 
 test("parseProofArgs: empty and single-flag runs pass through", () => {
   assert.deepEqual(parseProofArgs([]), []);
@@ -456,5 +456,148 @@ test("findPendingSnapshots: nested pending files are found, target and .git are 
     assert.equal(findPendingSnapshots(join(dir, "nothing-here")).length, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// AD22 playable verdict fixtures: one record per gate, every stamp hours before
+// NOW so freshness is judged against a fixed clock.
+const PLAYABLE_NOW = new Date("2026-10-23T00:00:00.000Z");
+const playableIso = (h) => new Date(PLAYABLE_NOW.getTime() - h * 3_600_000).toISOString();
+const PLAYABLE_CONTEXT = { head: HEAD, isAncestor: () => false, now: PLAYABLE_NOW };
+const STAGE_RECEIPT = {
+  files: [
+    { rel: "bin/arena.exe", bytes: 1024, fnv: "0123456789abcdef" },
+    { rel: "content/arena-bundle.bin", bytes: 2048, fnv: "fedcba9876543210" },
+  ],
+  mtime: playableIso(1),
+};
+const CLEAN_RUN_RECEIPT = {
+  started: playableIso(1),
+  exit: 0,
+  ticks: 18000,
+  frames: 18000,
+  proof_matches: true,
+  smoke: "arena smoke: ticks=18000 frames=18000 hud_cells=5",
+};
+const playableGreenRecords = () => ({
+  compile: { gate: "compile", sha: HEAD, time: playableIso(1) },
+  play: { gate: "play", sha: HEAD, time: playableIso(1) },
+  "save-reopen": { gate: "save-reopen", sha: HEAD, time: playableIso(1) },
+  package: { ...STAGE_RECEIPT },
+  "packaged-launch": { ...CLEAN_RUN_RECEIPT },
+  "packaged-smoke": { ...CLEAN_RUN_RECEIPT },
+});
+
+test("playableVerdict: all six gates passing PASSes and every line names its gate", () => {
+  const verdict = playableVerdict(playableGreenRecords(), PLAYABLE_CONTEXT);
+  assert.equal(verdict.ok, true, verdict.lines.join("\n"));
+  assert.equal(verdict.gates.length, 6);
+  assert.deepEqual(verdict.gates.map((gate) => gate.gate), ["compile", "play", "save-reopen", "package", "packaged-launch", "packaged-smoke"]);
+  for (const gate of PLAYABLE_GATES) assert.ok(verdict.lines.some((line) => line.includes(gate)), `a line names ${gate}`);
+  assert.match(verdict.gates.find((gate) => gate.gate === "play").line, /play with 0 errors/);
+  assert.match(verdict.gates.find((gate) => gate.gate === "save-reopen").line, /save then reopen/);
+  assert.equal(verdict.lines.at(-1), "RESULT PASS (playable, six gates)");
+});
+
+test("playableVerdict: a stub with package not_wired FAILs and names package", () => {
+  const verdict = playableVerdict({ ...playableGreenRecords(), package: null }, PLAYABLE_CONTEXT);
+  assert.equal(verdict.ok, false);
+  const line = verdict.gates.find((gate) => gate.gate === "package").line;
+  assert.match(line, /not_wired/);
+  assert.match(line, /package/);
+  assert.equal(verdict.lines.at(-1), "RESULT FAIL (playable)");
+});
+
+test("playableVerdict: a stale record FAILs the gate that reads it", () => {
+  const records = playableGreenRecords();
+  records.compile = { ...records.compile, time: playableIso(GREEN_MAX_AGE_HOURS + 0.5) };
+  const verdict = playableVerdict(records, PLAYABLE_CONTEXT);
+  assert.equal(verdict.ok, false);
+  const line = verdict.gates.find((gate) => gate.gate === "compile").line;
+  assert.match(line, /25\.5 h old/);
+  assert.match(line, /compile/);
+});
+
+test("playableVerdict: a green record cannot make a missing gate pass", () => {
+  const records = playableGreenRecords();
+  delete records["packaged-smoke"];
+  const verdict = playableVerdict(records, PLAYABLE_CONTEXT);
+  assert.equal(verdict.ok, false);
+  const line = verdict.gates.find((gate) => gate.gate === "packaged-smoke").line;
+  assert.match(line, /missing gate/);
+  assert.match(line, /packaged-smoke/);
+});
+
+test("playableGateVerdict: a renamed, copied or red green record FAILs", () => {
+  const copied = { gate: "compile", sha: HEAD, time: playableIso(1) };
+  assert.match(playableGateVerdict("play", copied, PLAYABLE_CONTEXT).line, /record is for gate compile, not play/);
+  assert.match(playableGateVerdict("compile", { ...copied, pass: false }, PLAYABLE_CONTEXT).line, /record is red/);
+  assert.match(playableGateVerdict("compile", { ...copied, ok: false }, PLAYABLE_CONTEXT).line, /record is red/);
+  assert.match(playableGateVerdict("compile", { ...copied, sha: "d".repeat(40) }, PLAYABLE_CONTEXT).line, /neither HEAD nor an ancestor/);
+  assert.equal(playableGateVerdict("compile", { ...copied, pass: true }, PLAYABLE_CONTEXT).ok, true);
+});
+
+test("readPlayableRecords: real AD4, stage and clean-run shapes read, missing and broken read null", () => {
+  const root = mkdtempSync(join(tmpdir(), "proof-playable-"));
+  const paths = Object.fromEntries(PLAYABLE_GATES.map((gate) => [gate, join("records", `${gate}.json`)]));
+  try {
+    mkdirSync(join(root, "records"), { recursive: true });
+    writeFileSync(join(root, "records", "compile.json"), JSON.stringify({ gate: "compile", sha: HEAD, time: playableIso(1) }));
+    writeFileSync(join(root, "records", "play.json"), "not json");
+    writeFileSync(join(root, "records", "package.json"), JSON.stringify({ files: STAGE_RECEIPT.files }));
+    writeFileSync(join(root, "records", "packaged-launch.json"), JSON.stringify(CLEAN_RUN_RECEIPT));
+    writeFileSync(join(root, "records", "packaged-smoke.json"), JSON.stringify(CLEAN_RUN_RECEIPT));
+    const records = readPlayableRecords({ root, paths });
+    assert.equal(records.compile.gate, "compile");
+    assert.equal(records.play, null, "unparseable text reads as no record");
+    assert.equal(records["save-reopen"], null, "a missing file reads as no record");
+    assert.equal(records.package.files.length, 2);
+    assert.match(records.package.mtime, /^\d{4}-\d\d-\d\dT/, "a receipt with no stamp gets the file mtime");
+    assert.equal(records["packaged-launch"].proof_matches, true);
+    assert.equal(PLAYABLE_RECORD_PATHS.package, join("dist", "stage-receipt.json"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("playableGateVerdict: a dry-run or failed clean-run receipt FAILs launch and smoke only", () => {
+  for (const gate of ["packaged-launch", "packaged-smoke"]) {
+    assert.match(playableGateVerdict(gate, { ...CLEAN_RUN_RECEIPT, dry_run: true }, PLAYABLE_CONTEXT).line, /dry run/);
+    assert.match(playableGateVerdict(gate, { ...CLEAN_RUN_RECEIPT, exit: 1 }, PLAYABLE_CONTEXT).line, /exit is 1/);
+  }
+  assert.equal(playableGateVerdict("package", { ...STAGE_RECEIPT }, PLAYABLE_CONTEXT).ok, true, "the package gate does not read the run receipt");
+});
+
+test("playableGateVerdict: package needs bin/arena.exe, real bytes and a 16-hex fnv", () => {
+  const stage = (files) => ({ files, mtime: playableIso(1) });
+  assert.match(playableGateVerdict("package", stage([]), PLAYABLE_CONTEXT).line, /no files/);
+  assert.match(playableGateVerdict("package", stage([{ rel: "content/contents.txt", bytes: 1, fnv: "0".repeat(16) }]), PLAYABLE_CONTEXT).line, /no bin\/arena\.exe/);
+  assert.match(playableGateVerdict("package", stage([{ rel: "bin/arena.exe", bytes: 0, fnv: "0".repeat(16) }]), PLAYABLE_CONTEXT).line, /no bytes/);
+  assert.match(playableGateVerdict("package", stage([{ rel: "bin/arena.exe", bytes: 4, fnv: "xyz" }]), PLAYABLE_CONTEXT).line, /16-hex fnv/);
+  assert.equal(playableGateVerdict("package", stage([{ rel: "bin/arena.exe", bytes: 4, fnv: "ABCDEF0123456789" }]), PLAYABLE_CONTEXT).ok, true);
+});
+
+test("playableGateVerdict: packaged smoke needs a smoke line, ticks and a matching proof", () => {
+  assert.match(playableGateVerdict("packaged-smoke", { ...CLEAN_RUN_RECEIPT, smoke: "" }, PLAYABLE_CONTEXT).line, /no arena smoke line/);
+  assert.match(playableGateVerdict("packaged-smoke", { ...CLEAN_RUN_RECEIPT, smoke: "arena headless smoke: ticks=0 frames=0" }, PLAYABLE_CONTEXT).line, /ticks=0/);
+  assert.match(playableGateVerdict("packaged-smoke", { ...CLEAN_RUN_RECEIPT, proof_matches: false }, PLAYABLE_CONTEXT).line, /proof_matches is false/);
+  assert.equal(playableGateVerdict("packaged-smoke", { ...CLEAN_RUN_RECEIPT, smoke: "arena headless smoke: ticks=120 frames=120" }, PLAYABLE_CONTEXT).ok, true);
+});
+
+test("playableReport: prints six gate lines and one result line, and reports the same verdict", () => {
+  const root = mkdtempSync(join(tmpdir(), "proof-playable-report-"));
+  const paths = Object.fromEntries(PLAYABLE_GATES.map((gate) => [gate, join("records", `${gate}.json`)]));
+  const printed = [];
+  const original = console.log;
+  console.log = (line) => printed.push(line);
+  try {
+    const verdict = playableReport({ root, paths, head: HEAD, isAncestor: () => false, now: PLAYABLE_NOW });
+    assert.equal(verdict.ok, false, "nothing was written, so every gate reports not_wired");
+    assert.equal(printed.length, 7);
+    assert.match(printed[0], /playable compile/);
+    assert.equal(printed.at(-1), "RESULT FAIL (playable)");
+  } finally {
+    console.log = original;
+    rmSync(root, { recursive: true, force: true });
   }
 });

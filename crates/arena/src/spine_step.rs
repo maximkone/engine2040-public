@@ -853,7 +853,14 @@ fn after_motion(core: &mut Core, n: usize) {
     // before the spear, so a swing constrains a body that has already fallen
     // this tick. Off means the floor plane, untouched.
     if core.height {
-        authority::fall_states(&mut core.states[..n], &mut core.rise, n, &core.last_inputs);
+        let _ = authority::fall_states(
+            &mut core.states[..n],
+            &mut core.rise,
+            n,
+            &core.last_inputs,
+            &mut core.fight,
+            &core.rules,
+        );
     }
     // Spear grapple: throws, flights, tether physics and the bodies it
     // drags, between the walking and the collision pass. Frozen with

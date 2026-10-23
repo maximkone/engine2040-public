@@ -20,7 +20,7 @@
 
 use std::fmt;
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 use crate::present::Presenter;
 use crate::present::{DrawItem, DrawList, MeshKey};
 use crate::v1;
@@ -192,7 +192,7 @@ pub fn twin_fighter_material(slot: u8) -> v1::PbrMaterial {
 }
 
 /// Upload one body per staged slot (`0..count`): skinned `0..3`, boxes after.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn stage_twin_fighters(presenter: &mut Presenter, count: u8) -> Result<usize, TwinBodyError> {
     check_count(count)?;
     let mut uploaded = 0usize;

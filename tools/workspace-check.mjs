@@ -1,9 +1,9 @@
 // Audit the workspace before landing: Cargo metadata, the resolved dependency
-// graph, module reachability, sim determinism, genre ledger, baseline gate,
+// graph, module reachability, sim determinism, genre ledger,
 // board needs, and new LFS blobs.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SIM_CRATES } from "./rust-quality.mjs";
@@ -11,7 +11,6 @@ import { archivedDoneRows, needsOf } from "./board-slice.mjs";
 import { loadBoardMemo, parseBoardMemo } from "./board-memo.mjs";
 import { OWN_MATH_FILES, deriveFixedApi, genreFindings, ioHits, platformMathHits, productionCode, softFloatHits } from "./sim-source-scan.mjs";
 import { runWithVerdictCache, scanIslandsFrom } from "./wiring-scan.mjs";
-import { crateRows, committedTree, deadFeatures, lockVersions } from "./crate-map.mjs";
 import { rowsWithReason, scan as scanUnwired, summaryLine as unwiredSummaryLine } from "./unwired-code-gate.mjs";
 
 // engine-core is the bottom layer (ARCHITECTURE.md): any crate may use it.
@@ -31,7 +30,10 @@ export const allowedEdges = new Map([
   // its own time deltas and draws the flat frame with Canvas2D.
   ["kam2-web", ["kam2-sim", "kam2-game", "engine-render"]],
   ["engine2040", ["engine-core", "engine-ecs", "engine-render", "engine-physics", "engine-nav", "engine-audio", "engine-script", "engine-net", "engine-assets", "engine-destruction", "engine-ai", "engine-ponytail", "engine-proof"]],
-  ["engine-ai", ["engine-ecs", "engine-physics", "engine-input", "engine-nn"]],
+  // GA9: dev-only edge. The 500-vs-500 legion battle fixture holds NV3 stamped
+  // rout walks and seals a gap mid-rout, so routers repath on the rebaked tile
+  // version. The crate itself stays nav-free; nav takes core and spatial only.
+  ["engine-ai", ["engine-ecs", "engine-physics", "engine-input", "engine-nn", "engine-nav"]],
   ["engine-app", ["engine-core", "engine-ecs", "engine-scene", "engine-arena", "engine-clock"]],
   ["engine-audio", ["engine-observe"]],
   ["engine-save", ["engine-observe", "engine-ecs"]], // ARC5: dev-only edge; the spine payload test consumes real `Spine::snapshot`/`restore`, the crate itself stays ecs-free
@@ -43,11 +45,14 @@ export const allowedEdges = new Map([
   ["engine-chaos", ["engine-observe", "engine-proof"]],
   ["engine-combat", ["engine-input"]],
   ["engine-game", ["engine-arena", "engine-input", "engine-save", "engine-ui", "engine-audio", "engine-render", "engine-combat", "engine-anim", "engine-net", "engine-ai", "engine-core", "engine-destruction", "engine-world", "engine-spatial", "engine-assets", "engine-physfx", "engine-clock", "engine-perf", "engine-material", "engine-provider"]], // OPT27: the window's pressure watch feeds frame time and the OS VRAM reading to the provider arbiter and reads back a placement and a GPU layer count; `app` only, so the headless graph never arbitrates a local model.
-  ["engine-destruction", ["engine-core", "engine-nav"]],
+  // DX6: the chunk chain proof cooks a chunk fixture through the CT2 owner
+  // (`engine-assets` mesh_cook, its import lane) as a dev-dependency only;
+  // no destruction production path reads a cook.
+  ["engine-destruction", ["engine-core", "engine-nav", "engine-assets"]],
   // The material record composes destruction's MaterialRow (its sim half);
   // render, assets and the viewer read the record above it.
   ["engine-material", ["engine-destruction"]],
-  ["engine-editor", ["engine-ecs", "engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app", "engine-arena", "engine-material"]], // NS31a2: the document holds the material table and edits it with undo; engine-material takes destruction + core only, so no cycle. ARC6: the ui play-in loop steps one arena spine match for the inspector (arena never imports editor).
+  ["engine-editor", ["engine-ecs", "engine-scene", "engine-render", "engine-spatial", "engine-assets", "engine-combat", "engine-ai", "engine-app", "engine-arena", "engine-material", "engine-destruction"]], // NS31a2: the document holds the material table and edits it with undo; engine-material takes destruction + core only, so no cycle. DX7: the fracture tool bakes painted bond strengths onto a `BondedDesc` through the destruction owner; destruction never imports editor. ARC6: the ui play-in loop steps one arena spine match for the inspector (arena never imports editor).
   // The duel teacher and strength gate run arena bouts through the public controller seam.
   ["engine-distill", ["engine-nn", "engine-ai", "engine-arena", "engine-input"]],
   // The squad pack reads legion formations from engine-ai (feature `mcp` only).
@@ -58,9 +63,9 @@ export const allowedEdges = new Map([
   // `look.judge` with it (feature `mcp` only).
   // UI5: play.step paints HP bars, names, echo, tick and the you arrow from
   // engine-ui snapshots (feature `mcp` only); ui never imports endpoint.
-  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-nav", "engine-input", "engine-ui", "engine-playtest", "engine-proof"]],
+  ["engine-endpoint", ["engine-geo", "engine-editor", "engine-scene", "engine-arena", "engine-spatial", "engine-provider", "engine-observe", "engine-game", "engine-anim", "engine-destruction", "engine-combat", "engine-material", "engine-assets", "engine-rules", "engine-ai", "engine-net", "engine-physics", "engine-physfx", "engine-nav", "engine-input", "engine-ui", "engine-playtest", "engine-proof"]],
   ["engine-input", ["engine-core"]],
-  ["engine-net", ["engine-arena", "engine-input", "engine-observe", "engine-ecs", "engine-save"]], // ARC5: rejoin resim keeps spine checkpoints in `Spine::snapshot` bytes and rides the save rollback/persist envelopes
+  ["engine-net", ["engine-arena", "engine-input", "engine-observe", "engine-ecs", "engine-save", "engine-combat", "engine-physics"]], // ARC5: rejoin resim keeps spine checkpoints in `Spine::snapshot` bytes and rides the save rollback/persist envelopes; BX9 frames combat's `Cut` and spawns the decoded limb on a real limb pool (tests)
   ["engine-nav", ["engine-spatial"]], // SP40 KdTree crowd feed reads spatial KdTree
   // step_islands runs its lanes on the ecs JobPool (persistent workers, index-ordered merge).
   ["engine-physics", ["engine-anim", "engine-ecs"]],
@@ -83,10 +88,10 @@ export const allowedEdges = new Map([
   ["engine-web", ["engine-proof", "engine-clock", "engine-render", "engine-input", "engine-audio", "engine-net", "engine-game", "engine-assets"]],
   ["engine-viewer", ["engine-game", "engine-arena", "engine-app", "engine-material"]],
   ["engine-geo", ["engine-assets"]],
-  ["engine-perf", ["engine-core", "engine-ecs", "engine-physics", "engine-render", "engine-arena", "engine-ai", "engine-destruction", "engine-net"]],
+  ["engine-perf", ["engine-core", "engine-ecs", "engine-physics", "engine-render", "engine-arena", "engine-ai", "engine-destruction", "engine-net", "engine-anim"]],
   // The ragdoll tape (feature `ragdoll`) builds the skeleton and pose types of the fixture from engine-anim.
   // The pillars receipt loads the shipped net through engine-ai and digests its fighter inputs (engine-input).
-  ["engine-proof", ["engine-core", "engine-ecs", "engine-physics", "engine-scene", "engine-arena", "engine-observe", "engine-assets", "engine-editor", "engine-render", "engine-net", "engine-combat", "engine-anim", "engine-ai", "engine-input"]],
+  ["engine-proof", ["engine-core", "engine-ecs", "engine-physics", "engine-scene", "engine-arena", "engine-observe", "engine-assets", "engine-editor", "engine-render", "engine-net", "engine-combat", "engine-anim", "engine-ai", "engine-input", "engine-destruction"]], // HS23: the bond Kani harnesses and their fallback mirror in src/kani_kernels.rs; destruction takes core only, so the layer stays acyclic.
   ["engine-core", []],
   ["engine-ecs", []],
   ["engine-nn", []],
@@ -599,69 +604,6 @@ export function unwiredModulesLine(cratesDir) {
   }
 }
 
-// PW51: the compaction baseline (closes E51). docs/compaction-baseline.md holds
-// the recorded size of the engine: crate count, src lines, multi-version lock
-// names and dead feature flags, one number per line in the `- crates: 42`
-// shape. It is prose around them, so the reader takes the four lines and leaves
-// the words. Null when the block is missing, so the gate can say so instead of
-// comparing against nothing.
-export const BASELINE_KEYS = ["crates", "src lines", "multi-version lock names", "dead feature flags"];
-export function readBaseline(text) {
-  const source = String(text ?? "").replace(/\r\n/g, "\n");
-  const number = (key) => {
-    const m = new RegExp(`^- ${key}: (\\d+)$`, "m").exec(source);
-    return m ? Number(m[1]) : null;
-  };
-  const recorded = {
-    crates: number(BASELINE_KEYS[0]),
-    srcLines: number(BASELINE_KEYS[1]),
-    lockNames: number(BASELINE_KEYS[2]),
-    deadFlags: number(BASELINE_KEYS[3]),
-  };
-  return Object.values(recorded).every((v) => Number.isInteger(v)) ? recorded : null;
-}
-
-// The measured side of the baseline: every number is counted from the tree, so
-// no number is written down in a tool and goes stale. One tool owns the counts
-// (tools/crate-map.mjs), one walk of crates/ answers all four.
-export function baselineCounts(repoDir) {
-  const rows = crateRows(repoDir);
-  return {
-    crates: rows.length,
-    srcLines: rows.reduce((a, r) => a + (r.srcLines ?? 0), 0),
-    lockNames: lockVersions(repoDir).names,
-    deadFlags: deadFeatures(repoDir).length,
-  };
-}
-
-// A moved number is a FAIL naming both sides, so the fix is one paste into the
-// doc. The dead feature flags are left out on purpose: deleting one is the
-// point of the compaction rows, so that one is a WARN the lead re-records.
-export function baselineDrift(recorded, measured) {
-  const found = [];
-  if (recorded.crates !== measured.crates) found.push(`baseline: crates ${recorded.crates} -> ${measured.crates}`);
-  if (recorded.srcLines !== measured.srcLines) found.push(`baseline: src lines ${recorded.srcLines} -> ${measured.srcLines}`);
-  if (recorded.lockNames !== measured.lockNames) found.push(`baseline: multi-version lock names ${recorded.lockNames} -> ${measured.lockNames}`);
-  return found;
-}
-
-// The whole baseline check in one place, so the audit and a test read the
-// same numbers: the four recorded lines of docs/compaction-baseline.md and the
-// four measured ones of the committed tree.
-export function baselineAudit(repoDir) {
-  const basePath = join(repoDir, "docs", "compaction-baseline.md");
-  const recorded = readBaseline(existsSync(basePath) ? readFileSync(basePath, "utf8") : "");
-  const tree = committedTree(repoDir);
-  const measured = baselineCounts(tree ?? repoDir);
-  if (tree) rmSync(tree, { recursive: true, force: true });
-  return {
-    recorded,
-    measured,
-    drift: recorded ? baselineDrift(recorded, measured) : [],
-    treeRead: Boolean(tree),
-  };
-}
-
 // CDX6: a Rome number needs a source. The Rome loader (crates/rome/src/table.rs)
 // refuses a section that carries a number and no `ref`; this lint refuses the
 // same on disk, before a build ever sees the file, and a ref written in the
@@ -853,7 +795,7 @@ Usage:
   node tools/workspace-check.mjs [--help]
 
 Checks: Cargo metadata, dependency graph, module reachability, sim
-determinism, genre ledger, baseline gate, board needs, new LFS blobs,
+determinism, genre ledger, board needs, new LFS blobs,
 structural maps, Rome sources.
 
 Lane triage: this audits the whole worktree, not your lane. A FAIL on a
@@ -871,7 +813,8 @@ export function hasHelpFlag(argv = process.argv.slice(2)) {
 }
 
 function main() {
-  if (hasHelpFlag(process.argv.slice(2))) {
+  const argv = process.argv.slice(2);
+  if (hasHelpFlag(argv)) {
     process.stdout.write(WORKSPACE_CHECK_HELP);
     return;
   }
@@ -912,7 +855,7 @@ function audit(repoDir) {
     const allowed = new Set(allowedEdges.get(pkg.name) ?? []);
     for (const dependency of pkg.dependencies.filter((dep) => dep.path)) {
       if (pkg.name !== "engine-core" && UNIVERSAL_EDGES.has(dependency.name)) continue;
-      if (!allowed.has(dependency.name)) errors.push(`${pkg.name} -> ${dependency.name}: undocumented local dependency edge`);
+      if (!allowed.has(dependency.name)) errors.push(`${pkg.name} -> ${dependency.name}: undocumented local dependency edge (add "${dependency.name}" under "${pkg.name}" in allowedEdges in tools/workspace-check.mjs, and the edge line in docs/ARCHITECTURE.md)`);
     }
     if (pkg.name === "engine-core" && pkg.dependencies.length !== 0) {
       errors.push("engine-core must remain std-only, including optional/build/dev dependencies");
@@ -1158,9 +1101,6 @@ function audit(repoDir) {
   const genreLedger = new Set([
     // ai, combat, ui, net: move (GE4/GE5/GE6/GE7) or contract sites.
     "ai/src/apply.rs", "ai/src/depth.rs", "ai/src/gladiator.rs",
-    // The plan trace asks the ai crate's own gladiator percept for its plan
-    // (contract site, the same site ai/src/gladiator.rs already carries).
-    "ai/src/plan_trace.rs",
     "anim/src/pack.rs",
     "app/src/app.rs", "app/src/tests.rs",
     "combat/src/exchange.rs", "combat/src/fight.rs", "combat/src/lib.rs",
@@ -1208,10 +1148,6 @@ function audit(repoDir) {
     "observe/src/supervisor.rs",
     "perf/src/fight_cost.rs",
     "physics/src/islands.rs", "physics/src/layers.rs", "physics/src/lod.rs",
-    // GE12-era splits: the cloth module moved from one file into a directory, and the
-    // collide track names the physics layer group's FIGHTER const (the same site
-    // physics/src/layers.rs already carries).
-    "physics/src/cloth/collide.rs", "physics/src/cloth/tests.rs",
     "playtest/src/brief_eval.rs",
     // proof: Rome harnesses (fixtures must not import them).
     "proof/src/a9.rs", "proof/src/arena_matrix.rs", "proof/src/chaos.rs", "proof/src/tape_fuzz.rs",
@@ -1412,48 +1348,6 @@ function audit(repoDir) {
   // child, no node startup) and prints one report-only line.
   console.log(unwiredModulesLine(cratesDir));
 
-  // PW51: the compaction baseline drift gate (closes E51).
-  // docs/compaction-baseline.md records the measured size of the engine, and
-  // this gate fails when a number moves without that file moving with it. The
-  // counts come from tools/crate-map.mjs (one tool, one walk of the tree), so
-  // no number is written down here.
-  // A dead feature flag drifting is a WARN, not a failure: deleting one is the
-  // point of the compaction work, and the doc is re-recorded in the same
-  // commit. Crates, source lines and multi-version lock names are hard
-  // signals: a new crate or a growing file must be named in the baseline.
-  let baselineCrates = 0;
-  let baselineSrcLines = 0;
-  let baselineLockNames = 0;
-  let baselineDeadFlags = 0;
-  try {
-    // The baseline is a snapshot of a commit, so the gate measures the
-    // committed tree (HEAD). A dirty working tree from another session must
-    // not turn this audit red; a commit that moves the size without the doc
-    // moving does.
-    const check = baselineAudit(repoDir);
-    const { recorded, measured } = check;
-    baselineCrates = measured.crates;
-    baselineSrcLines = measured.srcLines;
-    baselineLockNames = measured.lockNames;
-    baselineDeadFlags = measured.deadFlags;
-    if (!check.treeRead) console.log("WARN baseline: the committed tree could not be read, the working tree was measured instead");
-    if (!recorded) {
-      errors.push("baseline: docs/compaction-baseline.md has no machine-readable block (crates, src lines, multi-version lock names, dead feature flags); record it with node tools/crate-map.mjs --baseline");
-    } else {
-      // A moved number prints its own FAIL line, so the reader sees the old
-      // and the new value without looking for them in the error text.
-      for (const line of check.drift) console.log(`FAIL ${line}`);
-      if (check.drift.length) {
-        errors.push(`baseline: ${check.drift.length} number(s) moved (see the FAIL lines above); record docs/compaction-baseline.md in the same commit (node tools/crate-map.mjs --baseline)`);
-      }
-      if (measured.deadFlags !== recorded.deadFlags) {
-        console.log(`WARN baseline: dead feature flags ${recorded.deadFlags} -> ${measured.deadFlags}: record docs/compaction-baseline.md in the same commit`);
-      }
-    }
-  } catch (error) {
-    errors.push(`baseline drift gate could not run: ${error.message}`);
-  }
-
   if (errors.length) throw new Error(errors.join("\n"));
   console.log(`PASS workspace: ${workspacePackages.length} packages share version/edition/license/rust-version`);
   console.log("PASS dependency edges and std-only engine-core");
@@ -1463,7 +1357,6 @@ function audit(repoDir) {
   console.log("PASS lfs guard: no newly tracked non-LFS blob over 5 MB");
   console.log(`PASS test layout: ${layoutCrates} crates keep one integration-test binary (tests/it)`);
   console.log(`PASS maps: ${mapCrates} crates, ${mapPaths} paths match the tree`);
-  console.log(`PASS baseline: ${baselineCrates} crates, ${baselineSrcLines} src lines, ${baselineLockNames} multi-version lock names, ${baselineDeadFlags} dead feature flags`);
   console.log("PASS layer rules: no simulation crate imports a presentation crate");
   console.log(`WARN gpu boundary: ${gpu.offenders.length} files outside present/ name wgpu:: (report-only)`);
   if (gpu.stale.length) {

@@ -12,7 +12,10 @@ use web_sys::HtmlCanvasElement;
 
 use crate::anim::{backing_size, clear_colour, duration_from_ms, FrameStats, Square};
 use crate::golden::{self, Status};
-use crate::limits::{feature_names, limit_rows, required_limits, wanted_features};
+use crate::limits::{
+    choose, feature_names, limit_rows, required_limits, wanted_features, AdapterLimits, Backend,
+    Choice, Probe,
+};
 use crate::recovery::{
     reason_word, Cause, LossBudget, LossNote, LostBox, Verdict, ATTEMPTS, PAUSE_MS,
 };
@@ -147,6 +150,116 @@ pub(crate) async fn raw_adapter_info(gpu: &JsValue) -> [String; 4] {
         ])
     }
     read(gpu).await.unwrap_or_default()
+}
+
+/// The browser's own error name (`OperationError`) for a rejected promise, or its text.
+fn error_name(value: &JsValue) -> String {
+    js_sys::Reflect::get(value, &JsValue::from_str("name"))
+        .ok()
+        .and_then(|name| name.as_string())
+        .filter(|name| !name.is_empty())
+        .or_else(|| value.as_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// `target[name]()` as a promise, awaited. `Err` is the browser's rejection value.
+async fn call0(target: &JsValue, name: &str) -> Result<JsValue, JsValue> {
+    let f: js_sys::Function = js_sys::Reflect::get(target, &JsValue::from_str(name))
+        .and_then(|value| value.dyn_into())
+        .map_err(|_| JsValue::from_str(&format!("{name} is not a function")))?;
+    let promise: js_sys::Promise = f
+        .call0(target)?
+        .dyn_into()
+        .map_err(|_| JsValue::from_str(&format!("{name} did not return a promise")))?;
+    JsFuture::from(promise).await
+}
+
+/// Read one number of a WebGPU limits object. `JSON.stringify` then `parse` keeps the value
+/// exact without a float cast; a value a browser cannot report reads as `0`, which is below.
+fn read_limit(limits: &JsValue, name: &str) -> Option<u32> {
+    let value = js_sys::Reflect::get(limits, &JsValue::from_str(name)).ok()?;
+    let text = js_sys::JSON::stringify(&value).ok()?.as_string()?;
+    text.parse::<u32>().ok()
+}
+
+/// The limits the probe reads out of a `GPUAdapter`'s `limits` object, by WebGPU name.
+fn adapter_limits(adapter: &JsValue) -> AdapterLimits {
+    let limits =
+        js_sys::Reflect::get(adapter, &JsValue::from_str("limits")).unwrap_or(JsValue::UNDEFINED);
+    let read = |name: &str| read_limit(&limits, name).unwrap_or(0);
+    AdapterLimits {
+        max_storage_buffers_per_shader_stage: read("maxStorageBuffersPerShaderStage"),
+        max_storage_textures_per_shader_stage: read("maxStorageTexturesPerShaderStage"),
+        max_bind_groups: read("maxBindGroups"),
+        max_texture_dimension_2d: read("maxTextureDimension2D"),
+        max_compute_invocations_per_workgroup: read("maxComputeInvocationsPerWorkgroup"),
+    }
+}
+
+/// Why `navigator.gpu.requestAdapter` gave no adapter.
+enum AdapterRefusal {
+    /// The request itself failed; this is the browser's error name (`OperationError`).
+    Rejected(String),
+    /// The request resolved with no adapter (`null`).
+    NoAdapter,
+}
+
+impl AdapterRefusal {
+    /// The word the page receipt prints after `adapter request failed: `.
+    fn word(&self) -> &str {
+        match self {
+            Self::Rejected(name) => name,
+            Self::NoAdapter => "null",
+        }
+    }
+}
+
+/// Ask `navigator.gpu` for an adapter as the browser sees it. `Err` is the browser's refusal.
+async fn probe_adapter(gpu: &JsValue) -> Result<JsValue, AdapterRefusal> {
+    match call0(gpu, "requestAdapter").await {
+        Ok(adapter) if adapter.is_object() => Ok(adapter),
+        Ok(_) => Err(AdapterRefusal::NoAdapter),
+        Err(error) => Err(AdapterRefusal::Rejected(error_name(&error))),
+    }
+}
+
+/// Whether the canvas can give a `webgpu` context. A browser with the WebGPU API on can still
+/// answer `null` here (headless Chrome with no compositor), and WebGPU cannot draw then.
+fn has_webgpu_context(canvas: &HtmlCanvasElement) -> bool {
+    matches!(canvas.get_context("webgpu"), Ok(Some(_)))
+}
+
+/// What the page can see about WebGPU, before the first frame. The decision is pure
+/// ([`crate::limits::choose`]); this only asks the browser. The canvas is asked last, and only
+/// when the limits are met: a canvas that holds a `webgpu` context can never then give the
+/// `webgl2` one the fallback needs.
+pub(crate) async fn probe_gpu(canvas: &HtmlCanvasElement) -> Probe {
+    let Some(gpu) = navigator_gpu() else {
+        return Probe::NoNavigatorGpu;
+    };
+    match probe_adapter(&gpu).await {
+        Ok(adapter) => {
+            let limits = adapter_limits(&adapter);
+            if limits.first_below().is_none() && !has_webgpu_context(canvas) {
+                return Probe::NoCanvasContext;
+            }
+            Probe::Adapter(limits)
+        }
+        Err(refusal) => Probe::AdapterFailed {
+            name: refusal.word().to_string(),
+        },
+    }
+}
+
+/// Print the probe's choice before the first frame: one `key=value` line in the console and on
+/// `<body>` (`data-backend`, `data-backend-reason`), so the page receipt names the backend and
+/// why it is not WebGPU. Returns the line.
+pub(crate) fn announce_backend(choice: &Choice) -> String {
+    let line = choice.receipt_line();
+    set_body_attr("data-backend", choice.backend.name());
+    set_body_attr("data-backend-reason", &choice.reason);
+    web_sys::console::log_1(&JsValue::from_str(&line));
+    line
 }
 
 /// Resolves after `ms` milliseconds.
@@ -348,6 +461,129 @@ fn run_loop(mut frame: Frame, canvas_id: String, generation: u32) {
     request_frame(&slot);
 }
 
+/// `gl.COLOR_BUFFER_BIT`: the one WebGL2 clear bit the fallback uses.
+const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+/// `gl.MAX_TEXTURE_SIZE`: how wide the fallback may make the canvas backing store.
+const GL_MAX_TEXTURE_SIZE: u32 = 0x0D33;
+/// Backing-store cap when the WebGL2 context will not say its own (a safe WebGL2 floor).
+const GL_MAX_DIM_FALLBACK: u32 = 4096;
+
+/// `target[name]`, when it is a function (the shell has no typed WebGL2 binding).
+fn gl_function(target: &JsValue, name: &str) -> Option<js_sys::Function> {
+    js_sys::Reflect::get(target, &JsValue::from_str(name))
+        .ok()?
+        .dyn_into()
+        .ok()
+}
+
+/// The WebGL2 fallback's frame: the context that clears the canvas and the frame counter.
+struct GlFrame {
+    canvas: HtmlCanvasElement,
+    gl: js_sys::Object,
+    max_dim: u32,
+    stats: FrameStats,
+}
+
+impl GlFrame {
+    /// Clear the canvas to the same colour the WebGPU square's frame uses, and keep the HUD
+    /// moving, so `data-state=running` still means frames reach the page.
+    fn draw(&mut self, now_ms: f64) {
+        self.stats.tick(now_ms);
+        set_text("hud", &format!("{} | backend=webgl2", self.stats.line()));
+        let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
+        let (w, h) = backing_size(
+            f64::from(self.canvas.client_width()),
+            f64::from(self.canvas.client_height()),
+            dpr,
+            self.max_dim,
+        );
+        if (w, h) != (self.canvas.width(), self.canvas.height()) {
+            self.canvas.set_width(w);
+            self.canvas.set_height(h);
+        }
+        let gl: &JsValue = self.gl.as_ref();
+        if let Some(viewport) = gl_function(gl, "viewport") {
+            let (w, h) = (JsValue::from(w), JsValue::from(h));
+            let _ = viewport.call4(gl, &JsValue::from(0), &JsValue::from(0), &w, &h);
+        }
+        let [r, g, b] = clear_colour(now_ms);
+        if let Some(clear_colour) = gl_function(gl, "clearColor") {
+            let _ = clear_colour.call4(
+                gl,
+                &JsValue::from(r),
+                &JsValue::from(g),
+                &JsValue::from(b),
+                &JsValue::from(1.0),
+            );
+        }
+        if let Some(clear) = gl_function(gl, "clear") {
+            let _ = clear.call1(gl, &JsValue::from(GL_COLOR_BUFFER_BIT));
+        }
+    }
+}
+
+/// Run the WebGL2 fallback's clear on every animation frame.
+fn run_gl_loop(mut frame: GlFrame) {
+    let slot: Rc<FrameSlot> = Rc::new(RefCell::new(None));
+    let again = Rc::clone(&slot);
+    *slot.borrow_mut() = Some(Closure::new(move |now: f64| {
+        frame.draw(now);
+        request_frame(&again);
+    }));
+    request_frame(&slot);
+}
+
+/// Why the WebGL2 fallback could not start after the probe turned WebGPU down.
+enum GlFailure {
+    /// `getContext("webgl2")` threw; this is the browser's error name.
+    Threw(String),
+    /// The canvas gave no WebGL2 context.
+    NoContext,
+}
+
+impl GlFailure {
+    /// The page's one-sentence detail for the fatal line.
+    fn detail(self) -> String {
+        match self {
+            Self::Threw(name) => format!("webgl2 context request failed: {name}"),
+            Self::NoContext => "the canvas has no WebGL2 context either".to_string(),
+        }
+    }
+}
+
+/// Start on WebGL2 when the probe turned WebGPU down: the canvas is cleared through its
+/// `webgl2` context and the HUD keeps counting, so the page still loads and says why it is
+/// not on WebGPU. The lit arena needs WebGPU; this fallback is the page, not the arena.
+fn start_webgl2(canvas: HtmlCanvasElement, receipt: &str) -> Result<String, GlFailure> {
+    let context = canvas
+        .get_context("webgl2")
+        .map_err(|error| GlFailure::Threw(error_name(&error)))?;
+    let Some(gl) = context else {
+        return Err(GlFailure::NoContext);
+    };
+    let max_dim = gl_function(gl.as_ref(), "getParameter")
+        .and_then(|get| {
+            get.call1(gl.as_ref(), &JsValue::from(GL_MAX_TEXTURE_SIZE))
+                .ok()
+        })
+        .and_then(|value| js_sys::JSON::stringify(&value).ok())
+        .and_then(|text| text.as_string())
+        .and_then(|text| text.parse::<u32>().ok())
+        .filter(|dim| *dim > 0)
+        .unwrap_or(GL_MAX_DIM_FALLBACK);
+    let mut frame = GlFrame {
+        canvas,
+        gl,
+        max_dim,
+        stats: FrameStats::default(),
+    };
+    frame.draw(now_ms());
+    set_text("report", receipt);
+    set_state("running");
+    run_gl_loop(frame);
+    Ok(receipt.to_string())
+}
+
 /// Start over after a device loss, on a fresh instance, adapter and device.
 async fn recover(canvas_id: String, generation: u32) {
     recover_with(
@@ -384,14 +620,10 @@ where
 }
 
 /// Everything up to the first frame. `Err` is a failure the page can show, not a crash.
+/// The backend is chosen here, before any GPU object: a probe of what the page can see picks
+/// WebGPU when it is there and its adapter meets the limits, WebGL2 otherwise, and the receipt
+/// line is printed before the first frame.
 async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, String)> {
-    let gpu = navigator_gpu().ok_or_else(|| {
-        (
-            Failure::NoWebGpu,
-            "navigator.gpu is undefined: an older browser, or a page that is neither https nor localhost."
-                .to_string(),
-        )
-    })?;
     let canvas = document()
         .and_then(|d| d.get_element_by_id(canvas_id))
         .and_then(|e| e.dyn_into::<HtmlCanvasElement>().ok())
@@ -401,6 +633,29 @@ async fn start(canvas_id: &str, generation: u32) -> Result<String, (Failure, Str
                 format!("expected <canvas id=\"{canvas_id}\">"),
             )
         })?;
+    let probe = probe_gpu(&canvas).await;
+    let choice = choose(&probe);
+    let receipt = announce_backend(&choice);
+    match choice.backend {
+        Backend::WebGpu => start_webgpu(canvas, canvas_id, generation).await,
+        Backend::WebGl2 => {
+            start_webgl2(canvas, &receipt).map_err(|failure| (Failure::NoWebGpu, failure.detail()))
+        }
+    }
+}
+
+/// The WebGPU start: the adapter and device the shell draws the square with.
+async fn start_webgpu(
+    canvas: HtmlCanvasElement,
+    canvas_id: &str,
+    generation: u32,
+) -> Result<String, (Failure, String)> {
+    let gpu = navigator_gpu().ok_or_else(|| {
+        (
+            Failure::NoWebGpu,
+            "navigator.gpu disappeared between the probe and the device.".to_string(),
+        )
+    })?;
 
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::BROWSER_WEBGPU;

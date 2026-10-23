@@ -16,16 +16,23 @@ registry = ["engine-scene"]
 # Import lane: real glTF + texture decoding, opt-in so headless stays std-only.
 # It also covers skinned/skeleton/clip import into the anim contract
 # (assets -> anim; anim never imports assets back).
-import = ["dep:gltf", "dep:image", "dep:engine-anim", "dep:serde_json"]
+import = ["dep:gltf", "dep:image", "dep:serde_json"]
 
 [dependencies]
 engine-core.workspace = true
 engine-clock.workspace = true
 engine-scene = { version = "0.1.0", path = "../scene", optional = true }
-engine-anim = { workspace = true, optional = true }
+# The anim contract owns the clip and pose types every intake fills; it is
+# std-only, so the BVH motion intake reads it in the default build.
+engine-anim.workspace = true
 # `extras`: morph target names ride in `mesh.extras.targetNames` (morph_import).
 gltf = { workspace = true, optional = true, features = ["extras"] }
-image = { workspace = true, optional = true }
+# QW10: PNG, JPEG and Radiance HDR are the only formats the content holds, so
+# the codec set is named here instead of taking image's defaults. The defaults
+# also carry the avif chain (ravif -> rav1e) whose licence the deny gate fights,
+# and every codec lands in the browser wasm; the page loads PNG and JPEG kit
+# textures and HDR skies only.
+image = { workspace = true, optional = true, default-features = false, features = ["png", "jpeg", "hdr"] }
 # The rig cook writes the document's JSON back, so the cooked body keeps the
 # rig it came from.
 serde_json = { workspace = true, optional = true }

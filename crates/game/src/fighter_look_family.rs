@@ -15,6 +15,11 @@
 
 use super::*;
 
+use engine_anim::pose::QuatTrack;
+use engine_anim::{Clip, Track};
+use engine_assets::ktx2_cook::{decode_level_rgba, parse_ktx2, MapKind};
+use engine_assets::retarget::BindPose;
+
 /// The band a person's pelvis sits in above the ground at bind, in metres.
 /// Every body the game ships stands at 0.89 m; a body outside the band was
 /// cooked in other units or with an unapplied scale, and drawing it puts the
@@ -32,6 +37,62 @@ pub(super) fn check_body_units(variant: &str, pelvis: [f32; 3]) -> Result<(), Lo
     Err(LookError::Import(format!(
         "{variant}: pelvis bind height {height} m is not a person's ({low}..{high} m):          the body was cooked in other units or with an unapplied object scale"
     )))
+}
+
+/// The six acts in the look's clip order, each held for this many seconds.
+/// The cooked lane carries no clip GLBs yet, so every act draws the bind
+/// pose instead of refusing the whole rig. A clips bundle can replace these
+/// holds without touching the body or texture path.
+const COOKED_HOLD_CLIPS: [(&str, f32); 6] = [
+    ("idle", 1.0),
+    ("run", 0.8),
+    ("attack_0", 0.5),
+    ("attack_1", 0.5),
+    ("attack_2", 0.5),
+    ("down", 1.0),
+];
+
+/// One hold clip: every joint keeps its bind local transform at both ends.
+/// The target skeleton is the body's own, so the look's retarget is the
+/// identity and the drawn pose is the bind pose.
+fn hold_clip(name: &str, duration: f32, bind: &BindPose) -> ImportedClip {
+    let times = vec![0.0, duration];
+    let positions = Clip {
+        tracks: bind
+            .positions
+            .iter()
+            .map(|position| Track {
+                times: times.clone(),
+                values: vec![*position, *position],
+            })
+            .collect(),
+    };
+    let rotations = bind
+        .rotations
+        .iter()
+        .map(|rotation| QuatTrack {
+            times: times.clone(),
+            values: vec![*rotation, *rotation],
+        })
+        .collect();
+    ImportedClip {
+        name: name.to_string(),
+        duration,
+        positions,
+        rotations,
+    }
+}
+
+/// The six hold clips as clip sources on the body's own skeleton and bind.
+fn hold_sources(body: &SkinnedBody) -> Vec<ClipSource> {
+    COOKED_HOLD_CLIPS
+        .iter()
+        .map(|(name, duration)| ClipSource {
+            skeleton: body.skeleton.clone(),
+            bind: body.bind.clone(),
+            clips: vec![hold_clip(name, *duration, &body.bind)],
+        })
+        .collect()
 }
 
 impl FighterLook {
@@ -72,6 +133,81 @@ impl FighterLook {
         )
     }
 
+    /// The cooked lane the page fetches: the four bodies and their atlas
+    /// quadrants by the names `engine_assets::rig_cook` writes. The bodies
+    /// are pinned by SHA; each act holds the bind pose because the lane
+    /// carries no clip GLBs yet. Cold path; loud on any refusal.
+    pub fn load_cooked_from(source: &dyn AssetSource) -> Result<Self, LookError> {
+        let mut rigs = Vec::with_capacity(fighter_bind::VARIANTS.len());
+        let mut shas = Vec::with_capacity(fighter_bind::VARIANTS.len());
+        for (index, variant) in fighter_bind::VARIANTS.iter().enumerate() {
+            let body_name = format!("{}/{variant}_body.glb", engine_assets::rig_cook::COOKED_DIR);
+            let bytes = source
+                .read(&body_name)
+                .map_err(|err| LookError::Bind(format!("{body_name}: {err}")))?;
+            let body_sha = sha_hex(&bytes);
+            if body_sha.as_str() != fighter_bind::EXPECTED_COOKED_BODY_SHA256[index] {
+                return Err(LookError::ShaMismatch((*variant).to_string()));
+            }
+            // Import once for the hold clips; `load_rig` imports the same
+            // bytes for the draw. Cold path, so the second parse is cheap
+            // enough and keeps one body-import path for every family.
+            let body = import_skinned_body(&bytes)
+                .map_err(|err| LookError::Import(format!("{variant}: {err}")))?;
+            let hold = hold_sources(&body);
+            let binding = FighterBinding {
+                variant: (*variant).to_string(),
+                bundle_sha256: body_sha.clone(),
+                body_glb_sha256: body_sha.clone(),
+                body_glb: body_name,
+                joints: u32::try_from(body.skeleton.len())
+                    .map_err(|_| LookError::Import(format!("{variant}: joint count over u32")))?,
+                tris_lod0: 0,
+                clips: u32::try_from(hold.len())
+                    .map_err(|_| LookError::Import(format!("{variant}: clip count over u32")))?,
+            };
+            let mut rig = load_rig(&binding, index, &hold, source)?;
+            if rig.parts.len() != engine_assets::rig_cook::QUADRANTS {
+                return Err(LookError::Import(format!(
+                    "{variant}: {} parts, the cooked lane has {} atlas quadrants",
+                    rig.parts.len(),
+                    engine_assets::rig_cook::QUADRANTS
+                )));
+            }
+            for (part_index, part) in rig.parts.iter_mut().enumerate() {
+                let atlas = format!(
+                    "{}/{variant}_q{part_index}.ktx2",
+                    engine_assets::rig_cook::COOKED_DIR
+                );
+                let bytes = source
+                    .read(&atlas)
+                    .map_err(|err| LookError::Import(format!("{atlas}: {err}")))?;
+                let texture = parse_ktx2(&bytes)
+                    .map_err(|err| LookError::Import(format!("{atlas}: {err:?}")))?;
+                if texture.kind != MapKind::BaseColor {
+                    return Err(LookError::Import(format!("{atlas}: not a base-color map")));
+                }
+                let (width, height, rgba) = decode_level_rgba(&texture, 0)
+                    .map_err(|err| LookError::Import(format!("{atlas}: {err:?}")))?;
+                let upload = TextureUpload {
+                    width,
+                    height,
+                    rgba,
+                };
+                upload
+                    .validate()
+                    .map_err(|err| LookError::Import(format!("{atlas}: {err}")))?;
+                let id = LOOK_TEXTURE_ID_BASE
+                    + u64::try_from(index * MAX_PARTS + part_index)
+                        .map_err(|_| LookError::Import("texture id".to_string()))?;
+                part.texture = Some((TextureKey::new(id, digest32(&bytes)), upload));
+            }
+            shas.push(body_sha);
+            rigs.push(rig);
+        }
+        Self::from_rigs(rigs, shas)
+    }
+
     /// The look around loaded rigs: the swing length from the first rig's
     /// first attack clip, then the inertia, limit, ragdoll and cape layers.
     /// Shared by every body family.
@@ -92,7 +228,8 @@ impl FighterLook {
         }
         let inertia = fighter_look_inertia::slot_sets(&rigs)?;
         let limit = limit_lanes(&rigs)?;
-        let ragdoll = Self::ragdoll_for_rigs(&rigs);
+        let ragdoll =
+            Self::ragdoll_for_rigs(&rigs).map_err(|error| LookError::Import(error.to_string()))?;
         let capes = Capes::for_rigs(&rigs);
         Ok(Self {
             rigs,
@@ -112,6 +249,9 @@ impl FighterLook {
             limbs: LimbLook::new(),
             capes,
             hero: 0,
+            checkpoints: empty_checkpoints(),
+            rewind_cursor: 0,
+            correction: None,
         })
     }
 
@@ -199,6 +339,45 @@ mod tests {
                 (q[0] - first[0]).abs() + (q[1] - first[1]).abs() + (q[2] - first[2]).abs() > 0.2
             });
             assert!(turned, "the right arm swings in the attack clip");
+        }
+    }
+
+    /// The shipped cooked lane opens by the names `rig_cook` writes: one rig
+    /// per variant, four atlas quadrants per rig, six hold clips that sample
+    /// the bind pose. The body pins are checked by the loader.
+    #[test]
+    fn the_shipped_cooked_lane_loads_four_rigs_with_bind_holds() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../content/fighters/rig.e2bundle");
+        let bytes = std::fs::read(&path).expect("the shipped cooked lane");
+        let source =
+            engine_assets::asset_source::BundleSource::open(bytes).expect("the lane opens");
+        let look = FighterLook::load_cooked_from(&source).expect("the cooked lane loads");
+        assert_eq!(look.rigs.len(), fighter_bind::VARIANTS.len());
+        for (index, rig) in look.rigs.iter().enumerate() {
+            assert_eq!(rig.variant, fighter_bind::VARIANTS[index]);
+            assert_eq!(rig.skeleton.joints.len(), 45, "the CT7 rig");
+            assert_eq!(rig.clips.len(), 6, "one hold clip per act");
+            assert_eq!(rig.parts.len(), 4, "one part per atlas quadrant");
+            assert!(
+                rig.parts.iter().all(|part| part.texture.is_some()),
+                "every part carries its atlas quadrant"
+            );
+            let pelvis = rig
+                .skeleton
+                .joints
+                .iter()
+                .position(|joint| joint.name == "pelvis")
+                .expect("the pelvis joint");
+            let keys = &rig.clips[0].positions.tracks[pelvis].values;
+            let first = keys.first().copied().expect("the first key");
+            let last = keys.last().copied().expect("the last key");
+            for axis in 0..3 {
+                assert!(
+                    (first[axis] - last[axis]).abs() < 1.0e-6,
+                    "the hold clip stays on its bind position"
+                );
+            }
         }
     }
 }

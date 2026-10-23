@@ -439,17 +439,17 @@ mod tests {
     }
 
     fn twin_presenter(test: &str) -> Option<Presenter> {
-        match Presenter::init_offscreen() {
+        let probe = match Presenter::init_offscreen() {
             Ok(mut presenter) => {
                 presenter.resize(128, 128).expect("valid size applies");
-                Some(presenter)
+                Ok(presenter)
             }
-            Err(PresentError::NoAdapter) => {
-                eprintln!("SKIPPED {test}: no wgpu adapter on this machine");
-                None
-            }
+            Err(PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
-        }
+        };
+        crate::test_gpu::require_or_skip(test, probe)
     }
 
     fn cube_list(presenter: &mut Presenter) -> crate::present::DrawList {

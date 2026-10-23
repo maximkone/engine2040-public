@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::spatial_glue::{conflict_texts, finding_line, quat_of_yaw, yaw_of_quat, ParsedWant};
+use crate::spatial_glue::{conflict_texts, finding_line, quat_of_yaw, ParsedWant};
 use engine_arena::fork::{Fork, ForkMetrics, ForkProposal};
 use engine_arena::{ArenaConfig, FighterTape};
 use engine_core::{

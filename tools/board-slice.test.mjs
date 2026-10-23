@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { archivedDoneRows, blockedBy, boardShardFiles, focusAncestors, focusNowIds, loadBoardText, needsOf, ownedOf, parseBoard, parkedUnmarked, pathsOverlap, pickNext, planWave, rowReady, rowsOverlap, ticksOf } from "./board-slice.mjs";
+import { archivedDoneRows, blockedBy, boardShardFiles, focusAncestors, focusNowIds, loadBoardText, nearRowIds, needsOf, ownedOf, parseBoard, parkedUnmarked, pathsOverlap, pickNext, planWave, rowReady, rowsOverlap, ticksOf } from "./board-slice.mjs";
 
 // Remove every temp folder this file makes when it exits (test temp folders piled up in %TEMP%).
 const madeDirs = [];
@@ -723,4 +723,12 @@ test("--wave prints N rows with disjoint paths and counts what it skipped", () =
   assert.deepEqual(parsed.picked.map((r) => r.id), ["W1", "W3"]);
   assert.deepEqual(parsed.picked[0].owned, ["crates/render/src/a.rs"]);
   assert.equal(parsed.skipped.length, 3);
+});
+
+test("a guessed row id names the nearest live ids", () => {
+  const tasks = new Map(["PW47", "PW48", "PW99", "GA9"].map((id) => [id, { id }]));
+  assert.deepEqual(nearRowIds("PW49", tasks), ["PW48", "PW47", "PW99"], "same letters, nearest digits first");
+  assert.deepEqual(nearRowIds("GA1", tasks), ["GA9"], "a prefix with no close number still names the family");
+  assert.deepEqual(nearRowIds("ZZ1", tasks), [], "nothing near is no hint");
+  assert.deepEqual(nearRowIds("PW", tasks), [], "a bare prefix is not a row id");
 });

@@ -56,6 +56,8 @@ pub mod powered;
 pub mod query;
 #[cfg(feature = "rapier")]
 pub mod ragdoll;
+#[cfg(feature = "rapier")]
+mod ragdoll_contacts;
 /// Frozen-baseline fall/clinch measurement tape: seeded scripts beside
 /// `ragdoll`, read-only on the tick; the fix rows consume its report.
 #[cfg(feature = "rapier")]

@@ -29,7 +29,7 @@ use rmcp::model::ToolAnnotations;
 use rmcp::schemars::JsonSchema;
 use rmcp::serde::{Deserialize, Serialize};
 
-use super::mcp::{McpServer, McpToolError};
+use super::mcp::{ChangeListDto, McpServer, McpToolError};
 use super::scene_tools::{
     object_label, parse_object_ref, snapshot, SCENE_BRIEF_DEFAULT_BUDGET, SCENE_BRIEF_MAX_BUDGET,
 };
@@ -115,6 +115,8 @@ pub enum QueryKind {
     Map = 22,
     /// One ray through a view pixel: entity id, point in cm, distance (SP69).
     Pixel = 23,
+    /// What changed between two held document revisions (AX23).
+    Diff = 24,
 }
 
 impl QueryKind {
@@ -145,6 +147,7 @@ impl QueryKind {
             Self::Lidar => "lidar",
             Self::Map => "map",
             Self::Pixel => "pixel",
+            Self::Diff => "diff",
         }
     }
 
@@ -175,12 +178,13 @@ impl QueryKind {
             "lidar" => Ok(Self::Lidar),
             "map" => Ok(Self::Map),
             "pixel" => Ok(Self::Pixel),
+            "diff" => Ok(Self::Diff),
             _ => Err(QueryError::new(
                 "bad_kind",
                 format!("query kind `{text}` is unknown"),
                 "legal kinds: near, between, visible, reachable, cover_near, \
                  largest_open, free_space, cone, relation, sees, why_hidden, clearance, slide, ground, \
-                 measure, room_of, in_room, exits_of, glance, coverage, view, lidar, map, pixel \
+                 measure, room_of, in_room, exits_of, glance, coverage, view, lidar, map, pixel, diff \
                  (re-read scene.brief for ids first)",
             )),
         }
@@ -188,6 +192,7 @@ impl QueryKind {
 }
 
 mod cards;
+pub(crate) mod diff;
 pub use cards::{KindCard, KIND_CARDS};
 
 /// Typed query failure. `hint` always names the legal values plus one
@@ -670,6 +675,7 @@ pub fn run_query(
     let budget = check_budget(args.budget_bytes)?;
     let limit = check_limit(args.limit)?;
     match args.kind {
+        QueryKind::Diff => Err(diff::needs_journal()),
         QueryKind::Near => {
             let anchor = check_anchor(actors, args.anchor)?;
             let radius = check_radius(args.radius_cm.unwrap_or(500))?;
@@ -1198,8 +1204,8 @@ impl Hit {
 #[serde(crate = "rmcp::serde")]
 #[schemars(crate = "rmcp::schemars")]
 pub struct SceneQueryArgs {
-    /// Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m; measure anchor, other; room_of anchor; in_room room; exits_of anchor|room; glance eye_m; coverage anchor, eye_m; view eye_m; lidar eye_m; map eye_m; pixel eye_m. a|b means either.
-    #[schemars(schema_with = "kind_schema")]
+    /// Question. Needs: near anchor; between anchor, other; visible eye_m; reachable anchor; cover_near anchor, eye_m; largest_open -; free_space -; cone half_angle_deg, anchor|eye_m; relation anchor, relation; sees anchor, other; why_hidden anchor, eye_m; clearance anchor; slide anchor, dir; ground eye_m; measure anchor, other; room_of anchor; in_room room; exits_of anchor|room; glance eye_m; coverage anchor, eye_m; view eye_m; lidar eye_m; map eye_m; pixel eye_m; diff revision_a, revision_b. a|b means either.
+    #[schemars(schema_with = "cards::kind_schema")]
     pub kind: String,
     /// Object label from scene.brief (`lamp_2 [uuid]`) or bare UUID: the subject.
     pub anchor: Option<String>,
@@ -1247,12 +1253,10 @@ pub struct SceneQueryArgs {
     /// default [24,16,0,0], x and y inside the view). The map uses the eye as
     /// its center and `radius_cm` as its reach.
     pub cells: Option<[i32; 4]>,
-}
-
-/// Schema of `kind`: a string enum of the kind words.
-fn kind_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-    let words: Vec<&str> = KIND_CARDS.iter().map(|card| card.kind.name()).collect();
-    rmcp::schemars::json_schema!({ "type": "string", "enum": words })
+    /// Before revision of a diff (diff); must be held by the journal.
+    pub revision_a: Option<u64>,
+    /// After revision of a diff; may be lower than revision_a.
+    pub revision_b: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1291,6 +1295,11 @@ pub struct SceneQueryOutput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ids: Vec<String>,
     pub conflicts: Vec<SceneQueryConflict>,
+    /// Revision diff (kind diff): the same list `tx.apply` returns
+    /// (`ChangeListDto`: revisions, counts, rows, touched ids and edges).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<rmcp::serde_json::Value>")]
+    pub change: Option<ChangeListDto>,
 }
 
 /// True when the door request carries `field` (`a|b` holds when either does).
@@ -1304,6 +1313,8 @@ fn has_field(args: &SceneQueryArgs, field: &str) -> bool {
         "dir" => args.dir.is_some(),
         "room" => args.room.is_some(),
         "cells" => args.cells.is_some(),
+        "revision_a" => args.revision_a.is_some(),
+        "revision_b" => args.revision_b.is_some(),
         _ => true,
     })
 }
@@ -1445,6 +1456,7 @@ fn shape_output(
                 hint: conflict.hint.clone(),
             })
             .collect(),
+        change: None,
     };
     output
 }
@@ -1456,6 +1468,9 @@ impl super::mcp::ServerState {
         let kind = QueryKind::parse(&args.kind).map_err(query_error)?;
         require_fields(kind, args)?;
         let format = QueryFormat::parse(args.format.as_deref())?;
+        if kind == QueryKind::Diff {
+            return diff::answer(&self.doc, &self.journal, args);
+        }
         let snap = snapshot(&self.doc);
         let (actors, uuids) = (snap.actors, snap.ids);
         let anchor = args
@@ -1535,7 +1550,7 @@ impl ToolBase for SceneQueryTool {
         Some(
             "Spatial questions with reasons: near, between, visible, reachable, \
              cover_near, largest_open, free_space, cone, relation, view, lidar, \
-             map, pixel. Read-only; api.describe query:<kind> gives a working call."
+             map, pixel, diff. Read-only; api.describe query:<kind> gives a working call."
                 .into(),
         )
     }
@@ -1566,6 +1581,8 @@ use space_kinds::SpaceArgs;
 
 #[cfg(test)]
 mod compact_tests;
+#[cfg(test)]
+mod diff_tests;
 #[cfg(test)]
 mod reach_door_tests;
 #[cfg(test)]

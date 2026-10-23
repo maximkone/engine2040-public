@@ -1,4 +1,4 @@
-//! verbs: the four fx calls. Each one turns an event into a typed receipt.
+//! verbs: the five fx calls. Each one turns an event into a typed receipt.
 //!
 //! Owner: this crate. A caller names a body and hands over what the sim said;
 //! the verb paints it in the float world and answers with a receipt that says
@@ -18,6 +18,7 @@
 use crate::body::BodyDesc;
 use crate::error::Error;
 use crate::fx::PhysFx;
+use crate::soft::{ClothDesc, ClothError, SoftReceipt};
 use crate::types::{Blast, Shard, Transform};
 use engine_anim::contract::LocalPose;
 
@@ -68,6 +69,13 @@ pub struct BlastEvent {
     pub blast: Blast,
 }
 
+/// A cloth was asked for: the sheet to hang.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClothEvent {
+    /// The cape or banner to hang.
+    pub desc: ClothDesc,
+}
+
 /// What a ragdoll call painted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RagdollFx {
@@ -116,6 +124,23 @@ pub struct BlastFx {
     pub pushed: usize,
     /// How much blood the body sheds, permille of the whole.
     pub gore: u16,
+}
+
+/// What a cloth call hung: its stable slot and its receipt at the spawn tick.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClothFx {
+    /// The cloth's slot in [`PhysFx::cloths`].
+    pub slot: usize,
+    /// The spawn receipt: size and a zero sag until the world steps.
+    pub receipt: SoftReceipt,
+}
+
+impl ClothFx {
+    /// The one line the page and the window print.
+    #[must_use]
+    pub fn receipt_line(&self) -> String {
+        self.receipt.receipt_line()
+    }
 }
 
 /// Paints a fighter that fell: spawns the ragdoll of that body and answers
@@ -194,4 +219,261 @@ pub fn fx_blast(world: &mut PhysFx, body: &BodyDesc, event: &BlastEvent) -> Resu
         pushed,
         gore: body.gore_permille,
     })
+}
+
+/// Hangs a cape or a banner and answers with its spawn receipt. The cloth moves
+/// with [`PhysFx::step`]; read [`PhysFx::cloth_receipt`] after the steps for its
+/// sag. A refusal leaves the world as it was.
+pub fn fx_cloth(world: &mut PhysFx, event: &ClothEvent) -> Result<ClothFx, ClothError> {
+    let slot = world.spawn_cloth(event.desc)?;
+    let receipt = world.cloth_receipt(slot).ok_or(ClothError::Missing)?;
+    Ok(ClothFx { slot, receipt })
+}
+
+#[cfg(test)]
+mod fx_verbs {
+    //! fx_verbs: the four fx calls over the committed fighter body.
+
+    use super::*;
+    use crate::body::{load, BodyDesc, BodyFileError};
+    use crate::caps::Tier;
+    use crate::types::Blast;
+    use engine_anim::contract::LocalPose;
+    use std::path::Path;
+
+    /// The fifteen physical bones of the fighter, in the file's parent-first
+    /// order: the CT7 rig the look draws.
+    const CT7: [&str; 15] = [
+        "pelvis",
+        "torso",
+        "head",
+        "leg_upper_l",
+        "leg_lower_l",
+        "foot_l",
+        "leg_upper_r",
+        "leg_lower_r",
+        "foot_r",
+        "arm_upper_l",
+        "arm_lower_l",
+        "palm_l",
+        "arm_upper_r",
+        "arm_lower_r",
+        "palm_r",
+    ];
+
+    /// The pose the body stands in: each bone's offset from its parent, meters.
+    const OFFSETS: [(&str, [f32; 3]); 15] = [
+        ("pelvis", [0.0, 1.1, 0.0]),
+        ("torso", [0.0, 0.17, 0.0]),
+        ("head", [0.0, 0.5, 0.0]),
+        ("leg_upper_l", [-0.1, -0.25, 0.0]),
+        ("leg_lower_l", [0.0, -0.4, 0.0]),
+        ("foot_l", [0.0, -0.3, 0.0]),
+        ("leg_upper_r", [0.1, -0.25, 0.0]),
+        ("leg_lower_r", [0.0, -0.4, 0.0]),
+        ("foot_r", [0.0, -0.3, 0.0]),
+        ("arm_upper_l", [-0.25, -0.1, 0.0]),
+        ("arm_lower_l", [0.0, -0.25, 0.0]),
+        ("palm_l", [0.0, -0.2, 0.0]),
+        ("arm_upper_r", [0.25, -0.1, 0.0]),
+        ("arm_lower_r", [0.0, -0.25, 0.0]),
+        ("palm_r", [0.0, -0.2, 0.0]),
+    ];
+
+    /// The committed fighter body, read once.
+    fn fighter() -> BodyDesc {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        load(&root.join("../../content/bodies/fighter.toml")).expect("the fighter body loads")
+    }
+
+    /// The pose of `body`, in the body file's own bone order.
+    fn pose_of(body: &BodyDesc) -> LocalPose {
+        let positions = body
+            .bones
+            .iter()
+            .map(|bone| {
+                OFFSETS
+                    .iter()
+                    .find(|(name, _)| *name == bone.name)
+                    .expect("bone offset")
+                    .1
+            })
+            .collect();
+        LocalPose {
+            positions,
+            rotations: vec![Transform::IDENTITY.rot; body.bones.len()],
+        }
+    }
+
+    /// A world on a floor whose top is at y = 0.
+    fn arena() -> PhysFx {
+        let mut world = PhysFx::new(Tier::Comfort);
+        world
+            .add_static_box([50.0, 0.5, 50.0], [0.0, -0.5, 0.0])
+            .expect("floor");
+        world
+    }
+
+    fn at(pos: [f32; 3]) -> Transform {
+        Transform {
+            pos,
+            ..Transform::IDENTITY
+        }
+    }
+
+    fn fell(pose: LocalPose) -> RagdollEvent {
+        RagdollEvent {
+            slot: 0,
+            pose,
+            velocity: [0.0; 3],
+            impulse: [0.0; 3],
+        }
+    }
+
+    fn limb() -> LimbEvent {
+        LimbEvent {
+            slot: 0,
+            bone: "arm_lower_l".to_string(),
+            part: 7,
+            at: at([0.0, 1.0, 0.0]),
+            velocity: [1.0, 2.0, 0.0],
+        }
+    }
+
+    fn shards() -> Vec<Shard> {
+        [[-1.0, 1.0, 4.0], [-0.5, 1.0, 4.0], [0.0, 1.0, 4.0]]
+            .iter()
+            .map(|pos| Shard {
+                at: at(*pos),
+                half: [0.1; 3],
+                velocity: [0.0; 3],
+            })
+            .collect()
+    }
+
+    fn wall() -> BreakEvent {
+        BreakEvent {
+            shards: shards(),
+            impulse: [0.0, 200.0, 0.0],
+        }
+    }
+
+    fn blast() -> BlastEvent {
+        BlastEvent {
+            blast: Blast {
+                center_mm: [0, 1270, 0],
+                radius_mm: 5000,
+                impulse_ns: 1000,
+            },
+        }
+    }
+
+    #[test]
+    fn each_fx_call_answers_a_receipt_for_the_fighter_body() {
+        let body = fighter();
+        let names: Vec<&str> = body.bones.iter().map(|bone| bone.name.as_str()).collect();
+        assert_eq!(names, CT7, "the body file carries the CT7 rig's bones");
+        assert_eq!(
+            body.cuts.len(),
+            CT7.len() - 1,
+            "every joint but the root cuts"
+        );
+
+        let mut ragg = arena();
+        let receipt = fx_ragdoll(&mut ragg, &body, &fell(pose_of(&body))).expect("ragdoll");
+        assert_eq!(receipt.slot, 0);
+        assert_eq!(receipt.bones, CT7.len());
+        assert_eq!(receipt.muscle, body.muscle_permille);
+        assert_eq!(receipt.gore, body.gore_permille);
+
+        let mut limbs = arena();
+        let receipt = fx_limb(&mut limbs, &body, &limb()).expect("limb");
+        assert_eq!(receipt.bone, "arm_lower_l");
+        assert_eq!(
+            Some(receipt.energy),
+            body.cut_energy("arm_lower_l"),
+            "the receipt carries the file's price"
+        );
+        assert_eq!(receipt.gore, body.gore_permille);
+
+        let mut walls = arena();
+        let receipt = fx_break(&mut walls, &body, &wall()).expect("break");
+        assert_eq!(receipt.admitted, 3);
+        assert_eq!(receipt.gore, body.gore_permille);
+
+        let mut blasts = arena();
+        fx_ragdoll(&mut blasts, &body, &fell(pose_of(&body))).expect("ragdoll");
+        let receipt = fx_blast(&mut blasts, &body, &blast()).expect("blast");
+        assert_eq!(receipt.pushed, CT7.len());
+        assert_eq!(receipt.gore, body.gore_permille);
+    }
+
+    #[test]
+    fn the_same_event_twice_gives_the_same_receipt() {
+        let body = fighter();
+        let pose = pose_of(&body);
+
+        let ragdoll = || {
+            let mut world = arena();
+            fx_ragdoll(&mut world, &body, &fell(pose.clone())).expect("ragdoll")
+        };
+        assert_eq!(ragdoll(), ragdoll());
+
+        let limb_once = || {
+            let mut world = arena();
+            fx_limb(&mut world, &body, &limb()).expect("limb")
+        };
+        assert_eq!(limb_once(), limb_once());
+
+        let wall_once = || {
+            let mut world = arena();
+            fx_break(&mut world, &body, &wall()).expect("break")
+        };
+        assert_eq!(wall_once(), wall_once());
+
+        let blast_once = || {
+            let mut world = arena();
+            fx_ragdoll(&mut world, &body, &fell(pose.clone())).expect("ragdoll");
+            fx_blast(&mut world, &body, &blast()).expect("blast")
+        };
+        assert_eq!(blast_once(), blast_once());
+    }
+
+    #[test]
+    fn a_body_file_that_is_not_there_names_its_path() {
+        let path = std::env::temp_dir().join(format!(
+            "engine2040-physfx-missing-{}.toml",
+            std::process::id()
+        ));
+        let error = load(&path).expect_err("there is no body file");
+        assert!(matches!(error, BodyFileError::Read { .. }), "{error}");
+        let text = error.to_string();
+        assert!(text.contains("could not be read"), "{text}");
+        assert!(text.contains("engine2040-physfx-missing"), "{text}");
+    }
+
+    #[test]
+    fn a_bad_body_file_names_the_key_and_its_line() {
+        let path =
+            std::env::temp_dir().join(format!("engine2040-physfx-bad-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "name = \"fighter\"\ngore_permille = 1000\nsheen = 3\n",
+        )
+        .expect("write the bad body");
+        let error = load(&path).expect_err("an unknown key is refused");
+        let text = error.to_string();
+        assert!(text.contains("`sheen`"), "{text}");
+        assert!(text.contains("line 3"), "{text}");
+
+        std::fs::write(
+            &path,
+            "name = \"fighter\"\ngore_permille = 1000\n\n[bone.pelvis]\nparent = \"\"\nradius = 0.09\nhalf_height = 0.0\n",
+        )
+        .expect("write the incomplete body");
+        let error = load(&path).expect_err("a missing key is refused");
+        assert!(error.to_string().contains("`muscle_permille`"), "{error}");
+
+        std::fs::remove_file(&path).expect("remove the test body");
+    }
 }

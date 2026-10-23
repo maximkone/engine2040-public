@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, TryLockError};
 
+use engine_core::text::clip_bytes;
+
 /// Environment variable that overrides the crash-receipt folder.
 pub const CRASH_DIR_ENV: &str = "E2040_CRASH_DIR";
 /// Default crash-receipt folder, relative to the working directory.
@@ -333,18 +335,6 @@ fn seen_path(path: &Path) -> PathBuf {
         .to_os_string();
     name.push(SEEN_SUFFIX);
     path.with_file_name(name)
-}
-
-/// `text` clipped to at most `max` bytes at a char boundary.
-fn clip_bytes(text: &str, max: usize) -> &str {
-    if text.len() <= max {
-        return text;
-    }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 /// Live snapshot the panic hook reads: update it from the run loop, then

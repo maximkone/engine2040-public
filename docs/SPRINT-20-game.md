@@ -152,7 +152,7 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   -p engine-playtest --lib tiers` x2: over 200 seeded duels each tier beats the
   one below in 600+ permille and loses to the one above; replay x2. F2P: no
   tier rows. P2P: golden unchanged; P3 tournament green. needs: GP27.
-- [ ] GA14 playtest: difficulty sweep with a human-like error model — the Progress 2026-10-17: The sweep, the seeded human-error tape (default off) and the CSV writer exist under cfg(test) in crates/playtest/src/tournament.rs (sweep_rows_cover_every_difficulty_at_each_value, sweep_skips_bloodless_variants_and_replays_its_csv, ignored full_difficulty_sweep_writes_csv; green in gh run 39059423063). Left: the knob is match_ticks over difficulties at 200 matches per value (row: 5 seeds per value, `difficulty-<knob>.csv`), no `sweep_noise` test and no strict T1-T3 rung rise check.
+- [x] GA14 playtest: difficulty sweep with a human-like error model — the Progress 2026-10-17: The sweep, the seeded human-error tape (default off) and the CSV writer exist under cfg(test) in crates/playtest/src/tournament.rs (sweep_rows_cover_every_difficulty_at_each_value, sweep_skips_bloodless_variants_and_replays_its_csv, ignored full_difficulty_sweep_writes_csv; green in gh run 39059423063). Left: the knob is match_ticks over difficulties at 200 matches per value (row: 5 seeds per value, `difficulty-<knob>.csv`), no `sweep_noise` test and no strict T1-T3 rung rise check.
   tournament holds one band (`tournament.rs:36-40`) with no sweep and bots read
   tells instantly. Add a sweep of one config field to
   `target/reports/difficulty-<knob>.csv` (5 seeds per value, averaged) and a
@@ -163,6 +163,15 @@ values are proposals the GA14 sweep tunes, not owner decisions. Studio seats: ce
   strength rises strictly across T1-T3; noise on and off both replay x2. F2P:
   no sweep or noise. P2P: P3 bars unchanged with noise off. needs: GA13.
   Correction 2026-10-21: the Accept filter `sweep_noise` matches no test (`Grep sweep_noise` over crates/playtest is empty), so the command exits 0 with 0 passed. The sweep half is real: `cargo test -p engine-playtest --lib sweep_` runs `sweep_rows_cover_every_difficulty_at_each_value` (`tournament.rs:2519`), `sweep_skips_bloodless_variants_and_replays_its_csv` (`:2491`), `sweep_stamp_pins_epoch_and_names_csv_files` (`:2550`) and the ignored `full_difficulty_sweep_writes_csv` (`:2560`). The noise test is the work: Accept is `--lib sweep_` printing at least 4 passed AND `--lib sweep_noise` printing at least 1 passed, and the row may not be ticked until the second line prints it.
+  Landed 2026-10-23 `315044344` (Accept): `cargo test -p engine-playtest --lib
+  sweep_` 7 passed / 1 ignored x2 (39910287921, 39910654715) and `--lib
+  sweep_noise` 1 passed x2 (39910272285, 39910654917). The standard-shape curve
+  runs the perfect player first (P3 band 490/482/472 permille, curve replays
+  byte-identically); the seeded human tape (HumanError::human(2040)) makes rung
+  strength rise strictly T1 138 < T2 374 < T3 386 half points of 2 x 200
+  (player 655/65/35 permille), and the noise-on curve also replays
+  byte-identically. The noise defaults off, so noise off equals the perfect
+  player and the P3 bars hold. No sim or golden change.
 - [x] GP33 playtest: time-to-kill and matchup table — no per-pair numbers exist.
   A test computes time-to-kill per tier and move kind from the loaded tables
   into `target/reports/rome-ttk.csv` and a win matrix from the GA13 tournament

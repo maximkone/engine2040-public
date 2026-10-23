@@ -207,3 +207,23 @@ until the slice (LEG10) lands.
   F2P: no slingers or caltrops.
   P2P: golden x2.
   needs: KIT1, LEG15.
+- [ ] LEG17 game: the contubernium has names. Steal: OpenXcom `Soldier` and `SoldierDiary`. Seven
+  anonymous slots become seven named men with fights, kills, wounds and rank, and one diary line
+  per fight. Tier A. Size S. Owns `crates/game/src/roster.rs`, `content/rome/contubernium.toml`.
+  Accept: `cargo test -p engine-game --lib roster` passes - 7/7 names after one fight, the man who
+  fought carries kills and wounds, one diary line exists; the roster is in the tape, so the hash
+  moves once with a receipt that names it.
+  F2P: seven slots with no name.
+- [ ] LEG18 game: the camp day is a works table. Steal: 0 A.D. builder costs and CDDA basecamp
+  recipes. Eight works cost man-ticks; the ditch already lives in `crates/rome/src/camp.rs`.
+  Tier B. Size M. Owns `crates/game/src/camp_day.rs`, `content/rome/works.toml`.
+  Accept: `cargo test -p engine-game --lib camp_day` passes - the player starts a work, man-ticks
+  tick down, the work completes and its prop appears in the next frame; replay twice equal.
+  F2P: no works, no camp loop.
+- [ ] LEG19 game: wounds outlive the fight. Steal: CDDA body parts plus OpenXcom hospital days.
+  Four parts at three severities, set from the `combat::cut` events we already raise, healed by a
+  camp day. Tier B. Size M. Owns `crates/game/src/wounds.rs`, `content/rome/wound.toml`.
+  Accept: `cargo test -p engine-game --lib wounds` passes - a cut persists across the tick loop
+  and `scene.save`/`scene.load`, one camp day heals one step, a severed part never heals; the
+  golden re-pin is explicit and names the tick it first differs.
+  F2P: a wound dies with the fight.

@@ -135,18 +135,10 @@ impl Readable {
         self.lean
     }
 
-    /// One presentation tick. `mx`/`mz` carry planar velocity (m/s) in
-    /// world `[x, z]`; `facing` carries the body facing (unit `[x, z]`).
-    /// Moving ticks steer the arrow toward velocity, resting ticks toward
-    /// facing, both capped at [`ARROW_MAX_TURN`]; lean tracks speed at
-    /// [`LEAN_SLEW`] per tick. Rejected input leaves state untouched.
-    /// Allocation-free: only `Copy` scalars move here.
-    pub fn update(
-        &mut self,
-        mx: f32,
-        mz: f32,
-        facing: [f32; 2],
-    ) -> Result<ReadableFrame, ReadableError> {
+    /// Validate one motion input and return its planar speed. Every input the
+    /// overlay accepts passes this first, so a crowd overlay can refuse a bad
+    /// lane before it steps any other.
+    pub fn checked_speed(mx: f32, mz: f32, facing: [f32; 2]) -> Result<f32, ReadableError> {
         if !mx.is_finite() {
             return Err(ReadableError::NonFiniteInput("mx"));
         }
@@ -167,6 +159,22 @@ impl Readable {
         if speed > MAX_SPEED {
             return Err(ReadableError::SpeedTooHigh(speed));
         }
+        Ok(speed)
+    }
+
+    /// One presentation tick. `mx`/`mz` carry planar velocity (m/s) in
+    /// world `[x, z]`; `facing` carries the body facing (unit `[x, z]`).
+    /// Moving ticks steer the arrow toward velocity, resting ticks toward
+    /// facing, both capped at [`ARROW_MAX_TURN`]; lean tracks speed at
+    /// [`LEAN_SLEW`] per tick. Rejected input leaves state untouched.
+    /// Allocation-free: only `Copy` scalars move here.
+    pub fn update(
+        &mut self,
+        mx: f32,
+        mz: f32,
+        facing: [f32; 2],
+    ) -> Result<ReadableFrame, ReadableError> {
+        let speed = Self::checked_speed(mx, mz, facing)?;
         let target = if speed < IDLE_SPEED {
             normalize2(facing).ok_or(ReadableError::BadFacing)?
         } else {

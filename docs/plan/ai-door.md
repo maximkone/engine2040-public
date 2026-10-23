@@ -19,7 +19,7 @@ vendor wire or a real client.
 | Live bout stepping (EG1) | unit-tested, integrated, ticked | `crates/arena/src/live.rs` (`LiveMatch::step`, tick log) |
 | Tick-stamped model actions | unit-tested library, no bout wiring | `crates/ai/src/mind.rs` (validate → stamp `issued + delay` → `ActionLog::drain_due`; `apply.rs` window checks) |
 | Provider-driven fighter (AL1) | absent | no `live_mind` bout test in `crates/arena`; replay-with-provider-off unproven |
-| Net pack (DP1 half) | unit-tested, integrated | `crates/endpoint/src/packs/net.rs` (`net.loopback`, loss/latency/burst knobs, seeded-desync tick test, `api.describe` listing) |
+| Net pack (DP1 half) | unit-tested, integrated | `crates/endpoint/src/packs/net.rs` (`net.loopback` and `net.shape`, loss/latency/burst knobs, seeded link shape, seeded-desync tick test, `api.describe` listing); a shaped 120 ms/5% duel folds the clean digest (`crates/proof/src/chaos.rs`) |
 | Perf pack (DP1 half) | unit-tested, integrated | `crates/endpoint/src/packs/perf.rs` (`perf.table`, fixture-csv parse, newest-csv pick, read-only listing) |
 | DP1 remaining | proof-line wording only | full endpoint lib count + golden in the proof line |
 | Replay library (RB1 substrate) | unit-tested | `crates/playtest/src/causal.rs` (`verify_replay`, `bisect_replay`), `replay.rs`, `seeded_bug.rs` (`SEEDED_TICK = 8`) |

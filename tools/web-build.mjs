@@ -5,7 +5,8 @@
 // cargo builds crates/web for wasm32-unknown-unknown with the size-tuned `web` profile (root
 // Cargo.toml), the wasm-bindgen CLI at the version Cargo.lock locks turns the module into
 // engine.js + engine_bg.wasm, wasm-opt -Oz shrinks it when it is installed, and the page
-// (crates/web/index.html) is written beside them with build.json: sizes, gzip sizes, SHA-256,
+// (crates/web/index.html) is written beside them with build.json: sizes, gzip and brotli
+// sizes, the first-bundle total, SHA-256,
 // tool versions, the commit baked into the module. Exit 0 = dist/web is complete and under
 // the size limit; 1 = a step failed (the message says which and how to fix it).
 // QW1: --size-sweep builds the web profile once per opt-level (CARGO_PROFILE_WEB_OPT_LEVEL; the same LTO and one codegen unit),
@@ -24,7 +25,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
-import { brotliSize } from "./web-budget.mjs";
+import { ARENA_BUNDLE, brotliSize, firstLoadBytes, firstTierBytes } from "./web-budget.mjs";
 
 export const TARGET = "wasm32-unknown-unknown";
 export const PROFILE = "web";
@@ -45,7 +46,7 @@ export const COI_WORKER = "coi-serviceworker.js";
 export const DIST_FILES = ["index.html", "loader.js", COI_WORKER, "engine.js", "engine_bg.wasm", "build.json"];
 // WEB17: the cooked arena kit the played page fetches and stages (`?fight`); cooked offline by
 // `cargo run -p engine-assets --features import --bin arena_bundle`.
-export const KIT_BUNDLE = "assets/arena.e2bundle";
+export const KIT_BUNDLE = ARENA_BUNDLE;
 // WEB6: the cooked fighter rig, the file the page fetches for `?fight`. The
 // entries keep their `cooked/` prefix, so they match `rig_cook::cooked_names`.
 export const RIG_BUNDLE = "assets/fighters.e2bundle";
@@ -270,15 +271,36 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
     writeFileSync(join(outDir, "loader.js"), deps.readText(join(rootDir, "crates", "web", "loader.js"))); // QW3/QW12: the page imports it
     writeFileSync(join(outDir, COI_WORKER), worker); // WEB14: the page registers it; 200 on the site is one more deploy check
     mkdirSync(join(outDir, "assets"), { recursive: true });
-    cpSync(kitSource, join(outDir, KIT_BUNDLE)); // WEB17: the cooked arena kit, whole
-    cpSync(rigSource, join(outDir, RIG_BUNDLE)); // WEB6: the cooked rig, its entries under `cooked/`
+    // QW10: both cooked bundles ship gzip-compressed. dist/web has a hard 8 MiB build limit
+    // and a static host will not compress a binary type it does not know, so the compression
+    // happens at build time and crates/web/loader.js undoes it while the body streams. The
+    // file names stay the same, so a page and a dist always agree.
+    const kitRaw = deps.readBytes(kitSource);
+    const rigRaw = deps.readBytes(rigSource);
+    writeFileSync(join(outDir, KIT_BUNDLE), gzipSync(kitRaw, { level: 9 })); // WEB17: the cooked arena kit, whole
+    writeFileSync(join(outDir, RIG_BUNDLE), gzipSync(rigRaw, { level: 9 })); // WEB6: the cooked rig, its entries under `cooked/`
 
+    const rawBundle = new Map([[KIT_BUNDLE, kitRaw], [RIG_BUNDLE, rigRaw]]);
     const files = {};
     let totalBytes = 0;
+    let firstBundleBytes = 0;
     for (const rel of listFiles(outDir)) {
+      if (rel === "build.json") continue;
       const bytes = deps.readBytes(join(outDir, rel));
-      files[rel] = { bytes: bytes.length, gzipBytes: gzipBytes(bytes), sha256: sha256(bytes) };
+      const raw = rawBundle.get(rel) ?? bytes;
+      const first = rel === KIT_BUNDLE ? firstTierBytes(raw) : raw;
+      files[rel] = {
+        bytes: bytes.length,
+        ...(raw === bytes ? {} : { rawBytes: raw.length }),
+        firstBytes: first.length,
+        gzipBytes: gzipBytes(bytes),
+        brotliBytes: brotliSize(bytes),
+        sha256: sha256(bytes),
+      };
       totalBytes += bytes.length;
+      // QW4: the page's first load, in the same words as web-budget.mjs: the shipped form of
+      // every file except build.json, and of the arena bundle only to its tier-0 prefix.
+      firstBundleBytes += firstLoadBytes(rel, bytes);
     }
     const info = {
       schema: 1,
@@ -286,6 +308,7 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
       target: TARGET,
       profile: PROFILE,
       files,
+      firstBundleBytes,
       totalBytes,
       limitBytes: SIZE_LIMIT_BYTES,
       underLimit: totalBytes < SIZE_LIMIT_BYTES,
@@ -297,11 +320,16 @@ export function build({ rootDir = root, outDir = join(root, "dist", "web"), comm
     };
     // build.json lists the other files; it cannot hold its own hash.
     writeFileSync(join(outDir, "build.json"), `${JSON.stringify(info, null, 2)}\n`);
+    // The numbers print before the gate, so an over-limit build still says how far over it is.
+    say(
+      `[web-build] dist/web ${totalBytes} bytes (limit ${SIZE_LIMIT_BYTES}); wasm ${files["engine_bg.wasm"].bytes} bytes, ${files["engine_bg.wasm"].gzipBytes} gzip; ` +
+        `arena bundle ${files[KIT_BUNDLE].bytes} gzip (${files[KIT_BUNDLE].rawBytes} raw, tier 0 at ${files[KIT_BUNDLE].firstBytes}); ` +
+        `rig ${files[RIG_BUNDLE].bytes} gzip (${files[RIG_BUNDLE].rawBytes} raw); first_bundle ${firstBundleBytes} bytes`,
+    );
     if (!info.underLimit) {
       rmSync(outDir, { recursive: true, force: true }); // no half-shipped build over the limit
       throw new BuildError(`dist/web is ${totalBytes} bytes, over the ${SIZE_LIMIT_BYTES} byte limit`);
     }
-    say(`[web-build] dist/web ${totalBytes} bytes (limit ${SIZE_LIMIT_BYTES}); wasm ${files["engine_bg.wasm"].bytes} bytes, ${files["engine_bg.wasm"].gzipBytes} gzip`);
     return info;
   } finally {
     rmSync(work, { recursive: true, force: true });

@@ -1,6 +1,6 @@
 # Cargo cheatsheet
 
-Generic Cargo behavior (Cargo book). Repo specifics are in `SKILL.md` section 8.
+Generic Cargo behavior (Cargo book). Repo specifics are in `SKILL.md` Cargo rule.
 
 ## Lockfile
 

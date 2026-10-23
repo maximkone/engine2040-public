@@ -9,12 +9,17 @@
 
 use std::collections::BTreeMap;
 
+use engine_arena::recorder::Row;
 use engine_arena::Checkpoint;
 use engine_core::Fnv64;
 use engine_input::fighter::{Buttons, ATTACK, BLOCK};
 use engine_input::{FighterId, FighterInput, MAX_PARTICIPANTS};
 
 use crate::delta::{encode_delta, FighterSnap, FullSnap};
+use crate::interest::{
+    ConnectionInterest, InterestCfg, InterestEntity, InterestError, SelectReport,
+    SIEGE_BUDGET_BYTES, SNAPSHOT_EVERY_TICKS,
+};
 use crate::netcode::{Channel, KIND_CHANNEL};
 use crate::session::{
     encode_input, encode_input_compressed, encode_snapshot, encode_state_delta, NetError,
@@ -353,6 +358,314 @@ pub fn within_cap(fighters: u8, bytes_per_snapshot: usize) -> Result<(), ScaleEr
         });
     }
     Ok(())
+}
+
+/// True when `viewer`'s connection is due a snapshot on `tick`: viewer `v`
+/// sends on ticks `v % SNAPSHOT_EVERY_TICKS == tick % SNAPSHOT_EVERY_TICKS`,
+/// so every connection still replicates at the 10 Hz snapshot cadence while
+/// no tick pays all of them at once. The live send path and the interest
+/// proofs share this one lane rule.
+#[must_use]
+pub const fn snapshot_due(viewer: u32, tick: u32) -> bool {
+    tick % SNAPSHOT_EVERY_TICKS == viewer % SNAPSHOT_EVERY_TICKS
+}
+
+/// Live per-connection snapshot interest: one [`ConnectionInterest`] per
+/// viewer, selecting with the ON3 tuning ([`InterestCfg::default_64`]: 40 m
+/// near at 10 Hz, 120 m far at 3 Hz, 256 kbps) inside one ON3 datagram
+/// ([`SIEGE_BUDGET_BYTES`]).
+///
+/// This is the production call site of [`ConnectionInterest::select`]; the
+/// in-test consumer in `interest.rs` stays the oracle, so a proof can post the
+/// two number sets side by side. Buffers are sized once at construction and a
+/// select writes only through them, so a snapshot tick allocates nothing.
+pub struct SnapshotViews {
+    cfg: InterestCfg,
+    budget_bytes: usize,
+    views: Vec<SnapshotView>,
+}
+
+/// One viewer's connection state plus its own selection buffer and report.
+struct SnapshotView {
+    viewer: u32,
+    conn: ConnectionInterest,
+    ids: Vec<u32>,
+    report: Option<SelectReport>,
+}
+
+impl SnapshotViews {
+    /// One selector per viewer over an `entities`-slot roster with the ON3
+    /// tuning and datagram budget. `viewers` must be ascending and unique.
+    pub fn new(viewers: &[u32], entities: usize) -> Result<Self, InterestError> {
+        Self::with_tuning(
+            viewers,
+            entities,
+            InterestCfg::default_64(),
+            SIEGE_BUDGET_BYTES,
+        )
+    }
+
+    /// The same roster with explicit tuning: the proof drives the oracle's
+    /// own [`InterestCfg`] through this path to compare numbers.
+    pub fn with_tuning(
+        viewers: &[u32],
+        entities: usize,
+        cfg: InterestCfg,
+        budget_bytes: usize,
+    ) -> Result<Self, InterestError> {
+        cfg.validate()?;
+        let mut order = SortedUnique::new();
+        let mut views = Vec::with_capacity(viewers.len());
+        for viewer in viewers {
+            if !order.push(*viewer) {
+                return Err(InterestError::UnsortedEntities);
+            }
+            views.push(SnapshotView {
+                viewer: *viewer,
+                conn: ConnectionInterest::for_entities(*viewer, entities)?,
+                ids: vec![0; entities],
+                report: None,
+            });
+        }
+        Ok(Self {
+            cfg,
+            budget_bytes,
+            views,
+        })
+    }
+
+    /// Tuning every connection selects with.
+    #[must_use]
+    pub const fn tuning(&self) -> InterestCfg {
+        self.cfg
+    }
+
+    /// Per-snapshot byte budget every connection selects inside.
+    #[must_use]
+    pub const fn budget_bytes(&self) -> usize {
+        self.budget_bytes
+    }
+
+    /// Connections served.
+    #[must_use]
+    pub fn viewers(&self) -> usize {
+        self.views.len()
+    }
+
+    /// Register `entities` as every connection's delta baseline (match start,
+    /// roster swap or resync).
+    pub fn register_baseline(&mut self, entities: &[InterestEntity]) -> Result<(), InterestError> {
+        for view in &mut self.views {
+            view.conn.register_baseline(entities)?;
+        }
+        Ok(())
+    }
+
+    /// Live call site: select one viewer's snapshot inside the budget. Selected
+    /// ids land ascending in that viewer's own buffer and the report is kept
+    /// for the packet encoder.
+    pub fn select(
+        &mut self,
+        viewer: u32,
+        entities: &[InterestEntity],
+        viewer_x_mm: i32,
+        viewer_z_mm: i32,
+        viewer_yaw_ddeg: i16,
+        now: u32,
+    ) -> Result<SelectReport, InterestError> {
+        let at = self
+            .views
+            .binary_search_by_key(&viewer, |view| view.viewer)
+            .map_err(|_| InterestError::UnknownViewer { viewer })?;
+        let view = &mut self.views[at];
+        let report = view.conn.select(
+            &self.cfg,
+            entities,
+            viewer,
+            viewer_x_mm,
+            viewer_z_mm,
+            viewer_yaw_ddeg,
+            now,
+            self.budget_bytes,
+            &mut view.ids,
+        )?;
+        view.report = Some(report);
+        Ok(report)
+    }
+
+    /// Last selection for `viewer`: its report plus the ascending ids.
+    #[must_use]
+    pub fn selected(&self, viewer: u32) -> Option<(SelectReport, &[u32])> {
+        let view = &self.views[self
+            .views
+            .binary_search_by_key(&viewer, |v| v.viewer)
+            .ok()?];
+        let report = view.report?;
+        Some((report, &view.ids[..report.selected]))
+    }
+
+    /// Wire bytes of the last selection per connection (sum over viewers).
+    #[must_use]
+    pub fn selected_bytes(&self) -> u64 {
+        self.views
+            .iter()
+            .filter_map(|view| view.report)
+            .map(|report| u64::try_from(report.bytes).unwrap_or(u64::MAX))
+            .sum()
+    }
+
+    /// Worst ticks-since-sent any connection has seen (the starve ledger).
+    #[must_use]
+    pub fn starve_max(&self) -> u32 {
+        self.views
+            .iter()
+            .map(|view| view.conn.starve_max())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Live server snapshot lane: the authority state plus one interest selector
+/// per connection. [`Server`](crate::session::Server) owns one and records
+/// every stepped tick here, which is the production
+/// [`ConnectionInterest::select`] call site.
+///
+/// Buffers are sized once at construction: recording a tick clears and refills
+/// the state fighters inside their capacity, and a selection writes only
+/// through per-connection buffers, so a live tick allocates nothing.
+pub struct SnapshotLane {
+    state: FullSnap,
+    recorded: bool,
+    views: SnapshotViews,
+    roster: Vec<InterestEntity>,
+    baselined: bool,
+}
+
+impl SnapshotLane {
+    /// Open the lane for a `fighters`-slot match: ON3 tuning, one connection
+    /// per slot. Viewer `v` sends on the ticks [`snapshot_due`] names.
+    pub fn new(fighters: u8) -> Result<Self, NetError> {
+        let slots = usize::from(fighters);
+        let viewers: Vec<u32> = (0..fighters).map(u32::from).collect();
+        let views = SnapshotViews::new(&viewers, slots).map_err(interest_fault)?;
+        Ok(Self {
+            state: FullSnap {
+                tick: 0,
+                fighters: Vec::with_capacity(slots),
+            },
+            recorded: false,
+            views,
+            roster: Vec::with_capacity(slots),
+            baselined: false,
+        })
+    }
+
+    /// Record one step's dataset row (its pre-step observation: the state the
+    /// tick entered), then select this tick's snapshot for every due
+    /// connection.
+    pub fn record(&mut self, row: &Row) -> Result<(), NetError> {
+        let observation = &row.observation;
+        self.state.tick = observation.tick;
+        self.state.fighters.clear();
+        for entry in observation.fighters.as_slice() {
+            self.state.fighters.push(FighterSnap::quantize(
+                entry.id, entry.pos, entry.yaw, entry.hp, 0,
+            )?);
+        }
+        self.state.validate()?;
+        self.recorded = true;
+        self.publish()
+    }
+
+    /// Authority state entering the next tick, or `None` before the first.
+    pub fn state(&self) -> Option<&FullSnap> {
+        self.recorded.then_some(&self.state)
+    }
+
+    /// Last selection for `viewer`: report plus ascending slot ids.
+    pub fn selection(&self, viewer: u32) -> Option<(SelectReport, &[u32])> {
+        self.views.selected(viewer)
+    }
+
+    /// The packet `viewer` is owed on the current state, encoded exactly as
+    /// [`encode_snapshot`]. Refused with [`NetError::BadState`] when the viewer
+    /// has no selection at the current state tick (not its turn yet, or the
+    /// state already advanced).
+    pub fn packet(&self, viewer: u32) -> Result<Vec<u8>, NetError> {
+        let state = self.state().ok_or(NetError::BadState)?;
+        let (report, ids) = self.views.selected(viewer).ok_or(NetError::BadState)?;
+        if report.tick != state.tick {
+            return Err(NetError::BadState);
+        }
+        encode_snapshot_of(state, ids)
+    }
+
+    /// Select this tick's snapshot for every due connection. Near/far cadence
+    /// and the starve guard live inside [`ConnectionInterest::select`]; this
+    /// lane rule only spreads connections across ticks.
+    fn publish(&mut self) -> Result<(), NetError> {
+        let tick = self.state.tick;
+        self.roster.clear();
+        self.roster
+            .extend(self.state.fighters.iter().map(interest_entity));
+        if !self.baselined {
+            self.views
+                .register_baseline(&self.roster)
+                .map_err(interest_fault)?;
+            self.baselined = true;
+        }
+        for (index, fighter) in self.state.fighters.iter().enumerate() {
+            let viewer = u32::try_from(index).map_err(|_| NetError::BadState)?;
+            if !snapshot_due(viewer, tick) {
+                continue;
+            }
+            let own = self.roster.get(index).ok_or(NetError::BadState)?;
+            let (x_mm, z_mm) = (own.x_mm, own.z_mm);
+            self.views
+                .select(viewer, &self.roster, x_mm, z_mm, fighter.yaw_ddeg, tick)
+                .map_err(interest_fault)?;
+        }
+        Ok(())
+    }
+}
+
+/// Encode `ids` (ascending slot ids) of `full` as one snapshot packet: the
+/// same wire shape [`encode_snapshot`] writes, so the session decoder reads
+/// it. Every id must name a slot in `full`; an unknown id is
+/// [`NetError::BadState`].
+pub(crate) fn encode_snapshot_of(full: &FullSnap, ids: &[u32]) -> Result<Vec<u8>, NetError> {
+    let mut fighters = Vec::with_capacity(ids.len());
+    for id in ids {
+        let slot = u8::try_from(*id).map_err(|_| NetError::BadState)?;
+        let fighter = full
+            .fighters
+            .iter()
+            .find(|fighter| fighter.slot == slot)
+            .ok_or(NetError::BadState)?;
+        fighters.push(*fighter);
+    }
+    encode_snapshot(&FullSnap::new(full.tick, fighters)?)
+}
+
+/// Map one quantized body into the interest roster word. Combat folds health
+/// in the high half and stamina in the low half, so a change in either marks
+/// the entity combat-dirty.
+fn interest_entity(fighter: &FighterSnap) -> InterestEntity {
+    InterestEntity {
+        id: u32::from(fighter.slot),
+        x_mm: fighter.x_mm,
+        z_mm: fighter.z_mm,
+        combat: (u32::from(fighter.hp) << 16) | u32::from(fighter.stamina),
+    }
+}
+
+/// Map an interest failure to the session error: bad tuning is a bad config,
+/// every other failure (entity order, budget, stale tick) is bad state.
+fn interest_fault(err: InterestError) -> NetError {
+    match err {
+        InterestError::BadConfig => NetError::BadConfig,
+        _ => NetError::BadState,
+    }
 }
 
 /// Check that slots are sorted, unique and in range; empty is its own error.
@@ -1082,8 +1395,8 @@ mod tests {
     use crate::delta::MASK_HP;
     use crate::interest::{
         entity_room, room_mask, ConnectionInterest, InterestCfg, InterestEntity, InterestError,
-        MAX_INTEREST_ENTITIES, ON9_CAP_KBPS_X100, SCOPE_ROOMS, SIEGE_BUDGET_BYTES,
-        SNAPSHOT_EVERY_TICKS, STARVE_TICKS,
+        MAX_INTEREST_ENTITIES, ON3_CAP_KBPS_X100, ON9_CAP_KBPS_X100, SCOPE_ROOMS,
+        SIEGE_BUDGET_BYTES, SNAPSHOT_EVERY_TICKS, STARVE_TICKS,
     };
     use crate::netcode::kind_channel;
     use crate::replicate::{
@@ -1378,7 +1691,7 @@ mod tests {
         assert_eq!(full, 617);
         assert!(full <= MAX_DATAGRAM_BYTES);
         within_cap(32, full).expect("32 must fit");
-        assert!(full <= crate::session::IOQ3_FRAGMENT_SIZE);
+        assert!(full <= crate::ioq3::IOQ3_FRAGMENT_SIZE);
         // Flood: every non-viewer slot combat-changed; budget is the cap.
         let base = lineup(32);
         let mut now = base.clone();
@@ -2243,6 +2556,197 @@ mod tests {
              total_row={} cap={MAX_INTEREST_ENTITIES} legion_fit={MP21_LEGION_FIT} \
              entities={MP21_ENTITIES} refused=1064",
             MP21_FIGHTERS + MP21_LEGION
+        );
+    }
+
+    /// One live-snapshot soak arm: every number the ON29 equality proof posts.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct LiveSoakArm {
+        bytes: u64,
+        starve: u32,
+        combat_gap: u32,
+        digest: u64,
+    }
+
+    /// Bots in the live-snapshot soak (one connection per bot).
+    const LIVE_SOAK_BOTS: u32 = 64;
+    /// Soak length in ticks (10 s at 60 Hz).
+    const LIVE_SOAK_TICKS: u32 = 600;
+    /// Tick the combat body starts fighting on.
+    const LIVE_SOAK_COMBAT_TICK: u32 = 300;
+    /// The combat body's id.
+    const LIVE_SOAK_COMBAT_ID: u32 = 7;
+
+    /// The oracle's 64-bot roster: one body per metre, all drifting east
+    /// together, and entity 7 starts fighting at [`LIVE_SOAK_COMBAT_TICK`].
+    fn live_soak_roster(tick: u32) -> Vec<InterestEntity> {
+        let drift = i32::try_from(tick).expect("tick fits") * 10;
+        (0..LIVE_SOAK_BOTS)
+            .map(|id| InterestEntity {
+                id,
+                x_mm: i32::try_from(id).expect("id fits") * 1_000 + drift,
+                z_mm: 0,
+                combat: if id == LIVE_SOAK_COMBAT_ID && tick >= LIVE_SOAK_COMBAT_TICK {
+                    900
+                } else {
+                    1_000
+                },
+            })
+            .collect()
+    }
+
+    /// Metric pass shared by both arms: for every due `(tick, viewer)` pair the
+    /// closure selects and reports (ascending ids, wire bytes, ticks-since-
+    /// sent). Posts total bytes, worst starve, entity 7's worst gap and a
+    /// digest over every selection, so equal numbers and equal ids both fail
+    /// loudly on any drift.
+    fn live_soak_metrics(
+        mut select: impl FnMut(u32, u32, &[InterestEntity]) -> (Vec<u32>, usize, u32),
+    ) -> LiveSoakArm {
+        let bots = usize::try_from(LIVE_SOAK_BOTS).expect("bots fit");
+        let combat = usize::try_from(LIVE_SOAK_COMBAT_ID).expect("id fits");
+        let mut held7 = vec![1_000u32; bots];
+        let mut stale7 = vec![None::<u32>; bots];
+        let mut arm = LiveSoakArm {
+            bytes: 0,
+            starve: 0,
+            combat_gap: 0,
+            digest: 0,
+        };
+        let mut fold = Fnv64::new();
+        for tick in 0..LIVE_SOAK_TICKS {
+            let entities = live_soak_roster(tick);
+            for viewer in 0..LIVE_SOAK_BOTS {
+                if !snapshot_due(viewer, tick) {
+                    continue;
+                }
+                let index = usize::try_from(viewer).expect("viewer fits");
+                let (ids, bytes, starve) = select(tick, viewer, &entities);
+                arm.bytes += u64::try_from(bytes).expect("bytes fit");
+                arm.starve = arm.starve.max(starve);
+                if ids.contains(&LIVE_SOAK_COMBAT_ID) {
+                    held7[index] = entities[combat].combat;
+                    stale7[index] = None;
+                } else if held7[index] != entities[combat].combat {
+                    let since = *stale7[index].get_or_insert(tick);
+                    arm.combat_gap = arm.combat_gap.max(tick - since);
+                }
+                fold.write_u32(tick);
+                fold.write_u32(viewer);
+                fold.write_len32(ids.len());
+                for id in &ids {
+                    fold.write_u32(*id);
+                }
+            }
+        }
+        arm.digest = fold.finish();
+        arm
+    }
+
+    #[test]
+    fn live_snapshot_views_match_the_in_test_oracle_x2() {
+        // ON29 Accept: the live `SnapshotViews` lane posts the in-test oracle's
+        // numbers exactly, twice, with no combat entity starved past 500 ms.
+        const TUNING: InterestCfg = InterestCfg::default_siege();
+        let production = |cfg: InterestCfg| {
+            let bots = usize::try_from(LIVE_SOAK_BOTS).expect("bots fit");
+            let viewers: Vec<u32> = (0..LIVE_SOAK_BOTS).collect();
+            let mut views =
+                SnapshotViews::with_tuning(&viewers, bots, cfg, SIEGE_BUDGET_BYTES).expect("views");
+            views
+                .register_baseline(&live_soak_roster(0))
+                .expect("baseline");
+            live_soak_metrics(|tick, viewer, entities| {
+                let index = usize::try_from(viewer).expect("viewer fits");
+                let own = &entities[index];
+                let report = views
+                    .select(viewer, entities, own.x_mm, own.z_mm, 0, tick)
+                    .expect("select");
+                let (_, ids) = views.selected(viewer).expect("selected");
+                (ids.to_vec(), report.bytes, report.starve_seen)
+            })
+        };
+        let oracle = |cfg: InterestCfg| {
+            let bots = usize::try_from(LIVE_SOAK_BOTS).expect("bots fit");
+            let base = live_soak_roster(0);
+            let mut conns: Vec<ConnectionInterest> = (0..LIVE_SOAK_BOTS)
+                .map(|viewer| {
+                    let mut conn = ConnectionInterest::for_entities(viewer, bots).expect("conn");
+                    conn.register_baseline(&base).expect("baseline");
+                    conn
+                })
+                .collect();
+            let mut out = vec![0u32; bots];
+            live_soak_metrics(|tick, viewer, entities| {
+                let index = usize::try_from(viewer).expect("viewer fits");
+                let own = &entities[index];
+                let report = conns[index]
+                    .select(
+                        &cfg,
+                        entities,
+                        viewer,
+                        own.x_mm,
+                        own.z_mm,
+                        0,
+                        tick,
+                        SIEGE_BUDGET_BYTES,
+                        &mut out,
+                    )
+                    .expect("select");
+                (
+                    out[..report.selected].to_vec(),
+                    report.bytes,
+                    report.starve_seen,
+                )
+            })
+        };
+        let live = production(TUNING);
+        let reference = oracle(TUNING);
+        assert_eq!(
+            live, reference,
+            "live SnapshotViews numbers must equal the in-test oracle"
+        );
+        assert_eq!(
+            (live, reference),
+            (production(TUNING), oracle(TUNING)),
+            "both arms must replay bit-identically"
+        );
+        assert!(live.starve <= STARVE_TICKS);
+        assert!(live.combat_gap <= STARVE_TICKS);
+        let per_client = u64::from(LIVE_SOAK_BOTS) * u64::from(LIVE_SOAK_TICKS) * 1_000;
+        let oracle_kbps_x100 = live.bytes * 8 * 100 * TICK_HZ / per_client;
+        println!(
+            "ON29 oracle-equal (siege): bytes={} kbps_x100={oracle_kbps_x100} \
+             starve={} combat_gap={} digest={:016x}",
+            live.bytes, live.starve, live.combat_gap, live.digest
+        );
+        // The production default: ON3 budgets over the same soak.
+        let on3 = production(InterestCfg::default_64());
+        let kbps_x100 = on3.bytes * 8 * 100 * TICK_HZ / per_client;
+        assert!(
+            kbps_x100 <= ON3_CAP_KBPS_X100,
+            "client {kbps_x100} kbps x100 over the {ON3_CAP_KBPS_X100} (256 kbps) bar"
+        );
+        assert!(
+            on3.starve <= STARVE_TICKS,
+            "worst starve {} ticks over the {STARVE_TICKS}-tick bar",
+            on3.starve
+        );
+        assert!(
+            on3.combat_gap <= STARVE_TICKS,
+            "combat body stale {} ticks over the {STARVE_TICKS}-tick bar",
+            on3.combat_gap
+        );
+        let bots = usize::try_from(LIVE_SOAK_BOTS).expect("bots fit");
+        let viewers: Vec<u32> = (0..LIVE_SOAK_BOTS).collect();
+        let default_views = SnapshotViews::new(&viewers, bots).expect("views");
+        assert_eq!(default_views.tuning(), InterestCfg::default_64());
+        assert_eq!(default_views.budget_bytes(), SIEGE_BUDGET_BYTES);
+        assert_eq!(default_views.viewers(), bots);
+        println!(
+            "ON29 live default (ON3): kbps_x100={kbps_x100} starve={} \
+             combat_gap={} digest={:016x}",
+            on3.starve, on3.combat_gap, on3.digest
         );
     }
 }

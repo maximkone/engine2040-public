@@ -255,10 +255,10 @@ fn blast_refusals_name_the_input_and_leave_the_world_unchanged() {
             },
             Field::Position,
         ),
-        // 7001 N s is 100.01 m/s for a 70 kg body: a bug upstream, not a blast.
+        // One N s past the cap is 100.01 m/s for a 70 kg body: a bug upstream, not a blast.
         (
             Blast {
-                impulse_ns: 7_001,
+                impulse_ns: MAX_BLAST_NS + 1,
                 ..BLAST
             },
             Field::Impulse,
@@ -287,7 +287,7 @@ fn blast_refusals_name_the_input_and_leave_the_world_unchanged() {
     let edge = Blast {
         center_mm: [1_000_000, -1_000_000, 0],
         radius_mm: 100_000,
-        impulse_ns: 7_000,
+        impulse_ns: MAX_BLAST_NS,
     };
     assert_eq!(touched.apply_blast(edge), Ok(0));
     assert_eq!(PhysFx::new(Tier::Web).apply_blast(BLAST), Ok(0));

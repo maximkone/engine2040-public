@@ -417,6 +417,7 @@ fn op_target_id(op: &Op) -> ObjectId {
         Op::SetMaterial { id, .. } => *id,
         Op::SetComponent { id, .. } => *id,
         Op::RemoveComponent { id, .. } => *id,
+        Op::SetBond { id, .. } => *id,
         // The material-table ops name no node.
         Op::PutMaterial { .. } | Op::SetMaterialParam { .. } | Op::RemoveLastMaterial => {
             ObjectId::NIL

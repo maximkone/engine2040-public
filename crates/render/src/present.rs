@@ -10,10 +10,12 @@
 //! (bind probes, IBL chart, depth readback with fog and GTAO) run only under
 //! the opt-in `Presenter::set_look_probes` or on the offscreen capture twin.
 //! The forward pass is the one shader file `shaders/forward.wgsl`
-//! (`v1_gpu::FORWARD_PBR_WGSL`, entry points `vs` and `fs`): sun-shadow
-//! cascade at group 0 binding 3, base-color sample at bindings 4-5, fog at
-//! binding 6, no string patching. Resize/minimize/Outdated/Lost keep the
-//! last-good pipeline and targets; every failure is a typed `PresentError` with a recovery action.
+//! (`v1_gpu::FORWARD_PBR_WGSL`, entry points `vs` and `fs`): the twin
+//! shadow frame at group 0 binding 3, base-color sample at bindings 4-5,
+//! fog at 6, the live sun depth map with its comparison sampler at 13/14
+//! and its pass frame at 20, no string patching. Resize/minimize/Outdated/
+//! Lost keep the last-good pipeline and targets; every failure is a typed
+//! `PresentError` with a recovery action.
 
 // ---------------------------------------------------------------------------
 // Bounds: every external size is validated before allocation.
@@ -33,10 +35,11 @@ pub const MAX_CACHED_TEXTURES: usize = 512;
 
 pub mod aa;
 pub mod cache;
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub mod fog_fwd;
 pub mod look;
 pub mod surface;
+pub mod texture_source;
 pub mod wait_stats;
 
 pub use aa::{
@@ -58,6 +61,10 @@ pub use look::{
 pub use surface::{
     surface_action, surface_fault_code, PresentError, RecoveryAction, SizeClass, SurfaceAction,
     SurfaceEvent,
+};
+pub use texture_source::{
+    BlockFormat, BlockLevel, BlockUpload, TextureReceipt, TextureShape, TextureShapeSlice,
+    TextureSource,
 };
 pub use wait_stats::{
     percentiles, CreateTally, FrameKind, FrameWaits, GpuTimingReport, Percentiles, WaitStats,
@@ -705,14 +712,17 @@ mod bins_tests {
     }
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 mod gpu_present;
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub use gpu_present::*;
 
 #[cfg(test)]
 mod tests_gpu;
+
+#[cfg(test)]
+mod tests_motion;
 
 #[cfg(test)]
 mod tests_linear;

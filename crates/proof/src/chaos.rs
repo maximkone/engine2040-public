@@ -10,11 +10,17 @@
 //! per-row forked streams, so the same seed always gives the same report on
 //! every machine. There is no `Result` on the API: internal failures become
 //! loud [`LoudReason`] entries, never silent passes.
+//!
+//! The module also owns the deterministic [`LinkShape`] shaper: one link's
+//! delay, jitter and loss in model units, decided per tick from the seed, so
+//! netcode proofs can test delivery without sockets. A shape changes only
+//! delivery, never a simulated outcome.
 
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use engine_core::Rng;
+use engine_net::link::LinkProfile;
 use engine_net::wan_soak::{FaultReport, WanError};
 use engine_observe::heal::{HealKind, Registry};
 use engine_observe::{Event, EventCode, RingBuffer};
@@ -637,9 +643,109 @@ pub fn run(seed: u64) -> ChaosReport {
     ChaosReport { healed, loud }
 }
 
+// ---------------------------------------------------------------------------
+// Link shape: seeded delay, jitter and loss for a proof link, no socket.
+// ---------------------------------------------------------------------------
+
+/// Ticks per second the shaper converts milliseconds at.
+const SHAPE_HZ: u64 = 60;
+
+/// One link condition a netcode proof plays under: whole milliseconds of
+/// one-way delay and jitter, loss in permille, and the draw seed.
+///
+/// This is the model-facing shape; `engine-net`'s [`LinkProfile`] is the
+/// wire's tick-based form, reached through [`LinkShape::profile`]. Both are
+/// integer only. The same shape and tick always give the same
+/// [`PacketFate`], independent of the order ticks are asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkShape {
+    /// Base one-way delay in whole milliseconds.
+    pub delay_ms: u32,
+    /// Largest extra one-way delay in whole milliseconds; `0` is pure delay.
+    pub jitter_ms: u32,
+    /// Datagram loss in permille of 1000 (50 is five percent).
+    pub loss_permille: u32,
+    /// Draw seed; the same seed replays the same drop and delay sequence.
+    pub seed: u64,
+}
+
+/// What the shaper decides for one packet at one tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketFate {
+    /// True when the packet never arrives.
+    pub dropped: bool,
+    /// Whole ticks the packet arrives after its send tick; `0` when dropped.
+    pub late_ticks: u32,
+}
+
+impl LinkShape {
+    /// Milliseconds rounded up to whole 60 Hz ticks, so a promised delay is
+    /// never under-delivered: 120 ms reads 8 ticks.
+    fn ms_to_ticks(ms: u32) -> u32 {
+        let scaled = u64::from(ms) * SHAPE_HZ + 999;
+        u32::try_from(scaled / 1000).unwrap_or(u32::MAX)
+    }
+
+    /// Base one-way delay in whole ticks.
+    #[must_use]
+    pub fn delay_ticks(&self) -> u32 {
+        Self::ms_to_ticks(self.delay_ms)
+    }
+
+    /// Largest extra one-way delay in whole ticks.
+    #[must_use]
+    pub fn jitter_ticks(&self) -> u32 {
+        Self::ms_to_ticks(self.jitter_ms)
+    }
+
+    /// Loss in whole percent, rounded up so the wire never loses less than
+    /// the shape asks for: 50 permille is 5 percent.
+    #[must_use]
+    pub fn loss_pct(&self) -> u32 {
+        self.loss_permille.clamp(0, 1000).div_ceil(10)
+    }
+
+    /// The wire profile this shape plays under; reorder stays off.
+    #[must_use]
+    pub fn profile(&self) -> LinkProfile {
+        LinkProfile {
+            latency: self.delay_ticks(),
+            jitter: self.jitter_ticks(),
+            loss_pct: self.loss_pct(),
+            reorder_pct: 0,
+        }
+    }
+
+    /// Decide one packet sent at `tick`: dropped or late by whole ticks.
+    ///
+    /// One fork per tick keeps the answer local to `(seed, tick)`, so
+    /// deciding tick 9 before tick 3 cannot change either answer.
+    #[must_use]
+    pub fn fate(&self, tick: u32) -> PacketFate {
+        let mut rng = Rng::new(self.seed).fork(u64::from(tick));
+        let loss = self.loss_permille.min(1000);
+        if rng.next_u64() % 1000 < u64::from(loss) {
+            return PacketFate {
+                dropped: true,
+                late_ticks: 0,
+            };
+        }
+        let spread = u64::from(self.jitter_ticks()) + 1;
+        let jitter = u32::try_from(rng.next_u64() % spread).unwrap_or(0);
+        PacketFate {
+            dropped: false,
+            late_ticks: self.delay_ticks() + jitter,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use engine_core::Fnv64;
+    use engine_net::link::LinkProfile;
+    use engine_net::played::BoutConfig;
 
     /// Quarantined rows: code plus the subsystem label the loud fault event
     /// carries. The net/assets/save rows heal, so they are absent; the
@@ -829,5 +935,183 @@ mod tests {
                 assert!(format!("{reason}").len() <= 256, "seed {seed}");
             }
         }
+    }
+
+    // -- link shape: seeded delivery, no socket -----------------------------
+
+    /// Simulated outcome of one scripted duel: the authority's tape and
+    /// checkpoint chain, never the wire counters, so another link shape that
+    /// delivers the same inputs folds the same digest.
+    #[derive(Debug)]
+    struct Duel {
+        tape_hash: u64,
+        tape_len: usize,
+        tip_hash: u64,
+        digest: u64,
+        converged: bool,
+        loss_bp: u32,
+        delay_max: u32,
+    }
+
+    fn duel(cfg: BoutConfig, profile: LinkProfile) -> Duel {
+        let report = engine_net::played::run_loopback(&cfg, profile, profile)
+            .expect("the scripted duel runs");
+        let mut h = Fnv64::new();
+        h.write_u64(report.config.seed);
+        h.write_u32(report.config.ticks);
+        h.write_u64(report.tape_hash);
+        h.write_u64(u64::try_from(report.tape_len).unwrap_or(u64::MAX));
+        h.write_bool(report.replay_equal);
+        h.write_u64(report.server_tip.hash);
+        for checkpoint in &report.checkpoints {
+            h.write_u64(checkpoint.hash);
+        }
+        let (up, _) = report.totals();
+        Duel {
+            tape_hash: report.tape_hash,
+            tape_len: report.tape_len,
+            tip_hash: report.server_tip.hash,
+            digest: h.finish(),
+            converged: report.converged(),
+            loss_bp: up.loss_bp(),
+            delay_max: up.delay_max(),
+        }
+    }
+
+    /// A clean link: no delay, no loss, no reorder.
+    fn clean() -> LinkProfile {
+        LinkProfile {
+            latency: 0,
+            jitter: 0,
+            loss_pct: 0,
+            reorder_pct: 0,
+        }
+    }
+
+    #[test]
+    fn shaper_same_seed_replays_its_sequence() {
+        let shape = LinkShape {
+            delay_ms: 120,
+            jitter_ms: 20,
+            loss_permille: 50,
+            seed: 2040,
+        };
+        let once: Vec<PacketFate> = (0..2_000).map(|tick| shape.fate(tick)).collect();
+        let twice: Vec<PacketFate> = (0..2_000).map(|tick| shape.fate(tick)).collect();
+        assert_eq!(once, twice, "the same shape replays the same sequence");
+        assert_eq!(shape.fate(9), once[9], "a tick's fate is local to it");
+        let other = LinkShape { seed: 7, ..shape };
+        let other_once: Vec<PacketFate> = (0..2_000).map(|tick| other.fate(tick)).collect();
+        assert_ne!(once, other_once, "another seed draws another network");
+    }
+
+    #[test]
+    fn shaper_5pct_loss_pins_its_exact_seeded_count() {
+        let shape = LinkShape {
+            delay_ms: 120,
+            jitter_ms: 0,
+            loss_permille: 50,
+            seed: 2040,
+        };
+        // Seed 2040 drops exactly 46 of the first 1000 packets: 4.6 percent,
+        // the seeded draw for an asked 5 percent. Pinned so a change to the
+        // draw stream shows up here, never hidden behind a tolerance.
+        let dropped = (0..1_000).filter(|tick| shape.fate(*tick).dropped).count();
+        assert_eq!(dropped, 46, "seed 2040 drops its exact 1000-packet count");
+        assert_eq!(shape.loss_pct(), 5, "50 permille is 5 whole percent");
+    }
+
+    #[test]
+    fn shaper_zero_jitter_is_pure_delay() {
+        let shape = LinkShape {
+            delay_ms: 120,
+            jitter_ms: 0,
+            loss_permille: 0,
+            seed: 2040,
+        };
+        assert_eq!(shape.delay_ticks(), 8, "120 ms is 8 ticks at 60 Hz");
+        assert_eq!(shape.jitter_ticks(), 0);
+        for tick in 0..1_000 {
+            let fate = shape.fate(tick);
+            assert!(!fate.dropped, "zero loss drops nothing: tick {tick}");
+            assert_eq!(fate.late_ticks, 8, "zero jitter is pure delay: tick {tick}");
+        }
+        // A jittered shape spreads above the base delay, never below it.
+        let jittered = LinkShape {
+            jitter_ms: 20,
+            ..shape
+        };
+        let lates: Vec<u32> = (0..1_000)
+            .map(|tick| jittered.fate(tick).late_ticks)
+            .collect();
+        assert_eq!(lates.iter().copied().min(), Some(8));
+        assert!(
+            lates.iter().any(|late| *late > 8),
+            "jitter spreads: {lates:?}"
+        );
+        assert!(lates
+            .iter()
+            .all(|late| *late <= 8 + jittered.jitter_ticks()));
+    }
+
+    #[test]
+    fn shaped_duel_at_120ms_and_5pct_loss_matches_the_clean_digest() {
+        // The accepted shape: 120 ms one way and 5 percent loss. The duel is
+        // the shipped loopback bout over the same seeded wire, so loss only
+        // changes delivery: the authority takes the same input tape and the
+        // same checkpoint chain as a clean link.
+        let shape = LinkShape {
+            delay_ms: 120,
+            jitter_ms: 0,
+            loss_permille: 50,
+            seed: 2040,
+        };
+        assert_eq!(shape.delay_ticks(), 8);
+        assert_eq!(shape.loss_pct(), 5);
+        let shaped = shape.profile();
+        // Both runs size the server for the slow link's lag window, so the
+        // wire is the only variable. One tick more than the slow link's
+        // delay keeps the third redundancy copy open: it lands at
+        // `tick + 2 + delay`, and the server still admits that tick. The
+        // shaped client also ends its outage one one-way delay early: its
+        // delayed rejoin request then reaches the server on the clean run's
+        // rejoin step, so the server authors the same authority tape from
+        // the same input script.
+        let mut clear_cfg = BoutConfig::canonical(2040, shaped.worst_delay());
+        clear_cfg.hold += 1;
+        let mut shaped_cfg = clear_cfg;
+        shaped_cfg.drop.back -= shaped.worst_delay();
+        let clear = duel(clear_cfg, clean());
+        let first = duel(shaped_cfg, shaped);
+        let second = duel(shaped_cfg, shaped);
+        assert_eq!(
+            clear.tape_len, first.tape_len,
+            "5 percent loss must not drop an authoritative input"
+        );
+        assert_eq!(
+            clear.tape_hash, first.tape_hash,
+            "5 percent loss must not drop an authoritative input"
+        );
+        assert_eq!(clear.tip_hash, first.tip_hash, "same tip");
+        assert_eq!(
+            first.digest, second.digest,
+            "the same shape replays the same duel digest"
+        );
+        assert_eq!(
+            first.digest, clear.digest,
+            "the shape changes delivery, not the simulated outcome"
+        );
+        assert!(first.converged, "both seats hold the authority: {first:?}");
+        assert!(second.converged, "the replay holds it too");
+        assert!(
+            (1..1_000).contains(&first.loss_bp),
+            "the link really lost packets: {} bp",
+            first.loss_bp
+        );
+        assert!(
+            first.delay_max >= 8,
+            "the link really delayed packets: max {} ticks",
+            first.delay_max
+        );
     }
 }

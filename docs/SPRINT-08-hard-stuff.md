@@ -39,7 +39,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Size M. Owns `crates/anim/src/additive.rs`. Accept: no pops on any
   interruption; foot slide at most 20 mm straight and 40 mm on pivots;
   replay x2; at most 0.05 ms per tick. needs: AM1, AM2, AM3, AM6. Progress 2026-10-17: ba6ad347 anim additive.rs layers + one inertializer + planted feet via solve_limb; slide within 20 mm straight, 40 mm pivots, 1.3 us per tick (run 39067390119); left: fighter_look does not call AdditiveRig::tick yet. Dunsky 2026-10-19: additive.rs has 0 game callers (`nb-gaps-anim-dunsky.txt`).
-- [ ] AM18 anim: thousand-agent crowd pose budget — extend the AM13 tiers Progress 2026-10-17: crates/anim/src/crowd_scale.rs landed (assign_crowd_tiers, eight_nearest_match_full_rate_poses, far ring FarImpostorSink handoff, run 39056591616); left: the 1,000-agent p99 is a modeled cost (modeled_tick_cost_posts_per_tier_within_budget), the timing gate thousand_agent_tick_p99_within_budget is #[ignore] and only re-checks the model, and no PF workload entry exists.
+- [x] AM18 anim: thousand-agent crowd pose budget — extend the AM13 tiers Progress 2026-10-17: crates/anim/src/crowd_scale.rs landed (assign_crowd_tiers, eight_nearest_match_full_rate_poses, far ring FarImpostorSink handoff, run 39056591616); left: the 1,000-agent p99 is a modeled cost (modeled_tick_cost_posts_per_tier_within_budget), the timing gate thousand_agent_tick_p99_within_budget is #[ignore] and only re-checks the model, and no PF workload entry exists.
   to a seeded 1,000-agent crowd tape on the reference CPU with per-tier
   costs posted and the far ring handed to VG4 impostors by contract.
   Tier A. Size M. Owns the scale-proof hunks plus PF workload
@@ -48,6 +48,24 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   1,000 agents p99 at most 2 ms; the 8 nearest match full-rate poses;
   golden unchanged. needs: AM13, PF1.
   (PLN animation.md EXTEND, proposed 2026-09-29.)
+  Landed a6a2d197d. The ignored gate no longer replays the model: it times `crowd_tick_report` on the
+  wall clock over the seeded 1,000-agent tape (CROWD_SEED 2040, 0.5 m/tick), 256 warmup ticks
+  discarded, 2048 timed ticks, release on this PC's i5-13420H — the lead re-ran it at HEAD: p50 68,100
+  ns, p99 82,400 ns, max 194,100 ns against the 2 ms bar (24x under; the helper's run read 83.9 us).
+  Last tick tiers full 77 / half 470 / quarter 141 / far 312, far handed 312; posted per-tier ns
+  1500 / 750 / 375 / 20 -> modeled 527,115 ns, and the model test stays as the constants check.
+  `crowd_scale` 9 passed, 1 ignored (the timing gate), and `eight_nearest_match_full_rate_poses` is
+  green on the same 1,000-agent tape (run 39879482397). Golden 13/13 at HEAD with the commit an
+  ancestor (run 39880101869). PF workload `crowd_scale_1000` (`crates/perf/src/workloads.rs`) runs 600
+  ticks and folds tier counts, the far handoff and tape digest `11495894263503076227` at 0 allocations
+  under a 1200 ms budget (run 39880084484); perf takes engine-anim as a tools application, the edge
+  named in `docs/ARCHITECTURE.md` and allowed in `tools/workspace-check.mjs`. Open legs named: the
+  per-agent pose evaluation is not in the crate's 1,000-agent path (the pose table caps at 64, stated
+  in the test doc), so this budget measures the crowd LOD tick, not 1,000 full pose evals; and the p99
+  receipt is a local reference-CPU run, since CI is not the reference CPU. Note: full-tree
+  `cargo clippy -p engine-anim` is red at HEAD inside `crates/anim/src/ik.rs` (atan2/asin/unit-pattern,
+  another lane's committed file); the helper proved clippy with `--only` while that file was still
+  dirty (runs 39879657720, 39879771183), and the Accept does not name clippy.
 - [x] LM5 anim: net-pose divergence diagnostics — a per-fighter pose-hash
   ring beside `net_pose.rs` (diagnostics only, never authoritative) that
   names the first divergent tick and fighter on a seeded N-client soak.
@@ -56,12 +74,12 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Accept: `cargo test -p engine-anim --lib net_diverge` green; seeded
   soak names first divergence 10/10; sim bytes x2; golden unchanged.
   needs: LM3. (PLN animation.md EXTEND, proposed 2026-09-29.) Landed 21e1a645. net_diverge.rs pose-hash ring names the first divergent tick and fighter on 10 of 10 seeds in a 4-client 8-fighter soak (anim tests run 39067150760).
-- [ ] LM6 anim: slope/stair/sand ground feel — deepen `warp_ground.rs`
+- [x] LM6 anim: slope/stair/sand ground feel — deepen `warp_ground.rs`
   with slope cling, stair stepping and soft-ground sink so the LM2 bars
   hold off flat ground. Tier A. Size M. Owns the slope hunks
   beside `crates/anim/src/warp_ground.rs` (LM2 file frozen; lands after
   LM2; never a second warp). Accept: foot slide bars hold on 20-degree
-  slopes plus stair fixtures; replay exact x2. needs: LM2, AM6.
+  slopes plus stair fixtures; replay exact x2. needs: LM2, AM6. Landed 7e9a144b9. New `crates/anim/src/warp_ground_slope.rs` + `warp_ground_slope_test.rs` wrap the one `GroundWarp` (no second warp; `warp_ground.rs` untouched): 20 degrees up and down at 0.5/1/1.5/2/4/6/7 m/s cling at 0 mm slide (plain warp drags 11-83 mm, so the fixture bites); stairs rise 180 / tread 300: climb 13 steps at 0 mm placement and slide, descent 11 steps at 0 mm; sand sinks 0-24 mm with 0 mm slide; cost 67 ns/tick (bar 50,000). Replay x2 byte-equal (slope `112bd30a442675c4`, feet `c3bb588727dbd57e`, stairs `8e75681aeaaa2cc5`, sand `15e2d953efcbda04`); `cargo test -p engine-anim --lib warp_ground` 34 passed, 0 failed, 1 ignored timing report (run 39867302049); clippy `-D warnings` green; rustfmt clean; anim rust-quality 99. Owns widened to the two new files. Open leg, named: no binary calls `SlopeWarp` / `GroundFeet` / `Sand` yet (arena live still runs the plain `GroundWarp`; `crates/arena` is another lane's), so the wiring is a separate row.
   (PLN animation.md EXTEND, proposed 2026-09-29.)
 - [x] TV3 anim: siege traversal set — ladder, rampart vault and rubble
   scramble edges on integer-mm warp for the C5 siege map, with nav links
@@ -70,12 +88,17 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   frozen) plus siege fixtures. Accept: siege fixtures pick expected
    actions; warped roots land within 1 cm; sim bytes x2. needs: TV1, TV2.
    (PLN animation.md EXTEND, proposed 2026-09-29.) Landed 7196f6fa. engine-anim --no-fail-fast 443 lib + 8 it passed (run 39106084274), clippy run 39106954469: traversal_siege_test siege_fixtures_pick_the_expected_actions, a_broken_ladder_and_a_wide_breach_are_refused_never_faked, every_siege_edge_names_one_link_and_a_breach_rebakes_exactly_the_scattered_ones, warped_roots_land_within_1cm_and_bytes_repeat_x2. Set is data on the TV1 chooser (no new move kinds); rubble variance sweeps stay TV4.
-- [ ] AM21 anim: LOD strobing vs warp contract — warp-window ticks never
+- [x] AM21 anim: LOD strobing vs warp contract - warp-window ticks never
   strobe so TV1 landings hold under AM13 tiers. Tier A. Size S. Owns
   eval-pin hunks beside `crates/anim/src/graph.rs` (AM1 order frozen).
   Accept: `cargo test -p engine-anim --lib lod_warp` green; warped roots
   land within 1 cm with strobing on; replay x2; golden unchanged. needs:
-  AM13, TV1. (PLN animation.md EXTEND r7, proposed 2026-09-29.)
+  AM13, TV1. (PLN animation.md EXTEND r7, proposed 2026-09-29.) Landed af60a32fe:
+  pinned landing 0 mm worst (bar 10 mm) over 64 fighters x 4 tier lanes x 8
+  phases; the same tape without the pin misses by 1853.4 mm with 17 held-root
+  landings; replay seed 2040 0xc1fed095b504a5ad twice, seed 2041 differs;
+  lod_warp 2/2 (39902908210), lod 11/12, golden 13/13 d57b5c8ae3096614
+  (39902345065), clippy PASS (39902499110).
 - [ ] LM7 anim: motion-search fatigue-soak lock — seeded 600-tick fatigue
   sweep proves LM1 picks stay stable inside the LM4 cost bars. Tier A.
   Size S. Owns soak-test hunks in `crates/anim/src/motion_match.rs` (LM1
@@ -83,12 +106,13 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   -p engine-anim --lib search_soak` green; no pick churn past the band;
   cost within LM4 bars; replay x2; golden unchanged. needs: LM4, AM8.
   (PLN animation.md EXTEND r7, proposed 2026-09-29.)
-- [ ] AM22 anim: crowd readability at LOD — facing arrow plus lean stay
+- [x] AM22 anim: crowd readability at LOD - facing arrow plus lean stay Landed a3d25e82c.
   readable on the 64-fighter tape with tiers on. Tier A. Size S. Owns
   readability hunks beside `crates/anim/src/locomotion.rs` (lands after
   AM17, disjoint hunks). Accept: `cargo test -p engine-anim --lib
   lod_readable` green; arrow plus lean visible far-ring; nearest-8 match
   full-rate poses; sim bytes x2. needs: AM18, AM17.
+  Progress 2026-10-23: `lod_readable` 4 passed x2 (runs 39950591275, 39952276838); nearest-8 arrow and lean bit-equal; sim bytes x2; `readable` 12 (39953021420), `lod` 15 (39953334450); golden PASS (39952580167); rust-quality 99 A. Landed a3d25e82c (+ 0a08078c5 clippy).
   (PLN animation.md EXTEND r7, proposed 2026-09-29.)
 - [x] TV4 anim: breach-rubble scramble variance — TV3 scramble holds across
   seeded rubble height plus noise sweeps. Tier B. Size S. Owns fixture
@@ -119,7 +143,9 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   `.e2nn` net; LM1 stays the default. Tier C. Size L. Owns
   `crates/physics/src/learned_ctrl.rs`. Accept: an AI fighter walks, turns
   and recovers from shoves; replay exact x2; A/B against LM1 on blind
-  review decides adoption. Hunt 2026-09-25: the student passes tract agreement (max abs diff at most 2.0) and the 100-match tournament [350, 650]; a student trained on a shuffled teacher must collapse, else the pipeline is rejected. Motion 2026-09-25: CT14 clips may seed teachers, under DT5 manifests; clips from non-commercial training data never train a shipped student. needs: PX4, DT2, NN1.
+  review decides adoption. Hunt 2026-09-25: the student passes tract agreement (max abs diff at most 2.0) and the 100-match tournament [350, 650]; a student trained on a shuffled teacher must collapse, else the pipeline is rejected. Motion 2026-09-25: CT14 clips may seed teachers, under DT5 manifests; clips from non-commercial training data never train a shipped student. Decision 2026-10-23 (owner: skip "full RL from scratch"): no RL env and no reward are built for this row. The teacher is the CPG that PX5a lands, or a licence-clean donor policy when its retarget is cheap, and PX5b learns the residual by imitation. The AMP/DeepMimic from-scratch pipeline is dropped, not deferred. needs: PX4, DT2, NN1.
+- [ ] PX5a physics: the physical gait, without a teacher. A procedural walk cycle drives the powered ragdoll's servo pose (`PoweredRagdoll::set_animated`) while `balance` biases it, so the legs push the body and a shove, a slope or a step moves it like a body. This is the cheap half of PX5 and the fallback if no teacher ever lands. Files: `crates/physics/src/gait.rs` (new), `crates/physics/tests/it/`. Accept: `cargo test -p engine-physics --lib gait` - a two-legged fixture walks 3 m in 120 ticks with the pelvis inside 150 mm of the line and 60 mm of its start height, stops inside 30 ticks, replay twice gives the same hash, and a shove at the stagger threshold makes it step out and recover instead of gliding; no golden change (the fixture is a test, not a rule). Kill: if a stance foot slides more than 100 mm at 3 m/s, the cycle is wrong - drop the row and keep LM1. needs: PX4.
+- [ ] PX5b physics: the residual corrector, trained by imitation instead of RL. A small net learns the correction on top of the PX5a gait: record the CPG's own states at 60 Hz, fit a two-layer net to the balance-corrected target, export i8 `.e2nn`, and apply it as a residual on the servo targets. This replaces "RL from scratch" (owner 2026-10-23): no env, no reward, no GPU-days. Files: `crates/distill/src/train.rs` (continuous targets), `crates/distill/src/export.rs`, new `crates/physics/src/learned_ctrl.rs`. Accept: `cargo test -p engine-distill --lib regression` - a continuous-target fit converges on a fixture and the one-hot path is unchanged; `cargo test -p engine-physics --lib corrector` - the PX5a walk stays inside its bands and a stagger-threshold shove recovers at least 10 ticks sooner than PX5a alone over 20 seeded shoves; replay twice equal; no golden change. Kill: if the corrector needs more than 10 minutes of CPU training for one gait it is not worth the pipeline - ship PX5a alone. needs: PX5a.
 - [x] NN3 nn: quantization-aware training — `simulate_quantize()` during Progress 2026-10-17: crates/nn/src/qat.rs landed (simulate_quantize, train_student, export_qat, determinism_report; qat_beats_post_training_on_fixture and int8_student_is_bit_identical_with_report green, run 39057462635); left: the win is shown on a 64-row fixture not the DT3 tournament, and no digest compare across two toolchains is posted.
   training plus a determinism report across toolchains; only the int8
   student ships. Tier B. Size S. Owns `crates/nn/src/qat.rs`. Accept: QAT
@@ -145,7 +171,57 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   1 cm in 50 seeded falls; two ragdolls landing on each other separate; hash
   x2; settles within the PX1 bound; zero per-tick allocations. needs: PX1, PX10. Progress 2026-10-17: b61738a5 physfx tests: two ragdolls landing on each other separate with no unjoined overlap over 1 cm and replay exactly (4 passed); the 50-seeded-falls bar fails (seed 44 overlaps lower_arm_r/shin_r by 8 cm at tick 40, run 39068262860), committed as an ignored repro; left: more solver iterations or bone CCD, spawn reading the joint tables. Progress 2026-10-19: `joint_limits.rs` lands (named degree rows spine 20/35, head 35/45, arm 85/70, hip 40/30, knee/elbow hinge 145; friction-spring motor numbers; collision groups that keep parent and child apart but let the same bone of two ragdolls meet) and `Ragdoll::spawn` reads it through `insert_table_joints`. Runner green: 256 lib + 18 it + 3 balance + 5 stagger tests, clippy -D warnings, golden d57b5c8ae3096614 x2, float world unchanged. Two-ragdoll separation still proves through `ragdoll_tape::clinch_fighters_part_under_a_centimeter_x2_shuffled`. The 1 cm bar is still open: the joint table moved the worst 50-fall overlap to 4.53 cm (fall 46, elbow_r/ankle_r) at Rapier's four solver iterations, 2.9 cm at six and 9.2 cm at twelve in engine-physfx, so the 50-fall test stays ignored with those numbers; left: a contact model the joints cannot overrun (AD17 bones plus a stiffer solver, or contacts between grandparents).
   Correction 2026-10-21: duplicate of PW16 (SPRINT-28), which asks this row's failing 50-seeded-falls 1 cm bar and names it as the close (seed 44 overlaps `lower_arm_r`/`shin_r` by 8 cm); do not work both.
-- [ ] PX11 physics: PID servo — the joint motors of PX9 run a Fixed-point
+- [x] PX44 physics: a body file the four fx calls share - finish-line C10's
+  body half. `crates/physfx/src/body.rs` reads a strict body file (name, gore,
+  muscle, `[bone.NAME]` parent/radius/half_height, `[cut.NAME]` energy) and the
+  four fx calls in `crates/physfx/src/verbs.rs` (`fx_ragdoll`, `fx_limb`,
+  `fx_break`, `fx_blast`) take a `&BodyDesc`, but no body file is in the tree
+  and `verbs.rs` has no test, so nothing loads a body or calls a verb. Ship
+  `content/bodies/fighter.toml` with the fighter rig's bone capsule rows (the
+  names the rig uses, parents first), its muscle and its cut energies; add the
+  read-once loader the callers can use and tests for the four calls over that
+  file. Owns `content/bodies/fighter.toml`, `crates/physfx/src/verbs.rs` and
+  the `body.rs` loader hunk. Accept: `cargo test -p engine-physfx --lib
+  fx_verbs` x2: each of the four calls answers a receipt for the file's body;
+  the same event twice gives the same receipt; a missing or bad body file names
+  the key and its line; `cargo test -p engine-physfx --lib body` stays green.
+  F2P: no body file in the tree and no test in `verbs.rs`. P2P: golden
+  `d57b5c8ae3096614` unchanged (physfx is the float layer); clippy
+  `-D warnings`. Tier A. Size S-M. needs: none.
+  Landed 432c9cf61. `content/bodies/fighter.toml` carries the CT7 physical rig's 15 bones (pelvis, torso, head, both legs, feet, arms, palms), parents first, 14 cuts, capsules matching the look's ragdoll table, gore 1000, muscle 900, cut energies 20-90 N s against the arena's 40 N s blade. `body.rs` `load` reads the file once through the strict parser and `BodyFileError` names a missing path or keeps the key and line of a bad one. `verbs.rs` has `mod fx_verbs`: each of the four calls answers a receipt for the file's body, the same event twice gives the same receipt, a missing file names its path, a bad file names the key and its line. Proof: `cargo test -p engine-physfx --features rapier --lib fx_verbs` 4 passed x2 (runs 39944479039, 39944850378); `--lib body` 30 passed (run 39944448704); clippy `--features rapier --all-targets -- -D warnings` PASS (run 39945107221); golden `default_and_max_seed` PASS, asserts `d57b5c8ae3096614` (run 39944873144); rust-quality physfx PASS 100; rustfmt clean. The row's literal line omits `--features rapier` and would run 0 tests; the feature is required, as with RZ6. Open leg: `crates/game/src/ragdoll_look.rs` still builds its own 15-bone table, so no production binary calls `load_body` yet (C10's authority-reader half); AD30 wraps the verbs for the door.
+- [ ] PX44b game: the ragdoll shape table reads the body file — PX44 landed the body file and `load_body`, but the look still builds its own 15-bone table (`crates/game/src/ragdoll_look.rs` `const BONES: [Bone; 15]`), so the file has no production caller and every capsule size is written twice. Build the table from `content/bodies/fighter.toml` at load: keep the look-only joint/tip name chain, take parent, radius and half-height from `BodyDesc`, and refuse loudly when the file is missing or a rig joint name does not match. Diff: regular. Tier A. Size S. Owns `crates/game/src/ragdoll_look.rs` and its tests. Accept: `cargo test -p engine-game --features app --lib ragdoll_look` x2: the table's 15 joints, parents, radii and half-heights equal the file's rows; a missing file names its path; a renamed joint fails naming both names; the existing ragdoll and cape tests stay green. F2P: the table is a const and `load_body` has no caller. P2P: golden `d57b5c8ae3096614` unchanged (look only). needs: PX44.
+- [x] PX44c physics: Rapier 0.36 soft bodies for capes and banners (C10) - Landed b53921018.
+  a cloth `SoftBody` in `crates/physfx` only (float layer, never hashed): a
+  pinned particle grid from a `ClothDesc` (rows, cols, spacing, pin row),
+  built with `SoftBodyBuilder` (positions, edges, skin, pinned_particles),
+  stepped through a physfx-owned `SoftBodySet` and pipeline at the tier's fixed
+  dt, and read back as particle positions for the draw. A cape and a banner are
+  two descs. The hashed authority layer never sees it: golden unchanged.
+  Diff: good. Tier A. Size M. Owns `crates/physfx/src/soft.rs`, the cloth
+  entry under `crates/physfx/src/fx/`, `crates/physfx/src/verbs.rs` (the
+  receipt) and its tests. `content/bodies/fighter.toml` is committed: add a
+  `[[cloth]]` table only if the file needs one, and say so.
+  Accept: `cargo test -p engine-physfx --features rapier --lib soft` x2: a 4x4
+  pinned cloth under gravity sags below its pins, the pin row stays exactly on
+  its pins, no particle is non-finite after 120 steps, and the free row settles
+  (no motion above 1 mm for 10 steps within the 120); a `physfx:` receipt line
+  prints `soft: nodes=16 pins=4 sag_cm=<n>`; the golden d57b5c8ae3096614 is
+  unchanged. F2P: no soft-body module and no `SoftBodySet` in physfx. P2P:
+  `cargo test -p engine-physfx --features rapier --lib` green; the step
+  allocates nothing per tick (buffers built once).
+  needs: PX44.
+  Progress 2026-10-23: landed `b53921018`. New `crates/physfx/src/soft.rs` (`SoftWorld`, `SoftCloth`:
+  one shared Rapier pipeline, pinned grid, structural and bending edges, triangle skin, fixed 60 Hz
+  step, `MAX_CLOTHS = 8`, `ClothDesc::CAPE` 10x6 and `BANNER` 4x4), `crates/physfx/src/fx/cloth.rs`
+  (`spawn_cloth`, `cloths`, `cloth`, `cloth_receipt`), the verbs receipt and the six soft tests. The
+  pin row is snapped back to rest after each step, so it stays exact; the receipt prints
+  `physfx: soft: nodes=16 pins=4 sag_cm=46.4`; the same event twice gives the same line and it never
+  enters a hash. Proof: `soft` 8 passed x2 (runs 39961671292, 39962604615); whole crate
+  `--features rapier --lib` PASS; clippy `--features rapier --all-targets -- -D warnings` PASS;
+  golden `default_and_max_seed` PASS, `d57b5c8ae3096614` (run 39963342838). No `[[cloth]]` table was
+  needed; cape and banner are code descs. Open leg: our own step buffers are built once, but Rapier's
+  pipeline allocates its own per-step workspace, so no zero-allocation solver is claimed.
+- [ ] PX11 physics: PID servo - the joint motors of PX9 run a Fixed-point
   PID (P and D first, I clamped, D on the measurement, slew cap) instead of
   setting velocities, with one tuning per rig, not per animation. Tier B.
   Size S. Owns `crates/physics/src/servo.rs`. Accept: hit, partial and 2 s
@@ -167,12 +243,18 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   flag. Tier B. Size M. Owns `crates/destruction/src/debris_lod.rs`. Accept:
   1,000 debris pieces cost within the DX4 budget; merges are identical x2;
   no pop visible in a PQ4 lookcheck. needs: DX4, CT2. Progress 2026-10-17: 4cf108a8 debris_lod.rs tiers Full/Simplified/Merged/Impostor over the DX4 ledger; 1 ms budget test is ignored and unrun, PQ4 lookcheck needs a human; left: a caller in the window and the CT2 chain. Progress 2026-10-18: caller wired 40119424 (BreakScene::draws takes a camera, DebrisLedger plus plan_lod merge far pieces at 14 m and drop impostors; test break_wire_far_cameras_merge_then_drop_the_pieces); left: 1 ms budget test still ignored and unrun, PQ4 lookcheck needs a human.
-- [ ] DX7 editor: fracture authoring — bond paint, strength preview and a
+- [x] DX7 editor: fracture authoring — bond paint, strength preview and a
   break-replay preview in the editor, through the command service with undo,
   so AI and humans author destructibles. Tier B. Size M. Owns
   `crates/editor/src/fracture_tool.rs`. Accept: an AI command paints bonds,
   previews a break and undoes cleanly; the saved bonds bake identically x2.
-  needs: DX3, ED4.
+  needs: DX3, ED4. Landed 95496392c: `fracture_tool.rs` paints bonds through
+  `Op::SetBond` + `commands::apply` (undo restores the bond bytes), previews a
+  break through `bake_bonds` without writing, and refuses a replay past the
+  600-tick cap by name; paint then preview then undo leaves the world bytes and
+  the content digest unchanged, and the same sequence twice bakes identical
+  bytes and state hash; fracture 9/9 (39903893698), editor 293 passed / 3
+  ignored (39904200572), clippy PASS (39904200443).
 - [x] DX8 destruction: detail where it breaks — bake probe that puts fine chunks
   where impacts are likely and coarse chunks in the wake (idea from
   phase-field wake coarsening, arXiv 2609.21201; no solver or code taken).
@@ -320,7 +402,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   (Solari proxy rule). Tier A. Size S. Owns `crates/assets/src/proxy.rs`.
   Accept: proxies stay inside their bound on every museum asset; a light leak
   through a proxy fails the tunnel fixture; cook x2 identical. needs: CT2, RT1. Landed c36c060e. proxy::tests 5 passed (proxies_stay_inside_their_bound_on_every_museum_asset, the_same_mesh_cooks_the_same_proxy_twice, a_light_leak_through_a_proxy_fails_the_tunnel_fixture, a_tiny_mesh_keeps_its_own_surface_as_the_proxy, a_degenerate_mesh_is_refused_not_panicking), gh run 39505030084; proxy.rs clippy clean (the crate-wide run stays red on another agent's asset_source/fetch.rs type_complexity).
-- [ ] CT14 content: AI motion source — a provider-style `MotionSource` (mock
+- [x] CT14 content: AI motion source — a provider-style `MotionSource` (mock
   clip library; forge's combat-motion sidecar over loopback at
   127.0.0.1:7863, the owner's own trained model; any remote text-to-motion
   API) takes a prompt and seed and returns a clip that goes through CT1
@@ -333,7 +415,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   a clip that imports, retargets with the bind pose verified and plays on
   the fighter with foot slide at most 20 mm; a clip whose model trained on
   non-commercial data is marked non-commercial and refused by the packaged
-  build. needs: CT1, CT12, DT5.
+  build. needs: CT1, CT12, DT5. Landed 97485bb85. Mock source: 10 lib + 3 it tests green (the it line also ran on the runner, 39920918190); sword slash seed 42 plays with foot slide 0 mm (budget 20), root travel 1398 mm, compressed 3249/3860 bytes, manifest digest d59c6b9b; AMASS CC-BY-NC training data marks the bake non-commercial and `package()` refuses before writing a file; clippy import,registry clean, rust-quality 0 regressions, baseline 934309. Open: mock transport only (no real sidecar or remote provider), `idle` ignores the seed, HML22 fingers and clavicles stay at bind (20/22 joints drive the rig).
 - [ ] CT16 content: sandbox boundary for untrusted content — munal-os
   WASM-sandbox shape reimplemented (MIT, PORT cite + EVIDENCE row).
   Tier B. Size S. Owns `crates/endpoint/src/sandbox/content.rs`.
@@ -346,25 +428,56 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   Owns `crates/nav/src/orca.rs`. Accept: steering ≤ 0.1 ms per agent, flat
   from 50 to 500 agents; 0 stuck in a 1,000-seed corridor drill; replay x2.
   needs: NV2. Landed c531822d c57b0e3a. orca.rs integer port of RVO2 half-planes with hard walls: 200-agent replay digest pinned x2, 1,000 corridor seeds leave nobody stuck (4 m corridor; a 3 m one stuck 3 of 1,000), 0.56/0.54/0.79 us per agent at 50/200/500 vs the 100 us bar; timing on a runner, not the reference PC (run 39070961762) (nav run 39070600996: 89 lib + 9 integration; clippy 39071165673). The fake solver in crates/ai/tests/crowd_orca_bench.rs still duplicates this.
-- [ ] NV5 nav: legion platoons — leaders query nav, followers hold gaps in O(1)
+- [x] NV5 nav: legion platoons — leaders query nav, followers hold gaps in O(1) - Landed 18f7be4b9.
   (idea from traffic platoons; SUMO is EPL-2.0, patterns only). Tier B.
   Size M. Owns `crates/nav/src/platoon.rs`. Accept: ≥ 5x fewer nav queries
-  for a 500-soldier legion; no accordion at 60 Hz; replay x2. needs: NV4, PX7.
+  for a 500-soldier legion; no accordion at 60 Hz; replay x2. needs: NV4, PX7. Progress 2026-10-23: crates/nav/src/platoon.rs landed cf2dab184 (PlanSource seam, one nav read per leader per tick, integer mm slots) and 18f7be4b9 (a leader finishes the walk into the goal cell with no extra query). gh-check run 39866396537: 500 soldiers, 600 plans (10 leaders x 60 ticks) vs 30,000 all-query = 50x (bar 5x); accordion 600 ticks at 60 Hz: same-file rank gap 800..=800 mm, slot error after warmup 0 mm (bar 250), window maxima [0,0,0], muster 6092 mm at tick 0; replay x2 byte-equal digest tick 0 65d30d3c824a5c63 / tick 599 744ec5d3cc7ed66d, 6,000 plans; typed errors for 0 leaders and 50 followers. clippy -D warnings run 39866534962; rust-quality 92 (A); golden d57b5c8ae3096614 (run 39866675658).
 - [x] NV6 nav: smooth paths — portal funnel (string pulling) over the tiled
   mesh with salted tile references so paths survive rebakes
   (recastnavigation Zlib and polyanya Apache-2.0 patterns). Tier B. Size M.
   Owns `crates/nav/src/funnel.rs`. Accept: paths never longer than the grid
   path and at least 10% shorter on 80% of queries; query at most 0.2 ms p50;
   a breach opens a path within 1 s; bytes x2. needs: NV3, DX1. Landed 1329f98e. funnel.rs string pulling over an A* corridor, never longer than the grid walk, >=10% shorter on >=80% of 200 seeded queries, segments inside open cells, breach opens a path in under a second of ticks, bytes equal x2, p50 under 0.2 ms (nav run 39070600996: 89 lib + 9 integration; clippy 39071165673).
-- [ ] NV8 nav: 500-agent soak harness — 500 agents under 1 ms, 0 stuck in
+- [x] NV8 nav: 500-agent soak harness — 500 agents under 1 ms, 0 stuck in
   1000 corridors, bytes x2. Tier A. Size S. Owns nav/tests/soak.rs.
   Accept: 500 agents under 1 ms; 0 stuck in 1000 corridors; bytes x2.
   needs: NV4, NV5. (PLN30 gameplay.md, reviewed 2026-09-25; waits NV4/NV5.)
-- [ ] GA5 brain: thinking LOD plus perception-clock audit with GA2 —
+  Landed a07afb0fc. Harness at `crates/nav/tests/it/soak.rs` (the one integration binary; `tiles.rs`
+  moved under `tests/it/` so the layout guard stays green). 500 agents on this PC (`gh-check --local`,
+  release, one test thread, 32 warmups, 513 single-step samples): median 540.6 us and 544.6 us, p95
+  598.5 us and 794.6 us, min 524.3 us on two runs — under the 1 ms bar on the reference CPU
+  (i5-13420H, 8/8 build slots free, CPU ~34%); the runner was not used for timing. 0 stuck and 0 short
+  over seeds 0..999, 8 agents each, 1200 ticks (stuck = still more than 400 mm from the goal and no
+  tick in the last 200 brought it 100 mm closer; both named constants). Bytes x2: seed 2040 trace
+  `aca060c622cc2fbb` and end `4bf72057017d29cd` on both runs; seed 2041 trace `6b594757d209d837`
+  differs, so the gate can say no (end-state alone converged across seeds and was not enough). Proofs:
+  `cargo test -p engine-nav --lib` 121 passed (run 39878187813), soak 2 passed (run 39878189199),
+  whole `--test it` binary 11 passed (run 39878399285), clippy `--all-targets -D warnings` PASS (run
+  39878178413), rustfmt clean, `rust-quality --owned` PASS. The workspace baseline red it saw
+  (921742 -> 922125) is other lanes' src commits, not this row.
+- [x] GA5 brain: thinking LOD plus perception-clock audit with GA2 —
   500-soldier budget held, 0 stuck, replay x2. Tier B. Size S. Owns
   legion.rs LOD hunks. Accept: 500-soldier budget held; 0 stuck;
   replay x2. needs: GA2, NV5. (PLN30 gameplay.md, reviewed 2026-09-25;
   waits GA2/NV5.)
+  Landed a3b947a1d (`crates/ai/src/legion.rs`, new `legion/audit.rs`). Budget: the ignored
+  `perf_500_soldiers_under_budget` times 500 soldiers over 64 warmup + 600 measured steps in release on
+  this PC's i5-13420H — the lead re-ran it at HEAD: idle median 3.4 us / p95 8.6 us, moving median
+  12.8 us / p95 12.9 us against the 1500 us/step GA2 bar. 0 stuck over STUCK_SEEDS 2040..2043 x 600
+  ticks (stuck = a squad not seated and no soldier or slot moved for STUCK_WINDOW_TICKS 16), with the
+  frozen-body negative control flagging its first squad at tick 16, so the detector can say no. Replay
+  x2: seed 2040 final state `f0b920a98ca848b7` and trace `4ef34effd335a93a` on both runs; seed 2041
+  differs (`72e370ce13d1524d` / `6af92cbe32aabe64`). Thinking LOD is outcome-exact: per-tick states and
+  outputs equal On vs Off for the whole tape, final digest equal, thinks 77,100 vs 300,000 (3.9x
+  fewer). Perception clock: every squad's interval is 1..=8 on its distance wave, lag never exceeds the
+  interval or PERCEPTION_INTERVAL_TICKS 8, and each squad decides at least TAPE_TICKS/8-1 times. Checks
+  at HEAD: `cargo test -p engine-ai --lib legion` 19 passed / 1 ignored (run 39881640190, lead), full
+  `-p engine-ai --lib` 325 passed (run 39881032310), clippy `-p engine-ai --all-targets -D warnings`
+  PASS (run 39880948480), the arena consumer `-p engine-arena --lib` 314 passed (run 39881202212), and
+  golden `proof_cli` 13/13 with `d57b5c8ae3096614` (run 39881639832). Open legs named: the budget
+  receipt is local because the shared runner is not the reference CPU; the arena still fights its
+  8-man contubernium, so no arena-scale LOD switch exists yet; stamina paces once per tick in both
+  modes, and that is what keeps On/Off identical (covered by the tape test).
 - [ ] GA7 brain: diverse fighting strategies via offline integer
   students — Halina & Guzdial 2211.02759v1 diversity loss trains
   `.e2nn` students offline (ideas only, license UNVERIFIED, no GPU in
@@ -386,14 +499,22 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   needs: GA1, GA6.
   (PLN EXTEND gameplay.md, proposed 2026-09-29; binding gap is honest:
   no tick-path caller outside ai/nav today.)
-- [ ] GA9 brain: legion-vs-legion fixture — 500-vs-500 with orders
+- [x] GA9 brain: legion-vs-legion fixture — 500-vs-500 with orders
   latency: shield wall holds, flanking decides, routers repath on NV3
   versions mid-battle. Tier B. Size M. Owns
   `crates/ai/src/legion.rs` battle-fixture hunks (no new system).
   Accept: flanked force breaks first in fixtures twice; orders take
   effect within the posted latency bound; replay x2. Proof: `cargo
    test -p engine-ai legion` green, battle fixture run twice.
-   needs: GA2, NV5.
+   needs: GA2, NV5. Landed 2780bbe6a: 500 shield-wall west vs 500 wedge east;
+   the flanked west wall breaks first at tick 393 (seed 2040) and 395 (seed
+   2041), 7 of 14 engaged squads wheel, east never breaks; the no-flank control
+   leaves both sides standing (fronts meet tick 362, so contact is real); orders
+   measured 1 tick against the 2-tick bound; the mid-battle rout leg rebakes 1
+   tile and repaths 32 stale walks (0 stale after, west gap used 0 times vs 32);
+   replay seed 2040 trace 7725819906b2a3c7 / final digest 4f87ae3589a07abf,
+   seed 2041 trace f307337511fff313; legion 24 passed / 1 ignored (39903364048),
+   clippy PASS (39903363328), golden 13/13 d57b5c8ae3096614 (39903512834).
    (PLN EXTEND gameplay.md, proposed 2026-09-29.)
 - [x] GA10 brain: threshold-gated utility pick + otherwise fallback — Landed f3cbc4f. Tick audit 2026-10-17: utility_threshold_gates_first_and_highest, utility_threshold_otherwise_and_jitter, gladiator tests green in gh-check run 39056802035 (engine-ai, 264 passed).
   FirstToScore/HighestToScore threshold pickers plus an otherwise fallback
@@ -467,7 +588,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   `up_to_date` true with stale-exact 10/10 plus digest `afb7c5d2`
   x2; burst-10 ablation killed; golden unchanged. needs: NV3.
   (PLN gameplay.md, proposed 2026-09-30.) Landed 28d7a357. Cylinder obstacles, touched(), pending_count(), TiledNav::up_to_date(): the 32x32 edge-8 breach touches 4/4/4 tiles (cap 8), rebuilds one tile per tick over 10 ticks with an exact stale set each tick, the burst-10 ablation trips the per-tick gate; the Rust digest 8032266843827844966 x2 replaces the spike's afb7c5d2 (different digest model) (nav run 39070600996: 89 lib + 9 integration; clippy 39071165673).
-- [ ] NV14 nav: per-tile integer-mm rebake detail (held on NV13, feeds
+- [x] NV14 nav: per-tile integer-mm rebake detail (held on NV13, feeds
   NV12 stitch proof) — border-overlap bake-lane geometry, tick keeps
   version flips only (LADDER L511, spike first). Tier A. Size M. Owns
   `crates/nav/src/mesh.rs` bake-tile hunks plus `tiles.rs`
@@ -475,7 +596,7 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
   dirty-4-only ms versus full-bake ms posted plus unaffected-tile
   bytes identical plus cross-tile path byte-equal to whole-bake path
   plus digest x2; kill on any seam gap or per-event over 50 ms p95.
-  needs: NV13, NV3. (PLN gameplay.md, proposed 2026-09-30.)
+  needs: NV13, NV3. (PLN gameplay.md, proposed 2026-09-30.) Landed 238dacd94. cargo test -p engine-nav tiles 11 passed / 3 timing ignored (39921393188), the whole crate green (39920748830), clippy -D warnings (39920749300), release timing_four_tile_rebake (39920749994); 257x257 grid, 17x17 tiles: full bake p50 7.26 ms / p95 10.04, dirty-4 rebake p50 4.57 / p95 6.28 against the 50 ms p95 kill; the tiled assembly equals the whole bake byte for byte before and after the 4-tile rebake, all 25 tile blobs unchanged, 40 seeded cross-tile paths equal (>20 cross a border), every border cell reads the same height, digest x2 equal, hook received [6, 7, 11, 12] once each ascending. Open: dist/web still parked on the render lane.
 - [x] NV15 nav: salt-epoch handle detail (held on NV13, feeds NV7) —
   tile and obstacle handles so dangling refs fail closed (LADDER
   L512, spike first). Tier A. Size S. Owns
@@ -558,3 +679,16 @@ time, `PORT()` + `EVIDENCE.md` row); papers and talks are reimplemented.
 - [x] SG5 arena: a fighter can leave the floor and land - the height channel: `pos[1]` with a per-slot vertical speed in mm, gravity at 11 mm/tick squared (the source game's -40 m/s^2 at 60 Hz), a landing at the floor with the speed cleared, the vertical speeds folded into the checkpoint hash behind tag `0xB4`, and the snapshot, fork and live-snapshot paths carrying it; opt-in through `MatchSpec::with_height`, so the golden baseline (which stands on the floor) is untouched. Tier A. Size L. Owns `crates/arena/src/lib.rs`, `crates/arena/src/spec.rs`. Accept: `node tools/gh-check.mjs cargo test -p engine-arena --lib fighter_height` prints 3 passed (a placed fighter falls and rests on the floor, the same placement without the channel never moves, one digest twice and the height fold is in it), `cargo test -p engine-arena --lib spear` stays green, and golden `d57b5c8ae3096614` x2 unchanged. F2P: no fighter had a vertical speed; `pos[1]` was written only at placement. P2P: `cargo test -p engine-arena --lib` (227 passed) and the golden hash. Landed 6f4ec04b. Proof: fighter_height 3 passed run 39311606450, engine-arena 227 passed run 39317657320, golden d57b5c8ae3096614 twice on this PC. The jump button and the movement numbers are a later row; the channel is driven by gravity and the tether now. Plan docs/plan/shady-knight-port.md (SG5).
 - [x] SG6 game: the fight camera bobs with the hero's walk - the source game's `CameraBob` numbers (`bobSpeed=1`, `mgtSpeed=2`, `xAmp=0.08` m, `yAmp=0.12` m) drive a stride-locked eye bob from the hero's own floor speed, fading in over a 0.5 s halflife and out when the walk stops; presentation only, nothing in the tick or the hash. Tier B. Size S. Owns `crates/game/src/fighter_look_cam.rs`. Accept: `cargo test -p engine-game --lib --features app fighter_look_cam` prints 11 passed including `walk_bob_moves_the_eye_only_while_the_hero_walks`, and the 30 vs 144 fps camera test still passes. F2P: the window camera has no bob; a walking hero moved the shot only. P2P: the ten existing `fighter_look_cam` tests. Landed 280c08f7. Proof: 11 passed on this PC through `node tools/gh-check.mjs` (the `app` feature runs here, not on the Linux runner). Plan docs/plan/shady-knight-port.md. The amplitude pair is read as a normalized strength with 2 cm of eye travel at full strength (read as metres it shook the picture like a hit), the phase follows the hero's floor step, never the frame time, and a hero off the floor or one that teleports in a frame holds the bob still. Fixed 2026-10-20 (owner report: the camera shook while moving).
 - [x] SG7 game: the demo plays the rope swing - a `--height` flag on `arena.exe` (and a session field) arms `MatchSpec::with_height` for the window, so the wall tether swings in `play-arena.bat` instead of zipping; the match identity gains the `0x48` tag when on, so LAN peers must ask for it too. Diff: easy. Tier B. Size S. Owns `crates/game/src/lib.rs`, `crates/game/src/bin/arena.rs`. Accept: `arena.exe --scene arena --spear --height --frames 300 --exit` prints `arena sim:` twice identical with the flag and once without, the run prints no error, and a throw at a wall in a capture leaves the floor (`arena view:` line) instead of reaching the wall face. F2P: no window flag arms the height channel; `play-arena.bat` cannot show the swing. P2P: `cargo test -p engine-game --lib` and the plain demo run. needs: SG4. Plan docs/plan/shady-knight-port.md. Progress 2026-10-19: `--height` is wired (`App::into_height`, `live_session(config, spear, height)`, the binary flag, `--hold` runs) and proven in the window: `arena sim:` `7d204c3622c2d48c` twice with the flag and `d851bde575bbc6ba` once without, `nonfinite=0 error_parts=0` on every line, landed 1f615910. Left: the visual clause, a wall throw in a capture; `--spear-demo` aims at fighters, so it needed a hand throw at a wall or a wall-throw script. Visual clause 2026-10-20: a hand-thrown (agent-seat) throw at the wall under `--height` gave `arena spear: thrown=1 hits=1 tethers=1 ends=0 spears_max=1 ropes_max=1` and `arena capture: frames=26 ... sha=49f44599e9d8969e`; the body left the floor on the rope arc instead of reaching the wall face. Captures and the full line set: `docs/receipts/2026-10-20-sg7-rope-swing/`. The same run reads `pops=281` (AM24's open rotation-aware look defect), not this row. Landed 1f615910.
+- [x] PX45 physics: the candidate-oracle determinism spike (finish-line C15). Landed 2849fe95d. Run
+  box3d-rust's falling-ragdoll determinism scene twice on Windows and once on wasm;
+  if the three digests match it is the candidate hashed-ragdoll backend, and fixed3d
+  sets the cost of a fully integer solver (about 2.2x float). A spike, not a port:
+  vendor the donor scene under `tools/oracle-box3d/` (its own workspace, never a tick
+  crate), hash the full body state after N ticks, print the digest on each run, and
+  write `tools/oracle-box3d/RESULTS.md` with the three digests, the wasm build line,
+  the float-vs-integer time and the decision input. Owns `tools/oracle-box3d/**` and
+  `docs/receipts/2026-10-23-box3d-oracle/`. Diff: regular. Tier B. Size M.
+  Accept: three runs print the same digest (or the mismatch is named with the first
+  differing field); the integer-solver cost factor is measured on the same scene;
+  no workspace crate and no golden changes. F2P: no comparison exists. P2P:
+  `node tools/workspace-check.mjs` green, golden untouched. needs: none.

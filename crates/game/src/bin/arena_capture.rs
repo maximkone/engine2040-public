@@ -34,6 +34,8 @@ pub(crate) mod capture {
 
     use std::time::Instant;
 
+    use crate::headless::{headless_smoke_line, HeadlessWhy, HEADLESS_FLAG};
+
     use engine_game::break_window::BreakScene;
     use engine_game::capture::{self, CaptureSink, LookTap, TapeInputs};
     use engine_game::director::AuditReport;
@@ -44,7 +46,10 @@ pub(crate) mod capture {
     };
     use engine_game::{App, GameConfig, HUMAN_SLOT};
     use engine_input::FighterId;
-    use engine_render::present::{DrawList, MeshKey, Presenter, TextureKey};
+    use engine_render::present::{DrawList, FrameOutput, MeshKey, Presenter, TextureKey};
+
+    mod reference_tier;
+    pub(crate) use reference_tier::{run_reference_mode, ReferenceTier};
 
     /// Chart flags: `--chart` runs the material-chart path synchronously
     /// (no window), `--chart-dir <path>` picks the output directory (default
@@ -117,6 +122,319 @@ pub(crate) mod capture {
             None => std::path::PathBuf::from(CHART_DEFAULT_DIR),
         };
         Ok((ChartArgs { enabled, dir }, rest))
+    }
+
+    /// Reference-set flags: `--reference-set` draws the ten reference captures
+    /// of one tier headless (no window) and files the PNGs plus the manifest
+    /// fragment `tools/reference-captures.mjs` merges. Parsed before chart and
+    /// capture flags, so `WinArgs` still refuses every other unknown flag
+    /// exactly as before.
+    pub(crate) struct ReferenceArgs {
+        /// True while `--reference-set` was given.
+        pub(crate) enabled: bool,
+        /// Root the tier folder plus the fragment go into.
+        pub(crate) dir: std::path::PathBuf,
+        /// Tier to draw; native when `--reference-tier` is absent.
+        pub(crate) tier: ReferenceTier,
+    }
+
+    /// Default reference-set root: the tree's `content/reference`.
+    pub(crate) const REFERENCE_DEFAULT_DIR: &str = "content/reference";
+    /// Native capture canvas, pixels: the manifest's declared size.
+    pub(crate) const REFERENCE_SIZE: (u32, u32) = (1280, 720);
+    /// Potato capture canvas, pixels: the low tier's declared size.
+    pub(crate) const REFERENCE_POTATO_SIZE: (u32, u32) = (320, 180);
+    /// The ten tick offsets the camera path is sampled at: six sim-seconds
+    /// apart across the fixed seed-2040 `arena600` orbit (600 frames).
+    pub(crate) const REFERENCE_TICKS: [u32; 10] = [0, 60, 120, 180, 240, 300, 360, 420, 480, 540];
+    /// Longest accepted reference flag path in bytes (mirrors the chart bound).
+    pub(crate) const REFERENCE_MAX_PATH_BYTES: usize = 4096;
+    /// Fragment file the mode writes beside its PNGs.
+    pub(crate) const REFERENCE_FRAGMENT: &str = "fragment.json";
+
+    /// Split the reference-set flags out of `raw`, passing everything else
+    /// through in order for chart, capture and `WinArgs`. Unknown
+    /// `--reference*` flags, missing values, duplicates and a `--reference-dir`
+    /// without `--reference-set` fail loudly; other flags are never touched.
+    pub(crate) fn split_reference_args(
+        raw: &[String],
+    ) -> Result<(ReferenceArgs, Vec<String>), WinError> {
+        let mut enabled = false;
+        let mut seen_set = false;
+        let mut seen_dir = false;
+        let mut seen_tier = false;
+        let mut dir: Option<String> = None;
+        let mut tier: Option<ReferenceTier> = None;
+        let mut rest = Vec::with_capacity(raw.len());
+        let mut index = 0usize;
+        while index < raw.len() {
+            match raw[index].as_str() {
+                "--reference-set" => {
+                    if seen_set {
+                        return Err(WinError::BadArgs("duplicate --reference-set".to_string()));
+                    }
+                    seen_set = true;
+                    enabled = true;
+                }
+                "--reference-dir" => {
+                    if seen_dir {
+                        return Err(WinError::BadArgs("duplicate --reference-dir".to_string()));
+                    }
+                    seen_dir = true;
+                    index += 1;
+                    match raw.get(index) {
+                        Some(value) if !value.starts_with("--") => dir = Some(value.clone()),
+                        _ => {
+                            return Err(WinError::BadArgs(
+                                "--reference-dir needs a value".to_string(),
+                            ));
+                        }
+                    }
+                }
+                "--reference-tier" => {
+                    if seen_tier {
+                        return Err(WinError::BadArgs("duplicate --reference-tier".to_string()));
+                    }
+                    seen_tier = true;
+                    index += 1;
+                    match raw.get(index) {
+                        Some(value) if !value.starts_with("--") => {
+                            tier = Some(ReferenceTier::parse(value).ok_or_else(|| {
+                                WinError::BadArgs(format!("unknown --reference-tier {value}"))
+                            })?);
+                        }
+                        _ => {
+                            return Err(WinError::BadArgs(
+                                "--reference-tier needs a value".to_string(),
+                            ));
+                        }
+                    }
+                }
+                other if other.starts_with("--reference") => {
+                    return Err(WinError::BadArgs(other.to_string()));
+                }
+                _ => rest.push(raw[index].clone()),
+            }
+            index += 1;
+        }
+        if dir.is_some() && !enabled {
+            return Err(WinError::BadArgs(
+                "--reference-dir needs --reference-set".to_string(),
+            ));
+        }
+        if tier.is_some() && !enabled {
+            return Err(WinError::BadArgs(
+                "--reference-tier needs --reference-set".to_string(),
+            ));
+        }
+        let tier = tier.unwrap_or(ReferenceTier::Native);
+        let dir = match dir {
+            Some(raw) => {
+                if raw.is_empty() || raw.len() > REFERENCE_MAX_PATH_BYTES {
+                    return Err(WinError::BadArgs(
+                        "--reference-dir path rejected".to_string(),
+                    ));
+                }
+                std::path::PathBuf::from(raw)
+            }
+            None => std::path::PathBuf::from(REFERENCE_DEFAULT_DIR),
+        };
+        Ok((ReferenceArgs { enabled, dir, tier }, rest))
+    }
+
+    /// One reference capture the mode filed: the shot name, its manifest path,
+    /// the tick it was taken on and the FNV of the PNG bytes (the tool's
+    /// pixel digest is computed over the decoded pixels it reads back).
+    pub(crate) struct ReferenceShot {
+        /// Shot name inside the tier (`arena600-t000`).
+        pub(crate) shot: String,
+        /// Filed path relative to the set root (`native/arena600-t000.png`).
+        pub(crate) png: String,
+        /// Sim tick the capture ran on.
+        pub(crate) tick: u32,
+        /// FNV-1a of the PNG bytes, hex.
+        pub(crate) png_fnv: String,
+        /// PNG size in bytes.
+        pub(crate) bytes: usize,
+    }
+
+    /// `arena600-tNNN`: the shot name for one tick offset, zero-padded to the
+    /// three digits the 600-frame path uses.
+    pub(crate) fn reference_shot_name(tick: u32) -> String {
+        format!("arena600-t{tick:03}")
+    }
+
+    /// JSON text escaping for the fragment's one-line strings.
+    fn reference_json_text(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        for ch in raw.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    /// The fragment `tools/reference-captures.mjs` reads: the tier, the canvas,
+    /// the adapter and command line behind every shot, and the ten rows. The
+    /// tool re-verifies each PNG and computes the manifest's `pixel_fnv` over
+    /// the decoded pixels, so the fragment carries the byte digest it prints.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fragment names tier, canvas, adapter, driver, command, seed and rows"
+    )]
+    pub(crate) fn reference_fragment_json(
+        tier: &str,
+        camera: &str,
+        seed: u64,
+        width: u32,
+        height: u32,
+        adapter: &str,
+        driver: &str,
+        command: &str,
+        shots: &[ReferenceShot],
+    ) -> String {
+        let mut out = String::with_capacity(256 + shots.len() * 256);
+        out.push_str("{\"schema\":1");
+        out.push_str(&format!(",\"tier\":\"{}\"", reference_json_text(tier)));
+        out.push_str(&format!(",\"camera\":\"{}\"", reference_json_text(camera)));
+        out.push_str(&format!(",\"seed\":{seed}"));
+        out.push_str(&format!(",\"width\":{width},\"height\":{height}"));
+        out.push_str(&format!(
+            ",\"adapter\":\"{}\"",
+            reference_json_text(adapter)
+        ));
+        out.push_str(&format!(",\"driver\":\"{}\"", reference_json_text(driver)));
+        out.push_str(&format!(
+            ",\"command\":\"{}\"",
+            reference_json_text(command)
+        ));
+        out.push_str(",\"shots\":[");
+        for (at, shot) in shots.iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{{\"shot\":\"{}\",\"png\":\"{}\",\"tick\":{},\"width\":{width},\"height\":{height},\"seed\":{seed},\"png_fnv\":\"{}\",\"bytes\":{}}}",
+                reference_json_text(&shot.shot),
+                reference_json_text(&shot.png),
+                shot.tick,
+                reference_json_text(&shot.png_fnv),
+                shot.bytes
+            ));
+        }
+        out.push_str("]}");
+        out
+    }
+
+    /// The kit draws the twin binds: one triple per staged arena-kit draw.
+    pub(crate) type KitDraws = Vec<(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)>;
+
+    /// The config the reference run draws: the arena600 seed and enough ticks
+    /// to reach the last capture offset.
+    pub(crate) fn reference_config(config: &GameConfig) -> GameConfig {
+        let mut config = *config;
+        config.seed = engine_game::windowed::CameraPath::Arena600.seed();
+        let last = REFERENCE_TICKS[REFERENCE_TICKS.len() - 1];
+        config.ticks = config.ticks.max(last + 1);
+        config
+    }
+
+    /// Stage the twin for one reference tier: the tier canvas, the proof cube,
+    /// the dressing, the two fighter bodies and the arena kit.
+    fn reference_stage(
+        presenter: &mut Presenter,
+        config: &GameConfig,
+        size: (u32, u32),
+    ) -> Result<KitDraws, WinError> {
+        presenter.resize(size.0, size.1)?;
+        let key = MeshKey::new(1, [0xA1; 32]);
+        let _ = presenter.upload_mesh(key, &engine_render::v1::cube());
+        let _ = stage_dressing(presenter);
+        engine_render::twin_fighters::stage_twin_fighters(presenter, config.fighters)
+            .map_err(|error| WinError::Render(error.to_string()))?;
+        let report = engine_game::arena_kit::stage_kit_or_default(presenter);
+        Ok(kit_triples(&report))
+    }
+
+    /// Advance the sim one tick and, on a [`REFERENCE_TICKS`] offset, render
+    /// the frame at the reference canvas and file its PNG. Returns the row plus
+    /// the frame's adapter and driver on a shot tick, `None` on any other tick.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one tick needs the presenter, app, scene, draws, fighter, tier and dir"
+    )]
+    fn reference_tick(
+        presenter: &mut Presenter,
+        app: &mut App,
+        crate_scene: &mut Option<BreakScene>,
+        kit_draws: &[(MeshKey, engine_render::v1::PbrMaterial, Option<TextureKey>)],
+        human: FighterId,
+        tier: ReferenceTier,
+        dir: &std::path::Path,
+        tick: u32,
+    ) -> Result<Option<(ReferenceShot, String, String)>, WinError> {
+        let input = engine_input::FighterInput {
+            tick,
+            fighter: human,
+            mx: 0,
+            mz: 0,
+            facing: 0,
+            buttons: engine_input::Buttons::NONE,
+        };
+        let outcome = app.tick(input);
+        if !outcome.input_accepted {
+            return Err(WinError::Render(format!("tick {tick} rejected")));
+        }
+        observe_crate(crate_scene, &outcome);
+        if !REFERENCE_TICKS.contains(&tick) {
+            return Ok(None);
+        }
+        let (width, height) = tier.size();
+        let out = capture_frame_output(
+            presenter,
+            app,
+            crate_scene,
+            &FrameInputs {
+                camera_path: Some(engine_game::windowed::CameraPath::Arena600),
+                kit_draws,
+                night: false,
+                torch_actors: None,
+                frame: tick,
+                tick,
+                size: (width, height),
+            },
+        )?;
+        let Some(png) = out.png else {
+            return Err(WinError::Render(format!("tick {tick} carried no bytes")));
+        };
+        let shot = reference_shot_name(tick);
+        let path = dir.join(format!("{shot}.png"));
+        std::fs::write(&path, &png)
+            .map_err(|error| WinError::Render(format!("{}: {error}", path.display())))?;
+        let png_fnv = engine_game::capture::fnv_hex(&png);
+        say!(
+            "arena reference: tier={} shot={shot} tick={tick} size={width}x{height} png=\"{}\" png_fnv={png_fnv} bytes={}",
+            tier.name(),
+            path.display(),
+            png.len()
+        );
+        Ok(Some((
+            ReferenceShot {
+                png: format!("{}/{shot}.png", tier.name()),
+                shot,
+                tick,
+                png_fnv,
+                bytes: png.len(),
+            },
+            out.receipt.adapter,
+            out.receipt.driver,
+        )))
     }
 
     /// Evidence-only gamma for the chart PNG strips: linear 0..=1 to sRGB u8
@@ -719,22 +1037,25 @@ pub(crate) mod capture {
         frame: u32,
         /// The sim tick the flame flickers on.
         tick: u32,
+        /// The canvas the frame renders at (pixels).
+        size: (u32, u32),
     }
 
     /// One captured twin frame: the draw list, the kit bind, the HUD bars,
-    /// the crate and the night lights, then the offscreen render. The PNG
-    /// bytes come back; the sink writes them. A frame that fails validation
-    /// or carries no bytes is refused loudly.
-    fn capture_frame(
+    /// the crate and the night lights, then the offscreen render. The output
+    /// (PNG bytes plus the adapter receipt) comes back; the sink writes the
+    /// bytes. A frame that fails validation or carries no bytes is refused
+    /// loudly.
+    fn capture_frame_output(
         presenter: &mut Presenter,
         app: &App,
         crate_scene: &mut Option<BreakScene>,
         inputs: &FrameInputs<'_>,
-    ) -> Result<Vec<u8>, WinError> {
+    ) -> Result<FrameOutput, WinError> {
         let mut list = frame_list(
             presenter,
-            SMOKE_FRAME_SIZE.0,
-            SMOKE_FRAME_SIZE.1,
+            inputs.size.0,
+            inputs.size.1,
             inputs.camera_path,
             inputs.frame,
         )?;
@@ -760,10 +1081,24 @@ pub(crate) mod capture {
         if !out.manifest.is_clean() {
             return Err(WinError::Render("twin frame failed validation".to_string()));
         }
-        match out.png {
-            Some(png) => Ok(png),
-            None => Err(WinError::Render("twin frame carried no bytes".to_string())),
+        if out.png.is_none() {
+            return Err(WinError::Render("twin frame carried no bytes".to_string()));
         }
+        Ok(out)
+    }
+
+    /// The PNG bytes of one captured twin frame: the sink's half of
+    /// [`capture_frame_output`], which the reference-set mode calls for the
+    /// adapter receipt it needs in the manifest fragment.
+    fn capture_frame(
+        presenter: &mut Presenter,
+        app: &App,
+        crate_scene: &mut Option<BreakScene>,
+        inputs: &FrameInputs<'_>,
+    ) -> Result<Vec<u8>, WinError> {
+        let out = capture_frame_output(presenter, app, crate_scene, inputs)?;
+        out.png
+            .ok_or_else(|| WinError::Render("twin frame carried no bytes".to_string()))
     }
 
     /// The night preset's light for one captured frame (VS7): the placement's
@@ -859,6 +1194,7 @@ pub(crate) mod capture {
                         torch_actors: torch_actors.as_deref(),
                         frame: presented,
                         tick,
+                        size: SMOKE_FRAME_SIZE,
                     },
                 )?;
                 sink.write_frame(tick, hash, &png)
@@ -960,15 +1296,16 @@ pub(crate) mod capture {
         }))
     }
 
-    /// Headless `--frames` fallback when no display exists: same idle tape, same
-    /// checkpoints, offscreen twin when an adapter exists. With capture flags the
-    /// same session runs through the capture sink instead (synth frames bound to
-    /// the tape), leaving the same PNG sequence plus manifest on disk.
-    pub(crate) fn headless_fallback(
+    /// Headless `--frames` run: same idle tape, same checkpoints, offscreen
+    /// twin when an adapter exists. With capture flags the same session runs
+    /// through the capture sink instead (synth frames bound to the tape),
+    /// leaving the same PNG sequence plus manifest on disk.
+    fn headless_receipts(
         config: GameConfig,
         args: &WinArgs,
         display_err: &WinError,
         capture_flags: &Option<capture::CaptureFlags>,
+        why: HeadlessWhy,
     ) -> i32 {
         let frames = args.frames.unwrap_or(120);
         let started = Instant::now();
@@ -1003,16 +1340,11 @@ pub(crate) mod capture {
             args.present_skip,
         ) {
             Ok(report) => {
-                say!(
-                    "arena headless smoke: ticks={} frames={} hud_cells={} hud_quads={} mixed_frames={} audio=\"{}\" presenter=\"{}\" display=\"{display_err}\"",
-                    report.ticks_run,
-                    report.frames_presented,
-                    report.hud_cells,
-                    report.hud_quads,
-                    report.mixed_frames,
-                    report.audio_notice,
-                    report.presenter_notice,
-                );
+                let display = match why {
+                    HeadlessWhy::Forced => "none requested".to_string(),
+                    HeadlessWhy::NoDisplay => display_err.to_string(),
+                };
+                say!("{}", headless_smoke_line(&report, why, &display));
                 if args.timed_smoke {
                     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                     match format_timed_smoke(frames, report.ticks_run, elapsed_ms) {
@@ -1030,6 +1362,61 @@ pub(crate) mod capture {
                 2
             }
         }
+    }
+
+    /// Headless `--frames` fallback when no display exists. Consumer: the
+    /// binary's `EventLoop::new` failure arm; the receipt names
+    /// `headless=no-display` and carries the display error.
+    pub(crate) fn headless_fallback(
+        config: GameConfig,
+        args: &WinArgs,
+        display_err: &WinError,
+        capture_flags: &Option<capture::CaptureFlags>,
+    ) -> i32 {
+        headless_receipts(
+            config,
+            args,
+            display_err,
+            capture_flags,
+            HeadlessWhy::NoDisplay,
+        )
+    }
+
+    /// `--headless`: the same fixed-tick session with no window and no event
+    /// loop. The shipped check runs this on a runner with no GPU adapter, so
+    /// the game plays instead of being skipped by name; the receipt carries
+    /// `headless=forced` and the last checkpoint hash.
+    pub(crate) fn forced_headless(
+        config: GameConfig,
+        args: &WinArgs,
+        capture_flags: &Option<capture::CaptureFlags>,
+    ) -> i32 {
+        let no_window = WinError::NoDisplay("--headless".to_string());
+        headless_receipts(config, args, &no_window, capture_flags, HeadlessWhy::Forced)
+    }
+
+    /// The `--headless` gate: `None` when the flag is off; `Some(2)` when a
+    /// window-only mode was also asked for; else `Some(code)` from the no-window
+    /// session. `window_only` names every flag whose promise needs the window,
+    /// so a shipped run never silently drops a mode.
+    pub(crate) fn headless_gate(
+        headless: bool,
+        window_only: bool,
+        config: GameConfig,
+        args: &WinArgs,
+        capture_flags: &Option<capture::CaptureFlags>,
+    ) -> Option<i32> {
+        if !headless {
+            return None;
+        }
+        if window_only || args.backend.is_some() {
+            tell!(
+                "arena: {HEADLESS_FLAG} plays the plain session; --play seats, --staged-fight, --spear, --height, --legionary, --speed-demo, {} and --backend need the window",
+                crate::arena_args::VIEW_BRIEF_FLAG
+            );
+            return Some(2);
+        }
+        Some(forced_headless(config, args, capture_flags))
     }
 
     /// One baked kit actor as the twin binds it: mesh key, material and the
@@ -1273,6 +1660,176 @@ pub(crate) mod capture {
     }
 
     #[cfg(test)]
+    mod reference_unit_tests {
+        use super::*;
+
+        fn strings(items: &[&str]) -> Vec<String> {
+            items.iter().map(|item| (*item).to_string()).collect()
+        }
+
+        #[test]
+        fn reference_flags_split_off_before_capture_flags() {
+            let raw = strings(&[
+                "arena",
+                "--reference-set",
+                "--reference-tier",
+                "potato",
+                "--reference-dir",
+                "out/ref",
+                "--frames",
+                "2",
+                "--exit",
+            ]);
+            let (reference, rest) = split_reference_args(&raw).expect("split");
+            assert!(reference.enabled);
+            assert_eq!(reference.tier, ReferenceTier::Potato);
+            assert_eq!(reference.dir, std::path::PathBuf::from("out/ref"));
+            assert_eq!(rest, strings(&["arena", "--frames", "2", "--exit"]));
+            // The default root is the tree's content dir and native is the
+            // default tier, so the old command keeps its meaning.
+            let bare = strings(&["arena", "--reference-set"]);
+            let (default, _) = split_reference_args(&bare).expect("split");
+            assert_eq!(default.dir, std::path::PathBuf::from(REFERENCE_DEFAULT_DIR));
+            assert_eq!(default.tier, ReferenceTier::Native);
+            // Loud refusals: duplicates, an unknown reference flag or tier, and
+            // a dir or tier without the switch that would capture nothing.
+            for bad in [
+                strings(&["arena", "--reference-set", "--reference-set"]),
+                strings(&[
+                    "arena",
+                    "--reference-set",
+                    "--reference-dir",
+                    "a",
+                    "--reference-dir",
+                    "b",
+                ]),
+                strings(&[
+                    "arena",
+                    "--reference-set",
+                    "--reference-tier",
+                    "native",
+                    "--reference-tier",
+                    "potato",
+                ]),
+                strings(&["arena", "--reference-set", "--reference-tier", "web"]),
+                strings(&["arena", "--reference-set", "--reference-fps", "30"]),
+                strings(&["arena", "--reference-set", "--reference-dir"]),
+                strings(&["arena", "--reference-set", "--reference-tier"]),
+                strings(&["arena", "--reference-dir", "out"]),
+                strings(&["arena", "--reference-tier", "potato"]),
+            ] {
+                assert!(split_reference_args(&bad).is_err(), "{bad:?}");
+            }
+        }
+
+        #[test]
+        fn reference_tiers_declare_their_canvas_and_quality() {
+            assert_eq!(ReferenceTier::parse("native"), Some(ReferenceTier::Native));
+            assert_eq!(ReferenceTier::parse("potato"), Some(ReferenceTier::Potato));
+            assert_eq!(ReferenceTier::parse("web"), None, "the page shoots web");
+            assert_eq!(ReferenceTier::Native.name(), "native");
+            assert_eq!(ReferenceTier::Potato.name(), "potato");
+            assert_eq!(ReferenceTier::Native.size(), (1280, 720));
+            assert_eq!(ReferenceTier::Potato.size(), (320, 180));
+            assert_eq!(ReferenceTier::Native.quality(), None);
+            assert_eq!(
+                ReferenceTier::Potato.quality(),
+                Some(engine_render::quality::Quality::Potato),
+                "the potato shot stages under the low tier's caps"
+            );
+        }
+
+        #[test]
+        fn reference_shots_are_ten_distinct_ticks_on_the_orbit() {
+            assert_eq!(REFERENCE_TICKS.len(), 10, "ten captures per tier");
+            let last = REFERENCE_TICKS[REFERENCE_TICKS.len() - 1];
+            assert!(
+                last < engine_game::windowed::ARENA600_FRAMES,
+                "every tick stays inside the 600-frame path"
+            );
+            for pair in REFERENCE_TICKS.windows(2) {
+                assert!(pair[0] < pair[1], "ticks ascend: {REFERENCE_TICKS:?}");
+            }
+            let mut names: Vec<String> = REFERENCE_TICKS
+                .iter()
+                .map(|tick| reference_shot_name(*tick))
+                .collect();
+            assert_eq!(names.len(), 10);
+            assert_eq!(names[0], "arena600-t000");
+            assert_eq!(names[9], "arena600-t540");
+            names.sort();
+            names.dedup();
+            assert_eq!(names.len(), 10, "shot names are unique");
+        }
+
+        #[test]
+        fn reference_fragment_carries_every_shot_and_its_source() {
+            let shots = vec![
+                ReferenceShot {
+                    shot: reference_shot_name(0),
+                    png: format!("{}/arena600-t000.png", ReferenceTier::Native.name()),
+                    tick: 0,
+                    png_fnv: "0123456789abcdef".to_string(),
+                    bytes: 4096,
+                },
+                ReferenceShot {
+                    shot: reference_shot_name(540),
+                    png: format!("{}/arena600-t540.png", ReferenceTier::Native.name()),
+                    tick: 540,
+                    png_fnv: "fedcba9876543210".to_string(),
+                    bytes: 8192,
+                },
+            ];
+            let json = reference_fragment_json(
+                ReferenceTier::Native.name(),
+                "arena600",
+                2040,
+                ReferenceTier::Native.size().0,
+                ReferenceTier::Native.size().1,
+                "RTX \"3050\"",
+                "driver",
+                "arena --reference-set",
+                &shots,
+            );
+            assert!(json.starts_with("{\"schema\":1"), "{json}");
+            assert!(json.contains("\"tier\":\"native\""), "{json}");
+            assert!(json.contains("\"camera\":\"arena600\""), "{json}");
+            assert!(json.contains("\"seed\":2040"), "{json}");
+            assert!(json.contains("\"width\":1280,\"height\":720"), "{json}");
+            // A quote in the adapter name is escaped, so the fragment stays one
+            // valid JSON document.
+            assert!(json.contains("\"adapter\":\"RTX \\\"3050\\\"\""), "{json}");
+            assert!(
+                json.contains("\"command\":\"arena --reference-set\""),
+                "{json}"
+            );
+            assert!(json.contains("\"shot\":\"arena600-t000\""), "{json}");
+            assert!(
+                json.contains("\"png\":\"native/arena600-t540.png\""),
+                "{json}"
+            );
+            assert!(json.contains("\"tick\":540"), "{json}");
+            assert!(json.contains("\"png_fnv\":\"fedcba9876543210\""), "{json}");
+            assert!(json.contains("\"bytes\":8192"), "{json}");
+            assert_eq!(json.matches("\"shot\":").count(), 2, "{json}");
+            let potato = reference_fragment_json(
+                ReferenceTier::Potato.name(),
+                "arena600",
+                2040,
+                ReferenceTier::Potato.size().0,
+                ReferenceTier::Potato.size().1,
+                "adapter",
+                "driver",
+                "arena --reference-set --reference-tier potato",
+                &[],
+            );
+            assert!(potato.contains("\"tier\":\"potato\""), "{potato}");
+            assert!(potato.contains("\"width\":320,\"height\":180"), "{potato}");
+            assert!(potato.contains("\"shots\":[]"), "{potato}");
+        }
+    }
+
+    #[cfg(test)]
     mod cut_audit_tests {
         use super::*;
         use engine_game::director::{
@@ -1396,13 +1953,17 @@ pub(crate) mod capture {
         /// adapter skips loudly, the same skip the twin smokes take.
         #[test]
         fn twin_fighters_reach_the_frame_pixels() {
-            let mut presenter = match Presenter::init_offscreen() {
-                Ok(presenter) => presenter,
-                Err(engine_render::present::PresentError::NoAdapter) => {
-                    eprintln!("SKIPPED twin_fighters_reach_the_frame_pixels: NoAdapter");
-                    return;
+            let probe = Presenter::init_offscreen().map_err(|error| match error {
+                engine_render::present::PresentError::NoAdapter => {
+                    engine_render::test_gpu::NoAdapter("no wgpu adapter on this machine".into())
                 }
-                Err(err) => panic!("offscreen presenter: {err}"),
+                other => panic!("offscreen presenter: {other}"),
+            });
+            let Some(mut presenter) = engine_render::test_gpu::require_or_skip(
+                "twin_fighters_reach_the_frame_pixels",
+                probe,
+            ) else {
+                return;
             };
             presenter
                 .resize(SMOKE_FRAME_SIZE.0, SMOKE_FRAME_SIZE.1)
@@ -1437,6 +1998,91 @@ pub(crate) mod capture {
                 with_png, without_png,
                 "the staged fighter bodies change the twin pixels"
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod headless_tests {
+        use super::*;
+
+        use crate::headless::{headless_smoke_line, split_plain_headless, HeadlessWhy};
+
+        fn string_args(args: &[&str]) -> Vec<String> {
+            args.iter().map(|arg| arg.to_string()).collect()
+        }
+
+        fn test_config() -> GameConfig {
+            GameConfig {
+                seed: 2040,
+                ticks: 24,
+                fighters: 2,
+                half_extent_m: 20.0,
+            }
+        }
+
+        #[test]
+        fn headless_flag_splits_off_and_the_strict_parser_still_refuses_it() {
+            let (on, rest) =
+                split_plain_headless(&string_args(&["arena", "--headless", "--frames", "3"]));
+            assert!(on, "the flag asks for the no-window route");
+            assert_eq!(rest, string_args(&["arena", "--frames", "3"]));
+            // A net seat keeps the flag: there it asks the net session to run
+            // windowless, so the net split owns it.
+            let (net, same) =
+                split_plain_headless(&string_args(&["arena", "--headless", "--host", "1"]));
+            assert!(!net, "a net seat keeps its own --headless meaning");
+            assert_eq!(same, string_args(&["arena", "--headless", "--host", "1"]));
+            let (off, same) = split_plain_headless(&string_args(&["arena", "--exit"]));
+            assert!(!off, "the route ships off");
+            assert_eq!(same, string_args(&["arena", "--exit"]));
+            // The strict parser still refuses the flag if it were not split.
+            assert!(WinArgs::parse(&string_args(&["arena", "--headless"])).is_err());
+        }
+
+        #[test]
+        fn headless_smoke_line_carries_the_last_checkpoint_hash() {
+            let mut report = engine_game::windowed::WinReport {
+                ticks_run: 600,
+                frames_presented: 0,
+                last_checkpoint: Some(engine_arena::Checkpoint {
+                    tick: 600,
+                    hash: 0x0123_4567_89ab_cdef,
+                }),
+                hud_cells: 5,
+                hud_quads: 3,
+                mixed_frames: 0,
+                mean_send: 0.0,
+                audio_notice: "audio muted".to_string(),
+                presenter_notice: "presenter skipped: no wgpu adapter on this machine".to_string(),
+                camera_frames: 600,
+            };
+            let line = headless_smoke_line(&report, HeadlessWhy::Forced, "none requested");
+            assert!(
+                line.starts_with("arena headless smoke: ticks=600 frames=0 hash=0123456789abcdef "),
+                "{line}"
+            );
+            assert!(line.contains("headless=forced"), "{line}");
+            assert!(
+                line.contains("presenter=\"presenter skipped: no wgpu adapter on this machine\""),
+                "{line}"
+            );
+            // A run that never ticked names no hash, so a checker cannot read one.
+            report.ticks_run = 0;
+            report.last_checkpoint = None;
+            let empty = headless_smoke_line(&report, HeadlessWhy::NoDisplay, "no display (test)");
+            assert!(empty.contains(" ticks=0 frames=0 hash=- "), "{empty}");
+            assert!(empty.contains("headless=no-display"), "{empty}");
+        }
+
+        #[test]
+        fn forced_headless_plays_the_session_with_no_window() {
+            // The shipped check uses this route: the fixed ticks run with no
+            // window and no presenter, and the run reports green on its own.
+            let args = WinArgs::parse(&string_args(&[
+                "arena", "--frames", "6", "--exit", "--mute",
+            ]))
+            .expect("headless args parse");
+            assert_eq!(forced_headless(test_config(), &args, &None), 0);
         }
     }
 }

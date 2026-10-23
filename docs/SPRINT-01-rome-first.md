@@ -325,12 +325,30 @@
   engine-game --lib` green, headless default builds with no `gltf` in
   `cargo tree -p engine-game -e normal`. needs: CT8.
   progress 2026-10-10: kit tests green with `--features app` (`kit_imports_8_files_over_5000_tris`, `_x2`, `kit_twin_stages_11_draws_over_5000_tris`; 12/12 with `-- kit`); headless `cargo tree -p engine-game -e normal` has no gltf/engine-assets/image. Not ticked: default `cargo test -p engine-game --lib` not yet green (cold rebuild hit the heavy.mjs 60 s cap) and the golden not run (no sim path touched). VS4, VS3 and RA14 packets in target/queue/ready/60-62. Landed 802ed2ce (kit import and staging, progress a42e8f82); verified 2026-10-18: cargo test -p engine-game --lib 436 passed 0 failed (runner run 39105755591); engine-game --features app --lib 711 passed incl. arena_kit::tests::kit_imports_8_files_over_5000_tris, _x2 and windowed::tests::kit_twin_stages_11_draws_over_5000_tris (8 kit meshes over 5,000 tris, frame-0 PNG differs from the cube frame, run on this RTX 3050); cargo tree -p engine-game -e normal has no gltf; no sim crate touched, golden d57b5c8ae3096614 unchanged (engine-proof does not depend on engine-game).
-- [ ] VS3 game: kit textures — VS1 meshes bind their glTF base-color images
+- [x] VS3 game: kit textures — VS1 meshes bind their glTF base-color images
   from `content/arena/textures` through VS2. Tier A. Size S. Owns the texture
   half of `crates/game/src/arena_kit.rs`. Accept: F2P the sand region of the
   frame-60 capture has a luminance variance at least 4 times the untextured
-  run; P2P golden unchanged. needs: VS1, VS2.
-- [ ] VS4 game: fighters at their simulated positions — `App::fighter_views()` Progress 2026-10-17: App::fighter_views landed (dd7b4743) with lib.rs fighter_views_match_sim_positions_every_tick (2 fighters, 120 ticks, byte-equal to the dataset); left: no test that at least 2 fighter meshes over 5,000 triangles are drawn.
+  run; P2P golden unchanged. needs: VS1, VS2. Landed 0050d23f6. `kit_texture` resolves
+  and decodes the base-color image a kit file names; a named image the import does not
+  carry refuses with `KitError::Texture` naming file and asset id, and bad bytes refuse
+  the same way (no white fallback). `E2040_KIT_TEXTURES=off` is read once at import so
+  the staged report and the window twin list go flat together. Proof: `cargo test -p
+  engine-game --features app --lib arena_kit` 52 passed (incl. the missing-image and
+  switch tests); F2P capture pair at the frame-60 establishing view, sand rect
+  x64..126 y72..93 (n=1386) luminance variance 14.810 vs 0.881 = 16.8x (bar 4x) on
+  the kept frames `target/vs3/kit-tex60c/frame_000001.png` (14869 B) vs
+  `target/vs3/kit-plain60c/frame_000001.png` (12451 B), re-measured by the lead
+  (the first run read 12.912 vs 0.881 = 14.7x; the tree had moved); the probe that
+  shot them was temporary and is not in the tree, the frames are the evidence;
+  `cargo test -p engine2040 --release --test proof_cli default_and_max_seed` PASS with
+  `final_hash == d57b5c8ae3096614`; clippy `-p engine-game --features app --all-targets
+  --no-deps -- -D warnings` PASS (Windows runner); rustfmt clean; `rust-quality --owned`
+  PASS (production lines 1497, under the 1500 cap, so the big-file ratchet no longer
+  regresses). Named caveat: the app lib tests in the shared tree also need another
+  lane's uncommitted allocator cfg fix in `crates/game/src/lib.rs`, which this row does
+  not own or commit.
+- [x] VS4 game: fighters at their simulated positions — `App::fighter_views()` Progress 2026-10-17: App::fighter_views landed (dd7b4743) with lib.rs fighter_views_match_sim_positions_every_tick (2 fighters, 120 ticks, byte-equal to the dataset); left: no test that at least 2 fighter meshes over 5,000 triangles are drawn.
   returns slot, position and yaw from the authoritative dataset each tick; the
   4 CT7 bodies import (after `fighter_bind::bind_all`) and draw in bind pose at
   those positions in the window and capture legs. Tier A. Size M. Owns
@@ -338,7 +356,7 @@
   `crates/game/src/lib.rs`, the window-leg feed in `crates/game/src/camera_feed.rs`.
   Accept: F2P for a 2-fighter 120-tick run every frame's fighter positions
   equal `fighter_views` (test) and at least 2 meshes of over 5,000 triangles
-  are drawn; P2P golden unchanged. needs: VS1.
+  are drawn; P2P golden unchanged. needs: VS1. Landed c8bed518b. fighter_draw:: 3 passed (39919063323) and the moved default test 1 passed (39918750341); the capture test checks every frame's drawn feet equal [view.x, 0, view.z] and each body clears 5,000 tris, the window test poses roots within 1e-5 and two slot bodies clear 5,000 tris; lib.rs 4011 -> 3985 so the over-3000 cap is gone; golden d57b5c8ae3096614 and both arena pins re-proven at HEAD (39920678515, 39920678454).
 - [ ] VS5a anim: fighter pose to joint matrices — LOC2 `LocalPose` to the 45
   AN1 skinning matrices through the glTF-to-AN1 joint remap (43-bone
   bijection, 2 identity nodes). Tier A. Size M. Owns the remap and matrix
@@ -509,7 +527,7 @@
   FAIL names only other seats' in-flight gates, quoted in
   `docs/SPRINT-19-receipts.md` and `target/q1/receipt.md`. GPU lines
   PENDING, zero reference-GPU pixels claimed.)
-- [ ] CT12 assets: bake manifest — every cook and bake writes a seeded manifest
+- [x] CT12 assets: bake manifest — every cook and bake writes a seeded manifest
   of inputs, tool versions and outputs, so only what changed rebuilds and
   every output has a receipt for DT5 and PR1 (Snakemake discipline, MIT, no
   runtime). Tier B. Size S. Owns `crates/assets/src/manifest.rs` (new file
@@ -527,7 +545,16 @@
   `manifest.rs` beside frozen owners, fixture-scoped 20/20 + closure-exact
   10/10, receipts feed DT5/PR1; proof: manifest suite green +
   workspace-check board-valid + proof golden x2.)
-  LATER: parked 2026-10-03 (circus verdict 2: bake manifest for a cook pipeline no product binary calls (engine-assets is outside the arena window, e2040-mcp and the editor), consumer DT5 is open and off the duel; stuck 3 helpers and 3 deep-dives; unpark once BV1 or VS1 loads assets in a game binary); unpark by deleting this line.
+  Landed 51ec5cf29: `manifest.rs` (canonical LF: seed, threads, profile,
+  importer + version, settings, sorted source + artifact rows with blake3 and a
+  trailing checksum; corrupt/truncated/future text refused), and
+  `bundle_cook --out` writes `<out>.manifest` beside the bundle. 20/20 fixture
+  rebuilds byte-equal (manifest digest 82e66330f0ede22b..., seed 2040, threads
+  1, profile potato), 10/10 edits invalidate exactly the transitive closure
+  (failed edit keeps last-good), round-trip 13/13 and bin 3/3 green; runs
+  39904265062 / 39904239734 / 39904264872, clippy 39904265069, golden 13/13
+  d57b5c8ae3096614 (39903948299); baseline 929777 recorded (42f1ddc24). Park
+  cleared: the code is landed and additive; DT5 remains its consumer.
 - [ ] WIN10 game: arena CLI surface — `--help`, `--version`, `--mode`,
   `--list-modes` parsed as data before the winit loop; unknown flags
   exit non-zero with usage, never a silent no-op. Tier B. Size S.

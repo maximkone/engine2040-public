@@ -41,6 +41,9 @@ pub mod feet;
 pub mod graph;
 /// Procedural additive hit reactions over body layers.
 pub mod hit_react;
+/// Baked per-move hit tracks: integer-mm blade segments and bone capsules the
+/// fight reads by `(move, tick)`. Std-only; no donor bytes.
+pub mod hit_track;
 pub mod ik;
 /// Inertialized clip switches: the shown joint's offset and offset velocity
 /// from the arriving clip decay on a critically damped spring, so a cut keeps
@@ -60,6 +63,8 @@ pub mod locomotion;
 pub mod lod;
 #[cfg(test)]
 mod lod_w1_test;
+#[cfg(test)]
+mod lod_warp_test;
 /// Offline motion bake: the PartiGen endpoint rule plus the one AM5P pack half
 /// a teacher bake must use. Std-only, no I/O, never called by the tick.
 pub mod motion_bake;
@@ -83,6 +88,10 @@ pub mod pose;
 #[cfg(test)]
 mod pose_c1_test;
 pub mod readable;
+/// Facing arrow plus lean at crowd LOD: one [`readable::Readable`] per LOD
+/// fighter, re-evaluated on the ticks its tier owns and held in between, so the
+/// far ring never strobes. Presentation only: the sim bytes cannot move.
+pub mod readable_lod;
 pub mod space;
 /// Blend-space cues: each sample's event track speaks by integer weight
 /// under an [`EventStrategy`](space_events::EventStrategy). Std-only; the
@@ -116,6 +125,11 @@ pub mod viseme;
 pub mod warp_ground;
 #[cfg(test)]
 mod warp_ground_feel_test;
+/// Slope cling, stair stepping and soft-ground sink beside the ground warp:
+/// surface-speed feed, tread plants and a sink that is not skate.
+pub mod warp_ground_slope;
+#[cfg(test)]
+mod warp_ground_slope_test;
 #[cfg(test)]
 mod warp_ground_test;
 

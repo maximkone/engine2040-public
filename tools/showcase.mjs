@@ -29,6 +29,7 @@
 //   node tools/showcase.mjs --clip <dir> [--fps 30] [--width 640]
 //     [--out <dir>] [--manifest <path>] [--check-only] [--json] [--allow-unhashed]
 //   node tools/showcase.mjs <clipDir>
+//   node tools/showcase.mjs --check-only   (newest set under target/showcase/)
 //   node tools/showcase.mjs --help
 import { spawnSync } from "node:child_process";
 import { sha256 } from "./hash-util.mjs";
@@ -62,6 +63,7 @@ Usage:
   node tools/showcase.mjs --clip target/showcase/<date>/<clip> [options]
   node tools/showcase.mjs <clipDir> [options]
   node tools/showcase.mjs --set target/showcase/<date> [--json]
+  node tools/showcase.mjs --check-only [--json]
 
 Options:
   --clip <dir>      clip dir with PNGs + manifest.json (or first positional arg)
@@ -72,7 +74,9 @@ Options:
   --fps <n>         override manifest fps (default: manifest fps or 30)
   --width <px>      GIF scale width, height follows aspect (default 640)
   --out <dir>       output dir (default: the clip dir, as <clip>.mp4/.gif)
-  --check-only      validate manifest + PNGs, run no ffmpeg, write nothing
+  --check-only      validate manifest + PNGs, run no ffmpeg, write nothing;
+                    with no --clip and no --set it checks the newest date set
+                    under target/showcase/ and fails closed when none exists
   --json            print the result summary as JSON
   --allow-unhashed  accept a manifest with no frames/files/count coverage
                     (frameless) or whose frames lack per-file sha256
@@ -364,6 +368,28 @@ function checkShowcaseSet(setDir, asJson) {
   else process.stdout.write(`showcase set OK: ${pngs} PNGs in ${setDir}\n`);
 }
 
+// Newest capture set for the bare `--check-only` gate: the last date-named
+// dir under target/showcase/ (SHOW1 writes one dir per run date). Fails closed
+// when the root or every set is missing, so an absent capture never passes.
+function newestShowcaseSet(root = join(process.cwd(), "target", "showcase")) {
+  if (!existsSync(root) || !statSync(root).isDirectory()) {
+    fail("showcase", `no showcase sets: ${root} does not exist (capture a clip first, or pass --clip/--set)`);
+  }
+  let names;
+  try {
+    names = readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(e.name))
+      .map((e) => e.name)
+      .sort();
+  } catch (e) {
+    fail("showcase", `cannot read showcase root ${root}: ${e.message}`);
+  }
+  if (names.length === 0) {
+    fail("showcase", `no showcase sets: ${root} holds no <date> dir (pass --clip/--set)`);
+  }
+  return join(root, names[names.length - 1]);
+}
+
 function writeConcatList(pngPaths) {
   const dir = mkdtempSync(join(tmpdir(), "e2040-showcase-"));
   const listPath = join(dir, "list.txt");
@@ -378,6 +404,11 @@ function main() {
   if (opts.set && opts.clip) usageFail("showcase", "use one of --clip <clipDir> or --set <setDir>, not both", HELP);
   if (opts.set) {
     checkShowcaseSet(resolve(opts.set), opts.json);
+    return;
+  }
+  if (!opts.clip && opts.checkOnly) {
+    // The gate leg: bare --check-only checks the newest capture set.
+    checkShowcaseSet(newestShowcaseSet(), opts.json);
     return;
   }
   if (!opts.clip) usageFail("showcase", "give a clip dir: --clip target/showcase/<date>/<clip>", HELP);

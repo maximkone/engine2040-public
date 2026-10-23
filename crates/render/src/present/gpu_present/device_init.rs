@@ -37,17 +37,22 @@ impl Presenter {
         Self::build_with_preset(device, queue, adapter.get_info(), support, night)
     }
 
-    /// What every presenter device is opened with: pass timestamps when the
-    /// adapter supports them (the GPU timing rows stay `unsupported`
-    /// otherwise and nothing else changes) and the default limits, which
-    /// every WebGPU adapter grants. The one descriptor for the blocking
-    /// native request below and for a caller that opens its device
-    /// asynchronously (the browser shell) before `init_from_device`.
+    /// What every presenter device is opened with: pass timestamps and BC
+    /// texture decoding when the adapter supports them (the GPU timing rows
+    /// stay `unsupported` otherwise, and a cook format the adapter cannot
+    /// decode stays RGBA8), and the default limits, which every WebGPU
+    /// adapter grants. The one descriptor for the blocking native request
+    /// below and for a caller that opens its device asynchronously (the
+    /// browser shell) before `init_from_device`.
+    ///
+    /// The web tier grants no `TEXTURE_COMPRESSION_BC`, so the mask leaves
+    /// it out there and a compressed cook falls back to RGBA8.
     #[must_use]
     pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+        let wanted = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TEXTURE_COMPRESSION_BC;
         wgpu::DeviceDescriptor {
             label: Some("engine2040-ra1-present"),
-            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+            required_features: adapter.features() & wanted,
             ..Default::default()
         }
     }

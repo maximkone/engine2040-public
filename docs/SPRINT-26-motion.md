@@ -85,6 +85,19 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   both lines are named. Left: the SOMA BVH input (somaskel77, cm root) as
   the second format; the NPZ reader already handles `savez_compressed` and
   the `(1,N,77,3,3)` one-batch shape.
+  Progress 2026-10-23 (repair): the committed fixture gate went red after
+  `692cac700` re-packed `stagger.am5p` with local offsets - the test still
+  measured `avg_slip` on the foot's own track (0.109355) where the receipt's
+  meter is `avg_world_slip` (0.024264). Root cause: the gate read the wrong
+  frame; the cook and the fixture were right, and no bar moved. Fix
+  `be75d2c32` (`crates/anim/src/motion_bake.rs`) reads `avg_world_slip` on
+  the receipt's track pair and pins the fixture's own `qclip_hash`
+  `0xf5f4de57dd5a7280`. Proof: `motion_bake` 5 passed x2 (runs 39956107000,
+  39956330408), anim lib 517 passed 0 failed (39956525181), anim clippy PASS
+  (39957217012), golden PASS `d57b5c8ae3096614` (39956764887). Open content
+  note for the cook lane: the re-cook moved the stepping foot to 0.496259 m/s
+  and `plant_windows` to 0/0 - the detector finds no plant at all in the new
+  clip; not this row's gate and not re-pinned.
   (RES-ARXIV 2026-10-20, motion teacher hunt.)
 
 - [ ] AM28 anim: distilled trajectory student in the tick - train the
@@ -103,7 +116,7 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   nothing, and the net-on tape repeats its `arena sim:` hash.
   Correction 2026-10-21: the Accept filter `traj_student` matches no test (`Grep traj` over crates/anim is empty) and `fixtures/nets/traj.e2nn` does not exist (`Test-Path` false; only `depth_student.e2nn` is in that folder), so the command exits 0 with 0 passed. The net, the fixture and the test are the work; Accept is `--lib traj_student` printing a nonzero passed count, and the row may not be ticked until it does.
 
-- [ ] AM29 anim: a baked teacher clip is playable in the tick - the pack
+- [x] AM29 anim: a baked teacher clip is playable in the tick - the pack
   carries the whole fighter body, the engine loads an `.am5p` from disk and
   samples it onto the fighter rig. AM27 bakes and proves the wire, but
   nothing played it: the bake wrote only the two foot tracks (the gate's
@@ -172,3 +185,14 @@ Every row here is off-tick: a teacher bakes bytes, the tick only samples them.
   Left in the row: no game-side caller plays a loaded clip yet. The map and
   the loader are in place; the caller that loads a pack and plays it on the
   game's rig is still to write.
+  Landed 2026-10-23 (loader Accept): `cargo test -p engine-anim --lib pack_file`
+  12 passed x2 (39907704138, 39907851439) - `stagger.am5p` loads from disk,
+  carries every fighter joint, a sampled pose holds the rig's own stance, a pack
+  baked for another rig refuses, and the bake-gate slip stays under 0.08.
+  `f6ef1a686` also plays the four combat clips on the CT7 body (world-space
+  transplant; 8 `pack_clip` + 4 `combat_clips` tests, body height 1.544 m and a
+  per-clip foot range in the commit). Open leg, named: the game-side attack-slot
+  swap is held back (11-16 cm foot-predictor miss and a death pose landing
+  mid-attack trip the duel pop law) and waits under
+  `C:\_quarantine\2026-10-22\engine2040-combat-packs\`, so the live attack slot
+  still plays the old clip.

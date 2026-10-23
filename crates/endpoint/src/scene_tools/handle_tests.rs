@@ -259,6 +259,19 @@ fn brief_handles_size_from_collider_component() {
     let spatial = SceneSpatialTool::invoke(&server, SceneSpatialArgs::default()).expect("reads");
     assert_eq!(spatial.size_source.collider, 1);
     assert_eq!(spatial.size_source.default, 1);
+    // The bare node is named with its assumed box, not silently believed.
+    assert_eq!(
+        spatial.default_sized.len(),
+        1,
+        "{:?}",
+        spatial.default_sized
+    );
+    assert!(
+        spatial.default_sized[0].starts_with("lamp_1 "),
+        "{:?}",
+        spatial.default_sized
+    );
+    assert!(spatial.default_sized[0].contains("default size"));
 }
 
 /// A wide pad collider with four small nodes standing inside it, inserted in
@@ -439,4 +452,186 @@ fn read_repeat_include_spatial_counts_equal_a_spatial_call() {
     assert_eq!(summary.hash, spatial.hash);
     let plain = brief_page(&server, SCENE_BRIEF_DEFAULT_BUDGET, None);
     assert!(plain.spatial.is_none(), "off unless asked");
+}
+
+struct Yard {
+    server: McpServer,
+    wall: ObjectId,
+    crate_: ObjectId,
+    old_a: ObjectId,
+    old_b: ObjectId,
+    lamp: ObjectId,
+}
+
+// A 10 m x 2 m x 20 cm wall collider at the origin, a free crate south of
+// it, two crates already stacked on one footprint far away (a pre-existing
+// overlap), and a free lamp, seeded through the command service. Since AD7
+// the tx gate measures the wall's collider, so a crate 3 m from the
+// center lands inside the slab and is refused.
+fn yard() -> Yard {
+    let mut doc = Document::new();
+    let mut journal = Journal::new();
+    let (wall, crate_, old_a, old_b, lamp) = (
+        ObjectId::new(),
+        ObjectId::new(),
+        ObjectId::new(),
+        ObjectId::new(),
+        ObjectId::new(),
+    );
+    let spots = [
+        (wall, [0.0, 0.0, 0.0]),
+        (crate_, [0.0, 0.0, 6.0]),
+        (old_a, [20.0, 0.0, 20.0]),
+        (old_b, [20.0, 0.0, 20.0]),
+        (lamp, [-20.0, 0.0, -20.0]),
+    ];
+    let mut ops = Vec::new();
+    for (id, pos) in spots {
+        ops.push(Op::Insert {
+            id,
+            parent: ObjectId::NIL,
+            local: Transform::new(pos, [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+        });
+    }
+    ops.push(Op::SetComponent {
+        id: wall,
+        component: Component::Collider(Collider {
+            shape: ColliderShape::Box,
+            half: [5.0, 1.0, 0.1],
+            sensor: false,
+        }),
+    });
+    let batch = Batch {
+        ops,
+        base_revision: doc.revision,
+        idempotency_key: 700,
+        provenance: None,
+    };
+    commands::apply(&mut doc, &mut journal, &batch).expect("yard seed applies");
+    Yard {
+        server: McpServer::with_document(doc, journal, 7, Capability::unrestricted(7)),
+        wall,
+        crate_,
+        old_a,
+        old_b,
+        lamp,
+    }
+}
+
+// One root move through the tx door: preview, then apply with the approval.
+fn tx_move(
+    server: &McpServer,
+    id: &ObjectId,
+    pos: [f32; 3],
+    key: u64,
+    delta: Option<bool>,
+) -> Result<crate::mcp::TxApplyOutput, crate::mcp::McpToolError> {
+    use crate::mcp::{OpDto, PoseDto, TxApplyArgs, TxApplyTool, TxPreviewArgs, TxPreviewTool};
+    let rev = server.lock().expect("test lock holds").doc.revision;
+    let ops = vec![OpDto::SetLocal {
+        id: id.to_string(),
+        local: PoseDto {
+            pos,
+            rot: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+        },
+    }];
+    let preview = TxPreviewTool::invoke(
+        server,
+        TxPreviewArgs {
+            expected_revision: rev,
+            idempotency_key: key,
+            ops: ops.clone(),
+        },
+    )
+    .expect("move previews");
+    TxApplyTool::invoke(
+        server,
+        TxApplyArgs {
+            expected_revision: rev,
+            idempotency_key: key,
+            ops,
+            approval: preview.approval,
+            delta,
+        },
+    )
+}
+
+/// AD7: the gate measures the wall's collider extents, so the crate that
+/// the old 1 m snapshot let slip into the slab is refused with both ids,
+/// and nothing lands.
+#[test]
+fn gate_refuses_the_crate_in_the_wall_and_names_both_ids() {
+    let yard = yard();
+    let rev = yard.server.lock().expect("test lock holds").doc.revision;
+    let refused = tx_move(&yard.server, &yard.crate_, [3.0, 0.0, 0.0], 810, None)
+        .expect_err("a crate inside a wall collider is refused");
+    assert_eq!(refused.code, "spatial_rejected");
+    assert!(
+        refused.message.contains(&yard.crate_.to_string()),
+        "mover id: {}",
+        refused.message
+    );
+    assert!(
+        refused.message.contains(&yard.wall.to_string()),
+        "wall id: {}",
+        refused.message
+    );
+    assert!(refused.message.contains("overlap"), "{}", refused.message);
+    assert_eq!(
+        yard.server.lock().expect("test lock holds").doc.revision,
+        rev,
+        "the document is unchanged"
+    );
+}
+
+#[test]
+fn spatial_delta_hides_old_overlaps_and_clean_moves_read_empty() {
+    let yard = yard();
+    let (server, lamp) = (&yard.server, &yard.lamp);
+    // A clean move of a free lamp: empty lists, touched ids only. The old
+    // stacked pair elsewhere stays out.
+    let clean = tx_move(server, lamp, [-22.0, 0.0, -20.0], 820, None)
+        .expect("clean move applies")
+        .spatial_delta
+        .expect("delta rides on the write");
+    assert_eq!(clean.ids, vec![lamp.to_string()]);
+    assert!(clean.new_findings.is_empty() && clean.resolved.is_empty());
+    assert_eq!(clean.more, 0);
+    // Walking the crate into the wall is refused now (AD7), so no delta.
+    let hit = tx_move(server, &yard.crate_, [3.0, 0.0, 0.0], 821, None)
+        .expect_err("the crate cannot enter the wall");
+    assert!(
+        !hit.message.contains(&yard.old_a.to_string())
+            && !hit.message.contains(&yard.old_b.to_string()),
+        "old overlap stays out: {}",
+        hit.message
+    );
+    // A legal move the gate does not cover still reports its new finding:
+    // sinking the lamp's box under the floor adds one `sunken` line.
+    let sunk = tx_move(server, lamp, [-22.0, -5.0, -20.0], 822, None)
+        .expect("a free sunk move applies")
+        .spatial_delta
+        .expect("delta rides on the write");
+    assert_eq!(sunk.new_findings.len(), 1, "{:?}", sunk.new_findings);
+    assert!(
+        sunk.new_findings[0].contains(&lamp.to_string()),
+        "{:?}",
+        sunk.new_findings
+    );
+    // Moving one stacked crate away clears the old overlap: one resolved line.
+    let freed = tx_move(server, &yard.old_a, [20.0, 0.0, 26.0], 823, None)
+        .expect("freeing move applies")
+        .spatial_delta
+        .expect("delta rides on the write");
+    assert!(freed.new_findings.is_empty());
+    assert_eq!(freed.resolved.len(), 1, "{:?}", freed.resolved);
+    assert!(
+        freed.resolved[0].contains(&yard.old_a.to_string())
+            && freed.resolved[0].contains(&yard.old_b.to_string())
+    );
+    // `delta: false` skips the check: no field at all.
+    let skipped = tx_move(server, lamp, [-24.0, 0.0, -20.0], 824, Some(false))
+        .expect("skipping move applies");
+    assert!(skipped.spatial_delta.is_none());
 }

@@ -39,14 +39,14 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   only when armour is worn, so v1 and bare v2 bytes hold. Left: today every blow on plate
   deflects (penetration past the block needs weapon energy), and the window duel does not
   yet call `wear_armour` from the kit.
-- [ ] FEEL5 render: a hit throws sparks, blood and dust where it lands. The arena frame folds In hand 2026-10-22 (Claude lead session + one Haiku; pick another row until this lands).
+- [x] FEEL5 render: a hit throws sparks, blood and dust where it lands. The arena frame folds In hand 2026-10-22 (Claude lead session + one Haiku; pick another row until this lands). Landed f0975158b (with c0737c5c3 and 61cc048a3). Proof: `cargo test -p engine-render --lib decals::` 17 passed / 1 ignored (39912685520); `cargo test -p engine-game --features app --bin arena fight_fx` 3 passed (39913078168); clippy PASS render (39914379865) and game with app (39915322714). Captures on the PC release arena: target/clips/feel5 38 PNGs sha 77098509cc55070e and feel5b 104 PNGs sha bef77aaca24f5876, both view=ok; receipt `spawned=432 blood=360 dust=72 flame=0 splats=30 placed=30 evicted=0 cap=128`; the lead opened feel5/frame_000012.png (red pools under two fighters) and feel5b frames 33-34 (blood cloud on the torso). Potato cap is unit-proven (`potato_tier_caps_the_ground_splats`: 64 slots, High clamps 512 to 256); the native arena has no `--tier` flag, so the cap is not capture-proven yet. Open legs named: sparks spawned 0 on this tape (the block/clash path is unit-tested, not filmed).
   each cue into the GPU particle pool at the contact point (sparks on metal, block and clash;
   blood on a flesh hit; dust on a fall), the pool steps and draws every frame, and a blood
   decal lands on the floor. Files: `crates/game/src/bin/arena_frame/mod.rs`,
   `crates/render/src/particles_gpu.rs`, `present/gpu_present/live.rs`, `submit.rs`, `decals.rs`.
   Accept: a scripted duel capture shows particles at the hit point (counted spawns per cue in
   the frame stats) and a decal under the victim; potato tier caps the count.
-- [ ] FEEL6 combat: a clash binds and recoils. Blade on blade throws both weapons back In hand 2026-10-22 (Claude lead session + one Haiku; pick another row until this lands).
+- [x] FEEL6 combat: a clash binds and recoils. Blade on blade throws both weapons back In hand 2026-10-22 (Claude lead session + one Haiku; pick another row until this lands).
   (a held recoil pose for both fighters), sparks (FEEL5) and a metal clash cue. Files:
   `crates/combat/src/exchange.rs`, `crates/arena/src/match_wire.rs`,
   `crates/game/src/fighter_look_acts.rs`, `crates/audio/src/cue.rs`. Accept: a clash test
@@ -56,25 +56,49 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   (`ImpactKind::Clash` already sounds steel); v0/v1 bytes unmoved. Left: the live duel
   runs `match_live = false`, so the recoil shows once the arena authority is wired, and
   the look needs a recoil flag (`FighterLook` has none); V2 snapshots fail closed in
-  arena `lib.rs`/`fork.rs`.
-- [ ] FEEL7 game: landing has weight. Jump and fall play in the default duel (not only behind
+  arena `lib.rs`/`fork.rs`. Landed 2026-10-23 (sim Accept): the clash test
+  `clash_recoil_throws_both_blades_the_same_ticks_once` is green (39906309942) - one
+  Clash event (the cue), both fighters recoiling for exactly `0..CLASH_RECOIL_TICKS`,
+  and v1 still binds with no recoil; the wire tape `clash_tape_mirrors_and_replays`
+  is green too (39906426534). Open leg, named: the live duel runs `match_live = false`,
+  so the held recoil and the look's recoil flag wait for the arena authority; V2
+  snapshots still fail closed in arena `lib.rs`/`fork.rs`.
+- [x] FEEL7 game: landing has weight. Jump and fall play in the default duel (not only behind
   `--height`); a landing squashes the body, dips the camera, plays a land sound by speed and
   raises dust; a long fall costs health by a fall table. Files: `crates/game/src/lib.rs`,
   `bin/arena.rs`, `crates/arena/src/authority.rs`, `fighter_look_cam.rs`,
   `window_audio_space.rs`, `fighter_look_feet.rs`. Accept: a scripted jump shows the squash,
   dip and land cue in one tick; a fall from 4 m costs the table's damage; rules v1 unchanged.
+  Landed 5945d02a9. The test found the real defect: the app's views are the tick's pre-step
+  positions, so the look saw the ground one tick after the authority's landing row. Gaps added
+  `FighterLook::observe_landing_rows` and fed the window's `TickOutcome.lands`, so squash, camera
+  dip and the footstep cue all start on the charged tick. Proof: `feel7_a_landing_tick_squashes_dips_and_plays_its_cue`
+  + 5 more, 6 passed, 0 failed (run 39941035099); the 4 m table row `fall_damage_permille(4_000)
+  == 250` and v1 never charges pass (run 39943213262, 1 passed). Golden `d57b5c8ae3096614`
+  unchanged (run 39941034726), bin check run 39940110303, rustfmt clean on the five files. Open
+  leg: landing dust is not raised yet (it rides the NS11 render particle feed); no sim path moved.
 - [x] FEEL8 audio: a hit sounds like what hit what. Gain and pitch follow damage and weapon Landed ad9f95aa4.
   mass; metal, wood and flesh cues come from `impact_cue` by material; the App mirror stops
   hard-coding Flesh. Files: `crates/audio/src/combat_cues.rs`, `cue.rs`, `strike_sound.rs`,
   `crates/game/src/window_audio_space.rs`, `lib.rs`. Accept: a test maps a dagger-on-flesh and a
   mace-on-plate hit to different cues with the mace louder.
-- [ ] FEEL9 game: a hit moves the body that took it. Upper-body hits drive
+- [x] FEEL9 game: a hit moves the body that took it. Upper-body hits drive
   `PhysFx::hit_ragdoll` on the struck bones through the (now stable) powered servo and blend
   back; stagger memory shows a limp. Files: `crates/physfx/src/fx/hit.rs`,
   `crates/physics/src/powered.rs`, `stagger_memory.rs`, `crates/game/src/ragdoll_look.rs`,
   `fighter_look_acts.rs`. Accept: a capture of a torso hit shows the struck chain displaced
-  and back within the row's tick budget; presentation only, hash unchanged.
-- [ ] FEEL10 physics: close contact pushes back. Bodies in contact exchange push forces (not
+  and back within the row's tick budget; presentation only, hash unchanged. Landed cda19d727.
+  16 `ragdoll_look` tests pass: head moves 12.5 cm vs layer off, 0.000 m after the 18-tick fade,
+  same blow twice gives the same chain, a knockdown replaces a standing reaction, a hit on a
+  floored fighter leaves the fall alone, on/off hashes equal; clippy PASS, golden PASS, rustfmt
+  clean, rust-quality --owned PASS. Window run 600 ticks reactions on: hits=27 knockdowns=3
+  pops=0 pop_cm_max=9.0 ragdolls=3 (control --no-ragdoll pops=3 down:3). Capture
+  `target/feel9-hits/` 306 frames 1280x720, peak frame_000111.png tick 213 at 13.7 cm on/off
+  bounds difference; caveat recorded: the fight camera is wide (body ~30 px), so the readable
+  proof is the measured test. Open legs named by the lane: stagger-memory limp needs a sim-side
+  hit zone/bone (out of crate reach), and the scripted-knockout test is red at ff35036a2 without
+  this lane's files (pre-existing, proved separately).
+- [x] FEEL10 physics: close contact pushes back. Bodies in contact exchange push forces (not
   only positional separation) and two fighters can clinch with the clinch pass in the live
   look. Files: `crates/arena/src/collide.rs`, `crates/physics/src/clinch.rs`,
   `controller2.rs`. Accept: law tests: momentum is conserved in a two-body push
@@ -84,7 +108,13 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
   rapier clinch pair conserves too); arena `exchange_contact_pushes` hands the speed over
   through the knockback carrier above rules v2. Left: it is dormant until a
   `FIGHT_RULES_V3` / `ArenaRules::V3` exists (combat `fight.rs`, arena `lib.rs`), walking
-  speed does not enter the push yet, and the clinch pass in the live look.
+  speed does not enter the push yet, and the clinch pass in the live look. Landed
+  2026-10-23 (law Accept): `cargo test -p engine-physics --lib push` is green (7 passed,
+  39906309439) - `a_contact_push_conserves_momentum` through `laws::conserved`,
+  `a_resting_pair_stays_at_rest_under_the_push`, `mirrored_contact_pushes_mirror`, plus
+  `push_and_shove_separate`. Open leg, named: dormant until `FIGHT_RULES_V3` /
+  `ArenaRules::V3`; walking speed is not in the push yet; the clinch pass is not in the
+  live look.
 - [x] FEEL11 game: the pad rumbles on a hit. gilrs force feedback, strength by the eye trauma
   the hit gave (`fps_view::EyeTrauma`), off by a setting. Files: `crates/game/src/windowed.rs`,
   `fps_view.rs`. Accept: a test maps a hit taken and a knockdown to two rumble strengths; no
@@ -119,3 +149,45 @@ golden `d57b5c8ae3096614` never move. Physics rows prove their laws with `engine
 - [x] DOOR5 tools: the installed bridge is never stale. `tools/mcp-install.mjs --check` fails Landed da72ff8.
   when `.opencode/bin/e2040-mcp.exe` is older than `target/release/e2040-mcp.exe`, and the
   install renames a locked copy aside instead of failing. Accept: node tests for both cases.
+- [ ] FEEL12 feel: the walk answers to a known game, not to our taste. A fixture runs one
+  input tape through our integer controller and through the published Half-Life movement
+  model, then prints both speed curves per tick. Source: `ValveSoftware/halflife`
+  `pm_shared/pm_shared.c` (`PM_Accelerate` :990, `PM_Friction` :1202, `PM_AirAccelerate`
+  :1279, `PM_Jump` :2474, `PM_PreventMegaBunnyJumping` :2444), read as a spec only (Valve
+  licence forbids reuse); numbers pinned in `docs/research/blendworks-2026-10-23/README.md`.
+  Files: `crates/physics/src/controller.rs`, new `crates/physics/src/oracle.rs`,
+  `crates/physics/tests/it/`. Accept: one test replays a 120-tick tape (run up, stop, turn,
+  jump, air strafe) through both models, prints speed and height per tick, and asserts our
+  curve sits inside a stated band of the oracle; the oracle is offline f64 and never enters
+  the tick; `AirTuning` gains no default change, so golden `d57b5c8ae3096614` does not move.
+  Kill: if our curve cannot be brought inside the band without importing the engine cvars
+  (`maxspeed`, `accelerate`, `airaccelerate`, `friction`, `stopspeed`, `edgefriction`) as
+  sim constants, the oracle is not usable - record it and drop the row.
+- [ ] DOOR6 endpoint: a refusal is a record, not a sentence. Steal: `ChiR24/Unreal_mcp@8d7e1495`
+  `semantic/errors.ts` - every code carries `kind`, `retryable`, `suggestions[]`, the revision
+  pair and a `next` call. We have 348 refusal sites and 177 codes, none with a machine-readable
+  advice field; the 12 most used codes cover 133 sites, so those go first. Files:
+  `crates/endpoint/src/mcp_refusal.rs`, `crates/endpoint/src/mcp_tools.rs`.
+  Accept: a test walks every code in the table and asserts the four fields, and each suggestion
+  parses back as a valid verb call in dry run; one test per top-12 code pins its suggestion text.
+  F2P: a refusal is a string with no fields.
+- [ ] DOOR7 proof: the ladder measures the model, not our mood. Steal: `SummerEngine/summer@88d0a5b6`
+  `evals/end-to-end/README.md` - six fixed prompts, all-or-nothing gates, wall clock, tool calls
+  and cost printed per rung. Rungs: E0 door alive, E1 player walks, E2 two fighters trade, E3 parry
+  lands, E4 camp work builds, E5 the slice runs. Files: `crates/playtest/src/eval.rs`,
+  `tools/agent-ladder.mjs`.
+  Accept: three rungs run against the mock provider and print a table with pass/fail and counts;
+  a failing rung names the verb that refused; the same tape twice gives the same table.
+- [ ] DOOR8 endpoint: level.paint, one call for a room. Steal: Godot GridMap painting plus LDtk
+  auto-layer rules - kit cells, rules and seeded scatter in one gated call that expands to one
+  batch of `Op::Insert` inside one undo step. It wires `wfc` and `scatter`, which landed with no
+  caller, so 24 cells go from 24 preview+apply pairs to 1. Files: the level pack in
+  `crates/endpoint/src/packs/`, `crates/spatial` (wfc).
+  Accept: 24 cells placed in one call, one undo reverts all 24; the same seed gives the same scene
+  digest x2; a rule that cannot be satisfied refuses and names the cell.
+- [ ] DOOR9 endpoint: anim.retarget, the clips we cannot use. Steal: Godot BoneMap over
+  `bone_role_for_name`, `BoneMapping` and `bone_coverage` in `crates/anim/src/contract.rs`, which
+  have no verb. A third-party clip goes from "unknown role" to intake, retarget and a preview
+  frame. Files: `crates/endpoint/src/packs/anim.rs`, `crates/anim/src/contract.rs`.
+  Accept: a Mixamo rig with UE bone names retargets to our skeleton and reports coverage 100%; an
+  unknown bone refuses with its name; the preview is a real frame with pixels.

@@ -5,6 +5,7 @@
 //! per-frame fog and GTAO tranche lives in `fog_tranche`.
 use super::super::fog_fwd::{FogFwd, FOG_FWD_UNIFORM_BYTES};
 use super::super::*;
+use super::forward_group::{forward_bind_with_sky, ForwardBindSources};
 use super::frame::{gtao_err, sky_err, GpuMesh, GpuTexture, Targets};
 use super::msaa::{
     msaa_effective_sample_count, msaa_sample_count, msaa_target_desc, msaa_transient_bytes,
@@ -95,6 +96,12 @@ pub struct Presenter {
     /// `SkinParams` uniform (forward binding 8): `has_skin` is 1, written
     /// once at build, so `vs_skinned` always blends.
     pub(crate) skin_params_buf: wgpu::Buffer,
+    /// LF5: the previous joint palette (binding 22, same block layout).
+    pub(crate) prev_skin_joint_buf: wgpu::Buffer,
+    /// What each skin block last held: `write_skin_block` publishes it.
+    skin_prev: Vec<[[f32; 4]; 4]>,
+    /// True once a block saw its first palette (zero motion, not a jump).
+    skin_prev_seen: [bool; SKIN_BLOCKS],
     /// Skin block of every resident mesh uploaded through
     /// `upload_skinned_mesh`. A mesh key listed here holds 80-byte skinned
     /// vertices and draws through `forward_skinned`; every other key holds
@@ -119,6 +126,14 @@ pub struct Presenter {
     pub(crate) swap: v1::SwapState,
     pub(crate) targets: Option<Targets>,
     pub(crate) cam_buf: wgpu::Buffer,
+    /// LF5: the previous frame's view-projection (binding 21), a frame behind `cam_buf`.
+    pub(crate) prev_cam_buf: wgpu::Buffer,
+    /// Last un-jittered camera bytes `prev_cam_buf` took; `None` before the first frame.
+    pub(super) prev_cam_bytes: Option<[u8; 64]>,
+    /// LF5b: the jitter switch, its un-jittered matrix (23) and last images.
+    pub(crate) jitter: super::motion::JitterState,
+    /// LF5c: the live TAA resolve history pair, pipeline and switch.
+    pub(crate) taa: super::taa_resolve::TaaResolve,
     pub(crate) light_buf: wgpu::Buffer,
     /// One 256-byte-strided uniform ring for every draw's material: one
     /// `write_buffer` per frame, bound with a dynamic offset per draw.
@@ -158,6 +173,10 @@ pub struct Presenter {
     pub(crate) textures: CpuCache<TextureKey, GpuTexture>,
     pub(crate) device_lost: Option<String>,
     pub(crate) frames_presented: u64,
+    /// Draws the last staged frame submitted after the EG38 sphere cull: the
+    /// list length minus the draws whose world bound is outside the frame
+    /// frustum. Evidence only, never hashed.
+    pub(crate) submitted_draws: usize,
     /// Surface frames between look-probe rounds (sky, layer, particle and
     /// decal bind probes plus the IBL chart); 1 probes every frame.
     pub(crate) probe_every: u64,
@@ -199,6 +218,14 @@ pub struct Presenter {
     pub(crate) fight_fx: Option<particles_gpu::ParticlePool>,
     /// RP2 particle bind state (sizes only when the word shape moves).
     pub(crate) particle_sub: particles_gpu::ParticleSubmitter,
+    /// LF14 weapon-trail strip for the coming frame: flat verts plus the vert
+    /// count of each slot's strip. Replaced every staged frame; empty clears.
+    pub(crate) trail_verts: Vec<crate::draw::TrailStripVert>,
+    /// Per-slot vert counts for `trail_verts`, so one draw never bridges two
+    /// fighters.
+    pub(crate) trail_lens: Vec<u32>,
+    /// LF14 trail bind state (built on the first non-empty strip).
+    pub(crate) trail_sub: crate::trail_draw_gpu::TrailSubmitter,
     /// RP3 resident decal pool (empty until WIN1 maps CB2 gore events).
     pub(crate) decal_pool: decals::DecalPool,
     /// RP3 decal bind state (sizes only when the word shape moves).
@@ -363,6 +390,12 @@ pub struct Presenter {
     pub(crate) neutral_fog_pending: bool,
     /// CPU HUD quad ring in 0..1 space; drained by the next slice.
     pub(crate) overlay: overlay::OverlayRing,
+    /// Debug line list of the frame, replaced by `push_debug_lines`; the
+    /// live line pass reads it (PW13). Empty until the game pushes.
+    pub(crate) debug_lines: crate::debug_draw::LineBatch,
+    /// The after-blit debug line switch (`debug_line_enable`); off by default
+    /// so a frame with no debug view stays bit-identical.
+    pub(crate) debug_line_on: bool,
     /// LF4 slice 1 bloom state: enable flag plus pass thresholds, default
     /// on. Init only, no per-frame allocation; reuses the HDR target.
     pub(crate) bloom: BloomState,
@@ -460,140 +493,6 @@ pub(super) fn forward_ao_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
             },
             count: None,
         }],
-    })
-}
-
-/// Every shared resource a forward bind group points at, besides the
-/// per-texture base-color view. Borrowed, built where the bind is created.
-#[cfg(feature = "window")]
-#[derive(Clone, Copy)]
-struct ForwardBindSources<'a> {
-    layout: &'a wgpu::BindGroupLayout,
-    cam: &'a wgpu::Buffer,
-    light: &'a wgpu::Buffer,
-    material: &'a wgpu::Buffer,
-    material_bytes: u64,
-    shadow: &'a wgpu::Buffer,
-    sampler: &'a wgpu::Sampler,
-    /// Sampler for the base map (5) and the normal and ORM maps (18): the
-    /// clamped `sampler` for plain draws, the Repeat one for material sets.
-    map_sampler: &'a wgpu::Sampler,
-    fog: &'a wgpu::Buffer,
-    torch: &'a wgpu::Buffer,
-    pre_view: &'a wgpu::TextureView,
-    brdf_view: &'a wgpu::TextureView,
-    sh_buf: &'a wgpu::Buffer,
-    sky_view: &'a wgpu::TextureView,
-    normal_view: &'a wgpu::TextureView,
-    /// ORM map view (binding 19).
-    orm_view: &'a wgpu::TextureView,
-    /// Joint palette storage buffer (binding 7, one block per draw offset).
-    skin_joints: &'a wgpu::Buffer,
-    /// `SkinParams` uniform (binding 8).
-    skin_params: &'a wgpu::Buffer,
-}
-
-/// LF1 live sky bind: the forward group plus the init-time sky-view
-/// texture at 15. Same buffers the IBL live bind carries, plus the sky
-/// view; cold bind creation only, never per frame. Keeps the binary
-/// uniform layout, adds no pass.
-#[cfg(feature = "window")]
-fn forward_bind_with_sky(
-    device: &wgpu::Device,
-    sources: &ForwardBindSources<'_>,
-    base_view: &wgpu::TextureView,
-) -> wgpu::BindGroup {
-    let ForwardBindSources {
-        layout,
-        cam,
-        light,
-        material,
-        material_bytes,
-        shadow,
-        sampler,
-        map_sampler,
-        fog,
-        torch,
-        pre_view,
-        brdf_view,
-        sh_buf,
-        sky_view,
-        normal_view,
-        orm_view,
-        skin_joints,
-        skin_params,
-    } = *sources;
-    fn whole(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-        wgpu::BindGroupEntry {
-            binding,
-            resource: buffer.as_entire_binding(),
-        }
-    }
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("ra1-forward-bind-sky"),
-        layout,
-        entries: &[
-            // One joint block window; the draw's dynamic offset moves it.
-            wgpu::BindGroupEntry {
-                binding: 7,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: skin_joints,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(SKIN_BLOCK_BYTES),
-                }),
-            },
-            whole(8, skin_params),
-            whole(0, cam),
-            whole(1, light),
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: material,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(material_bytes),
-                }),
-            },
-            whole(3, shadow),
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(base_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: wgpu::BindingResource::Sampler(map_sampler),
-            },
-            whole(6, fog),
-            wgpu::BindGroupEntry {
-                binding: 9,
-                resource: wgpu::BindingResource::TextureView(pre_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 10,
-                resource: wgpu::BindingResource::TextureView(brdf_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 11,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            whole(12, sh_buf),
-            wgpu::BindGroupEntry {
-                binding: 15,
-                resource: wgpu::BindingResource::TextureView(sky_view),
-            },
-            whole(16, torch),
-            wgpu::BindGroupEntry {
-                binding: 17,
-                resource: wgpu::BindingResource::TextureView(normal_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 18,
-                resource: wgpu::BindingResource::Sampler(map_sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 19,
-                resource: wgpu::BindingResource::TextureView(orm_view),
-            },
-        ],
     })
 }
 
@@ -848,7 +747,7 @@ impl Presenter {
             skin_params_entry(8),
             // LF1 live sky: the init-time sky-view texture (Rgba32Float,
             // unfilterable, manual bilinear in `fs_sky`). Free binding:
-            // 9-12 owned by IBL, 13-14 dead sun shadow, 7-8 skin.
+            // 9-12 owned by IBL, 13-14 the live sun map, 7-8 skin.
             wgpu::BindGroupLayoutEntry {
                 binding: 15,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -865,6 +764,31 @@ impl Presenter {
         forward_entries.extend_from_slice(&forward_normal_layout_entries());
         forward_entries.push(forward_orm_layout_entry());
         forward_entries.extend_from_slice(&ibl::gpu::forward_ibl_layout_entries());
+        // EG11b: the live sun depth map at 13, its comparison sampler at 14
+        // and the pass frame at 20; the window `fs` entry samples the map.
+        forward_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 13,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+        forward_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 14,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+            count: None,
+        });
+        forward_entries.push(uniform_entry(20, wgpu::ShaderStages::FRAGMENT));
+        // LF5 motion: the previous view-projection (21) and the previous
+        // joint palette (22, one block picked by the same dynamic offset as
+        // binding 7). Both vertex stage: the motion is built per vertex.
+        forward_entries.push(uniform_entry(21, wgpu::ShaderStages::VERTEX));
+        forward_entries.push(super::submit::skin_joints_entry(22));
+        forward_entries.push(uniform_entry(23, wgpu::ShaderStages::VERTEX));
         let forward_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ra1-uniforms"),
             entries: &forward_entries,
@@ -891,6 +815,14 @@ impl Presenter {
         );
         let skin_joint_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fc2b-skin-joints"),
+            size: SKIN_BLOCK_BYTES * u64::try_from(SKIN_BLOCKS).unwrap_or(1),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // LF5: the previous palette, one block per body, same stride as the
+        // live one so a draw passes the same dynamic offset to both.
+        let prev_skin_joint_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ra1-skin-joints-prev"),
             size: SKIN_BLOCK_BYTES * u64::try_from(SKIN_BLOCKS).unwrap_or(1),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -1006,6 +938,9 @@ impl Presenter {
         let orm_fallback =
             Self::linear_texel(&device, &queue, "ra1-orm-fallback", orm_fallback_rgba());
         let cam_buf = uniform_buffer(&device, "ra1-u-camera", 80);
+        // LF5: the previous frame's view-projection.
+        let prev_cam_buf = uniform_buffer(&device, "ra1-u-prev-camera", 64);
+        let jitter = super::motion::JitterState::new(&device);
         let light_buf = uniform_buffer(&device, "ra1-u-light", 32);
         // The twin sun pass is std-only (no device work); a bad
         // shape fails init loudly, never a silent unlit twin.
@@ -1169,6 +1104,7 @@ impl Presenter {
             dimension: Some(wgpu::TextureViewDimension::D2),
             ..Default::default()
         });
+        let sun_sub = super::sun_shadow::SunShadowSubmitter::build(&device);
         let fallback_bind = forward_bind_with_sky(
             &device,
             &ForwardBindSources {
@@ -1190,6 +1126,12 @@ impl Presenter {
                 orm_view: &orm_fallback.view,
                 skin_joints: &skin_joint_buf,
                 skin_params: &skin_params_buf,
+                prev_cam: &prev_cam_buf,
+                prev_skin_joints: &prev_skin_joint_buf,
+                steady_cam: &jitter.steady_buf,
+                sun_view: sun_sub.view(),
+                sun_smp: sun_sub.sampler(),
+                sun_buf: sun_sub.fwd_uniform(),
             },
             &base_fallback.view,
         );
@@ -1220,6 +1162,7 @@ impl Presenter {
             draw_sets: Vec::with_capacity(MAX_DRAWS_PER_FRAME),
             draw_binds: Vec::with_capacity(MAX_DRAWS_PER_FRAME),
             creates: CreateTally::default(),
+            submitted_draws: 0,
             look_probes: false,
             msaa,
             msaa_support: support,
@@ -1236,6 +1179,8 @@ impl Presenter {
             last_acquire_us: 0,
             neutral_fog_pending: false,
             overlay: overlay::OverlayRing::new(),
+            debug_lines: crate::debug_draw::LineBatch::default(),
+            debug_line_on: false,
             bloom: BloomState::on(),
             capture: super::capture::CaptureSlot::default(),
             #[cfg(target_arch = "wasm32")]
@@ -1245,6 +1190,9 @@ impl Presenter {
             particles: particles_gpu::ParticlePool::new(super::quality_apply::POOL_SEED),
             fight_fx: None,
             particle_sub: particles_gpu::ParticleSubmitter::new(&device),
+            trail_verts: Vec::new(),
+            trail_lens: Vec::new(),
+            trail_sub: crate::trail_draw_gpu::TrailSubmitter::new(),
             decal_pool: decals::DecalPool::new(),
             decal_sub: decals::DecalSubmitter::new(&device),
             fog_sub: fog::FogSubmitter::new(&device),
@@ -1276,7 +1224,7 @@ impl Presenter {
             twin_sun,
             twin_shadow_buf,
             contact_feet: [0u8; crate::contact_feet::CONTACT_FEET_BYTES],
-            sun_sub: super::sun_shadow::SunShadowSubmitter::build(&device),
+            sun_sub,
             spot_lights: Vec::new(),
             torch_lights: Vec::new(),
             spot_occluders: Vec::new(),
@@ -1289,6 +1237,7 @@ impl Presenter {
             quality: crate::quality::knobs(crate::quality::Quality::High),
             pipelines,
             pipeline_keys,
+            taa: super::taa_resolve::TaaResolve::new(&device),
             device,
             queue,
             instance: None,
@@ -1308,6 +1257,9 @@ impl Presenter {
             ao_layout,
             skin_joint_buf,
             skin_params_buf,
+            prev_skin_joint_buf,
+            skin_prev: vec![[[0.0f32; 4]; 4]; SKIN_BLOCKS * SKIN_BLOCK_JOINTS],
+            skin_prev_seen: [false; SKIN_BLOCKS],
             skin_blocks: BTreeMap::new(),
             blit_layout,
             blit_shader,
@@ -1322,6 +1274,9 @@ impl Presenter {
             swap: v1::SwapState::new(0, 0),
             targets: None,
             cam_buf,
+            prev_cam_buf,
+            prev_cam_bytes: None,
+            jitter,
             light_buf,
             meshes: CpuCache::new(MAX_CACHED_MESHES),
             mesh_index_hash: BTreeMap::new(),
@@ -1628,10 +1583,25 @@ impl Presenter {
                 }
             }
             if let Some(resident) = self.meshes.get(&key) {
+                // LF5: publish the positions this key held before the write,
+                // so the motion target carries the mesh's own move.
+                if let Some(prev) = &resident.prev_vertex {
+                    super::motion::write_prev_positions_alloc(
+                        &self.queue,
+                        prev,
+                        &resident.last_positions,
+                    );
+                }
                 self.queue
                     .write_buffer(&resident.vertex, 0, &self.vertex_scratch);
-                return Ok(());
             }
+            if let Some(resident) = self.meshes.get_mut(&key) {
+                resident.last_positions.clear();
+                resident
+                    .last_positions
+                    .extend_from_slice(&validated.positions);
+            }
+            return Ok(());
         }
         let gpu = self.pack_mesh(mesh)?;
         let incoming = Self::mesh_index_hash(&mesh.indices);
@@ -1733,9 +1703,14 @@ impl Presenter {
         self.creates.buffer();
         let gpu = GpuMesh {
             vertex,
+            // A skinned body takes its previous pose from the previous
+            // joint palette, never a second vertex stream.
+            prev_vertex: None,
+            last_positions: Vec::new(),
             index,
             count: u32::try_from(mesh.indices.len()).unwrap_or(u32::MAX),
             vertices: u32::try_from(mesh.positions.len()).unwrap_or(u32::MAX),
+            bounds: crate::draw::bound_sphere(&mesh.positions),
             indices: Vec::new(),
         };
         if let Some(evicted) = self.meshes.insert(key, gpu) {
@@ -1746,6 +1721,9 @@ impl Presenter {
         // No index fingerprint: a skinned key never takes the in-place path.
         self.mesh_index_hash.remove(&key);
         self.skin_blocks.insert(key, block_id);
+        // A new body in this block: its first palette write reports zero
+        // motion instead of the previous occupant's pose.
+        self.skin_prev_seen[block] = false;
         Ok(())
     }
 
@@ -1774,6 +1752,7 @@ impl Presenter {
                 matrices.len()
             )));
         }
+        let base = block * SKIN_BLOCK_JOINTS;
         let mut bytes = [0u8; SKIN_BLOCK_JOINTS * 64];
         let mut at = 0usize;
         for (joint, matrix) in matrices.iter().enumerate() {
@@ -1787,10 +1766,22 @@ impl Presenter {
                 at += 4;
             }
         }
+        // LF5: the palette this block took last time, or today's matrix on
+        // its first write: a fresh body reports zero motion, never a jump
+        // from the bind pose.
+        let prev_bytes = super::motion::prev_skin_bytes(
+            base,
+            matrices,
+            &mut self.skin_prev,
+            self.skin_prev_seen[block],
+        );
         if at > 0 {
             let offset = u64::try_from(block).unwrap_or(0) * SKIN_BLOCK_BYTES;
             self.queue
+                .write_buffer(&self.prev_skin_joint_buf, offset, &prev_bytes[..at]);
+            self.queue
                 .write_buffer(&self.skin_joint_buf, offset, &bytes[..at]);
+            self.skin_prev_seen[block] = true;
         }
         Ok(())
     }
@@ -1832,15 +1823,22 @@ impl Presenter {
                 contents: &mesh.index_bytes(),
                 usage: wgpu::BufferUsages::INDEX,
             });
+        // LF5: the same positions as a compact stream the motion target
+        // subtracts; a refresh rewrites it before taking the new pose.
+        let prev_vb = super::motion::create_prev_buffer(&self.device, &mesh.positions);
+        self.creates.buffer();
         self.creates.buffer();
         self.creates.buffer();
         let count = u32::try_from(mesh.indices.len()).unwrap_or(u32::MAX);
         let vertices = u32::try_from(mesh.positions.len()).unwrap_or(u32::MAX);
         Ok(GpuMesh {
             vertex: vb,
+            prev_vertex: Some(prev_vb),
+            last_positions: mesh.positions.clone(),
             index: ib,
             count,
             vertices,
+            bounds: crate::draw::bound_sphere(&mesh.positions),
             indices: mesh.indices,
         })
     }
@@ -2154,6 +2152,12 @@ impl Presenter {
                 orm_view,
                 skin_joints: &self.skin_joint_buf,
                 skin_params: &self.skin_params_buf,
+                prev_cam: &self.prev_cam_buf,
+                prev_skin_joints: &self.prev_skin_joint_buf,
+                steady_cam: &self.jitter.steady_buf,
+                sun_view: self.sun_sub.view(),
+                sun_smp: self.sun_sub.sampler(),
+                sun_buf: self.sun_sub.fwd_uniform(),
             },
             view,
         )
@@ -2215,6 +2219,15 @@ impl Presenter {
         }
         // CODELAW one-owner: tangents come from the import lane, as in
         // `v1::upload_mesh`; every input is validated above.
+        // LF5: publish the pose this key held before the refresh.
+        if let Some(prev) = &resident.prev_vertex {
+            super::motion::write_prev_positions(
+                &self.queue,
+                &mut self.vertex_scratch,
+                prev,
+                &resident.last_positions,
+            );
+        }
         let proxy = engine_assets::CookedMesh {
             positions: positions.to_vec(),
             normals: normals.to_vec(),
@@ -2237,6 +2250,13 @@ impl Presenter {
         };
         self.queue
             .write_buffer(&resident.vertex, 0, &self.vertex_scratch);
+        // The new pose becomes the next frame's previous one.
+        if let Some(resident) = self.meshes.get_mut(&key) {
+            resident.last_positions.clear();
+            resident.last_positions.extend_from_slice(positions);
+            // The world bound follows the positions it describes.
+            resident.bounds = crate::draw::bound_sphere(positions);
+        }
         Ok(true)
     }
 
@@ -2244,6 +2264,13 @@ impl Presenter {
     /// (cumulative): a steady frame leaves both unchanged.
     pub fn gpu_create_totals(&self) -> (u64, u64) {
         self.creates.totals()
+    }
+
+    /// Draws the last staged frame submitted after the EG38 sphere cull: the
+    /// forward pass drew this many of the list's items. A list whose only
+    /// draw sits outside the frame frustum reads zero.
+    pub fn submitted_draws(&self) -> usize {
+        self.submitted_draws
     }
 
     /// Resident mesh count.
@@ -2316,6 +2343,25 @@ impl Presenter {
     /// Resident mesh keys in sorted order (deterministic receipts).
     pub fn mesh_keys(&self) -> Vec<MeshKey> {
         self.meshes.sorted_keys()
+    }
+
+    /// LF14: replace the weapon-trail strip the coming frame draws. `verts`
+    /// is the flat list of per-slot strips and `lens` the vert count of each
+    /// slot's strip, so one draw never bridges two fighters. An empty list
+    /// clears it, so an idle frame draws no ribbon. View only, never hashed.
+    /// Both lists are copied into reuse buffers: no per-frame allocation
+    /// once the shape settles.
+    pub fn set_trail_strips(&mut self, verts: &[crate::draw::TrailStripVert], lens: &[u32]) {
+        self.trail_verts.clear();
+        self.trail_verts.extend_from_slice(verts);
+        self.trail_lens.clear();
+        self.trail_lens.extend_from_slice(lens);
+    }
+
+    /// Verts in the trail strip staged for the coming frame (receipts and
+    /// tests read it; 0 means no ribbon).
+    pub fn trail_vert_count(&self) -> usize {
+        self.trail_verts.len()
     }
 
     /// True while minimized/zero-area (last-good kept, nothing drawn).
@@ -2475,6 +2521,27 @@ impl Presenter {
     /// Window leg only; no GPU work this slice.
     pub fn push_hp_bar(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, fraction: f32) -> bool {
         self.overlay.push_hp_bar(x0, y0, x1, y1, fraction)
+    }
+
+    /// Stage one text line as glyph quads in 0..1 space, top-left origin;
+    /// false when the ring takes no glyph. Window leg only; no GPU work.
+    pub fn push_text(&mut self, x: f32, y: f32, height: f32, col: [u8; 4], line: &str) -> bool {
+        stage_text_line(&mut self.overlay, x, y, height, col, line)
+    }
+
+    /// Replace this frame's debug line list with `batch`; an empty batch
+    /// clears it, so the caller pushes once per frame after the tick (the
+    /// one call `debug_draw.rs` names as the live sink). The batch is
+    /// copied into buffers the next push reuses; the after-blit line pass
+    /// draws it while [`Presenter::debug_line_enable`] is on.
+    pub fn push_debug_lines(&mut self, batch: &crate::debug_draw::LineBatch) {
+        super::debug_lines::stage_debug_lines(&mut self.debug_lines, batch);
+    }
+
+    /// This frame's debug line list in group order: the source the live
+    /// line pass draws. Window leg only.
+    pub fn debug_lines(&self) -> &crate::debug_draw::LineBatch {
+        &self.debug_lines
     }
 
     /// Drop staged HUD quads; the fixed backing stays for the next frame.
@@ -2807,13 +2874,17 @@ mod presenter_adapter_tests {
 
     #[test]
     fn msaa_toggle_drops_targets() {
-        let mut presenter = match crate::present::Presenter::init_offscreen() {
-            Ok(p) => p,
-            Err(crate::present::PresentError::NoAdapter) => {
-                eprintln!("SKIPPED msaa toggle: no adapter");
-                return;
-            }
+        let probe = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(crate::present::PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(e) => panic!("presenter init failed: {e}"),
+        };
+        let Some(mut presenter) =
+            crate::test_gpu::require_or_skip("msaa_toggle_drops_targets", probe)
+        else {
+            return;
         };
         assert!(!presenter.msaa_enabled(), "MSAA defaults off");
         presenter.resize(64, 64).expect("size applies");
@@ -2988,6 +3059,58 @@ mod forward_normal_tests {
     }
 }
 
+/// Stage one line into `ring`; true when at least one glyph quad landed.
+/// Split from [`Presenter::push_text`] so the ring rule is testable without
+/// a GPU.
+fn stage_text_line(
+    ring: &mut overlay::OverlayRing,
+    x: f32,
+    y: f32,
+    height: f32,
+    col: [u8; 4],
+    line: &str,
+) -> bool {
+    ring.push_text(x, y, height, col, line) > 0
+}
+
+#[cfg(test)]
+mod overlay_text_tests {
+    use super::*;
+    use crate::overlay::{Quad, OVERLAY_MAX_QUADS};
+
+    #[test]
+    fn push_text_stages_a_line_and_refuses_a_full_ring() {
+        let mut ring = overlay::OverlayRing::new();
+        assert!(stage_text_line(
+            &mut ring,
+            0.05,
+            0.06,
+            0.05,
+            [230, 235, 240, 255],
+            "hash 0"
+        ));
+        assert_eq!(ring.quad_count(), 5, "spaces advance without a quad");
+        let first = ring.quads()[0];
+        assert_eq!(first.rect[0], 0.05);
+        assert_eq!(first.rect[1], 0.06);
+        assert!((first.rect[2] - 0.0875).abs() < 1e-6);
+        assert!((first.rect[3] - 0.11).abs() < 1e-6);
+        assert_eq!(first.col, [230, 235, 240, 255]);
+        assert_eq!(
+            first.uv,
+            crate::overlay::text::glyph_uv(b'h').expect("h is printable")
+        );
+
+        ring.clear();
+        let full = Quad::default();
+        for _ in 0..OVERLAY_MAX_QUADS {
+            assert!(ring.push_quad(full));
+        }
+        assert!(!stage_text_line(&mut ring, 0.05, 0.06, 0.05, [255; 4], "x"));
+        assert_eq!(ring.quad_count(), OVERLAY_MAX_QUADS);
+    }
+}
+
 #[cfg(test)]
 mod mesh_upload_reuse_tests {
     #[test]
@@ -3013,13 +3136,17 @@ mod mesh_upload_reuse_tests {
 
     #[test]
     fn second_identical_upload_sizes_no_new_buffers() {
-        let mut presenter = match crate::present::Presenter::init_offscreen() {
-            Ok(p) => p,
-            Err(crate::present::PresentError::NoAdapter) => {
-                eprintln!("SKIPPED mesh reuse: no adapter");
-                return;
-            }
+        let probe = match crate::present::Presenter::init_offscreen() {
+            Ok(p) => Ok(p),
+            Err(crate::present::PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(e) => panic!("presenter init failed: {e}"),
+        };
+        let Some(mut presenter) =
+            crate::test_gpu::require_or_skip("second_identical_upload_sizes_no_new_buffers", probe)
+        else {
+            return;
         };
         let key = crate::present::MeshKey::new(0x5EED_0001, [0x5E; 32]);
         let mesh = crate::v1::cube();
@@ -3106,17 +3233,17 @@ mod skin_window_tests {
     }
 
     fn presenter_or_skip(test: &str) -> Option<Presenter> {
-        match Presenter::init_offscreen() {
+        let probe = match Presenter::init_offscreen() {
             Ok(mut presenter) => {
                 presenter.resize(128, 128).expect("valid size applies");
-                Some(presenter)
+                Ok(presenter)
             }
-            Err(PresentError::NoAdapter) => {
-                eprintln!("SKIPPED {test}: no wgpu adapter on this machine");
-                None
-            }
+            Err(PresentError::NoAdapter) => Err(crate::test_gpu::NoAdapter(
+                "no wgpu adapter on this machine".into(),
+            )),
             Err(err) => panic!("presenter init failed (must fail loudly): {err}"),
-        }
+        };
+        crate::test_gpu::require_or_skip(test, probe)
     }
 
     fn list_of(keys: &[MeshKey]) -> DrawList {
@@ -3446,5 +3573,20 @@ mod skin_window_tests {
             .upload_skinned_mesh(key, &mesh, &skin, 2)
             .expect("skinned again");
         assert_eq!(presenter.skin_block_of(&key), Some(2));
+    }
+
+    #[test]
+    fn presenter_text_line_reaches_the_capture() {
+        let Some(mut presenter) = presenter_or_skip("presenter text line") else {
+            return;
+        };
+        let list = list_of(&[]);
+        presenter.clear_overlay();
+        let bare = pixels(&mut presenter, &list);
+        presenter.clear_overlay();
+        assert!(presenter.push_text(0.1, 0.1, 0.2, [255, 255, 255, 255], "III"));
+        let text = pixels(&mut presenter, &list);
+        let (worst, over) = compare(&bare, &text, 3);
+        assert!(over > 0, "text pixels differ, worst {worst}");
     }
 }

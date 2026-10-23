@@ -244,12 +244,14 @@ fn classify_pair(
             | Op::Reparent { .. }
             | Op::SetMaterial { .. }
             | Op::SetComponent { .. }
-            | Op::RemoveComponent { .. },
+            | Op::RemoveComponent { .. }
+            | Op::SetBond { .. },
             Op::SetLocal { .. }
             | Op::Reparent { .. }
             | Op::SetMaterial { .. }
             | Op::SetComponent { .. }
             | Op::RemoveComponent { .. }
+            | Op::SetBond { .. }
             | Op::Remove { .. },
         ) => Some(ConflictReason::OverwrittenByLater),
         // The node was removed and recreated after the selected value write:
@@ -259,7 +261,8 @@ fn classify_pair(
             | Op::Reparent { .. }
             | Op::SetMaterial { .. }
             | Op::SetComponent { .. }
-            | Op::RemoveComponent { .. },
+            | Op::RemoveComponent { .. }
+            | Op::SetBond { .. },
             Op::Insert { .. },
         ) => Some(ConflictReason::DependsOnLater),
         // Material-table ops touch no node (their target id is nil), so only

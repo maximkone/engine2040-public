@@ -33,7 +33,7 @@
 //! No `arena_tick_32_sim` row: the `sim` track does not build in this
 //! workspace, so no sim number was invented. See the table comment.
 
-use crate::workloads::ScaledArenaTick;
+use crate::workloads::{CrowdScale, ScaledArenaTick};
 use engine_arena::MAX_PARTICIPANTS;
 use engine_core::seal_key::{self, SealKeyError, MIN_SEAL_KEY_BYTES};
 use engine_core::Fnv64;
@@ -193,6 +193,17 @@ pub const BASELINES: &[Baseline] = &[
     // perf crate with it. The `sim` twins above (4/8/16 fighters) keep their
     // historical values for the same reason. Record the cap-sized `sim` row
     // where that track builds; the lookup fails loudly until then.
+    // 2026-10-23 (AM18): the thousand-agent crowd tick, the row's own case.
+    // The tape and the tier lane live on this run's stack, so the run
+    // allocates nothing: the exact gate is the digest plus a zero allocation
+    // ceiling.
+    Baseline {
+        workload: CrowdScale::NAME,
+        ticks: 600,
+        hash: 11495894263503076227,
+        alloc_bytes: 0,
+        alloc_count: 0,
+    },
 ];
 
 /// Look up a baseline by workload name.
@@ -439,6 +450,10 @@ pub fn verify_seal_against(row: &Baseline, presented: u64, key: &[u8]) -> Result
 /// 2.0 -> 4.0 ms. The release-mode p50 re-measurement is an open item on a
 /// quiet box (the local release build is memory-bound while other lanes
 /// build); the derived bars keep the rate the OPT14 bars were written for.
+///
+/// 2026-10-23 (AM18): the crowd row is the row's own bar scaled by the run
+/// length, 600 ticks x 2.0 ms per thousand-agent tick = 1200 ms per run.
+/// Presentation only: the crowd digest never enters the legacy golden.
 pub const TIME_BUDGETS_MS: &[(&str, f64)] = &[
     ("arena_tick", 50.0),
     ("physics_step", 120.0),
@@ -446,6 +461,7 @@ pub const TIME_BUDGETS_MS: &[(&str, f64)] = &[
     ("destruction_step", 25.0),
     ("spine_transform_body", 1.0),
     ("spine_full_tick", 4.0),
+    ("crowd_scale_1000", 1200.0),
     ("audio_reverb", 0.4),
     ("audio_occlusion_per_voice", 0.1),
     ("audio_director", 0.05),

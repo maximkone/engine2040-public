@@ -7,7 +7,8 @@
 //                           + the mesh tangent, skinned with the joints
 //             vs_depth      position only, for depth-only passes
 //             vs_sky        fullscreen triangle at the far plane
-//   fragment  fs            window frame: textured, cascade shade, ambient
+//   fragment  fs            window frame: textured, live sun-map shadow and
+//                           contact shade, ambient
 //                           floor, per-fragment height fog; writes LINEAR
 //                           HDR radiance (exposure only) into Rgba16Float.
 //                           No tone map here: the blit does ACES + sRGB.
@@ -112,15 +113,46 @@ struct SkinParams {
 @group(0) @binding(11) var ibl_sampler: sampler;
 @group(0) @binding(12) var<uniform> ibl_sh: array<vec4<f32>, 9>;
 // Single sun shadow map: depth plus comparison sampler for the arena sun
-// pass (`sun_shadow::SunDepthMap` draws it). Bound at 13/14 so the live
-// `fs` layout stays clean (9-12 owned by IBL); the sun reader below
-// (`sun_shadow_pcf`) samples it with a 2x2 PCF once the presenter binds the
-// map; the grounding shade under the fighters (`sun_contact_factor`) is the
-// live feet block of `shadow`, not this map. Slope bias lives in the
-// depth pipeline (`SUN_SHADOW_SLOPE_SCALE`), the constant bias in the
-// compare below.
+// pass (`sun_shadow::SunShadowSubmitter` draws it). Bound at 13/14 so the
+// live `fs` layout stays clean (9-12 owned by IBL); `sun_shadow_at` below
+// reads it with a 3x3 `textureSampleCompare` PCF, and the pass frame at 20
+// carries the light view-projection so a fragment finds its texel. The
+// grounding shade under the fighters (`sun_contact_factor`) is the live feet
+// block of `shadow`, not this map. The compare bias is the 2^-19 constant
+// plus the slope term `sun_bias` adds; the normal offset moves the sample,
+// never the compare. `SUN_SHADOW_BIAS`, `SUN_SHADOW_SLOPE_SCALE` and
+// `SUN_SHADOW_NORMAL_OFFSET_TEXELS` are the CPU owners.
 @group(0) @binding(13) var sun_shadow_map: texture_depth_2d;
 @group(0) @binding(14) var sun_shadow_sampler: sampler_comparison;
+// EG11b: the live sun pass frame. `view_proj` is the matrix the depth pass
+// drew with, `enabled` is 0 on a frame that skipped the pass (the reader
+// then returns fully lit), `texel` is 1/edge of the map in texels,
+// `normal_offset` is the sample shift in meters and `slope_scale` the slope
+// bias per unit tan(theta) in normalized depth.
+struct SunFwdU {
+    view_proj: mat4x4<f32>,
+    bias: f32,
+    enabled: f32,
+    texel: f32,
+    normal_offset: f32,
+    slope_scale: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+};
+@group(0) @binding(20) var<uniform> sun_fwd: SunFwdU;
+// LF5 motion: the previous frame's view-projection and the previous joint
+// palette. The forward vertex entries read them to write where this
+// fragment stood a frame ago; every other pass leaves 21/22 unread.
+struct PrevCameraU {
+    view_proj: mat4x4<f32>,
+};
+@group(0) @binding(21) var<uniform> prev_cam: PrevCameraU;
+@group(0) @binding(22) var<storage, read> prev_skin_joints: array<mat4x4<f32>, 64>;
+// LF5b: this frame's un-jittered view-projection. The forward entries rasterize
+// with the jittered `cam` above and build motion from `steady_cam`, so the
+// Halton offset never enters a motion vector.
+@group(0) @binding(23) var<uniform> steady_cam: PrevCameraU;
 // LF1 live sky: the one init-time sky-view texture (64x32 Rgba32Float,
 // row 0 at the zenith, same backing the fog horizon reads). Sampled by
 // ray direction with manual bilinear (textureLoad, U wraps, V clamps),
@@ -176,21 +208,58 @@ fn sky_view_sample(d: vec3<f32>) -> vec3<f32> {
     let t11 = textureLoad(sky_view, vec2<i32>(xb, yb), 0).rgb;
     return mix(mix(t00, t10, tx), mix(t01, t11, tx), ty);
 }
+// Snap to the centre of the texel that holds `v`, so the taps below are that
+// texel and its neighbours: the compare grid stays on whole texels as the
+// camera moves and does not slide by a texel inside one.
 fn snap_texel(v: f32, texel: f32) -> f32 {
     if (texel <= 0.0) {
         return v;
     }
-    return floor(v / texel) * texel;
+    return (floor(v / texel) + 0.5) * texel;
+}
+// Constant plus slope-scaled compare bias. A surface tilted against the light
+// spans more depth per texel, so its bias grows with tan(theta); the clamp
+// caps a face-on or back-facing surface instead of letting it diverge.
+fn sun_bias(n: vec3<f32>) -> f32 {
+    let no_l = clamp(dot(n, normalize(light.dir_to_light)), 0.0, 1.0);
+    let tan_theta = sqrt(max(1.0 - no_l * no_l, 0.0)) / max(no_l, 0.05);
+    return sun_fwd.bias + sun_fwd.slope_scale * tan_theta;
 }
 fn sun_shadow_pcf(uv: vec2<f32>, frag_depth: f32, bias: f32) -> f32 {
-    let texel = vec2<f32>(1.0 / 256.0);
+    let texel = vec2<f32>(max(sun_fwd.texel, 1.0 / 4096.0));
     let base = vec2<f32>(snap_texel(uv.x, texel.x), snap_texel(uv.y, texel.y));
     var lit = 0.0;
-    lit += textureSampleCompare(sun_shadow_map, sun_shadow_sampler, base + vec2<f32>(-0.5, -0.5) * texel, frag_depth - bias);
-    lit += textureSampleCompare(sun_shadow_map, sun_shadow_sampler, base + vec2<f32>(0.5, -0.5) * texel, frag_depth - bias);
-    lit += textureSampleCompare(sun_shadow_map, sun_shadow_sampler, base + vec2<f32>(-0.5, 0.5) * texel, frag_depth - bias);
-    lit += textureSampleCompare(sun_shadow_map, sun_shadow_sampler, base + vec2<f32>(0.5, 0.5) * texel, frag_depth - bias);
-    return lit * 0.25;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let off = vec2<f32>(f32(x), f32(y)) * texel;
+            lit += textureSampleCompare(sun_shadow_map, sun_shadow_sampler, base + off, frag_depth - bias);
+        }
+    }
+    return lit / 9.0;
+}
+// Sun visibility at `world_pos` from the live depth map: 1 lit, 0 shadowed.
+// A frame that skipped the pass reads fully lit, and so does a point whose
+// ortho depth falls outside the map, so the term never leaks past the pit
+// the map covers. The sample stays in uniform control flow: the outside case
+// is a select, not a branch around the compare. The sample moves along the
+// surface normal by one texel (`normal_offset`) before it projects, so a face
+// does not read the depth it wrote itself.
+fn sun_shadow_at(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+    if (sun_fwd.enabled < 0.5) {
+        return 1.0;
+    }
+    let n_len = max(length(normal), 0.000001);
+    let sample_pos = world_pos + normal * (sun_fwd.normal_offset / n_len);
+    let clip = sun_fwd.view_proj * vec4<f32>(sample_pos, 1.0);
+    let w = max(clip.w, 0.0001);
+    // Texture v runs down and NDC y runs up; the depth pass drew through the
+    // same viewport, so the flip is the whole difference.
+    let uv = vec2<f32>(clip.x / w * 0.5 + 0.5, 0.5 - clip.y / w * 0.5);
+    let depth = clamp(clip.z / w, 0.0, 1.0);
+    let inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+    let uv_in = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let lit = sun_shadow_pcf(uv_in, depth, sun_bias(normal));
+    return select(1.0, lit, inside > 0.5);
 }
 // Live contact shade (presentation only). Sand under a fighter keeps less of
 // the sun and the baked ambient so the body grounds. The feet come from the
@@ -333,6 +402,12 @@ struct VIn {
     @location(2) uv: vec2<f32>,
     @location(3) tangent: vec4<f32>,
 };
+// LF5 motion: the static forward pipeline also reads the previous world
+// position from its own compact vec3 stream, so a refreshed body keeps its
+// history without a second copy of the lighting vertex.
+struct VPrev {
+    @location(6) prev_pos: vec3<f32>,
+};
 struct SIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -351,10 +426,19 @@ struct VOut {
     @location(2) uv: vec2<f32>,
     @location(3) @interpolate(flat) draw_id: u32,
     @location(4) tangent: vec4<f32>,
+    // LF5: this frame's and the previous frame's clip position. Clip
+    // coordinates are linear in the world point, so perspective-correct
+    // interpolation rebuilds them exactly; the fragment divides per pixel.
+    // (An ndc carried through would interpolate a homography and drift on a
+    // large triangle.)
+    @location(5) cur_clip: vec4<f32>,
+    @location(6) prev_clip: vec4<f32>,
 };
 struct FsOut {
     @location(0) color: vec4<f32>,
     @location(1) id: u32,
+    // LF5: uv-space move from the previous frame to this one (y down).
+    @location(2) motion: vec2<f32>,
 };
 struct SkyOut {
     @builtin(position) pos: vec4<f32>,
@@ -366,6 +450,8 @@ struct SkyOut {
 struct SkyFsOut {
     @location(0) color: vec4<f32>,
     @location(1) id: u32,
+    // LF5: the sky holds still in uv space; a camera-moved sky stays zero.
+    @location(2) motion: vec2<f32>,
 };
 
 // ---------------------------------------------------------------------------
@@ -382,6 +468,30 @@ fn vs(in: VIn, @builtin(instance_index) ii: u32) -> VOut {
     out.tangent = in.tangent;
     out.clip = cam.view_proj * wp;
     out.draw_id = ii;
+    // No previous position reaches this entry: its passes write no motion.
+    out.cur_clip = out.clip;
+    out.prev_clip = out.clip;
+    return out;
+}
+
+// LF5: the static forward entry. Same lighting vertex as `vs`, plus the
+// previous world position from its own stream and the previous camera.
+@vertex
+fn vs_motion(in: VIn, prev: VPrev, @builtin(instance_index) ii: u32) -> VOut {
+    var out: VOut;
+    let wp = vec4<f32>(in.pos, 1.0);
+    out.world_pos = wp.xyz;
+    out.world_n = in.normal;
+    out.uv = in.uv;
+    out.tangent = in.tangent;
+    let clip = cam.view_proj * wp;
+    out.clip = clip;
+    out.draw_id = ii;
+    // LF5b: the jitter rides `clip` only; motion uses the steady matrix.
+    out.cur_clip = steady_cam.view_proj * wp;
+    // A fragment behind the previous camera keeps this frame's ndc in `fs`:
+    // zero move, never a huge wrap from a negative w.
+    out.prev_clip = prev_cam.view_proj * vec4<f32>(prev.prev_pos, 1.0);
     return out;
 }
 
@@ -419,6 +529,51 @@ fn vs_skinned(in: SIn, @builtin(instance_index) ii: u32) -> VOut {
         in.tangent.w);
     out.clip = cam.view_proj * vec4<f32>(sp, 1.0);
     out.draw_id = ii;
+    // This entry serves passes without a motion target: zero move.
+    out.cur_clip = out.clip;
+    out.prev_clip = out.clip;
+    return out;
+}
+
+// LF5: the skinned forward entry. Same skinning as `vs_skinned`, plus the
+// previous frame's palette so a posed body writes its own move.
+@vertex
+fn vs_skinned_motion(in: SIn, @builtin(instance_index) ii: u32) -> VOut {
+    var out: VOut;
+    var sp = vec3<f32>(0.0);
+    var sn = vec3<f32>(0.0);
+    var st = vec3<f32>(0.0);
+    var prev_sp = in.pos;
+    if (skin_params.has_skin == 0u) {
+        sp = in.pos;
+        sn = in.normal;
+        st = in.tangent.xyz;
+    } else {
+        prev_sp = vec3<f32>(0.0);
+        for (var k = 0u; k < 4u; k = k + 1u) {
+            let idx = min(in.joints[k], 63u);
+            let m = skin_joints[idx];
+            let w = in.weights[k];
+            sp += w * (m * vec4<f32>(in.pos, 1.0)).xyz;
+            sn += w * (m * vec4<f32>(in.normal, 0.0)).xyz;
+            st += w * (m * vec4<f32>(in.tangent.xyz, 0.0)).xyz;
+            prev_sp += w * (prev_skin_joints[idx] * vec4<f32>(in.pos, 1.0)).xyz;
+        }
+    }
+    out.world_pos = sp;
+    let l = length(sn);
+    out.world_n = select(vec3<f32>(0.0, 1.0, 0.0), sn / max(l, 1e-12), l > 1e-6);
+    out.uv = in.uv;
+    let tl = length(st);
+    out.tangent = vec4<f32>(
+        select(vec3<f32>(1.0, 0.0, 0.0), st / max(tl, 1e-12), tl > 1e-6),
+        in.tangent.w);
+    let clip = cam.view_proj * vec4<f32>(sp, 1.0);
+    out.clip = clip;
+    out.draw_id = ii;
+    // LF5b: the jitter rides `clip` only; motion uses the steady matrix.
+    out.cur_clip = steady_cam.view_proj * vec4<f32>(sp, 1.0);
+    out.prev_clip = prev_cam.view_proj * vec4<f32>(prev_sp, 1.0);
     return out;
 }
 
@@ -546,7 +701,7 @@ fn specular_term(d: f32, v: f32, f: vec3<f32>, f0: vec3<f32>, fab: vec2<f32>) ->
 // before exposure and before any shading factor.
 // PORT(bevyengine/bevy@v0.15.0:crates/bevy_pbr/src/render/pbr_lighting.wgsl): directional_light combine:
 // color = (diffuse + specular) * NdotL * light_color.
-fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
+fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, albedo: vec3<f32>, sun_vis: f32) -> vec3<f32> {
     let n = normalize(world_n);
     let v = normalize(cam.camera_pos - world_pos);
     let l = normalize(light.dir_to_light);
@@ -567,7 +722,7 @@ fn direct_light(world_pos: vec3<f32>, world_n: vec3<f32>, albedo: vec3<f32>) -> 
     let vv = v_smith_ggx_correlated(roughness, ndot_v, ndot_l);
     let fab = f_ab_term(perceptual, ndot_v);
     let spec = specular_term(d, vv, f, f0, fab);
-    let sun_shadow = sun_contact_factor(world_pos);
+    let sun_shadow = sun_contact_factor(world_pos) * sun_vis;
     return (diffuse + spec) * ndot_l * light.light_color * sun_shadow;
 }
 
@@ -696,23 +851,17 @@ fn fog_factor_infinite(fog: FogFwdU, eye: vec3<f32>, dir: vec3<f32>) -> f32 {
 // ---------------------------------------------------------------------------
 
 // Window frame: linear HDR radiance, exposure only. The sampled texel
-// modulates the material factor, the view-distance cascade dims the sun
+// modulates the material factor, the live sun map shadows the direct sun
 // term, the baked lighting lifts the shadowed side, then fog mixes toward
 // the horizon radiance. The blit tone-maps.
 @fragment
 fn fs(in: VOut) -> FsOut {
     contact_live = contact_from_feet(in.world_pos);
     let albedo = mat.base_color * textureSample(base_map, base_smp, in.uv).rgb;
-    let view_dist = length(cam.camera_pos - in.world_pos);
-    var cascade = 2u;
-    if (view_dist < shadow.splits.x) {
-        cascade = 0u;
-    } else if (view_dist < shadow.splits.y) {
-        cascade = 1u;
-    } else if (view_dist < shadow.splits.z) {
-        cascade = 2u;
-    }
-    let shade = 1.0 - 0.15 * f32(cascade) / 2.0;
+    // EG11b: the live sun depth map is the shadow. The old view-distance
+    // cascade dim is gone: the map says where the sun is blocked, so no
+    // band has to pretend.
+    let sun_vis = sun_shadow_at(in.world_pos, in.world_n);
     // EG12 slice c: mapped normal from the bound normal map through the
     // tangent frame (handedness in tangent.w); degenerate tangents keep
     // the geometric normal inside `eg12_world_normal`.
@@ -739,12 +888,21 @@ fn fs(in: VOut) -> FsOut {
     // direct sun and the torches keep their own light, so a sunlit open
     // texel does not move when the field comes on.
     let ao = ao_at(in.clip.xy);
-    let lit = direct_light(in.world_pos, mapped_n, albedo) * shade + ibl_diffuse_term * ao * occlusion * orm.x + ibl_spec_term + torch_frame_sum(in.world_pos, mapped_n, albedo);
+    let lit = direct_light(in.world_pos, mapped_n, albedo, sun_vis) + ibl_diffuse_term * ao * occlusion * orm.x + ibl_spec_term + torch_frame_sum(in.world_pos, mapped_n, albedo);
     let radiance = max(lit * mat.exposure, vec3<f32>(0.0));
     let fog_f = fog_factor_finite(fog_fwd, cam.camera_pos, in.world_pos);
     var out: FsOut;
     out.color = vec4<f32>(mix(radiance, fog_fwd.color, fog_f), 1.0);
     out.id = in.draw_id;
+    // LF5: uv-space move, y down, the pair TAA reprojects. The divide is
+    // per fragment: a point behind the previous camera falls back to this
+    // frame's ndc, hence zero move.
+    let cur_ndc = in.cur_clip.xy / max(in.cur_clip.w, 1e-6);
+    var prev_ndc = cur_ndc;
+    if (in.prev_clip.w > 1e-6) {
+        prev_ndc = in.prev_clip.xy / in.prev_clip.w;
+    }
+    out.motion = (cur_ndc - prev_ndc) * vec2<f32>(0.5, -0.5);
     return out;
 }
 
@@ -764,6 +922,7 @@ fn fs_sky(in: SkyOut) -> SkyFsOut {
     out.color = vec4<f32>(mix(base_or_fog, fog_fwd.color, f), 1.0);
     // No draw claims a sky pixel: hold the id target's clear value.
     out.id = 0xFFFFFFFFu;
+    out.motion = vec2<f32>(0.0);
     return out;
 }
 
@@ -783,7 +942,7 @@ fn fs_display(in: VOut) -> @location(0) vec4<f32> {
     let ibl_diffuse_term = ibl_diffuse(n_ibl, albedo, mat.metallic);
     let ibl_spec_term = ibl_specular(n_ibl, v_ibl, f0_ibl, mat.roughness);
     let occlusion: f32 = sun_contact_factor(in.world_pos);
-    let lit = direct_light(in.world_pos, in.world_n, albedo) + ibl_diffuse_term * occlusion + ibl_spec_term;
+    let lit = direct_light(in.world_pos, in.world_n, albedo, 1.0) + ibl_diffuse_term * occlusion + ibl_spec_term;
     let mapped = aces_tonemap(max(lit * mat.exposure, vec3<f32>(0.0)), 1.0, DISPLAY_WHITE);
     // The shared dither: one fixed 4x4 pattern, one 8-bit step, so the
     // 8-bit capture breaks the bands the tone map leaves behind.
@@ -819,7 +978,9 @@ fn fs_skinned(in: VOut) -> @location(0) vec4<f32> {
     let ibl_diffuse_term = ibl_diffuse(n_ibl, albedo, metal_eff);
     let ibl_spec_term = ibl - ibl_diffuse_term;
     let occlusion: f32 = sun_contact_factor(in.world_pos) * orm.x;
-    let lit = direct_light(in.world_pos, mapped_n, albedo) + ibl_diffuse_term * occlusion + ibl_spec_term;
+    // EG11b: the v1 skinned layouts carry no sun map bindings, so this entry
+    // stays lit; the window parities compare two draws of one path.
+    let lit = direct_light(in.world_pos, mapped_n, albedo, 1.0) + ibl_diffuse_term * occlusion + ibl_spec_term;
     let mapped = aces_tonemap(max(lit * mat.exposure, vec3<f32>(0.0)), 1.0, DISPLAY_WHITE);
     // The shared dither, the same fixed 4x4 pattern the display capture
     // and the live blit use.

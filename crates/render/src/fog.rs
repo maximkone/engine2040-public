@@ -13,7 +13,7 @@
 use std::fmt;
 use std::time::Instant;
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 use crate::decals::{compute_storage_entry, compute_uniform_entry};
 
 // ---------------------------------------------------------------------------
@@ -713,7 +713,7 @@ impl ContactAo {
     /// Bind seam for the RA1 forward contact bind on the headless twin:
     /// validates the frame and the shape, then names the missing device bind.
     /// The window build next to it binds the baked buffer for real.
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     pub fn submit_gpu(&self, frame: &crate::gtao::LookFrame) -> Result<FogReceipt, FogError> {
         frame.validate().map_err(look_err)?;
         if frame.viewport_px != [self.width_px, self.height_px] {
@@ -730,7 +730,7 @@ impl ContactAo {
     /// bind-group probe pass over it and reads it back exactly, proving the
     /// forward bind validates with 0 errors. Fails loudly (never silent,
     /// never the twin refusal) on bad shapes or any device fault.
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     pub fn submit_gpu(
         &self,
         device: &wgpu::Device,
@@ -974,7 +974,7 @@ impl FogReceipt {
 /// the missing window device bind on the headless twin (never silent
 /// success). The CPU bakes above are the reference here; the `window` build
 /// below records both live passes instead.
-#[cfg(not(feature = "window"))]
+#[cfg(not(feature = "gpu"))]
 pub fn submit_gpu_fog(
     field: &FogField,
     ao: &ContactAo,
@@ -1013,7 +1013,7 @@ pub fn submit_gpu_fog(
 /// Height-fog compute: one thread per pixel, Frostbite-style extinction in
 /// shader order mirroring the CPU bake. The shared look uniform stays bound
 /// and live without touching fog math.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const FOG_HEIGHT_WGSL: &str = r#"
 struct FogU {
     color: vec3<f32>,
@@ -1052,7 +1052,7 @@ fn fog_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// Contact-shadow compute: one thread per pixel, fixed slice taps in shader
 /// order mirroring the CPU bake. Look uniform bound and live.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const FOG_CONTACT_WGSL: &str = r#"
 struct ContactU {
     full_wh: vec2<u32>,
@@ -1117,7 +1117,7 @@ fn contact_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// Bind probe over a baked buffer: copies the bound buffer to prove the
 /// forward bind-group path validates. Look uniform bound and live.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 const FOG_BIND_WGSL: &str = r#"
 struct LookU {
     frame_idx: u32,
@@ -1140,15 +1140,15 @@ fn bind_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// Byte size of the packed height-fog uniform (color, density, falloff,
 /// base, cutoff, pad; 16-byte aligned fields).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const FOG_UNIFORM_BYTES: u64 = 32;
 /// Byte size of the packed contact uniform (frame size, step, thickness,
 /// intensity, weight normalizer, pads; 16-byte aligned fields).
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub const CONTACT_UNIFORM_BYTES: u64 = 32;
 
 /// Pack the height-fog uniform. Pure bytes; validation stays on the caller.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn fog_uniform_bytes(params: &FogParams) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[0..4].copy_from_slice(&params.fog_color[0].to_le_bytes());
@@ -1162,7 +1162,7 @@ fn fog_uniform_bytes(params: &FogParams) -> [u8; 32] {
 }
 
 /// Pack the contact uniform. Pure bytes; validation stays on the caller.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn contact_uniform_bytes(config: &ContactConfig) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[0..4].copy_from_slice(&config.width_px.to_le_bytes());
@@ -1176,7 +1176,7 @@ fn contact_uniform_bytes(config: &ContactConfig) -> [u8; 32] {
 
 /// Map a readback buffer and wait for it. One poll covers every pending map.
 /// Shared [`crate::accel`] core with the `fog` error prefix kept.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn fog_map_and_wait(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,
@@ -1184,7 +1184,7 @@ fn fog_map_and_wait(
     crate::accel::map_readback(device, buffer, "fog")
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl From<crate::accel::ReadbackError> for FogError {
     fn from(error: crate::accel::ReadbackError) -> Self {
         Self::Device(error.to_string())
@@ -1193,7 +1193,7 @@ impl From<crate::accel::ReadbackError> for FogError {
 
 /// Run the bind probe over one baked buffer: upload, copy on the device,
 /// read back exactly. Shared writer for the contact bind path.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn submit_bind_probe(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1293,7 +1293,7 @@ fn submit_bind_probe(
 /// Build the bind-probe pipeline plus its layout: shader, bind layout and
 /// compute pipeline over the shared bind WGSL. One writer so the submit
 /// above stays under the line limit with identical behavior.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 fn bind_probe_pipeline(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::ComputePipeline) {
     use crate::pipeline_warmup::CountedPipelines as _;
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1326,7 +1326,7 @@ fn bind_probe_pipeline(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::C
 
 /// One device fog frame: height-fog factors plus contact AO matching the CPU
 /// bakes within [`FOG_GPU_PARITY_TOL`], with the submit receipt.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct FogGpuOutput {
     /// Height-fog factors matching the CPU bake.
     pub fog: FogField,
@@ -1339,7 +1339,7 @@ pub struct FogGpuOutput {
 /// One device submit: texel counts, the validation outcome and the
 /// wall-clock encode + submit + readback ms (evidence only, never hashed).
 /// Covers both fog passes; the combined budget is fog 0.2 + contact 0.3.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct FogGpuReceipt {
     /// Frame index from the submitted [`crate::gtao::LookFrame`].
@@ -1354,7 +1354,7 @@ pub struct FogGpuReceipt {
     pub submit_ms: f64,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl FogGpuReceipt {
     /// Posted fog-pass budget this submit is charged against.
     pub fn fog_budget_ms(&self) -> f64 {
@@ -1388,7 +1388,7 @@ impl FogGpuReceipt {
 /// each own one); steady-state submits on a matching shape create no buffers
 /// or bind groups (the reuse test proves the count stays flat). Per-submit
 /// encoders and the uniform rewrites are driver work, same as the RA1 twin.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub struct FogSubmitter {
     fog_pipeline: wgpu::ComputePipeline,
     contact_pipeline: wgpu::ComputePipeline,
@@ -1410,7 +1410,7 @@ pub struct FogSubmitter {
     created_buffers: u64,
 }
 
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 impl FogSubmitter {
     /// Compile both compute pipelines and the fog plus look bind layouts;
     /// allocate the three uniform buffers. No frame-size state yet: storage
@@ -1783,7 +1783,7 @@ impl FogSubmitter {
 /// bind, each through one bind-group probe pass, read back exactly to prove
 /// the forward bind validates with 0 errors. Fails loudly (never silent,
 /// never the twin refusal) on bad shapes or any device fault.
-#[cfg(feature = "window")]
+#[cfg(feature = "gpu")]
 pub fn submit_gpu_fog(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -2315,7 +2315,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "window"))]
+    #[cfg(not(feature = "gpu"))]
     fn fog_submit_without_device_names_the_window_build() {
         let params = day_params();
         let contact = contact_16();
@@ -2388,16 +2388,19 @@ mod tests {
 
     /// Device shared with the GX1 suite: one device for the run, so parallel
     /// tests never exhaust adapters. `None` is skip-not-green, never a pass.
-    #[cfg(feature = "window")]
-    fn fog_device() -> Option<(
-        &'static wgpu::Device,
-        &'static wgpu::Queue,
-        &'static wgpu::AdapterInfo,
-    )> {
-        crate::graph::gx1_test_device()
+    #[cfg(feature = "gpu")]
+    fn fog_device() -> Result<
+        (
+            &'static wgpu::Device,
+            &'static wgpu::Queue,
+            &'static wgpu::AdapterInfo,
+        ),
+        crate::test_gpu::NoAdapter,
+    > {
+        crate::graph::gx1_probe()
     }
 
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn fog_worst_diff(a: &[f32], b: &[f32]) -> f32 {
         a.iter()
             .zip(b.iter())
@@ -2406,10 +2409,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn fog_gpu_passes_match_cpu_within_tolerance() {
-        let Some((device, queue, info)) = fog_device() else {
-            eprintln!("SKIPPED fog parity: no wgpu adapter on this machine");
+        let Some((device, queue, info)) = crate::test_gpu::require_or_skip(
+            "fog_gpu_passes_match_cpu_within_tolerance",
+            fog_device(),
+        ) else {
             return;
         };
         let params = day_params();
@@ -2454,10 +2459,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "window")]
+    #[cfg(feature = "gpu")]
     fn fog_gpu_baked_binds_roundtrip_exact_and_reuse_stays_flat() {
-        let Some((device, queue, _)) = fog_device() else {
-            eprintln!("SKIPPED fog bind: no wgpu adapter on this machine");
+        let Some((device, queue, _)) = crate::test_gpu::require_or_skip(
+            "fog_gpu_baked_binds_roundtrip_exact_and_reuse_stays_flat",
+            fog_device(),
+        ) else {
             return;
         };
         let params = day_params();

@@ -2522,13 +2522,18 @@ mod tests {
             )
             .unwrap();
         let mut snapshot = ViewportSnapshot::new();
-        let out = match snapshot.capture(&shell, 320, 200) {
-            Ok(out) => out,
-            Err(EditorAppError::NoAdapter) => {
-                eprintln!("viewport: no adapter; GPU leg skipped");
-                return;
-            }
-            Err(error) => panic!("GPU capture failed: {error}"),
+        use engine_render::test_gpu::{require_or_skip, NoAdapter};
+        let probe = snapshot
+            .capture(&shell, 320, 200)
+            .map_err(|error| match error {
+                EditorAppError::NoAdapter => {
+                    NoAdapter("no wgpu adapter on this machine".to_string())
+                }
+                other => panic!("GPU capture failed: {other}"),
+            });
+        let Some(out) = require_or_skip("gpu_viewport_frame_differs_from_cpu_markers", probe)
+        else {
+            return;
         };
         eprintln!(
             "viewport: gpu {}x{} draws={} adapter={} driver={}",

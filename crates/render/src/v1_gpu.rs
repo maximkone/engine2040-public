@@ -99,10 +99,29 @@ pub(crate) fn create_uniform_buffer(
     })
 }
 
-/// The studio HDRI behind the baked ambient of every offscreen forward
-/// capture (the window presenter bakes the same picture), embedded once.
-pub(crate) const STUDIO_HDRI_BYTES: &[u8] =
-    include_bytes!("../../../content/arena/hdri/polyhaven-studio-small-09-1k.hdr");
+/// Logical path of the studio HDRI: `content/arena/<name>` natively, `<name>`
+/// inside the fetched arena bundle. The browser has no file system, so a web
+/// caller reads it from the bundle and passes those bytes to
+/// [`GpuForward::init_from_hdri`].
+pub const STUDIO_HDRI_ASSET: &str = engine_assets::kit_import::STUDIO_HDRI;
+
+/// Read the studio HDRI from the native content root. Never compiled for the
+/// browser: the HDRI must not return to the wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn studio_hdri_bytes() -> Result<Vec<u8>, GpuError> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/arena")
+        .join(STUDIO_HDRI_ASSET);
+    let bytes = std::fs::read(&path)
+        .map_err(|err| GpuError::Device(format!("studio HDRI {}: {err}", path.display())))?;
+    if engine_assets::is_lfs_pointer(&bytes) {
+        return Err(GpuError::Device(format!(
+            "studio HDRI {}: git-lfs pointer, run git lfs pull",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
 
 /// Offscreen V1 forward renderer: pipeline compiled once, color/depth
 /// targets rebuilt per capture size (the recreate path). The `fs_display`
@@ -122,10 +141,20 @@ pub struct GpuForward {
 }
 
 impl GpuForward {
-    /// Bring up a high-performance adapter and compile the forward pipeline.
+    /// Bring up the forward pipeline with the studio HDRI from the native
+    /// content root. The browser reads the same bytes from the fetched arena
+    /// bundle and calls [`GpuForward::init_from_hdri`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn init() -> Result<Self, GpuError> {
+        Self::init_from_hdri(&studio_hdri_bytes()?)
+    }
+
+    /// Bring up a high-performance adapter and compile the forward pipeline,
+    /// baking `hdri` for the capture's ambient. The caller owns where the
+    /// bytes came from: the native content root or a fetched bundle.
     /// Returns [`GpuError::NoAdapter`] when no GPU is present; callers
     /// testing on headless machines treat that as skip, not failure.
-    pub fn init() -> Result<Self, GpuError> {
+    pub fn init_from_hdri(hdri: &[u8]) -> Result<Self, GpuError> {
         // Test builds only: cap the GPU tests that hold a device at once.
         #[cfg(test)]
         crate::test_gpu::hold_gpu_slot();
@@ -155,8 +184,8 @@ impl GpuForward {
         // The capture entry samples the baked ambient like the window frame,
         // so the studio bake is uploaded once here. A failed bake fails init
         // loudly, never a silent dark frame.
-        let (ibl_bake, _) = crate::ibl::bake(STUDIO_HDRI_BYTES)
-            .map_err(|e| GpuError::Device(format!("look ibl bake: {e}")))?;
+        let (ibl_bake, _) =
+            crate::ibl::bake(hdri).map_err(|e| GpuError::Device(format!("look ibl bake: {e}")))?;
         let (ibl_prefilter, ibl_brdf, ibl_sh_buf) =
             crate::ibl::gpu::upload_live_bake(&device, &queue, &ibl_bake)
                 .map_err(|e| GpuError::Device(format!("live ibl bake: {e}")))?;
@@ -550,13 +579,16 @@ mod tests {
     /// Exercises the recreate path by capturing at two sizes in a row.
     #[test]
     fn gpu_offscreen_capture_is_validation_clean() {
-        let gpu = match GpuForward::init() {
-            Ok(g) => g,
-            Err(GpuError::NoAdapter) => {
-                eprintln!("SKIPPED gpu_offscreen_capture: no wgpu adapter on this machine");
-                return;
-            }
-            Err(e) => panic!("gpu init failed (must fail loudly, never fake green): {e}"),
+        let Some(gpu) = crate::test_gpu::require_or_skip(
+            "gpu_offscreen_capture_is_validation_clean",
+            GpuForward::init().map_err(|e| match e {
+                GpuError::NoAdapter => {
+                    crate::test_gpu::NoAdapter("no wgpu adapter on this machine".into())
+                }
+                other => panic!("gpu init failed (must fail loudly, never fake green): {other}"),
+            }),
+        ) else {
+            return;
         };
         for (w, h) in [(160u32, 120u32), (96u32, 96u32)] {
             let scene = v1::default_scene(w, h).expect("default scene is valid");
