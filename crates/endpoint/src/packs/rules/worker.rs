@@ -59,6 +59,7 @@ enum Request {
     Set {
         source: String,
         slots: Vec<u8>,
+        no_op: bool,
         reply: Sender<SetReply>,
     },
     Test {
@@ -110,11 +111,17 @@ impl Worker {
     }
 
     /// Install `source` driving `slots`; the last good script stays on any refusal.
-    pub(crate) fn set(&mut self, source: &str, slots: Vec<u8>) -> Result<SetReply, McpToolError> {
+    pub(crate) fn set(
+        &mut self,
+        source: &str,
+        slots: Vec<u8>,
+        no_op: bool,
+    ) -> Result<SetReply, McpToolError> {
         let (reply, answer) = channel();
         self.send(Request::Set {
             source: source.to_owned(),
             slots: slots.clone(),
+            no_op,
             reply,
         })?;
         let result = answer.recv().map_err(|_| down())?;
@@ -212,13 +219,14 @@ fn serve(rx: &std::sync::mpsc::Receiver<Request>) {
             Request::Set {
                 source,
                 slots: wanted,
+                no_op,
                 reply,
             } => {
                 let previous = rules
                     .borrow()
                     .source()
                     .map(|text| (text.to_owned(), slots.clone()));
-                let result = rules.borrow_mut().set(&source, 0);
+                let result = rules.borrow_mut().set_allowing_no_op(&source, 0, no_op);
                 if result.is_ok() {
                     if let Some(previous) = previous {
                         if undo.len() == MAX_UNDO {
