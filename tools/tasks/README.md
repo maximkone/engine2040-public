@@ -5,9 +5,10 @@ LLM judge:** a referee reads the tree, runs its checks and exits 0 (PASS) or 1
 (FAIL). The same referee is red on that task's committed known-bad mutation.
 
 ```sh
-node tools/tasks/run.mjs --selftest    # all referees on start/fixed/mutation + the pass@k table
+node tools/tasks/run.mjs --selftest    # all referees on start/fixed/mutation + the pass@k table + both solve arms
 node tools/tasks/run.mjs --list        # the ten tasks
 node tools/tasks/run.mjs --log tools/tasks/logs/canned.jsonl --k 3
+node tools/tasks/run.mjs --solve --arm scripted   # solve the suite, print its real pass@1
 ```
 
 ## The ten tasks
@@ -64,3 +65,32 @@ deepseek-v4.1-flash      10        13   0.800   1.000
 baseline-agent           10        15   0.500   0.700
 no-memory-agent          10        17   0.200   0.200
 ```
+
+## Solving the suite for real (`--solve`)
+
+A run log is only as good as the referee behind it. `--solve --arm <name>` writes
+each task's `start` tree, lays one arm's patch over it the way a solver's edit
+lands, and asks the referee to judge the tree that results. It then prints the
+pass@1 it actually measured.
+
+| arm | what it lays | expected pass@1 |
+| --- | --- | --- |
+| `scripted` | each task's own `fixed` tree | `1.000` |
+| `mutation` | each task's committed known-bad tree | `0.000` |
+
+```
+task               patched  verdict  the referee
+01-door-verb       2        solved   referee 01-door-verb: PASS
+02-red-capture     2        solved   referee 02-red-capture: PASS
+...
+model     tasks  attempts  pass@1
+scripted  10     10        1.000
+solve scripted: pass@1 1.000 (10/10 tasks solved)
+```
+
+`patched` counts the files the arm changed over the start tree, so an arm that
+laid nothing is visible as one row of zeros. The arms are **oracles, not
+models**: they say what the referee can tell apart, which is the floor a real
+model is scored against. `--selftest` runs both arms and fails the suite when an
+arm misses its expected pass@1, so a referee that stops judging is caught here
+rather than in someone's benchmark number.
