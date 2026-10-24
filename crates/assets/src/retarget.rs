@@ -28,7 +28,7 @@
 //!
 //! Documented fallbacks (never guesses): target joints with no map entry hold
 //! the target bind pose on a single key; degenerate bone lengths (at or below
-//! [`BONE_FLOOR`]) retarget unscaled; JSON `null` reads as a missing sidecar
+//! `BONE_FLOOR`) retarget unscaled; JSON `null` reads as a missing sidecar
 //! field; unknown sidecar fields are ignored. Rejected instead: map names
 //! absent from either skeleton, duplicate target entries, non-finite or
 //! non-unit binds, degenerate or unordered keys, malformed sidecars and
