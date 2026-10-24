@@ -98,6 +98,33 @@ pub fn apply_night_sun(list: &mut engine_render::present::DrawList) {
     list.light.intensity = night_sun_intensity(list.light.intensity);
 }
 
+/// The day preset's sun for one draw list (RL40): the direction, colour and
+/// strength of the day rig's sun at the run's time of day, the same sun the
+/// skybox, the fog and the baked ambient read, so the shadows fall away from
+/// the bright side of the sky and the sunlit sand is as warm as the air makes
+/// it. A refused rig keeps the built-in light and never fails the frame.
+/// Opt-in: only a run that named its time of day (rena --sun-elev) takes this
+/// sun, so every default day frame keeps the built-in light pair and stays
+/// byte-equal until a reviewed frame moves the default.
+/// Presentation only, never hashed. `app` leg only, like [`apply_night_sun`].
+#[cfg(feature = "app")]
+pub fn apply_day_sun(list: &mut engine_render::present::DrawList) {
+    if engine_render::arena_day::sun_elevation_override().is_none() {
+        return;
+    }
+    if let Ok(sun) = engine_render::arena_day::arena_sun_now() {
+        let [x, y, z] = sun.dir_to_light;
+        (
+            list.light.direction.x,
+            list.light.direction.y,
+            list.light.direction.z,
+        ) = (x, y, z);
+        let [r, g, b] = sun.color;
+        (list.light.color.x, list.light.color.y, list.light.color.z) = (r, g, b);
+        list.light.intensity = sun.intensity;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

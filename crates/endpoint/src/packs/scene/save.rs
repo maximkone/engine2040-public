@@ -286,6 +286,7 @@ mod tests {
         // reads the save again. Both must land at the saved revision.
         let config = StartupConfig {
             project_dir: dir.clone(),
+            policy: None,
             web: None,
         };
         let fresh = build_server(&config).expect("restart opens the folder");
@@ -322,6 +323,7 @@ mod tests {
 
         let fresh = build_server(&StartupConfig {
             project_dir: dir.clone(),
+            policy: None,
             web: None,
         })
         .expect("restart opens the folder");
