@@ -11,7 +11,7 @@
 //! canonical cap); this module declares no private fighter cap. Crate edge
 //! `engine-combat -> engine-input` is in `tools/workspace-check.mjs`.
 
-use crate::fight::SLOT_COUNT;
+use crate::fight::{FIGHT_RULES_V3, SLOT_COUNT};
 use engine_input::MAX_PARTICIPANTS;
 /// Version tag of the shipped sweep rows.
 pub const SWEEP_VERSION_V1: u32 = 1;
@@ -231,6 +231,75 @@ pub enum SweepOutcome {
     Miss(SweepMiss),
 }
 
+/// What a blow's own row lets the defender do about it (SW48, rules v3).
+///
+/// Every shipped v1 and v2 move is stoppable three ways: the flags exist so a
+/// v3 move can declare a blow that no block, parry or dodge answers, and the
+/// resolve then reads the flag instead of the shield geometry alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SweepAnswer {
+    /// A raised shield stops the blow.
+    pub blockable: bool,
+    /// A parry deflects the blow.
+    pub parryable: bool,
+    /// A dodge avoids the blow.
+    pub dodgeable: bool,
+}
+
+impl SweepAnswer {
+    /// Every defence works: the v1 and v2 rule, and the v3 default.
+    pub const ALL: Self = Self {
+        blockable: true,
+        parryable: true,
+        dodgeable: true,
+    };
+
+    /// A blow no shield stops (the v3 row that needs [`SweepAnswer::blockable`] off).
+    pub const fn unblockable() -> Self {
+        Self {
+            blockable: false,
+            parryable: true,
+            dodgeable: true,
+        }
+    }
+
+    /// A blow no dodge avoids.
+    pub const fn undodgeable() -> Self {
+        Self {
+            blockable: true,
+            parryable: true,
+            dodgeable: false,
+        }
+    }
+}
+
+/// The defence a defender committed to this tick (SW48, rules v3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Defence {
+    /// Shield raised.
+    Block,
+    /// Parry attempted.
+    Parry,
+    /// Dodge attempted.
+    Dodge,
+}
+
+/// What a resolved blow came to once the move's own answer was read (SW48).
+///
+/// Kept apart from [`SweepOutcome`] so the v1 and v2 resolvers, their matches
+/// and their tapes never see a new arm.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Answered {
+    /// The blow landed.
+    Hit,
+    /// The shield held.
+    Blocked,
+    /// The dodge held.
+    Dodged,
+    /// The blow never touched the body.
+    Miss(SweepMiss),
+}
+
 /// One tick's sweep contacts, in (attacker, victim) ID order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SweepEvent {
@@ -421,6 +490,52 @@ pub fn sweep_one(
     SweepOutcome::Hit {
         attacker: a,
         victim: v,
+    }
+}
+
+/// True when this rules `version` reads a move's own answer (SW48): rules v3
+/// and its append-only successors. v1 and v2 moves are blockable, parryable
+/// and dodgeable by construction, so their resolvers never ask.
+#[must_use]
+pub const fn answer_rules(version: u32) -> bool {
+    version >= FIGHT_RULES_V3
+}
+
+/// One pair solved against the blow's own answer (SW48, rules v3).
+///
+/// The geometry decides first, exactly as [`sweep_one`] does; then the move's
+/// [`SweepAnswer`] decides whether the defence the defender committed to holds:
+/// a dodge that the move allows avoids a contact that would have landed, a
+/// blow no shield stops lands through a raised shield, and a parry is reported
+/// as a block the armour check reads (the parry resolve is SW82's).
+///
+/// Rules v1 and v2 pass [`SweepAnswer::ALL`] and [`Defence::Block`], where this
+/// is [`sweep_one`] with the shield geometry deciding, so no recorded tape
+/// moves.
+pub fn sweep_one_answered(
+    attacker: &SweepParticipant,
+    defender: &SweepParticipant,
+    sweep: &WeaponSweep,
+    tables: &SweepTables,
+    defence: Defence,
+    answer: SweepAnswer,
+) -> Answered {
+    match sweep_one(attacker, defender, sweep, tables) {
+        SweepOutcome::Miss(miss) => Answered::Miss(miss),
+        SweepOutcome::Blocked { .. } => {
+            if answer.blockable || (defence == Defence::Parry && answer.parryable) {
+                Answered::Blocked
+            } else {
+                Answered::Hit
+            }
+        }
+        SweepOutcome::Hit { .. } => {
+            if defence == Defence::Dodge && answer.dodgeable {
+                Answered::Dodged
+            } else {
+                Answered::Hit
+            }
+        }
     }
 }
 
@@ -1911,5 +2026,120 @@ mod tests {
         assert_eq!(n2, 1, "a new swing id re-arms every victim");
         let n3 = resolve_swing_tick(&fighters, &[arc], &t, 8, 1, &mut gate, &mut out);
         assert_eq!(n3, 1, "a gate tracks only its own attacker");
+    }
+    /// A defender with the shield raised into the attacker's swing.
+    fn shielded_defender() -> SweepParticipant {
+        pose(1, 0, 0, -1, 0, 800, 60, true)
+    }
+
+    #[test]
+    fn sweep_answer_unblockable_blow_lands() {
+        let t = tables();
+        let atk = duel_attacker();
+        let def = shielded_defender();
+        let s = sweep(0, [-100, 0, 0], [100, 0, 0], 10);
+        // The geometry alone says the shield covers the blow: today's rule.
+        assert_eq!(
+            sweep_one(&atk, &def, &s, &t),
+            SweepOutcome::Blocked {
+                attacker: 0,
+                victim: 1
+            }
+        );
+        // v3: the move's own row says no shield stops it, so the blow lands.
+        assert_eq!(
+            sweep_one_answered(
+                &atk,
+                &def,
+                &s,
+                &t,
+                Defence::Block,
+                SweepAnswer::unblockable()
+            ),
+            Answered::Hit
+        );
+        // A parry does not answer a blow declared beyond both defences either.
+        let beyond = SweepAnswer {
+            blockable: false,
+            parryable: false,
+            dodgeable: true,
+        };
+        assert_eq!(
+            sweep_one_answered(&atk, &def, &s, &t, Defence::Parry, beyond),
+            Answered::Hit
+        );
+    }
+
+    #[test]
+    fn sweep_answer_blockable_blow_is_blocked() {
+        let t = tables();
+        let atk = duel_attacker();
+        let def = shielded_defender();
+        let s = sweep(0, [-100, 0, 0], [100, 0, 0], 10);
+        assert_eq!(
+            sweep_one_answered(&atk, &def, &s, &t, Defence::Block, SweepAnswer::ALL),
+            Answered::Blocked
+        );
+    }
+
+    #[test]
+    fn sweep_answer_dodgeable_blow_is_dodged() {
+        let t = tables();
+        let atk = duel_attacker();
+        let def = duel_defender();
+        let s = sweep(0, [-100, 0, 0], [100, 0, 0], 10);
+        assert!(matches!(
+            sweep_one(&atk, &def, &s, &t),
+            SweepOutcome::Hit { .. }
+        ));
+        // A dodge the move allows avoids a contact that would have landed.
+        assert_eq!(
+            sweep_one_answered(&atk, &def, &s, &t, Defence::Dodge, SweepAnswer::ALL),
+            Answered::Dodged
+        );
+        // A blow declared beyond the dodge lands through it.
+        assert_eq!(
+            sweep_one_answered(
+                &atk,
+                &def,
+                &s,
+                &t,
+                Defence::Dodge,
+                SweepAnswer::undodgeable()
+            ),
+            Answered::Hit
+        );
+    }
+
+    #[test]
+    fn sweep_answer_keeps_the_v1_rule_for_a_blockable_move() {
+        // v1 and v2 pass ALL + Block, so the answer resolver is the old solver:
+        // a hit, a block and a miss all come out as the geometry says.
+        let t = tables();
+        let atk = duel_attacker();
+        let s = sweep(0, [-100, 0, 0], [100, 0, 0], 10);
+        let open = duel_defender();
+        let guarded = shielded_defender();
+        assert_eq!(
+            sweep_one_answered(&atk, &open, &s, &t, Defence::Block, SweepAnswer::ALL),
+            Answered::Hit
+        );
+        assert_eq!(
+            sweep_one_answered(&atk, &guarded, &s, &t, Defence::Block, SweepAnswer::ALL),
+            Answered::Blocked
+        );
+        let far = pose(1, 0, 20_000, -1, 0, 800, 60, true);
+        assert!(matches!(
+            sweep_one_answered(&atk, &far, &s, &t, Defence::Block, SweepAnswer::ALL),
+            Answered::Miss(_)
+        ));
+    }
+
+    #[test]
+    fn sweep_answer_is_a_rules_v3_rule() {
+        assert!(!answer_rules(1), "v1 never reads a move's answer");
+        assert!(!answer_rules(2), "v2 never reads a move's answer");
+        assert!(answer_rules(3), "v3 reads it");
+        assert!(answer_rules(4), "append-only successors read it too");
     }
 }

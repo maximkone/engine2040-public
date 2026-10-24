@@ -13,4 +13,7 @@ banner_west class=0 cx_cm=-800 cz_cm=-930 radius_cm=80 height_cm=300 advantage=0
 banner_east class=0 cx_cm=-800 cz_cm=930 radius_cm=80 height_cm=300 advantage=0 dominance=0 risk=0
 crate_a class=4 cx_cm=-500 cz_cm=-500 radius_cm=100 height_cm=100 advantage=1 dominance=0 risk=0
 debris_field class=4 cx_cm=500 cz_cm=500 radius_cm=125 height_cm=100 advantage=1 dominance=0 risk=1
+machine_ballista class=4 cx_cm=-800 cz_cm=400 radius_cm=130 height_cm=120 advantage=0 dominance=0 risk=0
+machine_crane class=4 cx_cm=-800 cz_cm=-400 radius_cm=80 height_cm=240 advantage=0 dominance=0 risk=0
+machine_cart class=4 cx_cm=600 cz_cm=-600 radius_cm=110 height_cm=120 advantage=0 dominance=0 risk=0
 centre class=1 cx_cm=0 cz_cm=0 radius_cm=250 height_cm=0 advantage=1 dominance=1 risk=0
