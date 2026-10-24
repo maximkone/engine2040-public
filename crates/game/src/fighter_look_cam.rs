@@ -24,6 +24,13 @@ use crate::camera::camera_rig::{
     damper_step, halflife_to_damping, smooth_trauma_offset, trauma_gain, FightCamSpring,
 };
 use crate::camera::{CameraError, LookAhead, Vec3};
+use crate::camera_frame::Lead;
+use crate::camera_stack::{CameraStack, ShotOffer};
+
+/// Which bodies the fight camera frames and how it holds them in the picture: the
+/// soft refit before the springs and the containment after them.
+#[path = "fighter_look_frame.rs"]
+mod fighter_look_frame;
 
 /// Halflife of yaw, distance, look point and eye height, seconds: a cut or a
 /// moving pair settles over about half a second, a steady drift lags a few
@@ -94,6 +101,20 @@ pub struct CamFollow {
     look_ahead: LookAhead,
     /// True when the look-ahead moves the shot (default off: today's camera).
     lead_armed: bool,
+    /// Smoothed velocity of the framed bodies, for the framing's look-ahead.
+    lead: Lead,
+    /// The threat slot the fight shot frames, held while no other is clearly nearer.
+    hint: Option<u8>,
+    /// The director's shelf of shots (SW42): the shot this frame sits on it, a change
+    /// of shot eases over its blend ticks, and the eye holds while the framed bodies
+    /// stay inside the dead zone. Off until the window arms it.
+    stack: CameraStack,
+    /// True when the shelf moves the shot (arm with [`Self::with_camera_stack`]);
+    /// an unarmed follower is the camera before SW42, byte for byte.
+    stack_armed: bool,
+    /// Test seam: the walk bob is held off, so a test can read the bob alone.
+    #[cfg(test)]
+    bob_off: bool,
 }
 
 impl CamFollow {
@@ -112,7 +133,21 @@ impl CamFollow {
             bob_last: None,
             look_ahead: LookAhead::new(),
             lead_armed: false,
+            lead: Lead::new(),
+            hint: None,
+            stack: CameraStack::default(),
+            stack_armed: false,
+            #[cfg(test)]
+            bob_off: false,
         })
+    }
+
+    /// Test seam: the same follower with the walk bob held off, so a test can
+    /// read the bob as the height gap against this twin on the same tape.
+    #[cfg(test)]
+    fn without_bob(mut self) -> Self {
+        self.bob_off = true;
+        self
     }
 
     /// Arm the 0.5 s velocity look-ahead ([`LookAhead`]): the presented eye
@@ -122,6 +157,16 @@ impl CamFollow {
     #[must_use]
     pub fn with_look_ahead(mut self) -> Self {
         self.lead_armed = true;
+        self
+    }
+
+    /// Arm the director's shelf (SW42): the shot the frame asks for sits on it, a change
+    /// of shot eases over its blend ticks instead of cutting, and the eye holds while the
+    /// framed bodies stay inside the dead zone. Off by default, so every earlier camera
+    /// and its tests show today's shot; presentation only, never sim input or a hash.
+    #[must_use]
+    pub fn with_camera_stack(mut self) -> Self {
+        self.stack_armed = true;
         self
     }
 
@@ -181,19 +226,9 @@ impl CamFollow {
             } else {
                 Vec3::new(delta[0] / dt_s, 0.0, delta[1] / dt_s)
             };
-            let lead = self.look_ahead.step(velocity, dt_s).unwrap_or(Vec3::ZERO);
-            camera.target = [
-                camera.target.x + lead.x,
-                camera.target.y + lead.y,
-                camera.target.z + lead.z,
-            ]
-            .into();
-            camera.eye = [
-                camera.eye.x + lead.x,
-                camera.eye.y + lead.y,
-                camera.eye.z + lead.z,
-            ]
-            .into();
+            // Folded here and applied by `aim_camera` after the framing: a refit
+            // that read the offset as part of its shot pulls the led picture apart.
+            self.look_ahead.step(velocity, dt_s)?;
         }
         self.walk_bob(&mut camera, step, hero[1] <= BOB_AIRBORNE_M, dt_s)?;
         camera.fov_y = self.fov_y;
@@ -241,6 +276,10 @@ impl CamFollow {
         let stride = if walking { step / BOB_STRIDE_M } else { 0.0 };
         self.bob_phase = (self.bob_phase + stride * BOB_SPEED * std::f32::consts::TAU)
             .rem_euclid(std::f32::consts::TAU);
+        #[cfg(test)]
+        if self.bob_off {
+            return Ok(());
+        }
         let gain = self.bob_gain;
         if gain <= 0.0 {
             return Ok(());
@@ -314,7 +353,37 @@ impl FighterLook {
         frame: &LookFrame,
         dt_s: f32,
     ) -> Camera {
-        let calm = self.fight_camera_with(base, frame.shot, frame.fighters, frame.frame, [0.0; 3]);
+        let hint = follow.hint;
+        let calm = self.fight_camera_with(
+            base,
+            frame.shot,
+            frame.fighters,
+            frame.frame,
+            [0.0; 3],
+            hint,
+        );
+        let mut calm = self.frame_calm(follow, calm, frame);
+        // The director's shelf (SW42), when the window arms it: the shot holds its place
+        // while the framed bodies stay inside the dead zone, and a change of shot eases
+        // over its blend ticks. It sits on the shot, before the springs, so the bob, the
+        // shake and the look-ahead still move the eye on top of the held shot. An
+        // unarmed follower (every test, the first frame of the window) takes the old path
+        // byte for byte.
+        if follow.stack_armed {
+            let bodies = self.framed_subjects(follow, frame);
+            let (key, priority) = Self::shot_offer(frame.shot);
+            let offer = ShotOffer {
+                key,
+                priority,
+                rig: Self::camera_rig(&calm),
+            };
+            if let Some(rig) = follow
+                .stack
+                .step(frame.frame, dt_s, &[offer], bodies.as_slice())
+            {
+                calm = Self::camera_at(&calm, &rig);
+            }
+        }
         let lens = calm.fov_y * (1.0 - LENS_PUNCH * trauma_gain(self.shake_trauma_permille));
         let dt_s = dt_s.clamp(MIN_DT_S, MAX_DT_S);
         let hero = self.hero_root(frame.alpha);
@@ -322,12 +391,23 @@ impl FighterLook {
             return self.fight_camera(base, frame.shot, frame.fighters, frame.frame);
         };
         hold_in_pit(&mut camera, self.pit_limit_m());
+        // The springs lag a swing or a tow: keep the framed bodies inside the safe frame now.
+        self.frame_hold(follow, &mut camera, frame);
         // FEEL7: a fresh landing drops the eye for a beat, and the look point
         // follows a little, so the ground takes the weight the body does.
         let dip = self.landing_dip_at(self.tick).unwrap_or(0.0);
         if dip > 0.0 {
             camera.eye.y -= dip;
             camera.target.y -= dip * 0.35;
+        }
+        // The look-ahead is a final translate of the presented shot, after the framing
+        // has read the picture: the refit must not see the led camera, or it reads the
+        // offset as a body out of frame and pulls the armed shot away from the calm one.
+        if follow.lead_armed {
+            let lead = follow.lead_m();
+            for point in [&mut camera.eye, &mut camera.target] {
+                *point = [point.x + lead.x, point.y + lead.y, point.z + lead.z].into();
+            }
         }
         let shake = self.fight_shake_vec();
         for point in [&mut camera.eye, &mut camera.target] {
@@ -811,16 +891,20 @@ mod tests {
 
     /// The bob comes from the hero's own walk: a standing hero holds the eye
     /// still, a walking hero lifts and drops it inside the source amplitudes,
-    /// and it fades out when the walk stops.
+    /// and it fades out when the walk stops. The bob is read against a twin
+    /// follower with the bob off on the same tape, so the framing's own eye
+    /// height (it follows the pair as they part) does not read as bob.
     #[test]
     fn walk_bob_moves_the_eye_only_while_the_hero_walks() {
         let mut look = super::super::tests::balance_look_two();
         let mut follow = follower();
+        let mut twin = follower().without_bob();
         place(&mut look, [0.0, 0.0], [1.0, 0.5]);
         let mut still = Vec::new();
         for _ in 0..90 {
             let camera = look.aim_camera(&mut follow, &base(), &frame(), FRAME_60_S);
-            still.push(camera.eye.y - (camera.target.y + follow.height_m));
+            let quiet = look.aim_camera(&mut twin, &base(), &frame(), FRAME_60_S);
+            still.push(camera.eye.y - quiet.eye.y);
         }
         let worst = still.iter().fold(0.0f32, |w, v| w.max(v.abs()));
         assert!(worst < 1.0e-5, "a standing hero has no bob: {worst} m");
@@ -830,7 +914,8 @@ mod tests {
         for n in 0..90 {
             walk_hero(&mut look, n as f32 * step, step);
             let camera = look.aim_camera(&mut follow, &base(), &frame(), FRAME_60_S);
-            bob.push(camera.eye.y - (camera.target.y + follow.height_m));
+            let quiet = look.aim_camera(&mut twin, &base(), &frame(), FRAME_60_S);
+            bob.push(camera.eye.y - quiet.eye.y);
         }
         let (lo, hi) = bob
             .iter()

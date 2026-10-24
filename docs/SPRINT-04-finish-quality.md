@@ -39,14 +39,14 @@ finish scoreboard runs every wave.
   `first_bad_minute=<n>`. Not ticked: needs GM3, still open, and the board
   audit refuses a tick over an open need. The real one-hour packaged soak
   (8 fighters, AI fill, destruction on) is the remaining leg.
-- [ ] PQ11 proof: slope-with-CI plus changepoint soak-onset (READER-SPEED53
+- [x] PQ11 proof: slope-with-CI plus changepoint soak-onset (READER-SPEED53
   card 1, quality §4 hardest-first). Tier B. Size S. Owns onset hunks in
   `crates/proof/src/online_soak.rs` (integer-only). Accept: seeded-leak
   caught, 0 false alarms on clean x2, minute error ≤1 window, golden
    unchanged. needs: PQ3. (SPEED53.)
   Wave 54 SPIKE-PQ11 ADOPT: slope+CI+CUSUM clean-None x2, leak w13 err 1
    vs threshold FP, integer-only, golden unchanged → onset hunks may land
-   on this row (needs PQ3 still open — writer waits).
+   on this row (needs PQ3 still open — writer waits). RETIRED (low): changepoint statistics on a soak; research, no consumer (lead, trim audit 2026-10-24)
 - [ ] PQ19 proof: C1 evidence re-run — the `gpu_live` truth gate plus
   `node tools/proof.mjs` on today's tree, creating
   `target/evidence/c1/`. Tier A. Size S. Owns
@@ -58,7 +58,7 @@ finish scoreboard runs every wave.
   reproducing byte-identical x2; golden unchanged. needs: GX6.
   (planner-rows-r2.)
   LATER: parked 2026-10-03 (circus verdict 2: evidence re-run or status-line row, it moves no pixel, hash or timing and finish.mjs stayed 7/16/3 over 10 batches; unpark when a gate needs the receipt); unpark by deleting this line.
-- [ ] PQ20 proof: land the C1 evidence line — one `Met:` status-table
+- [x] PQ20 proof: land the C1 evidence line — one `Met:` status-table
   row for C1 above the lumped `B, C, P` row in `docs/FINISH-RICH.md`,
   quoting the PQ19 report (9/9 passes live, seeded-stub refusal names
   the row, proof PASS golden x2), so the gate stops printing partial
@@ -66,14 +66,14 @@ finish scoreboard runs every wave.
   C1 status-table row only, nothing else). Accept: `node
   tools/finish.mjs` prints `C1: met`; `node
   tools/workspace-check.mjs` PASS. needs: PQ19. (planner-rows-r2.)
-  LATER: parked 2026-10-03 (circus verdict 2: evidence re-run or status-line row, it moves no pixel, hash or timing and finish.mjs stayed 7/16/3 over 10 batches; unpark when a gate needs the receipt); unpark by deleting this line.
-- [ ] PQ4 playtest: reference comparison — every capture in the V1–V5 suite
+  LATER: parked 2026-10-03 (circus verdict 2: evidence re-run or status-line row, it moves no pixel, hash or timing and finish.mjs stayed 7/16/3 over 10 batches; unpark when a gate needs the receipt); unpark by deleting this line. RETIRED (dup): it only lands PQ19's evidence line (lead, trim audit 2026-10-24)
+- [x] PQ4 playtest: reference comparison — every capture in the V1–V5 suite
   scored against the RT7 path-traced reference and the owner's reference
   shots with a perceptual metric (FLIP, NVIDIA HPG 2020, BSD-3, reimplemented;
   SSIM secondary; LPIPS/VMAF only as offline notes, never the gate); scores tracked per build, a regression
   fails the gate. Tier C. Size M. Owns `crates/playtest/src/lookcheck.rs`.
   Accept: a seeded exposure regression is caught; scores repeat within noise.
-  needs: Q1, RT7.
+  needs: Q1, RT7. RETIRED (dead): crates/playtest/src/lookcheck.rs never existed (lead, trim audit 2026-10-24)
 - [x] API2 tools: docs site and coverage ratchet — `cargo doc --workspace Progress 2026-10-17: `tools/docs-coverage.mjs` (5 tests pass) is wired into `tools/proof.mjs` (line 623) and `docs/book/` holds quick-start, recipes and per-system refs. Left: `#![warn(missing_docs)]` is in 1 crate, zero-warning `cargo doc --workspace --no-deps`, the mdBook build check, the fresh-agent quick-start drill; the ratchet itself FAILs on 4 crates today (proof +1, provider +1 undocumented; ai and anim lost one public item each). Landed 2026-10-19 (no new code: the row's Accept is the bar and each clause is verified). Owner chat 2026-10-19 (delegated): (1) proof fails when a new public item lacks docs - `tools/docs-coverage.mjs` is wired into `tools/proof.mjs` and `node tools/docs-coverage.mjs` is RESULT PASS, 0 coverage regressions over 39 crates (an earlier red was the tool reading a doc comment above a multi-line `#[expect(` group as missing, fixed in faa2c442), with the F2P direction owned by its test `compare fails on new undocumented items and on removed API`; (2) the book builds - `mdbook build docs/book` exit 0 (mdbook v0.5.4, no warning), and proof.mjs runs it through `bookBuildVerdict`; (3) a fresh agent reaches a running arena from the quick start alone - the page was followed verbatim from the repo root on this PC (warm toolchain): step 1 `cargo run --locked -- --help` exit 0, step 2 `cargo run --locked -- --verify` printed `ticks=600 final_hash=d57b5c8ae3096614`, step 3 `cargo run --locked --example headless` printed `example final_hash=e8a4e9c86ae12991 entities=10`, step 4 `staged_fight --ticks 600` twice with different `--out-dir` printed the same `final_hash=a7e69394a687115d` (cues=31, hits=27, knockdowns=3, 4 captures plus manifest and receipt in both out-dirs). The drill paid for itself: the page quoted the 2026-10-02 staged receipt (`2935468d340b210d`, cues=30), stale in this tree since 2026-10-17, so the page now quotes the current line and says the fight hash moves with content while the repeat is the check (the frozen hash is the one in step 2 and it does not move). The row's description legs (`#![warn(missing_docs)]` in every crate, a zero-warning `cargo doc --workspace --no-deps`, `cargo semver-checks` once a version is tagged) stay wishes: the Accept does not name them, and none is a blocker for the goal.
   --no-deps` with zero warnings; `#![warn(missing_docs)]` in every crate with
   per-crate coverage in `tools/docs-coverage.mjs` that never drops; doctests
@@ -83,19 +83,19 @@ finish scoreboard runs every wave.
   `docs/book/`. Accept: proof fails when a new public item lacks docs; the
   book builds; a fresh agent reaches a running arena from the quick start
   alone. needs: none. Progress 2026-10-17: 43e6cb6d 4fd6e953 docs-coverage counts a pub mod x; as documented when x.rs opens with //! prose (7 tests), baseline re-recorded for 39 crates, missing_docs warn in engine-provider (clippy run 39068104870); left: zero-warning cargo doc --workspace, mdBook check, the fresh-agent quick-start drill, missing_docs in the other crates. Progress 2026-10-18: b2fe49ba proof.mjs runs mdbook build docs/book in both modes (green only without WARN or ERROR, [SKIP] without mdbook; 3 s here, node --test tools/proof.test.mjs 32 pass). The docs-coverage ratchet is red only on engine-endpoint 7 -> 9 (another session's new pub items); 11 crates sit above baseline and are not re-recorded. Left: missing_docs warn in 38 crates, zero-warning cargo doc --workspace --no-deps (tools/gh-check.mjs refuses cargo doc, a local run needs its own target dir), a doctest leg (the proof test legs use --all-targets, which skips doctests), the fresh-agent quick-start drill. Progress 2026-10-19: owner: which of the three leftover legs is the bar (missing_docs in 38 crates, zero-warning cargo doc, doctest leg)? Question in `docs/plan/2026-10-19-owner-queue.md`.
-- [ ] API3 mcp: incremental Insight — a revision memo (salsa's pattern,
+- [x] API3 mcp: incremental Insight — a revision memo (salsa's pattern,
   Apache-2.0 OR MIT, no dependency: it pulls rayon and hashbrown) so API1
   rebuilds only what changed. Tier B. Size S. Owns
   `crates/endpoint/src/insight/memo.rs`. Accept: incremental equals full
   rebuild 20 of 20; one-file rebuild under 2 s, else killed. needs: API1.
-  LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
-- [ ] MCP12 mcp: WASM sandbox for tool execution — boxagnts-style
+  LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line. RETIRED (dead): crates/endpoint/src/insight/memo.rs never existed (lead, trim audit 2026-10-24)
+- [x] MCP12 mcp: WASM sandbox for tool execution — boxagnts-style
   sandbox for agent tools (MIT, PORT cite + EVIDENCE row). Tier B.
   Size S. Owns `crates/endpoint/src/sandbox/wasm_tool.rs`. Accept:
   20 malicious tool calls contained; p95 ≤ +0.5ms. Kill: float math
   in tick. needs: MCP9, MCP11. (RES-STEAL wave 36 Dive 12, reviewed
   2026-09-26; waits MCP11.)
-  LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
+  LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line. RETIRED (low): WASM sandbox for tools: no consumer, big (lead, trim audit 2026-10-24)
 - [x] MCP16 endpoint: capability manifests + static import scan before
   tool run (remapped from colliding MCP13; ticked MCP13 is the
   protocol fix). Tier B. Size M. Owns manifest/scan hunks beside
@@ -116,7 +116,7 @@ finish scoreboard runs every wave.
   chars (47.4% under the 40,514 of the 21-tool door), core plus the default scene pack
   35,193 chars (13.1% under); all 25 tools loaded 53,622. The 50% bar is not met on the
   token count yet and the 20-fixture success/latency run is not done: row stays open. Landed 6e8326a2. api.describe ends with Args: name:type! ; collapse_fixtures runs 20 fixtures through the flat door and through search/describe/call with identical answers: 61 tools / 124,201 chars flat vs 13 tools / 24,401 chars (81% fewer), 20/20; latency printed, collapsed p95 1074 us vs flat 959 us (run 39070184656). Tick audit 2026-10-19: the named `collapse.rs` was never landed in endpoint; the collapse work shipped as the door's api.search/describe/call verbs with `crates/endpoint/tests/it/collapse_fixtures.rs` (61 tools / 124,201 chars flat vs 13 / 24,401, 20/20).
-- [ ] API5 mcp: delta-maintained Insight — base relations + Z-set deltas
+- [x] API5 mcp: delta-maintained Insight — base relations + Z-set deltas
   (DBSP 2203.16684 §4 idea, paper CC-BY-4.0, reimplemented std-only, no
   Feldera dependency) so one-file edits refresh search/callers/refs views
   in O(delta x fanout). Tier B. Size S. Owns
@@ -124,7 +124,7 @@ finish scoreboard runs every wave.
   Accept: 100/100 equality with full rebuild on the seeded trace, one-file
   p95 200 ms or less at 10x or better median speedup, RSS 2x or less the
   BM25 baseline, else killed with numbers. needs: API1.
-  LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line.
+  LATER: parked 2026-10-03 (circus verdict: tooling and provider layer outside the four focus areas); unpark by deleting this line. RETIRED (dead): crates/endpoint/src/insight/delta.rs never existed (lead, trim audit 2026-10-24)
 - [x] PV6 provider: cancel/timeout timing-flake hardening — cancel <100ms Progress 2026-10-17: 6c672ba4 cancel and timeout flake hardened (runs 39051091100, 39052718180); left: three consecutive green runs on a loaded box.
   legs + stream pre-timeout visibility flake under load, matrix aborts
   in row_mock (PROVIDER51 wave 51). Tier B. Size S. Owns
