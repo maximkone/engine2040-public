@@ -82,6 +82,11 @@ mod tests {
     }
 
     #[test]
+    fn the_conjugate_negates_the_three_vector_lanes_only() {
+        assert_eq!(quat_conj(&[1.0, -2.0, 3.0, 0.5]), [-1.0, 2.0, -3.0, 0.5]);
+    }
+
+    #[test]
     fn identity_rotates_no_point() {
         assert_eq!(rotate_vec(&[1.5, -2.0, 0.25], &ONE), [1.5, -2.0, 0.25]);
     }
