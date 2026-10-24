@@ -148,6 +148,27 @@ pub struct FighterSlot {
     /// hitstop hold). The look sets it from the tick's impact pair; the hold
     /// freezes clip phases only, never sim state. Zero means never held.
     hold_until: u32,
+    /// First tick a press-driven swing (EG19c) no longer owns the pick
+    /// (exclusive). Zero means no press swing was ever started. While the tick
+    /// is under it, an outcome cue of the same blow (Hit, Blocked, ...) is the
+    /// swing's own impact and never restarts it.
+    press_until: u32,
+    /// Ticks from the press to the blow of the press swing in flight (the
+    /// armed weapon's startup); the look times its clip by it.
+    press_lead: u32,
+    /// The press the next [`FighterSlot::observe_tick`] folds (EG19c), set by
+    /// [`FighterSlot::press`] and consumed by that call.
+    pending_press: Option<Press>,
+}
+
+/// A swing the fight cued on its press tick (`AttackStarted`, rules v2): the
+/// ticks to the blow and the ticks the pick lives in all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Press {
+    /// Ticks from the press to the blow (the weapon's startup).
+    pub lead: u32,
+    /// Ticks the swing pick lives from the press.
+    pub total: u32,
 }
 
 impl FighterSlot {
@@ -167,6 +188,39 @@ impl FighterSlot {
             swings: 0,
             fade: SlotFade::idle(),
             hold_until: 0,
+            press_until: 0,
+            press_lead: 0,
+            pending_press: None,
+        }
+    }
+
+    /// Queue this tick's press (EG19c): the fight cued `AttackStarted` for
+    /// this slot, `press` carries the lead to the blow and the swing's whole
+    /// life. The next [`FighterSlot::observe_tick`] starts the swing pick on
+    /// its own tick, and the blow's outcome cue, arriving `lead` ticks later,
+    /// is that swing's impact and does not start another. A tick with no press
+    /// queued is exactly the old behavior: the swing starts on the outcome cue
+    /// (rules v1, or no cue source).
+    pub fn press(&mut self, press: Press) {
+        self.pending_press = Some(press);
+    }
+
+    /// True while a press-driven swing owns the pick at `tick`: the outcome
+    /// cue of its blow is the swing's impact, not a new swing.
+    #[must_use]
+    pub fn in_press_swing(&self, tick: u32) -> bool {
+        tick < self.press_until
+    }
+
+    /// Ticks from the press to the blow of the press swing in flight at
+    /// `tick`, or zero when no press swing is (the clip then plays from the
+    /// outcome cue, as before EG19c).
+    #[must_use]
+    pub fn press_lead(&self, tick: u32) -> u32 {
+        if self.in_press_swing(tick) {
+            self.press_lead
+        } else {
+            0
         }
     }
 
@@ -222,6 +276,11 @@ impl FighterSlot {
     #[cfg(any(feature = "app", test))]
     pub(crate) fn march_hold(&mut self, elapsed: u32) {
         self.pick.act_start = self.pick.act_start.saturating_add(elapsed);
+        // A press swing's life holds with its clip: the freeze must not eat
+        // the follow-through.
+        if self.press_until != 0 {
+            self.press_until = self.press_until.saturating_add(elapsed);
+        }
     }
 
     /// Fold one tick of sim state into the pick: advance the fade clock,
@@ -245,6 +304,7 @@ impl FighterSlot {
         if view.slot != self.slot {
             return Err(BridgeError::BadSlot(view.slot));
         }
+        let press = self.pending_press.take();
         // A held slot's crossfade waits with its clip clock, so the blend
         // weight on the first free tick is the one the hit froze.
         if tick >= self.hold_until {
@@ -253,12 +313,16 @@ impl FighterSlot {
         self.fold_position(view);
         let speed = planar_speed(self.pos_m, self.prev_pos_m);
         let down = hp_permille == 0;
-        let striking = !down && strikes_this_tick(self.slot, cues);
+        // EG19c: a swing cued on its press owns the pick until its life ends,
+        // so its own outcome cue (the blow) is the impact, not a new swing.
+        let pressing = self.in_press_swing(tick);
+        let striking = !down && !pressing && strikes_this_tick(self.slot, cues);
+        let pressed = if down { None } else { press };
         let next = if down {
             BridgeClip::Down
         } else if self.pick.clip == BridgeClip::Down {
             BridgeClip::Idle
-        } else if striking {
+        } else if pressed.is_some() || striking {
             let variant = match self.swings % 3 {
                 0 => BridgeClip::Attack0,
                 1 => BridgeClip::Attack1,
@@ -269,7 +333,7 @@ impl FighterSlot {
         } else if matches!(
             self.pick.clip,
             BridgeClip::Attack0 | BridgeClip::Attack1 | BridgeClip::Attack2
-        ) && tick.saturating_sub(self.pick.act_start) < swing_ticks
+        ) && (pressing || tick.saturating_sub(self.pick.act_start) < swing_ticks)
         {
             self.pick.clip
         } else if speed > tuning.run_speed_m_per_tick {
@@ -277,6 +341,18 @@ impl FighterSlot {
         } else {
             BridgeClip::Idle
         };
+        if let Some(press) = pressed {
+            if matches!(
+                next,
+                BridgeClip::Attack0 | BridgeClip::Attack1 | BridgeClip::Attack2
+            ) {
+                self.press_until = tick.saturating_add(press.total.max(1));
+                self.press_lead = press.lead;
+            }
+        }
+        if down {
+            self.press_until = 0;
+        }
         if next != self.pick.clip {
             // A death swap always blends: leaving or entering `Down` never
             // cancels, so a revival blends from the held last frame instead
@@ -331,6 +407,12 @@ impl FighterSlot {
         h.write_u8(self.swings);
         h.write_u8(u8::from(self.seen));
         h.write_u32(self.hold_until);
+        // EG19c: a press swing's life enters only once one was started, so a
+        // slot that never saw a press digests the bytes it always did.
+        if self.press_until != 0 {
+            h.write_u32(self.press_until);
+            h.write_u32(self.press_lead);
+        }
         h.write_u64(self.fade.digest());
         h.finish()
     }
@@ -903,5 +985,89 @@ mod tests {
             frozen.act_start.saturating_add(2),
             "start marches so resume recomputes the same phase"
         );
+    }
+
+    #[test]
+    fn swing_on_press_starts_the_pick_and_its_blow_cue_restarts_nothing() {
+        // EG19c: the press opens the swing pick on its own tick; the blow's
+        // outcome cue (15 ticks on) is that swing's impact, so the pick keeps
+        // its start and its variant, and the swing hands back to idle only
+        // when its life (lead 15 plus 12) is over.
+        let mut slot = FighterSlot::new(0);
+        tick_march(&mut slot, 0, -1.0, 1000, &[]);
+        slot.press(Press {
+            lead: 15,
+            total: 27,
+        });
+        let pressed = tick_march(&mut slot, 1, -1.0, 1000, &[]);
+        assert_eq!(pressed.clip, BridgeClip::Attack0);
+        assert_eq!(pressed.act_start, 1, "the swing starts on the press tick");
+        assert!(slot.in_press_swing(1));
+        assert_eq!(slot.press_lead(1), 15);
+        for tick in 2..=27u32 {
+            let cues: &[FightCue] = if tick == 16 { &[hit(0, 1)] } else { &[] };
+            // `tick_march` keeps the old 12-tick default swing window: the
+            // press life, not that window, must carry the swing.
+            let pick = tick_march(&mut slot, tick, -1.0, 1000, cues);
+            assert_eq!(
+                pick.clip,
+                BridgeClip::Attack0,
+                "tick {tick}: still one swing"
+            );
+            assert_eq!(pick.act_start, 1, "tick {tick}: the start never moves");
+        }
+        let after = tick_march(&mut slot, 28, -1.0, 1000, &[]);
+        assert_eq!(after.clip, BridgeClip::Idle, "the swing's life is over");
+        assert_eq!(slot.press_lead(28), 0);
+    }
+
+    #[test]
+    fn swing_on_press_without_a_press_the_outcome_cue_swings_as_before() {
+        // The v1 path is untouched: no press queued, the cue starts the swing
+        // and the default window times it.
+        let mut slot = FighterSlot::new(0);
+        tick_march(&mut slot, 0, -1.0, 1000, &[]);
+        let pick = tick_march(&mut slot, 1, -1.0, 1000, &[hit(0, 1)]);
+        assert_eq!(pick.clip, BridgeClip::Attack0);
+        assert_eq!(slot.press_lead(1), 0, "no press lead");
+        let digest = slot.digest();
+        let mut twin = FighterSlot::new(0);
+        tick_march(&mut twin, 0, -1.0, 1000, &[]);
+        tick_march(&mut twin, 1, -1.0, 1000, &[hit(0, 1)]);
+        assert_eq!(digest, twin.digest(), "a pressless slot digests as always");
+    }
+
+    #[test]
+    fn swing_on_press_a_second_press_restarts_and_a_hold_keeps_the_life() {
+        let mut slot = FighterSlot::new(0);
+        tick_march(&mut slot, 0, -1.0, 1000, &[]);
+        slot.press(Press {
+            lead: 15,
+            total: 27,
+        });
+        tick_march(&mut slot, 1, -1.0, 1000, &[]);
+        // A new press mid-swing opens the next variant on its own tick.
+        slot.press(Press {
+            lead: 12,
+            total: 20,
+        });
+        let again = tick_march(&mut slot, 10, -1.0, 1000, &[]);
+        assert_eq!(again.clip, BridgeClip::Attack1);
+        assert_eq!(again.act_start, 10);
+        assert_eq!(slot.press_lead(10), 12);
+        // The hitstop hold marches the life with the clip: three held ticks
+        // leave the swing three ticks longer.
+        slot.march_hold(3);
+        assert!(slot.in_press_swing(32), "life 10 + 20 + 3 holds to tick 32");
+        assert!(!slot.in_press_swing(33));
+        // A press on a downed fighter starts nothing.
+        let mut down = FighterSlot::new(0);
+        down.press(Press {
+            lead: 15,
+            total: 27,
+        });
+        let pick = tick_march(&mut down, 0, -1.0, 0, &[]);
+        assert_eq!(pick.clip, BridgeClip::Down);
+        assert!(!down.in_press_swing(1));
     }
 }
