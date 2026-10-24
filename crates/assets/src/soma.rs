@@ -1,6 +1,7 @@
 //! soma: the SOMA-77 joint table and its name map onto the fighter-65 rig.
 //!
-//! Consumer: the offline motion bake builds a `BoneMap` from [`soma_pairs`]
+//! Consumer: the offline motion bake builds a `BoneMap` from
+//! [`soma_pairs`](crate::soma::soma_pairs)
 //! to land a teacher clip on the fighter rig; the tick never reads this
 //! module. Data owner: `engine-assets`.
 //! Source: nv-tlabs/kimodo `kimodo/skeleton/definitions.py`,
